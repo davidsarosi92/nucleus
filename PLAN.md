@@ -1,389 +1,398 @@
-# nucleus — munkaterv
+# nucleus — work plan
 
-> **Mi ez a fájl:** a nucleus előretekintő roadmapje.  Minden milestone-nak
-> van státusza, rövid tervvázlata és explicit **„kész, ha”** (Definition of
-> Done) feltételei, hogy egy új session (ember vagy AI) tisztán fel tudja
-> venni a fonalat.
+> **What this file is:** the forward-looking roadmap for nucleus.  Each
+> milestone has a status, a short design sketch, and explicit **"done when"**
+> criteria, so a fresh session (human or AI) can pick up the thread cleanly.
 >
-> **Mi lesz a `DOCS.md`:** a *jelenlegi állapot* — ami már létezik, az API-ja
-> és a furcsaságai.  Ha egy milestone kész, a tervjegyzetei átkerülnek a
-> DOCS.md-be, és az itteni bejegyzés egysoros „✅ kész → DOCS §x” mutatóvá
-> zsugorodik.
+> **What `DOCS.md` will be:** the *current state* — what already exists, its
+> API and its quirks.  Once a milestone ships, its design notes graduate into
+> DOCS.md and the entry here shrinks to a one-line "✅ shipped → DOCS §x"
+> pointer.
 
-Státusz jelölések: ⬜ nem kezdett · ◐ folyamatban · ✅ kész · ⏸ parkolva
-
----
-
-## Tartalom
-
-| Szakasz | Cél |
-|---------|-----|
-| Vízió | Mivé nő a rendszer |
-| Architektúra | A rétegek és a határaik |
-| Alapelvek (north-star) | A szabályok, amik miatt a későbbi fázisok nem igényelnek újraírást |
-| Nyitott döntések | Amit a kód első sora előtt el kell dönteni |
-| Státusz-pillanatkép | Fázisok + milestone-ok táblázata |
-| §F0 – §F4 | Fázisok és milestone-ok részletesen |
-| Változásnapló | A terv módosításai |
+Status legend: ⬜ not started · ◐ in progress · ✅ shipped · ⏸ parked
 
 ---
 
-## Vízió
+## Contents
 
-A nucleus egy **rétegzett, multi-modell adatbázis**, amelynek a magja (a
-„nucleus”) egy **tranzakcionális, rendezett kulcs-érték motor**.  Minden más
-erre épül:
+| Section | Purpose |
+|---------|---------|
+| Vision | What the system grows into |
+| Architecture | The layers and their boundaries |
+| North-star principles | The rules that keep later phases from needing a rewrite |
+| Decisions | What has to be settled before the first line of code |
+| Status snapshot | Phases + milestones table |
+| §F0 – §F4 | Phases and milestones in detail |
+| Changelog | Changes to this plan |
 
-1. **SQL** — relációs modell, ami sorokat és indexeket kulcs-érték párokra képez le.
-2. **NoSQL** — dokumentum (és később más) modellek *ugyanarra* a KV-magra,
-   ugyanazzal a tranzakciókezeléssel.
-3. **Elosztott** — a lokális KV-motort kicseréljük egy particionált,
-   replikált (Raft) KV-rétegre; a fölötte lévő SQL/NoSQL réteg **nem
-   változik**, csak a KV-szerződés implementációja.
-4. **Fölé** — föderáció: a nucleus lekérdezőmotorja külső rendszereket
-   (más adatbázisokat, fájlokat, más nucleus klasztereket) is el tud érni.
+---
 
-Ez a FoundationDB („rétegek egy rendezett tranzakcionális KV fölött”) és a
-CockroachDB/TiDB („SQL egy elosztott KV fölött”) bevált mintája.  Az ok,
-amiért *most* ehhez igazodunk: ha a KV-szerződés jól van megválasztva, a 3.
-fázis egy implementációcsere, nem újraírás.
+## Vision
 
-## Architektúra
+nucleus is a **layered, multi-model database** whose core (the "nucleus") is
+a **transactional, ordered key-value engine**.  Everything else is built on
+top of it:
+
+1. **SQL** — a relational model that maps rows and indexes onto key-value pairs.
+2. **NoSQL** — document (and later other) models on the *same* KV core, with
+   the same transaction machinery.
+3. **Distributed** — the local KV engine is replaced by a partitioned,
+   replicated (Raft) KV layer; the SQL/NoSQL layers above it **do not
+   change**, only the implementation of the KV contract does.
+4. **Above** — federation: the nucleus query engine can also reach external
+   systems (other databases, files, other nucleus clusters).
+
+This is the proven pattern of FoundationDB ("layers on top of an ordered
+transactional KV") and CockroachDB/TiDB ("SQL on top of a distributed KV").
+The reason to commit to it *now*: if the KV contract is chosen well, phase 3
+is an implementation swap, not a rewrite.
+
+## Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Interfészek: beágyazott API · CLI/REPL · Postgres wire protokoll │  F1+
+│  Interfaces: embedded API · CLI/REPL · Postgres wire protocol    │  F1+
 ├──────────────────────────────────────────────────────────────────┤
-│  Lekérdezés: parser → binder → logikai terv → optimalizáló →      │
-│              fizikai terv → végrehajtó        (SQL + doc közös)  │  F1, F2
+│  Query: parser → binder → logical plan → optimizer →             │
+│         physical plan → executor          (shared by SQL + doc)  │  F1, F2
 ├────────────────────────────┬─────────────────────────────────────┤
-│  Relációs modell           │  Dokumentum modell (+ később más)   │
-│  katalógus, sorkódolás,    │  kollekciók, JSON-kódolás,          │
-│  indexek                   │  útvonal-indexek                    │  F1, F2
+│  Relational model          │  Document model (+ others later)    │
+│  catalog, row encoding,    │  collections, JSON encoding,        │
+│  indexes                   │  path indexes                       │  F1, F2
 ├────────────────────────────┴─────────────────────────────────────┤
-│  ════════ KV-SZERZŐDÉS (a „nucleus contract”) ════════            │
-│  get / put / delete / range-scan · tranzakció · snapshot · ts     │  F0
+│  ════════ KV CONTRACT (the "nucleus contract") ════════          │
+│  get / put / delete / range scan · transaction · snapshot · ts   │  F0
 ├──────────────────────────────────────────────────────────────────┤
-│  Lokális implementáció (F0)    │  Elosztott implementáció (F3)    │
-│  MVCC · WAL · B+fa · buffer    │  range-ek · Raft · HLC ·         │
-│  pool · pager                  │  elosztott tx · placement        │
+│  Local implementation (F0)     │  Distributed implementation (F3) │
+│  MVCC · WAL · B+tree · buffer  │  ranges · Raft · HLC ·           │
+│  pool · pager                  │  distributed txn · placement     │
 ├──────────────────────────────────────────────────────────────────┤
-│  Platform: fájl I/O · idő · véletlen · hálózat — MIND injektálható│  F0
+│  Platform: file I/O · time · randomness · network — ALL injectable│  F0
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Rétegszabály:** egy réteg csak a közvetlenül alatta lévő réteg interfészét
-látja.  Az SQL réteg soha nem nyúl a B+fához vagy a WAL-hoz.
+**Layering rule:** a layer only sees the interface of the layer directly
+below it.  The SQL layer never touches the B+tree or the WAL.
 
-## Alapelvek (north-star)
+## North-star principles
 
-Ezek a szabályok drágák most és nagyon olcsók később.  Ha egy milestone
-megsértené valamelyiket, előbb itt kell módosítani, indoklással.
+These rules are expensive now and very cheap later.  If a milestone would
+violate one, amend it here first, with a rationale.
 
-1. **Minden a KV-szerződésen megy át.**  Az adatmodellek és a lekérdező réteg
-   csak a KV API-t ismeri.  Ez teszi lehetővé, hogy a 3. fázisban a lokális
-   motor helyére elosztott kerüljön.
-2. **Rendezés-megőrző (memcomparable) kulcskódolás az első naptól.**  A
-   kulcsok bájtonkénti összehasonlítása = logikai rendezés.  Range-scan,
-   indexek, majd később a range-alapú particionálás mind erre épül.
-3. **Absztrahált időbélyegek.**  A tranzakciós időbélyeg most egy logikai
-   `u64` számláló, de típus mögé van zárva, hogy később HLC (hybrid logical
-   clock) kerülhessen a helyére.
-4. **Determinisztikus szimulációs tesztelhetőség.**  Fájl I/O, idő,
-   véletlen és (később) hálózat csak injektálható interfészen keresztül
-   érhető el.  Teszt alatt egy szimulált platform fut, amely hibákat
-   injektál (torn write, fsync-hiba, crash bármely ponton), és egy seed-ből
-   reprodukálható.  (FoundationDB / TigerBeetle stílus.)  Ez az, ami a Raftot
-   és az elosztott tranzakciókat egyáltalán debugolhatóvá teszi.
-5. **Helyesség a teljesítmény előtt.**  Minden tartóssággal kapcsolatos
-   milestone-nak van crash-teszt és invariáns-ellenőrzés a DoD-jában.
-6. **Verziózott formátumok.**  Lemezformátum, WAL-rekord, kulcskódolás és
-   wire protokoll mind verziószámot hordoz; checksum minden lapon és
-   WAL-rekordon.
-7. **Beágyazott először, szerver másodszor.**  A mag egy könyvtár (mint a
-   SQLite); a szerver és a hálózati protokoll erre épülő vékony réteg.
-8. **A metaadat is adat.**  Katalógus, sémák, később a range-leírók is a
-   KV-térben élnek, saját kulcs-prefix alatt — nincs külön metaadat-tároló,
-   amit később replikálni kellene.
+1. **Everything goes through the KV contract.**  Data models and the query
+   layer only know the KV API.  This is what lets a distributed engine
+   replace the local one in phase 3.
+2. **Order-preserving (memcomparable) key encoding from day one.**  Bytewise
+   key comparison = logical ordering.  Range scans, indexes, and later
+   range-based partitioning all rely on it.
+3. **Abstracted timestamps.**  The transaction timestamp is a logical `u64`
+   counter for now, but it is wrapped in a type so an HLC (hybrid logical
+   clock) can replace it later.
+4. **Deterministic simulation testing.**  File I/O, time, randomness and
+   (later) network are only reachable through injectable interfaces.  Tests
+   run against a simulated platform that injects faults (torn writes, fsync
+   failures, a crash at any point) and is reproducible from a seed.
+   (FoundationDB / TigerBeetle style.)  This is what makes Raft and
+   distributed transactions debuggable at all.
+5. **Correctness before performance.**  Every durability-related milestone
+   has crash tests and invariant checks in its "done when".
+6. **Versioned formats.**  On-disk format, WAL records, key encoding and
+   wire protocol all carry a version number; every page and every WAL record
+   carries a checksum.
+7. **Embedded first, server second.**  The core is a library (like SQLite);
+   the server and the network protocol are a thin layer on top.
+8. **Metadata is data.**  The catalog, schemas, and later the range
+   descriptors live in the KV space under their own key prefix — there is no
+   separate metadata store that would later need replicating.
 
-## Nyitott döntések
+## Decisions
 
-Ezeket a §F0/M0 előtt le kell zárni.  Mindegyiknél ott a javaslat; a végső
-szó a tiéd.  A lezárt döntések ✅ jelet kapnak.
+These have to be settled before §F0/M0.  Each has a proposal; settled ones
+are marked ✅.
 
-| # | Kérdés | Javaslat | Alternatívák / megjegyzés |
-|---|--------|----------|---------------------------|
-| D1 | Nyelv | ✅ **Rust** (eldöntve 2026-10-16) — memóriabiztonság + konkurencia (buffer pool, MVCC, Raft) | elvetve: C, Zig, Go |
-| D2 | Első storage motor | **B+fa** (copy-on-write vagy in-place + WAL) | LSM-fa: írásra jobb, de compaction miatt bonyolultabb; később második motorként a KV-szerződés mögé |
-| D3 | Konkurenciamodell | **Szálak + zárak** a motorban, async csak a hálózati rétegben | thread-per-core (shared-nothing) — 3. fázisban újragondolandó |
-| D4 | SQL dialektus | **PostgreSQL-közeli** részhalmaz | a Postgres wire protokollal együtt ingyen kliensek (psql, driverek) |
-| D5 | Izoláció | **Snapshot Isolation** először, **Serializable (SSI)** később | — |
-| D6 | Fájlelrendezés | **Egy adatfájl + egy WAL-könyvtár** adatbázisonként | egyfájlos (SQLite-szerű) |
-| D7 | Licenc | ✅ **MIT** (a GitHub repóval már létrejött) | — |
+| # | Question | Proposal | Alternatives / notes |
+|---|----------|----------|----------------------|
+| D1 | Language | ✅ **Rust** (settled 2026-10-16) — memory safety + concurrency (buffer pool, MVCC, Raft) | rejected: C, Zig, Go |
+| D2 | First storage engine | **B+tree** (copy-on-write, or in-place + WAL) | LSM tree: better for writes, but compaction adds complexity; can come later as a second engine behind the KV contract |
+| D3 | Concurrency model | **Threads + locks** in the engine, async only in the network layer | thread-per-core (shared-nothing) — revisit in phase 3 |
+| D4 | SQL dialect | **PostgreSQL-like** subset | together with the Postgres wire protocol this gives free clients (psql, drivers) |
+| D5 | Isolation | **Snapshot Isolation** first, **Serializable (SSI)** later | — |
+| D6 | File layout | **One data file + one WAL directory** per database | single file (SQLite-style) |
+| D7 | License | ✅ **MIT** (came with the GitHub repo) | — |
 
 ---
 
-## Státusz-pillanatkép
+## Status snapshot
 
-| Fázis | Milestone | Cél | Státusz |
-|-------|-----------|-----|:-------:|
-| **F0 — Mag** | M0 | Projekt alap, build, teszt-harness, szimulált platform | ⬜ |
-| | M1 | Pager + lemezformátum | ⬜ |
+| Phase | Milestone | Goal | Status |
+|-------|-----------|------|:------:|
+| **F0 — Core** | M0 | Project skeleton, build, test harness, simulated platform | ⬜ |
+| | M1 | Pager + on-disk format | ⬜ |
 | | M2 | Buffer pool | ⬜ |
-| | M3 | B+fa | ⬜ |
-| | M4 | WAL + helyreállítás | ⬜ |
-| | M5 | Tranzakciók + MVCC | ⬜ |
-| | M6 | KV-szerződés stabilizálása + beágyazott API + CLI | ⬜ |
-| **F1 — SQL** | M7 | Kulcskódolás + katalógus | ⬜ |
+| | M3 | B+tree | ⬜ |
+| | M4 | WAL + recovery | ⬜ |
+| | M5 | Transactions + MVCC | ⬜ |
+| | M6 | Stabilise the KV contract + embedded API + CLI | ⬜ |
+| **F1 — SQL** | M7 | Key encoding + catalog | ⬜ |
 | | M8 | SQL parser + AST | ⬜ |
-| | M9 | Binder, tervező, Volcano végrehajtó | ⬜ |
-| | M10 | Join, aggregáció, másodlagos indexek | ⬜ |
-| | M11 | SQL tranzakciók + kényszerek | ⬜ |
-| | M12 | Szerver + Postgres wire protokoll | ⬜ |
-| | M13 | Költségalapú optimalizáló | ⬜ |
+| | M9 | Binder, planner, Volcano executor | ⬜ |
+| | M10 | Joins, aggregation, secondary indexes | ⬜ |
+| | M11 | SQL transactions + constraints | ⬜ |
+| | M12 | Server + Postgres wire protocol | ⬜ |
+| | M13 | Cost-based optimizer | ⬜ |
 | | M14 | Serializable (SSI) | ⬜ |
-| **F2 — NoSQL** | M15 | Dokumentum modell | ⬜ |
-| | M16 | Dokumentum lekérdezés (közös végrehajtóval) | ⬜ |
-| | M17 | További modellek (döntés később) | ⬜ |
-| **F3 — Elosztott** | M18 | Range-particionálás (még egy gépen) | ⬜ |
-| | M19 | Raft replikáció range-enként | ⬜ |
-| | M20 | Klaszter-tagság + placement | ⬜ |
-| | M21 | Elosztott tranzakciók (HLC) | ⬜ |
-| | M22 | Elosztott lekérdezés-végrehajtás | ⬜ |
-| | M23 | Rebalancing, hibatűrés, Jepsen-stílusú tesztek | ⬜ |
-| **F4 — Fölé** | M24 | Föderáció / konnektorok | ⬜ |
-| | M25 | CDC / changefeed, multi-region | ⬜ |
+| **F2 — NoSQL** | M15 | Document model | ⬜ |
+| | M16 | Document queries (shared executor) | ⬜ |
+| | M17 | Further models (decide later) | ⏸ |
+| **F3 — Distributed** | M18 | Range partitioning (still single-node) | ⬜ |
+| | M19 | Per-range Raft replication | ⬜ |
+| | M20 | Cluster membership + placement | ⬜ |
+| | M21 | Distributed transactions (HLC) | ⬜ |
+| | M22 | Distributed query execution | ⬜ |
+| | M23 | Rebalancing, fault tolerance, Jepsen-style tests | ⬜ |
+| **F4 — Above** | M24 | Federation / connectors | ⬜ |
+| | M25 | CDC / changefeeds, multi-region | ⏸ |
 
 ---
 
-## §F0 — A mag (tranzakcionális rendezett KV)
+## §F0 — The core (transactional ordered KV)
 
-A cél egy beágyazható könyvtár, ami tartósan, crash-biztosan, tranzakciósan
-tárol rendezett kulcs-érték párokat.  Ez a rendszer legfontosabb része —
-minden további fázis ezt használja.
+The goal is an embeddable library that stores ordered key-value pairs
+durably, crash-safely and transactionally.  This is the most important part
+of the system — every later phase uses it.
 
-### §M0 — Projekt alap ⬜
+### §M0 — Project skeleton ⬜
 
-- Cargo workspace, crate-onként egy réteg; `rustfmt` + `clippy`, GitHub Actions CI.
-- Modulhatárok kijelölése az architektúra-ábra szerint (`platform`,
-  `storage`, `txn`, `kv`, később `sql`, `doc`, `server`).
-- **Platform-interfész** (fájl, idő, véletlen) + két implementáció: valós
-  OS és szimulált (memóriában, hibainjektálással, seed-ből determinisztikus).
-- Property-based teszt infrastruktúra.
+- Cargo workspace, one crate per layer; `rustfmt` + `clippy`, GitHub Actions CI.
+- Module boundaries following the architecture diagram (`platform`,
+  `storage`, `txn`, `kv`, later `sql`, `doc`, `server`).
+- **Platform interface** (file, time, randomness) with two implementations:
+  real OS and simulated (in-memory, fault-injecting, deterministic from a seed).
+- Property-based testing infrastructure.
 
-**Kész, ha:** `build` + `test` zöld a CI-ban; egy példateszt a szimulált
-platformon fut és seed-ből reprodukálható; DOCS.md váz létezik.
+**Done when:** `cargo build` + `cargo test` are green in CI; a sample test
+runs on the simulated platform and is reproducible from a seed; a DOCS.md
+skeleton exists.
 
-### §M1 — Pager + lemezformátum ⬜
+### §M1 — Pager + on-disk format ⬜
 
-- Fix méretű lapok (4 KiB vagy 8 KiB — döntés M1-ben), lapazonosító = offset.
-- Fájlfejléc: magic, formátumverzió, lapméret, gyökér-lap mutatók.
-- Minden lapon checksum + laptípus + LSN mező (WAL-hoz előkészítve).
-- Szabadlap-kezelés (free list).
+- Fixed-size pages (4 KiB or 8 KiB — decided in M1), page id = offset.
+- File header: magic, format version, page size, root page pointers.
+- Every page carries a checksum + page type + LSN field (prepared for the WAL).
+- Free-page management (free list).
 
-**Kész, ha:** lapok írhatók/olvashatók; sérült checksum detektált hibát ad;
-a szimulált platformon a torn write felismerhető.
+**Done when:** pages can be written and read; a bad checksum yields a
+detected error; a torn write is recognised on the simulated platform.
 
 ### §M2 — Buffer pool ⬜
 
-- Fix kapacitású lapgyorsítótár, pin/unpin, dirty jelölés.
-- Kilakoltatás: clock vagy LRU-K.
-- Szálbiztos; lap-szintű latch-ek (olvasó/író).
-- WAL-szabály előkészítése: dirty lap csak akkor írható ki, ha a hozzá
-  tartozó WAL már tartós (M4-ben élesedik).
+- Fixed-capacity page cache, pin/unpin, dirty tracking.
+- Eviction: clock or LRU-K.
+- Thread-safe; page-level latches (reader/writer).
+- Prepare the WAL rule: a dirty page may only be written out once its WAL
+  records are durable (enforced from M4).
 
-**Kész, ha:** konkurens stresszteszt adatvesztés és deadlock nélkül fut;
-kilakoltatás alatt pinnelt lap soha nem kerül ki.
+**Done when:** a concurrent stress test runs without data loss or deadlock;
+a pinned page is never evicted.
 
-### §M3 — B+fa ⬜
+### §M3 — B+tree ⬜
 
-- Változó hosszú kulcsok és értékek; túlcsorduló lapok nagy értékekhez.
-- Beszúrás, törlés, pontkeresés, **range-scan iterátor** (előre/hátra).
-- Lap-szétvágás és -összevonás.
-- Konkurens hozzáférés: latch crabbing (vagy B-link fa).
+- Variable-length keys and values; overflow pages for large values.
+- Insert, delete, point lookup, **range-scan iterator** (forward/backward).
+- Page split and merge.
+- Concurrent access: latch crabbing (or a B-link tree).
 
-**Kész, ha:** property-teszt egy referencia `BTreeMap`-pel szemben millió
-véletlen műveleten egyezik; invariáns-ellenőrző (rendezettség, kitöltöttség,
-szülő-gyerek kulcsok) minden teszt végén lefut.
+**Done when:** a property test against a reference `BTreeMap` agrees over a
+million random operations; an invariant checker (ordering, fill factor,
+parent/child keys) runs at the end of every test.
 
-### §M4 — WAL + helyreállítás ⬜
+### §M4 — WAL + recovery ⬜
 
-- Írás-előtti napló: LSN-ek, rekordonkénti checksum, group commit.
-- Fizikai-logikai (physiological) naplózás; ARIES-szerű redo (+ undo, ha
-  M5 megköveteli).
-- Checkpoint, WAL-csonkolás.
-- Helyreállítás indításkor.
+- Write-ahead log: LSNs, per-record checksum, group commit.
+- Physiological logging; ARIES-style redo (+ undo if M5 requires it).
+- Checkpoints, WAL truncation.
+- Recovery on startup.
 
-**Kész, ha:** a szimulációs teszt **minden** I/O ponton crash-t injektál,
-újraindít, és ellenőrzi: minden commitolt tranzakció megvan, semmi
-nem-commitolt nem látszik, a fa invariánsai érvényesek.
+**Done when:** the simulation test injects a crash at **every** I/O point,
+restarts, and checks that every committed transaction is present, nothing
+uncommitted is visible, and the tree invariants hold.
 
-### §M5 — Tranzakciók + MVCC ⬜
+### §M5 — Transactions + MVCC ⬜
 
-- Verziózott értékek: kulcs + commit-időbélyeg (az időbélyeg absztrahált
-  típus — lásd alapelv 3).
-- Snapshot Isolation: olvasás snapshotból, írás-írás konfliktus detektálás
+- Versioned values: key + commit timestamp (the timestamp is an abstracted
+  type — see principle 3).
+- Snapshot Isolation: reads from a snapshot, write-write conflict detection
   (first-committer-wins).
-- Régi verziók szemétgyűjtése (GC / vacuum) a legrégebbi aktív snapshot alapján.
-- Tranzakciós API: `begin` → `get/put/delete/scan` → `commit` / `abort`.
+- Garbage collection of old versions (GC / vacuum) based on the oldest
+  active snapshot.
+- Transaction API: `begin` → `get/put/delete/scan` → `commit` / `abort`.
 
-**Kész, ha:** anomália-tesztek (dirty read, lost update, non-repeatable read)
-SI alatt nem fordulnak elő; write skew *dokumentáltan* előfordulhat (M14
-javítja); a GC nem töröl még látható verziót.
+**Done when:** anomaly tests (dirty read, lost update, non-repeatable read)
+never occur under SI; write skew *can* occur and is documented (M14 fixes
+it); GC never removes a version that is still visible.
 
-### §M6 — KV-szerződés stabilizálása ⬜
+### §M6 — Stabilise the KV contract ⬜
 
-- A KV API véglegesítése — **ez az interfész, amit az F3 elosztott
-  implementációja is meg fog valósítani**, ezért itt átgondoljuk:
-  range-alapú műveletek, batch-ek, snapshot-olvasás adott időbélyegen,
-  hibatípusok (pl. retryable konfliktus vs. végleges hiba).
-- Beágyazott könyvtár publikus API + dokumentáció.
-- Kis CLI/REPL KV-parancsokhoz (`put`, `get`, `scan`, `begin`, `commit`).
-- Első benchmark-alapvonal.
+- Finalise the KV API — **this is the interface the F3 distributed
+  implementation will also implement**, so it gets thought through here:
+  range operations, batches, snapshot reads at a given timestamp, error
+  types (e.g. retryable conflict vs. permanent failure).
+- Public embedded library API + documentation.
+- Small CLI/REPL for KV commands (`put`, `get`, `scan`, `begin`, `commit`).
+- First benchmark baseline.
 
-**Kész, ha:** a KV API egy trait/interfész mögött van, amit az F1 kód
-egyetlen konkrét típus ismerete nélkül használ; DOCS.md leírja.
+**Done when:** the KV API sits behind a trait that F1 code uses without
+knowing any concrete type; DOCS.md describes it.
 
 ---
 
-## §F1 — SQL réteg
+## §F1 — SQL layer
 
-### §M7 — Kulcskódolás + katalógus ⬜
+### §M7 — Key encoding + catalog ⬜
 
-- Memcomparable kódolás minden típusra (egész, float, string, bool, NULL,
-  összetett kulcsok); DESC sorrend támogatása.
-- Kulcstér-felosztás: `/<tábla_id>/<index_id>/<kulcsoszlopok>` → sor.
-- Katalógus (táblák, oszlopok, típusok, indexek) **a KV-térben**, rendszer-prefix alatt.
-- Sémaverziózás (online sémaváltozás csak később, de a verziómező már most).
+- Memcomparable encoding for every type (integer, float, string, bool, NULL,
+  composite keys); DESC ordering support.
+- Keyspace layout: `/<table_id>/<index_id>/<key columns>` → row.
+- Catalog (tables, columns, types, indexes) **in the KV space**, under a
+  system prefix.
+- Schema versioning (online schema changes come later, but the version field
+  exists now).
 
-**Kész, ha:** kódolás round-trip és rendezés-megőrzés property-tesztelt.
+**Done when:** encoding round-trip and order preservation are property-tested.
 
 ### §M8 — SQL parser + AST ⬜
 
-- Kézzel írt rekurzív leszálló (vagy Pratt) parser, jó hibaüzenetekkel.
-- Kezdő részhalmaz: `CREATE TABLE`, `DROP TABLE`, `INSERT`, `SELECT ... WHERE`,
+- Hand-written recursive-descent (or Pratt) parser with good error messages.
+- Initial subset: `CREATE TABLE`, `DROP TABLE`, `INSERT`, `SELECT ... WHERE`,
   `UPDATE`, `DELETE`.
 
-### §M9 — Binder, tervező, végrehajtó ⬜
+### §M9 — Binder, planner, executor ⬜
 
-- Binder: nevek feloldása, típusellenőrzés.
-- Logikai terv → fizikai terv (egyelőre szabályalapú).
-- Volcano (iterátor) végrehajtó: scan, filter, project, sort, limit.
+- Binder: name resolution, type checking.
+- Logical plan → physical plan (rule-based for now).
+- Volcano (iterator) executor: scan, filter, project, sort, limit.
 - `EXPLAIN`.
 
-**Kész, ha:** egy SQL logic test (sqllogictest formátum) alapcsomag zöld.
+**Done when:** a basic SQL logic test suite (sqllogictest format) is green.
 
-### §M10 — Join, aggregáció, indexek ⬜
+### §M10 — Joins, aggregation, indexes ⬜
 
 - Nested loop, hash join, (merge join).
-- `GROUP BY`, aggregátorok, `HAVING`, `ORDER BY`, `DISTINCT`.
-- Másodlagos indexek, index-scan kiválasztása.
+- `GROUP BY`, aggregates, `HAVING`, `ORDER BY`, `DISTINCT`.
+- Secondary indexes, index-scan selection.
 
-### §M11 — SQL tranzakciók + kényszerek ⬜
+### §M11 — SQL transactions + constraints ⬜
 
 - `BEGIN` / `COMMIT` / `ROLLBACK`, autocommit.
-- `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`; `FOREIGN KEY` később.
+- `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`; `FOREIGN KEY` later.
 
-### §M12 — Szerver + Postgres wire protokoll ⬜
+### §M12 — Server + Postgres wire protocol ⬜
 
-- Hálózati szerver, kapcsolatkezelés, session állapot.
-- PostgreSQL frontend/backend protokoll (simple + extended query).
+- Network server, connection handling, session state.
+- PostgreSQL frontend/backend protocol (simple + extended query).
 
-**Kész, ha:** `psql` csatlakozik és lefut rajta az M9–M11 tesztcsomag.
+**Done when:** `psql` connects and the M9–M11 test suite runs through it.
 
-### §M13 — Költségalapú optimalizáló ⬜
+### §M13 — Cost-based optimizer ⬜
 
-- Statisztikák (sorszám, hisztogram, NDV), `ANALYZE`.
-- Join-sorrend (DP vagy Cascades-stílusú keresés).
+- Statistics (row count, histograms, NDV), `ANALYZE`.
+- Join ordering (DP or Cascades-style search).
 
 ### §M14 — Serializable (SSI) ⬜
 
-- Serializable Snapshot Isolation (olvasás-írás függőségek követése).
-- Write skew teszt, ami M5-ben „dokumentáltan elbukott”, itt zöld.
+- Serializable Snapshot Isolation (tracking read-write dependencies).
+- The write-skew test that "failed as documented" in M5 is green here.
 
 ---
 
-## §F2 — NoSQL réteg
+## §F2 — NoSQL layer
 
-Ugyanazon a KV-szerződésen és tranzakciókezelésen, mint az SQL.  A
-lekérdező réteg (tervező + végrehajtó) **közös**, csak a frontend és az
-adatmodell-leképezés más.
+On the same KV contract and transaction machinery as SQL.  The query layer
+(planner + executor) is **shared**; only the frontend and the data-model
+mapping differ.
 
-### §M15 — Dokumentum modell ⬜
+### §M15 — Document model ⬜
 
-- Bináris dokumentumkódolás (JSON-kompatibilis, gyors mezőelérés).
-- Kollekciók a katalógusban; dokumentum-azonosító → kulcs.
-- Útvonal-indexek (`a.b.c`), tömb-indexek.
+- Binary document encoding (JSON-compatible, fast field access).
+- Collections in the catalog; document id → key.
+- Path indexes (`a.b.c`), array indexes.
 
-### §M16 — Dokumentum lekérdezés ⬜
+### §M16 — Document queries ⬜
 
-- Szűrő-nyelv (Mongo-szerű) **és/vagy** SQL/JSON függvények — döntés M15 végén.
-- Ugyanarra a logikai tervre fordul, mint az SQL.
-- Tranzakció átível SQL tábla és dokumentum-kollekció között.
+- Filter language (Mongo-style) **and/or** SQL/JSON functions — decided at
+  the end of M15.
+- Compiles to the same logical plan as SQL.
+- A transaction can span SQL tables and document collections.
 
-### §M17 — További modellek ⏸
+### §M17 — Further models ⏸
 
-Döntés később: wide-column, idősor, gráf, vektor.  Mind ugyanaz a minta:
-leképezés a rendezett KV-ra + operátorok a közös végrehajtóba.
-
----
-
-## §F3 — Elosztott réteg
-
-A KV-szerződés elosztott implementációja.  Az F1/F2 kód változatlan.
-
-### §M18 — Range-particionálás (egy gépen) ⬜
-
-- A kulcstér folytonos range-ekre bontása; range-leírók a KV-ben (meta range).
-- Range-szétvágás méret/terhelés alapján, összevonás.
-- Még egy folyamatban — a cél az, hogy a routing logika elkészüljön, mielőtt a hálózat bejön.
-
-### §M19 — Raft replikáció ⬜
-
-- Raft range-enként (leader election, log replikáció, snapshot, membership change).
-- A Raft log **a determinisztikus szimulátorban** fut, hálózati partíció,
-  üzenetvesztés, átrendezés injektálással.
-
-**Kész, ha:** a szimulátor ezer seed-en linearizálhatósági ellenőrzést
-(Porcupine/Knossos-szerű) futtat hiba nélkül.
-
-### §M20 — Klaszter-tagság + placement ⬜
-
-- Csomópont-csatlakozás/-kilépés, gossip vagy központi placement driver.
-- Replika-elhelyezési szabályok.
-
-### §M21 — Elosztott tranzakciók ⬜
-
-- HLC időbélyegek (az alapelv-3 típus cseréje).
-- Írási intent-ek + 2PC / parallel commits; tranzakciós rekord.
-- Olvasási bizonytalansági ablak (uncertainty interval) kezelése.
-
-### §M22 — Elosztott lekérdezés-végrehajtás ⬜
-
-- Filter/projekció lenyomása a range-ekhez; elosztott join és aggregáció.
-
-### §M23 — Hibatűrés + tesztelés ⬜
-
-- Rebalancing, csomópont-kiesés kezelése, lassú csomópont.
-- Valós hálózaton Jepsen-stílusú tesztek.
+Decided later: wide-column, time series, graph, vector.  All follow the same
+pattern: a mapping onto the ordered KV + operators in the shared executor.
 
 ---
 
-## §F4 — Fölé
+## §F3 — Distributed layer
 
-### §M24 — Föderáció / konnektorok ⬜
+A distributed implementation of the KV contract.  F1/F2 code is unchanged.
 
-- Külső adatforrások a lekérdező réteg alá (FDW-szerűen): más SQL
-  adatbázisok, CSV/Parquet, másik nucleus klaszter.
-- Predikátum-lenyomás a forrásokhoz.
+### §M18 — Range partitioning (single node) ⬜
+
+- Split the keyspace into contiguous ranges; range descriptors live in the
+  KV (meta range).
+- Range split by size/load, range merge.
+- Still a single process — the goal is to finish the routing logic before
+  the network comes in.
+
+### §M19 — Raft replication ⬜
+
+- Raft per range (leader election, log replication, snapshots, membership change).
+- The Raft log runs **inside the deterministic simulator**, with injected
+  network partitions, message loss and reordering.
+
+**Done when:** the simulator runs a linearizability check (Porcupine/Knossos
+style) across a thousand seeds without failure.
+
+### §M20 — Cluster membership + placement ⬜
+
+- Node join/leave, gossip or a central placement driver.
+- Replica placement rules.
+
+### §M21 — Distributed transactions ⬜
+
+- HLC timestamps (swapping in the principle-3 type).
+- Write intents + 2PC / parallel commits; transaction record.
+- Handling the read uncertainty interval.
+
+### §M22 — Distributed query execution ⬜
+
+- Push filters/projections down to ranges; distributed joins and aggregation.
+
+### §M23 — Fault tolerance + testing ⬜
+
+- Rebalancing, node failure handling, slow nodes.
+- Jepsen-style tests on a real network.
+
+---
+
+## §F4 — Above
+
+### §M24 — Federation / connectors ⬜
+
+- External data sources under the query layer (FDW-style): other SQL
+  databases, CSV/Parquet, another nucleus cluster.
+- Predicate push-down to the sources.
 
 ### §M25 — CDC, multi-region ⏸
 
-- Changefeed (a WAL / MVCC verziókból), multi-region elhelyezés, follower reads.
+- Changefeeds (from the WAL / MVCC versions), multi-region placement,
+  follower reads.
 
 ---
 
-## Változásnapló
+## Changelog
 
-- **2026-10-16** — első terv: vízió, rétegek, 8 alapelv, 7 nyitott döntés, F0–F4 / M0–M25.
-- **2026-10-16** — D1 lezárva: Rust.  D7 lezárva: MIT.  Repo: `github.com/davidsarosi92/nucleus`.
+- **2026-10-16** — first plan: vision, layers, 8 principles, 7 open
+  decisions, F0–F4 / M0–M25.
+- **2026-10-16** — D1 settled: Rust.  D7 settled: MIT.  Repo:
+  `github.com/davidsarosi92/nucleus`.
+- **2026-10-16** — plan translated to English (all repo content is English).
