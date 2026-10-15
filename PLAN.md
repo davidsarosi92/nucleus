@@ -47,6 +47,24 @@ transactional KV") and CockroachDB/TiDB ("SQL on top of a distributed KV").
 The reason to commit to it *now*: if the KV contract is chosen well, phase 3
 is an implementation swap, not a rewrite.
 
+**Deployment modes.**  nucleus is a general-purpose database, and every
+phase must keep all of these working:
+
+- **Embedded library** — linked into an application, like SQLite or RocksDB
+  (from F0).
+- **Standalone SQL server** — used like a plain PostgreSQL: start it, connect
+  with `psql` or any Postgres driver (from M12).
+- **Standalone document server** — used like a NoSQL database, through its
+  own client protocol (from M16).
+- **Cluster** — the same SQL and document interfaces over the distributed
+  KV (F3).
+
+**First real consumer: [d-os](https://github.com/davidsarosi92/d-os).**  d-os is
+a hobby operating system that will move its settings store onto nucleus
+(§M6.5).  It is a consumer, not a special case: it uses the public API only,
+and later it can use nucleus in any of the modes above (see §M6.5 "Beyond
+settings").
+
 ## Architecture
 
 ```
@@ -104,6 +122,17 @@ violate one, amend it here first, with a rationale.
 8. **Metadata is data.**  The catalog, schemas, and later the range
    descriptors live in the KV space under their own key prefix — there is no
    separate metadata store that would later need replicating.
+9. **General-purpose core, consumer-agnostic.**  No consumer-specific code or
+   assumptions in the core crates.  Integrations (such as d-os) live in
+   separate crates under `integrations/` and depend only on the public API.
+   If an integration needs something the public API cannot do, the API is
+   extended for everyone, never bypassed.
+10. **Portable and frugal.**  The core builds and runs as a static binary on
+    `x86_64`, `aarch64` and `i686` `unknown-linux-musl` (32-bit included: no
+    assumption of a 64-bit `usize` or of mapping large files).  The real
+    platform layer uses only plain syscalls (`open`, `pread`, `pwrite`,
+    `fsync`, `rename`, `ftruncate`; no `io_uring`, no `O_DIRECT`, `mmap`
+    optional).  Memory use (buffer pool, caches) is bounded and configurable.
 
 ## Decisions
 
@@ -119,6 +148,7 @@ are marked ✅.
 | D5 | Isolation | **Snapshot Isolation** first, **Serializable (SSI)** later | — |
 | D6 | File layout | **One data file + one WAL directory** per database | single file (SQLite-style) |
 | D7 | License | ✅ **MIT** (came with the GitHub repo) | — |
+| D8 | Document client protocol (needed by M16) | **MongoDB wire protocol** subset — existing drivers and tools work, as the Postgres wire protocol does for SQL | own protocol (binary or HTTP/JSON); decide at the end of M15 |
 
 ---
 
@@ -133,6 +163,7 @@ are marked ✅.
 | | M4 | WAL + recovery | ⬜ |
 | | M5 | Transactions + MVCC | ⬜ |
 | | M6 | Stabilise the KV contract + embedded API + CLI | ⬜ |
+| | M6.5 | First embedded consumer: d-os settings store | ⬜ |
 | **F1 — SQL** | M7 | Key encoding + catalog | ⬜ |
 | | M8 | SQL parser + AST | ⬜ |
 | | M9 | Binder, planner, Volcano executor | ⬜ |
@@ -142,7 +173,7 @@ are marked ✅.
 | | M13 | Cost-based optimizer | ⬜ |
 | | M14 | Serializable (SSI) | ⬜ |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
-| | M16 | Document queries (shared executor) | ⬜ |
+| | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
 | **F3 — Distributed** | M18 | Range partitioning (still single-node) | ⬜ |
 | | M19 | Per-range Raft replication | ⬜ |
@@ -164,6 +195,8 @@ of the system — every later phase uses it.
 ### §M0 — Project skeleton ⬜
 
 - Cargo workspace, one crate per layer; `rustfmt` + `clippy`, GitHub Actions CI.
+- CI also cross-builds for the three musl targets of principle 10, so a
+  portability regression fails the build the day it is introduced.
 - Module boundaries following the architecture diagram (`platform`,
   `storage`, `txn`, `kv`, later `sql`, `doc`, `server`).
 - **Platform interface** (file, time, randomness) with two implementations:
@@ -244,6 +277,69 @@ it); GC never removes a version that is still visible.
 **Done when:** the KV API sits behind a trait that F1 code uses without
 knowing any concrete type; DOCS.md describes it.
 
+### §M6.5 — First embedded consumer: d-os settings store ⬜
+
+[d-os](https://github.com/davidsarosi92/d-os) keeps its settings in a key-value
+store inside the kernel (`kernel/core/config.c`): built-in defaults, an
+in-memory cache, change watchers, one layer per signed-in account.  Today it
+persists them by rewriting a flat text file, `<volume>/d-os.conf`.  This
+milestone makes nucleus that persistence backend.  It is the first time
+nucleus runs under a real workload — before SQL exists.
+
+**What stays in d-os.**  The kernel cache, the defaults and the watchers.
+`config_init` runs before any disk or userland exists, and `config_get` is
+called from early boot and from fault paths that must never block, so the
+kernel keeps answering from memory.  Only loading and saving move to nucleus.
+
+**Design.**
+
+- A ring-3 service (a static musl Rust binary, run by the d-os service
+  supervisor) built on the nucleus **embedded API only** (principle 9).  Its
+  crate lives in this repo at `integrations/d-os/`, so nucleus CI builds it
+  for all three targets; the kernel-side half stays in the d-os repo.
+- Key layout: `cfg/machine/<key>` and `cfg/user/<uid>/<key>` — the d-os
+  layers become key prefixes.
+- Startup: once the service is up, the kernel overlays the stored values on
+  its cache (what `config_attach_persistent` does with the file today).
+  `config_save` writes through to the service; one save = one transaction,
+  so a settings panel that changes several keys commits all or none.
+- No service → the kernel keeps working on defaults and says honestly that
+  nothing will survive a reboot (the same rule d-os already follows).
+- History: old versions stay readable through MVCC snapshots (bounded
+  retention), so "restore yesterday's settings" is possible.
+- Migration and rescue: on first start an existing `d-os.conf` is imported;
+  `export` writes the same text format back.  The text file stays readable
+  from another OS, which a binary store alone would lose.
+
+**Prerequisites.**
+
+- nucleus: M6 shipped; on-disk format versioned and covered by a migration
+  path (no breaking change without one).
+- d-os: Rust `std` binaries run on musl (d-os §M44 — expected to be low risk,
+  since unmodified Java and Docker already run); `fsync` on exFAT over
+  virtio-blk really reaches stable storage — nucleus durability depends on
+  it, so this is verified, not assumed.
+
+**Done when:**
+
+- On d-os (i386, x86_64, aarch64) settings saved through nucleus survive a
+  reboot, including per-account layers.
+- Crash test on d-os: the VM is killed during a save, many times — after
+  restart the store holds either the complete old or the complete new set,
+  never a mix.
+- An existing `d-os.conf` imports on first start, and `export` reproduces it.
+- Killing the service leaves d-os running on its cache and reporting that
+  saves do not persist.
+
+**The d-os switch-over.**  d-os moves its settings to nucleus once the "done
+when" list above is green; the d-os PLAN tracks the switch on its side.
+Until then `d-os.conf` remains the d-os default.
+
+**Beyond settings.**  The same deployment modes as anywhere else: once M12
+ships, programs on d-os can use nucleus as a Postgres-compatible system
+database; once M16 ships, as a document store.  No d-os-specific server code
+— d-os gets the same binaries as any other platform.
+
 ---
 
 ## §F1 — SQL layer
@@ -317,12 +413,18 @@ mapping differ.
 - Collections in the catalog; document id → key.
 - Path indexes (`a.b.c`), array indexes.
 
-### §M16 — Document queries ⬜
+### §M16 — Document queries + document server ⬜
 
 - Filter language (Mongo-style) **and/or** SQL/JSON functions — decided at
   the end of M15.
 - Compiles to the same logical plan as SQL.
 - A transaction can span SQL tables and document collections.
+- **Document server:** the M12 server also speaks the document client
+  protocol (decision D8), so nucleus can be used like a NoSQL database.
+
+**Done when:** an existing client for the D8 protocol (e.g. `mongosh` and a
+standard driver, if D8 lands on the MongoDB wire protocol) runs CRUD and
+queries against nucleus.
 
 ### §M17 — Further models ⏸
 
@@ -396,3 +498,7 @@ style) across a thousand seeds without failure.
 - **2026-10-16** — D1 settled: Rust.  D7 settled: MIT.  Repo:
   `github.com/davidsarosi92/nucleus`.
 - **2026-10-16** — plan translated to English (all repo content is English).
+- **2026-10-16** — deployment modes (embedded / SQL server / document server
+  / cluster); principles 9 (consumer-agnostic core) and 10 (portable and
+  frugal); §M6.5 d-os settings store as the first consumer; D8 document
+  client protocol; M16 gains the document server.
