@@ -155,6 +155,34 @@ Where a target cannot run its tests in CI (d-os needs its QEMU harness), it
 is at least cross-built in CI and tested in its own environment before a
 release.
 
+### Packaging and install
+
+Every release is installable on every platform, not just buildable.  One
+release = the same binaries (`nucleus` CLI, and from M12 `nucleus-server`)
+packaged per platform:
+
+| Platform | Package (first) | Later |
+|----------|-----------------|-------|
+| Linux | `.tar.gz` per target | `.deb` / `.rpm`, container image |
+| macOS | `.tar.gz` per target | Homebrew formula |
+| Windows | `.zip` | installer (MSI / winget) |
+| d-os | `.tar.gz` in the **d-os app format** (below), one per d-os arch | installable through the d-os package frontend once it exists (d-os §M45) |
+
+**The d-os app format** (what d-os `app install` expects, d-os §M93): the
+archive has one top directory `nucleus-<version>/` (d-os reads the version
+from that name), static musl binaries under `bin/`, and a `.dos-app` manifest
+in the top directory declaring the programs (`program=`, `link=` into
+`/bin`) and, for server mode, the service (`dir=` for the data directory,
+`service=nucleus-server …`).  Installed this way, nucleus lands in
+`/mnt/apps/nucleus/<version>/`; an update installs beside the old version
+and `app use` rolls back.  The manifest and the packaging script live in
+`integrations/d-os/` (principle 9); CI produces the three d-os archives
+alongside the other platforms' packages.
+
+Installing nucleus on d-os as a database (CLI, SQL or document server) is
+independent of §M6.5: a user can install any release on any d-os machine.
+§M6.5 is d-os itself using nucleus for its settings.
+
 ## Decisions
 
 These have to be settled before §F0/M0.  Each has a proposal; settled ones
@@ -299,9 +327,13 @@ it); GC never removes a version that is still visible.
 - Public embedded library API + documentation.
 - Small CLI/REPL for KV commands (`put`, `get`, `scan`, `begin`, `commit`).
 - First benchmark baseline.
+- First release packages for every platform in "Packaging and install",
+  including the d-os app format.
 
 **Done when:** the KV API sits behind a trait that F1 code uses without
-knowing any concrete type; DOCS.md describes it.
+knowing any concrete type; DOCS.md describes it; the release archive installs
+and the CLI runs on Linux, macOS, Windows and d-os (`app install
+nucleus-<version>-d-os-<arch>.tar.gz`, then `nucleus` from the d-os shell).
 
 ### §M6.5 — First embedded consumer: d-os settings store ⬜
 
@@ -320,7 +352,10 @@ kernel keeps answering from memory.  Only loading and saving move to nucleus.
 **Design.**
 
 - A ring-3 service (a static musl Rust binary, run by the d-os service
-  supervisor) built on the nucleus **embedded API only** (principle 9).  Its
+  supervisor, shipped in the d-os app format of "Packaging and install")
+  built on the nucleus **embedded API only** (principle 9).  Whether d-os
+  bundles it in its system image or installs it as an app is d-os's call —
+  settings are needed early in boot, which may favour bundling.  Its
   crate lives in this repo at `integrations/d-os/`, so nucleus CI builds it
   for all three targets; the kernel-side half stays in the d-os repo.
 - Key layout: `cfg/machine/<key>` and `cfg/user/<uid>/<key>` — the d-os
@@ -530,3 +565,5 @@ style) across a thousand seeds without failure.
   client protocol; M16 gains the document server.
 - **2026-10-16** — build targets: Linux, macOS, Windows, d-os; per-OS
   durability notes; artifacts are not stored in the repo (D9).
+- **2026-10-16** — packaging and install per platform, including the d-os
+  app format (`app install`, `.dos-app` manifest); first packages in M6.
