@@ -20,6 +20,7 @@ Status legend: ⬜ not started · ◐ in progress · ✅ shipped · ⏸ parked
 | Vision | What the system grows into |
 | Architecture | The layers and their boundaries |
 | North-star principles | The rules that keep later phases from needing a rewrite |
+| Build targets | Platforms nucleus must build for |
 | Decisions | What has to be settled before the first line of code |
 | Status snapshot | Phases + milestones table |
 | §F0 – §F4 | Phases and milestones in detail |
@@ -127,12 +128,32 @@ violate one, amend it here first, with a rationale.
    separate crates under `integrations/` and depend only on the public API.
    If an integration needs something the public API cannot do, the API is
    extended for everyone, never bypassed.
-10. **Portable and frugal.**  The core builds and runs as a static binary on
-    `x86_64`, `aarch64` and `i686` `unknown-linux-musl` (32-bit included: no
-    assumption of a 64-bit `usize` or of mapping large files).  The real
-    platform layer uses only plain syscalls (`open`, `pread`, `pwrite`,
-    `fsync`, `rename`, `ftruncate`; no `io_uring`, no `O_DIRECT`, `mmap`
-    optional).  Memory use (buffer pool, caches) is bounded and configurable.
+10. **Portable and frugal.**  Every target in the table below builds from
+    this repo (see "Build targets").  32-bit is included: no assumption of a
+    64-bit `usize` or of mapping large files.  The real platform layer uses
+    only plain file operations (on POSIX: `open`, `pread`, `pwrite`, `fsync`,
+    `rename`, `ftruncate`; no `io_uring`, no `O_DIRECT`, `mmap` optional),
+    with one implementation per OS family behind the platform interface.
+    Memory use (buffer pool, caches) is bounded and configurable.
+
+## Build targets
+
+nucleus must build for all of these.  Build artifacts are **not** stored in
+this repo (where releases are published is decision D9); the repo only has
+to be able to produce them.
+
+| Platform | Rust targets | Notes |
+|----------|--------------|-------|
+| Linux | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, and the same two as `-musl` (static) | the reference platform for development and benchmarks |
+| macOS | `aarch64-apple-darwin`, `x86_64-apple-darwin` | `fsync` does not flush the drive cache on macOS — durability needs `fcntl(F_FULLFSYNC)` |
+| Windows | `x86_64-pc-windows-msvc` | no POSIX file API — its own platform implementation (`FlushFileBuffers` for durability, `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` for atomic rename, offset reads/writes via `OVERLAPPED`) |
+| d-os | `x86_64`, `aarch64`, `i686` `-unknown-linux-musl`, static | runs through the d-os Linux ABI; the only 32-bit target, so it is the one that catches `usize` assumptions |
+
+Every target runs the same platform conformance tests, including the
+durability ones (principle 5): "it compiles" is not "it is supported".
+Where a target cannot run its tests in CI (d-os needs its QEMU harness), it
+is at least cross-built in CI and tested in its own environment before a
+release.
 
 ## Decisions
 
@@ -149,6 +170,7 @@ are marked ✅.
 | D6 | File layout | **One data file + one WAL directory** per database | single file (SQLite-style) |
 | D7 | License | ✅ **MIT** (came with the GitHub repo) | — |
 | D8 | Document client protocol (needed by M16) | **MongoDB wire protocol** subset — existing drivers and tools work, as the Postgres wire protocol does for SQL | own protocol (binary or HTTP/JSON); decide at the end of M15 |
+| D9 | Where release builds are published | **GitHub Releases** attached to tags, built by CI | a separate artifact store; not in this repo either way |
 
 ---
 
@@ -195,8 +217,12 @@ of the system — every later phase uses it.
 ### §M0 — Project skeleton ⬜
 
 - Cargo workspace, one crate per layer; `rustfmt` + `clippy`, GitHub Actions CI.
-- CI also cross-builds for the three musl targets of principle 10, so a
-  portability regression fails the build the day it is introduced.
+- CI builds every target in "Build targets" (Linux, macOS and Windows
+  runners; the musl targets cross-built), and runs the tests on Linux, macOS
+  and Windows, so a portability regression fails the build the day it is
+  introduced.
+- Platform implementations: POSIX (Linux, macOS, d-os) and Windows, plus the
+  simulated one.
 - Module boundaries following the architecture diagram (`platform`,
   `storage`, `txn`, `kv`, later `sql`, `doc`, `server`).
 - **Platform interface** (file, time, randomness) with two implementations:
@@ -502,3 +528,5 @@ style) across a thousand seeds without failure.
   / cluster); principles 9 (consumer-agnostic core) and 10 (portable and
   frugal); §M6.5 d-os settings store as the first consumer; D8 document
   client protocol; M16 gains the document server.
+- **2026-10-16** — build targets: Linux, macOS, Windows, d-os; per-OS
+  durability notes; artifacts are not stored in the repo (D9).
