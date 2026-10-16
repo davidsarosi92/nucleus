@@ -206,7 +206,7 @@ are marked ✅.
 
 | Phase | Milestone | Goal | Status |
 |-------|-----------|------|:------:|
-| **F0 — Core** | M0 | Project skeleton, build, test harness, simulated platform | ⬜ |
+| **F0 — Core** | M0 | Project skeleton, build, test harness, simulated platform | ◐ |
 | | M1 | Pager + on-disk format | ⬜ |
 | | M2 | Buffer pool | ⬜ |
 | | M3 | B+tree | ⬜ |
@@ -242,7 +242,7 @@ The goal is an embeddable library that stores ordered key-value pairs
 durably, crash-safely and transactionally.  This is the most important part
 of the system — every later phase uses it.
 
-### §M0 — Project skeleton ⬜
+### §M0 — Project skeleton ◐
 
 - Cargo workspace, one crate per layer; `rustfmt` + `clippy`, GitHub Actions CI.
 - CI builds every target in "Build targets" (Linux, macOS and Windows

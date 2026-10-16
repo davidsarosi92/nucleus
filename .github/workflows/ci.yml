@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal -c rustfmt -c clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Every target in PLAN.md "Build targets".  `test: true` runs the tests on
+  # that target (natively, or a 32-bit binary on a 64-bit kernel); the rest
+  # are built, tests included, so they at least link.
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   test: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  test: true }
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  test: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, test: true }
+          - { os: ubuntu-latest,    target: i686-unknown-linux-musl,    test: true, apt: gcc-multilib }
+          - { os: macos-latest,     target: aarch64-apple-darwin,       test: true }
+          - { os: macos-latest,     target: x86_64-apple-darwin,        test: false }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,     test: true }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal --target ${{ matrix.target }}
+      - name: Install system packages
+        if: matrix.apt
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Test
+        if: matrix.test
+        run: cargo test --workspace --target ${{ matrix.target }}
+      - name: Build
+        if: ${{ !matrix.test }}
+        run: cargo build --workspace --all-targets --target ${{ matrix.target }}
+      - name: Run the binary
+        if: matrix.test
+        run: cargo run -q --target ${{ matrix.target }} --bin nucleus -- --version

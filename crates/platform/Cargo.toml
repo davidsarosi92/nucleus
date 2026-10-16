@@ -1,0 +1,16 @@
+[package]
+name = "nucleus-platform"
+description = "Injectable file system, clock and randomness for nucleus, with a deterministic fault-injecting simulation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+getrandom = "0.4.3"
+
+[dev-dependencies]
+proptest = "1.12.0"
+
+[lints]
+workspace = true
