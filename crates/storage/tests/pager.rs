@@ -1,12 +1,13 @@
-//! Pager tests: format, validation, free list, and crashes at every I/O point.
+//! Pager tests: format, validation, the copy-on-write rule, the free list,
+//! and crashes at every I/O point.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use nucleus_platform::harness;
 use nucleus_platform::sim::{CrashMode, Faults, SimPlatform};
 use nucleus_platform::{OpenMode, Platform, Rng, SplitMix64};
-use nucleus_storage::pager::{FIRST_DATA_PAGE, RESERVE_TARGET};
+use nucleus_storage::pager::{FIRST_DATA_PAGE, IDS_PER_FREELIST_PAGE};
 use nucleus_storage::{Error, PAGE_SIZE, Page, PageId, PageType, Pager};
 
 const DB: &str = "/db/data";
@@ -40,6 +41,16 @@ fn poke(p: &SimPlatform, offset: u64, bytes: &[u8]) {
     f.sync().unwrap();
 }
 
+fn raw(p: &SimPlatform, offset: u64, len: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; len];
+    p.fs()
+        .open(Path::new(DB), OpenMode::ReadOnly)
+        .unwrap()
+        .read_exact_at(&mut buf, offset)
+        .unwrap();
+    buf
+}
+
 #[test]
 fn create_write_reopen() {
     let p = platform(1);
@@ -49,12 +60,12 @@ fn create_write_reopen() {
     for (i, id) in ids.iter().enumerate() {
         pager.write_page(*id, &mut page_with(i as u64)).unwrap();
     }
-    pager.set_root(3, Some(ids[2])).unwrap();
+    pager.set_meta(3, 0xABCD).unwrap();
     pager.close().unwrap();
 
     let pager = Pager::open(p.fs(), Path::new(DB)).unwrap();
-    assert_eq!(pager.root(3), Some(ids[2]));
-    assert_eq!(pager.root(0), None);
+    assert_eq!(pager.meta(3), 0xABCD);
+    assert_eq!(pager.meta(0), 0);
     for (i, id) in ids.iter().enumerate() {
         assert!(same_payload(
             &pager.read_page(*id).unwrap(),
@@ -62,6 +73,7 @@ fn create_write_reopen() {
         ));
     }
     assert_eq!(pager.page_count(), 7);
+    pager.check().unwrap();
 }
 
 #[test]
@@ -94,20 +106,32 @@ fn create_refuses_an_existing_file() {
 }
 
 #[test]
+fn durable_pages_are_immutable() {
+    let p = platform(1);
+    let pager = Pager::create(p.fs(), Path::new(DB)).unwrap();
+    let id = pager.allocate().unwrap();
+    assert!(pager.is_writable(id));
+    pager.write_page(id, &mut page_with(1)).unwrap();
+    pager.write_page(id, &mut page_with(2)).unwrap(); // same epoch: in place
+    pager.sync().unwrap();
+    assert!(!pager.is_writable(id));
+    assert!(matches!(
+        pager.write_page(id, &mut page_with(3)),
+        Err(Error::Immutable(_))
+    ));
+    assert!(same_payload(&pager.read_page(id).unwrap(), &page_with(2)));
+}
+
+#[test]
 fn detects_a_flipped_bit() {
     let p = platform(1);
     let pager = Pager::create(p.fs(), Path::new(DB)).unwrap();
     let id = pager.allocate().unwrap();
     pager.write_page(id, &mut page_with(1)).unwrap();
     pager.sync().unwrap();
-    let mut byte = [0u8];
     let at = id.offset() + 5000;
-    p.fs()
-        .open(Path::new(DB), OpenMode::ReadOnly)
-        .unwrap()
-        .read_exact_at(&mut byte, at)
-        .unwrap();
-    poke(&p, at, &[byte[0] ^ 0x10]);
+    let byte = raw(&p, at, 1)[0];
+    poke(&p, at, &[byte ^ 0x10]);
     assert!(matches!(
         pager.read_page(id),
         Err(Error::Corrupt {
@@ -125,14 +149,7 @@ fn detects_a_misdirected_write() {
     pager.write_page(a, &mut page_with(1)).unwrap();
     pager.write_page(b, &mut page_with(2)).unwrap();
     pager.sync().unwrap();
-    // Page a's correct bytes, written where page b belongs.
-    let mut raw = vec![0u8; PAGE_SIZE];
-    p.fs()
-        .open(Path::new(DB), OpenMode::ReadOnly)
-        .unwrap()
-        .read_exact_at(&mut raw, a.offset())
-        .unwrap();
-    poke(&p, b.offset(), &raw);
+    poke(&p, b.offset(), &raw(&p, a.offset(), PAGE_SIZE)); // a's bytes where b belongs
     assert!(matches!(
         pager.read_page(b),
         Err(Error::Corrupt {
@@ -172,7 +189,7 @@ fn refuses_invalid_and_reserved_pages() {
     let id = pager.allocate().unwrap();
     // The pager's own page types are not for callers.
     assert!(matches!(
-        pager.write_page(id, &mut Page::new(PageType::FREE)),
+        pager.write_page(id, &mut Page::new(PageType::FREELIST)),
         Err(Error::InvalidPage(_))
     ));
 }
@@ -199,15 +216,15 @@ fn refuses_files_that_are_not_databases() {
 fn survives_one_damaged_header_copy_not_two() {
     let p = platform(1);
     let pager = Pager::create(p.fs(), Path::new(DB)).unwrap();
-    pager.set_root(0, Some(PageId(1234))).unwrap();
+    pager.set_meta(0, 1234).unwrap();
     pager.sync().unwrap(); // seq 2 -> slot 0
-    pager.set_root(0, Some(PageId(5678))).unwrap();
+    pager.set_meta(0, 5678).unwrap();
     pager.sync().unwrap(); // seq 3 -> slot 1
     drop(pager);
 
     poke(&p, PAGE_SIZE as u64 + 100, &[0xFF; 8]); // damage slot 1, the newer
     let pager = Pager::open(p.fs(), Path::new(DB)).unwrap();
-    assert_eq!(pager.root(0), Some(PageId(1234))); // fell back to the older copy
+    assert_eq!(pager.meta(0), 1234); // fell back to the older copy
     drop(pager);
 
     poke(&p, 100, &[0xFF; 8]); // and slot 0
@@ -222,7 +239,7 @@ fn survives_one_damaged_header_copy_not_two() {
 }
 
 #[test]
-fn free_pages_are_reused() {
+fn freed_pages_are_reused_after_the_next_sync() {
     let p = platform(1);
     let pager = Pager::create(p.fs(), Path::new(DB)).unwrap();
     let ids: Vec<PageId> = (0..10).map(|_| pager.allocate().unwrap()).collect();
@@ -231,52 +248,48 @@ fn free_pages_are_reused() {
     }
     pager.sync().unwrap();
 
-    // Freed since the last sync: reused at once.
+    // Freed durable pages wait for the next commit...
     for id in &ids[..5] {
         pager.free(*id).unwrap();
     }
-    let again: Vec<PageId> = (0..5).map(|_| pager.allocate().unwrap()).collect();
-    assert_eq!(sorted(&again), sorted(&ids[..5]));
-    assert_eq!(pager.page_count(), 12);
-
-    // Freed before the last sync: reused through the reserve.
-    for id in &again {
-        pager.free(*id).unwrap();
-    }
+    assert_eq!(pager.allocate().unwrap(), PageId(12));
+    assert!(matches!(pager.free(ids[0]), Err(Error::InvalidPage(_)))); // double free
     pager.sync().unwrap();
-    assert_eq!((pager.free_count(), pager.reserved()), (0, 5));
-    let from_reserve: Vec<PageId> = (0..5).map(|_| pager.allocate().unwrap()).collect();
-    assert_eq!(sorted(&from_reserve), sorted(&ids[..5]));
-    assert_eq!(pager.page_count(), 12);
-    assert_eq!(pager.allocate().unwrap(), PageId(12)); // then the file grows
+    // ...and come back, lowest first (one went to hold the free list).
+    let again: BTreeSet<PageId> = (0..4).map(|_| pager.allocate().unwrap()).collect();
+    assert!(again.iter().all(|id| ids[..5].contains(id)), "{again:?}");
+
+    // A page allocated and freed within one epoch is reusable at once.
+    let fresh = pager.allocate().unwrap();
+    pager.free(fresh).unwrap();
+    assert_eq!(pager.allocate().unwrap(), fresh);
     pager.check().unwrap();
 }
 
 #[test]
-fn close_returns_the_reserve() {
+fn a_long_free_list_spans_pages() {
     let p = platform(1);
     let pager = Pager::create(p.fs(), Path::new(DB)).unwrap();
-    let ids: Vec<PageId> = (0..RESERVE_TARGET as u64 + 8)
-        .map(|_| pager.allocate().unwrap())
-        .collect();
-    for id in &ids {
-        pager.write_page(*id, &mut page_with(0)).unwrap();
-    }
+    let n = IDS_PER_FREELIST_PAGE * 2 + 10;
+    let ids: Vec<PageId> = (0..n).map(|_| pager.allocate().unwrap()).collect();
     pager.sync().unwrap();
     for id in &ids {
         pager.free(*id).unwrap();
     }
     pager.sync().unwrap();
-    assert_eq!(pager.reserved(), RESERVE_TARGET);
-    assert_eq!(pager.free_count(), 8);
-    pager.close().unwrap();
-
-    let pager = Pager::open(p.fs(), Path::new(DB)).unwrap();
-    assert_eq!(
-        pager.free_count() + pager.reserved() as u64,
-        ids.len() as u64
-    );
     pager.check().unwrap();
+    let count = pager.page_count();
+    drop(pager);
+    let pager = Pager::open(p.fs(), Path::new(DB)).unwrap();
+    pager.check().unwrap();
+    assert_eq!(pager.page_count(), count);
+    // Every page but the headers and the free list's own pages is free.
+    let acc = pager.accounting();
+    assert_eq!(
+        acc.free.len() + acc.freelist_pages.len(),
+        (count - 2) as usize
+    );
+    assert_eq!(acc.freelist_pages.len(), 3);
 }
 
 #[test]
@@ -309,7 +322,9 @@ fn torn_page_writes_are_detected() {
         let id = pager.allocate().unwrap();
         pager.write_page(id, &mut page_with(1)).unwrap();
         pager.sync().unwrap();
-        pager.write_page(id, &mut page_with(2)).unwrap(); // never synced
+        pager.set_meta(0, 1).unwrap();
+        // Overwriting raw, as a buggy writer would: the pager must notice.
+        poke_unsynced(&p, id.offset(), page_bytes(&p, id, 2));
         p.sim_fs().crash();
 
         let pager = Pager::open(p.fs(), Path::new(DB)).unwrap();
@@ -329,82 +344,93 @@ fn torn_page_writes_are_detected() {
     assert!(old > 0 && caught > 0, "old {old}, new {new}, torn {caught}");
 }
 
-fn sorted(ids: &[PageId]) -> Vec<PageId> {
-    let mut v = ids.to_vec();
-    v.sort();
-    v
+/// The sealed bytes `page_with(tag)` would have at `id`.
+fn page_bytes(p: &SimPlatform, id: PageId, tag: u64) -> Vec<u8> {
+    // Seal via a scratch pager so the bytes carry a valid checksum and id.
+    let scratch = "/db/scratch";
+    let _ = p.fs().remove_file(Path::new(scratch));
+    let pager = Pager::create(p.fs(), Path::new(scratch)).unwrap();
+    while pager.allocate().unwrap() < id {}
+    pager.write_page(id, &mut page_with(tag)).unwrap();
+    let f = p.fs().open(Path::new(scratch), OpenMode::ReadOnly).unwrap();
+    let mut buf = vec![0u8; PAGE_SIZE];
+    f.read_exact_at(&mut buf, id.offset()).unwrap();
+    buf
 }
 
-/// What a committed state promises: its roots, its size, its free pages,
-/// and the contents of every live page not touched after the commit.
+fn poke_unsynced(p: &SimPlatform, offset: u64, bytes: Vec<u8>) {
+    let f = p.fs().open(Path::new(DB), OpenMode::ReadWrite).unwrap();
+    f.write_all_at(&bytes, offset).unwrap();
+}
+
+/// What a committed state promises: its meta, its page count, and the
+/// contents of every live page.
 #[derive(Clone, Debug)]
 struct Snapshot {
     epoch: u64,
     page_count: u64,
-    free_count: u64,
     live: BTreeMap<u64, u64>, // page -> content tag
 }
 
-/// A random workload of allocations, writes, rewrites and frees, with a
-/// sync per epoch.  Stops at the first error (the crash).  Returns the
-/// snapshots of the syncs that completed, and per page the epoch that last
-/// touched it.
-fn workload(p: &SimPlatform, seed: u64) -> (Vec<Snapshot>, BTreeMap<u64, u64>) {
+/// A random workload of allocations, writes, copy-on-write rewrites and
+/// frees, with a sync per epoch.  Stops at the first error (the crash) and
+/// returns the snapshots of the syncs that completed.
+fn workload(p: &SimPlatform, seed: u64) -> Vec<Snapshot> {
     let rng = SplitMix64::new(seed);
     let mut snaps = Vec::new();
-    let mut touched = BTreeMap::new();
     let _ = (|| -> Result<(), Error> {
         let pager = Pager::create(p.fs(), Path::new(DB))?;
         let mut live: BTreeMap<u64, u64> = BTreeMap::new();
         snaps.push(Snapshot {
             epoch: 0,
             page_count: 2,
-            free_count: 0,
             live: live.clone(),
         });
         for epoch in 1..=6 {
-            // Epoch 2 allocates in bulk and epoch 3 frees in bulk, so more
-            // pages are free at a sync than the reserve takes: the durable
-            // free list is non-empty, which is the case the allocation
-            // rules exist for.
+            // Epoch 2 allocates in bulk and epoch 3 frees in bulk, so the
+            // free list is long and reused within later epochs.
             let (steps, forced) = match epoch {
-                2 => (RESERVE_TARGET as u64 + 12, Some(0)),
-                3 => (RESERVE_TARGET as u64 + 8, Some(5)),
-                _ => (8, None),
+                2 => (40, Some(0)),
+                3 => (36, Some(6)),
+                _ => (10, None),
             };
             for step in 0..steps {
                 let tag = epoch * 1000 + step;
                 let choice = forced.unwrap_or_else(|| rng.below(10));
                 if choice < 5 || live.is_empty() {
                     let id = pager.allocate()?;
-                    touched.insert(id.0, epoch);
                     pager.write_page(id, &mut page_with(tag))?;
                     live.insert(id.0, tag);
+                    continue;
+                }
+                let keys: Vec<u64> = live.keys().copied().collect();
+                let id = keys[rng.below(keys.len() as u64) as usize];
+                if choice < 8 {
+                    pager.free(PageId(id))?;
+                    live.remove(&id);
+                } else if pager.is_writable(PageId(id)) {
+                    pager.write_page(PageId(id), &mut page_with(tag))?;
+                    live.insert(id, tag);
                 } else {
-                    let keys: Vec<u64> = live.keys().copied().collect();
-                    let id = keys[rng.below(keys.len() as u64) as usize];
-                    touched.insert(id, epoch);
-                    if choice < 8 {
-                        pager.free(PageId(id))?;
-                        live.remove(&id);
-                    } else {
-                        pager.write_page(PageId(id), &mut page_with(tag))?;
-                        live.insert(id, tag);
-                    }
+                    // Copy-on-write: a new page, the old one freed.
+                    let new = pager.allocate()?;
+                    pager.write_page(new, &mut page_with(tag))?;
+                    pager.free(PageId(id))?;
+                    live.remove(&id);
+                    live.insert(new.0, tag);
                 }
             }
-            pager.set_root(0, Some(PageId(epoch)))?;
+            pager.set_meta(0, epoch)?;
             pager.sync()?;
             snaps.push(Snapshot {
                 epoch,
                 page_count: pager.page_count(),
-                free_count: pager.free_count() + pager.reserved() as u64,
                 live: live.clone(),
             });
         }
         pager.close()
     })();
-    (snaps, touched)
+    snaps
 }
 
 #[test]
@@ -414,7 +440,8 @@ fn crash_at_every_io_point() {
             // A dry run counts the operations; then crash at each one.
             let dry = platform(seed);
             let before = dry.sim_fs().op_count();
-            workload(&dry, seed);
+            let snaps = workload(&dry, seed);
+            assert_eq!(snaps.len(), 7);
             let total = dry.sim_fs().op_count() - before;
 
             for n in 1..=total {
@@ -424,19 +451,19 @@ fn crash_at_every_io_point() {
                     ..Faults::default()
                 });
                 p.sim_fs().crash_after_ops(n);
-                let (snaps, touched) = workload(&p, seed);
+                let snaps = workload(&p, seed);
                 assert_eq!(
                     p.sim_fs().crash_count(),
                     1,
                     "op {n} of {total} did not crash"
                 );
-                check_after_crash(&p, &snaps, &touched, n);
+                check_after_crash(&p, &snaps, n);
             }
         });
     }
 }
 
-fn check_after_crash(p: &SimPlatform, snaps: &[Snapshot], touched: &BTreeMap<u64, u64>, n: u64) {
+fn check_after_crash(p: &SimPlatform, snaps: &[Snapshot], n: u64) {
     let ctx = format!("crash at op {n}");
     let pager = match Pager::open(p.fs(), Path::new(DB)) {
         Ok(pager) => pager,
@@ -452,7 +479,7 @@ fn check_after_crash(p: &SimPlatform, snaps: &[Snapshot], touched: &BTreeMap<u64
         .unwrap_or_else(|e| panic!("{ctx}: check failed: {e}"));
 
     // The state is the last completed sync, or the one in flight.
-    let epoch = pager.root(0).map_or(0, |r| r.0);
+    let epoch = pager.meta(0);
     let last = snaps.last().map_or(0, |s| s.epoch);
     assert!(
         epoch == last || epoch == last + 1,
@@ -462,17 +489,9 @@ fn check_after_crash(p: &SimPlatform, snaps: &[Snapshot], touched: &BTreeMap<u64
         return; // the in-flight sync won; its snapshot was never recorded
     };
     assert_eq!(pager.page_count(), snap.page_count, "{ctx}: page count");
-    // Leaks are allowed (at most one reserve's worth), losses are not.
-    let free = pager.free_count() + pager.reserved() as u64;
-    assert!(
-        free <= snap.free_count && snap.free_count - free <= RESERVE_TARGET as u64,
-        "{ctx}: free pages {free}, committed {}",
-        snap.free_count
-    );
+    // Every live page holds its contents, and every page is accounted for:
+    // live, free, or holding the free list.  Nothing leaks.
     for (&id, &tag) in &snap.live {
-        if touched.get(&id).is_some_and(|&e| e > epoch) {
-            continue; // rewritten or freed later: the WAL's problem (§M4)
-        }
         let page = pager
             .read_page(PageId(id))
             .unwrap_or_else(|e| panic!("{ctx}: page {id}: {e}"));
@@ -481,4 +500,10 @@ fn check_after_crash(p: &SimPlatform, snaps: &[Snapshot], touched: &BTreeMap<u64
             "{ctx}: page {id} has wrong contents"
         );
     }
+    let acc = pager.accounting();
+    let mut all: BTreeSet<u64> = snap.live.keys().copied().collect();
+    for id in acc.free.iter().chain(&acc.freelist_pages) {
+        assert!(all.insert(*id), "{ctx}: page {id} both live and free");
+    }
+    assert_eq!(all.len() as u64, snap.page_count - 2, "{ctx}: pages leaked");
 }

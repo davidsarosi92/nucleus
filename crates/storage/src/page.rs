@@ -48,8 +48,8 @@ impl PageType {
     pub const UNUSED: Self = Self(0);
     /// One of the two file header copies.
     pub const HEADER: Self = Self(1);
-    /// A page on the free list.
-    pub const FREE: Self = Self(2);
+    /// A page of the free list (holds free page numbers).
+    pub const FREELIST: Self = Self(2);
     /// The first type available to layers above the pager.
     pub const FIRST_USER: Self = Self(16);
 }
@@ -140,6 +140,16 @@ impl Page {
         }
         Ok(())
     }
+}
+
+/// Reads a little-endian `u64` at `at` (for page payloads).
+pub fn read_u64_at(b: &[u8], at: usize) -> u64 {
+    read_u64(b, at)
+}
+
+/// Writes a little-endian `u64` at `at` (for page payloads).
+pub fn write_u64_at(b: &mut [u8], at: usize, v: u64) {
+    write_u64(b, at, v)
 }
 
 pub(crate) fn read_u64(b: &[u8], at: usize) -> u64 {
