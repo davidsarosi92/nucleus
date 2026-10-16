@@ -199,6 +199,9 @@ are marked ✅.
 | D7 | License | ✅ **MIT** (came with the GitHub repo) | — |
 | D8 | Document client protocol (needed by M16) | **MongoDB wire protocol** subset — existing drivers and tools work, as the Postgres wire protocol does for SQL | own protocol (binary or HTTP/JSON); decide at the end of M15 |
 | D9 | Where release builds are published | **GitHub Releases** attached to tags, built by CI | a separate artifact store; not in this repo either way |
+| D10 | Storage engine shape | ✅ **Copy-on-write B+tree + logical WAL** (2026-10-17): checkpoints are atomic pager commits of a COW tree; the WAL holds batches of key writes; recovery = replay after the checkpoint; no undo | ARIES-style physiological logging with in-place updates — more write-efficient, far more complex; revisit only if checkpoint write amplification hurts |
+| D11 | Tree concurrency | ✅ **One writer or many readers** per tree (`RwLock`); MVCC scans re-seek between batches (2026-10-17) | latch crabbing / B-link trees, when benchmarks show writer contention |
+| D12 | Serializable isolation (§M14) | **Read-set validation** (FoundationDB style): a commit fails if a key or range it read was written after its snapshot | Cahill SSI (fewer aborts, much more state); FDB's approach also distributes in F3 |
 
 ---
 
@@ -207,11 +210,11 @@ are marked ✅.
 | Phase | Milestone | Goal | Status |
 |-------|-----------|------|:------:|
 | **F0 — Core** | M0 | Project skeleton, build, test harness, simulated platform | ✅ DOCS §3 |
-| | M1 | Pager + on-disk format | ✅ DOCS §4 |
-| | M2 | Buffer pool | ⬜ |
-| | M3 | B+tree | ⬜ |
-| | M4 | WAL + recovery | ⬜ |
-| | M5 | Transactions + MVCC | ⬜ |
+| | M1 | Pager + on-disk format | ✅ DOCS §4.1 |
+| | M2 | Buffer pool | ✅ DOCS §4.3 |
+| | M3 | B+tree | ✅ DOCS §4.4 |
+| | M4 | WAL + recovery | ✅ DOCS §4.5 |
+| | M5 | Transactions + MVCC | ✅ DOCS §5 |
 | | M6 | Stabilise the KV contract + embedded API + CLI | ⬜ |
 | | M6.5 | First embedded consumer: d-os settings store | ⬜ |
 | **F1 — SQL** | M7 | Key encoding + catalog | ⬜ |
@@ -261,76 +264,86 @@ of the system — every later phase uses it.
 runs on the simulated platform and is reproducible from a seed; a DOCS.md
 skeleton exists.
 
-### §M1 — Pager + on-disk format ✅ (DOCS §4)
+### §M1 — Pager + on-disk format ✅ (DOCS §4.1–§4.2)
 
-- 8 KiB pages (settled 2026-10-17), page `n` at offset `n × 8192`.
-- Every page starts with a 24-byte header: CRC-32C, page type, LSN (for
-  §M4), and the page's own id (catches misdirected writes).
-- Two header copies (pages 0 and 1) updated alternately with a sequence
-  number, so a header update is atomic; magic, format version, page size,
-  page count, free list, 16 root slots.
-- Free list linked through the free pages.  The pager never hands out a
-  page the *durable* header still lists as free (a crash would otherwise
-  leave the free list running through user data): it allocates from pages
-  freed since the last sync, then a reserve that `sync` takes off the list
-  before committing, then the end of the file.  A crash can leak at most one
-  reserve (32 pages), never corrupt the list.
-- `create` is atomic (temporary name + rename); a failed `sync` poisons the
-  pager (fsyncgate).
+- 8 KiB pages (settled 2026-10-17), page `n` at offset `n × 8192`; every
+  page starts with a 24-byte header: CRC-32C, type, LSN, its own id
+  (catches misdirected writes).
+- Two header copies (pages 0 and 1) written alternately with a sequence
+  number: an atomic commit point.  16 meta slots for the layers above.
+- **Revised with §M3/§M4 (D10):** the durable state is immutable — only
+  pages allocated since the last commit may be written; freed durable pages
+  become reusable after the next commit; the free list lives in dedicated
+  pages rewritten by each commit.  (The first version linked free pages
+  through themselves and kept a 32-page reserve; copy-on-write made that
+  unnecessary, and now nothing leaks.)
+- `create` is atomic (temporary name + rename); a failed `sync` poisons.
 
-**Done when:** pages can be written and read; a bad checksum yields a
-detected error; a torn write is recognised on the simulated platform; a
-crash at every I/O point of a workload, in both crash modes, reopens to the
-last (or in-flight) synced state with a valid free list; mutations of the
-ordering rules (allocating from the durable list, header before data,
-non-atomic create) each fail that test.
+**Done when:** pages round-trip; bad checksums, torn and misdirected writes
+are detected; a crash at every I/O point of a workload, both crash modes,
+reopens to the last (or in-flight) commit with every live page intact and
+every page accounted for; mutations of the ordering rules fail that test.
 
-### §M2 — Buffer pool ⬜
+### §M2 — Buffer pool ✅ (DOCS §4.3)
 
-- Fixed-capacity page cache, pin/unpin, dirty tracking.
-- Eviction: clock or LRU-K.
-- Thread-safe; page-level latches (reader/writer).
-- Prepare the WAL rule: a dirty page may only be written out once its WAL
-  records are durable (enforced from M4).
+- Fixed frames, pin/unpin through `PageRef`, per-frame reader/writer
+  latches, dirty tracking, clock eviction with write-back.
+- No "no-steal" rule needed: a dirty page can be evicted any time, because
+  the pager only lets pages outside the committed state be written.
+  `PageRef::write` checks that rule up front.
 
-**Done when:** a concurrent stress test runs without data loss or deadlock;
-a pinned page is never evicted.
+**Done when:** a concurrent stress test (8 threads, real and simulated
+file systems, thousands of evictions) loses nothing; pinned pages are never
+evicted; a fully pinned pool says so.
 
-### §M3 — B+tree ⬜
+### §M3 — B+tree ✅ (DOCS §4.4)
 
-- Variable-length keys and values; overflow pages for large values.
-- Insert, delete, point lookup, **range-scan iterator** (forward/backward).
-- Page split and merge.
-- Concurrent access: latch crabbing (or a B-link tree).
+- Variable-length keys (≤ 1024 bytes) and values, overflow chains for large
+  values; insert, delete, get, range iterators both ways.
+- Split by bytes; merge or redistribute under a quarter page.
+- **Copy-on-write (D10):** a node changed after a commit is copied, up to a
+  new root, so committing the pager is an atomic checkpoint.
+- **Concurrency (D11):** one writer or many readers (an `RwLock` around the
+  tree) instead of latch crabbing; MVCC scans re-seek between batches, so
+  no lock is held for long.  Finer latching waits for benchmarks.
 
-**Done when:** a property test against a reference `BTreeMap` agrees over a
-million random operations; an invariant checker (ordering, fill factor,
-parent/child keys) runs at the end of every test.
+**Done when:** a property test agrees with a `BTreeMap` over a million
+random operations (CI, long tests) and over model-based workloads with
+commits between epochs; the invariant checker (ordering, separators, equal
+leaf depth, minimum fill, overflow lengths, page accounting) passes after
+every epoch; the committed tree survives a crash at every I/O point.
 
-### §M4 — WAL + recovery ⬜
+### §M4 — WAL + recovery ✅ (DOCS §4.5–§4.6)
 
-- Write-ahead log: LSNs, per-record checksum, group commit.
-- Physiological logging; ARIES-style redo (+ undo if M5 requires it).
-- Checkpoints, WAL truncation.
-- Recovery on startup.
+- WAL segments with checksummed, LSN-stamped records; group commit; torn
+  tail cut on open.  Directory changes ordered so a crash only loses a
+  suffix or a prefix of the log, never leaves a gap.
+- **Logical redo + copy-on-write checkpoints (D10)** instead of ARIES: a
+  WAL record is an atomic batch of key writes; a checkpoint commits the
+  tree root and the WAL position with the pages; recovery replays the
+  batches after the checkpoint.  No undo: uncommitted data never reaches
+  the tree.
 
-**Done when:** the simulation test injects a crash at **every** I/O point,
-restarts, and checks that every committed transaction is present, nothing
-uncommitted is visible, and the tree invariants hold.
+**Done when:** a crash at every I/O point of a workload with unsynced
+batches piling up across segments and checkpoints recovers exactly the
+state after some batch `k`, including every acknowledged one, with tree and
+pager checks passing; ordering mutations fail it.
 
-### §M5 — Transactions + MVCC ⬜
+### §M5 — Transactions + MVCC ✅ (DOCS §5)
 
-- Versioned values: key + commit timestamp (the timestamp is an abstracted
-  type — see principle 3).
-- Snapshot Isolation: reads from a snapshot, write-write conflict detection
-  (first-committer-wins).
-- Garbage collection of old versions (GC / vacuum) based on the oldest
-  active snapshot.
-- Transaction API: `begin` → `get/put/delete/scan` → `commit` / `abort`.
+- Versions as store entries keyed `escape(key) 00 00 (MAX − ts)`; snapshot
+  reads are one seek; tombstones for deletes.
+- Snapshot isolation with first-committer-wins; writes buffered, applied at
+  commit as one WAL batch carrying the commit timestamp; snapshots see only
+  durable commits.
+- GC at commit for the keys written, `vacuum` for the rest; watermark =
+  oldest running snapshot minus an optional history window.
 
-**Done when:** anomaly tests (dirty read, lost update, non-repeatable read)
-never occur under SI; write skew *can* occur and is documented (M14 fixes
-it); GC never removes a version that is still visible.
+**Done when:** dirty reads, lost updates, non-repeatable reads and phantoms
+do not occur under SI; write skew does and is documented (§M14); GC keeps
+every version a running snapshot can see; concurrent transfers keep their
+total; recovery and a crash at every I/O point keep every acknowledged
+commit.
 
 ### §M6 — Stabilise the KV contract ⬜
 
@@ -584,3 +597,5 @@ style) across a thousand seeds without failure.
 - **2026-10-17** — §M0 shipped (DOCS §1–§3); CI green on all nine jobs.
 - **2026-10-17** — D2–D6 settled as proposed; page size 8 KiB (M1).
 - **2026-10-17** — §M1 shipped (DOCS §4); CI green on all nine jobs.
+- **2026-10-17** — D10–D12 recorded; §M1 revised (copy-on-write rule, free
+  list in dedicated pages, no leaks); §M2–§M5 shipped.

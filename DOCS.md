@@ -12,7 +12,8 @@
 | 2 | Building and testing |
 | 3 | Platform layer (`nucleus-platform`) |
 | 4 | Storage layer (`nucleus-storage`) |
-| 5 | Change log |
+| 5 | Transaction layer (`nucleus-txn`) |
+| 6 | Change log |
 
 ---
 
@@ -21,8 +22,8 @@
 | Path | Crate | Contents | Milestone |
 |------|-------|----------|-----------|
 | `crates/platform` | `nucleus-platform` | file system, clock and randomness traits; real and simulated implementations; simulation harness | §M0 |
-| `crates/storage` | `nucleus-storage` | page format and pager; buffer pool, B+tree, WAL to come | §M1 ✅, §M2–§M4 |
-| `crates/txn` | `nucleus-txn` | MVCC and transactions — empty | §M5 |
+| `crates/storage` | `nucleus-storage` | page format, pager, buffer pool, B+tree, WAL, store | §M1–§M4 ✅ |
+| `crates/txn` | `nucleus-txn` | MVCC, snapshot isolation, GC | §M5 ✅ |
 | `crates/kv` | `nucleus-kv` | the KV contract — empty | §M6 |
 | `crates/cli` | `nucleus-cli` (binary `nucleus`) | `--version` only | §M6 |
 
@@ -100,7 +101,7 @@ drives it.
   has the same two layers; `sync_dir` makes one directory's entries durable.
 - **Crashes**: `sim_fs().crash()` now, or `crash_after_ops(n)` — the n-th
   operation from now crashes instead of running and fails with
-  `SimFault::Crash`.  After a crash every old handle fails with
+  `SimFault::Crash`; `crash()` cancels a scheduled crash.  After a crash every old handle fails with
   `SimFault::StaleHandle`; the file system itself carries on, as after a
   restart.  An entry whose parent directory did not survive is gone too.
 - **`CrashMode`**: `DropUnsynced` (default) loses everything unsynced.
@@ -136,99 +137,221 @@ prints the seed and the command to rerun it; `NUCLEUS_SEED` runs one seed,
 
 ## 4. Storage layer (`nucleus-storage`)
 
+Bottom to top: page format → pager → buffer pool → B+tree → WAL → store.
+Every layer reaches files only through `nucleus-platform`.
+
 ### 4.1 Page format (`page`)
 
 A database file is an array of 8 KiB pages (`PAGE_SIZE`); page `n` is at
-offset `n × 8192`.  Every page, the header pages included, starts with a
-24-byte page header (little-endian):
+offset `n × 8192`.  Every page starts with a 24-byte header (little-endian):
 
 | Offset | Size | Field |
 |-------:|-----:|-------|
 | 0  | 4 | CRC-32C of bytes `4..8192` |
 | 4  | 1 | page type |
 | 5  | 3 | reserved, zero |
-| 8  | 8 | LSN (unused until §M4) |
+| 8  | 8 | LSN (reserved; unused by the logical WAL) |
 | 16 | 8 | the page's own id |
 
-The payload is the remaining 8168 bytes (`PAYLOAD_SIZE`).  Page types below
-16 (`PageType::FIRST_USER`) belong to the pager: 0 unused, 1 header, 2 free.
-Verification reports *why* a page failed: `checksum mismatch`, `never
-written (all zeros)`, `page id mismatch (misdirected write)`.
-
-`crc32c` is a portable table-driven CRC-32C (Castagnoli), checked against
-the RFC 3720 vectors; a hardware version can replace it without changing any
-stored value.
+Payload: 8168 bytes (`PAYLOAD_SIZE`).  Types below 16 belong to the pager
+(0 unused, 1 header, 2 free list); the B+tree uses 16 leaf, 17 internal,
+18 overflow.  Verification names the failure: `checksum mismatch`, `never
+written (all zeros)`, `page id mismatch (misdirected write)`.  `crc32c` is
+a portable table-driven CRC-32C checked against the RFC 3720 vectors.
 
 ### 4.2 Pager (`pager::Pager`)
 
-**API.**  `Pager::create(fs, path)`, `Pager::open(fs, path)`;
-`read_page(id) -> Page`, `write_page(id, &mut Page)` (stamps id and
-checksum; caller types only), `allocate() -> PageId`, `free(id)`,
-`root(slot)`/`set_root(slot, page)` (16 slots), `sync()`, `close()`,
-`check()` (walks and validates the free list), and `page_count`,
-`free_count`, `reserved`, `durable_header`.  Shareable between threads: page
-reads and writes do not take the pager lock.
+**The rule: the durable state is immutable.**  `write_page` accepts only
+pages allocated since the last `sync` (else `Error::Immutable`).  Changing a
+committed page means copying it; a freed committed page goes to *pending*
+and becomes free after the next commit.  A page allocated and freed within
+one epoch is free at once.  So a crash at any moment leaves the last
+committed state untouched, and `sync` moves to a new one with one header
+write.
 
-**Errors** (`nucleus_storage::Error`): `Io`, `NotADatabase` (magic, format
-version or page size), `Corrupt { page, reason }`, `InvalidPage` (outside
-the file, a header page, or a pager page type), `Poisoned`.
+**API.**  `create`, `open`; `read_page`, `write_page`, `is_writable`,
+`allocate` (lowest free page, else grows the file), `free` (refuses double
+frees); `meta`/`set_meta` (16 `u64` slots committed atomically with the
+pages); `sync`, `close`; `check` (on-disk free list vs. memory, no page in
+two places), `accounting` (free / pending / free-list pages / allocated).
 
-**Header.**  Pages 0 and 1 hold two copies; copy `seq % 2` holds sequence
-number `seq`.  An update writes the older copy with `seq + 1`, so a torn
-header write leaves the other copy intact; `open` picks the valid copy with
-the highest `seq`.  Payload: magic `NUCLEUS\0`, format version (1), page
-size, `seq`, page count, free list head, free list length, 16 root slots.
+**Header** — pages 0 and 1; copy `seq % 2` holds sequence number `seq`; a
+commit writes the older copy, `open` takes the valid copy with the highest
+`seq`.  Payload: magic `NUCLEUS\0`, format version 1, page size, `seq`, page
+count, first free-list page, free count, 16 meta slots.
 
-**`sync` order.**  (1) Refill the reserve from the free list; (2) extend the
-file to the page count the header will claim (allocated pages nobody wrote
-are zeros); (3) `fsync` the data; (4) write the header copy; (5) `fsync`
-again.  If any step fails the pager is **poisoned**: every later call fails
-with `Poisoned`, and the file must be reopened.
+**Free list** — a chain of free-list pages (`next u64, count u32`, then up
+to 1019 page numbers each), rewritten by every commit into pages the
+previous state does not use; the previous free-list pages are free in the
+new state.  Nothing leaks: after a crash every page is live, free, or
+beyond the page count.
 
-**Free list and the reserve.**  Free pages are linked through their first
-payload bytes.  Allocation order: pages freed since the last sync (not on
-the durable list), then the reserve (taken off the list before the last
-commit), then a new page at the end.  Never a page the durable header lists
-as free — allocating one and crashing would leave the durable free list
-running through user data.  A crash forgets the reserve: up to
-`RESERVE_TARGET` (32) pages leak, nothing is corrupted.  `close` returns the
-reserve to the list.  `open` refills the reserve (and so commits once) when
-the free list is non-empty.
+**`sync` order:** write the new free list; extend the file to the page
+count (unwritten allocated pages become zeros); `fsync`; write the header
+copy; `fsync`.  Any failure poisons the pager.  `create` builds the file as
+`<path>.creating`, syncs it, renames it into place and syncs the directory.
 
-**`create` is atomic**: the file is built as `<path>.creating`, synced,
-renamed into place, and the directory synced.  After a crash, `path` either
-does not exist or is a complete, empty database.
+### 4.3 Buffer pool (`buffer::BufferPool`)
 
-**What the pager does not guarantee**: atomicity of callers' page writes.  A
-page rewritten or freed after a sync keeps its new contents even when a
-crash rolls the header back.  That is §M4's WAL.
+`fetch(id) -> PageRef` pins a page (dropping the `PageRef` unpins);
+`PageRef::read()` / `write()` take the frame's reader/writer latch, and
+`write()` marks it dirty — after checking the pager's rule, so a missing
+copy-on-write fails at once.  `create(type)` allocates a page into a frame;
+`free(id)` drops it (must be unpinned).  Eviction is the clock algorithm
+over unpinned frames; dirty victims are written back first.  `flush`
+writes every dirty frame, `sync` = flush + pager commit.  Page-table
+changes and misses take one pool lock.  Errors: `PoolExhausted` (every
+frame pinned), `Pinned`.  `stats()`: hits, misses, evictions, write-backs.
 
-### 4.3 Tests
+### 4.4 B+tree (`btree::BTree`, `node`)
 
-`crates/storage/tests/pager.rs`: round trip (simulated and real file
-system), flipped bit, misdirected write, unwritten pages, invalid and
-reserved pages, foreign files, one and two damaged header copies, free list
-reuse order, `close` returning the reserve, poisoning after a failed sync,
-torn page writes detected (both "old page intact" and "torn, caught" occur
-across seeds).
+Byte-string keys (≤ `MAX_KEY` = 1024) compared bytewise, values of any
+size.  **Node format:** kind, count, leftmost child, an offset table, cells
+packed from the end.  Leaf cell `klen u16, flags u8, vlen u32, key, value`;
+a cell over 2048 bytes moves its value to an overflow chain (`next u64,
+len u32, data`) and stores `first page, length`.  Internal cell `klen u16,
+child u64, key`; child `i` holds keys in `[keys[i-1], keys[i])`.
 
-**The crash sweep** (`crash_at_every_io_point`): a seeded workload — six
-epochs of allocations, writes, rewrites and frees, one of them freeing more
-pages than the reserve holds — is run once to count its I/O operations, then
-once per operation with a crash scheduled there, in both crash modes, for 4
-seeds.  After each crash the file must reopen, pass `check`, be in the state
-of the last completed sync or the one in flight (identified by root slot 0),
-have exactly that page count, have lost no free pages beyond one reserve,
-and hold the right contents in every live page not touched after that sync.
+**Copy-on-write:** a node is rewritten in place only if its page is
+writable; otherwise copied to a new page (old one freed) and the parent
+updated, up to a new root.  **Balance:** split by bytes; a non-root node
+under `MIN_FILL` (¼ page) after an insert or delete is merged with a
+sibling, or the pair is split evenly; an internal root with one child is
+replaced by it.
 
-Mutations checked against the tests, each caught: allocating from the
-durable free list (sweep: "on the free list but not a free page" — caught
-only once a bulk-free epoch was added; before that the case never arose),
-writing the header before syncing the data (sweep), creating the file in
-place (sweep), not extending the file before the header (unit test).
+**API:** `create`, `open(root)`, `root`, `get`, `insert`, `remove`,
+`range` / `range_rev` (bounds), `cursor` (`seek`, `seek_after`, `seek_end`,
+`next_entry`, `prev_entry`), `destroy`, `check` (ordering, separators,
+equal leaf depth, minimum fill, overflow lengths, no page used twice;
+returns the pages used).  `&self` reads, `&mut self` writes: callers wrap
+the tree in an `RwLock` (D11).  Nodes are decoded into structs to be read
+or changed — simple, but allocation-heavy (≈ 30 µs per operation in the
+million-operation test); an in-place read path is a known optimisation.
 
-## 5. Change log
+### 4.5 Write-ahead log (`wal::Wal`)
 
+Segments named by start LSN (20 digits, `.wal`); an LSN is a byte position
+in the log.  Record: `len u32, crc u32 (CRC-32C of LSN ‖ payload), lsn u64,
+payload`.  `append` → LSN past the record; `sync_to(lsn)` is group commit
+(one `fsync` for everything appended; waiters for earlier LSNs return at
+once); `replay(from, f)`; `truncate_before(lsn)`; `size`, `start`, `end`,
+`durable`.
+
+**Crash rules.**  `open` cuts a torn tail of the last segment; a bad record
+anywhere else is corruption.  Before a new segment is created, the previous
+one *and its directory entry* are synced; segments are deleted oldest
+first, one directory sync each — so a crash loses only a suffix or a
+prefix, never leaves a gap (a torn-crash sweep found both rules missing).
+A failed `fsync` poisons the log.
+
+### 4.6 Store (`store::Store`)
+
+The B+tree made durable by the WAL.  `Store::open(platform, dir, opts)`
+creates `dir/data` and `dir/wal/` if needed and recovers; returns
+`Recovery { meta, replayed }`.  `write(&Batch)` appends the batch to the
+WAL and applies it under the tree's write lock (visible at once);
+`wait_durable(lsn)`; `commit` = both.  `read()` gives the tree's read
+guard; `get`.  `checkpoint()` syncs the WAL up to the applied LSN, commits
+the pager with root, checkpoint LSN and the last batch's `meta`, then
+truncates the WAL.  `wal_since_checkpoint()` tells callers when to
+checkpoint.  A `Batch` is `meta: u64` (the transaction layer's commit
+timestamp) and ordered puts/deletes; its WAL encoding is versioned.  Keys
+over `MAX_KEY` are refused before logging.  Any failure poisons the store.
+Recovery checkpoints once if it replayed anything; a checkpoint the WAL
+does not line up with (ahead of its end, or its start after it) is
+corruption.  Options: `cache_pages` (default 1024), `wal_segment_size`
+(default 16 MiB).
+
+### 4.7 Tests
+
+- `pager.rs` — round trips (simulated and real), the immutability rule,
+  flipped bits, misdirected and unwritten pages, foreign files, header
+  copies, free list reuse and spanning pages, poisoning, torn writes, and a
+  crash at every I/O point (both modes): exact committed state, every live
+  page intact, every page accounted for.
+- `buffer.rs` — hits, write-back on eviction, pinning, the copy-on-write
+  check, reopen, and an 8-thread stress test on real and simulated files.
+- `btree.rs` — model-based property test with commits between epochs,
+  deep trees, oversized keys, megabyte values, crashes after a commit, a
+  crash at every I/O point of a 4-commit workload (exactly the last commit
+  or the one in flight), and the million-operation test (`--ignored`; CI
+  runs it on x86_64 Linux).
+- `store.rs` — replay, acknowledged vs. unacknowledged writes, WAL
+  truncation, corruption, poisoning, concurrency, real files, and a crash
+  at every I/O point (both modes, 8 seeds) of batches with unsynced writes
+  piling up across segments and checkpoints.
+
+Mutations each caught by these tests: writing committed pages in place,
+reusing freed committed pages before a commit, header before data, skipped
+rebalancing, wrong split separators, segment creation without a directory
+sync, checkpoint without a WAL sync (and, by `pager.rs`'s first version:
+allocating from the durable free list, in-place create, no file extension).
+
+## 5. Transaction layer (`nucleus-txn`)
+
+### 5.1 Versions (`mvcc`)
+
+Each version of a user key is a store entry
+`escape(key) 00 00 ‖ (u64::MAX − ts) big-endian → tag ‖ value` (tag 1
+value, 0 tombstone).  `escape` doubles `00` into `00 FF`, so the encoding
+is prefix-free and bytewise order is (user key ascending, timestamp
+descending).  A read at `ts` is one seek to `encode_key(k, ts)`.
+`first_version(k)` and `after_versions(k)` bound all versions of `k`.  A
+user key may be at most 1014 bytes after escaping.
+
+### 5.2 Engine and transactions
+
+`Engine::open(platform, dir, EngineOptions)` (cheap to clone).
+`begin()` / `begin_with(TxnOptions { isolation, read_only, at })`.
+`Transaction`: `get`, `put`, `delete`, `scan(start, end)` (ascending;
+merges the transaction's own writes), `commit() -> Timestamp`,
+`rollback()`; dropping it rolls back.  `Engine`: `visible`, `checkpoint`,
+`vacuum`, `version_count`, `store`.
+
+**Snapshot isolation.**  A transaction reads at its start timestamp — the
+engine's *visible* timestamp, which advances only once a commit is durable,
+so nobody reads what a crash could undo.  Writes are buffered.  Commit,
+under the commit lock: for each written key, if its newest version (durable
+or not) is newer than the snapshot → `Error::Conflict` (retryable; first
+committer wins); else one WAL batch with the next timestamp, applied at
+once; then the group-commit wait, then *visible* moves.  A checkpoint runs
+when the WAL since the last one exceeds `checkpoint_wal_bytes` (64 MiB).
+Write skew is possible (tested and documented).
+
+**Garbage collection.**  Watermark = the oldest running snapshot (or
+*visible*) minus `history` commits.  A commit also deletes, for each key it
+writes, every version but the newest at or below the watermark (and that
+one if it is a tombstone); `vacuum()` does the same for all keys, in chunks.
+Snapshots register under the same lock the watermark is read under, so GC
+never removes a version a snapshot can see.  `begin_with(at)` reads an older
+snapshot within the history window (read-only), else `SnapshotTooOld`.
+
+**Scans** read the store in batches of 128 visible keys, re-seeking each
+time, so no store lock is held between calls; MVCC makes the re-seek
+consistent.  Reverse scans are not implemented yet.
+
+Errors: `Storage`, `Conflict { key }`, `SnapshotTooOld`, `ReadOnly`,
+`KeyTooLarge`, `Corrupt`; `is_retryable()`.
+
+### 5.3 Tests (`tests/mvcc.rs`)
+
+Own writes and rollback; stable snapshots (no dirty or non-repeatable
+reads, no phantoms); uncommitted writes invisible; first committer wins;
+write skew possible; no lost updates (6 threads incrementing with retries);
+transfers between 8 accounts from 4 threads keep the total in every
+snapshot a concurrent reader takes; GC with pinned snapshots, tombstones
+and vacuum; history; zero bytes and prefixes in keys; model-based scans
+inside transactions; recovery of data and timestamps; a crash at every I/O
+point (both modes).  Mutations caught: no conflict check; a GC watermark
+that ignores running snapshots.
+
+## 6. Change log
+
+- **2026-10-17 — §M2–§M5 shipped; §M1 revised.**  Pager: the durable state
+  is immutable, free list in dedicated pages, no leaks (the first version's
+  linked list and reserve are gone).  Buffer pool, copy-on-write B+tree,
+  WAL + store with checkpoints and recovery, MVCC with snapshot isolation.
+  CI reports test failures as annotations; long tests run on one target.
 - **2026-10-17 — §M1 shipped** (CI green on all nine jobs): page format, CRC-32C, A/B
   header, crash-safe free list with reserve, atomic create, poisoning; crash
   sweep; `[profile.test] opt-level = 1` (crash sweep 36 s → 5 s).

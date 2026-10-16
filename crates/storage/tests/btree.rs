@@ -338,3 +338,33 @@ fn crash_at_every_io_point_of_a_commit() {
         }
     });
 }
+
+/// PLAN.md §M3 "done when": agrees with the model over a million random
+/// operations, with the invariants checked along the way.  Long (~30 s), so
+/// ignored by default; CI runs the ignored tests on one target.
+#[test]
+#[ignore = "long; run with --ignored"]
+fn a_million_operations() {
+    let p = platform(7);
+    let mut tree = new_tree(&p, 256);
+    let rng = SplitMix64::new(7);
+    let mut model = BTreeMap::new();
+    for round in 0..10 {
+        for _ in 0..100_000 {
+            let k = format!("{:06}", rng.below(50_000)).into_bytes();
+            match rng.below(4) {
+                0 => assert_eq!(tree.remove(&k).unwrap(), model.remove(&k).is_some()),
+                1 => assert_eq!(tree.get(&k).unwrap(), model.get(&k).cloned()),
+                _ => {
+                    let v = vec![rng.next_u64() as u8; rng.below(64) as usize];
+                    tree.insert(&k, &v).unwrap();
+                    model.insert(k, v);
+                }
+            }
+        }
+        verify(&tree, &model, &rng);
+        if round % 3 == 2 {
+            commit(&tree).unwrap();
+        }
+    }
+}
