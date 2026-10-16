@@ -34,13 +34,21 @@ impl DataType {
     pub fn parse(words: &[&str]) -> Option<Self> {
         Some(match words {
             ["boolean"] | ["bool"] => DataType::Bool,
-            ["bigint"] | ["int"] | ["integer"] | ["smallint"] | ["int8"] | ["int4"] | ["int2"] => DataType::Int,
-            ["double", "precision"] | ["float"] | ["real"] | ["float8"] | ["float4"] | ["double"] => {
-                DataType::Float
+            ["bigint"] | ["int"] | ["integer"] | ["smallint"] | ["int8"] | ["int4"] | ["int2"] => {
+                DataType::Int
             }
-            ["text"] | ["varchar"] | ["character", "varying"] | ["char"] | ["character"] | ["string"] => {
-                DataType::Text
-            }
+            ["double", "precision"]
+            | ["float"]
+            | ["real"]
+            | ["float8"]
+            | ["float4"]
+            | ["double"] => DataType::Float,
+            ["text"]
+            | ["varchar"]
+            | ["character", "varying"]
+            | ["char"]
+            | ["character"]
+            | ["string"] => DataType::Text,
             _ => return None,
         })
     }
@@ -112,7 +120,11 @@ impl Value {
             (Value::Null, Value::Null) => Ordering::Equal,
             (Value::Null, _) => Ordering::Greater,
             (_, Value::Null) => Ordering::Less,
-            _ => self.sql_cmp(other).ok().flatten().unwrap_or_else(|| rank(self).cmp(&rank(other))),
+            _ => self
+                .sql_cmp(other)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| rank(self).cmp(&rank(other))),
         }
     }
 
@@ -136,16 +148,22 @@ impl Value {
             (Value::Int(i), DataType::Bool) => Value::Bool(i != 0),
             (Value::Bool(b), DataType::Int) => Value::Int(i64::from(b)),
             (v, DataType::Text) => Value::Text(v.render()),
-            (Value::Text(s), DataType::Int) => {
-                Value::Int(s.trim().parse().map_err(|_| Error::invalid_text(format!("invalid input syntax for type bigint: {s:?}")))?)
-            }
-            (Value::Text(s), DataType::Float) => Value::Float(
-                s.trim().parse().map_err(|_| Error::invalid_text(format!("invalid input syntax for type double precision: {s:?}")))?,
-            ),
+            (Value::Text(s), DataType::Int) => Value::Int(s.trim().parse().map_err(|_| {
+                Error::invalid_text(format!("invalid input syntax for type bigint: {s:?}"))
+            })?),
+            (Value::Text(s), DataType::Float) => Value::Float(s.trim().parse().map_err(|_| {
+                Error::invalid_text(format!(
+                    "invalid input syntax for type double precision: {s:?}"
+                ))
+            })?),
             (Value::Text(s), DataType::Bool) => match s.trim().to_ascii_lowercase().as_str() {
                 "t" | "true" | "yes" | "y" | "on" | "1" => Value::Bool(true),
                 "f" | "false" | "no" | "n" | "off" | "0" => Value::Bool(false),
-                _ => return Err(Error::invalid_text(format!("invalid input syntax for type boolean: {s:?}"))),
+                _ => {
+                    return Err(Error::invalid_text(format!(
+                        "invalid input syntax for type boolean: {s:?}"
+                    )));
+                }
             },
             (v, _) => return Err(bad(&v)),
         })
@@ -167,7 +185,10 @@ impl Value {
         match self {
             Value::Null => Ok(None),
             Value::Bool(b) => Ok(Some(*b)),
-            v => Err(Error::type_mismatch(format!("argument must be boolean, not {}", type_name(v)))),
+            v => Err(Error::type_mismatch(format!(
+                "argument must be boolean, not {}",
+                type_name(v)
+            ))),
         }
     }
 }
@@ -202,7 +223,11 @@ fn render_float(f: f64) -> String {
     } else {
         // Shortest representation that round-trips, like PostgreSQL 12+.
         let s = format!("{f}");
-        if s.contains('e') || s.len() < 18 { s } else { format!("{f:e}") }
+        if s.contains('e') || s.len() < 18 {
+            s
+        } else {
+            format!("{f:e}")
+        }
     }
 }
 
@@ -236,7 +261,11 @@ impl Hash for Value {
 fn hash_number<H: Hasher>(f: f64, state: &mut H) {
     1u8.hash(state);
     let f = if f == 0.0 { 0.0 } else { f }; // -0 == 0
-    if f.is_nan() { u64::MAX.hash(state) } else { f.to_bits().hash(state) }
+    if f.is_nan() {
+        u64::MAX.hash(state)
+    } else {
+        f.to_bits().hash(state)
+    }
 }
 
 impl fmt::Display for Value {
@@ -254,7 +283,10 @@ mod tests {
 
     #[test]
     fn comparisons() {
-        assert_eq!(Value::Int(1).sql_cmp(&Value::Float(1.5)).unwrap(), Some(Ordering::Less));
+        assert_eq!(
+            Value::Int(1).sql_cmp(&Value::Float(1.5)).unwrap(),
+            Some(Ordering::Less)
+        );
         assert_eq!(Value::Null.sql_cmp(&Value::Int(1)).unwrap(), None);
         assert!(Value::Int(1).sql_cmp(&Value::Text("1".into())).is_err());
         assert_eq!(Value::Null.sort_cmp(&Value::Int(1)), Ordering::Greater);
@@ -263,11 +295,23 @@ mod tests {
 
     #[test]
     fn casts() {
-        assert_eq!(Value::Text(" 42 ".into()).cast(DataType::Int).unwrap(), Value::Int(42));
-        assert_eq!(Value::Float(2.5).cast(DataType::Int).unwrap(), Value::Int(3));
+        assert_eq!(
+            Value::Text(" 42 ".into()).cast(DataType::Int).unwrap(),
+            Value::Int(42)
+        );
+        assert_eq!(
+            Value::Float(2.5).cast(DataType::Int).unwrap(),
+            Value::Int(3)
+        );
         assert!(Value::Text("x".into()).cast(DataType::Int).is_err());
-        assert_eq!(Value::Text("on".into()).cast(DataType::Bool).unwrap(), Value::Bool(true));
-        assert_eq!(Value::Float(0.1).cast(DataType::Text).unwrap(), Value::Text("0.1".into()));
+        assert_eq!(
+            Value::Text("on".into()).cast(DataType::Bool).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            Value::Float(0.1).cast(DataType::Text).unwrap(),
+            Value::Text("0.1".into())
+        );
     }
 
     #[test]

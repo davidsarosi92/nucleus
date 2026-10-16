@@ -70,11 +70,13 @@ impl std::error::Error for Error {}
 impl From<nucleus_kv::Error> for Error {
     fn from(e: nucleus_kv::Error) -> Self {
         match e {
-            nucleus_kv::Error::Conflict { .. } => Error::serialization(
-                "could not serialize access due to concurrent update",
-            ),
+            nucleus_kv::Error::Conflict { .. } => {
+                Error::serialization("could not serialize access due to concurrent update")
+            }
             nucleus_kv::Error::SnapshotTooOld => Error::snapshot_too_old("snapshot too old"),
-            nucleus_kv::Error::ReadOnly => Error::read_only("cannot execute this in a read-only transaction"),
+            nucleus_kv::Error::ReadOnly => {
+                Error::read_only("cannot execute this in a read-only transaction")
+            }
             nucleus_kv::Error::KeyTooLarge(n) => {
                 Error::out_of_range(format!("index row of {n} bytes is too large"))
             }
