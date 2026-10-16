@@ -194,6 +194,9 @@ dependencies = [
 [[package]]
 name = "nucleus-storage"
 version = "0.0.0"
+dependencies = [
+ "nucleus-platform",
+]
 
 [[package]]
 name = "nucleus-txn"

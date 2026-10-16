@@ -191,11 +191,11 @@ are marked ✅.
 | # | Question | Proposal | Alternatives / notes |
 |---|----------|----------|----------------------|
 | D1 | Language | ✅ **Rust** (settled 2026-10-16) — memory safety + concurrency (buffer pool, MVCC, Raft) | rejected: C, Zig, Go |
-| D2 | First storage engine | **B+tree** (copy-on-write, or in-place + WAL) | LSM tree: better for writes, but compaction adds complexity; can come later as a second engine behind the KV contract |
-| D3 | Concurrency model | **Threads + locks** in the engine, async only in the network layer | thread-per-core (shared-nothing) — revisit in phase 3 |
-| D4 | SQL dialect | **PostgreSQL-like** subset | together with the Postgres wire protocol this gives free clients (psql, drivers) |
-| D5 | Isolation | **Snapshot Isolation** first, **Serializable (SSI)** later | — |
-| D6 | File layout | **One data file + one WAL directory** per database | single file (SQLite-style) |
+| D2 | First storage engine | ✅ **B+tree** (copy-on-write, or in-place + WAL) | LSM tree: better for writes, but compaction adds complexity; can come later as a second engine behind the KV contract |
+| D3 | Concurrency model | ✅ **Threads + locks** in the engine, async only in the network layer | thread-per-core (shared-nothing) — revisit in phase 3 |
+| D4 | SQL dialect | ✅ **PostgreSQL-like** subset | together with the Postgres wire protocol this gives free clients (psql, drivers) |
+| D5 | Isolation | ✅ **Snapshot Isolation** first, **Serializable (SSI)** later | — |
+| D6 | File layout | ✅ **One data file + one WAL directory** per database | single file (SQLite-style) |
 | D7 | License | ✅ **MIT** (came with the GitHub repo) | — |
 | D8 | Document client protocol (needed by M16) | **MongoDB wire protocol** subset — existing drivers and tools work, as the Postgres wire protocol does for SQL | own protocol (binary or HTTP/JSON); decide at the end of M15 |
 | D9 | Where release builds are published | **GitHub Releases** attached to tags, built by CI | a separate artifact store; not in this repo either way |
@@ -207,7 +207,7 @@ are marked ✅.
 | Phase | Milestone | Goal | Status |
 |-------|-----------|------|:------:|
 | **F0 — Core** | M0 | Project skeleton, build, test harness, simulated platform | ✅ DOCS §3 |
-| | M1 | Pager + on-disk format | ⬜ |
+| | M1 | Pager + on-disk format | ◐ |
 | | M2 | Buffer pool | ⬜ |
 | | M3 | B+tree | ⬜ |
 | | M4 | WAL + recovery | ⬜ |
@@ -261,15 +261,29 @@ of the system — every later phase uses it.
 runs on the simulated platform and is reproducible from a seed; a DOCS.md
 skeleton exists.
 
-### §M1 — Pager + on-disk format ⬜
+### §M1 — Pager + on-disk format ◐
 
-- Fixed-size pages (4 KiB or 8 KiB — decided in M1), page id = offset.
-- File header: magic, format version, page size, root page pointers.
-- Every page carries a checksum + page type + LSN field (prepared for the WAL).
-- Free-page management (free list).
+- 8 KiB pages (settled 2026-10-17), page `n` at offset `n × 8192`.
+- Every page starts with a 24-byte header: CRC-32C, page type, LSN (for
+  §M4), and the page's own id (catches misdirected writes).
+- Two header copies (pages 0 and 1) updated alternately with a sequence
+  number, so a header update is atomic; magic, format version, page size,
+  page count, free list, 16 root slots.
+- Free list linked through the free pages.  The pager never hands out a
+  page the *durable* header still lists as free (a crash would otherwise
+  leave the free list running through user data): it allocates from pages
+  freed since the last sync, then a reserve that `sync` takes off the list
+  before committing, then the end of the file.  A crash can leak at most one
+  reserve (32 pages), never corrupt the list.
+- `create` is atomic (temporary name + rename); a failed `sync` poisons the
+  pager (fsyncgate).
 
 **Done when:** pages can be written and read; a bad checksum yields a
-detected error; a torn write is recognised on the simulated platform.
+detected error; a torn write is recognised on the simulated platform; a
+crash at every I/O point of a workload, in both crash modes, reopens to the
+last (or in-flight) synced state with a valid free list; mutations of the
+ordering rules (allocating from the durable list, header before data,
+non-atomic create) each fail that test.
 
 ### §M2 — Buffer pool ⬜
 
@@ -568,3 +582,4 @@ style) across a thousand seeds without failure.
 - **2026-10-16** — packaging and install per platform, including the d-os
   app format (`app install`, `.dos-app` manifest); first packages in M6.
 - **2026-10-17** — §M0 shipped (DOCS §1–§3); CI green on all nine jobs.
+- **2026-10-17** — D2–D6 settled as proposed; page size 8 KiB (M1).
