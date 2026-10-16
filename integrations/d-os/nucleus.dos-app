@@ -1,0 +1,4 @@
+# nucleus for d-os (https://github.com/davidsarosi92/nucleus).
+# Installed by d-os `app install` into /mnt/apps/nucleus/<version>/.
+# The CLI only, for now; the SQL server (PLAN.md §M12) adds a service line.
+link=bin/nucleus /bin/nucleus

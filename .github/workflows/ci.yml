@@ -68,6 +68,22 @@ jobs:
       - name: Build
         if: ${{ !matrix.test }}
         run: cargo build --workspace --all-targets --target ${{ matrix.target }}
-      - name: Run the binary
+      - name: Package, unpack, run
         if: matrix.test
-        run: cargo run -q --target ${{ matrix.target }} --bin nucleus -- --version
+        run: |
+          scripts/package.sh ${{ matrix.target }} dist
+          for f in dist/*; do
+            echo "== $f"
+            rm -rf unpacked && mkdir unpacked
+            case $f in
+              *.zip) powershell -NoProfile -Command "Expand-Archive -Path '$f' -DestinationPath unpacked" ;;
+              *) tar -C unpacked -xzf "$f" ;;
+            esac
+            ls -R unpacked | head -20
+            top=$(ls unpacked)
+            [ "$top" = "nucleus-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" ] || { echo "bad top directory: $top"; exit 1; }
+            case $f in
+              *-d-os-*) grep -q '^link=bin/nucleus /bin/nucleus' "unpacked/$top/.dos-app" ;;
+            esac
+            "unpacked/$top/bin/nucleus" --version
+          done

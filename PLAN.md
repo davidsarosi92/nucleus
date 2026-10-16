@@ -215,7 +215,7 @@ are marked ✅.
 | | M3 | B+tree | ✅ DOCS §4.4 |
 | | M4 | WAL + recovery | ✅ DOCS §4.5 |
 | | M5 | Transactions + MVCC | ✅ DOCS §5 |
-| | M6 | Stabilise the KV contract + embedded API + CLI | ⬜ |
+| | M6 | Stabilise the KV contract + embedded API + CLI | ✅ DOCS §6 (d-os run pending) |
 | | M6.5 | First embedded consumer: d-os settings store | ⬜ |
 | **F1 — SQL** | M7 | Key encoding + catalog | ⬜ |
 | | M8 | SQL parser + AST | ⬜ |
@@ -345,7 +345,7 @@ every version a running snapshot can see; concurrent transfers keep their
 total; recovery and a crash at every I/O point keep every acknowledged
 commit.
 
-### §M6 — Stabilise the KV contract ⬜
+### §M6 — Stabilise the KV contract ✅ (DOCS §6; running on d-os pending)
 
 - Finalise the KV API — **this is the interface the F3 distributed
   implementation will also implement**, so it gets thought through here:
@@ -597,5 +597,7 @@ style) across a thousand seeds without failure.
 - **2026-10-17** — §M0 shipped (DOCS §1–§3); CI green on all nine jobs.
 - **2026-10-17** — D2–D6 settled as proposed; page size 8 KiB (M1).
 - **2026-10-17** — §M1 shipped (DOCS §4); CI green on all nine jobs.
+- **2026-10-17** — §M6 shipped: contract, CLI, packaging, release workflow;
+  the d-os archive is built and checked in CI, not yet run on d-os.
 - **2026-10-17** — D10–D12 recorded; §M1 revised (copy-on-write rule, free
   list in dedicated pages, no leaks); §M2–§M5 shipped.

@@ -13,7 +13,8 @@
 | 3 | Platform layer (`nucleus-platform`) |
 | 4 | Storage layer (`nucleus-storage`) |
 | 5 | Transaction layer (`nucleus-txn`) |
-| 6 | Change log |
+| 6 | KV contract (`nucleus-kv`) and the CLI |
+| 7 | Change log |
 
 ---
 
@@ -24,8 +25,10 @@
 | `crates/platform` | `nucleus-platform` | file system, clock and randomness traits; real and simulated implementations; simulation harness | §M0 |
 | `crates/storage` | `nucleus-storage` | page format, pager, buffer pool, B+tree, WAL, store | §M1–§M4 ✅ |
 | `crates/txn` | `nucleus-txn` | MVCC, snapshot isolation, GC | §M5 ✅ |
-| `crates/kv` | `nucleus-kv` | the KV contract — empty | §M6 |
-| `crates/cli` | `nucleus-cli` (binary `nucleus`) | `--version` only | §M6 |
+| `crates/kv` | `nucleus-kv` | the KV contract and the local `Database` | §M6 ✅ |
+| `crates/cli` | `nucleus-cli` (binary `nucleus`) | `nucleus kv` commands and shell | §M6 ✅ |
+| `integrations/d-os` | — | the d-os app manifest | §M6, §M6.5 |
+| `scripts` | — | `package.sh` | §M6 |
 
 Workspace-wide: Rust edition 2024, toolchain pinned in `rust-toolchain.toml`
 (rustup installs it on first use), `unsafe_code` forbidden, `missing_docs`
@@ -345,8 +348,90 @@ inside transactions; recovery of data and timestamps; a crash at every I/O
 point (both modes).  Mutations caught: no conflict check; a GC watermark
 that ignores running snapshots.
 
-## 6. Change log
+## 6. KV contract (`nucleus-kv`) and the CLI
 
+### 6.1 The contract
+
+What every layer above the core uses (principle 1), and what the
+distributed implementation will provide (§F3).
+
+- `trait Kv { fn begin(&self, TxnOptions) -> Result<Box<dyn KvTxn>> }`
+- `trait KvTxn`: `read_ts`, `get(&self)`, `scan(&self, start, end) ->
+  KvIter` (ascending), `put(&mut self)`, `delete(&mut self)`,
+  `commit(self: Box<Self>) -> Timestamp`, `rollback`.  Reads take `&self`
+  so a scan can stay open while the same transaction reads keys.
+- `TxnOptions { isolation, read_only, at }` (`read_only()`,
+  `serializable()`).
+- `Error`: `Conflict { key }` (the only retryable one — `is_retryable()`),
+  `SnapshotTooOld`, `ReadOnly`, `KeyTooLarge`, `Storage(boxed)`.
+- Helpers: `transact(kv, opts, f)` runs `f` and commits, retrying on
+  conflicts (100 attempts); `prefix_end(prefix)` gives the exclusive upper
+  bound of a prefix scan.
+- Not yet in the contract: reverse scans, scan limits pushed down.  They
+  will be added as provided methods, so implementations keep compiling.
+
+`Database` is the local implementation: `Database::open(dir, Options)` on
+the real file system, `open_on(platform, dir, Options)` on any platform;
+`checkpoint`, `vacuum`, `latest`, `close`.  `Options`: `cache_bytes` (8 MiB),
+`checkpoint_wal_bytes` (64 MiB), `wal_segment_bytes` (16 MiB), `history`
+(0).  `tests/contract.rs` holds the contract as a suite any implementation
+must pass (run on the simulation and on real files, plus 8 threads through
+`Arc<dyn Kv>`).
+
+### 6.2 The `nucleus` CLI
+
+```
+nucleus --version
+nucleus kv <dir> get <key> | put <key> <value> | delete <key> | scan [<prefix>]
+nucleus kv <dir> checkpoint | vacuum
+nucleus kv <dir>              # shell: the same commands, plus begin/commit/rollback
+```
+
+Keys and values are text; any byte can be written as `\xNN` (`\\` for a
+backslash), and output escapes non-printable bytes the same way.  Outside
+`begin` each command is its own transaction; an open transaction at the end
+of input is rolled back.  `crates/cli/tests/cli.rs` drives the binary.
+
+### 6.3 Packaging
+
+`scripts/package.sh <rust-target> [<out>]` builds a release and writes, per
+PLAN.md "Packaging and install": `nucleus-<v>-linux-<arch>.tar.gz` (gnu),
+`…-linux-<arch>-musl.tar.gz`, `…-macos-<arch>.tar.gz`,
+`…-windows-<arch>.zip`, and for musl targets `nucleus-<v>-d-os-<arch>.tar.gz`
+(`<arch>` `x86_64`, `aarch64`, `i386`).  Every archive has one top directory
+`nucleus-<v>/` with `bin/`, `LICENSE`, `README.md`; the d-os one adds the
+`.dos-app` manifest from `integrations/d-os/`.  CI packages every tested
+target, unpacks it and runs `nucleus --version`.  `.github/workflows/
+release.yml` does the same for every target on a `v<version>` tag (the tag
+must match `Cargo.toml`) and attaches the archives to a GitHub release.  No
+release has been tagged yet.
+
+**d-os:** the archives are built and checked in CI (layout, manifest), but
+installing and running them on d-os needs the d-os harness and has not been
+done yet.
+
+### 6.4 Benchmark baseline
+
+`cargo run --release -p nucleus-kv --example bench` (real files).  First
+numbers, 2026-10-17, Apple Silicon laptop, APFS (`F_FULLFSYNC`), 100-byte
+values:
+
+| Workload | Rate |
+|----------|-----:|
+| single-row commits (one fsync each) | 242 /s |
+| rows in 500-row commits | 23 184 /s |
+| single-row commits, 8 threads (group commit) | 698 /s |
+| point reads (one read-only snapshot) | 98 881 /s |
+| full scan | 3.6 M rows/s |
+
+Commits are fsync-bound, as they should be on a durable store.  Point reads
+are bounded by decoding whole nodes per level (§4.4).
+
+## 7. Change log
+
+- **2026-10-17 — §M6 shipped** (d-os run pending): KV contract, `Database`,
+  CLI, packaging for every platform and d-os, release workflow, benchmark
+  baseline.  Version 0.1.0.
 - **2026-10-17 — §M2–§M5 shipped; §M1 revised.**  Pager: the durable state
   is immutable, free list in dedicated pages, no leaks (the first version's
   linked list and reserve are gone).  Buffer pool, copy-on-write B+tree,

@@ -1,10 +1,15 @@
 [package]
 name = "nucleus-kv"
-description = "nucleus kv layer"
+description = "The nucleus KV contract and its local implementation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[dependencies]
+nucleus-platform.workspace = true
+nucleus-storage.workspace = true
+nucleus-txn.workspace = true
 
 [lints]
 workspace = true

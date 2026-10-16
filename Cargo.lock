@@ -177,15 +177,23 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "nucleus-cli"
-version = "0.0.0"
+version = "0.1.0"
+dependencies = [
+ "nucleus-kv",
+]
 
 [[package]]
 name = "nucleus-kv"
-version = "0.0.0"
+version = "0.1.0"
+dependencies = [
+ "nucleus-platform",
+ "nucleus-storage",
+ "nucleus-txn",
+]
 
 [[package]]
 name = "nucleus-platform"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "getrandom",
  "proptest",
@@ -193,14 +201,14 @@ dependencies = [
 
 [[package]]
 name = "nucleus-storage"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "nucleus-platform",
 ]
 
 [[package]]
 name = "nucleus-txn"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "nucleus-platform",
  "nucleus-storage",

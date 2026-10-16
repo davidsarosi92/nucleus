@@ -10,5 +10,8 @@ repository.workspace = true
 name = "nucleus"
 path = "src/main.rs"
 
+[dependencies]
+nucleus-kv.workspace = true
+
 [lints]
 workspace = true
