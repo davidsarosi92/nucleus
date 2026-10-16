@@ -133,6 +133,6 @@ prints the seed and the command to rerun it; `NUCLEUS_SEED` runs one seed,
 
 ## 4. Change log
 
-- **2026-10-17 — §M0 (awaiting first green CI run).**  Workspace, platform layer (real POSIX +
+- **2026-10-17 — §M0 shipped** (CI green: lint + all eight build targets).  Workspace, platform layer (real POSIX +
   Windows, simulation with faults and crashes), seed harness, conformance and
   simulation tests, CI for every build target.
