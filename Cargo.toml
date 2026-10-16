@@ -10,6 +10,9 @@ repository = "https://github.com/davidsarosi92/nucleus"
 
 [workspace.dependencies]
 nucleus-platform = { path = "crates/platform" }
+nucleus-storage = { path = "crates/storage" }
+nucleus-txn = { path = "crates/txn" }
+nucleus-kv = { path = "crates/kv" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

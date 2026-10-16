@@ -201,6 +201,10 @@ dependencies = [
 [[package]]
 name = "nucleus-txn"
 version = "0.0.0"
+dependencies = [
+ "nucleus-platform",
+ "nucleus-storage",
+]
 
 [[package]]
 name = "num-traits"
