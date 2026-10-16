@@ -14,7 +14,8 @@
 | 4 | Storage layer (`nucleus-storage`) |
 | 5 | Transaction layer (`nucleus-txn`) |
 | 6 | KV contract (`nucleus-kv`) and the CLI |
-| 7 | Change log |
+| 7 | d-os settings store (`integrations/d-os`) |
+| 8 | Change log |
 
 ---
 
@@ -27,7 +28,7 @@
 | `crates/txn` | `nucleus-txn` | MVCC, snapshot isolation, GC | §M5 ✅ |
 | `crates/kv` | `nucleus-kv` | the KV contract and the local `Database` | §M6 ✅ |
 | `crates/cli` | `nucleus-cli` (binary `nucleus`) | `nucleus kv` commands and shell | §M6 ✅ |
-| `integrations/d-os` | — | the d-os app manifest | §M6, §M6.5 |
+| `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
 | `scripts` | — | `package.sh` | §M6 |
 
 Workspace-wide: Rust edition 2024, toolchain pinned in `rust-toolchain.toml`
@@ -427,8 +428,30 @@ values:
 Commits are fsync-bound, as they should be on a durable store.  Point reads
 are bounded by decoding whole nodes per level (§4.4).
 
-## 7. Change log
+## 7. d-os settings store (`integrations/d-os`, §M6.5)
 
+`nucleus-dos-settings`: `Layer` (`machine`, `user/<uid>`), `Settings` over
+any `&dyn Kv` — `get`, staged `set` / `unset`, `commit` (one transaction),
+`discard`, `snapshot`, `dump`, `dump_at(ts)`, `layers`, `import` / `export`
+(the `d-os.conf` format).  Keys `cfg/machine/<k>`, `cfg/user/<uid>/<k>`.
+The `nucleus-settings <dir>` binary serves it over a line protocol on
+stdin/stdout (commands and replies in `integrations/d-os/README.md`); it
+keeps 10 000 commits of history.  Packaged in the d-os archive and linked
+into `/bin` by the manifest; CI starts it from the unpacked archive.
+
+Tests (`integrations/d-os/tests/settings.rs`): layer separation (including
+`user/10` vs `user/1000`), import/export round trip, reading old settings,
+the protocol through the binary, and a crash at every I/O point of a
+multi-key save (both modes): the old or the new set, never a mix, and never
+losing an acknowledged save.
+
+What remains is d-os's: starting the service and wiring it to the kernel
+cache (see the README's "Switching d-os over").
+
+## 8. Change log
+
+- **2026-10-17 — §M6.5, nucleus side:** the settings service, packaged for
+  d-os.
 - **2026-10-17 — §M6 shipped** (d-os run pending): KV contract, `Database`,
   CLI, packaging for every platform and d-os, release workflow, benchmark
   baseline.  Version 0.1.0.

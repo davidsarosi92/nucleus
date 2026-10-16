@@ -83,7 +83,9 @@ jobs:
             top=$(ls unpacked)
             [ "$top" = "nucleus-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" ] || { echo "bad top directory: $top"; exit 1; }
             case $f in
-              *-d-os-*) grep -q '^link=bin/nucleus /bin/nucleus' "unpacked/$top/.dos-app" ;;
+              *-d-os-*)
+                grep -q '^link=bin/nucleus /bin/nucleus' "unpacked/$top/.dos-app"
+                echo QUIT | "unpacked/$top/bin/nucleus-settings" "$RUNNER_TEMP/settings-smoke" | grep -q '^BYE' ;;
             esac
             "unpacked/$top/bin/nucleus" --version
           done

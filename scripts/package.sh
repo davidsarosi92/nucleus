@@ -18,6 +18,10 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
 name="nucleus-$version"
 
 cargo build --release --locked --target "$target" --bin nucleus --manifest-path "$root/Cargo.toml"
+case "$target" in
+  *-linux-musl) # the d-os settings service ships in the d-os archive
+    cargo build --release --locked --target "$target" --bin nucleus-settings --manifest-path "$root/Cargo.toml" ;;
+esac
 
 arch=${target%%-*}
 exe=nucleus
@@ -45,7 +49,8 @@ for kind in $kinds; do
       # d-os names the 32-bit x86 architecture i386.
       dos_arch=$arch; [ "$arch" = i686 ] && dos_arch=i386
       file="$name-d-os-$dos_arch.tar.gz"
-      cp "$root/integrations/d-os/nucleus.dos-app" "$stage/$name/.dos-app" ;;
+      cp "$root/integrations/d-os/nucleus.dos-app" "$stage/$name/.dos-app"
+      cp "$root/target/$target/release/nucleus-settings" "$stage/$name/bin/" ;;
     windows)    file="$name-windows-$arch.zip" ;;
   esac
   if [ "$kind" = windows ]; then

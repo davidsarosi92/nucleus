@@ -1,0 +1,20 @@
+[package]
+name = "nucleus-dos-settings"
+description = "The d-os settings store on nucleus (PLAN.md §M6.5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nucleus-settings"
+path = "src/main.rs"
+
+[dependencies]
+nucleus-kv.workspace = true
+
+[dev-dependencies]
+nucleus-platform.workspace = true
+
+[lints]
+workspace = true

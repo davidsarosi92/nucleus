@@ -183,6 +183,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-dos-settings"
+version = "0.1.0"
+dependencies = [
+ "nucleus-kv",
+ "nucleus-platform",
+]
+
+[[package]]
 name = "nucleus-kv"
 version = "0.1.0"
 dependencies = [

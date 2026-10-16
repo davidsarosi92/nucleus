@@ -216,7 +216,7 @@ are marked ✅.
 | | M4 | WAL + recovery | ✅ DOCS §4.5 |
 | | M5 | Transactions + MVCC | ✅ DOCS §5 |
 | | M6 | Stabilise the KV contract + embedded API + CLI | ✅ DOCS §6 (d-os run pending) |
-| | M6.5 | First embedded consumer: d-os settings store | ⬜ |
+| | M6.5 | First embedded consumer: d-os settings store | ◐ nucleus side done (DOCS §7); d-os side pending |
 | **F1 — SQL** | M7 | Key encoding + catalog | ⬜ |
 | | M8 | SQL parser + AST | ⬜ |
 | | M9 | Binder, planner, Volcano executor | ⬜ |
@@ -362,7 +362,7 @@ knowing any concrete type; DOCS.md describes it; the release archive installs
 and the CLI runs on Linux, macOS, Windows and d-os (`app install
 nucleus-<version>-d-os-<arch>.tar.gz`, then `nucleus` from the d-os shell).
 
-### §M6.5 — First embedded consumer: d-os settings store ⬜
+### §M6.5 — First embedded consumer: d-os settings store ◐ (nucleus side done, DOCS §7; d-os side pending)
 
 [d-os](https://github.com/davidsarosi92/d-os) keeps its settings in a key-value
 store inside the kernel (`kernel/core/config.c`): built-in defaults, an
@@ -418,6 +418,13 @@ kernel keeps answering from memory.  Only loading and saving move to nucleus.
 - An existing `d-os.conf` imports on first start, and `export` reproduces it.
 - Killing the service leaves d-os running on its cache and reporting that
   saves do not persist.
+
+**Status (2026-10-17).**  The nucleus side is done: `nucleus-settings`
+(crate `integrations/d-os`) with its line protocol, layers, atomic saves,
+history (`DUMP … AT <ts>`), `IMPORT`/`EXPORT` of `d-os.conf`, packaged in
+the d-os archive; a crash at every I/O point of a multi-key save keeps the
+old or the new set whole.  The "done when" items that run on d-os itself
+(kernel side, the three arches, VM-kill tests) are the d-os side's.
 
 **The d-os switch-over.**  d-os moves its settings to nucleus once the "done
 when" list above is green; the d-os PLAN tracks the switch on its side.
@@ -597,6 +604,8 @@ style) across a thousand seeds without failure.
 - **2026-10-17** — §M0 shipped (DOCS §1–§3); CI green on all nine jobs.
 - **2026-10-17** — D2–D6 settled as proposed; page size 8 KiB (M1).
 - **2026-10-17** — §M1 shipped (DOCS §4); CI green on all nine jobs.
+- **2026-10-17** — §M6.5 nucleus side done (settings service, protocol,
+  packaging); the d-os side remains.
 - **2026-10-17** — §M6 shipped: contract, CLI, packaging, release workflow;
   the d-os archive is built and checked in CI, not yet run on d-os.
 - **2026-10-17** — D10–D12 recorded; §M1 revised (copy-on-write rule, free
