@@ -21,7 +21,7 @@
 | Path | Crate | Contents | Milestone |
 |------|-------|----------|-----------|
 | `crates/platform` | `nucleus-platform` | file system, clock and randomness traits; real and simulated implementations; simulation harness | §M0 |
-| `crates/storage` | `nucleus-storage` | page format and pager; buffer pool, B+tree, WAL to come | §M1 ◐, §M2–§M4 |
+| `crates/storage` | `nucleus-storage` | page format and pager; buffer pool, B+tree, WAL to come | §M1 ✅, §M2–§M4 |
 | `crates/txn` | `nucleus-txn` | MVCC and transactions — empty | §M5 |
 | `crates/kv` | `nucleus-kv` | the KV contract — empty | §M6 |
 | `crates/cli` | `nucleus-cli` (binary `nucleus`) | `--version` only | §M6 |
@@ -229,7 +229,7 @@ place (sweep), not extending the file before the header (unit test).
 
 ## 5. Change log
 
-- **2026-10-17 — §M1 pager** (awaiting CI): page format, CRC-32C, A/B
+- **2026-10-17 — §M1 shipped** (CI green on all nine jobs): page format, CRC-32C, A/B
   header, crash-safe free list with reserve, atomic create, poisoning; crash
   sweep; `[profile.test] opt-level = 1` (crash sweep 36 s → 5 s).
 - **2026-10-17 — §M0 shipped** (CI green: lint + all eight build targets).  Workspace, platform layer (real POSIX +

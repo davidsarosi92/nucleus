@@ -207,7 +207,7 @@ are marked ✅.
 | Phase | Milestone | Goal | Status |
 |-------|-----------|------|:------:|
 | **F0 — Core** | M0 | Project skeleton, build, test harness, simulated platform | ✅ DOCS §3 |
-| | M1 | Pager + on-disk format | ◐ |
+| | M1 | Pager + on-disk format | ✅ DOCS §4 |
 | | M2 | Buffer pool | ⬜ |
 | | M3 | B+tree | ⬜ |
 | | M4 | WAL + recovery | ⬜ |
@@ -261,7 +261,7 @@ of the system — every later phase uses it.
 runs on the simulated platform and is reproducible from a seed; a DOCS.md
 skeleton exists.
 
-### §M1 — Pager + on-disk format ◐
+### §M1 — Pager + on-disk format ✅ (DOCS §4)
 
 - 8 KiB pages (settled 2026-10-17), page `n` at offset `n × 8192`.
 - Every page starts with a 24-byte header: CRC-32C, page type, LSN (for
@@ -583,3 +583,4 @@ style) across a thousand seeds without failure.
   app format (`app install`, `.dos-app` manifest); first packages in M6.
 - **2026-10-17** — §M0 shipped (DOCS §1–§3); CI green on all nine jobs.
 - **2026-10-17** — D2–D6 settled as proposed; page size 8 KiB (M1).
+- **2026-10-17** — §M1 shipped (DOCS §4); CI green on all nine jobs.
