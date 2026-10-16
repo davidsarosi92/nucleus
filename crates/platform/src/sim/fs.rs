@@ -170,9 +170,12 @@ impl SimFs {
 
     /// Crashes now: everything not durable is lost (or torn, per
     /// [`Faults::crash_mode`]) and every open handle becomes stale.  The file
-    /// system stays usable, as after a restart.
+    /// system stays usable, as after a restart.  Cancels a crash scheduled
+    /// with [`SimFs::crash_after_ops`].
     pub fn crash(&self) {
-        self.lock().crash();
+        let mut s = self.lock();
+        s.crash_at = None; // a crash scheduled for later is superseded
+        s.crash();
     }
 
     /// Schedules a crash: the `n`-th operation from now (counting from 1)

@@ -123,7 +123,9 @@ fn stress(platform: &dyn Platform, path: &Path) {
     let pager = Arc::new(Pager::create(platform.fs(), path).unwrap());
     let pool = Arc::new(BufferPool::new(pager, 16));
     let threads = 8;
-    let per_thread = 12;
+    // More pages per thread than frames, so even a thread running alone
+    // evicts on most fetches, whatever the scheduler does.
+    let per_thread = 40;
     let mut pages: Vec<Vec<PageId>> = Vec::new();
     for _ in 0..threads {
         pages.push(make_pages(&pool, per_thread));
@@ -154,7 +156,7 @@ fn stress(platform: &dyn Platform, path: &Path) {
             });
         }
     });
-    assert!(pool.stats().evictions > 1000, "{:?}", pool.stats());
+    assert!(pool.stats().evictions > 4000, "{:?}", pool.stats());
 }
 
 #[test]

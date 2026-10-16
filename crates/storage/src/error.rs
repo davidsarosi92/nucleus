@@ -25,6 +25,8 @@ pub enum Error {
     /// The caller tried to write a page of the durable state (one not
     /// allocated since the last sync).  Copy it instead.
     Immutable(PageId),
+    /// A key longer than the tree accepts (`node::MAX_KEY`).
+    KeyTooLarge(usize),
     /// Every buffer pool frame is pinned; no page can be brought in.
     PoolExhausted,
     /// The page is pinned and cannot be freed.
@@ -45,6 +47,7 @@ impl fmt::Display for Error {
             Error::Corrupt { page, reason } => write!(f, "page {} is corrupt: {reason}", page.0),
             Error::InvalidPage(page) => write!(f, "page {} does not exist or is reserved", page.0),
             Error::Immutable(page) => write!(f, "page {} belongs to the durable state", page.0),
+            Error::KeyTooLarge(n) => write!(f, "key of {n} bytes is too large"),
             Error::PoolExhausted => f.write_str("every buffer pool frame is pinned"),
             Error::Pinned(page) => write!(f, "page {} is pinned", page.0),
             Error::Poisoned => f.write_str("an earlier sync failed; reopen the database"),
