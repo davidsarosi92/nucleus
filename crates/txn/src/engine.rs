@@ -190,7 +190,7 @@ impl Engine {
                         continue; // still needed by someone
                     }
                     let tombstone = decode_value(&v)
-                        .map_err(|()| Error::Corrupt("bad version value"))?
+                        .ok_or(Error::Corrupt("bad version value"))?
                         .is_none();
                     if kept_one || tombstone {
                         ops.push((k, None));
@@ -257,7 +257,7 @@ impl Inner {
             None => Ok(None),
             Some(entry) => {
                 let (_, v) = entry?;
-                let value = decode_value(&v).map_err(|()| Error::Corrupt("bad version value"))?;
+                let value = decode_value(&v).ok_or(Error::Corrupt("bad version value"))?;
                 Ok(Some(value.map(<[u8]>::to_vec)))
             }
         }
@@ -296,7 +296,7 @@ impl Inner {
         for entry in tree.range(Bound::Included(&from), Bound::Excluded(&to))? {
             let (k, v) = entry?;
             let tombstone = decode_value(&v)
-                .map_err(|()| Error::Corrupt("bad version value"))?
+                .ok_or(Error::Corrupt("bad version value"))?
                 .is_none();
             if !first || tombstone {
                 ops.push((k, None));
@@ -458,8 +458,8 @@ pub struct Scan<'t> {
     /// Where the next store batch starts (`None` once the store is done).
     seek: Option<Vec<u8>>,
     store_end: Option<Vec<u8>>,
-    /// Visible store entries read ahead: user key and value or tombstone.
-    buffer: VecDeque<(Vec<u8>, Option<Vec<u8>>)>,
+    /// Visible store entries read ahead.
+    buffer: VecDeque<Visible>,
     writes: std::iter::Peekable<std::collections::btree_map::Range<'t, Vec<u8>, Option<Vec<u8>>>>,
 }
 
@@ -470,6 +470,9 @@ impl std::fmt::Debug for Scan<'_> {
 }
 
 const SCAN_BATCH: usize = 128;
+
+/// A user key and its visible value (`None`: deleted).
+type Visible = (Vec<u8>, Option<Vec<u8>>);
 
 impl Scan<'_> {
     /// Reads the next batch of visible versions from the store.
@@ -495,7 +498,7 @@ impl Scan<'_> {
                 self.seek = Some(first_version(&user));
                 return Ok(());
             }
-            let value = decode_value(&v).map_err(|()| Error::Corrupt("bad version value"))?;
+            let value = decode_value(&v).ok_or(Error::Corrupt("bad version value"))?;
             self.buffer
                 .push_back((user.clone(), value.map(<[u8]>::to_vec)));
             last = Some(user);
@@ -504,7 +507,7 @@ impl Scan<'_> {
         Ok(())
     }
 
-    fn next_store(&mut self) -> Result<Option<&(Vec<u8>, Option<Vec<u8>>)>> {
+    fn next_store(&mut self) -> Result<Option<&Visible>> {
         if self.buffer.is_empty() {
             self.refill()?;
         }

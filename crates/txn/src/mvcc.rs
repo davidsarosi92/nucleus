@@ -90,12 +90,13 @@ pub fn encode_value(value: Option<&[u8]>) -> Vec<u8> {
     }
 }
 
-/// The value a stored form holds (`None` = tombstone); `Err` if malformed.
-pub fn decode_value(stored: &[u8]) -> Result<Option<&[u8]>, ()> {
+/// The value a stored form holds: `Some(None)` is a tombstone, `None` a
+/// malformed value.
+pub fn decode_value(stored: &[u8]) -> Option<Option<&[u8]>> {
     match stored.split_first() {
-        Some((1, v)) => Ok(Some(v)),
-        Some((0, [])) => Ok(None),
-        _ => Err(()),
+        Some((1, v)) => Some(Some(v)),
+        Some((0, [])) => Some(None),
+        _ => None,
     }
 }
 
@@ -136,9 +137,12 @@ mod tests {
 
     #[test]
     fn values() {
-        assert_eq!(decode_value(&encode_value(Some(b"x"))), Ok(Some(&b"x"[..])));
-        assert_eq!(decode_value(&encode_value(None)), Ok(None));
-        assert!(decode_value(&[]).is_err());
-        assert!(decode_value(&[0, 1]).is_err());
+        assert_eq!(
+            decode_value(&encode_value(Some(b"x"))),
+            Some(Some(&b"x"[..]))
+        );
+        assert_eq!(decode_value(&encode_value(None)), Some(None));
+        assert!(decode_value(&[]).is_none());
+        assert!(decode_value(&[0, 1]).is_none());
     }
 }
