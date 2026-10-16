@@ -167,20 +167,47 @@ pub fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Runs `f` in a transaction and commits, retrying from the start on
-/// retryable errors (up to 100 times).
+/// retryable errors (up to 100 times), backing off exponentially between
+/// attempts (from 1 µs up to about 1 ms) so contending retries spread out
+/// instead of colliding again.
+///
+/// The back-off is the one real-time wait in the contract layer; it does
+/// not read the clock, so it does not affect a simulation's determinism.
 pub fn transact<T>(
     kv: &dyn Kv,
     opts: TxnOptions,
     mut f: impl FnMut(&mut dyn KvTxn) -> Result<T>,
 ) -> Result<T> {
-    let mut attempt = 0;
+    let mut attempt: u32 = 0;
     loop {
         let mut txn = kv.begin(opts)?;
         let result = f(txn.as_mut()).and_then(|v| txn.commit().map(|_| v));
         match result {
-            Err(e) if e.is_retryable() && attempt < 100 => attempt += 1,
+            Err(e) if e.is_retryable() && attempt < 100 => {
+                attempt += 1;
+                // Spread by a little per-thread jitter, so threads that
+                // collided once do not wake in lock-step.
+                let jitter = (std::thread::current().id().as_u64_ish() % 7) as u64;
+                let micros = (1u64 << attempt.min(10)) + jitter * attempt as u64;
+                std::thread::sleep(std::time::Duration::from_micros(micros));
+            }
             other => return other,
         }
+    }
+}
+
+trait ThreadIdBits {
+    fn as_u64_ish(&self) -> u64;
+}
+
+impl ThreadIdBits for std::thread::ThreadId {
+    /// A number that differs between threads (ThreadId has no stable
+    /// numeric accessor).
+    fn as_u64_ish(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut h);
+        h.finish()
     }
 }
 

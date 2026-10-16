@@ -13,6 +13,7 @@ nucleus-platform = { path = "crates/platform" }
 nucleus-storage = { path = "crates/storage" }
 nucleus-txn = { path = "crates/txn" }
 nucleus-kv = { path = "crates/kv" }
+nucleus-sql = { path = "crates/sql" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

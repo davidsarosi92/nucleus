@@ -208,6 +208,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-sql"
+version = "0.1.0"
+dependencies = [
+ "nucleus-kv",
+ "nucleus-platform",
+]
+
+[[package]]
 name = "nucleus-storage"
 version = "0.1.0"
 dependencies = [
