@@ -1,0 +1,177 @@
+# BEGIN / COMMIT / ROLLBACK, aborted transactions, snapshot isolation
+# between two sessions, transactional DDL.
+
+statement ok
+CREATE TABLE kv (k TEXT PRIMARY KEY, v INT)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO kv VALUES ('a', 1)
+
+query I
+SELECT v FROM kv WHERE k = 'a'
+----
+1
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM kv
+----
+0
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO kv VALUES ('a', 1)
+
+statement error 23505
+INSERT INTO kv VALUES ('a', 2)
+
+statement error 25P02
+SELECT 1
+
+statement ok
+COMMIT
+
+# The failed transaction rolled back.
+query I
+SELECT count(*) FROM kv
+----
+0
+
+statement ok
+INSERT INTO kv VALUES ('x', 0)
+
+# Snapshot isolation between two sessions.
+connection a
+
+statement ok
+BEGIN
+
+query I
+SELECT v FROM kv WHERE k = 'x'
+----
+0
+
+connection b
+
+statement ok
+UPDATE kv SET v = 1 WHERE k = 'x'
+
+connection a
+
+query I
+SELECT v FROM kv WHERE k = 'x'
+----
+0
+
+statement error 40001
+UPDATE kv SET v = 2 WHERE k = 'x'
+
+statement ok
+ROLLBACK
+
+query I
+SELECT v FROM kv WHERE k = 'x'
+----
+1
+
+# Uncommitted writes are invisible to others; committed ones are visible to
+# transactions that start later.
+connection a
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO kv VALUES ('y', 5)
+
+connection b
+
+query I
+SELECT count(*) FROM kv
+----
+1
+
+connection a
+
+statement ok
+COMMIT
+
+connection b
+
+query I
+SELECT count(*) FROM kv
+----
+2
+
+# Two concurrent inserts of the same key: the second committer fails.
+connection a
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO kv VALUES ('z', 1)
+
+connection b
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO kv VALUES ('z', 2)
+
+statement ok
+COMMIT
+
+connection a
+
+statement error 40001
+COMMIT
+
+query I
+SELECT v FROM kv WHERE k = 'z'
+----
+2
+
+# Transactional DDL.
+statement ok
+BEGIN
+
+statement ok
+CREATE TABLE ghost (a INT)
+
+statement ok
+INSERT INTO ghost VALUES (1)
+
+statement ok
+ROLLBACK
+
+statement error 42P01
+SELECT * FROM ghost
+
+statement ok
+BEGIN ISOLATION LEVEL REPEATABLE READ
+
+query T
+SHOW transaction_isolation
+----
+repeatable read
+
+statement ok
+COMMIT
+
+statement ok
+START TRANSACTION READ ONLY
+
+statement error 25006
+INSERT INTO kv VALUES ('ro', 1)
+
+statement ok
+ROLLBACK

@@ -1,0 +1,81 @@
+# GROUP BY, aggregates, HAVING, DISTINCT aggregates.
+
+statement ok
+CREATE TABLE sales (id INT PRIMARY KEY, region TEXT, product TEXT, amount INT, price DOUBLE PRECISION)
+
+statement ok
+INSERT INTO sales VALUES (1, 'north', 'apple', 10, 1.5), (2, 'north', 'pear', 5, 2.0), (3, 'south', 'apple', 7, 1.5), (4, 'south', 'apple', 3, 1.25), (5, 'east', NULL, NULL, NULL)
+
+query TII rowsort
+SELECT region, count(*), sum(amount) FROM sales GROUP BY region
+----
+east 1 NULL
+north 2 15
+south 2 10
+
+query IIIIR
+SELECT count(*), count(amount), min(amount), max(amount), avg(amount) FROM sales
+----
+5 4 3 10 6.250
+
+query II
+SELECT count(DISTINCT product), count(product) FROM sales
+----
+2 4
+
+query TI
+SELECT region, sum(amount) AS total FROM sales GROUP BY region HAVING sum(amount) > 12
+----
+north 15
+
+query TR
+SELECT product, sum(amount * price) FROM sales WHERE product IS NOT NULL GROUP BY product ORDER BY product
+----
+apple 29.250
+pear 10.000
+
+query TI
+SELECT region, count(*) FROM sales GROUP BY 1 ORDER BY 2 DESC, 1
+----
+north 2
+south 2
+east 1
+
+query TI
+SELECT upper(region) AS r, sum(amount) FROM sales GROUP BY upper(region) ORDER BY r
+----
+EAST NULL
+NORTH 15
+SOUTH 10
+
+query I
+SELECT sum(amount) FROM sales WHERE id > 100
+----
+NULL
+
+query I
+SELECT count(*) FROM sales WHERE id > 100
+----
+0
+
+query I
+SELECT count(*) FROM sales GROUP BY region HAVING count(*) > 5
+----
+
+statement error 42803
+SELECT region, amount FROM sales GROUP BY region
+
+statement error 42803
+SELECT * FROM sales WHERE sum(amount) > 1
+
+query TI
+SELECT region, max(amount) - min(amount) FROM sales GROUP BY region ORDER BY region
+----
+east NULL
+north 5
+south 4
+
+query IT
+SELECT count(*), region FROM sales GROUP BY region ORDER BY count(*), region LIMIT 1
+----
+1 east

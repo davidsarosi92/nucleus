@@ -1,0 +1,92 @@
+# Inner, left, right and cross joins; USING; joins on expressions.
+
+statement ok
+CREATE TABLE dept (id INT PRIMARY KEY, name TEXT)
+
+statement ok
+CREATE TABLE emp (id INT PRIMARY KEY, name TEXT, dept_id INT, salary INT)
+
+statement ok
+INSERT INTO dept VALUES (1, 'eng'), (2, 'ops'), (3, 'empty')
+
+statement ok
+INSERT INTO emp VALUES (10, 'ann', 1, 100), (11, 'bob', 1, 80), (12, 'cat', 2, 90), (13, 'dan', NULL, 70)
+
+query TT rowsort
+SELECT e.name, d.name FROM emp e JOIN dept d ON e.dept_id = d.id
+----
+ann eng
+bob eng
+cat ops
+
+query TT rowsort
+SELECT e.name, d.name FROM emp e LEFT JOIN dept d ON e.dept_id = d.id
+----
+ann eng
+bob eng
+cat ops
+dan NULL
+
+query TT rowsort
+SELECT e.name, d.name FROM emp e RIGHT JOIN dept d ON e.dept_id = d.id
+----
+ann eng
+bob eng
+cat ops
+NULL empty
+
+query TT rowsort
+SELECT e.name, d.name FROM emp e, dept d WHERE e.dept_id = d.id AND d.name = 'eng'
+----
+ann eng
+bob eng
+
+query I
+SELECT count(*) FROM emp CROSS JOIN dept
+----
+12
+
+# A left join keeps unmatched rows even when the ON condition filters.
+query TT rowsort
+SELECT d.name, e.name FROM dept d LEFT JOIN emp e ON e.dept_id = d.id AND e.salary > 85
+----
+eng ann
+ops cat
+empty NULL
+
+# WHERE on the null-padded side runs after the join: an anti-join.
+query T
+SELECT d.name FROM dept d LEFT JOIN emp e ON e.dept_id = d.id WHERE e.id IS NULL
+----
+empty
+
+statement ok
+CREATE TABLE loc (id INT PRIMARY KEY, city TEXT)
+
+statement ok
+INSERT INTO loc VALUES (1, 'Budapest'), (2, 'Debrecen')
+
+query ITT rowsort
+SELECT * FROM dept JOIN loc USING (id)
+----
+1 eng Budapest
+2 ops Debrecen
+
+query TTT rowsort
+SELECT e.name, d.name, l.city FROM emp e JOIN dept d ON e.dept_id = d.id JOIN loc l ON l.id = d.id
+----
+ann eng Budapest
+bob eng Budapest
+cat ops Debrecen
+
+# Self join.
+query TT rowsort
+SELECT a.name, b.name FROM emp a JOIN emp b ON a.salary < b.salary AND a.dept_id = b.dept_id
+----
+bob ann
+
+statement error 42702
+SELECT id FROM emp JOIN dept ON emp.dept_id = dept.id
+
+statement error 42P01
+SELECT x.id FROM emp

@@ -1,0 +1,110 @@
+# Operators, NULL logic, CASE, casts, functions, LIKE.
+
+query BBB
+SELECT NULL AND false, NULL OR true, NOT (NULL = 1) IS NULL
+----
+false true false
+
+query T
+SELECT CASE WHEN 1 > 2 THEN 'a' WHEN 2 > 1 THEN 'b' ELSE 'c' END
+----
+b
+
+query T
+SELECT CASE 3 WHEN 1 THEN 'one' WHEN 3 THEN 'three' END
+----
+three
+
+query T
+SELECT CASE WHEN false THEN 'x' END
+----
+NULL
+
+query ITR
+SELECT CAST('42' AS INT), 42::text, '2.5'::double precision
+----
+42 42 2.500
+
+query I
+SELECT '7'::int + 1
+----
+8
+
+statement error 22P02
+SELECT 'abc'::int
+
+statement error 22012
+SELECT 1 / 0
+
+statement error 22003
+SELECT 9223372036854775807 + 1
+
+query I
+SELECT -9223372036854775808
+----
+-9223372036854775808
+
+query BBBB
+SELECT 'hello' LIKE 'h%', 'hello' LIKE 'H%', 'hello' ILIKE 'H%', 'hello' NOT LIKE '_ello'
+----
+true false true false
+
+query BB
+SELECT 5 BETWEEN 1 AND 10, 5 NOT BETWEEN 1 AND 4
+----
+true true
+
+query BBT
+SELECT 1 IN (1, 2), 3 IN (1, NULL), CAST(3 NOT IN (1, 2) AS TEXT)
+----
+true NULL true
+
+query TIT
+SELECT lower('ÁRVÍZ'), length('tükör'), substr('nucleus', 2, 3)
+----
+árvíz 5 ucl
+
+query ITTI
+SELECT coalesce(NULL, NULL, 3), nullif('a', 'a'), concat('a', NULL, 'b'), strpos('database', 'base')
+----
+3 NULL ab 5
+
+query RRII
+SELECT round(2.567, 2), abs(-1.5), greatest(1, 5, 3), least(4, 2, 8)
+----
+2.570 1.500 5 2
+
+query T
+SELECT replace(trim('  a-b-c  '), '-', '+')
+----
+a+b+c
+
+query BB
+SELECT NULL IS DISTINCT FROM NULL, 1 IS DISTINCT FROM NULL
+----
+false true
+
+query BB
+SELECT (NULL = NULL) IS TRUE, (1 = 1) IS NOT FALSE
+----
+false true
+
+# The untyped literal is read as an integer, like PostgreSQL does.
+statement error 22P02
+SELECT 1 + 'a'
+
+statement error 42883
+SELECT nosuchfunction(1)
+
+statement error 42804
+SELECT * FROM (VALUES (1)) v WHERE 1
+
+query T
+SELECT 'it''s'
+----
+it's
+
+query I
+SELECT 10 % 3
+----
+1

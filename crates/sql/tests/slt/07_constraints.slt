@@ -1,0 +1,109 @@
+# NOT NULL, CHECK, DEFAULT, VARCHAR(n), UNIQUE, composite keys, ADD COLUMN.
+
+statement ok
+CREATE TABLE acct (id INT PRIMARY KEY, owner VARCHAR(5) NOT NULL, balance INT DEFAULT 0 CHECK (balance >= 0), kind TEXT DEFAULT 'std', UNIQUE (owner, kind))
+
+statement ok
+INSERT INTO acct (id, owner) VALUES (1, 'anna')
+
+query ITIT
+SELECT * FROM acct
+----
+1 anna 0 std
+
+statement error 23514
+INSERT INTO acct VALUES (2, 'bob', -5, 'std')
+
+statement error 22001
+INSERT INTO acct VALUES (3, 'charlie', 1, 'std')
+
+statement error 23502
+INSERT INTO acct (id, balance) VALUES (4, 1)
+
+statement error 23505
+INSERT INTO acct (id, owner) VALUES (5, 'anna')
+
+statement ok
+INSERT INTO acct (id, owner, kind) VALUES (5, 'anna', 'gold')
+
+statement error 23514
+UPDATE acct SET balance = balance - 1 WHERE id = 1
+
+statement ok
+UPDATE acct SET balance = balance + 10 RETURNING id
+
+query II
+UPDATE acct SET balance = balance * 2 WHERE id = 5 RETURNING id, balance
+----
+5 20
+
+query IT
+INSERT INTO acct (id, owner) VALUES (6, 'cat') RETURNING id, kind
+----
+6 std
+
+query I
+DELETE FROM acct WHERE owner = 'cat' RETURNING id
+----
+6
+
+statement ok
+CREATE TABLE named (a INT, b INT, CONSTRAINT b_bigger CHECK (b > a))
+
+statement error b_bigger
+INSERT INTO named VALUES (2, 1)
+
+statement ok
+INSERT INTO named VALUES (1, 2)
+
+# A CHECK that is NULL passes.
+statement ok
+INSERT INTO named VALUES (NULL, 1)
+
+statement ok
+ALTER TABLE named ADD COLUMN c TEXT DEFAULT 'new'
+
+query IIT rowsort
+SELECT * FROM named
+----
+1 2 new
+NULL 1 new
+
+statement ok
+ALTER TABLE named ADD COLUMN d INT
+
+query I
+SELECT count(*) FROM named WHERE d IS NULL
+----
+2
+
+statement error 23502
+ALTER TABLE named ADD COLUMN e INT NOT NULL
+
+statement error 42701
+ALTER TABLE named ADD COLUMN c INT
+
+statement error 42804
+INSERT INTO named VALUES (true, 1)
+
+statement ok
+INSERT INTO named VALUES (0, 5.4)
+
+query I
+SELECT b FROM named WHERE a = 0
+----
+5
+
+statement error 0A000
+CREATE TABLE fk (a INT REFERENCES named)
+
+statement ok
+CREATE TABLE d (x INT)
+
+statement ok
+INSERT INTO d DEFAULT VALUES
+
+query I
+SELECT x FROM d
+----
+NULL

@@ -1,0 +1,76 @@
+# The optimizer's choices, as EXPLAIN shows them.
+
+statement ok
+CREATE TABLE a (id INT PRIMARY KEY, x INT)
+
+statement ok
+CREATE TABLE b (id INT PRIMARY KEY, a_id INT, y TEXT)
+
+# Filters go to their scans; the join condition becomes a hash join.
+query T
+EXPLAIN SELECT a.x, b.y FROM a JOIN b ON a.id = b.a_id WHERE a.x > 5 AND b.y = 'q'
+----
+Project: #1, #4
+  Hash Join (#0 = #1) on (#0 = #3)
+    Seq Scan on a filter: (#1 > 5)
+    Seq Scan on b filter: (#2 = 'q')
+
+# A comma join with an equality in WHERE is a hash join too.
+query T
+EXPLAIN SELECT * FROM a, b WHERE a.id = b.a_id
+----
+Project: #0, #1, #2, #3, #4
+  Hash Join (#0 = #1) on (#0 = #3)
+    Seq Scan on a
+    Seq Scan on b
+
+# A filter on the null-padded side of a left join stays above it.
+query T
+EXPLAIN SELECT * FROM a LEFT JOIN b ON a.id = b.a_id WHERE b.id IS NULL
+----
+Project: #0, #1, #2, #3, #4
+  Filter: #2 IS NULL
+    Left Hash Join (#0 = #1) on (#0 = #3)
+      Seq Scan on a
+      Seq Scan on b
+
+# Through a subquery in FROM, down to the scan.
+query T
+EXPLAIN SELECT x FROM (SELECT x FROM a WHERE x > 1) s WHERE x < 10
+----
+Project: #0
+  Project: #1
+    Seq Scan on a filter: ((#1 < 10) AND (#1 > 1))
+
+query T
+EXPLAIN SELECT * FROM a WHERE id BETWEEN 2 AND 5
+----
+Project: #0, #1
+  Index Scan using primary key on a (id >= 2 AND id <= 5) filter: ((#0 >= 2) AND (#0 <= 5))
+
+# A correlated subquery looks rows up by the outer row's value.
+query T
+EXPLAIN SELECT * FROM a WHERE x IN (SELECT a_id FROM b WHERE b.id = a.id)
+----
+Project: #0, #1
+  Seq Scan on a filter: #1 IN (subquery)
+    In (correlated):
+      Project: #1
+        Index Scan using primary key on b (id = outer1.#0) filter: (#0 = outer1.#0)
+
+# And the answers are right.
+statement ok
+INSERT INTO a VALUES (1, 1), (2, 7), (3, 30)
+
+statement ok
+INSERT INTO b VALUES (1, 1, 'q'), (2, 2, 'q'), (3, 9, 'r')
+
+query IT rowsort
+SELECT a.x, b.y FROM a JOIN b ON a.id = b.a_id WHERE a.x > 5 AND b.y = 'q'
+----
+7 q
+
+query I
+SELECT id FROM a WHERE x IN (SELECT a_id FROM b WHERE b.id = a.id)
+----
+1

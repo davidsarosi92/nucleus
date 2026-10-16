@@ -21,6 +21,8 @@ missing_docs = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+# Tuple-heavy signatures read fine here; aliases would only add names.
+type_complexity = "allow"
 
 # The simulation tests replay workloads thousands of times; unoptimised they
 # dominate the test run.  Debug assertions and overflow checks stay on.

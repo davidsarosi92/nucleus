@@ -147,6 +147,11 @@ impl Value {
             }
             (Value::Int(i), DataType::Bool) => Value::Bool(i != 0),
             (Value::Bool(b), DataType::Int) => Value::Int(i64::from(b)),
+            // As PostgreSQL: a boolean cast to text is 'true'/'false' (the
+            // wire format's 't'/'f' is only how it is sent).
+            (Value::Bool(b), DataType::Text) => {
+                Value::Text(if b { "true" } else { "false" }.into())
+            }
             (v, DataType::Text) => Value::Text(v.render()),
             (Value::Text(s), DataType::Int) => Value::Int(s.trim().parse().map_err(|_| {
                 Error::invalid_text(format!("invalid input syntax for type bigint: {s:?}"))

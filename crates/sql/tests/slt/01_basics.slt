@@ -1,0 +1,137 @@
+# Tables, inserts, selects, ordering and limits.
+
+statement ok
+CREATE TABLE people (id INT PRIMARY KEY, name TEXT NOT NULL, age INT, city TEXT)
+
+statement ok
+INSERT INTO people VALUES (1, 'Anna', 34, 'Budapest'), (2, 'Béla', 27, 'Szeged'), (3, 'Csilla', NULL, 'Budapest')
+
+statement ok
+INSERT INTO people (id, name, city) VALUES (4, 'Dénes', 'Pécs')
+
+query ITIT
+SELECT id, name, age, city FROM people ORDER BY id
+----
+1 Anna 34 Budapest
+2 Béla 27 Szeged
+3 Csilla NULL Budapest
+4 Dénes NULL Pécs
+
+query T rowsort
+SELECT name FROM people WHERE city = 'Budapest'
+----
+Anna
+Csilla
+
+query IT
+SELECT id, name FROM people WHERE age > 30 OR age IS NULL ORDER BY id DESC
+----
+4 Dénes
+3 Csilla
+1 Anna
+
+query T
+SELECT name FROM people ORDER BY age DESC, name
+----
+Csilla
+Dénes
+Anna
+Béla
+
+query T
+SELECT name FROM people ORDER BY age NULLS FIRST, id
+----
+Csilla
+Dénes
+Béla
+Anna
+
+query I
+SELECT id FROM people ORDER BY id LIMIT 2 OFFSET 1
+----
+2
+3
+
+query IT
+SELECT p.id AS n, upper(p.name) AS loud FROM people AS p WHERE p.id IN (2, 4) ORDER BY n
+----
+2 BÉLA
+4 DÉNES
+
+query T
+SELECT DISTINCT city FROM people ORDER BY city
+----
+Budapest
+Pécs
+Szeged
+
+query I
+SELECT count(*) FROM people
+----
+4
+
+statement error 23505
+INSERT INTO people VALUES (1, 'Again', 1, 'X')
+
+statement error 23502
+INSERT INTO people (id) VALUES (9)
+
+statement error 42P01
+SELECT * FROM nobody
+
+statement error 42703
+SELECT nope FROM people
+
+statement error 42601
+SELEC 1
+
+statement ok
+CREATE TABLE IF NOT EXISTS people (x INT)
+
+statement error 42P07
+CREATE TABLE people (x INT)
+
+# Without a primary key, rows get hidden ids and keep insertion order.
+statement ok
+CREATE TABLE log (msg TEXT)
+
+statement ok
+INSERT INTO log VALUES ('first'), ('second'), ('first')
+
+query T
+SELECT msg FROM log
+----
+first
+second
+first
+
+query T
+SELECT * FROM log WHERE msg = 'first'
+----
+first
+first
+
+statement ok
+DROP TABLE log
+
+statement error 42P01
+SELECT * FROM log
+
+statement ok
+DROP TABLE IF EXISTS log
+
+# SELECT without FROM.
+query IRT
+SELECT 1 + 2, 7 / 2.0, 'a' || 'b'
+----
+3 3.500 ab
+
+query I
+SELECT 7 / 2
+----
+3
+
+query B
+SELECT 1 < 2
+----
+true

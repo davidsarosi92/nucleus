@@ -151,8 +151,11 @@ fn lost_updates_cannot_happen() {
                     loop {
                         let mut t = e.begin();
                         let n: u64 = get(&t, "counter").unwrap().parse().unwrap();
-                        t.put(b"counter", (n + 1).to_string().as_bytes()).unwrap();
-                        match t.commit() {
+                        // A conflict can surface at the write or the commit.
+                        let r = t
+                            .put(b"counter", (n + 1).to_string().as_bytes())
+                            .and_then(|()| t.commit());
+                        match r {
                             Ok(_) => break,
                             Err(err) if err.is_retryable() => continue,
                             Err(err) => panic!("{err}"),
@@ -195,13 +198,18 @@ fn transfers_keep_the_total() {
                         let (fk, tk) = (format!("acct{from}"), format!("acct{to}"));
                         let f: u64 = get(&t, &fk).unwrap().parse().unwrap();
                         let amount = rng.below(f + 1);
-                        t.put(fk.as_bytes(), (f - amount).to_string().as_bytes())
-                            .unwrap();
-                        let g: u64 = get(&t, &tk).unwrap().parse().unwrap();
-                        t.put(tk.as_bytes(), (g + amount).to_string().as_bytes())
-                            .unwrap();
-                        if t.commit().is_ok() {
-                            break;
+                        // A conflict can surface at a write or the commit.
+                        let r = t
+                            .put(fk.as_bytes(), (f - amount).to_string().as_bytes())
+                            .and_then(|()| {
+                                let g: u64 = get(&t, &tk).unwrap().parse().unwrap();
+                                t.put(tk.as_bytes(), (g + amount).to_string().as_bytes())
+                            })
+                            .and_then(|()| t.commit().map(|_| ()));
+                        match r {
+                            Ok(()) => break,
+                            Err(err) if err.is_retryable() => continue,
+                            Err(err) => panic!("{err}"),
                         }
                     }
                 }

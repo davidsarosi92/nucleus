@@ -381,6 +381,18 @@ impl Transaction {
             return Err(Error::ReadOnly);
         }
         check_key(key)?;
+        // Fail early when a newer version exists: the commit would fail
+        // anyway (first committer wins), and the client learns at the
+        // statement, as PostgreSQL reports it.  The commit check stays the
+        // guarantee — a conflicting commit can still land after this.
+        if !self.writes.contains_key(key)
+            && self
+                .engine
+                .newest_ts(key)?
+                .is_some_and(|ts| ts > self.start)
+        {
+            return Err(Error::Conflict { key: key.to_vec() });
+        }
         self.writes.insert(key.to_vec(), value.map(<[u8]>::to_vec));
         Ok(())
     }

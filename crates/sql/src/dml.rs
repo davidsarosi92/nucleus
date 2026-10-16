@@ -1,0 +1,504 @@
+//! Writes: INSERT, UPDATE, DELETE — constraints and index maintenance.
+
+use std::collections::HashSet;
+
+use nucleus_kv::KvTxn;
+
+use crate::ast::{self, SelectItem};
+use crate::binder::{Binder, Scope, ScopeCol, conjunction, conjuncts};
+use crate::catalog::{self, Table};
+use crate::error::{Error, Result};
+use crate::exec::{self, index_entry, pk_suffix, row_key_of};
+use crate::expr::{Ctx, Env, Expr};
+use crate::optimizer::choose_access;
+use crate::parser::parse_expr;
+use crate::plan::{Access, Plan};
+use crate::types::{DataType, Row, Value};
+
+/// The scope of a table's own columns.
+pub fn table_scope(table: &Table) -> Scope {
+    Scope {
+        cols: table
+            .columns
+            .iter()
+            .map(|c| ScopeCol {
+                table: Some(table.name.clone()),
+                name: c.name.clone(),
+                ty: Some(c.ty),
+                hidden: false,
+            })
+            .collect(),
+    }
+}
+
+/// What writes to one table need, bound once per statement.
+pub struct Writer {
+    /// The table.
+    pub table: Table,
+    checks: Vec<(String, Expr)>,
+    defaults: Vec<Option<Expr>>,
+}
+
+impl Writer {
+    /// Binds the table's `CHECK` and `DEFAULT` expressions.
+    pub fn new(txn: &dyn KvTxn, table: Table) -> Result<Self> {
+        let scope = table_scope(&table);
+        let mut binder = Binder::new(txn);
+        let mut checks = Vec::new();
+        for (name, text) in &table.checks {
+            checks.push((name.clone(), binder.condition(&parse_expr(text)?, &scope)?));
+        }
+        let empty = Scope::default();
+        let mut defaults = Vec::new();
+        for c in &table.columns {
+            defaults.push(match &c.default {
+                None => None,
+                Some(text) => Some(binder.expr(&parse_expr(text)?, &empty)?.0),
+            });
+        }
+        Ok(Self {
+            table,
+            checks,
+            defaults,
+        })
+    }
+
+    /// The default value of column `c`.
+    pub fn default_of(&self, c: usize, ctx: &Ctx) -> Result<Value> {
+        match &self.defaults[c] {
+            None => Ok(Value::Null),
+            Some(e) => assign(
+                e.eval(&Env {
+                    row: &[],
+                    outer: None,
+                    ctx,
+                })?,
+                &self.table,
+                c,
+            ),
+        }
+    }
+
+    /// Checks NOT NULL, lengths and CHECK constraints of a full row.
+    pub fn validate(&self, row: &Row, ctx: &Ctx) -> Result<()> {
+        let t = &self.table;
+        for (i, c) in t.columns.iter().enumerate() {
+            if row[i].is_null() && (!c.nullable || t.primary_key.contains(&i)) {
+                return Err(Error::not_null_violation(format!(
+                    "null value in column \"{}\" of relation \"{}\" violates not-null constraint",
+                    c.name, t.name
+                )));
+            }
+        }
+        let env = Env {
+            row,
+            outer: None,
+            ctx,
+        };
+        for (name, check) in &self.checks {
+            if check.eval(&env)?.truth()? == Some(false) {
+                return Err(Error::check_violation(format!(
+                    "new row for relation \"{}\" violates check constraint \"{name}\"",
+                    t.name
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Converts a value for storing in column `c` (assignment cast).
+pub fn assign(v: Value, table: &Table, c: usize) -> Result<Value> {
+    let col = &table.columns[c];
+    let v = match (&v, col.ty) {
+        (Value::Null, _) => return Ok(v),
+        (Value::Bool(_), DataType::Int | DataType::Float)
+        | (Value::Int(_) | Value::Float(_), DataType::Bool) => {
+            return Err(Error::type_mismatch(format!(
+                "column \"{}\" is of type {} but expression is of type {}",
+                col.name,
+                col.ty,
+                crate::types::type_name(&v)
+            )));
+        }
+        _ => v.cast(col.ty)?,
+    };
+    if let (Some(max), Value::Text(s)) = (col.max_len, &v)
+        && s.chars().count() > max as usize
+    {
+        return Err(Error::string_too_long(format!(
+            "value too long for type character varying({max})"
+        )));
+    }
+    Ok(v)
+}
+
+fn duplicate(name: &str) -> Error {
+    Error::unique_violation(format!(
+        "duplicate key value violates unique constraint \"{name}\""
+    ))
+}
+
+/// Stores a new row and its index entries.
+fn insert_row(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<()> {
+    let t = &w.table;
+    let rowid = if t.primary_key.is_empty() {
+        Some(catalog::next_rowid(txn, t)?)
+    } else {
+        None
+    };
+    let key = row_key_of(t, row, rowid);
+    if rowid.is_none() && txn.get(&key)?.is_some() {
+        return Err(duplicate(&format!("{}_pkey", t.name)));
+    }
+    txn.put(&key, &crate::encoding::encode_row(row))?;
+    let pk = pk_suffix(t, &key);
+    for i in 0..t.indexes.len() {
+        let (k, unique) = index_entry(t, i, row, &pk);
+        if unique && txn.get(&k)?.is_some() {
+            return Err(duplicate(&t.indexes[i].name));
+        }
+        txn.put(&k, &pk)?;
+    }
+    Ok(())
+}
+
+fn returning(
+    binder: &mut Binder,
+    items: &[SelectItem],
+    table: &Table,
+) -> Result<Option<(Vec<Expr>, Vec<(String, Option<DataType>)>)>> {
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let scope = table_scope(table);
+    let mut exprs = Vec::new();
+    let mut cols = Vec::new();
+    for item in items {
+        match item {
+            SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => {
+                for (i, c) in table.columns.iter().enumerate() {
+                    exprs.push(Expr::Column(i));
+                    cols.push((c.name.clone(), Some(c.ty)));
+                }
+            }
+            SelectItem::Expr { expr, alias } => {
+                let (x, t) = binder.expr(expr, &scope)?;
+                let name = alias.clone().unwrap_or_else(|| match expr {
+                    ast::Expr::Column { name, .. } => name.clone(),
+                    _ => "?column?".into(),
+                });
+                exprs.push(x);
+                cols.push((name, t));
+            }
+        }
+    }
+    Ok(Some((exprs, cols)))
+}
+
+/// The result of a write: how many rows, and the `RETURNING` rows.
+pub struct Written {
+    /// Rows written.
+    pub count: u64,
+    /// `RETURNING` columns and rows, if asked.
+    pub returning: Option<(Vec<(String, Option<DataType>)>, Vec<Row>)>,
+}
+
+fn project(exprs: &[Expr], row: &Row, ctx: &Ctx) -> Result<Row> {
+    let env = Env {
+        row,
+        outer: None,
+        ctx,
+    };
+    exprs.iter().map(|e| e.eval(&env)).collect()
+}
+
+/// `INSERT`.
+pub fn insert(
+    txn: &mut dyn KvTxn,
+    table: &str,
+    columns: &Option<Vec<String>>,
+    source: &ast::Query,
+    returning_items: &[SelectItem],
+    params: &[Value],
+) -> Result<Written> {
+    let t = catalog::table(&*txn, table)?;
+    let targets: Vec<usize> = match columns {
+        None => (0..t.columns.len()).collect(),
+        Some(names) => {
+            let mut seen = HashSet::new();
+            names
+                .iter()
+                .map(|n| {
+                    let i = t.column(n).ok_or_else(|| {
+                        Error::undefined_column(format!(
+                            "column \"{n}\" of relation \"{}\" does not exist",
+                            t.name
+                        ))
+                    })?;
+                    if !seen.insert(i) {
+                        return Err(Error::duplicate_column(format!(
+                            "column \"{n}\" specified more than once"
+                        )));
+                    }
+                    Ok(i)
+                })
+                .collect::<Result<_>>()?
+        }
+    };
+    let (rows, writer, ret) = {
+        let ro: &dyn KvTxn = &*txn;
+        let mut binder = Binder::new(ro);
+        let bound = binder.query(source)?;
+        let plan = crate::optimizer::optimize(bound.plan);
+        let width = plan.width();
+        // DEFAULT VALUES: zero columns.
+        if width > targets.len() {
+            return Err(Error::syntax(
+                "INSERT has more expressions than target columns",
+            ));
+        }
+        // Without a column list, missing trailing values take defaults.
+        if columns.is_some() && width < targets.len() && width > 0 {
+            return Err(Error::syntax(
+                "INSERT has more target columns than expressions",
+            ));
+        }
+        let ret = returning(&mut binder, returning_items, &t)?;
+        let writer = Writer::new(ro, t.clone())?;
+        let ctx = Ctx::new(ro, params);
+        let source_rows = exec::collect(&plan, &ctx, None)?;
+        let mut rows = Vec::with_capacity(source_rows.len());
+        for src in source_rows {
+            let mut row = Vec::with_capacity(t.columns.len());
+            for c in 0..t.columns.len() {
+                row.push(match targets.iter().position(|&x| x == c) {
+                    Some(j) if j < src.len() => assign(src[j].clone(), &t, c)?,
+                    _ => writer.default_of(c, &ctx)?,
+                });
+            }
+            writer.validate(&row, &ctx)?;
+            rows.push(row);
+        }
+        (rows, writer, ret)
+    };
+    for row in &rows {
+        insert_row(txn, &writer, row)?;
+    }
+    let returning = match ret {
+        None => None,
+        Some((exprs, cols)) => {
+            let ctx = Ctx::new(&*txn, params);
+            Some((
+                cols,
+                rows.iter()
+                    .map(|r| project(&exprs, r, &ctx))
+                    .collect::<Result<_>>()?,
+            ))
+        }
+    };
+    Ok(Written {
+        count: rows.len() as u64,
+        returning,
+    })
+}
+
+/// The access path and filter for `WHERE filter` on `table`.
+pub fn bind_filter(
+    binder: &mut Binder,
+    table: &Table,
+    filter: Option<&ast::Expr>,
+) -> Result<(Access, Option<Expr>)> {
+    let Some(f) = filter else {
+        return Ok((Access::Full, None));
+    };
+    let pred = binder.condition(f, &table_scope(table))?;
+    let mut parts = Vec::new();
+    conjuncts(pred, &mut parts);
+    Ok((choose_access(table, &parts), conjunction(parts)))
+}
+
+/// `UPDATE`.
+pub fn update(
+    txn: &mut dyn KvTxn,
+    table: &str,
+    assignments: &[(String, ast::Expr)],
+    filter: Option<&ast::Expr>,
+    returning_items: &[SelectItem],
+    params: &[Value],
+) -> Result<Written> {
+    let t = catalog::table(&*txn, table)?;
+    let (changes, writer, ret) = {
+        let ro: &dyn KvTxn = &*txn;
+        let mut binder = Binder::new(ro);
+        let scope = table_scope(&t);
+        let mut sets = Vec::new();
+        for (col, e) in assignments {
+            let c = t.column(col).ok_or_else(|| {
+                Error::undefined_column(format!(
+                    "column \"{col}\" of relation \"{}\" does not exist",
+                    t.name
+                ))
+            })?;
+            if sets.iter().any(|(x, _)| *x == c) {
+                return Err(Error::duplicate_column(format!(
+                    "multiple assignments to same column \"{col}\""
+                )));
+            }
+            sets.push((c, binder.expr(e, &scope)?.0));
+        }
+        let (access, pred) = bind_filter(&mut binder, &t, filter)?;
+        let ret = returning(&mut binder, returning_items, &t)?;
+        let writer = Writer::new(ro, t.clone())?;
+        let ctx = Ctx::new(ro, params);
+        let mut changes = Vec::new();
+        for (key, old) in exec::matching_rows(&t, &access, pred.as_ref(), &ctx)? {
+            let env = Env {
+                row: &old,
+                outer: None,
+                ctx: &ctx,
+            };
+            let mut new = old.clone();
+            for (c, e) in &sets {
+                new[*c] = assign(e.eval(&env)?, &t, *c)?;
+            }
+            writer.validate(&new, &ctx)?;
+            changes.push((key, old, new));
+        }
+        (changes, writer, ret)
+    };
+    let t = &writer.table;
+    for (key, old, new) in &changes {
+        let new_key = if t.primary_key.is_empty() {
+            key.clone()
+        } else {
+            row_key_of(t, new, None)
+        };
+        if new_key != *key {
+            if txn.get(&new_key)?.is_some() {
+                return Err(duplicate(&format!("{}_pkey", t.name)));
+            }
+            txn.delete(key)?;
+        }
+        txn.put(&new_key, &crate::encoding::encode_row(new))?;
+        let (old_pk, new_pk) = (pk_suffix(t, key), pk_suffix(t, &new_key));
+        for i in 0..t.indexes.len() {
+            let (ok, _) = index_entry(t, i, old, &old_pk);
+            let (nk, unique) = index_entry(t, i, new, &new_pk);
+            if ok == nk && old_pk == new_pk {
+                continue;
+            }
+            txn.delete(&ok)?;
+            if unique && txn.get(&nk)?.is_some() {
+                return Err(duplicate(&t.indexes[i].name));
+            }
+            txn.put(&nk, &new_pk)?;
+        }
+    }
+    let returning = match ret {
+        None => None,
+        Some((exprs, cols)) => {
+            let ctx = Ctx::new(&*txn, params);
+            Some((
+                cols,
+                changes
+                    .iter()
+                    .map(|(_, _, n)| project(&exprs, n, &ctx))
+                    .collect::<Result<_>>()?,
+            ))
+        }
+    };
+    Ok(Written {
+        count: changes.len() as u64,
+        returning,
+    })
+}
+
+/// `DELETE`.
+pub fn delete(
+    txn: &mut dyn KvTxn,
+    table: &str,
+    filter: Option<&ast::Expr>,
+    returning_items: &[SelectItem],
+    params: &[Value],
+) -> Result<Written> {
+    let t = catalog::table(&*txn, table)?;
+    let (rows, ret) = {
+        let ro: &dyn KvTxn = &*txn;
+        let mut binder = Binder::new(ro);
+        let (access, pred) = bind_filter(&mut binder, &t, filter)?;
+        let ret = returning(&mut binder, returning_items, &t)?;
+        let ctx = Ctx::new(ro, params);
+        (exec::matching_rows(&t, &access, pred.as_ref(), &ctx)?, ret)
+    };
+    for (key, row) in &rows {
+        txn.delete(key)?;
+        let pk = pk_suffix(&t, key);
+        for i in 0..t.indexes.len() {
+            txn.delete(&index_entry(&t, i, row, &pk).0)?;
+        }
+    }
+    let returning = match ret {
+        None => None,
+        Some((exprs, cols)) => {
+            let ctx = Ctx::new(&*txn, params);
+            Some((
+                cols,
+                rows.iter()
+                    .map(|(_, r)| project(&exprs, r, &ctx))
+                    .collect::<Result<_>>()?,
+            ))
+        }
+    };
+    Ok(Written {
+        count: rows.len() as u64,
+        returning,
+    })
+}
+
+/// Writes the entries of a new index for every existing row.
+pub fn backfill_index(txn: &mut dyn KvTxn, table: &Table, i: usize) -> Result<()> {
+    let rows: Vec<(Vec<u8>, Row)> = {
+        let ctx = Ctx::new(&*txn, &[]);
+        exec::matching_rows(table, &Access::Full, None, &ctx)?
+    };
+    for (key, row) in rows {
+        let pk = pk_suffix(table, &key);
+        let (k, unique) = index_entry(table, i, &row, &pk);
+        if unique && txn.get(&k)?.is_some() {
+            return Err(Error::unique_violation(format!(
+                "could not create unique index \"{}\": key is duplicated",
+                table.indexes[i].name
+            )));
+        }
+        txn.put(&k, &pk)?;
+    }
+    Ok(())
+}
+
+/// Every row of a table rewritten (after `ADD COLUMN … DEFAULT`).
+pub fn rewrite_rows(txn: &mut dyn KvTxn, table: &Table, fill: &Value) -> Result<()> {
+    let rows: Vec<(Vec<u8>, Row)> = {
+        let ctx = Ctx::new(&*txn, &[]);
+        exec::matching_rows(table, &Access::Full, None, &ctx)?
+    };
+    for (key, mut row) in rows {
+        let last = table.columns.len() - 1;
+        row[last] = fill.clone();
+        txn.put(&key, &crate::encoding::encode_row(&row))?;
+    }
+    Ok(())
+}
+
+/// For `EXPLAIN` of a write: the scan it would do.
+pub fn explain_scan(txn: &dyn KvTxn, table: &str, filter: Option<&ast::Expr>) -> Result<Plan> {
+    let t = catalog::table(txn, table)?;
+    let mut binder = Binder::new(txn);
+    let (access, filter) = bind_filter(&mut binder, &t, filter)?;
+    Ok(Plan::Scan {
+        table: t,
+        access,
+        filter,
+        estimate: None,
+    })
+}
