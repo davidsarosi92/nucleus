@@ -1,7 +1,8 @@
 //! Storage layer: pager, buffer pool, B+tree and write-ahead log.
 //!
 //! So far: the on-disk page format ([`page`]), the [`pager`] (PLAN.md §M1)
-//! the [`buffer`] pool (§M2) and the copy-on-write [`btree`] (§M3).  Reaches the outside world only through `nucleus-platform`.
+//! the [`buffer`] pool (§M2) and the copy-on-write [`btree`]
+//! (§M3), the [`wal`] and the crash-safe [`store`] (§M4).  Reaches the outside world only through `nucleus-platform`.
 
 pub mod btree;
 pub mod buffer;
@@ -10,9 +11,13 @@ mod error;
 pub mod node;
 pub mod page;
 pub mod pager;
+pub mod store;
+pub mod wal;
 
 pub use btree::BTree;
 pub use buffer::{BufferPool, PageRef};
 pub use error::{Error, Result};
 pub use page::{PAGE_SIZE, PAYLOAD_SIZE, Page, PageId, PageType};
 pub use pager::Pager;
+pub use store::{Batch, Recovery, Store, StoreOptions};
+pub use wal::{Lsn, Wal};
