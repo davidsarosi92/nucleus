@@ -1,0 +1,172 @@
+# SERIALIZABLE vs. REPEATABLE READ (snapshot isolation): write skew and
+# phantoms between two sessions (PLAN.md §M14).
+
+statement ok
+CREATE TABLE doctors (name TEXT PRIMARY KEY, on_call BOOLEAN)
+
+statement ok
+INSERT INTO doctors VALUES ('alice', true), ('bob', true)
+
+# Under REPEATABLE READ both may go off call: write skew.
+connection a
+
+statement ok
+BEGIN ISOLATION LEVEL REPEATABLE READ
+
+query I
+SELECT count(*) FROM doctors WHERE on_call
+----
+2
+
+connection b
+
+statement ok
+BEGIN ISOLATION LEVEL REPEATABLE READ
+
+query I
+SELECT count(*) FROM doctors WHERE on_call
+----
+2
+
+statement ok
+UPDATE doctors SET on_call = false WHERE name = 'bob'
+
+connection a
+
+statement ok
+UPDATE doctors SET on_call = false WHERE name = 'alice'
+
+statement ok
+COMMIT
+
+connection b
+
+statement ok
+COMMIT
+
+query I
+SELECT count(*) FROM doctors WHERE on_call
+----
+0
+
+statement ok
+UPDATE doctors SET on_call = true
+
+# Under SERIALIZABLE the second commit fails.
+connection a
+
+statement ok
+BEGIN ISOLATION LEVEL SERIALIZABLE
+
+query T
+SHOW transaction_isolation
+----
+serializable
+
+query I
+SELECT count(*) FROM doctors WHERE on_call
+----
+2
+
+connection b
+
+statement ok
+BEGIN ISOLATION LEVEL SERIALIZABLE
+
+query I
+SELECT count(*) FROM doctors WHERE on_call
+----
+2
+
+statement ok
+UPDATE doctors SET on_call = false WHERE name = 'bob'
+
+connection a
+
+statement ok
+UPDATE doctors SET on_call = false WHERE name = 'alice'
+
+statement ok
+COMMIT
+
+connection b
+
+statement error 40001
+COMMIT
+
+query I
+SELECT count(*) FROM doctors WHERE on_call
+----
+1
+
+# Phantoms: an insert into a range another serializable transaction read.
+statement ok
+CREATE TABLE bookings (room INT, slot INT, PRIMARY KEY (room, slot))
+
+connection a
+
+statement ok
+BEGIN ISOLATION LEVEL SERIALIZABLE
+
+query I
+SELECT count(*) FROM bookings WHERE room = 1
+----
+0
+
+connection b
+
+statement ok
+BEGIN ISOLATION LEVEL SERIALIZABLE
+
+query I
+SELECT count(*) FROM bookings WHERE room = 1
+----
+0
+
+statement ok
+INSERT INTO bookings VALUES (1, 10)
+
+statement ok
+COMMIT
+
+connection a
+
+statement ok
+INSERT INTO bookings VALUES (1, 11)
+
+statement error 40001
+COMMIT
+
+# The session default can be serializable.
+statement ok
+SET default_transaction_isolation = 'serializable'
+
+statement ok
+BEGIN
+
+query T
+SHOW transaction_isolation
+----
+serializable
+
+statement ok
+COMMIT
+
+# Read-only serializable transactions never fail.
+statement ok
+BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY
+
+query I
+SELECT count(*) FROM bookings
+----
+1
+
+connection b
+
+statement ok
+INSERT INTO bookings VALUES (2, 1)
+
+connection a
+
+statement ok
+COMMIT

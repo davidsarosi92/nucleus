@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,7 +24,7 @@ pub enum Isolation {
     /// Snapshot isolation.
     #[default]
     Snapshot,
-    /// Serializable (§M14).
+    /// Serializable: snapshot isolation plus read-set validation (§M14).
     Serializable,
 }
 
@@ -73,6 +73,32 @@ struct Inner {
     /// Start timestamps of running transactions (with counts), guarding
     /// their versions from garbage collection.
     active: Mutex<BTreeMap<u64, usize>>,
+    /// Keys written by recent commits, with the newest commit timestamp:
+    /// what serializable transactions validate their reads against.
+    /// Entries no running transaction can conflict with are pruned.
+    /// Changed only under the commit lock.
+    recent: Mutex<BTreeMap<Vec<u8>, u64>>,
+}
+
+/// What a serializable transaction read: keys, and key ranges.
+#[derive(Default)]
+struct ReadSet {
+    keys: BTreeSet<Vec<u8>>,
+    ranges: Vec<(Bound<Vec<u8>>, Bound<Vec<u8>>)>,
+}
+
+/// Prune `recent` once it holds this many keys.
+const RECENT_PRUNE: usize = 4096;
+
+/// Whether `(start, end)` is a non-empty, well-formed range (BTreeMap
+/// panics on the others).
+fn valid_range(start: &Bound<Vec<u8>>, end: &Bound<Vec<u8>>) -> bool {
+    match (start, end) {
+        (Bound::Included(a), Bound::Included(b)) => a <= b,
+        (Bound::Included(a) | Bound::Excluded(a), Bound::Excluded(b))
+        | (Bound::Excluded(a), Bound::Included(b)) => a < b,
+        _ => true,
+    }
 }
 
 /// A database of versioned keys.  Cloning gives another handle to the same
@@ -105,6 +131,7 @@ impl Engine {
                 commit: Mutex::new(recovery.meta),
                 visible: AtomicU64::new(recovery.meta),
                 active: Mutex::new(BTreeMap::new()),
+                recent: Mutex::new(BTreeMap::new()),
             }),
         })
     }
@@ -149,6 +176,7 @@ impl Engine {
             read_only: opts.read_only || opts.at.is_some(),
             isolation: opts.isolation,
             done: false,
+            reads: Mutex::new(ReadSet::default()),
         })
     }
 
@@ -315,6 +343,8 @@ pub struct Transaction {
     read_only: bool,
     isolation: Isolation,
     done: bool,
+    /// Serializable only: what was read, for validation at commit.
+    reads: Mutex<ReadSet>,
 }
 
 impl std::fmt::Debug for Transaction {
@@ -362,6 +392,9 @@ impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if let Some(w) = self.writes.get(key) {
             return Ok(w.clone());
+        }
+        if self.isolation == Isolation::Serializable {
+            lock(&self.reads).keys.insert(key.to_vec());
         }
         Ok(self.engine.read_at(key, self.start)?.flatten())
     }
@@ -417,6 +450,9 @@ impl Transaction {
             store_end,
             buffer: VecDeque::new(),
             writes,
+            range: (start.map(<[u8]>::to_vec), end.map(<[u8]>::to_vec)),
+            last: None,
+            done: false,
         })
     }
 
@@ -435,6 +471,9 @@ impl Transaction {
                     return Err(Error::Conflict { key: key.clone() });
                 }
             }
+            if self.isolation == Isolation::Serializable {
+                self.validate_reads(&engine)?;
+            }
             let ts = *last + 1;
             let wm = engine.current_watermark();
             let mut ops = Vec::with_capacity(self.writes.len());
@@ -444,6 +483,17 @@ impl Transaction {
             }
             let lsn = engine.store.write(&Batch { meta: ts, ops })?;
             *last = ts;
+            let mut recent = lock(&engine.recent);
+            for key in self.writes.keys() {
+                recent.insert(key.clone(), ts);
+            }
+            if recent.len() > RECENT_PRUNE {
+                // Nobody started before the oldest running transaction can
+                // still commit, so older writes cannot conflict any more.
+                let oldest = lock(&engine.active).keys().next().copied().unwrap_or(ts);
+                recent.retain(|_, t| *t > oldest);
+            }
+            drop(recent);
             (ts, lsn)
         };
         engine.store.wait_durable(lsn)?;
@@ -455,6 +505,31 @@ impl Transaction {
             }
         }
         Ok(Timestamp(ts))
+    }
+
+    /// Serializable validation: no key or range this transaction read was
+    /// written by a commit after its snapshot.  Called under the commit lock.
+    fn validate_reads(&self, engine: &Inner) -> Result<()> {
+        let reads = lock(&self.reads);
+        let recent = lock(&engine.recent);
+        for k in &reads.keys {
+            if recent.get(k).is_some_and(|&ts| ts > self.start) {
+                return Err(Error::Conflict { key: k.clone() });
+            }
+        }
+        for (s, e) in &reads.ranges {
+            if !valid_range(s, e) {
+                continue;
+            }
+            let bounds = (s.as_ref().map(Vec::as_slice), e.as_ref().map(Vec::as_slice));
+            if let Some((k, _)) = recent
+                .range::<[u8], _>(bounds)
+                .find(|(_, ts)| **ts > self.start)
+            {
+                return Err(Error::Conflict { key: k.clone() });
+            }
+        }
+        Ok(())
     }
 
     /// Discards the transaction's writes.
@@ -473,6 +548,29 @@ pub struct Scan<'t> {
     /// Visible store entries read ahead.
     buffer: VecDeque<Visible>,
     writes: std::iter::Peekable<std::collections::btree_map::Range<'t, Vec<u8>, Option<Vec<u8>>>>,
+    /// The requested range, and how far it was read: a serializable
+    /// transaction depends on the part it consumed.
+    range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    last: Option<Vec<u8>>,
+    done: bool,
+}
+
+impl Drop for Scan<'_> {
+    fn drop(&mut self) {
+        if self.txn.isolation != Isolation::Serializable {
+            return;
+        }
+        let read = if self.done {
+            Some(self.range.clone())
+        } else {
+            self.last
+                .clone()
+                .map(|k| (self.range.0.clone(), Bound::Included(k)))
+        };
+        if let Some(r) = read {
+            lock(&self.txn.reads).ranges.push(r);
+        }
+    }
 }
 
 impl std::fmt::Debug for Scan<'_> {
@@ -557,6 +655,16 @@ impl Iterator for Scan<'_> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.step().transpose()
+        match self.step() {
+            Ok(Some((k, v))) => {
+                self.last = Some(k.clone());
+                Some(Ok((k, v)))
+            }
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(e) => Some(Err(e)),
+        }
     }
 }
