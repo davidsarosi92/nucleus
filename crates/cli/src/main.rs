@@ -1,6 +1,8 @@
 //! The `nucleus` command-line tool.
 
 mod kv;
+mod server;
+mod sql;
 
 use std::process::ExitCode;
 
@@ -13,6 +15,9 @@ usage:
   nucleus kv <dir> scan [<prefix>]
   nucleus kv <dir> checkpoint | vacuum
   nucleus kv <dir>                  interactive shell (type `help`)
+  nucleus sql <dir> [-c <sql>]      SQL shell, a script on stdin, or one command
+  nucleus server <dir> [--listen <addr:port>] [--password <pw>]
+                                    PostgreSQL-compatible server (default 127.0.0.1:5432)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";
@@ -25,6 +30,8 @@ fn main() -> ExitCode {
             Ok(())
         }
         Some("kv") => kv::run(&args[1..]),
+        Some("sql") => sql::run(&args[1..]),
+        Some("server") => server::run(&args[1..]),
         Some("help" | "--help" | "-h") => {
             print!("{USAGE}");
             Ok(())

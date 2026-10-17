@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 nucleus-kv.workspace = true
+nucleus-sql.workspace = true
+nucleus-server.workspace = true
 
 [lints]
 workspace = true

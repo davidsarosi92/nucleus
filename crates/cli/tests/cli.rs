@@ -75,3 +75,21 @@ fn shell_with_transactions() {
     assert_eq!(nucleus(&["kv", d, "get", "z"], "").1, "(not found)\n");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn sql_shell_and_command() {
+    let dir = temp_dir("sql");
+    let d = dir.to_str().unwrap();
+    let script = "CREATE TABLE t (id INT PRIMARY KEY, name TEXT);\nINSERT INTO t VALUES (1, 'one'),\n  (2, NULL);\nSELECT * FROM t ORDER BY id;\n";
+    let (ok, out) = nucleus(&["sql", d], script);
+    assert!(ok, "{out}");
+    assert!(out.contains("CREATE TABLE\nINSERT 0 2\n id | name \n----+------\n 1  | one  \n 2  |      \n(2 rows)\n"), "{out}");
+    let (ok, out) = nucleus(&["sql", d, "-c", "SELECT count(*) AS n FROM t"], "");
+    assert!(ok && out.contains(" n \n---\n 2 \n(1 row)"), "{out}");
+    let (ok, out) = nucleus(&["sql", d, "-c", "SELECT * FROM nope"], "");
+    assert!(
+        !ok && out.contains("ERROR:  relation \"nope\" does not exist (42P01)"),
+        "{out}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
