@@ -23,7 +23,7 @@ Status legend: ⬜ not started · ◐ in progress · ✅ shipped · ⏸ parked
 | Build targets | Platforms nucleus must build for |
 | Decisions | What has to be settled before the first line of code |
 | Status snapshot | Phases + milestones table |
-| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.23, sits between F1 and F2) |
+| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.24, sits between F1 and F2) |
 | Changelog | Changes to this plan |
 
 ---
@@ -273,6 +273,7 @@ are marked ✅.
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
+| | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ⬜ |
 | | M14.15 | JSON type and functions | ⬜ |
@@ -634,12 +635,13 @@ quickstart in every language.
 parameters, errors, transactions) against `nucleus server` in CI. ✅
 (Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
 
-### Developer platform (§M14.9–§M14.23)
+### Developer platform (§M14.9–§M14.24)
 
 What makes nucleus worth choosing, before more data models: understanding
 queries, being usable by AI models, holding large data and analysing it
 fast, vectors, search and embeddings for AI applications, nucleus
-embedded in any application, browser or phone — and the
+embedded in any application, browser or phone, the memory AI models
+know from — and the
 things nucleus's design gives almost for free (branches and time travel
 from copy-on-write storage and MVCC), the everyday tools (JSON,
 migrations, code generation), an easy start, and what production needs.
@@ -1152,6 +1154,53 @@ only the connection string; the browser edition persists across reloads;
 and the iOS and Android libraries run the examples on a simulator within
 the size budget.
 
+### §M14.24 — Memory for AI models ⬜
+
+A model's weights are a poor place for knowledge: a fact in them cannot be
+corrected without retraining, cannot really be deleted, is the same for
+every user, and cannot say where it came from.  Held in nucleus and read
+while the model generates, the same fact can be all four — so models
+become reasoning engines over a memory that nucleus keeps, built from what
+the milestones before this give (vectors, search, embeddings, row-level
+security, time travel, embedded editions):
+
+- **Updatable**: knowledge and memories are rows, changed in transactions
+  and visible to the next retrieval; a model (or an agent) writes what it
+  learns back — `remember` / `recall` / `forget` as SQL functions, driver
+  helpers and MCP tools (§M14.10) — with near-duplicate merging by
+  similarity, confidence, and expiry or decay per memory.
+- **Erasable, provably**: `FORGET` removes a subject's data everywhere it
+  lives — tables, vector and text indexes, the chunks and embeddings
+  derived from it (lineage from §M14.22), time-travel history (§M14.14,
+  overriding retention) — and from WAL and backups by crypto-shredding:
+  data is encrypted with a per-subject key, and destroying the key erases
+  every copy.  The erasure is recorded, and a check confirms nothing
+  readable is left.
+- **Permissioned**: retrieval runs under row-level security (§M14.18), so
+  a model answering a user knows only what that user may see — in
+  search, in ranking and in what is cited.
+- **Auditable**: every retrieved row carries its source and version, so
+  an answer can cite them; a generation can record what it read (its
+  read set, which the transaction engine already tracks) under a request
+  id; and `AS OF` (§M14.14) answers what the system knew at a given
+  moment.
+- **Fast enough to read while generating**: a retrieval API for inference
+  servers — prepared retrievals, many queries per call (one per sequence
+  in a batch, or per step), results as vectors and ids without
+  conversion — in process through the embedded editions (§M14.23), on
+  the vectorized executor (§M14.20), with a latency target per lookup
+  for a hot working set in memory.
+- Documented schemas and runnable examples beside the agent patterns
+  (§M16.5): a knowledge base with citations, per-user memory, erasure on
+  request.
+
+**Done when:** a fact changed or forgotten is reflected in the next
+retrieval; after `FORGET`, no table, index, derived row, history version,
+WAL segment or backup yields the subject's data (checked by scanning
+every copy); retrieval never returns or cites a row the user may not see
+(leak tests); an answer's citations and recorded read set match what was
+retrieved; and in-process retrieval meets its latency target.
+
 ### §M14.13 — Database branches ⬜
 
 The copy-on-write store makes a consistent snapshot a root pointer: a
@@ -1545,3 +1594,9 @@ style) across a thousand seeds without failure.
   embedded editions (in memory or on a file inside Python and JavaScript,
   the browser, iOS and Android) and §M16.7 sync between devices and a
   server; build targets and D15 updated.
+- **2026-10-17** — New §M14.24, memory for AI models: knowledge kept in
+  nucleus and read at generation time — updatable (`remember` / `recall`
+  / `forget`), provably erasable (`FORGET` through indexes, derived rows,
+  history, WAL and backups by crypto-shredding), permissioned by
+  row-level security, auditable (sources, recorded read sets, `AS OF`),
+  with an in-process retrieval API for inference servers.
