@@ -236,9 +236,16 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
 | | M14.11 | Large data foundations: streaming results, bulk load, spilling, parallel scans, benchmarks | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)`, similarity search, then an ANN index | ⬜ |
+| | M14.13 | Database branches (copy-on-write) | ⬜ |
+| | M14.14 | Time travel: `AS OF` queries | ⬜ |
+| | M14.15 | JSON type and functions | ⬜ |
+| | M14.16 | Migrations and code generation | ⬜ |
+| | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
+| | M14.18 | Operations: backups and point-in-time restore, metrics and tracing, TLS, roles and privileges | ⬜ |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
+| | M16.6 | Live queries: subscriptions to query results | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
 | **F3 — Distributed** | M18 | Range partitioning (still single-node) | ⬜ |
 | | M19 | Per-range Raft replication | ⬜ |
@@ -588,10 +595,13 @@ quickstart in every language.
 parameters, errors, transactions) against `nucleus server` in CI. ✅
 (Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
 
-### Developer appeal (§M14.9–§M14.12)
+### Developer platform (§M14.9–§M14.18)
 
 What makes nucleus worth choosing, before more data models: understanding
-queries, being usable by AI models, holding large data, and vectors.
+queries, being usable by AI models, holding large data, vectors — and the
+things nucleus's design gives almost for free (branches and time travel
+from copy-on-write storage and MVCC), the everyday tools (JSON,
+migrations, code generation), an easy start, and what production needs.
 
 ### §M14.9 — SQL analyzer ⬜
 
@@ -666,6 +676,90 @@ Embeddings beside the data they describe, in the same transactions:
 **Done when:** exact search matches a brute-force reference, and the ANN
 index reaches a set recall at a set latency on a public dataset.
 
+### §M14.13 — Database branches ⬜
+
+The copy-on-write store makes a consistent snapshot a root pointer: a
+branch is a writable database that starts as a snapshot of another and
+shares every unchanged page with it.
+
+- `nucleus branch create <name> [--from <branch> [--at <time>]]`, `list`,
+  `drop`, `reset`; SQL-visible (`nc_catalog.branches`), and per connection
+  (`ncp` Hello names a branch; drivers and `ncsql` take it).
+- Pages are reference-counted across branches (the free list learns
+  sharing); a branch costs only what it changes.
+- Typical uses: a database per test, per pull request, per experiment;
+  discarded in milliseconds.
+
+**Done when:** creating a branch of a large database takes constant time
+and space, writes on either side stay invisible to the other, and crash
+tests cover branch creation and drop.
+
+### §M14.14 — Time travel ⬜
+
+MVCC already keeps old versions for `history`; make them queryable:
+
+- `SELECT … FROM t AS OF TIMESTAMP '…'` (or `AS OF <commit>`), a
+  session-wide `SET read_as_of`, and `BEGIN … AS OF` for a read-only
+  transaction in the past.
+- A retention setting by time (not only by commit count), and
+  `nc_catalog` showing how far back each table can go.
+- Restoring a dropped or damaged table from the past (`CREATE TABLE … AS
+  … AS OF`).
+
+**Done when:** queries at past timestamps return exactly what was visible
+then (checked against a log of the workload), within the retention.
+
+### §M14.15 — JSON ⬜
+
+- A `JSON` type (validated, stored in a compact binary form), operators
+  `->`, `->>`, `#>`, `@>`, `?`, functions to build, extract, test and
+  aggregate (`json_build_object`, `json_agg`, `jsonb_path`-style paths).
+- Indexes on JSON paths (expression indexes), and a containment index.
+- The bridge to the document model (§M15): documents are JSON values.
+
+**Done when:** an slt script checked against PostgreSQL's `jsonb` covers
+the operators and functions.
+
+### §M14.16 — Migrations and code generation ⬜
+
+- `nucleus migrate`: versioned migration files (`up` / `down`), applied
+  transactionally (DDL is transactional), recorded in `nc_catalog`;
+  `status`, `new`, `diff` (the schema change between a database and the
+  files), and a dry run on a branch (§M14.13).
+- `nucleus codegen ts|rust|python|java`: types and typed query helpers
+  generated from the schema (`nc_catalog`) and from checked SQL files.
+
+**Done when:** a sample project migrates up and down, and the generated
+code compiles and passes its tests in each language.
+
+### §M14.17 — Easy start ⬜
+
+- Packages: Homebrew, winget, apt/rpm, a Docker image, an install script;
+  `nucleus init` for a ready local setup.
+- A web console in the server (`--console`): browse tables, run SQL, see
+  plans drawn, `EXPLAIN ANALYZE`, the analyzer's findings.
+- A browser playground: nucleus compiled to WebAssembly (in-memory
+  platform), the whole database in a web page — for docs and teaching.
+- A guided tutorial in DOCS and the examples.
+
+**Done when:** a new user goes from nothing to a running query in one
+command per platform, and the playground runs the tutorial.
+
+### §M14.18 — Operations ⬜
+
+- Online backups (a checkpoint's pages are immutable: a consistent copy
+  without stopping writes), and point-in-time restore from backups plus
+  the WAL.
+- Metrics (Prometheus endpoint) and tracing (OpenTelemetry): commits,
+  conflicts, cache, WAL, statement latencies.
+- TLS for `ncp` (and the PostgreSQL protocol), password hashing (SCRAM),
+  users and roles with `GRANT` / `REVOKE` on tables and columns.
+- An exclusive lock on the data directory, so a second process cannot open
+  it (today nothing prevents that — urgent, to be done first).
+
+**Done when:** a restore reproduces the database at a chosen moment,
+privileges are enforced in slt tests, and TLS works with every driver.
+
 ---
 
 ## §F2 — NoSQL layer
@@ -709,6 +803,19 @@ for free, and what developers otherwise assemble from several systems:
 
 **Done when:** exactly-once processing (consume, write, commit) survives
 crash tests, and changefeeds deliver every committed change in order.
+
+### §M16.6 — Live queries ⬜
+
+A client subscribes to a query and receives its changes after every
+commit that affects it — built on the changefeeds (§M16.5).
+
+- `ncp` subscription messages; driver APIs (`subscribe(sql, params)` →
+  initial rows, then inserts / updates / deletes).
+- Incremental maintenance where the plan allows (filters, projections,
+  joins on keys), re-evaluation otherwise; a limit on subscriptions.
+
+**Done when:** subscribers see exactly the query's result after each
+commit, under concurrent writes, in every driver.
 
 ### §M17 — Further models ⏸
 
@@ -815,3 +922,7 @@ style) across a thousand seeds without failure.
 - **2026-10-17** — Developer appeal planned: §M14.9 SQL analyzer, §M14.10
   AI access (MCP), §M14.11 large data foundations, §M14.12 vectors; §M16.5
   streams and a transactional broker (changefeeds moved there from §M25).
+- **2026-10-17** — Developer platform extended: §M14.13 branches,
+  §M14.14 time travel, §M14.15 JSON, §M14.16 migrations and code
+  generation, §M14.17 easy start, §M14.18 operations (with the data
+  directory lock, urgent); §M16.6 live queries.
