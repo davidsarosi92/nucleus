@@ -414,6 +414,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-example"
+version = "0.1.0"
+dependencies = [
+ "nucleus-client",
+]
+
+[[package]]
 name = "nucleus-kv"
 version = "0.1.0"
 dependencies = [

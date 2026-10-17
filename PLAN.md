@@ -204,6 +204,7 @@ are marked ✅.
 | D12 | Serializable isolation (§M14) | ✅ **Read-set validation** (FoundationDB style): a commit fails if a key or range it read was written after its snapshot | Cahill SSI (fewer aborts, much more state); FDB's approach also distributes in F3 |
 | D13 | System catalog naming (§M14.5) | ✅ **nucleus's own `nc_catalog`** (2026-10-17), in nucleus's terms (table ids, key prefixes, statistics); `pg_catalog` / `information_schema` only as a compatibility layer on top, because PostgreSQL clients hard-code those names — nucleus is PostgreSQL-compatible, not PostgreSQL | expose only `pg_catalog` (simpler, but makes PostgreSQL's names nucleus's identity) |
 | D14 | Client protocol (§M14.7) | ✅ **nucleus's own protocol, `ncp`** (2026-10-17): little-endian frames, nucleus's typed value encoding on the wire, port 20035; nucleus's own drivers (Rust, C, C++, Python, JS/TS, Java).  The PostgreSQL protocol becomes an optional module (`--pg-compat`, off by default), frozen: kept working for psql and existing tools, not extended for tool-specific catalog queries | the PostgreSQL protocol as the only client protocol (every PostgreSQL tool works, but nucleus stays a PostgreSQL look-alike); dropping it entirely (no psql, no PostgreSQL tools) |
+| D15 | Versioning (open) | Proposed: one semantic version for the server, CLI and Rust crates (`Cargo.toml`); each **format** versioned on its own and checked on open — the on-disk store (pager header), the catalog records (table definitions, already versioned), the row encoding, the WAL, and the client protocol (`ncp`'s Hello version, negotiated); drivers versioned per language but tied to the protocol version they speak; upgrades read older formats and refuse newer ones, and a release note lists format changes | to decide before the first tagged release and before publishing drivers |
 
 ---
 
@@ -230,7 +231,7 @@ are marked ✅.
 | | M14.5 | SQL completeness: FK, FULL JOIN, EXCEPT/INTERSECT, CTEs, numeric and date/time types, `nc_catalog`, `psql` `\d` | ✅ DOCS §8.10–§8.11 |
 | | M14.6 | `ncsql`: nucleus's own SQL shell and client | ✅ DOCS §6.2 |
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
-| | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java | ⬜ |
+| | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
@@ -567,18 +568,20 @@ work together unconfigured.
 **Done when:** the slt suite runs over `ncp`, `ncsql` uses it, and psql
 still works with `--pg-compat`. ✅
 
-### §M14.8 — Drivers ⬜
+### §M14.8 — Drivers ✅ (DOCS §11)
 
 Drivers in `drivers/`, each a small library with its own tests against a
 running server (CI starts one): **C** (`libnucleus`, C99, POSIX and
 Windows sockets), **C++** (header-only, over the C driver: RAII,
 exceptions, `std::variant` values), **Python** (pure Python, DB-API 2.0
 style), **JavaScript/TypeScript** (Node, Promise API, typings), **Java**
-(plain Java 11+, no dependencies).  Values map to each language's natural
-types (exact decimals, dates and times, arrays).
+(plain Java 17+, no dependencies).  Values map to each language's natural
+types (exact decimals, dates and times, arrays).  `examples/` has the same
+quickstart in every language.
 
 **Done when:** every driver passes the same conformance cases (types,
-parameters, errors, transactions) against `nucleus server` in CI.
+parameters, errors, transactions) against `nucleus server` in CI. ✅
+(Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
 
 ---
 
@@ -708,3 +711,5 @@ style) across a thousand seeds without failure.
 - **2026-10-17** — D14 settled: nucleus's own protocol and drivers; the
   PostgreSQL protocol becomes optional.  §M14.7 shipped; default
   credentials `nucleus` / `nucleus`.
+- **2026-10-17** — §M14.8 shipped: drivers for C, C++, Python, JS/TS and
+  Java beside Rust, with `examples/`; D15 (versioning) opened.

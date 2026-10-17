@@ -1,0 +1,17 @@
+[package]
+name = "nucleus-example"
+description = "nucleus from Rust: the quickstart"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "quickstart"
+path = "src/main.rs"
+
+[dependencies]
+nucleus-client.workspace = true
+
+[lints]
+workspace = true

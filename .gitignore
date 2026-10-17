@@ -1,3 +1,10 @@
 /target
 **/*.rs.bk
 .DS_Store
+# Driver build outputs
+/drivers/c/build
+/drivers/js/dist
+/drivers/js/node_modules
+/drivers/java/target
+__pycache__/
+*.class

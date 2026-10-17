@@ -1,0 +1,268 @@
+// The C++ driver for nucleus: a header-only C++17 layer over libnucleus
+// (drivers/c): RAII connections, exceptions, std::variant values.
+//
+//   nucleus::Connection db;                      // 127.0.0.1:20035, nucleus / nucleus
+//   db.query("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)");
+//   db.query("INSERT INTO t VALUES ($1, $2)", {1, "one"});
+//   for (const auto& row : db.query("SELECT id, name FROM t").rows)
+//       std::cout << row[0].str() << " " << row[1].str() << "\n";
+//
+// Build with drivers/c/nucleus.c (or libnucleus.a) and -Idrivers/c.
+#ifndef NUCLEUS_HPP
+#define NUCLEUS_HPP
+
+#include <cstdint>
+#include <deque>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "nucleus.h"
+
+namespace nucleus {
+
+/// An error from the server (`code()` is the SQLSTATE) or the driver.
+class Error : public std::runtime_error {
+public:
+    Error(const std::string& message, std::string code)
+        : std::runtime_error(code.empty() ? message : message + " (" + code + ")"), code_(std::move(code)) {}
+    const std::string& code() const { return code_; }
+
+private:
+    std::string code_;
+};
+
+/// An exact decimal (mantissa × 10^-scale), parsed from and printed as text.
+struct Numeric {
+    uint64_t lo = 0;
+    int64_t hi = 0;
+    uint8_t scale = 0;
+
+    static Numeric parse(const std::string& text) {
+        nc_value v;
+        if (nc_numeric(text.c_str(), &v) != 0) throw Error("invalid numeric: " + text, "22P02");
+        return Numeric{v.as.numeric.lo, v.as.numeric.hi, v.as.numeric.scale};
+    }
+    bool operator==(const Numeric& o) const { return lo == o.lo && hi == o.hi && scale == o.scale; }
+};
+
+/// Days since 2000-01-01.
+struct Date {
+    int32_t days = 0;
+    static Date ymd(int y, int m, int d) { return Date{nc_days_from_ymd(y, m, d)}; }
+    bool operator==(const Date& o) const { return days == o.days; }
+};
+
+/// Microseconds since 2000-01-01 00:00.
+struct Timestamp {
+    int64_t micros = 0;
+    bool operator==(const Timestamp& o) const { return micros == o.micros; }
+};
+
+/// Microseconds since 2000-01-01 00:00 UTC.
+struct TimestampTz {
+    int64_t micros = 0;
+    bool operator==(const TimestampTz& o) const { return micros == o.micros; }
+};
+
+/// Months, days and microseconds, kept apart.
+struct Interval {
+    int32_t months = 0, days = 0;
+    int64_t micros = 0;
+    bool operator==(const Interval& o) const { return months == o.months && days == o.days && micros == o.micros; }
+};
+
+struct Value;
+using Array = std::vector<Value>;
+using Variant = std::variant<std::monostate, bool, int64_t, double, std::string, Numeric, Date, Timestamp,
+                             TimestampTz, Interval, Array>;
+
+/// A value: NULL (monostate), bool, int64, double, text, numeric, date,
+/// timestamp, timestamptz, interval, or an array.
+struct Value : Variant {
+    using Variant::Variant;
+    Value() = default;
+    Value(int v) : Variant(int64_t{v}) {}
+    Value(long v) : Variant(int64_t{v}) {}
+    Value(long long v) : Variant(int64_t{v}) {}
+    Value(const char* s) : Variant(std::string(s)) {}
+
+    bool is_null() const { return std::holds_alternative<std::monostate>(*this); }
+    template <class T> const T& as() const { return std::get<T>(*this); }
+
+    /// As nucleus prints it (NULL as an empty string).
+    std::string str() const;
+};
+
+/// Where and as whom to connect (the defaults reach a local server).
+struct Config {
+    std::string host = "127.0.0.1";
+    uint16_t port = NC_DEFAULT_PORT;
+    std::string user = "nucleus";
+    std::string password = "nucleus";
+    std::string database = "nucleus";
+    std::string client_name = "nucleus-cpp";
+};
+
+struct Column {
+    std::string name;
+    nc_type type;
+    nc_type element; // for arrays
+};
+
+/// One statement's result.
+struct Result {
+    std::vector<Column> columns;
+    std::vector<std::vector<Value>> rows;
+    std::string command; // "SELECT", "INSERT", …
+    uint64_t count = 0;  // rows returned or affected
+};
+
+namespace detail {
+
+inline Value from_c(const nc_value& v) {
+    switch (v.type) {
+    case NC_BOOL: return Value(bool(v.as.boolean));
+    case NC_INT: return Value(int64_t{v.as.integer});
+    case NC_FLOAT: return Value(v.as.real);
+    case NC_TEXT: return Value(std::string(v.as.text.ptr, v.as.text.len));
+    case NC_NUMERIC: return Value(Numeric{v.as.numeric.lo, v.as.numeric.hi, v.as.numeric.scale});
+    case NC_DATE: return Value(Date{v.as.date});
+    case NC_TIMESTAMP: return Value(Timestamp{v.as.timestamp});
+    case NC_TIMESTAMPTZ: return Value(TimestampTz{v.as.timestamp});
+    case NC_INTERVAL: return Value(Interval{v.as.interval.months, v.as.interval.days, v.as.interval.micros});
+    case NC_ARRAY: {
+        Array items;
+        for (size_t i = 0; i < v.as.array.len; i++) items.push_back(from_c(v.as.array.items[i]));
+        return Value(std::move(items));
+    }
+    default: return Value();
+    }
+}
+
+/// Converts values for a call; nested arrays live in `store`.
+inline nc_value to_c(const Value& v, std::deque<std::vector<nc_value>>& store) {
+    struct Visit {
+        std::deque<std::vector<nc_value>>& store;
+        nc_value operator()(std::monostate) const { return nc_null(); }
+        nc_value operator()(bool b) const { return nc_bool(b); }
+        nc_value operator()(int64_t i) const { return nc_int(i); }
+        nc_value operator()(double f) const { return nc_float(f); }
+        nc_value operator()(const std::string& s) const {
+            nc_value r = nc_text(s.c_str());
+            r.as.text.len = s.size();
+            return r;
+        }
+        nc_value operator()(const Numeric& n) const {
+            nc_value r = nc_null();
+            r.type = NC_NUMERIC;
+            r.as.numeric.lo = n.lo;
+            r.as.numeric.hi = n.hi;
+            r.as.numeric.scale = n.scale;
+            return r;
+        }
+        nc_value operator()(const Date& d) const { return nc_date(d.days); }
+        nc_value operator()(const Timestamp& t) const { return nc_timestamp(t.micros); }
+        nc_value operator()(const TimestampTz& t) const { return nc_timestamptz(t.micros); }
+        nc_value operator()(const Interval& i) const { return nc_interval(i.months, i.days, i.micros); }
+        nc_value operator()(const Array& a) const {
+            std::vector<nc_value> items;
+            for (const auto& item : a) items.push_back(to_c(item, store));
+            store.push_back(std::move(items));
+            return nc_array(store.back().data(), store.back().size());
+        }
+    };
+    return std::visit(Visit{store}, static_cast<const Variant&>(v));
+}
+
+} // namespace detail
+
+inline std::string Value::str() const {
+    std::deque<std::vector<nc_value>> store;
+    nc_value v = detail::to_c(*this, store);
+    size_t n = nc_format(&v, nullptr, 0);
+    std::string s(n, '\0');
+    nc_format(&v, s.data(), n + 1);
+    return s;
+}
+
+/// A connection; closes when destroyed.  One thread at a time.
+class Connection {
+public:
+    explicit Connection(const Config& config = Config()) {
+        nc_config c = nc_default_config();
+        c.host = config.host.c_str();
+        c.port = config.port;
+        c.user = config.user.c_str();
+        c.password = config.password.c_str();
+        c.database = config.database.c_str();
+        c.client_name = config.client_name.c_str();
+        nc_error err;
+        conn_ = nc_connect(&c, &err);
+        if (!conn_) throw Error(err.message, err.code);
+    }
+    Connection(const Connection&) = delete;
+    Connection& operator=(const Connection&) = delete;
+    Connection(Connection&& o) noexcept : conn_(std::exchange(o.conn_, nullptr)) {}
+    Connection& operator=(Connection&& o) noexcept {
+        if (this != &o) {
+            nc_close(conn_);
+            conn_ = std::exchange(o.conn_, nullptr);
+        }
+        return *this;
+    }
+    ~Connection() { nc_close(conn_); }
+
+    /// Runs one statement (or several: the last one's result).
+    Result query(const std::string& sql, const std::vector<Value>& params = {}) {
+        std::deque<std::vector<nc_value>> store;
+        std::vector<nc_value> args;
+        for (const auto& p : params) args.push_back(detail::to_c(p, store));
+        nc_error err;
+        nc_result* r = nc_query(conn_, sql.c_str(), args.data(), args.size(), &err);
+        if (!r) throw Error(err.message, err.code);
+        Result out;
+        for (size_t c = 0; c < nc_columns(r); c++)
+            out.columns.push_back({nc_column_name(r, c), nc_column_type(r, c), nc_column_element(r, c)});
+        for (size_t i = 0; i < nc_rows(r); i++) {
+            std::vector<Value> row;
+            for (size_t c = 0; c < nc_columns(r); c++) row.push_back(detail::from_c(*nc_value_at(r, i, c)));
+            out.rows.push_back(std::move(row));
+        }
+        out.command = nc_command(r);
+        out.count = nc_count(r);
+        nc_result_free(r);
+        return out;
+    }
+
+    /// BEGIN, `body(*this)`, then COMMIT — or ROLLBACK if it throws.
+    template <class F> auto transaction(F body) -> decltype(body(*this)) {
+        query("BEGIN");
+        try {
+            if constexpr (std::is_void_v<decltype(body(*this))>) {
+                body(*this);
+                query(status() == 2 ? "ROLLBACK" : "COMMIT");
+            } else {
+                auto v = body(*this);
+                query(status() == 2 ? "ROLLBACK" : "COMMIT");
+                return v;
+            }
+        } catch (...) {
+            query("ROLLBACK");
+            throw;
+        }
+    }
+
+    /// 0 idle, 1 in a transaction block, 2 in a failed block.
+    int status() const { return nc_status(conn_); }
+    std::string server_version() const { return nc_server_version(conn_); }
+
+private:
+    nc_conn* conn_ = nullptr;
+};
+
+} // namespace nucleus
+
+#endif // NUCLEUS_HPP

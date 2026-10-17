@@ -1,0 +1,461 @@
+"""Python driver for nucleus: the nucleus protocol (ncp, DOCS.md section 10).
+
+Pure Python, no dependencies.  The API follows DB-API 2.0 where it fits::
+
+    import nucleus
+
+    conn = nucleus.connect()            # 127.0.0.1:20035, user/password "nucleus"
+    conn.execute("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)")
+    conn.execute("INSERT INTO t VALUES ($1, $2)", [1, "one"])
+    for row in conn.execute("SELECT id, name FROM t").rows:
+        print(row)
+    with conn.transaction():
+        conn.execute("UPDATE t SET name = $1 WHERE id = $2", ["uno", 1])
+
+Values map to Python types: boolean -> bool, bigint -> int, double ->
+float, numeric -> decimal.Decimal, text -> str, date -> datetime.date,
+timestamp -> datetime.datetime (naive), timestamptz -> datetime.datetime
+(UTC), interval -> nucleus.Interval, arrays -> list, NULL -> None.
+Parameters take the same types (and datetime.timedelta for intervals).
+
+The connection runs each statement in its own transaction unless a
+transaction block is open (``BEGIN`` or ``with conn.transaction()``).
+"""
+
+import datetime as _dt
+import decimal as _decimal
+import socket as _socket
+import struct as _struct
+from dataclasses import dataclass as _dataclass
+
+__all__ = [
+    "connect", "Connection", "Cursor", "Result", "Column", "Interval",
+    "Error", "InterfaceError", "DatabaseError", "DataError",
+    "OperationalError", "IntegrityError", "ProgrammingError",
+    "NotSupportedError", "DEFAULT_PORT",
+]
+
+apilevel = "2.0"
+threadsafety = 1
+paramstyle = "numeric"  # $1, $2, ...
+
+PROTOCOL_VERSION = 1
+DEFAULT_PORT = 20035
+
+_EPOCH_DATE = _dt.date(2000, 1, 1)
+_EPOCH = _dt.datetime(2000, 1, 1)
+_EPOCH_TZ = _dt.datetime(2000, 1, 1, tzinfo=_dt.timezone.utc)
+_TYPE_NAMES = {
+    0: "unknown", 1: "boolean", 2: "bigint", 3: "double precision", 4: "text",
+    5: "numeric", 6: "date", 7: "timestamp", 8: "timestamptz", 9: "interval",
+    10: "array",
+}
+
+
+class Error(Exception):
+    """A nucleus error; ``code`` is the SQLSTATE (or None)."""
+
+    def __init__(self, message, code=None):
+        super().__init__(f"{message} ({code})" if code else message)
+        self.message = message
+        self.code = code
+
+
+class InterfaceError(Error):
+    """A problem with the driver or the connection itself."""
+
+
+class DatabaseError(Error):
+    """An error the server reported."""
+
+
+class DataError(DatabaseError):
+    """Bad data: SQLSTATE class 22."""
+
+
+class OperationalError(DatabaseError):
+    """Connection, authentication, serialization: classes 08, 28, 40, …"""
+
+
+class IntegrityError(DatabaseError):
+    """A constraint: class 23."""
+
+
+class ProgrammingError(DatabaseError):
+    """Syntax, names, types: class 42."""
+
+
+class NotSupportedError(DatabaseError):
+    """A feature nucleus does not have: 0A000."""
+
+
+def _server_error(code, message):
+    cls = {
+        "22": DataError, "23": IntegrityError, "42": ProgrammingError,
+        "0A": NotSupportedError, "08": OperationalError,
+        "28": OperationalError, "40": OperationalError,
+    }.get(code[:2], DatabaseError)
+    return cls(message, code)
+
+
+@_dataclass(frozen=True)
+class Interval:
+    """An interval: months, days and microseconds, kept apart (a month is
+    not a fixed number of days)."""
+
+    months: int = 0
+    days: int = 0
+    microseconds: int = 0
+
+    def to_timedelta(self):
+        """As a timedelta; fails if there are months."""
+        if self.months:
+            raise ValueError("an interval with months has no fixed length")
+        return _dt.timedelta(days=self.days, microseconds=self.microseconds)
+
+
+@_dataclass(frozen=True)
+class Column:
+    """A result column: its name and type name."""
+
+    name: str
+    type: str
+
+
+@_dataclass
+class Result:
+    """One statement's result."""
+
+    columns: list
+    rows: list
+    command: str
+    count: int
+
+    def records(self):
+        """The rows as dicts by column name."""
+        names = [c.name for c in self.columns]
+        return [dict(zip(names, r)) for r in self.rows]
+
+
+# ------------------------------------------------------------------ values
+
+def _put_str(out, s):
+    b = s.encode("utf-8")
+    out += _struct.pack("<I", len(b))
+    out += b
+
+
+def _encode(out, v):
+    if v is None:
+        out.append(0)
+    elif isinstance(v, bool):
+        out += bytes([1, 1 if v else 0])
+    elif isinstance(v, int):
+        if not -(1 << 63) <= v < (1 << 63):
+            raise DataError("integer out of range for bigint", "22003")
+        out.append(2)
+        out += _struct.pack("<q", v)
+    elif isinstance(v, float):
+        out.append(3)
+        out += _struct.pack("<d", v)
+    elif isinstance(v, str):
+        out.append(4)
+        _put_str(out, v)
+    elif isinstance(v, _decimal.Decimal):
+        if not v.is_finite():
+            raise DataError("NaN and infinity are not numeric values", "22003")
+        sign, digits, exp = v.as_tuple()
+        mantissa = int("".join(map(str, digits)) or "0")
+        if exp > 0:
+            mantissa *= 10 ** exp
+            exp = 0
+        if sign:
+            mantissa = -mantissa
+        out.append(5)
+        out += (mantissa & ((1 << 128) - 1)).to_bytes(16, "little")
+        out.append(-exp)
+    elif isinstance(v, _dt.datetime):
+        if v.tzinfo is None:
+            out.append(7)
+            delta = v - _EPOCH
+        else:
+            out.append(8)
+            delta = v - _EPOCH_TZ
+        out += _struct.pack("<q", (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds)
+    elif isinstance(v, _dt.date):
+        out.append(6)
+        out += _struct.pack("<i", (v - _EPOCH_DATE).days)
+    elif isinstance(v, _dt.timedelta):
+        out.append(9)
+        out += _struct.pack("<iiq", 0, v.days, v.seconds * 1_000_000 + v.microseconds)
+    elif isinstance(v, Interval):
+        out.append(9)
+        out += _struct.pack("<iiq", v.months, v.days, v.microseconds)
+    elif isinstance(v, (list, tuple)):
+        out.append(10)
+        out += _struct.pack("<I", len(v))
+        for item in v:
+            _encode(out, item)
+    else:
+        raise InterfaceError(f"cannot send a {type(v).__name__} as a nucleus value")
+
+
+class _Reader:
+    def __init__(self, b):
+        self.b = b
+        self.at = 0
+
+    def take(self, n):
+        if self.at + n > len(self.b):
+            raise InterfaceError("message too short")
+        s = self.b[self.at:self.at + n]
+        self.at += n
+        return s
+
+    def u8(self):
+        return self.take(1)[0]
+
+    def unpack(self, fmt):
+        return _struct.unpack(fmt, self.take(_struct.calcsize(fmt)))
+
+    def str(self):
+        (n,) = self.unpack("<I")
+        return self.take(n).decode("utf-8")
+
+    def value(self):
+        tag = self.u8()
+        if tag == 0:
+            return None
+        if tag == 1:
+            return self.u8() != 0
+        if tag == 2:
+            return self.unpack("<q")[0]
+        if tag == 3:
+            return self.unpack("<d")[0]
+        if tag == 4:
+            return self.str()
+        if tag == 5:
+            mantissa = int.from_bytes(self.take(16), "little", signed=True)
+            scale = self.u8()
+            return _decimal.Decimal(mantissa).scaleb(-scale)
+        if tag == 6:
+            return _EPOCH_DATE + _dt.timedelta(days=self.unpack("<i")[0])
+        if tag == 7:
+            return _EPOCH + _dt.timedelta(microseconds=self.unpack("<q")[0])
+        if tag == 8:
+            return _EPOCH_TZ + _dt.timedelta(microseconds=self.unpack("<q")[0])
+        if tag == 9:
+            months, days, micros = self.unpack("<iiq")
+            return Interval(months, days, micros)
+        if tag == 10:
+            (n,) = self.unpack("<I")
+            return [self.value() for _ in range(n)]
+        raise InterfaceError(f"unknown value tag {tag}")
+
+
+# -------------------------------------------------------------- connection
+
+class Connection:
+    """A connection to a nucleus server (see ``connect``)."""
+
+    def __init__(self, host="127.0.0.1", port=DEFAULT_PORT, user="nucleus",
+                 password="nucleus", database="nucleus", timeout=10.0,
+                 client_name="nucleus-python"):
+        try:
+            self._sock = _socket.create_connection((host, port), timeout=timeout)
+        except OSError as e:
+            raise OperationalError(f"cannot connect to {host}:{port}: {e}") from e
+        self._sock.settimeout(None)
+        self._sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+        self._buf = bytearray()
+        self.status = 0  # 0 idle, 1 in a transaction block, 2 failed block
+        hello = bytearray(_struct.pack("<H", PROTOCOL_VERSION))
+        for s in (user, database, password or "", client_name):
+            _put_str(hello, s)
+        self._send(b"H", hello)
+        while True:
+            kind, body = self._read()
+            r = _Reader(body)
+            if kind == b"W":
+                r.unpack("<H")
+                self.server_version = r.str()
+                (self.session_id,) = r.unpack("<I")
+            elif kind == b"R":
+                self.status = body[0]
+                return
+            elif kind == b"E":
+                code, message = r.str(), r.str()
+                self._sock.close()
+                raise _server_error(code, message)
+            else:
+                raise InterfaceError(f"unexpected message {kind!r}")
+
+    def _send(self, kind, body):
+        self._sock.sendall(kind + _struct.pack("<I", len(body)) + bytes(body))
+
+    def _fill(self, n):
+        while len(self._buf) < n:
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                raise OperationalError("the server closed the connection")
+            self._buf += chunk
+
+    def _read(self):
+        self._fill(5)
+        kind = bytes(self._buf[:1])
+        (n,) = _struct.unpack("<I", self._buf[1:5])
+        self._fill(5 + n)
+        body = bytes(self._buf[5:5 + n])
+        del self._buf[:5 + n]
+        return kind, body
+
+    def query(self, sql, params=(), text=False):
+        """Runs ``sql`` (several statements allowed without parameters).
+        Returns a list with each statement's ``Result``; a failing
+        statement raises its error."""
+        body = bytearray()
+        _put_str(body, sql)
+        body.append(1 if text else 0)
+        body += _struct.pack("<H", len(params))
+        for p in params:
+            _encode(body, p)
+        self._send(b"Q", body)
+        results, error = [], None
+        columns, rows = None, []
+        while True:
+            kind, payload = self._read()
+            r = _Reader(payload)
+            if kind == b"C":
+                (n,) = r.unpack("<H")
+                columns = []
+                for _ in range(n):
+                    name = r.str()
+                    tag = r.u8()
+                    type_name = _TYPE_NAMES.get(tag, "unknown")
+                    if tag == 10:
+                        type_name = _TYPE_NAMES.get(r.u8(), "unknown") + "[]"
+                    columns.append(Column(name, type_name))
+                rows = []
+            elif kind == b"D":
+                rows.append(tuple(r.value() for _ in columns))
+            elif kind == b"K":
+                command = r.str()
+                (count,) = r.unpack("<Q")
+                results.append(Result(columns or [], rows if columns is not None else [], command, count))
+                columns, rows = None, []
+            elif kind == b"E":
+                error = _server_error(r.str(), r.str())
+            elif kind == b"R":
+                self.status = payload[0]
+                if error is not None:
+                    raise error
+                return results
+            else:
+                raise InterfaceError(f"unexpected message {kind!r}")
+
+    def execute(self, sql, params=()):
+        """Runs one statement (or several, returning the last result)."""
+        results = self.query(sql, params)
+        return results[-1] if results else Result([], [], "", 0)
+
+    def cursor(self):
+        return Cursor(self)
+
+    def transaction(self):
+        """``with conn.transaction():`` — BEGIN, then COMMIT, or ROLLBACK
+        if the block raises."""
+        return _Transaction(self)
+
+    @property
+    def in_transaction(self):
+        return self.status != 0
+
+    def commit(self):
+        if self.status != 0:
+            self.execute("COMMIT")
+
+    def rollback(self):
+        if self.status != 0:
+            self.execute("ROLLBACK")
+
+    def close(self):
+        if self._sock is not None:
+            try:
+                self._send(b"X", b"")
+            except OSError:
+                pass
+            self._sock.close()
+            self._sock = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class _Transaction:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        self.conn.execute("BEGIN")
+        return self.conn
+
+    def __exit__(self, kind, value, tb):
+        self.conn.execute("ROLLBACK" if kind is not None or self.conn.status == 2 else "COMMIT")
+        return False
+
+
+class Cursor:
+    """A DB-API cursor."""
+
+    arraysize = 1
+
+    def __init__(self, conn):
+        self.connection = conn
+        self.description = None
+        self.rowcount = -1
+        self._rows = []
+
+    def execute(self, sql, params=()):
+        r = self.connection.execute(sql, list(params))
+        self._rows = list(r.rows)
+        self.rowcount = r.count
+        self.description = (
+            [(c.name, c.type, None, None, None, None, None) for c in r.columns]
+            if r.columns else None
+        )
+        return self
+
+    def executemany(self, sql, seq):
+        total = 0
+        for params in seq:
+            self.execute(sql, params)
+            total += self.rowcount
+        self.rowcount = total
+
+    def fetchone(self):
+        return self._rows.pop(0) if self._rows else None
+
+    def fetchmany(self, size=None):
+        n = size or self.arraysize
+        out, self._rows = self._rows[:n], self._rows[n:]
+        return out
+
+    def fetchall(self):
+        out, self._rows = self._rows, []
+        return out
+
+    def __iter__(self):
+        while self._rows:
+            yield self._rows.pop(0)
+
+    def close(self):
+        self._rows = []
+
+
+def connect(host="127.0.0.1", port=DEFAULT_PORT, user="nucleus", password="nucleus",
+            database="nucleus", timeout=10.0):
+    """Opens a connection (the defaults reach a local server as it starts)."""
+    return Connection(host, port, user, password, database, timeout)

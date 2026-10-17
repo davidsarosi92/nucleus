@@ -1,0 +1,767 @@
+/* libnucleus: see nucleus.h. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200112L
+#endif
+
+#include "nucleus.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET nc_socket;
+#define NC_BAD_SOCKET INVALID_SOCKET
+#define nc_closesocket closesocket
+#else
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+typedef int nc_socket;
+#define NC_BAD_SOCKET (-1)
+#define nc_closesocket close
+#endif
+
+struct nc_conn {
+    nc_socket sock;
+    int status;
+    char server[128];
+    uint32_t session;
+};
+
+typedef struct {
+    char *name;
+    nc_type type;
+    nc_type element;
+} nc_column;
+
+struct nc_result {
+    nc_column *columns;
+    size_t ncolumns;
+    nc_value *values; /* rows × columns */
+    size_t nrows, cap_rows;
+    char *command;
+    uint64_t count;
+};
+
+/* ----------------------------------------------------------------- errors */
+
+static void set_error(nc_error *err, const char *code, const char *fmt, ...) {
+    va_list ap;
+    if (!err) return;
+    snprintf(err->code, sizeof err->code, "%s", code ? code : "");
+    va_start(ap, fmt);
+    vsnprintf(err->message, sizeof err->message, fmt, ap);
+    va_end(ap);
+}
+
+/* ---------------------------------------------------------------- buffers */
+
+typedef struct {
+    unsigned char *b;
+    size_t len, cap;
+    int failed;
+} buf;
+
+static void put(buf *w, const void *p, size_t n) {
+    if (w->failed) return;
+    if (w->len + n > w->cap) {
+        size_t cap = w->cap ? w->cap * 2 : 256;
+        unsigned char *nb;
+        while (cap < w->len + n) cap *= 2;
+        nb = realloc(w->b, cap);
+        if (!nb) {
+            w->failed = 1;
+            return;
+        }
+        w->b = nb;
+        w->cap = cap;
+    }
+    memcpy(w->b + w->len, p, n);
+    w->len += n;
+}
+
+static void put_u8(buf *w, unsigned v) {
+    unsigned char c = (unsigned char)v;
+    put(w, &c, 1);
+}
+
+static void put_le(buf *w, uint64_t v, int n) {
+    unsigned char b[8];
+    int i;
+    for (i = 0; i < n; i++) b[i] = (unsigned char)(v >> (8 * i));
+    put(w, b, (size_t)n);
+}
+
+static void put_str(buf *w, const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    put_le(w, n, 4);
+    put(w, s ? s : "", n);
+}
+
+static int put_value(buf *w, const nc_value *v) {
+    size_t i;
+    put_u8(w, (unsigned)v->type);
+    switch (v->type) {
+    case NC_NULL: break;
+    case NC_BOOL: put_u8(w, v->as.boolean ? 1 : 0); break;
+    case NC_INT: put_le(w, (uint64_t)v->as.integer, 8); break;
+    case NC_FLOAT: {
+        uint64_t bits;
+        memcpy(&bits, &v->as.real, 8);
+        put_le(w, bits, 8);
+        break;
+    }
+    case NC_TEXT:
+        put_le(w, v->as.text.len, 4);
+        put(w, v->as.text.ptr, v->as.text.len);
+        break;
+    case NC_NUMERIC:
+        put_le(w, v->as.numeric.lo, 8);
+        put_le(w, (uint64_t)v->as.numeric.hi, 8);
+        put_u8(w, v->as.numeric.scale);
+        break;
+    case NC_DATE: put_le(w, (uint32_t)v->as.date, 4); break;
+    case NC_TIMESTAMP:
+    case NC_TIMESTAMPTZ: put_le(w, (uint64_t)v->as.timestamp, 8); break;
+    case NC_INTERVAL:
+        put_le(w, (uint32_t)v->as.interval.months, 4);
+        put_le(w, (uint32_t)v->as.interval.days, 4);
+        put_le(w, (uint64_t)v->as.interval.micros, 8);
+        break;
+    case NC_ARRAY:
+        put_le(w, v->as.array.len, 4);
+        for (i = 0; i < v->as.array.len; i++)
+            if (put_value(w, &v->as.array.items[i]) != 0) return -1;
+        break;
+    default: return -1;
+    }
+    return 0;
+}
+
+typedef struct {
+    const unsigned char *b;
+    size_t len, at;
+    int bad;
+} reader;
+
+static const unsigned char *take(reader *r, size_t n) {
+    const unsigned char *p;
+    if (r->bad || r->at + n > r->len) {
+        r->bad = 1;
+        return NULL;
+    }
+    p = r->b + r->at;
+    r->at += n;
+    return p;
+}
+
+static uint64_t get_le(reader *r, int n) {
+    const unsigned char *p = take(r, (size_t)n);
+    uint64_t v = 0;
+    int i;
+    if (!p) return 0;
+    for (i = 0; i < n; i++) v |= (uint64_t)p[i] << (8 * i);
+    return v;
+}
+
+static char *get_str(reader *r) {
+    size_t n = (size_t)get_le(r, 4);
+    const unsigned char *p = take(r, n);
+    char *s;
+    if (!p) return NULL;
+    s = malloc(n + 1);
+    if (!s) {
+        r->bad = 1;
+        return NULL;
+    }
+    memcpy(s, p, n);
+    s[n] = 0;
+    return s;
+}
+
+static void free_value(nc_value *v) {
+    size_t i;
+    if (v->type == NC_TEXT) free((void *)v->as.text.ptr);
+    if (v->type == NC_ARRAY) {
+        for (i = 0; i < v->as.array.len; i++) free_value((nc_value *)&v->as.array.items[i]);
+        free((void *)v->as.array.items);
+    }
+    v->type = NC_NULL;
+}
+
+static int get_value(reader *r, nc_value *v) {
+    unsigned tag = (unsigned)get_le(r, 1);
+    memset(v, 0, sizeof *v);
+    v->type = (nc_type)tag;
+    switch (tag) {
+    case NC_NULL: break;
+    case NC_BOOL: v->as.boolean = get_le(r, 1) != 0; break;
+    case NC_INT: v->as.integer = (int64_t)get_le(r, 8); break;
+    case NC_FLOAT: {
+        uint64_t bits = get_le(r, 8);
+        memcpy(&v->as.real, &bits, 8);
+        break;
+    }
+    case NC_TEXT: {
+        size_t n = (size_t)get_le(r, 4);
+        const unsigned char *p = take(r, n);
+        char *s;
+        if (!p) return -1;
+        s = malloc(n + 1);
+        if (!s) return -1;
+        memcpy(s, p, n);
+        s[n] = 0;
+        v->as.text.ptr = s;
+        v->as.text.len = n;
+        break;
+    }
+    case NC_NUMERIC:
+        v->as.numeric.lo = get_le(r, 8);
+        v->as.numeric.hi = (int64_t)get_le(r, 8);
+        v->as.numeric.scale = (uint8_t)get_le(r, 1);
+        break;
+    case NC_DATE: v->as.date = (int32_t)(uint32_t)get_le(r, 4); break;
+    case NC_TIMESTAMP:
+    case NC_TIMESTAMPTZ: v->as.timestamp = (int64_t)get_le(r, 8); break;
+    case NC_INTERVAL:
+        v->as.interval.months = (int32_t)(uint32_t)get_le(r, 4);
+        v->as.interval.days = (int32_t)(uint32_t)get_le(r, 4);
+        v->as.interval.micros = (int64_t)get_le(r, 8);
+        break;
+    case NC_ARRAY: {
+        size_t n = (size_t)get_le(r, 4), i;
+        nc_value *items;
+        if (r->bad || n > r->len) return -1;
+        items = calloc(n ? n : 1, sizeof *items);
+        if (!items) return -1;
+        v->as.array.items = items;
+        v->as.array.len = 0;
+        for (i = 0; i < n; i++) {
+            if (get_value(r, &items[i]) != 0) return -1;
+            v->as.array.len = i + 1;
+        }
+        break;
+    }
+    default: return -1;
+    }
+    return r->bad ? -1 : 0;
+}
+
+/* ---------------------------------------------------------------- network */
+
+static int send_all(nc_conn *c, const unsigned char *p, size_t n) {
+    while (n > 0) {
+#ifdef _WIN32
+        int k = send(c->sock, (const char *)p, (int)n, 0);
+#else
+        ssize_t k = send(c->sock, p, n, 0);
+#endif
+        if (k <= 0) return -1;
+        p += k;
+        n -= (size_t)k;
+    }
+    return 0;
+}
+
+static int recv_all(nc_conn *c, unsigned char *p, size_t n) {
+    while (n > 0) {
+#ifdef _WIN32
+        int k = recv(c->sock, (char *)p, (int)n, 0);
+#else
+        ssize_t k = recv(c->sock, p, n, 0);
+#endif
+        if (k <= 0) return -1;
+        p += k;
+        n -= (size_t)k;
+    }
+    return 0;
+}
+
+static int send_frame(nc_conn *c, char kind, const buf *body) {
+    unsigned char h[5];
+    size_t n = body ? body->len : 0;
+    int i;
+    h[0] = (unsigned char)kind;
+    for (i = 0; i < 4; i++) h[1 + i] = (unsigned char)(n >> (8 * i));
+    if (send_all(c, h, 5) != 0) return -1;
+    return n ? send_all(c, body->b, n) : 0;
+}
+
+/* Reads one frame; the body is malloc'd (free it). */
+static int read_frame(nc_conn *c, char *kind, unsigned char **body, size_t *len) {
+    unsigned char h[5];
+    size_t n;
+    if (recv_all(c, h, 5) != 0) return -1;
+    n = (size_t)h[1] | (size_t)h[2] << 8 | (size_t)h[3] << 16 | (size_t)h[4] << 24;
+    if (n > (1u << 30)) return -1;
+    *body = malloc(n ? n : 1);
+    if (!*body) return -1;
+    if (n && recv_all(c, *body, n) != 0) {
+        free(*body);
+        return -1;
+    }
+    *kind = (char)h[0];
+    *len = n;
+    return 0;
+}
+
+nc_config nc_default_config(void) {
+    nc_config cfg;
+    cfg.host = "127.0.0.1";
+    cfg.port = NC_DEFAULT_PORT;
+    cfg.user = "nucleus";
+    cfg.password = "nucleus";
+    cfg.database = "nucleus";
+    cfg.client_name = "libnucleus";
+    return cfg;
+}
+
+static void server_error(nc_error *err, const unsigned char *body, size_t len) {
+    reader r = {body, len, 0, 0};
+    char *code = get_str(&r), *msg = get_str(&r);
+    set_error(err, code ? code : "", "%s", msg ? msg : "unknown error");
+    free(code);
+    free(msg);
+}
+
+nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
+    nc_config d = nc_default_config();
+    struct addrinfo hints, *res = NULL, *ai;
+    char port[16];
+    nc_conn *c;
+    buf hello = {0};
+    int one = 1, rc;
+    if (!cfg) cfg = &d;
+#ifdef _WIN32
+    {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+            set_error(err, "", "WSAStartup failed");
+            return NULL;
+        }
+    }
+#endif
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(port, sizeof port, "%u", (unsigned)(cfg->port ? cfg->port : NC_DEFAULT_PORT));
+    rc = getaddrinfo(cfg->host ? cfg->host : d.host, port, &hints, &res);
+    if (rc != 0) {
+        set_error(err, "", "cannot resolve %s", cfg->host ? cfg->host : d.host);
+        return NULL;
+    }
+    c = calloc(1, sizeof *c);
+    if (!c) {
+        freeaddrinfo(res);
+        set_error(err, "", "out of memory");
+        return NULL;
+    }
+    c->sock = NC_BAD_SOCKET;
+    for (ai = res; ai; ai = ai->ai_next) {
+        c->sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (c->sock == NC_BAD_SOCKET) continue;
+        if (connect(c->sock, ai->ai_addr, (int)ai->ai_addrlen) == 0) break;
+        nc_closesocket(c->sock);
+        c->sock = NC_BAD_SOCKET;
+    }
+    freeaddrinfo(res);
+    if (c->sock == NC_BAD_SOCKET) {
+        set_error(err, "", "cannot connect to %s:%s", cfg->host ? cfg->host : d.host, port);
+        free(c);
+        return NULL;
+    }
+    setsockopt(c->sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
+    put_le(&hello, NC_PROTOCOL_VERSION, 2);
+    put_str(&hello, cfg->user ? cfg->user : d.user);
+    put_str(&hello, cfg->database ? cfg->database : d.database);
+    put_str(&hello, cfg->password ? cfg->password : "");
+    put_str(&hello, cfg->client_name ? cfg->client_name : d.client_name);
+    rc = hello.failed ? -1 : send_frame(c, 'H', &hello);
+    free(hello.b);
+    while (rc == 0) {
+        char kind;
+        unsigned char *body;
+        size_t len;
+        if (read_frame(c, &kind, &body, &len) != 0) break;
+        if (kind == 'W') {
+            reader r = {body, len, 0, 0};
+            char *server;
+            get_le(&r, 2);
+            server = get_str(&r);
+            snprintf(c->server, sizeof c->server, "%s", server ? server : "");
+            free(server);
+            c->session = (uint32_t)get_le(&r, 4);
+        } else if (kind == 'R') {
+            c->status = len ? body[0] : 0;
+            free(body);
+            return c;
+        } else if (kind == 'E') {
+            server_error(err, body, len);
+            free(body);
+            nc_closesocket(c->sock);
+            free(c);
+            return NULL;
+        } else {
+            free(body);
+            break;
+        }
+        free(body);
+    }
+    set_error(err, "08006", "the connection failed during login");
+    nc_closesocket(c->sock);
+    free(c);
+    return NULL;
+}
+
+void nc_result_free(nc_result *r) {
+    size_t i;
+    if (!r) return;
+    for (i = 0; i < r->nrows * r->ncolumns; i++) free_value(&r->values[i]);
+    for (i = 0; i < r->ncolumns; i++) free(r->columns[i].name);
+    free(r->columns);
+    free(r->values);
+    free(r->command);
+    free(r);
+}
+
+nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, nc_error *err) {
+    buf q = {0};
+    size_t i;
+    nc_result *cur = NULL, *last = NULL;
+    int failed = 0;
+    put_str(&q, sql);
+    put_u8(&q, 0);
+    put_le(&q, nparams, 2);
+    for (i = 0; i < nparams; i++) {
+        if (put_value(&q, &params[i]) != 0) {
+            free(q.b);
+            set_error(err, "", "parameter %u has an unknown type", (unsigned)i + 1);
+            return NULL;
+        }
+    }
+    if (q.failed || send_frame(c, 'Q', &q) != 0) {
+        free(q.b);
+        set_error(err, "08006", "connection lost");
+        return NULL;
+    }
+    free(q.b);
+    for (;;) {
+        char kind;
+        unsigned char *body;
+        size_t len;
+        reader r;
+        if (read_frame(c, &kind, &body, &len) != 0) {
+            nc_result_free(cur);
+            nc_result_free(last);
+            set_error(err, "08006", "connection lost");
+            return NULL;
+        }
+        r.b = body;
+        r.len = len;
+        r.at = 0;
+        r.bad = 0;
+        switch (kind) {
+        case 'C': {
+            size_t n = (size_t)get_le(&r, 2);
+            nc_result_free(cur);
+            cur = calloc(1, sizeof *cur);
+            if (cur) cur->columns = calloc(n ? n : 1, sizeof *cur->columns);
+            if (!cur || !cur->columns) break;
+            for (i = 0; i < n && !r.bad; i++) {
+                cur->columns[i].name = get_str(&r);
+                cur->columns[i].type = (nc_type)get_le(&r, 1);
+                if (cur->columns[i].type == NC_ARRAY) cur->columns[i].element = (nc_type)get_le(&r, 1);
+                cur->ncolumns = i + 1;
+            }
+            break;
+        }
+        case 'D':
+            if (!cur) break;
+            if (cur->nrows == cur->cap_rows) {
+                size_t cap = cur->cap_rows ? cur->cap_rows * 2 : 16;
+                nc_value *nv = realloc(cur->values, cap * (cur->ncolumns ? cur->ncolumns : 1) * sizeof *nv);
+                if (!nv) break;
+                cur->values = nv;
+                cur->cap_rows = cap;
+            }
+            for (i = 0; i < cur->ncolumns; i++) {
+                nc_value *v = &cur->values[cur->nrows * cur->ncolumns + i];
+                if (get_value(&r, v) != 0) {
+                    free_value(v);
+                    r.bad = 1;
+                    for (; i + 1 < cur->ncolumns; i++) cur->values[cur->nrows * cur->ncolumns + i + 1].type = NC_NULL;
+                    break;
+                }
+            }
+            cur->nrows++;
+            break;
+        case 'K':
+            if (!cur) cur = calloc(1, sizeof *cur);
+            if (cur) {
+                cur->command = get_str(&r);
+                cur->count = get_le(&r, 8);
+            }
+            nc_result_free(last);
+            last = cur;
+            cur = NULL;
+            break;
+        case 'E':
+            server_error(err, body, len);
+            failed = 1;
+            break;
+        case 'R':
+            c->status = len ? body[0] : 0;
+            free(body);
+            nc_result_free(cur);
+            if (failed) {
+                nc_result_free(last);
+                return NULL;
+            }
+            if (!last) set_error(err, "", "no result");
+            return last;
+        default:
+            r.bad = 1;
+        }
+        free(body);
+        if (r.bad) {
+            nc_result_free(cur);
+            nc_result_free(last);
+            set_error(err, "08P01", "malformed message from the server");
+            return NULL;
+        }
+    }
+}
+
+int nc_status(const nc_conn *c) { return c->status; }
+const char *nc_server_version(const nc_conn *c) { return c->server; }
+uint32_t nc_session_id(const nc_conn *c) { return c->session; }
+
+void nc_close(nc_conn *c) {
+    if (!c) return;
+    send_frame(c, 'X', NULL);
+    nc_closesocket(c->sock);
+    free(c);
+}
+
+size_t nc_columns(const nc_result *r) { return r->ncolumns; }
+const char *nc_column_name(const nc_result *r, size_t col) { return col < r->ncolumns ? r->columns[col].name : NULL; }
+nc_type nc_column_type(const nc_result *r, size_t col) { return col < r->ncolumns ? r->columns[col].type : NC_NULL; }
+nc_type nc_column_element(const nc_result *r, size_t col) { return col < r->ncolumns ? r->columns[col].element : NC_NULL; }
+size_t nc_rows(const nc_result *r) { return r->nrows; }
+const nc_value *nc_value_at(const nc_result *r, size_t row, size_t col) {
+    return row < r->nrows && col < r->ncolumns ? &r->values[row * r->ncolumns + col] : NULL;
+}
+const char *nc_command(const nc_result *r) { return r->command ? r->command : ""; }
+uint64_t nc_count(const nc_result *r) { return r->count; }
+
+/* ----------------------------------------------------------------- values */
+
+nc_value nc_null(void) { nc_value v; memset(&v, 0, sizeof v); return v; }
+nc_value nc_bool(int b) { nc_value v = nc_null(); v.type = NC_BOOL; v.as.boolean = b != 0; return v; }
+nc_value nc_int(int64_t i) { nc_value v = nc_null(); v.type = NC_INT; v.as.integer = i; return v; }
+nc_value nc_float(double f) { nc_value v = nc_null(); v.type = NC_FLOAT; v.as.real = f; return v; }
+nc_value nc_text(const char *s) {
+    nc_value v = nc_null();
+    if (!s) return v;
+    v.type = NC_TEXT;
+    v.as.text.ptr = s;
+    v.as.text.len = strlen(s);
+    return v;
+}
+nc_value nc_date(int32_t days) { nc_value v = nc_null(); v.type = NC_DATE; v.as.date = days; return v; }
+nc_value nc_timestamp(int64_t us) { nc_value v = nc_null(); v.type = NC_TIMESTAMP; v.as.timestamp = us; return v; }
+nc_value nc_timestamptz(int64_t us) { nc_value v = nc_null(); v.type = NC_TIMESTAMPTZ; v.as.timestamp = us; return v; }
+nc_value nc_interval(int32_t months, int32_t days, int64_t micros) {
+    nc_value v = nc_null();
+    v.type = NC_INTERVAL;
+    v.as.interval.months = months;
+    v.as.interval.days = days;
+    v.as.interval.micros = micros;
+    return v;
+}
+nc_value nc_array(const nc_value *items, size_t len) {
+    nc_value v = nc_null();
+    v.type = NC_ARRAY;
+    v.as.array.items = items;
+    v.as.array.len = len;
+    return v;
+}
+
+/* 128-bit magnitudes as four 32-bit limbs, most significant first. */
+typedef struct { uint32_t l[4]; } u128;
+
+static int mul10_add(u128 *x, unsigned d) {
+    uint64_t carry = d;
+    int i;
+    for (i = 3; i >= 0; i--) {
+        uint64_t t = (uint64_t)x->l[i] * 10 + carry;
+        x->l[i] = (uint32_t)t;
+        carry = t >> 32;
+    }
+    return carry != 0;
+}
+
+static unsigned divmod10(u128 *x) {
+    uint64_t rem = 0;
+    int i;
+    for (i = 0; i < 4; i++) {
+        uint64_t cur = (rem << 32) | x->l[i];
+        x->l[i] = (uint32_t)(cur / 10);
+        rem = cur % 10;
+    }
+    return (unsigned)rem;
+}
+
+static int is_zero(const u128 *x) { return !(x->l[0] | x->l[1] | x->l[2] | x->l[3]); }
+
+static void negate(uint64_t *lo, uint64_t *hi) {
+    *lo = ~*lo + 1;
+    *hi = ~*hi + (*lo == 0);
+}
+
+int nc_numeric(const char *text, nc_value *out) {
+    u128 m = {{0, 0, 0, 0}};
+    int neg = 0, scale = 0, seen = 0, point = 0;
+    uint64_t lo, hi;
+    const char *p = text;
+    if (!p) return -1;
+    while (*p == ' ') p++;
+    if (*p == '-' || *p == '+') neg = *p++ == '-';
+    for (; *p; p++) {
+        if (*p == '.' && !point) {
+            point = 1;
+        } else if (*p >= '0' && *p <= '9') {
+            if (mul10_add(&m, (unsigned)(*p - '0'))) return -1;
+            seen = 1;
+            if (point) scale++;
+        } else {
+            break;
+        }
+    }
+    while (*p == ' ') p++;
+    if (!seen || *p || scale > 38 || (m.l[0] & 0x80000000u)) return -1;
+    lo = (uint64_t)m.l[2] << 32 | m.l[3];
+    hi = (uint64_t)m.l[0] << 32 | m.l[1];
+    if (neg) negate(&lo, &hi);
+    *out = nc_null();
+    out->type = NC_NUMERIC;
+    out->as.numeric.lo = lo;
+    out->as.numeric.hi = (int64_t)hi;
+    out->as.numeric.scale = (uint8_t)scale;
+    return 0;
+}
+
+int32_t nc_days_from_ymd(int year, int month, int day) {
+    int64_t y = month <= 2 ? year - 1 : year;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t mp = (month + 9) % 12;
+    int64_t doy = (153 * mp + 2) / 5 + day - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (int32_t)(era * 146097 + doe - 719468 - 10957);
+}
+
+void nc_ymd_from_days(int32_t days, int *year, int *month, int *day) {
+    int64_t z = (int64_t)days + 10957 + 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    int64_t doe = z - era * 146097;
+    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int64_t mp = (5 * doy + 2) / 153;
+    int64_t d = doy - (153 * mp + 2) / 5 + 1;
+    int64_t m = mp < 10 ? mp + 3 : mp - 9;
+    *year = (int)(yoe + era * 400 + (m <= 2));
+    *month = (int)m;
+    *day = (int)d;
+}
+
+static size_t fmt_time(char *out, size_t size, int64_t us_of_day) {
+    int64_t h = us_of_day / 3600000000LL, mi = us_of_day / 60000000LL % 60;
+    int64_t s = us_of_day / 1000000 % 60, f = us_of_day % 1000000;
+    if (f == 0) return (size_t)snprintf(out, size, "%02lld:%02lld:%02lld", (long long)h, (long long)mi, (long long)s);
+    {
+        char frac[8];
+        int n;
+        snprintf(frac, sizeof frac, "%06lld", (long long)f);
+        for (n = 5; n > 0 && frac[n] == '0'; n--) frac[n] = 0;
+        return (size_t)snprintf(out, size, "%02lld:%02lld:%02lld.%s", (long long)h, (long long)mi, (long long)s, frac);
+    }
+}
+
+size_t nc_format(const nc_value *v, char *buf, size_t size) {
+    char tmp[128];
+    size_t n = 0, i;
+    if (size) buf[0] = 0;
+    switch (v->type) {
+    case NC_NULL: return 0;
+    case NC_BOOL: return (size_t)snprintf(buf, size, "%s", v->as.boolean ? "t" : "f");
+    case NC_INT: return (size_t)snprintf(buf, size, "%lld", (long long)v->as.integer);
+    case NC_FLOAT: return (size_t)snprintf(buf, size, "%.17g", v->as.real);
+    case NC_TEXT: return (size_t)snprintf(buf, size, "%s", v->as.text.ptr);
+    case NC_NUMERIC: {
+        uint64_t lo = v->as.numeric.lo, hi = (uint64_t)v->as.numeric.hi;
+        int neg = v->as.numeric.hi < 0, len = 0, scale = v->as.numeric.scale, k;
+        u128 m;
+        char digits[48];
+        if (neg) negate(&lo, &hi);
+        m.l[0] = (uint32_t)(hi >> 32);
+        m.l[1] = (uint32_t)hi;
+        m.l[2] = (uint32_t)(lo >> 32);
+        m.l[3] = (uint32_t)lo;
+        do digits[len++] = (char)('0' + divmod10(&m)); while (!is_zero(&m));
+        while (len <= scale) digits[len++] = '0';
+        if (neg) tmp[n++] = '-';
+        for (k = len - 1; k >= 0; k--) {
+            tmp[n++] = digits[k];
+            if (k == scale && scale > 0) tmp[n++] = '.';
+        }
+        tmp[n] = 0;
+        return (size_t)snprintf(buf, size, "%s", tmp);
+    }
+    case NC_DATE: {
+        int y, m, d;
+        nc_ymd_from_days(v->as.date, &y, &m, &d);
+        return (size_t)snprintf(buf, size, "%04d-%02d-%02d", y, m, d);
+    }
+    case NC_TIMESTAMP:
+    case NC_TIMESTAMPTZ: {
+        const int64_t day = 86400000000LL;
+        int64_t t = v->as.timestamp, days = t / day, rem = t % day;
+        int y, m, d;
+        if (rem < 0) {
+            rem += day;
+            days--;
+        }
+        nc_ymd_from_days((int32_t)days, &y, &m, &d);
+        fmt_time(tmp, sizeof tmp, rem);
+        return (size_t)snprintf(buf, size, "%04d-%02d-%02d %s%s", y, m, d, tmp,
+                                v->type == NC_TIMESTAMPTZ ? "+00" : "");
+    }
+    case NC_INTERVAL: {
+        int64_t us = v->as.interval.micros;
+        fmt_time(tmp, sizeof tmp, us < 0 ? -us : us);
+        return (size_t)snprintf(buf, size, "%d mons %d days %s%s", (int)v->as.interval.months,
+                                (int)v->as.interval.days, us < 0 ? "-" : "", tmp);
+    }
+    case NC_ARRAY:
+        n = (size_t)snprintf(buf, size, "{");
+        for (i = 0; i < v->as.array.len; i++) {
+            const nc_value *e = &v->as.array.items[i];
+            if (i) n += (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, ",");
+            if (e->type == NC_NULL)
+                n += (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, "NULL");
+            else
+                n += nc_format(e, n < size ? buf + n : NULL, n < size ? size - n : 0);
+        }
+        n += (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, "}");
+        return n;
+    }
+    return 0;
+}

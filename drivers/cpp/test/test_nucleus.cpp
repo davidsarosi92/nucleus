@@ -1,0 +1,96 @@
+// The C++ driver against a running nucleus server (NUCLEUS_HOST,
+// NUCLEUS_PORT; scripts/driver-tests.sh starts one).
+#include <cstdlib>
+#include <ctime>
+#include <iostream>
+#include <string>
+
+#include "nucleus.hpp"
+
+static int failures = 0;
+#define CHECK(cond)                                                                       \
+    do {                                                                                  \
+        if (!(cond)) {                                                                    \
+            std::cerr << __FILE__ << ":" << __LINE__ << ": check failed: " #cond "\n";    \
+            failures++;                                                                   \
+        }                                                                                 \
+    } while (0)
+
+static nucleus::Config config() {
+    nucleus::Config c;
+    if (const char* h = std::getenv("NUCLEUS_HOST")) c.host = h;
+    if (const char* p = std::getenv("NUCLEUS_PORT")) c.port = static_cast<uint16_t>(std::atoi(p));
+    return c;
+}
+
+static std::string table() {
+    static int n = 0;
+    return "cpp_" + std::to_string(std::time(nullptr)) + "_" + std::to_string(++n);
+}
+
+static std::string error_code(nucleus::Connection& db, const std::string& sql) {
+    try {
+        db.query(sql);
+    } catch (const nucleus::Error& e) {
+        return e.code();
+    }
+    return "";
+}
+
+int main() {
+    using namespace nucleus;
+    {
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, b BOOLEAN, f FLOAT, s TEXT, n NUMERIC(10, 2),"
+                 " d DATE, tz TIMESTAMPTZ, iv INTERVAL, tags TEXT[])");
+        std::vector<Value> row = {1, true, 0.5, "h\xc3\xa9llo", Numeric::parse("-123.45"), Date::ymd(2024, 2, 29),
+                                  TimestampTz{763387200000000LL}, Interval{1, 2, 3000000},
+                                  Array{"a", Value(), "c"}};
+        auto r = db.query("INSERT INTO " + t + " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", row);
+        CHECK(r.command == "INSERT" && r.count == 1);
+        r = db.query("SELECT * FROM " + t);
+        CHECK(r.rows.size() == 1 && r.rows[0] == row);
+        CHECK(r.columns[8].type == NC_ARRAY && r.columns[8].element == NC_TEXT);
+        CHECK(r.rows[0][4].str() == "-123.45");
+        CHECK(r.rows[0][6].str() == "2024-03-10 12:00:00+00");
+        CHECK(r.rows[0][8].str() == "{a,NULL,c}");
+        r = db.query("SELECT 1.50 + 1, $1 + 1, NULL", {"41"});
+        CHECK(r.rows[0][0].str() == "2.50" && r.rows[0][1].as<int64_t>() == 42 && r.rows[0][2].is_null());
+    }
+    {
+        Connection db(config());
+        CHECK(error_code(db, "SELECT * FROM nosuch") == "42P01");
+        CHECK(error_code(db, "SELECT 1 / 0") == "22012");
+        auto t = table();
+        db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY)");
+        db.transaction([&](Connection& c) { c.query("INSERT INTO " + t + " VALUES (1)"); });
+        try {
+            db.transaction([&](Connection& c) {
+                c.query("INSERT INTO " + t + " VALUES (2)");
+                throw std::runtime_error("roll back");
+            });
+            CHECK(false);
+        } catch (const std::runtime_error&) {
+        }
+        CHECK(db.status() == 0);
+        CHECK(db.query("SELECT count(*) FROM " + t).rows[0][0].as<int64_t>() == 1);
+        CHECK(error_code(db, "INSERT INTO " + t + " VALUES (1)") == "23505");
+    }
+    {
+        auto c = config();
+        c.password = "wrong";
+        try {
+            Connection db(c);
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "28P01");
+        }
+    }
+    if (failures) {
+        std::cerr << failures << " check(s) failed\n";
+        return 1;
+    }
+    std::cout << "nucleus.hpp: all checks passed\n";
+    return 0;
+}

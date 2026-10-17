@@ -31,11 +31,14 @@
 | `crates/storage` | `nucleus-storage` | page format, pager, buffer pool, B+tree, WAL, store | §M1–§M4 ✅ |
 | `crates/txn` | `nucleus-txn` | MVCC, snapshot isolation, GC | §M5 ✅ |
 | `crates/kv` | `nucleus-kv` | the KV contract and the local `Database` | §M6 ✅ |
-| `crates/sql` | `nucleus-sql` | types, encodings, catalog, parser, binder, optimizer, executor, sessions | §M7–§M14 ✅ |
-| `crates/server` | `nucleus-server` | the PostgreSQL wire protocol | §M12 ✅ |
-| `crates/cli` | `nucleus-cli` (binary `nucleus`) | `nucleus kv`, `nucleus sql`, `nucleus server` | §M6, §M12 ✅ |
+| `crates/sql` | `nucleus-sql` | types, encodings, catalog (`nc_catalog`, PostgreSQL views), parser, binder, optimizer, executor, sessions | §M7–§M14.5 ✅ |
+| `crates/server` | `nucleus-server` | the nucleus protocol; the PostgreSQL protocol (optional) | §M12, §M14.7 ✅ |
+| `crates/client` | `nucleus-client` | the Rust driver | §M14.6–§M14.8 ✅ |
+| `crates/cli` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` | §M6, §M12, §M14.6 ✅ |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
-| `scripts` | — | `package.sh` | §M6 |
+| `drivers` | — | drivers for C, C++, Python, JS/TS, Java (§11) | §M14.8 ✅ |
+| `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
+| `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh` | §M6, §M12, §M14.8 |
 
 Workspace-wide: Rust edition 2024, toolchain pinned in `rust-toolchain.toml`
 (rustup installs it on first use), `unsafe_code` forbidden, `missing_docs`
@@ -886,10 +889,56 @@ every nucleus type (numeric as mantissa and scale, dates and timestamps as
 days and µs since 2000-01-01, intervals, arrays) with `From` conversions
 for parameters.
 
-(The other languages: §M14.8, in progress.)
+**C:** `drivers/c` (`nucleus.h`, `nucleus.c`; C99, POSIX sockets or
+Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
+(the last statement's result, or NULL with the SQLSTATE in `err`),
+accessors (`nc_rows`, `nc_value_at`, `nc_column_type`, `nc_command`,
+`nc_count`), `nc_format` (text as `ncsql` prints it), value constructors
+(`nc_int`, `nc_text`, `nc_numeric`, `nc_date`, `nc_array`, …),
+`nc_result_free`, `nc_close`.  Results own their values.
+
+**C++:** `drivers/cpp/nucleus.hpp`, header-only C++17 over the C driver:
+`nucleus::Connection` (RAII, movable), `query(sql, {params})` → `Result`,
+`transaction(fn)`, `nucleus::Error` with `code()`; `nucleus::Value` is a
+`std::variant` (NULL, bool, int64, double, string, `Numeric`, `Date`,
+`Timestamp`, `TimestampTz`, `Interval`, `Array`).
+
+**Python:** `drivers/python`, package `nucleus` (pure Python 3.8+).
+`nucleus.connect()`, `conn.execute(sql, params)` → `Result` (`rows`,
+`records()`, `columns`, `command`, `count`), `conn.query` for several
+statements, `with conn.transaction():`, DB-API cursors; values as `bool`,
+`int`, `float`, `Decimal`, `str`, `date`, `datetime` (naive / UTC),
+`Interval`, `list`; errors are `nucleus.Error` subclasses by SQLSTATE class
+(`IntegrityError` for 23, `ProgrammingError` for 42, …).
+
+**JavaScript / TypeScript:** `drivers/js`, package `nucleus-db` (Node;
+TypeScript source that Node 22.6+ runs directly, `npm run build` for
+`dist/`).  `await connect()`, `query(sql, params)` → `Result`, `queryAll`,
+`transaction(fn)`; queries on one connection are queued.  Values: integers
+as `number` (`bigint` beyond 2^53), `Decimal` (exact, with `parse` /
+`toString`), `Date` for dates and timestamps (UTC; millisecond precision
+when read), `Interval`, arrays, `null`; errors are `NucleusError` with
+`code`.
+
+**Java:** `drivers/java`, package `io.github.davidsarosi92.nucleus` (Java
+17+, `javac` or Maven).  `NucleusClient.connect(new Config())`,
+`query(sql, params...)` → `Result` (`rows()`, `records()`), `queryAll`,
+`transaction(fn)`, `NucleusException` with `code()`; values as `Boolean`,
+`Long`, `Double`, `BigDecimal`, `String`, `LocalDate`, `LocalDateTime`,
+`OffsetDateTime` (UTC), `Interval`, `List`.
+
+**Tests and examples.**  Every driver has the same conformance cases
+(each type both ways, NULL and arrays, text parameters, errors and their
+SQLSTATE, transactions, a wrong password), and `examples/<language>/` has
+the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
+[languages]` starts a server on a free port and runs them all; the CI job
+`drivers` does so on Linux.
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.8 drivers:** C, C++, Python, JS/TS and Java beside
+  the Rust one, each with conformance tests; `examples/` in every language;
+  the CI job `drivers`.
 - **2026-10-17 — §M14.7 the nucleus protocol (`ncp`):** the server's
   default protocol (port 20035, user / password `nucleus`); the Rust
   driver and `ncsql` use it; PostgreSQL's protocol is optional

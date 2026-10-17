@@ -1,0 +1,116 @@
+package io.github.davidsarosi92.nucleus;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Objects;
+import java.util.UUID;
+
+/**
+ * The Java driver against a running nucleus server (NUCLEUS_HOST, NUCLEUS_PORT;
+ * scripts/driver-tests.sh starts one). Plain Java: run its main.
+ */
+public final class NucleusTest {
+    private static int passed;
+
+    private static Config config() {
+        return new Config()
+                .host(Objects.requireNonNullElse(System.getenv("NUCLEUS_HOST"), "127.0.0.1"))
+                .port(Integer.parseInt(Objects.requireNonNullElse(System.getenv("NUCLEUS_PORT"), "20035")));
+    }
+
+    private static String table() {
+        return "java_" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private static void check(boolean ok, String what) {
+        if (!ok) throw new AssertionError(what);
+    }
+
+    private static void equal(Object got, Object want, String what) {
+        if (!Objects.equals(got, want)) throw new AssertionError(what + ": got " + got + ", want " + want);
+    }
+
+    private static String errorCode(Runnable r) {
+        try {
+            r.run();
+        } catch (NucleusException e) {
+            return e.code();
+        }
+        throw new AssertionError("no error");
+    }
+
+    static void typesBothWays() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            String t = table();
+            db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, b BOOLEAN, f FLOAT, s TEXT, n NUMERIC(10, 2),"
+                    + " d DATE, ts TIMESTAMP, tz TIMESTAMPTZ, iv INTERVAL, tags TEXT[])");
+            List<Object> row = Arrays.asList(1L, true, 0.5, "héllo", new BigDecimal("-123.45"),
+                    LocalDate.of(2024, 2, 29), LocalDateTime.of(2024, 3, 10, 14, 5, 6, 500_000_000),
+                    OffsetDateTime.of(2024, 3, 10, 12, 0, 0, 0, ZoneOffset.UTC), new Interval(1, 2, 3_000_000),
+                    Arrays.asList("a", null, "c"));
+            Result r = db.query("INSERT INTO " + t + " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", row.toArray());
+            equal(r.command() + " " + r.count(), "INSERT 1", "insert");
+            Result got = db.query("SELECT * FROM " + t);
+            equal(got.rows(), List.of(row), "round trip");
+            equal(got.columns().get(9).type(), "text[]", "array type");
+            equal(db.query("SELECT 1.50 + 1, $1 + 1", "41").rows().get(0), List.of(new BigDecimal("2.50"), 42L), "numeric and text param");
+            equal(db.query("SELECT NULL").rows().get(0).get(0), null, "null");
+            equal(got.records().get(0).get("s"), "héllo", "records");
+        }
+    }
+
+    static void errors() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            equal(errorCode(() -> db.query("SELECT * FROM nosuch")), "42P01", "undefined table");
+            equal(errorCode(() -> db.query("SELECT 1 / 0")), "22012", "division by zero");
+            String t = table();
+            db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY)");
+            db.query("INSERT INTO " + t + " VALUES (1)");
+            equal(errorCode(() -> db.query("INSERT INTO " + t + " VALUES (1)")), "23505", "duplicate");
+            equal(db.queryAll("SELECT 1; SELECT 2").size(), 2, "two results");
+        }
+    }
+
+    static void transactions() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            String t = table();
+            db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY)");
+            db.transaction(c -> c.query("INSERT INTO " + t + " VALUES (1)"));
+            try {
+                db.transaction(c -> {
+                    c.query("INSERT INTO " + t + " VALUES (2)");
+                    throw new IllegalStateException("roll back");
+                });
+                throw new AssertionError("no exception");
+            } catch (IllegalStateException expected) {
+                // rolled back
+            }
+            equal(db.status(), NucleusClient.Status.IDLE, "status");
+            equal(db.query("SELECT id FROM " + t).rows(), List.of(List.of(1L)), "committed rows");
+        }
+    }
+
+    static void authentication() {
+        equal(errorCode(() -> NucleusClient.connect(config().password("wrong"))), "28P01", "wrong password");
+    }
+
+    private static void run(String name, Runnable test) {
+        test.run();
+        passed++;
+        System.out.println("ok " + name);
+    }
+
+    public static void main(String[] args) {
+        run("types both ways", NucleusTest::typesBothWays);
+        run("errors", NucleusTest::errors);
+        run("transactions", NucleusTest::transactions);
+        run("authentication", NucleusTest::authentication);
+        check(passed == 4, "all tests ran");
+        System.out.println(passed + " tests passed");
+    }
+}
