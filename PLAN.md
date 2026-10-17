@@ -23,7 +23,7 @@ Status legend: ⬜ not started · ◐ in progress · ✅ shipped · ⏸ parked
 | Build targets | Platforms nucleus must build for |
 | Decisions | What has to be settled before the first line of code |
 | Status snapshot | Phases + milestones table |
-| §F0 – §F4 | Phases and milestones in detail |
+| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.18, sits between F1 and F2) |
 | Changelog | Changes to this plan |
 
 ---
@@ -53,8 +53,10 @@ phase must keep all of these working:
 
 - **Embedded library** — linked into an application, like SQLite or RocksDB
   (from F0).
-- **Standalone SQL server** — used like a plain PostgreSQL: start it, connect
-  with `psql` or any Postgres driver (from M12).
+- **Standalone SQL server** — start it, connect with `ncsql` or nucleus's
+  drivers over its own protocol, `ncp` (from §M14.7, D14); with
+  `--pg-compat` also `psql` and PostgreSQL drivers, as to a plain
+  PostgreSQL (from §M12).
 - **Standalone document server** — used like a NoSQL database, through its
   own client protocol (from M16).
 - **Cluster** — the same SQL and document interfaces over the distributed
@@ -70,7 +72,7 @@ settings").
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Interfaces: embedded API · CLI/REPL · Postgres wire protocol    │  F1+
+│  Interfaces: embedded API · ncsql · ncp · PostgreSQL compat      │  F1+
 ├──────────────────────────────────────────────────────────────────┤
 │  Query: parser → binder → logical plan → optimizer →             │
 │         physical plan → executor          (shared by SQL + doc)  │  F1, F2
@@ -193,11 +195,11 @@ are marked ✅.
 | D1 | Language | ✅ **Rust** (settled 2026-10-16) — memory safety + concurrency (buffer pool, MVCC, Raft) | rejected: C, Zig, Go |
 | D2 | First storage engine | ✅ **B+tree** (copy-on-write, or in-place + WAL) | LSM tree: better for writes, but compaction adds complexity; can come later as a second engine behind the KV contract |
 | D3 | Concurrency model | ✅ **Threads + locks** in the engine, async only in the network layer | thread-per-core (shared-nothing) — revisit in phase 3 |
-| D4 | SQL dialect | ✅ **PostgreSQL-like** subset | together with the Postgres wire protocol this gives free clients (psql, drivers) |
+| D4 | SQL dialect | ✅ **PostgreSQL-like** subset (clients: D14) | familiar to most developers; with the optional PostgreSQL protocol it also gives existing clients (psql, drivers) |
 | D5 | Isolation | ✅ **Snapshot Isolation** first, **Serializable (SSI)** later | — |
 | D6 | File layout | ✅ **One data file + one WAL directory** per database | single file (SQLite-style) |
 | D7 | License | ✅ **MIT** (came with the GitHub repo) | — |
-| D8 | Document client protocol (needed by M16) | **MongoDB wire protocol** subset — existing drivers and tools work, as the Postgres wire protocol does for SQL | own protocol (binary or HTTP/JSON); decide at the end of M15 |
+| D8 | Document client protocol (needed by M16) | Proposed, after D14: **`ncp` with document messages**, through nucleus's drivers; a MongoDB wire subset only as an optional compatibility module (as `--pg-compat` is for SQL) | the MongoDB wire protocol as the main interface (existing tools at once, but a borrowed identity); HTTP/JSON; decide at the end of M15 |
 | D9 | Where release builds are published | **GitHub Releases** attached to tags, built by CI | a separate artifact store; not in this repo either way |
 | D10 | Storage engine shape | ✅ **Copy-on-write B+tree + logical WAL** (2026-10-17): checkpoints are atomic pager commits of a COW tree; the WAL holds batches of key writes; recovery = replay after the checkpoint; no undo | ARIES-style physiological logging with in-place updates — more write-efficient, far more complex; revisit only if checkpoint write amplification hurts |
 | D11 | Tree concurrency | ✅ **One writer or many readers** per tree (`RwLock`); MVCC scans re-seek between batches (2026-10-17) | latch crabbing / B-link trees, when benchmarks show writer contention |
@@ -467,8 +469,8 @@ database; once M16 ships, as a document store.  No d-os-specific server code
   data `01 <table> <index> <key>`.  The catalog lives in the KV store, so
   DDL is transactional.
 - Types for now: `BOOLEAN`, `BIGINT` (all integer names), `DOUBLE
-  PRECISION` (all float names), `TEXT` / `VARCHAR(n)`.  Decimal and
-  date/time types are later work.
+  PRECISION` (all float names), `TEXT` / `VARCHAR(n)`.  (Decimal,
+  date/time and array types came in §M14.5.)
 
 **Done when:** encoding round-trip and order preservation are
 property-tested. ✅
@@ -500,9 +502,9 @@ maintenance; index range scans.  Merge join is not needed yet.
 `BEGIN`/`COMMIT`/`ROLLBACK`, autocommit with conflict retry, aborted
 blocks (`25P02`); `PRIMARY KEY`, `UNIQUE` (concurrent duplicates conflict),
 `NOT NULL`, `CHECK`, `DEFAULT`, `VARCHAR(n)`, `RETURNING`.  `FOREIGN KEY`
-is parsed and refused (`0A000`) — later work.
+was parsed and refused (`0A000`) here; it shipped in §M14.5.
 
-### §M12 — Server + Postgres wire protocol ✅ (DOCS §9)
+### §M12 — Server + Postgres wire protocol ✅ (DOCS §9; optional since §M14.7)
 
 Protocol v3: startup, trust or cleartext password, simple and extended
 query protocols, text and binary formats; `nucleus server`.

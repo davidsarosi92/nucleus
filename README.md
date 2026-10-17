@@ -9,9 +9,14 @@ later — without changing the layers above.
 crash-safe copy-on-write B+tree with a write-ahead log, MVCC transactions
 (snapshot isolation and serializable), the KV contract, a PostgreSQL-like
 SQL dialect (joins of every kind, CTEs, foreign keys, numeric, date/time
-and array types) with a cost-based optimizer, and a server that speaks the
-PostgreSQL wire protocol.  The document model (§F2) is next.  See [PLAN.md](PLAN.md) for the roadmap
-and [DOCS.md](DOCS.md) for what exists today.
+and array types) with a cost-based optimizer, its own system catalog
+(`nc_catalog`), and a server that speaks nucleus's own protocol (`ncp`) —
+with drivers for Rust, C, C++, Python, JavaScript/TypeScript and Java, and
+the `ncsql` shell — and, optionally, PostgreSQL's.  Next is the developer
+platform (PLAN.md §M14.9–§M14.18: SQL analyzer, AI access, large data,
+vectors, branches, time travel, …), then the document model (§F2).  See
+[PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
+today.
 
 ## Using it
 
@@ -21,9 +26,9 @@ nucleus kv ./mydb get greeting
 nucleus kv ./mydb            # interactive shell: begin, put, get, scan, commit, …
 ```
 
-SQL, and a server that nucleus's drivers (Rust; C, C++, Python, JS/TS and
-Java are coming, §M14.8) and `ncsql` connect to — and, with `--pg-compat`,
-`psql` and PostgreSQL drivers too:
+SQL, and a server that nucleus's drivers ([`drivers/`](drivers), with
+[`examples/`](examples) in every language) and `ncsql` connect to — and,
+with `--pg-compat`, `psql` and PostgreSQL drivers too:
 
 ```sh
 nucleus sql ./mydb -c "CREATE TABLE t (id INT PRIMARY KEY, name TEXT)"

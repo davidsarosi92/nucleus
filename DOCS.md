@@ -55,7 +55,17 @@ cargo build --target i686-unknown-linux-musl     # any target in PLAN.md "Build 
 
 CI (`.github/workflows/ci.yml`) runs fmt and clippy, then builds every build
 target and runs the tests on all of them except `x86_64-apple-darwin` (built
-only).  The `i686` musl tests run as 32-bit binaries on a 64-bit Linux
+only); on Linux it also runs the real `psql` against `--pg-compat`
+(`scripts/psql-smoke.sh`, §9), and the `drivers` job runs every driver's
+tests and every example against a server (`scripts/driver-tests.sh`, §11):
+
+```sh
+cargo build --release -p nucleus-cli
+scripts/driver-tests.sh target/release/nucleus [rust python js java c cpp]
+scripts/psql-smoke.sh target/release/nucleus     # needs psql
+```
+
+  The `i686` musl tests run as 32-bit binaries on a 64-bit Linux
 kernel, which is what catches 64-bit `usize` assumptions.
 
 **Simulation tests** take their seeds from `harness::run` (§3.4).  The test
