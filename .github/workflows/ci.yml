@@ -17,7 +17,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain (from rust-toolchain.toml)
         run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal -c rustfmt -c clippy
       - run: cargo fmt --all --check
@@ -28,16 +28,16 @@ jobs:
     name: drivers (Rust, C, C++, Python, JS/TS, Java)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain (from rust-toolchain.toml)
         run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
           key: drivers
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -63,7 +63,7 @@ jobs:
           - { os: macos-latest,     target: x86_64-apple-darwin,        test: false }
           - { os: windows-latest,   target: x86_64-pc-windows-msvc,     test: true }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain (from rust-toolchain.toml)
         run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal --target ${{ matrix.target }}
       - name: Install system packages

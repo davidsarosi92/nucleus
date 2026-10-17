@@ -12,7 +12,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 "$bin" server "$work/db" --listen 127.0.0.1:0 2>"$work/server.log" &
 pid=$!
-trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null; rm -rf "$work"' EXIT
+trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null || true; rm -rf "$work"' EXIT
 for _ in $(seq 100); do grep -q "listening on" "$work/server.log" 2>/dev/null && break; sleep 0.1; done
 port=$(sed -n 's/.*listening on 127\.0\.0\.1:\([0-9]*\).*/\1/p' "$work/server.log" | head -1)
 [ -n "$port" ] || { cat "$work/server.log"; echo "server did not start"; exit 1; }
