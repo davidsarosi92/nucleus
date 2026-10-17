@@ -6,6 +6,8 @@
 pub mod ast;
 pub mod binder;
 pub mod catalog;
+pub mod datetime;
+pub mod decimal;
 pub mod dml;
 pub mod encoding;
 pub mod error;

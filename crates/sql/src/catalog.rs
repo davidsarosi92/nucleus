@@ -32,7 +32,8 @@ const SEQUENCE: &[u8] = &[0x00, 0x02];
 const ROWID: &[u8] = &[0x00, 0x03];
 const STATS: &[u8] = &[0x00, 0x04];
 const DATA: u8 = 0x01;
-const TABLE_VERSION: u8 = 1;
+/// Version 2 added `NUMERIC(p, s)` modifiers; version 1 still reads.
+const TABLE_VERSION: u8 = 2;
 
 /// A column.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +48,8 @@ pub struct Column {
     pub default: Option<String>,
     /// `VARCHAR(n)`: the longest value allowed, in characters.
     pub max_len: Option<u32>,
+    /// `NUMERIC(precision, scale)`.
+    pub numeric: Option<(u32, u32)>,
 }
 
 /// An index.
@@ -114,6 +117,8 @@ impl Table {
                 .u8(u8::from(c.nullable))
                 .opt_str(c.default.as_deref())
                 .u32(c.max_len.map_or(0, |n| n + 1));
+            let (p, s) = c.numeric.map_or((0, 0), |(p, s)| (p + 1, s));
+            w.u32(p).u32(s);
         }
         w.u32(self.primary_key.len() as u32);
         for &p in &self.primary_key {
@@ -139,7 +144,8 @@ impl Table {
 
     fn decode(b: &[u8]) -> Result<Self> {
         let mut r = Reader::new(b);
-        if r.u8()? != TABLE_VERSION {
+        let version = r.u8()?;
+        if !(1..=TABLE_VERSION).contains(&version) {
             return Err(Error::internal("unknown table definition version"));
         }
         let id = r.u32()?;
@@ -155,12 +161,21 @@ impl Table {
                 0 => None,
                 n => Some(n - 1),
             };
+            let numeric = if version >= 2 {
+                match (r.u32()?, r.u32()?) {
+                    (0, _) => None,
+                    (p, s) => Some((p - 1, s)),
+                }
+            } else {
+                None
+            };
             columns.push(Column {
                 name,
                 ty,
                 nullable,
                 default,
                 max_len,
+                numeric,
             });
         }
         let n = r.u32()? as usize;
@@ -207,6 +222,11 @@ fn type_tag(t: DataType) -> u8 {
         DataType::Int => 2,
         DataType::Float => 3,
         DataType::Text => 4,
+        DataType::Numeric => 5,
+        DataType::Date => 6,
+        DataType::Timestamp => 7,
+        DataType::TimestampTz => 8,
+        DataType::Interval => 9,
     }
 }
 
@@ -216,6 +236,11 @@ fn type_of_tag(t: u8) -> Result<DataType> {
         2 => DataType::Int,
         3 => DataType::Float,
         4 => DataType::Text,
+        5 => DataType::Numeric,
+        6 => DataType::Date,
+        7 => DataType::Timestamp,
+        8 => DataType::TimestampTz,
+        9 => DataType::Interval,
         _ => return Err(Error::internal("unknown column type tag")),
     })
 }
@@ -357,6 +382,7 @@ mod tests {
                     nullable: false,
                     default: None,
                     max_len: None,
+                    numeric: None,
                 },
                 Column {
                     name: "name".into(),
@@ -364,6 +390,15 @@ mod tests {
                     nullable: true,
                     default: Some("'anon'".into()),
                     max_len: Some(20),
+                    numeric: None,
+                },
+                Column {
+                    name: "price".into(),
+                    ty: DataType::Numeric,
+                    nullable: true,
+                    default: None,
+                    max_len: None,
+                    numeric: Some((10, 2)),
                 },
             ],
             primary_key: vec![0],

@@ -110,10 +110,19 @@ impl Writer {
 /// Converts a value for storing in column `c` (assignment cast).
 pub fn assign(v: Value, table: &Table, c: usize) -> Result<Value> {
     let col = &table.columns[c];
+    // Assignment casts: within numbers, within dates and timestamps, and
+    // from or to text (text is parsed, as an untyped literal would be).
+    let from = v.data_type();
+    let compatible = |f: DataType| {
+        f == col.ty
+            || f == DataType::Text
+            || col.ty == DataType::Text
+            || (f.is_number() && col.ty.is_number())
+            || (f.is_datetime() && col.ty.is_datetime())
+    };
     let v = match (&v, col.ty) {
         (Value::Null, _) => return Ok(v),
-        (Value::Bool(_), DataType::Int | DataType::Float)
-        | (Value::Int(_) | Value::Float(_), DataType::Bool) => {
+        _ if !from.is_some_and(compatible) => {
             return Err(Error::type_mismatch(format!(
                 "column \"{}\" is of type {} but expression is of type {}",
                 col.name,
@@ -129,6 +138,9 @@ pub fn assign(v: Value, table: &Table, c: usize) -> Result<Value> {
         return Err(Error::string_too_long(format!(
             "value too long for type character varying({max})"
         )));
+    }
+    if let (Some((p, s)), Value::Numeric(d)) = (col.numeric, &v) {
+        return Ok(Value::Numeric(d.fit(p, s)?));
     }
     Ok(v)
 }

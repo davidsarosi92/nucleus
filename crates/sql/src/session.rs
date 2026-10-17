@@ -63,6 +63,8 @@ pub enum TxnStatus {
 
 struct Block {
     txn: Option<Box<dyn KvTxn>>,
+    /// `now()` of the transaction: when it started.
+    now: i64,
     mode: TxnMode,
     failed: bool,
 }
@@ -149,6 +151,7 @@ impl Session {
                 if self.block.is_none() {
                     self.block = Some(Block {
                         txn: None,
+                        now: 0,
                         mode: *mode,
                         failed: false,
                     });
@@ -250,9 +253,10 @@ impl Session {
             }
             if block.txn.is_none() {
                 block.txn = Some(self.kv.begin(options(&block.mode, default, false))?);
+                block.now = crate::datetime::clock();
             }
             let txn = block.txn.as_mut().expect("just started");
-            let r = execute(txn.as_mut(), stmt, params);
+            let r = crate::datetime::with_now(block.now, || execute(txn.as_mut(), stmt, params));
             if r.is_err() {
                 block.failed = true;
             }
@@ -263,10 +267,12 @@ impl Session {
         let mut attempt = 0;
         loop {
             let mut txn = self.kv.begin(opts)?;
-            let r = execute(txn.as_mut(), stmt, params).and_then(|out| {
-                txn.commit()?;
-                Ok(out)
-            });
+            let now = crate::datetime::clock();
+            let r = crate::datetime::with_now(now, || execute(txn.as_mut(), stmt, params))
+                .and_then(|out| {
+                    txn.commit()?;
+                    Ok(out)
+                });
             match r {
                 Err(e) if e.code == "40001" && attempt < 10 => attempt += 1,
                 r => return r,
@@ -552,6 +558,7 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
                 nullable: !column.not_null,
                 default: column.default.clone(),
                 max_len: column.max_len,
+                numeric: column.numeric,
             });
             if let Some(check) = &column.check {
                 t.checks
@@ -646,6 +653,7 @@ fn create_table(
             nullable: !s.not_null,
             default: s.default.clone(),
             max_len: s.max_len,
+            numeric: s.numeric,
         });
         if s.primary_key {
             if !pk.is_empty() {

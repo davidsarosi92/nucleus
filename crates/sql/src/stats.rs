@@ -197,6 +197,11 @@ fn as_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Int(i) => Some(*i as f64),
         Value::Float(f) => Some(*f),
+        Value::Numeric(d) => Some(d.to_f64()),
+        Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {
+            v.as_timestamp().map(|t| t as f64)
+        }
+        Value::Interval(i) => Some(i.span() as f64),
         _ => None,
     }
 }

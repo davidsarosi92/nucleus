@@ -1,0 +1,231 @@
+# DATE, TIMESTAMP, TIMESTAMPTZ, INTERVAL (results checked against
+# PostgreSQL 16, whose session time zone is UTC here as in nucleus).
+
+query TTTT
+SELECT DATE '2024-02-29', TIMESTAMP '2024-03-10 14:05:06.5', TIMESTAMPTZ '2024-03-10T14:05:06+02:00', INTERVAL '1 year 2 months 3 days 04:05:06'
+----
+2024-02-29 2024-03-10 14:05:06.5 2024-03-10 12:05:06+00 1 year 2 mons 3 days 04:05:06
+
+query TTT
+SELECT '2024-01-01'::date, '2024-01-01 10:30'::timestamp, CAST('2024-06-01 00:00:00Z' AS timestamp with time zone)
+----
+2024-01-01 2024-01-01 10:30:00 2024-06-01 00:00:00+00
+
+query TTTT
+SELECT '1 day'::interval, '-1 day'::interval, '90 minutes'::interval, '1.5 days'::interval
+----
+1 day -1 days 01:30:00 1 day 12:00:00
+
+query TTT
+SELECT '2 weeks'::interval, '@ 3 days ago'::interval, 'P1Y2M3DT4H5M6S'::interval
+----
+14 days -3 days 1 year 2 mons 3 days 04:05:06
+
+query TT
+SELECT '1 day -01:00:00'::interval, '36:00:00'::interval
+----
+1 day -01:00:00 36:00:00
+
+statement error 22008
+SELECT '2023-02-29'::date
+
+statement error 22007
+SELECT 'yesterdayish'::date
+
+statement error 22007
+SELECT '1 fortnight'::interval
+
+# Arithmetic.
+query TITT
+SELECT DATE '2024-01-31' + 1, DATE '2024-03-01' - DATE '2024-02-01', DATE '2024-01-31' + INTERVAL '1 month', DATE '2024-03-01' - 1
+----
+2024-02-01 29 2024-02-29 00:00:00 2024-02-29
+
+query TTT
+SELECT TIMESTAMP '2024-01-31 10:00' + INTERVAL '1 month 1 day 2 hours', TIMESTAMP '2024-03-02 01:00' - TIMESTAMP '2024-03-01 00:00', TIMESTAMP '2024-01-01' + '1 day'
+----
+2024-03-01 12:00:00 1 day 01:00:00 2024-01-02 00:00:00
+
+query TTT
+SELECT TIMESTAMP '2024-01-03' - '2024-01-01', TIMESTAMPTZ '2024-01-01 00:00+00' - INTERVAL '30 minutes', TIMESTAMP '2024-01-01' - TIMESTAMP '2024-03-05 06:00'
+----
+2 days 2023-12-31 23:30:00+00 -64 days -06:00:00
+
+query TTTTT
+SELECT INTERVAL '1 day' * 2.5, INTERVAL '1 day' / 3, 3 * INTERVAL '1 hour', - INTERVAL '1 day', INTERVAL '1 day' + INTERVAL '2 hours'
+----
+2 days 12:00:00 08:00:00 03:00:00 -1 days 1 day 02:00:00
+
+query T
+SELECT INTERVAL '1 mon 1 day' * 1.5
+----
+1 mon 16 days 12:00:00
+
+# Comparisons, including across date and timestamp.
+query BBBB
+SELECT DATE '2024-01-01' < TIMESTAMP '2024-01-01 00:00:01', DATE '2024-01-01' = TIMESTAMP '2024-01-01', INTERVAL '1 mon' = INTERVAL '30 days', INTERVAL '1 day' > INTERVAL '23:59:59'
+----
+true true true true
+
+query B
+SELECT TIMESTAMPTZ '2024-01-01 12:00+02' = TIMESTAMP '2024-01-01 10:00'
+----
+true
+
+# Fields.
+query TTTTTT
+SELECT extract(year FROM t), extract(month FROM t), extract(day FROM t), extract(hour FROM t), extract(minute FROM t), extract(second FROM t) FROM (SELECT TIMESTAMP '2024-12-30 13:14:15.25' AS t) s
+----
+2024 12 30 13 14 15.250000
+
+query TTTTT
+SELECT extract(dow FROM t), extract(isodow FROM t), extract(doy FROM t), extract(week FROM t), extract(quarter FROM t) FROM (SELECT TIMESTAMP '2024-12-30 13:14:15.25' AS t) s
+----
+1 1 365 1 4
+
+query TTR
+SELECT extract(epoch FROM TIMESTAMP '1970-01-02'), extract(epoch FROM DATE '2024-01-01'), date_part('hour', TIMESTAMP '2024-01-01 07:30')
+----
+86400.000000 1704067200 7.000
+
+query TT
+SELECT extract(epoch FROM INTERVAL '1 year 2 mons 3 days 04:05:06'), extract(day FROM INTERVAL '40 days')
+----
+37015506.000000 40
+
+statement error 0A000
+SELECT extract(hour FROM DATE '2024-01-01')
+
+query TTTT
+SELECT date_trunc('month', TIMESTAMP '2024-05-17 10:11:12'), date_trunc('week', TIMESTAMP '2024-12-30 13:00'), date_trunc('hour', TIMESTAMPTZ '2024-05-17 10:11:12+00'), date_trunc('year', DATE '2024-05-17')
+----
+2024-05-01 00:00:00 2024-12-30 00:00:00 2024-05-17 10:00:00+00 2024-01-01 00:00:00+00
+
+query TT
+SELECT make_date(2024, 2, 29), to_timestamp(86400)
+----
+2024-02-29 1970-01-02 00:00:00+00
+
+query TTT
+SELECT age(TIMESTAMP '2024-03-01', TIMESTAMP '2023-01-15 12:00'), age(TIMESTAMP '2023-01-15', TIMESTAMP '2024-03-01'), justify_hours(INTERVAL '50 hours')
+----
+1 year 1 mon 16 days 12:00:00 -1 years -1 mons -17 days 2 days 02:00:00
+
+query TT
+SELECT justify_days(INTERVAL '65 days'), justify_interval(INTERVAL '1 mon -1 hour')
+----
+2 mons 5 days 29 days 23:00:00
+
+# Tables, indexes, ordering, grouping.
+statement ok
+CREATE TABLE ev (id INT PRIMARY KEY, day DATE NOT NULL, at TIMESTAMP, atz TIMESTAMPTZ, dur INTERVAL)
+
+statement ok
+INSERT INTO ev VALUES (1, '2024-01-15', '2024-01-15 08:00', '2024-01-15 08:00+01', '1 hour'), (2, '2024-01-16', '2024-01-16 09:30:00.123456', '2024-01-16 09:30Z', '90 minutes'), (3, '2023-12-31', NULL, NULL, '1 day'), (4, '2024-02-29', '2024-02-29 23:59:59', '2024-03-01 00:00:00-01', NULL)
+
+query ITTTT
+SELECT id, day, at, atz, dur FROM ev ORDER BY day
+----
+3 2023-12-31 NULL NULL 1 day
+1 2024-01-15 2024-01-15 08:00:00 2024-01-15 07:00:00+00 01:00:00
+2 2024-01-16 2024-01-16 09:30:00.123456 2024-01-16 09:30:00+00 01:30:00
+4 2024-02-29 2024-02-29 23:59:59 2024-03-01 01:00:00+00 NULL
+
+statement ok
+CREATE INDEX ev_day ON ev (day)
+
+query I
+SELECT id FROM ev WHERE day >= '2024-01-16' ORDER BY id
+----
+2
+4
+
+query I
+SELECT id FROM ev WHERE at >= DATE '2024-01-16' ORDER BY id
+----
+2
+4
+
+query I
+SELECT id FROM ev WHERE day BETWEEN '2024-01-01' AND '2024-01-31' ORDER BY id
+----
+1
+2
+
+query TI
+SELECT date_trunc('month', day), count(*) FROM ev GROUP BY 1 ORDER BY 1
+----
+2023-12-01 00:00:00+00 1
+2024-01-01 00:00:00+00 2
+2024-02-01 00:00:00+00 1
+
+query TTT
+SELECT min(day), max(at), sum(dur) FROM ev
+----
+2023-12-31 2024-02-29 23:59:59 1 day 02:30:00
+
+query T
+SELECT avg(dur) FROM ev
+----
+08:50:00
+
+query I
+SELECT id FROM ev WHERE dur > INTERVAL '1 hour' ORDER BY dur
+----
+2
+3
+
+query T
+SELECT max(day) - min(day) FROM ev
+----
+60
+
+statement error 22007
+INSERT INTO ev VALUES (5, 'not a date', NULL, NULL, NULL)
+
+statement error 42804
+INSERT INTO ev VALUES (5, 20240101, NULL, NULL, NULL)
+
+statement ok
+UPDATE ev SET day = day + 1, dur = dur * 2 WHERE id = 1
+
+query TT
+SELECT day, dur FROM ev WHERE id = 1
+----
+2024-01-16 02:00:00
+
+# now() is fixed for the whole transaction.
+statement ok
+CREATE TABLE ticks (t TIMESTAMPTZ)
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO ticks VALUES (now())
+
+statement ok
+INSERT INTO ticks VALUES (current_timestamp)
+
+statement ok
+COMMIT
+
+query IB
+SELECT count(DISTINCT t), min(t) > TIMESTAMPTZ '2020-01-01 00:00+00' FROM ticks
+----
+1 true
+
+query BB
+SELECT now() = now(), current_date = now()::date
+----
+true true
+
+query BB
+SELECT localtimestamp = now()::timestamp, clock_timestamp() >= now()
+----
+true true
+
+query TT
+SELECT DATE '0044-03-15 BC', TIMESTAMP 'epoch'
+----
+0044-03-15 BC 1970-01-01 00:00:00

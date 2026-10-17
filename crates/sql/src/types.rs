@@ -4,6 +4,8 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use crate::datetime::{self, Interval};
+use crate::decimal::Decimal;
 use crate::error::{Error, Result};
 
 /// A column type.
@@ -17,6 +19,16 @@ pub enum DataType {
     Float,
     /// `TEXT` / `VARCHAR`.
     Text,
+    /// `NUMERIC` / `DECIMAL`: exact.
+    Numeric,
+    /// `DATE`.
+    Date,
+    /// `TIMESTAMP [WITHOUT TIME ZONE]`.
+    Timestamp,
+    /// `TIMESTAMPTZ` / `TIMESTAMP WITH TIME ZONE`.
+    TimestampTz,
+    /// `INTERVAL`.
+    Interval,
 }
 
 impl DataType {
@@ -27,7 +39,39 @@ impl DataType {
             DataType::Int => "bigint",
             DataType::Float => "double precision",
             DataType::Text => "text",
+            DataType::Numeric => "numeric",
+            DataType::Date => "date",
+            DataType::Timestamp => "timestamp without time zone",
+            DataType::TimestampTz => "timestamp with time zone",
+            DataType::Interval => "interval",
         }
+    }
+
+    /// Whether this is `bigint`, `double precision` or `numeric`.
+    pub fn is_number(self) -> bool {
+        matches!(self, DataType::Int | DataType::Float | DataType::Numeric)
+    }
+
+    /// Whether this is `date`, `timestamp` or `timestamptz`.
+    pub fn is_datetime(self) -> bool {
+        matches!(
+            self,
+            DataType::Date | DataType::Timestamp | DataType::TimestampTz
+        )
+    }
+
+    /// Whether `words` begin a type name (for parsing multi-word names).
+    pub fn is_prefix(words: &[&str]) -> bool {
+        Self::parse(words).is_some()
+            || matches!(
+                words,
+                ["double"]
+                    | ["character"]
+                    | ["timestamp", "with"]
+                    | ["timestamp", "with", "time"]
+                    | ["timestamp", "without"]
+                    | ["timestamp", "without", "time"]
+            )
     }
 
     /// Parses a type name (lowercase words, e.g. `["double", "precision"]`).
@@ -48,7 +92,14 @@ impl DataType {
             | ["character", "varying"]
             | ["char"]
             | ["character"]
-            | ["string"] => DataType::Text,
+            | ["string"]
+            | ["name"]
+            | ["bpchar"] => DataType::Text,
+            ["numeric"] | ["decimal"] | ["dec"] => DataType::Numeric,
+            ["date"] => DataType::Date,
+            ["timestamp"] | ["timestamp", "without", "time", "zone"] => DataType::Timestamp,
+            ["timestamptz"] | ["timestamp", "with", "time", "zone"] => DataType::TimestampTz,
+            ["interval"] => DataType::Interval,
             _ => return None,
         })
     }
@@ -73,6 +124,16 @@ pub enum Value {
     Float(f64),
     /// A string.
     Text(String),
+    /// An exact decimal.
+    Numeric(Decimal),
+    /// Days since 2000-01-01.
+    Date(i32),
+    /// Microseconds since 2000-01-01 00:00.
+    Timestamp(i64),
+    /// Microseconds since 2000-01-01 00:00 UTC.
+    TimestampTz(i64),
+    /// An interval.
+    Interval(Interval),
 }
 
 impl Value {
@@ -84,6 +145,21 @@ impl Value {
             Value::Int(_) => Some(DataType::Int),
             Value::Float(_) => Some(DataType::Float),
             Value::Text(_) => Some(DataType::Text),
+            Value::Numeric(_) => Some(DataType::Numeric),
+            Value::Date(_) => Some(DataType::Date),
+            Value::Timestamp(_) => Some(DataType::Timestamp),
+            Value::TimestampTz(_) => Some(DataType::TimestampTz),
+            Value::Interval(_) => Some(DataType::Interval),
+        }
+    }
+
+    /// A date or timestamp as microseconds since 2000-01-01 (a date at
+    /// midnight), for comparing them with each other.
+    pub fn as_timestamp(&self) -> Option<i64> {
+        match self {
+            Value::Date(d) => Some(datetime::date_to_ts(*d)),
+            Value::Timestamp(t) | Value::TimestampTz(t) => Some(*t),
+            _ => None,
         }
     }
 
@@ -93,7 +169,9 @@ impl Value {
     }
 
     /// SQL comparison: `None` if either side is `NULL`; numbers compare
-    /// across `Int` and `Float`; other mixed types are an error.
+    /// across `bigint`, `double precision` and `numeric` (numeric against
+    /// float as floats), dates and timestamps across each other (a date as
+    /// its midnight); other mixed types are an error.
     pub fn sql_cmp(&self, other: &Value) -> Result<Option<Ordering>> {
         Ok(Some(match (self, other) {
             (Value::Null, _) | (_, Value::Null) => return Ok(None),
@@ -103,6 +181,15 @@ impl Value {
             (Value::Int(a), Value::Float(b)) => total_cmp(*a as f64, *b),
             (Value::Float(a), Value::Int(b)) => total_cmp(*a, *b as f64),
             (Value::Text(a), Value::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
+            (Value::Numeric(a), Value::Numeric(b)) => a.cmp(b),
+            (Value::Numeric(a), Value::Int(b)) => a.cmp(&Decimal::from_i64(*b)),
+            (Value::Int(a), Value::Numeric(b)) => Decimal::from_i64(*a).cmp(b),
+            (Value::Numeric(a), Value::Float(b)) => total_cmp(a.to_f64(), *b),
+            (Value::Float(a), Value::Numeric(b)) => total_cmp(*a, b.to_f64()),
+            (Value::Interval(a), Value::Interval(b)) => a.cmp(b),
+            (a, b) if a.as_timestamp().is_some() && b.as_timestamp().is_some() => {
+                a.as_timestamp().cmp(&b.as_timestamp())
+            }
             (a, b) => {
                 return Err(Error::type_mismatch(format!(
                     "cannot compare {} with {}",
@@ -136,7 +223,32 @@ impl Value {
             (v @ Value::Bool(_), DataType::Bool)
             | (v @ Value::Int(_), DataType::Int)
             | (v @ Value::Float(_), DataType::Float)
-            | (v @ Value::Text(_), DataType::Text) => v,
+            | (v @ Value::Text(_), DataType::Text)
+            | (v @ Value::Numeric(_), DataType::Numeric)
+            | (v @ Value::Date(_), DataType::Date)
+            | (v @ Value::Timestamp(_), DataType::Timestamp)
+            | (v @ Value::TimestampTz(_), DataType::TimestampTz)
+            | (v @ Value::Interval(_), DataType::Interval) => v,
+            (Value::Int(i), DataType::Numeric) => Value::Numeric(Decimal::from_i64(i)),
+            (Value::Float(f), DataType::Numeric) => Value::Numeric(Decimal::from_f64(f)?),
+            (Value::Numeric(d), DataType::Int) => Value::Int(d.to_i64()?),
+            (Value::Numeric(d), DataType::Float) => Value::Float(d.to_f64()),
+            (Value::Text(s), DataType::Numeric) => Value::Numeric(Decimal::parse(&s)?),
+            (Value::Text(s), DataType::Date) => Value::Date(datetime::parse_date(&s)?),
+            (Value::Text(s), DataType::Timestamp) => {
+                Value::Timestamp(datetime::parse_timestamp(&s, false)?)
+            }
+            (Value::Text(s), DataType::TimestampTz) => {
+                Value::TimestampTz(datetime::parse_timestamp(&s, true)?)
+            }
+            (Value::Text(s), DataType::Interval) => Value::Interval(datetime::parse_interval(&s)?),
+            (Value::Timestamp(t) | Value::TimestampTz(t), DataType::Date) => {
+                Value::Date(datetime::ts_to_date(t))
+            }
+            (Value::Date(d), DataType::Timestamp) => Value::Timestamp(datetime::date_to_ts(d)),
+            (Value::Date(d), DataType::TimestampTz) => Value::TimestampTz(datetime::date_to_ts(d)),
+            (Value::Timestamp(t), DataType::TimestampTz) => Value::TimestampTz(t),
+            (Value::TimestampTz(t), DataType::Timestamp) => Value::Timestamp(t),
             (Value::Int(i), DataType::Float) => Value::Float(i as f64),
             (Value::Float(f), DataType::Int) => {
                 let r = f.round();
@@ -182,6 +294,11 @@ impl Value {
             Value::Int(i) => i.to_string(),
             Value::Float(f) => render_float(*f),
             Value::Text(s) => s.clone(),
+            Value::Numeric(d) => d.to_string(),
+            Value::Date(d) => datetime::format_date(*d),
+            Value::Timestamp(t) => datetime::format_timestamp(*t, false),
+            Value::TimestampTz(t) => datetime::format_timestamp(*t, true),
+            Value::Interval(i) => i.to_string(),
         }
     }
 
@@ -202,8 +319,10 @@ fn rank(v: &Value) -> u8 {
     match v {
         Value::Null => 5,
         Value::Bool(_) => 0,
-        Value::Int(_) | Value::Float(_) => 1,
+        Value::Int(_) | Value::Float(_) | Value::Numeric(_) => 1,
         Value::Text(_) => 2,
+        Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 3,
+        Value::Interval(_) => 4,
     }
 }
 
@@ -259,6 +378,15 @@ impl Hash for Value {
             Value::Int(i) => hash_number(*i as f64, state),
             Value::Float(f) => hash_number(*f, state),
             Value::Text(s) => s.hash(state),
+            Value::Numeric(d) => hash_number(d.to_f64(), state),
+            Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {
+                3u8.hash(state);
+                self.as_timestamp().hash(state);
+            }
+            Value::Interval(i) => {
+                4u8.hash(state);
+                i.span().hash(state);
+            }
         }
     }
 }

@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use nucleus_kv::KvTxn;
 
 use crate::ast::{BinaryOp, UnaryOp};
+use crate::datetime as dt;
+use crate::decimal::Decimal;
 use crate::error::{Error, Result};
 use crate::plan::Plan;
 use crate::types::{DataType, Row, Value, type_name};
@@ -128,6 +130,46 @@ pub enum Func {
     Power,
     /// `version()`.
     Version,
+    /// `trunc(x [, digits])`.
+    Trunc,
+    /// `sign(x)`.
+    Sign,
+    /// `mod(a, b)`.
+    Mod,
+    /// `now()`, `current_timestamp`: the transaction's start.
+    Now,
+    /// `clock_timestamp()`: the clock.
+    ClockTimestamp,
+    /// `current_date`.
+    CurrentDate,
+    /// `localtimestamp`.
+    LocalTimestamp,
+    /// `extract(field FROM x)` (numeric).
+    Extract,
+    /// `date_part('field', x)` (double precision).
+    DatePart,
+    /// `date_trunc('field', x)`.
+    DateTrunc,
+    /// `make_date(y, m, d)`.
+    MakeDate,
+    /// `age(a [, b])`: years, months and days between.
+    Age,
+    /// `justify_days(interval)`.
+    JustifyDays,
+    /// `justify_hours(interval)`.
+    JustifyHours,
+    /// `justify_interval(interval)`.
+    JustifyInterval,
+    /// `to_timestamp(epoch seconds)`.
+    ToTimestamp,
+    /// A cast to `numeric(p, s)`: rounds, checks the precision.
+    NumericFit,
+    /// `current_user`, `session_user`.
+    CurrentUser,
+    /// `current_database()`, `current_catalog`.
+    CurrentDatabase,
+    /// `current_schema()`.
+    CurrentSchema,
 }
 
 impl Func {
@@ -154,6 +196,28 @@ impl Func {
             "sqrt" => (Func::Sqrt, 1..=1),
             "power" | "pow" => (Func::Power, 2..=2),
             "version" => (Func::Version, 0..=0),
+            "trunc" => (Func::Trunc, 1..=2),
+            "sign" => (Func::Sign, 1..=1),
+            "mod" => (Func::Mod, 2..=2),
+            "now" | "current_timestamp" | "transaction_timestamp" | "statement_timestamp" => {
+                (Func::Now, 0..=0)
+            }
+            "clock_timestamp" => (Func::ClockTimestamp, 0..=0),
+            "current_date" => (Func::CurrentDate, 0..=0),
+            "localtimestamp" => (Func::LocalTimestamp, 0..=0),
+            "extract" => (Func::Extract, 2..=2),
+            "date_part" => (Func::DatePart, 2..=2),
+            "date_trunc" => (Func::DateTrunc, 2..=2),
+            "make_date" => (Func::MakeDate, 3..=3),
+            "age" => (Func::Age, 1..=2),
+            "justify_days" => (Func::JustifyDays, 1..=1),
+            "justify_hours" => (Func::JustifyHours, 1..=1),
+            "justify_interval" => (Func::JustifyInterval, 1..=1),
+            "to_timestamp" => (Func::ToTimestamp, 1..=1),
+            "__numeric_fit" => (Func::NumericFit, 3..=3),
+            "current_user" | "session_user" | "user" | "current_role" => (Func::CurrentUser, 0..=0),
+            "current_database" | "current_catalog" => (Func::CurrentDatabase, 0..=0),
+            "current_schema" => (Func::CurrentSchema, 0..=0),
             _ => return None,
         })
     }
@@ -181,6 +245,26 @@ impl Func {
             Func::Sqrt => "sqrt",
             Func::Power => "power",
             Func::Version => "version",
+            Func::Trunc => "trunc",
+            Func::Sign => "sign",
+            Func::Mod => "mod",
+            Func::Now => "now",
+            Func::ClockTimestamp => "clock_timestamp",
+            Func::CurrentDate => "current_date",
+            Func::LocalTimestamp => "localtimestamp",
+            Func::Extract => "extract",
+            Func::DatePart => "date_part",
+            Func::DateTrunc => "date_trunc",
+            Func::MakeDate => "make_date",
+            Func::Age => "age",
+            Func::JustifyDays => "justify_days",
+            Func::JustifyHours => "justify_hours",
+            Func::JustifyInterval => "justify_interval",
+            Func::ToTimestamp => "to_timestamp",
+            Func::NumericFit => "numeric",
+            Func::CurrentUser => "current_user",
+            Func::CurrentDatabase => "current_database",
+            Func::CurrentSchema => "current_schema",
         }
     }
 }
@@ -523,7 +607,12 @@ fn unary(op: UnaryOp, v: Value) -> Result<Value> {
                 .ok_or_else(|| Error::out_of_range("bigint out of range"))?,
         ),
         (UnaryOp::Neg, Value::Float(f)) => Value::Float(-f),
-        (UnaryOp::Plus, v @ (Value::Int(_) | Value::Float(_))) => v,
+        (UnaryOp::Neg, Value::Numeric(d)) => Value::Numeric(d.negate()),
+        (UnaryOp::Neg, Value::Interval(i)) => Value::Interval(i.checked_neg()?),
+        (
+            UnaryOp::Plus,
+            v @ (Value::Int(_) | Value::Float(_) | Value::Numeric(_) | Value::Interval(_)),
+        ) => v,
         (op, v) => {
             return Err(Error::undefined_function(format!(
                 "operator does not exist: {}{}",
@@ -565,7 +654,20 @@ pub fn binary(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
                 _ if y == 0 => return Err(Error::division_by_zero("division by zero")),
                 _ => x.checked_rem(y).unwrap_or(0),
             }),
-            (x @ (Value::Int(_) | Value::Float(_)), y @ (Value::Int(_) | Value::Float(_))) => {
+            (x @ (Value::Int(_) | Value::Numeric(_)), y @ (Value::Int(_) | Value::Numeric(_))) => {
+                let (x, y) = (as_decimal(&x), as_decimal(&y));
+                Value::Numeric(match op {
+                    Add => x.checked_add(y)?,
+                    Sub => x.checked_sub(y)?,
+                    Mul => x.checked_mul(y)?,
+                    Div => x.checked_div(y)?,
+                    _ => x.checked_rem(y)?,
+                })
+            }
+            (x, y)
+                if x.data_type().is_some_and(|t| t.is_number())
+                    && y.data_type().is_some_and(|t| t.is_number()) =>
+            {
                 let (x, y) = (as_f64(&x), as_f64(&y));
                 if matches!(op, Div | Mod) && y == 0.0 {
                     return Err(Error::division_by_zero("division by zero"));
@@ -578,23 +680,73 @@ pub fn binary(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
                     _ => x % y,
                 })
             }
-            (x, y) => {
-                return Err(Error::undefined_function(format!(
-                    "operator does not exist: {} {} {}",
-                    type_name(&x),
-                    op.symbol(),
-                    type_name(&y)
-                )));
-            }
+            (x, y) => datetime_arith(op, x, y)?,
         },
         And | Or => unreachable!("handled with three-valued logic"),
     })
+}
+
+/// Arithmetic on dates, timestamps and intervals.
+fn datetime_arith(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
+    use crate::datetime as dt;
+    use BinaryOp::*;
+    let num = |v: &Value| v.data_type().is_some_and(|t| t.is_number());
+    Ok(match (op, a, b) {
+        (Add, Value::Date(d), Value::Int(n)) | (Add, Value::Int(n), Value::Date(d)) => {
+            Value::Date(dt::date_add_days(d, n)?)
+        }
+        (Sub, Value::Date(d), Value::Int(n)) => Value::Date(dt::date_add_days(
+            d,
+            n.checked_neg()
+                .ok_or_else(|| Error::datetime_overflow("date out of range"))?,
+        )?),
+        (Sub, Value::Date(x), Value::Date(y)) => Value::Int(i64::from(x) - i64::from(y)),
+        (Add, Value::Interval(i), Value::Interval(j)) => Value::Interval(i.checked_add(j)?),
+        (Sub, Value::Interval(i), Value::Interval(j)) => Value::Interval(i.checked_sub(j)?),
+        (Add | Sub, t, Value::Interval(i)) | (Add, Value::Interval(i), t)
+            if t.as_timestamp().is_some() =>
+        {
+            let i = if op == Sub { i.checked_neg()? } else { i };
+            let ts = dt::ts_add(t.as_timestamp().expect("checked"), i)?;
+            match t {
+                Value::TimestampTz(_) => Value::TimestampTz(ts),
+                _ => Value::Timestamp(ts),
+            }
+        }
+        (Sub, x, y) if x.as_timestamp().is_some() && y.as_timestamp().is_some() => {
+            Value::Interval(dt::ts_diff(
+                x.as_timestamp().expect("checked"),
+                y.as_timestamp().expect("checked"),
+            )?)
+        }
+        (Mul, Value::Interval(i), n) | (Mul, n, Value::Interval(i)) if num(&n) => {
+            Value::Interval(i.checked_mul(as_f64(&n))?)
+        }
+        (Div, Value::Interval(i), n) if num(&n) => Value::Interval(i.checked_div(as_f64(&n))?),
+        (op, x, y) => {
+            return Err(Error::undefined_function(format!(
+                "operator does not exist: {} {} {}",
+                type_name(&x),
+                op.symbol(),
+                type_name(&y)
+            )));
+        }
+    })
+}
+
+fn as_decimal(v: &Value) -> Decimal {
+    match v {
+        Value::Int(i) => Decimal::from_i64(*i),
+        Value::Numeric(d) => *d,
+        _ => Decimal::ZERO,
+    }
 }
 
 fn as_f64(v: &Value) -> f64 {
     match v {
         Value::Int(i) => *i as f64,
         Value::Float(f) => *f,
+        Value::Numeric(d) => d.to_f64(),
         _ => f64::NAN,
     }
 }
@@ -646,6 +798,7 @@ fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
         match v {
             Value::Int(i) => Ok(*i),
             Value::Float(x) => Ok(x.round() as i64),
+            Value::Numeric(d) => d.to_i64(),
             v => Err(Error::undefined_function(format!(
                 "function {}({}) does not exist",
                 f.name(),
@@ -706,6 +859,13 @@ fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                 env!("CARGO_PKG_VERSION")
             )));
         }
+        Func::Now => return Ok(Value::TimestampTz(dt::now())),
+        Func::ClockTimestamp => return Ok(Value::TimestampTz(dt::clock())),
+        Func::CurrentDate => return Ok(Value::Date(dt::ts_to_date(dt::now()))),
+        Func::LocalTimestamp => return Ok(Value::Timestamp(dt::now())),
+        Func::CurrentUser => return Ok(Value::Text("nucleus".into())),
+        Func::CurrentDatabase => return Ok(Value::Text("nucleus".into())),
+        Func::CurrentSchema => return Ok(Value::Text("public".into())),
         _ => {}
     }
     if args.iter().any(Value::is_null) {
@@ -722,6 +882,7 @@ fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                     .ok_or_else(|| Error::out_of_range("bigint out of range"))?,
             ),
             Value::Float(x) => Value::Float(x.abs()),
+            Value::Numeric(d) => Value::Numeric(d.abs()),
             v => {
                 return Err(Error::undefined_function(format!(
                     "function abs({}) does not exist",
@@ -758,6 +919,7 @@ fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
             let digits = args.get(1).map(int).transpose()?.unwrap_or(0);
             match &args[0] {
                 Value::Int(i) if digits >= 0 => Value::Int(*i),
+                Value::Numeric(d) => Value::Numeric(d.round(digits.clamp(-100, 100) as i32)?),
                 v => {
                     let x = as_f64(v);
                     let m = 10f64.powi(digits as i32);
@@ -772,6 +934,11 @@ fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
         }
         Func::Floor | Func::Ceil => match &args[0] {
             Value::Int(i) => Value::Int(*i),
+            Value::Numeric(d) => Value::Numeric(if f == Func::Floor {
+                d.floor()?
+            } else {
+                d.ceil()?
+            }),
             v => Value::Float(if f == Func::Floor {
                 as_f64(v).floor()
             } else {
@@ -796,7 +963,123 @@ fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
             Value::Float(x.sqrt())
         }
         Func::Power => Value::Float(as_f64(&args[0]).powf(as_f64(&args[1]))),
-        Func::Coalesce
+        Func::Trunc => {
+            let digits = args.get(1).map(int).transpose()?.unwrap_or(0);
+            match &args[0] {
+                Value::Numeric(d) => Value::Numeric(d.trunc(digits.clamp(-100, 100) as i32)?),
+                Value::Int(i) => Value::Int(*i),
+                v => {
+                    let m = 10f64.powi(digits as i32);
+                    Value::Float((as_f64(v) * m).trunc() / m)
+                }
+            }
+        }
+        Func::Sign => match &args[0] {
+            Value::Int(i) => Value::Int(i.signum()),
+            Value::Numeric(d) => Value::Numeric(Decimal::from_i64(i64::from(d.signum()))),
+            v => {
+                let x = as_f64(v);
+                Value::Float(if x == 0.0 || x.is_nan() {
+                    x
+                } else {
+                    x.signum()
+                })
+            }
+        },
+        Func::Mod => binary(BinaryOp::Mod, args[0].clone(), args[1].clone())?,
+        Func::Extract | Func::DatePart => {
+            let unit = text(&args[0])?;
+            let d = match &args[1] {
+                Value::Date(d) => dt::extract_date(&unit, *d)?,
+                Value::Timestamp(t) => dt::extract_ts(&unit, *t, false)?,
+                Value::TimestampTz(t) => dt::extract_ts(&unit, *t, true)?,
+                Value::Interval(i) => dt::extract_interval(&unit, *i)?,
+                v => {
+                    return Err(Error::undefined_function(format!(
+                        "function {}(text, {}) does not exist",
+                        f.name(),
+                        type_name(v)
+                    )));
+                }
+            };
+            if f == Func::Extract {
+                Value::Numeric(d)
+            } else {
+                Value::Float(d.to_f64())
+            }
+        }
+        Func::DateTrunc => {
+            let unit = text(&args[0])?;
+            match &args[1] {
+                Value::Timestamp(t) => Value::Timestamp(dt::date_trunc(&unit, *t)?),
+                Value::TimestampTz(t) => Value::TimestampTz(dt::date_trunc(&unit, *t)?),
+                Value::Date(d) => Value::TimestampTz(dt::date_trunc(&unit, dt::date_to_ts(*d))?),
+                v => {
+                    return Err(Error::undefined_function(format!(
+                        "function date_trunc(text, {}) does not exist",
+                        type_name(v)
+                    )));
+                }
+            }
+        }
+        Func::MakeDate => {
+            let (y, m, d) = (int(&args[0])?, int(&args[1])?, int(&args[2])?);
+            let field = |v: i64| u32::try_from(v).unwrap_or(0);
+            Value::Date(dt::date_from_ymd(y, field(m), field(d))?)
+        }
+        Func::Age => {
+            let ts = |v: &Value| {
+                v.as_timestamp().ok_or_else(|| {
+                    Error::undefined_function(format!(
+                        "function age({}) does not exist",
+                        type_name(v)
+                    ))
+                })
+            };
+            let (a, b) = match args.as_slice() {
+                [b] => (dt::date_to_ts(dt::ts_to_date(dt::now())), ts(b)?),
+                [a, b, ..] => (ts(a)?, ts(b)?),
+                [] => unreachable!("arity checked"),
+            };
+            Value::Interval(dt::age(a, b))
+        }
+        Func::JustifyDays | Func::JustifyHours | Func::JustifyInterval => {
+            let Value::Interval(i) = &args[0] else {
+                return Err(Error::undefined_function(format!(
+                    "function {}({}) does not exist",
+                    f.name(),
+                    type_name(&args[0])
+                )));
+            };
+            Value::Interval(match f {
+                Func::JustifyDays => dt::justify_days(*i),
+                Func::JustifyHours => i.justify_hours(),
+                _ => dt::justify_interval(*i),
+            })
+        }
+        Func::ToTimestamp => {
+            let secs = as_f64(&args[0]);
+            if !secs.is_finite() {
+                return Err(Error::datetime_overflow("timestamp out of range"));
+            }
+            Value::TimestampTz(dt::from_unix_micros((secs * 1e6).round() as i64)?)
+        }
+        Func::NumericFit => {
+            let Value::Numeric(d) = &args[0] else {
+                return Ok(args[0].clone());
+            };
+            let p = u32::try_from(int(&args[1])?).unwrap_or(0);
+            let s = u32::try_from(int(&args[2])?).unwrap_or(0);
+            Value::Numeric(d.fit(p, s)?)
+        }
+        Func::Now
+        | Func::ClockTimestamp
+        | Func::CurrentDate
+        | Func::LocalTimestamp
+        | Func::CurrentUser
+        | Func::CurrentDatabase
+        | Func::CurrentSchema
+        | Func::Coalesce
         | Func::Concat
         | Func::IsDistinctFrom
         | Func::Nullif

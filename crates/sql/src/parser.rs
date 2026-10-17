@@ -423,7 +423,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn data_type(&mut self) -> Result<(DataType, Option<u32>)> {
+    fn data_type(&mut self) -> Result<(DataType, TypeMod)> {
+        // `pg_catalog.` before a type name.
+        if self.peek_kw("pg_catalog") && self.peek_at(1) == Some(&Token::Op(".")) {
+            self.pos += 2;
+        }
         let mut words: Vec<String> = Vec::new();
         while let Some(Token::Word(w)) = self.peek() {
             let candidate: Vec<&str> = words
@@ -431,9 +435,7 @@ impl<'a> Parser<'a> {
                 .map(String::as_str)
                 .chain([w.as_str()])
                 .collect();
-            let prefix_ok = DataType::parse(&candidate).is_some()
-                || matches!(candidate.as_slice(), ["double"] | ["character"]);
-            if !prefix_ok {
+            if !DataType::is_prefix(&candidate) {
                 break;
             }
             words.push(w.clone());
@@ -441,32 +443,56 @@ impl<'a> Parser<'a> {
         }
         let refs: Vec<&str> = words.iter().map(String::as_str).collect();
         let ty = DataType::parse(&refs).ok_or_else(|| self.error("expected a type"))?;
-        let mut max_len = None;
+        let mut typmod = TypeMod::default();
         if self.eat_op("(") {
-            let n = match self.next() {
+            let number = |p: &mut Self| match p.next() {
                 Some(Token::Number(n)) => n
                     .parse::<u32>()
-                    .map_err(|_| Error::syntax("bad type length"))?,
-                _ => return Err(self.error("expected a length")),
+                    .map_err(|_| Error::syntax("bad type modifier")),
+                _ => Err(p.error("expected a number")),
             };
-            if self.eat_op(",") {
-                self.next(); // NUMERIC(p, s): scale ignored
-            }
+            let n = number(self)?;
+            let m = if self.eat_op(",") {
+                Some(number(self)?)
+            } else {
+                None
+            };
             self.expect_op(")")?;
-            if ty == DataType::Text {
-                max_len = Some(n);
+            match ty {
+                DataType::Text => typmod.max_len = Some(n),
+                DataType::Numeric => {
+                    let s = m.unwrap_or(0);
+                    if !(1..=crate::decimal::MAX_DIGITS).contains(&n) || s > n {
+                        return Err(Error::invalid_parameter(format!(
+                            "NUMERIC precision {n} must be between 1 and {}, and scale {s} at most the precision",
+                            crate::decimal::MAX_DIGITS
+                        )));
+                    }
+                    typmod.numeric = Some((n, s));
+                }
+                // Fractional-second precision of timestamps: accepted,
+                // microseconds are kept.
+                _ => {}
             }
         }
-        Ok((ty, max_len))
+        // `TIMESTAMP(p) WITH TIME ZONE`.
+        if ty == DataType::Timestamp && self.eat_kws(&["with", "time", "zone"]) {
+            return Ok((DataType::TimestampTz, typmod));
+        }
+        if ty == DataType::Timestamp {
+            self.eat_kws(&["without", "time", "zone"]);
+        }
+        Ok((ty, typmod))
     }
 
     fn column_spec(&mut self) -> Result<ColumnSpec> {
         let name = self.ident()?;
-        let (ty, max_len) = self.data_type()?;
+        let (ty, typmod) = self.data_type()?;
         let mut c = ColumnSpec {
             name,
             ty,
-            max_len,
+            max_len: typmod.max_len,
+            numeric: typmod.numeric,
             not_null: false,
             primary_key: false,
             unique: false,
@@ -976,10 +1002,11 @@ impl<'a> Parser<'a> {
 
     fn postfix(&mut self, mut e: Expr) -> Result<Expr> {
         while self.eat_op("::") {
-            let (ty, _) = self.data_type()?;
+            let (ty, typmod) = self.data_type()?;
             e = Expr::Cast {
                 expr: Box::new(e),
                 ty,
+                typmod,
             };
         }
         Ok(e)
@@ -991,20 +1018,27 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| self.error("expected an expression"))?;
         Ok(match tok {
             Token::Number(n) => {
-                if n.contains(['.', 'e', 'E']) {
-                    Expr::Literal(Value::Float(
+                // As in PostgreSQL: integers are bigint, anything else (or
+                // too big) numeric; double precision only beyond numeric's
+                // range.
+                let float = || -> Result<Expr> {
+                    Ok(Expr::Literal(Value::Float(
                         n.parse()
                             .map_err(|_| Error::syntax(format!("bad number {n}")))?,
-                    ))
+                    )))
+                };
+                let numeric = || match crate::decimal::Decimal::parse(&n) {
+                    Ok(d) => Ok(Expr::Literal(Value::Numeric(d))),
+                    Err(_) => float(),
+                };
+                if n.contains(['.', 'e', 'E']) {
+                    numeric()?
                 } else {
                     match n.parse::<i64>() {
                         Ok(i) => Expr::Literal(Value::Int(i)),
                         // 9223372036854775808 only makes sense negated.
                         Err(_) if n == "9223372036854775808" => Expr::Literal(Value::Int(i64::MIN)),
-                        Err(_) => Expr::Literal(Value::Float(
-                            n.parse()
-                                .map_err(|_| Error::syntax(format!("bad number {n}")))?,
-                        )),
+                        Err(_) => numeric()?,
                     }
                 }
             }
@@ -1043,16 +1077,40 @@ impl<'a> Parser<'a> {
                     self.expect_op("(")?;
                     let e = self.expr()?;
                     self.expect_kw("as")?;
-                    let (ty, _) = self.data_type()?;
+                    let (ty, typmod) = self.data_type()?;
                     self.expect_op(")")?;
                     Expr::Cast {
                         expr: Box::new(e),
                         ty,
+                        typmod,
                     }
                 }
                 _ if RESERVED.contains(&w.as_str()) => {
                     self.pos -= 1;
                     return Err(self.error("expected an expression"));
+                }
+                "current_date" | "current_timestamp" | "localtimestamp" | "current_user"
+                | "session_user" | "current_catalog" | "current_role" | "user"
+                    if !self.peek_op("(") =>
+                {
+                    Expr::Function {
+                        name: w,
+                        args: vec![],
+                        distinct: false,
+                        star: false,
+                    }
+                }
+                _ if DataType::is_prefix(&[w.as_str()]) && self.typed_literal_ahead() => {
+                    self.pos -= 1;
+                    let (ty, typmod) = self.data_type()?;
+                    let Some(Token::Str(s)) = self.next() else {
+                        return Err(self.error("expected a string"));
+                    };
+                    Expr::Cast {
+                        expr: Box::new(Expr::Literal(Value::Text(s))),
+                        ty,
+                        typmod,
+                    }
                 }
                 _ => self.name_or_call(w)?,
             },
@@ -1065,7 +1123,39 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// After a type's first word (just consumed): whether the rest of a
+    /// type name and then a string follow (`DATE '2024-01-01'`).
+    fn typed_literal_ahead(&mut self) -> bool {
+        let save = self.pos;
+        self.pos -= 1;
+        let ok = self.data_type().is_ok() && matches!(self.peek(), Some(Token::Str(_)));
+        self.pos = save;
+        ok
+    }
+
     fn name_or_call(&mut self, first: String) -> Result<Expr> {
+        // extract(field FROM expr)
+        if first == "extract" && self.peek_op("(") {
+            let save = self.pos;
+            self.pos += 1;
+            let field = match self.next() {
+                Some(Token::Word(w) | Token::Str(w) | Token::Quoted(w)) => Some(w),
+                _ => None,
+            };
+            if let Some(field) = field
+                && self.eat_kw("from")
+            {
+                let e = self.expr()?;
+                self.expect_op(")")?;
+                return Ok(Expr::Function {
+                    name: "extract".into(),
+                    args: vec![Expr::Literal(Value::Text(field)), e],
+                    distinct: false,
+                    star: false,
+                });
+            }
+            self.pos = save;
+        }
         if self.eat_op("(") {
             let mut args = Vec::new();
             let mut distinct = false;

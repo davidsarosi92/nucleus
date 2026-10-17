@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use nucleus_kv::Kv;
 use nucleus_sql::ast::Statement;
+use nucleus_sql::decimal::Decimal;
 use nucleus_sql::{DataType, Error, OutColumn, Output, Session, TxnStatus, Value};
 
 use crate::Config;
@@ -26,6 +27,13 @@ const FLOAT4: i32 = 700;
 const FLOAT8: i32 = 701;
 const VARCHAR: i32 = 1043;
 const UNKNOWN: i32 = 705;
+const BPCHAR: i32 = 1042;
+const NAME: i32 = 19;
+const NUMERIC: i32 = 1700;
+const DATE: i32 = 1082;
+const TIMESTAMP: i32 = 1114;
+const TIMESTAMPTZ: i32 = 1184;
+const INTERVAL: i32 = 1186;
 
 fn oid(t: DataType) -> i32 {
     match t {
@@ -33,6 +41,11 @@ fn oid(t: DataType) -> i32 {
         DataType::Int => INT8,
         DataType::Float => FLOAT8,
         DataType::Text => TEXT,
+        DataType::Numeric => NUMERIC,
+        DataType::Date => DATE,
+        DataType::Timestamp => TIMESTAMP,
+        DataType::TimestampTz => TIMESTAMPTZ,
+        DataType::Interval => INTERVAL,
     }
 }
 
@@ -41,7 +54,12 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         BOOL => DataType::Bool,
         INT2 | INT4 | INT8 => DataType::Int,
         FLOAT4 | FLOAT8 => DataType::Float,
-        TEXT | VARCHAR | UNKNOWN => DataType::Text,
+        TEXT | VARCHAR | UNKNOWN | BPCHAR | NAME => DataType::Text,
+        NUMERIC => DataType::Numeric,
+        DATE => DataType::Date,
+        TIMESTAMP => DataType::Timestamp,
+        TIMESTAMPTZ => DataType::TimestampTz,
+        INTERVAL => DataType::Interval,
         _ => return None,
     })
 }
@@ -49,9 +67,67 @@ fn type_of_oid(o: i32) -> Option<DataType> {
 fn type_size(t: DataType) -> i16 {
     match t {
         DataType::Bool => 1,
-        DataType::Int | DataType::Float => 8,
-        DataType::Text => -1,
+        DataType::Date => 4,
+        DataType::Int | DataType::Float | DataType::Timestamp | DataType::TimestampTz => 8,
+        DataType::Interval => 16,
+        DataType::Text | DataType::Numeric => -1,
     }
+}
+
+/// PostgreSQL's binary `numeric`: digit count, weight, sign and display
+/// scale, then base-10000 digits.
+fn numeric_binary(d: &Decimal) -> Vec<u8> {
+    let s = d.scale() as usize;
+    let digits = d.mantissa().unsigned_abs().to_string();
+    let padded = format!("{digits:0>width$}", width = s + 1);
+    let (int, frac) = padded.split_at(padded.len() - s);
+    let int = int.trim_start_matches('0');
+    // Integer groups from the right, fraction groups from the left.
+    let lead = (4 - int.len() % 4) % 4;
+    let int = format!("{}{int}", "0".repeat(lead));
+    let frac = format!("{frac}{}", "0".repeat((4 - frac.len() % 4) % 4));
+    let mut groups: Vec<i16> = int
+        .as_bytes()
+        .chunks(4)
+        .chain(frac.as_bytes().chunks(4))
+        .map(|c| std::str::from_utf8(c).unwrap().parse().unwrap())
+        .collect();
+    let mut weight = (int.len() / 4) as i16 - 1;
+    while groups.first() == Some(&0) {
+        groups.remove(0);
+        weight -= 1;
+    }
+    while groups.last() == Some(&0) {
+        groups.pop();
+    }
+    if groups.is_empty() {
+        weight = 0;
+    }
+    let mut out = Vec::with_capacity(8 + 2 * groups.len());
+    out.extend_from_slice(&(groups.len() as i16).to_be_bytes());
+    out.extend_from_slice(&weight.to_be_bytes());
+    out.extend_from_slice(&(if d.signum() < 0 { 0x4000u16 } else { 0 }).to_be_bytes());
+    out.extend_from_slice(&(s as i16).to_be_bytes());
+    for g in groups {
+        out.extend_from_slice(&g.to_be_bytes());
+    }
+    out
+}
+
+fn numeric_from_binary(b: &[u8]) -> Option<Decimal> {
+    let i16_at = |i: usize| Some(i16::from_be_bytes(b.get(i..i + 2)?.try_into().ok()?));
+    let (n, weight, sign, dscale) = (i16_at(0)?, i16_at(2)?, i16_at(4)? as u16, i16_at(6)?);
+    if sign == 0xC000 {
+        return None; // NaN
+    }
+    let mut text = String::new();
+    for i in 0..n as usize {
+        text.push_str(&format!("{:04}", i16_at(8 + 2 * i)?));
+    }
+    // The digits are worth 10000^(weight - i): place the point.
+    let point = 4 * (i64::from(weight) + 1);
+    let value = format!("{}0.{text}e{point}", if sign == 0x4000 { "-" } else { "" });
+    Decimal::parse(&value).ok()?.round(i32::from(dscale)).ok()
 }
 
 /// An outgoing message being built.
@@ -347,6 +423,15 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
         (Value::Int(i), DataType::Float) => (*i as f64).to_be_bytes().to_vec(),
         (Value::Int(i), _) => i.to_be_bytes().to_vec(),
         (Value::Float(f), _) => f.to_be_bytes().to_vec(),
+        (Value::Numeric(d), _) => numeric_binary(d),
+        (Value::Date(d), _) => d.to_be_bytes().to_vec(),
+        (Value::Timestamp(t) | Value::TimestampTz(t), _) => t.to_be_bytes().to_vec(),
+        (Value::Interval(i), _) => {
+            let mut b = i.micros.to_be_bytes().to_vec();
+            b.extend_from_slice(&i.days.to_be_bytes());
+            b.extend_from_slice(&i.months.to_be_bytes());
+            b
+        }
         (v, _) => text_value(v).into_bytes(),
     }
 }
@@ -376,6 +461,21 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
             (Some(DataType::Text) | None, _) => {
                 Value::Text(String::from_utf8(bytes.to_vec()).map_err(|_| bad("text not UTF-8"))?)
             }
+            (Some(DataType::Numeric), _) => {
+                Value::Numeric(numeric_from_binary(bytes).ok_or_else(|| bad("numeric"))?)
+            }
+            (Some(DataType::Date), 4) => Value::Date(i32::from_be_bytes(bytes.try_into().unwrap())),
+            (Some(DataType::Timestamp), 8) => {
+                Value::Timestamp(i64::from_be_bytes(bytes.try_into().unwrap()))
+            }
+            (Some(DataType::TimestampTz), 8) => {
+                Value::TimestampTz(i64::from_be_bytes(bytes.try_into().unwrap()))
+            }
+            (Some(DataType::Interval), 16) => Value::Interval(nucleus_sql::datetime::Interval {
+                micros: i64::from_be_bytes(bytes[0..8].try_into().unwrap()),
+                days: i32::from_be_bytes(bytes[8..12].try_into().unwrap()),
+                months: i32::from_be_bytes(bytes[12..16].try_into().unwrap()),
+            }),
             _ => return Err(bad("unexpected length for its type")),
         });
     }
@@ -670,5 +770,52 @@ fn format_for(formats: &[i16], i: usize) -> i16 {
         0 => 0,
         1 => formats[0],
         _ => formats.get(i).copied().unwrap_or(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    #[test]
+    fn numeric_binary_matches_postgresql() {
+        // From PostgreSQL 16's numeric_send.
+        for (v, want) in [
+            ("12345.678", "0003000100000003000109291a7c"),
+            ("0", "0000000000000000"),
+            ("-0.0001", "0001ffff400000040001"),
+            ("10000", "00010001000000000001"),
+            ("1.50", "000200000000000200011388"),
+            ("123456789.000", "0003000200000003000109291a85"),
+        ] {
+            let d = Decimal::parse(v).unwrap();
+            let b = numeric_binary(&d);
+            assert_eq!(hex(&b), want, "{v}");
+            let back = numeric_from_binary(&b).unwrap();
+            assert_eq!(back.to_string(), d.to_string(), "{v}");
+        }
+    }
+
+    #[test]
+    fn date_time_binary_matches_postgresql() {
+        let iv = nucleus_sql::datetime::parse_interval("1 mon 2 days 00:00:03").unwrap();
+        assert_eq!(
+            hex(&binary_value(&Value::Interval(iv), DataType::Interval)),
+            "00000000002dc6c00000000200000001"
+        );
+        let d = nucleus_sql::datetime::parse_date("2024-01-01").unwrap();
+        assert_eq!(
+            hex(&binary_value(&Value::Date(d), DataType::Date)),
+            "0000223e"
+        );
+        let t = nucleus_sql::datetime::parse_timestamp("2000-01-01 00:00:01", false).unwrap();
+        assert_eq!(
+            hex(&binary_value(&Value::Timestamp(t), DataType::Timestamp)),
+            "00000000000f4240"
+        );
     }
 }

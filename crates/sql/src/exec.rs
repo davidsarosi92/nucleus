@@ -257,16 +257,29 @@ fn key_range(
     let ty = |pos: usize| columns.get(pos).map(|c| table.columns[*c].ty);
     // A bound of the wrong type would encode in the wrong place: then read
     // more (the filter decides), never less.
-    let fits = |v: &Value, pos: usize| {
-        v.is_null()
-            || v.data_type() == ty(pos)
-            || (v.data_type() == Some(DataType::Int) && ty(pos) == Some(DataType::Float))
-    };
-    let coerce = |v: Value, pos: usize| -> Value {
-        match (v, ty(pos)) {
-            (Value::Int(i), Some(DataType::Float)) => Value::Float(i as f64),
-            (v, _) => v,
-        }
+    // Exact conversions only: a value that compares equal to the column's
+    // values the way its converted form does.
+    let coerce = |v: Value, pos: usize| -> Option<Value> {
+        Some(match (v, ty(pos)?) {
+            (v, t) if v.is_null() || v.data_type() == Some(t) => v,
+            (Value::Int(i), DataType::Float) => Value::Float(i as f64),
+            (Value::Int(i), DataType::Numeric) => {
+                Value::Numeric(crate::decimal::Decimal::from_i64(i))
+            }
+            // numeric against float compares as floats.
+            (Value::Numeric(d), DataType::Float) => Value::Float(d.to_f64()),
+            (v @ (Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_)), t)
+                if t.is_datetime() && t != DataType::Date =>
+            {
+                let ts = v.as_timestamp()?;
+                if t == DataType::Timestamp {
+                    Value::Timestamp(ts)
+                } else {
+                    Value::TimestampTz(ts)
+                }
+            }
+            _ => return None,
+        })
     };
     let mut usable = true;
     for (pos, p) in prefix.iter().enumerate() {
@@ -274,11 +287,11 @@ fn key_range(
         if v.is_null() {
             return Ok(None); // `col = NULL` matches nothing
         }
-        if !fits(&v, pos) {
+        let Some(v) = coerce(v, pos) else {
             usable = false;
             break;
-        }
-        encode_key_value(&mut key, &coerce(v, pos));
+        };
+        encode_key_value(&mut key, &v);
     }
     let base_end = prefix_end(&key);
     if !usable {
@@ -287,11 +300,11 @@ fn key_range(
     let pos = prefix.len();
     let bound_key = |b: &Expr| -> Result<Option<Vec<u8>>> {
         let v = b.eval(e)?;
-        if v.is_null() || !fits(&v, pos) {
+        let Some(v) = coerce(v, pos).filter(|v| !v.is_null()) else {
             return Ok(None);
-        }
+        };
         let mut k = key.clone();
-        encode_key_value(&mut k, &coerce(v, pos));
+        encode_key_value(&mut k, &v);
         Ok(Some(k))
     };
     let start = match lower {
@@ -555,7 +568,9 @@ fn full_join<'a>(
 enum Acc {
     Count(i64),
     Sum(Value),
-    Avg(f64, i64),
+    /// The sum (integers summed as numeric, so it cannot overflow) and the
+    /// count.
+    Avg(Value, i64),
     MinMax(Value),
 }
 
@@ -572,7 +587,7 @@ fn aggregate(
                 let acc = match a.func {
                     AggFunc::Count => Acc::Count(0),
                     AggFunc::Sum => Acc::Sum(Value::Null),
-                    AggFunc::Avg => Acc::Avg(0.0, 0),
+                    AggFunc::Avg => Acc::Avg(Value::Null, 0),
                     AggFunc::Min | AggFunc::Max => Acc::MinMax(Value::Null),
                 };
                 (acc, a.distinct.then(HashSet::new))
@@ -619,18 +634,25 @@ fn aggregate(
     if groups.is_empty() && group.is_empty() {
         groups.push((Vec::new(), fresh())); // aggregates over no rows
     }
-    Ok(groups
+    groups
         .into_iter()
         .map(|(mut key, accs)| {
-            key.extend(accs.into_iter().map(|(acc, _)| match acc {
-                Acc::Count(n) => Value::Int(n),
-                Acc::Sum(v) | Acc::MinMax(v) => v,
-                Acc::Avg(_, 0) => Value::Null,
-                Acc::Avg(s, n) => Value::Float(s / n as f64),
-            }));
-            key
+            for (acc, _) in accs {
+                key.push(match acc {
+                    Acc::Count(n) => Value::Int(n),
+                    Acc::Sum(v) | Acc::MinMax(v) => v,
+                    Acc::Avg(_, 0) => Value::Null,
+                    Acc::Avg(Value::Numeric(d), n) => {
+                        Value::Numeric(d.checked_div(crate::decimal::Decimal::from_i64(n))?)
+                    }
+                    Acc::Avg(Value::Interval(i), n) => Value::Interval(i.checked_div(n as f64)?),
+                    Acc::Avg(Value::Float(f), n) => Value::Float(f / n as f64),
+                    Acc::Avg(_, _) => Value::Null,
+                });
+            }
+            Ok(key)
         })
-        .collect())
+        .collect()
 }
 
 fn accumulate(func: AggFunc, acc: &mut Acc, v: Value) -> Result<()> {
@@ -639,7 +661,7 @@ fn accumulate(func: AggFunc, acc: &mut Acc, v: Value) -> Result<()> {
         Acc::Sum(s) => {
             *s = if s.is_null() {
                 match v {
-                    Value::Int(_) | Value::Float(_) => v,
+                    Value::Int(_) | Value::Float(_) | Value::Numeric(_) | Value::Interval(_) => v,
                     v => {
                         return Err(Error::undefined_function(format!(
                             "function sum({}) does not exist",
@@ -652,12 +674,16 @@ fn accumulate(func: AggFunc, acc: &mut Acc, v: Value) -> Result<()> {
             }
         }
         Acc::Avg(s, n) => match v {
-            Value::Int(i) => {
-                *s += i as f64;
-                *n += 1;
-            }
-            Value::Float(f) => {
-                *s += f;
+            Value::Int(_) | Value::Float(_) | Value::Numeric(_) | Value::Interval(_) => {
+                let v = match v {
+                    Value::Int(i) => Value::Numeric(crate::decimal::Decimal::from_i64(i)),
+                    v => v,
+                };
+                *s = if s.is_null() {
+                    v
+                } else {
+                    crate::expr::binary(crate::ast::BinaryOp::Add, s.clone(), v)?
+                };
                 *n += 1;
             }
             v => {

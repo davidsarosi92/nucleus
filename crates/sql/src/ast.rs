@@ -134,6 +134,8 @@ pub struct ColumnSpec {
     pub ty: DataType,
     /// `VARCHAR(n)`.
     pub max_len: Option<u32>,
+    /// `NUMERIC(precision, scale)`.
+    pub numeric: Option<(u32, u32)>,
     /// `NOT NULL` (or `PRIMARY KEY`).
     pub not_null: bool,
     /// `PRIMARY KEY` on the column.
@@ -422,12 +424,14 @@ pub enum Expr {
         /// `ELSE`.
         otherwise: Option<Box<Expr>>,
     },
-    /// `CAST(expr AS type)` / `expr::type`.
+    /// `CAST(expr AS type)` / `expr::type` / `type 'literal'`.
     Cast {
         /// The operand.
         expr: Box<Expr>,
         /// The type.
         ty: DataType,
+        /// Its modifier: `VARCHAR(n)`, `NUMERIC(p, s)`.
+        typmod: TypeMod,
     },
     /// A function call; `count(*)` has `star`.
     Function {
@@ -440,6 +444,15 @@ pub enum Expr {
         /// `count(*)`.
         star: bool,
     },
+}
+
+/// A type modifier.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TypeMod {
+    /// `VARCHAR(n)`: the longest value, in characters.
+    pub max_len: Option<u32>,
+    /// `NUMERIC(precision, scale)`.
+    pub numeric: Option<(u32, u32)>,
 }
 
 /// A prefix operator.

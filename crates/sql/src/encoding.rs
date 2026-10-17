@@ -11,15 +11,23 @@
 //! | bigint | `02`, then `i ^ i64::MIN` as 8 bytes big-endian |
 //! | double | `03`, then the IEEE bits, sign-flipped (positive) or inverted (negative), big-endian; `-0` as `0`, one `NaN` above all numbers |
 //! | text | `04`, the bytes with `00` escaped as `00 FF`, then `00 01` |
+//! | numeric | `05`, then `02` for zero; else `03` (positive) and the leading digit's power of ten as `i16 ^ 0x8000` big-endian, the significant digits as bytes `d + 1`, then `00`; or `01` (negative) and the positive form's bytes inverted |
+//! | date | `06`, then `days ^ i32::MIN` as 4 bytes big-endian |
+//! | timestamp, timestamptz | `07` / `08`, then `µs ^ i64::MIN` as 8 bytes big-endian |
+//! | interval | `09`, then its span (months as 30 days) in µs as `i128 ^ i128::MIN`, 16 bytes big-endian |
 //!
 //! Every encoding is self-delimiting, so a key can be split back into its
 //! values (`decode_key_value`).
 //!
 //! **Rows** — `01` (version), column count `u16`, then per column a tag
-//! (`0` null, `1` bool, `2` bigint, `3` double, `4` text) and its bytes
-//! (little-endian; text with a `u32` length).  A row shorter than its table
+//! (`0` null, `1` bool, `2` bigint, `3` double, `4` text, `5` numeric:
+//! `i128` mantissa and `u8` scale, `6` date `i32`, `7` timestamp and `8`
+//! timestamptz `i64`, `9` interval: months `i32`, days `i32`, µs `i64`) and
+//! its bytes (little-endian; text with a `u32` length).  A row shorter than its table
 //! (a column added later) reads the missing columns as `NULL`.
 
+use crate::datetime::{Interval, USECS_PER_DAY};
+use crate::decimal::Decimal;
 use crate::error::{Error, Result};
 use crate::types::Value;
 
@@ -58,6 +66,41 @@ pub fn encode_key_value(out: &mut Vec<u8>, v: &Value) {
                 }
             }
             out.extend_from_slice(&[0x00, 0x01]);
+        }
+        Value::Numeric(d) => {
+            out.push(0x05);
+            match d.digits() {
+                None => out.push(0x02),
+                Some((digits, exp)) => {
+                    let mut body = Vec::with_capacity(digits.len() + 3);
+                    body.extend_from_slice(&((exp as i16 as u16) ^ 0x8000).to_be_bytes());
+                    body.extend(digits.iter().map(|d| d + 1));
+                    body.push(0x00);
+                    if d.signum() > 0 {
+                        out.push(0x03);
+                        out.extend_from_slice(&body);
+                    } else {
+                        out.push(0x01);
+                        out.extend(body.iter().map(|b| !b));
+                    }
+                }
+            }
+        }
+        Value::Date(d) => {
+            out.push(0x06);
+            out.extend_from_slice(&((*d ^ i32::MIN) as u32).to_be_bytes());
+        }
+        Value::Timestamp(t) | Value::TimestampTz(t) => {
+            out.push(if matches!(v, Value::Timestamp(_)) {
+                0x07
+            } else {
+                0x08
+            });
+            out.extend_from_slice(&((*t ^ i64::MIN) as u64).to_be_bytes());
+        }
+        Value::Interval(i) => {
+            out.push(0x09);
+            out.extend_from_slice(&((i.span() ^ i128::MIN) as u128).to_be_bytes());
         }
     }
 }
@@ -113,6 +156,53 @@ pub fn decode_key_value(b: &[u8]) -> Result<(Value, usize)> {
                 i + 2,
             )
         }
+        0x05 => match b.get(1).ok_or_else(bad_key)? {
+            0x02 => (Value::Numeric(Decimal::ZERO), 2),
+            &class @ (0x01 | 0x03) => {
+                let neg = class == 0x01;
+                let byte = |i: usize| -> Result<u8> {
+                    let x = *b.get(i).ok_or_else(bad_key)?;
+                    Ok(if neg { !x } else { x })
+                };
+                let exp = i64::from((u16::from_be_bytes([byte(2)?, byte(3)?]) ^ 0x8000) as i16);
+                let mut digits = Vec::new();
+                let mut i = 4;
+                loop {
+                    match byte(i)? {
+                        0 => break,
+                        d @ 1..=10 => digits.push(d - 1),
+                        _ => return Err(bad_key()),
+                    }
+                    i += 1;
+                }
+                (
+                    Value::Numeric(Decimal::from_digits(neg, &digits, exp).map_err(|_| bad_key())?),
+                    i + 1,
+                )
+            }
+            _ => return Err(bad_key()),
+        },
+        0x06 => {
+            let x = u32::from_be_bytes(b.get(1..5).ok_or_else(bad_key)?.try_into().unwrap());
+            (Value::Date((x as i32) ^ i32::MIN), 5)
+        }
+        0x07 => (Value::Timestamp((eight(b)? as i64) ^ i64::MIN), 9),
+        0x08 => (Value::TimestampTz((eight(b)? as i64) ^ i64::MIN), 9),
+        0x09 => {
+            let x = u128::from_be_bytes(b.get(1..17).ok_or_else(bad_key)?.try_into().unwrap());
+            let span = (x as i128) ^ i128::MIN;
+            // The span is all a key keeps: days and time.
+            let day = i128::from(USECS_PER_DAY);
+            let days = i32::try_from(span.div_euclid(day)).map_err(|_| bad_key())?;
+            (
+                Value::Interval(Interval {
+                    months: 0,
+                    days,
+                    micros: span.rem_euclid(day) as i64,
+                }),
+                17,
+            )
+        }
         _ => return Err(bad_key()),
     })
 }
@@ -153,6 +243,29 @@ pub fn encode_row(row: &[Value]) -> Vec<u8> {
                 out.extend_from_slice(&(s.len() as u32).to_le_bytes());
                 out.extend_from_slice(s.as_bytes());
             }
+            Value::Numeric(d) => {
+                out.push(5);
+                out.extend_from_slice(&d.mantissa().to_le_bytes());
+                out.push(d.scale() as u8);
+            }
+            Value::Date(d) => {
+                out.push(6);
+                out.extend_from_slice(&d.to_le_bytes());
+            }
+            Value::Timestamp(t) => {
+                out.push(7);
+                out.extend_from_slice(&t.to_le_bytes());
+            }
+            Value::TimestampTz(t) => {
+                out.push(8);
+                out.extend_from_slice(&t.to_le_bytes());
+            }
+            Value::Interval(i) => {
+                out.push(9);
+                out.extend_from_slice(&i.months.to_le_bytes());
+                out.extend_from_slice(&i.days.to_le_bytes());
+                out.extend_from_slice(&i.micros.to_le_bytes());
+            }
         }
     }
     out
@@ -174,6 +287,21 @@ pub fn decode_row(b: &[u8], columns: usize) -> Result<Vec<Value>> {
             2 => Value::Int(r.u64().map_err(|_| bad())? as i64),
             3 => Value::Float(f64::from_bits(r.u64().map_err(|_| bad())?)),
             4 => Value::Text(r.str().map_err(|_| bad())?),
+            5 => {
+                let lo = r.u64().map_err(|_| bad())?;
+                let hi = r.u64().map_err(|_| bad())?;
+                let m = (i128::from(hi as i64) << 64) | i128::from(lo);
+                let scale = r.u8().map_err(|_| bad())?;
+                Value::Numeric(Decimal::new(m, u32::from(scale)).map_err(|_| bad())?)
+            }
+            6 => Value::Date(r.u32().map_err(|_| bad())? as i32),
+            7 => Value::Timestamp(r.u64().map_err(|_| bad())? as i64),
+            8 => Value::TimestampTz(r.u64().map_err(|_| bad())? as i64),
+            9 => Value::Interval(Interval {
+                months: r.u32().map_err(|_| bad())? as i32,
+                days: r.u32().map_err(|_| bad())? as i32,
+                micros: r.u64().map_err(|_| bad())? as i64,
+            }),
             _ => return Err(bad()),
         });
     }
@@ -285,7 +413,10 @@ impl<'a> Reader<'a> {
         let len = match tag {
             0 => 0,
             1 => 1,
-            2 | 3 => 8,
+            2 | 3 | 7 | 8 => 8,
+            5 => 17,
+            6 => 4,
+            9 => 16,
             4 => {
                 4 + u32::from_le_bytes(
                     self.b
@@ -336,7 +467,53 @@ mod tests {
             Value::Text("a\0".into()),
             Value::Text("ab".into()),
             Value::Text("é".into()),
+            num("-1000"),
+            num("-12.5"),
+            num("-12.25"),
+            num("-12.2"),
+            num("-0.001"),
+            num("0"),
+            num("0.001"),
+            num("1"),
+            num("1.5"),
+            num("1.55"),
+            num("9.99"),
+            num("10"),
+            num("123456789012345678901234567890.12345678"),
+            Value::Date(-2_400_000),
+            Value::Date(-1),
+            Value::Date(0),
+            Value::Date(9000),
+            Value::Timestamp(-5),
+            Value::Timestamp(0),
+            Value::Timestamp(1 << 40),
+            Value::TimestampTz(-1),
+            Value::TimestampTz(7),
+            Value::Interval(Interval {
+                months: -1,
+                days: 0,
+                micros: 0,
+            }),
+            Value::Interval(Interval {
+                months: 0,
+                days: 1,
+                micros: -1,
+            }),
+            Value::Interval(Interval {
+                months: 0,
+                days: 1,
+                micros: 0,
+            }),
+            Value::Interval(Interval {
+                months: 1,
+                days: 0,
+                micros: 5,
+            }),
         ]
+    }
+
+    fn num(s: &str) -> Value {
+        Value::Numeric(Decimal::parse(s).unwrap())
     }
 
     #[test]

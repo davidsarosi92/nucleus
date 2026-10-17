@@ -505,29 +505,31 @@ impl<'a> Binder<'a> {
 
     fn values(&mut self, rows: &[Vec<ast::Expr>]) -> Result<Bound> {
         let width = rows.first().map_or(0, Vec::len);
-        let mut types: Vec<Option<DataType>> = vec![None; width];
-        let mut out = Vec::with_capacity(rows.len());
         let empty = Scope::default();
+        let mut cells: Vec<Vec<Typed>> = Vec::with_capacity(rows.len());
         for row in rows {
             if row.len() != width {
                 return Err(Error::syntax("VALUES lists must all be the same length"));
             }
-            let mut bound = Vec::with_capacity(width);
-            for (i, e) in row.iter().enumerate() {
-                let (x, t) = self.expr(e, &empty)?;
-                types[i] = unify(types[i], t)?;
-                bound.push(x);
-            }
-            out.push(bound);
+            cells.push(
+                row.iter()
+                    .map(|e| self.expr(e, &empty))
+                    .collect::<Result<_>>()?,
+            );
         }
-        // Mixed int/float columns become float.
-        for row in &mut out {
-            for (i, x) in row.iter_mut().enumerate() {
-                if types[i] == Some(DataType::Float) {
-                    *x = Expr::Cast(Box::new(x.clone()), DataType::Float);
-                }
+        // Each column takes the common type of its cells.
+        let mut types: Vec<Option<DataType>> = vec![None; width];
+        for (i, ty) in types.iter_mut().enumerate() {
+            let mut column: Vec<Typed> = cells.iter_mut().map(|r| r[i].clone()).collect();
+            *ty = self.unify_items(&mut column)?;
+            for (r, c) in cells.iter_mut().zip(column) {
+                r[i] = c;
             }
         }
+        let out: Vec<Vec<Expr>> = cells
+            .into_iter()
+            .map(|r| r.into_iter().map(|(x, _)| x).collect())
+            .collect();
         let scope = Scope {
             cols: types
                 .iter()
@@ -698,12 +700,7 @@ impl<'a> Binder<'a> {
                     let mut exprs = Vec::new();
                     let mut cols = Vec::new();
                     for (name, li, ri, ty) in &merged {
-                        let side = |i: usize| match ty {
-                            Some(DataType::Float) if b.scope.cols[i].ty == Some(DataType::Int) => {
-                                Expr::Cast(Box::new(Expr::Column(i)), DataType::Float)
-                            }
-                            _ => Expr::Column(i),
-                        };
+                        let side = |i: usize| convert(Expr::Column(i), b.scope.cols[i].ty, *ty);
                         exprs.push(Expr::Func(Func::Coalesce, vec![side(*li), side(*ri)]));
                         cols.push(ScopeCol {
                             table: None,
@@ -1019,11 +1016,15 @@ impl<'a> Binder<'a> {
             };
             let ty = match func {
                 AggFunc::Count => Some(DataType::Int),
-                AggFunc::Avg => Some(DataType::Float),
+                // As PostgreSQL: the average of integers is numeric.
+                AggFunc::Avg => match at {
+                    Some(DataType::Int) | None => Some(DataType::Numeric),
+                    t => t,
+                },
                 AggFunc::Sum | AggFunc::Min | AggFunc::Max => at,
             };
             if matches!(func, AggFunc::Sum | AggFunc::Avg)
-                && at.is_some_and(|t| !matches!(t, DataType::Int | DataType::Float))
+                && at.is_some_and(|t| !t.is_number() && t != DataType::Interval)
             {
                 return Err(Error::undefined_function(format!(
                     "function {name}({}) does not exist",
@@ -1223,7 +1224,7 @@ impl<'a> Binder<'a> {
                         (Expr::Unary(UnaryOp::Not, Box::new(x)), Some(DataType::Bool))
                     }
                     _ => {
-                        if t.is_some_and(|t| !matches!(t, DataType::Int | DataType::Float)) {
+                        if t.is_some_and(|t| !t.is_number() && t != DataType::Interval) {
                             return Err(Error::undefined_function(format!(
                                 "operator does not exist: -{}",
                                 t.unwrap()
@@ -1307,44 +1308,61 @@ impl<'a> Binder<'a> {
                 otherwise,
             } => {
                 let op = operand.as_ref().map(|o| sub(o, self)).transpose()?;
-                let mut ty = None;
-                let mut bound = Vec::new();
+                let mut conds = Vec::new();
+                let mut results = Vec::new();
                 for (w, t) in whens {
                     let (wx, wt) = sub(w, self)?;
-                    match &op {
-                        Some((_, ot)) => comparable(*ot, wt)?,
-                        None => expect(wt, DataType::Bool, "CASE WHEN")?,
-                    }
-                    let (tx, tt) = sub(t, self)?;
-                    ty = unify(ty, tt)?;
-                    bound.push((wx, tx));
+                    let wx = match &op {
+                        Some((_, ot)) => {
+                            let (wx, (_, wt)) = self.coerce(*ot, wx, wt)?;
+                            comparable(*ot, wt)?;
+                            wx
+                        }
+                        None => {
+                            expect(wt, DataType::Bool, "CASE WHEN")?;
+                            wx
+                        }
+                    };
+                    conds.push(wx);
+                    results.push(sub(t, self)?);
                 }
-                let other = otherwise.as_ref().map(|o| sub(o, self)).transpose()?;
-                if let Some((_, ot)) = &other {
-                    ty = unify(ty, *ot)?;
+                let has_else = otherwise.is_some();
+                if let Some(o) = otherwise {
+                    results.push(sub(o, self)?);
                 }
-                let cast = |x: Expr, t: Option<DataType>| {
-                    if ty == Some(DataType::Float) && t == Some(DataType::Int) {
-                        Expr::Cast(Box::new(x), DataType::Float)
-                    } else {
-                        x
-                    }
+                let ty = self.unify_items(&mut results)?;
+                let other = if has_else {
+                    results.pop().map(|(x, _)| Box::new(x))
+                } else {
+                    None
                 };
                 (
                     Expr::Case {
                         operand: op.map(|(x, _)| Box::new(x)),
-                        whens: bound.into_iter().map(|(w, t)| (w, cast(t, None))).collect(),
-                        otherwise: other.map(|(x, t)| Box::new(cast(x, t))),
+                        whens: conds
+                            .into_iter()
+                            .zip(results.into_iter().map(|(x, _)| x))
+                            .collect(),
+                        otherwise: other,
                     },
                     ty,
                 )
             }
-            A::Cast { expr, ty } => {
+            A::Cast { expr, ty, typmod } => {
                 let (x, _) = sub(expr, self)?;
                 if let Expr::Param(n) = x {
                     self.note_param(n, Some(*ty));
                 }
-                (Expr::Cast(Box::new(x), *ty), Some(*ty))
+                let mut e = Expr::Cast(Box::new(x), *ty);
+                let lit = |n: u32| Expr::Literal(Value::Int(i64::from(n)));
+                if let (DataType::Numeric, Some((p, s))) = (ty, typmod.numeric) {
+                    e = Expr::Func(Func::NumericFit, vec![e, lit(p), lit(s)]);
+                }
+                if let (DataType::Text, Some(n)) = (ty, typmod.max_len) {
+                    // An explicit cast to varchar(n) truncates.
+                    e = Expr::Func(Func::Substr, vec![e, lit(1), lit(n)]);
+                }
+                (e, Some(*ty))
             }
             A::Function {
                 name,
@@ -1384,25 +1402,109 @@ impl<'a> Binder<'a> {
                     Func::Length | Func::Strpos => Some(DataType::Int),
                     Func::IsDistinctFrom => Some(DataType::Bool),
                     Func::Sqrt | Func::Power => Some(DataType::Float),
-                    Func::Abs | Func::Round | Func::Floor | Func::Ceil | Func::Nullif => types[0],
+                    Func::Round | Func::Trunc
+                        if types[0] == Some(DataType::Int)
+                            && (f == Func::Trunc || bound.len() == 2) =>
+                    {
+                        // round(int, n) and trunc(int) are numeric.
+                        bound[0] = convert(bound[0].clone(), types[0], Some(DataType::Numeric));
+                        Some(DataType::Numeric)
+                    }
+                    Func::Abs
+                    | Func::Round
+                    | Func::Trunc
+                    | Func::Floor
+                    | Func::Ceil
+                    | Func::Sign
+                    | Func::Nullif => types[0],
+                    Func::Mod => arith_type(BinaryOp::Mod, types[0], types[1]).flatten(),
+                    Func::Now | Func::ClockTimestamp | Func::ToTimestamp => {
+                        if let Some(x) = bound.first_mut() {
+                            let (c, _) = self.coerce(Some(DataType::Float), x.clone(), types[0])?;
+                            *x = c;
+                        }
+                        Some(DataType::TimestampTz)
+                    }
+                    Func::CurrentDate | Func::MakeDate => Some(DataType::Date),
+                    Func::LocalTimestamp => Some(DataType::Timestamp),
+                    Func::Extract | Func::DatePart | Func::DateTrunc => {
+                        let (field, _) = self.text_operand(bound[0].clone(), types[0], name)?;
+                        bound[0] = field;
+                        let (x, t) = self.coerce(
+                            is_text_literal(&bound[1]).then_some(DataType::Timestamp),
+                            bound[1].clone(),
+                            types[1],
+                        )?;
+                        bound[1] = x;
+                        let t = t.1;
+                        if t.is_some_and(|t| !t.is_datetime() && t != DataType::Interval) {
+                            return Err(Error::undefined_function(format!(
+                                "function {name}(text, {}) does not exist",
+                                name_of(t)
+                            )));
+                        }
+                        match f {
+                            Func::Extract => Some(DataType::Numeric),
+                            Func::DatePart => Some(DataType::Float),
+                            _ => match t {
+                                Some(DataType::Date) => Some(DataType::TimestampTz),
+                                t => t,
+                            },
+                        }
+                    }
+                    Func::Age => {
+                        for (x, t) in bound.iter_mut().zip(&types) {
+                            let (c, _) = self.coerce(
+                                is_text_literal(x).then_some(DataType::Timestamp),
+                                x.clone(),
+                                *t,
+                            )?;
+                            *x = c;
+                        }
+                        Some(DataType::Interval)
+                    }
+                    Func::JustifyDays | Func::JustifyHours | Func::JustifyInterval => {
+                        let (c, _) =
+                            self.coerce(Some(DataType::Interval), bound[0].clone(), types[0])?;
+                        bound[0] = c;
+                        Some(DataType::Interval)
+                    }
+                    Func::NumericFit => Some(DataType::Numeric),
+                    Func::CurrentUser | Func::CurrentDatabase | Func::CurrentSchema => {
+                        Some(DataType::Text)
+                    }
                     Func::Coalesce | Func::Greatest | Func::Least => {
-                        let mut t = None;
-                        for x in &types {
-                            t = unify(t, *x)?;
-                        }
-                        if t == Some(DataType::Float) {
-                            for (x, xt) in bound.iter_mut().zip(&types) {
-                                if *xt == Some(DataType::Int) {
-                                    *x = Expr::Cast(Box::new(x.clone()), DataType::Float);
-                                }
-                            }
-                        }
+                        let mut items: Vec<Typed> =
+                            bound.drain(..).zip(types.iter().copied()).collect();
+                        let t = self.unify_items(&mut items)?;
+                        bound = items.into_iter().map(|(x, _)| x).collect();
                         t
                     }
                 };
                 (Expr::Func(f, bound), ty)
             }
         })
+    }
+
+    /// The common type of `items`, each converted to it.  Text literals and
+    /// parameters are untyped here: they take the others' type (as
+    /// PostgreSQL's `unknown`).
+    fn unify_items(&mut self, items: &mut [Typed]) -> Result<Option<DataType>> {
+        let mut ty = None;
+        for (x, t) in items.iter() {
+            if !is_text_literal(x) {
+                ty = unify(ty, *t)?;
+            }
+        }
+        if ty.is_none() && items.iter().any(|(x, _)| is_text_literal(x)) {
+            ty = Some(DataType::Text);
+        }
+        for item in items.iter_mut() {
+            let (x, t) = std::mem::replace(item, (Expr::Literal(Value::Null), None));
+            let (x, (_, t2)) = self.coerce(ty, x, t)?;
+            *item = (convert(x, t2, ty), ty);
+        }
+        Ok(ty)
     }
 
     fn text_operand(&mut self, x: Expr, t: Option<DataType>, what: &str) -> Result<Typed> {
@@ -1459,6 +1561,33 @@ impl<'a> Binder<'a> {
         // An untyped side takes the other side's type — for comparisons and
         // arithmetic.  `||` yields text whatever its operands are, so
         // `'n' || 3` keeps 'n' as text (as PostgreSQL does).
+        // `timestamp + '1 day'`: the untyped side is an interval; `date ±
+        // $1`: a number of days.
+        let untyped = |x: &Expr| matches!(x, Expr::Param(_)) || is_text_literal(x);
+        let stamp =
+            |t: Option<DataType>| matches!(t, Some(DataType::Timestamp | DataType::TimestampTz));
+        let (l, lt, r, rt) = if op == Add && stamp(lt) && untyped(&r) {
+            let (r, (_, rt)) = self.coerce(Some(DataType::Interval), r, rt)?;
+            (l, lt, r, rt)
+        } else if op == Add && stamp(rt) && untyped(&l) {
+            let (l, (_, lt)) = self.coerce(Some(DataType::Interval), l, lt)?;
+            (l, lt, r, rt)
+        } else if matches!(op, Add | Sub)
+            && lt == Some(DataType::Date)
+            && matches!(r, Expr::Param(_))
+        {
+            let (r, (_, rt)) = self.coerce(Some(DataType::Int), r, rt)?;
+            (l, lt, r, rt)
+        } else if matches!(op, Mul | Div) && lt == Some(DataType::Interval) && untyped(&r) {
+            // interval × number: an untyped number is a float.
+            let (r, (_, rt)) = self.coerce(Some(DataType::Float), r, rt)?;
+            (l, lt, r, rt)
+        } else if op == Mul && rt == Some(DataType::Interval) && untyped(&l) {
+            let (l, (_, lt)) = self.coerce(Some(DataType::Float), l, lt)?;
+            (l, lt, r, rt)
+        } else {
+            (l, lt, r, rt)
+        };
         let (l, lt, r, rt) = if op == Concat {
             (l, lt, r, rt)
         } else {
@@ -1490,30 +1619,58 @@ impl<'a> Binder<'a> {
                     )));
                 }
             }
-            Add | Sub | Mul | Div | Mod => match (lt, rt) {
-                (Some(DataType::Int), Some(DataType::Int)) => Some(DataType::Int),
-                (
-                    Some(DataType::Int | DataType::Float) | None,
-                    Some(DataType::Int | DataType::Float) | None,
-                ) => {
-                    if lt == Some(DataType::Float) || rt == Some(DataType::Float) {
-                        Some(DataType::Float)
-                    } else {
-                        lt.or(rt)
-                    }
-                }
-                _ => {
-                    return Err(Error::undefined_function(format!(
-                        "operator does not exist: {} {} {}",
-                        name(lt),
-                        op.symbol(),
-                        name(rt)
-                    )));
-                }
-            },
+            Add | Sub | Mul | Div | Mod => arith_type(op, lt, rt).ok_or_else(|| {
+                Error::undefined_function(format!(
+                    "operator does not exist: {} {} {}",
+                    name(lt),
+                    op.symbol(),
+                    name(rt)
+                ))
+            })?,
         };
         Ok((Expr::Binary(op, Box::new(l), Box::new(r)), ty))
     }
+}
+
+/// The result type of an arithmetic operator, if it applies to these
+/// operand types (`None` operands: untyped).
+fn arith_type(
+    op: BinaryOp,
+    lt: Option<DataType>,
+    rt: Option<DataType>,
+) -> Option<Option<DataType>> {
+    use BinaryOp::*;
+    use DataType::*;
+    let num = |t: Option<DataType>| t.is_none_or(DataType::is_number);
+    Some(match (op, lt, rt) {
+        (_, l, r) if num(l) && num(r) => {
+            if l == Some(Float) || r == Some(Float) {
+                Some(Float)
+            } else if l == Some(Numeric) || r == Some(Numeric) {
+                Some(Numeric)
+            } else {
+                l.or(r)
+            }
+        }
+        (Add, Some(Date), Some(Int))
+        | (Add, Some(Int), Some(Date))
+        | (Sub, Some(Date), Some(Int)) => Some(Date),
+        (Sub, Some(Date), Some(Date)) => Some(Int),
+        (Add, Some(Date | Timestamp), Some(Interval))
+        | (Add, Some(Interval), Some(Date | Timestamp))
+        | (Sub, Some(Date | Timestamp), Some(Interval)) => Some(Timestamp),
+        (Add, Some(TimestampTz), Some(Interval))
+        | (Add, Some(Interval), Some(TimestampTz))
+        | (Sub, Some(TimestampTz), Some(Interval)) => Some(TimestampTz),
+        (Sub, Some(a), Some(b)) if a.is_datetime() && b.is_datetime() => Some(Interval),
+        (Add | Sub, Some(Interval), Some(Interval)) => Some(Interval),
+        (Mul, Some(Interval), r) | (Mul, r, Some(Interval)) | (Div, Some(Interval), r)
+            if num(r) =>
+        {
+            Some(Interval)
+        }
+        _ => return None,
+    })
 }
 
 /// Applies a `FROM` item's column alias list.
@@ -1531,6 +1688,10 @@ fn rename_columns(scope: &mut Scope, alias: &str, names: &[String]) -> Result<()
     Ok(())
 }
 
+fn name_of(t: Option<DataType>) -> &'static str {
+    name(t)
+}
+
 fn name(t: Option<DataType>) -> &'static str {
     t.map_or("unknown", DataType::name)
 }
@@ -1546,28 +1707,56 @@ fn expect(t: Option<DataType>, want: DataType, what: &str) -> Result<()> {
 
 /// Whether two types can be compared.
 fn comparable(a: Option<DataType>, b: Option<DataType>) -> Result<()> {
-    use DataType::*;
     match (a, b) {
         (None, _) | (_, None) => Ok(()),
-        (Some(x), Some(y)) if x == y => Ok(()),
-        (Some(Int | Float), Some(Int | Float)) => Ok(()),
+        (Some(x), Some(y))
+            if x == y
+                || (x.is_number() && y.is_number())
+                || (x.is_datetime() && y.is_datetime()) =>
+        {
+            Ok(())
+        }
         (Some(x), Some(y)) => Err(Error::undefined_function(format!(
             "operator does not exist: {x} = {y}"
         ))),
     }
 }
 
-/// The common type of two branches (`CASE`, `UNION`, `VALUES`).
-fn unify(a: Option<DataType>, b: Option<DataType>) -> Result<Option<DataType>> {
+/// The common type of two branches (`CASE`, `UNION`, `VALUES`): numbers
+/// widen to `numeric`, then `double precision`; dates to `timestamp`, then
+/// `timestamptz`.
+pub fn unify(a: Option<DataType>, b: Option<DataType>) -> Result<Option<DataType>> {
     use DataType::*;
+    let rank = |t: DataType| match t {
+        Int | Date => 0,
+        Numeric | Timestamp => 1,
+        Float | TimestampTz => 2,
+        _ => 0,
+    };
     Ok(match (a, b) {
         (None, t) | (t, None) => t,
         (Some(x), Some(y)) if x == y => Some(x),
-        (Some(Int | Float), Some(Int | Float)) => Some(Float),
+        (Some(x), Some(y))
+            if (x.is_number() && y.is_number()) || (x.is_datetime() && y.is_datetime()) =>
+        {
+            Some(if rank(x) >= rank(y) { x } else { y })
+        }
         (Some(x), Some(y)) => {
             return Err(Error::type_mismatch(format!(
                 "types {x} and {y} cannot be matched"
             )));
         }
     })
+}
+
+/// `x` (of type `from`) converted to `to` where they differ.
+fn convert(x: Expr, from: Option<DataType>, to: Option<DataType>) -> Expr {
+    match (from, to) {
+        (Some(f), Some(t)) if f != t => Expr::Cast(Box::new(x), t),
+        _ => x,
+    }
+}
+
+fn is_text_literal(x: &Expr) -> bool {
+    matches!(x, Expr::Literal(Value::Text(_)))
 }

@@ -43,6 +43,8 @@ codes! {
     grouping => "42803",
     type_mismatch => "42804",
     invalid_text => "22P02",
+    datetime_format => "22007",
+    datetime_overflow => "22008",
     out_of_range => "22003",
     division_by_zero => "22012",
     string_too_long => "22001",
