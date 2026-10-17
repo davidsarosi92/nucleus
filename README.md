@@ -12,9 +12,11 @@ SQL dialect (joins of every kind, CTEs, foreign keys, numeric, date/time
 and array types) with a cost-based optimizer, its own system catalog
 (`nc_catalog`), and a server that speaks nucleus's own protocol (`ncp`) —
 with drivers for Rust, C, C++, Python, JavaScript/TypeScript and Java, and
-the `ncsql` shell — and, optionally, PostgreSQL's.  Next is the developer
-platform (PLAN.md §M14.9–§M14.19: SQL analyzer, AI access, large data,
-vectors, branches, time travel, …), then the document model (§F2).  See
+the `ncsql` shell — and, optionally, PostgreSQL's.  Next is modularity
+(PLAN.md §M14.19: registries, extensible and evolvable types, an extension
+API — the principles come first), then the rest of the developer platform
+(§M14.9–§M14.18: SQL analyzer, AI access, large data, vectors, branches,
+time travel, …), then the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.
 

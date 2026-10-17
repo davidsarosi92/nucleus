@@ -100,6 +100,12 @@ below it.  The SQL layer never touches the B+tree or the WAL.
 These rules are expensive now and very cheap later.  If a milestone would
 violate one, amend it here first, with a rationale.
 
+**Fidelity to these principles comes first.**  When a feature and a
+principle conflict, the principle wins; work that brings existing code in
+line with the principles is scheduled before new features (that is why
+§M14.19 comes next); and every milestone's design is checked against them
+before it starts.
+
 1. **Everything goes through the KV contract.**  Data models and the query
    layer only know the KV API.  This is what lets a distributed engine
    replace the local one in phase 3.
@@ -254,6 +260,7 @@ are marked ✅.
 | | M14.6 | `ncsql`: nucleus's own SQL shell and client | ✅ DOCS §6.2 |
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
+| | M14.19 | **Next:** modularity — registries, extensible and evolvable types, an extension API (principle 12) | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
 | | M14.11 | Large data foundations: streaming results, bulk load, spilling, parallel scans, benchmarks | ⬜ |
@@ -264,7 +271,6 @@ are marked ✅.
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: backups and point-in-time restore, metrics and tracing, TLS, roles and privileges | ⬜ |
-| | M14.19 | Modularity: registries and an extension API (principle 12) | ⬜ |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -627,6 +633,53 @@ things nucleus's design gives almost for free (branches and time travel
 from copy-on-write storage and MVCC), the everyday tools (JSON,
 migrations, code generation), an easy start, and what production needs.
 
+### §M14.19 — Modularity: registries and an extension API ⬜ (next)
+
+**Order:** this comes first in the developer platform — principles before
+features — then §M14.9 onward.  It starts with a **principle audit**: the
+code checked against all twelve principles, each gap listed here with its
+fix.
+
+Principle 12 applied to what exists.  Today these are hard-coded lists or
+`match`es that a new entry has to edit: scalar functions (`Func`) and
+aggregates (`AggFunc`), table functions, the value types, the catalog
+views (`nc_catalog`, the compatibility catalogs), the server's front ends
+(chosen in the CLI), the authentication check.
+
+- Each becomes a registry behind a trait: a function, type, table
+  function, catalog view, protocol front end or authenticator is one
+  implementation and one registration line; the built-in ones register
+  the same way.
+- **Types are modules, and they evolve.**  A type is one implementation of
+  a `Type` trait: its names and modifiers, text input and output, casts,
+  operators and how it unifies with others, its row and key encodings, its
+  `ncp` tag and each driver's mapping, its statistics.  So types can be:
+  - *added* — a new type is a module (and user-defined types: domains,
+    enums, composites, built on the same trait);
+  - *modified* — `ALTER TABLE … ALTER COLUMN … TYPE` with a conversion
+    (`USING`), applied online in the background, the column readable
+    throughout;
+  - *updated* — every stored value carries its type's encoding version;
+    a new version of a type's encoding is added beside the old one, old
+    values stay readable, and they are rewritten lazily or by
+    `nucleus upgrade` (tied to D15).
+  The wire tags and catalog type ids are assigned by the registry, not
+  hard-coded, with the built-in ones fixed for compatibility.
+- The front ends share one session layer, so a new protocol is a module
+  over `Session` (as `ncp` and `--pg-compat` already are); the server
+  starts the modules a configuration names.
+- An extension API for out-of-tree modules (Rust crates linked into a
+  custom build first; loadable modules later), with DOCS for extension
+  authors and a sample extension in `examples/`.
+- A boundary check in CI: core crates do not depend on modules.
+
+**Done when:** the principle audit's gaps are closed or scheduled; the
+built-in functions, types, catalog views, front ends and authentication
+are all registered through the public extension API; the sample extension
+adds a function, a type and a catalog view without touching the core; and
+a type's encoding is upgraded on a populated database (old and new values
+read side by side, crash-tested) and a column's type changed online.
+
 ### §M14.9 — SQL analyzer ⬜
 
 nucleus has the catalog, the statistics and the optimizer in one place;
@@ -783,31 +836,6 @@ command per platform, and the playground runs the tutorial.
 
 **Done when:** a restore reproduces the database at a chosen moment,
 privileges are enforced in slt tests, and TLS works with every driver.
-
-### §M14.19 — Modularity: registries and an extension API ⬜
-
-Principle 12 applied to what exists.  Today these are hard-coded lists or
-`match`es that a new entry has to edit: scalar functions (`Func`) and
-aggregates (`AggFunc`), table functions, the value types, the catalog
-views (`nc_catalog`, the compatibility catalogs), the server's front ends
-(chosen in the CLI), the authentication check.
-
-- Each becomes a registry behind a trait: a function, type, table
-  function, catalog view, protocol front end or authenticator is one
-  implementation and one registration line; the built-in ones register
-  the same way.
-- The front ends share one session layer, so a new protocol is a module
-  over `Session` (as `ncp` and `--pg-compat` already are); the server
-  starts the modules a configuration names.
-- An extension API for out-of-tree modules (Rust crates linked into a
-  custom build first; loadable modules later), with DOCS for extension
-  authors and a sample extension in `examples/`.
-- A boundary check in CI: core crates do not depend on modules.
-
-**Done when:** the built-in functions, types, catalog views, front ends and
-authentication are all registered through the public extension API, and
-the sample extension adds a function, a type and a catalog view without
-touching the core.
 
 ---
 
@@ -1016,3 +1044,7 @@ style) across a thousand seeds without failure.
 - **2026-10-17** — Principle 12: modular, any part replaceable or
   extensible (as in d-os); §M14.19 turns today's hard-coded lists into
   registries with an extension API.
+- **2026-10-17** — Fidelity to the principles comes first (stated under
+  the principles).  §M14.19 is next: a principle audit, registries, types
+  that can be added, modified and updated (versioned encodings, online
+  column type changes), an extension API.
