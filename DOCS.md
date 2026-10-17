@@ -15,7 +15,9 @@
 | 5 | Transaction layer (`nucleus-txn`) |
 | 6 | KV contract (`nucleus-kv`) and the CLI |
 | 7 | d-os settings store (`integrations/d-os`) |
-| 8 | Change log |
+| 8 | SQL layer (`nucleus-sql`) |
+| 9 | Server (`nucleus-server`) |
+| 10 | Change log |
 
 ---
 
@@ -27,7 +29,9 @@
 | `crates/storage` | `nucleus-storage` | page format, pager, buffer pool, B+tree, WAL, store | §M1–§M4 ✅ |
 | `crates/txn` | `nucleus-txn` | MVCC, snapshot isolation, GC | §M5 ✅ |
 | `crates/kv` | `nucleus-kv` | the KV contract and the local `Database` | §M6 ✅ |
-| `crates/cli` | `nucleus-cli` (binary `nucleus`) | `nucleus kv` commands and shell | §M6 ✅ |
+| `crates/sql` | `nucleus-sql` | types, encodings, catalog, parser, binder, optimizer, executor, sessions | §M7–§M14 ✅ |
+| `crates/server` | `nucleus-server` | the PostgreSQL wire protocol | §M12 ✅ |
+| `crates/cli` | `nucleus-cli` (binary `nucleus`) | `nucleus kv`, `nucleus sql`, `nucleus server` | §M6, §M12 ✅ |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
 | `scripts` | — | `package.sh` | §M6 |
 
@@ -320,7 +324,19 @@ or not) is newer than the snapshot → `Error::Conflict` (retryable; first
 committer wins); else one WAL batch with the next timestamp, applied at
 once; then the group-commit wait, then *visible* moves.  A checkpoint runs
 when the WAL since the last one exceeds `checkpoint_wal_bytes` (64 MiB).
-Write skew is possible (tested and documented).
+Write skew is possible under snapshot isolation (tested and documented).
+
+**Serializable** (`Isolation::Serializable`, §M14).  The transaction also
+records the keys it read and the key ranges its scans consumed (a scan
+counts up to the last row taken).  The engine keeps the keys of recent
+commits with their timestamps (pruned below the oldest running
+transaction once it holds 4096 keys).  At commit, if any recorded key or
+range was written by a commit newer than the snapshot, the commit fails
+with a retryable `Conflict`.  Read-only transactions never conflict.  This
+is FoundationDB's read-conflict check rather than Cahill's SSI (D12): more
+aborts in some patterns, much less state, and it distributes.  A write
+whose key already has a newer version fails at the write, under both
+levels.
 
 **Garbage collection.**  Watermark = the oldest running snapshot (or
 *visible*) minus `history` commits.  A commit also deletes, for each key it
@@ -386,6 +402,8 @@ nucleus --version
 nucleus kv <dir> get <key> | put <key> <value> | delete <key> | scan [<prefix>]
 nucleus kv <dir> checkpoint | vacuum
 nucleus kv <dir>              # shell: the same commands, plus begin/commit/rollback
+nucleus sql <dir> [-c <sql>]  # SQL shell (statements end with ;), a script on stdin, or one command
+nucleus server <dir> [--listen <addr:port>] [--password <pw>]   # §9
 ```
 
 Keys and values are text; any byte can be written as `\xNN` (`\\` for a
@@ -448,8 +466,174 @@ losing an acknowledged save.
 What remains is d-os's: starting the service and wiring it to the kernel
 cache (see the README's "Switching d-os over").
 
-## 8. Change log
+## 8. SQL layer (`nucleus-sql`)
 
+Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
+`run(&Statement, params)`; results are `Output::Rows { columns, rows }` or
+`Output::Command(tag)`.  Errors carry PostgreSQL SQLSTATE codes
+(`Error { code, message }`).
+
+### 8.1 Types and encodings (`types`, `encoding`)
+
+Types: `BOOLEAN`, `BIGINT` (also `INT`, `INTEGER`, `SMALLINT`, `INT2/4/8`
+— all 64-bit), `DOUBLE PRECISION` (also `FLOAT`, `REAL`), `TEXT` /
+`VARCHAR(n)` / `CHAR` (length enforced for `VARCHAR(n)`).  `Value` has SQL
+comparison (`NULL` → unknown, numbers compare across int/float), a sort
+order with `NULL` last, casts (text parses to any type; float → int
+rounds; bool → text is `true`/`false`), and PostgreSQL text output.
+
+Key encoding (order-preserving, self-delimiting): `00` NULL; `01` bool;
+`02` + `i ^ i64::MIN` big-endian; `03` + sign-flipped/inverted IEEE bits
+(`-0` = `0`, one `NaN` above everything); `04` + text with `00` → `00 FF`,
+terminated `00 01`.  Row encoding: version `01`, column count, tagged
+values (missing trailing columns read as NULL, so `ADD COLUMN` needs no
+rewrite unless it has a default).
+
+### 8.2 Catalog and keyspace (`catalog`)
+
+| Key | Value |
+|-----|-------|
+| `00 01 <table name>` | table definition (columns, primary key, indexes, checks) |
+| `00 02 <sequence>` | counter (`table_id`) |
+| `00 03 <table id>` | next hidden row id (tables without a primary key) |
+| `00 04 <table id>` | statistics (§8.8) |
+| `01 <table id> 00000000 <pk>` | the row |
+| `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
+
+A unique index entry is keyed by the index values alone (unless one is
+NULL), so two transactions inserting the same value write the same key and
+the second conflicts; other entries append the primary key.  The catalog is
+read through the statement's own transaction, so DDL is transactional and
+needs no cache invalidation.
+
+### 8.3 Parser (`lexer`, `parser`, `ast`)
+
+Statements: `CREATE TABLE [IF NOT EXISTS]` (column constraints `PRIMARY
+KEY`, `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`; table constraints `PRIMARY
+KEY (…)`, `UNIQUE (…)`, `[CONSTRAINT n] CHECK (…)`), `DROP TABLE [IF
+EXISTS]`, `CREATE [UNIQUE] INDEX [IF NOT EXISTS]`, `DROP INDEX [IF EXISTS]`,
+`ALTER TABLE … ADD [COLUMN]`, `INSERT … VALUES | SELECT | DEFAULT VALUES
+[RETURNING]`, `UPDATE … SET … [WHERE] [RETURNING]`, `DELETE … [WHERE]
+[RETURNING]`, queries, `BEGIN`/`START TRANSACTION` (`ISOLATION LEVEL …`,
+`READ ONLY|WRITE`), `COMMIT`/`END`, `ROLLBACK`, `SET TRANSACTION …`, `SET
+name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`.
+
+Queries: `SELECT [DISTINCT]`, `FROM` with comma joins, `[INNER|LEFT|RIGHT|
+CROSS] JOIN … ON | USING`, subqueries in `FROM`, `WHERE`, `GROUP BY`
+(expressions, positions, aliases), `HAVING`, `UNION [ALL]`, `VALUES`,
+`ORDER BY` (`ASC|DESC`, `NULLS FIRST|LAST`, positions, aliases,
+expressions), `LIMIT`, `OFFSET`.  Expressions: arithmetic, `||`,
+comparisons, `AND/OR/NOT`, `IS [NOT] NULL|TRUE|FALSE|DISTINCT FROM`,
+`[NOT] BETWEEN`, `[NOT] IN (list | subquery)`, `[NOT] EXISTS`, scalar
+subqueries, `[NOT] LIKE / ILIKE`, `CASE`, `CAST` / `::`, `$n`.  Functions:
+`lower upper length trim substr replace strpos concat coalesce nullif
+greatest least abs round floor ceil sqrt power version`; aggregates `count
+sum avg min max` (with `DISTINCT`, `count(*)`).
+
+Not yet: `FOREIGN KEY` (refused with `0A000`), `FULL JOIN`, `EXCEPT`,
+`INTERSECT`, window functions, `COPY`, column alias lists on subqueries,
+date/time and decimal types.
+
+### 8.4 Binder (`binder`)
+
+Resolves names through nested scopes — a subquery sees enclosing rows as
+`Outer { depth, index }`, which makes it *correlated* — reports ambiguous
+(`42702`) and unknown (`42703`, `42P01`) names, infers types (an untyped
+string literal or `NULL` takes the other side's type in comparisons and
+arithmetic, never in `||`; a `$n` takes its context's type — including
+`INSERT`/`UPDATE` target columns, for `describe`), lifts aggregates into an
+`Aggregate` node (grouped expressions matched structurally; other column
+references are `42803`), and places `ORDER BY` keys (output name or
+position, else a hidden extra column, refused under `DISTINCT`).
+
+### 8.5 Plans and the executor (`plan`, `exec`, `expr`)
+
+Plan nodes: `Scan` (table, access path, filter), `Values`, `Filter`,
+`Project`, `Join` (inner/left; nested loop or hash), `Aggregate`, `Sort`,
+`Limit`, `Distinct`, `Union`.  The executor runs them as iterators; joins
+materialise their right input, sorts and aggregates their input.
+Subqueries run per row when correlated, once per execution otherwise
+(cached in the execution context).  Expressions use three-valued logic,
+checked integer arithmetic (`22003`), division by zero (`22012`).
+
+### 8.6 Optimizer (`optimizer`)
+
+Predicate pushdown (through projections, into join sides, outer-join safe),
+WHERE conjuncts into join conditions, hash joins on equality conjuncts,
+access paths: primary key or index with an equality prefix and a range on
+the next column; the filter always stays, so an access path only narrows.
+`EXPLAIN` prints the plan (columns as `#n`).
+
+### 8.7 Writes, constraints and sessions (`dml`, `session`)
+
+Writes collect their rows first, then write (no Halloween problem).
+Constraint errors: `23502` NOT NULL, `22001` too long, `23514` CHECK (a
+NULL check passes), `23505` duplicate key; `42804` wrong assignment type.
+`CREATE INDEX` backfills (and refuses existing duplicates for `UNIQUE`);
+`ADD COLUMN` with a default rewrites existing rows.
+
+Sessions: outside `BEGIN` every statement is its own transaction, retried
+up to 10 times on `40001`; inside, the KV transaction starts with the
+first statement (so `SET TRANSACTION` may follow `BEGIN`), an error moves
+the block to *failed* (`25P02` until `ROLLBACK`; `COMMIT` then rolls
+back).  `REPEATABLE READ`, `READ COMMITTED` and `READ UNCOMMITTED` all run
+as snapshot isolation; `SERIALIZABLE` as §5.2.  `SET
+default_transaction_isolation`; `SHOW transaction_isolation |
+server_version | …`.
+
+### 8.8 Statistics and costs (`stats`)
+
+`ANALYZE [table]` stores rows, and per column NULLs, distinct values and a
+16-bucket equi-depth histogram.  Selectivities: `=` 1/ndv, ranges from the
+histogram, `IS NULL` the null fraction, `IN` n/ndv, `LIKE` 0.1, combined
+by AND/OR/NOT.  For analyzed tables the access path is the cheapest of a
+full scan and every index (a secondary index pays a row fetch per row),
+`EXPLAIN` shows `rows=`, and chains of up to 8 inner joins are reordered by
+dynamic programming (no cross products unless nothing connects; the
+smaller input becomes the hash build side; a projection restores the
+column order).  Without statistics the rule-based plan is kept.
+
+### 8.9 Tests
+
+- `tests/slt/*.slt` (eleven scripts: basics, expressions, joins,
+  aggregates, subqueries, indexes, constraints, transactions, plans,
+  statistics, serializable) through `nucleus_sql::slt`, which also runs
+  them over the wire (§9).  `SLT=<name>` runs one script.
+- `tests/encoding.rs`: key order and round trips, property-tested.
+- `cargo run -p nucleus-sql --example sql_script -- file.sql` prints the
+  results of a script.
+
+## 9. Server (`nucleus-server`)
+
+`nucleus server <dir> [--listen 127.0.0.1:5432] [--password <pw>]`, or
+`nucleus_server::serve(listener, kv, Config)`.  PostgreSQL protocol 3.0:
+SSL/GSS requests declined (`N`), trust or cleartext-password
+authentication (`28P01` on failure), parameter status (`server_version`
+16.0 (nucleus), UTF8, ISO dates), backend key data, `ReadyForQuery` with
+the transaction status.  Simple query protocol (statements one by one, the
+first error stops the rest) and extended protocol: Parse (parameter types
+inferred, or given), Bind (text or binary parameters), Describe (statement
+and portal), Execute with a row limit (`PortalSuspended`), Sync, Close,
+Flush; after an error, messages are skipped until Sync.  Types on the wire:
+`bool` 16, `int8` 20 (`int2`/`int4` accepted), `float8` 701 (`float4`
+accepted), `text` 25 (`varchar` accepted); binary formats for all of them.
+One thread per connection.
+
+Not supported: `COPY`, cancellation, `pg_catalog` (so `psql`'s `\d`
+commands fail; plain SQL works).
+
+Tests: `crates/server/tests/wire.rs` runs every slt script over the wire
+with a minimal client, checks password authentication and the SSL refusal,
+and drives the extended protocol with the `postgres` crate (prepared
+statements, typed and NULL parameters, binary results, SQLSTATE codes,
+transactions, portals, `RETURNING`).  `scripts/psql-smoke.sh` (run by CI on
+Linux) uses the real `psql`.
+
+## 10. Change log
+
+- **2026-10-17 — §F1 shipped:** SQL layer (§M7–§M11), server (§M12),
+  statistics and costs (§M13), serializable (§M14); `nucleus sql` and
+  `nucleus server`.
 - **2026-10-17 — §M6.5, nucleus side:** the settings service, packaged for
   d-os.
 - **2026-10-17 — §M6 shipped** (d-os run pending): KV contract, `Database`,

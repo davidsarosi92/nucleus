@@ -5,9 +5,11 @@ transactional, ordered key-value engine; SQL and document models are built on
 top of it, and a distributed implementation of the same KV contract comes
 later — without changing the layers above.
 
-**Status:** the core exists (PLAN.md §F0): a crash-safe copy-on-write
-B+tree with a write-ahead log, MVCC transactions with snapshot isolation, the
-KV contract and a CLI.  SQL is next.  See [PLAN.md](PLAN.md) for the roadmap
+**Status:** the core (PLAN.md §F0) and the SQL layer (§F1) exist: a
+crash-safe copy-on-write B+tree with a write-ahead log, MVCC transactions
+(snapshot isolation and serializable), the KV contract, a PostgreSQL-like
+SQL dialect with a cost-based optimizer, and a server that speaks the
+PostgreSQL wire protocol.  The document model (§F2) is next.  See [PLAN.md](PLAN.md) for the roadmap
 and [DOCS.md](DOCS.md) for what exists today.
 
 ## Using it
@@ -16,6 +18,15 @@ and [DOCS.md](DOCS.md) for what exists today.
 nucleus kv ./mydb put greeting "hello world"
 nucleus kv ./mydb get greeting
 nucleus kv ./mydb            # interactive shell: begin, put, get, scan, commit, …
+```
+
+SQL, and a server `psql` or any PostgreSQL driver can connect to:
+
+```sh
+nucleus sql ./mydb -c "CREATE TABLE t (id INT PRIMARY KEY, name TEXT)"
+nucleus sql ./mydb                      # SQL shell
+nucleus server ./mydb --listen 127.0.0.1:5432
+psql -h 127.0.0.1 -p 5432 -c "SELECT * FROM t"
 ```
 
 As a Rust library: `nucleus_kv::Database::open(dir, Options::default())`,

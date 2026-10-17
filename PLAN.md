@@ -201,7 +201,7 @@ are marked ✅.
 | D9 | Where release builds are published | **GitHub Releases** attached to tags, built by CI | a separate artifact store; not in this repo either way |
 | D10 | Storage engine shape | ✅ **Copy-on-write B+tree + logical WAL** (2026-10-17): checkpoints are atomic pager commits of a COW tree; the WAL holds batches of key writes; recovery = replay after the checkpoint; no undo | ARIES-style physiological logging with in-place updates — more write-efficient, far more complex; revisit only if checkpoint write amplification hurts |
 | D11 | Tree concurrency | ✅ **One writer or many readers** per tree (`RwLock`); MVCC scans re-seek between batches (2026-10-17) | latch crabbing / B-link trees, when benchmarks show writer contention |
-| D12 | Serializable isolation (§M14) | **Read-set validation** (FoundationDB style): a commit fails if a key or range it read was written after its snapshot | Cahill SSI (fewer aborts, much more state); FDB's approach also distributes in F3 |
+| D12 | Serializable isolation (§M14) | ✅ **Read-set validation** (FoundationDB style): a commit fails if a key or range it read was written after its snapshot | Cahill SSI (fewer aborts, much more state); FDB's approach also distributes in F3 |
 
 ---
 
@@ -217,14 +217,14 @@ are marked ✅.
 | | M5 | Transactions + MVCC | ✅ DOCS §5 |
 | | M6 | Stabilise the KV contract + embedded API + CLI | ✅ DOCS §6 (d-os run pending) |
 | | M6.5 | First embedded consumer: d-os settings store | ◐ nucleus side done (DOCS §7); d-os side pending |
-| **F1 — SQL** | M7 | Key encoding + catalog | ⬜ |
-| | M8 | SQL parser + AST | ⬜ |
-| | M9 | Binder, planner, Volcano executor | ⬜ |
-| | M10 | Joins, aggregation, secondary indexes | ⬜ |
-| | M11 | SQL transactions + constraints | ⬜ |
-| | M12 | Server + Postgres wire protocol | ⬜ |
-| | M13 | Cost-based optimizer | ⬜ |
-| | M14 | Serializable (SSI) | ⬜ |
+| **F1 — SQL** | M7 | Key encoding + catalog | ✅ DOCS §8.1 |
+| | M8 | SQL parser + AST | ✅ DOCS §8.3 |
+| | M9 | Binder, planner, Volcano executor | ✅ DOCS §8.4 |
+| | M10 | Joins, aggregation, secondary indexes | ✅ DOCS §8.5 |
+| | M11 | SQL transactions + constraints | ✅ DOCS §8.7 |
+| | M12 | Server + Postgres wire protocol | ✅ DOCS §9 |
+| | M13 | Cost-based optimizer | ✅ DOCS §8.8 |
+| | M14 | Serializable (read-set validation) | ✅ DOCS §5.2 |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
@@ -439,60 +439,72 @@ database; once M16 ships, as a document store.  No d-os-specific server code
 
 ## §F1 — SQL layer
 
-### §M7 — Key encoding + catalog ⬜
+### §M7 — Key encoding + catalog ✅ (DOCS §8.1–§8.2)
 
-- Memcomparable encoding for every type (integer, float, string, bool, NULL,
-  composite keys); DESC ordering support.
-- Keyspace layout: `/<table_id>/<index_id>/<key columns>` → row.
-- Catalog (tables, columns, types, indexes) **in the KV space**, under a
-  system prefix.
-- Schema versioning (online schema changes come later, but the version field
-  exists now).
+- Order-preserving key encoding (NULL first; bool, bigint, double, text),
+  self-delimiting for composite keys; versioned row encoding.
+- Keyspace: catalog `00 01 <name>`, sequences, hidden row ids, statistics;
+  data `01 <table> <index> <key>`.  The catalog lives in the KV store, so
+  DDL is transactional.
+- Types for now: `BOOLEAN`, `BIGINT` (all integer names), `DOUBLE
+  PRECISION` (all float names), `TEXT` / `VARCHAR(n)`.  Decimal and
+  date/time types are later work.
 
-**Done when:** encoding round-trip and order preservation are property-tested.
+**Done when:** encoding round-trip and order preservation are
+property-tested. ✅
 
-### §M8 — SQL parser + AST ⬜
+### §M8 — SQL parser + AST ✅ (DOCS §8.3)
 
-- Hand-written recursive-descent (or Pratt) parser with good error messages.
-- Initial subset: `CREATE TABLE`, `DROP TABLE`, `INSERT`, `SELECT ... WHERE`,
-  `UPDATE`, `DELETE`.
+Hand-written recursive descent with Pratt precedence; DDL, DML, queries
+with joins/grouping/ordering/subqueries/UNION, transactions, SET/SHOW,
+EXPLAIN, ANALYZE; errors with SQLSTATE 42601 and a position.
 
-### §M9 — Binder, planner, executor ⬜
+### §M9 — Binder, planner, executor ✅ (DOCS §8.4–§8.6)
 
-- Binder: name resolution, type checking.
-- Logical plan → physical plan (rule-based for now).
-- Volcano (iterator) executor: scan, filter, project, sort, limit.
-- `EXPLAIN`.
+Binder (nested scopes, correlated subqueries, type inference with untyped
+literals and parameters), rule-based optimizer (pushdown, hash joins,
+access paths), Volcano executor, `EXPLAIN`.
 
-**Done when:** a basic SQL logic test suite (sqllogictest format) is green.
+**Done when:** a sqllogictest suite is green. ✅ (`crates/sql/tests/slt`,
+eleven scripts.)
 
-### §M10 — Joins, aggregation, indexes ⬜
+### §M10 — Joins, aggregation, indexes ✅ (DOCS §8.5–§8.6)
 
-- Nested loop, hash join, (merge join).
-- `GROUP BY`, aggregates, `HAVING`, `ORDER BY`, `DISTINCT`.
-- Secondary indexes, index-scan selection.
+Nested-loop and hash joins (inner, left; right as swapped left; USING),
+hash aggregation with DISTINCT aggregates, HAVING, ORDER BY with NULLS
+FIRST/LAST, DISTINCT, UNION; secondary indexes with backfill and
+maintenance; index range scans.  Merge join is not needed yet.
 
-### §M11 — SQL transactions + constraints ⬜
+### §M11 — SQL transactions + constraints ✅ (DOCS §8.7)
 
-- `BEGIN` / `COMMIT` / `ROLLBACK`, autocommit.
-- `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`; `FOREIGN KEY` later.
+`BEGIN`/`COMMIT`/`ROLLBACK`, autocommit with conflict retry, aborted
+blocks (`25P02`); `PRIMARY KEY`, `UNIQUE` (concurrent duplicates conflict),
+`NOT NULL`, `CHECK`, `DEFAULT`, `VARCHAR(n)`, `RETURNING`.  `FOREIGN KEY`
+is parsed and refused (`0A000`) — later work.
 
-### §M12 — Server + Postgres wire protocol ⬜
+### §M12 — Server + Postgres wire protocol ✅ (DOCS §9)
 
-- Network server, connection handling, session state.
-- PostgreSQL frontend/backend protocol (simple + extended query).
+Protocol v3: startup, trust or cleartext password, simple and extended
+query protocols, text and binary formats; `nucleus server`.
 
-**Done when:** `psql` connects and the M9–M11 test suite runs through it.
+**Done when:** `psql` connects and the M9–M11 suite runs through it. ✅ The
+whole slt suite runs over the wire; a real driver (the `postgres` crate)
+exercises the extended protocol; CI runs `psql` against the server.
 
-### §M13 — Cost-based optimizer ⬜
+### §M13 — Cost-based optimizer ✅ (DOCS §8.8)
 
-- Statistics (row count, histograms, NDV), `ANALYZE`.
-- Join ordering (DP or Cascades-style search).
+`ANALYZE` (rows, NULLs, distinct values, equi-depth histograms);
+selectivity estimates; cost-based access paths; join reordering by dynamic
+programming over up to 8 inner-join inputs.  Without statistics the
+rule-based plan is kept.
 
-### §M14 — Serializable (SSI) ⬜
+### §M14 — Serializable ✅ (DOCS §5.2, D12)
 
-- Serializable Snapshot Isolation (tracking read-write dependencies).
-- The write-skew test that "failed as documented" in M5 is green here.
+Read-set validation (FoundationDB style) instead of Cahill SSI: keys and
+consumed scan ranges are checked at commit against recent commits.
+
+**Done when:** the write-skew test that "failed as documented" in M5 is
+green under SERIALIZABLE. ✅ (And phantoms, in KV and SQL tests.)
 
 ---
 
@@ -604,6 +616,8 @@ style) across a thousand seeds without failure.
 - **2026-10-17** — §M0 shipped (DOCS §1–§3); CI green on all nine jobs.
 - **2026-10-17** — D2–D6 settled as proposed; page size 8 KiB (M1).
 - **2026-10-17** — §M1 shipped (DOCS §4); CI green on all nine jobs.
+- **2026-10-17** — §F1 (SQL) complete: §M7–§M14 shipped (DOCS §8–§9); D12
+  settled.
 - **2026-10-17** — §M6.5 nucleus side done (settings service, protocol,
   packaging); the d-os side remains.
 - **2026-10-17** — §M6 shipped: contract, CLI, packaging, release workflow;
