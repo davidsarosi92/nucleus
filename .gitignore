@@ -8,3 +8,6 @@
 /drivers/java/target
 __pycache__/
 *.class
+
+# Local helper: an interactive SQL prompt (Python driver)
+/nucleus_prompt.py

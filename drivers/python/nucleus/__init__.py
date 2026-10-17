@@ -312,7 +312,8 @@ class Connection:
     def query(self, sql, params=(), text=False):
         """Runs ``sql`` (several statements allowed without parameters).
         Returns a list with each statement's ``Result``; a failing
-        statement raises its error."""
+        statement raises its error, whose ``results`` holds the statements
+        before it."""
         body = bytearray()
         _put_str(body, sql)
         body.append(1 if text else 0)
@@ -348,6 +349,7 @@ class Connection:
             elif kind == b"R":
                 self.status = payload[0]
                 if error is not None:
+                    error.results = results
                     raise error
                 return results
             else:
