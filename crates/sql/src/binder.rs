@@ -164,7 +164,8 @@ impl<'a> Binder<'a> {
         catalog::table(self.txn, name)
     }
 
-    fn note_param(&mut self, n: usize, ty: Option<DataType>) {
+    /// Records the type of parameter `$n+1`, unless already known.
+    pub fn note_param(&mut self, n: usize, ty: Option<DataType>) {
         if self.params.len() <= n {
             self.params.resize(n + 1, None);
         }

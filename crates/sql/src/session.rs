@@ -304,10 +304,25 @@ impl Session {
             }]),
             Statement::Insert {
                 table,
+                columns,
                 source,
                 returning,
-                ..
             } => {
+                // `VALUES ($1, …)`: a parameter takes its target column's type.
+                let t = catalog::table(txn, table)?;
+                let targets: Vec<usize> = match columns {
+                    None => (0..t.columns.len()).collect(),
+                    Some(names) => names.iter().filter_map(|n| t.column(n)).collect(),
+                };
+                if let crate::ast::SetExpr::Values(rows) = &source.body {
+                    for row in rows {
+                        for (j, e) in row.iter().enumerate() {
+                            if let (crate::ast::Expr::Param(n), Some(&c)) = (e, targets.get(j)) {
+                                binder.note_param(n - 1, Some(t.columns[c].ty));
+                            }
+                        }
+                    }
+                }
                 let _ = binder.query(source)?;
                 returning_columns(&mut binder, txn, table, returning)?
             }
@@ -319,10 +334,12 @@ impl Session {
             } => {
                 let t = catalog::table(txn, table)?;
                 let scope = dml::table_scope(&t);
-                for (_, e) in assignments {
-                    let (x, _) = binder.expr(e, &scope)?;
+                for (col, e) in assignments {
                     // A parameter assigned to a column takes its type.
-                    let _ = x;
+                    if let (crate::ast::Expr::Param(n), Some(c)) = (e, t.column(col)) {
+                        binder.note_param(n - 1, Some(t.columns[c].ty));
+                    }
+                    binder.expr(e, &scope)?;
                 }
                 if let Some(f) = filter {
                     binder.condition(f, &scope)?;
