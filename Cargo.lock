@@ -391,6 +391,7 @@ version = "0.1.0"
 dependencies = [
  "nucleus-client",
  "nucleus-kv",
+ "nucleus-pg-compat",
  "nucleus-server",
  "nucleus-sql",
 ]
@@ -403,6 +404,7 @@ dependencies = [
  "nucleus-platform",
  "nucleus-server",
  "nucleus-sql",
+ "nucleus-testkit",
 ]
 
 [[package]]
@@ -430,6 +432,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-pg-compat"
+version = "0.1.0"
+dependencies = [
+ "nucleus-kv",
+ "nucleus-platform",
+ "nucleus-server",
+ "nucleus-sql",
+ "nucleus-testkit",
+ "postgres",
+]
+
+[[package]]
 name = "nucleus-platform"
 version = "0.1.0"
 dependencies = [
@@ -444,7 +458,6 @@ dependencies = [
  "nucleus-kv",
  "nucleus-platform",
  "nucleus-sql",
- "postgres",
 ]
 
 [[package]]
@@ -453,6 +466,7 @@ version = "0.1.0"
 dependencies = [
  "nucleus-kv",
  "nucleus-platform",
+ "nucleus-testkit",
  "proptest",
  "regex",
 ]
@@ -462,6 +476,13 @@ name = "nucleus-storage"
 version = "0.1.0"
 dependencies = [
  "nucleus-platform",
+]
+
+[[package]]
+name = "nucleus-testkit"
+version = "0.1.0"
+dependencies = [
+ "nucleus-sql",
 ]
 
 [[package]]

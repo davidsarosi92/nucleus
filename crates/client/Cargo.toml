@@ -13,6 +13,7 @@ nucleus-kv.workspace = true
 nucleus-platform.workspace = true
 nucleus-server.workspace = true
 nucleus-sql.workspace = true
+nucleus-testkit.workspace = true
 
 [lints]
 workspace = true

@@ -1,6 +1,7 @@
-//! A sqllogictest-style test runner, over any [`Connection`] — the local
-//! [`Session`](crate::Session) here, the PostgreSQL wire protocol in the
-//! server's tests (PLAN.md §M12: the same files run through both).
+//! A sqllogictest-style test runner, over any [`Connection`] — a local
+//! [`Session`] ([`Local`]), the nucleus protocol in the client's tests, the
+//! PostgreSQL protocol in pg-compat's (PLAN.md §M12: the same files run
+//! through all of them).
 //!
 //! File format (records separated by blank lines):
 //!
@@ -28,6 +29,8 @@
 
 use std::collections::HashMap;
 
+use nucleus_sql::ext::{Output, Session, parse};
+
 /// A result cell as text (`None` = SQL `NULL`).
 pub type Cell = Option<String>;
 
@@ -47,16 +50,23 @@ pub trait Connection {
 }
 
 /// The local session as a [`Connection`].
-pub struct Local(pub crate::Session);
+pub struct Local(pub Session);
 
 impl Connection for Local {
     fn run(&mut self, sql: &str) -> Result<Option<Vec<Vec<Cell>>>, SqlError> {
-        let stmt = crate::parser::parse_one(sql).map_err(|e| SqlError {
+        let mut stmts = parse(sql).map_err(|e| SqlError {
             code: e.code.into(),
             message: e.message,
         })?;
+        if stmts.len() != 1 {
+            return Err(SqlError {
+                code: "42601".into(),
+                message: "expected one statement".into(),
+            });
+        }
+        let stmt = stmts.remove(0);
         match self.0.run(&stmt, &[]) {
-            Ok(crate::Output::Rows { rows, .. }) => Ok(Some(
+            Ok(Output::Rows { rows, .. }) => Ok(Some(
                 rows.into_iter()
                     .map(|r| {
                         r.into_iter()
@@ -65,7 +75,7 @@ impl Connection for Local {
                     })
                     .collect(),
             )),
-            Ok(crate::Output::Command(_)) => Ok(None),
+            Ok(Output::Command(_)) => Ok(None),
             Err(e) => Err(SqlError {
                 code: e.code.into(),
                 message: e.message,

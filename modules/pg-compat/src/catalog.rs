@@ -1,9 +1,10 @@
-//! PostgreSQL compatibility, the `pg-compat` module ([`PgCompat`]): the
+//! The SQL side of PostgreSQL compatibility, the `pg-compat` module
+//! ([`PgCompat`]): the
 //! `pg_catalog` and `information_schema` tables PostgreSQL clients query,
 //! as views of the nucleus catalog (PLAN.md §M14.5) — enough for `psql`'s
 //! `\d` family and for tools that read `information_schema` — and the
 //! `pg_*` functions they call.  nucleus's own catalog is `nc_catalog`
-//! ([`crate::ncatalog`]); these exist because clients hard-code
+//! (`nucleus_sql`'s `ncatalog`); these exist because clients hard-code
 //! PostgreSQL's names, and only sessions whose registry has the module
 //! see them (the PostgreSQL front end's).
 //!
@@ -32,14 +33,11 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use nucleus_kv::KvTxn;
-
-use crate::ast::FkAction;
-use crate::catalog::{self, Column, ConstraintKind, Table};
-use crate::error::{Error, Result};
-use crate::ext::{
-    Arg, ArgInfo, CallContext, CatalogView, Module, Registry, Returns, ScalarFunction, Signature,
+use nucleus_sql::ext::catalog::{self, Column, ConstraintKind, FkAction, Table};
+use nucleus_sql::ext::{
+    Arg, ArgInfo, CallContext, CatalogView, DataType, Error, Module, Registry, Result, Returns,
+    Row, ScalarFunction, Signature, Value,
 };
-use crate::types::{DataType, Row, Value};
 
 /// The `pg_catalog` namespace.
 pub const NS_CATALOG: i64 = 11;
@@ -959,7 +957,7 @@ fn constraints(tables: &[Table]) -> Vec<Con> {
                     let parent = tables.iter().find(|p| p.name == fk.table).expect("listed");
                     con.oid = base + 800 + j as i64;
                     con.kind = "f";
-                    con.index = crate::fk::referenced_key(parent, &fk.ref_columns)
+                    con.index = catalog::referenced_key(parent, &fk.ref_columns)
                         .map_or(0, |(i, _)| index_oid(parent, i));
                     con.references = Some(parent.clone());
                     con.cols = fk.columns.clone();

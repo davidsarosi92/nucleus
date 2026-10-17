@@ -1,5 +1,6 @@
 //! `nucleus server`: the front ends a command line names — the nucleus
-//! protocol by default, PostgreSQL compatibility on request.
+//! protocol by default, PostgreSQL compatibility (the `pg-compat` module,
+//! which this edition includes) on request.
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -13,7 +14,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let Some(dir) = args.first() else {
         return Err("server: missing <dir>".into());
     };
-    let fronts = FrontEnds::builtin();
+    let mut fronts = FrontEnds::builtin();
+    fronts.add(Arc::new(nucleus_pg_compat::Pg))?;
     // (front end, address): ncp always, on `--listen`'s address.
     let mut listen: Option<String> = None;
     let mut extra: Vec<(String, Option<String>)> = Vec::new();

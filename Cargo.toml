@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "integrations/d-os", "examples/rust"]
+members = ["crates/*", "modules/*", "editions/*", "integrations/d-os", "examples/rust"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,13 +9,17 @@ license = "MIT"
 repository = "https://github.com/davidsarosi92/nucleus"
 
 [workspace.dependencies]
-nucleus-platform = { path = "crates/platform" }
-nucleus-storage = { path = "crates/storage" }
-nucleus-txn = { path = "crates/txn" }
-nucleus-kv = { path = "crates/kv" }
-nucleus-sql = { path = "crates/sql" }
-nucleus-server = { path = "crates/server" }
-nucleus-client = { path = "crates/client" }
+# Path and version: in the repository the path is used; a published
+# crate keeps the version (PLAN.md §M14.19).
+nucleus-platform = { version = "0.1.0", path = "crates/platform" }
+nucleus-storage = { version = "0.1.0", path = "crates/storage" }
+nucleus-txn = { version = "0.1.0", path = "crates/txn" }
+nucleus-kv = { version = "0.1.0", path = "crates/kv" }
+nucleus-sql = { version = "0.1.0", path = "crates/sql" }
+nucleus-server = { version = "0.1.0", path = "crates/server" }
+nucleus-client = { version = "0.1.0", path = "crates/client" }
+nucleus-testkit = { version = "0.1.0", path = "crates/testkit" }
+nucleus-pg-compat = { version = "0.1.0", path = "modules/pg-compat" }
 # Regular expressions for `~`: linear-time matching, so no pattern can
 # stall the server.
 regex = "1.11.1"

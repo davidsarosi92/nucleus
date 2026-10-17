@@ -50,6 +50,23 @@ pub enum Output {
     Command(String),
 }
 
+/// The command tag of a statement's output, as clients show it: the
+/// output's own for commands, else `INSERT 0 n`, `UPDATE n`, `DELETE n`
+/// (with `RETURNING`), `SHOW`, `EXPLAIN` or `SELECT n`.
+pub fn command_tag(stmt: &Statement, out: &Output) -> String {
+    match out {
+        Output::Command(tag) => tag.clone(),
+        Output::Rows { rows, .. } => match stmt {
+            Statement::Insert { .. } => format!("INSERT 0 {}", rows.len()),
+            Statement::Update { .. } => format!("UPDATE {}", rows.len()),
+            Statement::Delete { .. } => format!("DELETE {}", rows.len()),
+            Statement::Show(_) => "SHOW".into(),
+            Statement::Explain(_) => "EXPLAIN".into(),
+            _ => format!("SELECT {}", rows.len()),
+        },
+    }
+}
+
 /// Where the session is with transactions (PostgreSQL's
 /// `ReadyForQuery` status).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,0 +1,13 @@
+[package]
+name = "nucleus-testkit"
+description = "nucleus test kit: the sqllogictest runner and the SQL layer's scripts, for the SQL layer, front ends and modules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nucleus-sql.workspace = true
+
+[lints]
+workspace = true

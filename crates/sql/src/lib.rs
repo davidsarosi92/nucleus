@@ -21,13 +21,14 @@ pub mod lexer;
 pub mod ncatalog;
 pub mod optimizer;
 pub mod parser;
-pub mod pgcatalog;
+
 pub mod plan;
 pub mod session;
-pub mod slt;
 pub mod stats;
 pub mod types;
 
+pub use ast::Statement;
 pub use error::{Error, Result};
-pub use session::{OutColumn, Output, Session, TxnStatus};
+pub use parser::parse;
+pub use session::{OutColumn, Output, Session, TxnStatus, command_tag};
 pub use types::{DataType, Row, Value};

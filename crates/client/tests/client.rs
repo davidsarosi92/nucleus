@@ -10,7 +10,7 @@ use nucleus_client::{Client, Config, Error, Format, TxnStatus, Type, Value};
 use nucleus_kv::{Database, Kv, Options};
 use nucleus_platform::sim::SimPlatform;
 use nucleus_server::serve;
-use nucleus_sql::slt::{Cell, Connection, SqlError, run_script};
+use nucleus_testkit::slt::{Cell, Connection, SqlError, run_script};
 
 fn start(password: Option<&str>) -> SocketAddr {
     let db: Arc<dyn Kv> = Arc::new(
@@ -185,23 +185,15 @@ impl Connection for Ncp {
 
 #[test]
 fn sql_scripts_over_the_nucleus_protocol() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sql/tests/slt");
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|f| f.extension().is_some_and(|e| e == "slt"))
-        .collect();
-    files.sort();
     let mut failures = Vec::new();
-    for f in &files {
+    let scripts = nucleus_testkit::core_scripts();
+    for (name, script) in scripts.iter().filter(|(n, _)| nucleus_testkit::picked(n)) {
         let addr = start(None);
-        let name = f.file_name().unwrap().to_string_lossy().into_owned();
-        let script = std::fs::read_to_string(f).unwrap();
         let mut connect =
             || -> Box<dyn Connection> { Box::new(Ncp(Client::connect(config(addr)).unwrap())) };
-        failures.extend(run_script(&script, &name, &mut connect));
+        failures.extend(run_script(script, name, &mut connect));
     }
-    assert!(files.len() >= 19);
+    assert!(scripts.len() >= 19);
     assert!(
         failures.is_empty(),
         "{} failure(s):\n\n{}",

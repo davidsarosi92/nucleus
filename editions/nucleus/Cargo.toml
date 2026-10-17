@@ -1,6 +1,6 @@
 [package]
 name = "nucleus-cli"
-description = "The nucleus command-line tool"
+description = "The nucleus command-line tool: the full edition (every front end and module)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,6 +20,7 @@ nucleus-kv.workspace = true
 nucleus-sql.workspace = true
 nucleus-server.workspace = true
 nucleus-client.workspace = true
+nucleus-pg-compat.workspace = true
 
 [lints]
 workspace = true

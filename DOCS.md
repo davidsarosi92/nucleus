@@ -31,14 +31,24 @@
 | `crates/storage` | `nucleus-storage` | page format, pager, buffer pool, B+tree, WAL, store | §M1–§M4 ✅ |
 | `crates/txn` | `nucleus-txn` | MVCC, snapshot isolation, GC | §M5 ✅ |
 | `crates/kv` | `nucleus-kv` | the KV contract and the local `Database` | §M6 ✅ |
-| `crates/sql` | `nucleus-sql` | types, encodings, catalog (`nc_catalog`, PostgreSQL views), parser, binder, optimizer, executor, sessions | §M7–§M14.5 ✅ |
-| `crates/server` | `nucleus-server` | the nucleus protocol; the PostgreSQL protocol (optional) | §M12, §M14.7 ✅ |
+| `crates/sql` | `nucleus-sql` | types, encodings, catalog (`nc_catalog`), parser, binder, optimizer, executor, sessions; the extension API (`ext`) | §M7–§M14.5, §M14.19 |
+| `crates/server` | `nucleus-server` | front ends (the nucleus protocol), authentication | §M12, §M14.7, §M14.19 |
 | `crates/client` | `nucleus-client` | the Rust driver | §M14.6–§M14.8 ✅ |
-| `crates/cli` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` | §M6, §M12, §M14.6 ✅ |
+| `crates/testkit` | `nucleus-testkit` | the sqllogictest runner and the SQL layer's scripts, for the core, front ends and modules | §M14.19 |
+| `modules/pg-compat` | `nucleus-pg-compat` | PostgreSQL compatibility: the protocol, `pg_catalog`, `information_schema`, the `pg_*` functions (its own README) | §M12, §M14.5, §M14.19 |
+| `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end | §M6, §M12, §M14.6 ✅ |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
 | `drivers` | — | drivers for C, C++, Python, JS/TS, Java (§11) | §M14.8 ✅ |
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
 | `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh` | §M6, §M12, §M14.8 |
+
+`crates/` is the core and the public API crates; `modules/` are modules,
+each a folder built to leave the repository (its own README, changelog,
+licence and version; dependencies on the public API crates only, by
+version and path; in code, of `nucleus-sql` only `nucleus_sql::ext`);
+`editions/` are the builds that choose modules.  `scripts/check-boundaries.py`
+checks this both ways and `scripts/detach-test.sh` builds and tests every
+module from its packaged form alone (§2).
 
 Workspace-wide: Rust edition 2024, toolchain pinned in `rust-toolchain.toml`
 (rustup installs it on first use), `unsafe_code` forbidden, `missing_docs`
@@ -56,14 +66,24 @@ cargo build --target i686-unknown-linux-musl     # any target in PLAN.md "Build 
 CI (`.github/workflows/ci.yml`) runs fmt and clippy, then builds every build
 target and runs the tests on all of them except `x86_64-apple-darwin` (built
 only); on Linux it also runs the real `psql` against `--pg-compat`
-(`scripts/psql-smoke.sh`, §9), and the `drivers` job runs every driver's
-tests and every example against a server (`scripts/driver-tests.sh`, §11):
+(`scripts/psql-smoke.sh`, §9), the `drivers` job runs every driver's
+tests and every example against a server (`scripts/driver-tests.sh`, §11),
+and the `modules` job checks the module boundaries and detaches every
+module (§1):
 
 ```sh
 cargo build --release -p nucleus-cli
 scripts/driver-tests.sh target/release/nucleus [rust python js java c cpp]
 scripts/psql-smoke.sh target/release/nucleus     # needs psql
+scripts/check-boundaries.py                      # core ↛ modules; modules → public API only
+scripts/detach-test.sh [<module package> …]      # cargo package, then test each unpacked copy
 ```
+
+The detachability test packages the core crates and the modules
+(`cargo package`, which also builds each from its package against the
+others'), unpacks each module into an empty directory, points its
+nucleus dependencies at the packaged core crates (`[patch.crates-io]`) and
+runs its tests there.
 
   The `i686` musl tests run as 32-bit binaries on a 64-bit Linux
 kernel, which is what catches 64-bit `usize` assumptions.
@@ -716,19 +736,19 @@ column order).  Without statistics the rule-based plan is kept.
 
 ### 8.9 Tests
 
-- `tests/slt/*.slt` (nineteen scripts: basics, expressions, joins,
+- The SQL layer's sqllogictest scripts live in the test kit,
+  `crates/testkit/slt/*.slt` (nineteen: basics, expressions, joins,
   aggregates, subqueries, indexes, constraints, transactions, plans,
   statistics, serializable, set operations, full joins, CTEs, numeric,
-  date/time, foreign keys, arrays and regular expressions, catalogs)
-  through `nucleus_sql::slt`, which also runs them over the wire (§9).
-  `SLT=<name>` runs one script.  The expected results of scripts 12–18
-  were produced by PostgreSQL 16 (records marked `nucleus-only` excepted:
-  concurrency, and what PostgreSQL does not do).
-- `tests/slt-pg/*.slt`: the pg-compat module's scripts (`pg_catalog`,
-  `information_schema`, `pg_*` functions), run with it registered — and
-  over the PostgreSQL protocol by the server's tests;
-  `pg_compat_only_where_registered` checks that sessions without it see
-  none of it.
+  date/time, foreign keys, arrays and regular expressions, `nc_catalog`),
+  embedded in `nucleus-testkit` (`core_scripts()`) with its runner
+  (`nucleus_testkit::slt`), so the client's tests and modules run them
+  without reading files outside their folders.  `tests/slt.rs` runs them
+  locally, `SLT=<name>` one of them.  The expected results of scripts
+  12–18 were produced by PostgreSQL 16 (records marked `nucleus-only`
+  excepted: concurrency, and what PostgreSQL does not do).
+  `no_postgresql_without_pg_compat` checks that a session without the
+  module sees nothing of PostgreSQL's catalog.
 - `tests/encoding.rs`: key order and round trips, property-tested (every
   type).
 - `tests/crash.rs`: random DDL and DML (in autocommit and in blocks)
@@ -770,7 +790,7 @@ MATCH FULL.  `DROP TABLE` of a referenced table needs `CASCADE` (which
 drops the referencing constraints); dropping an index a foreign key needs
 is refused (`2BP01`).
 
-### 8.11 System catalogs (`ncatalog`, `pgcatalog`)
+### 8.11 System catalogs (`ncatalog`; `modules/pg-compat`)
 
 nucleus's own catalog is **`nc_catalog`**: read-only views made from the
 catalog when scanned (D13), registered by the built-in module (§8.12).
@@ -786,8 +806,8 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.statistics` | `table_id`, `table_name`, `column_name`, `rows`, `nulls`, `distinct_values`, `histogram` |
 | `nc_catalog.types` | `name`, `aliases`, `category` |
 
-**PostgreSQL compatibility: the `pg-compat` module** (`pgcatalog::PgCompat`,
-§8.12).  Only sessions whose registry has it see any of what follows —
+**PostgreSQL compatibility: the `pg-compat` module** (`modules/pg-compat`,
+`nucleus_pg_compat::PgCompat`, §8.12).  Only sessions whose registry has it see any of what follows —
 the PostgreSQL front end's (§9); `ncp` sessions and the embedded
 `Session::new` do not (principle 11).  PostgreSQL clients hard-code
 PostgreSQL's catalog names, so the same catalog is also shown as
@@ -805,7 +825,8 @@ call (`format_type`, `pg_get_expr`, `pg_get_indexdef`,
 an oid and an oid to a name).  Unqualified `pg_*` names resolve to these
 unless a user table has the name.  Oids: PostgreSQL's for types,
 namespaces and access methods; a table is `16384 + 1000 × table id`, its
-indexes and constraints numbered after it (`pgcatalog.rs` has the table).
+indexes and constraints numbered after it (the module's `catalog.rs` has
+the table).
 One role, `nucleus`.  This is what makes `psql`'s `\d`, `\d table`,
 `\d+`, `\dt`, `\di`, `\dv`, `\dn`, `\du`, `\l` work; `\df` and others
 that need functions, sequences or permissions do not.  `pg_typeof(x)` is
@@ -878,7 +899,8 @@ error, to stderr — to see what a tool asks for.
 
 **Front ends and authentication are registered** (principle 12): a
 front end is a `FrontEnd` (`name`, `default_addr`, `handle(stream, kv,
-config, id)`), the built-in ones `Ncp` and `Pg` in `FrontEnds::builtin()`;
+config, id)`) — the built-in `Ncp` in `FrontEnds::builtin()`, `Pg` from
+the pg-compat module, which the `nucleus` edition adds;
 `serve_front_end(front, listener, kv, config)` runs any.  The server
 starts `ncp` and each `--front-end <name>` (`--pg-compat` is `--front-end
 pg`).  `Config { auth, log_queries }`: `auth` is an `Authenticator`
@@ -888,7 +910,7 @@ pg`).  `Config { auth, log_queries }`: `auth` is an `Authenticator`
 methods are §M14.25.
 
 **PostgreSQL compatibility** (optional, D14): `--pg-compat` also listens
-for the PostgreSQL protocol (`nucleus_server::serve_pg`, default
+for the PostgreSQL protocol (`nucleus_pg_compat::Pg`, default
 `127.0.0.1:5432`), with the same credentials, so `psql` and PostgreSQL
 drivers and tools can connect.  Its sessions have the `pg-compat` module
 (§8.11); `ncp` sessions do not.  It is frozen: kept working, not extended
@@ -914,8 +936,9 @@ the compatibility catalog (§8.11).
 
 Tests: `crates/client/tests/client.rs` runs every slt script over the
 nucleus protocol and checks typed values both ways, parameters, errors,
-transactions and passwords; `crates/server/tests/wire.rs` runs every slt
-script over the PostgreSQL protocol with a minimal client, checks password authentication and the SSL refusal,
+transactions and passwords; `modules/pg-compat/tests/wire.rs` runs every
+slt script (the kit's and the module's) over the PostgreSQL protocol with
+a minimal client, checks password authentication and the SSL refusal,
 and drives the extended protocol with the `postgres` crate (prepared
 statements, typed and NULL parameters, binary results, SQLSTATE codes,
 transactions, portals, `RETURNING`).  `scripts/psql-smoke.sh` (run by CI on
@@ -1043,6 +1066,13 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.19 modules built to leave the repository:** the
+  layout `crates/` (core), `modules/`, `editions/`; PostgreSQL
+  compatibility is `modules/pg-compat` (from `nucleus-sql`'s `pgcatalog`
+  and `nucleus-server`'s `pg`), on `nucleus_sql::ext` alone; the test kit
+  `nucleus-testkit` (runner and scripts); the CLI is `editions/nucleus`;
+  `scripts/check-boundaries.py` and `scripts/detach-test.sh`, and the CI
+  job `modules`.
 - **2026-10-17 — §M14.19 front ends and authentication registered:**
   `nucleus_server::{FrontEnd, FrontEnds, Authenticator}`; the CLI starts
   the front ends it is given (`--front-end`).

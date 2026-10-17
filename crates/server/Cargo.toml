@@ -1,6 +1,6 @@
 [package]
 name = "nucleus-server"
-description = "nucleus server: the PostgreSQL wire protocol over the SQL layer"
+description = "nucleus server: front ends (the nucleus protocol) over the SQL layer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,6 @@ nucleus-sql.workspace = true
 
 [dev-dependencies]
 nucleus-platform.workspace = true
-postgres = "0.19.14"
 
 [lints]
 workspace = true

@@ -52,6 +52,11 @@ clients (DOCS.md §8.11).
 As a Rust library: `nucleus_kv::Database::open(dir, Options::default())`,
 then `begin` / `get` / `scan` / `put` / `commit` (see DOCS.md §6).
 
+The repository: `crates/` is the core, `modules/` the modules (each built
+to leave the repository as its own package — PostgreSQL compatibility is
+`modules/pg-compat`), `editions/` the builds that choose them, `drivers/`
+the language drivers (DOCS.md §1).
+
 ## Building
 
 ```sh

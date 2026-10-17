@@ -12,6 +12,9 @@ regex.workspace = true
 
 [dev-dependencies]
 nucleus-platform.workspace = true
+# Path only: the test kit depends on this crate, so a published copy
+# leaves the dev-dependency (and the tests that use it) out.
+nucleus-testkit = { path = "../testkit" }
 proptest = "1.12.0"
 
 [lints]

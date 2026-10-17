@@ -1,5 +1,5 @@
-//! The server through the PostgreSQL wire protocol: the SQL test scripts
-//! run over the wire (PLAN.md §M12 "done when"), authentication, and the
+//! The PostgreSQL front end: the SQL layer's scripts and this module's run
+//! over the wire (PLAN.md §M12 "done when"), authentication, and the
 //! extended protocol through a real PostgreSQL driver.
 
 use std::io::{Read, Write};
@@ -8,9 +8,30 @@ use std::path::Path;
 use std::sync::Arc;
 
 use nucleus_kv::{Database, Kv, Options};
+use nucleus_pg_compat::Pg;
 use nucleus_platform::sim::SimPlatform;
-use nucleus_server::{Config, serve_pg as serve};
-use nucleus_sql::slt::{Cell, Connection, SqlError, run_script};
+use nucleus_server::{Config, serve_front_end};
+use nucleus_testkit::slt::{Cell, Connection, SqlError, run_script};
+
+/// This module's scripts (in its folder): (name, text).
+pub fn own_scripts() -> Vec<(String, String)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/slt");
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|f| f.extension().is_some_and(|e| e == "slt"))
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .map(|f| {
+            (
+                f.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read_to_string(f).unwrap(),
+            )
+        })
+        .collect()
+}
 
 fn start(config: Config) -> SocketAddr {
     let db: Arc<dyn Kv> = Arc::new(
@@ -23,7 +44,7 @@ fn start(config: Config) -> SocketAddr {
     );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || serve(listener, db, config));
+    std::thread::spawn(move || serve_front_end(Arc::new(Pg), listener, db, config));
     addr
 }
 
@@ -135,27 +156,22 @@ impl Connection for Client {
 /// sessions have it).
 #[test]
 fn sql_scripts_over_the_wire() {
-    let mut files: Vec<_> = ["../sql/tests/slt", "../sql/tests/slt-pg"]
+    let mut scripts: Vec<(String, String)> = nucleus_testkit::core_scripts()
         .iter()
-        .flat_map(|d| {
-            std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(d))
-                .unwrap()
-                .map(|e| e.unwrap().path())
-        })
+        .map(|(n, s)| (n.to_string(), s.to_string()))
         .collect();
-    files.sort_by_key(|f| f.file_name().unwrap().to_owned());
+    scripts.extend(
+        own_scripts()
+            .into_iter()
+            .map(|(n, s)| (format!("pg-compat/{n}"), s)),
+    );
     let mut failures = Vec::new();
     let mut ran = 0;
-    for f in files
-        .iter()
-        .filter(|f| f.extension().is_some_and(|e| e == "slt"))
-    {
+    for (name, script) in scripts.iter().filter(|(n, _)| nucleus_testkit::picked(n)) {
         let addr = start(Config::trust());
-        let name = f.file_name().unwrap().to_string_lossy().into_owned();
-        let script = std::fs::read_to_string(f).unwrap();
         let mut connect =
             || -> Box<dyn Connection> { Box::new(Client::connect(addr, None).unwrap()) };
-        failures.extend(run_script(&script, &name, &mut connect));
+        failures.extend(run_script(script, name, &mut connect));
         ran += 1;
     }
     assert!(ran >= 9, "only {ran} scripts");

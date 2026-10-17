@@ -1,5 +1,5 @@
-//! PostgreSQL compatibility (optional, `--pg-compat`): one connection of
-//! the PostgreSQL v3 message flow.
+//! The front end: PostgreSQL's protocol (version 3), one connection at a
+//! time (`nucleus server --pg-compat`).
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -7,15 +7,17 @@ use std::net::TcpStream;
 use std::sync::Arc;
 
 use nucleus_kv::Kv;
-use nucleus_sql::ast::Statement;
-use nucleus_sql::decimal::Decimal;
-use nucleus_sql::ext::Registry;
-use nucleus_sql::pgcatalog::PgCompat;
-use nucleus_sql::{DataType, Error, OutColumn, Output, Session, TxnStatus, Value};
+use nucleus_server::{Config, FrontEnd};
+use nucleus_sql::ext::{
+    DataType, Decimal, Error, Interval, OutColumn, Output, Registry, Session, Statement, TxnStatus,
+    Value,
+};
 
-/// The sessions' registry: the built-ins and `pg-compat`, which PostgreSQL
-/// clients need (`pg_catalog`, the `pg_*` functions).
-fn registry() -> Arc<Registry> {
+use crate::PgCompat;
+
+/// The front end's sessions' registry: the built-ins and [`PgCompat`],
+/// which PostgreSQL clients need (`pg_catalog`, the `pg_*` functions).
+pub fn registry() -> Arc<Registry> {
     static R: std::sync::OnceLock<Arc<Registry>> = std::sync::OnceLock::new();
     R.get_or_init(|| {
         let mut r = Registry::builtin();
@@ -25,7 +27,27 @@ fn registry() -> Arc<Registry> {
     .clone()
 }
 
-use crate::Config;
+/// PostgreSQL's protocol as a front end (`pg`, default
+/// `127.0.0.1:5432`); its sessions have [`PgCompat`].
+pub struct Pg;
+
+impl FrontEnd for Pg {
+    fn name(&self) -> &str {
+        "pg"
+    }
+    fn default_addr(&self) -> String {
+        "127.0.0.1:5432".into()
+    }
+    fn handle(
+        &self,
+        stream: TcpStream,
+        kv: Arc<dyn Kv>,
+        config: &Config,
+        id: u32,
+    ) -> io::Result<()> {
+        handle(stream, kv, config, id)
+    }
+}
 
 const PROTOCOL_V3: i32 = 196_608;
 const SSL_REQUEST: i32 = 80_877_103;
@@ -51,7 +73,7 @@ const TIMESTAMPTZ: i32 = 1184;
 const INTERVAL: i32 = 1186;
 
 fn oid(t: DataType) -> i32 {
-    nucleus_sql::pgcatalog::type_oid(t) as i32
+    crate::type_oid(t) as i32
 }
 
 fn type_of_oid(o: i32) -> Option<DataType> {
@@ -547,7 +569,7 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                 }
                 Value::Array(items)
             }
-            (Some(DataType::Interval), 16) => Value::Interval(nucleus_sql::datetime::Interval {
+            (Some(DataType::Interval), 16) => Value::Interval(Interval {
                 micros: i64::from_be_bytes(bytes[0..8].try_into().unwrap()),
                 days: i32::from_be_bytes(bytes[8..12].try_into().unwrap()),
                 months: i32::from_be_bytes(bytes[12..16].try_into().unwrap()),
@@ -562,20 +584,6 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
     match ty {
         None | Some(DataType::Text) => Ok(Value::Text(s)),
         Some(t) => Value::Text(s).cast(t),
-    }
-}
-
-pub(crate) fn command_tag(stmt: &Statement, out: &Output) -> String {
-    match out {
-        Output::Command(tag) => tag.clone(),
-        Output::Rows { rows, .. } => match stmt {
-            Statement::Insert { .. } => format!("INSERT 0 {}", rows.len()),
-            Statement::Update { .. } => format!("UPDATE {}", rows.len()),
-            Statement::Delete { .. } => format!("DELETE {}", rows.len()),
-            Statement::Show(_) => "SHOW".into(),
-            Statement::Explain(_) => "EXPLAIN".into(),
-            _ => format!("SELECT {}", rows.len()),
-        },
     }
 }
 
@@ -640,7 +648,7 @@ impl Conn {
 
     fn simple_query(&mut self, sql: &str) -> io::Result<()> {
         self.log("query", sql);
-        let stmts = match nucleus_sql::parser::parse(sql) {
+        let stmts = match nucleus_sql::ext::parse(sql) {
             Ok(s) => s,
             Err(e) => {
                 self.log_error(&e);
@@ -662,7 +670,7 @@ impl Conn {
                             self.data_row(r, columns, &[])?;
                         }
                     }
-                    let tag = command_tag(stmt, &out);
+                    let tag = nucleus_sql::ext::command_tag(stmt, &out);
                     self.out.write_all(&Msg::new(b'C').str(&tag).finish())?;
                 }
                 Err(e) => {
@@ -684,7 +692,7 @@ impl Conn {
         for _ in 0..n {
             given.push(b.i32().map_err(proto)?);
         }
-        let mut stmts = nucleus_sql::parser::parse(&sql)?;
+        let mut stmts = nucleus_sql::ext::parse(&sql)?;
         if stmts.len() > 1 {
             return Err(Error::syntax(
                 "cannot insert multiple commands into a prepared statement",
@@ -807,7 +815,7 @@ impl Conn {
         };
         if portal.pending.is_none() {
             let out = self.session.run(&stmt, &portal.params)?;
-            let tag = command_tag(&stmt, &out);
+            let tag = nucleus_sql::ext::command_tag(&stmt, &out);
             let rows = match out {
                 Output::Rows { rows, columns } => {
                     portal.columns = Some(columns);
@@ -896,17 +904,17 @@ mod tests {
 
     #[test]
     fn date_time_binary_matches_postgresql() {
-        let iv = nucleus_sql::datetime::parse_interval("1 mon 2 days 00:00:03").unwrap();
+        let iv = nucleus_sql::ext::parse_interval("1 mon 2 days 00:00:03").unwrap();
         assert_eq!(
             hex(&binary_value(&Value::Interval(iv), DataType::Interval)),
             "00000000002dc6c00000000200000001"
         );
-        let d = nucleus_sql::datetime::parse_date("2024-01-01").unwrap();
+        let d = nucleus_sql::ext::parse_date("2024-01-01").unwrap();
         assert_eq!(
             hex(&binary_value(&Value::Date(d), DataType::Date)),
             "0000223e"
         );
-        let t = nucleus_sql::datetime::parse_timestamp("2000-01-01 00:00:01", false).unwrap();
+        let t = nucleus_sql::ext::parse_timestamp("2000-01-01 00:00:01", false).unwrap();
         assert_eq!(
             hex(&binary_value(&Value::Timestamp(t), DataType::Timestamp)),
             "00000000000f4240"

@@ -296,7 +296,7 @@ fn run(
             Ok(o) => o,
             Err(e) => return Ok(Err(e)),
         };
-        let (command, count) = split_tag(&crate::pg::command_tag(stmt, &output));
+        let (command, count) = split_tag(&nucleus_sql::command_tag(stmt, &output));
         if let Output::Rows { columns, rows } = output {
             let mut m = Msg::new(b'C').u16(columns.len() as u16);
             for c in &columns {

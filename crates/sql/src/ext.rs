@@ -39,6 +39,12 @@
 //!
 //! The interfaces are versioned ([`API_VERSION`], principle 6); a change
 //! that breaks a module raises it.
+//!
+//! **This module is the SQL layer's whole public API for modules**: a
+//! module (`modules/`) uses `nucleus_sql::ext` and nothing else of this
+//! crate — CI checks it (PLAN.md §M14.19) — so the rest can change freely.
+//! Everything a module needs is re-exported here: sessions and statements,
+//! values, the read-only catalog.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -47,8 +53,23 @@ use std::sync::{Arc, OnceLock};
 
 use nucleus_kv::KvTxn;
 
+pub use crate::ast::Statement;
+pub use crate::datetime::{Interval, parse_date, parse_interval, parse_timestamp};
+pub use crate::decimal::Decimal;
 pub use crate::error::{Error, Result};
+pub use crate::parser::parse;
+pub use crate::session::{OutColumn, Output, Session, TxnStatus, command_tag};
 pub use crate::types::{DataType, Row, Value};
+
+/// The catalog, read-only, as modules see it: table definitions and their
+/// constraints.
+pub mod catalog {
+    pub use crate::ast::FkAction;
+    pub use crate::catalog::{
+        Column, Constraint, ConstraintKind, ForeignKey, Index, Table, constraints, tables,
+    };
+    pub use crate::fk::referenced_key;
+}
 
 /// The version of this interface.
 pub const API_VERSION: u32 = 1;

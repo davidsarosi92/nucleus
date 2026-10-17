@@ -1,22 +1,15 @@
-//! The nucleus server (PLAN.md §M12, §M14.7).
+//! The nucleus server (PLAN.md §M12, §M14.7): front ends over
+//! [`nucleus_sql::Session`], one thread per connection.
 //!
-//! - **The nucleus protocol** (`ncp`, DOCS §10) — nucleus's own, and the
-//!   default ([`serve`], port 20035): typed values exactly as stored,
-//!   SQLSTATE errors, the transaction status.  nucleus's drivers and
-//!   `ncsql` speak it.
-//! - **PostgreSQL compatibility** (optional, [`serve_pg`], `nucleus server
-//!   --pg-compat`) — the PostgreSQL frontend/backend protocol version 3, so
-//!   `psql` and PostgreSQL drivers connect too: startup (SSL and GSSAPI
-//!   requests declined), trust or cleartext password, the simple and
-//!   extended query protocols, text and binary formats.  Frozen (D14): kept
-//!   working, not extended for tool-specific catalog queries.
-//!
-//! Both run statements through [`nucleus_sql::Session`], one thread per
-//! connection; the PostgreSQL front end's sessions also have the
-//! `pg-compat` module (`pg_catalog`, the `pg_*` functions).
+//! - A front end is a [`FrontEnd`], run by [`serve_front_end`]; the built-in
+//!   one is **the nucleus protocol** ([`Ncp`], `ncp`, DOCS §10, port
+//!   20035): typed values exactly as stored, SQLSTATE errors, the
+//!   transaction status.  nucleus's drivers and `ncsql` speak it.  Others
+//!   are modules — PostgreSQL's protocol is `nucleus-pg-compat`
+//!   (`modules/pg-compat`).
+//! - Who may log in is an [`Authenticator`] ([`Password`], [`Trust`]).
 
 mod native;
-mod pg;
 
 use std::io;
 use std::net::{TcpListener, TcpStream};
@@ -26,7 +19,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use nucleus_kv::Kv;
 
 pub use native::handle as handle_native;
-pub use pg::handle as handle_pg;
 
 /// The nucleus protocol's default port (`NC` in ASCII).
 pub const DEFAULT_PORT: u16 = 20_035;
@@ -173,37 +165,15 @@ impl FrontEnd for Ncp {
     }
 }
 
-/// PostgreSQL's protocol (compatibility; its sessions have `pg-compat`).
-pub struct Pg;
-
-impl FrontEnd for Pg {
-    fn name(&self) -> &str {
-        "pg"
-    }
-    fn default_addr(&self) -> String {
-        "127.0.0.1:5432".into()
-    }
-    fn handle(
-        &self,
-        stream: TcpStream,
-        kv: Arc<dyn Kv>,
-        config: &Config,
-        id: u32,
-    ) -> io::Result<()> {
-        pg::handle(stream, kv, config, id)
-    }
-}
-
 /// The front ends a server can run, by name.
 #[derive(Clone, Default)]
 pub struct FrontEnds(Vec<Arc<dyn FrontEnd>>);
 
 impl FrontEnds {
-    /// The built-in ones: `ncp` and `pg`.
+    /// The built-in one: `ncp`.
     pub fn builtin() -> Self {
         let mut f = Self::default();
-        f.add(Arc::new(Ncp)).expect("distinct");
-        f.add(Arc::new(Pg)).expect("distinct");
+        f.add(Arc::new(Ncp)).expect("the first");
         f
     }
 
@@ -260,9 +230,4 @@ pub fn serve_front_end(
 /// connection.
 pub fn serve(listener: TcpListener, kv: Arc<dyn Kv>, config: Config) -> io::Result<()> {
     serve_front_end(Arc::new(Ncp), listener, kv, config)
-}
-
-/// Serves the PostgreSQL protocol (compatibility) on `listener` forever.
-pub fn serve_pg(listener: TcpListener, kv: Arc<dyn Kv>, config: Config) -> io::Result<()> {
-    serve_front_end(Arc::new(Pg), listener, kv, config)
 }
