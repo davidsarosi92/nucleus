@@ -8,6 +8,7 @@ use std::ops::Bound;
 
 use nucleus_kv::prefix_end;
 
+use crate::ast::SetOp;
 use crate::catalog::{Table, row_key};
 use crate::encoding::{decode_row, encode_key, encode_key_value};
 use crate::error::{Error, Result};
@@ -125,7 +126,12 @@ pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
                 Err(_) => true,
             }))
         }
-        Plan::Union { left, right, all } => {
+        Plan::SetOp {
+            op: SetOp::Union,
+            left,
+            right,
+            all,
+        } => {
             let rows = build(left, ctx, outer)?.chain(build(right, ctx, outer)?);
             if *all {
                 Box::new(rows)
@@ -136,6 +142,41 @@ pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
                     Err(_) => true,
                 }))
             }
+        }
+        Plan::SetOp {
+            op,
+            left,
+            right,
+            all,
+        } => {
+            // How often each right row occurs; left rows are matched
+            // against it (multiset semantics for ALL, as in PostgreSQL).
+            let mut counts: HashMap<Row, usize> = HashMap::new();
+            for r in build(right, ctx, outer)? {
+                *counts.entry(r?).or_default() += 1;
+            }
+            let (op, all) = (*op, *all);
+            let mut seen = HashSet::new();
+            Box::new(build(left, ctx, outer)?.filter(move |r| {
+                let Ok(row) = r else { return true };
+                let count = counts.get_mut(row);
+                let keep = match (op, count) {
+                    (SetOp::Intersect, Some(n)) if *n > 0 => {
+                        *n -= 1;
+                        true
+                    }
+                    (SetOp::Intersect, _) => false,
+                    (_, Some(n)) if *n > 0 => {
+                        *n -= 1;
+                        false
+                    }
+                    (_, Some(_)) => all, // EXCEPT ALL: more on the left
+                    (_, None) => true,
+                };
+                // Without ALL each distinct row appears at most once, and
+                // EXCEPT drops a row the right side has at all.
+                keep && (all || seen.insert(row.clone()))
+            }))
         }
     })
 }
@@ -305,6 +346,10 @@ fn join<'a>(
             Some(on) => on.holds(&env(combined, ctx, outer)),
         }
     };
+    if kind == JoinType::Full {
+        let widths = (left.width(), right_width);
+        return full_join(widths, left_rows, right_rows, algo, &matches, ctx, outer);
+    }
     match algo {
         JoinAlgo::NestedLoop => Ok(Box::new(left_rows.flat_map(move |l| -> Vec<Result<Row>> {
             let l = match l {
@@ -332,34 +377,18 @@ fn join<'a>(
             left_keys,
             right_keys,
         } => {
-            let mut table: HashMap<Vec<Value>, Vec<usize>> = HashMap::new();
-            for (i, r) in right_rows.iter().enumerate() {
-                let e = env(r, ctx, outer);
-                let key = right_keys
-                    .iter()
-                    .map(|k| k.eval(&e))
-                    .collect::<Result<Vec<_>>>()?;
-                if key.iter().any(Value::is_null) {
-                    continue; // NULL never equals anything
-                }
-                table.entry(key).or_default().push(i);
-            }
+            let table = hash_table(&right_rows, right_keys, ctx, outer)?;
             Ok(Box::new(left_rows.flat_map(move |l| -> Vec<Result<Row>> {
                 let l = match l {
                     Ok(l) => l,
                     Err(e) => return vec![Err(e)],
                 };
-                let e = env(&l, ctx, outer);
-                let key = match left_keys
-                    .iter()
-                    .map(|k| k.eval(&e))
-                    .collect::<Result<Vec<_>>>()
-                {
+                let key = match probe_key(&l, left_keys, ctx, outer) {
                     Ok(k) => k,
                     Err(e) => return vec![Err(e)],
                 };
                 let mut out = Vec::new();
-                if !key.iter().any(Value::is_null) {
+                if let Some(key) = key {
                     for &i in table.get(&key).into_iter().flatten() {
                         let mut combined = l.clone();
                         combined.extend_from_slice(&right_rows[i]);
@@ -379,6 +408,98 @@ fn join<'a>(
             })))
         }
     }
+}
+
+/// The right rows of a hash join by key (rows with a NULL key left out:
+/// NULL never equals anything).
+fn hash_table(
+    rows: &[Row],
+    keys: &[Expr],
+    ctx: &Ctx,
+    outer: Option<&Env>,
+) -> Result<HashMap<Vec<Value>, Vec<usize>>> {
+    let mut table: HashMap<Vec<Value>, Vec<usize>> = HashMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        let e = env(r, ctx, outer);
+        let key = keys
+            .iter()
+            .map(|k| k.eval(&e))
+            .collect::<Result<Vec<_>>>()?;
+        if !key.iter().any(Value::is_null) {
+            table.entry(key).or_default().push(i);
+        }
+    }
+    Ok(table)
+}
+
+/// A left row's hash join key; `None` if it has a NULL.
+fn probe_key(
+    row: &[Value],
+    keys: &[Expr],
+    ctx: &Ctx,
+    outer: Option<&Env>,
+) -> Result<Option<Vec<Value>>> {
+    let e = env(row, ctx, outer);
+    let key = keys
+        .iter()
+        .map(|k| k.eval(&e))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((!key.iter().any(Value::is_null)).then_some(key))
+}
+
+/// A full outer join: the left join's rows, then every right row that
+/// matched no left row, NULL-padded on the left.
+fn full_join<'a>(
+    (left_width, right_width): (usize, usize),
+    left_rows: Rows<'a>,
+    right_rows: Vec<Row>,
+    algo: &JoinAlgo,
+    matches: &dyn Fn(&Row) -> Result<bool>,
+    ctx: &Ctx,
+    outer: Option<&Env>,
+) -> Result<Rows<'a>> {
+    let table = match algo {
+        JoinAlgo::Hash { right_keys, .. } => Some(hash_table(&right_rows, right_keys, ctx, outer)?),
+        JoinAlgo::NestedLoop => None,
+    };
+    let all: Vec<usize> = (0..right_rows.len()).collect();
+    let mut matched = vec![false; right_rows.len()];
+    let mut out = Vec::new();
+    for l in left_rows {
+        let l = l?;
+        let candidates: &[usize] = match (algo, &table) {
+            (JoinAlgo::Hash { left_keys, .. }, Some(t)) => {
+                match probe_key(&l, left_keys, ctx, outer)? {
+                    Some(k) => t.get(&k).map_or(&[], Vec::as_slice),
+                    None => &[],
+                }
+            }
+            _ => &all,
+        };
+        let mut any = false;
+        for &i in candidates {
+            let mut combined = l.clone();
+            combined.extend_from_slice(&right_rows[i]);
+            if matches(&combined)? {
+                matched[i] = true;
+                any = true;
+                out.push(combined);
+            }
+        }
+        if !any {
+            let mut padded = l;
+            padded.extend(std::iter::repeat_n(Value::Null, right_width));
+            out.push(padded);
+        }
+    }
+    for (r, m) in right_rows.into_iter().zip(matched) {
+        if !m {
+            let mut padded = vec![Value::Null; left_width];
+            padded.extend(r);
+            out.push(padded);
+        }
+    }
+    Ok(Box::new(out.into_iter().map(Ok)))
 }
 
 enum Acc {

@@ -69,7 +69,13 @@ fn push(plan: Plan, st: &Stats) -> Plan {
         Plan::Distinct { input } => Plan::Distinct {
             input: Box::new(push(*input, st)),
         },
-        Plan::Union { left, right, all } => Plan::Union {
+        Plan::SetOp {
+            op,
+            left,
+            right,
+            all,
+        } => Plan::SetOp {
+            op,
             left: Box::new(push(*left, st)),
             right: Box::new(push(*right, st)),
             all,
@@ -149,6 +155,9 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
             };
             for p in preds {
                 match (side(&p), kind) {
+                    // Both sides of a full join are preserved: nothing
+                    // moves below it.
+                    (_, JoinType::Full) => above.push(p),
                     ((true, _), _) => lp.push(p),
                     ((_, true), JoinType::Inner) => rp.push(shift(&p, -(lw as isize))),
                     (_, JoinType::Inner) => onp.push(p),
@@ -160,6 +169,7 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
                 conjuncts(on, &mut parts);
                 for p in parts {
                     match (side(&p), kind) {
+                        (_, JoinType::Full) => onp.push(p),
                         // Only inner joins may move ON conjuncts on the
                         // preserved side out of the condition.
                         ((true, false), JoinType::Inner) => lp.push(p),
@@ -419,13 +429,22 @@ fn estimate(plan: &Plan, st: &Stats) -> f64 {
                 }
             }
             let out = l * r * sel;
-            if *kind == JoinType::Left {
-                out.max(l)
-            } else {
-                out
+            match kind {
+                JoinType::Inner => out,
+                JoinType::Left => out.max(l),
+                JoinType::Full => out.max(l).max(r),
             }
         }
-        Plan::Union { left, right, .. } => estimate(left, st) + estimate(right, st),
+        Plan::SetOp {
+            op, left, right, ..
+        } => {
+            let (l, r) = (estimate(left, st), estimate(right, st));
+            match op {
+                crate::ast::SetOp::Union => l + r,
+                crate::ast::SetOp::Intersect => l.min(r),
+                crate::ast::SetOp::Except => l,
+            }
+        }
     }
 }
 
@@ -522,7 +541,13 @@ fn map_children(plan: Plan, f: &dyn Fn(Plan) -> Plan) -> Plan {
             offset,
         },
         Plan::Distinct { input } => Plan::Distinct { input: b(input) },
-        Plan::Union { left, right, all } => Plan::Union {
+        Plan::SetOp {
+            op,
+            left,
+            right,
+            all,
+        } => Plan::SetOp {
+            op,
             left: b(left),
             right: b(right),
             all,

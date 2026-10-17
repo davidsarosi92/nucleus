@@ -37,6 +37,7 @@ codes! {
     duplicate_column => "42701",
     duplicate_object => "42710",
     ambiguous_column => "42702",
+    invalid_column_reference => "42P10",
     grouping => "42803",
     type_mismatch => "42804",
     invalid_text => "22P02",

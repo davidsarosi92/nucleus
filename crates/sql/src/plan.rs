@@ -4,6 +4,7 @@
 use std::fmt::Write;
 use std::ops::Bound;
 
+use crate::ast::SetOp;
 use crate::catalog::Table;
 use crate::expr::{Expr, SubKind};
 
@@ -88,13 +89,15 @@ pub enum Plan {
         /// Input.
         input: Box<Plan>,
     },
-    /// `UNION [ALL]`.
-    Union {
+    /// `UNION` / `EXCEPT` / `INTERSECT` `[ALL]`.
+    SetOp {
+        /// Which.
+        op: SetOp,
         /// Left input.
         left: Box<Plan>,
         /// Right input.
         right: Box<Plan>,
-        /// Keep duplicates.
+        /// Keep duplicates (multiset semantics).
         all: bool,
     },
 }
@@ -106,6 +109,8 @@ pub enum JoinType {
     Inner,
     /// Left outer join.
     Left,
+    /// Full outer join.
+    Full,
 }
 
 /// Join algorithms.
@@ -218,7 +223,7 @@ impl Plan {
             | Plan::Sort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::Distinct { input } => input.width(),
-            Plan::Union { left, .. } => left.width(),
+            Plan::SetOp { left, .. } => left.width(),
         }
     }
 
@@ -295,7 +300,11 @@ impl Plan {
                 )
             }
             Plan::Join { kind, on, algo, .. } => {
-                let k = if *kind == JoinType::Left { "Left " } else { "" };
+                let k = match kind {
+                    JoinType::Inner => "",
+                    JoinType::Left => "Left ",
+                    JoinType::Full => "Full ",
+                };
                 let a = match algo {
                     JoinAlgo::NestedLoop => "Nested Loop".to_string(),
                     JoinAlgo::Hash {
@@ -351,7 +360,18 @@ impl Plan {
                     .map_or(String::new(), |o| format!(" offset {}", show(o)))
             ),
             Plan::Distinct { .. } => "Distinct".into(),
-            Plan::Union { all, .. } => if *all { "Union All" } else { "Union" }.into(),
+            Plan::SetOp { op, all, .. } => {
+                let name = match op {
+                    SetOp::Union => "Union",
+                    SetOp::Except => "Except",
+                    SetOp::Intersect => "Intersect",
+                };
+                if *all {
+                    format!("{name} All")
+                } else {
+                    name.into()
+                }
+            }
         };
         out.push(format!("{pad}{line}"));
         for child in self.children() {
@@ -384,7 +404,7 @@ impl Plan {
     pub fn children(&self) -> Vec<&Plan> {
         match self {
             Plan::Scan { .. } | Plan::Values { .. } => vec![],
-            Plan::Join { left, right, .. } | Plan::Union { left, right, .. } => vec![left, right],
+            Plan::Join { left, right, .. } | Plan::SetOp { left, right, .. } => vec![left, right],
             Plan::Filter { input, .. }
             | Plan::Project { input, .. }
             | Plan::Aggregate { input, .. }
@@ -439,7 +459,7 @@ impl Plan {
             Plan::Limit { limit, offset, .. } => {
                 limit.iter().chain(offset).for_each(f);
             }
-            Plan::Distinct { .. } | Plan::Union { .. } => {}
+            Plan::Distinct { .. } | Plan::SetOp { .. } => {}
         }
     }
 

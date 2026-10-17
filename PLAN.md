@@ -225,6 +225,7 @@ are marked ✅.
 | | M12 | Server + Postgres wire protocol | ✅ DOCS §9 |
 | | M13 | Cost-based optimizer | ✅ DOCS §8.8 |
 | | M14 | Serializable (read-set validation) | ✅ DOCS §5.2 |
+| | M14.5 | SQL completeness: FK, FULL JOIN, EXCEPT/INTERSECT, CTEs, numeric and date/time types, `psql` `\d` | ◐ |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
@@ -505,6 +506,29 @@ consumed scan ranges are checked at commit against recent commits.
 
 **Done when:** the write-skew test that "failed as documented" in M5 is
 green under SERIALIZABLE. ✅ (And phantoms, in KV and SQL tests.)
+
+### §M14.5 — SQL completeness ◐
+
+The gaps that keep nucleus from passing for "a plain PostgreSQL" in
+everyday use, closed before F2:
+
+- `EXCEPT` / `INTERSECT` (`ALL` too), with PostgreSQL's precedence.
+- Common table expressions: `WITH` (several, referring to earlier ones)
+  and `WITH RECURSIVE` (`UNION [ALL]`, iterated to a fixed point).
+- `FULL [OUTER] JOIN` (with `USING` merging columns by `COALESCE`).
+- Types: `NUMERIC` / `DECIMAL` (exact, with `(p, s)`), `DATE`,
+  `TIMESTAMP`, `TIMESTAMPTZ` (sessions in UTC), `INTERVAL`; decimal
+  literals are `NUMERIC` as in PostgreSQL; date/time arithmetic and
+  functions (`now()`, `extract`, `date_trunc`, …).
+- `FOREIGN KEY` / `REFERENCES`: checked at the end of each statement;
+  `ON DELETE` / `ON UPDATE` `NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`,
+  `SET DEFAULT`; race-free under snapshot isolation (the checks' reads are
+  validated at commit, as serializable reads are).
+- The `pg_catalog` tables, functions and syntax `psql`'s `\d` family
+  queries, so `\d`, `\d table`, `\dt`, `\di`, `\dn`, `\l` work.
+
+**Done when:** each has an slt script whose expected output was checked
+against PostgreSQL 16, and CI's `psql` runs `\d` against the server.
 
 ---
 

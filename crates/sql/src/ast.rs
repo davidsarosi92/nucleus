@@ -177,8 +177,10 @@ pub enum SetExpr {
     Select(Box<Select>),
     /// `VALUES (…), (…)`.
     Values(Vec<Vec<Expr>>),
-    /// `left UNION [ALL] right`.
-    Union {
+    /// `left UNION | EXCEPT | INTERSECT [ALL] right`.
+    SetOp {
+        /// Which.
+        op: SetOp,
         /// Left side.
         left: Box<SetExpr>,
         /// Right side.
@@ -186,6 +188,28 @@ pub enum SetExpr {
         /// `ALL`: keep duplicates.
         all: bool,
     },
+}
+
+/// A set operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetOp {
+    /// `UNION`: rows of either side.
+    Union,
+    /// `EXCEPT`: rows of the left side not on the right.
+    Except,
+    /// `INTERSECT`: rows on both sides.
+    Intersect,
+}
+
+impl SetOp {
+    /// The SQL keyword.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            SetOp::Union => "UNION",
+            SetOp::Except => "EXCEPT",
+            SetOp::Intersect => "INTERSECT",
+        }
+    }
 }
 
 /// A `SELECT`.
@@ -230,13 +254,17 @@ pub enum TableRef {
         name: String,
         /// Alias.
         alias: Option<String>,
+        /// Column aliases: `AS alias (a, b)` renames the first columns.
+        columns: Vec<String>,
     },
-    /// `(query) AS alias`.
+    /// `(query) AS alias [(columns)]`.
     Subquery {
         /// The query.
         query: Box<Query>,
         /// Alias.
         alias: String,
+        /// Column aliases.
+        columns: Vec<String>,
     },
     /// A join.
     Join {
@@ -262,6 +290,8 @@ pub enum JoinKind {
     Left,
     /// `RIGHT [OUTER] JOIN`.
     Right,
+    /// `FULL [OUTER] JOIN`.
+    Full,
 }
 
 /// An `ORDER BY` item.

@@ -614,22 +614,34 @@ impl<'a> Parser<'a> {
 
     // --------------------------------------------------------------- queries
 
+    /// `ALL` / `DISTINCT` after a set operator: whether `ALL`.
+    fn set_quantifier(&mut self) -> bool {
+        let all = self.eat_kw("all");
+        if !all {
+            self.eat_kw("distinct");
+        }
+        all
+    }
+
     fn query(&mut self) -> Result<Query> {
-        let mut body = self.set_term()?;
-        while self.eat_kw("union") {
-            let all = self.eat_kw("all");
-            if !all {
-                self.eat_kw("distinct");
-            }
-            let right = self.set_term()?;
-            body = SetExpr::Union {
+        // INTERSECT binds tighter than UNION and EXCEPT (as in PostgreSQL).
+        let mut body = self.intersect_term()?;
+        loop {
+            let op = if self.eat_kw("union") {
+                SetOp::Union
+            } else if self.eat_kw("except") {
+                SetOp::Except
+            } else {
+                break;
+            };
+            let all = self.set_quantifier();
+            let right = self.intersect_term()?;
+            body = SetExpr::SetOp {
+                op,
                 left: Box::new(body),
                 right: Box::new(right),
                 all,
             };
-        }
-        if self.peek_kw("except") || self.peek_kw("intersect") {
-            return Err(Error::feature("EXCEPT and INTERSECT are not supported yet"));
         }
         let mut order_by = Vec::new();
         if self.eat_kws(&["order", "by"]) {
@@ -679,6 +691,21 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn intersect_term(&mut self) -> Result<SetExpr> {
+        let mut body = self.set_term()?;
+        while self.eat_kw("intersect") {
+            let all = self.set_quantifier();
+            let right = self.set_term()?;
+            body = SetExpr::SetOp {
+                op: SetOp::Intersect,
+                left: Box::new(body),
+                right: Box::new(right),
+                all,
+            };
+        }
+        Ok(body)
+    }
+
     fn set_term(&mut self) -> Result<SetExpr> {
         if self.eat_op("(") {
             let q = self.query()?;
@@ -687,7 +714,7 @@ impl<'a> Parser<'a> {
                 return Ok(q.body);
             }
             return Err(Error::feature(
-                "ORDER BY / LIMIT inside a parenthesised UNION member",
+                "ORDER BY / LIMIT inside a parenthesised set operation member",
             ));
         }
         if self.eat_kw("values") {
@@ -800,8 +827,8 @@ impl<'a> Parser<'a> {
                     using: vec![],
                 };
                 continue;
-            } else if self.peek_kw("full") {
-                return Err(Error::feature("FULL OUTER JOIN is not supported yet"));
+            } else if self.eat_kws(&["full", "join"]) || self.eat_kws(&["full", "outer", "join"]) {
+                JoinKind::Full
             } else {
                 return Ok(left);
             };
@@ -831,9 +858,11 @@ impl<'a> Parser<'a> {
                 let alias = self
                     .alias()?
                     .ok_or_else(|| Error::syntax("subquery in FROM must have an alias"))?;
+                let columns = self.column_aliases()?;
                 return Ok(TableRef::Subquery {
                     query: Box::new(query),
                     alias,
+                    columns,
                 });
             }
             let t = self.table_ref()?;
@@ -842,7 +871,25 @@ impl<'a> Parser<'a> {
         }
         let name = self.ident()?;
         let alias = self.alias()?;
-        Ok(TableRef::Table { name, alias })
+        let columns = if alias.is_some() {
+            self.column_aliases()?
+        } else {
+            Vec::new()
+        };
+        Ok(TableRef::Table {
+            name,
+            alias,
+            columns,
+        })
+    }
+
+    /// `(a, b, …)` after a table alias, if present.
+    fn column_aliases(&mut self) -> Result<Vec<String>> {
+        if self.peek_op("(") {
+            self.ident_list()
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     // ----------------------------------------------------------- expressions

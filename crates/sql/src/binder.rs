@@ -194,7 +194,7 @@ impl<'a> Binder<'a> {
                     .output_position(&item.expr, &bound.scope)?
                     .ok_or_else(|| {
                         Error::feature(
-                            "ORDER BY on a UNION or VALUES must name an output column or position",
+                            "ORDER BY on a set operation or VALUES must name an output column or position",
                         )
                     })?;
                 keys.push(SortKey {
@@ -262,13 +262,19 @@ impl<'a> Binder<'a> {
         match body {
             SetExpr::Select(s) => self.select(s, &[], None, None),
             SetExpr::Values(rows) => self.values(rows),
-            SetExpr::Union { left, right, all } => {
+            SetExpr::SetOp {
+                op,
+                left,
+                right,
+                all,
+            } => {
                 let l = self.set_expr(left)?;
                 let r = self.set_expr(right)?;
                 if l.scope.cols.len() != r.scope.cols.len() {
-                    return Err(Error::syntax(
-                        "each UNION query must have the same number of columns",
-                    ));
+                    return Err(Error::syntax(format!(
+                        "each {} query must have the same number of columns",
+                        op.keyword()
+                    )));
                 }
                 let mut scope = l.scope.clone();
                 for (c, rc) in scope.cols.iter_mut().zip(&r.scope.cols) {
@@ -276,7 +282,8 @@ impl<'a> Binder<'a> {
                     c.table = None;
                 }
                 Ok(Bound {
-                    plan: Plan::Union {
+                    plan: Plan::SetOp {
+                        op: *op,
                         left: Box::new(l.plan),
                         right: Box::new(r.plan),
                         all: *all,
@@ -368,10 +375,14 @@ impl<'a> Binder<'a> {
 
     fn table_ref(&mut self, t: &TableRef) -> Result<Bound> {
         match t {
-            TableRef::Table { name, alias } => {
+            TableRef::Table {
+                name,
+                alias,
+                columns,
+            } => {
                 let table = self.table(name)?;
                 let qual = alias.clone().unwrap_or_else(|| name.clone());
-                let scope = Scope {
+                let mut scope = Scope {
                     cols: table
                         .columns
                         .iter()
@@ -383,6 +394,7 @@ impl<'a> Binder<'a> {
                         })
                         .collect(),
                 };
+                rename_columns(&mut scope, &qual, columns)?;
                 Ok(Bound {
                     plan: Plan::Scan {
                         table,
@@ -393,11 +405,16 @@ impl<'a> Binder<'a> {
                     scope,
                 })
             }
-            TableRef::Subquery { query, alias } => {
+            TableRef::Subquery {
+                query,
+                alias,
+                columns,
+            } => {
                 let mut b = self.query(query)?;
                 for c in &mut b.scope.cols {
                     c.table = Some(alias.clone());
                 }
+                rename_columns(&mut b.scope, alias, columns)?;
                 Ok(b)
             }
             TableRef::Join {
@@ -416,18 +433,21 @@ impl<'a> Binder<'a> {
                     (l, r, false)
                 };
                 let (lw, rw) = (l.scope.cols.len(), r.scope.cols.len());
-                let jt = if *kind == JoinKind::Inner {
-                    JoinType::Inner
-                } else {
-                    JoinType::Left
+                let jt = match kind {
+                    JoinKind::Inner => JoinType::Inner,
+                    JoinKind::Left | JoinKind::Right => JoinType::Left,
+                    JoinKind::Full => JoinType::Full,
                 };
                 let mut combined = l.scope.clone();
                 combined.cols.extend(r.scope.cols.clone());
+                let mut merged = Vec::new();
                 let cond = if !using.is_empty() {
                     let mut parts = Vec::new();
                     for col in using {
                         let li = l.scope.find(None, col)?.ok_or_else(|| Error::undefined_column(format!("column \"{col}\" specified in USING clause does not exist in left table")))?;
                         let ri = r.scope.find(None, col)?.ok_or_else(|| Error::undefined_column(format!("column \"{col}\" specified in USING clause does not exist in right table")))?;
+                        let (lt, rt) = (l.scope.cols[li].ty, r.scope.cols[ri].ty);
+                        comparable(lt, rt)?;
                         parts.push(Expr::Binary(
                             BinaryOp::Eq,
                             Box::new(Expr::Column(li)),
@@ -437,6 +457,12 @@ impl<'a> Binder<'a> {
                         // side stays addressable by its table but leaves
                         // `*` and unqualified names.
                         combined.cols[lw + ri].hidden = true;
+                        if jt == JoinType::Full {
+                            // Both sides may be NULL-padded: the merged
+                            // column is the first non-NULL of the two.
+                            combined.cols[li].hidden = true;
+                            merged.push((col.clone(), li, lw + ri, unify(lt, rt)?));
+                        }
                     }
                     conjunction(parts)
                 } else {
@@ -454,6 +480,36 @@ impl<'a> Binder<'a> {
                     },
                     scope: combined,
                 };
+                if !merged.is_empty() {
+                    // FULL JOIN … USING: the merged columns first, then
+                    // every input column (the USING copies hidden).
+                    let mut exprs = Vec::new();
+                    let mut cols = Vec::new();
+                    for (name, li, ri, ty) in &merged {
+                        let side = |i: usize| match ty {
+                            Some(DataType::Float) if b.scope.cols[i].ty == Some(DataType::Int) => {
+                                Expr::Cast(Box::new(Expr::Column(i)), DataType::Float)
+                            }
+                            _ => Expr::Column(i),
+                        };
+                        exprs.push(Expr::Func(Func::Coalesce, vec![side(*li), side(*ri)]));
+                        cols.push(ScopeCol {
+                            table: None,
+                            name: name.clone(),
+                            ty: *ty,
+                            hidden: false,
+                        });
+                    }
+                    exprs.extend((0..lw + rw).map(Expr::Column));
+                    cols.extend(b.scope.cols.iter().cloned());
+                    b = Bound {
+                        plan: Plan::Project {
+                            input: Box::new(b.plan),
+                            exprs,
+                        },
+                        scope: Scope { cols },
+                    };
+                }
                 if swapped {
                     let exprs: Vec<Expr> = (rw..rw + lw).chain(0..rw).map(Expr::Column).collect();
                     let cols: Vec<ScopeCol> = exprs
@@ -1246,6 +1302,21 @@ impl<'a> Binder<'a> {
         };
         Ok((Expr::Binary(op, Box::new(l), Box::new(r)), ty))
     }
+}
+
+/// Applies a `FROM` item's column alias list.
+fn rename_columns(scope: &mut Scope, alias: &str, names: &[String]) -> Result<()> {
+    if names.len() > scope.cols.len() {
+        return Err(Error::invalid_column_reference(format!(
+            "table \"{alias}\" has {} columns available but {} columns specified",
+            scope.cols.len(),
+            names.len()
+        )));
+    }
+    for (c, n) in scope.cols.iter_mut().zip(names) {
+        c.name = n.clone();
+    }
+    Ok(())
 }
 
 fn name(t: Option<DataType>) -> &'static str {
