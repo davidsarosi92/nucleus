@@ -232,8 +232,13 @@ are marked ✅.
 | | M14.6 | `ncsql`: nucleus's own SQL shell and client | ✅ DOCS §6.2 |
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
+| | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
+| | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
+| | M14.11 | Large data foundations: streaming results, bulk load, spilling, parallel scans, benchmarks | ⬜ |
+| | M14.12 | Vectors: `VECTOR(n)`, similarity search, then an ANN index | ⬜ |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
+| | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
 | **F3 — Distributed** | M18 | Range partitioning (still single-node) | ⬜ |
 | | M19 | Per-range Raft replication | ⬜ |
@@ -242,7 +247,7 @@ are marked ✅.
 | | M22 | Distributed query execution | ⬜ |
 | | M23 | Rebalancing, fault tolerance, Jepsen-style tests | ⬜ |
 | **F4 — Above** | M24 | Federation / connectors | ⬜ |
-| | M25 | CDC / changefeeds, multi-region | ⏸ |
+| | M25 | Multi-region (changefeeds moved to M16.5) | ⏸ |
 
 ---
 
@@ -583,6 +588,84 @@ quickstart in every language.
 parameters, errors, transactions) against `nucleus server` in CI. ✅
 (Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
 
+### Developer appeal (§M14.9–§M14.12)
+
+What makes nucleus worth choosing, before more data models: understanding
+queries, being usable by AI models, holding large data, and vectors.
+
+### §M14.9 — SQL analyzer ⬜
+
+nucleus has the catalog, the statistics and the optimizer in one place;
+the analyzer turns that into answers:
+
+- `EXPLAIN ANALYZE`: the plan with actual rows, loops and time per node
+  beside the estimates (a large gap points at stale statistics).
+- Statement statistics in `nc_catalog.statements`: per normalized
+  statement (constants replaced) its calls, total and mean time, rows read
+  and returned, errors; reset by a function.
+- A linter (`ANALYZE QUERY <sql>`, `ncsql \lint`): full scans under a
+  selective filter, foreign key columns without an index, cartesian
+  products, `NOT IN` over a nullable subquery, comparisons that defeat an
+  index, `SELECT *` in views later.  Each finding names the rule, the place
+  and the fix.
+- An index advisor: from the statement statistics and `ANALYZE` data, the
+  indexes that would have paid off, with the plans they would give.
+
+**Done when:** each lint rule and the advisor have slt cases, and `EXPLAIN
+ANALYZE`'s actual row counts are checked against the results.
+
+### §M14.10 — AI access ⬜
+
+Make nucleus a tool AI models can pick up in seconds, and give them the
+context they need:
+
+- `nucleus mcp`: a Model Context Protocol server (stdio, over a local
+  directory or a server) with tools to list and describe tables (from
+  `nc_catalog`), run read-only queries (row and time limits), `EXPLAIN`,
+  sample rows, and — when enabled — write statements.
+- `COMMENT ON TABLE / COLUMN`, kept in the catalog and shown in
+  `nc_catalog` and `\d`: the schema explains itself to people and models.
+- Errors with a hint beside the SQLSTATE (the closest column or table
+  name, the cast that would work), on the wire and in every driver.
+- A compact, model-oriented reference of the dialect (`docs/llm.md`).
+
+**Done when:** an MCP client lists, describes and queries a database end to
+end in a test, and hints appear for the common error codes.
+
+### §M14.11 — Large data foundations ⬜
+
+Today results are materialized, joins and sorts are in memory, and `ncp`
+sends a whole result at once.  Before claiming large data:
+
+- Streaming results: `ncp` sends rows as they are produced, with flow
+  control; drivers iterate (cursors) instead of collecting.
+- Bulk load: `COPY`-style loading (text/CSV and `ncp` batches) and batched
+  inserts in the drivers, bypassing per-row statement overhead.
+- A memory-bounded executor: sorts, hash joins and aggregates spill to
+  temporary files past a budget.
+- Parallel scans over key ranges; page compression.
+- Published benchmarks (load, point reads, scans, joins, mixed) with
+  targets, run in CI to catch regressions.
+
+Columnar storage for analytics and range partitioning (§M18) build on this.
+
+**Done when:** a 100-million-row table loads, scans, sorts and joins within
+a fixed memory budget, and the benchmark targets are met.
+
+### §M14.12 — Vectors ⬜
+
+Embeddings beside the data they describe, in the same transactions:
+
+- A `VECTOR(n)` type (float32 components), literals and casts, wire and
+  driver support.
+- Distance operators and functions — cosine, L2, inner product — and exact
+  nearest-neighbour search with `ORDER BY distance LIMIT k`.
+- An approximate nearest-neighbour index (HNSW) the optimizer uses for
+  `ORDER BY … LIMIT k`, kept transactionally consistent with the table.
+
+**Done when:** exact search matches a brute-force reference, and the ANN
+index reaches a set recall at a set latency on a public dataset.
+
 ---
 
 ## §F2 — NoSQL layer
@@ -610,9 +693,26 @@ mapping differ.
 standard driver, if D8 lands on the MongoDB wire protocol) runs CRUD and
 queries against nucleus.
 
+### §M16.5 — Streams: a transactional broker ⬜
+
+Not a Kafka replacement — what the ordered KV and transactions give almost
+for free, and what developers otherwise assemble from several systems:
+
+- Streams: append-only, ordered topics stored as KV ranges, with
+  retention; consumer groups with committed offsets.
+- Publishing and consuming inside SQL transactions: a table write and its
+  event commit together (a built-in outbox), and a consumer's offset moves
+  only if its processing commits.
+- Changefeeds (CDC, moved here from §M25): a table's committed changes as
+  a stream, from the MVCC versions.
+- Clients: `ncp` messages for subscribing, and the drivers' consumer API.
+
+**Done when:** exactly-once processing (consume, write, commit) survives
+crash tests, and changefeeds deliver every committed change in order.
+
 ### §M17 — Further models ⏸
 
-Decided later: wide-column, time series, graph, vector.  All follow the same
+Decided later: wide-column, time series, graph (vectors are §M14.12).  All follow the same
 pattern: a mapping onto the ordered KV + operators in the shared executor.
 
 ---
@@ -668,10 +768,9 @@ style) across a thousand seeds without failure.
   databases, CSV/Parquet, another nucleus cluster.
 - Predicate push-down to the sources.
 
-### §M25 — CDC, multi-region ⏸
+### §M25 — Multi-region ⏸
 
-- Changefeeds (from the WAL / MVCC versions), multi-region placement,
-  follower reads.
+- Multi-region placement, follower reads.  (Changefeeds moved to §M16.5.)
 
 ---
 
@@ -713,3 +812,6 @@ style) across a thousand seeds without failure.
   credentials `nucleus` / `nucleus`.
 - **2026-10-17** — §M14.8 shipped: drivers for C, C++, Python, JS/TS and
   Java beside Rust, with `examples/`; D15 (versioning) opened.
+- **2026-10-17** — Developer appeal planned: §M14.9 SQL analyzer, §M14.10
+  AI access (MCP), §M14.11 large data foundations, §M14.12 vectors; §M16.5
+  streams and a transactional broker (changefeeds moved there from §M25).
