@@ -15,9 +15,9 @@ with drivers for Rust, C, C++, Python, JavaScript/TypeScript and Java, and
 the `ncsql` shell — and, optionally, PostgreSQL's.  Next is modularity
 (PLAN.md §M14.19: registries, extensible and evolvable types, an extension
 API — the principles come first), then the rest of the developer platform
-(§M14.9–§M14.22: SQL analyzer, AI access, large data and analytics,
-vectors, full-text and hybrid search, embeddings, branches, time travel,
-…), then the document model (§F2).  See
+(§M14.9–§M14.23: SQL analyzer, AI access, large data and analytics,
+vectors, full-text and hybrid search, embeddings, embedded editions for
+Python, JavaScript, the browser and phones, branches, time travel, …), then the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.
 

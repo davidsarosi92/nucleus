@@ -23,7 +23,7 @@ Status legend: ⬜ not started · ◐ in progress · ✅ shipped · ⏸ parked
 | Build targets | Platforms nucleus must build for |
 | Decisions | What has to be settled before the first line of code |
 | Status snapshot | Phases + milestones table |
-| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.22, sits between F1 and F2) |
+| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.23, sits between F1 and F2) |
 | Changelog | Changes to this plan |
 
 ---
@@ -52,7 +52,9 @@ is an implementation swap, not a rewrite.
 phase must keep all of these working:
 
 - **Embedded library** — linked into an application, like SQLite or RocksDB
-  (from F0).
+  (from F0, Rust); from §M14.23 also inside Python and JavaScript
+  processes, in the browser (WASM) and on phones, in memory or on a file;
+  from §M16.7 kept in sync with a server.
 - **Standalone SQL server** — start it, connect with `ncsql` or nucleus's
   drivers over its own protocol, `ncp` (from §M14.7, D14); with
   `--pg-compat` also `psql` and PostgreSQL drivers, as to a plain
@@ -176,6 +178,8 @@ to be able to produce them.
 | macOS | `aarch64-apple-darwin`, `x86_64-apple-darwin` | `fsync` does not flush the drive cache on macOS — durability needs `fcntl(F_FULLFSYNC)` |
 | Windows | `x86_64-pc-windows-msvc` | no POSIX file API — its own platform implementation (`FlushFileBuffers` for durability, `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` for atomic rename, offset reads/writes via `OVERLAPPED`) |
 | d-os | `x86_64`, `aarch64`, `i686` `-unknown-linux-musl`, static | runs through the d-os Linux ABI; the only 32-bit target, so it is the one that catches `usize` assumptions |
+| Browser (from §M14.23) | `wasm32-unknown-unknown` | the embedded edition only: no threads or blocking file API by default — storage through OPFS (or in memory), its own platform implementation |
+| iOS, Android (from §M14.23) | `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-linux-android`, `x86_64-linux-android` | the embedded edition only; durability per platform (`F_FULLFSYNC` on iOS) |
 
 Every target runs the same platform conformance tests, including the
 durability ones (principle 5): "it compiles" is not "it is supported".
@@ -232,7 +236,7 @@ are marked ✅.
 | D12 | Serializable isolation (§M14) | ✅ **Read-set validation** (FoundationDB style): a commit fails if a key or range it read was written after its snapshot | Cahill SSI (fewer aborts, much more state); FDB's approach also distributes in F3 |
 | D13 | System catalog naming (§M14.5) | ✅ **nucleus's own `nc_catalog`** (2026-10-17), in nucleus's terms (table ids, key prefixes, statistics); `pg_catalog` / `information_schema` only as a compatibility layer on top, because PostgreSQL clients hard-code those names — nucleus is PostgreSQL-compatible, not PostgreSQL | expose only `pg_catalog` (simpler, but makes PostgreSQL's names nucleus's identity) |
 | D14 | Client protocol (§M14.7) | ✅ **nucleus's own protocol, `ncp`** (2026-10-17): little-endian frames, nucleus's typed value encoding on the wire, port 20035; nucleus's own drivers (Rust, C, C++, Python, JS/TS, Java).  The PostgreSQL protocol becomes an optional module (`--pg-compat`, off by default), frozen: kept working for psql and existing tools, not extended for tool-specific catalog queries | the PostgreSQL protocol as the only client protocol (every PostgreSQL tool works, but nucleus stays a PostgreSQL look-alike); dropping it entirely (no psql, no PostgreSQL tools) |
-| D15 | Versioning (open) | Proposed: one semantic version for the server, CLI and Rust crates (`Cargo.toml`); each **format** versioned on its own and checked on open — the on-disk store (pager header), the catalog records (table definitions, already versioned), the row encoding, the WAL, and the client protocol (`ncp`'s Hello version, negotiated); drivers versioned per language but tied to the protocol version they speak; upgrades read older formats and refuse newer ones, and a release note lists format changes | to decide before the first tagged release and before publishing drivers |
+| D15 | Versioning (open) | Proposed: one semantic version for the server, CLI and Rust crates (`Cargo.toml`); each **format** versioned on its own and checked on open — the on-disk store (pager header), the catalog records (table definitions, already versioned), the row encoding, the WAL, and the client protocol (`ncp`'s Hello version, negotiated); drivers versioned per language but tied to the protocol version they speak; upgrades read older formats and refuse newer ones, and a release note lists format changes | to decide before the first tagged release, before publishing drivers, before a module leaves this repo (§M14.19) and before an embedded edition ships a file format to devices (§M14.23) |
 
 ---
 
@@ -268,6 +272,7 @@ are marked ✅.
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
+| | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ⬜ |
 | | M14.15 | JSON type and functions | ⬜ |
@@ -278,6 +283,7 @@ are marked ✅.
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
+| | M16.7 | Sync: embedded databases on devices kept in sync with a server, offline first | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
 | | M17.5 | Read replicas, failover, cluster management | ⬜ |
 | **F3 — Distributed** | M18 | Range partitioning (still single-node) | ⬜ |
@@ -628,11 +634,12 @@ quickstart in every language.
 parameters, errors, transactions) against `nucleus server` in CI. ✅
 (Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
 
-### Developer platform (§M14.9–§M14.22)
+### Developer platform (§M14.9–§M14.23)
 
 What makes nucleus worth choosing, before more data models: understanding
 queries, being usable by AI models, holding large data and analysing it
-fast, vectors, search and embeddings for AI applications — and the
+fast, vectors, search and embeddings for AI applications, nucleus
+embedded in any application, browser or phone — and the
 things nucleus's design gives almost for free (branches and time travel
 from copy-on-write storage and MVCC), the everyday tools (JSON,
 migrations, code generation), an easy start, and what production needs.
@@ -764,12 +771,43 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
 - An extension API for out-of-tree modules (Rust crates linked into a
   custom build first; loadable modules later), with DOCS for extension
   authors and a sample extension in `examples/`.
-- A boundary check in CI: core crates do not depend on modules.
+- **Modules live in one repository but are built to leave it.**  Every
+  module, edition, driver and binding is a folder that could become its
+  own repository and package at any time, without changes:
+  - the layout — `crates/` the core (KV, storage, transactions, the SQL
+    engine) and the public API crates; `modules/` the modules (vectors,
+    text search, embeddings, columnar storage, `pg-compat`, …);
+    `editions/` the build profiles that choose modules (server, embedded,
+    browser, mobile); `drivers/` and `bindings/` the language packages;
+  - a module depends on the core only through the public API crates
+    (Cargo path dependencies that also carry a version, so the same
+    manifest works published), never on internal crates or on files
+    outside its folder; non-Rust packages have their own manifest and no
+    imports from outside their folder;
+  - each folder has its own README, tests, changelog, licence and
+    version; its documentation lives in the folder, and DOCS links to it;
+  - shared test material is a package too: the slt runner and suites and
+    the type law kit are published test-kit crates a module depends on,
+    not files it reads from the repository.
+- **Checked in CI, not left to discipline:** a boundary check in both
+  directions — core crates do not depend on modules, and modules depend
+  only on the public API; and a *detachability test* — each module is
+  copied into an empty directory and built and tested there from
+  versioned dependencies alone (`cargo package` for Rust crates).  When a
+  folder does leave, `git filter-repo --subdirectory-filter` keeps its
+  history.
+- **First piece: `pg-compat`.**  The PostgreSQL protocol
+  (`crates/server/src/pg.rs`) and the `pg_catalog` / `information_schema`
+  views (`crates/sql/src/pgcatalog.rs`) move into `modules/pg-compat`,
+  connected through the public API only — the whole path tried on a real,
+  existing part before the others follow.
 
 **Done when:** the principle audit's gaps are closed or scheduled; the
 built-in functions, types, catalog views, front ends and authentication
 are all registered through the public extension API; the sample extension
-adds a function, a type and a catalog view without touching the core; and
+adds a function, a type and a catalog view without touching the core;
+`modules/pg-compat` passes the detachability test and `psql` still works
+through it; and
 a type's encoding is upgraded on a populated database (old and new values
 read side by side, crash-tested) and a column's type changed online.  The
 law kit runs on every built-in type, and a sample type with only some
@@ -850,13 +888,9 @@ sends a whole result at once.  Before claiming large data:
   regressions, and its results are published with the commands to
   reproduce them.  Targets are set from the first run and recorded here.
 
-Not planned for now: an embedded Python mode (the engine inside the Python
-process, as SQLite and DuckDB do).  With columnar results the network
-adds little on one machine, and an embedded mode costs native wheels per
-platform, crashes that take the Python process down, and the data
-directory lock (a server and an embedded process cannot open one database
-at once).  The engine is already a library (Rust embeds it today), so it
-is a thin layer if it is ever asked for.
+Speed alone does not call for an embedded Python mode: with columnar
+results the network adds little on one machine.  Starting without any
+setup does, and that is §M14.23.
 
 Vectorized execution and columnar storage (§M14.20) and range partitioning
 (§M18) build on this.
@@ -1074,6 +1108,50 @@ done by the database:
 through inserts, updates, deletes, provider outages and crashes; a model
 change re-embeds online; and a local model embeds without any network.
 
+### §M14.23 — Embedded editions ⬜
+
+The quickest start there is — no server, no setup, `open` and query — is
+how a developer, or an AI agent choosing a tool, meets a database first
+(SQLite's reach, DuckDB's, PGlite's on the browser-based coding
+platforms).  The same engine, SQL, types and vectors as the server, as a
+library, so a prototype that grows moves to a server without code changes.
+Not a fork and not a "lite" engine: editions are build profiles over the
+same core, choosing modules (§M14.19), so a phone build leaves out what it
+does not need and stays small.  In order:
+
+1. **In memory and on a file, inside Python and JavaScript.**
+   `nucleus.open("app.db")` or `nucleus.open(":memory:")`; Python (a
+   native wheel per platform, the same DB-API as the network driver) and
+   Node / Bun / Deno (a native addon), with the network drivers' API, so
+   code switches by changing the connection string.  Results reach numpy
+   and Arrow without a copy.  In-memory mode is the platform layer's
+   memory file system made a product: no files, optionally saved to one.
+2. **The browser (WASM).**  The engine compiled to `wasm32`, storage in
+   OPFS (persistent) or in memory, run in a worker; a JavaScript / TypeScript
+   package with the same API.  For in-browser development platforms,
+   playgrounds (§M14.17), tests and offline web applications.
+3. **Phones.**  iOS (Swift package, `XCFramework`) and Android (Kotlin
+   library, AAR) over the C API, with each platform's durability rules;
+   a size budget for the mobile profile.
+4. **Sync with a server** is §M16.7.
+
+What it costs, and how that is met: more platforms in CI (each edition
+runs the platform conformance and slt suites on its targets); native
+packages per platform (built by CI, like the release packages); a crash
+in the engine takes the host process with it (the engine already runs
+under the simulator's crash and fault tests); one process per data
+directory (the directory lock holds — an embedded process and a server do
+not open one database at once); and a file format that lives on many
+devices for years, so D15 must be settled before the first embedded
+release, and every older format stays readable.
+
+**Done when:** each edition passes the slt suite and the platform
+conformance tests on its targets; a Python and a JavaScript example open a
+file, query it, then run unchanged against `nucleus server` by changing
+only the connection string; the browser edition persists across reloads;
+and the iOS and Android libraries run the examples on a simulator within
+the size budget.
+
 ### §M14.13 — Database branches ⬜
 
 The copy-on-write store makes a consistent snapshot a root pointer: a
@@ -1247,6 +1325,33 @@ commit that affects it — built on the changefeeds (§M16.5).
 
 **Done when:** subscribers see exactly the query's result after each
 commit, under concurrent writes, in every driver.
+
+### §M16.7 — Sync: devices and a server ⬜
+
+Embedded databases (§M14.23) on phones, browsers and laptops, kept in sync
+with a server — offline first: the application reads and writes its local
+database at local speed, and changes flow both ways when a connection
+exists.
+
+- **Shapes**: a device subscribes to a subset of the server's data (rows
+  a query selects, scoped by row-level security, §M14.18) and holds only
+  that; the server streams changes into it from changefeeds (§M16.5).
+- **Local writes** are committed locally, kept in an outbox and sent in
+  order; the server applies them in a transaction, with its constraints
+  and policies, and answers accepted or rejected.
+- **Conflicts** resolved by a rule chosen per table: server wins, last
+  writer wins (by hybrid logical clocks), or a merge function (a module);
+  rejected writes are reported to the application, never dropped silently.
+- **Resumable**: a device that has been offline for a week catches up from
+  its last position, or re-syncs its shape if the server's retention has
+  passed it.
+- Clients in every embedded edition (Python, JavaScript, browser, Swift,
+  Kotlin), over `ncp`.
+
+**Done when:** devices that write offline and reconnect in any order
+converge to the server's state under the chosen rules, with no lost and no
+doubled write, under network-partition and crash tests; and a device sees
+only rows its policies allow.
 
 ### §M17 — Further models ⏸
 
@@ -1433,3 +1538,10 @@ style) across a thousand seeds without failure.
   through a durable job queue, model versions, chunking); §M14.18
   row-level security everywhere rows are read; §M16.5 task queues and
   agent patterns (`examples/agents/`).
+- **2026-10-17** — §M14.19: modules live in one repository but are built
+  to leave it (`crates/`, `modules/`, `editions/`, `drivers/`,
+  `bindings/`; public-API-only dependencies; a boundary check both ways
+  and a detachability test in CI), `pg-compat` first.  New §M14.23
+  embedded editions (in memory or on a file inside Python and JavaScript,
+  the browser, iOS and Android) and §M16.7 sync between devices and a
+  server; build targets and D15 updated.
