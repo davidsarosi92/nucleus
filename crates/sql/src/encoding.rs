@@ -397,12 +397,30 @@ pub fn decode_value(r: &mut Reader) -> Result<Value> {
         }
         11 => {
             let t = crate::ext::TypeRef::by_id(r.u32().map_err(bad)?);
-            let _version = r.u16().map_err(bad)?;
+            let version = r.u16().map_err(bad)?;
             let n = r.u32().map_err(bad)? as usize;
-            Value::ext(t, r.take(n).map_err(bad)?)
+            let bytes = r.take(n).map_err(bad)?;
+            let current = t.imp().encoding_version();
+            if version == current || r#missing(t) {
+                Value::ext(t, bytes)
+            } else if version < current {
+                Value::ext(t, t.imp().upgrade(version, bytes)?)
+            } else {
+                return Err(Error::feature(format!(
+                    "a {} value is stored in encoding version {version}, newer than this \
+                     build's ({current}); upgrade nucleus",
+                    t.name()
+                )));
+            }
         }
         _ => return Err(Error::internal("malformed row encoding")),
     })
+}
+
+/// Whether `t` is the stand-in for a type this process lacks (whose bytes
+/// are kept as they are).
+fn r#missing(t: crate::ext::TypeRef) -> bool {
+    crate::ext::is_missing(t)
 }
 
 /// Decodes a row of a table with `columns` columns.

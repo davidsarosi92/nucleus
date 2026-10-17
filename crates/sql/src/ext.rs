@@ -782,9 +782,29 @@ pub trait Type: std::any::Any + Send + Sync {
         None
     }
 
-    /// The version of its stored form (rows and keys record it).
+    /// The version of its stored form (rows record it per value).
     fn encoding_version(&self) -> u16 {
         1
+    }
+
+    /// A value's canonical bytes now, from the bytes an older encoding
+    /// version stored: values are upgraded as they are read, and written
+    /// in the current version (`ALTER TYPE t UPGRADE` rewrites them all).
+    fn upgrade(&self, from: u16, bytes: &[u8]) -> Result<Vec<u8>> {
+        let _ = bytes;
+        Err(Error::feature(format!(
+            "type {} cannot read its encoding version {from}",
+            self.name()
+        )))
+    }
+
+    /// Whether values upgraded from version `from` have other keys than
+    /// before (their key encoding changed too): then the keys holding them
+    /// are rewritten before anything uses them — by the first transaction
+    /// that may write.
+    fn upgrade_changes_keys(&self, from: u16) -> bool {
+        let _ = from;
+        false
     }
 
     /// Some of its values — edge cases first — on which registration
@@ -1052,6 +1072,12 @@ fn intern(t: Arc<dyn Type>) -> Result<TypeRef> {
         map.by_id.insert(id, r);
     }
     Ok(r)
+}
+
+/// Whether `t` is the stand-in for a type this process has no
+/// implementation of.
+pub fn is_missing(t: TypeRef) -> bool {
+    (t.imp() as &dyn std::any::Any).type_id() == std::any::TypeId::of::<Missing>()
 }
 
 /// The stand-in for a type a database names but this process lacks.

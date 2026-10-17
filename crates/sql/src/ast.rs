@@ -40,6 +40,19 @@ pub enum Statement {
         /// `IF NOT EXISTS`.
         if_not_exists: bool,
     },
+    /// `ALTER TABLE t ALTER [COLUMN] c [SET DATA] TYPE type [USING expr]`.
+    AlterColumnType {
+        /// Table.
+        table: String,
+        /// The column.
+        column: String,
+        /// Its new type.
+        ty: SqlType,
+        /// The type's modifier.
+        typmod: TypeMod,
+        /// How each value converts (over the row): else a cast.
+        using: Option<Expr>,
+    },
     /// `ALTER TYPE name …`: teaching a type, or making it forget.
     AlterType {
         /// The type's name.
@@ -473,6 +486,9 @@ pub enum TypeAction {
         /// `ASSIGNMENT` 1, `IMPLICIT` 2, else 0.
         context: u8,
     },
+    /// `UPGRADE`: every stored value rewritten in the type's current
+    /// encoding version.
+    Upgrade,
     /// `DROP CAST [IF EXISTS] TO type`.
     DropCast {
         /// The target type.

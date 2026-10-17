@@ -639,6 +639,45 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
     Ok(())
 }
 
+/// Replaces every row of `table` (as now defined) with `rows` — each with
+/// the key it had, which a table with a primary key computes afresh —
+/// and writes their index entries; duplicates of a key or a unique index
+/// are refused.
+pub fn replace_rows(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    table: &Table,
+    rows: Vec<(Vec<u8>, Row)>,
+) -> Result<()> {
+    let prefix = table.data_prefix();
+    let end = nucleus_kv::prefix_end(&prefix).expect("table prefix");
+    catalog::delete_range(txn, &prefix, Some(&end))?;
+    let keys = IndexKeys::new(&*txn, reg, table)?;
+    for (old_key, row) in rows {
+        let key = if table.primary_key.is_empty() {
+            old_key
+        } else {
+            row_key_of(table, &row, None)
+        };
+        if txn.get(&key)?.is_some() {
+            return Err(duplicate(&format!("{}_pkey", table.name)));
+        }
+        txn.put(&key, &crate::encoding::encode_row(&row))?;
+        let pk = pk_suffix(table, &key);
+        for (i, (k, unique)) in keys
+            .entries(&*txn, table, &row, &pk)?
+            .into_iter()
+            .enumerate()
+        {
+            if unique && txn.get(&k)?.is_some() {
+                return Err(duplicate(&table.indexes[i].name));
+            }
+            txn.put(&k, &pk)?;
+        }
+    }
+    Ok(())
+}
+
 /// Every row of a table rewritten (after `ADD COLUMN … DEFAULT`).
 pub fn rewrite_rows(
     txn: &mut dyn KvTxn,

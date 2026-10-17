@@ -153,6 +153,7 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("key_encoding", B),
             ("distance", T),
             ("encoding_version", I),
+            ("stored_version", I),
         ],
     ),
 ];
@@ -446,6 +447,11 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     Value::Bool(t.key_encoding().is_some()),
                     t.distance().map_or(Value::Null, |d| text(d.operator())),
                     Value::Int(i64::from(t.encoding_version())),
+                    match ty {
+                        DataType::Ext(r) => catalog::stored_version(txn, r.name())?
+                            .map_or(Value::Null, |v| Value::Int(i64::from(v))),
+                        _ => Value::Null,
+                    },
                 ]);
             }
         }

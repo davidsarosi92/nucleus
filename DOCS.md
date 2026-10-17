@@ -652,6 +652,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 05 <type> 00 <ordering>` | an ordering taught to a type: its mapping (SQL over `value`) |
 | `00 06 <symbol> 00 <left> 00 <right>` | an operator taught: its function |
 | `00 07 <from> 00 <to>` | a cast taught: its function and context |
+| `00 08 <type>` | the oldest encoding version a registered type's stored values may be in |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 
@@ -902,6 +903,30 @@ Orderings live in the catalog (key `00 05`), so teaching is transactional
 DDL; indexes record them per column (table record version 5).
 `CREATE INDEX` without a name makes one up (`table_columns_idx`).
 
+**Encoding versions** (registered types): each stored value carries its
+type's encoding version.  A value in an older one is upgraded as it is
+read (`Type::upgrade(from, bytes)`), and writes use the current one, so
+old and new values live side by side; `ALTER TYPE t UPGRADE` rewrites
+every row and key holding `t` in one transaction.  The catalog records the
+oldest version stored (`00 08`; `nc_catalog.types.stored_version`).  An
+upgrade that changes the type's keys (`Type::upgrade_changes_keys`) is
+done by the first transaction that may write, before anything reads those
+keys (a read-only statement before it gets `25006`); a database storing a
+version newer than the build is refused (`0A000`).  `tests/upgrade.rs`
+plays successive builds of one type, crashes `UPGRADE` at every I/O
+operation (all old or all new afterwards), and changes keys.
+
+**`ALTER TABLE t ALTER [COLUMN] c [SET DATA] TYPE type [USING expr]`**:
+every value converted — by `expr` over the row, else by a taught cast of
+context `ASSIGNMENT` or `IMPLICIT`, else a built-in assignment cast
+(between numbers, between dates and timestamps, to text; anything else
+needs `USING`: `42804`) — and stored as the column now says (lengths,
+precision), every row, key and index entry rewritten, checks, defaults,
+keys and uniqueness holding afterwards (`22001`, `23505`, `23514`).  One
+transaction: readers keep the old column until it commits.  A column a
+foreign key uses cannot change type yet.  `22_alter_column_type.slt`'s
+results came from PostgreSQL 18.
+
 **Operators outside the grammar's own.**  The lexer reads operators as
 PostgreSQL does — the longest run of `+-*/<>=~!@#%^&|`?`, not into a
 comment, a run of more than one not ending in `+` or `-` unless it holds
@@ -916,9 +941,9 @@ EXISTS] symbol (left, right)` (the grammar's own operators cannot be
 taught: `22023`).  **Casts taught:** `ALTER TYPE t ADD CAST TO target AS
 function [EXPLICIT | ASSIGNMENT | IMPLICIT]` / `DROP CAST [IF EXISTS] TO
 target`, between types one of which is registered (the built-in casts are
-fixed); `CAST(x AS target)` and `x::target` then call the function.  The
-context is recorded; applying assignment and implicit casts unwritten
-comes with `ALTER COLUMN … TYPE` (§M14.19 T6).  Naming a type's distances
+fixed); `CAST(x AS target)` and `x::target` then call the function, and
+`ALTER COLUMN … TYPE` without `USING` takes an `ASSIGNMENT` or `IMPLICIT`
+one.  (`INSERT` and `UPDATE` do not apply taught casts unwritten yet.)  Naming a type's distances
 in SQL (`ADD DISTANCE`) comes with the nearest-neighbour indexes of
 §M14.12; today a type's distance is its ability's.
 `crates/testkit/slt/21_orderings.slt` and `tests/types.rs` (`geopoint`
@@ -1215,6 +1240,10 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-18 — §M14.19 encoding versions and `ALTER COLUMN … TYPE`
+  (T6):** values upgraded as read, `ALTER TYPE … UPGRADE` (crash-tested),
+  key-changing upgrades before the keys are used, newer versions refused;
+  `ALTER TABLE … ALTER COLUMN … TYPE … [USING]`.
 - **2026-10-17 — §M14.19 operators and casts (T5b):** PostgreSQL's
   operator lexing; operators outside the grammar's own at one precedence,
   resolved by symbol and types — a type's distance (`<->`), a module's

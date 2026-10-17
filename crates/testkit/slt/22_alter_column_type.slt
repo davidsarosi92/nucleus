@@ -1,0 +1,90 @@
+# ALTER TABLE … ALTER COLUMN … TYPE: values converted (by a cast, or USING),
+# keys and indexes rewritten, constraints checked against the new type.
+# Expected results produced by PostgreSQL 18 (records marked nucleus-only
+# excepted).
+
+statement ok
+CREATE TABLE m (id INT PRIMARY KEY, amount NUMERIC(8, 3), code TEXT, born DATE)
+
+statement ok
+CREATE INDEX m_amount ON m (amount)
+
+statement ok
+INSERT INTO m VALUES (1, 1.25, '10', '2024-01-31'), (2, 2.5, '7', '2024-02-29'), (3, -0.125, '200', NULL)
+
+statement ok
+ALTER TABLE m ALTER COLUMN amount TYPE NUMERIC(8, 1)
+
+query IT
+SELECT id, amount FROM m ORDER BY amount
+----
+3 -0.1
+1 1.3
+2 2.5
+
+query I
+SELECT id FROM m WHERE amount = 1.3
+----
+1
+
+statement error 42804
+ALTER TABLE m ALTER COLUMN code TYPE BIGINT
+
+statement ok
+ALTER TABLE m ALTER COLUMN code SET DATA TYPE BIGINT USING code::bigint * 2
+
+query II
+SELECT id, code FROM m ORDER BY code
+----
+2 14
+1 20
+3 400
+
+statement ok
+ALTER TABLE m ALTER code TYPE TEXT
+
+query T
+SELECT code FROM m ORDER BY code
+----
+14
+20
+400
+
+statement ok
+ALTER TABLE m ALTER COLUMN born TYPE TIMESTAMP
+
+query T
+SELECT born FROM m WHERE id = 2
+----
+2024-02-29 00:00:00
+
+statement ok
+ALTER TABLE m ALTER COLUMN code TYPE VARCHAR(3)
+
+statement error 22001
+ALTER TABLE m ALTER COLUMN code TYPE VARCHAR(2)
+
+statement ok
+ALTER TABLE m ALTER COLUMN id TYPE NUMERIC USING id * 1.5
+
+query T
+SELECT id FROM m ORDER BY id
+----
+1.5
+3.0
+4.5
+
+statement error 23505
+ALTER TABLE m ALTER COLUMN id TYPE INT USING 1
+
+statement error 42703
+ALTER TABLE m ALTER COLUMN nosuch TYPE INT
+
+statement ok
+CREATE TABLE k (a INT CHECK (a < 100))
+
+statement ok
+INSERT INTO k VALUES (50), (99)
+
+statement error 23514
+ALTER TABLE k ALTER COLUMN a TYPE INT USING a * 2

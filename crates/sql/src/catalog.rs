@@ -14,6 +14,7 @@
 //! | `00 05 <type name> 00 <ordering name>` | an ordering taught to a type (`ALTER TYPE … ADD ORDERING`): its mapping |
 //! | `00 06 <symbol> 00 <left type> 00 <right type>` | an operator taught (`ALTER TYPE … ADD OPERATOR`): its function |
 //! | `00 07 <from type> 00 <to type>` | a cast taught (`ALTER TYPE … ADD CAST`): its function and context |
+//! | `00 08 <type name>` | the oldest encoding version a registered type's stored values may be in (`u16`) |
 //! | `01 <table id u32 BE> <index id u32 BE> <key>` | table and index entries |
 //!
 //! Index 0 of a table is its primary index: key = the primary key columns
@@ -41,6 +42,36 @@ const ORDERINGS: &[u8] = &[0x00, 0x05];
 const ORDERING_VERSION: u8 = 1;
 const OPERATORS: &[u8] = &[0x00, 0x06];
 const CASTS: &[u8] = &[0x00, 0x07];
+const TYPE_VERSIONS: &[u8] = &[0x00, 0x08];
+
+/// The oldest encoding version values of registered type `name` may be
+/// stored in (`None`: no column of it was ever created).
+pub fn stored_version(txn: &dyn KvTxn, name: &str) -> Result<Option<u16>> {
+    txn.get(&names_key(TYPE_VERSIONS, &[name]))?
+        .map(|v| Reader::new(&v).u16())
+        .transpose()
+}
+
+/// Records that values of `name` may be stored in `version` and later.
+pub fn put_stored_version(txn: &mut dyn KvTxn, name: &str, version: u16) -> Result<()> {
+    let mut w = Writer::default();
+    w.u16(version);
+    txn.put(&names_key(TYPE_VERSIONS, &[name]), &w.0)?;
+    Ok(())
+}
+
+/// Notes the registered types among `columns` as stored: their current
+/// encoding version, unless an older one is on record.
+pub fn note_stored_types(txn: &mut dyn KvTxn, columns: &[Column]) -> Result<()> {
+    for c in columns {
+        if let DataType::Ext(t) = c.ty
+            && stored_version(&*txn, t.name())?.is_none()
+        {
+            put_stored_version(txn, t.name(), t.imp().encoding_version())?;
+        }
+    }
+    Ok(())
+}
 const DATA: u8 = 0x01;
 /// Version 2 added `NUMERIC(p, s)` modifiers, version 3 foreign keys,
 /// version 4 registered types (tag `7F` and the type's name), version 5
@@ -100,7 +131,52 @@ pub fn check_format(txn: &mut dyn KvTxn, reg: &crate::ext::Registry) -> Result<b
             }
         }
     }
+    // Registered types: refuse values newer than this build; rewrite those
+    // whose upgrade changes their keys before anything uses the keys.
+    for (ty, _) in reg.types() {
+        let DataType::Ext(t) = *ty else { continue };
+        let Some(stored) = stored_version(&*txn, t.name())? else {
+            continue;
+        };
+        let current = t.imp().encoding_version();
+        if stored > current {
+            return Err(Error::feature(format!(
+                "the database stores type {} in encoding version {stored}, newer than this \
+                 build's ({current}); upgrade nucleus",
+                t.name()
+            )));
+        }
+        if stored < current && t.imp().upgrade_changes_keys(stored) {
+            match put_stored_version(txn, t.name(), stored) {
+                Err(e) if e.code == "25006" => {
+                    return Err(Error::read_only(format!(
+                        "type {}'s keys change with its encoding version {current}: a writing \
+                         statement (or ALTER TYPE {} UPGRADE) upgrades the database first",
+                        t.name(),
+                        t.name()
+                    )));
+                }
+                Err(e) => return Err(e),
+                Ok(()) => upgrade_type(txn, reg, t)?,
+            }
+        }
+    }
     Ok(true)
+}
+
+/// Rewrites every table with a column of registered type `t` — rows in its
+/// current encoding version, and their keys — and records the version.
+pub fn upgrade_type(
+    txn: &mut dyn KvTxn,
+    reg: &crate::ext::Registry,
+    t: crate::ext::TypeRef,
+) -> Result<()> {
+    for table in tables(&*txn)? {
+        if table.columns.iter().any(|c| c.ty == DataType::Ext(t)) {
+            crate::dml::rewrite_keys(txn, reg, &table)?;
+        }
+    }
+    put_stored_version(txn, t.name(), t.imp().encoding_version())
 }
 
 /// A column.

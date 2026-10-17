@@ -704,6 +704,12 @@ impl<'a> Parser<'a> {
     fn alter_type(&mut self) -> Result<Statement> {
         let type_name = self.ident()?;
         let verb = self.ident()?;
+        if verb == "upgrade" {
+            return Ok(Statement::AlterType {
+                type_name,
+                action: TypeAction::Upgrade,
+            });
+        }
         let unsupported = || {
             Error::feature(
                 "ALTER TYPE supports ADD, ALTER and DROP ORDERING, ADD and DROP OPERATOR and CAST",
@@ -828,9 +834,29 @@ impl<'a> Parser<'a> {
                 if_exists,
             });
         }
+        if self.eat_kw("alter") {
+            // ALTER [COLUMN] c [SET DATA] TYPE t [USING expr]
+            self.eat_kw("column");
+            let column = self.ident()?;
+            let _ = self.eat_kws(&["set", "data"]);
+            self.expect_kw("type")?;
+            let (ty, typmod) = self.data_type()?;
+            let using = if self.eat_kw("using") {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            return Ok(Statement::AlterColumnType {
+                table,
+                column,
+                ty,
+                typmod,
+                using,
+            });
+        }
         if !self.eat_kw("add") {
             return Err(Error::feature(
-                "only ALTER TABLE … ADD COLUMN, ADD CONSTRAINT and DROP CONSTRAINT are supported",
+                "ALTER TABLE supports ADD COLUMN, ADD CONSTRAINT, DROP CONSTRAINT and ALTER COLUMN … TYPE",
             ));
         }
         if ["constraint", "primary", "unique", "check", "foreign"]

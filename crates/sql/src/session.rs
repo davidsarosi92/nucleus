@@ -652,6 +652,16 @@ pub fn execute(
             catalog::update_table(txn, &t)?;
             Output::Command("CREATE INDEX".into())
         }
+        Statement::AlterColumnType {
+            table,
+            column,
+            ty,
+            typmod,
+            using,
+        } => {
+            alter_column_type(txn, reg, table, column, ty, typmod, using.as_ref())?;
+            Output::Command("ALTER TABLE".into())
+        }
         Statement::AlterType { type_name, action } => {
             alter_type(txn, reg, type_name, action)?;
             Output::Command("ALTER TYPE".into())
@@ -707,6 +717,7 @@ pub fn execute(
                 t.checks
                     .push((format!("{table}_{}_check", column.name), check.clone()));
             }
+            catalog::note_stored_types(txn, &t.columns)?;
             let w = dml::Writer::new(&*txn, reg, t.clone())?;
             let fill = {
                 let ctx = Ctx::new(&*txn, reg, &[]);
@@ -949,6 +960,7 @@ fn create_table(
     table.foreign_keys.clear();
     // Self-references are recorded on the new table, others on the
     // referenced tables (which exist).
+    catalog::note_stored_types(txn, &table.columns)?;
     let mut table = catalog::create_table(txn, table)?;
     for fk in built {
         crate::fk::attach(txn, &mut table, fk)?;
@@ -1161,6 +1173,14 @@ fn alter_type(
                 },
             )?;
         }
+        crate::ast::TypeAction::Upgrade => {
+            let DataType::Ext(t) = ty else {
+                return Err(Error::invalid_parameter(format!(
+                    "{tname} is built in: its encoding is the build's"
+                )));
+            };
+            catalog::upgrade_type(txn, reg, t)?;
+        }
         crate::ast::TypeAction::DropCast { to, if_exists } => {
             let tn = type_name_of(crate::binder::column_type(reg, to)?);
             if catalog::get_cast(&*txn, &tname, &tn)?.is_none() {
@@ -1175,6 +1195,117 @@ fn alter_type(
         }
     }
     Ok(())
+}
+
+/// `ALTER TABLE t ALTER COLUMN c TYPE ty [USING expr]`: every value
+/// converted — by `expr` (over the row), else by a taught assignment or
+/// implicit cast, else a built-in assignment cast — and every row, key and
+/// index entry rewritten, the table's checks and keys holding afterwards.
+/// One transaction: readers see the old column until it commits.
+#[allow(clippy::too_many_arguments)]
+fn alter_column_type(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    table: &str,
+    column: &str,
+    ty: &crate::ast::SqlType,
+    typmod: &crate::ast::TypeMod,
+    using: Option<&crate::ast::Expr>,
+) -> Result<()> {
+    let old = catalog::table(&*txn, table)?;
+    let c = old.column(column).ok_or_else(|| {
+        Error::undefined_column(format!(
+            "column \"{column}\" of relation \"{table}\" does not exist"
+        ))
+    })?;
+    let in_fk = old.foreign_keys.iter().any(|fk| fk.columns.contains(&c))
+        || old.referenced_by.iter().any(|(child, name)| {
+            catalog::table(&*txn, child).is_ok_and(|ct| {
+                ct.foreign_keys
+                    .iter()
+                    .any(|fk| &fk.name == name && fk.ref_columns.contains(&c))
+            })
+        });
+    if in_fk {
+        return Err(Error::feature(format!(
+            "changing the type of column \"{column}\", which a foreign key uses, is not supported yet"
+        )));
+    }
+    let from = old.columns[c].ty;
+    let to = crate::binder::column_type(reg, ty)?;
+    let conversion = {
+        let mut binder = Binder::new(&*txn, reg);
+        let scope = dml::table_scope(&old);
+        match using {
+            Some(e) => binder.expr(e, &scope)?.0,
+            None => {
+                let column_expr = crate::expr::Expr::Column(c);
+                let name = |t: DataType| crate::builtin::type_of(t).name().to_string();
+                let taught = catalog::get_cast(&*txn, &name(from), &name(to))?
+                    .filter(|k| k.context != catalog::CastContext::Explicit);
+                if let Some(k) = taught {
+                    let f = reg.function(&k.function).cloned().ok_or_else(|| {
+                        Error::undefined_function(format!("function {} does not exist", k.function))
+                    })?;
+                    crate::expr::Expr::Call(f, vec![column_expr])
+                } else if from == to {
+                    column_expr
+                } else if to == DataType::Text
+                    || (from.is_number() && to.is_number())
+                    || (from.is_datetime() && to.is_datetime())
+                {
+                    crate::expr::Expr::Cast(Box::new(column_expr), to)
+                } else {
+                    return Err(Error::type_mismatch(format!(
+                        "column \"{column}\" cannot be cast automatically to type {}; give USING",
+                        name(to)
+                    )));
+                }
+            }
+        }
+    };
+    let mut new = old.clone();
+    new.columns[c].ty = to;
+    new.columns[c].max_len = typmod.max_len;
+    new.columns[c].numeric = typmod.numeric;
+    if new.primary_key.contains(&c) {
+        require_keys(&new.columns, &[c], true, "a primary key")?;
+    }
+    for ix in &new.indexes {
+        if ix.columns.contains(&c) && !ix.mapped() {
+            require_keys(&new.columns, &[c], ix.unique, "an index")?;
+        }
+    }
+    // Convert every row (against the old definition), then check it
+    // against the new one.
+    let rows = {
+        let ctx = Ctx::new(&*txn, reg, &[]);
+        let mut rows = Vec::new();
+        for (key, mut row) in exec::matching_rows(&old, &crate::plan::Access::Full, None, &ctx)? {
+            let v = conversion.eval(&crate::expr::Env {
+                row: &row,
+                outer: None,
+                ctx: &ctx,
+            })?;
+            row[c] = dml::assign(v, &new, c)?;
+            rows.push((key, row));
+        }
+        rows
+    };
+    let w = dml::Writer::new(&*txn, reg, new.clone())?;
+    {
+        let ctx = Ctx::new(&*txn, reg, &[]);
+        for (_, row) in &rows {
+            w.validate(row, &ctx)?;
+        }
+        if new.columns[c].default.is_some() {
+            w.default_of(c, &ctx)?;
+        }
+    }
+    dml::replace_rows(txn, reg, &new, rows)?;
+    txn.delete(&catalog::stats_key(&new))?; // the old type's statistics
+    catalog::note_stored_types(txn, &new.columns)?;
+    catalog::update_table(txn, &new)
 }
 
 fn type_name_of(t: DataType) -> String {

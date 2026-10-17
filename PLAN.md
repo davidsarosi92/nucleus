@@ -264,7 +264,7 @@ are marked ✅.
 | | M14.6 | `ncsql`: nucleus's own SQL shell and client | ✅ DOCS §6.2 |
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
-| | M14.19 | **In progress:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ◐ audit closed; every list a registry; `modules/pg-compat` detachable (CI); types as modules, `UUID` everywhere, the law kit, orderings, operators and casts taught in SQL (T1–T5b; T6–T7 left) |
+| | M14.19 | **In progress:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ◐ audit closed; every list a registry; `modules/pg-compat` detachable (CI); types as modules, `UUID` everywhere, the law kit, orderings, operators and casts taught in SQL, encoding upgrades, `ALTER COLUMN … TYPE` (T1–T6; T7 left) |
 | | M14.26 | Core types: integers by width, `real`, `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
@@ -727,8 +727,11 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
     one, `COLLATE` (T5 ✅); operators and casts taught in SQL, and the
     parser reading any operator symbol (T5b ✅ — assignment and implicit
     casts applied unwritten come with T6; naming distances in SQL with
-    §M14.12); encoding
-    versions and `ALTER COLUMN … TYPE` (T6); the sample extension (T7).
+    §M14.12); encoding versions and `ALTER COLUMN … TYPE` (T6 ✅ — one
+    transaction under MVCC, readers keep the old column; chunked
+    conversion of very large tables in the background is §M14.11's;
+    `INSERT`/`UPDATE` applying taught assignment casts is still open); the
+    sample extension (T7).
 - **`UUID`, the first new type built this way** — a real type proving the
   path, not only a sample: 16 bytes; text input in the canonical form
   (and upper case, braces, no hyphens), output canonical lower case;
@@ -1893,3 +1896,6 @@ style) across a thousand seeds without failure.
 - **2026-10-17** — §M14.19 T5b: operators outside the grammar's own
   (PostgreSQL's lexing and precedence), a type's distance as its operator,
   modules' operators, operators and casts taught in SQL.
+- **2026-10-18** — §M14.19 T6: encoding versions of registered types
+  (upgraded as read, `ALTER TYPE … UPGRADE`, crash-tested) and `ALTER
+  TABLE … ALTER COLUMN … TYPE … [USING]`, checked against PostgreSQL 18.
