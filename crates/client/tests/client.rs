@@ -24,10 +24,7 @@ fn start(password: Option<&str>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let config = match password {
-        Some(pw) => nucleus_server::Config {
-            password: Some(pw.into()),
-            ..Default::default()
-        },
+        Some(pw) => nucleus_server::Config::password(nucleus_server::DEFAULT_USER, pw),
         // The defaults on both sides: user and password `nucleus`.
         None => nucleus_server::Config::default(),
     };

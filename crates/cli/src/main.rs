@@ -19,11 +19,13 @@ usage:
                                     SQL shell (also `ncsql`): a local database or a
                                     server; a script on stdin, or one command
   nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
+                     [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
                                     the server: the nucleus protocol (default
-                                    127.0.0.1:20035), and with --pg-compat also
-                                    PostgreSQL's (default 127.0.0.1:5432); clients
-                                    log in as nucleus / nucleus unless changed
+                                    127.0.0.1:20035), and with --pg-compat (the
+                                    front end `pg`) also PostgreSQL's (default
+                                    127.0.0.1:5432); clients log in as
+                                    nucleus / nucleus unless changed
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

@@ -297,7 +297,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
         }
     };
 
-    if config.password.is_some() {
+    if config.auth.wants_password() {
         out.write_all(&Msg::new(b'R').i32(3).finish())?; // cleartext password
         out.flush()?;
         let (tag, body) = read_message(&mut input)?;

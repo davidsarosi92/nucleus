@@ -169,11 +169,7 @@ fn sql_scripts_over_the_wire() {
 
 #[test]
 fn password_authentication() {
-    let addr = start(Config {
-        user: "test".into(),
-        password: Some("s3cret".into()),
-        ..Config::default()
-    });
+    let addr = start(Config::password("test", "s3cret"));
     let err = Client::connect(addr, Some("wrong"))
         .err()
         .expect("wrong password accepted");

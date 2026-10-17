@@ -861,6 +861,7 @@ implementation behind the same interface.
 
 ```
 nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
+                     [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
 ```
 
@@ -874,6 +875,17 @@ Passwords travel in clear text: keep servers on trusted networks (TLS is
 later work).  One thread per connection.  `--log-queries`
 (`Config::log_queries`) prints every statement a client sends, and every
 error, to stderr — to see what a tool asks for.
+
+**Front ends and authentication are registered** (principle 12): a
+front end is a `FrontEnd` (`name`, `default_addr`, `handle(stream, kv,
+config, id)`), the built-in ones `Ncp` and `Pg` in `FrontEnds::builtin()`;
+`serve_front_end(front, listener, kv, config)` runs any.  The server
+starts `ncp` and each `--front-end <name>` (`--pg-compat` is `--front-end
+pg`).  `Config { auth, log_queries }`: `auth` is an `Authenticator`
+(`describe`, `wants_password`, `accepts(user, password)`) — `Password`
+(one user; `Config::password`, the default `nucleus` / `nucleus`) or
+`Trust` (`Config::trust`, `--no-auth`); users, roles and the other
+methods are §M14.25.
 
 **PostgreSQL compatibility** (optional, D14): `--pg-compat` also listens
 for the PostgreSQL protocol (`nucleus_server::serve_pg`, default
@@ -1031,6 +1043,9 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.19 front ends and authentication registered:**
+  `nucleus_server::{FrontEnd, FrontEnds, Authenticator}`; the CLI starts
+  the front ends it is given (`--front-end`).
 - **2026-10-17 — §M14.19 aggregates and table functions registered:**
   `ext::Aggregate` / `Accumulator`, `ext::TableFunction`; the built-ins
   (`count` … `bool_or`, `generate_series`, `unnest`) register through
