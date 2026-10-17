@@ -665,6 +665,44 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
     `nucleus upgrade` (tied to D15).
   The wire tags and catalog type ids are assigned by the registry, not
   hard-coded, with the built-in ones fixed for compatibility.
+- **Type capabilities.**  A type is not one thing but a set of abilities,
+  and many are optional — a vector has distances but no meaningful order;
+  a JSON value has equality but no arithmetic.  Each ability is its own
+  interface that a type implements or not, and the engine *asks* before it
+  relies on one:
+
+  | Capability | What it enables | If the type lacks it |
+  |------------|-----------------|----------------------|
+  | text input / output, row encoding | literals, storage, the text wire format | required of every type |
+  | equality | `=`, `<>`, `IN`, `DISTINCT`, `GROUP BY`, set operations, `UNIQUE` | those are refused at bind / DDL time |
+  | hashing (consistent with equality) | hash joins and hash aggregation | the planner uses sorting or nested loops |
+  | total order | `<` …, `ORDER BY`, `MIN` / `MAX`, range predicates, merge joins, histograms | refused (`ORDER BY` a vector is an error, not an arbitrary order) |
+  | order-preserving key encoding | primary keys, B-tree indexes, index range scans | the type cannot be a key or B-tree-indexed |
+  | operators and functions | `+`, `||`, `->`, type-specific functions — each registered, typed | not available |
+  | distance / similarity | `ORDER BY a <-> b LIMIT k`, nearest-neighbour indexes | not available |
+  | casts | to and from other types, each marked implicit, assignment or explicit, with `unify` rules | only the casts declared |
+  | aggregation | `sum`, `avg` and type-specific aggregates | refused |
+  | partial update | changing part of a value in place (an array element, a JSON path) | the whole value is replaced |
+  | statistics | distinct counts, histograms, selectivity | the optimizer uses defaults |
+  | modifiers | `(n)`, `(p, s)`; which changes need no rewrite (`varchar(10)` → `(20)`) | none, or every change rewrites |
+  | encoding versions and upgrades | updating the type's stored form (see above) | the encoding is frozen |
+  | conversion for `ALTER COLUMN … TYPE` | changing a column to another type | only with an explicit `USING` |
+
+  The engine is taught through these declarations, never by special
+  cases: the binder, planner, executor, index layer, statistics, wire
+  protocol and drivers each consult the capability they need, and a
+  missing one gives a clear error naming it at bind or DDL time (not a
+  surprise at run time).  `nc_catalog.types` (and `nc_catalog.operators`,
+  `nc_catalog.casts`) list every type's capabilities, so people, tools and
+  AI models can see what a type supports.
+- **Laws, checked for every type.**  A capability comes with laws the
+  engine relies on, and a test kit runs them, property-based, on every
+  registered type — built-in or extension: equality is an equivalence;
+  hashing agrees with equality; the order is total and agrees with
+  equality; the key encoding's byte order is the type's order and decodes
+  back; text output parses back to an equal value; every encoding version
+  reads what it wrote, and upgrades preserve equality; casts round-trip
+  where declared lossless.  A type that breaks a law is not registered.
 - The front ends share one session layer, so a new protocol is a module
   over `Session` (as `ncp` and `--pg-compat` already are); the server
   starts the modules a configuration names.
@@ -678,7 +716,11 @@ built-in functions, types, catalog views, front ends and authentication
 are all registered through the public extension API; the sample extension
 adds a function, a type and a catalog view without touching the core; and
 a type's encoding is upgraded on a populated database (old and new values
-read side by side, crash-tested) and a column's type changed online.
+read side by side, crash-tested) and a column's type changed online.  The
+law kit runs on every built-in type, and a sample type with only some
+capabilities (equality and distance, no order — vector-like) is refused
+exactly where it should be (`ORDER BY`, primary key, B-tree index) and
+works everywhere else.
 
 ### §M14.9 — SQL analyzer ⬜
 
@@ -1048,3 +1090,7 @@ style) across a thousand seeds without failure.
   the principles).  §M14.19 is next: a principle audit, registries, types
   that can be added, modified and updated (versioned encodings, online
   column type changes), an extension API.
+- **2026-10-17** — §M14.19: type capabilities (equality, hashing, order,
+  key encoding, operators, distance, casts, aggregation, partial update,
+  statistics, modifiers, encoding versions, conversions), consulted by
+  every layer, listed in `nc_catalog`; laws checked for every type.
