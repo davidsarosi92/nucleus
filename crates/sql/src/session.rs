@@ -1069,8 +1069,138 @@ fn alter_type(
             }
             catalog::delete_ordering(txn, &tname, name)?;
         }
+        crate::ast::TypeAction::AddOperator {
+            symbol,
+            left,
+            right,
+            function,
+        } => {
+            let (l, r) = (
+                crate::binder::column_type(reg, left)?,
+                crate::binder::column_type(reg, right)?,
+            );
+            if l != ty && r != ty {
+                return Err(Error::invalid_parameter(format!(
+                    "an operator taught to {tname} takes a {tname}"
+                )));
+            }
+            let (ln, rn) = (type_name_of(l), type_name_of(r));
+            let taken = reg.operator(symbol, l, r).is_some()
+                || (l == r
+                    && crate::builtin::type_of(l)
+                        .distance()
+                        .is_some_and(|d| d.operator() == symbol))
+                || catalog::get_operator(&*txn, symbol, &ln, &rn)?.is_some();
+            if taken {
+                return Err(Error::duplicate_object(format!(
+                    "operator {symbol} ({ln}, {rn}) already exists"
+                )));
+            }
+            check_function(reg, function, &[l, r])?;
+            catalog::put_operator(
+                txn,
+                &catalog::TaughtOperator {
+                    symbol: symbol.clone(),
+                    left: ln,
+                    right: rn,
+                    function: function.clone(),
+                },
+            )?;
+        }
+        crate::ast::TypeAction::DropOperator {
+            symbol,
+            left,
+            right,
+            if_exists,
+        } => {
+            let (ln, rn) = (
+                type_name_of(crate::binder::column_type(reg, left)?),
+                type_name_of(crate::binder::column_type(reg, right)?),
+            );
+            if catalog::get_operator(&*txn, symbol, &ln, &rn)?.is_none() {
+                if *if_exists {
+                    return Ok(());
+                }
+                return Err(Error::undefined_function(format!(
+                    "operator {symbol} ({ln}, {rn}) was not taught"
+                )));
+            }
+            catalog::delete_operator(txn, symbol, &ln, &rn)?;
+        }
+        crate::ast::TypeAction::AddCast {
+            to,
+            function,
+            context,
+        } => {
+            let target = crate::binder::column_type(reg, to)?;
+            let tn = type_name_of(target);
+            if target == ty
+                || !(matches!(ty, DataType::Ext(_)) || matches!(target, DataType::Ext(_)))
+            {
+                return Err(Error::invalid_parameter(format!(
+                    "casts between built-in types are fixed; {tname} to {tn} cannot be taught"
+                )));
+            }
+            if catalog::get_cast(&*txn, &tname, &tn)?.is_some() {
+                return Err(Error::duplicate_object(format!(
+                    "cast from {tname} to {tn} already exists"
+                )));
+            }
+            check_function(reg, function, &[ty])?;
+            catalog::put_cast(
+                txn,
+                &catalog::TaughtCast {
+                    from: tname,
+                    to: tn,
+                    function: function.clone(),
+                    context: match context {
+                        2 => catalog::CastContext::Implicit,
+                        1 => catalog::CastContext::Assignment,
+                        _ => catalog::CastContext::Explicit,
+                    },
+                },
+            )?;
+        }
+        crate::ast::TypeAction::DropCast { to, if_exists } => {
+            let tn = type_name_of(crate::binder::column_type(reg, to)?);
+            if catalog::get_cast(&*txn, &tname, &tn)?.is_none() {
+                if *if_exists {
+                    return Ok(());
+                }
+                return Err(Error::undefined_object(format!(
+                    "cast from {tname} to {tn} was not taught"
+                )));
+            }
+            catalog::delete_cast(txn, &tname, &tn)?;
+        }
     }
     Ok(())
+}
+
+fn type_name_of(t: DataType) -> String {
+    crate::builtin::type_of(t).name().to_string()
+}
+
+/// Refuses a function the registry lacks, or that does not take
+/// arguments of these types.
+fn check_function(reg: &Registry, name: &str, args: &[DataType]) -> Result<()> {
+    let f = reg
+        .function(name)
+        .ok_or_else(|| Error::undefined_function(format!("function {name} does not exist")))?;
+    if !f.arity().contains(&args.len()) {
+        return Err(Error::undefined_function(format!(
+            "function {name} does not take {} arguments",
+            args.len()
+        )));
+    }
+    let info: Vec<crate::ext::ArgInfo> = args
+        .iter()
+        .map(|t| crate::ext::ArgInfo {
+            ty: Some(*t),
+            text_literal: false,
+        })
+        .collect();
+    f.resolve(&info).map(|_| ())
 }
 
 /// Refuses key columns whose types have no key encoding (and, for a

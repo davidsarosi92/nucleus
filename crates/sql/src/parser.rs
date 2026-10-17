@@ -704,10 +704,79 @@ impl<'a> Parser<'a> {
     fn alter_type(&mut self) -> Result<Statement> {
         let type_name = self.ident()?;
         let verb = self.ident()?;
+        let unsupported = || {
+            Error::feature(
+                "ALTER TYPE supports ADD, ALTER and DROP ORDERING, ADD and DROP OPERATOR and CAST",
+            )
+        };
+        if self.eat_kw("operator") {
+            let if_exists = verb == "drop" && self.eat_kws(&["if", "exists"]);
+            let symbol = match self.next() {
+                Some(Token::UserOp(s)) => s,
+                Some(Token::Op(o)) => {
+                    return Err(Error::invalid_parameter(format!(
+                        "{o} is the grammar's own operator; a type can be taught others (<->, @>, …)"
+                    )));
+                }
+                _ => return Err(self.error("expected an operator")),
+            };
+            self.expect_op("(")?;
+            let (left, _) = self.data_type()?;
+            self.expect_op(",")?;
+            let (right, _) = self.data_type()?;
+            self.expect_op(")")?;
+            let action = match verb.as_str() {
+                "add" => {
+                    if self.eat_kw("returns") {
+                        self.data_type()?;
+                    }
+                    self.expect_kw("as")?;
+                    TypeAction::AddOperator {
+                        symbol,
+                        left,
+                        right,
+                        function: self.ident()?,
+                    }
+                }
+                "drop" => TypeAction::DropOperator {
+                    symbol,
+                    left,
+                    right,
+                    if_exists,
+                },
+                _ => return Err(unsupported()),
+            };
+            return Ok(Statement::AlterType { type_name, action });
+        }
+        if self.eat_kw("cast") {
+            let if_exists = verb == "drop" && self.eat_kws(&["if", "exists"]);
+            self.expect_kw("to")?;
+            let (to, _) = self.data_type()?;
+            let action = match verb.as_str() {
+                "add" => {
+                    self.expect_kw("as")?;
+                    let function = self.ident()?;
+                    let context = if self.eat_kw("implicit") {
+                        2
+                    } else if self.eat_kw("assignment") {
+                        1
+                    } else {
+                        self.eat_kw("explicit");
+                        0
+                    };
+                    TypeAction::AddCast {
+                        to,
+                        function,
+                        context,
+                    }
+                }
+                "drop" => TypeAction::DropCast { to, if_exists },
+                _ => return Err(unsupported()),
+            };
+            return Ok(Statement::AlterType { type_name, action });
+        }
         if !self.eat_kw("ordering") {
-            return Err(Error::feature(
-                "ALTER TYPE supports ADD, ALTER and DROP ORDERING",
-            ));
+            return Err(unsupported());
         }
         let action = match verb.as_str() {
             "add" | "alter" => {
@@ -1601,6 +1670,8 @@ impl<'a> Parser<'a> {
                 let (prec, op) = binary_operator(op)?;
                 (prec, Infix::Binary(op))
             }
+            // Any other operator: PostgreSQL's precedence for them.
+            Token::UserOp(_) => (PREC_CONCAT, Infix::User),
             _ => return None,
         })
     }
@@ -1608,6 +1679,16 @@ impl<'a> Parser<'a> {
     fn apply_infix(&mut self, left: Expr, prec: u8, kind: Infix) -> Result<Expr> {
         let boxed = Box::new(left);
         Ok(match kind {
+            Infix::User => {
+                let Some(Token::UserOp(op)) = self.next() else {
+                    unreachable!("peeked")
+                };
+                Expr::Operator {
+                    op,
+                    left: boxed,
+                    right: Box::new(self.expr_prec(prec + 1)?),
+                }
+            }
             Infix::Binary(op) | Infix::Operator(op, _) => {
                 self.pos += match kind {
                     Infix::Operator(_, n) => n,
@@ -1774,6 +1855,8 @@ enum Infix {
     In(bool),
     Between(bool),
     Like(bool, bool),
+    /// A [`Token::UserOp`].
+    User,
 }
 
 const PREC_OR: u8 = 1;
@@ -1795,6 +1878,7 @@ fn show(t: &Token) -> String {
         Token::Number(n) => n.clone(),
         Token::Param(n) => format!("${n}"),
         Token::Op(o) => format!("\"{o}\""),
+        Token::UserOp(o) => format!("\"{o}\""),
     }
 }
 

@@ -142,7 +142,9 @@ fn contains_agg(r: &Registry, e: &ast::Expr) -> bool {
         | A::IsNull { expr, .. }
         | A::Cast { expr, .. }
         | A::Collate { expr, .. } => contains_agg(expr),
-        A::Binary { left, right, .. } => contains_agg(left) || contains_agg(right),
+        A::Binary { left, right, .. } | A::Operator { left, right, .. } => {
+            contains_agg(left) || contains_agg(right)
+        }
         A::Between {
             expr, low, high, ..
         } => contains_agg(expr) || contains_agg(low) || contains_agg(high),
@@ -1563,6 +1565,14 @@ impl<'a> Binder<'a> {
                     _ => self.binary(*op, l, lt, r, rt)?,
                 }
             }
+            A::Operator { op, left, right } => {
+                let (l, lt) = sub(left, self)?;
+                let (r, rt) = sub(right, self)?;
+                // An untyped side takes the other side's type.
+                let (l, lt) = self.coerce(rt, l, lt)?.1;
+                let (r, rt) = self.coerce(lt, r, rt)?.1;
+                self.operator(op, (l, lt), (r, rt))?
+            }
             A::Collate { expr, collation } => {
                 // The value itself; its comparisons and sorts use the
                 // ordering (above, and in ORDER BY).
@@ -1701,7 +1711,10 @@ impl<'a> Binder<'a> {
                     let arg = sub(expr, self)?;
                     return self.call(f, vec![arg]);
                 };
-                let (x, _) = sub(expr, self)?;
+                let (x, xt) = sub(expr, self)?;
+                if let Some(cast) = self.taught_cast(xt, *ty)? {
+                    return self.call(cast, vec![(x, xt)]);
+                }
                 if let Expr::Param(n) = x {
                     self.note_param(n, Some(*ty));
                 }
@@ -1781,6 +1794,68 @@ impl<'a> Binder<'a> {
                 )))
             }
         }
+    }
+
+    /// An operator outside the grammar's own: a type's distance, a
+    /// module's operator, or one taught in SQL — found by symbol and the
+    /// operands' types.
+    fn operator(&mut self, op: &str, l: Typed, r: Typed) -> Result<Typed> {
+        let name = |t: Option<DataType>| t.map_or("unknown", |t| crate::builtin::type_of(t).name());
+        if let (Some(a), Some(b)) = (l.1, r.1) {
+            if a == b
+                && crate::builtin::type_of(a)
+                    .distance()
+                    .is_some_and(|d| d.operator() == op)
+            {
+                let f = crate::ext::DistanceFn::of(a);
+                return Ok((Expr::Call(f, vec![l.0, r.0]), Some(DataType::Float)));
+            }
+            if let Some(f) = self.registry.operator(op, a, b).cloned() {
+                return self.call(f, vec![l, r]);
+            }
+            if let Some(o) = catalog::get_operator(self.txn, op, name(Some(a)), name(Some(b)))? {
+                let f = self
+                    .registry
+                    .function(&o.function)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Error::undefined_function(format!(
+                            "operator {op} calls function {}, which this session does not have",
+                            o.function
+                        ))
+                    })?;
+                return self.call(f, vec![l, r]);
+            }
+        }
+        Err(Error::undefined_function(format!(
+            "operator does not exist: {} {op} {}",
+            name(l.1),
+            name(r.1)
+        )))
+    }
+
+    /// The function of a cast taught from `from` to `to` (only between
+    /// types one of which is registered: the built-in casts are fixed).
+    fn taught_cast(&self, from: Option<DataType>, to: DataType) -> Result<Option<FnRef>> {
+        let Some(from) = from else { return Ok(None) };
+        if from == to || !(matches!(from, DataType::Ext(_)) || matches!(to, DataType::Ext(_))) {
+            return Ok(None);
+        }
+        let name = |t: DataType| crate::builtin::type_of(t).name();
+        let Some(c) = catalog::get_cast(self.txn, name(from), name(to))? else {
+            return Ok(None);
+        };
+        self.registry
+            .function(&c.function)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| {
+                Error::undefined_function(format!(
+                    "the cast to {} calls function {}, which this session does not have",
+                    name(to),
+                    c.function
+                ))
+            })
     }
 
     /// The orderings taught to the type called `type_name`.

@@ -442,6 +442,44 @@ pub enum TypeAction {
         /// `CASCADE`: drop what uses it too.
         cascade: bool,
     },
+    /// `ADD OPERATOR symbol (left, right) [RETURNS type] AS function`.
+    AddOperator {
+        /// The symbol (`<->`).
+        symbol: String,
+        /// The left operand's type.
+        left: SqlType,
+        /// The right operand's type.
+        right: SqlType,
+        /// The function it calls.
+        function: String,
+    },
+    /// `DROP OPERATOR [IF EXISTS] symbol (left, right)`.
+    DropOperator {
+        /// The symbol.
+        symbol: String,
+        /// The left operand's type.
+        left: SqlType,
+        /// The right operand's type.
+        right: SqlType,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
+    /// `ADD CAST TO type AS function [EXPLICIT | ASSIGNMENT | IMPLICIT]`.
+    AddCast {
+        /// The target type.
+        to: SqlType,
+        /// The function converting.
+        function: String,
+        /// `ASSIGNMENT` 1, `IMPLICIT` 2, else 0.
+        context: u8,
+    },
+    /// `DROP CAST [IF EXISTS] TO type`.
+    DropCast {
+        /// The target type.
+        to: SqlType,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
 }
 
 /// An `ORDER BY` item.
@@ -560,6 +598,16 @@ pub enum Expr {
         ty: SqlType,
         /// Its modifier: `VARCHAR(n)`, `NUMERIC(p, s)`.
         typmod: TypeMod,
+    },
+    /// `left op right` with an operator outside the grammar's own (`a <->
+    /// b`): a registered or taught one, found by symbol and types.
+    Operator {
+        /// The symbol.
+        op: String,
+        /// The left operand.
+        left: Box<Expr>,
+        /// The right operand.
+        right: Box<Expr>,
     },
     /// `expr COLLATE name`: compared and sorted in text ordering `name`.
     Collate {

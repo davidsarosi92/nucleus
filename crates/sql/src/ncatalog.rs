@@ -17,6 +17,8 @@
 //! | `nc_catalog.constraints` | primary key, unique, check, foreign key |
 //! | `nc_catalog.foreign_keys` | foreign key |
 //! | `nc_catalog.statistics` | analyzed column (`ANALYZE`) |
+//! | `nc_catalog.operators` | operator outside the grammar's own: a type's distance, a module's, or taught (`ALTER TYPE … ADD OPERATOR`) |
+//! | `nc_catalog.casts` | cast taught (`ALTER TYPE … ADD CAST`) |
 //! | `nc_catalog.orderings` | ordering taught to a type (`ALTER TYPE … ADD ORDERING`) |
 //! | `nc_catalog.types` | type (of the session's registry), with its abilities |
 
@@ -113,6 +115,25 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("nulls", I),
             ("distinct_values", I),
             ("histogram", TA),
+        ],
+    ),
+    (
+        "operators",
+        &[
+            ("symbol", T),
+            ("left_type", T),
+            ("right_type", T),
+            ("function", T),
+            ("source", T),
+        ],
+    ),
+    (
+        "casts",
+        &[
+            ("from_type", T),
+            ("to_type", T),
+            ("function", T),
+            ("context", T),
         ],
     ),
     (
@@ -335,6 +356,49 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         Value::Array(cs.bounds.iter().map(|b| text(b.render())).collect()),
                     ]);
                 }
+            }
+        }
+        "operators" => {
+            let name = |t: DataType| text(crate::builtin::type_of(t).name());
+            for (ty, _) in registry.types() {
+                if let Some(d) = crate::builtin::type_of(*ty).distance() {
+                    let f = crate::ext::DistanceFn::of(*ty);
+                    out.push(vec![
+                        text(d.operator()),
+                        name(*ty),
+                        name(*ty),
+                        text(f.name()),
+                        text("distance"),
+                    ]);
+                }
+            }
+            for (symbol, l, r, f) in registry.operators() {
+                out.push(vec![
+                    text(symbol),
+                    name(l),
+                    name(r),
+                    text(f.name()),
+                    text("registered"),
+                ]);
+            }
+            for o in catalog::operators(txn)? {
+                out.push(vec![
+                    text(o.symbol),
+                    text(o.left),
+                    text(o.right),
+                    text(o.function),
+                    text("taught"),
+                ]);
+            }
+        }
+        "casts" => {
+            for c in catalog::casts(txn)? {
+                out.push(vec![
+                    text(c.from),
+                    text(c.to),
+                    text(c.function),
+                    text(c.context.sql()),
+                ]);
             }
         }
         "orderings" => {

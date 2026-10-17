@@ -12,6 +12,8 @@
 //! | `00 03 <table id u32 BE>` | next hidden row id of a table without a primary key |
 //! | `00 04 <table id u32 BE>` | table statistics (§M13) |
 //! | `00 05 <type name> 00 <ordering name>` | an ordering taught to a type (`ALTER TYPE … ADD ORDERING`): its mapping |
+//! | `00 06 <symbol> 00 <left type> 00 <right type>` | an operator taught (`ALTER TYPE … ADD OPERATOR`): its function |
+//! | `00 07 <from type> 00 <to type>` | a cast taught (`ALTER TYPE … ADD CAST`): its function and context |
 //! | `01 <table id u32 BE> <index id u32 BE> <key>` | table and index entries |
 //!
 //! Index 0 of a table is its primary index: key = the primary key columns
@@ -37,6 +39,8 @@ const ROWID: &[u8] = &[0x00, 0x03];
 const STATS: &[u8] = &[0x00, 0x04];
 const ORDERINGS: &[u8] = &[0x00, 0x05];
 const ORDERING_VERSION: u8 = 1;
+const OPERATORS: &[u8] = &[0x00, 0x06];
+const CASTS: &[u8] = &[0x00, 0x07];
 const DATA: u8 = 0x01;
 /// Version 2 added `NUMERIC(p, s)` modifiers, version 3 foreign keys,
 /// version 4 registered types (tag `7F` and the type's name), version 5
@@ -728,6 +732,188 @@ pub fn put_ordering(txn: &mut dyn KvTxn, o: &TaughtOrdering) -> Result<()> {
 /// Forgets a taught ordering.
 pub fn delete_ordering(txn: &mut dyn KvTxn, type_name: &str, name: &str) -> Result<()> {
     txn.delete(&ordering_key(type_name, name))?;
+    Ok(())
+}
+
+/// The parts of a key `prefix name 00 name …`.
+fn key_parts(k: &[u8], prefix: &[u8]) -> Result<Vec<String>> {
+    k[prefix.len()..]
+        .split(|&b| b == 0)
+        .map(|p| String::from_utf8(p.to_vec()).map_err(|_| Error::internal("bad name")))
+        .collect()
+}
+
+fn names_key(prefix: &[u8], names: &[&str]) -> Vec<u8> {
+    let mut k = prefix.to_vec();
+    for (i, n) in names.iter().enumerate() {
+        if i > 0 {
+            k.push(0);
+        }
+        k.extend_from_slice(n.as_bytes());
+    }
+    k
+}
+
+fn scan_prefix(txn: &dyn KvTxn, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let end = prefix_end(prefix).expect("a catalog prefix");
+    let mut out = Vec::new();
+    for e in txn.scan(Bound::Included(prefix), Bound::Excluded(&end))? {
+        out.push(e?);
+    }
+    Ok(out)
+}
+
+/// An operator taught: `ALTER TYPE t ADD OPERATOR symbol (left, right) AS
+/// function`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaughtOperator {
+    /// The symbol (`<->`).
+    pub symbol: String,
+    /// The left operand's type name.
+    pub left: String,
+    /// The right operand's type name.
+    pub right: String,
+    /// The function it calls with the two operands.
+    pub function: String,
+}
+
+/// The operator `symbol` taught for these operand type names.
+pub fn get_operator(
+    txn: &dyn KvTxn,
+    symbol: &str,
+    left: &str,
+    right: &str,
+) -> Result<Option<TaughtOperator>> {
+    txn.get(&names_key(OPERATORS, &[symbol, left, right]))?
+        .map(|v| {
+            Reader::new(&v).str().map(|function| TaughtOperator {
+                symbol: symbol.into(),
+                left: left.into(),
+                right: right.into(),
+                function,
+            })
+        })
+        .transpose()
+}
+
+/// Every taught operator.
+pub fn operators(txn: &dyn KvTxn) -> Result<Vec<TaughtOperator>> {
+    scan_prefix(txn, OPERATORS)?
+        .into_iter()
+        .map(|(k, v)| {
+            let p = key_parts(&k, OPERATORS)?;
+            let [symbol, left, right] = <[String; 3]>::try_from(p)
+                .map_err(|_| Error::internal("malformed operator key"))?;
+            Ok(TaughtOperator {
+                symbol,
+                left,
+                right,
+                function: Reader::new(&v).str()?,
+            })
+        })
+        .collect()
+}
+
+/// Stores a taught operator.
+pub fn put_operator(txn: &mut dyn KvTxn, o: &TaughtOperator) -> Result<()> {
+    let mut w = Writer::default();
+    w.str(&o.function);
+    txn.put(&names_key(OPERATORS, &[&o.symbol, &o.left, &o.right]), &w.0)?;
+    Ok(())
+}
+
+/// Forgets a taught operator.
+pub fn delete_operator(txn: &mut dyn KvTxn, symbol: &str, left: &str, right: &str) -> Result<()> {
+    txn.delete(&names_key(OPERATORS, &[symbol, left, right]))?;
+    Ok(())
+}
+
+/// Where a taught cast applies on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CastContext {
+    /// Only written: `CAST(x AS t)`, `x::t`.
+    Explicit,
+    /// Also when a value is stored in a column (`INSERT`, `UPDATE`).
+    Assignment,
+    /// Also wherever the types meet.
+    Implicit,
+}
+
+impl CastContext {
+    /// Its SQL keyword.
+    pub fn sql(self) -> &'static str {
+        match self {
+            CastContext::Explicit => "explicit",
+            CastContext::Assignment => "assignment",
+            CastContext::Implicit => "implicit",
+        }
+    }
+}
+
+/// A cast taught: `ALTER TYPE t ADD CAST TO target AS function`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaughtCast {
+    /// The source type's name.
+    pub from: String,
+    /// The target type's name.
+    pub to: String,
+    /// The function converting.
+    pub function: String,
+    /// Where it applies on its own.
+    pub context: CastContext,
+}
+
+fn decode_cast(from: String, to: String, v: &[u8]) -> Result<TaughtCast> {
+    let mut r = Reader::new(v);
+    let function = r.str()?;
+    let context = match r.u8()? {
+        0 => CastContext::Explicit,
+        1 => CastContext::Assignment,
+        _ => CastContext::Implicit,
+    };
+    Ok(TaughtCast {
+        from,
+        to,
+        function,
+        context,
+    })
+}
+
+/// The cast taught from `from` to `to` (type names).
+pub fn get_cast(txn: &dyn KvTxn, from: &str, to: &str) -> Result<Option<TaughtCast>> {
+    txn.get(&names_key(CASTS, &[from, to]))?
+        .map(|v| decode_cast(from.into(), to.into(), &v))
+        .transpose()
+}
+
+/// Every taught cast.
+pub fn casts(txn: &dyn KvTxn) -> Result<Vec<TaughtCast>> {
+    scan_prefix(txn, CASTS)?
+        .into_iter()
+        .map(|(k, v)| {
+            let p = key_parts(&k, CASTS)?;
+            let [from, to] =
+                <[String; 2]>::try_from(p).map_err(|_| Error::internal("malformed cast key"))?;
+            decode_cast(from, to, &v)
+        })
+        .collect()
+}
+
+/// Stores a taught cast.
+pub fn put_cast(txn: &mut dyn KvTxn, c: &TaughtCast) -> Result<()> {
+    let mut w = Writer::default();
+    w.str(&c.function).u8(match c.context {
+        CastContext::Explicit => 0,
+        CastContext::Assignment => 1,
+        CastContext::Implicit => 2,
+    });
+    txn.put(&names_key(CASTS, &[&c.from, &c.to]), &w.0)?;
+    Ok(())
+}
+
+/// Forgets a taught cast.
+pub fn delete_cast(txn: &mut dyn KvTxn, from: &str, to: &str) -> Result<()> {
+    txn.delete(&names_key(CASTS, &[from, to]))?;
     Ok(())
 }
 

@@ -175,6 +175,56 @@ impl ScalarFunction for GeoHash {
     }
 }
 
+/// `geo_text(p)`: degrees with hemispheres (`47.5N 19.04E`).
+struct GeoText;
+
+impl ScalarFunction for GeoText {
+    fn name(&self) -> &str {
+        "geo_text"
+    }
+    fn arity(&self) -> RangeInclusive<usize> {
+        1..=1
+    }
+    fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
+        Ok(Signature::new(
+            vec![Arg::Untyped(DataType::Ext(geopoint()))],
+            Returns::Type(Some(DataType::Text)),
+        ))
+    }
+    fn volatility(&self) -> Volatility {
+        Volatility::Immutable
+    }
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        let (lat, lon) = coords(&args[0]);
+        let ns = if lat < 0.0 { 'S' } else { 'N' };
+        let ew = if lon < 0.0 { 'W' } else { 'E' };
+        Ok(Value::Text(format!("{}{ns} {}{ew}", lat.abs(), lon.abs())))
+    }
+}
+
+/// `a <^> b`: how far north of `b` `a` is, in degrees (the module's own
+/// operator).
+struct NorthOf;
+
+impl ScalarFunction for NorthOf {
+    fn name(&self) -> &str {
+        "north_of"
+    }
+    fn arity(&self) -> RangeInclusive<usize> {
+        2..=2
+    }
+    fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
+        let t = DataType::Ext(geopoint());
+        Ok(Signature::new(
+            vec![Arg::Untyped(t), Arg::Untyped(t)],
+            Returns::Type(Some(DataType::Float)),
+        ))
+    }
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        Ok(Value::Float(coords(&args[0]).0 - coords(&args[1]).0))
+    }
+}
+
 struct Geo;
 
 impl Module for Geo {
@@ -184,6 +234,9 @@ impl Module for Geo {
     fn register(&self, r: &mut Registry) -> Result<()> {
         r.add_type(Arc::new(GeoPoint))?;
         r.add_function(&["geohash"], Arc::new(GeoHash))?;
+        r.add_function(&["geo_text"], Arc::new(GeoText))?;
+        let t = DataType::Ext(geopoint());
+        r.add_operator("<^>", t, t, Arc::new(NorthOf))?;
         r.add_function(&["geo_distance"], Arc::new(GeoDistance))
     }
 }
@@ -502,4 +555,107 @@ fn taught_an_ordering_by_a_mapping() {
     );
     assert!(rows(&mut s, "SELECT name FROM nc_catalog.orderings").is_empty());
     consistent(&kv);
+}
+
+/// Operators outside the grammar's own: a type's distance (`<->`, from its
+/// ability), a module's (`<^>`), and one taught in SQL; and a cast taught.
+#[test]
+fn operators_and_casts() {
+    let p = Arc::new(SimPlatform::new(1));
+    let mut s = Session::with_registry(open(&p), registry());
+    setup(&mut s);
+    // The distance, as its operator: nearest first.
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT id FROM shops WHERE at IS NOT NULL ORDER BY at <-> '(47.4925,19.0513)', id LIMIT 2"
+        ),
+        [["2"], ["1"]]
+    );
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT round((at <-> '(47.4925,19.0513)')::numeric, 2) FROM shops WHERE id = 1"
+        ),
+        [["1.03"]]
+    );
+    // The module's operator.
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT round((at <^> '(47,19)')::numeric, 4) FROM shops WHERE id = 1"
+        ),
+        [["0.4979"]]
+    );
+    // An operator nobody brought.
+    assert_eq!(error(&mut s, "SELECT at <%> at FROM shops").code, "42883");
+    // Taught in SQL, then forgotten.
+    s.execute(
+        "ALTER TYPE geopoint ADD OPERATOR <=> (geopoint, geopoint) RETURNS float8 AS geo_distance",
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&mut s, "SELECT at <=> at FROM shops WHERE id = 1"),
+        [["0"]]
+    );
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT symbol, left_type, function, source FROM nc_catalog.operators ORDER BY 1"
+        ),
+        [
+            ["<->", "geopoint", "<->(geopoint)", "distance"],
+            ["<=>", "geopoint", "geo_distance", "taught"],
+            ["<^>", "geopoint", "north_of", "registered"],
+        ]
+    );
+    assert_eq!(
+        error(
+            &mut s,
+            "ALTER TYPE geopoint ADD OPERATOR + (geopoint, geopoint) AS geo_distance"
+        )
+        .code,
+        "22023"
+    );
+    assert_eq!(
+        error(
+            &mut s,
+            "ALTER TYPE geopoint ADD OPERATOR <-> (geopoint, geopoint) AS geo_distance"
+        )
+        .code,
+        "42710"
+    );
+    s.execute("ALTER TYPE geopoint DROP OPERATOR <=> (geopoint, geopoint)")
+        .unwrap();
+    assert_eq!(error(&mut s, "SELECT at <=> at FROM shops").code, "42883");
+    // A cast taught: geopoint to text through the module's function.
+    assert_eq!(
+        rows(&mut s, "SELECT at::text FROM shops WHERE id = 2"),
+        [["(47.4925,19.0513)"]]
+    );
+    s.execute("ALTER TYPE geopoint ADD CAST TO text AS geo_text ASSIGNMENT")
+        .unwrap();
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT at::text, CAST(at AS text) FROM shops WHERE id = 2"
+        ),
+        [["47.4925N 19.0513E", "47.4925N 19.0513E"]]
+    );
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT from_type, to_type, function, context FROM nc_catalog.casts"
+        ),
+        [["geopoint", "text", "geo_text", "assignment"]]
+    );
+    assert_eq!(
+        error(&mut s, "ALTER TYPE bigint ADD CAST TO text AS geo_text").code,
+        "22023"
+    );
+    s.execute("ALTER TYPE geopoint DROP CAST TO text").unwrap();
+    assert_eq!(
+        rows(&mut s, "SELECT at::text FROM shops WHERE id = 2"),
+        [["(47.4925,19.0513)"]]
+    );
 }

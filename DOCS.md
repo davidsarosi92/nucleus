@@ -650,6 +650,8 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 03 <table id>` | next hidden row id (tables without a primary key) |
 | `00 04 <table id>` | statistics (§8.8) |
 | `00 05 <type> 00 <ordering>` | an ordering taught to a type: its mapping (SQL over `value`) |
+| `00 06 <symbol> 00 <left> 00 <right>` | an operator taught: its function |
+| `00 07 <from> 00 <to>` | a cast taught: its function and context |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 
@@ -849,6 +851,8 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.foreign_keys` | `table_id`, `table_name`, `name`, `columns`, `referenced_table`, `referenced_columns`, `on_delete`, `on_update` |
 | `nc_catalog.statistics` | `table_id`, `table_name`, `column_name`, `rows`, `nulls`, `distinct_values`, `histogram` |
 | `nc_catalog.orderings` | `type`, `name`, `mapping`, `used_by` (the indexes in it) |
+| `nc_catalog.operators` | `symbol`, `left_type`, `right_type`, `function`, `source` (`distance`: a type's ability; `registered`: a module's; `taught`) |
+| `nc_catalog.casts` | `from_type`, `to_type`, `function`, `context` |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
 
 **PostgreSQL compatibility: the `pg-compat` module** (`modules/pg-compat`,
@@ -897,6 +901,26 @@ text ADD ORDERING ci BY lower(value)`); the value itself is unchanged.
 Orderings live in the catalog (key `00 05`), so teaching is transactional
 DDL; indexes record them per column (table record version 5).
 `CREATE INDEX` without a name makes one up (`table_columns_idx`).
+
+**Operators outside the grammar's own.**  The lexer reads operators as
+PostgreSQL does — the longest run of `+-*/<>=~!@#%^&|`?`, not into a
+comment, a run of more than one not ending in `+` or `-` unless it holds
+one of `~!@#%^&|`?` — so `a=-1` is `=` and `-`, `a<->b` one operator.
+Those the grammar does not know (`<->`, `@>`) all parse at one precedence,
+PostgreSQL's for "any other operator" (that of `||`), and the binder finds
+them by symbol and operand types: a type's distance (its `Distance`
+ability's operator: `ORDER BY at <-> '(47.5,19.04)'`), a module's
+(`Registry::add_operator`), or one taught: `ALTER TYPE t ADD OPERATOR
+symbol (left, right) [RETURNS type] AS function` / `DROP OPERATOR [IF
+EXISTS] symbol (left, right)` (the grammar's own operators cannot be
+taught: `22023`).  **Casts taught:** `ALTER TYPE t ADD CAST TO target AS
+function [EXPLICIT | ASSIGNMENT | IMPLICIT]` / `DROP CAST [IF EXISTS] TO
+target`, between types one of which is registered (the built-in casts are
+fixed); `CAST(x AS target)` and `x::target` then call the function.  The
+context is recorded; applying assignment and implicit casts unwritten
+comes with `ALTER COLUMN … TYPE` (§M14.19 T6).  Naming a type's distances
+in SQL (`ADD DISTANCE`) comes with the nearest-neighbour indexes of
+§M14.12; today a type's distance is its ability's.
 `crates/testkit/slt/21_orderings.slt` and `tests/types.rs` (`geopoint`
 taught `by_geohash`) test it.
 
@@ -1191,6 +1215,12 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.19 operators and casts (T5b):** PostgreSQL's
+  operator lexing; operators outside the grammar's own at one precedence,
+  resolved by symbol and types — a type's distance (`<->`), a module's
+  (`Registry::add_operator`), or taught (`ALTER TYPE … ADD / DROP
+  OPERATOR`); casts taught (`… ADD / DROP CAST TO`);
+  `nc_catalog.operators`, `nc_catalog.casts`.
 - **2026-10-17 — §M14.19 teaching orderings (T5, orderings):** `ALTER
   TYPE … ADD / ALTER / DROP ORDERING … BY mapping`, `ORDER BY … USING`,
   `COLLATE` as a text ordering, indexes in an ordering (rebuilt when it is

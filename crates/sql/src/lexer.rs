@@ -18,6 +18,9 @@ pub enum Token {
     /// Punctuation or an operator: `( ) [ ] , ; . * + - / % = <> != < <= >
     /// >= || :: ~ ~* !~ !~*`.
     Op(&'static str),
+    /// Any other operator (`<->`, `@>`): one a module or `ALTER TYPE …
+    /// ADD OPERATOR` brings; the grammar has one place for them.
+    UserOp(String),
 }
 
 impl Token {
@@ -26,6 +29,9 @@ impl Token {
         matches!(self, Token::Word(w) if w == kw)
     }
 }
+
+/// The characters operators are made of (PostgreSQL's).
+const OP_CHARS: &[u8] = b"+-*/<>=~!@#%^&|`?";
 
 /// Longest first, so `<=` is not read as `<` `=`.
 const OPS: &[&str] = &[
@@ -177,8 +183,29 @@ pub fn tokenize(sql: &str) -> Result<Vec<(Token, usize)>> {
                 i += 1;
             }
             out.push((Token::Word(sql[start..i].to_lowercase()), start));
+        } else if OP_CHARS.contains(&c) {
+            // PostgreSQL's rule: the longest run of operator characters —
+            // not into a comment — and a run of more than one does not end
+            // in + or - unless it holds one of ~ ! @ # % ^ & | ` ?.
+            let mut end = i;
+            while end < b.len() && OP_CHARS.contains(&b[end]) {
+                if end > i && (sql[end..].starts_with("--") || sql[end..].starts_with("/*")) {
+                    break;
+                }
+                end += 1;
+            }
+            let special = |s: &str| s.bytes().any(|x| b"~!@#%^&|`?".contains(&x));
+            while end - i > 1 && matches!(b[end - 1], b'+' | b'-') && !special(&sql[i..end]) {
+                end -= 1;
+            }
+            let run = &sql[i..end];
+            match OPS.iter().find(|op| **op == run) {
+                Some(op) => out.push((Token::Op(if *op == "!=" { "<>" } else { op }), i)),
+                None => out.push((Token::UserOp(run.to_string()), i)),
+            }
+            i = end;
         } else if let Some(op) = OPS.iter().find(|op| sql[i..].starts_with(**op)) {
-            out.push((Token::Op(if *op == "!=" { "<>" } else { op }), i));
+            out.push((Token::Op(op), i));
             i += op.len();
         } else {
             let ch = sql[i..].chars().next().unwrap_or('?');
@@ -233,6 +260,39 @@ mod tests {
             ]
         );
         assert!(tokenize("'open").is_err());
-        assert!(tokenize("a ? b").is_err());
+        assert!(tokenize("a { b").is_err());
+    }
+}
+
+#[cfg(test)]
+mod operator_tests {
+    use super::*;
+
+    fn ops(sql: &str) -> Vec<String> {
+        tokenize(sql)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(t, _)| match t {
+                Token::Op(o) => Some(o.to_string()),
+                Token::UserOp(o) => Some(format!("user {o}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn operators_as_postgresql_reads_them() {
+        assert_eq!(ops("a=-1"), ["=", "-"]);
+        assert_eq!(ops("a<>-1"), ["<>", "-"]);
+        assert_eq!(ops("a*-1"), ["*", "-"]);
+        assert_eq!(ops("a<-1"), ["<", "-"]);
+        assert_eq!(ops("a!=b"), ["<>"]);
+        assert_eq!(ops("a<->b"), ["user <->"]);
+        assert_eq!(ops("a@>b"), ["user @>"]);
+        assert_eq!(ops("a@-b"), ["user @-"]);
+        assert_eq!(ops("a<=>b"), ["user <=>"]);
+        assert_eq!(ops("a !~* b"), ["!~*"]);
+        assert_eq!(ops("a--comment"), Vec::<String>::new());
+        assert_eq!(ops("a+/*c*/b"), ["+"]);
     }
 }

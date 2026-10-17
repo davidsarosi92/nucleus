@@ -445,6 +445,8 @@ pub struct Registry {
     /// Every type, in registration order, with the module that registered
     /// it.
     type_list: Vec<(DataType, String)>,
+    /// Operators outside the grammar's own, by symbol and operand types.
+    operators: HashMap<(String, DataType, DataType), FnRef>,
     /// The module whose `register` is running.
     registering: String,
 }
@@ -649,6 +651,45 @@ impl Registry {
             self.types.insert(n.clone(), ty);
         }
         self.type_list.push((ty, self.registering.clone()));
+    }
+
+    /// Registers operator `symbol` for operands of types `left` and
+    /// `right`, computed by `f` (called with the two operands).  The
+    /// grammar's own operators (`+`, `=`, `||`, …) are not taken.
+    pub fn add_operator(
+        &mut self,
+        symbol: &str,
+        left: DataType,
+        right: DataType,
+        f: Arc<dyn ScalarFunction>,
+    ) -> Result<()> {
+        if !is_user_operator(symbol) {
+            return Err(Error::invalid_parameter(format!(
+                "{symbol} is not an operator a module can bring (the grammar has its own)"
+            )));
+        }
+        let key = (symbol.to_string(), left, right);
+        if self.operators.contains_key(&key) {
+            return Err(duplicate("operator", symbol));
+        }
+        self.operators.insert(key, FnRef(f));
+        Ok(())
+    }
+
+    /// The operator `symbol` for these operand types.
+    pub fn operator(&self, symbol: &str, left: DataType, right: DataType) -> Option<&FnRef> {
+        self.operators.get(&(symbol.to_string(), left, right))
+    }
+
+    /// Every registered operator: symbol, operand types, function.
+    pub fn operators(&self) -> Vec<(&str, DataType, DataType, &FnRef)> {
+        let mut v: Vec<_> = self
+            .operators
+            .iter()
+            .map(|((s, l, r), f)| (s.as_str(), *l, *r, f))
+            .collect();
+        v.sort_by(|a, b| (a.0, a.1.name(), a.2.name()).cmp(&(b.0, b.1.name(), b.2.name())));
+        v
     }
 
     /// Makes `name` another name for type `ty` (pg-compat's `int4`, `oid`).
@@ -894,6 +935,57 @@ impl std::hash::Hash for TypeRef {
 impl fmt::Debug for TypeRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0.name)
+    }
+}
+
+/// Whether `symbol` is an operator outside the grammar's own: one the
+/// lexer reads as a [`crate::lexer::Token::UserOp`].
+pub fn is_user_operator(symbol: &str) -> bool {
+    matches!(
+        crate::lexer::tokenize(symbol).as_deref(),
+        Ok([(crate::lexer::Token::UserOp(s), 0)]) if s == symbol
+    )
+}
+
+/// A type's [`Distance`], as the function its operator calls.
+pub struct DistanceFn {
+    ty: DataType,
+    name: String,
+}
+
+impl DistanceFn {
+    /// The distance of `ty` (which must have one).
+    pub fn of(ty: DataType) -> FnRef {
+        let t = crate::builtin::type_of(ty);
+        let op = t.distance().map_or("", |d| d.operator()).to_string();
+        FnRef::new(Arc::new(DistanceFn {
+            ty,
+            name: format!("{op}({})", t.name()),
+        }))
+    }
+}
+
+impl ScalarFunction for DistanceFn {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn arity(&self) -> RangeInclusive<usize> {
+        2..=2
+    }
+    fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
+        Ok(Signature::new(
+            vec![Arg::Untyped(self.ty); 2],
+            Returns::Type(Some(DataType::Float)),
+        ))
+    }
+    fn volatility(&self) -> Volatility {
+        Volatility::Immutable
+    }
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        let d = crate::builtin::type_of(self.ty)
+            .distance()
+            .ok_or_else(|| Error::internal("a distance without one"))?;
+        Ok(Value::Float(d.distance(&args[0], &args[1])?))
     }
 }
 
