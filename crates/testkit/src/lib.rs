@@ -3,9 +3,12 @@
 //! module's tests need no files outside its folder).
 //!
 //! - [`slt`]: the sqllogictest runner, over any [`slt::Connection`].
+//! - [`laws`]: the type law kit — the laws every type's abilities must
+//!   keep, checked property-based.
 //! - [`core_scripts`]: the SQL layer's scripts, which every front end and
 //!   edition runs too.
 
+pub mod laws;
 pub mod slt;
 
 /// The SQL layer's sqllogictest scripts: (file name, text), in name order.

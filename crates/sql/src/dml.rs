@@ -539,6 +539,38 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
     Ok(())
 }
 
+/// Every key of a table — its rows' and its indexes' — written again in
+/// the current key encoding (an upgrade from an older one; the decoder
+/// reads both).
+pub fn rewrite_keys(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
+    let prefix = table.data_prefix();
+    let end = nucleus_kv::prefix_end(&prefix).expect("table prefix");
+    let primary = table.index_prefix(0);
+    let primary_end = nucleus_kv::prefix_end(&primary).expect("index prefix");
+    let mut rows = Vec::new();
+    for e in txn.scan(
+        std::ops::Bound::Included(&primary),
+        std::ops::Bound::Excluded(&primary_end),
+    )? {
+        let (k, v) = e?;
+        rows.push((k, crate::encoding::decode_row(&v, table.columns.len())?));
+    }
+    catalog::delete_range(txn, &prefix, Some(&end))?;
+    for (old_key, row) in rows {
+        let key = if table.primary_key.is_empty() {
+            old_key // a hidden row id: an integer, encoded as before
+        } else {
+            row_key_of(table, &row, None)
+        };
+        txn.put(&key, &crate::encoding::encode_row(&row))?;
+        let pk = pk_suffix(table, &key);
+        for i in 0..table.indexes.len() {
+            txn.put(&index_entry(table, i, &row, &pk).0, &pk)?;
+        }
+    }
+    Ok(())
+}
+
 /// Every row of a table rewritten (after `ADD COLUMN … DEFAULT`).
 pub fn rewrite_rows(
     txn: &mut dyn KvTxn,

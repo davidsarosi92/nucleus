@@ -15,7 +15,7 @@
 //! | date | `06`, then `days ^ i32::MIN` as 4 bytes big-endian |
 //! | timestamp, timestamptz | `07` / `08`, then `µs ^ i64::MIN` as 8 bytes big-endian |
 //! | interval | `09`, then its span (months as 30 days) in µs as `i128 ^ i128::MIN`, 16 bytes big-endian |
-//! | array | `0A`, then `01` and the encoding of each element, then `00` |
+//! | array | `0A`, then per element `01` and its encoding — or `02` for a `NULL` element, which sorts after the others as in comparisons — then `00` (key encoding version 2; version 1 wrote a `NULL` element as `01 00`, which still decodes) |
 //! | registered type | `0B`, its stable id (`u32` big-endian, [`crate::ext::type_id_of`]), then its own key encoding — or, for a type without one, its canonical bytes escaped as text's |
 //!
 //! Every encoding is self-delimiting, so a key can be split back into its
@@ -110,13 +110,17 @@ pub fn encode_key_value(out: &mut Vec<u8>, v: &Value) {
             out.extend_from_slice(&((i.span() ^ i128::MIN) as u128).to_be_bytes());
         }
         Value::Array(items) => {
-            // Each element after a 01, then 00: element order, then the
-            // shorter first.  (A NULL element sorts first here, unlike in
-            // comparisons; keys only need a consistent order.)
+            // Each element after a 01, a NULL element as 02, then 00:
+            // element order (a NULL element after the others, as in
+            // comparisons), then the shorter first.
             out.push(0x0A);
             for item in items {
-                out.push(0x01);
-                encode_key_value(out, item);
+                if item.is_null() {
+                    out.push(0x02);
+                } else {
+                    out.push(0x01);
+                    encode_key_value(out, item);
+                }
             }
             out.push(0x00);
         }
@@ -247,6 +251,10 @@ pub fn decode_key_value(b: &[u8]) -> Result<(Value, usize)> {
                         let (v, used) = decode_key_value(&b[at + 1..])?;
                         items.push(v);
                         at += 1 + used;
+                    }
+                    0x02 => {
+                        items.push(Value::Null);
+                        at += 1;
                     }
                     _ => return Err(bad_key()),
                 }

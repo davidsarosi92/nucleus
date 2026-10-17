@@ -114,6 +114,8 @@ impl Module for Builtin {
         r.add_table_function(Arc::new(GenerateSeries))?;
         for (ty, names, _) in TYPES {
             r.add_builtin_type(names, *ty);
+            crate::ext::lawful(type_of(*ty))?;
+            crate::ext::lawful(type_of(ty.array_of().expect("arrays")))?;
         }
         crate::uuid::register(r)?;
         r.add_table_function(Arc::new(Unnest))?;
@@ -753,7 +755,7 @@ const TYPES: &[(DataType, &[&str], &str)] = &[
 /// are the engine's own code (the hot paths call it directly).
 struct BuiltinType {
     ty: DataType,
-    names: &'static [&'static str],
+    names: Vec<&'static str>,
     category: &'static str,
 }
 
@@ -824,29 +826,98 @@ impl Type for BuiltinType {
     fn key_encoding(&self) -> Option<&dyn KeyEncoding> {
         Some(&Native)
     }
+    fn examples(&self) -> Vec<Value> {
+        examples(self.ty)
+    }
 }
 
-/// The [`Type`] behind any type: a built-in one's descriptor (arrays of
-/// built-ins share their abilities), or a registered type's own.
+/// Edge cases of a built-in type.
+fn examples(ty: DataType) -> Vec<Value> {
+    use crate::datetime::Interval;
+    use crate::decimal::Decimal;
+    match ty {
+        DataType::Bool => vec![Value::Bool(false), Value::Bool(true)],
+        DataType::Int => [0, 1, -1, i64::MIN, i64::MAX].map(Value::Int).to_vec(),
+        DataType::Float => [
+            0.0,
+            -0.0,
+            1.5,
+            -2.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e300,
+        ]
+        .map(Value::Float)
+        .to_vec(),
+        DataType::Numeric => [
+            (0, 0),
+            (150, 2),
+            (15, 1),
+            (-1, 0),
+            (i128::from(i64::MAX), 3),
+        ]
+        .iter()
+        .map(|&(m, s)| Value::Numeric(Decimal::new(m, s).expect("in range")))
+        .collect(),
+        DataType::Text => ["", "a", "a\u{0}b", "é", "{a,\"b\"}", "NULL"]
+            .map(|s| Value::Text(s.to_string()))
+            .to_vec(),
+        DataType::Date => [0, 1, -1, -2_451_000, 100_000_000]
+            .map(Value::Date)
+            .to_vec(),
+        DataType::Timestamp => [0, 1, -1, i64::MAX / 4].map(Value::Timestamp).to_vec(),
+        DataType::TimestampTz => [0, 1, -1, i64::MAX / 4].map(Value::TimestampTz).to_vec(),
+        DataType::Interval => [(0, 0, 0), (1, 0, 0), (0, 30, 0), (-1, 2, -3_000_000)]
+            .iter()
+            .map(|&(months, days, micros)| {
+                Value::Interval(Interval {
+                    months,
+                    days,
+                    micros,
+                })
+            })
+            .collect(),
+        DataType::Array(e) => {
+            let mut out = vec![Value::Array(Vec::new()), Value::Array(vec![Value::Null])];
+            for v in examples(*e).into_iter().take(3) {
+                out.push(Value::Array(vec![v.clone()]));
+                out.push(Value::Array(vec![v.clone(), Value::Null]));
+                out.push(Value::Array(vec![Value::Null, v]));
+            }
+            out
+        }
+        DataType::Ext(_) => Vec::new(),
+    }
+}
+
+/// The [`Type`] behind any type: a built-in one's descriptor (and its
+/// array's), or a registered type's own.
 pub fn type_of(ty: DataType) -> &'static dyn Type {
     static ALL: OnceLock<Vec<BuiltinType>> = OnceLock::new();
-    static ARRAY: BuiltinType = BuiltinType {
-        ty: DataType::Array(&DataType::Text),
-        names: &["array"],
-        category: "array",
-    };
     if let DataType::Ext(t) = ty {
         return t.imp();
     }
     let all = ALL.get_or_init(|| {
-        TYPES
+        let mut all: Vec<BuiltinType> = TYPES
             .iter()
             .map(|(ty, names, category)| BuiltinType {
                 ty: *ty,
-                names,
+                names: names.to_vec(),
                 category,
             })
-            .collect()
+            .collect();
+        for (ty, _, _) in TYPES {
+            let array = ty.array_of().expect("built-in types have arrays");
+            all.push(BuiltinType {
+                ty: array,
+                names: vec![array.name()],
+                category: "array",
+            });
+        }
+        all
     });
-    all.iter().find(|b| b.ty == ty).map_or(&ARRAY, |b| b)
+    all.iter()
+        .find(|b| b.ty == ty)
+        .expect("every built-in type has a descriptor")
 }

@@ -86,6 +86,14 @@ impl Type for GeoPoint {
     fn distance(&self) -> Option<&dyn Distance> {
         Some(&Haversine)
     }
+    fn examples(&self) -> Vec<Value> {
+        vec![
+            point(0.0, 0.0),
+            point(-0.0, 180.0),
+            point(90.0, -180.0),
+            point(47.5, 19.04),
+        ]
+    }
 }
 
 /// `geo_distance(a, b)` in kilometres (the operator `<->` comes when
@@ -320,4 +328,16 @@ fn a_type_this_process_lacks_still_has_a_name() {
     assert_eq!(Value::ext(t, vec![0xab, 0x01]).render(), "\\xab01");
     // The same name again is the same stand-in.
     assert_eq!(TypeRef::named_or_missing("never_registered_anywhere"), t);
+}
+
+#[test]
+fn geopoint_keeps_the_laws() {
+    let _ = registry();
+    let mut generate = |g: &mut nucleus_testkit::laws::Gen| {
+        let lat = (g.below(18001) as f64 - 9000.0) / 100.0;
+        let lon = (g.below(36001) as f64 - 18000.0) / 100.0;
+        point(if g.one_in(8) { 0.0 } else { lat }, lon)
+    };
+    let problems = nucleus_testkit::laws::check(DataType::Ext(geopoint()), &mut generate, 2000);
+    assert!(problems.is_empty(), "{problems:#?}");
 }

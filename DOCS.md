@@ -615,8 +615,13 @@ Key encoding (order-preserving, self-delimiting): `00` NULL; `01` bool;
 terminated `00 01`; `05` numeric (sign class, decimal exponent, digits;
 equal values of different scale share a key); `06` date; `07`/`08`
 timestamps; `09` interval (its span); `0A` arrays (each element after
-`01`, then `00`); `0B` a registered type (its stable id, then its own
-key encoding).  Row encoding: version `01`, column count, tagged values
+`01`, a `NULL` element as `02` — after the others, as comparisons have
+it — then `00`); `0B` a registered type (its stable id, then its own key
+encoding).  Key encoding version 2 (the format record, §8.2): version 1
+wrote a `NULL` array element as `01 00`, before the others — the law kit
+caught the disagreement — and the first write to a version-1 database
+rewrites the keys of every table with an array in a key
+(`dml::rewrite_keys`; the decoder reads both).  Row encoding: version `01`, column count, tagged values
 (missing trailing columns read as NULL, so `ADD COLUMN` needs no rewrite
 unless it has a default); a registered type's value is tag `11`, its id,
 its encoding version and its canonical bytes.  A registered type's id is
@@ -639,7 +644,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 
 | Key | Value |
 |-----|-------|
-| `00 00` | the format record: keyspace layout and key encoding versions (`u16` each, both 1) |
+| `00 00` | the format record: keyspace layout (1) and key encoding (2) versions, `u16` each |
 | `00 01 <table name>` | table definition (columns, primary key, indexes, checks) |
 | `00 02 <sequence>` | counter (`table_id`) |
 | `00 03 <table id>` | next hidden row id (tables without a primary key) |
@@ -902,7 +907,9 @@ What a module adds to the SQL layer (principle 12), versioned
   not: `equality()` (`Equality`), `hashing()` (`Hashing`), `ordering()`
   (`TotalOrder`), `key_encoding()` (`KeyEncoding`: order-preserving,
   self-delimiting), `distance()` (`Distance`: an operator and a
-  distance); `encoding_version()`.  A registered type's values are
+  distance); `encoding_version()`; `examples()` (on which registration
+  checks the laws: a type that breaks one is not registered).  A
+  registered type's values are
   `Value::Ext(TypeRef, bytes)` — `Value::ext(t, bytes)`, `v.ext_bytes()`
   — whose bytes are canonical: equality and hashing are on them
   (`CanonicalBytes` implements both), so they agree by construction; its
@@ -929,6 +936,19 @@ What a module adds to the SQL layer (principle 12), versioned
   written `name`, `schema.name`, `name 'literal'` or `x::name`, and
   `x::name` where `name` is no type but a function `__name` exists calls
   it (pg-compat's `::regclass`).
+
+**Laws** (`nucleus_sql::laws`, run property-based by the test kit's
+`nucleus_testkit::laws`): for each ability a type has — equality is an
+equivalence; hashing agrees with equality; the order is total and agrees
+with equality; the key encoding's byte order is the type's order, it
+decodes back and is self-delimiting — and always: text output parses back
+to an equal value, the row encoding reads back what it wrote, and the
+engine's own comparisons and hashing (`Value`'s) agree with the type's.
+`Registry::add_type` checks them on the type's examples;
+`laws::check(ty, generator, cases)` on generated values (`laws::Gen`, a
+seeded generator; `laws::generator(ty)` for the built-in types, their
+arrays and `uuid`).  `crates/sql/tests/laws.rs` runs the kit on every
+built-in type and array, and shows a broken type caught and refused.
 
 `tests/extension.rs` is a module from outside the crate adding a
 function, an aggregate, a table function and a view, used through SQL;
@@ -1144,6 +1164,11 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.19 the law kit (T4):** `nucleus_sql::laws` and
+  `nucleus_testkit::laws`; registration checks a type's examples.  It
+  caught arrays' key encoding putting a `NULL` element first (comparisons
+  put it last): key encoding version 2, and version-1 databases are
+  upgraded on their first write.
 - **2026-10-17 — §M14.19 `uuid` everywhere (T3):** `ncp` version 2 (tag
   11: registered types by name and binary form; version 1 still served,
   with them as text); all six drivers on version 2 with native uuids

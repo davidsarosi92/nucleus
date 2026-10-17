@@ -133,6 +133,18 @@ impl Type for Uuid {
     fn key_encoding(&self) -> Option<&dyn KeyEncoding> {
         Some(&Raw)
     }
+    fn examples(&self) -> Vec<Value> {
+        let mut max = [0xffu8; 16];
+        max[0] = 0x7f;
+        [
+            [0u8; 16],
+            [0xff; 16],
+            max,
+            parse("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11").expect("valid"),
+        ]
+        .map(value)
+        .to_vec()
+    }
 }
 
 // ------------------------------------------------------------- functions

@@ -614,8 +614,9 @@ impl Registry {
         if let Some(n) = names.iter().find(|n| self.types.contains_key(*n)) {
             return Err(duplicate("type", n));
         }
-        let ty = DataType::Ext(intern(t)?);
-        self.add_type_as(&names, ty);
+        let r = intern(t)?;
+        lawful(r.imp())?;
+        self.add_type_as(&names, DataType::Ext(r));
         Ok(())
     }
 
@@ -725,6 +726,13 @@ pub trait Type: std::any::Any + Send + Sync {
     /// The version of its stored form (rows and keys record it).
     fn encoding_version(&self) -> u16 {
         1
+    }
+
+    /// Some of its values — edge cases first — on which registration
+    /// checks the laws ([`crate::laws`]): a type that breaks one is not
+    /// registered.  (The test kit checks many more, generated.)
+    fn examples(&self) -> Vec<Value> {
+        Vec::new()
     }
 }
 
@@ -869,6 +877,19 @@ impl fmt::Debug for TypeRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0.name)
     }
+}
+
+/// Refuses a type whose examples break a law.
+pub(crate) fn lawful(t: &dyn Type) -> Result<()> {
+    let problems = crate::laws::check_values(t, &t.examples());
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(Error::invalid_parameter(format!(
+        "type {} breaks the laws its abilities promise: {}",
+        t.name(),
+        problems.join("; ")
+    )))
 }
 
 /// Every interned type, by name and by id.

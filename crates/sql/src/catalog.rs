@@ -42,18 +42,25 @@ const TABLE_VERSION: u8 = 4;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
-/// The version of the key encoding ([`crate::encoding`]).
-pub const KEY_ENCODING_VERSION: u16 = 1;
+/// The version of the key encoding ([`crate::encoding`]).  Version 2: a
+/// `NULL` array element sorts after the others (version 1 put it first,
+/// which the law kit caught).
+pub const KEY_ENCODING_VERSION: u16 = 2;
 
 /// Checks the format record; on a database the SQL layer has not used yet,
 /// writes it (unless `txn` is read-only: there is nothing to misread yet).
-/// A database written in a newer format is refused rather than misread.
-/// Returns whether the record is in place.
+/// A database written in a newer format is refused rather than misread;
+/// one in an older key encoding is upgraded — the keys of every table with
+/// an array in a key are rewritten — by the first transaction that may
+/// write.  Returns whether the record is in place and current.
 pub fn check_format(txn: &mut dyn KvTxn) -> Result<bool> {
-    let Some(b) = txn.get(FORMAT)? else {
+    let current = || {
         let mut w = Writer::default();
         w.u16(KEYSPACE_VERSION).u16(KEY_ENCODING_VERSION);
-        return match txn.put(FORMAT, &w.0) {
+        w.0
+    };
+    let Some(b) = txn.get(FORMAT)? else {
+        return match txn.put(FORMAT, &current()) {
             Ok(()) => Ok(true),
             Err(nucleus_kv::Error::ReadOnly) => Ok(false),
             Err(e) => Err(e.into()),
@@ -67,6 +74,24 @@ pub fn check_format(txn: &mut dyn KvTxn) -> Result<bool> {
              {keys}) than this build reads (keyspace {KEYSPACE_VERSION}, key encoding \
              {KEY_ENCODING_VERSION}); upgrade nucleus"
         )));
+    }
+    if keys < KEY_ENCODING_VERSION {
+        if let Err(e) = txn.put(FORMAT, &current()) {
+            return match e {
+                nucleus_kv::Error::ReadOnly => Ok(false),
+                e => Err(e.into()),
+            };
+        }
+        for t in tables(&*txn)? {
+            let array_key = t
+                .primary_key
+                .iter()
+                .chain(t.indexes.iter().flat_map(|i| &i.columns))
+                .any(|&c| t.columns[c].ty.element().is_some());
+            if array_key {
+                crate::dml::rewrite_keys(txn, &t)?;
+            }
+        }
     }
     Ok(true)
 }
