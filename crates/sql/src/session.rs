@@ -408,7 +408,7 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
             let ro: &dyn KvTxn = &*txn;
             let mut binder = Binder::new(ro);
             let bound = binder.query(q)?;
-            let plan = optimize(bound.plan);
+            let plan = optimize(bound.plan, ro);
             let ctx = Ctx::new(ro, params);
             let rows = exec::collect(&plan, &ctx, None)?;
             Output::Rows {
@@ -419,7 +419,7 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
         Statement::Explain(inner) => {
             let ro: &dyn KvTxn = &*txn;
             let plan = match &**inner {
-                Statement::Query(q) => optimize(Binder::new(ro).query(q)?.plan),
+                Statement::Query(q) => optimize(Binder::new(ro).query(q)?.plan, ro),
                 Statement::Update { table, filter, .. }
                 | Statement::Delete { table, filter, .. } => {
                     dml::explain_scan(ro, table, filter.as_ref())?

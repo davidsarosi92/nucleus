@@ -160,6 +160,11 @@ impl<'a> Binder<'a> {
         }
     }
 
+    /// The transaction the binder reads the catalog through.
+    pub fn txn(&self) -> &'a dyn KvTxn {
+        self.txn
+    }
+
     fn table(&self, name: &str) -> Result<Table> {
         catalog::table(self.txn, name)
     }
@@ -862,7 +867,11 @@ impl<'a> Binder<'a> {
         self.outer.pop();
         let b = r?;
         let correlated = b.plan.outer_depth() > 0;
-        Ok((crate::optimizer::optimize(b.plan), b.scope, correlated))
+        Ok((
+            crate::optimizer::optimize(b.plan, self.txn),
+            b.scope,
+            correlated,
+        ))
     }
 
     fn subquery_expr(&mut self, e: &ast::Expr, scope: &Scope) -> Result<Option<Typed>> {
@@ -1179,9 +1188,16 @@ impl<'a> Binder<'a> {
         rt: Option<DataType>,
     ) -> Result<Typed> {
         use BinaryOp::*;
-        let (l, (l2, lt)) = self.coerce(rt, l, lt)?;
-        let _ = l2;
-        let (r, (_, rt)) = self.coerce(lt, r, rt)?;
+        // An untyped side takes the other side's type — for comparisons and
+        // arithmetic.  `||` yields text whatever its operands are, so
+        // `'n' || 3` keeps 'n' as text (as PostgreSQL does).
+        let (l, lt, r, rt) = if op == Concat {
+            (l, lt, r, rt)
+        } else {
+            let (l, (_, lt)) = self.coerce(rt, l, lt)?;
+            let (r, (_, rt)) = self.coerce(lt, r, rt)?;
+            (l, lt, r, rt)
+        };
         let ty = match op {
             And | Or => {
                 expect(lt, DataType::Bool, op.symbol())?;

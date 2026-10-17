@@ -250,7 +250,7 @@ pub fn insert(
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro);
         let bound = binder.query(source)?;
-        let plan = crate::optimizer::optimize(bound.plan);
+        let plan = crate::optimizer::optimize(bound.plan, ro);
         let width = plan.width();
         // DEFAULT VALUES: zero columns.
         if width > targets.len() {
@@ -315,7 +315,11 @@ pub fn bind_filter(
     let pred = binder.condition(f, &table_scope(table))?;
     let mut parts = Vec::new();
     conjuncts(pred, &mut parts);
-    Ok((choose_access(table, &parts), conjunction(parts)))
+    let stats = crate::stats::Stats::new(binder.txn());
+    Ok((
+        choose_access(table, &parts, Some(&stats)),
+        conjunction(parts),
+    ))
 }
 
 /// `UPDATE`.

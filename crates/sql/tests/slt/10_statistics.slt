@@ -1,0 +1,140 @@
+# ANALYZE and the cost-based choices it enables (PLAN.md §M13).
+
+statement ok
+CREATE TABLE digits (d INT PRIMARY KEY)
+
+statement ok
+INSERT INTO digits VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+
+statement ok
+CREATE TABLE t (id INT PRIMARY KEY, k INT, v INT)
+
+statement ok
+INSERT INTO t SELECT a.d * 100 + b.d * 10 + c.d, (a.d * 100 + b.d * 10 + c.d) % 2, a.d * 100 + b.d * 10 + c.d FROM digits a, digits b, digits c
+
+statement ok
+CREATE INDEX t_k ON t (k)
+
+statement ok
+CREATE INDEX t_v ON t (v)
+
+# Without statistics, any usable index is used.
+query T
+EXPLAIN SELECT count(*) FROM t WHERE k = 1
+----
+Project: #0
+  Aggregate: count(*)
+    Index Scan using t_k on t (k = 1) filter: (#1 = 1)
+
+statement ok
+ANALYZE
+
+# k has two values: the index would fetch half the table row by row.
+query T
+EXPLAIN SELECT count(*) FROM t WHERE k = 1
+----
+Project: #0
+  Aggregate: count(*)
+    Seq Scan on t filter: (#1 = 1) (rows=500)
+
+query T
+EXPLAIN SELECT count(*) FROM t WHERE v = 5
+----
+Project: #0
+  Aggregate: count(*)
+    Index Scan using t_v on t (v = 5) filter: (#2 = 5) (rows=1)
+
+# Ranges are estimated from the histogram.
+query T
+EXPLAIN SELECT count(*) FROM t WHERE v > 990
+----
+Project: #0
+  Aggregate: count(*)
+    Index Scan using t_v on t (v > 990) filter: (#2 > 990) (rows=9)
+
+query T
+EXPLAIN SELECT count(*) FROM t WHERE v > 10
+----
+Project: #0
+  Aggregate: count(*)
+    Seq Scan on t filter: (#2 > 10) (rows=990)
+
+query III
+SELECT (SELECT count(*) FROM t WHERE k = 1), (SELECT count(*) FROM t WHERE v > 990), (SELECT count(*) FROM t WHERE v > 10)
+----
+500 9 989
+
+# Join order: the selective small table first, the big one last.
+statement ok
+CREATE TABLE small (id INT PRIMARY KEY, name TEXT)
+
+statement ok
+INSERT INTO small SELECT d, 'n' || d FROM digits
+
+statement ok
+CREATE TABLE mid (id INT PRIMARY KEY, small_id INT)
+
+statement ok
+INSERT INTO mid SELECT a.d * 10 + b.d, b.d FROM digits a, digits b
+
+statement ok
+CREATE TABLE big (id INT PRIMARY KEY, mid_id INT)
+
+statement ok
+INSERT INTO big SELECT id, id % 100 FROM t
+
+statement ok
+ANALYZE
+
+query T
+EXPLAIN SELECT count(*) FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE small.name = 'n3'
+----
+Project: #0
+  Aggregate: count(*)
+    Project: #0, #1, #2, #3, #4, #5
+      Hash Join (#1 = #0) on (#1 = #2)
+        Seq Scan on big (rows=1000)
+        Hash Join (#1 = #0) on (#1 = #2)
+          Seq Scan on mid (rows=100)
+          Seq Scan on small filter: (#1 = 'n3') (rows=1)
+
+query I
+SELECT count(*) FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE small.name = 'n3'
+----
+100
+
+query TI
+SELECT small.name, big.id FROM big, small, mid WHERE big.mid_id = mid.id AND mid.small_id = small.id AND big.id = 7
+----
+n7 7
+
+query TI rowsort
+SELECT small.name, count(*) FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE big.id < 30 GROUP BY small.name
+----
+n0 3
+n1 3
+n2 3
+n3 3
+n4 3
+n5 3
+n6 3
+n7 3
+n8 3
+n9 3
+
+# Statistics never change answers: the same query on a fresh copy without them.
+statement ok
+CREATE TABLE big2 (id INT PRIMARY KEY, mid_id INT)
+
+statement ok
+INSERT INTO big2 SELECT * FROM big
+
+query I
+SELECT count(*) FROM big2 JOIN mid ON big2.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE small.name = 'n3'
+----
+100
+
+query I
+SELECT count(*) FROM t WHERE k = 1 AND v BETWEEN 100 AND 199
+----
+50
