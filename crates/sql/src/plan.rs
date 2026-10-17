@@ -7,6 +7,7 @@ use std::ops::Bound;
 use crate::ast::SetOp;
 use crate::catalog::Table;
 use crate::expr::{Expr, SubKind};
+use crate::ext::ViewRef;
 
 /// A plan node.
 // Scan carries its table definition inline; plans are few and short-lived,
@@ -125,11 +126,11 @@ pub enum Plan {
         /// `WITH ORDINALITY`: a 1-based row number after the other columns.
         ordinality: bool,
     },
-    /// A system catalog table (`pg_catalog`, `information_schema`), its
-    /// rows made from the catalog when scanned.
-    Virtual {
-        /// Its definition (columns).
-        table: Table,
+    /// A registered catalog view (`nc_catalog.tables`, …), its rows made
+    /// when scanned.
+    View {
+        /// The view.
+        view: ViewRef,
     },
     /// The rows of the previous round of a recursive CTE.
     WorkTable {
@@ -311,7 +312,7 @@ impl Plan {
             Plan::Cte { plan, .. } => plan.width(),
             Plan::Recursive { base, .. } => base.width(),
             Plan::WorkTable { width, .. } | Plan::Function { width, .. } => *width,
-            Plan::Virtual { table } => table.columns.len(),
+            Plan::View { view } => view.columns().len(),
         }
     }
 
@@ -461,7 +462,7 @@ impl Plan {
                 TableFunc::Unnest => format!("Function Scan on unnest({})", show(&args[0])),
                 TableFunc::Scalar => format!("Result: {}", show(&args[0])),
             },
-            Plan::Virtual { table } => format!("Catalog Scan on {}", table.name),
+            Plan::View { view } => format!("Catalog Scan on {}.{}", view.schema(), view.name()),
             Plan::SetOp { op, all, .. } => {
                 let name = match op {
                     SetOp::Union => "Union",
@@ -510,7 +511,7 @@ impl Plan {
             | Plan::Values { .. }
             | Plan::WorkTable { .. }
             | Plan::Function { .. }
-            | Plan::Virtual { .. } => vec![],
+            | Plan::View { .. } => vec![],
             Plan::Join { left, right, .. } | Plan::SetOp { left, right, .. } => vec![left, right],
             Plan::Recursive { base, step, .. } => vec![base, step],
             Plan::Cte { plan, .. } => vec![plan],
@@ -581,7 +582,7 @@ impl Plan {
             | Plan::Cte { .. }
             | Plan::Recursive { .. }
             | Plan::WorkTable { .. }
-            | Plan::Virtual { .. } => {}
+            | Plan::View { .. } => {}
         }
     }
 
@@ -647,7 +648,7 @@ pub fn show(e: &Expr) -> String {
         ),
         Expr::Case { .. } => "CASE …".into(),
         Expr::Cast(e, t) => format!("{}::{t}", show(e)),
-        Expr::Func(f, args) => format!(
+        Expr::Call(f, args) => format!(
             "{}({})",
             f.name(),
             args.iter().map(show).collect::<Vec<_>>().join(", ")

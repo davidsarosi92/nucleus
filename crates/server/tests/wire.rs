@@ -131,14 +131,19 @@ impl Connection for Client {
     }
 }
 
+/// The SQL layer's scripts and pg-compat's (the PostgreSQL front end's
+/// sessions have it).
 #[test]
 fn sql_scripts_over_the_wire() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sql/tests/slt");
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
+    let mut files: Vec<_> = ["../sql/tests/slt", "../sql/tests/slt-pg"]
+        .iter()
+        .flat_map(|d| {
+            std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join(d))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+        })
         .collect();
-    files.sort();
+    files.sort_by_key(|f| f.file_name().unwrap().to_owned());
     let mut failures = Vec::new();
     let mut ran = 0;
     for f in files

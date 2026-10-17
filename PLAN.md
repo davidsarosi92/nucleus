@@ -264,7 +264,7 @@ are marked ✅.
 | | M14.6 | `ncsql`: nucleus's own SQL shell and client | ✅ DOCS §6.2 |
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
-| | M14.19 | **In progress:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ◐ audit done, fixes 3–6 shipped |
+| | M14.19 | **In progress:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ◐ audit done; fixes 3–6, function and view registries, `pg-compat` as a module |
 | | M14.26 | Core types: integers by width, `real`, `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
@@ -670,8 +670,8 @@ KV space) and 9 (d-os code only in `integrations/d-os`) hold.  The gaps:
 | 5 | the storage and transaction layers are crash-tested, the SQL layer is not: no test crashes the simulation in the middle of DDL and DML run through `Session` | a SQL crash test: random DDL and DML on the simulation, a crash at a random point, reopen — the catalog, every index and the rows agree with each other and with what was reported committed | ✅ |
 | 6 | the page format, WAL batches, rows, catalog records and `ncp` carry versions; the **key encoding and the SQL keyspace layout do not**, so a change to either could not be told from data written before it | a SQL-layer format record at key `00 00` (keyspace layout and key encoding versions), written when a database is first used by the SQL layer and checked on every session: an older version is read (or upgraded), a newer one refused with a clear error; per-type encoding versions come with the `Type` trait below | ✅ |
 | 10 | memory is bounded in the core (buffer pool), not in the executor: sorts, hash joins, hash aggregation and materialised CTEs hold their whole input | scheduled: spilling in §M14.11 | — |
-| 11 | PostgreSQL compatibility is not optional inside the engine: `pg_catalog`, `information_schema` and the `pg_*` functions (`pg_typeof`, `pg_get_constraintdef`, `has_table_privilege`, …) are bound in every session, `ncp` ones included; the parser and binder special-case `pg_catalog`; and `nc_catalog` is looked up *through* `pgcatalog::lookup` | `nc_catalog` stands on its own; the PostgreSQL views and functions move into `modules/pg-compat` (below) and are registered per session — on in sessions of the PostgreSQL front end, off on `ncp` | ⬜ |
-| 12 | hard-coded lists: the value types (`DataType`, and a `match` on it in encoding, casts, output, the binder, statistics, `ncp` and `pg`), the scalar functions (`Func`, about seventy, and `Func::lookup`), the aggregates (`AggFunc`), the table functions (`TableFunc`), the catalog views (`ncatalog::definitions`, the `pgcatalog` table), the front ends (the CLI calls `serve` / `serve_pg`), authentication (`Config::accepts`, one user) | the registries and the extension API, below | ⬜ |
+| 11 | PostgreSQL compatibility is not optional inside the engine: `pg_catalog`, `information_schema` and the `pg_*` functions (`pg_typeof`, `pg_get_constraintdef`, `has_table_privilege`, …) are bound in every session, `ncp` ones included; the parser and binder special-case `pg_catalog`; and `nc_catalog` is looked up *through* `pgcatalog::lookup` | `nc_catalog` stands on its own; the PostgreSQL views and functions are the `pg-compat` module, registered per session — on in sessions of the PostgreSQL front end, off on `ncp` (done); it moves into `modules/pg-compat` (below); the parser's `pg_catalog.` type prefix and `::regclass` casts go with the type registry | ◐ |
+| 12 | hard-coded lists: the value types (`DataType`, and a `match` on it in encoding, casts, output, the binder, statistics, `ncp` and `pg`), the scalar functions (`Func`, about seventy, and `Func::lookup`), the aggregates (`AggFunc`), the table functions (`TableFunc`), the catalog views (`ncatalog::definitions`, the `pgcatalog` table), the front ends (the CLI calls `serve` / `serve_pg`), authentication (`Config::accepts`, one user) | the registries and the extension API, below — scalar functions, schemas and catalog views done (`nucleus_sql::ext`) | ◐ |
 
 Principle 12 applied to what exists.  Today these are hard-coded lists or
 `match`es that a new entry has to edit: scalar functions (`Func`) and
@@ -1830,3 +1830,7 @@ style) across a thousand seeds without failure.
   consistency check), 6 (the SQL layer's format record); 10 and the
   network part of 4 scheduled (§M14.11, §M19); 11 and 12 are the rest of
   this milestone.
+- **2026-10-17** — §M14.19: the extension API (`nucleus_sql::ext`) with
+  registries for scalar functions, schemas and catalog views; the
+  built-ins register through it; `pg-compat` is a module, on only in the
+  PostgreSQL front end's sessions.

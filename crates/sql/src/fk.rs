@@ -28,6 +28,7 @@ use crate::encoding::encode_key;
 use crate::error::{Error, Result};
 use crate::exec;
 use crate::expr::{Ctx, Expr};
+use crate::ext::Registry;
 use crate::optimizer::choose_access;
 use crate::types::{Row, Value};
 
@@ -133,6 +134,7 @@ pub fn check_children<'r>(
 /// The rows of `child` whose `fk.columns` equal `vals` (a validated scan).
 fn referencing_rows(
     txn: &dyn KvTxn,
+    reg: &Registry,
     child: &Table,
     fk: &ForeignKey,
     vals: &[Value],
@@ -151,7 +153,7 @@ fn referencing_rows(
         .collect();
     let access = choose_access(child, &preds, None);
     let filter = conjunction(preds);
-    let mut ctx = Ctx::new(txn, &[]);
+    let mut ctx = Ctx::new(txn, reg, &[]);
     ctx.validated = true;
     exec::matching_rows(child, &access, filter.as_ref(), &ctx)
 }
@@ -160,6 +162,7 @@ fn referencing_rows(
 /// runs the referential actions of every foreign key referencing it.
 pub fn parent_changed(
     txn: &mut dyn KvTxn,
+    reg: &Registry,
     parent: &Table,
     changes: &[(Row, Option<Row>)],
 ) -> Result<()> {
@@ -190,7 +193,7 @@ pub fn parent_changed(
             // The child's current definition (an earlier action may have
             // been on the same table).
             let child = catalog::table(&*txn, child_name)?;
-            let rows = referencing_rows(&*txn, &child, &fk, &vals)?;
+            let rows = referencing_rows(&*txn, reg, &child, &fk, &vals)?;
             if rows.is_empty() {
                 continue;
             }
@@ -206,12 +209,12 @@ pub fn parent_changed(
                         parent.name, fk.name, child.name
                     )));
                 }
-                FkAction::Cascade if new.is_none() => dml::delete_rows(txn, &child, &rows)?,
+                FkAction::Cascade if new.is_none() => dml::delete_rows(txn, reg, &child, &rows)?,
                 _ => {
-                    let w = Writer::new(&*txn, child.clone())?;
+                    let w = Writer::new(&*txn, reg, child.clone())?;
                     let mut changes = Vec::with_capacity(rows.len());
                     {
-                        let ctx = Ctx::new(&*txn, &[]);
+                        let ctx = Ctx::new(&*txn, reg, &[]);
                         for (key, old_child) in rows {
                             let mut row = old_child.clone();
                             for (j, &c) in fk.columns.iter().enumerate() {
@@ -229,7 +232,7 @@ pub fn parent_changed(
                             changes.push((key, old_child, row));
                         }
                     }
-                    dml::update_rows(txn, &w, &changes)?;
+                    dml::update_rows(txn, reg, &w, &changes)?;
                     if action == FkAction::SetDefault {
                         // The defaults must reference rows too (even when
                         // they equal the old values, whose row just went).
@@ -244,13 +247,18 @@ pub fn parent_changed(
 
 /// Checks that every existing row of `child` satisfies `fk` (for
 /// `ALTER TABLE … ADD FOREIGN KEY`).
-pub fn validate_existing(txn: &dyn KvTxn, child: &Table, fk: &ForeignKey) -> Result<()> {
+pub fn validate_existing(
+    txn: &dyn KvTxn,
+    reg: &Registry,
+    child: &Table,
+    fk: &ForeignKey,
+) -> Result<()> {
     let parent = if fk.table == child.name {
         child.clone()
     } else {
         catalog::table(txn, &fk.table)?
     };
-    let ctx = Ctx::new(txn, &[]);
+    let ctx = Ctx::new(txn, reg, &[]);
     for (_, row) in exec::matching_rows(child, &crate::plan::Access::Full, None, &ctx)? {
         if let Some(vals) = key_values(&row, &fk.columns)
             && !parent_exists(txn, &parent, fk, &vals)?

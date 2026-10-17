@@ -723,6 +723,11 @@ column order).  Without statistics the rule-based plan is kept.
   `SLT=<name>` runs one script.  The expected results of scripts 12–18
   were produced by PostgreSQL 16 (records marked `nucleus-only` excepted:
   concurrency, and what PostgreSQL does not do).
+- `tests/slt-pg/*.slt`: the pg-compat module's scripts (`pg_catalog`,
+  `information_schema`, `pg_*` functions), run with it registered — and
+  over the PostgreSQL protocol by the server's tests;
+  `pg_compat_only_where_registered` checks that sessions without it see
+  none of it.
 - `tests/encoding.rs`: key order and round trips, property-tested (every
   type).
 - `tests/crash.rs`: random DDL and DML (in autocommit and in blocks)
@@ -766,12 +771,12 @@ is refused (`2BP01`).
 
 ### 8.11 System catalogs (`ncatalog`, `pgcatalog`)
 
-nucleus's own catalog is **`nc_catalog`**: read-only tables made from the
-catalog when scanned (D13).
+nucleus's own catalog is **`nc_catalog`**: read-only views made from the
+catalog when scanned (D13), registered by the built-in module (§8.12).
 
 | Table | Rows |
 |-------|------|
-| `nc_catalog.schemas` | `name`, `description` |
+| `nc_catalog.schemas` | `name`, `description` (the session registry's schemas) |
 | `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows` |
 | `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key` |
 | `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix` |
@@ -780,7 +785,10 @@ catalog when scanned (D13).
 | `nc_catalog.statistics` | `table_id`, `table_name`, `column_name`, `rows`, `nulls`, `distinct_values`, `histogram` |
 | `nc_catalog.types` | `name`, `aliases`, `category` |
 
-**PostgreSQL compatibility layer.**  PostgreSQL clients hard-code
+**PostgreSQL compatibility: the `pg-compat` module** (`pgcatalog::PgCompat`,
+§8.12).  Only sessions whose registry has it see any of what follows —
+the PostgreSQL front end's (§9); `ncp` sessions and the embedded
+`Session::new` do not (principle 11).  PostgreSQL clients hard-code
 PostgreSQL's catalog names, so the same catalog is also shown as
 `pg_catalog` (`pg_namespace`, `pg_class`, `pg_attribute`, `pg_attrdef`,
 `pg_type`, `pg_index`, `pg_constraint`, `pg_am`, `pg_collation`,
@@ -799,7 +807,38 @@ namespaces and access methods; a table is `16384 + 1000 × table id`, its
 indexes and constraints numbered after it (`pgcatalog.rs` has the table).
 One role, `nucleus`.  This is what makes `psql`'s `\d`, `\d table`,
 `\d+`, `\dt`, `\di`, `\dv`, `\dn`, `\du`, `\l` work; `\df` and others
-that need functions, sequences or permissions do not.
+that need functions, sequences or permissions do not.  `pg_typeof(x)` is
+one of its functions too.
+
+### 8.12 Extension API (`ext`, `builtin`)
+
+What a module adds to the SQL layer (principle 12), versioned
+(`ext::API_VERSION`, 1):
+
+- `Module` — `name()`, `register(&mut Registry)`.
+- `ScalarFunction` — `name()` (for `EXPLAIN`), `arity()`,
+  `resolve(&[ArgInfo]) -> Signature` (bind-time typing: per argument
+  `Keep`, `Untyped(t)` — an untyped literal, `NULL` or parameter takes
+  `t` —, `Convert(t)` or `Common`; the result a type, the arguments'
+  common type, or a `Constant`), `strict()` (default true: a `NULL`
+  argument gives `NULL` without a call), `call(&CallContext, &[Value])`.
+  `CallContext` gives the statement's transaction and the registry.
+- `CatalogView` — `schema()`, `name()`, `columns()`, `rows(&CallContext)`.
+- `Registry` — `empty()`, `builtin()` (the `builtin` module: every
+  built-in function, the schemas `public` and `nc_catalog`, the
+  `nc_catalog` views), `shared_builtin()`, `add(&dyn Module)` (refused,
+  and the registry unchanged, if the module or anything it registers is
+  already there), `add_function(names, f)`, `add_schema(name,
+  description, searched)` (a searched schema's views are found by
+  unqualified names after the user's tables, as `pg_catalog`'s),
+  `add_view(v)`, and the lookups `function`, `view`, `schemas`, `views`,
+  `modules`.
+
+A session runs against one registry: `Session::new(kv)` the built-in one,
+`Session::with_registry(kv, registry)` any.  The binder finds functions
+and views there; bound calls and view scans hold the registered objects,
+so execution needs no lookup.  The built-in functions share one
+implementation behind the same interface.
 
 ## 9. Server (`nucleus-server`)
 
@@ -822,7 +861,8 @@ error, to stderr — to see what a tool asks for.
 **PostgreSQL compatibility** (optional, D14): `--pg-compat` also listens
 for the PostgreSQL protocol (`nucleus_server::serve_pg`, default
 `127.0.0.1:5432`), with the same credentials, so `psql` and PostgreSQL
-drivers and tools can connect.  It is frozen: kept working, not extended
+drivers and tools can connect.  Its sessions have the `pg-compat` module
+(§8.11); `ncp` sessions do not.  It is frozen: kept working, not extended
 for the catalog queries particular tools send (some, like Valentina
 Studio, ask for PostgreSQL internals nucleus does not have).  PostgreSQL
 protocol 3.0:
@@ -974,6 +1014,12 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.19 registries, first part:** the extension API
+  (`ext`: `Module`, `ScalarFunction`, `CatalogView`, `Registry`); the
+  built-in functions and `nc_catalog` register through it; PostgreSQL
+  compatibility is the `pg-compat` module, in the PostgreSQL front end's
+  sessions only (`nc_catalog` no longer goes through it); its scripts
+  in `tests/slt-pg`.
 - **2026-10-17 — §M14.19 principle audit, first fixes:** `now()` and
   retry back-off go through the platform (`Kv::wall_clock`,
   `Kv::back_off`, `Clock::sleep`); `Timestamp` is opaque; the SQL layer's

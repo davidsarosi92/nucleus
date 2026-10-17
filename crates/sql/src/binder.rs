@@ -4,9 +4,11 @@
 use nucleus_kv::KvTxn;
 
 use crate::ast::{self, BinaryOp, JoinKind, SelectItem, SetExpr, TableRef, UnaryOp};
+use crate::builtin;
 use crate::catalog::{self, Table};
 use crate::error::{Error, Result};
 use crate::expr::{Expr, Func, SubKind, SubPlan};
+use crate::ext::{Arg, ArgInfo, FnRef, Registry, Returns};
 use crate::plan::{Access, Agg, AggFunc, JoinAlgo, JoinType, Plan, SortKey, TableFunc};
 use crate::types::{DataType, Value};
 
@@ -75,6 +77,7 @@ struct Grouping {
 /// The binder.
 pub struct Binder<'a> {
     txn: &'a dyn KvTxn,
+    registry: &'a Registry,
     /// Enclosing queries' scopes, innermost last.
     outer: Vec<Scope>,
     /// Inferred parameter types, by `$n - 1`.
@@ -206,13 +209,19 @@ pub fn conjunction(mut es: Vec<Expr>) -> Option<Expr> {
 
 impl<'a> Binder<'a> {
     /// A binder reading the catalog through `txn`.
-    pub fn new(txn: &'a dyn KvTxn) -> Self {
+    pub fn new(txn: &'a dyn KvTxn, registry: &'a Registry) -> Self {
         Self {
             txn,
+            registry,
             outer: Vec::new(),
             params: Vec::new(),
             ctes: Vec::new(),
         }
+    }
+
+    /// The registry functions and views are found in.
+    pub fn registry(&self) -> &'a Registry {
+        self.registry
     }
 
     /// The transaction the binder reads the catalog through.
@@ -715,8 +724,8 @@ impl<'a> Binder<'a> {
                 {
                     return Ok(b);
                 }
-                // pg_catalog is searched after the user's tables (and
-                // information_schema only by name).
+                // Views of searched schemas (pg_catalog, with pg-compat)
+                // after the user's tables; others only by schema.
                 let user = match schema.as_deref() {
                     None => catalog::get_table(self.txn, name)?,
                     Some("public") => Some(self.table(name)?),
@@ -724,23 +733,23 @@ impl<'a> Binder<'a> {
                 };
                 let table = match user {
                     Some(t) => t,
-                    None => match crate::pgcatalog::lookup(schema.as_deref(), name) {
-                        Some(table) => {
+                    None => match self.registry.view(schema.as_deref(), name) {
+                        Some(view) => {
                             let mut scope = Scope {
-                                cols: table
-                                    .columns
-                                    .iter()
-                                    .map(|c| ScopeCol {
+                                cols: view
+                                    .columns()
+                                    .into_iter()
+                                    .map(|(name, ty)| ScopeCol {
                                         table: Some(qual.clone()),
-                                        name: c.name.clone(),
-                                        ty: Some(c.ty),
+                                        name,
+                                        ty: Some(ty),
                                         hidden: false,
                                     })
                                     .collect(),
                             };
                             rename_columns(&mut scope, &qual, columns)?;
                             return Ok(Bound {
-                                plan: Plan::Virtual { table },
+                                plan: Plan::View { view: view.clone() },
                                 scope,
                             });
                         }
@@ -860,7 +869,10 @@ impl<'a> Binder<'a> {
                     let mut cols = Vec::new();
                     for (name, li, ri, ty) in &merged {
                         let side = |i: usize| convert(Expr::Column(i), b.scope.cols[i].ty, *ty);
-                        exprs.push(Expr::Func(Func::Coalesce, vec![side(*li), side(*ri)]));
+                        exprs.push(Expr::Call(
+                            builtin::func(Func::Coalesce),
+                            vec![side(*li), side(*ri)],
+                        ));
                         cols.push(ScopeCol {
                             table: None,
                             name: name.clone(),
@@ -1649,11 +1661,11 @@ impl<'a> Binder<'a> {
                 let mut e = Expr::Cast(Box::new(x), *ty);
                 let lit = |n: u32| Expr::Literal(Value::Int(i64::from(n)));
                 if let (DataType::Numeric, Some((p, s))) = (ty, typmod.numeric) {
-                    e = Expr::Func(Func::NumericFit, vec![e, lit(p), lit(s)]);
+                    e = Expr::Call(builtin::func(Func::NumericFit), vec![e, lit(p), lit(s)]);
                 }
                 if let (DataType::Text, Some(n)) = (ty, typmod.max_len) {
                     // An explicit cast to varchar(n) truncates.
-                    e = Expr::Func(Func::Substr, vec![e, lit(1), lit(n)]);
+                    e = Expr::Call(builtin::func(Func::Substr), vec![e, lit(1), lit(n)]);
                 }
                 (e, Some(*ty))
             }
@@ -1669,164 +1681,91 @@ impl<'a> Binder<'a> {
                         "{name}(*), DISTINCT and ORDER BY are only for aggregates"
                     )));
                 }
-                if name == "pg_typeof" && args.len() == 1 {
-                    let (_, t) = sub(&args[0], self)?;
-                    let name = match t {
-                        Some(DataType::Int) => "bigint".to_string(),
-                        Some(t) => t.name().to_string(),
-                        None => "unknown".to_string(),
-                    };
-                    return Ok((Expr::Literal(Value::Text(name)), Some(DataType::Text)));
-                }
-                let (f, arity) = Func::lookup(name).ok_or_else(|| {
-                    Error::undefined_function(format!("function {name} does not exist"))
-                })?;
-                if !arity.contains(&args.len()) {
+                let f = match self.registry.function(name) {
+                    Some(f) => f.clone(),
+                    None if name.starts_with("__reg") => {
+                        return Err(Error::undefined_object(format!(
+                            "type {} does not exist",
+                            &name[2..]
+                        )));
+                    }
+                    None => {
+                        return Err(Error::undefined_function(format!(
+                            "function {name} does not exist"
+                        )));
+                    }
+                };
+                if !f.arity().contains(&args.len()) {
                     return Err(Error::undefined_function(format!(
                         "function {name} with {} arguments does not exist",
                         args.len()
                     )));
                 }
                 let mut bound = Vec::new();
-                let mut types = Vec::new();
                 for a in args {
-                    let (x, t) = sub(a, self)?;
-                    bound.push(x);
-                    types.push(t);
+                    bound.push(sub(a, self)?);
                 }
-                let ty = match f {
-                    Func::Lower
-                    | Func::Upper
-                    | Func::Trim
-                    | Func::Substr
-                    | Func::Concat
-                    | Func::Replace
-                    | Func::Version => Some(DataType::Text),
-                    Func::Length | Func::Strpos => Some(DataType::Int),
-                    Func::IsDistinctFrom => Some(DataType::Bool),
-                    Func::Sqrt | Func::Power => Some(DataType::Float),
-                    Func::Round | Func::Trunc
-                        if types[0] == Some(DataType::Int)
-                            && (f == Func::Trunc || bound.len() == 2) =>
-                    {
-                        // round(int, n) and trunc(int) are numeric.
-                        bound[0] = convert(bound[0].clone(), types[0], Some(DataType::Numeric));
-                        Some(DataType::Numeric)
-                    }
-                    Func::Abs
-                    | Func::Round
-                    | Func::Trunc
-                    | Func::Floor
-                    | Func::Ceil
-                    | Func::Sign
-                    | Func::Nullif => types[0],
-                    Func::Mod => arith_type(BinaryOp::Mod, types[0], types[1]).flatten(),
-                    Func::Now | Func::ClockTimestamp | Func::ToTimestamp => {
-                        if let Some(x) = bound.first_mut() {
-                            let (c, _) = self.coerce(Some(DataType::Float), x.clone(), types[0])?;
-                            *x = c;
-                        }
-                        Some(DataType::TimestampTz)
-                    }
-                    Func::CurrentDate | Func::MakeDate => Some(DataType::Date),
-                    Func::LocalTimestamp => Some(DataType::Timestamp),
-                    Func::Extract | Func::DatePart | Func::DateTrunc => {
-                        let (field, _) = self.text_operand(bound[0].clone(), types[0], name)?;
-                        bound[0] = field;
-                        let (x, t) = self.coerce(
-                            is_text_literal(&bound[1]).then_some(DataType::Timestamp),
-                            bound[1].clone(),
-                            types[1],
-                        )?;
-                        bound[1] = x;
-                        let t = t.1;
-                        if t.is_some_and(|t| !t.is_datetime() && t != DataType::Interval) {
-                            return Err(Error::undefined_function(format!(
-                                "function {name}(text, {}) does not exist",
-                                name_of(t)
-                            )));
-                        }
-                        match f {
-                            Func::Extract => Some(DataType::Numeric),
-                            Func::DatePart => Some(DataType::Float),
-                            _ => match t {
-                                Some(DataType::Date) => Some(DataType::TimestampTz),
-                                t => t,
-                            },
-                        }
-                    }
-                    Func::Age => {
-                        for (x, t) in bound.iter_mut().zip(&types) {
-                            let (c, _) = self.coerce(
-                                is_text_literal(x).then_some(DataType::Timestamp),
-                                x.clone(),
-                                *t,
-                            )?;
-                            *x = c;
-                        }
-                        Some(DataType::Interval)
-                    }
-                    Func::JustifyDays | Func::JustifyHours | Func::JustifyInterval => {
-                        let (c, _) =
-                            self.coerce(Some(DataType::Interval), bound[0].clone(), types[0])?;
-                        bound[0] = c;
-                        Some(DataType::Interval)
-                    }
-                    Func::NumericFit => Some(DataType::Numeric),
-                    Func::CurrentUser | Func::CurrentDatabase | Func::CurrentSchema => {
-                        Some(DataType::Text)
-                    }
-                    // regclass: text (a name) to an oid, an oid to its name.
-                    Func::RegClass => match types[0] {
-                        Some(DataType::Int) => Some(DataType::Text),
-                        _ => Some(DataType::Int),
-                    },
-                    Func::RegType
-                    | Func::RegNamespace
-                    | Func::RegRole
-                    | Func::GetUserById
-                    | Func::FormatType
-                    | Func::GetExpr
-                    | Func::GetIndexdef
-                    | Func::GetConstraintdef
-                    | Func::ArrayToString
-                    | Func::StatisticsObjColumns
-                    | Func::GetTriggerdef
-                    | Func::EncodingToChar
-                    | Func::ObjDescription
-                    | Func::CurrentSetting
-                    | Func::RegexpReplace => Some(DataType::Text),
-                    Func::TableIsVisible | Func::RelationIsPublishable | Func::HasPrivilege => {
-                        Some(DataType::Bool)
-                    }
-                    Func::PartitionAncestors => {
-                        let (x, _) =
-                            self.coerce(Some(DataType::Int), bound[0].clone(), types[0])?;
-                        bound[0] = x;
-                        Some(DataType::Int)
-                    }
-                    Func::ArrayUpper
-                    | Func::ArrayLower
-                    | Func::ArrayLength
-                    | Func::Cardinality
-                    | Func::BackendPid => Some(DataType::Int),
-                    Func::ArrayAppend => {
-                        let et = types[0].and_then(DataType::element);
-                        let (x, (_, xt)) = self.coerce(et, bound[1].clone(), types[1])?;
-                        bound[1] = x;
-                        types[0].or_else(|| xt.and_then(DataType::array_of))
-                    }
-                    Func::Coalesce | Func::Greatest | Func::Least => {
-                        let mut items: Vec<Typed> =
-                            bound.drain(..).zip(types.iter().copied()).collect();
-                        let t = self.unify_items(&mut items)?;
-                        bound = items.into_iter().map(|(x, _)| x).collect();
-                        t
-                    }
-                };
-                (Expr::Func(f, bound), ty)
+                self.call(f, bound)?
             }
         })
+    }
+
+    /// A call of `f` with bound arguments, typed by its signature.
+    fn call(&mut self, f: FnRef, mut args: Vec<Typed>) -> Result<Typed> {
+        let info: Vec<ArgInfo> = args
+            .iter()
+            .map(|(x, t)| ArgInfo {
+                ty: *t,
+                text_literal: is_text_literal(x),
+            })
+            .collect();
+        let sig = f.resolve(&info)?;
+        if sig.args.len() != args.len() {
+            return Err(Error::internal(format!(
+                "{} resolved {} arguments of {}",
+                f.name(),
+                sig.args.len(),
+                args.len()
+            )));
+        }
+        if let Returns::Constant(v) = sig.returns {
+            let t = v.data_type();
+            return Ok((Expr::Literal(v), t));
+        }
+        for (a, arg) in args.iter_mut().zip(&sig.args) {
+            let (x, t) = std::mem::replace(a, (Expr::Literal(Value::Null), None));
+            *a = match *arg {
+                Arg::Keep | Arg::Common => (x, t),
+                Arg::Untyped(ty) => self.coerce(Some(ty), x, t)?.1,
+                Arg::Convert(ty) => {
+                    let (x, t) = self.coerce(Some(ty), x, t)?.1;
+                    (convert(x, t, Some(ty)), Some(ty))
+                }
+            };
+        }
+        let common: Vec<usize> = (0..args.len())
+            .filter(|&i| sig.args[i] == Arg::Common)
+            .collect();
+        let mut common_ty = None;
+        if !common.is_empty() {
+            let mut items: Vec<Typed> = common
+                .iter()
+                .map(|&i| std::mem::replace(&mut args[i], (Expr::Literal(Value::Null), None)))
+                .collect();
+            common_ty = self.unify_items(&mut items)?;
+            for (&i, item) in common.iter().zip(items) {
+                args[i] = item;
+            }
+        }
+        let ty = match sig.returns {
+            Returns::Type(t) => t,
+            Returns::Common => common_ty,
+            Returns::Constant(_) => unreachable!("returned above"),
+        };
+        Ok((
+            Expr::Call(f, args.into_iter().map(|(x, _)| x).collect()),
+            ty,
+        ))
     }
 
     /// The common type of `items`, each converted to it.  Text literals and
@@ -2005,7 +1944,7 @@ impl<'a> Binder<'a> {
 
 /// The result type of an arithmetic operator, if it applies to these
 /// operand types (`None` operands: untyped).
-fn arith_type(
+pub(crate) fn arith_type(
     op: BinaryOp,
     lt: Option<DataType>,
     rt: Option<DataType>,
@@ -2057,10 +1996,6 @@ fn rename_columns(scope: &mut Scope, alias: &str, names: &[String]) -> Result<()
         c.name = n.clone();
     }
     Ok(())
-}
-
-fn name_of(t: Option<DataType>) -> &'static str {
-    name(t)
 }
 
 fn name(t: Option<DataType>) -> &'static str {

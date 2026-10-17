@@ -21,6 +21,7 @@ use crate::encoding::{Reader, Writer};
 use crate::error::Result;
 use crate::exec;
 use crate::expr::{Ctx, Expr};
+use crate::ext::Registry;
 use crate::plan::{Access, Plan};
 use crate::types::Value;
 
@@ -88,9 +89,9 @@ impl TableStats {
 }
 
 /// Computes and stores the statistics of one table.
-pub fn analyze_table(txn: &mut dyn KvTxn, table: &Table) -> Result<TableStats> {
+pub fn analyze_table(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Result<TableStats> {
     let rows: Vec<crate::types::Row> = {
-        let ctx = Ctx::new(&*txn, &[]);
+        let ctx = Ctx::new(&*txn, reg, &[]);
         exec::matching_rows(table, &Access::Full, None, &ctx)?
             .into_iter()
             .map(|(_, r)| r)
@@ -129,13 +130,13 @@ pub fn analyze_table(txn: &mut dyn KvTxn, table: &Table) -> Result<TableStats> {
 }
 
 /// `ANALYZE [table]`.
-pub fn analyze(txn: &mut dyn KvTxn, table: Option<&str>) -> Result<()> {
+pub fn analyze(txn: &mut dyn KvTxn, reg: &Registry, table: Option<&str>) -> Result<()> {
     let tables = match table {
         Some(name) => vec![catalog::table(&*txn, name)?],
         None => catalog::tables(&*txn)?,
     };
     for t in tables {
-        analyze_table(txn, &t)?;
+        analyze_table(txn, reg, &t)?;
     }
     Ok(())
 }

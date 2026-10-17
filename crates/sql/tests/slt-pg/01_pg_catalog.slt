@@ -1,0 +1,126 @@
+# The pg-compat module: the PostgreSQL catalog views (pg_catalog,
+# information_schema) and functions psql and drivers use.  These scripts
+# run with pg-compat registered (and over the PostgreSQL protocol).
+
+statement ok
+CREATE TABLE p (id BIGINT PRIMARY KEY, name TEXT NOT NULL DEFAULT 'x', score DOUBLE PRECISION CHECK (score >= 0))
+
+statement ok
+CREATE TABLE c (id BIGINT PRIMARY KEY, pid BIGINT REFERENCES p (id) ON DELETE CASCADE, note VARCHAR(20) UNIQUE, amount NUMERIC(10, 2))
+
+statement ok
+CREATE INDEX c_pid ON c (pid)
+
+statement ok
+CREATE TABLE log (msg TEXT)
+
+statement ok
+INSERT INTO p VALUES (1, 'a', 1.5), (2, 'b', NULL), (3, 'b', 7)
+
+query T
+SELECT name FROM nc_catalog.schemas ORDER BY name
+----
+information_schema
+nc_catalog
+pg_catalog
+public
+
+# pg_catalog, as psql's \d queries it.
+query TTT
+SELECT n.nspname, c.relname, c.relkind FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' ORDER BY 2
+----
+public c r
+public c_note_key i
+public c_pid i
+public c_pkey i
+public log r
+public p r
+public p_pkey i
+
+query T
+SELECT c.relname FROM pg_catalog.pg_class c WHERE c.relname OPERATOR(pg_catalog.~) '^(c)$' COLLATE pg_catalog.default AND pg_catalog.pg_table_is_visible(c.oid)
+----
+c
+
+query TTBT
+SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnotnull, (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) FROM pg_catalog.pg_attrdef d WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef) FROM pg_catalog.pg_attribute a WHERE a.attrelid = 'p'::regclass AND a.attnum > 0 ORDER BY a.attnum
+----
+id bigint true NULL
+name text true 'x'
+score double precision false NULL
+
+query TT
+SELECT conname, pg_catalog.pg_get_constraintdef(oid, true) FROM pg_catalog.pg_constraint WHERE conrelid = 'c'::regclass ORDER BY 1
+----
+c_note_key UNIQUE (note)
+c_pid_fkey FOREIGN KEY (pid) REFERENCES p(id) ON DELETE CASCADE
+c_pkey PRIMARY KEY (id)
+
+query TT
+SELECT conname, conrelid::pg_catalog.regclass FROM pg_catalog.pg_constraint c WHERE confrelid IN (SELECT pg_catalog.pg_partition_ancestors('p'::regclass) UNION ALL VALUES ('p'::pg_catalog.regclass)) AND contype = 'f'
+----
+c_pid_fkey c
+
+query T
+SELECT pg_catalog.pg_get_indexdef(i.indexrelid, 0, true) FROM pg_catalog.pg_index i WHERE i.indrelid = 'c'::regclass ORDER BY 1
+----
+CREATE INDEX c_pid ON public.c USING btree (pid)
+CREATE UNIQUE INDEX c_note_key ON public.c USING btree (note)
+CREATE UNIQUE INDEX c_pkey ON public.c USING btree (id)
+
+# Empty catalogs still bind the array-heavy queries psql sends.
+query T
+SELECT CASE WHEN pol.polroles = '{0}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1), ',') END FROM pg_catalog.pg_policy pol
+----
+
+query T
+SELECT 'd' = any(stxkind) FROM pg_catalog.pg_statistic_ext WHERE stxrelid = 'c'::regclass
+----
+
+query TTT
+SELECT nspname, pg_catalog.pg_get_userbyid(nspowner), current_user FROM pg_catalog.pg_namespace WHERE nspname = 'public'
+----
+public nucleus nucleus
+
+# information_schema
+query TT
+SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'public' ORDER BY 1
+----
+c BASE TABLE
+log BASE TABLE
+p BASE TABLE
+
+query TITTI
+SELECT table_name, ordinal_position, column_name, data_type, character_maximum_length FROM information_schema.columns WHERE table_name = 'c' ORDER BY 2
+----
+c 1 id bigint NULL
+c 2 pid bigint NULL
+c 3 note character varying 20
+c 4 amount numeric NULL
+
+query TTT rowsort
+SELECT constraint_name, table_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 'c'
+----
+c_note_key c UNIQUE
+c_pid_fkey c FOREIGN KEY
+c_pkey c PRIMARY KEY
+
+# A user table shadows a catalog table of the same unqualified name.
+statement ok
+CREATE TABLE pg_class (x INT)
+
+query I
+SELECT count(*) FROM pg_class
+----
+0
+
+query T
+SELECT relname FROM pg_catalog.pg_class WHERE relname = 'pg_class' ORDER BY relname
+----
+pg_class
+pg_class
+
+query TTT
+SELECT pg_typeof(1::bigint), pg_typeof('x'::text), pg_typeof(ARRAY[1.5])
+----
+bigint text numeric[]

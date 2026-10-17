@@ -14,6 +14,7 @@ use crate::catalog::{Table, row_key};
 use crate::encoding::{decode_row, encode_key, encode_key_value};
 use crate::error::{Error, Result};
 use crate::expr::{Ctx, Env, Expr};
+use crate::ext::CallContext;
 use crate::plan::{Access, Agg, AggFunc, JoinAlgo, JoinType, Plan, SortKey, TableFunc};
 use crate::types::{DataType, Row, Value};
 
@@ -127,8 +128,8 @@ pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
                 Err(_) => true,
             }))
         }
-        Plan::Virtual { table } => Box::new(
-            crate::pgcatalog::rows(&table.name, ctx.txn)?
+        Plan::View { view } => Box::new(
+            view.rows(&CallContext::new(ctx.txn, ctx.registry))?
                 .into_iter()
                 .map(Ok),
         ),

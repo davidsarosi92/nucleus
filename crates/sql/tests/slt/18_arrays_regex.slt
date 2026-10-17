@@ -172,7 +172,3 @@ SELECT pg_catalog.lower('ABC')
 ----
 abc
 
-query TTT
-SELECT pg_typeof(1::bigint), pg_typeof('x'::text), pg_typeof(ARRAY[1.5])
-----
-bigint text numeric[]

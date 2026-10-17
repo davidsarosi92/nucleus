@@ -1,9 +1,11 @@
-//! PostgreSQL compatibility: the `pg_catalog` and `information_schema`
-//! tables PostgreSQL clients query, as views of the nucleus catalog
-//! (PLAN.md §M14.5) — enough for `psql`'s `\d` family and for tools that
-//! read `information_schema`.  nucleus's own catalog is `nc_catalog`
+//! PostgreSQL compatibility, the `pg-compat` module ([`PgCompat`]): the
+//! `pg_catalog` and `information_schema` tables PostgreSQL clients query,
+//! as views of the nucleus catalog (PLAN.md §M14.5) — enough for `psql`'s
+//! `\d` family and for tools that read `information_schema` — and the
+//! `pg_*` functions they call.  nucleus's own catalog is `nc_catalog`
 //! ([`crate::ncatalog`]); these exist because clients hard-code
-//! PostgreSQL's names.
+//! PostgreSQL's names, and only sessions whose registry has the module
+//! see them (the PostgreSQL front end's).
 //!
 //! The tables are virtual: their rows are made from the catalog when they
 //! are scanned, and they cannot be written.  Object ids follow
@@ -26,13 +28,17 @@
 //! as constraints.  Everything belongs to one role, `nucleus` (oid 10).
 
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 use nucleus_kv::KvTxn;
 
 use crate::ast::FkAction;
-use crate::catalog::{self, Column, Table};
+use crate::catalog::{self, Column, ConstraintKind, Table};
 use crate::error::{Error, Result};
-use crate::expr::Func;
+use crate::ext::{
+    Arg, ArgInfo, CallContext, CatalogView, Module, Registry, Returns, ScalarFunction, Signature,
+};
 use crate::types::{DataType, Row, Value};
 
 /// The `pg_catalog` namespace.
@@ -545,20 +551,56 @@ fn def_table(k: usize) -> Table {
     }
 }
 
-/// The catalog table `[schema.]name`, if there is one.  Unqualified names
-/// find `pg_catalog` tables (it is on the search path).
-pub fn lookup(schema: Option<&str>, name: &str) -> Option<Table> {
-    if schema == Some("nc_catalog") {
-        return crate::ncatalog::lookup(name);
+/// The `pg-compat` module.
+pub struct PgCompat;
+
+impl Module for PgCompat {
+    fn name(&self) -> &str {
+        "pg-compat"
     }
-    let ns = match schema {
-        None | Some("pg_catalog") => NS_CATALOG,
-        Some("information_schema") => NS_INFO,
-        Some(_) => return None,
-    };
-    DEFS.iter()
-        .position(|d| d.ns == ns && d.name == name)
-        .map(def_table)
+
+    fn register(&self, r: &mut Registry) -> Result<()> {
+        r.add_schema("pg_catalog", "PostgreSQL-compatible catalog views", true)?;
+        r.add_schema("information_schema", "SQL-standard catalog views", false)?;
+        for k in 0..DEFS.len() {
+            r.add_view(Arc::new(PgView(k)))?;
+        }
+        for (f, names, arity) in FUNCTIONS {
+            r.add_function(
+                names,
+                Arc::new(PgFunction {
+                    f: *f,
+                    arity: arity.clone(),
+                }),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// `DEFS[k]` as a view.
+struct PgView(usize);
+
+impl CatalogView for PgView {
+    fn schema(&self) -> &str {
+        ns_name(DEFS[self.0].ns).expect("known")
+    }
+
+    fn name(&self) -> &str {
+        DEFS[self.0].name
+    }
+
+    fn columns(&self) -> Vec<(String, DataType)> {
+        DEFS[self.0]
+            .cols
+            .iter()
+            .map(|(n, t)| ((*n).to_string(), *t))
+            .collect()
+    }
+
+    fn rows(&self, cx: &CallContext<'_>) -> Result<Vec<Row>> {
+        rows(self.0, cx.txn(), cx.registry())
+    }
 }
 
 // ------------------------------------------------------------------ oids
@@ -570,10 +612,6 @@ pub fn rel_oid(t: &Table) -> i64 {
 
 fn index_oid(t: &Table, index: Option<usize>) -> i64 {
     rel_oid(t) + 1 + index.map_or(0, |i| i64::from(t.indexes[i].id))
-}
-
-fn is_unique_constraint(t: &Table, i: usize) -> bool {
-    t.indexes[i].unique && t.indexes[i].name.ends_with("_key")
 }
 
 /// A column's type oid and type modifier, as PostgreSQL reports them.
@@ -771,7 +809,7 @@ fn column_attrs(t: &Table, c: usize) -> (String, i64, i64, bool, bool, i64) {
     )
 }
 
-fn relations(tables: &[Table]) -> Vec<Rel> {
+fn relations(tables: &[Table], registry: &Registry) -> Vec<Rel> {
     let mut out = Vec::new();
     for t in tables {
         out.push(Rel {
@@ -835,16 +873,21 @@ fn relations(tables: &[Table]) -> Vec<Rel> {
             table: None,
         });
     }
-    for (k, (name, cols)) in crate::ncatalog::definitions().into_iter().enumerate() {
+    let nc = registry
+        .views()
+        .iter()
+        .filter(|v| v.schema() == "nc_catalog");
+    for (k, v) in nc.enumerate() {
         out.push(Rel {
             oid: 12_500 + k as i64,
-            name,
+            name: v.name().to_string(),
             ns: NS_NC,
             kind: "v",
             am: 0,
-            cols: cols
-                .iter()
-                .map(|c| (c.name.clone(), type_oid(c.ty), -1, false, false, 0))
+            cols: v
+                .columns()
+                .into_iter()
+                .map(|(n, ty)| (n, type_oid(ty), -1, false, false, 0))
                 .collect(),
             checks: 0,
             has_index: false,
@@ -878,90 +921,56 @@ fn quoted_list(t: &Table, cols: &[usize]) -> String {
         .join(", ")
 }
 
-pub(crate) fn constraints(tables: &[Table]) -> Vec<Con> {
-    let mut out = Vec::new();
-    let by_name: HashMap<&str, &Table> = tables.iter().map(|t| (t.name.as_str(), t)).collect();
-    for t in tables {
-        let base = rel_oid(t);
-        let con = |oid, name: String, kind, index, cols: Vec<usize>, def: String| Con {
-            oid,
-            name,
-            kind,
-            table: t.clone(),
-            index,
-            references: None,
-            cols,
-            ref_cols: Vec::new(),
-            on_update: " ",
-            on_delete: " ",
-            def,
-        };
-        if !t.primary_key.is_empty() {
-            out.push(con(
-                base + 500,
-                format!("{}_pkey", t.name),
-                "p",
-                index_oid(t, None),
-                t.primary_key.clone(),
-                format!("PRIMARY KEY ({})", quoted_list(t, &t.primary_key)),
-            ));
-        }
-        for (i, ix) in t.indexes.iter().enumerate() {
-            if is_unique_constraint(t, i) {
-                out.push(con(
-                    base + 500 + i64::from(ix.id),
-                    ix.name.clone(),
-                    "u",
-                    index_oid(t, Some(i)),
-                    ix.columns.clone(),
-                    format!("UNIQUE ({})", quoted_list(t, &ix.columns)),
-                ));
-            }
-        }
-        for (j, (name, check)) in t.checks.iter().enumerate() {
-            out.push(con(
-                base + 700 + j as i64,
-                name.clone(),
-                "c",
-                0,
-                Vec::new(),
-                format!("CHECK ({check})"),
-            ));
-        }
-        for (j, fk) in t.foreign_keys.iter().enumerate() {
-            let Some(parent) = by_name.get(fk.table.as_str()) else {
-                continue;
-            };
-            let index = crate::fk::referenced_key(parent, &fk.ref_columns)
-                .map_or(0, |(i, _)| index_oid(parent, i));
-            let mut def = format!(
-                "FOREIGN KEY ({}) REFERENCES {}({})",
-                quoted_list(t, &fk.columns),
-                parent.name,
-                quoted_list(parent, &fk.ref_columns)
-            );
-            if fk.on_update != FkAction::NoAction {
-                def.push_str(&format!(" ON UPDATE {}", fk.on_update.sql()));
-            }
-            if fk.on_delete != FkAction::NoAction {
-                def.push_str(&format!(" ON DELETE {}", fk.on_delete.sql()));
-            }
-            out.push(Con {
-                oid: base + 800 + j as i64,
-                name: fk.name.clone(),
-                kind: "f",
+fn constraints(tables: &[Table]) -> Vec<Con> {
+    catalog::constraints(tables)
+        .into_iter()
+        .map(|c| {
+            let t = c.table;
+            let base = rel_oid(t);
+            let mut con = Con {
+                oid: base + 500,
+                name: c.name,
+                kind: "p",
                 table: t.clone(),
-                index,
-                references: Some((*parent).clone()),
-                cols: fk.columns.clone(),
-                ref_cols: fk.ref_columns.clone(),
-                on_update: fk_code(fk.on_update),
-                on_delete: fk_code(fk.on_delete),
-                def,
-            });
-        }
-    }
-    out
+                index: index_oid(t, None),
+                references: None,
+                cols: t.primary_key.clone(),
+                ref_cols: Vec::new(),
+                on_update: " ",
+                on_delete: " ",
+                def: c.definition,
+            };
+            match c.kind {
+                ConstraintKind::PrimaryKey => {}
+                ConstraintKind::Unique(i) => {
+                    con.oid = base + 500 + i64::from(t.indexes[i].id);
+                    con.kind = "u";
+                    con.index = index_oid(t, Some(i));
+                    con.cols = t.indexes[i].columns.clone();
+                }
+                ConstraintKind::Check(j) => {
+                    con.oid = base + 700 + j as i64;
+                    con.kind = "c";
+                    con.index = 0;
+                    con.cols = Vec::new();
+                }
+                ConstraintKind::ForeignKey(j) => {
+                    let fk = &t.foreign_keys[j];
+                    let parent = tables.iter().find(|p| p.name == fk.table).expect("listed");
+                    con.oid = base + 800 + j as i64;
+                    con.kind = "f";
+                    con.index = crate::fk::referenced_key(parent, &fk.ref_columns)
+                        .map_or(0, |(i, _)| index_oid(parent, i));
+                    con.references = Some(parent.clone());
+                    con.cols = fk.columns.clone();
+                    con.ref_cols = fk.ref_columns.clone();
+                    con.on_update = fk_code(fk.on_update);
+                    con.on_delete = fk_code(fk.on_delete);
+                }
+            }
+            con
+        })
+        .collect()
 }
 
 fn index_def(t: &Table, i: Option<usize>) -> String {
@@ -989,21 +998,9 @@ fn data_type_name(c: &Column) -> String {
     format_type(oid, None).unwrap_or_else(|| c.ty.name().into())
 }
 
-/// The rows of catalog table `name` (as [`lookup`] named it).
-pub fn rows(name: &str, txn: &dyn KvTxn) -> Result<Vec<Row>> {
-    if let Some(short) = name.strip_prefix("nc_catalog.") {
-        return crate::ncatalog::rows(short, txn);
-    }
-    let (schema, short) = name.split_once('.').unwrap_or(("pg_catalog", name));
-    let ns = if schema == "information_schema" {
-        NS_INFO
-    } else {
-        NS_CATALOG
-    };
-    let k = DEFS
-        .iter()
-        .position(|d| d.ns == ns && d.name == short)
-        .ok_or_else(|| Error::internal(format!("no catalog table {name}")))?;
+/// The rows of catalog table `DEFS[k]`.
+fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
+    let short = DEFS[k].name;
     let def = def_table(k);
     let tables = catalog::tables(txn)?;
     let r = |vals: &[(&str, Value)]| row(&def, vals);
@@ -1033,7 +1030,7 @@ pub fn rows(name: &str, txn: &dyn KvTxn) -> Result<Vec<Row>> {
             ]));
         }
         "pg_class" => {
-            for rel in relations(&tables) {
+            for rel in relations(&tables, registry) {
                 out.push(r(&[
                     ("oid", int(rel.oid)),
                     ("relname", text(rel.name)),
@@ -1072,7 +1069,7 @@ pub fn rows(name: &str, txn: &dyn KvTxn) -> Result<Vec<Row>> {
             }
         }
         "pg_attribute" => {
-            for rel in relations(&tables) {
+            for rel in relations(&tables, registry) {
                 for (i, (name, typ, typmod, notnull, hasdef, coll)) in
                     rel.cols.into_iter().enumerate()
                 {
@@ -1451,15 +1448,15 @@ pub fn rows(name: &str, txn: &dyn KvTxn) -> Result<Vec<Row>> {
 
 // ------------------------------------------------------------- functions
 
-fn relation_by_oid(tables: &[Table], oid: i64) -> Option<String> {
-    relations(tables)
+fn relation_by_oid(tables: &[Table], registry: &Registry, oid: i64) -> Option<String> {
+    relations(tables, registry)
         .into_iter()
         .find(|r| r.oid == oid)
         .map(|r| r.name)
 }
 
 /// `'name'::regclass` / `'16384'::regclass`: the relation's oid.
-fn regclass_oid(tables: &[Table], s: &str) -> Result<i64> {
+fn regclass_oid(tables: &[Table], registry: &Registry, s: &str) -> Result<i64> {
     let s = s.trim();
     if let Ok(oid) = s.parse::<i64>() {
         return Ok(oid);
@@ -1469,15 +1466,172 @@ fn regclass_oid(tables: &[Table], s: &str) -> Result<i64> {
         Some((a, b)) => (Some(a.trim_matches('"')), b.trim_matches('"')),
         None => (None, unquoted),
     };
-    relations(tables)
+    relations(tables, registry)
         .into_iter()
         .find(|r| r.name == name && schema.is_none_or(|sch| ns_name(r.ns) == Some(sch)))
         .map(|r| r.oid)
         .ok_or_else(|| Error::undefined_table(format!("relation \"{s}\" does not exist")))
 }
 
-/// Evaluates a catalog or array function (the [`Func::catalog`] ones).
-pub fn call(f: Func, args: &[Value], txn: &dyn KvTxn) -> Result<Value> {
+/// The `pg-compat` functions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PgFn {
+    /// `x::regclass`: a name (or oid text) to an oid, an oid to a name.
+    RegClass,
+    /// `oid::regtype`: a type's name.
+    RegType,
+    /// `oid::regnamespace`: a schema's name.
+    RegNamespace,
+    /// `oid::regrole`: a role's name.
+    RegRole,
+    /// `pg_get_userbyid(oid)`.
+    GetUserById,
+    /// `pg_table_is_visible(oid)` (and the type / function variants).
+    TableIsVisible,
+    /// `format_type(type oid, typmod)`.
+    FormatType,
+    /// `pg_get_expr(expr, relation [, pretty])`.
+    GetExpr,
+    /// `pg_get_indexdef(index oid [, column, pretty])`.
+    GetIndexdef,
+    /// `pg_get_constraintdef(constraint oid [, pretty])`.
+    GetConstraintdef,
+    /// `pg_partition_ancestors(relation)`: the relation (nothing is
+    /// partitioned).
+    PartitionAncestors,
+    /// `pg_get_statisticsobjdef_columns(oid)` (always NULL).
+    StatisticsObjColumns,
+    /// `pg_relation_is_publishable(oid)` (always false).
+    RelationIsPublishable,
+    /// `pg_get_triggerdef(oid [, pretty])` (always NULL).
+    GetTriggerdef,
+    /// `pg_encoding_to_char(encoding)`.
+    EncodingToChar,
+    /// `obj_description`, `col_description`, `shobj_description` (NULL).
+    ObjDescription,
+    /// `has_table_privilege` and friends (always true: one role).
+    HasPrivilege,
+    /// `pg_backend_pid()`.
+    BackendPid,
+    /// `current_setting(name [, missing ok])`.
+    CurrentSetting,
+    /// `pg_typeof(x)`: the argument's type name, a constant.
+    TypeOf,
+}
+
+/// The functions: names (the first is shown by `EXPLAIN`) and argument
+/// counts.
+const FUNCTIONS: &[(PgFn, &[&str], RangeInclusive<usize>)] = &[
+    (PgFn::RegClass, &["__regclass"], 1..=1),
+    (PgFn::RegType, &["__regtype"], 1..=1),
+    (PgFn::RegNamespace, &["__regnamespace"], 1..=1),
+    (PgFn::RegRole, &["__regrole"], 1..=1),
+    (PgFn::GetUserById, &["pg_get_userbyid"], 1..=1),
+    (
+        PgFn::TableIsVisible,
+        &[
+            "pg_table_is_visible",
+            "pg_type_is_visible",
+            "pg_function_is_visible",
+        ],
+        1..=1,
+    ),
+    (PgFn::FormatType, &["format_type"], 2..=2),
+    (PgFn::GetExpr, &["pg_get_expr"], 2..=3),
+    (PgFn::GetIndexdef, &["pg_get_indexdef"], 1..=3),
+    (PgFn::GetConstraintdef, &["pg_get_constraintdef"], 1..=2),
+    (PgFn::PartitionAncestors, &["pg_partition_ancestors"], 1..=1),
+    (
+        PgFn::StatisticsObjColumns,
+        &["pg_get_statisticsobjdef_columns"],
+        1..=1,
+    ),
+    (
+        PgFn::RelationIsPublishable,
+        &["pg_relation_is_publishable"],
+        1..=1,
+    ),
+    (PgFn::GetTriggerdef, &["pg_get_triggerdef"], 1..=2),
+    (PgFn::EncodingToChar, &["pg_encoding_to_char"], 1..=1),
+    (
+        PgFn::ObjDescription,
+        &["obj_description", "col_description", "shobj_description"],
+        1..=2,
+    ),
+    (
+        PgFn::HasPrivilege,
+        &[
+            "has_table_privilege",
+            "has_schema_privilege",
+            "has_database_privilege",
+            "has_column_privilege",
+            "has_sequence_privilege",
+            "has_function_privilege",
+            "pg_has_role",
+        ],
+        1..=4,
+    ),
+    (PgFn::BackendPid, &["pg_backend_pid"], 0..=0),
+    (PgFn::CurrentSetting, &["current_setting"], 1..=2),
+    (PgFn::TypeOf, &["pg_typeof"], 1..=1),
+];
+
+struct PgFunction {
+    f: PgFn,
+    arity: RangeInclusive<usize>,
+}
+
+impl ScalarFunction for PgFunction {
+    fn name(&self) -> &str {
+        match self.f {
+            PgFn::RegClass => "regclass",
+            PgFn::RegType => "regtype",
+            PgFn::RegNamespace => "regnamespace",
+            PgFn::RegRole => "regrole",
+            f => FUNCTIONS.iter().find(|(g, ..)| *g == f).expect("listed").1[0],
+        }
+    }
+
+    fn arity(&self) -> RangeInclusive<usize> {
+        self.arity.clone()
+    }
+
+    fn resolve(&self, args: &[ArgInfo]) -> Result<Signature> {
+        let n = args.len();
+        let keep = |t| Ok(Signature::keep(n, Some(t)));
+        match self.f {
+            // regclass: text (a name) to an oid, an oid to its name.
+            PgFn::RegClass => keep(if args[0].ty == Some(I) { T } else { I }),
+            PgFn::TableIsVisible | PgFn::RelationIsPublishable | PgFn::HasPrivilege => keep(B),
+            PgFn::PartitionAncestors => Ok(Signature::new(
+                vec![Arg::Untyped(I)],
+                Returns::Type(Some(I)),
+            )),
+            PgFn::BackendPid => keep(I),
+            PgFn::TypeOf => Ok(Signature::new(
+                vec![Arg::Keep],
+                Returns::Constant(Value::Text(match args[0].ty {
+                    Some(DataType::Int) => "bigint".into(),
+                    Some(t) => t.name().into(),
+                    None => "unknown".into(),
+                })),
+            )),
+            _ => keep(T),
+        }
+    }
+
+    /// They take `NULL`s their own way.
+    fn strict(&self) -> bool {
+        false
+    }
+
+    fn call(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        call(self.f, args, cx.txn(), cx.registry())
+    }
+}
+
+/// Evaluates a `pg-compat` function.
+fn call(f: PgFn, args: &[Value], txn: &dyn KvTxn, registry: &Registry) -> Result<Value> {
     let null = |i: usize| args.get(i).is_none_or(Value::is_null);
     let as_int = |i: usize| match args.get(i) {
         Some(Value::Int(n)) => Some(*n),
@@ -1485,27 +1639,24 @@ pub fn call(f: Func, args: &[Value], txn: &dyn KvTxn) -> Result<Value> {
         Some(Value::Text(s)) => s.trim().parse().ok(),
         _ => None,
     };
-    let array = |i: usize| match args.get(i) {
-        Some(Value::Array(items)) => Some(items),
-        _ => None,
-    };
     Ok(match f {
-        Func::RegClass => match args.first() {
-            Some(Value::Text(s)) => Value::Int(regclass_oid(&catalog::tables(txn)?, s)?),
+        PgFn::RegClass => match args.first() {
+            Some(Value::Text(s)) => Value::Int(regclass_oid(&catalog::tables(txn)?, registry, s)?),
             Some(Value::Int(oid)) => Value::Text(
-                relation_by_oid(&catalog::tables(txn)?, *oid).unwrap_or_else(|| oid.to_string()),
+                relation_by_oid(&catalog::tables(txn)?, registry, *oid)
+                    .unwrap_or_else(|| oid.to_string()),
             ),
             _ => Value::Null,
         },
-        Func::RegType => match as_int(0) {
+        PgFn::RegType => match as_int(0) {
             Some(oid) => Value::Text(format_type(oid, None).unwrap_or_else(|| oid.to_string())),
             None => Value::Null,
         },
-        Func::RegNamespace => match as_int(0) {
+        PgFn::RegNamespace => match as_int(0) {
             Some(oid) => Value::Text(ns_name(oid).map_or_else(|| oid.to_string(), str::to_string)),
             None => Value::Null,
         },
-        Func::RegRole | Func::GetUserById => {
+        PgFn::RegRole | PgFn::GetUserById => {
             if null(0) {
                 Value::Null
             } else {
@@ -1513,30 +1664,30 @@ pub fn call(f: Func, args: &[Value], txn: &dyn KvTxn) -> Result<Value> {
             }
         }
         // On the search path: public and pg_catalog.
-        Func::TableIsVisible => match as_int(0) {
+        PgFn::TableIsVisible => match as_int(0) {
             Some(oid) => Value::Bool(
-                relations(&catalog::tables(txn)?)
+                relations(&catalog::tables(txn)?, registry)
                     .iter()
                     .find(|r| r.oid == oid)
                     .is_none_or(|r| r.ns == NS_PUBLIC || r.ns == NS_CATALOG),
             ),
             None => Value::Null,
         },
-        Func::FormatType => match as_int(0) {
+        PgFn::FormatType => match as_int(0) {
             Some(oid) => format_type(oid, as_int(1)).map_or(Value::Null, Value::Text),
             None => Value::Null,
         },
-        Func::GetExpr => match args.first() {
+        PgFn::GetExpr => match args.first() {
             Some(Value::Text(s)) => Value::Text(s.clone()),
             _ => Value::Null,
         },
-        Func::GetIndexdef => {
+        PgFn::GetIndexdef => {
             let Some(oid) = as_int(0) else {
                 return Ok(Value::Null);
             };
             let tables = catalog::tables(txn)?;
             let column = as_int(1).filter(|c| *c > 0);
-            relations(&tables)
+            relations(&tables, registry)
                 .into_iter()
                 .find(|r| r.oid == oid && r.kind == "i")
                 .and_then(|r| match column {
@@ -1546,7 +1697,7 @@ pub fn call(f: Func, args: &[Value], txn: &dyn KvTxn) -> Result<Value> {
                 })
                 .map_or(Value::Null, Value::Text)
         }
-        Func::GetConstraintdef => {
+        PgFn::GetConstraintdef => {
             let Some(oid) = as_int(0) else {
                 return Ok(Value::Null);
             };
@@ -1556,61 +1707,19 @@ pub fn call(f: Func, args: &[Value], txn: &dyn KvTxn) -> Result<Value> {
                 .map_or(Value::Null, |c| Value::Text(c.def))
         }
         // No partitioning: a table is its own (only) ancestor.
-        Func::PartitionAncestors => args.first().cloned().unwrap_or(Value::Null),
-        Func::ArrayToString => {
-            let Some(items) = array(0) else {
-                return Ok(Value::Null);
-            };
-            let Some(Value::Text(sep)) = args.get(1) else {
-                return Ok(Value::Null);
-            };
-            let null_as = match args.get(2) {
-                Some(Value::Text(s)) => Some(s.clone()),
-                _ => None,
-            };
-            let parts: Vec<String> = items
-                .iter()
-                .filter_map(|v| match v {
-                    Value::Null => null_as.clone(),
-                    v => Some(v.render()),
-                })
-                .collect();
-            Value::Text(parts.join(sep))
-        }
-        Func::ArrayUpper | Func::ArrayLength | Func::ArrayLower | Func::Cardinality => {
-            let Some(items) = array(0) else {
-                return Ok(Value::Null);
-            };
-            if f != Func::Cardinality && as_int(1) != Some(1) || items.is_empty() {
-                return Ok(if f == Func::Cardinality {
-                    Value::Int(0)
-                } else {
-                    Value::Null
-                });
-            }
-            Value::Int(if f == Func::ArrayLower {
-                1
-            } else {
-                items.len() as i64
-            })
-        }
-        Func::ArrayAppend => {
-            let mut items = array(0).cloned().unwrap_or_default();
-            items.push(args.get(1).cloned().unwrap_or(Value::Null));
-            Value::Array(items)
-        }
-        Func::StatisticsObjColumns | Func::GetTriggerdef | Func::ObjDescription => Value::Null,
-        Func::RelationIsPublishable => Value::Bool(false),
-        Func::EncodingToChar => {
+        PgFn::PartitionAncestors => args.first().cloned().unwrap_or(Value::Null),
+        PgFn::StatisticsObjColumns | PgFn::GetTriggerdef | PgFn::ObjDescription => Value::Null,
+        PgFn::RelationIsPublishable => Value::Bool(false),
+        PgFn::EncodingToChar => {
             if as_int(0) == Some(6) {
                 Value::Text("UTF8".into())
             } else {
                 Value::Text(String::new())
             }
         }
-        Func::HasPrivilege => Value::Bool(true),
-        Func::BackendPid => Value::Int(i64::from(std::process::id())),
-        Func::CurrentSetting => match args.first() {
+        PgFn::HasPrivilege => Value::Bool(true),
+        PgFn::BackendPid => Value::Int(i64::from(std::process::id())),
+        PgFn::CurrentSetting => match args.first() {
             Some(Value::Text(name)) => match name.to_ascii_lowercase().as_str() {
                 "server_version" => Value::Text("16.0 (nucleus)".into()),
                 "server_version_num" => Value::Text("160000".into()),
@@ -1632,48 +1741,7 @@ pub fn call(f: Func, args: &[Value], txn: &dyn KvTxn) -> Result<Value> {
             },
             _ => Value::Null,
         },
-        Func::RegexpReplace => {
-            let (Some(Value::Text(s)), Some(Value::Text(p)), Some(Value::Text(rep))) =
-                (args.first(), args.get(1), args.get(2))
-            else {
-                return Ok(Value::Null);
-            };
-            let flags = match args.get(3) {
-                Some(Value::Text(f)) => f.clone(),
-                _ => String::new(),
-            };
-            // PostgreSQL writes \1 for a group; the regex crate ${1}.
-            let mut rep2 = String::new();
-            let mut chars = rep.chars().peekable();
-            while let Some(c) = chars.next() {
-                match (c, chars.peek()) {
-                    ('\\', Some(d)) if d.is_ascii_digit() => {
-                        rep2.push_str(&format!("${{{d}}}"));
-                        chars.next();
-                    }
-                    ('\\', Some('&')) => {
-                        rep2.push_str("${0}");
-                        chars.next();
-                    }
-                    ('$', _) => rep2.push_str("$$"),
-                    (c, _) => rep2.push(c),
-                }
-            }
-            crate::expr::with_regex(p, flags.contains('i'), |re| {
-                if flags.contains('g') {
-                    re.replace_all(s, rep2.as_str()).into_owned()
-                } else {
-                    re.replace(s, rep2.as_str()).into_owned()
-                }
-            })
-            .map(Value::Text)?
-        }
-        _ => {
-            return Err(Error::internal(format!(
-                "{} is not a catalog function",
-                f.name()
-            )));
-        }
+        PgFn::TypeOf => unreachable!("a constant"),
     })
 }
 
@@ -1694,11 +1762,12 @@ mod tests {
         );
         assert_eq!(format_type(1009, None).as_deref(), Some("text[]"));
         assert_eq!(format_type(424242, None), None);
+        // Every view is registered, pg_catalog's found unqualified too.
+        let mut r = Registry::builtin();
+        r.add(&PgCompat).unwrap();
         for d in DEFS {
-            assert!(
-                lookup(ns_name(d.ns).filter(|n| *n != "pg_catalog"), d.name).is_some()
-                    || d.ns == NS_INFO
-            );
+            assert!(r.view(ns_name(d.ns), d.name).is_some());
+            assert_eq!(r.view(None, d.name).is_some(), d.ns == NS_CATALOG);
         }
     }
 }

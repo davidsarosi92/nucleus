@@ -9,7 +9,21 @@ use std::sync::Arc;
 use nucleus_kv::Kv;
 use nucleus_sql::ast::Statement;
 use nucleus_sql::decimal::Decimal;
+use nucleus_sql::ext::Registry;
+use nucleus_sql::pgcatalog::PgCompat;
 use nucleus_sql::{DataType, Error, OutColumn, Output, Session, TxnStatus, Value};
+
+/// The sessions' registry: the built-ins and `pg-compat`, which PostgreSQL
+/// clients need (`pg_catalog`, the `pg_*` functions).
+fn registry() -> Arc<Registry> {
+    static R: std::sync::OnceLock<Arc<Registry>> = std::sync::OnceLock::new();
+    R.get_or_init(|| {
+        let mut r = Registry::builtin();
+        r.add(&PgCompat).expect("pg-compat registers");
+        Arc::new(r)
+    })
+    .clone()
+}
 
 use crate::Config;
 
@@ -323,7 +337,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     let mut conn = Conn {
         out,
         log: config.log_queries.then_some(id),
-        session: Session::new(kv),
+        session: Session::with_registry(kv, registry()),
         prepared: HashMap::new(),
         portals: HashMap::new(),
     };

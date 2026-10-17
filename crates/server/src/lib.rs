@@ -12,7 +12,8 @@
 //!   working, not extended for tool-specific catalog queries.
 //!
 //! Both run statements through [`nucleus_sql::Session`], one thread per
-//! connection.
+//! connection; the PostgreSQL front end's sessions also have the
+//! `pg-compat` module (`pg_catalog`, the `pg_*` functions).
 
 mod native;
 mod pg;

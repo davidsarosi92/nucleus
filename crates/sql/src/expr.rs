@@ -9,6 +9,7 @@ use crate::ast::{BinaryOp, UnaryOp};
 use crate::datetime as dt;
 use crate::decimal::Decimal;
 use crate::error::{Error, Result};
+use crate::ext::{CallContext, FnRef, Registry};
 use crate::plan::Plan;
 use crate::types::{DataType, Row, Value, type_name};
 
@@ -59,8 +60,8 @@ pub enum Expr {
     },
     /// `CAST`.
     Cast(Box<Expr>, DataType),
-    /// A scalar function.
-    Func(Func, Vec<Expr>),
+    /// A call of a registered scalar function.
+    Call(FnRef, Vec<Expr>),
     /// A subquery.
     Subquery(Box<SubPlan>),
     /// `ARRAY[…]`.
@@ -104,8 +105,8 @@ pub enum SubKind {
     Array,
 }
 
-/// Scalar functions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The built-in scalar functions ([`crate::builtin`] registers them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Func {
     /// `lower(text)`.
     Lower,
@@ -187,29 +188,6 @@ pub enum Func {
     CurrentDatabase,
     /// `current_schema()`.
     CurrentSchema,
-    /// `x::regclass`: a name (or oid text) to an oid, an oid to a name.
-    RegClass,
-    /// `oid::regtype`: a type's name.
-    RegType,
-    /// `oid::regnamespace`: a schema's name.
-    RegNamespace,
-    /// `oid::regrole`: a role's name.
-    RegRole,
-    /// `pg_get_userbyid(oid)`.
-    GetUserById,
-    /// `pg_table_is_visible(oid)` (and the type / function variants).
-    TableIsVisible,
-    /// `format_type(type oid, typmod)`.
-    FormatType,
-    /// `pg_get_expr(expr, relation [, pretty])`.
-    GetExpr,
-    /// `pg_get_indexdef(index oid [, column, pretty])`.
-    GetIndexdef,
-    /// `pg_get_constraintdef(constraint oid [, pretty])`.
-    GetConstraintdef,
-    /// `pg_partition_ancestors(relation)`: the relation (nothing is
-    /// partitioned).
-    PartitionAncestors,
     /// `array_to_string(array, separator [, null text])`.
     ArrayToString,
     /// `array_upper(array, dimension)`.
@@ -222,148 +200,11 @@ pub enum Func {
     Cardinality,
     /// `array_append(array, element)`.
     ArrayAppend,
-    /// `pg_get_statisticsobjdef_columns(oid)` (always NULL).
-    StatisticsObjColumns,
-    /// `pg_relation_is_publishable(oid)` (always false).
-    RelationIsPublishable,
-    /// `pg_get_triggerdef(oid [, pretty])` (always NULL).
-    GetTriggerdef,
-    /// `pg_encoding_to_char(encoding)`.
-    EncodingToChar,
-    /// `obj_description`, `col_description`, `shobj_description` (NULL).
-    ObjDescription,
-    /// `has_table_privilege` and friends (always true: one role).
-    HasPrivilege,
-    /// `pg_backend_pid()`.
-    BackendPid,
-    /// `current_setting(name [, missing ok])`.
-    CurrentSetting,
     /// `regexp_replace(text, pattern, replacement [, flags])`.
     RegexpReplace,
 }
 
 impl Func {
-    /// Whether [`crate::pgcatalog::call`] evaluates it (it may read the
-    /// catalog, and handles NULL arguments itself).
-    pub fn catalog(self) -> bool {
-        matches!(
-            self,
-            Func::RegClass
-                | Func::RegType
-                | Func::RegNamespace
-                | Func::RegRole
-                | Func::GetUserById
-                | Func::TableIsVisible
-                | Func::FormatType
-                | Func::GetExpr
-                | Func::GetIndexdef
-                | Func::GetConstraintdef
-                | Func::PartitionAncestors
-                | Func::ArrayToString
-                | Func::ArrayUpper
-                | Func::ArrayLower
-                | Func::ArrayLength
-                | Func::Cardinality
-                | Func::ArrayAppend
-                | Func::StatisticsObjColumns
-                | Func::RelationIsPublishable
-                | Func::GetTriggerdef
-                | Func::EncodingToChar
-                | Func::ObjDescription
-                | Func::HasPrivilege
-                | Func::BackendPid
-                | Func::CurrentSetting
-                | Func::RegexpReplace
-        )
-    }
-}
-
-impl Func {
-    /// The function called `name`, with its accepted argument counts.
-    pub fn lookup(name: &str) -> Option<(Func, std::ops::RangeInclusive<usize>)> {
-        Some(match name {
-            "lower" => (Func::Lower, 1..=1),
-            "upper" => (Func::Upper, 1..=1),
-            "length" | "char_length" | "character_length" => (Func::Length, 1..=1),
-            "abs" => (Func::Abs, 1..=1),
-            "coalesce" => (Func::Coalesce, 1..=usize::MAX),
-            "nullif" => (Func::Nullif, 2..=2),
-            "substr" | "substring" => (Func::Substr, 2..=3),
-            "round" => (Func::Round, 1..=2),
-            "floor" => (Func::Floor, 1..=1),
-            "ceil" | "ceiling" => (Func::Ceil, 1..=1),
-            "trim" | "btrim" => (Func::Trim, 1..=1),
-            "concat" => (Func::Concat, 1..=usize::MAX),
-            "greatest" => (Func::Greatest, 1..=usize::MAX),
-            "least" => (Func::Least, 1..=usize::MAX),
-            "__is_distinct_from" => (Func::IsDistinctFrom, 2..=2),
-            "replace" => (Func::Replace, 3..=3),
-            "strpos" => (Func::Strpos, 2..=2),
-            "sqrt" => (Func::Sqrt, 1..=1),
-            "power" | "pow" => (Func::Power, 2..=2),
-            "version" => (Func::Version, 0..=0),
-            "trunc" => (Func::Trunc, 1..=2),
-            "sign" => (Func::Sign, 1..=1),
-            "mod" => (Func::Mod, 2..=2),
-            "now" | "current_timestamp" | "transaction_timestamp" | "statement_timestamp" => {
-                (Func::Now, 0..=0)
-            }
-            "clock_timestamp" => (Func::ClockTimestamp, 0..=0),
-            "current_date" => (Func::CurrentDate, 0..=0),
-            "localtimestamp" => (Func::LocalTimestamp, 0..=0),
-            "extract" => (Func::Extract, 2..=2),
-            "date_part" => (Func::DatePart, 2..=2),
-            "date_trunc" => (Func::DateTrunc, 2..=2),
-            "make_date" => (Func::MakeDate, 3..=3),
-            "age" => (Func::Age, 1..=2),
-            "justify_days" => (Func::JustifyDays, 1..=1),
-            "justify_hours" => (Func::JustifyHours, 1..=1),
-            "justify_interval" => (Func::JustifyInterval, 1..=1),
-            "to_timestamp" => (Func::ToTimestamp, 1..=1),
-            "__numeric_fit" => (Func::NumericFit, 3..=3),
-            "current_user" | "session_user" | "user" | "current_role" => (Func::CurrentUser, 0..=0),
-            "current_database" | "current_catalog" => (Func::CurrentDatabase, 0..=0),
-            "current_schema" => (Func::CurrentSchema, 0..=0),
-            "__regclass" => (Func::RegClass, 1..=1),
-            "__regtype" => (Func::RegType, 1..=1),
-            "__regnamespace" => (Func::RegNamespace, 1..=1),
-            "__regrole" => (Func::RegRole, 1..=1),
-            "pg_get_userbyid" => (Func::GetUserById, 1..=1),
-            "pg_table_is_visible" | "pg_type_is_visible" | "pg_function_is_visible" => {
-                (Func::TableIsVisible, 1..=1)
-            }
-            "format_type" => (Func::FormatType, 2..=2),
-            "pg_get_expr" => (Func::GetExpr, 2..=3),
-            "pg_get_indexdef" => (Func::GetIndexdef, 1..=3),
-            "pg_get_constraintdef" => (Func::GetConstraintdef, 1..=2),
-            "pg_partition_ancestors" => (Func::PartitionAncestors, 1..=1),
-            "array_to_string" => (Func::ArrayToString, 2..=3),
-            "array_upper" => (Func::ArrayUpper, 2..=2),
-            "array_lower" => (Func::ArrayLower, 2..=2),
-            "array_length" => (Func::ArrayLength, 2..=2),
-            "cardinality" => (Func::Cardinality, 1..=1),
-            "array_append" => (Func::ArrayAppend, 2..=2),
-            "pg_get_statisticsobjdef_columns" => (Func::StatisticsObjColumns, 1..=1),
-            "pg_relation_is_publishable" => (Func::RelationIsPublishable, 1..=1),
-            "pg_get_triggerdef" => (Func::GetTriggerdef, 1..=2),
-            "pg_encoding_to_char" => (Func::EncodingToChar, 1..=1),
-            "obj_description" | "col_description" | "shobj_description" => {
-                (Func::ObjDescription, 1..=2)
-            }
-            "has_table_privilege"
-            | "has_schema_privilege"
-            | "has_database_privilege"
-            | "has_column_privilege"
-            | "has_sequence_privilege"
-            | "has_function_privilege"
-            | "pg_has_role" => (Func::HasPrivilege, 1..=4),
-            "pg_backend_pid" => (Func::BackendPid, 0..=0),
-            "current_setting" => (Func::CurrentSetting, 1..=2),
-            "regexp_replace" => (Func::RegexpReplace, 3..=4),
-            _ => return None,
-        })
-    }
-
     /// The SQL name, for `EXPLAIN`.
     pub fn name(self) -> &'static str {
         match self {
@@ -407,41 +248,24 @@ impl Func {
             Func::CurrentUser => "current_user",
             Func::CurrentDatabase => "current_database",
             Func::CurrentSchema => "current_schema",
-            Func::RegClass => "regclass",
-            Func::RegType => "regtype",
-            Func::RegNamespace => "regnamespace",
-            Func::RegRole => "regrole",
-            Func::GetUserById => "pg_get_userbyid",
-            Func::TableIsVisible => "pg_table_is_visible",
-            Func::FormatType => "format_type",
-            Func::GetExpr => "pg_get_expr",
-            Func::GetIndexdef => "pg_get_indexdef",
-            Func::GetConstraintdef => "pg_get_constraintdef",
-            Func::PartitionAncestors => "pg_partition_ancestors",
             Func::ArrayToString => "array_to_string",
             Func::ArrayUpper => "array_upper",
             Func::ArrayLower => "array_lower",
             Func::ArrayLength => "array_length",
             Func::Cardinality => "cardinality",
             Func::ArrayAppend => "array_append",
-            Func::StatisticsObjColumns => "pg_get_statisticsobjdef_columns",
-            Func::RelationIsPublishable => "pg_relation_is_publishable",
-            Func::GetTriggerdef => "pg_get_triggerdef",
-            Func::EncodingToChar => "pg_encoding_to_char",
-            Func::ObjDescription => "obj_description",
-            Func::HasPrivilege => "has_table_privilege",
-            Func::BackendPid => "pg_backend_pid",
-            Func::CurrentSetting => "current_setting",
             Func::RegexpReplace => "regexp_replace",
         }
     }
 }
 
-/// What an execution shares: the transaction, the parameters, and cached
-/// results of uncorrelated subqueries.
+/// What an execution shares: the transaction, the registry, the
+/// parameters, and cached results of uncorrelated subqueries.
 pub struct Ctx<'a> {
     /// The transaction.
     pub txn: &'a dyn KvTxn,
+    /// The session's functions and views.
+    pub registry: &'a Registry,
     /// Parameter values.
     pub params: &'a [Value],
     /// Uncorrelated subquery results, by plan address.
@@ -456,9 +280,10 @@ pub struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     /// A context.
-    pub fn new(txn: &'a dyn KvTxn, params: &'a [Value]) -> Self {
+    pub fn new(txn: &'a dyn KvTxn, registry: &'a Registry, params: &'a [Value]) -> Self {
         Self {
             txn,
+            registry,
             params,
             cache: RefCell::new(HashMap::new()),
             ctes: RefCell::new(HashMap::new()),
@@ -582,15 +407,15 @@ impl Expr {
                 }
             }
             Expr::Cast(e, ty) => e.eval(env)?.cast(*ty)?,
-            Expr::Func(f, args) => {
+            Expr::Call(f, args) => {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
                     vals.push(a.eval(env)?);
                 }
-                if f.catalog() {
-                    crate::pgcatalog::call(*f, &vals, env.ctx.txn)?
+                if f.strict() && vals.iter().any(Value::is_null) {
+                    Value::Null
                 } else {
-                    func(*f, vals)?
+                    f.call(&CallContext::new(env.ctx.txn, env.ctx.registry), &vals)?
                 }
             }
             Expr::Subquery(sub) => subquery(sub, env)?,
@@ -679,7 +504,7 @@ impl Expr {
                     o.walk(f);
                 }
             }
-            Expr::Func(_, args) | Expr::Array(args) => args.iter().for_each(|x| x.walk(f)),
+            Expr::Call(_, args) | Expr::Array(args) => args.iter().for_each(|x| x.walk(f)),
             Expr::Subscript(a, b)
             | Expr::AnyAll {
                 left: a, right: b, ..
@@ -731,9 +556,10 @@ impl Expr {
                     .collect(),
                 otherwise: otherwise.as_ref().map(|o| m(o)),
             },
-            Expr::Func(func, args) => {
-                Expr::Func(*func, args.iter().map(|x| x.map_columns(f)).collect())
-            }
+            Expr::Call(func, args) => Expr::Call(
+                func.clone(),
+                args.iter().map(|x| x.map_columns(f)).collect(),
+            ),
             Expr::Array(items) => Expr::Array(items.iter().map(|x| x.map_columns(f)).collect()),
             Expr::Subscript(a, i) => Expr::Subscript(m(a), m(i)),
             Expr::AnyAll {
@@ -1084,7 +910,8 @@ pub fn like(s: &str, p: &str) -> bool {
     j == p.len()
 }
 
-fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
+/// Evaluates built-in `f` (what [`crate::builtin`]'s functions call).
+pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
     let text = |v: &Value| -> Result<String> {
         match v {
             Value::Text(s) => Ok(s.clone()),
@@ -1373,9 +1200,8 @@ fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
             let s = u32::try_from(int(&args[2])?).unwrap_or(0);
             Value::Numeric(d.fit(p, s)?)
         }
-        // Catalog functions run in pgcatalog::call, the others before the
-        // NULL check above.
-        _ => unreachable!("{} is evaluated elsewhere", f.name()),
+        // The rest before the NULL check above.
+        _ => unreachable!("{} is evaluated above", f.name()),
     })
 }
 

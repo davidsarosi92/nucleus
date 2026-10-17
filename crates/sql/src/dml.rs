@@ -10,6 +10,7 @@ use crate::catalog::{self, Table};
 use crate::error::{Error, Result};
 use crate::exec::{self, index_entry, pk_suffix, row_key_of};
 use crate::expr::{Ctx, Env, Expr};
+use crate::ext::Registry;
 use crate::optimizer::choose_access;
 use crate::parser::parse_expr;
 use crate::plan::{Access, Plan};
@@ -41,9 +42,9 @@ pub struct Writer {
 
 impl Writer {
     /// Binds the table's `CHECK` and `DEFAULT` expressions.
-    pub fn new(txn: &dyn KvTxn, table: Table) -> Result<Self> {
+    pub fn new(txn: &dyn KvTxn, reg: &Registry, table: Table) -> Result<Self> {
         let scope = table_scope(&table);
-        let mut binder = Binder::new(txn);
+        let mut binder = Binder::new(txn, reg);
         let mut checks = Vec::new();
         for (name, text) in &table.checks {
             checks.push((name.clone(), binder.condition(&parse_expr(text)?, &scope)?));
@@ -228,6 +229,7 @@ fn project(exprs: &[Expr], row: &Row, ctx: &Ctx) -> Result<Row> {
 /// `INSERT`.
 pub fn insert(
     txn: &mut dyn KvTxn,
+    reg: &Registry,
     table: &str,
     columns: &Option<Vec<String>>,
     source: &ast::Query,
@@ -260,7 +262,7 @@ pub fn insert(
     };
     let (rows, writer, ret) = {
         let ro: &dyn KvTxn = &*txn;
-        let mut binder = Binder::new(ro);
+        let mut binder = Binder::new(ro, reg);
         let bound = binder.query(source)?;
         let plan = crate::optimizer::optimize(bound.plan, ro);
         let width = plan.width();
@@ -277,8 +279,8 @@ pub fn insert(
             ));
         }
         let ret = returning(&mut binder, returning_items, &t)?;
-        let writer = Writer::new(ro, t.clone())?;
-        let ctx = Ctx::new(ro, params);
+        let writer = Writer::new(ro, reg, t.clone())?;
+        let ctx = Ctx::new(ro, reg, params);
         let source_rows = exec::collect(&plan, &ctx, None)?;
         let mut rows = Vec::with_capacity(source_rows.len());
         for src in source_rows {
@@ -298,7 +300,7 @@ pub fn insert(
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {
-            let ctx = Ctx::new(&*txn, params);
+            let ctx = Ctx::new(&*txn, reg, params);
             Some((
                 cols,
                 rows.iter()
@@ -335,6 +337,7 @@ pub fn bind_filter(
 /// `UPDATE`.
 pub fn update(
     txn: &mut dyn KvTxn,
+    reg: &Registry,
     table: &str,
     assignments: &[(String, ast::Expr)],
     filter: Option<&ast::Expr>,
@@ -344,7 +347,7 @@ pub fn update(
     let t = catalog::table(&*txn, table)?;
     let (changes, writer, ret) = {
         let ro: &dyn KvTxn = &*txn;
-        let mut binder = Binder::new(ro);
+        let mut binder = Binder::new(ro, reg);
         let scope = table_scope(&t);
         let mut sets = Vec::new();
         for (col, e) in assignments {
@@ -363,8 +366,8 @@ pub fn update(
         }
         let (access, pred) = bind_filter(&mut binder, &t, filter)?;
         let ret = returning(&mut binder, returning_items, &t)?;
-        let writer = Writer::new(ro, t.clone())?;
-        let ctx = Ctx::new(ro, params);
+        let writer = Writer::new(ro, reg, t.clone())?;
+        let ctx = Ctx::new(ro, reg, params);
         let mut changes = Vec::new();
         for (key, old) in exec::matching_rows(&t, &access, pred.as_ref(), &ctx)? {
             let env = Env {
@@ -381,11 +384,11 @@ pub fn update(
         }
         (changes, writer, ret)
     };
-    update_rows(txn, &writer, &changes)?;
+    update_rows(txn, reg, &writer, &changes)?;
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {
-            let ctx = Ctx::new(&*txn, params);
+            let ctx = Ctx::new(&*txn, reg, params);
             Some((
                 cols,
                 changes
@@ -411,7 +414,12 @@ pub fn insert_rows(txn: &mut dyn KvTxn, w: &Writer, rows: &[Row]) -> Result<()> 
 
 /// Replaces rows `(key, old, new)` (validated already) and their index
 /// entries, then runs the foreign key checks and actions.
-pub fn update_rows(txn: &mut dyn KvTxn, w: &Writer, changes: &[(Vec<u8>, Row, Row)]) -> Result<()> {
+pub fn update_rows(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    w: &Writer,
+    changes: &[(Vec<u8>, Row, Row)],
+) -> Result<()> {
     let t = &w.table;
     for (key, old, new) in changes {
         let new_key = if t.primary_key.is_empty() {
@@ -446,14 +454,19 @@ pub fn update_rows(txn: &mut dyn KvTxn, w: &Writer, changes: &[(Vec<u8>, Row, Ro
             .iter()
             .map(|(_, o, n)| (o.clone(), Some(n.clone())))
             .collect();
-        crate::fk::parent_changed(txn, t, &changed)?;
+        crate::fk::parent_changed(txn, reg, t, &changed)?;
     }
     Ok(())
 }
 
 /// Deletes rows and their index entries, then runs the foreign key
 /// actions of the tables referencing them.
-pub fn delete_rows(txn: &mut dyn KvTxn, t: &Table, rows: &[(Vec<u8>, Row)]) -> Result<()> {
+pub fn delete_rows(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    t: &Table,
+    rows: &[(Vec<u8>, Row)],
+) -> Result<()> {
     for (key, row) in rows {
         txn.delete(key)?;
         let pk = pk_suffix(t, key);
@@ -464,7 +477,7 @@ pub fn delete_rows(txn: &mut dyn KvTxn, t: &Table, rows: &[(Vec<u8>, Row)]) -> R
     if !t.referenced_by.is_empty() {
         let removed: Vec<(Row, Option<Row>)> =
             rows.iter().map(|(_, r)| (r.clone(), None)).collect();
-        crate::fk::parent_changed(txn, t, &removed)?;
+        crate::fk::parent_changed(txn, reg, t, &removed)?;
     }
     Ok(())
 }
@@ -472,6 +485,7 @@ pub fn delete_rows(txn: &mut dyn KvTxn, t: &Table, rows: &[(Vec<u8>, Row)]) -> R
 /// `DELETE`.
 pub fn delete(
     txn: &mut dyn KvTxn,
+    reg: &Registry,
     table: &str,
     filter: Option<&ast::Expr>,
     returning_items: &[SelectItem],
@@ -480,17 +494,17 @@ pub fn delete(
     let t = catalog::table(&*txn, table)?;
     let (rows, ret) = {
         let ro: &dyn KvTxn = &*txn;
-        let mut binder = Binder::new(ro);
+        let mut binder = Binder::new(ro, reg);
         let (access, pred) = bind_filter(&mut binder, &t, filter)?;
         let ret = returning(&mut binder, returning_items, &t)?;
-        let ctx = Ctx::new(ro, params);
+        let ctx = Ctx::new(ro, reg, params);
         (exec::matching_rows(&t, &access, pred.as_ref(), &ctx)?, ret)
     };
-    delete_rows(txn, &t, &rows)?;
+    delete_rows(txn, reg, &t, &rows)?;
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {
-            let ctx = Ctx::new(&*txn, params);
+            let ctx = Ctx::new(&*txn, reg, params);
             Some((
                 cols,
                 rows.iter()
@@ -506,9 +520,9 @@ pub fn delete(
 }
 
 /// Writes the entries of a new index for every existing row.
-pub fn backfill_index(txn: &mut dyn KvTxn, table: &Table, i: usize) -> Result<()> {
+pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usize) -> Result<()> {
     let rows: Vec<(Vec<u8>, Row)> = {
-        let ctx = Ctx::new(&*txn, &[]);
+        let ctx = Ctx::new(&*txn, reg, &[]);
         exec::matching_rows(table, &Access::Full, None, &ctx)?
     };
     for (key, row) in rows {
@@ -526,9 +540,14 @@ pub fn backfill_index(txn: &mut dyn KvTxn, table: &Table, i: usize) -> Result<()
 }
 
 /// Every row of a table rewritten (after `ADD COLUMN … DEFAULT`).
-pub fn rewrite_rows(txn: &mut dyn KvTxn, table: &Table, fill: &Value) -> Result<()> {
+pub fn rewrite_rows(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    table: &Table,
+    fill: &Value,
+) -> Result<()> {
     let rows: Vec<(Vec<u8>, Row)> = {
-        let ctx = Ctx::new(&*txn, &[]);
+        let ctx = Ctx::new(&*txn, reg, &[]);
         exec::matching_rows(table, &Access::Full, None, &ctx)?
     };
     for (key, mut row) in rows {
@@ -540,9 +559,14 @@ pub fn rewrite_rows(txn: &mut dyn KvTxn, table: &Table, fill: &Value) -> Result<
 }
 
 /// For `EXPLAIN` of a write: the scan it would do.
-pub fn explain_scan(txn: &dyn KvTxn, table: &str, filter: Option<&ast::Expr>) -> Result<Plan> {
+pub fn explain_scan(
+    txn: &dyn KvTxn,
+    reg: &Registry,
+    table: &str,
+    filter: Option<&ast::Expr>,
+) -> Result<Plan> {
     let t = catalog::table(txn, table)?;
-    let mut binder = Binder::new(txn);
+    let mut binder = Binder::new(txn, reg);
     let (access, filter) = bind_filter(&mut binder, &t, filter)?;
     Ok(Plan::Scan {
         table: t,

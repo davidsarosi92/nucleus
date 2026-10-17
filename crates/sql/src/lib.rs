@@ -5,6 +5,7 @@
 
 pub mod ast;
 pub mod binder;
+pub mod builtin;
 pub mod catalog;
 pub mod check;
 pub mod datetime;
@@ -14,6 +15,7 @@ pub mod encoding;
 pub mod error;
 pub mod exec;
 pub mod expr;
+pub mod ext;
 pub mod fk;
 pub mod lexer;
 pub mod ncatalog;

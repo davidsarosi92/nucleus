@@ -4,13 +4,13 @@
 //! It describes the database in nucleus's terms — table and index ids,
 //! the key prefixes their entries live under, foreign key actions,
 //! statistics — and is what nucleus's own tools and documentation use.
-//! (`pg_catalog` / `information_schema` are a compatibility layer for
-//! PostgreSQL clients, built from the same catalog; see
-//! [`crate::pgcatalog`].)
+//! Its views are registered by the built-in module ([`crate::builtin`]);
+//! `pg_catalog` / `information_schema` are another module's, for
+//! PostgreSQL clients ([`crate::pgcatalog`]).
 //!
 //! | table | one row per |
 //! |-------|-------------|
-//! | `nc_catalog.schemas` | schema |
+//! | `nc_catalog.schemas` | schema (of the session's registry) |
 //! | `nc_catalog.tables` | table |
 //! | `nc_catalog.columns` | column |
 //! | `nc_catalog.indexes` | index (the primary index is index 0) |
@@ -19,10 +19,13 @@
 //! | `nc_catalog.statistics` | analyzed column (`ANALYZE`) |
 //! | `nc_catalog.types` | type |
 
+use std::sync::Arc;
+
 use nucleus_kv::KvTxn;
 
-use crate::catalog::{self, Column, Table};
+use crate::catalog::{self, Column, ConstraintKind, Table};
 use crate::error::{Error, Result};
+use crate::ext::{CallContext, CatalogView, Registry};
 use crate::stats::Stats;
 use crate::types::{DataType, Row, Value};
 
@@ -113,40 +116,38 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
     ("types", &[("name", T), ("aliases", TA), ("category", T)]),
 ];
 
-fn columns_of(cols: &[(&str, DataType)]) -> Vec<Column> {
-    cols.iter()
-        .map(|(n, ty)| Column {
-            name: (*n).to_string(),
-            ty: *ty,
-            nullable: true,
-            default: None,
-            max_len: None,
-            numeric: None,
-        })
-        .collect()
+/// An `nc_catalog` view.
+struct NcView {
+    name: &'static str,
+    columns: &'static [(&'static str, DataType)],
 }
 
-/// Every `nc_catalog` table: name and columns.
-pub fn definitions() -> Vec<(String, Vec<Column>)> {
+impl CatalogView for NcView {
+    fn schema(&self) -> &str {
+        "nc_catalog"
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn columns(&self) -> Vec<(String, DataType)> {
+        self.columns
+            .iter()
+            .map(|(n, t)| ((*n).to_string(), *t))
+            .collect()
+    }
+
+    fn rows(&self, cx: &CallContext<'_>) -> Result<Vec<Row>> {
+        rows(self.name, cx.txn(), cx.registry())
+    }
+}
+
+/// Every `nc_catalog` view.
+pub fn views() -> Vec<Arc<dyn CatalogView>> {
     DEFS.iter()
-        .map(|(n, cols)| ((*n).to_string(), columns_of(cols)))
+        .map(|(name, columns)| Arc::new(NcView { name, columns }) as Arc<dyn CatalogView>)
         .collect()
-}
-
-/// The `nc_catalog` table `name`.
-pub fn lookup(name: &str) -> Option<Table> {
-    let (n, cols) = DEFS.iter().find(|(n, _)| *n == name)?;
-    Some(Table {
-        id: 0,
-        name: format!("nc_catalog.{n}"),
-        columns: columns_of(cols),
-        primary_key: Vec::new(),
-        indexes: Vec::new(),
-        checks: Vec::new(),
-        next_index_id: 1,
-        foreign_keys: Vec::new(),
-        referenced_by: Vec::new(),
-    })
 }
 
 /// A column's type as nucleus writes it.
@@ -181,18 +182,13 @@ fn id(t: &Table) -> Value {
 }
 
 /// The rows of `nc_catalog.<name>`.
-pub fn rows(name: &str, txn: &dyn KvTxn) -> Result<Vec<Row>> {
+fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
     let tables = catalog::tables(txn)?;
     let mut out: Vec<Row> = Vec::new();
     match name {
         "schemas" => {
-            for (n, d) in [
-                ("nc_catalog", "the nucleus system catalog"),
-                ("public", "user tables"),
-                ("pg_catalog", "PostgreSQL-compatible catalog views"),
-                ("information_schema", "SQL-standard catalog views"),
-            ] {
-                out.push(vec![text(n), text(d)]);
+            for s in registry.schemas() {
+                out.push(vec![text(s.name.clone()), text(s.description.clone())]);
             }
         }
         "tables" => {
@@ -261,19 +257,19 @@ pub fn rows(name: &str, txn: &dyn KvTxn) -> Result<Vec<Row>> {
             }
         }
         "constraints" => {
-            for c in crate::pgcatalog::constraints(&tables) {
+            for c in catalog::constraints(&tables) {
                 let kind = match c.kind {
-                    "p" => "primary key",
-                    "u" => "unique",
-                    "c" => "check",
-                    _ => "foreign key",
+                    ConstraintKind::PrimaryKey => "primary key",
+                    ConstraintKind::Unique(_) => "unique",
+                    ConstraintKind::Check(_) => "check",
+                    ConstraintKind::ForeignKey(_) => "foreign key",
                 };
                 out.push(vec![
-                    id(&c.table),
+                    id(c.table),
                     text(c.table.name.clone()),
                     text(c.name),
                     text(kind),
-                    text(c.def),
+                    text(c.definition),
                 ]);
             }
         }

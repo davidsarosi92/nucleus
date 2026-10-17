@@ -486,6 +486,103 @@ pub fn stats_key(table: &Table) -> Vec<u8> {
     id_key(STATS, table.id)
 }
 
+/// What a constraint is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstraintKind {
+    /// The primary key.
+    PrimaryKey,
+    /// A `UNIQUE` constraint: `table.indexes[index]`.
+    Unique(usize),
+    /// `table.checks[index]`.
+    Check(usize),
+    /// `table.foreign_keys[index]`.
+    ForeignKey(usize),
+}
+
+/// A constraint, described.
+#[derive(Clone, Debug)]
+pub struct Constraint<'a> {
+    /// Its table.
+    pub table: &'a Table,
+    /// Its name.
+    pub name: String,
+    /// What it is.
+    pub kind: ConstraintKind,
+    /// Its definition, as SQL (`PRIMARY KEY (id)`, `CHECK (a > 0)`, …).
+    pub definition: String,
+}
+
+impl Table {
+    /// Whether `indexes[i]` is a `UNIQUE` constraint (the indexes those
+    /// create are named `…_key`) rather than an index.
+    pub fn is_unique_constraint(&self, i: usize) -> bool {
+        self.indexes[i].unique && self.indexes[i].name.ends_with("_key")
+    }
+}
+
+fn column_list(t: &Table, cols: &[usize]) -> String {
+    cols.iter()
+        .map(|&c| t.columns[c].name.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Every constraint of `tables`: per table its primary key, unique
+/// constraints, checks and foreign keys, in that order.
+pub fn constraints(tables: &[Table]) -> Vec<Constraint<'_>> {
+    let mut out = Vec::new();
+    for t in tables {
+        let con = |name: String, kind, definition| Constraint {
+            table: t,
+            name,
+            kind,
+            definition,
+        };
+        if !t.primary_key.is_empty() {
+            out.push(con(
+                format!("{}_pkey", t.name),
+                ConstraintKind::PrimaryKey,
+                format!("PRIMARY KEY ({})", column_list(t, &t.primary_key)),
+            ));
+        }
+        for (i, ix) in t.indexes.iter().enumerate() {
+            if t.is_unique_constraint(i) {
+                out.push(con(
+                    ix.name.clone(),
+                    ConstraintKind::Unique(i),
+                    format!("UNIQUE ({})", column_list(t, &ix.columns)),
+                ));
+            }
+        }
+        for (j, (name, check)) in t.checks.iter().enumerate() {
+            out.push(con(
+                name.clone(),
+                ConstraintKind::Check(j),
+                format!("CHECK ({check})"),
+            ));
+        }
+        for (j, fk) in t.foreign_keys.iter().enumerate() {
+            let Some(parent) = tables.iter().find(|p| p.name == fk.table) else {
+                continue;
+            };
+            let mut def = format!(
+                "FOREIGN KEY ({}) REFERENCES {}({})",
+                column_list(t, &fk.columns),
+                parent.name,
+                column_list(parent, &fk.ref_columns)
+            );
+            if fk.on_update != FkAction::NoAction {
+                def.push_str(&format!(" ON UPDATE {}", fk.on_update.sql()));
+            }
+            if fk.on_delete != FkAction::NoAction {
+                def.push_str(&format!(" ON DELETE {}", fk.on_delete.sql()));
+            }
+            out.push(con(fk.name.clone(), ConstraintKind::ForeignKey(j), def));
+        }
+    }
+    out
+}
+
 /// A row's primary index key.
 pub fn row_key(table: &Table, pk: &[Value]) -> Vec<u8> {
     let mut k = table.index_prefix(0);

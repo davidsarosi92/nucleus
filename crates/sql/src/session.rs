@@ -22,6 +22,7 @@ use crate::dml;
 use crate::error::{Error, Result};
 use crate::exec;
 use crate::expr::Ctx;
+use crate::ext::Registry;
 use crate::optimizer::optimize;
 use crate::parser::{parse, parse_expr};
 use crate::types::{DataType, Row, Value};
@@ -72,6 +73,7 @@ struct Block {
 /// A session over a database.
 pub struct Session {
     kv: Arc<dyn Kv>,
+    registry: Arc<Registry>,
     block: Option<Block>,
     default_isolation: IsolationLevel,
     settings: BTreeMap<String, String>,
@@ -118,10 +120,17 @@ fn read_only(stmt: &Statement) -> bool {
 }
 
 impl Session {
-    /// A new session.
+    /// A new session with the built-in functions and views
+    /// ([`Registry::builtin`]).
     pub fn new(kv: Arc<dyn Kv>) -> Self {
+        Self::with_registry(kv, Registry::shared_builtin())
+    }
+
+    /// A new session with the functions and views of `registry`.
+    pub fn with_registry(kv: Arc<dyn Kv>, registry: Arc<Registry>) -> Self {
         Self {
             kv,
+            registry,
             block: None,
             default_isolation: IsolationLevel::Snapshot,
             settings: BTreeMap::new(),
@@ -136,6 +145,11 @@ impl Session {
             self.format_checked = crate::catalog::check_format(txn)?;
         }
         Ok(())
+    }
+
+    /// The session's registry.
+    pub fn registry(&self) -> &Arc<Registry> {
+        &self.registry
     }
 
     /// The transaction status.
@@ -275,7 +289,7 @@ impl Session {
             };
             let r = r.and_then(|()| {
                 crate::datetime::with_now(block.now, &self.kv, || {
-                    execute(txn.as_mut(), stmt, params)
+                    execute(txn.as_mut(), &self.registry, stmt, params)
                 })
             });
             if r.is_err() {
@@ -292,7 +306,9 @@ impl Session {
             let r = self
                 .check_format(txn.as_mut())
                 .and_then(|()| {
-                    crate::datetime::with_now(now, &self.kv, || execute(txn.as_mut(), stmt, params))
+                    crate::datetime::with_now(now, &self.kv, || {
+                        execute(txn.as_mut(), &self.registry, stmt, params)
+                    })
                 })
                 .and_then(|out| {
                     txn.commit()?;
@@ -322,7 +338,7 @@ impl Session {
                 own.as_ref()
             }
         };
-        let mut binder = Binder::new(txn);
+        let mut binder = Binder::new(txn, &self.registry);
         let columns = match stmt {
             Statement::Query(q) => {
                 let b = binder.query(q)?;
@@ -436,14 +452,19 @@ fn written(tag: &str, w: dml::Written) -> Output {
 }
 
 /// Runs a statement inside `txn`.
-pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Result<Output> {
+pub fn execute(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    stmt: &Statement,
+    params: &[Value],
+) -> Result<Output> {
     Ok(match stmt {
         Statement::Query(q) => {
             let ro: &dyn KvTxn = &*txn;
-            let mut binder = Binder::new(ro);
+            let mut binder = Binder::new(ro, reg);
             let bound = binder.query(q)?;
             let plan = optimize(bound.plan, ro);
-            let ctx = Ctx::new(ro, params);
+            let ctx = Ctx::new(ro, reg, params);
             let rows = exec::collect(&plan, &ctx, None)?;
             Output::Rows {
                 columns: columns_of(bound.scope.cols.into_iter().map(|c| (c.name, c.ty))),
@@ -453,10 +474,10 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
         Statement::Explain(inner) => {
             let ro: &dyn KvTxn = &*txn;
             let plan = match &**inner {
-                Statement::Query(q) => optimize(Binder::new(ro).query(q)?.plan, ro),
+                Statement::Query(q) => optimize(Binder::new(ro, reg).query(q)?.plan, ro),
                 Statement::Update { table, filter, .. }
                 | Statement::Delete { table, filter, .. } => {
-                    dml::explain_scan(ro, table, filter.as_ref())?
+                    dml::explain_scan(ro, reg, table, filter.as_ref())?
                 }
                 _ => {
                     return Err(Error::feature(
@@ -491,7 +512,7 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
                     "relation \"{name}\" already exists"
                 )));
             }
-            create_table(txn, name, columns, constraints)?;
+            create_table(txn, reg, name, columns, constraints)?;
             Output::Command("CREATE TABLE".into())
         }
         Statement::DropTable {
@@ -570,7 +591,7 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
             });
             t.next_index_id += 1;
             let i = t.indexes.len() - 1;
-            dml::backfill_index(txn, &t, i)?;
+            dml::backfill_index(txn, reg, &t, i)?;
             catalog::update_table(txn, &t)?;
             Output::Command("CREATE INDEX".into())
         }
@@ -625,14 +646,18 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
                 t.checks
                     .push((format!("{table}_{}_check", column.name), check.clone()));
             }
-            let w = dml::Writer::new(&*txn, t.clone())?;
+            let w = dml::Writer::new(&*txn, reg, t.clone())?;
             let fill = {
-                let ctx = Ctx::new(&*txn, &[]);
+                let ctx = Ctx::new(&*txn, reg, &[]);
                 w.default_of(t.columns.len() - 1, &ctx)?
             };
-            let has_rows =
-                !exec::matching_rows(&t, &crate::plan::Access::Full, None, &Ctx::new(&*txn, &[]))?
-                    .is_empty();
+            let has_rows = !exec::matching_rows(
+                &t,
+                &crate::plan::Access::Full,
+                None,
+                &Ctx::new(&*txn, reg, &[]),
+            )?
+            .is_empty();
             if has_rows {
                 if fill.is_null() && column.not_null {
                     return Err(Error::not_null_violation(format!(
@@ -641,7 +666,7 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
                     )));
                 }
                 if !fill.is_null() {
-                    dml::rewrite_rows(txn, &t, &fill)?;
+                    dml::rewrite_rows(txn, reg, &t, &fill)?;
                 }
             }
             if let Some((name, r)) = &column.references {
@@ -652,14 +677,14 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
                     std::slice::from_ref(&column.name),
                     r,
                 )?;
-                crate::fk::validate_existing(&*txn, &t, &fk)?;
+                crate::fk::validate_existing(&*txn, reg, &t, &fk)?;
                 crate::fk::attach(txn, &mut t, fk)?;
             }
             catalog::update_table(txn, &t)?;
             Output::Command("ALTER TABLE".into())
         }
         Statement::AddConstraint { table, constraint } => {
-            add_constraint(txn, table, constraint)?;
+            add_constraint(txn, reg, table, constraint)?;
             Output::Command("ALTER TABLE".into())
         }
         Statement::DropConstraint {
@@ -676,7 +701,7 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
             source,
             returning,
         } => {
-            let w = dml::insert(txn, table, columns, source, returning, params)?;
+            let w = dml::insert(txn, reg, table, columns, source, returning, params)?;
             match w.returning {
                 Some(_) => written("INSERT 0", w),
                 None => Output::Command(format!("INSERT 0 {}", w.count)),
@@ -689,7 +714,15 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
             returning,
         } => written(
             "UPDATE",
-            dml::update(txn, table, assignments, filter.as_ref(), returning, params)?,
+            dml::update(
+                txn,
+                reg,
+                table,
+                assignments,
+                filter.as_ref(),
+                returning,
+                params,
+            )?,
         ),
         Statement::Delete {
             table,
@@ -697,10 +730,10 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
             returning,
         } => written(
             "DELETE",
-            dml::delete(txn, table, filter.as_ref(), returning, params)?,
+            dml::delete(txn, reg, table, filter.as_ref(), returning, params)?,
         ),
         Statement::Analyze(table) => {
-            crate::stats::analyze(txn, table.as_deref())?;
+            crate::stats::analyze(txn, reg, table.as_deref())?;
             Output::Command("ANALYZE".into())
         }
         Statement::Begin(_)
@@ -716,6 +749,7 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
 
 fn create_table(
     txn: &mut dyn KvTxn,
+    reg: &Registry,
     name: &str,
     specs: &[crate::ast::ColumnSpec],
     constraints: &[TableConstraint],
@@ -815,15 +849,15 @@ fn create_table(
         table.next_index_id += 1;
     }
     // Defaults and checks must bind now, not at the first insert.
-    let w = dml::Writer::new(&*txn, table.clone())?;
-    let ctx = Ctx::new(&*txn, &[]);
+    let w = dml::Writer::new(&*txn, reg, table.clone())?;
+    let ctx = Ctx::new(&*txn, reg, &[]);
     for (i, c) in table.columns.iter().enumerate() {
         if c.default.is_some() {
             w.default_of(i, &ctx)?;
         }
     }
     for (_, text) in &table.checks {
-        let _ = Binder::new(&*txn).condition(&parse_expr(text)?, &dml::table_scope(&table))?;
+        let _ = Binder::new(&*txn, reg).condition(&parse_expr(text)?, &dml::table_scope(&table))?;
     }
     let _ = Scope::default();
     // Foreign keys: from columns, then table constraints.
@@ -862,7 +896,12 @@ fn create_table(
 }
 
 /// `ALTER TABLE … ADD CONSTRAINT`.
-fn add_constraint(txn: &mut dyn KvTxn, table: &str, c: &TableConstraint) -> Result<()> {
+fn add_constraint(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    table: &str,
+    c: &TableConstraint,
+) -> Result<()> {
     let mut t = catalog::table(&*txn, table)?;
     match c {
         TableConstraint::ForeignKey {
@@ -871,7 +910,7 @@ fn add_constraint(txn: &mut dyn KvTxn, table: &str, c: &TableConstraint) -> Resu
             references,
         } => {
             let fk = crate::fk::build(&*txn, &t, name.as_deref(), columns, references)?;
-            crate::fk::validate_existing(&*txn, &t, &fk)?;
+            crate::fk::validate_existing(&*txn, reg, &t, &fk)?;
             crate::fk::attach(txn, &mut t, fk)?;
         }
         TableConstraint::Check(name, text) => {
@@ -883,8 +922,9 @@ fn add_constraint(txn: &mut dyn KvTxn, table: &str, c: &TableConstraint) -> Resu
                     "constraint \"{name}\" for relation \"{table}\" already exists"
                 )));
             }
-            let check = Binder::new(&*txn).condition(&parse_expr(text)?, &dml::table_scope(&t))?;
-            let ctx = Ctx::new(&*txn, &[]);
+            let check =
+                Binder::new(&*txn, reg).condition(&parse_expr(text)?, &dml::table_scope(&t))?;
+            let ctx = Ctx::new(&*txn, reg, &[]);
             for (_, row) in exec::matching_rows(&t, &crate::plan::Access::Full, None, &ctx)? {
                 let env = crate::expr::Env {
                     row: &row,
@@ -925,7 +965,7 @@ fn add_constraint(txn: &mut dyn KvTxn, table: &str, c: &TableConstraint) -> Resu
                 unique: true,
             });
             t.next_index_id += 1;
-            dml::backfill_index(txn, &t, t.indexes.len() - 1)?;
+            dml::backfill_index(txn, reg, &t, t.indexes.len() - 1)?;
         }
         TableConstraint::PrimaryKey(_) => {
             return Err(Error::feature(
