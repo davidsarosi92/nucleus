@@ -725,9 +725,8 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
     key encoding disagreeing with their order: key encoding version 2);
     teaching abilities in SQL — orderings by a mapping, `USING`, indexes in
     one, `COLLATE` (T5 ✅); operators, distances and casts taught in SQL,
-    with the parser finding registered operator symbols (T5b); teaching
-    abilities in SQL (T5); encoding versions and `ALTER COLUMN … TYPE`
-    (T6); the sample extension (T7).
+    with the parser finding registered operator symbols (T5b); encoding
+    versions and `ALTER COLUMN … TYPE` (T6); the sample extension (T7).
 - **`UUID`, the first new type built this way** — a real type proving the
   path, not only a sample: 16 bytes; text input in the canonical form
   (and upper case, braces, no hyphens), output canonical lower case;
