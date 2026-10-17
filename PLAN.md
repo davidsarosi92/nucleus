@@ -137,6 +137,14 @@ violate one, amend it here first, with a rationale.
     `rename`, `ftruncate`; no `io_uring`, no `O_DIRECT`, `mmap` optional),
     with one implementation per OS family behind the platform interface.
     Memory use (buffer pool, caches) is bounded and configurable.
+11. **One system, many services; compatible, not borrowed.**  SQL,
+    documents, streams, vectors, live queries and whatever comes next are
+    services of one nucleus: one protocol (`ncp`), one set of drivers, one
+    shell, one catalog (`nc_catalog`), one login, one transaction across
+    them all.  Other systems' protocols and catalogs (PostgreSQL, MongoDB)
+    are supported as optional compatibility modules, so existing tools
+    work — but nucleus's own interface comes first and is never shaped by
+    them (D13, D14, D8).
 
 ## Build targets
 
@@ -199,7 +207,7 @@ are marked ✅.
 | D5 | Isolation | ✅ **Snapshot Isolation** first, **Serializable (SSI)** later | — |
 | D6 | File layout | ✅ **One data file + one WAL directory** per database | single file (SQLite-style) |
 | D7 | License | ✅ **MIT** (came with the GitHub repo) | — |
-| D8 | Document client protocol (needed by M16) | Proposed, after D14: **`ncp` with document messages**, through nucleus's drivers; a MongoDB wire subset only as an optional compatibility module (as `--pg-compat` is for SQL) | the MongoDB wire protocol as the main interface (existing tools at once, but a borrowed identity); HTTP/JSON; decide at the end of M15 |
+| D8 | Document client protocol (needed by M16) | ✅ **`ncp` with document messages** (2026-10-17), through nucleus's drivers — one protocol and toolset for every service (principle 11); a MongoDB wire subset as an optional compatibility module (as `--pg-compat` is for SQL), so existing tools work too | the MongoDB wire protocol as the main interface (existing tools at once, but a borrowed identity); HTTP/JSON |
 | D9 | Where release builds are published | **GitHub Releases** attached to tags, built by CI | a separate artifact store; not in this repo either way |
 | D10 | Storage engine shape | ✅ **Copy-on-write B+tree + logical WAL** (2026-10-17): checkpoints are atomic pager commits of a COW tree; the WAL holds batches of key writes; recovery = replay after the checkpoint; no undo | ARIES-style physiological logging with in-place updates — more write-efficient, far more complex; revisit only if checkpoint write amplification hurts |
 | D11 | Tree concurrency | ✅ **One writer or many readers** per tree (`RwLock`); MVCC scans re-seek between batches (2026-10-17) | latch crabbing / B-link trees, when benchmarks show writer contention |
@@ -783,12 +791,16 @@ mapping differ.
   the end of M15.
 - Compiles to the same logical plan as SQL.
 - A transaction can span SQL tables and document collections.
-- **Document server:** the M12 server also speaks the document client
-  protocol (decision D8), so nucleus can be used like a NoSQL database.
+- **Document server:** documents travel over `ncp` (D8): new messages for
+  collections, and document APIs in every nucleus driver and in `ncsql`,
+  in the same sessions and transactions as SQL.
+- **MongoDB compatibility** (optional, like `--pg-compat`): a subset of
+  the MongoDB wire protocol (`--mongo-compat`), so `mongosh` and MongoDB
+  drivers can connect.
 
-**Done when:** an existing client for the D8 protocol (e.g. `mongosh` and a
-standard driver, if D8 lands on the MongoDB wire protocol) runs CRUD and
-queries against nucleus.
+**Done when:** every nucleus driver runs CRUD and queries on collections,
+in transactions that also touch tables; and with `--mongo-compat`,
+`mongosh` and a standard MongoDB driver run CRUD and queries.
 
 ### §M16.5 — Streams: a transactional broker ⬜
 
@@ -960,3 +972,6 @@ style) across a thousand seeds without failure.
 - **2026-10-17** — The data directory lock shipped (one process per
   database).  §M17.5 read replicas, failover and cluster management planned
   (shared-storage readers as a later option).
+- **2026-10-17** — D8 settled: documents over `ncp`, MongoDB compatibility
+  optional; principle 11 (one system, many services; compatible, not
+  borrowed).  §M16's "done when" follows.
