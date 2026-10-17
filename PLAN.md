@@ -23,7 +23,7 @@ Status legend: ⬜ not started · ◐ in progress · ✅ shipped · ⏸ parked
 | Build targets | Platforms nucleus must build for |
 | Decisions | What has to be settled before the first line of code |
 | Status snapshot | Phases + milestones table |
-| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.24, sits between F1 and F2) |
+| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.25, sits between F1 and F2) |
 | Changelog | Changes to this plan |
 
 ---
@@ -265,6 +265,7 @@ are marked ✅.
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
 | | M14.19 | **Next:** modularity — registries, extensible and evolvable types, an extension API (principle 12) | ⬜ |
+| | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
@@ -279,7 +280,7 @@ are marked ✅.
 | | M14.15 | JSON type and functions | ⬜ |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
-| | M14.18 | Operations: backups and point-in-time restore, metrics and tracing, TLS, roles and privileges, row-level security | ⬜ |
+| | M14.18 | Operations: backups and point-in-time restore, metrics and tracing | ⬜ |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -635,7 +636,7 @@ quickstart in every language.
 parameters, errors, transactions) against `nucleus server` in CI. ✅
 (Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
 
-### Developer platform (§M14.9–§M14.24)
+### Developer platform (§M14.9–§M14.25)
 
 What makes nucleus worth choosing, before more data models: understanding
 queries, being usable by AI models, holding large data and analysing it
@@ -649,7 +650,8 @@ migrations, code generation), an easy start, and what production needs.
 ### §M14.19 — Modularity: registries and an extension API ⬜ (next)
 
 **Order:** this comes first in the developer platform — principles before
-features — then §M14.9 onward.  It starts with a **principle audit**: the
+features — then §M14.25 (identity and access), then §M14.9 onward.  It
+starts with a **principle audit**: the
 code checked against all twelve principles, each gap listed here with its
 fix.
 
@@ -820,6 +822,113 @@ works everywhere else.  Then it is taught an ordering by a mapping
 work, dropping the ordering while the index exists is refused, and
 redefining it rebuilds the index; and `COLLATE` resolves to a text
 ordering.
+
+### §M14.25 — Identity and access ⬜
+
+**Order:** right after §M14.19, before the rest of the developer platform:
+much of it builds on roles and row-level security — the MCP server's
+write access (§M14.10), filtered vector search (§M14.12), hybrid search
+(§M14.21), memory for models (§M14.24), sync (§M16.7).
+
+Today there is one user and one password, given on the server's command
+line; `ncp` sends the password in the clear (there is no TLS yet), and
+`--no-auth` admits anyone.  Fine on `127.0.0.1` for development, not
+beyond it.
+
+- **Users and roles, in SQL and in the catalog** (principle 8):
+  `CREATE ROLE`, `CREATE USER` (a role that may log in), `ALTER`, `DROP`;
+  membership with inheritance (`GRANT role TO role`); an owner for every
+  object; an administrator role.  `nc_catalog.roles`, `role_members` and
+  `grants` show them (`pg_roles` and `pg_auth_members` as compatibility).
+  `nucleus init` creates the first administrator with a password it asks
+  for or takes from the environment.
+- **Privileges on every object**: databases, schemas, tables, columns,
+  functions, types, sequences, streams, branches, modules — `SELECT`,
+  `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `USAGE`,
+  `CREATE`, `EXECUTE`, `CONNECT`, `WITH GRANT OPTION`, and default
+  privileges for objects not yet created.  Checked at bind time, and a
+  refusal names the privilege that is missing and the object (`42501`).
+- **Authentication methods are modules** (the authenticator registry of
+  §M14.19):
+  - passwords by SCRAM-SHA-256 — `ncp` gains a challenge–response
+    handshake in its next protocol version (negotiated, D15), so a
+    password never crosses the wire;
+  - **tokens**: API keys for programs and AI agents — scoped (read only,
+    a schema, a branch, row, time and cost budgets), expiring,
+    revocable, stored hashed;
+  - client certificates (mutual TLS);
+  - OIDC / JWT single sign-on, with the token's claims mapped to roles and
+    to the session's context;
+  - LDAP.
+  TLS for `ncp` and `pg-compat`, which an access rule can require.
+- **Access rules: who may connect, from where, how.**  Ordered rules in
+  the catalog, managed in SQL, the first match deciding: conditions on the
+  source address (CIDR), the front end (`ncp`, `pg-compat`, MCP, sync),
+  the database, the user or role, the authentication method and TLS; the
+  outcome is to reject, or to admit with a given method.  Behind a load
+  balancer the real client address is taken (PROXY protocol) only from
+  proxies the configuration names.
+- **Privileges by connection context.**  The same user may have different
+  rights depending on where and how they connect:
+
+  ```sql
+  -- alice from 10.2.3.1: everything she has been granted
+  CREATE ACCESS RULE alice_desk  FOR alice FROM '10.2.3.1/32' ALLOW;
+  -- alice from 10.2.3.2: read only
+  CREATE ACCESS RULE alice_kiosk FOR alice FROM '10.2.3.2/32' ALLOW READ ONLY;
+  -- the admin role only from the office network, over TLS with a certificate
+  GRANT admin TO alice WHEN (source <<= '10.2.0.0/16' AND auth = 'certificate');
+  ```
+
+  - a rule can set a *ceiling*: `READ ONLY`, or `AS ROLE r` (only what
+    `r` may do) — always intersected with the user's own privileges, so
+    a rule can narrow them but never widen them;
+  - a role membership can carry a *condition* on the session's context
+    (source address, front end, authentication method, TLS, a time
+    window), so the role is active only when it holds;
+  - the effective privileges are fixed at login, re-checked on
+    `SET ROLE`, and shown — `nc_catalog.sessions` lists each session's
+    active roles and the rule that admitted it (`\conninfo` too);
+  - the context is visible to row-level security
+    (`nucleus.client_addr`, `nucleus.auth_method`, …), so a policy can
+    use it as well;
+  - an address alone is weak identity (shared networks, NAT, spoofing on
+    a local segment): rules can require TLS or a certificate as well, and
+    the documentation recommends it for anything beyond read access.
+- **Row-level security**, for multi-tenant and AI applications in which
+  a user, or an agent acting for one, must see only their own rows:
+  `CREATE POLICY` on a table (for `SELECT`, `INSERT`, `UPDATE`, `DELETE`)
+  with predicates over the row and the session's context
+  (`SET nucleus.tenant = …`, the roles, claims from the login, the
+  connection context).  Policies apply everywhere a row is read — scans,
+  indexes, joins, vector and text search (§M14.12, §M14.21), streams and
+  live queries — and the planner adds them before optimizing, so no plan
+  can leak a row.  MCP sessions (§M14.10) run as a role or token under the
+  same policies.
+- **Protection**: connection limits per user and role; rate limits on
+  logins and statements; slowing, then locking, an account after failed
+  logins; password rules and expiry; and the server refuses to listen
+  beyond loopback with the default password or `--no-auth` unless told
+  `--insecure`.
+- **Audit**: logins (success or failure, source, method, the rule that
+  matched), DDL, and every change to roles, privileges, rules, tokens and
+  policies, always; statements optionally, per role or table.  Written to
+  a log and, from §M16.5, a stream; hash-chained, so a gap or an edit
+  shows.
+- **Embedded editions and devices** (§M14.23, §M16.7): an embedded
+  database has no login — the file's permissions guard it — with optional
+  encryption at rest by a key the application supplies; synced devices
+  authenticate with device-bound, revocable tokens.
+
+**Done when:** privileges on every object kind and row-level security are
+enforced in slt tests, with leak tests (an error, a plan or a search
+ranking never reveals a hidden row); every authentication method works
+with every driver (OIDC against a test issuer); access rules are tested
+over real sockets from several source addresses — the same user with
+full rights from one and read only from another, and a role active only
+under its condition; the server refuses an insecure start; failed logins
+are throttled; and the audit log records every login and every change of
+access, with a broken chain detected.
 
 ### §M14.9 — SQL analyzer ⬜
 
@@ -1035,7 +1144,7 @@ reference that the capability model is proven on:
   - an index can be split by a column (`CREATE INDEX … USING hnsw (v)
     PARTITION BY (tenant_id)`), one graph per value, for multi-tenant
     applications; table partitions (§M14.20) each have their own graph;
-  - row-level security (§M14.18) is a filter like any other, so a search
+  - row-level security (§M14.25) is a filter like any other, so a search
     never returns, or is shaped by, rows the session may not see.
 - Later, as further encodings or types on the same model: half precision,
   int8 and binary quantization, sparse vectors.
@@ -1176,7 +1285,7 @@ security, time travel, embedded editions):
   data is encrypted with a per-subject key, and destroying the key erases
   every copy.  The erasure is recorded, and a check confirms nothing
   readable is left.
-- **Permissioned**: retrieval runs under row-level security (§M14.18), so
+- **Permissioned**: retrieval runs under row-level security (§M14.25), so
   a model answering a user knows only what that user may see — in
   search, in ranking and in what is cited.
 - **Auditable**: every retrieved row carries its source and version, so
@@ -1277,24 +1386,13 @@ command per platform, and the playground runs the tutorial.
   the WAL.
 - Metrics (Prometheus endpoint) and tracing (OpenTelemetry): commits,
   conflicts, cache, WAL, statement latencies.
-- TLS for `ncp` (and the PostgreSQL protocol), password hashing (SCRAM),
-  users and roles with `GRANT` / `REVOKE` on tables and columns.
-- **Row-level security**, for multi-tenant and AI applications in which
-  a user, or an agent acting for one, must see only their own rows:
-  `CREATE POLICY` on a table (for `SELECT`, `INSERT`, `UPDATE`, `DELETE`)
-  with predicates over the row and the session's context
-  (`SET nucleus.tenant = …`, the role, claims passed at login).  Policies
-  apply everywhere a row is read — scans, indexes, joins, vector and text
-  search (§M14.12, §M14.21), streams and live queries — and the planner
-  adds them before optimizing, so no plan can leak a row.  MCP sessions
-  (§M14.10) run as a role under the same policies.
+- TLS, users, roles, privileges and row-level security moved to §M14.25.
 - ✅ An exclusive lock on the data directory, so a second process cannot
   open it (done first, 2026-10-17: DOCS §4.6).
 
-**Done when:** a restore reproduces the database at a chosen moment,
-privileges and row-level security are enforced in slt tests (including
-leak tests: an error, a plan or a search ranking never reveals a hidden
-row), and TLS works with every driver.
+**Done when:** a restore reproduces the database at a chosen moment, and
+metrics and traces reach a Prometheus and an OpenTelemetry collector in
+tests.
 
 ---
 
@@ -1350,7 +1448,7 @@ for free, and what developers otherwise assemble from several systems:
     summaries;
   - *semantic memory* — facts with embeddings (§M14.22) and text
     (§M14.21), recalled by hybrid search, scoped by row-level security
-    (§M14.18);
+    (§M14.25);
   - *tool and run state* — an agent's steps, checkpoints and results, so
     a run resumes after a crash;
   - *a task queue for agents* — work handed between agents, exactly once;
@@ -1383,7 +1481,7 @@ database at local speed, and changes flow both ways when a connection
 exists.
 
 - **Shapes**: a device subscribes to a subset of the server's data (rows
-  a query selects, scoped by row-level security, §M14.18) and holds only
+  a query selects, scoped by row-level security, §M14.25) and holds only
   that; the server streams changes into it from changefeeds (§M16.5).
 - **Local writes** are committed locally, kept in an outbox and sent in
   order; the server applies them in a transaction, with its constraints
@@ -1600,3 +1698,10 @@ style) across a thousand seeds without failure.
   history, WAL and backups by crypto-shredding), permissioned by
   row-level security, auditable (sources, recorded read sets, `AS OF`),
   with an in-process retrieval API for inference servers.
+- **2026-10-17** — New §M14.25, identity and access, right after §M14.19:
+  users and roles in SQL, privileges on every object, authentication
+  modules (SCRAM with a new `ncp` handshake, scoped tokens for agents,
+  client certificates, OIDC, LDAP), access rules by source, front end and
+  method, privileges by connection context (ceilings and conditional role
+  membership), row-level security (moved from §M14.18), protection and a
+  hash-chained audit log.
