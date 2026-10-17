@@ -15,6 +15,7 @@ nucleus-txn = { path = "crates/txn" }
 nucleus-kv = { path = "crates/kv" }
 nucleus-sql = { path = "crates/sql" }
 nucleus-server = { path = "crates/server" }
+nucleus-client = { path = "crates/client" }
 # Regular expressions for `~`: linear-time matching, so no pattern can
 # stall the server.
 regex = "1.11.1"

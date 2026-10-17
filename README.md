@@ -25,8 +25,9 @@ SQL, and a server `psql` or any PostgreSQL driver can connect to:
 
 ```sh
 nucleus sql ./mydb -c "CREATE TABLE t (id INT PRIMARY KEY, name TEXT)"
-nucleus sql ./mydb                      # SQL shell
+ncsql ./mydb                            # SQL shell (same as `nucleus sql`)
 nucleus server ./mydb --listen 127.0.0.1:5432
+ncsql -h 127.0.0.1:5432 -c '\d t'        # the shell, connected to the server
 psql -h 127.0.0.1 -p 5432 -c "SELECT * FROM t"
 psql -h 127.0.0.1 -p 5432 -c '\d t'    # psql's \d works too
 ```

@@ -29,6 +29,9 @@ pub struct Config {
     /// If set, clients must send this password (cleartext authentication;
     /// use it on trusted networks only).
     pub password: Option<String>,
+    /// Print every statement a client sends, and every error, to stderr
+    /// (for seeing what a tool asks).
+    pub log_queries: bool,
 }
 
 /// Accepts connections on `listener` forever, one thread each.

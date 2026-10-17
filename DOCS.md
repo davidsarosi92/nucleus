@@ -410,14 +410,39 @@ nucleus --version
 nucleus kv <dir> get <key> | put <key> <value> | delete <key> | scan [<prefix>]
 nucleus kv <dir> checkpoint | vacuum
 nucleus kv <dir>              # shell: the same commands, plus begin/commit/rollback
-nucleus sql <dir> [-c <sql>]  # SQL shell (statements end with ;), a script on stdin, or one command
-nucleus server <dir> [--listen <addr:port>] [--password <pw>]   # §9
+nucleus sql [<dir>] [-h <host[:port]>] [-p <port>] [-U <user>] [-d <db>] [--password <pw>] [-c <sql>]
+ncsql …                       # the same shell under its own name
+nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]   # §9
 ```
 
 Keys and values are text; any byte can be written as `\xNN` (`\\` for a
 backslash), and output escapes non-printable bytes the same way.  Outside
 `begin` each command is its own transaction; an open transaction at the end
-of input is rolled back.  `crates/cli/tests/cli.rs` drives the binary.
+of input is rolled back.  `crates/cli/tests/cli.rs` drives the binaries.
+
+**`ncsql`** (§M14.6) is nucleus's SQL shell: with a directory it opens
+that database itself; otherwise it connects to a nucleus server (default
+`127.0.0.1:5432`, user and database `nucleus`, the password from
+`--password` or `NCPASSWORD`).  Statements end with `;` (a script on stdin,
+or one `-c` command); the prompt shows `*` in a transaction block and `!`
+in a failed one.  Its backslash commands read `nc_catalog` (§8.11), so they
+work the same locally and remotely:
+
+| Command | Shows |
+|---------|-------|
+| `\d`, `\dt`, `\tables` | tables, with index, foreign key and statistics counts |
+| `\d <table>` | columns, then indexes (with index ids), foreign keys, referencing tables, checks; the title has the table id, key prefix and whether it is analyzed |
+| `\indexes [<table>]`, `\di` | indexes |
+| `\fks [<table>]` | foreign keys from or to a table |
+| `\stats <table>` | `ANALYZE` statistics |
+| `\schemas`, `\dn` · `\types`, `\dT` | schemas, types |
+| `\timing` · `\conninfo` · `\?` · `\q` | timing toggle, connection, help, quit |
+
+The network side is `nucleus-client` (`crates/client`): the frontend of the
+PostgreSQL protocol 3.0 — startup, trust or cleartext password, the simple
+query protocol, results as text, SQLSTATE errors, the transaction status —
+usable by any Rust program (it also talks to PostgreSQL servers using
+trust or password authentication).
 
 ### 6.3 Packaging
 
@@ -426,9 +451,10 @@ PLAN.md "Packaging and install": `nucleus-<v>-linux-<arch>.tar.gz` (gnu),
 `…-linux-<arch>-musl.tar.gz`, `…-macos-<arch>.tar.gz`,
 `…-windows-<arch>.zip`, and for musl targets `nucleus-<v>-d-os-<arch>.tar.gz`
 (`<arch>` `x86_64`, `aarch64`, `i386`).  Every archive has one top directory
-`nucleus-<v>/` with `bin/`, `LICENSE`, `README.md`; the d-os one adds the
-`.dos-app` manifest from `integrations/d-os/`.  CI packages every tested
-target, unpacks it and runs `nucleus --version`.  `.github/workflows/
+`nucleus-<v>/` with `bin/` (`nucleus` and `ncsql`), `LICENSE`, `README.md`;
+the d-os one adds the `.dos-app` manifest from `integrations/d-os/` (linking
+`/bin/nucleus`, `/bin/ncsql`, `/bin/nucleus-settings`).  CI packages every
+tested target, unpacks it and runs `nucleus --version` and `ncsql --help`.  `.github/workflows/
 release.yml` does the same for every target on a `v<version>` tag (the tag
 must match `Cargo.toml`) and attaches the archives to a GitHub release.  No
 release has been tagged yet.
@@ -752,7 +778,9 @@ accepted), `text` 25 (`varchar`, `bpchar`, `name` accepted), `numeric`
 1700, `date` 1082, `timestamp` 1114, `timestamptz` 1184, `interval` 1186,
 and their arrays; text and binary formats for all of them (binary numeric
 and dates checked against PostgreSQL's `*_send`).  One thread per
-connection.
+connection.  `--log-queries` (`Config::log_queries`) prints every
+statement a client sends, and every error, to stderr — to see what a tool
+asks for.
 
 Not supported: `COPY`, cancellation.  `psql`'s `\d` family works through
 the compatibility catalog (§8.11).
@@ -767,6 +795,9 @@ Linux) uses the real `psql`, including `\d`, `\d+`, `\dt`, `\di`, `\dn`,
 
 ## 10. Change log
 
+- **2026-10-17 — §M14.6 `ncsql`:** the nucleus SQL shell, local or over the
+  network, with `nc_catalog` commands; `nucleus-client`; the server's
+  `--log-queries`.
 - **2026-10-17 — §M14.5 SQL completeness:** EXCEPT / INTERSECT, FULL
   JOIN, CTEs (recursive too), NUMERIC and date/time types, arrays, regular
   expressions, functions in FROM, foreign keys (with validated reads in

@@ -389,9 +389,19 @@ dependencies = [
 name = "nucleus-cli"
 version = "0.1.0"
 dependencies = [
+ "nucleus-client",
  "nucleus-kv",
  "nucleus-server",
  "nucleus-sql",
+]
+
+[[package]]
+name = "nucleus-client"
+version = "0.1.0"
+dependencies = [
+ "nucleus-kv",
+ "nucleus-platform",
+ "nucleus-server",
 ]
 
 [[package]]

@@ -225,6 +225,8 @@ struct Portal {
 
 struct Conn {
     out: BufWriter<TcpStream>,
+    /// The connection number and whether to log (see `Config::log_queries`).
+    log: Option<u32>,
     session: Session,
     prepared: HashMap<String, Prepared>,
     portals: HashMap<String, Portal>,
@@ -319,6 +321,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     out.write_all(&Msg::new(b'K').i32(id as i32).i32(0x6e75_636c).finish())?;
     let mut conn = Conn {
         out,
+        log: config.log_queries.then_some(id),
         session: Session::new(kv),
         prepared: HashMap::new(),
         portals: HashMap::new(),
@@ -363,6 +366,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
         match r {
             Ok(()) => {}
             Err(e) => {
+                conn.log_error(&e);
                 send_error(&mut conn.out, &e)?;
                 skipping = true;
             }
@@ -609,10 +613,24 @@ impl Conn {
         self.out.write_all(&m.finish())
     }
 
+    fn log(&self, what: &str, text: &str) {
+        if let Some(id) = self.log {
+            eprintln!("nucleus-server: [{id}] {what}: {}", text.trim());
+        }
+    }
+
+    fn log_error(&self, e: &Error) {
+        self.log("error", &format!("{} {}", e.code, e.message));
+    }
+
     fn simple_query(&mut self, sql: &str) -> io::Result<()> {
+        self.log("query", sql);
         let stmts = match nucleus_sql::parser::parse(sql) {
             Ok(s) => s,
-            Err(e) => return send_error(&mut self.out, &e),
+            Err(e) => {
+                self.log_error(&e);
+                return send_error(&mut self.out, &e);
+            }
         };
         if stmts.is_empty() {
             return self.out.write_all(&Msg::new(b'I').finish());
@@ -632,7 +650,10 @@ impl Conn {
                     let tag = command_tag(stmt, &out);
                     self.out.write_all(&Msg::new(b'C').str(&tag).finish())?;
                 }
-                Err(e) => return send_error(&mut self.out, &e),
+                Err(e) => {
+                    self.log_error(&e);
+                    return send_error(&mut self.out, &e);
+                }
             }
         }
         Ok(())
@@ -642,6 +663,7 @@ impl Conn {
         let mut b = Body { b: body };
         let name = b.cstr().map_err(proto)?;
         let sql = b.cstr().map_err(proto)?;
+        self.log("parse", &sql);
         let n = b.i16().map_err(proto)?;
         let mut given = Vec::new();
         for _ in 0..n {

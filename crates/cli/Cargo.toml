@@ -10,10 +10,16 @@ repository.workspace = true
 name = "nucleus"
 path = "src/main.rs"
 
+# The SQL shell under its own name: `ncsql` is `nucleus sql`.
+[[bin]]
+name = "ncsql"
+path = "src/ncsql.rs"
+
 [dependencies]
 nucleus-kv.workspace = true
 nucleus-sql.workspace = true
 nucleus-server.workspace = true
+nucleus-client.workspace = true
 
 [lints]
 workspace = true

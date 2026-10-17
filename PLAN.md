@@ -227,6 +227,7 @@ are marked ✅.
 | | M13 | Cost-based optimizer | ✅ DOCS §8.8 |
 | | M14 | Serializable (read-set validation) | ✅ DOCS §5.2 |
 | | M14.5 | SQL completeness: FK, FULL JOIN, EXCEPT/INTERSECT, CTEs, numeric and date/time types, `nc_catalog`, `psql` `\d` | ✅ DOCS §8.10–§8.11 |
+| | M14.6 | `ncsql`: nucleus's own SQL shell and client | ✅ DOCS §6.2 |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
@@ -535,6 +536,18 @@ everyday use, closed before F2:
 against PostgreSQL 16, and CI's `psql` runs `\d` against the server. ✅
 (Scripts 12–19; `\df` and permissions remain out of scope.)
 
+### §M14.6 — `ncsql`, the nucleus SQL shell ✅ (DOCS §6.2)
+
+nucleus's own client, so working with it does not mean borrowing
+PostgreSQL's (`psql` still works, D13): `ncsql` (= `nucleus sql`) opens a
+local database or connects to a server, and its backslash commands read
+`nc_catalog` — including what `psql` cannot show (table ids, key prefixes,
+statistics).  The protocol side is a reusable crate, `nucleus-client`.  The
+server gains `--log-queries`, to see what other tools send.
+
+**Done when:** `ncsql` runs statements and its commands locally and
+against `nucleus server`, tested end to end, and ships in every package. ✅
+
 ---
 
 ## §F2 — NoSQL layer
@@ -658,3 +671,5 @@ style) across a thousand seeds without failure.
   numeric / date / time / interval / array types, regular expressions,
   foreign keys (validated reads added to the KV contract), `nc_catalog`
   and the PostgreSQL compatibility catalog; D13 settled.
+- **2026-10-17** — §M14.6 shipped: `ncsql` and `nucleus-client`; the
+  server's `--log-queries`.

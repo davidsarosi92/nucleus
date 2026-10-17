@@ -19,6 +19,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--password" => {
                 config.password = Some(rest.next().ok_or("--password needs a value")?.clone())
             }
+            "--log-queries" => config.log_queries = true,
             other => return Err(format!("server: unknown option {other}")),
         }
     }

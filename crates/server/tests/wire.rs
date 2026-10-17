@@ -166,6 +166,7 @@ fn sql_scripts_over_the_wire() {
 fn password_authentication() {
     let addr = start(Config {
         password: Some("s3cret".into()),
+        ..Config::default()
     });
     let err = Client::connect(addr, Some("wrong"))
         .err()

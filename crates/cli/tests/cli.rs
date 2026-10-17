@@ -93,3 +93,85 @@ fn sql_shell_and_command() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+fn ncsql(args: &[&str], stdin: &str) -> (bool, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ncsql"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    (out.status.success(), text)
+}
+
+#[test]
+fn ncsql_local_and_over_the_network() {
+    use std::io::BufRead;
+
+    let dir = temp_dir("ncsql");
+    let d = dir.to_str().unwrap();
+    let schema = "CREATE TABLE dept (id INT PRIMARY KEY, name TEXT UNIQUE);\n\
+                  CREATE TABLE emp (id INT PRIMARY KEY, dept_id INT REFERENCES dept ON DELETE CASCADE, salary NUMERIC(10, 2) CHECK (salary > 0));\n\
+                  INSERT INTO dept VALUES (1, 'eng');\nINSERT INTO emp VALUES (10, 1, 100.5);\n";
+    let (ok, out) = ncsql(&[d], schema);
+    assert!(ok, "{out}");
+    // Local: the commands read nc_catalog.
+    let (ok, out) = ncsql(&[d, "-c", "\\d emp"], "");
+    assert!(ok, "{out}");
+    for want in [
+        "Table \"emp\" (id 2, key prefix 0100000002, not analyzed)",
+        " salary  | numeric(10,2) |          | ",
+        "emp_pkey  PRIMARY KEY (id), index 0",
+        "emp_dept_id_fkey  (dept_id) -> dept (id) on delete cascade",
+        "emp_salary_check  CHECK (salary > 0)",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in\n{out}");
+    }
+    let (ok, out) = ncsql(&[d, "-c", "\\nope"], "");
+    assert!(!ok && out.contains("invalid command"), "{out}");
+
+    // Over the network, against `nucleus server` on a free port.
+    let mut server = Command::new(env!("CARGO_BIN_EXE_nucleus"))
+        .args(["server", d, "--listen", "127.0.0.1:0"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first = String::new();
+    std::io::BufReader::new(server.stderr.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    let addr = first
+        .split_whitespace()
+        .find(|w| w.starts_with("127.0.0.1:"))
+        .unwrap_or_else(|| panic!("no address in {first:?}"))
+        .to_string();
+    let (ok, out) = ncsql(&["-h", &addr, "-c", "SELECT name FROM dept"], "");
+    assert!(ok && out.contains(" eng "), "{out}");
+    let (ok, out) = ncsql(&["-h", &addr, "-c", "\\fks dept"], "");
+    assert!(
+        ok && out.contains("emp_dept_id_fkey") && out.contains("cascade"),
+        "{out}"
+    );
+    let (ok, out) = ncsql(
+        &["-h", &addr],
+        "BEGIN;\nDELETE FROM dept;\nCOMMIT;\nSELECT count(*) FROM emp;\n\\conninfo\n",
+    );
+    assert!(
+        ok && out.contains("DELETE 1") && out.contains(" 0 "),
+        "{out}"
+    );
+    assert!(out.contains("on 127.0.0.1:"), "{out}");
+    server.kill().unwrap();
+    server.wait().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

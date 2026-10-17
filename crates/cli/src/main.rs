@@ -15,8 +15,10 @@ usage:
   nucleus kv <dir> scan [<prefix>]
   nucleus kv <dir> checkpoint | vacuum
   nucleus kv <dir>                  interactive shell (type `help`)
-  nucleus sql <dir> [-c <sql>]      SQL shell, a script on stdin, or one command
-  nucleus server <dir> [--listen <addr:port>] [--password <pw>]
+  nucleus sql [<dir>] [-h <host[:port]>] [-U <user>] [-d <db>] [-c <sql>]
+                                    SQL shell (also `ncsql`): a local database or a
+                                    server; a script on stdin, or one command
+  nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]
                                     PostgreSQL-compatible server (default 127.0.0.1:5432)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).

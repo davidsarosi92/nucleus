@@ -94,4 +94,5 @@ jobs:
                 echo QUIT | "unpacked/$top/bin/nucleus-settings" "$RUNNER_TEMP/settings-smoke" | grep -q '^BYE' ;;
             esac
             "unpacked/$top/bin/nucleus" --version
+            "unpacked/$top/bin/ncsql" --help | grep -q '^usage: ncsql'
           done

@@ -17,19 +17,19 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
 name="nucleus-$version"
 
-cargo build --release --locked --target "$target" --bin nucleus --manifest-path "$root/Cargo.toml"
+cargo build --release --locked --target "$target" --bin nucleus --bin ncsql --manifest-path "$root/Cargo.toml"
 case "$target" in
   *-linux-musl) # the d-os settings service ships in the d-os archive
     cargo build --release --locked --target "$target" --bin nucleus-settings --manifest-path "$root/Cargo.toml" ;;
 esac
 
 arch=${target%%-*}
-exe=nucleus
+exe=nucleus; shell=ncsql
 case "$target" in
   *-linux-musl)   kinds="linux-musl d-os" ;;
   *-linux-gnu)    kinds="linux" ;;
   *-apple-darwin) kinds="macos" ;;
-  *-windows-*)    kinds="windows"; exe=nucleus.exe ;;
+  *-windows-*)    kinds="windows"; exe=nucleus.exe; shell=ncsql.exe ;;
   *) echo "package.sh: no packaging rule for $target" >&2; exit 1 ;;
 esac
 bin="$root/target/$target/release/$exe"
@@ -39,7 +39,7 @@ out=$(cd "$out" && pwd)
 for kind in $kinds; do
   stage=$(mktemp -d)
   mkdir -p "$stage/$name/bin"
-  cp "$bin" "$stage/$name/bin/"
+  cp "$bin" "$root/target/$target/release/$shell" "$stage/$name/bin/"
   cp "$root/LICENSE" "$root/README.md" "$stage/$name/"
   case $kind in
     linux)      file="$name-linux-$arch.tar.gz" ;;

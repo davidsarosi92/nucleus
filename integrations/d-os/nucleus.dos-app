@@ -1,6 +1,7 @@
 # nucleus for d-os (https://github.com/davidsarosi92/nucleus).
 # Installed by d-os `app install` into /mnt/apps/nucleus/<version>/.
-# The CLI, and the settings service (PLAN.md §M6.5) for d-os to start.
-# The SQL server (§M12) will add a service line.
+# The CLI, the SQL shell (ncsql), and the settings service (PLAN.md §M6.5)
+# for d-os to start.  The SQL server (§M12) will add a service line.
 link=bin/nucleus /bin/nucleus
+link=bin/ncsql /bin/ncsql
 link=bin/nucleus-settings /bin/nucleus-settings
