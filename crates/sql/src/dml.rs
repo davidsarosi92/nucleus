@@ -294,9 +294,7 @@ pub fn insert(
         }
         (rows, writer, ret)
     };
-    for row in &rows {
-        insert_row(txn, &writer, row)?;
-    }
+    insert_rows(txn, &writer, &rows)?;
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {
@@ -383,8 +381,39 @@ pub fn update(
         }
         (changes, writer, ret)
     };
-    let t = &writer.table;
-    for (key, old, new) in &changes {
+    update_rows(txn, &writer, &changes)?;
+    let returning = match ret {
+        None => None,
+        Some((exprs, cols)) => {
+            let ctx = Ctx::new(&*txn, params);
+            Some((
+                cols,
+                changes
+                    .iter()
+                    .map(|(_, _, n)| project(&exprs, n, &ctx))
+                    .collect::<Result<_>>()?,
+            ))
+        }
+    };
+    Ok(Written {
+        count: changes.len() as u64,
+        returning,
+    })
+}
+
+/// Stores new rows (validated already), then checks their foreign keys.
+pub fn insert_rows(txn: &mut dyn KvTxn, w: &Writer, rows: &[Row]) -> Result<()> {
+    for row in rows {
+        insert_row(txn, w, row)?;
+    }
+    crate::fk::check_children(&*txn, &w.table, rows.iter().map(|r| (None, r)))
+}
+
+/// Replaces rows `(key, old, new)` (validated already) and their index
+/// entries, then runs the foreign key checks and actions.
+pub fn update_rows(txn: &mut dyn KvTxn, w: &Writer, changes: &[(Vec<u8>, Row, Row)]) -> Result<()> {
+    let t = &w.table;
+    for (key, old, new) in changes {
         let new_key = if t.primary_key.is_empty() {
             key.clone()
         } else {
@@ -411,23 +440,33 @@ pub fn update(
             txn.put(&nk, &new_pk)?;
         }
     }
-    let returning = match ret {
-        None => None,
-        Some((exprs, cols)) => {
-            let ctx = Ctx::new(&*txn, params);
-            Some((
-                cols,
-                changes
-                    .iter()
-                    .map(|(_, _, n)| project(&exprs, n, &ctx))
-                    .collect::<Result<_>>()?,
-            ))
+    crate::fk::check_children(&*txn, t, changes.iter().map(|(_, o, n)| (Some(o), n)))?;
+    if !t.referenced_by.is_empty() {
+        let changed: Vec<(Row, Option<Row>)> = changes
+            .iter()
+            .map(|(_, o, n)| (o.clone(), Some(n.clone())))
+            .collect();
+        crate::fk::parent_changed(txn, t, &changed)?;
+    }
+    Ok(())
+}
+
+/// Deletes rows and their index entries, then runs the foreign key
+/// actions of the tables referencing them.
+pub fn delete_rows(txn: &mut dyn KvTxn, t: &Table, rows: &[(Vec<u8>, Row)]) -> Result<()> {
+    for (key, row) in rows {
+        txn.delete(key)?;
+        let pk = pk_suffix(t, key);
+        for i in 0..t.indexes.len() {
+            txn.delete(&index_entry(t, i, row, &pk).0)?;
         }
-    };
-    Ok(Written {
-        count: changes.len() as u64,
-        returning,
-    })
+    }
+    if !t.referenced_by.is_empty() {
+        let removed: Vec<(Row, Option<Row>)> =
+            rows.iter().map(|(_, r)| (r.clone(), None)).collect();
+        crate::fk::parent_changed(txn, t, &removed)?;
+    }
+    Ok(())
 }
 
 /// `DELETE`.
@@ -447,13 +486,7 @@ pub fn delete(
         let ctx = Ctx::new(ro, params);
         (exec::matching_rows(&t, &access, pred.as_ref(), &ctx)?, ret)
     };
-    for (key, row) in &rows {
-        txn.delete(key)?;
-        let pk = pk_suffix(&t, key);
-        for i in 0..t.indexes.len() {
-            txn.delete(&index_entry(&t, i, row, &pk).0)?;
-        }
-    }
+    delete_rows(txn, &t, &rows)?;
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {

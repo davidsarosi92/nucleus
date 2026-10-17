@@ -381,10 +381,9 @@ impl<'a> Parser<'a> {
                 || self.peek_kw("unique")
                 || self.peek_kw("check")
                 || self.peek_kw("constraint")
+                || self.peek_kw("foreign")
             {
                 constraints.push(self.table_constraint()?);
-            } else if self.peek_kw("foreign") {
-                return Err(Error::feature("FOREIGN KEY is not supported yet"));
             } else {
                 columns.push(self.column_spec()?);
             }
@@ -416,11 +415,77 @@ impl<'a> Parser<'a> {
             let (_, text) = self.text_of(|p| p.expr())?;
             self.expect_op(")")?;
             Ok(TableConstraint::Check(name, text))
-        } else if self.peek_kw("foreign") {
-            Err(Error::feature("FOREIGN KEY is not supported yet"))
+        } else if self.eat_kws(&["foreign", "key"]) {
+            let columns = self.ident_list()?;
+            self.expect_kw("references")?;
+            Ok(TableConstraint::ForeignKey {
+                name,
+                columns,
+                references: self.references()?,
+            })
         } else {
-            Err(self.error("expected PRIMARY KEY, UNIQUE or CHECK"))
+            Err(self.error("expected PRIMARY KEY, UNIQUE, CHECK or FOREIGN KEY"))
         }
+    }
+
+    /// After `REFERENCES`: `table [(columns)] [MATCH SIMPLE] [ON DELETE a]
+    /// [ON UPDATE a] [NOT DEFERRABLE] [INITIALLY IMMEDIATE]`.
+    fn references(&mut self) -> Result<References> {
+        let table = self.ident()?;
+        let columns = if self.peek_op("(") {
+            self.ident_list()?
+        } else {
+            Vec::new()
+        };
+        let mut r = References {
+            table,
+            columns,
+            on_delete: FkAction::NoAction,
+            on_update: FkAction::NoAction,
+        };
+        loop {
+            if self.eat_kws(&["match", "simple"])
+                || self.eat_kws(&["not", "deferrable"])
+                || self.eat_kws(&["initially", "immediate"])
+            {
+            } else if self.peek_kw("match") {
+                return Err(Error::feature(
+                    "only MATCH SIMPLE foreign keys are supported",
+                ));
+            } else if self.peek_kw("deferrable") || self.peek_kws(&["initially", "deferred"]) {
+                return Err(Error::feature("deferrable constraints are not supported"));
+            } else if self.eat_kws(&["on", "delete"]) {
+                r.on_delete = self.fk_action()?;
+            } else if self.eat_kws(&["on", "update"]) {
+                r.on_update = self.fk_action()?;
+            } else {
+                return Ok(r);
+            }
+        }
+    }
+
+    fn fk_action(&mut self) -> Result<FkAction> {
+        Ok(if self.eat_kws(&["no", "action"]) {
+            FkAction::NoAction
+        } else if self.eat_kw("restrict") {
+            FkAction::Restrict
+        } else if self.eat_kw("cascade") {
+            FkAction::Cascade
+        } else if self.eat_kws(&["set", "null"]) {
+            FkAction::SetNull
+        } else if self.eat_kws(&["set", "default"]) {
+            FkAction::SetDefault
+        } else {
+            return Err(
+                self.error("expected NO ACTION, RESTRICT, CASCADE, SET NULL or SET DEFAULT")
+            );
+        })
+    }
+
+    fn peek_kws(&self, kws: &[&str]) -> bool {
+        kws.iter()
+            .enumerate()
+            .all(|(i, k)| self.peek_at(i).is_some_and(|t| t.is(k)))
     }
 
     fn data_type(&mut self) -> Result<(DataType, TypeMod)> {
@@ -498,7 +563,9 @@ impl<'a> Parser<'a> {
             unique: false,
             default: None,
             check: None,
+            references: None,
         };
+        let mut constraint_name = None;
         loop {
             if self.eat_kws(&["not", "null"]) {
                 c.not_null = true;
@@ -517,11 +584,9 @@ impl<'a> Parser<'a> {
                 self.expect_op(")")?;
                 c.check = Some(text);
             } else if self.eat_kw("constraint") {
-                self.ident()?;
-            } else if self.peek_kw("references") {
-                return Err(Error::feature(
-                    "REFERENCES (foreign keys) is not supported yet",
-                ));
+                constraint_name = Some(self.ident()?);
+            } else if self.eat_kw("references") {
+                c.references = Some((constraint_name.take(), self.references()?));
             } else {
                 return Ok(c);
             }
@@ -543,15 +608,44 @@ impl<'a> Parser<'a> {
         while self.eat_op(",") {
             names.push(self.ident()?);
         }
-        Ok(Statement::DropTable { names, if_exists })
+        let cascade = self.eat_kw("cascade");
+        if !cascade {
+            self.eat_kw("restrict");
+        }
+        Ok(Statement::DropTable {
+            names,
+            if_exists,
+            cascade,
+        })
     }
 
     fn alter(&mut self) -> Result<Statement> {
         self.expect_kw("alter")?;
         self.expect_kw("table")?;
         let table = self.ident()?;
+        if self.eat_kws(&["drop", "constraint"]) {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let name = self.ident()?;
+            let _ = self.eat_kw("restrict") || self.eat_kw("cascade");
+            return Ok(Statement::DropConstraint {
+                table,
+                name,
+                if_exists,
+            });
+        }
         if !self.eat_kw("add") {
-            return Err(Error::feature("only ALTER TABLE … ADD COLUMN is supported"));
+            return Err(Error::feature(
+                "only ALTER TABLE … ADD COLUMN, ADD CONSTRAINT and DROP CONSTRAINT are supported",
+            ));
+        }
+        if ["constraint", "primary", "unique", "check", "foreign"]
+            .iter()
+            .any(|k| self.peek_kw(k))
+        {
+            return Ok(Statement::AddConstraint {
+                table,
+                constraint: self.table_constraint()?,
+            });
         }
         self.eat_kw("column");
         Ok(Statement::AddColumn {
@@ -1530,7 +1624,7 @@ mod tests {
         assert!(e.message.contains("position"), "{}", e.message);
         assert!(parse_one("SELECT 1 2 3").is_err());
         assert_eq!(
-            parse_one("CREATE TABLE t (a INT REFERENCES u)")
+            parse_one("CREATE TABLE t (a INT REFERENCES u DEFERRABLE)")
                 .unwrap_err()
                 .code,
             "0A000"

@@ -22,6 +22,8 @@ pub enum Statement {
         names: Vec<String>,
         /// `IF EXISTS`.
         if_exists: bool,
+        /// `CASCADE`: drop the foreign keys that reference them too.
+        cascade: bool,
     },
     /// `CREATE [UNIQUE] INDEX`.
     CreateIndex {
@@ -49,6 +51,22 @@ pub enum Statement {
         table: String,
         /// The new column.
         column: ColumnSpec,
+    },
+    /// `ALTER TABLE … ADD [CONSTRAINT name] …`.
+    AddConstraint {
+        /// Table.
+        table: String,
+        /// The constraint.
+        constraint: TableConstraint,
+    },
+    /// `ALTER TABLE … DROP CONSTRAINT [IF EXISTS] name`.
+    DropConstraint {
+        /// Table.
+        table: String,
+        /// Constraint name.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
     },
     /// `INSERT`.
     Insert {
@@ -146,6 +164,50 @@ pub struct ColumnSpec {
     pub default: Option<String>,
     /// `CHECK (expr)` on the column, as SQL text.
     pub check: Option<String>,
+    /// `[CONSTRAINT name] REFERENCES …` on the column.
+    pub references: Option<(Option<String>, References)>,
+}
+
+/// `REFERENCES table [(columns)] [ON DELETE …] [ON UPDATE …]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct References {
+    /// The referenced table.
+    pub table: String,
+    /// The referenced columns (empty: its primary key).
+    pub columns: Vec<String>,
+    /// `ON DELETE`.
+    pub on_delete: FkAction,
+    /// `ON UPDATE`.
+    pub on_update: FkAction,
+}
+
+/// What a foreign key does when the referenced row goes away or changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FkAction {
+    /// Fail at the end of the statement (the default).
+    #[default]
+    NoAction,
+    /// Fail.
+    Restrict,
+    /// Delete the referencing rows / update their columns too.
+    Cascade,
+    /// Set the referencing columns to NULL.
+    SetNull,
+    /// Set the referencing columns to their defaults.
+    SetDefault,
+}
+
+impl FkAction {
+    /// The SQL words.
+    pub fn sql(self) -> &'static str {
+        match self {
+            FkAction::NoAction => "NO ACTION",
+            FkAction::Restrict => "RESTRICT",
+            FkAction::Cascade => "CASCADE",
+            FkAction::SetNull => "SET NULL",
+            FkAction::SetDefault => "SET DEFAULT",
+        }
+    }
 }
 
 /// A table constraint.
@@ -157,6 +219,15 @@ pub enum TableConstraint {
     Unique(Option<String>, Vec<String>),
     /// `CHECK (expr)`.
     Check(Option<String>, String),
+    /// `FOREIGN KEY (cols) REFERENCES …`.
+    ForeignKey {
+        /// Name.
+        name: Option<String>,
+        /// The referencing columns.
+        columns: Vec<String>,
+        /// What they reference.
+        references: References,
+    },
 }
 
 /// A query: a body with ordering and limits.

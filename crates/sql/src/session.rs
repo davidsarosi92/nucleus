@@ -466,10 +466,38 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
             create_table(txn, name, columns, constraints)?;
             Output::Command("CREATE TABLE".into())
         }
-        Statement::DropTable { names, if_exists } => {
+        Statement::DropTable {
+            names,
+            if_exists,
+            cascade,
+        } => {
             for name in names {
                 match catalog::get_table(&*txn, name)? {
-                    Some(t) => catalog::drop_table(txn, &t)?,
+                    Some(mut t) => {
+                        // Foreign keys of other tables referencing it.
+                        for (child_name, fk_name) in t.referenced_by.clone() {
+                            if child_name == t.name || names.contains(&child_name) {
+                                continue;
+                            }
+                            if !*cascade {
+                                return Err(Error::dependent_objects(format!(
+                                    "cannot drop table {name} because other objects depend on it: constraint {fk_name} on table {child_name}"
+                                )));
+                            }
+                            let mut child = catalog::table(&*txn, &child_name)?;
+                            if let Some(i) =
+                                child.foreign_keys.iter().position(|f| f.name == fk_name)
+                            {
+                                child.foreign_keys.remove(i);
+                                catalog::update_table(txn, &child)?;
+                            }
+                        }
+                        // Its own foreign keys, from the tables they reference.
+                        while let Some(i) = t.foreign_keys.iter().position(|f| f.table != t.name) {
+                            crate::fk::detach(txn, &mut t, i)?;
+                        }
+                        catalog::drop_table(txn, &t)?
+                    }
                     None if *if_exists => {}
                     None => {
                         return Err(Error::undefined_table(format!(
@@ -521,6 +549,11 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
         Statement::DropIndex { name, if_exists } => {
             match catalog::find_index(&*txn, name)? {
                 Some((mut t, i)) => {
+                    if let Some((child, fk)) = crate::fk::index_users(&*txn, &t, i)?.first() {
+                        return Err(Error::dependent_objects(format!(
+                            "cannot drop index {name} because constraint {fk} on table {child} requires it"
+                        )));
+                    }
                     let prefix = t.index_prefix(t.indexes[i].id);
                     catalog::delete_range(
                         txn,
@@ -583,7 +616,30 @@ pub fn execute(txn: &mut dyn KvTxn, stmt: &Statement, params: &[Value]) -> Resul
                     dml::rewrite_rows(txn, &t, &fill)?;
                 }
             }
+            if let Some((name, r)) = &column.references {
+                let fk = crate::fk::build(
+                    &*txn,
+                    &t,
+                    name.as_deref(),
+                    std::slice::from_ref(&column.name),
+                    r,
+                )?;
+                crate::fk::validate_existing(&*txn, &t, &fk)?;
+                crate::fk::attach(txn, &mut t, fk)?;
+            }
             catalog::update_table(txn, &t)?;
+            Output::Command("ALTER TABLE".into())
+        }
+        Statement::AddConstraint { table, constraint } => {
+            add_constraint(txn, table, constraint)?;
+            Output::Command("ALTER TABLE".into())
+        }
+        Statement::DropConstraint {
+            table,
+            name,
+            if_exists,
+        } => {
+            drop_constraint(txn, table, name, *if_exists)?;
             Output::Command("ALTER TABLE".into())
         }
         Statement::Insert {
@@ -692,6 +748,7 @@ fn create_table(
                     .unwrap_or_else(|| format!("{name}_{}_key", cols.join("_")));
                 uniques.push((n, idx));
             }
+            TableConstraint::ForeignKey { .. } => {} // after the table is built
             TableConstraint::Check(n, text) => {
                 checks.push((
                     n.clone()
@@ -712,6 +769,8 @@ fn create_table(
         indexes: Vec::new(),
         checks,
         next_index_id: 1,
+        foreign_keys: Vec::new(),
+        referenced_by: Vec::new(),
     };
     for (n, cols) in uniques {
         if catalog::find_index(&*txn, &n)?.is_some() {
@@ -739,6 +798,140 @@ fn create_table(
         let _ = Binder::new(&*txn).condition(&parse_expr(text)?, &dml::table_scope(&table))?;
     }
     let _ = Scope::default();
-    catalog::create_table(txn, table)?;
+    // Foreign keys: from columns, then table constraints.
+    let mut fks = Vec::new();
+    for s in specs {
+        if let Some((n, r)) = &s.references {
+            fks.push((n.clone(), vec![s.name.clone()], r.clone()));
+        }
+    }
+    for c in constraints {
+        if let TableConstraint::ForeignKey {
+            name,
+            columns,
+            references,
+        } = c
+        {
+            fks.push((name.clone(), columns.clone(), references.clone()));
+        }
+    }
+    let mut built = Vec::new();
+    for (n, cols, r) in &fks {
+        let fk = crate::fk::build(&*txn, &table, n.as_deref(), cols, r)?;
+        // Later names must not collide with this one.
+        table.foreign_keys.push(fk.clone());
+        built.push(fk);
+    }
+    table.foreign_keys.clear();
+    // Self-references are recorded on the new table, others on the
+    // referenced tables (which exist).
+    let mut table = catalog::create_table(txn, table)?;
+    for fk in built {
+        crate::fk::attach(txn, &mut table, fk)?;
+    }
+    catalog::update_table(txn, &table)?;
     Ok(())
+}
+
+/// `ALTER TABLE … ADD CONSTRAINT`.
+fn add_constraint(txn: &mut dyn KvTxn, table: &str, c: &TableConstraint) -> Result<()> {
+    let mut t = catalog::table(&*txn, table)?;
+    match c {
+        TableConstraint::ForeignKey {
+            name,
+            columns,
+            references,
+        } => {
+            let fk = crate::fk::build(&*txn, &t, name.as_deref(), columns, references)?;
+            crate::fk::validate_existing(&*txn, &t, &fk)?;
+            crate::fk::attach(txn, &mut t, fk)?;
+        }
+        TableConstraint::Check(name, text) => {
+            let name = name
+                .clone()
+                .unwrap_or_else(|| format!("{table}_check{}", t.checks.len() + 1));
+            if t.checks.iter().any(|(n, _)| *n == name) {
+                return Err(Error::duplicate_object(format!(
+                    "constraint \"{name}\" for relation \"{table}\" already exists"
+                )));
+            }
+            let check = Binder::new(&*txn).condition(&parse_expr(text)?, &dml::table_scope(&t))?;
+            let ctx = Ctx::new(&*txn, &[]);
+            for (_, row) in exec::matching_rows(&t, &crate::plan::Access::Full, None, &ctx)? {
+                let env = crate::expr::Env {
+                    row: &row,
+                    outer: None,
+                    ctx: &ctx,
+                };
+                if check.eval(&env)?.truth()? == Some(false) {
+                    return Err(Error::check_violation(format!(
+                        "check constraint \"{name}\" of relation \"{table}\" is violated by some row"
+                    )));
+                }
+            }
+            t.checks.push((name, text.clone()));
+        }
+        TableConstraint::Unique(name, cols) => {
+            let name = name
+                .clone()
+                .unwrap_or_else(|| format!("{table}_{}_key", cols.join("_")));
+            if catalog::find_index(&*txn, &name)?.is_some() {
+                return Err(Error::duplicate_table(format!(
+                    "relation \"{name}\" already exists"
+                )));
+            }
+            let columns = cols
+                .iter()
+                .map(|c| {
+                    t.column(c).ok_or_else(|| {
+                        Error::undefined_column(format!(
+                            "column \"{c}\" named in key does not exist"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            t.indexes.push(Index {
+                id: t.next_index_id,
+                name,
+                columns,
+                unique: true,
+            });
+            t.next_index_id += 1;
+            dml::backfill_index(txn, &t, t.indexes.len() - 1)?;
+        }
+        TableConstraint::PrimaryKey(_) => {
+            return Err(Error::feature(
+                "ALTER TABLE … ADD PRIMARY KEY is not supported",
+            ));
+        }
+    }
+    catalog::update_table(txn, &t)
+}
+
+/// `ALTER TABLE … DROP CONSTRAINT`.
+fn drop_constraint(txn: &mut dyn KvTxn, table: &str, name: &str, if_exists: bool) -> Result<()> {
+    let mut t = catalog::table(&*txn, table)?;
+    if let Some(i) = t.foreign_keys.iter().position(|f| f.name == name) {
+        crate::fk::detach(txn, &mut t, i)?;
+    } else if let Some(i) = t.checks.iter().position(|(n, _)| n == name) {
+        t.checks.remove(i);
+    } else if let Some(i) = t.indexes.iter().position(|ix| ix.name == name && ix.unique) {
+        if let Some((child, fk)) = crate::fk::index_users(&*txn, &t, i)?.first() {
+            return Err(Error::dependent_objects(format!(
+                "cannot drop constraint {name} on table {table} because constraint {fk} on table {child} requires it"
+            )));
+        }
+        let prefix = t.index_prefix(t.indexes[i].id);
+        catalog::delete_range(txn, &prefix, nucleus_kv::prefix_end(&prefix).as_deref())?;
+        t.indexes.remove(i);
+    } else if name == format!("{table}_pkey") {
+        return Err(Error::feature("dropping a primary key is not supported"));
+    } else if if_exists {
+        return Ok(());
+    } else {
+        return Err(Error::undefined_object(format!(
+            "constraint \"{name}\" of relation \"{table}\" does not exist"
+        )));
+    }
+    catalog::update_table(txn, &t)
 }

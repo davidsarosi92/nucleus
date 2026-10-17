@@ -13,6 +13,7 @@ pub mod encoding;
 pub mod error;
 pub mod exec;
 pub mod expr;
+pub mod fk;
 pub mod lexer;
 pub mod optimizer;
 pub mod parser;

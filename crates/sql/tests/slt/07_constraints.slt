@@ -94,7 +94,8 @@ SELECT b FROM named WHERE a = 0
 ----
 5
 
-statement error 0A000
+# Foreign keys are in 17_foreign_keys.slt; this table has no primary key.
+statement error 42830
 CREATE TABLE fk (a INT REFERENCES named)
 
 statement ok

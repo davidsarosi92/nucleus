@@ -336,7 +336,11 @@ pub fn scan<'a>(
         return Ok(Box::new(std::iter::empty()));
     };
     let end_bound = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
-    let entries = ctx.txn.scan(Bound::Included(&start), end_bound)?;
+    let entries = if ctx.validated {
+        ctx.txn.scan_validated(Bound::Included(&start), end_bound)?
+    } else {
+        ctx.txn.scan(Bound::Included(&start), end_bound)?
+    };
     let ncols = table.columns.len();
     Ok(match index {
         None => Box::new(entries.map(move |e| {

@@ -1,0 +1,338 @@
+# FOREIGN KEY / REFERENCES (results checked against PostgreSQL 16).
+
+statement ok
+CREATE TABLE dept (id INT PRIMARY KEY, name TEXT UNIQUE)
+
+statement ok
+CREATE TABLE emp (id INT PRIMARY KEY, dept_id INT REFERENCES dept, dept_name TEXT REFERENCES dept (name) ON UPDATE CASCADE)
+
+statement ok
+INSERT INTO dept VALUES (1, 'eng'), (2, 'ops'), (3, 'empty')
+
+statement ok
+INSERT INTO emp VALUES (10, 1, 'eng'), (11, 1, NULL), (12, NULL, NULL), (13, 2, 'ops')
+
+statement error 23503
+INSERT INTO emp VALUES (14, 9, NULL)
+
+statement error 23503
+INSERT INTO emp VALUES (14, NULL, 'nope')
+
+statement error 23503
+UPDATE emp SET dept_id = 7 WHERE id = 10
+
+# NO ACTION: a referenced row cannot go.
+statement error 23503
+DELETE FROM dept WHERE id = 1
+
+statement error 23503
+UPDATE dept SET id = 100 WHERE id = 2
+
+statement ok
+DELETE FROM dept WHERE id = 3
+
+statement ok
+UPDATE dept SET name = 'engineering' WHERE id = 1
+
+# ON UPDATE CASCADE carried the new name along.
+query IIT rowsort
+SELECT id, dept_id, dept_name FROM emp
+----
+10 1 engineering
+11 1 NULL
+12 NULL NULL
+13 2 ops
+
+statement ok
+DELETE FROM emp WHERE dept_id = 1 OR dept_id = 2
+
+statement ok
+DELETE FROM dept
+
+# CASCADE, SET NULL, SET DEFAULT, and cascades of cascades.
+statement ok
+CREATE TABLE author (id INT PRIMARY KEY, name TEXT)
+
+statement ok
+CREATE TABLE book (id INT PRIMARY KEY, author_id INT REFERENCES author ON DELETE CASCADE ON UPDATE CASCADE, title TEXT)
+
+statement ok
+CREATE TABLE review (id INT PRIMARY KEY, book_id INT REFERENCES book (id) ON DELETE CASCADE, stars INT)
+
+statement ok
+CREATE TABLE loan (id INT PRIMARY KEY, book_id INT DEFAULT 0, reader TEXT, FOREIGN KEY (book_id) REFERENCES book ON DELETE SET DEFAULT)
+
+statement ok
+CREATE TABLE note (id INT PRIMARY KEY, author_id INT, CONSTRAINT note_author FOREIGN KEY (author_id) REFERENCES author (id) ON DELETE SET NULL ON UPDATE CASCADE)
+
+statement ok
+INSERT INTO author VALUES (0, 'nobody'), (1, 'ann'), (2, 'bob')
+
+statement ok
+INSERT INTO book VALUES (0, 0, 'placeholder'), (10, 1, 'a1'), (11, 1, 'a2'), (20, 2, 'b1')
+
+statement ok
+INSERT INTO review VALUES (100, 10, 5), (101, 11, 3), (102, 20, 4)
+
+statement ok
+INSERT INTO loan VALUES (1, 10, 'x'), (2, 20, 'y')
+
+statement ok
+INSERT INTO note VALUES (1, 1), (2, 2), (3, NULL)
+
+statement ok
+DELETE FROM author WHERE id = 1
+
+query IT rowsort
+SELECT id, title FROM book
+----
+0 placeholder
+20 b1
+
+query I rowsort
+SELECT id FROM review
+----
+102
+
+query II rowsort
+SELECT id, book_id FROM loan
+----
+1 0
+2 20
+
+query II rowsort
+SELECT id, author_id FROM note
+----
+1 NULL
+2 2
+3 NULL
+
+statement ok
+UPDATE author SET id = 22 WHERE id = 2
+
+query II rowsort
+SELECT id, author_id FROM note
+----
+1 NULL
+2 22
+3 NULL
+
+query II rowsort
+SELECT id, author_id FROM book
+----
+0 0
+20 22
+
+# SET DEFAULT needs the default to exist: deleting book 0 now fails.
+statement error 23503
+DELETE FROM book WHERE id = 0
+
+# Composite keys and a self-reference; a statement may insert a parent
+# after its child.
+statement ok
+CREATE TABLE node (tree INT, id INT, parent INT, PRIMARY KEY (tree, id), FOREIGN KEY (tree, parent) REFERENCES node (tree, id) ON DELETE CASCADE)
+
+statement ok
+INSERT INTO node VALUES (1, 2, 1), (1, 1, NULL), (1, 3, 2), (2, 1, NULL)
+
+statement error 23503
+INSERT INTO node VALUES (2, 5, 4)
+
+statement ok
+DELETE FROM node WHERE tree = 1 AND id = 2
+
+query II rowsort
+SELECT tree, id FROM node
+----
+1 1
+2 1
+
+# Schema changes.
+statement error 2BP01
+DROP TABLE author
+
+statement ok
+CREATE TABLE tag (name TEXT PRIMARY KEY)
+
+statement ok
+CREATE TABLE tagged (book_id INT, tag TEXT)
+
+statement ok
+INSERT INTO tagged VALUES (10, 'x')
+
+statement error 23503
+ALTER TABLE tagged ADD CONSTRAINT tagged_tag_fkey FOREIGN KEY (tag) REFERENCES tag
+
+statement ok
+INSERT INTO tag VALUES ('x')
+
+statement ok
+ALTER TABLE tagged ADD CONSTRAINT tagged_tag_fkey FOREIGN KEY (tag) REFERENCES tag
+
+statement error 23503
+INSERT INTO tagged VALUES (1, 'y')
+
+statement ok
+ALTER TABLE tagged DROP CONSTRAINT tagged_tag_fkey
+
+statement ok
+INSERT INTO tagged VALUES (1, 'y')
+
+statement error 42704
+ALTER TABLE tagged DROP CONSTRAINT nosuch
+
+statement ok
+ALTER TABLE tagged DROP CONSTRAINT IF EXISTS nosuch
+
+statement ok
+ALTER TABLE tagged ADD COLUMN author_id INT REFERENCES author
+
+statement error 23503
+UPDATE tagged SET author_id = 99
+
+statement ok
+DROP TABLE author CASCADE
+
+statement ok
+INSERT INTO book VALUES (30, 99, 'orphan allowed now')
+
+# Definition errors.
+statement error 42830
+CREATE TABLE bad1 (x TEXT REFERENCES book (title))
+
+statement error 42804
+CREATE TABLE bad2 (x TEXT REFERENCES book)
+
+statement error 42830
+CREATE TABLE bad3 (a INT, b INT, FOREIGN KEY (a, b) REFERENCES book)
+
+statement error 42P01
+CREATE TABLE bad4 (x INT REFERENCES nosuch)
+
+statement error 42703
+CREATE TABLE bad5 (x INT, FOREIGN KEY (y) REFERENCES book)
+
+# A unique index a foreign key relies on cannot be dropped.
+statement ok
+CREATE TABLE code (c TEXT, CONSTRAINT code_c_key UNIQUE (c))
+
+statement ok
+CREATE TABLE uses_code (c TEXT REFERENCES code (c))
+
+statement error 2BP01
+ALTER TABLE code DROP CONSTRAINT code_c_key
+
+statement ok
+DROP TABLE uses_code
+
+statement ok
+ALTER TABLE code DROP CONSTRAINT code_c_key
+
+# nucleus-only
+statement error 0A000
+CREATE TABLE deferred (x INT REFERENCES book DEFERRABLE INITIALLY DEFERRED)
+
+# Concurrency (nucleus-only: PostgreSQL blocks on row locks where nucleus
+# fails one transaction at commit).  A child inserted while its parent is
+# deleted: one of the two must fail.
+# nucleus-only
+statement ok
+CREATE TABLE p (id INT PRIMARY KEY)
+
+# nucleus-only
+statement ok
+CREATE TABLE c (id INT PRIMARY KEY, pid INT REFERENCES p)
+
+# nucleus-only
+statement ok
+CREATE INDEX c_pid ON c (pid)
+
+# nucleus-only
+statement ok
+INSERT INTO p VALUES (1), (2), (3)
+
+connection a
+
+
+# nucleus-only
+statement ok
+BEGIN
+
+# nucleus-only
+statement ok
+INSERT INTO c VALUES (10, 1)
+
+connection b
+
+
+# nucleus-only
+statement ok
+DELETE FROM p WHERE id = 1
+
+connection a
+
+
+# nucleus-only
+statement error 40001
+COMMIT
+
+# The other order: the delete saw no children, then one was inserted.
+# nucleus-only
+statement ok
+BEGIN
+
+# nucleus-only
+statement ok
+DELETE FROM p WHERE id = 2
+
+connection b
+
+
+# nucleus-only
+statement ok
+INSERT INTO c VALUES (11, 2)
+
+connection a
+
+
+# nucleus-only
+statement error 40001
+COMMIT
+
+# Children of the same parent do not conflict with each other.
+# nucleus-only
+statement ok
+BEGIN
+
+# nucleus-only
+statement ok
+INSERT INTO c VALUES (12, 3)
+
+connection b
+
+
+# nucleus-only
+statement ok
+INSERT INTO c VALUES (13, 3)
+
+connection a
+
+
+# nucleus-only
+statement ok
+COMMIT
+
+# nucleus-only
+query II rowsort
+SELECT id, pid FROM c
+----
+11 2
+12 3
+13 3
+
+# nucleus-only
+query I rowsort
+SELECT id FROM p
+----
+2
+3

@@ -343,7 +343,10 @@ pub struct Transaction {
     read_only: bool,
     isolation: Isolation,
     done: bool,
-    /// Serializable only: what was read, for validation at commit.
+    /// What was read, for validation at commit: every read of a
+    /// serializable transaction, and the validated reads
+    /// ([`Transaction::get_validated`], [`Transaction::scan_validated`]) of
+    /// any transaction.
     reads: Mutex<ReadSet>,
 }
 
@@ -397,6 +400,25 @@ impl Transaction {
             lock(&self.reads).keys.insert(key.to_vec());
         }
         Ok(self.engine.read_at(key, self.start)?.flatten())
+    }
+
+    /// [`get`](Self::get), and the commit fails if a commit after this
+    /// transaction's snapshot wrote `key` — at any isolation level.  Under
+    /// snapshot isolation this makes a decision on the value safe without
+    /// serializing everything (a foreign key check: the referenced row must
+    /// still be there at commit).
+    pub fn get_validated(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        lock(&self.reads).keys.insert(key.to_vec());
+        self.get(key)
+    }
+
+    /// [`scan`](Self::scan), validated as [`get_validated`](Self::get_validated):
+    /// the commit fails if a later commit wrote inside the part of the range
+    /// that was consumed.
+    pub fn scan_validated(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Scan<'_>> {
+        let mut scan = self.scan(start, end)?;
+        scan.validated = true;
+        Ok(scan)
     }
 
     /// Sets `key` to `value`.
@@ -453,6 +475,7 @@ impl Transaction {
             range: (start.map(<[u8]>::to_vec), end.map(<[u8]>::to_vec)),
             last: None,
             done: false,
+            validated: self.isolation == Isolation::Serializable,
         })
     }
 
@@ -471,9 +494,9 @@ impl Transaction {
                     return Err(Error::Conflict { key: key.clone() });
                 }
             }
-            if self.isolation == Isolation::Serializable {
-                self.validate_reads(&engine)?;
-            }
+            // Serializable transactions record every read; others only
+            // their validated ones.
+            self.validate_reads(&engine)?;
             let ts = *last + 1;
             let wm = engine.current_watermark();
             let mut ops = Vec::with_capacity(self.writes.len());
@@ -507,8 +530,9 @@ impl Transaction {
         Ok(Timestamp(ts))
     }
 
-    /// Serializable validation: no key or range this transaction read was
-    /// written by a commit after its snapshot.  Called under the commit lock.
+    /// Read validation: no key or range in the read set was written by a
+    /// commit after this transaction's snapshot.  Called under the commit
+    /// lock.
     fn validate_reads(&self, engine: &Inner) -> Result<()> {
         let reads = lock(&self.reads);
         let recent = lock(&engine.recent);
@@ -553,11 +577,13 @@ pub struct Scan<'t> {
     range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
     last: Option<Vec<u8>>,
     done: bool,
+    /// Whether the consumed range joins the read set.
+    validated: bool,
 }
 
 impl Drop for Scan<'_> {
     fn drop(&mut self) {
-        if self.txn.isolation != Isolation::Serializable {
+        if !self.validated {
             return;
         }
         let read = if self.done {

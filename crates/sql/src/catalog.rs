@@ -23,6 +23,7 @@ use std::ops::Bound;
 
 use nucleus_kv::{KvTxn, prefix_end};
 
+use crate::ast::FkAction;
 use crate::encoding::{Reader, Writer};
 use crate::error::{Error, Result};
 use crate::types::{DataType, Value};
@@ -32,8 +33,9 @@ const SEQUENCE: &[u8] = &[0x00, 0x02];
 const ROWID: &[u8] = &[0x00, 0x03];
 const STATS: &[u8] = &[0x00, 0x04];
 const DATA: u8 = 0x01;
-/// Version 2 added `NUMERIC(p, s)` modifiers; version 1 still reads.
-const TABLE_VERSION: u8 = 2;
+/// Version 2 added `NUMERIC(p, s)` modifiers, version 3 foreign keys;
+/// older versions still read.
+const TABLE_VERSION: u8 = 3;
 
 /// A column.
 #[derive(Clone, Debug, PartialEq)]
@@ -65,6 +67,25 @@ pub struct Index {
     pub unique: bool,
 }
 
+/// A foreign key: columns of this table that must match a row of another
+/// (or the same) table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForeignKey {
+    /// Constraint name.
+    pub name: String,
+    /// The referencing columns, by position.
+    pub columns: Vec<usize>,
+    /// The referenced table.
+    pub table: String,
+    /// The referenced columns (its primary key or a unique index), by
+    /// position, matching `columns` one to one.
+    pub ref_columns: Vec<usize>,
+    /// `ON DELETE`.
+    pub on_delete: FkAction,
+    /// `ON UPDATE`.
+    pub on_update: FkAction,
+}
+
 /// A table definition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -82,6 +103,10 @@ pub struct Table {
     pub checks: Vec<(String, String)>,
     /// The id the next index gets.
     pub next_index_id: u32,
+    /// Foreign keys of this table.
+    pub foreign_keys: Vec<ForeignKey>,
+    /// The foreign keys referencing this table: (table, constraint name).
+    pub referenced_by: Vec<(String, String)>,
 }
 
 impl Table {
@@ -139,6 +164,22 @@ impl Table {
             w.str(name).str(expr);
         }
         w.u32(self.next_index_id);
+        w.u32(self.foreign_keys.len() as u32);
+        for fk in &self.foreign_keys {
+            w.str(&fk.name).u32(fk.columns.len() as u32);
+            for &c in &fk.columns {
+                w.u32(c as u32);
+            }
+            w.str(&fk.table).u32(fk.ref_columns.len() as u32);
+            for &c in &fk.ref_columns {
+                w.u32(c as u32);
+            }
+            w.u8(action_tag(fk.on_delete)).u8(action_tag(fk.on_update));
+        }
+        w.u32(self.referenced_by.len() as u32);
+        for (t, c) in &self.referenced_by {
+            w.str(t).str(c);
+        }
         w.0
     }
 
@@ -204,6 +245,30 @@ impl Table {
             .map(|_| Ok((r.str()?, r.str()?)))
             .collect::<Result<_>>()?;
         let next_index_id = r.u32()?;
+        let (mut foreign_keys, mut referenced_by) = (Vec::new(), Vec::new());
+        if version >= 3 {
+            let positions = |r: &mut Reader| -> Result<Vec<usize>> {
+                let n = r.u32()? as usize;
+                (0..n).map(|_| r.u32().map(|c| c as usize)).collect()
+            };
+            for _ in 0..r.u32()? {
+                let name = r.str()?;
+                let columns = positions(&mut r)?;
+                let table = r.str()?;
+                let ref_columns = positions(&mut r)?;
+                foreign_keys.push(ForeignKey {
+                    name,
+                    columns,
+                    table,
+                    ref_columns,
+                    on_delete: action_of_tag(r.u8()?)?,
+                    on_update: action_of_tag(r.u8()?)?,
+                });
+            }
+            for _ in 0..r.u32()? {
+                referenced_by.push((r.str()?, r.str()?));
+            }
+        }
         Ok(Self {
             id,
             name,
@@ -212,8 +277,31 @@ impl Table {
             indexes,
             checks,
             next_index_id,
+            foreign_keys,
+            referenced_by,
         })
     }
+}
+
+fn action_tag(a: FkAction) -> u8 {
+    match a {
+        FkAction::NoAction => 0,
+        FkAction::Restrict => 1,
+        FkAction::Cascade => 2,
+        FkAction::SetNull => 3,
+        FkAction::SetDefault => 4,
+    }
+}
+
+fn action_of_tag(t: u8) -> Result<FkAction> {
+    Ok(match t {
+        0 => FkAction::NoAction,
+        1 => FkAction::Restrict,
+        2 => FkAction::Cascade,
+        3 => FkAction::SetNull,
+        4 => FkAction::SetDefault,
+        _ => return Err(Error::internal("unknown foreign key action tag")),
+    })
 }
 
 fn type_tag(t: DataType) -> u8 {
@@ -410,6 +498,15 @@ mod tests {
             }],
             checks: vec![("id_positive".into(), "id > 0".into())],
             next_index_id: 2,
+            foreign_keys: vec![ForeignKey {
+                name: "people_boss_fkey".into(),
+                columns: vec![0],
+                table: "bosses".into(),
+                ref_columns: vec![0],
+                on_delete: FkAction::Cascade,
+                on_update: FkAction::SetNull,
+            }],
+            referenced_by: vec![("pets".into(), "pets_owner_fkey".into())],
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));

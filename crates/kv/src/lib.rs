@@ -138,6 +138,17 @@ pub trait KvTxn: Send {
     /// The pairs with keys in `(start, end)`, ascending.
     fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>>;
 
+    /// [`get`](Self::get), and the commit fails with a conflict if a commit
+    /// after this transaction's snapshot wrote `key` — at any isolation
+    /// level.  For decisions that must still hold at commit (a foreign key's
+    /// referenced row exists) without making the whole transaction
+    /// serializable.
+    fn get_validated(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// [`scan`](Self::scan), validated as [`get_validated`](Self::get_validated)
+    /// over the part of the range consumed.
+    fn scan_validated<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>>;
+
     /// Sets `key` to `value`.
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
 
@@ -312,6 +323,15 @@ impl KvTxn for LocalTxn {
 
     fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
         let scan = self.0.scan(start, end)?;
+        Ok(Box::new(scan.map(|r| r.map_err(Error::from))))
+    }
+
+    fn get_validated(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.0.get_validated(key)?)
+    }
+
+    fn scan_validated<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
+        let scan = self.0.scan_validated(start, end)?;
         Ok(Box::new(scan.map(|r| r.map_err(Error::from))))
     }
 

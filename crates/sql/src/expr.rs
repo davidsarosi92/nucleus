@@ -282,6 +282,8 @@ pub struct Ctx<'a> {
     pub ctes: RefCell<HashMap<usize, std::rc::Rc<Vec<Row>>>>,
     /// The current round's rows of each recursive CTE being computed.
     pub work: RefCell<HashMap<usize, std::rc::Rc<Vec<Row>>>>,
+    /// Table scans are validated reads (foreign key checks).
+    pub validated: bool,
 }
 
 impl<'a> Ctx<'a> {
@@ -293,6 +295,7 @@ impl<'a> Ctx<'a> {
             cache: RefCell::new(HashMap::new()),
             ctes: RefCell::new(HashMap::new()),
             work: RefCell::new(HashMap::new()),
+            validated: false,
         }
     }
 }

@@ -184,3 +184,46 @@ fn serializable_counters_under_contention() {
     let t = e.begin();
     assert_eq!(read(&t, b"c1") + read(&t, b"c2"), 100, "the invariant held");
 }
+
+#[test]
+fn validated_reads_under_snapshot_isolation() {
+    let e = engine();
+    put(&e, b"parent", b"p");
+    // A child insert validates its parent while the parent is deleted.
+    let mut child = e.begin();
+    assert!(child.get_validated(b"parent").unwrap().is_some());
+    child.put(b"child/1", b"c").unwrap();
+    let mut del = e.begin();
+    del.delete(b"parent").unwrap();
+    del.commit().unwrap();
+    assert!(matches!(child.commit(), Err(Error::Conflict { ref key }) if key == b"parent"));
+
+    // Validated readers of one key do not conflict with each other.
+    put(&e, b"parent", b"p");
+    let (mut a, mut b) = (e.begin(), e.begin());
+    a.get_validated(b"parent").unwrap();
+    b.get_validated(b"parent").unwrap();
+    a.put(b"child/2", b"").unwrap();
+    b.put(b"child/3", b"").unwrap();
+    a.commit().unwrap();
+    b.commit().unwrap();
+
+    // A validated scan fails on an insert into the range it consumed: the
+    // parent's delete saw no children, but one arrived.
+    let mut d = e.begin();
+    let n = d
+        .scan_validated(Bound::Included(b"child/"), Bound::Excluded(b"child0"))
+        .unwrap()
+        .count();
+    assert_eq!(n, 2);
+    d.delete(b"parent").unwrap();
+    put(&e, b"child/4", b"");
+    assert!(d.commit().is_err());
+
+    // Plain snapshot-isolation reads stay unvalidated.
+    let mut p = e.begin();
+    p.get(b"parent").unwrap();
+    p.put(b"other", b"").unwrap();
+    put(&e, b"parent", b"changed");
+    p.commit().unwrap();
+}
