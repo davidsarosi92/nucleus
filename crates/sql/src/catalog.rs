@@ -306,6 +306,7 @@ fn action_of_tag(t: u8) -> Result<FkAction> {
 
 fn type_tag(t: DataType) -> u8 {
     match t {
+        DataType::Array(e) => 0x80 | type_tag(*e),
         DataType::Bool => 1,
         DataType::Int => 2,
         DataType::Float => 3,
@@ -319,6 +320,11 @@ fn type_tag(t: DataType) -> u8 {
 }
 
 fn type_of_tag(t: u8) -> Result<DataType> {
+    if t & 0x80 != 0 {
+        return type_of_tag(t & 0x7f)?
+            .array_of()
+            .ok_or_else(|| Error::internal("unknown column type tag"));
+    }
     Ok(match t {
         1 => DataType::Bool,
         2 => DataType::Int,

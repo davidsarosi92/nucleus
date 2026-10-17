@@ -15,7 +15,8 @@ pub enum Token {
     Number(String),
     /// `$n`.
     Param(usize),
-    /// Punctuation or an operator: `( ) , ; . * + - / % = <> != < <= > >= || ::`.
+    /// Punctuation or an operator: `( ) [ ] , ; . * + - / % = <> != < <= >
+    /// >= || :: ~ ~* !~ !~*`.
     Op(&'static str),
 }
 
@@ -28,9 +29,48 @@ impl Token {
 
 /// Longest first, so `<=` is not read as `<` `=`.
 const OPS: &[&str] = &[
-    "<>", "!=", "<=", ">=", "||", "::", "(", ")", ",", ";", ".", "*", "+", "-", "/", "%", "=", "<",
-    ">",
+    "!~*", "<>", "!~", "!=", "~*", "<=", ">=", "||", "::", "(", ")", "[", "]", ",", ";", ".", "*",
+    "+", "-", "/", "%", "=", "<", ">", "~",
 ];
+
+/// The body of an `E'…'` string from just after its opening quote: C-style
+/// backslash escapes.  Returns the string and the index after the closing
+/// quote.
+fn escape_string(sql: &str, mut i: usize) -> Result<(String, usize)> {
+    let b = sql.as_bytes();
+    let mut s = String::new();
+    loop {
+        let Some(c) = sql[i..].chars().next() else {
+            return Err(Error::syntax("unterminated string literal"));
+        };
+        match c {
+            '\'' if b.get(i + 1) == Some(&b'\'') => {
+                s.push('\'');
+                i += 2;
+            }
+            '\'' => return Ok((s, i + 1)),
+            '\\' => {
+                let e = sql[i + 1..]
+                    .chars()
+                    .next()
+                    .ok_or_else(|| Error::syntax("unterminated string literal"))?;
+                i += 1 + e.len_utf8();
+                s.push(match e {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    'b' => '\u{8}',
+                    'f' => '\u{c}',
+                    other => other,
+                });
+            }
+            c => {
+                s.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+}
 
 /// Splits `sql` into tokens, each with its byte offset.
 pub fn tokenize(sql: &str) -> Result<Vec<(Token, usize)>> {
@@ -50,6 +90,10 @@ pub fn tokenize(sql: &str) -> Result<Vec<(Token, usize)>> {
                 .find("*/")
                 .ok_or_else(|| Error::syntax("unterminated /* comment"))?;
             i += end + 4;
+        } else if (c == b'e' || c == b'E') && b.get(i + 1) == Some(&b'\'') {
+            let (s, end) = escape_string(sql, i + 2)?;
+            out.push((Token::Str(s), i));
+            i = end;
         } else if c == b'\'' {
             let start = i;
             let mut s = String::new();

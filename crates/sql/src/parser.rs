@@ -90,6 +90,7 @@ const RESERVED: &[&str] = &[
     "using",
     "except",
     "intersect",
+    "collate",
 ];
 
 struct Parser<'a> {
@@ -212,6 +213,26 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// A table to write or define: `name` or `public.name`.
+    fn relation(&mut self) -> Result<String> {
+        let first = self.ident()?;
+        if !self.eat_op(".") {
+            return Ok(first);
+        }
+        let name = self.ident()?;
+        match first.as_str() {
+            "public" => Ok(name),
+            "pg_catalog" | "information_schema" | "nc_catalog" => {
+                Err(Error::insufficient_privilege(format!(
+                    "permission denied: \"{first}.{name}\" is a system catalog"
+                )))
+            }
+            _ => Err(Error::invalid_schema(format!(
+                "schema \"{first}\" does not exist"
+            ))),
+        }
+    }
+
     fn ident_list(&mut self) -> Result<Vec<String>> {
         self.expect_op("(")?;
         let mut out = vec![self.ident()?];
@@ -281,7 +302,7 @@ impl<'a> Parser<'a> {
                 let table = if self.at_end() || self.peek_op(";") {
                     None
                 } else {
-                    Some(self.ident()?)
+                    Some(self.relation()?)
                 };
                 Ok(Statement::Analyze(table))
             }
@@ -357,7 +378,7 @@ impl<'a> Parser<'a> {
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
             let name = self.ident()?;
             self.expect_kw("on")?;
-            let table = self.ident()?;
+            let table = self.relation()?;
             let columns = self.ident_list()?;
             return Ok(Statement::CreateIndex {
                 name,
@@ -372,7 +393,7 @@ impl<'a> Parser<'a> {
         }
         self.expect_kw("table")?;
         let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
-        let name = self.ident()?;
+        let name = self.relation()?;
         self.expect_op("(")?;
         let mut columns = Vec::new();
         let mut constraints = Vec::new();
@@ -431,7 +452,7 @@ impl<'a> Parser<'a> {
     /// After `REFERENCES`: `table [(columns)] [MATCH SIMPLE] [ON DELETE a]
     /// [ON UPDATE a] [NOT DEFERRABLE] [INITIALLY IMMEDIATE]`.
     fn references(&mut self) -> Result<References> {
-        let table = self.ident()?;
+        let table = self.relation()?;
         let columns = if self.peek_op("(") {
             self.ident_list()?
         } else {
@@ -541,11 +562,26 @@ impl<'a> Parser<'a> {
             }
         }
         // `TIMESTAMP(p) WITH TIME ZONE`.
+        let mut ty = ty;
         if ty == DataType::Timestamp && self.eat_kws(&["with", "time", "zone"]) {
-            return Ok((DataType::TimestampTz, typmod));
-        }
-        if ty == DataType::Timestamp {
+            ty = DataType::TimestampTz;
+        } else if ty == DataType::Timestamp {
             self.eat_kws(&["without", "time", "zone"]);
+        }
+        // `type[]` (any number of brackets, sizes ignored: one dimension).
+        let mut array = false;
+        while self.peek_op("[") {
+            self.pos += 1;
+            if let Some(Token::Number(_)) = self.peek() {
+                self.pos += 1;
+            }
+            self.expect_op("]")?;
+            array = true;
+        }
+        if array {
+            ty = ty
+                .array_of()
+                .ok_or_else(|| Error::feature("arrays of arrays are not supported"))?;
         }
         Ok((ty, typmod))
     }
@@ -604,9 +640,9 @@ impl<'a> Parser<'a> {
         }
         self.expect_kw("table")?;
         let if_exists = self.eat_kws(&["if", "exists"]);
-        let mut names = vec![self.ident()?];
+        let mut names = vec![self.relation()?];
         while self.eat_op(",") {
-            names.push(self.ident()?);
+            names.push(self.relation()?);
         }
         let cascade = self.eat_kw("cascade");
         if !cascade {
@@ -622,7 +658,7 @@ impl<'a> Parser<'a> {
     fn alter(&mut self) -> Result<Statement> {
         self.expect_kw("alter")?;
         self.expect_kw("table")?;
-        let table = self.ident()?;
+        let table = self.relation()?;
         if self.eat_kws(&["drop", "constraint"]) {
             let if_exists = self.eat_kws(&["if", "exists"]);
             let name = self.ident()?;
@@ -665,7 +701,7 @@ impl<'a> Parser<'a> {
     fn insert(&mut self) -> Result<Statement> {
         self.expect_kw("insert")?;
         self.expect_kw("into")?;
-        let table = self.ident()?;
+        let table = self.relation()?;
         let columns = if self.peek_op("(") && !matches!(self.peek_at(1), Some(t) if t.is("select"))
         {
             Some(self.ident_list()?)
@@ -693,7 +729,7 @@ impl<'a> Parser<'a> {
 
     fn update(&mut self) -> Result<Statement> {
         self.expect_kw("update")?;
-        let table = self.ident()?;
+        let table = self.relation()?;
         self.expect_kw("set")?;
         let mut assignments = Vec::new();
         loop {
@@ -720,7 +756,7 @@ impl<'a> Parser<'a> {
     fn delete(&mut self) -> Result<Statement> {
         self.expect_kw("delete")?;
         self.expect_kw("from")?;
-        let table = self.ident()?;
+        let table = self.relation()?;
         let filter = if self.eat_kw("where") {
             Some(self.expr()?)
         } else {
@@ -796,33 +832,11 @@ impl<'a> Parser<'a> {
                 all,
             };
         }
-        let mut order_by = Vec::new();
-        if self.eat_kws(&["order", "by"]) {
-            loop {
-                let expr = self.expr()?;
-                let desc = if self.eat_kw("desc") {
-                    true
-                } else {
-                    self.eat_kw("asc");
-                    false
-                };
-                let nulls_first = if self.eat_kws(&["nulls", "first"]) {
-                    Some(true)
-                } else if self.eat_kws(&["nulls", "last"]) {
-                    Some(false)
-                } else {
-                    None
-                };
-                order_by.push(OrderItem {
-                    expr,
-                    desc,
-                    nulls_first,
-                });
-                if !self.eat_op(",") {
-                    break;
-                }
-            }
-        }
+        let order_by = if self.eat_kws(&["order", "by"]) {
+            self.order_items()?
+        } else {
+            Vec::new()
+        };
         let (mut limit, mut offset) = (None, None);
         for _ in 0..2 {
             if self.eat_kw("limit") {
@@ -1023,7 +1037,36 @@ impl<'a> Parser<'a> {
             self.expect_op(")")?;
             return Ok(t);
         }
-        let name = self.ident()?;
+        let mut schema = None;
+        let mut name = self.ident()?;
+        if self.eat_op(".") {
+            schema = Some(name);
+            name = self.ident()?;
+        }
+        if self.eat_op("(") {
+            let mut args = Vec::new();
+            if !self.peek_op(")") {
+                args.push(self.expr()?);
+                while self.eat_op(",") {
+                    args.push(self.expr()?);
+                }
+            }
+            self.expect_op(")")?;
+            let ordinality = self.eat_kws(&["with", "ordinality"]);
+            let alias = self.alias()?;
+            let columns = if alias.is_some() {
+                self.column_aliases()?
+            } else {
+                Vec::new()
+            };
+            return Ok(TableRef::Function {
+                name,
+                args,
+                ordinality,
+                alias,
+                columns,
+            });
+        }
         let alias = self.alias()?;
         let columns = if alias.is_some() {
             self.column_aliases()?
@@ -1031,6 +1074,7 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         Ok(TableRef::Table {
+            schema,
             name,
             alias,
             columns,
@@ -1095,15 +1139,60 @@ impl<'a> Parser<'a> {
     }
 
     fn postfix(&mut self, mut e: Expr) -> Result<Expr> {
-        while self.eat_op("::") {
-            let (ty, typmod) = self.data_type()?;
-            e = Expr::Cast {
-                expr: Box::new(e),
-                ty,
-                typmod,
-            };
+        loop {
+            if self.eat_op("::") {
+                e = self.cast_to(e)?;
+            } else if self.eat_op("[") {
+                let index = self.expr()?;
+                self.expect_op("]")?;
+                e = Expr::Subscript {
+                    expr: Box::new(e),
+                    index: Box::new(index),
+                };
+            } else if self.eat_kw("collate") {
+                // Collations are accepted and ignored: text compares
+                // bytewise (PostgreSQL's "C").
+                if !matches!(self.next(), Some(Token::Word(_) | Token::Quoted(_))) {
+                    return Err(self.error("expected a collation"));
+                }
+                if self.eat_op(".") {
+                    self.ident()?;
+                }
+            } else {
+                return Ok(e);
+            }
         }
-        Ok(e)
+    }
+
+    /// The type of a cast (after `::` or `AS`), applied to `e`.  The
+    /// object-identifier types are functions: `regclass` maps a name or
+    /// oid text to an oid and an oid to its name, `regtype` and
+    /// `regnamespace` an oid to its name.
+    fn cast_to(&mut self, e: Expr) -> Result<Expr> {
+        let qualified = self.peek_kw("pg_catalog") && self.peek_at(1) == Some(&Token::Op("."));
+        let at = if qualified { 2 } else { 0 };
+        if let Some(Token::Word(w)) = self.peek_at(at)
+            && matches!(
+                w.as_str(),
+                "regclass" | "regtype" | "regnamespace" | "regrole"
+            )
+        {
+            let name = format!("__{w}");
+            self.pos += at + 1;
+            return Ok(Expr::Function {
+                name,
+                args: vec![e],
+                distinct: false,
+                star: false,
+                order_by: vec![],
+            });
+        }
+        let (ty, typmod) = self.data_type()?;
+        Ok(Expr::Cast {
+            expr: Box::new(e),
+            ty,
+            typmod,
+        })
     }
 
     fn primary(&mut self) -> Result<Expr> {
@@ -1171,13 +1260,27 @@ impl<'a> Parser<'a> {
                     self.expect_op("(")?;
                     let e = self.expr()?;
                     self.expect_kw("as")?;
-                    let (ty, typmod) = self.data_type()?;
+                    let e = self.cast_to(e)?;
                     self.expect_op(")")?;
-                    Expr::Cast {
-                        expr: Box::new(e),
-                        ty,
-                        typmod,
+                    e
+                }
+                "array" if self.peek_op("[") => {
+                    self.pos += 1;
+                    let mut items = Vec::new();
+                    if !self.peek_op("]") {
+                        items.push(self.expr()?);
+                        while self.eat_op(",") {
+                            items.push(self.expr()?);
+                        }
                     }
+                    self.expect_op("]")?;
+                    Expr::Array(items)
+                }
+                "array" if self.peek_op("(") => {
+                    self.pos += 1;
+                    let q = self.query()?;
+                    self.expect_op(")")?;
+                    Expr::ArraySubquery(Box::new(q))
                 }
                 _ if RESERVED.contains(&w.as_str()) => {
                     self.pos -= 1;
@@ -1192,6 +1295,7 @@ impl<'a> Parser<'a> {
                         args: vec![],
                         distinct: false,
                         star: false,
+                        order_by: vec![],
                     }
                 }
                 _ if DataType::is_prefix(&[w.as_str()]) && self.typed_literal_ahead() => {
@@ -1227,6 +1331,35 @@ impl<'a> Parser<'a> {
         ok
     }
 
+    /// `ORDER BY` items (after the keywords).
+    fn order_items(&mut self) -> Result<Vec<OrderItem>> {
+        let mut out = Vec::new();
+        loop {
+            let expr = self.expr()?;
+            let desc = if self.eat_kw("desc") {
+                true
+            } else {
+                self.eat_kw("asc");
+                false
+            };
+            let nulls_first = if self.eat_kws(&["nulls", "first"]) {
+                Some(true)
+            } else if self.eat_kws(&["nulls", "last"]) {
+                Some(false)
+            } else {
+                None
+            };
+            out.push(OrderItem {
+                expr,
+                desc,
+                nulls_first,
+            });
+            if !self.eat_op(",") {
+                return Ok(out);
+            }
+        }
+    }
+
     fn name_or_call(&mut self, first: String) -> Result<Expr> {
         // extract(field FROM expr)
         if first == "extract" && self.peek_op("(") {
@@ -1246,6 +1379,7 @@ impl<'a> Parser<'a> {
                     args: vec![Expr::Literal(Value::Text(field)), e],
                     distinct: false,
                     star: false,
+                    order_by: vec![],
                 });
             }
             self.pos = save;
@@ -1254,6 +1388,7 @@ impl<'a> Parser<'a> {
             let mut args = Vec::new();
             let mut distinct = false;
             let mut star = false;
+            let mut order_by = Vec::new();
             if self.eat_op("*") {
                 star = true;
             } else if !self.peek_op(")") {
@@ -1262,6 +1397,9 @@ impl<'a> Parser<'a> {
                 while self.eat_op(",") {
                     args.push(self.expr()?);
                 }
+                if self.eat_kws(&["order", "by"]) {
+                    order_by = self.order_items()?;
+                }
             }
             self.expect_op(")")?;
             return Ok(Expr::Function {
@@ -1269,10 +1407,23 @@ impl<'a> Parser<'a> {
                 args,
                 distinct,
                 star,
+                order_by,
             });
         }
         if self.eat_op(".") {
             let name = self.ident()?;
+            // schema.function(…)
+            if self.peek_op("(") {
+                return self.name_or_call(name);
+            }
+            // schema.table.column
+            if self.eat_op(".") {
+                let column = self.ident()?;
+                return Ok(Expr::Column {
+                    table: Some(name),
+                    name: column,
+                });
+            }
             return Ok(Expr::Column {
                 table: Some(first),
                 name,
@@ -1324,6 +1475,19 @@ impl<'a> Parser<'a> {
                 "between" => (PREC_IN, Infix::Between(false)),
                 "like" => (PREC_IN, Infix::Like(false, false)),
                 "ilike" => (PREC_IN, Infix::Like(false, true)),
+                "operator" if self.peek_at(1) == Some(&Token::Op("(")) => {
+                    // OPERATOR([schema.]op)
+                    let (op_at, len) = if matches!(self.peek_at(3), Some(Token::Op("."))) {
+                        (4, 6)
+                    } else {
+                        (2, 4)
+                    };
+                    let Some(Token::Op(op)) = self.peek_at(op_at) else {
+                        return None;
+                    };
+                    let (prec, op) = binary_operator(op)?;
+                    (prec, Infix::Operator(op, len))
+                }
                 "not" => match self.peek_at(1)? {
                     t if t.is("in") => (PREC_IN, Infix::In(true)),
                     t if t.is("between") => (PREC_IN, Infix::Between(true)),
@@ -1334,22 +1498,8 @@ impl<'a> Parser<'a> {
                 _ => return None,
             },
             Token::Op(op) => {
-                let b = match *op {
-                    "=" => (PREC_CMP, BinaryOp::Eq),
-                    "<>" => (PREC_CMP, BinaryOp::NotEq),
-                    "<" => (PREC_CMP, BinaryOp::Lt),
-                    "<=" => (PREC_CMP, BinaryOp::LtEq),
-                    ">" => (PREC_CMP, BinaryOp::Gt),
-                    ">=" => (PREC_CMP, BinaryOp::GtEq),
-                    "||" => (PREC_CONCAT, BinaryOp::Concat),
-                    "+" => (PREC_ADD, BinaryOp::Add),
-                    "-" => (PREC_ADD, BinaryOp::Sub),
-                    "*" => (PREC_MUL, BinaryOp::Mul),
-                    "/" => (PREC_MUL, BinaryOp::Div),
-                    "%" => (PREC_MUL, BinaryOp::Mod),
-                    _ => return None,
-                };
-                (b.0, Infix::Binary(b.1))
+                let (prec, op) = binary_operator(op)?;
+                (prec, Infix::Binary(op))
             }
             _ => return None,
         })
@@ -1358,8 +1508,30 @@ impl<'a> Parser<'a> {
     fn apply_infix(&mut self, left: Expr, prec: u8, kind: Infix) -> Result<Expr> {
         let boxed = Box::new(left);
         Ok(match kind {
-            Infix::Binary(op) => {
-                self.pos += 1;
+            Infix::Binary(op) | Infix::Operator(op, _) => {
+                self.pos += match kind {
+                    Infix::Operator(_, n) => n,
+                    _ => 1,
+                };
+                // op ANY / SOME / ALL (array or subquery)
+                let quantified = [("any", false), ("some", false), ("all", true)]
+                    .into_iter()
+                    .find(|(k, _)| self.peek_kw(k) && self.peek_at(1) == Some(&Token::Op("(")));
+                if let Some((_, all)) = quantified {
+                    self.pos += 2;
+                    let right = if self.at_query() {
+                        Expr::ArraySubquery(Box::new(self.query()?))
+                    } else {
+                        self.expr()?
+                    };
+                    self.expect_op(")")?;
+                    return Ok(Expr::AnyAll {
+                        left: boxed,
+                        op,
+                        right: Box::new(right),
+                        all,
+                    });
+                }
                 Expr::Binary {
                     op,
                     left: boxed,
@@ -1389,6 +1561,7 @@ impl<'a> Parser<'a> {
                         ],
                         distinct: false,
                         star: false,
+                        order_by: vec![],
                     };
                     if negated {
                         Expr::Unary {
@@ -1406,6 +1579,7 @@ impl<'a> Parser<'a> {
                         args: vec![*boxed, right],
                         distinct: false,
                         star: false,
+                        order_by: vec![],
                     };
                     if negated {
                         Expr::Unary {
@@ -1468,9 +1642,34 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// A binary operator token: its precedence and operator.
+fn binary_operator(op: &str) -> Option<(u8, BinaryOp)> {
+    Some(match op {
+        "=" => (PREC_CMP, BinaryOp::Eq),
+        "<>" => (PREC_CMP, BinaryOp::NotEq),
+        "<" => (PREC_CMP, BinaryOp::Lt),
+        "<=" => (PREC_CMP, BinaryOp::LtEq),
+        ">" => (PREC_CMP, BinaryOp::Gt),
+        ">=" => (PREC_CMP, BinaryOp::GtEq),
+        "||" => (PREC_CONCAT, BinaryOp::Concat),
+        "~" => (PREC_CONCAT, BinaryOp::Match),
+        "!~" => (PREC_CONCAT, BinaryOp::NotMatch),
+        "~*" => (PREC_CONCAT, BinaryOp::IMatch),
+        "!~*" => (PREC_CONCAT, BinaryOp::NotIMatch),
+        "+" => (PREC_ADD, BinaryOp::Add),
+        "-" => (PREC_ADD, BinaryOp::Sub),
+        "*" => (PREC_MUL, BinaryOp::Mul),
+        "/" => (PREC_MUL, BinaryOp::Div),
+        "%" => (PREC_MUL, BinaryOp::Mod),
+        _ => return None,
+    })
+}
+
 #[derive(Clone, Copy)]
 enum Infix {
     Binary(BinaryOp),
+    /// `OPERATOR(…)`: the operator and how many tokens it takes.
+    Operator(BinaryOp, usize),
     Is,
     In(bool),
     Between(bool),

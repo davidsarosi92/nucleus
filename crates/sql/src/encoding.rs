@@ -15,6 +15,7 @@
 //! | date | `06`, then `days ^ i32::MIN` as 4 bytes big-endian |
 //! | timestamp, timestamptz | `07` / `08`, then `µs ^ i64::MIN` as 8 bytes big-endian |
 //! | interval | `09`, then its span (months as 30 days) in µs as `i128 ^ i128::MIN`, 16 bytes big-endian |
+//! | array | `0A`, then `01` and the encoding of each element, then `00` |
 //!
 //! Every encoding is self-delimiting, so a key can be split back into its
 //! values (`decode_key_value`).
@@ -22,7 +23,8 @@
 //! **Rows** — `01` (version), column count `u16`, then per column a tag
 //! (`0` null, `1` bool, `2` bigint, `3` double, `4` text, `5` numeric:
 //! `i128` mantissa and `u8` scale, `6` date `i32`, `7` timestamp and `8`
-//! timestamptz `i64`, `9` interval: months `i32`, days `i32`, µs `i64`) and
+//! timestamptz `i64`, `9` interval: months `i32`, days `i32`, µs `i64`,
+//! `10` array: a `u32` count, then each element tagged the same way) and
 //! its bytes (little-endian; text with a `u32` length).  A row shorter than its table
 //! (a column added later) reads the missing columns as `NULL`.
 
@@ -101,6 +103,17 @@ pub fn encode_key_value(out: &mut Vec<u8>, v: &Value) {
         Value::Interval(i) => {
             out.push(0x09);
             out.extend_from_slice(&((i.span() ^ i128::MIN) as u128).to_be_bytes());
+        }
+        Value::Array(items) => {
+            // Each element after a 01, then 00: element order, then the
+            // shorter first.  (A NULL element sorts first here, unlike in
+            // comparisons; keys only need a consistent order.)
+            out.push(0x0A);
+            for item in items {
+                out.push(0x01);
+                encode_key_value(out, item);
+            }
+            out.push(0x00);
         }
     }
 }
@@ -188,6 +201,22 @@ pub fn decode_key_value(b: &[u8]) -> Result<(Value, usize)> {
         }
         0x07 => (Value::Timestamp((eight(b)? as i64) ^ i64::MIN), 9),
         0x08 => (Value::TimestampTz((eight(b)? as i64) ^ i64::MIN), 9),
+        0x0A => {
+            let mut items = Vec::new();
+            let mut at = 1;
+            loop {
+                match b.get(at).ok_or_else(bad_key)? {
+                    0x00 => break,
+                    0x01 => {
+                        let (v, used) = decode_key_value(&b[at + 1..])?;
+                        items.push(v);
+                        at += 1 + used;
+                    }
+                    _ => return Err(bad_key()),
+                }
+            }
+            (Value::Array(items), at + 1)
+        }
         0x09 => {
             let x = u128::from_be_bytes(b.get(1..17).ok_or_else(bad_key)?.try_into().unwrap());
             let span = (x as i128) ^ i128::MIN;
@@ -227,83 +256,109 @@ pub fn encode_row(row: &[Value]) -> Vec<u8> {
     out.push(ROW_VERSION);
     out.extend_from_slice(&(row.len() as u16).to_le_bytes());
     for v in row {
-        match v {
-            Value::Null => out.push(0),
-            Value::Bool(b) => out.extend_from_slice(&[1, u8::from(*b)]),
-            Value::Int(i) => {
-                out.push(2);
-                out.extend_from_slice(&i.to_le_bytes());
-            }
-            Value::Float(f) => {
-                out.push(3);
-                out.extend_from_slice(&f.to_le_bytes());
-            }
-            Value::Text(s) => {
-                out.push(4);
-                out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-                out.extend_from_slice(s.as_bytes());
-            }
-            Value::Numeric(d) => {
-                out.push(5);
-                out.extend_from_slice(&d.mantissa().to_le_bytes());
-                out.push(d.scale() as u8);
-            }
-            Value::Date(d) => {
-                out.push(6);
-                out.extend_from_slice(&d.to_le_bytes());
-            }
-            Value::Timestamp(t) => {
-                out.push(7);
-                out.extend_from_slice(&t.to_le_bytes());
-            }
-            Value::TimestampTz(t) => {
-                out.push(8);
-                out.extend_from_slice(&t.to_le_bytes());
-            }
-            Value::Interval(i) => {
-                out.push(9);
-                out.extend_from_slice(&i.months.to_le_bytes());
-                out.extend_from_slice(&i.days.to_le_bytes());
-                out.extend_from_slice(&i.micros.to_le_bytes());
-            }
-        }
+        encode_value(&mut out, v);
     }
     out
 }
 
+/// Appends one value's row encoding: its tag, then its bytes.
+fn encode_value(out: &mut Vec<u8>, v: &Value) {
+    match v {
+        Value::Null => out.push(0),
+        Value::Bool(b) => out.extend_from_slice(&[1, u8::from(*b)]),
+        Value::Int(i) => {
+            out.push(2);
+            out.extend_from_slice(&i.to_le_bytes());
+        }
+        Value::Float(f) => {
+            out.push(3);
+            out.extend_from_slice(&f.to_le_bytes());
+        }
+        Value::Text(s) => {
+            out.push(4);
+            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        Value::Numeric(d) => {
+            out.push(5);
+            out.extend_from_slice(&d.mantissa().to_le_bytes());
+            out.push(d.scale() as u8);
+        }
+        Value::Date(d) => {
+            out.push(6);
+            out.extend_from_slice(&d.to_le_bytes());
+        }
+        Value::Timestamp(t) => {
+            out.push(7);
+            out.extend_from_slice(&t.to_le_bytes());
+        }
+        Value::TimestampTz(t) => {
+            out.push(8);
+            out.extend_from_slice(&t.to_le_bytes());
+        }
+        Value::Interval(i) => {
+            out.push(9);
+            out.extend_from_slice(&i.months.to_le_bytes());
+            out.extend_from_slice(&i.days.to_le_bytes());
+            out.extend_from_slice(&i.micros.to_le_bytes());
+        }
+        Value::Array(items) => {
+            out.push(10);
+            out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+            for item in items {
+                encode_value(out, item);
+            }
+        }
+    }
+}
+
+/// Reads one value's row encoding.
+fn decode_value(r: &mut Reader) -> Result<Value> {
+    let bad = |_| Error::internal("malformed row encoding");
+    Ok(match r.u8().map_err(bad)? {
+        0 => Value::Null,
+        1 => Value::Bool(r.u8().map_err(bad)? == 1),
+        2 => Value::Int(r.u64().map_err(bad)? as i64),
+        3 => Value::Float(f64::from_bits(r.u64().map_err(bad)?)),
+        4 => Value::Text(r.str().map_err(bad)?),
+        5 => {
+            let lo = r.u64().map_err(bad)?;
+            let hi = r.u64().map_err(bad)?;
+            let m = (i128::from(hi as i64) << 64) | i128::from(lo);
+            let scale = r.u8().map_err(bad)?;
+            Value::Numeric(Decimal::new(m, u32::from(scale)).map_err(bad)?)
+        }
+        6 => Value::Date(r.u32().map_err(bad)? as i32),
+        7 => Value::Timestamp(r.u64().map_err(bad)? as i64),
+        8 => Value::TimestampTz(r.u64().map_err(bad)? as i64),
+        9 => Value::Interval(Interval {
+            months: r.u32().map_err(bad)? as i32,
+            days: r.u32().map_err(bad)? as i32,
+            micros: r.u64().map_err(bad)? as i64,
+        }),
+        10 => {
+            let n = r.u32().map_err(bad)? as usize;
+            let mut items = Vec::with_capacity(n.min(1024));
+            for _ in 0..n {
+                items.push(decode_value(r)?);
+            }
+            Value::Array(items)
+        }
+        _ => return Err(Error::internal("malformed row encoding")),
+    })
+}
+
 /// Decodes a row of a table with `columns` columns.
 pub fn decode_row(b: &[u8], columns: usize) -> Result<Vec<Value>> {
-    let bad = || Error::internal("malformed row encoding");
+    let bad = |_| Error::internal("malformed row encoding");
     let mut r = Reader::new(b);
-    if r.u8().map_err(|_| bad())? != ROW_VERSION {
-        return Err(bad());
+    if r.u8().map_err(bad)? != ROW_VERSION {
+        return Err(Error::internal("malformed row encoding"));
     }
-    let n = r.u16().map_err(|_| bad())? as usize;
+    let n = r.u16().map_err(bad)? as usize;
     let mut row = Vec::with_capacity(columns.max(n));
     for _ in 0..n {
-        row.push(match r.u8().map_err(|_| bad())? {
-            0 => Value::Null,
-            1 => Value::Bool(r.u8().map_err(|_| bad())? == 1),
-            2 => Value::Int(r.u64().map_err(|_| bad())? as i64),
-            3 => Value::Float(f64::from_bits(r.u64().map_err(|_| bad())?)),
-            4 => Value::Text(r.str().map_err(|_| bad())?),
-            5 => {
-                let lo = r.u64().map_err(|_| bad())?;
-                let hi = r.u64().map_err(|_| bad())?;
-                let m = (i128::from(hi as i64) << 64) | i128::from(lo);
-                let scale = r.u8().map_err(|_| bad())?;
-                Value::Numeric(Decimal::new(m, u32::from(scale)).map_err(|_| bad())?)
-            }
-            6 => Value::Date(r.u32().map_err(|_| bad())? as i32),
-            7 => Value::Timestamp(r.u64().map_err(|_| bad())? as i64),
-            8 => Value::TimestampTz(r.u64().map_err(|_| bad())? as i64),
-            9 => Value::Interval(Interval {
-                months: r.u32().map_err(|_| bad())? as i32,
-                days: r.u32().map_err(|_| bad())? as i32,
-                micros: r.u64().map_err(|_| bad())? as i64,
-            }),
-            _ => return Err(bad()),
-        });
+        row.push(decode_value(&mut r)?);
     }
     row.resize(columns.max(n), Value::Null);
     Ok(row)
@@ -349,8 +404,7 @@ impl Writer {
     }
     /// A value, row-encoded.
     pub fn value(&mut self, v: &Value) -> &mut Self {
-        let row = encode_row(std::slice::from_ref(v));
-        self.0.extend_from_slice(&row[3..]);
+        encode_value(&mut self.0, v);
         self
     }
 }
@@ -406,31 +460,7 @@ impl<'a> Reader<'a> {
     }
     /// A value.
     pub fn value(&mut self) -> Result<Value> {
-        let mut row = vec![ROW_VERSION, 1, 0];
-        // Re-frame as a one-column row and decode it.
-        let start = self.b;
-        let tag = self.u8()?;
-        let len = match tag {
-            0 => 0,
-            1 => 1,
-            2 | 3 | 7 | 8 => 8,
-            5 => 17,
-            6 => 4,
-            9 => 16,
-            4 => {
-                4 + u32::from_le_bytes(
-                    self.b
-                        .get(..4)
-                        .ok_or_else(|| Error::internal("truncated value"))?
-                        .try_into()
-                        .unwrap(),
-                ) as usize
-            }
-            _ => return Err(Error::internal("bad value tag")),
-        };
-        self.take(len)?;
-        row.extend_from_slice(&start[..1 + len]);
-        Ok(decode_row(&row, 1)?.remove(0))
+        decode_value(self)
     }
     /// Whether everything was read.
     pub fn is_empty(&self) -> bool {

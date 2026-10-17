@@ -202,6 +202,7 @@ are marked ✅.
 | D10 | Storage engine shape | ✅ **Copy-on-write B+tree + logical WAL** (2026-10-17): checkpoints are atomic pager commits of a COW tree; the WAL holds batches of key writes; recovery = replay after the checkpoint; no undo | ARIES-style physiological logging with in-place updates — more write-efficient, far more complex; revisit only if checkpoint write amplification hurts |
 | D11 | Tree concurrency | ✅ **One writer or many readers** per tree (`RwLock`); MVCC scans re-seek between batches (2026-10-17) | latch crabbing / B-link trees, when benchmarks show writer contention |
 | D12 | Serializable isolation (§M14) | ✅ **Read-set validation** (FoundationDB style): a commit fails if a key or range it read was written after its snapshot | Cahill SSI (fewer aborts, much more state); FDB's approach also distributes in F3 |
+| D13 | System catalog naming (§M14.5) | ✅ **nucleus's own `nc_catalog`** (2026-10-17), in nucleus's terms (table ids, key prefixes, statistics); `pg_catalog` / `information_schema` only as a compatibility layer on top, because PostgreSQL clients hard-code those names — nucleus is PostgreSQL-compatible, not PostgreSQL | expose only `pg_catalog` (simpler, but makes PostgreSQL's names nucleus's identity) |
 
 ---
 
@@ -225,7 +226,7 @@ are marked ✅.
 | | M12 | Server + Postgres wire protocol | ✅ DOCS §9 |
 | | M13 | Cost-based optimizer | ✅ DOCS §8.8 |
 | | M14 | Serializable (read-set validation) | ✅ DOCS §5.2 |
-| | M14.5 | SQL completeness: FK, FULL JOIN, EXCEPT/INTERSECT, CTEs, numeric and date/time types, `psql` `\d` | ◐ |
+| | M14.5 | SQL completeness: FK, FULL JOIN, EXCEPT/INTERSECT, CTEs, numeric and date/time types, `nc_catalog`, `psql` `\d` | ✅ DOCS §8.10–§8.11 |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
@@ -507,7 +508,7 @@ consumed scan ranges are checked at commit against recent commits.
 **Done when:** the write-skew test that "failed as documented" in M5 is
 green under SERIALIZABLE. ✅ (And phantoms, in KV and SQL tests.)
 
-### §M14.5 — SQL completeness ◐
+### §M14.5 — SQL completeness ✅ (DOCS §8.1, §8.3, §8.10–§8.11)
 
 The gaps that keep nucleus from passing for "a plain PostgreSQL" in
 everyday use, closed before F2:
@@ -524,11 +525,15 @@ everyday use, closed before F2:
   `ON DELETE` / `ON UPDATE` `NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`,
   `SET DEFAULT`; race-free under snapshot isolation (the checks' reads are
   validated at commit, as serializable reads are).
-- The `pg_catalog` tables, functions and syntax `psql`'s `\d` family
-  queries, so `\d`, `\d table`, `\dt`, `\di`, `\dn`, `\l` work.
+- nucleus's own system catalog, `nc_catalog` (D13), and on top of it the
+  `pg_catalog` / `information_schema` compatibility layer — tables,
+  functions and syntax (arrays, regular expressions, functions in `FROM`,
+  schema-qualified names, `::regclass`) — that `psql`'s `\d` family
+  queries, so `\d`, `\d table`, `\d+`, `\dt`, `\di`, `\dn`, `\l` work.
 
 **Done when:** each has an slt script whose expected output was checked
-against PostgreSQL 16, and CI's `psql` runs `\d` against the server.
+against PostgreSQL 16, and CI's `psql` runs `\d` against the server. ✅
+(Scripts 12–19; `\df` and permissions remain out of scope.)
 
 ---
 
@@ -624,6 +629,7 @@ style) across a thousand seeds without failure.
 
 ## Changelog
 
+
 - **2026-10-16** — first plan: vision, layers, 8 principles, 7 open
   decisions, F0–F4 / M0–M25.
 - **2026-10-16** — D1 settled: Rust.  D7 settled: MIT.  Repo:
@@ -648,3 +654,7 @@ style) across a thousand seeds without failure.
   the d-os archive is built and checked in CI, not yet run on d-os.
 - **2026-10-17** — D10–D12 recorded; §M1 revised (copy-on-write rule, free
   list in dedicated pages, no leaks); §M2–§M5 shipped.
+- **2026-10-17** — §M14.5 shipped: set operations, FULL JOIN, CTEs,
+  numeric / date / time / interval / array types, regular expressions,
+  foreign keys (validated reads added to the KV contract), `nc_catalog`
+  and the PostgreSQL compatibility catalog; D13 settled.

@@ -36,17 +36,7 @@ const TIMESTAMPTZ: i32 = 1184;
 const INTERVAL: i32 = 1186;
 
 fn oid(t: DataType) -> i32 {
-    match t {
-        DataType::Bool => BOOL,
-        DataType::Int => INT8,
-        DataType::Float => FLOAT8,
-        DataType::Text => TEXT,
-        DataType::Numeric => NUMERIC,
-        DataType::Date => DATE,
-        DataType::Timestamp => TIMESTAMP,
-        DataType::TimestampTz => TIMESTAMPTZ,
-        DataType::Interval => INTERVAL,
-    }
+    nucleus_sql::pgcatalog::type_oid(t) as i32
 }
 
 fn type_of_oid(o: i32) -> Option<DataType> {
@@ -60,6 +50,15 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         TIMESTAMP => DataType::Timestamp,
         TIMESTAMPTZ => DataType::TimestampTz,
         INTERVAL => DataType::Interval,
+        1000 => DataType::Array(&DataType::Bool),
+        1005 | 1007 | 1016 | 1028 => DataType::Array(&DataType::Int),
+        1021 | 1022 => DataType::Array(&DataType::Float),
+        1009 | 1014 | 1015 | 1003 => DataType::Array(&DataType::Text),
+        1231 => DataType::Array(&DataType::Numeric),
+        1182 => DataType::Array(&DataType::Date),
+        1115 => DataType::Array(&DataType::Timestamp),
+        1185 => DataType::Array(&DataType::TimestampTz),
+        1187 => DataType::Array(&DataType::Interval),
         _ => return None,
     })
 }
@@ -70,7 +69,7 @@ fn type_size(t: DataType) -> i16 {
         DataType::Date => 4,
         DataType::Int | DataType::Float | DataType::Timestamp | DataType::TimestampTz => 8,
         DataType::Interval => 16,
-        DataType::Text | DataType::Numeric => -1,
+        DataType::Text | DataType::Numeric | DataType::Array(_) => -1,
     }
 }
 
@@ -432,6 +431,30 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
             b.extend_from_slice(&i.months.to_be_bytes());
             b
         }
+        (Value::Array(items), t) => {
+            // Dimensions, a has-NULLs flag, the element type, then (length,
+            // lower bound) per dimension and the elements.
+            let elem = t.element().unwrap_or(DataType::Text);
+            let mut b = Vec::new();
+            let dims: i32 = if items.is_empty() { 0 } else { 1 };
+            b.extend_from_slice(&dims.to_be_bytes());
+            b.extend_from_slice(&i32::from(items.iter().any(Value::is_null)).to_be_bytes());
+            b.extend_from_slice(&oid(elem).to_be_bytes());
+            if dims == 1 {
+                b.extend_from_slice(&(items.len() as i32).to_be_bytes());
+                b.extend_from_slice(&1i32.to_be_bytes());
+            }
+            for v in items {
+                if v.is_null() {
+                    b.extend_from_slice(&(-1i32).to_be_bytes());
+                } else {
+                    let e = binary_value(v, elem);
+                    b.extend_from_slice(&(e.len() as i32).to_be_bytes());
+                    b.extend_from_slice(&e);
+                }
+            }
+            b
+        }
         (v, _) => text_value(v).into_bytes(),
     }
 }
@@ -470,6 +493,40 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
             }
             (Some(DataType::TimestampTz), 8) => {
                 Value::TimestampTz(i64::from_be_bytes(bytes.try_into().unwrap()))
+            }
+            (Some(DataType::Array(elem)), _) => {
+                let int = |at: usize| -> Result<i32, Error> {
+                    Ok(i32::from_be_bytes(
+                        bytes
+                            .get(at..at + 4)
+                            .ok_or_else(|| bad("array"))?
+                            .try_into()
+                            .unwrap(),
+                    ))
+                };
+                let dims = int(0)?;
+                if dims > 1 {
+                    return Err(Error::feature("multidimensional arrays are not supported"));
+                }
+                let mut items = Vec::new();
+                if dims == 1 {
+                    let n = int(12)?;
+                    let mut at = 20;
+                    for _ in 0..n {
+                        let len = int(at)?;
+                        at += 4;
+                        if len < 0 {
+                            items.push(Value::Null);
+                            continue;
+                        }
+                        let e = bytes
+                            .get(at..at + len as usize)
+                            .ok_or_else(|| bad("array"))?;
+                        items.push(decode_param(e, 1, Some(*elem))?);
+                        at += len as usize;
+                    }
+                }
+                Value::Array(items)
             }
             (Some(DataType::Interval), 16) => Value::Interval(nucleus_sql::datetime::Interval {
                 micros: i64::from_be_bytes(bytes[0..8].try_into().unwrap()),

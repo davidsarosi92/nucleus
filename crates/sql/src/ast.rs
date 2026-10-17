@@ -345,6 +345,8 @@ pub enum SelectItem {
 pub enum TableRef {
     /// A table.
     Table {
+        /// `schema.` before the name.
+        schema: Option<String>,
         /// Name.
         name: String,
         /// Alias.
@@ -358,6 +360,20 @@ pub enum TableRef {
         query: Box<Query>,
         /// Alias.
         alias: String,
+        /// Column aliases.
+        columns: Vec<String>,
+    },
+    /// A function in `FROM`: `generate_series(1, 3) [WITH ORDINALITY] [AS]
+    /// alias [(columns)]`.
+    Function {
+        /// Name, lowercase.
+        name: String,
+        /// Arguments (they may refer to enclosing queries).
+        args: Vec<Expr>,
+        /// `WITH ORDINALITY`: a row-number column after the others.
+        ordinality: bool,
+        /// Alias.
+        alias: Option<String>,
         /// Column aliases.
         columns: Vec<String>,
     },
@@ -504,6 +520,29 @@ pub enum Expr {
         /// Its modifier: `VARCHAR(n)`, `NUMERIC(p, s)`.
         typmod: TypeMod,
     },
+    /// `ARRAY[a, b, …]`.
+    Array(Vec<Expr>),
+    /// `ARRAY(subquery)`: the subquery's single column as an array.
+    ArraySubquery(Box<Query>),
+    /// `array[index]` (1-based).
+    Subscript {
+        /// The array.
+        expr: Box<Expr>,
+        /// The position.
+        index: Box<Expr>,
+    },
+    /// `left op ANY (array)` / `left op ALL (array)` (a subquery stands for
+    /// the array of its rows).
+    AnyAll {
+        /// The left operand.
+        left: Box<Expr>,
+        /// The comparison.
+        op: BinaryOp,
+        /// The array.
+        right: Box<Expr>,
+        /// `ALL` (else `ANY` / `SOME`).
+        all: bool,
+    },
     /// A function call; `count(*)` has `star`.
     Function {
         /// Name, lowercase.
@@ -514,6 +553,8 @@ pub enum Expr {
         distinct: bool,
         /// `count(*)`.
         star: bool,
+        /// `ORDER BY` inside an aggregate's parentheses.
+        order_by: Vec<OrderItem>,
     },
 }
 
@@ -568,6 +609,14 @@ pub enum BinaryOp {
     Mod,
     /// `||`.
     Concat,
+    /// `~`: matches a regular expression.
+    Match,
+    /// `!~`.
+    NotMatch,
+    /// `~*`: matches, ignoring case.
+    IMatch,
+    /// `!~*`.
+    NotIMatch,
 }
 
 impl BinaryOp {
@@ -588,6 +637,10 @@ impl BinaryOp {
             BinaryOp::Div => "/",
             BinaryOp::Mod => "%",
             BinaryOp::Concat => "||",
+            BinaryOp::Match => "~",
+            BinaryOp::NotMatch => "!~",
+            BinaryOp::IMatch => "~*",
+            BinaryOp::NotIMatch => "!~*",
         }
     }
 }

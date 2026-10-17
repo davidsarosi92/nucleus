@@ -1,0 +1,178 @@
+# Arrays, regular expressions, functions in FROM, string_agg / array_agg,
+# schema-qualified names (results checked against PostgreSQL 16).
+
+query TTT
+SELECT ARRAY[1, 2, 3], '{a,"b c",NULL}'::text[], ARRAY['x', NULL]
+----
+{1,2,3} {a,"b c",NULL} {x,NULL}
+
+query IIIT
+SELECT (ARRAY[10, 20, 30])[2], array_length(ARRAY[1, 2], 1), cardinality(ARRAY[1, 2, 3]), array_to_string(ARRAY['a', NULL, 'c'], ',', '*')
+----
+20 2 3 a,*,c
+
+query T
+SELECT (ARRAY[1, 2])[5]
+----
+NULL
+
+query BBBB
+SELECT 2 = ANY (ARRAY[1, 2, 3]), 5 = ANY (ARRAY[1, 2]), 1 < ALL (ARRAY[2, 3]), 3 = ANY ('{1,3}')
+----
+true false true true
+
+query BB
+SELECT 1 = ANY (ARRAY[2, NULL]), 1 = ANY (ARRAY[1, NULL])
+----
+NULL true
+
+query TT
+SELECT ARRAY[1, 2] || ARRAY[3], ARRAY[1] || 2
+----
+{1,2,3} {1,2}
+
+statement ok
+CREATE TABLE tags (id INT PRIMARY KEY, names TEXT[], score INT)
+
+statement ok
+INSERT INTO tags VALUES (1, '{red,green}', 5), (2, ARRAY['blue'], 7), (3, '{}', 9), (4, NULL, 1)
+
+query IT
+SELECT id, names FROM tags ORDER BY id
+----
+1 {red,green}
+2 {blue}
+3 {}
+4 NULL
+
+query I
+SELECT id FROM tags WHERE 'red' = ANY (names) ORDER BY id
+----
+1
+
+query IT
+SELECT id, names[1] FROM tags ORDER BY id
+----
+1 red
+2 blue
+3 NULL
+4 NULL
+
+query T
+SELECT array_agg(id ORDER BY id) FROM tags
+----
+{1,2,3,4}
+
+query TT
+SELECT string_agg(names[1], '; '), array_agg(score) FROM (SELECT * FROM tags ORDER BY id) t
+----
+red; blue {5,7,9,1}
+
+query I
+SELECT id FROM tags WHERE id = ANY (SELECT score - 4 FROM tags) ORDER BY id
+----
+1
+3
+
+query T
+SELECT ARRAY(SELECT id * 10 FROM tags WHERE id < 3 ORDER BY id)
+----
+{10,20}
+
+query TT
+SELECT string_agg(id::text, ',' ORDER BY id DESC), array_agg(DISTINCT score ORDER BY score) FROM tags
+----
+4,3,2,1 {1,5,7,9}
+
+query BB
+SELECT bool_and(score > 0), bool_or(score > 8) FROM tags
+----
+true true
+
+# Regular expressions.
+query BBBB
+SELECT 'nucleus' ~ '^nuc', 'nucleus' ~ 'X', 'Nucleus' ~* '^nuc', 'abc' !~ 'b'
+----
+true false true false
+
+query T
+SELECT regexp_replace('a1b22c333', '[0-9]+', '#', 'g')
+----
+a#b#c#
+
+query T
+SELECT regexp_replace('John Smith', '(\w+) (\w+)', '\2, \1')
+----
+Smith, John
+
+statement error 2201B
+SELECT 'x' ~ '('
+
+query T
+SELECT E'tab\there' || E'\nnewline' = 'tab	here
+newline'
+----
+t
+
+# Functions in FROM.
+query I
+SELECT * FROM generate_series(1, 5, 2)
+----
+1
+3
+5
+
+query II
+SELECT s, s * s FROM generate_series(3, 1, -1) AS s
+----
+3 9
+2 4
+1 1
+
+query T
+SELECT * FROM generate_series(TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-03', INTERVAL '1 day')
+----
+2024-01-01 00:00:00
+2024-01-02 00:00:00
+2024-01-03 00:00:00
+
+query TI
+SELECT x, n FROM unnest(ARRAY['a', 'b', 'c']) WITH ORDINALITY AS t (x, n)
+----
+a 1
+b 2
+c 3
+
+query I
+SELECT count(*) FROM generate_series(1, 100) g WHERE g % 7 = 0
+----
+14
+
+query T
+SELECT upper FROM upper('abc')
+----
+ABC
+
+# Schema-qualified names and collations.
+query I
+SELECT count(*) FROM public.tags
+----
+4
+
+statement ok
+INSERT INTO public.tags VALUES (5, NULL, 0)
+
+query BB
+SELECT 'b' < 'c' COLLATE pg_catalog.default, 'B' COLLATE "C" < 'a'
+----
+true true
+
+query T
+SELECT pg_catalog.lower('ABC')
+----
+abc
+
+query TTT
+SELECT pg_typeof(1::bigint), pg_typeof('x'::text), pg_typeof(ARRAY[1.5])
+----
+bigint text numeric[]

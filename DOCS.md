@@ -338,6 +338,12 @@ aborts in some patterns, much less state, and it distributes.  A write
 whose key already has a newer version fails at the write, under both
 levels.
 
+**Validated reads** (§M14.5).  `get_validated` / `scan_validated` record
+the key or consumed range in the same read set at *any* isolation level, so
+a snapshot-isolation transaction can make one decision safe without
+becoming serializable: its commit fails if a newer commit wrote what it
+read.  Foreign key checks use them (§8.10).
+
 **Garbage collection.**  Watermark = the oldest running snapshot (or
 *visible*) minus `history` commits.  A commit also deletes, for each key it
 writes, every version but the newest at or below the watermark (and that
@@ -374,7 +380,9 @@ distributed implementation will provide (§F3).
 
 - `trait Kv { fn begin(&self, TxnOptions) -> Result<Box<dyn KvTxn>> }`
 - `trait KvTxn`: `read_ts`, `get(&self)`, `scan(&self, start, end) ->
-  KvIter` (ascending), `put(&mut self)`, `delete(&mut self)`,
+  KvIter` (ascending), `get_validated` / `scan_validated` (reads checked
+  at commit at any isolation level, §5.2), `put(&mut self)`,
+  `delete(&mut self)`,
   `commit(self: Box<Self>) -> Timestamp`, `rollback`.  Reads take `&self`
   so a scan can stay open while the same transaction reads keys.
 - `TxnOptions { isolation, read_only, at }` (`read_only()`,
@@ -473,21 +481,51 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 `Output::Command(tag)`.  Errors carry PostgreSQL SQLSTATE codes
 (`Error { code, message }`).
 
-### 8.1 Types and encodings (`types`, `encoding`)
+### 8.1 Types and encodings (`types`, `encoding`, `decimal`, `datetime`)
 
-Types: `BOOLEAN`, `BIGINT` (also `INT`, `INTEGER`, `SMALLINT`, `INT2/4/8`
-— all 64-bit), `DOUBLE PRECISION` (also `FLOAT`, `REAL`), `TEXT` /
-`VARCHAR(n)` / `CHAR` (length enforced for `VARCHAR(n)`).  `Value` has SQL
-comparison (`NULL` → unknown, numbers compare across int/float), a sort
-order with `NULL` last, casts (text parses to any type; float → int
-rounds; bool → text is `true`/`false`), and PostgreSQL text output.
+| Type | Names | Value |
+|------|-------|-------|
+| boolean | `BOOLEAN`, `BOOL` | |
+| bigint | `BIGINT`, `INT`, `INTEGER`, `SMALLINT`, `INT2/4/8`, `OID` | 64-bit (every integer type) |
+| double precision | `DOUBLE PRECISION`, `FLOAT`, `REAL` | IEEE 754 |
+| numeric | `NUMERIC [(p, s)]`, `DECIMAL`, `DEC` | exact: 128-bit mantissa and a scale, ≤ 38 digits |
+| text | `TEXT`, `VARCHAR(n)`, `CHAR`, `NAME` | `VARCHAR(n)` length enforced |
+| date | `DATE` | days since 2000-01-01, 4713 BC – 294276 AD |
+| timestamp | `TIMESTAMP [WITHOUT TIME ZONE]` | µs since 2000-01-01 |
+| timestamptz | `TIMESTAMPTZ`, `TIMESTAMP WITH TIME ZONE` | µs since 2000-01-01 UTC |
+| interval | `INTERVAL` | months, days, µs (kept apart) |
+| arrays | `type[]` | one dimension, elements of the type or NULL |
+
+Decimal literals (`1.5`, `1e3`) are `numeric`, as in PostgreSQL; integers
+too big for bigint too; only values beyond numeric's 38 digits fall back to
+double.  Numeric arithmetic is exact and never rounds silently (overflow is
+`22003`): `+`/`-` keep the larger scale, `*` adds them, `/` keeps at least
+16 significant digits (PostgreSQL's rule); rounding is half away from zero;
+`NUMERIC(p, s)` rounds to `s` and checks `p`.  Numbers compare across
+types (numeric against double as doubles); dates and timestamps compare
+across each other (a date as its midnight); intervals by their span (a
+month as 30 days).  `avg` of integers is numeric.
+
+Date/time: sessions are in UTC.  Input `YYYY-MM-DD`, `YYYY-MM-DD[ T]HH:MM[:SS
+[.f]][zone]` (`Z`, `UTC`, `±HH[:MM]`; ignored for `timestamp`), `epoch`,
+` BC`; intervals as `N unit …` (µs to millennia, fractions spill into
+smaller units), `[-]H:M[:S]`, `@ … ago`, ISO 8601 `P…`.  Output is
+PostgreSQL's ISO style (`2024-03-10 12:05:06+00`, `1 year 2 mons 3 days
+04:05:06`).  Arithmetic: `date ± int`, `date - date`, `± interval` (months
+by the calendar, the day clamped), `timestamp - timestamp` (days and
+time), `interval × / number`.  Typed literals: `DATE '…'`, `INTERVAL '…'`,
+any `type 'text'`.  Arrays: `'{a,"b c",NULL}'`, `ARRAY[…]`,
+`ARRAY(subquery)`, `a[i]` (1-based, NULL out of range), `||`.
 
 Key encoding (order-preserving, self-delimiting): `00` NULL; `01` bool;
 `02` + `i ^ i64::MIN` big-endian; `03` + sign-flipped/inverted IEEE bits
 (`-0` = `0`, one `NaN` above everything); `04` + text with `00` → `00 FF`,
-terminated `00 01`.  Row encoding: version `01`, column count, tagged
-values (missing trailing columns read as NULL, so `ADD COLUMN` needs no
-rewrite unless it has a default).
+terminated `00 01`; `05` numeric (sign class, decimal exponent, digits;
+equal values of different scale share a key); `06` date; `07`/`08`
+timestamps; `09` interval (its span); `0A` arrays (each element after
+`01`, then `00`).  Row encoding: version `01`, column count, tagged values
+(missing trailing columns read as NULL, so `ADD COLUMN` needs no rewrite
+unless it has a default).
 
 ### 8.2 Catalog and keyspace (`catalog`)
 
@@ -509,30 +547,47 @@ needs no cache invalidation.
 ### 8.3 Parser (`lexer`, `parser`, `ast`)
 
 Statements: `CREATE TABLE [IF NOT EXISTS]` (column constraints `PRIMARY
-KEY`, `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`; table constraints `PRIMARY
-KEY (…)`, `UNIQUE (…)`, `[CONSTRAINT n] CHECK (…)`), `DROP TABLE [IF
-EXISTS]`, `CREATE [UNIQUE] INDEX [IF NOT EXISTS]`, `DROP INDEX [IF EXISTS]`,
-`ALTER TABLE … ADD [COLUMN]`, `INSERT … VALUES | SELECT | DEFAULT VALUES
+KEY`, `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`, `REFERENCES`; table
+constraints `PRIMARY KEY (…)`, `UNIQUE (…)`, `CHECK (…)`, `FOREIGN KEY (…)
+REFERENCES …`, each with an optional `CONSTRAINT name`), `DROP TABLE [IF
+EXISTS] … [CASCADE]`, `CREATE [UNIQUE] INDEX [IF NOT EXISTS]`, `DROP INDEX
+[IF EXISTS]`, `ALTER TABLE … ADD [COLUMN] …`, `ALTER TABLE … ADD
+[CONSTRAINT n] FOREIGN KEY | CHECK | UNIQUE …`, `ALTER TABLE … DROP
+CONSTRAINT [IF EXISTS] n`, `INSERT … VALUES | SELECT | DEFAULT VALUES
 [RETURNING]`, `UPDATE … SET … [WHERE] [RETURNING]`, `DELETE … [WHERE]
 [RETURNING]`, queries, `BEGIN`/`START TRANSACTION` (`ISOLATION LEVEL …`,
 `READ ONLY|WRITE`), `COMMIT`/`END`, `ROLLBACK`, `SET TRANSACTION …`, `SET
-name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`.
+name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`.  Table names may
+be qualified with `public.` (and, to read, `nc_catalog.`, `pg_catalog.`,
+`information_schema.`).
 
-Queries: `SELECT [DISTINCT]`, `FROM` with comma joins, `[INNER|LEFT|RIGHT|
-CROSS] JOIN … ON | USING`, subqueries in `FROM`, `WHERE`, `GROUP BY`
-(expressions, positions, aliases), `HAVING`, `UNION [ALL]`, `VALUES`,
-`ORDER BY` (`ASC|DESC`, `NULLS FIRST|LAST`, positions, aliases,
-expressions), `LIMIT`, `OFFSET`.  Expressions: arithmetic, `||`,
-comparisons, `AND/OR/NOT`, `IS [NOT] NULL|TRUE|FALSE|DISTINCT FROM`,
-`[NOT] BETWEEN`, `[NOT] IN (list | subquery)`, `[NOT] EXISTS`, scalar
-subqueries, `[NOT] LIKE / ILIKE`, `CASE`, `CAST` / `::`, `$n`.  Functions:
-`lower upper length trim substr replace strpos concat coalesce nullif
-greatest least abs round floor ceil sqrt power version`; aggregates `count
-sum avg min max` (with `DISTINCT`, `count(*)`).
+Queries: `WITH [RECURSIVE] name [(cols)] AS (…)`, `SELECT [DISTINCT]`,
+`FROM` with comma joins, `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`,
+subqueries and functions in `FROM` (`generate_series`, `unnest`, any
+scalar function; `WITH ORDINALITY`), alias column lists (`AS t (a, b)`),
+`WHERE`, `GROUP BY` (expressions, positions, aliases), `HAVING`, `UNION |
+EXCEPT | INTERSECT [ALL]` (INTERSECT binding tighter), `VALUES`, `ORDER BY`
+(`ASC|DESC`, `NULLS FIRST|LAST`, positions, aliases, expressions), `LIMIT`,
+`OFFSET`.  Expressions: arithmetic, `||`, comparisons, `AND/OR/NOT`, `IS
+[NOT] NULL|TRUE|FALSE|DISTINCT FROM`, `[NOT] BETWEEN`, `[NOT] IN (list |
+subquery)`, `[NOT] EXISTS`, `op ANY|SOME|ALL (array | subquery)`, scalar
+subqueries, `[NOT] LIKE / ILIKE`, `~ ~* !~ !~*` (regular expressions,
+linear-time), `CASE`, `CAST` / `::`, typed literals, `E'…'` strings,
+`COLLATE` (accepted, ignored: text compares bytewise), `OPERATOR(op)`,
+`$n`, `extract(field FROM x)`.  Functions: `lower upper length trim substr
+replace strpos concat coalesce nullif greatest least abs round trunc floor
+ceil sign mod sqrt power regexp_replace version now current_timestamp
+current_date localtimestamp clock_timestamp extract date_part date_trunc
+make_date age justify_days justify_hours justify_interval to_timestamp
+array_length array_upper array_lower cardinality array_append
+array_to_string pg_typeof current_user current_database current_schema
+current_setting` (and the catalog functions of §8.11); aggregates `count
+sum avg min max string_agg array_agg bool_and bool_or every` (with
+`DISTINCT`, `count(*)`, `ORDER BY` inside the call).
 
-Not yet: `FOREIGN KEY` (refused with `0A000`), `FULL JOIN`, `EXCEPT`,
-`INTERSECT`, window functions, `COPY`, column alias lists on subqueries,
-date/time and decimal types.
+Not yet: window functions, `COPY`, `TIME` / `TIMETZ`, time zones other than
+UTC, multi-dimensional arrays, data-modifying CTEs, `LATERAL`, user
+functions.  Every integer is 64-bit (`pg_typeof(1)` is `bigint`).
 
 ### 8.4 Binder (`binder`)
 
@@ -549,8 +604,12 @@ position, else a hidden extra column, refused under `DISTINCT`).
 ### 8.5 Plans and the executor (`plan`, `exec`, `expr`)
 
 Plan nodes: `Scan` (table, access path, filter), `Values`, `Filter`,
-`Project`, `Join` (inner/left; nested loop or hash), `Aggregate`, `Sort`,
-`Limit`, `Distinct`, `Union`.  The executor runs them as iterators; joins
+`Project`, `Join` (inner, left, full; nested loop or hash), `Aggregate`,
+`Sort`, `Limit`, `Distinct`, `SetOp` (union, except, intersect),
+`Cte` (computed once per execution, shared by its references),
+`Recursive` / `WorkTable` (`WITH RECURSIVE`: the step re-runs over the
+previous round until it yields nothing; `UNION` drops repeats, so cycles
+end), `Function` (functions in `FROM`), `Virtual` (catalog tables).  The executor runs them as iterators; joins
 materialise their right input, sorts and aggregates their input.
 Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context).  Expressions use three-valued logic,
@@ -568,7 +627,9 @@ the next column; the filter always stays, so an access path only narrows.
 
 Writes collect their rows first, then write (no Halloween problem).
 Constraint errors: `23502` NOT NULL, `22001` too long, `23514` CHECK (a
-NULL check passes), `23505` duplicate key; `42804` wrong assignment type.
+NULL check passes), `23505` duplicate key, `23503` foreign key; `42804`
+wrong assignment type (assignment converts within numbers, within dates
+and timestamps, and from or to text).
 `CREATE INDEX` backfills (and refuses existing duplicates for `UNIQUE`);
 `ADD COLUMN` with a default rewrites existing rows.
 
@@ -595,13 +656,84 @@ column order).  Without statistics the rule-based plan is kept.
 
 ### 8.9 Tests
 
-- `tests/slt/*.slt` (eleven scripts: basics, expressions, joins,
+- `tests/slt/*.slt` (nineteen scripts: basics, expressions, joins,
   aggregates, subqueries, indexes, constraints, transactions, plans,
-  statistics, serializable) through `nucleus_sql::slt`, which also runs
-  them over the wire (§9).  `SLT=<name>` runs one script.
-- `tests/encoding.rs`: key order and round trips, property-tested.
+  statistics, serializable, set operations, full joins, CTEs, numeric,
+  date/time, foreign keys, arrays and regular expressions, catalogs)
+  through `nucleus_sql::slt`, which also runs them over the wire (§9).
+  `SLT=<name>` runs one script.  The expected results of scripts 12–18
+  were produced by PostgreSQL 16 (records marked `nucleus-only` excepted:
+  concurrency, and what PostgreSQL does not do).
+- `tests/encoding.rs`: key order and round trips, property-tested (every
+  type).
 - `cargo run -p nucleus-sql --example sql_script -- file.sql` prints the
   results of a script.
+
+### 8.10 Foreign keys (`fk`)
+
+A foreign key references the primary key or a unique constraint of a table
+(itself allowed), with columns of the same types; MATCH SIMPLE (a row with
+a NULL in its key references nothing).  Checks run at the end of each
+statement, so a statement may insert a parent after its child, or swap
+keys:
+
+- **child side** — every inserted row, and every updated row whose key
+  changed, must find its referenced row: a point lookup on the parent's
+  primary or unique index;
+- **parent side** — for every deleted row, or updated row whose referenced
+  key changed (unless another row now holds the key), the referencing rows
+  are found (through an index whose leading columns are the foreign key, or
+  a full scan) and the action runs: `NO ACTION` / `RESTRICT` fail
+  (`23503`), `CASCADE` deletes them or updates their columns, `SET NULL` /
+  `SET DEFAULT` update them (a default must reference a row too).  Cascaded
+  writes run the same checks, recursively.
+
+Both lookups are validated reads (§5.2): an insert racing the delete of its
+parent fails one of the two transactions at commit with `40001`, at any
+isolation level, while children of one parent do not conflict with each
+other.  PostgreSQL blocks on row locks instead.  Index the foreign key
+columns: a parent-side check without such an index reads, and so
+validates, the whole child table.  Not supported: deferrable constraints,
+MATCH FULL.  `DROP TABLE` of a referenced table needs `CASCADE` (which
+drops the referencing constraints); dropping an index a foreign key needs
+is refused (`2BP01`).
+
+### 8.11 System catalogs (`ncatalog`, `pgcatalog`)
+
+nucleus's own catalog is **`nc_catalog`**: read-only tables made from the
+catalog when scanned (D13).
+
+| Table | Rows |
+|-------|------|
+| `nc_catalog.schemas` | `name`, `description` |
+| `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows` |
+| `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key` |
+| `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix` |
+| `nc_catalog.constraints` | `table_id`, `table_name`, `name`, `kind`, `definition` |
+| `nc_catalog.foreign_keys` | `table_id`, `table_name`, `name`, `columns`, `referenced_table`, `referenced_columns`, `on_delete`, `on_update` |
+| `nc_catalog.statistics` | `table_id`, `table_name`, `column_name`, `rows`, `nulls`, `distinct_values`, `histogram` |
+| `nc_catalog.types` | `name`, `aliases`, `category` |
+
+**PostgreSQL compatibility layer.**  PostgreSQL clients hard-code
+PostgreSQL's catalog names, so the same catalog is also shown as
+`pg_catalog` (`pg_namespace`, `pg_class`, `pg_attribute`, `pg_attrdef`,
+`pg_type`, `pg_index`, `pg_constraint`, `pg_am`, `pg_collation`,
+`pg_roles`, `pg_database`, `pg_tablespace`, `pg_tables`, `pg_indexes`, and
+empty `pg_policy`, `pg_trigger`, `pg_inherits`, `pg_statistic_ext`,
+`pg_publication*`, `pg_description`, `pg_auth_members`) and
+`information_schema` (`schemata`, `tables`, `columns`,
+`table_constraints`, `key_column_usage`), with the functions their queries
+call (`format_type`, `pg_get_expr`, `pg_get_indexdef`,
+`pg_get_constraintdef`, `pg_get_userbyid`, `pg_table_is_visible`,
+`pg_partition_ancestors`, `has_*_privilege`, `obj_description`, …) and
+`::regclass` / `regtype` / `regnamespace` casts (`regclass` maps a name to
+an oid and an oid to a name).  Unqualified `pg_*` names resolve to these
+unless a user table has the name.  Oids: PostgreSQL's for types,
+namespaces and access methods; a table is `16384 + 1000 × table id`, its
+indexes and constraints numbered after it (`pgcatalog.rs` has the table).
+One role, `nucleus`.  This is what makes `psql`'s `\d`, `\d table`,
+`\d+`, `\dt`, `\di`, `\dv`, `\dn`, `\du`, `\l` work; `\df` and others
+that need functions, sequences or permissions do not.
 
 ## 9. Server (`nucleus-server`)
 
@@ -616,20 +748,30 @@ inferred, or given), Bind (text or binary parameters), Describe (statement
 and portal), Execute with a row limit (`PortalSuspended`), Sync, Close,
 Flush; after an error, messages are skipped until Sync.  Types on the wire:
 `bool` 16, `int8` 20 (`int2`/`int4` accepted), `float8` 701 (`float4`
-accepted), `text` 25 (`varchar` accepted); binary formats for all of them.
-One thread per connection.
+accepted), `text` 25 (`varchar`, `bpchar`, `name` accepted), `numeric`
+1700, `date` 1082, `timestamp` 1114, `timestamptz` 1184, `interval` 1186,
+and their arrays; text and binary formats for all of them (binary numeric
+and dates checked against PostgreSQL's `*_send`).  One thread per
+connection.
 
-Not supported: `COPY`, cancellation, `pg_catalog` (so `psql`'s `\d`
-commands fail; plain SQL works).
+Not supported: `COPY`, cancellation.  `psql`'s `\d` family works through
+the compatibility catalog (§8.11).
 
 Tests: `crates/server/tests/wire.rs` runs every slt script over the wire
 with a minimal client, checks password authentication and the SSL refusal,
 and drives the extended protocol with the `postgres` crate (prepared
 statements, typed and NULL parameters, binary results, SQLSTATE codes,
 transactions, portals, `RETURNING`).  `scripts/psql-smoke.sh` (run by CI on
-Linux) uses the real `psql`.
+Linux) uses the real `psql`, including `\d`, `\d+`, `\dt`, `\di`, `\dn`,
+`\l` and a foreign key's `Referenced by`.
 
 ## 10. Change log
+
+- **2026-10-17 — §M14.5 SQL completeness:** EXCEPT / INTERSECT, FULL
+  JOIN, CTEs (recursive too), NUMERIC and date/time types, arrays, regular
+  expressions, functions in FROM, foreign keys (with validated reads in
+  the KV contract), the `nc_catalog` system catalog and the PostgreSQL
+  compatibility catalog for `psql`'s `\d`.
 
 - **2026-10-17 — §F1 shipped:** SQL layer (§M7–§M11), server (§M12),
   statistics and costs (§M13), serializable (§M14); `nucleus sql` and

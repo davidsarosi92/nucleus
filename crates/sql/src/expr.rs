@@ -63,6 +63,21 @@ pub enum Expr {
     Func(Func, Vec<Expr>),
     /// A subquery.
     Subquery(Box<SubPlan>),
+    /// `ARRAY[…]`.
+    Array(Vec<Expr>),
+    /// `array[index]`.
+    Subscript(Box<Expr>, Box<Expr>),
+    /// `left op ANY|ALL (array)`.
+    AnyAll {
+        /// The left operand.
+        left: Box<Expr>,
+        /// The comparison.
+        op: BinaryOp,
+        /// The array.
+        right: Box<Expr>,
+        /// `ALL`.
+        all: bool,
+    },
 }
 
 /// A subquery inside an expression.
@@ -85,6 +100,8 @@ pub enum SubKind {
     Exists,
     /// `x [NOT] IN (SELECT …)`.
     In(Box<Expr>, bool),
+    /// `ARRAY(SELECT …)`: the single column as an array.
+    Array,
 }
 
 /// Scalar functions.
@@ -170,6 +187,95 @@ pub enum Func {
     CurrentDatabase,
     /// `current_schema()`.
     CurrentSchema,
+    /// `x::regclass`: a name (or oid text) to an oid, an oid to a name.
+    RegClass,
+    /// `oid::regtype`: a type's name.
+    RegType,
+    /// `oid::regnamespace`: a schema's name.
+    RegNamespace,
+    /// `oid::regrole`: a role's name.
+    RegRole,
+    /// `pg_get_userbyid(oid)`.
+    GetUserById,
+    /// `pg_table_is_visible(oid)` (and the type / function variants).
+    TableIsVisible,
+    /// `format_type(type oid, typmod)`.
+    FormatType,
+    /// `pg_get_expr(expr, relation [, pretty])`.
+    GetExpr,
+    /// `pg_get_indexdef(index oid [, column, pretty])`.
+    GetIndexdef,
+    /// `pg_get_constraintdef(constraint oid [, pretty])`.
+    GetConstraintdef,
+    /// `pg_partition_ancestors(relation)`: the relation (nothing is
+    /// partitioned).
+    PartitionAncestors,
+    /// `array_to_string(array, separator [, null text])`.
+    ArrayToString,
+    /// `array_upper(array, dimension)`.
+    ArrayUpper,
+    /// `array_lower(array, dimension)`.
+    ArrayLower,
+    /// `array_length(array, dimension)`.
+    ArrayLength,
+    /// `cardinality(array)`.
+    Cardinality,
+    /// `array_append(array, element)`.
+    ArrayAppend,
+    /// `pg_get_statisticsobjdef_columns(oid)` (always NULL).
+    StatisticsObjColumns,
+    /// `pg_relation_is_publishable(oid)` (always false).
+    RelationIsPublishable,
+    /// `pg_get_triggerdef(oid [, pretty])` (always NULL).
+    GetTriggerdef,
+    /// `pg_encoding_to_char(encoding)`.
+    EncodingToChar,
+    /// `obj_description`, `col_description`, `shobj_description` (NULL).
+    ObjDescription,
+    /// `has_table_privilege` and friends (always true: one role).
+    HasPrivilege,
+    /// `pg_backend_pid()`.
+    BackendPid,
+    /// `current_setting(name [, missing ok])`.
+    CurrentSetting,
+    /// `regexp_replace(text, pattern, replacement [, flags])`.
+    RegexpReplace,
+}
+
+impl Func {
+    /// Whether [`crate::pgcatalog::call`] evaluates it (it may read the
+    /// catalog, and handles NULL arguments itself).
+    pub fn catalog(self) -> bool {
+        matches!(
+            self,
+            Func::RegClass
+                | Func::RegType
+                | Func::RegNamespace
+                | Func::RegRole
+                | Func::GetUserById
+                | Func::TableIsVisible
+                | Func::FormatType
+                | Func::GetExpr
+                | Func::GetIndexdef
+                | Func::GetConstraintdef
+                | Func::PartitionAncestors
+                | Func::ArrayToString
+                | Func::ArrayUpper
+                | Func::ArrayLower
+                | Func::ArrayLength
+                | Func::Cardinality
+                | Func::ArrayAppend
+                | Func::StatisticsObjColumns
+                | Func::RelationIsPublishable
+                | Func::GetTriggerdef
+                | Func::EncodingToChar
+                | Func::ObjDescription
+                | Func::HasPrivilege
+                | Func::BackendPid
+                | Func::CurrentSetting
+                | Func::RegexpReplace
+        )
+    }
 }
 
 impl Func {
@@ -218,6 +324,42 @@ impl Func {
             "current_user" | "session_user" | "user" | "current_role" => (Func::CurrentUser, 0..=0),
             "current_database" | "current_catalog" => (Func::CurrentDatabase, 0..=0),
             "current_schema" => (Func::CurrentSchema, 0..=0),
+            "__regclass" => (Func::RegClass, 1..=1),
+            "__regtype" => (Func::RegType, 1..=1),
+            "__regnamespace" => (Func::RegNamespace, 1..=1),
+            "__regrole" => (Func::RegRole, 1..=1),
+            "pg_get_userbyid" => (Func::GetUserById, 1..=1),
+            "pg_table_is_visible" | "pg_type_is_visible" | "pg_function_is_visible" => {
+                (Func::TableIsVisible, 1..=1)
+            }
+            "format_type" => (Func::FormatType, 2..=2),
+            "pg_get_expr" => (Func::GetExpr, 2..=3),
+            "pg_get_indexdef" => (Func::GetIndexdef, 1..=3),
+            "pg_get_constraintdef" => (Func::GetConstraintdef, 1..=2),
+            "pg_partition_ancestors" => (Func::PartitionAncestors, 1..=1),
+            "array_to_string" => (Func::ArrayToString, 2..=3),
+            "array_upper" => (Func::ArrayUpper, 2..=2),
+            "array_lower" => (Func::ArrayLower, 2..=2),
+            "array_length" => (Func::ArrayLength, 2..=2),
+            "cardinality" => (Func::Cardinality, 1..=1),
+            "array_append" => (Func::ArrayAppend, 2..=2),
+            "pg_get_statisticsobjdef_columns" => (Func::StatisticsObjColumns, 1..=1),
+            "pg_relation_is_publishable" => (Func::RelationIsPublishable, 1..=1),
+            "pg_get_triggerdef" => (Func::GetTriggerdef, 1..=2),
+            "pg_encoding_to_char" => (Func::EncodingToChar, 1..=1),
+            "obj_description" | "col_description" | "shobj_description" => {
+                (Func::ObjDescription, 1..=2)
+            }
+            "has_table_privilege"
+            | "has_schema_privilege"
+            | "has_database_privilege"
+            | "has_column_privilege"
+            | "has_sequence_privilege"
+            | "has_function_privilege"
+            | "pg_has_role" => (Func::HasPrivilege, 1..=4),
+            "pg_backend_pid" => (Func::BackendPid, 0..=0),
+            "current_setting" => (Func::CurrentSetting, 1..=2),
+            "regexp_replace" => (Func::RegexpReplace, 3..=4),
             _ => return None,
         })
     }
@@ -265,6 +407,32 @@ impl Func {
             Func::CurrentUser => "current_user",
             Func::CurrentDatabase => "current_database",
             Func::CurrentSchema => "current_schema",
+            Func::RegClass => "regclass",
+            Func::RegType => "regtype",
+            Func::RegNamespace => "regnamespace",
+            Func::RegRole => "regrole",
+            Func::GetUserById => "pg_get_userbyid",
+            Func::TableIsVisible => "pg_table_is_visible",
+            Func::FormatType => "format_type",
+            Func::GetExpr => "pg_get_expr",
+            Func::GetIndexdef => "pg_get_indexdef",
+            Func::GetConstraintdef => "pg_get_constraintdef",
+            Func::PartitionAncestors => "pg_partition_ancestors",
+            Func::ArrayToString => "array_to_string",
+            Func::ArrayUpper => "array_upper",
+            Func::ArrayLower => "array_lower",
+            Func::ArrayLength => "array_length",
+            Func::Cardinality => "cardinality",
+            Func::ArrayAppend => "array_append",
+            Func::StatisticsObjColumns => "pg_get_statisticsobjdef_columns",
+            Func::RelationIsPublishable => "pg_relation_is_publishable",
+            Func::GetTriggerdef => "pg_get_triggerdef",
+            Func::EncodingToChar => "pg_encoding_to_char",
+            Func::ObjDescription => "obj_description",
+            Func::HasPrivilege => "has_table_privilege",
+            Func::BackendPid => "pg_backend_pid",
+            Func::CurrentSetting => "current_setting",
+            Func::RegexpReplace => "regexp_replace",
         }
     }
 }
@@ -419,9 +587,56 @@ impl Expr {
                 for a in args {
                     vals.push(a.eval(env)?);
                 }
-                func(*f, vals)?
+                if f.catalog() {
+                    crate::pgcatalog::call(*f, &vals, env.ctx.txn)?
+                } else {
+                    func(*f, vals)?
+                }
             }
             Expr::Subquery(sub) => subquery(sub, env)?,
+            Expr::Array(items) => {
+                Value::Array(items.iter().map(|x| x.eval(env)).collect::<Result<_>>()?)
+            }
+            Expr::Subscript(a, i) => match (a.eval(env)?, i.eval(env)?) {
+                (Value::Array(items), Value::Int(n)) if n >= 1 => items
+                    .into_iter()
+                    .nth((n - 1) as usize)
+                    .unwrap_or(Value::Null),
+                _ => Value::Null, // out of range, NULL, or not an array
+            },
+            Expr::AnyAll {
+                left,
+                op,
+                right,
+                all,
+            } => {
+                let l = left.eval(env)?;
+                let items = match right.eval(env)? {
+                    Value::Null => return Ok(Value::Null),
+                    Value::Array(items) => items,
+                    v => {
+                        return Err(Error::type_mismatch(format!(
+                            "op ANY/ALL (array) requires an array, not {}",
+                            type_name(&v)
+                        )));
+                    }
+                };
+                // Three-valued: ANY is true on a match, ALL false on a miss;
+                // a NULL comparison leaves it unknown.
+                let mut unknown = false;
+                for item in items {
+                    match binary(*op, l.clone(), item)?.truth()? {
+                        Some(b) if b != *all => return Ok(Value::Bool(b)),
+                        None => unknown = true,
+                        _ => {}
+                    }
+                }
+                if unknown {
+                    Value::Null
+                } else {
+                    Value::Bool(*all)
+                }
+            }
         })
     }
 
@@ -464,7 +679,14 @@ impl Expr {
                     o.walk(f);
                 }
             }
-            Expr::Func(_, args) => args.iter().for_each(|x| x.walk(f)),
+            Expr::Func(_, args) | Expr::Array(args) => args.iter().for_each(|x| x.walk(f)),
+            Expr::Subscript(a, b)
+            | Expr::AnyAll {
+                left: a, right: b, ..
+            } => {
+                a.walk(f);
+                b.walk(f);
+            }
             Expr::Subquery(s) => {
                 if let SubKind::In(e, _) = &s.kind {
                     e.walk(f);
@@ -512,6 +734,19 @@ impl Expr {
             Expr::Func(func, args) => {
                 Expr::Func(*func, args.iter().map(|x| x.map_columns(f)).collect())
             }
+            Expr::Array(items) => Expr::Array(items.iter().map(|x| x.map_columns(f)).collect()),
+            Expr::Subscript(a, i) => Expr::Subscript(m(a), m(i)),
+            Expr::AnyAll {
+                left,
+                op,
+                right,
+                all,
+            } => Expr::AnyAll {
+                left: m(left),
+                op: *op,
+                right: m(right),
+                all: *all,
+            },
             Expr::Subquery(s) => {
                 // Columns inside the subquery are its own; only the IN operand
                 // belongs to this level.
@@ -574,6 +809,7 @@ fn subquery(sub: &SubPlan, env: &Env) -> Result<Value> {
             let v = e.eval(env)?;
             in_values(&v, rows.iter().map(|r| &r[0]), *negated)?
         }
+        SubKind::Array => Value::Array(rows.iter().map(|r| r[0].clone()).collect()),
     })
 }
 
@@ -646,7 +882,33 @@ pub fn binary(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
                 _ => o != Less,
             })
         }
-        Concat => Value::Text(format!("{}{}", a.render(), b.render())),
+        Concat => match (a, b) {
+            (Value::Array(mut x), Value::Array(y)) => {
+                x.extend(y);
+                Value::Array(x)
+            }
+            (Value::Array(mut x), e) => {
+                x.push(e);
+                Value::Array(x)
+            }
+            (e, Value::Array(mut y)) => {
+                y.insert(0, e);
+                Value::Array(y)
+            }
+            (a, b) => Value::Text(format!("{}{}", a.render(), b.render())),
+        },
+        Match | NotMatch | IMatch | NotIMatch => {
+            let (Value::Text(s), Value::Text(p)) = (&a, &b) else {
+                return Err(Error::undefined_function(format!(
+                    "operator does not exist: {} {} {}",
+                    type_name(&a),
+                    op.symbol(),
+                    type_name(&b)
+                )));
+            };
+            let hit = regex_matches(p, matches!(op, IMatch | NotIMatch), s)?;
+            Value::Bool(hit != matches!(op, NotMatch | NotIMatch))
+        }
         Add | Sub | Mul | Div | Mod => match (a, b) {
             (Value::Int(x), Value::Int(y)) => Value::Int(match op {
                 Add => x.checked_add(y).ok_or_else(overflow)?,
@@ -752,6 +1014,42 @@ fn as_f64(v: &Value) -> f64 {
         Value::Numeric(d) => d.to_f64(),
         _ => f64::NAN,
     }
+}
+
+thread_local! {
+    /// Compiled patterns, by (pattern, case-insensitive); bounded.
+    static REGEXES: RefCell<HashMap<(String, bool), regex::Regex>> = RefCell::new(HashMap::new());
+}
+
+/// Whether `s` contains a match of the POSIX-style regular expression `p`
+/// (as PostgreSQL's `~`; `regex` crate syntax, which covers the common
+/// part of PostgreSQL's: no back-references or look-around).
+pub fn regex_matches(p: &str, case_insensitive: bool, s: &str) -> Result<bool> {
+    with_regex(p, case_insensitive, |re| re.is_match(s))
+}
+
+/// Runs `f` with the compiled pattern.
+pub fn with_regex<T>(
+    p: &str,
+    case_insensitive: bool,
+    f: impl FnOnce(&regex::Regex) -> T,
+) -> Result<T> {
+    REGEXES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let key = (p.to_string(), case_insensitive);
+        if !cache.contains_key(&key) {
+            let re = regex::RegexBuilder::new(p)
+                .case_insensitive(case_insensitive)
+                .size_limit(1 << 20)
+                .build()
+                .map_err(|e| Error::invalid_regex(format!("invalid regular expression: {e}")))?;
+            if cache.len() >= 64 {
+                cache.clear();
+            }
+            cache.insert(key.clone(), re);
+        }
+        Ok(f(&cache[&key]))
+    })
 }
 
 /// SQL `LIKE`: `%` any run, `_` any one character, `\` escapes.
@@ -1075,22 +1373,9 @@ fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
             let s = u32::try_from(int(&args[2])?).unwrap_or(0);
             Value::Numeric(d.fit(p, s)?)
         }
-        Func::Now
-        | Func::ClockTimestamp
-        | Func::CurrentDate
-        | Func::LocalTimestamp
-        | Func::CurrentUser
-        | Func::CurrentDatabase
-        | Func::CurrentSchema
-        | Func::Coalesce
-        | Func::Concat
-        | Func::IsDistinctFrom
-        | Func::Nullif
-        | Func::Greatest
-        | Func::Least
-        | Func::Version => {
-            unreachable!("handled above")
-        }
+        // Catalog functions run in pgcatalog::call, the others before the
+        // NULL check above.
+        _ => unreachable!("{} is evaluated elsewhere", f.name()),
     })
 }
 

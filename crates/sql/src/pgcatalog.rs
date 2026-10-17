@@ -1,0 +1,1704 @@
+//! PostgreSQL compatibility: the `pg_catalog` and `information_schema`
+//! tables PostgreSQL clients query, as views of the nucleus catalog
+//! (PLAN.md §M14.5) — enough for `psql`'s `\d` family and for tools that
+//! read `information_schema`.  nucleus's own catalog is `nc_catalog`
+//! ([`crate::ncatalog`]); these exist because clients hard-code
+//! PostgreSQL's names.
+//!
+//! The tables are virtual: their rows are made from the catalog when they
+//! are scanned, and they cannot be written.  Object ids follow
+//! PostgreSQL's where they are fixed (types, namespaces, access methods);
+//! a table's oid is `16384 + 1000 × id`, its indexes and constraints are
+//! numbered after it:
+//!
+//! | object | oid |
+//! |--------|-----|
+//! | table | `t = 16384 + 1000 × table id` |
+//! | primary key index | `t + 1` |
+//! | index | `t + 1 + index id` |
+//! | primary key constraint | `t + 500` |
+//! | unique constraint | `t + 500 + index id` |
+//! | check constraint `j` | `t + 700 + j` |
+//! | foreign key `j` | `t + 800 + j` |
+//! | catalog table `k` | `12000 + k` |
+//!
+//! Unique indexes named `…_key` (the names UNIQUE constraints get) are shown
+//! as constraints.  Everything belongs to one role, `nucleus` (oid 10).
+
+use std::collections::HashMap;
+
+use nucleus_kv::KvTxn;
+
+use crate::ast::FkAction;
+use crate::catalog::{self, Column, Table};
+use crate::error::{Error, Result};
+use crate::expr::Func;
+use crate::types::{DataType, Row, Value};
+
+/// The `pg_catalog` namespace.
+pub const NS_CATALOG: i64 = 11;
+/// The `public` namespace.
+pub const NS_PUBLIC: i64 = 2200;
+/// The `information_schema` namespace.
+pub const NS_INFO: i64 = 13_000;
+/// The `nc_catalog` namespace (nucleus's own catalog).
+pub const NS_NC: i64 = 13_100;
+/// The one role.
+pub const OWNER: i64 = 10;
+const ROLE: &str = "nucleus";
+const DATABASE_OID: i64 = 16_383;
+
+const B: DataType = DataType::Bool;
+const I: DataType = DataType::Int;
+const F: DataType = DataType::Float;
+const T: DataType = DataType::Text;
+const IA: DataType = DataType::Array(&DataType::Int);
+const TA: DataType = DataType::Array(&DataType::Text);
+
+/// A catalog table: schema, name, columns.
+struct Def {
+    ns: i64,
+    name: &'static str,
+    cols: &'static [(&'static str, DataType)],
+}
+
+const DEFS: &[Def] = &[
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_namespace",
+        cols: &[("oid", I), ("nspname", T), ("nspowner", I), ("nspacl", TA)],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_class",
+        cols: &[
+            ("oid", I),
+            ("relname", T),
+            ("relnamespace", I),
+            ("reltype", I),
+            ("reloftype", I),
+            ("relowner", I),
+            ("relam", I),
+            ("relfilenode", I),
+            ("reltablespace", I),
+            ("relpages", I),
+            ("reltuples", F),
+            ("relallvisible", I),
+            ("reltoastrelid", I),
+            ("relhasindex", B),
+            ("relisshared", B),
+            ("relpersistence", T),
+            ("relkind", T),
+            ("relnatts", I),
+            ("relchecks", I),
+            ("relhasrules", B),
+            ("relhastriggers", B),
+            ("relhassubclass", B),
+            ("relrowsecurity", B),
+            ("relforcerowsecurity", B),
+            ("relispopulated", B),
+            ("relreplident", T),
+            ("relispartition", B),
+            ("relrewrite", I),
+            ("relfrozenxid", I),
+            ("relminmxid", I),
+            ("relacl", TA),
+            ("reloptions", TA),
+            ("relpartbound", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_am",
+        cols: &[("oid", I), ("amname", T), ("amhandler", T), ("amtype", T)],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_attribute",
+        cols: &[
+            ("attrelid", I),
+            ("attname", T),
+            ("atttypid", I),
+            ("attlen", I),
+            ("attnum", I),
+            ("attcacheoff", I),
+            ("atttypmod", I),
+            ("attndims", I),
+            ("attbyval", B),
+            ("attalign", T),
+            ("attstorage", T),
+            ("attcompression", T),
+            ("attnotnull", B),
+            ("atthasdef", B),
+            ("atthasmissing", B),
+            ("attidentity", T),
+            ("attgenerated", T),
+            ("attisdropped", B),
+            ("attislocal", B),
+            ("attinhcount", I),
+            ("attstattarget", I),
+            ("attcollation", I),
+            ("attacl", TA),
+            ("attoptions", TA),
+            ("attfdwoptions", TA),
+            ("attmissingval", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_attrdef",
+        cols: &[("oid", I), ("adrelid", I), ("adnum", I), ("adbin", T)],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_type",
+        cols: &[
+            ("oid", I),
+            ("typname", T),
+            ("typnamespace", I),
+            ("typowner", I),
+            ("typlen", I),
+            ("typbyval", B),
+            ("typtype", T),
+            ("typcategory", T),
+            ("typispreferred", B),
+            ("typisdefined", B),
+            ("typdelim", T),
+            ("typrelid", I),
+            ("typsubscript", T),
+            ("typelem", I),
+            ("typarray", I),
+            ("typinput", T),
+            ("typoutput", T),
+            ("typreceive", T),
+            ("typsend", T),
+            ("typnotnull", B),
+            ("typbasetype", I),
+            ("typtypmod", I),
+            ("typndims", I),
+            ("typcollation", I),
+            ("typdefault", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_collation",
+        cols: &[
+            ("oid", I),
+            ("collname", T),
+            ("collnamespace", I),
+            ("collowner", I),
+            ("collprovider", T),
+            ("collisdeterministic", B),
+            ("collencoding", I),
+            ("collcollate", T),
+            ("collctype", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_index",
+        cols: &[
+            ("indexrelid", I),
+            ("indrelid", I),
+            ("indnatts", I),
+            ("indnkeyatts", I),
+            ("indisunique", B),
+            ("indnullsnotdistinct", B),
+            ("indisprimary", B),
+            ("indisexclusion", B),
+            ("indimmediate", B),
+            ("indisclustered", B),
+            ("indisvalid", B),
+            ("indcheckxmin", B),
+            ("indisready", B),
+            ("indislive", B),
+            ("indisreplident", B),
+            ("indkey", IA),
+            ("indcollation", IA),
+            ("indclass", IA),
+            ("indoption", IA),
+            ("indexprs", T),
+            ("indpred", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_constraint",
+        cols: &[
+            ("oid", I),
+            ("conname", T),
+            ("connamespace", I),
+            ("contype", T),
+            ("condeferrable", B),
+            ("condeferred", B),
+            ("convalidated", B),
+            ("conrelid", I),
+            ("contypid", I),
+            ("conindid", I),
+            ("conparentid", I),
+            ("confrelid", I),
+            ("confupdtype", T),
+            ("confdeltype", T),
+            ("confmatchtype", T),
+            ("conislocal", B),
+            ("coninhcount", I),
+            ("connoinherit", B),
+            ("conkey", IA),
+            ("confkey", IA),
+            ("conbin", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_policy",
+        cols: &[
+            ("oid", I),
+            ("polname", T),
+            ("polrelid", I),
+            ("polcmd", T),
+            ("polpermissive", B),
+            ("polroles", IA),
+            ("polqual", T),
+            ("polwithcheck", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_roles",
+        cols: &[
+            ("oid", I),
+            ("rolname", T),
+            ("rolsuper", B),
+            ("rolinherit", B),
+            ("rolcreaterole", B),
+            ("rolcreatedb", B),
+            ("rolcanlogin", B),
+            ("rolreplication", B),
+            ("rolconnlimit", I),
+            ("rolpassword", T),
+            ("rolvaliduntil", DataType::TimestampTz),
+            ("rolbypassrls", B),
+            ("rolconfig", TA),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_auth_members",
+        cols: &[
+            ("oid", I),
+            ("roleid", I),
+            ("member", I),
+            ("grantor", I),
+            ("admin_option", B),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_statistic_ext",
+        cols: &[
+            ("oid", I),
+            ("stxrelid", I),
+            ("stxname", T),
+            ("stxnamespace", I),
+            ("stxowner", I),
+            ("stxstattarget", I),
+            ("stxkeys", IA),
+            ("stxkind", TA),
+            ("stxexprs", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_publication",
+        cols: &[
+            ("oid", I),
+            ("pubname", T),
+            ("pubowner", I),
+            ("puballtables", B),
+            ("pubinsert", B),
+            ("pubupdate", B),
+            ("pubdelete", B),
+            ("pubtruncate", B),
+            ("pubviaroot", B),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_publication_namespace",
+        cols: &[("oid", I), ("pnpubid", I), ("pnnspid", I)],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_publication_rel",
+        cols: &[
+            ("oid", I),
+            ("prpubid", I),
+            ("prrelid", I),
+            ("prqual", T),
+            ("prattrs", IA),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_trigger",
+        cols: &[
+            ("oid", I),
+            ("tgrelid", I),
+            ("tgparentid", I),
+            ("tgname", T),
+            ("tgfoid", I),
+            ("tgtype", I),
+            ("tgenabled", T),
+            ("tgisinternal", B),
+            ("tgconstrrelid", I),
+            ("tgconstrindid", I),
+            ("tgconstraint", I),
+            ("tgdeferrable", B),
+            ("tginitdeferred", B),
+            ("tgnargs", I),
+            ("tgattr", IA),
+            ("tgqual", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_inherits",
+        cols: &[
+            ("inhrelid", I),
+            ("inhparent", I),
+            ("inhseqno", I),
+            ("inhdetachpending", B),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_description",
+        cols: &[
+            ("objoid", I),
+            ("classoid", I),
+            ("objsubid", I),
+            ("description", T),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_database",
+        cols: &[
+            ("oid", I),
+            ("datname", T),
+            ("datdba", I),
+            ("encoding", I),
+            ("datlocprovider", T),
+            ("datistemplate", B),
+            ("datallowconn", B),
+            ("datconnlimit", I),
+            ("datfrozenxid", I),
+            ("datminmxid", I),
+            ("dattablespace", I),
+            ("datcollate", T),
+            ("datctype", T),
+            ("daticulocale", T),
+            ("daticurules", T),
+            ("datcollversion", T),
+            ("datacl", TA),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_tablespace",
+        cols: &[
+            ("oid", I),
+            ("spcname", T),
+            ("spcowner", I),
+            ("spcacl", TA),
+            ("spcoptions", TA),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_tables",
+        cols: &[
+            ("schemaname", T),
+            ("tablename", T),
+            ("tableowner", T),
+            ("tablespace", T),
+            ("hasindexes", B),
+            ("hasrules", B),
+            ("hastriggers", B),
+            ("rowsecurity", B),
+        ],
+    },
+    Def {
+        ns: NS_CATALOG,
+        name: "pg_indexes",
+        cols: &[
+            ("schemaname", T),
+            ("tablename", T),
+            ("indexname", T),
+            ("tablespace", T),
+            ("indexdef", T),
+        ],
+    },
+    Def {
+        ns: NS_INFO,
+        name: "schemata",
+        cols: &[("catalog_name", T), ("schema_name", T), ("schema_owner", T)],
+    },
+    Def {
+        ns: NS_INFO,
+        name: "tables",
+        cols: &[
+            ("table_catalog", T),
+            ("table_schema", T),
+            ("table_name", T),
+            ("table_type", T),
+            ("is_insertable_into", T),
+            ("is_typed", T),
+        ],
+    },
+    Def {
+        ns: NS_INFO,
+        name: "columns",
+        cols: &[
+            ("table_catalog", T),
+            ("table_schema", T),
+            ("table_name", T),
+            ("column_name", T),
+            ("ordinal_position", I),
+            ("column_default", T),
+            ("is_nullable", T),
+            ("data_type", T),
+            ("character_maximum_length", I),
+            ("numeric_precision", I),
+            ("numeric_scale", I),
+            ("datetime_precision", I),
+            ("udt_name", T),
+            ("is_identity", T),
+            ("is_generated", T),
+        ],
+    },
+    Def {
+        ns: NS_INFO,
+        name: "table_constraints",
+        cols: &[
+            ("constraint_catalog", T),
+            ("constraint_schema", T),
+            ("constraint_name", T),
+            ("table_catalog", T),
+            ("table_schema", T),
+            ("table_name", T),
+            ("constraint_type", T),
+            ("is_deferrable", T),
+            ("initially_deferred", T),
+        ],
+    },
+    Def {
+        ns: NS_INFO,
+        name: "key_column_usage",
+        cols: &[
+            ("constraint_catalog", T),
+            ("constraint_schema", T),
+            ("constraint_name", T),
+            ("table_catalog", T),
+            ("table_schema", T),
+            ("table_name", T),
+            ("column_name", T),
+            ("ordinal_position", I),
+        ],
+    },
+];
+
+fn ns_name(ns: i64) -> Option<&'static str> {
+    Some(match ns {
+        NS_CATALOG => "pg_catalog",
+        NS_PUBLIC => "public",
+        NS_INFO => "information_schema",
+        NS_NC => "nc_catalog",
+        _ => return None,
+    })
+}
+
+fn def_table(k: usize) -> Table {
+    let d = &DEFS[k];
+    Table {
+        id: 0,
+        name: format!("{}.{}", ns_name(d.ns).expect("known"), d.name),
+        columns: d
+            .cols
+            .iter()
+            .map(|(n, ty)| Column {
+                name: (*n).to_string(),
+                ty: *ty,
+                nullable: true,
+                default: None,
+                max_len: None,
+                numeric: None,
+            })
+            .collect(),
+        primary_key: Vec::new(),
+        indexes: Vec::new(),
+        checks: Vec::new(),
+        next_index_id: 1,
+        foreign_keys: Vec::new(),
+        referenced_by: Vec::new(),
+    }
+}
+
+/// The catalog table `[schema.]name`, if there is one.  Unqualified names
+/// find `pg_catalog` tables (it is on the search path).
+pub fn lookup(schema: Option<&str>, name: &str) -> Option<Table> {
+    if schema == Some("nc_catalog") {
+        return crate::ncatalog::lookup(name);
+    }
+    let ns = match schema {
+        None | Some("pg_catalog") => NS_CATALOG,
+        Some("information_schema") => NS_INFO,
+        Some(_) => return None,
+    };
+    DEFS.iter()
+        .position(|d| d.ns == ns && d.name == name)
+        .map(def_table)
+}
+
+// ------------------------------------------------------------------ oids
+
+/// A table's oid.
+pub fn rel_oid(t: &Table) -> i64 {
+    16_384 + 1000 * i64::from(t.id)
+}
+
+fn index_oid(t: &Table, index: Option<usize>) -> i64 {
+    rel_oid(t) + 1 + index.map_or(0, |i| i64::from(t.indexes[i].id))
+}
+
+fn is_unique_constraint(t: &Table, i: usize) -> bool {
+    t.indexes[i].unique && t.indexes[i].name.ends_with("_key")
+}
+
+/// A column's type oid and type modifier, as PostgreSQL reports them.
+fn type_of(c: &Column) -> (i64, i64) {
+    let typmod = match (c.max_len, c.numeric) {
+        (Some(n), _) => i64::from(n) + 4,
+        (_, Some((p, s))) => ((i64::from(p) << 16) | i64::from(s)) + 4,
+        _ => -1,
+    };
+    let oid = if c.ty == DataType::Text && c.max_len.is_some() {
+        1043
+    } else {
+        type_oid(c.ty)
+    };
+    (oid, typmod)
+}
+
+/// The oid of a type.
+pub fn type_oid(t: DataType) -> i64 {
+    match t {
+        DataType::Bool => 16,
+        DataType::Int => 20,
+        DataType::Float => 701,
+        DataType::Text => 25,
+        DataType::Numeric => 1700,
+        DataType::Date => 1082,
+        DataType::Timestamp => 1114,
+        DataType::TimestampTz => 1184,
+        DataType::Interval => 1186,
+        DataType::Array(e) => match e {
+            DataType::Bool => 1000,
+            DataType::Int => 1016,
+            DataType::Float => 1022,
+            DataType::Text => 1009,
+            DataType::Numeric => 1231,
+            DataType::Date => 1182,
+            DataType::Timestamp => 1115,
+            DataType::TimestampTz => 1185,
+            DataType::Interval => 1187,
+            DataType::Array(_) => 0,
+        },
+    }
+}
+
+/// `(oid, name, length, category, element, array, collation)` of the types
+/// `pg_type` lists.
+const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
+    (16, "bool", 1, "B", 0, 1000, 0),
+    (18, "char", 1, "Z", 0, 1002, 0),
+    (19, "name", 64, "S", 0, 1003, 950),
+    (20, "int8", 8, "N", 0, 1016, 0),
+    (21, "int2", 2, "N", 0, 1005, 0),
+    (23, "int4", 4, "N", 0, 1007, 0),
+    (25, "text", -1, "S", 0, 1009, 100),
+    (26, "oid", 4, "N", 0, 1028, 0),
+    (700, "float4", 4, "N", 0, 1021, 0),
+    (701, "float8", 8, "N", 0, 1022, 0),
+    (1042, "bpchar", -1, "S", 0, 1014, 100),
+    (1043, "varchar", -1, "S", 0, 1015, 100),
+    (1082, "date", 4, "D", 0, 1182, 0),
+    (1114, "timestamp", 8, "D", 0, 1115, 0),
+    (1184, "timestamptz", 8, "D", 0, 1185, 0),
+    (1186, "interval", 16, "T", 0, 1187, 0),
+    (1700, "numeric", -1, "N", 0, 1231, 0),
+    (2205, "regclass", 4, "N", 0, 2210, 0),
+    (1000, "_bool", -1, "A", 16, 0, 0),
+    (1002, "_char", -1, "A", 18, 0, 0),
+    (1003, "_name", -1, "A", 19, 0, 950),
+    (1005, "_int2", -1, "A", 21, 0, 0),
+    (1007, "_int4", -1, "A", 23, 0, 0),
+    (1009, "_text", -1, "A", 25, 0, 100),
+    (1014, "_bpchar", -1, "A", 1042, 0, 100),
+    (1015, "_varchar", -1, "A", 1043, 0, 100),
+    (1016, "_int8", -1, "A", 20, 0, 0),
+    (1021, "_float4", -1, "A", 700, 0, 0),
+    (1022, "_float8", -1, "A", 701, 0, 0),
+    (1028, "_oid", -1, "A", 26, 0, 0),
+    (1115, "_timestamp", -1, "A", 1114, 0, 0),
+    (1182, "_date", -1, "A", 1082, 0, 0),
+    (1185, "_timestamptz", -1, "A", 1184, 0, 0),
+    (1187, "_interval", -1, "A", 1186, 0, 0),
+    (1231, "_numeric", -1, "A", 1700, 0, 0),
+    (2210, "_regclass", -1, "A", 2205, 0, 0),
+];
+
+/// `format_type(oid, typmod)`: a type's SQL name.
+pub fn format_type(oid: i64, typmod: Option<i64>) -> Option<String> {
+    let m = typmod.filter(|m| *m >= 4).map(|m| m - 4);
+    let base = match oid {
+        16 => "boolean".into(),
+        18 => "\"char\"".into(),
+        19 => "name".into(),
+        20 => "bigint".into(),
+        21 => "smallint".into(),
+        23 => "integer".into(),
+        25 => "text".into(),
+        26 => "oid".into(),
+        700 => "real".into(),
+        701 => "double precision".into(),
+        1042 => match m {
+            Some(n) => format!("character({n})"),
+            None => "character".into(),
+        },
+        1043 => match m {
+            Some(n) => format!("character varying({n})"),
+            None => "character varying".into(),
+        },
+        1082 => "date".into(),
+        1114 => "timestamp without time zone".into(),
+        1184 => "timestamp with time zone".into(),
+        1186 => "interval".into(),
+        1700 => match m {
+            Some(m) => format!("numeric({},{})", m >> 16, m & 0xffff),
+            None => "numeric".into(),
+        },
+        2205 => "regclass".into(),
+        _ => {
+            let (_, _, _, _, elem, _, _) = TYPES.iter().find(|t| t.0 == oid)?;
+            return format_type(*elem, typmod).map(|e| format!("{e}[]"));
+        }
+    };
+    Some(base)
+}
+
+// ------------------------------------------------------------------ rows
+
+/// A row for `table` from named values (unnamed columns are NULL).
+fn row(table: &Table, vals: &[(&str, Value)]) -> Row {
+    let mut by: HashMap<&str, &Value> = HashMap::new();
+    for (k, v) in vals {
+        by.insert(k, v);
+    }
+    table
+        .columns
+        .iter()
+        .map(|c| {
+            by.get(c.name.as_str())
+                .map_or(Value::Null, |v| (*v).clone())
+        })
+        .collect()
+}
+
+fn int(i: impl Into<i64>) -> Value {
+    Value::Int(i.into())
+}
+
+fn text(s: impl Into<String>) -> Value {
+    Value::Text(s.into())
+}
+
+fn ints(v: impl IntoIterator<Item = i64>) -> Value {
+    Value::Array(v.into_iter().map(Value::Int).collect())
+}
+
+fn attnums(cols: &[usize]) -> Value {
+    ints(cols.iter().map(|&c| c as i64 + 1))
+}
+
+fn fk_code(a: FkAction) -> &'static str {
+    match a {
+        FkAction::NoAction => "a",
+        FkAction::Restrict => "r",
+        FkAction::Cascade => "c",
+        FkAction::SetNull => "n",
+        FkAction::SetDefault => "d",
+    }
+}
+
+/// A relation in `pg_class`: a user table or index, or a catalog table.
+struct Rel {
+    oid: i64,
+    name: String,
+    ns: i64,
+    kind: &'static str,
+    am: i64,
+    /// Columns: name, type oid, typmod, not null, has default, collation.
+    cols: Vec<(String, i64, i64, bool, bool, i64)>,
+    checks: i64,
+    has_index: bool,
+    has_triggers: bool,
+    /// The user table it is (or indexes).
+    table: Option<(Table, Option<Option<usize>>)>,
+}
+
+fn column_attrs(t: &Table, c: usize) -> (String, i64, i64, bool, bool, i64) {
+    let col = &t.columns[c];
+    let (oid, typmod) = type_of(col);
+    (
+        col.name.clone(),
+        oid,
+        typmod,
+        !col.nullable || t.primary_key.contains(&c),
+        col.default.is_some(),
+        if col.ty == DataType::Text { 100 } else { 0 },
+    )
+}
+
+fn relations(tables: &[Table]) -> Vec<Rel> {
+    let mut out = Vec::new();
+    for t in tables {
+        out.push(Rel {
+            oid: rel_oid(t),
+            name: t.name.clone(),
+            ns: NS_PUBLIC,
+            kind: "r",
+            am: 2,
+            cols: (0..t.columns.len()).map(|c| column_attrs(t, c)).collect(),
+            checks: t.checks.len() as i64,
+            has_index: !t.primary_key.is_empty() || !t.indexes.is_empty(),
+            has_triggers: !t.foreign_keys.is_empty() || !t.referenced_by.is_empty(),
+            table: Some((t.clone(), None)),
+        });
+        let mut indexes: Vec<(Option<usize>, String, Vec<usize>)> = Vec::new();
+        if !t.primary_key.is_empty() {
+            indexes.push((None, format!("{}_pkey", t.name), t.primary_key.clone()));
+        }
+        for (i, ix) in t.indexes.iter().enumerate() {
+            indexes.push((Some(i), ix.name.clone(), ix.columns.clone()));
+        }
+        for (i, name, cols) in indexes {
+            out.push(Rel {
+                oid: index_oid(t, i),
+                name,
+                ns: NS_PUBLIC,
+                kind: "i",
+                am: 403,
+                cols: cols.iter().map(|&c| column_attrs(t, c)).collect(),
+                checks: 0,
+                has_index: false,
+                has_triggers: false,
+                table: Some((t.clone(), Some(i))),
+            });
+        }
+    }
+    for (k, d) in DEFS.iter().enumerate() {
+        out.push(Rel {
+            oid: 12_000 + k as i64,
+            name: d.name.to_string(),
+            ns: d.ns,
+            kind: if d.ns == NS_INFO { "v" } else { "r" },
+            am: if d.ns == NS_INFO { 0 } else { 2 },
+            cols: d
+                .cols
+                .iter()
+                .map(|(n, ty)| {
+                    (
+                        (*n).to_string(),
+                        type_oid(*ty),
+                        -1,
+                        false,
+                        false,
+                        if *ty == T { 100 } else { 0 },
+                    )
+                })
+                .collect(),
+            checks: 0,
+            has_index: false,
+            has_triggers: false,
+            table: None,
+        });
+    }
+    for (k, (name, cols)) in crate::ncatalog::definitions().into_iter().enumerate() {
+        out.push(Rel {
+            oid: 12_500 + k as i64,
+            name,
+            ns: NS_NC,
+            kind: "v",
+            am: 0,
+            cols: cols
+                .iter()
+                .map(|c| (c.name.clone(), type_oid(c.ty), -1, false, false, 0))
+                .collect(),
+            checks: 0,
+            has_index: false,
+            has_triggers: false,
+            table: None,
+        });
+    }
+    out
+}
+
+/// A constraint in `pg_constraint`.
+pub(crate) struct Con {
+    oid: i64,
+    pub(crate) name: String,
+    pub(crate) kind: &'static str,
+    pub(crate) table: Table,
+    index: i64,
+    /// The referenced table, for a foreign key.
+    references: Option<Table>,
+    cols: Vec<usize>,
+    ref_cols: Vec<usize>,
+    on_update: &'static str,
+    on_delete: &'static str,
+    pub(crate) def: String,
+}
+
+fn quoted_list(t: &Table, cols: &[usize]) -> String {
+    cols.iter()
+        .map(|&c| t.columns[c].name.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub(crate) fn constraints(tables: &[Table]) -> Vec<Con> {
+    let mut out = Vec::new();
+    let by_name: HashMap<&str, &Table> = tables.iter().map(|t| (t.name.as_str(), t)).collect();
+    for t in tables {
+        let base = rel_oid(t);
+        let con = |oid, name: String, kind, index, cols: Vec<usize>, def: String| Con {
+            oid,
+            name,
+            kind,
+            table: t.clone(),
+            index,
+            references: None,
+            cols,
+            ref_cols: Vec::new(),
+            on_update: " ",
+            on_delete: " ",
+            def,
+        };
+        if !t.primary_key.is_empty() {
+            out.push(con(
+                base + 500,
+                format!("{}_pkey", t.name),
+                "p",
+                index_oid(t, None),
+                t.primary_key.clone(),
+                format!("PRIMARY KEY ({})", quoted_list(t, &t.primary_key)),
+            ));
+        }
+        for (i, ix) in t.indexes.iter().enumerate() {
+            if is_unique_constraint(t, i) {
+                out.push(con(
+                    base + 500 + i64::from(ix.id),
+                    ix.name.clone(),
+                    "u",
+                    index_oid(t, Some(i)),
+                    ix.columns.clone(),
+                    format!("UNIQUE ({})", quoted_list(t, &ix.columns)),
+                ));
+            }
+        }
+        for (j, (name, check)) in t.checks.iter().enumerate() {
+            out.push(con(
+                base + 700 + j as i64,
+                name.clone(),
+                "c",
+                0,
+                Vec::new(),
+                format!("CHECK ({check})"),
+            ));
+        }
+        for (j, fk) in t.foreign_keys.iter().enumerate() {
+            let Some(parent) = by_name.get(fk.table.as_str()) else {
+                continue;
+            };
+            let index = crate::fk::referenced_key(parent, &fk.ref_columns)
+                .map_or(0, |(i, _)| index_oid(parent, i));
+            let mut def = format!(
+                "FOREIGN KEY ({}) REFERENCES {}({})",
+                quoted_list(t, &fk.columns),
+                parent.name,
+                quoted_list(parent, &fk.ref_columns)
+            );
+            if fk.on_update != FkAction::NoAction {
+                def.push_str(&format!(" ON UPDATE {}", fk.on_update.sql()));
+            }
+            if fk.on_delete != FkAction::NoAction {
+                def.push_str(&format!(" ON DELETE {}", fk.on_delete.sql()));
+            }
+            out.push(Con {
+                oid: base + 800 + j as i64,
+                name: fk.name.clone(),
+                kind: "f",
+                table: t.clone(),
+                index,
+                references: Some((*parent).clone()),
+                cols: fk.columns.clone(),
+                ref_cols: fk.ref_columns.clone(),
+                on_update: fk_code(fk.on_update),
+                on_delete: fk_code(fk.on_delete),
+                def,
+            });
+        }
+    }
+    out
+}
+
+fn index_def(t: &Table, i: Option<usize>) -> String {
+    let (name, cols, unique) = match i {
+        None => (format!("{}_pkey", t.name), t.primary_key.clone(), true),
+        Some(i) => (
+            t.indexes[i].name.clone(),
+            t.indexes[i].columns.clone(),
+            t.indexes[i].unique,
+        ),
+    };
+    format!(
+        "CREATE {}INDEX {name} ON public.{} USING btree ({})",
+        if unique { "UNIQUE " } else { "" },
+        t.name,
+        quoted_list(t, &cols)
+    )
+}
+
+fn data_type_name(c: &Column) -> String {
+    let (oid, _) = type_of(c);
+    if c.ty.element().is_some() {
+        return "ARRAY".into();
+    }
+    format_type(oid, None).unwrap_or_else(|| c.ty.name().into())
+}
+
+/// The rows of catalog table `name` (as [`lookup`] named it).
+pub fn rows(name: &str, txn: &dyn KvTxn) -> Result<Vec<Row>> {
+    if let Some(short) = name.strip_prefix("nc_catalog.") {
+        return crate::ncatalog::rows(short, txn);
+    }
+    let (schema, short) = name.split_once('.').unwrap_or(("pg_catalog", name));
+    let ns = if schema == "information_schema" {
+        NS_INFO
+    } else {
+        NS_CATALOG
+    };
+    let k = DEFS
+        .iter()
+        .position(|d| d.ns == ns && d.name == short)
+        .ok_or_else(|| Error::internal(format!("no catalog table {name}")))?;
+    let def = def_table(k);
+    let tables = catalog::tables(txn)?;
+    let r = |vals: &[(&str, Value)]| row(&def, vals);
+    let mut out = Vec::new();
+    match short {
+        "pg_namespace" => {
+            for ns in [NS_CATALOG, NS_PUBLIC, NS_INFO, NS_NC] {
+                out.push(r(&[
+                    ("oid", int(ns)),
+                    ("nspname", text(ns_name(ns).expect("known"))),
+                    ("nspowner", int(OWNER)),
+                ]));
+            }
+        }
+        "pg_am" => {
+            out.push(r(&[
+                ("oid", int(2)),
+                ("amname", text("heap")),
+                ("amhandler", text("heap_tableam_handler")),
+                ("amtype", text("t")),
+            ]));
+            out.push(r(&[
+                ("oid", int(403)),
+                ("amname", text("btree")),
+                ("amhandler", text("bthandler")),
+                ("amtype", text("i")),
+            ]));
+        }
+        "pg_class" => {
+            for rel in relations(&tables) {
+                out.push(r(&[
+                    ("oid", int(rel.oid)),
+                    ("relname", text(rel.name)),
+                    ("relnamespace", int(rel.ns)),
+                    ("reltype", int(0)),
+                    ("reloftype", int(0)),
+                    ("relowner", int(OWNER)),
+                    ("relam", int(rel.am)),
+                    ("relfilenode", int(rel.oid)),
+                    ("reltablespace", int(0)),
+                    ("relpages", int(0)),
+                    ("reltuples", Value::Float(-1.0)),
+                    ("relallvisible", int(0)),
+                    ("reltoastrelid", int(0)),
+                    ("relhasindex", Value::Bool(rel.has_index)),
+                    ("relisshared", Value::Bool(false)),
+                    ("relpersistence", text("p")),
+                    ("relkind", text(rel.kind)),
+                    ("relnatts", int(rel.cols.len() as i64)),
+                    ("relchecks", int(rel.checks)),
+                    ("relhasrules", Value::Bool(false)),
+                    ("relhastriggers", Value::Bool(rel.has_triggers)),
+                    ("relhassubclass", Value::Bool(false)),
+                    ("relrowsecurity", Value::Bool(false)),
+                    ("relforcerowsecurity", Value::Bool(false)),
+                    ("relispopulated", Value::Bool(true)),
+                    (
+                        "relreplident",
+                        text(if rel.kind == "r" { "d" } else { "n" }),
+                    ),
+                    ("relispartition", Value::Bool(false)),
+                    ("relrewrite", int(0)),
+                    ("relfrozenxid", int(0)),
+                    ("relminmxid", int(0)),
+                ]));
+            }
+        }
+        "pg_attribute" => {
+            for rel in relations(&tables) {
+                for (i, (name, typ, typmod, notnull, hasdef, coll)) in
+                    rel.cols.into_iter().enumerate()
+                {
+                    let len = TYPES.iter().find(|t| t.0 == typ).map_or(-1, |t| t.2);
+                    out.push(r(&[
+                        ("attrelid", int(rel.oid)),
+                        ("attname", text(name)),
+                        ("atttypid", int(typ)),
+                        ("attlen", int(len)),
+                        ("attnum", int(i as i64 + 1)),
+                        ("attcacheoff", int(-1)),
+                        ("atttypmod", int(typmod)),
+                        ("attndims", int(0)),
+                        ("attbyval", Value::Bool(len > 0 && len <= 8)),
+                        ("attalign", text("d")),
+                        ("attstorage", text(if len < 0 { "x" } else { "p" })),
+                        ("attcompression", text("")),
+                        ("attnotnull", Value::Bool(notnull)),
+                        ("atthasdef", Value::Bool(hasdef)),
+                        ("atthasmissing", Value::Bool(false)),
+                        ("attidentity", text("")),
+                        ("attgenerated", text("")),
+                        ("attisdropped", Value::Bool(false)),
+                        ("attislocal", Value::Bool(true)),
+                        ("attinhcount", int(0)),
+                        ("attstattarget", int(-1)),
+                        ("attcollation", int(coll)),
+                    ]));
+                }
+            }
+        }
+        "pg_attrdef" => {
+            for t in &tables {
+                for (c, col) in t.columns.iter().enumerate() {
+                    if let Some(d) = &col.default {
+                        out.push(r(&[
+                            ("oid", int(rel_oid(t) + 300 + c as i64)),
+                            ("adrelid", int(rel_oid(t))),
+                            ("adnum", int(c as i64 + 1)),
+                            ("adbin", text(d.clone())),
+                        ]));
+                    }
+                }
+            }
+        }
+        "pg_type" => {
+            for &(oid, name, len, cat, elem, array, coll) in TYPES {
+                out.push(r(&[
+                    ("oid", int(oid)),
+                    ("typname", text(name)),
+                    ("typnamespace", int(NS_CATALOG)),
+                    ("typowner", int(OWNER)),
+                    ("typlen", int(len)),
+                    ("typbyval", Value::Bool(len > 0 && len <= 8)),
+                    ("typtype", text("b")),
+                    ("typcategory", text(cat)),
+                    ("typispreferred", Value::Bool(matches!(oid, 25 | 701 | 16))),
+                    ("typisdefined", Value::Bool(true)),
+                    ("typdelim", text(",")),
+                    ("typrelid", int(0)),
+                    ("typelem", int(elem)),
+                    ("typarray", int(array)),
+                    ("typnotnull", Value::Bool(false)),
+                    ("typbasetype", int(0)),
+                    ("typtypmod", int(-1)),
+                    ("typndims", int(0)),
+                    ("typcollation", int(coll)),
+                ]));
+            }
+        }
+        "pg_collation" => {
+            for (oid, name, provider) in
+                [(100, "default", "d"), (950, "C", "c"), (951, "POSIX", "c")]
+            {
+                out.push(r(&[
+                    ("oid", int(oid)),
+                    ("collname", text(name)),
+                    ("collnamespace", int(NS_CATALOG)),
+                    ("collowner", int(OWNER)),
+                    ("collprovider", text(provider)),
+                    ("collisdeterministic", Value::Bool(true)),
+                    ("collencoding", int(-1)),
+                    (
+                        "collcollate",
+                        if oid == 100 { Value::Null } else { text(name) },
+                    ),
+                    (
+                        "collctype",
+                        if oid == 100 { Value::Null } else { text(name) },
+                    ),
+                ]));
+            }
+        }
+        "pg_index" => {
+            for t in &tables {
+                let mut list: Vec<(Option<usize>, Vec<usize>, bool, bool)> = Vec::new();
+                if !t.primary_key.is_empty() {
+                    list.push((None, t.primary_key.clone(), true, true));
+                }
+                for (i, ix) in t.indexes.iter().enumerate() {
+                    list.push((Some(i), ix.columns.clone(), ix.unique, false));
+                }
+                for (i, cols, unique, primary) in list {
+                    let n = cols.len() as i64;
+                    out.push(r(&[
+                        ("indexrelid", int(index_oid(t, i))),
+                        ("indrelid", int(rel_oid(t))),
+                        ("indnatts", int(n)),
+                        ("indnkeyatts", int(n)),
+                        ("indisunique", Value::Bool(unique)),
+                        ("indnullsnotdistinct", Value::Bool(false)),
+                        ("indisprimary", Value::Bool(primary)),
+                        ("indisexclusion", Value::Bool(false)),
+                        ("indimmediate", Value::Bool(true)),
+                        ("indisclustered", Value::Bool(false)),
+                        ("indisvalid", Value::Bool(true)),
+                        ("indcheckxmin", Value::Bool(false)),
+                        ("indisready", Value::Bool(true)),
+                        ("indislive", Value::Bool(true)),
+                        ("indisreplident", Value::Bool(false)),
+                        ("indkey", attnums(&cols)),
+                        ("indcollation", ints(cols.iter().map(|_| 0))),
+                        ("indclass", ints(cols.iter().map(|_| 0))),
+                        ("indoption", ints(cols.iter().map(|_| 0))),
+                    ]));
+                }
+            }
+        }
+        "pg_constraint" => {
+            for c in constraints(&tables) {
+                out.push(r(&[
+                    ("oid", int(c.oid)),
+                    ("conname", text(c.name)),
+                    ("connamespace", int(NS_PUBLIC)),
+                    ("contype", text(c.kind)),
+                    ("condeferrable", Value::Bool(false)),
+                    ("condeferred", Value::Bool(false)),
+                    ("convalidated", Value::Bool(true)),
+                    ("conrelid", int(rel_oid(&c.table))),
+                    ("contypid", int(0)),
+                    ("conindid", int(c.index)),
+                    ("conparentid", int(0)),
+                    ("confrelid", int(c.references.as_ref().map_or(0, rel_oid))),
+                    ("confupdtype", text(c.on_update)),
+                    ("confdeltype", text(c.on_delete)),
+                    ("confmatchtype", text(if c.kind == "f" { "s" } else { " " })),
+                    ("conislocal", Value::Bool(true)),
+                    ("coninhcount", int(0)),
+                    ("connoinherit", Value::Bool(false)),
+                    (
+                        "conkey",
+                        if c.cols.is_empty() {
+                            Value::Null
+                        } else {
+                            attnums(&c.cols)
+                        },
+                    ),
+                    (
+                        "confkey",
+                        if c.ref_cols.is_empty() {
+                            Value::Null
+                        } else {
+                            attnums(&c.ref_cols)
+                        },
+                    ),
+                    (
+                        "conbin",
+                        if c.kind == "c" {
+                            text(c.def)
+                        } else {
+                            Value::Null
+                        },
+                    ),
+                ]));
+            }
+        }
+        "pg_roles" => {
+            out.push(r(&[
+                ("oid", int(OWNER)),
+                ("rolname", text(ROLE)),
+                ("rolsuper", Value::Bool(true)),
+                ("rolinherit", Value::Bool(true)),
+                ("rolcreaterole", Value::Bool(true)),
+                ("rolcreatedb", Value::Bool(true)),
+                ("rolcanlogin", Value::Bool(true)),
+                ("rolreplication", Value::Bool(false)),
+                ("rolconnlimit", int(-1)),
+                ("rolpassword", text("********")),
+                ("rolbypassrls", Value::Bool(true)),
+            ]));
+        }
+        "pg_database" => {
+            out.push(r(&[
+                ("oid", int(DATABASE_OID)),
+                ("datname", text("nucleus")),
+                ("datdba", int(OWNER)),
+                ("encoding", int(6)),
+                ("datlocprovider", text("c")),
+                ("datistemplate", Value::Bool(false)),
+                ("datallowconn", Value::Bool(true)),
+                ("datconnlimit", int(-1)),
+                ("datfrozenxid", int(0)),
+                ("datminmxid", int(1)),
+                ("dattablespace", int(1663)),
+                ("datcollate", text("C")),
+                ("datctype", text("C")),
+            ]));
+        }
+        "pg_tablespace" => {
+            for (oid, name) in [(1663, "pg_default"), (1664, "pg_global")] {
+                out.push(r(&[
+                    ("oid", int(oid)),
+                    ("spcname", text(name)),
+                    ("spcowner", int(OWNER)),
+                ]));
+            }
+        }
+        "pg_tables" => {
+            for t in &tables {
+                out.push(r(&[
+                    ("schemaname", text("public")),
+                    ("tablename", text(t.name.clone())),
+                    ("tableowner", text(ROLE)),
+                    (
+                        "hasindexes",
+                        Value::Bool(!t.primary_key.is_empty() || !t.indexes.is_empty()),
+                    ),
+                    ("hasrules", Value::Bool(false)),
+                    (
+                        "hastriggers",
+                        Value::Bool(!t.foreign_keys.is_empty() || !t.referenced_by.is_empty()),
+                    ),
+                    ("rowsecurity", Value::Bool(false)),
+                ]));
+            }
+        }
+        "pg_indexes" => {
+            for t in &tables {
+                let mut list = Vec::new();
+                if !t.primary_key.is_empty() {
+                    list.push(None);
+                }
+                list.extend((0..t.indexes.len()).map(Some));
+                for i in list {
+                    let name =
+                        i.map_or_else(|| format!("{}_pkey", t.name), |i| t.indexes[i].name.clone());
+                    out.push(r(&[
+                        ("schemaname", text("public")),
+                        ("tablename", text(t.name.clone())),
+                        ("indexname", text(name)),
+                        ("indexdef", text(index_def(t, i))),
+                    ]));
+                }
+            }
+        }
+        "schemata" => {
+            for ns in [NS_CATALOG, NS_PUBLIC, NS_INFO, NS_NC] {
+                out.push(r(&[
+                    ("catalog_name", text("nucleus")),
+                    ("schema_name", text(ns_name(ns).expect("known"))),
+                    ("schema_owner", text(ROLE)),
+                ]));
+            }
+        }
+        "tables" => {
+            for t in &tables {
+                out.push(r(&[
+                    ("table_catalog", text("nucleus")),
+                    ("table_schema", text("public")),
+                    ("table_name", text(t.name.clone())),
+                    ("table_type", text("BASE TABLE")),
+                    ("is_insertable_into", text("YES")),
+                    ("is_typed", text("NO")),
+                ]));
+            }
+            for d in DEFS {
+                out.push(r(&[
+                    ("table_catalog", text("nucleus")),
+                    ("table_schema", text(ns_name(d.ns).expect("known"))),
+                    ("table_name", text(d.name)),
+                    (
+                        "table_type",
+                        text(if d.ns == NS_INFO {
+                            "VIEW"
+                        } else {
+                            "BASE TABLE"
+                        }),
+                    ),
+                    ("is_insertable_into", text("NO")),
+                    ("is_typed", text("NO")),
+                ]));
+            }
+        }
+        "columns" => {
+            for t in &tables {
+                for (c, col) in t.columns.iter().enumerate() {
+                    let nullable = col.nullable && !t.primary_key.contains(&c);
+                    let (precision, scale) = match (col.ty, col.numeric) {
+                        (DataType::Int, _) => (Value::Int(64), Value::Int(0)),
+                        (DataType::Float, _) => (Value::Int(53), Value::Null),
+                        (DataType::Numeric, Some((p, s))) => (int(p), int(s)),
+                        _ => (Value::Null, Value::Null),
+                    };
+                    let (oid, _) = type_of(col);
+                    let udt = TYPES.iter().find(|x| x.0 == oid).map_or("", |x| x.1);
+                    out.push(r(&[
+                        ("table_catalog", text("nucleus")),
+                        ("table_schema", text("public")),
+                        ("table_name", text(t.name.clone())),
+                        ("column_name", text(col.name.clone())),
+                        ("ordinal_position", int(c as i64 + 1)),
+                        (
+                            "column_default",
+                            col.default.clone().map_or(Value::Null, text),
+                        ),
+                        ("is_nullable", text(if nullable { "YES" } else { "NO" })),
+                        ("data_type", text(data_type_name(col))),
+                        (
+                            "character_maximum_length",
+                            col.max_len.map_or(Value::Null, int),
+                        ),
+                        ("numeric_precision", precision),
+                        ("numeric_scale", scale),
+                        (
+                            "datetime_precision",
+                            if col.ty.is_datetime() || col.ty == DataType::Interval {
+                                int(if col.ty == DataType::Date { 0 } else { 6 })
+                            } else {
+                                Value::Null
+                            },
+                        ),
+                        ("udt_name", text(udt)),
+                        ("is_identity", text("NO")),
+                        ("is_generated", text("NEVER")),
+                    ]));
+                }
+            }
+        }
+        "table_constraints" | "key_column_usage" => {
+            for c in constraints(&tables) {
+                let kind = match c.kind {
+                    "p" => "PRIMARY KEY",
+                    "u" => "UNIQUE",
+                    "c" => "CHECK",
+                    _ => "FOREIGN KEY",
+                };
+                let common = [
+                    ("constraint_catalog", text("nucleus")),
+                    ("constraint_schema", text("public")),
+                    ("constraint_name", text(c.name.clone())),
+                    ("table_catalog", text("nucleus")),
+                    ("table_schema", text("public")),
+                    ("table_name", text(c.table.name.clone())),
+                ];
+                if short == "table_constraints" {
+                    let mut vals = common.to_vec();
+                    vals.push(("constraint_type", text(kind)));
+                    vals.push(("is_deferrable", text("NO")));
+                    vals.push(("initially_deferred", text("NO")));
+                    out.push(r(&vals));
+                } else {
+                    for (i, &col) in c.cols.iter().enumerate() {
+                        let mut vals = common.to_vec();
+                        vals.push(("column_name", text(c.table.columns[col].name.clone())));
+                        vals.push(("ordinal_position", int(i as i64 + 1)));
+                        out.push(r(&vals));
+                    }
+                }
+            }
+        }
+        // Objects nucleus does not have: always empty.
+        _ => {}
+    }
+    Ok(out)
+}
+
+// ------------------------------------------------------------- functions
+
+fn relation_by_oid(tables: &[Table], oid: i64) -> Option<String> {
+    relations(tables)
+        .into_iter()
+        .find(|r| r.oid == oid)
+        .map(|r| r.name)
+}
+
+/// `'name'::regclass` / `'16384'::regclass`: the relation's oid.
+fn regclass_oid(tables: &[Table], s: &str) -> Result<i64> {
+    let s = s.trim();
+    if let Ok(oid) = s.parse::<i64>() {
+        return Ok(oid);
+    }
+    let unquoted = s.trim_matches('"');
+    let (schema, name) = match unquoted.split_once('.') {
+        Some((a, b)) => (Some(a.trim_matches('"')), b.trim_matches('"')),
+        None => (None, unquoted),
+    };
+    relations(tables)
+        .into_iter()
+        .find(|r| r.name == name && schema.is_none_or(|sch| ns_name(r.ns) == Some(sch)))
+        .map(|r| r.oid)
+        .ok_or_else(|| Error::undefined_table(format!("relation \"{s}\" does not exist")))
+}
+
+/// Evaluates a catalog or array function (the [`Func::catalog`] ones).
+pub fn call(f: Func, args: &[Value], txn: &dyn KvTxn) -> Result<Value> {
+    let null = |i: usize| args.get(i).is_none_or(Value::is_null);
+    let as_int = |i: usize| match args.get(i) {
+        Some(Value::Int(n)) => Some(*n),
+        Some(Value::Numeric(d)) => d.to_i64().ok(),
+        Some(Value::Text(s)) => s.trim().parse().ok(),
+        _ => None,
+    };
+    let array = |i: usize| match args.get(i) {
+        Some(Value::Array(items)) => Some(items),
+        _ => None,
+    };
+    Ok(match f {
+        Func::RegClass => match args.first() {
+            Some(Value::Text(s)) => Value::Int(regclass_oid(&catalog::tables(txn)?, s)?),
+            Some(Value::Int(oid)) => Value::Text(
+                relation_by_oid(&catalog::tables(txn)?, *oid).unwrap_or_else(|| oid.to_string()),
+            ),
+            _ => Value::Null,
+        },
+        Func::RegType => match as_int(0) {
+            Some(oid) => Value::Text(format_type(oid, None).unwrap_or_else(|| oid.to_string())),
+            None => Value::Null,
+        },
+        Func::RegNamespace => match as_int(0) {
+            Some(oid) => Value::Text(ns_name(oid).map_or_else(|| oid.to_string(), str::to_string)),
+            None => Value::Null,
+        },
+        Func::RegRole | Func::GetUserById => {
+            if null(0) {
+                Value::Null
+            } else {
+                Value::Text(ROLE.into())
+            }
+        }
+        // On the search path: public and pg_catalog.
+        Func::TableIsVisible => match as_int(0) {
+            Some(oid) => Value::Bool(
+                relations(&catalog::tables(txn)?)
+                    .iter()
+                    .find(|r| r.oid == oid)
+                    .is_none_or(|r| r.ns == NS_PUBLIC || r.ns == NS_CATALOG),
+            ),
+            None => Value::Null,
+        },
+        Func::FormatType => match as_int(0) {
+            Some(oid) => format_type(oid, as_int(1)).map_or(Value::Null, Value::Text),
+            None => Value::Null,
+        },
+        Func::GetExpr => match args.first() {
+            Some(Value::Text(s)) => Value::Text(s.clone()),
+            _ => Value::Null,
+        },
+        Func::GetIndexdef => {
+            let Some(oid) = as_int(0) else {
+                return Ok(Value::Null);
+            };
+            let tables = catalog::tables(txn)?;
+            let column = as_int(1).filter(|c| *c > 0);
+            relations(&tables)
+                .into_iter()
+                .find(|r| r.oid == oid && r.kind == "i")
+                .and_then(|r| match column {
+                    // pg_get_indexdef(index, n, …): the n-th key column.
+                    Some(n) => r.cols.get(n as usize - 1).map(|c| c.0.clone()),
+                    None => r.table.map(|(t, i)| index_def(&t, i.flatten())),
+                })
+                .map_or(Value::Null, Value::Text)
+        }
+        Func::GetConstraintdef => {
+            let Some(oid) = as_int(0) else {
+                return Ok(Value::Null);
+            };
+            constraints(&catalog::tables(txn)?)
+                .into_iter()
+                .find(|c| c.oid == oid)
+                .map_or(Value::Null, |c| Value::Text(c.def))
+        }
+        // No partitioning: a table is its own (only) ancestor.
+        Func::PartitionAncestors => args.first().cloned().unwrap_or(Value::Null),
+        Func::ArrayToString => {
+            let Some(items) = array(0) else {
+                return Ok(Value::Null);
+            };
+            let Some(Value::Text(sep)) = args.get(1) else {
+                return Ok(Value::Null);
+            };
+            let null_as = match args.get(2) {
+                Some(Value::Text(s)) => Some(s.clone()),
+                _ => None,
+            };
+            let parts: Vec<String> = items
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Null => null_as.clone(),
+                    v => Some(v.render()),
+                })
+                .collect();
+            Value::Text(parts.join(sep))
+        }
+        Func::ArrayUpper | Func::ArrayLength | Func::ArrayLower | Func::Cardinality => {
+            let Some(items) = array(0) else {
+                return Ok(Value::Null);
+            };
+            if f != Func::Cardinality && as_int(1) != Some(1) || items.is_empty() {
+                return Ok(if f == Func::Cardinality {
+                    Value::Int(0)
+                } else {
+                    Value::Null
+                });
+            }
+            Value::Int(if f == Func::ArrayLower {
+                1
+            } else {
+                items.len() as i64
+            })
+        }
+        Func::ArrayAppend => {
+            let mut items = array(0).cloned().unwrap_or_default();
+            items.push(args.get(1).cloned().unwrap_or(Value::Null));
+            Value::Array(items)
+        }
+        Func::StatisticsObjColumns | Func::GetTriggerdef | Func::ObjDescription => Value::Null,
+        Func::RelationIsPublishable => Value::Bool(false),
+        Func::EncodingToChar => {
+            if as_int(0) == Some(6) {
+                Value::Text("UTF8".into())
+            } else {
+                Value::Text(String::new())
+            }
+        }
+        Func::HasPrivilege => Value::Bool(true),
+        Func::BackendPid => Value::Int(i64::from(std::process::id())),
+        Func::CurrentSetting => match args.first() {
+            Some(Value::Text(name)) => match name.to_ascii_lowercase().as_str() {
+                "server_version" => Value::Text("16.0 (nucleus)".into()),
+                "server_version_num" => Value::Text("160000".into()),
+                "server_encoding" | "client_encoding" => Value::Text("UTF8".into()),
+                "timezone" => Value::Text("UTC".into()),
+                "datestyle" => Value::Text("ISO, MDY".into()),
+                "search_path" => Value::Text("\"$user\", public".into()),
+                "standard_conforming_strings" | "integer_datetimes" => Value::Text("on".into()),
+                "max_identifier_length" => Value::Text("63".into()),
+                other => {
+                    if matches!(args.get(1), Some(Value::Bool(true))) {
+                        Value::Null
+                    } else {
+                        return Err(Error::undefined_object(format!(
+                            "unrecognized configuration parameter \"{other}\""
+                        )));
+                    }
+                }
+            },
+            _ => Value::Null,
+        },
+        Func::RegexpReplace => {
+            let (Some(Value::Text(s)), Some(Value::Text(p)), Some(Value::Text(rep))) =
+                (args.first(), args.get(1), args.get(2))
+            else {
+                return Ok(Value::Null);
+            };
+            let flags = match args.get(3) {
+                Some(Value::Text(f)) => f.clone(),
+                _ => String::new(),
+            };
+            // PostgreSQL writes \1 for a group; the regex crate ${1}.
+            let mut rep2 = String::new();
+            let mut chars = rep.chars().peekable();
+            while let Some(c) = chars.next() {
+                match (c, chars.peek()) {
+                    ('\\', Some(d)) if d.is_ascii_digit() => {
+                        rep2.push_str(&format!("${{{d}}}"));
+                        chars.next();
+                    }
+                    ('\\', Some('&')) => {
+                        rep2.push_str("${0}");
+                        chars.next();
+                    }
+                    ('$', _) => rep2.push_str("$$"),
+                    (c, _) => rep2.push(c),
+                }
+            }
+            crate::expr::with_regex(p, flags.contains('i'), |re| {
+                if flags.contains('g') {
+                    re.replace_all(s, rep2.as_str()).into_owned()
+                } else {
+                    re.replace(s, rep2.as_str()).into_owned()
+                }
+            })
+            .map(Value::Text)?
+        }
+        _ => {
+            return Err(Error::internal(format!(
+                "{} is not a catalog function",
+                f.name()
+            )));
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_names() {
+        assert_eq!(format_type(20, None).as_deref(), Some("bigint"));
+        assert_eq!(
+            format_type(1043, Some(24)).as_deref(),
+            Some("character varying(20)")
+        );
+        assert_eq!(
+            format_type(1700, Some(((10 << 16) | 2) + 4)).as_deref(),
+            Some("numeric(10,2)")
+        );
+        assert_eq!(format_type(1009, None).as_deref(), Some("text[]"));
+        assert_eq!(format_type(424242, None), None);
+        for d in DEFS {
+            assert!(
+                lookup(ns_name(d.ns).filter(|n| *n != "pg_catalog"), d.name).is_some()
+                    || d.ns == NS_INFO
+            );
+        }
+    }
+}

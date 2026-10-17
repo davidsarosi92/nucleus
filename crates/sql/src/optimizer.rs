@@ -83,7 +83,9 @@ fn push(plan: Plan, st: &Stats) -> Plan {
         p @ (Plan::Values { .. }
         | Plan::Cte { .. }
         | Plan::Recursive { .. }
-        | Plan::WorkTable { .. }) => p,
+        | Plan::WorkTable { .. }
+        | Plan::Function { .. }
+        | Plan::Virtual { .. }) => p,
     }
 }
 
@@ -393,6 +395,8 @@ fn estimate(plan: &Plan, st: &Stats) -> f64 {
         Plan::Cte { plan, .. } => estimate(plan, st),
         Plan::Recursive { base, .. } => estimate(base, st) * 10.0,
         Plan::WorkTable { .. } => 10.0,
+        Plan::Function { .. } => 100.0,
+        Plan::Virtual { .. } => 100.0,
         Plan::Filter { input, .. } => estimate(input, st) * 0.33,
         Plan::Project { input, .. } | Plan::Sort { input, .. } => estimate(input, st),
         Plan::Distinct { input } => estimate(input, st) * 0.5,
@@ -562,7 +566,9 @@ fn map_children(plan: Plan, f: &dyn Fn(Plan) -> Plan) -> Plan {
         | Plan::Values { .. }
         | Plan::Cte { .. }
         | Plan::Recursive { .. }
-        | Plan::WorkTable { .. }) => p,
+        | Plan::WorkTable { .. }
+        | Plan::Function { .. }
+        | Plan::Virtual { .. }) => p,
     }
 }
 

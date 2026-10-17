@@ -113,6 +113,24 @@ pub enum Plan {
         /// `UNION ALL` (else rows already produced are dropped).
         all: bool,
     },
+    /// A function's rows: a table function (`generate_series`, `unnest`)
+    /// or a scalar function (one row).
+    Function {
+        /// Which.
+        func: TableFunc,
+        /// Arguments (evaluated once per execution).
+        args: Vec<Expr>,
+        /// Output columns (with the ordinality column).
+        width: usize,
+        /// `WITH ORDINALITY`: a 1-based row number after the other columns.
+        ordinality: bool,
+    },
+    /// A system catalog table (`pg_catalog`, `information_schema`), its
+    /// rows made from the catalog when scanned.
+    Virtual {
+        /// Its definition (columns).
+        table: Table,
+    },
     /// The rows of the previous round of a recursive CTE.
     WorkTable {
         /// Which.
@@ -133,6 +151,19 @@ pub enum Plan {
         /// Keep duplicates (multiset semantics).
         all: bool,
     },
+}
+
+/// Functions that can stand in `FROM`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TableFunc {
+    /// `generate_series(start, stop [, step])` over integers, numerics or
+    /// timestamps (with an interval step).
+    GenerateSeries,
+    /// `unnest(array)`: its elements.
+    Unnest,
+    /// A scalar function: its value as one row (the only argument is the
+    /// bound call).
+    Scalar,
 }
 
 /// Join types the executor runs (`RIGHT` is planned as a swapped `LEFT`).
@@ -191,6 +222,10 @@ pub struct Agg {
     pub arg: Option<Expr>,
     /// `DISTINCT`.
     pub distinct: bool,
+    /// `string_agg`'s separator.
+    pub sep: Option<Expr>,
+    /// `ORDER BY` inside the call: the order values are aggregated in.
+    pub order: Vec<SortKey>,
 }
 
 /// Aggregate functions.
@@ -206,6 +241,14 @@ pub enum AggFunc {
     Min,
     /// `max`.
     Max,
+    /// `string_agg(text, separator)`.
+    StringAgg,
+    /// `array_agg(x)` (NULLs included).
+    ArrayAgg,
+    /// `bool_and` / `every`.
+    BoolAnd,
+    /// `bool_or`.
+    BoolOr,
 }
 
 impl AggFunc {
@@ -217,6 +260,10 @@ impl AggFunc {
             "avg" => AggFunc::Avg,
             "min" => AggFunc::Min,
             "max" => AggFunc::Max,
+            "string_agg" => AggFunc::StringAgg,
+            "array_agg" => AggFunc::ArrayAgg,
+            "bool_and" | "every" => AggFunc::BoolAnd,
+            "bool_or" => AggFunc::BoolOr,
             _ => return None,
         })
     }
@@ -228,6 +275,10 @@ impl AggFunc {
             AggFunc::Avg => "avg",
             AggFunc::Min => "min",
             AggFunc::Max => "max",
+            AggFunc::StringAgg => "string_agg",
+            AggFunc::ArrayAgg => "array_agg",
+            AggFunc::BoolAnd => "bool_and",
+            AggFunc::BoolOr => "bool_or",
         }
     }
 }
@@ -259,7 +310,8 @@ impl Plan {
             Plan::SetOp { left, .. } => left.width(),
             Plan::Cte { plan, .. } => plan.width(),
             Plan::Recursive { base, .. } => base.width(),
-            Plan::WorkTable { width, .. } => *width,
+            Plan::WorkTable { width, .. } | Plan::Function { width, .. } => *width,
+            Plan::Virtual { table } => table.columns.len(),
         }
     }
 
@@ -401,6 +453,15 @@ impl Plan {
                 format!("Recursive Union{}", if *all { " All" } else { "" })
             }
             Plan::WorkTable { name, .. } => format!("WorkTable Scan on {name}"),
+            Plan::Function { func, args, .. } => match func {
+                TableFunc::GenerateSeries => format!(
+                    "Function Scan on generate_series({})",
+                    args.iter().map(show).collect::<Vec<_>>().join(", ")
+                ),
+                TableFunc::Unnest => format!("Function Scan on unnest({})", show(&args[0])),
+                TableFunc::Scalar => format!("Result: {}", show(&args[0])),
+            },
+            Plan::Virtual { table } => format!("Catalog Scan on {}", table.name),
             Plan::SetOp { op, all, .. } => {
                 let name = match op {
                     SetOp::Union => "Union",
@@ -432,6 +493,7 @@ impl Plan {
                 SubKind::Scalar => "Subquery",
                 SubKind::Exists => "Exists",
                 SubKind::In(..) => "In",
+                SubKind::Array => "Array",
             };
             out.push(format!(
                 "{pad}  {kind}{}:",
@@ -444,7 +506,11 @@ impl Plan {
     /// The inputs of this node.
     pub fn children(&self) -> Vec<&Plan> {
         match self {
-            Plan::Scan { .. } | Plan::Values { .. } | Plan::WorkTable { .. } => vec![],
+            Plan::Scan { .. }
+            | Plan::Values { .. }
+            | Plan::WorkTable { .. }
+            | Plan::Function { .. }
+            | Plan::Virtual { .. } => vec![],
             Plan::Join { left, right, .. } | Plan::SetOp { left, right, .. } => vec![left, right],
             Plan::Recursive { base, step, .. } => vec![base, step],
             Plan::Cte { plan, .. } => vec![plan],
@@ -480,6 +546,7 @@ impl Plan {
                 }
             }
             Plan::Values { rows, .. } => rows.iter().flatten().for_each(f),
+            Plan::Function { args, .. } => args.iter().for_each(f),
             Plan::Filter { predicate, .. } => f(predicate),
             Plan::Project { exprs, .. } => exprs.iter().for_each(f),
             Plan::Join { on, algo, .. } => {
@@ -496,7 +563,14 @@ impl Plan {
             }
             Plan::Aggregate { group, aggs, .. } => {
                 group.iter().for_each(&mut *f);
-                aggs.iter().filter_map(|a| a.arg.as_ref()).for_each(f);
+                aggs.iter()
+                    .flat_map(|a| {
+                        a.arg
+                            .iter()
+                            .chain(&a.sep)
+                            .chain(a.order.iter().map(|k| &k.expr))
+                    })
+                    .for_each(f);
             }
             Plan::Sort { keys, .. } => keys.iter().for_each(|k| f(&k.expr)),
             Plan::Limit { limit, offset, .. } => {
@@ -506,7 +580,8 @@ impl Plan {
             | Plan::SetOp { .. }
             | Plan::Cte { .. }
             | Plan::Recursive { .. }
-            | Plan::WorkTable { .. } => {}
+            | Plan::WorkTable { .. }
+            | Plan::Virtual { .. } => {}
         }
     }
 
@@ -583,6 +658,24 @@ pub fn show(e: &Expr) -> String {
             SubKind::In(e, n) => {
                 format!("{} {}IN (subquery)", show(e), if *n { "NOT " } else { "" })
             }
+            SubKind::Array => "ARRAY(subquery)".into(),
         },
+        Expr::Array(items) => format!(
+            "ARRAY[{}]",
+            items.iter().map(show).collect::<Vec<_>>().join(", ")
+        ),
+        Expr::Subscript(a, i) => format!("{}[{}]", show(a), show(i)),
+        Expr::AnyAll {
+            left,
+            op,
+            right,
+            all,
+        } => format!(
+            "{} {} {}({})",
+            show(left),
+            op.symbol(),
+            if *all { "ALL " } else { "ANY " },
+            show(right)
+        ),
     }
 }

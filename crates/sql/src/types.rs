@@ -29,9 +29,35 @@ pub enum DataType {
     TimestampTz,
     /// `INTERVAL`.
     Interval,
+    /// `type[]`: a one-dimensional array of the element type.
+    Array(&'static DataType),
 }
 
 impl DataType {
+    /// The array type of a scalar type (`None` for an array).
+    pub fn array_of(self) -> Option<DataType> {
+        Some(DataType::Array(match self {
+            DataType::Bool => &DataType::Bool,
+            DataType::Int => &DataType::Int,
+            DataType::Float => &DataType::Float,
+            DataType::Text => &DataType::Text,
+            DataType::Numeric => &DataType::Numeric,
+            DataType::Date => &DataType::Date,
+            DataType::Timestamp => &DataType::Timestamp,
+            DataType::TimestampTz => &DataType::TimestampTz,
+            DataType::Interval => &DataType::Interval,
+            DataType::Array(_) => return None,
+        }))
+    }
+
+    /// The element type of an array type.
+    pub fn element(self) -> Option<DataType> {
+        match self {
+            DataType::Array(e) => Some(*e),
+            _ => None,
+        }
+    }
+
     /// The SQL name.
     pub fn name(self) -> &'static str {
         match self {
@@ -44,6 +70,18 @@ impl DataType {
             DataType::Timestamp => "timestamp without time zone",
             DataType::TimestampTz => "timestamp with time zone",
             DataType::Interval => "interval",
+            DataType::Array(e) => match e {
+                DataType::Bool => "boolean[]",
+                DataType::Int => "bigint[]",
+                DataType::Float => "double precision[]",
+                DataType::Text => "text[]",
+                DataType::Numeric => "numeric[]",
+                DataType::Date => "date[]",
+                DataType::Timestamp => "timestamp without time zone[]",
+                DataType::TimestampTz => "timestamp with time zone[]",
+                DataType::Interval => "interval[]",
+                DataType::Array(_) => "array",
+            },
         }
     }
 
@@ -78,9 +116,16 @@ impl DataType {
     pub fn parse(words: &[&str]) -> Option<Self> {
         Some(match words {
             ["boolean"] | ["bool"] => DataType::Bool,
-            ["bigint"] | ["int"] | ["integer"] | ["smallint"] | ["int8"] | ["int4"] | ["int2"] => {
-                DataType::Int
-            }
+            ["bigint"]
+            | ["int"]
+            | ["integer"]
+            | ["smallint"]
+            | ["int8"]
+            | ["int4"]
+            | ["int2"]
+            | ["oid"]
+            | ["xid"]
+            | ["regproc"] => DataType::Int,
             ["double", "precision"]
             | ["float"]
             | ["real"]
@@ -134,6 +179,8 @@ pub enum Value {
     TimestampTz(i64),
     /// An interval.
     Interval(Interval),
+    /// An array (one dimension; elements of one type or NULL).
+    Array(Vec<Value>),
 }
 
 impl Value {
@@ -150,6 +197,12 @@ impl Value {
             Value::Timestamp(_) => Some(DataType::Timestamp),
             Value::TimestampTz(_) => Some(DataType::TimestampTz),
             Value::Interval(_) => Some(DataType::Interval),
+            Value::Array(items) => items
+                .iter()
+                .find_map(Value::data_type)
+                .unwrap_or(DataType::Text)
+                .array_of()
+                .or(Some(DataType::Array(&DataType::Text))),
         }
     }
 
@@ -187,6 +240,22 @@ impl Value {
             (Value::Numeric(a), Value::Float(b)) => total_cmp(a.to_f64(), *b),
             (Value::Float(a), Value::Numeric(b)) => total_cmp(*a, b.to_f64()),
             (Value::Interval(a), Value::Interval(b)) => a.cmp(b),
+            (Value::Array(a), Value::Array(b)) => {
+                // Element by element (a NULL element after the others),
+                // then the shorter first: PostgreSQL's array order.
+                for (x, y) in a.iter().zip(b) {
+                    let o = match (x.is_null(), y.is_null()) {
+                        (true, true) => Ordering::Equal,
+                        (true, false) => Ordering::Greater,
+                        (false, true) => Ordering::Less,
+                        _ => x.sql_cmp(y)?.expect("not null"),
+                    };
+                    if o != Ordering::Equal {
+                        return Ok(Some(o));
+                    }
+                }
+                a.len().cmp(&b.len())
+            }
             (a, b) if a.as_timestamp().is_some() && b.as_timestamp().is_some() => {
                 a.as_timestamp().cmp(&b.as_timestamp())
             }
@@ -229,6 +298,18 @@ impl Value {
             | (v @ Value::Timestamp(_), DataType::Timestamp)
             | (v @ Value::TimestampTz(_), DataType::TimestampTz)
             | (v @ Value::Interval(_), DataType::Interval) => v,
+            (Value::Array(items), DataType::Array(e)) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|v| v.cast(*e))
+                    .collect::<Result<_>>()?,
+            ),
+            (Value::Text(s), DataType::Array(e)) => Value::Array(
+                parse_array(&s)?
+                    .into_iter()
+                    .map(|v| v.cast(*e))
+                    .collect::<Result<_>>()?,
+            ),
             (Value::Int(i), DataType::Numeric) => Value::Numeric(Decimal::from_i64(i)),
             (Value::Float(f), DataType::Numeric) => Value::Numeric(Decimal::from_f64(f)?),
             (Value::Numeric(d), DataType::Int) => Value::Int(d.to_i64()?),
@@ -299,6 +380,16 @@ impl Value {
             Value::Timestamp(t) => datetime::format_timestamp(*t, false),
             Value::TimestampTz(t) => datetime::format_timestamp(*t, true),
             Value::Interval(i) => i.to_string(),
+            Value::Array(items) => {
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|v| match v {
+                        Value::Null => "NULL".into(),
+                        v => quote_element(&v.render()),
+                    })
+                    .collect();
+                format!("{{{}}}", parts.join(","))
+            }
         }
     }
 
@@ -323,6 +414,97 @@ fn rank(v: &Value) -> u8 {
         Value::Text(_) => 2,
         Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 3,
         Value::Interval(_) => 4,
+        Value::Array(_) => 6,
+    }
+}
+
+/// An array element as PostgreSQL prints it: quoted when it is empty,
+/// `NULL`, or holds a delimiter, brace, quote, backslash or space.
+fn quote_element(s: &str) -> String {
+    let plain = !s.is_empty()
+        && !s.eq_ignore_ascii_case("null")
+        && !s
+            .chars()
+            .any(|c| matches!(c, ',' | '{' | '}' | '"' | '\\') || c.is_whitespace());
+    if plain {
+        return s.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// Parses an array literal `{a,"b c",NULL}` into text elements (`NULL`
+/// unquoted is a NULL).
+pub fn parse_array(s: &str) -> Result<Vec<Value>> {
+    let bad = || Error::invalid_text(format!("malformed array literal: \"{s}\""));
+    let t = s.trim();
+    let inner = t
+        .strip_prefix('{')
+        .and_then(|r| r.strip_suffix('}'))
+        .ok_or_else(bad)?;
+    let mut out = Vec::new();
+    if inner.trim().is_empty() {
+        return Ok(out);
+    }
+    let mut chars = inner.chars().peekable();
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        let mut item = String::new();
+        let quoted = chars.peek() == Some(&'"');
+        if quoted {
+            chars.next();
+            loop {
+                match chars.next().ok_or_else(bad)? {
+                    '"' => break,
+                    '\\' => item.push(chars.next().ok_or_else(bad)?),
+                    c => item.push(c),
+                }
+            }
+            while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                chars.next();
+            }
+        } else {
+            while let Some(&c) = chars.peek() {
+                if c == ',' {
+                    break;
+                }
+                if matches!(c, '{' | '}' | '"') {
+                    return Err(bad());
+                }
+                item.push(if c == '\\' {
+                    chars.next();
+                    chars.next().ok_or_else(bad)?
+                } else {
+                    c
+                });
+                if c != '\\' {
+                    chars.next();
+                }
+            }
+            item = item.trim_end().to_string();
+            if item.is_empty() {
+                return Err(bad());
+            }
+        }
+        out.push(if !quoted && item.eq_ignore_ascii_case("null") {
+            Value::Null
+        } else {
+            Value::Text(item)
+        });
+        match chars.next() {
+            None => return Ok(out),
+            Some(',') => {}
+            Some(_) => return Err(bad()),
+        }
     }
 }
 
@@ -386,6 +568,10 @@ impl Hash for Value {
             Value::Interval(i) => {
                 4u8.hash(state);
                 i.span().hash(state);
+            }
+            Value::Array(items) => {
+                6u8.hash(state);
+                items.hash(state);
             }
         }
     }

@@ -7,7 +7,7 @@ use crate::ast::{self, BinaryOp, JoinKind, SelectItem, SetExpr, TableRef, UnaryO
 use crate::catalog::{self, Table};
 use crate::error::{Error, Result};
 use crate::expr::{Expr, Func, SubKind, SubPlan};
-use crate::plan::{Access, Agg, AggFunc, JoinAlgo, JoinType, Plan, SortKey};
+use crate::plan::{Access, Agg, AggFunc, JoinAlgo, JoinType, Plan, SortKey, TableFunc};
 use crate::types::{DataType, Value};
 
 /// A column visible to expressions.
@@ -155,7 +155,15 @@ fn contains_agg(e: &ast::Expr) -> bool {
                     .any(|(w, t)| contains_agg(w) || contains_agg(t))
                 || otherwise.as_deref().is_some_and(contains_agg)
         }
-        A::Literal(_) | A::Column { .. } | A::Param(_) | A::Exists { .. } | A::Subquery(_) => false,
+        A::Array(items) => items.iter().any(contains_agg),
+        A::Subscript { expr, index } => contains_agg(expr) || contains_agg(index),
+        A::AnyAll { left, right, .. } => contains_agg(left) || contains_agg(right),
+        A::Literal(_)
+        | A::Column { .. }
+        | A::Param(_)
+        | A::Exists { .. }
+        | A::Subquery(_)
+        | A::ArraySubquery(_) => false,
     }
 }
 
@@ -167,6 +175,8 @@ fn default_name(e: &ast::Expr) -> String {
         ast::Expr::Cast { expr, .. } => default_name(expr),
         ast::Expr::Case { .. } => "case".into(),
         ast::Expr::Exists { .. } => "exists".into(),
+        ast::Expr::Array(_) | ast::Expr::ArraySubquery(_) => "array".into(),
+        ast::Expr::Subscript { expr, .. } => default_name(expr),
         _ => "?column?".into(),
     }
 }
@@ -358,6 +368,106 @@ impl<'a> Binder<'a> {
             }
         };
         self.cte_def(cte, base.scope, plan)
+    }
+
+    /// A function in `FROM`.
+    fn function_ref(
+        &mut self,
+        name: &str,
+        args: &[ast::Expr],
+        ordinality: bool,
+        alias: Option<&str>,
+        columns: &[String],
+    ) -> Result<Bound> {
+        let empty = Scope::default();
+        let mut bound = Vec::new();
+        let mut types = Vec::new();
+        for a in args {
+            let (x, t) = self.expr(a, &empty)?;
+            bound.push(x);
+            types.push(t);
+        }
+        let (func, ty) = match name {
+            "generate_series" => {
+                if !(2..=3).contains(&args.len()) {
+                    return Err(Error::undefined_function(format!(
+                        "function generate_series with {} arguments does not exist",
+                        args.len()
+                    )));
+                }
+                // Integers, numerics, or timestamps with an interval step.
+                let mut items: Vec<Typed> = bound.drain(..2).zip(types.iter().copied()).collect();
+                let ty = self.unify_items(&mut items)?.unwrap_or(DataType::Int);
+                bound.splice(0..0, items.into_iter().map(|(x, _)| x));
+                if let Some(step) = bound.get_mut(2) {
+                    let want = if ty.is_datetime() {
+                        DataType::Interval
+                    } else {
+                        ty
+                    };
+                    let (x, _) = self.coerce(Some(want), step.clone(), types[2])?;
+                    *step = x;
+                }
+                if !(ty.is_number() || ty.is_datetime()) {
+                    return Err(Error::undefined_function(format!(
+                        "function generate_series({ty}, {ty}) does not exist"
+                    )));
+                }
+                let ty = if ty == DataType::Date {
+                    DataType::Timestamp
+                } else {
+                    ty
+                };
+                (TableFunc::GenerateSeries, Some(ty))
+            }
+            "unnest" => {
+                let [t] = types.as_slice() else {
+                    return Err(Error::undefined_function(
+                        "function unnest takes one argument",
+                    ));
+                };
+                (TableFunc::Unnest, t.and_then(DataType::element))
+            }
+            _ => {
+                // A scalar function: one row.
+                let call = ast::Expr::Function {
+                    name: name.to_string(),
+                    args: args.to_vec(),
+                    distinct: false,
+                    star: false,
+                    order_by: vec![],
+                };
+                let (x, t) = self.expr(&call, &empty)?;
+                bound = vec![x];
+                (TableFunc::Scalar, t)
+            }
+        };
+        let qual = alias.unwrap_or(name).to_string();
+        let mut cols = vec![ScopeCol {
+            table: Some(qual.clone()),
+            name: qual.clone(),
+            ty,
+            hidden: false,
+        }];
+        if ordinality {
+            cols.push(ScopeCol {
+                table: Some(qual.clone()),
+                name: "ordinality".into(),
+                ty: Some(DataType::Int),
+                hidden: false,
+            });
+        }
+        let mut scope = Scope { cols };
+        rename_columns(&mut scope, &qual, columns)?;
+        Ok(Bound {
+            plan: Plan::Function {
+                func,
+                args: bound,
+                width: scope.cols.len(),
+                ordinality,
+            },
+            scope,
+        })
     }
 
     /// A reference to CTE `name`, if one is in scope.
@@ -586,16 +696,65 @@ impl<'a> Binder<'a> {
 
     fn table_ref(&mut self, t: &TableRef) -> Result<Bound> {
         match t {
+            TableRef::Function {
+                name,
+                args,
+                ordinality,
+                alias,
+                columns,
+            } => self.function_ref(name, args, *ordinality, alias.as_deref(), columns),
             TableRef::Table {
+                schema,
                 name,
                 alias,
                 columns,
             } => {
                 let qual = alias.clone().unwrap_or_else(|| name.clone());
-                if let Some(b) = self.cte_ref(name, &qual, columns)? {
+                if schema.is_none()
+                    && let Some(b) = self.cte_ref(name, &qual, columns)?
+                {
                     return Ok(b);
                 }
-                let table = self.table(name)?;
+                // pg_catalog is searched after the user's tables (and
+                // information_schema only by name).
+                let user = match schema.as_deref() {
+                    None => catalog::get_table(self.txn, name)?,
+                    Some("public") => Some(self.table(name)?),
+                    Some(_) => None,
+                };
+                let table = match user {
+                    Some(t) => t,
+                    None => match crate::pgcatalog::lookup(schema.as_deref(), name) {
+                        Some(table) => {
+                            let mut scope = Scope {
+                                cols: table
+                                    .columns
+                                    .iter()
+                                    .map(|c| ScopeCol {
+                                        table: Some(qual.clone()),
+                                        name: c.name.clone(),
+                                        ty: Some(c.ty),
+                                        hidden: false,
+                                    })
+                                    .collect(),
+                            };
+                            rename_columns(&mut scope, &qual, columns)?;
+                            return Ok(Bound {
+                                plan: Plan::Virtual { table },
+                                scope,
+                            });
+                        }
+                        None => {
+                            let full = match schema {
+                                Some(s) => format!("{s}.{name}"),
+                                None => name.clone(),
+                            };
+                            return Err(Error::undefined_table(format!(
+                                "relation \"{full}\" does not exist"
+                            )));
+                        }
+                    },
+                };
                 let mut scope = Scope {
                     cols: table
                         .columns
@@ -995,22 +1154,46 @@ impl<'a> Binder<'a> {
             args,
             distinct,
             star,
+            order_by,
         } = e
             && let Some(func) = AggFunc::lookup(name)
         {
             let from = g.from.clone();
+            let mut order = Vec::new();
+            for o in order_by {
+                if contains_agg(&o.expr) {
+                    return Err(Error::grouping("aggregate function calls cannot be nested"));
+                }
+                order.push(SortKey {
+                    expr: self.expr(&o.expr, &from)?.0,
+                    desc: o.desc,
+                    nulls_first: o.nulls_first.unwrap_or(o.desc),
+                });
+            }
+            let mut sep = None;
             let (arg, at) = match (star, args.as_slice()) {
                 (true, []) if func == AggFunc::Count => (None, None),
-                (false, [a]) => {
+                (false, [a]) if func != AggFunc::StringAgg => {
                     if contains_agg(a) {
                         return Err(Error::grouping("aggregate function calls cannot be nested"));
                     }
                     let (x, t) = self.expr(a, &from)?;
                     (Some(x), t)
                 }
+                (false, [a, s]) if func == AggFunc::StringAgg => {
+                    if contains_agg(a) || contains_agg(s) {
+                        return Err(Error::grouping("aggregate function calls cannot be nested"));
+                    }
+                    let (x, t) = self.expr(a, &from)?;
+                    let (x, _) = self.text_operand(x, t, "string_agg")?;
+                    let (s, st) = self.expr(s, &from)?;
+                    sep = Some(self.text_operand(s, st, "string_agg")?.0);
+                    (Some(x), Some(DataType::Text))
+                }
                 _ => {
                     return Err(Error::undefined_function(format!(
-                        "function {name} takes one argument"
+                        "function {name} with {} arguments does not exist",
+                        args.len()
                     )));
                 }
             };
@@ -1022,6 +1205,16 @@ impl<'a> Binder<'a> {
                     t => t,
                 },
                 AggFunc::Sum | AggFunc::Min | AggFunc::Max => at,
+                AggFunc::StringAgg => Some(DataType::Text),
+                AggFunc::ArrayAgg => Some(
+                    at.unwrap_or(DataType::Text)
+                        .array_of()
+                        .ok_or_else(|| Error::feature("arrays of arrays are not supported"))?,
+                ),
+                AggFunc::BoolAnd | AggFunc::BoolOr => {
+                    expect(at, DataType::Bool, name)?;
+                    Some(DataType::Bool)
+                }
             };
             if matches!(func, AggFunc::Sum | AggFunc::Avg)
                 && at.is_some_and(|t| !t.is_number() && t != DataType::Interval)
@@ -1035,6 +1228,8 @@ impl<'a> Binder<'a> {
                 func,
                 arg,
                 distinct: *distinct,
+                sep,
+                order,
             };
             let slot = match g.aggs.iter().position(|a| *a == agg) {
                 Some(j) => j,
@@ -1162,6 +1357,25 @@ impl<'a> Binder<'a> {
                     Some(DataType::Bool),
                 )
             }
+            A::ArraySubquery(query) => {
+                let (plan, s, correlated) = self.subquery(query, scope)?;
+                if s.cols.len() != 1 {
+                    return Err(Error::syntax("subquery must return only one column"));
+                }
+                let ty = s.cols[0]
+                    .ty
+                    .unwrap_or(DataType::Text)
+                    .array_of()
+                    .ok_or_else(|| Error::feature("arrays of arrays are not supported"))?;
+                (
+                    Expr::Subquery(Box::new(SubPlan {
+                        kind: SubKind::Array,
+                        plan,
+                        correlated,
+                    })),
+                    Some(ty),
+                )
+            }
             A::Subquery(query) => {
                 let (plan, s, correlated) = self.subquery(query, scope)?;
                 if s.cols.len() != 1 {
@@ -1209,8 +1423,87 @@ impl<'a> Binder<'a> {
         use ast::Expr as A;
         Ok(match e {
             A::Literal(v) => (Expr::Literal(v.clone()), v.data_type()),
-            A::Column { .. } | A::Exists { .. } | A::Subquery(_) | A::InSubquery { .. } => {
-                sub(e, self)?
+            A::Column { .. }
+            | A::Exists { .. }
+            | A::Subquery(_)
+            | A::InSubquery { .. }
+            | A::ArraySubquery(_) => sub(e, self)?,
+            A::Array(items) => {
+                let mut bound = Vec::new();
+                for i in items {
+                    bound.push(sub(i, self)?);
+                }
+                let ty = self.unify_items(&mut bound)?.unwrap_or(DataType::Text);
+                let ty = ty
+                    .array_of()
+                    .ok_or_else(|| Error::feature("arrays of arrays are not supported"))?;
+                (
+                    Expr::Array(bound.into_iter().map(|(x, _)| x).collect()),
+                    Some(ty),
+                )
+            }
+            A::Subscript { expr, index } => {
+                let (a, at) = sub(expr, self)?;
+                let (i, it) = sub(index, self)?;
+                let (i, (_, it)) = self.coerce(Some(DataType::Int), i, it)?;
+                expect(it, DataType::Int, "an array subscript")?;
+                if at.is_some_and(|t| t.element().is_none()) {
+                    return Err(Error::type_mismatch(format!(
+                        "cannot subscript type {} because it is not an array",
+                        at.unwrap()
+                    )));
+                }
+                (
+                    Expr::Subscript(Box::new(a), Box::new(i)),
+                    at.and_then(DataType::element),
+                )
+            }
+            A::AnyAll {
+                left,
+                op,
+                right,
+                all,
+            } => {
+                let (l, lt) = sub(left, self)?;
+                let (r, rt) = sub(right, self)?;
+                // An untyped array takes the left side's array type.
+                let want = lt.and_then(DataType::array_of);
+                let (r, (_, rt)) = self.coerce(want, r, rt)?;
+                if rt.is_some_and(|t| t.element().is_none()) {
+                    return Err(Error::type_mismatch(format!(
+                        "op ANY/ALL (array) requires array on right side, not {}",
+                        rt.unwrap()
+                    )));
+                }
+                let et = rt.and_then(DataType::element);
+                let (l, (_, lt)) = self.coerce(et, l, lt)?;
+                if !matches!(
+                    op,
+                    BinaryOp::Eq
+                        | BinaryOp::NotEq
+                        | BinaryOp::Lt
+                        | BinaryOp::LtEq
+                        | BinaryOp::Gt
+                        | BinaryOp::GtEq
+                        | BinaryOp::Match
+                        | BinaryOp::NotMatch
+                        | BinaryOp::IMatch
+                        | BinaryOp::NotIMatch
+                ) {
+                    return Err(Error::type_mismatch(
+                        "op ANY/ALL (array) requires an operator yielding boolean",
+                    ));
+                }
+                comparable(lt, et)?;
+                (
+                    Expr::AnyAll {
+                        left: Box::new(l),
+                        op: *op,
+                        right: Box::new(r),
+                        all: *all,
+                    },
+                    Some(DataType::Bool),
+                )
             }
             A::Param(n) => {
                 self.note_param(n - 1, None);
@@ -1369,11 +1662,21 @@ impl<'a> Binder<'a> {
                 args,
                 distinct,
                 star,
+                order_by,
             } => {
-                if *star || *distinct {
+                if *star || *distinct || !order_by.is_empty() {
                     return Err(Error::syntax(format!(
-                        "{name}(*) / DISTINCT is only for aggregates"
+                        "{name}(*), DISTINCT and ORDER BY are only for aggregates"
                     )));
+                }
+                if name == "pg_typeof" && args.len() == 1 {
+                    let (_, t) = sub(&args[0], self)?;
+                    let name = match t {
+                        Some(DataType::Int) => "bigint".to_string(),
+                        Some(t) => t.name().to_string(),
+                        None => "unknown".to_string(),
+                    };
+                    return Ok((Expr::Literal(Value::Text(name)), Some(DataType::Text)));
                 }
                 let (f, arity) = Func::lookup(name).ok_or_else(|| {
                     Error::undefined_function(format!("function {name} does not exist"))
@@ -1472,6 +1775,46 @@ impl<'a> Binder<'a> {
                     Func::NumericFit => Some(DataType::Numeric),
                     Func::CurrentUser | Func::CurrentDatabase | Func::CurrentSchema => {
                         Some(DataType::Text)
+                    }
+                    // regclass: text (a name) to an oid, an oid to its name.
+                    Func::RegClass => match types[0] {
+                        Some(DataType::Int) => Some(DataType::Text),
+                        _ => Some(DataType::Int),
+                    },
+                    Func::RegType
+                    | Func::RegNamespace
+                    | Func::RegRole
+                    | Func::GetUserById
+                    | Func::FormatType
+                    | Func::GetExpr
+                    | Func::GetIndexdef
+                    | Func::GetConstraintdef
+                    | Func::ArrayToString
+                    | Func::StatisticsObjColumns
+                    | Func::GetTriggerdef
+                    | Func::EncodingToChar
+                    | Func::ObjDescription
+                    | Func::CurrentSetting
+                    | Func::RegexpReplace => Some(DataType::Text),
+                    Func::TableIsVisible | Func::RelationIsPublishable | Func::HasPrivilege => {
+                        Some(DataType::Bool)
+                    }
+                    Func::PartitionAncestors => {
+                        let (x, _) =
+                            self.coerce(Some(DataType::Int), bound[0].clone(), types[0])?;
+                        bound[0] = x;
+                        Some(DataType::Int)
+                    }
+                    Func::ArrayUpper
+                    | Func::ArrayLower
+                    | Func::ArrayLength
+                    | Func::Cardinality
+                    | Func::BackendPid => Some(DataType::Int),
+                    Func::ArrayAppend => {
+                        let et = types[0].and_then(DataType::element);
+                        let (x, (_, xt)) = self.coerce(et, bound[1].clone(), types[1])?;
+                        bound[1] = x;
+                        types[0].or_else(|| xt.and_then(DataType::array_of))
                     }
                     Func::Coalesce | Func::Greatest | Func::Least => {
                         let mut items: Vec<Typed> =
@@ -1604,6 +1947,34 @@ impl<'a> Binder<'a> {
             Eq | NotEq | Lt | LtEq | Gt | GtEq => {
                 comparable(lt, rt)?;
                 Some(DataType::Bool)
+            }
+            Match | NotMatch | IMatch | NotIMatch => {
+                let (l2, _) = self.text_operand(l, lt, op.symbol())?;
+                let (r2, _) = self.text_operand(r, rt, op.symbol())?;
+                return Ok((
+                    Expr::Binary(op, Box::new(l2), Box::new(r2)),
+                    Some(DataType::Bool),
+                ));
+            }
+            Concat
+                if lt.is_some_and(|t| t.element().is_some())
+                    || rt.is_some_and(|t| t.element().is_some()) =>
+            {
+                // array || array, array || element, element || array.
+                let arr = lt.filter(|t| t.element().is_some()).or(rt);
+                let et = arr.and_then(DataType::element);
+                let (l, (_, lt2)) = self.coerce(if lt == arr { arr } else { et }, l, lt)?;
+                let (r, (_, rt2)) = self.coerce(if rt == arr { arr } else { et }, r, rt)?;
+                for t in [lt2, rt2] {
+                    if t.is_some_and(|t| t != arr.expect("an array side") && Some(t) != et) {
+                        return Err(Error::undefined_function(format!(
+                            "operator does not exist: {} || {}",
+                            name(lt2),
+                            name(rt2)
+                        )));
+                    }
+                }
+                return Ok((Expr::Binary(op, Box::new(l), Box::new(r)), arr));
             }
             Concat => {
                 if lt == Some(DataType::Text)

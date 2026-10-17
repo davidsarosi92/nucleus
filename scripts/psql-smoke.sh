@@ -32,4 +32,25 @@ fi
 grep -q 'duplicate key value violates unique constraint' "$work/err"
 [ "$(psql -X -At -c 'SELECT count(*) FROM people')" = 3 ]
 
+# psql's \d family reads the pg_catalog compatibility views (PLAN.md §M14.5).
+psql -X -v ON_ERROR_STOP=1 -q -c "CREATE TABLE dept (id INT PRIMARY KEY, name TEXT UNIQUE)" \
+  -c "ALTER TABLE people ADD COLUMN dept_id INT REFERENCES dept ON DELETE SET NULL"
+describe() { psql -X -v ON_ERROR_STOP=1 -c "$1" 2>&1 || { echo "psql $1 failed"; exit 1; }; }
+expect() { grep -qF -- "$2" <<<"$1" || { echo "missing in output: $2"; echo "$1"; exit 1; }; }
+out=$(describe '\d people')
+expect "$out" 'Table "public.people"'
+expect "$out" '"people_pkey" PRIMARY KEY, btree (id)'
+expect "$out" '"people_city" btree (city)'
+expect "$out" 'FOREIGN KEY (dept_id) REFERENCES dept(id) ON DELETE SET NULL'
+out=$(describe '\d dept')
+expect "$out" '"dept_name_key" UNIQUE CONSTRAINT, btree (name)'
+expect "$out" 'TABLE "people" CONSTRAINT "people_dept_id_fkey"'
+expect "$(describe '\d')" 'people'
+expect "$(describe '\dt')" 'dept'
+expect "$(describe '\di')" 'people_city'
+expect "$(describe '\dn')" 'nc_catalog'
+expect "$(describe '\l')" 'nucleus'
+expect "$(describe '\d+ people')" 'Access method: heap'
+[ "$(psql -X -At -c "SELECT name FROM nc_catalog.tables ORDER BY name")" = $'dept\npeople' ]
+
 echo "psql smoke test passed ($(psql --version))"
