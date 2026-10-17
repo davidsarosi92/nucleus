@@ -48,6 +48,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             None => Arc::new(Trust),
         },
         log_queries,
+        registry: nucleus_sql::ext::Registry::shared_builtin(),
     };
     let db = Database::open(dir, Options::default()).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);

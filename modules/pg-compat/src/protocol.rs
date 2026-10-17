@@ -15,16 +15,26 @@ use nucleus_sql::ext::{
 
 use crate::PgCompat;
 
-/// The front end's sessions' registry: the built-ins and [`PgCompat`],
-/// which PostgreSQL clients need (`pg_catalog`, the `pg_*` functions).
-pub fn registry() -> Arc<Registry> {
-    static R: std::sync::OnceLock<Arc<Registry>> = std::sync::OnceLock::new();
-    R.get_or_init(|| {
-        let mut r = Registry::builtin();
+/// The front end's sessions' registry: `base` (the server's) and
+/// [`PgCompat`], which PostgreSQL clients need (`pg_catalog`, the `pg_*`
+/// functions).  Made once per base registry.
+pub fn registry(base: &Arc<Registry>) -> Arc<Registry> {
+    type Cache = std::sync::Mutex<Vec<(Arc<Registry>, Arc<Registry>)>>;
+    static R: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let mut cache = R
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some((_, r)) = cache.iter().find(|(b, _)| Arc::ptr_eq(b, base)) {
+        return r.clone();
+    }
+    let mut r = (**base).clone();
+    if !r.modules().iter().any(|m| m == "pg-compat") {
         r.add(&PgCompat).expect("pg-compat registers");
-        Arc::new(r)
-    })
-    .clone()
+    }
+    let r = Arc::new(r);
+    cache.push((base.clone(), r.clone()));
+    r
 }
 
 /// PostgreSQL's protocol as a front end (`pg`, default
@@ -361,7 +371,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     let mut conn = Conn {
         out,
         log: config.log_queries.then_some(id),
-        session: Session::with_registry(kv, registry()),
+        session: Session::with_registry(kv, registry(&config.registry)),
         prepared: HashMap::new(),
         portals: HashMap::new(),
     };

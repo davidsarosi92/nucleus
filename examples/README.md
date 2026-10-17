@@ -23,3 +23,8 @@ target/release/nucleus server ./mydb
 
 `NUCLEUS_PORT` points them at another port.  CI runs all of them
 (`scripts/driver-tests.sh`).
+
+**A module:** [`extension/`](extension) is a sample nucleus module — a
+type, a function and a catalog view added through the extension API — and
+the guide for writing one (`cargo run -p nucleus-example-extension --bin
+geo-demo -- ./geodb`).

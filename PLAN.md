@@ -105,7 +105,7 @@ violate one, amend it here first, with a rationale.
 **Fidelity to these principles comes first.**  When a feature and a
 principle conflict, the principle wins; work that brings existing code in
 line with the principles is scheduled before new features (that is why
-§M14.19 comes next); and every milestone's design is checked against them
+§M14.19 came first); and every milestone's design is checked against them
 before it starts.
 
 1. **Everything goes through the KV contract.**  Data models and the query
@@ -264,8 +264,8 @@ are marked ✅.
 | | M14.6 | `ncsql`: nucleus's own SQL shell and client | ✅ DOCS §6.2 |
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
-| | M14.19 | **In progress:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ◐ audit closed; every list a registry; `modules/pg-compat` detachable (CI); types as modules, `UUID` everywhere, the law kit, orderings, operators and casts taught in SQL, encoding upgrades, `ALTER COLUMN … TYPE` (T1–T6; T7 left) |
-| | M14.26 | Core types: integers by width, `real`, `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
+| | M14.19 | Modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ✅ DOCS §1, §8.11–§8.12, §9 |
+| | M14.26 | **Next:** core types: integers by width, `real`, `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
@@ -648,7 +648,7 @@ things nucleus's design gives almost for free (branches and time travel
 from copy-on-write storage and MVCC), the everyday tools (JSON,
 migrations, code generation), an easy start, and what production needs.
 
-### §M14.19 — Modularity: registries and an extension API ◐ (in progress)
+### §M14.19 — Modularity: registries and an extension API ✅ (DOCS §1, §8.11–§8.12, §9)
 
 **Order:** this comes first in the developer platform — principles before
 features — then §M14.26 (core types), §M14.25 (identity and access),
@@ -731,7 +731,14 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
     transaction under MVCC, readers keep the old column; chunked
     conversion of very large tables in the background is §M14.11's;
     `INSERT`/`UPDATE` applying taught assignment casts is still open); the
-    sample extension (T7).
+    sample extension (T7 ✅ — `examples/extension`, the `geo` module and
+    the guide for writing one).
+  - *Left for later, on purpose:* converting a very large column in the
+    background in chunks (§M14.11); `INSERT` / `UPDATE` applying taught
+    assignment casts unwritten; naming distances in SQL (§M14.12, with
+    nearest-neighbour indexes); arrays of registered types; a
+    nearest-first `ORDER BY` using an index (the index in an ordering is
+    kept current but sorting still sorts).
 - **`UUID`, the first new type built this way** — a real type proving the
   path, not only a sample: 16 bytes; text input in the canonical form
   (and upper case, braces, no hyphens), output canonical lower case;
@@ -895,7 +902,7 @@ work, dropping the ordering while the index exists is refused, and
 redefining it rebuilds the index; and `COLLATE` resolves to a text
 ordering.
 
-### §M14.26 — Core types ⬜
+### §M14.26 — Core types ⬜ (next)
 
 **Order:** right after §M14.19, whose type registry they are built on —
 each one registered like `UUID`, with its capabilities declared and the
@@ -1899,3 +1906,6 @@ style) across a thousand seeds without failure.
 - **2026-10-18** — §M14.19 T6: encoding versions of registered types
   (upgraded as read, `ALTER TYPE … UPGRADE`, crash-tested) and `ALTER
   TABLE … ALTER COLUMN … TYPE … [USING]`, checked against PostgreSQL 18.
+- **2026-10-18** — §M14.19 shipped (DOCS §1, §8.11–§8.12, §9): the
+  sample extension `examples/extension` (T7) closes it; what was left for
+  later is listed in §M14.19.  Next: §M14.26.

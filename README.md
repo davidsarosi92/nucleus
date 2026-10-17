@@ -12,9 +12,14 @@ SQL dialect (joins of every kind, CTEs, foreign keys, numeric, date/time
 and array types) with a cost-based optimizer, its own system catalog
 (`nc_catalog`), and a server that speaks nucleus's own protocol (`ncp`) —
 with drivers for Rust, C, C++, Python, JavaScript/TypeScript and Java, and
-the `ncsql` shell — and, optionally, PostgreSQL's.  Next is modularity
-(PLAN.md §M14.19: registries, extensible and evolvable types, an extension
-API — the principles come first), the core types (§M14.26), then
+the `ncsql` shell — and, optionally, PostgreSQL's.  It is modular
+(§M14.19): every list is a registry, types are modules with abilities the
+engine asks before relying on them (`uuid` the first), orderings,
+operators and casts can be taught in SQL, and modules are folders built
+to leave the repository — PostgreSQL compatibility is one,
+[`modules/pg-compat`](modules/pg-compat); writing one:
+[`examples/extension`](examples/extension).  Next are the core types
+(§M14.26), then
 identity and access (§M14.25: users, roles, privileges, authentication,
 access rules, row-level security), then the rest of the developer platform (§M14.9–§M14.24: SQL
 analyzer, AI access, large data and analytics, vectors, full-text and

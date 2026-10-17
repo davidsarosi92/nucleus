@@ -423,6 +423,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-example-extension"
+version = "0.1.0"
+dependencies = [
+ "nucleus-kv",
+ "nucleus-platform",
+ "nucleus-server",
+ "nucleus-sql",
+ "nucleus-testkit",
+]
+
+[[package]]
 name = "nucleus-kv"
 version = "0.1.0"
 dependencies = [

@@ -25,6 +25,8 @@
 extern "C" {
 #endif
 
+/* This driver's version. */
+#define NC_VERSION "0.1.0"
 /* 2: registered types (uuid, modules' types) arrive in their binary form. */
 #define NC_PROTOCOL_VERSION 2
 #define NC_DEFAULT_PORT 20035

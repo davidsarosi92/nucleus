@@ -23,6 +23,9 @@
 
 #include "nucleus.h"
 
+/// This driver's version.
+#define NUCLEUS_HPP_VERSION "0.1.0"
+
 namespace nucleus {
 
 /// An error from the server (`code()` is the SQLSTATE) or the driver.

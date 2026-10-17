@@ -85,6 +85,9 @@ impl Authenticator for Trust {
 pub struct Config {
     /// Who may log in.
     pub auth: Arc<dyn Authenticator>,
+    /// The functions, types and views sessions have (a custom build adds
+    /// its modules here; front ends may add their own on top).
+    pub registry: Arc<nucleus_sql::ext::Registry>,
     /// Print every statement a client sends, and every error, to stderr
     /// (for seeing what a tool asks).
     pub log_queries: bool,
@@ -107,6 +110,7 @@ impl Config {
                 password: password.into(),
             }),
             log_queries: false,
+            registry: nucleus_sql::ext::Registry::shared_builtin(),
         }
     }
 
@@ -114,8 +118,14 @@ impl Config {
     pub fn trust() -> Self {
         Self {
             auth: Arc::new(Trust),
-            log_queries: false,
+            ..Self::password("", "")
         }
+    }
+
+    /// The same, with sessions on `registry`.
+    pub fn with_registry(mut self, registry: Arc<nucleus_sql::ext::Registry>) -> Self {
+        self.registry = registry;
+        self
     }
 
     /// Whether `user` / `password` may log in.

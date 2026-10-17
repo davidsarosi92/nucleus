@@ -228,7 +228,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
             .u32(id)
             .finish(),
     )?;
-    let mut session = Session::new(kv);
+    let mut session = Session::with_registry(kv, config.registry.clone());
     out.write_all(&ready_msg(session.status()))?;
     out.flush()?;
 

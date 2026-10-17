@@ -3,7 +3,8 @@
 
 - the core (crates/) depends on no module (modules/) and no edition
   (editions/);
-- a module depends on nucleus's public API crates only — by version, and
+- a module (and the sample one, examples/extension) depends on nucleus's
+  public API crates only — by version, and
   in its code on `nucleus_sql::ext` alone of the SQL layer — reads no files
   outside its folder, and carries its own README, changelog and licence.
 
@@ -56,7 +57,8 @@ def packages(glob):
 
 
 core = packages("crates/*")
-modules = packages("modules/*")
+# The sample module in examples/ is held to the same rules.
+modules = {**packages("modules/*"), **packages("examples/extension")}
 editions = packages("editions/*")
 outside = set(modules) | set(editions)
 

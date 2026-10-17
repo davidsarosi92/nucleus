@@ -1,0 +1,25 @@
+[package]
+name = "nucleus-example-extension"
+description = "A sample nucleus module: a type, a function and a catalog view, without touching the core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# A module depends on nucleus's public API crates only (PLAN.md §M14.19).
+[dependencies]
+nucleus-kv = { version = "0.1.0", path = "../../crates/kv" }
+nucleus-sql = { version = "0.1.0", path = "../../crates/sql" }
+nucleus-server = { version = "0.1.0", path = "../../crates/server" }
+
+[dev-dependencies]
+nucleus-platform = { version = "0.1.0", path = "../../crates/platform" }
+nucleus-testkit = { version = "0.1.0", path = "../../crates/testkit" }
+
+[[bin]]
+name = "geo-demo"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

@@ -40,6 +40,7 @@
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
 | `drivers` | — | drivers for C, C++, Python, JS/TS, Java (§11) | §M14.8 ✅ |
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
+| `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
 | `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh` | §M6, §M12, §M14.8 |
 
 `crates/` is the core and the public API crates; `modules/` are modules,
@@ -952,7 +953,10 @@ taught `by_geohash`) test it.
 ### 8.12 Extension API (`ext`, `builtin`)
 
 What a module adds to the SQL layer (principle 12), versioned
-(`ext::API_VERSION`, 1):
+(`ext::API_VERSION`, 1).  **The guide for writing one is
+[`examples/extension/README.md`](examples/extension/README.md)**, with the
+sample module `geo` (`geopoint`, `geohash`, `geo.cities`) built on this
+API alone, embedded and as a custom server build (`geo-demo serve`).
 
 - `Module` — `name()`, `register(&mut Registry)`.
 - `ScalarFunction` — `name()` (for `EXPLAIN`), `arity()`,
@@ -1067,7 +1071,9 @@ pg`).  `Config { auth, log_queries }`: `auth` is an `Authenticator`
 (`describe`, `wants_password`, `accepts(user, password)`) — `Password`
 (one user; `Config::password`, the default `nucleus` / `nucleus`) or
 `Trust` (`Config::trust`, `--no-auth`); users, roles and the other
-methods are §M14.25.
+methods are §M14.25.  `Config::registry` is what sessions have (the
+built-ins by default; a custom build adds its modules —
+`Config::with_registry`); pg-compat's front end adds its module on top.
 
 **PostgreSQL compatibility** (optional, D14): `--pg-compat` also listens
 for the PostgreSQL protocol (`nucleus_pg_compat::Pg`, default
@@ -1240,6 +1246,11 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-18 — §M14.19 shipped: the sample extension (T7).**
+  `examples/extension` (the `geo` module, `geo-demo`, the guide for
+  writing a module), held to the module rules by the boundary check;
+  `nucleus_server::Config::registry`; every driver and edition folder with
+  its own changelog, licence and version.
 - **2026-10-18 — §M14.19 encoding versions and `ALTER COLUMN … TYPE`
   (T6):** values upgraded as read, `ALTER TYPE … UPGRADE` (crash-tested),
   key-changing upgrades before the keys are used, newer versions refused;
