@@ -73,7 +73,11 @@ impl Platform for SimPlatform {
 /// Wall-clock time at simulated monotonic time zero: 2026-01-01T00:00:00Z.
 pub const SIM_EPOCH_SECS: u64 = 1_767_225_600;
 
-/// A clock that moves only when [`SimClock::advance`] is called.
+/// The most real time a simulated [`Clock::sleep`] waits.
+pub const SIM_SLEEP_CAP: Duration = Duration::from_millis(1);
+
+/// A clock that moves only when [`SimClock::advance`] (or a sleep) is
+/// called.
 #[derive(Debug, Default)]
 pub struct SimClock {
     nanos: AtomicU64,
@@ -97,7 +101,13 @@ impl Clock for SimClock {
     fn wall(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(SIM_EPOCH_SECS) + self.now()
     }
+    /// Advances the clock by `d`, and also gives up the CPU for `d` up to
+    /// [`SIM_SLEEP_CAP`]: while several threads drive the simulation, the OS
+    /// schedules them (see the module docs), and threads backing off must
+    /// spread out in real time or their retries keep colliding.  One
+    /// thread stays deterministic, only that much slower.
     fn sleep(&self, d: Duration) {
         self.advance(d);
+        std::thread::sleep(d.min(SIM_SLEEP_CAP));
     }
 }

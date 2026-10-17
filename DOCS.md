@@ -94,7 +94,8 @@ principle 4).
 - `OpenMode` — `ReadOnly`, `ReadWrite`, `Create`, `CreateNew`; none
   truncates.
 - `Clock` — `now()` monotonic since platform creation, `wall()`, `sleep(d)`
-  (the simulated clock advances by `d` instead of waiting).
+  (the simulated clock advances by `d` at once and waits at most 1 ms of
+  real time, so threads backing off on the simulation still spread out).
 - `Rng` — `next_u64`, `below`, `chance_ppm`, `fill_bytes`.  **Not
   cryptographic.**  `SplitMix64` is the implementation everywhere.
 
