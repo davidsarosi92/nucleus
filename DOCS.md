@@ -824,16 +824,32 @@ What a module adds to the SQL layer (principle 12), versioned
   common type, or a `Constant`), `strict()` (default true: a `NULL`
   argument gives `NULL` without a call), `call(&CallContext, &[Value])`.
   `CallContext` gives the statement's transaction and the registry.
+- `Aggregate` — `name()`, `arity()`, `accepts_star()` (`count(*)`),
+  `keeps_nulls()` (default false: rows whose first argument is `NULL` are
+  skipped), `resolve` (as a function's), `start() -> Box<dyn
+  Accumulator>` (`add(&[Value])`, `finish()`), one per group.  The engine
+  does the grouping, `DISTINCT` (over the arguments) and `ORDER BY` inside
+  the call.
+- `TableFunction` — `name()`, `arity()`, `resolve(&[ArgInfo]) ->
+  TableSignature` (per argument, and the output columns; one column for
+  now, named after the function or its alias), `rows(&CallContext,
+  &[Value])`.  `ext::common_type` is the binder's rule for `Common`
+  arguments, for a `resolve` that needs it.
 - `CatalogView` — `schema()`, `name()`, `columns()`, `rows(&CallContext)`.
 - `Registry` — `empty()`, `builtin()` (the `builtin` module: every
-  built-in function, the schemas `public` and `nc_catalog`, the
-  `nc_catalog` views), `shared_builtin()`, `add(&dyn Module)` (refused,
-  and the registry unchanged, if the module or anything it registers is
-  already there), `add_function(names, f)`, `add_schema(name,
+  built-in function, aggregate and table function, the schemas `public`
+  and `nc_catalog`, the `nc_catalog` views), `shared_builtin()`,
+  `add(&dyn Module)` (refused, and the registry unchanged, if the module
+  or anything it registers is already there), `add_function(names, f)`,
+  `add_aggregate(names, a)` (functions and aggregates share one
+  namespace), `add_table_function(f)`, `add_schema(name,
   description, searched)` (a searched schema's views are found by
   unqualified names after the user's tables, as `pg_catalog`'s),
-  `add_view(v)`, and the lookups `function`, `view`, `schemas`, `views`,
-  `modules`.
+  `add_view(v)`, and the lookups `function`, `aggregate`,
+  `table_function`, `view`, `schemas`, `views`, `modules`.
+
+`tests/extension.rs` is a module from outside the crate adding a
+function, an aggregate, a table function and a view, used through SQL.
 
 A session runs against one registry: `Session::new(kv)` the built-in one,
 `Session::with_registry(kv, registry)` any.  The binder finds functions
@@ -1015,6 +1031,10 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.19 aggregates and table functions registered:**
+  `ext::Aggregate` / `Accumulator`, `ext::TableFunction`; the built-ins
+  (`count` … `bool_or`, `generate_series`, `unnest`) register through
+  them; `tests/extension.rs`.
 - **2026-10-17 — §M14.19 registries, first part:** the extension API
   (`ext`: `Module`, `ScalarFunction`, `CatalogView`, `Registry`); the
   built-in functions and `nc_catalog` register through it; PostgreSQL

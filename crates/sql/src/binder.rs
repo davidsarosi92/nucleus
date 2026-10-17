@@ -9,7 +9,7 @@ use crate::catalog::{self, Table};
 use crate::error::{Error, Result};
 use crate::expr::{Expr, Func, SubKind, SubPlan};
 use crate::ext::{Arg, ArgInfo, FnRef, Registry, Returns};
-use crate::plan::{Access, Agg, AggFunc, JoinAlgo, JoinType, Plan, SortKey, TableFunc};
+use crate::plan::{Access, Agg, JoinAlgo, JoinType, Plan, SortKey, TableFunc};
 use crate::types::{DataType, Value};
 
 /// A column visible to expressions.
@@ -130,21 +130,20 @@ fn reads_work_table(plan: &Plan) -> bool {
 
 type Typed = (Expr, Option<DataType>);
 
-fn is_aggregate(name: &str) -> bool {
-    AggFunc::lookup(name).is_some()
-}
-
-/// Whether `e` calls an aggregate (not looking into subqueries).
-fn contains_agg(e: &ast::Expr) -> bool {
+/// Whether `e` calls an aggregate of `r` (not looking into subqueries).
+fn contains_agg(r: &Registry, e: &ast::Expr) -> bool {
     use ast::Expr as A;
+    let contains_agg = |e: &ast::Expr| contains_agg(r, e);
     match e {
-        A::Function { name, args, .. } => is_aggregate(name) || args.iter().any(contains_agg),
+        A::Function { name, args, .. } => {
+            r.aggregate(name).is_some() || args.iter().any(&contains_agg)
+        }
         A::Unary { expr, .. } | A::IsNull { expr, .. } | A::Cast { expr, .. } => contains_agg(expr),
         A::Binary { left, right, .. } => contains_agg(left) || contains_agg(right),
         A::Between {
             expr, low, high, ..
         } => contains_agg(expr) || contains_agg(low) || contains_agg(high),
-        A::InList { expr, list, .. } => contains_agg(expr) || list.iter().any(contains_agg),
+        A::InList { expr, list, .. } => contains_agg(expr) || list.iter().any(&contains_agg),
         A::InSubquery { expr, .. } => contains_agg(expr),
         A::Like { expr, pattern, .. } => contains_agg(expr) || contains_agg(pattern),
         A::Case {
@@ -158,7 +157,7 @@ fn contains_agg(e: &ast::Expr) -> bool {
                     .any(|(w, t)| contains_agg(w) || contains_agg(t))
                 || otherwise.as_deref().is_some_and(contains_agg)
         }
-        A::Array(items) => items.iter().any(contains_agg),
+        A::Array(items) => items.iter().any(&contains_agg),
         A::Subscript { expr, index } => contains_agg(expr) || contains_agg(index),
         A::AnyAll { left, right, .. } => contains_agg(left) || contains_agg(right),
         A::Literal(_)
@@ -389,55 +388,30 @@ impl<'a> Binder<'a> {
         columns: &[String],
     ) -> Result<Bound> {
         let empty = Scope::default();
-        let mut bound = Vec::new();
-        let mut types = Vec::new();
-        for a in args {
-            let (x, t) = self.expr(a, &empty)?;
-            bound.push(x);
-            types.push(t);
-        }
-        let (func, ty) = match name {
-            "generate_series" => {
-                if !(2..=3).contains(&args.len()) {
+        let (func, bound, ty) = match self.registry.table_function(name).cloned() {
+            Some(f) => {
+                if !f.arity().contains(&args.len()) {
                     return Err(Error::undefined_function(format!(
-                        "function generate_series with {} arguments does not exist",
+                        "function {name} with {} arguments does not exist",
                         args.len()
                     )));
                 }
-                // Integers, numerics, or timestamps with an interval step.
-                let mut items: Vec<Typed> = bound.drain(..2).zip(types.iter().copied()).collect();
-                let ty = self.unify_items(&mut items)?.unwrap_or(DataType::Int);
-                bound.splice(0..0, items.into_iter().map(|(x, _)| x));
-                if let Some(step) = bound.get_mut(2) {
-                    let want = if ty.is_datetime() {
-                        DataType::Interval
-                    } else {
-                        ty
-                    };
-                    let (x, _) = self.coerce(Some(want), step.clone(), types[2])?;
-                    *step = x;
+                let mut typed = Vec::new();
+                for a in args {
+                    typed.push(self.expr(a, &empty)?);
                 }
-                if !(ty.is_number() || ty.is_datetime()) {
-                    return Err(Error::undefined_function(format!(
-                        "function generate_series({ty}, {ty}) does not exist"
+                let sig = f.resolve(&arg_info(&typed))?;
+                let [(_, ty)] = sig.columns.as_slice() else {
+                    return Err(Error::feature(format!(
+                        "table function {name} returns {} columns; one is supported",
+                        sig.columns.len()
                     )));
-                }
-                let ty = if ty == DataType::Date {
-                    DataType::Timestamp
-                } else {
-                    ty
                 };
-                (TableFunc::GenerateSeries, Some(ty))
+                let ty = *ty;
+                let (bound, _) = self.apply_signature(name, sig.args, typed)?;
+                (TableFunc::Call(f), bound, ty)
             }
-            "unnest" => {
-                let [t] = types.as_slice() else {
-                    return Err(Error::undefined_function(
-                        "function unnest takes one argument",
-                    ));
-                };
-                (TableFunc::Unnest, t.and_then(DataType::element))
-            }
-            _ => {
+            None => {
                 // A scalar function: one row.
                 let call = ast::Expr::Function {
                     name: name.to_string(),
@@ -447,8 +421,7 @@ impl<'a> Binder<'a> {
                     order_by: vec![],
                 };
                 let (x, t) = self.expr(&call, &empty)?;
-                bound = vec![x];
-                (TableFunc::Scalar, t)
+                (TableFunc::Scalar, vec![x], t)
             }
         };
         let qual = alias.unwrap_or(name).to_string();
@@ -925,7 +898,7 @@ impl<'a> Binder<'a> {
         let mut plan = from.plan;
         let scope = from.scope;
         if let Some(w) = &s.filter {
-            if contains_agg(w) {
+            if contains_agg(self.registry, w) {
                 return Err(Error::grouping(
                     "aggregate functions are not allowed in WHERE",
                 ));
@@ -939,10 +912,12 @@ impl<'a> Binder<'a> {
 
         let grouped = !s.group_by.is_empty()
             || s.having.is_some()
-            || s.items
+            || s.items.iter().any(
+                |i| matches!(i, SelectItem::Expr { expr, .. } if contains_agg(self.registry, expr)),
+            )
+            || order_by
                 .iter()
-                .any(|i| matches!(i, SelectItem::Expr { expr, .. } if contains_agg(expr)))
-            || order_by.iter().any(|o| contains_agg(&o.expr));
+                .any(|o| contains_agg(self.registry, &o.expr));
         let mut grouping = None;
         if grouped {
             let mut g = Grouping {
@@ -1168,12 +1143,12 @@ impl<'a> Binder<'a> {
             star,
             order_by,
         } = e
-            && let Some(func) = AggFunc::lookup(name)
+            && let Some(func) = self.registry.aggregate(name).cloned()
         {
             let from = g.from.clone();
             let mut order = Vec::new();
             for o in order_by {
-                if contains_agg(&o.expr) {
+                if contains_agg(self.registry, &o.expr) {
                     return Err(Error::grouping("aggregate function calls cannot be nested"));
                 }
                 order.push(SortKey {
@@ -1182,65 +1157,39 @@ impl<'a> Binder<'a> {
                     nulls_first: o.nulls_first.unwrap_or(o.desc),
                 });
             }
-            let mut sep = None;
-            let (arg, at) = match (star, args.as_slice()) {
-                (true, []) if func == AggFunc::Count => (None, None),
-                (false, [a]) if func != AggFunc::StringAgg => {
-                    if contains_agg(a) {
-                        return Err(Error::grouping("aggregate function calls cannot be nested"));
-                    }
-                    let (x, t) = self.expr(a, &from)?;
-                    (Some(x), t)
+            let shape_ok = if *star {
+                args.is_empty() && func.accepts_star()
+            } else {
+                func.arity().contains(&args.len())
+            };
+            if !shape_ok {
+                return Err(Error::undefined_function(format!(
+                    "function {name} with {} arguments does not exist",
+                    args.len()
+                )));
+            }
+            let mut bound = Vec::new();
+            for a in args {
+                if contains_agg(self.registry, a) {
+                    return Err(Error::grouping("aggregate function calls cannot be nested"));
                 }
-                (false, [a, s]) if func == AggFunc::StringAgg => {
-                    if contains_agg(a) || contains_agg(s) {
-                        return Err(Error::grouping("aggregate function calls cannot be nested"));
-                    }
-                    let (x, t) = self.expr(a, &from)?;
-                    let (x, _) = self.text_operand(x, t, "string_agg")?;
-                    let (s, st) = self.expr(s, &from)?;
-                    sep = Some(self.text_operand(s, st, "string_agg")?.0);
-                    (Some(x), Some(DataType::Text))
-                }
-                _ => {
-                    return Err(Error::undefined_function(format!(
-                        "function {name} with {} arguments does not exist",
-                        args.len()
+                bound.push(self.expr(a, &from)?);
+            }
+            let sig = func.resolve(&arg_info(&bound))?;
+            let (args, common) = self.apply_signature(name, sig.args, bound)?;
+            let ty = match sig.returns {
+                Returns::Type(t) => t,
+                Returns::Common => common,
+                Returns::Constant(_) => {
+                    return Err(Error::internal(format!(
+                        "aggregate {name} resolved to a constant"
                     )));
                 }
             };
-            let ty = match func {
-                AggFunc::Count => Some(DataType::Int),
-                // As PostgreSQL: the average of integers is numeric.
-                AggFunc::Avg => match at {
-                    Some(DataType::Int) | None => Some(DataType::Numeric),
-                    t => t,
-                },
-                AggFunc::Sum | AggFunc::Min | AggFunc::Max => at,
-                AggFunc::StringAgg => Some(DataType::Text),
-                AggFunc::ArrayAgg => Some(
-                    at.unwrap_or(DataType::Text)
-                        .array_of()
-                        .ok_or_else(|| Error::feature("arrays of arrays are not supported"))?,
-                ),
-                AggFunc::BoolAnd | AggFunc::BoolOr => {
-                    expect(at, DataType::Bool, name)?;
-                    Some(DataType::Bool)
-                }
-            };
-            if matches!(func, AggFunc::Sum | AggFunc::Avg)
-                && at.is_some_and(|t| !t.is_number() && t != DataType::Interval)
-            {
-                return Err(Error::undefined_function(format!(
-                    "function {name}({}) does not exist",
-                    at.unwrap()
-                )));
-            }
             let agg = Agg {
                 func,
-                arg,
+                args,
                 distinct: *distinct,
-                sep,
                 order,
             };
             let slot = match g.aggs.iter().position(|a| *a == agg) {
@@ -1253,7 +1202,7 @@ impl<'a> Binder<'a> {
             };
             return Ok((Expr::Column(g.group.len() + slot), ty));
         }
-        if !contains_agg(e) {
+        if !contains_agg(self.registry, e) {
             let from = g.from.clone();
             let (x, t) = self.expr(e, &from)?;
             if let Some(gi) = g.group.iter().position(|y| *y == x) {
@@ -1295,7 +1244,7 @@ impl<'a> Binder<'a> {
             return self.column(table.as_deref(), name, scope);
         }
         if let ast::Expr::Function { name, .. } = e
-            && is_aggregate(name)
+            && self.registry.aggregate(name).is_some()
         {
             return Err(Error::grouping(format!(
                 "aggregate function {name} is not allowed here"
@@ -1711,28 +1660,37 @@ impl<'a> Binder<'a> {
     }
 
     /// A call of `f` with bound arguments, typed by its signature.
-    fn call(&mut self, f: FnRef, mut args: Vec<Typed>) -> Result<Typed> {
-        let info: Vec<ArgInfo> = args
-            .iter()
-            .map(|(x, t)| ArgInfo {
-                ty: *t,
-                text_literal: is_text_literal(x),
-            })
-            .collect();
-        let sig = f.resolve(&info)?;
-        if sig.args.len() != args.len() {
-            return Err(Error::internal(format!(
-                "{} resolved {} arguments of {}",
-                f.name(),
-                sig.args.len(),
-                args.len()
-            )));
-        }
+    fn call(&mut self, f: FnRef, args: Vec<Typed>) -> Result<Typed> {
+        let sig = f.resolve(&arg_info(&args))?;
         if let Returns::Constant(v) = sig.returns {
             let t = v.data_type();
             return Ok((Expr::Literal(v), t));
         }
-        for (a, arg) in args.iter_mut().zip(&sig.args) {
+        let (args, ty) = self.apply_signature(f.name(), sig.args, args)?;
+        let ty = match sig.returns {
+            Returns::Type(t) => t,
+            Returns::Common => ty,
+            Returns::Constant(_) => unreachable!("returned above"),
+        };
+        Ok((Expr::Call(f, args), ty))
+    }
+
+    /// Converts bound arguments as a signature says; returns them and the
+    /// common type of the [`Arg::Common`] ones.
+    fn apply_signature(
+        &mut self,
+        name: &str,
+        sig: Vec<Arg>,
+        mut args: Vec<Typed>,
+    ) -> Result<(Vec<Expr>, Option<DataType>)> {
+        if sig.len() != args.len() {
+            return Err(Error::internal(format!(
+                "{name} resolved {} arguments of {}",
+                sig.len(),
+                args.len()
+            )));
+        }
+        for (a, arg) in args.iter_mut().zip(&sig) {
             let (x, t) = std::mem::replace(a, (Expr::Literal(Value::Null), None));
             *a = match *arg {
                 Arg::Keep | Arg::Common => (x, t),
@@ -1743,9 +1701,7 @@ impl<'a> Binder<'a> {
                 }
             };
         }
-        let common: Vec<usize> = (0..args.len())
-            .filter(|&i| sig.args[i] == Arg::Common)
-            .collect();
+        let common: Vec<usize> = (0..args.len()).filter(|&i| sig[i] == Arg::Common).collect();
         let mut common_ty = None;
         if !common.is_empty() {
             let mut items: Vec<Typed> = common
@@ -1757,15 +1713,7 @@ impl<'a> Binder<'a> {
                 args[i] = item;
             }
         }
-        let ty = match sig.returns {
-            Returns::Type(t) => t,
-            Returns::Common => common_ty,
-            Returns::Constant(_) => unreachable!("returned above"),
-        };
-        Ok((
-            Expr::Call(f, args.into_iter().map(|(x, _)| x).collect()),
-            ty,
-        ))
+        Ok((args.into_iter().map(|(x, _)| x).collect(), common_ty))
     }
 
     /// The common type of `items`, each converted to it.  Text literals and
@@ -2061,6 +2009,16 @@ fn convert(x: Expr, from: Option<DataType>, to: Option<DataType>) -> Expr {
         (Some(f), Some(t)) if f != t => Expr::Cast(Box::new(x), t),
         _ => x,
     }
+}
+
+/// What a function's `resolve` learns of bound arguments.
+fn arg_info(args: &[Typed]) -> Vec<ArgInfo> {
+    args.iter()
+        .map(|(x, t)| ArgInfo {
+            ty: *t,
+            text_literal: is_text_literal(x),
+        })
+        .collect()
 }
 
 fn is_text_literal(x: &Expr) -> bool {

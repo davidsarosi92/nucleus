@@ -7,7 +7,7 @@ use std::ops::Bound;
 use crate::ast::SetOp;
 use crate::catalog::Table;
 use crate::expr::{Expr, SubKind};
-use crate::ext::ViewRef;
+use crate::ext::{AggRef, TableFnRef, ViewRef};
 
 /// A plan node.
 // Scan carries its table definition inline; plans are few and short-lived,
@@ -157,11 +157,8 @@ pub enum Plan {
 /// Functions that can stand in `FROM`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TableFunc {
-    /// `generate_series(start, stop [, step])` over integers, numerics or
-    /// timestamps (with an interval step).
-    GenerateSeries,
-    /// `unnest(array)`: its elements.
-    Unnest,
+    /// A registered table function.
+    Call(TableFnRef),
     /// A scalar function: its value as one row (the only argument is the
     /// bound call).
     Scalar,
@@ -214,74 +211,17 @@ pub enum Access {
     },
 }
 
-/// An aggregate.
+/// An aggregate call.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Agg {
-    /// The function.
-    pub func: AggFunc,
-    /// Its argument (`None` for `count(*)`).
-    pub arg: Option<Expr>,
+    /// The aggregate.
+    pub func: AggRef,
+    /// Its arguments (none for `count(*)`).
+    pub args: Vec<Expr>,
     /// `DISTINCT`.
     pub distinct: bool,
-    /// `string_agg`'s separator.
-    pub sep: Option<Expr>,
     /// `ORDER BY` inside the call: the order values are aggregated in.
     pub order: Vec<SortKey>,
-}
-
-/// Aggregate functions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AggFunc {
-    /// `count`.
-    Count,
-    /// `sum`.
-    Sum,
-    /// `avg`.
-    Avg,
-    /// `min`.
-    Min,
-    /// `max`.
-    Max,
-    /// `string_agg(text, separator)`.
-    StringAgg,
-    /// `array_agg(x)` (NULLs included).
-    ArrayAgg,
-    /// `bool_and` / `every`.
-    BoolAnd,
-    /// `bool_or`.
-    BoolOr,
-}
-
-impl AggFunc {
-    /// The function called `name`.
-    pub fn lookup(name: &str) -> Option<Self> {
-        Some(match name {
-            "count" => AggFunc::Count,
-            "sum" => AggFunc::Sum,
-            "avg" => AggFunc::Avg,
-            "min" => AggFunc::Min,
-            "max" => AggFunc::Max,
-            "string_agg" => AggFunc::StringAgg,
-            "array_agg" => AggFunc::ArrayAgg,
-            "bool_and" | "every" => AggFunc::BoolAnd,
-            "bool_or" => AggFunc::BoolOr,
-            _ => return None,
-        })
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            AggFunc::Count => "count",
-            AggFunc::Sum => "sum",
-            AggFunc::Avg => "avg",
-            AggFunc::Min => "min",
-            AggFunc::Max => "max",
-            AggFunc::StringAgg => "string_agg",
-            AggFunc::ArrayAgg => "array_agg",
-            AggFunc::BoolAnd => "bool_and",
-            AggFunc::BoolOr => "bool_or",
-        }
-    }
 }
 
 /// A sort key.
@@ -418,7 +358,11 @@ impl Plan {
                 let mut parts: Vec<String> = aggs
                     .iter()
                     .map(|a| {
-                        let arg = a.arg.as_ref().map_or("*".to_string(), show);
+                        let arg = if a.args.is_empty() {
+                            "*".to_string()
+                        } else {
+                            a.args.iter().map(show).collect::<Vec<_>>().join(", ")
+                        };
                         format!(
                             "{}({}{arg})",
                             a.func.name(),
@@ -455,11 +399,11 @@ impl Plan {
             }
             Plan::WorkTable { name, .. } => format!("WorkTable Scan on {name}"),
             Plan::Function { func, args, .. } => match func {
-                TableFunc::GenerateSeries => format!(
-                    "Function Scan on generate_series({})",
+                TableFunc::Call(f) => format!(
+                    "Function Scan on {}({})",
+                    f.name(),
                     args.iter().map(show).collect::<Vec<_>>().join(", ")
                 ),
-                TableFunc::Unnest => format!("Function Scan on unnest({})", show(&args[0])),
                 TableFunc::Scalar => format!("Result: {}", show(&args[0])),
             },
             Plan::View { view } => format!("Catalog Scan on {}.{}", view.schema(), view.name()),
@@ -565,12 +509,7 @@ impl Plan {
             Plan::Aggregate { group, aggs, .. } => {
                 group.iter().for_each(&mut *f);
                 aggs.iter()
-                    .flat_map(|a| {
-                        a.arg
-                            .iter()
-                            .chain(&a.sep)
-                            .chain(a.order.iter().map(|k| &k.expr))
-                    })
+                    .flat_map(|a| a.args.iter().chain(a.order.iter().map(|k| &k.expr)))
                     .for_each(f);
             }
             Plan::Sort { keys, .. } => keys.iter().for_each(|k| f(&k.expr)),

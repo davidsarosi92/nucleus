@@ -14,8 +14,8 @@ use crate::catalog::{Table, row_key};
 use crate::encoding::{decode_row, encode_key, encode_key_value};
 use crate::error::{Error, Result};
 use crate::expr::{Ctx, Env, Expr};
-use crate::ext::CallContext;
-use crate::plan::{Access, Agg, AggFunc, JoinAlgo, JoinType, Plan, SortKey, TableFunc};
+use crate::ext::{Accumulator, CallContext};
+use crate::plan::{Access, Agg, JoinAlgo, JoinType, Plan, SortKey, TableFunc};
 use crate::types::{DataType, Row, Value};
 
 /// A stream of rows.
@@ -146,11 +146,7 @@ pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
                 .collect::<Result<Vec<_>>>()?;
             let mut rows: Vec<Row> = match func {
                 TableFunc::Scalar => vec![vec![vals[0].clone()]],
-                TableFunc::Unnest => match &vals[0] {
-                    Value::Array(items) => items.iter().map(|v| vec![v.clone()]).collect(),
-                    _ => Vec::new(),
-                },
-                TableFunc::GenerateSeries => generate_series(&vals)?,
+                TableFunc::Call(f) => f.rows(&CallContext::new(ctx.txn, ctx.registry), &vals)?,
             };
             if *ordinality {
                 for (i, r) in rows.iter_mut().enumerate() {
@@ -260,7 +256,8 @@ pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
 
 /// `generate_series(start, stop [, step])`: numbers, or timestamps with an
 /// interval step.  NULL arguments give no rows.
-fn generate_series(vals: &[Value]) -> Result<Vec<Row>> {
+/// `generate_series`'s rows (the built-in's implementation).
+pub(crate) fn generate_series(vals: &[Value]) -> Result<Vec<Row>> {
     use crate::ast::BinaryOp;
     use crate::expr::binary;
     if vals.iter().any(Value::is_null) {
@@ -649,56 +646,26 @@ fn full_join<'a>(
     Ok(Box::new(out.into_iter().map(Ok)))
 }
 
-enum Acc {
-    Count(i64),
-    Sum(Value),
-    /// The sum (integers summed as numeric, so it cannot overflow) and the
-    /// count.
-    Avg(Value, i64),
-    MinMax(Value),
-    /// `string_agg` so far (`None`: no value yet).
-    Str(Option<String>),
-    /// `array_agg` so far (`None`: no row yet).
-    Arr(Option<Vec<Value>>),
-    /// `bool_and` (`true`) / `bool_or` (`false`) so far.
-    Bool(Option<bool>, bool),
-}
-
 /// One aggregate's state in one group.
 struct AggState {
-    acc: Acc,
-    /// `DISTINCT`: the values seen.
-    seen: Option<HashSet<Value>>,
-    /// `ORDER BY` in the call: (sort keys, value, separator) until the end.
-    buffer: Option<Vec<(Vec<Value>, Value, Value)>>,
+    acc: Box<dyn Accumulator>,
+    /// `DISTINCT`: the arguments seen.
+    seen: Option<HashSet<Vec<Value>>>,
+    /// `ORDER BY` in the call: (sort keys, arguments) until the end.
+    buffer: Option<Vec<(Vec<Value>, Vec<Value>)>>,
 }
 
-/// Adds one value (and `string_agg`'s separator) to an aggregate.
-fn feed(agg: &Agg, st: &mut AggState, v: Value, sep: Value) -> Result<()> {
-    // array_agg keeps NULLs; the others skip them.
-    if v.is_null() && agg.func != AggFunc::ArrayAgg {
+/// Adds one row's arguments to an aggregate.
+fn feed(agg: &Agg, st: &mut AggState, args: Vec<Value>) -> Result<()> {
+    if !agg.func.keeps_nulls() && args.first().is_some_and(Value::is_null) {
         return Ok(());
     }
     if let Some(seen) = &mut st.seen
-        && !seen.insert(v.clone())
+        && !seen.insert(args.clone())
     {
         return Ok(());
     }
-    if let Acc::Str(s) = &mut st.acc {
-        let text = v.render();
-        *s = Some(match s.take() {
-            None => text,
-            Some(mut so_far) => {
-                if !sep.is_null() {
-                    so_far.push_str(&sep.render());
-                }
-                so_far.push_str(&text);
-                so_far
-            }
-        });
-        return Ok(());
-    }
-    accumulate(agg.func, &mut st.acc, v)
+    st.acc.add(&args)
 }
 
 fn aggregate(
@@ -710,22 +677,10 @@ fn aggregate(
 ) -> Result<Vec<Row>> {
     let fresh = || -> Vec<AggState> {
         aggs.iter()
-            .map(|a| {
-                let acc = match a.func {
-                    AggFunc::Count => Acc::Count(0),
-                    AggFunc::Sum => Acc::Sum(Value::Null),
-                    AggFunc::Avg => Acc::Avg(Value::Null, 0),
-                    AggFunc::Min | AggFunc::Max => Acc::MinMax(Value::Null),
-                    AggFunc::StringAgg => Acc::Str(None),
-                    AggFunc::ArrayAgg => Acc::Arr(None),
-                    AggFunc::BoolAnd => Acc::Bool(None, true),
-                    AggFunc::BoolOr => Acc::Bool(None, false),
-                };
-                AggState {
-                    acc,
-                    seen: a.distinct.then(HashSet::new),
-                    buffer: (!a.order.is_empty()).then(Vec::new),
-                }
+            .map(|a| AggState {
+                acc: a.func.start(),
+                seen: a.distinct.then(HashSet::new),
+                buffer: (!a.order.is_empty()).then(Vec::new),
             })
             .collect()
     };
@@ -751,24 +706,21 @@ fn aggregate(
             }
         };
         for (agg, st) in aggs.iter().zip(groups[gi].1.iter_mut()) {
-            let v = match &agg.arg {
-                None => Value::Bool(true), // count(*)
-                Some(a) => a.eval(&e)?,
-            };
-            let sep = match &agg.sep {
-                Some(x) => x.eval(&e)?,
-                None => Value::Null,
-            };
+            let args = agg
+                .args
+                .iter()
+                .map(|a| a.eval(&e))
+                .collect::<Result<Vec<_>>>()?;
             if let Some(buffer) = &mut st.buffer {
                 let keys = agg
                     .order
                     .iter()
                     .map(|k| k.expr.eval(&e))
                     .collect::<Result<Vec<_>>>()?;
-                buffer.push((keys, v, sep));
+                buffer.push((keys, args));
                 continue;
             }
-            feed(agg, st, v, sep)?;
+            feed(agg, st, args)?;
         }
     }
     if groups.is_empty() && group.is_empty() {
@@ -780,93 +732,15 @@ fn aggregate(
             for (agg, mut st) in aggs.iter().zip(states) {
                 if let Some(mut buffer) = st.buffer.take() {
                     buffer.sort_by(|a, b| compare_keys(&agg.order, &a.0, &b.0));
-                    for (_, v, sep) in buffer {
-                        feed(agg, &mut st, v, sep)?;
+                    for (_, args) in buffer {
+                        feed(agg, &mut st, args)?;
                     }
                 }
-                key.push(match st.acc {
-                    Acc::Count(n) => Value::Int(n),
-                    Acc::Sum(v) | Acc::MinMax(v) => v,
-                    Acc::Avg(_, 0) => Value::Null,
-                    Acc::Avg(Value::Numeric(d), n) => {
-                        Value::Numeric(d.checked_div(crate::decimal::Decimal::from_i64(n))?)
-                    }
-                    Acc::Avg(Value::Interval(i), n) => Value::Interval(i.checked_div(n as f64)?),
-                    Acc::Avg(Value::Float(f), n) => Value::Float(f / n as f64),
-                    Acc::Avg(_, _) => Value::Null,
-                    Acc::Str(s) => s.map_or(Value::Null, Value::Text),
-                    Acc::Arr(a) => a.map_or(Value::Null, Value::Array),
-                    Acc::Bool(b, _) => b.map_or(Value::Null, Value::Bool),
-                });
+                key.push(st.acc.finish()?);
             }
             Ok(key)
         })
         .collect()
-}
-
-fn accumulate(func: AggFunc, acc: &mut Acc, v: Value) -> Result<()> {
-    match acc {
-        Acc::Str(_) => unreachable!("string_agg accumulates with its separator"),
-        Acc::Arr(a) => a.get_or_insert_with(Vec::new).push(v),
-        Acc::Bool(b, and) => {
-            let x = v.truth()?.expect("not null");
-            *b = Some(match *b {
-                None => x,
-                Some(y) if *and => x && y,
-                Some(y) => x || y,
-            });
-        }
-        Acc::Count(n) => *n += 1,
-        Acc::Sum(s) => {
-            *s = if s.is_null() {
-                match v {
-                    Value::Int(_) | Value::Float(_) | Value::Numeric(_) | Value::Interval(_) => v,
-                    v => {
-                        return Err(Error::undefined_function(format!(
-                            "function sum({}) does not exist",
-                            crate::types::type_name(&v)
-                        )));
-                    }
-                }
-            } else {
-                crate::expr::binary(crate::ast::BinaryOp::Add, s.clone(), v)?
-            }
-        }
-        Acc::Avg(s, n) => match v {
-            Value::Int(_) | Value::Float(_) | Value::Numeric(_) | Value::Interval(_) => {
-                let v = match v {
-                    Value::Int(i) => Value::Numeric(crate::decimal::Decimal::from_i64(i)),
-                    v => v,
-                };
-                *s = if s.is_null() {
-                    v
-                } else {
-                    crate::expr::binary(crate::ast::BinaryOp::Add, s.clone(), v)?
-                };
-                *n += 1;
-            }
-            v => {
-                return Err(Error::undefined_function(format!(
-                    "function avg({}) does not exist",
-                    crate::types::type_name(&v)
-                )));
-            }
-        },
-        Acc::MinMax(m) => {
-            let replace = m.is_null() || {
-                let o = v.sql_cmp(m)?.expect("not null");
-                if func == AggFunc::Min {
-                    o.is_lt()
-                } else {
-                    o.is_gt()
-                }
-            };
-            if replace {
-                *m = v;
-            }
-        }
-    }
-    Ok(())
 }
 
 fn sort(rows: Rows, keys: &[SortKey], ctx: &Ctx, outer: Option<&Env>) -> Result<Vec<Row>> {

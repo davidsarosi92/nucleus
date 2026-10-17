@@ -1,6 +1,7 @@
-//! The built-in module: every built-in scalar function, the `public` and
-//! `nc_catalog` schemas and the `nc_catalog` views — registered through the
-//! extension API ([`crate::ext`]) like any other module.
+//! The built-in module: every built-in scalar function, aggregate and table
+//! function, the `public` and `nc_catalog` schemas and the `nc_catalog`
+//! views — registered through the extension API ([`crate::ext`]) like any
+//! other module.
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
@@ -11,9 +12,10 @@ use crate::binder::arith_type;
 use crate::error::{Error, Result};
 use crate::expr::Func;
 use crate::ext::{
-    Arg, ArgInfo, CallContext, FnRef, Module, Registry, Returns, ScalarFunction, Signature,
+    Accumulator, Aggregate, Arg, ArgInfo, CallContext, FnRef, Module, Registry, Returns,
+    ScalarFunction, Signature, TableFunction, TableSignature, common_type,
 };
-use crate::types::{DataType, Value};
+use crate::types::{DataType, Row, Value};
 
 /// The built-in module.
 pub struct Builtin;
@@ -105,6 +107,11 @@ impl Module for Builtin {
                 .expect("listed");
             r.add_function(names, f.clone())?;
         }
+        for (a, names) in AGGREGATES {
+            r.add_aggregate(names, Arc::new(BuiltinAgg(*a)))?;
+        }
+        r.add_table_function(Arc::new(GenerateSeries))?;
+        r.add_table_function(Arc::new(Unnest))?;
         r.add_schema("public", "user tables", false)?;
         r.add_schema("nc_catalog", "the nucleus system catalog", false)?;
         for v in crate::ncatalog::views() {
@@ -385,5 +392,299 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
         Func::Coalesce | Func::Greatest | Func::Least => {
             Ok(Signature::new(vec![Arg::Common; n], Returns::Common))
         }
+    }
+}
+
+// ------------------------------------------------------------ aggregates
+
+/// The built-in aggregates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AggFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    StringAgg,
+    ArrayAgg,
+    BoolAnd,
+    BoolOr,
+}
+
+const AGGREGATES: &[(AggFunc, &[&str])] = &[
+    (AggFunc::Count, &["count"]),
+    (AggFunc::Sum, &["sum"]),
+    (AggFunc::Avg, &["avg"]),
+    (AggFunc::Min, &["min"]),
+    (AggFunc::Max, &["max"]),
+    (AggFunc::StringAgg, &["string_agg"]),
+    (AggFunc::ArrayAgg, &["array_agg"]),
+    (AggFunc::BoolAnd, &["bool_and", "every"]),
+    (AggFunc::BoolOr, &["bool_or"]),
+];
+
+struct BuiltinAgg(AggFunc);
+
+impl Aggregate for BuiltinAgg {
+    fn name(&self) -> &str {
+        AGGREGATES
+            .iter()
+            .find(|(f, _)| *f == self.0)
+            .expect("listed")
+            .1[0]
+    }
+
+    fn arity(&self) -> RangeInclusive<usize> {
+        if self.0 == AggFunc::StringAgg {
+            2..=2
+        } else {
+            1..=1
+        }
+    }
+
+    fn accepts_star(&self) -> bool {
+        self.0 == AggFunc::Count
+    }
+
+    /// `array_agg` keeps `NULL`s.
+    fn keeps_nulls(&self) -> bool {
+        self.0 == AggFunc::ArrayAgg
+    }
+
+    fn resolve(&self, args: &[ArgInfo]) -> Result<Signature> {
+        use DataType::*;
+        let name = self.name();
+        let at = args.first().and_then(|a| a.ty);
+        let keep = |t| Ok(Signature::keep(args.len(), t));
+        if matches!(self.0, AggFunc::Sum | AggFunc::Avg)
+            && at.is_some_and(|t| !t.is_number() && t != Interval)
+        {
+            return Err(Error::undefined_function(format!(
+                "function {name}({}) does not exist",
+                at.unwrap()
+            )));
+        }
+        match self.0 {
+            AggFunc::Count => keep(Some(Int)),
+            // As PostgreSQL: the average of integers is numeric.
+            AggFunc::Avg => keep(match at {
+                Some(Int) | None => Some(Numeric),
+                t => t,
+            }),
+            AggFunc::Sum | AggFunc::Min | AggFunc::Max => keep(at),
+            AggFunc::StringAgg => {
+                if let Some(t) = args.iter().find_map(|a| a.ty.filter(|t| *t != Text)) {
+                    return Err(Error::undefined_function(format!(
+                        "operator does not exist: {t} string_agg text"
+                    )));
+                }
+                Ok(Signature::new(
+                    vec![Arg::Untyped(Text); 2],
+                    Returns::Type(Some(Text)),
+                ))
+            }
+            AggFunc::ArrayAgg => {
+                keep(Some(at.unwrap_or(Text).array_of().ok_or_else(|| {
+                    Error::feature("arrays of arrays are not supported")
+                })?))
+            }
+            AggFunc::BoolAnd | AggFunc::BoolOr => match at {
+                Some(t) if t != Bool => Err(Error::type_mismatch(format!(
+                    "argument of {name} must be type boolean, not type {t}"
+                ))),
+                _ => keep(Some(Bool)),
+            },
+        }
+    }
+
+    fn start(&self) -> Box<dyn Accumulator> {
+        Box::new(Acc {
+            func: self.0,
+            count: 0,
+            value: Value::Null,
+            text: None,
+            items: None,
+        })
+    }
+}
+
+/// A built-in aggregate's state.
+struct Acc {
+    func: AggFunc,
+    /// Rows seen (`count`, `avg`).
+    count: i64,
+    /// The running sum, minimum, maximum or truth value (`NULL`: no row).
+    value: Value,
+    /// `string_agg` so far.
+    text: Option<String>,
+    /// `array_agg` so far.
+    items: Option<Vec<Value>>,
+}
+
+impl Accumulator for Acc {
+    fn add(&mut self, args: &[Value]) -> Result<()> {
+        let add = |a: Value, b: Value| crate::expr::binary(BinaryOp::Add, a, b);
+        let v = args.first().cloned().unwrap_or(Value::Null);
+        match self.func {
+            AggFunc::Count => self.count += 1,
+            AggFunc::Sum => {
+                self.value = match (&self.value, v) {
+                    (Value::Null, v @ (Value::Int(_) | Value::Float(_) | Value::Numeric(_))) => v,
+                    (Value::Null, v @ Value::Interval(_)) => v,
+                    (Value::Null, v) => {
+                        return Err(Error::undefined_function(format!(
+                            "function sum({}) does not exist",
+                            crate::types::type_name(&v)
+                        )));
+                    }
+                    (s, v) => add(s.clone(), v)?,
+                }
+            }
+            AggFunc::Avg => {
+                let v = match v {
+                    Value::Int(i) => Value::Numeric(crate::decimal::Decimal::from_i64(i)),
+                    v @ (Value::Float(_) | Value::Numeric(_) | Value::Interval(_)) => v,
+                    v => {
+                        return Err(Error::undefined_function(format!(
+                            "function avg({}) does not exist",
+                            crate::types::type_name(&v)
+                        )));
+                    }
+                };
+                self.value = if self.value.is_null() {
+                    v
+                } else {
+                    add(self.value.clone(), v)?
+                };
+                self.count += 1;
+            }
+            AggFunc::Min | AggFunc::Max => {
+                let replace = self.value.is_null() || {
+                    let o = v.sql_cmp(&self.value)?.expect("not null");
+                    if self.func == AggFunc::Min {
+                        o.is_lt()
+                    } else {
+                        o.is_gt()
+                    }
+                };
+                if replace {
+                    self.value = v;
+                }
+            }
+            AggFunc::StringAgg => {
+                let text = v.render();
+                self.text = Some(match self.text.take() {
+                    None => text,
+                    Some(mut so_far) => {
+                        if let Some(sep) = args.get(1).filter(|s| !s.is_null()) {
+                            so_far.push_str(&sep.render());
+                        }
+                        so_far.push_str(&text);
+                        so_far
+                    }
+                });
+            }
+            AggFunc::ArrayAgg => self.items.get_or_insert_with(Vec::new).push(v),
+            AggFunc::BoolAnd | AggFunc::BoolOr => {
+                let x = v.truth()?.expect("not null");
+                self.value = Value::Bool(match self.value {
+                    Value::Bool(y) if self.func == AggFunc::BoolAnd => x && y,
+                    Value::Bool(y) => x || y,
+                    _ => x,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<Value> {
+        Ok(match self.func {
+            AggFunc::Count => Value::Int(self.count),
+            AggFunc::Avg => match std::mem::replace(&mut self.value, Value::Null) {
+                _ if self.count == 0 => Value::Null,
+                Value::Numeric(d) => {
+                    Value::Numeric(d.checked_div(crate::decimal::Decimal::from_i64(self.count))?)
+                }
+                Value::Interval(i) => Value::Interval(i.checked_div(self.count as f64)?),
+                Value::Float(f) => Value::Float(f / self.count as f64),
+                _ => Value::Null,
+            },
+            AggFunc::StringAgg => self.text.take().map_or(Value::Null, Value::Text),
+            AggFunc::ArrayAgg => self.items.take().map_or(Value::Null, Value::Array),
+            _ => std::mem::replace(&mut self.value, Value::Null),
+        })
+    }
+}
+
+// ------------------------------------------------------- table functions
+
+/// `generate_series(start, stop [, step])` over integers, numerics or
+/// timestamps (with an interval step).
+struct GenerateSeries;
+
+impl TableFunction for GenerateSeries {
+    fn name(&self) -> &str {
+        "generate_series"
+    }
+
+    fn arity(&self) -> RangeInclusive<usize> {
+        2..=3
+    }
+
+    fn resolve(&self, args: &[ArgInfo]) -> Result<TableSignature> {
+        let ty = common_type(&args[..2])?.unwrap_or(DataType::Int);
+        if !(ty.is_number() || ty.is_datetime()) {
+            return Err(Error::undefined_function(format!(
+                "function generate_series({ty}, {ty}) does not exist"
+            )));
+        }
+        let mut a = vec![Arg::Common, Arg::Common];
+        if args.len() == 3 {
+            a.push(Arg::Untyped(if ty.is_datetime() {
+                DataType::Interval
+            } else {
+                ty
+            }));
+        }
+        let out = if ty == DataType::Date {
+            DataType::Timestamp
+        } else {
+            ty
+        };
+        Ok(TableSignature {
+            args: a,
+            columns: vec![(self.name().into(), Some(out))],
+        })
+    }
+
+    fn rows(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Vec<Row>> {
+        crate::exec::generate_series(args)
+    }
+}
+
+/// `unnest(array)`: its elements.
+struct Unnest;
+
+impl TableFunction for Unnest {
+    fn name(&self) -> &str {
+        "unnest"
+    }
+
+    fn arity(&self) -> RangeInclusive<usize> {
+        1..=1
+    }
+
+    fn resolve(&self, args: &[ArgInfo]) -> Result<TableSignature> {
+        Ok(TableSignature {
+            args: vec![Arg::Keep],
+            columns: vec![(self.name().into(), args[0].ty.and_then(DataType::element))],
+        })
+    }
+
+    fn rows(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Vec<Row>> {
+        Ok(match &args[0] {
+            Value::Array(items) => items.iter().map(|v| vec![v.clone()]).collect(),
+            _ => Vec::new(),
+        })
     }
 }

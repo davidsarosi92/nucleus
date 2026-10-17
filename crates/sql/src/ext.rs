@@ -195,6 +195,135 @@ impl fmt::Debug for FnRef {
     }
 }
 
+/// The common type of arguments, as the binder unifies [`Arg::Common`]
+/// ones: string literals take the others' type, or `text` if all are.
+pub fn common_type(args: &[ArgInfo]) -> Result<Option<DataType>> {
+    let mut ty = None;
+    for a in args.iter().filter(|a| !a.text_literal) {
+        ty = crate::binder::unify(ty, a.ty)?;
+    }
+    if ty.is_none() && args.iter().any(|a| a.text_literal) {
+        ty = Some(DataType::Text);
+    }
+    Ok(ty)
+}
+
+/// An aggregate function.  The engine groups rows, skips rows whose first
+/// argument is `NULL` (unless [`Aggregate::keeps_nulls`]), applies
+/// `DISTINCT` and `ORDER BY` inside the call, and feeds each group's rows
+/// to a fresh [`Accumulator`].
+pub trait Aggregate: Send + Sync {
+    /// Its name.
+    fn name(&self) -> &str;
+
+    /// The argument counts accepted.
+    fn arity(&self) -> RangeInclusive<usize>;
+
+    /// Whether `name(*)` is accepted (fed with no arguments).
+    fn accepts_star(&self) -> bool {
+        false
+    }
+
+    /// Whether rows whose first argument is `NULL` are fed too.
+    fn keeps_nulls(&self) -> bool {
+        false
+    }
+
+    /// Types a call (as [`ScalarFunction::resolve`]; [`Returns::Constant`]
+    /// is not allowed).
+    fn resolve(&self, args: &[ArgInfo]) -> Result<Signature>;
+
+    /// A fresh state, for one group.
+    fn start(&self) -> Box<dyn Accumulator>;
+}
+
+/// One group's state of an aggregate.
+pub trait Accumulator {
+    /// Takes one row's arguments.
+    fn add(&mut self, args: &[Value]) -> Result<()>;
+
+    /// The result, after the last row (or none).
+    fn finish(&mut self) -> Result<Value>;
+}
+
+/// A registered aggregate, as a plan holds it.  Equal when names are.
+#[derive(Clone)]
+pub struct AggRef(Arc<dyn Aggregate>);
+
+impl AggRef {
+    /// A reference to `a`.
+    pub fn new(a: Arc<dyn Aggregate>) -> Self {
+        Self(a)
+    }
+}
+
+impl std::ops::Deref for AggRef {
+    type Target = dyn Aggregate;
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl PartialEq for AggRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.name() == other.0.name()
+    }
+}
+
+impl fmt::Debug for AggRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.name())
+    }
+}
+
+/// How a table function call is typed: per argument, and its columns (a
+/// single column is named after the function, or its alias).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableSignature {
+    /// One per argument.
+    pub args: Vec<Arg>,
+    /// The output columns: name and type.
+    pub columns: Vec<(String, Option<DataType>)>,
+}
+
+/// A function in `FROM`: `generate_series(1, 10)`, `unnest(array)`.
+pub trait TableFunction: Send + Sync {
+    /// Its name.
+    fn name(&self) -> &str;
+
+    /// The argument counts accepted.
+    fn arity(&self) -> RangeInclusive<usize>;
+
+    /// Types a call.
+    fn resolve(&self, args: &[ArgInfo]) -> Result<TableSignature>;
+
+    /// Its rows, for these argument values.
+    fn rows(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Vec<Row>>;
+}
+
+/// A registered table function, as a plan holds it.  Equal when names are.
+#[derive(Clone)]
+pub struct TableFnRef(Arc<dyn TableFunction>);
+
+impl std::ops::Deref for TableFnRef {
+    type Target = dyn TableFunction;
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl PartialEq for TableFnRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.name() == other.0.name()
+    }
+}
+
+impl fmt::Debug for TableFnRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.name())
+    }
+}
+
 /// A read-only table computed when it is scanned: `nc_catalog.tables`,
 /// `pg_catalog.pg_class`, …
 pub trait CatalogView: Send + Sync {
@@ -252,6 +381,8 @@ pub struct Schema {
 pub struct Registry {
     modules: Vec<String>,
     functions: HashMap<String, FnRef>,
+    aggregates: HashMap<String, AggRef>,
+    table_functions: HashMap<String, TableFnRef>,
     schemas: Vec<Schema>,
     views: Vec<ViewRef>,
 }
@@ -307,9 +438,15 @@ impl Registry {
         &self.modules
     }
 
+    /// Whether a scalar function or aggregate is called `name` (they share
+    /// one namespace: a call does not say which it is).
+    fn callable(&self, name: &str) -> bool {
+        self.functions.contains_key(name) || self.aggregates.contains_key(name)
+    }
+
     /// Registers `f` under each of `names`.
     pub fn add_function(&mut self, names: &[&str], f: Arc<dyn ScalarFunction>) -> Result<()> {
-        if let Some(n) = names.iter().find(|n| self.functions.contains_key(**n)) {
+        if let Some(n) = names.iter().find(|n| self.callable(n)) {
             return Err(duplicate("function", n));
         }
         let f = FnRef(f);
@@ -322,6 +459,38 @@ impl Registry {
     /// The function called `name`.
     pub fn function(&self, name: &str) -> Option<&FnRef> {
         self.functions.get(name)
+    }
+
+    /// Registers aggregate `a` under each of `names`.
+    pub fn add_aggregate(&mut self, names: &[&str], a: Arc<dyn Aggregate>) -> Result<()> {
+        if let Some(n) = names.iter().find(|n| self.callable(n)) {
+            return Err(duplicate("function", n));
+        }
+        let a = AggRef(a);
+        for n in names {
+            self.aggregates.insert((*n).to_string(), a.clone());
+        }
+        Ok(())
+    }
+
+    /// The aggregate called `name`.
+    pub fn aggregate(&self, name: &str) -> Option<&AggRef> {
+        self.aggregates.get(name)
+    }
+
+    /// Registers table function `f`.
+    pub fn add_table_function(&mut self, f: Arc<dyn TableFunction>) -> Result<()> {
+        if self.table_functions.contains_key(f.name()) {
+            return Err(duplicate("table function", f.name()));
+        }
+        self.table_functions
+            .insert(f.name().to_string(), TableFnRef(f));
+        Ok(())
+    }
+
+    /// The table function called `name`.
+    pub fn table_function(&self, name: &str) -> Option<&TableFnRef> {
+        self.table_functions.get(name)
     }
 
     /// Every function name, sorted.
