@@ -262,7 +262,7 @@ pub fn encode_row(row: &[Value]) -> Vec<u8> {
 }
 
 /// Appends one value's row encoding: its tag, then its bytes.
-fn encode_value(out: &mut Vec<u8>, v: &Value) {
+pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
     match v {
         Value::Null => out.push(0),
         Value::Bool(b) => out.extend_from_slice(&[1, u8::from(*b)]),
@@ -313,7 +313,7 @@ fn encode_value(out: &mut Vec<u8>, v: &Value) {
 }
 
 /// Reads one value's row encoding.
-fn decode_value(r: &mut Reader) -> Result<Value> {
+pub fn decode_value(r: &mut Reader) -> Result<Value> {
     let bad = |_| Error::internal("malformed row encoding");
     Ok(match r.u8().map_err(bad)? {
         0 => Value::Null,

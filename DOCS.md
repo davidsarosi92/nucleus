@@ -17,7 +17,9 @@
 | 7 | d-os settings store (`integrations/d-os`) |
 | 8 | SQL layer (`nucleus-sql`) |
 | 9 | Server (`nucleus-server`) |
-| 10 | Change log |
+| 10 | The nucleus protocol (`ncp`) |
+| 11 | Drivers (`drivers/`) |
+| 12 | Change log |
 
 ---
 
@@ -421,9 +423,9 @@ backslash), and output escapes non-printable bytes the same way.  Outside
 of input is rolled back.  `crates/cli/tests/cli.rs` drives the binaries.
 
 **`ncsql`** (§M14.6) is nucleus's SQL shell: with a directory it opens
-that database itself; otherwise it connects to a nucleus server (default
-`127.0.0.1:5432`, user and database `nucleus`, the password from
-`--password` or `NCPASSWORD`).  Statements end with `;` (a script on stdin,
+that database itself; otherwise it connects to a nucleus server over the
+nucleus protocol (default `127.0.0.1:20035`, user, password and database
+`nucleus`; the password also from `NCPASSWORD`).  Statements end with `;` (a script on stdin,
 or one `-c` command); the prompt shows `*` in a transaction block and `!`
 in a failed one.  Its backslash commands read `nc_catalog` (§8.11), so they
 work the same locally and remotely:
@@ -438,11 +440,8 @@ work the same locally and remotely:
 | `\schemas`, `\dn` · `\types`, `\dT` | schemas, types |
 | `\timing` · `\conninfo` · `\?` · `\q` | timing toggle, connection, help, quit |
 
-The network side is `nucleus-client` (`crates/client`): the frontend of the
-PostgreSQL protocol 3.0 — startup, trust or cleartext password, the simple
-query protocol, results as text, SQLSTATE errors, the transaction status —
-usable by any Rust program (it also talks to PostgreSQL servers using
-trust or password authentication).
+The network side is `nucleus-client` (`crates/client`), the Rust driver
+(§11).
 
 ### 6.3 Packaging
 
@@ -763,8 +762,29 @@ that need functions, sequences or permissions do not.
 
 ## 9. Server (`nucleus-server`)
 
-`nucleus server <dir> [--listen 127.0.0.1:5432] [--password <pw>]`, or
-`nucleus_server::serve(listener, kv, Config)`.  PostgreSQL protocol 3.0:
+```
+nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
+                     [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
+```
+
+The server speaks **the nucleus protocol** (§10, `nucleus_server::serve`)
+on `--listen` (default `127.0.0.1:20035`).  Clients log in as user
+`nucleus` with password `nucleus` unless `--user` / `--password` say
+otherwise; `--no-auth` accepts anyone (`Config::trust()`); a wrong user or
+password is `28P01`.  Every nucleus client tries `nucleus` / `nucleus` by
+default, so a fresh server and client work together unconfigured.
+Passwords travel in clear text: keep servers on trusted networks (TLS is
+later work).  One thread per connection.  `--log-queries`
+(`Config::log_queries`) prints every statement a client sends, and every
+error, to stderr — to see what a tool asks for.
+
+**PostgreSQL compatibility** (optional, D14): `--pg-compat` also listens
+for the PostgreSQL protocol (`nucleus_server::serve_pg`, default
+`127.0.0.1:5432`), with the same credentials, so `psql` and PostgreSQL
+drivers and tools can connect.  It is frozen: kept working, not extended
+for the catalog queries particular tools send (some, like Valentina
+Studio, ask for PostgreSQL internals nucleus does not have).  PostgreSQL
+protocol 3.0:
 SSL/GSS requests declined (`N`), trust or cleartext-password
 authentication (`28P01` on failure), parameter status (`server_version`
 16.0 (nucleus), UTF8, ISO dates), backend key data, `ReadyForQuery` with
@@ -777,24 +797,103 @@ Flush; after an error, messages are skipped until Sync.  Types on the wire:
 accepted), `text` 25 (`varchar`, `bpchar`, `name` accepted), `numeric`
 1700, `date` 1082, `timestamp` 1114, `timestamptz` 1184, `interval` 1186,
 and their arrays; text and binary formats for all of them (binary numeric
-and dates checked against PostgreSQL's `*_send`).  One thread per
-connection.  `--log-queries` (`Config::log_queries`) prints every
-statement a client sends, and every error, to stderr — to see what a tool
-asks for.
+and dates checked against PostgreSQL's `*_send`).
 
 Not supported: `COPY`, cancellation.  `psql`'s `\d` family works through
 the compatibility catalog (§8.11).
 
-Tests: `crates/server/tests/wire.rs` runs every slt script over the wire
-with a minimal client, checks password authentication and the SSL refusal,
+Tests: `crates/client/tests/client.rs` runs every slt script over the
+nucleus protocol and checks typed values both ways, parameters, errors,
+transactions and passwords; `crates/server/tests/wire.rs` runs every slt
+script over the PostgreSQL protocol with a minimal client, checks password authentication and the SSL refusal,
 and drives the extended protocol with the `postgres` crate (prepared
 statements, typed and NULL parameters, binary results, SQLSTATE codes,
 transactions, portals, `RETURNING`).  `scripts/psql-smoke.sh` (run by CI on
 Linux) uses the real `psql`, including `\d`, `\d+`, `\dt`, `\di`, `\dn`,
 `\l` and a foreign key's `Referenced by`.
 
-## 10. Change log
+## 10. The nucleus protocol (`ncp`)
 
+nucleus's own client protocol (D14): what `nucleus server` speaks by
+default and what nucleus's drivers (§11) implement.  This section is the
+whole specification.
+
+**Transport.** TCP, default port **20035** (`NC` in ASCII).  Every integer
+is **little-endian**.  A *string* is a `u32` byte length and that many
+bytes of UTF-8.  Passwords travel in clear text: use it on trusted
+networks (TLS is later work).
+
+**Frames.** Each message is a `u8` kind, a `u32` body length (the 5
+header bytes not included; at most 1 GiB), then the body.
+
+| Kind | Direction | Body |
+|------|-----------|------|
+| `H` Hello | client → server, first | `u16` version (1), string user, string database, string password (empty: none), string client name |
+| `W` Welcome | server → client | `u16` version, string server (`nucleus 0.1.0`), `u32` session id |
+| `Q` Query | client → server | string SQL, `u8` result format (0 typed, 1 text), `u16` parameter count, the parameters as values |
+| `C` Columns | server → client | `u16` count, then per column: string name, type |
+| `D` Row | server → client | one value per column |
+| `K` Done | server → client | string command (`SELECT`, `INSERT`, `CREATE TABLE`, `BEGIN`, …), `u64` rows returned or affected (0 when it does not apply) |
+| `E` Error | server → client | string SQLSTATE (5 characters), string message |
+| `R` Ready | server → client | `u8` transaction status: 0 idle, 1 in a transaction block, 2 in a failed block |
+| `X` Bye | client → server | empty; the server closes |
+
+**Session.** The client sends Hello; the server answers Welcome and Ready,
+or Error and closes (`28P01` wrong user or password — servers default to
+user `nucleus`, password `nucleus`; `08P01` unsupported version or a
+malformed message).  Then any number of Query messages, each answered
+by, per statement, `[C D*] K` (Columns and Rows only for statements that
+return rows), and finally Ready.  A failing statement sends Error instead
+of Done, the remaining statements of that Query are skipped, and Ready
+follows.  A Query with parameters must hold one statement; `$1`, `$2`, …
+refer to them.  Transactions are SQL (`BEGIN`, `COMMIT`, `ROLLBACK`), as in
+§8.7; outside a block every statement commits on its own.
+
+**Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
+2 bigint, 3 double precision, 4 text, 5 numeric, 6 date, 7 timestamp,
+8 timestamptz, 9 interval, 10 array followed by the element's tag.
+
+**Values** (in Rows and parameters): a `u8` tag, then:
+
+| Tag | Value | Payload |
+|-----|-------|---------|
+| 0 | NULL | — |
+| 1 | boolean | `u8` 0 or 1 |
+| 2 | bigint | `i64` |
+| 3 | double precision | `f64` (IEEE 754 bits) |
+| 4 | text | string |
+| 5 | numeric | `i128` mantissa (16 bytes, two's complement), `u8` scale: value = mantissa × 10^-scale |
+| 6 | date | `i32` days since 2000-01-01 |
+| 7 | timestamp | `i64` µs since 2000-01-01 00:00 |
+| 8 | timestamptz | `i64` µs since 2000-01-01 00:00 UTC |
+| 9 | interval | `i32` months, `i32` days, `i64` µs |
+| 10 | array | `u32` count, then each element as a value |
+
+This is the storage's own row encoding (§8.1), so values cross the wire
+exactly as stored.  With result format 1 (text) every non-NULL value is
+sent as text (tag 4), rendered as `ncsql` prints it.  Parameters are
+converted to the type their place needs (a text parameter is parsed, as an
+untyped literal would be).
+
+## 11. Drivers (`drivers/`)
+
+**Rust:** `nucleus-client` (`crates/client`, no dependencies).
+`Client::connect(Config)` (defaults: `127.0.0.1:20035`, user, password and
+database `nucleus`), `execute(sql, params) -> Reply` (columns, rows,
+command, count), `rows(sql, params)`, `query(sql, params, Format)` for
+several statements or text results, `status()`, `close()`.  `Value` covers
+every nucleus type (numeric as mantissa and scale, dates and timestamps as
+days and µs since 2000-01-01, intervals, arrays) with `From` conversions
+for parameters.
+
+(The other languages: §M14.8, in progress.)
+
+## 12. Change log
+
+- **2026-10-17 — §M14.7 the nucleus protocol (`ncp`):** the server's
+  default protocol (port 20035, user / password `nucleus`); the Rust
+  driver and `ncsql` use it; PostgreSQL's protocol is optional
+  (`--pg-compat`).
 - **2026-10-17 — §M14.6 `ncsql`:** the nucleus SQL shell, local or over the
   network, with `nc_catalog` commands; `nucleus-client`; the server's
   `--log-queries`.

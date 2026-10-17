@@ -6,10 +6,10 @@ set -euo pipefail
 bin=${1:?usage: scripts/psql-smoke.sh <nucleus binary>}
 work=$(mktemp -d)
 port=54329
-"$bin" server "$work/db" --listen "127.0.0.1:$port" 2>"$work/server.log" &
+"$bin" server "$work/db" --listen 127.0.0.1:0 --pg-compat "127.0.0.1:$port" 2>"$work/server.log" &
 pid=$!
 trap 'kill $pid 2>/dev/null; rm -rf "$work"' EXIT
-export PGHOST=127.0.0.1 PGPORT=$port PGUSER=nucleus PGDATABASE=nucleus PGCONNECT_TIMEOUT=2
+export PGHOST=127.0.0.1 PGPORT=$port PGUSER=nucleus PGPASSWORD=nucleus PGDATABASE=nucleus PGCONNECT_TIMEOUT=2
 for _ in $(seq 50); do psql -X -At -c 'SELECT 1' >/dev/null 2>&1 && break; sleep 0.2; done
 
 psql -X -v ON_ERROR_STOP=1 -q <<'SQL'

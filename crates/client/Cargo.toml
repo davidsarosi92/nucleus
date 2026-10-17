@@ -12,6 +12,7 @@ repository.workspace = true
 nucleus-kv.workspace = true
 nucleus-platform.workspace = true
 nucleus-server.workspace = true
+nucleus-sql.workspace = true
 
 [lints]
 workspace = true

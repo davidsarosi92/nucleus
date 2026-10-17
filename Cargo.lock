@@ -402,6 +402,7 @@ dependencies = [
  "nucleus-kv",
  "nucleus-platform",
  "nucleus-server",
+ "nucleus-sql",
 ]
 
 [[package]]

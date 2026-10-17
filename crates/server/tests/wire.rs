@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use nucleus_kv::{Database, Kv, Options};
 use nucleus_platform::sim::SimPlatform;
-use nucleus_server::{Config, serve};
+use nucleus_server::{Config, serve_pg as serve};
 use nucleus_sql::slt::{Cell, Connection, SqlError, run_script};
 
 fn start(config: Config) -> SocketAddr {
@@ -145,7 +145,7 @@ fn sql_scripts_over_the_wire() {
         .iter()
         .filter(|f| f.extension().is_some_and(|e| e == "slt"))
     {
-        let addr = start(Config::default());
+        let addr = start(Config::trust());
         let name = f.file_name().unwrap().to_string_lossy().into_owned();
         let script = std::fs::read_to_string(f).unwrap();
         let mut connect =
@@ -165,6 +165,7 @@ fn sql_scripts_over_the_wire() {
 #[test]
 fn password_authentication() {
     let addr = start(Config {
+        user: "test".into(),
         password: Some("s3cret".into()),
         ..Config::default()
     });
@@ -181,7 +182,7 @@ fn password_authentication() {
 
 #[test]
 fn ssl_is_declined_and_plain_connections_continue() {
-    let addr = start(Config::default());
+    let addr = start(Config::trust());
     let mut s = TcpStream::connect(addr).unwrap();
     let mut req = 8i32.to_be_bytes().to_vec();
     req.extend_from_slice(&80_877_103i32.to_be_bytes());
@@ -195,7 +196,7 @@ fn ssl_is_declined_and_plain_connections_continue() {
 fn a_real_driver_with_the_extended_protocol() {
     use postgres::{Client as Pg, NoTls, error::SqlState};
 
-    let addr = start(Config::default());
+    let addr = start(Config::trust());
     let url = format!(
         "host={} port={} user=test dbname=nucleus",
         addr.ip(),

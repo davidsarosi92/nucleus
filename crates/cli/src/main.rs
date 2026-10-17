@@ -18,8 +18,12 @@ usage:
   nucleus sql [<dir>] [-h <host[:port]>] [-U <user>] [-d <db>] [-c <sql>]
                                     SQL shell (also `ncsql`): a local database or a
                                     server; a script on stdin, or one command
-  nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]
-                                    PostgreSQL-compatible server (default 127.0.0.1:5432)
+  nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
+                     [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
+                                    the server: the nucleus protocol (default
+                                    127.0.0.1:20035), and with --pg-compat also
+                                    PostgreSQL's (default 127.0.0.1:5432); clients
+                                    log in as nucleus / nucleus unless changed
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

@@ -21,15 +21,17 @@ nucleus kv ./mydb get greeting
 nucleus kv ./mydb            # interactive shell: begin, put, get, scan, commit, …
 ```
 
-SQL, and a server `psql` or any PostgreSQL driver can connect to:
+SQL, and a server that nucleus's drivers (Rust; C, C++, Python, JS/TS and
+Java are coming, §M14.8) and `ncsql` connect to — and, with `--pg-compat`,
+`psql` and PostgreSQL drivers too:
 
 ```sh
 nucleus sql ./mydb -c "CREATE TABLE t (id INT PRIMARY KEY, name TEXT)"
 ncsql ./mydb                            # SQL shell (same as `nucleus sql`)
-nucleus server ./mydb --listen 127.0.0.1:5432
-ncsql -h 127.0.0.1:5432 -c '\d t'        # the shell, connected to the server
-psql -h 127.0.0.1 -p 5432 -c "SELECT * FROM t"
-psql -h 127.0.0.1 -p 5432 -c '\d t'    # psql's \d works too
+nucleus server ./mydb                   # nucleus protocol on 127.0.0.1:20035
+ncsql -c '\d t'                         # the shell, connected (user and password: nucleus)
+nucleus server ./mydb --pg-compat       # also PostgreSQL's protocol on 5432
+PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
 ```
 
 nucleus describes itself in its own catalog, `nc_catalog`

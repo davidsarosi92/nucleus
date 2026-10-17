@@ -9,7 +9,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::sync::Arc;
 use std::time::Instant;
 
-use nucleus_client::{Client, Config, Reply, TxnStatus as RemoteStatus};
+use nucleus_client::{Client, Config, Format, TxnStatus as RemoteStatus, Value};
 use nucleus_kv::{Database, Options};
 use nucleus_sql::{Output, Session, TxnStatus};
 
@@ -18,11 +18,11 @@ type Result<T> = std::result::Result<T, String>;
 const USAGE: &str = "\
 usage: ncsql [<dir>] [options]          (also: nucleus sql …)
   <dir>                     open a local database directory
-  -h, --host <host[:port]>  connect to a nucleus server (default 127.0.0.1:5432)
+  -h, --host <host[:port]>  connect to a nucleus server (default 127.0.0.1:20035)
   -p, --port <port>
   -U, --user <name>         (default nucleus)
   -d, --database <name>     (default nucleus)
-      --password <pw>       or the NCPASSWORD environment variable
+      --password <pw>       or NCPASSWORD (default nucleus)
   -c <sql>                  run one command and exit
 Without -c it reads statements from stdin (a shell on a terminal).
 ";
@@ -111,20 +111,36 @@ impl Backend {
                 Ok(out)
             }
             Backend::Remote(c) => Ok(c
-                .query(sql)
+                .query(sql, &[], Format::Text)
                 .map_err(|e| format!("connection lost: {e}"))?
                 .into_iter()
-                .filter_map(|r| match r {
-                    Ok(Reply::Rows { columns, rows, .. }) => Some(Ok(Res::Rows(Table {
-                        columns: columns.into_iter().map(|c| c.name).collect(),
-                        rows,
-                    }))),
-                    Ok(Reply::Command(tag)) => Some(Ok(Res::Command(tag))),
-                    Ok(Reply::Empty) => None,
-                    Err(e) => Some(Err(Failure {
+                .map(|r| match r {
+                    Ok(r) if r.has_rows => Ok(Res::Rows(Table {
+                        columns: r.columns.into_iter().map(|c| c.name).collect(),
+                        rows: r
+                            .rows
+                            .into_iter()
+                            .map(|row| {
+                                row.into_iter()
+                                    .map(|v| match v {
+                                        Value::Null => None,
+                                        Value::Text(s) => Some(s),
+                                        v => Some(v.to_string()),
+                                    })
+                                    .collect()
+                            })
+                            .collect(),
+                    })),
+                    // nucleus's command tags: the command, and the row
+                    // count where it means something.
+                    Ok(r) => Ok(Res::Command(match r.command.as_str() {
+                        "INSERT" | "UPDATE" | "DELETE" => format!("{} {}", r.command, r.count),
+                        _ => r.command,
+                    })),
+                    Err(e) => Err(Failure {
                         code: e.code,
                         message: e.message,
-                    })),
+                    }),
                 })
                 .collect()),
         }
@@ -157,12 +173,13 @@ impl Backend {
             Backend::Remote(c) => {
                 let cfg = c.config();
                 format!(
-                    "database \"{}\" as user \"{}\" on {}:{} (server {})",
+                    "database \"{}\" as user \"{}\" on {}:{} ({}, session {})",
                     cfg.database,
                     cfg.user,
                     cfg.host,
                     cfg.port,
-                    c.parameter("server_version").unwrap_or("?")
+                    c.server_version(),
+                    c.session_id()
                 )
             }
         }
@@ -536,8 +553,12 @@ impl Shell {
 pub fn run(args: &[String]) -> Result<()> {
     let mut dir = None;
     let mut command = None;
-    let mut cfg = Config::default();
+    let mut cfg = Config {
+        client_name: "ncsql".into(),
+        ..Config::default()
+    };
     let mut remote = false;
+    let mut explicit_password = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = |what: &str| it.next().cloned().ok_or(format!("{a} needs {what}"));
@@ -562,7 +583,7 @@ pub fn run(args: &[String]) -> Result<()> {
             }
             "-U" | "--user" => cfg.user = value("a user name")?,
             "-d" | "--database" => cfg.database = value("a database name")?,
-            "--password" => cfg.password = Some(value("a password")?),
+            "--password" => explicit_password = Some(value("a password")?),
             "--help" => {
                 print!("{USAGE}");
                 return Ok(());
@@ -578,8 +599,8 @@ pub fn run(args: &[String]) -> Result<()> {
     if dir.is_some() && remote {
         return Err("give a directory or a server, not both".into());
     }
-    if cfg.password.is_none() {
-        cfg.password = std::env::var("NCPASSWORD").ok();
+    if let Some(pw) = explicit_password.or_else(|| std::env::var("NCPASSWORD").ok()) {
+        cfg.password = Some(pw);
     }
     let backend = match dir {
         Some(dir) => {

@@ -1,4 +1,5 @@
-//! One connection: the PostgreSQL v3 message flow.
+//! PostgreSQL compatibility (optional, `--pg-compat`): one connection of
+//! the PostgreSQL v3 message flow.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -282,13 +283,13 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
         }
     };
 
-    if let Some(pw) = &config.password {
+    if config.password.is_some() {
         out.write_all(&Msg::new(b'R').i32(3).finish())?; // cleartext password
         out.flush()?;
         let (tag, body) = read_message(&mut input)?;
         let given = Body { b: &body }.cstr().unwrap_or_default();
-        if tag != b'p' || given != *pw {
-            let user = params.get("user").cloned().unwrap_or_default();
+        let user = params.get("user").cloned().unwrap_or_default();
+        if tag != b'p' || !config.accepts(&user, &given) {
             send_error(
                 &mut out,
                 &Error {
@@ -550,7 +551,7 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
     }
 }
 
-fn command_tag(stmt: &Statement, out: &Output) -> String {
+pub(crate) fn command_tag(stmt: &Statement, out: &Output) -> String {
     match out {
         Output::Command(tag) => tag.clone(),
         Output::Rows { rows, .. } => match stmt {
