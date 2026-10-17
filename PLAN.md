@@ -263,8 +263,8 @@ are marked ✅.
 | | M14.19 | **Next:** modularity — registries, extensible and evolvable types, an extension API (principle 12) | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
-| | M14.11 | Large data foundations: benchmarks against PostgreSQL, streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans | ⬜ |
-| | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, columnar storage beside rows (HTAP) | ⬜ |
+| | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
+| | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)`, similarity search, then an ANN index | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ⬜ |
@@ -823,12 +823,6 @@ end in a test, and hints appear for the common error codes.
 Today results are materialized, joins and sorts are in memory, and `ncp`
 sends a whole result at once.  Before claiming large data:
 
-- **Measure first.**  A benchmark suite with PostgreSQL as the reference,
-  on the same machine and data: TPC-H and ClickBench for analytics, a
-  pgbench-like workload for transactions, load and point reads, and an
-  ANN-recall suite for vectors (§M14.12).  It runs in CI to catch
-  regressions, and its results are published with the commands to
-  reproduce them.  Targets are set from the first run and recorded here.
 - Streaming results: `ncp` sends rows as they are produced, with flow
   control; drivers iterate (cursors) instead of collecting.
 - **Columnar results.**  A third `ncp` result format: batches in which
@@ -846,6 +840,13 @@ sends a whole result at once.  Before claiming large data:
 - A memory-bounded executor: sorts, hash joins and aggregates spill to
   temporary files past a budget.
 - Parallel scans over key ranges; page compression.
+- **Benchmarks** (not urgent — performance work comes first, with
+  micro-benchmarks beside it): a suite with PostgreSQL as the reference,
+  on the same machine and data: TPC-H and ClickBench for analytics, a
+  pgbench-like workload for transactions, load and point reads, and an
+  ANN-recall suite for vectors (§M14.12).  It runs in CI to catch
+  regressions, and its results are published with the commands to
+  reproduce them.  Targets are set from the first run and recorded here.
 
 Not planned for now: an embedded Python mode (the engine inside the Python
 process, as SQLite and DuckDB do).  With columnar results the network
@@ -889,18 +890,65 @@ to do both in one system, with vectors and streams beside them
   scalar versions as the reference the law kit compares them against.
 - **Parallel execution**: a query's scans, joins and aggregates split
   across cores (morsel-driven), building on §M14.11's parallel scans.
-- **Columnar storage beside rows (HTAP).**  A table can keep a columnar
-  copy, maintained in the same transactions: compressed segments
-  (dictionary, run-length, delta, bit-packing — the types' columnar
-  encodings), min / max per segment to skip what a predicate rules out,
-  only the needed columns read.  Rows serve point reads and writes, the
-  columns serve scans; the optimizer chooses, and MVCC visibility is the
-  same for both.
+- **Columnar storage.**  Compressed column segments (dictionary,
+  run-length, delta, bit-packing — the types' columnar encodings), min /
+  max per segment to skip what a predicate rules out, only the needed
+  columns read.  Writes go to a row-format delta store and are merged into
+  segments in the background; deletes and updates mark rows in a
+  per-segment visibility map, so MVCC visibility is the same as for rows.
+  The segments are KV values keyed by (table, partition, column,
+  segment), so columnar storage sits *on* the KV contract, not beside it:
+  transactions, crash safety and, later, distribution (§F3) come with it.
+- **Table storage is a module** (principle 12): a registry of storage
+  implementations behind one trait — `row` and `column` built in, others
+  (an append-only time-series store, say) added the same way.
+- **The storage mode is chosen per table, per column and per partition**
+  — all three are required in this milestone, none deferred:
+
+  | Mode | Suits | Costs |
+  |------|-------|-------|
+  | `row` (the default) | point reads, small writes, updates | scans read every column |
+  | `column` | events, logs, time series, analytics — many rows, few columns per query | point updates are dearer (delta store, then merge) |
+  | `row, column` (HTAP) | transactions and analytics on the same table | space and write cost for both copies |
+
+  ```sql
+  CREATE TABLE events (...) WITH (storage = column);
+  ALTER TABLE orders SET STORAGE row, column;                    -- per table
+  ALTER TABLE orders SET STORAGE column (amount, status, created_at);  -- per column
+  CREATE TABLE metrics (...) PARTITION BY RANGE (at);
+  CREATE TABLE metrics_2026_10 PARTITION OF metrics
+    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01') WITH (storage = row);
+  ALTER TABLE metrics SET STORAGE POLICY (column AFTER interval '30 days');
+  ```
+
+  - *Per table*: `row`, `column` or both, both copies maintained in the
+    same transaction.
+  - *Per column*: in a `row, column` table only the named columns get a
+    columnar copy; the optimizer uses it when a query's columns are
+    covered, and otherwise joins the copies by row id or uses the rows.
+  - *Per partition*: declarative partitioning — `PARTITION BY RANGE`,
+    `LIST` and `HASH`, with partition pruning at plan and run time, and
+    `ATTACH` / `DETACH` / `DROP PARTITION` online.  Each partition has its
+    own storage mode, so the hot, recent partition can be `row` and the
+    old ones `column`; a storage policy moves partitions between modes by
+    age.  (These are SQL partitions on one node; §M18 later places them
+    on KV ranges.)
+  - Every change of mode is online — built in the background, the table
+    readable and writable throughout, switched over atomically — like
+    `ALTER COLUMN … TYPE`.
+  - The optimizer chooses rows or columns per query and per partition
+    (point lookups from rows, aggregates from columns); `nc_catalog`
+    shows each table's, partition's and column's storage, and the
+    analyzer (§M14.9) suggests changes from the workload it observes.
 - Results stay columnar end to end: a batch from a columnar scan goes out
   as an `ncp` columnar result (§M14.11) and into numpy without being
   turned into rows.
 
-**Done when:** on the §M14.11 suite, analytical queries (TPC-H,
+**Done when:** every storage mode works per table, per column and per
+partition, with online conversion between them under crash and
+concurrency tests, the same query giving the same result in each mode;
+partition pruning and the age policy work; and on the §M14.11 suite,
+analytical queries (TPC-H,
 ClickBench) are faster than PostgreSQL on the same machine by the
 recorded targets, transactional workloads stay within the recorded
 margin of it, every SIMD kernel matches its scalar reference under the
@@ -1136,6 +1184,8 @@ A distributed implementation of the KV contract.  F1/F2 code is unchanged.
 - Range split by size/load, range merge.
 - Still a single process — the goal is to finish the routing logic before
   the network comes in.
+- SQL table partitions (§M14.20) map onto ranges, so a partition and its
+  storage mode can be placed as a unit later.
 
 ### §M19 — Raft replication ⬜
 
@@ -1260,3 +1310,8 @@ style) across a thousand seeds without failure.
   for now.  New §M14.20: vectorized execution, SIMD batch kernels and
   columnar encodings as type capabilities, parallel execution, columnar
   storage beside rows (HTAP).
+- **2026-10-17** — §M14.20: storage mode (`row`, `column`, both) chosen
+  per table, per column and per partition, all required in the milestone;
+  declarative partitioning (range, list, hash) with pruning and an age
+  policy; table storage as a module on the KV contract; online conversion.
+  §M14.11's benchmarks are no longer first.
