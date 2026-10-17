@@ -600,6 +600,7 @@ pub fn execute(
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
+            require_keys(&t.columns, &cols, *unique, "an index")?;
             t.indexes.push(Index {
                 id: t.next_index_id,
                 name: name.clone(),
@@ -653,7 +654,7 @@ pub fn execute(
             }
             t.columns.push(Column {
                 name: column.name.clone(),
-                ty: column.ty,
+                ty: crate::binder::column_type(reg, &column.ty)?,
                 nullable: !column.not_null,
                 default: column.default.clone(),
                 max_len: column.max_len,
@@ -784,7 +785,7 @@ fn create_table(
         }
         columns.push(Column {
             name: s.name.clone(),
-            ty: s.ty,
+            ty: crate::binder::column_type(reg, &s.ty)?,
             nullable: !s.not_null,
             default: s.default.clone(),
             max_len: s.max_len,
@@ -836,6 +837,10 @@ fn create_table(
                 ));
             }
         }
+    }
+    require_keys(&columns, &pk, true, "a primary key")?;
+    for (_, cols) in &uniques {
+        require_keys(&columns, cols, true, "UNIQUE")?;
     }
     for &p in &pk {
         columns[p].nullable = false;
@@ -913,6 +918,21 @@ fn create_table(
 }
 
 /// `ALTER TABLE … ADD CONSTRAINT`.
+/// Refuses key columns whose types have no key encoding (and, for a
+/// primary key or `UNIQUE`, no equality).
+fn require_keys(columns: &[Column], cols: &[usize], unique: bool, what: &str) -> Result<()> {
+    use crate::binder::{Need, require};
+    let needs: &[Need] = if unique {
+        &[Need::KeyEncoding, Need::Equality]
+    } else {
+        &[Need::KeyEncoding]
+    };
+    for &c in cols {
+        require(Some(columns[c].ty), needs, what)?;
+    }
+    Ok(())
+}
+
 fn add_constraint(
     txn: &mut dyn KvTxn,
     reg: &Registry,
@@ -975,6 +995,7 @@ fn add_constraint(
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
+            require_keys(&t.columns, &columns, true, "UNIQUE")?;
             t.indexes.push(Index {
                 id: t.next_index_id,
                 name,

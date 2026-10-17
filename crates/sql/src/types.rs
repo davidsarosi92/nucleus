@@ -4,9 +4,12 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use std::sync::Arc;
+
 use crate::datetime::{self, Interval};
 use crate::decimal::Decimal;
 use crate::error::{Error, Result};
+use crate::ext::TypeRef;
 
 /// A column type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,6 +34,8 @@ pub enum DataType {
     Interval,
     /// `type[]`: a one-dimensional array of the element type.
     Array(&'static DataType),
+    /// A registered type (a module's, or `uuid`): see [`crate::ext::Type`].
+    Ext(TypeRef),
 }
 
 impl DataType {
@@ -46,7 +51,8 @@ impl DataType {
             DataType::Timestamp => &DataType::Timestamp,
             DataType::TimestampTz => &DataType::TimestampTz,
             DataType::Interval => &DataType::Interval,
-            DataType::Array(_) => return None,
+            // Arrays of registered types: not yet.
+            DataType::Array(_) | DataType::Ext(_) => return None,
         }))
     }
 
@@ -80,8 +86,9 @@ impl DataType {
                 DataType::Timestamp => "timestamp without time zone[]",
                 DataType::TimestampTz => "timestamp with time zone[]",
                 DataType::Interval => "interval[]",
-                DataType::Array(_) => "array",
+                DataType::Array(_) | DataType::Ext(_) => "array",
             },
+            DataType::Ext(t) => t.name(),
         }
     }
 
@@ -116,16 +123,9 @@ impl DataType {
     pub fn parse(words: &[&str]) -> Option<Self> {
         Some(match words {
             ["boolean"] | ["bool"] => DataType::Bool,
-            ["bigint"]
-            | ["int"]
-            | ["integer"]
-            | ["smallint"]
-            | ["int8"]
-            | ["int4"]
-            | ["int2"]
-            | ["oid"]
-            | ["xid"]
-            | ["regproc"] => DataType::Int,
+            ["bigint"] | ["int"] | ["integer"] | ["smallint"] | ["int8"] | ["int4"] | ["int2"] => {
+                DataType::Int
+            }
             ["double", "precision"]
             | ["float"]
             | ["real"]
@@ -137,9 +137,7 @@ impl DataType {
             | ["character", "varying"]
             | ["char"]
             | ["character"]
-            | ["string"]
-            | ["name"]
-            | ["bpchar"] => DataType::Text,
+            | ["string"] => DataType::Text,
             ["numeric"] | ["decimal"] | ["dec"] => DataType::Numeric,
             ["date"] => DataType::Date,
             ["timestamp"] | ["timestamp", "without", "time", "zone"] => DataType::Timestamp,
@@ -181,9 +179,25 @@ pub enum Value {
     Interval(Interval),
     /// An array (one dimension; elements of one type or NULL).
     Array(Vec<Value>),
+    /// A value of a registered type: the type and the value's canonical
+    /// bytes (equal values have equal bytes).
+    Ext(TypeRef, Arc<[u8]>),
 }
 
 impl Value {
+    /// A value of the registered type `ty` from its canonical bytes.
+    pub fn ext(ty: TypeRef, bytes: impl Into<Arc<[u8]>>) -> Value {
+        Value::Ext(ty, bytes.into())
+    }
+
+    /// A registered type's value's canonical bytes (`None` for others).
+    pub fn ext_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Value::Ext(_, b) => Some(b),
+            _ => None,
+        }
+    }
+
     /// The value's type (`None` for `NULL`).
     pub fn data_type(&self) -> Option<DataType> {
         match self {
@@ -203,6 +217,7 @@ impl Value {
                 .unwrap_or(DataType::Text)
                 .array_of()
                 .or(Some(DataType::Array(&DataType::Text))),
+            Value::Ext(t, _) => Some(DataType::Ext(*t)),
         }
     }
 
@@ -259,6 +274,16 @@ impl Value {
             (a, b) if a.as_timestamp().is_some() && b.as_timestamp().is_some() => {
                 a.as_timestamp().cmp(&b.as_timestamp())
             }
+            (Value::Ext(t, x), Value::Ext(u, y)) if t == u => match t.imp().ordering() {
+                Some(o) => o.compare(self, other)?,
+                None if x == y => Ordering::Equal,
+                None => {
+                    return Err(Error::undefined_function(format!(
+                        "type {} has no ordering",
+                        t.name()
+                    )));
+                }
+            },
             (a, b) => {
                 return Err(Error::type_mismatch(format!(
                     "cannot compare {} with {}",
@@ -269,13 +294,27 @@ impl Value {
         }))
     }
 
+    /// SQL equality: `None` if either side is `NULL`.  A registered type
+    /// needs no order for it (its equality is on canonical bytes).
+    pub fn sql_eq(&self, other: &Value) -> Result<Option<bool>> {
+        match (self, other) {
+            (Value::Ext(t, x), Value::Ext(u, y)) if t == u => Ok(Some(x == y)),
+            _ => Ok(self.sql_cmp(other)?.map(Ordering::is_eq)),
+        }
+    }
+
     /// The order used by `ORDER BY`, `DISTINCT` and grouping: `NULL` sorts
-    /// after every value (PostgreSQL's default for ascending order).
+    /// after every value (PostgreSQL's default for ascending order).  A
+    /// registered type without an ordering sorts by its bytes — never
+    /// visible: `ORDER BY` refuses such a type.
     pub fn sort_cmp(&self, other: &Value) -> Ordering {
         match (self, other) {
             (Value::Null, Value::Null) => Ordering::Equal,
             (Value::Null, _) => Ordering::Greater,
             (_, Value::Null) => Ordering::Less,
+            (Value::Ext(t, x), Value::Ext(u, y)) if t == u && t.imp().ordering().is_none() => {
+                x.cmp(y)
+            }
             _ => self
                 .sql_cmp(other)
                 .ok()
@@ -289,6 +328,9 @@ impl Value {
         let bad = |v: &Value| Error::invalid_text(format!("cannot cast {} to {ty}", v.render()));
         Ok(match (self, ty) {
             (Value::Null, _) => Value::Null,
+            (v @ Value::Ext(..), DataType::Ext(t)) if v.data_type() == Some(DataType::Ext(t)) => v,
+            (Value::Text(s), DataType::Ext(t)) => t.imp().input(&s)?,
+            (Value::Ext(t, b), DataType::Text) => Value::Text(t.imp().output(&Value::Ext(t, b))),
             (v @ Value::Bool(_), DataType::Bool)
             | (v @ Value::Int(_), DataType::Int)
             | (v @ Value::Float(_), DataType::Float)
@@ -380,6 +422,7 @@ impl Value {
             Value::Timestamp(t) => datetime::format_timestamp(*t, false),
             Value::TimestampTz(t) => datetime::format_timestamp(*t, true),
             Value::Interval(i) => i.to_string(),
+            Value::Ext(t, _) => t.imp().output(self),
             Value::Array(items) => {
                 let parts: Vec<String> = items
                     .iter()
@@ -415,6 +458,7 @@ fn rank(v: &Value) -> u8 {
         Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 3,
         Value::Interval(_) => 4,
         Value::Array(_) => 6,
+        Value::Ext(..) => 7,
     }
 }
 
@@ -572,6 +616,11 @@ impl Hash for Value {
             Value::Array(items) => {
                 6u8.hash(state);
                 items.hash(state);
+            }
+            Value::Ext(t, b) => {
+                7u8.hash(state);
+                t.hash(state);
+                b.hash(state);
             }
         }
     }

@@ -498,6 +498,7 @@ impl<'a> Binder<'a> {
                             "ORDER BY on a set operation or VALUES must name an output column or position",
                         )
                     })?;
+                require(bound.scope.cols[i].ty, &[Need::Ordering], "ORDER BY")?;
                 keys.push(SortKey {
                     expr: Expr::Column(i),
                     desc: item.desc,
@@ -581,6 +582,9 @@ impl<'a> Binder<'a> {
                 for (c, rc) in scope.cols.iter_mut().zip(&r.scope.cols) {
                     c.ty = unify(c.ty, rc.ty)?;
                     c.table = None;
+                    if !*all || *op != ast::SetOp::Union {
+                        require(c.ty, &[Need::Equality, Need::Hashing], op.keyword())?;
+                    }
                 }
                 Ok(Bound {
                     plan: Plan::SetOp {
@@ -803,6 +807,7 @@ impl<'a> Binder<'a> {
                         let ri = r.scope.find(None, col)?.ok_or_else(|| Error::undefined_column(format!("column \"{col}\" specified in USING clause does not exist in right table")))?;
                         let (lt, rt) = (l.scope.cols[li].ty, r.scope.cols[ri].ty);
                         comparable(lt, rt)?;
+                        require(lt.or(rt), &[Need::Equality], "JOIN USING")?;
                         parts.push(Expr::Binary(
                             BinaryOp::Eq,
                             Box::new(Expr::Column(li)),
@@ -931,6 +936,7 @@ impl<'a> Binder<'a> {
                 // GROUP BY 1 / GROUP BY alias: select-list items.
                 let resolved = self.group_item(e, &s.items)?;
                 let (x, t) = self.expr(resolved, &scope)?;
+                require(t, &[Need::Equality, Need::Hashing], "GROUP BY")?;
                 g.group.push(x);
                 g.group_types.push(t);
             }
@@ -1018,6 +1024,7 @@ impl<'a> Binder<'a> {
         for item in order_by {
             let nulls_first = item.nulls_first.unwrap_or(item.desc);
             if let Some(i) = self.output_position(&item.expr, &Scope { cols: cols.clone() })? {
+                require(cols[i].ty, &[Need::Ordering], "ORDER BY")?;
                 keys.push(SortKey {
                     expr: Expr::Column(i),
                     desc: item.desc,
@@ -1025,10 +1032,11 @@ impl<'a> Binder<'a> {
                 });
                 continue;
             }
-            let (x, _) = match &mut grouping {
+            let (x, t) = match &mut grouping {
                 Some(g) => self.grouped_expr(&item.expr, g)?,
                 None => self.expr(&item.expr, &scope)?,
             };
+            require(t, &[Need::Ordering], "ORDER BY")?;
             let i = match exprs.iter().position(|e| *e == x) {
                 Some(i) => i,
                 None => {
@@ -1066,6 +1074,9 @@ impl<'a> Binder<'a> {
             exprs,
         };
         if s.distinct {
+            for c in &cols {
+                require(c.ty, &[Need::Equality, Need::Hashing], "DISTINCT")?;
+            }
             plan = Plan::Distinct {
                 input: Box::new(plan),
             };
@@ -1151,8 +1162,10 @@ impl<'a> Binder<'a> {
                 if contains_agg(self.registry, &o.expr) {
                     return Err(Error::grouping("aggregate function calls cannot be nested"));
                 }
+                let (x, t) = self.expr(&o.expr, &from)?;
+                require(t, &[Need::Ordering], "ORDER BY")?;
                 order.push(SortKey {
-                    expr: self.expr(&o.expr, &from)?.0,
+                    expr: x,
                     desc: o.desc,
                     nulls_first: o.nulls_first.unwrap_or(o.desc),
                 });
@@ -1173,7 +1186,11 @@ impl<'a> Binder<'a> {
                 if contains_agg(self.registry, a) {
                     return Err(Error::grouping("aggregate function calls cannot be nested"));
                 }
-                bound.push(self.expr(a, &from)?);
+                let (x, t) = self.expr(a, &from)?;
+                if *distinct {
+                    require(t, &[Need::Equality, Need::Hashing], "DISTINCT")?;
+                }
+                bound.push((x, t));
             }
             let sig = func.resolve(&arg_info(&bound))?;
             let (args, common) = self.apply_signature(name, sig.args, bound)?;
@@ -1362,6 +1379,7 @@ impl<'a> Binder<'a> {
                     return Err(Error::syntax("subquery has too many columns"));
                 }
                 comparable(xt, s.cols[0].ty)?;
+                require(xt.or(s.cols[0].ty), &[Need::Equality], "IN")?;
                 (
                     Expr::Subquery(Box::new(SubPlan {
                         kind: SubKind::In(Box::new(x), *negated),
@@ -1456,6 +1474,12 @@ impl<'a> Binder<'a> {
                     ));
                 }
                 comparable(lt, et)?;
+                let need = if matches!(op, BinaryOp::Eq | BinaryOp::NotEq) {
+                    Need::Equality
+                } else {
+                    Need::Ordering
+                };
+                require(lt.or(et), &[need], op.symbol())?;
                 (
                     Expr::AnyAll {
                         left: Box::new(l),
@@ -1529,6 +1553,7 @@ impl<'a> Binder<'a> {
                     let (i, it) = sub(item, self)?;
                     let (_, i) = self.coerce(xt, i, it)?;
                     comparable(xt, i.1)?;
+                    require(xt.or(i.1), &[Need::Equality], "IN")?;
                     items.push(i.0);
                 }
                 (
@@ -1570,6 +1595,7 @@ impl<'a> Binder<'a> {
                         Some((_, ot)) => {
                             let (wx, (_, wt)) = self.coerce(*ot, wx, wt)?;
                             comparable(*ot, wt)?;
+                            require(ot.or(wt), &[Need::Equality], "CASE")?;
                             wx
                         }
                         None => {
@@ -1603,6 +1629,19 @@ impl<'a> Binder<'a> {
                 )
             }
             A::Cast { expr, ty, typmod } => {
+                let Some(ty) = &resolve_type(self.registry, ty)? else {
+                    // Not a type: a cast function (`::regclass`), or nothing.
+                    let ast::SqlType::Named { name, .. } = ty else {
+                        unreachable!("built-in types resolve")
+                    };
+                    let Some(f) = self.registry.function(&format!("__{name}")).cloned() else {
+                        return Err(Error::undefined_object(format!(
+                            "type {name} does not exist"
+                        )));
+                    };
+                    let arg = sub(expr, self)?;
+                    return self.call(f, vec![arg]);
+                };
                 let (x, _) = sub(expr, self)?;
                 if let Expr::Param(n) = x {
                     self.note_param(n, Some(*ty));
@@ -1632,12 +1671,6 @@ impl<'a> Binder<'a> {
                 }
                 let f = match self.registry.function(name) {
                     Some(f) => f.clone(),
-                    None if name.starts_with("__reg") => {
-                        return Err(Error::undefined_object(format!(
-                            "type {} does not exist",
-                            &name[2..]
-                        )));
-                    }
                     None => {
                         return Err(Error::undefined_function(format!(
                             "function {name} does not exist"
@@ -1833,6 +1866,12 @@ impl<'a> Binder<'a> {
             }
             Eq | NotEq | Lt | LtEq | Gt | GtEq => {
                 comparable(lt, rt)?;
+                let need = if matches!(op, Eq | NotEq) {
+                    Need::Equality
+                } else {
+                    Need::Ordering
+                };
+                require(lt.or(rt), &[need], op.symbol())?;
                 Some(DataType::Bool)
             }
             Match | NotMatch | IMatch | NotIMatch => {
@@ -1959,6 +1998,66 @@ fn expect(t: Option<DataType>, want: DataType, what: &str) -> Result<()> {
     }
 }
 
+/// An ability a construct needs of a type (PLAN.md §M14.19, "Type
+/// capabilities").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Need {
+    /// `=`, `IN`, `DISTINCT`, grouping, set operations, `UNIQUE`.
+    Equality,
+    /// Hash joins and aggregation, `DISTINCT`, grouping, set operations.
+    Hashing,
+    /// `<` …, `ORDER BY`, `min` / `max`.
+    Ordering,
+    /// Primary keys and indexes.
+    KeyEncoding,
+}
+
+impl Need {
+    fn name(self) -> &'static str {
+        match self {
+            Need::Equality => "equality",
+            Need::Hashing => "hashing",
+            Need::Ordering => "ordering",
+            Need::KeyEncoding => "key encoding",
+        }
+    }
+}
+
+/// Refuses `t` for `what` unless it has the abilities `needs`, naming the
+/// one missing (and what the type offers instead).
+pub fn require(t: Option<DataType>, needs: &[Need], what: &str) -> Result<()> {
+    let Some(t) = t else { return Ok(()) };
+    let ty = crate::builtin::type_of(t);
+    for &need in needs {
+        let has = match need {
+            Need::Equality => ty.equality().is_some(),
+            Need::Hashing => ty.hashing().is_some(),
+            Need::Ordering => ty.ordering().is_some(),
+            Need::KeyEncoding => ty.key_encoding().is_some(),
+        };
+        if has {
+            continue;
+        }
+        let hint = match (need, ty.distance()) {
+            (Need::Ordering, Some(d)) => {
+                format!("; it has a distance: ORDER BY x {} value", d.operator())
+            }
+            _ => String::new(),
+        };
+        let message = format!(
+            "type {} has no {}, which {what} needs{hint}",
+            ty.name(),
+            need.name()
+        );
+        return Err(if need == Need::KeyEncoding {
+            Error::undefined_object(message)
+        } else {
+            Error::undefined_function(message)
+        });
+    }
+    Ok(())
+}
+
 /// Whether two types can be compared.
 fn comparable(a: Option<DataType>, b: Option<DataType>) -> Result<()> {
     match (a, b) {
@@ -2009,6 +2108,34 @@ fn convert(x: Expr, from: Option<DataType>, to: Option<DataType>) -> Expr {
         (Some(f), Some(t)) if f != t => Expr::Cast(Box::new(x), t),
         _ => x,
     }
+}
+
+/// The type `t` names in `registry` (`None`: a name that is no type).  A
+/// schema before it must exist: `public`, or a registered one.
+pub fn resolve_type(registry: &Registry, t: &ast::SqlType) -> Result<Option<DataType>> {
+    let (schema, found) = match t {
+        ast::SqlType::Builtin { schema, ty } => (schema, Some(*ty)),
+        ast::SqlType::Named { schema, name } => (schema, registry.type_named(name)),
+    };
+    if let Some(s) = schema
+        && s != "public"
+        && registry.schema(s).is_none()
+    {
+        return Err(Error::invalid_schema(format!(
+            "schema \"{s}\" does not exist"
+        )));
+    }
+    Ok(found)
+}
+
+/// [`resolve_type`] for a column: the name must be a type.
+pub fn column_type(registry: &Registry, t: &ast::SqlType) -> Result<DataType> {
+    resolve_type(registry, t)?.ok_or_else(|| {
+        let ast::SqlType::Named { name, .. } = t else {
+            unreachable!("built-in types resolve")
+        };
+        Error::undefined_object(format!("type \"{name}\" does not exist"))
+    })
 }
 
 /// What a function's `resolve` learns of bound arguments.

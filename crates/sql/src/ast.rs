@@ -149,7 +149,7 @@ pub struct ColumnSpec {
     /// Name.
     pub name: String,
     /// Type.
-    pub ty: DataType,
+    pub ty: SqlType,
     /// `VARCHAR(n)`.
     pub max_len: Option<u32>,
     /// `NUMERIC(precision, scale)`.
@@ -516,7 +516,7 @@ pub enum Expr {
         /// The operand.
         expr: Box<Expr>,
         /// The type.
-        ty: DataType,
+        ty: SqlType,
         /// Its modifier: `VARCHAR(n)`, `NUMERIC(p, s)`.
         typmod: TypeMod,
     },
@@ -565,6 +565,33 @@ pub struct TypeMod {
     pub max_len: Option<u32>,
     /// `NUMERIC(precision, scale)`.
     pub numeric: Option<(u32, u32)>,
+}
+
+/// A type as written: a built-in one, or a name the binder resolves in
+/// the session's registry (`uuid`, a module's type).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SqlType {
+    /// A built-in type (the grammar knows their multi-word names).
+    Builtin {
+        /// `schema.` before it (`pg_catalog.int4`).
+        schema: Option<String>,
+        /// The type.
+        ty: DataType,
+    },
+    /// A name, maybe schema-qualified.
+    Named {
+        /// `schema.` before it.
+        schema: Option<String>,
+        /// The name.
+        name: String,
+    },
+}
+
+impl SqlType {
+    /// An unqualified built-in type.
+    pub fn builtin(ty: DataType) -> Self {
+        SqlType::Builtin { schema: None, ty }
+    }
 }
 
 /// A prefix operator.

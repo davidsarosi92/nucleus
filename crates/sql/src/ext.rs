@@ -406,6 +406,13 @@ pub struct Registry {
     table_functions: HashMap<String, TableFnRef>,
     schemas: Vec<Schema>,
     views: Vec<ViewRef>,
+    /// Types by name and alias.
+    types: HashMap<String, DataType>,
+    /// Every type, in registration order, with the module that registered
+    /// it.
+    type_list: Vec<(DataType, String)>,
+    /// The module whose `register` is running.
+    registering: String,
 }
 
 impl fmt::Debug for Registry {
@@ -448,7 +455,9 @@ impl Registry {
             return Err(duplicate("module", module.name()));
         }
         let mut next = self.clone();
+        next.registering = module.name().to_string();
         module.register(&mut next)?;
+        next.registering.clear();
         next.modules.push(module.name().to_string());
         *self = next;
         Ok(())
@@ -578,5 +587,352 @@ impl Registry {
     /// Every view, in registration order.
     pub fn views(&self) -> &[ViewRef] {
         &self.views
+    }
+
+    /// Registers a type under its name and aliases.
+    pub fn add_type(&mut self, t: Arc<dyn Type>) -> Result<()> {
+        let names: Vec<String> = std::iter::once(t.name())
+            .chain(t.aliases().iter().copied())
+            .map(str::to_string)
+            .collect();
+        if let Some(n) = names.iter().find(|n| self.types.contains_key(*n)) {
+            return Err(duplicate("type", n));
+        }
+        let ty = DataType::Ext(intern(t)?);
+        self.add_type_as(&names, ty);
+        Ok(())
+    }
+
+    /// Registers a built-in type (its values are native variants).
+    pub(crate) fn add_builtin_type(&mut self, names: &[&str], ty: DataType) {
+        let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        self.add_type_as(&names, ty);
+    }
+
+    fn add_type_as(&mut self, names: &[String], ty: DataType) {
+        for n in names {
+            self.types.insert(n.clone(), ty);
+        }
+        self.type_list.push((ty, self.registering.clone()));
+    }
+
+    /// Makes `name` another name for type `ty` (pg-compat's `int4`, `oid`).
+    pub fn add_alias(&mut self, name: &str, ty: DataType) -> Result<()> {
+        if self.types.contains_key(name) {
+            return Err(duplicate("type", name));
+        }
+        self.types.insert(name.to_string(), ty);
+        Ok(())
+    }
+
+    /// The type a name (or alias) means.
+    pub fn type_named(&self, name: &str) -> Option<DataType> {
+        self.types.get(name).copied()
+    }
+
+    /// Every type, in registration order, with the module that registered
+    /// it.
+    pub fn types(&self) -> &[(DataType, String)] {
+        &self.type_list
+    }
+
+    /// Every name the registry knows `ty` by, sorted.
+    pub fn type_aliases(&self, ty: DataType) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .types
+            .iter()
+            .filter(|(_, t)| **t == ty)
+            .map(|(n, _)| n.clone())
+            .collect();
+        v.sort();
+        v
+    }
+}
+
+// ------------------------------------------------------------------ types
+
+/// A type: its names, its text form and its abilities (PLAN.md §M14.19,
+/// "Type capabilities").  Every type is one — the built-in ones too, whose
+/// values are native [`Value`] variants; a registered type's values are
+/// [`Value::Ext`]: the type and the value's **canonical** bytes.
+///
+/// Each ability is its own interface, and a type has it or not; the
+/// engine asks before it relies on one, and refuses at bind or DDL time
+/// — naming the ability — what a type cannot do.
+pub trait Type: std::any::Any + Send + Sync {
+    /// Its name, unique (`uuid`): what SQL and the catalog call it.
+    fn name(&self) -> &str;
+
+    /// Other names SQL accepts for it.
+    fn aliases(&self) -> &[&str] {
+        &[]
+    }
+
+    /// Its category, for `nc_catalog.types` (`number`, `text`, …).
+    fn category(&self) -> &str {
+        "other"
+    }
+
+    /// A value from its text form (literals, casts from `text`, the text
+    /// wire format).  A registered type returns [`Value::ext`].
+    fn input(&self, text: &str) -> Result<Value>;
+
+    /// A value's text form.  `input(output(v))` is `v` (a law).
+    fn output(&self, v: &Value) -> String;
+
+    /// `=`, `<>`, `IN`, `DISTINCT`, `GROUP BY`, set operations, `UNIQUE`.
+    fn equality(&self) -> Option<&dyn Equality> {
+        None
+    }
+
+    /// Hashing consistent with equality: hash joins and hash aggregation.
+    fn hashing(&self) -> Option<&dyn Hashing> {
+        None
+    }
+
+    /// A total order: `<` …, `ORDER BY`, `min` / `max`, range predicates.
+    fn ordering(&self) -> Option<&dyn TotalOrder> {
+        None
+    }
+
+    /// An order-preserving key encoding: primary keys, indexes, index
+    /// range scans.
+    fn key_encoding(&self) -> Option<&dyn KeyEncoding> {
+        None
+    }
+
+    /// A distance (`ORDER BY a <-> b`).
+    fn distance(&self) -> Option<&dyn Distance> {
+        None
+    }
+
+    /// The version of its stored form (rows and keys record it).
+    fn encoding_version(&self) -> u16 {
+        1
+    }
+}
+
+/// Equality.  A registered type's is on canonical bytes
+/// ([`CanonicalBytes`]), which is what makes hashing agree with it.
+pub trait Equality: Send + Sync {
+    /// Whether `a` and `b` (non-`NULL`, of the type) are equal.
+    fn equal(&self, a: &Value, b: &Value) -> Result<bool>;
+}
+
+/// Hashing, consistent with [`Equality`].
+pub trait Hashing: Send + Sync {
+    /// Feeds `v` to `state`.
+    fn hash(&self, v: &Value, state: &mut dyn std::hash::Hasher);
+}
+
+/// A total order, consistent with [`Equality`].
+pub trait TotalOrder: Send + Sync {
+    /// Compares two non-`NULL` values of the type.
+    fn compare(&self, a: &Value, b: &Value) -> Result<std::cmp::Ordering>;
+}
+
+/// An order-preserving, self-delimiting key encoding: bytewise order of the
+/// encodings is the type's [`TotalOrder`].
+pub trait KeyEncoding: Send + Sync {
+    /// Appends `v`'s encoding to `out`.
+    fn encode(&self, v: &Value, out: &mut Vec<u8>);
+
+    /// The value at the start of `b` and the bytes it took.
+    fn decode(&self, b: &[u8]) -> Result<(Value, usize)>;
+}
+
+/// A distance.
+pub trait Distance: Send + Sync {
+    /// The operator SQL writes it with (`<->`).
+    fn operator(&self) -> &str;
+
+    /// The distance between two non-`NULL` values of the type.
+    fn distance(&self, a: &Value, b: &Value) -> Result<f64>;
+}
+
+/// Equality and hashing on a registered type's canonical bytes — the only
+/// equality such a type may have, since [`Value`]'s own comparison of
+/// [`Value::Ext`] is on its bytes too.
+pub struct CanonicalBytes;
+
+impl Equality for CanonicalBytes {
+    fn equal(&self, a: &Value, b: &Value) -> Result<bool> {
+        Ok(a.ext_bytes() == b.ext_bytes())
+    }
+}
+
+impl Hashing for CanonicalBytes {
+    fn hash(&self, v: &Value, state: &mut dyn std::hash::Hasher) {
+        state.write(v.ext_bytes().unwrap_or_default());
+    }
+}
+
+/// A registered type, as a [`DataType::Ext`] or [`Value::Ext`] holds it:
+/// interned once per name, so it is small and `Copy`.  Equal when the
+/// names are.
+#[derive(Clone, Copy)]
+pub struct TypeRef(&'static TypeEntry);
+
+/// An interned type.
+pub struct TypeEntry {
+    name: &'static str,
+    id: u32,
+    imp: Arc<dyn Type>,
+}
+
+/// A registered type's stable id: the FNV-1a hash of its name — the same
+/// in every process and database, so rows and keys can carry it (two names
+/// with one id are refused at registration).
+pub fn type_id_of(name: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in name.bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+impl TypeRef {
+    /// The type's name.
+    pub fn name(self) -> &'static str {
+        self.0.name
+    }
+
+    /// Its implementation.
+    pub fn imp(self) -> &'static dyn Type {
+        &*self.0.imp
+    }
+
+    /// Its stable id ([`type_id_of`] its name).
+    pub fn id(self) -> u32 {
+        self.0.id
+    }
+
+    /// The interned type called `name`, if a registry has registered one
+    /// in this process.
+    pub fn named(name: &str) -> Option<TypeRef> {
+        let t = interned().lock().unwrap_or_else(|e| e.into_inner());
+        t.by_name.get(name).copied()
+    }
+
+    /// The interned `name`, or a stand-in for a type this process has no
+    /// implementation of (a database naming a module's type that is not
+    /// linked in): it can be named, and every use of a value fails.
+    pub fn named_or_missing(name: &str) -> TypeRef {
+        Self::named(name).unwrap_or_else(|| {
+            intern(Arc::new(Missing(name.to_string()))).expect("not yet interned")
+        })
+    }
+
+    /// The interned type with stable id `id`, or a stand-in (named by the
+    /// id) when this process has none.
+    pub fn by_id(id: u32) -> TypeRef {
+        let found = {
+            let t = interned().lock().unwrap_or_else(|e| e.into_inner());
+            t.by_id.get(&id).copied()
+        };
+        found.unwrap_or_else(|| Self::named_or_missing(&format!("type #{id:08x}")))
+    }
+}
+
+impl PartialEq for TypeRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.name == other.0.name
+    }
+}
+
+impl Eq for TypeRef {}
+
+impl std::hash::Hash for TypeRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.name.hash(state);
+    }
+}
+
+impl fmt::Debug for TypeRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.name)
+    }
+}
+
+/// Every interned type, by name and by id.
+#[derive(Default)]
+struct Interned {
+    by_name: HashMap<String, TypeRef>,
+    by_id: HashMap<u32, TypeRef>,
+}
+
+fn interned() -> &'static std::sync::Mutex<Interned> {
+    static T: OnceLock<std::sync::Mutex<Interned>> = OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// Interns `t`: the same implementation under a name returns the same
+/// [`TypeRef`]; another one under a taken name is refused.  A stand-in for
+/// a missing type gives way to the real one.
+fn intern(t: Arc<dyn Type>) -> Result<TypeRef> {
+    let mut map = interned().lock().unwrap_or_else(|e| e.into_inner());
+    let rust_type = |t: &dyn Type| (t as &dyn std::any::Any).type_id();
+    let missing = std::any::TypeId::of::<Missing>();
+    if let Some(r) = map.by_name.get(t.name()) {
+        let existing = r.imp();
+        if rust_type(existing) == rust_type(&*t) {
+            return Ok(*r);
+        }
+        if rust_type(existing) != missing {
+            return Err(duplicate("type", t.name()));
+        }
+    }
+    let id = type_id_of(t.name());
+    if let Some(other) = map.by_id.get(&id)
+        && other.name() != t.name()
+        && rust_type(other.imp()) != missing
+    {
+        return Err(Error::duplicate_object(format!(
+            "type {} has the id of type {} (rename one)",
+            t.name(),
+            other.name()
+        )));
+    }
+    let entry: &'static TypeEntry = Box::leak(Box::new(TypeEntry {
+        name: Box::leak(t.name().to_string().into_boxed_str()),
+        id,
+        imp: t,
+    }));
+    let r = TypeRef(entry);
+    map.by_name.insert(entry.name.to_string(), r);
+    if rust_type(r.imp()) != missing || !map.by_id.contains_key(&id) {
+        map.by_id.insert(id, r);
+    }
+    Ok(r)
+}
+
+/// The stand-in for a type a database names but this process lacks.
+struct Missing(String);
+
+impl Missing {
+    fn error(&self) -> Error {
+        Error::undefined_object(format!(
+            "type {} is not available: no module registered it in this build",
+            self.0
+        ))
+    }
+}
+
+impl Type for Missing {
+    fn name(&self) -> &str {
+        &self.0
+    }
+    fn input(&self, _: &str) -> Result<Value> {
+        Err(self.error())
+    }
+    fn output(&self, v: &Value) -> String {
+        let hex: String = v
+            .ext_bytes()
+            .unwrap_or_default()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("\\x{hex}")
     }
 }

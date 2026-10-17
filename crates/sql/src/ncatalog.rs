@@ -17,7 +17,7 @@
 //! | `nc_catalog.constraints` | primary key, unique, check, foreign key |
 //! | `nc_catalog.foreign_keys` | foreign key |
 //! | `nc_catalog.statistics` | analyzed column (`ANALYZE`) |
-//! | `nc_catalog.types` | type |
+//! | `nc_catalog.types` | type (of the session's registry), with its abilities |
 
 use std::sync::Arc;
 
@@ -113,7 +113,21 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("histogram", TA),
         ],
     ),
-    ("types", &[("name", T), ("aliases", TA), ("category", T)]),
+    (
+        "types",
+        &[
+            ("name", T),
+            ("aliases", TA),
+            ("category", T),
+            ("module", T),
+            ("equality", B),
+            ("hashing", B),
+            ("ordering", B),
+            ("key_encoding", B),
+            ("distance", T),
+            ("encoding_version", I),
+        ],
+    ),
 ];
 
 /// An `nc_catalog` view.
@@ -311,37 +325,28 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
             }
         }
         "types" => {
-            for (n, aliases, cat) in [
-                ("boolean", &["bool"][..], "boolean"),
-                (
-                    "bigint",
-                    &["int", "integer", "smallint", "int8", "int4", "int2"][..],
-                    "number",
-                ),
-                (
-                    "double precision",
-                    &["float", "real", "float8", "float4"][..],
-                    "number",
-                ),
-                ("numeric", &["decimal", "dec"][..], "number"),
-                (
-                    "text",
-                    &["varchar", "character varying", "char"][..],
-                    "text",
-                ),
-                ("date", &[][..], "datetime"),
-                (
-                    "timestamp",
-                    &["timestamp without time zone"][..],
-                    "datetime",
-                ),
-                ("timestamptz", &["timestamp with time zone"][..], "datetime"),
-                ("interval", &[][..], "interval"),
-            ] {
+            for (ty, module) in registry.types() {
+                let ty = *ty;
+                let t = crate::builtin::type_of(ty);
+                let mut aliases: Vec<Value> = t.aliases().iter().map(|a| text(*a)).collect();
+                aliases.extend(
+                    registry
+                        .type_aliases(ty)
+                        .into_iter()
+                        .filter(|a| a != t.name() && !t.aliases().contains(&a.as_str()))
+                        .map(text),
+                );
                 out.push(vec![
-                    text(n),
-                    Value::Array(aliases.iter().map(|a| text(*a)).collect()),
-                    text(cat),
+                    text(t.name()),
+                    Value::Array(aliases),
+                    text(t.category()),
+                    text(module.clone()),
+                    Value::Bool(t.equality().is_some()),
+                    Value::Bool(t.hashing().is_some()),
+                    Value::Bool(t.ordering().is_some()),
+                    Value::Bool(t.key_encoding().is_some()),
+                    t.distance().map_or(Value::Null, |d| text(d.operator())),
+                    Value::Int(i64::from(t.encoding_version())),
                 ]);
             }
         }

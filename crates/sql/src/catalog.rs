@@ -35,9 +35,10 @@ const SEQUENCE: &[u8] = &[0x00, 0x02];
 const ROWID: &[u8] = &[0x00, 0x03];
 const STATS: &[u8] = &[0x00, 0x04];
 const DATA: u8 = 0x01;
-/// Version 2 added `NUMERIC(p, s)` modifiers, version 3 foreign keys;
-/// older versions still read.
-const TABLE_VERSION: u8 = 3;
+/// Version 2 added `NUMERIC(p, s)` modifiers, version 3 foreign keys,
+/// version 4 registered types (tag `7F` and the type's name); older
+/// versions still read.
+const TABLE_VERSION: u8 = 4;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -170,9 +171,11 @@ impl Table {
             .str(&self.name)
             .u32(self.columns.len() as u32);
         for c in &self.columns {
-            w.str(&c.name)
-                .u8(type_tag(c.ty))
-                .u8(u8::from(c.nullable))
+            w.str(&c.name).u8(type_tag(c.ty));
+            if let DataType::Ext(t) = c.ty {
+                w.str(t.name());
+            }
+            w.u8(u8::from(c.nullable))
                 .opt_str(c.default.as_deref())
                 .u32(c.max_len.map_or(0, |n| n + 1));
             let (p, s) = c.numeric.map_or((0, 0), |(p, s)| (p + 1, s));
@@ -228,7 +231,10 @@ impl Table {
         let mut columns = Vec::with_capacity(n);
         for _ in 0..n {
             let name = r.str()?;
-            let ty = type_of_tag(r.u8()?)?;
+            let ty = match r.u8()? {
+                EXT_TAG => DataType::Ext(crate::ext::TypeRef::named_or_missing(&r.str()?)),
+                tag => type_of_tag(tag)?,
+            };
             let nullable = r.u8()? == 1;
             let default = r.opt_str()?;
             let max_len = match r.u32()? {
@@ -337,8 +343,12 @@ fn action_of_tag(t: u8) -> Result<FkAction> {
     })
 }
 
+/// A registered type's column tag; its name follows.
+const EXT_TAG: u8 = 0x7F;
+
 fn type_tag(t: DataType) -> u8 {
     match t {
+        DataType::Ext(_) => EXT_TAG,
         DataType::Array(e) => 0x80 | type_tag(*e),
         DataType::Bool => 1,
         DataType::Int => 2,

@@ -394,7 +394,7 @@ impl Expr {
                 for (when, then) in whens {
                     let w = when.eval(env)?;
                     let hit = match &op {
-                        Some(o) => o.sql_cmp(&w)? == Some(std::cmp::Ordering::Equal),
+                        Some(o) => o.sql_eq(&w)? == Some(true),
                         None => w.truth()? == Some(true),
                     };
                     if hit {
@@ -650,10 +650,10 @@ fn in_values<'v>(
     }
     let mut saw_null = false;
     for item in items {
-        match v.sql_cmp(item)? {
-            Some(std::cmp::Ordering::Equal) => return Ok(Value::Bool(!negated)),
+        match v.sql_eq(item)? {
+            Some(true) => return Ok(Value::Bool(!negated)),
             None => saw_null = true,
-            _ => {}
+            Some(false) => {}
         }
     }
     Ok(if saw_null {
@@ -697,11 +697,13 @@ pub fn binary(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
     }
     let overflow = || Error::out_of_range("bigint out of range");
     Ok(match op {
-        Eq | NotEq | Lt | LtEq | Gt | GtEq => {
+        Eq | NotEq => {
+            let eq = a.sql_eq(&b)?.expect("not null");
+            Value::Bool(eq == (op == Eq))
+        }
+        Lt | LtEq | Gt | GtEq => {
             let o = a.sql_cmp(&b)?.expect("not null");
             Value::Bool(match op {
-                Eq => o == Equal,
-                NotEq => o != Equal,
                 Lt => o == Less,
                 LtEq => o != Greater,
                 Gt => o == Greater,
@@ -954,11 +956,11 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
             return Ok(Value::Bool(match (a.is_null(), b.is_null()) {
                 (true, true) => false,
                 (true, false) | (false, true) => true,
-                _ => a.sql_cmp(b)? != Some(std::cmp::Ordering::Equal),
+                _ => a.sql_eq(b)? != Some(true),
             }));
         }
         Func::Nullif => {
-            let eq = args[0].sql_cmp(&args[1])? == Some(std::cmp::Ordering::Equal);
+            let eq = args[0].sql_eq(&args[1])? == Some(true);
             return Ok(if eq { Value::Null } else { args.swap_remove(0) });
         }
         Func::Greatest | Func::Least => {

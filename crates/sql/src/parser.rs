@@ -509,9 +509,13 @@ impl<'a> Parser<'a> {
             .all(|(i, k)| self.peek_at(i).is_some_and(|t| t.is(k)))
     }
 
-    fn data_type(&mut self) -> Result<(DataType, TypeMod)> {
-        // `pg_catalog.` before a type name.
-        if self.peek_kw("pg_catalog") && self.peek_at(1) == Some(&Token::Op(".")) {
+    fn data_type(&mut self) -> Result<(SqlType, TypeMod)> {
+        // `schema.` before a type name (the binder checks the schema).
+        let mut schema = None;
+        if let Some(Token::Word(w)) = self.peek()
+            && self.peek_at(1) == Some(&Token::Op("."))
+        {
+            schema = Some(w.clone());
             self.pos += 2;
         }
         let mut words: Vec<String> = Vec::new();
@@ -528,7 +532,27 @@ impl<'a> Parser<'a> {
             self.pos += 1;
         }
         let refs: Vec<&str> = words.iter().map(String::as_str).collect();
+        if words.is_empty()
+            && let Some(Token::Word(w) | Token::Quoted(w)) = self.peek()
+        {
+            // Not a built-in name: one the registry may know.
+            let name = w.clone();
+            self.pos += 1;
+            if self.peek_op("(") || self.peek_op("[") {
+                return Err(Error::feature(format!(
+                    "modifiers and arrays of type {name} are not supported yet"
+                )));
+            }
+            return Ok((SqlType::Named { schema, name }, TypeMod::default()));
+        }
         let ty = DataType::parse(&refs).ok_or_else(|| self.error("expected a type"))?;
+        let (ty, typmod) = self.builtin_rest(ty)?;
+        Ok((SqlType::Builtin { schema, ty }, typmod))
+    }
+
+    /// The rest of a built-in type after its name: modifiers, `WITH TIME
+    /// ZONE`, `[]`.
+    fn builtin_rest(&mut self, ty: DataType) -> Result<(DataType, TypeMod)> {
         let mut typmod = TypeMod::default();
         if self.eat_op("(") {
             let number = |p: &mut Self| match p.next() {
@@ -1164,29 +1188,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The type of a cast (after `::` or `AS`), applied to `e`.  The
-    /// object-identifier types are functions: `regclass` maps a name or
-    /// oid text to an oid and an oid to its name, `regtype` and
-    /// `regnamespace` an oid to its name.
+    /// The type of a cast (after `::` or `AS`), applied to `e`.  (A cast to
+    /// a name that is no type but a cast function — `::regclass` with
+    /// pg-compat — the binder makes a call.)
     fn cast_to(&mut self, e: Expr) -> Result<Expr> {
-        let qualified = self.peek_kw("pg_catalog") && self.peek_at(1) == Some(&Token::Op("."));
-        let at = if qualified { 2 } else { 0 };
-        if let Some(Token::Word(w)) = self.peek_at(at)
-            && matches!(
-                w.as_str(),
-                "regclass" | "regtype" | "regnamespace" | "regrole"
-            )
-        {
-            let name = format!("__{w}");
-            self.pos += at + 1;
-            return Ok(Expr::Function {
-                name,
-                args: vec![e],
-                distinct: false,
-                star: false,
-                order_by: vec![],
-            });
-        }
         let (ty, typmod) = self.data_type()?;
         Ok(Expr::Cast {
             expr: Box::new(e),
@@ -1308,6 +1313,20 @@ impl<'a> Parser<'a> {
                         expr: Box::new(Expr::Literal(Value::Text(s))),
                         ty,
                         typmod,
+                    }
+                }
+                // `uuid '…'`: a registered type's literal.
+                _ if matches!(self.peek(), Some(Token::Str(_))) => {
+                    let Some(Token::Str(s)) = self.next() else {
+                        unreachable!("peeked")
+                    };
+                    Expr::Cast {
+                        expr: Box::new(Expr::Literal(Value::Text(s))),
+                        ty: SqlType::Named {
+                            schema: None,
+                            name: w,
+                        },
+                        typmod: TypeMod::default(),
                     }
                 }
                 _ => self.name_or_call(w)?,

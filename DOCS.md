@@ -557,15 +557,16 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 | Type | Names | Value |
 |------|-------|-------|
 | boolean | `BOOLEAN`, `BOOL` | |
-| bigint | `BIGINT`, `INT`, `INTEGER`, `SMALLINT`, `INT2/4/8`, `OID` | 64-bit (every integer type) |
+| bigint | `BIGINT`, `INT`, `INTEGER`, `SMALLINT`, `INT2/4/8` (and, with pg-compat, `OID`) | 64-bit (every integer type) |
 | double precision | `DOUBLE PRECISION`, `FLOAT`, `REAL` | IEEE 754 |
 | numeric | `NUMERIC [(p, s)]`, `DECIMAL`, `DEC` | exact: 128-bit mantissa and a scale, ≤ 38 digits |
-| text | `TEXT`, `VARCHAR(n)`, `CHAR`, `NAME` | `VARCHAR(n)` length enforced |
+| text | `TEXT`, `VARCHAR(n)`, `CHAR` (and, with pg-compat, `NAME`, `BPCHAR`) | `VARCHAR(n)` length enforced |
 | date | `DATE` | days since 2000-01-01, 4713 BC – 294276 AD |
 | timestamp | `TIMESTAMP [WITHOUT TIME ZONE]` | µs since 2000-01-01 |
 | timestamptz | `TIMESTAMPTZ`, `TIMESTAMP WITH TIME ZONE` | µs since 2000-01-01 UTC |
 | interval | `INTERVAL` | months, days, µs (kept apart) |
 | arrays | `type[]` | one dimension, elements of the type or NULL |
+| registered types | their name (`geopoint`) | a module's type: its canonical bytes (§8.12) |
 
 Decimal literals (`1.5`, `1e3`) are `numeric`, as in PostgreSQL; integers
 too big for bigint too; only values beyond numeric's 38 digits fall back to
@@ -594,9 +595,25 @@ Key encoding (order-preserving, self-delimiting): `00` NULL; `01` bool;
 terminated `00 01`; `05` numeric (sign class, decimal exponent, digits;
 equal values of different scale share a key); `06` date; `07`/`08`
 timestamps; `09` interval (its span); `0A` arrays (each element after
-`01`, then `00`).  Row encoding: version `01`, column count, tagged values
+`01`, then `00`); `0B` a registered type (its stable id, then its own
+key encoding).  Row encoding: version `01`, column count, tagged values
 (missing trailing columns read as NULL, so `ADD COLUMN` needs no rewrite
-unless it has a default).
+unless it has a default); a registered type's value is tag `11`, its id,
+its encoding version and its canonical bytes.  A registered type's id is
+the FNV-1a hash of its name, the same in every process (two names with
+one id are refused when registered).
+
+**Every type is a `Type`** (§8.12), the built-in ones included: the
+binder, DDL and aggregates ask a type's abilities before relying on them,
+and refuse what it lacks at bind or DDL time, naming the ability — `type
+geopoint has no ordering, which ORDER BY needs; it has a distance: ORDER
+BY x <-> value` (`42883`), `… no key encoding, which a primary key needs`
+(`42704`).  Equality: `=`, `<>`, `IN`, simple `CASE`, `JOIN USING`;
+equality and hashing: `DISTINCT` (also in aggregates), `GROUP BY`, `UNION`
+(not `ALL`), `INTERSECT`, `EXCEPT`; ordering: `<` …, `ORDER BY` (also in
+aggregates), `min`, `max`; key encoding (and equality for a primary key
+or `UNIQUE`): keys and indexes.  The built-in types have every ability
+(their values are native, and the hot paths run native code).
 
 ### 8.2 Catalog and keyspace (`catalog`)
 
@@ -804,7 +821,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.constraints` | `table_id`, `table_name`, `name`, `kind`, `definition` |
 | `nc_catalog.foreign_keys` | `table_id`, `table_name`, `name`, `columns`, `referenced_table`, `referenced_columns`, `on_delete`, `on_update` |
 | `nc_catalog.statistics` | `table_id`, `table_name`, `column_name`, `rows`, `nulls`, `distinct_values`, `histogram` |
-| `nc_catalog.types` | `name`, `aliases`, `category` |
+| `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
 
 **PostgreSQL compatibility: the `pg-compat` module** (`modules/pg-compat`,
 `nucleus_pg_compat::PgCompat`, §8.12).  Only sessions whose registry has it see any of what follows —
@@ -857,6 +874,22 @@ What a module adds to the SQL layer (principle 12), versioned
   &[Value])`.  `ext::common_type` is the binder's rule for `Common`
   arguments, for a `resolve` that needs it.
 - `CatalogView` — `schema()`, `name()`, `columns()`, `rows(&CallContext)`.
+- `Type` — `name()`, `aliases()`, `category()`, `input(text)`,
+  `output(&Value)`, and its abilities, each its own interface it has or
+  not: `equality()` (`Equality`), `hashing()` (`Hashing`), `ordering()`
+  (`TotalOrder`), `key_encoding()` (`KeyEncoding`: order-preserving,
+  self-delimiting), `distance()` (`Distance`: an operator and a
+  distance); `encoding_version()`.  A registered type's values are
+  `Value::Ext(TypeRef, bytes)` — `Value::ext(t, bytes)`, `v.ext_bytes()`
+  — whose bytes are canonical: equality and hashing are on them
+  (`CanonicalBytes` implements both), so they agree by construction; its
+  type is `DataType::Ext(TypeRef)`.  `TypeRef` is the type interned once
+  per name (small, `Copy`): `name()`, `id()`, `imp()`,
+  `TypeRef::named(name)`.  The catalog stores a registered type by name;
+  a database naming a type this process has never registered still opens
+  (`TypeRef::named_or_missing`: values print as hex, input fails naming
+  the missing type).  `ncp` sends registered types as text for now (their
+  binary form with §M14.19's `UUID`), `pg-compat` as `text`.
 - `Registry` — `empty()`, `builtin()` (the `builtin` module: every
   built-in function, aggregate and table function, the schemas `public`
   and `nc_catalog`, the `nc_catalog` views), `shared_builtin()`,
@@ -866,11 +899,19 @@ What a module adds to the SQL layer (principle 12), versioned
   namespace), `add_table_function(f)`, `add_schema(name,
   description, searched)` (a searched schema's views are found by
   unqualified names after the user's tables, as `pg_catalog`'s),
-  `add_view(v)`, and the lookups `function`, `aggregate`,
-  `table_function`, `view`, `schemas`, `views`, `modules`.
+  `add_view(v)`, `add_type(t)`, `add_alias(name, ty)` (pg-compat's
+  `oid`, `name`, `bpchar`, …), and the lookups `function`, `aggregate`,
+  `table_function`, `view`, `type_named`, `schemas`, `views`, `types`,
+  `modules`.  A session can name only its registry's types; a type is
+  written `name`, `schema.name`, `name 'literal'` or `x::name`, and
+  `x::name` where `name` is no type but a function `__name` exists calls
+  it (pg-compat's `::regclass`).
 
 `tests/extension.rs` is a module from outside the crate adding a
-function, an aggregate, a table function and a view, used through SQL.
+function, an aggregate, a table function and a view, used through SQL;
+`tests/types.rs` one adding the `geopoint` type (equality and a distance,
+no order, no key encoding) — stored, reread, compared, grouped, and
+refused exactly where an ability is missing.
 
 A session runs against one registry: `Session::new(kv)` the built-in one,
 `Session::with_registry(kv, registry)` any.  The binder finds functions
@@ -1066,6 +1107,13 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.19 types as modules (T1, T2):** `ext::Type` with
+  its abilities as separate interfaces; the built-in types registered
+  through it; registered types (`Value::Ext`, `DataType::Ext`) stored in
+  rows, keys and the catalog, compared, grouped and listed
+  (`nc_catalog.types`), and refused where an ability is missing; named
+  types in the grammar; PostgreSQL's type names and `::regclass` moved
+  out of the parser into pg-compat.
 - **2026-10-17 — §M14.19 modules built to leave the repository:** the
   layout `crates/` (core), `modules/`, `editions/`; PostgreSQL
   compatibility is `modules/pg-compat` (from `nucleus-sql`'s `pgcatalog`

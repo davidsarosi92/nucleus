@@ -12,8 +12,9 @@ use crate::binder::arith_type;
 use crate::error::{Error, Result};
 use crate::expr::Func;
 use crate::ext::{
-    Accumulator, Aggregate, Arg, ArgInfo, CallContext, FnRef, Module, Registry, Returns,
-    ScalarFunction, Signature, TableFunction, TableSignature, common_type,
+    Accumulator, Aggregate, Arg, ArgInfo, CallContext, Equality, FnRef, Hashing, KeyEncoding,
+    Module, Registry, Returns, ScalarFunction, Signature, TableFunction, TableSignature,
+    TotalOrder, Type, common_type,
 };
 use crate::types::{DataType, Row, Value};
 
@@ -111,6 +112,9 @@ impl Module for Builtin {
             r.add_aggregate(names, Arc::new(BuiltinAgg(*a)))?;
         }
         r.add_table_function(Arc::new(GenerateSeries))?;
+        for (ty, names, _) in TYPES {
+            r.add_builtin_type(names, *ty);
+        }
         r.add_table_function(Arc::new(Unnest))?;
         r.add_schema("public", "user tables", false)?;
         r.add_schema("nc_catalog", "the nucleus system catalog", false)?;
@@ -471,7 +475,11 @@ impl Aggregate for BuiltinAgg {
                 Some(Int) | None => Some(Numeric),
                 t => t,
             }),
-            AggFunc::Sum | AggFunc::Min | AggFunc::Max => keep(at),
+            AggFunc::Sum => keep(at),
+            AggFunc::Min | AggFunc::Max => {
+                crate::binder::require(at, &[crate::binder::Need::Ordering], name)?;
+                keep(at)
+            }
             AggFunc::StringAgg => {
                 if let Some(t) = args.iter().find_map(|a| a.ty.filter(|t| *t != Text)) {
                     return Err(Error::undefined_function(format!(
@@ -687,4 +695,157 @@ impl TableFunction for Unnest {
             _ => Vec::new(),
         })
     }
+}
+
+// ------------------------------------------------------------------ types
+
+/// The built-in types: name, the other names SQL accepts, category.
+const TYPES: &[(DataType, &[&str], &str)] = &[
+    (DataType::Bool, &["boolean", "bool"], "boolean"),
+    (
+        DataType::Int,
+        &[
+            "bigint", "int", "integer", "smallint", "int8", "int4", "int2",
+        ],
+        "number",
+    ),
+    (
+        DataType::Float,
+        &[
+            "double precision",
+            "float",
+            "real",
+            "float8",
+            "float4",
+            "double",
+        ],
+        "number",
+    ),
+    (DataType::Numeric, &["numeric", "decimal", "dec"], "number"),
+    (
+        DataType::Text,
+        &[
+            "text",
+            "varchar",
+            "character varying",
+            "char",
+            "character",
+            "string",
+        ],
+        "text",
+    ),
+    (DataType::Date, &["date"], "datetime"),
+    (
+        DataType::Timestamp,
+        &["timestamp", "timestamp without time zone"],
+        "datetime",
+    ),
+    (
+        DataType::TimestampTz,
+        &["timestamptz", "timestamp with time zone"],
+        "datetime",
+    ),
+    (DataType::Interval, &["interval"], "interval"),
+];
+
+/// A built-in type as a [`Type`]: its values are native, and its abilities
+/// are the engine's own code (the hot paths call it directly).
+struct BuiltinType {
+    ty: DataType,
+    names: &'static [&'static str],
+    category: &'static str,
+}
+
+/// The native abilities, shared by every built-in type.
+struct Native;
+
+impl Equality for Native {
+    fn equal(&self, a: &Value, b: &Value) -> Result<bool> {
+        Ok(a.sql_eq(b)?.unwrap_or(false))
+    }
+}
+
+impl Hashing for Native {
+    fn hash(&self, v: &Value, state: &mut dyn std::hash::Hasher) {
+        struct H<'a>(&'a mut dyn std::hash::Hasher);
+        impl std::hash::Hasher for H<'_> {
+            fn finish(&self) -> u64 {
+                self.0.finish()
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.write(bytes);
+            }
+        }
+        std::hash::Hash::hash(v, &mut H(state));
+    }
+}
+
+impl TotalOrder for Native {
+    fn compare(&self, a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
+        Ok(a.sql_cmp(b)?.unwrap_or(std::cmp::Ordering::Equal))
+    }
+}
+
+impl KeyEncoding for Native {
+    fn encode(&self, v: &Value, out: &mut Vec<u8>) {
+        crate::encoding::encode_key_value(out, v);
+    }
+    fn decode(&self, b: &[u8]) -> Result<(Value, usize)> {
+        crate::encoding::decode_key_value(b)
+    }
+}
+
+impl Type for BuiltinType {
+    fn name(&self) -> &str {
+        self.names[0]
+    }
+    fn aliases(&self) -> &[&str] {
+        &self.names[1..]
+    }
+    fn category(&self) -> &str {
+        self.category
+    }
+    fn input(&self, text: &str) -> Result<Value> {
+        Value::Text(text.to_string()).cast(self.ty)
+    }
+    fn output(&self, v: &Value) -> String {
+        v.render()
+    }
+    fn equality(&self) -> Option<&dyn Equality> {
+        Some(&Native)
+    }
+    fn hashing(&self) -> Option<&dyn Hashing> {
+        Some(&Native)
+    }
+    fn ordering(&self) -> Option<&dyn TotalOrder> {
+        Some(&Native)
+    }
+    fn key_encoding(&self) -> Option<&dyn KeyEncoding> {
+        Some(&Native)
+    }
+}
+
+/// The [`Type`] behind any type: a built-in one's descriptor (arrays of
+/// built-ins share their abilities), or a registered type's own.
+pub fn type_of(ty: DataType) -> &'static dyn Type {
+    static ALL: OnceLock<Vec<BuiltinType>> = OnceLock::new();
+    static ARRAY: BuiltinType = BuiltinType {
+        ty: DataType::Array(&DataType::Text),
+        names: &["array"],
+        category: "array",
+    };
+    if let DataType::Ext(t) = ty {
+        return t.imp();
+    }
+    let all = ALL.get_or_init(|| {
+        TYPES
+            .iter()
+            .map(|(ty, names, category)| BuiltinType {
+                ty: *ty,
+                names,
+                category,
+            })
+            .collect()
+    });
+    all.iter().find(|b| b.ty == ty).map_or(&ARRAY, |b| b)
 }

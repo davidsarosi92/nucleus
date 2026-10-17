@@ -106,7 +106,7 @@ fn type_size(t: DataType) -> i16 {
         DataType::Date => 4,
         DataType::Int | DataType::Float | DataType::Timestamp | DataType::TimestampTz => 8,
         DataType::Interval => 16,
-        DataType::Text | DataType::Numeric | DataType::Array(_) => -1,
+        DataType::Text | DataType::Numeric | DataType::Array(_) | DataType::Ext(_) => -1,
     }
 }
 

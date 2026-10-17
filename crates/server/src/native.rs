@@ -58,6 +58,8 @@ impl Msg {
             DataType::TimestampTz => 8,
             DataType::Interval => 9,
             DataType::Array(_) => 10,
+            // Registered types travel as text, for now (PLAN.md §M14.19 T3).
+            DataType::Ext(_) => 4,
         };
         match t {
             None => self.u8(0),
@@ -69,7 +71,10 @@ impl Msg {
         }
     }
     fn value(mut self, v: &Value) -> Self {
-        encode_value(&mut self.buf, v);
+        match v {
+            Value::Ext(..) => encode_value(&mut self.buf, &Value::Text(v.render())),
+            v => encode_value(&mut self.buf, v),
+        }
         self
     }
     fn finish(mut self) -> Vec<u8> {

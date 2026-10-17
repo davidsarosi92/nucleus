@@ -560,6 +560,16 @@ impl Module for PgCompat {
     fn register(&self, r: &mut Registry) -> Result<()> {
         r.add_schema("pg_catalog", "PostgreSQL-compatible catalog views", true)?;
         r.add_schema("information_schema", "SQL-standard catalog views", false)?;
+        // PostgreSQL's names for types nucleus has under others.
+        for (alias, ty) in [
+            ("oid", DataType::Int),
+            ("xid", DataType::Int),
+            ("regproc", DataType::Int),
+            ("name", DataType::Text),
+            ("bpchar", DataType::Text),
+        ] {
+            r.add_alias(alias, ty)?;
+        }
         for k in 0..DEFS.len() {
             r.add_view(Arc::new(PgView(k)))?;
         }
@@ -639,6 +649,8 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Timestamp => 1114,
         DataType::TimestampTz => 1184,
         DataType::Interval => 1186,
+        // Registered types PostgreSQL has no oid for are shown as text.
+        DataType::Ext(_) => 25,
         DataType::Array(e) => match e {
             DataType::Bool => 1000,
             DataType::Int => 1016,
@@ -649,7 +661,7 @@ pub fn type_oid(t: DataType) -> i64 {
             DataType::Timestamp => 1115,
             DataType::TimestampTz => 1185,
             DataType::Interval => 1187,
-            DataType::Array(_) => 0,
+            DataType::Array(_) | DataType::Ext(_) => 0,
         },
     }
 }

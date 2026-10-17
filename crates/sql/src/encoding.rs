@@ -16,6 +16,7 @@
 //! | timestamp, timestamptz | `07` / `08`, then `µs ^ i64::MIN` as 8 bytes big-endian |
 //! | interval | `09`, then its span (months as 30 days) in µs as `i128 ^ i128::MIN`, 16 bytes big-endian |
 //! | array | `0A`, then `01` and the encoding of each element, then `00` |
+//! | registered type | `0B`, its stable id (`u32` big-endian, [`crate::ext::type_id_of`]), then its own key encoding — or, for a type without one, its canonical bytes escaped as text's |
 //!
 //! Every encoding is self-delimiting, so a key can be split back into its
 //! values (`decode_key_value`).
@@ -24,8 +25,10 @@
 //! (`0` null, `1` bool, `2` bigint, `3` double, `4` text, `5` numeric:
 //! `i128` mantissa and `u8` scale, `6` date `i32`, `7` timestamp and `8`
 //! timestamptz `i64`, `9` interval: months `i32`, days `i32`, µs `i64`,
-//! `10` array: a `u32` count, then each element tagged the same way) and
-//! its bytes (little-endian; text with a `u32` length).  A row shorter than its table
+//! `10` array: a `u32` count, then each element tagged the same way; `11` a
+//! registered type: its stable id `u32`, its encoding version `u16`, a
+//! `u32` length and its canonical bytes) and its bytes (little-endian; text
+//! with a `u32` length).  A row shorter than its table
 //! (a column added later) reads the missing columns as `NULL`.
 
 use crate::datetime::{Interval, USECS_PER_DAY};
@@ -61,13 +64,15 @@ pub fn encode_key_value(out: &mut Vec<u8>, v: &Value) {
         }
         Value::Text(s) => {
             out.push(0x04);
-            for &b in s.as_bytes() {
-                out.push(b);
-                if b == 0 {
-                    out.push(0xFF);
-                }
+            escape(out, s.as_bytes());
+        }
+        Value::Ext(t, bytes) => {
+            out.push(0x0B);
+            out.extend_from_slice(&t.id().to_be_bytes());
+            match t.imp().key_encoding() {
+                Some(k) => k.encode(v, out),
+                None => escape(out, bytes),
             }
-            out.extend_from_slice(&[0x00, 0x01]);
         }
         Value::Numeric(d) => {
             out.push(0x05);
@@ -118,6 +123,38 @@ pub fn encode_key_value(out: &mut Vec<u8>, v: &Value) {
     }
 }
 
+/// `b` with `00` escaped as `00 FF`, then `00 01`: self-delimiting, and in
+/// `b`'s bytewise order.
+fn escape(out: &mut Vec<u8>, b: &[u8]) {
+    for &x in b {
+        out.push(x);
+        if x == 0 {
+            out.push(0xFF);
+        }
+    }
+    out.extend_from_slice(&[0x00, 0x01]);
+}
+
+/// The bytes [`escape`] wrote at the front of `b`, and how many it used.
+fn unescape(b: &[u8]) -> Result<(Vec<u8>, usize)> {
+    let mut s = Vec::new();
+    let mut i = 0;
+    loop {
+        match (b.get(i), b.get(i + 1)) {
+            (Some(0), Some(0xFF)) => {
+                s.push(0);
+                i += 2;
+            }
+            (Some(0), Some(1)) => return Ok((s, i + 2)),
+            (Some(c), _) if *c != 0 => {
+                s.push(*c);
+                i += 1;
+            }
+            _ => return Err(bad_key()),
+        }
+    }
+}
+
 /// The encoding of several values, concatenated.
 pub fn encode_key(values: &[Value]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -148,26 +185,25 @@ pub fn decode_key_value(b: &[u8]) -> Result<(Value, usize)> {
             (Value::Float(f64::from_bits(bits)), 9)
         }
         0x04 => {
-            let mut s = Vec::new();
-            let mut i = 1;
-            loop {
-                match (b.get(i), b.get(i + 1)) {
-                    (Some(0), Some(0xFF)) => {
-                        s.push(0);
-                        i += 2;
-                    }
-                    (Some(0), Some(1)) => break,
-                    (Some(c), _) if *c != 0 => {
-                        s.push(*c);
-                        i += 1;
-                    }
-                    _ => return Err(bad_key()),
-                }
-            }
+            let (s, used) = unescape(&b[1..])?;
             (
                 Value::Text(String::from_utf8(s).map_err(|_| bad_key())?),
-                i + 2,
+                1 + used,
             )
+        }
+        0x0B => {
+            let id = u32::from_be_bytes(b.get(1..5).ok_or_else(bad_key)?.try_into().unwrap());
+            let t = crate::ext::TypeRef::by_id(id);
+            match t.imp().key_encoding() {
+                Some(k) => {
+                    let (v, used) = k.decode(&b[5..])?;
+                    (v, 5 + used)
+                }
+                None => {
+                    let (bytes, used) = unescape(&b[5..])?;
+                    (Value::ext(t, bytes), 5 + used)
+                }
+            }
         }
         0x05 => match b.get(1).ok_or_else(bad_key)? {
             0x02 => (Value::Numeric(Decimal::ZERO), 2),
@@ -309,6 +345,13 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
                 encode_value(out, item);
             }
         }
+        Value::Ext(t, bytes) => {
+            out.push(11);
+            out.extend_from_slice(&t.id().to_le_bytes());
+            out.extend_from_slice(&t.imp().encoding_version().to_le_bytes());
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
     }
 }
 
@@ -343,6 +386,12 @@ pub fn decode_value(r: &mut Reader) -> Result<Value> {
                 items.push(decode_value(r)?);
             }
             Value::Array(items)
+        }
+        11 => {
+            let t = crate::ext::TypeRef::by_id(r.u32().map_err(bad)?);
+            let _version = r.u16().map_err(bad)?;
+            let n = r.u32().map_err(bad)? as usize;
+            Value::ext(t, r.take(n).map_err(bad)?)
         }
         _ => return Err(Error::internal("malformed row encoding")),
     })
@@ -420,7 +469,8 @@ impl<'a> Reader<'a> {
         Self { b }
     }
 
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+    /// The next `n` bytes.
+    pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.b.len() < n {
             return Err(Error::internal("truncated record"));
         }
