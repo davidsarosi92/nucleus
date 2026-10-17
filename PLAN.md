@@ -264,7 +264,7 @@ are marked ✅.
 | | M14.6 | `ncsql`: nucleus's own SQL shell and client | ✅ DOCS §6.2 |
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
-| | M14.19 | **Next:** modularity — registries, extensible and evolvable types, an extension API (principle 12) | ⬜ |
+| | M14.19 | **Next:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
@@ -280,7 +280,7 @@ are marked ✅.
 | | M14.15 | JSON type and functions | ⬜ |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
-| | M14.18 | Operations: backups and point-in-time restore, metrics and tracing | ⬜ |
+| | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -680,6 +680,19 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
     `nucleus upgrade` (tied to D15).
   The wire tags and catalog type ids are assigned by the registry, not
   hard-coded, with the built-in ones fixed for compatibility.
+- **`UUID`, the first new type built this way** — a real type proving the
+  path, not only a sample: 16 bytes; text input in the canonical form
+  (and upper case, braces, no hyphens), output canonical lower case;
+  casts to and from `text`; equality, hashing, a byte-wise total order
+  and a fixed 16-byte key encoding, so it can be a primary key and be
+  indexed; generators `gen_random_uuid()` (version 4) and `uuidv7()`
+  (version 7, time-ordered — the recommended key, since new rows land at
+  the end of the index instead of all over it); `uuid_extract_version`
+  and `uuid_extract_timestamp`; a columnar encoding and statistics; an
+  `ncp` tag and each driver's native type (`[u8; 16]` or the `uuid`
+  crate's type in Rust, a 16-byte struct in C and C++, `uuid.UUID` in
+  Python, a string in JavaScript, `java.util.UUID` in Java); and in
+  `pg-compat`, PostgreSQL's `uuid` (oid 2950) in text and binary form.
 - **Type capabilities.**  A type is not one thing but a set of abilities,
   and many are optional — a geographic point has a distance but no natural
   order; a JSON value has equality but no arithmetic.  Each ability is its own
@@ -811,7 +824,9 @@ built-in functions, types, catalog views, front ends and authentication
 are all registered through the public extension API; the sample extension
 adds a function, a type and a catalog view without touching the core;
 `modules/pg-compat` passes the detachability test and `psql` still works
-through it; and
+through it; `UUID` is registered like any extension type, passes the law
+kit and round-trips through SQL, `ncp`, every driver and `pg-compat`
+(checked against PostgreSQL); and
 a type's encoding is upgraded on a populated database (old and new values
 read side by side, crash-tested) and a column's type changed online.  The
 law kit runs on every built-in type, and a sample type with only some
@@ -1384,15 +1399,44 @@ command per platform, and the playground runs the tutorial.
 - Online backups (a checkpoint's pages are immutable: a consistent copy
   without stopping writes), and point-in-time restore from backups plus
   the WAL.
+- **Incremental backups**: only the pages changed since the previous
+  backup (the store tracks which pages a checkpoint rewrote), chained to
+  a full backup; chains merged into a new full backup in the background,
+  so a restore never replays a long chain.
+- **Backup targets are modules** (principle 12): a local directory and
+  S3-compatible object storage built in, others (GCS, Azure Blob)
+  added the same way.  Backups are compressed, checksummed and encrypted;
+  the WAL is archived to the same target continuously, so point-in-time
+  restore reaches the last archived commit; retention policies (keep N
+  full, every daily for a week, …) prune old backups and WAL.
+- **Restore tests, automatically**: on a schedule, the latest backup is
+  restored into a scratch directory and checked — every page checksum,
+  the store opens, the catalog and indexes agree with the tables, row
+  counts match the backup's manifest.  An untested backup is reported as
+  one; each result is a metric and an audit entry.
 - Metrics (Prometheus endpoint) and tracing (OpenTelemetry): commits,
-  conflicts, cache, WAL, statement latencies.
+  conflicts, cache, WAL, statement latencies, backups and restore tests,
+  logins (§M14.25).
+- **Health checks**: liveness and readiness endpoints for orchestrators
+  (`/health/live`, `/health/ready` — ready only once recovery is done and
+  the store is open), and `nucleus status` for people.
+- **Alerting, ready to use**: a set of recommended alert rules
+  (Prometheus rules) and a dashboard (Grafana) shipped with each release —
+  disk space and its rate of use, WAL growth, a failed or overdue backup
+  or restore test, long-running transactions, the rate of serialization
+  conflicts, cache hit ratio, failed logins, and from §M17.5 replication
+  lag — each with a short runbook entry in DOCS.
 - TLS, users, roles, privileges and row-level security moved to §M14.25.
 - ✅ An exclusive lock on the data directory, so a second process cannot
   open it (done first, 2026-10-17: DOCS §4.6).
 
-**Done when:** a restore reproduces the database at a chosen moment, and
-metrics and traces reach a Prometheus and an OpenTelemetry collector in
-tests.
+**Done when:** a restore — from a full backup, from an incremental chain,
+from local and from object storage — reproduces the database at a chosen
+moment, under crash tests during backup and restore; the scheduled
+restore test catches a deliberately corrupted backup; metrics and traces
+reach a Prometheus and an OpenTelemetry collector in tests; readiness
+waits for recovery; and every shipped alert rule fires in a test that
+provokes it.
 
 ---
 
@@ -1705,3 +1749,8 @@ style) across a thousand seeds without failure.
   method, privileges by connection context (ceilings and conditional role
   membership), row-level security (moved from §M14.18), protection and a
   hash-chained audit log.
+- **2026-10-17** — §M14.18 grows: incremental backups, backup targets as
+  modules (local, S3-compatible), encrypted archives with continuous WAL
+  archiving and retention, scheduled restore tests, health endpoints,
+  shipped alert rules and dashboard.  §M14.19: `UUID` (v4 and v7
+  generators) is the first new type built through the type registry.
