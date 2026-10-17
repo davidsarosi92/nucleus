@@ -23,7 +23,7 @@ Status legend: ⬜ not started · ◐ in progress · ✅ shipped · ⏸ parked
 | Build targets | Platforms nucleus must build for |
 | Decisions | What has to be settled before the first line of code |
 | Status snapshot | Phases + milestones table |
-| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.19, sits between F1 and F2) |
+| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.20, sits between F1 and F2) |
 | Changelog | Changes to this plan |
 
 ---
@@ -263,7 +263,8 @@ are marked ✅.
 | | M14.19 | **Next:** modularity — registries, extensible and evolvable types, an extension API (principle 12) | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
-| | M14.11 | Large data foundations: streaming results, bulk load, spilling, parallel scans, benchmarks | ⬜ |
+| | M14.11 | Large data foundations: benchmarks against PostgreSQL, streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans | ⬜ |
+| | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, columnar storage beside rows (HTAP) | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)`, similarity search, then an ANN index | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ⬜ |
@@ -625,10 +626,11 @@ quickstart in every language.
 parameters, errors, transactions) against `nucleus server` in CI. ✅
 (Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
 
-### Developer platform (§M14.9–§M14.19)
+### Developer platform (§M14.9–§M14.20)
 
 What makes nucleus worth choosing, before more data models: understanding
-queries, being usable by AI models, holding large data, vectors — and the
+queries, being usable by AI models, holding large data and analysing it
+fast, vectors — and the
 things nucleus's design gives almost for free (branches and time travel
 from copy-on-write storage and MVCC), the everyday tools (JSON,
 migrations, code generation), an easy start, and what production needs.
@@ -684,6 +686,8 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
   | aggregation | `sum`, `avg` and type-specific aggregates | refused |
   | partial update | changing part of a value in place (an array element, a JSON path) | the whole value is replaced |
   | statistics | distinct counts, histograms, selectivity | the optimizer uses defaults |
+  | batch kernels | operators, comparisons, hashing and aggregates over a whole column batch at once (SIMD), for the vectorized executor (§M14.20) | the executor falls back to one value at a time |
+  | columnar encoding | compressed column segments (dictionary, run-length, delta, bit-packing) with min / max per segment | the column is stored plainly |
   | modifiers | `(n)`, `(p, s)`; which changes need no rewrite (`varchar(10)` → `(20)`) | none, or every change rewrites |
   | encoding versions and upgrades | updating the type's stored form (see above) | the encoding is frozen |
   | conversion for `ALTER COLUMN … TYPE` | changing a column to another type | only with an explicit `USING` |
@@ -819,20 +823,89 @@ end in a test, and hints appear for the common error codes.
 Today results are materialized, joins and sorts are in memory, and `ncp`
 sends a whole result at once.  Before claiming large data:
 
+- **Measure first.**  A benchmark suite with PostgreSQL as the reference,
+  on the same machine and data: TPC-H and ClickBench for analytics, a
+  pgbench-like workload for transactions, load and point reads, and an
+  ANN-recall suite for vectors (§M14.12).  It runs in CI to catch
+  regressions, and its results are published with the commands to
+  reproduce them.  Targets are set from the first run and recorded here.
 - Streaming results: `ncp` sends rows as they are produced, with flow
   control; drivers iterate (cursors) instead of collecting.
+- **Columnar results.**  A third `ncp` result format: batches in which
+  each column is one contiguous, typed buffer (Arrow-compatible layout,
+  with a validity bitmap for NULLs).  Drivers hand them over without
+  building a value per cell — the Python driver as numpy arrays
+  (`np.frombuffer`, zero-copy), Arrow tables, pandas and polars frames;
+  JavaScript as typed arrays; Java as primitive arrays or buffers; C and
+  C++ as pointers into the batch.  Today the Python driver builds one
+  object per value, which costs far more than the query; this removes it.
 - Bulk load: `COPY`-style loading (text/CSV and `ncp` batches) and batched
-  inserts in the drivers, bypassing per-row statement overhead.
+  inserts in the drivers, bypassing per-row statement overhead — and the
+  columnar direction in reverse: a numpy array, Arrow table or DataFrame
+  loaded into a table in one call.
 - A memory-bounded executor: sorts, hash joins and aggregates spill to
   temporary files past a budget.
 - Parallel scans over key ranges; page compression.
-- Published benchmarks (load, point reads, scans, joins, mixed) with
-  targets, run in CI to catch regressions.
 
-Columnar storage for analytics and range partitioning (§M18) build on this.
+Not planned for now: an embedded Python mode (the engine inside the Python
+process, as SQLite and DuckDB do).  With columnar results the network
+adds little on one machine, and an embedded mode costs native wheels per
+platform, crashes that take the Python process down, and the data
+directory lock (a server and an embedded process cannot open one database
+at once).  The engine is already a library (Rust embeds it today), so it
+is a thin layer if it is ever asked for.
+
+Vectorized execution and columnar storage (§M14.20) and range partitioning
+(§M18) build on this.
 
 **Done when:** a 100-million-row table loads, scans, sorts and joins within
-a fixed memory budget, and the benchmark targets are met.
+a fixed memory budget; a 100-million-value column reaches numpy through
+the Python driver without a per-value object, at a rate bound by the
+network, not the driver; and the benchmark suite runs in CI against
+PostgreSQL.
+
+### §M14.20 — Analytics: vectorized execution and columnar storage ⬜
+
+Runs after §M14.11 (its number only reflects when it was planned).  Why
+nucleus can compete with PostgreSQL on large data: PostgreSQL stores rows
+in a heap and executes one row at a time, which suits transactions and
+limits analytics (hence its columnar extensions).  An engine that works
+on column batches with compiled, SIMD kernels and reads only the columns
+and segments a query needs is commonly 10–100× faster on scans and
+aggregates — an architectural gain, not a tuning one.  For transactions
+the aim is parity with PostgreSQL; for analytics, to beat it clearly; and
+to do both in one system, with vectors and streams beside them
+(principle 11), where PostgreSQL needs extensions.
+
+- **Vectorized executor.**  Operators pass batches (about a thousand
+  rows) of typed column buffers with selection vectors, instead of one
+  `Value` row at a time; expressions evaluate a batch per call and are
+  fused where they can be (`a * b + c` in one pass, no temporary column).
+  Types provide batch kernels as a capability (§M14.19); one without them
+  runs value by value, so nothing is refused, only slower.
+- **SIMD kernels** for the built-in types — integers, floats, `numeric`,
+  date / time, booleans, strings (comparison, hashing, `LIKE`), `vector`
+  distances — chosen at run time for the CPU (AVX2, AVX-512, NEON), with
+  scalar versions as the reference the law kit compares them against.
+- **Parallel execution**: a query's scans, joins and aggregates split
+  across cores (morsel-driven), building on §M14.11's parallel scans.
+- **Columnar storage beside rows (HTAP).**  A table can keep a columnar
+  copy, maintained in the same transactions: compressed segments
+  (dictionary, run-length, delta, bit-packing — the types' columnar
+  encodings), min / max per segment to skip what a predicate rules out,
+  only the needed columns read.  Rows serve point reads and writes, the
+  columns serve scans; the optimizer chooses, and MVCC visibility is the
+  same for both.
+- Results stay columnar end to end: a batch from a columnar scan goes out
+  as an `ncp` columnar result (§M14.11) and into numpy without being
+  turned into rows.
+
+**Done when:** on the §M14.11 suite, analytical queries (TPC-H,
+ClickBench) are faster than PostgreSQL on the same machine by the
+recorded targets, transactional workloads stay within the recorded
+margin of it, every SIMD kernel matches its scalar reference under the
+law kit, and a table's columnar copy stays consistent with its rows under
+crash and concurrency tests.
 
 ### §M14.12 — Vectors ⬜
 
@@ -852,7 +925,9 @@ reference that the capability model is proven on:
   encoding — so a vector can be sorted, be a key and be B-tree-indexed.
 - Distances as distance capabilities — L2 `<->`, cosine `<=>`, inner
   product `<#>`, L1 `<+>` — and exact nearest-neighbour search with
-  `ORDER BY v <-> :q LIMIT k`.
+  `ORDER BY v <-> :q LIMIT k`; each distance a SIMD batch kernel (AVX2,
+  AVX-512, NEON, chosen at run time), so an exact search over a column is
+  bound by memory bandwidth.
 - Operators and functions: element-wise `+`, `-`, `*`, `||`
   (concatenation), `v[i]` and slices, `dims`, `norm`, `normalize`,
   `subvector`; `UPDATE … SET v[i] = …`.
@@ -1178,3 +1253,10 @@ style) across a thousand seeds without failure.
   capability (equality, hashing, an element-wise order and key encoding,
   four distances, operators, aggregates, statistics, driver mappings);
   §M14.19's partial-capability examples use a `geopoint` sample type.
+- **2026-10-17** — Large data and analytics: §M14.11 measures against
+  PostgreSQL first (TPC-H, ClickBench, pgbench-like, ANN recall) and adds
+  columnar `ncp` results that drivers hand over zero-copy (numpy, Arrow,
+  pandas, polars, typed arrays); an embedded Python mode is not planned
+  for now.  New §M14.20: vectorized execution, SIMD batch kernels and
+  columnar encodings as type capabilities, parallel execution, columnar
+  storage beside rows (HTAP).
