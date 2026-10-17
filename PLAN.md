@@ -703,6 +703,55 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
   back; text output parses back to an equal value; every encoding version
   reads what it wrote, and upgrades preserve equality; casts round-trip
   where declared lossless.  A type that breaks a law is not registered.
+- **Teaching a type new abilities.**  Capabilities are not fixed when a
+  type is created: any type — built-in, extension or user-defined — can be
+  taught one later, and unlearn it, in the language itself, as ordinary
+  transactional DDL recorded in the catalog:
+
+  ```sql
+  -- an ordering derived by a mapping into an ordered type
+  ALTER TYPE vector ADD ORDERING magnitude BY norm(value);
+  -- an operator, a distance, a cast, an aggregate
+  ALTER TYPE vector ADD OPERATOR <-> (vector, vector) RETURNS float8 AS l2_distance;
+  ALTER TYPE vector ADD DISTANCE l2 USING <->;
+  ALTER TYPE vector ADD CAST TO text AS vector_text ASSIGNMENT;
+  ALTER TYPE vector DROP ORDERING magnitude;
+
+  SELECT * FROM t ORDER BY v USING magnitude;
+  CREATE INDEX ON t (v USING magnitude);
+  ```
+
+  - *By mapping* (the preferred way): an ability is derived from another
+    type through a deterministic function — an ordering by `norm(v)`, an
+    equality or a hash by a canonical form, a key encoding by the mapped
+    key's encoding, statistics by the mapped values.  Everything follows
+    from the target type's own capabilities, so the laws hold by
+    construction; the engine only requires the function to be immutable.
+    A mapping that is not one-to-one gives an ordering with ties, which
+    sorts and indexes (the row id breaks ties) but cannot be a type's
+    default order or back a `UNIQUE`.
+  - *By an implementation*: a comparison, hash or encoding written as a
+    function — in SQL, or in a module's Rust code (loadable modules
+    later).  The engine checks the laws on the existing data when it is
+    taught, and the law kit runs it in tests.
+  - *Several of a kind*: a type may have more than one ordering (or
+    distance); one may be its default, used by a plain `ORDER BY`, the
+    others are named with `USING`.  Collations are this same mechanism for
+    `text`: `COLLATE` names a text ordering (byte order built in at
+    first), instead of being ignored as today.
+  - *In the language*: an operator a type or module brings is registered
+    with its symbol and one of a fixed set of precedence classes, and the
+    parser looks it up; functions, aggregates and casts are found by name.
+    The grammar itself stays fixed — a module extends the vocabulary, not
+    the syntax.
+  - *Dependencies*: the catalog records what uses each ability (indexes,
+    constraints, views, defaults).  Dropping one in use is refused (or
+    `CASCADE`); redefining one rebuilds what depends on it, online.
+  - *Visible*: `nc_catalog.orderings`, `nc_catalog.operators`,
+    `nc_catalog.casts` list what each type has been taught, and the error
+    for a missing ability names the abilities that would work instead
+    (`vector has no default ordering; available: magnitude, or a distance
+    with <->`), for people, tools and AI models alike.
 - The front ends share one session layer, so a new protocol is a module
   over `Session` (as `ncp` and `--pg-compat` already are); the server
   starts the modules a configuration names.
@@ -720,7 +769,11 @@ read side by side, crash-tested) and a column's type changed online.  The
 law kit runs on every built-in type, and a sample type with only some
 capabilities (equality and distance, no order — vector-like) is refused
 exactly where it should be (`ORDER BY`, primary key, B-tree index) and
-works everywhere else.
+works everywhere else.  Then it is taught an ordering by a mapping
+(`magnitude`) in SQL: `ORDER BY … USING magnitude` and an index on it
+work, dropping the ordering while the index exists is refused, and
+redefining it rebuilds the index; and `COLLATE` resolves to a text
+ordering.
 
 ### §M14.9 — SQL analyzer ⬜
 
@@ -1094,3 +1147,8 @@ style) across a thousand seeds without failure.
   key encoding, operators, distance, casts, aggregation, partial update,
   statistics, modifiers, encoding versions, conversions), consulted by
   every layer, listed in `nc_catalog`; laws checked for every type.
+- **2026-10-17** — §M14.19: teaching a type new abilities in SQL
+  (`ALTER TYPE … ADD ORDERING / OPERATOR / DISTANCE / CAST`), preferably
+  by a mapping into a type that already has them; several named orderings
+  per type (`USING`), collations as text orderings; operators extend the
+  vocabulary, not the grammar; dependencies tracked in the catalog.
