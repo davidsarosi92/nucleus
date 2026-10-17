@@ -113,6 +113,9 @@ principle 4).
   `size`, `set_len`.
 - `OpenMode` — `ReadOnly`, `ReadWrite`, `Create`, `CreateNew`; none
   truncates.
+- `Rng::fill_unpredictable(buf)` — the operating system's generator on
+  the real platform (UUIDs, tokens); the simulation's seed in a
+  simulation.  `Kv::random_bytes` (§6.1) and `CallContext::random` reach it.
 - `Clock` — `now()` monotonic since platform creation, `wall()`, `sleep(d)`
   (the simulated clock advances by `d` at once and waits at most 1 ms of
   real time, so threads backing off on the simulation still spread out).
@@ -426,7 +429,8 @@ distributed implementation will provide (§F3).
   `wall_clock()` — the time as the implementation keeps it (the local
   one's platform clock), the only clock layers above read (principle 4);
   `back_off(attempt)` — the wait before a retry (exponential with
-  jitter, through the platform, so a simulation does not wait).
+  jitter, through the platform, so a simulation does not wait);
+  `random_bytes(buf)` — unpredictable bytes from the platform.
 - `trait KvTxn`: `read_ts`, `get(&self)`, `scan(&self, start, end) ->
   KvIter` (ascending), `get_validated` / `scan_validated` (reads checked
   at commit at any isolation level, §5.2), `put(&mut self)`,
@@ -566,7 +570,22 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 | timestamptz | `TIMESTAMPTZ`, `TIMESTAMP WITH TIME ZONE` | µs since 2000-01-01 UTC |
 | interval | `INTERVAL` | months, days, µs (kept apart) |
 | arrays | `type[]` | one dimension, elements of the type or NULL |
+| uuid | `UUID` | 16 bytes, a registered type (§8.12) |
 | registered types | their name (`geopoint`) | a module's type: its canonical bytes (§8.12) |
+
+**`uuid`** is the first type built as a registered one (`uuid.rs`):
+input as 32 hex digits in either case, a hyphen allowed after any group of
+four, optionally in braces; output lower case `8-4-4-4-12`; equality,
+hashing, ordering (byte order, as PostgreSQL's) and a fixed 16-byte key
+encoding, so it can be a primary key or indexed; casts to and from
+`text`; `min` / `max` (from its ordering — PostgreSQL has none).
+Functions: `gen_random_uuid()` / `uuidv4()` (version 4, from the
+platform's unpredictable randomness), `uuidv7()` (version 7: unix
+milliseconds, 12 bits of the millisecond's fraction, random bits;
+increasing within a process — the recommended key, new rows land at the
+end of the index), `uuid_extract_version(u)` (for RFC 9562 variants),
+`uuid_extract_timestamp(u)` (versions 1 and 7).  `crates/testkit/slt/20_uuid.slt`'s
+expected results came from PostgreSQL 18.
 
 Decimal literals (`1.5`, `1e3`) are `numeric`, as in PostgreSQL; integers
 too big for bigint too; only values beyond numeric's 38 digits fall back to
@@ -754,10 +773,11 @@ column order).  Without statistics the rule-based plan is kept.
 ### 8.9 Tests
 
 - The SQL layer's sqllogictest scripts live in the test kit,
-  `crates/testkit/slt/*.slt` (nineteen: basics, expressions, joins,
+  `crates/testkit/slt/*.slt` (twenty: basics, expressions, joins,
   aggregates, subqueries, indexes, constraints, transactions, plans,
   statistics, serializable, set operations, full joins, CTEs, numeric,
-  date/time, foreign keys, arrays and regular expressions, `nc_catalog`),
+  date/time, foreign keys, arrays and regular expressions, `nc_catalog`,
+  `uuid`),
   embedded in `nucleus-testkit` (`core_scripts()`) with its runner
   (`nucleus_testkit::slt`), so the client's tests and modules run them
   without reading files outside their folders.  `tests/slt.rs` runs them
@@ -861,7 +881,9 @@ What a module adds to the SQL layer (principle 12), versioned
   `t` —, `Convert(t)` or `Common`; the result a type, the arguments'
   common type, or a `Constant`), `strict()` (default true: a `NULL`
   argument gives `NULL` without a call), `call(&CallContext, &[Value])`.
-  `CallContext` gives the statement's transaction and the registry.
+  `CallContext` gives the statement's transaction, the registry,
+  `now()`, `clock()` and `random(buf)` (all through the database's
+  platform).
 - `Aggregate` — `name()`, `arity()`, `accepts_star()` (`count(*)`),
   `keeps_nulls()` (default false: rows whose first argument is `NULL` are
   skipped), `resolve` (as a function's), `start() -> Box<dyn
@@ -1107,6 +1129,10 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.19 `uuid` (T3, first part):** the type and
+  `gen_random_uuid` / `uuidv4`, `uuidv7`, `uuid_extract_version`,
+  `uuid_extract_timestamp`; `Rng::fill_unpredictable`,
+  `Kv::random_bytes`; `20_uuid.slt`, checked against PostgreSQL 18.
 - **2026-10-17 — §M14.19 types as modules (T1, T2):** `ext::Type` with
   its abilities as separate interfaces; the built-in types registered
   through it; registered types (`Value::Ext`, `DataType::Ext`) stored in

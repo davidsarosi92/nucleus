@@ -161,6 +161,22 @@ impl<'a> CallContext<'a> {
     pub fn registry(&self) -> &'a Registry {
         self.registry
     }
+
+    /// Fills `buf` with unpredictable bytes, from the database's platform
+    /// (never the host directly: a simulation stays reproducible).
+    pub fn random(&self, buf: &mut [u8]) -> Result<()> {
+        crate::datetime::random_bytes(buf)
+    }
+
+    /// The transaction's start (`now()`), as µs since 2000-01-01 UTC.
+    pub fn now(&self) -> Result<i64> {
+        crate::datetime::now()
+    }
+
+    /// The time now (`clock_timestamp()`), as µs since 2000-01-01 UTC.
+    pub fn clock(&self) -> Result<i64> {
+        crate::datetime::clock()
+    }
 }
 
 /// A scalar function.

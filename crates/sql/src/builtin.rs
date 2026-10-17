@@ -115,6 +115,7 @@ impl Module for Builtin {
         for (ty, names, _) in TYPES {
             r.add_builtin_type(names, *ty);
         }
+        crate::uuid::register(r)?;
         r.add_table_function(Arc::new(Unnest))?;
         r.add_schema("public", "user tables", false)?;
         r.add_schema("nc_catalog", "the nucleus system catalog", false)?;

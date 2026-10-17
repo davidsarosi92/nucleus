@@ -1,0 +1,139 @@
+# uuid: input forms, output, comparisons, keys and indexes, functions.
+# Expected results produced by PostgreSQL 18 (records marked nucleus-only
+# excepted).
+
+query T
+SELECT 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid
+----
+a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11
+
+query TTT
+SELECT '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}'::uuid, 'a0eebc999c0b4ef8bb6d6bb9bd380a11'::uuid, 'a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11'::uuid
+----
+a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11 a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11
+
+statement error 22P02
+SELECT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a1'::uuid
+
+statement error 22P02
+SELECT 'a0eeb-c999c0b4ef8bb6d6bb9bd380a11'::uuid
+
+query T
+SELECT uuid 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::text
+----
+a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11
+
+statement ok
+CREATE TABLE things (id uuid PRIMARY KEY, name TEXT, parent uuid)
+
+statement ok
+INSERT INTO things VALUES ('00000000-0000-0000-0000-000000000002', 'b', NULL), ('00000000-0000-0000-0000-000000000001', 'a', NULL), ('ffffffff-0000-0000-0000-000000000000', 'z', '00000000-0000-0000-0000-000000000001')
+
+statement error 23505
+INSERT INTO things VALUES ('00000000000000000000000000000001', 'dup', NULL)
+
+query TT
+SELECT id, name FROM things ORDER BY id
+----
+00000000-0000-0000-0000-000000000001 a
+00000000-0000-0000-0000-000000000002 b
+ffffffff-0000-0000-0000-000000000000 z
+
+query T
+SELECT name FROM things WHERE id = '00000000-0000-0000-0000-000000000002'
+----
+b
+
+query T
+SELECT name FROM things WHERE id > '00000000-0000-0000-0000-000000000001' ORDER BY name
+----
+b
+z
+
+# nucleus-only: min and max of any type with an ordering (PostgreSQL has
+# none for uuid).
+query TT
+SELECT min(id), max(id) FROM things
+----
+00000000-0000-0000-0000-000000000001 ffffffff-0000-0000-0000-000000000000
+
+statement ok
+CREATE INDEX things_parent ON things (parent)
+
+query T
+SELECT name FROM things WHERE parent = '00000000-0000-0000-0000-000000000001'
+----
+z
+
+query IT
+SELECT count(*), parent FROM things GROUP BY parent ORDER BY parent NULLS FIRST
+----
+2 NULL
+1 00000000-0000-0000-0000-000000000001
+
+query I
+SELECT count(DISTINCT parent) FROM things
+----
+1
+
+query TI
+SELECT a.name, count(b.id) FROM things a LEFT JOIN things b ON b.parent = a.id GROUP BY a.name ORDER BY a.name
+----
+a 1
+b 0
+z 0
+
+query II
+SELECT uuid_extract_version('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'), uuid_extract_version('017f22e2-79b0-7cc3-98c4-dc0c0c07398f')
+----
+4 7
+
+query T
+SELECT uuid_extract_timestamp('017f22e2-79b0-7cc3-98c4-dc0c0c07398f')
+----
+2022-02-22 19:22:22+00
+
+query T
+SELECT uuid_extract_timestamp('c232ab00-9414-11ec-b3c8-9f6bdeced846')
+----
+2022-02-22 19:22:22+00
+
+query T
+SELECT uuid_extract_timestamp('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')
+----
+NULL
+
+query II
+SELECT uuid_extract_version(gen_random_uuid()), uuid_extract_version(uuidv7())
+----
+4 7
+
+query B
+SELECT gen_random_uuid() <> gen_random_uuid()
+----
+true
+
+# nucleus-only: uuidv7 values made one after the other increase (PostgreSQL
+# guarantees it within a session; nucleus within a process).
+query B
+SELECT uuidv7() < uuidv7()
+----
+true
+
+query B
+SELECT uuid_extract_timestamp(uuidv7()) BETWEEN now() - interval '1 minute' AND clock_timestamp() + interval '1 minute'
+----
+true
+
+statement ok
+CREATE TABLE events (id uuid PRIMARY KEY DEFAULT uuidv7(), what TEXT)
+
+statement ok
+INSERT INTO events (what) VALUES ('first'), ('second'), ('third')
+
+query T
+SELECT what FROM events ORDER BY id
+----
+first
+second
+third

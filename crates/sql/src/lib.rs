@@ -26,6 +26,7 @@ pub mod plan;
 pub mod session;
 pub mod stats;
 pub mod types;
+pub mod uuid;
 
 pub use ast::Statement;
 pub use error::{Error, Result};

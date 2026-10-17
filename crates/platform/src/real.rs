@@ -27,7 +27,24 @@ use crate::{Clock, File, FileSystem, OpenMode, Platform, Rng, SplitMix64};
 pub struct RealPlatform {
     fs: RealFs,
     clock: RealClock,
-    rng: SplitMix64,
+    rng: OsRng,
+}
+
+/// Fast randomness (seeded from the operating system once), and the
+/// operating system's generator where it must be unpredictable.
+#[derive(Debug)]
+struct OsRng(SplitMix64);
+
+impl Rng for OsRng {
+    fn next_u64(&self) -> u64 {
+        self.0.next_u64()
+    }
+    fn fill_unpredictable(&self, buf: &mut [u8]) {
+        if getrandom::fill(buf).is_err() {
+            // No OS generator: still random, though not unpredictable.
+            self.fill_bytes(buf);
+        }
+    }
 }
 
 impl RealPlatform {
@@ -40,7 +57,7 @@ impl RealPlatform {
             clock: RealClock {
                 origin: Instant::now(),
             },
-            rng: SplitMix64::new(seed),
+            rng: OsRng(SplitMix64::new(seed)),
         })
     }
 }

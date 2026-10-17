@@ -188,4 +188,11 @@ pub trait Rng: Send + Sync {
             chunk.copy_from_slice(&bytes[..chunk.len()]);
         }
     }
+
+    /// Fills `buf` with bytes nobody can predict (for UUIDs, tokens): the
+    /// operating system's generator on the real platform; in the
+    /// simulation they come from its seed, like all its randomness.
+    fn fill_unpredictable(&self, buf: &mut [u8]) {
+        self.fill_bytes(buf);
+    }
 }

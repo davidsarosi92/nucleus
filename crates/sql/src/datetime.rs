@@ -186,6 +186,17 @@ pub fn clock() -> Result<i64> {
     .ok_or_else(no_clock)
 }
 
+/// Unpredictable bytes from the database's platform ([`Kv::random_bytes`]).
+pub fn random_bytes(buf: &mut [u8]) -> Result<()> {
+    NOW.with(|n| match n.borrow().as_ref() {
+        Some((_, kv)) => {
+            kv.random_bytes(buf);
+            Ok(())
+        }
+        None => Err(no_clock()),
+    })
+}
+
 /// Runs `f` with `now()` fixed at `ts` and `clock()` reading `kv`'s clock.
 pub fn with_now<R>(ts: i64, kv: &Arc<dyn Kv>, f: impl FnOnce() -> R) -> R {
     let prev = NOW.with(|n| n.replace(Some((ts, kv.clone()))));

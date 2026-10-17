@@ -138,6 +138,10 @@ pub trait Kv: Send + Sync {
     /// collided once spread out.  Through the implementation's platform, so
     /// a simulation does not wait in real time.
     fn back_off(&self, attempt: u32);
+
+    /// Fills `buf` with unpredictable bytes (`gen_random_uuid()`): the
+    /// platform's (the operating system's generator; a simulation's seed).
+    fn random_bytes(&self, buf: &mut [u8]);
 }
 
 /// A transaction.  Dropping it without committing rolls it back.
@@ -310,6 +314,10 @@ impl Kv for Database {
 
     fn wall_clock(&self) -> SystemTime {
         self.platform.clock().wall()
+    }
+
+    fn random_bytes(&self, buf: &mut [u8]) {
+        self.platform.rng().fill_unpredictable(buf);
     }
 
     /// From 2 µs, doubling up to about 1 ms, plus up to as much again at
