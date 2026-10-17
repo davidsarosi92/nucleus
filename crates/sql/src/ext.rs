@@ -179,6 +179,18 @@ impl<'a> CallContext<'a> {
     }
 }
 
+/// Whether a function's result depends only on its arguments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Volatility {
+    /// The same arguments give the same result, always: a mapping that
+    /// defines an ordering or an index may use it.
+    Immutable,
+    /// The same within a statement (`now()`, catalog lookups).
+    Stable,
+    /// Anything (`gen_random_uuid()`, `clock_timestamp()`).
+    Volatile,
+}
+
 /// A scalar function.
 pub trait ScalarFunction: Send + Sync {
     /// The name `EXPLAIN` shows.
@@ -195,6 +207,12 @@ pub trait ScalarFunction: Send + Sync {
     /// (the default); `false` if the function handles `NULL`s itself.
     fn strict(&self) -> bool {
         true
+    }
+
+    /// How its result may vary (the default, `Volatile`, assumes the
+    /// worst).
+    fn volatility(&self) -> Volatility {
+        Volatility::Volatile
     }
 
     /// Computes the value.

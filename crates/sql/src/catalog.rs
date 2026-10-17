@@ -11,6 +11,7 @@
 //! | `00 02 <sequence name>` | a `u64` counter (`table_id`) |
 //! | `00 03 <table id u32 BE>` | next hidden row id of a table without a primary key |
 //! | `00 04 <table id u32 BE>` | table statistics (§M13) |
+//! | `00 05 <type name> 00 <ordering name>` | an ordering taught to a type (`ALTER TYPE … ADD ORDERING`): its mapping |
 //! | `01 <table id u32 BE> <index id u32 BE> <key>` | table and index entries |
 //!
 //! Index 0 of a table is its primary index: key = the primary key columns
@@ -34,11 +35,13 @@ const CATALOG: &[u8] = &[0x00, 0x01];
 const SEQUENCE: &[u8] = &[0x00, 0x02];
 const ROWID: &[u8] = &[0x00, 0x03];
 const STATS: &[u8] = &[0x00, 0x04];
+const ORDERINGS: &[u8] = &[0x00, 0x05];
+const ORDERING_VERSION: u8 = 1;
 const DATA: u8 = 0x01;
 /// Version 2 added `NUMERIC(p, s)` modifiers, version 3 foreign keys,
-/// version 4 registered types (tag `7F` and the type's name); older
-/// versions still read.
-const TABLE_VERSION: u8 = 4;
+/// version 4 registered types (tag `7F` and the type's name), version 5
+/// indexes in taught orderings; older versions still read.
+const TABLE_VERSION: u8 = 5;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -53,7 +56,7 @@ pub const KEY_ENCODING_VERSION: u16 = 2;
 /// one in an older key encoding is upgraded — the keys of every table with
 /// an array in a key are rewritten — by the first transaction that may
 /// write.  Returns whether the record is in place and current.
-pub fn check_format(txn: &mut dyn KvTxn) -> Result<bool> {
+pub fn check_format(txn: &mut dyn KvTxn, reg: &crate::ext::Registry) -> Result<bool> {
     let current = || {
         let mut w = Writer::default();
         w.u16(KEYSPACE_VERSION).u16(KEY_ENCODING_VERSION);
@@ -89,7 +92,7 @@ pub fn check_format(txn: &mut dyn KvTxn) -> Result<bool> {
                 .chain(t.indexes.iter().flat_map(|i| &i.columns))
                 .any(|&c| t.columns[c].ty.element().is_some());
             if array_key {
-                crate::dml::rewrite_keys(txn, &t)?;
+                crate::dml::rewrite_keys(txn, reg, &t)?;
             }
         }
     }
@@ -124,6 +127,29 @@ pub struct Index {
     pub columns: Vec<usize>,
     /// Whether two rows may not share non-NULL index values.
     pub unique: bool,
+    /// Per column, the taught ordering of its type the column is indexed
+    /// in (`CREATE INDEX … (col USING ordering)`): its entries hold the
+    /// column's mapping.  `None`: the value itself.
+    pub orderings: Vec<Option<String>>,
+}
+
+impl Index {
+    /// A plain index (every column by its own value).
+    pub fn plain(id: u32, name: String, columns: Vec<usize>, unique: bool) -> Self {
+        let orderings = vec![None; columns.len()];
+        Self {
+            id,
+            name,
+            columns,
+            unique,
+            orderings,
+        }
+    }
+
+    /// Whether some column is indexed in a taught ordering.
+    pub fn mapped(&self) -> bool {
+        self.orderings.iter().any(Option::is_some)
+    }
 }
 
 /// A foreign key: columns of this table that must match a row of another
@@ -219,6 +245,9 @@ impl Table {
             for &c in &i.columns {
                 w.u32(c as u32);
             }
+            for o in &i.orderings {
+                w.opt_str(o.as_deref());
+            }
         }
         w.u32(self.checks.len() as u32);
         for (name, expr) in &self.checks {
@@ -297,11 +326,17 @@ impl Table {
             let columns = (0..m)
                 .map(|_| r.u32().map(|c| c as usize))
                 .collect::<Result<_>>()?;
+            let orderings = if version >= 5 {
+                (0..m).map(|_| r.opt_str()).collect::<Result<_>>()?
+            } else {
+                vec![None; m]
+            };
             indexes.push(Index {
                 id,
                 name,
                 columns,
                 unique,
+                orderings,
             });
         }
         let n = r.u32()? as usize;
@@ -618,6 +653,84 @@ pub fn constraints(tables: &[Table]) -> Vec<Constraint<'_>> {
     out
 }
 
+/// An ordering taught to a type: `ALTER TYPE t ADD ORDERING name BY
+/// mapping`.  Values sort as their mappings do.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaughtOrdering {
+    /// The type's name.
+    pub type_name: String,
+    /// The ordering's name.
+    pub name: String,
+    /// The mapping, as SQL over `value`.
+    pub mapping: String,
+}
+
+fn ordering_key(type_name: &str, name: &str) -> Vec<u8> {
+    let mut k = ORDERINGS.to_vec();
+    k.extend_from_slice(type_name.as_bytes());
+    k.push(0);
+    k.extend_from_slice(name.as_bytes());
+    k
+}
+
+/// The ordering `name` taught to `type_name`.
+pub fn get_ordering(
+    txn: &dyn KvTxn,
+    type_name: &str,
+    name: &str,
+) -> Result<Option<TaughtOrdering>> {
+    let Some(b) = txn.get(&ordering_key(type_name, name))? else {
+        return Ok(None);
+    };
+    let mut r = Reader::new(&b);
+    if r.u8()? != ORDERING_VERSION {
+        return Err(Error::internal("unknown ordering record version"));
+    }
+    Ok(Some(TaughtOrdering {
+        type_name: type_name.into(),
+        name: name.into(),
+        mapping: r.str()?,
+    }))
+}
+
+/// Every taught ordering, by type and name.
+pub fn orderings(txn: &dyn KvTxn) -> Result<Vec<TaughtOrdering>> {
+    let end = prefix_end(ORDERINGS).expect("orderings prefix");
+    let mut out = Vec::new();
+    for e in txn.scan(Bound::Included(ORDERINGS), Bound::Excluded(&end))? {
+        let (k, v) = e?;
+        let rest = &k[ORDERINGS.len()..];
+        let split = rest
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| Error::internal("malformed ordering key"))?;
+        let text =
+            |b: &[u8]| String::from_utf8(b.to_vec()).map_err(|_| Error::internal("bad name"));
+        let mut r = Reader::new(&v);
+        r.u8()?;
+        out.push(TaughtOrdering {
+            type_name: text(&rest[..split])?,
+            name: text(&rest[split + 1..])?,
+            mapping: r.str()?,
+        });
+    }
+    Ok(out)
+}
+
+/// Stores (or replaces) a taught ordering.
+pub fn put_ordering(txn: &mut dyn KvTxn, o: &TaughtOrdering) -> Result<()> {
+    let mut w = Writer::default();
+    w.u8(ORDERING_VERSION).str(&o.mapping);
+    txn.put(&ordering_key(&o.type_name, &o.name), &w.0)?;
+    Ok(())
+}
+
+/// Forgets a taught ordering.
+pub fn delete_ordering(txn: &mut dyn KvTxn, type_name: &str, name: &str) -> Result<()> {
+    txn.delete(&ordering_key(type_name, name))?;
+    Ok(())
+}
+
 /// A row's primary index key.
 pub fn row_key(table: &Table, pk: &[Value]) -> Vec<u8> {
     let mut k = table.index_prefix(0);
@@ -666,6 +779,7 @@ mod tests {
                 name: "people_name".into(),
                 columns: vec![1],
                 unique: true,
+                orderings: vec![Some("ci".into())],
             }],
             checks: vec![("id_positive".into(), "id > 0".into())],
             next_index_id: 2,

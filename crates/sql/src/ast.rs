@@ -27,16 +27,25 @@ pub enum Statement {
     },
     /// `CREATE [UNIQUE] INDEX`.
     CreateIndex {
-        /// Index name.
-        name: String,
+        /// Index name (`None`: one is made up, `table_column_idx`).
+        name: Option<String>,
         /// Table.
         table: String,
         /// Indexed columns.
         columns: Vec<String>,
+        /// Per column, `USING ordering`: index it in that ordering.
+        orderings: Vec<Option<String>>,
         /// `UNIQUE`.
         unique: bool,
         /// `IF NOT EXISTS`.
         if_not_exists: bool,
+    },
+    /// `ALTER TYPE name …`: teaching a type, or making it forget.
+    AlterType {
+        /// The type's name.
+        type_name: String,
+        /// What changes.
+        action: TypeAction,
     },
     /// `DROP INDEX`.
     DropIndex {
@@ -405,6 +414,36 @@ pub enum JoinKind {
     Full,
 }
 
+/// What `ALTER TYPE` changes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TypeAction {
+    /// `ADD ORDERING name BY mapping`: an ordering by a mapping of `value`
+    /// into an ordered type.
+    AddOrdering {
+        /// Its name.
+        name: String,
+        /// The mapping, as SQL over `value`.
+        mapping: String,
+    },
+    /// `ALTER ORDERING name BY mapping`: redefined (what uses it is
+    /// rebuilt).
+    AlterOrdering {
+        /// Its name.
+        name: String,
+        /// The new mapping.
+        mapping: String,
+    },
+    /// `DROP ORDERING [IF EXISTS] name [CASCADE]`.
+    DropOrdering {
+        /// Its name.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+        /// `CASCADE`: drop what uses it too.
+        cascade: bool,
+    },
+}
+
 /// An `ORDER BY` item.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OrderItem {
@@ -414,6 +453,8 @@ pub struct OrderItem {
     pub desc: bool,
     /// `NULLS FIRST` / `NULLS LAST`, if given.
     pub nulls_first: Option<bool>,
+    /// `USING ordering`: sort in a taught ordering of the type.
+    pub using: Option<String>,
 }
 
 /// An expression.
@@ -519,6 +560,13 @@ pub enum Expr {
         ty: SqlType,
         /// Its modifier: `VARCHAR(n)`, `NUMERIC(p, s)`.
         typmod: TypeMod,
+    },
+    /// `expr COLLATE name`: compared and sorted in text ordering `name`.
+    Collate {
+        /// The operand.
+        expr: Box<Expr>,
+        /// The ordering (collation) name.
+        collation: String,
     },
     /// `ARRAY[a, b, …]`.
     Array(Vec<Expr>),

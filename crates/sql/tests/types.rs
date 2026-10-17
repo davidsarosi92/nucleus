@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use nucleus_kv::{Database, Kv, Options};
 use nucleus_platform::sim::SimPlatform;
+use nucleus_sql::ext::Volatility;
 use nucleus_sql::ext::*;
 use nucleus_sql::{Output, Session};
 
@@ -119,6 +120,61 @@ impl ScalarFunction for GeoDistance {
     }
 }
 
+/// `geohash(p)`: the point's geohash, 8 characters — nearby points share
+/// prefixes, so it orders points along a space-filling curve.
+struct GeoHash;
+
+fn geohash(lat: f64, lon: f64) -> String {
+    const BASE32: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+    let (mut lat_r, mut lon_r) = ((-90.0, 90.0), (-180.0, 180.0));
+    let mut out = String::new();
+    let (mut bits, mut ch, mut even) = (0, 0usize, true);
+    while out.len() < 8 {
+        let (r, v): (&mut (f64, f64), f64) = if even {
+            (&mut lon_r, lon)
+        } else {
+            (&mut lat_r, lat)
+        };
+        let mid = (r.0 + r.1) / 2.0;
+        ch <<= 1;
+        if v >= mid {
+            ch |= 1;
+            r.0 = mid;
+        } else {
+            r.1 = mid;
+        }
+        even = !even;
+        bits += 1;
+        if bits == 5 {
+            out.push(BASE32[ch] as char);
+            (bits, ch) = (0, 0);
+        }
+    }
+    out
+}
+
+impl ScalarFunction for GeoHash {
+    fn name(&self) -> &str {
+        "geohash"
+    }
+    fn arity(&self) -> RangeInclusive<usize> {
+        1..=1
+    }
+    fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
+        Ok(Signature::new(
+            vec![Arg::Untyped(DataType::Ext(geopoint()))],
+            Returns::Type(Some(DataType::Text)),
+        ))
+    }
+    fn volatility(&self) -> Volatility {
+        Volatility::Immutable
+    }
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        let (lat, lon) = coords(&args[0]);
+        Ok(Value::Text(geohash(lat, lon)))
+    }
+}
+
 struct Geo;
 
 impl Module for Geo {
@@ -127,6 +183,7 @@ impl Module for Geo {
     }
     fn register(&self, r: &mut Registry) -> Result<()> {
         r.add_type(Arc::new(GeoPoint))?;
+        r.add_function(&["geohash"], Arc::new(GeoHash))?;
         r.add_function(&["geo_distance"], Arc::new(GeoDistance))
     }
 }
@@ -340,4 +397,109 @@ fn geopoint_keeps_the_laws() {
     };
     let problems = nucleus_testkit::laws::check(DataType::Ext(geopoint()), &mut generate, 2000);
     assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// Teaching geopoint an ordering in SQL (PLAN.md §M14.19 "done when"):
+/// `ORDER BY … USING` and an index in it work; dropping it while the index
+/// uses it is refused; redefining it rebuilds the index; `CASCADE` drops
+/// the index with it.
+#[test]
+fn taught_an_ordering_by_a_mapping() {
+    let p = Arc::new(SimPlatform::new(1));
+    let kv = open(&p);
+    let reg = registry();
+    let mut s = Session::with_registry(kv.clone(), reg.clone());
+    setup(&mut s);
+    s.execute(
+        "INSERT INTO shops VALUES (5, 'Tokyo', '(35.68,139.69)'), (6, 'Quito', '(-0.18,-78.47)')",
+    )
+    .unwrap();
+    let consistent = |kv: &Arc<dyn Kv>| {
+        let txn = kv.begin(nucleus_kv::TxnOptions::read_only()).unwrap();
+        let problems = nucleus_sql::check::check(&*txn, &reg).unwrap();
+        assert!(problems.is_empty(), "{problems:#?}");
+    };
+    // Before: no order, nothing taught.
+    assert!(
+        !error(&mut s, "SELECT * FROM shops ORDER BY at")
+            .message
+            .contains("taught")
+    );
+    assert_eq!(
+        error(&mut s, "SELECT * FROM shops ORDER BY at USING by_geohash").code,
+        "42704"
+    );
+    // A mapping that may vary is refused.
+    let e = error(
+        &mut s,
+        "ALTER TYPE geopoint ADD ORDERING bad BY geohash(value) || gen_random_uuid()::text",
+    );
+    assert!(e.message.contains("immutable"), "{e}");
+    s.execute("ALTER TYPE geopoint ADD ORDERING by_geohash BY geohash(value)")
+        .unwrap();
+    let by_hash = rows(
+        &mut s,
+        "SELECT id FROM shops WHERE at IS NOT NULL ORDER BY at USING by_geohash, id",
+    );
+    let mut want: Vec<(String, String)> =
+        rows(&mut s, "SELECT id, at FROM shops WHERE at IS NOT NULL")
+            .into_iter()
+            .map(|r| {
+                let v = GeoPoint.input(&r[1]).unwrap();
+                let (lat, lon) = coords(&v);
+                (geohash(lat, lon), r[0].clone())
+            })
+            .collect();
+    want.sort();
+    assert_eq!(
+        by_hash.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
+        want.iter().map(|(_, id)| id.clone()).collect::<Vec<_>>()
+    );
+    // Plain ORDER BY now names the taught ordering.
+    let e = error(&mut s, "SELECT * FROM shops ORDER BY at");
+    assert!(e.message.contains("USING by_geohash"), "{e}");
+    // An index in it, kept up through writes.
+    s.execute("CREATE INDEX ON shops (at USING by_geohash)")
+        .unwrap();
+    consistent(&kv);
+    s.execute("INSERT INTO shops VALUES (7, 'Lima', '(-12.05,-77.04)')")
+        .unwrap();
+    s.execute("UPDATE shops SET at = '(51.5,-0.12)' WHERE id = 6")
+        .unwrap();
+    s.execute("DELETE FROM shops WHERE id = 1").unwrap();
+    consistent(&kv);
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT name, orderings FROM nc_catalog.indexes WHERE table_name = 'shops' AND NOT is_primary"
+        ),
+        [["shops_at_idx", "{by_geohash}"]]
+    );
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT type, name, mapping, used_by FROM nc_catalog.orderings"
+        ),
+        [["geopoint", "by_geohash", "geohash(value)", "{shops_at_idx}"]]
+    );
+    // Dropping it while the index uses it is refused.
+    let e = error(&mut s, "ALTER TYPE geopoint DROP ORDERING by_geohash");
+    assert_eq!(e.code, "2BP01", "{e}");
+    assert!(e.message.contains("shops_at_idx"), "{e}");
+    // Redefining it rebuilds the index (check() holds it to the new mapping).
+    s.execute("ALTER TYPE geopoint ALTER ORDERING by_geohash BY upper(geohash(value))")
+        .unwrap();
+    consistent(&kv);
+    // CASCADE drops the index with it.
+    s.execute("ALTER TYPE geopoint DROP ORDERING by_geohash CASCADE")
+        .unwrap();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT name FROM nc_catalog.indexes WHERE table_name = 'shops' AND NOT is_primary"
+        )
+        .is_empty()
+    );
+    assert!(rows(&mut s, "SELECT name FROM nc_catalog.orderings").is_empty());
+    consistent(&kv);
 }

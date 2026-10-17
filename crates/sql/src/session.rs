@@ -159,7 +159,7 @@ impl Session {
     /// ([`catalog::check_format`]).
     fn check_format(&mut self, txn: &mut dyn KvTxn) -> Result<()> {
         if !self.format_checked {
-            self.format_checked = crate::catalog::check_format(txn)?;
+            self.format_checked = crate::catalog::check_format(txn, &self.registry)?;
         }
         Ok(())
     }
@@ -302,7 +302,8 @@ impl Session {
             let r = if self.format_checked {
                 Ok(())
             } else {
-                crate::catalog::check_format(txn.as_mut()).map(|ok| self.format_checked = ok)
+                crate::catalog::check_format(txn.as_mut(), &self.registry)
+                    .map(|ok| self.format_checked = ok)
             };
             let r = r.and_then(|()| {
                 crate::datetime::with_now(block.now, &self.kv, || {
@@ -578,9 +579,26 @@ pub fn execute(
             name,
             table,
             columns,
+            orderings,
             unique,
             if_not_exists,
         } => {
+            let name = &match name {
+                Some(n) => n.clone(),
+                None => {
+                    // PostgreSQL's: table_columns_idx, numbered if taken.
+                    let base = format!("{table}_{}_idx", columns.join("_"));
+                    let mut n = base.clone();
+                    let mut k = 1;
+                    while catalog::find_index(&*txn, &n)?.is_some()
+                        || catalog::get_table(&*txn, &n)?.is_some()
+                    {
+                        n = format!("{base}{k}");
+                        k += 1;
+                    }
+                    n
+                }
+            };
             if catalog::find_index(&*txn, name)?.is_some()
                 || catalog::get_table(&*txn, name)?.is_some()
             {
@@ -600,18 +618,43 @@ pub fn execute(
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            require_keys(&t.columns, &cols, *unique, "an index")?;
-            t.indexes.push(Index {
-                id: t.next_index_id,
-                name: name.clone(),
-                columns: cols,
-                unique: *unique,
-            });
+            let mut plain = Vec::new();
+            for (&c, o) in cols.iter().zip(orderings) {
+                let Some(o) = o else {
+                    plain.push(c);
+                    continue;
+                };
+                if *unique {
+                    return Err(Error::feature(
+                        "a UNIQUE index in a taught ordering is not supported: its mapping may have ties",
+                    ));
+                }
+                let ty = t.columns[c].ty;
+                if let crate::binder::OrderingUse::Mapped { result, .. } =
+                    Binder::new(&*txn, reg).ordering(Some(ty), o)?
+                {
+                    crate::binder::require(
+                        result,
+                        &[crate::binder::Need::KeyEncoding],
+                        "an index in an ordering",
+                    )?;
+                } else {
+                    plain.push(c);
+                }
+            }
+            require_keys(&t.columns, &plain, *unique, "an index")?;
+            let mut ix = Index::plain(t.next_index_id, name.clone(), cols, *unique);
+            ix.orderings = orderings.clone();
+            t.indexes.push(ix);
             t.next_index_id += 1;
             let i = t.indexes.len() - 1;
             dml::backfill_index(txn, reg, &t, i)?;
             catalog::update_table(txn, &t)?;
             Output::Command("CREATE INDEX".into())
+        }
+        Statement::AlterType { type_name, action } => {
+            alter_type(txn, reg, type_name, action)?;
+            Output::Command("ALTER TYPE".into())
         }
         Statement::DropIndex { name, if_exists } => {
             match catalog::find_index(&*txn, name)? {
@@ -862,12 +905,9 @@ fn create_table(
                 "relation \"{n}\" already exists"
             )));
         }
-        table.indexes.push(Index {
-            id: table.next_index_id,
-            name: n,
-            columns: cols,
-            unique: true,
-        });
+        table
+            .indexes
+            .push(Index::plain(table.next_index_id, n, cols, true));
         table.next_index_id += 1;
     }
     // Defaults and checks must bind now, not at the first insert.
@@ -918,6 +958,121 @@ fn create_table(
 }
 
 /// `ALTER TABLE … ADD CONSTRAINT`.
+/// The indexes that use ordering `name` of type `type_name`: (table,
+/// index position).
+fn ordering_users(txn: &dyn KvTxn, type_name: &str, name: &str) -> Result<Vec<(Table, usize)>> {
+    let mut out = Vec::new();
+    for t in catalog::tables(txn)? {
+        for (i, ix) in t.indexes.iter().enumerate() {
+            let uses = ix.columns.iter().zip(&ix.orderings).any(|(&c, o)| {
+                o.as_deref() == Some(name)
+                    && crate::builtin::type_of(t.columns[c].ty).name() == type_name
+            });
+            if uses {
+                out.push((t.clone(), i));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Rebuilds index `i` of `t`: its entries again, from the rows.
+fn rebuild_index(txn: &mut dyn KvTxn, reg: &Registry, t: &Table, i: usize) -> Result<()> {
+    let prefix = t.index_prefix(t.indexes[i].id);
+    catalog::delete_range(txn, &prefix, nucleus_kv::prefix_end(&prefix).as_deref())?;
+    dml::backfill_index(txn, reg, t, i)
+}
+
+/// `ALTER TYPE`: teaching a type an ordering, redefining one (rebuilding
+/// the indexes that use it), or dropping one (refused while used, unless
+/// `CASCADE`, which drops those indexes).
+fn alter_type(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    type_name: &str,
+    action: &crate::ast::TypeAction,
+) -> Result<()> {
+    use crate::catalog::TaughtOrdering;
+    let ty = reg
+        .type_named(type_name)
+        .ok_or_else(|| Error::undefined_object(format!("type \"{type_name}\" does not exist")))?;
+    let tname = crate::builtin::type_of(ty).name().to_string();
+    let builtin_name = |n: &str| {
+        ty == DataType::Text && crate::binder::BYTE_ORDER.contains(&n.to_lowercase().as_str())
+    };
+    match action {
+        crate::ast::TypeAction::AddOrdering { name, mapping } => {
+            if builtin_name(name) || catalog::get_ordering(&*txn, &tname, name)?.is_some() {
+                return Err(Error::duplicate_object(format!(
+                    "type {tname} already has an ordering {name}"
+                )));
+            }
+            Binder::new(&*txn, reg).bind_mapping(ty, mapping)?;
+            catalog::put_ordering(
+                txn,
+                &TaughtOrdering {
+                    type_name: tname,
+                    name: name.clone(),
+                    mapping: mapping.clone(),
+                },
+            )?;
+        }
+        crate::ast::TypeAction::AlterOrdering { name, mapping } => {
+            if catalog::get_ordering(&*txn, &tname, name)?.is_none() {
+                return Err(Error::undefined_object(format!(
+                    "type {tname} has no ordering {name}"
+                )));
+            }
+            Binder::new(&*txn, reg).bind_mapping(ty, mapping)?;
+            catalog::put_ordering(
+                txn,
+                &TaughtOrdering {
+                    type_name: tname.clone(),
+                    name: name.clone(),
+                    mapping: mapping.clone(),
+                },
+            )?;
+            for (t, i) in ordering_users(&*txn, &tname, name)? {
+                rebuild_index(txn, reg, &t, i)?;
+            }
+        }
+        crate::ast::TypeAction::DropOrdering {
+            name,
+            if_exists,
+            cascade,
+        } => {
+            if catalog::get_ordering(&*txn, &tname, name)?.is_none() {
+                if *if_exists {
+                    return Ok(());
+                }
+                return Err(Error::undefined_object(format!(
+                    "type {tname} has no ordering {name}"
+                )));
+            }
+            let users = ordering_users(&*txn, &tname, name)?;
+            if let Some((t, i)) = users.first()
+                && !*cascade
+            {
+                return Err(Error::dependent_objects(format!(
+                    "cannot drop ordering {name} of type {tname} because index {} on table {} uses it (DROP … CASCADE drops it too)",
+                    t.indexes[*i].name, t.name
+                )));
+            }
+            for (t, i) in users {
+                let id = t.indexes[i].id;
+                // Read afresh: an earlier drop may have changed the table.
+                let mut t = catalog::table(&*txn, &t.name)?;
+                let prefix = t.index_prefix(id);
+                catalog::delete_range(txn, &prefix, nucleus_kv::prefix_end(&prefix).as_deref())?;
+                t.indexes.retain(|ix| ix.id != id);
+                catalog::update_table(txn, &t)?;
+            }
+            catalog::delete_ordering(txn, &tname, name)?;
+        }
+    }
+    Ok(())
+}
+
 /// Refuses key columns whose types have no key encoding (and, for a
 /// primary key or `UNIQUE`, no equality).
 fn require_keys(columns: &[Column], cols: &[usize], unique: bool, what: &str) -> Result<()> {
@@ -996,12 +1151,8 @@ fn add_constraint(
                 })
                 .collect::<Result<Vec<_>>>()?;
             require_keys(&t.columns, &columns, true, "UNIQUE")?;
-            t.indexes.push(Index {
-                id: t.next_index_id,
-                name,
-                columns,
-                unique: true,
-            });
+            t.indexes
+                .push(Index::plain(t.next_index_id, name, columns, true));
             t.next_index_id += 1;
             dml::backfill_index(txn, reg, &t, t.indexes.len() - 1)?;
         }

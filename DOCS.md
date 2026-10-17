@@ -649,6 +649,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 02 <sequence>` | counter (`table_id`) |
 | `00 03 <table id>` | next hidden row id (tables without a primary key) |
 | `00 04 <table id>` | statistics (§8.8) |
+| `00 05 <type> 00 <ordering>` | an ordering taught to a type: its mapping (SQL over `value`) |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 
@@ -843,10 +844,11 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.schemas` | `name`, `description` (the session registry's schemas) |
 | `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows` |
 | `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key` |
-| `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix` |
+| `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix`, `orderings` (per column, the taught ordering it is indexed in, or NULL) |
 | `nc_catalog.constraints` | `table_id`, `table_name`, `name`, `kind`, `definition` |
 | `nc_catalog.foreign_keys` | `table_id`, `table_name`, `name`, `columns`, `referenced_table`, `referenced_columns`, `on_delete`, `on_update` |
 | `nc_catalog.statistics` | `table_id`, `table_name`, `column_name`, `rows`, `nulls`, `distinct_values`, `histogram` |
+| `nc_catalog.orderings` | `type`, `name`, `mapping`, `used_by` (the indexes in it) |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
 
 **PostgreSQL compatibility: the `pg-compat` module** (`modules/pg-compat`,
@@ -875,6 +877,29 @@ One role, `nucleus`.  This is what makes `psql`'s `\d`, `\d table`,
 that need functions, sequences or permissions do not.  `pg_typeof(x)` is
 one of its functions too.
 
+**Teaching a type an ordering** (§M14.19): `ALTER TYPE t ADD ORDERING
+name BY mapping` — `mapping` is SQL over `value` (a `t`), into a type with
+an order, and must be immutable (no subqueries, parameters, or functions
+that are not `Volatility::Immutable`: `22023` otherwise).  Values then
+sort as their mappings: `ORDER BY x USING name [DESC]` (in aggregates
+too), and an index can hold the mappings: `CREATE INDEX [name] ON t (col
+USING name)` (not `UNIQUE`: a mapping may have ties, which the primary key
+breaks; such an index is kept current by every write but is no access
+path for predicates on the column).  `ALTER TYPE t ALTER ORDERING name BY
+mapping` redefines it and rebuilds the indexes in it; `ALTER TYPE t DROP
+ORDERING [IF EXISTS] name` is refused while an index uses it (`2BP01`,
+naming the index) unless `CASCADE`, which drops those indexes.  A plain
+`ORDER BY` of a type without an order names the orderings taught to it.
+**Collations are text orderings:** `x COLLATE name` sorts and compares
+(`=`, `<`, …) in text ordering `name` — `C`, `default`, `POSIX`,
+`ucs_basic` are text's own byte order, any other one taught (`ALTER TYPE
+text ADD ORDERING ci BY lower(value)`); the value itself is unchanged.
+Orderings live in the catalog (key `00 05`), so teaching is transactional
+DDL; indexes record them per column (table record version 5).
+`CREATE INDEX` without a name makes one up (`table_columns_idx`).
+`crates/testkit/slt/21_orderings.slt` and `tests/types.rs` (`geopoint`
+taught `by_geohash`) test it.
+
 ### 8.12 Extension API (`ext`, `builtin`)
 
 What a module adds to the SQL layer (principle 12), versioned
@@ -886,7 +911,9 @@ What a module adds to the SQL layer (principle 12), versioned
   `Keep`, `Untyped(t)` — an untyped literal, `NULL` or parameter takes
   `t` —, `Convert(t)` or `Common`; the result a type, the arguments'
   common type, or a `Constant`), `strict()` (default true: a `NULL`
-  argument gives `NULL` without a call), `call(&CallContext, &[Value])`.
+  argument gives `NULL` without a call), `volatility()` (`Immutable`,
+  `Stable`, `Volatile` — the default; only immutable functions may define
+  an ordering), `call(&CallContext, &[Value])`.
   `CallContext` gives the statement's transaction, the registry,
   `now()`, `clock()` and `random(buf)` (all through the database's
   platform).
@@ -1164,6 +1191,11 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.19 teaching orderings (T5, orderings):** `ALTER
+  TYPE … ADD / ALTER / DROP ORDERING … BY mapping`, `ORDER BY … USING`,
+  `COLLATE` as a text ordering, indexes in an ordering (rebuilt when it is
+  redefined, guarding its drop), `nc_catalog.orderings`; function
+  volatility.
 - **2026-10-17 — §M14.19 the law kit (T4):** `nucleus_sql::laws` and
   `nucleus_testkit::laws`; registration checks a type's examples.  It
   caught arrays' key encoding putting a `NULL` element first (comparisons

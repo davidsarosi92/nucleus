@@ -802,11 +802,22 @@ pub fn row_key_of(table: &Table, row: &[Value], rowid: Option<i64>) -> Vec<u8> {
     }
 }
 
-/// The index entry key of `row` in `table.indexes[i]`, and whether its
-/// index columns are all non-NULL (only those take part in uniqueness).
+/// The index entry key of `row` in `table.indexes[i]` (a plain index:
+/// its columns' own values), and whether its index columns are all
+/// non-NULL (only those take part in uniqueness).
 pub fn index_entry(table: &Table, i: usize, row: &[Value], pk_bytes: &[u8]) -> (Vec<u8>, bool) {
+    let vals: Vec<Value> = table.indexes[i]
+        .columns
+        .iter()
+        .map(|&c| row[c].clone())
+        .collect();
+    index_key(table, i, vals, pk_bytes)
+}
+
+/// The index entry key for index values `vals` (the columns' values, or
+/// their mappings in taught orderings) in `table.indexes[i]`.
+pub fn index_key(table: &Table, i: usize, vals: Vec<Value>, pk_bytes: &[u8]) -> (Vec<u8>, bool) {
     let index = &table.indexes[i];
-    let vals: Vec<Value> = index.columns.iter().map(|&c| row[c].clone()).collect();
     let all_set = !vals.iter().any(Value::is_null);
     let mut k = table.index_prefix(index.id);
     k.extend_from_slice(&encode_key(&vals));

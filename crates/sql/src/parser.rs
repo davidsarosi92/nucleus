@@ -376,14 +376,34 @@ impl<'a> Parser<'a> {
         let unique = self.eat_kw("unique");
         if self.eat_kw("index") {
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
-            let name = self.ident()?;
+            let name = if self.peek_kw("on") {
+                None
+            } else {
+                Some(self.ident()?)
+            };
             self.expect_kw("on")?;
             let table = self.relation()?;
-            let columns = self.ident_list()?;
+            // (column [USING ordering], …)
+            self.expect_op("(")?;
+            let mut columns = Vec::new();
+            let mut orderings = Vec::new();
+            loop {
+                columns.push(self.ident()?);
+                orderings.push(if self.eat_kw("using") {
+                    Some(self.ident()?)
+                } else {
+                    None
+                });
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+            self.expect_op(")")?;
             return Ok(Statement::CreateIndex {
                 name,
                 table,
                 columns,
+                orderings,
                 unique,
                 if_not_exists,
             });
@@ -679,8 +699,54 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `ALTER TYPE name ADD | ALTER ORDERING o BY mapping`, `… DROP
+    /// ORDERING [IF EXISTS] o [CASCADE | RESTRICT]`.
+    fn alter_type(&mut self) -> Result<Statement> {
+        let type_name = self.ident()?;
+        let verb = self.ident()?;
+        if !self.eat_kw("ordering") {
+            return Err(Error::feature(
+                "ALTER TYPE supports ADD, ALTER and DROP ORDERING",
+            ));
+        }
+        let action = match verb.as_str() {
+            "add" | "alter" => {
+                let name = self.ident()?;
+                self.expect_kw("by")?;
+                let (_, mapping) = self.text_of(|p| p.expr())?;
+                if verb == "add" {
+                    TypeAction::AddOrdering { name, mapping }
+                } else {
+                    TypeAction::AlterOrdering { name, mapping }
+                }
+            }
+            "drop" => {
+                let if_exists = self.eat_kws(&["if", "exists"]);
+                let name = self.ident()?;
+                let cascade = self.eat_kw("cascade");
+                if !cascade {
+                    self.eat_kw("restrict");
+                }
+                TypeAction::DropOrdering {
+                    name,
+                    if_exists,
+                    cascade,
+                }
+            }
+            _ => {
+                return Err(Error::feature(
+                    "ALTER TYPE supports ADD, ALTER and DROP ORDERING",
+                ));
+            }
+        };
+        Ok(Statement::AlterType { type_name, action })
+    }
+
     fn alter(&mut self) -> Result<Statement> {
         self.expect_kw("alter")?;
+        if self.eat_kw("type") {
+            return self.alter_type();
+        }
         self.expect_kw("table")?;
         let table = self.relation()?;
         if self.eat_kws(&["drop", "constraint"]) {
@@ -1174,14 +1240,19 @@ impl<'a> Parser<'a> {
                     index: Box::new(index),
                 };
             } else if self.eat_kw("collate") {
-                // Collations are accepted and ignored: text compares
-                // bytewise (PostgreSQL's "C").
-                if !matches!(self.next(), Some(Token::Word(_) | Token::Quoted(_))) {
-                    return Err(self.error("expected a collation"));
-                }
+                // A text ordering, maybe schema-qualified (the schema is
+                // the binder's to check; the name is the ordering's).
+                let mut collation = match self.next() {
+                    Some(Token::Word(w) | Token::Quoted(w)) => w,
+                    _ => return Err(self.error("expected a collation")),
+                };
                 if self.eat_op(".") {
-                    self.ident()?;
+                    collation = self.ident()?;
                 }
+                e = Expr::Collate {
+                    expr: Box::new(e),
+                    collation,
+                };
             } else {
                 return Ok(e);
             }
@@ -1361,6 +1432,15 @@ impl<'a> Parser<'a> {
                 self.eat_kw("asc");
                 false
             };
+            let using = if self.eat_kw("using") {
+                Some(self.ident()?)
+            } else {
+                None
+            };
+            let desc = desc || (using.is_some() && self.eat_kw("desc"));
+            if using.is_some() {
+                self.eat_kw("asc");
+            }
             let nulls_first = if self.eat_kws(&["nulls", "first"]) {
                 Some(true)
             } else if self.eat_kws(&["nulls", "last"]) {
@@ -1372,6 +1452,7 @@ impl<'a> Parser<'a> {
                 expr,
                 desc,
                 nulls_first,
+                using,
             });
             if !self.eat_op(",") {
                 return Ok(out);

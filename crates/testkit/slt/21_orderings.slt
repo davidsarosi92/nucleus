@@ -1,0 +1,84 @@
+# Orderings taught in SQL (nucleus-only): ALTER TYPE … ADD ORDERING, ORDER BY
+# … USING, COLLATE as a text ordering, indexes in an ordering.
+
+statement ok
+CREATE TABLE people (id INT PRIMARY KEY, name TEXT)
+
+statement ok
+INSERT INTO people VALUES (1, 'bob'), (2, 'Alice'), (3, 'carol'), (4, 'Bob')
+
+# Text's own order is byte order ("C"): upper case before lower.
+query T
+SELECT name FROM people ORDER BY name COLLATE "C", id
+----
+Alice
+Bob
+bob
+carol
+
+statement error 42704
+SELECT name FROM people ORDER BY name COLLATE nosuch
+
+statement ok
+ALTER TYPE text ADD ORDERING ci BY lower(value)
+
+query T
+SELECT name FROM people ORDER BY name COLLATE ci, id
+----
+Alice
+bob
+Bob
+carol
+
+query T
+SELECT name FROM people ORDER BY name USING ci DESC, id
+----
+carol
+bob
+Bob
+Alice
+
+query BBB
+SELECT 'ABC' COLLATE ci = 'abc', 'ABC' = 'abc', 'b' COLLATE ci > 'A'
+----
+true false true
+
+query I
+SELECT count(*) FROM people WHERE name COLLATE ci = 'BOB'
+----
+2
+
+# The value itself is unchanged.
+query T
+SELECT name COLLATE ci FROM people WHERE id = 2
+----
+Alice
+
+statement ok
+CREATE INDEX people_name_ci ON people (name USING ci)
+
+statement ok
+INSERT INTO people VALUES (5, 'ALICE')
+
+query TTT
+SELECT type, name, mapping FROM nc_catalog.orderings
+----
+text ci lower(value)
+
+statement error 2BP01
+ALTER TYPE text DROP ORDERING ci
+
+statement ok
+DROP INDEX people_name_ci
+
+statement ok
+ALTER TYPE text DROP ORDERING ci
+
+statement error 42704
+SELECT name FROM people ORDER BY name USING ci
+
+statement error 42710
+ALTER TYPE text ADD ORDERING c BY lower(value)
+
+statement error 22023
+ALTER TYPE text ADD ORDERING noisy BY value || clock_timestamp()::text

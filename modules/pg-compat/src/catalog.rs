@@ -36,7 +36,7 @@ use nucleus_kv::KvTxn;
 use nucleus_sql::ext::catalog::{self, Column, ConstraintKind, FkAction, Table};
 use nucleus_sql::ext::{
     Arg, ArgInfo, CallContext, CatalogView, DataType, Error, Module, Registry, Result, Returns,
-    Row, ScalarFunction, Signature, Value,
+    Row, ScalarFunction, Signature, Value, Volatility,
 };
 
 /// The `pg_catalog` namespace.
@@ -1639,6 +1639,11 @@ impl ScalarFunction for PgFunction {
     /// They take `NULL`s their own way.
     fn strict(&self) -> bool {
         false
+    }
+
+    /// They read the catalog.
+    fn volatility(&self) -> Volatility {
+        Volatility::Stable
     }
 
     fn call(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Value> {

@@ -182,7 +182,9 @@ fn sql_survives_a_crash_at_any_io_point() {
                 let ok = got == states[done] || (in_step && states.get(done + 1) == Some(&got));
                 assert!(ok, "{ctx}: recovered a state that no step left:\n{got}");
                 let txn = kv.begin(TxnOptions::read_only()).unwrap();
-                let problems = nucleus_sql::check::check(&*txn).unwrap();
+                let problems =
+                    nucleus_sql::check::check(&*txn, &nucleus_sql::ext::Registry::builtin())
+                        .unwrap();
                 assert!(problems.is_empty(), "{ctx}: {problems:#?}");
                 drop(txn);
                 // And it keeps working.
@@ -219,7 +221,8 @@ fn the_workload_does_what_it_should() {
         .unwrap()
         .0;
     txn.delete(&first).unwrap();
-    let problems = nucleus_sql::check::check(&*txn).unwrap();
+    let problems =
+        nucleus_sql::check::check(&*txn, &nucleus_sql::ext::Registry::builtin()).unwrap();
     assert_eq!(problems.len(), 1, "{problems:#?}");
     assert!(problems[0].contains("1 missing"), "{problems:#?}");
 }

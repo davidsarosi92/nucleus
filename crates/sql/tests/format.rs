@@ -121,7 +121,8 @@ fn an_older_key_encoding_is_upgraded() {
     s.execute("CREATE TABLE other (x INT)").unwrap();
     assert_eq!(record(&*kv), Some(vec![1, 0, 2, 0]));
     let txn = kv.begin(TxnOptions::read_only()).unwrap();
-    let problems = nucleus_sql::check::check(&*txn).unwrap();
+    let problems =
+        nucleus_sql::check::check(&*txn, &nucleus_sql::ext::Registry::builtin()).unwrap();
     assert!(problems.is_empty(), "{problems:#?}");
     drop(txn);
     // check() found every key in the current encoding; and the rows read.

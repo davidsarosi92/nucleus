@@ -14,7 +14,7 @@ use crate::expr::Func;
 use crate::ext::{
     Accumulator, Aggregate, Arg, ArgInfo, CallContext, Equality, FnRef, Hashing, KeyEncoding,
     Module, Registry, Returns, ScalarFunction, Signature, TableFunction, TableSignature,
-    TotalOrder, Type, common_type,
+    TotalOrder, Type, Volatility, common_type,
 };
 use crate::types::{DataType, Row, Value};
 
@@ -175,6 +175,19 @@ impl ScalarFunction for BuiltinFn {
     /// The built-ins handle `NULL`s themselves.
     fn strict(&self) -> bool {
         false
+    }
+
+    fn volatility(&self) -> Volatility {
+        match self.func {
+            Func::ClockTimestamp => Volatility::Volatile,
+            Func::Now
+            | Func::CurrentDate
+            | Func::LocalTimestamp
+            | Func::CurrentUser
+            | Func::CurrentDatabase
+            | Func::CurrentSchema => Volatility::Stable,
+            _ => Volatility::Immutable,
+        }
     }
 
     fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {

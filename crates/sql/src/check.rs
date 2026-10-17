@@ -16,16 +16,16 @@ use nucleus_kv::{KvTxn, prefix_end};
 use crate::catalog::{self, Table};
 use crate::encoding::{decode_row, encode_key};
 use crate::error::Result;
-use crate::exec::{index_entry, pk_suffix, row_key_of};
+use crate::exec::{pk_suffix, row_key_of};
 use crate::types::{Row, Value};
 
 /// Every inconsistency found, described; empty when the data is consistent.
-pub fn check(txn: &dyn KvTxn) -> Result<Vec<String>> {
+pub fn check(txn: &dyn KvTxn, reg: &crate::ext::Registry) -> Result<Vec<String>> {
     let tables = catalog::tables(txn)?;
     let mut problems = Vec::new();
     let mut rows_of: BTreeMap<&str, Vec<Row>> = BTreeMap::new();
     for t in &tables {
-        rows_of.insert(&t.name, check_table(txn, t, &mut problems)?);
+        rows_of.insert(&t.name, check_table(txn, reg, t, &mut problems)?);
     }
     for t in &tables {
         for fk in &t.foreign_keys {
@@ -86,7 +86,13 @@ fn pick(row: &Row, columns: &[usize]) -> Vec<Value> {
 }
 
 /// Checks one table's rows and indexes; returns its rows.
-fn check_table(txn: &dyn KvTxn, t: &Table, problems: &mut Vec<String>) -> Result<Vec<Row>> {
+fn check_table(
+    txn: &dyn KvTxn,
+    reg: &crate::ext::Registry,
+    t: &Table,
+    problems: &mut Vec<String>,
+) -> Result<Vec<Row>> {
+    let keys = crate::dml::IndexKeys::new(txn, reg, t)?;
     let scan = |prefix: &[u8]| -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let end = prefix_end(prefix).expect("table prefix");
         txn.scan(Bound::Included(prefix), Bound::Excluded(&end))?
@@ -118,8 +124,11 @@ fn check_table(txn: &dyn KvTxn, t: &Table, problems: &mut Vec<String>) -> Result
             }
         }
         let pk = pk_suffix(t, &key);
-        for (i, want) in expected.iter_mut().enumerate() {
-            let (k, _) = index_entry(t, i, &row, &pk);
+        for (i, (want, (k, _))) in expected
+            .iter_mut()
+            .zip(keys.entries(txn, t, &row, &pk)?)
+            .enumerate()
+        {
             if want.insert(k, pk.clone()).is_some() {
                 problems.push(format!(
                     "{}: row {row:?} duplicates another in unique index {}",

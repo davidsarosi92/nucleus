@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use crate::error::{Error, Result};
 use crate::ext::{
     Arg, ArgInfo, CallContext, CanonicalBytes, Equality, Hashing, KeyEncoding, Registry, Returns,
-    ScalarFunction, Signature, TotalOrder, Type, TypeRef,
+    ScalarFunction, Signature, TotalOrder, Type, TypeRef, Volatility,
 };
 use crate::types::{DataType, Value};
 
@@ -188,6 +188,13 @@ impl ScalarFunction for UuidFn {
                 Returns::Type(Some(DataType::TimestampTz)),
             ),
         })
+    }
+
+    fn volatility(&self) -> Volatility {
+        match self.0 {
+            F::Random | F::V7 => Volatility::Volatile,
+            F::Version | F::Timestamp => Volatility::Immutable,
+        }
     }
 
     fn call(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Value> {

@@ -138,7 +138,10 @@ fn contains_agg(r: &Registry, e: &ast::Expr) -> bool {
         A::Function { name, args, .. } => {
             r.aggregate(name).is_some() || args.iter().any(&contains_agg)
         }
-        A::Unary { expr, .. } | A::IsNull { expr, .. } | A::Cast { expr, .. } => contains_agg(expr),
+        A::Unary { expr, .. }
+        | A::IsNull { expr, .. }
+        | A::Cast { expr, .. }
+        | A::Collate { expr, .. } => contains_agg(expr),
         A::Binary { left, right, .. } => contains_agg(left) || contains_agg(right),
         A::Between {
             expr, low, high, ..
@@ -491,6 +494,11 @@ impl<'a> Binder<'a> {
         if !q.order_by.is_empty() {
             let mut keys = Vec::new();
             for item in &q.order_by {
+                if item.using.is_some() || collation(&item.expr).is_some() {
+                    return Err(Error::feature(
+                        "ORDER BY … USING or COLLATE on a set operation is not supported yet",
+                    ));
+                }
                 let i = self
                     .output_position(&item.expr, &bound.scope)?
                     .ok_or_else(|| {
@@ -1023,8 +1031,16 @@ impl<'a> Binder<'a> {
         let mut keys = Vec::new();
         for item in order_by {
             let nulls_first = item.nulls_first.unwrap_or(item.desc);
-            if let Some(i) = self.output_position(&item.expr, &Scope { cols: cols.clone() })? {
-                require(cols[i].ty, &[Need::Ordering], "ORDER BY")?;
+            // `x COLLATE name` sorts as `x USING name`.
+            let (key, using) = match (&item.expr, &item.using) {
+                (ast::Expr::Collate { expr, collation }, None) => {
+                    (&**expr, Some(collation.as_str()))
+                }
+                (e, u) => (e, u.as_deref()),
+            };
+            let output = self.output_position(key, &Scope { cols: cols.clone() })?;
+            if let (Some(i), None) = (output, using) {
+                self.require_order(cols[i].ty, "ORDER BY")?;
                 keys.push(SortKey {
                     expr: Expr::Column(i),
                     desc: item.desc,
@@ -1032,11 +1048,12 @@ impl<'a> Binder<'a> {
                 });
                 continue;
             }
-            let (x, t) = match &mut grouping {
-                Some(g) => self.grouped_expr(&item.expr, g)?,
-                None => self.expr(&item.expr, &scope)?,
+            let (x, t) = match (output, &mut grouping) {
+                (Some(i), _) => (exprs[i].clone(), cols[i].ty),
+                (None, Some(g)) => self.grouped_expr(key, g)?,
+                (None, None) => self.expr(key, &scope)?,
             };
-            require(t, &[Need::Ordering], "ORDER BY")?;
+            let x = self.sort_key(x, t, using)?;
             let i = match exprs.iter().position(|e| *e == x) {
                 Some(i) => i,
                 None => {
@@ -1162,8 +1179,14 @@ impl<'a> Binder<'a> {
                 if contains_agg(self.registry, &o.expr) {
                     return Err(Error::grouping("aggregate function calls cannot be nested"));
                 }
-                let (x, t) = self.expr(&o.expr, &from)?;
-                require(t, &[Need::Ordering], "ORDER BY")?;
+                let (key, using) = match (&o.expr, &o.using) {
+                    (ast::Expr::Collate { expr, collation }, None) => {
+                        (&**expr, Some(collation.as_str()))
+                    }
+                    (e, u) => (e, u.as_deref()),
+                };
+                let (x, t) = self.expr(key, &from)?;
+                let x = self.sort_key(x, t, using)?;
                 order.push(SortKey {
                     expr: x,
                     desc: o.desc,
@@ -1515,7 +1538,43 @@ impl<'a> Binder<'a> {
             A::Binary { op, left, right } => {
                 let (l, lt) = sub(left, self)?;
                 let (r, rt) = sub(right, self)?;
-                self.binary(*op, l, lt, r, rt)?
+                let comparison = matches!(
+                    op,
+                    BinaryOp::Eq
+                        | BinaryOp::NotEq
+                        | BinaryOp::Lt
+                        | BinaryOp::LtEq
+                        | BinaryOp::Gt
+                        | BinaryOp::GtEq
+                );
+                match (comparison, collation(left).or(collation(right))) {
+                    (true, Some(name)) => {
+                        // Compared in a text ordering: as their mappings.
+                        let (l, lt) = self.coerce(Some(DataType::Text), l, lt)?.1;
+                        let (r, rt) = self.coerce(Some(DataType::Text), r, rt)?.1;
+                        match self.ordering(lt.or(rt), name)? {
+                            OrderingUse::Native => self.binary(*op, l, lt, r, rt)?,
+                            OrderingUse::Mapped { mapping, result } => {
+                                let (ml, mr) = (apply(&mapping, &l), apply(&mapping, &r));
+                                self.binary(*op, ml, result, mr, result)?
+                            }
+                        }
+                    }
+                    _ => self.binary(*op, l, lt, r, rt)?,
+                }
+            }
+            A::Collate { expr, collation } => {
+                // The value itself; its comparisons and sorts use the
+                // ordering (above, and in ORDER BY).
+                let (x, t) = sub(expr, self)?;
+                if t.is_some_and(|t| t != DataType::Text) {
+                    return Err(Error::type_mismatch(format!(
+                        "collations are not supported by type {}",
+                        t.unwrap()
+                    )));
+                }
+                self.ordering(Some(DataType::Text), collation)?;
+                (x, t)
             }
             A::IsNull { expr, negated } => {
                 let (x, _) = sub(expr, self)?;
@@ -1689,6 +1748,112 @@ impl<'a> Binder<'a> {
                 }
                 self.call(f, bound)?
             }
+        })
+    }
+
+    /// The ordering `name` of `ty`: text's own (`C`, `default`, …) or one
+    /// taught to the type (`ALTER TYPE … ADD ORDERING`).
+    pub fn ordering(&mut self, ty: Option<DataType>, name: &str) -> Result<OrderingUse> {
+        let Some(ty) = ty else {
+            return Err(Error::feature(format!(
+                "ordering {name} needs a typed value"
+            )));
+        };
+        if ty == DataType::Text && BYTE_ORDER.contains(&name.to_lowercase().as_str()) {
+            return Ok(OrderingUse::Native);
+        }
+        let t = crate::builtin::type_of(ty);
+        match catalog::get_ordering(self.txn, t.name(), name)? {
+            Some(o) => {
+                let (mapping, result) = self.bind_mapping(ty, &o.mapping)?;
+                Ok(OrderingUse::Mapped { mapping, result })
+            }
+            None => {
+                let taught = self.taught_orderings(t.name())?;
+                Err(Error::undefined_object(format!(
+                    "type {} has no ordering {name}{}",
+                    t.name(),
+                    if taught.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; it has: {}", taught.join(", "))
+                    }
+                )))
+            }
+        }
+    }
+
+    /// The orderings taught to the type called `type_name`.
+    fn taught_orderings(&self, type_name: &str) -> Result<Vec<String>> {
+        Ok(catalog::orderings(self.txn)?
+            .into_iter()
+            .filter(|o| o.type_name == type_name)
+            .map(|o| o.name)
+            .collect())
+    }
+
+    /// Binds an ordering's mapping of a `ty` value (`value`, column 0):
+    /// it must be immutable — no subqueries, parameters or functions that
+    /// may vary — and its result ordered.
+    pub fn bind_mapping(&mut self, ty: DataType, text: &str) -> Result<(Expr, Option<DataType>)> {
+        let scope = Scope {
+            cols: vec![ScopeCol {
+                table: None,
+                name: "value".into(),
+                ty: Some(ty),
+                hidden: false,
+            }],
+        };
+        let ast = crate::parser::parse_expr(text)?;
+        let (x, t) = Binder::new(self.txn, self.registry).expr(&ast, &scope)?;
+        let mut problem = None;
+        x.walk(&mut |e| match e {
+            Expr::Subquery(_) | Expr::Param(_) | Expr::Outer { .. } => {
+                problem = Some("a subquery, a parameter or an outer reference".to_string());
+            }
+            Expr::Call(f, _) if f.volatility() != crate::ext::Volatility::Immutable => {
+                problem = Some(format!("{}(), which is not immutable", f.name()));
+            }
+            _ => {}
+        });
+        if let Some(p) = problem {
+            return Err(Error::invalid_parameter(format!(
+                "an ordering's mapping must be immutable; {text} uses {p}"
+            )));
+        }
+        require(t, &[Need::Ordering], "an ordering's mapping")?;
+        Ok((x, t))
+    }
+
+    /// A sort key: `x` itself, or `x` in the ordering `using` names.
+    fn sort_key(&mut self, x: Expr, t: Option<DataType>, using: Option<&str>) -> Result<Expr> {
+        let Some(name) = using else {
+            self.require_order(t, "ORDER BY")?;
+            return Ok(x);
+        };
+        Ok(match self.ordering(t, name)? {
+            OrderingUse::Native => {
+                require(t, &[Need::Ordering], "ORDER BY")?;
+                x
+            }
+            OrderingUse::Mapped { mapping, .. } => apply(&mapping, &x),
+        })
+    }
+
+    /// [`require`] for an order, naming the orderings taught to the type
+    /// when it has none of its own.
+    fn require_order(&self, t: Option<DataType>, what: &str) -> Result<()> {
+        require(t, &[Need::Ordering], what).map_err(|mut e| {
+            if let Some(ty) = t
+                && let Ok(taught) = self.taught_orderings(crate::builtin::type_of(ty).name())
+                && !taught.is_empty()
+            {
+                e.message.push_str(&format!(
+                    "; or a taught ordering: ORDER BY x USING {}",
+                    taught.join(" | ")
+                ));
+            }
+            e
         })
     }
 
@@ -2136,6 +2301,37 @@ pub fn column_type(registry: &Registry, t: &ast::SqlType) -> Result<DataType> {
         };
         Error::undefined_object(format!("type \"{name}\" does not exist"))
     })
+}
+
+/// The collation of `e` written at its top (`x COLLATE name`).
+fn collation(e: &ast::Expr) -> Option<&str> {
+    match e {
+        ast::Expr::Collate { collation, .. } => Some(collation),
+        _ => None,
+    }
+}
+
+/// `mapping` (over column 0, `value`) applied to `x`.
+pub fn apply(mapping: &Expr, x: &Expr) -> Expr {
+    mapping.map_columns(&|i| if i == 0 { x.clone() } else { Expr::Column(i) })
+}
+
+/// The names of text's own ordering, byte order (PostgreSQL's collation
+/// names for it included).
+pub(crate) const BYTE_ORDER: &[&str] = &["c", "default", "posix", "ucs_basic"];
+
+/// What `USING name` / `COLLATE name` means for a type.
+#[derive(Clone, Debug)]
+pub enum OrderingUse {
+    /// The type's own order.
+    Native,
+    /// A taught ordering: values sort as their mapping does.
+    Mapped {
+        /// The mapping, over column 0 (`value`).
+        mapping: Expr,
+        /// Its result type.
+        result: Option<DataType>,
+    },
 }
 
 /// What a function's `resolve` learns of bound arguments.

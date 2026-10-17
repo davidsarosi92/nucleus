@@ -17,6 +17,7 @@
 //! | `nc_catalog.constraints` | primary key, unique, check, foreign key |
 //! | `nc_catalog.foreign_keys` | foreign key |
 //! | `nc_catalog.statistics` | analyzed column (`ANALYZE`) |
+//! | `nc_catalog.orderings` | ordering taught to a type (`ALTER TYPE … ADD ORDERING`) |
 //! | `nc_catalog.types` | type (of the session's registry), with its abilities |
 
 use std::sync::Arc;
@@ -76,6 +77,7 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("is_unique", B),
             ("is_primary", B),
             ("key_prefix", T),
+            ("orderings", TA),
         ],
     ),
     (
@@ -112,6 +114,10 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("distinct_values", I),
             ("histogram", TA),
         ],
+    ),
+    (
+        "orderings",
+        &[("type", T), ("name", T), ("mapping", T), ("used_by", TA)],
     ),
     (
         "types",
@@ -254,6 +260,7 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         Value::Bool(true),
                         Value::Bool(true),
                         text(hex(&t.index_prefix(0))),
+                        Value::Array(vec![Value::Null; t.primary_key.len()]),
                     ]);
                 }
                 for ix in &t.indexes {
@@ -266,6 +273,12 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         Value::Bool(ix.unique),
                         Value::Bool(false),
                         text(hex(&t.index_prefix(ix.id))),
+                        Value::Array(
+                            ix.orderings
+                                .iter()
+                                .map(|o| o.clone().map_or(Value::Null, text))
+                                .collect(),
+                        ),
                     ]);
                 }
             }
@@ -322,6 +335,28 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         Value::Array(cs.bounds.iter().map(|b| text(b.render())).collect()),
                     ]);
                 }
+            }
+        }
+        "orderings" => {
+            for o in catalog::orderings(txn)? {
+                let mut users = Vec::new();
+                for t in &tables {
+                    for ix in &t.indexes {
+                        let uses = ix.columns.iter().zip(&ix.orderings).any(|(&c, u)| {
+                            u.as_deref() == Some(o.name.as_str())
+                                && crate::builtin::type_of(t.columns[c].ty).name() == o.type_name
+                        });
+                        if uses {
+                            users.push(text(ix.name.clone()));
+                        }
+                    }
+                }
+                out.push(vec![
+                    text(o.type_name),
+                    text(o.name),
+                    text(o.mapping),
+                    Value::Array(users),
+                ]);
             }
         }
         "types" => {

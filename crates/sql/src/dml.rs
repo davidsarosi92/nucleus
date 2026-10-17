@@ -8,7 +8,7 @@ use crate::ast::{self, SelectItem};
 use crate::binder::{Binder, Scope, ScopeCol, conjunction, conjuncts};
 use crate::catalog::{self, Table};
 use crate::error::{Error, Result};
-use crate::exec::{self, index_entry, pk_suffix, row_key_of};
+use crate::exec::{self, index_key, pk_suffix, row_key_of};
 use crate::expr::{Ctx, Env, Expr};
 use crate::ext::Registry;
 use crate::optimizer::choose_access;
@@ -32,12 +32,76 @@ pub fn table_scope(table: &Table) -> Scope {
     }
 }
 
+/// How a table's index entries are made: per index, per column, the
+/// column's value or (a column indexed in a taught ordering) its mapping,
+/// bound once.
+pub struct IndexKeys {
+    maps: Vec<Vec<Option<Expr>>>,
+}
+
+impl IndexKeys {
+    /// Binds the mappings of `table`'s indexes.
+    pub fn new(txn: &dyn KvTxn, reg: &Registry, table: &Table) -> Result<Self> {
+        let mut binder = Binder::new(txn, reg);
+        let mut maps = Vec::with_capacity(table.indexes.len());
+        for ix in &table.indexes {
+            let mut per = Vec::with_capacity(ix.columns.len());
+            for (&c, o) in ix.columns.iter().zip(&ix.orderings) {
+                per.push(match o {
+                    None => None,
+                    Some(name) => match binder.ordering(Some(table.columns[c].ty), name)? {
+                        crate::binder::OrderingUse::Native => None,
+                        crate::binder::OrderingUse::Mapped { mapping, .. } => {
+                            Some(crate::binder::apply(&mapping, &Expr::Column(c)))
+                        }
+                    },
+                });
+            }
+            maps.push(per);
+        }
+        Ok(Self { maps })
+    }
+
+    /// Every index entry of `row` (primary key bytes `pk`): key and whether
+    /// it takes part in uniqueness, one per index.
+    pub fn entries(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        row: &Row,
+        pk: &[u8],
+    ) -> Result<Vec<(Vec<u8>, bool)>> {
+        // Mappings are immutable: they need nothing of the session.
+        static NONE: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+        let ctx = Ctx::new(txn, NONE.get_or_init(Registry::empty), &[]);
+        let env = Env {
+            row,
+            outer: None,
+            ctx: &ctx,
+        };
+        let mut out = Vec::with_capacity(t.indexes.len());
+        for (i, maps) in self.maps.iter().enumerate() {
+            let mut vals = Vec::with_capacity(maps.len());
+            for (&c, m) in t.indexes[i].columns.iter().zip(maps) {
+                vals.push(match m {
+                    None => row[c].clone(),
+                    Some(e) => e.eval(&env)?,
+                });
+            }
+            out.push(index_key(t, i, vals, pk));
+        }
+        Ok(out)
+    }
+}
+
 /// What writes to one table need, bound once per statement.
 pub struct Writer {
     /// The table.
     pub table: Table,
     checks: Vec<(String, Expr)>,
     defaults: Vec<Option<Expr>>,
+    /// Its index entries.
+    pub keys: IndexKeys,
 }
 
 impl Writer {
@@ -57,10 +121,12 @@ impl Writer {
                 Some(text) => Some(binder.expr(&parse_expr(text)?, &empty)?.0),
             });
         }
+        let keys = IndexKeys::new(txn, reg, &table)?;
         Ok(Self {
             table,
             checks,
             defaults,
+            keys,
         })
     }
 
@@ -166,8 +232,7 @@ fn insert_row(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<()> {
     }
     txn.put(&key, &crate::encoding::encode_row(row))?;
     let pk = pk_suffix(t, &key);
-    for i in 0..t.indexes.len() {
-        let (k, unique) = index_entry(t, i, row, &pk);
+    for (i, (k, unique)) in w.keys.entries(&*txn, t, row, &pk)?.into_iter().enumerate() {
         if unique && txn.get(&k)?.is_some() {
             return Err(duplicate(&t.indexes[i].name));
         }
@@ -435,9 +500,9 @@ pub fn update_rows(
         }
         txn.put(&new_key, &crate::encoding::encode_row(new))?;
         let (old_pk, new_pk) = (pk_suffix(t, key), pk_suffix(t, &new_key));
-        for i in 0..t.indexes.len() {
-            let (ok, _) = index_entry(t, i, old, &old_pk);
-            let (nk, unique) = index_entry(t, i, new, &new_pk);
+        let olds = w.keys.entries(&*txn, t, old, &old_pk)?;
+        let news = w.keys.entries(&*txn, t, new, &new_pk)?;
+        for (i, ((ok, _), (nk, unique))) in olds.into_iter().zip(news).enumerate() {
             if ok == nk && old_pk == new_pk {
                 continue;
             }
@@ -467,11 +532,12 @@ pub fn delete_rows(
     t: &Table,
     rows: &[(Vec<u8>, Row)],
 ) -> Result<()> {
+    let keys = IndexKeys::new(&*txn, reg, t)?;
     for (key, row) in rows {
         txn.delete(key)?;
         let pk = pk_suffix(t, key);
-        for i in 0..t.indexes.len() {
-            txn.delete(&index_entry(t, i, row, &pk).0)?;
+        for (k, _) in keys.entries(&*txn, t, row, &pk)? {
+            txn.delete(&k)?;
         }
     }
     if !t.referenced_by.is_empty() {
@@ -525,9 +591,10 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
         let ctx = Ctx::new(&*txn, reg, &[]);
         exec::matching_rows(table, &Access::Full, None, &ctx)?
     };
+    let keys = IndexKeys::new(&*txn, reg, table)?;
     for (key, row) in rows {
         let pk = pk_suffix(table, &key);
-        let (k, unique) = index_entry(table, i, &row, &pk);
+        let (k, unique) = keys.entries(&*txn, table, &row, &pk)?.swap_remove(i);
         if unique && txn.get(&k)?.is_some() {
             return Err(Error::unique_violation(format!(
                 "could not create unique index \"{}\": key is duplicated",
@@ -542,7 +609,8 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
 /// Every key of a table — its rows' and its indexes' — written again in
 /// the current key encoding (an upgrade from an older one; the decoder
 /// reads both).
-pub fn rewrite_keys(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
+pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Result<()> {
+    let keys = IndexKeys::new(&*txn, reg, table)?;
     let prefix = table.data_prefix();
     let end = nucleus_kv::prefix_end(&prefix).expect("table prefix");
     let primary = table.index_prefix(0);
@@ -564,8 +632,8 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
         };
         txn.put(&key, &crate::encoding::encode_row(&row))?;
         let pk = pk_suffix(table, &key);
-        for i in 0..table.indexes.len() {
-            txn.put(&index_entry(table, i, &row, &pk).0, &pk)?;
+        for (k, _) in keys.entries(&*txn, table, &row, &pk)? {
+            txn.put(&k, &pk)?;
         }
     }
     Ok(())
