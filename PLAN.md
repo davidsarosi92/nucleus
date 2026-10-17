@@ -23,7 +23,7 @@ Status legend: ⬜ not started · ◐ in progress · ✅ shipped · ⏸ parked
 | Build targets | Platforms nucleus must build for |
 | Decisions | What has to be settled before the first line of code |
 | Status snapshot | Phases + milestones table |
-| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.20, sits between F1 and F2) |
+| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.22, sits between F1 and F2) |
 | Changelog | Changes to this plan |
 
 ---
@@ -265,13 +265,15 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
-| | M14.12 | Vectors: `VECTOR(n)`, similarity search, then an ANN index | ⬜ |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
+| | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
+| | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ⬜ |
 | | M14.15 | JSON type and functions | ⬜ |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
-| | M14.18 | Operations: backups and point-in-time restore, metrics and tracing, TLS, roles and privileges | ⬜ |
+| | M14.18 | Operations: backups and point-in-time restore, metrics and tracing, TLS, roles and privileges, row-level security | ⬜ |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -626,11 +628,11 @@ quickstart in every language.
 parameters, errors, transactions) against `nucleus server` in CI. ✅
 (Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
 
-### Developer platform (§M14.9–§M14.20)
+### Developer platform (§M14.9–§M14.22)
 
 What makes nucleus worth choosing, before more data models: understanding
 queries, being usable by AI models, holding large data and analysing it
-fast, vectors — and the
+fast, vectors, search and embeddings for AI applications — and the
 things nucleus's design gives almost for free (branches and time travel
 from copy-on-write storage and MVCC), the everyday tools (JSON,
 migrations, code generation), an easy start, and what production needs.
@@ -985,13 +987,92 @@ reference that the capability model is proven on:
 - An approximate nearest-neighbour index (HNSW) the optimizer uses for
   `ORDER BY … LIMIT k`, kept transactionally consistent with the table,
   one per distance.
+- **Filtered vector search** — "the ten nearest, among this user's
+  documents" — returning `k` rows at the index's recall whatever the
+  filter, where an ANN index followed by a `WHERE` returns too few or
+  wrong rows (the common failure of vector extensions):
+  - the filter is applied *during* the graph search, not after it, so
+    the search keeps walking until it has `k` matching rows;
+  - the optimizer estimates the filter's selectivity and, when few rows
+    pass, searches them exactly instead (or through a B-tree index on the
+    filter columns first);
+  - an index can be split by a column (`CREATE INDEX … USING hnsw (v)
+    PARTITION BY (tenant_id)`), one graph per value, for multi-tenant
+    applications; table partitions (§M14.20) each have their own graph;
+  - row-level security (§M14.18) is a filter like any other, so a search
+    never returns, or is shaped by, rows the session may not see.
 - Later, as further encodings or types on the same model: half precision,
   int8 and binary quantization, sparse vectors.
 
 **Done when:** the law kit passes on `vector`; every capability above
 works through SQL, `ncp` and all six drivers; exact search matches a
-brute-force reference; and the ANN index reaches a set recall at a set
-latency on a public dataset.
+brute-force reference; the ANN index reaches a set recall at a set
+latency on a public dataset; and filtered searches keep that recall at
+filter selectivities from 50 % down to 0.01 %, always returning `k` rows
+when `k` matching rows exist.
+
+### §M14.21 — Full-text and hybrid search ⬜
+
+Retrieval for AI applications (RAG) needs words and meaning together:
+vectors alone miss exact names, codes and rare terms; keywords alone miss
+paraphrases.  Both, with filters, in one query and one transaction:
+
+- **Full-text search**: an inverted index (`CREATE INDEX … USING text
+  (body)`) kept transactionally consistent with the table, BM25 ranking,
+  phrase, prefix and fuzzy matching, highlighting and snippets.
+- **Analyzers are modules** (principle 12): tokenizers, stemmers,
+  stop-word lists and per-language rules registered like types, chosen
+  per index or column; built in: a Unicode word tokenizer, the common
+  European languages (Hungarian included) and a language-neutral n-gram
+  analyzer.
+- A search syntax in SQL — `body @@ 'nucleus AND (database OR engine)'`
+  with `score(body)` — and PostgreSQL's `tsvector`, `tsquery` and
+  `to_tsvector` as a compatibility layer over it (principle 11).
+- **Hybrid search**: text and vector scores fused in one query —
+  reciprocal rank fusion (`rrf(...)`) and weighted combination — with
+  filters, as a single plan the optimizer runs in one pass over the
+  candidates, not as two queries merged in the application.
+
+  ```sql
+  SELECT id, title FROM docs
+  WHERE tenant_id = $1
+  ORDER BY rrf(score(body @@ $2), v <=> embed($2)) LIMIT 10;
+  ```
+- Columnar and partitioned tables (§M14.20) are searchable the same way.
+
+**Done when:** BM25 rankings match a reference implementation on a public
+corpus; hybrid search beats text-only and vector-only on a public
+retrieval benchmark (e.g. BEIR) at a set latency; and text indexes stay
+consistent with their tables under crash and concurrency tests.
+
+### §M14.22 — Embeddings in the database ⬜
+
+The step every AI application repeats — text to vectors, kept in sync —
+done by the database:
+
+- **`embed(text [, model])`** returning a `vector`.  Embedding providers
+  are modules: local models (ONNX runtime, run by nucleus itself) and
+  HTTP providers, configured in the catalog, with their credentials kept
+  as secrets (never shown in `nc_catalog` or logs).
+- **Embedding columns kept current**: `v vector(1024) GENERATED BY
+  EMBEDDING (title || ' ' || body) USING model` — when the source
+  changes, the vector is recomputed in the background.  A network call
+  never runs inside a transaction: the write commits, a durable job
+  queue (on the KV, transactional with the write) computes the vector,
+  retries with backoff, and marks rows whose vector is pending, so a
+  query can wait for, skip or include them.
+- **Model versions**: a column records which model and version made each
+  vector; changing the model re-embeds online (old vectors served until
+  the new ones are ready), like an encoding upgrade (§M14.19).
+- **Chunking**: table functions that split documents into overlapping
+  chunks by tokens, sentences or structure (Markdown headings), so a
+  document table feeds a chunk table with embeddings in one statement.
+- Batching and rate limits per provider; the cost and latency of calls
+  visible in the analyzer (§M14.9).
+
+**Done when:** a document table with an embedding column stays in sync
+through inserts, updates, deletes, provider outages and crashes; a model
+change re-embeds online; and a local model embeds without any network.
 
 ### §M14.13 — Database branches ⬜
 
@@ -1071,11 +1152,22 @@ command per platform, and the playground runs the tutorial.
   conflicts, cache, WAL, statement latencies.
 - TLS for `ncp` (and the PostgreSQL protocol), password hashing (SCRAM),
   users and roles with `GRANT` / `REVOKE` on tables and columns.
+- **Row-level security**, for multi-tenant and AI applications in which
+  a user, or an agent acting for one, must see only their own rows:
+  `CREATE POLICY` on a table (for `SELECT`, `INSERT`, `UPDATE`, `DELETE`)
+  with predicates over the row and the session's context
+  (`SET nucleus.tenant = …`, the role, claims passed at login).  Policies
+  apply everywhere a row is read — scans, indexes, joins, vector and text
+  search (§M14.12, §M14.21), streams and live queries — and the planner
+  adds them before optimizing, so no plan can leak a row.  MCP sessions
+  (§M14.10) run as a role under the same policies.
 - ✅ An exclusive lock on the data directory, so a second process cannot
   open it (done first, 2026-10-17: DOCS §4.6).
 
 **Done when:** a restore reproduces the database at a chosen moment,
-privileges are enforced in slt tests, and TLS works with every driver.
+privileges and row-level security are enforced in slt tests (including
+leak tests: an error, a plan or a search ranking never reveals a hidden
+row), and TLS works with every driver.
 
 ---
 
@@ -1121,9 +1213,27 @@ for free, and what developers otherwise assemble from several systems:
 - Changefeeds (CDC, moved here from §M25): a table's committed changes as
   a stream, from the MVCC versions.
 - Clients: `ncp` messages for subscribing, and the drivers' consumer API.
+- **Task queues**: a stream with competing consumers, leases, retries,
+  delays, priorities and a dead-letter stream — the queue an AI agent or
+  a pipeline needs, transactional with the data it changes.
+- **Patterns for AI agents**, built from these and shipped as documented
+  schemas and runnable examples (`examples/agents/`, in Python and
+  TypeScript first, then every driver):
+  - *conversation memory* — messages and tool calls per session, with
+    summaries;
+  - *semantic memory* — facts with embeddings (§M14.22) and text
+    (§M14.21), recalled by hybrid search, scoped by row-level security
+    (§M14.18);
+  - *tool and run state* — an agent's steps, checkpoints and results, so
+    a run resumes after a crash;
+  - *a task queue for agents* — work handed between agents, exactly once;
+  - *experiments on a branch* (§M14.13) — an agent changes a copy, a
+    person or a check merges or drops it.
 
 **Done when:** exactly-once processing (consume, write, commit) survives
-crash tests, and changefeeds deliver every committed change in order.
+crash tests, changefeeds deliver every committed change in order, the
+task queue survives crash tests with no lost or doubled task, and every
+agent example runs in CI against `nucleus server`.
 
 ### §M16.6 — Live queries ⬜
 
@@ -1315,3 +1425,11 @@ style) across a thousand seeds without failure.
   declarative partitioning (range, list, hash) with pruning and an age
   policy; table storage as a module on the KV contract; online conversion.
   §M14.11's benchmarks are no longer first.
+- **2026-10-17** — For AI applications: §M14.12 filtered vector search
+  (filters inside the graph search, selectivity-based exact search,
+  per-tenant index partitions); new §M14.21 full-text and hybrid search
+  (BM25, analyzers as modules, rank fusion with filters); new §M14.22
+  embeddings in the database (`embed()`, embedding columns kept current
+  through a durable job queue, model versions, chunking); §M14.18
+  row-level security everywhere rows are read; §M16.5 task queues and
+  agent patterns (`examples/agents/`).
