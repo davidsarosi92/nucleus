@@ -13,7 +13,7 @@ and array types) with a cost-based optimizer, its own system catalog
 (`nc_catalog`), and a server that speaks nucleus's own protocol (`ncp`) —
 with drivers for Rust, C, C++, Python, JavaScript/TypeScript and Java, and
 the `ncsql` shell — and, optionally, PostgreSQL's.  Next is the developer
-platform (PLAN.md §M14.9–§M14.18: SQL analyzer, AI access, large data,
+platform (PLAN.md §M14.9–§M14.19: SQL analyzer, AI access, large data,
 vectors, branches, time travel, …), then the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.

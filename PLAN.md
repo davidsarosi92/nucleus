@@ -23,7 +23,7 @@ Status legend: ⬜ not started · ◐ in progress · ✅ shipped · ⏸ parked
 | Build targets | Platforms nucleus must build for |
 | Decisions | What has to be settled before the first line of code |
 | Status snapshot | Phases + milestones table |
-| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.18, sits between F1 and F2) |
+| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.19, sits between F1 and F2) |
 | Changelog | Changes to this plan |
 
 ---
@@ -145,6 +145,18 @@ violate one, amend it here first, with a rationale.
     are supported as optional compatibility modules, so existing tools
     work — but nucleus's own interface comes first and is never shaped by
     them (D13, D14, D8).
+12. **Modular: any part can be replaced or extended at any time** (as in
+    d-os).  Every component sits behind an interface and is *registered*,
+    not wired in: the platform (real, simulated), the KV implementation
+    (local, later distributed), the client protocols (`ncp`, PostgreSQL and
+    MongoDB compatibility), the data models and services (SQL, documents,
+    streams, vectors), and inside them types, functions, table functions,
+    catalog views, aggregates, authentication.  Adding one is a new
+    implementation and its registration — never an edit of the core to
+    wire it in; replacing one keeps every other part unchanged.  Interfaces
+    are stable and versioned (principle 6) and documented for extension
+    authors.  Where the code still has a hard-coded list, §M14.19 turns it
+    into a registry.
 
 ## Build targets
 
@@ -252,6 +264,7 @@ are marked ✅.
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: backups and point-in-time restore, metrics and tracing, TLS, roles and privileges | ⬜ |
+| | M14.19 | Modularity: registries and an extension API (principle 12) | ⬜ |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -606,7 +619,7 @@ quickstart in every language.
 parameters, errors, transactions) against `nucleus server` in CI. ✅
 (Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
 
-### Developer platform (§M14.9–§M14.18)
+### Developer platform (§M14.9–§M14.19)
 
 What makes nucleus worth choosing, before more data models: understanding
 queries, being usable by AI models, holding large data, vectors — and the
@@ -770,6 +783,31 @@ command per platform, and the playground runs the tutorial.
 
 **Done when:** a restore reproduces the database at a chosen moment,
 privileges are enforced in slt tests, and TLS works with every driver.
+
+### §M14.19 — Modularity: registries and an extension API ⬜
+
+Principle 12 applied to what exists.  Today these are hard-coded lists or
+`match`es that a new entry has to edit: scalar functions (`Func`) and
+aggregates (`AggFunc`), table functions, the value types, the catalog
+views (`nc_catalog`, the compatibility catalogs), the server's front ends
+(chosen in the CLI), the authentication check.
+
+- Each becomes a registry behind a trait: a function, type, table
+  function, catalog view, protocol front end or authenticator is one
+  implementation and one registration line; the built-in ones register
+  the same way.
+- The front ends share one session layer, so a new protocol is a module
+  over `Session` (as `ncp` and `--pg-compat` already are); the server
+  starts the modules a configuration names.
+- An extension API for out-of-tree modules (Rust crates linked into a
+  custom build first; loadable modules later), with DOCS for extension
+  authors and a sample extension in `examples/`.
+- A boundary check in CI: core crates do not depend on modules.
+
+**Done when:** the built-in functions, types, catalog views, front ends and
+authentication are all registered through the public extension API, and
+the sample extension adds a function, a type and a catalog view without
+touching the core.
 
 ---
 
@@ -975,3 +1013,6 @@ style) across a thousand seeds without failure.
 - **2026-10-17** — D8 settled: documents over `ncp`, MongoDB compatibility
   optional; principle 11 (one system, many services; compatible, not
   borrowed).  §M16's "done when" follows.
+- **2026-10-17** — Principle 12: modular, any part replaceable or
+  extensible (as in d-os); §M14.19 turns today's hard-coded lists into
+  registries with an extension API.
