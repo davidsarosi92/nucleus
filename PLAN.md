@@ -264,7 +264,7 @@ are marked ✅.
 | | M14.6 | `ncsql`: nucleus's own SQL shell and client | ✅ DOCS §6.2 |
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
-| | M14.19 | **In progress:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ◐ audit closed; every list a registry; `modules/pg-compat` detachable (CI); types as modules (T1–T2 of T1–T7) |
+| | M14.19 | **In progress:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ◐ audit closed; every list a registry; `modules/pg-compat` detachable (CI); types as modules and `UUID` everywhere (T1–T3 of T1–T7) |
 | | M14.26 | Core types: integers by width, `real`, `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
@@ -719,7 +719,9 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
     and hand the rest over as name and bytes.
   - *Steps:* the `Type` trait and capabilities, built-ins registered
     (T1 ✅); registered types stored, compared and sent, with the
-    `geopoint` sample (T2 ✅; `ncp` sends them as text until T3); `UUID` everywhere (T3); the law kit (T4); teaching
+    `geopoint` sample (T2 ✅); `UUID` everywhere (T3 ✅ — `ncp` version 2,
+    all six drivers, pg-compat; its columnar encoding comes with the
+    columnar storage of §M14.20); the law kit (T4); teaching
     abilities in SQL (T5); encoding versions and `ALTER COLUMN … TYPE`
     (T6); the sample extension (T7).
 - **`UUID`, the first new type built this way** — a real type proving the
@@ -1873,3 +1875,5 @@ style) across a thousand seeds without failure.
   abilities, the built-ins registered, registered types stored and
   compared (`geopoint` sample), refused where an ability is missing; the
   principle audit's rows 11 and 12 closed.
+- **2026-10-17** — §M14.19 T3: `UUID` through SQL, `ncp` (version 2), all
+  six drivers and pg-compat; its slt script checked against PostgreSQL 18.

@@ -49,6 +49,19 @@ class Conformance(unittest.TestCase):
             self.assertEqual(c.execute("SELECT 1.50 + 1, 7 / 2.0").rows,
                              [(decimal.Decimal("2.50"), decimal.Decimal("3.5000000000000000"))])
 
+    def test_uuid(self):
+        t = table()
+        u = uuid.UUID("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")
+        with connect() as c:
+            c.execute(f"CREATE TABLE {t} (id UUID PRIMARY KEY, n INT)")
+            c.execute(f"INSERT INTO {t} VALUES ($1, 1)", [u])
+            r = c.execute(f"SELECT id, id::text, gen_random_uuid() FROM {t}")
+            self.assertEqual(r.columns[0].type, "uuid")
+            self.assertEqual(r.rows[0][:2], (u, str(u)))
+            self.assertIsInstance(r.rows[0][2], uuid.UUID)
+            self.assertEqual(r.rows[0][2].version, 4)
+            self.assertEqual(c.execute(f"SELECT n FROM {t} WHERE id = $1", [str(u).upper()]).rows, [(1,)])
+
     def test_errors(self):
         with connect() as c:
             with self.assertRaises(nucleus.ProgrammingError) as e:

@@ -469,6 +469,11 @@ impl<'a> Reader<'a> {
         Self { b }
     }
 
+    /// The next byte, not consumed.
+    pub fn peek(&self) -> Option<u8> {
+        self.b.first().copied()
+    }
+
     /// The next `n` bytes.
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.b.len() < n {

@@ -11,11 +11,14 @@
 // Values: boolean, bigint columns as number (bigint beyond 2^53), double
 // as number, numeric as Decimal (exact), text as string, date / timestamp /
 // timestamptz as Date (UTC; read with millisecond precision), interval as
-// Interval, arrays as arrays, NULL as null.
+// Interval, uuid as its canonical string, arrays as arrays, NULL as null;
+// another registered type as Ext (its name and binary form).
 
 import net from "node:net";
 
-export const PROTOCOL_VERSION = 1;
+// 2: registered types (uuid, modules' types) arrive in their binary form.
+export const PROTOCOL_VERSION = 2;
+const EXT = 11;
 export const DEFAULT_PORT = 20035;
 
 const EPOCH_MS = Date.UTC(2000, 0, 1);
@@ -92,6 +95,24 @@ export class Interval {
   }
 }
 
+/** A value of a registered type this driver has no JavaScript type for:
+ * the type's name and the value's binary (canonical) form. */
+export class Ext {
+  readonly typeName: string;
+  readonly data: Buffer;
+
+  constructor(typeName: string, data: Buffer) {
+    this.typeName = typeName;
+    this.data = data;
+  }
+}
+
+/** A uuid's canonical text (`8-4-4-4-12`, lower case) from its 16 bytes. */
+export function uuidText(b: Buffer): string {
+  const h = b.toString("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 export type Value =
   | null
   | boolean
@@ -101,6 +122,7 @@ export type Value =
   | Decimal
   | Date
   | Interval
+  | Ext
   | Value[];
 
 export interface Column {
@@ -213,6 +235,11 @@ class Writer {
       return this.u8(8).i64(BigInt(v.getTime() - EPOCH_MS) * 1000n);
     }
     if (v instanceof Interval) return this.u8(9).i32(v.months).i32(v.days).i64(v.micros);
+    if (v instanceof Ext) {
+      this.u8(EXT).str(v.typeName).u32(v.data.length);
+      this.parts.push(v.data);
+      return this;
+    }
     if (Array.isArray(v)) {
       this.u8(10).u32(v.length);
       for (const item of v) this.value(item);
@@ -312,6 +339,14 @@ class Reader {
         const items: Value[] = [];
         for (let i = 0; i < n; i++) items.push(this.value());
         return items;
+      }
+      case EXT: {
+        const name = this.str();
+        const n = this.u32();
+        this.need(n);
+        const data = Buffer.from(this.b.subarray(this.at, this.at + n));
+        this.at += n;
+        return name === "uuid" && n === 16 ? uuidText(data) : new Ext(name, data);
       }
       default:
         throw new NucleusError(`unknown value tag ${tag}`);
@@ -451,7 +486,12 @@ export class Client {
             for (let i = 0; i < n; i++) {
               const name = r.str();
               const tag = r.u8();
-              const type = tag === 10 ? `${TYPE_NAMES[r.u8()] ?? "unknown"}[]` : TYPE_NAMES[tag] ?? "unknown";
+              const type =
+                tag === 10
+                  ? `${TYPE_NAMES[r.u8()] ?? "unknown"}[]`
+                  : tag === EXT
+                    ? r.str()
+                    : TYPE_NAMES[tag] ?? "unknown";
               columns.push({ name, type });
             }
             rows = [];

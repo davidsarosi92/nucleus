@@ -44,6 +44,20 @@ test("types both ways", async () => {
   await db.close();
 });
 
+test("uuid", async () => {
+  const db = await connect(options);
+  const t = table();
+  const u = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";
+  await db.query(`CREATE TABLE ${t} (id UUID PRIMARY KEY, n INT)`);
+  await db.query(`INSERT INTO ${t} VALUES ($1, 1)`, [u.toUpperCase()]);
+  const r = await db.query(`SELECT id, gen_random_uuid() FROM ${t}`);
+  assert.equal(r.columns[0].type, "uuid");
+  assert.equal(r.rows[0][0], u);
+  assert.match(r.rows[0][1] as string, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.deepEqual((await db.query(`SELECT n FROM ${t} WHERE id = $1`, [u])).rows, [[1]]);
+  await db.close();
+});
+
 test("errors", async () => {
   const db = await connect(options);
   await assert.rejects(db.query("SELECT * FROM nosuch"), (e: NucleusError) => e.code === "42P01");

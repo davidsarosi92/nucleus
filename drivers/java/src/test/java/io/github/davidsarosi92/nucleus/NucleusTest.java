@@ -64,6 +64,21 @@ public final class NucleusTest {
         }
     }
 
+    static void uuid() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            String t = table();
+            UUID u = UUID.fromString("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11");
+            db.query("CREATE TABLE " + t + " (id UUID PRIMARY KEY, n INT)");
+            db.query("INSERT INTO " + t + " VALUES ($1, 1)", u);
+            Result r = db.query("SELECT id, id::text, gen_random_uuid() FROM " + t);
+            equal(r.columns().get(0).type(), "uuid", "uuid column type");
+            equal(r.rows().get(0).get(0), u, "uuid value");
+            equal(r.rows().get(0).get(1), u.toString(), "uuid text");
+            equal(((UUID) r.rows().get(0).get(2)).version(), 4, "a version-4 uuid");
+            equal(db.query("SELECT n FROM " + t + " WHERE id = $1", u.toString().toUpperCase()).rows(), List.of(List.of(1L)), "text parameter");
+        }
+    }
+
     static void errors() {
         try (NucleusClient db = NucleusClient.connect(config())) {
             equal(errorCode(() -> db.query("SELECT * FROM nosuch")), "42P01", "undefined table");
@@ -107,10 +122,11 @@ public final class NucleusTest {
 
     public static void main(String[] args) {
         run("types both ways", NucleusTest::typesBothWays);
+        run("uuid", NucleusTest::uuid);
         run("errors", NucleusTest::errors);
         run("transactions", NucleusTest::transactions);
         run("authentication", NucleusTest::authentication);
-        check(passed == 4, "all tests ran");
+        check(passed == 5, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

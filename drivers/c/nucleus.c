@@ -39,6 +39,7 @@ typedef struct {
     char *name;
     nc_type type;
     nc_type element;
+    char *type_name; /* NC_UUID, NC_EXT */
 } nc_column;
 
 struct nc_result {
@@ -105,8 +106,23 @@ static void put_str(buf *w, const char *s) {
     put(w, s ? s : "", n);
 }
 
+static void put_ext(buf *w, const char *name, const void *data, size_t len) {
+    put_u8(w, NC_EXT);
+    put_str(w, name);
+    put_le(w, len, 4);
+    put(w, data, len);
+}
+
 static int put_value(buf *w, const nc_value *v) {
     size_t i;
+    if (v->type == NC_UUID) {
+        put_ext(w, "uuid", v->as.uuid.bytes, 16);
+        return 0;
+    }
+    if (v->type == NC_EXT) {
+        put_ext(w, v->as.ext.type_name, v->as.ext.data, v->as.ext.len);
+        return 0;
+    }
     put_u8(w, (unsigned)v->type);
     switch (v->type) {
     case NC_NULL: break;
@@ -189,6 +205,10 @@ static char *get_str(reader *r) {
 static void free_value(nc_value *v) {
     size_t i;
     if (v->type == NC_TEXT) free((void *)v->as.text.ptr);
+    if (v->type == NC_EXT) {
+        free((void *)v->as.ext.type_name);
+        free((void *)v->as.ext.data);
+    }
     if (v->type == NC_ARRAY) {
         for (i = 0; i < v->as.array.len; i++) free_value((nc_value *)&v->as.array.items[i]);
         free((void *)v->as.array.items);
@@ -235,6 +255,32 @@ static int get_value(reader *r, nc_value *v) {
         v->as.interval.days = (int32_t)(uint32_t)get_le(r, 4);
         v->as.interval.micros = (int64_t)get_le(r, 8);
         break;
+    case NC_EXT: {
+        char *name = get_str(r);
+        size_t n = (size_t)get_le(r, 4);
+        const unsigned char *p = take(r, n);
+        uint8_t *data;
+        if (!name || !p) {
+            free(name);
+            return -1;
+        }
+        if (strcmp(name, "uuid") == 0 && n == 16) {
+            free(name);
+            v->type = NC_UUID;
+            memcpy(v->as.uuid.bytes, p, 16);
+            break;
+        }
+        data = malloc(n ? n : 1);
+        if (!data) {
+            free(name);
+            return -1;
+        }
+        memcpy(data, p, n);
+        v->as.ext.type_name = name;
+        v->as.ext.data = data;
+        v->as.ext.len = n;
+        break;
+    }
     case NC_ARRAY: {
         size_t n = (size_t)get_le(r, 4), i;
         nc_value *items;
@@ -424,7 +470,10 @@ void nc_result_free(nc_result *r) {
     size_t i;
     if (!r) return;
     for (i = 0; i < r->nrows * r->ncolumns; i++) free_value(&r->values[i]);
-    for (i = 0; i < r->ncolumns; i++) free(r->columns[i].name);
+    for (i = 0; i < r->ncolumns; i++) {
+        free(r->columns[i].name);
+        free(r->columns[i].type_name);
+    }
     free(r->columns);
     free(r->values);
     free(r->command);
@@ -478,6 +527,11 @@ nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t 
                 cur->columns[i].name = get_str(&r);
                 cur->columns[i].type = (nc_type)get_le(&r, 1);
                 if (cur->columns[i].type == NC_ARRAY) cur->columns[i].element = (nc_type)get_le(&r, 1);
+                if (cur->columns[i].type == NC_EXT) {
+                    cur->columns[i].type_name = get_str(&r);
+                    if (cur->columns[i].type_name && strcmp(cur->columns[i].type_name, "uuid") == 0)
+                        cur->columns[i].type = NC_UUID;
+                }
                 cur->ncolumns = i + 1;
             }
             break;
@@ -554,6 +608,7 @@ size_t nc_columns(const nc_result *r) { return r->ncolumns; }
 const char *nc_column_name(const nc_result *r, size_t col) { return col < r->ncolumns ? r->columns[col].name : NULL; }
 nc_type nc_column_type(const nc_result *r, size_t col) { return col < r->ncolumns ? r->columns[col].type : NC_NULL; }
 nc_type nc_column_element(const nc_result *r, size_t col) { return col < r->ncolumns ? r->columns[col].element : NC_NULL; }
+const char *nc_column_type_name(const nc_result *r, size_t col) { return col < r->ncolumns ? r->columns[col].type_name : NULL; }
 size_t nc_rows(const nc_result *r) { return r->nrows; }
 const nc_value *nc_value_at(const nc_result *r, size_t row, size_t col) {
     return row < r->nrows && col < r->ncolumns ? &r->values[row * r->ncolumns + col] : NULL;
@@ -592,6 +647,57 @@ nc_value nc_array(const nc_value *items, size_t len) {
     v.as.array.items = items;
     v.as.array.len = len;
     return v;
+}
+
+nc_value nc_uuid_value(nc_uuid u) {
+    nc_value v = nc_null();
+    v.type = NC_UUID;
+    v.as.uuid = u;
+    return v;
+}
+
+nc_value nc_ext(const char *type_name, const uint8_t *data, size_t len) {
+    nc_value v = nc_null();
+    v.type = NC_EXT;
+    v.as.ext.type_name = type_name;
+    v.as.ext.data = data;
+    v.as.ext.len = len;
+    return v;
+}
+
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+int nc_uuid_parse(const char *text, nc_uuid *out) {
+    const char *p = text;
+    size_t len = strlen(text);
+    int n = 0, hyphen_ok = 0, braces = 0;
+    memset(out, 0, sizeof *out);
+    if (len && p[0] == '{') {
+        if (p[len - 1] != '}') return -1;
+        braces = 1;
+        p++;
+        len -= 2;
+    }
+    for (; len > 0; p++, len--) {
+        int d;
+        if (*p == '-') {
+            if (!hyphen_ok) return -1;
+            hyphen_ok = 0;
+            continue;
+        }
+        d = hex_digit(*p);
+        if (d < 0 || n == 32) return -1;
+        out->bytes[n / 2] |= (uint8_t)(n % 2 == 0 ? d << 4 : d);
+        n++;
+        hyphen_ok = n % 4 == 0 && n < 32;
+    }
+    (void)braces;
+    return n == 32 && p[-1] != '-' ? 0 : -1;
 }
 
 /* 128-bit magnitudes as four 32-bit limbs, most significant first. */
@@ -750,6 +856,18 @@ size_t nc_format(const nc_value *v, char *buf, size_t size) {
         return (size_t)snprintf(buf, size, "%d mons %d days %s%s", (int)v->as.interval.months,
                                 (int)v->as.interval.days, us < 0 ? "-" : "", tmp);
     }
+    case NC_UUID: {
+        const uint8_t *b = v->as.uuid.bytes;
+        return (size_t)snprintf(buf, size,
+                                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10],
+                                b[11], b[12], b[13], b[14], b[15]);
+    }
+    case NC_EXT:
+        n = (size_t)snprintf(buf, size, "\\x");
+        for (i = 0; i < v->as.ext.len; i++)
+            n += (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, "%02x", v->as.ext.data[i]);
+        return n;
     case NC_ARRAY:
         n = (size_t)snprintf(buf, size, "{");
         for (i = 0; i < v->as.array.len; i++) {

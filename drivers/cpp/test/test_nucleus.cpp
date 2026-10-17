@@ -78,6 +78,18 @@ int main() {
         CHECK(error_code(db, "INSERT INTO " + t + " VALUES (1)") == "23505");
     }
     {
+        Connection db(config());
+        auto t = table();
+        auto u = Uuid::parse("A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11");
+        db.query("CREATE TABLE " + t + " (id UUID PRIMARY KEY, n INT)");
+        db.query("INSERT INTO " + t + " VALUES ($1, 1)", {u});
+        auto r = db.query("SELECT id, gen_random_uuid() FROM " + t);
+        CHECK(r.columns[0].type == NC_UUID && r.columns[0].type_name == "uuid");
+        CHECK(r.rows[0][0] == Value(u));
+        CHECK(r.rows[0][0].str() == "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11");
+        CHECK(r.rows[0][1].as<Uuid>().bytes[6] >> 4 == 4);
+    }
+    {
         auto c = config();
         c.password = "wrong";
         try {

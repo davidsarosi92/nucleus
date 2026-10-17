@@ -296,3 +296,66 @@ fn a_real_driver_with_the_extended_protocol() {
     let msgs = pg.simple_query("SELECT 1 AS one; SELECT 'x'").unwrap();
     assert!(msgs.len() >= 4);
 }
+
+/// A uuid as PostgreSQL drivers see it: type `uuid` (oid 2950), its 16
+/// bytes in binary format, its canonical text in text format.
+#[test]
+fn uuid_through_a_real_driver() {
+    use postgres::types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
+    use postgres::{Client as Pg, NoTls};
+
+    #[derive(Debug, PartialEq)]
+    struct Uuid([u8; 16]);
+
+    impl<'a> FromSql<'a> for Uuid {
+        fn from_sql(
+            _: &Type,
+            raw: &'a [u8],
+        ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+            Ok(Uuid(raw.try_into()?))
+        }
+        fn accepts(ty: &Type) -> bool {
+            *ty == Type::UUID
+        }
+    }
+
+    impl ToSql for Uuid {
+        fn to_sql(
+            &self,
+            _: &Type,
+            out: &mut postgres::types::private::BytesMut,
+        ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+            out.extend_from_slice(&self.0);
+            Ok(IsNull::No)
+        }
+        fn accepts(ty: &Type) -> bool {
+            *ty == Type::UUID
+        }
+        to_sql_checked!();
+    }
+
+    let addr = start(Config::trust());
+    let url = format!(
+        "host={} port={} user=test dbname=nucleus",
+        addr.ip(),
+        addr.port()
+    );
+    let mut pg = Pg::connect(&url, NoTls).unwrap();
+    pg.batch_execute("CREATE TABLE u (id UUID PRIMARY KEY, n INT)")
+        .unwrap();
+    let id = Uuid([
+        0xa0, 0xee, 0xbc, 0x99, 0x9c, 0x0b, 0x4e, 0xf8, 0xbb, 0x6d, 0x6b, 0xb9, 0xbd, 0x38, 0x0a,
+        0x11,
+    ]);
+    pg.execute("INSERT INTO u VALUES ($1, 1)", &[&id]).unwrap();
+    let row = pg
+        .query_one("SELECT id, n FROM u WHERE id = $1", &[&id])
+        .unwrap();
+    assert_eq!(row.columns()[0].type_(), &Type::UUID);
+    assert_eq!(row.get::<_, Uuid>(0), id);
+    let text = pg.simple_query("SELECT id FROM u").unwrap();
+    let postgres::SimpleQueryMessage::Row(r) = &text[1] else {
+        panic!("{text:?}")
+    };
+    assert_eq!(r.get(0), Some("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"));
+}

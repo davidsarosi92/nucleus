@@ -81,9 +81,10 @@ scripts/detach-test.sh [<module package> …]      # cargo package, then test ea
 
 The detachability test packages the core crates and the modules
 (`cargo package`, which also builds each from its package against the
-others'), unpacks each module into an empty directory, points its
-nucleus dependencies at the packaged core crates (`[patch.crates-io]`) and
-runs its tests there.
+others'; in a target directory of its own, fresh each run, since cargo
+reuses a registry crate of an unchanged version), unpacks each module
+into an empty directory, points its nucleus dependencies at the packaged
+core crates (`[patch.crates-io]`) and runs its tests there.
 
   The `i686` musl tests run as 32-bit binaries on a 64-bit Linux
 kernel, which is what catches 64-bit `usize` assumptions.
@@ -991,7 +992,8 @@ Flush; after an error, messages are skipped until Sync.  Types on the wire:
 `bool` 16, `int8` 20 (`int2`/`int4` accepted), `float8` 701 (`float4`
 accepted), `text` 25 (`varchar`, `bpchar`, `name` accepted), `numeric`
 1700, `date` 1082, `timestamp` 1114, `timestamptz` 1184, `interval` 1186,
-and their arrays; text and binary formats for all of them (binary numeric
+and their arrays, `uuid` 2950 (binary: its 16 bytes); other registered
+types as `text`; text and binary formats for all of them (binary numeric
 and dates checked against PostgreSQL's `*_send`).
 
 Not supported: `COPY`, cancellation.  `psql`'s `\d` family works through
@@ -1024,8 +1026,8 @@ header bytes not included; at most 1 GiB), then the body.
 
 | Kind | Direction | Body |
 |------|-----------|------|
-| `H` Hello | client → server, first | `u16` version (1), string user, string database, string password (empty: none), string client name |
-| `W` Welcome | server → client | `u16` version, string server (`nucleus 0.1.0`), `u32` session id |
+| `H` Hello | client → server, first | `u16` version (2; 1 still accepted), string user, string database, string password (empty: none), string client name |
+| `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |
 | `Q` Query | client → server | string SQL, `u8` result format (0 typed, 1 text), `u16` parameter count, the parameters as values |
 | `C` Columns | server → client | `u16` count, then per column: string name, type |
 | `D` Row | server → client | one value per column |
@@ -1045,9 +1047,14 @@ follows.  A Query with parameters must hold one statement; `$1`, `$2`, …
 refer to them.  Transactions are SQL (`BEGIN`, `COMMIT`, `ROLLBACK`), as in
 §8.7; outside a block every statement commits on its own.
 
+**Versions.**  2 adds registered types (`uuid`, a module's type): tag 11
+below.  A version-1 client gets them as text (type and value tag 4), so
+older drivers keep working.
+
 **Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
 2 bigint, 3 double precision, 4 text, 5 numeric, 6 date, 7 timestamp,
-8 timestamptz, 9 interval, 10 array followed by the element's tag.
+8 timestamptz, 9 interval, 10 array followed by the element's tag, 11 a
+registered type followed by its name (a string: `uuid`).
 
 **Values** (in Rows and parameters): a `u8` tag, then:
 
@@ -1064,9 +1071,12 @@ refer to them.  Transactions are SQL (`BEGIN`, `COMMIT`, `ROLLBACK`), as in
 | 8 | timestamptz | `i64` µs since 2000-01-01 00:00 UTC |
 | 9 | interval | `i32` months, `i32` days, `i64` µs |
 | 10 | array | `u32` count, then each element as a value |
+| 11 | a registered type (version 2) | string type name, `u32` length, the value's binary (canonical) form — for `uuid` its 16 bytes |
 
-This is the storage's own row encoding (§8.1), so values cross the wire
-exactly as stored.  With result format 1 (text) every non-NULL value is
+Tags 0–10 are the storage's own row encoding (§8.1), so those values cross
+the wire exactly as stored; a registered type's carries its name instead
+of its id, so drivers need no table of ids.  A tag-11 parameter of a type
+the server does not know is refused (`42704`).  With result format 1 (text) every non-NULL value is
 sent as text (tag 4), rendered as `ncsql` prints it.  Parameters are
 converted to the type their place needs (a text parameter is parsed, as an
 untyped literal would be).
@@ -1079,29 +1089,33 @@ database `nucleus`), `execute(sql, params) -> Reply` (columns, rows,
 command, count), `rows(sql, params)`, `query(sql, params, Format)` for
 several statements or text results, `status()`, `close()`.  `Value` covers
 every nucleus type (numeric as mantissa and scale, dates and timestamps as
-days and µs since 2000-01-01, intervals, arrays) with `From` conversions
-for parameters.
+days and µs since 2000-01-01, intervals, arrays, `Uuid([u8; 16])`, `Other {
+type_name, bytes }` for another registered type) with `From` conversions
+for parameters.  Every driver speaks protocol version 2.
 
 **C:** `drivers/c` (`nucleus.h`, `nucleus.c`; C99, POSIX sockets or
 Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
 (the last statement's result, or NULL with the SQLSTATE in `err`),
 accessors (`nc_rows`, `nc_value_at`, `nc_column_type`, `nc_command`,
 `nc_count`), `nc_format` (text as `ncsql` prints it), value constructors
-(`nc_int`, `nc_text`, `nc_numeric`, `nc_date`, `nc_array`, …),
-`nc_result_free`, `nc_close`.  Results own their values.
+(`nc_int`, `nc_text`, `nc_numeric`, `nc_date`, `nc_array`, `nc_uuid_value`,
+`nc_ext`, …), `nc_uuid_parse`, `nc_result_free`, `nc_close`.  `uuid` is
+`NC_UUID` (an `nc_uuid` of 16 bytes), another registered type `NC_EXT`
+(name and bytes; `nc_column_type_name`).  Results own their values.
 
 **C++:** `drivers/cpp/nucleus.hpp`, header-only C++17 over the C driver:
 `nucleus::Connection` (RAII, movable), `query(sql, {params})` → `Result`,
 `transaction(fn)`, `nucleus::Error` with `code()`; `nucleus::Value` is a
 `std::variant` (NULL, bool, int64, double, string, `Numeric`, `Date`,
-`Timestamp`, `TimestampTz`, `Interval`, `Array`).
+`Timestamp`, `TimestampTz`, `Interval`, `Array`, `Uuid`, `Ext`).
 
 **Python:** `drivers/python`, package `nucleus` (pure Python 3.8+).
 `nucleus.connect()`, `conn.execute(sql, params)` → `Result` (`rows`,
 `records()`, `columns`, `command`, `count`), `conn.query` for several
 statements, `with conn.transaction():`, DB-API cursors; values as `bool`,
 `int`, `float`, `Decimal`, `str`, `date`, `datetime` (naive / UTC),
-`Interval`, `list`; errors are `nucleus.Error` subclasses by SQLSTATE class
+`Interval`, `uuid.UUID`, `list`, `nucleus.Ext` (another registered
+type); errors are `nucleus.Error` subclasses by SQLSTATE class
 (`IntegrityError` for 23, `ProgrammingError` for 42, …).
 
 **JavaScript / TypeScript:** `drivers/js`, package `nucleus-db` (Node;
@@ -1110,15 +1124,16 @@ TypeScript source that Node 22.6+ runs directly, `npm run build` for
 `transaction(fn)`; queries on one connection are queued.  Values: integers
 as `number` (`bigint` beyond 2^53), `Decimal` (exact, with `parse` /
 `toString`), `Date` for dates and timestamps (UTC; millisecond precision
-when read), `Interval`, arrays, `null`; errors are `NucleusError` with
-`code`.
+when read), `Interval`, uuid as its canonical string, `Ext` (another
+registered type), arrays, `null`; errors are `NucleusError` with `code`.
 
 **Java:** `drivers/java`, package `io.github.davidsarosi92.nucleus` (Java
 17+, `javac` or Maven).  `NucleusClient.connect(new Config())`,
 `query(sql, params...)` → `Result` (`rows()`, `records()`), `queryAll`,
 `transaction(fn)`, `NucleusException` with `code()`; values as `Boolean`,
 `Long`, `Double`, `BigDecimal`, `String`, `LocalDate`, `LocalDateTime`,
-`OffsetDateTime` (UTC), `Interval`, `List`.
+`OffsetDateTime` (UTC), `Interval`, `UUID`, `Ext` (another registered
+type), `List`.
 
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
@@ -1129,6 +1144,12 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — §M14.19 `uuid` everywhere (T3):** `ncp` version 2 (tag
+  11: registered types by name and binary form; version 1 still served,
+  with them as text); all six drivers on version 2 with native uuids
+  (Rust `Value::Uuid`, C `nc_uuid`, C++ `Uuid`, Python `uuid.UUID`, JS
+  string, Java `UUID`) and a generic form for other registered types;
+  pg-compat's `uuid` (oid 2950, text and binary).
 - **2026-10-17 — §M14.19 `uuid` (T3, first part):** the type and
   `gen_random_uuid` / `uuidv4`, `uuidv7`, `uuid_extract_version`,
   `uuid_extract_timestamp`; `Rng::fill_unpredictable`,

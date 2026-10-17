@@ -139,6 +139,40 @@ static void errors_and_transactions(void) {
     nc_close(db);
 }
 
+static void uuids(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    char t[64], sql[256];
+    nc_uuid u, bad;
+    nc_value p;
+    nc_result *r;
+    CHECK(db != NULL);
+    if (!db) return;
+    CHECK(nc_uuid_parse("A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11", &u) == 0);
+    CHECK(nc_uuid_parse("{a0eebc999c0b4ef8bb6d6bb9bd380a11}", &bad) == 0);
+    CHECK(memcmp(u.bytes, bad.bytes, 16) == 0);
+    CHECK(nc_uuid_parse("a0eeb-c999c0b4ef8bb6d6bb9bd380a11", &bad) != 0);
+    table(t, sizeof t);
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (id UUID PRIMARY KEY, n INT)", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    p = nc_uuid_value(u);
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES ($1, 1)", t);
+    nc_result_free(must(db, sql, &p, 1));
+    snprintf(sql, sizeof sql, "SELECT id, gen_random_uuid() FROM %s", t);
+    r = must(db, sql, NULL, 0);
+    if (r) {
+        CHECK(nc_column_type(r, 0) == NC_UUID);
+        CHECK(strcmp(nc_column_type_name(r, 0), "uuid") == 0);
+        CHECK(nc_value_at(r, 0, 0)->type == NC_UUID);
+        CHECK(memcmp(nc_value_at(r, 0, 0)->as.uuid.bytes, u.bytes, 16) == 0);
+        CHECK(strcmp(text_of(r, 0, 0), "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11") == 0);
+        CHECK(nc_value_at(r, 0, 1)->as.uuid.bytes[6] >> 4 == 4);
+        nc_result_free(r);
+    }
+    nc_close(db);
+}
+
 static void authentication(void) {
     nc_error err;
     nc_config cfg = config();
@@ -149,6 +183,7 @@ static void authentication(void) {
 int main(void) {
     types_both_ways();
     errors_and_transactions();
+    uuids();
     authentication();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);

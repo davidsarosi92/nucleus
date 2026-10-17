@@ -11,6 +11,8 @@
 #ifndef NUCLEUS_HPP
 #define NUCLEUS_HPP
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <stdexcept>
@@ -74,13 +76,35 @@ struct Interval {
     bool operator==(const Interval& o) const { return months == o.months && days == o.days && micros == o.micros; }
 };
 
+/// A uuid: its 16 bytes.
+struct Uuid {
+    std::array<uint8_t, 16> bytes{};
+
+    static Uuid parse(const std::string& text) {
+        nc_uuid u;
+        if (nc_uuid_parse(text.c_str(), &u) != 0) throw Error("invalid uuid: " + text, "22P02");
+        Uuid out;
+        std::copy(std::begin(u.bytes), std::end(u.bytes), out.bytes.begin());
+        return out;
+    }
+    bool operator==(const Uuid& o) const { return bytes == o.bytes; }
+};
+
+/// A value of another registered type: its name and binary form.
+struct Ext {
+    std::string type_name;
+    std::vector<uint8_t> data;
+    bool operator==(const Ext& o) const { return type_name == o.type_name && data == o.data; }
+};
+
 struct Value;
 using Array = std::vector<Value>;
 using Variant = std::variant<std::monostate, bool, int64_t, double, std::string, Numeric, Date, Timestamp,
-                             TimestampTz, Interval, Array>;
+                             TimestampTz, Interval, Array, Uuid, Ext>;
 
 /// A value: NULL (monostate), bool, int64, double, text, numeric, date,
-/// timestamp, timestamptz, interval, or an array.
+/// timestamp, timestamptz, interval, an array, a uuid, or another
+/// registered type's value.
 struct Value : Variant {
     using Variant::Variant;
     Value() = default;
@@ -109,7 +133,8 @@ struct Config {
 struct Column {
     std::string name;
     nc_type type;
-    nc_type element; // for arrays
+    nc_type element;       // for arrays
+    std::string type_name; // for registered types ("uuid", …)
 };
 
 /// One statement's result.
@@ -138,6 +163,13 @@ inline Value from_c(const nc_value& v) {
         for (size_t i = 0; i < v.as.array.len; i++) items.push_back(from_c(v.as.array.items[i]));
         return Value(std::move(items));
     }
+    case NC_UUID: {
+        Uuid u;
+        std::copy(std::begin(v.as.uuid.bytes), std::end(v.as.uuid.bytes), u.bytes.begin());
+        return Value(u);
+    }
+    case NC_EXT:
+        return Value(Ext{v.as.ext.type_name, std::vector<uint8_t>(v.as.ext.data, v.as.ext.data + v.as.ext.len)});
     default: return Value();
     }
 }
@@ -167,6 +199,12 @@ inline nc_value to_c(const Value& v, std::deque<std::vector<nc_value>>& store) {
         nc_value operator()(const Timestamp& t) const { return nc_timestamp(t.micros); }
         nc_value operator()(const TimestampTz& t) const { return nc_timestamptz(t.micros); }
         nc_value operator()(const Interval& i) const { return nc_interval(i.months, i.days, i.micros); }
+        nc_value operator()(const Uuid& u) const {
+            nc_uuid c;
+            std::copy(u.bytes.begin(), u.bytes.end(), c.bytes);
+            return nc_uuid_value(c);
+        }
+        nc_value operator()(const Ext& e) const { return nc_ext(e.type_name.c_str(), e.data.data(), e.data.size()); }
         nc_value operator()(const Array& a) const {
             std::vector<nc_value> items;
             for (const auto& item : a) items.push_back(to_c(item, store));
@@ -225,7 +263,8 @@ public:
         if (!r) throw Error(err.message, err.code);
         Result out;
         for (size_t c = 0; c < nc_columns(r); c++)
-            out.columns.push_back({nc_column_name(r, c), nc_column_type(r, c), nc_column_element(r, c)});
+            out.columns.push_back({nc_column_name(r, c), nc_column_type(r, c), nc_column_element(r, c),
+                                   nc_column_type_name(r, c) ? nc_column_type_name(r, c) : ""});
         for (size_t i = 0; i < nc_rows(r); i++) {
             std::vector<Value> row;
             for (size_t c = 0; c < nc_columns(r); c++) row.push_back(detail::from_c(*nc_value_at(r, i, c)));

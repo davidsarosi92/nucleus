@@ -13,6 +13,7 @@ try (NucleusClient db = NucleusClient.connect(new Config())) {   // 127.0.0.1:20
 
 Types: `Boolean`, `Long`, `Double`, `BigDecimal`, `String`, `LocalDate`,
 `LocalDateTime` (timestamp), `OffsetDateTime` (timestamptz, UTC),
-`Interval` (and `Duration` as a parameter), `List`, `null`.  Errors are
+`Interval` (and `Duration` as a parameter), `UUID`, `List`, `null`; another
+registered type is `Ext` (its name and binary form).  Errors are
 `NucleusException` with `code()` (SQLSTATE).  Tests: `NucleusTest` (a plain
 main); example: `examples/java/Quickstart.java`.

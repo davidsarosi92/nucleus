@@ -15,6 +15,8 @@ await db.close();
 
 Types: `boolean`, `number` (or `bigint` beyond 2^53), `Decimal` (exact),
 `string`, `Date` (date, timestamp, timestamptz — UTC, millisecond precision
-when read), `Interval`, arrays, `null`.  Errors are `NucleusError` with
+when read), `Interval`, uuid as its canonical string, arrays, `null`;
+another registered type is `Ext` (its name and binary form).  Errors are
+`NucleusError` with
 `code` (SQLSTATE).  Queries on one connection run one after another.
 Tests: `npm test`; example: `examples/js/quickstart.ts`.

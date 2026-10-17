@@ -49,6 +49,8 @@ pub const NS_INFO: i64 = 13_000;
 pub const NS_NC: i64 = 13_100;
 /// The one role.
 pub const OWNER: i64 = 10;
+/// PostgreSQL's `uuid`.
+pub const UUID: i64 = 2950;
 const ROLE: &str = "nucleus";
 const DATABASE_OID: i64 = 16_383;
 
@@ -649,6 +651,7 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Timestamp => 1114,
         DataType::TimestampTz => 1184,
         DataType::Interval => 1186,
+        DataType::Ext(t) if t.name() == "uuid" => UUID,
         // Registered types PostgreSQL has no oid for are shown as text.
         DataType::Ext(_) => 25,
         DataType::Array(e) => match e {
@@ -687,6 +690,8 @@ const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
     (1186, "interval", 16, "T", 0, 1187, 0),
     (1700, "numeric", -1, "N", 0, 1231, 0),
     (2205, "regclass", 4, "N", 0, 2210, 0),
+    (2950, "uuid", 16, "U", 0, 2951, 0),
+    (2951, "_uuid", -1, "A", 2950, 0, 0),
     (1000, "_bool", -1, "A", 16, 0, 0),
     (1002, "_char", -1, "A", 18, 0, 0),
     (1003, "_name", -1, "A", 19, 0, 950),
@@ -738,6 +743,7 @@ pub fn format_type(oid: i64, typmod: Option<i64>) -> Option<String> {
             None => "numeric".into(),
         },
         2205 => "regclass".into(),
+        2950 => "uuid".into(),
         _ => {
             let (_, _, _, _, elem, _, _) = TYPES.iter().find(|t| t.0 == oid)?;
             return format_type(*elem, typmod).map(|e| format!("{e}[]"));

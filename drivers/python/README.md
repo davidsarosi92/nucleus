@@ -14,6 +14,8 @@ with conn.transaction():
 
 Types: `bool`, `int`, `float`, `decimal.Decimal`, `str`, `datetime.date`,
 `datetime.datetime` (naive for timestamp, UTC for timestamptz),
-`nucleus.Interval` (and `timedelta` as a parameter), `list`, `None`.
+`nucleus.Interval` (and `timedelta` as a parameter), `uuid.UUID`, `list`,
+`None`; another registered type is `nucleus.Ext` (its name and binary
+form).
 Errors are `nucleus.Error` subclasses with `.code` (SQLSTATE).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.

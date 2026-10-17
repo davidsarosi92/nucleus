@@ -23,13 +23,18 @@ fi
 args=()
 for p in "${core[@]}" "${modules[@]}"; do args+=(-p "$p"); done
 # Packages and verifies (builds each from its packaged form, against the
-# others' packages in a temporary registry).
-cargo package --allow-dirty "${args[@]}"
+# others' packages in a temporary registry).  Cargo takes a registry crate
+# of an unchanged version for unchanged — its unpacked source and its build
+# — so packaging gets a target directory of its own, fresh each time, and
+# earlier unpacked copies of our crates go.
+pkg="$root/target/detach-package"
+rm -rf "$pkg" "${CARGO_HOME:-$HOME/.cargo}"/registry/src/-*/nucleus-*
+CARGO_TARGET_DIR="$pkg" cargo package --allow-dirty "${args[@]}"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 for m in "${modules[@]}"; do
-    crate=$(ls target/package/"$m"-*.crate)
+    crate=$(ls "$pkg"/package/"$m"-*.crate)
     dir="$work/$m"
     mkdir -p "$dir/.cargo"
     tar -xzf "$crate" -C "$dir" --strip-components=1
@@ -37,7 +42,7 @@ for m in "${modules[@]}"; do
     {
         echo "[patch.crates-io]"
         for p in "${core[@]}"; do
-            echo "$p = { path = \"$(ls -d "$root"/target/package/"$p"-*/ | head -1)\" }"
+            echo "$p = { path = \"$(ls -d "$pkg"/package/"$p"-*/ | head -1)\" }"
         done
     } > "$dir/.cargo/config.toml"
     cp rust-toolchain.toml "$dir/"

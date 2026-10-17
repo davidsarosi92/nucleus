@@ -25,7 +25,8 @@
 extern "C" {
 #endif
 
-#define NC_PROTOCOL_VERSION 1
+/* 2: registered types (uuid, modules' types) arrive in their binary form. */
+#define NC_PROTOCOL_VERSION 2
 #define NC_DEFAULT_PORT 20035
 
 /* Value and column types (the protocol's tags). */
@@ -40,8 +41,15 @@ typedef enum nc_type {
     NC_TIMESTAMP = 7,
     NC_TIMESTAMPTZ = 8,
     NC_INTERVAL = 9,
-    NC_ARRAY = 10
+    NC_ARRAY = 10,
+    NC_EXT = 11,  /* another registered type: its name and binary form */
+    NC_UUID = 100 /* uuid (on the wire, NC_EXT named "uuid") */
 } nc_type;
+
+/* A uuid: its 16 bytes. */
+typedef struct nc_uuid {
+    uint8_t bytes[16];
+} nc_uuid;
 
 typedef struct nc_value nc_value;
 
@@ -58,6 +66,8 @@ struct nc_value {
         int64_t timestamp;      /* µs since 2000-01-01 00:00 (UTC for timestamptz) */
         struct { int32_t months, days; int64_t micros; } interval;
         struct { const nc_value *items; size_t len; } array;
+        nc_uuid uuid;
+        struct { const char *type_name; const uint8_t *data; size_t len; } ext;
     } as;
 };
 
@@ -103,6 +113,8 @@ size_t nc_columns(const nc_result *r);
 const char *nc_column_name(const nc_result *r, size_t col);
 nc_type nc_column_type(const nc_result *r, size_t col);
 nc_type nc_column_element(const nc_result *r, size_t col); /* for NC_ARRAY columns */
+/* A registered type's name ("uuid", …) for NC_UUID and NC_EXT columns, else NULL. */
+const char *nc_column_type_name(const nc_result *r, size_t col);
 size_t nc_rows(const nc_result *r);
 const nc_value *nc_value_at(const nc_result *r, size_t row, size_t col);
 const char *nc_command(const nc_result *r); /* "SELECT", "INSERT", … */
@@ -120,6 +132,13 @@ nc_value nc_timestamp(int64_t micros);
 nc_value nc_timestamptz(int64_t micros);
 nc_value nc_interval(int32_t months, int32_t days, int64_t micros);
 nc_value nc_array(const nc_value *items, size_t len);
+nc_value nc_uuid_value(nc_uuid u);
+/* A registered type's value from its name and binary form (both must
+ * outlive the query). */
+nc_value nc_ext(const char *type_name, const uint8_t *data, size_t len);
+/* Parses a uuid's text (32 hex digits, hyphens after groups of four,
+ * optionally in braces); 0 on success. */
+int nc_uuid_parse(const char *text, nc_uuid *out);
 /* Parses "-12.50" into a numeric; 0 on success. */
 int nc_numeric(const char *text, nc_value *out);
 

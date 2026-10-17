@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.UUID;
 import java.util.function.Function;
 
 /**
@@ -39,12 +40,15 @@ import java.util.function.Function;
  *
  * <p>Values: boolean → Boolean, bigint → Long, double → Double, numeric → BigDecimal, text →
  * String, date → LocalDate, timestamp → LocalDateTime, timestamptz → OffsetDateTime (UTC),
- * interval → {@link Interval}, arrays → List, NULL → null. Parameters take the same types (and
+ * interval → {@link Interval}, uuid → UUID, arrays → List, NULL → null; another registered type
+ * → {@link Ext} (its name and binary form). Parameters take the same types (and
  * Integer, Short, Float, Instant, Duration, arrays and Collections). One thread at a time per
  * connection.
  */
 public final class NucleusClient implements AutoCloseable {
-    public static final int PROTOCOL_VERSION = 1;
+    /** 2: registered types (uuid, modules' types) arrive in their binary form. */
+    public static final int PROTOCOL_VERSION = 2;
+    private static final int EXT = 11;
     public static final int DEFAULT_PORT = 20035;
 
     private static final LocalDate EPOCH_DATE = LocalDate.of(2000, 1, 1);
@@ -132,7 +136,7 @@ public final class NucleusClient implements AutoCloseable {
                         for (int i = 0; i < n; i++) {
                             String name = r.str();
                             int tag = r.u8();
-                            String type = tag == 10 ? typeName(r.u8()) + "[]" : typeName(tag);
+                            String type = tag == 10 ? typeName(r.u8()) + "[]" : tag == EXT ? r.str() : typeName(tag);
                             columns.add(new Column(name, type));
                         }
                         rows = new ArrayList<>();
@@ -261,6 +265,12 @@ public final class NucleusClient implements AutoCloseable {
 
         byte[] bytes() { return b.toByteArray(); }
 
+        Writer ext(String name, byte[] data) {
+            u8(EXT).str(name).i32(data.length);
+            b.writeBytes(data);
+            return this;
+        }
+
         Writer value(Object v) {
             if (v == null) return u8(0);
             if (v instanceof Boolean x) return u8(1).u8(x ? 1 : 0);
@@ -295,6 +305,11 @@ public final class NucleusClient implements AutoCloseable {
                 long days = micros / 86_400_000_000L;
                 return u8(9).i32(0).i32((int) days).i64(micros - days * 86_400_000_000L);
             }
+            if (v instanceof UUID x) {
+                ByteBuffer bb = ByteBuffer.allocate(16).putLong(x.getMostSignificantBits()).putLong(x.getLeastSignificantBits());
+                return ext("uuid", bb.array());
+            }
+            if (v instanceof Ext x) return ext(x.typeName(), x.data());
             if (v instanceof Collection<?> items) {
                 u8(10).i32(items.size());
                 for (Object item : items) value(item);
@@ -348,6 +363,16 @@ public final class NucleusClient implements AutoCloseable {
                     List<Object> items = new ArrayList<>();
                     for (long i = 0; i < n; i++) items.add(value());
                     yield items;
+                }
+                case EXT -> {
+                    String name = str();
+                    byte[] data = new byte[(int) u32()];
+                    b.get(data);
+                    if (name.equals("uuid") && data.length == 16) {
+                        ByteBuffer bb = ByteBuffer.wrap(data); // big-endian
+                        yield new UUID(bb.getLong(), bb.getLong());
+                    }
+                    yield new Ext(name, data);
                 }
                 default -> throw new NucleusException("unknown value tag " + tag, (String) null);
             };

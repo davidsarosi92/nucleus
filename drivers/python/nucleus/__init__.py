@@ -15,8 +15,10 @@ Pure Python, no dependencies.  The API follows DB-API 2.0 where it fits::
 Values map to Python types: boolean -> bool, bigint -> int, double ->
 float, numeric -> decimal.Decimal, text -> str, date -> datetime.date,
 timestamp -> datetime.datetime (naive), timestamptz -> datetime.datetime
-(UTC), interval -> nucleus.Interval, arrays -> list, NULL -> None.
-Parameters take the same types (and datetime.timedelta for intervals).
+(UTC), interval -> nucleus.Interval, uuid -> uuid.UUID, arrays -> list,
+NULL -> None; another registered type -> nucleus.Ext (its name and binary
+form).  Parameters take the same types (and datetime.timedelta for
+intervals).
 
 The connection runs each statement in its own transaction unless a
 transaction block is open (``BEGIN`` or ``with conn.transaction()``).
@@ -26,10 +28,11 @@ import datetime as _dt
 import decimal as _decimal
 import socket as _socket
 import struct as _struct
+import uuid as _uuid
 from dataclasses import dataclass as _dataclass
 
 __all__ = [
-    "connect", "Connection", "Cursor", "Result", "Column", "Interval",
+    "connect", "Connection", "Cursor", "Result", "Column", "Interval", "Ext",
     "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "ProgrammingError",
     "NotSupportedError", "DEFAULT_PORT",
@@ -39,7 +42,8 @@ apilevel = "2.0"
 threadsafety = 1
 paramstyle = "numeric"  # $1, $2, ...
 
-PROTOCOL_VERSION = 1
+# 2: registered types (uuid, modules' types) arrive in their binary form.
+PROTOCOL_VERSION = 2
 DEFAULT_PORT = 20035
 
 _EPOCH_DATE = _dt.date(2000, 1, 1)
@@ -50,6 +54,7 @@ _TYPE_NAMES = {
     5: "numeric", 6: "date", 7: "timestamp", 8: "timestamptz", 9: "interval",
     10: "array",
 }
+_EXT = 11
 
 
 class Error(Exception):
@@ -112,6 +117,15 @@ class Interval:
         if self.months:
             raise ValueError("an interval with months has no fixed length")
         return _dt.timedelta(days=self.days, microseconds=self.microseconds)
+
+
+@_dataclass(frozen=True)
+class Ext:
+    """A value of a registered type this driver has no Python type for:
+    the type's name and the value's binary (canonical) form."""
+
+    type_name: str
+    data: bytes
 
 
 @_dataclass(frozen=True)
@@ -191,6 +205,10 @@ def _encode(out, v):
     elif isinstance(v, Interval):
         out.append(9)
         out += _struct.pack("<iiq", v.months, v.days, v.microseconds)
+    elif isinstance(v, _uuid.UUID):
+        _encode_ext(out, "uuid", v.bytes)
+    elif isinstance(v, Ext):
+        _encode_ext(out, v.type_name, v.data)
     elif isinstance(v, (list, tuple)):
         out.append(10)
         out += _struct.pack("<I", len(v))
@@ -198,6 +216,13 @@ def _encode(out, v):
             _encode(out, item)
     else:
         raise InterfaceError(f"cannot send a {type(v).__name__} as a nucleus value")
+
+
+def _encode_ext(out, name, data):
+    out.append(_EXT)
+    _put_str(out, name)
+    out += _struct.pack("<I", len(data))
+    out += data
 
 
 class _Reader:
@@ -250,6 +275,13 @@ class _Reader:
         if tag == 10:
             (n,) = self.unpack("<I")
             return [self.value() for _ in range(n)]
+        if tag == _EXT:
+            name = self.str()
+            (n,) = self.unpack("<I")
+            data = bytes(self.take(n))
+            if name == "uuid" and n == 16:
+                return _uuid.UUID(bytes=data)
+            return Ext(name, data)
         raise InterfaceError(f"unknown value tag {tag}")
 
 
@@ -335,6 +367,8 @@ class Connection:
                     type_name = _TYPE_NAMES.get(tag, "unknown")
                     if tag == 10:
                         type_name = _TYPE_NAMES.get(r.u8(), "unknown") + "[]"
+                    elif tag == _EXT:
+                        type_name = r.str()
                     columns.append(Column(name, type_name))
                 rows = []
             elif kind == b"D":

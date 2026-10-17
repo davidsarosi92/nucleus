@@ -4,7 +4,10 @@ Clients for nucleus's own protocol, `ncp` (DOCS.md §10).  Each is a small
 library without dependencies; all of them connect to a local server as it
 starts (`127.0.0.1:20035`, user and password `nucleus`) unless told
 otherwise, and all of them pass the same conformance cases (every type both
-ways, parameters, errors with their SQLSTATE, transactions, passwords).
+ways — `uuid` as each language's native uuid, or a string in JavaScript —,
+parameters, errors with their SQLSTATE, transactions, passwords).  They
+speak protocol version 2, in which registered types arrive in their binary
+form.
 
 | Language | Where | Values |
 |----------|-------|--------|

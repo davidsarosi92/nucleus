@@ -6,12 +6,20 @@ use std::sync::Arc;
 
 use nucleus_kv::Kv;
 use nucleus_sql::encoding::{Reader, decode_value, encode_value};
+use nucleus_sql::ext::TypeRef;
+
+/// The value and type tag of a registered type (version 2).
+const EXT: u8 = 11;
 use nucleus_sql::{DataType, Error, Output, Session, TxnStatus, Value};
 
 use crate::Config;
 
-/// The protocol version this server speaks.
-pub const VERSION: u16 = 1;
+/// The newest protocol version this server speaks.  Version 2 adds
+/// registered types (value and type tag 11: name and binary form); a
+/// version-1 client gets them as text.
+pub const VERSION: u16 = 2;
+/// The oldest it still speaks.
+pub const MIN_VERSION: u16 = 1;
 const MAX_BODY: u32 = 1 << 30;
 
 /// An outgoing message.
@@ -46,7 +54,10 @@ impl Msg {
         self.buf.extend_from_slice(s.as_bytes());
         self
     }
-    fn ty(mut self, t: Option<DataType>) -> Self {
+    fn ty(mut self, t: Option<DataType>, v2: bool) -> Self {
+        if let (Some(DataType::Ext(t)), true) = (t, v2) {
+            return self.u8(EXT).str(t.name());
+        }
         let tag = |t: DataType| match t {
             DataType::Bool => 1,
             DataType::Int => 2,
@@ -58,7 +69,7 @@ impl Msg {
             DataType::TimestampTz => 8,
             DataType::Interval => 9,
             DataType::Array(_) => 10,
-            // Registered types travel as text, for now (PLAN.md §M14.19 T3).
+            // Registered types travel as text to version-1 clients.
             DataType::Ext(_) => 4,
         };
         match t {
@@ -70,8 +81,12 @@ impl Msg {
             Some(t) => self.u8(tag(t)),
         }
     }
-    fn value(mut self, v: &Value) -> Self {
+    fn value(mut self, v: &Value, v2: bool) -> Self {
         match v {
+            Value::Ext(t, bytes) if v2 => {
+                self = self.u8(EXT).str(t.name()).u32(bytes.len() as u32);
+                self.buf.extend_from_slice(bytes);
+            }
             Value::Ext(..) => encode_value(&mut self.buf, &Value::Text(v.render())),
             v => encode_value(&mut self.buf, v),
         }
@@ -174,15 +189,16 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
 
     // Hello.
     let (kind, body) = read_message(&mut input)?;
-    let hello = (|| -> Result<(), Error> {
+    let hello = (|| -> Result<u16, Error> {
         if kind != b'H' {
             return Err(protocol("expected Hello"));
         }
         let mut b = Body { b: &body };
         let version = b.u16()?;
-        if version != VERSION {
+        if version < MIN_VERSION {
             return Err(protocol(format!(
-                "unsupported protocol version {version} (this server speaks {VERSION})"
+                "unsupported protocol version {version} (this server speaks \
+                 {MIN_VERSION} to {VERSION})"
             )));
         }
         let user = b.str()?;
@@ -196,15 +212,18 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
                 message: format!("password authentication failed for user \"{user}\""),
             });
         }
-        Ok(())
+        Ok(version.min(VERSION))
     })();
-    if let Err(e) = hello {
-        out.write_all(&error_msg(&e))?;
-        return out.flush();
-    }
+    let version = match hello {
+        Ok(v) => v,
+        Err(e) => {
+            out.write_all(&error_msg(&e))?;
+            return out.flush();
+        }
+    };
     out.write_all(
         &Msg::new(b'W')
-            .u16(VERSION)
+            .u16(version)
             .str(&format!("nucleus {}", env!("CARGO_PKG_VERSION")))
             .u32(id)
             .finish(),
@@ -225,16 +244,16 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
                     let mut r = Reader::new(b.b);
                     let mut params = Vec::with_capacity(n);
                     for _ in 0..n {
-                        params.push(
-                            decode_value(&mut r).map_err(|_| protocol("malformed parameter"))?,
-                        );
+                        params.push(parameter(&mut r)?);
                     }
                     Ok((sql, format, params))
                 })();
                 match parsed {
                     Ok((sql, format, params)) => {
                         log("query", &sql);
-                        if let Err(e) = run(&mut session, &sql, format == 1, &params, &mut out)? {
+                        let v2 = version >= 2;
+                        if let Err(e) = run(&mut session, &sql, format == 1, v2, &params, &mut out)?
+                        {
                             log("error", &format!("{} {}", e.code, e.message));
                             out.write_all(&error_msg(&e))?;
                         }
@@ -258,10 +277,34 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
 
 /// Runs a Query's statements, writing their results; the first error is
 /// returned (not yet written).
+/// A parameter: a value in the row encoding, or (tag 11) a registered
+/// type's name and binary form.
+fn parameter(r: &mut Reader) -> Result<Value, Error> {
+    let bad = |_| protocol("malformed parameter");
+    if r.peek() != Some(EXT) {
+        return decode_value(r).map_err(bad);
+    }
+    r.u8().map_err(bad)?;
+    let name = r.str().map_err(bad)?;
+    let n = r.u32().map_err(bad)? as usize;
+    let bytes = r.take(n).map_err(bad)?;
+    let t = TypeRef::named(&name).ok_or_else(|| Error {
+        code: "42704",
+        message: format!("type \"{name}\" does not exist"),
+    })?;
+    // The binary form is the canonical one; checked, as any input is.
+    let v = Value::ext(t, bytes.to_vec());
+    t.imp()
+        .input(&t.imp().output(&v))
+        .map_err(|_| protocol("malformed parameter"))?;
+    Ok(v)
+}
+
 fn run(
     session: &mut Session,
     sql: &str,
     text: bool,
+    v2: bool,
     params: &[Value],
     out: &mut impl Write,
 ) -> io::Result<Result<(), Error>> {
@@ -305,16 +348,16 @@ fn run(
         if let Output::Rows { columns, rows } = output {
             let mut m = Msg::new(b'C').u16(columns.len() as u16);
             for c in &columns {
-                m = m.str(&c.name).ty(Some(c.ty));
+                m = m.str(&c.name).ty(Some(c.ty), v2);
             }
             out.write_all(&m.finish())?;
             for row in &rows {
                 let mut m = Msg::new(b'D');
                 for v in row {
                     m = if text && !v.is_null() {
-                        m.value(&Value::Text(v.render()))
+                        m.value(&Value::Text(v.render()), v2)
                     } else {
-                        m.value(v)
+                        m.value(v, v2)
                     };
                 }
                 out.write_all(&m.finish())?;

@@ -18,8 +18,9 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-/// The protocol version this driver speaks.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// The protocol version this driver speaks (2: registered types such as
+/// `uuid` arrive in their binary form).
+pub const PROTOCOL_VERSION: u16 = 2;
 /// The nucleus protocol's default port.
 pub const DEFAULT_PORT: u16 = 20_035;
 
@@ -126,6 +127,10 @@ pub enum Type {
     Interval,
     /// An array of the element type.
     Array(Box<Type>),
+    /// `uuid`.
+    Uuid,
+    /// Another registered type, by name.
+    Other(String),
 }
 
 fn type_of_tag(t: u8) -> Type {
@@ -180,6 +185,15 @@ pub enum Value {
     },
     /// An array.
     Array(Vec<Value>),
+    /// A `uuid`: its 16 bytes.
+    Uuid([u8; 16]),
+    /// A value of another registered type: its name and binary form.
+    Other {
+        /// The type's name.
+        type_name: String,
+        /// The value's binary (canonical) form.
+        bytes: Vec<u8>,
+    },
 }
 
 impl From<&str> for Value {
@@ -270,6 +284,8 @@ impl Value {
                     v.encode(out);
                 }
             }
+            Value::Uuid(b) => encode_ext(out, "uuid", b),
+            Value::Other { type_name, bytes } => encode_ext(out, type_name, bytes),
         }
     }
 
@@ -303,6 +319,18 @@ impl Value {
                 }
                 Value::Array(items)
             }
+            11 => {
+                let type_name = r.str()?;
+                let n = r.u32()? as usize;
+                let bytes = r.take(n)?;
+                match (type_name.as_str(), <[u8; 16]>::try_from(bytes)) {
+                    ("uuid", Ok(b)) => Value::Uuid(b),
+                    _ => Value::Other {
+                        type_name,
+                        bytes: bytes.to_vec(),
+                    },
+                }
+            }
             t => return Err(Error::Protocol(format!("unknown value tag {t}"))),
         })
     }
@@ -311,6 +339,28 @@ impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
+}
+
+/// A registered type's value: tag 11, its name, its binary form.
+fn encode_ext(out: &mut Vec<u8>, name: &str, bytes: &[u8]) {
+    out.push(11);
+    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+    out.extend_from_slice(name.as_bytes());
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+/// The canonical text of a uuid's 16 bytes (`8-4-4-4-12`, lower case).
+pub fn uuid_text(b: &[u8; 16]) -> String {
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
 }
 
 /// `(year, month, day)` of a day number since 2000-01-01 (proleptic
@@ -379,6 +429,11 @@ impl fmt::Display for Value {
                 days,
                 micros,
             } => write!(f, "{months} mons {days} days {micros} us"),
+            Value::Uuid(b) => f.write_str(&uuid_text(b)),
+            Value::Other { bytes, .. } => {
+                f.write_str("\\x")?;
+                bytes.iter().try_for_each(|b| write!(f, "{b:02x}"))
+            }
             Value::Array(items) => {
                 f.write_str("{")?;
                 for (i, v) in items.iter().enumerate() {
@@ -616,10 +671,13 @@ impl Client {
                     for _ in 0..n {
                         let name = b.str()?;
                         let tag = b.u8()?;
-                        let ty = if tag == 10 {
-                            Type::Array(Box::new(type_of_tag(b.u8()?)))
-                        } else {
-                            type_of_tag(tag)
+                        let ty = match tag {
+                            10 => Type::Array(Box::new(type_of_tag(b.u8()?))),
+                            11 => match b.str()? {
+                                n if n == "uuid" => Type::Uuid,
+                                n => Type::Other(n),
+                            },
+                            _ => type_of_tag(tag),
                         };
                         columns.push(Column { name, ty });
                     }

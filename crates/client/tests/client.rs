@@ -201,3 +201,102 @@ fn sql_scripts_over_the_nucleus_protocol() {
         failures.join("\n\n")
     );
 }
+
+#[test]
+fn uuid_both_ways() {
+    let mut c = Client::connect(config(start(None))).unwrap();
+    c.execute("CREATE TABLE u (id UUID PRIMARY KEY, n INT)", &[])
+        .unwrap();
+    let id = [
+        0xa0, 0xee, 0xbc, 0x99, 0x9c, 0x0b, 0x4e, 0xf8, 0xbb, 0x6d, 0x6b, 0xb9, 0xbd, 0x38, 0x0a,
+        0x11,
+    ];
+    c.execute("INSERT INTO u VALUES ($1, 1)", &[Value::Uuid(id)])
+        .unwrap();
+    let r = c
+        .execute("SELECT id, id::text, gen_random_uuid() FROM u", &[])
+        .unwrap();
+    assert_eq!(r.columns[0].ty, Type::Uuid);
+    assert_eq!(r.rows[0][0], Value::Uuid(id));
+    assert_eq!(
+        r.rows[0][1],
+        Value::from("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")
+    );
+    assert_eq!(
+        r.rows[0][0].to_string(),
+        "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+    );
+    assert!(matches!(r.rows[0][2], Value::Uuid(b) if b[6] >> 4 == 4));
+    // A text parameter is parsed where a uuid is needed.
+    let r = c
+        .execute(
+            "SELECT n FROM u WHERE id = $1",
+            &[Value::from("A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11")],
+        )
+        .unwrap();
+    assert_eq!(r.rows, vec![vec![Value::Int(1)]]);
+    // A registered type the server does not know is refused.
+    let err = c
+        .execute(
+            "SELECT $1::text",
+            &[Value::Other {
+                type_name: "nosuch".into(),
+                bytes: vec![1],
+            }],
+        )
+        .unwrap_err();
+    assert!(matches!(err, Error::Server(e) if e.code == "42704"));
+}
+
+/// A version-1 client (before registered types) gets them as text.
+#[test]
+fn version_1_clients_get_registered_types_as_text() {
+    use std::io::{Read, Write};
+    let addr = start(None);
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    let frame = |kind: u8, body: &[u8]| {
+        let mut f = vec![kind];
+        f.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        f.extend_from_slice(body);
+        f
+    };
+    let string = |b: &mut Vec<u8>, s: &str| {
+        b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        b.extend_from_slice(s.as_bytes());
+    };
+    let mut hello = 1u16.to_le_bytes().to_vec();
+    for part in ["nucleus", "", "nucleus", "test"] {
+        string(&mut hello, part);
+    }
+    s.write_all(&frame(b'H', &hello)).unwrap();
+    let mut query = Vec::new();
+    string(
+        &mut query,
+        "SELECT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid",
+    );
+    query.push(0); // typed
+    query.extend_from_slice(&0u16.to_le_bytes());
+    s.write_all(&frame(b'Q', &query)).unwrap();
+    // Read until Ready after the query; collect frames.
+    let mut frames = Vec::new();
+    let mut readies = 0;
+    while readies < 2 {
+        let mut head = [0u8; 5];
+        s.read_exact(&mut head).unwrap();
+        let mut body = vec![0u8; u32::from_le_bytes(head[1..].try_into().unwrap()) as usize];
+        s.read_exact(&mut body).unwrap();
+        if head[0] == b'R' {
+            readies += 1;
+        }
+        frames.push((head[0], body));
+    }
+    let welcome = &frames.iter().find(|f| f.0 == b'W').unwrap().1;
+    assert_eq!(u16::from_le_bytes([welcome[0], welcome[1]]), 1);
+    let columns = &frames.iter().find(|f| f.0 == b'C').unwrap().1;
+    // u16 count, the string name, then the type tag: text.
+    let name_len = u32::from_le_bytes(columns[2..6].try_into().unwrap()) as usize;
+    assert_eq!(columns[6 + name_len], 4);
+    let row = &frames.iter().find(|f| f.0 == b'D').unwrap().1;
+    assert_eq!(row[0], 4);
+    assert_eq!(&row[5..], b"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11");
+}

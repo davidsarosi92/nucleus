@@ -10,7 +10,7 @@ use nucleus_kv::Kv;
 use nucleus_server::{Config, FrontEnd};
 use nucleus_sql::ext::{
     DataType, Decimal, Error, Interval, OutColumn, Output, Registry, Session, Statement, TxnStatus,
-    Value,
+    TypeRef, Value,
 };
 
 use crate::PgCompat;
@@ -78,6 +78,7 @@ fn oid(t: DataType) -> i32 {
 
 fn type_of_oid(o: i32) -> Option<DataType> {
     Some(match o {
+        2950 => DataType::Ext(TypeRef::named("uuid")?),
         BOOL => DataType::Bool,
         INT2 | INT4 | INT8 => DataType::Int,
         FLOAT4 | FLOAT8 => DataType::Float,
@@ -106,6 +107,7 @@ fn type_size(t: DataType) -> i16 {
         DataType::Date => 4,
         DataType::Int | DataType::Float | DataType::Timestamp | DataType::TimestampTz => 8,
         DataType::Interval => 16,
+        DataType::Ext(t) if t.name() == "uuid" => 16,
         DataType::Text | DataType::Numeric | DataType::Array(_) | DataType::Ext(_) => -1,
     }
 }
@@ -459,6 +461,8 @@ fn text_value(v: &Value) -> String {
 
 fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
     match (v, ty) {
+        // PostgreSQL's binary uuid is its 16 bytes, as nucleus's canonical form.
+        (Value::Ext(t, bytes), _) if t.name() == "uuid" => bytes.to_vec(),
         (Value::Bool(b), _) => vec![u8::from(*b)],
         (Value::Int(i), DataType::Float) => (*i as f64).to_be_bytes().to_vec(),
         (Value::Int(i), _) => i.to_be_bytes().to_vec(),
@@ -535,6 +539,7 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
             (Some(DataType::TimestampTz), 8) => {
                 Value::TimestampTz(i64::from_be_bytes(bytes.try_into().unwrap()))
             }
+            (Some(DataType::Ext(t)), 16) if t.name() == "uuid" => Value::ext(t, bytes.to_vec()),
             (Some(DataType::Array(elem)), _) => {
                 let int = |at: usize| -> Result<i32, Error> {
                     Ok(i32::from_be_bytes(
