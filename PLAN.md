@@ -23,7 +23,7 @@ Status legend: ⬜ not started · ◐ in progress · ✅ shipped · ⏸ parked
 | Build targets | Platforms nucleus must build for |
 | Decisions | What has to be settled before the first line of code |
 | Status snapshot | Phases + milestones table |
-| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.25, sits between F1 and F2) |
+| §F0 – §F4 | Phases and milestones in detail (the developer platform, §M14.9–§M14.26, sits between F1 and F2) |
 | Changelog | Changes to this plan |
 
 ---
@@ -265,6 +265,7 @@ are marked ✅.
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
 | | M14.19 | **Next:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ⬜ |
+| | M14.26 | Core types: integers by width, `real`, `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
@@ -636,7 +637,7 @@ quickstart in every language.
 parameters, errors, transactions) against `nucleus server` in CI. ✅
 (Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
 
-### Developer platform (§M14.9–§M14.25)
+### Developer platform (§M14.9–§M14.26)
 
 What makes nucleus worth choosing, before more data models: understanding
 queries, being usable by AI models, holding large data and analysing it
@@ -650,7 +651,8 @@ migrations, code generation), an easy start, and what production needs.
 ### §M14.19 — Modularity: registries and an extension API ⬜ (next)
 
 **Order:** this comes first in the developer platform — principles before
-features — then §M14.25 (identity and access), then §M14.9 onward.  It
+features — then §M14.26 (core types), §M14.25 (identity and access),
+then §M14.9 onward.  It
 starts with a **principle audit**: the
 code checked against all twelve principles, each gap listed here with its
 fix.
@@ -838,9 +840,57 @@ work, dropping the ordering while the index exists is refused, and
 redefining it rebuilds the index; and `COLLATE` resolves to a text
 ordering.
 
+### §M14.26 — Core types ⬜
+
+**Order:** right after §M14.19, whose type registry they are built on —
+each one registered like `UUID`, with its capabilities declared and the
+law kit run on it.  The everyday types an application expects, which the
+type set still lacks (today `smallint` and `integer` are names for a
+64-bit integer, `real` for a 64-bit float, and `char(n)` for `text`):
+
+- **Integers by width**: `smallint` (16-bit), `integer` (32-bit),
+  `bigint` (64-bit), each stored at its width, with its own range
+  (`22003` outside it), overflow checked per width, and promotion rules
+  for mixed arithmetic.  Columns already declared `smallint` or
+  `integer` keep their stored 64-bit values readable (an older encoding
+  version, §M14.19) and are range-checked from then on.
+- **`real`** (32-bit float) beside `double precision`, with PostgreSQL's
+  output rules for each.
+- **`bytea`**: binary strings — hex and escape text forms
+  (`'\xdeadbeef'`), `||`, `substring`, `length`, `position`, `encode` /
+  `decode` (hex, base64), digests (`sha256`, `md5`); byte-wise order and
+  a key encoding; native types in every driver (`Vec<u8>`, `bytes`,
+  `Uint8Array`, `byte[]`, pointer and length in C).  Values larger than a
+  page are stored out of line in chunks, so a column can hold files and
+  model artefacts.
+- **`time`** (time of day, microseconds), with `date + time`, intervals,
+  `extract` and `date_trunc`.
+- **`char(n)`** with the standard's blank padding and comparison rules.
+- **`inet` and `cidr`**: IPv4 and IPv6 addresses and networks;
+  containment operators (`<<`, `<<=`, `>>`, `>>=`, `&&`), `host`,
+  `network`, `masklen`, `family`, `broadcast`; an order and key encoding
+  in which a network's addresses are one contiguous range, so containment
+  is an index range scan.  The access rules (§M14.25) and the audit log
+  use them.
+- **Enums**: `CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')`, ordered
+  by declaration; `ALTER TYPE … ADD VALUE … BEFORE / AFTER` and
+  `RENAME VALUE` without rewriting a row — values are stored by a sort
+  key that leaves room between labels, so a new label fits anywhere.
+- For each: text and binary forms, casts, the `ncp` tag, every driver's
+  native type, statistics, a columnar encoding (§M14.20), and in
+  `pg-compat` PostgreSQL's type with its oid and binary format.
+
+**Done when:** each type passes the law kit; an slt script per type,
+filled from PostgreSQL 16, covers input, output, casts, operators,
+functions, ordering and errors; every type round-trips through `ncp`,
+all six drivers and `pg-compat` (binary formats checked against
+PostgreSQL); and a database created before this milestone opens with its
+old `integer` columns intact.
+
 ### §M14.25 — Identity and access ⬜
 
-**Order:** right after §M14.19, before the rest of the developer platform:
+**Order:** right after §M14.19 and §M14.26 (whose `inet` / `cidr` the
+access rules use), before the rest of the developer platform:
 much of it builds on roles and row-level security — the MCP server's
 write access (§M14.10), filtered vector search (§M14.12), hybrid search
 (§M14.21), memory for models (§M14.24), sync (§M16.7).
@@ -1754,3 +1804,7 @@ style) across a thousand seeds without failure.
   archiving and retention, scheduled restore tests, health endpoints,
   shipped alert rules and dashboard.  §M14.19: `UUID` (v4 and v7
   generators) is the first new type built through the type registry.
+- **2026-10-17** — New §M14.26, core types, right after §M14.19 and
+  before §M14.25: integers by width, `real`, `bytea` (with out-of-line
+  large values), `time`, `char(n)`, `inet` / `cidr`, enums whose labels
+  can be added anywhere without a rewrite.

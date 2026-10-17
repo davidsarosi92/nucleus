@@ -14,9 +14,9 @@ and array types) with a cost-based optimizer, its own system catalog
 with drivers for Rust, C, C++, Python, JavaScript/TypeScript and Java, and
 the `ncsql` shell — and, optionally, PostgreSQL's.  Next is modularity
 (PLAN.md §M14.19: registries, extensible and evolvable types, an extension
-API — the principles come first), then identity and access (§M14.25:
-users, roles, privileges, authentication, access rules, row-level
-security), then the rest of the developer platform (§M14.9–§M14.24: SQL
+API — the principles come first), the core types (§M14.26), then
+identity and access (§M14.25: users, roles, privileges, authentication,
+access rules, row-level security), then the rest of the developer platform (§M14.9–§M14.24: SQL
 analyzer, AI access, large data and analytics, vectors, full-text and
 hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, …), then
