@@ -666,8 +666,8 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
   The wire tags and catalog type ids are assigned by the registry, not
   hard-coded, with the built-in ones fixed for compatibility.
 - **Type capabilities.**  A type is not one thing but a set of abilities,
-  and many are optional — a vector has distances but no meaningful order;
-  a JSON value has equality but no arithmetic.  Each ability is its own
+  and many are optional — a geographic point has a distance but no natural
+  order; a JSON value has equality but no arithmetic.  Each ability is its own
   interface that a type implements or not, and the engine *asks* before it
   relies on one:
 
@@ -676,7 +676,7 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
   | text input / output, row encoding | literals, storage, the text wire format | required of every type |
   | equality | `=`, `<>`, `IN`, `DISTINCT`, `GROUP BY`, set operations, `UNIQUE` | those are refused at bind / DDL time |
   | hashing (consistent with equality) | hash joins and hash aggregation | the planner uses sorting or nested loops |
-  | total order | `<` …, `ORDER BY`, `MIN` / `MAX`, range predicates, merge joins, histograms | refused (`ORDER BY` a vector is an error, not an arbitrary order) |
+  | total order | `<` …, `ORDER BY`, `MIN` / `MAX`, range predicates, merge joins, histograms | refused (`ORDER BY` a point is an error, not an arbitrary order) |
   | order-preserving key encoding | primary keys, B-tree indexes, index range scans | the type cannot be a key or B-tree-indexed |
   | operators and functions | `+`, `||`, `->`, type-specific functions — each registered, typed | not available |
   | distance / similarity | `ORDER BY a <-> b LIMIT k`, nearest-neighbour indexes | not available |
@@ -710,19 +710,19 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
 
   ```sql
   -- an ordering derived by a mapping into an ordered type
-  ALTER TYPE vector ADD ORDERING magnitude BY norm(value);
-  -- an operator, a distance, a cast, an aggregate
-  ALTER TYPE vector ADD OPERATOR <-> (vector, vector) RETURNS float8 AS l2_distance;
-  ALTER TYPE vector ADD DISTANCE l2 USING <->;
-  ALTER TYPE vector ADD CAST TO text AS vector_text ASSIGNMENT;
-  ALTER TYPE vector DROP ORDERING magnitude;
+  ALTER TYPE geopoint ADD ORDERING by_geohash BY geohash(value);
+  -- an operator, a distance, a cast
+  ALTER TYPE geopoint ADD OPERATOR <-> (geopoint, geopoint) RETURNS float8 AS haversine;
+  ALTER TYPE geopoint ADD DISTANCE great_circle USING <->;
+  ALTER TYPE geopoint ADD CAST TO text AS geopoint_text ASSIGNMENT;
+  ALTER TYPE geopoint DROP ORDERING by_geohash;
 
-  SELECT * FROM t ORDER BY v USING magnitude;
-  CREATE INDEX ON t (v USING magnitude);
+  SELECT * FROM shops ORDER BY at USING by_geohash;
+  CREATE INDEX ON shops (at USING by_geohash);
   ```
 
   - *By mapping* (the preferred way): an ability is derived from another
-    type through a deterministic function — an ordering by `norm(v)`, an
+    type through a deterministic function — an ordering by `geohash(p)`, an
     equality or a hash by a canonical form, a key encoding by the mapped
     key's encoding, statistics by the mapped values.  Everything follows
     from the target type's own capabilities, so the laws hold by
@@ -750,8 +750,8 @@ views (`nc_catalog`, the compatibility catalogs), the server's front ends
   - *Visible*: `nc_catalog.orderings`, `nc_catalog.operators`,
     `nc_catalog.casts` list what each type has been taught, and the error
     for a missing ability names the abilities that would work instead
-    (`vector has no default ordering; available: magnitude, or a distance
-    with <->`), for people, tools and AI models alike.
+    (`geopoint has no default ordering; available: by_geohash, or a
+    distance with <->`), for people, tools and AI models alike.
 - The front ends share one session layer, so a new protocol is a module
   over `Session` (as `ncp` and `--pg-compat` already are); the server
   starts the modules a configuration names.
@@ -767,10 +767,10 @@ adds a function, a type and a catalog view without touching the core; and
 a type's encoding is upgraded on a populated database (old and new values
 read side by side, crash-tested) and a column's type changed online.  The
 law kit runs on every built-in type, and a sample type with only some
-capabilities (equality and distance, no order — vector-like) is refused
+capabilities (equality and distance, no order — `geopoint`) is refused
 exactly where it should be (`ORDER BY`, primary key, B-tree index) and
 works everywhere else.  Then it is taught an ordering by a mapping
-(`magnitude`) in SQL: `ORDER BY … USING magnitude` and an index on it
+(`by_geohash`) in SQL: `ORDER BY … USING by_geohash` and an index on it
 work, dropping the ordering while the index exists is refused, and
 redefining it rebuilds the index; and `COLLATE` resolves to a text
 ordering.
@@ -836,17 +836,39 @@ a fixed memory budget, and the benchmark targets are met.
 
 ### §M14.12 — Vectors ⬜
 
-Embeddings beside the data they describe, in the same transactions:
+Embeddings beside the data they describe, in the same transactions.
+`vector` is a **built-in type with every capability** — it matters most
+for AI work, so nothing about it is optional.  It is built as a module
+through §M14.19's type registry like every other built-in, and it is the
+reference that the capability model is proven on:
 
-- A `VECTOR(n)` type (float32 components), literals and casts, wire and
-  driver support.
-- Distance operators and functions — cosine, L2, inner product — and exact
-  nearest-neighbour search with `ORDER BY distance LIMIT k`.
+- `VECTOR(n)`, float32 components, the dimension as a modifier checked on
+  every write; text form `'[1, 2.5, -3]'`; casts to and from `real[]`
+  and `text`; an `ncp` tag and a native mapping in every driver (`Vec<f32>`,
+  `float*`, `std::vector<float>`, a list or `array('f')` in Python,
+  `Float32Array`, `float[]`).
+- Equality and hashing (`DISTINCT`, `GROUP BY`, `UNIQUE`, hash joins) and
+  a default total order, element by element, with an order-preserving key
+  encoding — so a vector can be sorted, be a key and be B-tree-indexed.
+- Distances as distance capabilities — L2 `<->`, cosine `<=>`, inner
+  product `<#>`, L1 `<+>` — and exact nearest-neighbour search with
+  `ORDER BY v <-> :q LIMIT k`.
+- Operators and functions: element-wise `+`, `-`, `*`, `||`
+  (concatenation), `v[i]` and slices, `dims`, `norm`, `normalize`,
+  `subvector`; `UPDATE … SET v[i] = …`.
+- Aggregates: `avg` and `sum` (centroids).
+- Statistics for the optimizer: dimension, norms, and distance selectivity
+  sampled from the data.
 - An approximate nearest-neighbour index (HNSW) the optimizer uses for
-  `ORDER BY … LIMIT k`, kept transactionally consistent with the table.
+  `ORDER BY … LIMIT k`, kept transactionally consistent with the table,
+  one per distance.
+- Later, as further encodings or types on the same model: half precision,
+  int8 and binary quantization, sparse vectors.
 
-**Done when:** exact search matches a brute-force reference, and the ANN
-index reaches a set recall at a set latency on a public dataset.
+**Done when:** the law kit passes on `vector`; every capability above
+works through SQL, `ncp` and all six drivers; exact search matches a
+brute-force reference; and the ANN index reaches a set recall at a set
+latency on a public dataset.
 
 ### §M14.13 — Database branches ⬜
 
@@ -1152,3 +1174,7 @@ style) across a thousand seeds without failure.
   by a mapping into a type that already has them; several named orderings
   per type (`USING`), collations as text orderings; operators extend the
   vocabulary, not the grammar; dependencies tracked in the catalog.
+- **2026-10-17** — §M14.12: `vector` is a built-in type with every
+  capability (equality, hashing, an element-wise order and key encoding,
+  four distances, operators, aggregates, statistics, driver mappings);
+  §M14.19's partial-capability examples use a `geopoint` sample type.
