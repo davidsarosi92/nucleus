@@ -16,6 +16,7 @@
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use nucleus_platform::Platform;
 use nucleus_platform::real::RealPlatform;
@@ -125,6 +126,18 @@ pub type KvIter<'a> = Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>;
 pub trait Kv: Send + Sync {
     /// Starts a transaction.
     fn begin(&self, opts: TxnOptions) -> Result<Box<dyn KvTxn>>;
+
+    /// Wall-clock time as the implementation keeps it — the local one's
+    /// platform clock; a distributed one answers from its hybrid logical
+    /// clock.  Layers above read the time only here (principle 4), so a
+    /// simulation's `now()` is the simulated clock.
+    fn wall_clock(&self) -> SystemTime;
+
+    /// Waits before retrying a transaction for the `attempt`-th time (from
+    /// 1): exponentially longer each time, with jitter, so retries that
+    /// collided once spread out.  Through the implementation's platform, so
+    /// a simulation does not wait in real time.
+    fn back_off(&self, attempt: u32);
 }
 
 /// A transaction.  Dropping it without committing rolls it back.
@@ -178,12 +191,8 @@ pub fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Runs `f` in a transaction and commits, retrying from the start on
-/// retryable errors (up to 100 times), backing off exponentially between
-/// attempts (from 1 µs up to about 1 ms) so contending retries spread out
-/// instead of colliding again.
-///
-/// The back-off is the one real-time wait in the contract layer; it does
-/// not read the clock, so it does not affect a simulation's determinism.
+/// retryable errors (up to 100 times), with [`Kv::back_off`] between
+/// attempts.
 pub fn transact<T>(
     kv: &dyn Kv,
     opts: TxnOptions,
@@ -196,29 +205,10 @@ pub fn transact<T>(
         match result {
             Err(e) if e.is_retryable() && attempt < 100 => {
                 attempt += 1;
-                // Spread by a little per-thread jitter, so threads that
-                // collided once do not wake in lock-step.
-                let jitter = (std::thread::current().id().as_u64_ish() % 7) as u64;
-                let micros = (1u64 << attempt.min(10)) + jitter * attempt as u64;
-                std::thread::sleep(std::time::Duration::from_micros(micros));
+                kv.back_off(attempt);
             }
             other => return other,
         }
-    }
-}
-
-trait ThreadIdBits {
-    fn as_u64_ish(&self) -> u64;
-}
-
-impl ThreadIdBits for std::thread::ThreadId {
-    /// A number that differs between threads (ThreadId has no stable
-    /// numeric accessor).
-    fn as_u64_ish(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut h);
-        h.finish()
     }
 }
 
@@ -248,9 +238,18 @@ impl Default for Options {
 
 /// The local, embedded implementation of [`Kv`]: one directory on disk.
 /// Cloning gives another handle to the same database.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Database {
     engine: nucleus_txn::Engine,
+    platform: Arc<dyn Platform>,
+}
+
+impl std::fmt::Debug for Database {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Database")
+            .field("engine", &self.engine)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Database {
@@ -264,7 +263,7 @@ impl Database {
     /// simulation, in tests).
     pub fn open_on(platform: Arc<dyn Platform>, path: &Path, opts: Options) -> Result<Self> {
         let engine = nucleus_txn::Engine::open(
-            platform,
+            platform.clone(),
             path,
             nucleus_txn::EngineOptions {
                 store: StoreOptions {
@@ -275,7 +274,7 @@ impl Database {
                 history: opts.history,
             },
         )?;
-        Ok(Self { engine })
+        Ok(Self { engine, platform })
     }
 
     /// Writes everything to the data file and trims the WAL.
@@ -307,6 +306,20 @@ impl Kv for Database {
             at: opts.at,
         })?;
         Ok(Box::new(LocalTxn(txn)))
+    }
+
+    fn wall_clock(&self) -> SystemTime {
+        self.platform.clock().wall()
+    }
+
+    /// From 2 µs, doubling up to about 1 ms, plus up to as much again at
+    /// random.
+    fn back_off(&self, attempt: u32) {
+        let base = 1u64 << attempt.clamp(1, 10);
+        let jitter = self.platform.rng().below(base);
+        self.platform
+            .clock()
+            .sleep(Duration::from_micros(base + jitter));
     }
 }
 

@@ -191,6 +191,8 @@ fn clock_is_monotonic() {
         let b = p.clock().now();
         assert!(b >= a);
         assert!(p.clock().wall() > std::time::UNIX_EPOCH);
+        p.clock().sleep(std::time::Duration::from_millis(2));
+        assert!(p.clock().now() >= b + std::time::Duration::from_millis(2));
     });
 }
 

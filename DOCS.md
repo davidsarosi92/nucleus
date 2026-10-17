@@ -93,7 +93,8 @@ principle 4).
   `size`, `set_len`.
 - `OpenMode` — `ReadOnly`, `ReadWrite`, `Create`, `CreateNew`; none
   truncates.
-- `Clock` — `now()` monotonic since platform creation, `wall()`.
+- `Clock` — `now()` monotonic since platform creation, `wall()`, `sleep(d)`
+  (the simulated clock advances by `d` instead of waiting).
 - `Rng` — `next_u64`, `below`, `chance_ppm`, `fill_bytes`.  **Not
   cryptographic.**  `SplitMix64` is the implementation everywhere.
 
@@ -137,7 +138,8 @@ drives it.
 - `sim_fault(&io::Error)` tells simulated failures apart from real errors.
 - Paths are component lists (`/a/b` = `a/b`); `..` is refused; directories
   cannot be renamed.
-- `sim_clock().advance(d)` is the only thing that moves time.  Wall time
+- `sim_clock().advance(d)` (and `clock().sleep(d)`) is the only thing
+  that moves time.  Wall time
   starts at 2026-01-01T00:00:00Z.
 
 ### 3.4 Harness (`harness`)
@@ -332,7 +334,9 @@ user key may be at most 1014 bytes after escaping.
 `begin()` / `begin_with(TxnOptions { isolation, read_only, at })`.
 `Transaction`: `get`, `put`, `delete`, `scan(start, end)` (ascending;
 merges the transaction's own writes), `commit() -> Timestamp`,
-`rollback()`; dropping it rolls back.  `Engine`: `visible`, `checkpoint`,
+`rollback()`; dropping it rolls back.  `Timestamp` is opaque outside the
+crate (principle 3): compared, printed and parsed (`Display`, `FromStr`),
+never computed with.  `Engine`: `visible`, `checkpoint`,
 `vacuum`, `version_count`, `store`.
 
 **Snapshot isolation.**  A transaction reads at its start timestamp — the
@@ -397,7 +401,11 @@ that ignores running snapshots.
 What every layer above the core uses (principle 1), and what the
 distributed implementation will provide (§F3).
 
-- `trait Kv { fn begin(&self, TxnOptions) -> Result<Box<dyn KvTxn>> }`
+- `trait Kv`: `begin(&self, TxnOptions) -> Result<Box<dyn KvTxn>>`;
+  `wall_clock()` — the time as the implementation keeps it (the local
+  one's platform clock), the only clock layers above read (principle 4);
+  `back_off(attempt)` — the wait before a retry (exponential with
+  jitter, through the platform, so a simulation does not wait).
 - `trait KvTxn`: `read_ts`, `get(&self)`, `scan(&self, start, end) ->
   KvIter` (ascending), `get_validated` / `scan_validated` (reads checked
   at commit at any isolation level, §5.2), `put(&mut self)`,
@@ -409,7 +417,7 @@ distributed implementation will provide (§F3).
 - `Error`: `Conflict { key }` (the only retryable one — `is_retryable()`),
   `SnapshotTooOld`, `ReadOnly`, `KeyTooLarge`, `Storage(boxed)`.
 - Helpers: `transact(kv, opts, f)` runs `f` and commits, retrying on
-  conflicts (100 attempts); `prefix_end(prefix)` gives the exclusive upper
+  conflicts (100 attempts, `back_off` between them); `prefix_end(prefix)` gives the exclusive upper
   bound of a prefix scan.
 - Not yet in the contract: reverse scans, scan limits pushed down.  They
   will be added as provided methods, so implementations keep compiling.
@@ -573,6 +581,7 @@ unless it has a default).
 
 | Key | Value |
 |-----|-------|
+| `00 00` | the format record: keyspace layout and key encoding versions (`u16` each, both 1) |
 | `00 01 <table name>` | table definition (columns, primary key, indexes, checks) |
 | `00 02 <sequence>` | counter (`table_id`) |
 | `00 03 <table id>` | next hidden row id (tables without a primary key) |
@@ -585,6 +594,14 @@ NULL), so two transactions inserting the same value write the same key and
 the second conflicts; other entries append the primary key.  The catalog is
 read through the statement's own transaction, so DDL is transactional and
 needs no cache invalidation.
+
+The format record (principle 6) is checked by a session's first
+statement and written by the first write to a database the SQL layer has
+not used; a newer format than the build reads is refused with `0A000`
+rather than misread.  `check::check(txn)` lists every inconsistency between
+the catalog, the rows and the indexes (rows under their primary key, `NOT
+NULL`, index entries exactly as the rows imply, unique indexes, foreign
+keys, no keys of unknown tables or indexes).
 
 ### 8.3 Parser (`lexer`, `parser`, `ast`)
 
@@ -676,7 +693,7 @@ and timestamps, and from or to text).
 `ADD COLUMN` with a default rewrites existing rows.
 
 Sessions: outside `BEGIN` every statement is its own transaction, retried
-up to 10 times on `40001`; inside, the KV transaction starts with the
+up to 10 times on `40001` (with the KV contract's `back_off`); inside, the KV transaction starts with the
 first statement (so `SET TRANSACTION` may follow `BEGIN`), an error moves
 the block to *failed* (`25P02` until `ROLLBACK`; `COMMIT` then rolls
 back).  `REPEATABLE READ`, `READ COMMITTED` and `READ UNCOMMITTED` all run
@@ -708,6 +725,13 @@ column order).  Without statistics the rule-based plan is kept.
   concurrency, and what PostgreSQL does not do).
 - `tests/encoding.rs`: key order and round trips, property-tested (every
   type).
+- `tests/crash.rs`: random DDL and DML (in autocommit and in blocks)
+  through `Session` on the simulation, with a crash at every I/O operation
+  in both crash modes; after reopening, the state is the one after every
+  statement that returned (or the one in flight) and `check` finds
+  nothing.  `tests/format.rs`: the format record.  `tests/slt.rs` also
+  checks that `now()` is the simulated clock and fixed within a
+  transaction (`clock_timestamp()` is not).
 - `cargo run -p nucleus-sql --example sql_script -- file.sql` prints the
   results of a script.
 
@@ -949,6 +973,11 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 `drivers` does so on Linux.
 
 ## 12. Change log
+
+- **2026-10-17 — §M14.19 principle audit, first fixes:** `now()` and
+  retry back-off go through the platform (`Kv::wall_clock`,
+  `Kv::back_off`, `Clock::sleep`); `Timestamp` is opaque; the SQL layer's
+  format record (`00 00`); the SQL consistency check and crash test.
 
 - **2026-10-17 — the data directory lock:** one process at a time per
   database (§4.6); tested on the OS and the simulation, in the KV contract

@@ -209,4 +209,7 @@ impl Clock for RealClock {
     fn wall(&self) -> SystemTime {
         SystemTime::now()
     }
+    fn sleep(&self, d: Duration) {
+        std::thread::sleep(d);
+    }
 }

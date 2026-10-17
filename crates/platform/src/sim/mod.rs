@@ -97,4 +97,7 @@ impl Clock for SimClock {
     fn wall(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(SIM_EPOCH_SECS) + self.now()
     }
+    fn sleep(&self, d: Duration) {
+        self.advance(d);
+    }
 }

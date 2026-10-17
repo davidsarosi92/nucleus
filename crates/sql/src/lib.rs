@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod binder;
 pub mod catalog;
+pub mod check;
 pub mod datetime;
 pub mod decimal;
 pub mod dml;

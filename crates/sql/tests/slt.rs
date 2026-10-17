@@ -50,3 +50,28 @@ fn sqllogictest_scripts() {
         failures.join("\n\n")
     );
 }
+
+/// `now()` reads the database's clock — under the simulation, the simulated
+/// one (PLAN.md principle 4) — and stays fixed within a transaction.
+#[test]
+fn now_is_the_simulated_clock() {
+    let sim = Arc::new(SimPlatform::new(1));
+    let db: Arc<dyn Kv> =
+        Arc::new(Database::open_on(sim.clone(), Path::new("/db"), Options::default()).unwrap());
+    let mut s = Session::new(db);
+    let one = |s: &mut Session, sql: &str| match s.execute(sql).unwrap().pop() {
+        Some(nucleus_sql::Output::Rows { rows, .. }) => rows[0][0].render(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(one(&mut s, "SELECT now()::text"), "2026-01-01 00:00:00+00");
+    s.execute("BEGIN").unwrap();
+    sim.sim_clock().advance(std::time::Duration::from_secs(90));
+    assert_eq!(one(&mut s, "SELECT now()::text"), "2026-01-01 00:01:30+00");
+    sim.sim_clock().advance(std::time::Duration::from_secs(30));
+    assert_eq!(one(&mut s, "SELECT now()::text"), "2026-01-01 00:01:30+00");
+    assert_eq!(
+        one(&mut s, "SELECT clock_timestamp()::text"),
+        "2026-01-01 00:02:00+00"
+    );
+    s.execute("COMMIT").unwrap();
+}

@@ -448,7 +448,7 @@ fn crash_at_every_io_point() {
                 let (_, acked) = run(&p);
                 let e =
                     engine_on(&p, opts()).unwrap_or_else(|err| panic!("{mode:?} op {n}: {err}"));
-                let k = e.visible().0 as usize;
+                let k: usize = e.visible().to_string().parse().unwrap();
                 assert!(
                     k >= acked && k < states.len(),
                     "{mode:?} op {n}: at {k}, acked {acked}"

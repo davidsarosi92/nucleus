@@ -12,9 +12,13 @@
 //!   not a fixed number of days); for comparison a month counts 30 days and
 //!   a day 24 hours, as in PostgreSQL.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use nucleus_kv::Kv;
 
 use crate::decimal::Decimal;
 use crate::error::{Error, Result};
@@ -152,32 +156,41 @@ pub fn ts_to_date(ts: i64) -> i32 {
 // ------------------------------------------------------------------- now
 
 thread_local! {
-    static NOW: Cell<Option<i64>> = const { Cell::new(None) };
+    static NOW: RefCell<Option<(i64, Arc<dyn Kv>)>> = const { RefCell::new(None) };
 }
 
-fn system_now() -> i64 {
-    let since = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+/// A wall-clock time as a timestamp (µs since 2000-01-01).
+pub fn from_system(t: SystemTime) -> i64 {
+    let since = t.duration_since(UNIX_EPOCH).unwrap_or_default();
     since.as_micros() as i64 - UNIX_TO_PG_DAYS * USECS_PER_DAY
 }
 
-/// The current transaction's timestamp (`now()`): fixed by
-/// [`with_now`] while a statement runs, else the clock.
-pub fn now() -> i64 {
-    NOW.with(|n| n.get()).unwrap_or_else(system_now)
+fn no_clock() -> Error {
+    Error::internal("now() outside a statement")
 }
 
-/// The clock, for a new transaction's [`with_now`].
-pub fn clock() -> i64 {
-    system_now()
+/// The current transaction's timestamp (`now()`), fixed by [`with_now`].
+pub fn now() -> Result<i64> {
+    NOW.with(|n| n.borrow().as_ref().map(|(ts, _)| *ts))
+        .ok_or_else(no_clock)
 }
 
-/// Runs `f` with `now()` fixed at `ts`.
-pub fn with_now<R>(ts: i64, f: impl FnOnce() -> R) -> R {
-    let prev = NOW.with(|n| n.replace(Some(ts)));
+/// The time now (`clock_timestamp()`), from the database's clock
+/// ([`Kv::wall_clock`]: never the host's directly, principle 4).
+pub fn clock() -> Result<i64> {
+    NOW.with(|n| {
+        n.borrow()
+            .as_ref()
+            .map(|(_, kv)| from_system(kv.wall_clock()))
+    })
+    .ok_or_else(no_clock)
+}
+
+/// Runs `f` with `now()` fixed at `ts` and `clock()` reading `kv`'s clock.
+pub fn with_now<R>(ts: i64, kv: &Arc<dyn Kv>, f: impl FnOnce() -> R) -> R {
+    let prev = NOW.with(|n| n.replace(Some((ts, kv.clone()))));
     let r = f();
-    NOW.with(|n| n.set(prev));
+    NOW.with(|n| n.replace(prev));
     r
 }
 

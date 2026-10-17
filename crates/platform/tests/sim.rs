@@ -168,6 +168,9 @@ fn simulated_clock_moves_only_when_told() {
     p.sim_clock().advance(Duration::from_millis(1500));
     assert_eq!(p.clock().now(), Duration::from_millis(1500));
     assert_eq!(p.clock().now(), Duration::from_millis(1500));
+    // Sleeping advances the clock instead of waiting.
+    p.clock().sleep(Duration::from_secs(3600));
+    assert_eq!(p.clock().now(), Duration::from_millis(3_601_500));
 }
 
 /// One scripted workload with torn crashes; returns everything observable.

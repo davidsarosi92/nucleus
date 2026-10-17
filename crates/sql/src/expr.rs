@@ -1160,10 +1160,10 @@ fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                 env!("CARGO_PKG_VERSION")
             )));
         }
-        Func::Now => return Ok(Value::TimestampTz(dt::now())),
-        Func::ClockTimestamp => return Ok(Value::TimestampTz(dt::clock())),
-        Func::CurrentDate => return Ok(Value::Date(dt::ts_to_date(dt::now()))),
-        Func::LocalTimestamp => return Ok(Value::Timestamp(dt::now())),
+        Func::Now => return Ok(Value::TimestampTz(dt::now()?)),
+        Func::ClockTimestamp => return Ok(Value::TimestampTz(dt::clock()?)),
+        Func::CurrentDate => return Ok(Value::Date(dt::ts_to_date(dt::now()?))),
+        Func::LocalTimestamp => return Ok(Value::Timestamp(dt::now()?)),
         Func::CurrentUser => return Ok(Value::Text("nucleus".into())),
         Func::CurrentDatabase => return Ok(Value::Text("nucleus".into())),
         Func::CurrentSchema => return Ok(Value::Text("public".into())),
@@ -1338,7 +1338,7 @@ fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                 })
             };
             let (a, b) = match args.as_slice() {
-                [b] => (dt::date_to_ts(dt::ts_to_date(dt::now())), ts(b)?),
+                [b] => (dt::date_to_ts(dt::ts_to_date(dt::now()?)), ts(b)?),
                 [a, b, ..] => (ts(a)?, ts(b)?),
                 [] => unreachable!("arity checked"),
             };

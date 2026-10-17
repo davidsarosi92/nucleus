@@ -75,6 +75,8 @@ pub struct Session {
     block: Option<Block>,
     default_isolation: IsolationLevel,
     settings: BTreeMap<String, String>,
+    /// The database's format record has been checked (or written).
+    format_checked: bool,
 }
 
 impl std::fmt::Debug for Session {
@@ -123,7 +125,17 @@ impl Session {
             block: None,
             default_isolation: IsolationLevel::Snapshot,
             settings: BTreeMap::new(),
+            format_checked: false,
         }
+    }
+
+    /// The first statement of a session checks the database's format
+    /// ([`catalog::check_format`]).
+    fn check_format(&mut self, txn: &mut dyn KvTxn) -> Result<()> {
+        if !self.format_checked {
+            self.format_checked = crate::catalog::check_format(txn)?;
+        }
+        Ok(())
     }
 
     /// The transaction status.
@@ -253,10 +265,19 @@ impl Session {
             }
             if block.txn.is_none() {
                 block.txn = Some(self.kv.begin(options(&block.mode, default, false))?);
-                block.now = crate::datetime::clock();
+                block.now = crate::datetime::from_system(self.kv.wall_clock());
             }
             let txn = block.txn.as_mut().expect("just started");
-            let r = crate::datetime::with_now(block.now, || execute(txn.as_mut(), stmt, params));
+            let r = if self.format_checked {
+                Ok(())
+            } else {
+                crate::catalog::check_format(txn.as_mut()).map(|ok| self.format_checked = ok)
+            };
+            let r = r.and_then(|()| {
+                crate::datetime::with_now(block.now, &self.kv, || {
+                    execute(txn.as_mut(), stmt, params)
+                })
+            });
             if r.is_err() {
                 block.failed = true;
             }
@@ -267,14 +288,21 @@ impl Session {
         let mut attempt = 0;
         loop {
             let mut txn = self.kv.begin(opts)?;
-            let now = crate::datetime::clock();
-            let r = crate::datetime::with_now(now, || execute(txn.as_mut(), stmt, params))
+            let now = crate::datetime::from_system(self.kv.wall_clock());
+            let r = self
+                .check_format(txn.as_mut())
+                .and_then(|()| {
+                    crate::datetime::with_now(now, &self.kv, || execute(txn.as_mut(), stmt, params))
+                })
                 .and_then(|out| {
                     txn.commit()?;
                     Ok(out)
                 });
             match r {
-                Err(e) if e.code == "40001" && attempt < 10 => attempt += 1,
+                Err(e) if e.code == "40001" && attempt < 10 => {
+                    attempt += 1;
+                    self.kv.back_off(attempt);
+                }
                 r => return r,
             }
         }

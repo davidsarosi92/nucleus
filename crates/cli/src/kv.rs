@@ -137,7 +137,7 @@ impl Session<'_> {
             ["commit"] => {
                 let txn = self.txn.take().ok_or("no transaction is open")?;
                 let ts = txn.commit().map_err(err)?;
-                w(out, format!("committed at {}", ts.0))?;
+                w(out, format!("committed at {ts}"))?;
             }
             ["rollback"] => {
                 self.txn.take().ok_or("no transaction is open")?.rollback();

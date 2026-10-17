@@ -264,7 +264,7 @@ are marked ✅.
 | | M14.6 | `ncsql`: nucleus's own SQL shell and client | ✅ DOCS §6.2 |
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
-| | M14.19 | **Next:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ⬜ |
+| | M14.19 | **In progress:** modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ◐ audit done, fixes 3–6 shipped |
 | | M14.26 | Core types: integers by width, `real`, `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
@@ -648,7 +648,7 @@ things nucleus's design gives almost for free (branches and time travel
 from copy-on-write storage and MVCC), the everyday tools (JSON,
 migrations, code generation), an easy start, and what production needs.
 
-### §M14.19 — Modularity: registries and an extension API ⬜ (next)
+### §M14.19 — Modularity: registries and an extension API ◐ (in progress)
 
 **Order:** this comes first in the developer platform — principles before
 features — then §M14.26 (core types), §M14.25 (identity and access),
@@ -656,6 +656,22 @@ then §M14.9 onward.  It
 starts with a **principle audit**: the
 code checked against all twelve principles, each gap listed here with its
 fix.
+
+**Principle audit (2026-10-17).**  Principles 1 (the SQL layer and the
+server depend only on `nucleus-kv`), 2 (every key type is memcomparable
+and self-delimiting), 7, 8 (catalog, sequences and statistics live in the
+KV space) and 9 (d-os code only in `integrations/d-os`) hold.  The gaps:
+
+| # | Gap | Fix | |
+|---|-----|-----|:-:|
+| 3 | `Timestamp(pub u64)`: code above the transaction layer can build and read the raw counter (the d-os integration does), so an HLC could not replace it without breaking them | the field private; timestamps are compared, printed and parsed, never computed with | ✅ |
+| 4 | `now()` reads `SystemTime::now()` directly, and `transact`'s back-off sleeps on `std::thread` with a jitter from the thread id — neither goes through the platform, so a simulation's `now()` is the host's clock and its retries wait in real time | the KV contract gives the clock (`Kv::wall_clock`, from the platform; a distributed implementation answers from its HLC) and the back-off (`Kv::back_off`, the platform's `Clock::sleep` with jitter from its `Rng`); the simulated clock advances instead of sleeping | ✅ |
+| 4 | the server uses `std::net` directly | scheduled: a network interface in the platform, with a simulated network, comes with §M19 (as principle 4 says, "later network") | — |
+| 5 | the storage and transaction layers are crash-tested, the SQL layer is not: no test crashes the simulation in the middle of DDL and DML run through `Session` | a SQL crash test: random DDL and DML on the simulation, a crash at a random point, reopen — the catalog, every index and the rows agree with each other and with what was reported committed | ✅ |
+| 6 | the page format, WAL batches, rows, catalog records and `ncp` carry versions; the **key encoding and the SQL keyspace layout do not**, so a change to either could not be told from data written before it | a SQL-layer format record at key `00 00` (keyspace layout and key encoding versions), written when a database is first used by the SQL layer and checked on every session: an older version is read (or upgraded), a newer one refused with a clear error; per-type encoding versions come with the `Type` trait below | ✅ |
+| 10 | memory is bounded in the core (buffer pool), not in the executor: sorts, hash joins, hash aggregation and materialised CTEs hold their whole input | scheduled: spilling in §M14.11 | — |
+| 11 | PostgreSQL compatibility is not optional inside the engine: `pg_catalog`, `information_schema` and the `pg_*` functions (`pg_typeof`, `pg_get_constraintdef`, `has_table_privilege`, …) are bound in every session, `ncp` ones included; the parser and binder special-case `pg_catalog`; and `nc_catalog` is looked up *through* `pgcatalog::lookup` | `nc_catalog` stands on its own; the PostgreSQL views and functions move into `modules/pg-compat` (below) and are registered per session — on in sessions of the PostgreSQL front end, off on `ncp` | ⬜ |
+| 12 | hard-coded lists: the value types (`DataType`, and a `match` on it in encoding, casts, output, the binder, statistics, `ncp` and `pg`), the scalar functions (`Func`, about seventy, and `Func::lookup`), the aggregates (`AggFunc`), the table functions (`TableFunc`), the catalog views (`ncatalog::definitions`, the `pgcatalog` table), the front ends (the CLI calls `serve` / `serve_pg`), authentication (`Config::accepts`, one user) | the registries and the extension API, below | ⬜ |
 
 Principle 12 applied to what exists.  Today these are hard-coded lists or
 `match`es that a new entry has to edit: scalar functions (`Func`) and
@@ -1808,3 +1824,9 @@ style) across a thousand seeds without failure.
   before §M14.25: integers by width, `real`, `bytea` (with out-of-line
   large values), `time`, `char(n)`, `inet` / `cidr`, enums whose labels
   can be added anywhere without a rewrite.
+- **2026-10-17** — §M14.19 started: the principle audit (table in
+  §M14.19).  Fixed: principle 3 (`Timestamp` opaque), 4 (`now()` and the
+  retry back-off through the platform), 5 (a SQL crash test and
+  consistency check), 6 (the SQL layer's format record); 10 and the
+  network part of 4 scheduled (§M14.11, §M19); 11 and 12 are the rest of
+  this milestone.

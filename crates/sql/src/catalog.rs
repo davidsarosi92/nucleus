@@ -6,6 +6,7 @@
 //!
 //! | Key | Value |
 //! |-----|-------|
+//! | `00 00` | the format record: [`KEYSPACE_VERSION`] and [`KEY_ENCODING_VERSION`], `u16` each |
 //! | `00 01 <table name>` | the table definition |
 //! | `00 02 <sequence name>` | a `u64` counter (`table_id`) |
 //! | `00 03 <table id u32 BE>` | next hidden row id of a table without a primary key |
@@ -28,6 +29,7 @@ use crate::encoding::{Reader, Writer};
 use crate::error::{Error, Result};
 use crate::types::{DataType, Value};
 
+const FORMAT: &[u8] = &[0x00, 0x00];
 const CATALOG: &[u8] = &[0x00, 0x01];
 const SEQUENCE: &[u8] = &[0x00, 0x02];
 const ROWID: &[u8] = &[0x00, 0x03];
@@ -36,6 +38,37 @@ const DATA: u8 = 0x01;
 /// Version 2 added `NUMERIC(p, s)` modifiers, version 3 foreign keys;
 /// older versions still read.
 const TABLE_VERSION: u8 = 3;
+
+/// The version of the keyspace layout above (PLAN.md principle 6).
+pub const KEYSPACE_VERSION: u16 = 1;
+/// The version of the key encoding ([`crate::encoding`]).
+pub const KEY_ENCODING_VERSION: u16 = 1;
+
+/// Checks the format record; on a database the SQL layer has not used yet,
+/// writes it (unless `txn` is read-only: there is nothing to misread yet).
+/// A database written in a newer format is refused rather than misread.
+/// Returns whether the record is in place.
+pub fn check_format(txn: &mut dyn KvTxn) -> Result<bool> {
+    let Some(b) = txn.get(FORMAT)? else {
+        let mut w = Writer::default();
+        w.u16(KEYSPACE_VERSION).u16(KEY_ENCODING_VERSION);
+        return match txn.put(FORMAT, &w.0) {
+            Ok(()) => Ok(true),
+            Err(nucleus_kv::Error::ReadOnly) => Ok(false),
+            Err(e) => Err(e.into()),
+        };
+    };
+    let mut r = Reader::new(&b);
+    let (keyspace, keys) = (r.u16()?, r.u16()?);
+    if keyspace > KEYSPACE_VERSION || keys > KEY_ENCODING_VERSION {
+        return Err(Error::feature(format!(
+            "the database is in a newer SQL format (keyspace {keyspace}, key encoding \
+             {keys}) than this build reads (keyspace {KEYSPACE_VERSION}, key encoding \
+             {KEY_ENCODING_VERSION}); upgrade nucleus"
+        )));
+    }
+    Ok(true)
+}
 
 /// A column.
 #[derive(Clone, Debug, PartialEq)]

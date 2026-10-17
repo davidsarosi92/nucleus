@@ -88,16 +88,16 @@ fn handle(s: &mut Settings, line: &str) -> Option<String> {
                 s.unset(layer(l)?, k);
                 Ok("OK".into())
             }
-            ("COMMIT", []) => Ok(format!("OK {}", s.commit().map_err(e)?.0)),
+            ("COMMIT", []) => Ok(format!("OK {}", s.commit().map_err(e)?)),
             ("DISCARD", []) => {
                 s.discard();
                 Ok("OK".into())
             }
-            ("SNAPSHOT", []) => Ok(format!("OK {}", s.snapshot().map_err(e)?.0)),
+            ("SNAPSHOT", []) => Ok(format!("OK {}", s.snapshot().map_err(e)?)),
             ("DUMP", [l]) => Ok(listing(s.dump(&layer(l)?).map_err(e)?)),
             ("DUMP", [l, "AT", ts]) => {
-                let ts = ts.parse().map_err(|_| "ERR bad timestamp".to_string())?;
-                Ok(listing(s.dump_at(&layer(l)?, Timestamp(ts)).map_err(e)?))
+                let ts: Timestamp = ts.parse().map_err(|_| "ERR bad timestamp".to_string())?;
+                Ok(listing(s.dump_at(&layer(l)?, ts).map_err(e)?))
             }
             ("LAYERS", []) => {
                 let mut out = String::new();

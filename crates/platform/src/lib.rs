@@ -159,6 +159,9 @@ pub trait Clock: Send + Sync {
 
     /// Wall-clock time.  May jump; never use it to measure intervals.
     fn wall(&self) -> SystemTime;
+
+    /// Waits for `d`.  The simulated clock advances by `d` instead, at once.
+    fn sleep(&self, d: Duration);
 }
 
 /// A source of randomness.  **Not cryptographic.**

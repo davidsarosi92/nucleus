@@ -14,9 +14,26 @@ use crate::mvcc::{
 };
 
 /// A commit timestamp.  Logical for now (PLAN.md principle 3): a counter that
-/// increases by one per committed read-write transaction.
+/// increases by one per committed read-write transaction.  Opaque above
+/// this crate — timestamps are compared, printed and parsed, never
+/// computed with — so a hybrid logical clock can replace the counter.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Timestamp(pub u64);
+pub struct Timestamp(pub(crate) u64);
+
+impl std::fmt::Display for Timestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for Timestamp {
+    type Err = std::num::ParseIntError;
+
+    /// The text form [`Display`](std::fmt::Display) writes.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        s.parse().map(Timestamp)
+    }
+}
 
 /// The isolation level of a transaction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
