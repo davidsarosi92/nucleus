@@ -34,14 +34,15 @@ impl TotalOrder for Reversed {
     }
 }
 
-struct Raw;
+/// The raw bytes as the key, for the type named `.0`.
+struct Raw(&'static str);
 
 impl KeyEncoding for Raw {
     fn encode(&self, v: &Value, out: &mut Vec<u8>) {
         out.extend_from_slice(v.ext_bytes().unwrap());
     }
     fn decode(&self, b: &[u8]) -> Result<(Value, usize)> {
-        let t = TypeRef::named("backwards").unwrap();
+        let t = TypeRef::named(self.0).unwrap();
         Ok((Value::ext(t, b[..2].to_vec()), 2))
     }
 }
@@ -73,7 +74,7 @@ impl Type for Backwards {
         Some(&Reversed)
     }
     fn key_encoding(&self) -> Option<&dyn KeyEncoding> {
-        Some(&Raw)
+        Some(&Raw("backwards"))
     }
 }
 
@@ -120,7 +121,7 @@ impl Type for BackwardsWithExamples {
         Some(&Reversed)
     }
     fn key_encoding(&self) -> Option<&dyn KeyEncoding> {
-        Some(&Raw)
+        Some(&Raw("backwards_with_examples"))
     }
     fn examples(&self) -> Vec<Value> {
         let t = TypeRef::named("backwards_with_examples").unwrap();
