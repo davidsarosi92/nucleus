@@ -160,6 +160,8 @@ pub enum TableConstraint {
 /// A query: a body with ordering and limits.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Query {
+    /// `WITH …`: common table expressions.
+    pub with: Option<With>,
     /// The rows.
     pub body: SetExpr,
     /// `ORDER BY`.
@@ -168,6 +170,26 @@ pub struct Query {
     pub limit: Option<Expr>,
     /// `OFFSET`.
     pub offset: Option<Expr>,
+}
+
+/// A `WITH` clause.
+#[derive(Clone, Debug, PartialEq)]
+pub struct With {
+    /// `WITH RECURSIVE`: a CTE may refer to itself.
+    pub recursive: bool,
+    /// The CTEs, in order (each sees the ones before it).
+    pub ctes: Vec<Cte>,
+}
+
+/// A common table expression: `name [(columns)] AS (query)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cte {
+    /// Name.
+    pub name: String,
+    /// Column aliases.
+    pub columns: Vec<String>,
+    /// The query.
+    pub query: Box<Query>,
 }
 
 /// A query body.

@@ -1,0 +1,136 @@
+# Common table expressions: WITH and WITH RECURSIVE (results checked
+# against PostgreSQL 16).
+
+statement ok
+CREATE TABLE emp (id INT PRIMARY KEY, name TEXT, boss INT)
+
+statement ok
+INSERT INTO emp VALUES (1, 'root', NULL), (2, 'a', 1), (3, 'b', 1), (4, 'c', 2), (5, 'd', 4)
+
+statement ok
+CREATE TABLE edge (src INT, dst INT)
+
+statement ok
+INSERT INTO edge VALUES (1, 2), (2, 3), (3, 1), (3, 4)
+
+query T
+WITH t AS (SELECT id, name FROM emp WHERE boss = 1) SELECT name FROM t ORDER BY 1
+----
+a
+b
+
+query T
+WITH t (i, n) AS (SELECT id, name FROM emp) SELECT n FROM t WHERE i > 3 ORDER BY i
+----
+c
+d
+
+# Later CTEs see earlier ones.
+query II
+WITH a AS (SELECT 1 AS x), b AS (SELECT x + 1 AS y FROM a) SELECT x, y FROM a, b
+----
+1 2
+
+query I
+WITH t AS (SELECT id FROM emp) SELECT count(*) FROM t t1 JOIN t t2 ON t1.id < t2.id
+----
+10
+
+# A CTE shadows a table of the same name.
+query I
+WITH emp AS (SELECT 42 AS id) SELECT id FROM emp
+----
+42
+
+query I
+SELECT (WITH m AS (SELECT max(id) AS v FROM emp) SELECT v FROM m)
+----
+5
+
+query T
+SELECT name FROM emp WHERE id IN (WITH x AS (SELECT 2 AS v UNION ALL SELECT 3) SELECT v FROM x) ORDER BY 1
+----
+a
+b
+
+query II
+WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5) SELECT sum(i), count(*) FROM n
+----
+15 5
+
+query TI
+WITH RECURSIVE chain AS (
+  SELECT id, name, 0 AS depth FROM emp WHERE boss IS NULL
+  UNION ALL
+  SELECT e.id, e.name, c.depth + 1 FROM emp e JOIN chain c ON e.boss = c.id
+) SELECT name, depth FROM chain ORDER BY depth, name
+----
+root 0
+a 1
+b 1
+c 2
+d 3
+
+# UNION (not ALL) drops rows already found, so cycles end.
+query I
+WITH RECURSIVE reach (node) AS (SELECT 1 UNION SELECT e.dst FROM edge e JOIN reach r ON e.src = r.node) SELECT node FROM reach ORDER BY 1
+----
+1
+2
+3
+4
+
+query I
+WITH RECURSIVE fib (a, b) AS (SELECT 0::bigint, 1::bigint UNION ALL SELECT b, a + b FROM fib WHERE b < 100) SELECT a FROM fib ORDER BY a DESC LIMIT 3
+----
+89
+55
+34
+
+# RECURSIVE without a self-reference is a plain CTE.
+query I
+WITH RECURSIVE t AS (SELECT 1 AS x UNION ALL SELECT 2) SELECT x FROM t ORDER BY 1
+----
+1
+2
+
+query I
+WITH t AS (SELECT 1 AS x) SELECT * FROM t AS u (y)
+----
+1
+
+# INSERT … SELECT and a CTE in a FROM subquery.
+statement ok
+CREATE TABLE nums (n INT)
+
+statement ok
+INSERT INTO nums WITH RECURSIVE s (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 10) SELECT n FROM s
+
+query II
+SELECT count(*), sum(n) FROM (WITH big AS (SELECT n FROM nums WHERE n > 7) SELECT n FROM big) q
+----
+3 27
+
+statement error 42P19
+WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < (SELECT count(*) FROM r)) SELECT * FROM r
+
+statement error 42712
+WITH a AS (SELECT 1), a AS (SELECT 2) SELECT 1
+
+statement error 42804
+WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 0.5 FROM r WHERE n < 3) SELECT * FROM r
+
+statement error 42P01
+WITH t AS (SELECT * FROM nosuch) SELECT 1
+
+query T
+EXPLAIN WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5) SELECT i FROM n
+----
+Project: #0
+  CTE n
+    Recursive Union All
+      Project: 1
+        Values (1 rows)
+      Project: (#0 + 1)
+        Filter: (#0 < 5)
+          WorkTable Scan on n

@@ -89,6 +89,39 @@ pub enum Plan {
         /// Input.
         input: Box<Plan>,
     },
+    /// A common table expression: its rows are computed once per
+    /// execution and shared by every reference (all of which carry the same
+    /// `id` and plan).
+    Cte {
+        /// Unique per CTE.
+        id: usize,
+        /// Name, for `EXPLAIN`.
+        name: String,
+        /// The CTE's query.
+        plan: Box<Plan>,
+    },
+    /// `WITH RECURSIVE`: `base`, then `step` run again and again over the
+    /// rows the previous round produced (the work table `id`) until a round
+    /// produces none.
+    Recursive {
+        /// The work table the step reads.
+        id: usize,
+        /// The non-recursive term.
+        base: Box<Plan>,
+        /// The recursive term.
+        step: Box<Plan>,
+        /// `UNION ALL` (else rows already produced are dropped).
+        all: bool,
+    },
+    /// The rows of the previous round of a recursive CTE.
+    WorkTable {
+        /// Which.
+        id: usize,
+        /// Name, for `EXPLAIN`.
+        name: String,
+        /// Columns.
+        width: usize,
+    },
     /// `UNION` / `EXCEPT` / `INTERSECT` `[ALL]`.
     SetOp {
         /// Which.
@@ -224,6 +257,9 @@ impl Plan {
             | Plan::Limit { input, .. }
             | Plan::Distinct { input } => input.width(),
             Plan::SetOp { left, .. } => left.width(),
+            Plan::Cte { plan, .. } => plan.width(),
+            Plan::Recursive { base, .. } => base.width(),
+            Plan::WorkTable { width, .. } => *width,
         }
     }
 
@@ -360,6 +396,11 @@ impl Plan {
                     .map_or(String::new(), |o| format!(" offset {}", show(o)))
             ),
             Plan::Distinct { .. } => "Distinct".into(),
+            Plan::Cte { name, .. } => format!("CTE {name}"),
+            Plan::Recursive { all, .. } => {
+                format!("Recursive Union{}", if *all { " All" } else { "" })
+            }
+            Plan::WorkTable { name, .. } => format!("WorkTable Scan on {name}"),
             Plan::SetOp { op, all, .. } => {
                 let name = match op {
                     SetOp::Union => "Union",
@@ -403,8 +444,10 @@ impl Plan {
     /// The inputs of this node.
     pub fn children(&self) -> Vec<&Plan> {
         match self {
-            Plan::Scan { .. } | Plan::Values { .. } => vec![],
+            Plan::Scan { .. } | Plan::Values { .. } | Plan::WorkTable { .. } => vec![],
             Plan::Join { left, right, .. } | Plan::SetOp { left, right, .. } => vec![left, right],
+            Plan::Recursive { base, step, .. } => vec![base, step],
+            Plan::Cte { plan, .. } => vec![plan],
             Plan::Filter { input, .. }
             | Plan::Project { input, .. }
             | Plan::Aggregate { input, .. }
@@ -459,7 +502,11 @@ impl Plan {
             Plan::Limit { limit, offset, .. } => {
                 limit.iter().chain(offset).for_each(f);
             }
-            Plan::Distinct { .. } | Plan::SetOp { .. } => {}
+            Plan::Distinct { .. }
+            | Plan::SetOp { .. }
+            | Plan::Cte { .. }
+            | Plan::Recursive { .. }
+            | Plan::WorkTable { .. } => {}
         }
     }
 

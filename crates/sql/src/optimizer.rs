@@ -80,7 +80,10 @@ fn push(plan: Plan, st: &Stats) -> Plan {
             right: Box::new(push(*right, st)),
             all,
         },
-        p @ Plan::Values { .. } => p,
+        p @ (Plan::Values { .. }
+        | Plan::Cte { .. }
+        | Plan::Recursive { .. }
+        | Plan::WorkTable { .. }) => p,
     }
 }
 
@@ -387,6 +390,9 @@ fn estimate(plan: &Plan, st: &Stats) -> f64 {
             st.rows(table) * filter.as_ref().map_or(1.0, |f| st.selectivity(table, f))
         }),
         Plan::Values { rows, .. } => rows.len() as f64,
+        Plan::Cte { plan, .. } => estimate(plan, st),
+        Plan::Recursive { base, .. } => estimate(base, st) * 10.0,
+        Plan::WorkTable { .. } => 10.0,
         Plan::Filter { input, .. } => estimate(input, st) * 0.33,
         Plan::Project { input, .. } | Plan::Sort { input, .. } => estimate(input, st),
         Plan::Distinct { input } => estimate(input, st) * 0.5,
@@ -552,7 +558,11 @@ fn map_children(plan: Plan, f: &dyn Fn(Plan) -> Plan) -> Plan {
             right: b(right),
             all,
         },
-        p @ (Plan::Scan { .. } | Plan::Values { .. }) => p,
+        p @ (Plan::Scan { .. }
+        | Plan::Values { .. }
+        | Plan::Cte { .. }
+        | Plan::Recursive { .. }
+        | Plan::WorkTable { .. }) => p,
     }
 }
 

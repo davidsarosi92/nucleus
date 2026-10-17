@@ -5,6 +5,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
+use std::rc::Rc;
 
 use nucleus_kv::prefix_end;
 
@@ -126,6 +127,50 @@ pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
                 Err(_) => true,
             }))
         }
+        Plan::Cte { id, plan, .. } => {
+            let cached = ctx.ctes.borrow().get(id).cloned();
+            let rows = match cached {
+                Some(rows) => rows,
+                None => {
+                    let rows = Rc::new(collect(plan, ctx, outer)?);
+                    ctx.ctes.borrow_mut().insert(*id, Rc::clone(&rows));
+                    rows
+                }
+            };
+            shared(rows)
+        }
+        Plan::WorkTable { id, .. } => {
+            let rows = ctx.work.borrow().get(id).cloned().unwrap_or_default();
+            shared(rows)
+        }
+        Plan::Recursive {
+            id,
+            base,
+            step,
+            all,
+        } => {
+            let mut seen = HashSet::new();
+            let mut fresh = |rows: Vec<Row>| -> Vec<Row> {
+                if *all {
+                    rows
+                } else {
+                    rows.into_iter()
+                        .filter(|r| seen.insert(r.clone()))
+                        .collect()
+                }
+            };
+            let mut out = fresh(collect(base, ctx, outer)?);
+            let mut round = out.clone();
+            while !round.is_empty() {
+                // (The step reads the work table only outside subqueries
+                // and cached CTEs, so no cache holds an earlier round.)
+                ctx.work.borrow_mut().insert(*id, Rc::new(round));
+                round = fresh(collect(step, ctx, outer)?);
+                out.extend(round.iter().cloned());
+            }
+            ctx.work.borrow_mut().remove(id);
+            Box::new(out.into_iter().map(Ok))
+        }
         Plan::SetOp {
             op: SetOp::Union,
             left,
@@ -179,6 +224,11 @@ pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
             }))
         }
     })
+}
+
+/// Rows shared behind an `Rc`, cloned as they are read.
+fn shared<'a>(rows: Rc<Vec<Row>>) -> Rows<'a> {
+    Box::new((0..rows.len()).map(move |i| Ok(rows[i].clone())))
 }
 
 /// The KV key range an access path reads: `(start, end, index)`.

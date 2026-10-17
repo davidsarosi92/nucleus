@@ -79,6 +79,50 @@ pub struct Binder<'a> {
     outer: Vec<Scope>,
     /// Inferred parameter types, by `$n - 1`.
     pub params: Vec<Option<DataType>>,
+    /// The CTEs in scope, innermost last.
+    ctes: Vec<CteDef>,
+}
+
+/// A CTE visible to the query being bound.
+#[derive(Clone)]
+struct CteDef {
+    name: String,
+    /// Its columns.
+    scope: Scope,
+    /// A reference reads this plan, or (inside its own recursive term) the
+    /// work table.
+    plan: Option<Plan>,
+    /// The work table id while its recursive term is being bound.
+    work: usize,
+    /// `outer.len()` where it was defined: a recursive reference must be
+    /// at that level, not in a subquery.
+    level: usize,
+    /// Whether the recursive term referred to the work table.
+    used: bool,
+}
+
+/// CTE and work table ids, unique in the process.
+static NEXT_CTE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+fn next_cte_id() -> usize {
+    NEXT_CTE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether `plan` reads a work table of a recursive CTE it is not itself.
+fn reads_work_table(plan: &Plan) -> bool {
+    fn open(plan: &Plan, closed: &mut Vec<usize>) -> bool {
+        match plan {
+            Plan::WorkTable { id, .. } => !closed.contains(id),
+            Plan::Recursive { id, base, step, .. } => {
+                closed.push(*id);
+                let r = open(base, closed) || open(step, closed);
+                closed.pop();
+                r
+            }
+            p => p.children().into_iter().any(|c| open(c, closed)),
+        }
+    }
+    open(plan, &mut Vec::new())
 }
 
 type Typed = (Expr, Option<DataType>);
@@ -157,6 +201,7 @@ impl<'a> Binder<'a> {
             txn,
             outer: Vec::new(),
             params: Vec::new(),
+            ctes: Vec::new(),
         }
     }
 
@@ -183,6 +228,170 @@ impl<'a> Binder<'a> {
 
     /// Binds a query.
     pub fn query(&mut self, q: &ast::Query) -> Result<Bound> {
+        let mark = self.ctes.len();
+        let r = self.with_and_body(q);
+        self.ctes.truncate(mark);
+        r
+    }
+
+    fn with_and_body(&mut self, q: &ast::Query) -> Result<Bound> {
+        if let Some(w) = &q.with {
+            for (i, cte) in w.ctes.iter().enumerate() {
+                if w.ctes[..i].iter().any(|c| c.name == cte.name) {
+                    return Err(Error::duplicate_alias(format!(
+                        "WITH query name \"{}\" specified more than once",
+                        cte.name
+                    )));
+                }
+                let def = if w.recursive {
+                    self.recursive_cte(cte)?
+                } else {
+                    self.plain_cte(cte)?
+                };
+                self.ctes.push(def);
+            }
+        }
+        self.query_body(q)
+    }
+
+    fn cte_def(&self, cte: &ast::Cte, mut scope: Scope, plan: Plan) -> Result<CteDef> {
+        if plan.outer_depth() > 0 {
+            return Err(Error::feature(
+                "a WITH query referring to columns of an enclosing query is not supported",
+            ));
+        }
+        for c in &mut scope.cols {
+            c.table = None;
+        }
+        rename_columns(&mut scope, &cte.name, &cte.columns)?;
+        let plan = crate::optimizer::optimize(plan, self.txn);
+        // Computed once and shared — unless it reads a work table, whose
+        // rows change from round to round.
+        let plan = if reads_work_table(&plan) {
+            plan
+        } else {
+            Plan::Cte {
+                id: next_cte_id(),
+                name: cte.name.clone(),
+                plan: Box::new(plan),
+            }
+        };
+        Ok(CteDef {
+            name: cte.name.clone(),
+            scope,
+            plan: Some(plan),
+            work: 0,
+            level: self.outer.len(),
+            used: false,
+        })
+    }
+
+    fn plain_cte(&mut self, cte: &ast::Cte) -> Result<CteDef> {
+        let b = self.query(&cte.query)?;
+        self.cte_def(cte, b.scope, b.plan)
+    }
+
+    /// `name AS (base UNION [ALL] step)` where `step` may read `name`.
+    fn recursive_cte(&mut self, cte: &ast::Cte) -> Result<CteDef> {
+        let q = &cte.query;
+        let SetExpr::SetOp {
+            op: ast::SetOp::Union,
+            left,
+            right,
+            all,
+        } = &q.body
+        else {
+            return self.plain_cte(cte);
+        };
+        if q.with.is_some() || !q.order_by.is_empty() || q.limit.is_some() || q.offset.is_some() {
+            return self.plain_cte(cte);
+        }
+        let base = self.set_expr(left)?;
+        let mut scope = base.scope.clone();
+        for c in &mut scope.cols {
+            c.table = None;
+        }
+        rename_columns(&mut scope, &cte.name, &cte.columns)?;
+        let work = next_cte_id();
+        self.ctes.push(CteDef {
+            name: cte.name.clone(),
+            scope: scope.clone(),
+            plan: None,
+            work,
+            level: self.outer.len(),
+            used: false,
+        });
+        let at = self.ctes.len() - 1;
+        let step = self.set_expr(right);
+        let used = self.ctes[at].used;
+        self.ctes.truncate(at);
+        let step = step?;
+        if step.scope.cols.len() != base.scope.cols.len() {
+            return Err(Error::syntax(
+                "each UNION query must have the same number of columns",
+            ));
+        }
+        for (i, (b, s)) in base.scope.cols.iter().zip(&step.scope.cols).enumerate() {
+            if unify(b.ty, s.ty)? != b.ty && b.ty.is_some() {
+                return Err(Error::type_mismatch(format!(
+                    "recursive query \"{}\" column {} has type {} in non-recursive term but type {} overall",
+                    cte.name,
+                    i + 1,
+                    name(b.ty),
+                    name(unify(b.ty, s.ty)?)
+                )));
+            }
+        }
+        let plan = if used {
+            Plan::Recursive {
+                id: work,
+                base: Box::new(crate::optimizer::optimize(base.plan, self.txn)),
+                step: Box::new(crate::optimizer::optimize(step.plan, self.txn)),
+                all: *all,
+            }
+        } else {
+            Plan::SetOp {
+                op: ast::SetOp::Union,
+                left: Box::new(base.plan),
+                right: Box::new(step.plan),
+                all: *all,
+            }
+        };
+        self.cte_def(cte, base.scope, plan)
+    }
+
+    /// A reference to CTE `name`, if one is in scope.
+    fn cte_ref(&mut self, name: &str, qual: &str, columns: &[String]) -> Result<Option<Bound>> {
+        let Some(i) = self.ctes.iter().rposition(|c| c.name == name) else {
+            return Ok(None);
+        };
+        let def = &self.ctes[i];
+        let mut scope = def.scope.clone();
+        for c in &mut scope.cols {
+            c.table = Some(qual.to_string());
+        }
+        rename_columns(&mut scope, qual, columns)?;
+        let plan = match &def.plan {
+            Some(p) => p.clone(),
+            None => {
+                if self.outer.len() != def.level {
+                    return Err(Error::invalid_recursion(format!(
+                        "recursive reference to query \"{name}\" must not appear within a subquery"
+                    )));
+                }
+                let p = Plan::WorkTable {
+                    id: def.work,
+                    name: name.to_string(),
+                    width: def.scope.cols.len(),
+                };
+                self.ctes[i].used = true;
+                p
+            }
+        };
+        Ok(Some(Bound { plan, scope }))
+    }
+
+    fn query_body(&mut self, q: &ast::Query) -> Result<Bound> {
         if let SetExpr::Select(s) = &q.body {
             return self.select(s, &q.order_by, q.limit.as_ref(), q.offset.as_ref());
         }
@@ -380,8 +589,11 @@ impl<'a> Binder<'a> {
                 alias,
                 columns,
             } => {
-                let table = self.table(name)?;
                 let qual = alias.clone().unwrap_or_else(|| name.clone());
+                if let Some(b) = self.cte_ref(name, &qual, columns)? {
+                    return Ok(b);
+                }
+                let table = self.table(name)?;
                 let mut scope = Scope {
                     cols: table
                         .columns

@@ -240,7 +240,7 @@ impl<'a> Parser<'a> {
             return Err(self.error("expected a statement"));
         };
         match w.as_str() {
-            "select" | "values" => Ok(Statement::Query(self.query()?)),
+            "select" | "values" | "with" => Ok(Statement::Query(self.query()?)),
             "create" => self.create(),
             "drop" => self.drop(),
             "alter" => self.alter(),
@@ -554,6 +554,7 @@ impl<'a> Parser<'a> {
         };
         let source = if self.eat_kws(&["default", "values"]) {
             Query {
+                with: None,
                 body: SetExpr::Values(vec![vec![]]),
                 order_by: vec![],
                 limit: None,
@@ -623,7 +624,39 @@ impl<'a> Parser<'a> {
         all
     }
 
+    fn with_clause(&mut self) -> Result<Option<With>> {
+        if !self.eat_kw("with") {
+            return Ok(None);
+        }
+        let recursive = self.eat_kw("recursive");
+        let mut ctes = Vec::new();
+        loop {
+            let name = self.ident()?;
+            let columns = self.column_aliases()?;
+            self.expect_kw("as")?;
+            // Planner hints; every CTE is materialized here.
+            let _ = self.eat_kw("materialized") || self.eat_kws(&["not", "materialized"]);
+            self.expect_op("(")?;
+            let query = self.query()?;
+            self.expect_op(")")?;
+            ctes.push(Cte {
+                name,
+                columns,
+                query: Box::new(query),
+            });
+            if !self.eat_op(",") {
+                return Ok(Some(With { recursive, ctes }));
+            }
+        }
+    }
+
+    /// Whether a query starts here (inside parentheses).
+    fn at_query(&self) -> bool {
+        self.peek_kw("select") || self.peek_kw("values") || self.peek_kw("with")
+    }
+
     fn query(&mut self) -> Result<Query> {
+        let with = self.with_clause()?;
         // INTERSECT binds tighter than UNION and EXCEPT (as in PostgreSQL).
         let mut body = self.intersect_term()?;
         loop {
@@ -684,6 +717,7 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(Query {
+            with,
             body,
             order_by,
             limit,
@@ -852,7 +886,7 @@ impl<'a> Parser<'a> {
 
     fn table_primary(&mut self) -> Result<TableRef> {
         if self.eat_op("(") {
-            if self.peek_kw("select") || self.peek_kw("values") {
+            if self.at_query() {
                 let query = self.query()?;
                 self.expect_op(")")?;
                 let alias = self
@@ -982,7 +1016,7 @@ impl<'a> Parser<'a> {
                 Expr::Param(n)
             }
             Token::Op("(") => {
-                if self.peek_kw("select") || self.peek_kw("values") {
+                if self.at_query() {
                     let q = self.query()?;
                     self.expect_op(")")?;
                     return Ok(Expr::Subquery(Box::new(q)));
@@ -1204,7 +1238,7 @@ impl<'a> Parser<'a> {
             Infix::In(negated) => {
                 self.pos += if negated { 2 } else { 1 };
                 self.expect_op("(")?;
-                if self.peek_kw("select") || self.peek_kw("values") {
+                if self.at_query() {
                     let q = self.query()?;
                     self.expect_op(")")?;
                     return Ok(Expr::InSubquery {
@@ -1414,6 +1448,7 @@ mod tests {
         assert_eq!(
             parse_one("SELECT -9223372036854775808").unwrap(),
             Statement::Query(Query {
+                with: None,
                 body: SetExpr::Select(Box::new(Select {
                     distinct: false,
                     items: vec![SelectItem::Expr {
