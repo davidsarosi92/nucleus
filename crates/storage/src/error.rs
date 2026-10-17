@@ -34,6 +34,9 @@ pub enum Error {
     /// An earlier `sync` failed, so it is unknown what reached the disk;
     /// this handle refuses all further work.  Reopen the database.
     Poisoned,
+    /// Another process (or another `Store` in this one) has the database
+    /// open.
+    Locked(String),
 }
 
 /// The result type of the storage layer.
@@ -51,6 +54,10 @@ impl fmt::Display for Error {
             Error::PoolExhausted => f.write_str("every buffer pool frame is pinned"),
             Error::Pinned(page) => write!(f, "page {} is pinned", page.0),
             Error::Poisoned => f.write_str("an earlier sync failed; reopen the database"),
+            Error::Locked(dir) => write!(
+                f,
+                "the database {dir} is in use by another process (only one may open it)"
+            ),
         }
     }
 }

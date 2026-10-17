@@ -197,3 +197,19 @@ fn many_threads_through_the_trait() {
     let t = db.begin(TxnOptions::read_only()).unwrap();
     assert_eq!(t.get(b"n").unwrap(), Some(160u64.to_le_bytes().to_vec()));
 }
+
+#[test]
+fn one_process_at_a_time_per_directory() {
+    let dir = std::env::temp_dir().join(format!("nucleus-kv-lock-{}", std::process::id()));
+    let db = Database::open(&dir, Options::default()).unwrap();
+    let err = match Database::open(&dir, Options::default()) {
+        Ok(_) => panic!("a second open succeeded"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("in use by another process"), "{err}");
+    db.close().unwrap();
+    // Closed: it opens again.
+    let db = Database::open(&dir, Options::default()).unwrap();
+    drop(db);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

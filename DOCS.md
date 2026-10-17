@@ -260,8 +260,12 @@ A failed `fsync` poisons the log.
 ### 4.6 Store (`store::Store`)
 
 The B+tree made durable by the WAL.  `Store::open(platform, dir, opts)`
-creates `dir/data` and `dir/wal/` if needed and recovers; returns
-`Recovery { meta, replayed }`.  `write(&Batch)` appends the batch to the
+takes an exclusive lock on `dir/LOCK` (`FileSystem::lock`: `flock` /
+`LockFileEx` on the OS, a lock table in the simulation that a crash
+clears) and holds it as long as the store — a second process (or store)
+fails with `Error::Locked` ("in use by another process") instead of
+corrupting the database — then creates `dir/data` and `dir/wal/` if
+needed and recovers; returns `Recovery { meta, replayed }`.  `write(&Batch)` appends the batch to the
 WAL and applies it under the tree's write lock (visible at once);
 `wait_durable(lsn)`; `commit` = both.  `read()` gives the tree's read
 guard; `get`.  `checkpoint()` syncs the WAL up to the applied LSN, commits
@@ -936,6 +940,9 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-17 — the data directory lock:** one process at a time per
+  database (§4.6); tested on the OS and the simulation, in the KV contract
+  and with a running server.
 - **2026-10-17 — §M14.8 drivers:** C, C++, Python, JS/TS and Java beside
   the Rust one, each with conformance tests; `examples/` in every language;
   the CI job `drivers`.

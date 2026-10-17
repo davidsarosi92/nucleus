@@ -123,6 +123,9 @@ struct State {
     crashes: u64,
     faults: Faults,
     rng: SplitMix64,
+    /// Held locks: path → the id of the guard holding it.
+    locks: BTreeMap<PathBuf, u64>,
+    next_lock: u64,
 }
 
 /// The simulated file system.  Cloning gives another handle to the same one.
@@ -147,6 +150,8 @@ impl SimFs {
                 crashes: 0,
                 faults: Faults::default(),
                 rng: SplitMix64::new(seed),
+                locks: BTreeMap::new(),
+                next_lock: 1,
             })),
         }
     }
@@ -355,10 +360,56 @@ impl State {
         self.durable = namespace;
         self.epoch += 1;
         self.crashes += 1;
+        // The crashed "process" held the locks.
+        self.locks.clear();
+    }
+}
+
+/// A simulated lock; dropping it releases the lock if this guard still
+/// holds it (a crash may have released it already).
+struct SimLock {
+    state: Arc<Mutex<State>>,
+    path: PathBuf,
+    id: u64,
+}
+
+impl crate::Lock for SimLock {}
+
+impl Drop for SimLock {
+    fn drop(&mut self) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.locks.get(&self.path) == Some(&self.id) {
+            s.locks.remove(&self.path);
+        }
     }
 }
 
 impl FileSystem for SimFs {
+    fn lock(&self, path: &Path) -> io::Result<Box<dyn crate::Lock>> {
+        // Not an operation for crash scheduling: locks live outside the
+        // simulated disk.
+        let p = normalize(path)?;
+        let mut s = self.lock();
+        if !s.dir_exists(parent_of(&p)) {
+            return Err(err(
+                io::ErrorKind::NotFound,
+                path,
+                "parent directory does not exist",
+            ));
+        }
+        if s.locks.contains_key(&p) {
+            return Err(err(io::ErrorKind::WouldBlock, path, "is locked"));
+        }
+        let id = s.next_lock;
+        s.next_lock += 1;
+        s.locks.insert(p.clone(), id);
+        Ok(Box::new(SimLock {
+            state: Arc::clone(&self.state),
+            path: p,
+            id,
+        }))
+    }
+
     fn open(&self, path: &Path, mode: OpenMode) -> io::Result<Box<dyn File>> {
         let p = normalize(path)?;
         let mut s = self.lock();

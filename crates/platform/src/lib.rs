@@ -79,7 +79,17 @@ pub trait FileSystem: Send + Sync {
     /// Makes the entries of directory `path` (creations, removals, renames)
     /// durable.
     fn sync_dir(&self, path: &Path) -> io::Result<()>;
+
+    /// Takes an exclusive lock named by the file at `path` (created if
+    /// missing; its contents are not used), held until the returned guard
+    /// is dropped.  It excludes other processes and other locks of this
+    /// one; if someone holds it, fails at once with `WouldBlock`.  A crash
+    /// releases it, as the end of a process does.
+    fn lock(&self, path: &Path) -> io::Result<Box<dyn Lock>>;
 }
+
+/// A held lock (see [`FileSystem::lock`]); dropping it releases the lock.
+pub trait Lock: Send + Sync {}
 
 /// An open file, addressed by offset (there is no cursor).  All methods take
 /// `&self`, so one handle can be shared between threads.

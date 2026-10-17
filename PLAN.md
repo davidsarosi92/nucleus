@@ -247,6 +247,7 @@ are marked ✅.
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
 | | M16.6 | Live queries: subscriptions to query results | ⬜ |
 | | M17 | Further models (decide later) | ⏸ |
+| | M17.5 | Read replicas, failover, cluster management | ⬜ |
 | **F3 — Distributed** | M18 | Range partitioning (still single-node) | ⬜ |
 | | M19 | Per-range Raft replication | ⬜ |
 | | M20 | Cluster membership + placement | ⬜ |
@@ -754,8 +755,8 @@ command per platform, and the playground runs the tutorial.
   conflicts, cache, WAL, statement latencies.
 - TLS for `ncp` (and the PostgreSQL protocol), password hashing (SCRAM),
   users and roles with `GRANT` / `REVOKE` on tables and columns.
-- An exclusive lock on the data directory, so a second process cannot open
-  it (today nothing prevents that — urgent, to be done first).
+- ✅ An exclusive lock on the data directory, so a second process cannot
+  open it (done first, 2026-10-17: DOCS §4.6).
 
 **Done when:** a restore reproduces the database at a chosen moment,
 privileges are enforced in slt tests, and TLS works with every driver.
@@ -821,6 +822,34 @@ commit, under concurrent writes, in every driver.
 
 Decided later: wide-column, time series, graph (vectors are §M14.12).  All follow the same
 pattern: a mapping onto the ordered KV + operators in the shared executor.
+
+### §M17.5 — Read replicas, failover, management ⬜
+
+Several servers on one database before the distributed layer: one writes,
+the others serve reads.  Most deployments need exactly this, and it is far
+simpler than per-range Raft (§M19), which later replaces it.
+
+- **Replication:** the primary streams its logical WAL (committed key
+  batches) to replicas over `ncp`; a replica applies it to its own copy and
+  serves read-only queries at its applied snapshot.  Asynchronous, or
+  synchronous for a chosen number of replicas (a commit waits for them).
+  A new replica starts from an online backup (§M14.18) and catches up.
+- **Failover:** promoting a replica (`nucleus promote`), with a fencing
+  epoch so an old primary that comes back cannot accept writes; optional
+  automatic promotion by a witness.
+- **Clients:** drivers take several hosts, route reads to replicas and
+  writes to the primary (or as told), reconnect after a failover, and can
+  ask for read-your-writes (wait until a replica reached a commit).
+- **Management:** `nucleus cluster status` and an admin endpoint — roles,
+  lag in commits and time, health — plus the metrics of §M14.18.
+- **Option, later — shared-storage readers:** committed pages are never
+  overwritten (copy-on-write), so extra read-only servers could read
+  snapshots straight from shared storage, if the writer leases freed pages
+  until no reader needs them (Aurora-style compute/storage separation).
+
+**Done when:** replicas follow the primary under load, a promotion loses no
+committed write in synchronous mode (crash and partition tests), and
+drivers fail over without application changes.
 
 ---
 
@@ -926,3 +955,6 @@ style) across a thousand seeds without failure.
   §M14.14 time travel, §M14.15 JSON, §M14.16 migrations and code
   generation, §M14.17 easy start, §M14.18 operations (with the data
   directory lock, urgent); §M16.6 live queries.
+- **2026-10-17** — The data directory lock shipped (one process per
+  database).  §M17.5 read replicas, failover and cluster management planned
+  (shared-storage readers as a later option).

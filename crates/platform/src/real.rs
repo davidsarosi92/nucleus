@@ -61,7 +61,31 @@ impl Platform for RealPlatform {
 #[derive(Debug)]
 pub struct RealFs;
 
+/// A lock held through the OS (`flock` / `LockFileEx`) on an open file.
+struct RealLock {
+    _file: fs::File,
+}
+
+impl crate::Lock for RealLock {}
+
 impl FileSystem for RealFs {
+    fn lock(&self, path: &Path) -> io::Result<Box<dyn crate::Lock>> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Box::new(RealLock { _file: file })),
+            Err(fs::TryLockError::WouldBlock) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("{} is locked by another process", path.display()),
+            )),
+            Err(fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
+
     fn open(&self, path: &Path, mode: OpenMode) -> io::Result<Box<dyn File>> {
         let mut o = fs::OpenOptions::new();
         o.read(true);

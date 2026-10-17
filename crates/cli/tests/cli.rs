@@ -155,6 +155,9 @@ fn ncsql_local_and_over_the_network() {
         .find(|w| w.starts_with("127.0.0.1:"))
         .unwrap_or_else(|| panic!("no address in {first:?}"))
         .to_string();
+    // While the server has the directory, nothing else may open it.
+    let (ok, out) = nucleus(&["sql", d, "-c", "SELECT 1"], "");
+    assert!(!ok && out.contains("in use by another process"), "{out}");
     let (ok, out) = ncsql(&["-h", &addr, "-c", "SELECT name FROM dept"], "");
     assert!(ok && out.contains(" eng "), "{out}");
     let (ok, out) = ncsql(&["-h", &addr, "-c", "\\fks dept"], "");

@@ -207,3 +207,41 @@ fn rng_varies() {
         assert!(buf.iter().any(|&b| b != 0));
     });
 }
+
+#[test]
+fn locks_are_exclusive_until_dropped() {
+    both(|p, dir| {
+        let path = dir.join("LOCK");
+        let held = p.fs().lock(&path).unwrap();
+        let second = p.fs().lock(&path);
+        assert_eq!(second.err().map(|e| e.kind()), Some(ErrorKind::WouldBlock));
+        // Another name is another lock.
+        let other = p.fs().lock(&dir.join("OTHER")).unwrap();
+        drop(held);
+        let again = p.fs().lock(&path).unwrap();
+        drop((again, other));
+        assert_eq!(
+            p.fs()
+                .lock(&dir.join("missing/LOCK"))
+                .err()
+                .map(|e| e.kind()),
+            Some(ErrorKind::NotFound)
+        );
+    });
+}
+
+#[test]
+fn a_simulated_crash_releases_locks() {
+    let sim = SimPlatform::new(1);
+    sim.fs().create_dir_all(Path::new("/db")).unwrap();
+    sim.fs().sync_dir(Path::new("/")).unwrap(); // the directory survives the crash
+    let old = sim.fs().lock(Path::new("/db/LOCK")).unwrap();
+    sim.sim_fs().crash();
+    // The restarted "process" can lock; the dead one's guard releases
+    // nothing that is no longer its.
+    let new = sim.fs().lock(Path::new("/db/LOCK")).unwrap();
+    drop(old);
+    assert!(sim.fs().lock(Path::new("/db/LOCK")).is_err());
+    drop(new);
+    assert!(sim.fs().lock(Path::new("/db/LOCK")).is_ok());
+}

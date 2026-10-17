@@ -150,6 +150,8 @@ pub struct Store {
     writer: Mutex<(Lsn, u64)>,
     checkpoint_lsn: AtomicU64,
     poisoned: AtomicBool,
+    /// The exclusive lock on the directory (`LOCK`).
+    _lock: Box<dyn nucleus_platform::Lock>,
 }
 
 impl std::fmt::Debug for Store {
@@ -186,6 +188,15 @@ impl Store {
         opts: &StoreOptions,
     ) -> Result<(Self, Recovery)> {
         let fs = platform.fs();
+        // One process at a time: the lock is held as long as the store.
+        ensure_dir(fs, dir)?;
+        let lock = fs.lock(&dir.join("LOCK")).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                Error::Locked(dir.display().to_string())
+            } else {
+                Error::Io(e)
+            }
+        })?;
         let wal_dir: PathBuf = dir.join("wal");
         ensure_dir(fs, &wal_dir)?;
         let data = dir.join("data");
@@ -232,6 +243,7 @@ impl Store {
             writer: Mutex::new((applied, meta)),
             checkpoint_lsn: AtomicU64::new(checkpoint),
             poisoned: AtomicBool::new(false),
+            _lock: lock,
         };
         if replayed > 0 || root == 0 {
             store.checkpoint()?; // so the next open starts from here
