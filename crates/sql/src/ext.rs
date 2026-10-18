@@ -18,7 +18,7 @@
 //!     fn name(&self) -> &str { "double" }
 //!     fn arity(&self) -> std::ops::RangeInclusive<usize> { 1..=1 }
 //!     fn resolve(&self, _: &[ArgInfo]) -> nucleus_sql::Result<Signature> {
-//!         Ok(Signature::new(vec![Arg::Untyped(DataType::Int)], Returns::Type(Some(DataType::Int))))
+//!         Ok(Signature::new(vec![Arg::Untyped(DataType::BigInt)], Returns::Type(Some(DataType::BigInt))))
 //!     }
 //!     fn call(&self, _: &CallContext, args: &[Value]) -> nucleus_sql::Result<Value> {
 //!         match args[0] { Value::Int(i) => Ok(Value::Int(i * 2)), _ => Ok(Value::Null) }

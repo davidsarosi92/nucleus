@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU16, Ordering as AtomicOrdering};
 
 use nucleus_kv::{Database, Kv, Options, TxnOptions};
 use nucleus_platform::sim::{CrashMode, Faults, SimPlatform};
+use nucleus_sql::encoding::{self, Reader};
 use nucleus_sql::ext::*;
 use nucleus_sql::{Output, Session, catalog};
 
@@ -161,9 +162,11 @@ fn stored_versions(kv: &dyn Kv) -> Vec<u16> {
         .unwrap()
     {
         let (_, row) = e.unwrap();
-        // 01, u16 count, then `id` (tag 2, 8 bytes), then the counter:
+        // The version, a u16 count, then `id` (skipped), then the counter:
         // tag 11, u32 id, u16 version.
-        let at = 3 + 9;
+        let mut r = Reader::new(&row[3..]);
+        encoding::decode_value(&mut r).unwrap();
+        let at = row.len() - r.remaining();
         assert_eq!(row[at], 11);
         out.push(u16::from_le_bytes([row[at + 5], row[at + 6]]));
     }

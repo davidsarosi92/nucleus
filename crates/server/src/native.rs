@@ -60,7 +60,7 @@ impl Msg {
         }
         let tag = |t: DataType| match t {
             DataType::Bool => 1,
-            DataType::Int => 2,
+            DataType::SmallInt | DataType::Integer | DataType::BigInt => 2,
             DataType::Float => 3,
             DataType::Text => 4,
             DataType::Numeric => 5,
@@ -82,20 +82,42 @@ impl Msg {
         }
     }
     fn value(mut self, v: &Value, v2: bool) -> Self {
-        match v {
-            Value::Ext(t, bytes) if v2 => {
-                self = self.u8(EXT).str(t.name()).u32(bytes.len() as u32);
-                self.buf.extend_from_slice(bytes);
-            }
-            Value::Ext(..) => encode_value(&mut self.buf, &Value::Text(v.render())),
-            v => encode_value(&mut self.buf, v),
-        }
+        wire_value(&mut self.buf, v, v2);
         self
     }
     fn finish(mut self) -> Vec<u8> {
         let len = (self.buf.len() - 5) as u32;
         self.buf[1..5].copy_from_slice(&len.to_le_bytes());
         self.buf
+    }
+}
+
+/// Appends a value in the protocol's encoding (DOCS §10).  It shares its
+/// tags with the row encoding's version 1, but is the protocol's own: an
+/// integer is always 8 bytes, whatever the storage does.
+fn wire_value(buf: &mut Vec<u8>, v: &Value, v2: bool) {
+    match v {
+        Value::Int(i) => {
+            buf.push(2);
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        Value::Array(items) => {
+            buf.push(10);
+            buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
+            for item in items {
+                wire_value(buf, item, v2);
+            }
+        }
+        Value::Ext(t, bytes) if v2 => {
+            buf.push(EXT);
+            buf.extend_from_slice(&(t.name().len() as u32).to_le_bytes());
+            buf.extend_from_slice(t.name().as_bytes());
+            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(bytes);
+        }
+        // Registered types travel as text to version-1 clients.
+        Value::Ext(..) => encode_value(buf, &Value::Text(v.render())),
+        v => encode_value(buf, v),
     }
 }
 

@@ -131,6 +131,6 @@ Project: #0
     Recursive Union All
       Project: 1
         Values (1 rows)
-      Project: (#0 + 1)
+      Project: (#0 + 1)::integer
         Filter: (#0 < 5)
           WorkTable Scan on n

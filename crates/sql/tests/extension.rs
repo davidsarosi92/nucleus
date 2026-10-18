@@ -23,17 +23,14 @@ impl ScalarFunction for Clamp {
         3..=3
     }
     fn resolve(&self, args: &[ArgInfo]) -> Result<Signature> {
-        if let Some(t) = args
-            .iter()
-            .find_map(|a| a.ty.filter(|t| *t != DataType::Int))
-        {
+        if let Some(t) = args.iter().find_map(|a| a.ty.filter(|t| !t.is_integer())) {
             return Err(Error::undefined_function(format!(
                 "function clamp({t}, …) does not exist"
             )));
         }
         Ok(Signature::new(
-            vec![Arg::Untyped(DataType::Int); 3],
-            Returns::Type(Some(DataType::Int)),
+            vec![Arg::Untyped(DataType::BigInt); 3],
+            Returns::Type(Some(DataType::BigInt)),
         ))
     }
     fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
@@ -69,7 +66,7 @@ impl Aggregate for Product {
         1..=1
     }
     fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
-        Ok(Signature::keep(1, Some(DataType::Int)))
+        Ok(Signature::keep(1, Some(DataType::BigInt)))
     }
     fn start(&self) -> Box<dyn Accumulator> {
         Box::new(ProductAcc(None))
@@ -88,8 +85,8 @@ impl TableFunction for Countdown {
     }
     fn resolve(&self, _: &[ArgInfo]) -> Result<TableSignature> {
         Ok(TableSignature {
-            args: vec![Arg::Untyped(DataType::Int)],
-            columns: vec![("countdown".into(), Some(DataType::Int))],
+            args: vec![Arg::Untyped(DataType::BigInt)],
+            columns: vec![("countdown".into(), Some(DataType::BigInt))],
         })
     }
     fn rows(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Vec<Row>> {

@@ -265,7 +265,7 @@ are marked ✅.
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
 | | M14.19 | Modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ✅ DOCS §1, §8.11–§8.12, §9 |
-| | M14.26 | **Next:** core types: integers by width, `real`, `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
+| | M14.26 | **In progress:** core types: integers by width (✅), `real`, `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
@@ -902,7 +902,7 @@ work, dropping the ordering while the index exists is refused, and
 redefining it rebuilds the index; and `COLLATE` resolves to a text
 ordering.
 
-### §M14.26 — Core types ⬜ (next)
+### §M14.26 — Core types ⬜ (in progress)
 
 **Order:** right after §M14.19, whose type registry they are built on —
 each one registered like `UUID`, with its capabilities declared and the
@@ -910,12 +910,20 @@ law kit run on it.  The everyday types an application expects, which the
 type set still lacks (today `smallint` and `integer` are names for a
 64-bit integer, `real` for a 64-bit float, and `char(n)` for `text`):
 
-- **Integers by width**: `smallint` (16-bit), `integer` (32-bit),
-  `bigint` (64-bit), each stored at its width, with its own range
-  (`22003` outside it), overflow checked per width, and promotion rules
-  for mixed arithmetic.  Columns already declared `smallint` or
-  `integer` keep their stored 64-bit values readable (an older encoding
-  version, §M14.19) and are range-checked from then on.
+- ✅ **Integers by width**: `smallint` (16-bit), `integer` (32-bit),
+  `bigint` (64-bit), each with its own range (`22003` outside it),
+  overflow checked per width, and promotion rules for mixed arithmetic
+  (the wider operand's type); integer literals are `integer` if they fit
+  (PostgreSQL's rule).  The row encoding stores any integer in the fewest
+  of 2, 4 or 8 bytes (row version 2); keys keep 8 for every width, so
+  indexes serve comparisons across widths and widening keeps the keys.
+  The catalog never recorded which integer name a column was declared
+  with (all were `bigint`'s tag), so a database from before opens with
+  those columns as `bigint`, values intact; `ALTER COLUMN … TYPE
+  integer` narrows one, checking every value.  On `ncp` all three are
+  still tag 2 (8 bytes) until the protocol version that brings this
+  milestone's types; `pg-compat` sends oids 21 and 23 with their binary
+  forms.
 - **`real`** (32-bit float) beside `double precision`, with PostgreSQL's
   output rules for each.
 - **`bytea`**: binary strings — hex and escape text forms
@@ -1909,3 +1917,7 @@ style) across a thousand seeds without failure.
 - **2026-10-18** — §M14.19 shipped (DOCS §1, §8.11–§8.12, §9): the
   sample extension `examples/extension` (T7) closes it; what was left for
   later is listed in §M14.19.  Next: §M14.26.
+- **2026-10-18** — §M14.26: integers by width (`smallint`, `integer`,
+  `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
+  4- or 8-byte integers); `ncp` given its own value encoder, so storage
+  encodings no longer leak into the protocol.

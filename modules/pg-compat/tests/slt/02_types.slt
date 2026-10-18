@@ -1,0 +1,57 @@
+# Types of expressions, through pg_typeof: integer widths and their
+# promotion (crates/testkit/slt/23_integers.slt has the values).
+# Expected results produced by PostgreSQL 18.
+
+statement ok
+CREATE TABLE widths (id integer PRIMARY KEY, s smallint, b bigint)
+
+statement ok
+INSERT INTO widths VALUES (1, 32767, 9223372036854775807), (2, -32768, -9223372036854775808), (3, 0, 0), (4, -1, 12)
+
+query TTT
+SELECT pg_typeof(1), pg_typeof(2147483648), pg_typeof(1::smallint)
+----
+integer bigint smallint
+
+query TTTT
+SELECT pg_typeof(1::smallint + 1::smallint), pg_typeof(1::smallint + 1), pg_typeof(1 + 1::bigint), pg_typeof(1::smallint * 1.5)
+----
+smallint integer bigint numeric
+
+query TTT
+SELECT pg_typeof(s), pg_typeof(s + s), pg_typeof(s + id) FROM widths WHERE id = 3
+----
+smallint smallint integer
+
+query TTTT
+SELECT pg_typeof(sum(s)), pg_typeof(sum(id)), pg_typeof(avg(s)), pg_typeof(min(s)) FROM widths
+----
+bigint bigint numeric smallint
+
+query TT
+SELECT pg_typeof(length('abc')), pg_typeof(abs(1::smallint))
+----
+integer smallint
+
+query T
+SELECT pg_typeof(ARRAY[1::smallint, 2])
+----
+integer[]
+
+query T
+SELECT pg_typeof(CASE WHEN true THEN 1::smallint ELSE 2::bigint END)
+----
+bigint
+
+query T
+SELECT pg_typeof(x) FROM (SELECT 1::smallint UNION SELECT 2) t(x) LIMIT 1
+----
+integer
+
+query T
+SELECT pg_typeof(date '2024-01-02' - date '2024-01-01')
+----
+integer
+
+statement ok
+DROP TABLE widths

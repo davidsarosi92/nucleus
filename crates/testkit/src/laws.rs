@@ -111,13 +111,21 @@ fn seed_of(name: &str) -> u64 {
 pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
     Some(match ty {
         DataType::Bool => Box::new(|g: &mut Gen| Value::Bool(g.one_in(2))),
-        DataType::Int => Box::new(|g: &mut Gen| {
-            Value::Int(match g.below(4) {
-                0 => *g.pick(&[0, 1, -1, i64::MIN, i64::MAX, i64::MIN + 1, i64::MAX - 1]),
-                1 => g.below(1000) as i64 - 500,
-                _ => g.u64() as i64,
+        DataType::SmallInt | DataType::Integer | DataType::BigInt => {
+            let (lo, hi) = ty.int_range().expect("an integer type");
+            Box::new(move |g: &mut Gen| {
+                Value::Int(match g.below(4) {
+                    0 => *g.pick(&[0, 1, -1, lo, hi, lo + 1, hi - 1]),
+                    1 => g.below(1000) as i64 - 500,
+                    // Anywhere in the range.
+                    _ => {
+                        (i128::from(lo)
+                            + (u128::from(g.u64()) % (i128::from(hi) - i128::from(lo) + 1) as u128)
+                                as i128) as i64
+                    }
+                })
             })
-        }),
+        }
         DataType::Float => Box::new(|g: &mut Gen| {
             Value::Float(match g.below(4) {
                 0 => *g.pick(&[

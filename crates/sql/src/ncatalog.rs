@@ -33,7 +33,7 @@ use crate::stats::Stats;
 use crate::types::{DataType, Row, Value};
 
 const B: DataType = DataType::Bool;
-const I: DataType = DataType::Int;
+const I: DataType = DataType::BigInt;
 const T: DataType = DataType::Text;
 const TA: DataType = DataType::Array(&DataType::Text);
 

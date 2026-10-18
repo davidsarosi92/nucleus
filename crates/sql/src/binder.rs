@@ -440,7 +440,7 @@ impl<'a> Binder<'a> {
             cols.push(ScopeCol {
                 table: Some(qual.clone()),
                 name: "ordinality".into(),
-                ty: Some(DataType::Int),
+                ty: Some(DataType::BigInt),
                 hidden: false,
             });
         }
@@ -534,8 +534,8 @@ impl<'a> Binder<'a> {
             let mut bind = |e: &ast::Expr| -> Result<Expr> {
                 let (x, t) = self.expr(e, &empty)?;
                 if let Expr::Param(n) = x {
-                    self.note_param(n, Some(DataType::Int));
-                } else if t.is_some_and(|t| t != DataType::Int) {
+                    self.note_param(n, Some(DataType::BigInt));
+                } else if t.is_some_and(|t| !t.is_integer()) {
                     return Err(Error::type_mismatch("LIMIT and OFFSET take integers"));
                 }
                 Ok(x)
@@ -1426,7 +1426,7 @@ impl<'a> Binder<'a> {
     ) -> Result<Typed> {
         use ast::Expr as A;
         Ok(match e {
-            A::Literal(v) => (Expr::Literal(v.clone()), v.data_type()),
+            A::Literal(v) => (Expr::Literal(v.clone()), literal_type(v)),
             A::Column { .. }
             | A::Exists { .. }
             | A::Subquery(_)
@@ -1449,8 +1449,12 @@ impl<'a> Binder<'a> {
             A::Subscript { expr, index } => {
                 let (a, at) = sub(expr, self)?;
                 let (i, it) = sub(index, self)?;
-                let (i, (_, it)) = self.coerce(Some(DataType::Int), i, it)?;
-                expect(it, DataType::Int, "an array subscript")?;
+                let (i, (_, it)) = self.coerce(Some(DataType::Integer), i, it)?;
+                if let Some(t) = it.filter(|t| !t.is_integer()) {
+                    return Err(Error::type_mismatch(format!(
+                        "array subscript must have type integer, not type {t}"
+                    )));
+                }
                 if at.is_some_and(|t| t.element().is_none()) {
                     return Err(Error::type_mismatch(format!(
                         "cannot subscript type {} because it is not an array",
@@ -1533,7 +1537,7 @@ impl<'a> Binder<'a> {
                                 t.unwrap()
                             )));
                         }
-                        (Expr::Unary(*op, Box::new(x)), t)
+                        (narrow(Expr::Unary(*op, Box::new(x)), t), t)
                     }
                 }
             }
@@ -1945,7 +1949,9 @@ impl<'a> Binder<'a> {
             Returns::Common => ty,
             Returns::Constant(_) => unreachable!("returned above"),
         };
-        Ok((Expr::Call(f, args), ty))
+        // A function computes integers in 64 bits; a narrower result type
+        // is checked (`abs(-32768::smallint)` is out of range).
+        Ok((narrow(Expr::Call(f, args), ty), ty))
     }
 
     /// Converts bound arguments as a signature says; returns them and the
@@ -2079,7 +2085,7 @@ impl<'a> Binder<'a> {
             && lt == Some(DataType::Date)
             && matches!(r, Expr::Param(_))
         {
-            let (r, (_, rt)) = self.coerce(Some(DataType::Int), r, rt)?;
+            let (r, (_, rt)) = self.coerce(Some(DataType::Integer), r, rt)?;
             (l, lt, r, rt)
         } else if matches!(op, Mul | Div) && lt == Some(DataType::Interval) && untyped(&r) {
             // interval × number: an untyped number is a float.
@@ -2156,14 +2162,17 @@ impl<'a> Binder<'a> {
                     )));
                 }
             }
-            Add | Sub | Mul | Div | Mod => arith_type(op, lt, rt).ok_or_else(|| {
-                Error::undefined_function(format!(
-                    "operator does not exist: {} {} {}",
-                    name(lt),
-                    op.symbol(),
-                    name(rt)
-                ))
-            })?,
+            Add | Sub | Mul | Div | Mod => {
+                let ty = arith_type(op, lt, rt).ok_or_else(|| {
+                    Error::undefined_function(format!(
+                        "operator does not exist: {} {} {}",
+                        name(lt),
+                        op.symbol(),
+                        name(rt)
+                    ))
+                })?;
+                return Ok((narrow(Expr::Binary(op, Box::new(l), Box::new(r)), ty), ty));
+            }
         };
         Ok((Expr::Binary(op, Box::new(l), Box::new(r)), ty))
     }
@@ -2179,20 +2188,13 @@ pub(crate) fn arith_type(
     use BinaryOp::*;
     use DataType::*;
     let num = |t: Option<DataType>| t.is_none_or(DataType::is_number);
+    let int = |t: Option<DataType>| t.is_some_and(DataType::is_integer);
     Some(match (op, lt, rt) {
-        (_, l, r) if num(l) && num(r) => {
-            if l == Some(Float) || r == Some(Float) {
-                Some(Float)
-            } else if l == Some(Numeric) || r == Some(Numeric) {
-                Some(Numeric)
-            } else {
-                l.or(r)
-            }
-        }
-        (Add, Some(Date), Some(Int))
-        | (Add, Some(Int), Some(Date))
-        | (Sub, Some(Date), Some(Int)) => Some(Date),
-        (Sub, Some(Date), Some(Date)) => Some(Int),
+        // The wider of the two (integers: the wider width).
+        (_, l, r) if num(l) && num(r) => unify(l, r).ok()?,
+        (Add | Sub, Some(Date), r) if int(r) => Some(Date),
+        (Add, l, Some(Date)) if int(l) => Some(Date),
+        (Sub, Some(Date), Some(Date)) => Some(Integer),
         (Add, Some(Date | Timestamp), Some(Interval))
         | (Add, Some(Interval), Some(Date | Timestamp))
         | (Sub, Some(Date | Timestamp), Some(Interval)) => Some(Timestamp),
@@ -2315,15 +2317,26 @@ fn comparable(a: Option<DataType>, b: Option<DataType>) -> Result<()> {
     }
 }
 
+/// A literal's type: an integer one is `integer` if it fits (PostgreSQL's
+/// rule).
+pub(crate) fn literal_type(v: &Value) -> Option<DataType> {
+    match v {
+        Value::Int(i) => Some(DataType::of_int_literal(*i)),
+        v => v.data_type(),
+    }
+}
+
 /// The common type of two branches (`CASE`, `UNION`, `VALUES`): numbers
-/// widen to `numeric`, then `double precision`; dates to `timestamp`, then
-/// `timestamptz`.
+/// widen from `smallint` to `integer`, `bigint`, `numeric`, then `double
+/// precision`; dates to `timestamp`, then `timestamptz`.
 pub fn unify(a: Option<DataType>, b: Option<DataType>) -> Result<Option<DataType>> {
     use DataType::*;
     let rank = |t: DataType| match t {
-        Int | Date => 0,
-        Numeric | Timestamp => 1,
-        Float | TimestampTz => 2,
+        SmallInt | Date => 0,
+        Integer | Timestamp => 1,
+        BigInt | TimestampTz => 2,
+        Numeric => 3,
+        Float => 4,
         _ => 0,
     };
     Ok(match (a, b) {
@@ -2340,6 +2353,16 @@ pub fn unify(a: Option<DataType>, b: Option<DataType>) -> Result<Option<DataType
             )));
         }
     })
+}
+
+/// An integer result `e` of type `ty` (computed in 64 bits), checked
+/// against a narrower type's range: `smallint` and `integer` arithmetic
+/// overflows at its own width (`22003`).
+pub(crate) fn narrow(e: Expr, ty: Option<DataType>) -> Expr {
+    match ty {
+        Some(t @ (DataType::SmallInt | DataType::Integer)) => Expr::Cast(Box::new(e), t),
+        _ => e,
+    }
 }
 
 /// `x` (of type `from`) converted to `to` where they differ.

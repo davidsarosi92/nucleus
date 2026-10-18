@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `smallint` and `integer` are their own types in nucleus now: sent as
+  `int2` (oid 21) and `int4` (oid 23), in text and binary (checked
+  against PostgreSQL 18's `int2send` / `int4send`); binary parameters of
+  those types are range-checked.
+
 ## 0.1.0 — 2026-10-17
 
 - Moved out of `nucleus-sql` (`pgcatalog`) and `nucleus-server` (`pg`)

@@ -182,7 +182,10 @@ impl ScalarFunction for UuidFn {
         let u = DataType::Ext(uuid_type());
         Ok(match self.0 {
             F::Random | F::V7 => Signature::keep(0, Some(u)),
-            F::Version => Signature::new(vec![Arg::Untyped(u)], Returns::Type(Some(DataType::Int))),
+            F::Version => Signature::new(
+                vec![Arg::Untyped(u)],
+                Returns::Type(Some(DataType::SmallInt)),
+            ),
             F::Timestamp => Signature::new(
                 vec![Arg::Untyped(u)],
                 Returns::Type(Some(DataType::TimestampTz)),

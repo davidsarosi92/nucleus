@@ -55,10 +55,10 @@ const ROLE: &str = "nucleus";
 const DATABASE_OID: i64 = 16_383;
 
 const B: DataType = DataType::Bool;
-const I: DataType = DataType::Int;
+const I: DataType = DataType::BigInt;
 const F: DataType = DataType::Float;
 const T: DataType = DataType::Text;
-const IA: DataType = DataType::Array(&DataType::Int);
+const IA: DataType = DataType::Array(&DataType::BigInt);
 const TA: DataType = DataType::Array(&DataType::Text);
 
 /// A catalog table: schema, name, columns.
@@ -564,9 +564,9 @@ impl Module for PgCompat {
         r.add_schema("information_schema", "SQL-standard catalog views", false)?;
         // PostgreSQL's names for types nucleus has under others.
         for (alias, ty) in [
-            ("oid", DataType::Int),
-            ("xid", DataType::Int),
-            ("regproc", DataType::Int),
+            ("oid", DataType::BigInt),
+            ("xid", DataType::BigInt),
+            ("regproc", DataType::BigInt),
             ("name", DataType::Text),
             ("bpchar", DataType::Text),
         ] {
@@ -643,7 +643,9 @@ fn type_of(c: &Column) -> (i64, i64) {
 pub fn type_oid(t: DataType) -> i64 {
     match t {
         DataType::Bool => 16,
-        DataType::Int => 20,
+        DataType::SmallInt => 21,
+        DataType::Integer => 23,
+        DataType::BigInt => 20,
         DataType::Float => 701,
         DataType::Text => 25,
         DataType::Numeric => 1700,
@@ -656,7 +658,9 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Ext(_) => 25,
         DataType::Array(e) => match e {
             DataType::Bool => 1000,
-            DataType::Int => 1016,
+            DataType::SmallInt => 1005,
+            DataType::Integer => 1007,
+            DataType::BigInt => 1016,
             DataType::Float => 1022,
             DataType::Text => 1009,
             DataType::Numeric => 1231,
@@ -1384,7 +1388,7 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                 for (c, col) in t.columns.iter().enumerate() {
                     let nullable = col.nullable && !t.primary_key.contains(&c);
                     let (precision, scale) = match (col.ty, col.numeric) {
-                        (DataType::Int, _) => (Value::Int(64), Value::Int(0)),
+                        (DataType::BigInt, _) => (Value::Int(64), Value::Int(0)),
                         (DataType::Float, _) => (Value::Int(53), Value::Null),
                         (DataType::Numeric, Some((p, s))) => (int(p), int(s)),
                         _ => (Value::Null, Value::Null),
@@ -1627,7 +1631,7 @@ impl ScalarFunction for PgFunction {
             PgFn::TypeOf => Ok(Signature::new(
                 vec![Arg::Keep],
                 Returns::Constant(Value::Text(match args[0].ty {
-                    Some(DataType::Int) => "bigint".into(),
+                    Some(DataType::BigInt) => "bigint".into(),
                     Some(t) => t.name().into(),
                     None => "unknown".into(),
                 })),

@@ -16,8 +16,12 @@ use crate::ext::TypeRef;
 pub enum DataType {
     /// `BOOLEAN`.
     Bool,
-    /// `BIGINT` (`INTEGER`, `INT`, `SMALLINT` are the same 64-bit type).
-    Int,
+    /// `SMALLINT` (`INT2`): 16-bit.
+    SmallInt,
+    /// `INTEGER` (`INT`, `INT4`): 32-bit.
+    Integer,
+    /// `BIGINT` (`INT8`): 64-bit.
+    BigInt,
     /// `DOUBLE PRECISION` (`REAL`, `FLOAT`).
     Float,
     /// `TEXT` / `VARCHAR`.
@@ -43,7 +47,9 @@ impl DataType {
     pub fn array_of(self) -> Option<DataType> {
         Some(DataType::Array(match self {
             DataType::Bool => &DataType::Bool,
-            DataType::Int => &DataType::Int,
+            DataType::SmallInt => &DataType::SmallInt,
+            DataType::Integer => &DataType::Integer,
+            DataType::BigInt => &DataType::BigInt,
             DataType::Float => &DataType::Float,
             DataType::Text => &DataType::Text,
             DataType::Numeric => &DataType::Numeric,
@@ -68,7 +74,9 @@ impl DataType {
     pub fn name(self) -> &'static str {
         match self {
             DataType::Bool => "boolean",
-            DataType::Int => "bigint",
+            DataType::SmallInt => "smallint",
+            DataType::Integer => "integer",
+            DataType::BigInt => "bigint",
             DataType::Float => "double precision",
             DataType::Text => "text",
             DataType::Numeric => "numeric",
@@ -78,7 +86,9 @@ impl DataType {
             DataType::Interval => "interval",
             DataType::Array(e) => match e {
                 DataType::Bool => "boolean[]",
-                DataType::Int => "bigint[]",
+                DataType::SmallInt => "smallint[]",
+                DataType::Integer => "integer[]",
+                DataType::BigInt => "bigint[]",
                 DataType::Float => "double precision[]",
                 DataType::Text => "text[]",
                 DataType::Numeric => "numeric[]",
@@ -92,9 +102,37 @@ impl DataType {
         }
     }
 
-    /// Whether this is `bigint`, `double precision` or `numeric`.
+    /// Whether this is an integer, `double precision` or `numeric`.
     pub fn is_number(self) -> bool {
-        matches!(self, DataType::Int | DataType::Float | DataType::Numeric)
+        self.is_integer() || matches!(self, DataType::Float | DataType::Numeric)
+    }
+
+    /// Whether this is `smallint`, `integer` or `bigint`.
+    pub fn is_integer(self) -> bool {
+        matches!(
+            self,
+            DataType::SmallInt | DataType::Integer | DataType::BigInt
+        )
+    }
+
+    /// An integer type's range (`None` for other types).
+    pub fn int_range(self) -> Option<(i64, i64)> {
+        Some(match self {
+            DataType::SmallInt => (i16::MIN.into(), i16::MAX.into()),
+            DataType::Integer => (i32::MIN.into(), i32::MAX.into()),
+            DataType::BigInt => (i64::MIN, i64::MAX),
+            _ => return None,
+        })
+    }
+
+    /// The type of an integer literal: `integer` if it fits, else `bigint`
+    /// (PostgreSQL's rule; a larger one is `numeric`).
+    pub fn of_int_literal(i: i64) -> DataType {
+        if i32::try_from(i).is_ok() {
+            DataType::Integer
+        } else {
+            DataType::BigInt
+        }
     }
 
     /// Whether this is `date`, `timestamp` or `timestamptz`.
@@ -123,9 +161,9 @@ impl DataType {
     pub fn parse(words: &[&str]) -> Option<Self> {
         Some(match words {
             ["boolean"] | ["bool"] => DataType::Bool,
-            ["bigint"] | ["int"] | ["integer"] | ["smallint"] | ["int8"] | ["int4"] | ["int2"] => {
-                DataType::Int
-            }
+            ["smallint"] | ["int2"] => DataType::SmallInt,
+            ["integer"] | ["int"] | ["int4"] => DataType::Integer,
+            ["bigint"] | ["int8"] => DataType::BigInt,
             ["double", "precision"]
             | ["float"]
             | ["real"]
@@ -203,7 +241,7 @@ impl Value {
         match self {
             Value::Null => None,
             Value::Bool(_) => Some(DataType::Bool),
-            Value::Int(_) => Some(DataType::Int),
+            Value::Int(_) => Some(DataType::BigInt),
             Value::Float(_) => Some(DataType::Float),
             Value::Text(_) => Some(DataType::Text),
             Value::Numeric(_) => Some(DataType::Numeric),
@@ -332,7 +370,7 @@ impl Value {
             (Value::Text(s), DataType::Ext(t)) => t.imp().input(&s)?,
             (Value::Ext(t, b), DataType::Text) => Value::Text(t.imp().output(&Value::Ext(t, b))),
             (v @ Value::Bool(_), DataType::Bool)
-            | (v @ Value::Int(_), DataType::Int)
+            | (v @ Value::Int(_), DataType::BigInt)
             | (v @ Value::Float(_), DataType::Float)
             | (v @ Value::Text(_), DataType::Text)
             | (v @ Value::Numeric(_), DataType::Numeric)
@@ -354,7 +392,13 @@ impl Value {
             ),
             (Value::Int(i), DataType::Numeric) => Value::Numeric(Decimal::from_i64(i)),
             (Value::Float(f), DataType::Numeric) => Value::Numeric(Decimal::from_f64(f)?),
-            (Value::Numeric(d), DataType::Int) => Value::Int(d.to_i64()?),
+            (Value::Int(i), t @ (DataType::SmallInt | DataType::Integer)) => {
+                Value::Int(fit_int(i, t)?)
+            }
+            (Value::Numeric(d), t) if t.is_integer() => {
+                let i = d.to_i64().map_err(|_| int_overflow(t))?;
+                Value::Int(fit_int(i, t)?)
+            }
             (Value::Numeric(d), DataType::Float) => Value::Float(d.to_f64()),
             (Value::Text(s), DataType::Numeric) => Value::Numeric(Decimal::parse(&s)?),
             (Value::Text(s), DataType::Date) => Value::Date(datetime::parse_date(&s)?),
@@ -373,24 +417,23 @@ impl Value {
             (Value::Timestamp(t), DataType::TimestampTz) => Value::TimestampTz(t),
             (Value::TimestampTz(t), DataType::Timestamp) => Value::Timestamp(t),
             (Value::Int(i), DataType::Float) => Value::Float(i as f64),
-            (Value::Float(f), DataType::Int) => {
-                let r = f.round();
+            (Value::Float(f), t) if t.is_integer() => {
+                // Rounded half to even, as PostgreSQL's `rint`.
+                let r = f.round_ties_even();
                 if !r.is_finite() || r < i64::MIN as f64 || r >= i64::MAX as f64 {
-                    return Err(Error::out_of_range("bigint out of range"));
+                    return Err(int_overflow(t));
                 }
-                Value::Int(r as i64)
+                Value::Int(fit_int(r as i64, t)?)
             }
             (Value::Int(i), DataType::Bool) => Value::Bool(i != 0),
-            (Value::Bool(b), DataType::Int) => Value::Int(i64::from(b)),
+            (Value::Bool(b), DataType::Integer) => Value::Int(i64::from(b)),
             // As PostgreSQL: a boolean cast to text is 'true'/'false' (the
             // wire format's 't'/'f' is only how it is sent).
             (Value::Bool(b), DataType::Text) => {
                 Value::Text(if b { "true" } else { "false" }.into())
             }
             (v, DataType::Text) => Value::Text(v.render()),
-            (Value::Text(s), DataType::Int) => Value::Int(s.trim().parse().map_err(|_| {
-                Error::invalid_text(format!("invalid input syntax for type bigint: {s:?}"))
-            })?),
+            (Value::Text(s), t) if t.is_integer() => Value::Int(parse_int(&s, t)?),
             (Value::Text(s), DataType::Float) => Value::Float(s.trim().parse().map_err(|_| {
                 Error::invalid_text(format!(
                     "invalid input syntax for type double precision: {s:?}"
@@ -581,6 +624,63 @@ fn render_float(f: f64) -> String {
     }
 }
 
+/// `22003` for a value outside integer type `t`.
+pub fn int_overflow(t: DataType) -> Error {
+    Error::out_of_range(format!("{t} out of range"))
+}
+
+/// `i` if it is in integer type `t`'s range, else `22003`.
+pub fn fit_int(i: i64, t: DataType) -> Result<i64> {
+    let (lo, hi) = t.int_range().expect("an integer type");
+    if (lo..=hi).contains(&i) {
+        Ok(i)
+    } else {
+        Err(int_overflow(t))
+    }
+}
+
+/// Parses integer type `t`'s text form: an optional sign, then decimal
+/// digits — or, as PostgreSQL 16, `0x`, `0o` or `0b` digits — with `_`
+/// allowed between digits; spaces around.
+pub fn parse_int(s: &str, t: DataType) -> Result<i64> {
+    let bad = || Error::invalid_text(format!("invalid input syntax for type {t}: {s:?}"));
+    let body = s.trim_matches(|c: char| c.is_ascii_whitespace());
+    let (neg, digits) = match body.as_bytes().first() {
+        Some(b'-') => (true, &body[1..]),
+        Some(b'+') => (false, &body[1..]),
+        _ => (false, body),
+    };
+    let (radix, digits) = match digits.get(..2).map(str::to_ascii_lowercase).as_deref() {
+        Some("0x") => (16, &digits[2..]),
+        Some("0o") => (8, &digits[2..]),
+        Some("0b") => (2, &digits[2..]),
+        _ => (10, digits),
+    };
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
+        return Err(bad());
+    }
+    let mut v: i128 = 0;
+    for c in digits.chars().filter(|&c| c != '_') {
+        let d = c.to_digit(radix).ok_or_else(bad)?;
+        v = v * i128::from(radix) + i128::from(d);
+        if v > i128::from(u64::MAX) {
+            break;
+        }
+    }
+    let v = if neg { -v } else { v };
+    let (lo, hi) = t.int_range().expect("an integer type");
+    if v < i128::from(lo) || v > i128::from(hi) {
+        return Err(Error::out_of_range(format!(
+            "value \"{s}\" is out of range for type {t}"
+        )));
+    }
+    Ok(v as i64)
+}
+
 /// The type name of a value, for messages.
 pub fn type_name(v: &Value) -> &'static str {
     v.data_type().map_or("unknown", DataType::name)
@@ -664,14 +764,32 @@ mod tests {
     #[test]
     fn casts() {
         assert_eq!(
-            Value::Text(" 42 ".into()).cast(DataType::Int).unwrap(),
+            Value::Text(" 42 ".into()).cast(DataType::BigInt).unwrap(),
             Value::Int(42)
         );
         assert_eq!(
-            Value::Float(2.5).cast(DataType::Int).unwrap(),
-            Value::Int(3)
+            Value::Float(2.5).cast(DataType::BigInt).unwrap(),
+            Value::Int(2)
         );
-        assert!(Value::Text("x".into()).cast(DataType::Int).is_err());
+        assert_eq!(
+            Value::Float(3.5).cast(DataType::Integer).unwrap(),
+            Value::Int(4)
+        );
+        assert_eq!(
+            Value::Int(40_000)
+                .cast(DataType::SmallInt)
+                .unwrap_err()
+                .code,
+            "22003"
+        );
+        assert_eq!(
+            Value::Text("40000".into())
+                .cast(DataType::SmallInt)
+                .unwrap_err()
+                .message,
+            "value \"40000\" is out of range for type smallint"
+        );
+        assert!(Value::Text("x".into()).cast(DataType::BigInt).is_err());
         assert_eq!(
             Value::Text("on".into()).cast(DataType::Bool).unwrap(),
             Value::Bool(true)

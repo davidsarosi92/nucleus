@@ -75,8 +75,10 @@ pub fn note_stored_types(txn: &mut dyn KvTxn, columns: &[Column]) -> Result<()> 
 const DATA: u8 = 0x01;
 /// Version 2 added `NUMERIC(p, s)` modifiers, version 3 foreign keys,
 /// version 4 registered types (tag `7F` and the type's name), version 5
-/// indexes in taught orderings; older versions still read.
-const TABLE_VERSION: u8 = 5;
+/// indexes in taught orderings, version 6 `smallint` and `integer` (type
+/// tags 10 and 11: before it, every integer column was `bigint`, tag 2,
+/// and still reads as one); older versions still read.
+const TABLE_VERSION: u8 = 6;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -491,7 +493,7 @@ fn type_tag(t: DataType) -> u8 {
         DataType::Ext(_) => EXT_TAG,
         DataType::Array(e) => 0x80 | type_tag(*e),
         DataType::Bool => 1,
-        DataType::Int => 2,
+        DataType::BigInt => 2,
         DataType::Float => 3,
         DataType::Text => 4,
         DataType::Numeric => 5,
@@ -499,6 +501,8 @@ fn type_tag(t: DataType) -> u8 {
         DataType::Timestamp => 7,
         DataType::TimestampTz => 8,
         DataType::Interval => 9,
+        DataType::SmallInt => 10,
+        DataType::Integer => 11,
     }
 }
 
@@ -510,7 +514,7 @@ fn type_of_tag(t: u8) -> Result<DataType> {
     }
     Ok(match t {
         1 => DataType::Bool,
-        2 => DataType::Int,
+        2 => DataType::BigInt,
         3 => DataType::Float,
         4 => DataType::Text,
         5 => DataType::Numeric,
@@ -518,6 +522,8 @@ fn type_of_tag(t: u8) -> Result<DataType> {
         7 => DataType::Timestamp,
         8 => DataType::TimestampTz,
         9 => DataType::Interval,
+        10 => DataType::SmallInt,
+        11 => DataType::Integer,
         _ => return Err(Error::internal("unknown column type tag")),
     })
 }
@@ -1012,7 +1018,7 @@ mod tests {
             columns: vec![
                 Column {
                     name: "id".into(),
-                    ty: DataType::Int,
+                    ty: DataType::BigInt,
                     nullable: false,
                     default: None,
                     max_len: None,

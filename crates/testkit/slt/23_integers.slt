@@ -1,0 +1,202 @@
+# Integers by width: smallint (16-bit), integer (32-bit), bigint (64-bit) —
+# input, output, ranges, arithmetic and promotion, casts, keys, functions.
+# Expected results produced by PostgreSQL 18 (records marked nucleus-only
+# excepted).
+
+query III
+SELECT 32767::smallint, -2147483648, 9223372036854775807
+----
+32767 -2147483648 9223372036854775807
+
+query III
+SELECT '  42 '::smallint, '-7'::integer, '+12'::bigint
+----
+42 -7 12
+
+query III
+SELECT '0x1F'::integer, '0o17'::smallint, '1_000_000'::bigint
+----
+31 15 1000000
+
+statement error 22003
+SELECT '32768'::smallint
+
+statement error 22003
+SELECT '-2147483649'::integer
+
+statement error 22003
+SELECT '9223372036854775808'::bigint
+
+statement error 22P02
+SELECT '12a'::integer
+
+statement error 22P02
+SELECT '1__0'::integer
+
+statement error 22P02
+SELECT ''::smallint
+
+# Arithmetic overflows at the operands' width.
+
+statement error 22003
+SELECT 32767::smallint + 1::smallint
+
+statement error 22003
+SELECT 2147483647 + 1
+
+query I
+SELECT -(-2147483648)
+----
+2147483648
+
+statement error 22003
+SELECT -x FROM (SELECT -2147483648) t(x)
+
+statement error 22003
+SELECT (-2147483648) / -1
+
+statement error 22003
+SELECT 9223372036854775807 + 1
+
+# Mixed widths: the wider one (types: pg-compat's 02_types.slt).
+
+query I
+SELECT 32767::smallint + 1
+----
+32768
+
+query I
+SELECT 2147483647 + 1::bigint
+----
+2147483648
+
+query IIII
+SELECT 7 / 2, -7 / 2, 7 % -3, -7 % 3
+----
+3 -3 1 -1
+
+statement error 22012
+SELECT 1 / 0
+
+statement error 22012
+SELECT 1::smallint % 0::smallint
+
+# Casts between widths and from other numbers.
+
+statement error 22003
+SELECT 40000::smallint
+
+statement error 22003
+SELECT 3000000000::integer
+
+query III
+SELECT 2.5::integer, 3.5::integer, (-2.5)::smallint
+----
+3 4 -3
+
+query III
+SELECT 2.5::float8::integer, 3.5::float8::integer, (-2.5)::float8::bigint
+----
+2 4 -2
+
+statement error 22003
+SELECT 32767.5::smallint
+
+statement error 22003
+SELECT 1e10::float8::integer
+
+query TT
+SELECT 1::integer::text, true::integer
+----
+1 1
+
+# Columns: stored at their width, range-checked on write.
+
+statement ok
+CREATE TABLE nums (id integer PRIMARY KEY, s smallint, b bigint)
+
+statement ok
+INSERT INTO nums VALUES (1, 32767, 9223372036854775807), (2, -32768, -9223372036854775808), (3, 0, 0)
+
+statement error 22003
+INSERT INTO nums VALUES (4, 32768, 0)
+
+statement error 22003
+INSERT INTO nums VALUES (2147483648, 0, 0)
+
+statement error 22003
+UPDATE nums SET s = s + 1 WHERE id = 1
+
+statement ok
+INSERT INTO nums VALUES (4, '-1', '12')
+
+query III
+SELECT id, s, b FROM nums ORDER BY s
+----
+2 -32768 -9223372036854775808
+4 -1 12
+3 0 0
+1 32767 9223372036854775807
+
+query I
+SELECT id FROM nums WHERE s = 0::bigint AND b = 0::smallint
+----
+3
+
+query I
+SELECT id FROM nums WHERE id = 4::bigint
+----
+4
+
+query I
+SELECT s + 1 FROM nums WHERE id = 4
+----
+0
+
+# Aggregates: the sum of smallints or integers is a bigint, the average numeric.
+
+query III
+SELECT sum(s), min(s), max(s) FROM nums
+----
+-2 -32768 32767
+
+query T
+SELECT avg(s) FROM nums
+----
+-0.50000000000000000000
+
+# Functions.
+
+query IIII
+SELECT abs(-5::smallint), abs(-2147483647), mod(7, 3), mod(-7::smallint, 3::smallint)
+----
+5 2147483647 1 -1
+
+statement error 22003
+SELECT abs((-32768)::smallint)
+
+statement error 22003
+SELECT abs(-2147483648)
+
+query I
+SELECT (ARRAY[10, 20, 30])[2::smallint]
+----
+20
+
+query T
+SELECT ARRAY[1::smallint, 2::smallint]
+----
+{1,2}
+
+query I
+SELECT 3 FROM nums LIMIT 1::smallint
+----
+3
+
+query T
+SELECT date '2024-01-01' + 1::smallint
+----
+2024-01-02
+
+statement ok
+DROP TABLE nums

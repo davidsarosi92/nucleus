@@ -27,7 +27,7 @@ class Conformance(unittest.TestCase):
     def test_types_both_ways(self):
         t = table()
         with connect() as c:
-            c.execute(f"CREATE TABLE {t} (id INT PRIMARY KEY, b BOOLEAN, f FLOAT, s TEXT, n NUMERIC(10, 2), "
+            c.execute(f"CREATE TABLE {t} (id BIGINT PRIMARY KEY, b BOOLEAN, f FLOAT, s TEXT, n NUMERIC(10, 2), "
                       "d DATE, ts TIMESTAMP, tz TIMESTAMPTZ, iv INTERVAL, tags TEXT[])")
             row = (
                 1, True, 0.5, "héllo", decimal.Decimal("123.45"), dt.date(2024, 2, 29),

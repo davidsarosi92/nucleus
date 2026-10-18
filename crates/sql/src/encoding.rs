@@ -21,15 +21,21 @@
 //! Every encoding is self-delimiting, so a key can be split back into its
 //! values (`decode_key_value`).
 //!
-//! **Rows** — `01` (version), column count `u16`, then per column a tag
-//! (`0` null, `1` bool, `2` bigint, `3` double, `4` text, `5` numeric:
+//! **Rows** — `02` (version), column count `u16`, then per column a tag
+//! (`0` null, `1` bool, `2` an integer in 8 bytes, `12` in 2, `13` in 4 —
+//! the fewest that hold the value, whatever the column's width — `3` double, `4` text, `5` numeric:
 //! `i128` mantissa and `u8` scale, `6` date `i32`, `7` timestamp and `8`
 //! timestamptz `i64`, `9` interval: months `i32`, days `i32`, µs `i64`,
 //! `10` array: a `u32` count, then each element tagged the same way; `11` a
 //! registered type: its stable id `u32`, its encoding version `u16`, a
 //! `u32` length and its canonical bytes) and its bytes (little-endian; text
 //! with a `u32` length).  A row shorter than its table
-//! (a column added later) reads the missing columns as `NULL`.
+//! (a column added later) reads the missing columns as `NULL`.  Version 1
+//! (before tags 12 and 13) still reads.
+//!
+//! Keys hold every integer in 8 bytes, whatever its type: a `smallint`
+//! and a `bigint` that are equal have equal keys, so an index serves a
+//! comparison across widths and widening a column keeps its keys.
 
 use crate::datetime::{Interval, USECS_PER_DAY};
 use crate::decimal::Decimal;
@@ -292,7 +298,8 @@ pub fn decode_key(b: &[u8], n: usize) -> Result<(Vec<Value>, usize)> {
     Ok((values, at))
 }
 
-const ROW_VERSION: u8 = 1;
+/// Version 2 added tags 12 and 13; version 1 rows still read.
+const ROW_VERSION: u8 = 2;
 
 /// Encodes a row.
 pub fn encode_row(row: &[Value]) -> Vec<u8> {
@@ -311,8 +318,16 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
         Value::Null => out.push(0),
         Value::Bool(b) => out.extend_from_slice(&[1, u8::from(*b)]),
         Value::Int(i) => {
-            out.push(2);
-            out.extend_from_slice(&i.to_le_bytes());
+            if let Ok(x) = i16::try_from(*i) {
+                out.push(12);
+                out.extend_from_slice(&x.to_le_bytes());
+            } else if let Ok(x) = i32::try_from(*i) {
+                out.push(13);
+                out.extend_from_slice(&x.to_le_bytes());
+            } else {
+                out.push(2);
+                out.extend_from_slice(&i.to_le_bytes());
+            }
         }
         Value::Float(f) => {
             out.push(3);
@@ -370,6 +385,8 @@ pub fn decode_value(r: &mut Reader) -> Result<Value> {
         0 => Value::Null,
         1 => Value::Bool(r.u8().map_err(bad)? == 1),
         2 => Value::Int(r.u64().map_err(bad)? as i64),
+        12 => Value::Int(i64::from(r.u16().map_err(bad)? as i16)),
+        13 => Value::Int(i64::from(r.u32().map_err(bad)? as i32)),
         3 => Value::Float(f64::from_bits(r.u64().map_err(bad)?)),
         4 => Value::Text(r.str().map_err(bad)?),
         5 => {
@@ -427,7 +444,7 @@ fn r#missing(t: crate::ext::TypeRef) -> bool {
 pub fn decode_row(b: &[u8], columns: usize) -> Result<Vec<Value>> {
     let bad = |_| Error::internal("malformed row encoding");
     let mut r = Reader::new(b);
-    if r.u8().map_err(bad)? != ROW_VERSION {
+    if !(1..=ROW_VERSION).contains(&r.u8().map_err(bad)?) {
         return Err(Error::internal("malformed row encoding"));
     }
     let n = r.u16().map_err(bad)? as usize;
@@ -546,6 +563,10 @@ impl<'a> Reader<'a> {
     /// Whether everything was read.
     pub fn is_empty(&self) -> bool {
         self.b.is_empty()
+    }
+    /// How many bytes are left.
+    pub fn remaining(&self) -> usize {
+        self.b.len()
     }
 }
 

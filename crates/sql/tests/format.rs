@@ -134,3 +134,91 @@ fn an_older_key_encoding_is_upgraded() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Before integers had widths, `INT`, `INTEGER` and `SMALLINT` columns were
+/// 64-bit (column tag 2, as `BIGINT`'s, in table record version 5), and
+/// rows held every integer in 8 bytes (row version 1).  Such a database
+/// opens with those columns as `bigint`, its values intact; `ALTER COLUMN
+/// … TYPE integer` narrows one, checking its values.
+#[test]
+fn integer_columns_from_before_widths_read_as_bigint() {
+    use nucleus_sql::{Output, catalog, encoding};
+    let kv = db();
+    let mut s = Session::new(kv.clone());
+    s.execute("CREATE TABLE old (id BIGINT PRIMARY KEY, n BIGINT)")
+        .unwrap();
+    s.execute("INSERT INTO old VALUES (1, 5), (2, 3000000000)")
+        .unwrap();
+    // What the old build wrote: table record version 5, version-1 rows.
+    let mut txn = kv.begin(TxnOptions::default()).unwrap();
+    let t = catalog::table(&*txn, "old").unwrap();
+    let key = {
+        let mut k = vec![0x00, 0x01];
+        k.extend_from_slice(b"old");
+        k
+    };
+    let mut record = txn.get(&key).unwrap().unwrap();
+    assert_eq!(record[0], 6);
+    record[0] = 5;
+    txn.put(&key, &record).unwrap();
+    let prefix = t.index_prefix(0);
+    let end = nucleus_kv::prefix_end(&prefix).unwrap();
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = txn
+        .scan(
+            std::ops::Bound::Included(&prefix[..]),
+            std::ops::Bound::Excluded(&end[..]),
+        )
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for (k, v) in rows {
+        let row = encoding::decode_row(&v, 2).unwrap();
+        let mut old = vec![1, 2, 0];
+        for v in &row {
+            let nucleus_sql::Value::Int(i) = v else {
+                panic!("{v:?}")
+            };
+            old.push(2);
+            old.extend_from_slice(&i.to_le_bytes());
+        }
+        txn.put(&k, &old).unwrap();
+    }
+    txn.commit().unwrap();
+    let rows = |s: &mut Session, sql: &str| match s.execute(sql).unwrap().pop() {
+        Some(Output::Rows { rows, .. }) => rows
+            .iter()
+            .map(|r| r.iter().map(|v| v.render()).collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    let mut s = Session::new(kv.clone());
+    assert_eq!(
+        rows(&mut s, "SELECT id, n FROM old ORDER BY id"),
+        ["1 5", "2 3000000000"]
+    );
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT type FROM nc_catalog.columns WHERE table_name = 'old' ORDER BY position"
+        ),
+        ["bigint", "bigint"]
+    );
+    // Narrowing checks every value.
+    let err = s
+        .execute("ALTER TABLE old ALTER n TYPE integer")
+        .unwrap_err();
+    assert_eq!(err.code, "22003", "{err}");
+    s.execute("DELETE FROM old WHERE id = 2").unwrap();
+    s.execute("ALTER TABLE old ALTER n TYPE integer").unwrap();
+    assert_eq!(rows(&mut s, "SELECT n + 1 FROM old"), ["6"]);
+    assert_eq!(
+        s.execute("INSERT INTO old VALUES (3, 3000000000)")
+            .unwrap_err()
+            .code,
+        "22003"
+    );
+    let txn = kv.begin(TxnOptions::read_only()).unwrap();
+    let problems =
+        nucleus_sql::check::check(&*txn, &nucleus_sql::ext::Registry::builtin()).unwrap();
+    assert!(problems.is_empty(), "{problems:#?}");
+}

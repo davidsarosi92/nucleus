@@ -322,14 +322,16 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
         | Func::CurrentSchema
         | Func::ArrayToString
         | Func::RegexpReplace => keep(Some(Text)),
-        Func::Length | Func::Strpos => keep(Some(Int)),
+        Func::Length | Func::Strpos => keep(Some(Integer)),
         Func::ArrayUpper | Func::ArrayLower | Func::ArrayLength | Func::Cardinality => {
-            keep(Some(Int))
+            keep(Some(Integer))
         }
         Func::IsDistinctFrom => keep(Some(Bool)),
         Func::Sqrt | Func::Power => keep(Some(Float)),
         // round(int, n) and trunc(int) are numeric.
-        Func::Round | Func::Trunc if t(0) == Some(Int) && (f == Func::Trunc || n == 2) => {
+        Func::Round | Func::Trunc
+            if t(0).is_some_and(DataType::is_integer) && (f == Func::Trunc || n == 2) =>
+        {
             let mut a = vec![Arg::Keep; n];
             a[0] = Arg::Convert(Numeric);
             Ok(Signature::new(a, Returns::Type(Some(Numeric))))
@@ -485,13 +487,19 @@ impl Aggregate for BuiltinAgg {
             )));
         }
         match self.0 {
-            AggFunc::Count => keep(Some(Int)),
+            AggFunc::Count => keep(Some(BigInt)),
             // As PostgreSQL: the average of integers is numeric.
             AggFunc::Avg => keep(match at {
-                Some(Int) | None => Some(Numeric),
+                Some(t) if t.is_integer() => Some(Numeric),
+                None => Some(Numeric),
                 t => t,
             }),
-            AggFunc::Sum => keep(at),
+            // The sum of smallints or integers is a bigint (as
+            // PostgreSQL); of bigints, a bigint (PostgreSQL's is numeric).
+            AggFunc::Sum => keep(match at {
+                Some(t) if t.is_integer() => Some(BigInt),
+                t => t,
+            }),
             AggFunc::Min | AggFunc::Max => {
                 crate::binder::require(at, &[crate::binder::Need::Ordering], name)?;
                 keep(at)
@@ -656,7 +664,7 @@ impl TableFunction for GenerateSeries {
     }
 
     fn resolve(&self, args: &[ArgInfo]) -> Result<TableSignature> {
-        let ty = common_type(&args[..2])?.unwrap_or(DataType::Int);
+        let ty = common_type(&args[..2])?.unwrap_or(DataType::BigInt);
         if !(ty.is_number() || ty.is_datetime()) {
             return Err(Error::undefined_function(format!(
                 "function generate_series({ty}, {ty}) does not exist"
@@ -718,13 +726,9 @@ impl TableFunction for Unnest {
 /// The built-in types: name, the other names SQL accepts, category.
 const TYPES: &[(DataType, &[&str], &str)] = &[
     (DataType::Bool, &["boolean", "bool"], "boolean"),
-    (
-        DataType::Int,
-        &[
-            "bigint", "int", "integer", "smallint", "int8", "int4", "int2",
-        ],
-        "number",
-    ),
+    (DataType::SmallInt, &["smallint", "int2"], "number"),
+    (DataType::Integer, &["integer", "int", "int4"], "number"),
+    (DataType::BigInt, &["bigint", "int8"], "number"),
     (
         DataType::Float,
         &[
@@ -850,7 +854,10 @@ fn examples(ty: DataType) -> Vec<Value> {
     use crate::decimal::Decimal;
     match ty {
         DataType::Bool => vec![Value::Bool(false), Value::Bool(true)],
-        DataType::Int => [0, 1, -1, i64::MIN, i64::MAX].map(Value::Int).to_vec(),
+        DataType::SmallInt | DataType::Integer | DataType::BigInt => {
+            let (lo, hi) = ty.int_range().expect("an integer type");
+            [0, 1, -1, lo, hi, lo + 1, hi - 1].map(Value::Int).to_vec()
+        }
         DataType::Float => [
             0.0,
             -0.0,

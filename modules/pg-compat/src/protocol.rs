@@ -90,7 +90,9 @@ fn type_of_oid(o: i32) -> Option<DataType> {
     Some(match o {
         2950 => DataType::Ext(TypeRef::named("uuid")?),
         BOOL => DataType::Bool,
-        INT2 | INT4 | INT8 => DataType::Int,
+        INT2 => DataType::SmallInt,
+        INT4 => DataType::Integer,
+        INT8 => DataType::BigInt,
         FLOAT4 | FLOAT8 => DataType::Float,
         TEXT | VARCHAR | UNKNOWN | BPCHAR | NAME => DataType::Text,
         NUMERIC => DataType::Numeric,
@@ -99,7 +101,9 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         TIMESTAMPTZ => DataType::TimestampTz,
         INTERVAL => DataType::Interval,
         1000 => DataType::Array(&DataType::Bool),
-        1005 | 1007 | 1016 | 1028 => DataType::Array(&DataType::Int),
+        1005 => DataType::Array(&DataType::SmallInt),
+        1007 => DataType::Array(&DataType::Integer),
+        1016 | 1028 => DataType::Array(&DataType::BigInt),
         1021 | 1022 => DataType::Array(&DataType::Float),
         1009 | 1014 | 1015 | 1003 => DataType::Array(&DataType::Text),
         1231 => DataType::Array(&DataType::Numeric),
@@ -114,8 +118,9 @@ fn type_of_oid(o: i32) -> Option<DataType> {
 fn type_size(t: DataType) -> i16 {
     match t {
         DataType::Bool => 1,
-        DataType::Date => 4,
-        DataType::Int | DataType::Float | DataType::Timestamp | DataType::TimestampTz => 8,
+        DataType::SmallInt => 2,
+        DataType::Integer | DataType::Date => 4,
+        DataType::BigInt | DataType::Float | DataType::Timestamp | DataType::TimestampTz => 8,
         DataType::Interval => 16,
         DataType::Ext(t) if t.name() == "uuid" => 16,
         DataType::Text | DataType::Numeric | DataType::Array(_) | DataType::Ext(_) => -1,
@@ -475,6 +480,8 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
         (Value::Ext(t, bytes), _) if t.name() == "uuid" => bytes.to_vec(),
         (Value::Bool(b), _) => vec![u8::from(*b)],
         (Value::Int(i), DataType::Float) => (*i as f64).to_be_bytes().to_vec(),
+        (Value::Int(i), DataType::SmallInt) => (*i as i16).to_be_bytes().to_vec(),
+        (Value::Int(i), DataType::Integer) => (*i as i32).to_be_bytes().to_vec(),
         (Value::Int(i), _) => i.to_be_bytes().to_vec(),
         (Value::Float(f), _) => f.to_be_bytes().to_vec(),
         (Value::Numeric(d), _) => numeric_binary(d),
@@ -523,11 +530,13 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
     if format == 1 {
         return Ok(match (ty, bytes.len()) {
             (Some(DataType::Bool), 1) => Value::Bool(bytes[0] != 0),
-            (Some(DataType::Int), 8) => Value::Int(i64::from_be_bytes(bytes.try_into().unwrap())),
-            (Some(DataType::Int), 4) => {
-                Value::Int(i32::from_be_bytes(bytes.try_into().unwrap()).into())
+            (Some(t), 8) if t.is_integer() => {
+                Value::Int(i64::from_be_bytes(bytes.try_into().unwrap())).cast(t)?
             }
-            (Some(DataType::Int), 2) => {
+            (Some(t), 4) if t.is_integer() => {
+                Value::Int(i32::from_be_bytes(bytes.try_into().unwrap()).into()).cast(t)?
+            }
+            (Some(t), 2) if t.is_integer() => {
                 Value::Int(i16::from_be_bytes(bytes.try_into().unwrap()).into())
             }
             (Some(DataType::Float), 8) => {
@@ -915,6 +924,33 @@ mod tests {
             let back = numeric_from_binary(&b).unwrap();
             assert_eq!(back.to_string(), d.to_string(), "{v}");
         }
+    }
+
+    #[test]
+    fn integer_binary_matches_postgresql() {
+        // From PostgreSQL 18's int2send, int4send, int8send, array_send.
+        for (v, ty, want) in [
+            (-2, DataType::SmallInt, "fffe"),
+            (i64::from(i32::MIN), DataType::Integer, "80000000"),
+            (5, DataType::BigInt, "0000000000000005"),
+        ] {
+            assert_eq!(hex(&binary_value(&Value::Int(v), ty)), want);
+            let back = decode_param(&binary_value(&Value::Int(v), ty), 1, Some(ty)).unwrap();
+            assert_eq!(back, Value::Int(v));
+        }
+        let a = Value::Array(vec![Value::Int(1), Value::Int(-1)]);
+        assert_eq!(
+            hex(&binary_value(&a, DataType::Array(&DataType::SmallInt))),
+            "000000010000000000000015000000020000000100000002000100000002ffff"
+        );
+        // A bigint parameter for an integer is range-checked.
+        let wide = (1i64 << 40).to_be_bytes();
+        assert_eq!(
+            decode_param(&wide, 1, Some(DataType::Integer))
+                .unwrap_err()
+                .code,
+            "22003"
+        );
     }
 
     #[test]

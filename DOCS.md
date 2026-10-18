@@ -563,7 +563,9 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 | Type | Names | Value |
 |------|-------|-------|
 | boolean | `BOOLEAN`, `BOOL` | |
-| bigint | `BIGINT`, `INT`, `INTEGER`, `SMALLINT`, `INT2/4/8` (and, with pg-compat, `OID`) | 64-bit (every integer type) |
+| smallint | `SMALLINT`, `INT2` | 16-bit |
+| integer | `INTEGER`, `INT`, `INT4` | 32-bit |
+| bigint | `BIGINT`, `INT8` (and, with pg-compat, `OID`) | 64-bit |
 | double precision | `DOUBLE PRECISION`, `FLOAT`, `REAL` | IEEE 754 |
 | numeric | `NUMERIC [(p, s)]`, `DECIMAL`, `DEC` | exact: 128-bit mantissa and a scale, ≤ 38 digits |
 | text | `TEXT`, `VARCHAR(n)`, `CHAR` (and, with pg-compat, `NAME`, `BPCHAR`) | `VARCHAR(n)` length enforced |
@@ -588,6 +590,31 @@ increasing within a process — the recommended key, new rows land at the
 end of the index), `uuid_extract_version(u)` (for RFC 9562 variants),
 `uuid_extract_timestamp(u)` (versions 1 and 7).  `crates/testkit/slt/20_uuid.slt`'s
 expected results came from PostgreSQL 18.
+
+**Integers by width.**  An integer literal is `integer` if it fits, else
+`bigint` (PostgreSQL's rule).  Arithmetic on two integers has the wider
+operand's type (`smallint + smallint` is `smallint`, `smallint + integer`
+`integer`) and overflows at that width (`22003`, `integer out of range`);
+so does a function whose result is a narrow integer (`abs(-32768::smallint)`).
+Casts between widths and from `numeric` (half away from zero) or `double
+precision` (half to even, as PostgreSQL's `rint`) check the range; text
+input takes an optional sign, decimal digits, or `0x` / `0o` / `0b` ones,
+`_` between digits (PostgreSQL 16), and spaces around — out of range is
+`22003` (`value "40000" is out of range for type smallint`).  `sum` of
+`smallint` or `integer` is `bigint`, `avg` of any integer `numeric`;
+`count` is `bigint`; `length`, `strpos`, `array_length` and `date - date`
+are `integer`.  Columns are range-checked on every write.  Values are one
+64-bit integer in memory; the row encoding stores each in the fewest of 2,
+4 or 8 bytes that holds it, and keys hold every width in 8, so an index
+serves a comparison across widths and widening a column keeps its keys.
+`crates/testkit/slt/23_integers.slt` (and pg-compat's `02_types.slt` for
+the types, through `pg_typeof`) came from PostgreSQL 18.
+
+Before widths (table record version 5 and older), `INT`, `INTEGER` and
+`SMALLINT` columns were 64-bit with `BIGINT`'s column tag, so the catalog
+cannot tell them apart: such a database opens with them as `bigint`, its
+values intact; `ALTER TABLE … ALTER c TYPE integer` narrows one, checking
+every value.
 
 Decimal literals (`1.5`, `1e3`) are `numeric`, as in PostgreSQL; integers
 too big for bigint too; only values beyond numeric's 38 digits fall back to
@@ -622,10 +649,12 @@ encoding).  Key encoding version 2 (the format record, §8.2): version 1
 wrote a `NULL` array element as `01 00`, before the others — the law kit
 caught the disagreement — and the first write to a version-1 database
 rewrites the keys of every table with an array in a key
-(`dml::rewrite_keys`; the decoder reads both).  Row encoding: version `01`, column count, tagged values
+(`dml::rewrite_keys`; the decoder reads both).  Row encoding: version `02`, column count, tagged values
 (missing trailing columns read as NULL, so `ADD COLUMN` needs no rewrite
-unless it has a default); a registered type's value is tag `11`, its id,
-its encoding version and its canonical bytes.  A registered type's id is
+unless it has a default); an integer is tag `12` (2 bytes), `13` (4) or
+`2` (8), the fewest that hold it (version `01`, still read, had only `2`);
+a registered type's value is tag `11`, its id, its encoding version and
+its canonical bytes.  A registered type's id is
 the FNV-1a hash of its name, the same in every process (two names with
 one id are refused when registered).
 
@@ -714,7 +743,7 @@ sum avg min max string_agg array_agg bool_and bool_or every` (with
 
 Not yet: window functions, `COPY`, `TIME` / `TIMETZ`, time zones other than
 UTC, multi-dimensional arrays, data-modifying CTEs, `LATERAL`, user
-functions.  Every integer is 64-bit (`pg_typeof(1)` is `bigint`).
+functions.
 
 ### 8.4 Binder (`binder`)
 
@@ -1154,7 +1183,7 @@ below.  A version-1 client gets them as text (type and value tag 4), so
 older drivers keep working.
 
 **Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
-2 bigint, 3 double precision, 4 text, 5 numeric, 6 date, 7 timestamp,
+2 an integer (`smallint`, `integer` and `bigint` alike, for now), 3 double precision, 4 text, 5 numeric, 6 date, 7 timestamp,
 8 timestamptz, 9 interval, 10 array followed by the element's tag, 11 a
 registered type followed by its name (a string: `uuid`).
 
@@ -1175,8 +1204,10 @@ registered type followed by its name (a string: `uuid`).
 | 10 | array | `u32` count, then each element as a value |
 | 11 | a registered type (version 2) | string type name, `u32` length, the value's binary (canonical) form — for `uuid` its 16 bytes |
 
-Tags 0–10 are the storage's own row encoding (§8.1), so those values cross
-the wire exactly as stored; a registered type's carries its name instead
+Tags 0–10 are the tags of the storage's row encoding version 1 (§8.1), but
+the protocol's encoding is its own (`native::wire_value`): the storage may
+store a value more compactly (an integer in 2 or 4 bytes, tags 12 and 13)
+without the protocol changing.  A registered type's carries its name instead
 of its id, so drivers need no table of ids.  A tag-11 parameter of a type
 the server does not know is refused (`42704`).  With result format 1 (text) every non-NULL value is
 sent as text (tag 4), rendered as `ncsql` prints it.  Parameters are
@@ -1245,6 +1276,11 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 `drivers` does so on Linux.
 
 ## 12. Change log
+
+- **2026-10-18 — §M14.26 integers by width:** `smallint`, `integer`,
+  `bigint` as types of their own (ranges, overflow per width, promotion,
+  `integer` literals, PostgreSQL 16's integer input); row encoding
+  version 2; `ncp`'s own value encoder; pg-compat's int2 / int4.
 
 - **2026-10-18 — §M14.19 shipped: the sample extension (T7).**
   `examples/extension` (the `geo` module, `geo-demo`, the guide for
