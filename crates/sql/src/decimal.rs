@@ -136,6 +136,15 @@ impl Decimal {
         Ok(d.trim())
     }
 
+    /// A real's value to 6 significant digits (PostgreSQL's `float4` →
+    /// `numeric`).
+    pub fn from_f32(f: f32) -> Result<Self> {
+        if !f.is_finite() {
+            return Err(Error::feature("cannot convert NaN or infinity to numeric"));
+        }
+        Ok(Self::parse(&format!("{f:.5e}"))?.trim())
+    }
+
     /// The nearest float.
     pub fn to_f64(self) -> f64 {
         self.to_string().parse().unwrap_or(f64::NAN)

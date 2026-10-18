@@ -336,6 +336,12 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
             a[0] = Arg::Convert(Numeric);
             Ok(Signature::new(a, Returns::Type(Some(Numeric))))
         }
+        // Of a real, these are a double's (PostgreSQL has no real ones).
+        Func::Round | Func::Trunc | Func::Floor | Func::Ceil | Func::Sign if t(0) == Some(Real) => {
+            let mut a = vec![Arg::Keep; n];
+            a[0] = Arg::Convert(Float);
+            Ok(Signature::new(a, Returns::Type(Some(Float))))
+        }
         Func::Abs
         | Func::Round
         | Func::Trunc
@@ -491,6 +497,7 @@ impl Aggregate for BuiltinAgg {
             // As PostgreSQL: the average of integers is numeric.
             AggFunc::Avg => keep(match at {
                 Some(t) if t.is_integer() => Some(Numeric),
+                Some(Real) => Some(Float),
                 None => Some(Numeric),
                 t => t,
             }),
@@ -561,7 +568,10 @@ impl Accumulator for Acc {
             AggFunc::Count => self.count += 1,
             AggFunc::Sum => {
                 self.value = match (&self.value, v) {
-                    (Value::Null, v @ (Value::Int(_) | Value::Float(_) | Value::Numeric(_))) => v,
+                    (
+                        Value::Null,
+                        v @ (Value::Int(_) | Value::Real(_) | Value::Float(_) | Value::Numeric(_)),
+                    ) => v,
                     (Value::Null, v @ Value::Interval(_)) => v,
                     (Value::Null, v) => {
                         return Err(Error::undefined_function(format!(
@@ -575,6 +585,7 @@ impl Accumulator for Acc {
             AggFunc::Avg => {
                 let v = match v {
                     Value::Int(i) => Value::Numeric(crate::decimal::Decimal::from_i64(i)),
+                    Value::Real(f) => Value::Float(f64::from(f)),
                     v @ (Value::Float(_) | Value::Numeric(_) | Value::Interval(_)) => v,
                     v => {
                         return Err(Error::undefined_function(format!(
@@ -729,16 +740,10 @@ const TYPES: &[(DataType, &[&str], &str)] = &[
     (DataType::SmallInt, &["smallint", "int2"], "number"),
     (DataType::Integer, &["integer", "int", "int4"], "number"),
     (DataType::BigInt, &["bigint", "int8"], "number"),
+    (DataType::Real, &["real", "float4"], "number"),
     (
         DataType::Float,
-        &[
-            "double precision",
-            "float",
-            "real",
-            "float8",
-            "float4",
-            "double",
-        ],
+        &["double precision", "float", "float8", "double"],
         "number",
     ),
     (DataType::Numeric, &["numeric", "decimal", "dec"], "number"),
@@ -858,6 +863,20 @@ fn examples(ty: DataType) -> Vec<Value> {
             let (lo, hi) = ty.int_range().expect("an integer type");
             [0, 1, -1, lo, hi, lo + 1, hi - 1].map(Value::Int).to_vec()
         }
+        DataType::Real => [
+            0.0,
+            -0.0,
+            1.5,
+            0.1,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+            1e-45,
+        ]
+        .map(Value::Real)
+        .to_vec(),
         DataType::Float => [
             0.0,
             -0.0,

@@ -179,14 +179,22 @@ pub fn assign(v: Value, table: &Table, c: usize) -> Result<Value> {
     let col = &table.columns[c];
     // Assignment casts: within numbers, within dates and timestamps, and
     // from or to text (text is parsed, as an untyped literal would be).
+    // (A value's own type is approximate: an integer reads as `bigint`, an
+    // array's as its first element's.)
     let from = v.data_type();
-    let compatible = |f: DataType| {
-        f == col.ty
-            || f == DataType::Text
-            || col.ty == DataType::Text
-            || (f.is_number() && col.ty.is_number())
-            || (f.is_datetime() && col.ty.is_datetime())
-    };
+    fn assignable(f: DataType, to: DataType) -> bool {
+        match (f.element(), to.element()) {
+            (Some(fe), Some(te)) => assignable(fe, te),
+            _ => {
+                f == to
+                    || f == DataType::Text
+                    || to == DataType::Text
+                    || (f.is_number() && to.is_number())
+                    || (f.is_datetime() && to.is_datetime())
+            }
+        }
+    }
+    let compatible = |f: DataType| assignable(f, col.ty);
     let v = match (&v, col.ty) {
         (Value::Null, _) => return Ok(v),
         _ if !from.is_some_and(compatible) => {
@@ -328,7 +336,8 @@ pub fn insert(
     let (rows, writer, ret) = {
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro, reg);
-        let bound = binder.query(source)?;
+        let types = targets.iter().map(|&c| t.columns[c].ty).collect();
+        let bound = binder.insert_source(source, types)?;
         let plan = crate::optimizer::optimize(bound.plan, ro);
         let width = plan.width();
         // DEFAULT VALUES: zero columns.

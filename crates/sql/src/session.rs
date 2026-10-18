@@ -391,7 +391,8 @@ impl Session {
                         }
                     }
                 }
-                let _ = binder.query(source)?;
+                let types = targets.iter().map(|&c| t.columns[c].ty).collect();
+                let _ = binder.insert_source(source, types)?;
                 returning_columns(&mut binder, txn, table, returning)?
             }
             Statement::Update {

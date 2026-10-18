@@ -77,7 +77,8 @@ const DATA: u8 = 0x01;
 /// version 4 registered types (tag `7F` and the type's name), version 5
 /// indexes in taught orderings, version 6 `smallint` and `integer` (type
 /// tags 10 and 11: before it, every integer column was `bigint`, tag 2,
-/// and still reads as one); older versions still read.
+/// and still reads as one) and `real` (tag 12; before, `double
+/// precision`'s tag 3); older versions still read.
 const TABLE_VERSION: u8 = 6;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
@@ -503,6 +504,7 @@ fn type_tag(t: DataType) -> u8 {
         DataType::Interval => 9,
         DataType::SmallInt => 10,
         DataType::Integer => 11,
+        DataType::Real => 12,
     }
 }
 
@@ -524,6 +526,7 @@ fn type_of_tag(t: u8) -> Result<DataType> {
         9 => DataType::Interval,
         10 => DataType::SmallInt,
         11 => DataType::Integer,
+        12 => DataType::Real,
         _ => return Err(Error::internal("unknown column type tag")),
     })
 }

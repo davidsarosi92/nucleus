@@ -566,7 +566,8 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 | smallint | `SMALLINT`, `INT2` | 16-bit |
 | integer | `INTEGER`, `INT`, `INT4` | 32-bit |
 | bigint | `BIGINT`, `INT8` (and, with pg-compat, `OID`) | 64-bit |
-| double precision | `DOUBLE PRECISION`, `FLOAT`, `REAL` | IEEE 754 |
+| real | `REAL`, `FLOAT4` | 32-bit IEEE 754 |
+| double precision | `DOUBLE PRECISION`, `FLOAT`, `FLOAT8` | 64-bit IEEE 754 |
 | numeric | `NUMERIC [(p, s)]`, `DECIMAL`, `DEC` | exact: 128-bit mantissa and a scale, ≤ 38 digits |
 | text | `TEXT`, `VARCHAR(n)`, `CHAR` (and, with pg-compat, `NAME`, `BPCHAR`) | `VARCHAR(n)` length enforced |
 | date | `DATE` | days since 2000-01-01, 4713 BC – 294276 AD |
@@ -610,11 +611,35 @@ serves a comparison across widths and widening a column keeps its keys.
 `crates/testkit/slt/23_integers.slt` (and pg-compat's `02_types.slt` for
 the types, through `pg_typeof`) came from PostgreSQL 18.
 
+**`real` and `double precision`.**  A float prints as PostgreSQL 12+
+prints it: the shortest digits that read back to the same value, in fixed
+notation when the leading digit's power of ten is from −4 up to 14 (a
+double) or 5 (a real), else as `1.2345679e+08`; `-0`, `NaN`,
+`Infinity`.  Input out of range — beyond the largest, or nonzero digits
+that round to zero — is `22003` (`"1e40" is out of range for type
+real`), as is an arithmetic result that overflows or underflows (`value
+out of range: overflow`).  `real` with `real` is computed in 32 bits and
+is `real`; `real` with any other number is `double precision`
+(PostgreSQL has no mixed real operators), but `CASE`, `UNION` and
+`greatest` unify `real` with integers and `numeric` as `real`.  `sum` of
+reals is `real`, `avg` a double; `round`, `trunc`, `floor`, `ceil` and
+`sign` of a real are a double's, and `round` of a float is half to even
+(`rint`).  A real becomes `numeric` through 6 significant digits, a double
+through 15.  A real is stored in 4 bytes (row tag 14); keys widen it to a
+double's encoding, so an index on a real serves double bounds.
+`crates/testkit/slt/24_real.slt` came from PostgreSQL 18.
+
+`INSERT … VALUES` binds each value against its target column, as
+PostgreSQL does: an untyped literal takes the column's type, and each row's
+value is converted as it is stored rather than unified with the other rows'
+(`VALUES ('-inf'), (1.5)` into a `real` column).
+
 Before widths (table record version 5 and older), `INT`, `INTEGER` and
 `SMALLINT` columns were 64-bit with `BIGINT`'s column tag, so the catalog
 cannot tell them apart: such a database opens with them as `bigint`, its
 values intact; `ALTER TABLE … ALTER c TYPE integer` narrows one, checking
-every value.
+every value.  Likewise `REAL` columns were `double precision` and open as
+one.
 
 Decimal literals (`1.5`, `1e3`) are `numeric`, as in PostgreSQL; integers
 too big for bigint too; only values beyond numeric's 38 digits fall back to
@@ -1183,7 +1208,8 @@ below.  A version-1 client gets them as text (type and value tag 4), so
 older drivers keep working.
 
 **Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
-2 an integer (`smallint`, `integer` and `bigint` alike, for now), 3 double precision, 4 text, 5 numeric, 6 date, 7 timestamp,
+2 an integer (`smallint`, `integer` and `bigint` alike, for now), 3 a
+float (`real` sent as a double, exactly, for now), 4 text, 5 numeric, 6 date, 7 timestamp,
 8 timestamptz, 9 interval, 10 array followed by the element's tag, 11 a
 registered type followed by its name (a string: `uuid`).
 
@@ -1194,7 +1220,7 @@ registered type followed by its name (a string: `uuid`).
 | 0 | NULL | — |
 | 1 | boolean | `u8` 0 or 1 |
 | 2 | bigint | `i64` |
-| 3 | double precision | `f64` (IEEE 754 bits) |
+| 3 | double precision (and, for now, real) | `f64` (IEEE 754 bits) |
 | 4 | text | string |
 | 5 | numeric | `i128` mantissa (16 bytes, two's complement), `u8` scale: value = mantissa × 10^-scale |
 | 6 | date | `i32` days since 2000-01-01 |
@@ -1277,6 +1303,10 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-18 — §M14.26 `real`:** a 32-bit float beside `double
+  precision`, PostgreSQL's float output and range errors for both, float
+  overflow and underflow checked, `round` half to even; `INSERT … VALUES`
+  bound against the target columns; pg-compat's float4.
 - **2026-10-18 — §M14.26 integers by width:** `smallint`, `integer`,
   `bigint` as types of their own (ranges, overflow per width, promotion,
   `integer` literals, PostgreSQL 16's integer input); row encoding

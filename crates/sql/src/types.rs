@@ -22,7 +22,9 @@ pub enum DataType {
     Integer,
     /// `BIGINT` (`INT8`): 64-bit.
     BigInt,
-    /// `DOUBLE PRECISION` (`REAL`, `FLOAT`).
+    /// `REAL` (`FLOAT4`): 32-bit IEEE 754.
+    Real,
+    /// `DOUBLE PRECISION` (`FLOAT`, `FLOAT8`): 64-bit IEEE 754.
     Float,
     /// `TEXT` / `VARCHAR`.
     Text,
@@ -50,6 +52,7 @@ impl DataType {
             DataType::SmallInt => &DataType::SmallInt,
             DataType::Integer => &DataType::Integer,
             DataType::BigInt => &DataType::BigInt,
+            DataType::Real => &DataType::Real,
             DataType::Float => &DataType::Float,
             DataType::Text => &DataType::Text,
             DataType::Numeric => &DataType::Numeric,
@@ -77,6 +80,7 @@ impl DataType {
             DataType::SmallInt => "smallint",
             DataType::Integer => "integer",
             DataType::BigInt => "bigint",
+            DataType::Real => "real",
             DataType::Float => "double precision",
             DataType::Text => "text",
             DataType::Numeric => "numeric",
@@ -89,6 +93,7 @@ impl DataType {
                 DataType::SmallInt => "smallint[]",
                 DataType::Integer => "integer[]",
                 DataType::BigInt => "bigint[]",
+                DataType::Real => "real[]",
                 DataType::Float => "double precision[]",
                 DataType::Text => "text[]",
                 DataType::Numeric => "numeric[]",
@@ -104,7 +109,7 @@ impl DataType {
 
     /// Whether this is an integer, `double precision` or `numeric`.
     pub fn is_number(self) -> bool {
-        self.is_integer() || matches!(self, DataType::Float | DataType::Numeric)
+        self.is_integer() || matches!(self, DataType::Real | DataType::Float | DataType::Numeric)
     }
 
     /// Whether this is `smallint`, `integer` or `bigint`.
@@ -164,12 +169,8 @@ impl DataType {
             ["smallint"] | ["int2"] => DataType::SmallInt,
             ["integer"] | ["int"] | ["int4"] => DataType::Integer,
             ["bigint"] | ["int8"] => DataType::BigInt,
-            ["double", "precision"]
-            | ["float"]
-            | ["real"]
-            | ["float8"]
-            | ["float4"]
-            | ["double"] => DataType::Float,
+            ["real"] | ["float4"] => DataType::Real,
+            ["double", "precision"] | ["float"] | ["float8"] | ["double"] => DataType::Float,
             ["text"]
             | ["varchar"]
             | ["character", "varying"]
@@ -201,6 +202,8 @@ pub enum Value {
     Bool(bool),
     /// A 64-bit integer.
     Int(i64),
+    /// A 32-bit float (`real`).
+    Real(f32),
     /// A 64-bit float.
     Float(f64),
     /// A string.
@@ -242,6 +245,7 @@ impl Value {
             Value::Null => None,
             Value::Bool(_) => Some(DataType::Bool),
             Value::Int(_) => Some(DataType::BigInt),
+            Value::Real(_) => Some(DataType::Real),
             Value::Float(_) => Some(DataType::Float),
             Value::Text(_) => Some(DataType::Text),
             Value::Numeric(_) => Some(DataType::Numeric),
@@ -281,6 +285,10 @@ impl Value {
     pub fn sql_cmp(&self, other: &Value) -> Result<Option<Ordering>> {
         Ok(Some(match (self, other) {
             (Value::Null, _) | (_, Value::Null) => return Ok(None),
+            (Value::Real(a), Value::Real(b)) => total_cmp(f64::from(*a), f64::from(*b)),
+            // A real against another number: as a double (it widens exactly).
+            (Value::Real(a), b) => return Value::Float(f64::from(*a)).sql_cmp(b),
+            (a, Value::Real(b)) => return a.sql_cmp(&Value::Float(f64::from(*b))),
             (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
             (Value::Float(a), Value::Float(b)) => total_cmp(*a, *b),
@@ -366,6 +374,19 @@ impl Value {
         let bad = |v: &Value| Error::invalid_text(format!("cannot cast {} to {ty}", v.render()));
         Ok(match (self, ty) {
             (Value::Null, _) => Value::Null,
+            (v @ Value::Real(_), DataType::Real) => v,
+            // As PostgreSQL: a real becomes numeric through its 6 significant
+            // digits (FLT_DIG), as a double through 15.
+            (Value::Real(f), DataType::Numeric) => Value::Numeric(Decimal::from_f32(f)?),
+            (Value::Real(f), DataType::Text) => Value::Text(render_real(f)),
+            (Value::Real(f), t) => Value::Float(f64::from(f)).cast(t)?,
+            (Value::Text(s), DataType::Real) => Value::Real(parse_real(&s)?),
+            (v, DataType::Real) if v.data_type().is_some_and(DataType::is_number) => {
+                let Value::Float(f) = v.cast(DataType::Float)? else {
+                    unreachable!("a double")
+                };
+                Value::Real(narrow_float(f)?)
+            }
             (v @ Value::Ext(..), DataType::Ext(t)) if v.data_type() == Some(DataType::Ext(t)) => v,
             (Value::Text(s), DataType::Ext(t)) => t.imp().input(&s)?,
             (Value::Ext(t, b), DataType::Text) => Value::Text(t.imp().output(&Value::Ext(t, b))),
@@ -434,11 +455,7 @@ impl Value {
             }
             (v, DataType::Text) => Value::Text(v.render()),
             (Value::Text(s), t) if t.is_integer() => Value::Int(parse_int(&s, t)?),
-            (Value::Text(s), DataType::Float) => Value::Float(s.trim().parse().map_err(|_| {
-                Error::invalid_text(format!(
-                    "invalid input syntax for type double precision: {s:?}"
-                ))
-            })?),
+            (Value::Text(s), DataType::Float) => Value::Float(parse_double(&s)?),
             (Value::Text(s), DataType::Bool) => match s.trim().to_ascii_lowercase().as_str() {
                 "t" | "true" | "yes" | "y" | "on" | "1" => Value::Bool(true),
                 "f" | "false" | "no" | "n" | "off" | "0" => Value::Bool(false),
@@ -458,6 +475,7 @@ impl Value {
             Value::Null => "NULL".into(),
             Value::Bool(b) => if *b { "t" } else { "f" }.into(),
             Value::Int(i) => i.to_string(),
+            Value::Real(f) => render_real(*f),
             Value::Float(f) => render_float(*f),
             Value::Text(s) => s.clone(),
             Value::Numeric(d) => d.to_string(),
@@ -496,7 +514,7 @@ fn rank(v: &Value) -> u8 {
     match v {
         Value::Null => 5,
         Value::Bool(_) => 0,
-        Value::Int(_) | Value::Float(_) | Value::Numeric(_) => 1,
+        Value::Int(_) | Value::Real(_) | Value::Float(_) | Value::Numeric(_) => 1,
         Value::Text(_) => 2,
         Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 3,
         Value::Interval(_) => 4,
@@ -607,21 +625,118 @@ pub fn total_cmp(a: f64, b: f64) -> Ordering {
 }
 
 fn render_float(f: f64) -> String {
-    if f.is_nan() {
-        "NaN".into()
-    } else if f.is_infinite() {
-        if f > 0.0 { "Infinity" } else { "-Infinity" }.into()
-    } else if f == 0.0 {
-        "0".into() // -0 prints as 0
-    } else {
-        // Shortest representation that round-trips, like PostgreSQL 12+.
-        let s = format!("{f}");
-        if s.contains('e') || s.len() < 18 {
-            s
-        } else {
-            format!("{f:e}")
-        }
+    pg_float_text(f.is_nan(), f.is_infinite(), f < 0.0, &format!("{f:e}"), 15)
+}
+
+fn render_real(f: f32) -> String {
+    pg_float_text(f.is_nan(), f.is_infinite(), f < 0.0, &format!("{f:e}"), 6)
+}
+
+/// A float as PostgreSQL 12+ prints it: the shortest digits that read back
+/// to the same value, in fixed notation when the leading digit's power of
+/// ten is in `-4 .. limit` (15 for a double, 6 for a real), else as
+/// `d.ddde±XX`.  `sci` is Rust's shortest `{:e}` form (`-1.25e-7`).
+fn pg_float_text(nan: bool, inf: bool, neg: bool, sci: &str, limit: i32) -> String {
+    if nan {
+        return "NaN".into();
     }
+    if inf {
+        return if neg { "-Infinity" } else { "Infinity" }.into();
+    }
+    let (mantissa, exp) = sci.split_once('e').expect("{:e} has an exponent");
+    let exp: i32 = exp.parse().expect("an integer exponent");
+    let sign = if mantissa.starts_with('-') { "-" } else { "" };
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    if digits == "0" {
+        return format!("{sign}0");
+    }
+    if !(-4..limit).contains(&exp) {
+        let m = mantissa.trim_start_matches('-');
+        let e_sign = if exp < 0 { '-' } else { '+' };
+        return format!("{sign}{m}e{e_sign}{:02}", exp.unsigned_abs());
+    }
+    if exp < 0 {
+        return format!("{sign}0.{}{digits}", "0".repeat((-exp - 1) as usize));
+    }
+    let int_len = exp as usize + 1;
+    if digits.len() <= int_len {
+        format!("{sign}{digits}{}", "0".repeat(int_len - digits.len()))
+    } else {
+        format!("{sign}{}.{}", &digits[..int_len], &digits[int_len..])
+    }
+}
+
+/// `22003` for a float result outside its type's range.
+pub fn float_overflow() -> Error {
+    Error::out_of_range("value out of range: overflow")
+}
+
+/// `22003` for a nonzero float result too small for its type.
+pub fn float_underflow() -> Error {
+    Error::out_of_range("value out of range: underflow")
+}
+
+/// A double narrowed to a real: `22003` if it is finite but too large, or
+/// nonzero but too small (as PostgreSQL's `float8` → `float4`).
+pub fn narrow_float(f: f64) -> Result<f32> {
+    let r = f as f32;
+    if r.is_infinite() && f.is_finite() {
+        Err(float_overflow())
+    } else if r == 0.0 && f != 0.0 {
+        Err(float_underflow())
+    } else {
+        Ok(r)
+    }
+}
+
+/// A float's text form (`1.5`, `-2e10`, `Infinity`, `NaN`, spaces around),
+/// parsed by `parse`; out of range — beyond the largest, or nonzero digits
+/// that round to zero — is `22003`.
+fn parse_float<F: std::str::FromStr + Copy>(
+    s: &str,
+    name: &str,
+    parse: impl Fn(&str) -> Option<F>,
+    infinite: impl Fn(F) -> bool,
+    zero: impl Fn(F) -> bool,
+) -> Result<F> {
+    let t = s.trim_matches(|c: char| c.is_ascii_whitespace());
+    let bad = || Error::invalid_text(format!("invalid input syntax for type {name}: {s:?}"));
+    // Rust's parser takes "inf" and "nan" (any case) as PostgreSQL does,
+    // but also "infinity" spelled with a sign it rejects: none are digits.
+    let f = parse(t).ok_or_else(bad)?;
+    let word = t
+        .chars()
+        .any(|c| c.is_ascii_alphabetic() && !matches!(c, 'e' | 'E'));
+    let mantissa = t.split(['e', 'E']).next().unwrap_or("");
+    let nonzero = mantissa.chars().any(|c| ('1'..='9').contains(&c));
+    if (!word && infinite(f)) || (nonzero && zero(f)) {
+        return Err(Error::out_of_range(format!(
+            "\"{t}\" is out of range for type {name}"
+        )));
+    }
+    Ok(f)
+}
+
+/// A `double precision` from text.
+pub fn parse_double(s: &str) -> Result<f64> {
+    parse_float(
+        s,
+        "double precision",
+        |t| t.parse().ok(),
+        f64::is_infinite,
+        |f| f == 0.0,
+    )
+}
+
+/// A `real` from text.
+pub fn parse_real(s: &str) -> Result<f32> {
+    parse_float(
+        s,
+        "real",
+        |t| t.parse().ok(),
+        f32::is_infinite,
+        |f| f == 0.0,
+    )
 }
 
 /// `22003` for a value outside integer type `t`.
@@ -702,6 +817,7 @@ impl Hash for Value {
             Value::Null => 0u8.hash(state),
             Value::Bool(b) => b.hash(state),
             Value::Int(i) => hash_number(*i as f64, state),
+            Value::Real(f) => hash_number(f64::from(*f), state),
             Value::Float(f) => hash_number(*f, state),
             Value::Text(s) => s.hash(state),
             Value::Numeric(d) => hash_number(d.to_f64(), state),
@@ -790,6 +906,33 @@ mod tests {
             "value \"40000\" is out of range for type smallint"
         );
         assert!(Value::Text("x".into()).cast(DataType::BigInt).is_err());
+        let err = |v: Value, t| v.cast(t).unwrap_err().message;
+        assert_eq!(
+            err(Value::Text("1e40".into()), DataType::Real),
+            "\"1e40\" is out of range for type real"
+        );
+        assert_eq!(
+            err(Value::Text("1e-400".into()), DataType::Float),
+            "\"1e-400\" is out of range for type double precision"
+        );
+        assert_eq!(
+            err(Value::Float(1e40), DataType::Real),
+            "value out of range: overflow"
+        );
+        assert_eq!(
+            err(Value::Float(1e-50), DataType::Real),
+            "value out of range: underflow"
+        );
+        assert_eq!(
+            Value::Text(" -Infinity ".into())
+                .cast(DataType::Real)
+                .unwrap(),
+            Value::Real(f32::NEG_INFINITY)
+        );
+        assert_eq!(
+            Value::Real(0.1).cast(DataType::Numeric).unwrap().render(),
+            "0.1"
+        );
         assert_eq!(
             Value::Text("on".into()).cast(DataType::Bool).unwrap(),
             Value::Bool(true)
@@ -802,9 +945,40 @@ mod tests {
 
     #[test]
     fn rendering() {
-        assert_eq!(Value::Float(-0.0).render(), "0");
-        assert_eq!(Value::Float(1e300).render(), "1e300");
-        assert_eq!(Value::Float(2.5).render(), "2.5");
+        // PostgreSQL 18's output, for each.
+        for (f, want) in [
+            (-0.0, "-0"),
+            (0.0, "0"),
+            (1e300, "1e+300"),
+            (-1.5e300, "-1.5e+300"),
+            (2.5, "2.5"),
+            (1e16, "1e+16"),
+            (1e15, "1e+15"),
+            (123456789012345.0, "123456789012345"),
+            (1e-5, "1e-05"),
+            (0.0001, "0.0001"),
+            (1e-46, "1e-46"),
+            (100.0, "100"),
+            (f64::NAN, "NaN"),
+            (f64::NEG_INFINITY, "-Infinity"),
+        ] {
+            assert_eq!(Value::Float(f).render(), want);
+        }
+        for (f, want) in [
+            (0.1f32, "0.1"),
+            (-0.0, "-0"),
+            (3.4e38, "3.4e+38"),
+            (1e-45, "1e-45"),
+            (123456789.0, "1.2345679e+08"),
+            (12345678.0, "1.2345678e+07"),
+            (1e10, "1e+10"),
+            (1e-5, "1e-05"),
+            (1e-6, "1e-06"),
+            (123456.7, "123456.7"),
+            (1.0 / 3.0, "0.33333334"),
+        ] {
+            assert_eq!(Value::Real(f).render(), want);
+        }
         assert_eq!(Value::Bool(true).render(), "t");
     }
 }

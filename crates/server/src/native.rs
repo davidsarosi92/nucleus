@@ -61,7 +61,9 @@ impl Msg {
         let tag = |t: DataType| match t {
             DataType::Bool => 1,
             DataType::SmallInt | DataType::Integer | DataType::BigInt => 2,
-            DataType::Float => 3,
+            // A real travels as a double (exactly) until a protocol
+            // version gives it a tag.
+            DataType::Real | DataType::Float => 3,
             DataType::Text => 4,
             DataType::Numeric => 5,
             DataType::Date => 6,
@@ -100,6 +102,10 @@ fn wire_value(buf: &mut Vec<u8>, v: &Value, v2: bool) {
         Value::Int(i) => {
             buf.push(2);
             buf.extend_from_slice(&i.to_le_bytes());
+        }
+        Value::Real(f) => {
+            buf.push(3);
+            buf.extend_from_slice(&f64::from(*f).to_le_bytes());
         }
         Value::Array(items) => {
             buf.push(10);

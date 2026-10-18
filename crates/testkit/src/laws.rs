@@ -126,6 +126,25 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
                 })
             })
         }
+        DataType::Real => Box::new(|g: &mut Gen| {
+            Value::Real(match g.below(4) {
+                0 => *g.pick(&[
+                    0.0,
+                    -0.0,
+                    1.0,
+                    -1.5,
+                    f32::NAN,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::MIN_POSITIVE,
+                    f32::MAX,
+                    1e-45,
+                    0.1,
+                ]),
+                1 => (g.below(2000) as f32 - 1000.0) / 8.0,
+                _ => f32::from_bits(g.u64() as u32),
+            })
+        }),
         DataType::Float => Box::new(|g: &mut Gen| {
             Value::Float(match g.below(4) {
                 0 => *g.pick(&[

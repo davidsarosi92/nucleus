@@ -9,7 +9,7 @@
 //! | `NULL` | `00` |
 //! | bool | `01`, then `00`/`01` |
 //! | bigint | `02`, then `i ^ i64::MIN` as 8 bytes big-endian |
-//! | double | `03`, then the IEEE bits, sign-flipped (positive) or inverted (negative), big-endian; `-0` as `0`, one `NaN` above all numbers |
+//! | double, real | `03`, then the IEEE bits (a real's widened to 64), sign-flipped (positive) or inverted (negative), big-endian; `-0` as `0`, one `NaN` above all numbers |
 //! | text | `04`, the bytes with `00` escaped as `00 FF`, then `00 01` |
 //! | numeric | `05`, then `02` for zero; else `03` (positive) and the leading digit's power of ten as `i16 ^ 0x8000` big-endian, the significant digits as bytes `d + 1`, then `00`; or `01` (negative) and the positive form's bytes inverted |
 //! | date | `06`, then `days ^ i32::MIN` as 4 bytes big-endian |
@@ -23,7 +23,8 @@
 //!
 //! **Rows** — `02` (version), column count `u16`, then per column a tag
 //! (`0` null, `1` bool, `2` an integer in 8 bytes, `12` in 2, `13` in 4 —
-//! the fewest that hold the value, whatever the column's width — `3` double, `4` text, `5` numeric:
+//! the fewest that hold the value, whatever the column's width — `3` double,
+//! `14` real (4 bytes), `4` text, `5` numeric:
 //! `i128` mantissa and `u8` scale, `6` date `i32`, `7` timestamp and `8`
 //! timestamptz `i64`, `9` interval: months `i32`, days `i32`, µs `i64`,
 //! `10` array: a `u32` count, then each element tagged the same way; `11` a
@@ -51,6 +52,7 @@ pub fn encode_key_value(out: &mut Vec<u8>, v: &Value) {
             out.push(0x02);
             out.extend_from_slice(&((*i ^ i64::MIN) as u64).to_be_bytes());
         }
+        Value::Real(f) => encode_key_value(out, &Value::Float(f64::from(*f))),
         Value::Float(f) => {
             out.push(0x03);
             let f = if *f == 0.0 {
@@ -298,7 +300,7 @@ pub fn decode_key(b: &[u8], n: usize) -> Result<(Vec<Value>, usize)> {
     Ok((values, at))
 }
 
-/// Version 2 added tags 12 and 13; version 1 rows still read.
+/// Version 2 added tags 12, 13 and 14; version 1 rows still read.
 const ROW_VERSION: u8 = 2;
 
 /// Encodes a row.
@@ -328,6 +330,10 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
                 out.push(2);
                 out.extend_from_slice(&i.to_le_bytes());
             }
+        }
+        Value::Real(f) => {
+            out.push(14);
+            out.extend_from_slice(&f.to_le_bytes());
         }
         Value::Float(f) => {
             out.push(3);
@@ -385,6 +391,7 @@ pub fn decode_value(r: &mut Reader) -> Result<Value> {
         0 => Value::Null,
         1 => Value::Bool(r.u8().map_err(bad)? == 1),
         2 => Value::Int(r.u64().map_err(bad)? as i64),
+        14 => Value::Real(f32::from_bits(r.u32().map_err(bad)?)),
         12 => Value::Int(i64::from(r.u16().map_err(bad)? as i16)),
         13 => Value::Int(i64::from(r.u32().map_err(bad)? as i32)),
         3 => Value::Float(f64::from_bits(r.u64().map_err(bad)?)),

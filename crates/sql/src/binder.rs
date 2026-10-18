@@ -84,6 +84,8 @@ pub struct Binder<'a> {
     pub params: Vec<Option<DataType>>,
     /// The CTEs in scope, innermost last.
     ctes: Vec<CteDef>,
+    /// The target column types of `INSERT … VALUES`, for the `VALUES`.
+    values_targets: Option<Vec<DataType>>,
 }
 
 /// A CTE visible to the query being bound.
@@ -220,7 +222,26 @@ impl<'a> Binder<'a> {
             outer: Vec::new(),
             params: Vec::new(),
             ctes: Vec::new(),
+            values_targets: None,
         }
+    }
+
+    /// An `INSERT`'s source.  A plain `VALUES` list is bound against the
+    /// target columns' types, as PostgreSQL does: an untyped literal takes
+    /// its column's type, and each value is converted as it is stored
+    /// rather than unified with the other rows (`('-inf'), (1.5)` into a
+    /// `real`).
+    pub fn insert_source(&mut self, source: &ast::Query, targets: Vec<DataType>) -> Result<Bound> {
+        let plain = source.with.is_none()
+            && source.order_by.is_empty()
+            && source.limit.is_none()
+            && source.offset.is_none();
+        if plain && matches!(source.body, SetExpr::Values(_)) {
+            self.values_targets = Some(targets);
+        }
+        let b = self.query(source);
+        self.values_targets = None;
+        b
     }
 
     /// The registry functions and views are found in.
@@ -610,6 +631,7 @@ impl<'a> Binder<'a> {
     }
 
     fn values(&mut self, rows: &[Vec<ast::Expr>]) -> Result<Bound> {
+        let targets = self.values_targets.take();
         let width = rows.first().map_or(0, Vec::len);
         let empty = Scope::default();
         let mut cells: Vec<Vec<Typed>> = Vec::with_capacity(rows.len());
@@ -623,9 +645,18 @@ impl<'a> Binder<'a> {
                     .collect::<Result<_>>()?,
             );
         }
-        // Each column takes the common type of its cells.
+        // Each column takes the common type of its cells — or, in an
+        // INSERT, its target's.
         let mut types: Vec<Option<DataType>> = vec![None; width];
         for (i, ty) in types.iter_mut().enumerate() {
+            if let Some(&target) = targets.as_ref().and_then(|t| t.get(i)) {
+                for r in cells.iter_mut() {
+                    let (x, t) = std::mem::replace(&mut r[i], (Expr::Literal(Value::Null), None));
+                    r[i] = self.coerce(Some(target), x, t)?.1;
+                }
+                *ty = Some(target);
+                continue;
+            }
             let mut column: Vec<Typed> = cells.iter_mut().map(|r| r[i].clone()).collect();
             *ty = self.unify_items(&mut column)?;
             for (r, c) in cells.iter_mut().zip(column) {
@@ -2190,6 +2221,11 @@ pub(crate) fn arith_type(
     let num = |t: Option<DataType>| t.is_none_or(DataType::is_number);
     let int = |t: Option<DataType>| t.is_some_and(DataType::is_integer);
     Some(match (op, lt, rt) {
+        // real op real is real; real with another number is a double
+        // (PostgreSQL has no mixed real operators, and widens to its
+        // preferred type).
+        (_, Some(Real), Some(Real)) | (_, Some(Real), None) | (_, None, Some(Real)) => Some(Real),
+        (_, l, r) if num(l) && num(r) && (l == Some(Real) || r == Some(Real)) => Some(Float),
         // The wider of the two (integers: the wider width).
         (_, l, r) if num(l) && num(r) => unify(l, r).ok()?,
         (Add | Sub, Some(Date), r) if int(r) => Some(Date),
@@ -2327,8 +2363,8 @@ pub(crate) fn literal_type(v: &Value) -> Option<DataType> {
 }
 
 /// The common type of two branches (`CASE`, `UNION`, `VALUES`): numbers
-/// widen from `smallint` to `integer`, `bigint`, `numeric`, then `double
-/// precision`; dates to `timestamp`, then `timestamptz`.
+/// widen from `smallint` to `integer`, `bigint`, `numeric`, `real`, then
+/// `double precision`; dates to `timestamp`, then `timestamptz`.
 pub fn unify(a: Option<DataType>, b: Option<DataType>) -> Result<Option<DataType>> {
     use DataType::*;
     let rank = |t: DataType| match t {
@@ -2336,7 +2372,8 @@ pub fn unify(a: Option<DataType>, b: Option<DataType>) -> Result<Option<DataType
         Integer | Timestamp => 1,
         BigInt | TimestampTz => 2,
         Numeric => 3,
-        Float => 4,
+        Real => 4,
+        Float => 5,
         _ => 0,
     };
     Ok(match (a, b) {

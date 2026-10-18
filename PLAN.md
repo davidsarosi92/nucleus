@@ -265,7 +265,7 @@ are marked ✅.
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
 | | M14.19 | Modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ✅ DOCS §1, §8.11–§8.12, §9 |
-| | M14.26 | **In progress:** core types: integers by width (✅), `real`, `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
+| | M14.26 | **In progress:** core types: integers by width (✅), `real` (✅), `bytea`, `time`, `char(n)`, `inet` / `cidr`, enums | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
@@ -924,8 +924,12 @@ type set still lacks (today `smallint` and `integer` are names for a
   still tag 2 (8 bytes) until the protocol version that brings this
   milestone's types; `pg-compat` sends oids 21 and 23 with their binary
   forms.
-- **`real`** (32-bit float) beside `double precision`, with PostgreSQL's
-  output rules for each.
+- ✅ **`real`** (32-bit float) beside `double precision`, with PostgreSQL's
+  output rules for each (shortest round-trip digits, `e+XX` notation past
+  15 or 6 digits, `-0`), range errors on input and on overflowing or
+  underflowing arithmetic; stored in 4 bytes, keyed as a double.  On
+  `ncp` it travels as a double until the protocol version that brings
+  this milestone's types.
 - **`bytea`**: binary strings — hex and escape text forms
   (`'\xdeadbeef'`), `||`, `substring`, `length`, `position`, `encode` /
   `decode` (hex, base64), digests (`sha256`, `md5`); byte-wise order and
@@ -1921,3 +1925,6 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-18** — §M14.26: `real`, and PostgreSQL's float output for
+  `double precision` too; `INSERT … VALUES` bound against its target
+  columns, as PostgreSQL does.

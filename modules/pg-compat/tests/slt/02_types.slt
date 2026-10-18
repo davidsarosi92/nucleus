@@ -55,3 +55,25 @@ integer
 
 statement ok
 DROP TABLE widths
+
+# real beside double precision.
+
+query TTTT
+SELECT pg_typeof(1::real + 1::real), pg_typeof(1::real + 1), pg_typeof(1::real + 1.5), pg_typeof(1::real * 1::float8)
+----
+real double precision double precision double precision
+
+query TT
+SELECT pg_typeof(sum(x)), pg_typeof(avg(x)) FROM (VALUES (1.5::real)) v (x)
+----
+real double precision
+
+query TT
+SELECT pg_typeof(abs(1.5::real)), pg_typeof(floor(1.5::real))
+----
+real double precision
+
+query TT
+SELECT pg_typeof(greatest(1::real, 2)), pg_typeof(CASE WHEN true THEN 1::real ELSE 2.5 END)
+----
+real real

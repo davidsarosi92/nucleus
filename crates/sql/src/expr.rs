@@ -672,11 +672,16 @@ fn unary(op: UnaryOp, v: Value) -> Result<Value> {
                 .ok_or_else(|| Error::out_of_range("bigint out of range"))?,
         ),
         (UnaryOp::Neg, Value::Float(f)) => Value::Float(-f),
+        (UnaryOp::Neg, Value::Real(f)) => Value::Real(-f),
         (UnaryOp::Neg, Value::Numeric(d)) => Value::Numeric(d.negate()),
         (UnaryOp::Neg, Value::Interval(i)) => Value::Interval(i.checked_neg()?),
         (
             UnaryOp::Plus,
-            v @ (Value::Int(_) | Value::Float(_) | Value::Numeric(_) | Value::Interval(_)),
+            v @ (Value::Int(_)
+            | Value::Real(_)
+            | Value::Float(_)
+            | Value::Numeric(_)
+            | Value::Interval(_)),
         ) => v,
         (op, v) => {
             return Err(Error::undefined_function(format!(
@@ -757,6 +762,27 @@ pub fn binary(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
                     _ => x.checked_rem(y)?,
                 })
             }
+            (Value::Real(x), Value::Real(y)) => {
+                // real op real is computed in 32 bits, as PostgreSQL's.
+                if matches!(op, Div | Mod) && y == 0.0 {
+                    return Err(Error::division_by_zero("division by zero"));
+                }
+                let r = match op {
+                    Add => x + y,
+                    Sub => x - y,
+                    Mul => x * y,
+                    Div => x / y,
+                    _ => x % y,
+                };
+                check_float(
+                    op,
+                    r.is_infinite(),
+                    r == 0.0,
+                    [x.is_infinite(), y.is_infinite()],
+                    [x == 0.0, y == 0.0],
+                )?;
+                Value::Real(r)
+            }
             (x, y)
                 if x.data_type().is_some_and(|t| t.is_number())
                     && y.data_type().is_some_and(|t| t.is_number()) =>
@@ -765,13 +791,21 @@ pub fn binary(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
                 if matches!(op, Div | Mod) && y == 0.0 {
                     return Err(Error::division_by_zero("division by zero"));
                 }
-                Value::Float(match op {
+                let r = match op {
                     Add => x + y,
                     Sub => x - y,
                     Mul => x * y,
                     Div => x / y,
                     _ => x % y,
-                })
+                };
+                check_float(
+                    op,
+                    r.is_infinite(),
+                    r == 0.0,
+                    [x.is_infinite(), y.is_infinite()],
+                    [x == 0.0, y == 0.0],
+                )?;
+                Value::Float(r)
             }
             (x, y) => datetime_arith(op, x, y)?,
         },
@@ -835,9 +869,39 @@ fn as_decimal(v: &Value) -> Decimal {
     }
 }
 
+/// PostgreSQL's float result checks: an infinite result from finite
+/// operands overflows; a zero product or quotient from nonzero operands
+/// underflows (`22003`).
+fn check_float(
+    op: BinaryOp,
+    inf: bool,
+    zero: bool,
+    inf_in: [bool; 2],
+    zero_in: [bool; 2],
+) -> Result<()> {
+    use BinaryOp::*;
+    let inf_ok = match op {
+        Div => inf_in[0],
+        _ => inf_in[0] || inf_in[1],
+    };
+    if inf && !inf_ok {
+        return Err(crate::types::float_overflow());
+    }
+    let zero_ok = match op {
+        Mul => zero_in[0] || zero_in[1],
+        Div => zero_in[0] || inf_in[1],
+        _ => true,
+    };
+    if zero && !zero_ok {
+        return Err(crate::types::float_underflow());
+    }
+    Ok(())
+}
+
 fn as_f64(v: &Value) -> f64 {
     match v {
         Value::Int(i) => *i as f64,
+        Value::Real(f) => f64::from(*f),
         Value::Float(f) => *f,
         Value::Numeric(d) => d.to_f64(),
         _ => f64::NAN,
@@ -927,7 +991,7 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
     let int = |v: &Value| -> Result<i64> {
         match v {
             Value::Int(i) => Ok(*i),
-            Value::Float(x) => Ok(x.round() as i64),
+            Value::Float(x) => Ok(x.round_ties_even() as i64),
             Value::Numeric(d) => d.to_i64(),
             v => Err(Error::undefined_function(format!(
                 "function {}({}) does not exist",
@@ -1012,6 +1076,7 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                     .ok_or_else(|| Error::out_of_range("bigint out of range"))?,
             ),
             Value::Float(x) => Value::Float(x.abs()),
+            Value::Real(x) => Value::Real(x.abs()),
             Value::Numeric(d) => Value::Numeric(d.abs()),
             v => {
                 return Err(Error::undefined_function(format!(
@@ -1053,7 +1118,8 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                 v => {
                     let x = as_f64(v);
                     let m = 10f64.powi(digits as i32);
-                    let r = (x * m).round() / m;
+                    // Half to even, as PostgreSQL's `rint`.
+                    let r = (x * m).round_ties_even() / m;
                     if matches!(v, Value::Int(_)) {
                         Value::Int(r as i64)
                     } else {

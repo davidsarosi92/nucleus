@@ -93,7 +93,8 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         INT2 => DataType::SmallInt,
         INT4 => DataType::Integer,
         INT8 => DataType::BigInt,
-        FLOAT4 | FLOAT8 => DataType::Float,
+        FLOAT4 => DataType::Real,
+        FLOAT8 => DataType::Float,
         TEXT | VARCHAR | UNKNOWN | BPCHAR | NAME => DataType::Text,
         NUMERIC => DataType::Numeric,
         DATE => DataType::Date,
@@ -104,7 +105,8 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         1005 => DataType::Array(&DataType::SmallInt),
         1007 => DataType::Array(&DataType::Integer),
         1016 | 1028 => DataType::Array(&DataType::BigInt),
-        1021 | 1022 => DataType::Array(&DataType::Float),
+        1021 => DataType::Array(&DataType::Real),
+        1022 => DataType::Array(&DataType::Float),
         1009 | 1014 | 1015 | 1003 => DataType::Array(&DataType::Text),
         1231 => DataType::Array(&DataType::Numeric),
         1182 => DataType::Array(&DataType::Date),
@@ -119,7 +121,7 @@ fn type_size(t: DataType) -> i16 {
     match t {
         DataType::Bool => 1,
         DataType::SmallInt => 2,
-        DataType::Integer | DataType::Date => 4,
+        DataType::Integer | DataType::Real | DataType::Date => 4,
         DataType::BigInt | DataType::Float | DataType::Timestamp | DataType::TimestampTz => 8,
         DataType::Interval => 16,
         DataType::Ext(t) if t.name() == "uuid" => 16,
@@ -483,7 +485,10 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
         (Value::Int(i), DataType::SmallInt) => (*i as i16).to_be_bytes().to_vec(),
         (Value::Int(i), DataType::Integer) => (*i as i32).to_be_bytes().to_vec(),
         (Value::Int(i), _) => i.to_be_bytes().to_vec(),
+        (Value::Float(f), DataType::Real) => (*f as f32).to_be_bytes().to_vec(),
         (Value::Float(f), _) => f.to_be_bytes().to_vec(),
+        (Value::Real(f), DataType::Float) => f64::from(*f).to_be_bytes().to_vec(),
+        (Value::Real(f), _) => f.to_be_bytes().to_vec(),
         (Value::Numeric(d), _) => numeric_binary(d),
         (Value::Date(d), _) => d.to_be_bytes().to_vec(),
         (Value::Timestamp(t) | Value::TimestampTz(t), _) => t.to_be_bytes().to_vec(),
@@ -544,6 +549,10 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
             }
             (Some(DataType::Float), 4) => {
                 Value::Float(f32::from_be_bytes(bytes.try_into().unwrap()).into())
+            }
+            (Some(DataType::Real), 4) => Value::Real(f32::from_be_bytes(bytes.try_into().unwrap())),
+            (Some(DataType::Real), 8) => {
+                Value::Float(f64::from_be_bytes(bytes.try_into().unwrap())).cast(DataType::Real)?
             }
             (Some(DataType::Text) | None, _) => {
                 Value::Text(String::from_utf8(bytes.to_vec()).map_err(|_| bad("text not UTF-8"))?)
@@ -947,6 +956,35 @@ mod tests {
         let wide = (1i64 << 40).to_be_bytes();
         assert_eq!(
             decode_param(&wide, 1, Some(DataType::Integer))
+                .unwrap_err()
+                .code,
+            "22003"
+        );
+    }
+
+    #[test]
+    fn real_binary_matches_postgresql() {
+        // From PostgreSQL 18's float4send and array_send.
+        let real = DataType::Real;
+        assert_eq!(hex(&binary_value(&Value::Real(1.5), real)), "3fc00000");
+        assert_eq!(
+            hex(&binary_value(&Value::Real(f32::NEG_INFINITY), real)),
+            "ff800000"
+        );
+        assert_eq!(
+            hex(&binary_value(
+                &Value::Array(vec![Value::Real(0.1)]),
+                DataType::Array(&DataType::Real)
+            )),
+            "0000000100000000000002bc0000000100000001000000043dcccccd"
+        );
+        assert_eq!(
+            decode_param(&[0x3f, 0xc0, 0, 0], 1, Some(real)).unwrap(),
+            Value::Real(1.5)
+        );
+        // A double parameter for a real is narrowed, and range-checked.
+        assert_eq!(
+            decode_param(&1e300f64.to_be_bytes(), 1, Some(real))
                 .unwrap_err()
                 .code,
             "22003"

@@ -197,6 +197,7 @@ impl<'a> Stats<'a> {
 fn as_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Int(i) => Some(*i as f64),
+        Value::Real(f) => Some(f64::from(*f)),
         Value::Float(f) => Some(*f),
         Value::Numeric(d) => Some(d.to_f64()),
         Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {
