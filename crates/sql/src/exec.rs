@@ -308,6 +308,33 @@ fn shared<'a>(rows: Rc<Vec<Row>>) -> Rows<'a> {
     Box::new((0..rows.len()).map(move |i| Ok(rows[i].clone())))
 }
 
+/// `v` as a key bound in a column of type `t`.  A bound of the wrong type
+/// would encode in the wrong place: then `None`, and the caller reads more
+/// (the filter decides), never less.  Exact conversions only: a value that
+/// compares equal to the column's values the way its converted form does.
+fn key_bound(v: Value, t: DataType) -> Option<Value> {
+    Some(match (v, t) {
+        (v, t) if v.is_null() || v.data_type() == Some(t) => v,
+        // Every integer width has the same key encoding.
+        (v @ Value::Int(_), t) if t.is_integer() => v,
+        (Value::Int(i), DataType::Float) => Value::Float(i as f64),
+        (Value::Int(i), DataType::Numeric) => Value::Numeric(crate::decimal::Decimal::from_i64(i)),
+        // numeric against float compares as floats.
+        (Value::Numeric(d), DataType::Float) => Value::Float(d.to_f64()),
+        (v @ (Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_)), t)
+            if t.is_datetime() && t != DataType::Date =>
+        {
+            let ts = v.as_timestamp()?;
+            if t == DataType::Timestamp {
+                Value::Timestamp(ts)
+            } else {
+                Value::TimestampTz(ts)
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// The KV key range an access path reads: `(start, end, index)`.
 fn key_range(
     table: &Table,
@@ -332,32 +359,7 @@ fn key_range(
     let id = index.map_or(0, |i| table.indexes[i].id);
     let mut key = table.index_prefix(id);
     let ty = |pos: usize| columns.get(pos).map(|c| table.columns[*c].ty);
-    // A bound of the wrong type would encode in the wrong place: then read
-    // more (the filter decides), never less.
-    // Exact conversions only: a value that compares equal to the column's
-    // values the way its converted form does.
-    let coerce = |v: Value, pos: usize| -> Option<Value> {
-        Some(match (v, ty(pos)?) {
-            (v, t) if v.is_null() || v.data_type() == Some(t) => v,
-            (Value::Int(i), DataType::Float) => Value::Float(i as f64),
-            (Value::Int(i), DataType::Numeric) => {
-                Value::Numeric(crate::decimal::Decimal::from_i64(i))
-            }
-            // numeric against float compares as floats.
-            (Value::Numeric(d), DataType::Float) => Value::Float(d.to_f64()),
-            (v @ (Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_)), t)
-                if t.is_datetime() && t != DataType::Date =>
-            {
-                let ts = v.as_timestamp()?;
-                if t == DataType::Timestamp {
-                    Value::Timestamp(ts)
-                } else {
-                    Value::TimestampTz(ts)
-                }
-            }
-            _ => return None,
-        })
-    };
+    let coerce = |v: Value, pos: usize| key_bound(v, ty(pos)?);
     let mut usable = true;
     for (pos, p) in prefix.iter().enumerate() {
         let v = p.eval(e)?;
@@ -828,4 +830,22 @@ pub fn index_key(table: &Table, i: usize, vals: Vec<Value>, pk_bytes: &[u8]) -> 
         k.extend_from_slice(pk_bytes);
     }
     (k, index.unique && all_set)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_bounds_across_integer_widths() {
+        // An integer of any width bounds a key of any width: the same bytes.
+        for t in [DataType::SmallInt, DataType::Integer, DataType::BigInt] {
+            assert_eq!(key_bound(Value::Int(5), t), Some(Value::Int(5)));
+        }
+        assert_eq!(
+            key_bound(Value::Int(2), DataType::Float),
+            Some(Value::Float(2.0))
+        );
+        assert_eq!(key_bound(Value::Text("5".into()), DataType::Integer), None);
+    }
 }

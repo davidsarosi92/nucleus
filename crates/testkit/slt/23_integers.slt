@@ -200,3 +200,43 @@ SELECT date '2024-01-01' + 1::smallint
 
 statement ok
 DROP TABLE nums
+
+# A foreign key across widths; a cascaded value is range-checked.
+
+statement ok
+CREATE TABLE parent (id bigint PRIMARY KEY)
+
+statement ok
+CREATE TABLE child (id integer PRIMARY KEY, p smallint REFERENCES parent (id) ON UPDATE CASCADE)
+
+statement ok
+INSERT INTO parent VALUES (1), (2)
+
+statement ok
+INSERT INTO child VALUES (10, 1)
+
+statement error 23503
+INSERT INTO child VALUES (11, 3)
+
+statement ok
+UPDATE parent SET id = 5 WHERE id = 1
+
+query II
+SELECT id, p FROM child
+----
+10 5
+
+statement error 22003
+UPDATE parent SET id = 40000 WHERE id = 5
+
+query I
+SELECT id FROM parent ORDER BY id
+----
+2
+5
+
+statement ok
+DROP TABLE child
+
+statement ok
+DROP TABLE parent

@@ -358,7 +358,9 @@ pub fn build(
     };
     for (&c, &p) in cols.iter().zip(&ref_cols) {
         let (ct, pt) = (child.columns[c].ty, parent.columns[p].ty);
-        if ct != pt {
+        // Integers of any width have the same key encoding (a cascaded
+        // value is range-checked as it is written).
+        if ct != pt && !(ct.is_integer() && pt.is_integer()) {
             return Err(Error::type_mismatch(format!(
                 "foreign key constraint \"{name}\" cannot be implemented: key columns \"{}\" and \"{}\" are of incompatible types: {ct} and {pt}",
                 child.columns[c].name, parent.columns[p].name
