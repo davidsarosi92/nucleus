@@ -2179,6 +2179,18 @@ impl<'a> Binder<'a> {
                 }
                 return Ok((Expr::Binary(op, Box::new(l), Box::new(r)), arr));
             }
+            // bytea || bytea (an untyped side: bytea).
+            Concat
+                if (lt == Some(DataType::Bytea) && (rt == lt || untyped(&r)))
+                    || (rt == Some(DataType::Bytea) && untyped(&l)) =>
+            {
+                let (l, _) = self.coerce(Some(DataType::Bytea), l, lt)?;
+                let (r, _) = self.coerce(Some(DataType::Bytea), r, rt)?;
+                return Ok((
+                    Expr::Binary(op, Box::new(l), Box::new(r)),
+                    Some(DataType::Bytea),
+                ));
+            }
             Concat => {
                 if lt == Some(DataType::Text)
                     || rt == Some(DataType::Text)

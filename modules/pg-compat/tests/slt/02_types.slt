@@ -77,3 +77,15 @@ query TT
 SELECT pg_typeof(greatest(1::real, 2)), pg_typeof(CASE WHEN true THEN 1::real ELSE 2.5 END)
 ----
 real real
+
+# bytea.
+
+query TTTT
+SELECT pg_typeof('\x01'::bytea), pg_typeof('\x01'::bytea || '\x02'), pg_typeof(md5('a')), pg_typeof(sha256('a'))
+----
+bytea bytea text bytea
+
+query TTT
+SELECT pg_typeof(length('\x01'::bytea)), pg_typeof(substring('\x0102'::bytea from 2)), pg_typeof(encode('\x01'::bytea, 'hex'))
+----
+integer bytea text

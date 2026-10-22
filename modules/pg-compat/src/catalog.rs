@@ -649,6 +649,7 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Real => 700,
         DataType::Float => 701,
         DataType::Text => 25,
+        DataType::Bytea => 17,
         DataType::Numeric => 1700,
         DataType::Date => 1082,
         DataType::Timestamp => 1114,
@@ -665,6 +666,7 @@ pub fn type_oid(t: DataType) -> i64 {
             DataType::Real => 1021,
             DataType::Float => 1022,
             DataType::Text => 1009,
+            DataType::Bytea => 1001,
             DataType::Numeric => 1231,
             DataType::Date => 1182,
             DataType::Timestamp => 1115,
@@ -679,6 +681,7 @@ pub fn type_oid(t: DataType) -> i64 {
 /// `pg_type` lists.
 const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
     (16, "bool", 1, "B", 0, 1000, 0),
+    (17, "bytea", -1, "U", 0, 1001, 0),
     (18, "char", 1, "Z", 0, 1002, 0),
     (19, "name", 64, "S", 0, 1003, 950),
     (20, "int8", 8, "N", 0, 1016, 0),

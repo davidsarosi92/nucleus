@@ -97,6 +97,8 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         FLOAT8 => DataType::Float,
         TEXT | VARCHAR | UNKNOWN | BPCHAR | NAME => DataType::Text,
         NUMERIC => DataType::Numeric,
+        17 => DataType::Bytea,
+        1001 => DataType::Array(&DataType::Bytea),
         DATE => DataType::Date,
         TIMESTAMP => DataType::Timestamp,
         TIMESTAMPTZ => DataType::TimestampTz,
@@ -125,7 +127,11 @@ fn type_size(t: DataType) -> i16 {
         DataType::BigInt | DataType::Float | DataType::Timestamp | DataType::TimestampTz => 8,
         DataType::Interval => 16,
         DataType::Ext(t) if t.name() == "uuid" => 16,
-        DataType::Text | DataType::Numeric | DataType::Array(_) | DataType::Ext(_) => -1,
+        DataType::Text
+        | DataType::Bytea
+        | DataType::Numeric
+        | DataType::Array(_)
+        | DataType::Ext(_) => -1,
     }
 }
 
@@ -481,6 +487,8 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
         // PostgreSQL's binary uuid is its 16 bytes, as nucleus's canonical form.
         (Value::Ext(t, bytes), _) if t.name() == "uuid" => bytes.to_vec(),
         (Value::Bool(b), _) => vec![u8::from(*b)],
+        // PostgreSQL's binary bytea is its bytes.
+        (Value::Bytea(b), _) => b.to_vec(),
         (Value::Int(i), DataType::Float) => (*i as f64).to_be_bytes().to_vec(),
         (Value::Int(i), DataType::SmallInt) => (*i as i16).to_be_bytes().to_vec(),
         (Value::Int(i), DataType::Integer) => (*i as i32).to_be_bytes().to_vec(),
@@ -554,6 +562,7 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
             (Some(DataType::Real), 8) => {
                 Value::Float(f64::from_be_bytes(bytes.try_into().unwrap())).cast(DataType::Real)?
             }
+            (Some(DataType::Bytea), _) => Value::Bytea(bytes.into()),
             (Some(DataType::Text) | None, _) => {
                 Value::Text(String::from_utf8(bytes.to_vec()).map_err(|_| bad("text not UTF-8"))?)
             }
@@ -988,6 +997,24 @@ mod tests {
                 .unwrap_err()
                 .code,
             "22003"
+        );
+    }
+
+    #[test]
+    fn bytea_binary_matches_postgresql() {
+        // From PostgreSQL 18's byteasend and array_send.
+        let b = Value::Bytea(vec![0x01, 0xff].into());
+        assert_eq!(hex(&binary_value(&b, DataType::Bytea)), "01ff");
+        assert_eq!(
+            hex(&binary_value(
+                &Value::Array(vec![b.clone()]),
+                DataType::Array(&DataType::Bytea)
+            )),
+            "00000001000000000000001100000001000000010000000201ff"
+        );
+        assert_eq!(
+            decode_param(&[0x01, 0xff], 1, Some(DataType::Bytea)).unwrap(),
+            b
         );
     }
 

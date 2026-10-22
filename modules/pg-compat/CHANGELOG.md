@@ -6,6 +6,8 @@
   `int2` (oid 21) and `int4` (oid 23), in text and binary (checked
   against PostgreSQL 18's `int2send` / `int4send`); binary parameters of
   those types are range-checked.
+- `bytea` (oid 17, array 1001): text in the hex form, binary as its
+  bytes (checked against PostgreSQL 18).
 - `real` is its own type: sent as `float4` (oid 700), binary checked
   against PostgreSQL 18's `float4send`; a binary double parameter for a
   real column is narrowed and range-checked.

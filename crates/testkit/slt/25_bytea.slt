@@ -1,0 +1,143 @@
+# bytea: binary strings — the hex and escape input forms, hex output,
+# comparisons, keys, ||, substring, length, position, encode / decode,
+# digests, get_byte / set_byte.
+# Expected results produced by PostgreSQL 18 (records marked nucleus-only
+# excepted).
+
+query TTTTTT
+SELECT '\xDEADbeef'::bytea, '\x de ad'::bytea, 'abc'::bytea, 'a\\b'::bytea, 'a\001b'::bytea, ''::bytea
+----
+\xdeadbeef \xdead \x616263 \x615c62 \x610162 \x
+
+query TT
+SELECT 'é'::bytea, '\x41'::bytea::text
+----
+\xc3a9 \x41
+
+statement error 22023
+SELECT '\xabc'::bytea
+
+statement error 22023
+SELECT '\xzz'::bytea
+
+statement error 22P02
+SELECT 'a\9'::bytea
+
+query BBB
+SELECT '\x01'::bytea < '\x0100'::bytea, '\x02'::bytea > '\x0100'::bytea, '\x00'::bytea = '\x'::bytea
+----
+true true false
+
+query TT
+SELECT '\x01'::bytea || '\x02'::bytea, '\x01'::bytea || '\x'
+----
+\x0102 \x01
+
+query TTI
+SELECT substring('\x01020304'::bytea from 2 for 2), substr('\x01020304'::bytea, 3), position('\x03'::bytea in '\x010203'::bytea)
+----
+\x0203 \x0304 3
+
+query III
+SELECT length('\x0102'::bytea), octet_length('\x0102'::bytea), octet_length('é')
+----
+2 2 2
+
+query II
+SELECT get_byte('\x0102'::bytea, 1), length(set_byte('\x0102'::bytea, 0, 255))
+----
+2 2
+
+query T
+SELECT set_byte('\x0102'::bytea, 0, 255)
+----
+\xff02
+
+statement error 2202E
+SELECT get_byte('\x01'::bytea, 5)
+
+# encode / decode.
+
+query TT
+SELECT encode('\x00ff5c41'::bytea, 'escape'), encode('\xdead'::bytea, 'hex')
+----
+\000\377\\A dead
+
+# Base64 lines end after 76 characters (the newline is the 77th).
+query IIB
+SELECT length(encode(x, 'base64')), strpos(encode(x, 'base64'), 'IGJh'), decode(encode(x, 'base64'), 'base64') = x FROM (SELECT 'hello world, this is a long string to wrap base64 output lines at seventy six chars'::bytea) t (x)
+----
+113 57 true
+
+query T
+SELECT substring(encode(x, 'base64') FROM 78) FROM (SELECT 'hello world, this is a long string to wrap base64 output lines at seventy six chars'::bytea) t (x)
+----
+bGluZXMgYXQgc2V2ZW50eSBzaXggY2hhcnM=
+
+query TTT
+SELECT decode('aGVs bG8=', 'base64'), decode('DEAD', 'hex'), decode('a\\b\001', 'escape')
+----
+\x68656c6c6f \xdead \x615c6201
+
+statement error 22023
+SELECT decode('abc', 'hex')
+
+statement error 22023
+SELECT decode('a', 'base64')
+
+statement error 22023
+SELECT decode('a%', 'base64')
+
+statement error 22023
+SELECT encode('\x01'::bytea, 'foo')
+
+# Digests.
+
+query TTT
+SELECT md5('abc'), md5('abc'::bytea), sha256('abc')
+----
+900150983cd24fb0d6963f7d28e17f72 900150983cd24fb0d6963f7d28e17f72 \xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+
+query T
+SELECT encode(sha256(''), 'hex')
+----
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+# Columns, keys, ordering.
+
+statement ok
+CREATE TABLE blobs (k bytea PRIMARY KEY, v bytea)
+
+statement ok
+INSERT INTO blobs VALUES ('\x01', '\xff'), ('\x0100', NULL), ('\x', 'x'), ('\x00', '\x00'), ('\x02', 'a\000b')
+
+statement error 23505
+INSERT INTO blobs VALUES ('\x0100', '\x')
+
+query TT
+SELECT k, v FROM blobs ORDER BY k
+----
+\x \x78
+\x00 \x00
+\x01 \xff
+\x0100 NULL
+\x02 \x610062
+
+query T
+SELECT k FROM blobs WHERE k > '\x00' AND k < '\x02' ORDER BY k
+----
+\x01
+\x0100
+
+query T
+SELECT k FROM blobs WHERE k = '\x0100'
+----
+\x0100
+
+query IT
+SELECT count(*), max(k) FROM blobs
+----
+5 \x02
+
+statement ok
+DROP TABLE blobs

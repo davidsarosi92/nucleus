@@ -28,6 +28,8 @@ pub enum DataType {
     Float,
     /// `TEXT` / `VARCHAR`.
     Text,
+    /// `BYTEA`: a binary string.
+    Bytea,
     /// `NUMERIC` / `DECIMAL`: exact.
     Numeric,
     /// `DATE`.
@@ -55,6 +57,7 @@ impl DataType {
             DataType::Real => &DataType::Real,
             DataType::Float => &DataType::Float,
             DataType::Text => &DataType::Text,
+            DataType::Bytea => &DataType::Bytea,
             DataType::Numeric => &DataType::Numeric,
             DataType::Date => &DataType::Date,
             DataType::Timestamp => &DataType::Timestamp,
@@ -83,6 +86,7 @@ impl DataType {
             DataType::Real => "real",
             DataType::Float => "double precision",
             DataType::Text => "text",
+            DataType::Bytea => "bytea",
             DataType::Numeric => "numeric",
             DataType::Date => "date",
             DataType::Timestamp => "timestamp without time zone",
@@ -96,6 +100,7 @@ impl DataType {
                 DataType::Real => "real[]",
                 DataType::Float => "double precision[]",
                 DataType::Text => "text[]",
+                DataType::Bytea => "bytea[]",
                 DataType::Numeric => "numeric[]",
                 DataType::Date => "date[]",
                 DataType::Timestamp => "timestamp without time zone[]",
@@ -171,6 +176,7 @@ impl DataType {
             ["bigint"] | ["int8"] => DataType::BigInt,
             ["real"] | ["float4"] => DataType::Real,
             ["double", "precision"] | ["float"] | ["float8"] | ["double"] => DataType::Float,
+            ["bytea"] => DataType::Bytea,
             ["text"]
             | ["varchar"]
             | ["character", "varying"]
@@ -208,6 +214,8 @@ pub enum Value {
     Float(f64),
     /// A string.
     Text(String),
+    /// A binary string (`bytea`).
+    Bytea(Arc<[u8]>),
     /// An exact decimal.
     Numeric(Decimal),
     /// Days since 2000-01-01.
@@ -248,6 +256,7 @@ impl Value {
             Value::Real(_) => Some(DataType::Real),
             Value::Float(_) => Some(DataType::Float),
             Value::Text(_) => Some(DataType::Text),
+            Value::Bytea(_) => Some(DataType::Bytea),
             Value::Numeric(_) => Some(DataType::Numeric),
             Value::Date(_) => Some(DataType::Date),
             Value::Timestamp(_) => Some(DataType::Timestamp),
@@ -295,6 +304,7 @@ impl Value {
             (Value::Int(a), Value::Float(b)) => total_cmp(*a as f64, *b),
             (Value::Float(a), Value::Int(b)) => total_cmp(*a, *b as f64),
             (Value::Text(a), Value::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
+            (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
             (Value::Numeric(a), Value::Numeric(b)) => a.cmp(b),
             (Value::Numeric(a), Value::Int(b)) => a.cmp(&Decimal::from_i64(*b)),
             (Value::Int(a), Value::Numeric(b)) => Decimal::from_i64(*a).cmp(b),
@@ -394,6 +404,7 @@ impl Value {
             | (v @ Value::Int(_), DataType::BigInt)
             | (v @ Value::Float(_), DataType::Float)
             | (v @ Value::Text(_), DataType::Text)
+            | (v @ Value::Bytea(_), DataType::Bytea)
             | (v @ Value::Numeric(_), DataType::Numeric)
             | (v @ Value::Date(_), DataType::Date)
             | (v @ Value::Timestamp(_), DataType::Timestamp)
@@ -455,6 +466,7 @@ impl Value {
             }
             (v, DataType::Text) => Value::Text(v.render()),
             (Value::Text(s), t) if t.is_integer() => Value::Int(parse_int(&s, t)?),
+            (Value::Text(s), DataType::Bytea) => Value::Bytea(crate::bytea::parse(&s)?.into()),
             (Value::Text(s), DataType::Float) => Value::Float(parse_double(&s)?),
             (Value::Text(s), DataType::Bool) => match s.trim().to_ascii_lowercase().as_str() {
                 "t" | "true" | "yes" | "y" | "on" | "1" => Value::Bool(true),
@@ -478,6 +490,7 @@ impl Value {
             Value::Real(f) => render_real(*f),
             Value::Float(f) => render_float(*f),
             Value::Text(s) => s.clone(),
+            Value::Bytea(b) => crate::bytea::format_hex(b),
             Value::Numeric(d) => d.to_string(),
             Value::Date(d) => datetime::format_date(*d),
             Value::Timestamp(t) => datetime::format_timestamp(*t, false),
@@ -516,6 +529,7 @@ fn rank(v: &Value) -> u8 {
         Value::Bool(_) => 0,
         Value::Int(_) | Value::Real(_) | Value::Float(_) | Value::Numeric(_) => 1,
         Value::Text(_) => 2,
+        Value::Bytea(_) => 8,
         Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 3,
         Value::Interval(_) => 4,
         Value::Array(_) => 6,
@@ -820,6 +834,10 @@ impl Hash for Value {
             Value::Real(f) => hash_number(f64::from(*f), state),
             Value::Float(f) => hash_number(*f, state),
             Value::Text(s) => s.hash(state),
+            Value::Bytea(b) => {
+                8u8.hash(state);
+                b.hash(state);
+            }
             Value::Numeric(d) => hash_number(d.to_f64(), state),
             Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {
                 3u8.hash(state);

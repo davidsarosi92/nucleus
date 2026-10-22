@@ -11,6 +11,7 @@
 //! | bigint | `02`, then `i ^ i64::MIN` as 8 bytes big-endian |
 //! | double, real | `03`, then the IEEE bits (a real's widened to 64), sign-flipped (positive) or inverted (negative), big-endian; `-0` as `0`, one `NaN` above all numbers |
 //! | text | `04`, the bytes with `00` escaped as `00 FF`, then `00 01` |
+//! | bytea | `0C`, the bytes escaped as text's |
 //! | numeric | `05`, then `02` for zero; else `03` (positive) and the leading digit's power of ten as `i16 ^ 0x8000` big-endian, the significant digits as bytes `d + 1`, then `00`; or `01` (negative) and the positive form's bytes inverted |
 //! | date | `06`, then `days ^ i32::MIN` as 4 bytes big-endian |
 //! | timestamp, timestamptz | `07` / `08`, then `µs ^ i64::MIN` as 8 bytes big-endian |
@@ -24,7 +25,7 @@
 //! **Rows** — `02` (version), column count `u16`, then per column a tag
 //! (`0` null, `1` bool, `2` an integer in 8 bytes, `12` in 2, `13` in 4 —
 //! the fewest that hold the value, whatever the column's width — `3` double,
-//! `14` real (4 bytes), `4` text, `5` numeric:
+//! `14` real (4 bytes), `15` bytea (a `u32` length and the bytes), `4` text, `5` numeric:
 //! `i128` mantissa and `u8` scale, `6` date `i32`, `7` timestamp and `8`
 //! timestamptz `i64`, `9` interval: months `i32`, days `i32`, µs `i64`,
 //! `10` array: a `u32` count, then each element tagged the same way; `11` a
@@ -73,6 +74,10 @@ pub fn encode_key_value(out: &mut Vec<u8>, v: &Value) {
         Value::Text(s) => {
             out.push(0x04);
             escape(out, s.as_bytes());
+        }
+        Value::Bytea(b) => {
+            out.push(0x0C);
+            escape(out, b);
         }
         Value::Ext(t, bytes) => {
             out.push(0x0B);
@@ -203,6 +208,10 @@ pub fn decode_key_value(b: &[u8]) -> Result<(Value, usize)> {
                 1 + used,
             )
         }
+        0x0C => {
+            let (b, used) = unescape(&b[1..])?;
+            (Value::Bytea(b.into()), 1 + used)
+        }
         0x0B => {
             let id = u32::from_be_bytes(b.get(1..5).ok_or_else(bad_key)?.try_into().unwrap());
             let t = crate::ext::TypeRef::by_id(id);
@@ -300,7 +309,7 @@ pub fn decode_key(b: &[u8], n: usize) -> Result<(Vec<Value>, usize)> {
     Ok((values, at))
 }
 
-/// Version 2 added tags 12, 13 and 14; version 1 rows still read.
+/// Version 2 added tags 12 to 15; version 1 rows still read.
 const ROW_VERSION: u8 = 2;
 
 /// Encodes a row.
@@ -343,6 +352,11 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
             out.push(4);
             out.extend_from_slice(&(s.len() as u32).to_le_bytes());
             out.extend_from_slice(s.as_bytes());
+        }
+        Value::Bytea(b) => {
+            out.push(15);
+            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            out.extend_from_slice(b);
         }
         Value::Numeric(d) => {
             out.push(5);
@@ -391,6 +405,10 @@ pub fn decode_value(r: &mut Reader) -> Result<Value> {
         0 => Value::Null,
         1 => Value::Bool(r.u8().map_err(bad)? == 1),
         2 => Value::Int(r.u64().map_err(bad)? as i64),
+        15 => {
+            let n = r.u32().map_err(bad)? as usize;
+            Value::Bytea(r.take(n).map_err(bad)?.into())
+        }
         14 => Value::Real(f32::from_bits(r.u32().map_err(bad)?)),
         12 => Value::Int(i64::from(r.u16().map_err(bad)? as i16)),
         13 => Value::Int(i64::from(r.u32().map_err(bad)? as i32)),

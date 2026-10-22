@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod binder;
 pub mod builtin;
+pub mod bytea;
 pub mod catalog;
 pub mod check;
 pub mod datetime;

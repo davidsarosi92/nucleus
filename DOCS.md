@@ -570,6 +570,7 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 | double precision | `DOUBLE PRECISION`, `FLOAT`, `FLOAT8` | 64-bit IEEE 754 |
 | numeric | `NUMERIC [(p, s)]`, `DECIMAL`, `DEC` | exact: 128-bit mantissa and a scale, ≤ 38 digits |
 | text | `TEXT`, `VARCHAR(n)`, `CHAR` (and, with pg-compat, `NAME`, `BPCHAR`) | `VARCHAR(n)` length enforced |
+| bytea | `BYTEA` | a binary string |
 | date | `DATE` | days since 2000-01-01, 4713 BC – 294276 AD |
 | timestamp | `TIMESTAMP [WITHOUT TIME ZONE]` | µs since 2000-01-01 |
 | timestamptz | `TIMESTAMPTZ`, `TIMESTAMP WITH TIME ZONE` | µs since 2000-01-01 UTC |
@@ -628,6 +629,19 @@ reals is `real`, `avg` a double; `round`, `trunc`, `floor`, `ceil` and
 through 15.  A real is stored in 4 bytes (row tag 14); keys widen it to a
 double's encoding, so an index on a real serves double bounds.
 `crates/testkit/slt/24_real.slt` came from PostgreSQL 18.
+
+**`bytea`** (`bytea.rs`): input as `\x` and hex digit pairs (spaces
+between pairs allowed) or the escape form (characters as their UTF-8
+bytes, `\\` a backslash, `\ooo` an octal byte); output the hex form
+(`\xdeadbeef`); a text literal or text casts to it by its input form, and
+it casts to text as its output.  Byte-wise order (a shorter prefix
+first), key tag `0C` (its bytes escaped as text's), row tag `15`.  `||`,
+`length` and `octet_length` (bytes), `substring` / `substr` (also
+`substring(x FROM a FOR b)`), `position(sub IN x)`, `get_byte`,
+`set_byte`, `encode(b, 'hex' | 'base64' | 'escape')` (base64 lines of 76
+characters, as PostgreSQL's) and `decode`, `sha256` (bytea) and `md5`
+(text or bytea, a hex text) — the digests built in, without a
+dependency.  `crates/testkit/slt/25_bytea.slt` came from PostgreSQL 18.
 
 `INSERT … VALUES` binds each value against its target column, as
 PostgreSQL does: an untyped literal takes the column's type, and each row's
@@ -1209,7 +1223,8 @@ older drivers keep working.
 
 **Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
 2 an integer (`smallint`, `integer` and `bigint` alike, for now), 3 a
-float (`real` sent as a double, exactly, for now), 4 text, 5 numeric, 6 date, 7 timestamp,
+float (`real` sent as a double, exactly, for now), 4 text (and, for
+now, `bytea` in its hex text form), 5 numeric, 6 date, 7 timestamp,
 8 timestamptz, 9 interval, 10 array followed by the element's tag, 11 a
 registered type followed by its name (a string: `uuid`).
 
@@ -1303,6 +1318,10 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-22 — §M14.26 `bytea`:** binary strings (hex and escape
+  forms, `encode` / `decode`, `sha256`, `md5`, the byte functions),
+  `position(… IN …)` and `substring(… FROM … FOR …)` in the grammar;
+  pg-compat's bytea.
 - **2026-10-18 — §M14.26 `real`:** a 32-bit float beside `double
   precision`, PostgreSQL's float output and range errors for both, float
   overflow and underflow checked, `round` half to even; `INSERT … VALUES`

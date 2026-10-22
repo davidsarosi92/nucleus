@@ -1579,6 +1579,49 @@ impl<'a> Parser<'a> {
             }
             self.pos = save;
         }
+        let call = |name: &str, args: Vec<Expr>| Expr::Function {
+            name: name.into(),
+            args,
+            distinct: false,
+            star: false,
+            order_by: vec![],
+        };
+        // position(sub IN s): strpos(s, sub).
+        if first == "position" && self.peek_op("(") {
+            let save = self.pos;
+            self.pos += 1;
+            let sub = self.expr_prec(PREC_IN + 1)?;
+            if self.eat_kw("in") {
+                let s = self.expr()?;
+                self.expect_op(")")?;
+                return Ok(call("strpos", vec![s, sub]));
+            }
+            self.pos = save;
+        }
+        // substring(s FROM start [FOR count]), substring(s FOR count).
+        if first == "substring" && self.peek_op("(") {
+            let save = self.pos;
+            self.pos += 1;
+            let s = self.expr()?;
+            let from = if self.eat_kw("from") {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            let count = if self.eat_kw("for") {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            if from.is_some() || count.is_some() {
+                self.expect_op(")")?;
+                let start = from.unwrap_or(Expr::Literal(Value::Int(1)));
+                let mut args = vec![s, start];
+                args.extend(count);
+                return Ok(call("substr", args));
+            }
+            self.pos = save;
+        }
         if self.eat_op("(") {
             let mut args = Vec::new();
             let mut distinct = false;

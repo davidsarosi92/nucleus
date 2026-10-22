@@ -118,6 +118,7 @@ impl Module for Builtin {
             crate::ext::lawful(type_of(ty.array_of().expect("arrays")))?;
         }
         crate::uuid::register(r)?;
+        crate::bytea::register(r)?;
         r.add_table_function(Arc::new(Unnest))?;
         r.add_schema("public", "user tables", false)?;
         r.add_schema("nc_catalog", "the nucleus system catalog", false)?;
@@ -310,6 +311,7 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
     let t = |i: usize| args[i].ty;
     let keep = |ty: Option<DataType>| Ok(Signature::keep(n, ty));
     match f {
+        Func::Substr if t(0) == Some(Bytea) => keep(Some(Bytea)),
         Func::Lower
         | Func::Upper
         | Func::Trim
@@ -759,6 +761,7 @@ const TYPES: &[(DataType, &[&str], &str)] = &[
         ],
         "text",
     ),
+    (DataType::Bytea, &["bytea"], "binary"),
     (DataType::Date, &["date"], "datetime"),
     (
         DataType::Timestamp,
@@ -901,6 +904,9 @@ fn examples(ty: DataType) -> Vec<Value> {
         .collect(),
         DataType::Text => ["", "a", "a\u{0}b", "é", "{a,\"b\"}", "NULL"]
             .map(|s| Value::Text(s.to_string()))
+            .to_vec(),
+        DataType::Bytea => [&b""[..], b"\0", b"\0\0", b"\0\x01", b"a", b"a\0", b"\xff"]
+            .map(|b| Value::Bytea(b.into()))
             .to_vec(),
         DataType::Date => [0, 1, -1, -2_451_000, 100_000_000]
             .map(Value::Date)

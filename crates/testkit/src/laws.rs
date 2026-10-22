@@ -164,6 +164,13 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
                 _ => f64::from_bits(g.u64()),
             })
         }),
+        DataType::Bytea => Box::new(|g: &mut Gen| {
+            let n = g.below(12) as usize;
+            let bytes: Vec<u8> = (0..n)
+                .map(|_| *g.pick(&[0u8, 1, 0xff, b'a', b'\\', 0x80]))
+                .collect();
+            Value::Bytea(bytes.into())
+        }),
         DataType::Text => Box::new(|g: &mut Gen| {
             let alphabet = [
                 'a', 'b', 'Z', ' ', ',', '"', '\\', '{', '}', 'é', '😀', '\u{1}', 'Ω',

@@ -64,7 +64,9 @@ impl Msg {
             // A real travels as a double (exactly) until a protocol
             // version gives it a tag.
             DataType::Real | DataType::Float => 3,
-            DataType::Text => 4,
+            // bytea travels as its text form until a protocol version
+            // gives it a tag.
+            DataType::Text | DataType::Bytea => 4,
             DataType::Numeric => 5,
             DataType::Date => 6,
             DataType::Timestamp => 7,
@@ -107,6 +109,7 @@ fn wire_value(buf: &mut Vec<u8>, v: &Value, v2: bool) {
             buf.push(3);
             buf.extend_from_slice(&f64::from(*f).to_le_bytes());
         }
+        Value::Bytea(_) => encode_value(buf, &Value::Text(v.render())),
         Value::Array(items) => {
             buf.push(10);
             buf.extend_from_slice(&(items.len() as u32).to_le_bytes());

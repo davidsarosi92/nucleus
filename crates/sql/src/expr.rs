@@ -716,6 +716,7 @@ pub fn binary(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
             })
         }
         Concat => match (a, b) {
+            (Value::Bytea(x), Value::Bytea(y)) => Value::Bytea([&x[..], &y[..]].concat().into()),
             (Value::Array(mut x), Value::Array(y)) => {
                 x.extend(y);
                 Value::Array(x)
@@ -1068,7 +1069,10 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
     Ok(match f {
         Func::Lower => Value::Text(text(&args[0])?.to_lowercase()),
         Func::Upper => Value::Text(text(&args[0])?.to_uppercase()),
-        Func::Length => Value::Int(text(&args[0])?.chars().count() as i64),
+        Func::Length => match &args[0] {
+            Value::Bytea(b) => Value::Int(b.len() as i64),
+            v => Value::Int(text(v)?.chars().count() as i64),
+        },
         Func::Trim => Value::Text(text(&args[0])?.trim().to_string()),
         Func::Abs => match &args[0] {
             Value::Int(i) => Value::Int(
@@ -1086,7 +1090,6 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
             }
         },
         Func::Substr => {
-            let s: Vec<char> = text(&args[0])?.chars().collect();
             let from = int(&args[1])?;
             let count = args.get(2).map(int).transpose()?;
             // SQL semantics: positions before 1 count against `count`.
@@ -1100,15 +1103,19 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                 Some(c) => from.saturating_add(c).max(start),
                 None => i64::MAX,
             };
-            let (a, b) = (
-                (start - 1) as usize,
-                (end - 1).min(s.len() as i64).max(0) as usize,
-            );
-            Value::Text(if a >= s.len() || a >= b {
-                String::new()
-            } else {
-                s[a..b].iter().collect()
-            })
+            let range = |len: usize| {
+                let (a, b) = (
+                    (start - 1) as usize,
+                    (end - 1).min(len as i64).max(0) as usize,
+                );
+                if a >= len || a >= b { 0..0 } else { a..b }
+            };
+            // Of a bytea, bytes; of text, characters.
+            if let Value::Bytea(b) = &args[0] {
+                return Ok(Value::Bytea(b[range(b.len())].into()));
+            }
+            let s: Vec<char> = text(&args[0])?.chars().collect();
+            Value::Text(s[range(s.len())].iter().collect())
         }
         Func::Round => {
             let digits = args.get(1).map(int).transpose()?.unwrap_or(0);
@@ -1143,6 +1150,14 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
         },
         Func::Replace => Value::Text(text(&args[0])?.replace(&text(&args[1])?, &text(&args[2])?)),
         Func::Strpos => {
+            if let (Value::Bytea(s), Value::Bytea(sub)) = (&args[0], &args[1]) {
+                let at = if sub.is_empty() {
+                    Some(0)
+                } else {
+                    s.windows(sub.len()).position(|w| w == &sub[..])
+                };
+                return Ok(Value::Int(at.map_or(0, |i| i as i64 + 1)));
+            }
             let (s, sub) = (text(&args[0])?, text(&args[1])?);
             Value::Int(
                 s.find(&sub)

@@ -930,7 +930,8 @@ type set still lacks (today `smallint` and `integer` are names for a
   underflowing arithmetic; stored in 4 bytes, keyed as a double.  On
   `ncp` it travels as a double until the protocol version that brings
   this milestone's types.
-- **`bytea`**: binary strings — hex and escape text forms
+- 🟡 **`bytea`** (the type, its functions and pg-compat's done; out-of-line
+  storage and the drivers' native types next): binary strings — hex and escape text forms
   (`'\xdeadbeef'`), `||`, `substring`, `length`, `position`, `encode` /
   `decode` (hex, base64), digests (`sha256`, `md5`); byte-wise order and
   a key encoding; native types in every driver (`Vec<u8>`, `bytes`,
@@ -1925,6 +1926,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-22** — §M14.26: `bytea` — the type, its text forms and
+  functions, digests without a dependency; out-of-line storage of large
+  values and the drivers' native types are its next steps.
 - **2026-10-18** — §M14.26: `real`, and PostgreSQL's float output for
   `double precision` too; `INSERT … VALUES` bound against its target
   columns, as PostgreSQL does.

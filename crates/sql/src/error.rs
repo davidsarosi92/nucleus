@@ -65,6 +65,7 @@ codes! {
     invalid_schema => "3F000",
     invalid_regex => "2201B",
     invalid_parameter => "22023",
+    array_subscript => "2202E",
     snapshot_too_old => "72000",
     internal => "XX000",
     io => "58030",
