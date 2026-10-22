@@ -3,6 +3,7 @@ package io.github.davidsarosi92.nucleus;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Arrays;
@@ -49,7 +50,7 @@ public final class NucleusTest {
             String t = table();
             db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, b BOOLEAN, f FLOAT, s TEXT, n NUMERIC(10, 2),"
                     + " d DATE, ts TIMESTAMP, tz TIMESTAMPTZ, iv INTERVAL, tags TEXT[])");
-            List<Object> row = Arrays.asList(1L, true, 0.5, "héllo", new BigDecimal("-123.45"),
+            List<Object> row = Arrays.asList(1, true, 0.5, "héllo", new BigDecimal("-123.45"),
                     LocalDate.of(2024, 2, 29), LocalDateTime.of(2024, 3, 10, 14, 5, 6, 500_000_000),
                     OffsetDateTime.of(2024, 3, 10, 12, 0, 0, 0, ZoneOffset.UTC), new Interval(1, 2, 3_000_000),
                     Arrays.asList("a", null, "c"));
@@ -58,7 +59,7 @@ public final class NucleusTest {
             Result got = db.query("SELECT * FROM " + t);
             equal(got.rows(), List.of(row), "round trip");
             equal(got.columns().get(9).type(), "text[]", "array type");
-            equal(db.query("SELECT 1.50 + 1, $1 + 1", "41").rows().get(0), List.of(new BigDecimal("2.50"), 42L), "numeric and text param");
+            equal(db.query("SELECT 1.50 + 1, $1 + 1", "41").rows().get(0), List.of(new BigDecimal("2.50"), 42), "numeric and text param");
             equal(db.query("SELECT NULL").rows().get(0).get(0), null, "null");
             equal(got.records().get(0).get("s"), "héllo", "records");
         }
@@ -75,7 +76,37 @@ public final class NucleusTest {
             equal(r.rows().get(0).get(0), u, "uuid value");
             equal(r.rows().get(0).get(1), u.toString(), "uuid text");
             equal(((UUID) r.rows().get(0).get(2)).version(), 4, "a version-4 uuid");
-            equal(db.query("SELECT n FROM " + t + " WHERE id = $1", u.toString().toUpperCase()).rows(), List.of(List.of(1L)), "text parameter");
+            equal(db.query("SELECT n FROM " + t + " WHERE id = $1", u.toString().toUpperCase()).rows(), List.of(List.of(1)), "text parameter");
+        }
+    }
+
+    static void coreTypes() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            String t = table();
+            String mood = t + "_mood";
+            db.query("CREATE TYPE " + mood + " AS ENUM ('sad', 'happy')");
+            db.query("CREATE TABLE " + t + " (s SMALLINT, i INTEGER, r REAL, b BYTEA, tm TIME, ch CHAR(3),"
+                    + " ip INET, net CIDR, m " + mood + ")");
+            byte[] bytes = {0, (byte) 0xff};
+            List<Object> row = Arrays.asList((short) -2, 70000, 0.1f, bytes, LocalTime.of(12, 34, 56, 500_000_000),
+                    "ab ", Inet.parse("10.1.2.3/8"), Cidr.parse("2001:db8::/32"), "happy");
+            db.query("INSERT INTO " + t + " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", row.toArray());
+            Result got = db.query("SELECT * FROM " + t);
+            List<Object> back = got.rows().get(0);
+            equal(Arrays.equals((byte[]) back.get(3), bytes), true, "bytea");
+            List<Object> rest = new java.util.ArrayList<>(back);
+            rest.set(3, null);
+            List<Object> want = new java.util.ArrayList<>(row);
+            want.set(3, null);
+            equal(rest, want, "core types round trip");
+            equal(got.columns().stream().map(Column::type).toList(),
+                    List.of("smallint", "integer", "real", "bytea", "time", "character", "inet", "cidr", mood),
+                    "column types");
+            equal(back.get(6).toString() + " " + back.get(7), "10.1.2.3/8 2001:db8::/32", "address text");
+            equal(Inet.parse("::ffff:1.2.3.4").toString(), "::ffff:1.2.3.4", "mapped address");
+            equal(db.query("SELECT count(*) FROM " + t + " WHERE b = $1 AND ip <<= $2", bytes,
+                    Cidr.parse("10.0.0.0/8")).rows(), List.of(List.of(1L)), "parameters");
+            equal(db.query("SELECT time '24:00'").rows().get(0).get(0), LocalTime.MAX, "end of day");
         }
     }
 
@@ -106,7 +137,7 @@ public final class NucleusTest {
                 // rolled back
             }
             equal(db.status(), NucleusClient.Status.IDLE, "status");
-            equal(db.query("SELECT id FROM " + t).rows(), List.of(List.of(1L)), "committed rows");
+            equal(db.query("SELECT id FROM " + t).rows(), List.of(List.of(1)), "committed rows");
         }
     }
 
@@ -123,10 +154,11 @@ public final class NucleusTest {
     public static void main(String[] args) {
         run("types both ways", NucleusTest::typesBothWays);
         run("uuid", NucleusTest::uuid);
+        run("core types", NucleusTest::coreTypes);
         run("errors", NucleusTest::errors);
         run("transactions", NucleusTest::transactions);
         run("authentication", NucleusTest::authentication);
-        check(passed == 5, "all tests ran");
+        check(passed == 6, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
@@ -17,6 +18,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
@@ -38,24 +40,31 @@ import java.util.function.Function;
  * }
  * }</pre>
  *
- * <p>Values: boolean → Boolean, bigint → Long, double → Double, numeric → BigDecimal, text →
- * String, date → LocalDate, timestamp → LocalDateTime, timestamptz → OffsetDateTime (UTC),
- * interval → {@link Interval}, uuid → UUID, arrays → List, NULL → null; another registered type
- * → {@link Ext} (its name and binary form). Parameters take the same types (and
- * Integer, Short, Float, Instant, Duration, arrays and Collections). One thread at a time per
- * connection.
+ * <p>Values: boolean → Boolean, smallint → Short, integer → Integer, bigint → Long, real →
+ * Float, double → Double, numeric → BigDecimal, text, char(n) and enums → String, bytea →
+ * byte[], date → LocalDate, time → LocalTime (24:00:00, which it cannot hold, as
+ * LocalTime.MAX), timestamp → LocalDateTime, timestamptz → OffsetDateTime (UTC), interval →
+ * {@link Interval}, inet → {@link Inet}, cidr → {@link Cidr}, uuid → UUID, arrays → List, NULL
+ * → null; another registered type → {@link Ext} (its name and binary form). Parameters take
+ * the same types (and Byte, InetAddress, Instant, Duration, arrays and Collections). One thread
+ * at a time per connection.
  */
 public final class NucleusClient implements AutoCloseable {
-    /** 2: registered types (uuid, modules' types) arrive in their binary form. */
-    public static final int PROTOCOL_VERSION = 2;
+    /**
+     * 2: registered types (uuid, modules' types) arrive in their binary form; 3: smallint,
+     * integer, real, bytea, time, inet and cidr in theirs.
+     */
+    public static final int PROTOCOL_VERSION = 3;
     private static final int EXT = 11;
+    private static final int ENUM = 20;
     public static final int DEFAULT_PORT = 20035;
 
     private static final LocalDate EPOCH_DATE = LocalDate.of(2000, 1, 1);
     private static final LocalDateTime EPOCH = LocalDateTime.of(2000, 1, 1, 0, 0);
     private static final String[] TYPE_NAMES = {
         "unknown", "boolean", "bigint", "double precision", "text", "numeric",
-        "date", "timestamp", "timestamptz", "interval", "array",
+        "date", "timestamp", "timestamptz", "interval", "array", "", "smallint",
+        "integer", "real", "bytea", "time", "character", "inet", "cidr",
     };
 
     /** The transaction status after the last query. */
@@ -136,7 +145,8 @@ public final class NucleusClient implements AutoCloseable {
                         for (int i = 0; i < n; i++) {
                             String name = r.str();
                             int tag = r.u8();
-                            String type = tag == 10 ? typeName(r.u8()) + "[]" : tag == EXT ? r.str() : typeName(tag);
+                            String type = tag == 10 ? typeName(r.u8()) + "[]"
+                                    : tag == EXT || tag == ENUM ? r.str() : typeName(tag);
                             columns.add(new Column(name, type));
                         }
                         rows = new ArrayList<>();
@@ -265,6 +275,13 @@ public final class NucleusClient implements AutoCloseable {
 
         byte[] bytes() { return b.toByteArray(); }
 
+        Writer net(int tag, InetAddress a, int bits) {
+            byte[] addr = a.getAddress();
+            u8(tag).u8(addr.length == 4 ? 4 : 6).u8(bits);
+            b.writeBytes(addr);
+            return this;
+        }
+
         Writer ext(String name, byte[] data) {
             u8(EXT).str(name).i32(data.length);
             b.writeBytes(data);
@@ -274,11 +291,21 @@ public final class NucleusClient implements AutoCloseable {
         Writer value(Object v) {
             if (v == null) return u8(0);
             if (v instanceof Boolean x) return u8(1).u8(x ? 1 : 0);
-            if (v instanceof Long || v instanceof Integer || v instanceof Short || v instanceof Byte) {
-                return u8(2).i64(((Number) v).longValue());
-            }
+            if (v instanceof Short x) return u8(12).raw(ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN).putShort(x));
+            if (v instanceof Integer x) return u8(13).i32(x);
+            if (v instanceof Long || v instanceof Byte) return u8(2).i64(((Number) v).longValue());
             if (v instanceof BigInteger x) return value(new BigDecimal(x));
-            if (v instanceof Double || v instanceof Float) return u8(3).f64(((Number) v).doubleValue());
+            if (v instanceof Float x) return u8(14).i32(Float.floatToRawIntBits(x));
+            if (v instanceof Double x) return u8(3).f64(x);
+            if (v instanceof byte[] x) {
+                u8(15).i32(x.length);
+                b.writeBytes(x);
+                return this;
+            }
+            if (v instanceof LocalTime x) return u8(16).i64(x.toNanoOfDay() / 1000);
+            if (v instanceof Inet x) return net(18, x.address(), x.bits());
+            if (v instanceof Cidr x) return net(19, x.address(), x.bits());
+            if (v instanceof InetAddress x) return net(18, x, x.getAddress().length * 8);
             if (v instanceof String x) return u8(4).str(x);
             if (v instanceof BigDecimal x) {
                 BigDecimal d = x.scale() < 0 ? x.setScale(0) : x;
@@ -358,6 +385,39 @@ public final class NucleusClient implements AutoCloseable {
                 case 7 -> EPOCH.plus(i64(), ChronoUnit.MICROS);
                 case 8 -> EPOCH.atOffset(ZoneOffset.UTC).plus(i64(), ChronoUnit.MICROS);
                 case 9 -> new Interval(i32(), i32(), i64());
+                case 12 -> b.getShort();
+                case 13 -> i32();
+                case 14 -> b.getFloat();
+                case 15 -> {
+                    byte[] data = new byte[(int) u32()];
+                    b.get(data);
+                    yield data;
+                }
+                case 16 -> {
+                    long us = i64();
+                    yield us >= 86_400_000_000L ? LocalTime.MAX : LocalTime.ofNanoOfDay(us * 1000);
+                }
+                case 18, 19 -> {
+                    int family = u8();
+                    int bits = u8();
+                    byte[] addr = new byte[family == 4 ? 4 : 16];
+                    b.get(addr);
+                    InetAddress a;
+                    try {
+                        a = InetAddress.getByAddress(addr);
+                    } catch (java.net.UnknownHostException e) {
+                        throw new NucleusException("malformed address", e);
+                    }
+                    // getByAddress gives an IPv4-mapped IPv6 address as IPv4: keep its 16 bytes.
+                    if (family == 6 && a.getAddress().length == 4) {
+                        try {
+                            a = java.net.Inet6Address.getByAddress(null, addr, -1);
+                        } catch (java.net.UnknownHostException e) {
+                            throw new NucleusException("malformed address", e);
+                        }
+                    }
+                    yield tag == 18 ? new Inet(a, bits) : new Cidr(a, bits);
+                }
                 case 10 -> {
                     long n = u32();
                     List<Object> items = new ArrayList<>();
