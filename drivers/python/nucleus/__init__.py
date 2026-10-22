@@ -12,13 +12,17 @@ Pure Python, no dependencies.  The API follows DB-API 2.0 where it fits::
     with conn.transaction():
         conn.execute("UPDATE t SET name = $1 WHERE id = $2", ["uno", 1])
 
-Values map to Python types: boolean -> bool, bigint -> int, double ->
-float, numeric -> decimal.Decimal, text -> str, date -> datetime.date,
-timestamp -> datetime.datetime (naive), timestamptz -> datetime.datetime
-(UTC), interval -> nucleus.Interval, uuid -> uuid.UUID, arrays -> list,
-NULL -> None; another registered type -> nucleus.Ext (its name and binary
-form).  Parameters take the same types (and datetime.timedelta for
-intervals).
+Values map to Python types: boolean -> bool, smallint, integer and bigint
+-> int, real and double -> float (a real by its shortest digits), numeric
+-> decimal.Decimal, text, char(n) and enums -> str, bytea -> bytes, date
+-> datetime.date, time -> datetime.time (24:00:00, which it cannot hold,
+as time.max), timestamp -> datetime.datetime (naive), timestamptz ->
+datetime.datetime (UTC), interval -> nucleus.Interval, inet ->
+ipaddress.ip_interface, cidr -> ipaddress.ip_network, uuid -> uuid.UUID,
+arrays -> list, NULL -> None; another registered type -> nucleus.Ext (its
+name and binary form).  Parameters take the same types (and
+datetime.timedelta for intervals, bytearray for bytea, an ipaddress
+address for an inet).
 
 The connection runs each statement in its own transaction unless a
 transaction block is open (``BEGIN`` or ``with conn.transaction()``).
@@ -26,6 +30,7 @@ transaction block is open (``BEGIN`` or ``with conn.transaction()``).
 
 import datetime as _dt
 import decimal as _decimal
+import ipaddress as _ip
 import socket as _socket
 import struct as _struct
 import uuid as _uuid
@@ -42,8 +47,9 @@ apilevel = "2.0"
 threadsafety = 1
 paramstyle = "numeric"  # $1, $2, ...
 
-# 2: registered types (uuid, modules' types) arrive in their binary form.
-PROTOCOL_VERSION = 2
+# 2: registered types (uuid, modules' types) arrive in their binary form;
+# 3: smallint, integer, real, bytea, time, inet and cidr in theirs.
+PROTOCOL_VERSION = 3
 DEFAULT_PORT = 20035
 
 _EPOCH_DATE = _dt.date(2000, 1, 1)
@@ -52,8 +58,11 @@ _EPOCH_TZ = _dt.datetime(2000, 1, 1, tzinfo=_dt.timezone.utc)
 _TYPE_NAMES = {
     0: "unknown", 1: "boolean", 2: "bigint", 3: "double precision", 4: "text",
     5: "numeric", 6: "date", 7: "timestamp", 8: "timestamptz", 9: "interval",
-    10: "array",
+    10: "array", 12: "smallint", 13: "integer", 14: "real", 15: "bytea",
+    16: "time", 17: "character", 18: "inet", 19: "cidr",
 }
+_ENUM = 20
+_DAY_US = 86_400_000_000
 _EXT = 11
 
 
@@ -199,6 +208,21 @@ def _encode(out, v):
     elif isinstance(v, _dt.date):
         out.append(6)
         out += _struct.pack("<i", (v - _EPOCH_DATE).days)
+    elif isinstance(v, _dt.time):
+        out.append(16)
+        out += _struct.pack("<q", ((v.hour * 60 + v.minute) * 60 + v.second) * 1_000_000 + v.microsecond)
+    elif isinstance(v, (bytes, bytearray, memoryview)):
+        data = bytes(v)
+        out.append(15)
+        out += _struct.pack("<I", len(data))
+        out += data
+    elif isinstance(v, (_ip.IPv4Interface, _ip.IPv6Interface)):
+        # (Before addresses: an interface is a kind of address.)
+        _encode_net(out, 18, v.ip, v.network.prefixlen)
+    elif isinstance(v, (_ip.IPv4Address, _ip.IPv6Address)):
+        _encode_net(out, 18, v, v.max_prefixlen)
+    elif isinstance(v, (_ip.IPv4Network, _ip.IPv6Network)):
+        _encode_net(out, 19, v.network_address, v.prefixlen)
     elif isinstance(v, _dt.timedelta):
         out.append(9)
         out += _struct.pack("<iiq", 0, v.days, v.seconds * 1_000_000 + v.microseconds)
@@ -216,6 +240,24 @@ def _encode(out, v):
             _encode(out, item)
     else:
         raise InterfaceError(f"cannot send a {type(v).__name__} as a nucleus value")
+
+
+def _encode_net(out, tag, addr, bits):
+    out.append(tag)
+    out += bytes([addr.version, bits])
+    out += addr.packed
+
+
+def _real(bits):
+    """A real (its 4 bytes) as the float of its shortest digits."""
+    (f,) = _struct.unpack("<f", bits)
+    if f != f or f in (float("inf"), float("-inf")):
+        return f
+    for digits in range(1, 10):
+        s = "%.*g" % (digits, f)
+        if _struct.pack("<f", float(s)) == bits:
+            return float(s)
+    return f
 
 
 def _encode_ext(out, name, data):
@@ -275,6 +317,28 @@ class _Reader:
         if tag == 10:
             (n,) = self.unpack("<I")
             return [self.value() for _ in range(n)]
+        if tag == 12:
+            return self.unpack("<h")[0]
+        if tag == 13:
+            return self.unpack("<i")[0]
+        if tag == 14:
+            return _real(self.take(4))
+        if tag == 15:
+            (n,) = self.unpack("<I")
+            return bytes(self.take(n))
+        if tag == 16:
+            (us,) = self.unpack("<q")
+            if us >= _DAY_US:
+                return _dt.time.max
+            s, us = divmod(us, 1_000_000)
+            m, s = divmod(s, 60)
+            return _dt.time(m // 60, m % 60, s, us)
+        if tag in (18, 19):
+            family, bits = self.u8(), self.u8()
+            addr = _ip.ip_address(bytes(self.take(4 if family == 4 else 16)))
+            if tag == 18:
+                return _ip.ip_interface(f"{addr}/{bits}")
+            return _ip.ip_network(f"{addr}/{bits}")
         if tag == _EXT:
             name = self.str()
             (n,) = self.unpack("<I")
@@ -367,7 +431,7 @@ class Connection:
                     type_name = _TYPE_NAMES.get(tag, "unknown")
                     if tag == 10:
                         type_name = _TYPE_NAMES.get(r.u8(), "unknown") + "[]"
-                    elif tag == _EXT:
+                    elif tag in (_EXT, _ENUM):
                         type_name = r.str()
                     columns.append(Column(name, type_name))
                 rows = []

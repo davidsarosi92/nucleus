@@ -12,10 +12,14 @@ with conn.transaction():
     ...
 ```
 
-Types: `bool`, `int`, `float`, `decimal.Decimal`, `str`, `datetime.date`,
-`datetime.datetime` (naive for timestamp, UTC for timestamptz),
-`nucleus.Interval` (and `timedelta` as a parameter), `uuid.UUID`, `list`,
-`None`; another registered type is `nucleus.Ext` (its name and binary
-form).
+Types: `bool`, `int` (smallint, integer, bigint), `float` (real by its
+shortest digits, double), `decimal.Decimal`, `str` (text, `char(n)`,
+enums), `bytes` (bytea; `bytearray` too as a parameter), `datetime.date`,
+`datetime.time` (24:00:00 as `time.max`), `datetime.datetime` (naive for
+timestamp, UTC for timestamptz), `nucleus.Interval` (and `timedelta` as a
+parameter), `ipaddress.ip_interface` (inet; an address as a parameter),
+`ipaddress.ip_network` (cidr), `uuid.UUID`, `list`, `None`; another
+registered type is `nucleus.Ext` (its name and binary form).  Protocol
+version 3.
 Errors are `nucleus.Error` subclasses with `.code` (SQLSTATE).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Protocol version 3 (nucleus PLAN.md §M14.26): `smallint` and `integer`
+  as `int`, `real` as `float` (its shortest digits), `bytea` as `bytes`,
+  `time` as `datetime.time`, `inet` and `cidr` as `ipaddress` interfaces
+  and networks, `char(n)` and enums as `str` with their own column type
+  names.
+
 ## 0.1.0 — 2026-10-18
 
 - Protocol version 2: `uuid` as the language's native uuid (a string in

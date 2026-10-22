@@ -62,6 +62,30 @@ class Conformance(unittest.TestCase):
             self.assertEqual(r.rows[0][2].version, 4)
             self.assertEqual(c.execute(f"SELECT n FROM {t} WHERE id = $1", [str(u).upper()]).rows, [(1,)])
 
+    def test_core_types(self):
+        import ipaddress
+        t = table()
+        mood = t + "_mood"
+        with connect() as c:
+            c.execute(f"CREATE TYPE {mood} AS ENUM ('sad', 'happy')")
+            c.execute(f"CREATE TABLE {t} (s SMALLINT, i INTEGER, r REAL, b BYTEA, tm TIME, "
+                      f"ch CHAR(3), ip INET, net CIDR, m {mood})")
+            row = (-2, 70000, 0.1, b"\x00\xff", dt.time(12, 34, 56, 500000), "ab ",
+                   ipaddress.ip_interface("10.1.2.3/8"), ipaddress.ip_network("2001:db8::/32"),
+                   "happy")
+            c.execute(f"INSERT INTO {t} VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", list(row))
+            r = c.execute(f"SELECT * FROM {t}")
+            self.assertEqual(r.rows, [row])
+            self.assertEqual([col.type for col in r.columns],
+                             ["smallint", "integer", "real", "bytea", "time", "character",
+                              "inet", "cidr", mood])
+            # A plain address is a host; 24:00:00 is the end of the day.
+            r = c.execute("SELECT $1::inet, time '24:00'", [ipaddress.ip_address("::1")])
+            self.assertEqual(r.rows, [(ipaddress.ip_interface("::1/128"), dt.time.max)])
+            self.assertEqual(c.execute(f"SELECT count(*) FROM {t} WHERE b = $1 AND ip <<= $2",
+                                       [bytearray(b"\x00\xff"), ipaddress.ip_network("10.0.0.0/8")]).rows,
+                             [(1,)])
+
     def test_errors(self):
         with connect() as c:
             with self.assertRaises(nucleus.ProgrammingError) as e:
