@@ -1306,16 +1306,18 @@ refer to them.  Transactions are SQL (`BEGIN`, `COMMIT`, `ROLLBACK`), as in
 §8.7; outside a block every statement commits on its own.
 
 **Versions.**  2 adds registered types (`uuid`, a module's type): tag 11
-below.  A version-1 client gets them as text (type and value tag 4), so
-older drivers keep working.
+below.  3 adds tags 12–20, §M14.26's types.  An older client gets what
+its version knows — registered types as text before 2; before 3,
+`smallint` and `integer` as `bigint` (tag 2), `real` as a double (tag 3),
+`bytea`, `time`, `char(n)`, `inet`, `cidr` and enums as text — so older
+drivers keep working.
 
 **Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
-2 an integer (`smallint`, `integer` and `bigint` alike, for now), 3 a
-float (`real` sent as a double, exactly, for now), 4 text (and, for
-now, `bytea`, `time`, `char(n)`, `inet`, `cidr` and enums in their text
-forms), 5 numeric, 6 date, 7 timestamp,
-8 timestamptz, 9 interval, 10 array followed by the element's tag, 11 a
-registered type followed by its name (a string: `uuid`).
+2 bigint, 3 double precision, 4 text, 5 numeric, 6 date, 7 timestamp, 8
+timestamptz, 9 interval, 10 array followed by the element's tag, 11 a
+registered type followed by its name (a string: `uuid`); version 3: 12
+smallint, 13 integer, 14 real, 15 bytea, 16 time, 17 `char(n)`, 18 inet,
+19 cidr, 20 an enum followed by its name.
 
 **Values** (in Rows and parameters): a `u8` tag, then:
 
@@ -1333,11 +1335,22 @@ registered type followed by its name (a string: `uuid`).
 | 9 | interval | `i32` months, `i32` days, `i64` µs |
 | 10 | array | `u32` count, then each element as a value |
 | 11 | a registered type (version 2) | string type name, `u32` length, the value's binary (canonical) form — for `uuid` its 16 bytes |
+| 12 | smallint (version 3) | `i16` |
+| 13 | integer (version 3) | `i32` |
+| 14 | real (version 3) | `f32` (IEEE 754 bits) |
+| 15 | bytea (version 3) | `u32` length, the bytes |
+| 16 | time (version 3) | `i64` µs since midnight (`0` – `86 400 000 000`) |
+| 18, 19 | inet, cidr (version 3) | `u8` family (4 or 6), `u8` mask length, the address (4 or 16 bytes, network order) |
+
+A `char(n)` value and an enum's are text (tag 4): their column types say
+what they are.  An integer goes as the column's width (a `bigint`, or an
+expression's integer of no column, as tag 2); a parameter may use any
+integer tag.
 
 Tags 0–10 are the tags of the storage's row encoding version 1 (§8.1), but
-the protocol's encoding is its own (`native::wire_value`): the storage may
-store a value more compactly (an integer in 2 or 4 bytes, tags 12 and 13)
-without the protocol changing.  A registered type's carries its name instead
+the protocol's encoding is its own (`native::wire_value`, `parameter`):
+the storage may store a value differently without the protocol
+changing.  A cidr parameter with host bits set is refused (`22P02`).  A registered type's carries its name instead
 of its id, so drivers need no table of ids.  A tag-11 parameter of a type
 the server does not know is refused (`42704`).  With result format 1 (text) every non-NULL value is
 sent as text (tag 4), rendered as `ncsql` prints it.  Parameters are
@@ -1351,10 +1364,15 @@ untyped literal would be).
 database `nucleus`), `execute(sql, params) -> Reply` (columns, rows,
 command, count), `rows(sql, params)`, `query(sql, params, Format)` for
 several statements or text results, `status()`, `close()`.  `Value` covers
-every nucleus type (numeric as mantissa and scale, dates and timestamps as
-days and µs since 2000-01-01, intervals, arrays, `Uuid([u8; 16])`, `Other {
-type_name, bytes }` for another registered type) with `From` conversions
-for parameters.  Every driver speaks protocol version 2.
+every nucleus type (`SmallInt(i16)`, `Integer(i32)`, `Int(i64)`,
+`Real(f32)`, `Float(f64)`, numeric as mantissa and scale, `Bytes`,
+dates and timestamps as days and µs since 2000-01-01, `Time` as µs since
+midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
+`Uuid([u8; 16])`, `Other { type_name, bytes }` for another registered
+type; `char(n)` and enum values as text, their columns typed `Char` and
+`Enum(name)`) with `From` conversions for parameters.  The Rust driver
+speaks protocol version 3; the others version 2 until they gain §M14.26's
+types.
 
 **C:** `drivers/c` (`nucleus.h`, `nucleus.c`; C99, POSIX sockets or
 Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`

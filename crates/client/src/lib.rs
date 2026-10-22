@@ -15,12 +15,14 @@
 
 use std::fmt;
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::net::TcpStream;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream};
 use std::time::Duration;
 
 /// The protocol version this driver speaks (2: registered types such as
-/// `uuid` arrive in their binary form).
-pub const PROTOCOL_VERSION: u16 = 2;
+/// `uuid` arrive in their binary form; 3: `smallint`, `integer`, `real`,
+/// `bytea`, `time`, `inet` and `cidr` in theirs, `char(n)` and enums
+/// named as such).
+pub const PROTOCOL_VERSION: u16 = 3;
 /// The nucleus protocol's default port.
 pub const DEFAULT_PORT: u16 = 20_035;
 
@@ -109,12 +111,30 @@ pub enum Type {
     Unknown,
     /// `boolean`.
     Bool,
+    /// `smallint`.
+    SmallInt,
+    /// `integer`.
+    Integer,
     /// `bigint`.
     Int,
+    /// `real`.
+    Real,
     /// `double precision`.
     Float,
     /// `text`.
     Text,
+    /// `char(n)` (its values are text, blank-padded).
+    Char,
+    /// `bytea`.
+    Bytea,
+    /// `time` (of day).
+    Time,
+    /// `inet`.
+    Inet,
+    /// `cidr`.
+    Cidr,
+    /// An enum, by name (its values are its labels, as text).
+    Enum(String),
     /// `numeric`.
     Numeric,
     /// `date`.
@@ -144,6 +164,14 @@ fn type_of_tag(t: u8) -> Type {
         7 => Type::Timestamp,
         8 => Type::TimestampTz,
         9 => Type::Interval,
+        12 => Type::SmallInt,
+        13 => Type::Integer,
+        14 => Type::Real,
+        15 => Type::Bytea,
+        16 => Type::Time,
+        17 => Type::Char,
+        18 => Type::Inet,
+        19 => Type::Cidr,
         _ => Type::Unknown,
     }
 }
@@ -155,12 +183,36 @@ pub enum Value {
     Null,
     /// A boolean.
     Bool(bool),
-    /// A 64-bit integer.
+    /// A `smallint`.
+    SmallInt(i16),
+    /// An `integer`.
+    Integer(i32),
+    /// A 64-bit integer (`bigint`; any integer as a parameter).
     Int(i64),
+    /// A `real`.
+    Real(f32),
     /// A double.
     Float(f64),
     /// Text.
     Text(String),
+    /// A `bytea`.
+    Bytes(Vec<u8>),
+    /// A `time`: microseconds since midnight (`24:00:00` included).
+    Time(i64),
+    /// An `inet`: an address and its mask length.
+    Inet {
+        /// The address.
+        addr: IpAddr,
+        /// The mask length (32 or 128: a host).
+        bits: u8,
+    },
+    /// A `cidr`: a network.
+    Cidr {
+        /// The network address.
+        addr: IpAddr,
+        /// The mask length.
+        bits: u8,
+    },
     /// An exact decimal: `mantissa × 10^-scale`.
     Numeric {
         /// The unscaled value.
@@ -214,6 +266,44 @@ impl From<i64> for Value {
     }
 }
 
+impl From<i32> for Value {
+    fn from(i: i32) -> Self {
+        Value::Integer(i)
+    }
+}
+
+impl From<i16> for Value {
+    fn from(i: i16) -> Self {
+        Value::SmallInt(i)
+    }
+}
+
+impl From<f32> for Value {
+    fn from(f: f32) -> Self {
+        Value::Real(f)
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(b: Vec<u8>) -> Self {
+        Value::Bytes(b)
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(b: &[u8]) -> Self {
+        Value::Bytes(b.to_vec())
+    }
+}
+
+impl From<IpAddr> for Value {
+    /// A host address (`inet` with a full mask).
+    fn from(addr: IpAddr) -> Self {
+        let bits = if addr.is_ipv4() { 32 } else { 128 };
+        Value::Inet { addr, bits }
+    }
+}
+
 impl From<f64> for Value {
     fn from(f: f64) -> Self {
         Value::Float(f)
@@ -237,13 +327,51 @@ impl Value {
         match self {
             Value::Null => out.push(0),
             Value::Bool(b) => out.extend_from_slice(&[1, u8::from(*b)]),
+            Value::SmallInt(i) => {
+                out.push(12);
+                out.extend_from_slice(&i.to_le_bytes());
+            }
+            Value::Integer(i) => {
+                out.push(13);
+                out.extend_from_slice(&i.to_le_bytes());
+            }
             Value::Int(i) => {
                 out.push(2);
                 out.extend_from_slice(&i.to_le_bytes());
             }
+            Value::Real(f) => {
+                out.push(14);
+                out.extend_from_slice(&f.to_le_bytes());
+            }
             Value::Float(f) => {
                 out.push(3);
                 out.extend_from_slice(&f.to_le_bytes());
+            }
+            Value::Bytes(b) => {
+                out.push(15);
+                out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                out.extend_from_slice(b);
+            }
+            Value::Time(t) => {
+                out.push(16);
+                out.extend_from_slice(&t.to_le_bytes());
+            }
+            Value::Inet { addr, bits } | Value::Cidr { addr, bits } => {
+                out.push(if matches!(self, Value::Inet { .. }) {
+                    18
+                } else {
+                    19
+                });
+                match addr {
+                    IpAddr::V4(a) => {
+                        out.extend_from_slice(&[4, *bits]);
+                        out.extend_from_slice(&a.octets());
+                    }
+                    IpAddr::V6(a) => {
+                        out.extend_from_slice(&[6, *bits]);
+                        out.extend_from_slice(&a.octets());
+                    }
+                }
             }
             Value::Text(s) => {
                 out.push(4);
@@ -294,6 +422,27 @@ impl Value {
             0 => Value::Null,
             1 => Value::Bool(r.u8()? != 0),
             2 => Value::Int(r.i64()?),
+            12 => Value::SmallInt(i16::from_le_bytes(r.take(2)?.try_into().unwrap())),
+            13 => Value::Integer(r.i32()?),
+            14 => Value::Real(f32::from_bits(r.u32()?)),
+            15 => {
+                let n = r.u32()? as usize;
+                Value::Bytes(r.take(n)?.to_vec())
+            }
+            16 => Value::Time(r.i64()?),
+            tag @ (18 | 19) => {
+                let (family, bits) = (r.u8()?, r.u8()?);
+                let addr = match family {
+                    4 => IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(r.take(4)?).unwrap())),
+                    6 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(r.take(16)?).unwrap())),
+                    f => return Err(Error::Protocol(format!("unknown address family {f}"))),
+                };
+                if tag == 18 {
+                    Value::Inet { addr, bits }
+                } else {
+                    Value::Cidr { addr, bits }
+                }
+            }
             3 => Value::Float(f64::from_bits(r.i64()? as u64)),
             4 => Value::Text(r.str()?),
             5 => {
@@ -404,9 +553,38 @@ impl fmt::Display for Value {
         match self {
             Value::Null => Ok(()),
             Value::Bool(b) => f.write_str(if *b { "t" } else { "f" }),
+            Value::SmallInt(i) => write!(f, "{i}"),
+            Value::Integer(i) => write!(f, "{i}"),
             Value::Int(i) => write!(f, "{i}"),
+            Value::Real(x) => write!(f, "{x}"),
             Value::Float(x) => write!(f, "{x}"),
             Value::Text(s) => f.write_str(s),
+            Value::Bytes(b) => {
+                f.write_str("\\x")?;
+                b.iter().try_for_each(|b| write!(f, "{b:02x}"))
+            }
+            Value::Time(t) => {
+                let (h, m, s, us) = (
+                    t / 3_600_000_000,
+                    t / 60_000_000 % 60,
+                    t / 1_000_000 % 60,
+                    t % 1_000_000,
+                );
+                write!(f, "{h:02}:{m:02}:{s:02}")?;
+                if us != 0 {
+                    write!(f, ".{}", format!("{us:06}").trim_end_matches('0'))?;
+                }
+                Ok(())
+            }
+            Value::Inet { addr, bits } => {
+                let full = if addr.is_ipv4() { 32 } else { 128 };
+                if *bits == full {
+                    write!(f, "{addr}")
+                } else {
+                    write!(f, "{addr}/{bits}")
+                }
+            }
+            Value::Cidr { addr, bits } => write!(f, "{addr}/{bits}"),
             Value::Numeric { mantissa, scale } => {
                 let digits = mantissa.unsigned_abs().to_string();
                 let s = usize::from(*scale);
@@ -677,6 +855,7 @@ impl Client {
                                 n if n == "uuid" => Type::Uuid,
                                 n => Type::Other(n),
                             },
+                            20 => Type::Enum(b.str()?),
                             _ => type_of_tag(tag),
                         };
                         columns.push(Column { name, ty });

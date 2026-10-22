@@ -16,8 +16,11 @@ use crate::Config;
 
 /// The newest protocol version this server speaks.  Version 2 adds
 /// registered types (value and type tag 11: name and binary form); a
-/// version-1 client gets them as text.
-pub const VERSION: u16 = 2;
+/// version-1 client gets them as text.  Version 3 adds tags 12–20
+/// (`smallint`, `integer`, `real`, `bytea`, `time`, `char(n)`, `inet`,
+/// `cidr`, enums); an older client gets them as before — integers as
+/// `bigint`, a real as a double, the rest as text.
+pub const VERSION: u16 = 3;
 /// The oldest it still speaks.
 pub const MIN_VERSION: u16 = 1;
 const MAX_BODY: u32 = 1 << 30;
@@ -54,44 +57,20 @@ impl Msg {
         self.buf.extend_from_slice(s.as_bytes());
         self
     }
-    fn ty(mut self, t: Option<DataType>, v2: bool) -> Self {
-        if let (Some(DataType::Ext(t)), true) = (t, v2) {
-            return self.u8(EXT).str(t.name());
-        }
-        let tag = |t: DataType| match t {
-            DataType::Bool => 1,
-            DataType::SmallInt | DataType::Integer | DataType::BigInt => 2,
-            // A real travels as a double (exactly) until a protocol
-            // version gives it a tag.
-            DataType::Real | DataType::Float => 3,
-            // These travel as their text forms until a protocol version
-            // gives them tags.
-            DataType::Text
-            | DataType::Char
-            | DataType::Bytea
-            | DataType::Time
-            | DataType::Inet
-            | DataType::Cidr => 4,
-            DataType::Numeric => 5,
-            DataType::Date => 6,
-            DataType::Timestamp => 7,
-            DataType::TimestampTz => 8,
-            DataType::Interval => 9,
-            DataType::Array(_) => 10,
-            // Registered types travel as text to version-1 clients.
-            DataType::Ext(_) | DataType::Enum(_) => 4,
-        };
+    fn ty(mut self, t: Option<DataType>, version: u16) -> Self {
         match t {
+            Some(DataType::Ext(t)) if version >= 2 => self.u8(EXT).str(t.name()),
+            Some(DataType::Enum(e)) if version >= 3 => self.u8(ENUM).str(e.name()),
             None => self.u8(0),
             Some(t @ DataType::Array(e)) => {
-                self = self.u8(tag(t));
-                self.u8(tag(*e))
+                self = self.u8(type_tag(t, version));
+                self.u8(type_tag(*e, version))
             }
-            Some(t) => self.u8(tag(t)),
+            Some(t) => self.u8(type_tag(t, version)),
         }
     }
-    fn value(mut self, v: &Value, v2: bool) -> Self {
-        wire_value(&mut self.buf, v, v2);
+    fn value(mut self, v: &Value, ty: Option<DataType>, version: u16) -> Self {
+        wire_value(&mut self.buf, v, ty, version);
         self
     }
     fn finish(mut self) -> Vec<u8> {
@@ -101,19 +80,86 @@ impl Msg {
     }
 }
 
-/// Appends a value in the protocol's encoding (DOCS §10).  It shares its
-/// tags with the row encoding's version 1, but is the protocol's own: an
-/// integer is always 8 bytes, whatever the storage does.
-fn wire_value(buf: &mut Vec<u8>, v: &Value, v2: bool) {
+/// An enum column's type tag (version 3): its name follows.
+const ENUM: u8 = 20;
+
+/// A column type's tag in protocol `version` (DOCS §10).
+fn type_tag(t: DataType, version: u16) -> u8 {
+    let v3 = version >= 3;
+    match t {
+        DataType::Bool => 1,
+        DataType::SmallInt if v3 => 12,
+        DataType::Integer if v3 => 13,
+        DataType::SmallInt | DataType::Integer | DataType::BigInt => 2,
+        DataType::Real if v3 => 14,
+        DataType::Real | DataType::Float => 3,
+        DataType::Bytea if v3 => 15,
+        DataType::Time if v3 => 16,
+        DataType::Char if v3 => 17,
+        DataType::Inet if v3 => 18,
+        DataType::Cidr if v3 => 19,
+        DataType::Text
+        | DataType::Char
+        | DataType::Bytea
+        | DataType::Time
+        | DataType::Inet
+        | DataType::Cidr => 4,
+        DataType::Numeric => 5,
+        DataType::Date => 6,
+        DataType::Timestamp => 7,
+        DataType::TimestampTz => 8,
+        DataType::Interval => 9,
+        DataType::Array(_) => 10,
+        // Registered types (to version-1 clients) and enums (before
+        // version 3) travel as text.
+        DataType::Ext(_) | DataType::Enum(_) => 4,
+    }
+}
+
+/// Appends a value of column type `ty` in the protocol's encoding (DOCS
+/// §10).  Its tags 0–10 are the row encoding's version 1, but it is the
+/// protocol's own: the storage may store a value more compactly without
+/// the protocol changing.
+fn wire_value(buf: &mut Vec<u8>, v: &Value, ty: Option<DataType>, version: u16) {
+    let v3 = version >= 3;
     match v {
-        Value::Int(i) => {
-            buf.push(2);
-            buf.extend_from_slice(&i.to_le_bytes());
+        Value::Int(i) => match ty {
+            Some(DataType::SmallInt) if v3 => {
+                buf.push(12);
+                buf.extend_from_slice(&(*i as i16).to_le_bytes());
+            }
+            Some(DataType::Integer) if v3 => {
+                buf.push(13);
+                buf.extend_from_slice(&(*i as i32).to_le_bytes());
+            }
+            _ => {
+                buf.push(2);
+                buf.extend_from_slice(&i.to_le_bytes());
+            }
+        },
+        Value::Real(f) if v3 => {
+            buf.push(14);
+            buf.extend_from_slice(&f.to_le_bytes());
         }
         Value::Real(f) => {
             buf.push(3);
             buf.extend_from_slice(&f64::from(*f).to_le_bytes());
         }
+        Value::Bytea(b) if v3 => {
+            buf.push(15);
+            buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            buf.extend_from_slice(b);
+        }
+        Value::Time(t) if v3 => {
+            buf.push(16);
+            buf.extend_from_slice(&t.to_le_bytes());
+        }
+        Value::Inet(n) | Value::Cidr(n) if v3 => {
+            buf.push(if matches!(v, Value::Inet(_)) { 18 } else { 19 });
+            buf.extend(n.to_bytes());
+        }
+        // char(n) and enum values are text (their column types say what
+        // they are); older clients get the others as text too.
         Value::Bytea(_)
         | Value::Time(_)
         | Value::Char(_)
@@ -123,11 +169,12 @@ fn wire_value(buf: &mut Vec<u8>, v: &Value, v2: bool) {
         Value::Array(items) => {
             buf.push(10);
             buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
+            let elem = ty.and_then(DataType::element);
             for item in items {
-                wire_value(buf, item, v2);
+                wire_value(buf, item, elem, version);
             }
         }
-        Value::Ext(t, bytes) if v2 => {
+        Value::Ext(t, bytes) if version >= 2 => {
             buf.push(EXT);
             buf.extend_from_slice(&(t.name().len() as u32).to_le_bytes());
             buf.extend_from_slice(t.name().as_bytes());
@@ -292,8 +339,8 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
                 match parsed {
                     Ok((sql, format, params)) => {
                         log("query", &sql);
-                        let v2 = version >= 2;
-                        if let Err(e) = run(&mut session, &sql, format == 1, v2, &params, &mut out)?
+                        if let Err(e) =
+                            run(&mut session, &sql, format == 1, version, &params, &mut out)?
                         {
                             log("error", &format!("{} {}", e.code, e.message));
                             out.write_all(&error_msg(&e))?;
@@ -318,10 +365,74 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
 
 /// Runs a Query's statements, writing their results; the first error is
 /// returned (not yet written).
-/// A parameter: a value in the row encoding, or (tag 11) a registered
-/// type's name and binary form.
+/// A parameter: a value in the protocol's encoding (tags 0–10 as the row
+/// encoding's version 1, 11 a registered type's name and binary form,
+/// 12–19 version 3's).
 fn parameter(r: &mut Reader) -> Result<Value, Error> {
     let bad = |_| protocol("malformed parameter");
+    let net = |r: &mut Reader| -> Result<nucleus_sql::ext::Net, Error> {
+        let family = r.u8().map_err(bad)?;
+        let bits = r.u8().map_err(bad)?;
+        let n = match family {
+            4 => 4,
+            6 => 16,
+            _ => return Err(protocol("malformed parameter")),
+        };
+        let mut b = vec![family, bits];
+        b.extend_from_slice(r.take(n).map_err(bad)?);
+        nucleus_sql::ext::Net::from_bytes(&b).ok_or_else(|| protocol("malformed parameter"))
+    };
+    match r.peek() {
+        Some(12) => {
+            r.u8().map_err(bad)?;
+            return Ok(Value::Int(i64::from(r.u16().map_err(bad)? as i16)));
+        }
+        Some(13) => {
+            r.u8().map_err(bad)?;
+            return Ok(Value::Int(i64::from(r.u32().map_err(bad)? as i32)));
+        }
+        Some(14) => {
+            r.u8().map_err(bad)?;
+            return Ok(Value::Real(f32::from_bits(r.u32().map_err(bad)?)));
+        }
+        Some(15) => {
+            r.u8().map_err(bad)?;
+            let n = r.u32().map_err(bad)? as usize;
+            return Ok(Value::Bytea(r.take(n).map_err(bad)?.into()));
+        }
+        Some(16) => {
+            r.u8().map_err(bad)?;
+            let t = r.u64().map_err(bad)? as i64;
+            if !(0..=86_400_000_000).contains(&t) {
+                return Err(protocol("malformed parameter: a time of day out of range"));
+            }
+            return Ok(Value::Time(t));
+        }
+        Some(18) => {
+            r.u8().map_err(bad)?;
+            return Ok(Value::Inet(net(r)?));
+        }
+        Some(19) => {
+            r.u8().map_err(bad)?;
+            let n = net(r)?;
+            if n.network() != n {
+                return Err(Error::invalid_text(
+                    "invalid cidr value: it has bits set to the right of its mask",
+                ));
+            }
+            return Ok(Value::Cidr(n));
+        }
+        Some(10) => {
+            r.u8().map_err(bad)?;
+            let n = r.u32().map_err(bad)? as usize;
+            let mut items = Vec::with_capacity(n.min(4096));
+            for _ in 0..n {
+                items.push(parameter(r)?);
+            }
+            return Ok(Value::Array(items));
+        }
+        _ => {}
+    }
     if r.peek() != Some(EXT) {
         return decode_value(r).map_err(bad);
     }
@@ -345,7 +456,7 @@ fn run(
     session: &mut Session,
     sql: &str,
     text: bool,
-    v2: bool,
+    version: u16,
     params: &[Value],
     out: &mut impl Write,
 ) -> io::Result<Result<(), Error>> {
@@ -392,16 +503,16 @@ fn run(
         if let Output::Rows { columns, rows } = output {
             let mut m = Msg::new(b'C').u16(columns.len() as u16);
             for c in &columns {
-                m = m.str(&c.name).ty(Some(c.ty), v2);
+                m = m.str(&c.name).ty(Some(c.ty), version);
             }
             out.write_all(&m.finish())?;
             for row in &rows {
                 let mut m = Msg::new(b'D');
-                for v in row {
+                for (v, c) in row.iter().zip(&columns) {
                     m = if text && !v.is_null() {
-                        m.value(&Value::Text(v.render()), v2)
+                        m.value(&Value::Text(v.render()), None, version)
                     } else {
-                        m.value(v, v2)
+                        m.value(v, Some(c.ty), version)
                     };
                 }
                 out.write_all(&m.finish())?;

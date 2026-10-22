@@ -50,7 +50,7 @@ fn typed_values_both_ways() {
     )
     .unwrap();
     let params = [
-        Value::Int(1),
+        Value::Integer(1),
         Value::Numeric {
             mantissa: 12345,
             scale: 2,
@@ -149,7 +149,10 @@ fn passwords() {
         ..config(addr)
     })
     .unwrap();
-    assert_eq!(c.rows("SELECT 1", &[]).unwrap(), vec![vec![Value::Int(1)]]);
+    assert_eq!(
+        c.rows("SELECT 1", &[]).unwrap(),
+        vec![vec![Value::Integer(1)]]
+    );
 }
 
 /// The slt connection over the nucleus protocol (text results, as the
@@ -234,7 +237,7 @@ fn uuid_both_ways() {
             &[Value::from("A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11")],
         )
         .unwrap();
-    assert_eq!(r.rows, vec![vec![Value::Int(1)]]);
+    assert_eq!(r.rows, vec![vec![Value::Integer(1)]]);
     // A registered type the server does not know is refused.
     let err = c
         .execute(
@@ -248,9 +251,111 @@ fn uuid_both_ways() {
     assert!(matches!(err, Error::Server(e) if e.code == "42704"));
 }
 
-/// A version-1 client (before registered types) gets them as text.
+/// The types of §M14.26, in their native forms (protocol version 3):
+/// read back, and sent as parameters.
 #[test]
-fn version_1_clients_get_registered_types_as_text() {
+fn core_types_both_ways() {
+    use std::net::IpAddr;
+    let mut c = Client::connect(config(start(None))).unwrap();
+    c.execute("CREATE TYPE mood AS ENUM ('sad', 'happy')", &[])
+        .unwrap();
+    c.execute(
+        "CREATE TABLE k (s SMALLINT, i INTEGER, b BIGINT, r REAL, bin BYTEA, t TIME, \
+         ch CHAR(3), ip INET, net CIDR, m mood)",
+        &[],
+    )
+    .unwrap();
+    let ip: IpAddr = "10.1.2.3".parse().unwrap();
+    let v6: IpAddr = "2001:db8::".parse().unwrap();
+    let params = [
+        Value::SmallInt(-2),
+        Value::Integer(70_000),
+        Value::Int(1 << 40),
+        Value::Real(0.1),
+        Value::Bytes(vec![0, 0xff, 7]),
+        Value::Time(45_296_500_000), // 12:34:56.5
+        Value::from("ab"),
+        Value::Inet { addr: ip, bits: 8 },
+        Value::Cidr { addr: v6, bits: 32 },
+        Value::from("happy"),
+    ];
+    c.execute(
+        "INSERT INTO k VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        &params,
+    )
+    .unwrap();
+    let r = c.execute("SELECT * FROM k", &[]).unwrap();
+    let types: Vec<Type> = r.columns.iter().map(|c| c.ty.clone()).collect();
+    assert_eq!(
+        types,
+        [
+            Type::SmallInt,
+            Type::Integer,
+            Type::Int,
+            Type::Real,
+            Type::Bytea,
+            Type::Time,
+            Type::Char,
+            Type::Inet,
+            Type::Cidr,
+            Type::Enum("mood".into()),
+        ]
+    );
+    let mut want = params.to_vec();
+    want[6] = Value::from("ab "); // padded
+    assert_eq!(r.rows, vec![want]);
+    let shown: Vec<String> = r.rows[0].iter().map(|v| v.to_string()).collect();
+    assert_eq!(
+        shown,
+        [
+            "-2",
+            "70000",
+            "1099511627776",
+            "0.1",
+            "\\x00ff07",
+            "12:34:56.5",
+            "ab ",
+            "10.1.2.3/8",
+            "2001:db8::/32",
+            "happy"
+        ]
+    );
+    // Text parameters are parsed where these types are needed; arrays.
+    let r = c
+        .execute(
+            "SELECT count(*) FROM k WHERE t = $1 AND ip <<= $2 AND bin = $3 AND m = $4",
+            &[
+                Value::from("12:34:56.5"),
+                Value::from("10.0.0.0/8"),
+                Value::from("\\x00ff07"),
+                Value::from("happy"),
+            ],
+        )
+        .unwrap();
+    assert_eq!(r.rows, vec![vec![Value::Int(1)]]);
+    let r = c
+        .execute(
+            "SELECT ARRAY[1::smallint, 2], ARRAY[$1::real]",
+            &[Value::Real(1.5)],
+        )
+        .unwrap();
+    assert_eq!(
+        r.rows[0],
+        [
+            Value::Array(vec![Value::Integer(1), Value::Integer(2)]),
+            Value::Array(vec![Value::Real(1.5)])
+        ]
+    );
+    // A cidr parameter with host bits is refused.
+    let err = c
+        .execute("SELECT $1::cidr", &[Value::Cidr { addr: ip, bits: 8 }])
+        .unwrap_err();
+    assert!(matches!(err, Error::Server(e) if e.code == "22P02"));
+}
+
+/// One typed query by hand at protocol `version`: the version the server
+/// welcomed with, and the bodies of the Columns and the first Row.
+fn raw_query(version: u16, sql: &str) -> (u16, Vec<u8>, Vec<u8>) {
     use std::io::{Read, Write};
     let addr = start(None);
     let mut s = std::net::TcpStream::connect(addr).unwrap();
@@ -264,16 +369,13 @@ fn version_1_clients_get_registered_types_as_text() {
         b.extend_from_slice(&(s.len() as u32).to_le_bytes());
         b.extend_from_slice(s.as_bytes());
     };
-    let mut hello = 1u16.to_le_bytes().to_vec();
+    let mut hello = version.to_le_bytes().to_vec();
     for part in ["nucleus", "", "nucleus", "test"] {
         string(&mut hello, part);
     }
     s.write_all(&frame(b'H', &hello)).unwrap();
     let mut query = Vec::new();
-    string(
-        &mut query,
-        "SELECT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid",
-    );
+    string(&mut query, sql);
     query.push(0); // typed
     query.extend_from_slice(&0u16.to_le_bytes());
     s.write_all(&frame(b'Q', &query)).unwrap();
@@ -290,13 +392,38 @@ fn version_1_clients_get_registered_types_as_text() {
         }
         frames.push((head[0], body));
     }
-    let welcome = &frames.iter().find(|f| f.0 == b'W').unwrap().1;
-    assert_eq!(u16::from_le_bytes([welcome[0], welcome[1]]), 1);
-    let columns = &frames.iter().find(|f| f.0 == b'C').unwrap().1;
+    let find = |k: u8| frames.iter().find(|f| f.0 == k).unwrap().1.clone();
+    let welcome = find(b'W');
+    (
+        u16::from_le_bytes([welcome[0], welcome[1]]),
+        find(b'C'),
+        find(b'D'),
+    )
+}
+
+/// A version-1 client (before registered types) gets them as text.
+#[test]
+fn version_1_clients_get_registered_types_as_text() {
+    let (version, columns, row) =
+        raw_query(1, "SELECT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid");
+    assert_eq!(version, 1);
     // u16 count, the string name, then the type tag: text.
     let name_len = u32::from_le_bytes(columns[2..6].try_into().unwrap()) as usize;
     assert_eq!(columns[6 + name_len], 4);
-    let row = &frames.iter().find(|f| f.0 == b'D').unwrap().1;
     assert_eq!(row[0], 4);
     assert_eq!(&row[5..], b"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11");
+}
+
+/// A version-2 client (before §M14.26's tags) gets a smallint as a bigint
+/// and a time as text.
+#[test]
+fn version_2_clients_get_the_new_types_as_before() {
+    let (version, columns, row) = raw_query(2, "SELECT 7::smallint AS a, time '10:00' AS b");
+    assert_eq!(version, 2);
+    // Two columns named "a" and "b" (u32 length 1 each), their tags.
+    assert_eq!((columns[2 + 4 + 1], columns[2 + 4 + 1 + 1 + 4 + 1]), (2, 4));
+    assert_eq!(row[0], 2);
+    assert_eq!(i64::from_le_bytes(row[1..9].try_into().unwrap()), 7);
+    assert_eq!(row[9], 4);
+    assert_eq!(&row[14..], b"10:00:00");
 }
