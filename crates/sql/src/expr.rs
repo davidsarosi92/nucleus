@@ -140,6 +140,8 @@ pub enum Func {
     IsDistinctFrom,
     /// `replace(text, from, to)`.
     Replace,
+    /// `repeat(text, n)`.
+    Repeat,
     /// `position(sub in text)` / `strpos(text, sub)`.
     Strpos,
     /// `sqrt(x)`.
@@ -224,6 +226,7 @@ impl Func {
             Func::Least => "least",
             Func::IsDistinctFrom => "is_distinct_from",
             Func::Replace => "replace",
+            Func::Repeat => "repeat",
             Func::Strpos => "strpos",
             Func::Sqrt => "sqrt",
             Func::Power => "power",
@@ -1149,6 +1152,14 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
             }),
         },
         Func::Replace => Value::Text(text(&args[0])?.replace(&text(&args[1])?, &text(&args[2])?)),
+        Func::Repeat => {
+            let s = text(&args[0])?;
+            let n = usize::try_from(int(&args[1])?).unwrap_or(0);
+            if s.len().saturating_mul(n) > 1 << 30 {
+                return Err(Error::out_of_range("requested length too large"));
+            }
+            Value::Text(s.repeat(n))
+        }
         Func::Strpos => {
             if let (Value::Bytea(s), Value::Bytea(sub)) = (&args[0], &args[1]) {
                 let at = if sub.is_empty() {

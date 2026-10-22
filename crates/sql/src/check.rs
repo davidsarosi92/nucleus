@@ -4,9 +4,10 @@
 //!
 //! Checked, for every table: each row decodes, sits under its primary key
 //! and keeps `NOT NULL`; each secondary index holds exactly the entries its
-//! rows imply, and a unique index no duplicates; every foreign key finds
-//! its referenced row; and no keys exist for a table or index the catalog
-//! does not have.
+//! rows imply, and a unique index no duplicates; each value stored out of
+//! line has all its chunks, and no chunks are left without one; every
+//! foreign key finds its referenced row; and no keys exist for a table or
+//! index the catalog does not have.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
@@ -14,7 +15,7 @@ use std::ops::Bound;
 use nucleus_kv::{KvTxn, prefix_end};
 
 use crate::catalog::{self, Table};
-use crate::encoding::{decode_row, encode_key};
+use crate::encoding::{encode_key, out_of_line};
 use crate::error::Result;
 use crate::exec::{pk_suffix, row_key_of};
 use crate::types::{Row, Value};
@@ -55,7 +56,9 @@ pub fn check(txn: &dyn KvTxn, reg: &crate::ext::Registry) -> Result<Vec<String>>
     let known: BTreeMap<u32, BTreeSet<u32>> = tables
         .iter()
         .map(|t| {
-            let ids = std::iter::once(0).chain(t.indexes.iter().map(|i| i.id));
+            let ids = [0, crate::large::LARGE_INDEX]
+                .into_iter()
+                .chain(t.indexes.iter().map(|i| i.id));
             (t.id, ids.collect())
         })
         .collect();
@@ -101,8 +104,19 @@ fn check_table(
     };
     let mut rows = Vec::new();
     let mut expected: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = vec![BTreeMap::new(); t.indexes.len()];
+    // Values stored out of line: the chunks' common prefix, and length.
+    let large = t.index_prefix(crate::large::LARGE_INDEX);
+    let mut out_of_line_values: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
     for (key, value) in scan(&t.index_prefix(0))? {
-        let row = match decode_row(&value, t.columns.len()) {
+        if let Ok(refs) = out_of_line(&value) {
+            for (c, len) in refs {
+                let mut p = large.clone();
+                p.extend_from_slice(&pk_suffix(t, &key));
+                p.extend_from_slice(&(c as u16).to_be_bytes());
+                out_of_line_values.insert(p, u64::from(len));
+            }
+        }
+        let row = match crate::large::read_row(txn, t, &key, &value) {
             Ok(row) => row,
             Err(e) => {
                 problems.push(format!(
@@ -137,6 +151,27 @@ fn check_table(
             }
         }
         rows.push(row);
+    }
+    let mut chunks: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+    for (k, v) in scan(&large)? {
+        let Some(owner) = k.get(..k.len().saturating_sub(4)) else {
+            continue;
+        };
+        *chunks.entry(owner.to_vec()).or_default() += v.len() as u64;
+    }
+    if chunks != out_of_line_values {
+        let orphans = chunks
+            .keys()
+            .filter(|k| !out_of_line_values.contains_key(*k))
+            .count();
+        let short = out_of_line_values
+            .iter()
+            .filter(|(k, len)| chunks.get(*k) != Some(*len))
+            .count();
+        problems.push(format!(
+            "{}: {short} values stored out of line lack chunks, {orphans} have no row",
+            t.name
+        ));
     }
     for (i, want) in expected.iter().enumerate() {
         let got: BTreeMap<Vec<u8>, Vec<u8>> = scan(&t.index_prefix(t.indexes[i].id))?

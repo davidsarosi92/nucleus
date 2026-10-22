@@ -11,7 +11,7 @@ use nucleus_kv::prefix_end;
 
 use crate::ast::SetOp;
 use crate::catalog::{Table, row_key};
-use crate::encoding::{decode_row, encode_key, encode_key_value};
+use crate::encoding::{encode_key, encode_key_value};
 use crate::error::{Error, Result};
 use crate::expr::{Ctx, Env, Expr};
 use crate::ext::{Accumulator, CallContext};
@@ -420,11 +420,11 @@ pub fn scan<'a>(
     } else {
         ctx.txn.scan(Bound::Included(&start), end_bound)?
     };
-    let ncols = table.columns.len();
     Ok(match index {
         None => Box::new(entries.map(move |e| {
             let (k, v) = e?;
-            Ok((k, decode_row(&v, ncols)?))
+            let row = crate::large::read_row(ctx.txn, table, &k, &v)?;
+            Ok((k, row))
         })),
         Some(_) => {
             let base = table.index_prefix(0);
@@ -436,7 +436,8 @@ pub fn scan<'a>(
                     .txn
                     .get(&k)?
                     .ok_or_else(|| Error::internal("index entry without its row"))?;
-                Ok((k, decode_row(&v, ncols)?))
+                let row = crate::large::read_row(ctx.txn, table, &k, &v)?;
+                Ok((k, row))
             }))
         }
     })

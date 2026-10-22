@@ -692,8 +692,22 @@ rewrites the keys of every table with an array in a key
 (missing trailing columns read as NULL, so `ADD COLUMN` needs no rewrite
 unless it has a default); an integer is tag `12` (2 bytes), `13` (4) or
 `2` (8), the fewest that hold it (version `01`, still read, had only `2`);
-a registered type's value is tag `11`, its id, its encoding version and
-its canonical bytes.  A registered type's id is
+a real is tag `14`, a bytea `15`; a registered type's value is tag `11`,
+its id, its encoding version and its canonical bytes; and tag `16` (a
+`u32` length) is a value stored out of line.
+
+**Large values out of line** (`large`).  A value whose encoding is longer
+than 2 000 bytes (`large::THRESHOLD`) — a file in a `bytea`, a document
+in a `text`, any type — is stored in chunks of up to 32 KiB under the
+table's reserved index id `FFFFFFFF`, keyed by the row's primary key, the
+column and the chunk number; the row keeps tag 16 and the length, and
+reads (`large::read_row`) put the value back.  The chunks are written and
+removed with their row, in its transaction: a snapshot sees the chunks of
+the row version it sees, a rollback or a crash leaves none behind (the
+crash test writes large values), a changed primary key moves them, and
+dropping the table removes them.  An update that leaves a large value as
+it was writes none of its chunks.  The consistency check finds a value
+missing chunks and chunks without their value.  A registered type's id is
 the FNV-1a hash of its name, the same in every process (two names with
 one id are refused when registered).
 
@@ -724,6 +738,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 08 <type>` | the oldest encoding version a registered type's stored values may be in |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
+| `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
 
 A unique index entry is keyed by the index values alone (unless one is
 NULL), so two transactions inserting the same value write the same key and
@@ -736,8 +751,9 @@ statement and written by the first write to a database the SQL layer has
 not used; a newer format than the build reads is refused with `0A000`
 rather than misread.  `check::check(txn)` lists every inconsistency between
 the catalog, the rows and the indexes (rows under their primary key, `NOT
-NULL`, index entries exactly as the rows imply, unique indexes, foreign
-keys, no keys of unknown tables or indexes).
+NULL`, index entries exactly as the rows imply, unique indexes, values
+stored out of line whole and no chunks without one, foreign keys, no keys
+of unknown tables or indexes).
 
 ### 8.3 Parser (`lexer`, `parser`, `ast`)
 
@@ -1318,6 +1334,10 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-22 — §M14.26 large values out of line:** values over 2 000
+  bytes, of any type, stored in chunks keyed by their row; kept by
+  updates that leave them; in the consistency check and the crash test;
+  `repeat()`.
 - **2026-10-22 — §M14.26 `bytea`:** binary strings (hex and escape
   forms, `encode` / `decode`, `sha256`, `md5`, the byte functions),
   `position(… IN …)` and `substring(… FROM … FOR …)` in the grammar;

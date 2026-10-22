@@ -238,7 +238,7 @@ fn insert_row(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<()> {
     if rowid.is_none() && txn.get(&key)?.is_some() {
         return Err(duplicate(&format!("{}_pkey", t.name)));
     }
-    txn.put(&key, &crate::encoding::encode_row(row))?;
+    crate::large::write(txn, t, &key, row, None)?;
     let pk = pk_suffix(t, &key);
     for (i, (k, unique)) in w.keys.entries(&*txn, t, row, &pk)?.into_iter().enumerate() {
         if unique && txn.get(&k)?.is_some() {
@@ -505,9 +505,11 @@ pub fn update_rows(
             if txn.get(&new_key)?.is_some() {
                 return Err(duplicate(&format!("{}_pkey", t.name)));
             }
-            txn.delete(key)?;
+            crate::large::remove(txn, t, key)?;
+            crate::large::write(txn, t, &new_key, new, None)?;
+        } else {
+            crate::large::write(txn, t, key, new, Some(old))?;
         }
-        txn.put(&new_key, &crate::encoding::encode_row(new))?;
         let (old_pk, new_pk) = (pk_suffix(t, key), pk_suffix(t, &new_key));
         let olds = w.keys.entries(&*txn, t, old, &old_pk)?;
         let news = w.keys.entries(&*txn, t, new, &new_pk)?;
@@ -543,7 +545,7 @@ pub fn delete_rows(
 ) -> Result<()> {
     let keys = IndexKeys::new(&*txn, reg, t)?;
     for (key, row) in rows {
-        txn.delete(key)?;
+        crate::large::remove(txn, t, key)?;
         let pk = pk_suffix(t, key);
         for (k, _) in keys.entries(&*txn, t, row, &pk)? {
             txn.delete(&k)?;
@@ -630,7 +632,8 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
         std::ops::Bound::Excluded(&primary_end),
     )? {
         let (k, v) = e?;
-        rows.push((k, crate::encoding::decode_row(&v, table.columns.len())?));
+        let row = crate::large::read_row(&*txn, table, &k, &v)?;
+        rows.push((k, row));
     }
     catalog::delete_range(txn, &prefix, Some(&end))?;
     for (old_key, row) in rows {
@@ -639,7 +642,7 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
         } else {
             row_key_of(table, &row, None)
         };
-        txn.put(&key, &crate::encoding::encode_row(&row))?;
+        crate::large::write(txn, table, &key, &row, None)?;
         let pk = pk_suffix(table, &key);
         for (k, _) in keys.entries(&*txn, table, &row, &pk)? {
             txn.put(&k, &pk)?;
@@ -671,7 +674,7 @@ pub fn replace_rows(
         if txn.get(&key)?.is_some() {
             return Err(duplicate(&format!("{}_pkey", table.name)));
         }
-        txn.put(&key, &crate::encoding::encode_row(&row))?;
+        crate::large::write(txn, table, &key, &row, None)?;
         let pk = pk_suffix(table, &key);
         for (i, (k, unique)) in keys
             .entries(&*txn, table, &row, &pk)?
@@ -698,10 +701,11 @@ pub fn rewrite_rows(
         let ctx = Ctx::new(&*txn, reg, &[]);
         exec::matching_rows(table, &Access::Full, None, &ctx)?
     };
-    for (key, mut row) in rows {
+    for (key, row) in rows {
+        let mut filled = row.clone();
         let last = table.columns.len() - 1;
-        row[last] = fill.clone();
-        txn.put(&key, &crate::encoding::encode_row(&row))?;
+        filled[last] = fill.clone();
+        crate::large::write(txn, table, &key, &filled, Some(&row))?;
     }
     Ok(())
 }

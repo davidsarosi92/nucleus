@@ -11,7 +11,7 @@ use nucleus_kv::{Database, Kv, Options, TxnOptions};
 use nucleus_platform::harness;
 use nucleus_platform::sim::{CrashMode, Faults, SimPlatform};
 use nucleus_platform::{Rng, SplitMix64};
-use nucleus_sql::{Session, TxnStatus, catalog, encoding};
+use nucleus_sql::{Session, TxnStatus, catalog, large};
 
 const STEPS: u64 = 60;
 
@@ -62,10 +62,16 @@ fn step(rng: &SplitMix64, i: u64) -> String {
             rng.below(40)
         ),
         5 => format!("DELETE FROM parent WHERE id = {k} OR id = {}", k + 50),
+        // Some notes are large: stored out of line, in chunks.
         6 | 7 => format!(
-            "INSERT INTO child VALUES ({}, {}, 'c{k}')",
+            "INSERT INTO child VALUES ({}, {}, {})",
             rng.below(1000),
-            rng.below(40)
+            rng.below(40),
+            if n < 2 {
+                format!("repeat('c{k}', {})", 2000 + 20_000 * n)
+            } else {
+                format!("'c{k}'")
+            }
         ),
         8 => {
             let rows: Vec<String> = (0..=n * 3)
@@ -89,6 +95,15 @@ fn step(rng: &SplitMix64, i: u64) -> String {
             100 + k
         ),
         12 => format!("BEGIN; INSERT INTO bag VALUES ({k}, 'r'); ROLLBACK"),
+        13 if n < 2 => format!(
+            "UPDATE child SET note = {} WHERE id % 7 = {}",
+            if n == 0 {
+                "note || 'x'".to_string()
+            } else {
+                "'short'".into()
+            },
+            k % 7
+        ),
         _ => format!("UPDATE parent SET id = id + 50 WHERE id = {k}"),
     }
 }
@@ -108,8 +123,8 @@ fn dump(kv: &dyn Kv) -> String {
             )
             .unwrap();
         for e in scan {
-            let (_, v) = e.unwrap();
-            let row = encoding::decode_row(&v, t.columns.len()).unwrap();
+            let (k, v) = e.unwrap();
+            let row = large::read_row(&*txn, &t, &k, &v).unwrap();
             out.push_str(&format!("  {row:?}\n"));
         }
     }

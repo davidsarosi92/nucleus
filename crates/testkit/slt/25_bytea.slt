@@ -141,3 +141,15 @@ SELECT count(*), max(k) FROM blobs
 
 statement ok
 DROP TABLE blobs
+
+# repeat, which builds large values.
+
+query TTT
+SELECT repeat('ab', 3), repeat('x', 0) = '', repeat('x', -1) = ''
+----
+ababab t t
+
+query I
+SELECT length(decode(repeat('ab', 100000), 'hex'))
+----
+100000

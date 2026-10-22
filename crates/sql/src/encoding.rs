@@ -25,7 +25,9 @@
 //! **Rows** — `02` (version), column count `u16`, then per column a tag
 //! (`0` null, `1` bool, `2` an integer in 8 bytes, `12` in 2, `13` in 4 —
 //! the fewest that hold the value, whatever the column's width — `3` double,
-//! `14` real (4 bytes), `15` bytea (a `u32` length and the bytes), `4` text, `5` numeric:
+//! `14` real (4 bytes), `15` bytea (a `u32` length and the bytes), `16` a
+//! value stored out of line (a `u32` length: its encoding is in chunks,
+//! [`crate::large`]), `4` text, `5` numeric:
 //! `i128` mantissa and `u8` scale, `6` date `i32`, `7` timestamp and `8`
 //! timestamptz `i64`, `9` interval: months `i32`, days `i32`, µs `i64`,
 //! `10` array: a `u32` count, then each element tagged the same way; `11` a
@@ -310,7 +312,7 @@ pub fn decode_key(b: &[u8], n: usize) -> Result<(Vec<Value>, usize)> {
 }
 
 /// Version 2 added tags 12 to 15; version 1 rows still read.
-const ROW_VERSION: u8 = 2;
+pub const ROW_VERSION: u8 = 2;
 
 /// Encodes a row.
 pub fn encode_row(row: &[Value]) -> Vec<u8> {
@@ -467,6 +469,23 @@ fn r#missing(t: crate::ext::TypeRef) -> bool {
 
 /// Decodes a row of a table with `columns` columns.
 pub fn decode_row(b: &[u8], columns: usize) -> Result<Vec<Value>> {
+    decode_row_with(b, columns, &mut |_, _| {
+        Err(Error::internal(
+            "a value stored out of line, read without its table",
+        ))
+    })
+}
+
+/// The tag of a value stored out of line ([`crate::large`]).
+pub const OUT_OF_LINE: u8 = 16;
+
+/// Decodes a row; `resolve(column, length)` reads each value stored out of
+/// line (tag 16).
+pub fn decode_row_with(
+    b: &[u8],
+    columns: usize,
+    resolve: &mut dyn FnMut(usize, u32) -> Result<Value>,
+) -> Result<Vec<Value>> {
     let bad = |_| Error::internal("malformed row encoding");
     let mut r = Reader::new(b);
     if !(1..=ROW_VERSION).contains(&r.u8().map_err(bad)?) {
@@ -474,11 +493,27 @@ pub fn decode_row(b: &[u8], columns: usize) -> Result<Vec<Value>> {
     }
     let n = r.u16().map_err(bad)? as usize;
     let mut row = Vec::with_capacity(columns.max(n));
-    for _ in 0..n {
-        row.push(decode_value(&mut r)?);
+    for c in 0..n {
+        if r.peek() == Some(OUT_OF_LINE) {
+            r.u8().map_err(bad)?;
+            let len = r.u32().map_err(bad)?;
+            row.push(resolve(c, len)?);
+        } else {
+            row.push(decode_value(&mut r)?);
+        }
     }
     row.resize(columns.max(n), Value::Null);
     Ok(row)
+}
+
+/// The columns of an encoded row stored out of line, and their lengths.
+pub fn out_of_line(b: &[u8]) -> Result<Vec<(usize, u32)>> {
+    let mut out = Vec::new();
+    decode_row_with(b, 0, &mut |c, len| {
+        out.push((c, len));
+        Ok(Value::Null)
+    })?;
+    Ok(out)
 }
 
 /// A little-endian record writer (catalog entries, statistics).
