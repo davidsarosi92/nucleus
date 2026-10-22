@@ -93,6 +93,61 @@ struct Uuid {
     bool operator==(const Uuid& o) const { return bytes == o.bytes; }
 };
 
+/// A `smallint`.
+struct SmallInt {
+    int16_t value = 0;
+    bool operator==(const SmallInt& o) const { return value == o.value; }
+};
+
+/// An `integer`.
+struct Integer {
+    int32_t value = 0;
+    bool operator==(const Integer& o) const { return value == o.value; }
+};
+
+/// A `real`.
+struct Real {
+    float value = 0;
+    bool operator==(const Real& o) const { return value == o.value; }
+};
+
+/// A `bytea`.
+struct Bytes {
+    std::vector<uint8_t> data;
+    bool operator==(const Bytes& o) const { return data == o.data; }
+};
+
+/// A `time`: microseconds since midnight (`24:00:00` included).
+struct Time {
+    int64_t micros = 0;
+    bool operator==(const Time& o) const { return micros == o.micros; }
+};
+
+/// An `inet` (an address and its mask length) or, as `Cidr`, a network.
+struct Inet {
+    uint8_t family = 4; // 4 or 6
+    uint8_t bits = 32;
+    std::array<uint8_t, 16> addr{}; // the first 4 for IPv4
+
+    /// Parses "10.1.2.3/8", "::1".
+    static Inet parse(const std::string& text) {
+        nc_value v;
+        if (nc_inet_parse(text.c_str(), &v) != 0) throw Error("invalid address: " + text, "22P02");
+        Inet out;
+        out.family = v.as.net.family;
+        out.bits = v.as.net.bits;
+        std::copy(std::begin(v.as.net.addr), std::end(v.as.net.addr), out.addr.begin());
+        return out;
+    }
+    bool operator==(const Inet& o) const { return family == o.family && bits == o.bits && addr == o.addr; }
+};
+
+/// A `cidr`: a network (its host bits zero).
+struct Cidr : Inet {
+    static Cidr parse(const std::string& text) { return Cidr{Inet::parse(text)}; }
+    bool operator==(const Cidr& o) const { return Inet::operator==(o); }
+};
+
 /// A value of another registered type: its name and binary form.
 struct Ext {
     std::string type_name;
@@ -103,11 +158,13 @@ struct Ext {
 struct Value;
 using Array = std::vector<Value>;
 using Variant = std::variant<std::monostate, bool, int64_t, double, std::string, Numeric, Date, Timestamp,
-                             TimestampTz, Interval, Array, Uuid, Ext>;
+                             TimestampTz, Interval, Array, Uuid, Ext, SmallInt, Integer, Real, Bytes, Time,
+                             Inet, Cidr>;
 
-/// A value: NULL (monostate), bool, int64, double, text, numeric, date,
-/// timestamp, timestamptz, interval, an array, a uuid, or another
-/// registered type's value.
+/// A value: NULL (monostate), bool, int64 (bigint), double, text (also
+/// char(n) and enums), numeric, date, timestamp, timestamptz, interval, an
+/// array, a uuid, another registered type's value, smallint, integer,
+/// real, bytea, time, inet, cidr.
 struct Value : Variant {
     using Variant::Variant;
     Value() = default;
@@ -137,7 +194,7 @@ struct Column {
     std::string name;
     nc_type type;
     nc_type element;       // for arrays
-    std::string type_name; // for registered types ("uuid", …)
+    std::string type_name; // for registered types ("uuid", …) and enums
 };
 
 /// One statement's result.
@@ -154,6 +211,19 @@ inline Value from_c(const nc_value& v) {
     switch (v.type) {
     case NC_BOOL: return Value(bool(v.as.boolean));
     case NC_INT: return Value(int64_t{v.as.integer});
+    case NC_SMALLINT: return Value(SmallInt{static_cast<int16_t>(v.as.integer)});
+    case NC_INTEGER: return Value(Integer{static_cast<int32_t>(v.as.integer)});
+    case NC_REAL: return Value(Real{v.as.real4});
+    case NC_BYTEA: return Value(Bytes{std::vector<uint8_t>(v.as.bytes.ptr, v.as.bytes.ptr + v.as.bytes.len)});
+    case NC_TIME: return Value(Time{v.as.time});
+    case NC_INET:
+    case NC_CIDR: {
+        Inet n;
+        n.family = v.as.net.family;
+        n.bits = v.as.net.bits;
+        std::copy(std::begin(v.as.net.addr), std::end(v.as.net.addr), n.addr.begin());
+        return v.type == NC_INET ? Value(n) : Value(Cidr{n});
+    }
     case NC_FLOAT: return Value(v.as.real);
     case NC_TEXT: return Value(std::string(v.as.text.ptr, v.as.text.len));
     case NC_NUMERIC: return Value(Numeric{v.as.numeric.lo, v.as.numeric.hi, v.as.numeric.scale});
@@ -208,6 +278,13 @@ inline nc_value to_c(const Value& v, std::deque<std::vector<nc_value>>& store) {
             return nc_uuid_value(c);
         }
         nc_value operator()(const Ext& e) const { return nc_ext(e.type_name.c_str(), e.data.data(), e.data.size()); }
+        nc_value operator()(const SmallInt& i) const { return nc_smallint(i.value); }
+        nc_value operator()(const Integer& i) const { return nc_integer(i.value); }
+        nc_value operator()(const Real& f) const { return nc_real(f.value); }
+        nc_value operator()(const Bytes& b) const { return nc_bytea(b.data.data(), b.data.size()); }
+        nc_value operator()(const Time& t) const { return nc_time(t.micros); }
+        nc_value operator()(const Inet& n) const { return nc_inet(n.family, n.addr.data(), n.bits); }
+        nc_value operator()(const Cidr& n) const { return nc_cidr(n.family, n.addr.data(), n.bits); }
         nc_value operator()(const Array& a) const {
             std::vector<nc_value> items;
             for (const auto& item : a) items.push_back(to_c(item, store));

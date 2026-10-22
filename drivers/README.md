@@ -5,12 +5,10 @@ library without dependencies; all of them connect to a local server as it
 starts (`127.0.0.1:20035`, user and password `nucleus`) unless told
 otherwise, and all of them pass the same conformance cases (every type both
 ways — `uuid` as each language's native uuid, or a string in JavaScript —,
-parameters, errors with their SQLSTATE, transactions, passwords).  The
-Rust driver speaks protocol version 3, in which §M14.26's types
-(`smallint`, `integer`, `real`, `bytea`, `time`, `inet`, `cidr`) arrive in
-their native forms; the others speak version 2 (registered types in their
-binary form, the newer types as before: integers as 64-bit, `real` as a
-double, the rest as text) until they gain them.
+parameters, errors with their SQLSTATE, transactions, passwords).  They
+speak protocol version 3: registered types arrive in their binary form,
+and `smallint`, `integer`, `real`, `bytea`, `time`, `inet` and `cidr` as
+each language's native (or closest) type.
 
 | Language | Where | Values |
 |----------|-------|--------|

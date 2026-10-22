@@ -8,8 +8,10 @@ later — without changing the layers above.
 **Status:** the core (PLAN.md §F0) and the SQL layer (§F1) exist: a
 crash-safe copy-on-write B+tree with a write-ahead log, MVCC transactions
 (snapshot isolation and serializable), the KV contract, a PostgreSQL-like
-SQL dialect (joins of every kind, CTEs, foreign keys, numeric, date/time
-and array types) with a cost-based optimizer, its own system catalog
+SQL dialect (joins of every kind, CTEs, foreign keys; integers by width,
+`real` and `double`, `numeric`, text and `char(n)`, `bytea` — large
+values stored out of line —, date, time and timestamps, intervals,
+`inet` / `cidr`, `uuid`, enums and arrays) with a cost-based optimizer, its own system catalog
 (`nc_catalog`), and a server that speaks nucleus's own protocol (`ncp`) —
 with drivers for Rust, C, C++, Python, JavaScript/TypeScript and Java, and
 the `ncsql` shell — and, optionally, PostgreSQL's.  It is modular
@@ -18,8 +20,7 @@ engine asks before relying on them (`uuid` the first), orderings,
 operators and casts can be taught in SQL, and modules are folders built
 to leave the repository — PostgreSQL compatibility is one,
 [`modules/pg-compat`](modules/pg-compat); writing one:
-[`examples/extension`](examples/extension).  Next are the core types
-(§M14.26), then
+[`examples/extension`](examples/extension).  Next is
 identity and access (§M14.25: users, roles, privileges, authentication,
 access rules, row-level security), then the rest of the developer platform (§M14.9–§M14.24: SQL
 analyzer, AI access, large data and analytics, vectors, full-text and

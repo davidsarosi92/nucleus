@@ -265,8 +265,8 @@ are marked ✅.
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
 | | M14.19 | Modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ✅ DOCS §1, §8.11–§8.12, §9 |
-| | M14.26 | **In progress:** core types: integers by width (✅), `real` (✅), `bytea` (🟡), `time` (✅), `char(n)` (✅), `inet` / `cidr` (✅), enums (✅); next: the protocol version and drivers | ⬜ |
-| | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
+| | M14.26 | Core types: integers by width, `real`, `bytea` (with large values out of line), `time`, `char(n)`, `inet` / `cidr`, enums; `ncp` version 3 in every driver | ✅ |
+| | M14.25 | **Next:** identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
@@ -902,7 +902,7 @@ work, dropping the ordering while the index exists is refused, and
 redefining it rebuilds the index; and `COLLATE` resolves to a text
 ordering.
 
-### §M14.26 — Core types ⬜ (in progress)
+### §M14.26 — Core types ✅ (DOCS §8.1, §8.2, §10, §11)
 
 **Order:** right after §M14.19, whose type registry they are built on —
 each one registered like `UUID`, with its capabilities declared and the
@@ -930,9 +930,8 @@ type set still lacks (today `smallint` and `integer` are names for a
   underflowing arithmetic; stored in 4 bytes, keyed as a double.  On
   `ncp` it travels as a double until the protocol version that brings
   this milestone's types.
-- 🟡 **`bytea`** (the type, its functions, pg-compat's and out-of-line
-  storage done — for values of every type over 2 000 bytes; the drivers'
-  native types come with the protocol version): binary strings — hex and escape text forms
+- ✅ **`bytea`** (out-of-line storage for values of every type over 2 000
+  bytes): binary strings — hex and escape text forms
   (`'\xdeadbeef'`), `||`, `substring`, `length`, `position`, `encode` /
   `decode` (hex, base64), digests (`sha256`, `md5`); byte-wise order and
   a key encoding; native types in every driver (`Vec<u8>`, `bytes`,
@@ -966,6 +965,23 @@ functions, ordering and errors; every type round-trips through `ncp`,
 all six drivers and `pg-compat` (binary formats checked against
 PostgreSQL); and a database created before this milestone opens with its
 old `integer` columns intact.
+
+*Shipped (2026-10-22):* all of it — slt scripts 23–29 filled from
+PostgreSQL 18 (pg-compat's `02_types.slt` for the types through
+`pg_typeof`), binary forms checked against PostgreSQL 18's `*send`
+functions, `ncp` version 3 in all six drivers, old `integer` columns open
+as `bigint`.  On the way: `ncp`'s own value encoder (storage encodings no
+longer leak into the protocol), `INSERT … VALUES` bound against its
+target columns, PostgreSQL's float output and range errors for doubles
+too, `position(… IN …)` and `substring(… FROM … FOR …)`, `repeat()`, and
+`ScalarFunction::implied_range` in the extension API.
+
+*Left for later:* columnar encodings (they come with §M14.20); `time(p)`
+and `timestamp(p)` precision (µs are kept until type modifiers are
+stored); `date_trunc` of intervals (PostgreSQL's of a time goes through
+one); arrays of enums; an oid per enum in pg-compat (they travel as text);
+`sum(bigint)` as `numeric`, as PostgreSQL's (nucleus's is `bigint`, an
+overflow an error); `inet ± integer` arithmetic.
 
 ### §M14.25 — Identity and access ⬜
 
@@ -1931,6 +1947,11 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-22** — §M14.26 shipped (DOCS §8.1, §8.2, §10, §11): what was
+  left for later is listed in §M14.26.  Next: §M14.25.
+- **2026-10-22** — §M14.26: `ncp` version 3 with native tags for the new
+  types; all six drivers speak it, with the types both ways in their
+  conformance tests.
 - **2026-10-22** — §M14.26: enums, checked against PostgreSQL 18; adding
   and renaming labels rewrites no row (tested on the stored bytes).
 - **2026-10-22** — §M14.26: `inet` and `cidr`, checked against

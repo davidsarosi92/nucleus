@@ -44,7 +44,7 @@ int main() {
         auto t = table();
         db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, b BOOLEAN, f FLOAT, s TEXT, n NUMERIC(10, 2),"
                  " d DATE, tz TIMESTAMPTZ, iv INTERVAL, tags TEXT[])");
-        std::vector<Value> row = {1, true, 0.5, "h\xc3\xa9llo", Numeric::parse("-123.45"), Date::ymd(2024, 2, 29),
+        std::vector<Value> row = {Integer{1}, true, 0.5, "h\xc3\xa9llo", Numeric::parse("-123.45"), Date::ymd(2024, 2, 29),
                                   TimestampTz{763387200000000LL}, Interval{1, 2, 3000000},
                                   Array{"a", Value(), "c"}};
         auto r = db.query("INSERT INTO " + t + " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", row);
@@ -56,7 +56,7 @@ int main() {
         CHECK(r.rows[0][6].str() == "2024-03-10 12:00:00+00");
         CHECK(r.rows[0][8].str() == "{a,NULL,c}");
         r = db.query("SELECT 1.50 + 1, $1 + 1, NULL", {"41"});
-        CHECK(r.rows[0][0].str() == "2.50" && r.rows[0][1].as<int64_t>() == 42 && r.rows[0][2].is_null());
+        CHECK(r.rows[0][0].str() == "2.50" && r.rows[0][1].as<Integer>().value == 42 && r.rows[0][2].is_null());
     }
     {
         Connection db(config());
@@ -88,6 +88,25 @@ int main() {
         CHECK(r.rows[0][0] == Value(u));
         CHECK(r.rows[0][0].str() == "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11");
         CHECK(r.rows[0][1].as<Uuid>().bytes[6] >> 4 == 4);
+    }
+    {
+        // §M14.26's types, natively (protocol version 3).
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE TYPE " + t + "_mood AS ENUM ('sad', 'happy')");
+        db.query("CREATE TABLE " + t + " (s SMALLINT, i INTEGER, r REAL, b BYTEA, tm TIME, ch CHAR(3), ip INET,"
+                 " net CIDR, m " + t + "_mood)");
+        std::vector<Value> row = {SmallInt{-2}, Integer{70000}, Real{0.1f}, Bytes{{0, 0xff, 7}},
+                                  Time{45296500000LL}, "ab ", Inet::parse("10.1.2.3/8"),
+                                  Cidr::parse("2001:db8::/32"), "happy"};
+        db.query("INSERT INTO " + t + " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", row);
+        auto r = db.query("SELECT * FROM " + t);
+        CHECK(r.rows.size() == 1 && r.rows[0] == row);
+        CHECK(r.columns[5].type == NC_CHAR && r.columns[8].type == NC_ENUM && r.columns[8].type_name == t + "_mood");
+        std::vector<std::string> shown;
+        for (const auto& v : r.rows[0]) shown.push_back(v.str());
+        CHECK((shown == std::vector<std::string>{"-2", "70000", "0.1", "\\x00ff07", "12:34:56.5", "ab ",
+                                                 "10.1.2.3/8", "2001:db8::/32", "happy"}));
     }
     {
         auto c = config();

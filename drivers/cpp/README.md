@@ -5,7 +5,8 @@ Header-only C++17 over the C driver: `nucleus::Connection` (RAII; throws
 `Result` of `nucleus::Value`s (`std::variant` of NULL, bool, int64, double,
 text, `Numeric`, `Date`, `Timestamp`, `TimestampTz`, `Interval`, `Array`,
 `Uuid` — 16 bytes, `Uuid::parse` — and `Ext`, another registered type's name
-and binary form),
+and binary form; protocol version 3's `SmallInt`, `Integer`, `Real`,
+`Bytes`, `Time`, `Inet` and `Cidr` — `Inet::parse`, `Cidr::parse`),
 `transaction([](Connection&) { … })`.
 
 ```sh

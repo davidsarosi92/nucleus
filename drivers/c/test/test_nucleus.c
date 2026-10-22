@@ -173,6 +173,68 @@ static void uuids(void) {
     nc_close(db);
 }
 
+static void core_types(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    char t[64], sql[512];
+    static const uint8_t bytes[] = {0, 0xff, 7};
+    nc_value params[9], ip, net, q[2];
+    nc_result *r;
+    CHECK(db != NULL);
+    if (!db) return;
+    CHECK(nc_inet_parse("10.1.2.3/8", &ip) == 0);
+    CHECK(nc_inet_parse("2001:db8::/32", &net) == 0);
+    net.type = NC_CIDR;
+    CHECK(nc_inet_parse("1.2.3", &q[0]) != 0 && nc_inet_parse("1::2::3", &q[0]) != 0);
+    table(t, sizeof t);
+    snprintf(sql, sizeof sql, "CREATE TYPE %s_mood AS ENUM ('sad', 'happy')", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (s SMALLINT, i INTEGER, r REAL, b BYTEA, tm TIME, ch CHAR(3), "
+             "ip INET, net CIDR, m %s_mood)", t, t);
+    nc_result_free(must(db, sql, NULL, 0));
+    params[0] = nc_smallint(-2);
+    params[1] = nc_integer(70000);
+    params[2] = nc_real(0.1f);
+    params[3] = nc_bytea(bytes, sizeof bytes);
+    params[4] = nc_time(45296500000LL); /* 12:34:56.5 */
+    params[5] = nc_text("ab");
+    params[6] = ip;
+    params[7] = net;
+    params[8] = nc_text("happy");
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", t);
+    nc_result_free(must(db, sql, params, 9));
+    snprintf(sql, sizeof sql, "SELECT * FROM %s", t);
+    r = must(db, sql, NULL, 0);
+    if (r) {
+        static const nc_type want[] = {NC_SMALLINT, NC_INTEGER, NC_REAL, NC_BYTEA, NC_TIME,
+                                       NC_CHAR, NC_INET, NC_CIDR, NC_ENUM};
+        static const char *shown[] = {"-2", "70000", "0.1", "\\x00ff07", "12:34:56.5",
+                                      "ab ", "10.1.2.3/8", "2001:db8::/32", "happy"};
+        size_t i;
+        for (i = 0; i < 9; i++) {
+            CHECK(nc_column_type(r, i) == want[i]);
+            CHECK(strcmp(text_of(r, 0, i), shown[i]) == 0);
+        }
+        CHECK(nc_value_at(r, 0, 0)->as.integer == -2);
+        CHECK(nc_value_at(r, 0, 2)->as.real4 == 0.1f);
+        CHECK(nc_value_at(r, 0, 3)->as.bytes.len == 3);
+        CHECK(nc_value_at(r, 0, 6)->as.net.bits == 8 && nc_value_at(r, 0, 6)->as.net.addr[3] == 3);
+        CHECK(strncmp(nc_column_type_name(r, 8), t, strlen(t)) == 0);
+        nc_result_free(r);
+    }
+    CHECK(nc_inet_parse("::ffff:1.2.3.4", &q[0]) == 0);
+    q[1] = nc_bytea(bytes, sizeof bytes);
+    snprintf(sql, sizeof sql, "SELECT $1::inet, count(*) FROM %s WHERE b = $2", t);
+    r = must(db, sql, q, 2);
+    if (r) {
+        CHECK(strcmp(text_of(r, 0, 0), "::ffff:1.2.3.4") == 0);
+        CHECK(nc_value_at(r, 0, 1)->as.integer == 1);
+        nc_result_free(r);
+    }
+    nc_close(db);
+}
+
 static void authentication(void) {
     nc_error err;
     nc_config cfg = config();
@@ -184,6 +246,7 @@ int main(void) {
     types_both_ways();
     errors_and_transactions();
     uuids();
+    core_types();
     authentication();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);

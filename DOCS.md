@@ -1370,9 +1370,8 @@ dates and timestamps as days and µs since 2000-01-01, `Time` as µs since
 midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
 `Uuid([u8; 16])`, `Other { type_name, bytes }` for another registered
 type; `char(n)` and enum values as text, their columns typed `Char` and
-`Enum(name)`) with `From` conversions for parameters.  The Rust driver
-speaks protocol version 3; the others version 2 until they gain §M14.26's
-types.
+`Enum(name)`) with `From` conversions for parameters.  Every driver
+speaks protocol version 3.
 
 **C:** `drivers/c` (`nucleus.h`, `nucleus.c`; C99, POSIX sockets or
 Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
@@ -1380,41 +1379,52 @@ Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
 accessors (`nc_rows`, `nc_value_at`, `nc_column_type`, `nc_command`,
 `nc_count`), `nc_format` (text as `ncsql` prints it), value constructors
 (`nc_int`, `nc_text`, `nc_numeric`, `nc_date`, `nc_array`, `nc_uuid_value`,
-`nc_ext`, …), `nc_uuid_parse`, `nc_result_free`, `nc_close`.  `uuid` is
-`NC_UUID` (an `nc_uuid` of 16 bytes), another registered type `NC_EXT`
-(name and bytes; `nc_column_type_name`).  Results own their values.
+`nc_ext`, `nc_smallint`, `nc_integer`, `nc_real`, `nc_bytea`, `nc_time`,
+`nc_inet`, `nc_cidr`, …), `nc_uuid_parse`, `nc_inet_parse`,
+`nc_result_free`, `nc_close`.  `uuid` is `NC_UUID` (an `nc_uuid` of 16
+bytes), another registered type `NC_EXT` (name and bytes;
+`nc_column_type_name`); `NC_SMALLINT` / `NC_INTEGER` in `as.integer`,
+`NC_REAL` in `as.real4`, `NC_BYTEA` a pointer and length, `NC_TIME` µs
+since midnight, `NC_INET` / `NC_CIDR` a family, mask length and address;
+`NC_CHAR` and `NC_ENUM` columns (an enum's name by
+`nc_column_type_name`) hold `NC_TEXT` values.  Results own their values.
 
 **C++:** `drivers/cpp/nucleus.hpp`, header-only C++17 over the C driver:
 `nucleus::Connection` (RAII, movable), `query(sql, {params})` → `Result`,
 `transaction(fn)`, `nucleus::Error` with `code()`; `nucleus::Value` is a
 `std::variant` (NULL, bool, int64, double, string, `Numeric`, `Date`,
-`Timestamp`, `TimestampTz`, `Interval`, `Array`, `Uuid`, `Ext`).
+`Timestamp`, `TimestampTz`, `Interval`, `Array`, `Uuid`, `Ext`,
+`SmallInt`, `Integer`, `Real`, `Bytes`, `Time`, `Inet`, `Cidr` — the last
+seven wrappers, so an `int` literal stays a bigint parameter).
 
 **Python:** `drivers/python`, package `nucleus` (pure Python 3.8+).
 `nucleus.connect()`, `conn.execute(sql, params)` → `Result` (`rows`,
 `records()`, `columns`, `command`, `count`), `conn.query` for several
 statements, `with conn.transaction():`, DB-API cursors; values as `bool`,
-`int`, `float`, `Decimal`, `str`, `date`, `datetime` (naive / UTC),
-`Interval`, `uuid.UUID`, `list`, `nucleus.Ext` (another registered
-type); errors are `nucleus.Error` subclasses by SQLSTATE class
+`int`, `float` (a real by its shortest digits), `Decimal`, `str`, `bytes`,
+`date`, `time` (24:00:00 as `time.max`), `datetime` (naive / UTC),
+`Interval`, `ipaddress` interfaces (inet) and networks (cidr),
+`uuid.UUID`, `list`, `nucleus.Ext` (another registered type); errors are `nucleus.Error` subclasses by SQLSTATE class
 (`IntegrityError` for 23, `ProgrammingError` for 42, …).
 
 **JavaScript / TypeScript:** `drivers/js`, package `nucleus-db` (Node;
 TypeScript source that Node 22.6+ runs directly, `npm run build` for
 `dist/`).  `await connect()`, `query(sql, params)` → `Result`, `queryAll`,
 `transaction(fn)`; queries on one connection are queued.  Values: integers
-as `number` (`bigint` beyond 2^53), `Decimal` (exact, with `parse` /
-`toString`), `Date` for dates and timestamps (UTC; millisecond precision
-when read), `Interval`, uuid as its canonical string, `Ext` (another
-registered type), arrays, `null`; errors are `NucleusError` with `code`.
+and reals as `number` (`bigint` beyond 2^53; a real by its shortest
+digits), `Decimal` (exact, with `parse` / `toString`), `Buffer` (bytea),
+`Date` for dates and timestamps (UTC; millisecond precision when read),
+`Time`, `Interval`, `Inet` / `Cidr`, uuid as its canonical string, `Ext`
+(another registered type), arrays, `null`; errors are `NucleusError` with `code`.
 
 **Java:** `drivers/java`, package `io.github.davidsarosi92.nucleus` (Java
 17+, `javac` or Maven).  `NucleusClient.connect(new Config())`,
 `query(sql, params...)` → `Result` (`rows()`, `records()`), `queryAll`,
 `transaction(fn)`, `NucleusException` with `code()`; values as `Boolean`,
-`Long`, `Double`, `BigDecimal`, `String`, `LocalDate`, `LocalDateTime`,
-`OffsetDateTime` (UTC), `Interval`, `UUID`, `Ext` (another registered
-type), `List`.
+`Short`, `Integer`, `Long`, `Float`, `Double`, `BigDecimal`, `String`,
+`byte[]`, `LocalDate`, `LocalTime`, `LocalDateTime`, `OffsetDateTime`
+(UTC), `Interval`, `Inet` / `Cidr` (over `InetAddress`), `UUID`, `Ext`
+(another registered type), `List`.
 
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
@@ -1425,6 +1435,13 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-22 — §M14.26 shipped.**  Core types: integers by width,
+  `real`, `bytea` and large values out of line, `time`, `char(n)`,
+  `inet` / `cidr`, enums; `ncp` version 3 in every driver.
+- **2026-10-22 — §M14.26 `ncp` version 3:** native tags for the new
+  types; every driver speaks it (Rust, C, C++, Python, JavaScript, Java),
+  each with the types both ways in its conformance tests; older clients
+  get what their version knows.
 - **2026-10-22 — §M14.26 enums:** `CREATE TYPE … AS ENUM`, `ADD VALUE
   … BEFORE / AFTER` and `RENAME VALUE` without rewriting a row (sort keys
   with room between them), `DROP TYPE`, `nc_catalog.enums`.

@@ -27,8 +27,9 @@ extern "C" {
 
 /* This driver's version. */
 #define NC_VERSION "0.1.0"
-/* 2: registered types (uuid, modules' types) arrive in their binary form. */
-#define NC_PROTOCOL_VERSION 2
+/* 2: registered types (uuid, modules' types) arrive in their binary form;
+ * 3: smallint, integer, real, bytea, time, inet and cidr in theirs. */
+#define NC_PROTOCOL_VERSION 3
 #define NC_DEFAULT_PORT 20035
 
 /* Value and column types (the protocol's tags). */
@@ -45,6 +46,15 @@ typedef enum nc_type {
     NC_INTERVAL = 9,
     NC_ARRAY = 10,
     NC_EXT = 11,  /* another registered type: its name and binary form */
+    NC_SMALLINT = 12, /* as.integer */
+    NC_INTEGER = 13,  /* as.integer */
+    NC_REAL = 14,     /* as.real4 */
+    NC_BYTEA = 15,    /* as.bytes */
+    NC_TIME = 16,     /* as.time: µs since midnight */
+    NC_CHAR = 17,     /* a column only: char(n); its values are NC_TEXT */
+    NC_INET = 18,     /* as.net */
+    NC_CIDR = 19,     /* as.net */
+    NC_ENUM = 20,     /* a column only: an enum (nc_column_type_name); its values are NC_TEXT */
     NC_UUID = 100 /* uuid (on the wire, NC_EXT named "uuid") */
 } nc_type;
 
@@ -60,8 +70,12 @@ struct nc_value {
     nc_type type;
     union {
         int boolean;
-        int64_t integer;
+        int64_t integer;        /* bigint, integer, smallint */
         double real;
+        float real4;            /* real */
+        struct { const uint8_t *ptr; size_t len; } bytes;      /* bytea */
+        int64_t time;           /* µs since midnight (24:00:00 included) */
+        struct { uint8_t family, bits; uint8_t addr[16]; } net; /* family 4 (addr[0..4]) or 6 */
         struct { const char *ptr; size_t len; } text;          /* NUL-terminated */
         struct { uint64_t lo; int64_t hi; uint8_t scale; } numeric; /* (hi·2^64 + lo) × 10^-scale */
         int32_t date;           /* days since 2000-01-01 */
@@ -115,7 +129,8 @@ size_t nc_columns(const nc_result *r);
 const char *nc_column_name(const nc_result *r, size_t col);
 nc_type nc_column_type(const nc_result *r, size_t col);
 nc_type nc_column_element(const nc_result *r, size_t col); /* for NC_ARRAY columns */
-/* A registered type's name ("uuid", …) for NC_UUID and NC_EXT columns, else NULL. */
+/* A registered type's or an enum's name ("uuid", …) for NC_UUID, NC_EXT and
+ * NC_ENUM columns, else NULL. */
 const char *nc_column_type_name(const nc_result *r, size_t col);
 size_t nc_rows(const nc_result *r);
 const nc_value *nc_value_at(const nc_result *r, size_t row, size_t col);
@@ -128,6 +143,18 @@ nc_value nc_null(void);
 nc_value nc_bool(int b);
 nc_value nc_int(int64_t i);
 nc_value nc_float(double f);
+nc_value nc_smallint(int16_t i);
+nc_value nc_integer(int32_t i);
+nc_value nc_real(float f);
+/* bytea: the bytes must outlive the query. */
+nc_value nc_bytea(const uint8_t *data, size_t len);
+nc_value nc_time(int64_t micros_since_midnight);
+/* inet / cidr: family 4 (4 bytes of addr) or 6 (16), and a mask length. */
+nc_value nc_inet(int family, const uint8_t *addr, int bits);
+nc_value nc_cidr(int family, const uint8_t *addr, int bits);
+/* Parses "10.1.2.3/8" or "2001:db8::/32" (IPv4 dotted, IPv6 with "::"
+ * and an IPv4 tail) into an inet; 0 on success. */
+int nc_inet_parse(const char *text, nc_value *out);
 nc_value nc_text(const char *s);
 nc_value nc_date(int32_t days);
 nc_value nc_timestamp(int64_t micros);

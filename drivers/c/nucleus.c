@@ -128,6 +128,25 @@ static int put_value(buf *w, const nc_value *v) {
     case NC_NULL: break;
     case NC_BOOL: put_u8(w, v->as.boolean ? 1 : 0); break;
     case NC_INT: put_le(w, (uint64_t)v->as.integer, 8); break;
+    case NC_SMALLINT: put_le(w, (uint16_t)v->as.integer, 2); break;
+    case NC_INTEGER: put_le(w, (uint32_t)v->as.integer, 4); break;
+    case NC_REAL: {
+        uint32_t bits;
+        memcpy(&bits, &v->as.real4, 4);
+        put_le(w, bits, 4);
+        break;
+    }
+    case NC_BYTEA:
+        put_le(w, v->as.bytes.len, 4);
+        put(w, v->as.bytes.ptr, v->as.bytes.len);
+        break;
+    case NC_TIME: put_le(w, (uint64_t)v->as.time, 8); break;
+    case NC_INET:
+    case NC_CIDR:
+        put_u8(w, v->as.net.family);
+        put_u8(w, v->as.net.bits);
+        put(w, v->as.net.addr, v->as.net.family == 4 ? 4 : 16);
+        break;
     case NC_FLOAT: {
         uint64_t bits;
         memcpy(&bits, &v->as.real, 8);
@@ -205,6 +224,7 @@ static char *get_str(reader *r) {
 static void free_value(nc_value *v) {
     size_t i;
     if (v->type == NC_TEXT) free((void *)v->as.text.ptr);
+    if (v->type == NC_BYTEA) free((void *)v->as.bytes.ptr);
     if (v->type == NC_EXT) {
         free((void *)v->as.ext.type_name);
         free((void *)v->as.ext.data);
@@ -224,6 +244,37 @@ static int get_value(reader *r, nc_value *v) {
     case NC_NULL: break;
     case NC_BOOL: v->as.boolean = get_le(r, 1) != 0; break;
     case NC_INT: v->as.integer = (int64_t)get_le(r, 8); break;
+    case NC_SMALLINT: v->as.integer = (int16_t)(uint16_t)get_le(r, 2); break;
+    case NC_INTEGER: v->as.integer = (int32_t)(uint32_t)get_le(r, 4); break;
+    case NC_REAL: {
+        uint32_t bits = (uint32_t)get_le(r, 4);
+        memcpy(&v->as.real4, &bits, 4);
+        break;
+    }
+    case NC_BYTEA: {
+        size_t n = (size_t)get_le(r, 4);
+        const unsigned char *p = take(r, n);
+        uint8_t *data;
+        if (!p) return -1;
+        data = malloc(n ? n : 1);
+        if (!data) return -1;
+        memcpy(data, p, n);
+        v->as.bytes.ptr = data;
+        v->as.bytes.len = n;
+        break;
+    }
+    case NC_TIME: v->as.time = (int64_t)get_le(r, 8); break;
+    case NC_INET:
+    case NC_CIDR: {
+        const unsigned char *p;
+        v->as.net.family = (uint8_t)get_le(r, 1);
+        v->as.net.bits = (uint8_t)get_le(r, 1);
+        if (v->as.net.family != 4 && v->as.net.family != 6) return -1;
+        p = take(r, v->as.net.family == 4 ? 4 : 16);
+        if (!p) return -1;
+        memcpy(v->as.net.addr, p, v->as.net.family == 4 ? 4 : 16);
+        break;
+    }
     case NC_FLOAT: {
         uint64_t bits = get_le(r, 8);
         memcpy(&v->as.real, &bits, 8);
@@ -527,6 +578,7 @@ nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t 
                 cur->columns[i].name = get_str(&r);
                 cur->columns[i].type = (nc_type)get_le(&r, 1);
                 if (cur->columns[i].type == NC_ARRAY) cur->columns[i].element = (nc_type)get_le(&r, 1);
+                if (cur->columns[i].type == NC_ENUM) cur->columns[i].type_name = get_str(&r);
                 if (cur->columns[i].type == NC_EXT) {
                     cur->columns[i].type_name = get_str(&r);
                     if (cur->columns[i].type_name && strcmp(cur->columns[i].type_name, "uuid") == 0)
@@ -622,6 +674,117 @@ nc_value nc_null(void) { nc_value v; memset(&v, 0, sizeof v); return v; }
 nc_value nc_bool(int b) { nc_value v = nc_null(); v.type = NC_BOOL; v.as.boolean = b != 0; return v; }
 nc_value nc_int(int64_t i) { nc_value v = nc_null(); v.type = NC_INT; v.as.integer = i; return v; }
 nc_value nc_float(double f) { nc_value v = nc_null(); v.type = NC_FLOAT; v.as.real = f; return v; }
+nc_value nc_smallint(int16_t i) { nc_value v = nc_null(); v.type = NC_SMALLINT; v.as.integer = i; return v; }
+nc_value nc_integer(int32_t i) { nc_value v = nc_null(); v.type = NC_INTEGER; v.as.integer = i; return v; }
+nc_value nc_real(float f) { nc_value v = nc_null(); v.type = NC_REAL; v.as.real4 = f; return v; }
+nc_value nc_bytea(const uint8_t *data, size_t len) {
+    nc_value v = nc_null();
+    v.type = NC_BYTEA;
+    v.as.bytes.ptr = data;
+    v.as.bytes.len = len;
+    return v;
+}
+nc_value nc_time(int64_t us) { nc_value v = nc_null(); v.type = NC_TIME; v.as.time = us; return v; }
+static nc_value net_value(nc_type t, int family, const uint8_t *addr, int bits) {
+    nc_value v = nc_null();
+    v.type = t;
+    v.as.net.family = (uint8_t)(family == 6 ? 6 : 4);
+    v.as.net.bits = (uint8_t)bits;
+    memcpy(v.as.net.addr, addr, family == 6 ? 16 : 4);
+    return v;
+}
+nc_value nc_inet(int family, const uint8_t *addr, int bits) { return net_value(NC_INET, family, addr, bits); }
+nc_value nc_cidr(int family, const uint8_t *addr, int bits) { return net_value(NC_CIDR, family, addr, bits); }
+
+static int hex_digit(char c);
+
+static int parse_v4(const char *s, size_t n, uint8_t out[4]) {
+    size_t i = 0;
+    int k;
+    for (k = 0; k < 4; k++) {
+        unsigned x = 0, digits = 0;
+        while (i < n && s[i] >= '0' && s[i] <= '9' && digits < 3) x = x * 10 + (unsigned)(s[i++] - '0'), digits++;
+        if (!digits || x > 255) return -1;
+        out[k] = (uint8_t)x;
+        if (k < 3 && (i >= n || s[i++] != '.')) return -1;
+    }
+    return i == n ? 0 : -1;
+}
+
+int nc_inet_parse(const char *text, nc_value *out) {
+    const char *slash = strchr(text, '/');
+    size_t n = slash ? (size_t)(slash - text) : strlen(text);
+    uint8_t addr[16] = {0};
+    int family, bits;
+    if (!memchr(text, ':', n)) {
+        if (parse_v4(text, n, addr) != 0) return -1;
+        family = 4;
+    } else {
+        /* Groups before and after "::", and an IPv4 tail. */
+        uint16_t head[8], tail[8];
+        size_t nh = 0, nt = 0, i = 0;
+        int gap = 0;
+        uint16_t *g = head;
+        size_t *ng = &nh;
+        if (n >= 2 && text[0] == ':' && text[1] == ':') {
+            gap = 1;
+            g = tail;
+            ng = &nt;
+            i = 2;
+        }
+        while (i < n) {
+            size_t j = i;
+            unsigned x = 0;
+            while (j < n && text[j] != ':' && text[j] != '.') j++;
+            if (j < n && text[j] == '.') {
+                uint8_t v4[4];
+                size_t end = i;
+                while (end < n && text[end] != ':') end++;
+                if (end != n || *ng > 6 || parse_v4(text + i, n - i, v4) != 0) return -1;
+                g[(*ng)++] = (uint16_t)(v4[0] << 8 | v4[1]);
+                g[(*ng)++] = (uint16_t)(v4[2] << 8 | v4[3]);
+                i = n;
+                break;
+            }
+            if (j == i || j - i > 4 || *ng >= 8) return -1;
+            for (; i < j; i++) {
+                int d = hex_digit(text[i]);
+                if (d < 0) return -1;
+                x = x * 16 + (unsigned)d;
+            }
+            g[(*ng)++] = (uint16_t)x;
+            if (i < n) {
+                i++; /* ':' */
+                if (i < n && text[i] == ':') {
+                    if (gap) return -1;
+                    gap = 1;
+                    g = tail;
+                    ng = &nt;
+                    i++;
+                } else if (i == n) {
+                    return -1;
+                }
+            }
+        }
+        if (gap ? nh + nt > 7 : nh != 8) return -1;
+        for (i = 0; i < nh; i++) addr[2 * i] = (uint8_t)(head[i] >> 8), addr[2 * i + 1] = (uint8_t)head[i];
+        for (i = 0; i < nt; i++) {
+            size_t at = 8 - nt + i;
+            addr[2 * at] = (uint8_t)(tail[i] >> 8);
+            addr[2 * at + 1] = (uint8_t)tail[i];
+        }
+        family = 6;
+    }
+    bits = family == 4 ? 32 : 128;
+    if (slash) {
+        char *end;
+        long b = strtol(slash + 1, &end, 10);
+        if (*end || end == slash + 1 || b < 0 || b > bits) return -1;
+        bits = (int)b;
+    }
+    *out = nc_inet(family, addr, bits);
+    return 0;
+}
 nc_value nc_text(const char *s) {
     nc_value v = nc_null();
     if (!s) return v;
@@ -806,10 +969,71 @@ size_t nc_format(const nc_value *v, char *buf, size_t size) {
     size_t n = 0, i;
     if (size) buf[0] = 0;
     switch (v->type) {
-    case NC_NULL: return 0;
+    case NC_NULL:
+    case NC_CHAR: /* column types only: their values are NC_TEXT */
+    case NC_ENUM: return 0;
     case NC_BOOL: return (size_t)snprintf(buf, size, "%s", v->as.boolean ? "t" : "f");
     case NC_INT: return (size_t)snprintf(buf, size, "%lld", (long long)v->as.integer);
+    case NC_SMALLINT:
+    case NC_INTEGER: return (size_t)snprintf(buf, size, "%lld", (long long)v->as.integer);
     case NC_FLOAT: return (size_t)snprintf(buf, size, "%.17g", v->as.real);
+    case NC_REAL: {
+        /* The shortest digits that read back to the same float. */
+        int p;
+        for (p = 1; p < 9; p++) {
+            snprintf(tmp, sizeof tmp, "%.*g", p, (double)v->as.real4);
+            if (strtof(tmp, NULL) == v->as.real4) break;
+        }
+        return (size_t)snprintf(buf, size, "%.*g", p, (double)v->as.real4);
+    }
+    case NC_BYTEA:
+        n = (size_t)snprintf(buf, size, "\\x");
+        for (i = 0; i < v->as.bytes.len; i++)
+            n += (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, "%02x", v->as.bytes.ptr[i]);
+        return n;
+    case NC_TIME: return fmt_time(buf, size, v->as.time);
+    case NC_INET:
+    case NC_CIDR: {
+        const uint8_t *a = v->as.net.addr;
+        int full = v->as.net.family == 4 ? 32 : 128;
+        if (v->as.net.family == 4) {
+            n = (size_t)snprintf(tmp, sizeof tmp, "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+        } else {
+            /* The longest run of two or more zero groups as "::"; a mapped
+             * or compatible IPv4 address dotted (as nucleus prints it). */
+            unsigned w[8];
+            int best = -1, len = 0, k;
+            for (k = 0; k < 8; k++) w[k] = (unsigned)(a[2 * k] << 8 | a[2 * k + 1]);
+            for (k = 0; k < 8;) {
+                int start = k;
+                if (w[k]) {
+                    k++;
+                    continue;
+                }
+                while (k < 8 && !w[k]) k++;
+                if (k - start > len) best = start, len = k - start;
+            }
+            if (len < 2) best = -1;
+            if (best == 0 && (len == 6 || (len == 5 && w[5] == 0xffff))) {
+                n = (size_t)snprintf(tmp, sizeof tmp, "%s%u.%u.%u.%u", len == 5 ? "::ffff:" : "::", a[12], a[13], a[14], a[15]);
+            } else {
+                n = 0;
+                tmp[0] = 0;
+                for (k = 0; k < 8;) {
+                    if (k == best) {
+                        n += (size_t)snprintf(tmp + n, sizeof tmp - n, "::");
+                        k += len;
+                        continue;
+                    }
+                    if (n && tmp[n - 1] != ':') tmp[n++] = ':', tmp[n] = 0;
+                    n += (size_t)snprintf(tmp + n, sizeof tmp - n, "%x", w[k]);
+                    k++;
+                }
+            }
+        }
+        if (v->type == NC_INET && v->as.net.bits == full) return (size_t)snprintf(buf, size, "%s", tmp);
+        return (size_t)snprintf(buf, size, "%s/%u", tmp, v->as.net.bits);
+    }
     case NC_TEXT: return (size_t)snprintf(buf, size, "%s", v->as.text.ptr);
     case NC_NUMERIC: {
         uint64_t lo = v->as.numeric.lo, hi = (uint64_t)v->as.numeric.hi;

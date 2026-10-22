@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Protocol version 3 (nucleus PLAN.md §M14.26): `SmallInt`, `Integer`,
+  `Real`, `Bytes`, `Time`, `Inet` and `Cidr` values.
+
 ## 0.1.0 — 2026-10-18
 
 - Protocol version 2: `uuid` as the language's native uuid (a string in
