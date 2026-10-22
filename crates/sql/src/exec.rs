@@ -315,8 +315,9 @@ fn shared<'a>(rows: Rc<Vec<Row>>) -> Rows<'a> {
 fn key_bound(v: Value, t: DataType) -> Option<Value> {
     Some(match (v, t) {
         (v, t) if v.is_null() || v.data_type() == Some(t) => v,
-        // Every integer width has the same key encoding.
+        // Every integer width has the same key encoding; so do inet and cidr.
         (v @ Value::Int(_), t) if t.is_integer() => v,
+        (v @ (Value::Inet(_) | Value::Cidr(_)), DataType::Inet | DataType::Cidr) => v,
         (Value::Int(i), DataType::Float) => Value::Float(i as f64),
         (Value::Int(i), DataType::Numeric) => Value::Numeric(crate::decimal::Decimal::from_i64(i)),
         // numeric against float compares as floats.

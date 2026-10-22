@@ -123,6 +123,7 @@ impl Module for Builtin {
         }
         crate::uuid::register(r)?;
         crate::bytea::register(r)?;
+        crate::inet::register(r)?;
         r.add_table_function(Arc::new(Unnest))?;
         r.add_schema("public", "user tables", false)?;
         r.add_schema("nc_catalog", "the nucleus system catalog", false)?;
@@ -798,6 +799,8 @@ const TYPES: &[(DataType, &[&str], &str)] = &[
         "datetime",
     ),
     (DataType::Interval, &["interval"], "interval"),
+    (DataType::Inet, &["inet"], "network"),
+    (DataType::Cidr, &["cidr"], "network"),
 ];
 
 /// A built-in type as a [`Type`]: its values are native, and its abilities
@@ -943,6 +946,27 @@ fn examples(ty: DataType) -> Vec<Value> {
             .map(Value::Time)
             .to_vec(),
         DataType::TimestampTz => [0, 1, -1, i64::MAX / 4].map(Value::TimestampTz).to_vec(),
+        DataType::Inet => [
+            "0.0.0.0/0",
+            "10.0.0.5/8",
+            "10.0.0.5",
+            "255.255.255.255",
+            "::",
+            "::1/64",
+            "ffff::1",
+        ]
+        .map(|s| Value::Inet(crate::inet::parse_inet(s).expect("an inet")))
+        .to_vec(),
+        DataType::Cidr => [
+            "0.0.0.0/0",
+            "10.0.0.0/7",
+            "10.0.0.0/8",
+            "10.1.2.3/32",
+            "::/0",
+            "2001:db8::/32",
+        ]
+        .map(|s| Value::Cidr(crate::inet::parse_cidr(s).expect("a cidr")))
+        .to_vec(),
         DataType::Interval => [(0, 0, 0), (1, 0, 0), (0, 30, 0), (-1, 2, -3_000_000)]
             .iter()
             .map(|&(months, days, micros)| {

@@ -601,7 +601,8 @@ fn operators_and_casts() {
     assert_eq!(
         rows(
             &mut s,
-            "SELECT symbol, left_type, function, source FROM nc_catalog.operators ORDER BY 1"
+            "SELECT symbol, left_type, function, source FROM nc_catalog.operators \
+             WHERE left_type = 'geopoint' ORDER BY 1"
         ),
         [
             ["<->", "geopoint", "<->(geopoint)", "distance"],

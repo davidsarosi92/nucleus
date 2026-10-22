@@ -44,6 +44,10 @@ pub enum DataType {
     TimestampTz,
     /// `INTERVAL`.
     Interval,
+    /// `INET`: an IPv4 or IPv6 address with an optional mask.
+    Inet,
+    /// `CIDR`: an IPv4 or IPv6 network.
+    Cidr,
     /// `type[]`: a one-dimensional array of the element type.
     Array(&'static DataType),
     /// A registered type (a module's, or `uuid`): see [`crate::ext::Type`].
@@ -69,6 +73,8 @@ impl DataType {
             DataType::Timestamp => &DataType::Timestamp,
             DataType::TimestampTz => &DataType::TimestampTz,
             DataType::Interval => &DataType::Interval,
+            DataType::Inet => &DataType::Inet,
+            DataType::Cidr => &DataType::Cidr,
             // Arrays of registered types: not yet.
             DataType::Array(_) | DataType::Ext(_) => return None,
         }))
@@ -100,6 +106,8 @@ impl DataType {
             DataType::Timestamp => "timestamp without time zone",
             DataType::TimestampTz => "timestamp with time zone",
             DataType::Interval => "interval",
+            DataType::Inet => "inet",
+            DataType::Cidr => "cidr",
             DataType::Array(e) => match e {
                 DataType::Bool => "boolean[]",
                 DataType::SmallInt => "smallint[]",
@@ -116,6 +124,8 @@ impl DataType {
                 DataType::Timestamp => "timestamp without time zone[]",
                 DataType::TimestampTz => "timestamp with time zone[]",
                 DataType::Interval => "interval[]",
+                DataType::Inet => "inet[]",
+                DataType::Cidr => "cidr[]",
                 DataType::Array(_) | DataType::Ext(_) => "array",
             },
             DataType::Ext(t) => t.name(),
@@ -125,6 +135,11 @@ impl DataType {
     /// Whether this is an integer, `double precision` or `numeric`.
     pub fn is_number(self) -> bool {
         self.is_integer() || matches!(self, DataType::Real | DataType::Float | DataType::Numeric)
+    }
+
+    /// Whether this is `inet` or `cidr`.
+    pub fn is_net(self) -> bool {
+        matches!(self, DataType::Inet | DataType::Cidr)
     }
 
     /// Whether this is `text` or `char(n)`.
@@ -200,6 +215,8 @@ impl DataType {
             ["timestamp"] | ["timestamp", "without", "time", "zone"] => DataType::Timestamp,
             ["timestamptz"] | ["timestamp", "with", "time", "zone"] => DataType::TimestampTz,
             ["interval"] => DataType::Interval,
+            ["inet"] => DataType::Inet,
+            ["cidr"] => DataType::Cidr,
             _ => return None,
         })
     }
@@ -243,6 +260,10 @@ pub enum Value {
     TimestampTz(i64),
     /// An interval.
     Interval(Interval),
+    /// An `inet`.
+    Inet(crate::inet::Net),
+    /// A `cidr` (its host bits zero).
+    Cidr(crate::inet::Net),
     /// An array (one dimension; elements of one type or NULL).
     Array(Vec<Value>),
     /// A value of a registered type: the type and the value's canonical
@@ -281,6 +302,8 @@ impl Value {
             Value::Timestamp(_) => Some(DataType::Timestamp),
             Value::TimestampTz(_) => Some(DataType::TimestampTz),
             Value::Interval(_) => Some(DataType::Interval),
+            Value::Inet(_) => Some(DataType::Inet),
+            Value::Cidr(_) => Some(DataType::Cidr),
             Value::Array(items) => items
                 .iter()
                 .find_map(Value::data_type)
@@ -338,6 +361,7 @@ impl Value {
             }
             (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
             (Value::Time(a), Value::Time(b)) => a.cmp(b),
+            (Value::Inet(a) | Value::Cidr(a), Value::Inet(b) | Value::Cidr(b)) => a.cmp_net(*b),
             (Value::Numeric(a), Value::Numeric(b)) => a.cmp(b),
             (Value::Numeric(a), Value::Int(b)) => a.cmp(&Decimal::from_i64(*b)),
             (Value::Int(a), Value::Numeric(b)) => Decimal::from_i64(*a).cmp(b),
@@ -451,6 +475,8 @@ impl Value {
             | (v @ Value::Numeric(_), DataType::Numeric)
             | (v @ Value::Date(_), DataType::Date)
             | (v @ Value::Time(_), DataType::Time)
+            | (v @ Value::Inet(_), DataType::Inet)
+            | (v @ Value::Cidr(_), DataType::Cidr)
             | (v @ Value::Timestamp(_), DataType::Timestamp)
             | (v @ Value::TimestampTz(_), DataType::TimestampTz)
             | (v @ Value::Interval(_), DataType::Interval) => v,
@@ -479,6 +505,10 @@ impl Value {
             (Value::Text(s), DataType::Numeric) => Value::Numeric(Decimal::parse(&s)?),
             (Value::Text(s), DataType::Date) => Value::Date(datetime::parse_date(&s)?),
             (Value::Text(s), DataType::Time) => Value::Time(datetime::parse_time_of_day(&s)?),
+            (Value::Text(s), DataType::Inet) => Value::Inet(crate::inet::parse_inet(&s)?),
+            (Value::Text(s), DataType::Cidr) => Value::Cidr(crate::inet::parse_cidr(&s)?),
+            (Value::Inet(n), DataType::Cidr) => Value::Cidr(n.network()),
+            (Value::Cidr(n), DataType::Inet) => Value::Inet(n),
             (Value::Timestamp(t) | Value::TimestampTz(t), DataType::Time) => {
                 Value::Time(datetime::time_of_ts(t))
             }
@@ -549,6 +579,8 @@ impl Value {
             Value::Numeric(d) => d.to_string(),
             Value::Date(d) => datetime::format_date(*d),
             Value::Time(t) => datetime::format_time(*t),
+            Value::Inet(n) => n.inet_text(),
+            Value::Cidr(n) => n.cidr_text(),
             Value::Timestamp(t) => datetime::format_timestamp(*t, false),
             Value::TimestampTz(t) => datetime::format_timestamp(*t, true),
             Value::Interval(i) => i.to_string(),
@@ -587,6 +619,7 @@ fn rank(v: &Value) -> u8 {
         Value::Text(_) | Value::Char(_) => 2,
         Value::Bytea(_) => 8,
         Value::Time(_) => 9,
+        Value::Inet(_) | Value::Cidr(_) => 10,
         Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 3,
         Value::Interval(_) => 4,
         Value::Array(_) => 6,
@@ -926,6 +959,11 @@ impl Hash for Value {
             Value::Time(t) => {
                 9u8.hash(state);
                 t.hash(state);
+            }
+            // Equal whatever their type: an inet and a cidr can be equal.
+            Value::Inet(n) | Value::Cidr(n) => {
+                10u8.hash(state);
+                n.hash(state);
             }
             Value::Numeric(d) => hash_number(d.to_f64(), state),
             Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {

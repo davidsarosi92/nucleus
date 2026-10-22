@@ -1984,6 +1984,18 @@ impl<'a> Binder<'a> {
             Returns::Common => ty,
             Returns::Constant(_) => unreachable!("returned above"),
         };
+        // A range the call implies on its first argument: as comparisons
+        // beside it, for the optimizer's index ranges.
+        if let (Some((low, high)), [a, b]) = (f.implied_range(), &args[..]) {
+            let bound = |g: std::sync::Arc<dyn crate::ext::ScalarFunction>| {
+                Expr::Call(FnRef::new(g), vec![b.clone()])
+            };
+            let ge = Expr::Binary(BinaryOp::GtEq, Box::new(a.clone()), Box::new(bound(low)));
+            let le = Expr::Binary(BinaryOp::LtEq, Box::new(a.clone()), Box::new(bound(high)));
+            let call = Expr::Call(f, args.clone());
+            let and = |x, y| Expr::Binary(BinaryOp::And, Box::new(x), Box::new(y));
+            return Ok((and(call, and(ge, le)), ty));
+        }
         // A function computes integers in 64 bits; a narrower result type
         // is checked (`abs(-32768::smallint)` is out of range).
         Ok((narrow(Expr::Call(f, args), ty), ty))
@@ -2365,7 +2377,8 @@ fn comparable(a: Option<DataType>, b: Option<DataType>) -> Result<()> {
             if x == y
                 || (x.is_number() && y.is_number())
                 || (x.is_datetime() && y.is_datetime())
-                || (x.is_text() && y.is_text()) =>
+                || (x.is_text() && y.is_text())
+                || (x.is_net() && y.is_net()) =>
         {
             Ok(())
         }
@@ -2406,8 +2419,10 @@ pub fn unify(a: Option<DataType>, b: Option<DataType>) -> Result<Option<DataType
         {
             Some(if rank(x) >= rank(y) { x } else { y })
         }
-        // char(n) with text: text (PostgreSQL's preferred string type).
+        // char(n) with text: text (PostgreSQL's preferred string type);
+        // cidr with inet: inet.
         (Some(x), Some(y)) if x.is_text() && y.is_text() => Some(Text),
+        (Some(x), Some(y)) if x.is_net() && y.is_net() => Some(Inet),
         (Some(x), Some(y)) => {
             return Err(Error::type_mismatch(format!(
                 "types {x} and {y} cannot be matched"

@@ -14,6 +14,7 @@
 //! | bytea | `0C`, the bytes escaped as text's |
 //! | time | `0D`, then µs since midnight as 8 bytes big-endian |
 //! | char(n) | `0E`, without its trailing blanks, escaped as text's |
+//! | inet, cidr | `0F`, then the family (`04` / `06`), the address masked to its mask length, the mask length, the address ([`crate::inet`]) |
 //! | numeric | `05`, then `02` for zero; else `03` (positive) and the leading digit's power of ten as `i16 ^ 0x8000` big-endian, the significant digits as bytes `d + 1`, then `00`; or `01` (negative) and the positive form's bytes inverted |
 //! | date | `06`, then `days ^ i32::MIN` as 4 bytes big-endian |
 //! | timestamp, timestamptz | `07` / `08`, then `µs ^ i64::MIN` as 8 bytes big-endian |
@@ -29,7 +30,7 @@
 //! the fewest that hold the value, whatever the column's width — `3` double,
 //! `14` real (4 bytes), `15` bytea (a `u32` length and the bytes), `16` a
 //! value stored out of line (a `u32` length: its encoding is in chunks,
-//! [`crate::large`]), `17` time (`i64` µs), `18` char(n) (as text, padded), `4` text, `5` numeric:
+//! [`crate::large`]), `17` time (`i64` µs), `18` char(n) (as text, padded), `19` inet and `20` cidr (the family, mask length and address), `4` text, `5` numeric:
 //! `i128` mantissa and `u8` scale, `6` date `i32`, `7` timestamp and `8`
 //! timestamptz `i64`, `9` interval: months `i32`, days `i32`, µs `i64`,
 //! `10` array: a `u32` count, then each element tagged the same way; `11` a
@@ -82,6 +83,10 @@ pub fn encode_key_value(out: &mut Vec<u8>, v: &Value) {
         Value::Bytea(b) => {
             out.push(0x0C);
             escape(out, b);
+        }
+        Value::Inet(n) | Value::Cidr(n) => {
+            out.push(0x0F);
+            n.key(out);
         }
         Value::Char(s) => {
             out.push(0x0E);
@@ -220,6 +225,10 @@ pub fn decode_key_value(b: &[u8]) -> Result<(Value, usize)> {
                 1 + used,
             )
         }
+        0x0F => {
+            let (n, used) = crate::inet::Net::from_key(&b[1..]).ok_or_else(bad_key)?;
+            (Value::Inet(n), 1 + used)
+        }
         0x0E => {
             let (s, used) = unescape(&b[1..])?;
             (
@@ -329,7 +338,7 @@ pub fn decode_key(b: &[u8], n: usize) -> Result<(Vec<Value>, usize)> {
     Ok((values, at))
 }
 
-/// Version 2 added tags 12 to 18; version 1 rows still read.
+/// Version 2 added tags 12 to 20; version 1 rows still read.
 pub const ROW_VERSION: u8 = 2;
 
 /// Encodes a row.
@@ -372,6 +381,10 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
             out.push(4);
             out.extend_from_slice(&(s.len() as u32).to_le_bytes());
             out.extend_from_slice(s.as_bytes());
+        }
+        Value::Inet(n) | Value::Cidr(n) => {
+            out.push(if matches!(v, Value::Inet(_)) { 19 } else { 20 });
+            out.extend(n.to_bytes());
         }
         Value::Char(s) => {
             out.push(18);
@@ -435,6 +448,20 @@ pub fn decode_value(r: &mut Reader) -> Result<Value> {
         1 => Value::Bool(r.u8().map_err(bad)? == 1),
         2 => Value::Int(r.u64().map_err(bad)? as i64),
         18 => Value::Char(r.str().map_err(bad)?),
+        tag @ (19 | 20) => {
+            let family = r.u8().map_err(bad)?;
+            let n = if family == 6 { 16 } else { 4 };
+            let rest = r.take(1 + n).map_err(bad)?;
+            let mut b = vec![family];
+            b.extend_from_slice(rest);
+            let net = crate::inet::Net::from_bytes(&b)
+                .ok_or_else(|| Error::internal("malformed row encoding"))?;
+            if tag == 19 {
+                Value::Inet(net)
+            } else {
+                Value::Cidr(net)
+            }
+        }
         17 => Value::Time(r.u64().map_err(bad)? as i64),
         15 => {
             let n = r.u32().map_err(bad)? as usize;

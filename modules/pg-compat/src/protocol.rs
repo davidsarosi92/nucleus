@@ -119,6 +119,10 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         1115 => DataType::Array(&DataType::Timestamp),
         1185 => DataType::Array(&DataType::TimestampTz),
         1187 => DataType::Array(&DataType::Interval),
+        869 => DataType::Inet,
+        650 => DataType::Cidr,
+        1041 => DataType::Array(&DataType::Inet),
+        651 => DataType::Array(&DataType::Cidr),
         _ => return None,
     })
 }
@@ -138,6 +142,8 @@ fn type_size(t: DataType) -> i16 {
         DataType::Text
         | DataType::Char
         | DataType::Bytea
+        | DataType::Inet
+        | DataType::Cidr
         | DataType::Numeric
         | DataType::Array(_)
         | DataType::Ext(_) => -1,
@@ -509,6 +515,16 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
         (Value::Numeric(d), _) => numeric_binary(d),
         (Value::Date(d), _) => d.to_be_bytes().to_vec(),
         (Value::Time(t), _) => t.to_be_bytes().to_vec(),
+        // PostgreSQL's binary inet / cidr: family (2 IPv4, 3 IPv6), mask
+        // length, whether a cidr, address length, the address.
+        (Value::Inet(n) | Value::Cidr(n), _) => {
+            let b = n.to_bytes();
+            let mut out = vec![if n.v6 { 3 } else { 2 }, n.bits];
+            out.push(u8::from(matches!(v, Value::Cidr(_))));
+            out.push((b.len() - 2) as u8);
+            out.extend_from_slice(&b[2..]);
+            out
+        }
         (Value::Timestamp(t) | Value::TimestampTz(t), _) => t.to_be_bytes().to_vec(),
         (Value::Interval(i), _) => {
             let mut b = i.micros.to_be_bytes().to_vec();
@@ -573,6 +589,24 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                 Value::Float(f64::from_be_bytes(bytes.try_into().unwrap())).cast(DataType::Real)?
             }
             (Some(DataType::Bytea), _) => Value::Bytea(bytes.into()),
+            (Some(t @ (DataType::Inet | DataType::Cidr)), _) => {
+                let family = match bytes.first() {
+                    Some(2) => 4,
+                    Some(3) => 6,
+                    _ => return Err(bad("inet family")),
+                };
+                let mut b = vec![family, *bytes.get(1).ok_or_else(|| bad("inet"))?];
+                b.extend_from_slice(bytes.get(4..).ok_or_else(|| bad("inet"))?);
+                let n = nucleus_sql::ext::Net::from_bytes(&b).ok_or_else(|| bad("inet"))?;
+                if t == DataType::Cidr {
+                    if n.network() != n {
+                        return Err(bad("cidr has bits set to the right of its mask"));
+                    }
+                    Value::Cidr(n)
+                } else {
+                    Value::Inet(n)
+                }
+            }
             (Some(DataType::Char), _) => {
                 Value::Char(String::from_utf8(bytes.to_vec()).map_err(|_| bad("text not UTF-8"))?)
             }
@@ -1051,6 +1085,46 @@ mod tests {
             Value::Time(t)
         );
         assert!(decode_param(&(-1i64).to_be_bytes(), 1, Some(DataType::Time)).is_err());
+    }
+
+    #[test]
+    fn inet_binary_matches_postgresql() {
+        use nucleus_sql::ext::Net;
+        // From PostgreSQL 18's inet_send and cidr_send.
+        let v4 = |a: u32, bits| Net {
+            v6: false,
+            addr: u128::from(a),
+            bits,
+        };
+        let inet = Value::Inet(v4(0x0a01_0203, 8));
+        let cidr = Value::Cidr(v4(0x0a00_0000, 8));
+        let v6 = Value::Inet(Net {
+            v6: true,
+            addr: 1,
+            bits: 128,
+        });
+        for (v, ty, want) in [
+            (&inet, DataType::Inet, "020800040a010203"),
+            (&cidr, DataType::Cidr, "020801040a000000"),
+            (
+                &v6,
+                DataType::Inet,
+                "0380001000000000000000000000000000000001",
+            ),
+        ] {
+            let b = binary_value(v, ty);
+            assert_eq!(hex(&b), want);
+            assert_eq!(&decode_param(&b, 1, Some(ty)).unwrap(), v);
+        }
+        // A binary cidr with host bits is refused.
+        assert!(
+            decode_param(
+                &binary_value(&inet, DataType::Inet),
+                1,
+                Some(DataType::Cidr)
+            )
+            .is_err()
+        );
     }
 
     #[test]

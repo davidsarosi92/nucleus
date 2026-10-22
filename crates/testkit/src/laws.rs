@@ -184,6 +184,24 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
             let m = if g.one_in(3) { m % 1000 } else { m };
             Value::Numeric(Decimal::new(m, g.below(20) as u32).expect("in range"))
         }),
+        DataType::Inet | DataType::Cidr => Box::new(move |g: &mut Gen| {
+            let v6 = g.one_in(2);
+            let max = if v6 { 128 } else { 32 };
+            let raw = if v6 {
+                u128::from(g.u64()) << 64 | u128::from(g.u64())
+            } else {
+                u128::from(g.u64() as u32)
+            };
+            // Few distinct prefixes, so containment and order meet often.
+            let addr = if g.one_in(2) { raw & 0xff } else { raw };
+            let bits = *g.pick(&[0, 7, 8, 16, max - 1, max]);
+            let n = nucleus_sql::inet::Net { v6, addr, bits };
+            if ty == DataType::Cidr {
+                Value::Cidr(n.network())
+            } else {
+                Value::Inet(n)
+            }
+        }),
         DataType::Char => Box::new(|g: &mut Gen| {
             let n = g.below(5) as usize;
             let s: String = (0..n)

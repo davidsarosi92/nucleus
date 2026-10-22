@@ -1,0 +1,136 @@
+# inet and cidr: IPv4 and IPv6 addresses and networks — input, output,
+# order, containment (<<, <<=, >>, >>=, &&), functions, casts, keys; a
+# network's addresses are one index range.
+# Expected results produced by PostgreSQL 18 (records marked nucleus-only
+# excepted).
+
+query TTTT
+SELECT '192.168.1.5/24'::inet, '192.168.1.5'::inet, '::1'::inet, '2001:DB8::/32'::inet
+----
+192.168.1.5/24 192.168.1.5 ::1 2001:db8::/32
+
+query TTTT
+SELECT '::ffff:1.2.3.4'::inet, '0:0:0:1:0:0:0:1'::inet, '1:0:0:2::'::inet, '64:ff9b::1.2.3.4'::inet
+----
+::ffff:1.2.3.4 ::1:0:0:0:1 1:0:0:2:: 64:ff9b::102:304
+
+query TTTTT
+SELECT '10'::cidr, '10.1'::cidr, '192.168.1'::cidr, '224'::cidr, '1.2.3.4'::cidr
+----
+10.0.0.0/8 10.1.0.0/16 192.168.1.0/24 224.0.0.0/4 1.2.3.4/32
+
+statement error 22P02
+SELECT '192.168.1.5/24'::cidr
+
+statement error 22P02
+SELECT '1.2.3.4/33'::inet
+
+statement error 22P02
+SELECT '10'::inet
+
+statement error 22P02
+SELECT '256.1.1.1'::inet
+
+# Functions.
+
+query TTITTT
+SELECT host('10.1.2.3/8'::inet), network('10.1.2.3/8'::inet), masklen('10.1.2.3/8'::inet), broadcast('10.1.2.3/8'::inet), netmask('10.1.2.3/8'::inet), hostmask('10.1.2.3/8'::inet)
+----
+10.1.2.3 10.0.0.0/8 8 10.255.255.255/8 255.0.0.0 0.255.255.255
+
+query ITTT
+SELECT family('::1'::inet), abbrev('10.1.0.0/16'::cidr), abbrev('10.1.2.3/24'::inet), set_masklen('10.1.2.3/8'::inet, 16)
+----
+6 10.1/16 10.1.2.3/24 10.1.2.3/16
+
+query TTT
+SELECT broadcast('::1/64'::inet), network('2001:db8::1/32'::inet), netmask('::1/64'::inet)
+----
+::ffff:ffff:ffff:ffff/64 2001:db8::/32 ffff:ffff:ffff:ffff::
+
+statement error 22023
+SELECT set_masklen('10.1.2.3/8'::inet, 40)
+
+# Containment and overlap.
+
+query BBBBBBBB
+SELECT '10.1.2.3'::inet << '10.0.0.0/8', '10.0.0.0/8'::inet << '10.0.0.0/8', '10.0.0.0/8'::inet <<= '10.0.0.0/8', '10.0.0.0/8'::cidr >> '10.1.2.3', '10/8'::cidr >>= '10/8'::cidr, '10/8'::cidr && '10.1/16'::cidr, '10/8'::cidr && '11/8'::cidr, '::1'::inet << '10/8'::cidr
+----
+true false true true true true false false
+
+# Order, equality across inet and cidr, casts.
+
+query T
+SELECT x FROM (VALUES ('10.0.0.0/7'::inet), ('10.0.0.0/8'), ('10.5.0.0/16'), ('10.0.0.5'), ('9.255.0.0/16'), ('11.0.0.1'), ('::1'), ('0.0.0.0/0'), ('10.0.0.5/8')) v (x) ORDER BY x
+----
+0.0.0.0/0
+9.255.0.0/16
+10.0.0.0/7
+10.0.0.0/8
+10.0.0.5/8
+10.0.0.5
+10.5.0.0/16
+11.0.0.1
+::1
+
+query BBTTT
+SELECT '10.1.2.3'::inet = '10.1.2.3/32'::cidr, '1.2.3.4'::inet > '::1'::inet, '10.1.2.3/8'::inet::cidr, '10/8'::cidr::inet, '10.1.2.3/8'::inet::text
+----
+true false 10.0.0.0/8 10.0.0.0/8 10.1.2.3/8
+
+# A table of addresses, indexed: containment is a range of the index.
+
+statement ok
+CREATE TABLE hits (id INT PRIMARY KEY, addr inet, net cidr)
+
+statement ok
+CREATE INDEX hits_addr ON hits (addr)
+
+statement ok
+INSERT INTO hits VALUES (1, '10.0.0.1', '10.0.0.0/8'), (2, '10.200.3.4', '10.200.0.0/16'), (3, '11.0.0.1', '11.0.0.0/8'), (4, '9.255.255.255', '9.0.0.0/8'), (5, '10.0.0.0/8', '10.0.0.0/24'), (6, '::ffff:10.0.0.1', '::/0'), (7, '10.255.255.255', '10.255.0.0/16')
+
+query I
+SELECT id FROM hits WHERE addr << '10.0.0.0/8' ORDER BY id
+----
+1
+2
+7
+
+query I
+SELECT id FROM hits WHERE addr <<= '10.0.0.0/8' ORDER BY id
+----
+1
+2
+5
+7
+
+query I
+SELECT id FROM hits WHERE net >>= addr ORDER BY id
+----
+1
+2
+3
+4
+6
+7
+
+query I
+SELECT id FROM hits WHERE net && '10.200.3.0/24' ORDER BY id
+----
+1
+2
+
+query TT
+SELECT min(addr), max(addr) FROM hits
+----
+9.255.255.255 ::ffff:10.0.0.1
+
+# nucleus-only: the containment is scanned as a range of the index.
+query T
+EXPLAIN SELECT id FROM hits WHERE addr <<= '10.0.0.0/8'
+----
+Project: #0
+  Index Scan using hits_addr on hits (addr >= __inet_low(10.0.0.0/8) AND addr <= __inet_high(10.0.0.0/8)) filter: ((network_subeq(#1, 10.0.0.0/8) AND (#1 >= __inet_low(10.0.0.0/8))) AND (#1 <= __inet_high(10.0.0.0/8)))
+
+statement ok
+DROP TABLE hits

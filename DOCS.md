@@ -577,6 +577,8 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 | timestamp | `TIMESTAMP [WITHOUT TIME ZONE]` | µs since 2000-01-01 |
 | timestamptz | `TIMESTAMPTZ`, `TIMESTAMP WITH TIME ZONE` | µs since 2000-01-01 UTC |
 | interval | `INTERVAL` | months, days, µs (kept apart) |
+| inet | `INET` | an IPv4 or IPv6 address, optionally with a mask length |
+| cidr | `CIDR` | an IPv4 or IPv6 network (host bits zero) |
 | arrays | `type[]` | one dimension, elements of the type or NULL |
 | uuid | `UUID` | 16 bytes, a registered type (§8.12) |
 | registered types | their name (`geopoint`) | a module's type: its canonical bytes (§8.12) |
@@ -654,6 +656,24 @@ taking text; `octet_length` and `LIKE` see the padded value, as
 PostgreSQL's.  `char` with `text` unifies to `text`.  Key tag `0E`, row
 tag `18`.  Columns declared `char(n)` before §M14.26 were text and open
 as text.  `crates/testkit/slt/27_char.slt` came from PostgreSQL 18.
+
+**`inet` and `cidr`** (`inet.rs`): input as PostgreSQL's — dotted IPv4,
+IPv6 with `::` and an embedded IPv4 tail, `/bits`; a `cidr` refuses host
+bits set (`22P02`) and takes abbreviated IPv4 (`10`, `192.168/16`, the
+mask from the address class when omitted).  Output: an `inet` without
+`/bits` at a full mask, a `cidr` always with it, IPv6 lower case with the
+longest run of zero groups as `::` and `::ffff:a.b.c.d` dotted.  Order:
+IPv4 first, then the address masked to its mask length, the mask length,
+the whole address — PostgreSQL's — in which a network's addresses are one
+contiguous range; keys follow it (tag `0F`), and an `inet` equals a
+`cidr` of the same value.  Operators `<<`, `<<=`, `>>`, `>>=`, `&&`;
+functions `host`, `network`, `masklen`, `family`, `broadcast`, `netmask`,
+`hostmask`, `abbrev`, `set_masklen`, `inet_same_family`; casts between
+them (to `cidr` clears the host bits) and from text.  `x <<= net` and
+`x << net` imply `x` lies between `net` and its broadcast address at a
+full mask: the binder adds those bounds (the functions'
+`implied_range`, §8.12), so an index on `x` serves containment as a
+range scan.  `crates/testkit/slt/28_inet.slt` came from PostgreSQL 18.
 
 **`time`**: input as `HH:MM[:SS[.f]]`, `HHMM`, `HHMMSS`, with `AM` /
 `PM`, or `allballs` (a zone after it is ignored, as PostgreSQL's `time`
@@ -1076,7 +1096,11 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   common type, or a `Constant`), `strict()` (default true: a `NULL`
   argument gives `NULL` without a call), `volatility()` (`Immutable`,
   `Stable`, `Volatile` — the default; only immutable functions may define
-  an ordering), `call(&CallContext, &[Value])`.
+  an ordering), `implied_range()` (for a function of two arguments true
+  only when the first lies in a range computed from the second: two
+  functions giving the bounds; the binder adds the comparisons beside the
+  call, for index ranges — `inet <<= cidr` uses it), `call(&CallContext,
+  &[Value])`.
   `CallContext` gives the statement's transaction, the registry,
   `now()`, `clock()` and `random(buf)` (all through the database's
   platform).
@@ -1266,7 +1290,7 @@ older drivers keep working.
 **Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
 2 an integer (`smallint`, `integer` and `bigint` alike, for now), 3 a
 float (`real` sent as a double, exactly, for now), 4 text (and, for
-now, `bytea`, `time` and `char(n)` in their text forms), 5 numeric, 6 date, 7 timestamp,
+now, `bytea`, `time`, `char(n)`, `inet` and `cidr` in their text forms), 5 numeric, 6 date, 7 timestamp,
 8 timestamptz, 9 interval, 10 array followed by the element's tag, 11 a
 registered type followed by its name (a string: `uuid`).
 
@@ -1360,6 +1384,9 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-22 — §M14.26 `inet` / `cidr`:** addresses and networks,
+  containment operators as index range scans (`ScalarFunction::
+  implied_range`), the network functions; pg-compat's inet and cidr.
 - **2026-10-22 — §M14.26 `char(n)`:** blank-padded text with the
   standard's rules; pg-compat's bpchar.
 - **2026-10-22 — §M14.26 `time`:** a time of day (input forms, `24:00`,

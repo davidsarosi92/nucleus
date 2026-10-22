@@ -59,6 +59,7 @@ pub use crate::datetime::{
 };
 pub use crate::decimal::Decimal;
 pub use crate::error::{Error, Result};
+pub use crate::inet::Net;
 pub use crate::parser::parse;
 pub use crate::session::{OutColumn, Output, Session, TxnStatus, command_tag};
 pub use crate::types::{DataType, Row, Value};
@@ -215,6 +216,16 @@ pub trait ScalarFunction: Send + Sync {
     /// worst).
     fn volatility(&self) -> Volatility {
         Volatility::Volatile
+    }
+
+    /// For a function of two arguments that can be true only when its
+    /// first lies in a range computed from its second (`inet <<= cidr`):
+    /// two functions of the second giving that range's bounds, inclusive,
+    /// in the first's type and order.  The binder adds `first >= low(second)
+    /// AND first <= high(second)` beside the call, which an index on the
+    /// first can scan.  The default: none.
+    fn implied_range(&self) -> Option<(Arc<dyn ScalarFunction>, Arc<dyn ScalarFunction>)> {
+        None
     }
 
     /// Computes the value.

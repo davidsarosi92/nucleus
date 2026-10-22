@@ -659,6 +659,8 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Timestamp => 1114,
         DataType::TimestampTz => 1184,
         DataType::Interval => 1186,
+        DataType::Inet => 869,
+        DataType::Cidr => 650,
         DataType::Ext(t) if t.name() == "uuid" => UUID,
         // Registered types PostgreSQL has no oid for are shown as text.
         DataType::Ext(_) => 25,
@@ -678,6 +680,8 @@ pub fn type_oid(t: DataType) -> i64 {
             DataType::Timestamp => 1115,
             DataType::TimestampTz => 1185,
             DataType::Interval => 1187,
+            DataType::Inet => 1041,
+            DataType::Cidr => 651,
             DataType::Array(_) | DataType::Ext(_) => 0,
         },
     }
@@ -704,6 +708,8 @@ const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
     (1114, "timestamp", 8, "D", 0, 1115, 0),
     (1184, "timestamptz", 8, "D", 0, 1185, 0),
     (1186, "interval", 16, "T", 0, 1187, 0),
+    (869, "inet", -1, "I", 0, 1041, 0),
+    (650, "cidr", -1, "I", 0, 651, 0),
     (1700, "numeric", -1, "N", 0, 1231, 0),
     (2205, "regclass", 4, "N", 0, 2210, 0),
     (2950, "uuid", 16, "U", 0, 2951, 0),

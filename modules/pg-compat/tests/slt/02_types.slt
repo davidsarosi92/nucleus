@@ -115,3 +115,10 @@ character varying(4) v
 
 statement ok
 DROP TABLE chars
+
+# inet and cidr.
+
+query TTTT
+SELECT pg_typeof('10.1.2.3'::inet), pg_typeof(network('10.1.2.3/8'::inet)), pg_typeof(masklen('10/8'::cidr)), pg_typeof(CASE WHEN true THEN '10/8'::cidr ELSE '10.1.2.3'::inet END)
+----
+inet cidr integer inet
