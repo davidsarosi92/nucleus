@@ -164,6 +164,10 @@ pub enum Func {
     CurrentDate,
     /// `localtimestamp`.
     LocalTimestamp,
+    /// `localtime`: the transaction's start, its time of day.
+    LocalTime,
+    /// `make_time(hour, min, sec)`.
+    MakeTime,
     /// `extract(field FROM x)` (numeric).
     Extract,
     /// `date_part('field', x)` (double precision).
@@ -238,6 +242,8 @@ impl Func {
             Func::ClockTimestamp => "clock_timestamp",
             Func::CurrentDate => "current_date",
             Func::LocalTimestamp => "localtimestamp",
+            Func::LocalTime => "localtime",
+            Func::MakeTime => "make_time",
             Func::Extract => "extract",
             Func::DatePart => "date_part",
             Func::DateTrunc => "date_trunc",
@@ -832,6 +838,18 @@ fn datetime_arith(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
                 .ok_or_else(|| Error::datetime_overflow("date out of range"))?,
         )?),
         (Sub, Value::Date(x), Value::Date(y)) => Value::Int(i64::from(x) - i64::from(y)),
+        (Add, Value::Date(d), Value::Time(t)) | (Add, Value::Time(t), Value::Date(d)) => {
+            Value::Timestamp(dt::date_to_ts(d) + t)
+        }
+        (Add, Value::Time(t), Value::Interval(i)) | (Add, Value::Interval(i), Value::Time(t)) => {
+            Value::Time(dt::time_add(t, i))
+        }
+        (Sub, Value::Time(t), Value::Interval(i)) => Value::Time(dt::time_add(t, i.checked_neg()?)),
+        (Sub, Value::Time(a), Value::Time(b)) => Value::Interval(dt::Interval {
+            months: 0,
+            days: 0,
+            micros: a - b,
+        }),
         (Add, Value::Interval(i), Value::Interval(j)) => Value::Interval(i.checked_add(j)?),
         (Sub, Value::Interval(i), Value::Interval(j)) => Value::Interval(i.checked_sub(j)?),
         (Add | Sub, t, Value::Interval(i)) | (Add, Value::Interval(i), t)
@@ -1061,6 +1079,7 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
         Func::ClockTimestamp => return Ok(Value::TimestampTz(dt::clock()?)),
         Func::CurrentDate => return Ok(Value::Date(dt::ts_to_date(dt::now()?))),
         Func::LocalTimestamp => return Ok(Value::Timestamp(dt::now()?)),
+        Func::LocalTime => return Ok(Value::Time(dt::time_of_ts(dt::now()?))),
         Func::CurrentUser => return Ok(Value::Text("nucleus".into())),
         Func::CurrentDatabase => return Ok(Value::Text("nucleus".into())),
         Func::CurrentSchema => return Ok(Value::Text("public".into())),
@@ -1216,6 +1235,7 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                 Value::Timestamp(t) => dt::extract_ts(&unit, *t, false)?,
                 Value::TimestampTz(t) => dt::extract_ts(&unit, *t, true)?,
                 Value::Interval(i) => dt::extract_interval(&unit, *i)?,
+                Value::Time(t) => dt::extract_time(&unit, *t)?,
                 v => {
                     return Err(Error::undefined_function(format!(
                         "function {}(text, {}) does not exist",
@@ -1243,6 +1263,10 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                     )));
                 }
             }
+        }
+        Func::MakeTime => {
+            let (h, m) = (int(&args[0])?, int(&args[1])?);
+            Value::Time(dt::make_time(h, m, as_f64(&args[2]))?)
         }
         Func::MakeDate => {
             let (y, m, d) = (int(&args[0])?, int(&args[1])?, int(&args[2])?);

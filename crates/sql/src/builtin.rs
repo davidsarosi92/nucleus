@@ -65,6 +65,8 @@ const FUNCTIONS: &[(Func, &[&str], RangeInclusive<usize>)] = &[
     (Func::ClockTimestamp, &["clock_timestamp"], 0..=0),
     (Func::CurrentDate, &["current_date"], 0..=0),
     (Func::LocalTimestamp, &["localtimestamp"], 0..=0),
+    (Func::LocalTime, &["localtime"], 0..=0),
+    (Func::MakeTime, &["make_time"], 3..=3),
     (Func::Extract, &["extract"], 2..=2),
     (Func::DatePart, &["date_part"], 2..=2),
     (Func::DateTrunc, &["date_trunc"], 2..=2),
@@ -185,6 +187,7 @@ impl ScalarFunction for BuiltinFn {
             Func::Now
             | Func::CurrentDate
             | Func::LocalTimestamp
+            | Func::LocalTime
             | Func::CurrentUser
             | Func::CurrentDatabase
             | Func::CurrentSchema => Volatility::Stable,
@@ -360,6 +363,15 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
         )),
         Func::CurrentDate | Func::MakeDate => keep(Some(Date)),
         Func::LocalTimestamp => keep(Some(Timestamp)),
+        Func::LocalTime => keep(Some(Time)),
+        Func::MakeTime => Ok(Signature::new(
+            vec![
+                Arg::Untyped(Integer),
+                Arg::Untyped(Integer),
+                Arg::Convert(Float),
+            ],
+            Returns::Type(Some(Time)),
+        )),
         Func::Extract | Func::DatePart | Func::DateTrunc => {
             if let Some(t0) = t(0).filter(|t| *t != Text) {
                 return Err(Error::undefined_function(format!(
@@ -372,7 +384,9 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
             } else {
                 (Arg::Keep, t(1))
             };
-            if t1.is_some_and(|t| !t.is_datetime() && t != Interval) {
+            if t1.is_some_and(|t| !t.is_datetime() && t != Interval && t != Time)
+                || (f == Func::DateTrunc && t1 == Some(Time))
+            {
                 return Err(Error::undefined_function(format!(
                     "function {}(text, {}) does not exist",
                     f.name(),
@@ -775,6 +789,11 @@ const TYPES: &[(DataType, &[&str], &str)] = &[
         &["timestamptz", "timestamp with time zone"],
         "datetime",
     ),
+    (
+        DataType::Time,
+        &["time", "time without time zone"],
+        "datetime",
+    ),
     (DataType::Interval, &["interval"], "interval"),
 ];
 
@@ -914,6 +933,9 @@ fn examples(ty: DataType) -> Vec<Value> {
             .map(Value::Date)
             .to_vec(),
         DataType::Timestamp => [0, 1, -1, i64::MAX / 4].map(Value::Timestamp).to_vec(),
+        DataType::Time => [0, 1, 43_200_000_000, 86_399_999_999, 86_400_000_000]
+            .map(Value::Time)
+            .to_vec(),
         DataType::TimestampTz => [0, 1, -1, i64::MAX / 4].map(Value::TimestampTz).to_vec(),
         DataType::Interval => [(0, 0, 0), (1, 0, 0), (0, 30, 0), (-1, 2, -3_000_000)]
             .iter()

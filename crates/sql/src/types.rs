@@ -34,6 +34,8 @@ pub enum DataType {
     Numeric,
     /// `DATE`.
     Date,
+    /// `TIME [WITHOUT TIME ZONE]`: a time of day.
+    Time,
     /// `TIMESTAMP [WITHOUT TIME ZONE]`.
     Timestamp,
     /// `TIMESTAMPTZ` / `TIMESTAMP WITH TIME ZONE`.
@@ -60,6 +62,7 @@ impl DataType {
             DataType::Bytea => &DataType::Bytea,
             DataType::Numeric => &DataType::Numeric,
             DataType::Date => &DataType::Date,
+            DataType::Time => &DataType::Time,
             DataType::Timestamp => &DataType::Timestamp,
             DataType::TimestampTz => &DataType::TimestampTz,
             DataType::Interval => &DataType::Interval,
@@ -89,6 +92,7 @@ impl DataType {
             DataType::Bytea => "bytea",
             DataType::Numeric => "numeric",
             DataType::Date => "date",
+            DataType::Time => "time without time zone",
             DataType::Timestamp => "timestamp without time zone",
             DataType::TimestampTz => "timestamp with time zone",
             DataType::Interval => "interval",
@@ -103,6 +107,7 @@ impl DataType {
                 DataType::Bytea => "bytea[]",
                 DataType::Numeric => "numeric[]",
                 DataType::Date => "date[]",
+                DataType::Time => "time without time zone[]",
                 DataType::Timestamp => "timestamp without time zone[]",
                 DataType::TimestampTz => "timestamp with time zone[]",
                 DataType::Interval => "interval[]",
@@ -185,6 +190,7 @@ impl DataType {
             | ["string"] => DataType::Text,
             ["numeric"] | ["decimal"] | ["dec"] => DataType::Numeric,
             ["date"] => DataType::Date,
+            ["time"] => DataType::Time,
             ["timestamp"] | ["timestamp", "without", "time", "zone"] => DataType::Timestamp,
             ["timestamptz"] | ["timestamp", "with", "time", "zone"] => DataType::TimestampTz,
             ["interval"] => DataType::Interval,
@@ -220,6 +226,8 @@ pub enum Value {
     Numeric(Decimal),
     /// Days since 2000-01-01.
     Date(i32),
+    /// Microseconds since midnight (`24:00:00` included).
+    Time(i64),
     /// Microseconds since 2000-01-01 00:00.
     Timestamp(i64),
     /// Microseconds since 2000-01-01 00:00 UTC.
@@ -259,6 +267,7 @@ impl Value {
             Value::Bytea(_) => Some(DataType::Bytea),
             Value::Numeric(_) => Some(DataType::Numeric),
             Value::Date(_) => Some(DataType::Date),
+            Value::Time(_) => Some(DataType::Time),
             Value::Timestamp(_) => Some(DataType::Timestamp),
             Value::TimestampTz(_) => Some(DataType::TimestampTz),
             Value::Interval(_) => Some(DataType::Interval),
@@ -305,6 +314,7 @@ impl Value {
             (Value::Float(a), Value::Int(b)) => total_cmp(*a, *b as f64),
             (Value::Text(a), Value::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
             (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
+            (Value::Time(a), Value::Time(b)) => a.cmp(b),
             (Value::Numeric(a), Value::Numeric(b)) => a.cmp(b),
             (Value::Numeric(a), Value::Int(b)) => a.cmp(&Decimal::from_i64(*b)),
             (Value::Int(a), Value::Numeric(b)) => Decimal::from_i64(*a).cmp(b),
@@ -407,6 +417,7 @@ impl Value {
             | (v @ Value::Bytea(_), DataType::Bytea)
             | (v @ Value::Numeric(_), DataType::Numeric)
             | (v @ Value::Date(_), DataType::Date)
+            | (v @ Value::Time(_), DataType::Time)
             | (v @ Value::Timestamp(_), DataType::Timestamp)
             | (v @ Value::TimestampTz(_), DataType::TimestampTz)
             | (v @ Value::Interval(_), DataType::Interval) => v,
@@ -434,6 +445,16 @@ impl Value {
             (Value::Numeric(d), DataType::Float) => Value::Float(d.to_f64()),
             (Value::Text(s), DataType::Numeric) => Value::Numeric(Decimal::parse(&s)?),
             (Value::Text(s), DataType::Date) => Value::Date(datetime::parse_date(&s)?),
+            (Value::Text(s), DataType::Time) => Value::Time(datetime::parse_time_of_day(&s)?),
+            (Value::Timestamp(t) | Value::TimestampTz(t), DataType::Time) => {
+                Value::Time(datetime::time_of_ts(t))
+            }
+            (Value::Interval(i), DataType::Time) => Value::Time(datetime::time_add(0, i)),
+            (Value::Time(t), DataType::Interval) => Value::Interval(Interval {
+                months: 0,
+                days: 0,
+                micros: t,
+            }),
             (Value::Text(s), DataType::Timestamp) => {
                 Value::Timestamp(datetime::parse_timestamp(&s, false)?)
             }
@@ -493,6 +514,7 @@ impl Value {
             Value::Bytea(b) => crate::bytea::format_hex(b),
             Value::Numeric(d) => d.to_string(),
             Value::Date(d) => datetime::format_date(*d),
+            Value::Time(t) => datetime::format_time(*t),
             Value::Timestamp(t) => datetime::format_timestamp(*t, false),
             Value::TimestampTz(t) => datetime::format_timestamp(*t, true),
             Value::Interval(i) => i.to_string(),
@@ -530,6 +552,7 @@ fn rank(v: &Value) -> u8 {
         Value::Int(_) | Value::Real(_) | Value::Float(_) | Value::Numeric(_) => 1,
         Value::Text(_) => 2,
         Value::Bytea(_) => 8,
+        Value::Time(_) => 9,
         Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 3,
         Value::Interval(_) => 4,
         Value::Array(_) => 6,
@@ -837,6 +860,10 @@ impl Hash for Value {
             Value::Bytea(b) => {
                 8u8.hash(state);
                 b.hash(state);
+            }
+            Value::Time(t) => {
+                9u8.hash(state);
+                t.hash(state);
             }
             Value::Numeric(d) => hash_number(d.to_f64(), state),
             Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {

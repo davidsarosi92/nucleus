@@ -89,3 +89,10 @@ query TTT
 SELECT pg_typeof(length('\x01'::bytea)), pg_typeof(substring('\x0102'::bytea from 2)), pg_typeof(encode('\x01'::bytea, 'hex'))
 ----
 integer bytea text
+
+# time.
+
+query TTTT
+SELECT pg_typeof(time '10:00'), pg_typeof(time '10:00' - time '09:00'), pg_typeof(date '2024-01-01' + time '10:00'), pg_typeof(localtime)
+----
+time without time zone interval timestamp without time zone time without time zone

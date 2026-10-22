@@ -1,0 +1,124 @@
+# time (time of day, microseconds): input forms, output, ranges,
+# arithmetic with dates, intervals and times, extract, casts, keys.
+# Expected results produced by PostgreSQL 18 (records marked nucleus-only
+# excepted).
+
+query TTTT
+SELECT '04:05'::time, '04:05:06.789'::time, '4:05 PM'::time, '24:00'::time
+----
+04:05:00 04:05:06.789 16:05:00 24:00:00
+
+query TTTT
+SELECT '040506'::time, '0405'::time, '04:05:06+02'::time, 'allballs'::time
+----
+04:05:06 04:05:00 04:05:06 00:00:00
+
+query TTTT
+SELECT '12:00 AM'::time, '12:30 pm'::time, '1:2:3'::time, ' 04:05:06 UTC '::time
+----
+00:00:00 12:30:00 01:02:03 04:05:06
+
+query TT
+SELECT '23:59:59.9999999'::time, '23:59:60'::time
+----
+24:00:00 24:00:00
+
+query TT
+SELECT time '10:00:00.5', '10:00'::time::text
+----
+10:00:00.5 10:00:00
+
+statement error 22008
+SELECT '25:00'::time
+
+statement error 22008
+SELECT '12:60'::time
+
+statement error 22008
+SELECT '13:00 PM'::time
+
+statement error 22007
+SELECT 'x'::time
+
+# Arithmetic.
+
+query TTTT
+SELECT time '10:00' + interval '3 hours', time '22:00' + interval '3 hours', time '01:00' - interval '2 hours', time '10:00' - time '08:30'
+----
+13:00:00 01:00:00 23:00:00 01:30:00
+
+query TTT
+SELECT date '2024-01-02' + time '03:04', time '03:04' + date '2024-01-02', time '10:00' + '1 hour'
+----
+2024-01-02 03:04:00 2024-01-02 03:04:00 11:00:00
+
+query TTT
+SELECT time '10:00' - interval '1 day 1 hour', time '10:00' + interval '1 month', time '24:00' + interval '1 min'
+----
+09:00:00 10:00:00 00:01:00
+
+query TB
+SELECT time '23:59' - time '24:00', time '24:00' = time '00:00'
+----
+-00:01:00 false
+
+statement error 42883
+SELECT time '10:00' + 1
+
+# extract and date_part.
+
+query TTTTT
+SELECT extract(hour from time '13:14:15.5'), extract(second from time '13:14:15.5'), extract(epoch from time '01:00'), extract(microseconds from time '00:00:01.5'), date_part('minute', time '13:14')
+----
+13 15.500000 3600.000000 1500000 14
+
+statement error 0A000
+SELECT extract(day from time '13:00')
+
+# Casts, make_time.
+
+query TTTT
+SELECT '2024-01-02 03:04:05.6'::timestamp::time, '1 day 25:30'::interval::time, time '03:04'::interval, make_time(8, 15, 23.5)
+----
+03:04:05.6 01:30:00 03:04:00 08:15:23.5
+
+query T
+SELECT make_time(1, 2, 60)
+----
+01:03:00
+
+statement error 22008
+SELECT make_time(25, 0, 0)
+
+# Columns, keys, ordering, aggregates.
+
+statement ok
+CREATE TABLE shifts (starts time PRIMARY KEY, ends time WITHOUT TIME ZONE)
+
+statement ok
+INSERT INTO shifts VALUES ('22:00', '06:00'), ('06:00', '14:00'), ('14:00', '22:00'), ('00:00', '24:00')
+
+statement error 23505
+INSERT INTO shifts VALUES ('06:00:00', '07:00')
+
+query TTT
+SELECT starts, ends, ends - starts FROM shifts ORDER BY starts
+----
+00:00:00 24:00:00 24:00:00
+06:00:00 14:00:00 08:00:00
+14:00:00 22:00:00 08:00:00
+22:00:00 06:00:00 -16:00:00
+
+query T
+SELECT starts FROM shifts WHERE starts > '05:00' AND starts < '20:00' ORDER BY starts
+----
+06:00:00
+14:00:00
+
+query TT
+SELECT min(ends), max(ends) FROM shifts
+----
+06:00:00 24:00:00
+
+statement ok
+DROP TABLE shifts

@@ -262,10 +262,20 @@ fn parse_time(t: &str) -> Option<i64> {
         None => (sec, ""),
     };
     let s: i64 = whole.parse().ok()?;
-    if !(0..60).contains(&s) || !frac.bytes().all(|b| b.is_ascii_digit()) {
+    if !(0..60).contains(&s) {
         return None;
     }
-    // Microseconds, rounded half up beyond six digits.
+    let us = frac_micros(frac)?;
+    let total = h * USECS_PER_HOUR + m * USECS_PER_MINUTE + s * USECS_PER_SEC + us;
+    (0..=USECS_PER_DAY).contains(&total).then_some(total)
+}
+
+/// A second's fraction (`5` → 500 000 µs), rounded half up beyond six
+/// digits.
+fn frac_micros(frac: &str) -> Option<i64> {
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let mut us: i64 = 0;
     for (i, b) in frac.bytes().enumerate() {
         let digit = i64::from(b - b'0');
@@ -282,8 +292,7 @@ fn parse_time(t: &str) -> Option<i64> {
     for _ in frac.len()..6 {
         us *= 10;
     }
-    let total = h * USECS_PER_HOUR + m * USECS_PER_MINUTE + s * USECS_PER_SEC + us;
-    (0..=USECS_PER_DAY).contains(&total).then_some(total)
+    Some(us)
 }
 
 /// A zone suffix: `Z`, `UTC`, `GMT`, `±HH`, `±HH:MM`, `±HHMM` → seconds
@@ -391,6 +400,129 @@ pub fn format_timestamp(ts: i64, with_tz: bool) -> String {
         seconds_text(f.second, f.micros),
         if with_tz { "+00" } else { "" }
     )
+}
+
+// ------------------------------------------------------------------ time
+
+/// Parses a time of day (`time`): `HH:MM[:SS[.f]]`, `HHMM`, `HHMMSS`, an
+/// optional `AM` / `PM`, `allballs`; a zone after it is ignored, as
+/// PostgreSQL's `time` does.  `24:00:00` is the end of the day.
+pub fn parse_time_of_day(s: &str) -> Result<i64> {
+    let bad = || Error::datetime_format(format!("invalid input syntax for type time: \"{s}\""));
+    let range = || Error::datetime_overflow(format!("date/time field value out of range: \"{s}\""));
+    let lower = s.trim().to_ascii_lowercase();
+    if lower == "allballs" {
+        return Ok(0);
+    }
+    let (body, pm) = if let Some(b) = lower.strip_suffix("am") {
+        (b.trim_end(), Some(false))
+    } else if let Some(b) = lower.strip_suffix("pm") {
+        (b.trim_end(), Some(true))
+    } else {
+        (lower.as_str(), None)
+    };
+    let end = body
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_digit() || *c == ':' || *c == '.'))
+        .map_or(body.len(), |(i, _)| i);
+    let (time, zone) = body.split_at(end);
+    if time.is_empty() || parse_zone(zone).is_none() {
+        return Err(bad());
+    }
+    let (clock, frac) = time.split_once('.').unwrap_or((time, ""));
+    let parts: Vec<&str> = if clock.contains(':') {
+        clock.split(':').collect()
+    } else if clock.len() == 4 {
+        vec![&clock[..2], &clock[2..]]
+    } else if clock.len() == 6 {
+        vec![&clock[..2], &clock[2..4], &clock[4..]]
+    } else {
+        return Err(bad());
+    };
+    if !(2..=3).contains(&parts.len()) || (parts.len() == 2 && !frac.is_empty()) {
+        return Err(bad());
+    }
+    let num = |p: &str| -> Result<i64> {
+        if p.is_empty() || p.len() > 9 {
+            return Err(bad());
+        }
+        p.parse().map_err(|_| bad())
+    };
+    let (mut h, m) = (num(parts[0])?, num(parts[1])?);
+    let sec = parts.get(2).map(|p| num(p)).transpose()?.unwrap_or(0);
+    let us = frac_micros(frac).ok_or_else(bad)?;
+    if m > 59 || sec > 60 {
+        return Err(range());
+    }
+    if let Some(pm) = pm {
+        if !(1..=12).contains(&h) {
+            return Err(range());
+        }
+        h = h % 12 + if pm { 12 } else { 0 };
+    }
+    let total = h * USECS_PER_HOUR + m * USECS_PER_MINUTE + sec * USECS_PER_SEC + us;
+    if total > USECS_PER_DAY {
+        return Err(range());
+    }
+    Ok(total)
+}
+
+/// A time of day as `HH:MM:SS[.ffffff]`.
+pub fn format_time(t: i64) -> String {
+    let (h, m) = (t / USECS_PER_HOUR, t / USECS_PER_MINUTE % 60);
+    let (s, us) = (t / USECS_PER_SEC % 60, t % USECS_PER_SEC);
+    format!("{h:02}:{m:02}:{}", seconds_text(s as u32, us as u32))
+}
+
+/// `time + interval`: the interval's time part, around the clock (its
+/// months and days do not move a time of day).
+pub fn time_add(t: i64, iv: Interval) -> i64 {
+    (i128::from(t) + i128::from(iv.micros)).rem_euclid(i128::from(USECS_PER_DAY)) as i64
+}
+
+/// A timestamp's time of day.
+pub fn time_of_ts(ts: i64) -> i64 {
+    ts.rem_euclid(USECS_PER_DAY)
+}
+
+/// `make_time(hour, min, sec)`.
+pub fn make_time(h: i64, m: i64, s: f64) -> Result<i64> {
+    let us = (s * 1e6).round();
+    let total = h
+        .checked_mul(USECS_PER_HOUR)
+        .and_then(|x| x.checked_add(m.checked_mul(USECS_PER_MINUTE)?));
+    match total {
+        Some(t)
+            if (0..=24).contains(&h)
+                && (0..60).contains(&m)
+                && (0.0..=60e6).contains(&us)
+                && t + us as i64 <= USECS_PER_DAY =>
+        {
+            Ok(t + us as i64)
+        }
+        _ => Err(Error::datetime_overflow(format!(
+            "time field value out of range: {h:02}:{m:02}:{}",
+            if s.fract() == 0.0 {
+                format!("{:02}", s as i64)
+            } else {
+                format!("{s:09.6}")
+            }
+        ))),
+    }
+}
+
+/// `extract(unit FROM time)`.
+pub fn extract_time(unit: &str, t: i64) -> Result<Decimal> {
+    let unit = canonical_unit(unit);
+    Ok(match unit.as_str() {
+        "epoch" => scaled(t, 6),
+        "microseconds" => int(t % USECS_PER_MINUTE),
+        "milliseconds" => scaled(t % USECS_PER_MINUTE, 3),
+        "second" => scaled(t % USECS_PER_MINUTE, 6),
+        "minute" => int(t / USECS_PER_MINUTE % 60),
+        "hour" => int(t / USECS_PER_HOUR),
+        _ => return Err(unsupported(&unit, "time without time zone")),
+    })
 }
 
 // -------------------------------------------------------------- interval

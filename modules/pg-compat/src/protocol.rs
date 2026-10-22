@@ -112,6 +112,8 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         1009 | 1014 | 1015 | 1003 => DataType::Array(&DataType::Text),
         1231 => DataType::Array(&DataType::Numeric),
         1182 => DataType::Array(&DataType::Date),
+        1083 => DataType::Time,
+        1183 => DataType::Array(&DataType::Time),
         1115 => DataType::Array(&DataType::Timestamp),
         1185 => DataType::Array(&DataType::TimestampTz),
         1187 => DataType::Array(&DataType::Interval),
@@ -124,7 +126,11 @@ fn type_size(t: DataType) -> i16 {
         DataType::Bool => 1,
         DataType::SmallInt => 2,
         DataType::Integer | DataType::Real | DataType::Date => 4,
-        DataType::BigInt | DataType::Float | DataType::Timestamp | DataType::TimestampTz => 8,
+        DataType::BigInt
+        | DataType::Float
+        | DataType::Time
+        | DataType::Timestamp
+        | DataType::TimestampTz => 8,
         DataType::Interval => 16,
         DataType::Ext(t) if t.name() == "uuid" => 16,
         DataType::Text
@@ -499,6 +505,7 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
         (Value::Real(f), _) => f.to_be_bytes().to_vec(),
         (Value::Numeric(d), _) => numeric_binary(d),
         (Value::Date(d), _) => d.to_be_bytes().to_vec(),
+        (Value::Time(t), _) => t.to_be_bytes().to_vec(),
         (Value::Timestamp(t) | Value::TimestampTz(t), _) => t.to_be_bytes().to_vec(),
         (Value::Interval(i), _) => {
             let mut b = i.micros.to_be_bytes().to_vec();
@@ -570,6 +577,13 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                 Value::Numeric(numeric_from_binary(bytes).ok_or_else(|| bad("numeric"))?)
             }
             (Some(DataType::Date), 4) => Value::Date(i32::from_be_bytes(bytes.try_into().unwrap())),
+            (Some(DataType::Time), 8) => {
+                let t = i64::from_be_bytes(bytes.try_into().unwrap());
+                if !(0..=86_400_000_000).contains(&t) {
+                    return Err(bad("time"));
+                }
+                Value::Time(t)
+            }
             (Some(DataType::Timestamp), 8) => {
                 Value::Timestamp(i64::from_be_bytes(bytes.try_into().unwrap()))
             }
@@ -1016,6 +1030,21 @@ mod tests {
             decode_param(&[0x01, 0xff], 1, Some(DataType::Bytea)).unwrap(),
             b
         );
+    }
+
+    #[test]
+    fn time_binary_matches_postgresql() {
+        // From PostgreSQL 18's time_send: µs since midnight.
+        let t = nucleus_sql::ext::parse_time_of_day("10:00").unwrap();
+        assert_eq!(
+            hex(&binary_value(&Value::Time(t), DataType::Time)),
+            "0000000861c46800"
+        );
+        assert_eq!(
+            decode_param(&t.to_be_bytes(), 1, Some(DataType::Time)).unwrap(),
+            Value::Time(t)
+        );
+        assert!(decode_param(&(-1i64).to_be_bytes(), 1, Some(DataType::Time)).is_err());
     }
 
     #[test]

@@ -2104,8 +2104,12 @@ impl<'a> Binder<'a> {
         // `timestamp + '1 day'`: the untyped side is an interval; `date ±
         // $1`: a number of days.
         let untyped = |x: &Expr| matches!(x, Expr::Param(_)) || is_text_literal(x);
-        let stamp =
-            |t: Option<DataType>| matches!(t, Some(DataType::Timestamp | DataType::TimestampTz));
+        let stamp = |t: Option<DataType>| {
+            matches!(
+                t,
+                Some(DataType::Timestamp | DataType::TimestampTz | DataType::Time)
+            )
+        };
         let (l, lt, r, rt) = if op == Add && stamp(lt) && untyped(&r) {
             let (r, (_, rt)) = self.coerce(Some(DataType::Interval), r, rt)?;
             (l, lt, r, rt)
@@ -2243,6 +2247,9 @@ pub(crate) fn arith_type(
         (Add | Sub, Some(Date), r) if int(r) => Some(Date),
         (Add, l, Some(Date)) if int(l) => Some(Date),
         (Sub, Some(Date), Some(Date)) => Some(Integer),
+        (Add, Some(Date), Some(Time)) | (Add, Some(Time), Some(Date)) => Some(Timestamp),
+        (Add | Sub, Some(Time), Some(Interval)) | (Add, Some(Interval), Some(Time)) => Some(Time),
+        (Sub, Some(Time), Some(Time)) => Some(Interval),
         (Add, Some(Date | Timestamp), Some(Interval))
         | (Add, Some(Interval), Some(Date | Timestamp))
         | (Sub, Some(Date | Timestamp), Some(Interval)) => Some(Timestamp),

@@ -78,7 +78,8 @@ const DATA: u8 = 0x01;
 /// indexes in taught orderings, version 6 `smallint` and `integer` (type
 /// tags 10 and 11: before it, every integer column was `bigint`, tag 2,
 /// and still reads as one) and `real` (tag 12; before, `double
-/// precision`'s tag 3) and `bytea` (tag 13); older versions still read.
+/// precision`'s tag 3), `bytea` (tag 13) and `time` (14); older versions
+/// still read.
 const TABLE_VERSION: u8 = 6;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
@@ -506,6 +507,7 @@ fn type_tag(t: DataType) -> u8 {
         DataType::Integer => 11,
         DataType::Real => 12,
         DataType::Bytea => 13,
+        DataType::Time => 14,
     }
 }
 
@@ -529,6 +531,7 @@ fn type_of_tag(t: u8) -> Result<DataType> {
         11 => DataType::Integer,
         12 => DataType::Real,
         13 => DataType::Bytea,
+        14 => DataType::Time,
         _ => return Err(Error::internal("unknown column type tag")),
     })
 }

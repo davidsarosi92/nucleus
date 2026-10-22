@@ -611,6 +611,12 @@ impl<'a> Parser<'a> {
             ty = DataType::TimestampTz;
         } else if ty == DataType::Timestamp {
             self.eat_kws(&["without", "time", "zone"]);
+        } else if ty == DataType::Time && self.eat_kws(&["with", "time", "zone"]) {
+            return Err(Error::feature(
+                "type time with time zone is not supported; use time or timestamptz",
+            ));
+        } else if ty == DataType::Time {
+            self.eat_kws(&["without", "time", "zone"]);
         }
         // `type[]` (any number of brackets, sizes ignored: one dimension).
         let mut array = false;
@@ -1457,8 +1463,8 @@ impl<'a> Parser<'a> {
                     self.pos -= 1;
                     return Err(self.error("expected an expression"));
                 }
-                "current_date" | "current_timestamp" | "localtimestamp" | "current_user"
-                | "session_user" | "current_catalog" | "current_role" | "user"
+                "current_date" | "current_timestamp" | "localtimestamp" | "localtime"
+                | "current_user" | "session_user" | "current_catalog" | "current_role" | "user"
                     if !self.peek_op("(") =>
                 {
                     Expr::Function {

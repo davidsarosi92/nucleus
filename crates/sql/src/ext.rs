@@ -54,7 +54,9 @@ use std::sync::{Arc, OnceLock};
 use nucleus_kv::KvTxn;
 
 pub use crate::ast::Statement;
-pub use crate::datetime::{Interval, parse_date, parse_interval, parse_timestamp};
+pub use crate::datetime::{
+    Interval, parse_date, parse_interval, parse_time_of_day, parse_timestamp,
+};
 pub use crate::decimal::Decimal;
 pub use crate::error::{Error, Result};
 pub use crate::parser::parse;

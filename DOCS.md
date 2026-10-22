@@ -572,6 +572,7 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 | text | `TEXT`, `VARCHAR(n)`, `CHAR` (and, with pg-compat, `NAME`, `BPCHAR`) | `VARCHAR(n)` length enforced |
 | bytea | `BYTEA` | a binary string |
 | date | `DATE` | days since 2000-01-01, 4713 BC – 294276 AD |
+| time | `TIME [WITHOUT TIME ZONE]` | µs since midnight, `00:00` – `24:00` |
 | timestamp | `TIMESTAMP [WITHOUT TIME ZONE]` | µs since 2000-01-01 |
 | timestamptz | `TIMESTAMPTZ`, `TIMESTAMP WITH TIME ZONE` | µs since 2000-01-01 UTC |
 | interval | `INTERVAL` | months, days, µs (kept apart) |
@@ -642,6 +643,20 @@ first), key tag `0C` (its bytes escaped as text's), row tag `15`.  `||`,
 characters, as PostgreSQL's) and `decode`, `sha256` (bytea) and `md5`
 (text or bytea, a hex text) — the digests built in, without a
 dependency.  `crates/testkit/slt/25_bytea.slt` came from PostgreSQL 18.
+
+**`time`**: input as `HH:MM[:SS[.f]]`, `HHMM`, `HHMMSS`, with `AM` /
+`PM`, or `allballs` (a zone after it is ignored, as PostgreSQL's `time`
+does; `24:00:00` is the end of the day, a leap second rounds into it);
+out of range is `22008`, bad syntax `22007`.  `time ± interval` (the
+interval's time part, around the clock), `time - time` (an interval),
+`date + time` (a timestamp); casts from timestamps and intervals (their
+time of day) and to an interval; `extract` / `date_part` of `hour`,
+`minute`, `second`, `milliseconds`, `microseconds`, `epoch` (others are
+`0A000`, as PostgreSQL's); `make_time(h, m, s)`, `localtime`.  Key tag
+`0D`, row tag `17`.  `time(p)` is accepted and µs are kept (as for
+timestamps); `time with time zone` is refused (`0A000`) — `timestamptz`
+covers what it would.  `crates/testkit/slt/26_time.slt` came from
+PostgreSQL 18.
 
 `INSERT … VALUES` binds each value against its target column, as
 PostgreSQL does: an untyped literal takes the column's type, and each row's
@@ -796,7 +811,7 @@ current_setting` (and the catalog functions of §8.11); aggregates `count
 sum avg min max string_agg array_agg bool_and bool_or every` (with
 `DISTINCT`, `count(*)`, `ORDER BY` inside the call).
 
-Not yet: window functions, `COPY`, `TIME` / `TIMETZ`, time zones other than
+Not yet: window functions, `COPY`, `TIMETZ`, time zones other than
 UTC, multi-dimensional arrays, data-modifying CTEs, `LATERAL`, user
 functions.
 
@@ -1240,7 +1255,7 @@ older drivers keep working.
 **Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
 2 an integer (`smallint`, `integer` and `bigint` alike, for now), 3 a
 float (`real` sent as a double, exactly, for now), 4 text (and, for
-now, `bytea` in its hex text form), 5 numeric, 6 date, 7 timestamp,
+now, `bytea` and `time` in their text forms), 5 numeric, 6 date, 7 timestamp,
 8 timestamptz, 9 interval, 10 array followed by the element's tag, 11 a
 registered type followed by its name (a string: `uuid`).
 
@@ -1334,6 +1349,9 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-22 — §M14.26 `time`:** a time of day (input forms, `24:00`,
+  arithmetic with dates, intervals and times, `extract`, `make_time`,
+  `localtime`); pg-compat's time.
 - **2026-10-22 — §M14.26 large values out of line:** values over 2 000
   bytes, of any type, stored in chunks keyed by their row; kept by
   updates that leave them; in the consistency check and the crash test;
