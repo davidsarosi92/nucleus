@@ -569,7 +569,8 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 | real | `REAL`, `FLOAT4` | 32-bit IEEE 754 |
 | double precision | `DOUBLE PRECISION`, `FLOAT`, `FLOAT8` | 64-bit IEEE 754 |
 | numeric | `NUMERIC [(p, s)]`, `DECIMAL`, `DEC` | exact: 128-bit mantissa and a scale, ≤ 38 digits |
-| text | `TEXT`, `VARCHAR(n)`, `CHAR` (and, with pg-compat, `NAME`, `BPCHAR`) | `VARCHAR(n)` length enforced |
+| text | `TEXT`, `VARCHAR(n)` (and, with pg-compat, `NAME`) | `VARCHAR(n)` length enforced |
+| character | `CHAR(n)`, `CHARACTER(n)` (`CHAR` is `CHAR(1)`; with pg-compat, `BPCHAR`) | blank-padded |
 | bytea | `BYTEA` | a binary string |
 | date | `DATE` | days since 2000-01-01, 4713 BC – 294276 AD |
 | time | `TIME [WITHOUT TIME ZONE]` | µs since midnight, `00:00` – `24:00` |
@@ -643,6 +644,16 @@ first), key tag `0C` (its bytes escaped as text's), row tag `15`.  `||`,
 characters, as PostgreSQL's) and `decode`, `sha256` (bytea) and `md5`
 (text or bytea, a hex text) — the digests built in, without a
 dependency.  `crates/testkit/slt/25_bytea.slt` came from PostgreSQL 18.
+
+**`char(n)`** follows the standard: a value is stored padded with blanks
+to `n`; a longer one is `22001` unless the excess is blanks, and an
+explicit cast truncates.  Trailing blanks do not count: in comparisons
+(with another `char`, or as text with text), keys (stored without them),
+`length`, `||` and the cast to text (which drop them), and functions
+taking text; `octet_length` and `LIKE` see the padded value, as
+PostgreSQL's.  `char` with `text` unifies to `text`.  Key tag `0E`, row
+tag `18`.  Columns declared `char(n)` before §M14.26 were text and open
+as text.  `crates/testkit/slt/27_char.slt` came from PostgreSQL 18.
 
 **`time`**: input as `HH:MM[:SS[.f]]`, `HHMM`, `HHMMSS`, with `AM` /
 `PM`, or `allballs` (a zone after it is ignored, as PostgreSQL's `time`
@@ -1255,7 +1266,7 @@ older drivers keep working.
 **Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
 2 an integer (`smallint`, `integer` and `bigint` alike, for now), 3 a
 float (`real` sent as a double, exactly, for now), 4 text (and, for
-now, `bytea` and `time` in their text forms), 5 numeric, 6 date, 7 timestamp,
+now, `bytea`, `time` and `char(n)` in their text forms), 5 numeric, 6 date, 7 timestamp,
 8 timestamptz, 9 interval, 10 array followed by the element's tag, 11 a
 registered type followed by its name (a string: `uuid`).
 
@@ -1349,6 +1360,8 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-22 — §M14.26 `char(n)`:** blank-padded text with the
+  standard's rules; pg-compat's bpchar.
 - **2026-10-22 — §M14.26 `time`:** a time of day (input forms, `24:00`,
   arithmetic with dates, intervals and times, `extract`, `make_time`,
   `localtime`); pg-compat's time.

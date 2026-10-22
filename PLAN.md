@@ -265,7 +265,7 @@ are marked ✅.
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
 | | M14.19 | Modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ✅ DOCS §1, §8.11–§8.12, §9 |
-| | M14.26 | **In progress:** core types: integers by width (✅), `real` (✅), `bytea` (🟡), `time` (✅), `char(n)`, `inet` / `cidr`, enums | ⬜ |
+| | M14.26 | **In progress:** core types: integers by width (✅), `real` (✅), `bytea` (🟡), `time` (✅), `char(n)` (✅), `inet` / `cidr`, enums | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
@@ -944,7 +944,8 @@ type set still lacks (today `smallint` and `integer` are names for a
   of a time — it casts it to an interval, whose `date_trunc` nucleus
   lacks yet; `time(p)` keeps µs, as timestamps do, until precision
   modifiers are stored.)
-- **`char(n)`** with the standard's blank padding and comparison rules.
+- ✅ **`char(n)`** with the standard's blank padding and comparison rules
+  (columns declared `char(n)` before were text, and stay text).
 - **`inet` and `cidr`**: IPv4 and IPv6 addresses and networks;
   containment operators (`<<`, `<<=`, `>>`, `>>=`, `&&`), `host`,
   `network`, `masklen`, `family`, `broadcast`; an order and key encoding
@@ -1930,6 +1931,7 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-22** — §M14.26: `char(n)`, checked against PostgreSQL 18.
 - **2026-10-22** — §M14.26: `time`, checked against PostgreSQL 18.
 - **2026-10-22** — §M14.26: large values out of line, for every type:
   chunks keyed by their row, written and removed in its transaction, kept

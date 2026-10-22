@@ -1,0 +1,74 @@
+# char(n): the standard's blank padding and comparison rules — stored
+# padded, trailing blanks insignificant in comparisons, removed when it
+# becomes text; too long is an error unless the excess is blanks, an
+# explicit cast truncates.
+# Expected results produced by PostgreSQL 18 (records marked nucleus-only
+# excepted).
+
+query TIT
+SELECT 'a'::char(3) || '|', length('a'::char(3)), 'a'::char(3)::text || '|'
+----
+a| 1 a|
+
+query TTT
+SELECT 'abcdef'::char(3), 'abc   '::char(3), 'abc'::char
+----
+abc abc a
+
+query BBBB
+SELECT 'a'::char(3) = 'a  '::char(5), 'a'::char(3) = 'a', 'a'::char(3) = 'a '::text, 'a'::char(3) < 'a!'::char(3)
+----
+true true false true
+
+query TTI
+SELECT 'a'::char(3) || 'b', upper('a'::char(3)) || '|', octet_length('a'::char(3))
+----
+ab A| 3
+
+query BB
+SELECT 'a'::char(3) LIKE 'a', 'a'::char(3) LIKE 'a%'
+----
+false true
+
+statement ok
+CREATE TABLE codes (code char(3) PRIMARY KEY, name character(5), v varchar(5))
+
+statement ok
+INSERT INTO codes VALUES ('ab', 'x', 'y'), ('a', 'longe', 'z')
+
+statement error 22001
+INSERT INTO codes VALUES ('b', 'longer', 'z')
+
+statement error 22001
+INSERT INTO codes VALUES ('abcd', 'x', 'y')
+
+statement ok
+INSERT INTO codes VALUES ('abc   ', 'x    ', 'w')
+
+statement error 23505
+INSERT INTO codes VALUES ('ab ', 'dup', 'd')
+
+query TIIT
+SELECT code || '|', length(code), octet_length(code), name || '|' FROM codes ORDER BY code
+----
+a| 1 3 longe|
+ab| 2 3 x|
+abc| 3 3 x|
+
+query T
+SELECT code || '|' FROM codes WHERE code = 'ab'
+----
+ab|
+
+query T
+SELECT code || '|' FROM codes WHERE code > 'a' AND code < 'abc' ORDER BY code
+----
+ab|
+
+query TT
+SELECT max(code) || '|', min(name) || '|' FROM codes
+----
+abc| longe|
+
+statement ok
+DROP TABLE codes

@@ -30,6 +30,8 @@ pub enum DataType {
     Text,
     /// `BYTEA`: a binary string.
     Bytea,
+    /// `CHAR(n)` / `CHARACTER(n)`: blank-padded text.
+    Char,
     /// `NUMERIC` / `DECIMAL`: exact.
     Numeric,
     /// `DATE`.
@@ -60,6 +62,7 @@ impl DataType {
             DataType::Float => &DataType::Float,
             DataType::Text => &DataType::Text,
             DataType::Bytea => &DataType::Bytea,
+            DataType::Char => &DataType::Char,
             DataType::Numeric => &DataType::Numeric,
             DataType::Date => &DataType::Date,
             DataType::Time => &DataType::Time,
@@ -90,6 +93,7 @@ impl DataType {
             DataType::Float => "double precision",
             DataType::Text => "text",
             DataType::Bytea => "bytea",
+            DataType::Char => "character",
             DataType::Numeric => "numeric",
             DataType::Date => "date",
             DataType::Time => "time without time zone",
@@ -105,6 +109,7 @@ impl DataType {
                 DataType::Float => "double precision[]",
                 DataType::Text => "text[]",
                 DataType::Bytea => "bytea[]",
+                DataType::Char => "character[]",
                 DataType::Numeric => "numeric[]",
                 DataType::Date => "date[]",
                 DataType::Time => "time without time zone[]",
@@ -120,6 +125,11 @@ impl DataType {
     /// Whether this is an integer, `double precision` or `numeric`.
     pub fn is_number(self) -> bool {
         self.is_integer() || matches!(self, DataType::Real | DataType::Float | DataType::Numeric)
+    }
+
+    /// Whether this is `text` or `char(n)`.
+    pub fn is_text(self) -> bool {
+        matches!(self, DataType::Text | DataType::Char)
     }
 
     /// Whether this is `smallint`, `integer` or `bigint`.
@@ -182,12 +192,8 @@ impl DataType {
             ["real"] | ["float4"] => DataType::Real,
             ["double", "precision"] | ["float"] | ["float8"] | ["double"] => DataType::Float,
             ["bytea"] => DataType::Bytea,
-            ["text"]
-            | ["varchar"]
-            | ["character", "varying"]
-            | ["char"]
-            | ["character"]
-            | ["string"] => DataType::Text,
+            ["text"] | ["varchar"] | ["character", "varying"] | ["string"] => DataType::Text,
+            ["char"] | ["character"] => DataType::Char,
             ["numeric"] | ["decimal"] | ["dec"] => DataType::Numeric,
             ["date"] => DataType::Date,
             ["time"] => DataType::Time,
@@ -222,6 +228,9 @@ pub enum Value {
     Text(String),
     /// A binary string (`bytea`).
     Bytea(Arc<[u8]>),
+    /// A `char(n)` value, as stored: blank-padded (trailing blanks do not
+    /// count in comparisons).
+    Char(String),
     /// An exact decimal.
     Numeric(Decimal),
     /// Days since 2000-01-01.
@@ -265,6 +274,7 @@ impl Value {
             Value::Float(_) => Some(DataType::Float),
             Value::Text(_) => Some(DataType::Text),
             Value::Bytea(_) => Some(DataType::Bytea),
+            Value::Char(_) => Some(DataType::Char),
             Value::Numeric(_) => Some(DataType::Numeric),
             Value::Date(_) => Some(DataType::Date),
             Value::Time(_) => Some(DataType::Time),
@@ -313,6 +323,19 @@ impl Value {
             (Value::Int(a), Value::Float(b)) => total_cmp(*a as f64, *b),
             (Value::Float(a), Value::Int(b)) => total_cmp(*a, *b as f64),
             (Value::Text(a), Value::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
+            // char(n) compares without its trailing blanks — with another
+            // char, and as text with text (PostgreSQL's cast).
+            (Value::Char(a) | Value::Text(a), Value::Char(b))
+            | (Value::Char(a), Value::Text(b)) => {
+                let side = |v: &Value, s: &str| -> usize {
+                    if matches!(v, Value::Char(_)) {
+                        unpadded(s).len()
+                    } else {
+                        s.len()
+                    }
+                };
+                a.as_bytes()[..side(self, a)].cmp(&b.as_bytes()[..side(other, b)])
+            }
             (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
             (Value::Time(a), Value::Time(b)) => a.cmp(b),
             (Value::Numeric(a), Value::Numeric(b)) => a.cmp(b),
@@ -394,6 +417,16 @@ impl Value {
         let bad = |v: &Value| Error::invalid_text(format!("cannot cast {} to {ty}", v.render()));
         Ok(match (self, ty) {
             (Value::Null, _) => Value::Null,
+            (v @ Value::Char(_), DataType::Char) => v,
+            (Value::Text(s), DataType::Char) => Value::Char(s),
+            (Value::Char(s), DataType::Text) => Value::Text(unpadded(&s).to_string()),
+            (Value::Char(s), t) => Value::Text(unpadded(&s).to_string()).cast(t)?,
+            (v, DataType::Char) if !matches!(v, Value::Array(_)) => {
+                let Value::Text(s) = v.cast(DataType::Text)? else {
+                    unreachable!("text")
+                };
+                Value::Char(s)
+            }
             (v @ Value::Real(_), DataType::Real) => v,
             // As PostgreSQL: a real becomes numeric through its 6 significant
             // digits (FLT_DIG), as a double through 15.
@@ -512,6 +545,7 @@ impl Value {
             Value::Float(f) => render_float(*f),
             Value::Text(s) => s.clone(),
             Value::Bytea(b) => crate::bytea::format_hex(b),
+            Value::Char(s) => s.clone(),
             Value::Numeric(d) => d.to_string(),
             Value::Date(d) => datetime::format_date(*d),
             Value::Time(t) => datetime::format_time(*t),
@@ -550,7 +584,7 @@ fn rank(v: &Value) -> u8 {
         Value::Null => 5,
         Value::Bool(_) => 0,
         Value::Int(_) | Value::Real(_) | Value::Float(_) | Value::Numeric(_) => 1,
-        Value::Text(_) => 2,
+        Value::Text(_) | Value::Char(_) => 2,
         Value::Bytea(_) => 8,
         Value::Time(_) => 9,
         Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 3,
@@ -776,6 +810,32 @@ pub fn parse_real(s: &str) -> Result<f32> {
     )
 }
 
+/// A `char(n)` value without its trailing blanks.
+pub fn unpadded(s: &str) -> &str {
+    s.trim_end_matches(' ')
+}
+
+/// `s` as a `char(n)`: padded with blanks to `n` characters.  Longer is
+/// `22001` unless the excess is blanks — or the cast is explicit, which
+/// truncates.
+pub fn fit_char(s: &str, n: u32, explicit: bool) -> Result<String> {
+    let n = n as usize;
+    let len = s.chars().count();
+    if len > n {
+        let cut = s.char_indices().nth(n).map_or(s.len(), |(i, _)| i);
+        if !explicit && !s[cut..].chars().all(|c| c == ' ') {
+            return Err(Error::string_too_long(format!(
+                "value too long for type character({n})"
+            )));
+        }
+        return Ok(s[..cut].to_string());
+    }
+    let mut out = String::with_capacity(s.len() + n - len);
+    out.push_str(s);
+    out.extend(std::iter::repeat_n(' ', n - len));
+    Ok(out)
+}
+
 /// `22003` for a value outside integer type `t`.
 pub fn int_overflow(t: DataType) -> Error {
     Error::out_of_range(format!("{t} out of range"))
@@ -857,6 +917,8 @@ impl Hash for Value {
             Value::Real(f) => hash_number(f64::from(*f), state),
             Value::Float(f) => hash_number(*f, state),
             Value::Text(s) => s.hash(state),
+            // As the text it equals.
+            Value::Char(s) => unpadded(s).hash(state),
             Value::Bytea(b) => {
                 8u8.hash(state);
                 b.hash(state);

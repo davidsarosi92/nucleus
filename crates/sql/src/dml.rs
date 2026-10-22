@@ -214,6 +214,12 @@ pub fn assign(v: Value, table: &Table, c: usize) -> Result<Value> {
             "value too long for type character varying({max})"
         )));
     }
+    if let Value::Char(s) = &v {
+        return Ok(match col.max_len {
+            Some(n) => Value::Char(crate::types::fit_char(s, n, false)?),
+            None => v,
+        });
+    }
     if let (Some((p, s)), Value::Numeric(d)) = (col.numeric, &v) {
         return Ok(Value::Numeric(d.fit(p, s)?));
     }

@@ -188,6 +188,8 @@ pub enum Func {
     ToTimestamp,
     /// A cast to `numeric(p, s)`: rounds, checks the precision.
     NumericFit,
+    /// A cast to `char(n)`: truncates or pads to `n`.
+    CharFit,
     /// `current_user`, `session_user`.
     CurrentUser,
     /// `current_database()`, `current_catalog`.
@@ -254,6 +256,7 @@ impl Func {
             Func::JustifyInterval => "justify_interval",
             Func::ToTimestamp => "to_timestamp",
             Func::NumericFit => "numeric",
+            Func::CharFit => "bpchar",
             Func::CurrentUser => "current_user",
             Func::CurrentDatabase => "current_database",
             Func::CurrentSchema => "current_schema",
@@ -379,7 +382,9 @@ impl Expr {
                 case_insensitive,
             } => match (expr.eval(env)?, pattern.eval(env)?) {
                 (Value::Null, _) | (_, Value::Null) => Value::Null,
-                (Value::Text(s), Value::Text(p)) => {
+                // A char(n) matches as stored, blanks included (as
+                // PostgreSQL's bpchar LIKE).
+                (Value::Text(s) | Value::Char(s), Value::Text(p) | Value::Char(p)) => {
                     let m = if *case_insensitive {
                         like(&s.to_lowercase(), &p.to_lowercase())
                     } else {
@@ -738,7 +743,14 @@ pub fn binary(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
                 y.insert(0, e);
                 Value::Array(y)
             }
-            (a, b) => Value::Text(format!("{}{}", a.render(), b.render())),
+            // A char(n) joins as text: without its trailing blanks.
+            (a, b) => {
+                let text = |v: &Value| match v {
+                    Value::Char(s) => crate::types::unpadded(s).to_string(),
+                    v => v.render(),
+                };
+                Value::Text(format!("{}{}", text(&a), text(&b)))
+            }
         },
         Match | NotMatch | IMatch | NotIMatch => {
             let (Value::Text(s), Value::Text(p)) = (&a, &b) else {
@@ -1003,6 +1015,8 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
     let text = |v: &Value| -> Result<String> {
         match v {
             Value::Text(s) => Ok(s.clone()),
+            // A char(n) argument is text without its trailing blanks.
+            Value::Char(s) => Ok(crate::types::unpadded(s).to_string()),
             v => Err(Error::undefined_function(format!(
                 "function {}({}) does not exist",
                 f.name(),
@@ -1309,6 +1323,13 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
                 return Err(Error::datetime_overflow("timestamp out of range"));
             }
             Value::TimestampTz(dt::from_unix_micros((secs * 1e6).round() as i64)?)
+        }
+        Func::CharFit => {
+            let Value::Char(s) = &args[0] else {
+                return Ok(args[0].clone());
+            };
+            let n = u32::try_from(int(&args[1])?).unwrap_or(0);
+            Value::Char(crate::types::fit_char(s, n, true)?)
         }
         Func::NumericFit => {
             let Value::Numeric(d) = &args[0] else {

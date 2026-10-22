@@ -372,6 +372,7 @@ impl ScalarFunction for ByteFn {
             let Arg::Untyped(want) = want else { continue };
             if let Some(t) = arg.ty.filter(|_| !arg.text_literal)
                 && t != *want
+                && !(*want == Text && t == DataType::Char)
                 && !(want.is_integer() && t.is_integer())
             {
                 let names: Vec<String> = args
@@ -414,10 +415,11 @@ impl ScalarFunction for ByteFn {
             F::Sha256 => blob(sha256(bytes(&args[0])?).to_vec()),
             F::Md5 => Value::Text(hex(&md5(match &args[0] {
                 Value::Text(s) => s.as_bytes(),
+                Value::Char(s) => crate::types::unpadded(s).as_bytes(),
                 v => bytes(v)?,
             }))),
             F::OctetLength => Value::Int(match &args[0] {
-                Value::Text(s) => s.len(),
+                Value::Text(s) | Value::Char(s) => s.len(),
                 v => bytes(v)?.len(),
             } as i64),
             F::GetByte | F::SetByte => {

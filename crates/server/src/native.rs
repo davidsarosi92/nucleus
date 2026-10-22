@@ -66,7 +66,7 @@ impl Msg {
             DataType::Real | DataType::Float => 3,
             // bytea and time travel as their text forms until a protocol
             // version gives them tags.
-            DataType::Text | DataType::Bytea | DataType::Time => 4,
+            DataType::Text | DataType::Char | DataType::Bytea | DataType::Time => 4,
             DataType::Numeric => 5,
             DataType::Date => 6,
             DataType::Timestamp => 7,
@@ -109,7 +109,9 @@ fn wire_value(buf: &mut Vec<u8>, v: &Value, v2: bool) {
             buf.push(3);
             buf.extend_from_slice(&f64::from(*f).to_le_bytes());
         }
-        Value::Bytea(_) | Value::Time(_) => encode_value(buf, &Value::Text(v.render())),
+        Value::Bytea(_) | Value::Time(_) | Value::Char(_) => {
+            encode_value(buf, &Value::Text(v.render()))
+        }
         Value::Array(items) => {
             buf.push(10);
             buf.extend_from_slice(&(items.len() as u32).to_le_bytes());

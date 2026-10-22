@@ -589,7 +589,7 @@ impl<'a> Parser<'a> {
             };
             self.expect_op(")")?;
             match ty {
-                DataType::Text => typmod.max_len = Some(n),
+                DataType::Text | DataType::Char => typmod.max_len = Some(n),
                 DataType::Numeric => {
                     let s = m.unwrap_or(0);
                     if !(1..=crate::decimal::MAX_DIGITS).contains(&n) || s > n {
@@ -604,6 +604,10 @@ impl<'a> Parser<'a> {
                 // microseconds are kept.
                 _ => {}
             }
+        }
+        // `CHAR` alone is `CHAR(1)`.
+        if ty == DataType::Char && typmod.max_len.is_none() {
+            typmod.max_len = Some(1);
         }
         // `TIMESTAMP(p) WITH TIME ZONE`.
         let mut ty = ty;

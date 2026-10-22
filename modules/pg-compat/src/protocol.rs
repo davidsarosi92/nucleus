@@ -95,7 +95,8 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         INT8 => DataType::BigInt,
         FLOAT4 => DataType::Real,
         FLOAT8 => DataType::Float,
-        TEXT | VARCHAR | UNKNOWN | BPCHAR | NAME => DataType::Text,
+        TEXT | VARCHAR | UNKNOWN | NAME => DataType::Text,
+        BPCHAR => DataType::Char,
         NUMERIC => DataType::Numeric,
         17 => DataType::Bytea,
         1001 => DataType::Array(&DataType::Bytea),
@@ -109,7 +110,8 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         1016 | 1028 => DataType::Array(&DataType::BigInt),
         1021 => DataType::Array(&DataType::Real),
         1022 => DataType::Array(&DataType::Float),
-        1009 | 1014 | 1015 | 1003 => DataType::Array(&DataType::Text),
+        1009 | 1015 | 1003 => DataType::Array(&DataType::Text),
+        1014 => DataType::Array(&DataType::Char),
         1231 => DataType::Array(&DataType::Numeric),
         1182 => DataType::Array(&DataType::Date),
         1083 => DataType::Time,
@@ -134,6 +136,7 @@ fn type_size(t: DataType) -> i16 {
         DataType::Interval => 16,
         DataType::Ext(t) if t.name() == "uuid" => 16,
         DataType::Text
+        | DataType::Char
         | DataType::Bytea
         | DataType::Numeric
         | DataType::Array(_)
@@ -570,6 +573,9 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                 Value::Float(f64::from_be_bytes(bytes.try_into().unwrap())).cast(DataType::Real)?
             }
             (Some(DataType::Bytea), _) => Value::Bytea(bytes.into()),
+            (Some(DataType::Char), _) => {
+                Value::Char(String::from_utf8(bytes.to_vec()).map_err(|_| bad("text not UTF-8"))?)
+            }
             (Some(DataType::Text) | None, _) => {
                 Value::Text(String::from_utf8(bytes.to_vec()).map_err(|_| bad("text not UTF-8"))?)
             }

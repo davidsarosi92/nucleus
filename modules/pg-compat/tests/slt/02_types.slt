@@ -96,3 +96,22 @@ query TTTT
 SELECT pg_typeof(time '10:00'), pg_typeof(time '10:00' - time '09:00'), pg_typeof(date '2024-01-01' + time '10:00'), pg_typeof(localtime)
 ----
 time without time zone interval timestamp without time zone time without time zone
+
+# char(n).
+
+query TTT
+SELECT pg_typeof('a'::char(3)), pg_typeof('a'::char(3) || 'b'), pg_typeof(CASE WHEN true THEN 'a'::char(2) ELSE 'b'::text END)
+----
+character text text
+
+statement ok
+CREATE TABLE chars (c char(4), v varchar(4))
+
+query TT
+SELECT format_type(atttypid, atttypmod), attname FROM pg_attribute WHERE attrelid = 'chars'::regclass AND attnum > 0 ORDER BY attnum
+----
+character(4) c
+character varying(4) v
+
+statement ok
+DROP TABLE chars

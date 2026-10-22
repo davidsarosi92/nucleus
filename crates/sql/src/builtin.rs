@@ -77,6 +77,7 @@ const FUNCTIONS: &[(Func, &[&str], RangeInclusive<usize>)] = &[
     (Func::JustifyInterval, &["justify_interval"], 1..=1),
     (Func::ToTimestamp, &["to_timestamp"], 1..=1),
     (Func::NumericFit, &["__numeric_fit"], 3..=3),
+    (Func::CharFit, &["__char_fit"], 2..=2),
     (
         Func::CurrentUser,
         &["current_user", "session_user", "user", "current_role"],
@@ -423,6 +424,7 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
             Returns::Type(Some(Interval)),
         )),
         Func::NumericFit => keep(Some(Numeric)),
+        Func::CharFit => keep(Some(Char)),
         Func::ArrayAppend => {
             let et = t(0).and_then(DataType::element);
             let untyped = args[1].ty.is_none() || args[1].text_literal;
@@ -777,6 +779,7 @@ const TYPES: &[(DataType, &[&str], &str)] = &[
         ],
         "text",
     ),
+    (DataType::Char, &["character", "char"], "text"),
     (DataType::Bytea, &["bytea"], "binary"),
     (DataType::Date, &["date"], "datetime"),
     (
@@ -925,6 +928,9 @@ fn examples(ty: DataType) -> Vec<Value> {
         .collect(),
         DataType::Text => ["", "a", "a\u{0}b", "é", "{a,\"b\"}", "NULL"]
             .map(|s| Value::Text(s.to_string()))
+            .to_vec(),
+        DataType::Char => ["", " ", "a", "a ", "a\u{0}", "é  ", "b"]
+            .map(|s| Value::Char(s.to_string()))
             .to_vec(),
         DataType::Bytea => [&b""[..], b"\0", b"\0\0", b"\0\x01", b"a", b"a\0", b"\xff"]
             .map(|b| Value::Bytea(b.into()))

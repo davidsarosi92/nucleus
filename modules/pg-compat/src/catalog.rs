@@ -568,7 +568,7 @@ impl Module for PgCompat {
             ("xid", DataType::BigInt),
             ("regproc", DataType::BigInt),
             ("name", DataType::Text),
-            ("bpchar", DataType::Text),
+            ("bpchar", DataType::Char),
         ] {
             r.add_alias(alias, ty)?;
         }
@@ -633,6 +633,8 @@ fn type_of(c: &Column) -> (i64, i64) {
     };
     let oid = if c.ty == DataType::Text && c.max_len.is_some() {
         1043
+    } else if c.ty == DataType::Char {
+        1042
     } else {
         type_oid(c.ty)
     };
@@ -650,6 +652,7 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Float => 701,
         DataType::Text => 25,
         DataType::Bytea => 17,
+        DataType::Char => 1042,
         DataType::Numeric => 1700,
         DataType::Date => 1082,
         DataType::Time => 1083,
@@ -668,6 +671,7 @@ pub fn type_oid(t: DataType) -> i64 {
             DataType::Float => 1022,
             DataType::Text => 1009,
             DataType::Bytea => 1001,
+            DataType::Char => 1014,
             DataType::Numeric => 1231,
             DataType::Date => 1182,
             DataType::Time => 1183,

@@ -6,6 +6,8 @@
   `int2` (oid 21) and `int4` (oid 23), in text and binary (checked
   against PostgreSQL 18's `int2send` / `int4send`); binary parameters of
   those types are range-checked.
+- `char(n)` is nucleus's own blank-padded type: `bpchar` (oid 1042, typmod
+  n + 4) names it, and `format_type` shows `character(n)`.
 - `time` (oid 1083, array 1183): binary as µs since midnight (checked
   against PostgreSQL 18).
 - `bytea` (oid 17, array 1001): text in the hex form, binary as its

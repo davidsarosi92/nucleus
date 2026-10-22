@@ -1762,6 +1762,10 @@ impl<'a> Binder<'a> {
                     // An explicit cast to varchar(n) truncates.
                     e = Expr::Call(builtin::func(Func::Substr), vec![e, lit(1), lit(n)]);
                 }
+                if let (DataType::Char, Some(n)) = (ty, typmod.max_len) {
+                    // … and to char(n) truncates or pads.
+                    e = Expr::Call(builtin::func(Func::CharFit), vec![e, lit(n)]);
+                }
                 (e, Some(*ty))
             }
             A::Function {
@@ -2052,7 +2056,7 @@ impl<'a> Binder<'a> {
             self.note_param(n, Some(DataType::Text));
             return Ok((x, Some(DataType::Text)));
         }
-        if t.is_some_and(|t| t != DataType::Text) {
+        if t.is_some_and(|t| t != DataType::Text && t != DataType::Char) {
             return Err(Error::undefined_function(format!(
                 "operator does not exist: {} {what} text",
                 t.unwrap()
@@ -2196,10 +2200,8 @@ impl<'a> Binder<'a> {
                 ));
             }
             Concat => {
-                if lt == Some(DataType::Text)
-                    || rt == Some(DataType::Text)
-                    || (lt.is_none() && rt.is_none())
-                {
+                let text = |t: Option<DataType>| matches!(t, Some(DataType::Text | DataType::Char));
+                if text(lt) || text(rt) || (lt.is_none() && rt.is_none()) {
                     Some(DataType::Text)
                 } else {
                     return Err(Error::undefined_function(format!(
@@ -2362,7 +2364,8 @@ fn comparable(a: Option<DataType>, b: Option<DataType>) -> Result<()> {
         (Some(x), Some(y))
             if x == y
                 || (x.is_number() && y.is_number())
-                || (x.is_datetime() && y.is_datetime()) =>
+                || (x.is_datetime() && y.is_datetime())
+                || (x.is_text() && y.is_text()) =>
         {
             Ok(())
         }
@@ -2403,6 +2406,8 @@ pub fn unify(a: Option<DataType>, b: Option<DataType>) -> Result<Option<DataType
         {
             Some(if rank(x) >= rank(y) { x } else { y })
         }
+        // char(n) with text: text (PostgreSQL's preferred string type).
+        (Some(x), Some(y)) if x.is_text() && y.is_text() => Some(Text),
         (Some(x), Some(y)) => {
             return Err(Error::type_mismatch(format!(
                 "types {x} and {y} cannot be matched"

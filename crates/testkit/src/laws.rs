@@ -184,6 +184,13 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
             let m = if g.one_in(3) { m % 1000 } else { m };
             Value::Numeric(Decimal::new(m, g.below(20) as u32).expect("in range"))
         }),
+        DataType::Char => Box::new(|g: &mut Gen| {
+            let n = g.below(5) as usize;
+            let s: String = (0..n)
+                .map(|_| *g.pick(&['a', ' ', 'é', '\u{0}', 'Z']))
+                .collect();
+            Value::Char(s)
+        }),
         DataType::Time => Box::new(|g: &mut Gen| {
             const DAY: u64 = 86_400_000_000;
             Value::Time(match g.below(3) {
