@@ -581,6 +581,7 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 | cidr | `CIDR` | an IPv4 or IPv6 network (host bits zero) |
 | arrays | `type[]` | one dimension, elements of the type or NULL |
 | uuid | `UUID` | 16 bytes, a registered type (§8.12) |
+| enums | `CREATE TYPE name AS ENUM (…)` | a label of the database's enum |
 | registered types | their name (`geopoint`) | a module's type: its canonical bytes (§8.12) |
 
 **`uuid`** is the first type built as a registered one (`uuid.rs`):
@@ -674,6 +675,25 @@ them (to `cidr` clears the host bits) and from text.  `x <<= net` and
 full mask: the binder adds those bounds (the functions'
 `implied_range`, §8.12), so an index on `x` serves containment as a
 range scan.  `crates/testkit/slt/28_inet.slt` came from PostgreSQL 18.
+
+**Enums** (`enums.rs`): `CREATE TYPE mood AS ENUM ('sad', 'ok',
+'happy')`, ordered by declaration; `ALTER TYPE mood ADD VALUE [IF NOT
+EXISTS] 'meh' [BEFORE | AFTER 'ok']`, `ALTER TYPE mood RENAME VALUE 'sad'
+TO 'blue'`, `DROP TYPE [IF EXISTS] mood` (refused, `2BP01`, while a column
+has it).  An enum is the database's, in its catalog (`00 09 <name>`), and
+transactional as the rest of it.  Each label has a sort key, a base-256
+fraction between 0 and 1 without trailing zero bytes (byte order is its
+order); a value is stored as its key alone (key tag `10`, row tag `21`),
+and there is always room between two keys, so a new label goes anywhere
+and a renamed one keeps its key: neither rewrites a row (a test compares
+the table's bytes).  Reading a row gives each value its label
+(`enums::Labels`, one catalog read per enum and scan); text becomes an
+enum where a transaction is at hand — binding, a cast as it runs,
+assignment to a column — and a parameter for one arrives as its label.
+Values of different enums do not compare (`42883`); an unknown label is
+`22P02`.  Arrays of enums: not yet.  `nc_catalog.enums` lists the labels
+with their keys.  `crates/testkit/slt/29_enum.slt` came from PostgreSQL
+18.
 
 **`time`**: input as `HH:MM[:SS[.f]]`, `HHMM`, `HHMMSS`, with `AM` /
 `PM`, or `allballs` (a zone after it is ignored, as PostgreSQL's `time`
@@ -782,6 +802,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 06 <symbol> 00 <left> 00 <right>` | an operator taught: its function |
 | `00 07 <from> 00 <to>` | a cast taught: its function and context |
 | `00 08 <type>` | the oldest encoding version a registered type's stored values may be in |
+| `00 09 <enum>` | an enum: its labels and their sort keys, in order |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -985,6 +1006,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.orderings` | `type`, `name`, `mapping`, `used_by` (the indexes in it) |
 | `nc_catalog.operators` | `symbol`, `left_type`, `right_type`, `function`, `source` (`distance`: a type's ability; `registered`: a module's; `taught`) |
 | `nc_catalog.casts` | `from_type`, `to_type`, `function`, `context` |
+| `nc_catalog.enums` | `type`, `label`, `position`, `sort_key` (hex) |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
 
 **PostgreSQL compatibility: the `pg-compat` module** (`modules/pg-compat`,
@@ -1290,7 +1312,8 @@ older drivers keep working.
 **Types** (in Columns): a `u8` tag — 0 unknown (sent as text), 1 boolean,
 2 an integer (`smallint`, `integer` and `bigint` alike, for now), 3 a
 float (`real` sent as a double, exactly, for now), 4 text (and, for
-now, `bytea`, `time`, `char(n)`, `inet` and `cidr` in their text forms), 5 numeric, 6 date, 7 timestamp,
+now, `bytea`, `time`, `char(n)`, `inet`, `cidr` and enums in their text
+forms), 5 numeric, 6 date, 7 timestamp,
 8 timestamptz, 9 interval, 10 array followed by the element's tag, 11 a
 registered type followed by its name (a string: `uuid`).
 
@@ -1384,6 +1407,9 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-22 — §M14.26 enums:** `CREATE TYPE … AS ENUM`, `ADD VALUE
+  … BEFORE / AFTER` and `RENAME VALUE` without rewriting a row (sort keys
+  with room between them), `DROP TYPE`, `nc_catalog.enums`.
 - **2026-10-22 — §M14.26 `inet` / `cidr`:** addresses and networks,
   containment operators as index range scans (`ScalarFunction::
   implied_range`), the network functions; pg-compat's inet and cidr.

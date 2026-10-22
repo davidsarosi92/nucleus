@@ -146,7 +146,8 @@ fn type_size(t: DataType) -> i16 {
         | DataType::Cidr
         | DataType::Numeric
         | DataType::Array(_)
-        | DataType::Ext(_) => -1,
+        | DataType::Ext(_)
+        | DataType::Enum(_) => -1,
     }
 }
 

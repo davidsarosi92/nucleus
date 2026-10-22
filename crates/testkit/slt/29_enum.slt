@@ -1,0 +1,187 @@
+# Enums: CREATE TYPE … AS ENUM, ordered by declaration; ADD VALUE BEFORE /
+# AFTER and RENAME VALUE, which rewrite no row; comparisons, keys, casts,
+# errors, DROP TYPE.
+# Expected results produced by PostgreSQL 18 (records marked nucleus-only
+# excepted).
+
+statement ok
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')
+
+statement error 42710
+CREATE TYPE mood AS ENUM ('x')
+
+# nucleus-only: a label twice is 42710, as ADD VALUE's is (PostgreSQL
+# reports its catalog's unique index, 23505).
+statement error 42710
+CREATE TYPE twice AS ENUM ('a', 'a')
+
+statement ok
+CREATE TABLE people (name text PRIMARY KEY, feels mood)
+
+statement ok
+INSERT INTO people VALUES ('ann', 'happy'), ('bob', 'sad'), ('cy', 'ok'), ('di', NULL)
+
+statement error 22P02
+INSERT INTO people VALUES ('ed', 'angry')
+
+query TT
+SELECT name, feels FROM people ORDER BY feels, name
+----
+bob sad
+cy ok
+ann happy
+di NULL
+
+query T
+SELECT name FROM people WHERE feels > 'sad' ORDER BY name
+----
+ann
+cy
+
+query TB
+SELECT 'ok'::mood, 'ok'::mood < 'happy'::mood
+----
+ok true
+
+query T
+SELECT max(feels) FROM people
+----
+happy
+
+statement error 22P02
+SELECT 'angry'::mood
+
+# New labels anywhere, a renamed label: the rows keep their places.
+
+statement ok
+ALTER TYPE mood ADD VALUE 'meh' BEFORE 'ok'
+
+statement ok
+ALTER TYPE mood ADD VALUE 'ecstatic' AFTER 'happy'
+
+statement ok
+ALTER TYPE mood ADD VALUE 'awful' BEFORE 'sad'
+
+statement ok
+ALTER TYPE mood ADD VALUE 'glad' AFTER 'ok'
+
+statement ok
+ALTER TYPE mood ADD VALUE IF NOT EXISTS 'ok'
+
+statement error 42710
+ALTER TYPE mood ADD VALUE 'ok'
+
+statement error 22023
+ALTER TYPE mood ADD VALUE 'x' BEFORE 'nope'
+
+statement ok
+ALTER TYPE mood RENAME VALUE 'sad' TO 'blue'
+
+statement error 22023
+ALTER TYPE mood RENAME VALUE 'nope' TO 'x'
+
+statement error 42710
+ALTER TYPE mood RENAME VALUE 'blue' TO 'ok'
+
+statement ok
+INSERT INTO people VALUES ('ed', 'meh'), ('fay', 'ecstatic'), ('gus', 'awful'), ('hal', 'glad')
+
+query TT
+SELECT name, feels FROM people ORDER BY feels, name
+----
+gus awful
+bob blue
+ed meh
+cy ok
+hal glad
+ann happy
+fay ecstatic
+di NULL
+
+query T
+SELECT name FROM people WHERE feels BETWEEN 'meh' AND 'glad' ORDER BY name
+----
+cy
+ed
+hal
+
+query T
+SELECT feels::text FROM people WHERE name = 'bob'
+----
+blue
+
+# An index on an enum; a key of one.
+
+statement ok
+CREATE INDEX people_feels ON people (feels)
+
+query T
+SELECT name FROM people WHERE feels = 'ok'
+----
+cy
+
+statement ok
+CREATE TABLE moods (m mood PRIMARY KEY, note text)
+
+statement ok
+INSERT INTO moods VALUES ('happy', 'h'), ('awful', 'a'), ('ok', 'o')
+
+statement error 23505
+INSERT INTO moods VALUES ('ok', 'again')
+
+query TT
+SELECT m, note FROM moods ORDER BY m
+----
+awful a
+ok o
+happy h
+
+# Comparing with another type, or another enum, is an error.
+
+statement ok
+CREATE TYPE color AS ENUM ('red', 'green')
+
+statement error 42883
+SELECT 'red'::color = 'ok'::mood
+
+# DROP TYPE: refused while a column uses it.
+
+statement error 2BP01
+DROP TYPE mood
+
+statement ok
+DROP TYPE color
+
+statement error 42704
+DROP TYPE color
+
+statement ok
+DROP TYPE IF EXISTS color
+
+statement ok
+DROP TABLE people
+
+statement ok
+DROP TABLE moods
+
+statement ok
+DROP TYPE mood
+
+# nucleus-only: nc_catalog.enums lists the labels, in order, with their
+# sort keys (room is left between them).
+statement ok
+CREATE TYPE size AS ENUM ('s', 'l')
+
+statement ok
+ALTER TYPE size ADD VALUE 'm' AFTER 's'
+
+# nucleus-only
+query TTIT
+SELECT type, label, position, sort_key FROM nc_catalog.enums WHERE type = 'size' ORDER BY position
+----
+size s 1 5555
+size m 2 7f
+size l 3 aaaa
+
+statement ok
+DROP TYPE size

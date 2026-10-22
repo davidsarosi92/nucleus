@@ -53,6 +53,20 @@ pub enum Statement {
         /// How each value converts (over the row): else a cast.
         using: Option<Expr>,
     },
+    /// `CREATE TYPE name AS ENUM (labels)`.
+    CreateEnum {
+        /// The type's name.
+        name: String,
+        /// Its labels, in order.
+        labels: Vec<String>,
+    },
+    /// `DROP TYPE [IF EXISTS] name` (an enum).
+    DropType {
+        /// The type's name.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
     /// `ALTER TYPE name …`: teaching a type, or making it forget.
     AlterType {
         /// The type's name.
@@ -489,6 +503,22 @@ pub enum TypeAction {
     /// `UPGRADE`: every stored value rewritten in the type's current
     /// encoding version.
     Upgrade,
+    /// An enum's `ADD VALUE [IF NOT EXISTS] label [BEFORE | AFTER label]`.
+    AddValue {
+        /// The new label.
+        label: String,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+        /// Where it goes.
+        place: crate::enums::Place,
+    },
+    /// An enum's `RENAME VALUE from TO to`.
+    RenameValue {
+        /// The label now.
+        from: String,
+        /// Its new text.
+        to: String,
+    },
     /// `DROP CAST [IF EXISTS] TO type`.
     DropCast {
         /// The target type.

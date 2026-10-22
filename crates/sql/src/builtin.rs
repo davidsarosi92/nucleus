@@ -986,7 +986,41 @@ fn examples(ty: DataType) -> Vec<Value> {
             }
             out
         }
-        DataType::Ext(_) => Vec::new(),
+        DataType::Ext(_) | DataType::Enum(_) => Vec::new(),
+    }
+}
+
+/// Every enum's [`Type`]: native values (a sort key and a label), ordered
+/// by declaration.  Its labels are the database's (the catalog's), so it
+/// parses none itself.
+struct EnumType;
+
+impl Type for EnumType {
+    fn name(&self) -> &str {
+        "enum"
+    }
+    fn category(&self) -> &str {
+        "enum"
+    }
+    fn input(&self, text: &str) -> Result<Value> {
+        Err(Error::internal(format!(
+            "an enum label ({text:?}) is read through the catalog"
+        )))
+    }
+    fn output(&self, v: &Value) -> String {
+        v.render()
+    }
+    fn equality(&self) -> Option<&dyn Equality> {
+        Some(&Native)
+    }
+    fn hashing(&self) -> Option<&dyn Hashing> {
+        Some(&Native)
+    }
+    fn ordering(&self) -> Option<&dyn TotalOrder> {
+        Some(&Native)
+    }
+    fn key_encoding(&self) -> Option<&dyn KeyEncoding> {
+        Some(&Native)
     }
 }
 
@@ -996,6 +1030,9 @@ pub fn type_of(ty: DataType) -> &'static dyn Type {
     static ALL: OnceLock<Vec<BuiltinType>> = OnceLock::new();
     if let DataType::Ext(t) = ty {
         return t.imp();
+    }
+    if let DataType::Enum(_) = ty {
+        return &EnumType;
     }
     let all = ALL.get_or_init(|| {
         let mut all: Vec<BuiltinType> = TYPES

@@ -52,6 +52,8 @@ pub enum DataType {
     Array(&'static DataType),
     /// A registered type (a module's, or `uuid`): see [`crate::ext::Type`].
     Ext(TypeRef),
+    /// An enum of the database's ([`crate::enums`]).
+    Enum(crate::enums::EnumRef),
 }
 
 impl DataType {
@@ -75,8 +77,8 @@ impl DataType {
             DataType::Interval => &DataType::Interval,
             DataType::Inet => &DataType::Inet,
             DataType::Cidr => &DataType::Cidr,
-            // Arrays of registered types: not yet.
-            DataType::Array(_) | DataType::Ext(_) => return None,
+            // Arrays of registered types and enums: not yet.
+            DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) => return None,
         }))
     }
 
@@ -126,9 +128,10 @@ impl DataType {
                 DataType::Interval => "interval[]",
                 DataType::Inet => "inet[]",
                 DataType::Cidr => "cidr[]",
-                DataType::Array(_) | DataType::Ext(_) => "array",
+                DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) => "array",
             },
             DataType::Ext(t) => t.name(),
+            DataType::Enum(e) => e.name(),
         }
     }
 
@@ -269,6 +272,8 @@ pub enum Value {
     /// A value of a registered type: the type and the value's canonical
     /// bytes (equal values have equal bytes).
     Ext(TypeRef, Arc<[u8]>),
+    /// An enum's value.
+    Enum(crate::enums::EnumValue),
 }
 
 impl Value {
@@ -311,6 +316,7 @@ impl Value {
                 .array_of()
                 .or(Some(DataType::Array(&DataType::Text))),
             Value::Ext(t, _) => Some(DataType::Ext(*t)),
+            Value::Enum(e) => e.ty.map(DataType::Enum),
         }
     }
 
@@ -361,6 +367,12 @@ impl Value {
             }
             (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
             (Value::Time(a), Value::Time(b)) => a.cmp(b),
+            // By declaration (the sort keys), within one enum.
+            (Value::Enum(a), Value::Enum(b))
+                if a.ty == b.ty || a.ty.is_none() || b.ty.is_none() =>
+            {
+                a.key.cmp(&b.key)
+            }
             (Value::Inet(a) | Value::Cidr(a), Value::Inet(b) | Value::Cidr(b)) => a.cmp_net(*b),
             (Value::Numeric(a), Value::Numeric(b)) => a.cmp(b),
             (Value::Numeric(a), Value::Int(b)) => a.cmp(&Decimal::from_i64(*b)),
@@ -441,6 +453,15 @@ impl Value {
         let bad = |v: &Value| Error::invalid_text(format!("cannot cast {} to {ty}", v.render()));
         Ok(match (self, ty) {
             (Value::Null, _) => Value::Null,
+            (Value::Enum(e), DataType::Enum(t)) if e.ty == Some(t) => Value::Enum(e),
+            (Value::Enum(e), DataType::Text) => Value::Text(e.label.to_string()),
+            // Text to an enum needs the catalog: crate::enums::cast.
+            (Value::Text(s), DataType::Enum(t)) => {
+                return Err(Error::internal(format!(
+                    "the enum {} label {s:?} was converted without the catalog",
+                    t.name()
+                )));
+            }
             (v @ Value::Char(_), DataType::Char) => v,
             (Value::Text(s), DataType::Char) => Value::Char(s),
             (Value::Char(s), DataType::Text) => Value::Text(unpadded(&s).to_string()),
@@ -579,6 +600,7 @@ impl Value {
             Value::Numeric(d) => d.to_string(),
             Value::Date(d) => datetime::format_date(*d),
             Value::Time(t) => datetime::format_time(*t),
+            Value::Enum(e) => e.label.to_string(),
             Value::Inet(n) => n.inet_text(),
             Value::Cidr(n) => n.cidr_text(),
             Value::Timestamp(t) => datetime::format_timestamp(*t, false),
@@ -620,6 +642,7 @@ fn rank(v: &Value) -> u8 {
         Value::Bytea(_) => 8,
         Value::Time(_) => 9,
         Value::Inet(_) | Value::Cidr(_) => 10,
+        Value::Enum(_) => 11,
         Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => 3,
         Value::Interval(_) => 4,
         Value::Array(_) => 6,
@@ -964,6 +987,10 @@ impl Hash for Value {
             Value::Inet(n) | Value::Cidr(n) => {
                 10u8.hash(state);
                 n.hash(state);
+            }
+            Value::Enum(e) => {
+                11u8.hash(state);
+                e.key.hash(state);
             }
             Value::Numeric(d) => hash_number(d.to_f64(), state),
             Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {

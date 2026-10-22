@@ -422,13 +422,17 @@ pub fn scan<'a>(
         ctx.txn.scan(Bound::Included(&start), end_bound)?
     };
     Ok(match index {
-        None => Box::new(entries.map(move |e| {
-            let (k, v) = e?;
-            let row = crate::large::read_row(ctx.txn, table, &k, &v)?;
-            Ok((k, row))
-        })),
+        None => {
+            let mut labels = crate::enums::Labels::default();
+            Box::new(entries.map(move |e| {
+                let (k, v) = e?;
+                let row = crate::large::read_row_with(ctx.txn, table, &k, &v, &mut labels)?;
+                Ok((k, row))
+            }))
+        }
         Some(_) => {
             let base = table.index_prefix(0);
+            let mut labels = crate::enums::Labels::default();
             Box::new(entries.map(move |e| {
                 let (_, pk) = e?;
                 let mut k = base.clone();
@@ -437,7 +441,7 @@ pub fn scan<'a>(
                     .txn
                     .get(&k)?
                     .ok_or_else(|| Error::internal("index entry without its row"))?;
-                let row = crate::large::read_row(ctx.txn, table, &k, &v)?;
+                let row = crate::large::read_row_with(ctx.txn, table, &k, &v, &mut labels)?;
                 Ok((k, row))
             }))
         }

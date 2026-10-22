@@ -141,6 +141,10 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         &[("type", T), ("name", T), ("mapping", T), ("used_by", TA)],
     ),
     (
+        "enums",
+        &[("type", T), ("label", T), ("position", I), ("sort_key", T)],
+    ),
+    (
         "types",
         &[
             ("name", T),
@@ -196,6 +200,7 @@ pub fn views() -> Vec<Arc<dyn CatalogView>> {
 pub fn type_text(c: &Column) -> String {
     match (c.ty, c.max_len, c.numeric) {
         (DataType::Text, Some(n), _) => format!("varchar({n})"),
+        (DataType::Char, Some(n), _) => format!("char({n})"),
         (DataType::Numeric, _, Some((p, s))) => format!("numeric({p},{s})"),
         (DataType::Timestamp, ..) => "timestamp".into(),
         (DataType::TimestampTz, ..) => "timestamptz".into(),
@@ -390,6 +395,18 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     text(o.function),
                     text("taught"),
                 ]);
+            }
+        }
+        "enums" => {
+            for e in crate::enums::all(txn)? {
+                for (i, (key, label)) in e.labels.iter().enumerate() {
+                    out.push(vec![
+                        text(e.name.clone()),
+                        text(label.clone()),
+                        Value::Int(i as i64 + 1),
+                        text(hex(key)),
+                    ]);
+                }
             }
         }
         "casts" => {

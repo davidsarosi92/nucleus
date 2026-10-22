@@ -1733,7 +1733,7 @@ impl<'a> Binder<'a> {
                 )
             }
             A::Cast { expr, ty, typmod } => {
-                let Some(ty) = &resolve_type(self.registry, ty)? else {
+                let Some(ty) = &resolve_type(self.txn, self.registry, ty)? else {
                     // Not a type: a cast function (`::regclass`), or nothing.
                     let ast::SqlType::Named { name, .. } = ty else {
                         unreachable!("built-in types resolve")
@@ -2089,13 +2089,20 @@ impl<'a> Binder<'a> {
             return Ok((x.clone(), (x, t)));
         };
         Ok(match &x {
+            // A parameter for an enum arrives as its label: converted as
+            // the statement runs, through the catalog.
+            Expr::Param(n) if matches!(target, DataType::Enum(_)) => {
+                self.note_param(*n, Some(target));
+                let e = Expr::Cast(Box::new(x.clone()), target);
+                (e.clone(), (e, Some(target)))
+            }
             Expr::Param(n) => {
                 self.note_param(*n, Some(target));
                 (x.clone(), (x, Some(target)))
             }
             Expr::Literal(Value::Text(_)) if target != DataType::Text => {
                 let v = match &x {
-                    Expr::Literal(v) => v.clone().cast(target)?,
+                    Expr::Literal(v) => crate::enums::cast(self.txn, v.clone(), target)?,
                     _ => unreachable!(),
                 };
                 let e = Expr::Literal(v);
@@ -2449,12 +2456,24 @@ fn convert(x: Expr, from: Option<DataType>, to: Option<DataType>) -> Expr {
     }
 }
 
-/// The type `t` names in `registry` (`None`: a name that is no type).  A
-/// schema before it must exist: `public`, or a registered one.
-pub fn resolve_type(registry: &Registry, t: &ast::SqlType) -> Result<Option<DataType>> {
+/// The type `t` names in `registry` — or, if none, an enum of the
+/// database's (`None`: a name that is no type).  A schema before it must
+/// exist: `public`, or a registered one.
+pub fn resolve_type(
+    txn: &dyn KvTxn,
+    registry: &Registry,
+    t: &ast::SqlType,
+) -> Result<Option<DataType>> {
     let (schema, found) = match t {
         ast::SqlType::Builtin { schema, ty } => (schema, Some(*ty)),
-        ast::SqlType::Named { schema, name } => (schema, registry.type_named(name)),
+        ast::SqlType::Named { schema, name } => match registry.type_named(name) {
+            Some(t) => (schema, Some(t)),
+            None => (
+                schema,
+                crate::enums::get(txn, name)?
+                    .map(|_| DataType::Enum(crate::enums::EnumRef::named(name))),
+            ),
+        },
     };
     if let Some(s) = schema
         && s != "public"
@@ -2468,8 +2487,8 @@ pub fn resolve_type(registry: &Registry, t: &ast::SqlType) -> Result<Option<Data
 }
 
 /// [`resolve_type`] for a column: the name must be a type.
-pub fn column_type(registry: &Registry, t: &ast::SqlType) -> Result<DataType> {
-    resolve_type(registry, t)?.ok_or_else(|| {
+pub fn column_type(txn: &dyn KvTxn, registry: &Registry, t: &ast::SqlType) -> Result<DataType> {
+    resolve_type(txn, registry, t)?.ok_or_else(|| {
         let ast::SqlType::Named { name, .. } = t else {
             unreachable!("built-in types resolve")
         };

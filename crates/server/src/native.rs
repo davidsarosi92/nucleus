@@ -79,7 +79,7 @@ impl Msg {
             DataType::Interval => 9,
             DataType::Array(_) => 10,
             // Registered types travel as text to version-1 clients.
-            DataType::Ext(_) => 4,
+            DataType::Ext(_) | DataType::Enum(_) => 4,
         };
         match t {
             None => self.u8(0),
@@ -114,9 +114,12 @@ fn wire_value(buf: &mut Vec<u8>, v: &Value, v2: bool) {
             buf.push(3);
             buf.extend_from_slice(&f64::from(*f).to_le_bytes());
         }
-        Value::Bytea(_) | Value::Time(_) | Value::Char(_) | Value::Inet(_) | Value::Cidr(_) => {
-            encode_value(buf, &Value::Text(v.render()))
-        }
+        Value::Bytea(_)
+        | Value::Time(_)
+        | Value::Char(_)
+        | Value::Inet(_)
+        | Value::Cidr(_)
+        | Value::Enum(_) => encode_value(buf, &Value::Text(v.render())),
         Value::Array(items) => {
             buf.push(10);
             buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
@@ -365,8 +368,11 @@ fn run(
             Err(e) => return Ok(Err(e)),
         };
         for (v, t) in converted.iter_mut().zip(types) {
+            // (An enum's label is converted by the statement, through
+            // the catalog.)
             if let Some(t) = t
                 && !v.is_null()
+                && !matches!(t, DataType::Enum(_))
                 && v.data_type() != Some(t)
             {
                 match v.clone().cast(t) {

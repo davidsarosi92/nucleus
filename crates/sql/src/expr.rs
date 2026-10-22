@@ -420,7 +420,7 @@ impl Expr {
                     None => Value::Null,
                 }
             }
-            Expr::Cast(e, ty) => e.eval(env)?.cast(*ty)?,
+            Expr::Cast(e, ty) => crate::enums::cast(env.ctx.txn, e.eval(env)?, *ty)?,
             Expr::Call(f, args) => {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {

@@ -135,6 +135,7 @@ impl Writer {
         match &self.defaults[c] {
             None => Ok(Value::Null),
             Some(e) => assign(
+                ctx.txn,
                 e.eval(&Env {
                     row: &[],
                     outer: None,
@@ -174,8 +175,9 @@ impl Writer {
     }
 }
 
-/// Converts a value for storing in column `c` (assignment cast).
-pub fn assign(v: Value, table: &Table, c: usize) -> Result<Value> {
+/// Converts a value for storing in column `c` (assignment cast; an enum's
+/// label read through `txn`'s catalog).
+pub fn assign(txn: &dyn KvTxn, v: Value, table: &Table, c: usize) -> Result<Value> {
     let col = &table.columns[c];
     // Assignment casts: within numbers, within dates and timestamps, and
     // from or to text (text is parsed, as an untyped literal would be).
@@ -205,7 +207,7 @@ pub fn assign(v: Value, table: &Table, c: usize) -> Result<Value> {
                 crate::types::type_name(&v)
             )));
         }
-        _ => v.cast(col.ty)?,
+        _ => crate::enums::cast(txn, v, col.ty)?,
     };
     if let (Some(max), Value::Text(s)) = (col.max_len, &v)
         && s.chars().count() > max as usize
@@ -367,7 +369,7 @@ pub fn insert(
             let mut row = Vec::with_capacity(t.columns.len());
             for c in 0..t.columns.len() {
                 row.push(match targets.iter().position(|&x| x == c) {
-                    Some(j) if j < src.len() => assign(src[j].clone(), &t, c)?,
+                    Some(j) if j < src.len() => assign(ro, src[j].clone(), &t, c)?,
                     _ => writer.default_of(c, &ctx)?,
                 });
             }
@@ -457,7 +459,7 @@ pub fn update(
             };
             let mut new = old.clone();
             for (c, e) in &sets {
-                new[*c] = assign(e.eval(&env)?, &t, *c)?;
+                new[*c] = assign(ctx.txn, e.eval(&env)?, &t, *c)?;
             }
             writer.validate(&new, &ctx)?;
             changes.push((key, old, new));

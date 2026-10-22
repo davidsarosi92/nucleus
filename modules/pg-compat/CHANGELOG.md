@@ -6,6 +6,8 @@
   `int2` (oid 21) and `int4` (oid 23), in text and binary (checked
   against PostgreSQL 18's `int2send` / `int4send`); binary parameters of
   those types are range-checked.
+- Enums travel as text (oid 25): PostgreSQL gives each enum an oid of its
+  own, which nucleus does not have yet; `pg_typeof` names them.
 - `inet` (oid 869, array 1041) and `cidr` (oid 650, array 651), binary
   as PostgreSQL's (checked against `inet_send` / `cidr_send`); a binary
   cidr parameter with host bits is refused.

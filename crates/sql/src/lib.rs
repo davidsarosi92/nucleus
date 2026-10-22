@@ -13,6 +13,7 @@ pub mod datetime;
 pub mod decimal;
 pub mod dml;
 pub mod encoding;
+pub mod enums;
 pub mod error;
 pub mod exec;
 pub mod expr;

@@ -265,7 +265,7 @@ are marked ✅.
 | | M14.7 | The nucleus protocol (`ncp`); PostgreSQL protocol optional | ✅ DOCS §9–§10 |
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
 | | M14.19 | Modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ✅ DOCS §1, §8.11–§8.12, §9 |
-| | M14.26 | **In progress:** core types: integers by width (✅), `real` (✅), `bytea` (🟡), `time` (✅), `char(n)` (✅), `inet` / `cidr` (✅), enums | ⬜ |
+| | M14.26 | **In progress:** core types: integers by width (✅), `real` (✅), `bytea` (🟡), `time` (✅), `char(n)` (✅), `inet` / `cidr` (✅), enums (✅); next: the protocol version and drivers | ⬜ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
@@ -952,7 +952,7 @@ type set still lacks (today `smallint` and `integer` are names for a
   in which a network's addresses are one contiguous range, so containment
   is an index range scan.  The access rules (§M14.25) and the audit log
   use them.
-- **Enums**: `CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')`, ordered
+- ✅ **Enums**: `CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')`, ordered
   by declaration; `ALTER TYPE … ADD VALUE … BEFORE / AFTER` and
   `RENAME VALUE` without rewriting a row — values are stored by a sort
   key that leaves room between labels, so a new label fits anywhere.
@@ -1931,6 +1931,8 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-22** — §M14.26: enums, checked against PostgreSQL 18; adding
+  and renaming labels rewrites no row (tested on the stored bytes).
 - **2026-10-22** — §M14.26: `inet` and `cidr`, checked against
   PostgreSQL 18; containment scans an index range through a new hook of
   the extension API, `ScalarFunction::implied_range`.

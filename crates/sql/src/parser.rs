@@ -197,6 +197,18 @@ impl<'a> Parser<'a> {
     }
 
     /// An identifier (a non-reserved word or a quoted name).
+    /// A string literal's text.
+    fn string(&mut self) -> Result<String> {
+        match self.peek() {
+            Some(Token::Str(s)) => {
+                let s = s.clone();
+                self.pos += 1;
+                Ok(s)
+            }
+            _ => Err(self.error("expected a string")),
+        }
+    }
+
     fn ident(&mut self) -> Result<String> {
         match self.peek() {
             Some(Token::Word(w)) if !RESERVED.contains(&w.as_str()) => {
@@ -410,6 +422,23 @@ impl<'a> Parser<'a> {
         }
         if unique {
             return Err(self.error("expected INDEX"));
+        }
+        if self.eat_kw("type") {
+            let name = self.ident()?;
+            self.expect_kw("as")?;
+            self.expect_kw("enum")?;
+            self.expect_op("(")?;
+            let mut labels = Vec::new();
+            if !self.peek_op(")") {
+                loop {
+                    labels.push(self.string()?);
+                    if !self.eat_op(",") {
+                        break;
+                    }
+                }
+            }
+            self.expect_op(")")?;
+            return Ok(Statement::CreateEnum { name, labels });
         }
         self.expect_kw("table")?;
         let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
@@ -692,6 +721,15 @@ impl<'a> Parser<'a> {
                 if_exists,
             });
         }
+        if self.eat_kw("type") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let name = self.ident()?;
+            if self.eat_kw("cascade") {
+                return Err(Error::feature("DROP TYPE … CASCADE is not supported"));
+            }
+            self.eat_kw("restrict");
+            return Ok(Statement::DropType { name, if_exists });
+        }
         self.expect_kw("table")?;
         let if_exists = self.eat_kws(&["if", "exists"]);
         let mut names = vec![self.relation()?];
@@ -714,6 +752,35 @@ impl<'a> Parser<'a> {
     fn alter_type(&mut self) -> Result<Statement> {
         let type_name = self.ident()?;
         let verb = self.ident()?;
+        // An enum's labels.
+        if verb == "add" && self.eat_kw("value") {
+            let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
+            let label = self.string()?;
+            let place = if self.eat_kw("before") {
+                crate::enums::Place::Before(self.string()?)
+            } else if self.eat_kw("after") {
+                crate::enums::Place::After(self.string()?)
+            } else {
+                crate::enums::Place::Last
+            };
+            return Ok(Statement::AlterType {
+                type_name,
+                action: TypeAction::AddValue {
+                    label,
+                    if_not_exists,
+                    place,
+                },
+            });
+        }
+        if verb == "rename" && self.eat_kw("value") {
+            let from = self.string()?;
+            self.expect_kw("to")?;
+            let to = self.string()?;
+            return Ok(Statement::AlterType {
+                type_name,
+                action: TypeAction::RenameValue { from, to },
+            });
+        }
         if verb == "upgrade" {
             return Ok(Statement::AlterType {
                 type_name,

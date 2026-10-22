@@ -252,6 +252,6 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
             }
             Value::ext(t, b)
         }),
-        DataType::Ext(_) => return None,
+        DataType::Ext(_) | DataType::Enum(_) => return None,
     })
 }

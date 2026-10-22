@@ -220,6 +220,7 @@ pub fn parent_changed(
                             for (j, &c) in fk.columns.iter().enumerate() {
                                 row[c] = match action {
                                     FkAction::Cascade => dml::assign(
+                                        ctx.txn,
                                         new.as_ref().expect("an update")[fk.ref_columns[j]].clone(),
                                         &child,
                                         c,

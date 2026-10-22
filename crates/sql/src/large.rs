@@ -24,6 +24,7 @@ use crate::catalog::{self, Table};
 use crate::encoding::{
     OUT_OF_LINE, ROW_VERSION, Reader, decode_row_with, decode_value, encode_value, out_of_line,
 };
+use crate::enums::Labels;
 use crate::error::{Error, Result};
 use crate::exec::pk_suffix;
 use crate::types::{Row, Value};
@@ -142,10 +143,26 @@ pub fn fetch(txn: &dyn KvTxn, t: &Table, pk: &[u8], col: usize, len: u32) -> Res
     decode_value(&mut Reader::new(&enc))
 }
 
-/// Decodes the row stored at `key`, reading its values stored out of line.
+/// Decodes the row stored at `key`, reading its values stored out of line
+/// (and its enums' labels).
 pub fn read_row(txn: &dyn KvTxn, t: &Table, key: &[u8], bytes: &[u8]) -> Result<Row> {
+    read_row_with(txn, t, key, bytes, &mut Labels::default())
+}
+
+/// [`read_row`], with the enums a scan has looked up so far.
+pub fn read_row_with(
+    txn: &dyn KvTxn,
+    t: &Table,
+    key: &[u8],
+    bytes: &[u8],
+    labels: &mut Labels,
+) -> Result<Row> {
     let pk = pk_suffix(t, key);
-    decode_row_with(bytes, t.columns.len(), &mut |c, len| {
+    let mut row = decode_row_with(bytes, t.columns.len(), &mut |c, len| {
         fetch(txn, t, &pk, c, len)
-    })
+    })?;
+    for (v, c) in row.iter_mut().zip(&t.columns) {
+        labels.fill(txn, c.ty, v)?;
+    }
+    Ok(row)
 }

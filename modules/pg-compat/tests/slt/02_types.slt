@@ -122,3 +122,26 @@ query TTTT
 SELECT pg_typeof('10.1.2.3'::inet), pg_typeof(network('10.1.2.3/8'::inet)), pg_typeof(masklen('10/8'::cidr)), pg_typeof(CASE WHEN true THEN '10/8'::cidr ELSE '10.1.2.3'::inet END)
 ----
 inet cidr integer inet
+
+# Enums.
+
+statement ok
+CREATE TYPE pg_mood AS ENUM ('sad', 'happy')
+
+statement ok
+CREATE TABLE pg_feel (who text, m pg_mood)
+
+statement ok
+INSERT INTO pg_feel VALUES ('a', 'happy'), ('b', 'sad')
+
+query TTT
+SELECT who, m, pg_typeof(m) FROM pg_feel ORDER BY m
+----
+b sad pg_mood
+a happy pg_mood
+
+statement ok
+DROP TABLE pg_feel
+
+statement ok
+DROP TYPE pg_mood

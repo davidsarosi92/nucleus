@@ -667,6 +667,14 @@ pub fn execute(
             alter_type(txn, reg, type_name, action)?;
             Output::Command("ALTER TYPE".into())
         }
+        Statement::CreateEnum { name, labels } => {
+            crate::enums::create(txn, reg, name, labels)?;
+            Output::Command("CREATE TYPE".into())
+        }
+        Statement::DropType { name, if_exists } => {
+            crate::enums::drop(txn, name, *if_exists)?;
+            Output::Command("DROP TYPE".into())
+        }
         Statement::DropIndex { name, if_exists } => {
             match catalog::find_index(&*txn, name)? {
                 Some((mut t, i)) => {
@@ -708,7 +716,7 @@ pub fn execute(
             }
             t.columns.push(Column {
                 name: column.name.clone(),
-                ty: crate::binder::column_type(reg, &column.ty)?,
+                ty: crate::binder::column_type(&*txn, reg, &column.ty)?,
                 nullable: !column.not_null,
                 default: column.default.clone(),
                 max_len: column.max_len,
@@ -840,7 +848,7 @@ fn create_table(
         }
         columns.push(Column {
             name: s.name.clone(),
-            ty: crate::binder::column_type(reg, &s.ty)?,
+            ty: crate::binder::column_type(&*txn, reg, &s.ty)?,
             nullable: !s.not_null,
             default: s.default.clone(),
             max_len: s.max_len,
@@ -1006,6 +1014,17 @@ fn alter_type(
     action: &crate::ast::TypeAction,
 ) -> Result<()> {
     use crate::catalog::TaughtOrdering;
+    match action {
+        crate::ast::TypeAction::AddValue {
+            label,
+            if_not_exists,
+            place,
+        } => return crate::enums::add_value(txn, type_name, label, *if_not_exists, place),
+        crate::ast::TypeAction::RenameValue { from, to } => {
+            return crate::enums::rename_value(txn, type_name, from, to);
+        }
+        _ => {}
+    }
     let ty = reg
         .type_named(type_name)
         .ok_or_else(|| Error::undefined_object(format!("type \"{type_name}\" does not exist")))?;
@@ -1089,8 +1108,8 @@ fn alter_type(
             function,
         } => {
             let (l, r) = (
-                crate::binder::column_type(reg, left)?,
-                crate::binder::column_type(reg, right)?,
+                crate::binder::column_type(&*txn, reg, left)?,
+                crate::binder::column_type(&*txn, reg, right)?,
             );
             if l != ty && r != ty {
                 return Err(Error::invalid_parameter(format!(
@@ -1127,8 +1146,8 @@ fn alter_type(
             if_exists,
         } => {
             let (ln, rn) = (
-                type_name_of(crate::binder::column_type(reg, left)?),
-                type_name_of(crate::binder::column_type(reg, right)?),
+                type_name_of(crate::binder::column_type(&*txn, reg, left)?),
+                type_name_of(crate::binder::column_type(&*txn, reg, right)?),
             );
             if catalog::get_operator(&*txn, symbol, &ln, &rn)?.is_none() {
                 if *if_exists {
@@ -1145,7 +1164,7 @@ fn alter_type(
             function,
             context,
         } => {
-            let target = crate::binder::column_type(reg, to)?;
+            let target = crate::binder::column_type(&*txn, reg, to)?;
             let tn = type_name_of(target);
             if target == ty
                 || !(matches!(ty, DataType::Ext(_)) || matches!(target, DataType::Ext(_)))
@@ -1174,6 +1193,9 @@ fn alter_type(
                 },
             )?;
         }
+        crate::ast::TypeAction::AddValue { .. } | crate::ast::TypeAction::RenameValue { .. } => {
+            unreachable!("an enum's, handled above")
+        }
         crate::ast::TypeAction::Upgrade => {
             let DataType::Ext(t) = ty else {
                 return Err(Error::invalid_parameter(format!(
@@ -1183,7 +1205,7 @@ fn alter_type(
             catalog::upgrade_type(txn, reg, t)?;
         }
         crate::ast::TypeAction::DropCast { to, if_exists } => {
-            let tn = type_name_of(crate::binder::column_type(reg, to)?);
+            let tn = type_name_of(crate::binder::column_type(&*txn, reg, to)?);
             if catalog::get_cast(&*txn, &tname, &tn)?.is_none() {
                 if *if_exists {
                     return Ok(());
@@ -1233,7 +1255,7 @@ fn alter_column_type(
         )));
     }
     let from = old.columns[c].ty;
-    let to = crate::binder::column_type(reg, ty)?;
+    let to = crate::binder::column_type(&*txn, reg, ty)?;
     let conversion = {
         let mut binder = Binder::new(&*txn, reg);
         let scope = dml::table_scope(&old);
@@ -1288,7 +1310,7 @@ fn alter_column_type(
                 outer: None,
                 ctx: &ctx,
             })?;
-            row[c] = dml::assign(v, &new, c)?;
+            row[c] = dml::assign(ctx.txn, v, &new, c)?;
             rows.push((key, row));
         }
         rows

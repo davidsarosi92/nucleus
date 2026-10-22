@@ -663,7 +663,8 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Cidr => 650,
         DataType::Ext(t) if t.name() == "uuid" => UUID,
         // Registered types PostgreSQL has no oid for are shown as text.
-        DataType::Ext(_) => 25,
+        // Enums too: PostgreSQL gives each its own oid, nucleus sends labels.
+        DataType::Ext(_) | DataType::Enum(_) => 25,
         DataType::Array(e) => match e {
             DataType::Bool => 1000,
             DataType::SmallInt => 1005,
@@ -682,7 +683,7 @@ pub fn type_oid(t: DataType) -> i64 {
             DataType::Interval => 1187,
             DataType::Inet => 1041,
             DataType::Cidr => 651,
-            DataType::Array(_) | DataType::Ext(_) => 0,
+            DataType::Array(_) | DataType::Ext(_) | DataType::Enum(_) => 0,
         },
     }
 }
