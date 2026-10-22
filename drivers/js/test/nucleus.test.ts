@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 
-import { connect, Decimal, Interval, NucleusError } from "../src/index.ts";
+import { Cidr, connect, Decimal, Inet, Interval, NucleusError, Time } from "../src/index.ts";
 
 const options = {
   host: process.env.NUCLEUS_HOST ?? "127.0.0.1",
@@ -26,7 +26,7 @@ test("types both ways", async () => {
   assert.equal(r.count, 1);
   const got = await db.query(`SELECT * FROM ${t}`);
   assert.deepEqual(got.columns.map((c) => c.type),
-    ["bigint", "boolean", "double precision", "text", "numeric", "date", "timestamptz", "interval", "text[]", "bigint"]);
+    ["integer", "boolean", "double precision", "text", "numeric", "date", "timestamptz", "interval", "text[]", "bigint"]);
   const v = got.rows[0];
   assert.deepEqual(v.slice(0, 4), [1, true, 0.5, "héllo"]);
   assert.equal(String(v[4]), "123.45");
@@ -41,6 +41,30 @@ test("types both ways", async () => {
   assert.equal(sums.rows[0][1], null);
   assert.equal(sums.rows[0][2], 42);
   assert.deepEqual(got.records()[0].s, "héllo");
+  await db.close();
+});
+
+test("core types", async () => {
+  const db = await connect(options);
+  const t = table();
+  const mood = `${t}_mood`;
+  await db.query(`CREATE TYPE ${mood} AS ENUM ('sad', 'happy')`);
+  await db.query(`CREATE TABLE ${t} (s SMALLINT, i INTEGER, r REAL, b BYTEA, tm TIME, ch CHAR(3),
+    ip INET, net CIDR, m ${mood})`);
+  const row = [-2, 70000, 0.1, Buffer.from([0, 255]), Time.parse("12:34:56.5"), "ab ",
+    Inet.parse("10.1.2.3/8"), Cidr.parse("2001:db8::/32"), "happy"];
+  await db.query(`INSERT INTO ${t} VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, row);
+  const got = await db.query(`SELECT * FROM ${t}`);
+  assert.deepEqual(got.columns.map((c) => c.type),
+    ["smallint", "integer", "real", "bytea", "time", "character", "inet", "cidr", mood]);
+  assert.deepEqual(got.rows[0], row);
+  assert.deepEqual([0, 1, 2, 4, 5, 6, 7, 8].map((i) => String(got.rows[0][i])),
+    ["-2", "70000", "0.1", "12:34:56.5", "ab ", "10.1.2.3/8", "2001:db8::/32", "happy"]);
+  assert.equal(String(Inet.parse("::ffff:1.2.3.4")), "::ffff:1.2.3.4");
+  assert.equal(String(Inet.parse("0:0:0:1:0:0:0:1")), "::1:0:0:0:1");
+  const n = await db.query(`SELECT count(*) FROM ${t} WHERE b = $1 AND ip <<= $2`,
+    [new Uint8Array([0, 255]), Cidr.parse("10.0.0.0/8")]);
+  assert.deepEqual(n.rows, [[1]]);
   await db.close();
 });
 

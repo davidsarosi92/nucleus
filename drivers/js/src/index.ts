@@ -8,24 +8,29 @@
 //   const { rows } = await db.query("SELECT id, name FROM t");
 //   await db.close();
 //
-// Values: boolean, bigint columns as number (bigint beyond 2^53), double
-// as number, numeric as Decimal (exact), text as string, date / timestamp /
-// timestamptz as Date (UTC; read with millisecond precision), interval as
-// Interval, uuid as its canonical string, arrays as arrays, NULL as null;
+// Values: boolean, smallint / integer as number, bigint as number (bigint
+// beyond 2^53), real (its shortest digits) and double as number, numeric
+// as Decimal (exact), text, char(n) and enums as string, bytea as Buffer,
+// date / timestamp / timestamptz as Date (UTC; read with millisecond
+// precision), time as Time, interval as Interval, inet as Inet, cidr as
+// Cidr, uuid as its canonical string, arrays as arrays, NULL as null;
 // another registered type as Ext (its name and binary form).
 
 import net from "node:net";
 
-// 2: registered types (uuid, modules' types) arrive in their binary form.
-export const PROTOCOL_VERSION = 2;
+// 2: registered types (uuid, modules' types) arrive in their binary form;
+// 3: smallint, integer, real, bytea, time, inet and cidr in theirs.
+export const PROTOCOL_VERSION = 3;
 const EXT = 11;
+const ENUM = 20;
 export const DEFAULT_PORT = 20035;
 
 const EPOCH_MS = Date.UTC(2000, 0, 1);
 const DAY_MS = 86_400_000;
 const TYPE_NAMES = [
   "unknown", "boolean", "bigint", "double precision", "text", "numeric",
-  "date", "timestamp", "timestamptz", "interval", "array",
+  "date", "timestamp", "timestamptz", "interval", "array", "", "smallint",
+  "integer", "real", "bytea", "time", "character", "inet", "cidr",
 ];
 
 /** An error from the server (`code` is the SQLSTATE) or the driver. */
@@ -95,6 +100,147 @@ export class Interval {
   }
 }
 
+/** A time of day: microseconds since midnight (`24:00:00` included). */
+export class Time {
+  readonly micros: number;
+
+  constructor(micros: number) {
+    this.micros = micros;
+  }
+
+  /** Parses `"12:34:56.5"`. */
+  static parse(text: string): Time {
+    const m = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?$/.exec(text.trim());
+    if (!m) throw new NucleusError(`invalid time: ${JSON.stringify(text)}`, "22007");
+    const us = Number((m[4] ?? "").padEnd(6, "0"));
+    return new Time(((Number(m[1]) * 60 + Number(m[2])) * 60 + Number(m[3] ?? 0)) * 1e6 + us);
+  }
+
+  toString(): string {
+    const p = (n: number) => String(n).padStart(2, "0");
+    const s = Math.floor(this.micros / 1e6);
+    const us = this.micros % 1e6;
+    const frac = us ? "." + String(us).padStart(6, "0").replace(/0+$/, "") : "";
+    return `${p(Math.floor(s / 3600))}:${p(Math.floor(s / 60) % 60)}:${p(s % 60)}${frac}`;
+  }
+}
+
+/** An address's text: dotted IPv4, or IPv6 with the longest run of zero
+ * groups as `::` (as nucleus prints it, mapped IPv4 dotted). */
+function addressText(b: Buffer): string {
+  if (b.length === 4) return Array.from(b).join(".");
+  const w = Array.from({ length: 8 }, (_, i) => b.readUInt16BE(2 * i));
+  let best = -1;
+  let len = 0;
+  for (let i = 0; i < 8; ) {
+    if (w[i] !== 0) {
+      i++;
+      continue;
+    }
+    const start = i;
+    while (i < 8 && w[i] === 0) i++;
+    if (i - start > len) {
+      best = start;
+      len = i - start;
+    }
+  }
+  if (len < 2) best = -1;
+  if (best === 0 && (len === 6 || (len === 5 && w[5] === 0xffff))) {
+    return (len === 5 ? "::ffff:" : "::") + Array.from(b.subarray(12)).join(".");
+  }
+  let out = "";
+  for (let i = 0; i < 8; ) {
+    if (i === best) {
+      out += "::";
+      i += len;
+      continue;
+    }
+    if (out && !out.endsWith(":")) out += ":";
+    out += w[i].toString(16);
+    i++;
+  }
+  return out;
+}
+
+/** An address's bytes from its text (IPv4 dotted, or IPv6). */
+function addressBytes(text: string): Buffer {
+  const bad = () => new NucleusError(`invalid address: ${JSON.stringify(text)}`, "22P02");
+  if (!text.includes(":")) {
+    const parts = text.split(".").map(Number);
+    if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) throw bad();
+    return Buffer.from(parts);
+  }
+  // An embedded IPv4 tail (`::ffff:1.2.3.4`) as its two groups.
+  let t = text;
+  const v4 = /(\d+\.\d+\.\d+\.\d+)$/.exec(t);
+  if (v4) {
+    const b = addressBytes(v4[1]);
+    t = t.slice(0, -v4[1].length) + `${b.readUInt16BE(0).toString(16)}:${b.readUInt16BE(2).toString(16)}`;
+  }
+  const groups = (s: string) => (s === "" ? [] : s.split(":").map((g) => {
+    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) throw bad();
+    return parseInt(g, 16);
+  }));
+  const halves = t.split("::");
+  if (halves.length > 2) throw bad();
+  const head = groups(halves[0]);
+  const rest = halves.length === 2 ? groups(halves[1]) : [];
+  const fill = 8 - head.length - rest.length;
+  if (halves.length === 1 ? fill !== 0 : fill < 1) throw bad();
+  const words = [...head, ...Array(halves.length === 2 ? fill : 0).fill(0), ...rest];
+  const b = Buffer.alloc(16);
+  words.forEach((w, i) => b.writeUInt16BE(w, 2 * i));
+  return b;
+}
+
+/** An `inet`: an address and its mask length (32 or 128: a host). */
+export class Inet {
+  readonly bytes: Buffer;
+  readonly bits: number;
+
+  constructor(bytes: Buffer, bits?: number) {
+    this.bytes = bytes;
+    this.bits = bits ?? bytes.length * 8;
+  }
+
+  /** Parses `"10.1.2.3/8"`, `"::1"`. */
+  static parse(text: string): Inet {
+    const [addr, bits] = text.trim().split("/");
+    return new Inet(addressBytes(addr), bits === undefined ? undefined : Number(bits));
+  }
+
+  /** The address alone. */
+  get address(): string {
+    return addressText(this.bytes);
+  }
+
+  toString(): string {
+    return this.bits === this.bytes.length * 8 ? this.address : `${this.address}/${this.bits}`;
+  }
+}
+
+/** A `cidr`: a network. */
+export class Cidr extends Inet {
+  static parse(text: string): Cidr {
+    const i = Inet.parse(text);
+    return new Cidr(i.bytes, i.bits);
+  }
+
+  toString(): string {
+    return `${this.address}/${this.bits}`;
+  }
+}
+
+/** A real's 4 bytes as the number of its shortest digits. */
+function realOf(f: number): number {
+  if (!Number.isFinite(f)) return f;
+  for (let p = 1; p <= 9; p++) {
+    const n = Number(f.toPrecision(p));
+    if (Math.fround(n) === f) return n;
+  }
+  return f;
+}
+
 /** A value of a registered type this driver has no JavaScript type for:
  * the type's name and the value's binary (canonical) form. */
 export class Ext {
@@ -122,6 +268,10 @@ export type Value =
   | Decimal
   | Date
   | Interval
+  | Time
+  | Inet
+  | Buffer
+  | Uint8Array
   | Ext
   | Value[];
 
@@ -235,6 +385,19 @@ class Writer {
       return this.u8(8).i64(BigInt(v.getTime() - EPOCH_MS) * 1000n);
     }
     if (v instanceof Interval) return this.u8(9).i32(v.months).i32(v.days).i64(v.micros);
+    if (v instanceof Time) return this.u8(16).i64(BigInt(v.micros));
+    if (v instanceof Inet) {
+      // (A Cidr is an Inet too.)
+      this.u8(v instanceof Cidr ? 19 : 18).u8(v.bytes.length === 4 ? 4 : 6).u8(v.bits);
+      this.parts.push(v.bytes);
+      return this;
+    }
+    if (v instanceof Uint8Array) {
+      // A Buffer is one too: bytea.
+      this.u8(15).u32(v.length);
+      this.parts.push(Buffer.from(v));
+      return this;
+    }
     if (v instanceof Ext) {
       this.u8(EXT).str(v.typeName).u32(v.data.length);
       this.parts.push(v.data);
@@ -334,6 +497,39 @@ class Reader {
         return new Date(EPOCH_MS + Number(this.i64() / 1000n));
       case 9:
         return new Interval(this.i32(), this.i32(), this.i64());
+      case 12: {
+        this.need(2);
+        const v = this.b.readInt16LE(this.at);
+        this.at += 2;
+        return v;
+      }
+      case 13:
+        return this.i32();
+      case 14: {
+        this.need(4);
+        const v = this.b.readFloatLE(this.at);
+        this.at += 4;
+        return realOf(v);
+      }
+      case 15: {
+        const n = this.u32();
+        this.need(n);
+        const data = Buffer.from(this.b.subarray(this.at, this.at + n));
+        this.at += n;
+        return data;
+      }
+      case 16:
+        return new Time(Number(this.i64()));
+      case 18:
+      case 19: {
+        const family = this.u8();
+        const bits = this.u8();
+        const n = family === 4 ? 4 : 16;
+        this.need(n);
+        const data = Buffer.from(this.b.subarray(this.at, this.at + n));
+        this.at += n;
+        return tag === 18 ? new Inet(data, bits) : new Cidr(data, bits);
+      }
       case 10: {
         const n = this.u32();
         const items: Value[] = [];
@@ -489,7 +685,7 @@ export class Client {
               const type =
                 tag === 10
                   ? `${TYPE_NAMES[r.u8()] ?? "unknown"}[]`
-                  : tag === EXT
+                  : tag === EXT || tag === ENUM
                     ? r.str()
                     : TYPE_NAMES[tag] ?? "unknown";
               columns.push({ name, type });

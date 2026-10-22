@@ -13,10 +13,14 @@ await db.transaction(async (tx) => { /* … */ });
 await db.close();
 ```
 
-Types: `boolean`, `number` (or `bigint` beyond 2^53), `Decimal` (exact),
-`string`, `Date` (date, timestamp, timestamptz — UTC, millisecond precision
-when read), `Interval`, uuid as its canonical string, arrays, `null`;
-another registered type is `Ext` (its name and binary form).  Errors are
+Types: `boolean`, `number` (smallint, integer, real — by its shortest
+digits —, double; bigint too, or `bigint` beyond 2^53), `Decimal` (exact),
+`string` (text, `char(n)`, enums), `Buffer` (bytea; any `Uint8Array` as a
+parameter), `Date` (date, timestamp, timestamptz — UTC, millisecond
+precision when read), `Time` (time of day, µs), `Interval`, `Inet` and
+`Cidr` (`.bytes`, `.bits`, `.address`, `parse`, `toString`), uuid as its
+canonical string, arrays, `null`; another registered type is `Ext` (its
+name and binary form).  Protocol version 3.  Errors are
 `NucleusError` with
 `code` (SQLSTATE).  Queries on one connection run one after another.
 Tests: `npm test`; example: `examples/js/quickstart.ts`.
