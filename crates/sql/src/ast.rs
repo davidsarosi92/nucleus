@@ -102,6 +102,35 @@ pub enum Statement {
     },
     /// `SET ROLE name`, `SET ROLE NONE`, `RESET ROLE` (`None`).
     SetRole(Option<String>),
+    /// `GRANT privileges ON objects TO grantees [WITH GRANT OPTION]`, or
+    /// (`revoke`) `REVOKE [GRANT OPTION FOR] privileges ON objects FROM
+    /// grantees`.
+    Grant {
+        /// The privileges.
+        items: Vec<crate::privileges::Item>,
+        /// The objects.
+        target: crate::privileges::Target,
+        /// Roles, or `public`.
+        grantees: Vec<String>,
+        /// `WITH GRANT OPTION`; for `REVOKE`, `GRANT OPTION FOR`.
+        grant_option: bool,
+        /// A `REVOKE`.
+        revoke: bool,
+    },
+    /// `ALTER DEFAULT PRIVILEGES [FOR ROLE r] [IN SCHEMA public] GRANT |
+    /// REVOKE … ON TABLES …`.
+    AlterDefaultPrivileges {
+        /// `FOR ROLE r` (`None`: the current role).
+        for_role: Option<String>,
+        /// The privileges (`None`: `ALL`).
+        privileges: Option<u32>,
+        /// Roles, or `public`.
+        grantees: Vec<String>,
+        /// `WITH GRANT OPTION` / `GRANT OPTION FOR`.
+        grant_option: bool,
+        /// A `REVOKE`.
+        revoke: bool,
+    },
     /// `CREATE TYPE name AS ENUM (labels)`.
     CreateEnum {
         /// The type's name.

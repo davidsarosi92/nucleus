@@ -805,6 +805,8 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 09 <enum>` | an enum: its labels and their sort keys, in order |
 | `00 0A <role>` | a role: its attributes and password verifier (§9) |
 | `00 0B <role> 00 <member>` | a membership: its admin option |
+| `00 0C <kind> <object>` | an object's ACL (privileges per grantee, and per column) |
+| `00 0D <role> 00 <kind>` | a role's default privileges for objects it makes |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -1011,6 +1013,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.enums` | `type`, `label`, `position`, `sort_key` (hex) |
 | `nc_catalog.roles` | `name`, `superuser`, `login`, `inherit`, `createrole`, `connection_limit`, `has_password`, `valid_until` |
 | `nc_catalog.role_members` | `role`, `member`, `admin_option` |
+| `nc_catalog.grants` | `kind`, `object`, `column`, `grantee`, `privilege`, `grantable` (the ACLs written out) |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
 
 **PostgreSQL compatibility: the `pg-compat` module** (`modules/pg-compat`,
@@ -1228,6 +1231,36 @@ else gets `42501`.  `current_user` is the role a statement runs as,
 `session_user` the one that logged in (`access::with_who`, as `now()`'s
 time); a table's owner is its maker (`nc_catalog.tables.owner`, table
 record version 7).
+
+**Privileges** (`privileges.rs`): `GRANT privilege [(columns)], … | ALL
+ON [TABLE] t, … | ALL TABLES IN SCHEMA public | SCHEMA s | FUNCTION f
+[(args)] | TYPE t | DATABASE nucleus TO role | PUBLIC, … [WITH GRANT
+OPTION]`, `REVOKE [GRANT OPTION FOR] … FROM …` (on a table also from its
+columns), `ALTER DEFAULT PRIVILEGES [FOR ROLE r] [IN SCHEMA public] GRANT
+| REVOKE … ON TABLES …`.  Each object has an ACL — written out on its
+first `GRANT` or `REVOKE`, until then its kind's default: the owner has
+everything; `PUBLIC` may `EXECUTE` functions, use types and schema
+`public`, and `CONNECT` to the database; nothing else (so making a table
+or a type needs `CREATE` on schema `public`, as in PostgreSQL 15).
+Administrators and owners are never refused; privileges come through
+inherited roles and `PUBLIC`.  A user's statement is bound with checks
+(`Binder::checked`): reading a table needs `SELECT` on it or on some
+column, and every column read — in the select list, `*`, `WHERE`, joins,
+`RETURNING`, an `UPDATE`'s expressions — `SELECT` on it; `INSERT` on the
+columns written, `UPDATE` on those set, `DELETE` on the table;
+`EXECUTE` on each function and aggregate called (internal binding —
+constraints, defaults, mappings — checks nothing).  DDL is checked before
+it runs (`authorize_ddl`): changing, dropping or indexing a table, or
+altering or dropping a type, is its owner's; a foreign key needs
+`REFERENCES` on the columns it references; a column's registered or enum
+type needs `USAGE`.  A login needs `CONNECT`.  Granting needs the
+owner's rights or the grant option (else `42501` — where PostgreSQL
+warns that nothing was granted).  A refusal is `42501` naming the
+privilege and the object (`permission denied: SELECT on column salary of
+table pay`), never a value; `EXPLAIN` is checked as the statement is.
+Dropping a role is refused while it holds privileges.
+`crates/testkit/slt/31_privileges.slt` was checked against PostgreSQL 18
+in one session (as another role too).
 
 **Bootstrap.**  A database whose catalog has no administrator that can
 log in with a password is *unclaimed*: the server's `--user` /
@@ -1464,6 +1497,10 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 privileges (T2):** `GRANT` / `REVOKE` on
+  tables and columns, schemas, functions, types and the database, `WITH
+  GRANT OPTION`, `PUBLIC`, default privileges; checked when a user's
+  statement is bound and before DDL; enum owners; `nc_catalog.grants`.
 - **2026-10-23 — §M14.25 users and roles (T1):** roles in the catalog
   (`CREATE / ALTER / DROP ROLE`, `CREATE USER`, membership with
   inheritance and admin option, `SET ROLE`), SCRAM-SHA-256 password

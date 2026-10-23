@@ -89,10 +89,13 @@ pub struct EnumDef {
     pub name: String,
     /// Its labels with their sort keys, in order.
     pub labels: Vec<(Vec<u8>, String)>,
+    /// The role that owns it (`None`: made before roles).
+    pub owner: Option<String>,
 }
 
 const PREFIX: [u8; 2] = [0x00, 0x09];
-const VERSION: u8 = 1;
+/// Version 2 added the owner; version 1 still reads.
+const VERSION: u8 = 2;
 
 fn key_of(name: &str) -> Vec<u8> {
     let mut k = PREFIX.to_vec();
@@ -109,12 +112,14 @@ impl EnumDef {
             w.0.extend_from_slice(k);
             w.str(l);
         }
+        w.opt_str(self.owner.as_deref());
         w.0
     }
 
     fn decode(b: &[u8]) -> Result<Self> {
         let mut r = Reader::new(b);
-        if r.u8()? != VERSION {
+        let version = r.u8()?;
+        if !(1..=VERSION).contains(&version) {
             return Err(Error::internal("unknown enum definition version"));
         }
         let name = r.str()?;
@@ -125,7 +130,12 @@ impl EnumDef {
             let k = r.take(len)?.to_vec();
             labels.push((k, r.str()?));
         }
-        Ok(EnumDef { name, labels })
+        let owner = if version >= 2 { r.opt_str()? } else { None };
+        Ok(EnumDef {
+            name,
+            labels,
+            owner,
+        })
     }
 
     /// The value of `label`, or `22P02`.
@@ -248,6 +258,7 @@ pub fn create(
         &EnumDef {
             name: name.to_string(),
             labels: keys.into_iter().zip(labels.iter().cloned()).collect(),
+            owner: Some(crate::access::current().user.clone()),
         },
     )
 }
@@ -317,6 +328,17 @@ pub fn rename_value(txn: &mut dyn KvTxn, name: &str, from: &str, to: &str) -> Re
     }
     def.labels[i].1 = to.to_string();
     put(txn, &def)
+}
+
+/// Enums owned by `from` become `to`'s (a renamed role).
+pub fn rename_owner(txn: &mut dyn KvTxn, from: &str, to: &str) -> Result<()> {
+    for mut e in all(&*txn)? {
+        if e.owner.as_deref() == Some(from) {
+            e.owner = Some(to.to_string());
+            put(txn, &e)?;
+        }
+    }
+    Ok(())
 }
 
 /// `DROP TYPE [IF EXISTS] name`: refused while a column has the type.

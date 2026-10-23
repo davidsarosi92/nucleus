@@ -23,6 +23,8 @@ pub struct ScopeCol {
     pub ty: Option<DataType>,
     /// Left out of `*` (the second copy of a `USING` column).
     pub hidden: bool,
+    /// The table column it is (table, column), for privilege checks.
+    pub origin: Option<(String, String)>,
 }
 
 /// The columns of a plan's output, by position.
@@ -86,6 +88,9 @@ pub struct Binder<'a> {
     ctes: Vec<CteDef>,
     /// The target column types of `INSERT … VALUES`, for the `VALUES`.
     values_targets: Option<Vec<DataType>>,
+    /// The privilege checks of a user's statement (`None`: internal
+    /// binding — constraints, defaults, mappings — which checks nothing).
+    checker: Option<crate::privileges::Checker>,
 }
 
 /// A CTE visible to the query being bound.
@@ -223,7 +228,48 @@ impl<'a> Binder<'a> {
             params: Vec::new(),
             ctes: Vec::new(),
             values_targets: None,
+            checker: None,
         }
+    }
+
+    /// Checks the current role's privileges on what the statement reads
+    /// and calls (a user's statement).
+    pub fn checked(mut self) -> Self {
+        self.checker = Some(crate::privileges::Checker::new());
+        self
+    }
+
+    /// The privilege checks, if this binding checks.
+    pub fn checker(&self) -> Option<&crate::privileges::Checker> {
+        self.checker.as_ref()
+    }
+
+    /// `SELECT` on a column of a table, if this binding checks.
+    fn read_column(&self, col: &ScopeCol) -> Result<()> {
+        if let (Some(c), Some((t, name))) = (&self.checker, &col.origin) {
+            c.require(
+                self.txn,
+                crate::privileges::Kind::Table,
+                t,
+                crate::privileges::SELECT,
+                Some(name),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// `EXECUTE` on a function or aggregate, if this binding checks.
+    fn execute(&self, name: &str) -> Result<()> {
+        if let Some(c) = &self.checker {
+            c.require(
+                self.txn,
+                crate::privileges::Kind::Function,
+                name,
+                crate::privileges::EXECUTE,
+                None,
+            )?;
+        }
+        Ok(())
     }
 
     /// An `INSERT`'s source.  A plain `VALUES` list is bound against the
@@ -456,6 +502,7 @@ impl<'a> Binder<'a> {
             name: qual.clone(),
             ty,
             hidden: false,
+            origin: None,
         }];
         if ordinality {
             cols.push(ScopeCol {
@@ -463,6 +510,7 @@ impl<'a> Binder<'a> {
                 name: "ordinality".into(),
                 ty: Some(DataType::BigInt),
                 hidden: false,
+                origin: None,
             });
         }
         let mut scope = Scope { cols };
@@ -676,6 +724,7 @@ impl<'a> Binder<'a> {
                     name: format!("column{}", i + 1),
                     ty: *t,
                     hidden: false,
+                    origin: None,
                 })
                 .collect(),
         };
@@ -762,6 +811,7 @@ impl<'a> Binder<'a> {
                                         name,
                                         ty: Some(ty),
                                         hidden: false,
+                                        origin: None,
                                     })
                                     .collect(),
                             };
@@ -782,6 +832,18 @@ impl<'a> Binder<'a> {
                         }
                     },
                 };
+                // A table read needs SELECT on it, or on some column of it
+                // (each column read is checked on its own).
+                if let Some(c) = &self.checker
+                    && !c.has_any_column(self.txn, &table.name, crate::privileges::SELECT)?
+                {
+                    return Err(crate::privileges::denied(
+                        crate::privileges::Kind::Table,
+                        &table.name,
+                        crate::privileges::SELECT,
+                        None,
+                    ));
+                }
                 let mut scope = Scope {
                     cols: table
                         .columns
@@ -791,6 +853,7 @@ impl<'a> Binder<'a> {
                             name: c.name.clone(),
                             ty: Some(c.ty),
                             hidden: false,
+                            origin: Some((table.name.clone(), c.name.clone())),
                         })
                         .collect(),
                 };
@@ -846,6 +909,8 @@ impl<'a> Binder<'a> {
                     for col in using {
                         let li = l.scope.find(None, col)?.ok_or_else(|| Error::undefined_column(format!("column \"{col}\" specified in USING clause does not exist in left table")))?;
                         let ri = r.scope.find(None, col)?.ok_or_else(|| Error::undefined_column(format!("column \"{col}\" specified in USING clause does not exist in right table")))?;
+                        self.read_column(&l.scope.cols[li])?;
+                        self.read_column(&r.scope.cols[ri])?;
                         let (lt, rt) = (l.scope.cols[li].ty, r.scope.cols[ri].ty);
                         comparable(lt, rt)?;
                         require(lt.or(rt), &[Need::Equality], "JOIN USING")?;
@@ -897,6 +962,7 @@ impl<'a> Binder<'a> {
                             name: name.clone(),
                             ty: *ty,
                             hidden: false,
+                            origin: None,
                         });
                     }
                     exprs.extend((0..lw + rw).map(Expr::Column));
@@ -1010,6 +1076,7 @@ impl<'a> Binder<'a> {
                         if c.hidden || only.is_some_and(|t| c.table.as_deref() != Some(t)) {
                             continue;
                         }
+                        self.read_column(c)?;
                         let e = match &mut grouping {
                             Some(g) => self.grouped_column(g, i)?,
                             None => Expr::Column(i),
@@ -1020,6 +1087,7 @@ impl<'a> Binder<'a> {
                             name: c.name.clone(),
                             ty: c.ty,
                             hidden: false,
+                            origin: None,
                         });
                     }
                 }
@@ -1041,6 +1109,7 @@ impl<'a> Binder<'a> {
                         name: alias.clone().unwrap_or_else(|| default_name(expr)),
                         ty: t,
                         hidden: false,
+                        origin: None,
                     });
                 }
             }
@@ -1206,6 +1275,7 @@ impl<'a> Binder<'a> {
         } = e
             && let Some(func) = self.registry.aggregate(name).cloned()
         {
+            self.execute(name)?;
             let from = g.from.clone();
             let mut order = Vec::new();
             for o in order_by {
@@ -1331,10 +1401,12 @@ impl<'a> Binder<'a> {
 
     fn column(&self, table: Option<&str>, name: &str, scope: &Scope) -> Result<Typed> {
         if let Some(i) = scope.find(table, name)? {
+            self.read_column(&scope.cols[i])?;
             return Ok((Expr::Column(i), scope.cols[i].ty));
         }
         for (d, s) in self.outer.iter().rev().enumerate() {
             if let Some(i) = s.find(table, name)? {
+                self.read_column(&s.cols[i])?;
                 return Ok((
                     Expr::Outer {
                         depth: d + 1,
@@ -1916,6 +1988,7 @@ impl<'a> Binder<'a> {
                 name: "value".into(),
                 ty: Some(ty),
                 hidden: false,
+                origin: None,
             }],
         };
         let ast = crate::parser::parse_expr(text)?;
@@ -1973,6 +2046,7 @@ impl<'a> Binder<'a> {
 
     /// A call of `f` with bound arguments, typed by its signature.
     fn call(&mut self, f: FnRef, args: Vec<Typed>) -> Result<Typed> {
+        self.execute(f.name())?;
         let sig = f.resolve(&arg_info(&args))?;
         if let Returns::Constant(v) = sig.returns {
             let t = v.data_type();

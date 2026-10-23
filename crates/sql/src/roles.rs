@@ -456,6 +456,8 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
                     crate::catalog::update_table(txn, &t)?;
                 }
             }
+            crate::enums::rename_owner(txn, name, to)?;
+            crate::privileges::rename_grantee(txn, name, to)?;
             Ok("ALTER ROLE".into())
         }
         Statement::DropRole { names, if_exists } => {
@@ -473,14 +475,21 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
                         "current user cannot be dropped: \"{name}\""
                     )));
                 }
-                let owned: Vec<String> = crate::catalog::tables(&*txn)?
+                let mut owned: Vec<String> = crate::catalog::tables(&*txn)?
                     .into_iter()
                     .filter(|t| t.owner.as_deref() == Some(name.as_str()))
-                    .map(|t| t.name)
+                    .map(|t| format!("table {}", t.name))
                     .collect();
+                owned.extend(
+                    crate::enums::all(&*txn)?
+                        .into_iter()
+                        .filter(|e| e.owner.as_deref() == Some(name.as_str()))
+                        .map(|e| format!("type {}", e.name)),
+                );
+                owned.extend(crate::privileges::held_by(&*txn, name)?);
                 if !owned.is_empty() {
                     return Err(Error::dependent_objects(format!(
-                        "role \"{name}\" cannot be dropped because it owns tables: {}",
+                        "role \"{name}\" cannot be dropped because it owns {}",
                         owned.join(", ")
                     )));
                 }

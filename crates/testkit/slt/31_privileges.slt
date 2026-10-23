@@ -1,0 +1,294 @@
+# Privileges on objects: GRANT / REVOKE on tables and columns, WITH GRANT
+# OPTION, PUBLIC, default privileges, functions, schemas, owners.  A
+# refusal names the privilege and the object, never a row.
+# Expected results from PostgreSQL 18's rules (records that act as another
+# role are nucleus-only: the checker runs each record in a session of its
+# own); the session starts as an administrator.
+
+statement ok
+CREATE TABLE slt_pay (id int PRIMARY KEY, name text, salary int)
+
+statement ok
+INSERT INTO slt_pay VALUES (1, 'ann', 100), (2, 'bob', 200)
+
+statement ok
+CREATE USER slt_u1
+
+statement ok
+CREATE USER slt_u2
+
+statement ok
+CREATE ROLE slt_hr
+
+statement ok
+GRANT slt_hr TO slt_u2
+
+statement ok
+GRANT SELECT (id, name) ON slt_pay TO slt_u1
+
+statement ok
+GRANT SELECT, UPDATE (salary) ON TABLE slt_pay TO slt_hr WITH GRANT OPTION
+
+statement error 42601
+GRANT FLY ON slt_pay TO slt_u1
+
+statement error 0LP01
+GRANT EXECUTE ON TABLE slt_pay TO slt_u1
+
+statement error 42703
+GRANT SELECT (nope) ON slt_pay TO slt_u1
+
+statement error 42704
+GRANT SELECT ON slt_pay TO slt_nobody
+
+# slt_u1: two columns only.
+
+# nucleus-only
+statement ok
+SET ROLE slt_u1
+
+# nucleus-only
+query IT
+SELECT id, name FROM slt_pay ORDER BY id
+----
+1 ann
+2 bob
+
+# nucleus-only
+statement error 42501
+SELECT salary FROM slt_pay
+
+# nucleus-only
+statement error 42501
+SELECT * FROM slt_pay
+
+# nucleus-only: a column in WHERE is read too.
+statement error 42501
+SELECT id FROM slt_pay WHERE salary > 150
+
+# nucleus-only: the refusal names the column, not a value.
+statement error permission denied: SELECT on column salary of table slt_pay
+SELECT max(salary) FROM slt_pay
+
+# nucleus-only
+statement error 42501
+EXPLAIN SELECT salary FROM slt_pay
+
+# nucleus-only
+statement error 42501
+INSERT INTO slt_pay VALUES (3, 'cy', 1)
+
+# nucleus-only
+statement error 42501
+UPDATE slt_pay SET name = 'x' WHERE id = 1
+
+# nucleus-only
+statement error 42501
+DELETE FROM slt_pay
+
+# nucleus-only
+statement error 42501
+DROP TABLE slt_pay
+
+# nucleus-only; pg-differs: granting what one may not grant on is 42501
+# (PostgreSQL warns "no privileges were granted" and succeeds).
+statement error 42501
+GRANT SELECT (id) ON slt_pay TO slt_u2
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# slt_u2, through slt_hr: reads all, updates salaries, may grant that on.
+
+# nucleus-only
+statement ok
+SET ROLE slt_u2
+
+# nucleus-only
+statement ok
+UPDATE slt_pay SET salary = salary + 1 WHERE id = 2
+
+# nucleus-only
+statement error 42501
+UPDATE slt_pay SET name = 'x'
+
+# nucleus-only
+query I
+SELECT salary FROM slt_pay WHERE id = 2
+----
+201
+
+# nucleus-only: the grant option, through a role.
+statement ok
+GRANT SELECT ON slt_pay TO slt_u1
+
+# nucleus-only; pg-differs: 42501, where PostgreSQL warns and succeeds.
+statement error 42501
+GRANT DELETE ON slt_pay TO slt_u1
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# nucleus-only
+statement ok
+SET ROLE slt_u1
+
+# nucleus-only
+query I
+SELECT sum(salary) FROM slt_pay
+----
+301
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# REVOKE; PUBLIC; the grant option alone.
+
+statement ok
+REVOKE SELECT ON slt_pay FROM slt_u1
+
+statement ok
+REVOKE SELECT (id, name) ON slt_pay FROM slt_u1
+
+statement ok
+GRANT SELECT ON slt_pay TO PUBLIC
+
+# nucleus-only
+statement ok
+SET ROLE slt_u1
+
+# nucleus-only
+query I
+SELECT count(*) FROM slt_pay
+----
+2
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+statement ok
+REVOKE SELECT ON slt_pay FROM PUBLIC
+
+statement ok
+REVOKE GRANT OPTION FOR UPDATE ON slt_pay FROM slt_hr
+
+# nucleus-only
+query TTTB
+SELECT object, grantee, privilege, grantable FROM nc_catalog.grants WHERE object = 'slt_pay' AND grantee LIKE 'slt_%' ORDER BY grantee, privilege
+----
+slt_pay slt_hr SELECT true
+slt_pay slt_hr UPDATE false
+
+# Functions: EXECUTE is PUBLIC's until revoked.
+
+statement ok
+REVOKE EXECUTE ON FUNCTION md5(text) FROM PUBLIC
+
+# nucleus-only
+statement ok
+SET ROLE slt_u1
+
+# nucleus-only
+statement error 42501
+SELECT md5('x')
+
+# nucleus-only
+query T
+SELECT upper('x')
+----
+X
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+statement ok
+GRANT EXECUTE ON FUNCTION md5(text) TO PUBLIC
+
+# Schema public: CREATE is granted, not had.
+
+# nucleus-only
+statement ok
+SET ROLE slt_u1
+
+# nucleus-only
+statement error 42501
+CREATE TABLE slt_mine (x int)
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+statement ok
+GRANT CREATE ON SCHEMA public TO slt_u1
+
+# Default privileges: slt_u1's new tables are readable by slt_hr.
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_u1 GRANT SELECT ON TABLES TO slt_hr
+
+# nucleus-only
+statement ok
+SET ROLE slt_u1
+
+# nucleus-only
+statement ok
+CREATE TABLE slt_mine (x int)
+
+# nucleus-only
+statement ok
+INSERT INTO slt_mine VALUES (7)
+
+# nucleus-only: the owner alters, indexes, grants.
+statement ok
+CREATE INDEX slt_mine_x ON slt_mine (x)
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# nucleus-only
+statement ok
+SET ROLE slt_u2
+
+# nucleus-only
+query I
+SELECT x FROM slt_mine
+----
+7
+
+# nucleus-only
+statement error 42501
+INSERT INTO slt_mine VALUES (8)
+
+# nucleus-only
+statement error 42501
+DROP INDEX slt_mine_x
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# Clean up: a role holding privileges is not dropped.
+
+statement error 2BP01
+DROP ROLE slt_hr
+
+statement ok
+DROP TABLE slt_mine
+
+statement ok
+ALTER DEFAULT PRIVILEGES FOR ROLE slt_u1 REVOKE SELECT ON TABLES FROM slt_hr
+
+statement ok
+REVOKE CREATE ON SCHEMA public FROM slt_u1
+
+statement ok
+DROP TABLE slt_pay
+
+statement ok
+DROP ROLE slt_hr, slt_u1, slt_u2

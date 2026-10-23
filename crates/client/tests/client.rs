@@ -480,4 +480,15 @@ fn roles_decide_logins() {
     root.execute("ALTER ROLE app VALID UNTIL 'infinity'", &[])
         .unwrap();
     assert!(as_user("app", "app-pw").is_ok());
+    // CONNECT on the database: PUBLIC's until revoked.
+    root.execute("REVOKE CONNECT ON DATABASE nucleus FROM PUBLIC", &[])
+        .unwrap();
+    assert_eq!(code(as_user("app", "app-pw")), "42501");
+    root.execute("GRANT CONNECT ON DATABASE nucleus TO app", &[])
+        .unwrap();
+    assert!(as_user("app", "app-pw").is_ok());
+    let err = root
+        .execute("GRANT CONNECT ON DATABASE elsewhere TO app", &[])
+        .unwrap_err();
+    assert!(matches!(err, Error::Server(e) if e.code == "3D000"));
 }

@@ -166,7 +166,18 @@ impl Session {
     /// has no such role and is claimed — [`crate::roles`]).
     pub fn login(&mut self, user: &str) -> Result<()> {
         let txn = self.kv.begin(TxnOptions::read_only())?;
-        self.login = Arc::new(crate::roles::login_identity(&*txn, user)?);
+        let who = Arc::new(crate::roles::login_identity(&*txn, user)?);
+        // CONNECT on the database (PUBLIC has it unless revoked).
+        crate::access::with_who(&who, || {
+            crate::privileges::Checker::new().require(
+                &*txn,
+                crate::privileges::Kind::Database,
+                crate::privileges::DATABASE,
+                crate::privileges::CONNECT,
+                None,
+            )
+        })?;
+        self.login = who;
         self.who = self.login.clone();
         Ok(())
     }
@@ -393,7 +404,7 @@ impl Session {
                 own.as_ref()
             }
         };
-        let mut binder = Binder::new(txn, &self.registry);
+        let mut binder = Binder::new(txn, &self.registry).checked();
         let columns = match stmt {
             Statement::Query(q) => {
                 let b = binder.query(q)?;
@@ -514,10 +525,11 @@ pub fn execute(
     stmt: &Statement,
     params: &[Value],
 ) -> Result<Output> {
+    crate::privileges::authorize_ddl(&*txn, reg, stmt)?;
     Ok(match stmt {
         Statement::Query(q) => {
             let ro: &dyn KvTxn = &*txn;
-            let mut binder = Binder::new(ro, reg);
+            let mut binder = Binder::new(ro, reg).checked();
             let bound = binder.query(q)?;
             let plan = optimize(bound.plan, ro);
             let ctx = Ctx::new(ro, reg, params);
@@ -530,7 +542,7 @@ pub fn execute(
         Statement::Explain(inner) => {
             let ro: &dyn KvTxn = &*txn;
             let plan = match &**inner {
-                Statement::Query(q) => optimize(Binder::new(ro, reg).query(q)?.plan, ro),
+                Statement::Query(q) => optimize(Binder::new(ro, reg).checked().query(q)?.plan, ro),
                 Statement::Update { table, filter, .. }
                 | Statement::Delete { table, filter, .. } => {
                     dml::explain_scan(ro, reg, table, filter.as_ref())?
@@ -569,6 +581,8 @@ pub fn execute(
                 )));
             }
             create_table(txn, reg, name, columns, constraints)?;
+            let owner = crate::access::current().user.clone();
+            crate::privileges::on_create_table(txn, name, &owner)?;
             Output::Command("CREATE TABLE".into())
         }
         Statement::DropTable {
@@ -576,9 +590,12 @@ pub fn execute(
             if_exists,
             cascade,
         } => {
+            let checker = crate::privileges::Checker::new();
             for name in names {
                 match catalog::get_table(&*txn, name)? {
                     Some(mut t) => {
+                        checker.require_owner(&*txn, crate::privileges::Kind::Table, name)?;
+                        crate::privileges::forget(txn, crate::privileges::Kind::Table, name)?;
                         // Foreign keys of other tables referencing it.
                         for (child_name, fk_name) in t.referenced_by.clone() {
                             if child_name == t.name || names.contains(&child_name) {
@@ -711,6 +728,51 @@ pub fn execute(
         | Statement::GrantRole { .. }
         | Statement::RevokeRole { .. } => Output::Command(crate::roles::run(txn, stmt)?),
         Statement::SetRole(_) => unreachable!("handled by the session"),
+        Statement::Grant {
+            items,
+            target,
+            grantees,
+            grant_option,
+            revoke,
+        } => {
+            use crate::privileges::Kind;
+            for o in &target.objects {
+                let known = match target.kind {
+                    Kind::Function => reg.function(o).is_some() || reg.aggregate(o).is_some(),
+                    Kind::Type => {
+                        reg.type_named(o).is_some() || crate::enums::get(&*txn, o)?.is_some()
+                    }
+                    _ => true,
+                };
+                if !known {
+                    return Err(match target.kind {
+                        Kind::Function => {
+                            Error::undefined_function(format!("function {o} does not exist"))
+                        }
+                        _ => Error::undefined_object(format!("type \"{o}\" does not exist")),
+                    });
+                }
+            }
+            crate::privileges::grant(txn, items, target, grantees, *grant_option, *revoke)?;
+            Output::Command(if *revoke { "REVOKE" } else { "GRANT" }.into())
+        }
+        Statement::AlterDefaultPrivileges {
+            for_role,
+            privileges,
+            grantees,
+            grant_option,
+            revoke,
+        } => {
+            crate::privileges::alter_defaults(
+                txn,
+                for_role.as_deref(),
+                *privileges,
+                grantees,
+                *grant_option,
+                *revoke,
+            )?;
+            Output::Command("ALTER DEFAULT PRIVILEGES".into())
+        }
         Statement::CreateEnum { name, labels } => {
             crate::enums::create(txn, reg, name, labels)?;
             Output::Command("CREATE TYPE".into())

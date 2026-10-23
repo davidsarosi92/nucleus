@@ -255,15 +255,156 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
+    /// Whether `ON` comes before `TO` / `FROM` at depth 0: a `GRANT` or
+    /// `REVOKE` of privileges on objects (else of roles).
+    fn names_privileges(&self) -> bool {
+        let mut depth = 0i32;
+        for (t, _) in &self.toks[self.pos..] {
+            match t {
+                Token::Op("(") => depth += 1,
+                Token::Op(")") => depth -= 1,
+                Token::Word(w) if depth == 0 && (w == "to" || w == "from") => return false,
+                Token::Word(w) if depth == 0 && w == "on" => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// `privilege [(columns)], …` or `ALL [PRIVILEGES]`.
+    fn privilege_items(&mut self) -> Result<Vec<crate::privileges::Item>> {
+        let mut items = Vec::new();
+        loop {
+            // Privilege names are often reserved words (SELECT, ALL, …).
+            let word = match self.next() {
+                Some(Token::Word(w)) => w,
+                _ => return Err(self.error("expected a privilege")),
+            };
+            let privilege = if word == "all" {
+                self.eat_kw("privileges");
+                None
+            } else {
+                Some(crate::privileges::by_name(&word).ok_or_else(|| {
+                    Error::syntax(format!("unrecognized privilege type \"{word}\""))
+                })?)
+            };
+            let columns = if self.peek_op("(") {
+                self.ident_list()?
+            } else {
+                Vec::new()
+            };
+            items.push(crate::privileges::Item { privilege, columns });
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    /// Privileges, `ON`, and the objects.
+    fn privileges_on(
+        &mut self,
+    ) -> Result<(Vec<crate::privileges::Item>, crate::privileges::Target)> {
+        use crate::privileges::{Kind, Target};
+        let items = self.privilege_items()?;
+        self.expect_kw("on")?;
+        let target = if self.eat_kw("all") {
+            self.expect_kw("tables")?;
+            self.expect_kw("in")?;
+            self.expect_kw("schema")?;
+            Target {
+                kind: Kind::Table,
+                objects: Vec::new(),
+                all_in_schema: Some(self.ident()?),
+            }
+        } else {
+            let kind = if self.eat_kw("schema") {
+                Kind::Schema
+            } else if self.eat_kw("function") || self.eat_kw("routine") {
+                Kind::Function
+            } else if self.eat_kw("type") || self.eat_kw("domain") {
+                Kind::Type
+            } else if self.eat_kw("database") {
+                Kind::Database
+            } else {
+                self.eat_kw("table");
+                Kind::Table
+            };
+            let mut objects = Vec::new();
+            loop {
+                objects.push(match kind {
+                    Kind::Table => self.relation()?,
+                    _ => self.ident()?,
+                });
+                // A function's argument types: optional (by name).
+                if kind == Kind::Function && self.peek_op("(") {
+                    let mut depth = 0;
+                    while let Some(t) = self.next() {
+                        match t {
+                            Token::Op("(") => depth += 1,
+                            Token::Op(")") => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+            Target {
+                kind,
+                objects,
+                all_in_schema: None,
+            }
+        };
+        Ok((items, target))
+    }
+
+    /// Roles, or `PUBLIC` (as `public`).
+    fn grantees(&mut self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        loop {
+            self.eat_kw("group");
+            out.push(self.ident()?);
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// The privileges part of `GRANT` / `REVOKE` (after the keyword).
+    fn grant_privileges(&mut self, revoke: bool, option_for: bool) -> Result<Statement> {
+        let (items, target) = self.privileges_on()?;
+        self.expect_kw(if revoke { "from" } else { "to" })?;
+        let grantees = self.grantees()?;
+        let grant_option = if revoke {
+            let _ = self.eat_kw("cascade") || self.eat_kw("restrict");
+            option_for
+        } else {
+            self.eat_kws(&["with", "grant", "option"])
+        };
+        Ok(Statement::Grant {
+            items,
+            target,
+            grantees,
+            grant_option,
+            revoke,
+        })
+    }
+
     /// `GRANT role, … TO role, … [WITH ADMIN OPTION]`.
     fn grant(&mut self) -> Result<Statement> {
         self.expect_kw("grant")?;
-        let roles = self.name_list()?;
-        if self.peek_kw("on") {
-            return Err(Error::feature(
-                "privileges on objects are not supported yet",
-            ));
+        if self.names_privileges() {
+            return self.grant_privileges(false, false);
         }
+        let roles = self.name_list()?;
         self.expect_kw("to")?;
         let members = self.name_list()?;
         let admin_option = self.eat_kws(&["with", "admin", "option"]);
@@ -277,13 +418,14 @@ impl<'a> Parser<'a> {
     /// `REVOKE [ADMIN OPTION FOR] role, … FROM role, …`.
     fn revoke(&mut self) -> Result<Statement> {
         self.expect_kw("revoke")?;
+        if self.eat_kws(&["grant", "option", "for"]) {
+            return self.grant_privileges(true, true);
+        }
+        if self.names_privileges() {
+            return self.grant_privileges(true, false);
+        }
         let admin_option_only = self.eat_kws(&["admin", "option", "for"]);
         let roles = self.name_list()?;
-        if self.peek_kw("on") {
-            return Err(Error::feature(
-                "privileges on objects are not supported yet",
-            ));
-        }
         self.expect_kw("from")?;
         let members = self.name_list()?;
         let _ = self.eat_kw("cascade") || self.eat_kw("restrict");
@@ -1041,6 +1183,49 @@ impl<'a> Parser<'a> {
         self.expect_kw("alter")?;
         if self.eat_kw("type") {
             return self.alter_type();
+        }
+        if self.eat_kws(&["default", "privileges"]) {
+            let for_role = if self.eat_kw("for") {
+                let _ = self.eat_kw("role") || self.eat_kw("user");
+                Some(self.ident()?)
+            } else {
+                None
+            };
+            if self.eat_kws(&["in", "schema"]) {
+                let s = self.ident()?;
+                if s != "public" {
+                    return Err(Error::invalid_schema(format!(
+                        "schema \"{s}\" does not exist"
+                    )));
+                }
+            }
+            let revoke = self.eat_kw("revoke");
+            if !revoke {
+                self.expect_kw("grant")?;
+            }
+            let option_for = revoke && self.eat_kws(&["grant", "option", "for"]);
+            let items = self.privilege_items()?;
+            self.expect_kw("on")?;
+            if !self.eat_kw("tables") {
+                return Err(Error::feature("default privileges are for TABLES"));
+            }
+            let privileges = items
+                .iter()
+                .try_fold(0u32, |acc, i| i.privilege.map(|p| acc | p));
+            self.expect_kw(if revoke { "from" } else { "to" })?;
+            let grantees = self.grantees()?;
+            let grant_option = if revoke {
+                option_for
+            } else {
+                self.eat_kws(&["with", "grant", "option"])
+            };
+            return Ok(Statement::AlterDefaultPrivileges {
+                for_role,
+                privileges,
+                grantees,
+                grant_option,
+                revoke,
+            });
         }
         if self.eat_kw("role") || self.eat_kw("user") {
             let name = self.ident()?;

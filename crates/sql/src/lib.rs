@@ -29,6 +29,7 @@ pub mod optimizer;
 pub mod parser;
 
 pub mod plan;
+pub mod privileges;
 pub mod roles;
 pub mod session;
 pub mod stats;

@@ -987,7 +987,10 @@ overflow an error); `inet ± integer` arithmetic.
 
 *Steps:* T1 users and roles ✅ (roles in the catalog, membership, `SET
 ROLE`, SCRAM-SHA-256 verifiers, owners, logins from the catalog once
-claimed, `nucleus init`); T2 privileges on every object; T3 row-level
+claimed, `nucleus init`); T2 privileges ✅ (tables and columns, schemas,
+functions, types, the database; grant options, `PUBLIC`, default
+privileges; sequences, streams, branches and modules get theirs when they
+exist, and pg-compat's `relacl` / `\dp` is left for later); T3 row-level
 security; T4 authentication methods (SCRAM on the wire, tokens, TLS,
 certificates, OIDC, LDAP); T5 access rules and privileges by connection
 context; T6 protection; T7 audit.
@@ -1954,6 +1957,8 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.25 T2: privileges on objects, checked at bind
+  time and before DDL, checked against PostgreSQL 18 in one session.
 - **2026-10-23** — §M14.25 T1: users and roles in the catalog, password
   verifiers, owners, logins from the catalog (`nucleus init` claims a
   database); a new core crate, `nucleus-crypto`.

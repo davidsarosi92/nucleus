@@ -14,6 +14,7 @@ use crate::ext::Registry;
 use crate::optimizer::choose_access;
 use crate::parser::parse_expr;
 use crate::plan::{Access, Plan};
+use crate::privileges::{DELETE, INSERT, Kind, UPDATE};
 use crate::types::{DataType, Row, Value};
 
 /// The scope of a table's own columns.
@@ -27,6 +28,7 @@ pub fn table_scope(table: &Table) -> Scope {
                 name: c.name.clone(),
                 ty: Some(c.ty),
                 hidden: false,
+                origin: Some((table.name.clone(), c.name.clone())),
             })
             .collect(),
     }
@@ -343,7 +345,13 @@ pub fn insert(
     };
     let (rows, writer, ret) = {
         let ro: &dyn KvTxn = &*txn;
-        let mut binder = Binder::new(ro, reg);
+        let mut binder = Binder::new(ro, reg).checked();
+        // INSERT on each target column (or the table).
+        if let Some(c) = binder.checker() {
+            for &col in &targets {
+                c.require(ro, Kind::Table, &t.name, INSERT, Some(&t.columns[col].name))?;
+            }
+        }
         let types = targets.iter().map(|&c| t.columns[c].ty).collect();
         let bound = binder.insert_source(source, types)?;
         let plan = crate::optimizer::optimize(bound.plan, ro);
@@ -429,7 +437,7 @@ pub fn update(
     let t = catalog::table(&*txn, table)?;
     let (changes, writer, ret) = {
         let ro: &dyn KvTxn = &*txn;
-        let mut binder = Binder::new(ro, reg);
+        let mut binder = Binder::new(ro, reg).checked();
         let scope = table_scope(&t);
         let mut sets = Vec::new();
         for (col, e) in assignments {
@@ -443,6 +451,10 @@ pub fn update(
                 return Err(Error::duplicate_column(format!(
                     "multiple assignments to same column \"{col}\""
                 )));
+            }
+            // UPDATE on each column set (or the table).
+            if let Some(ch) = binder.checker() {
+                ch.require(ro, Kind::Table, &t.name, UPDATE, Some(col))?;
             }
             sets.push((c, binder.expr(e, &scope)?.0));
         }
@@ -579,7 +591,10 @@ pub fn delete(
     let t = catalog::table(&*txn, table)?;
     let (rows, ret) = {
         let ro: &dyn KvTxn = &*txn;
-        let mut binder = Binder::new(ro, reg);
+        let mut binder = Binder::new(ro, reg).checked();
+        if let Some(c) = binder.checker() {
+            c.require(ro, Kind::Table, &t.name, DELETE, None)?;
+        }
         let (access, pred) = bind_filter(&mut binder, &t, filter)?;
         let ret = returning(&mut binder, returning_items, &t)?;
         let ctx = Ctx::new(ro, reg, params);
@@ -726,7 +741,7 @@ pub fn explain_scan(
     filter: Option<&ast::Expr>,
 ) -> Result<Plan> {
     let t = catalog::table(txn, table)?;
-    let mut binder = Binder::new(txn, reg);
+    let mut binder = Binder::new(txn, reg).checked();
     let (access, filter) = bind_filter(&mut binder, &t, filter)?;
     Ok(Plan::Scan {
         table: t,

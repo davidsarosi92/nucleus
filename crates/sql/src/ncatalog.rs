@@ -74,6 +74,17 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         &[("role", T), ("member", T), ("admin_option", B)],
     ),
     (
+        "grants",
+        &[
+            ("kind", T),
+            ("object", T),
+            ("column", T),
+            ("grantee", T),
+            ("privilege", T),
+            ("grantable", B),
+        ],
+    ),
+    (
         "columns",
         &[
             ("table_id", I),
@@ -290,6 +301,29 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     Value::Bool(r.password.is_some()),
                     r.valid_until.map_or(Value::Null, Value::TimestampTz),
                 ]);
+            }
+        }
+        "grants" => {
+            for (kind, object, acl) in crate::privileges::all(txn)? {
+                for (grantee, e) in acl {
+                    let mut row = |column: Option<&str>, bits: u32, grantable: u32| {
+                        for name in crate::privileges::names(bits) {
+                            let bit = crate::privileges::by_name(name).expect("a privilege");
+                            out.push(vec![
+                                text(kind.word()),
+                                text(object.clone()),
+                                column.map_or(Value::Null, text),
+                                text(grantee.clone()),
+                                text(name),
+                                Value::Bool(grantable & bit != 0),
+                            ]);
+                        }
+                    };
+                    row(None, e.privileges, e.grantable);
+                    for (c, (p, g)) in &e.columns {
+                        row(Some(c), *p, *g);
+                    }
+                }
             }
         }
         "role_members" => {

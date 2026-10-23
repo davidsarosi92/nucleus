@@ -24,6 +24,9 @@ statement ok
 GRANT slt_readers TO slt_alice
 
 statement ok
+GRANT CREATE ON SCHEMA public TO slt_alice
+
+statement ok
 GRANT slt_alice TO slt_bob
 
 statement error 0LP01
@@ -134,6 +137,9 @@ slt_viewers
 # nucleus-only
 statement ok
 REVOKE slt_viewers FROM slt_alice
+
+statement ok
+REVOKE CREATE ON SCHEMA public FROM slt_alice
 
 # nucleus-only
 statement ok
