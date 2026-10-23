@@ -428,6 +428,45 @@ fn version_2_clients_get_the_new_types_as_before() {
     assert_eq!(&row[14..], b"10:00:00");
 }
 
+/// Version 4 proves the password (SCRAM-SHA-256) and never sends it: a
+/// password in Hello counts for nothing; the server's first answer is the
+/// mechanism, and a client that does not go through with it is not let in.
+#[test]
+fn version_4_never_takes_a_password_in_hello() {
+    use std::io::{Read, Write};
+    let addr = start(None);
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    let string = |b: &mut Vec<u8>, s: &str| {
+        b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        b.extend_from_slice(s.as_bytes());
+    };
+    let mut hello = 4u16.to_le_bytes().to_vec();
+    for part in ["nucleus", "", "nucleus", "test"] {
+        string(&mut hello, part);
+    }
+    let mut frame = vec![b'H'];
+    frame.extend_from_slice(&(hello.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&hello);
+    s.write_all(&frame).unwrap();
+    let mut head = [0u8; 5];
+    s.read_exact(&mut head).unwrap();
+    let mut body = vec![0u8; u32::from_le_bytes(head[1..].try_into().unwrap()) as usize];
+    s.read_exact(&mut body).unwrap();
+    assert_eq!(head[0], b'A');
+    assert_eq!(&body[4..], b"SCRAM-SHA-256");
+    // Skipping the exchange (a query instead of client-first) fails.
+    let mut query = Vec::new();
+    string(&mut query, "SELECT 1");
+    query.push(0);
+    query.extend_from_slice(&0u16.to_le_bytes());
+    let mut frame = vec![b'Q'];
+    frame.extend_from_slice(&(query.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&query);
+    s.write_all(&frame).unwrap();
+    s.read_exact(&mut head).unwrap();
+    assert_eq!(head[0], b'E');
+}
+
 /// Logins (PLAN.md §M14.25): an unclaimed database takes the server's
 /// credentials; once it has an administrator with a password, its roles
 /// decide.

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Protocol version 4 (nucleus PLAN.md §M14.25): the password is proved by
+  SCRAM-SHA-256 (`Scram`, over `javax.crypto`), never sent; the server's
+  signature is checked.
 - Protocol version 3 (nucleus PLAN.md §M14.26): `smallint` as `Short`,
   `integer` as `Integer`, `real` as `Float` (and those sent natively as
   parameters), `bytea` as `byte[]`, `time` as `LocalTime`, `inet` and

@@ -29,8 +29,12 @@ transaction block is open (``BEGIN`` or ``with conn.transaction()``).
 """
 
 import datetime as _dt
+import base64 as _b64
 import decimal as _decimal
+import hashlib as _hashlib
+import hmac as _hmac
 import ipaddress as _ip
+import os as _os
 import socket as _socket
 import struct as _struct
 import uuid as _uuid
@@ -48,8 +52,9 @@ threadsafety = 1
 paramstyle = "numeric"  # $1, $2, ...
 
 # 2: registered types (uuid, modules' types) arrive in their binary form;
-# 3: smallint, integer, real, bytea, time, inet and cidr in theirs.
-PROTOCOL_VERSION = 3
+# 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
+# 4: the password is proved by SCRAM-SHA-256, never sent.
+PROTOCOL_VERSION = 4
 DEFAULT_PORT = 20035
 
 _EPOCH_DATE = _dt.date(2000, 1, 1)
@@ -351,6 +356,37 @@ class _Reader:
 
 # -------------------------------------------------------------- connection
 
+class _Scram:
+    """The client's side of a SCRAM-SHA-256 exchange (RFC 5802)."""
+
+    def __init__(self, password):
+        self.password = password.encode("utf-8")
+        self.bare = "n=,r=" + _b64.b64encode(_os.urandom(18)).decode()
+
+    def first(self):
+        return "n,," + self.bare
+
+    def respond(self, server_first):
+        attrs = dict(p.split("=", 1) for p in server_first.split(","))
+        nonce, salt, iterations = attrs["r"], _b64.b64decode(attrs["s"]), int(attrs["i"])
+        if not nonce.startswith(self.bare[5:]) or len(nonce) == len(self.bare) - 5:
+            raise InterfaceError("malformed SCRAM message")
+        salted = _hashlib.pbkdf2_hmac("sha256", self.password, salt, iterations)
+        client_key = _hmac.new(salted, b"Client Key", "sha256").digest()
+        stored = _hashlib.sha256(client_key).digest()
+        self.server_key = _hmac.new(salted, b"Server Key", "sha256").digest()
+        without_proof = "c=biws,r=" + nonce
+        self.auth = f"{self.bare},{server_first},{without_proof}".encode()
+        signature = _hmac.new(stored, self.auth, "sha256").digest()
+        proof = bytes(a ^ b for a, b in zip(client_key, signature))
+        return without_proof + ",p=" + _b64.b64encode(proof).decode()
+
+    def verify(self, server_final):
+        want = _hmac.new(self.server_key, self.auth, "sha256").digest()
+        if not _hmac.compare_digest(_b64.b64decode(server_final[2:]), want):
+            raise InterfaceError("the server could not prove it knows the password")
+
+
 class Connection:
     """A connection to a nucleus server (see ``connect``)."""
 
@@ -366,13 +402,30 @@ class Connection:
         self._buf = bytearray()
         self.status = 0  # 0 idle, 1 in a transaction block, 2 failed block
         hello = bytearray(_struct.pack("<H", PROTOCOL_VERSION))
-        for s in (user, database, password or "", client_name):
+        for s in (user, database, "", client_name):
             _put_str(hello, s)
         self._send(b"H", hello)
+        scram = None
         while True:
             kind, body = self._read()
             r = _Reader(body)
-            if kind == b"W":
+            if kind == b"A":
+                msg = r.str()
+                if scram is None:
+                    if msg != "SCRAM-SHA-256":
+                        raise InterfaceError(f"unsupported authentication {msg!r}")
+                    scram = _Scram(password or "")
+                    reply = scram.first()
+                elif msg.startswith("v="):
+                    scram.verify(msg)
+                    reply = None
+                else:
+                    reply = scram.respond(msg)
+                if reply is not None:
+                    out = bytearray()
+                    _put_str(out, reply)
+                    self._send(b"a", out)
+            elif kind == b"W":
                 r.unpack("<H")
                 self.server_version = r.str()
                 (self.session_id,) = r.unpack("<I")

@@ -21,8 +21,9 @@ use std::time::Duration;
 /// The protocol version this driver speaks (2: registered types such as
 /// `uuid` arrive in their binary form; 3: `smallint`, `integer`, `real`,
 /// `bytea`, `time`, `inet` and `cidr` in theirs, `char(n)` and enums
-/// named as such).
-pub const PROTOCOL_VERSION: u16 = 3;
+/// named as such; 4: the password is proved by SCRAM-SHA-256, never
+/// sent).
+pub const PROTOCOL_VERSION: u16 = 4;
 /// The nucleus protocol's default port.
 pub const DEFAULT_PORT: u16 = 20_035;
 
@@ -709,6 +710,24 @@ impl<'a> Input<'a> {
     }
 }
 
+/// A SCRAM nonce from the process's randomly keyed hasher (the operating
+/// system seeds it): printable, without commas.
+fn nonce() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut bytes = Vec::with_capacity(24);
+    for i in 0..3u64 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(i);
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        bytes.extend_from_slice(&h.finish().to_le_bytes());
+    }
+    nucleus_crypto::base64_encode(&bytes)
+}
+
 fn frame(kind: u8, body: &[u8]) -> Vec<u8> {
     let mut m = vec![kind];
     m.extend_from_slice(&(body.len() as u32).to_le_bytes());
@@ -759,21 +778,59 @@ impl Client {
             session: 0,
             config,
         };
+        // Version 4: no password in Hello; the server asks for a proof.
         let mut hello = PROTOCOL_VERSION.to_le_bytes().to_vec();
         for s in [
             &c.config.user,
             &c.config.database,
-            c.config.password.as_deref().unwrap_or(""),
+            "",
             &c.config.client_name,
         ] {
             put_str(&mut hello, s);
         }
         c.output.write_all(&frame(b'H', &hello))?;
         c.output.flush()?;
+        let mut scram: Option<nucleus_crypto::ScramClient> = None;
         loop {
             let (kind, body) = c.read()?;
             let mut b = Input { b: &body };
             match kind {
+                b'A' => {
+                    let msg = b.str()?;
+                    let reply = match scram.as_mut() {
+                        None => {
+                            if msg != "SCRAM-SHA-256" {
+                                return Err(Error::Protocol(format!(
+                                    "unsupported authentication {msg:?}"
+                                )));
+                            }
+                            let password = c.config.password.clone().unwrap_or_default();
+                            let client = nucleus_crypto::ScramClient::new(&password, &nonce());
+                            let first = client.first();
+                            scram = Some(client);
+                            Some(first)
+                        }
+                        Some(client) if msg.starts_with("v=") => {
+                            client.verify(&msg).map_err(|_| {
+                                Error::Protocol(
+                                    "the server could not prove it knows the password".into(),
+                                )
+                            })?;
+                            None
+                        }
+                        Some(client) => Some(
+                            client
+                                .respond(&msg)
+                                .map_err(|_| Error::Protocol("malformed SCRAM message".into()))?,
+                        ),
+                    };
+                    if let Some(r) = reply {
+                        let mut body = Vec::new();
+                        put_str(&mut body, &r);
+                        c.output.write_all(&frame(b'a', &body))?;
+                        c.output.flush()?;
+                    }
+                }
                 b'W' => {
                     let _version = b.u16()?;
                     c.server = b.str()?;

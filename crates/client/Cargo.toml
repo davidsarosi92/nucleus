@@ -1,12 +1,13 @@
 [package]
 name = "nucleus-client"
-description = "nucleus network client: the PostgreSQL wire protocol, frontend side"
+description = "nucleus's Rust driver: the nucleus protocol (ncp), client side"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+nucleus-crypto.workspace = true
 
 [dev-dependencies]
 nucleus-kv.workspace = true

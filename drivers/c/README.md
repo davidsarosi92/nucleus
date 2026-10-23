@@ -12,6 +12,9 @@ enum).  Protocol version 3: `NC_SMALLINT` and `NC_INTEGER` (`as.integer`),
 `NC_REAL` (`as.real4`), `NC_BYTEA` (a pointer and length), `NC_TIME` (µs
 since midnight), `NC_INET` / `NC_CIDR` (family, mask length, address;
 `nc_inet_parse`); `NC_CHAR` and `NC_ENUM` columns hold text values.
+Protocol version 4: `nc_connect` proves the password by SCRAM-SHA-256
+(with the driver's own SHA-256, HMAC, PBKDF2 and base64) and never sends
+it; a server that cannot sign the exchange is refused (`08006`).
 
 ```sh
 make                # build/libnucleus.a

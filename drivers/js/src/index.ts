@@ -16,11 +16,13 @@
 // Cidr, uuid as its canonical string, arrays as arrays, NULL as null;
 // another registered type as Ext (its name and binary form).
 
+import { createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 import net from "node:net";
 
 // 2: registered types (uuid, modules' types) arrive in their binary form;
-// 3: smallint, integer, real, bytea, time, inet and cidr in theirs.
-export const PROTOCOL_VERSION = 3;
+// 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
+// 4: the password is proved by SCRAM-SHA-256, never sent.
+export const PROTOCOL_VERSION = 4;
 const EXT = 11;
 const ENUM = 20;
 export const DEFAULT_PORT = 20035;
@@ -550,6 +552,47 @@ class Reader {
   }
 }
 
+/** The client's side of a SCRAM-SHA-256 exchange (RFC 5802). */
+class Scram {
+  private readonly password: Buffer;
+  private readonly bare: string;
+  private auth = Buffer.alloc(0);
+  private serverKey = Buffer.alloc(0);
+
+  constructor(password: string) {
+    this.password = Buffer.from(password, "utf8");
+    this.bare = `n=,r=${randomBytes(18).toString("base64")}`;
+  }
+
+  first(): string {
+    return `n,,${this.bare}`;
+  }
+
+  respond(serverFirst: string): string {
+    const attrs = new Map(serverFirst.split(",").map((p) => [p[0], p.slice(2)] as [string, string]));
+    const nonce = attrs.get("r") ?? "";
+    const own = this.bare.slice(5);
+    if (!nonce.startsWith(own) || nonce.length === own.length) throw new NucleusError("malformed SCRAM message");
+    const salted = pbkdf2Sync(this.password, Buffer.from(attrs.get("s") ?? "", "base64"), Number(attrs.get("i")), 32, "sha256");
+    const clientKey = createHmac("sha256", salted).update("Client Key").digest();
+    const stored = createHash("sha256").update(clientKey).digest();
+    this.serverKey = createHmac("sha256", salted).update("Server Key").digest();
+    const withoutProof = `c=biws,r=${nonce}`;
+    this.auth = Buffer.from(`${this.bare},${serverFirst},${withoutProof}`, "utf8");
+    const signature = createHmac("sha256", stored).update(this.auth).digest();
+    const proof = Buffer.from(clientKey.map((b, i) => b ^ signature[i]));
+    return `${withoutProof},p=${proof.toString("base64")}`;
+  }
+
+  verify(serverFinal: string): void {
+    const want = createHmac("sha256", this.serverKey).update(this.auth).digest();
+    const got = Buffer.from(serverFinal.slice(2), "base64");
+    if (got.length !== want.length || !timingSafeEqual(got, want)) {
+      throw new NucleusError("the server could not prove it knows the password");
+    }
+  }
+}
+
 function frame(kind: string, body: Buffer): Buffer {
   const h = Buffer.alloc(5);
   h.write(kind, 0, "latin1");
@@ -636,14 +679,29 @@ export class Client {
       .u16(PROTOCOL_VERSION)
       .str(options.user ?? "nucleus")
       .str(options.database ?? "nucleus")
-      .str(options.password ?? "nucleus")
+      .str("")
       .str(options.clientName ?? "nucleus-js")
       .bytes();
     socket.write(frame("H", hello));
+    let scram: Scram | null = null;
     for (;;) {
       const m = await c.read();
       const r = new Reader(m.body);
-      if (m.kind === "W") {
+      if (m.kind === "A") {
+        const msg = r.str();
+        let reply: string | null;
+        if (scram === null) {
+          if (msg !== "SCRAM-SHA-256") throw new NucleusError(`unsupported authentication ${msg}`);
+          scram = new Scram(options.password ?? "nucleus");
+          reply = scram.first();
+        } else if (msg.startsWith("v=")) {
+          scram.verify(msg);
+          reply = null;
+        } else {
+          reply = scram.respond(msg);
+        }
+        if (reply !== null) socket.write(frame("a", new Writer().str(reply).bytes()));
+      } else if (m.kind === "W") {
         r.u16();
         c.serverVersion = r.str();
         c.sessionId = r.u32();

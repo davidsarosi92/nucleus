@@ -6,9 +6,10 @@ starts (`127.0.0.1:20035`, user and password `nucleus`) unless told
 otherwise, and all of them pass the same conformance cases (every type both
 ways — `uuid` as each language's native uuid, or a string in JavaScript —,
 parameters, errors with their SQLSTATE, transactions, passwords).  They
-speak protocol version 3: registered types arrive in their binary form,
-and `smallint`, `integer`, `real`, `bytea`, `time`, `inet` and `cidr` as
-each language's native (or closest) type.
+speak protocol version 4: the password is proved by SCRAM-SHA-256 and
+never sent, registered types arrive in their binary form, and `smallint`,
+`integer`, `real`, `bytea`, `time`, `inet` and `cidr` as each language's
+native (or closest) type.
 
 | Language | Where | Values |
 |----------|-------|--------|

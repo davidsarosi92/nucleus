@@ -20,7 +20,8 @@ parameter), `Date` (date, timestamp, timestamptz — UTC, millisecond
 precision when read), `Time` (time of day, µs), `Interval`, `Inet` and
 `Cidr` (`.bytes`, `.bits`, `.address`, `parse`, `toString`), uuid as its
 canonical string, arrays, `null`; another registered type is `Ext` (its
-name and binary form).  Protocol version 3.  Errors are
+name and binary form).  Protocol version 4: the password is proved by
+SCRAM-SHA-256, never sent.  Errors are
 `NucleusError` with
 `code` (SQLSTATE).  Queries on one connection run one after another.
 Tests: `npm test`; example: `examples/js/quickstart.ts`.

@@ -52,9 +52,10 @@ import java.util.function.Function;
 public final class NucleusClient implements AutoCloseable {
     /**
      * 2: registered types (uuid, modules' types) arrive in their binary form; 3: smallint,
-     * integer, real, bytea, time, inet and cidr in theirs.
+     * integer, real, bytea, time, inet and cidr in theirs; 4: the password is proved by
+     * SCRAM-SHA-256, never sent.
      */
-    public static final int PROTOCOL_VERSION = 3;
+    public static final int PROTOCOL_VERSION = 4;
     private static final int EXT = 11;
     private static final int ENUM = 20;
     public static final int DEFAULT_PORT = 20035;
@@ -91,12 +92,30 @@ public final class NucleusClient implements AutoCloseable {
             s.setTcpNoDelay(true);
             NucleusClient c = new NucleusClient(s);
             Writer hello = new Writer().u16(PROTOCOL_VERSION).str(config.user).str(config.database)
-                    .str(config.password == null ? "" : config.password).str(config.clientName);
+                    .str("").str(config.clientName);
             c.send('H', hello.bytes());
+            Scram scram = null;
             for (;;) {
                 Message m = c.read();
                 Reader r = new Reader(m.body);
                 switch (m.kind) {
+                    case 'A' -> {
+                        String msg = r.str();
+                        String reply;
+                        if (scram == null) {
+                            if (!msg.equals("SCRAM-SHA-256")) {
+                                throw new NucleusException("unsupported authentication " + msg, (String) null);
+                            }
+                            scram = new Scram(config.password == null ? "" : config.password);
+                            reply = scram.first();
+                        } else if (msg.startsWith("v=")) {
+                            scram.verify(msg);
+                            reply = null;
+                        } else {
+                            reply = scram.respond(msg);
+                        }
+                        if (reply != null) c.send('a', new Writer().str(reply).bytes());
+                    }
                     case 'W' -> {
                         r.u16();
                         c.serverVersion = r.str();

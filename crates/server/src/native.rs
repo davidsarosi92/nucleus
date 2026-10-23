@@ -19,8 +19,10 @@ use crate::Config;
 /// version-1 client gets them as text.  Version 3 adds tags 12–20
 /// (`smallint`, `integer`, `real`, `bytea`, `time`, `char(n)`, `inet`,
 /// `cidr`, enums); an older client gets them as before — integers as
-/// `bigint`, a real as a double, the rest as text.
-pub const VERSION: u16 = 3;
+/// `bigint`, a real as a double, the rest as text.  Version 4 logs in by
+/// SCRAM-SHA-256 (`A` / `a` messages), so a password never crosses the
+/// wire; older clients still send theirs in clear.
+pub const VERSION: u16 = 4;
 /// The oldest it still speaks.
 pub const MIN_VERSION: u16 = 1;
 const MAX_BODY: u32 = 1 << 30;
@@ -194,7 +196,7 @@ fn protocol(what: impl Into<String>) -> Error {
     }
 }
 
-fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
+fn read_message<R: Read + ?Sized>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
     let mut h = [0u8; 5];
     r.read_exact(&mut h)?;
     let len = u32::from_le_bytes(h[1..5].try_into().unwrap());
@@ -275,35 +277,8 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
         }
     };
 
-    // Hello.
-    let (kind, body) = read_message(&mut input)?;
-    let hello = (|| -> Result<(u16, Session), Error> {
-        if kind != b'H' {
-            return Err(protocol("expected Hello"));
-        }
-        let mut b = Body { b: &body };
-        let version = b.u16()?;
-        if version < MIN_VERSION {
-            return Err(protocol(format!(
-                "unsupported protocol version {version} (this server speaks \
-                 {MIN_VERSION} to {VERSION})"
-            )));
-        }
-        let user = b.str()?;
-        let _database = b.str()?;
-        let password = b.str()?;
-        let client = b.str()?;
-        log("hello", &format!("user {user}, client {client}"));
-        if !config.accepts(&*kv, &user, &password) {
-            return Err(Error {
-                code: "28P01",
-                message: format!("password authentication failed for user \"{user}\""),
-            });
-        }
-        let mut session = Session::with_registry(kv.clone(), config.registry.clone());
-        session.login(&user)?;
-        Ok((version.min(VERSION), session))
-    })();
+    // Hello, and the login it starts.
+    let hello = login(&mut input, &mut out, &kv, config, &log)?;
     let (version, mut session) = match hello {
         Ok(v) => v,
         Err(e) => {
@@ -361,6 +336,111 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
                 return out.flush();
             }
         }
+    }
+}
+
+/// Reads Hello and logs the client in: by SCRAM-SHA-256 from protocol
+/// version 4, else by the password Hello carries.  The session, or the
+/// error to send.
+fn login(
+    input: &mut impl Read,
+    out: &mut impl Write,
+    kv: &Arc<dyn Kv>,
+    config: &Config,
+    log: &dyn Fn(&str, &str),
+) -> io::Result<Result<(u16, Session), Error>> {
+    let (kind, body) = read_message(input)?;
+    let parsed = (|| -> Result<(u16, String, String), Error> {
+        if kind != b'H' {
+            return Err(protocol("expected Hello"));
+        }
+        let mut b = Body { b: &body };
+        let version = b.u16()?;
+        if version < MIN_VERSION {
+            return Err(protocol(format!(
+                "unsupported protocol version {version} (this server speaks \
+                 {MIN_VERSION} to {VERSION})"
+            )));
+        }
+        let user = b.str()?;
+        let _database = b.str()?;
+        let password = b.str()?;
+        let client = b.str()?;
+        log("hello", &format!("user {user}, client {client}"));
+        Ok((version.min(VERSION), user, password))
+    })();
+    let (version, user, password) = match parsed {
+        Ok(p) => p,
+        Err(e) => return Ok(Err(e)),
+    };
+    let refused = || Error {
+        code: "28P01",
+        message: format!("password authentication failed for user \"{user}\""),
+    };
+    if config.auth.wants_password() {
+        if version >= 4 {
+            match scram(input, out, &**kv, config, &user)? {
+                Ok(true) => {}
+                Ok(false) => return Ok(Err(refused())),
+                Err(e) => return Ok(Err(e)),
+            }
+        } else if !config.accepts(&**kv, &user, &password) {
+            return Ok(Err(refused()));
+        }
+    }
+    let mut session = Session::with_registry(kv.clone(), config.registry.clone());
+    Ok(match session.login(&user) {
+        Ok(()) => Ok((version, session)),
+        Err(e) => Err(e),
+    })
+}
+
+/// The SCRAM-SHA-256 exchange: `A` names the mechanism, then `a` (client
+/// first) / `A` (server first) / `a` (client final) / `A` (server final).
+/// Whether the client proved its password.
+fn scram(
+    input: &mut impl Read,
+    out: &mut impl Write,
+    kv: &dyn Kv,
+    config: &Config,
+    user: &str,
+) -> io::Result<Result<bool, Error>> {
+    let mut server = nucleus_crypto::ScramServer::new(
+        config.auth.verifier(kv, user),
+        &crate::fake_salt(kv, user),
+        &crate::scram_nonce(kv),
+    );
+    let send = |out: &mut dyn Write, s: &str| -> io::Result<()> {
+        out.write_all(&Msg::new(b'A').str(s).finish())?;
+        out.flush()
+    };
+    let receive = |input: &mut dyn Read| -> io::Result<Result<String, Error>> {
+        let (kind, body) = read_message(input)?;
+        if kind != b'a' {
+            return Ok(Err(protocol("expected an authentication response")));
+        }
+        Ok(Body { b: &body }.str())
+    };
+    send(out, "SCRAM-SHA-256")?;
+    let first = match receive(input)? {
+        Ok(m) => m,
+        Err(e) => return Ok(Err(e)),
+    };
+    let Ok(server_first) = server.first(&first) else {
+        return Ok(Err(protocol("malformed SCRAM message")));
+    };
+    send(out, &server_first)?;
+    let last = match receive(input)? {
+        Ok(m) => m,
+        Err(e) => return Ok(Err(e)),
+    };
+    match server.finish(&last) {
+        Ok(server_final) => {
+            send(out, &server_final)?;
+            Ok(Ok(true))
+        }
+        Err(nucleus_crypto::ScramError::Rejected) => Ok(Ok(false)),
+        Err(nucleus_crypto::ScramError::Malformed) => Ok(Err(protocol("malformed SCRAM message"))),
     }
 }
 

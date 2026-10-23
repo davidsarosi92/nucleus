@@ -18,6 +18,7 @@ Types: `Boolean`, `Short` (smallint), `Integer` (integer), `Long`
 (timestamptz, UTC), `Interval` (and `Duration` as a parameter), `Inet` and
 `Cidr` (an `InetAddress` and a mask length; an `InetAddress` as a
 parameter is a host), `UUID`, `List`, `null`; another registered type is
-`Ext` (its name and binary form).  Protocol version 3.  Errors are
+`Ext` (its name and binary form).  Protocol version 4: the password is
+proved by SCRAM-SHA-256, never sent.  Errors are
 `NucleusException` with `code()` (SQLSTATE).  Tests: `NucleusTest` (a plain
 main); example: `examples/java/Quickstart.java`.

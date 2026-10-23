@@ -7,7 +7,8 @@ text, `Numeric`, `Date`, `Timestamp`, `TimestampTz`, `Interval`, `Array`,
 `Uuid` — 16 bytes, `Uuid::parse` — and `Ext`, another registered type's name
 and binary form; protocol version 3's `SmallInt`, `Integer`, `Real`,
 `Bytes`, `Time`, `Inet` and `Cidr` — `Inet::parse`, `Cidr::parse`),
-`transaction([](Connection&) { … })`.
+`transaction([](Connection&) { … })`.  Protocol version 4 (through the C
+driver): the password is proved by SCRAM-SHA-256, never sent.
 
 ```sh
 cc -std=c99 -c ../c/nucleus.c -o nucleus.o

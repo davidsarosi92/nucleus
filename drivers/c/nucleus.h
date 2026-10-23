@@ -28,8 +28,9 @@ extern "C" {
 /* This driver's version. */
 #define NC_VERSION "0.1.0"
 /* 2: registered types (uuid, modules' types) arrive in their binary form;
- * 3: smallint, integer, real, bytea, time, inet and cidr in theirs. */
-#define NC_PROTOCOL_VERSION 3
+ * 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
+ * 4: the password is proved by SCRAM-SHA-256, never sent. */
+#define NC_PROTOCOL_VERSION 4
 #define NC_DEFAULT_PORT 20035
 
 /* Value and column types (the protocol's tags). */

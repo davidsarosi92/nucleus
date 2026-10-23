@@ -1314,8 +1314,12 @@ pg`).  `Config { auth, log_queries }`: `auth` is an `Authenticator`
 `Password` (the catalog's roles, or while unclaimed one user;
 `Config::password`, the default `nucleus` / `nucleus`) or `Trust`
 (`Config::trust`, `--no-auth`); after it accepts, a front end logs the
-session in (`Session::login`).  Further methods (SCRAM on the wire,
-tokens, certificates, OIDC, LDAP) are §M14.25's later steps.  `Config::registry` is what sessions have (the
+session in (`Session::login`).  For SCRAM it gives a user's verifier
+(`verifier(kv, user)`: the catalog role's, with `LOGIN` and `VALID UNTIL`
+checked, or while unclaimed one derived from the configured password),
+and `fake_salt` / `scram_nonce` for the exchange; `ncp` version 4 uses it
+(§10).  Further methods (tokens, certificates, OIDC, LDAP) are §M14.25's
+later steps.  `Config::registry` is what sessions have (the
 built-ins by default; a custom build adds its modules —
 `Config::with_registry`); pg-compat's front end adds its module on top.
 
@@ -1364,15 +1368,19 @@ whole specification.
 
 **Transport.** TCP, default port **20035** (`NC` in ASCII).  Every integer
 is **little-endian**.  A *string* is a `u32` byte length and that many
-bytes of UTF-8.  Passwords travel in clear text: use it on trusted
-networks (TLS is later work).
+bytes of UTF-8.  From version 4 the password never travels: the client
+proves it with SCRAM-SHA-256 (RFC 5802 / 7677); before 4 it is sent in
+Hello in clear text.  Queries and results are not yet encrypted (TLS is
+§M14.25's later work): use it on trusted networks.
 
 **Frames.** Each message is a `u8` kind, a `u32` body length (the 5
 header bytes not included; at most 1 GiB), then the body.
 
 | Kind | Direction | Body |
 |------|-----------|------|
-| `H` Hello | client → server, first | `u16` version (2; 1 still accepted), string user, string database, string password (empty: none), string client name |
+| `H` Hello | client → server, first | `u16` version (4; 1–3 still accepted), string user, string database, string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
+| `A` Authentication | server → client | string: the mechanism (`SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
+| `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message |
 | `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |
 | `Q` Query | client → server | string SQL, `u8` result format (0 typed, 1 text), `u16` parameter count, the parameters as values |
 | `C` Columns | server → client | `u16` count, then per column: string name, type |
@@ -1382,10 +1390,20 @@ header bytes not included; at most 1 GiB), then the body.
 | `R` Ready | server → client | `u8` transaction status: 0 idle, 1 in a transaction block, 2 in a failed block |
 | `X` Bye | client → server | empty; the server closes |
 
-**Session.** The client sends Hello; the server answers Welcome and Ready,
-or Error and closes (`28P01` wrong user or password — servers default to
-user `nucleus`, password `nucleus`; `08P01` unsupported version or a
-malformed message).  Then any number of Query messages, each answered
+**Session.** The client sends Hello.  If the server wants a password and
+the client speaks version 4, they run SCRAM-SHA-256: the server sends `A`
+`SCRAM-SHA-256`; the client `a` client-first (`n,,n=,r=<nonce>`: no
+channel binding, the user is Hello's); the server `A` server-first
+(`r=<nonce>,s=<salt>,i=<iterations>`); the client `a` client-final
+(`c=biws,r=<nonce>,p=<proof>`); the server `A` server-final
+(`v=<signature>`), which the client checks — a server that cannot sign
+does not know the password's verifier, and the client hangs up.  An
+unknown user gets a salt of its own (derived from a server secret), so
+the exchange does not tell which users exist.  The server then answers
+Welcome and Ready, or Error and closes (`28P01` wrong user or password —
+an unclaimed database takes the server's credentials, by default user
+`nucleus`, password `nucleus`; `08P01` unsupported version or a malformed
+message, an `a` out of turn included).  Then any number of Query messages, each answered
 by, per statement, `[C D*] K` (Columns and Rows only for statements that
 return rows), and finally Ready.  A failing statement sends Error instead
 of Done, the remaining statements of that Query are skipped, and Ready
@@ -1394,7 +1412,8 @@ refer to them.  Transactions are SQL (`BEGIN`, `COMMIT`, `ROLLBACK`), as in
 §8.7; outside a block every statement commits on its own.
 
 **Versions.**  2 adds registered types (`uuid`, a module's type): tag 11
-below.  3 adds tags 12–20, §M14.26's types.  An older client gets what
+below.  3 adds tags 12–20, §M14.26's types.  4 proves the password by
+SCRAM-SHA-256 instead of sending it (§M14.25).  An older client gets what
 its version knows — registered types as text before 2; before 3,
 `smallint` and `integer` as `bigint` (tag 2), `real` as a double (tag 3),
 `bytea`, `time`, `char(n)`, `inet`, `cidr` and enums as text — so older
@@ -1459,7 +1478,9 @@ midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
 `Uuid([u8; 16])`, `Other { type_name, bytes }` for another registered
 type; `char(n)` and enum values as text, their columns typed `Char` and
 `Enum(name)`) with `From` conversions for parameters.  Every driver
-speaks protocol version 3.
+speaks protocol version 4 and logs in by SCRAM-SHA-256 (the C driver with
+its own SHA-256, HMAC, PBKDF2 and base64; the others with their
+platform's).
 
 **C:** `drivers/c` (`nucleus.h`, `nucleus.c`; C99, POSIX sockets or
 Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
@@ -1523,6 +1544,11 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 SCRAM on the wire (T4):** `ncp` version 4 —
+  the password is proved by SCRAM-SHA-256 (`A` / `a` messages), never
+  sent; the server signs back; unknown users get a stable fake salt.
+  Every driver speaks it; older clients still log in with a cleartext
+  password.
 - **2026-10-23 — §M14.25 row-level security (T3):** policies (permissive
   and restrictive, per command and role, `USING` / `WITH CHECK`),
   `ENABLE` / `FORCE ROW LEVEL SECURITY`, a barrier node the optimizer

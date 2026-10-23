@@ -267,6 +267,175 @@ fn padded(data: &[u8], big_endian: bool) -> Vec<u8> {
     m
 }
 
+// ------------------------------------------------------- SCRAM exchange
+
+/// A SCRAM-SHA-256 exchange, the server's side (RFC 5802): it never sees
+/// the password, only the client's proof that it knows it.
+#[derive(Debug)]
+pub struct ScramServer {
+    verifier: ScramVerifier,
+    /// Whether the verifier is a stand-in (an unknown user): the exchange
+    /// runs to its end and fails, so a client cannot tell names apart.
+    fake: bool,
+    server_nonce: String,
+    client_first_bare: String,
+    server_first: String,
+    nonce: String,
+}
+
+/// Why an exchange failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScramError {
+    /// A message is not what SCRAM-SHA-256 sends.
+    Malformed,
+    /// The proof is wrong (or the user unknown).
+    Rejected,
+}
+
+fn attr(msg: &str, key: char) -> Option<&str> {
+    msg.split(',')
+        .find_map(|p| p.strip_prefix(key).and_then(|r| r.strip_prefix('=')))
+}
+
+impl ScramServer {
+    /// An exchange against `verifier` (`None`: an unknown user, whose
+    /// stand-in salt `fake_salt` should be stable per name), with
+    /// `server_nonce` (random, printable, no commas).
+    pub fn new(verifier: Option<ScramVerifier>, fake_salt: &[u8], server_nonce: &str) -> Self {
+        let fake = verifier.is_none();
+        ScramServer {
+            verifier: verifier.unwrap_or_else(|| ScramVerifier {
+                iterations: SCRAM_ITERATIONS,
+                salt: fake_salt.to_vec(),
+                stored_key: [0; 32],
+                server_key: [0; 32],
+            }),
+            fake,
+            server_nonce: server_nonce.to_string(),
+            client_first_bare: String::new(),
+            server_first: String::new(),
+            nonce: String::new(),
+        }
+    }
+
+    /// The client's first message (`n,,n=…,r=…`) → the server's first.
+    pub fn first(&mut self, client_first: &str) -> Result<String, ScramError> {
+        // Channel binding is not offered: the GS2 header must be "n,,".
+        let bare = client_first
+            .strip_prefix("n,,")
+            .ok_or(ScramError::Malformed)?;
+        let client_nonce = attr(bare, 'r').ok_or(ScramError::Malformed)?;
+        if client_nonce.is_empty() {
+            return Err(ScramError::Malformed);
+        }
+        self.nonce = format!("{client_nonce}{}", self.server_nonce);
+        self.client_first_bare = bare.to_string();
+        self.server_first = format!(
+            "r={},s={},i={}",
+            self.nonce,
+            base64_encode(&self.verifier.salt),
+            self.verifier.iterations
+        );
+        Ok(self.server_first.clone())
+    }
+
+    /// The client's final message (`c=biws,r=…,p=…`) → the server's final
+    /// (`v=…`, its signature), if the proof holds.
+    pub fn finish(&self, client_final: &str) -> Result<String, ScramError> {
+        let (without_proof, proof) = client_final
+            .rsplit_once(",p=")
+            .ok_or(ScramError::Malformed)?;
+        if attr(without_proof, 'c') != Some("biws") || attr(without_proof, 'r') != Some(&self.nonce)
+        {
+            return Err(ScramError::Malformed);
+        }
+        let proof = base64_decode(proof).ok_or(ScramError::Malformed)?;
+        if proof.len() != 32 {
+            return Err(ScramError::Malformed);
+        }
+        let auth = format!(
+            "{},{},{without_proof}",
+            self.client_first_bare, self.server_first
+        );
+        let signature = hmac_sha256(&self.verifier.stored_key, auth.as_bytes());
+        let client_key: Vec<u8> = proof.iter().zip(signature).map(|(a, b)| a ^ b).collect();
+        if self.fake || !constant_time_eq(&sha256(&client_key), &self.verifier.stored_key) {
+            return Err(ScramError::Rejected);
+        }
+        let server_signature = hmac_sha256(&self.verifier.server_key, auth.as_bytes());
+        Ok(format!("v={}", base64_encode(&server_signature)))
+    }
+}
+
+/// A SCRAM-SHA-256 exchange, the client's side.
+#[derive(Debug)]
+pub struct ScramClient {
+    password: String,
+    client_first_bare: String,
+    auth: String,
+    server_key: [u8; 32],
+}
+
+impl ScramClient {
+    /// An exchange for `password`, with `client_nonce` (random, printable,
+    /// no commas).
+    pub fn new(password: &str, client_nonce: &str) -> Self {
+        ScramClient {
+            password: password.to_string(),
+            client_first_bare: format!("n=,r={client_nonce}"),
+            auth: String::new(),
+            server_key: [0; 32],
+        }
+    }
+
+    /// The first message.
+    pub fn first(&self) -> String {
+        format!("n,,{}", self.client_first_bare)
+    }
+
+    /// The server's first message → the client's final one.
+    pub fn respond(&mut self, server_first: &str) -> Result<String, ScramError> {
+        let nonce = attr(server_first, 'r').ok_or(ScramError::Malformed)?;
+        let own = attr(&self.client_first_bare, 'r').unwrap_or_default();
+        if !nonce.starts_with(own) || nonce.len() == own.len() {
+            return Err(ScramError::Malformed);
+        }
+        let salt = attr(server_first, 's')
+            .and_then(base64_decode)
+            .ok_or(ScramError::Malformed)?;
+        let iterations: u32 = attr(server_first, 'i')
+            .and_then(|i| i.parse().ok())
+            .filter(|&i| i > 0)
+            .ok_or(ScramError::Malformed)?;
+        let salted = pbkdf2_sha256(self.password.as_bytes(), &salt, iterations);
+        let client_key = hmac_sha256(&salted, b"Client Key");
+        let stored_key = sha256(&client_key);
+        self.server_key = hmac_sha256(&salted, b"Server Key");
+        let without_proof = format!("c=biws,r={nonce}");
+        self.auth = format!("{},{server_first},{without_proof}", self.client_first_bare);
+        let signature = hmac_sha256(&stored_key, self.auth.as_bytes());
+        let proof: Vec<u8> = client_key
+            .iter()
+            .zip(signature)
+            .map(|(a, b)| a ^ b)
+            .collect();
+        Ok(format!("{without_proof},p={}", base64_encode(&proof)))
+    }
+
+    /// Checks the server's final message: the server knew the verifier too.
+    pub fn verify(&self, server_final: &str) -> Result<(), ScramError> {
+        let v = attr(server_final, 'v')
+            .and_then(base64_decode)
+            .ok_or(ScramError::Malformed)?;
+        let want = hmac_sha256(&self.server_key, self.auth.as_bytes());
+        if constant_time_eq(&v, &want) {
+            Ok(())
+        } else {
+            Err(ScramError::Rejected)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +485,28 @@ mod tests {
         }
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
         assert!(base64_decode("Zm9").is_none());
+    }
+
+    #[test]
+    fn scram_exchanges() {
+        let v = ScramVerifier::new("pencil", b"salt-salt-salt!!", 4096);
+        let run = |verifier: Option<ScramVerifier>, password: &str| {
+            let mut server = ScramServer::new(verifier, b"fake", "SNONCE");
+            let mut client = ScramClient::new(password, "CNONCE");
+            let first = server.first(&client.first()).unwrap();
+            let fin = client.respond(&first).unwrap();
+            server.finish(&fin).map(|f| client.verify(&f))
+        };
+        assert_eq!(run(Some(v.clone()), "pencil"), Ok(Ok(())));
+        assert_eq!(run(Some(v.clone()), "pen"), Err(ScramError::Rejected));
+        assert_eq!(run(None, "pencil"), Err(ScramError::Rejected));
+        // A server that does not know the verifier cannot sign.
+        let mut client = ScramClient::new("pencil", "CNONCE");
+        let mut server = ScramServer::new(Some(v), b"", "S");
+        client
+            .respond(&server.first(&client.first()).unwrap())
+            .unwrap();
+        assert_eq!(client.verify("v=AAAA"), Err(ScramError::Rejected));
     }
 
     #[test]

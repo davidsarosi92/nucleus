@@ -38,8 +38,36 @@ pub trait Authenticator: Send + Sync + std::fmt::Debug {
     /// Whether a front end must ask the client for a password.
     fn wants_password(&self) -> bool;
 
-    /// Whether `user` with `password` may log in to the database `kv`.
+    /// Whether `user` with `password` may log in to the database `kv` (a
+    /// password sent in clear: protocol versions before 4, and
+    /// PostgreSQL's cleartext method).
     fn accepts(&self, kv: &dyn Kv, user: &str, password: &str) -> bool;
+
+    /// The SCRAM-SHA-256 verifier `user` logs in to `kv` with (`None`: it
+    /// may not — an unknown user, no password, no `LOGIN`, expired).
+    fn verifier(&self, _kv: &dyn Kv, _user: &str) -> Option<nucleus_crypto::ScramVerifier> {
+        None
+    }
+}
+
+/// A stand-in salt for `user`, stable while the process runs and not
+/// derivable without its secret, so an unknown name's exchange looks like a
+/// known one's.
+pub fn fake_salt(kv: &dyn Kv, user: &str) -> Vec<u8> {
+    static SECRET: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    let secret = SECRET.get_or_init(|| {
+        let mut b = [0u8; 32];
+        kv.random_bytes(&mut b);
+        b
+    });
+    nucleus_crypto::hmac_sha256(secret, user.as_bytes())[..16].to_vec()
+}
+
+/// A random SCRAM nonce: printable, without commas.
+pub fn scram_nonce(kv: &dyn Kv) -> String {
+    let mut b = [0u8; 18];
+    kv.random_bytes(&mut b);
+    nucleus_crypto::base64_encode(&b)
 }
 
 /// Passwords: the roles of the database's catalog (`CREATE USER …
@@ -72,6 +100,35 @@ impl Authenticator for Password {
             Ok(nucleus_sql::roles::authenticate(&*txn, user, password, now)?.is_ok())
         };
         check().unwrap_or(false)
+    }
+    fn verifier(&self, kv: &dyn Kv, user: &str) -> Option<nucleus_crypto::ScramVerifier> {
+        let find = || -> nucleus_sql::Result<Option<nucleus_crypto::ScramVerifier>> {
+            let txn = kv.begin(nucleus_kv::TxnOptions::read_only())?;
+            if nucleus_sql::roles::unclaimed(&*txn)? {
+                // The configured password's verifier, salted per user.
+                return Ok((user == self.user).then(|| {
+                    let salt =
+                        nucleus_crypto::sha256(format!("nucleus bootstrap {user}").as_bytes());
+                    nucleus_crypto::ScramVerifier::new(
+                        &self.password,
+                        &salt[..16],
+                        nucleus_crypto::SCRAM_ITERATIONS,
+                    )
+                }));
+            }
+            let Some(role) = nucleus_sql::roles::get(&*txn, user)? else {
+                return Ok(None);
+            };
+            let now = nucleus_sql::datetime::from_system(kv.wall_clock());
+            if !role.login || role.valid_until.is_some_and(|t| t < now) {
+                return Ok(None);
+            }
+            Ok(role
+                .password
+                .as_deref()
+                .and_then(nucleus_crypto::ScramVerifier::parse))
+        };
+        find().ok().flatten()
     }
 }
 

@@ -20,6 +20,6 @@ timestamp, UTC for timestamptz), `nucleus.Interval` (and `timedelta` as a
 parameter), `ipaddress.ip_interface` (inet; an address as a parameter),
 `ipaddress.ip_network` (cidr), `uuid.UUID`, `list`, `None`; another
 registered type is `nucleus.Ext` (its name and binary form).  Protocol
-version 3.
+version 4: the password is proved by SCRAM-SHA-256, never sent.
 Errors are `nucleus.Error` subclasses with `.code` (SQLSTATE).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.

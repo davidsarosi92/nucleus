@@ -2,6 +2,9 @@
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200112L
 #endif
+#if defined(_WIN32) && !defined(_CRT_RAND_S)
+#define _CRT_RAND_S /* rand_s, for SCRAM's nonce; before <stdlib.h> */
+#endif
 
 #include "nucleus.h"
 
@@ -351,6 +354,258 @@ static int get_value(reader *r, nc_value *v) {
     return r->bad ? -1 : 0;
 }
 
+/* ------------------------------------------------------- SCRAM-SHA-256 */
+
+/* SHA-256 (FIPS 180-4), HMAC (RFC 2104), PBKDF2 (RFC 8018), base64: what
+ * a SCRAM-SHA-256 login (RFC 5802) needs, without a library. */
+
+typedef struct {
+    uint32_t h[8];
+    uint64_t len;
+    unsigned char block[64];
+    size_t fill;
+} sha256_ctx;
+
+static uint32_t ror(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+
+static void sha256_block(sha256_ctx *c, const unsigned char *b) {
+    static const uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    uint32_t w[64], v[8], t1, t2;
+    int i;
+    for (i = 0; i < 16; i++)
+        w[i] = (uint32_t)b[4 * i] << 24 | (uint32_t)b[4 * i + 1] << 16 | (uint32_t)b[4 * i + 2] << 8 | b[4 * i + 3];
+    for (i = 16; i < 64; i++)
+        w[i] = (ror(w[i - 2], 17) ^ ror(w[i - 2], 19) ^ (w[i - 2] >> 10)) + w[i - 7] +
+               (ror(w[i - 15], 7) ^ ror(w[i - 15], 18) ^ (w[i - 15] >> 3)) + w[i - 16];
+    memcpy(v, c->h, sizeof v);
+    for (i = 0; i < 64; i++) {
+        t1 = v[7] + (ror(v[4], 6) ^ ror(v[4], 11) ^ ror(v[4], 25)) + ((v[4] & v[5]) ^ (~v[4] & v[6])) + k[i] + w[i];
+        t2 = (ror(v[0], 2) ^ ror(v[0], 13) ^ ror(v[0], 22)) + ((v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]));
+        memmove(v + 1, v, 7 * sizeof *v);
+        v[4] += t1;
+        v[0] = t1 + t2;
+    }
+    for (i = 0; i < 8; i++) c->h[i] += v[i];
+}
+
+static void sha256_init(sha256_ctx *c) {
+    static const uint32_t h0[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                                   0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    memcpy(c->h, h0, sizeof h0);
+    c->len = 0;
+    c->fill = 0;
+}
+
+static void sha256_update(sha256_ctx *c, const void *data, size_t n) {
+    const unsigned char *p = data;
+    c->len += n;
+    while (n--) {
+        c->block[c->fill++] = *p++;
+        if (c->fill == 64) {
+            sha256_block(c, c->block);
+            c->fill = 0;
+        }
+    }
+}
+
+static void sha256_final(sha256_ctx *c, unsigned char out[32]) {
+    uint64_t bits = c->len * 8;
+    unsigned char pad = 0x80, zero = 0, len[8];
+    int i;
+    sha256_update(c, &pad, 1);
+    while (c->fill != 56) sha256_update(c, &zero, 1);
+    for (i = 0; i < 8; i++) len[i] = (unsigned char)(bits >> (56 - 8 * i));
+    sha256_update(c, len, 8);
+    for (i = 0; i < 8; i++) {
+        out[4 * i] = (unsigned char)(c->h[i] >> 24);
+        out[4 * i + 1] = (unsigned char)(c->h[i] >> 16);
+        out[4 * i + 2] = (unsigned char)(c->h[i] >> 8);
+        out[4 * i + 3] = (unsigned char)c->h[i];
+    }
+}
+
+static void sha256(const void *data, size_t n, unsigned char out[32]) {
+    sha256_ctx c;
+    sha256_init(&c);
+    sha256_update(&c, data, n);
+    sha256_final(&c, out);
+}
+
+static void hmac_sha256(const unsigned char *key, size_t klen, const void *data, size_t n, unsigned char out[32]) {
+    unsigned char k[64] = {0}, pad[64], inner[32];
+    sha256_ctx c;
+    int i;
+    if (klen > 64) sha256(key, klen, k);
+    else memcpy(k, key, klen);
+    for (i = 0; i < 64; i++) pad[i] = k[i] ^ 0x36;
+    sha256_init(&c);
+    sha256_update(&c, pad, 64);
+    sha256_update(&c, data, n);
+    sha256_final(&c, inner);
+    for (i = 0; i < 64; i++) pad[i] = k[i] ^ 0x5c;
+    sha256_init(&c);
+    sha256_update(&c, pad, 64);
+    sha256_update(&c, inner, 32);
+    sha256_final(&c, out);
+}
+
+static void pbkdf2_sha256(const char *password, const unsigned char *salt, size_t slen, unsigned iterations,
+                          unsigned char out[32]) {
+    unsigned char *first = malloc(slen + 4), u[32];
+    unsigned i, j;
+    if (!first) {
+        memset(out, 0, 32);
+        return;
+    }
+    memcpy(first, salt, slen);
+    memcpy(first + slen, "\0\0\0\1", 4);
+    hmac_sha256((const unsigned char *)password, strlen(password), first, slen + 4, u);
+    free(first);
+    memcpy(out, u, 32);
+    for (i = 1; i < iterations; i++) {
+        hmac_sha256((const unsigned char *)password, strlen(password), u, 32, u);
+        for (j = 0; j < 32; j++) out[j] ^= u[j];
+    }
+}
+
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* Base64 of n bytes into out (4·⌈n/3⌉ + 1 bytes). */
+static void b64_encode(const unsigned char *b, size_t n, char *out) {
+    size_t i, o = 0;
+    for (i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)b[i] << 16 | (i + 1 < n ? (uint32_t)b[i + 1] << 8 : 0) | (i + 2 < n ? b[i + 2] : 0);
+        out[o++] = B64[v >> 18 & 63];
+        out[o++] = B64[v >> 12 & 63];
+        out[o++] = i + 1 < n ? B64[v >> 6 & 63] : '=';
+        out[o++] = i + 2 < n ? B64[v & 63] : '=';
+    }
+    out[o] = 0;
+}
+
+/* Decodes base64 text of length n into out (at most size bytes); the
+ * length, or -1. */
+static long b64_decode(const char *s, size_t n, unsigned char *out, size_t size) {
+    size_t i, o = 0;
+    if (n % 4) return -1;
+    for (i = 0; i < n; i += 4) {
+        uint32_t v = 0;
+        int k, pad = 0;
+        for (k = 0; k < 4; k++) {
+            const char *at = strchr(B64, s[i + k]);
+            if (s[i + k] == '=') pad++, v <<= 6;
+            else if (!at || !s[i + k] || pad) return -1;
+            else v = v << 6 | (uint32_t)(at - B64);
+        }
+        for (k = 0; k < 3 - pad; k++) {
+            if (o >= size) return -1;
+            out[o++] = (unsigned char)(v >> (16 - 8 * k));
+        }
+    }
+    return (long)o;
+}
+
+static int random_bytes(unsigned char *b, size_t n) {
+#ifdef _WIN32
+    size_t i;
+    for (i = 0; i < n; i++) {
+        unsigned int r;
+        if (rand_s(&r) != 0) return -1;
+        b[i] = (unsigned char)r;
+    }
+    return 0;
+#else
+    FILE *f = fopen("/dev/urandom", "rb");
+    size_t got;
+    if (!f) return -1;
+    got = fread(b, 1, n, f);
+    fclose(f);
+    return got == n ? 0 : -1;
+#endif
+}
+
+/* The value of "k=" in a SCRAM message, copied into out; 0 if found. */
+static int scram_attr(const char *msg, char key, char *out, size_t size) {
+    const char *p = msg;
+    while (p && *p) {
+        if (p[0] == key && p[1] == '=') {
+            const char *end = strchr(p, ',');
+            size_t n = end ? (size_t)(end - p - 2) : strlen(p + 2);
+            if (n >= size) return -1;
+            memcpy(out, p + 2, n);
+            out[n] = 0;
+            return 0;
+        }
+        p = strchr(p, ',');
+        if (p) p++;
+    }
+    return -1;
+}
+
+typedef struct {
+    char bare[64];
+    char auth[1024];
+    unsigned char server_key[32];
+} scram_state;
+
+/* The client's first message. */
+static int scram_first(scram_state *st, char *out, size_t size) {
+    unsigned char nonce[18];
+    char text[32];
+    if (random_bytes(nonce, sizeof nonce) != 0) return -1;
+    b64_encode(nonce, sizeof nonce, text);
+    snprintf(st->bare, sizeof st->bare, "n=,r=%s", text);
+    return snprintf(out, size, "n,,%s", st->bare) < (int)size ? 0 : -1;
+}
+
+/* The server's first message → the client's final one. */
+static int scram_respond(scram_state *st, const char *password, const char *server_first, char *out, size_t size) {
+    char nonce[256], salt64[256], iter[16], without[300];
+    unsigned char salt[192], salted[32], client_key[32], stored[32], sig[32], proof[32];
+    char proof64[48];
+    long slen;
+    int i;
+    if (scram_attr(server_first, 'r', nonce, sizeof nonce) || scram_attr(server_first, 's', salt64, sizeof salt64) ||
+        scram_attr(server_first, 'i', iter, sizeof iter))
+        return -1;
+    if (strncmp(nonce, st->bare + 5, strlen(st->bare + 5)) != 0 || strlen(nonce) == strlen(st->bare + 5)) return -1;
+    slen = b64_decode(salt64, strlen(salt64), salt, sizeof salt);
+    if (slen < 0 || atoi(iter) <= 0) return -1;
+    pbkdf2_sha256(password, salt, (size_t)slen, (unsigned)atoi(iter), salted);
+    hmac_sha256(salted, 32, "Client Key", 10, client_key);
+    sha256(client_key, 32, stored);
+    hmac_sha256(salted, 32, "Server Key", 10, st->server_key);
+    snprintf(without, sizeof without, "c=biws,r=%s", nonce);
+    if (snprintf(st->auth, sizeof st->auth, "%s,%s,%s", st->bare, server_first, without) >= (int)sizeof st->auth)
+        return -1;
+    hmac_sha256(stored, 32, st->auth, strlen(st->auth), sig);
+    for (i = 0; i < 32; i++) proof[i] = client_key[i] ^ sig[i];
+    b64_encode(proof, 32, proof64);
+    return snprintf(out, size, "%s,p=%s", without, proof64) < (int)size ? 0 : -1;
+}
+
+/* Checks the server's final message ("v=…"): 0 if it signed right. */
+static int scram_verify(const scram_state *st, const char *server_final) {
+    unsigned char want[32], got[48];
+    long n;
+    unsigned diff = 0;
+    int i;
+    if (strncmp(server_final, "v=", 2) != 0) return -1;
+    n = b64_decode(server_final + 2, strlen(server_final + 2), got, sizeof got);
+    if (n != 32) return -1;
+    hmac_sha256(st->server_key, 32, st->auth, strlen(st->auth), want);
+    for (i = 0; i < 32; i++) diff |= (unsigned)(want[i] ^ got[i]);
+    return diff ? -1 : 0;
+}
+
 /* ---------------------------------------------------------------- network */
 
 static int send_all(nc_conn *c, const unsigned char *p, size_t n) {
@@ -434,7 +689,8 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
     char port[16];
     nc_conn *c;
     buf hello = {0};
-    int one = 1, rc;
+    int one = 1, rc, scram_started = 0;
+    scram_state scram;
     if (!cfg) cfg = &d;
 #ifdef _WIN32
     {
@@ -478,7 +734,7 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
     put_le(&hello, NC_PROTOCOL_VERSION, 2);
     put_str(&hello, cfg->user ? cfg->user : d.user);
     put_str(&hello, cfg->database ? cfg->database : d.database);
-    put_str(&hello, cfg->password ? cfg->password : "");
+    put_str(&hello, ""); /* version 4: the password is proved, not sent */
     put_str(&hello, cfg->client_name ? cfg->client_name : d.client_name);
     rc = hello.failed ? -1 : send_frame(c, 'H', &hello);
     free(hello.b);
@@ -487,6 +743,35 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
         unsigned char *body;
         size_t len;
         if (read_frame(c, &kind, &body, &len) != 0) break;
+        if (kind == 'A') {
+            reader r = {body, len, 0, 0};
+            char *msg = get_str(&r), reply[1024];
+            int ok = msg != NULL, send = 1;
+            if (ok && !scram_started) {
+                ok = strcmp(msg, "SCRAM-SHA-256") == 0 && scram_first(&scram, reply, sizeof reply) == 0;
+                scram_started = 1;
+            } else if (ok && strncmp(msg, "v=", 2) == 0) {
+                ok = scram_verify(&scram, msg) == 0;
+                send = 0;
+            } else if (ok) {
+                ok = scram_respond(&scram, cfg->password ? cfg->password : "", msg, reply, sizeof reply) == 0;
+            }
+            free(msg);
+            free(body);
+            if (!ok) {
+                set_error(err, "08006", "the SCRAM-SHA-256 login failed (or the server could not prove it knows the password)");
+                nc_closesocket(c->sock);
+                free(c);
+                return NULL;
+            }
+            if (send) {
+                buf a = {0};
+                put_str(&a, reply);
+                rc = a.failed ? -1 : send_frame(c, 'a', &a);
+                free(a.b);
+            }
+            continue;
+        }
         if (kind == 'W') {
             reader r = {body, len, 0, 0};
             char *server;

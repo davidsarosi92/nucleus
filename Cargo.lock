@@ -400,6 +400,7 @@ dependencies = [
 name = "nucleus-client"
 version = "0.1.0"
 dependencies = [
+ "nucleus-crypto",
  "nucleus-kv",
  "nucleus-platform",
  "nucleus-server",
@@ -470,6 +471,7 @@ dependencies = [
 name = "nucleus-server"
 version = "0.1.0"
 dependencies = [
+ "nucleus-crypto",
  "nucleus-kv",
  "nucleus-platform",
  "nucleus-sql",
