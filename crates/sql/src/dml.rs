@@ -177,6 +177,66 @@ impl Writer {
     }
 }
 
+/// The row-level security condition `command` must pass on existing
+/// rows of `t` (`None`: none applies).
+fn row_policy(
+    binder: &Binder,
+    t: &Table,
+    command: crate::policies::Command,
+) -> Result<Option<Expr>> {
+    if binder.checker().is_none() {
+        return Ok(None);
+    }
+    crate::policies::applied(binder.txn(), t, command)?
+        .map(|a| binder.policy_condition(t, &a.using))
+        .transpose()
+}
+
+/// The row-level security condition `command`'s new rows must pass.
+fn new_row_check(
+    binder: &Binder,
+    t: &Table,
+    command: crate::policies::Command,
+) -> Result<Option<Expr>> {
+    if binder.checker().is_none() {
+        return Ok(None);
+    }
+    crate::policies::applied(binder.txn(), t, command)?
+        .map(|a| binder.policy_condition(t, &a.check))
+        .transpose()
+}
+
+/// `42501` unless `row` passes the policies' check.
+fn admit(check: &Option<Expr>, t: &Table, row: &[Value], ctx: &Ctx) -> Result<()> {
+    if let Some(c) = check
+        && !c.holds(&exec::env(row, ctx, None))?
+    {
+        return Err(crate::policies::violated(&t.name));
+    }
+    Ok(())
+}
+
+/// The rows an `UPDATE` or `DELETE` touches: those the policy lets through
+/// and, then — never on a hidden row — the statement's condition holds for.
+fn secure_rows(
+    t: &Table,
+    access: &Access,
+    policy: Option<&Expr>,
+    pred: Option<&Expr>,
+    ctx: &Ctx,
+) -> Result<Vec<(Vec<u8>, Row)>> {
+    let Some(policy) = policy else {
+        return exec::matching_rows(t, access, pred, ctx);
+    };
+    let mut out = Vec::new();
+    for (k, row) in exec::matching_rows(t, access, Some(policy), ctx)? {
+        if pred.map_or(Ok(true), |p| p.holds(&exec::env(&row, ctx, None)))? {
+            out.push((k, row));
+        }
+    }
+    Ok(out)
+}
+
 /// Converts a value for storing in column `c` (assignment cast; an enum's
 /// label read through `txn`'s catalog).
 pub fn assign(txn: &dyn KvTxn, v: Value, table: &Table, c: usize) -> Result<Value> {
@@ -369,6 +429,7 @@ pub fn insert(
             ));
         }
         let ret = returning(&mut binder, returning_items, &t)?;
+        let check = new_row_check(&binder, &t, crate::policies::Command::Insert)?;
         let writer = Writer::new(ro, reg, t.clone())?;
         let ctx = Ctx::new(ro, reg, params);
         let source_rows = exec::collect(&plan, &ctx, None)?;
@@ -382,6 +443,7 @@ pub fn insert(
                 });
             }
             writer.validate(&row, &ctx)?;
+            admit(&check, &t, &row, &ctx)?;
             rows.push(row);
         }
         (rows, writer, ret)
@@ -460,10 +522,12 @@ pub fn update(
         }
         let (access, pred) = bind_filter(&mut binder, &t, filter)?;
         let ret = returning(&mut binder, returning_items, &t)?;
+        let using = row_policy(&binder, &t, crate::policies::Command::Update)?;
+        let check = new_row_check(&binder, &t, crate::policies::Command::Update)?;
         let writer = Writer::new(ro, reg, t.clone())?;
         let ctx = Ctx::new(ro, reg, params);
         let mut changes = Vec::new();
-        for (key, old) in exec::matching_rows(&t, &access, pred.as_ref(), &ctx)? {
+        for (key, old) in secure_rows(&t, &access, using.as_ref(), pred.as_ref(), &ctx)? {
             let env = Env {
                 row: &old,
                 outer: None,
@@ -474,6 +538,7 @@ pub fn update(
                 new[*c] = assign(ctx.txn, e.eval(&env)?, &t, *c)?;
             }
             writer.validate(&new, &ctx)?;
+            admit(&check, &t, &new, &ctx)?;
             changes.push((key, old, new));
         }
         (changes, writer, ret)
@@ -597,8 +662,12 @@ pub fn delete(
         }
         let (access, pred) = bind_filter(&mut binder, &t, filter)?;
         let ret = returning(&mut binder, returning_items, &t)?;
+        let using = row_policy(&binder, &t, crate::policies::Command::Delete)?;
         let ctx = Ctx::new(ro, reg, params);
-        (exec::matching_rows(&t, &access, pred.as_ref(), &ctx)?, ret)
+        (
+            secure_rows(&t, &access, using.as_ref(), pred.as_ref(), &ctx)?,
+            ret,
+        )
     };
     delete_rows(txn, reg, &t, &rows)?;
     let returning = match ret {

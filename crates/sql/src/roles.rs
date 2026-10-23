@@ -574,11 +574,13 @@ pub fn login_identity(txn: &dyn KvTxn, user: &str) -> Result<access::Who> {
             session_user: user.into(),
             user: user.into(),
             superuser: r.superuser,
+            settings: Default::default(),
         }),
         None if unclaimed(txn)? => Ok(access::Who {
             session_user: user.into(),
             user: user.into(),
             superuser: true,
+            settings: Default::default(),
         }),
         None => Err(Error::invalid_authorization(format!(
             "role \"{user}\" does not exist"
@@ -603,5 +605,6 @@ pub fn set_role(txn: &dyn KvTxn, login: &access::Who, role: Option<&str>) -> Res
         session_user: login.session_user.clone(),
         user: role.into(),
         superuser: r.superuser,
+        settings: login.settings.clone(),
     })
 }

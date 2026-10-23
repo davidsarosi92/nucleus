@@ -244,6 +244,13 @@ impl<'a> Binder<'a> {
         self.checker.as_ref()
     }
 
+    /// A row-level security condition over `table`'s row, bound without
+    /// privilege checks (a policy is the owner's).
+    pub fn policy_condition(&self, table: &Table, text: &str) -> Result<Expr> {
+        let e = crate::parser::parse_expr(text)?;
+        Binder::new(self.txn, self.registry).condition(&e, &crate::dml::table_scope(table))
+    }
+
     /// `SELECT` on a column of a table, if this binding checks.
     fn read_column(&self, col: &ScopeCol) -> Result<()> {
         if let (Some(c), Some((t, name))) = (&self.checker, &col.origin) {
@@ -858,12 +865,33 @@ impl<'a> Binder<'a> {
                         .collect(),
                 };
                 rename_columns(&mut scope, &qual, columns)?;
+                // Row-level security: the rows its policies let through,
+                // under a barrier.
+                let applied = match &self.checker {
+                    Some(_) => crate::policies::applied(
+                        self.txn,
+                        &table,
+                        crate::policies::Command::Select,
+                    )?,
+                    None => None,
+                };
+                let policy = match &applied {
+                    Some(a) => Some(self.policy_condition(&table, &a.using)?),
+                    None => None,
+                };
+                let scan = Plan::Scan {
+                    table,
+                    access: Access::Full,
+                    filter: None,
+                    estimate: None,
+                };
                 Ok(Bound {
-                    plan: Plan::Scan {
-                        table,
-                        access: Access::Full,
-                        filter: None,
-                        estimate: None,
+                    plan: match policy {
+                        Some(policy) => Plan::Secure {
+                            input: Box::new(scan),
+                            policy,
+                        },
+                        None => scan,
                     },
                     scope,
                 })

@@ -991,7 +991,9 @@ claimed, `nucleus init`); T2 privileges ✅ (tables and columns, schemas,
 functions, types, the database; grant options, `PUBLIC`, default
 privileges; sequences, streams, branches and modules get theirs when they
 exist, and pg-compat's `relacl` / `\dp` is left for later); T3 row-level
-security; T4 authentication methods (SCRAM on the wire, tokens, TLS,
+security ✅ (policies under a barrier; vector, text and stream reads get
+them as those arrive — §M14.12, §M14.21, §M16.5; the connection context
+in `current_setting` comes with T5); T4 authentication methods (SCRAM on the wire, tokens, TLS,
 certificates, OIDC, LDAP); T5 access rules and privileges by connection
 context; T6 protection; T7 audit.
 
@@ -1957,6 +1959,8 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.25 T3: row-level security, with leak tests that
+  agree with PostgreSQL 18 run in one session.
 - **2026-10-23** — §M14.25 T2: privileges on objects, checked at bind
   time and before DDL, checked against PostgreSQL 18 in one session.
 - **2026-10-23** — §M14.25 T1: users and roles in the catalog, password

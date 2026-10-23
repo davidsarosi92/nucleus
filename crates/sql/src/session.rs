@@ -283,6 +283,21 @@ impl Session {
                 self.settings.insert(name.clone(), value.clone());
                 Ok(Output::Command("SET".into()))
             }
+            Statement::Reset(name) => {
+                match name {
+                    Some(n) => {
+                        self.settings.remove(n);
+                        if n == "default_transaction_isolation" {
+                            self.default_isolation = IsolationLevel::Snapshot;
+                        }
+                    }
+                    None => {
+                        self.settings.clear();
+                        self.default_isolation = IsolationLevel::Snapshot;
+                    }
+                }
+                Ok(Output::Command("RESET".into()))
+            }
             Statement::Show(name) => {
                 let value = match name.as_str() {
                     "transaction_isolation" | "default_transaction_isolation" => {
@@ -328,7 +343,9 @@ impl Session {
                 Ok(Output::Command("SET".into()))
             }
             _ => {
-                let who = self.who.clone();
+                let mut who = (*self.who).clone();
+                who.settings = self.settings.clone();
+                let who = Arc::new(who);
                 crate::access::with_who(&who, || self.run_in_txn(stmt, params))
             }
         }
@@ -596,6 +613,7 @@ pub fn execute(
                     Some(mut t) => {
                         checker.require_owner(&*txn, crate::privileges::Kind::Table, name)?;
                         crate::privileges::forget(txn, crate::privileges::Kind::Table, name)?;
+                        crate::policies::forget(txn, name)?;
                         // Foreign keys of other tables referencing it.
                         for (child_name, fk_name) in t.referenced_by.clone() {
                             if child_name == t.name || names.contains(&child_name) {
@@ -727,7 +745,71 @@ pub fn execute(
         | Statement::DropRole { .. }
         | Statement::GrantRole { .. }
         | Statement::RevokeRole { .. } => Output::Command(crate::roles::run(txn, stmt)?),
-        Statement::SetRole(_) => unreachable!("handled by the session"),
+        Statement::SetRole(_) | Statement::Reset(_) => unreachable!("handled by the session"),
+        Statement::SetRowSecurity {
+            table,
+            enable,
+            force,
+        } => {
+            let mut t = catalog::table(&*txn, table)?;
+            if let Some(e) = enable {
+                t.row_security = *e;
+            }
+            if let Some(f) = force {
+                t.force_row_security = *f;
+            }
+            catalog::update_table(txn, &t)?;
+            Output::Command("ALTER TABLE".into())
+        }
+        Statement::CreatePolicy(p) => {
+            let t = catalog::table(&*txn, &p.table)?;
+            if crate::policies::get(&*txn, &p.table, &p.name)?.is_some() {
+                return Err(Error::duplicate_object(format!(
+                    "policy \"{}\" for table \"{}\" already exists",
+                    p.name, p.table
+                )));
+            }
+            for r in &p.roles {
+                if r != crate::privileges::PUBLIC && crate::roles::get(&*txn, r)?.is_none() {
+                    return Err(Error::undefined_object(format!(
+                        "role \"{r}\" does not exist"
+                    )));
+                }
+            }
+            use crate::policies::Command;
+            if p.check.is_some() && matches!(p.command, Command::Select | Command::Delete) {
+                return Err(Error::syntax(
+                    "only WITH CHECK expression allowed for INSERT; SELECT and DELETE take USING",
+                ));
+            }
+            if p.using.is_some() && p.command == Command::Insert {
+                return Err(Error::syntax(
+                    "only WITH CHECK expression allowed for INSERT",
+                ));
+            }
+            for text in p.using.iter().chain(&p.check) {
+                Binder::new(&*txn, reg).condition(&parse_expr(text)?, &dml::table_scope(&t))?;
+            }
+            crate::policies::put(txn, p)?;
+            Output::Command("CREATE POLICY".into())
+        }
+        Statement::DropPolicy {
+            name,
+            table,
+            if_exists,
+        } => {
+            catalog::table(&*txn, table)?;
+            if crate::policies::get(&*txn, table, name)?.is_none() {
+                if !*if_exists {
+                    return Err(Error::undefined_object(format!(
+                        "policy \"{name}\" for table \"{table}\" does not exist"
+                    )));
+                }
+            } else {
+                crate::policies::delete(txn, table, name)?;
+            }
+            Output::Command("DROP POLICY".into())
+        }
         Statement::Grant {
             items,
             target,
@@ -1025,6 +1107,8 @@ fn create_table(
         foreign_keys: Vec::new(),
         referenced_by: Vec::new(),
         owner: Some(crate::access::current().user.clone()),
+        row_security: false,
+        force_row_security: false,
     };
     for (n, cols) in uniques {
         if catalog::find_index(&*txn, &n)?.is_some() {

@@ -1,0 +1,211 @@
+# Row-level security: a role sees and changes only the rows its policies
+# let through — by the row and the session's settings — and nothing of
+# a hidden row leaks: not through an error, a count, a join, an index, a
+# subquery or EXPLAIN ANALYZE-free plans.
+# Expected results from PostgreSQL 18, run in one session (records that act
+# as another role are nucleus-only for the per-record checker).
+
+statement ok
+CREATE TABLE slt_docs (id int PRIMARY KEY, tenant text, secret int, body text)
+
+statement ok
+CREATE INDEX slt_docs_tenant ON slt_docs (tenant)
+
+statement ok
+INSERT INTO slt_docs VALUES (1, 'acme', 5, 'a1'), (2, 'acme', 7, 'a2'), (3, 'globex', 0, 'g1'), (4, 'globex', 9, 'g2')
+
+statement ok
+CREATE USER slt_app
+
+statement ok
+GRANT SELECT, INSERT, UPDATE, DELETE ON slt_docs TO slt_app
+
+statement ok
+ALTER TABLE slt_docs ENABLE ROW LEVEL SECURITY
+
+statement ok
+CREATE POLICY slt_tenant ON slt_docs USING (tenant = current_setting('nucleus.tenant')) WITH CHECK (tenant = current_setting('nucleus.tenant'))
+
+statement error 42710
+CREATE POLICY slt_tenant ON slt_docs USING (true)
+
+statement error 42704
+CREATE POLICY slt_other ON slt_docs TO slt_nobody USING (true)
+
+# The owner (here, the administrator) sees everything.
+
+query I
+SELECT count(*) FROM slt_docs
+----
+4
+
+statement ok
+SET nucleus.tenant = 'acme'
+
+# nucleus-only
+statement ok
+SET ROLE slt_app
+
+# nucleus-only
+query IT
+SELECT id, body FROM slt_docs ORDER BY id
+----
+1 a1
+2 a2
+
+# nucleus-only: nothing of another tenant's rows, by any path.
+query I
+SELECT count(*) FROM slt_docs WHERE tenant = 'globex'
+----
+0
+
+# nucleus-only: an index on the policy's column, and on the statement's.
+query I
+SELECT id FROM slt_docs WHERE id = 3
+----
+
+# nucleus-only: an error that a hidden row would cause does not happen —
+# the statement's condition never sees the row (globex's secret is 0).
+query I
+SELECT id FROM slt_docs WHERE 10 / secret > 0 ORDER BY id
+----
+1
+2
+
+# nucleus-only
+query I
+SELECT count(*) FROM slt_docs a JOIN slt_docs b ON a.id = b.id + 1
+----
+1
+
+# nucleus-only
+query I
+SELECT (SELECT max(secret) FROM slt_docs)
+----
+7
+
+# nucleus-only: writes see the same rows; new rows must pass the check.
+statement ok
+UPDATE slt_docs SET body = body || '!' WHERE 10 / secret > 0
+
+statement ok
+DELETE FROM slt_docs WHERE id = 3
+
+# nucleus-only
+statement error 42501
+INSERT INTO slt_docs VALUES (5, 'globex', 1, 'sneak')
+
+# nucleus-only
+statement error 42501
+UPDATE slt_docs SET tenant = 'globex' WHERE id = 1
+
+# nucleus-only
+statement ok
+INSERT INTO slt_docs VALUES (6, 'acme', 2, 'a6')
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+query IT
+SELECT id, body FROM slt_docs ORDER BY id
+----
+1 a1!
+2 a2!
+3 g1
+4 g2
+6 a6
+
+# Permissive and restrictive policies, per command and role.
+
+statement ok
+CREATE POLICY slt_public_read ON slt_docs FOR SELECT USING (body LIKE 'g%')
+
+statement ok
+CREATE POLICY slt_no_big ON slt_docs AS RESTRICTIVE FOR SELECT USING (id < 6)
+
+# nucleus-only
+statement ok
+SET ROLE slt_app
+
+# nucleus-only: acme's rows OR body like 'g%', AND id < 6.
+query I
+SELECT id FROM slt_docs ORDER BY id
+----
+1
+2
+3
+4
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# Forced: the owner too.
+
+statement ok
+CREATE USER slt_owner
+
+statement ok
+CREATE TABLE slt_own (x int)
+
+statement ok
+INSERT INTO slt_own VALUES (1), (2)
+
+statement ok
+GRANT ALL ON slt_own TO slt_owner
+
+statement ok
+ALTER TABLE slt_own ENABLE ROW LEVEL SECURITY
+
+# nucleus-only: no policy at all: no row for a non-owner.
+statement ok
+SET ROLE slt_owner
+
+# nucleus-only
+query I
+SELECT count(*) FROM slt_own
+----
+0
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+statement ok
+DROP POLICY slt_public_read ON slt_docs
+
+statement error 42704
+DROP POLICY slt_public_read ON slt_docs
+
+statement ok
+DROP POLICY IF EXISTS slt_public_read ON slt_docs
+
+statement ok
+ALTER TABLE slt_docs DISABLE ROW LEVEL SECURITY
+
+# nucleus-only
+statement ok
+SET ROLE slt_app
+
+# nucleus-only
+query I
+SELECT count(*) FROM slt_docs
+----
+5
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+statement ok
+DROP TABLE slt_own
+
+statement ok
+DROP TABLE slt_docs
+
+statement ok
+DROP ROLE slt_app, slt_owner
+
+statement ok
+RESET nucleus.tenant

@@ -807,6 +807,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 0B <role> 00 <member>` | a membership: its admin option |
 | `00 0C <kind> <object>` | an object's ACL (privileges per grantee, and per column) |
 | `00 0D <role> 00 <kind>` | a role's default privileges for objects it makes |
+| `00 0E <table> 00 <policy>` | a row-level security policy |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -1013,6 +1014,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.enums` | `type`, `label`, `position`, `sort_key` (hex) |
 | `nc_catalog.roles` | `name`, `superuser`, `login`, `inherit`, `createrole`, `connection_limit`, `has_password`, `valid_until` |
 | `nc_catalog.role_members` | `role`, `member`, `admin_option` |
+| `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
 | `nc_catalog.grants` | `kind`, `object`, `column`, `grantee`, `privilege`, `grantable` (the ACLs written out) |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
 
@@ -1262,6 +1264,30 @@ Dropping a role is refused while it holds privileges.
 `crates/testkit/slt/31_privileges.slt` was checked against PostgreSQL 18
 in one session (as another role too).
 
+**Row-level security** (`policies.rs`): `ALTER TABLE t ENABLE | DISABLE
+ROW LEVEL SECURITY`, `… [NO] FORCE ROW LEVEL SECURITY`, `CREATE POLICY p
+ON t [AS PERMISSIVE | RESTRICTIVE] [FOR ALL | SELECT | INSERT | UPDATE |
+DELETE] [TO roles | PUBLIC] [USING (cond)] [WITH CHECK (cond)]`, `DROP
+POLICY [IF EXISTS] p ON t` (the table owner's).  On a table with it, for
+a role that is neither an administrator nor — unless forced — the owner,
+a command touches only rows passing `(its permissive USING conditions,
+OR-ed) AND (its restrictive ones)` — no permissive policy, no row — and
+new rows (`INSERT`, `UPDATE`'s result) must pass the `WITH CHECK` ones (or
+`USING` where none is given), else `42501` "new row violates row-level
+security policy".  Conditions see the row and the session:
+`current_user`, `current_setting('nucleus.tenant')` (`SET name = value`,
+dotted names allowed, `RESET name | ALL`; `current_setting(name,
+missing_ok)` is the core's).  The binder applies the policies wherever a
+user's statement reads a table, as a barrier, `Plan::Secure` ("Row
+Security" in `EXPLAIN`): the optimizer may narrow the scan by key ranges
+from the policy and from the statement's bounds on a column by a value
+free of the row (evaluated once, on no row), but no other predicate of the
+statement is evaluated on a row before the policies have passed it —
+`UPDATE` and `DELETE` likewise filter by the policy first — so an error,
+a count, a join, a subquery or a side effect reveals nothing of a hidden
+row (`crates/testkit/slt/32_row_security.slt`, the leak cases among
+them, agrees with PostgreSQL 18 run in one session).
+
 **Bootstrap.**  A database whose catalog has no administrator that can
 log in with a password is *unclaimed*: the server's `--user` /
 `--password` (default `nucleus` / `nucleus`) log in as an administrator,
@@ -1497,6 +1523,11 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 row-level security (T3):** policies (permissive
+  and restrictive, per command and role, `USING` / `WITH CHECK`),
+  `ENABLE` / `FORCE ROW LEVEL SECURITY`, a barrier node the optimizer
+  respects, `current_setting` and `RESET` in the core;
+  `nc_catalog.policies`.
 - **2026-10-23 — §M14.25 privileges (T2):** `GRANT` / `REVOKE` on
   tables and columns, schemas, functions, types and the database, `WITH
   GRANT OPTION`, `PUBLIC`, default privileges; checked when a user's

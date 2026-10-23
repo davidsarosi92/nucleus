@@ -84,6 +84,7 @@ const FUNCTIONS: &[(Func, &[&str], RangeInclusive<usize>)] = &[
         0..=0,
     ),
     (Func::SessionUser, &["session_user"], 0..=0),
+    (Func::CurrentSetting, &["current_setting"], 1..=2),
     (
         Func::CurrentDatabase,
         &["current_database", "current_catalog"],
@@ -193,6 +194,7 @@ impl ScalarFunction for BuiltinFn {
             | Func::LocalTime
             | Func::CurrentUser
             | Func::SessionUser
+            | Func::CurrentSetting
             | Func::CurrentDatabase
             | Func::CurrentSchema => Volatility::Stable,
             _ => Volatility::Immutable,
@@ -339,6 +341,10 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
             keep(Some(Integer))
         }
         Func::IsDistinctFrom => keep(Some(Bool)),
+        Func::CurrentSetting => Ok(Signature::new(
+            [Arg::Untyped(Text), Arg::Untyped(Bool)][..n].to_vec(),
+            Returns::Type(Some(Text)),
+        )),
         Func::Sqrt | Func::Power => keep(Some(Float)),
         // round(int, n) and trunc(int) are numeric.
         Func::Round | Func::Trunc

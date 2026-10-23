@@ -26,7 +26,8 @@ pub fn collect(plan: &Plan, ctx: &Ctx, outer: Option<&Env>) -> Result<Vec<Row>> 
     build(plan, ctx, outer)?.collect()
 }
 
-fn env<'a>(row: &'a [Value], ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -> Env<'a> {
+/// The environment a row is evaluated in.
+pub fn env<'a>(row: &'a [Value], ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -> Env<'a> {
     Env { row, outer, ctx }
 }
 
@@ -60,7 +61,11 @@ pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
             }
             Box::new(out.into_iter())
         }
-        Plan::Filter { input, predicate } => {
+        Plan::Filter { input, predicate }
+        | Plan::Secure {
+            input,
+            policy: predicate,
+        } => {
             let rows = build(input, ctx, outer)?;
             Box::new(rows.filter_map(move |r| match r {
                 Err(e) => Some(Err(e)),

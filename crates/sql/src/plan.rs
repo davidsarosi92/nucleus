@@ -33,6 +33,15 @@ pub enum Plan {
         /// Columns per row.
         width: usize,
     },
+    /// The rows of a table that its row-level security policies let
+    /// through: a barrier no predicate of the statement is evaluated
+    /// below ([`crate::policies`]).
+    Secure {
+        /// The table's scan (its key range may come from the statement).
+        input: Box<Plan>,
+        /// The policies' condition.
+        policy: Expr,
+    },
     /// Rows of `input` satisfying `predicate`.
     Filter {
         /// Input.
@@ -245,6 +254,7 @@ impl Plan {
             Plan::Join { left, right, .. } => left.width() + right.width(),
             Plan::Aggregate { group, aggs, .. } => group.len() + aggs.len(),
             Plan::Filter { input, .. }
+            | Plan::Secure { input, .. }
             | Plan::Sort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::Distinct { input } => input.width(),
@@ -322,6 +332,7 @@ impl Plan {
             }
             Plan::Values { rows, .. } => format!("Values ({} rows)", rows.len()),
             Plan::Filter { predicate, .. } => format!("Filter: {}", show(predicate)),
+            Plan::Secure { policy, .. } => format!("Row Security: {}", show(policy)),
             Plan::Project { exprs, .. } => {
                 format!(
                     "Project: {}",
@@ -460,6 +471,7 @@ impl Plan {
             Plan::Recursive { base, step, .. } => vec![base, step],
             Plan::Cte { plan, .. } => vec![plan],
             Plan::Filter { input, .. }
+            | Plan::Secure { input, .. }
             | Plan::Project { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::Sort { input, .. }
@@ -493,6 +505,7 @@ impl Plan {
             Plan::Values { rows, .. } => rows.iter().flatten().for_each(f),
             Plan::Function { args, .. } => args.iter().for_each(f),
             Plan::Filter { predicate, .. } => f(predicate),
+            Plan::Secure { policy, .. } => f(policy),
             Plan::Project { exprs, .. } => exprs.iter().for_each(f),
             Plan::Join { on, algo, .. } => {
                 if let Some(e) = on {

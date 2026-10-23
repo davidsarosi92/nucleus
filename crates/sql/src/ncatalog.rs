@@ -54,6 +54,20 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("key_prefix", T),
             ("analyzed_rows", I),
             ("owner", T),
+            ("row_security", B),
+            ("force_row_security", B),
+        ],
+    ),
+    (
+        "policies",
+        &[
+            ("table_name", T),
+            ("name", T),
+            ("permissive", B),
+            ("command", T),
+            ("roles", TA),
+            ("using", T),
+            ("with_check", T),
         ],
     ),
     (
@@ -285,6 +299,8 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         .of(t)
                         .map_or(Value::Null, |s| Value::Int(s.rows as i64)),
                     t.owner.clone().map_or(Value::Null, text),
+                    Value::Bool(t.row_security),
+                    Value::Bool(t.force_row_security),
                 ]);
             }
         }
@@ -300,6 +316,19 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         .map_or(Value::Null, |n| Value::Int(i64::from(n))),
                     Value::Bool(r.password.is_some()),
                     r.valid_until.map_or(Value::Null, Value::TimestampTz),
+                ]);
+            }
+        }
+        "policies" => {
+            for p in crate::policies::all(txn)? {
+                out.push(vec![
+                    text(p.table),
+                    text(p.name),
+                    Value::Bool(p.permissive),
+                    text(p.command.word()),
+                    Value::Array(p.roles.into_iter().map(text).collect()),
+                    p.using.map_or(Value::Null, text),
+                    p.check.map_or(Value::Null, text),
                 ]);
             }
         }

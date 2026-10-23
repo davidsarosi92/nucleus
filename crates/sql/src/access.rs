@@ -27,6 +27,9 @@ pub struct Who {
     pub user: String,
     /// Whether the role it acts as is an administrator.
     pub superuser: bool,
+    /// The session's settings (`SET name = value`), for
+    /// `current_setting()` — and so for row-level security policies.
+    pub settings: std::collections::BTreeMap<String, String>,
 }
 
 impl Who {
@@ -36,6 +39,7 @@ impl Who {
             session_user: SYSTEM_USER.into(),
             user: SYSTEM_USER.into(),
             superuser: true,
+            settings: Default::default(),
         }
     }
 }

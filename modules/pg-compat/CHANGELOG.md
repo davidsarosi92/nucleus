@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `current_setting` is nucleus's own now (it reads `SET` values too); the
+  module's copy is gone.
 - `pg_roles` and `pg_auth_members` show the database's roles and
   memberships (nucleus's `nc_catalog.roles` / `role_members` under their
   PostgreSQL names); `pg_class.relowner` and `pg_get_userbyid` its owners.

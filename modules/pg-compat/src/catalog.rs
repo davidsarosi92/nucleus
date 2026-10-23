@@ -549,6 +549,8 @@ fn def_table(k: usize) -> Table {
         foreign_keys: Vec::new(),
         referenced_by: Vec::new(),
         owner: None,
+        row_security: false,
+        force_row_security: false,
     }
 }
 
@@ -1609,8 +1611,6 @@ enum PgFn {
     HasPrivilege,
     /// `pg_backend_pid()`.
     BackendPid,
-    /// `current_setting(name [, missing ok])`.
-    CurrentSetting,
     /// `pg_typeof(x)`: the argument's type name, a constant.
     TypeOf,
 }
@@ -1668,7 +1668,6 @@ const FUNCTIONS: &[(PgFn, &[&str], RangeInclusive<usize>)] = &[
         1..=4,
     ),
     (PgFn::BackendPid, &["pg_backend_pid"], 0..=0),
-    (PgFn::CurrentSetting, &["current_setting"], 1..=2),
     (PgFn::TypeOf, &["pg_typeof"], 1..=1),
 ];
 
@@ -1825,28 +1824,6 @@ fn call(f: PgFn, args: &[Value], txn: &dyn KvTxn, registry: &Registry) -> Result
         }
         PgFn::HasPrivilege => Value::Bool(true),
         PgFn::BackendPid => Value::Int(i64::from(std::process::id())),
-        PgFn::CurrentSetting => match args.first() {
-            Some(Value::Text(name)) => match name.to_ascii_lowercase().as_str() {
-                "server_version" => Value::Text("16.0 (nucleus)".into()),
-                "server_version_num" => Value::Text("160000".into()),
-                "server_encoding" | "client_encoding" => Value::Text("UTF8".into()),
-                "timezone" => Value::Text("UTC".into()),
-                "datestyle" => Value::Text("ISO, MDY".into()),
-                "search_path" => Value::Text("\"$user\", public".into()),
-                "standard_conforming_strings" | "integer_datetimes" => Value::Text("on".into()),
-                "max_identifier_length" => Value::Text("63".into()),
-                other => {
-                    if matches!(args.get(1), Some(Value::Bool(true))) {
-                        Value::Null
-                    } else {
-                        return Err(Error::undefined_object(format!(
-                            "unrecognized configuration parameter \"{other}\""
-                        )));
-                    }
-                }
-            },
-            _ => Value::Null,
-        },
         PgFn::TypeOf => unreachable!("a constant"),
     })
 }

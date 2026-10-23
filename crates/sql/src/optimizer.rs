@@ -43,7 +43,7 @@ fn push(plan: Plan, st: &Stats) -> Plan {
             conjuncts(predicate, &mut preds);
             push_into(*input, preds, st)
         }
-        Plan::Scan { .. } | Plan::Join { .. } => push_into(plan, vec![], st),
+        Plan::Scan { .. } | Plan::Join { .. } | Plan::Secure { .. } => push_into(plan, vec![], st),
         Plan::Project { input, exprs } => Plan::Project {
             input: Box::new(push(*input, st)),
             exprs,
@@ -126,6 +126,48 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
             conjuncts(predicate, &mut preds);
             push_into(*input, preds, st)
         }
+        // A barrier: the statement's predicates stay above it.  Those that
+        // bound a column by a value free of the row may still narrow the
+        // scan's key range — evaluated once, on no row — and the policy's
+        // conjuncts may too.
+        Plan::Secure { input, policy } => match *input {
+            Plan::Scan { table, filter, .. } => {
+                let mut pol = Vec::new();
+                conjuncts(policy, &mut pol);
+                if let Some(f) = filter {
+                    conjuncts(f, &mut pol);
+                }
+                let mut bounds = pol.clone();
+                bounds.extend(preds.iter().filter(|p| column_bound(p).is_some()).cloned());
+                let access = choose_access(&table, &bounds, Some(st));
+                let estimate = st.of(&table).map(|_| {
+                    let sel =
+                        conjunction(bounds.clone()).map_or(1.0, |p| st.selectivity(&table, &p));
+                    (st.rows(&table) * sel).max(1.0)
+                });
+                let policy =
+                    conjunction(pol).unwrap_or(Expr::Literal(crate::types::Value::Bool(true)));
+                filtered(
+                    Plan::Secure {
+                        input: Box::new(Plan::Scan {
+                            table,
+                            access,
+                            filter: None,
+                            estimate,
+                        }),
+                        policy,
+                    },
+                    preds,
+                )
+            }
+            other => filtered(
+                Plan::Secure {
+                    input: Box::new(push(other, st)),
+                    policy,
+                },
+                preds,
+            ),
+        },
         Plan::Project { input, exprs } => {
             // Through the projection, by substituting its expressions —
             // unless they hold subqueries (they would run more often).
@@ -401,6 +443,7 @@ fn estimate(plan: &Plan, st: &Stats) -> f64 {
         Plan::Function { .. } => 100.0,
         Plan::View { .. } => 100.0,
         Plan::Filter { input, .. } => estimate(input, st) * 0.33,
+        Plan::Secure { input, .. } => estimate(input, st) * 0.5,
         Plan::Project { input, .. } | Plan::Sort { input, .. } => estimate(input, st),
         Plan::Distinct { input } => estimate(input, st) * 0.5,
         Plan::Limit { input, limit, .. } => match limit {
@@ -517,6 +560,10 @@ fn map_children(plan: Plan, f: &dyn Fn(Plan) -> Plan) -> Plan {
         Plan::Filter { input, predicate } => Plan::Filter {
             input: b(input),
             predicate,
+        },
+        Plan::Secure { input, policy } => Plan::Secure {
+            input: b(input),
+            policy,
         },
         Plan::Project { input, exprs } => Plan::Project {
             input: b(input),

@@ -194,6 +194,8 @@ pub enum Func {
     CurrentUser,
     /// `session_user`: the role the session logged in as.
     SessionUser,
+    /// `current_setting(name [, missing_ok])`: a session setting.
+    CurrentSetting,
     /// `current_database()`, `current_catalog`.
     CurrentDatabase,
     /// `current_schema()`.
@@ -261,6 +263,7 @@ impl Func {
             Func::CharFit => "bpchar",
             Func::CurrentUser => "current_user",
             Func::SessionUser => "session_user",
+            Func::CurrentSetting => "current_setting",
             Func::CurrentDatabase => "current_database",
             Func::CurrentSchema => "current_schema",
             Func::ArrayToString => "array_to_string",
@@ -654,6 +657,29 @@ fn subquery(sub: &SubPlan, env: &Env) -> Result<Value> {
         }
         SubKind::Array => Value::Array(rows.iter().map(|r| r[0].clone()).collect()),
     })
+}
+
+/// A setting's value: the session's (`SET`), or a built-in parameter's.
+pub fn setting(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    if let Some(v) = crate::access::current().settings.get(&lower) {
+        return Some(v.clone());
+    }
+    Some(
+        match lower.as_str() {
+            "server_version" => "16.0 (nucleus)",
+            "server_version_num" => "160000",
+            "server_encoding" | "client_encoding" => "UTF8",
+            "timezone" => "UTC",
+            "datestyle" => "ISO, MDY",
+            "search_path" => "\"$user\", public",
+            "standard_conforming_strings" | "integer_datetimes" => "on",
+            "max_identifier_length" => "63",
+            "transaction_isolation" | "default_transaction_isolation" => "repeatable read",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 /// `v IN (items)` with SQL's NULL rules.
@@ -1100,6 +1126,21 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
         Func::CurrentUser => return Ok(Value::Text(crate::access::current().user.clone())),
         Func::SessionUser => {
             return Ok(Value::Text(crate::access::current().session_user.clone()));
+        }
+        Func::CurrentSetting => {
+            let Value::Text(name) = &args[0] else {
+                return Ok(Value::Null);
+            };
+            let missing_ok = matches!(args.get(1), Some(Value::Bool(true)));
+            return Ok(match setting(name) {
+                Some(v) => Value::Text(v),
+                None if missing_ok => Value::Null,
+                None => {
+                    return Err(Error::undefined_object(format!(
+                        "unrecognized configuration parameter \"{name}\""
+                    )));
+                }
+            });
         }
         Func::CurrentDatabase => return Ok(Value::Text("nucleus".into())),
         Func::CurrentSchema => return Ok(Value::Text("public".into())),

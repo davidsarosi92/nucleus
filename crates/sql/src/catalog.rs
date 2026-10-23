@@ -80,8 +80,9 @@ const DATA: u8 = 0x01;
 /// and still reads as one) and `real` (tag 12; before, `double
 /// precision`'s tag 3), `bytea` (tag 13), `time` (14) and `char(n)` (15;
 /// before, `text`'s 4, and still read as text), `inet` and `cidr` (16, 17);
-/// version 7 an owner; older versions still read.
-const TABLE_VERSION: u8 = 7;
+/// version 7 an owner, version 8 row-level security; older versions still
+/// read.
+const TABLE_VERSION: u8 = 8;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -280,6 +281,10 @@ pub struct Table {
     /// The role that owns it (`None`: made before roles, owned by the
     /// administrators).
     pub owner: Option<String>,
+    /// Row-level security is on ([`crate::policies`]).
+    pub row_security: bool,
+    /// … for its owner too.
+    pub force_row_security: bool,
 }
 
 impl Table {
@@ -362,6 +367,7 @@ impl Table {
             w.str(t).str(c);
         }
         w.opt_str(self.owner.as_deref());
+        w.u8(u8::from(self.row_security) | u8::from(self.force_row_security) << 1);
         w.0
     }
 
@@ -462,6 +468,7 @@ impl Table {
             }
         }
         let owner = if version >= 7 { r.opt_str()? } else { None };
+        let rls = if version >= 8 { r.u8()? } else { 0 };
         Ok(Self {
             id,
             name,
@@ -473,6 +480,8 @@ impl Table {
             foreign_keys,
             referenced_by,
             owner,
+            row_security: rls & 1 != 0,
+            force_row_security: rls & 2 != 0,
         })
     }
 }
@@ -1089,6 +1098,8 @@ mod tests {
             }],
             referenced_by: vec![("pets".into(), "pets_owner_fkey".into())],
             owner: Some("alice".into()),
+            row_security: true,
+            force_row_security: false,
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));

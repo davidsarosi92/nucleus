@@ -131,6 +131,27 @@ pub enum Statement {
         /// A `REVOKE`.
         revoke: bool,
     },
+    /// `ALTER TABLE t ENABLE | DISABLE ROW LEVEL SECURITY`, `… [NO] FORCE
+    /// ROW LEVEL SECURITY`.
+    SetRowSecurity {
+        /// The table.
+        table: String,
+        /// `ENABLE` / `DISABLE`.
+        enable: Option<bool>,
+        /// `FORCE` / `NO FORCE`.
+        force: Option<bool>,
+    },
+    /// `CREATE POLICY …` (validated when run).
+    CreatePolicy(crate::policies::Policy),
+    /// `DROP POLICY [IF EXISTS] name ON table`.
+    DropPolicy {
+        /// The policy.
+        name: String,
+        /// Its table.
+        table: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
     /// `CREATE TYPE name AS ENUM (labels)`.
     CreateEnum {
         /// The type's name.
@@ -230,6 +251,8 @@ pub enum Statement {
         /// Value, as text.
         value: String,
     },
+    /// `RESET name`, `RESET ALL` (`None`).
+    Reset(Option<String>),
     /// `SHOW name`.
     Show(String),
     /// `EXPLAIN`.

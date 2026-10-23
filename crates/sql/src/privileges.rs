@@ -832,7 +832,10 @@ pub fn authorize_ddl(
         Statement::CreateEnum { .. } => c.require(txn, Kind::Schema, "public", CREATE, None)?,
         Statement::CreateIndex { table, .. }
         | Statement::AlterColumnType { table, .. }
-        | Statement::DropConstraint { table, .. } => {
+        | Statement::DropConstraint { table, .. }
+        | Statement::SetRowSecurity { table, .. }
+        | Statement::DropPolicy { table, .. }
+        | Statement::CreatePolicy(crate::policies::Policy { table, .. }) => {
             if crate::catalog::get_table(txn, table)?.is_some() {
                 c.require_owner(txn, Kind::Table, table)?;
             }

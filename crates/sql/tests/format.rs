@@ -158,7 +158,7 @@ fn integer_columns_from_before_widths_read_as_bigint() {
         k
     };
     let mut record = txn.get(&key).unwrap().unwrap();
-    assert_eq!(record[0], 7);
+    assert_eq!(record[0], 8);
     record[0] = 5;
     txn.put(&key, &record).unwrap();
     let prefix = t.index_prefix(0);

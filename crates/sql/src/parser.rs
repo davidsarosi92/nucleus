@@ -436,6 +436,70 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `CREATE POLICY name ON table [AS PERMISSIVE | RESTRICTIVE] [FOR
+    /// command] [TO roles] [USING (expr)] [WITH CHECK (expr)]`.
+    fn create_policy(&mut self) -> Result<Statement> {
+        use crate::policies::{Command, Policy};
+        let name = self.ident()?;
+        self.expect_kw("on")?;
+        let table = self.relation()?;
+        let permissive = if self.eat_kw("as") {
+            if self.eat_kw("restrictive") {
+                false
+            } else {
+                self.expect_kw("permissive")?;
+                true
+            }
+        } else {
+            true
+        };
+        let command = if self.eat_kw("for") {
+            match self.next() {
+                Some(Token::Word(w)) => match w.as_str() {
+                    "all" => Command::All,
+                    "select" => Command::Select,
+                    "insert" => Command::Insert,
+                    "update" => Command::Update,
+                    "delete" => Command::Delete,
+                    _ => return Err(self.error("expected ALL, SELECT, INSERT, UPDATE or DELETE")),
+                },
+                _ => return Err(self.error("expected a command")),
+            }
+        } else {
+            Command::All
+        };
+        let roles = if self.eat_kw("to") {
+            self.grantees()?
+        } else {
+            vec![crate::privileges::PUBLIC.into()]
+        };
+        let condition = |p: &mut Self| -> Result<String> {
+            p.expect_op("(")?;
+            let (_, text) = p.text_of(|p| p.expr())?;
+            p.expect_op(")")?;
+            Ok(text)
+        };
+        let using = if self.eat_kw("using") {
+            Some(condition(self)?)
+        } else {
+            None
+        };
+        let check = if self.eat_kws(&["with", "check"]) {
+            Some(condition(self)?)
+        } else {
+            None
+        };
+        Ok(Statement::CreatePolicy(Policy {
+            name,
+            table,
+            permissive,
+            command,
+            roles,
+            using,
+            check,
+        }))
+    }
+
     /// `name, name, …` (no parentheses).
     fn name_list(&mut self) -> Result<Vec<String>> {
         let mut out = vec![self.ident()?];
@@ -552,6 +616,18 @@ impl<'a> Parser<'a> {
                 self.pos += 2;
                 Ok(Statement::SetRole(None))
             }
+            "reset" => {
+                self.pos += 1;
+                if self.eat_kw("all") {
+                    return Ok(Statement::Reset(None));
+                }
+                let mut name = self.ident()?;
+                while self.eat_op(".") {
+                    name.push('.');
+                    name.push_str(&self.ident()?);
+                }
+                Ok(Statement::Reset(Some(name)))
+            }
             "show" => {
                 self.pos += 1;
                 if self.eat_kws(&["transaction", "isolation", "level"]) {
@@ -627,7 +703,12 @@ impl<'a> Parser<'a> {
             };
             return Ok(Statement::SetRole(role));
         }
-        let name = self.ident()?;
+        // A dotted name (`nucleus.tenant`): a custom setting.
+        let mut name = self.ident()?;
+        while self.eat_op(".") {
+            name.push('.');
+            name.push_str(&self.ident()?);
+        }
         if !self.eat_op("=") {
             self.expect_kw("to")?;
         }
@@ -699,6 +780,9 @@ impl<'a> Parser<'a> {
             };
             options.extend(self.role_options()?);
             return Ok(Statement::CreateRole { name, options });
+        }
+        if self.eat_kw("policy") {
+            return self.create_policy();
         }
         if self.eat_kw("type") {
             let name = self.ident()?;
@@ -998,6 +1082,17 @@ impl<'a> Parser<'a> {
                 if_exists,
             });
         }
+        if self.eat_kw("policy") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let name = self.ident()?;
+            self.expect_kw("on")?;
+            let table = self.relation()?;
+            return Ok(Statement::DropPolicy {
+                name,
+                table,
+                if_exists,
+            });
+        }
         if self.eat_kw("role") || self.eat_kw("user") {
             let if_exists = self.eat_kws(&["if", "exists"]);
             let mut names = vec![self.ident()?];
@@ -1242,6 +1337,32 @@ impl<'a> Parser<'a> {
         }
         self.expect_kw("table")?;
         let table = self.relation()?;
+        for (words, enable, force) in [
+            (
+                &["enable", "row", "level", "security"][..],
+                Some(true),
+                None,
+            ),
+            (
+                &["disable", "row", "level", "security"][..],
+                Some(false),
+                None,
+            ),
+            (&["force", "row", "level", "security"][..], None, Some(true)),
+            (
+                &["no", "force", "row", "level", "security"][..],
+                None,
+                Some(false),
+            ),
+        ] {
+            if self.eat_kws(words) {
+                return Ok(Statement::SetRowSecurity {
+                    table,
+                    enable,
+                    force,
+                });
+            }
+        }
         if self.eat_kws(&["drop", "constraint"]) {
             let if_exists = self.eat_kws(&["if", "exists"]);
             let name = self.ident()?;
