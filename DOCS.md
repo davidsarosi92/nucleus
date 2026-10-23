@@ -88,7 +88,11 @@ into an empty directory, points its nucleus dependencies at the packaged
 core crates (`[patch.crates-io]`) and runs its tests there.
 
   The `i686` musl tests run as 32-bit binaries on a 64-bit Linux
-kernel, which is what catches 64-bit `usize` assumptions.
+kernel, which is what catches 64-bit `usize` assumptions.  The `tls` module's
+cryptography (ring) has C and assembly, so a musl target needs a C
+compiler for it: `musl-gcc` (Debian / Ubuntu `musl-tools`) for x86_64 and
+aarch64, the multilib `gcc` for i686 — CI sets `CC_<target>`, e.g.
+`CC_x86_64_unknown_linux_musl=musl-gcc`.
 
 **Simulation tests** take their seeds from `harness::run` (§3.4).  The test
 profile builds with `opt-level = 1` (debug assertions on), because the crash

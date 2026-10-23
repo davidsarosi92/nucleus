@@ -72,9 +72,11 @@ jobs:
         include:
           - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,   test: true }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  test: true }
-          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  test: true }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, test: true }
-          - { os: ubuntu-latest,    target: i686-unknown-linux-musl,    test: true, apt: gcc-multilib }
+          # musl: a C compiler for ring's code (the tls module) — musl-gcc,
+          # or for i686 the multilib gcc (cc adds -m32).
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  test: true, apt: musl-tools, cc: musl-gcc }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, test: true, apt: musl-tools, cc: musl-gcc }
+          - { os: ubuntu-latest,    target: i686-unknown-linux-musl,    test: true, apt: gcc-multilib, cc: gcc }
           - { os: macos-latest,     target: aarch64-apple-darwin,       test: true }
           - { os: macos-latest,     target: x86_64-apple-darwin,        test: false }
           - { os: windows-latest,   target: x86_64-pc-windows-msvc,     test: true }
@@ -85,6 +87,10 @@ jobs:
       - name: Install system packages
         if: matrix.apt
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      - name: C compiler for the target
+        if: matrix.cc
+        shell: bash
+        run: echo "CC_$(echo '${{ matrix.target }}' | tr '-' '_')=${{ matrix.cc }}" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
