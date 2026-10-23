@@ -833,9 +833,13 @@ impl<'a> Binder<'a> {
                                 Some(s) => format!("{s}.{name}"),
                                 None => name.clone(),
                             };
-                            return Err(Error::undefined_table(format!(
-                                "relation \"{full}\" does not exist"
-                            )));
+                            let views: Vec<String> = self
+                                .registry
+                                .views()
+                                .iter()
+                                .map(|v| format!("{}.{}", v.schema(), v.name()))
+                                .collect();
+                            return Err(catalog::no_such_table(self.txn, &full, &views));
                         }
                     },
                 };
@@ -1444,19 +1448,49 @@ impl<'a> Binder<'a> {
                 ));
             }
         }
+        // The names that are there, for the hint.
+        let visible = |of: Option<&str>| -> Vec<&str> {
+            let mut v: Vec<&str> = std::iter::once(scope)
+                .chain(self.outer.iter())
+                .flat_map(|s| s.cols.iter())
+                .filter(|c| !c.hidden && of.is_none_or(|t| c.table.as_deref() == Some(t)))
+                .map(|c| c.name.as_str())
+                .collect();
+            v.dedup();
+            v
+        };
         if let Some(t) = table {
             if !scope.has_table(t) && !self.outer.iter().any(|s| s.has_table(t)) {
-                return Err(Error::undefined_table(format!(
-                    "missing FROM-clause entry for table \"{t}\""
-                )));
+                let mut tables: Vec<&str> = std::iter::once(scope)
+                    .chain(self.outer.iter())
+                    .flat_map(|s| s.cols.iter())
+                    .filter_map(|c| c.table.as_deref())
+                    .collect();
+                tables.dedup();
+                let e =
+                    Error::undefined_table(format!("missing FROM-clause entry for table \"{t}\""));
+                return Err(
+                    match crate::hint::names("table or alias", t, &tables, None) {
+                        Some(h) => e.with_hint(h),
+                        None => e,
+                    },
+                );
             }
-            return Err(Error::undefined_column(format!(
-                "column {t}.{name} does not exist"
-            )));
+            let e = Error::undefined_column(format!("column {t}.{name} does not exist"));
+            return Err(
+                match crate::hint::names("column", name, &visible(Some(t)), None) {
+                    Some(h) => e.with_hint(h),
+                    None => e,
+                },
+            );
         }
-        Err(Error::undefined_column(format!(
-            "column \"{name}\" does not exist"
-        )))
+        let e = Error::undefined_column(format!("column \"{name}\" does not exist"));
+        Err(
+            match crate::hint::names("column", name, &visible(None), None) {
+                Some(h) => e.with_hint(h),
+                None => e,
+            },
+        )
     }
 
     fn subquery(&mut self, q: &ast::Query, scope: &Scope) -> Result<(Plan, Scope, bool)> {
@@ -1875,24 +1909,41 @@ impl<'a> Binder<'a> {
                 star,
                 order_by,
             } => {
-                if *star || *distinct || !order_by.is_empty() {
-                    return Err(Error::syntax(format!(
-                        "{name}(*), DISTINCT and ORDER BY are only for aggregates"
-                    )));
-                }
                 let f = match self.registry.function(name) {
+                    Some(_) if *star || *distinct || !order_by.is_empty() => {
+                        return Err(Error::syntax(format!(
+                            "{name}(*), DISTINCT and ORDER BY are only for aggregates"
+                        )));
+                    }
                     Some(f) => f.clone(),
                     None => {
-                        return Err(Error::undefined_function(format!(
-                            "function {name} does not exist"
-                        )));
+                        let e =
+                            Error::undefined_function(format!("function {name} does not exist"));
+                        let names = self.registry.function_names();
+                        let aggs = self.registry.aggregate_names();
+                        let known = names
+                            .iter()
+                            .chain(&aggs)
+                            .copied()
+                            .filter(|n| !n.starts_with("__"));
+                        return Err(match crate::hint::closest(name, known) {
+                            Some(c) => e.with_hint(format!("Perhaps you meant {c}().")),
+                            None => e,
+                        });
                     }
                 };
                 if !f.arity().contains(&args.len()) {
+                    let a = f.arity();
+                    let takes = match (*a.start(), *a.end()) {
+                        (x, y) if x == y => format!("{x}"),
+                        (x, usize::MAX) => format!("{x} or more"),
+                        (x, y) => format!("{x} to {y}"),
+                    };
                     return Err(Error::undefined_function(format!(
                         "function {name} with {} arguments does not exist",
                         args.len()
-                    )));
+                    ))
+                    .with_hint(format!("{name}() takes {takes} arguments.")));
                 }
                 let mut bound = Vec::new();
                 for a in args {
@@ -2493,6 +2544,9 @@ fn comparable(a: Option<DataType>, b: Option<DataType>) -> Result<()> {
         }
         (Some(x), Some(y)) => Err(Error::undefined_function(format!(
             "operator does not exist: {x} = {y}"
+        ))
+        .with_hint(format!(
+            "Compare values of one type: cast one side, as CAST(… AS {x}) or …::{y}."
         ))),
     }
 }

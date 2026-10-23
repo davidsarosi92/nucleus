@@ -540,6 +540,7 @@ fn def_table(k: usize) -> Table {
                 default: None,
                 max_len: None,
                 numeric: None,
+                comment: None,
             })
             .collect(),
         primary_key: Vec::new(),
@@ -551,6 +552,7 @@ fn def_table(k: usize) -> Table {
         owner: None,
         row_security: false,
         force_row_security: false,
+        comment: None,
     }
 }
 
@@ -1083,6 +1085,27 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                 ("amtype", text("i")),
             ]));
         }
+        // Comments: tables' (objsubid 0) and columns' (their number).
+        "pg_description" => {
+            for t in &tables {
+                let comments = std::iter::once((0, &t.comment)).chain(
+                    t.columns
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| (i as i64 + 1, &c.comment)),
+                );
+                for (sub, comment) in comments {
+                    if let Some(c) = comment {
+                        out.push(r(&[
+                            ("objoid", int(rel_oid(t))),
+                            ("classoid", int(1259)),
+                            ("objsubid", int(sub)),
+                            ("description", text(c)),
+                        ]));
+                    }
+                }
+            }
+        }
         "pg_class" => {
             for rel in relations(&tables, registry) {
                 out.push(r(&[
@@ -1605,8 +1628,13 @@ enum PgFn {
     GetTriggerdef,
     /// `pg_encoding_to_char(encoding)`.
     EncodingToChar,
-    /// `obj_description`, `col_description`, `shobj_description` (NULL).
+    /// `obj_description(oid [, catalog])`: a table's comment.
     ObjDescription,
+    /// `col_description(table oid, column number)`: a column's comment.
+    ColDescription,
+    /// `shobj_description(oid, catalog)` (NULL: no shared objects have
+    /// comments).
+    ShobjDescription,
     /// `has_table_privilege` and friends (always true: one role).
     HasPrivilege,
     /// `pg_backend_pid()`.
@@ -1649,11 +1677,9 @@ const FUNCTIONS: &[(PgFn, &[&str], RangeInclusive<usize>)] = &[
     ),
     (PgFn::GetTriggerdef, &["pg_get_triggerdef"], 1..=2),
     (PgFn::EncodingToChar, &["pg_encoding_to_char"], 1..=1),
-    (
-        PgFn::ObjDescription,
-        &["obj_description", "col_description", "shobj_description"],
-        1..=2,
-    ),
+    (PgFn::ObjDescription, &["obj_description"], 1..=2),
+    (PgFn::ColDescription, &["col_description"], 2..=2),
+    (PgFn::ShobjDescription, &["shobj_description"], 2..=2),
     (
         PgFn::HasPrivilege,
         &[
@@ -1813,7 +1839,33 @@ fn call(f: PgFn, args: &[Value], txn: &dyn KvTxn, registry: &Registry) -> Result
         }
         // No partitioning: a table is its own (only) ancestor.
         PgFn::PartitionAncestors => args.first().cloned().unwrap_or(Value::Null),
-        PgFn::StatisticsObjColumns | PgFn::GetTriggerdef | PgFn::ObjDescription => Value::Null,
+        PgFn::ObjDescription => {
+            let class = match args.get(1) {
+                Some(Value::Text(c)) => Some(c.as_str()),
+                _ => None,
+            };
+            match as_int(0) {
+                Some(oid) if class.is_none_or(|c| c == "pg_class") => catalog::tables(txn)?
+                    .into_iter()
+                    .find(|t| rel_oid(t) == oid)
+                    .and_then(|t| t.comment)
+                    .map_or(Value::Null, Value::Text),
+                _ => Value::Null,
+            }
+        }
+        PgFn::ColDescription => match (as_int(0), as_int(1)) {
+            (Some(oid), Some(n)) if n > 0 => catalog::tables(txn)?
+                .into_iter()
+                .find(|t| rel_oid(t) == oid)
+                .and_then(|t| {
+                    t.columns
+                        .get(n as usize - 1)
+                        .and_then(|c| c.comment.clone())
+                })
+                .map_or(Value::Null, Value::Text),
+            _ => Value::Null,
+        },
+        PgFn::StatisticsObjColumns | PgFn::GetTriggerdef | PgFn::ShobjDescription => Value::Null,
         PgFn::RelationIsPublishable => Value::Bool(false),
         PgFn::EncodingToChar => {
             if as_int(0) == Some(6) {

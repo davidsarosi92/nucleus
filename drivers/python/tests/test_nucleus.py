@@ -99,6 +99,13 @@ class Conformance(unittest.TestCase):
             with self.assertRaises(nucleus.IntegrityError) as e:
                 c.execute(f"INSERT INTO {t} VALUES (1)")
             self.assertEqual(e.exception.code, "23505")
+            # What to do about it: the hint (protocol version 5).
+            with self.assertRaises(nucleus.ProgrammingError) as e:
+                c.execute(f"SELECT ib FROM {t}")
+            self.assertEqual(e.exception.hint, 'Perhaps you meant column "id".')
+            with self.assertRaises(nucleus.DataError) as e:
+                c.execute("SELECT 'x'::integer")
+            self.assertIsNone(e.exception.hint)
             # Several statements: results, until the first error.
             self.assertEqual(len(c.query("SELECT 1; SELECT 2")), 2)
             self.assertEqual(c.execute("SELECT 3").rows, [(3,)])

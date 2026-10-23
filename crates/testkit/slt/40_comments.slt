@@ -1,0 +1,85 @@
+# COMMENT ON TABLE / COLUMN: kept in the catalog, shown in nc_catalog, so
+# the schema explains itself to people and models.
+
+statement ok
+CREATE TABLE cm (id INT PRIMARY KEY, email TEXT, region TEXT)
+
+statement ok
+COMMENT ON TABLE cm IS 'People who buy; one row per account.'
+
+statement ok
+COMMENT ON COLUMN cm.email IS 'Login e-mail, lower case.'
+
+statement ok
+COMMENT ON COLUMN public.cm.region IS 'it''s the sales region'
+
+# nucleus-only
+query T
+SELECT comment FROM nc_catalog.tables WHERE name = 'cm'
+----
+People who buy; one row per account.
+
+# nucleus-only
+query TT
+SELECT name, comment FROM nc_catalog.columns WHERE table_name = 'cm' ORDER BY position
+----
+id NULL
+email Login e-mail, lower case.
+region it's the sales region
+
+# A comment stays with its column when the table changes.
+statement ok
+ALTER TABLE cm ADD COLUMN score INT
+
+# nucleus-only
+query T
+SELECT comment FROM nc_catalog.columns WHERE table_name = 'cm' AND name = 'email'
+----
+Login e-mail, lower case.
+
+# NULL or '' removes it.
+statement ok
+COMMENT ON COLUMN cm.email IS NULL
+
+statement ok
+COMMENT ON TABLE cm IS ''
+
+# nucleus-only
+query TT
+SELECT (SELECT comment FROM nc_catalog.tables WHERE name = 'cm'), (SELECT comment FROM nc_catalog.columns WHERE table_name = 'cm' AND name = 'email')
+----
+NULL NULL
+
+statement error 42703
+COMMENT ON COLUMN cm.nope IS 'x'
+
+statement error 42P01
+COMMENT ON TABLE nope IS 'x'
+
+statement error 0A000
+COMMENT ON INDEX cm_pkey IS 'x'
+
+# Only the owner comments.
+statement ok
+CREATE USER slt_cm_other
+
+statement ok
+GRANT SELECT, UPDATE ON cm TO slt_cm_other
+
+statement ok
+SET ROLE slt_cm_other
+
+statement error 42501
+COMMENT ON TABLE cm IS 'mine'
+
+statement ok
+RESET ROLE
+
+statement ok
+REVOKE SELECT, UPDATE ON cm FROM slt_cm_other
+
+statement ok
+DROP USER slt_cm_other
+
+statement ok
+DROP TABLE cm

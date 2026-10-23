@@ -23,8 +23,9 @@ import tls from "node:tls";
 
 // 2: registered types (uuid, modules' types) arrive in their binary form;
 // 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
-// 4: the password is proved by SCRAM-SHA-256, never sent.
-export const PROTOCOL_VERSION = 4;
+// 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
+// a hint.
+export const PROTOCOL_VERSION = 5;
 const EXT = 11;
 const ENUM = 20;
 export const DEFAULT_PORT = 20035;
@@ -37,13 +38,18 @@ const TYPE_NAMES = [
   "integer", "real", "bytea", "time", "character", "inet", "cidr",
 ];
 
-/** An error from the server (`code` is the SQLSTATE) or the driver. */
+/**
+ * An error from the server (`code` is the SQLSTATE; `hint`, what to do about
+ * it — the name meant, the cast that would work) or the driver.
+ */
 export class NucleusError extends Error {
   readonly code: string | null;
-  constructor(message: string, code: string | null = null) {
+  readonly hint: string | null;
+  constructor(message: string, code: string | null = null, hint: string | null = null) {
     super(code ? `${message} (${code})` : message);
     this.name = "NucleusError";
     this.code = code;
+    this.hint = hint;
   }
 }
 
@@ -437,6 +443,14 @@ class Reader {
   constructor(b: Buffer) {
     this.b = b;
   }
+
+  /** An `E` message: SQLSTATE, message and (from version 5) the hint. */
+  serverError(): NucleusError {
+    const code = this.str();
+    const message = this.str();
+    const hint = this.at < this.b.length ? this.str() : "";
+    return new NucleusError(message, code, hint === "" ? null : hint);
+  }
   need(n: number): void {
     if (this.at + n > this.b.length) throw new NucleusError("message too short");
   }
@@ -799,10 +813,9 @@ export class Client {
         c.setStatus(m.body);
         return c;
       } else if (m.kind === "E") {
-        const code = r.str();
-        const message = r.str();
+        const e = r.serverError();
         socket.destroy();
-        throw new NucleusError(message, code);
+        throw e;
       } else {
         throw new NucleusError(`unexpected message ${m.kind}`);
       }
@@ -855,11 +868,9 @@ export class Client {
             rows = [];
             break;
           }
-          case "E": {
-            const code = r.str();
-            error = new NucleusError(r.str(), code);
+          case "E":
+            error = r.serverError();
             break;
-          }
           case "R":
             this.setStatus(m.body);
             if (error) throw error;

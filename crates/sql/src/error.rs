@@ -2,13 +2,24 @@
 
 use std::fmt;
 
-/// A SQL error: a SQLSTATE code and a message.
+/// A SQL error: a SQLSTATE code, a message, and perhaps a hint — what to
+/// do about it ([`crate::hint`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     /// The five-character SQLSTATE.
     pub code: &'static str,
     /// The message.
     pub message: String,
+    /// What to do about it: the name meant, the cast that would work.
+    pub hint: Option<String>,
+}
+
+impl Error {
+    /// The same error with `hint`.
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
 }
 
 /// The result type of the SQL layer.
@@ -20,7 +31,7 @@ macro_rules! codes {
             $(
                 #[doc = concat!("An error with SQLSTATE ", $code, ".")]
                 pub fn $fn(message: impl Into<String>) -> Self {
-                    Self { code: $code, message: message.into() }
+                    Self { code: $code, message: message.into(), hint: None }
                 }
             )*
         }

@@ -22,8 +22,8 @@ use std::time::Duration;
 /// `uuid` arrive in their binary form; 3: `smallint`, `integer`, `real`,
 /// `bytea`, `time`, `inet` and `cidr` in theirs, `char(n)` and enums
 /// named as such; 4: the password is proved by SCRAM-SHA-256, never
-/// sent).
-pub const PROTOCOL_VERSION: u16 = 4;
+/// sent; 5: errors carry a hint).
+pub const PROTOCOL_VERSION: u16 = 5;
 /// The nucleus protocol's default port.
 pub const DEFAULT_PORT: u16 = 20_035;
 
@@ -92,13 +92,16 @@ impl Default for Config {
     }
 }
 
-/// An error the server reported: SQLSTATE and message.
+/// An error the server reported: SQLSTATE, message and perhaps a hint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerError {
     /// SQLSTATE (5 characters).
     pub code: String,
     /// The message.
     pub message: String,
+    /// What to do about it — the name meant, the cast that would work
+    /// (protocol version 5; `None` from older servers).
+    pub hint: Option<String>,
 }
 
 impl fmt::Display for ServerError {
@@ -722,6 +725,21 @@ impl<'a> Input<'a> {
     fn u8(&mut self) -> Result<u8, Error> {
         Ok(self.take(1)?[0])
     }
+    /// The `E` message's fields: the hint, from version 5, follows.
+    fn server_error(&mut self) -> Result<ServerError, Error> {
+        let code = self.str()?;
+        let message = self.str()?;
+        let hint = if self.b.is_empty() {
+            None
+        } else {
+            Some(self.str()?).filter(|h| !h.is_empty())
+        };
+        Ok(ServerError {
+            code,
+            message,
+            hint,
+        })
+    }
     fn u16(&mut self) -> Result<u16, Error> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
@@ -928,12 +946,7 @@ impl Client {
                     c.set_status(&body);
                     return Ok(c);
                 }
-                b'E' => {
-                    return Err(Error::Server(ServerError {
-                        code: b.str()?,
-                        message: b.str()?,
-                    }));
-                }
+                b'E' => return Err(Error::Server(b.server_error()?)),
                 k => {
                     return Err(Error::Protocol(format!(
                         "unexpected message {:?}",
@@ -1034,10 +1047,7 @@ impl Client {
                 }
                 b'E' => {
                     current = None;
-                    out.push(Err(ServerError {
-                        code: b.str()?,
-                        message: b.str()?,
-                    }));
+                    out.push(Err(b.server_error()?));
                 }
                 b'R' => {
                     self.set_status(&body);

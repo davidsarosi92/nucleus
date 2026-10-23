@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Protocol version 5 (nucleus PLAN.md §M14.10): errors carry a hint,
+  `Error::hint()` (empty when there is none).
 - A directory's (LDAP) password through PLAIN, over TLS only.
 - An identity token instead of the password: `Config::token`.
 - SCRAM-SHA-256-PLUS over TLS, through the C driver.

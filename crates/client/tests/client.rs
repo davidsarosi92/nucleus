@@ -356,6 +356,19 @@ fn core_types_both_ways() {
 /// One typed query by hand at protocol `version`: the version the server
 /// welcomed with, and the bodies of the Columns and the first Row.
 fn raw_query(version: u16, sql: &str) -> (u16, Vec<u8>, Vec<u8>) {
+    let frames = raw_frames(version, sql);
+    let find = |k: u8| frames.iter().find(|f| f.0 == k).unwrap().1.clone();
+    let welcome = find(b'W');
+    (
+        u16::from_le_bytes([welcome[0], welcome[1]]),
+        find(b'C'),
+        find(b'D'),
+    )
+}
+
+/// The frames a client of `version` (below 4: the password in Hello) gets
+/// for `sql`, through Ready after it.
+fn raw_frames(version: u16, sql: &str) -> Vec<(u8, Vec<u8>)> {
     use std::io::{Read, Write};
     let addr = start(None);
     let mut s = std::net::TcpStream::connect(addr).unwrap();
@@ -392,13 +405,50 @@ fn raw_query(version: u16, sql: &str) -> (u16, Vec<u8>, Vec<u8>) {
         }
         frames.push((head[0], body));
     }
-    let find = |k: u8| frames.iter().find(|f| f.0 == k).unwrap().1.clone();
-    let welcome = find(b'W');
-    (
-        u16::from_le_bytes([welcome[0], welcome[1]]),
-        find(b'C'),
-        find(b'D'),
+    frames
+}
+
+/// Errors carry a hint from protocol version 5 (PLAN.md §M14.10); an older
+/// client's `E` is as it was: SQLSTATE and message only.
+#[test]
+fn hints_from_version_5() {
+    let mut c = Client::connect(config(start(None))).unwrap();
+    c.execute(
+        "CREATE TABLE customers (id INT PRIMARY KEY, email TEXT)",
+        &[],
     )
+    .unwrap();
+    let hint = |c: &mut Client, sql: &str| match c.execute(sql, &[]) {
+        Err(Error::Server(e)) => (e.code, e.hint),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        hint(&mut c, "SELECT emial FROM customers"),
+        (
+            "42703".into(),
+            Some("Perhaps you meant column \"email\".".into())
+        )
+    );
+    assert_eq!(
+        hint(&mut c, "SELECT * FROM custmers"),
+        (
+            "42P01".into(),
+            Some("Perhaps you meant table \"customers\".".into())
+        )
+    );
+    assert_eq!(
+        hint(&mut c, "SELECT * FROM customers WHERE id = 'x'::text").1,
+        Some("Compare values of one type: cast one side, as CAST(… AS integer) or …::text.".into())
+    );
+    // No hint is none, not an empty one.
+    assert_eq!(hint(&mut c, "SELECT 'abc'::integer").1, None);
+    c.close().unwrap();
+    let frames = raw_frames(3, "SELECT 1/0");
+    let e = &frames.iter().find(|f| f.0 == b'E').unwrap().1;
+    let code_len = u32::from_le_bytes(e[0..4].try_into().unwrap()) as usize;
+    let at = 4 + code_len;
+    let message_len = u32::from_le_bytes(e[at..at + 4].try_into().unwrap()) as usize;
+    assert_eq!(e.len(), at + 4 + message_len, "no hint before version 5");
 }
 
 /// A version-1 client (before registered types) gets them as text.

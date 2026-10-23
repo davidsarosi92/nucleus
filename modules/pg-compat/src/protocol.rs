@@ -444,6 +444,7 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
                             v >> 16,
                             v & 0xFFFF
                         ),
+                        hint: None,
                     },
                 )?;
                 out.flush()?;
@@ -463,6 +464,7 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
             &Error {
                 code: "28000",
                 message: why,
+                hint: None,
             },
         )?;
         out.flush()?;
@@ -481,6 +483,7 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
                 message: format!(
                     "the password of \"{user}\" is checked by a directory, which needs TLS (sslmode=require)"
                 ),
+                hint: None,
             },
         )?;
         out.flush()?;
@@ -527,6 +530,7 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
             &Error {
                 code: "28P01",
                 message: format!("password authentication failed for user \"{user}\""),
+                hint: None,
             },
         )?;
         out.flush()?;
@@ -617,6 +621,7 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
             other => Err(Error {
                 code: "08P01",
                 message: format!("unsupported message type {:?}", other as char),
+                hint: None,
             }),
         };
         match r {
@@ -649,25 +654,28 @@ fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
 }
 
 fn send_error(out: &mut impl Write, e: &Error) -> io::Result<()> {
-    out.write_all(
-        &Msg::new(b'E')
-            .u8(b'S')
-            .str("ERROR")
-            .u8(b'V')
-            .str("ERROR")
-            .u8(b'C')
-            .str(e.code)
-            .u8(b'M')
-            .str(&e.message)
-            .u8(0)
-            .finish(),
-    )
+    let m = Msg::new(b'E')
+        .u8(b'S')
+        .str("ERROR")
+        .u8(b'V')
+        .str("ERROR")
+        .u8(b'C')
+        .str(e.code)
+        .u8(b'M')
+        .str(&e.message);
+    // The hint, as PostgreSQL's clients show it (`HINT:` in psql).
+    let m = match &e.hint {
+        Some(h) => m.u8(b'H').str(h),
+        None => m,
+    };
+    out.write_all(&m.u8(0).finish())
 }
 
 fn proto(e: io::Error) -> Error {
     Error {
         code: "08P01",
         message: e.to_string(),
+        hint: None,
     }
 }
 
@@ -744,6 +752,7 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
     let bad = |what: &str| Error {
         code: "22P03",
         message: format!("invalid binary parameter: {what}"),
+        hint: None,
     };
     if format == 1 {
         return Ok(match (ty, bytes.len()) {
@@ -855,6 +864,7 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
     let s = String::from_utf8(bytes.to_vec()).map_err(|_| Error {
         code: "22021",
         message: "parameter is not valid UTF-8".into(),
+        hint: None,
     })?;
     match ty {
         None | Some(DataType::Text) => Ok(Value::Text(s)),
@@ -1006,6 +1016,7 @@ impl Conn {
         let p = self.prepared.get(&name).ok_or_else(|| Error {
             code: "26000",
             message: format!("prepared statement \"{name}\" does not exist"),
+            hint: None,
         })?;
         let nf = b.i16().map_err(proto)? as usize;
         let mut formats = Vec::with_capacity(nf);
@@ -1053,6 +1064,7 @@ impl Conn {
                 let p = self.prepared.get(&name).ok_or_else(|| Error {
                     code: "26000",
                     message: format!("prepared statement \"{name}\" does not exist"),
+                    hint: None,
                 })?;
                 (p.columns.clone(), vec![], Some(p.params.clone()))
             }
@@ -1060,6 +1072,7 @@ impl Conn {
                 let p = self.portals.get(&name).ok_or_else(|| Error {
                     code: "34000",
                     message: format!("portal \"{name}\" does not exist"),
+                    hint: None,
                 })?;
                 (p.columns.clone(), p.result_formats.clone(), None)
             }
@@ -1084,6 +1097,7 @@ impl Conn {
         let mut portal = self.portals.remove(&name).ok_or_else(|| Error {
             code: "34000",
             message: format!("portal \"{name}\" does not exist"),
+            hint: None,
         })?;
         let Some(stmt) = portal.stmt.clone() else {
             self.out

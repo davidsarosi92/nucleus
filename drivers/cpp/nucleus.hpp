@@ -28,15 +28,21 @@
 
 namespace nucleus {
 
-/// An error from the server (`code()` is the SQLSTATE) or the driver.
+/// An error from the server (`code()` is the SQLSTATE, `hint()` what to do
+/// about it — empty: none) or the driver.
 class Error : public std::runtime_error {
 public:
-    Error(const std::string& message, std::string code)
-        : std::runtime_error(code.empty() ? message : message + " (" + code + ")"), code_(std::move(code)) {}
+    Error(const std::string& message, std::string code, std::string hint = "")
+        : std::runtime_error(code.empty() ? message : message + " (" + code + ")"),
+          code_(std::move(code)),
+          hint_(std::move(hint)) {}
     const std::string& code() const { return code_; }
+    /// The name meant, the cast that would work (protocol version 5).
+    const std::string& hint() const { return hint_; }
 
 private:
     std::string code_;
+    std::string hint_;
 };
 
 /// An exact decimal (mantissa × 10^-scale), parsed from and printed as text.
@@ -336,7 +342,7 @@ public:
         c.token = config.token.empty() ? nullptr : config.token.c_str();
         nc_error err;
         conn_ = nc_connect(&c, &err);
-        if (!conn_) throw Error(err.message, err.code);
+        if (!conn_) throw Error(err.message, err.code, err.hint);
     }
     Connection(const Connection&) = delete;
     Connection& operator=(const Connection&) = delete;
@@ -357,7 +363,7 @@ public:
         for (const auto& p : params) args.push_back(detail::to_c(p, store));
         nc_error err;
         nc_result* r = nc_query(conn_, sql.c_str(), args.data(), args.size(), &err);
-        if (!r) throw Error(err.message, err.code);
+        if (!r) throw Error(err.message, err.code, err.hint);
         Result out;
         for (size_t c = 0; c < nc_columns(r); c++)
             out.columns.push_back({nc_column_name(r, c), nc_column_type(r, c), nc_column_element(r, c),

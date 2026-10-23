@@ -482,6 +482,11 @@ impl Session {
 
     /// Runs one statement with parameter values.
     pub fn run(&mut self, stmt: &Statement, params: &[Value]) -> Result<Output> {
+        self.run_statement(stmt, params)
+            .map_err(crate::hint::complete)
+    }
+
+    fn run_statement(&mut self, stmt: &Statement, params: &[Value]) -> Result<Output> {
         match stmt {
             Statement::Begin(mode) => {
                 if self.block.is_none() {
@@ -983,6 +988,33 @@ pub fn execute(
                 rows,
             }
         }
+        Statement::Comment {
+            table,
+            column,
+            text,
+        } => {
+            let mut t = catalog::table(&*txn, table)?;
+            crate::privileges::Checker::new().require_owner(
+                &*txn,
+                crate::privileges::Kind::Table,
+                table,
+            )?;
+            // An empty comment is none (as PostgreSQL has it).
+            let text = text.clone().filter(|s| !s.is_empty());
+            match column {
+                None => t.comment = text,
+                Some(c) => {
+                    let i = t.column(c).ok_or_else(|| {
+                        Error::undefined_column(format!(
+                            "column \"{c}\" of relation \"{table}\" does not exist"
+                        ))
+                    })?;
+                    t.columns[i].comment = text;
+                }
+            }
+            catalog::update_table(txn, &t)?;
+            Output::Command("COMMENT".into())
+        }
         Statement::Lint(inner) => {
             let ro: &dyn KvTxn = &*txn;
             let (plan, changed) = match &**inner {
@@ -1473,6 +1505,7 @@ pub fn execute(
                 default: column.default.clone(),
                 max_len: column.max_len,
                 numeric: column.numeric,
+                comment: None,
             });
             if let Some(check) = &column.check {
                 t.checks
@@ -1605,6 +1638,7 @@ fn create_table(
             default: s.default.clone(),
             max_len: s.max_len,
             numeric: s.numeric,
+            comment: None,
         });
         if s.primary_key {
             if !pk.is_empty() {
@@ -1673,6 +1707,7 @@ fn create_table(
         owner: Some(crate::access::current().user.clone()),
         row_security: false,
         force_row_security: false,
+        comment: None,
     };
     for (n, cols) in uniques {
         if catalog::find_index(&*txn, &n)?.is_some() {

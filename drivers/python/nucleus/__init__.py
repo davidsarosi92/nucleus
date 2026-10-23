@@ -54,8 +54,9 @@ paramstyle = "numeric"  # $1, $2, ...
 
 # 2: registered types (uuid, modules' types) arrive in their binary form;
 # 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
-# 4: the password is proved by SCRAM-SHA-256, never sent.
-PROTOCOL_VERSION = 4
+# 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
+# a hint.
+PROTOCOL_VERSION = 5
 DEFAULT_PORT = 20035
 
 _EPOCH_DATE = _dt.date(2000, 1, 1)
@@ -73,12 +74,14 @@ _EXT = 11
 
 
 class Error(Exception):
-    """A nucleus error; ``code`` is the SQLSTATE (or None)."""
+    """A nucleus error; ``code`` is the SQLSTATE (or None), ``hint`` what
+    to do about it (or None): the name meant, the cast that would work."""
 
-    def __init__(self, message, code=None):
+    def __init__(self, message, code=None, hint=None):
         super().__init__(f"{message} ({code})" if code else message)
         self.message = message
         self.code = code
+        self.hint = hint
 
 
 class InterfaceError(Error):
@@ -109,13 +112,16 @@ class NotSupportedError(DatabaseError):
     """A feature nucleus does not have: 0A000."""
 
 
-def _server_error(code, message):
+def _server_error(r):
+    """The error an E message reports (its hint from protocol version 5)."""
+    code, message = r.str(), r.str()
+    hint = (r.str() or None) if r.at < len(r.b) else None
     cls = {
         "22": DataError, "23": IntegrityError, "42": ProgrammingError,
         "0A": NotSupportedError, "08": OperationalError,
         "28": OperationalError, "40": OperationalError,
     }.get(code[:2], DatabaseError)
-    return cls(message, code)
+    return cls(message, code, hint)
 
 
 @_dataclass(frozen=True)
@@ -511,9 +517,9 @@ class Connection:
                 self.status = body[0]
                 return
             elif kind == b"E":
-                code, message = r.str(), r.str()
+                error = _server_error(r)
                 self._sock.close()
-                raise _server_error(code, message)
+                raise error
             else:
                 raise InterfaceError(f"unexpected message {kind!r}")
 
@@ -574,7 +580,7 @@ class Connection:
                 results.append(Result(columns or [], rows if columns is not None else [], command, count))
                 columns, rows = None, []
             elif kind == b"E":
-                error = _server_error(r.str(), r.str())
+                error = _server_error(r)
             elif kind == b"R":
                 self.status = payload[0]
                 if error is not None:

@@ -483,7 +483,8 @@ of input is rolled back.  `crates/cli/tests/cli.rs` drives the binaries.
 **`ncsql`** (§M14.6) is nucleus's SQL shell: with a directory it opens
 that database itself; otherwise it connects to a nucleus server over the
 nucleus protocol (default `127.0.0.1:20035`, user, password and database
-`nucleus`; the password also from `NCPASSWORD`).  Statements end with `;` (a script on stdin,
+`nucleus`; the password also from `NCPASSWORD`).  An error prints its hint
+on a `HINT:` line.  Statements end with `;` (a script on stdin,
 or one `-c` command); the prompt shows `*` in a transaction block and `!`
 in a failed one.  Its backslash commands read `nc_catalog` (§8.11), so they
 work the same locally and remotely:
@@ -849,7 +850,11 @@ CONSTRAINT [IF EXISTS] n`, `INSERT … VALUES | SELECT | DEFAULT VALUES
 [RETURNING]`, `UPDATE … SET … [WHERE] [RETURNING]`, `DELETE … [WHERE]
 [RETURNING]`, queries, `BEGIN`/`START TRANSACTION` (`ISOLATION LEVEL …`,
 `READ ONLY|WRITE`), `COMMIT`/`END`, `ROLLBACK`, `SET TRANSACTION …`, `SET
-name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`.  Table names may
+name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`, `COMMENT ON
+TABLE t | COLUMN t.c IS 'text' | NULL` (the owner's; `''` removes it too;
+kept in the table's record, shown in `nc_catalog.tables` and `.columns`,
+`ncsql \d` and pg-compat's `obj_description` / `col_description` /
+`pg_description`).  Table names may
 be qualified with `public.` (and, to read, `nc_catalog.`, `pg_catalog.`,
 `information_schema.`).
 
@@ -1292,6 +1297,22 @@ normalized) and `plan` (that statement's plan with the index, with its
 constants).  Most rows saved first.  Joins do not give candidates yet
 (the executor has no index nested loop).
 
+### 8.14 Errors and hints (`error`, `hint`)
+
+An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
+about it, for people and for models.  Sites that know more attach their
+own (`Error::with_hint`): an unknown column — the one meant
+(`Perhaps you meant column "email".`, by edit distance with swaps, a third
+of the letters at most), else the columns in scope when there are 12 or
+fewer; an unknown table or `FROM` entry — the one meant, else the tables;
+an unknown function — the one meant (aggregates too), a wrong argument
+count — the counts it takes; a comparison of two types — the cast.  The
+session gives the rest a hint by code (`hint::complete`): `25P02`
+ROLLBACK, `40001` run it again, `23502`, `23505`, `42501` GRANT, `22003`
+a wider type, `22012` NULLIF, `21000` LIMIT 1, `42P07` IF NOT EXISTS,
+`42804` and argument types — a cast.  On the wire: `ncp` 5's `E`
+(§10), pg-compat's `H` field (psql's `HINT:`).
+
 ## 9. Server (`nucleus-server`)
 
 ```
@@ -1627,7 +1648,7 @@ header bytes not included; at most 1 GiB), then the body.
 
 | Kind | Direction | Body |
 |------|-----------|------|
-| `H` Hello | client → server, first | `u16` version (4; 1–3 still accepted), string user, string database, string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
+| `H` Hello | client → server, first | `u16` version (5; 1–4 still accepted), string user, string database, string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
 | `A` Authentication | server → client | string: the mechanisms, space-separated (`SCRAM-SHA-256`; over TLS with a channel binding `SCRAM-SHA-256-PLUS SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
 | `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message — or OAUTHBEARER's initial response, or PLAIN's |
 | `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |
@@ -1635,7 +1656,7 @@ header bytes not included; at most 1 GiB), then the body.
 | `C` Columns | server → client | `u16` count, then per column: string name, type |
 | `D` Row | server → client | one value per column |
 | `K` Done | server → client | string command (`SELECT`, `INSERT`, `CREATE TABLE`, `BEGIN`, …), `u64` rows returned or affected (0 when it does not apply) |
-| `E` Error | server → client | string SQLSTATE (5 characters), string message |
+| `E` Error | server → client | string SQLSTATE (5 characters), string message; version 5: string hint (what to do about it; empty: none) |
 | `R` Ready | server → client | `u8` transaction status: 0 idle, 1 in a transaction block, 2 in a failed block |
 | `X` Bye | client → server | empty; the server closes |
 
@@ -1677,7 +1698,8 @@ refer to them.  Transactions are SQL (`BEGIN`, `COMMIT`, `ROLLBACK`), as in
 
 **Versions.**  2 adds registered types (`uuid`, a module's type): tag 11
 below.  3 adds tags 12–20, §M14.26's types.  4 proves the password by
-SCRAM-SHA-256 instead of sending it (§M14.25).  An older client gets what
+SCRAM-SHA-256 instead of sending it (§M14.25).  5 adds the hint to `E`
+(§8.14).  An older client gets what
 its version knows — registered types as text before 2; before 3,
 `smallint` and `integer` as `bigint` (tag 2), `real` as a double (tag 3),
 `bytea`, `time`, `char(n)`, `inet`, `cidr` and enums as text — so older
@@ -1742,7 +1764,9 @@ midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
 `Uuid([u8; 16])`, `Other { type_name, bytes }` for another registered
 type; `char(n)` and enum values as text, their columns typed `Char` and
 `Enum(name)`) with `From` conversions for parameters.  Every driver
-speaks protocol version 4 and logs in by SCRAM-SHA-256 (the C driver with
+speaks protocol version 5 — errors with their hint (`ServerError::hint`,
+Python's `.hint`, JavaScript's `hint`, Java's `hint()`, C's
+`nc_error.hint`, C++'s `hint()`) — and logs in by SCRAM-SHA-256 (the C driver with
 its own SHA-256, HMAC, PBKDF2 and base64; the others with their
 platform's).  **TLS** in each: the server's certificate checked against
 the platform's CA certificates (Rust: Mozilla's, through the `tls`
@@ -1832,6 +1856,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.10 comments and hints (B1, B2):** `COMMENT ON
+  TABLE / COLUMN` (table record version 9; nc_catalog, `\d`, pg-compat's
+  descriptions); errors with a hint — the name meant, the names there
+  are, the cast — on `ncp` version 5 and pg's `H`, in every driver and
+  ncsql.
 - **2026-10-23 — §M14.9 the index advisor (A4) — §M14.9 shipped:**
   `nc_catalog.index_advice`, the recorded statements planned again with
   hypothetical indexes; the analyzer in §8.13.

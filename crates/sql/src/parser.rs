@@ -737,6 +737,47 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Statement::Show(self.ident()?))
             }
+            "comment" => {
+                self.pos += 1;
+                self.expect_kw("on")?;
+                let (table, column) = if self.eat_kw("table") {
+                    (self.relation()?, None)
+                } else if self.eat_kw("column") {
+                    // t.c or public.t.c
+                    let mut parts = vec![self.ident()?];
+                    while self.eat_op(".") {
+                        parts.push(self.ident()?);
+                    }
+                    let column = parts.pop().filter(|_| !parts.is_empty());
+                    let Some(column) = column else {
+                        return Err(self.error("expected table.column"));
+                    };
+                    let table = match parts.as_slice() {
+                        [t] => t.clone(),
+                        [s, t] if s == "public" => t.clone(),
+                        [s, _] => {
+                            return Err(Error::invalid_schema(format!(
+                                "schema \"{s}\" does not exist"
+                            )));
+                        }
+                        _ => return Err(self.error("expected table.column")),
+                    };
+                    (table, Some(column))
+                } else {
+                    return Err(Error::feature("COMMENT ON supports TABLE and COLUMN"));
+                };
+                self.expect_kw("is")?;
+                let text = if self.eat_kw("null") {
+                    None
+                } else {
+                    Some(self.string()?)
+                };
+                Ok(Statement::Comment {
+                    table,
+                    column,
+                    text,
+                })
+            }
             "explain" => {
                 self.pos += 1;
                 let options = self.explain_options()?;

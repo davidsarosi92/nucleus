@@ -21,8 +21,9 @@ use crate::Config;
 /// `cidr`, enums); an older client gets them as before — integers as
 /// `bigint`, a real as a double, the rest as text.  Version 4 logs in by
 /// SCRAM-SHA-256 (`A` / `a` messages), so a password never crosses the
-/// wire; older clients still send theirs in clear.
-pub const VERSION: u16 = 4;
+/// wire; older clients still send theirs in clear.  Version 5 adds a hint
+/// to `E` (what to do about the error; empty: none).
+pub const VERSION: u16 = 5;
 /// The oldest it still speaks.
 pub const MIN_VERSION: u16 = 1;
 const MAX_BODY: u32 = 1 << 30;
@@ -193,6 +194,7 @@ fn protocol(what: impl Into<String>) -> Error {
     Error {
         code: "08P01",
         message: what.into(),
+        hint: None,
     }
 }
 
@@ -237,8 +239,14 @@ impl<'a> Body<'a> {
     }
 }
 
-fn error_msg(e: &Error) -> Vec<u8> {
-    Msg::new(b'E').str(e.code).str(&e.message).finish()
+/// `E` for a session of `version` (0: before one was agreed).
+fn error_msg(e: &Error, version: u16) -> Vec<u8> {
+    let m = Msg::new(b'E').str(e.code).str(&e.message);
+    if version >= 5 {
+        m.str(e.hint.as_deref().unwrap_or("")).finish()
+    } else {
+        m.finish()
+    }
 }
 
 fn ready_msg(s: TxnStatus) -> Vec<u8> {
@@ -314,7 +322,7 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
     let (version, mut session) = match hello {
         Ok(v) => v,
         Err(e) => {
-            out.write_all(&error_msg(&e))?;
+            out.write_all(&error_msg(&e, 0))?;
             return out.flush();
         }
     };
@@ -351,20 +359,20 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
                             run(&mut session, &sql, format == 1, version, &params, &mut out)?
                         {
                             log("error", &format!("{} {}", e.code, e.message));
-                            out.write_all(&error_msg(&e))?;
+                            out.write_all(&error_msg(&e, version))?;
                         }
                     }
-                    Err(e) => out.write_all(&error_msg(&e))?,
+                    Err(e) => out.write_all(&error_msg(&e, version))?,
                 }
                 out.write_all(&ready_msg(session.status()))?;
                 out.flush()?;
             }
             b'X' => return Ok(()),
             other => {
-                out.write_all(&error_msg(&protocol(format!(
-                    "unexpected message {:?}",
-                    other as char
-                ))))?;
+                out.write_all(&error_msg(
+                    &protocol(format!("unexpected message {:?}", other as char)),
+                    version,
+                ))?;
                 return out.flush();
             }
         }
@@ -411,6 +419,7 @@ fn login(
         return Ok(Err(Error {
             code: "28000",
             message: why,
+            hint: None,
         }));
     }
     let context = |method: &str| nucleus_sql::access::Context {
@@ -432,6 +441,7 @@ fn login(
         Error {
             code: "28P01",
             message,
+            hint: None,
         }
     };
     let mut identity = None;
@@ -537,6 +547,7 @@ fn exchange(
                 message: format!(
                     "the password of \"{user}\" is checked by a directory, which needs TLS"
                 ),
+                hint: None,
             }));
         }
         String::from("PLAIN")
@@ -582,6 +593,7 @@ fn exchange(
                 Err(why) => Err(Error {
                     code: "08006",
                     message: format!("the directory could not check the password: {why}"),
+                    hint: None,
                 }),
             },
         );
@@ -600,6 +612,7 @@ fn exchange(
             Err(why) => Err(Error {
                 code: "28000",
                 message: format!("the bearer token was not accepted: {why}"),
+                hint: None,
             }),
         });
     }
@@ -706,6 +719,7 @@ fn parameter(r: &mut Reader) -> Result<Value, Error> {
     let t = TypeRef::named(&name).ok_or_else(|| Error {
         code: "42704",
         message: format!("type \"{name}\" does not exist"),
+        hint: None,
     })?;
     // The binary form is the canonical one; checked, as any input is.
     let v = Value::ext(t, bytes.to_vec());

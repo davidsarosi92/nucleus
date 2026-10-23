@@ -37,10 +37,14 @@ public final class NucleusTest {
     }
 
     private static String errorCode(Runnable r) {
+        return error(r).code();
+    }
+
+    private static NucleusException error(Runnable r) {
         try {
             r.run();
         } catch (NucleusException e) {
-            return e.code();
+            return e;
         }
         throw new AssertionError("no error");
     }
@@ -118,6 +122,9 @@ public final class NucleusTest {
             db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY)");
             db.query("INSERT INTO " + t + " VALUES (1)");
             equal(errorCode(() -> db.query("INSERT INTO " + t + " VALUES (1)")), "23505", "duplicate");
+            // What to do about it: the hint (protocol version 5).
+            equal(error(() -> db.query("SELECT ib FROM " + t)).hint(), "Perhaps you meant column \"id\".", "hint");
+            equal(error(() -> db.query("SELECT 'x'::integer")).hint(), null, "no hint");
             equal(db.queryAll("SELECT 1; SELECT 2").size(), 2, "two results");
         }
     }

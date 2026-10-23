@@ -53,9 +53,9 @@ public final class NucleusClient implements AutoCloseable {
     /**
      * 2: registered types (uuid, modules' types) arrive in their binary form; 3: smallint,
      * integer, real, bytea, time, inet and cidr in theirs; 4: the password is proved by
-     * SCRAM-SHA-256, never sent.
+     * SCRAM-SHA-256, never sent; 5: errors carry a hint.
      */
-    public static final int PROTOCOL_VERSION = 4;
+    public static final int PROTOCOL_VERSION = 5;
     private static final int EXT = 11;
     private static final int ENUM = 20;
     public static final int DEFAULT_PORT = 20035;
@@ -156,10 +156,9 @@ public final class NucleusClient implements AutoCloseable {
                         return c;
                     }
                     case 'E' -> {
-                        String code = r.str();
-                        String message = r.str();
+                        NucleusException e = r.serverError();
                         s.close();
-                        throw new NucleusException(message, code);
+                        throw e;
                     }
                     default -> throw new NucleusException("unexpected message " + m.kind, (String) null);
                 }
@@ -213,10 +212,7 @@ public final class NucleusClient implements AutoCloseable {
                         columns = null;
                         rows = new ArrayList<>();
                     }
-                    case 'E' -> {
-                        String code = r.str();
-                        error = new NucleusException(r.str(), code);
-                    }
+                    case 'E' -> error = r.serverError();
                     case 'R' -> {
                         setStatus(m.body);
                         if (error != null) throw error;
@@ -413,6 +409,14 @@ public final class NucleusClient implements AutoCloseable {
             byte[] s = new byte[(int) u32()];
             b.get(s);
             return new String(s, StandardCharsets.UTF_8);
+        }
+
+        /** An E message: SQLSTATE, message and (from version 5) the hint. */
+        NucleusException serverError() {
+            String code = str();
+            String message = str();
+            String hint = b.hasRemaining() ? str() : "";
+            return new NucleusException(message, code, hint.isEmpty() ? null : hint);
         }
 
         Object value() {

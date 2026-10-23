@@ -585,6 +585,13 @@ impl Registry {
         v
     }
 
+    /// Every aggregate name, sorted.
+    pub fn aggregate_names(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.aggregates.keys().map(String::as_str).collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Registers a schema.
     pub fn add_schema(&mut self, name: &str, description: &str, searched: bool) -> Result<()> {
         if self.schema(name).is_some() {

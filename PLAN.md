@@ -1162,7 +1162,7 @@ best).  Left for later: `EXPLAIN ANALYZE` of writes, a cost model (and
 with it cost budgets, §M14.25), statement statistics that survive a
 restart or span a cluster, indexes for joins (with index nested loops).
 
-### §M14.10 — AI access ⬜
+### §M14.10 — AI access ⬜ (in progress)
 
 Make nucleus a tool AI models can pick up in seconds, and give them the
 context they need:
@@ -1179,6 +1179,12 @@ context they need:
 
 **Done when:** an MCP client lists, describes and queries a database end to
 end in a test, and hints appear for the common error codes.
+
+**Steps.**  B1 comments ✅ (`COMMENT ON TABLE / COLUMN`, in the table
+record, nc_catalog, `\d`, pg-compat's descriptions); B2 hints ✅ (the
+name meant or the names there are, the cast, by code for the rest; `ncp`
+version 5 and pg's `H` field, every driver, ncsql); B3 `nucleus mcp`; B4
+`docs/llm.md`.
 
 ### §M14.11 — Large data foundations ⬜
 
@@ -1997,6 +2003,7 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.10 B1–B2: comments and hints in errors.
 - **2026-10-23** — §M14.9 shipped (A4: the index advisor).  Every "done
   when" holds: each lint rule and the advisor have slt cases (firing and
   quiet), and `EXPLAIN ANALYZE`'s actual rows are checked against the

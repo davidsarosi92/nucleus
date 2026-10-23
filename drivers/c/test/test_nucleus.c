@@ -122,6 +122,10 @@ static void errors_and_transactions(void) {
     table(t, sizeof t);
     snprintf(sql, sizeof sql, "CREATE TABLE %s (id INT PRIMARY KEY)", t);
     nc_result_free(must(db, sql, NULL, 0));
+    /* What to do about it: the hint (protocol version 5). */
+    snprintf(sql, sizeof sql, "SELECT ib FROM %s", t);
+    CHECK(nc_query(db, sql, NULL, 0, &err) == NULL && strcmp(err.hint, "Perhaps you meant column \"id\".") == 0);
+    CHECK(nc_query(db, "SELECT 'x'::integer", NULL, 0, &err) == NULL && err.hint[0] == '\0');
     nc_result_free(must(db, "BEGIN", NULL, 0));
     CHECK(nc_status(db) == 1);
     snprintf(sql, sizeof sql, "INSERT INTO %s VALUES (1)", t);

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Protocol version 5 (nucleus PLAN.md §M14.10): errors carry a hint,
+  `nc_error.hint` (empty when there is none); `nc_error` grew by it.
 - A directory's (LDAP) password through PLAIN, over TLS only.
 - An identity token instead of the password: `cfg.token` (OAUTHBEARER).
 - Over TLS, SCRAM bound to the session (SCRAM-SHA-256-PLUS,

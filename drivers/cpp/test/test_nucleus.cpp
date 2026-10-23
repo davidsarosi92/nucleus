@@ -37,6 +37,15 @@ static std::string error_code(nucleus::Connection& db, const std::string& sql) {
     return "";
 }
 
+static std::string error_hint(nucleus::Connection& db, const std::string& sql) {
+    try {
+        db.query(sql);
+    } catch (const nucleus::Error& e) {
+        return e.hint();
+    }
+    return "(no error)";
+}
+
 int main() {
     using namespace nucleus;
     {
@@ -64,6 +73,9 @@ int main() {
         CHECK(error_code(db, "SELECT 1 / 0") == "22012");
         auto t = table();
         db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY)");
+        // What to do about it: the hint (protocol version 5).
+        CHECK(error_hint(db, "SELECT ib FROM " + t) == "Perhaps you meant column \"id\".");
+        CHECK(error_hint(db, "SELECT 'x'::integer").empty());
         db.transaction([&](Connection& c) { c.query("INSERT INTO " + t + " VALUES (1)"); });
         try {
             db.transaction([&](Connection& c) {

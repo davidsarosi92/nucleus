@@ -26,5 +26,5 @@ SCRAM-SHA-256, never sent.  TLS: `connect({ tls: true })` (Node's CAs),
 `tlsKey` for a client certificate; `token` for an identity token instead
 of the password.  Errors are
 `NucleusError` with
-`code` (SQLSTATE).  Queries on one connection run one after another.
+`code` (SQLSTATE) and `hint` (what to do about it, or `null`).  Queries on one connection run one after another.
 Tests: `npm test`; example: `examples/js/quickstart.ts`.

@@ -146,3 +146,36 @@ slt_pg_group slt_pg_user
 
 statement ok
 DROP ROLE slt_pg_user, slt_pg_group
+
+# Comments (PLAN.md §M14.10), as psql's \d+ and \dt+ read them.
+
+statement ok
+CREATE TABLE slt_pg_commented (id INT PRIMARY KEY, email TEXT)
+
+statement ok
+COMMENT ON TABLE slt_pg_commented IS 'people who buy'
+
+statement ok
+COMMENT ON COLUMN slt_pg_commented.email IS 'lower case'
+
+query TTT
+SELECT obj_description('slt_pg_commented'::regclass, 'pg_class'), col_description('slt_pg_commented'::regclass, 2), col_description('slt_pg_commented'::regclass, 1)
+----
+people who buy lower case NULL
+
+query IT
+SELECT objsubid, description FROM pg_description WHERE objoid = 'slt_pg_commented'::regclass ORDER BY objsubid
+----
+0 people who buy
+2 lower case
+
+statement ok
+COMMENT ON TABLE slt_pg_commented IS NULL
+
+query T
+SELECT obj_description('slt_pg_commented'::regclass, 'pg_class')
+----
+NULL
+
+statement ok
+DROP TABLE slt_pg_commented

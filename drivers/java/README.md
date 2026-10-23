@@ -24,5 +24,6 @@ proved by SCRAM-SHA-256, never sent.  TLS: `new Config().tls(true)`
 (encrypted, unverified), `.tlsCertificate(cert, key)` for a client
 certificate (a PKCS #8 key); `.token(…)` for an identity token instead of
 the password.  Errors are
-`NucleusException` with `code()` (SQLSTATE).  Tests: `NucleusTest` (a plain
+`NucleusException` with `code()` (SQLSTATE) and `hint()` (what to do about
+it, or null).  Tests: `NucleusTest` (a plain
 main); example: `examples/java/Quickstart.java`.

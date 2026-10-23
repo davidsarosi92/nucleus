@@ -57,6 +57,7 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("owner", T),
             ("row_security", B),
             ("force_row_security", B),
+            ("comment", T),
         ],
     ),
     (
@@ -232,6 +233,7 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("nullable", B),
             ("default_expr", T),
             ("in_primary_key", B),
+            ("comment", T),
         ],
     ),
     (
@@ -424,6 +426,7 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     t.owner.clone().map_or(Value::Null, text),
                     Value::Bool(t.row_security),
                     Value::Bool(t.force_row_security),
+                    t.comment.clone().map_or(Value::Null, text),
                 ]);
             }
         }
@@ -662,6 +665,7 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         Value::Bool(col.nullable && !in_pk),
                         col.default.clone().map_or(Value::Null, text),
                         Value::Bool(in_pk),
+                        col.comment.clone().map_or(Value::Null, text),
                     ]);
                 }
             }

@@ -243,6 +243,11 @@ fn a_real_driver_with_the_extended_protocol() {
         "CREATE TABLE t (id BIGINT PRIMARY KEY, name TEXT, score DOUBLE PRECISION, ok BOOLEAN)",
     )
     .unwrap();
+    // A hint arrives as PostgreSQL's (the H field).
+    let e = pg.batch_execute("SELECT nmae FROM t").unwrap_err();
+    let db = e.as_db_error().unwrap();
+    assert_eq!(db.code(), &SqlState::UNDEFINED_COLUMN);
+    assert_eq!(db.hint(), Some("Perhaps you meant column \"name\"."));
     let insert = pg.prepare("INSERT INTO t VALUES ($1, $2, $3, $4)").unwrap();
     for (id, name, score, ok) in [
         (1i64, Some("anna"), 1.5f64, true),

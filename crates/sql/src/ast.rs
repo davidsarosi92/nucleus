@@ -305,6 +305,15 @@ pub enum Statement {
     Analyze(Option<String>),
     /// `ANALYZE QUERY <statement>`: the linter's findings.
     Lint(Box<Statement>),
+    /// `COMMENT ON TABLE t | COLUMN t.c IS 'text' | NULL`.
+    Comment {
+        /// The table.
+        table: String,
+        /// The column (`None`: the table itself).
+        column: Option<String>,
+        /// The comment (`None`: removed).
+        text: Option<String>,
+    },
 }
 
 /// `EXPLAIN`'s options.

@@ -65,6 +65,17 @@ enum Res {
 struct Failure {
     code: String,
     message: String,
+    hint: Option<String>,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ERROR:  {} ({})", self.message, self.code)?;
+        if let Some(h) = &self.hint {
+            write!(f, "\nHINT:  {h}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Where statements run.
@@ -89,6 +100,7 @@ impl Backend {
                         return Ok(vec![Err(Failure {
                             code: e.code.into(),
                             message: e.message,
+                            hint: e.hint,
                         })]);
                     }
                 };
@@ -112,6 +124,7 @@ impl Backend {
                             out.push(Err(Failure {
                                 code: e.code.into(),
                                 message: e.message,
+                                hint: e.hint,
                             }));
                             break;
                         }
@@ -149,6 +162,7 @@ impl Backend {
                     Err(e) => Err(Failure {
                         code: e.code,
                         message: e.message,
+                        hint: e.hint,
                     }),
                 })
                 .collect()),
@@ -272,7 +286,7 @@ impl Shell {
                 Ok(Res::Rows(t)) => print_table(out, &t, None),
                 Err(f) => {
                     ok = false;
-                    writeln!(out, "ERROR:  {} ({})", f.message, f.code)
+                    writeln!(out, "{f}")
                 }
             }
             .map_err(|e| e.to_string())?;
@@ -295,8 +309,7 @@ impl Shell {
                 Ok(Res::Rows(t)) => return Ok(Some(t)),
                 Ok(Res::Command(_)) => {}
                 Err(f) => {
-                    writeln!(out, "ERROR:  {} ({})", f.message, f.code)
-                        .map_err(|e| e.to_string())?;
+                    writeln!(out, "{f}").map_err(|e| e.to_string())?;
                     return Ok(None);
                 }
             }
@@ -451,7 +464,7 @@ impl Shell {
         let q = quote(t);
         let Some(info) = self.fetch(
             &format!(
-                "SELECT table_id, key_prefix, analyzed_rows, has_row_id FROM nc_catalog.tables WHERE name = {q}"
+                "SELECT table_id, key_prefix, analyzed_rows, has_row_id, comment FROM nc_catalog.tables WHERE name = {q}"
             ),
             out,
         )?
@@ -480,7 +493,8 @@ impl Shell {
         let Some(cols) = self.fetch(
             &format!(
                 "SELECT name AS \"column\", type, CASE WHEN nullable THEN '' ELSE 'not null' END AS nullable, \
-                 default_expr AS \"default\" FROM nc_catalog.columns WHERE table_name = {q} ORDER BY position"
+                 default_expr AS \"default\", coalesce(comment, '') AS comment FROM nc_catalog.columns \
+                 WHERE table_name = {q} ORDER BY position"
             ),
             out,
         )?
@@ -488,6 +502,9 @@ impl Shell {
             return Ok(false);
         };
         print_table(out, &cols, Some(&title)).map_err(|e| e.to_string())?;
+        if let Some(comment) = &row[4] {
+            writeln!(out, "Comment: {comment}").map_err(|e| e.to_string())?;
+        }
         let sections = [
             (
                 "Indexes",

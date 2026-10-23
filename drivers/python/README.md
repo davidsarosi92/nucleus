@@ -25,5 +25,6 @@ version 4: the password is proved by SCRAM-SHA-256, never sent.  TLS:
 `tls_verify=False` (encrypted, unverified); `tls_cert=`, `tls_key=` for
 a client certificate; `token=` for an identity token instead of the
 password.
-Errors are `nucleus.Error` subclasses with `.code` (SQLSTATE).  Tests:
+Errors are `nucleus.Error` subclasses with `.code` (SQLSTATE) and `.hint`
+(what to do about it, or `None`).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.

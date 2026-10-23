@@ -90,6 +90,9 @@ test("errors", async () => {
   await db.query(`CREATE TABLE ${t} (id INT PRIMARY KEY)`);
   await db.query(`INSERT INTO ${t} VALUES (1)`);
   await assert.rejects(db.query(`INSERT INTO ${t} VALUES (1)`), (e: NucleusError) => e.code === "23505");
+  // What to do about it: the hint (protocol version 5).
+  await assert.rejects(db.query(`SELECT ib FROM ${t}`), (e: NucleusError) => e.hint === 'Perhaps you meant column "id".');
+  await assert.rejects(db.query("SELECT 'x'::integer"), (e: NucleusError) => e.hint === null);
   assert.equal((await db.queryAll("SELECT 1; SELECT 2")).length, 2);
   // Queries issued together run one after another.
   const all = await Promise.all([1, 2, 3].map((i) => db.query("SELECT $1", [i])));

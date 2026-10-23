@@ -29,8 +29,9 @@ extern "C" {
 #define NC_VERSION "0.1.0"
 /* 2: registered types (uuid, modules' types) arrive in their binary form;
  * 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
- * 4: the password is proved by SCRAM-SHA-256, never sent. */
-#define NC_PROTOCOL_VERSION 4
+ * 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
+ * a hint. */
+#define NC_PROTOCOL_VERSION 5
 #define NC_DEFAULT_PORT 20035
 
 /* Value and column types (the protocol's tags). */
@@ -112,10 +113,13 @@ typedef struct nc_config {
     const char *token;
 } nc_config;
 
-/* An error: SQLSTATE (empty for a driver or network error) and message. */
+/* An error: SQLSTATE (empty for a driver or network error), message, and
+ * hint — what to do about it, the name meant, the cast that would work
+ * (empty: none). */
 typedef struct nc_error {
     char code[6];
     char message[512];
+    char hint[512];
 } nc_error;
 
 typedef struct nc_conn nc_conn;

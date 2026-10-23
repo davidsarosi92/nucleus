@@ -80,9 +80,9 @@ const DATA: u8 = 0x01;
 /// and still reads as one) and `real` (tag 12; before, `double
 /// precision`'s tag 3), `bytea` (tag 13), `time` (14) and `char(n)` (15;
 /// before, `text`'s 4, and still read as text), `inet` and `cidr` (16, 17);
-/// version 7 an owner, version 8 row-level security; older versions still
-/// read.
-const TABLE_VERSION: u8 = 8;
+/// version 7 an owner, version 8 row-level security, version 9 comments
+/// on the table and its columns; older versions still read.
+const TABLE_VERSION: u8 = 9;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -200,6 +200,8 @@ pub struct Column {
     pub max_len: Option<u32>,
     /// `NUMERIC(precision, scale)`.
     pub numeric: Option<(u32, u32)>,
+    /// `COMMENT ON COLUMN`.
+    pub comment: Option<String>,
 }
 
 /// An index.
@@ -285,6 +287,8 @@ pub struct Table {
     pub row_security: bool,
     /// … for its owner too.
     pub force_row_security: bool,
+    /// `COMMENT ON TABLE`.
+    pub comment: Option<String>,
 }
 
 impl Table {
@@ -368,6 +372,10 @@ impl Table {
         }
         w.opt_str(self.owner.as_deref());
         w.u8(u8::from(self.row_security) | u8::from(self.force_row_security) << 1);
+        w.opt_str(self.comment.as_deref());
+        for c in &self.columns {
+            w.opt_str(c.comment.as_deref());
+        }
         w.0
     }
 
@@ -409,6 +417,7 @@ impl Table {
                 default,
                 max_len,
                 numeric,
+                comment: None,
             });
         }
         let n = r.u32()? as usize;
@@ -469,6 +478,13 @@ impl Table {
         }
         let owner = if version >= 7 { r.opt_str()? } else { None };
         let rls = if version >= 8 { r.u8()? } else { 0 };
+        let mut comment = None;
+        if version >= 9 {
+            comment = r.opt_str()?;
+            for c in &mut columns {
+                c.comment = r.opt_str()?;
+            }
+        }
         Ok(Self {
             id,
             name,
@@ -482,6 +498,7 @@ impl Table {
             owner,
             row_security: rls & 1 != 0,
             force_row_security: rls & 2 != 0,
+            comment,
         })
     }
 }
@@ -605,8 +622,40 @@ pub fn with_hypothetical<T>(table: Table, f: impl FnOnce() -> T) -> T {
 
 /// The table named `name`, or `42P01`.
 pub fn table(txn: &dyn KvTxn, name: &str) -> Result<Table> {
-    get_table(txn, name)?
-        .ok_or_else(|| Error::undefined_table(format!("relation \"{name}\" does not exist")))
+    match get_table(txn, name)? {
+        Some(t) => Ok(t),
+        None => Err(no_such_table(txn, name, &[])),
+    }
+}
+
+/// `42P01` for `name`, with a hint: the table (or one of `views`) meant,
+/// or the tables there are.
+pub fn no_such_table(txn: &dyn KvTxn, name: &str, views: &[String]) -> Error {
+    let tables: Vec<String> = tables(txn)
+        .map(|ts| ts.into_iter().map(|t| t.name).collect())
+        .unwrap_or_default();
+    let mut names: Vec<&str> = tables.iter().map(String::as_str).collect();
+    let e = Error::undefined_table(format!("relation \"{name}\" does not exist"));
+    let hint = crate::hint::closest(
+        name,
+        names
+            .iter()
+            .copied()
+            .chain(views.iter().map(String::as_str)),
+    )
+    .map(|c| format!("Perhaps you meant table \"{c}\"."))
+    .or_else(|| {
+        names.sort_unstable();
+        match names.len() {
+            0 => Some("There are no tables yet: CREATE TABLE makes one.".into()),
+            1..=12 => Some(format!("The tables: {}.", names.join(", "))),
+            _ => Some("SELECT name FROM nc_catalog.tables lists the tables.".into()),
+        }
+    });
+    match hint {
+        Some(h) => e.with_hint(h),
+        None => e,
+    }
 }
 
 /// Every table, by name.
@@ -1079,6 +1128,7 @@ mod tests {
                     default: None,
                     max_len: None,
                     numeric: None,
+                    comment: None,
                 },
                 Column {
                     name: "name".into(),
@@ -1087,6 +1137,7 @@ mod tests {
                     default: Some("'anon'".into()),
                     max_len: Some(20),
                     numeric: None,
+                    comment: Some("who".into()),
                 },
                 Column {
                     name: "price".into(),
@@ -1095,6 +1146,7 @@ mod tests {
                     default: None,
                     max_len: None,
                     numeric: Some((10, 2)),
+                    comment: None,
                 },
             ],
             primary_key: vec![0],
@@ -1119,6 +1171,7 @@ mod tests {
             owner: Some("alice".into()),
             row_security: true,
             force_row_security: false,
+            comment: Some("everyone we know".into()),
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));

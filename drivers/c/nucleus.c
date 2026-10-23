@@ -72,6 +72,7 @@ static void set_error(nc_error *err, const char *code, const char *fmt, ...) {
     va_list ap;
     if (!err) return;
     snprintf(err->code, sizeof err->code, "%s", code ? code : "");
+    err->hint[0] = '\0';
     va_start(ap, fmt);
     vsnprintf(err->message, sizeof err->message, fmt, ap);
     va_end(ap);
@@ -864,10 +865,14 @@ nc_config nc_default_config(void) {
 
 static void server_error(nc_error *err, const unsigned char *body, size_t len) {
     reader r = {body, len, 0, 0};
-    char *code = get_str(&r), *msg = get_str(&r);
+    char *code = get_str(&r), *msg = get_str(&r), *hint = NULL;
+    /* The hint follows from protocol version 5. */
+    if (r.at < r.len) hint = get_str(&r);
     set_error(err, code ? code : "", "%s", msg ? msg : "unknown error");
+    if (err && hint) snprintf(err->hint, sizeof err->hint, "%s", hint);
     free(code);
     free(msg);
+    free(hint);
 }
 
 nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
