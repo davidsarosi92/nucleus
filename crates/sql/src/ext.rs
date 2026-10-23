@@ -61,7 +61,7 @@ pub use crate::decimal::Decimal;
 pub use crate::error::{Error, Result};
 pub use crate::inet::Net;
 pub use crate::parser::{parse, parse_with_text};
-pub use crate::session::{OutColumn, Output, Session, TxnStatus, command_tag};
+pub use crate::session::{OutColumn, Output, Session, TxnStatus, command_tag, read_only};
 pub use crate::types::{DataType, Row, Value};
 
 /// The catalog, read-only, as modules see it: table definitions and their

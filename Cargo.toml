@@ -24,6 +24,7 @@ nucleus-pg-compat = { version = "0.1.0", path = "modules/pg-compat" }
 nucleus-tls = { version = "0.1.0", path = "modules/tls" }
 nucleus-oidc = { version = "0.1.0", path = "modules/oidc" }
 nucleus-ldap = { version = "0.1.0", path = "modules/ldap" }
+nucleus-mcp = { version = "0.1.0", path = "modules/mcp" }
 # Regular expressions for `~`: linear-time matching, so no pattern can
 # stall the server.
 regex = "1.11.1"

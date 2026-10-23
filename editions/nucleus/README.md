@@ -9,6 +9,8 @@ The `nucleus` and `ncsql` binaries: everything nucleus has, chosen here
 - `nucleus server <dir>` — the server: the nucleus protocol, plus every
   front end this edition includes — `pg` (PostgreSQL compatibility,
   `modules/pg-compat`), started with `--pg-compat` or `--front-end pg`.
+- `nucleus mcp` — a Model Context Protocol server on stdin and stdout
+  (`modules/mcp`), for AI assistants: a local database or a server.
 
 See the repository's [README](../../README.md) and [DOCS.md](../../DOCS.md)
 §6 and §9.  `tests/cli.rs` drives the binaries.

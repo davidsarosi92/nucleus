@@ -170,8 +170,9 @@ fn options(mode: &TxnMode, default: IsolationLevel, read_only: bool) -> TxnOptio
     }
 }
 
-/// Whether a statement only reads.
-fn read_only(stmt: &Statement) -> bool {
+/// Whether a statement only reads (a query, `EXPLAIN`, `SHOW`, `ANALYZE
+/// QUERY`).
+pub fn read_only(stmt: &Statement) -> bool {
     matches!(
         stmt,
         Statement::Query(_) | Statement::Explain(..) | Statement::Show(_) | Statement::Lint(_)

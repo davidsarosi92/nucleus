@@ -51,21 +51,26 @@ Statements end with ;.  Commands (they read nc_catalog):
 ";
 
 /// A result table: column names and text cells (`None` = NULL).
-struct Table {
-    columns: Vec<String>,
-    rows: Vec<Vec<Option<String>>>,
+pub(crate) struct Table {
+    pub(crate) columns: Vec<String>,
+    /// The columns' types, by name (`boolean`, `integer`, … ; `text` when
+    /// not known): `nucleus mcp` types its JSON by them (the `ncsql`
+    /// binary, which prints text, does not read them).
+    #[allow(dead_code)]
+    pub(crate) types: Vec<String>,
+    pub(crate) rows: Vec<Vec<Option<String>>>,
 }
 
-enum Res {
+pub(crate) enum Res {
     Rows(Table),
     Command(String),
 }
 
 /// A failed statement.
-struct Failure {
-    code: String,
-    message: String,
-    hint: Option<String>,
+pub(crate) struct Failure {
+    pub(crate) code: String,
+    pub(crate) message: String,
+    pub(crate) hint: Option<String>,
 }
 
 impl std::fmt::Display for Failure {
@@ -79,7 +84,7 @@ impl std::fmt::Display for Failure {
 }
 
 /// Where statements run.
-enum Backend {
+pub(crate) enum Backend {
     Local {
         session: Session,
         db: Database,
@@ -91,7 +96,7 @@ enum Backend {
 impl Backend {
     /// Runs `sql`; stops at the first failing statement.  `Err` only for a
     /// lost connection.
-    fn execute(&mut self, sql: &str) -> Result<Vec<std::result::Result<Res, Failure>>> {
+    pub(crate) fn execute(&mut self, sql: &str) -> Result<Vec<std::result::Result<Res, Failure>>> {
         match self {
             Backend::Local { session, .. } => {
                 let stmts = match nucleus_sql::parser::parse_with_text(sql) {
@@ -110,6 +115,7 @@ impl Backend {
                     match session.run(&stmt, &[]) {
                         Ok(Output::Command(tag)) => out.push(Ok(Res::Command(tag))),
                         Ok(Output::Rows { columns, rows }) => out.push(Ok(Res::Rows(Table {
+                            types: columns.iter().map(|c| c.ty.name().to_string()).collect(),
                             columns: columns.into_iter().map(|c| c.name).collect(),
                             rows: rows
                                 .into_iter()
@@ -138,6 +144,23 @@ impl Backend {
                 .into_iter()
                 .map(|r| match r {
                     Ok(r) if r.has_rows => Ok(Res::Rows(Table {
+                        types: r
+                            .columns
+                            .iter()
+                            .map(|c| {
+                                use nucleus_client::Type as T;
+                                match c.ty {
+                                    T::Bool => "boolean",
+                                    T::SmallInt => "smallint",
+                                    T::Integer => "integer",
+                                    T::Int => "bigint",
+                                    T::Real => "real",
+                                    T::Float => "double precision",
+                                    _ => "text",
+                                }
+                                .to_string()
+                            })
+                            .collect(),
                         columns: r.columns.into_iter().map(|c| c.name).collect(),
                         rows: r
                             .rows
@@ -208,7 +231,7 @@ impl Backend {
         }
     }
 
-    fn close(self) -> Result<()> {
+    pub(crate) fn close(self) -> Result<()> {
         match self {
             Backend::Local { session, db, .. } => {
                 drop(session);
@@ -623,100 +646,149 @@ impl Shell {
 }
 
 /// `ncsql …` / `nucleus sql …`.
-pub fn run(args: &[String]) -> Result<()> {
-    let mut dir = None;
-    let mut command = None;
-    let mut cfg = Config {
-        client_name: "ncsql".into(),
-        ..Config::default()
-    };
-    let mut remote = false;
-    let mut explicit_password = None;
-    let (mut tls, mut tls_cert, mut tls_key) = (None, None, None);
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        let mut value = |what: &str| it.next().cloned().ok_or(format!("{a} needs {what}"));
-        match a.as_str() {
-            "-c" => command = Some(value("a command")?),
+/// Where to connect: a local directory or a server, from the command
+/// line's connection options (shared by `nucleus sql` and `nucleus mcp`).
+pub(crate) struct Target {
+    dir: Option<String>,
+    cfg: Config,
+    remote: bool,
+    explicit_password: Option<String>,
+    tls: Option<nucleus_tls::ClientTls>,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
+}
+
+impl Target {
+    pub(crate) fn new(client_name: &str) -> Self {
+        Self {
+            dir: None,
+            cfg: Config {
+                client_name: client_name.into(),
+                ..Config::default()
+            },
+            remote: false,
+            explicit_password: None,
+            tls: None,
+            tls_cert: None,
+            tls_key: None,
+        }
+    }
+
+    /// Takes `a` if it is a connection option (its value from `value`) or
+    /// the directory; whether it did.
+    pub(crate) fn option(
+        &mut self,
+        a: &str,
+        value: &mut dyn FnMut(&str) -> Result<String>,
+    ) -> Result<bool> {
+        match a {
             "-h" | "--host" => {
                 let h = value("a host")?;
                 match h.rsplit_once(':') {
                     Some((host, port)) if port.parse::<u16>().is_ok() && !host.contains(':') => {
-                        cfg.host = host.to_string();
-                        cfg.port = port.parse().expect("checked");
+                        self.cfg.host = host.to_string();
+                        self.cfg.port = port.parse().expect("checked");
                     }
-                    _ => cfg.host = h,
+                    _ => self.cfg.host = h,
                 }
-                remote = true;
+                self.remote = true;
             }
             "-p" | "--port" => {
-                cfg.port = value("a port")?
+                self.cfg.port = value("a port")?
                     .parse()
                     .map_err(|_| "bad port".to_string())?;
-                remote = true;
+                self.remote = true;
             }
-            "-U" | "--user" => cfg.user = value("a user name")?,
-            "-d" | "--database" => cfg.database = value("a database name")?,
-            "--password" => explicit_password = Some(value("a password")?),
-            "--tls" => tls = Some(nucleus_tls::ClientTls::new()),
+            "-U" | "--user" => self.cfg.user = value("a user name")?,
+            "-d" | "--database" => self.cfg.database = value("a database name")?,
+            "--password" => self.explicit_password = Some(value("a password")?),
+            "--tls" => self.tls = Some(nucleus_tls::ClientTls::new()),
             "--tls-ca" => {
                 let file = value("a CA file")?;
-                tls = Some(
+                self.tls = Some(
                     nucleus_tls::ClientTls::with_ca_file(file.as_ref())
                         .map_err(|e| format!("--tls-ca: {e}"))?,
                 );
             }
-            "--tls-no-verify" => tls = Some(nucleus_tls::ClientTls::without_verification()),
-            "--tls-cert" => tls_cert = Some(value("a certificate file")?),
-            "--token" => cfg.token = Some(value("a token")?),
-            "--tls-key" => tls_key = Some(value("a key file")?),
-            "--help" => {
-                print!("{USAGE}");
-                return Ok(());
-            }
-            s if s.starts_with('-') => return Err(format!("unknown option {s}\n{USAGE}")),
+            "--tls-no-verify" => self.tls = Some(nucleus_tls::ClientTls::without_verification()),
+            "--tls-cert" => self.tls_cert = Some(value("a certificate file")?),
+            "--token" => self.cfg.token = Some(value("a token")?),
+            "--tls-key" => self.tls_key = Some(value("a key file")?),
+            s if s.starts_with('-') => return Ok(false),
             s => {
-                if dir.replace(s.to_string()).is_some() {
+                if self.dir.replace(s.to_string()).is_some() {
                     return Err(format!("more than one database directory\n{USAGE}"));
                 }
             }
         }
+        Ok(true)
     }
-    match (tls_cert, tls_key) {
-        (Some(cert), Some(key)) => {
-            let t = tls.unwrap_or_default();
-            tls = Some(
-                t.with_client_certificate_files(cert.as_ref(), key.as_ref())
-                    .map_err(|e| format!("--tls-cert: {e}"))?,
-            );
-        }
-        (None, None) => {}
-        _ => return Err("--tls-cert and --tls-key go together".into()),
-    }
-    cfg.tls = tls.map(|t| Arc::new(t) as Arc<dyn nucleus_client::Tls>);
-    if dir.is_some() && remote {
-        return Err("give a directory or a server, not both".into());
-    }
-    if let Some(pw) = explicit_password.or_else(|| std::env::var("NCPASSWORD").ok()) {
-        cfg.password = Some(pw);
-    }
-    if cfg.token.is_none() {
-        cfg.token = std::env::var("NCTOKEN").ok();
-    }
-    let backend = match dir {
-        Some(dir) => {
-            let db = Database::open(&dir, Options::default()).map_err(|e| e.to_string())?;
-            Backend::Local {
-                session: Session::new(Arc::new(db.clone())),
-                db,
-                dir,
+
+    /// Opens the directory or connects to the server.
+    pub(crate) fn open(mut self) -> Result<Backend> {
+        match (self.tls_cert, self.tls_key) {
+            (Some(cert), Some(key)) => {
+                let t = self.tls.unwrap_or_default();
+                self.tls = Some(
+                    t.with_client_certificate_files(cert.as_ref(), key.as_ref())
+                        .map_err(|e| format!("--tls-cert: {e}"))?,
+                );
             }
+            (None, None) => {}
+            _ => return Err("--tls-cert and --tls-key go together".into()),
         }
-        None => Backend::Remote(
-            Client::connect(cfg.clone())
-                .map_err(|e| format!("cannot connect to {}:{}: {e}", cfg.host, cfg.port))?,
-        ),
-    };
+        let mut cfg = self.cfg;
+        cfg.tls = self
+            .tls
+            .map(|t| Arc::new(t) as Arc<dyn nucleus_client::Tls>);
+        if self.dir.is_some() && self.remote {
+            return Err("give a directory or a server, not both".into());
+        }
+        if let Some(pw) = self
+            .explicit_password
+            .or_else(|| std::env::var("NCPASSWORD").ok())
+        {
+            cfg.password = Some(pw);
+        }
+        if cfg.token.is_none() {
+            cfg.token = std::env::var("NCTOKEN").ok();
+        }
+        Ok(match self.dir {
+            Some(dir) => {
+                let db = Database::open(&dir, Options::default()).map_err(|e| e.to_string())?;
+                Backend::Local {
+                    session: Session::new(Arc::new(db.clone())),
+                    db,
+                    dir,
+                }
+            }
+            None => Backend::Remote(
+                Client::connect(cfg.clone())
+                    .map_err(|e| format!("cannot connect to {}:{}: {e}", cfg.host, cfg.port))?,
+            ),
+        })
+    }
+}
+
+pub fn run(args: &[String]) -> Result<()> {
+    let mut command = None;
+    let mut target = Target::new("ncsql");
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |what: &str| it.next().cloned().ok_or(format!("{a} needs {what}"));
+        if target.option(a, &mut value)? {
+            continue;
+        }
+        match a.as_str() {
+            "-c" => command = Some(value("a command")?),
+            "--help" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            s => return Err(format!("unknown option {s}\n{USAGE}")),
+        }
+    }
+    let backend = target.open()?;
     let mut shell = Shell {
         backend,
         timing: false,

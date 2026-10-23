@@ -2,6 +2,7 @@
 
 mod init;
 mod kv;
+mod mcp;
 mod server;
 mod sql;
 
@@ -22,6 +23,12 @@ usage:
   nucleus sql [<dir>] [-h <host[:port]>] [-U <user>] [-d <db>] [-c <sql>]
                                     SQL shell (also `ncsql`): a local database or a
                                     server; a script on stdin, or one command
+  nucleus mcp [<dir>] [connection options of nucleus sql] [--allow-writes]
+              [--max-rows <n>] [--timeout <ms>]
+                                    a Model Context Protocol server on stdin and
+                                    stdout, for AI assistants: list, describe,
+                                    sample and query (read-only unless
+                                    --allow-writes)
   nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
@@ -60,6 +67,7 @@ fn main() -> ExitCode {
         Some("init") => init::run(&args[1..]),
         Some("kv") => kv::run(&args[1..]),
         Some("sql") => sql::run(&args[1..]),
+        Some("mcp") => mcp::run(&args[1..]),
         Some("server") => server::run(&args[1..]),
         Some("help" | "--help" | "-h") => {
             print!("{USAGE}");

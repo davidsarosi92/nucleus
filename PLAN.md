@@ -1183,7 +1183,10 @@ end in a test, and hints appear for the common error codes.
 **Steps.**  B1 comments ✅ (`COMMENT ON TABLE / COLUMN`, in the table
 record, nc_catalog, `\d`, pg-compat's descriptions); B2 hints ✅ (the
 name meant or the names there are, the cast, by code for the rest; `ncp`
-version 5 and pg's `H` field, every driver, ncsql); B3 `nucleus mcp`; B4
+version 5 and pg's `H` field, every driver, ncsql); B3 `nucleus mcp` ✅
+(the `mcp` module over stdio: list, describe, sample, read-only query
+with row and time limits, explain, lint, writes when allowed; for a
+directory or a server; end to end in the edition's tests); B4
 `docs/llm.md`.
 
 ### §M14.11 — Large data foundations ⬜

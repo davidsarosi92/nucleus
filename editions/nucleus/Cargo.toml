@@ -24,6 +24,11 @@ nucleus-pg-compat.workspace = true
 nucleus-tls.workspace = true
 nucleus-oidc.workspace = true
 nucleus-ldap.workspace = true
+nucleus-mcp.workspace = true
+
+[dev-dependencies]
+# The MCP test reads the server's JSON-RPC answers.
+serde_json = "1"
 
 [lints]
 workspace = true

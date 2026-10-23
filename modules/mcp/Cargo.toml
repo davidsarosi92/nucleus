@@ -1,0 +1,21 @@
+[package]
+name = "nucleus-mcp"
+description = "A Model Context Protocol server for nucleus: AI models list, describe and query a database"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+
+# The protocol only: the database is behind a trait (`Database`), which
+# the edition implements for a local directory and for a server.
+[dependencies]
+# MCP is JSON-RPC 2.0.
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

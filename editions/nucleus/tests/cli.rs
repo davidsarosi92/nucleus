@@ -178,3 +178,88 @@ fn ncsql_local_and_over_the_network() {
     server.wait().unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `nucleus mcp` end to end (PLAN.md §M14.10): an MCP client lists,
+/// describes and queries a database over standard input and output.
+#[test]
+fn an_mcp_client_lists_describes_and_queries() {
+    use serde_json::{Value, json};
+    let dir = temp_dir("mcp");
+    let d = dir.to_str().unwrap();
+    let (ok, out) = nucleus(
+        &["sql", d],
+        "CREATE TABLE customers (id INT PRIMARY KEY, email TEXT NOT NULL, region TEXT);\n\
+         COMMENT ON TABLE customers IS 'People who buy';\n\
+         COMMENT ON COLUMN customers.email IS 'Login e-mail';\n\
+         INSERT INTO customers VALUES (1, 'a@x', 'north'), (2, 'b@x', 'south'), (3, 'c@x', 'north');\n",
+    );
+    assert!(ok, "{out}");
+    let requests = [
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": { "name": "test", "version": "1" } } }),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "list_tables", "arguments": {} } }),
+        json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+            "name": "describe_table", "arguments": { "table": "customers" } } }),
+        json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
+            "name": "query", "arguments": {
+                "sql": "SELECT region, count(*) AS n FROM customers WHERE id <= $1 GROUP BY region ORDER BY region",
+                "params": [3] } } }),
+        json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {
+            "name": "query", "arguments": { "sql": "COMMIT; DELETE FROM customers" } } }),
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
+            "name": "query", "arguments": { "sql": "SELECT emial FROM customers" } } }),
+        json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {
+            "name": "sample_rows", "arguments": { "table": "customers", "limit": 2 } } }),
+        json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {
+            "name": "explain", "arguments": { "sql": "SELECT * FROM customers WHERE id = 2" } } }),
+    ];
+    let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
+    let (ok, out) = nucleus(&["mcp", d], &input);
+    assert!(ok, "{out}");
+    let replies: Vec<Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect();
+    assert_eq!(replies.len(), 9, "{out}");
+    let by_id = |id: u64| replies.iter().find(|r| r["id"] == id).unwrap();
+    let content = |id: u64| &by_id(id)["result"]["structuredContent"];
+    assert_eq!(by_id(1)["result"]["serverInfo"]["name"], "nucleus");
+    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        content(3)["tables"],
+        json!([{ "name": "customers", "comment": "People who buy", "rows": null }])
+    );
+    let table = content(4);
+    assert_eq!(table["comment"], "People who buy");
+    let email = &table["columns"][1];
+    assert_eq!(
+        (&email["name"], &email["comment"]),
+        (&json!("email"), &json!("Login e-mail"))
+    );
+    assert_eq!(
+        (&email["nullable"], &table["indexes"][0]["primary"]),
+        (&json!(false), &json!(true))
+    );
+    assert_eq!(content(5)["rows"], json!([["north", 2], ["south", 1]]));
+    // Nothing slips out of the read-only tool; errors carry their hint.
+    assert_eq!(by_id(6)["result"]["isError"], true);
+    let text = by_id(7)["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("HINT: Perhaps you meant column \"email\"."),
+        "{text}"
+    );
+    assert_eq!(content(8)["row_count"], 2);
+    let plan = content(9)["plan"][1].as_str().unwrap();
+    assert!(
+        plan.contains("Index Scan using primary key on customers"),
+        "{plan}"
+    );
+    // The rows are all still there.
+    let (_, out) = nucleus(&["sql", d, "-c", "SELECT count(*) FROM customers"], "");
+    assert!(out.contains(" 3 "), "{out}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

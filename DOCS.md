@@ -36,7 +36,11 @@
 | `crates/client` | `nucleus-client` | the Rust driver | §M14.6–§M14.8 ✅ |
 | `crates/testkit` | `nucleus-testkit` | the sqllogictest runner and the SQL layer's scripts, for the core, front ends and modules | §M14.19 |
 | `modules/pg-compat` | `nucleus-pg-compat` | PostgreSQL compatibility: the protocol, `pg_catalog`, `information_schema`, the `pg_*` functions (its own README) | §M12, §M14.5, §M14.19 |
-| `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end | §M6, §M12, §M14.6 ✅ |
+| `modules/tls` | `nucleus-tls` | TLS over rustls, for the front ends and the Rust client | §M14.25 ✅ |
+| `modules/oidc` | `nucleus-oidc` | OpenID Connect: logins by identity tokens | §M14.25 ✅ |
+| `modules/ldap` | `nucleus-ldap` | LDAP: passwords checked by a directory | §M14.25 ✅ |
+| `modules/mcp` | `nucleus-mcp` | a Model Context Protocol server: AI models list, describe and query a database (§6.5) | §M14.10 |
+| `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
 | `drivers` | — | drivers for C, C++, Python, JS/TS, Java (§11) | §M14.8 ✅ |
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
@@ -539,6 +543,36 @@ values:
 
 Commits are fsync-bound, as they should be on a durable store.  Point reads
 are bounded by decoding whole nodes per level (§4.4).
+
+### 6.5 `nucleus mcp` (`modules/mcp`)
+
+`nucleus mcp [<dir>] [nucleus sql's connection options] [--allow-writes]
+[--max-rows <n>] [--timeout <ms>]` serves the Model Context Protocol on
+standard input and output (JSON-RPC 2.0, one message per line; protocol
+versions 2025-06-18, 2025-03-26, 2024-11-05), for a local database
+directory or a server.  An MCP client — an AI assistant, an IDE — starts
+it as a command (`{"command": "nucleus", "args": ["mcp", "/path/to/db"]}`)
+and gets the tools: `list_tables` (name, comment, analyzed rows),
+`describe_table` (columns with type, nullability, default and comment;
+primary key, indexes, foreign keys, referencing tables), `sample_rows`,
+`query` (`$1`… from `params`, bound as literals), `explain` (and
+`analyze`), `lint` (`ANALYZE QUERY`), and with `--allow-writes`
+`execute`.  The initialize answer's instructions tell the model where to
+start.
+
+Reads cannot write: the edition parses a read tool's SQL with nucleus's
+parser and refuses it (`25006`, with a hint pointing at `execute`) unless
+every statement is a read (a query, `EXPLAIN`, `SHOW`, `ANALYZE QUERY`),
+and the module runs it in `BEGIN READ ONLY` … `ROLLBACK`, after `SET
+statement_timeout` (default 5000 ms).  At most `--max-rows` rows (default
+100) are returned, `row_count` and `truncated` saying how many there were.
+Results are JSON (`structuredContent` and the same as text): booleans and
+integers as JSON's, `real` and `double precision` as numbers, the rest —
+`numeric` too — as strings, NULL as null.  A failure is the tool's
+(`isError`), its text `ERROR: … (SQLSTATE)` and `HINT: …`; an unknown tool
+or method is a JSON-RPC error.  The module is the protocol over a
+`Database` trait (SQL text in, answers with column types out); the
+edition implements it for `nucleus sql`'s backends.
 
 ## 7. d-os settings store (`integrations/d-os`, §M6.5)
 
@@ -1856,6 +1890,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.10 `nucleus mcp` (B3):** the `mcp` module, a Model
+  Context Protocol server over stdio — tables (with comments), their
+  descriptions, samples, read-only queries with row and time limits,
+  plans, lint, writes when allowed; `nucleus mcp` for a directory or a
+  server.
 - **2026-10-23 — §M14.10 comments and hints (B1, B2):** `COMMENT ON
   TABLE / COLUMN` (table record version 9; nc_catalog, `\d`, pg-compat's
   descriptions); errors with a hint — the name meant, the names there
