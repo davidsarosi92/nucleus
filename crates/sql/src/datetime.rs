@@ -197,6 +197,11 @@ pub fn random_bytes(buf: &mut [u8]) -> Result<()> {
     })
 }
 
+/// The database the current statement runs in.
+pub fn current_kv() -> Option<Arc<dyn Kv>> {
+    NOW.with(|n| n.borrow().as_ref().map(|(_, kv)| kv.clone()))
+}
+
 /// Runs `f` with `now()` fixed at `ts` and `clock()` reading `kv`'s clock.
 pub fn with_now<R>(ts: i64, kv: &Arc<dyn Kv>, f: impl FnOnce() -> R) -> R {
     let prev = NOW.with(|n| n.replace(Some((ts, kv.clone()))));

@@ -1018,7 +1018,9 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.casts` | `from_type`, `to_type`, `function`, `context` |
 | `nc_catalog.enums` | `type`, `label`, `position`, `sort_key` (hex) |
 | `nc_catalog.roles` | `name`, `superuser`, `login`, `inherit`, `createrole`, `connection_limit`, `has_password`, `valid_until` |
-| `nc_catalog.role_members` | `role`, `member`, `admin_option` |
+| `nc_catalog.role_members` | `role`, `member`, `admin_option`, `condition` (a `WHEN` condition, or NULL) |
+| `nc_catalog.access_rules` | `position`, `name`, `roles`, `addresses`, `front_ends`, `auth_methods`, `tls`, `action`, `read_only`, `as_role` (in order) |
+| `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
 | `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by` (the tokens the current role may manage; never a secret) |
 | `nc_catalog.grants` | `kind`, `object`, `column`, `grantee`, `privilege`, `grantable` (the ACLs written out) |
@@ -1316,6 +1318,41 @@ scoped to it; after `VALID UNTIL` it does not log in (`28P01`, as any
 refusal).  Role names starting `nct_` are reserved.  Row, time and cost
 budgets come with §M14.25's protection step (T6); schema and branch
 scopes when there are schemas and branches.
+
+**Access rules** (`rules.rs`): `CREATE ACCESS RULE name [FOR role, … |
+FOR ALL] [FROM 'cidr', …] [VIA ncp | pg, …] [AUTH password | token |
+certificate | oidc | ldap | trust, …] [WITH TLS | WITHOUT TLS] {ALLOW
+[READ ONLY] [AS ROLE r] | REJECT} [BEFORE rule | AFTER rule]`, `DROP
+ACCESS RULE [IF EXISTS] name` (an administrator's).  After a client
+authenticates, the rules are tried in order and the first whose
+conditions all hold decides — its role (the user or a role it is a member
+of), the client's address, the front end, the method it authenticated by,
+TLS: `REJECT`, or no rule matching, refuses the login (`28000`, naming the
+rule or saying none admits it); `ALLOW` admits it under the rule's
+ceiling, `READ ONLY` (every transaction read only, `25006`) and `AS ROLE
+r` (every privilege must be `r`'s too — a ceiling, never more).  With no
+rules every login is admitted; a local session (`ncsql <dir>`, an
+embedded database) is under none, the way back in after a lockout.
+Dropping a role takes it out of the rules (a rule left for no role, or
+whose ceiling role went, is dropped).  **Conditional memberships:**
+`GRANT role TO member [WITH ADMIN OPTION] WHEN (condition)` — a boolean
+over the connection, `source` (`inet`, the client's address), `auth`,
+`front_end`, `tls` (`source <<= '10.2.0.0/16' AND auth = 'certificate'`),
+checked when made (`42703`, `42804`) — holds only in a session whose
+connection meets it, decided at login: inherited privileges, `SET ROLE`
+and access rules' `FOR` see it only then; granted again without `WHEN`, it
+holds always.  **The connection** is the session's, read only (`55P02` on
+`SET`): `current_setting('nucleus.client_addr')`, `nucleus.front_end`,
+`nucleus.auth_method`, `nucleus.tls` (`on` / `off`),
+`nucleus.access_rule` — so a row-level security policy can use it too —
+and `nc_catalog.sessions` lists the sessions; `ncsql`'s `\conninfo` shows
+them.  Behind a load balancer, `--trusted-proxy <cidr>` (repeatable,
+`Config::trusted_proxies`) takes the client's address from the PROXY
+protocol header (HAProxy's, version 1 or 2) of a proxy in it — which must
+send one; nobody else's is read (`transport::client_address`).  An
+address alone is weak identity (shared networks, NAT, a spoofing
+neighbour): for more than read access a rule should require TLS or a
+certificate too.
 
 **Bootstrap.**  A database whose catalog has no administrator that can
 log in with a password is *unclaimed*: the server's `--user` /
@@ -1671,6 +1708,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 access rules (T5):** `CREATE / DROP ACCESS
+  RULE` (role, address, front end, method, TLS; `ALLOW [READ ONLY] [AS
+  ROLE r]` or `REJECT`; first match), `GRANT … WHEN (…)` memberships held
+  only under their condition, the connection as read-only settings,
+  `nc_catalog.sessions` and `access_rules`, the PROXY protocol from
+  trusted proxies; tested over real sockets from several addresses.
 - **2026-10-23 — §M14.25 LDAP (T4):** the `ldap` module — passwords of
   roles without their own checked by a directory (bind, or search and
   bind; LDAPS, StartTLS), asked for only over TLS (`PLAIN` on `ncp`, the

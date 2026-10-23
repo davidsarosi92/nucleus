@@ -408,10 +408,19 @@ impl<'a> Parser<'a> {
         self.expect_kw("to")?;
         let members = self.name_list()?;
         let admin_option = self.eat_kws(&["with", "admin", "option"]);
+        let condition = if self.eat_kw("when") {
+            self.expect_op("(")?;
+            let (_, text) = self.text_of(|p| p.expr())?;
+            self.expect_op(")")?;
+            Some(text)
+        } else {
+            None
+        };
         Ok(Statement::GrantRole {
             roles,
             members,
             admin_option,
+            condition,
         })
     }
 
@@ -498,6 +507,64 @@ impl<'a> Parser<'a> {
             using,
             check,
         }))
+    }
+
+    /// `CREATE ACCESS RULE name …` after its first three words.
+    fn create_access_rule(&mut self) -> Result<Statement> {
+        use crate::rules::{Action, Place, Rule};
+        let name = self.ident()?;
+        let mut rule = Rule {
+            name,
+            position: 0,
+            roles: Vec::new(),
+            from: Vec::new(),
+            via: Vec::new(),
+            auth: Vec::new(),
+            tls: None,
+            action: Action::Reject,
+        };
+        loop {
+            if self.eat_kw("for") {
+                if !self.eat_kw("all") {
+                    rule.roles = self.name_list()?;
+                }
+            } else if self.eat_kw("from") {
+                rule.from.push(self.string()?);
+                while self.eat_op(",") {
+                    rule.from.push(self.string()?);
+                }
+            } else if self.eat_kw("via") {
+                rule.via = self.name_list()?;
+            } else if self.eat_kw("auth") {
+                rule.auth = self.name_list()?;
+            } else if self.eat_kws(&["with", "tls"]) {
+                rule.tls = Some(true);
+            } else if self.eat_kws(&["without", "tls"]) {
+                rule.tls = Some(false);
+            } else {
+                break;
+            }
+        }
+        if self.eat_kw("reject") {
+            rule.action = Action::Reject;
+        } else {
+            self.expect_kw("allow")?;
+            let read_only = self.eat_kws(&["read", "only"]);
+            let as_role = if self.eat_kws(&["as", "role"]) {
+                Some(self.ident()?)
+            } else {
+                None
+            };
+            rule.action = Action::Allow { read_only, as_role };
+        }
+        let place = if self.eat_kw("before") {
+            Place::Before(self.ident()?)
+        } else if self.eat_kw("after") {
+            Place::After(self.ident()?)
+        } else {
+            Place::Last
+        };
+        Ok(Statement::CreateAccessRule(rule, place))
     }
 
     /// `name, name, …` (no parentheses).
@@ -783,6 +850,9 @@ impl<'a> Parser<'a> {
         }
         if self.eat_kw("policy") {
             return self.create_policy();
+        }
+        if self.eat_kws(&["access", "rule"]) {
+            return self.create_access_rule();
         }
         if self.eat_kw("token") {
             let name = self.ident()?;
@@ -1121,6 +1191,11 @@ impl<'a> Parser<'a> {
                 table,
                 if_exists,
             });
+        }
+        if self.eat_kws(&["access", "rule"]) {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let name = self.ident()?;
+            return Ok(Statement::DropAccessRule { name, if_exists });
         }
         if self.eat_kw("token") {
             let if_exists = self.eat_kws(&["if", "exists"]);

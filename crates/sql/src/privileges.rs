@@ -421,28 +421,42 @@ impl Checker {
         Ok(a)
     }
 
-    /// Whether the current role owns the object (or is an administrator).
-    pub fn owns(&self, txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<bool> {
-        if !self.within_ceiling(kind, name, 0) {
-            return Ok(false);
+    /// Whose privileges a statement needs: the current role's (its roles,
+    /// and whether it is an administrator) — and, under an access rule's
+    /// `AS ROLE r` ceiling, `r`'s as well.
+    fn subjects(&self, txn: &dyn KvTxn) -> Result<Vec<(BTreeSet<String>, bool)>> {
+        let mut out = vec![(self.roles(txn)?, self.who.superuser)];
+        if let Some(r) = &self.who.ceiling.as_role {
+            let mut roles = crate::roles::effective(txn, r)?;
+            roles.insert(PUBLIC.into());
+            let superuser = crate::roles::get(txn, r)?.is_some_and(|role| role.superuser);
+            out.push((roles, superuser));
         }
-        if self.who.superuser {
-            return Ok(true);
-        }
+        Ok(out)
+    }
+
+    fn owner_of(&self, txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<Option<String>> {
         let key = (kind, name.to_string());
         let cached = self.owners.borrow().get(&key).cloned();
-        let owner = match cached {
+        Ok(match cached {
             Some(o) => o,
             None => {
                 let o = owner(txn, kind, name)?;
                 self.owners.borrow_mut().insert(key, o.clone());
                 o
             }
-        };
-        Ok(match owner {
-            Some(o) => self.roles(txn)?.contains(&o),
-            None => false,
         })
+    }
+
+    /// Whether the current role owns the object (or is an administrator).
+    pub fn owns(&self, txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<bool> {
+        if !self.within_ceiling(kind, name, 0) {
+            return Ok(false);
+        }
+        let owner = self.owner_of(txn, kind, name)?;
+        Ok(self.subjects(txn)?.iter().all(|(roles, superuser)| {
+            *superuser || owner.as_ref().is_some_and(|o| roles.contains(o))
+        }))
     }
 
     /// Whether the current role has `privilege` on the object — on the
@@ -458,19 +472,21 @@ impl Checker {
         if !self.within_ceiling(kind, name, privilege) {
             return Ok(false);
         }
-        if self.owns(txn, kind, name)? {
-            return Ok(true);
-        }
-        let roles = self.roles(txn)?;
+        let owner = self.owner_of(txn, kind, name)?;
         let acl = self.acl(txn, kind, name)?;
-        Ok(acl
-            .iter()
-            .filter(|(g, _)| roles.contains(*g))
-            .any(|(_, e)| {
-                e.privileges & privilege != 0
-                    || column
-                        .is_some_and(|c| e.columns.get(c).is_some_and(|(p, _)| p & privilege != 0))
-            }))
+        Ok(self.subjects(txn)?.iter().all(|(roles, superuser)| {
+            *superuser
+                || owner.as_ref().is_some_and(|o| roles.contains(o))
+                || acl
+                    .iter()
+                    .filter(|(g, _)| roles.contains(*g))
+                    .any(|(_, e)| {
+                        e.privileges & privilege != 0
+                            || column.is_some_and(|c| {
+                                e.columns.get(c).is_some_and(|(p, _)| p & privilege != 0)
+                            })
+                    })
+        }))
     }
 
     /// Whether the session's ceiling ([`crate::access::Ceiling`]) lets it
@@ -491,12 +507,22 @@ impl Checker {
         if self.has(txn, Kind::Table, table, privilege, None)? {
             return Ok(true);
         }
-        let roles = self.roles(txn)?;
+        if !self.within_ceiling(Kind::Table, table, privilege) {
+            return Ok(false);
+        }
+        let owner = self.owner_of(txn, Kind::Table, table)?;
         let acl = self.acl(txn, Kind::Table, table)?;
-        Ok(acl
-            .iter()
-            .filter(|(g, _)| roles.contains(*g))
-            .any(|(_, e)| e.columns.values().any(|(p, _)| p & privilege != 0)))
+        Ok(self.subjects(txn)?.iter().all(|(roles, superuser)| {
+            *superuser
+                || owner.as_ref().is_some_and(|o| roles.contains(o))
+                || acl
+                    .iter()
+                    .filter(|(g, _)| roles.contains(*g))
+                    .any(|(_, e)| {
+                        e.privileges & privilege != 0
+                            || e.columns.values().any(|(p, _)| p & privilege != 0)
+                    })
+        }))
     }
 
     /// `42501` unless the current role has `privilege` (see [`Checker::has`]).

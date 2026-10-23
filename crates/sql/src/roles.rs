@@ -161,6 +161,13 @@ pub struct Membership {
     pub member: String,
     /// The member may grant `role` to others, and revoke it.
     pub admin_option: bool,
+    /// `WHEN (…)`: the membership holds only in a session whose connection
+    /// meets it (SQL over `source`, `auth`, `front_end`, `tls`).
+    pub condition: Option<String>,
+}
+
+fn condition_of(v: &[u8]) -> Option<String> {
+    (v.len() > 1).then(|| String::from_utf8_lossy(&v[1..]).into_owned())
 }
 
 /// Every membership.
@@ -176,6 +183,7 @@ pub fn memberships(txn: &dyn KvTxn) -> Result<Vec<Membership>> {
             role: String::from_utf8_lossy(&rest[..at]).into_owned(),
             member: String::from_utf8_lossy(&rest[at + 1..]).into_owned(),
             admin_option: v.first() == Some(&1),
+            condition: condition_of(&v),
         });
     }
     Ok(out)
@@ -187,12 +195,26 @@ pub fn membership(txn: &dyn KvTxn, role: &str, member: &str) -> Result<Option<Me
         role: role.to_string(),
         member: member.to_string(),
         admin_option: v.first() == Some(&1),
+        condition: condition_of(&v),
     }))
 }
 
 /// Makes `member` a member of `role` (or changes its admin option).
 pub fn add_member(txn: &mut dyn KvTxn, role: &str, member: &str, admin_option: bool) -> Result<()> {
-    txn.put(&member_key(role, member), &[u8::from(admin_option)])?;
+    put_member(txn, role, member, admin_option, None)
+}
+
+/// The same, holding only under `condition` (`None`: always).
+pub fn put_member(
+    txn: &mut dyn KvTxn,
+    role: &str,
+    member: &str,
+    admin_option: bool,
+    condition: Option<&str>,
+) -> Result<()> {
+    let mut v = vec![u8::from(admin_option)];
+    v.extend_from_slice(condition.unwrap_or_default().as_bytes());
+    txn.put(&member_key(role, member), &v)?;
     Ok(())
 }
 
@@ -205,7 +227,19 @@ pub fn remove_member(txn: &mut dyn KvTxn, role: &str, member: &str) -> Result<()
 /// The roles `user` has the privileges of: itself, and — through members
 /// that inherit — the roles it belongs to, directly or not.
 pub fn effective(txn: &dyn KvTxn, user: &str) -> Result<BTreeSet<String>> {
-    let all = memberships(txn)?;
+    effective_except(txn, user, &BTreeSet::new())
+}
+
+/// The same, without the memberships `(role, member)` in `suspended`.
+pub fn effective_except(
+    txn: &dyn KvTxn,
+    user: &str,
+    suspended: &BTreeSet<(String, String)>,
+) -> Result<BTreeSet<String>> {
+    let all: Vec<Membership> = memberships(txn)?
+        .into_iter()
+        .filter(|m| !suspended.contains(&(m.role.clone(), m.member.clone())))
+        .collect();
     let mut out = BTreeSet::from([user.to_string()]);
     let mut todo = vec![user.to_string()];
     while let Some(r) = todo.pop() {
@@ -225,10 +259,10 @@ pub fn effective(txn: &dyn KvTxn, user: &str) -> Result<BTreeSet<String>> {
 /// The roles whose privileges `who` has: its role's, and while it acts as
 /// itself, those its login granted for the session.
 pub fn effective_for(txn: &dyn KvTxn, who: &access::Who) -> Result<BTreeSet<String>> {
-    let mut out = effective(txn, &who.user)?;
+    let mut out = effective_except(txn, &who.user, &who.suspended)?;
     if who.user == who.session_user {
         for r in &who.session_roles {
-            out.extend(effective(txn, r)?);
+            out.extend(effective_except(txn, r, &who.suspended)?);
         }
     }
     Ok(out)
@@ -237,10 +271,23 @@ pub fn effective_for(txn: &dyn KvTxn, who: &access::Who) -> Result<BTreeSet<Stri
 /// Whether `member` is in `role`, directly or not, inheriting or not (for
 /// `SET ROLE` and cycle checks).
 pub fn is_member(txn: &dyn KvTxn, member: &str, role: &str) -> Result<bool> {
+    is_member_except(txn, member, role, &BTreeSet::new())
+}
+
+/// The same, without the memberships `(role, member)` in `suspended`.
+pub fn is_member_except(
+    txn: &dyn KvTxn,
+    member: &str,
+    role: &str,
+    suspended: &BTreeSet<(String, String)>,
+) -> Result<bool> {
     if member == role {
         return Ok(true);
     }
-    let all = memberships(txn)?;
+    let all: Vec<Membership> = memberships(txn)?
+        .into_iter()
+        .filter(|m| !suspended.contains(&(m.role.clone(), m.member.clone())))
+        .collect();
     let mut seen = BTreeSet::from([member.to_string()]);
     let mut todo = vec![member.to_string()];
     while let Some(r) = todo.pop() {
@@ -478,6 +525,7 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
             crate::enums::rename_owner(txn, name, to)?;
             crate::privileges::rename_grantee(txn, name, to)?;
             crate::tokens::rename_role(txn, name, to)?;
+            crate::rules::rename_role(txn, name, to)?;
             Ok("ALTER ROLE".into())
         }
         Statement::DropRole { names, if_exists } => {
@@ -514,6 +562,7 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
                     )));
                 }
                 crate::tokens::forget_role(txn, name)?;
+                crate::rules::forget_role(txn, name)?;
                 drop(txn, name)?;
             }
             Ok("DROP ROLE".into())
@@ -522,6 +571,7 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
             roles,
             members,
             admin_option,
+            condition,
         } => {
             for r in roles {
                 let role = get(&*txn, r)?.ok_or_else(|| no_role(r))?;
@@ -536,7 +586,9 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
                         )));
                     }
                     let keep_admin = membership(&*txn, r, m)?.is_some_and(|x| x.admin_option);
-                    add_member(txn, r, m, *admin_option || keep_admin)?;
+                    // The statement says the membership's condition: none
+                    // without WHEN.
+                    put_member(txn, r, m, *admin_option || keep_admin, condition.as_deref())?;
                 }
             }
             Ok("GRANT ROLE".into())
@@ -605,6 +657,9 @@ pub fn login_identity(txn: &dyn KvTxn, user: &str) -> Result<access::Who> {
             token: Some(t.name),
             session_roles: Default::default(),
             claims: Default::default(),
+            context: Default::default(),
+            rule: None,
+            suspended: Default::default(),
         });
     }
     match get(txn, user)? {
@@ -617,6 +672,9 @@ pub fn login_identity(txn: &dyn KvTxn, user: &str) -> Result<access::Who> {
             ceiling: Default::default(),
             session_roles: Default::default(),
             claims: Default::default(),
+            context: Default::default(),
+            rule: None,
+            suspended: Default::default(),
         }),
         None if unclaimed(txn)? => Ok(access::Who {
             session_user: user.into(),
@@ -627,6 +685,9 @@ pub fn login_identity(txn: &dyn KvTxn, user: &str) -> Result<access::Who> {
             ceiling: Default::default(),
             session_roles: Default::default(),
             claims: Default::default(),
+            context: Default::default(),
+            rule: None,
+            suspended: Default::default(),
         }),
         None => Err(Error::invalid_authorization(format!(
             "role \"{user}\" does not exist"
@@ -644,10 +705,13 @@ pub fn set_role(txn: &dyn KvTxn, login: &access::Who, role: Option<&str>) -> Res
     let through_session = login
         .session_roles
         .iter()
-        .map(|r| Ok(r == role || is_member(txn, r, role)?))
+        .map(|r| Ok(r == role || is_member_except(txn, r, role, &login.suspended)?))
         .collect::<Result<Vec<bool>>>()?
         .contains(&true);
-    if !login.superuser && !through_session && !is_member(txn, &login.session_user, role)? {
+    if !login.superuser
+        && !through_session
+        && !is_member_except(txn, &login.session_user, role, &login.suspended)?
+    {
         return Err(denied(&format!(
             "role \"{}\" is not a member of role \"{role}\"",
             login.session_user
@@ -662,5 +726,8 @@ pub fn set_role(txn: &dyn KvTxn, login: &access::Who, role: Option<&str>) -> Res
         ceiling: login.ceiling.clone(),
         session_roles: login.session_roles.clone(),
         claims: login.claims.clone(),
+        context: login.context.clone(),
+        rule: login.rule.clone(),
+        suspended: login.suspended.clone(),
     })
 }

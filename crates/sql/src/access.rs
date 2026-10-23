@@ -41,6 +41,54 @@ pub struct Who {
     /// The login's claims (an identity token's), read only:
     /// `current_setting('nucleus.claims.<name>')`.
     pub claims: std::collections::BTreeMap<String, String>,
+    /// Where and how the session connected (none for a local one).
+    pub context: Context,
+    /// The access rule that admitted it ([`crate::rules`]).
+    pub rule: Option<String>,
+    /// Memberships `(role, member)` whose `WHEN` condition the connection
+    /// does not meet: not held in this session.
+    pub suspended: std::collections::BTreeSet<(String, String)>,
+}
+
+/// Where and how a session connected: what access rules decide by, and
+/// what the session can read (`nucleus.client_addr`, `nucleus.front_end`,
+/// `nucleus.auth_method`, `nucleus.tls`, `nucleus.access_rule`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Context {
+    /// The client's address (behind a trusted proxy, the one it names).
+    pub client_addr: Option<std::net::IpAddr>,
+    /// The front end (`ncp`, `pg`; empty for a local session).
+    pub front_end: String,
+    /// How it authenticated: `password`, `token`, `certificate`, `oidc`,
+    /// `ldap`, `trust`.
+    pub auth_method: String,
+    /// Over TLS.
+    pub tls: bool,
+}
+
+/// The settings a session's connection context gives, which no `SET` can
+/// change.
+pub const CONTEXT_SETTINGS: &[&str] = &[
+    "nucleus.client_addr",
+    "nucleus.front_end",
+    "nucleus.auth_method",
+    "nucleus.tls",
+    "nucleus.access_rule",
+];
+
+impl Who {
+    /// A context setting's value ([`CONTEXT_SETTINGS`]).
+    pub fn context_setting(&self, name: &str) -> Option<String> {
+        let c = &self.context;
+        match name {
+            "nucleus.client_addr" => c.client_addr.map(|a| crate::rules::host(a).host_text()),
+            "nucleus.front_end" => Some(c.front_end.clone()),
+            "nucleus.auth_method" => Some(c.auth_method.clone()),
+            "nucleus.tls" => Some(if c.tls { "on" } else { "off" }.into()),
+            "nucleus.access_rule" => self.rule.clone(),
+            _ => None,
+        }
+    }
 }
 
 /// Who an identity provider says a client is (a bearer token's subject).
@@ -67,6 +115,8 @@ pub struct Ceiling {
     pub read_only: bool,
     /// The only tables it may touch (`None`: any); none may be created.
     pub tables: Option<std::collections::BTreeSet<String>>,
+    /// Only what this role may do as well (an access rule's `AS ROLE`).
+    pub as_role: Option<String>,
 }
 
 impl Ceiling {
@@ -88,6 +138,9 @@ impl Who {
             ceiling: Ceiling::default(),
             session_roles: Default::default(),
             claims: Default::default(),
+            context: Context::default(),
+            rule: None,
+            suspended: Default::default(),
         }
     }
 }

@@ -130,6 +130,7 @@ impl Token {
                 .tables
                 .as_ref()
                 .map(|t| t.iter().cloned().collect::<BTreeSet<_>>()),
+            as_role: None,
         }
     }
 }

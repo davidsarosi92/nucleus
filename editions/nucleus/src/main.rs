@@ -32,6 +32,7 @@ usage:
                       --ldap-search-base <dn> [--ldap-search-attribute <attr>]
                       [--ldap-search-dn <dn> --ldap-search-password <pw>])
                       [--ldap-starttls] [--ldap-ca <pem file>]]
+                     [--trusted-proxy <cidr> …]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default

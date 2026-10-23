@@ -12,7 +12,7 @@
 
 use std::cell::RefCell;
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{IpAddr, TcpStream};
 use std::rc::Rc;
 
 /// A byte stream to a client.
@@ -83,3 +83,79 @@ impl Write for WriteHalf {
 /// The first byte of a TLS handshake record: a client that starts with it
 /// is starting TLS.
 pub const TLS_HANDSHAKE: u8 = 0x16;
+
+/// The client's address: the TCP peer's — or, when the peer is a trusted
+/// proxy ([`crate::Config::trusted_proxies`]), the one its PROXY protocol
+/// header (version 1 or 2, HAProxy's) names, read off the stream first.
+/// A trusted proxy must send one; `LOCAL` / `UNKNOWN` (a health check) keep
+/// the peer's.  Nothing is read from anyone else, whose header would be
+/// taken as the protocol's first bytes and refused.
+pub fn client_address(stream: &mut TcpStream, trusted: &[String]) -> io::Result<Option<IpAddr>> {
+    let Some(peer) = stream.peer_addr().ok().map(|a| a.ip()) else {
+        return Ok(None);
+    };
+    let host = nucleus_sql::rules::host(peer);
+    let trusted_peer = trusted
+        .iter()
+        .any(|c| nucleus_sql::inet::parse_cidr(c).is_ok_and(|net| host.within(net)));
+    if !trusted_peer {
+        return Ok(Some(peer));
+    }
+    let bad = |what: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("PROXY protocol: {what}"),
+        )
+    };
+    let mut sig = [0u8; 12];
+    stream.read_exact(&mut sig[..6])?;
+    if &sig[..6] == b"PROXY " {
+        // Version 1: one line of text, at most 107 bytes.
+        let mut line = Vec::new();
+        let mut b = [0u8; 1];
+        while !line.ends_with(b"\r\n") {
+            if line.len() > 107 {
+                return Err(bad("a line too long"));
+            }
+            stream.read_exact(&mut b)?;
+            line.push(b[0]);
+        }
+        let text = std::str::from_utf8(&line).map_err(|_| bad("not text"))?;
+        let mut parts = text.trim_end().split(' ');
+        return match parts.next() {
+            Some("TCP4" | "TCP6") => parts
+                .next()
+                .and_then(|a| a.parse().ok())
+                .map(Some)
+                .ok_or_else(|| bad("a bad source address")),
+            Some("UNKNOWN") => Ok(Some(peer)),
+            _ => Err(bad("an unknown protocol")),
+        };
+    }
+    stream.read_exact(&mut sig[6..])?;
+    if sig != *b"\r\n\r\n\0\r\nQUIT\n" {
+        return Err(bad("a trusted proxy sent no header"));
+    }
+    // Version 2: version/command, family/protocol, length, addresses.
+    let mut head = [0u8; 4];
+    stream.read_exact(&mut head)?;
+    let len = usize::from(u16::from_be_bytes([head[2], head[3]]));
+    let mut rest = vec![0u8; len];
+    stream.read_exact(&mut rest)?;
+    if head[0] >> 4 != 2 {
+        return Err(bad("an unknown version"));
+    }
+    if head[0] & 0x0f == 0 {
+        return Ok(Some(peer)); // LOCAL
+    }
+    match head[1] >> 4 {
+        1 if rest.len() >= 12 => Ok(Some(IpAddr::from([rest[0], rest[1], rest[2], rest[3]]))),
+        2 if rest.len() >= 36 => {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&rest[..16]);
+            Ok(Some(IpAddr::from(a)))
+        }
+        0 => Ok(Some(peer)), // UNSPEC
+        _ => Err(bad("a bad address block")),
+    }
+}

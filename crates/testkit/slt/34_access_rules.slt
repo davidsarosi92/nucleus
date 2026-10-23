@@ -1,0 +1,164 @@
+# Access rules and conditional memberships: the statements and the
+# catalog.  nucleus-only throughout (PostgreSQL's pg_hba.conf is a file);
+# logins under the rules are tested over real sockets
+# (crates/client/tests/client.rs).  A local session, as this one, is under
+# no rule.
+
+# nucleus-only
+statement ok
+CREATE ROLE slt_ar_ops
+
+# nucleus-only
+statement ok
+CREATE USER slt_ar_alice
+
+# nucleus-only
+statement ok
+CREATE ACCESS RULE slt_desk FOR slt_ar_alice FROM '10.2.3.1/32', '10.2.3.9/32' ALLOW
+
+# nucleus-only
+statement ok
+CREATE ACCESS RULE slt_kiosk FOR slt_ar_alice FROM '10.2.3.2/32' VIA ncp AUTH password, certificate WITH TLS ALLOW READ ONLY AS ROLE slt_ar_ops
+
+# nucleus-only
+statement ok
+CREATE ACCESS RULE slt_first FOR ALL WITHOUT TLS REJECT BEFORE slt_desk
+
+# nucleus-only
+statement ok
+CREATE ACCESS RULE slt_middle FOR slt_ar_alice ALLOW AFTER slt_desk
+
+# nucleus-only
+query ITTTTTBTBT
+SELECT position, name, roles, addresses, front_ends, auth_methods, tls, action, read_only, as_role FROM nc_catalog.access_rules ORDER BY position
+----
+1 slt_first {} {} {} {} false REJECT false NULL
+2 slt_desk {slt_ar_alice} {10.2.3.1/32,10.2.3.9/32} {} {} NULL ALLOW false NULL
+3 slt_middle {slt_ar_alice} {} {} {} NULL ALLOW false NULL
+4 slt_kiosk {slt_ar_alice} {10.2.3.2/32} {ncp} {password,certificate} true ALLOW true slt_ar_ops
+
+# nucleus-only
+statement error 42710
+CREATE ACCESS RULE slt_desk ALLOW
+
+# nucleus-only
+statement error 42704
+CREATE ACCESS RULE slt_x FOR slt_nobody ALLOW
+
+# nucleus-only
+statement error 42704
+CREATE ACCESS RULE slt_x ALLOW AS ROLE slt_nobody
+
+# nucleus-only
+statement error 42704
+CREATE ACCESS RULE slt_x ALLOW BEFORE slt_nothing
+
+# nucleus-only
+statement error 22023
+CREATE ACCESS RULE slt_x AUTH kerberos ALLOW
+
+# nucleus-only
+statement error 22P02
+CREATE ACCESS RULE slt_x FROM '10.2.3.300/32' ALLOW
+
+# nucleus-only
+statement error 42601
+CREATE ACCESS RULE slt_x FOR ALL
+
+# nucleus-only: only an administrator manages rules.
+statement ok
+SET ROLE slt_ar_alice
+
+# nucleus-only
+statement error 42501
+CREATE ACCESS RULE slt_mine ALLOW
+
+# nucleus-only
+statement error 42501
+DROP ACCESS RULE slt_desk
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# Conditional memberships.
+
+# nucleus-only
+statement ok
+GRANT slt_ar_ops TO slt_ar_alice WHEN (source <<= '10.2.0.0/16' AND auth IN ('certificate', 'oidc') AND tls)
+
+# nucleus-only
+query TTBT
+SELECT role, member, admin_option, condition FROM nc_catalog.role_members WHERE role = 'slt_ar_ops'
+----
+slt_ar_ops slt_ar_alice false source <<= '10.2.0.0/16' AND auth IN ('certificate', 'oidc') AND tls
+
+# nucleus-only
+statement error 42703
+GRANT slt_ar_ops TO slt_ar_alice WHEN (hostname = 'x')
+
+# nucleus-only
+statement error 42804
+GRANT slt_ar_ops TO slt_ar_alice WHEN (front_end)
+
+# nucleus-only: granted again without WHEN, it holds always.
+statement ok
+GRANT slt_ar_ops TO slt_ar_alice
+
+# nucleus-only
+query T
+SELECT condition FROM nc_catalog.role_members WHERE role = 'slt_ar_ops'
+----
+NULL
+
+# nucleus-only: the session's connection (local, or this script's over a
+# protocol, all without TLS); none of it can be set.
+query T
+SELECT current_setting('nucleus.tls')
+----
+off
+
+# nucleus-only
+statement error 55P02
+SET nucleus.auth_method = 'certificate'
+
+# nucleus-only: sessions of a role no one logged in as: none.
+query I
+SELECT count(*) FROM nc_catalog.sessions WHERE session_user_name = 'slt_ar_alice'
+----
+0
+
+# nucleus-only: dropping a role takes it out of the rules; a rule left for
+# no role, or whose ceiling role went, goes.
+statement ok
+DROP ROLE slt_ar_ops
+
+# nucleus-only
+query T
+SELECT name FROM nc_catalog.access_rules ORDER BY position
+----
+slt_first
+slt_desk
+slt_middle
+
+# nucleus-only
+statement ok
+DROP ACCESS RULE slt_first
+
+# nucleus-only
+statement error 42704
+DROP ACCESS RULE slt_first
+
+# nucleus-only
+statement ok
+DROP ACCESS RULE IF EXISTS slt_first
+
+# nucleus-only
+statement ok
+DROP ROLE slt_ar_alice
+
+# nucleus-only
+query I
+SELECT count(*) FROM nc_catalog.access_rules
+----
+0

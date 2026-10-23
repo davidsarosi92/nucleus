@@ -76,7 +76,7 @@ pub mod catalog {
 }
 
 /// Who the current statement runs as ([`crate::access`]).
-pub use crate::access::{Who, current as current_who};
+pub use crate::access::{Context, Who, current as current_who};
 
 /// The version of this interface.
 pub const API_VERSION: u32 = 1;

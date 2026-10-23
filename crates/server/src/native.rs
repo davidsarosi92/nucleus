@@ -268,12 +268,14 @@ fn split_tag(tag: &str) -> (String, u64) {
 }
 
 /// Serves one client until it says Bye or goes away.
-pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> io::Result<()> {
+pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> io::Result<()> {
     let log = |what: &str, text: &str| {
         if config.log_queries {
             eprintln!("nucleus-server: [{id}] {what}: {}", text.trim());
         }
     };
+    // Behind a trusted proxy, the address its header names.
+    let peer = crate::transport::client_address(&mut stream, &config.trusted_proxies)?;
     // A client that starts with a TLS handshake asks for TLS (§10).
     let mut first = [0u8; 1];
     if stream.peek(&mut first)? == 0 {
@@ -300,7 +302,15 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     let mut out = BufWriter::new(w);
 
     // Hello, and the login it starts.
-    let hello = login(&mut input, &mut out, &kv, config, tls_info.as_ref(), &log)?;
+    let hello = login(
+        &mut input,
+        &mut out,
+        &kv,
+        config,
+        tls_info.as_ref(),
+        peer,
+        &log,
+    )?;
     let (version, mut session) = match hello {
         Ok(v) => v,
         Err(e) => {
@@ -370,6 +380,7 @@ fn login(
     kv: &Arc<dyn Kv>,
     config: &Config,
     tls: Option<&crate::TlsInfo>,
+    peer: Option<std::net::IpAddr>,
     log: &dyn Fn(&str, &str),
 ) -> io::Result<Result<(u16, Session), Error>> {
     let (kind, body) = read_message(input)?;
@@ -401,9 +412,12 @@ fn login(
         message: format!("password authentication failed for user \"{user}\""),
     };
     let mut identity = None;
+    let mut method = "trust";
     if crate::certificate_login(config, &**kv, tls, &user) {
         log("login", &format!("{user} by its client certificate"));
+        method = "certificate";
     } else if config.auth.wants_password() {
+        method = crate::password_method(config, &**kv, &user);
         if version >= 4 {
             match exchange(input, out, &**kv, config, &user, tls)? {
                 Ok(Proved::Password) => {}
@@ -411,6 +425,7 @@ fn login(
                 Ok(Proved::Bearer(id)) => {
                     log("login", &format!("{} by a bearer token", id.user));
                     identity = Some(id);
+                    method = "oidc";
                 }
                 Err(e) => return Ok(Err(e)),
             }
@@ -428,7 +443,15 @@ fn login(
     let logged_in = match &identity {
         Some(id) => session.login_as(id),
         None => session.login(&user),
-    };
+    }
+    .and_then(|()| {
+        session.admit(nucleus_sql::access::Context {
+            client_addr: peer,
+            front_end: "ncp".into(),
+            auth_method: method.into(),
+            tls: tls.is_some(),
+        })
+    });
     Ok(match logged_in {
         Ok(()) => Ok((version, session)),
         Err(e) => Err(e),

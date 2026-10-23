@@ -89,6 +89,15 @@ pub enum Statement {
         /// `VALID UNTIL`.
         valid_until: Option<String>,
     },
+    /// `CREATE ACCESS RULE …` ([`crate::rules`]).
+    CreateAccessRule(crate::rules::Rule, crate::rules::Place),
+    /// `DROP ACCESS RULE [IF EXISTS] name`.
+    DropAccessRule {
+        /// The rule.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
     /// `DROP TOKEN [IF EXISTS] name`.
     DropToken {
         /// The token.
@@ -111,6 +120,8 @@ pub enum Statement {
         members: Vec<String>,
         /// `WITH ADMIN OPTION`.
         admin_option: bool,
+        /// `WHEN (…)`: a condition on the session's connection.
+        condition: Option<String>,
     },
     /// `REVOKE [ADMIN OPTION FOR] roles FROM members`.
     RevokeRole {

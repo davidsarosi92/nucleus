@@ -629,3 +629,311 @@ fn tokens_log_in_under_their_ceiling() {
     root.execute("DROP ROLE agent", &[]).unwrap();
     assert!(login(&wl, &ws).is_err());
 }
+
+/// A proxy for tests: each connection to it reaches `server` with a PROXY
+/// protocol header naming `source` as the client (version 1 text, or
+/// version 2 binary for an IPv4 source when `v2`).
+fn proxy(server: SocketAddr, source: &str, v2: bool) -> SocketAddr {
+    use std::io::{Read, Write};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let source: std::net::IpAddr = source.parse().unwrap();
+    std::thread::spawn(move || {
+        for client in listener.incoming() {
+            let mut client = client.unwrap();
+            let mut upstream = std::net::TcpStream::connect(server).unwrap();
+            match (source, v2) {
+                (std::net::IpAddr::V4(a), true) => {
+                    let mut h = b"\r\n\r\n\0\r\nQUIT\n".to_vec();
+                    h.extend([0x21, 0x11, 0, 12]);
+                    h.extend(a.octets());
+                    h.extend([127, 0, 0, 1, 0x30, 0x39, 0x4e, 0x23]);
+                    upstream.write_all(&h).unwrap();
+                }
+                (a, _) => {
+                    let family = if a.is_ipv4() { "TCP4" } else { "TCP6" };
+                    let dst = if a.is_ipv4() { "127.0.0.1" } else { "::1" };
+                    write!(upstream, "PROXY {family} {a} {dst} 12345 20035\r\n").unwrap();
+                }
+            }
+            let (mut c2, mut u2) = (client.try_clone().unwrap(), upstream.try_clone().unwrap());
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut u2, &mut c2);
+                let _ = c2.shutdown(std::net::Shutdown::Both);
+            });
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match client.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if upstream.write_all(&buf[..n]).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let _ = upstream.shutdown(std::net::Shutdown::Both);
+            });
+        }
+    });
+    addr
+}
+
+/// Access rules over real sockets (PLAN.md §M14.25 "done when"): the same
+/// user with full rights from one address and read only from another,
+/// refused from a third; a role held only under its condition; a ceiling
+/// of another role's rights; what the session sees of its connection.
+#[test]
+fn access_rules_decide_by_where_and_how() {
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(1)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = listener.local_addr().unwrap();
+    let server_config = nucleus_server::Config {
+        trusted_proxies: vec!["127.0.0.1/32".into()],
+        ..Default::default()
+    };
+    std::thread::spawn(move || serve(listener, db, server_config));
+    let from = |source: &str| proxy(server, source, false);
+    let login = |via: SocketAddr, user: &str, password: &str| {
+        Client::connect(Config {
+            user: user.into(),
+            password: Some(password.into()),
+            ..config(via)
+        })
+    };
+    fn code<T>(r: Result<T, Error>) -> String {
+        match r {
+            Err(Error::Server(e)) => e.code,
+            Err(e) => format!("{e}"),
+            Ok(_) => "ok".into(),
+        }
+    }
+    let admin_via = from("10.0.0.1");
+    login(admin_via, "nucleus", "nucleus")
+        .unwrap()
+        .execute("CREATE USER root SUPERUSER PASSWORD 'root-pw'", &[])
+        .unwrap();
+    let mut admin = login(admin_via, "root", "root-pw").unwrap();
+    for sql in [
+        "CREATE USER alice PASSWORD 'alice-pw'",
+        "CREATE USER bob PASSWORD 'bob-pw'",
+        "CREATE USER carol PASSWORD 'carol-pw'",
+        "CREATE ROLE ops",
+        "CREATE ROLE readers",
+        "CREATE TABLE notes (id int)",
+        "CREATE TABLE secret (x int)",
+        "INSERT INTO secret VALUES (42)",
+        "GRANT SELECT, INSERT ON notes TO alice, bob",
+        "GRANT SELECT ON notes TO readers",
+        "GRANT SELECT ON secret TO ops",
+        "GRANT ops TO alice WHEN (source <<= '10.2.0.0/16' AND auth = 'password')",
+        "CREATE ACCESS RULE admins FOR root FROM '10.0.0.0/8' ALLOW",
+        "CREATE ACCESS RULE alice_desk FOR alice FROM '10.2.3.1/32' ALLOW",
+        "CREATE ACCESS RULE alice_kiosk FOR alice FROM '10.2.3.2/32' ALLOW READ ONLY",
+        "CREATE ACCESS RULE alice_home FOR alice FROM '192.168.0.0/16' ALLOW",
+        "CREATE ACCESS RULE bob_lab FOR bob FROM '10.3.0.0/16' ALLOW AS ROLE readers",
+        "CREATE ACCESS RULE no_carol FOR carol REJECT BEFORE admins",
+    ] {
+        admin.execute(sql, &[]).unwrap();
+    }
+    // A bad condition, method or address is refused when made.
+    assert_eq!(
+        code(admin.execute("GRANT ops TO bob WHEN (nope = 1)", &[])),
+        "42703"
+    );
+    assert_eq!(
+        code(admin.execute("GRANT ops TO bob WHEN (auth)", &[])),
+        "42804"
+    );
+    assert_eq!(
+        code(admin.execute("CREATE ACCESS RULE x AUTH magic ALLOW", &[])),
+        "22023"
+    );
+    assert_eq!(
+        code(admin.execute("CREATE ACCESS RULE x FROM 'nope' ALLOW", &[])),
+        "22P02"
+    );
+    // From the desk: everything alice has, and ops (its condition holds).
+    let mut desk = login(from("10.2.3.1"), "alice", "alice-pw").unwrap();
+    desk.execute("INSERT INTO notes VALUES (1)", &[]).unwrap();
+    assert_eq!(
+        desk.rows(
+            "SELECT x, current_setting('nucleus.client_addr'), current_setting('nucleus.access_rule') FROM secret",
+            &[]
+        )
+        .unwrap(),
+        vec![vec![Value::Integer(42), Value::from("10.2.3.1"), Value::from("alice_desk")]]
+    );
+    assert_eq!(
+        code(desk.execute("SET nucleus.client_addr = '1.2.3.4'", &[])),
+        "55P02"
+    );
+    // From the kiosk: read only.
+    let mut kiosk = login(from("10.2.3.2"), "alice", "alice-pw").unwrap();
+    assert_eq!(code(kiosk.execute("SELECT count(*) FROM notes", &[])), "ok");
+    assert_eq!(
+        code(kiosk.execute("INSERT INTO notes VALUES (2)", &[])),
+        "25006"
+    );
+    // From home: alice, but not ops (its condition does not hold).
+    let mut home = login(from("192.168.7.7"), "alice", "alice-pw").unwrap();
+    home.execute("INSERT INTO notes VALUES (3)", &[]).unwrap();
+    assert_eq!(code(home.execute("SELECT x FROM secret", &[])), "42501");
+    assert_eq!(code(home.execute("SET ROLE ops", &[])), "42501");
+    // From anywhere else: no rule admits her; carol never.
+    assert_eq!(
+        code(login(from("172.16.0.1"), "alice", "alice-pw")),
+        "28000"
+    );
+    assert_eq!(code(login(from("10.0.0.5"), "carol", "carol-pw")), "28000");
+    // From the lab, bob has only what readers have as well.
+    let mut lab = login(proxy(server, "10.3.0.9", true), "bob", "bob-pw").unwrap();
+    assert_eq!(code(lab.execute("SELECT count(*) FROM notes", &[])), "ok");
+    assert_eq!(
+        code(lab.execute("INSERT INTO notes VALUES (4)", &[])),
+        "42501"
+    );
+    // nc_catalog.sessions: who, from where, by which rule, under what.
+    let rows = admin
+        .rows(
+            "SELECT user_name, client_addr, access_rule, read_only, as_role, front_end, auth_method
+             FROM nc_catalog.sessions WHERE session_user_name IN ('alice', 'bob') ORDER BY client_addr",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Value::from("alice"),
+                Value::from("10.2.3.1"),
+                Value::from("alice_desk"),
+                Value::Bool(false),
+                Value::Null,
+                Value::from("ncp"),
+                Value::from("password"),
+            ],
+            vec![
+                Value::from("alice"),
+                Value::from("10.2.3.2"),
+                Value::from("alice_kiosk"),
+                Value::Bool(true),
+                Value::Null,
+                Value::from("ncp"),
+                Value::from("password"),
+            ],
+            vec![
+                Value::from("bob"),
+                Value::from("10.3.0.9"),
+                Value::from("bob_lab"),
+                Value::Bool(false),
+                Value::from("readers"),
+                Value::from("ncp"),
+                Value::from("password"),
+            ],
+            vec![
+                Value::from("alice"),
+                Value::from("192.168.7.7"),
+                Value::from("alice_home"),
+                Value::Bool(false),
+                Value::Null,
+                Value::from("ncp"),
+                Value::from("password"),
+            ],
+        ]
+    );
+    // alice sees her own sessions only.
+    assert_eq!(
+        desk.rows(
+            "SELECT count(*) FROM nc_catalog.sessions WHERE session_user_name <> 'alice'",
+            &[]
+        )
+        .unwrap(),
+        vec![vec![Value::Int(0)]]
+    );
+    // Without rules, every login is admitted again.
+    for r in [
+        "no_carol",
+        "admins",
+        "alice_desk",
+        "alice_kiosk",
+        "alice_home",
+        "bob_lab",
+    ] {
+        admin
+            .execute(&format!("DROP ACCESS RULE {r}"), &[])
+            .unwrap();
+    }
+    assert!(login(from("172.16.0.1"), "carol", "carol-pw").is_ok());
+}
+
+/// Two real source addresses, without a proxy: 127.0.0.1 and ::1 (where
+/// the host has IPv6).
+#[test]
+fn access_rules_see_the_real_address() {
+    let Ok(v6) = TcpListener::bind("[::1]:0") else {
+        return; // no IPv6 here
+    };
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(1)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let v4 = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (a4, a6) = (v4.local_addr().unwrap(), v6.local_addr().unwrap());
+    let db2 = Arc::clone(&db);
+    std::thread::spawn(move || serve(v4, db, nucleus_server::Config::default()));
+    std::thread::spawn(move || serve(v6, db2, nucleus_server::Config::default()));
+    Client::connect(config(a4))
+        .unwrap()
+        .execute("CREATE USER root SUPERUSER PASSWORD 'root-pw'", &[])
+        .unwrap();
+    let mut admin = Client::connect(Config {
+        user: "root".into(),
+        password: Some("root-pw".into()),
+        ..config(a4)
+    })
+    .unwrap();
+    for sql in [
+        "CREATE USER dave PASSWORD 'dave-pw'",
+        "CREATE TABLE t (x int)",
+        "GRANT SELECT, INSERT ON t TO dave",
+        "CREATE ACCESS RULE everyone_v4 FROM '127.0.0.1/32' ALLOW",
+        "CREATE ACCESS RULE dave_v6 FOR dave FROM '::1/128' ALLOW READ ONLY",
+    ] {
+        admin.execute(sql, &[]).unwrap();
+    }
+    let dave = |at: SocketAddr| {
+        Client::connect(Config {
+            user: "dave".into(),
+            password: Some("dave-pw".into()),
+            ..config(at)
+        })
+        .unwrap()
+    };
+    assert!(dave(a4).execute("INSERT INTO t VALUES (1)", &[]).is_ok());
+    let err = dave(a6)
+        .execute("INSERT INTO t VALUES (2)", &[])
+        .unwrap_err();
+    assert!(matches!(err, Error::Server(e) if e.code == "25006"));
+    // root from ::1: no rule admits it.
+    assert!(
+        Client::connect(Config {
+            user: "root".into(),
+            password: Some("root-pw".into()),
+            ..config(a6)
+        })
+        .is_err()
+    );
+}

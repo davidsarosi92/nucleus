@@ -84,6 +84,38 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "sessions",
+        &[
+            ("id", I),
+            ("user_name", T),
+            ("session_user_name", T),
+            ("client_addr", T),
+            ("front_end", T),
+            ("auth_method", T),
+            ("tls", B),
+            ("access_rule", T),
+            ("read_only", B),
+            ("as_role", T),
+            ("roles", TA),
+            ("started", DataType::TimestampTz),
+        ],
+    ),
+    (
+        "access_rules",
+        &[
+            ("position", I),
+            ("name", T),
+            ("roles", TA),
+            ("addresses", TA),
+            ("front_ends", TA),
+            ("auth_methods", TA),
+            ("tls", B),
+            ("action", T),
+            ("read_only", B),
+            ("as_role", T),
+        ],
+    ),
+    (
         "tokens",
         &[
             ("name", T),
@@ -98,7 +130,12 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
     ),
     (
         "role_members",
-        &[("role", T), ("member", T), ("admin_option", B)],
+        &[
+            ("role", T),
+            ("member", T),
+            ("admin_option", B),
+            ("condition", T),
+        ],
     ),
     (
         "grants",
@@ -332,6 +369,49 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                 ]);
             }
         }
+        "sessions" => {
+            for s in crate::sessions::visible() {
+                out.push(vec![
+                    Value::Int(s.id as i64),
+                    text(s.user),
+                    text(s.session_user),
+                    s.context
+                        .client_addr
+                        .map_or(Value::Null, |a| text(crate::rules::host(a).host_text())),
+                    text(s.context.front_end),
+                    text(s.context.auth_method),
+                    Value::Bool(s.context.tls),
+                    s.rule.map_or(Value::Null, text),
+                    Value::Bool(s.read_only),
+                    s.as_role.map_or(Value::Null, text),
+                    Value::Array(s.roles.into_iter().map(text).collect()),
+                    Value::TimestampTz(s.started),
+                ]);
+            }
+        }
+        "access_rules" => {
+            let list = |v: Vec<String>| Value::Array(v.into_iter().map(text).collect());
+            for r in crate::rules::all(txn)? {
+                let (action, read_only, as_role) = match r.action {
+                    crate::rules::Action::Reject => ("REJECT", false, None),
+                    crate::rules::Action::Allow { read_only, as_role } => {
+                        ("ALLOW", read_only, as_role)
+                    }
+                };
+                out.push(vec![
+                    Value::Int(i64::from(r.position)),
+                    text(r.name),
+                    list(r.roles),
+                    list(r.from),
+                    list(r.via),
+                    list(r.auth),
+                    r.tls.map_or(Value::Null, Value::Bool),
+                    text(action.to_string()),
+                    Value::Bool(read_only),
+                    as_role.map_or(Value::Null, text),
+                ]);
+            }
+        }
         "tokens" => {
             for t in crate::tokens::visible(txn)? {
                 out.push(vec![
@@ -390,6 +470,7 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     text(m.role),
                     text(m.member),
                     Value::Bool(m.admin_option),
+                    m.condition.map_or(Value::Null, text),
                 ]);
             }
         }

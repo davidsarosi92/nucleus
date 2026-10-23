@@ -26,6 +26,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (mut oidc_issuer, mut oidc_audience, mut oidc_jwks) = (None, None, None::<String>);
     let (mut oidc_user_claim, mut oidc_role_claim) = (None::<String>, None::<String>);
     let mut ldap: std::collections::BTreeMap<&str, String> = Default::default();
+    let mut trusted_proxies = Vec::new();
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -81,6 +82,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     .ok_or_else(|| format!("{a} needs a value"))?
                     .clone();
                 ldap.insert(&a[7..], v);
+            }
+            "--trusted-proxy" => {
+                let cidr = rest
+                    .next()
+                    .ok_or("--trusted-proxy needs an address (CIDR)")?;
+                nucleus_sql::inet::parse_cidr(cidr)
+                    .map_err(|e| format!("--trusted-proxy {cidr}: {}", e.message))?;
+                trusted_proxies.push(cidr.clone());
             }
             "--ldap-starttls" => {
                 ldap.insert("starttls", String::new());
@@ -167,6 +176,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 Some(Arc::new(d) as Arc<dyn nucleus_server::Directory>)
             }
         },
+        trusted_proxies,
     };
     let db = Database::open(dir, Options::default()).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);

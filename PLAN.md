@@ -1007,8 +1007,11 @@ static or discovered keys, claims as read-only settings, a role claim's
 roles for the session) in every driver, against a test issuer;
 pg-compat's OAUTHBEARER, which libpq 18 speaks, is left for later; LDAP
 ✅ — the `ldap` module, for roles without a password of their own, the
-password asked for only over TLS); T4 done; T5 access rules and privileges by connection
-context; T6 protection; T7 audit.
+password asked for only over TLS); T4 done; T5 access rules and privileges
+by connection context ✅ (ordered rules with READ ONLY / AS ROLE ceilings,
+`GRANT … WHEN` memberships, the connection as read-only settings and in
+`nc_catalog.sessions`, the PROXY protocol; the MCP and sync front ends get
+the same rules when they exist, §M14.10, §M16.7); T6 protection; T7 audit.
 
 **Order:** right after §M14.19 and §M14.26 (whose `inet` / `cidr` the
 access rules use), before the rest of the developer platform:
@@ -1973,6 +1976,10 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.25 T5: access rules and privileges by connection
+  context — the same user with full rights from one address and read only
+  from another, a role held only under its condition, over real sockets
+  (proxied, and 127.0.0.1 against ::1).  Next: T6.
 - **2026-10-23** — §M14.25 T4: LDAP as a module, checked against OpenLDAP
   2.6; with it every authentication method of T4 is in.  Next: T5.
 - **2026-10-23** — §M14.25 T4: OpenID Connect as a module; tokens of a

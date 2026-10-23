@@ -666,6 +666,9 @@ pub fn setting(name: &str) -> Option<String> {
     if let Some(claim) = lower.strip_prefix(crate::access::CLAIMS) {
         return crate::access::current().claims.get(claim).cloned();
     }
+    if crate::access::CONTEXT_SETTINGS.contains(&lower.as_str()) {
+        return crate::access::current().context_setting(&lower);
+    }
     if let Some(v) = crate::access::current().settings.get(&lower) {
         return Some(v.clone());
     }

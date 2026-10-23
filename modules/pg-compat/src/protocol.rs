@@ -383,10 +383,11 @@ struct Conn {
 }
 
 /// Serves one client connection until it terminates.
-pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> io::Result<()> {
+pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> io::Result<()> {
     // Startup, possibly after SSL (accepted when the server has TLS) and
     // GSSAPI (declined) requests.  Read unbuffered: nothing a client sends
     // before the TLS handshake may be taken as sent inside it.
+    let peer = nucleus_server::transport::client_address(&mut stream, &config.trusted_proxies)?;
     let mut tcp = stream;
     let mut secured: Option<Box<dyn nucleus_server::Stream>> = None;
     let mut tls_info = None;
@@ -504,8 +505,23 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
         out.flush()?;
         return Ok(());
     }
-    let mut session = Session::with_registry(kv, registry(&config.registry));
-    if let Err(e) = session.login(&user) {
+    let method = if !config.auth.wants_password() {
+        "trust"
+    } else if by_certificate {
+        "certificate"
+    } else {
+        nucleus_server::password_method(config, &*kv, &user)
+    };
+    let mut session = Session::with_registry(Arc::clone(&kv), registry(&config.registry));
+    let admitted = session.login(&user).and_then(|()| {
+        session.admit(nucleus_sql::ext::Context {
+            client_addr: peer,
+            front_end: "pg".into(),
+            auth_method: method.into(),
+            tls: tls_info.is_some(),
+        })
+    });
+    if let Err(e) = admitted {
         send_error(&mut out, &e)?;
         out.flush()?;
         return Ok(());

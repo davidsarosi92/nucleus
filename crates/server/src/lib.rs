@@ -115,6 +115,19 @@ pub fn directory_accepts(config: &Config, user: &str, password: &str) -> Result<
     }
 }
 
+/// The authentication method name access rules see (`nucleus_sql::rules`)
+/// for a login by password-like means: a token's login name is `token`, a
+/// directory's user `ldap`, else `password`.
+pub fn password_method(config: &Config, kv: &dyn Kv, user: &str) -> &'static str {
+    if user.starts_with(nucleus_sql::tokens::PREFIX) {
+        "token"
+    } else if directory_user(config, kv, user) {
+        "ldap"
+    } else {
+        "password"
+    }
+}
+
 /// Whether a client logs in by its certificate: TLS verified one naming
 /// `user`, and the authenticator admits that.
 pub fn certificate_login(config: &Config, kv: &dyn Kv, tls: Option<&TlsInfo>, user: &str) -> bool {
@@ -287,6 +300,9 @@ pub struct Config {
     pub bearer: Option<Arc<dyn Bearer>>,
     /// A directory (LDAP) for the passwords of roles without their own.
     pub directory: Option<Arc<dyn Directory>>,
+    /// Proxies (CIDR) whose PROXY protocol header names the client's
+    /// address ([`transport::client_address`]).
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for Config {
@@ -310,6 +326,7 @@ impl Config {
             tls: None,
             bearer: None,
             directory: None,
+            trusted_proxies: Vec::new(),
         }
     }
 

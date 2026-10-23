@@ -100,6 +100,8 @@ pub struct Session {
     who: Arc<crate::access::Who>,
     /// Who it logged in as (`SET ROLE` changes `who`, not this).
     login: Arc<crate::access::Who>,
+    /// Its place in `nc_catalog.sessions`, once a front end admitted it.
+    listed: Option<crate::sessions::Entry>,
 }
 
 impl std::fmt::Debug for Session {
@@ -108,6 +110,16 @@ impl std::fmt::Debug for Session {
             .field("status", &self.status())
             .finish_non_exhaustive()
     }
+}
+
+/// A query of a `WHEN` condition over a connection's context: `$1` the
+/// client's address (`source`, an `inet`), `$2` the authentication method
+/// (`auth`), `$3` the front end, `$4` TLS.
+fn condition_query(condition: &str) -> String {
+    format!(
+        "SELECT ({condition}) FROM (SELECT $1::inet AS source, $2::text AS auth, \
+         $3::text AS front_end, $4::boolean AS tls) AS connection"
+    )
 }
 
 fn columns_of(cols: impl IntoIterator<Item = (String, Option<DataType>)>) -> Vec<OutColumn> {
@@ -158,6 +170,7 @@ impl Session {
             format_checked: false,
             who: Arc::new(crate::access::Who::system()),
             login: Arc::new(crate::access::Who::system()),
+            listed: None,
         }
     }
 
@@ -214,6 +227,77 @@ impl Session {
             .iter()
             .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
             .collect();
+        self.login = Arc::new(who);
+        self.who = self.login.clone();
+        Ok(())
+    }
+
+    /// Admits the logged-in session as connected in `context`, if an
+    /// access rule does ([`crate::rules`], `28000` otherwise), under the
+    /// rule's ceiling; the context is the session's from then on.
+    pub fn admit(&mut self, context: crate::access::Context) -> Result<()> {
+        // Memberships under a WHEN condition the connection does not meet
+        // are not held in this session.
+        let mut suspended = std::collections::BTreeSet::new();
+        let conditional: Vec<crate::roles::Membership> = {
+            let txn = self.kv.begin(TxnOptions::read_only())?;
+            crate::roles::memberships(&*txn)?
+                .into_iter()
+                .filter(|m| m.condition.is_some())
+                .collect()
+        };
+        if !conditional.is_empty() {
+            let mut probe = Session::with_registry(self.kv.clone(), self.registry.clone());
+            let params = [
+                context.client_addr.map_or(Value::Null, |a| {
+                    Value::Text(crate::rules::host(a).host_text())
+                }),
+                Value::Text(context.auth_method.clone()),
+                Value::Text(context.front_end.clone()),
+                Value::Bool(context.tls),
+            ];
+            for m in conditional {
+                let text = condition_query(m.condition.as_deref().unwrap_or("false"));
+                let holds = parse(&text).and_then(|stmts| probe.run(&stmts[0], &params));
+                let holds = matches!(
+                    holds,
+                    Ok(Output::Rows { rows, .. }) if rows.first().and_then(|r| r.first()) == Some(&Value::Bool(true))
+                );
+                if !holds {
+                    suspended.insert((m.role, m.member));
+                }
+            }
+        }
+        let txn = self.kv.begin(TxnOptions::read_only())?;
+        let rule = crate::rules::admit(&*txn, &self.login.session_user, &context, &suspended)?;
+        let mut who = (*self.login).clone();
+        who.suspended = suspended;
+        if let Some(r) = &rule
+            && let crate::rules::Action::Allow { read_only, as_role } = &r.action
+        {
+            who.ceiling.read_only |= *read_only;
+            if as_role.is_some() {
+                who.ceiling.as_role = as_role.clone();
+            }
+        }
+        who.rule = rule.map(|r| r.name);
+        who.context = context;
+        let roles = crate::roles::effective_for(&*txn, &who)?;
+        let started = crate::datetime::from_system(self.kv.wall_clock());
+        self.listed = Some(crate::sessions::register(
+            &self.kv,
+            crate::sessions::Info {
+                id: 0,
+                user: who.user.clone(),
+                session_user: who.session_user.clone(),
+                context: who.context.clone(),
+                rule: who.rule.clone(),
+                read_only: who.ceiling.read_only,
+                as_role: who.ceiling.as_role.clone(),
+                roles: roles.into_iter().collect(),
+                started,
+            },
+        ));
         self.login = Arc::new(who);
         self.who = self.login.clone();
         Ok(())
@@ -304,6 +388,11 @@ impl Session {
                 Ok(Output::Command("SET".into()))
             }
             Statement::Set { name, value } => {
+                if crate::access::CONTEXT_SETTINGS.contains(&name.as_str()) {
+                    return Err(Error::cant_change(format!(
+                        "parameter \"{name}\" cannot be changed: it is how the session connected"
+                    )));
+                }
                 if name.starts_with(crate::access::CLAIMS) {
                     return Err(Error::cant_change(format!(
                         "parameter \"{name}\" cannot be changed: it is a claim of the login"
@@ -381,6 +470,9 @@ impl Session {
                         crate::roles::set_role(&*txn, &self.login, role.as_deref())?
                     }
                 };
+                if let Some(l) = &self.listed {
+                    l.set_user(&who.user);
+                }
                 self.who = Arc::new(who);
                 Ok(Output::Command("SET".into()))
             }
@@ -793,7 +885,28 @@ pub fn execute(
         | Statement::RenameRole { .. }
         | Statement::DropRole { .. }
         | Statement::GrantRole { .. }
-        | Statement::RevokeRole { .. } => Output::Command(crate::roles::run(txn, stmt)?),
+        | Statement::RevokeRole { .. } => {
+            if let Statement::GrantRole {
+                condition: Some(c), ..
+            } = stmt
+            {
+                // The condition must make sense over a connection.
+                let probe = crate::parser::parse(&condition_query(c))?;
+                let crate::ast::Statement::Query(q) = &probe[0] else {
+                    return Err(Error::syntax("a bad condition"));
+                };
+                let b = Binder::new(&*txn, reg).query(q)?;
+                if b.scope
+                    .cols
+                    .first()
+                    .and_then(|c| c.ty)
+                    .is_some_and(|t| t != DataType::Bool)
+                {
+                    return Err(Error::type_mismatch("a WHEN condition must be a boolean"));
+                }
+            }
+            Output::Command(crate::roles::run(txn, stmt)?)
+        }
         Statement::CreateToken {
             name,
             role,
@@ -821,6 +934,14 @@ pub fn execute(
                     Value::Text(secret),
                 ]],
             }
+        }
+        Statement::CreateAccessRule(rule, place) => {
+            crate::rules::create(txn, rule.clone(), place)?;
+            Output::Command("CREATE ACCESS RULE".into())
+        }
+        Statement::DropAccessRule { name, if_exists } => {
+            crate::rules::drop(txn, name, *if_exists)?;
+            Output::Command("DROP ACCESS RULE".into())
         }
         Statement::DropToken { name, if_exists } => {
             crate::tokens::drop(txn, name, *if_exists)?;

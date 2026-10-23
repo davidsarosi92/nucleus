@@ -382,6 +382,27 @@ impl Shell {
             }
             ("\\conninfo", _) => {
                 writeln!(out, "Connected to {}.", self.backend.describe()).map_err(|e| e.to_string())?;
+                if matches!(self.backend, Backend::Remote(_))
+                    && let Some(t) = self.fetch(
+                        "SELECT current_user, coalesce(current_setting('nucleus.client_addr', true), '?'), \
+                         current_setting('nucleus.auth_method'), current_setting('nucleus.tls'), \
+                         coalesce(current_setting('nucleus.access_rule', true), '(no rules)')",
+                        out,
+                    )?
+                    && let Some(r) = t.rows.first()
+                {
+                    let cell = |i: usize| r.get(i).cloned().flatten().unwrap_or_default();
+                    writeln!(
+                        out,
+                        "Acting as \"{}\", seen from {} — authenticated by {}, TLS {}, admitted by {}.",
+                        cell(0),
+                        cell(1),
+                        cell(2),
+                        cell(3),
+                        cell(4)
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
                 true
             }
             ("\\stats", None) => {
