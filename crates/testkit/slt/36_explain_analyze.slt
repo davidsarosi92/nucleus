@@ -1,0 +1,139 @@
+# EXPLAIN ANALYZE: the plan run, each node's actual rows and starts beside
+# the estimates (TIMING OFF keeps the output repeatable).  nucleus-only
+# throughout: PostgreSQL's plans and their text differ.
+
+statement ok
+CREATE TABLE ea (id INT PRIMARY KEY, x INT)
+
+statement ok
+CREATE TABLE eb (id INT PRIMARY KEY, a_id INT, y TEXT)
+
+statement ok
+INSERT INTO ea SELECT i, i % 10 FROM generate_series(1, 100) i
+
+statement ok
+INSERT INTO eb SELECT i, i % 50, 'y' || i FROM generate_series(1, 200) i
+
+# nucleus-only: the join's actual rows are the query's.
+query I
+SELECT count(*) FROM ea JOIN eb ON ea.id = eb.a_id WHERE ea.x > 5
+----
+80
+
+# nucleus-only: without statistics the estimates are defaults.
+query T
+EXPLAIN (ANALYZE, TIMING OFF) SELECT ea.x, eb.y FROM ea JOIN eb ON ea.id = eb.a_id WHERE ea.x > 5
+----
+Project: #1, #4 (rows=330) (actual rows=80 loops=1)
+  Hash Join (#0 = #1) on (#0 = #3) (rows=330) (actual rows=80 loops=1)
+    Seq Scan on ea filter: (#1 > 5) (rows=330) (actual rows=40 loops=1)
+    Seq Scan on eb (rows=1000) (actual rows=200 loops=1)
+Execution: 80 rows
+
+statement ok
+ANALYZE
+
+# nucleus-only: analyzed, the estimates come close to the actual rows
+# (and the join order changes with them).
+query T
+EXPLAIN (ANALYZE, TIMING OFF) SELECT ea.x, eb.y FROM ea JOIN eb ON ea.id = eb.a_id WHERE ea.x > 5
+----
+Project: #1, #4 (rows=89) (actual rows=80 loops=1)
+  Project: #3, #4, #0, #1, #2 (rows=89) (actual rows=80 loops=1)
+    Hash Join (#1 = #0) on (#3 = #1) (rows=89) (actual rows=80 loops=1)
+      Seq Scan on eb (rows=200) (actual rows=200 loops=1)
+      Seq Scan on ea filter: (#1 > 5) (rows=44) (actual rows=40 loops=1)
+Execution: 80 rows
+
+# nucleus-only: a limit stops its input early; a sort reads all of its own.
+query T
+EXPLAIN (ANALYZE, TIMING OFF) SELECT x, count(*) FROM ea GROUP BY x ORDER BY x LIMIT 3
+----
+Limit: 3 (rows=3) (actual rows=3 loops=1)
+  Sort: #0 (rows=10) (actual rows=3 loops=1)
+    Project: #0, #1 (rows=10) (actual rows=10 loops=1)
+      Aggregate: count(*), group by #1 (rows=10) (actual rows=10 loops=1)
+        Seq Scan on ea (rows=100) (actual rows=100 loops=1)
+Execution: 3 rows
+
+# nucleus-only: a correlated subquery runs once per outer row.
+query II
+SELECT id, (SELECT count(*) FROM eb WHERE eb.a_id = ea.id) FROM ea WHERE id <= 3
+----
+1 4
+2 4
+3 4
+
+# nucleus-only
+query T
+EXPLAIN (ANALYZE, TIMING OFF) SELECT id, (SELECT count(*) FROM eb WHERE eb.a_id = ea.id) FROM ea WHERE id <= 3
+----
+Project: #0, (subquery) (rows=2) (actual rows=3 loops=1)
+  Index Scan using primary key on ea (id <= 3) filter: (#0 <= 3) (rows=2) (actual rows=3 loops=1)
+  Subquery (correlated):
+    Project: #0 (rows=1) (actual rows=3 loops=3)
+      Aggregate: count(*) (rows=1) (actual rows=3 loops=3)
+        Seq Scan on eb filter: (#1 = outer1.#0) (rows=4) (actual rows=12 loops=3)
+Execution: 3 rows
+
+# nucleus-only: a node the run never reached says so.
+query T
+EXPLAIN (ANALYZE, TIMING OFF) SELECT * FROM ea WHERE x > 100 AND id IN (SELECT a_id FROM eb)
+----
+Project: #0, #1 (rows=1) (actual rows=0 loops=1)
+  Seq Scan on ea filter: ((#1 > 100) AND #0 IN (subquery)) (rows=1) (actual rows=0 loops=1)
+    In:
+      Project: #1 (rows=200) (never executed)
+        Seq Scan on eb (rows=200) (never executed)
+Execution: 0 rows
+
+# nucleus-only: a CTE is computed once, whichever reference starts it.
+query T
+EXPLAIN (ANALYZE, TIMING OFF) WITH c AS (SELECT * FROM ea WHERE x = 1) SELECT count(*) FROM c c1 JOIN c c2 ON c1.id = c2.id
+----
+Project: #0 (rows=1) (actual rows=1 loops=1)
+  Aggregate: count(*) (rows=1) (actual rows=1 loops=1)
+    Project: #2, #3, #0, #1 (rows=10) (actual rows=10 loops=1)
+      Hash Join (#0 = #0) on (#2 = #0) (rows=10) (actual rows=10 loops=1)
+        CTE c (rows=10) (actual rows=10 loops=1)
+          Project: #0, #1 (rows=10) (never executed)
+            Seq Scan on ea filter: (#1 = 1) (rows=10) (never executed)
+        CTE c (rows=10) (actual rows=10 loops=1)
+          Project: #0, #1 (rows=10) (actual rows=10 loops=1)
+            Seq Scan on ea filter: (#1 = 1) (rows=10) (actual rows=10 loops=1)
+Execution: 1 rows
+
+# nucleus-only: ANALYZE false is a plain EXPLAIN.
+query T
+EXPLAIN (ANALYZE false) SELECT id FROM ea WHERE id = 7
+----
+Project: #0
+  Index Scan using primary key on ea (id = 7) filter: (#0 = 7) (rows=1)
+
+# nucleus-only
+statement error 0A000
+EXPLAIN (FORMAT JSON) SELECT 1
+
+# nucleus-only
+statement error 0A000
+EXPLAIN ANALYZE DELETE FROM ea
+
+# nucleus-only: what the query may not read, EXPLAIN ANALYZE may not run.
+statement ok
+CREATE USER slt_ea_reader
+
+statement ok
+SET ROLE slt_ea_reader
+
+# nucleus-only
+statement error 42501
+EXPLAIN ANALYZE SELECT * FROM ea
+
+statement ok
+RESET ROLE
+
+statement ok
+DROP USER slt_ea_reader
+
+statement ok
+DROP TABLE ea, eb

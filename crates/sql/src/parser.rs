@@ -60,6 +60,24 @@ pub fn parse_expr(sql: &str) -> Result<Expr> {
 }
 
 /// Words that cannot be a bare alias or column name.
+/// Words that open `EXPLAIN`'s option list (`EXPLAIN (` then one of
+/// these; else a parenthesised query).  Only `ANALYZE` and `TIMING` are
+/// supported; the others are named in the error.
+const EXPLAIN_OPTIONS: &[&str] = &[
+    "analyze",
+    "timing",
+    "verbose",
+    "costs",
+    "buffers",
+    "format",
+    "summary",
+    "settings",
+    "wal",
+    "generic_plan",
+    "serialize",
+    "memory",
+];
+
 const RESERVED: &[&str] = &[
     "select",
     "from",
@@ -721,7 +739,8 @@ impl<'a> Parser<'a> {
             }
             "explain" => {
                 self.pos += 1;
-                Ok(Statement::Explain(Box::new(self.statement()?)))
+                let options = self.explain_options()?;
+                Ok(Statement::Explain(Box::new(self.statement()?), options))
             }
             "analyze" => {
                 self.pos += 1;
@@ -734,6 +753,51 @@ impl<'a> Parser<'a> {
             }
             _ => Err(self.error("expected a statement")),
         }
+    }
+
+    /// `ANALYZE`, or `( option [value], … )` with `ANALYZE` and `TIMING`
+    /// (booleans: `true`, `false`, `on`, `off`, `1`, `0`; none is true).
+    fn explain_options(&mut self) -> Result<ExplainOptions> {
+        let mut o = ExplainOptions::default();
+        if self.eat_kw("analyze") {
+            o.analyze = true;
+            return Ok(o);
+        }
+        let options = self.peek_op("(")
+            && matches!(self.peek_at(1), Some(Token::Word(w)) if EXPLAIN_OPTIONS.contains(&w.as_str()));
+        if !options {
+            return Ok(o);
+        }
+        self.pos += 1;
+        loop {
+            let name = self.ident()?;
+            let value = match self.peek() {
+                Some(Token::Word(w)) if ["true", "on"].contains(&w.as_str()) => Some(true),
+                Some(Token::Word(w)) if ["false", "off"].contains(&w.as_str()) => Some(false),
+                Some(Token::Number(n)) if n == "1" => Some(true),
+                Some(Token::Number(n)) if n == "0" => Some(false),
+                _ => None,
+            };
+            if value.is_some() {
+                self.pos += 1;
+            }
+            let value = value.unwrap_or(true);
+            match name.as_str() {
+                "analyze" => o.analyze = value,
+                "timing" => o.timing = value,
+                other => {
+                    return Err(Error::feature(format!(
+                        "EXPLAIN option {} is not supported",
+                        other.to_uppercase()
+                    )));
+                }
+            }
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        Ok(o)
     }
 
     fn txn_mode(&mut self) -> Result<TxnMode> {

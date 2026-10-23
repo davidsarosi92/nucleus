@@ -133,6 +133,11 @@ pub trait Kv: Send + Sync {
     /// simulation's `now()` is the simulated clock.
     fn wall_clock(&self) -> SystemTime;
 
+    /// Monotonic time since an arbitrary origin, for measuring how long
+    /// something took (`EXPLAIN ANALYZE`, statement statistics): the
+    /// platform's, so a simulation measures simulated time.
+    fn elapsed(&self) -> Duration;
+
     /// Waits before retrying a transaction for the `attempt`-th time (from
     /// 1): exponentially longer each time, with jitter, so retries that
     /// collided once spread out.  Through the implementation's platform, so
@@ -314,6 +319,10 @@ impl Kv for Database {
 
     fn wall_clock(&self) -> SystemTime {
         self.platform.clock().wall()
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.platform.clock().now()
     }
 
     fn random_bytes(&self, buf: &mut [u8]) {

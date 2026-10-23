@@ -269,11 +269,25 @@ impl Plan {
     /// The plan as indented text, one node per line (`EXPLAIN`).
     pub fn explain(&self) -> Vec<String> {
         let mut out = Vec::new();
-        self.explain_into(0, &mut out);
+        self.explain_into(0, None, &mut out);
         out
     }
 
-    fn explain_into(&self, depth: usize, out: &mut Vec<String>) {
+    /// The same, `note`'s text after each node's (`EXPLAIN ANALYZE`: the
+    /// estimates and what the node did; a scan's own estimate is left
+    /// out).
+    pub fn explain_annotated(&self, note: &dyn Fn(&Plan) -> String) -> Vec<String> {
+        let mut out = Vec::new();
+        self.explain_into(0, Some(note), &mut out);
+        out
+    }
+
+    fn explain_into(
+        &self,
+        depth: usize,
+        note: Option<&dyn Fn(&Plan) -> String>,
+        out: &mut Vec<String>,
+    ) {
         let pad = "  ".repeat(depth);
         let line = match self {
             Plan::Scan {
@@ -325,7 +339,9 @@ impl Plan {
                 if let Some(f) = filter {
                     let _ = write!(s, " filter: {}", show(f));
                 }
-                if let Some(e) = estimate {
+                if let Some(e) = estimate
+                    && note.is_none()
+                {
                     let _ = write!(s, " (rows={e:.0})");
                 }
                 s
@@ -431,16 +447,20 @@ impl Plan {
                 }
             }
         };
+        let line = match note {
+            Some(n) => format!("{line}{}", n(self)),
+            None => line,
+        };
         out.push(format!("{pad}{line}"));
         for child in self.children() {
-            child.explain_into(depth + 1, out);
+            child.explain_into(depth + 1, note, out);
         }
         // Subqueries in this node's expressions, after its inputs.
         let mut subs = Vec::new();
         self.for_each_expr(&mut |e| {
             e.walk(&mut |x| {
                 if let Expr::Subquery(s) = x {
-                    subs.push(s.clone());
+                    subs.push(&**s);
                 }
             })
         });
@@ -455,7 +475,7 @@ impl Plan {
                 "{pad}  {kind}{}:",
                 if s.correlated { " (correlated)" } else { "" }
             ));
-            s.plan.explain_into(depth + 2, out);
+            s.plan.explain_into(depth + 2, note, out);
         }
     }
 
@@ -481,7 +501,7 @@ impl Plan {
     }
 
     /// Calls `f` on every expression of this node (not its inputs).
-    pub fn for_each_expr(&self, f: &mut dyn FnMut(&Expr)) {
+    pub fn for_each_expr<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
         match self {
             Plan::Scan { access, filter, .. } => {
                 if let Access::Key {

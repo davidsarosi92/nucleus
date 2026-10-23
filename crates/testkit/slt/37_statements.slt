@@ -1,0 +1,104 @@
+# Statement statistics: nc_catalog.statements, per role and normalized
+# statement (constants as $n); nc_statements_reset().  nucleus-only
+# throughout.  Times vary; their order and the counts do not.
+
+statement ok
+CREATE TABLE stqz (id INT PRIMARY KEY, x INT)
+
+statement ok
+INSERT INTO stqz SELECT i, i % 4 FROM generate_series(1, 40) i
+
+# nucleus-only
+query B
+SELECT nc_statements_reset()
+----
+true
+
+statement ok
+SELECT * FROM stqz WHERE id = 1
+
+statement ok
+SELECT * FROM stqz WHERE id = 22
+
+statement ok
+select *   from stqz   where id = 37
+
+statement ok
+SELECT count(*) FROM stqz WHERE x = 2
+
+statement error 42703
+SELECT nope FROM stqz
+
+statement ok
+UPDATE stqz SET x = 9 WHERE id <= 5
+
+# nucleus-only: constants, case and spacing do not split a statement; the
+# text is the first run's.
+query TIIII
+SELECT query, calls, errors, rows_read, rows_returned FROM nc_catalog.statements WHERE query LIKE '%stqz%' AND query NOT LIKE '%nc_catalog%' ORDER BY query
+----
+SELECT * FROM stqz WHERE id = $1 3 0 3 3
+SELECT count(*) FROM stqz WHERE x = $1 1 0 40 1
+SELECT nope FROM stqz 1 1 0 0
+UPDATE stqz SET x = $1 WHERE id <= $2 1 0 5 5
+
+# nucleus-only
+query B
+SELECT bool_and(total_ms >= max_ms AND max_ms >= mean_ms AND mean_ms >= min_ms AND min_ms >= 0) FROM nc_catalog.statements
+----
+true
+
+# nucleus-only: someone else sees their own statements only, and resets
+# only those.
+statement ok
+CREATE USER slt_st_other
+
+statement ok
+GRANT SELECT ON stqz TO slt_st_other
+
+statement ok
+SET ROLE slt_st_other
+
+statement ok
+SELECT x FROM stqz WHERE id = 3
+
+# nucleus-only
+query TTI
+SELECT user_name, query, calls FROM nc_catalog.statements WHERE query LIKE '%stqz%' ORDER BY query
+----
+slt_st_other SELECT x FROM stqz WHERE id = $1 1
+
+# nucleus-only
+query B
+SELECT nc_statements_reset()
+----
+true
+
+statement ok
+RESET ROLE
+
+# nucleus-only: an administrator sees everyone's; the other role's reset
+# left these (the four above and the GRANT).
+query BI
+SELECT user_name = current_user, count(*) FROM nc_catalog.statements WHERE query LIKE '%stqz%' AND query NOT LIKE '%nc_catalog%' GROUP BY user_name ORDER BY user_name
+----
+true 5
+
+# nucleus-only
+statement ok
+SELECT nc_statements_reset()
+
+# nucleus-only
+query I
+SELECT count(*) FROM nc_catalog.statements WHERE query LIKE '%stqz%' AND query NOT LIKE '%nc_catalog%'
+----
+0
+
+statement ok
+REVOKE SELECT ON stqz FROM slt_st_other
+
+statement ok
+DROP USER slt_st_other
+
+statement ok
+DROP TABLE stqz

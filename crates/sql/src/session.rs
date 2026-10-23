@@ -61,7 +61,7 @@ pub fn command_tag(stmt: &Statement, out: &Output) -> String {
             Statement::Update { .. } => format!("UPDATE {}", rows.len()),
             Statement::Delete { .. } => format!("DELETE {}", rows.len()),
             Statement::Show(_) => "SHOW".into(),
-            Statement::Explain(_) => "EXPLAIN".into(),
+            Statement::Explain(..) => "EXPLAIN".into(),
             _ => format!("SELECT {}", rows.len()),
         },
     }
@@ -174,7 +174,7 @@ fn options(mode: &TxnMode, default: IsolationLevel, read_only: bool) -> TxnOptio
 fn read_only(stmt: &Statement) -> bool {
     matches!(
         stmt,
-        Statement::Query(_) | Statement::Explain(_) | Statement::Show(_)
+        Statement::Query(_) | Statement::Explain(..) | Statement::Show(_)
     )
 }
 
@@ -631,13 +631,32 @@ impl Session {
 
     fn run_in_txn(&mut self, stmt: &Statement, params: &[Value]) -> Result<Output> {
         let text = self.text.take();
+        if !self.audited {
+            // A session of the database's own (a probe): neither audited
+            // nor in the statement statistics.
+            return self.run_unaudited(stmt, params);
+        }
+        let (start, read) = (self.kv.elapsed(), crate::budget::scanned());
         crate::audit::begin_statement();
-        let r = if self.audited {
-            self.run_in_txn_audited(stmt, params, text.as_deref())
-        } else {
-            self.run_unaudited(stmt, params)
-        };
+        let r = self.run_in_txn_audited(stmt, params, text.as_deref());
         crate::audit::end_statement();
+        // In the statistics when its text is known (every front end
+        // notes it, and `execute`).
+        let Some(text) = text.as_deref() else {
+            return r;
+        };
+        crate::statements::record(
+            &self.kv,
+            crate::statements::Run {
+                text,
+                user: &crate::access::current().user,
+                elapsed: self.kv.elapsed().saturating_sub(start),
+                rows_read: crate::budget::scanned().saturating_sub(read),
+                rows_returned: r.as_ref().map_or(0, crate::statements::rows_of),
+                ok: r.is_ok(),
+                at: crate::datetime::from_system(self.kv.wall_clock()),
+            },
+        );
         r
     }
 
@@ -660,7 +679,7 @@ impl Session {
                 | Statement::Insert { .. }
                 | Statement::Update { .. }
                 | Statement::Delete { .. }
-                | Statement::Explain(_)
+                | Statement::Explain(..)
                 | Statement::Show(_)
                 | Statement::Begin(_)
                 | Statement::Commit
@@ -827,7 +846,7 @@ impl Session {
                 let b = binder.query(q)?;
                 Some(columns_of(b.scope.cols.into_iter().map(|c| (c.name, c.ty))))
             }
-            Statement::Explain(_) => Some(vec![OutColumn {
+            Statement::Explain(..) => Some(vec![OutColumn {
                 name: "QUERY PLAN".into(),
                 ty: DataType::Text,
             }]),
@@ -960,7 +979,35 @@ pub fn execute(
                 rows,
             }
         }
-        Statement::Explain(inner) => {
+        Statement::Explain(inner, options) if options.analyze => {
+            let ro: &dyn KvTxn = &*txn;
+            let Statement::Query(q) = &**inner else {
+                return Err(Error::feature("EXPLAIN ANALYZE supports queries"));
+            };
+            let plan = optimize(Binder::new(ro, reg).checked().query(q)?.plan, ro);
+            let clock = if options.timing {
+                crate::datetime::current_kv()
+            } else {
+                None
+            };
+            let profile = crate::profile::Profile::new(clock.clone());
+            let mut ctx = Ctx::new(ro, reg, params);
+            ctx.profile = Some(&profile);
+            let start = clock.as_ref().map(|k| k.elapsed());
+            let rows = exec::collect(&plan, &ctx, None)?.len();
+            let total = clock.zip(start).map(|(k, s)| k.elapsed().saturating_sub(s));
+            Output::Rows {
+                columns: vec![OutColumn {
+                    name: "QUERY PLAN".into(),
+                    ty: DataType::Text,
+                }],
+                rows: crate::profile::explain(ro, &plan, &profile, rows, total)
+                    .into_iter()
+                    .map(|l| vec![Value::Text(l)])
+                    .collect(),
+            }
+        }
+        Statement::Explain(inner, _) => {
             let ro: &dyn KvTxn = &*txn;
             let plan = match &**inner {
                 Statement::Query(q) => optimize(Binder::new(ro, reg).checked().query(q)?.plan, ro),

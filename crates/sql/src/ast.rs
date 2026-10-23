@@ -299,10 +299,28 @@ pub enum Statement {
     Reset(Option<String>),
     /// `SHOW name`.
     Show(String),
-    /// `EXPLAIN`.
-    Explain(Box<Statement>),
+    /// `EXPLAIN [ANALYZE]`.
+    Explain(Box<Statement>, ExplainOptions),
     /// `ANALYZE [table]`.
     Analyze(Option<String>),
+}
+
+/// `EXPLAIN`'s options.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExplainOptions {
+    /// Run the statement and show what each node did.
+    pub analyze: bool,
+    /// With `analyze`: time each node.
+    pub timing: bool,
+}
+
+impl Default for ExplainOptions {
+    fn default() -> Self {
+        Self {
+            analyze: false,
+            timing: true,
+        }
+    }
 }
 
 /// Transaction characteristics.

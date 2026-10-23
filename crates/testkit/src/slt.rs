@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 
-use nucleus_sql::ext::{Output, Session, parse};
+use nucleus_sql::ext::{Output, Session, parse_with_text};
 
 /// A result cell as text (`None` = SQL `NULL`).
 pub type Cell = Option<String>;
@@ -54,7 +54,7 @@ pub struct Local(pub Session);
 
 impl Connection for Local {
     fn run(&mut self, sql: &str) -> Result<Option<Vec<Vec<Cell>>>, SqlError> {
-        let mut stmts = parse(sql).map_err(|e| SqlError {
+        let mut stmts = parse_with_text(sql).map_err(|e| SqlError {
             code: e.code.into(),
             message: e.message,
         })?;
@@ -64,7 +64,8 @@ impl Connection for Local {
                 message: "expected one statement".into(),
             });
         }
-        let stmt = stmts.remove(0);
+        let (stmt, text) = stmts.remove(0);
+        self.0.note_text(&text);
         match self.0.run(&stmt, &[]) {
             Ok(Output::Rows { rows, .. }) => Ok(Some(
                 rows.into_iter()

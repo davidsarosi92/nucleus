@@ -31,8 +31,19 @@ pub fn env<'a>(row: &'a [Value], ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
     Env { row, outer, ctx }
 }
 
-/// Builds the iterator for `plan`.
+/// Builds the iterator for `plan` (measured under `EXPLAIN ANALYZE`).
 pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -> Result<Rows<'a>> {
+    match ctx.profile {
+        Some(p) => p.measure(plan, || build_node(plan, ctx, outer)),
+        None => build_node(plan, ctx, outer),
+    }
+}
+
+fn build_node<'a>(
+    plan: &'a Plan,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Rows<'a>> {
     Ok(match plan {
         Plan::Scan {
             table,

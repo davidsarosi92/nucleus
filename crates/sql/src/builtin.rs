@@ -126,6 +126,7 @@ impl Module for Builtin {
         crate::uuid::register(r)?;
         crate::bytea::register(r)?;
         crate::inet::register(r)?;
+        crate::statements::register(r)?;
         r.add_table_function(Arc::new(Unnest))?;
         r.add_schema("public", "user tables", false)?;
         r.add_schema("nc_catalog", "the nucleus system catalog", false)?;

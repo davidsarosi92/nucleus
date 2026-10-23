@@ -426,7 +426,7 @@ fn origin(plan: &Plan, col: usize) -> Option<(&Table, usize)> {
 }
 
 /// Estimated output rows of a plan.
-fn estimate(plan: &Plan, st: &Stats) -> f64 {
+pub(crate) fn estimate(plan: &Plan, st: &Stats) -> f64 {
     match plan {
         Plan::Scan {
             table,

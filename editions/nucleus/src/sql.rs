@@ -81,7 +81,7 @@ impl Backend {
     fn execute(&mut self, sql: &str) -> Result<Vec<std::result::Result<Res, Failure>>> {
         match self {
             Backend::Local { session, .. } => {
-                let stmts = match nucleus_sql::parser::parse(sql) {
+                let stmts = match nucleus_sql::parser::parse_with_text(sql) {
                     Ok(s) => s,
                     Err(e) => {
                         return Ok(vec![Err(Failure {
@@ -91,7 +91,8 @@ impl Backend {
                     }
                 };
                 let mut out = Vec::new();
-                for stmt in stmts {
+                for (stmt, text) in stmts {
+                    session.note_text(&text);
                     match session.run(&stmt, &[]) {
                         Ok(Output::Command(tag)) => out.push(Ok(Res::Command(tag))),
                         Ok(Output::Rows { columns, rows }) => out.push(Ok(Res::Rows(Table {

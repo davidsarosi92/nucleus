@@ -80,10 +80,20 @@ fn escape_string(sql: &str, mut i: usize) -> Result<(String, usize)> {
 
 /// Splits `sql` into tokens, each with its byte offset.
 pub fn tokenize(sql: &str) -> Result<Vec<(Token, usize)>> {
+    Ok(tokenize_spans(sql)?
+        .into_iter()
+        .map(|(t, span)| (t, span.start))
+        .collect())
+}
+
+/// The same, each token with the bytes it spans.
+pub fn tokenize_spans(sql: &str) -> Result<Vec<(Token, std::ops::Range<usize>)>> {
     let b = sql.as_bytes();
     let mut out = Vec::new();
+    let mut ends = Vec::new();
     let mut i = 0;
     while i < b.len() {
+        let before = out.len();
         let c = b[i];
         if c.is_ascii_whitespace() {
             i += 1;
@@ -214,8 +224,15 @@ pub fn tokenize(sql: &str) -> Result<Vec<(Token, usize)>> {
                 i + 1
             )));
         }
+        if out.len() > before {
+            ends.push(i);
+        }
     }
-    Ok(out)
+    Ok(out
+        .into_iter()
+        .zip(ends)
+        .map(|((t, start), end)| (t, start..end))
+        .collect())
 }
 
 #[cfg(test)]

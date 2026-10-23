@@ -38,6 +38,9 @@ impl Kv for Counting {
     fn wall_clock(&self) -> SystemTime {
         self.inner.wall_clock()
     }
+    fn elapsed(&self) -> std::time::Duration {
+        self.inner.elapsed()
+    }
     fn back_off(&self, attempt: u32) {
         self.inner.back_off(attempt)
     }

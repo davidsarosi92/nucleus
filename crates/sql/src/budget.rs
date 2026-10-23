@@ -71,6 +71,11 @@ pub fn charge_scan() -> Result<()> {
     })
 }
 
+/// The rows the current statement has read so far.
+pub fn scanned() -> u64 {
+    SPENT.with(|s| s.borrow().as_ref().map_or(0, |s| s.scanned.get()))
+}
+
 fn check_time(b: &Budget) -> Result<()> {
     if let Some(d) = b.deadline
         && crate::datetime::clock()? > d

@@ -294,6 +294,8 @@ pub struct Ctx<'a> {
     pub work: RefCell<HashMap<usize, std::rc::Rc<Vec<Row>>>>,
     /// Table scans are validated reads (foreign key checks).
     pub validated: bool,
+    /// Every node measured (`EXPLAIN ANALYZE`).
+    pub profile: Option<&'a crate::profile::Profile>,
 }
 
 impl<'a> Ctx<'a> {
@@ -307,6 +309,7 @@ impl<'a> Ctx<'a> {
             ctes: RefCell::new(HashMap::new()),
             work: RefCell::new(HashMap::new()),
             validated: false,
+            profile: None,
         }
     }
 }
@@ -492,7 +495,7 @@ impl Expr {
 
     /// Calls `f` on this expression and every expression inside it
     /// (subquery plans not included).
-    pub fn walk(&self, f: &mut dyn FnMut(&Expr)) {
+    pub fn walk<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
         f(self);
         match self {
             Expr::Unary(_, e) | Expr::IsNull(e, _) | Expr::Cast(e, _) => e.walk(f),

@@ -1128,7 +1128,7 @@ under its condition; the server refuses an insecure start; failed logins
 are throttled; and the audit log records every login and every change of
 access, with a broken chain detected.
 
-### §M14.9 — SQL analyzer ⬜
+### §M14.9 — SQL analyzer ⬜ (in progress)
 
 nucleus has the catalog, the statistics and the optimizer in one place;
 the analyzer turns that into answers:
@@ -1148,6 +1148,12 @@ the analyzer turns that into answers:
 
 **Done when:** each lint rule and the advisor have slt cases, and `EXPLAIN
 ANALYZE`'s actual row counts are checked against the results.
+
+**Steps.**  A1 `EXPLAIN ANALYZE` ✅ (every node's rows, starts and time
+beside the estimates, `TIMING OFF`; the time from `Kv::elapsed`, the
+platform's monotonic clock); A2 statement statistics ✅
+(`nc_catalog.statements`, `nc_statements_reset()`; in the process, by
+database); A3 the linter; A4 the index advisor.
 
 ### §M14.10 — AI access ⬜
 
@@ -1984,6 +1990,8 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.9 A1–A2: `EXPLAIN ANALYZE` (actual rows checked
+  against the results in slt) and statement statistics.
 - **2026-10-23** — §M14.25 shipped (T7: the audit log, with a broken
   chain found).  Every "done when" holds: privileges and row-level
   security in slt with leak tests; SCRAM, tokens, certificates, OIDC

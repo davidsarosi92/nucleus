@@ -36,6 +36,7 @@ const B: DataType = DataType::Bool;
 const I: DataType = DataType::BigInt;
 const T: DataType = DataType::Text;
 const TA: DataType = DataType::Array(&DataType::Text);
+const F: DataType = DataType::Float;
 
 const DEFS: &[(&str, &[(&str, DataType)])] = &[
     ("schemas", &[("name", T), ("description", T)]),
@@ -136,6 +137,22 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("as_role", T),
             ("roles", TA),
             ("started", DataType::TimestampTz),
+        ],
+    ),
+    (
+        "statements",
+        &[
+            ("user_name", T),
+            ("query", T),
+            ("calls", I),
+            ("errors", I),
+            ("total_ms", F),
+            ("mean_ms", F),
+            ("min_ms", F),
+            ("max_ms", F),
+            ("rows_read", I),
+            ("rows_returned", I),
+            ("last_call", DataType::TimestampTz),
         ],
     ),
     (
@@ -476,6 +493,29 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     s.as_role.map_or(Value::Null, text),
                     Value::Array(s.roles.into_iter().map(text).collect()),
                     Value::TimestampTz(s.started),
+                ]);
+            }
+        }
+        "statements" => {
+            let who = crate::access::current();
+            let kv = crate::datetime::current_kv();
+            let ms = |d: std::time::Duration| Value::Float(d.as_secs_f64() * 1000.0);
+            for s in kv
+                .map(|kv| crate::statements::all(&kv, (!who.superuser).then_some(&who.user)))
+                .unwrap_or_default()
+            {
+                out.push(vec![
+                    text(s.user),
+                    text(s.query),
+                    Value::Int(s.calls as i64),
+                    Value::Int(s.errors as i64),
+                    ms(s.total),
+                    Value::Float(s.total.as_secs_f64() * 1000.0 / s.calls.max(1) as f64),
+                    ms(s.min),
+                    ms(s.max),
+                    Value::Int(s.rows_read as i64),
+                    Value::Int(s.rows_returned as i64),
+                    Value::TimestampTz(s.last),
                 ]);
             }
         }

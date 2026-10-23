@@ -434,6 +434,8 @@ distributed implementation will provide (§F3).
 - `trait Kv`: `begin(&self, TxnOptions) -> Result<Box<dyn KvTxn>>`;
   `wall_clock()` — the time as the implementation keeps it (the local
   one's platform clock), the only clock layers above read (principle 4);
+  `elapsed()` — monotonic time, for measuring how long something took
+  (`EXPLAIN ANALYZE`, statement statistics; simulated in a simulation);
   `back_off(attempt)` — the wait before a retry (exponential with
   jitter, through the platform, so a simulation does not wait);
   `random_bytes(buf)` — unpredictable bytes from the platform.
@@ -909,7 +911,8 @@ Predicate pushdown (through projections, into join sides, outer-join safe),
 WHERE conjuncts into join conditions, hash joins on equality conjuncts,
 access paths: primary key or index with an equality prefix and a range on
 the next column; the filter always stays, so an access path only narrows.
-`EXPLAIN` prints the plan (columns as `#n`).
+`EXPLAIN` prints the plan (columns as `#n`); `EXPLAIN ANALYZE` runs it
+too (§8.13).
 
 ### 8.7 Writes, constraints and sessions (`dml`, `session`)
 
@@ -945,11 +948,11 @@ column order).  Without statistics the rule-based plan is kept.
 ### 8.9 Tests
 
 - The SQL layer's sqllogictest scripts live in the test kit,
-  `crates/testkit/slt/*.slt` (twenty: basics, expressions, joins,
-  aggregates, subqueries, indexes, constraints, transactions, plans,
-  statistics, serializable, set operations, full joins, CTEs, numeric,
-  date/time, foreign keys, arrays and regular expressions, `nc_catalog`,
-  `uuid`),
+  `crates/testkit/slt/*.slt` (one per area, numbered: basics,
+  expressions, joins, aggregates, subqueries, indexes, constraints,
+  transactions, plans, statistics, … through the types, roles,
+  privileges, row-level security, tokens, access rules, protection and
+  the analyzer),
   embedded in `nucleus-testkit` (`core_scripts()`) with its runner
   (`nucleus_testkit::slt`), so the client's tests and modules run them
   without reading files outside their folders.  `tests/slt.rs` runs them
@@ -1023,6 +1026,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.audit` | `seq`, `at`, `kind` (`login`, `ddl`, `statement`), `ok`, `code`, `session_user_name`, `user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `detail`, `hash` (an administrator's; empty for others) |
 | `nc_catalog.audit_chain` | `records`, `intact`, `broken_at`, `problem` (the chain walked) |
 | `nc_catalog.database_settings` | `name`, `value`, `is_set`, `default`, `description` (`ALTER DATABASE nucleus SET …`) |
+| `nc_catalog.statements` | `user_name`, `query` (constants as `$n`), `calls`, `errors`, `total_ms`, `mean_ms`, `min_ms`, `max_ms`, `rows_read`, `rows_returned`, `last_call` (statement statistics, §8.13; an administrator sees all, others their own) |
 | `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
 | `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by`, `max_rows`, `max_scan`, `timeout`, `rate_per_minute` (the tokens the current role may manage; never a secret) |
@@ -1217,6 +1221,35 @@ A session runs against one registry: `Session::new(kv)` the built-in one,
 and views there; bound calls and view scans hold the registered objects,
 so execution needs no lookup.  The built-in functions share one
 implementation behind the same interface.
+
+### 8.13 The SQL analyzer (`profile`, `statements`)
+
+**`EXPLAIN ANALYZE <query>`** (also `EXPLAIN (ANALYZE [bool], TIMING
+[bool]) …`; other options are refused with `0A000`) runs the query and
+prints the plan with, on every node, the optimizer's estimate beside what
+the node did: `(rows=40) (actual rows=38 loops=1 time=0.120 ms)` — rows
+over all its starts, the starts (a nested loop's inner side, a correlated
+subquery: once per outer row), and the time spent in it, its inputs
+included.  A node the run never reached says `(never executed)`; the last
+line is `Execution: n rows in t ms`.  `TIMING OFF` leaves the times out
+(repeatable output, for tests).  Time is the database's monotonic clock
+(`Kv::elapsed`).  The query runs with the session's privileges, budget and
+row-level security, like the query itself; only queries for now (`UPDATE`
+and `DELETE` have plain `EXPLAIN`).  A large gap between `rows=` and
+`actual rows=` points at stale or missing statistics (`ANALYZE`).
+
+**Statement statistics** (`nc_catalog.statements`): every statement a
+front end (or `Session::execute`) gave the text of, per role
+(`current_user`) and normalized text — constants replaced by `$n`
+(numbered after the statement's own parameters), white space as one
+space; case and spacing do not split a statement, and the text shown is
+the first run's.  Per statement: calls, failures, total, mean, shortest
+and longest time (ms), rows read (scanned) and rows returned or changed,
+the last call.  An administrator sees every role's, anyone else their
+own; `nc_statements_reset()` forgets every role's (an administrator) or
+the caller's own.  They live in the process, by database (a restart
+starts over), at most 5000 statements (the least called makes room);
+statements of the database's own probe sessions are not counted.
 
 ## 9. Server (`nucleus-server`)
 
@@ -1758,6 +1791,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.9 `EXPLAIN ANALYZE` and statement statistics (A1,
+  A2):** every plan node measured (rows, starts, time) beside the
+  estimates; `nc_catalog.statements` per role and normalized statement,
+  `nc_statements_reset()`; `Kv::elapsed`, the monotonic clock.
 - **2026-10-23 — §M14.25 audit (T7) — §M14.25 shipped:** a hash-chained
   audit log in the catalog: logins, DDL and every change of access,
   statements by role or table as the database's settings ask; written with
