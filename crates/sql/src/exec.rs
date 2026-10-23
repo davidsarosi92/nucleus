@@ -153,6 +153,11 @@ pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
                 TableFunc::Scalar => vec![vec![vals[0].clone()]],
                 TableFunc::Call(f) => f.rows(&CallContext::new(ctx.txn, ctx.registry), &vals)?,
             };
+            if !matches!(func, TableFunc::Call(f) if f.name() == "generate_series") {
+                for _ in &rows {
+                    crate::budget::charge_scan()?;
+                }
+            }
             if *ordinality {
                 for (i, r) in rows.iter_mut().enumerate() {
                     r.push(Value::Int(i as i64 + 1));
@@ -199,6 +204,11 @@ pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
                 // and cached CTEs, so no cache holds an earlier round.)
                 ctx.work.borrow_mut().insert(*id, Rc::new(round));
                 round = fresh(collect(step, ctx, outer)?);
+                // Each row a round makes counts as read: an endless
+                // recursion runs into the statement's budget.
+                for _ in &round {
+                    crate::budget::charge_scan()?;
+                }
                 out.extend(round.iter().cloned());
             }
             ctx.work.borrow_mut().remove(id);
@@ -299,6 +309,8 @@ pub(crate) fn generate_series(vals: &[Value]) -> Result<Vec<Row>> {
         if out.len() >= 100_000_000 {
             return Err(Error::out_of_range("generate_series: too many rows"));
         }
+        // Each row made counts as read (and the statement's time runs).
+        crate::budget::charge_scan()?;
         out.push(vec![cur.clone()]);
         cur = match binary(BinaryOp::Add, cur, step.clone()) {
             Ok(v) => v,
@@ -430,6 +442,7 @@ pub fn scan<'a>(
         None => {
             let mut labels = crate::enums::Labels::default();
             Box::new(entries.map(move |e| {
+                crate::budget::charge_scan()?;
                 let (k, v) = e?;
                 let row = crate::large::read_row_with(ctx.txn, table, &k, &v, &mut labels)?;
                 Ok((k, row))
@@ -439,6 +452,7 @@ pub fn scan<'a>(
             let base = table.index_prefix(0);
             let mut labels = crate::enums::Labels::default();
             Box::new(entries.map(move |e| {
+                crate::budget::charge_scan()?;
                 let (_, pk) = e?;
                 let mut k = base.clone();
                 k.extend_from_slice(&pk);

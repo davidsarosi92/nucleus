@@ -1020,9 +1020,10 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.roles` | `name`, `superuser`, `login`, `inherit`, `createrole`, `connection_limit`, `has_password`, `valid_until` |
 | `nc_catalog.role_members` | `role`, `member`, `admin_option`, `condition` (a `WHEN` condition, or NULL) |
 | `nc_catalog.access_rules` | `position`, `name`, `roles`, `addresses`, `front_ends`, `auth_methods`, `tls`, `action`, `read_only`, `as_role` (in order) |
+| `nc_catalog.database_settings` | `name`, `value`, `is_set`, `default`, `description` (`ALTER DATABASE nucleus SET …`) |
 | `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
-| `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by` (the tokens the current role may manage; never a secret) |
+| `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by`, `max_rows`, `max_scan`, `timeout`, `rate_per_minute` (the tokens the current role may manage; never a secret) |
 | `nc_catalog.grants` | `kind`, `object`, `column`, `grantee`, `privilege`, `grantable` (the ACLs written out) |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
 
@@ -1353,6 +1354,34 @@ send one; nobody else's is read (`transport::client_address`).  An
 address alone is weak identity (shared networks, NAT, a spoofing
 neighbour): for more than read access a rule should require TLS or a
 certificate too.
+
+**Protection.**  *The database's settings*: `ALTER DATABASE nucleus SET
+name = value | RESET name` (an administrator's; `dbsettings.rs`, catalog
+`00 11`, `nc_catalog.database_settings`) — `password_min_length`
+(default 1), `password_lifetime` (an interval, default `infinity`),
+`statement_timeout` (default `0`, none), `login_lock_failures` (10),
+`login_lock_time` (`15 minutes`); a duration is milliseconds, `5s`,
+`100ms`, `2min`, `1h`, `1d` or an interval.  *Passwords*: at least
+`password_min_length` characters and not the role's name (`22023`; a
+verifier given as such, from a dump, is not checked); one set without
+`VALID UNTIL` expires after `password_lifetime`.  *Failed logins*
+(`nucleus_server::throttle`): from the third in a row, by user name or by
+client address, an answer waits a quarter second, doubling up to four;
+after `login_lock_failures` the role is locked for `login_lock_time` —
+even its password is refused (`28000`); a success clears the count;
+unknown names count alike; the counts are the server's memory.
+*Connection limits*: a role's `CONNECTION LIMIT` (administrators aside)
+and the server's `--max-connections` (`Config::max_connections`) — past
+either, `53300`.  *Statement budgets* (`budget.rs`): `SET
+statement_timeout = …` (or the database's) ends a statement that runs
+longer (`57014`), checked as rows are read or made — scans, table
+functions, recursive rounds; a token's `ROWS n` (the most rows a
+statement returns), `SCAN n` (the most it reads) — `54000` — `TIMEOUT
+'…'` and `RATE n PER MINUTE` (statements, `53400`): `CREATE TOKEN … ROWS
+1000 SCAN 100000 TIMEOUT '5s' RATE 60 PER MINUTE`.  *An insecure start*:
+`nucleus server` refuses to listen beyond loopback without
+authentication, or with the default password while the database is
+unclaimed, unless `--insecure`.
 
 **Bootstrap.**  A database whose catalog has no administrator that can
 log in with a password is *unclaimed*: the server's `--user` /
@@ -1708,6 +1737,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 protection (T6):** database settings (`ALTER
+  DATABASE … SET`), password length / name / lifetime rules, failed
+  logins slowed and locked, connection limits, statement timeouts and
+  token budgets (rows, scan, rate), the insecure start refused.
 - **2026-10-23 — §M14.25 access rules (T5):** `CREATE / DROP ACCESS
   RULE` (role, address, front end, method, TLS; `ALLOW [READ ONLY] [AS
   ROLE r]` or `REJECT`; first match), `GRANT … WHEN (…)` memberships held

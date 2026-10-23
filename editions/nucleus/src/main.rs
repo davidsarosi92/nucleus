@@ -32,7 +32,7 @@ usage:
                       --ldap-search-base <dn> [--ldap-search-attribute <attr>]
                       [--ldap-search-dn <dn> --ldap-search-password <pw>])
                       [--ldap-starttls] [--ldap-ca <pem file>]]
-                     [--trusted-proxy <cidr> …]
+                     [--trusted-proxy <cidr> …] [--max-connections <n>] [--insecure]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
@@ -43,7 +43,9 @@ usage:
                                     the user logs it in without a password; with
                                     an OIDC issuer, its identity tokens log in;
                                     with LDAP, the directory checks the passwords
-                                    of roles without their own (over TLS)
+                                    of roles without their own (over TLS).  Beyond
+                                    loopback it refuses the default password of an
+                                    unclaimed database and --no-auth unless --insecure
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

@@ -937,3 +937,142 @@ fn access_rules_see_the_real_address() {
         .is_err()
     );
 }
+
+/// A server on a real database (the real clock: for timeouts and lock
+/// times), with `config`.
+fn start_real(config: nucleus_server::Config) -> SocketAddr {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "nucleus-client-test-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let db: Arc<dyn Kv> = Arc::new(Database::open(&dir, Options::default()).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || serve(listener, db, config));
+    addr
+}
+
+/// Protection (PLAN.md §M14.25): failed logins slowed and then locked,
+/// connection limits, statement budgets — a timeout, and a token's rows,
+/// scan and rate.
+#[test]
+fn protection_limits_logins_and_statements() {
+    let addr = start_real(nucleus_server::Config {
+        max_connections: Some(6),
+        ..Default::default()
+    });
+    let login = |user: &str, password: &str| {
+        Client::connect(Config {
+            user: user.into(),
+            password: Some(password.into()),
+            ..config(addr)
+        })
+    };
+    fn code<T>(r: Result<T, Error>) -> String {
+        match r {
+            Err(Error::Server(e)) => e.code,
+            Err(e) => format!("{e}"),
+            Ok(_) => "ok".into(),
+        }
+    }
+    login("nucleus", "nucleus")
+        .unwrap()
+        .execute("CREATE USER root SUPERUSER PASSWORD 'root-password'", &[])
+        .unwrap();
+    let mut root = login("root", "root-password").unwrap();
+    for sql in [
+        "ALTER DATABASE nucleus SET login_lock_failures = 3",
+        "ALTER DATABASE nucleus SET login_lock_time = '1 minute'",
+        "CREATE USER app PASSWORD 'app-password' CONNECTION LIMIT 2",
+        "CREATE USER other PASSWORD 'other-password'",
+        "CREATE ROLE agent",
+        "CREATE TABLE t (x int)",
+        "INSERT INTO t SELECT * FROM generate_series(1, 100)",
+        "GRANT SELECT ON t TO agent, app",
+    ] {
+        root.execute(sql, &[]).unwrap();
+    }
+    // Three failures lock app: then even its password is refused; another
+    // role is not touched.
+    for _ in 0..3 {
+        assert_eq!(code(login("app", "wrong")), "28P01");
+    }
+    assert_eq!(code(login("app", "app-password")), "28000");
+    assert!(login("other", "other-password").is_ok());
+    // The lock is in memory for a lock time; another server would not have
+    // it — here the setting shortens it to nothing for the rest.
+    root.execute("ALTER DATABASE nucleus SET login_lock_time = '1ms'", &[])
+        .unwrap();
+    // (The lock already set lasts its minute; a fresh role shows the count
+    // starting again after a success.)
+    root.execute(
+        "CREATE USER app2 PASSWORD 'app2-password' CONNECTION LIMIT 2",
+        &[],
+    )
+    .unwrap();
+    root.execute("GRANT SELECT ON t TO app2", &[]).unwrap();
+    assert_eq!(code(login("app2", "wrong")), "28P01");
+    assert!(login("app2", "app2-password").is_ok());
+    // CONNECTION LIMIT 2: a third session at once is refused.
+    let a = login("app2", "app2-password").unwrap();
+    let b = login("app2", "app2-password").unwrap();
+    assert_eq!(code(login("app2", "app2-password")), "53300");
+    drop(a);
+    drop(b);
+    // The server sees the sessions end a moment later.
+    let mut ok = false;
+    for _ in 0..50 {
+        if login("app2", "app2-password").is_ok() {
+            ok = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(ok);
+    // statement_timeout: the session's, or the database's.
+    root.execute("SET statement_timeout = '50ms'", &[]).unwrap();
+    assert_eq!(
+        code(root.execute("SELECT count(*) FROM generate_series(1, 50000000)", &[])),
+        "57014"
+    );
+    assert_eq!(
+        code(root.execute(
+            "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r",
+            &[]
+        )),
+        "57014"
+    );
+    root.execute("RESET statement_timeout", &[]).unwrap();
+    assert_eq!(code(root.execute("SELECT count(*) FROM t", &[])), "ok");
+    // A token's budgets.
+    let r = root
+        .rows(
+            "CREATE TOKEN bot FOR agent ROWS 5 SCAN 50 RATE 4 PER MINUTE TIMEOUT '1 minute'",
+            &[],
+        )
+        .unwrap();
+    let (Value::Text(l), Value::Text(s)) = (&r[0][1], &r[0][2]) else {
+        panic!("{r:?}")
+    };
+    let mut bot = login(l, s).unwrap();
+    assert_eq!(
+        code(bot.execute("SELECT x FROM t WHERE x <= 5", &[])),
+        "54000"
+    ); // reads 100
+    assert_eq!(code(bot.execute("SELECT x FROM t LIMIT 6", &[])), "54000"); // returns 6
+    assert_eq!(code(bot.execute("SELECT 1", &[])), "ok");
+    assert_eq!(code(bot.execute("SELECT 2", &[])), "ok");
+    assert_eq!(code(bot.execute("SELECT 3", &[])), "53400"); // the fifth a minute
+    assert_eq!(
+        root.rows(
+            "SELECT max_rows, max_scan, rate_per_minute FROM nc_catalog.tokens WHERE name = 'bot'",
+            &[]
+        )
+        .unwrap(),
+        vec![vec![Value::Int(5), Value::Int(50), Value::Int(4)]]
+    );
+}

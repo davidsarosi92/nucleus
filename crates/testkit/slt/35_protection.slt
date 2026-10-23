@@ -1,0 +1,122 @@
+# Protection: the database's settings (ALTER DATABASE … SET), password
+# rules and lifetime.  nucleus-only throughout; login throttling,
+# connection limits and statement budgets are tested over real
+# connections (crates/client/tests/client.rs).
+
+# nucleus-only
+query TTB
+SELECT name, value, is_set FROM nc_catalog.database_settings ORDER BY name
+----
+login_lock_failures 10 false
+login_lock_time 15 minutes false
+password_lifetime infinity false
+password_min_length 1 false
+statement_timeout 0 false
+
+# nucleus-only
+statement ok
+ALTER DATABASE nucleus SET password_min_length = 8
+
+# nucleus-only
+statement error 22023
+CREATE USER slt_pr_short PASSWORD 'short'
+
+# nucleus-only: not the role's name either.
+statement error 22023
+CREATE USER slt_pr_longname PASSWORD 'SLT_PR_LONGNAME'
+
+# nucleus-only
+statement ok
+CREATE USER slt_pr_ok PASSWORD 'long enough'
+
+# nucleus-only: a verifier (a dump's) is taken as it is.
+statement ok
+ALTER ROLE slt_pr_ok PASSWORD 'SCRAM-SHA-256$4096:c2FsdHNhbHRzYWx0c2FsdA==$7A9Qw3Jv8m2m3qq3w0wqv1Wb8f3K3O6Y3s8o6l3c5yU=:c2VydmVya2V5c2VydmVya2V5c2VydmVya2V5c2VydmU='
+
+# nucleus-only: a password lifetime sets VALID UNTIL when none is given.
+statement ok
+ALTER DATABASE nucleus SET password_lifetime = '30 days'
+
+# nucleus-only
+statement ok
+ALTER ROLE slt_pr_ok PASSWORD 'another long one'
+
+# nucleus-only
+query B
+SELECT valid_until > now() + interval '29 days' AND valid_until < now() + interval '31 days' FROM nc_catalog.roles WHERE name = 'slt_pr_ok'
+----
+true
+
+# nucleus-only: an explicit VALID UNTIL wins.
+statement ok
+ALTER ROLE slt_pr_ok PASSWORD 'yet another one' VALID UNTIL 'infinity'
+
+# nucleus-only
+query B
+SELECT valid_until IS NULL FROM nc_catalog.roles WHERE name = 'slt_pr_ok'
+----
+true
+
+# nucleus-only
+statement error 42704
+ALTER DATABASE nucleus SET no_such_setting = 1
+
+# nucleus-only
+statement error 22023
+ALTER DATABASE nucleus SET password_min_length = 'many'
+
+# nucleus-only
+statement error 22023
+ALTER DATABASE nucleus SET login_lock_failures = 0
+
+# nucleus-only
+statement error 22023
+ALTER DATABASE nucleus SET statement_timeout = 'soon'
+
+# nucleus-only
+statement error 3D000
+ALTER DATABASE elsewhere SET password_min_length = 8
+
+# nucleus-only: an administrator's.
+statement ok
+SET ROLE slt_pr_ok
+
+# nucleus-only
+statement error 42501
+ALTER DATABASE nucleus SET password_min_length = 1
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# nucleus-only
+statement ok
+ALTER DATABASE nucleus SET statement_timeout = '5s'
+
+# nucleus-only
+query TB
+SELECT value, is_set FROM nc_catalog.database_settings WHERE name = 'statement_timeout'
+----
+5s true
+
+# nucleus-only
+statement ok
+ALTER DATABASE nucleus RESET statement_timeout
+
+# nucleus-only
+statement ok
+ALTER DATABASE nucleus RESET password_min_length
+
+# nucleus-only
+statement ok
+ALTER DATABASE nucleus RESET password_lifetime
+
+# nucleus-only
+query I
+SELECT count(*) FROM nc_catalog.database_settings WHERE is_set
+----
+0
+
+# nucleus-only
+statement ok
+DROP ROLE slt_pr_ok

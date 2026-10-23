@@ -407,9 +407,18 @@ fn login(
         Ok(p) => p,
         Err(e) => return Ok(Err(e)),
     };
-    let refused = || Error {
-        code: "28P01",
-        message: format!("password authentication failed for user \"{user}\""),
+    if let Some(why) = config.throttle.locked(&**kv, &user) {
+        return Ok(Err(Error {
+            code: "28000",
+            message: why,
+        }));
+    }
+    let refused = || {
+        config.throttle.failed(&**kv, &user, peer);
+        Error {
+            code: "28P01",
+            message: format!("password authentication failed for user \"{user}\""),
+        }
     };
     let mut identity = None;
     let mut method = "trust";
@@ -444,6 +453,7 @@ fn login(
         Some(id) => session.login_as(id),
         None => session.login(&user),
     }
+    .and_then(|()| crate::room_for(config, kv, &session))
     .and_then(|()| {
         session.admit(nucleus_sql::access::Context {
             client_addr: peer,
@@ -452,6 +462,9 @@ fn login(
             tls: tls.is_some(),
         })
     });
+    if logged_in.is_ok() {
+        config.throttle.succeeded(&user);
+    }
     Ok(match logged_in {
         Ok(()) => Ok((version, session)),
         Err(e) => Err(e),

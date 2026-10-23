@@ -411,6 +411,32 @@ fn apply(txn: &mut dyn KvTxn, role: &mut Role, options: &[RoleOption]) -> Result
                 if p.is_empty() {
                     return Err(Error::invalid_parameter("a password must not be empty"));
                 }
+                // A verifier given as such (a dump) is not checked again.
+                if nucleus_crypto::ScramVerifier::parse(p).is_none() {
+                    let min: usize = crate::dbsettings::get(&*txn, "password_min_length")?
+                        .parse()
+                        .unwrap_or(1);
+                    if p.chars().count() < min {
+                        return Err(Error::invalid_parameter(format!(
+                            "a password must have at least {min} characters (password_min_length)"
+                        )));
+                    }
+                    if p.eq_ignore_ascii_case(&role.name) {
+                        return Err(Error::invalid_parameter(
+                            "a password must not be the role's name",
+                        ));
+                    }
+                }
+                // Without VALID UNTIL, the database's password lifetime.
+                let lifetime = crate::dbsettings::get(&*txn, "password_lifetime")?;
+                if lifetime != "infinity"
+                    && !options
+                        .iter()
+                        .any(|o| matches!(o, RoleOption::ValidUntil(_)))
+                {
+                    let us = crate::dbsettings::duration(&lifetime)?;
+                    role.valid_until = Some(crate::datetime::now()? + us);
+                }
                 let mut salt = [0u8; 16];
                 crate::datetime::random_bytes(&mut salt)?;
                 role.password = Some(verifier(p, &salt));

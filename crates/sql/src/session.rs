@@ -102,6 +102,8 @@ pub struct Session {
     login: Arc<crate::access::Who>,
     /// Its place in `nc_catalog.sessions`, once a front end admitted it.
     listed: Option<crate::sessions::Entry>,
+    /// When its last statements ran (µs), for a rate ceiling.
+    recent: std::collections::VecDeque<i64>,
 }
 
 impl std::fmt::Debug for Session {
@@ -171,6 +173,7 @@ impl Session {
             who: Arc::new(crate::access::Who::system()),
             login: Arc::new(crate::access::Who::system()),
             listed: None,
+            recent: std::collections::VecDeque::new(),
         }
     }
 
@@ -269,6 +272,17 @@ impl Session {
             }
         }
         let txn = self.kv.begin(TxnOptions::read_only())?;
+        // CONNECTION LIMIT (administrators are not held to it).
+        if !self.login.superuser
+            && let Some(limit) =
+                crate::roles::get(&*txn, &self.login.session_user)?.and_then(|r| r.connection_limit)
+            && crate::sessions::count(&self.kv, Some(&self.login.session_user)) >= limit as usize
+        {
+            return Err(Error::too_many_connections(format!(
+                "too many connections for role \"{}\"",
+                self.login.session_user
+            )));
+        }
         let rule = crate::rules::admit(&*txn, &self.login.session_user, &context, &suspended)?;
         let mut who = (*self.login).clone();
         who.suspended = suspended;
@@ -301,6 +315,46 @@ impl Session {
         self.login = Arc::new(who);
         self.who = self.login.clone();
         Ok(())
+    }
+
+    /// A rate ceiling (statements a minute): `53400` when over it.
+    fn charge_rate(&mut self, who: &crate::access::Who) -> Result<()> {
+        let Some(rate) = who.ceiling.rate else {
+            return Ok(());
+        };
+        let now = crate::datetime::from_system(self.kv.wall_clock());
+        while self.recent.front().is_some_and(|&t| t <= now - 60_000_000) {
+            self.recent.pop_front();
+        }
+        if self.recent.len() >= rate as usize {
+            return Err(Error::configuration_limit(format!(
+                "more than {rate} statements a minute, the session's budget"
+            )));
+        }
+        self.recent.push_back(now);
+        Ok(())
+    }
+
+    /// The next statement's budget: the session's `statement_timeout` (or
+    /// the database's), and the ceiling's — the tighter of each.
+    fn budget(&self, who: &crate::access::Who) -> Result<crate::budget::Budget> {
+        let timeout = match self.settings.get("statement_timeout") {
+            Some(v) => crate::dbsettings::duration(v)?,
+            None => {
+                let txn = self.kv.begin(TxnOptions::read_only())?;
+                crate::dbsettings::duration(&crate::dbsettings::get(&*txn, "statement_timeout")?)?
+            }
+        };
+        let timeout = [(timeout > 0).then_some(timeout), who.ceiling.timeout]
+            .into_iter()
+            .flatten()
+            .min();
+        let now = crate::datetime::from_system(self.kv.wall_clock());
+        Ok(crate::budget::Budget {
+            deadline: timeout.map(|t| now + t),
+            max_scan: who.ceiling.max_scan,
+            max_rows: who.ceiling.max_rows,
+        })
     }
 
     /// Who the session's statements run as.
@@ -480,7 +534,11 @@ impl Session {
                 let mut who = (*self.who).clone();
                 who.settings = self.settings.clone();
                 let who = Arc::new(who);
-                crate::access::with_who(&who, || self.run_in_txn(stmt, params))
+                self.charge_rate(&who)?;
+                let budget = self.budget(&who)?;
+                crate::access::with_who(&who, || {
+                    crate::budget::with_budget(budget, || self.run_in_txn(stmt, params))
+                })
             }
         }
     }
@@ -691,6 +749,7 @@ pub fn execute(
             let plan = optimize(bound.plan, ro);
             let ctx = Ctx::new(ro, reg, params);
             let rows = exec::collect(&plan, &ctx, None)?;
+            crate::budget::charge_rows(rows.len())?;
             Output::Rows {
                 columns: columns_of(bound.scope.cols.into_iter().map(|c| (c.name, c.ty))),
                 rows,
@@ -913,6 +972,7 @@ pub fn execute(
             read_only,
             tables,
             valid_until,
+            budget,
         } => {
             let (t, secret) = crate::tokens::create(
                 txn,
@@ -921,6 +981,7 @@ pub fn execute(
                 *read_only,
                 tables.as_deref(),
                 valid_until.as_deref(),
+                budget.clone(),
             )?;
             Output::Rows {
                 columns: columns_of([
@@ -942,6 +1003,14 @@ pub fn execute(
         Statement::DropAccessRule { name, if_exists } => {
             crate::rules::drop(txn, name, *if_exists)?;
             Output::Command("DROP ACCESS RULE".into())
+        }
+        Statement::AlterDatabaseSet {
+            database,
+            name,
+            value,
+        } => {
+            crate::dbsettings::set(txn, database, name, value.as_deref())?;
+            Output::Command("ALTER DATABASE".into())
         }
         Statement::DropToken { name, if_exists } => {
             crate::tokens::drop(txn, name, *if_exists)?;

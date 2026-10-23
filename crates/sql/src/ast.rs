@@ -88,6 +88,8 @@ pub enum Statement {
         tables: Option<Vec<String>>,
         /// `VALID UNTIL`.
         valid_until: Option<String>,
+        /// `ROWS n`, `SCAN n`, `TIMEOUT '…'`, `RATE n PER MINUTE`.
+        budget: crate::tokens::Budgets,
     },
     /// `CREATE ACCESS RULE …` ([`crate::rules`]).
     CreateAccessRule(crate::rules::Rule, crate::rules::Place),
@@ -97,6 +99,16 @@ pub enum Statement {
         name: String,
         /// `IF EXISTS`.
         if_exists: bool,
+    },
+    /// `ALTER DATABASE name SET setting = value | RESET setting`
+    /// ([`crate::dbsettings`]).
+    AlterDatabaseSet {
+        /// The database.
+        database: String,
+        /// The setting.
+        name: String,
+        /// Its value (`None`: back to its default).
+        value: Option<String>,
     },
     /// `DROP TOKEN [IF EXISTS] name`.
     DropToken {

@@ -22,11 +22,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut extra: Vec<(String, Option<String>)> = Vec::new();
     let (mut user, mut password) = (DEFAULT_USER.to_string(), Some(DEFAULT_PASSWORD.to_string()));
     let mut log_queries = false;
+    let mut insecure = false;
     let (mut tls_cert, mut tls_key, mut tls_client_ca) = (None, None, None::<String>);
     let (mut oidc_issuer, mut oidc_audience, mut oidc_jwks) = (None, None, None::<String>);
     let (mut oidc_user_claim, mut oidc_role_claim) = (None::<String>, None::<String>);
     let mut ldap: std::collections::BTreeMap<&str, String> = Default::default();
     let mut trusted_proxies = Vec::new();
+    let mut max_connections = None;
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -45,6 +47,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--password" => password = Some(rest.next().ok_or("--password needs a value")?.clone()),
             "--no-auth" => password = None,
             "--log-queries" => log_queries = true,
+            "--insecure" => insecure = true,
             "--tls-cert" => tls_cert = Some(rest.next().ok_or("--tls-cert needs a file")?.clone()),
             "--tls-key" => tls_key = Some(rest.next().ok_or("--tls-key needs a file")?.clone()),
             "--oidc-issuer" => {
@@ -83,6 +86,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     .clone();
                 ldap.insert(&a[7..], v);
             }
+            "--max-connections" => {
+                let n = rest.next().ok_or("--max-connections needs a number")?;
+                max_connections = Some(
+                    n.parse()
+                        .map_err(|_| format!("--max-connections {n}: not a number"))?,
+                );
+            }
             "--trusted-proxy" => {
                 let cidr = rest
                     .next()
@@ -100,6 +110,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             other => return Err(format!("server: unknown option {other}")),
         }
     }
+    let weak_password = password.as_deref() == Some(DEFAULT_PASSWORD);
+    let no_auth = password.is_none();
     let config = Config {
         auth: match password {
             Some(password) => Arc::new(Password { user, password }),
@@ -177,6 +189,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             }
         },
         trusted_proxies,
+        max_connections,
+        throttle: Default::default(),
     };
     let db = Database::open(dir, Options::default()).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);
@@ -193,6 +207,36 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let addr = addr.unwrap_or_else(|| front.default_addr());
         let l = TcpListener::bind(&addr).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
         listeners.push((Arc::clone(front), l));
+    }
+    // Beyond loopback, not with the default password (while the database
+    // is unclaimed and so takes it) or without authentication — unless told.
+    let exposed: Vec<String> = listeners
+        .iter()
+        .filter_map(|(_, l)| l.local_addr().ok())
+        .filter(|a| !a.ip().is_loopback())
+        .map(|a| a.to_string())
+        .collect();
+    if !exposed.is_empty() && !insecure {
+        let unclaimed = || -> Result<bool, String> {
+            let txn = kv
+                .begin(nucleus_kv::TxnOptions::read_only())
+                .map_err(|e| e.to_string())?;
+            nucleus_sql::roles::unclaimed(&*txn).map_err(|e| e.message)
+        };
+        let why = if no_auth {
+            Some("without authentication (--no-auth)")
+        } else if weak_password && unclaimed()? {
+            Some("with the default password while the database is unclaimed")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            return Err(format!(
+                "server: refusing to listen on {} {why}: claim the database (nucleus init), \
+                 give --password, or say --insecure",
+                exposed.join(", ")
+            ));
+        }
     }
     let shown: Vec<String> = listeners
         .iter()

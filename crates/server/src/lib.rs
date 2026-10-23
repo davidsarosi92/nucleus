@@ -12,6 +12,7 @@
 //!   front ends negotiate it ([`transport`]).
 
 mod native;
+pub mod throttle;
 pub mod transport;
 
 pub use nucleus_sql::access::Identity;
@@ -126,6 +127,24 @@ pub fn password_method(config: &Config, kv: &dyn Kv, user: &str) -> &'static str
     } else {
         "password"
     }
+}
+
+/// Whether the server takes one more session for `session`'s user: not
+/// past `max_connections` (administrators aside) — `53300` otherwise.
+pub fn room_for(
+    config: &Config,
+    kv: &Arc<dyn Kv>,
+    session: &nucleus_sql::Session,
+) -> nucleus_sql::Result<()> {
+    if let Some(max) = config.max_connections
+        && !session.who().superuser
+        && nucleus_sql::sessions::count(kv, None) >= max
+    {
+        return Err(nucleus_sql::Error::too_many_connections(
+            "sorry, too many clients already",
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a client logs in by its certificate: TLS verified one naming
@@ -303,6 +322,11 @@ pub struct Config {
     /// Proxies (CIDR) whose PROXY protocol header names the client's
     /// address ([`transport::client_address`]).
     pub trusted_proxies: Vec<String>,
+    /// The most sessions at once, administrators' not counted (`None`: no
+    /// limit).
+    pub max_connections: Option<usize>,
+    /// Failed logins, slowed and locked ([`throttle`]).
+    pub throttle: Arc<throttle::Throttle>,
 }
 
 impl Default for Config {
@@ -327,6 +351,8 @@ impl Config {
             bearer: None,
             directory: None,
             trusted_proxies: Vec::new(),
+            max_connections: None,
+            throttle: Arc::default(),
         }
     }
 

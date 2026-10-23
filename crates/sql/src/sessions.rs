@@ -90,6 +90,17 @@ impl Drop for Entry {
     }
 }
 
+/// How many sessions of `kv` there are (of `user`'s, if given).
+pub fn count(kv: &Arc<dyn Kv>, user: Option<&str>) -> usize {
+    SESSIONS.lock().map_or(0, |all| {
+        all.get(&database(kv)).map_or(0, |t| {
+            t.values()
+                .filter(|i| user.is_none_or(|u| i.session_user == u))
+                .count()
+        })
+    })
+}
+
 /// The sessions of the database the current statement runs in that the
 /// current role may see.
 pub fn visible() -> Vec<Info> {

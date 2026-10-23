@@ -117,6 +117,14 @@ pub struct Ceiling {
     pub tables: Option<std::collections::BTreeSet<String>>,
     /// Only what this role may do as well (an access rule's `AS ROLE`).
     pub as_role: Option<String>,
+    /// The longest a statement may run (µs).
+    pub timeout: Option<i64>,
+    /// The most rows a statement may read.
+    pub max_scan: Option<u64>,
+    /// The most rows a statement may return.
+    pub max_rows: Option<u64>,
+    /// The most statements a minute.
+    pub rate: Option<u32>,
 }
 
 impl Ceiling {

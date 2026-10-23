@@ -6,11 +6,13 @@
 pub mod access;
 pub mod ast;
 pub mod binder;
+pub mod budget;
 pub mod builtin;
 pub mod bytea;
 pub mod catalog;
 pub mod check;
 pub mod datetime;
+pub mod dbsettings;
 pub mod decimal;
 pub mod dml;
 pub mod encoding;

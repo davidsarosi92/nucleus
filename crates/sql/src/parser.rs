@@ -857,6 +857,15 @@ impl<'a> Parser<'a> {
         if self.eat_kw("token") {
             let name = self.ident()?;
             let (mut role, mut read_only, mut tables, mut valid_until) = (None, false, None, None);
+            let mut budget = crate::tokens::Budgets::default();
+            let number = |p: &mut Self| -> Result<u64> {
+                match p.next() {
+                    Some(Token::Number(n)) => {
+                        n.parse().map_err(|_| Error::syntax("a whole number"))
+                    }
+                    _ => Err(p.error("expected a number")),
+                }
+            };
             loop {
                 if self.eat_kw("for") {
                     role = Some(self.ident()?);
@@ -871,6 +880,16 @@ impl<'a> Parser<'a> {
                     tables = Some(t);
                 } else if self.eat_kws(&["valid", "until"]) {
                     valid_until = Some(self.string()?);
+                } else if self.eat_kw("rows") {
+                    budget.rows = Some(number(self)?);
+                } else if self.eat_kw("scan") {
+                    budget.scan = Some(number(self)?);
+                } else if self.eat_kw("timeout") {
+                    budget.timeout = Some(crate::dbsettings::duration(&self.string()?)?);
+                } else if self.eat_kw("rate") {
+                    budget.rate = Some(number(self)? as u32);
+                    self.expect_kw("per")?;
+                    self.expect_kw("minute")?;
                 } else {
                     break;
                 }
@@ -881,6 +900,7 @@ impl<'a> Parser<'a> {
                 read_only,
                 tables,
                 valid_until,
+                budget,
             });
         }
         if self.eat_kw("type") {
@@ -1387,6 +1407,31 @@ impl<'a> Parser<'a> {
         self.expect_kw("alter")?;
         if self.eat_kw("type") {
             return self.alter_type();
+        }
+        if self.eat_kw("database") {
+            let database = self.ident()?;
+            if self.eat_kw("reset") {
+                let name = self.ident()?;
+                return Ok(Statement::AlterDatabaseSet {
+                    database,
+                    name,
+                    value: None,
+                });
+            }
+            self.expect_kw("set")?;
+            let name = self.ident()?;
+            if !self.eat_op("=") {
+                self.expect_kw("to")?;
+            }
+            let value = match self.next() {
+                Some(Token::Word(w) | Token::Str(w) | Token::Number(w)) => w,
+                _ => return Err(self.error("expected a value")),
+            };
+            return Ok(Statement::AlterDatabaseSet {
+                database,
+                name,
+                value: Some(value),
+            });
         }
         if self.eat_kws(&["default", "privileges"]) {
             let for_role = if self.eat_kw("for") {

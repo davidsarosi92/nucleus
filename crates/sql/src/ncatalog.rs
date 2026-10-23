@@ -84,6 +84,16 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "database_settings",
+        &[
+            ("name", T),
+            ("value", T),
+            ("is_set", B),
+            ("default", T),
+            ("description", T),
+        ],
+    ),
+    (
         "sessions",
         &[
             ("id", I),
@@ -126,6 +136,10 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("valid_until", DataType::TimestampTz),
             ("created", DataType::TimestampTz),
             ("created_by", T),
+            ("max_rows", I),
+            ("max_scan", I),
+            ("timeout", DataType::Interval),
+            ("rate_per_minute", I),
         ],
     ),
     (
@@ -369,6 +383,17 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                 ]);
             }
         }
+        "database_settings" => {
+            for (k, value, set) in crate::dbsettings::all(txn)? {
+                out.push(vec![
+                    text(k.name.to_string()),
+                    text(value),
+                    Value::Bool(set),
+                    text(k.default.to_string()),
+                    text(k.description.to_string()),
+                ]);
+            }
+        }
         "sessions" => {
             for s in crate::sessions::visible() {
                 out.push(vec![
@@ -425,6 +450,18 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     t.valid_until.map_or(Value::Null, Value::TimestampTz),
                     Value::TimestampTz(t.created),
                     text(t.created_by),
+                    t.budget.rows.map_or(Value::Null, |n| Value::Int(n as i64)),
+                    t.budget.scan.map_or(Value::Null, |n| Value::Int(n as i64)),
+                    t.budget.timeout.map_or(Value::Null, |us| {
+                        Value::Interval(crate::datetime::Interval {
+                            months: 0,
+                            days: 0,
+                            micros: us,
+                        })
+                    }),
+                    t.budget
+                        .rate
+                        .map_or(Value::Null, |n| Value::Int(i64::from(n))),
                 ]);
             }
         }

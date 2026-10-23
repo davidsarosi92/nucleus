@@ -454,6 +454,17 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
     let mut out = BufWriter::new(w);
 
     let user = params.get("user").cloned().unwrap_or_default();
+    if let Some(why) = config.throttle.locked(&*kv, &user) {
+        send_error(
+            &mut out,
+            &Error {
+                code: "28000",
+                message: why,
+            },
+        )?;
+        out.flush()?;
+        return Ok(());
+    }
     let by_certificate = nucleus_server::certificate_login(config, &*kv, tls_info.as_ref(), &user);
     if config.auth.wants_password()
         && !by_certificate
@@ -495,6 +506,7 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
         )?
     };
     if !proved {
+        config.throttle.failed(&*kv, &user, peer);
         send_error(
             &mut out,
             &Error {
@@ -513,14 +525,17 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
         nucleus_server::password_method(config, &*kv, &user)
     };
     let mut session = Session::with_registry(Arc::clone(&kv), registry(&config.registry));
-    let admitted = session.login(&user).and_then(|()| {
-        session.admit(nucleus_sql::ext::Context {
-            client_addr: peer,
-            front_end: "pg".into(),
-            auth_method: method.into(),
-            tls: tls_info.is_some(),
-        })
-    });
+    let admitted = session
+        .login(&user)
+        .and_then(|()| nucleus_server::room_for(config, &kv, &session))
+        .and_then(|()| {
+            session.admit(nucleus_sql::ext::Context {
+                client_addr: peer,
+                front_end: "pg".into(),
+                auth_method: method.into(),
+                tls: tls_info.is_some(),
+            })
+        });
     if let Err(e) = admitted {
         send_error(&mut out, &e)?;
         out.flush()?;

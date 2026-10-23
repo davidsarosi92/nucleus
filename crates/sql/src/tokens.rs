@@ -25,7 +25,8 @@ use crate::encoding::{Reader, Writer};
 use crate::error::{Error, Result};
 
 const TOKENS: [u8; 2] = [0x00, 0x0F];
-const VERSION: u8 = 1;
+/// 2: budgets (rows, scan, timeout, rate).
+const VERSION: u8 = 2;
 
 /// The prefix of every token's login name (role names may not take it).
 pub const PREFIX: &str = "nct_";
@@ -52,6 +53,32 @@ pub struct Token {
     pub created_by: String,
     /// Its secret's SCRAM-SHA-256 verifier.
     pub verifier: String,
+    /// Its budgets, per statement and a minute.
+    pub budget: Budgets,
+}
+
+/// A token's budgets (`None`: no limit).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Budgets {
+    /// `ROWS n`: the most rows a statement may return.
+    pub rows: Option<u64>,
+    /// `SCAN n`: the most rows a statement may read.
+    pub scan: Option<u64>,
+    /// `TIMEOUT '…'`: the longest a statement may run (µs).
+    pub timeout: Option<i64>,
+    /// `RATE n PER MINUTE`: the most statements a minute.
+    pub rate: Option<u32>,
+}
+
+fn opt_u64(w: &mut Writer, v: Option<u64>) {
+    match v {
+        Some(n) => w.u8(1).u64(n),
+        None => w.u8(0),
+    };
+}
+
+fn read_opt_u64(r: &mut Reader) -> Result<Option<u64>> {
+    Ok(if r.u8()? == 1 { Some(r.u64()?) } else { None })
 }
 
 fn key(login: &str) -> Vec<u8> {
@@ -86,12 +113,17 @@ impl Token {
         w.u64(self.created as u64)
             .str(&self.created_by)
             .str(&self.verifier);
+        opt_u64(&mut w, self.budget.rows);
+        opt_u64(&mut w, self.budget.scan);
+        opt_u64(&mut w, self.budget.timeout.map(|t| t as u64));
+        opt_u64(&mut w, self.budget.rate.map(u64::from));
         w.0
     }
 
     fn decode(b: &[u8]) -> Result<Token> {
         let mut r = Reader::new(b);
-        if r.u8()? != VERSION {
+        let version = r.u8()?;
+        if !(1..=VERSION).contains(&version) {
             return Err(Error::internal("unknown token record version"));
         }
         let login = r.str()?;
@@ -119,6 +151,16 @@ impl Token {
             created: r.u64()? as i64,
             created_by: r.str()?,
             verifier: r.str()?,
+            budget: if version >= 2 {
+                Budgets {
+                    rows: read_opt_u64(&mut r)?,
+                    scan: read_opt_u64(&mut r)?,
+                    timeout: read_opt_u64(&mut r)?.map(|t| t as i64),
+                    rate: read_opt_u64(&mut r)?.map(|n| n as u32),
+                }
+            } else {
+                Budgets::default()
+            },
         })
     }
 
@@ -131,6 +173,10 @@ impl Token {
                 .as_ref()
                 .map(|t| t.iter().cloned().collect::<BTreeSet<_>>()),
             as_role: None,
+            timeout: self.budget.timeout,
+            max_scan: self.budget.scan,
+            max_rows: self.budget.rows,
+            rate: self.budget.rate,
         }
     }
 }
@@ -249,6 +295,7 @@ pub fn create(
     read_only: bool,
     tables: Option<&[String]>,
     valid_until: Option<&str>,
+    budget: Budgets,
 ) -> Result<(Token, String)> {
     let who = access::current();
     let role_name = role.unwrap_or(&who.user);
@@ -293,6 +340,7 @@ pub fn create(
         created: crate::datetime::now()?,
         created_by: who.user.clone(),
         verifier: crate::roles::verifier(&secret, &salt),
+        budget,
     };
     put(txn, &token)?;
     Ok((token, secret))

@@ -1011,7 +1011,11 @@ password asked for only over TLS); T4 done; T5 access rules and privileges
 by connection context ✅ (ordered rules with READ ONLY / AS ROLE ceilings,
 `GRANT … WHEN` memberships, the connection as read-only settings and in
 `nc_catalog.sessions`, the PROXY protocol; the MCP and sync front ends get
-the same rules when they exist, §M14.10, §M16.7); T6 protection; T7 audit.
+the same rules when they exist, §M14.10, §M16.7); T6 protection ✅
+(database settings in SQL, password rules and lifetime, failed logins
+slowed and locked, connection limits, statement timeouts, token budgets
+of rows, scan and rate — a cost budget comes with §M14.9's costs — and the
+insecure start refused); T7 audit.
 
 **Order:** right after §M14.19 and §M14.26 (whose `inet` / `cidr` the
 access rules use), before the rest of the developer platform:
@@ -1976,6 +1980,8 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.25 T6: protection — failed logins locked, limits
+  on connections and statements, password rules, no insecure start.
 - **2026-10-23** — §M14.25 T5: access rules and privileges by connection
   context — the same user with full rights from one address and read only
   from another, a role held only under its condition, over real sockets
