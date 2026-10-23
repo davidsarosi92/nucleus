@@ -1,0 +1,31 @@
+[package]
+name = "nucleus-oidc"
+description = "OpenID Connect for nucleus: logins by identity tokens (JWTs), their claims mapped to roles and to the session"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+
+# A module depends on nucleus's public API crates only, by version (the
+# path is for building inside the repository; a published copy drops it).
+[dependencies]
+nucleus-kv = { version = "0.1.0", path = "../../crates/kv" }
+nucleus-server = { version = "0.1.0", path = "../../crates/server" }
+# Token signatures (RS*, PS*, ES256, ES384, EdDSA).
+ring = "0.17"
+# The tokens, the keys and the issuer's metadata are JSON.
+serde_json = "1"
+# The issuer's metadata and keys over HTTPS (discovery).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+nucleus-client = { version = "0.1.0", path = "../../crates/client" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

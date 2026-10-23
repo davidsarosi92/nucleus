@@ -46,6 +46,9 @@ pub struct Config {
     pub connect_timeout: Duration,
     /// TLS (`None`: none) — a module's ([`Tls`]; `nucleus-tls`).
     pub tls: Option<std::sync::Arc<dyn Tls>>,
+    /// A bearer token (an OpenID Connect identity token) to log in with
+    /// instead of the password: it names the user (OAUTHBEARER).
+    pub token: Option<String>,
 }
 
 /// A byte stream to the server.
@@ -84,6 +87,7 @@ impl Default for Config {
             client_name: "nucleus-client (rust)".into(),
             connect_timeout: Duration::from_secs(10),
             tls: None,
+            token: None,
         }
     }
 }
@@ -849,6 +853,20 @@ impl Client {
                         None => {
                             // The mechanisms offered: PLUS too over TLS.
                             let offered: Vec<&str> = msg.split(' ').collect();
+                            if let Some(token) = &c.config.token {
+                                // OAUTHBEARER's initial response (RFC 7628).
+                                if !offered.contains(&"OAUTHBEARER") {
+                                    return Err(Error::Protocol(
+                                        "the server does not take bearer tokens".into(),
+                                    ));
+                                }
+                                let reply = format!("n,,\x01auth=Bearer {token}\x01\x01");
+                                let mut body = Vec::new();
+                                put_str(&mut body, &reply);
+                                c.conn.get_mut().write_all(&frame(b'a', &body))?;
+                                c.conn.get_mut().flush()?;
+                                continue;
+                            }
                             if !offered.contains(&"SCRAM-SHA-256") {
                                 return Err(Error::Protocol(format!(
                                     "unsupported authentication {msg:?}"

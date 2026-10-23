@@ -67,6 +67,7 @@ codes! {
     invalid_parameter => "22023",
     array_subscript => "2202E",
     object_in_use => "55006",
+    cant_change => "55P02",
     invalid_grant => "0LP01",
     invalid_authorization => "28000",
     undefined_database => "3D000",

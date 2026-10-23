@@ -439,7 +439,7 @@ class Connection:
     def __init__(self, host="127.0.0.1", port=DEFAULT_PORT, user="nucleus",
                  password="nucleus", database="nucleus", timeout=10.0,
                  client_name="nucleus-python", tls=False, tls_ca=None,
-                 tls_verify=True, tls_cert=None, tls_key=None):
+                 tls_verify=True, tls_cert=None, tls_key=None, token=None):
         try:
             self._sock = _socket.create_connection((host, port), timeout=timeout)
             self._sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
@@ -467,6 +467,14 @@ class Connection:
             r = _Reader(body)
             if kind == b"A":
                 msg = r.str()
+                if scram is None and token is not None:
+                    # OAUTHBEARER's initial response (RFC 7628).
+                    if "OAUTHBEARER" not in msg.split(" "):
+                        raise InterfaceError("the server does not take bearer tokens")
+                    out = bytearray()
+                    _put_str(out, f"n,,\x01auth=Bearer {token}\x01\x01")
+                    self._send(b"a", out)
+                    continue
                 if scram is None:
                     offered = msg.split(" ")
                     if "SCRAM-SHA-256" not in offered:
@@ -671,7 +679,7 @@ class Cursor:
 
 def connect(host="127.0.0.1", port=DEFAULT_PORT, user="nucleus", password="nucleus",
             database="nucleus", timeout=10.0, tls=False, tls_ca=None, tls_verify=True,
-            tls_cert=None, tls_key=None):
+            tls_cert=None, tls_key=None, token=None):
     """Opens a connection (the defaults reach a local server as it starts).
 
     ``tls=True`` encrypts it, the server's certificate checked against the
@@ -679,7 +687,9 @@ def connect(host="127.0.0.1", port=DEFAULT_PORT, user="nucleus", password="nucle
     implies ``tls``); ``tls_verify=False`` skips the check (encrypted, but
     anyone can pose as the server).  ``tls_cert`` and ``tls_key`` (PEM
     files) show the server a client certificate: one naming the user logs
-    it in without a password, if the server accepts its CA."""
+    it in without a password, if the server accepts its CA.  ``token`` (an
+    OpenID Connect identity token) logs in instead of the password: it
+    names the user."""
     return Connection(host, port, user, password, database, timeout,
                       tls=tls, tls_ca=tls_ca, tls_verify=tls_verify,
-                      tls_cert=tls_cert, tls_key=tls_key)
+                      tls_cert=tls_cert, tls_key=tls_key, token=token)

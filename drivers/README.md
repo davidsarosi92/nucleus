@@ -12,7 +12,8 @@ never sent, registered types arrive in their binary form, and `smallint`,
 native (or closest) type.  Each can use TLS — the server's certificate
 checked against the system's CAs or one's own, or unverified — and show
 a client certificate, which logs its user in without a password — and
-over TLS binds SCRAM to the session (SCRAM-SHA-256-PLUS) (DOCS.md §10,
+over TLS binds SCRAM to the session (SCRAM-SHA-256-PLUS) — and logs in
+with an OpenID Connect identity token instead of a password (DOCS.md §10,
 §11).  A token (`CREATE TOKEN`, DOCS.md §9) is a
 user and a password to each of them: its `login` and its `secret`.
 

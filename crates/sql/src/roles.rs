@@ -222,6 +222,18 @@ pub fn effective(txn: &dyn KvTxn, user: &str) -> Result<BTreeSet<String>> {
     Ok(out)
 }
 
+/// The roles whose privileges `who` has: its role's, and while it acts as
+/// itself, those its login granted for the session.
+pub fn effective_for(txn: &dyn KvTxn, who: &access::Who) -> Result<BTreeSet<String>> {
+    let mut out = effective(txn, &who.user)?;
+    if who.user == who.session_user {
+        for r in &who.session_roles {
+            out.extend(effective(txn, r)?);
+        }
+    }
+    Ok(out)
+}
+
 /// Whether `member` is in `role`, directly or not, inheriting or not (for
 /// `SET ROLE` and cycle checks).
 pub fn is_member(txn: &dyn KvTxn, member: &str, role: &str) -> Result<bool> {
@@ -591,6 +603,8 @@ pub fn login_identity(txn: &dyn KvTxn, user: &str) -> Result<access::Who> {
             settings: Default::default(),
             ceiling: t.ceiling(),
             token: Some(t.name),
+            session_roles: Default::default(),
+            claims: Default::default(),
         });
     }
     match get(txn, user)? {
@@ -601,6 +615,8 @@ pub fn login_identity(txn: &dyn KvTxn, user: &str) -> Result<access::Who> {
             settings: Default::default(),
             token: None,
             ceiling: Default::default(),
+            session_roles: Default::default(),
+            claims: Default::default(),
         }),
         None if unclaimed(txn)? => Ok(access::Who {
             session_user: user.into(),
@@ -609,6 +625,8 @@ pub fn login_identity(txn: &dyn KvTxn, user: &str) -> Result<access::Who> {
             settings: Default::default(),
             token: None,
             ceiling: Default::default(),
+            session_roles: Default::default(),
+            claims: Default::default(),
         }),
         None => Err(Error::invalid_authorization(format!(
             "role \"{user}\" does not exist"
@@ -623,7 +641,13 @@ pub fn set_role(txn: &dyn KvTxn, login: &access::Who, role: Option<&str>) -> Res
         return Ok(login.clone());
     };
     let r = get(txn, role)?.ok_or_else(|| no_role(role))?;
-    if !login.superuser && !is_member(txn, &login.session_user, role)? {
+    let through_session = login
+        .session_roles
+        .iter()
+        .map(|r| Ok(r == role || is_member(txn, r, role)?))
+        .collect::<Result<Vec<bool>>>()?
+        .contains(&true);
+    if !login.superuser && !through_session && !is_member(txn, &login.session_user, role)? {
         return Err(denied(&format!(
             "role \"{}\" is not a member of role \"{role}\"",
             login.session_user
@@ -636,5 +660,7 @@ pub fn set_role(txn: &dyn KvTxn, login: &access::Who, role: Option<&str>) -> Res
         settings: login.settings.clone(),
         token: login.token.clone(),
         ceiling: login.ceiling.clone(),
+        session_roles: login.session_roles.clone(),
+        claims: login.claims.clone(),
     })
 }

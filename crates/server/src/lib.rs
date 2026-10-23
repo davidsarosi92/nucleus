@@ -14,6 +14,7 @@
 mod native;
 pub mod transport;
 
+pub use nucleus_sql::access::Identity;
 pub use transport::{Secured, Stream, Tls, TlsInfo};
 
 use std::io;
@@ -61,6 +62,21 @@ pub trait Authenticator: Send + Sync + std::fmt::Debug {
     fn accepts_certificate(&self, _kv: &dyn Kv, _user: &str) -> bool {
         false
     }
+}
+
+/// Bearer tokens — OAuth 2.0 / OpenID Connect identity tokens (JWTs): a
+/// module provides it (`nucleus-oidc`).  A client sends one through the
+/// OAUTHBEARER mechanism instead of proving a password; the token names
+/// the user, the roles granted for the session and the claims the session
+/// sees (`current_setting('nucleus.claims.<name>')`).
+pub trait Bearer: Send + Sync + std::fmt::Debug {
+    /// How the server describes it at startup.
+    fn describe(&self) -> String;
+
+    /// Who `token` says its holder is, for the database `kv` — or why it
+    /// is not accepted (expired, another issuer or audience, a bad
+    /// signature, …).
+    fn verify(&self, kv: &dyn Kv, token: &str) -> Result<Identity, String>;
 }
 
 /// Whether a client logs in by its certificate: TLS verified one naming
@@ -231,6 +247,8 @@ pub struct Config {
     pub log_queries: bool,
     /// TLS, for clients that ask for it (`None`: they are refused).
     pub tls: Option<Arc<dyn Tls>>,
+    /// Bearer tokens (OIDC), as well as passwords (`None`: none).
+    pub bearer: Option<Arc<dyn Bearer>>,
 }
 
 impl Default for Config {
@@ -252,6 +270,7 @@ impl Config {
             log_queries: false,
             registry: nucleus_sql::ext::Registry::shared_builtin(),
             tls: None,
+            bearer: None,
         }
     }
 
@@ -266,6 +285,12 @@ impl Config {
     /// The same, with sessions on `registry`.
     pub fn with_registry(mut self, registry: Arc<nucleus_sql::ext::Registry>) -> Self {
         self.registry = registry;
+        self
+    }
+
+    /// The same, also taking bearer tokens (OIDC) that `bearer` accepts.
+    pub fn with_bearer(mut self, bearer: Arc<dyn Bearer>) -> Self {
+        self.bearer = Some(bearer);
         self
     }
 

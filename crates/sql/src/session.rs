@@ -182,6 +182,43 @@ impl Session {
         Ok(())
     }
 
+    /// Logs the session in as an identity provider's subject
+    /// (authenticated already, [`crate::access::Identity`]): as its role,
+    /// with the roles it was granted for the session — those that exist and
+    /// are not administrators — and its claims.
+    pub fn login_as(&mut self, identity: &crate::access::Identity) -> Result<()> {
+        // The role must exist and may log in — even in an unclaimed
+        // database, whose bootstrap admits any name as its administrator
+        // (that is for the server's own credentials, not an issuer's).
+        {
+            let txn = self.kv.begin(TxnOptions::read_only())?;
+            if identity.user.starts_with(crate::tokens::PREFIX)
+                || !crate::roles::get(&*txn, &identity.user)?.is_some_and(|r| r.login)
+            {
+                return Err(Error::invalid_authorization(format!(
+                    "role \"{}\" does not exist or may not log in",
+                    identity.user
+                )));
+            }
+        }
+        self.login(&identity.user)?;
+        let txn = self.kv.begin(TxnOptions::read_only())?;
+        let mut who = (*self.login).clone();
+        for r in &identity.roles {
+            if crate::roles::get(&*txn, r)?.is_some_and(|role| !role.superuser) {
+                who.session_roles.insert(r.clone());
+            }
+        }
+        who.claims = identity
+            .claims
+            .iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+            .collect();
+        self.login = Arc::new(who);
+        self.who = self.login.clone();
+        Ok(())
+    }
+
     /// Who the session's statements run as.
     pub fn who(&self) -> &crate::access::Who {
         &self.who
@@ -267,6 +304,11 @@ impl Session {
                 Ok(Output::Command("SET".into()))
             }
             Statement::Set { name, value } => {
+                if name.starts_with(crate::access::CLAIMS) {
+                    return Err(Error::cant_change(format!(
+                        "parameter \"{name}\" cannot be changed: it is a claim of the login"
+                    )));
+                }
                 if name == "default_transaction_isolation" || name == "transaction_isolation" {
                     self.default_isolation = match value.to_ascii_lowercase().trim_matches('\'') {
                         "serializable" => IsolationLevel::Serializable,

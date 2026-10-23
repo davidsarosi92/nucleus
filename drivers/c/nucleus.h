@@ -107,6 +107,9 @@ typedef struct nc_config {
     int tls_no_verify;
     const char *tls_cert;
     const char *tls_key;
+    /* An OpenID Connect identity token to log in with instead of the
+     * password: it names the user (OAUTHBEARER). */
+    const char *token;
 } nc_config;
 
 /* An error: SQLSTATE (empty for a driver or network error) and message. */

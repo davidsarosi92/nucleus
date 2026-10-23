@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "kid": "driver-tests",
+      "alg": "EdDSA",
+      "use": "sig",
+      "x": "Bv11Pu8gpw-vRvyp0Jkvc42TpG_hO1nXFkQpLn6eWBI"
+    }
+  ]
+}

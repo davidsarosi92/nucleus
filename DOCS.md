@@ -1342,7 +1342,23 @@ user logging in stands in for the password, for a role with `LOGIN`
 (while unclaimed, the configured user) and never for a token
 (`Authenticator::accepts_certificate`, `certificate_login`); a
 certificate naming someone else changes nothing — the password is asked
-as before.  One thread per connection.  `--log-queries`
+as before.  **OpenID Connect** (the `oidc` module, `modules/oidc`):
+`--oidc-issuer <url> --oidc-audience <name> [--oidc-jwks <file>]
+[--oidc-user-claim <claim>] [--oidc-role-claim <claim>]` takes identity
+tokens (JWTs) of that issuer through OAUTHBEARER (§10) as well as
+passwords: the signature is checked against the issuer's keys (the file's,
+or found by OpenID Connect Discovery over HTTPS and fetched again for an
+unknown key, at most once a minute) — RS256/384/512, PS256/384/512,
+ES256, ES384, EdDSA, never `none` — with `iss`, `aud`, `exp` and `nbf` (a
+minute of leeway).  The user claim (`sub` by default) must name a role
+that exists and may log in, whether the database is claimed or not
+(`28000` otherwise, as for any refused token); the role claim's roles are
+granted for the session (`access::Who::session_roles`: those that exist
+and are not administrators, while the session acts as itself, and `SET
+ROLE` to them); every claim is `current_setting('nucleus.claims.<name>')`
+(names in lower case; an array's items joined by commas), which `SET`
+cannot change (`55P02`) — so a policy can use a tenant claim
+(`Session::login_as`, `access::Identity`, `nucleus_server::Bearer`).  One thread per connection.  `--log-queries`
 (`Config::log_queries`) prints every statement a client sends, and every
 error, to stderr — to see what a tool asks for.
 
@@ -1440,7 +1456,7 @@ header bytes not included; at most 1 GiB), then the body.
 |------|-----------|------|
 | `H` Hello | client → server, first | `u16` version (4; 1–3 still accepted), string user, string database, string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
 | `A` Authentication | server → client | string: the mechanisms, space-separated (`SCRAM-SHA-256`; over TLS with a channel binding `SCRAM-SHA-256-PLUS SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
-| `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message |
+| `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message — or OAUTHBEARER's initial response |
 | `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |
 | `Q` Query | client → server | string SQL, `u8` result format (0 typed, 1 text), `u16` parameter count, the parameters as values |
 | `C` Columns | server → client | `u16` count, then per column: string name, type |
@@ -1455,7 +1471,12 @@ the client speaks version 4, they run SCRAM-SHA-256: the server sends `A`
 with the mechanisms — `SCRAM-SHA-256`, and over TLS, when the server's
 certificate defines a `tls-server-end-point` value (RFC 5929: the
 certificate hashed by its signature's hash, SHA-256 for MD5 and SHA-1),
-`SCRAM-SHA-256-PLUS SCRAM-SHA-256`; the client `a` client-first
+`SCRAM-SHA-256-PLUS SCRAM-SHA-256`, and with an OpenID Connect issuer
+`OAUTHBEARER` after them.  A client with an identity token takes
+OAUTHBEARER: one `a` with RFC 7628's initial response
+(`n,,\x01auth=Bearer <token>\x01\x01`); the token names the user (Hello's is
+not used), and the server answers Welcome or Error (`28000`, with why).
+Otherwise the client `a` client-first
 (`<gs2>n=,r=<nonce>`, the user being Hello's), whose GS2 header picks:
 `p=tls-server-end-point,,` binds the proof to this TLS session (so a man in
 the middle, who has a session of its own with each side, cannot relay
@@ -1563,7 +1584,9 @@ tls_verify=False)` (`ssl`); JavaScript `{ tls, tlsCa, tlsVerify }`
 `ClientTls::with_client_certificate_files`, C / C++ `tls_cert`,
 `tls_key`, Python `tls_cert=`, `tls_key=`, JavaScript `tlsCert`,
 `tlsKey`, Java `tlsCertificate(cert, key)` (a PKCS #8 key); `ncsql
---tls-cert <pem> --tls-key <pem>`.
+--tls-cert <pem> --tls-key <pem>`.  An identity token (OAUTHBEARER) instead
+of the password: Rust `Config::token`, C / C++ `token`, Python `token=`,
+JavaScript `token`, Java `Config.token(…)`, `ncsql --token` or `NCTOKEN`.
 
 **C:** `drivers/c` (`nucleus.h`, `nucleus.c`; C99, POSIX sockets or
 Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
@@ -1621,7 +1644,9 @@ digits), `Decimal` (exact, with `parse` / `toString`), `Buffer` (bytea),
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
 SQLSTATE, transactions, a wrong password, TLS verified, unverified and
-refused for an unknown CA, and a login by client certificate), and `examples/<language>/` has the same
+refused for an unknown CA, a login by client certificate, and one by a
+test issuer's token — `scripts/fixtures/oidc`, whose key was thrown away
+once the token was made), and `examples/<language>/` has the same
 quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 [languages]` starts a server on a free port — with TLS, from a CA and a
 certificate it makes with `openssl`, when that is installed — and runs
@@ -1630,6 +1655,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 OpenID Connect (T4):** the `oidc` module —
+  identity tokens through OAUTHBEARER on `ncp`, their claims as read-only
+  settings (`nucleus.claims.*`, `55P02`), a role claim's roles for the
+  session; `--oidc-*`, `ncsql --token`; a token option in every driver.
+  A bearer login needs an existing role that may log in even while the
+  database is unclaimed.
 - **2026-10-23 — §M14.25 SCRAM-SHA-256-PLUS on `ncp` (T4):** over TLS the
   server offers `SCRAM-SHA-256-PLUS SCRAM-SHA-256`; every driver binds its
   proof to the session (`tls-server-end-point`), or sends `y` when the

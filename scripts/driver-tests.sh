@@ -29,7 +29,10 @@ if command -v openssl >/dev/null; then
   tls=(--tls-cert "$work/server.pem" --tls-key "$work/server.key" --tls-client-ca "$work/ca.pem")
   export NUCLEUS_TLS_CA="$work/ca.pem" NUCLEUS_TLS_CERT="$work/client.pem" NUCLEUS_TLS_KEY="$work/client.key"
 fi
-"$bin" server "$work/db" --listen 127.0.0.1:0 ${tls[@]+"${tls[@]}"} 2>"$work/server.log" &
+# The test issuer (scripts/fixtures/oidc): its token logs drivers_oidc in.
+oidc=(--oidc-issuer https://issuer.nucleus.test --oidc-audience nucleus-driver-tests
+  --oidc-jwks "$root/scripts/fixtures/oidc/jwks.json")
+"$bin" server "$work/db" --listen 127.0.0.1:0 ${tls[@]+"${tls[@]}"} "${oidc[@]}" 2>"$work/server.log" &
 pid=$!
 trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null || true; rm -rf "$work"' EXIT
 for _ in $(seq 100); do grep -q "listening on" "$work/server.log" 2>/dev/null && break; sleep 0.1; done
@@ -37,6 +40,9 @@ port=$(sed -n 's/.*listening on 127\.0\.0\.1:\([0-9]*\).*/\1/p' "$work/server.lo
 [ -n "$port" ] || { cat "$work/server.log"; echo "server did not start"; exit 1; }
 export NUCLEUS_HOST=127.0.0.1 NUCLEUS_PORT=$port
 echo "nucleus server on port $port"
+"$bin" sql -h "127.0.0.1:$port" -c "CREATE USER drivers_oidc" >/dev/null
+NUCLEUS_TOKEN=$(cat "$root/scripts/fixtures/oidc/token")
+export NUCLEUS_TOKEN
 
 have() { command -v "$1" >/dev/null; }
 langs=("$@")

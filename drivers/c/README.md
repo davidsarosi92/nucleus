@@ -20,7 +20,8 @@ in a build with OpenSSL (`make TLS=openssl`, which defines
 checks the server against the system's CAs, `cfg.tls_ca` against a PEM
 file, `cfg.tls_no_verify = 1` not at all; `cfg.tls_cert` / `tls_key`
 show a client certificate; `nc_tls_supported()` says whether the build
-can.
+can.  `cfg.token` logs in with an OpenID Connect identity token instead of
+the password.
 
 ```sh
 make                # build/libnucleus.a

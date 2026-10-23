@@ -118,6 +118,14 @@ test("authentication", async () => {
   await assert.rejects(connect({ ...options, password: "wrong" }), (e: NucleusError) => e.code === "28P01");
 });
 
+test("token", { skip: process.env.NUCLEUS_TOKEN === undefined && "the server has no issuer" }, async () => {
+  const db = await connect({ ...options, user: "", token: process.env.NUCLEUS_TOKEN });
+  const r = await db.query("SELECT current_user, current_setting('nucleus.claims.tenant')");
+  assert.deepEqual(r.rows[0], ["drivers_oidc", "acme"]);
+  await db.close();
+  await assert.rejects(connect({ ...options, token: "not.a.token" }), (e: NucleusError) => e.code === "28000");
+});
+
 test("tls", { skip: process.env.NUCLEUS_TLS_CA === undefined && "the server has no TLS" }, async () => {
   const ca = process.env.NUCLEUS_TLS_CA as string;
   const db = await connect({ ...options, tlsCa: ca });

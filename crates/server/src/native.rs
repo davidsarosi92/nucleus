@@ -400,14 +400,19 @@ fn login(
         code: "28P01",
         message: format!("password authentication failed for user \"{user}\""),
     };
+    let mut identity = None;
     if crate::certificate_login(config, &**kv, tls, &user) {
         log("login", &format!("{user} by its client certificate"));
     } else if config.auth.wants_password() {
         if version >= 4 {
             let binding = tls.and_then(|t| t.channel_binding.as_deref());
-            match scram(input, out, &**kv, config, &user, binding)? {
-                Ok(true) => {}
-                Ok(false) => return Ok(Err(refused())),
+            match exchange(input, out, &**kv, config, &user, binding)? {
+                Ok(Proved::Password) => {}
+                Ok(Proved::Nothing) => return Ok(Err(refused())),
+                Ok(Proved::Bearer(id)) => {
+                    log("login", &format!("{} by a bearer token", id.user));
+                    identity = Some(id);
+                }
                 Err(e) => return Ok(Err(e)),
             }
         } else if !config.accepts(&**kv, &user, &password) {
@@ -415,30 +420,63 @@ fn login(
         }
     }
     let mut session = Session::with_registry(kv.clone(), config.registry.clone());
-    Ok(match session.login(&user) {
+    let logged_in = match &identity {
+        Some(id) => session.login_as(id),
+        None => session.login(&user),
+    };
+    Ok(match logged_in {
         Ok(()) => Ok((version, session)),
         Err(e) => Err(e),
     })
 }
 
-/// The SCRAM-SHA-256 exchange: `A` names the mechanisms, then `a` (client
-/// first) / `A` (server first) / `a` (client final) / `A` (server final).
-/// Over TLS with a channel binding, SCRAM-SHA-256-PLUS is offered too, and
-/// the client's GS2 header says which it takes.  Whether the client proved
-/// its password.
-fn scram(
+/// What a client proved in the exchange.
+enum Proved {
+    /// Nothing: refused.
+    Nothing,
+    /// Its password.
+    Password,
+    /// Who a bearer token says it is.
+    Bearer(nucleus_sql::access::Identity),
+}
+
+/// An OAUTHBEARER initial response (RFC 7628): a GS2 header, then
+/// `\x01`-separated `key=value` pairs, `auth=Bearer <token>` among them.
+fn bearer_token(message: &str) -> Option<&str> {
+    let (_gs2, pairs) = message.split_once('\x01')?;
+    pairs
+        .split('\x01')
+        .find_map(|kv| kv.strip_prefix("auth="))
+        .and_then(|a| {
+            a.strip_prefix("Bearer ")
+                .or_else(|| a.strip_prefix("bearer "))
+        })
+        .map(str::trim)
+}
+
+/// The authentication exchange: `A` names the mechanisms, then the
+/// client's `a` takes one.  SCRAM-SHA-256: `a` (client first) / `A`
+/// (server first) / `a` (client final) / `A` (server final); over TLS with a
+/// channel binding SCRAM-SHA-256-PLUS is offered too, and the client's GS2
+/// header says which it takes.  OAUTHBEARER (when the server has a
+/// [`crate::Bearer`]): one `a` with the token (RFC 7628's initial
+/// response), which names the user — Hello's is not used.
+fn exchange(
     input: &mut impl Read,
     out: &mut impl Write,
     kv: &dyn Kv,
     config: &Config,
     user: &str,
     binding: Option<&[u8]>,
-) -> io::Result<Result<bool, Error>> {
+) -> io::Result<Result<Proved, Error>> {
     let mut server = crate::scram_server(config, kv, user);
-    let mut mechanisms = "SCRAM-SHA-256";
+    let mut mechanisms = String::from("SCRAM-SHA-256");
     if let Some(b) = binding {
         server = server.with_channel_binding(b.to_vec());
-        mechanisms = "SCRAM-SHA-256-PLUS SCRAM-SHA-256";
+        mechanisms = "SCRAM-SHA-256-PLUS SCRAM-SHA-256".into();
+    }
+    if config.bearer.is_some() {
+        mechanisms.push_str(" OAUTHBEARER");
     }
     let send = |out: &mut dyn Write, s: &str| -> io::Result<()> {
         out.write_all(&Msg::new(b'A').str(s).finish())?;
@@ -451,15 +489,29 @@ fn scram(
         }
         Ok(Body { b: &body }.str())
     };
-    send(out, mechanisms)?;
+    send(out, &mechanisms)?;
     let first = match receive(input)? {
         Ok(m) => m,
         Err(e) => return Ok(Err(e)),
     };
+    if let Some(bearer) = &config.bearer
+        && first.contains('\x01')
+    {
+        let Some(token) = bearer_token(&first) else {
+            return Ok(Err(protocol("malformed OAUTHBEARER message")));
+        };
+        return Ok(match bearer.verify(kv, token) {
+            Ok(id) => Ok(Proved::Bearer(id)),
+            Err(why) => Err(Error {
+                code: "28000",
+                message: format!("the bearer token was not accepted: {why}"),
+            }),
+        });
+    }
     let server_first = match server.first(&first) {
         Ok(m) => m,
         // A client that could bind, told it cannot: someone in between.
-        Err(nucleus_crypto::ScramError::Rejected) => return Ok(Ok(false)),
+        Err(nucleus_crypto::ScramError::Rejected) => return Ok(Ok(Proved::Nothing)),
         Err(nucleus_crypto::ScramError::Malformed) => {
             return Ok(Err(protocol("malformed SCRAM message")));
         }
@@ -472,9 +524,9 @@ fn scram(
     match server.finish(&last) {
         Ok(server_final) => {
             send(out, &server_final)?;
-            Ok(Ok(true))
+            Ok(Ok(Proved::Password))
         }
-        Err(nucleus_crypto::ScramError::Rejected) => Ok(Ok(false)),
+        Err(nucleus_crypto::ScramError::Rejected) => Ok(Ok(Proved::Nothing)),
         Err(nucleus_crypto::ScramError::Malformed) => Ok(Err(protocol("malformed SCRAM message"))),
     }
 }

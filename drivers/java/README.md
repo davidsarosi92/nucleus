@@ -22,6 +22,7 @@ parameter is a host), `UUID`, `List`, `null`; another registered type is
 proved by SCRAM-SHA-256, never sent.  TLS: `new Config().tls(true)`
 (Java's CAs), `.tlsCa(Path.of("ca.pem"))`, `.tlsVerify(false)`
 (encrypted, unverified), `.tlsCertificate(cert, key)` for a client
-certificate (a PKCS #8 key).  Errors are
+certificate (a PKCS #8 key); `.token(…)` for an identity token instead of
+the password.  Errors are
 `NucleusException` with `code()` (SQLSTATE).  Tests: `NucleusTest` (a plain
 main); example: `examples/java/Quickstart.java`.

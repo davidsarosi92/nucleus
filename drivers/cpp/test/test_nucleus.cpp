@@ -118,6 +118,13 @@ int main() {
             CHECK(e.code() == "28P01");
         }
     }
+    if (const char* token = std::getenv("NUCLEUS_TOKEN")) {
+        auto c = config();
+        c.user = "";
+        c.token = token;
+        Connection db(c);
+        CHECK(db.query("SELECT current_user").rows[0][0].str() == "drivers_oidc");
+    }
     if (const char* ca = std::getenv("NUCLEUS_TLS_CA"); ca && nc_tls_supported()) {
         auto c = config();
         c.tls_ca = ca;

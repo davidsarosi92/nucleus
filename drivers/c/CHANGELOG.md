@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- An identity token instead of the password: `cfg.token` (OAUTHBEARER).
 - Over TLS, SCRAM bound to the session (SCRAM-SHA-256-PLUS,
   `tls-server-end-point` by OpenSSL) when the server offers it.
 - Client certificates (mutual TLS): `cfg.tls_cert`, `cfg.tls_key`.

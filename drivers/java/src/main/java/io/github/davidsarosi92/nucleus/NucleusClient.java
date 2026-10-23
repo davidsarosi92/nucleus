@@ -106,6 +106,14 @@ public final class NucleusClient implements AutoCloseable {
                     case 'A' -> {
                         String msg = r.str();
                         String reply;
+                        if (scram == null && config.token != null) {
+                            // OAUTHBEARER's initial response (RFC 7628).
+                            if (!Arrays.asList(msg.split(" ")).contains("OAUTHBEARER")) {
+                                throw new NucleusException("the server does not take bearer tokens", (String) null);
+                            }
+                            c.send('a', new Writer().str("n,,\u0001auth=Bearer " + config.token + "\u0001\u0001").bytes());
+                            continue;
+                        }
                         if (scram == null) {
                             List<String> offered = Arrays.asList(msg.split(" "));
                             if (!offered.contains("SCRAM-SHA-256")) {

@@ -17,6 +17,7 @@ public final class Config {
     boolean tlsVerify = true;
     java.nio.file.Path tlsCert = null;
     java.nio.file.Path tlsKey = null;
+    String token = null;
 
     public Config host(String host) { this.host = host; return this; }
     public Config port(int port) { this.port = port; return this; }
@@ -35,6 +36,8 @@ public final class Config {
      * A client certificate chain and its PKCS #8 private key (PEM files): one naming the user logs it
      * in without a password, if the server accepts its CA.
      */
+    /** An OpenID Connect identity token to log in with instead of the password: it names the user. */
+    public Config token(String token) { this.token = token; return this; }
     public Config tlsCertificate(java.nio.file.Path cert, java.nio.file.Path key) {
         this.tlsCert = cert;
         this.tlsKey = key;

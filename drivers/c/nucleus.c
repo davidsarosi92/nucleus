@@ -584,7 +584,7 @@ static int scram_first(scram_state *st, char *out, size_t size) {
 
 /* The server's first message → the client's final one. */
 static int scram_respond(scram_state *st, const char *password, const char *server_first, char *out, size_t size) {
-    char nonce[256], salt64[256], iter[16], without[400], c64[160];
+    char nonce[256], salt64[256], iter[16], without[448], c64[160];
     unsigned char c[96];
     size_t clen = strlen(st->gs2);
     unsigned char salt[192], salted[32], client_key[32], stored[32], sig[32], proof[32];
@@ -914,6 +914,30 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
         unsigned char *body;
         size_t len;
         if (read_frame(c, &kind, &body, &len) != 0) break;
+        if (kind == 'A' && cfg->token && !scram_started) {
+            /* OAUTHBEARER's initial response (RFC 7628). */
+            reader r = {body, len, 0, 0};
+            char *msg = get_str(&r);
+            buf a = {0};
+            size_t n = strlen(cfg->token) + 32;
+            char *reply = malloc(n);
+            int offered = msg && has_word(msg, "OAUTHBEARER");
+            free(msg);
+            free(body);
+            scram_started = 1;
+            if (!offered || !reply) {
+                free(reply);
+                set_error(err, "", "the server does not take bearer tokens");
+                drop_conn(c);
+                return NULL;
+            }
+            snprintf(reply, n, "n,,\001auth=Bearer %s\001\001", cfg->token);
+            put_str(&a, reply);
+            free(reply);
+            rc = a.failed ? -1 : send_frame(c, 'a', &a);
+            free(a.b);
+            continue;
+        }
         if (kind == 'A') {
             reader r = {body, len, 0, 0};
             char *msg = get_str(&r), reply[1024];

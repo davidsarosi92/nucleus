@@ -145,6 +145,19 @@ public final class NucleusTest {
         equal(errorCode(() -> NucleusClient.connect(config().password("wrong"))), "28P01", "wrong password");
     }
 
+    static void token() {
+        String token = System.getenv("NUCLEUS_TOKEN");
+        if (token == null) {
+            System.out.println("(the server has no issuer)");
+            return;
+        }
+        try (NucleusClient db = NucleusClient.connect(config().user("").token(token))) {
+            equal(db.query("SELECT current_user, current_setting('nucleus.claims.tenant')").rows().get(0),
+                    List.of("drivers_oidc", "acme"), "by token");
+        }
+        equal(errorCode(() -> NucleusClient.connect(config().token("not.a.token"))), "28000", "a bad token");
+    }
+
     static void tls() {
         String ca = System.getenv("NUCLEUS_TLS_CA");
         if (ca == null) {
@@ -184,7 +197,8 @@ public final class NucleusTest {
         run("transactions", NucleusTest::transactions);
         run("authentication", NucleusTest::authentication);
         run("tls", NucleusTest::tls);
-        check(passed == 7, "all tests ran");
+        run("token", NucleusTest::token);
+        check(passed == 8, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

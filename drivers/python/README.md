@@ -23,6 +23,7 @@ registered type is `nucleus.Ext` (its name and binary form).  Protocol
 version 4: the password is proved by SCRAM-SHA-256, never sent.  TLS:
 `connect(tls=True)` (the system's CAs), `tls_ca="ca.pem"`,
 `tls_verify=False` (encrypted, unverified); `tls_cert=`, `tls_key=` for
-a client certificate.
+a client certificate; `token=` for an identity token instead of the
+password.
 Errors are `nucleus.Error` subclasses with `.code` (SQLSTATE).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.

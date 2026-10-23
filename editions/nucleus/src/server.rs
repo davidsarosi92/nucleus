@@ -23,6 +23,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (mut user, mut password) = (DEFAULT_USER.to_string(), Some(DEFAULT_PASSWORD.to_string()));
     let mut log_queries = false;
     let (mut tls_cert, mut tls_key, mut tls_client_ca) = (None, None, None::<String>);
+    let (mut oidc_issuer, mut oidc_audience, mut oidc_jwks) = (None, None, None::<String>);
+    let (mut oidc_user_claim, mut oidc_role_claim) = (None::<String>, None::<String>);
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -43,6 +45,29 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--log-queries" => log_queries = true,
             "--tls-cert" => tls_cert = Some(rest.next().ok_or("--tls-cert needs a file")?.clone()),
             "--tls-key" => tls_key = Some(rest.next().ok_or("--tls-key needs a file")?.clone()),
+            "--oidc-issuer" => {
+                oidc_issuer = Some(rest.next().ok_or("--oidc-issuer needs a URL")?.clone())
+            }
+            "--oidc-audience" => {
+                oidc_audience = Some(rest.next().ok_or("--oidc-audience needs a name")?.clone())
+            }
+            "--oidc-jwks" => {
+                oidc_jwks = Some(rest.next().ok_or("--oidc-jwks needs a file")?.clone())
+            }
+            "--oidc-user-claim" => {
+                oidc_user_claim = Some(
+                    rest.next()
+                        .ok_or("--oidc-user-claim needs a claim")?
+                        .clone(),
+                )
+            }
+            "--oidc-role-claim" => {
+                oidc_role_claim = Some(
+                    rest.next()
+                        .ok_or("--oidc-role-claim needs a claim")?
+                        .clone(),
+                )
+            }
             "--tls-client-ca" => {
                 tls_client_ca = Some(rest.next().ok_or("--tls-client-ca needs a file")?.clone())
             }
@@ -73,6 +98,29 @@ pub fn run(args: &[String]) -> Result<(), String> {
             }
             (None, None) => None,
             _ => return Err("server: --tls-cert and --tls-key go together".into()),
+        },
+        bearer: match (oidc_issuer, oidc_audience) {
+            (Some(issuer), Some(audience)) => {
+                let keys = match &oidc_jwks {
+                    Some(file) => nucleus_oidc::Keys::Static(
+                        std::fs::read_to_string(file)
+                            .map_err(|e| format!("--oidc-jwks {file}: {e}"))
+                            .and_then(|t| nucleus_oidc::Jwks::from_json(&t))
+                            .map_err(|e| format!("server: {e}"))?,
+                    ),
+                    None => nucleus_oidc::Keys::Discover,
+                };
+                let mut oidc = nucleus_oidc::Oidc::new(&issuer, &audience, keys);
+                if let Some(c) = &oidc_user_claim {
+                    oidc = oidc.user_claim(c);
+                }
+                if let Some(c) = &oidc_role_claim {
+                    oidc = oidc.role_claim(c);
+                }
+                Some(Arc::new(oidc) as Arc<dyn nucleus_server::Bearer>)
+            }
+            (None, None) if oidc_jwks.is_none() => None,
+            _ => return Err("server: --oidc-issuer and --oidc-audience go together".into()),
         },
     };
     let db = Database::open(dir, Options::default()).map_err(|e| e.to_string())?;
@@ -109,10 +157,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
         env!("CARGO_PKG_VERSION"),
         shown.join(" and "),
         config.auth.describe(),
-        if config.tls.is_some() {
-            "; TLS offered"
-        } else {
-            ""
+        match (&config.tls, &config.bearer) {
+            (Some(_), Some(b)) => format!("; TLS offered; {}", b.describe()),
+            (Some(_), None) => "; TLS offered".to_string(),
+            (None, Some(b)) => format!("; {}", b.describe()),
+            (None, None) => String::new(),
         }
     );
     let mut listeners = listeners.into_iter();

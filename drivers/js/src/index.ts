@@ -327,6 +327,9 @@ export interface ConnectOptions {
    *  it in without a password, if the server accepts its CA. */
   tlsCert?: string;
   tlsKey?: string;
+  /** An OpenID Connect identity token to log in with instead of the
+   *  password: it names the user. */
+  token?: string;
 }
 
 // ------------------------------------------------------------------ values
@@ -761,6 +764,12 @@ export class Client {
       if (m.kind === "A") {
         const msg = r.str();
         let reply: string | null;
+        if (scram === null && options.token !== undefined) {
+          // OAUTHBEARER's initial response (RFC 7628).
+          if (!msg.split(" ").includes("OAUTHBEARER")) throw new NucleusError("the server does not take bearer tokens");
+          socket.write(frame("a", new Writer().str(`n,,\x01auth=Bearer ${options.token}\x01\x01`).bytes()));
+          continue;
+        }
         if (scram === null) {
           const offered = msg.split(" ");
           if (!offered.includes("SCRAM-SHA-256")) throw new NucleusError(`unsupported authentication ${msg}`);

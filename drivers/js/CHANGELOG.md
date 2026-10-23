@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- An identity token instead of the password: `connect({ token })`.
 - Over TLS, SCRAM bound to the session (SCRAM-SHA-256-PLUS) when the
   server offers it.
 - Client certificates (mutual TLS): `connect({ tlsCert, tlsKey })`.

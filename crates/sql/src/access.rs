@@ -34,7 +34,30 @@ pub struct Who {
     pub token: Option<String>,
     /// What the session may do at most, whatever its roles may.
     pub ceiling: Ceiling,
+    /// Roles the login granted for this session only (an identity
+    /// provider's claims, [`Identity::roles`]): the session user has their
+    /// privileges as if a member, while it acts as itself.
+    pub session_roles: std::collections::BTreeSet<String>,
+    /// The login's claims (an identity token's), read only:
+    /// `current_setting('nucleus.claims.<name>')`.
+    pub claims: std::collections::BTreeMap<String, String>,
 }
+
+/// Who an identity provider says a client is (a bearer token's subject).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Identity {
+    /// The role it logs in as.
+    pub user: String,
+    /// Roles granted for the session (they must exist and not be
+    /// administrators; others are left out).
+    pub roles: Vec<String>,
+    /// Claims, as text (an array's items joined by commas, an object as
+    /// JSON).
+    pub claims: std::collections::BTreeMap<String, String>,
+}
+
+/// The prefix under which a session's claims are settings.
+pub const CLAIMS: &str = "nucleus.claims.";
 
 /// A ceiling on a session's privileges (a token's, §M14.25's access
 /// rules'): it narrows what the roles may do, never widens it.
@@ -63,6 +86,8 @@ impl Who {
             settings: Default::default(),
             token: None,
             ceiling: Ceiling::default(),
+            session_roles: Default::default(),
+            claims: Default::default(),
         }
     }
 }

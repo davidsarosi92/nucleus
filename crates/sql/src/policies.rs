@@ -229,7 +229,7 @@ pub fn applied(
     if who.superuser {
         return Ok(None);
     }
-    let roles = crate::roles::effective(txn, &who.user)?;
+    let roles = crate::roles::effective_for(txn, &who)?;
     if !table.force_row_security && table.owner.as_ref().is_some_and(|o| roles.contains(o)) {
         return Ok(None);
     }

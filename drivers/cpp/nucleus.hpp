@@ -197,6 +197,8 @@ struct Config {
     // A client certificate and its key (PEM files), for mutual TLS.
     std::string tls_cert;
     std::string tls_key;
+    // An OpenID Connect identity token, instead of the password.
+    std::string token;
 };
 
 struct Column {
@@ -331,6 +333,7 @@ public:
         c.tls_no_verify = config.tls_no_verify ? 1 : 0;
         c.tls_cert = config.tls_cert.empty() ? nullptr : config.tls_cert.c_str();
         c.tls_key = config.tls_key.empty() ? nullptr : config.tls_key.c_str();
+        c.token = config.token.empty() ? nullptr : config.token.c_str();
         nc_error err;
         conn_ = nc_connect(&c, &err);
         if (!conn_) throw Error(err.message, err.code);

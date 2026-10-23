@@ -26,6 +26,8 @@ usage:
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
                      [--tls-cert <pem file> --tls-key <pem file> [--tls-client-ca <pem file>]]
+                     [--oidc-issuer <url> --oidc-audience <name> [--oidc-jwks <file>]
+                      [--oidc-user-claim <claim>] [--oidc-role-claim <claim>]]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
@@ -33,7 +35,8 @@ usage:
                                     nucleus / nucleus unless changed; with a
                                     certificate, TLS for clients that ask; with
                                     a client CA, a client certificate naming
-                                    the user logs it in without a password
+                                    the user logs it in without a password; with
+                                    an OIDC issuer, its identity tokens log in
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

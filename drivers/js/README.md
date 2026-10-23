@@ -23,7 +23,8 @@ canonical string, arrays, `null`; another registered type is `Ext` (its
 name and binary form).  Protocol version 4: the password is proved by
 SCRAM-SHA-256, never sent.  TLS: `connect({ tls: true })` (Node's CAs),
 `tlsCa: "ca.pem"`, `tlsVerify: false` (encrypted, unverified); `tlsCert`,
-`tlsKey` for a client certificate.  Errors are
+`tlsKey` for a client certificate; `token` for an identity token instead
+of the password.  Errors are
 `NucleusError` with
 `code` (SQLSTATE).  Queries on one connection run one after another.
 Tests: `npm test`; example: `examples/js/quickstart.ts`.

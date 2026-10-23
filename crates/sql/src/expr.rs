@@ -662,6 +662,10 @@ fn subquery(sub: &SubPlan, env: &Env) -> Result<Value> {
 /// A setting's value: the session's (`SET`), or a built-in parameter's.
 pub fn setting(name: &str) -> Option<String> {
     let lower = name.to_ascii_lowercase();
+    // The login's claims, which no SET can change.
+    if let Some(claim) = lower.strip_prefix(crate::access::CLAIMS) {
+        return crate::access::current().claims.get(claim).cloned();
+    }
     if let Some(v) = crate::access::current().settings.get(&lower) {
         return Some(v.clone());
     }

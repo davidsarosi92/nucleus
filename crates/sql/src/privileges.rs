@@ -405,7 +405,7 @@ impl Checker {
         if let Some(r) = &*self.roles.borrow() {
             return Ok(r.clone());
         }
-        let mut r = crate::roles::effective(txn, &self.who.user)?;
+        let mut r = crate::roles::effective_for(txn, &self.who)?;
         r.insert(PUBLIC.into());
         *self.roles.borrow_mut() = Some(r.clone());
         Ok(r)

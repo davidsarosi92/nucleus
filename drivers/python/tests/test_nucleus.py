@@ -140,6 +140,15 @@ class Conformance(unittest.TestCase):
             connect(password="wrong")
         self.assertEqual(e.exception.code, "28P01")
 
+    @unittest.skipUnless(os.environ.get("NUCLEUS_TOKEN"), "the server has no issuer")
+    def test_token(self):
+        with connect(user="", password=None, token=os.environ["NUCLEUS_TOKEN"]) as c:
+            got = c.execute("SELECT current_user, current_setting('nucleus.claims.tenant')").rows
+            self.assertEqual(got, [("drivers_oidc", "acme")])
+        with self.assertRaises(nucleus.OperationalError) as e:
+            connect(token="not.a.token")
+        self.assertEqual(e.exception.code, "28000")
+
     @unittest.skipUnless(os.environ.get("NUCLEUS_TLS_CA"), "the server has no TLS")
     def test_tls(self):
         ca = os.environ["NUCLEUS_TLS_CA"]

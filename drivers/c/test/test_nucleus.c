@@ -242,6 +242,27 @@ static void authentication(void) {
     CHECK(nc_connect(&cfg, &err) == NULL && strcmp(err.code, "28P01") == 0);
 }
 
+static void token(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db;
+    nc_result *r;
+    if (!getenv("NUCLEUS_TOKEN")) return;
+    cfg.user = "";
+    cfg.token = getenv("NUCLEUS_TOKEN");
+    db = nc_connect(&cfg, &err);
+    CHECK(db != NULL);
+    if (!db) return;
+    r = must(db, "SELECT current_user, current_setting('nucleus.claims.tenant')", NULL, 0);
+    if (r) {
+        CHECK(strcmp(text_of(r, 0, 0), "drivers_oidc") == 0 && strcmp(text_of(r, 0, 1), "acme") == 0);
+        nc_result_free(r);
+    }
+    nc_close(db);
+    cfg.token = "not.a.token";
+    CHECK(nc_connect(&cfg, &err) == NULL && strcmp(err.code, "28000") == 0);
+}
+
 static void tls(void) {
     nc_error err;
     nc_config cfg = config();
@@ -302,6 +323,7 @@ int main(void) {
     core_types();
     authentication();
     tls();
+    token();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

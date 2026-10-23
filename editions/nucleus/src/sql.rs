@@ -28,6 +28,7 @@ usage: ncsql [<dir>] [options]          (also: nucleus sql …)
       --tls-no-verify       TLS without checking the certificate (encrypted only)
       --tls-cert <pem file> --tls-key <pem file>
                             show the server a client certificate (mutual TLS)
+      --token <jwt>         log in with an identity token (or NCTOKEN)
   -c <sql>                  run one command and exit
 Without -c it reads statements from stdin (a shell on a terminal).
 ";
@@ -600,6 +601,7 @@ pub fn run(args: &[String]) -> Result<()> {
             }
             "--tls-no-verify" => tls = Some(nucleus_tls::ClientTls::without_verification()),
             "--tls-cert" => tls_cert = Some(value("a certificate file")?),
+            "--token" => cfg.token = Some(value("a token")?),
             "--tls-key" => tls_key = Some(value("a key file")?),
             "--help" => {
                 print!("{USAGE}");
@@ -630,6 +632,9 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     if let Some(pw) = explicit_password.or_else(|| std::env::var("NCPASSWORD").ok()) {
         cfg.password = Some(pw);
+    }
+    if cfg.token.is_none() {
+        cfg.token = std::env::var("NCTOKEN").ok();
     }
     let backend = match dir {
         Some(dir) => {
