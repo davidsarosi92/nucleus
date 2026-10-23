@@ -60,7 +60,7 @@ pub use crate::datetime::{
 pub use crate::decimal::Decimal;
 pub use crate::error::{Error, Result};
 pub use crate::inet::Net;
-pub use crate::parser::parse;
+pub use crate::parser::{parse, parse_with_text};
 pub use crate::session::{OutColumn, Output, Session, TxnStatus, command_tag};
 pub use crate::types::{DataType, Row, Value};
 
@@ -77,6 +77,8 @@ pub mod catalog {
 
 /// Who the current statement runs as ([`crate::access`]).
 pub use crate::access::{Context, Who, current as current_who};
+/// Records a login refused before a session could be had ([`crate::audit`]).
+pub use crate::session::audit_refused_login;
 
 /// The version of this interface.
 pub const API_VERSION: u32 = 1;

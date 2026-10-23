@@ -104,6 +104,11 @@ pub struct Session {
     listed: Option<crate::sessions::Entry>,
     /// When its last statements ran (µs), for a rate ceiling.
     recent: std::collections::VecDeque<i64>,
+    /// The next statement's text, for the audit log ([`Session::note_text`]).
+    text: Option<String>,
+    /// Whether its statements go to the audit log (not a session of the
+    /// server's own, as one that checks a membership's condition).
+    audited: bool,
 }
 
 impl std::fmt::Debug for Session {
@@ -112,6 +117,25 @@ impl std::fmt::Debug for Session {
             .field("status", &self.status())
             .finish_non_exhaustive()
     }
+}
+
+/// Records a login refused before a session could be had — a wrong
+/// password, a token not accepted — in `kv`'s audit log.
+pub fn audit_refused_login(
+    kv: &Arc<dyn Kv>,
+    user: &str,
+    context: crate::access::Context,
+    code: &str,
+    detail: &str,
+) -> Result<()> {
+    let mut s = Session::new(kv.clone());
+    let mut who = crate::access::Who::system();
+    who.session_user = user.to_string();
+    who.user = user.to_string();
+    who.superuser = false;
+    who.context = context;
+    s.login = Arc::new(who);
+    s.audit_login(false, code, detail)
 }
 
 /// A query of a `WHEN` condition over a connection's context: `$1` the
@@ -174,6 +198,8 @@ impl Session {
             login: Arc::new(crate::access::Who::system()),
             listed: None,
             recent: std::collections::VecDeque::new(),
+            text: None,
+            audited: true,
         }
     }
 
@@ -239,6 +265,29 @@ impl Session {
     /// access rule does ([`crate::rules`], `28000` otherwise), under the
     /// rule's ceiling; the context is the session's from then on.
     pub fn admit(&mut self, context: crate::access::Context) -> Result<()> {
+        let mut who = (*self.login).clone();
+        who.context = context.clone();
+        let r = self.admit_quietly(context);
+        // Every login is in the audit log, admitted or refused here.
+        let (ok, code, detail) = match &r {
+            Ok(()) => (
+                true,
+                String::new(),
+                match &self.login.rule {
+                    Some(rule) => format!("admitted by access rule {rule}"),
+                    None => "admitted".to_string(),
+                },
+            ),
+            Err(e) => (false, e.code.to_string(), e.message.clone()),
+        };
+        if !ok {
+            self.login = Arc::new(who);
+        }
+        self.audit_login(ok, &code, &detail)?;
+        r
+    }
+
+    fn admit_quietly(&mut self, context: crate::access::Context) -> Result<()> {
         // Memberships under a WHEN condition the connection does not meet
         // are not held in this session.
         let mut suspended = std::collections::BTreeSet::new();
@@ -251,6 +300,7 @@ impl Session {
         };
         if !conditional.is_empty() {
             let mut probe = Session::with_registry(self.kv.clone(), self.registry.clone());
+            probe.audited = false;
             let params = [
                 context.client_addr.map_or(Value::Null, |a| {
                     Value::Text(crate::rules::host(a).host_text())
@@ -388,10 +438,46 @@ impl Session {
     /// Parses and runs every statement in `sql`; stops at the first error.
     pub fn execute(&mut self, sql: &str) -> Result<Vec<Output>> {
         let mut out = Vec::new();
-        for stmt in parse(sql)? {
+        for (stmt, text) in crate::parser::parse_with_text(sql)? {
+            self.note_text(&text);
             out.push(self.run(&stmt, &[])?);
         }
         Ok(out)
+    }
+
+    /// The text of the statement [`Session::run`] runs next, for the audit
+    /// log (front ends note it; without it the log names the command).
+    pub fn note_text(&mut self, text: &str) {
+        self.text = Some(text.to_string());
+    }
+
+    /// Appends `record` to the audit log in a transaction of its own (a
+    /// refusal, a read, a login), retried on conflicts.
+    fn audit_apart(&self, record: crate::audit::Record) -> Result<()> {
+        let mut attempt = 0;
+        loop {
+            let mut txn = self.kv.begin(TxnOptions::default())?;
+            let r = crate::audit::append(txn.as_mut(), record.clone()).and_then(|()| {
+                txn.commit()?;
+                Ok(())
+            });
+            match r {
+                Err(e) if e.code == "40001" && attempt < 20 => {
+                    attempt += 1;
+                    self.kv.back_off(attempt);
+                }
+                r => return r,
+            }
+        }
+    }
+
+    /// Records a login (admitted or refused) in the audit log.
+    pub fn audit_login(&self, ok: bool, code: &str, detail: &str) -> Result<()> {
+        let now = crate::datetime::from_system(self.kv.wall_clock());
+        let record = crate::datetime::with_now(now, &self.kv, || {
+            crate::audit::record_of(&self.login, "login", ok, code, detail)
+        });
+        self.audit_apart(record)
     }
 
     /// Runs one statement with parameter values.
@@ -544,6 +630,79 @@ impl Session {
     }
 
     fn run_in_txn(&mut self, stmt: &Statement, params: &[Value]) -> Result<Output> {
+        let text = self.text.take();
+        crate::audit::begin_statement();
+        let r = if self.audited {
+            self.run_in_txn_audited(stmt, params, text.as_deref())
+        } else {
+            self.run_unaudited(stmt, params)
+        };
+        crate::audit::end_statement();
+        r
+    }
+
+    fn run_unaudited(&mut self, stmt: &Statement, params: &[Value]) -> Result<Output> {
+        let opts = options(&TxnMode::default(), self.default_isolation, read_only(stmt));
+        let mut txn = self.kv.begin(opts)?;
+        let now = crate::datetime::from_system(self.kv.wall_clock());
+        let out = crate::datetime::with_now(now, &self.kv, || {
+            execute(txn.as_mut(), &self.registry, stmt, params)
+        })?;
+        txn.commit()?;
+        Ok(out)
+    }
+
+    /// Whether a statement changes the catalog: always in the audit log.
+    fn is_ddl(stmt: &Statement) -> bool {
+        !matches!(
+            stmt,
+            Statement::Query(_)
+                | Statement::Insert { .. }
+                | Statement::Update { .. }
+                | Statement::Delete { .. }
+                | Statement::Explain(_)
+                | Statement::Show(_)
+                | Statement::Begin(_)
+                | Statement::Commit
+                | Statement::Rollback
+                | Statement::SetTransaction(_)
+                | Statement::Set { .. }
+                | Statement::Reset(_)
+                | Statement::SetRole(_)
+        )
+    }
+
+    /// The audit record of a statement that ran (`out`) or was refused.
+    fn statement_record(
+        who: &crate::access::Who,
+        stmt: &Statement,
+        text: Option<&str>,
+        r: &Result<Output>,
+    ) -> crate::audit::Record {
+        let kind = if Self::is_ddl(stmt) {
+            "ddl"
+        } else {
+            "statement"
+        };
+        let detail = match (text, r) {
+            (Some(t), _) => t.to_string(),
+            (None, Ok(Output::Command(tag))) => tag.clone(),
+            (None, _) => "(a statement)".to_string(),
+        };
+        let (ok, code) = match r {
+            Ok(_) => (true, String::new()),
+            Err(e) => (false, e.code.to_string()),
+        };
+        crate::audit::record_of(who, kind, ok, &code, &detail)
+    }
+
+    fn run_in_txn_audited(
+        &mut self,
+        stmt: &Statement,
+        params: &[Value],
+        text: Option<&str>,
+    ) -> Result<Output> {
+        let ddl = Self::is_ddl(stmt);
         let default = self.default_isolation;
         if let Some(block) = &mut self.block {
             if block.failed {
@@ -564,13 +723,37 @@ impl Session {
                 crate::catalog::check_format(txn.as_mut(), &self.registry)
                     .map(|ok| self.format_checked = ok)
             };
+            let now = block.now;
             let r = r.and_then(|()| {
-                crate::datetime::with_now(block.now, &self.kv, || {
+                crate::datetime::with_now(now, &self.kv, || {
                     execute(txn.as_mut(), &self.registry, stmt, params)
                 })
             });
+            // Recorded in the block's transaction when it went through and
+            // the block may write (a block rolled back takes it with it);
+            // else apart.
+            let who = crate::access::current();
+            let mut apart = None;
+            let wanted = crate::datetime::with_now(now, &self.kv, || -> Result<bool> {
+                if !ddl
+                    && !crate::audit::wanted(txn.as_ref(), &who, &crate::audit::end_statement())?
+                {
+                    return Ok(false);
+                }
+                let record = Self::statement_record(&who, stmt, text, &r);
+                if r.is_ok() && !block.mode.read_only.unwrap_or(false) && !who.ceiling.read_only {
+                    crate::audit::append(txn.as_mut(), record)?;
+                } else {
+                    apart = Some(record);
+                }
+                Ok(true)
+            });
             if r.is_err() {
                 block.failed = true;
+            }
+            wanted?;
+            if let Some(record) = apart {
+                self.audit_apart(record)?;
             }
             return r;
         }
@@ -581,23 +764,45 @@ impl Session {
         loop {
             let mut txn = self.kv.begin(opts)?;
             let now = crate::datetime::from_system(self.kv.wall_clock());
-            let r = self
-                .check_format(txn.as_mut())
-                .and_then(|()| {
-                    crate::datetime::with_now(now, &self.kv, || {
-                        execute(txn.as_mut(), &self.registry, stmt, params)
-                    })
+            let who = crate::access::current();
+            let mut apart = None;
+            let r = self.check_format(txn.as_mut()).and_then(|()| {
+                crate::datetime::with_now(now, &self.kv, || {
+                    execute(txn.as_mut(), &self.registry, stmt, params)
                 })
-                .and_then(|out| {
-                    txn.commit()?;
-                    Ok(out)
-                });
+            });
+            // In the statement's transaction when it went through and may
+            // write; else apart (a read, a refusal).
+            let decided = crate::datetime::with_now(now, &self.kv, || -> Result<()> {
+                let touched = crate::audit::end_statement();
+                crate::audit::begin_statement();
+                if ddl || crate::audit::wanted(txn.as_ref(), &who, &touched)? {
+                    let record = Self::statement_record(&who, stmt, text, &r);
+                    if r.is_ok() && !opts.read_only {
+                        crate::audit::append(txn.as_mut(), record)?;
+                    } else {
+                        apart = Some(record);
+                    }
+                }
+                Ok(())
+            });
+            let r = decided.and(r).and_then(|out| {
+                txn.commit()?;
+                Ok(out)
+            });
             match r {
                 Err(e) if e.code == "40001" && attempt < 10 => {
                     attempt += 1;
                     self.kv.back_off(attempt);
                 }
-                r => return r,
+                r => {
+                    if let Some(record) = apart
+                        && !matches!(&r, Err(e) if e.code == "40001")
+                    {
+                        self.audit_apart(record)?;
+                    }
+                    return r;
+                }
             }
         }
     }

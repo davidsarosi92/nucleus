@@ -1020,6 +1020,8 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.roles` | `name`, `superuser`, `login`, `inherit`, `createrole`, `connection_limit`, `has_password`, `valid_until` |
 | `nc_catalog.role_members` | `role`, `member`, `admin_option`, `condition` (a `WHEN` condition, or NULL) |
 | `nc_catalog.access_rules` | `position`, `name`, `roles`, `addresses`, `front_ends`, `auth_methods`, `tls`, `action`, `read_only`, `as_role` (in order) |
+| `nc_catalog.audit` | `seq`, `at`, `kind` (`login`, `ddl`, `statement`), `ok`, `code`, `session_user_name`, `user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `detail`, `hash` (an administrator's; empty for others) |
+| `nc_catalog.audit_chain` | `records`, `intact`, `broken_at`, `problem` (the chain walked) |
 | `nc_catalog.database_settings` | `name`, `value`, `is_set`, `default`, `description` (`ALTER DATABASE nucleus SET …`) |
 | `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
@@ -1383,6 +1385,25 @@ statement returns), `SCAN n` (the most it reads) — `54000` — `TIMEOUT
 authentication, or with the default password while the database is
 unclaimed, unless `--insecure`.
 
+**The audit log** (`audit.rs`; catalog `00 12 <seq>`, its head `00
+13`): every login — admitted, with the rule, or refused, with why (a
+wrong password, a token not accepted, a rule, a limit) — and every
+statement that changes the catalog (`ddl`: tables, types, indexes, roles,
+grants, policies, tokens, rules, settings), always; statements as the
+database's settings ask (`audit_statements = all`, `audit_roles = 'a,b'`
+— those roles' and their members', `audit_tables = 't,u'` — those that
+touch these tables, by the privilege checks' lookups).  A record holds
+when, who (session and current user), the connection (address, front end,
+method, TLS, rule), what (the statement's text) and whether it went
+through (the SQLSTATE if not).  It is written in the transaction of what
+it records — a statement rolled back leaves none, a committed one always
+has one — and a refusal, a read or a login in one of its own.  Each
+record's hash is SHA-256 over its fields and the previous record's hash;
+`nc_catalog.audit_chain` walks the chain: a changed record, a gap, or
+records cut off the end (the head names more) show, with where.  A local
+session's DDL is recorded too.  Records are not pruned yet; a stream of
+them comes with §M16.5.
+
 **Bootstrap.**  A database whose catalog has no administrator that can
 log in with a password is *unclaimed*: the server's `--user` /
 `--password` (default `nucleus` / `nucleus`) log in as an administrator,
@@ -1737,6 +1758,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 audit (T7) — §M14.25 shipped:** a hash-chained
+  audit log in the catalog: logins, DDL and every change of access,
+  statements by role or table as the database's settings ask; written with
+  what it records; `nc_catalog.audit` and `audit_chain`, which find an
+  edit, a gap or a cut end.
 - **2026-10-23 — §M14.25 protection (T6):** database settings (`ALTER
   DATABASE … SET`), password length / name / lifetime rules, failed
   logins slowed and locked, connection limits, statement timeouts and

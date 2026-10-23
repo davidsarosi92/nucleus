@@ -413,11 +413,25 @@ fn login(
             message: why,
         }));
     }
-    let refused = || {
+    let context = |method: &str| nucleus_sql::access::Context {
+        client_addr: peer,
+        front_end: "ncp".into(),
+        auth_method: method.into(),
+        tls: tls.is_some(),
+    };
+    let refused = |method: &str| {
         config.throttle.failed(&**kv, &user, peer);
+        let message = format!("password authentication failed for user \"{user}\"");
+        let _ = nucleus_sql::session::audit_refused_login(
+            kv,
+            &user,
+            context(method),
+            "28P01",
+            &message,
+        );
         Error {
             code: "28P01",
-            message: format!("password authentication failed for user \"{user}\""),
+            message,
         }
     };
     let mut identity = None;
@@ -430,22 +444,31 @@ fn login(
         if version >= 4 {
             match exchange(input, out, &**kv, config, &user, tls)? {
                 Ok(Proved::Password) => {}
-                Ok(Proved::Nothing) => return Ok(Err(refused())),
+                Ok(Proved::Nothing) => return Ok(Err(refused(method))),
                 Ok(Proved::Bearer(id)) => {
                     log("login", &format!("{} by a bearer token", id.user));
                     identity = Some(id);
                     method = "oidc";
                 }
-                Err(e) => return Ok(Err(e)),
+                Err(e) => {
+                    let _ = nucleus_sql::session::audit_refused_login(
+                        kv,
+                        &user,
+                        context(method),
+                        e.code,
+                        &e.message,
+                    );
+                    return Ok(Err(e));
+                }
             }
         } else if crate::directory_user(config, &**kv, &user) {
             // A password sent in Hello: to the directory only over TLS.
             if tls.is_none() || !crate::directory_accepts(config, &user, &password).unwrap_or(false)
             {
-                return Ok(Err(refused()));
+                return Ok(Err(refused(method)));
             }
         } else if !config.accepts(&**kv, &user, &password) {
-            return Ok(Err(refused()));
+            return Ok(Err(refused(method)));
         }
     }
     let mut session = Session::with_registry(kv.clone(), config.registry.clone());
@@ -454,14 +477,7 @@ fn login(
         None => session.login(&user),
     }
     .and_then(|()| crate::room_for(config, kv, &session))
-    .and_then(|()| {
-        session.admit(nucleus_sql::access::Context {
-            client_addr: peer,
-            front_end: "ncp".into(),
-            auth_method: method.into(),
-            tls: tls.is_some(),
-        })
-    });
+    .and_then(|()| session.admit(context(method)));
     if logged_in.is_ok() {
         config.throttle.succeeded(&user);
     }
@@ -707,8 +723,8 @@ fn run(
     params: &[Value],
     out: &mut impl Write,
 ) -> io::Result<Result<(), Error>> {
-    let stmts = match nucleus_sql::parser::parse(sql) {
-        Ok(s) => s,
+    let (stmts, texts): (Vec<_>, Vec<_>) = match nucleus_sql::parser::parse_with_text(sql) {
+        Ok(s) => s.into_iter().unzip(),
         Err(e) => return Ok(Err(e)),
     };
     if !params.is_empty() && stmts.len() > 1 {
@@ -741,7 +757,8 @@ fn run(
         }
     }
     let params = converted.as_slice();
-    for stmt in &stmts {
+    for (stmt, stmt_text) in stmts.iter().zip(&texts) {
+        session.note_text(stmt_text);
         let output = match session.run(stmt, params) {
             Ok(o) => o,
             Err(e) => return Ok(Err(e)),

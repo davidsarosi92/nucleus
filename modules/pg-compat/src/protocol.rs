@@ -359,12 +359,15 @@ impl<'a> Body<'a> {
 
 struct Prepared {
     stmt: Option<Statement>,
+    /// Its text, for the audit log.
+    text: String,
     params: Vec<Option<DataType>>,
     columns: Option<Vec<OutColumn>>,
 }
 
 struct Portal {
     stmt: Option<Statement>,
+    text: String,
     params: Vec<Value>,
     result_formats: Vec<i16>,
     columns: Option<Vec<OutColumn>>,
@@ -507,6 +510,18 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
     };
     if !proved {
         config.throttle.failed(&*kv, &user, peer);
+        let _ = nucleus_sql::ext::audit_refused_login(
+            &kv,
+            &user,
+            nucleus_sql::ext::Context {
+                client_addr: peer,
+                front_end: "pg".into(),
+                auth_method: nucleus_server::password_method(config, &*kv, &user).into(),
+                tls: tls_info.is_some(),
+            },
+            "28P01",
+            &format!("password authentication failed for user \"{user}\""),
+        );
         send_error(
             &mut out,
             &Error {
@@ -908,8 +923,8 @@ impl Conn {
 
     fn simple_query(&mut self, sql: &str) -> io::Result<()> {
         self.log("query", sql);
-        let stmts = match nucleus_sql::ext::parse(sql) {
-            Ok(s) => s,
+        let (stmts, texts): (Vec<_>, Vec<_>) = match nucleus_sql::ext::parse_with_text(sql) {
+            Ok(s) => s.into_iter().unzip(),
             Err(e) => {
                 self.log_error(&e);
                 return send_error(&mut self.out, &e);
@@ -921,7 +936,8 @@ impl Conn {
         // Several statements in one Query run in one implicit transaction
         // in PostgreSQL; here each runs on its own (autocommit), and the
         // first error stops the rest.
-        for stmt in &stmts {
+        for (stmt, text) in stmts.iter().zip(&texts) {
+            self.session.note_text(text);
             match self.session.run(stmt, &[]) {
                 Ok(out) => {
                     if let Output::Rows { columns, rows } = &out {
@@ -975,6 +991,7 @@ impl Conn {
             name,
             Prepared {
                 stmt,
+                text: sql.trim().trim_end_matches(';').trim_end().to_string(),
                 params,
                 columns,
             },
@@ -1017,6 +1034,7 @@ impl Conn {
         }
         let portal_value = Portal {
             stmt: p.stmt.clone(),
+            text: p.text.clone(),
             params,
             result_formats,
             columns: p.columns.clone(),
@@ -1074,6 +1092,7 @@ impl Conn {
             return Ok(());
         };
         if portal.pending.is_none() {
+            self.session.note_text(&portal.text);
             let out = self.session.run(&stmt, &portal.params)?;
             let tag = nucleus_sql::ext::command_tag(&stmt, &out);
             let rows = match out {

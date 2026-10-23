@@ -266,8 +266,8 @@ are marked ✅.
 | | M14.8 | Drivers: Rust, C, C++, Python, JS/TS, Java; examples | ✅ DOCS §11 |
 | | M14.19 | Modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ✅ DOCS §1, §8.11–§8.12, §9 |
 | | M14.26 | Core types: integers by width, `real`, `bytea` (with large values out of line), `time`, `char(n)`, `inet` / `cidr`, enums; `ncp` version 3 in every driver | ✅ |
-| | M14.25 | **Next:** identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC), access rules by connection context, row-level security, audit | ⬜ |
-| | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
+| | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC, LDAP), access rules by connection context, row-level security, protection, audit | ✅ |
+| | M14.9 | **Next:** SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
@@ -983,7 +983,7 @@ one); arrays of enums; an oid per enum in pg-compat (they travel as text);
 `sum(bigint)` as `numeric`, as PostgreSQL's (nucleus's is `bigint`, an
 overflow an error); `inet ± integer` arithmetic.
 
-### §M14.25 — Identity and access ⬜ (in progress)
+### §M14.25 — Identity and access ✅
 
 *Steps:* T1 users and roles ✅ (roles in the catalog, membership, `SET
 ROLE`, SCRAM-SHA-256 verifiers, owners, logins from the catalog once
@@ -1015,7 +1015,11 @@ the same rules when they exist, §M14.10, §M16.7); T6 protection ✅
 (database settings in SQL, password rules and lifetime, failed logins
 slowed and locked, connection limits, statement timeouts, token budgets
 of rows, scan and rate — a cost budget comes with §M14.9's costs — and the
-insecure start refused); T7 audit.
+insecure start refused); T7 audit ✅ (a hash-chained log in the catalog,
+written with what it records, statements by role or table on request; a
+broken chain found). Left for later: pg-compat's OAUTHBEARER, `relacl` /
+`\dp`, pruning the audit log and its stream (§M16.5), cost budgets
+(§M14.9), the MCP and sync front ends' rules (§M14.10, §M16.7).
 
 **Order:** right after §M14.19 and §M14.26 (whose `inet` / `cidr` the
 access rules use), before the rest of the developer platform:
@@ -1980,6 +1984,13 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.25 shipped (T7: the audit log, with a broken
+  chain found).  Every "done when" holds: privileges and row-level
+  security in slt with leak tests; SCRAM, tokens, certificates, OIDC
+  (against a test issuer) and LDAP through every driver; access rules
+  over real sockets from several addresses; the insecure start refused;
+  failed logins throttled; every login and change of access audited.
+  Next: §M14.9.
 - **2026-10-23** — §M14.25 T6: protection — failed logins locked, limits
   on connections and statements, password rules, no insecure start.
 - **2026-10-23** — §M14.25 T5: access rules and privileges by connection

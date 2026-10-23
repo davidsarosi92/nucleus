@@ -7,6 +7,9 @@
 query TTB
 SELECT name, value, is_set FROM nc_catalog.database_settings ORDER BY name
 ----
+audit_roles (empty) false
+audit_statements none false
+audit_tables (empty) false
 login_lock_failures 10 false
 login_lock_time 15 minutes false
 password_lifetime infinity false

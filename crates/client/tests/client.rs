@@ -1076,3 +1076,151 @@ fn protection_limits_logins_and_statements() {
         vec![vec![Value::Int(5), Value::Int(50), Value::Int(4)]]
     );
 }
+
+/// The audit log (PLAN.md §M14.25 "done when"): every login and every
+/// change of access recorded, statements as asked, and a broken chain —
+/// an edit, a gap, a cut end — detected.
+#[test]
+fn the_audit_log_records_and_shows_tampering() {
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(1)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let kv = Arc::clone(&db);
+    std::thread::spawn(move || serve(listener, kv, nucleus_server::Config::default()));
+    let login = |user: &str, password: &str| {
+        Client::connect(Config {
+            user: user.into(),
+            password: Some(password.into()),
+            ..config(addr)
+        })
+    };
+    login("nucleus", "nucleus")
+        .unwrap()
+        .execute("CREATE USER root SUPERUSER PASSWORD 'root-pw'", &[])
+        .unwrap();
+    let mut root = login("root", "root-pw").unwrap();
+    for sql in [
+        "CREATE USER app PASSWORD 'app-pw'",
+        "CREATE TABLE pay (x int)",
+        "GRANT SELECT, INSERT ON pay TO app",
+        "ALTER DATABASE nucleus SET audit_tables = 'pay'",
+    ] {
+        root.execute(sql, &[]).unwrap();
+    }
+    assert!(login("app", "wrong").is_err());
+    let mut app = login("app", "app-pw").unwrap();
+    app.execute("INSERT INTO pay VALUES (1)", &[]).unwrap();
+    app.execute("SELECT * FROM pay", &[]).unwrap();
+    assert!(app.execute("DROP TABLE pay", &[]).is_err()); // refused: recorded too
+    let rows = root
+        .rows(
+            "SELECT kind, ok, coalesce(code, ''), session_user_name, client_addr, detail FROM nc_catalog.audit ORDER BY seq",
+            &[],
+        )
+        .unwrap();
+    let text = |v: &Value| match v {
+        Value::Text(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        other => format!("{other:?}"),
+    };
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(text).collect::<Vec<_>>().join(" | "))
+        .collect();
+    let want = [
+        "login | true |  | nucleus | 127.0.0.1 | admitted",
+        "ddl | true |  | nucleus | 127.0.0.1 | CREATE USER root SUPERUSER PASSWORD 'root-pw'",
+        "login | true |  | root | 127.0.0.1 | admitted",
+        "ddl | true |  | root | 127.0.0.1 | CREATE USER app PASSWORD 'app-pw'",
+        "ddl | true |  | root | 127.0.0.1 | CREATE TABLE pay (x int)",
+        "ddl | true |  | root | 127.0.0.1 | GRANT SELECT, INSERT ON pay TO app",
+        "ddl | true |  | root | 127.0.0.1 | ALTER DATABASE nucleus SET audit_tables = 'pay'",
+        "login | false | 28P01 | app | 127.0.0.1 | password authentication failed for user \"app\"",
+        "login | true |  | app | 127.0.0.1 | admitted",
+        "statement | true |  | app | 127.0.0.1 | INSERT INTO pay VALUES (1)",
+        "statement | true |  | app | 127.0.0.1 | SELECT * FROM pay",
+        "ddl | false | 42501 | app | 127.0.0.1 | DROP TABLE pay",
+    ];
+    assert_eq!(lines, want);
+    let chain = |root: &mut Client| {
+        root.rows(
+            "SELECT records, intact, broken_at, problem FROM nc_catalog.audit_chain",
+            &[],
+        )
+        .unwrap()
+    };
+    // (The query itself is not recorded: it touches no audited table.)
+    assert_eq!(
+        chain(&mut root),
+        vec![vec![
+            Value::Int(12),
+            Value::Bool(true),
+            Value::Null,
+            Value::Null
+        ]]
+    );
+    // Only an administrator reads it.
+    assert_eq!(
+        app.rows("SELECT count(*) FROM nc_catalog.audit", &[])
+            .unwrap(),
+        vec![vec![Value::Int(0)]]
+    );
+    // Tampering, straight in the store: an edit, a gap, a cut end.
+    let key = |seq: u64| {
+        let mut k = vec![0x00, 0x12];
+        k.extend_from_slice(&seq.to_be_bytes());
+        k
+    };
+    let mut txn = db.begin(nucleus_kv::TxnOptions::default()).unwrap();
+    let mut rec = txn.get(&key(4)).unwrap().unwrap();
+    let at = rec.windows(6).position(|w| w == b"app-pw").unwrap();
+    rec[at] = b'X';
+    txn.put(&key(4), &rec).unwrap();
+    txn.commit().unwrap();
+    let broken = chain(&mut root);
+    assert_eq!(
+        broken[0][1..],
+        [
+            Value::Bool(false),
+            Value::Int(4),
+            Value::from("it was changed")
+        ]
+    );
+    // Put back exactly, it holds again; a record taken out is a gap.
+    let mut txn = db.begin(nucleus_kv::TxnOptions::default()).unwrap();
+    rec[at] = b'a';
+    txn.put(&key(4), &rec).unwrap();
+    let six = txn.get(&key(6)).unwrap().unwrap();
+    txn.delete(&key(6)).unwrap();
+    txn.commit().unwrap();
+    let broken = chain(&mut root);
+    assert_eq!(
+        broken[0][1..],
+        [
+            Value::Bool(false),
+            Value::Int(6),
+            Value::from("a record is missing")
+        ]
+    );
+    // The last records cut off: the head still names them.
+    let mut txn = db.begin(nucleus_kv::TxnOptions::default()).unwrap();
+    txn.put(&key(6), &six).unwrap();
+    txn.delete(&key(12)).unwrap();
+    txn.commit().unwrap();
+    let broken = chain(&mut root);
+    assert_eq!(
+        broken[0][1..],
+        [
+            Value::Bool(false),
+            Value::Int(12),
+            Value::from("the last records are missing (the head names more)")
+        ]
+    );
+}

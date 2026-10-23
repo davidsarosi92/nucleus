@@ -5,6 +5,7 @@
 
 pub mod access;
 pub mod ast;
+pub mod audit;
 pub mod binder;
 pub mod budget;
 pub mod builtin;

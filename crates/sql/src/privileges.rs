@@ -412,6 +412,9 @@ impl Checker {
     }
 
     fn acl(&self, txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<Acl> {
+        if kind == Kind::Table {
+            crate::audit::touched(name);
+        }
         let key = (kind, name.to_string());
         if let Some(a) = self.acls.borrow().get(&key) {
             return Ok(a.clone());

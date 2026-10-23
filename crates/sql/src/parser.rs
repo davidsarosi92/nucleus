@@ -22,6 +22,23 @@ pub fn parse(sql: &str) -> Result<Vec<Statement>> {
     }
 }
 
+/// The same, each statement with its text (for the audit log).
+pub fn parse_with_text(sql: &str) -> Result<Vec<(Statement, String)>> {
+    let mut p = Parser::new(sql)?;
+    let mut out = Vec::new();
+    loop {
+        while p.eat_op(";") {}
+        if p.at_end() {
+            return Ok(out);
+        }
+        let (stmt, text) = p.text_of(|p| p.statement())?;
+        out.push((stmt, text));
+        if !p.at_end() && !p.eat_op(";") {
+            return Err(p.error("expected ; or end of input"));
+        }
+    }
+}
+
 /// Parses one statement (a trailing `;` is allowed).
 pub fn parse_one(sql: &str) -> Result<Statement> {
     let mut all = parse(sql)?;

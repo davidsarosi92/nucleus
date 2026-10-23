@@ -34,6 +34,22 @@ fn positive(v: &str) -> Result<String> {
     }
 }
 
+fn none_or_all(v: &str) -> Result<String> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "none" => Ok("none".into()),
+        "all" => Ok("all".into()),
+        _ => Err(Error::invalid_parameter("it is none or all")),
+    }
+}
+
+fn list(v: &str) -> Result<String> {
+    Ok(v.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
 fn duration_text(v: &str) -> Result<String> {
     duration(v)?;
     Ok(v.trim().to_string())
@@ -65,6 +81,24 @@ pub const KNOWN: &[Known] = &[
         default: "0",
         description: "the longest a statement may run (0: no limit); SET statement_timeout overrides",
         check: duration_text,
+    },
+    Known {
+        name: "audit_statements",
+        default: "none",
+        description: "all: every statement is recorded in the audit log; none: only logins and DDL",
+        check: none_or_all,
+    },
+    Known {
+        name: "audit_roles",
+        default: "",
+        description: "the statements of these roles (and their members) are recorded, a comma-separated list",
+        check: list,
+    },
+    Known {
+        name: "audit_tables",
+        default: "",
+        description: "the statements that touch these tables are recorded, a comma-separated list",
+        check: list,
     },
     Known {
         name: "login_lock_failures",

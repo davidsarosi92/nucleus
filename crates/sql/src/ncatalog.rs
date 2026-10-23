@@ -84,6 +84,34 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "audit",
+        &[
+            ("seq", I),
+            ("at", DataType::TimestampTz),
+            ("kind", T),
+            ("ok", B),
+            ("code", T),
+            ("session_user_name", T),
+            ("user_name", T),
+            ("client_addr", T),
+            ("front_end", T),
+            ("auth_method", T),
+            ("tls", B),
+            ("access_rule", T),
+            ("detail", T),
+            ("hash", T),
+        ],
+    ),
+    (
+        "audit_chain",
+        &[
+            ("records", I),
+            ("intact", B),
+            ("broken_at", I),
+            ("problem", T),
+        ],
+    ),
+    (
         "database_settings",
         &[
             ("name", T),
@@ -383,6 +411,43 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                 ]);
             }
         }
+        // The audit log is an administrator's.
+        "audit" if crate::access::current().superuser => {
+            for r in crate::audit::all(txn)? {
+                out.push(vec![
+                    Value::Int(r.seq as i64),
+                    Value::TimestampTz(r.at),
+                    text(r.kind),
+                    Value::Bool(r.ok),
+                    if r.code.is_empty() {
+                        Value::Null
+                    } else {
+                        text(r.code)
+                    },
+                    text(r.session_user),
+                    text(r.user),
+                    r.context
+                        .client_addr
+                        .map_or(Value::Null, |a| text(crate::rules::host(a).host_text())),
+                    text(r.context.front_end),
+                    text(r.context.auth_method),
+                    Value::Bool(r.context.tls),
+                    r.rule.map_or(Value::Null, text),
+                    text(r.detail),
+                    text(crate::audit::hex(&r.hash)),
+                ]);
+            }
+        }
+        "audit_chain" if crate::access::current().superuser => {
+            let c = crate::audit::check(txn)?;
+            out.push(vec![
+                Value::Int(c.records as i64),
+                Value::Bool(c.intact),
+                c.broken_at.map_or(Value::Null, |n| Value::Int(n as i64)),
+                c.problem.map_or(Value::Null, text),
+            ]);
+        }
+        "audit" | "audit_chain" => {}
         "database_settings" => {
             for (k, value, set) in crate::dbsettings::all(txn)? {
                 out.push(vec![
