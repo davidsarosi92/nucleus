@@ -21,9 +21,13 @@ if command -v openssl >/dev/null; then
     openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=localhost"
     printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n" >ext.cnf
     openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out server.pem -days 1 -extfile ext.cnf
+    # A client certificate for the user nucleus (mutual TLS).
+    openssl req -newkey rsa:2048 -nodes -keyout client.key -out client.csr -subj "/CN=nucleus"
+    printf "basicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=clientAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n" >client.cnf
+    openssl x509 -req -in client.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out client.pem -days 1 -extfile client.cnf
   ) >/dev/null 2>&1
-  tls=(--tls-cert "$work/server.pem" --tls-key "$work/server.key")
-  export NUCLEUS_TLS_CA="$work/ca.pem"
+  tls=(--tls-cert "$work/server.pem" --tls-key "$work/server.key" --tls-client-ca "$work/ca.pem")
+  export NUCLEUS_TLS_CA="$work/ca.pem" NUCLEUS_TLS_CERT="$work/client.pem" NUCLEUS_TLS_KEY="$work/client.key"
 fi
 "$bin" server "$work/db" --listen 127.0.0.1:0 ${tls[@]+"${tls[@]}"} 2>"$work/server.log" &
 pid=$!

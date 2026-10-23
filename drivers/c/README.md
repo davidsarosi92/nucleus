@@ -18,8 +18,9 @@ it; a server that cannot sign the exchange is refused (`08006`).  TLS
 in a build with OpenSSL (`make TLS=openssl`, which defines
 `NC_WITH_OPENSSL`; link with `pkg-config --libs openssl`): `cfg.tls = 1`
 checks the server against the system's CAs, `cfg.tls_ca` against a PEM
-file, `cfg.tls_no_verify = 1` not at all; `nc_tls_supported()` says
-whether the build can.
+file, `cfg.tls_no_verify = 1` not at all; `cfg.tls_cert` / `tls_key`
+show a client certificate; `nc_tls_supported()` says whether the build
+can.
 
 ```sh
 make                # build/libnucleus.a

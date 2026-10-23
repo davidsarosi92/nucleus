@@ -159,6 +159,15 @@ public final class NucleusTest {
         }
         // The test CA is not among Java's.
         errorCode(() -> NucleusClient.connect(config().tls(true)));
+        // A client certificate naming the user stands in for its password.
+        String cert = System.getenv("NUCLEUS_TLS_CERT"), key = System.getenv("NUCLEUS_TLS_KEY");
+        if (cert != null) {
+            Config byCert = config().tlsCa(java.nio.file.Path.of(ca)).password("wrong")
+                    .tlsCertificate(java.nio.file.Path.of(cert), java.nio.file.Path.of(key));
+            try (NucleusClient db = NucleusClient.connect(byCert)) {
+                equal(db.query("SELECT current_user").rows().get(0).get(0), "nucleus", "by certificate");
+            }
+        }
     }
 
     private static void run(String name, Runnable test) {

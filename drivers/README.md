@@ -10,7 +10,8 @@ speak protocol version 4: the password is proved by SCRAM-SHA-256 and
 never sent, registered types arrive in their binary form, and `smallint`,
 `integer`, `real`, `bytea`, `time`, `inet` and `cidr` as each language's
 native (or closest) type.  Each can use TLS — the server's certificate
-checked against the system's CAs or one's own, or unverified (DOCS.md
+checked against the system's CAs or one's own, or unverified — and show
+a client certificate, which logs its user in without a password (DOCS.md
 §11).  A token (`CREATE TOKEN`, DOCS.md §9) is a
 user and a password to each of them: its `login` and its `secret`.
 

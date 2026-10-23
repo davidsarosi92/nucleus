@@ -28,8 +28,10 @@ pub struct TlsInfo {
     /// The cipher suite (`TLS13_AES_128_GCM_SHA256`).
     pub cipher: String,
     /// The client's certificate chain (DER, its own first), if it sent
-    /// one and the server asked for it.
+    /// one, the server asked for it and it verified.
     pub client_certificates: Vec<Vec<u8>>,
+    /// That certificate's subject common name: who the client is.
+    pub client_name: Option<String>,
 }
 
 /// An encrypted stream, and what its handshake agreed on.

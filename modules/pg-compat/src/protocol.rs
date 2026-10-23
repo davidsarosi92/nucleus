@@ -372,6 +372,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     // before the TLS handshake may be taken as sent inside it.
     let mut tcp = stream;
     let mut secured: Option<Box<dyn nucleus_server::Stream>> = None;
+    let mut tls_info = None;
     let params = loop {
         let plain = secured.is_none();
         let s: &mut dyn nucleus_server::Stream = match &mut secured {
@@ -390,7 +391,9 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
                 tcp.write_all(b"S")?;
                 tcp.flush()?;
                 let tls = config.tls.as_ref().expect("checked");
-                secured = Some(tls.accept(tcp.try_clone()?)?.stream);
+                let s = tls.accept(tcp.try_clone()?)?;
+                tls_info = Some(s.info);
+                secured = Some(s.stream);
             }
             SSL_REQUEST | GSSENC_REQUEST => {
                 s.write_all(b"N")?;
@@ -432,22 +435,24 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     let mut input = BufReader::new(r);
     let mut out = BufWriter::new(w);
 
-    if config.auth.wants_password() {
-        let user = params.get("user").cloned().unwrap_or_default();
-        if !sasl(&mut input, &mut out, &*kv, config, &user)? {
-            send_error(
-                &mut out,
-                &Error {
-                    code: "28P01",
-                    message: format!("password authentication failed for user \"{user}\""),
-                },
-            )?;
-            out.flush()?;
-            return Ok(());
-        }
+    let user = params.get("user").cloned().unwrap_or_default();
+    let by_certificate = nucleus_server::certificate_login(config, &*kv, tls_info.as_ref(), &user);
+    if config.auth.wants_password()
+        && !by_certificate
+        && !sasl(&mut input, &mut out, &*kv, config, &user)?
+    {
+        send_error(
+            &mut out,
+            &Error {
+                code: "28P01",
+                message: format!("password authentication failed for user \"{user}\""),
+            },
+        )?;
+        out.flush()?;
+        return Ok(());
     }
     let mut session = Session::with_registry(kv, registry(&config.registry));
-    if let Err(e) = session.login(&params.get("user").cloned().unwrap_or_default()) {
+    if let Err(e) = session.login(&user) {
         send_error(&mut out, &e)?;
         out.flush()?;
         return Ok(());

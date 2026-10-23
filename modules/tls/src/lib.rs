@@ -58,32 +58,92 @@ where
 
 // ----------------------------------------------------------------- server
 
-/// The server side: a certificate chain and its key.
-#[derive(Debug, Clone)]
+/// The server side: a certificate chain and its key, and — optionally —
+/// the CA whose client certificates it accepts.
+#[derive(Clone)]
 pub struct ServerTls {
+    chain: Vec<CertificateDer<'static>>,
+    key: Arc<PrivateKeyDer<'static>>,
+    client_roots: Option<Arc<rustls::RootCertStore>>,
     config: Arc<rustls::ServerConfig>,
+}
+
+impl std::fmt::Debug for ServerTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerTls")
+            .field("certificates", &self.chain.len())
+            .field("client_certificates", &self.client_roots.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+fn roots(pem: &[u8]) -> io::Result<rustls::RootCertStore> {
+    let mut roots = rustls::RootCertStore::empty();
+    for c in certificates(pem)? {
+        roots
+            .add(c)
+            .map_err(|e| invalid(format!("bad CA certificate: {e}")))?;
+    }
+    Ok(roots)
+}
+
+fn private_key(pem: &[u8]) -> io::Result<PrivateKeyDer<'static>> {
+    PrivateKeyDer::from_pem_slice(pem).map_err(|e| invalid(format!("bad private key PEM: {e}")))
 }
 
 impl ServerTls {
     /// From PEM: the certificate chain (the server's own first) and its
     /// private key (PKCS #8, PKCS #1 or SEC1).
     pub fn from_pem(chain: &[u8], key: &[u8]) -> io::Result<Self> {
-        let key = PrivateKeyDer::from_pem_slice(key)
-            .map_err(|e| invalid(format!("bad private key PEM: {e}")))?;
-        let config = rustls::ServerConfig::builder_with_provider(provider())
-            .with_safe_default_protocol_versions()
-            .map_err(invalid)?
-            .with_no_client_auth()
-            .with_single_cert(certificates(chain)?, key)
-            .map_err(invalid)?;
-        Ok(ServerTls {
-            config: Arc::new(config),
-        })
+        Self::build(certificates(chain)?, Arc::new(private_key(key)?), None)
     }
 
     /// From PEM files.
     pub fn from_pem_files(chain: &Path, key: &Path) -> io::Result<Self> {
         Self::from_pem(&read(chain)?, &read(key)?)
+    }
+
+    /// The same, also asking clients for a certificate of the CA in `pem`:
+    /// one is not required, but one that is sent must verify, and its
+    /// subject's common name is [`nucleus_server::TlsInfo::client_name`].
+    pub fn accepting_client_certificates(self, pem: &[u8]) -> io::Result<Self> {
+        Self::build(self.chain, self.key, Some(Arc::new(roots(pem)?)))
+    }
+
+    /// The same, the CA from a file.
+    pub fn accepting_client_certificates_file(self, path: &Path) -> io::Result<Self> {
+        self.accepting_client_certificates(&read(path)?)
+    }
+
+    fn build(
+        chain: Vec<CertificateDer<'static>>,
+        key: Arc<PrivateKeyDer<'static>>,
+        client_roots: Option<Arc<rustls::RootCertStore>>,
+    ) -> io::Result<Self> {
+        let builder = rustls::ServerConfig::builder_with_provider(provider())
+            .with_safe_default_protocol_versions()
+            .map_err(invalid)?;
+        let builder = match &client_roots {
+            Some(r) => builder.with_client_cert_verifier(
+                rustls::server::WebPkiClientVerifier::builder_with_provider(
+                    Arc::clone(r),
+                    provider(),
+                )
+                .allow_unauthenticated()
+                .build()
+                .map_err(invalid)?,
+            ),
+            None => builder.with_no_client_auth(),
+        };
+        let config = builder
+            .with_single_cert(chain.clone(), key.clone_key())
+            .map_err(invalid)?;
+        Ok(ServerTls {
+            chain,
+            key,
+            client_roots,
+            config: Arc::new(config),
+        })
     }
 }
 
@@ -101,6 +161,13 @@ impl nucleus_server::Tls for ServerTls {
         let conn = rustls::ServerConnection::new(Arc::clone(&self.config)).map_err(invalid)?;
         let mut s = rustls::StreamOwned::new(conn, tcp);
         handshake(&mut s)?;
+        // A certificate is there only if it verified (rustls refuses the
+        // handshake otherwise).
+        let client_certificates: Vec<Vec<u8>> = s
+            .conn
+            .peer_certificates()
+            .map(|c| c.iter().map(|d| d.to_vec()).collect())
+            .unwrap_or_default();
         let info = nucleus_server::TlsInfo {
             version: version_name(s.conn.protocol_version()),
             cipher: s
@@ -109,11 +176,10 @@ impl nucleus_server::Tls for ServerTls {
                 .and_then(|c| c.suite().as_str())
                 .unwrap_or_default()
                 .to_string(),
-            client_certificates: s
-                .conn
-                .peer_certificates()
-                .map(|c| c.iter().map(|d| d.to_vec()).collect())
-                .unwrap_or_default(),
+            client_name: client_certificates
+                .first()
+                .and_then(|c| der::common_name(c)),
+            client_certificates,
         };
         Ok(nucleus_server::Secured {
             stream: Box::new(s),
@@ -124,10 +190,23 @@ impl nucleus_server::Tls for ServerTls {
 
 // ----------------------------------------------------------------- client
 
-/// The client side.
-#[derive(Debug, Clone)]
+/// The client side: how it checks the server, and — optionally — the
+/// certificate it shows.
+#[derive(Clone)]
 pub struct ClientTls {
+    /// `None`: no check.
+    roots: Option<Arc<rustls::RootCertStore>>,
+    identity: Option<(Vec<CertificateDer<'static>>, Arc<PrivateKeyDer<'static>>)>,
     config: Arc<rustls::ClientConfig>,
+}
+
+impl std::fmt::Debug for ClientTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientTls")
+            .field("verifies", &self.roots.is_some())
+            .field("certificate", &self.identity.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ClientTls {
@@ -137,19 +216,13 @@ impl ClientTls {
         let roots = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
-        Self::with_roots(roots).expect("the safe defaults")
+        Self::build(Some(Arc::new(roots)), None).expect("the safe defaults")
     }
 
     /// Checks the server's certificate against the CA certificates in
     /// `pem` (and the host name).
     pub fn with_ca_pem(pem: &[u8]) -> io::Result<Self> {
-        let mut roots = rustls::RootCertStore::empty();
-        for c in certificates(pem)? {
-            roots
-                .add(c)
-                .map_err(|e| invalid(format!("bad CA certificate: {e}")))?;
-        }
-        Self::with_roots(roots)
+        Self::build(Some(Arc::new(roots(pem)?)), None)
     }
 
     /// The same, from a file.
@@ -157,30 +230,52 @@ impl ClientTls {
         Self::with_ca_pem(&read(path)?)
     }
 
-    fn with_roots(roots: rustls::RootCertStore) -> io::Result<Self> {
-        let config = rustls::ClientConfig::builder_with_provider(provider())
-            .with_safe_default_protocol_versions()
-            .map_err(invalid)?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        Ok(ClientTls {
-            config: Arc::new(config),
-        })
-    }
-
     /// Encrypts without checking who the server is: anyone in the middle
     /// can pose as it.  For tests and networks one trusts anyway.
     pub fn without_verification() -> Self {
+        Self::build(None, None).expect("the safe defaults")
+    }
+
+    /// The same, showing the server a certificate (PEM: the chain, the
+    /// client's own first, and its private key) — mutual TLS; a server
+    /// that accepts it logs its common name in without a password.
+    pub fn with_client_certificate(self, chain: &[u8], key: &[u8]) -> io::Result<Self> {
+        Self::build(
+            self.roots,
+            Some((certificates(chain)?, Arc::new(private_key(key)?))),
+        )
+    }
+
+    /// The same, from files.
+    pub fn with_client_certificate_files(self, chain: &Path, key: &Path) -> io::Result<Self> {
+        self.with_client_certificate(&read(chain)?, &read(key)?)
+    }
+
+    fn build(
+        roots: Option<Arc<rustls::RootCertStore>>,
+        identity: Option<(Vec<CertificateDer<'static>>, Arc<PrivateKeyDer<'static>>)>,
+    ) -> io::Result<Self> {
         let p = provider();
-        let config = rustls::ClientConfig::builder_with_provider(Arc::clone(&p))
+        let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(&p))
             .with_safe_default_protocol_versions()
-            .expect("the safe defaults")
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerification(p)))
-            .with_no_client_auth();
-        ClientTls {
+            .map_err(invalid)?;
+        let builder = match &roots {
+            Some(r) => builder.with_root_certificates(Arc::clone(r)),
+            None => builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerification(p))),
+        };
+        let config = match &identity {
+            Some((chain, key)) => builder
+                .with_client_auth_cert(chain.clone(), key.clone_key())
+                .map_err(invalid)?,
+            None => builder.with_no_client_auth(),
+        };
+        Ok(ClientTls {
+            roots,
+            identity,
             config: Arc::new(config),
-        }
+        })
     }
 }
 
@@ -249,5 +344,78 @@ impl rustls::client::danger::ServerCertVerifier for NoVerification {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Just enough DER to read a certificate's subject common name.
+mod der {
+    /// One element: its tag, its contents, and what follows it.
+    fn element(b: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+        let (&tag, rest) = b.split_first()?;
+        let (&first, mut rest) = rest.split_first()?;
+        let len = if first < 0x80 {
+            usize::from(first)
+        } else {
+            let n = usize::from(first & 0x7f);
+            if n == 0 || n > 4 || rest.len() < n {
+                return None;
+            }
+            let (l, r) = rest.split_at(n);
+            rest = r;
+            l.iter().fold(0usize, |a, &x| (a << 8) | usize::from(x))
+        };
+        if rest.len() < len {
+            return None;
+        }
+        let (contents, after) = rest.split_at(len);
+        Some((tag, contents, after))
+    }
+
+    const SEQUENCE: u8 = 0x30;
+    const SET: u8 = 0x31;
+    /// 2.5.4.3, commonName.
+    const COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
+
+    /// The subject's (last) common name, if the certificate has one in a
+    /// string type.
+    pub fn common_name(cert: &[u8]) -> Option<String> {
+        let (SEQUENCE, cert, _) = element(cert)? else {
+            return None;
+        };
+        let (SEQUENCE, mut tbs, _) = element(cert)? else {
+            return None;
+        };
+        // [0] version (optional), serial, signature, issuer, validity, subject.
+        if tbs.first() == Some(&0xa0) {
+            tbs = element(tbs)?.2;
+        }
+        for _ in 0..4 {
+            tbs = element(tbs)?.2;
+        }
+        let (SEQUENCE, mut name, _) = element(tbs)? else {
+            return None;
+        };
+        let mut found = None;
+        while !name.is_empty() {
+            let (SET, mut rdn, rest) = element(name)? else {
+                return None;
+            };
+            name = rest;
+            while !rdn.is_empty() {
+                let (SEQUENCE, atv, rest) = element(rdn)? else {
+                    return None;
+                };
+                rdn = rest;
+                let (0x06, oid, value) = element(atv)? else {
+                    return None;
+                };
+                let (tag, text, _) = element(value)?;
+                // UTF8String, PrintableString, IA5String, T61String.
+                if oid == COMMON_NAME && matches!(tag, 0x0c | 0x13 | 0x16 | 0x14) {
+                    found = Some(String::from_utf8(text.to_vec()).ok()?);
+                }
+            }
+        }
+        found
     }
 }

@@ -9,12 +9,16 @@ carries no TLS library (nucleus PLAN.md §M14.25).
   that ask: `ncp` clients by starting a TLS handshake as soon as they are
   connected (nucleus DOCS.md §10), PostgreSQL clients by `SSLRequest`.
   Clients that do not ask still connect in plain text (access rules that
-  require TLS are a later step).
+  require TLS are a later step).  `accepting_client_certificates(ca)`
+  asks clients for a certificate of that CA (mutual TLS): a verified one's
+  subject common name is `TlsInfo::client_name`, and the server logs that
+  user in without a password.
 - **`ClientTls`** — for the Rust client (`nucleus_client::Config::tls`):
   the server's certificate checked against Mozilla's root certificates
   (`ClientTls::new`) or one's own CA (`with_ca_pem`, `with_ca_file`), and
   that it names the host; or `without_verification` — encrypted, but
-  anyone can pose as the server.
+  anyone can pose as the server.  `with_client_certificate` shows the
+  server a certificate.
 
 TLS 1.2 and 1.3, rustls's safe defaults, ring's cryptography (no OpenSSL).
 
@@ -31,8 +35,9 @@ let client = nucleus_client::Client::connect(nucleus_client::Config {
 ```
 
 The nucleus binary includes it: `nucleus server <dir> --tls-cert cert.pem
---tls-key key.pem`, and `ncsql --tls`, `--tls-ca <file>`,
-`--tls-no-verify`.
+--tls-key key.pem [--tls-client-ca ca.pem]`, and `ncsql --tls`,
+`--tls-ca <file>`, `--tls-no-verify`, `--tls-cert <file> --tls-key
+<file>`.
 
 ## Built on the public API only
 
@@ -45,7 +50,9 @@ checks both — the boundary check and the detachability test.
 
 `tests/tls.rs` — a server with a certificate of a test CA (made with
 `rcgen`): a verified client, a client checking the wrong name or the
-wrong roots, an unverified one, a plain one, and a server without TLS.
+wrong roots, an unverified one, a plain one, a server without TLS, and
+client certificates — of the right CA, naming the user or someone else,
+of another CA.
 
 ## Licence
 

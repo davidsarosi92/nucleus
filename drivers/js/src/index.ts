@@ -323,6 +323,10 @@ export interface ConnectOptions {
   /** `false`: encrypt without checking the certificate (anyone can pose as
    *  the server). */
   tlsVerify?: boolean;
+  /** A client certificate and its key (PEM files): one naming the user logs
+   *  it in without a password, if the server accepts its CA. */
+  tlsCert?: string;
+  tlsKey?: string;
 }
 
 // ------------------------------------------------------------------ values
@@ -681,6 +685,8 @@ export class Client {
             servername: net.isIP(host) ? undefined : host,
             ca: options.tlsCa === undefined ? undefined : readFileSync(options.tlsCa),
             rejectUnauthorized: options.tlsVerify ?? true,
+            cert: options.tlsCert === undefined ? undefined : readFileSync(options.tlsCert),
+            key: options.tlsKey === undefined ? undefined : readFileSync(options.tlsKey),
           })
         : net.createConnection({ host, port });
       s.setNoDelay(true);

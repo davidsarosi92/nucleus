@@ -99,10 +99,14 @@ typedef struct nc_config {
      * encrypt, the server's certificate checked against the system's CA
      * certificates — or against tls_ca's (a PEM file; setting it implies
      * tls).  tls_no_verify = 1 skips the check: encrypted, but anyone can
-     * pose as the server. */
+     * pose as the server.  tls_cert and tls_key (PEM files) show the
+     * server a client certificate: one naming the user logs it in without
+     * a password, if the server accepts its CA. */
     int tls;
     const char *tls_ca;
     int tls_no_verify;
+    const char *tls_cert;
+    const char *tls_key;
 } nc_config;
 
 /* An error: SQLSTATE (empty for a driver or network error) and message. */

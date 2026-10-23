@@ -394,7 +394,7 @@ class Connection:
     def __init__(self, host="127.0.0.1", port=DEFAULT_PORT, user="nucleus",
                  password="nucleus", database="nucleus", timeout=10.0,
                  client_name="nucleus-python", tls=False, tls_ca=None,
-                 tls_verify=True):
+                 tls_verify=True, tls_cert=None, tls_key=None):
         try:
             self._sock = _socket.create_connection((host, port), timeout=timeout)
             self._sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
@@ -404,6 +404,8 @@ class Connection:
                 if not tls_verify:
                     ctx.check_hostname = False
                     ctx.verify_mode = _ssl.CERT_NONE
+                if tls_cert is not None:
+                    ctx.load_cert_chain(tls_cert, tls_key)
                 self._sock = ctx.wrap_socket(self._sock, server_hostname=host)
         except OSError as e:
             raise OperationalError(f"cannot connect to {host}:{port}: {e}") from e
@@ -618,12 +620,16 @@ class Cursor:
 
 
 def connect(host="127.0.0.1", port=DEFAULT_PORT, user="nucleus", password="nucleus",
-            database="nucleus", timeout=10.0, tls=False, tls_ca=None, tls_verify=True):
+            database="nucleus", timeout=10.0, tls=False, tls_ca=None, tls_verify=True,
+            tls_cert=None, tls_key=None):
     """Opens a connection (the defaults reach a local server as it starts).
 
     ``tls=True`` encrypts it, the server's certificate checked against the
     system's CA certificates — or against ``tls_ca`` (a PEM file; giving it
     implies ``tls``); ``tls_verify=False`` skips the check (encrypted, but
-    anyone can pose as the server)."""
+    anyone can pose as the server).  ``tls_cert`` and ``tls_key`` (PEM
+    files) show the server a client certificate: one naming the user logs
+    it in without a password, if the server accepts its CA."""
     return Connection(host, port, user, password, database, timeout,
-                      tls=tls, tls_ca=tls_ca, tls_verify=tls_verify)
+                      tls=tls, tls_ca=tls_ca, tls_verify=tls_verify,
+                      tls_cert=tls_cert, tls_key=tls_key)

@@ -22,7 +22,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut extra: Vec<(String, Option<String>)> = Vec::new();
     let (mut user, mut password) = (DEFAULT_USER.to_string(), Some(DEFAULT_PASSWORD.to_string()));
     let mut log_queries = false;
-    let (mut tls_cert, mut tls_key) = (None, None);
+    let (mut tls_cert, mut tls_key, mut tls_client_ca) = (None, None, None::<String>);
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -43,6 +43,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--log-queries" => log_queries = true,
             "--tls-cert" => tls_cert = Some(rest.next().ok_or("--tls-cert needs a file")?.clone()),
             "--tls-key" => tls_key = Some(rest.next().ok_or("--tls-key needs a file")?.clone()),
+            "--tls-client-ca" => {
+                tls_client_ca = Some(rest.next().ok_or("--tls-client-ca needs a file")?.clone())
+            }
             other => return Err(format!("server: unknown option {other}")),
         }
     }
@@ -54,10 +57,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
         log_queries,
         registry: nucleus_sql::ext::Registry::shared_builtin(),
         tls: match (tls_cert, tls_key) {
-            (Some(cert), Some(key)) => Some(Arc::new(
-                nucleus_tls::ServerTls::from_pem_files(cert.as_ref(), key.as_ref())
-                    .map_err(|e| format!("server: TLS: {e}"))?,
-            )),
+            (Some(cert), Some(key)) => {
+                let tls = nucleus_tls::ServerTls::from_pem_files(cert.as_ref(), key.as_ref())
+                    .map_err(|e| format!("server: TLS: {e}"))?;
+                let tls = match &tls_client_ca {
+                    Some(ca) => tls
+                        .accepting_client_certificates_file(ca.as_ref())
+                        .map_err(|e| format!("server: --tls-client-ca: {e}"))?,
+                    None => tls,
+                };
+                Some(Arc::new(tls))
+            }
+            (None, None) if tls_client_ca.is_some() => {
+                return Err("server: --tls-client-ca needs --tls-cert and --tls-key".into());
+            }
             (None, None) => None,
             _ => return Err("server: --tls-cert and --tls-key go together".into()),
         },

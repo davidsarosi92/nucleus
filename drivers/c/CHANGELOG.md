@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Client certificates (mutual TLS): `cfg.tls_cert`, `cfg.tls_key`.
 - TLS (nucleus PLAN.md §M14.25) in a build with `NC_WITH_OPENSSL` (`make
   TLS=openssl`): `cfg.tls`, `cfg.tls_ca`, `cfg.tls_no_verify`,
   `nc_tls_supported()`; the certificate checked against the system's CAs

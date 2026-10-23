@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Client certificates (mutual TLS): `connect({ tlsCert, tlsKey })`.
 - TLS (nucleus PLAN.md §M14.25): `connect({ tls, tlsCa, tlsVerify })`, over
   `node:tls`.
 - Protocol version 4 (nucleus PLAN.md §M14.25): the password is proved by

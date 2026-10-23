@@ -26,6 +26,8 @@ usage: ncsql [<dir>] [options]          (also: nucleus sql …)
       --tls                 TLS, the server's certificate checked (Mozilla's roots)
       --tls-ca <pem file>   TLS, the certificate checked against this CA
       --tls-no-verify       TLS without checking the certificate (encrypted only)
+      --tls-cert <pem file> --tls-key <pem file>
+                            show the server a client certificate (mutual TLS)
   -c <sql>                  run one command and exit
 Without -c it reads statements from stdin (a shell on a terminal).
 ";
@@ -562,6 +564,7 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     let mut remote = false;
     let mut explicit_password = None;
+    let (mut tls, mut tls_cert, mut tls_key) = (None, None, None);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = |what: &str| it.next().cloned().ok_or(format!("{a} needs {what}"));
@@ -587,16 +590,17 @@ pub fn run(args: &[String]) -> Result<()> {
             "-U" | "--user" => cfg.user = value("a user name")?,
             "-d" | "--database" => cfg.database = value("a database name")?,
             "--password" => explicit_password = Some(value("a password")?),
-            "--tls" => cfg.tls = Some(Arc::new(nucleus_tls::ClientTls::new())),
+            "--tls" => tls = Some(nucleus_tls::ClientTls::new()),
             "--tls-ca" => {
                 let file = value("a CA file")?;
-                let tls = nucleus_tls::ClientTls::with_ca_file(file.as_ref())
-                    .map_err(|e| format!("--tls-ca: {e}"))?;
-                cfg.tls = Some(Arc::new(tls));
+                tls = Some(
+                    nucleus_tls::ClientTls::with_ca_file(file.as_ref())
+                        .map_err(|e| format!("--tls-ca: {e}"))?,
+                );
             }
-            "--tls-no-verify" => {
-                cfg.tls = Some(Arc::new(nucleus_tls::ClientTls::without_verification()));
-            }
+            "--tls-no-verify" => tls = Some(nucleus_tls::ClientTls::without_verification()),
+            "--tls-cert" => tls_cert = Some(value("a certificate file")?),
+            "--tls-key" => tls_key = Some(value("a key file")?),
             "--help" => {
                 print!("{USAGE}");
                 return Ok(());
@@ -609,6 +613,18 @@ pub fn run(args: &[String]) -> Result<()> {
             }
         }
     }
+    match (tls_cert, tls_key) {
+        (Some(cert), Some(key)) => {
+            let t = tls.unwrap_or_default();
+            tls = Some(
+                t.with_client_certificate_files(cert.as_ref(), key.as_ref())
+                    .map_err(|e| format!("--tls-cert: {e}"))?,
+            );
+        }
+        (None, None) => {}
+        _ => return Err("--tls-cert and --tls-key go together".into()),
+    }
+    cfg.tls = tls.map(|t| Arc::new(t) as Arc<dyn nucleus_client::Tls>);
     if dir.is_some() && remote {
         return Err("give a directory or a server, not both".into());
     }

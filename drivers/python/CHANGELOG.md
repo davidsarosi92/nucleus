@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Client certificates (mutual TLS): `connect(tls_cert=…, tls_key=…)`.
 - TLS (nucleus PLAN.md §M14.25): `connect(tls=True, tls_ca=…,
   tls_verify=False)`, over `ssl`.
 - Protocol version 4 (nucleus PLAN.md §M14.25): the password is proved by

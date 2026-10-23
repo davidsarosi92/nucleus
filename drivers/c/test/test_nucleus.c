@@ -276,6 +276,23 @@ static void tls(void) {
     /* The test CA is not among the system's. */
     cfg.tls_no_verify = 0;
     CHECK(nc_connect(&cfg, &err) == NULL);
+    /* A client certificate naming the user stands in for its password. */
+    if (getenv("NUCLEUS_TLS_CERT")) {
+        cfg.tls_ca = ca;
+        cfg.tls_cert = getenv("NUCLEUS_TLS_CERT");
+        cfg.tls_key = getenv("NUCLEUS_TLS_KEY");
+        cfg.password = "wrong";
+        db = nc_connect(&cfg, &err);
+        CHECK(db != NULL);
+        if (db) {
+            r = must(db, "SELECT current_user", NULL, 0);
+            if (r) {
+                CHECK(strcmp(text_of(r, 0, 0), "nucleus") == 0);
+                nc_result_free(r);
+            }
+            nc_close(db);
+        }
+    }
 }
 
 int main(void) {

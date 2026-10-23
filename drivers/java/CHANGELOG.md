@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Client certificates (mutual TLS): `Config.tlsCertificate(cert, key)`.
 - TLS (nucleus PLAN.md §M14.25): `Config.tls(true)`, `tlsCa(path)`,
   `tlsVerify(false)`, over JSSE.
 - Protocol version 4 (nucleus PLAN.md §M14.25): the password is proved by

@@ -25,13 +25,15 @@ usage:
   nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
-                     [--tls-cert <pem file> --tls-key <pem file>]
+                     [--tls-cert <pem file> --tls-key <pem file> [--tls-client-ca <pem file>]]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
                                     127.0.0.1:5432); clients log in as
                                     nucleus / nucleus unless changed; with a
-                                    certificate, TLS for clients that ask
+                                    certificate, TLS for clients that ask; with
+                                    a client CA, a client certificate naming
+                                    the user logs it in without a password
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

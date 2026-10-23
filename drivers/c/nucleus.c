@@ -736,6 +736,13 @@ static int start_tls(nc_conn *c, const nc_config *cfg, const char *host, nc_erro
             return -1;
         }
     }
+    if (cfg->tls_cert &&
+        (SSL_CTX_use_certificate_chain_file(c->ssl_ctx, cfg->tls_cert) != 1 ||
+         SSL_CTX_use_PrivateKey_file(c->ssl_ctx, cfg->tls_key ? cfg->tls_key : cfg->tls_cert, SSL_FILETYPE_PEM) != 1 ||
+         SSL_CTX_check_private_key(c->ssl_ctx) != 1)) {
+        set_error(err, "", "TLS: cannot use the client certificate %s", cfg->tls_cert);
+        return -1;
+    }
     c->ssl = SSL_new(c->ssl_ctx);
     if (!c->ssl || SSL_set_fd(c->ssl, (int)c->sock) != 1) {
         set_error(err, "", "TLS: cannot set up OpenSSL");

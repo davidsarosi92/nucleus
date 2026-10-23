@@ -15,6 +15,8 @@ public final class Config {
     boolean tls = false;
     java.nio.file.Path tlsCa = null;
     boolean tlsVerify = true;
+    java.nio.file.Path tlsCert = null;
+    java.nio.file.Path tlsKey = null;
 
     public Config host(String host) { this.host = host; return this; }
     public Config port(int port) { this.port = port; return this; }
@@ -29,4 +31,13 @@ public final class Config {
     public Config tlsCa(java.nio.file.Path pem) { this.tlsCa = pem; this.tls = true; return this; }
     /** {@code false}: encrypt without checking the certificate (anyone can pose as the server). */
     public Config tlsVerify(boolean verify) { this.tlsVerify = verify; return this; }
+    /**
+     * A client certificate chain and its PKCS #8 private key (PEM files): one naming the user logs it
+     * in without a password, if the server accepts its CA.
+     */
+    public Config tlsCertificate(java.nio.file.Path cert, java.nio.file.Path key) {
+        this.tlsCert = cert;
+        this.tlsKey = key;
+        return this;
+    }
 }

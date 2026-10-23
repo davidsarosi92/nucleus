@@ -279,6 +279,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     if stream.peek(&mut first)? == 0 {
         return Ok(());
     }
+    let mut tls_info = None;
     let stream: Box<dyn crate::Stream> = if first[0] == crate::transport::TLS_HANDSHAKE {
         let Some(tls) = &config.tls else {
             log("tls", "refused: this server has no TLS configured");
@@ -289,6 +290,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
             "tls",
             &format!("{} {}", secured.info.version, secured.info.cipher),
         );
+        tls_info = Some(secured.info);
         secured.stream
     } else {
         Box::new(stream)
@@ -298,7 +300,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     let mut out = BufWriter::new(w);
 
     // Hello, and the login it starts.
-    let hello = login(&mut input, &mut out, &kv, config, &log)?;
+    let hello = login(&mut input, &mut out, &kv, config, tls_info.as_ref(), &log)?;
     let (version, mut session) = match hello {
         Ok(v) => v,
         Err(e) => {
@@ -367,6 +369,7 @@ fn login(
     out: &mut impl Write,
     kv: &Arc<dyn Kv>,
     config: &Config,
+    tls: Option<&crate::TlsInfo>,
     log: &dyn Fn(&str, &str),
 ) -> io::Result<Result<(u16, Session), Error>> {
     let (kind, body) = read_message(input)?;
@@ -397,7 +400,9 @@ fn login(
         code: "28P01",
         message: format!("password authentication failed for user \"{user}\""),
     };
-    if config.auth.wants_password() {
+    if crate::certificate_login(config, &**kv, tls, &user) {
+        log("login", &format!("{user} by its client certificate"));
+    } else if config.auth.wants_password() {
         if version >= 4 {
             match scram(input, out, &**kv, config, &user)? {
                 Ok(true) => {}

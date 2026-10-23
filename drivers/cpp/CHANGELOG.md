@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Client certificates: `Config::tls_cert`, `tls_key`.
 - TLS through the C driver: `Config::tls`, `tls_ca`, `tls_no_verify`.
 - Protocol version 4 (nucleus PLAN.md §M14.25), through the C driver: the
   password is proved by SCRAM-SHA-256, never sent.

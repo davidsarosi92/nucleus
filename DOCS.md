@@ -1330,7 +1330,15 @@ clear).  **TLS** (the `tls` module, `modules/tls`, over rustls):
 clients that ask — `ncp` clients by starting a TLS handshake (§10),
 PostgreSQL clients by `SSLRequest` (`sslmode=require`, `verify-full`);
 clients that do not ask still connect in plain text until access rules
-can require it (§M14.25 T5).  TLS 1.2 and 1.3.  One thread per connection.  `--log-queries`
+can require it (§M14.25 T5).  TLS 1.2 and 1.3.  **Client certificates**
+(mutual TLS): `--tls-client-ca <pem>` asks clients for a certificate of
+that CA — not required, but one that is sent must verify, or the
+handshake fails; a verified certificate whose subject common name is the
+user logging in stands in for the password, for a role with `LOGIN`
+(while unclaimed, the configured user) and never for a token
+(`Authenticator::accepts_certificate`, `certificate_login`); a
+certificate naming someone else changes nothing — the password is asked
+as before.  One thread per connection.  `--log-queries`
 (`Config::log_queries`) prints every statement a client sends, and every
 error, to stderr — to see what a tool asks for.
 
@@ -1342,7 +1350,8 @@ the pg-compat module, which the `nucleus` edition adds;
 starts `ncp` and each `--front-end <name>` (`--pg-compat` is `--front-end
 pg`).  `Config { auth, registry, log_queries, tls }` (`tls`: a
 `transport::Tls`, `Config::with_tls`; the front end negotiates it and
-reads and writes through the stream it returns): `auth` is an `Authenticator`
+reads and writes through the stream it returns; `TlsInfo` says what was
+agreed, and `client_name` who a verified client certificate names): `auth` is an `Authenticator`
 (`describe`, `wants_password`, `accepts(kv, user, password)`) —
 `Password` (the catalog's roles, or while unclaimed one user;
 `Config::password`, the default `nucleus` / `nucleus`) or `Trust`
@@ -1533,7 +1542,11 @@ module) or a CA file of one's own, and the host name; or unverified
 same fields on `nucleus::Config`; Python `connect(tls=True, tls_ca=…,
 tls_verify=False)` (`ssl`); JavaScript `{ tls, tlsCa, tlsVerify }`
 (`node:tls`); Java `Config.tls(true)`, `tlsCa(path)`, `tlsVerify(false)`
-(JSSE).
+(JSSE).  A client certificate (mutual TLS): Rust
+`ClientTls::with_client_certificate_files`, C / C++ `tls_cert`,
+`tls_key`, Python `tls_cert=`, `tls_key=`, JavaScript `tlsCert`,
+`tlsKey`, Java `tlsCertificate(cert, key)` (a PKCS #8 key); `ncsql
+--tls-cert <pem> --tls-key <pem>`.
 
 **C:** `drivers/c` (`nucleus.h`, `nucleus.c`; C99, POSIX sockets or
 Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
@@ -1591,7 +1604,7 @@ digits), `Decimal` (exact, with `parse` / `toString`), `Buffer` (bytea),
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
 SQLSTATE, transactions, a wrong password, TLS verified, unverified and
-refused for an unknown CA), and `examples/<language>/` has the same
+refused for an unknown CA, and a login by client certificate), and `examples/<language>/` has the same
 quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 [languages]` starts a server on a free port — with TLS, from a CA and a
 certificate it makes with `openssl`, when that is installed — and runs
@@ -1600,6 +1613,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 client certificates (T4):** `--tls-client-ca`;
+  a verified certificate naming the user logs it in without a password,
+  on both front ends; client certificates in every driver and `ncsql`.
 - **2026-10-23 — §M14.25 TLS (T4):** the `tls` module (rustls): `ncp`
   clients start a handshake before Hello, PostgreSQL clients send
   `SSLRequest`; `--tls-cert` / `--tls-key`, `ncsql --tls | --tls-ca |

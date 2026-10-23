@@ -150,6 +150,11 @@ class Conformance(unittest.TestCase):
         # The test CA is not among the system's.
         with self.assertRaises(nucleus.OperationalError):
             connect(tls=True)
+        # A client certificate naming the user stands in for its password.
+        cert, key = os.environ.get("NUCLEUS_TLS_CERT"), os.environ.get("NUCLEUS_TLS_KEY")
+        if cert:
+            with connect(tls_ca=ca, tls_cert=cert, tls_key=key, password="wrong") as c:
+                self.assertEqual(c.execute("SELECT current_user").rows, [("nucleus",)])
 
 
 if __name__ == "__main__":

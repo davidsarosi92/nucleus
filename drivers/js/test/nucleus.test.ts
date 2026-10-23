@@ -128,4 +128,16 @@ test("tls", { skip: process.env.NUCLEUS_TLS_CA === undefined && "the server has 
   await unverified.close();
   // The test CA is not among Node's.
   await assert.rejects(connect({ ...options, tls: true }));
+  // A client certificate naming the user stands in for its password.
+  if (process.env.NUCLEUS_TLS_CERT !== undefined) {
+    const byCert = await connect({
+      ...options,
+      tlsCa: ca,
+      tlsCert: process.env.NUCLEUS_TLS_CERT,
+      tlsKey: process.env.NUCLEUS_TLS_KEY,
+      password: "wrong",
+    });
+    assert.equal((await byCert.query("SELECT current_user")).rows[0][0], "nucleus");
+    await byCert.close();
+  }
 });

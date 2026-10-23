@@ -54,6 +54,20 @@ pub trait Authenticator: Send + Sync + std::fmt::Debug {
     fn verifier(&self, _kv: &dyn Kv, _user: &str) -> Option<nucleus_crypto::ScramVerifier> {
         None
     }
+
+    /// Whether `user` — the common name of a client certificate the TLS
+    /// handshake verified, the same name the client logs in as — may log in
+    /// without a password (mutual TLS).
+    fn accepts_certificate(&self, _kv: &dyn Kv, _user: &str) -> bool {
+        false
+    }
+}
+
+/// Whether a client logs in by its certificate: TLS verified one naming
+/// `user`, and the authenticator admits that.
+pub fn certificate_login(config: &Config, kv: &dyn Kv, tls: Option<&TlsInfo>, user: &str) -> bool {
+    tls.and_then(|t| t.client_name.as_deref()) == Some(user)
+        && config.auth.accepts_certificate(kv, user)
 }
 
 /// A stand-in salt for `user`, stable while the process runs and not
@@ -121,6 +135,19 @@ impl Authenticator for Password {
             }
             let now = nucleus_sql::datetime::from_system(kv.wall_clock());
             Ok(nucleus_sql::roles::authenticate(&*txn, user, password, now)?.is_ok())
+        };
+        check().unwrap_or(false)
+    }
+    fn accepts_certificate(&self, kv: &dyn Kv, user: &str) -> bool {
+        if user.starts_with(nucleus_sql::tokens::PREFIX) {
+            return false;
+        }
+        let check = || -> nucleus_sql::Result<bool> {
+            let txn = kv.begin(nucleus_kv::TxnOptions::read_only())?;
+            if nucleus_sql::roles::unclaimed(&*txn)? {
+                return Ok(user == self.user);
+            }
+            Ok(nucleus_sql::roles::get(&*txn, user)?.is_some_and(|r| r.login))
         };
         check().unwrap_or(false)
     }

@@ -4,4 +4,6 @@
 
 - First version (nucleus PLAN.md §M14.25): `ServerTls` for the server's
   front ends (`ncp` and PostgreSQL's), `ClientTls` for the Rust client —
-  verified against Mozilla's roots or a CA of one's own, or unverified.
+  verified against Mozilla's roots or a CA of one's own, or unverified;
+  client certificates both ways (mutual TLS), the verified one's common
+  name in `TlsInfo::client_name`.
