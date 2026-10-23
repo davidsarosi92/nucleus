@@ -23,6 +23,7 @@ nucleus-client.workspace = true
 nucleus-pg-compat.workspace = true
 nucleus-tls.workspace = true
 nucleus-oidc.workspace = true
+nucleus-ldap.workspace = true
 
 [lints]
 workspace = true

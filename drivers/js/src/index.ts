@@ -770,6 +770,13 @@ export class Client {
           socket.write(frame("a", new Writer().str(`n,,\x01auth=Bearer ${options.token}\x01\x01`).bytes()));
           continue;
         }
+        if (scram === null && msg.split(" ").includes("PLAIN") && !msg.split(" ").includes("SCRAM-SHA-256")) {
+          // A directory checks this role's password: the password itself
+          // (RFC 4616), never without TLS.
+          if (!(socket instanceof tls.TLSSocket)) throw new NucleusError("the server asks for the password itself, which needs TLS");
+          socket.write(frame("a", new Writer().str(`\0${options.user ?? "nucleus"}\0${options.password ?? ""}`).bytes()));
+          continue;
+        }
         if (scram === null) {
           const offered = msg.split(" ");
           if (!offered.includes("SCRAM-SHA-256")) throw new NucleusError(`unsupported authentication ${msg}`);

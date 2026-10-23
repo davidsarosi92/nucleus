@@ -475,6 +475,15 @@ class Connection:
                     _put_str(out, f"n,,\x01auth=Bearer {token}\x01\x01")
                     self._send(b"a", out)
                     continue
+                if scram is None and "PLAIN" in msg.split(" ") and "SCRAM-SHA-256" not in msg.split(" "):
+                    # A directory checks this role's password: the password
+                    # itself (RFC 4616), never without TLS.
+                    if not isinstance(self._sock, _ssl.SSLSocket):
+                        raise InterfaceError("the server asks for the password itself, which needs TLS")
+                    out = bytearray()
+                    _put_str(out, f"\0{user}\0{password or ''}")
+                    self._send(b"a", out)
+                    continue
                 if scram is None:
                     offered = msg.split(" ")
                     if "SCRAM-SHA-256" not in offered:

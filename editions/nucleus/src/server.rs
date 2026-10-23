@@ -25,6 +25,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (mut tls_cert, mut tls_key, mut tls_client_ca) = (None, None, None::<String>);
     let (mut oidc_issuer, mut oidc_audience, mut oidc_jwks) = (None, None, None::<String>);
     let (mut oidc_user_claim, mut oidc_role_claim) = (None::<String>, None::<String>);
+    let mut ldap: std::collections::BTreeMap<&str, String> = Default::default();
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -67,6 +68,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
                         .ok_or("--oidc-role-claim needs a claim")?
                         .clone(),
                 )
+            }
+            "--ldap-url"
+            | "--ldap-bind-dn"
+            | "--ldap-search-base"
+            | "--ldap-search-attribute"
+            | "--ldap-search-dn"
+            | "--ldap-search-password"
+            | "--ldap-ca" => {
+                let v = rest
+                    .next()
+                    .ok_or_else(|| format!("{a} needs a value"))?
+                    .clone();
+                ldap.insert(&a[7..], v);
+            }
+            "--ldap-starttls" => {
+                ldap.insert("starttls", String::new());
             }
             "--tls-client-ca" => {
                 tls_client_ca = Some(rest.next().ok_or("--tls-client-ca needs a file")?.clone())
@@ -122,6 +139,34 @@ pub fn run(args: &[String]) -> Result<(), String> {
             (None, None) if oidc_jwks.is_none() => None,
             _ => return Err("server: --oidc-issuer and --oidc-audience go together".into()),
         },
+        directory: match ldap.get("url") {
+            None if ldap.is_empty() => None,
+            None => return Err("server: the --ldap-* options need --ldap-url".into()),
+            Some(url) => {
+                let mut d = match (ldap.get("bind-dn"), ldap.get("search-base")) {
+                    (Some(t), None) => nucleus_ldap::Ldap::bind(url, t),
+                    (None, Some(base)) => nucleus_ldap::Ldap::search(
+                        url,
+                        base,
+                        ldap.get("search-attribute").map_or("uid", String::as_str),
+                    ),
+                    _ => Err("give --ldap-bind-dn or --ldap-search-base".into()),
+                }
+                .map_err(|e| format!("server: LDAP: {e}"))?;
+                if let (Some(dn), Some(pw)) = (ldap.get("search-dn"), ldap.get("search-password")) {
+                    d = d.with_search_account(dn, pw);
+                }
+                if ldap.contains_key("starttls") {
+                    d = d.starttls();
+                }
+                if let Some(ca) = ldap.get("ca") {
+                    d = d
+                        .with_ca_file(ca.as_ref())
+                        .map_err(|e| format!("server: --ldap-ca: {e}"))?;
+                }
+                Some(Arc::new(d) as Arc<dyn nucleus_server::Directory>)
+            }
+        },
     };
     let db = Database::open(dir, Options::default()).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);
@@ -162,7 +207,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
             (Some(_), None) => "; TLS offered".to_string(),
             (None, Some(b)) => format!("; {}", b.describe()),
             (None, None) => String::new(),
-        }
+        } + &config
+            .directory
+            .as_ref()
+            .map_or(String::new(), |d| format!("; {}", d.describe()))
     );
     let mut listeners = listeners.into_iter();
     let (first, first_listener) = listeners.next().expect("ncp");

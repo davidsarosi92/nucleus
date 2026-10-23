@@ -114,6 +114,18 @@ public final class NucleusClient implements AutoCloseable {
                             c.send('a', new Writer().str("n,,\u0001auth=Bearer " + config.token + "\u0001\u0001").bytes());
                             continue;
                         }
+                        List<String> mechanisms = Arrays.asList(msg.split(" "));
+                        if (scram == null && mechanisms.contains("PLAIN") && !mechanisms.contains("SCRAM-SHA-256")) {
+                            // A directory checks this role's password: the password itself (RFC 4616),
+                            // never without TLS.
+                            if (!(s instanceof javax.net.ssl.SSLSocket)) {
+                                throw new NucleusException("the server asks for the password itself, which needs TLS",
+                                        (String) null);
+                            }
+                            String pw = config.password == null ? "" : config.password;
+                            c.send('a', new Writer().str("\u0000" + config.user + "\u0000" + pw).bytes());
+                            continue;
+                        }
                         if (scram == null) {
                             List<String> offered = Arrays.asList(msg.split(" "));
                             if (!offered.contains("SCRAM-SHA-256")) {

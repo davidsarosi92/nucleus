@@ -25,8 +25,8 @@ identity and access (§M14.25: users, roles, privileges, row-level security,
 SCRAM-SHA-256 logins — the password never crosses the wire —, tokens
 for programs and agents, TLS and client certificates
 ([`modules/tls`](modules/tls)) and OpenID Connect
-([`modules/oidc`](modules/oidc)) are in; LDAP, access rules, protection
-and audit are next), then the rest of the developer platform (§M14.9–§M14.24: SQL
+([`modules/oidc`](modules/oidc)) and LDAP ([`modules/ldap`](modules/ldap))
+are in; access rules, protection and audit are next), then the rest of the developer platform (§M14.9–§M14.24: SQL
 analyzer, AI access, large data and analytics, vectors, full-text and
 hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, …), then

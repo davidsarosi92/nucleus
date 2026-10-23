@@ -628,6 +628,16 @@ static int scram_verify(const scram_state *st, const char *server_final) {
     return diff ? -1 : 0;
 }
 
+/* Whether a TLS session is up. */
+static int tls_active(const nc_conn *c) {
+#ifdef NC_WITH_OPENSSL
+    return c->ssl != NULL;
+#else
+    (void)c;
+    return 0;
+#endif
+}
+
 /* Whether the space-separated list has the word. */
 static int has_word(const char *list, const char *word) {
     size_t n = strlen(word);
@@ -637,6 +647,16 @@ static int has_word(const char *list, const char *word) {
         p += n;
     }
     return 0;
+}
+
+/* Whether the space-separated list of n bytes (a protocol string's body)
+ * has the word. */
+static int memmem_word(const unsigned char *list, size_t n, const char *word) {
+    char text[256];
+    if (n >= sizeof text) n = sizeof text - 1;
+    memcpy(text, list, n);
+    text[n] = 0;
+    return has_word(text, word);
 }
 
 /* ---------------------------------------------------------------- network */
@@ -933,6 +953,32 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
             }
             snprintf(reply, n, "n,,\001auth=Bearer %s\001\001", cfg->token);
             put_str(&a, reply);
+            free(reply);
+            rc = a.failed ? -1 : send_frame(c, 'a', &a);
+            free(a.b);
+            continue;
+        }
+        if (kind == 'A' && !scram_started && len > 4 && memmem_word(body + 4, len - 4, "PLAIN") &&
+            !memmem_word(body + 4, len - 4, "SCRAM-SHA-256")) {
+            /* A directory checks this role's password: the password itself
+             * (RFC 4616), never without TLS. */
+            const char *user = cfg->user ? cfg->user : d.user, *pw = cfg->password ? cfg->password : "";
+            size_t n = strlen(user) + strlen(pw) + 2;
+            char *reply = malloc(n + 1);
+            buf a = {0};
+            free(body);
+            scram_started = 1;
+            if (!reply || !tls_active(c)) {
+                free(reply);
+                set_error(err, "", "the server asks for the password itself, which needs TLS");
+                drop_conn(c);
+                return NULL;
+            }
+            reply[0] = 0;
+            memcpy(reply + 1, user, strlen(user) + 1);
+            memcpy(reply + 2 + strlen(user), pw, strlen(pw));
+            put_le(&a, (uint64_t)n, 4);
+            put(&a, reply, n);
             free(reply);
             rc = a.failed ? -1 : send_frame(c, 'a', &a);
             free(a.b);

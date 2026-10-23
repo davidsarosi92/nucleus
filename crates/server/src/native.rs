@@ -405,8 +405,7 @@ fn login(
         log("login", &format!("{user} by its client certificate"));
     } else if config.auth.wants_password() {
         if version >= 4 {
-            let binding = tls.and_then(|t| t.channel_binding.as_deref());
-            match exchange(input, out, &**kv, config, &user, binding)? {
+            match exchange(input, out, &**kv, config, &user, tls)? {
                 Ok(Proved::Password) => {}
                 Ok(Proved::Nothing) => return Ok(Err(refused())),
                 Ok(Proved::Bearer(id)) => {
@@ -414,6 +413,12 @@ fn login(
                     identity = Some(id);
                 }
                 Err(e) => return Ok(Err(e)),
+            }
+        } else if crate::directory_user(config, &**kv, &user) {
+            // A password sent in Hello: to the directory only over TLS.
+            if tls.is_none() || !crate::directory_accepts(config, &user, &password).unwrap_or(false)
+            {
+                return Ok(Err(refused()));
             }
         } else if !config.accepts(&**kv, &user, &password) {
             return Ok(Err(refused()));
@@ -460,18 +465,35 @@ fn bearer_token(message: &str) -> Option<&str> {
 /// channel binding SCRAM-SHA-256-PLUS is offered too, and the client's GS2
 /// header says which it takes.  OAUTHBEARER (when the server has a
 /// [`crate::Bearer`]): one `a` with the token (RFC 7628's initial
-/// response), which names the user — Hello's is not used.
+/// response), which names the user — Hello's is not used.  PLAIN (RFC
+/// 4616), instead of SCRAM, for a role whose password a [`crate::Directory`]
+/// checks — over TLS only: one `a` with the password.
 fn exchange(
     input: &mut impl Read,
     out: &mut impl Write,
     kv: &dyn Kv,
     config: &Config,
     user: &str,
-    binding: Option<&[u8]>,
+    tls: Option<&crate::TlsInfo>,
 ) -> io::Result<Result<Proved, Error>> {
     let mut server = crate::scram_server(config, kv, user);
-    let mut mechanisms = String::from("SCRAM-SHA-256");
-    if let Some(b) = binding {
+    let directory = crate::directory_user(config, kv, user);
+    let mut mechanisms = if directory {
+        if tls.is_none() {
+            return Ok(Err(Error {
+                code: "28000",
+                message: format!(
+                    "the password of \"{user}\" is checked by a directory, which needs TLS"
+                ),
+            }));
+        }
+        String::from("PLAIN")
+    } else {
+        String::from("SCRAM-SHA-256")
+    };
+    if let Some(b) = tls.and_then(|t| t.channel_binding.as_deref())
+        && !directory
+    {
         server = server.with_channel_binding(b.to_vec());
         mechanisms = "SCRAM-SHA-256-PLUS SCRAM-SHA-256".into();
     }
@@ -494,6 +516,27 @@ fn exchange(
         Ok(m) => m,
         Err(e) => return Ok(Err(e)),
     };
+    if directory && first.contains('\0') {
+        // PLAIN: [authzid] NUL authcid NUL password; the user is Hello's.
+        let mut parts = first.splitn(3, '\0');
+        let (_authzid, authcid, password) = (parts.next(), parts.next(), parts.next());
+        if authcid.is_some_and(|a| !a.is_empty() && a != user) {
+            return Ok(Ok(Proved::Nothing));
+        }
+        return Ok(
+            match crate::directory_accepts(config, user, password.unwrap_or_default()) {
+                Ok(true) => Ok(Proved::Password),
+                Ok(false) => Ok(Proved::Nothing),
+                Err(why) => Err(Error {
+                    code: "08006",
+                    message: format!("the directory could not check the password: {why}"),
+                }),
+            },
+        );
+    }
+    if directory {
+        return Ok(Err(protocol("expected a PLAIN response")));
+    }
     if let Some(bearer) = &config.bearer
         && first.contains('\x01')
     {

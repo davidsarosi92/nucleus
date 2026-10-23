@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A directory's (LDAP) password through PLAIN, over TLS only.
 - An identity token instead of the password: `connect({ token })`.
 - Over TLS, SCRAM bound to the session (SCRAM-SHA-256-PLUS) when the
   server offers it.

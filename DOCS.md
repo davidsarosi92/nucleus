@@ -1358,7 +1358,19 @@ and are not administrators, while the session acts as itself, and `SET
 ROLE` to them); every claim is `current_setting('nucleus.claims.<name>')`
 (names in lower case; an array's items joined by commas), which `SET`
 cannot change (`55P02`) — so a policy can use a tenant claim
-(`Session::login_as`, `access::Identity`, `nucleus_server::Bearer`).  One thread per connection.  `--log-queries`
+(`Session::login_as`, `access::Identity`, `nucleus_server::Bearer`).
+**LDAP** (the `ldap` module, `modules/ldap`): `--ldap-url <url>
+(--ldap-bind-dn <template with {user}> | --ldap-search-base <dn>
+[--ldap-search-attribute <attr>] [--ldap-search-dn <dn>
+--ldap-search-password <pw>]) [--ldap-starttls] [--ldap-ca <pem>]` — a
+role that may log in and has no password of its own has it checked by the
+directory (a simple bind as the template's DN, the name escaped, or as the
+one entry a search finds; an empty password is never sent).  The server
+must then receive the password, so it asks for it only over TLS: `PLAIN`
+on `ncp` (§10), the cleartext method on pg-compat; without TLS such a login
+is refused (`28000`) before a password is sent, and an `ncp` client before
+version 4, which sends it in Hello, is refused too.  Roles with a password
+keep SCRAM (`nucleus_server::Directory`, `directory_user`).  One thread per connection.  `--log-queries`
 (`Config::log_queries`) prints every statement a client sends, and every
 error, to stderr — to see what a tool asks for.
 
@@ -1456,7 +1468,7 @@ header bytes not included; at most 1 GiB), then the body.
 |------|-----------|------|
 | `H` Hello | client → server, first | `u16` version (4; 1–3 still accepted), string user, string database, string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
 | `A` Authentication | server → client | string: the mechanisms, space-separated (`SCRAM-SHA-256`; over TLS with a channel binding `SCRAM-SHA-256-PLUS SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
-| `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message — or OAUTHBEARER's initial response |
+| `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message — or OAUTHBEARER's initial response, or PLAIN's |
 | `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |
 | `Q` Query | client → server | string SQL, `u8` result format (0 typed, 1 text), `u16` parameter count, the parameters as values |
 | `C` Columns | server → client | `u16` count, then per column: string name, type |
@@ -1471,8 +1483,10 @@ the client speaks version 4, they run SCRAM-SHA-256: the server sends `A`
 with the mechanisms — `SCRAM-SHA-256`, and over TLS, when the server's
 certificate defines a `tls-server-end-point` value (RFC 5929: the
 certificate hashed by its signature's hash, SHA-256 for MD5 and SHA-1),
-`SCRAM-SHA-256-PLUS SCRAM-SHA-256`, and with an OpenID Connect issuer
-`OAUTHBEARER` after them.  A client with an identity token takes
+`SCRAM-SHA-256-PLUS SCRAM-SHA-256` — or, for a role whose password a
+directory checks (LDAP), over TLS only, `PLAIN` instead of SCRAM — and with
+an OpenID Connect issuer `OAUTHBEARER` after them.  PLAIN (RFC 4616): one
+`a` with `<NUL><user><NUL><password>`; a client sends it only over TLS.  A client with an identity token takes
 OAUTHBEARER: one `a` with RFC 7628's initial response
 (`n,,\x01auth=Bearer <token>\x01\x01`); the token names the user (Hello's is
 not used), and the server answers Welcome or Error (`28000`, with why).
@@ -1587,6 +1601,7 @@ tls_verify=False)` (`ssl`); JavaScript `{ tls, tlsCa, tlsVerify }`
 --tls-cert <pem> --tls-key <pem>`.  An identity token (OAUTHBEARER) instead
 of the password: Rust `Config::token`, C / C++ `token`, Python `token=`,
 JavaScript `token`, Java `Config.token(…)`, `ncsql --token` or `NCTOKEN`.
+Every driver answers PLAIN (a directory's password) and only over TLS.
 
 **C:** `drivers/c` (`nucleus.h`, `nucleus.c`; C99, POSIX sockets or
 Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
@@ -1646,7 +1661,8 @@ digits), `Decimal` (exact, with `parse` / `toString`), `Buffer` (bytea),
 SQLSTATE, transactions, a wrong password, TLS verified, unverified and
 refused for an unknown CA, a login by client certificate, and one by a
 test issuer's token — `scripts/fixtures/oidc`, whose key was thrown away
-once the token was made), and `examples/<language>/` has the same
+once the token was made — and by a directory's password,
+`scripts/fake-ldap.py`, over TLS and refused without), and `examples/<language>/` has the same
 quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 [languages]` starts a server on a free port — with TLS, from a CA and a
 certificate it makes with `openssl`, when that is installed — and runs
@@ -1655,6 +1671,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 LDAP (T4):** the `ldap` module — passwords of
+  roles without their own checked by a directory (bind, or search and
+  bind; LDAPS, StartTLS), asked for only over TLS (`PLAIN` on `ncp`, the
+  cleartext method on pg-compat); every driver answers PLAIN, over TLS.
 - **2026-10-23 — §M14.25 OpenID Connect (T4):** the `oidc` module —
   identity tokens through OAUTHBEARER on `ncp`, their claims as read-only
   settings (`nucleus.claims.*`, `55P02`), a role claim's roles for the

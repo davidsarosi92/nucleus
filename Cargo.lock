@@ -430,6 +430,7 @@ version = "0.1.0"
 dependencies = [
  "nucleus-client",
  "nucleus-kv",
+ "nucleus-ldap",
  "nucleus-oidc",
  "nucleus-pg-compat",
  "nucleus-server",
@@ -486,6 +487,18 @@ dependencies = [
  "nucleus-platform",
  "nucleus-storage",
  "nucleus-txn",
+]
+
+[[package]]
+name = "nucleus-ldap"
+version = "0.1.0"
+dependencies = [
+ "nucleus-client",
+ "nucleus-kv",
+ "nucleus-server",
+ "rcgen",
+ "rustls",
+ "webpki-roots",
 ]
 
 [[package]]

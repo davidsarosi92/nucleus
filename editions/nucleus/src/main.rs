@@ -28,6 +28,10 @@ usage:
                      [--tls-cert <pem file> --tls-key <pem file> [--tls-client-ca <pem file>]]
                      [--oidc-issuer <url> --oidc-audience <name> [--oidc-jwks <file>]
                       [--oidc-user-claim <claim>] [--oidc-role-claim <claim>]]
+                     [--ldap-url <url> (--ldap-bind-dn <template with {user}> |
+                      --ldap-search-base <dn> [--ldap-search-attribute <attr>]
+                      [--ldap-search-dn <dn> --ldap-search-password <pw>])
+                      [--ldap-starttls] [--ldap-ca <pem file>]]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
@@ -36,7 +40,9 @@ usage:
                                     certificate, TLS for clients that ask; with
                                     a client CA, a client certificate naming
                                     the user logs it in without a password; with
-                                    an OIDC issuer, its identity tokens log in
+                                    an OIDC issuer, its identity tokens log in;
+                                    with LDAP, the directory checks the passwords
+                                    of roles without their own (over TLS)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

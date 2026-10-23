@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A directory's (LDAP) password through PLAIN, over TLS only.
 - An identity token instead of the password: `Config::token`.
 - SCRAM-SHA-256-PLUS over TLS, through the C driver.
 - Client certificates: `Config::tls_cert`, `tls_key`.

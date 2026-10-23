@@ -118,6 +118,17 @@ test("authentication", async () => {
   await assert.rejects(connect({ ...options, password: "wrong" }), (e: NucleusError) => e.code === "28P01");
 });
 
+test("directory", { skip: process.env.NUCLEUS_LDAP_USER === undefined && "the server has no directory" }, async () => {
+  const user = process.env.NUCLEUS_LDAP_USER as string;
+  const password = process.env.NUCLEUS_LDAP_PASSWORD as string;
+  const tlsCa = process.env.NUCLEUS_TLS_CA as string;
+  const db = await connect({ ...options, user, password, tlsCa });
+  assert.equal((await db.query("SELECT current_user")).rows[0][0], user);
+  await db.close();
+  await assert.rejects(connect({ ...options, user, password: "wrong", tlsCa }));
+  await assert.rejects(connect({ ...options, user, password }));
+});
+
 test("token", { skip: process.env.NUCLEUS_TOKEN === undefined && "the server has no issuer" }, async () => {
   const db = await connect({ ...options, user: "", token: process.env.NUCLEUS_TOKEN });
   const r = await db.query("SELECT current_user, current_setting('nucleus.claims.tenant')");

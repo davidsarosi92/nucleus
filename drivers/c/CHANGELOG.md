@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A directory's (LDAP) password through PLAIN, over TLS only.
 - An identity token instead of the password: `cfg.token` (OAUTHBEARER).
 - Over TLS, SCRAM bound to the session (SCRAM-SHA-256-PLUS,
   `tls-server-end-point` by OpenSSL) when the server offers it.

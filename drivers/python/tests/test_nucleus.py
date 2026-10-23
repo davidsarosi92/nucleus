@@ -140,6 +140,18 @@ class Conformance(unittest.TestCase):
             connect(password="wrong")
         self.assertEqual(e.exception.code, "28P01")
 
+    @unittest.skipUnless(os.environ.get("NUCLEUS_LDAP_USER"), "the server has no directory")
+    def test_directory(self):
+        user, pw = os.environ["NUCLEUS_LDAP_USER"], os.environ["NUCLEUS_LDAP_PASSWORD"]
+        ca = os.environ["NUCLEUS_TLS_CA"]
+        with connect(user=user, password=pw, tls_ca=ca) as c:
+            self.assertEqual(c.execute("SELECT current_user").rows, [(user,)])
+        with self.assertRaises(nucleus.OperationalError):
+            connect(user=user, password="wrong", tls_ca=ca)
+        # Not without TLS.
+        with self.assertRaises(nucleus.Error):
+            connect(user=user, password=pw)
+
     @unittest.skipUnless(os.environ.get("NUCLEUS_TOKEN"), "the server has no issuer")
     def test_token(self):
         with connect(user="", password=None, token=os.environ["NUCLEUS_TOKEN"]) as c:

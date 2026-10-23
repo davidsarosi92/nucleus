@@ -145,6 +145,26 @@ public final class NucleusTest {
         equal(errorCode(() -> NucleusClient.connect(config().password("wrong"))), "28P01", "wrong password");
     }
 
+    static void directory() {
+        String user = System.getenv("NUCLEUS_LDAP_USER");
+        if (user == null) {
+            System.out.println("(the server has no directory)");
+            return;
+        }
+        String pw = System.getenv("NUCLEUS_LDAP_PASSWORD");
+        java.nio.file.Path ca = java.nio.file.Path.of(System.getenv("NUCLEUS_TLS_CA"));
+        try (NucleusClient db = NucleusClient.connect(config().user(user).password(pw).tlsCa(ca))) {
+            equal(db.query("SELECT current_user").rows().get(0).get(0), user, "by the directory");
+        }
+        errorCode(() -> NucleusClient.connect(config().user(user).password("wrong").tlsCa(ca)));
+        try {
+            NucleusClient.connect(config().user(user).password(pw)).close();
+            throw new AssertionError("a directory password without TLS");
+        } catch (NucleusException expected) {
+            // refused
+        }
+    }
+
     static void token() {
         String token = System.getenv("NUCLEUS_TOKEN");
         if (token == null) {
@@ -198,7 +218,8 @@ public final class NucleusTest {
         run("authentication", NucleusTest::authentication);
         run("tls", NucleusTest::tls);
         run("token", NucleusTest::token);
-        check(passed == 8, "all tests ran");
+        run("directory", NucleusTest::directory);
+        check(passed == 9, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

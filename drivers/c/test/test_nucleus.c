@@ -242,6 +242,25 @@ static void authentication(void) {
     CHECK(nc_connect(&cfg, &err) == NULL && strcmp(err.code, "28P01") == 0);
 }
 
+static void directory(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db;
+    const char *user = getenv("NUCLEUS_LDAP_USER");
+    if (!user || !nc_tls_supported()) return;
+    cfg.user = user;
+    cfg.password = getenv("NUCLEUS_LDAP_PASSWORD");
+    cfg.tls_ca = getenv("NUCLEUS_TLS_CA");
+    db = nc_connect(&cfg, &err);
+    CHECK(db != NULL);
+    if (db) nc_close(db);
+    cfg.password = "wrong";
+    CHECK(nc_connect(&cfg, &err) == NULL);
+    cfg.password = getenv("NUCLEUS_LDAP_PASSWORD");
+    cfg.tls_ca = NULL;
+    CHECK(nc_connect(&cfg, &err) == NULL);
+}
+
 static void token(void) {
     nc_error err;
     nc_config cfg = config();
@@ -324,6 +343,7 @@ int main(void) {
     authentication();
     tls();
     token();
+    directory();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

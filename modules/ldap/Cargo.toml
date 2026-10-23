@@ -1,0 +1,28 @@
+[package]
+name = "nucleus-ldap"
+description = "LDAP for nucleus: passwords checked by a directory (bind, or search and bind)"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+
+# A module depends on nucleus's public API crates only, by version (the
+# path is for building inside the repository; a published copy drops it).
+[dependencies]
+nucleus-server = { version = "0.1.0", path = "../../crates/server" }
+# LDAPS and StartTLS.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+nucleus-kv = { version = "0.1.0", path = "../../crates/kv" }
+nucleus-client = { version = "0.1.0", path = "../../crates/client" }
+rcgen = "0.13"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

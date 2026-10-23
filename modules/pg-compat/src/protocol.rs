@@ -456,7 +456,35 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     let by_certificate = nucleus_server::certificate_login(config, &*kv, tls_info.as_ref(), &user);
     if config.auth.wants_password()
         && !by_certificate
-        && !sasl(
+        && tls_info.is_none()
+        && nucleus_server::directory_user(config, &*kv, &user)
+    {
+        send_error(
+            &mut out,
+            &Error {
+                code: "28000",
+                message: format!(
+                    "the password of \"{user}\" is checked by a directory, which needs TLS (sslmode=require)"
+                ),
+            },
+        )?;
+        out.flush()?;
+        return Ok(());
+    }
+    let proved = if !config.auth.wants_password() || by_certificate {
+        true
+    } else if nucleus_server::directory_user(config, &*kv, &user) {
+        // The directory needs the password itself: asked for in clear,
+        // over TLS only.
+        tls_info.is_some() && {
+            out.write_all(&Msg::new(b'R').i32(3).finish())?;
+            out.flush()?;
+            let (tag, body) = read_message(&mut input)?;
+            let given = Body { b: &body }.cstr().unwrap_or_default();
+            tag == b'p' && nucleus_server::directory_accepts(config, &user, &given).unwrap_or(false)
+        }
+    } else {
+        sasl(
             &mut input,
             &mut out,
             &*kv,
@@ -464,7 +492,8 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
             &user,
             tls_info.as_ref().and_then(|t| t.channel_binding.as_deref()),
         )?
-    {
+    };
+    if !proved {
         send_error(
             &mut out,
             &Error {

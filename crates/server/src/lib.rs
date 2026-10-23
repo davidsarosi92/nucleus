@@ -79,6 +79,42 @@ pub trait Bearer: Send + Sync + std::fmt::Debug {
     fn verify(&self, kv: &dyn Kv, token: &str) -> Result<Identity, String>;
 }
 
+/// A directory that checks passwords — LDAP: a module provides it
+/// (`nucleus-ldap`).  It checks the password of a role that has none of
+/// its own in the catalog (`CREATE USER alice` without `PASSWORD`), so the
+/// server must receive the password: it asks for it only over TLS
+/// (`PLAIN` on `ncp`, the cleartext method on the PostgreSQL protocol).
+pub trait Directory: Send + Sync + std::fmt::Debug {
+    /// How the server describes it at startup.
+    fn describe(&self) -> String;
+
+    /// Whether `user`'s password is `password` (never for an empty one),
+    /// or why it could not tell.
+    fn check(&self, user: &str, password: &str) -> Result<bool, String>;
+}
+
+/// Whether `user`'s password is the directory's: there is a directory, and
+/// `user` is a role that may log in and has no password of its own.
+pub fn directory_user(config: &Config, kv: &dyn Kv, user: &str) -> bool {
+    if config.directory.is_none() || user.starts_with(nucleus_sql::tokens::PREFIX) {
+        return false;
+    }
+    let check = || -> nucleus_sql::Result<bool> {
+        let txn = kv.begin(nucleus_kv::TxnOptions::read_only())?;
+        Ok(nucleus_sql::roles::get(&*txn, user)?.is_some_and(|r| r.login && r.password.is_none()))
+    };
+    check().unwrap_or(false)
+}
+
+/// Whether the directory takes `user`'s `password` (see [`directory_user`]).
+pub fn directory_accepts(config: &Config, user: &str, password: &str) -> Result<bool, String> {
+    match &config.directory {
+        Some(_) if password.is_empty() => Ok(false),
+        Some(d) => d.check(user, password),
+        None => Ok(false),
+    }
+}
+
 /// Whether a client logs in by its certificate: TLS verified one naming
 /// `user`, and the authenticator admits that.
 pub fn certificate_login(config: &Config, kv: &dyn Kv, tls: Option<&TlsInfo>, user: &str) -> bool {
@@ -249,6 +285,8 @@ pub struct Config {
     pub tls: Option<Arc<dyn Tls>>,
     /// Bearer tokens (OIDC), as well as passwords (`None`: none).
     pub bearer: Option<Arc<dyn Bearer>>,
+    /// A directory (LDAP) for the passwords of roles without their own.
+    pub directory: Option<Arc<dyn Directory>>,
 }
 
 impl Default for Config {
@@ -271,6 +309,7 @@ impl Config {
             registry: nucleus_sql::ext::Registry::shared_builtin(),
             tls: None,
             bearer: None,
+            directory: None,
         }
     }
 
@@ -291,6 +330,13 @@ impl Config {
     /// The same, also taking bearer tokens (OIDC) that `bearer` accepts.
     pub fn with_bearer(mut self, bearer: Arc<dyn Bearer>) -> Self {
         self.bearer = Some(bearer);
+        self
+    }
+
+    /// The same, checking the passwords of roles without their own against
+    /// `directory`.
+    pub fn with_directory(mut self, directory: Arc<dyn Directory>) -> Self {
+        self.directory = Some(directory);
         self
     }
 

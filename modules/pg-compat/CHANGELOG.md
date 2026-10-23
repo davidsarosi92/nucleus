@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A role whose password a directory checks (LDAP) logs in by the cleartext
+  method over TLS only (`28000` without).
 - SCRAM-SHA-256-PLUS over TLS (`tls-server-end-point` channel binding),
   offered first; a `y,,` client is refused where binding is possible.
 - `SSLRequest` is accepted when the server has TLS (`Config::tls`, the

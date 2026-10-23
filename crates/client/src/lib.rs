@@ -867,6 +867,22 @@ impl Client {
                                 c.conn.get_mut().flush()?;
                                 continue;
                             }
+                            if offered.contains(&"PLAIN") && !offered.contains(&"SCRAM-SHA-256") {
+                                // A directory checks this role's password:
+                                // the password itself, never without TLS.
+                                if c.config.tls.is_none() {
+                                    return Err(Error::Protocol(
+                                        "the server asks for the password itself, which needs TLS"
+                                            .into(),
+                                    ));
+                                }
+                                let password = c.config.password.clone().unwrap_or_default();
+                                let mut body = Vec::new();
+                                put_str(&mut body, &format!("\0{}\0{password}", c.config.user));
+                                c.conn.get_mut().write_all(&frame(b'a', &body))?;
+                                c.conn.get_mut().flush()?;
+                                continue;
+                            }
                             if !offered.contains(&"SCRAM-SHA-256") {
                                 return Err(Error::Protocol(format!(
                                     "unsupported authentication {msg:?}"
