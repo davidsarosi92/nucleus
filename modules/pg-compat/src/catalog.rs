@@ -548,6 +548,7 @@ fn def_table(k: usize) -> Table {
         next_index_id: 1,
         foreign_keys: Vec::new(),
         referenced_by: Vec::new(),
+        owner: None,
     }
 }
 
@@ -639,6 +640,18 @@ fn type_of(c: &Column) -> (i64, i64) {
         type_oid(c.ty)
     };
     (oid, typmod)
+}
+
+/// A role's oid: stable, from its name (the bootstrap administrator's is
+/// PostgreSQL's 10).
+pub fn role_oid(name: &str) -> i64 {
+    if name == ROLE {
+        return OWNER;
+    }
+    let h = name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+    });
+    16_384 + (h % (1 << 30)) as i64
 }
 
 /// The oid of a type.
@@ -1076,7 +1089,14 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     ("relnamespace", int(rel.ns)),
                     ("reltype", int(0)),
                     ("reloftype", int(0)),
-                    ("relowner", int(OWNER)),
+                    (
+                        "relowner",
+                        int(rel
+                            .table
+                            .as_ref()
+                            .and_then(|(t, _)| t.owner.as_deref())
+                            .map_or(OWNER, role_oid)),
+                    ),
                     ("relam", int(rel.am)),
                     ("relfilenode", int(rel.oid)),
                     ("reltablespace", int(0)),
@@ -1286,19 +1306,56 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
             }
         }
         "pg_roles" => {
-            out.push(r(&[
-                ("oid", int(OWNER)),
-                ("rolname", text(ROLE)),
-                ("rolsuper", Value::Bool(true)),
-                ("rolinherit", Value::Bool(true)),
-                ("rolcreaterole", Value::Bool(true)),
-                ("rolcreatedb", Value::Bool(true)),
-                ("rolcanlogin", Value::Bool(true)),
-                ("rolreplication", Value::Bool(false)),
-                ("rolconnlimit", int(-1)),
-                ("rolpassword", text("********")),
-                ("rolbypassrls", Value::Bool(true)),
-            ]));
+            let roles = catalog::roles(txn)?;
+            if roles.is_empty() {
+                // An unclaimed database: its bootstrap administrator.
+                out.push(r(&[
+                    ("oid", int(OWNER)),
+                    ("rolname", text(ROLE)),
+                    ("rolsuper", Value::Bool(true)),
+                    ("rolinherit", Value::Bool(true)),
+                    ("rolcreaterole", Value::Bool(true)),
+                    ("rolcreatedb", Value::Bool(true)),
+                    ("rolcanlogin", Value::Bool(true)),
+                    ("rolreplication", Value::Bool(false)),
+                    ("rolconnlimit", int(-1)),
+                    ("rolpassword", text("********")),
+                    ("rolbypassrls", Value::Bool(true)),
+                ]));
+            }
+            for role in roles {
+                out.push(r(&[
+                    ("oid", int(role_oid(&role.name))),
+                    ("rolname", text(&role.name)),
+                    ("rolsuper", Value::Bool(role.superuser)),
+                    ("rolinherit", Value::Bool(role.inherit)),
+                    ("rolcreaterole", Value::Bool(role.createrole)),
+                    ("rolcreatedb", Value::Bool(role.superuser)),
+                    ("rolcanlogin", Value::Bool(role.login)),
+                    ("rolreplication", Value::Bool(false)),
+                    (
+                        "rolconnlimit",
+                        int(role.connection_limit.map_or(-1, i64::from)),
+                    ),
+                    ("rolpassword", text("********")),
+                    (
+                        "rolvaliduntil",
+                        role.valid_until.map_or(Value::Null, Value::TimestampTz),
+                    ),
+                    ("rolbypassrls", Value::Bool(role.superuser)),
+                ]));
+            }
+        }
+        "pg_auth_members" => {
+            for m in catalog::memberships(txn)? {
+                out.push(r(&[
+                    ("oid", int(role_oid(&format!("{}\0{}", m.role, m.member)))),
+                    ("roleid", int(role_oid(&m.role))),
+                    ("member", int(role_oid(&m.member))),
+                    ("grantor", int(OWNER)),
+                    ("admin_option", Value::Bool(m.admin_option)),
+                ]));
+            }
         }
         "pg_database" => {
             out.push(r(&[
@@ -1676,7 +1733,6 @@ impl ScalarFunction for PgFunction {
 
 /// Evaluates a `pg-compat` function.
 fn call(f: PgFn, args: &[Value], txn: &dyn KvTxn, registry: &Registry) -> Result<Value> {
-    let null = |i: usize| args.get(i).is_none_or(Value::is_null);
     let as_int = |i: usize| match args.get(i) {
         Some(Value::Int(n)) => Some(*n),
         Some(Value::Numeric(d)) => d.to_i64().ok(),
@@ -1700,13 +1756,19 @@ fn call(f: PgFn, args: &[Value], txn: &dyn KvTxn, registry: &Registry) -> Result
             Some(oid) => Value::Text(ns_name(oid).map_or_else(|| oid.to_string(), str::to_string)),
             None => Value::Null,
         },
-        PgFn::RegRole | PgFn::GetUserById => {
-            if null(0) {
-                Value::Null
-            } else {
-                Value::Text(ROLE.into())
+        PgFn::RegRole | PgFn::GetUserById => match as_int(0) {
+            None => Value::Null,
+            Some(oid) => {
+                let roles = catalog::roles(txn)?;
+                Value::Text(
+                    roles
+                        .into_iter()
+                        .map(|r| r.name)
+                        .find(|n| role_oid(n) == oid)
+                        .unwrap_or_else(|| ROLE.into()),
+                )
             }
-        }
+        },
         // On the search path: public and pg_catalog.
         PgFn::TableIsVisible => match as_int(0) {
             Some(oid) => Value::Bool(

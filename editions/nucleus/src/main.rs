@@ -1,5 +1,6 @@
 //! The `nucleus` command-line tool.
 
+mod init;
 mod kv;
 mod server;
 mod sql;
@@ -9,6 +10,9 @@ use std::process::ExitCode;
 const USAGE: &str = "\
 usage:
   nucleus --version
+  nucleus init <dir> [--user <name>] the database's first administrator (default
+                                    admin), the password from NUCLEUS_PASSWORD
+                                    or standard input
   nucleus kv <dir> get <key>
   nucleus kv <dir> put <key> <value>
   nucleus kv <dir> delete <key>
@@ -37,6 +41,7 @@ fn main() -> ExitCode {
             println!("nucleus {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        Some("init") => init::run(&args[1..]),
         Some("kv") => kv::run(&args[1..]),
         Some("sql") => sql::run(&args[1..]),
         Some("server") => server::run(&args[1..]),

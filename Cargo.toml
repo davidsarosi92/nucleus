@@ -11,6 +11,7 @@ repository = "https://github.com/davidsarosi92/nucleus"
 [workspace.dependencies]
 # Path and version: in the repository the path is used; a published
 # crate keeps the version (PLAN.md §M14.19).
+nucleus-crypto = { version = "0.1.0", path = "crates/crypto" }
 nucleus-platform = { version = "0.1.0", path = "crates/platform" }
 nucleus-storage = { version = "0.1.0", path = "crates/storage" }
 nucleus-txn = { version = "0.1.0", path = "crates/txn" }

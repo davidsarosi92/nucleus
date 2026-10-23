@@ -803,6 +803,8 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 07 <from> 00 <to>` | a cast taught: its function and context |
 | `00 08 <type>` | the oldest encoding version a registered type's stored values may be in |
 | `00 09 <enum>` | an enum: its labels and their sort keys, in order |
+| `00 0A <role>` | a role: its attributes and password verifier (§9) |
+| `00 0B <role> 00 <member>` | a membership: its admin option |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -997,7 +999,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | Table | Rows |
 |-------|------|
 | `nc_catalog.schemas` | `name`, `description` (the session registry's schemas) |
-| `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows` |
+| `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows`, `owner` |
 | `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key` |
 | `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix`, `orderings` (per column, the taught ordering it is indexed in, or NULL) |
 | `nc_catalog.constraints` | `table_id`, `table_name`, `name`, `kind`, `definition` |
@@ -1007,6 +1009,8 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.operators` | `symbol`, `left_type`, `right_type`, `function`, `source` (`distance`: a type's ability; `registered`: a module's; `taught`) |
 | `nc_catalog.casts` | `from_type`, `to_type`, `function`, `context` |
 | `nc_catalog.enums` | `type`, `label`, `position`, `sort_key` (hex) |
+| `nc_catalog.roles` | `name`, `superuser`, `login`, `inherit`, `createrole`, `connection_limit`, `has_password`, `valid_until` |
+| `nc_catalog.role_members` | `role`, `member`, `admin_option` |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
 
 **PostgreSQL compatibility: the `pg-compat` module** (`modules/pg-compat`,
@@ -1207,11 +1211,34 @@ nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
 ```
 
 The server speaks **the nucleus protocol** (§10, `nucleus_server::serve`)
-on `--listen` (default `127.0.0.1:20035`).  Clients log in as user
-`nucleus` with password `nucleus` unless `--user` / `--password` say
-otherwise; `--no-auth` accepts anyone (`Config::trust()`); a wrong user or
-password is `28P01`.  Every nucleus client tries `nucleus` / `nucleus` by
-default, so a fresh server and client work together unconfigured.
+on `--listen` (default `127.0.0.1:20035`).  **Who logs in is the
+database's roles** (`roles.rs`, §M14.25): `CREATE ROLE` / `CREATE USER`
+(a role with `LOGIN`) `[WITH] SUPERUSER | LOGIN | INHERIT | CREATEROLE |
+CONNECTION LIMIT n | PASSWORD 'p' | VALID UNTIL 't' | IN ROLE r, …` (and
+their `NO…` forms), `ALTER ROLE … options | RENAME TO`, `DROP ROLE [IF
+EXISTS]` (refused while it owns a table, `2BP01`, or is the session's,
+`55006`), `GRANT role TO role [WITH ADMIN OPTION]` (a cycle is
+`0LP01`), `REVOKE [ADMIN OPTION FOR] role FROM role`, `SET ROLE r` /
+`RESET ROLE`.  Passwords are kept as SCRAM-SHA-256 verifiers
+(`nucleus-crypto`: SHA-256, HMAC, PBKDF2, 4096 iterations), never in
+clear.  An administrator (`SUPERUSER`) may do everything; `CREATEROLE`
+manages roles other than administrators, and a role it makes is
+administered by its maker; a role may change its own password; anyone
+else gets `42501`.  `current_user` is the role a statement runs as,
+`session_user` the one that logged in (`access::with_who`, as `now()`'s
+time); a table's owner is its maker (`nc_catalog.tables.owner`, table
+record version 7).
+
+**Bootstrap.**  A database whose catalog has no administrator that can
+log in with a password is *unclaimed*: the server's `--user` /
+`--password` (default `nucleus` / `nucleus`) log in as an administrator,
+so a fresh server and client work together unconfigured.  `nucleus init
+<dir> [--user <name>]` claims it — creates the first administrator, the
+password from `NUCLEUS_PASSWORD` or standard input — or one is made with
+`CREATE USER … SUPERUSER PASSWORD …`; from then on only the catalog's
+roles log in (a wrong user or password, a role without `LOGIN` or an
+expired password: `28P01`, not told apart).  `--no-auth` accepts any
+user that is a role (any name while unclaimed).
 Passwords travel in clear text: keep servers on trusted networks (TLS is
 later work).  One thread per connection.  `--log-queries`
 (`Config::log_queries`) prints every statement a client sends, and every
@@ -1224,10 +1251,12 @@ the pg-compat module, which the `nucleus` edition adds;
 `serve_front_end(front, listener, kv, config)` runs any.  The server
 starts `ncp` and each `--front-end <name>` (`--pg-compat` is `--front-end
 pg`).  `Config { auth, log_queries }`: `auth` is an `Authenticator`
-(`describe`, `wants_password`, `accepts(user, password)`) — `Password`
-(one user; `Config::password`, the default `nucleus` / `nucleus`) or
-`Trust` (`Config::trust`, `--no-auth`); users, roles and the other
-methods are §M14.25.  `Config::registry` is what sessions have (the
+(`describe`, `wants_password`, `accepts(kv, user, password)`) —
+`Password` (the catalog's roles, or while unclaimed one user;
+`Config::password`, the default `nucleus` / `nucleus`) or `Trust`
+(`Config::trust`, `--no-auth`); after it accepts, a front end logs the
+session in (`Session::login`).  Further methods (SCRAM on the wire,
+tokens, certificates, OIDC, LDAP) are §M14.25's later steps.  `Config::registry` is what sessions have (the
 built-ins by default; a custom build adds its modules —
 `Config::with_registry`); pg-compat's front end adds its module on top.
 
@@ -1435,6 +1464,13 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 users and roles (T1):** roles in the catalog
+  (`CREATE / ALTER / DROP ROLE`, `CREATE USER`, membership with
+  inheritance and admin option, `SET ROLE`), SCRAM-SHA-256 password
+  verifiers (`nucleus-crypto`), table owners, logins checked against the
+  catalog once a database is claimed (`nucleus init`), `current_user` /
+  `session_user`; `nc_catalog.roles`, `role_members`; pg-compat's
+  `pg_roles`, `pg_auth_members`, `relowner`.
 - **2026-10-22 — §M14.26 shipped.**  Core types: integers by width,
   `real`, `bytea` and large values out of line, `time`, `char(n)`,
   `inet` / `cidr`, enums; `ncp` version 3 in every driver.

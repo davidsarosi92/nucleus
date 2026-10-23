@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `pg_roles` and `pg_auth_members` show the database's roles and
+  memberships (nucleus's `nc_catalog.roles` / `role_members` under their
+  PostgreSQL names); `pg_class.relowner` and `pg_get_userbyid` its owners.
+
 - `smallint` and `integer` are their own types in nucleus now: sent as
   `int2` (oid 21) and `int4` (oid 23), in text and binary (checked
   against PostgreSQL 18's `int2send` / `int4send`); binary parameters of

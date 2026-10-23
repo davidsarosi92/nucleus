@@ -197,6 +197,112 @@ impl<'a> Parser<'a> {
     }
 
     /// An identifier (a non-reserved word or a quoted name).
+    /// `[WITH] option …` of `CREATE ROLE` / `ALTER ROLE`.
+    fn role_options(&mut self) -> Result<Vec<RoleOption>> {
+        self.eat_kw("with");
+        let mut out = Vec::new();
+        while let Some(Token::Word(w)) = self.peek() {
+            let w = w.clone();
+            self.pos += 1;
+            out.push(match w.as_str() {
+                "superuser" => RoleOption::Superuser(true),
+                "nosuperuser" => RoleOption::Superuser(false),
+                "login" => RoleOption::Login(true),
+                "nologin" => RoleOption::Login(false),
+                "inherit" => RoleOption::Inherit(true),
+                "noinherit" => RoleOption::Inherit(false),
+                "createrole" => RoleOption::CreateRole(true),
+                "nocreaterole" => RoleOption::CreateRole(false),
+                "connection" => {
+                    self.expect_kw("limit")?;
+                    let neg = self.eat_op("-");
+                    let n = match self.next() {
+                        Some(Token::Number(n)) => n
+                            .parse::<u32>()
+                            .map_err(|_| Error::syntax("bad connection limit"))?,
+                        _ => return Err(self.error("expected a number")),
+                    };
+                    RoleOption::ConnectionLimit(if neg { None } else { Some(n) })
+                }
+                "password" | "encrypted" => {
+                    if w == "encrypted" {
+                        self.expect_kw("password")?;
+                    }
+                    if self.eat_kw("null") {
+                        RoleOption::Password(None)
+                    } else {
+                        RoleOption::Password(Some(self.string()?))
+                    }
+                }
+                "valid" => {
+                    self.expect_kw("until")?;
+                    RoleOption::ValidUntil(self.string()?)
+                }
+                "in" => {
+                    let _ = self.eat_kw("role") || self.eat_kw("group");
+                    let mut roles = vec![self.ident()?];
+                    while self.eat_op(",") {
+                        roles.push(self.ident()?);
+                    }
+                    RoleOption::InRole(roles)
+                }
+                _ => {
+                    self.pos -= 1;
+                    break;
+                }
+            });
+        }
+        Ok(out)
+    }
+
+    /// `GRANT role, … TO role, … [WITH ADMIN OPTION]`.
+    fn grant(&mut self) -> Result<Statement> {
+        self.expect_kw("grant")?;
+        let roles = self.name_list()?;
+        if self.peek_kw("on") {
+            return Err(Error::feature(
+                "privileges on objects are not supported yet",
+            ));
+        }
+        self.expect_kw("to")?;
+        let members = self.name_list()?;
+        let admin_option = self.eat_kws(&["with", "admin", "option"]);
+        Ok(Statement::GrantRole {
+            roles,
+            members,
+            admin_option,
+        })
+    }
+
+    /// `REVOKE [ADMIN OPTION FOR] role, … FROM role, …`.
+    fn revoke(&mut self) -> Result<Statement> {
+        self.expect_kw("revoke")?;
+        let admin_option_only = self.eat_kws(&["admin", "option", "for"]);
+        let roles = self.name_list()?;
+        if self.peek_kw("on") {
+            return Err(Error::feature(
+                "privileges on objects are not supported yet",
+            ));
+        }
+        self.expect_kw("from")?;
+        let members = self.name_list()?;
+        let _ = self.eat_kw("cascade") || self.eat_kw("restrict");
+        Ok(Statement::RevokeRole {
+            roles,
+            members,
+            admin_option_only,
+        })
+    }
+
+    /// `name, name, …` (no parentheses).
+    fn name_list(&mut self) -> Result<Vec<String>> {
+        let mut out = vec![self.ident()?];
+        while self.eat_op(",") {
+            out.push(self.ident()?);
+        }
+        Ok(out)
+    }
+
     /// A string literal's text.
     fn string(&mut self) -> Result<String> {
         match self.peek() {
@@ -298,6 +404,12 @@ impl<'a> Parser<'a> {
                 Ok(Statement::Rollback)
             }
             "set" => self.set(),
+            "grant" => self.grant(),
+            "revoke" => self.revoke(),
+            "reset" if matches!(self.peek_at(1), Some(Token::Word(w)) if w == "role") => {
+                self.pos += 2;
+                Ok(Statement::SetRole(None))
+            }
             "show" => {
                 self.pos += 1;
                 if self.eat_kws(&["transaction", "isolation", "level"]) {
@@ -364,6 +476,15 @@ impl<'a> Parser<'a> {
             });
         }
         let _ = self.eat_kw("session") || self.eat_kw("local");
+        if self.eat_kw("role") {
+            let _ = self.eat_op("=") || self.eat_kw("to");
+            let role = match self.next() {
+                Some(Token::Word(w)) if w == "none" => None,
+                Some(Token::Word(w) | Token::Quoted(w) | Token::Str(w)) => Some(w),
+                _ => return Err(self.error("expected a role")),
+            };
+            return Ok(Statement::SetRole(role));
+        }
         let name = self.ident()?;
         if !self.eat_op("=") {
             self.expect_kw("to")?;
@@ -422,6 +543,20 @@ impl<'a> Parser<'a> {
         }
         if unique {
             return Err(self.error("expected INDEX"));
+        }
+        if self.peek_kw("role") || self.peek_kw("user") {
+            let user = self.eat_kw("user");
+            if !user {
+                self.expect_kw("role")?;
+            }
+            let name = self.ident()?;
+            let mut options = if user {
+                vec![RoleOption::Login(true)]
+            } else {
+                Vec::new()
+            };
+            options.extend(self.role_options()?);
+            return Ok(Statement::CreateRole { name, options });
         }
         if self.eat_kw("type") {
             let name = self.ident()?;
@@ -721,6 +856,14 @@ impl<'a> Parser<'a> {
                 if_exists,
             });
         }
+        if self.eat_kw("role") || self.eat_kw("user") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let mut names = vec![self.ident()?];
+            while self.eat_op(",") {
+                names.push(self.ident()?);
+            }
+            return Ok(Statement::DropRole { names, if_exists });
+        }
         if self.eat_kw("type") {
             let if_exists = self.eat_kws(&["if", "exists"]);
             let name = self.ident()?;
@@ -898,6 +1041,19 @@ impl<'a> Parser<'a> {
         self.expect_kw("alter")?;
         if self.eat_kw("type") {
             return self.alter_type();
+        }
+        if self.eat_kw("role") || self.eat_kw("user") {
+            let name = self.ident()?;
+            if self.eat_kws(&["rename", "to"]) {
+                return Ok(Statement::RenameRole {
+                    name,
+                    to: self.ident()?,
+                });
+            }
+            return Ok(Statement::AlterRole {
+                name,
+                options: self.role_options()?,
+            });
         }
         self.expect_kw("table")?;
         let table = self.relation()?;

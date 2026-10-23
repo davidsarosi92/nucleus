@@ -72,7 +72,11 @@ pub mod catalog {
         Column, Constraint, ConstraintKind, ForeignKey, Index, Table, constraints, tables,
     };
     pub use crate::fk::referenced_key;
+    pub use crate::roles::{Membership, Role, all as roles, memberships};
 }
+
+/// Who the current statement runs as ([`crate::access`]).
+pub use crate::access::{Who, current as current_who};
 
 /// The version of this interface.
 pub const API_VERSION: u32 = 1;

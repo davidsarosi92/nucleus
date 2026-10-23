@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 root=$PWD
 
 # The core crates a module may depend on, and theirs.
-core=(nucleus-platform nucleus-storage nucleus-txn nucleus-kv nucleus-sql nucleus-server nucleus-testkit)
+core=(nucleus-crypto nucleus-platform nucleus-storage nucleus-txn nucleus-kv nucleus-sql nucleus-server nucleus-testkit)
 if [ $# -gt 0 ]; then
     modules=("$@")
 else

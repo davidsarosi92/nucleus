@@ -53,7 +53,25 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("referenced_by", I),
             ("key_prefix", T),
             ("analyzed_rows", I),
+            ("owner", T),
         ],
+    ),
+    (
+        "roles",
+        &[
+            ("name", T),
+            ("superuser", B),
+            ("login", B),
+            ("inherit", B),
+            ("createrole", B),
+            ("connection_limit", I),
+            ("has_password", B),
+            ("valid_until", DataType::TimestampTz),
+        ],
+    ),
+    (
+        "role_members",
+        &[("role", T), ("member", T), ("admin_option", B)],
     ),
     (
         "columns",
@@ -255,6 +273,31 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     stats
                         .of(t)
                         .map_or(Value::Null, |s| Value::Int(s.rows as i64)),
+                    t.owner.clone().map_or(Value::Null, text),
+                ]);
+            }
+        }
+        "roles" => {
+            for r in crate::roles::all(txn)? {
+                out.push(vec![
+                    text(r.name),
+                    Value::Bool(r.superuser),
+                    Value::Bool(r.login),
+                    Value::Bool(r.inherit),
+                    Value::Bool(r.createrole),
+                    r.connection_limit
+                        .map_or(Value::Null, |n| Value::Int(i64::from(n))),
+                    Value::Bool(r.password.is_some()),
+                    r.valid_until.map_or(Value::Null, Value::TimestampTz),
+                ]);
+            }
+        }
+        "role_members" => {
+            for m in crate::roles::memberships(txn)? {
+                out.push(vec![
+                    text(m.role),
+                    text(m.member),
+                    Value::Bool(m.admin_option),
                 ]);
             }
         }

@@ -190,8 +190,10 @@ pub enum Func {
     NumericFit,
     /// A cast to `char(n)`: truncates or pads to `n`.
     CharFit,
-    /// `current_user`, `session_user`.
+    /// `current_user`: the role a statement runs as.
     CurrentUser,
+    /// `session_user`: the role the session logged in as.
+    SessionUser,
     /// `current_database()`, `current_catalog`.
     CurrentDatabase,
     /// `current_schema()`.
@@ -258,6 +260,7 @@ impl Func {
             Func::NumericFit => "numeric",
             Func::CharFit => "bpchar",
             Func::CurrentUser => "current_user",
+            Func::SessionUser => "session_user",
             Func::CurrentDatabase => "current_database",
             Func::CurrentSchema => "current_schema",
             Func::ArrayToString => "array_to_string",
@@ -1094,7 +1097,10 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
         Func::CurrentDate => return Ok(Value::Date(dt::ts_to_date(dt::now()?))),
         Func::LocalTimestamp => return Ok(Value::Timestamp(dt::now()?)),
         Func::LocalTime => return Ok(Value::Time(dt::time_of_ts(dt::now()?))),
-        Func::CurrentUser => return Ok(Value::Text("nucleus".into())),
+        Func::CurrentUser => return Ok(Value::Text(crate::access::current().user.clone())),
+        Func::SessionUser => {
+            return Ok(Value::Text(crate::access::current().session_user.clone()));
+        }
         Func::CurrentDatabase => return Ok(Value::Text("nucleus".into())),
         Func::CurrentSchema => return Ok(Value::Text("public".into())),
         _ => {}

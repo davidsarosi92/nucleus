@@ -80,8 +80,8 @@ const DATA: u8 = 0x01;
 /// and still reads as one) and `real` (tag 12; before, `double
 /// precision`'s tag 3), `bytea` (tag 13), `time` (14) and `char(n)` (15;
 /// before, `text`'s 4, and still read as text), `inet` and `cidr` (16, 17);
-/// older versions still read.
-const TABLE_VERSION: u8 = 6;
+/// version 7 an owner; older versions still read.
+const TABLE_VERSION: u8 = 7;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -277,6 +277,9 @@ pub struct Table {
     pub foreign_keys: Vec<ForeignKey>,
     /// The foreign keys referencing this table: (table, constraint name).
     pub referenced_by: Vec<(String, String)>,
+    /// The role that owns it (`None`: made before roles, owned by the
+    /// administrators).
+    pub owner: Option<String>,
 }
 
 impl Table {
@@ -358,6 +361,7 @@ impl Table {
         for (t, c) in &self.referenced_by {
             w.str(t).str(c);
         }
+        w.opt_str(self.owner.as_deref());
         w.0
     }
 
@@ -457,6 +461,7 @@ impl Table {
                 referenced_by.push((r.str()?, r.str()?));
             }
         }
+        let owner = if version >= 7 { r.opt_str()? } else { None };
         Ok(Self {
             id,
             name,
@@ -467,6 +472,7 @@ impl Table {
             next_index_id,
             foreign_keys,
             referenced_by,
+            owner,
         })
     }
 }
@@ -1082,6 +1088,7 @@ mod tests {
                 on_update: FkAction::SetNull,
             }],
             referenced_by: vec![("pets".into(), "pets_owner_fkey".into())],
+            owner: Some("alice".into()),
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));

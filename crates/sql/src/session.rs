@@ -96,6 +96,10 @@ pub struct Session {
     settings: BTreeMap<String, String>,
     /// The database's format record has been checked (or written).
     format_checked: bool,
+    /// Who its statements run as.
+    who: Arc<crate::access::Who>,
+    /// Who it logged in as (`SET ROLE` changes `who`, not this).
+    login: Arc<crate::access::Who>,
 }
 
 impl std::fmt::Debug for Session {
@@ -152,7 +156,24 @@ impl Session {
             default_isolation: IsolationLevel::Snapshot,
             settings: BTreeMap::new(),
             format_checked: false,
+            who: Arc::new(crate::access::Who::system()),
+            login: Arc::new(crate::access::Who::system()),
         }
+    }
+
+    /// Logs the session in as `user` (authenticated already): its
+    /// statements run as that role from now on (`28000` if the database
+    /// has no such role and is claimed — [`crate::roles`]).
+    pub fn login(&mut self, user: &str) -> Result<()> {
+        let txn = self.kv.begin(TxnOptions::read_only())?;
+        self.login = Arc::new(crate::roles::login_identity(&*txn, user)?);
+        self.who = self.login.clone();
+        Ok(())
+    }
+
+    /// Who the session's statements run as.
+    pub fn who(&self) -> &crate::access::Who {
+        &self.who
     }
 
     /// The first statement of a session checks the database's format
@@ -282,7 +303,23 @@ impl Session {
                     rows: vec![vec![Value::Text(value)]],
                 })
             }
-            _ => self.run_in_txn(stmt, params),
+            Statement::SetRole(role) => {
+                let who = match self.block.as_ref().and_then(|b| b.txn.as_ref()) {
+                    Some(txn) => {
+                        crate::roles::set_role(txn.as_ref(), &self.login, role.as_deref())?
+                    }
+                    None => {
+                        let txn = self.kv.begin(TxnOptions::read_only())?;
+                        crate::roles::set_role(&*txn, &self.login, role.as_deref())?
+                    }
+                };
+                self.who = Arc::new(who);
+                Ok(Output::Command("SET".into()))
+            }
+            _ => {
+                let who = self.who.clone();
+                crate::access::with_who(&who, || self.run_in_txn(stmt, params))
+            }
         }
     }
 
@@ -667,6 +704,13 @@ pub fn execute(
             alter_type(txn, reg, type_name, action)?;
             Output::Command("ALTER TYPE".into())
         }
+        Statement::CreateRole { .. }
+        | Statement::AlterRole { .. }
+        | Statement::RenameRole { .. }
+        | Statement::DropRole { .. }
+        | Statement::GrantRole { .. }
+        | Statement::RevokeRole { .. } => Output::Command(crate::roles::run(txn, stmt)?),
+        Statement::SetRole(_) => unreachable!("handled by the session"),
         Statement::CreateEnum { name, labels } => {
             crate::enums::create(txn, reg, name, labels)?;
             Output::Command("CREATE TYPE".into())
@@ -918,6 +962,7 @@ fn create_table(
         next_index_id: 1,
         foreign_keys: Vec::new(),
         referenced_by: Vec::new(),
+        owner: Some(crate::access::current().user.clone()),
     };
     for (n, cols) in uniques {
         if catalog::find_index(&*txn, &n)?.is_some() {

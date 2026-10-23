@@ -3,6 +3,7 @@
 //!
 //! [`Session`] is the entry point: `Session::new(kv).execute("SELECT 1")`.
 
+pub mod access;
 pub mod ast;
 pub mod binder;
 pub mod builtin;
@@ -28,6 +29,7 @@ pub mod optimizer;
 pub mod parser;
 
 pub mod plan;
+pub mod roles;
 pub mod session;
 pub mod stats;
 pub mod types;

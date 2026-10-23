@@ -366,7 +366,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
         let (tag, body) = read_message(&mut input)?;
         let given = Body { b: &body }.cstr().unwrap_or_default();
         let user = params.get("user").cloned().unwrap_or_default();
-        if tag != b'p' || !config.accepts(&user, &given) {
+        if tag != b'p' || !config.accepts(&*kv, &user, &given) {
             send_error(
                 &mut out,
                 &Error {
@@ -377,6 +377,12 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
             out.flush()?;
             return Ok(());
         }
+    }
+    let mut session = Session::with_registry(kv, registry(&config.registry));
+    if let Err(e) = session.login(&params.get("user").cloned().unwrap_or_default()) {
+        send_error(&mut out, &e)?;
+        out.flush()?;
+        return Ok(());
     }
     out.write_all(&Msg::new(b'R').i32(0).finish())?;
     for (k, v) in [
@@ -400,7 +406,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     let mut conn = Conn {
         out,
         log: config.log_queries.then_some(id),
-        session: Session::with_registry(kv, registry(&config.registry)),
+        session,
         prepared: HashMap::new(),
         portals: HashMap::new(),
     };

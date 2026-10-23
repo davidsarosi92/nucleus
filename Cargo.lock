@@ -408,6 +408,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-crypto"
+version = "0.1.0"
+
+[[package]]
 name = "nucleus-dos-settings"
 version = "0.1.0"
 dependencies = [
@@ -475,6 +479,7 @@ dependencies = [
 name = "nucleus-sql"
 version = "0.1.0"
 dependencies = [
+ "nucleus-crypto",
  "nucleus-kv",
  "nucleus-platform",
  "nucleus-testkit",

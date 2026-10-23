@@ -277,7 +277,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
 
     // Hello.
     let (kind, body) = read_message(&mut input)?;
-    let hello = (|| -> Result<u16, Error> {
+    let hello = (|| -> Result<(u16, Session), Error> {
         if kind != b'H' {
             return Err(protocol("expected Hello"));
         }
@@ -294,15 +294,17 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
         let password = b.str()?;
         let client = b.str()?;
         log("hello", &format!("user {user}, client {client}"));
-        if !config.accepts(&user, &password) {
+        if !config.accepts(&*kv, &user, &password) {
             return Err(Error {
                 code: "28P01",
                 message: format!("password authentication failed for user \"{user}\""),
             });
         }
-        Ok(version.min(VERSION))
+        let mut session = Session::with_registry(kv.clone(), config.registry.clone());
+        session.login(&user)?;
+        Ok((version.min(VERSION), session))
     })();
-    let version = match hello {
+    let (version, mut session) = match hello {
         Ok(v) => v,
         Err(e) => {
             out.write_all(&error_msg(&e))?;
@@ -316,7 +318,6 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
             .u32(id)
             .finish(),
     )?;
-    let mut session = Session::with_registry(kv, config.registry.clone());
     out.write_all(&ready_msg(session.status()))?;
     out.flush()?;
 

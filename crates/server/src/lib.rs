@@ -38,12 +38,15 @@ pub trait Authenticator: Send + Sync + std::fmt::Debug {
     /// Whether a front end must ask the client for a password.
     fn wants_password(&self) -> bool;
 
-    /// Whether `user` with `password` may log in.
-    fn accepts(&self, user: &str, password: &str) -> bool;
+    /// Whether `user` with `password` may log in to the database `kv`.
+    fn accepts(&self, kv: &dyn Kv, user: &str, password: &str) -> bool;
 }
 
-/// One user with a password.  Passwords travel in clear text: use them
-/// on trusted networks only.
+/// Passwords: the roles of the database's catalog (`CREATE USER …
+/// PASSWORD …`, checked against their SCRAM-SHA-256 verifiers) — or, while
+/// the database is unclaimed (no administrator with a password yet,
+/// [`nucleus_sql::roles`]), this one user.  Passwords travel in clear
+/// text: use them on trusted networks only.
 #[derive(Debug)]
 pub struct Password {
     /// The user.
@@ -59,8 +62,16 @@ impl Authenticator for Password {
     fn wants_password(&self) -> bool {
         true
     }
-    fn accepts(&self, user: &str, password: &str) -> bool {
-        user == self.user && password == self.password
+    fn accepts(&self, kv: &dyn Kv, user: &str, password: &str) -> bool {
+        let check = || -> nucleus_sql::Result<bool> {
+            let txn = kv.begin(nucleus_kv::TxnOptions::read_only())?;
+            if nucleus_sql::roles::unclaimed(&*txn)? {
+                return Ok(user == self.user && password == self.password);
+            }
+            let now = nucleus_sql::datetime::from_system(kv.wall_clock());
+            Ok(nucleus_sql::roles::authenticate(&*txn, user, password, now)?.is_ok())
+        };
+        check().unwrap_or(false)
     }
 }
 
@@ -75,7 +86,7 @@ impl Authenticator for Trust {
     fn wants_password(&self) -> bool {
         false
     }
-    fn accepts(&self, _: &str, _: &str) -> bool {
+    fn accepts(&self, _: &dyn Kv, _: &str, _: &str) -> bool {
         true
     }
 }
@@ -128,9 +139,9 @@ impl Config {
         self
     }
 
-    /// Whether `user` / `password` may log in.
-    pub fn accepts(&self, user: &str, password: &str) -> bool {
-        self.auth.accepts(user, password)
+    /// Whether `user` / `password` may log in to `kv`.
+    pub fn accepts(&self, kv: &dyn Kv, user: &str, password: &str) -> bool {
+        self.auth.accepts(kv, user, password)
     }
 }
 

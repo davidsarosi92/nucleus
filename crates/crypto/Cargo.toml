@@ -1,0 +1,10 @@
+[package]
+name = "nucleus-crypto"
+description = "nucleus's cryptographic primitives: SHA-256, HMAC, PBKDF2, SCRAM verifiers; no dependencies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

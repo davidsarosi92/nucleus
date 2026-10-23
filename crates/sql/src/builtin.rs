@@ -80,9 +80,10 @@ const FUNCTIONS: &[(Func, &[&str], RangeInclusive<usize>)] = &[
     (Func::CharFit, &["__char_fit"], 2..=2),
     (
         Func::CurrentUser,
-        &["current_user", "session_user", "user", "current_role"],
+        &["current_user", "user", "current_role"],
         0..=0,
     ),
+    (Func::SessionUser, &["session_user"], 0..=0),
     (
         Func::CurrentDatabase,
         &["current_database", "current_catalog"],
@@ -191,6 +192,7 @@ impl ScalarFunction for BuiltinFn {
             | Func::LocalTimestamp
             | Func::LocalTime
             | Func::CurrentUser
+            | Func::SessionUser
             | Func::CurrentDatabase
             | Func::CurrentSchema => Volatility::Stable,
             _ => Volatility::Immutable,
@@ -327,6 +329,7 @@ fn signature(f: Func, args: &[ArgInfo]) -> Result<Signature> {
         | Func::Repeat
         | Func::Version
         | Func::CurrentUser
+        | Func::SessionUser
         | Func::CurrentDatabase
         | Func::CurrentSchema
         | Func::ArrayToString

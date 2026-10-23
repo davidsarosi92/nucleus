@@ -983,7 +983,14 @@ one); arrays of enums; an oid per enum in pg-compat (they travel as text);
 `sum(bigint)` as `numeric`, as PostgreSQL's (nucleus's is `bigint`, an
 overflow an error); `inet ± integer` arithmetic.
 
-### §M14.25 — Identity and access ⬜
+### §M14.25 — Identity and access ⬜ (in progress)
+
+*Steps:* T1 users and roles ✅ (roles in the catalog, membership, `SET
+ROLE`, SCRAM-SHA-256 verifiers, owners, logins from the catalog once
+claimed, `nucleus init`); T2 privileges on every object; T3 row-level
+security; T4 authentication methods (SCRAM on the wire, tokens, TLS,
+certificates, OIDC, LDAP); T5 access rules and privileges by connection
+context; T6 protection; T7 audit.
 
 **Order:** right after §M14.19 and §M14.26 (whose `inet` / `cidr` the
 access rules use), before the rest of the developer platform:
@@ -1947,6 +1954,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.25 T1: users and roles in the catalog, password
+  verifiers, owners, logins from the catalog (`nucleus init` claims a
+  database); a new core crate, `nucleus-crypto`.
 - **2026-10-22** — §M14.26 shipped (DOCS §8.1, §8.2, §10, §11): what was
   left for later is listed in §M14.26.  Next: §M14.25.
 - **2026-10-22** — §M14.26: `ncp` version 3 with native tags for the new

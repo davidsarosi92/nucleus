@@ -53,6 +53,55 @@ pub enum Statement {
         /// How each value converts (over the row): else a cast.
         using: Option<Expr>,
     },
+    /// `CREATE ROLE name [WITH] options` (`CREATE USER`: `LOGIN` by
+    /// default).
+    CreateRole {
+        /// The role's name.
+        name: String,
+        /// Its options, in order.
+        options: Vec<RoleOption>,
+    },
+    /// `ALTER ROLE name [WITH] options`.
+    AlterRole {
+        /// The role.
+        name: String,
+        /// The options it changes.
+        options: Vec<RoleOption>,
+    },
+    /// `ALTER ROLE name RENAME TO new`.
+    RenameRole {
+        /// The role.
+        name: String,
+        /// Its new name.
+        to: String,
+    },
+    /// `DROP ROLE [IF EXISTS] names`.
+    DropRole {
+        /// The roles.
+        names: Vec<String>,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
+    /// `GRANT roles TO members [WITH ADMIN OPTION]`.
+    GrantRole {
+        /// The roles granted.
+        roles: Vec<String>,
+        /// Who gets them.
+        members: Vec<String>,
+        /// `WITH ADMIN OPTION`.
+        admin_option: bool,
+    },
+    /// `REVOKE [ADMIN OPTION FOR] roles FROM members`.
+    RevokeRole {
+        /// The roles.
+        roles: Vec<String>,
+        /// From whom.
+        members: Vec<String>,
+        /// Only the admin option.
+        admin_option_only: bool,
+    },
+    /// `SET ROLE name`, `SET ROLE NONE`, `RESET ROLE` (`None`).
+    SetRole(Option<String>),
     /// `CREATE TYPE name AS ENUM (labels)`.
     CreateEnum {
         /// The type's name.
@@ -439,6 +488,27 @@ pub enum JoinKind {
     Right,
     /// `FULL [OUTER] JOIN`.
     Full,
+}
+
+/// An option of `CREATE ROLE` / `ALTER ROLE`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RoleOption {
+    /// `SUPERUSER` / `NOSUPERUSER`.
+    Superuser(bool),
+    /// `LOGIN` / `NOLOGIN`.
+    Login(bool),
+    /// `INHERIT` / `NOINHERIT`.
+    Inherit(bool),
+    /// `CREATEROLE` / `NOCREATEROLE`.
+    CreateRole(bool),
+    /// `CONNECTION LIMIT n` (`-1`: none).
+    ConnectionLimit(Option<u32>),
+    /// `PASSWORD 'p'` / `PASSWORD NULL`.
+    Password(Option<String>),
+    /// `VALID UNTIL 'timestamp'` (`'infinity'`: never).
+    ValidUntil(String),
+    /// `IN ROLE r, …`: member of these from the start.
+    InRole(Vec<String>),
 }
 
 /// What `ALTER TYPE` changes.

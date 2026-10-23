@@ -1,0 +1,146 @@
+# Users and roles: CREATE ROLE / USER, ALTER, DROP, membership, SET ROLE,
+# who may manage roles, owners.
+# Expected results produced by PostgreSQL 18 (records marked nucleus-only
+# excepted — among them those that act as another role: the checker runs
+# each record in a session of its own; the session starts as an
+# administrator).
+
+statement ok
+CREATE ROLE slt_readers
+
+statement ok
+CREATE USER slt_alice PASSWORD 'secret-a'
+
+statement ok
+CREATE ROLE slt_bob WITH LOGIN NOINHERIT CONNECTION LIMIT 3
+
+statement error 42710
+CREATE ROLE slt_alice
+
+statement error 42704
+ALTER ROLE slt_nobody NOLOGIN
+
+statement ok
+GRANT slt_readers TO slt_alice
+
+statement ok
+GRANT slt_alice TO slt_bob
+
+statement error 0LP01
+GRANT slt_bob TO slt_readers
+
+# nucleus-only
+query TBBBI
+SELECT name, login, inherit, superuser, connection_limit FROM nc_catalog.roles WHERE name LIKE 'slt_%' ORDER BY name
+----
+slt_alice true true false NULL
+slt_bob true false false 3
+slt_readers false true false NULL
+
+# nucleus-only
+query TTB
+SELECT role, member, admin_option FROM nc_catalog.role_members WHERE role LIKE 'slt_%' ORDER BY role, member
+----
+slt_alice slt_bob false
+slt_readers slt_alice false
+
+# nucleus-only: passwords are kept as SCRAM-SHA-256 verifiers.
+query B
+SELECT has_password FROM nc_catalog.roles WHERE name = 'slt_alice'
+----
+true
+
+# Acting as another role.
+
+# nucleus-only
+statement ok
+SET ROLE slt_alice
+
+# nucleus-only
+query TB
+SELECT current_user, session_user = current_user
+----
+slt_alice false
+
+# nucleus-only
+statement error 42501
+CREATE ROLE slt_carol
+
+# nucleus-only
+statement error 42501
+ALTER ROLE slt_bob LOGIN
+
+# nucleus-only
+statement ok
+ALTER ROLE slt_alice PASSWORD 'secret-b'
+
+# nucleus-only
+statement ok
+CREATE TABLE slt_alices (x int)
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# nucleus-only: the table is owned by its maker.
+query T
+SELECT owner FROM nc_catalog.tables WHERE name = 'slt_alices'
+----
+slt_alice
+
+# nucleus-only
+statement error 2BP01
+DROP ROLE slt_alice
+
+statement ok
+DROP TABLE slt_alices
+
+# A role that may create roles, but not administrators.
+
+statement ok
+CREATE ROLE slt_admin CREATEROLE
+
+# nucleus-only
+statement ok
+SET ROLE slt_admin
+
+# nucleus-only
+statement ok
+CREATE ROLE slt_carol
+
+# nucleus-only
+statement error 42501
+CREATE ROLE slt_root SUPERUSER
+
+# nucleus-only
+statement ok
+DROP ROLE slt_carol
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# Renaming, dropping.
+
+statement ok
+ALTER ROLE slt_readers RENAME TO slt_viewers
+
+# nucleus-only
+query T
+SELECT role FROM nc_catalog.role_members WHERE member = 'slt_alice'
+----
+slt_viewers
+
+# nucleus-only
+statement ok
+REVOKE slt_viewers FROM slt_alice
+
+# nucleus-only
+statement ok
+DROP ROLE slt_viewers, slt_bob, slt_alice, slt_admin
+
+statement error 42704
+DROP ROLE slt_alice
+
+statement ok
+DROP ROLE IF EXISTS slt_alice

@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 nucleus-kv.workspace = true
+nucleus-crypto.workspace = true
 regex.workspace = true
 
 [dev-dependencies]

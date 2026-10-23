@@ -78,9 +78,9 @@ SELECT 'd' = any(stxkind) FROM pg_catalog.pg_statistic_ext WHERE stxrelid = 'c':
 ----
 
 query TTT
-SELECT nspname, pg_catalog.pg_get_userbyid(nspowner), current_user FROM pg_catalog.pg_namespace WHERE nspname = 'public'
+SELECT nspname, pg_catalog.pg_get_userbyid(nspowner), current_user = session_user FROM pg_catalog.pg_namespace WHERE nspname = 'public'
 ----
-public nucleus nucleus
+public nucleus t
 
 # information_schema
 query TT
@@ -124,3 +124,25 @@ query TTT
 SELECT pg_typeof(1::bigint), pg_typeof('x'::text), pg_typeof(ARRAY[1.5])
 ----
 bigint text numeric[]
+
+# Roles (PLAN.md §M14.25), as psql's \du reads them.
+
+statement ok
+CREATE ROLE slt_pg_group
+
+statement ok
+CREATE USER slt_pg_user IN ROLE slt_pg_group
+
+query TBBB
+SELECT rolname, rolsuper, rolcanlogin, rolinherit FROM pg_roles WHERE rolname LIKE 'slt_pg%' ORDER BY rolname
+----
+slt_pg_group false false true
+slt_pg_user false true true
+
+query TT
+SELECT g.rolname, u.rolname FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid JOIN pg_roles u ON u.oid = m.member WHERE u.rolname = 'slt_pg_user'
+----
+slt_pg_group slt_pg_user
+
+statement ok
+DROP ROLE slt_pg_user, slt_pg_group

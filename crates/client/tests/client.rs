@@ -427,3 +427,57 @@ fn version_2_clients_get_the_new_types_as_before() {
     assert_eq!(row[9], 4);
     assert_eq!(&row[14..], b"10:00:00");
 }
+
+/// Logins (PLAN.md §M14.25): an unclaimed database takes the server's
+/// credentials; once it has an administrator with a password, its roles
+/// decide.
+#[test]
+fn roles_decide_logins() {
+    let addr = start(None);
+    let as_user = |user: &str, password: &str| {
+        Client::connect(Config {
+            user: user.into(),
+            password: Some(password.into()),
+            ..config(addr)
+        })
+    };
+    let code = |r: Result<Client, Error>| match r {
+        Err(Error::Server(e)) => e.code,
+        Err(e) => format!("{e}"),
+        Ok(_) => "ok".into(),
+    };
+    // Unclaimed: the defaults (nucleus / nucleus) are the administrator.
+    let mut admin0 = as_user("nucleus", "nucleus").unwrap();
+    admin0
+        .execute("CREATE USER app PASSWORD 'app-pw'", &[])
+        .unwrap();
+    // Still unclaimed (no administrator with a password): app's password
+    // does not count yet, the defaults still do.
+    assert_eq!(code(as_user("app", "app-pw")), "28P01");
+    admin0
+        .execute("CREATE USER root SUPERUSER PASSWORD 'root-pw'", &[])
+        .unwrap();
+    // Claimed: the catalog decides.
+    assert_eq!(code(as_user("nucleus", "nucleus")), "28P01");
+    assert_eq!(code(as_user("root", "wrong")), "28P01");
+    let mut root = as_user("root", "root-pw").unwrap();
+    let mut app = as_user("app", "app-pw").unwrap();
+    assert_eq!(
+        app.rows("SELECT current_user, session_user", &[]).unwrap(),
+        vec![vec![Value::from("app"), Value::from("app")]]
+    );
+    let err = app.execute("CREATE ROLE x", &[]).unwrap_err();
+    assert!(matches!(err, Error::Server(e) if e.code == "42501"));
+    // A role that may not log in, and an expired password.
+    root.execute("ALTER ROLE app NOLOGIN", &[]).unwrap();
+    assert_eq!(code(as_user("app", "app-pw")), "28P01");
+    root.execute(
+        "ALTER ROLE app LOGIN VALID UNTIL '2001-01-01 00:00:00+00'",
+        &[],
+    )
+    .unwrap();
+    assert_eq!(code(as_user("app", "app-pw")), "28P01");
+    root.execute("ALTER ROLE app VALID UNTIL 'infinity'", &[])
+        .unwrap();
+    assert!(as_user("app", "app-pw").is_ok());
+}
