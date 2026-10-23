@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Passwords by SCRAM-SHA-256 (SASL, nucleus PLAN.md §M14.25) instead of
+  cleartext: the password never crosses the wire.
 - `current_setting` is nucleus's own now (it reads `SET` values too); the
   module's copy is gone.
 - `pg_roles` and `pg_auth_members` show the database's roles and

@@ -7,8 +7,9 @@ nucleus database.  nucleus's own interface — the `ncp` protocol,
 (nucleus PLAN.md, principle 11).
 
 - **`Pg`** — a front end for `nucleus-server`: PostgreSQL's protocol,
-  version 3 (startup with SSL/GSS declined, trust or cleartext password,
-  the simple and extended query protocols, text and binary formats).
+  version 3 (startup with SSL/GSS declined, trust or SCRAM-SHA-256 — the
+  password is proved, never sent — and the simple and extended query
+  protocols, text and binary formats).
 - **`PgCompat`** — the SQL side, registered in a session's registry:
   `pg_catalog` (`pg_class`, `pg_attribute`, `pg_constraint`, `pg_index`,
   `pg_type`, `pg_namespace`, …) and `information_schema` as views of the

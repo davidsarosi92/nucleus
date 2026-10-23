@@ -207,6 +207,61 @@ fn numeric_from_binary(b: &[u8]) -> Option<Decimal> {
     Decimal::parse(&value).ok()?.round(i32::from(dscale)).ok()
 }
 
+/// SCRAM-SHA-256 over PostgreSQL's SASL messages: AuthenticationSASL
+/// (`R` 10), SASLInitialResponse (`p`), SASLContinue (`R` 11), SASLResponse
+/// (`p`), SASLFinal (`R` 12).  Whether the client proved its password; a
+/// malformed exchange is a refusal.  Channel binding is not offered (SSL is
+/// declined), so the client's GS2 header is `n,,`.
+fn sasl(
+    input: &mut impl Read,
+    out: &mut impl Write,
+    kv: &dyn Kv,
+    config: &Config,
+    user: &str,
+) -> io::Result<bool> {
+    let mut server = nucleus_server::scram_server(config, kv, user);
+    out.write_all(&Msg::new(b'R').i32(10).str("SCRAM-SHA-256").u8(0).finish())?;
+    out.flush()?;
+    let (tag, body) = read_message(input)?;
+    let mut b = Body { b: &body };
+    if tag != b'p' || b.cstr()? != "SCRAM-SHA-256" {
+        return Ok(false);
+    }
+    let n = usize::try_from(b.i32()?).map_err(|_| bad("no SASL initial response"))?;
+    let Ok(first) = std::str::from_utf8(b.take(n)?) else {
+        return Ok(false);
+    };
+    let Ok(server_first) = server.first(first) else {
+        return Ok(false);
+    };
+    out.write_all(
+        &Msg::new(b'R')
+            .i32(11)
+            .bytes(server_first.as_bytes())
+            .finish(),
+    )?;
+    out.flush()?;
+    let (tag, body) = read_message(input)?;
+    let Ok(last) = std::str::from_utf8(&body) else {
+        return Ok(false);
+    };
+    if tag != b'p' {
+        return Ok(false);
+    }
+    match server.finish(last) {
+        Ok(server_final) => {
+            out.write_all(
+                &Msg::new(b'R')
+                    .i32(12)
+                    .bytes(server_final.as_bytes())
+                    .finish(),
+            )?;
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
+}
+
 /// An outgoing message being built.
 struct Msg {
     buf: Vec<u8>,
@@ -361,12 +416,8 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     };
 
     if config.auth.wants_password() {
-        out.write_all(&Msg::new(b'R').i32(3).finish())?; // cleartext password
-        out.flush()?;
-        let (tag, body) = read_message(&mut input)?;
-        let given = Body { b: &body }.cstr().unwrap_or_default();
         let user = params.get("user").cloned().unwrap_or_default();
-        if tag != b'p' || !config.accepts(&*kv, &user, &given) {
+        if !sasl(&mut input, &mut out, &*kv, config, &user)? {
             send_error(
                 &mut out,
                 &Error {

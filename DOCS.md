@@ -1298,8 +1298,10 @@ password from `NUCLEUS_PASSWORD` or standard input — or one is made with
 roles log in (a wrong user or password, a role without `LOGIN` or an
 expired password: `28P01`, not told apart).  `--no-auth` accepts any
 user that is a role (any name while unclaimed).
-Passwords travel in clear text: keep servers on trusted networks (TLS is
-later work).  One thread per connection.  `--log-queries`
+Passwords are proved by SCRAM-SHA-256 and never sent (`ncp` version 4,
+and the PostgreSQL front end; older `ncp` clients still send theirs in
+clear), but queries and results are not yet encrypted: keep servers on
+trusted networks (TLS is later work).  One thread per connection.  `--log-queries`
 (`Config::log_queries`) prints every statement a client sends, and every
 error, to stderr — to see what a tool asks for.
 
@@ -1331,8 +1333,9 @@ drivers and tools can connect.  Its sessions have the `pg-compat` module
 for the catalog queries particular tools send (some, like Valentina
 Studio, ask for PostgreSQL internals nucleus does not have).  PostgreSQL
 protocol 3.0:
-SSL/GSS requests declined (`N`), trust or cleartext-password
-authentication (`28P01` on failure), parameter status (`server_version`
+SSL/GSS requests declined (`N`), trust or SCRAM-SHA-256 authentication
+(SASL, without channel binding; never a cleartext password; `28P01` on
+failure), parameter status (`server_version`
 16.0 (nucleus), UTF8, ISO dates), backend key data, `ReadyForQuery` with
 the transaction status.  Simple query protocol (statements one by one, the
 first error stops the rest) and extended protocol: Parse (parameter types
@@ -1548,7 +1551,8 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
   the password is proved by SCRAM-SHA-256 (`A` / `a` messages), never
   sent; the server signs back; unknown users get a stable fake salt.
   Every driver speaks it; older clients still log in with a cleartext
-  password.
+  password.  pg-compat logs in by SCRAM-SHA-256 too (PostgreSQL's SASL;
+  checked with `psql`'s `require_auth=scram-sha-256`).
 - **2026-10-23 — §M14.25 row-level security (T3):** policies (permissive
   and restrictive, per command and role, `USING` / `WITH CHECK`),
   `ENABLE` / `FORCE ROW LEVEL SECURITY`, a barrier node the optimizer

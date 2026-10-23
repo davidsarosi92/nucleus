@@ -405,11 +405,7 @@ fn scram(
     config: &Config,
     user: &str,
 ) -> io::Result<Result<bool, Error>> {
-    let mut server = nucleus_crypto::ScramServer::new(
-        config.auth.verifier(kv, user),
-        &crate::fake_salt(kv, user),
-        &crate::scram_nonce(kv),
-    );
+    let mut server = crate::scram_server(config, kv, user);
     let send = |out: &mut dyn Write, s: &str| -> io::Result<()> {
         out.write_all(&Msg::new(b'A').str(s).finish())?;
         out.flush()

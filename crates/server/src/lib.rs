@@ -19,6 +19,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use nucleus_kv::Kv;
 
 pub use native::handle as handle_native;
+/// SCRAM-SHA-256 (RFC 5802 / 7677), for front ends and their clients.
+pub use nucleus_crypto::{ScramClient, ScramError, ScramServer};
 
 /// The nucleus protocol's default port (`NC` in ASCII).
 pub const DEFAULT_PORT: u16 = 20_035;
@@ -39,8 +41,7 @@ pub trait Authenticator: Send + Sync + std::fmt::Debug {
     fn wants_password(&self) -> bool;
 
     /// Whether `user` with `password` may log in to the database `kv` (a
-    /// password sent in clear: protocol versions before 4, and
-    /// PostgreSQL's cleartext method).
+    /// password sent in clear: `ncp` versions before 4).
     fn accepts(&self, kv: &dyn Kv, user: &str, password: &str) -> bool;
 
     /// The SCRAM-SHA-256 verifier `user` logs in to `kv` with (`None`: it
@@ -63,6 +64,19 @@ pub fn fake_salt(kv: &dyn Kv, user: &str) -> Vec<u8> {
     nucleus_crypto::hmac_sha256(secret, user.as_bytes())[..16].to_vec()
 }
 
+/// The server side of a SCRAM-SHA-256 login of `user` to `kv`, against
+/// the verifier `config`'s authenticator gives — or, for a user that may
+/// not log in, a stand-in exchange that ends in a refusal and looks like a
+/// real one until then.  Front ends carry its messages in their own
+/// framing (`ncp` version 4, PostgreSQL's SASL).
+pub fn scram_server(config: &Config, kv: &dyn Kv, user: &str) -> ScramServer {
+    ScramServer::new(
+        config.auth.verifier(kv, user),
+        &fake_salt(kv, user),
+        &scram_nonce(kv),
+    )
+}
+
 /// A random SCRAM nonce: printable, without commas.
 pub fn scram_nonce(kv: &dyn Kv) -> String {
     let mut b = [0u8; 18];
@@ -73,8 +87,9 @@ pub fn scram_nonce(kv: &dyn Kv) -> String {
 /// Passwords: the roles of the database's catalog (`CREATE USER …
 /// PASSWORD …`, checked against their SCRAM-SHA-256 verifiers) — or, while
 /// the database is unclaimed (no administrator with a password yet,
-/// [`nucleus_sql::roles`]), this one user.  Passwords travel in clear
-/// text: use them on trusted networks only.
+/// [`nucleus_sql::roles`]), this one user.  `ncp` version 4 and the
+/// PostgreSQL front end prove them by SCRAM-SHA-256; older `ncp` clients
+/// send them in clear text.
 #[derive(Debug)]
 pub struct Password {
     /// The user.

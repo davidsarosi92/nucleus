@@ -994,8 +994,8 @@ exist, and pg-compat's `relacl` / `\dp` is left for later); T3 row-level
 security ✅ (policies under a barrier; vector, text and stream reads get
 them as those arrive — §M14.12, §M14.21, §M16.5; the connection context
 in `current_setting` comes with T5); T4 authentication methods (SCRAM on
-the wire ✅ — `ncp` version 4 in every driver; pg-compat's SASL, tokens,
-TLS, certificates, OIDC, LDAP to come); T5 access rules and privileges by connection
+the wire ✅ — `ncp` version 4 in every driver, and pg-compat's SASL;
+tokens, TLS, certificates, OIDC, LDAP to come); T5 access rules and privileges by connection
 context; T6 protection; T7 audit.
 
 **Order:** right after §M14.19 and §M14.26 (whose `inet` / `cidr` the
@@ -1962,7 +1962,8 @@ style) across a thousand seeds without failure.
   encodings no longer leak into the protocol.
 - **2026-10-23** — §M14.25 T4: SCRAM-SHA-256 on the wire — `ncp` version
   4 proves the password and never sends it; all six drivers speak it,
-  with the C driver's primitives written in the driver.
+  with the C driver's primitives written in the driver; pg-compat uses
+  PostgreSQL's SASL (checked with `psql`).
 - **2026-10-23** — §M14.25 T3: row-level security, with leak tests that
   agree with PostgreSQL 18 run in one session.
 - **2026-10-23** — §M14.25 T2: privileges on objects, checked at bind

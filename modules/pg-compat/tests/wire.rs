@@ -90,14 +90,32 @@ impl Client {
         startup.extend(body);
         s.write_all(&startup).unwrap();
         let mut c = Self { s };
+        let mut scram = nucleus_server::ScramClient::new(password.unwrap_or(""), "test-nonce");
         loop {
             let (tag, body) = c.read();
             match tag {
-                b'R' if body[3] == 3 => {
-                    let mut p = password.unwrap_or("").as_bytes().to_vec();
-                    p.push(0);
+                // SCRAM-SHA-256: AuthenticationSASL, SASLContinue, SASLFinal.
+                b'R' if body[3] == 10 => {
+                    assert_eq!(&body[4..], b"SCRAM-SHA-256\0\0");
+                    let first = scram.first();
+                    let mut p = b"SCRAM-SHA-256\0".to_vec();
+                    p.extend_from_slice(&(first.len() as i32).to_be_bytes());
+                    p.extend_from_slice(first.as_bytes());
                     c.s.write_all(&message(b'p', &p)).unwrap();
                 }
+                b'R' if body[3] == 11 => {
+                    let last = scram
+                        .respond(std::str::from_utf8(&body[4..]).unwrap())
+                        .unwrap();
+                    c.s.write_all(&message(b'p', last.as_bytes())).unwrap();
+                }
+                b'R' if body[3] == 12 => {
+                    scram
+                        .verify(std::str::from_utf8(&body[4..]).unwrap())
+                        .unwrap();
+                }
+                // Never cleartext (3), nor any other method.
+                b'R' if body[3] != 0 => panic!("authentication request {}", body[3]),
                 b'E' => return Err(error_fields(&body)),
                 b'Z' => return Ok(c),
                 _ => {}
