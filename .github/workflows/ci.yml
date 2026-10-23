@@ -58,7 +58,15 @@ jobs:
           distribution: temurin
           java-version: 17
       - run: cargo build --release --locked -p nucleus-cli -p nucleus-example
-      - run: scripts/driver-tests.sh target/release/nucleus rust python js java c cpp
+      - name: Driver tests
+        # On failure the log's end is also an annotation (job logs need admin).
+        run: |
+          set -o pipefail
+          if ! scripts/driver-tests.sh target/release/nucleus rust python js java c cpp 2>&1 | tee drivers.log; then
+            tail -c 20000 drivers.log > failures.txt
+            echo "::error title=driver tests failed::$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' failures.txt)"
+            exit 1
+          fi
 
   # Every target in PLAN.md "Build targets".  `test: true` runs the tests on
   # that target (natively, or a 32-bit binary on a 64-bit kernel); the rest
