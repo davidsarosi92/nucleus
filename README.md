@@ -28,9 +28,12 @@ OpenID Connect ([`modules/oidc`](modules/oidc)), LDAP
 ([`modules/ldap`](modules/ldap)), access rules by where and how a client
 connects, protection (locked logins, limits, budgets) and a hash-chained
 audit log.  So is the SQL analyzer (§M14.9): `EXPLAIN ANALYZE`, statement
-statistics, a linter (`ANALYZE QUERY`) and an index advisor.  Next is the
-rest of the developer platform (§M14.10–§M14.24: AI access, large data
-and analytics, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
+statistics, a linter (`ANALYZE QUERY`) and an index advisor.  AI models
+pick it up through `nucleus mcp`, a Model Context Protocol server
+([`modules/mcp`](modules/mcp)); comments on tables and columns explain
+the schema, errors come with a hint, and [`docs/llm.md`](docs/llm.md) is
+the dialect in brief (§M14.10).  Next is the rest of the developer
+platform (§M14.11–§M14.24: large data and analytics, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, …), then
 the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
@@ -55,6 +58,12 @@ nucleus server ./mydb                   # nucleus protocol on 127.0.0.1:20035
 ncsql -c '\d t'                         # the shell, connected (user and password: nucleus)
 nucleus server ./mydb --pg-compat       # also PostgreSQL's protocol on 5432
 PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
+```
+
+For an AI assistant (any MCP client), point it at `nucleus mcp`:
+
+```json
+{ "mcpServers": { "nucleus": { "command": "nucleus", "args": ["mcp", "./mydb"] } } }
 ```
 
 nucleus describes itself in its own catalog, `nc_catalog`

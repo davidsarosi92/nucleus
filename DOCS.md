@@ -46,6 +46,7 @@
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
 | `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh` | §M6, §M12, §M14.8 |
+| `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
 
 `crates/` is the core and the public API crates; `modules/` are modules,
 each a folder built to leave the repository (its own README, changelog,
@@ -1890,6 +1891,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.10 `docs/llm.md` (B4) — §M14.10 shipped:** a
+  compact, model-oriented reference of the dialect, its gaps with what to
+  use instead, the catalog, hints and the analyzer.
 - **2026-10-23 — §M14.10 `nucleus mcp` (B3):** the `mcp` module, a Model
   Context Protocol server over stdio — tables (with comments), their
   descriptions, samples, read-only queries with row and time limits,

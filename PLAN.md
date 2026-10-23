@@ -268,8 +268,8 @@ are marked ✅.
 | | M14.26 | Core types: integers by width, `real`, `bytea` (with large values out of line), `time`, `char(n)`, `inet` / `cidr`, enums; `ncp` version 3 in every driver | ✅ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC, LDAP), access rules by connection context, row-level security, protection, audit | ✅ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
-| | M14.10 | **Next:** AI access: MCP server, schema comments, hints in errors | ⬜ |
-| | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
+| | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
+| | M14.11 | **Next:** Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -1162,7 +1162,7 @@ best).  Left for later: `EXPLAIN ANALYZE` of writes, a cost model (and
 with it cost budgets, §M14.25), statement statistics that survive a
 restart or span a cluster, indexes for joins (with index nested loops).
 
-### §M14.10 — AI access ⬜ (in progress)
+### §M14.10 — AI access ✅ (DOCS §6.5, §8.14, `docs/llm.md`)
 
 Make nucleus a tool AI models can pick up in seconds, and give them the
 context they need:
@@ -1187,7 +1187,11 @@ version 5 and pg's `H` field, every driver, ncsql); B3 `nucleus mcp` ✅
 (the `mcp` module over stdio: list, describe, sample, read-only query
 with row and time limits, explain, lint, writes when allowed; for a
 directory or a server; end to end in the edition's tests); B4
-`docs/llm.md`.
+`docs/llm.md` ✅ (the dialect, what is missing and what to use instead,
+the catalog, hints, `EXPLAIN` and the linter, the common codes).  Left
+for later: MCP over HTTP (Streamable HTTP) for remote clients, resources
+and prompts, typed parameters (they are bound as literals), hints for
+syntax errors.
 
 ### §M14.11 — Large data foundations ⬜
 
@@ -2006,6 +2010,11 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.10 shipped (B3 `nucleus mcp`, B4 `docs/llm.md`).
+  Every "done when" holds: an MCP client lists, describes and queries a
+  database end to end (`editions/nucleus/tests/cli.rs`), and the common
+  error codes have hints (`crates/sql/tests/hints.rs`, over `ncp` and pg
+  too).  Next: §M14.11.
 - **2026-10-23** — §M14.10 B1–B2: comments and hints in errors.
 - **2026-10-23** — §M14.9 shipped (A4: the index advisor).  Every "done
   when" holds: each lint rule and the advisor have slt cases (firing and
