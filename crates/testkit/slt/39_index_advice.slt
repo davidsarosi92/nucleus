@@ -1,0 +1,104 @@
+# The index advisor: nc_catalog.index_advice, from the statement
+# statistics and ANALYZE data — the indexes the recorded statements would
+# have used, with the rows they would have saved and the plan.
+# nucleus-only throughout.
+
+statement ok
+CREATE TABLE ad (id INT PRIMARY KEY, region TEXT, score INT, note TEXT)
+
+statement ok
+INSERT INTO ad SELECT i, 'r' || (i % 20), i % 7, 'n' || i FROM generate_series(1, 2000) i
+
+statement ok
+CREATE TABLE adsmall (id INT PRIMARY KEY, region TEXT)
+
+statement ok
+INSERT INTO adsmall SELECT i, 'r' || (i % 20) FROM generate_series(1, 100) i
+
+statement ok
+ANALYZE
+
+# nucleus-only
+statement ok
+SELECT nc_statements_reset()
+
+statement ok
+SELECT * FROM ad WHERE region = 'r3'
+
+statement ok
+SELECT * FROM ad WHERE region = 'r9'
+
+statement ok
+SELECT note FROM ad WHERE region = 'r4' AND score = 2
+
+statement ok
+SELECT * FROM ad WHERE score > 1
+
+statement ok
+SELECT * FROM ad WHERE id = 5
+
+statement ok
+SELECT * FROM adsmall WHERE region = 'r3'
+
+# nucleus-only: one index serves both statements on region (its columns
+# beginning with region's, the index on region alone is left out); a
+# filter that keeps most rows, the primary key and a small table give
+# none.
+query TTTIIIIT
+SELECT table_name, columns, create_statement, statements, calls, rows_read, rows_read_with_index, example_query FROM nc_catalog.index_advice
+----
+ad {region,score} CREATE INDEX ON ad (region, score) 2 3 6000 214 SELECT * FROM ad WHERE region = $1
+
+# nucleus-only: the plan it would give.
+query B
+SELECT position('Index Scan using ad_region_score_idx on ad' in plan) > 0 FROM nc_catalog.index_advice
+----
+true
+
+# nucleus-only: someone else gets advice from their own statements only.
+statement ok
+CREATE USER slt_ad_other
+
+statement ok
+GRANT SELECT ON ad TO slt_ad_other
+
+statement ok
+SET ROLE slt_ad_other
+
+# nucleus-only
+query I
+SELECT count(*) FROM nc_catalog.index_advice
+----
+0
+
+statement ok
+SELECT * FROM ad WHERE note = 'n7'
+
+# nucleus-only
+query TT
+SELECT table_name, create_statement FROM nc_catalog.index_advice
+----
+ad CREATE INDEX ON ad (note)
+
+statement ok
+RESET ROLE
+
+# nucleus-only: with the index made, the advice for it is gone (the
+# other role's statement keeps its own).
+statement ok
+CREATE INDEX ON ad (region, score)
+
+# nucleus-only
+query T
+SELECT create_statement FROM nc_catalog.index_advice
+----
+CREATE INDEX ON ad (note)
+
+statement ok
+REVOKE SELECT ON ad FROM slt_ad_other
+
+statement ok
+DROP USER slt_ad_other
+
+statement ok
+DROP TABLE ad, adsmall

@@ -4,6 +4,7 @@
 //! [`Session`] is the entry point: `Session::new(kv).execute("SELECT 1")`.
 
 pub mod access;
+pub mod advisor;
 pub mod ast;
 pub mod audit;
 pub mod binder;

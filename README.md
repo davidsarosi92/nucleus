@@ -27,9 +27,10 @@ agents, TLS and client certificates ([`modules/tls`](modules/tls)),
 OpenID Connect ([`modules/oidc`](modules/oidc)), LDAP
 ([`modules/ldap`](modules/ldap)), access rules by where and how a client
 connects, protection (locked logins, limits, budgets) and a hash-chained
-audit log.  Next is the rest of the developer platform (§M14.9–§M14.24: SQL
-analyzer, AI access, large data and analytics, vectors, full-text and
-hybrid search, embeddings, embedded editions for Python, JavaScript, the
+audit log.  So is the SQL analyzer (§M14.9): `EXPLAIN ANALYZE`, statement
+statistics, a linter (`ANALYZE QUERY`) and an index advisor.  Next is the
+rest of the developer platform (§M14.10–§M14.24: AI access, large data
+and analytics, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, …), then
 the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists

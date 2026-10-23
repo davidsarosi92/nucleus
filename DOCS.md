@@ -1029,6 +1029,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.audit_chain` | `records`, `intact`, `broken_at`, `problem` (the chain walked) |
 | `nc_catalog.database_settings` | `name`, `value`, `is_set`, `default`, `description` (`ALTER DATABASE nucleus SET …`) |
 | `nc_catalog.statements` | `user_name`, `query` (constants as `$n`), `calls`, `errors`, `total_ms`, `mean_ms`, `min_ms`, `max_ms`, `rows_read`, `rows_returned`, `last_call` (statement statistics, §8.13; an administrator sees all, others their own) |
+| `nc_catalog.index_advice` | `table_name`, `columns`, `create_statement`, `statements`, `calls`, `rows_read`, `rows_read_with_index`, `example_query`, `plan` (the index advisor, §8.13) |
 | `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
 | `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by`, `max_rows`, `max_scan`, `timeout`, `rate_per_minute` (the tokens the current role may manage; never a secret) |
@@ -1224,7 +1225,7 @@ and views there; bound calls and view scans hold the registered objects,
 so execution needs no lookup.  The built-in functions share one
 implementation behind the same interface.
 
-### 8.13 The SQL analyzer (`profile`, `statements`, `lint`)
+### 8.13 The SQL analyzer (`profile`, `statements`, `lint`, `advisor`)
 
 **`EXPLAIN ANALYZE <query>`** (also `EXPLAIN (ANALYZE [bool], TIMING
 [bool]) …`; other options are refused with `0A000`) runs the query and
@@ -1269,6 +1270,27 @@ and its subqueries:
 | `not_in_nullable` | `NOT IN (subquery)` whose column can be NULL (nullability followed through scans, filters that reject NULLs, projections, joins, aggregates) | `NOT EXISTS`, or `IS NOT NULL` in the subquery |
 
 `SELECT *` in views comes with views.
+
+**The index advisor** (`nc_catalog.index_advice`): from the statement
+statistics (the caller's own, or every role's for an administrator) and
+`ANALYZE` data, the indexes that would have paid off.  Each recorded
+query, `UPDATE` and `DELETE` is planned again from its last run's text;
+its full scans of analyzed tables of 1000 rows or more give candidates
+(the filter's equality columns, then one range column).  Each candidate
+is put on its table as a hypothetical index — the catalog reads a
+definition with it in place of the stored one
+(`catalog::with_hypothetical`), so the binder and optimizer plan as if it
+existed — and every statement is planned again: where the optimizer
+picks it and the estimated rows read fall by a tenth or more, it serves
+that statement.  Each statement counts, by its calls, for the candidate
+that serves it best (a tie goes to the one of more columns), so one index
+on `(region, score)` stands for statements on `region` alone too.
+Columns: `table_name`, `columns`, `create_statement` (`CREATE INDEX ON
+t (…)`), `statements`, `calls`, `rows_read` and `rows_read_with_index`
+(estimated, over the calls), `example_query` (the one it helps most,
+normalized) and `plan` (that statement's plan with the index, with its
+constants).  Most rows saved first.  Joins do not give candidates yet
+(the executor has no index nested loop).
 
 ## 9. Server (`nucleus-server`)
 
@@ -1810,6 +1832,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.9 the index advisor (A4) — §M14.9 shipped:**
+  `nc_catalog.index_advice`, the recorded statements planned again with
+  hypothetical indexes; the analyzer in §8.13.
 - **2026-10-23 — §M14.9 the linter (A3):** `ANALYZE QUERY <statement>`
   and `ncsql \lint` — full scans under a selective filter, comparisons
   that defeat an index, foreign keys without an index, cartesian

@@ -579,9 +579,28 @@ fn id_key(prefix: &[u8], id: u32) -> Vec<u8> {
 
 /// The table named `name`, if it exists.
 pub fn get_table(txn: &dyn KvTxn, name: &str) -> Result<Option<Table>> {
+    if let Some(t) = HYPOTHETICAL.with(|h| h.borrow().clone())
+        && t.name == name
+    {
+        return Ok(Some(t));
+    }
     txn.get(&table_key(name))?
         .map(|b| Table::decode(&b))
         .transpose()
+}
+
+thread_local! {
+    static HYPOTHETICAL: std::cell::RefCell<Option<Table>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `table` read in place of the stored table of its name —
+/// a definition with a hypothetical index, for the index advisor to plan
+/// with (`f` plans only; nothing is written).
+pub fn with_hypothetical<T>(table: Table, f: impl FnOnce() -> T) -> T {
+    let before = HYPOTHETICAL.with(|h| h.replace(Some(table)));
+    let out = f();
+    HYPOTHETICAL.with(|h| *h.borrow_mut() = before);
+    out
 }
 
 /// The table named `name`, or `42P01`.

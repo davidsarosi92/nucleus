@@ -267,8 +267,8 @@ are marked ✅.
 | | M14.19 | Modularity — registries, extensible and evolvable types (`UUID` the first new one), an extension API (principle 12) | ✅ DOCS §1, §8.11–§8.12, §9 |
 | | M14.26 | Core types: integers by width, `real`, `bytea` (with large values out of line), `time`, `char(n)`, `inet` / `cidr`, enums; `ncp` version 3 in every driver | ✅ |
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC, LDAP), access rules by connection context, row-level security, protection, audit | ✅ |
-| | M14.9 | **Next:** SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ⬜ |
-| | M14.10 | AI access: MCP server, schema comments, hints in errors | ⬜ |
+| | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
+| | M14.10 | **Next:** AI access: MCP server, schema comments, hints in errors | ⬜ |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
@@ -1128,7 +1128,7 @@ under its condition; the server refuses an insecure start; failed logins
 are throttled; and the audit log records every login and every change of
 access, with a broken chain detected.
 
-### §M14.9 — SQL analyzer ⬜ (in progress)
+### §M14.9 — SQL analyzer ✅ (DOCS §8.13)
 
 nucleus has the catalog, the statistics and the optimizer in one place;
 the analyzer turns that into answers:
@@ -1155,7 +1155,12 @@ platform's monotonic clock); A2 statement statistics ✅
 (`nc_catalog.statements`, `nc_statements_reset()`; in the process, by
 database); A3 the linter ✅ (`ANALYZE QUERY`, `ncsql \lint`: five rules,
 each with slt cases that fire and that stay quiet; `SELECT *` in views
-waits for views); A4 the index advisor.
+waits for views); A4 the index advisor ✅ (`nc_catalog.index_advice`:
+candidates from the recorded statements' full scans, tried as
+hypothetical indexes, each statement counted for the one that serves it
+best).  Left for later: `EXPLAIN ANALYZE` of writes, a cost model (and
+with it cost budgets, §M14.25), statement statistics that survive a
+restart or span a cluster, indexes for joins (with index nested loops).
 
 ### §M14.10 — AI access ⬜
 
@@ -1992,6 +1997,10 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.9 shipped (A4: the index advisor).  Every "done
+  when" holds: each lint rule and the advisor have slt cases (firing and
+  quiet), and `EXPLAIN ANALYZE`'s actual rows are checked against the
+  queries' results.  Next: §M14.10.
 - **2026-10-23** — §M14.9 A3: the linter.
 - **2026-10-23** — §M14.9 A1–A2: `EXPLAIN ANALYZE` (actual rows checked
   against the results in slt) and statement statistics.

@@ -156,6 +156,20 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "index_advice",
+        &[
+            ("table_name", T),
+            ("columns", TA),
+            ("create_statement", T),
+            ("statements", I),
+            ("calls", I),
+            ("rows_read", I),
+            ("rows_read_with_index", I),
+            ("example_query", T),
+            ("plan", T),
+        ],
+    ),
+    (
         "access_rules",
         &[
             ("position", I),
@@ -516,6 +530,25 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     Value::Int(s.rows_read as i64),
                     Value::Int(s.rows_returned as i64),
                     Value::TimestampTz(s.last),
+                ]);
+            }
+        }
+        "index_advice" => {
+            let who = crate::access::current();
+            let stats = crate::datetime::current_kv()
+                .map(|kv| crate::statements::all(&kv, (!who.superuser).then_some(&who.user)))
+                .unwrap_or_default();
+            for a in crate::advisor::advise(txn, registry, &stats)? {
+                out.push(vec![
+                    text(a.table),
+                    Value::Array(a.columns.into_iter().map(text).collect()),
+                    text(a.create),
+                    Value::Int(a.statements as i64),
+                    Value::Int(a.calls as i64),
+                    Value::Int(a.rows_read.round() as i64),
+                    Value::Int(a.rows_read_with.round() as i64),
+                    text(a.example),
+                    text(a.plan.join("\n")),
                 ]);
             }
         }
