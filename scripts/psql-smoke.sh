@@ -59,6 +59,8 @@ expect "$(describe '\d+ people')" 'Access method: heap'
 
 # TLS on request (and SCRAM inside it); plain still works.
 [ "$(PGSSLMODE=require psql -X -At -c 'SELECT 1')" = 1 ]
+# SCRAM-SHA-256-PLUS: the proof bound to the TLS session.
+[ "$(PGSSLMODE=require PGCHANNELBINDING=require psql -X -At -c 'SELECT 1')" = 1 ]
 expect "$(PGSSLMODE=require psql -X -c '\conninfo')" 'SSL'
 [ "$(PGSSLMODE=disable psql -X -At -c 'SELECT 1')" = 1 ]
 

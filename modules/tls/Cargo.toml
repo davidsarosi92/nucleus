@@ -17,6 +17,8 @@ nucleus-client = { version = "0.1.0", path = "../../crates/client" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # Mozilla's root certificates, for verifying a server without a CA file.
 webpki-roots = "1"
+# Hashes for SCRAM's tls-server-end-point channel binding (rustls's own).
+ring = "0.17"
 
 [dev-dependencies]
 nucleus-kv = { version = "0.1.0", path = "../../crates/kv" }

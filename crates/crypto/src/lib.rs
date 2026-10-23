@@ -278,8 +278,11 @@ pub struct ScramServer {
     /// runs to its end and fails, so a client cannot tell names apart.
     fake: bool,
     server_nonce: String,
-    /// The client's GS2 header's channel-binding flag: `n` or `y`.
-    gs2: char,
+    /// The `tls-server-end-point` channel binding the server offers
+    /// (SCRAM-SHA-256-PLUS, RFC 5929), if any.
+    binding: Option<Vec<u8>>,
+    /// The client's GS2 header (`n,,`, `y,,`, `p=tls-server-end-point,,`).
+    gs2: String,
     client_first_bare: String,
     server_first: String,
     nonce: String,
@@ -314,27 +317,52 @@ impl ScramServer {
             }),
             fake,
             server_nonce: server_nonce.to_string(),
-            gs2: 'n',
+            binding: None,
+            gs2: String::new(),
             client_first_bare: String::new(),
             server_first: String::new(),
             nonce: String::new(),
         }
     }
 
+    /// The same exchange, offering channel binding: `data` is the TLS
+    /// session's `tls-server-end-point` value (the hash of the server's
+    /// certificate), and a client may bind its proof to it
+    /// (SCRAM-SHA-256-PLUS) — a proof made over another TLS session, as a
+    /// man in the middle's would be, then fails.
+    pub fn with_channel_binding(mut self, data: Vec<u8>) -> Self {
+        self.binding = Some(data);
+        self
+    }
+
+    /// Whether the client bound its proof to the channel (after
+    /// [`ScramServer::first`]).
+    pub fn channel_bound(&self) -> bool {
+        self.gs2.starts_with("p=")
+    }
+
     /// The client's first message (`n,,n=…,r=…`) → the server's first.
     pub fn first(&mut self, client_first: &str) -> Result<String, ScramError> {
-        // Channel binding is not offered: the GS2 header is "n,," (the client
-        // does not do it) or "y,," (it would, but thinks the server does
-        // not — true here; a server that offers SCRAM-SHA-256-PLUS must
-        // refuse "y", RFC 5802 §6).  No authorization identity.
+        // The GS2 header: "n,," (the client does not bind), "y,," (it would,
+        // but thinks the server cannot — a downgrade if the server can, so
+        // refused then, RFC 5802 §6), "p=tls-server-end-point,," (it binds;
+        // only if offered).  No authorization identity.
         let (gs2, bare) = if let Some(b) = client_first.strip_prefix("n,,") {
-            ('n', b)
+            ("n,,", b)
         } else if let Some(b) = client_first.strip_prefix("y,,") {
-            ('y', b)
+            if self.binding.is_some() {
+                return Err(ScramError::Rejected);
+            }
+            ("y,,", b)
+        } else if let Some(b) = client_first.strip_prefix("p=tls-server-end-point,,") {
+            if self.binding.is_none() {
+                return Err(ScramError::Malformed);
+            }
+            ("p=tls-server-end-point,,", b)
         } else {
             return Err(ScramError::Malformed);
         };
-        self.gs2 = gs2;
+        self.gs2 = gs2.to_string();
         let client_nonce = attr(bare, 'r').ok_or(ScramError::Malformed)?;
         if client_nonce.is_empty() {
             return Err(ScramError::Malformed);
@@ -356,9 +384,14 @@ impl ScramServer {
         let (without_proof, proof) = client_final
             .rsplit_once(",p=")
             .ok_or(ScramError::Malformed)?;
-        // c= repeats the GS2 header: "n,," is "biws", "y,," is "eSws".
-        let binding = if self.gs2 == 'y' { "eSws" } else { "biws" };
-        if attr(without_proof, 'c') != Some(binding)
+        // c= repeats the GS2 header ("n,," is "biws", "y,," is "eSws"), and
+        // when bound, the channel's data after it.
+        let mut c = self.gs2.as_bytes().to_vec();
+        if self.channel_bound() {
+            c.extend_from_slice(self.binding.as_deref().unwrap_or_default());
+        }
+        let binding = base64_encode(&c);
+        if attr(without_proof, 'c') != Some(binding.as_str())
             || attr(without_proof, 'r') != Some(&self.nonce)
         {
             return Err(ScramError::Malformed);
@@ -548,6 +581,40 @@ mod tests {
             server.first("p=tls-server-end-point,,n=,r=x"),
             Err(ScramError::Malformed)
         );
+    }
+
+    /// SCRAM-SHA-256-PLUS: a proof bound to the channel's data passes, one
+    /// bound to other data (another TLS session) fails, and "y" — a
+    /// client that thinks the server cannot bind — is refused when it can.
+    #[test]
+    fn scram_binds_to_the_channel() {
+        let salt = [9u8; 16];
+        let v = ScramVerifier::new("pw", &salt, 4096);
+        let channel = vec![0xAB; 32];
+        let run = |client_channel: &[u8]| {
+            let mut server = ScramServer::new(Some(v.clone()), &[0; 16], "srv")
+                .with_channel_binding(channel.clone());
+            let header = "p=tls-server-end-point,,";
+            let first = server.first(&format!("{header}n=,r=cli")).unwrap();
+            assert!(server.channel_bound());
+            let nonce = attr(&first, 'r').unwrap().to_string();
+            let salted = pbkdf2_sha256(b"pw", &salt, 4096);
+            let client_key = hmac_sha256(&salted, b"Client Key");
+            let mut c = header.as_bytes().to_vec();
+            c.extend_from_slice(client_channel);
+            let without = format!("c={},r={nonce}", base64_encode(&c));
+            let auth = format!("n=,r=cli,{first},{without}");
+            let sig = hmac_sha256(&sha256(&client_key), auth.as_bytes());
+            let proof: Vec<u8> = client_key.iter().zip(sig).map(|(a, b)| a ^ b).collect();
+            server.finish(&format!("{without},p={}", base64_encode(&proof)))
+        };
+        assert!(run(&channel).is_ok());
+        assert_eq!(run(&[0xCD; 32]), Err(ScramError::Malformed));
+        let mut server =
+            ScramServer::new(Some(v.clone()), &[0; 16], "srv").with_channel_binding(channel);
+        assert_eq!(server.first("y,,n=,r=cli"), Err(ScramError::Rejected));
+        let mut server = ScramServer::new(Some(v), &[0; 16], "srv").with_channel_binding(vec![1]);
+        assert!(server.first("n,,n=,r=cli").is_ok() && !server.channel_bound());
     }
 
     #[test]

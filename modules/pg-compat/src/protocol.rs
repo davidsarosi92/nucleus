@@ -210,23 +210,36 @@ fn numeric_from_binary(b: &[u8]) -> Option<Decimal> {
 /// SCRAM-SHA-256 over PostgreSQL's SASL messages: AuthenticationSASL
 /// (`R` 10), SASLInitialResponse (`p`), SASLContinue (`R` 11), SASLResponse
 /// (`p`), SASLFinal (`R` 12).  Whether the client proved its password; a
-/// malformed exchange is a refusal.  Channel binding is not offered (SSL is
-/// declined), so the client's GS2 header is `n,,`.
+/// malformed exchange is a refusal.  Over TLS with a channel binding
+/// (`TlsInfo::channel_binding`), SCRAM-SHA-256-PLUS is offered first, and
+/// libpq takes it: the proof is then bound to this TLS session, so a man in
+/// the middle cannot relay it.
 fn sasl(
     input: &mut impl Read,
     out: &mut impl Write,
     kv: &dyn Kv,
     config: &Config,
     user: &str,
+    binding: Option<&[u8]>,
 ) -> io::Result<bool> {
     let mut server = nucleus_server::scram_server(config, kv, user);
-    out.write_all(&Msg::new(b'R').i32(10).str("SCRAM-SHA-256").u8(0).finish())?;
+    let mut offer = Msg::new(b'R').i32(10);
+    if let Some(b) = binding {
+        server = server.with_channel_binding(b.to_vec());
+        offer = offer.str("SCRAM-SHA-256-PLUS");
+    }
+    out.write_all(&offer.str("SCRAM-SHA-256").u8(0).finish())?;
     out.flush()?;
     let (tag, body) = read_message(input)?;
     let mut b = Body { b: &body };
-    if tag != b'p' || b.cstr()? != "SCRAM-SHA-256" {
+    if tag != b'p' {
         return Ok(false);
     }
+    let plus = match b.cstr()?.as_str() {
+        "SCRAM-SHA-256" => false,
+        "SCRAM-SHA-256-PLUS" if binding.is_some() => true,
+        _ => return Ok(false),
+    };
     let n = usize::try_from(b.i32()?).map_err(|_| bad("no SASL initial response"))?;
     let Ok(first) = std::str::from_utf8(b.take(n)?) else {
         return Ok(false);
@@ -234,6 +247,10 @@ fn sasl(
     let Ok(server_first) = server.first(first) else {
         return Ok(false);
     };
+    // The mechanism and the GS2 header agree: -PLUS binds, the other not.
+    if server.channel_bound() != plus {
+        return Ok(false);
+    }
     out.write_all(
         &Msg::new(b'R')
             .i32(11)
@@ -439,7 +456,14 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     let by_certificate = nucleus_server::certificate_login(config, &*kv, tls_info.as_ref(), &user);
     if config.auth.wants_password()
         && !by_certificate
-        && !sasl(&mut input, &mut out, &*kv, config, &user)?
+        && !sasl(
+            &mut input,
+            &mut out,
+            &*kv,
+            config,
+            &user,
+            tls_info.as_ref().and_then(|t| t.channel_binding.as_deref()),
+        )?
     {
         send_error(
             &mut out,

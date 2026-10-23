@@ -6,4 +6,6 @@
   front ends (`ncp` and PostgreSQL's), `ClientTls` for the Rust client —
   verified against Mozilla's roots or a CA of one's own, or unverified;
   client certificates both ways (mutual TLS), the verified one's common
-  name in `TlsInfo::client_name`.
+  name in `TlsInfo::client_name`; the server certificate's
+  `tls-server-end-point` value in `TlsInfo::channel_binding`, for
+  SCRAM-SHA-256-PLUS.

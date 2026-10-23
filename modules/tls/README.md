@@ -12,7 +12,9 @@ carries no TLS library (nucleus PLAN.md §M14.25).
   require TLS are a later step).  `accepting_client_certificates(ca)`
   asks clients for a certificate of that CA (mutual TLS): a verified one's
   subject common name is `TlsInfo::client_name`, and the server logs that
-  user in without a password.
+  user in without a password.  `TlsInfo::channel_binding` is the
+  certificate's `tls-server-end-point` value (RFC 5929), which binds SCRAM
+  to the session (SCRAM-SHA-256-PLUS).
 - **`ClientTls`** — for the Rust client (`nucleus_client::Config::tls`):
   the server's certificate checked against Mozilla's root certificates
   (`ClientTls::new`) or one's own CA (`with_ca_pem`, `with_ca_file`), and

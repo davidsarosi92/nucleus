@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- SCRAM-SHA-256-PLUS over TLS (`tls-server-end-point` channel binding),
+  offered first; a `y,,` client is refused where binding is possible.
 - `SSLRequest` is accepted when the server has TLS (`Config::tls`, the
   `nucleus-tls` module), read unbuffered so nothing sent before the
   handshake counts as inside it; SCRAM takes libpq's `y,,` header over TLS.

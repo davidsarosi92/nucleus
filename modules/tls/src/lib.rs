@@ -66,6 +66,8 @@ pub struct ServerTls {
     key: Arc<PrivateKeyDer<'static>>,
     client_roots: Option<Arc<rustls::RootCertStore>>,
     config: Arc<rustls::ServerConfig>,
+    /// SCRAM's channel binding for this certificate.
+    end_point: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for ServerTls {
@@ -139,6 +141,7 @@ impl ServerTls {
             .with_single_cert(chain.clone(), key.clone_key())
             .map_err(invalid)?;
         Ok(ServerTls {
+            end_point: der::server_end_point(&chain[0]),
             chain,
             key,
             client_roots,
@@ -180,6 +183,7 @@ impl nucleus_server::Tls for ServerTls {
                 .first()
                 .and_then(|c| der::common_name(c)),
             client_certificates,
+            channel_binding: self.end_point.clone(),
         };
         Ok(nucleus_server::Secured {
             stream: Box::new(s),
@@ -371,6 +375,42 @@ mod der {
         Some((tag, contents, after))
     }
 
+    /// RFC 5929's `tls-server-end-point`: the certificate hashed with its
+    /// signature's hash (SHA-256 for MD5 and SHA-1); `None` for a signature
+    /// that names none (RSASSA-PSS's is in its parameters, Ed25519 has none),
+    /// as PostgreSQL has.
+    pub fn server_end_point(cert: &[u8]) -> Option<Vec<u8>> {
+        let (SEQUENCE, body, _) = element(cert)? else {
+            return None;
+        };
+        let after_tbs = element(body)?.2;
+        let (SEQUENCE, algorithm, _) = element(after_tbs)? else {
+            return None;
+        };
+        let (0x06, oid, _) = element(algorithm)? else {
+            return None;
+        };
+        const RSA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
+        const ECDSA: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04];
+        let hash = match oid {
+            [r @ .., last] if r == RSA => match last {
+                4 | 5 | 11 => &ring::digest::SHA256,
+                12 => &ring::digest::SHA384,
+                13 => &ring::digest::SHA512,
+                _ => return None,
+            },
+            [e @ .., 1] if e == ECDSA => &ring::digest::SHA256,
+            [e @ .., 3, n] if e == ECDSA => match n {
+                2 => &ring::digest::SHA256,
+                3 => &ring::digest::SHA384,
+                4 => &ring::digest::SHA512,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(ring::digest::digest(hash, cert).as_ref().to_vec())
+    }
+
     const SEQUENCE: u8 = 0x30;
     const SET: u8 = 0x31;
     /// 2.5.4.3, commonName.
@@ -417,5 +457,39 @@ mod der {
             }
         }
         found
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::der;
+
+    fn certificate(alg: &'static rcgen::SignatureAlgorithm, cn: &str) -> Vec<u8> {
+        let mut p = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        p.distinguished_name.push(rcgen::DnType::CommonName, cn);
+        let key = rcgen::KeyPair::generate_for(alg).unwrap();
+        p.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    #[test]
+    fn common_names() {
+        let c = certificate(&rcgen::PKCS_ECDSA_P256_SHA256, "alice");
+        assert_eq!(der::common_name(&c).as_deref(), Some("alice"));
+        assert_eq!(der::common_name(b"\x30\x03\x02\x01"), None);
+        assert_eq!(der::common_name(&c[..c.len() / 2]), None);
+    }
+
+    /// The end point is hashed by the signature's hash.
+    #[test]
+    fn server_end_points() {
+        let c = certificate(&rcgen::PKCS_ECDSA_P256_SHA256, "x");
+        let want = ring::digest::digest(&ring::digest::SHA256, &c);
+        assert_eq!(der::server_end_point(&c).as_deref(), Some(want.as_ref()));
+        let c = certificate(&rcgen::PKCS_ECDSA_P384_SHA384, "x");
+        let want = ring::digest::digest(&ring::digest::SHA384, &c);
+        assert_eq!(der::server_end_point(&c).as_deref(), Some(want.as_ref()));
+        // Ed25519 names no hash: no channel binding.
+        let c = certificate(&rcgen::PKCS_ED25519, "x");
+        assert_eq!(der::server_end_point(&c), None);
     }
 }

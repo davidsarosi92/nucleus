@@ -32,6 +32,10 @@ pub struct TlsInfo {
     pub client_certificates: Vec<Vec<u8>>,
     /// That certificate's subject common name: who the client is.
     pub client_name: Option<String>,
+    /// The `tls-server-end-point` channel binding (RFC 5929: the hash of
+    /// the server's certificate), for SCRAM-SHA-256-PLUS; `None` when the
+    /// certificate's signature algorithm defines none.
+    pub channel_binding: Option<Vec<u8>>,
 }
 
 /// An encrypted stream, and what its handshake agreed on.

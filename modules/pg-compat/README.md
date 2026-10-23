@@ -8,7 +8,8 @@ nucleus database.  nucleus's own interface — the `ncp` protocol,
 
 - **`Pg`** — a front end for `nucleus-server`: PostgreSQL's protocol,
   version 3 (startup with SSL accepted when the server has TLS — the
-  `nucleus-tls` module — and GSS declined; trust or SCRAM-SHA-256 — the
+  `nucleus-tls` module — and GSS declined; trust or SCRAM-SHA-256 (over
+  TLS also SCRAM-SHA-256-PLUS, bound to the session) — the
   password is proved, never sent — and the simple and extended query
   protocols, text and binary formats).
 - **`PgCompat`** — the SQL side, registered in a session's registry:

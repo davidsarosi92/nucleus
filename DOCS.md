@@ -1380,8 +1380,13 @@ protocol 3.0:
 SSL requests accepted (`S`, then TLS) when the server has TLS, else
 declined (`N`), as are GSS requests; the request is read unbuffered, so
 nothing sent before the handshake counts as sent inside it; trust or
-SCRAM-SHA-256 authentication (over TLS libpq's `y,,` header is taken —
-channel binding, SCRAM-SHA-256-PLUS, is not offered yet)
+SCRAM-SHA-256 authentication — over TLS SCRAM-SHA-256-PLUS too, offered
+first, which libpq takes by default: the proof is bound to the TLS
+session (`tls-server-end-point`, RFC 5929: the server certificate hashed
+by its signature's hash; certificates whose signature names no hash, as
+Ed25519, get no binding), so a man in the middle cannot relay it, and a
+client claiming it cannot bind (`y,,`) is refused where the server can
+(`channel_binding=require` works)
 (SASL, without channel binding; never a cleartext password; `28P01` on
 failure), parameter status (`server_version`
 16.0 (nucleus), UTF8, ISO dates), backend key data, `ReadyForQuery` with
@@ -1617,6 +1622,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 SCRAM-SHA-256-PLUS (T4):** pg-compat binds SCRAM
+  to the TLS session (`tls-server-end-point`; `TlsInfo::channel_binding`),
+  checked with `psql channel_binding=require` on RSA SHA-256, RSA SHA-384
+  and ECDSA SHA-384 certificates.
 - **2026-10-23 — §M14.25 client certificates (T4):** `--tls-client-ca`;
   a verified certificate naming the user logs it in without a password,
   on both front ends; client certificates in every driver and `ncsql`.
