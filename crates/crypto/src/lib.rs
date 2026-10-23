@@ -278,6 +278,8 @@ pub struct ScramServer {
     /// runs to its end and fails, so a client cannot tell names apart.
     fake: bool,
     server_nonce: String,
+    /// The client's GS2 header's channel-binding flag: `n` or `y`.
+    gs2: char,
     client_first_bare: String,
     server_first: String,
     nonce: String,
@@ -312,6 +314,7 @@ impl ScramServer {
             }),
             fake,
             server_nonce: server_nonce.to_string(),
+            gs2: 'n',
             client_first_bare: String::new(),
             server_first: String::new(),
             nonce: String::new(),
@@ -320,10 +323,18 @@ impl ScramServer {
 
     /// The client's first message (`n,,n=…,r=…`) → the server's first.
     pub fn first(&mut self, client_first: &str) -> Result<String, ScramError> {
-        // Channel binding is not offered: the GS2 header must be "n,,".
-        let bare = client_first
-            .strip_prefix("n,,")
-            .ok_or(ScramError::Malformed)?;
+        // Channel binding is not offered: the GS2 header is "n,," (the client
+        // does not do it) or "y,," (it would, but thinks the server does
+        // not — true here; a server that offers SCRAM-SHA-256-PLUS must
+        // refuse "y", RFC 5802 §6).  No authorization identity.
+        let (gs2, bare) = if let Some(b) = client_first.strip_prefix("n,,") {
+            ('n', b)
+        } else if let Some(b) = client_first.strip_prefix("y,,") {
+            ('y', b)
+        } else {
+            return Err(ScramError::Malformed);
+        };
+        self.gs2 = gs2;
         let client_nonce = attr(bare, 'r').ok_or(ScramError::Malformed)?;
         if client_nonce.is_empty() {
             return Err(ScramError::Malformed);
@@ -345,7 +356,10 @@ impl ScramServer {
         let (without_proof, proof) = client_final
             .rsplit_once(",p=")
             .ok_or(ScramError::Malformed)?;
-        if attr(without_proof, 'c') != Some("biws") || attr(without_proof, 'r') != Some(&self.nonce)
+        // c= repeats the GS2 header: "n,," is "biws", "y,," is "eSws".
+        let binding = if self.gs2 == 'y' { "eSws" } else { "biws" };
+        if attr(without_proof, 'c') != Some(binding)
+            || attr(without_proof, 'r') != Some(&self.nonce)
         {
             return Err(ScramError::Malformed);
         }
@@ -507,6 +521,33 @@ mod tests {
             .respond(&server.first(&client.first()).unwrap())
             .unwrap();
         assert_eq!(client.verify("v=AAAA"), Err(ScramError::Rejected));
+    }
+
+    /// A client that could bind to the channel but thinks the server
+    /// cannot ("y,,", as libpq over TLS) is accepted, its c= checked.
+    #[test]
+    fn scram_takes_a_y_header() {
+        let salt = [7u8; 16];
+        let v = ScramVerifier::new("pw", &salt, 4096);
+        let run = |binding: &str| {
+            let mut server = ScramServer::new(Some(v.clone()), &[0; 16], "srv");
+            let first = server.first("y,,n=,r=cli").unwrap();
+            let nonce = attr(&first, 'r').unwrap().to_string();
+            let salted = pbkdf2_sha256(b"pw", &salt, 4096);
+            let client_key = hmac_sha256(&salted, b"Client Key");
+            let without = format!("c={binding},r={nonce}");
+            let auth = format!("n=,r=cli,{first},{without}");
+            let sig = hmac_sha256(&sha256(&client_key), auth.as_bytes());
+            let proof: Vec<u8> = client_key.iter().zip(sig).map(|(a, b)| a ^ b).collect();
+            server.finish(&format!("{without},p={}", base64_encode(&proof)))
+        };
+        assert!(run("eSws").is_ok());
+        assert_eq!(run("biws"), Err(ScramError::Malformed));
+        let mut server = ScramServer::new(Some(v.clone()), &[0; 16], "srv");
+        assert_eq!(
+            server.first("p=tls-server-end-point,,n=,r=x"),
+            Err(ScramError::Malformed)
+        );
     }
 
     #[test]

@@ -145,6 +145,22 @@ public final class NucleusTest {
         equal(errorCode(() -> NucleusClient.connect(config().password("wrong"))), "28P01", "wrong password");
     }
 
+    static void tls() {
+        String ca = System.getenv("NUCLEUS_TLS_CA");
+        if (ca == null) {
+            System.out.println("(the server has no TLS)");
+            return;
+        }
+        try (NucleusClient db = NucleusClient.connect(config().tlsCa(java.nio.file.Path.of(ca)))) {
+            equal(db.query("SELECT 'over tls'").rows().get(0).get(0), "over tls", "verified");
+        }
+        try (NucleusClient db = NucleusClient.connect(config().tls(true).tlsVerify(false))) {
+            equal(db.query("SELECT 'ok'").rows().get(0).get(0), "ok", "unverified");
+        }
+        // The test CA is not among Java's.
+        errorCode(() -> NucleusClient.connect(config().tls(true)));
+    }
+
     private static void run(String name, Runnable test) {
         test.run();
         passed++;
@@ -158,7 +174,8 @@ public final class NucleusTest {
         run("errors", NucleusTest::errors);
         run("transactions", NucleusTest::transactions);
         run("authentication", NucleusTest::authentication);
-        check(passed == 6, "all tests ran");
+        run("tls", NucleusTest::tls);
+        check(passed == 7, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

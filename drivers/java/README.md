@@ -19,6 +19,8 @@ Types: `Boolean`, `Short` (smallint), `Integer` (integer), `Long`
 `Cidr` (an `InetAddress` and a mask length; an `InetAddress` as a
 parameter is a host), `UUID`, `List`, `null`; another registered type is
 `Ext` (its name and binary form).  Protocol version 4: the password is
-proved by SCRAM-SHA-256, never sent.  Errors are
+proved by SCRAM-SHA-256, never sent.  TLS: `new Config().tls(true)`
+(Java's CAs), `.tlsCa(Path.of("ca.pem"))`, `.tlsVerify(false)`
+(encrypted, unverified).  Errors are
 `NucleusException` with `code()` (SQLSTATE).  Tests: `NucleusTest` (a plain
 main); example: `examples/java/Quickstart.java`.

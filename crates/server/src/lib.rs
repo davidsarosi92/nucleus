@@ -8,8 +8,13 @@
 //!   are modules — PostgreSQL's protocol is `nucleus-pg-compat`
 //!   (`modules/pg-compat`).
 //! - Who may log in is an [`Authenticator`] ([`Password`], [`Trust`]).
+//! - TLS is a module's [`Tls`] (`nucleus-tls`), in [`Config::tls`]; the
+//!   front ends negotiate it ([`transport`]).
 
 mod native;
+pub mod transport;
+
+pub use transport::{Secured, Stream, Tls, TlsInfo};
 
 use std::io;
 use std::net::{TcpListener, TcpStream};
@@ -197,6 +202,8 @@ pub struct Config {
     /// Print every statement a client sends, and every error, to stderr
     /// (for seeing what a tool asks).
     pub log_queries: bool,
+    /// TLS, for clients that ask for it (`None`: they are refused).
+    pub tls: Option<Arc<dyn Tls>>,
 }
 
 impl Default for Config {
@@ -217,6 +224,7 @@ impl Config {
             }),
             log_queries: false,
             registry: nucleus_sql::ext::Registry::shared_builtin(),
+            tls: None,
         }
     }
 
@@ -231,6 +239,12 @@ impl Config {
     /// The same, with sessions on `registry`.
     pub fn with_registry(mut self, registry: Arc<nucleus_sql::ext::Registry>) -> Self {
         self.registry = registry;
+        self
+    }
+
+    /// The same, offering `tls` to clients that ask for it.
+    pub fn with_tls(mut self, tls: Arc<dyn Tls>) -> Self {
+        self.tls = Some(tls);
         self
     }
 

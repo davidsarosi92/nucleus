@@ -10,7 +10,22 @@ bin=$(cd "$(dirname "${1:?usage: scripts/driver-tests.sh <nucleus binary> [langs
 shift
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
-"$bin" server "$work/db" --listen 127.0.0.1:0 2>"$work/server.log" &
+# With openssl at hand, a CA and a server certificate (for 127.0.0.1 and
+# localhost) of its own, so the drivers' TLS tests run (NUCLEUS_TLS_CA).
+tls=()
+if command -v openssl >/dev/null; then
+  (
+    cd "$work"
+    printf "[req]\ndistinguished_name=dn\nx509_extensions=ca\nprompt=no\n[dn]\nCN=nucleus test CA\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n" >ca.cnf
+    openssl req -x509 -config ca.cnf -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 1
+    openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/CN=localhost"
+    printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n" >ext.cnf
+    openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out server.pem -days 1 -extfile ext.cnf
+  ) >/dev/null 2>&1
+  tls=(--tls-cert "$work/server.pem" --tls-key "$work/server.key")
+  export NUCLEUS_TLS_CA="$work/ca.pem"
+fi
+"$bin" server "$work/db" --listen 127.0.0.1:0 ${tls[@]+"${tls[@]}"} 2>"$work/server.log" &
 pid=$!
 trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null || true; rm -rf "$work"' EXIT
 for _ in $(seq 100); do grep -q "listening on" "$work/server.log" 2>/dev/null && break; sleep 0.1; done
@@ -30,6 +45,14 @@ if [ ${#langs[@]} -eq 0 ]; then
   have c++ && langs+=(cpp)
 fi
 
+# The C driver with TLS when OpenSSL is at hand.
+ctls=() cflags=() clibs=()
+if pkg-config --exists openssl 2>/dev/null; then
+  ctls=(TLS=openssl)
+  read -r -a cflags <<<"-DNC_WITH_OPENSSL $(pkg-config --cflags openssl)"
+  read -r -a clibs <<<"$(pkg-config --libs openssl)"
+fi
+
 for lang in "${langs[@]}"; do
   echo "== $lang"
   case $lang in
@@ -47,18 +70,18 @@ for lang in "${langs[@]}"; do
       java -cp "$out" io.github.davidsarosi92.nucleus.NucleusTest
       java -cp "$out" Quickstart ;;
     c)
-      make -s -C "$root/drivers/c" OUT="$work/c" test
+      make -s -C "$root/drivers/c" OUT="$work/c" ${ctls[@]+"${ctls[@]}"} test
       "$work/c/test_nucleus"
-      cc -std=c99 -Wall -Wextra -Werror -I"$root/drivers/c" -o "$work/c/quickstart" \
-        "$root/examples/c/quickstart.c" "$root/drivers/c/nucleus.c"
+      cc -std=c99 -Wall -Wextra -Werror ${cflags[@]+"${cflags[@]}"} -I"$root/drivers/c" -o "$work/c/quickstart" \
+        "$root/examples/c/quickstart.c" "$root/drivers/c/nucleus.c" ${clibs[@]+"${clibs[@]}"}
       "$work/c/quickstart" ;;
     cpp)
       mkdir -p "$work/cpp"
-      cc -std=c99 -Wall -Wextra -Werror -c -o "$work/cpp/nucleus.o" "$root/drivers/c/nucleus.c"
+      cc -std=c99 -Wall -Wextra -Werror ${cflags[@]+"${cflags[@]}"} -c -o "$work/cpp/nucleus.o" "$root/drivers/c/nucleus.c"
       for src in "$root/drivers/cpp/test/test_nucleus.cpp" "$root/examples/cpp/quickstart.cpp"; do
         exe="$work/cpp/$(basename "$src" .cpp)"
         c++ -std=c++17 -Wall -Wextra -Werror -I"$root/drivers/c" -I"$root/drivers/cpp" \
-          -o "$exe" "$src" "$work/cpp/nucleus.o"
+          -o "$exe" "$src" "$work/cpp/nucleus.o" ${clibs[@]+"${clibs[@]}"}
         "$exe"
       done ;;
     *) echo "unknown language $lang"; exit 1 ;;

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `SSLRequest` is accepted when the server has TLS (`Config::tls`, the
+  `nucleus-tls` module), read unbuffered so nothing sent before the
+  handshake counts as inside it; SCRAM takes libpq's `y,,` header over TLS.
 - Passwords by SCRAM-SHA-256 (SASL, nucleus PLAN.md §M14.25) instead of
   cleartext: the password never crosses the wire.
 - `current_setting` is nucleus's own now (it reads `SET` values too); the

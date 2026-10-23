@@ -17,7 +17,9 @@
 // another registered type as Ext (its name and binary form).
 
 import { createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import net from "node:net";
+import tls from "node:tls";
 
 // 2: registered types (uuid, modules' types) arrive in their binary form;
 // 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
@@ -314,6 +316,13 @@ export interface ConnectOptions {
   database?: string;
   clientName?: string;
   timeoutMs?: number;
+  /** TLS, the server's certificate checked against Node's CA certificates
+   *  — or against `tlsCa`'s (a PEM file; giving it implies `tls`). */
+  tls?: boolean;
+  tlsCa?: string;
+  /** `false`: encrypt without checking the certificate (anyone can pose as
+   *  the server). */
+  tlsVerify?: boolean;
 }
 
 // ------------------------------------------------------------------ values
@@ -662,13 +671,23 @@ export class Client {
   static async connect(options: ConnectOptions = {}): Promise<Client> {
     const host = options.host ?? "127.0.0.1";
     const port = options.port ?? DEFAULT_PORT;
+    const secure = options.tls === true || options.tlsCa !== undefined;
     const socket = await new Promise<net.Socket>((resolve, reject) => {
-      const s = net.createConnection({ host, port });
+      // TLS starts at once; the server sees the handshake (DOCS §10).
+      const s = secure
+        ? tls.connect({
+            host,
+            port,
+            servername: net.isIP(host) ? undefined : host,
+            ca: options.tlsCa === undefined ? undefined : readFileSync(options.tlsCa),
+            rejectUnauthorized: options.tlsVerify ?? true,
+          })
+        : net.createConnection({ host, port });
       s.setNoDelay(true);
       s.setTimeout(options.timeoutMs ?? 10_000, () =>
         s.destroy(new NucleusError(`cannot connect to ${host}:${port}: timed out`)),
       );
-      s.once("connect", () => {
+      s.once(secure ? "secureConnect" : "connect", () => {
         s.setTimeout(0);
         resolve(s);
       });

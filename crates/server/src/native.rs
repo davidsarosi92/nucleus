@@ -269,13 +269,33 @@ fn split_tag(tag: &str) -> (String, u64) {
 
 /// Serves one client until it says Bye or goes away.
 pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> io::Result<()> {
-    let mut input = BufReader::new(stream.try_clone()?);
-    let mut out = BufWriter::new(stream);
     let log = |what: &str, text: &str| {
         if config.log_queries {
             eprintln!("nucleus-server: [{id}] {what}: {}", text.trim());
         }
     };
+    // A client that starts with a TLS handshake asks for TLS (§10).
+    let mut first = [0u8; 1];
+    if stream.peek(&mut first)? == 0 {
+        return Ok(());
+    }
+    let stream: Box<dyn crate::Stream> = if first[0] == crate::transport::TLS_HANDSHAKE {
+        let Some(tls) = &config.tls else {
+            log("tls", "refused: this server has no TLS configured");
+            return Ok(());
+        };
+        let secured = tls.accept(stream)?;
+        log(
+            "tls",
+            &format!("{} {}", secured.info.version, secured.info.cipher),
+        );
+        secured.stream
+    } else {
+        Box::new(stream)
+    };
+    let (r, w) = crate::transport::split(stream);
+    let mut input = BufReader::new(r);
+    let mut out = BufWriter::new(w);
 
     // Hello, and the login it starts.
     let hello = login(&mut input, &mut out, &kv, config, &log)?;

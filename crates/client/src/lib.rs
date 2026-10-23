@@ -14,7 +14,7 @@
 //! ```
 
 use std::fmt;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream};
 use std::time::Duration;
 
@@ -44,6 +44,22 @@ pub struct Config {
     pub client_name: String,
     /// How long to wait for the connection.
     pub connect_timeout: Duration,
+    /// TLS (`None`: none) — a module's ([`Tls`]; `nucleus-tls`).
+    pub tls: Option<std::sync::Arc<dyn Tls>>,
+}
+
+/// A byte stream to the server.
+pub trait Stream: Read + Write + Send {}
+
+impl<T: Read + Write + Send> Stream for T {}
+
+/// The client side of TLS: a module provides it (`nucleus-tls`), so this
+/// crate carries no TLS library.  The client starts the handshake as soon
+/// as it is connected; the server sees it and answers in kind (DOCS §10).
+pub trait Tls: Send + Sync + fmt::Debug {
+    /// Runs a handshake on `tcp` as the client, checking the server is
+    /// `host` as the implementation requires.
+    fn connect(&self, tcp: TcpStream, host: &str) -> io::Result<Box<dyn Stream>>;
 }
 
 impl Default for Config {
@@ -57,6 +73,7 @@ impl Default for Config {
             password: Some("nucleus".into()),
             client_name: "nucleus-client (rust)".into(),
             connect_timeout: Duration::from_secs(10),
+            tls: None,
         }
     }
 }
@@ -742,8 +759,8 @@ fn put_str(b: &mut Vec<u8>, s: &str) {
 
 /// A connection to a nucleus server.
 pub struct Client {
-    input: BufReader<TcpStream>,
-    output: BufWriter<TcpStream>,
+    /// Reads are buffered; writes go out a frame at a time.
+    conn: BufReader<Box<dyn Stream>>,
     status: TxnStatus,
     server: String,
     session: u32,
@@ -764,15 +781,33 @@ impl Client {
     /// Connects and says Hello.
     pub fn connect(config: Config) -> Result<Self, Error> {
         use std::net::ToSocketAddrs;
-        let addr = (config.host.as_str(), config.port)
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| Error::Protocol(format!("cannot resolve {}", config.host)))?;
-        let stream = TcpStream::connect_timeout(&addr, config.connect_timeout)?;
+        // Each address the name has, in turn (`localhost`: `::1`, then
+        // `127.0.0.1`).
+        let mut last = None;
+        let mut connected = None;
+        for addr in (config.host.as_str(), config.port).to_socket_addrs()? {
+            match TcpStream::connect_timeout(&addr, config.connect_timeout) {
+                Ok(s) => {
+                    connected = Some(s);
+                    break;
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        let stream = match (connected, last) {
+            (Some(s), _) => s,
+            (None, Some(e)) => return Err(e.into()),
+            (None, None) => {
+                return Err(Error::Protocol(format!("cannot resolve {}", config.host)));
+            }
+        };
         stream.set_nodelay(true)?;
+        let stream: Box<dyn Stream> = match &config.tls {
+            Some(tls) => tls.connect(stream, &config.host)?,
+            None => Box::new(stream),
+        };
         let mut c = Client {
-            input: BufReader::new(stream.try_clone()?),
-            output: BufWriter::new(stream),
+            conn: BufReader::new(stream),
             status: TxnStatus::Idle,
             server: String::new(),
             session: 0,
@@ -788,8 +823,8 @@ impl Client {
         ] {
             put_str(&mut hello, s);
         }
-        c.output.write_all(&frame(b'H', &hello))?;
-        c.output.flush()?;
+        c.conn.get_mut().write_all(&frame(b'H', &hello))?;
+        c.conn.get_mut().flush()?;
         let mut scram: Option<nucleus_crypto::ScramClient> = None;
         loop {
             let (kind, body) = c.read()?;
@@ -827,8 +862,8 @@ impl Client {
                     if let Some(r) = reply {
                         let mut body = Vec::new();
                         put_str(&mut body, &r);
-                        c.output.write_all(&frame(b'a', &body))?;
-                        c.output.flush()?;
+                        c.conn.get_mut().write_all(&frame(b'a', &body))?;
+                        c.conn.get_mut().flush()?;
                     }
                 }
                 b'W' => {
@@ -858,13 +893,13 @@ impl Client {
 
     fn read(&mut self) -> Result<(u8, Vec<u8>), Error> {
         let mut h = [0u8; 5];
-        self.input.read_exact(&mut h)?;
+        self.conn.read_exact(&mut h)?;
         let len = u32::from_le_bytes(h[1..5].try_into().unwrap());
         if len > 1 << 30 {
             return Err(Error::Protocol("message too large".into()));
         }
         let mut body = vec![0u8; len as usize];
-        self.input.read_exact(&mut body)?;
+        self.conn.read_exact(&mut body)?;
         Ok((h[0], body))
     }
 
@@ -892,8 +927,8 @@ impl Client {
         for p in params {
             p.encode(&mut body);
         }
-        self.output.write_all(&frame(b'Q', &body))?;
-        self.output.flush()?;
+        self.conn.get_mut().write_all(&frame(b'Q', &body))?;
+        self.conn.get_mut().flush()?;
         let mut out = Vec::new();
         let mut current: Option<(Vec<Column>, Vec<Vec<Value>>)> = None;
         loop {
@@ -1003,7 +1038,7 @@ impl Client {
 
     /// Says Bye and closes.
     pub fn close(mut self) -> io::Result<()> {
-        self.output.write_all(&frame(b'X', &[]))?;
-        self.output.flush()
+        self.conn.get_mut().write_all(&frame(b'X', &[]))?;
+        self.conn.get_mut().flush()
     }
 }

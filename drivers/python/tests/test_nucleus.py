@@ -140,6 +140,17 @@ class Conformance(unittest.TestCase):
             connect(password="wrong")
         self.assertEqual(e.exception.code, "28P01")
 
+    @unittest.skipUnless(os.environ.get("NUCLEUS_TLS_CA"), "the server has no TLS")
+    def test_tls(self):
+        ca = os.environ["NUCLEUS_TLS_CA"]
+        with connect(tls_ca=ca) as c:
+            self.assertEqual(c.execute("SELECT 'over tls'").rows, [("over tls",)])
+        with connect(tls=True, tls_verify=False) as c:
+            self.assertEqual(c.execute("SELECT 1").rows, [(1,)])
+        # The test CA is not among the system's.
+        with self.assertRaises(nucleus.OperationalError):
+            connect(tls=True)
+
 
 if __name__ == "__main__":
     unittest.main()

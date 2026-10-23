@@ -117,3 +117,15 @@ test("transactions", async () => {
 test("authentication", async () => {
   await assert.rejects(connect({ ...options, password: "wrong" }), (e: NucleusError) => e.code === "28P01");
 });
+
+test("tls", { skip: process.env.NUCLEUS_TLS_CA === undefined && "the server has no TLS" }, async () => {
+  const ca = process.env.NUCLEUS_TLS_CA as string;
+  const db = await connect({ ...options, tlsCa: ca });
+  assert.equal((await db.query("SELECT 'over tls'")).rows[0][0], "over tls");
+  await db.close();
+  const unverified = await connect({ ...options, tls: true, tlsVerify: false });
+  assert.equal((await unverified.query("SELECT 'ok'")).rows[0][0], "ok");
+  await unverified.close();
+  // The test CA is not among Node's.
+  await assert.rejects(connect({ ...options, tls: true }));
+});

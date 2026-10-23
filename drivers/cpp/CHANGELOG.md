@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- TLS through the C driver: `Config::tls`, `tls_ca`, `tls_no_verify`.
 - Protocol version 4 (nucleus PLAN.md §M14.25), through the C driver: the
   password is proved by SCRAM-SHA-256, never sent.
 - Protocol version 3 (nucleus PLAN.md §M14.26): `SmallInt`, `Integer`,

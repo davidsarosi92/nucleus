@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- TLS (nucleus PLAN.md §M14.25) in a build with `NC_WITH_OPENSSL` (`make
+  TLS=openssl`): `cfg.tls`, `cfg.tls_ca`, `cfg.tls_no_verify`,
+  `nc_tls_supported()`; the certificate checked against the system's CAs
+  or a CA file, and the host name (or IP address).
 - Protocol version 4 (nucleus PLAN.md §M14.25): the password is proved by
   SCRAM-SHA-256 (SHA-256, HMAC, PBKDF2 and base64 in the driver, the nonce
   from `/dev/urandom` or `rand_s`), never sent; the server's signature is

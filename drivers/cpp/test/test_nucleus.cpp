@@ -118,6 +118,12 @@ int main() {
             CHECK(e.code() == "28P01");
         }
     }
+    if (const char* ca = std::getenv("NUCLEUS_TLS_CA"); ca && nc_tls_supported()) {
+        auto c = config();
+        c.tls_ca = ca;
+        Connection db(c);
+        CHECK(db.query("SELECT 'over tls'").rows[0][0].str() == "over tls");
+    }
     if (failures) {
         std::cerr << failures << " check(s) failed\n";
         return 1;

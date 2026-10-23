@@ -1325,8 +1325,12 @@ expired password: `28P01`, not told apart).  `--no-auth` accepts any
 user that is a role (any name while unclaimed).
 Passwords are proved by SCRAM-SHA-256 and never sent (`ncp` version 4,
 and the PostgreSQL front end; older `ncp` clients still send theirs in
-clear), but queries and results are not yet encrypted: keep servers on
-trusted networks (TLS is later work).  One thread per connection.  `--log-queries`
+clear).  **TLS** (the `tls` module, `modules/tls`, over rustls):
+`--tls-cert <pem> --tls-key <pem>` offers it on every front end to
+clients that ask — `ncp` clients by starting a TLS handshake (§10),
+PostgreSQL clients by `SSLRequest` (`sslmode=require`, `verify-full`);
+clients that do not ask still connect in plain text until access rules
+can require it (§M14.25 T5).  TLS 1.2 and 1.3.  One thread per connection.  `--log-queries`
 (`Config::log_queries`) prints every statement a client sends, and every
 error, to stderr — to see what a tool asks for.
 
@@ -1336,7 +1340,9 @@ config, id)`) — the built-in `Ncp` in `FrontEnds::builtin()`, `Pg` from
 the pg-compat module, which the `nucleus` edition adds;
 `serve_front_end(front, listener, kv, config)` runs any.  The server
 starts `ncp` and each `--front-end <name>` (`--pg-compat` is `--front-end
-pg`).  `Config { auth, log_queries }`: `auth` is an `Authenticator`
+pg`).  `Config { auth, registry, log_queries, tls }` (`tls`: a
+`transport::Tls`, `Config::with_tls`; the front end negotiates it and
+reads and writes through the stream it returns): `auth` is an `Authenticator`
 (`describe`, `wants_password`, `accepts(kv, user, password)`) —
 `Password` (the catalog's roles, or while unclaimed one user;
 `Config::password`, the default `nucleus` / `nucleus`) or `Trust`
@@ -1358,7 +1364,11 @@ drivers and tools can connect.  Its sessions have the `pg-compat` module
 for the catalog queries particular tools send (some, like Valentina
 Studio, ask for PostgreSQL internals nucleus does not have).  PostgreSQL
 protocol 3.0:
-SSL/GSS requests declined (`N`), trust or SCRAM-SHA-256 authentication
+SSL requests accepted (`S`, then TLS) when the server has TLS, else
+declined (`N`), as are GSS requests; the request is read unbuffered, so
+nothing sent before the handshake counts as sent inside it; trust or
+SCRAM-SHA-256 authentication (over TLS libpq's `y,,` header is taken —
+channel binding, SCRAM-SHA-256-PLUS, is not offered yet)
 (SASL, without channel binding; never a cleartext password; `28P01` on
 failure), parameter status (`server_version`
 16.0 (nucleus), UTF8, ISO dates), backend key data, `ReadyForQuery` with
@@ -1398,8 +1408,12 @@ whole specification.
 is **little-endian**.  A *string* is a `u32` byte length and that many
 bytes of UTF-8.  From version 4 the password never travels: the client
 proves it with SCRAM-SHA-256 (RFC 5802 / 7677); before 4 it is sent in
-Hello in clear text.  Queries and results are not yet encrypted (TLS is
-§M14.25's later work): use it on trusted networks.
+Hello in clear text.  **TLS:** a client that wants it starts a TLS
+handshake as soon as it is connected, before Hello; the server sees the
+handshake's first byte (`0x16`, never a frame kind) and, if it has TLS,
+answers it — every frame then travels inside TLS; a server without TLS
+closes the connection.  No round trip is spent on asking, and the version
+of the protocol does not change.
 
 **Frames.** Each message is a `u8` kind, a `u32` body length (the 5
 header bytes not included; at most 1 GiB), then the body.
@@ -1508,7 +1522,18 @@ type; `char(n)` and enum values as text, their columns typed `Char` and
 `Enum(name)`) with `From` conversions for parameters.  Every driver
 speaks protocol version 4 and logs in by SCRAM-SHA-256 (the C driver with
 its own SHA-256, HMAC, PBKDF2 and base64; the others with their
-platform's).
+platform's).  **TLS** in each: the server's certificate checked against
+the platform's CA certificates (Rust: Mozilla's, through the `tls`
+module) or a CA file of one's own, and the host name; or unverified
+(encrypted, not authenticated).  Rust: `Config::tls` with
+`nucleus_tls::ClientTls::{new, with_ca_file, without_verification}`
+(the client crate names only the `nucleus_client::Tls` interface); C:
+`cfg.tls`, `cfg.tls_ca`, `cfg.tls_no_verify` in a build with
+`NC_WITH_OPENSSL` (`make TLS=openssl`; `nc_tls_supported()`), C++ the
+same fields on `nucleus::Config`; Python `connect(tls=True, tls_ca=…,
+tls_verify=False)` (`ssl`); JavaScript `{ tls, tlsCa, tlsVerify }`
+(`node:tls`); Java `Config.tls(true)`, `tlsCa(path)`, `tlsVerify(false)`
+(JSSE).
 
 **C:** `drivers/c` (`nucleus.h`, `nucleus.c`; C99, POSIX sockets or
 Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
@@ -1565,13 +1590,22 @@ digits), `Decimal` (exact, with `parse` / `toString`), `Buffer` (bytea),
 
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
-SQLSTATE, transactions, a wrong password), and `examples/<language>/` has
-the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
-[languages]` starts a server on a free port and runs them all; the CI job
-`drivers` does so on Linux.
+SQLSTATE, transactions, a wrong password, TLS verified, unverified and
+refused for an unknown CA), and `examples/<language>/` has the same
+quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
+[languages]` starts a server on a free port — with TLS, from a CA and a
+certificate it makes with `openssl`, when that is installed — and runs
+them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
+checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 TLS (T4):** the `tls` module (rustls): `ncp`
+  clients start a handshake before Hello, PostgreSQL clients send
+  `SSLRequest`; `--tls-cert` / `--tls-key`, `ncsql --tls | --tls-ca |
+  --tls-no-verify`; TLS in all six drivers (C with OpenSSL behind
+  `NC_WITH_OPENSSL`); the core gains only `transport` (`Stream`, `Tls`).
+  The Rust client tries every address a host name has.
 - **2026-10-23 — §M14.25 tokens (T4):** `CREATE TOKEN … [READ ONLY] [ON
   TABLE …] [VALID UNTIL …]`, `DROP TOKEN`; a login name and a secret,
   proved by SCRAM in every driver and `psql`; the session runs as the

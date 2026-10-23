@@ -6,7 +6,11 @@ set -euo pipefail
 bin=${1:?usage: scripts/psql-smoke.sh <nucleus binary>}
 work=$(mktemp -d)
 port=54329
-"$bin" server "$work/db" --listen 127.0.0.1:0 --pg-compat "127.0.0.1:$port" 2>"$work/server.log" &
+# A self-signed certificate, so TLS is offered (and checked below).
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$work/key.pem" -out "$work/cert.pem" -days 1 \
+  -subj "/CN=127.0.0.1" >/dev/null 2>&1
+"$bin" server "$work/db" --listen 127.0.0.1:0 --pg-compat "127.0.0.1:$port" \
+  --tls-cert "$work/cert.pem" --tls-key "$work/key.pem" 2>"$work/server.log" &
 pid=$!
 trap 'kill $pid 2>/dev/null; rm -rf "$work"' EXIT
 export PGHOST=127.0.0.1 PGPORT=$port PGUSER=nucleus PGPASSWORD=nucleus PGDATABASE=nucleus PGCONNECT_TIMEOUT=2
@@ -52,5 +56,10 @@ expect "$(describe '\dn')" 'nc_catalog'
 expect "$(describe '\l')" 'nucleus'
 expect "$(describe '\d+ people')" 'Access method: heap'
 [ "$(psql -X -At -c "SELECT name FROM nc_catalog.tables ORDER BY name")" = $'dept\npeople' ]
+
+# TLS on request (and SCRAM inside it); plain still works.
+[ "$(PGSSLMODE=require psql -X -At -c 'SELECT 1')" = 1 ]
+expect "$(PGSSLMODE=require psql -X -c '\conninfo')" 'SSL'
+[ "$(PGSSLMODE=disable psql -X -At -c 'SELECT 1')" = 1 ]
 
 echo "psql smoke test passed ($(psql --version))"

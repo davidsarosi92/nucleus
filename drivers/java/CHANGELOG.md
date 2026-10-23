@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- TLS (nucleus PLAN.md §M14.25): `Config.tls(true)`, `tlsCa(path)`,
+  `tlsVerify(false)`, over JSSE.
 - Protocol version 4 (nucleus PLAN.md §M14.25): the password is proved by
   SCRAM-SHA-256 (`Scram`, over `javax.crypto`), never sent; the server's
   signature is checked.

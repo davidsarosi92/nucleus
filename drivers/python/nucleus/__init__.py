@@ -36,6 +36,7 @@ import hmac as _hmac
 import ipaddress as _ip
 import os as _os
 import socket as _socket
+import ssl as _ssl
 import struct as _struct
 import uuid as _uuid
 from dataclasses import dataclass as _dataclass
@@ -392,13 +393,21 @@ class Connection:
 
     def __init__(self, host="127.0.0.1", port=DEFAULT_PORT, user="nucleus",
                  password="nucleus", database="nucleus", timeout=10.0,
-                 client_name="nucleus-python"):
+                 client_name="nucleus-python", tls=False, tls_ca=None,
+                 tls_verify=True):
         try:
             self._sock = _socket.create_connection((host, port), timeout=timeout)
+            self._sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+            if tls or tls_ca is not None:
+                # The handshake starts at once; the server sees it (DOCS §10).
+                ctx = _ssl.create_default_context(cafile=tls_ca)
+                if not tls_verify:
+                    ctx.check_hostname = False
+                    ctx.verify_mode = _ssl.CERT_NONE
+                self._sock = ctx.wrap_socket(self._sock, server_hostname=host)
         except OSError as e:
             raise OperationalError(f"cannot connect to {host}:{port}: {e}") from e
         self._sock.settimeout(None)
-        self._sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
         self._buf = bytearray()
         self.status = 0  # 0 idle, 1 in a transaction block, 2 failed block
         hello = bytearray(_struct.pack("<H", PROTOCOL_VERSION))
@@ -609,6 +618,12 @@ class Cursor:
 
 
 def connect(host="127.0.0.1", port=DEFAULT_PORT, user="nucleus", password="nucleus",
-            database="nucleus", timeout=10.0):
-    """Opens a connection (the defaults reach a local server as it starts)."""
-    return Connection(host, port, user, password, database, timeout)
+            database="nucleus", timeout=10.0, tls=False, tls_ca=None, tls_verify=True):
+    """Opens a connection (the defaults reach a local server as it starts).
+
+    ``tls=True`` encrypts it, the server's certificate checked against the
+    system's CA certificates — or against ``tls_ca`` (a PEM file; giving it
+    implies ``tls``); ``tls_verify=False`` skips the check (encrypted, but
+    anyone can pose as the server)."""
+    return Connection(host, port, user, password, database, timeout,
+                      tls=tls, tls_ca=tls_ca, tls_verify=tls_verify)

@@ -90,6 +90,10 @@ public final class NucleusClient implements AutoCloseable {
             Socket s = new Socket();
             s.connect(new InetSocketAddress(config.host, config.port), config.timeoutMillis);
             s.setTcpNoDelay(true);
+            if (config.tls) {
+                // The handshake starts at once; the server sees it (DOCS §10).
+                s = Tls.wrap(s, config);
+            }
             NucleusClient c = new NucleusClient(s);
             Writer hello = new Writer().u16(PROTOCOL_VERSION).str(config.user).str(config.database)
                     .str("").str(config.clientName);

@@ -21,6 +21,7 @@ nucleus-server = { version = "0.1.0", path = "crates/server" }
 nucleus-client = { version = "0.1.0", path = "crates/client" }
 nucleus-testkit = { version = "0.1.0", path = "crates/testkit" }
 nucleus-pg-compat = { version = "0.1.0", path = "modules/pg-compat" }
+nucleus-tls = { version = "0.1.0", path = "modules/tls" }
 # Regular expressions for `~`: linear-time matching, so no pattern can
 # stall the server.
 regex = "1.11.1"

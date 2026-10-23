@@ -95,6 +95,14 @@ typedef struct nc_config {
     const char *password;
     const char *database;
     const char *client_name;
+    /* TLS (a build with NC_WITH_OPENSSL; see nc_tls_supported): 1 to
+     * encrypt, the server's certificate checked against the system's CA
+     * certificates — or against tls_ca's (a PEM file; setting it implies
+     * tls).  tls_no_verify = 1 skips the check: encrypted, but anyone can
+     * pose as the server. */
+    int tls;
+    const char *tls_ca;
+    int tls_no_verify;
 } nc_config;
 
 /* An error: SQLSTATE (empty for a driver or network error) and message. */
@@ -106,8 +114,12 @@ typedef struct nc_error {
 typedef struct nc_conn nc_conn;
 typedef struct nc_result nc_result;
 
-/* The defaults: 127.0.0.1:20035, user, password and database "nucleus". */
+/* The defaults: 127.0.0.1:20035, user, password and database "nucleus";
+ * no TLS. */
 nc_config nc_default_config(void);
+
+/* 1 if this build can do TLS (NC_WITH_OPENSSL), else 0. */
+int nc_tls_supported(void);
 
 /* Connects and logs in; NULL (and err filled) on failure. */
 nc_conn *nc_connect(const nc_config *cfg, nc_error *err);

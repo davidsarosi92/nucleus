@@ -23,6 +23,9 @@ usage: ncsql [<dir>] [options]          (also: nucleus sql …)
   -U, --user <name>         (default nucleus)
   -d, --database <name>     (default nucleus)
       --password <pw>       or NCPASSWORD (default nucleus)
+      --tls                 TLS, the server's certificate checked (Mozilla's roots)
+      --tls-ca <pem file>   TLS, the certificate checked against this CA
+      --tls-no-verify       TLS without checking the certificate (encrypted only)
   -c <sql>                  run one command and exit
 Without -c it reads statements from stdin (a shell on a terminal).
 ";
@@ -584,6 +587,16 @@ pub fn run(args: &[String]) -> Result<()> {
             "-U" | "--user" => cfg.user = value("a user name")?,
             "-d" | "--database" => cfg.database = value("a database name")?,
             "--password" => explicit_password = Some(value("a password")?),
+            "--tls" => cfg.tls = Some(Arc::new(nucleus_tls::ClientTls::new())),
+            "--tls-ca" => {
+                let file = value("a CA file")?;
+                let tls = nucleus_tls::ClientTls::with_ca_file(file.as_ref())
+                    .map_err(|e| format!("--tls-ca: {e}"))?;
+                cfg.tls = Some(Arc::new(tls));
+            }
+            "--tls-no-verify" => {
+                cfg.tls = Some(Arc::new(nucleus_tls::ClientTls::without_verification()));
+            }
             "--help" => {
                 print!("{USAGE}");
                 return Ok(());

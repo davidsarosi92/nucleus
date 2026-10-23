@@ -997,7 +997,10 @@ in `current_setting` comes with T5); T4 authentication methods (SCRAM on
 the wire ✅ — `ncp` version 4 in every driver, and pg-compat's SASL;
 tokens ✅ — read only, table scope, expiry, revocation, through every
 driver and `psql`; schema and branch scopes when those exist, row, time
-and cost budgets with T6; TLS, certificates, OIDC, LDAP to come); T5 access rules and privileges by connection
+and cost budgets with T6; TLS ✅ — the `tls` module over rustls, `ncp`
+by a handshake before Hello and pg-compat by `SSLRequest`, in every
+driver (C with OpenSSL behind a build flag); next client certificates
+(mTLS) with SCRAM-SHA-256-PLUS channel binding, then OIDC, LDAP); T5 access rules and privileges by connection
 context; T6 protection; T7 audit.
 
 **Order:** right after §M14.19 and §M14.26 (whose `inet` / `cidr` the
@@ -1008,10 +1011,9 @@ write access (§M14.10), filtered vector search (§M14.12), hybrid search
 
 Before this milestone there was one user and one password, given on the
 server's command line, sent in the clear, and `--no-auth` admitted
-anyone.  Roles, privileges, row-level security, SCRAM and tokens are in
-now (the steps above); there is no TLS yet, so queries and results still
-travel in the clear: fine on `127.0.0.1` and trusted networks, not
-beyond.
+anyone.  Roles, privileges, row-level security, SCRAM, tokens and TLS are in
+now (the steps above); until access rules (T5) can require TLS, a client
+that does not ask for it still connects in plain text.
 
 - **Users and roles, in SQL and in the catalog** (principle 8):
   `CREATE ROLE`, `CREATE USER` (a role that may log in), `ALTER`, `DROP`;
@@ -1964,6 +1966,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.25 T4: TLS as a module (`modules/tls`, rustls),
+  so the core stays without a TLS library; both front ends and all six
+  drivers; checked with `psql` (`verify-full`).
 - **2026-10-23** — §M14.25 T4: tokens — a login name and a secret, so
   every driver and PostgreSQL client takes them as they are; a ceiling
   (read only, tables) that narrows the role and holds through `SET ROLE`.

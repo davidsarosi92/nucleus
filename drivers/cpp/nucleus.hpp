@@ -188,6 +188,12 @@ struct Config {
     std::string password = "nucleus";
     std::string database = "nucleus";
     std::string client_name = "nucleus-cpp";
+    // TLS (the C driver built with NC_WITH_OPENSSL): the server's
+    // certificate checked against the system's CAs, or tls_ca's (a PEM
+    // file; setting it implies tls); tls_no_verify skips the check.
+    bool tls = false;
+    std::string tls_ca;
+    bool tls_no_verify = false;
 };
 
 struct Column {
@@ -317,6 +323,9 @@ public:
         c.password = config.password.c_str();
         c.database = config.database.c_str();
         c.client_name = config.client_name.c_str();
+        c.tls = config.tls ? 1 : 0;
+        c.tls_ca = config.tls_ca.empty() ? nullptr : config.tls_ca.c_str();
+        c.tls_no_verify = config.tls_no_verify ? 1 : 0;
         nc_error err;
         conn_ = nc_connect(&c, &err);
         if (!conn_) throw Error(err.message, err.code);

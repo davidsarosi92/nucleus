@@ -21,6 +21,7 @@ nucleus-sql.workspace = true
 nucleus-server.workspace = true
 nucleus-client.workspace = true
 nucleus-pg-compat.workspace = true
+nucleus-tls.workspace = true
 
 [lints]
 workspace = true

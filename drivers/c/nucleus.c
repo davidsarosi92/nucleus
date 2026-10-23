@@ -8,10 +8,17 @@
 
 #include "nucleus.h"
 
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef NC_WITH_OPENSSL
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#include <openssl/x509v3.h>
+#endif
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -20,6 +27,7 @@ typedef SOCKET nc_socket;
 #define NC_BAD_SOCKET INVALID_SOCKET
 #define nc_closesocket closesocket
 #else
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -33,6 +41,10 @@ typedef int nc_socket;
 
 struct nc_conn {
     nc_socket sock;
+#ifdef NC_WITH_OPENSSL
+    SSL *ssl; /* NULL: plain TCP */
+    SSL_CTX *ssl_ctx;
+#endif
     int status;
     char server[128];
     uint32_t session;
@@ -610,6 +622,15 @@ static int scram_verify(const scram_state *st, const char *server_final) {
 
 static int send_all(nc_conn *c, const unsigned char *p, size_t n) {
     while (n > 0) {
+#ifdef NC_WITH_OPENSSL
+        if (c->ssl) {
+            int k = SSL_write(c->ssl, p, n > INT_MAX ? INT_MAX : (int)n);
+            if (k <= 0) return -1;
+            p += k;
+            n -= (size_t)k;
+            continue;
+        }
+#endif
 #ifdef _WIN32
         int k = send(c->sock, (const char *)p, (int)n, 0);
 #else
@@ -624,6 +645,15 @@ static int send_all(nc_conn *c, const unsigned char *p, size_t n) {
 
 static int recv_all(nc_conn *c, unsigned char *p, size_t n) {
     while (n > 0) {
+#ifdef NC_WITH_OPENSSL
+        if (c->ssl) {
+            int k = SSL_read(c->ssl, p, n > INT_MAX ? INT_MAX : (int)n);
+            if (k <= 0) return -1;
+            p += k;
+            n -= (size_t)k;
+            continue;
+        }
+#endif
 #ifdef _WIN32
         int k = recv(c->sock, (char *)p, (int)n, 0);
 #else
@@ -664,8 +694,87 @@ static int read_frame(nc_conn *c, char *kind, unsigned char **body, size_t *len)
     return 0;
 }
 
+int nc_tls_supported(void) {
+#ifdef NC_WITH_OPENSSL
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/* Frees a connection and its socket (and TLS session). */
+static void drop_conn(nc_conn *c) {
+#ifdef NC_WITH_OPENSSL
+    if (c->ssl) {
+        SSL_shutdown(c->ssl);
+        SSL_free(c->ssl);
+    }
+    if (c->ssl_ctx) SSL_CTX_free(c->ssl_ctx);
+#endif
+    if (c->sock != NC_BAD_SOCKET) nc_closesocket(c->sock);
+    free(c);
+}
+
+/* Starts TLS on c's socket, as the client: the server sees the handshake
+ * (DOCS §10).  0, or -1 with err set. */
+static int start_tls(nc_conn *c, const nc_config *cfg, const char *host, nc_error *err) {
+#ifdef NC_WITH_OPENSSL
+    unsigned char ip[16];
+    int is_ip = inet_pton(AF_INET, host, ip) == 1 || inet_pton(AF_INET6, host, ip) == 1;
+    long verified;
+    c->ssl_ctx = SSL_CTX_new(TLS_client_method());
+    if (!c->ssl_ctx || SSL_CTX_set_min_proto_version(c->ssl_ctx, TLS1_2_VERSION) != 1) {
+        set_error(err, "", "TLS: cannot set up OpenSSL");
+        return -1;
+    }
+    if (!cfg->tls_no_verify) {
+        SSL_CTX_set_verify(c->ssl_ctx, SSL_VERIFY_PEER, NULL);
+        if ((cfg->tls_ca ? SSL_CTX_load_verify_locations(c->ssl_ctx, cfg->tls_ca, NULL)
+                         : SSL_CTX_set_default_verify_paths(c->ssl_ctx)) != 1) {
+            set_error(err, "", "TLS: cannot load CA certificates%s%s", cfg->tls_ca ? " from " : "",
+                      cfg->tls_ca ? cfg->tls_ca : "");
+            return -1;
+        }
+    }
+    c->ssl = SSL_new(c->ssl_ctx);
+    if (!c->ssl || SSL_set_fd(c->ssl, (int)c->sock) != 1) {
+        set_error(err, "", "TLS: cannot set up OpenSSL");
+        return -1;
+    }
+    if (!cfg->tls_no_verify) {
+        /* The certificate must name the host connected to. */
+        X509_VERIFY_PARAM *param = SSL_get0_param(c->ssl);
+        if (is_ip ? X509_VERIFY_PARAM_set1_ip_asc(param, host) != 1
+                  : X509_VERIFY_PARAM_set1_host(param, host, 0) != 1) {
+            set_error(err, "", "TLS: bad host %s", host);
+            return -1;
+        }
+    }
+    if (!is_ip) SSL_set_tlsext_host_name(c->ssl, host);
+    if (SSL_connect(c->ssl) != 1) {
+        verified = SSL_get_verify_result(c->ssl);
+        if (verified != X509_V_OK) {
+            set_error(err, "", "TLS: %s", X509_verify_cert_error_string(verified));
+        } else {
+            char why[256];
+            ERR_error_string_n(ERR_get_error(), why, sizeof why);
+            set_error(err, "", "TLS handshake failed: %s", why);
+        }
+        return -1;
+    }
+    return 0;
+#else
+    (void)c;
+    (void)cfg;
+    (void)host;
+    set_error(err, "", "TLS: this libnucleus was built without it (build with NC_WITH_OPENSSL)");
+    return -1;
+#endif
+}
+
 nc_config nc_default_config(void) {
     nc_config cfg;
+    memset(&cfg, 0, sizeof cfg);
     cfg.host = "127.0.0.1";
     cfg.port = NC_DEFAULT_PORT;
     cfg.user = "nucleus";
@@ -731,6 +840,10 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
         return NULL;
     }
     setsockopt(c->sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
+    if ((cfg->tls || cfg->tls_ca) && start_tls(c, cfg, cfg->host ? cfg->host : d.host, err) != 0) {
+        drop_conn(c);
+        return NULL;
+    }
     put_le(&hello, NC_PROTOCOL_VERSION, 2);
     put_str(&hello, cfg->user ? cfg->user : d.user);
     put_str(&hello, cfg->database ? cfg->database : d.database);
@@ -760,8 +873,7 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
             free(body);
             if (!ok) {
                 set_error(err, "08006", "the SCRAM-SHA-256 login failed (or the server could not prove it knows the password)");
-                nc_closesocket(c->sock);
-                free(c);
+                drop_conn(c);
                 return NULL;
             }
             if (send) {
@@ -787,8 +899,7 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
         } else if (kind == 'E') {
             server_error(err, body, len);
             free(body);
-            nc_closesocket(c->sock);
-            free(c);
+            drop_conn(c);
             return NULL;
         } else {
             free(body);
@@ -797,8 +908,7 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
         free(body);
     }
     set_error(err, "08006", "the connection failed during login");
-    nc_closesocket(c->sock);
-    free(c);
+    drop_conn(c);
     return NULL;
 }
 
@@ -937,8 +1047,7 @@ uint32_t nc_session_id(const nc_conn *c) { return c->session; }
 void nc_close(nc_conn *c) {
     if (!c) return;
     send_frame(c, 'X', NULL);
-    nc_closesocket(c->sock);
-    free(c);
+    drop_conn(c);
 }
 
 size_t nc_columns(const nc_result *r) { return r->ncolumns; }

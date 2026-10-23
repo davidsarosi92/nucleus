@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- TLS (nucleus PLAN.md §M14.25): `connect({ tls, tlsCa, tlsVerify })`, over
+  `node:tls`.
 - Protocol version 4 (nucleus PLAN.md §M14.25): the password is proved by
   SCRAM-SHA-256 (`node:crypto`), never sent; the server's signature is
   checked.

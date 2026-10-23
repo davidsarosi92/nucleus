@@ -1,6 +1,7 @@
 //! `nucleus server`: the front ends a command line names — the nucleus
 //! protocol by default, PostgreSQL compatibility (the `pg-compat` module,
-//! which this edition includes) on request.
+//! which this edition includes) on request; TLS (the `tls` module) for
+//! clients that ask, given a certificate and its key.
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -21,6 +22,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut extra: Vec<(String, Option<String>)> = Vec::new();
     let (mut user, mut password) = (DEFAULT_USER.to_string(), Some(DEFAULT_PASSWORD.to_string()));
     let mut log_queries = false;
+    let (mut tls_cert, mut tls_key) = (None, None);
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -39,6 +41,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--password" => password = Some(rest.next().ok_or("--password needs a value")?.clone()),
             "--no-auth" => password = None,
             "--log-queries" => log_queries = true,
+            "--tls-cert" => tls_cert = Some(rest.next().ok_or("--tls-cert needs a file")?.clone()),
+            "--tls-key" => tls_key = Some(rest.next().ok_or("--tls-key needs a file")?.clone()),
             other => return Err(format!("server: unknown option {other}")),
         }
     }
@@ -49,6 +53,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
         },
         log_queries,
         registry: nucleus_sql::ext::Registry::shared_builtin(),
+        tls: match (tls_cert, tls_key) {
+            (Some(cert), Some(key)) => Some(Arc::new(
+                nucleus_tls::ServerTls::from_pem_files(cert.as_ref(), key.as_ref())
+                    .map_err(|e| format!("server: TLS: {e}"))?,
+            )),
+            (None, None) => None,
+            _ => return Err("server: --tls-cert and --tls-key go together".into()),
+        },
     };
     let db = Database::open(dir, Options::default()).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);
@@ -80,10 +92,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
         })
         .collect::<Result<_, _>>()?;
     eprintln!(
-        "nucleus {} listening on {} (database {dir}; {})",
+        "nucleus {} listening on {} (database {dir}; {}{})",
         env!("CARGO_PKG_VERSION"),
         shown.join(" and "),
-        config.auth.describe()
+        config.auth.describe(),
+        if config.tls.is_some() {
+            "; TLS offered"
+        } else {
+            ""
+        }
     );
     let mut listeners = listeners.into_iter();
     let (first, first_listener) = listeners.next().expect("ncp");

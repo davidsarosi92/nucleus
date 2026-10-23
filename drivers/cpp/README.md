@@ -8,7 +8,8 @@ text, `Numeric`, `Date`, `Timestamp`, `TimestampTz`, `Interval`, `Array`,
 and binary form; protocol version 3's `SmallInt`, `Integer`, `Real`,
 `Bytes`, `Time`, `Inet` and `Cidr` — `Inet::parse`, `Cidr::parse`),
 `transaction([](Connection&) { … })`.  Protocol version 4 (through the C
-driver): the password is proved by SCRAM-SHA-256, never sent.
+driver): the password is proved by SCRAM-SHA-256, never sent.  TLS with
+a C driver built with OpenSSL: `Config::tls`, `tls_ca`, `tls_no_verify`.
 
 ```sh
 cc -std=c99 -c ../c/nucleus.c -o nucleus.o

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- TLS (nucleus PLAN.md §M14.25): `connect(tls=True, tls_ca=…,
+  tls_verify=False)`, over `ssl`.
 - Protocol version 4 (nucleus PLAN.md §M14.25): the password is proved by
   SCRAM-SHA-256 (`hashlib`, `hmac`), never sent; the server's signature is
   checked.

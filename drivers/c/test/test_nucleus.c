@@ -242,12 +242,49 @@ static void authentication(void) {
     CHECK(nc_connect(&cfg, &err) == NULL && strcmp(err.code, "28P01") == 0);
 }
 
+static void tls(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db;
+    nc_result *r;
+    const char *ca = getenv("NUCLEUS_TLS_CA");
+    if (!nc_tls_supported()) {
+        cfg.tls = 1;
+        CHECK(nc_connect(&cfg, &err) == NULL);
+        return;
+    }
+    if (!ca) return;
+    cfg.tls_ca = ca;
+    db = nc_connect(&cfg, &err);
+    CHECK(db != NULL);
+    if (!db) {
+        fprintf(stderr, "tls: %s\n", err.message);
+        return;
+    }
+    r = must(db, "SELECT 'over tls'", NULL, 0);
+    if (r) {
+        CHECK(strcmp(text_of(r, 0, 0), "over tls") == 0);
+        nc_result_free(r);
+    }
+    nc_close(db);
+    cfg.tls_ca = NULL;
+    cfg.tls = 1;
+    cfg.tls_no_verify = 1;
+    db = nc_connect(&cfg, &err);
+    CHECK(db != NULL);
+    if (db) nc_close(db);
+    /* The test CA is not among the system's. */
+    cfg.tls_no_verify = 0;
+    CHECK(nc_connect(&cfg, &err) == NULL);
+}
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
     uuids();
     core_types();
     authentication();
+    tls();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

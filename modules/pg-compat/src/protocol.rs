@@ -357,7 +357,7 @@ struct Portal {
 }
 
 struct Conn {
-    out: BufWriter<TcpStream>,
+    out: BufWriter<nucleus_server::transport::WriteHalf>,
     /// The connection number and whether to log (see `Config::log_queries`).
     log: Option<u32>,
     session: Session,
@@ -367,22 +367,34 @@ struct Conn {
 
 /// Serves one client connection until it terminates.
 pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> io::Result<()> {
-    let mut input = BufReader::new(stream.try_clone()?);
-    let mut out = BufWriter::new(stream);
-
-    // Startup, possibly after declined SSL / GSSAPI requests.
+    // Startup, possibly after SSL (accepted when the server has TLS) and
+    // GSSAPI (declined) requests.  Read unbuffered: nothing a client sends
+    // before the TLS handshake may be taken as sent inside it.
+    let mut tcp = stream;
+    let mut secured: Option<Box<dyn nucleus_server::Stream>> = None;
     let params = loop {
-        let len = read_i32(&mut input)?;
+        let plain = secured.is_none();
+        let s: &mut dyn nucleus_server::Stream = match &mut secured {
+            Some(s) => s.as_mut(),
+            None => &mut tcp,
+        };
+        let len = read_i32(s)?;
         if !(8..=10_000).contains(&len) {
             return Err(bad("bad startup length"));
         }
         let mut body = vec![0u8; len as usize - 4];
-        input.read_exact(&mut body)?;
+        s.read_exact(&mut body)?;
         let code = i32::from_be_bytes(body[0..4].try_into().unwrap());
         match code {
+            SSL_REQUEST if plain && config.tls.is_some() => {
+                tcp.write_all(b"S")?;
+                tcp.flush()?;
+                let tls = config.tls.as_ref().expect("checked");
+                secured = Some(tls.accept(tcp.try_clone()?)?.stream);
+            }
             SSL_REQUEST | GSSENC_REQUEST => {
-                out.write_all(b"N")?;
-                out.flush()?;
+                s.write_all(b"N")?;
+                s.flush()?;
             }
             CANCEL_REQUEST => return Ok(()),
             PROTOCOL_V3 => {
@@ -398,6 +410,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
                 break params;
             }
             v => {
+                let mut out = BufWriter::new(s);
                 send_error(
                     &mut out,
                     &Error {
@@ -414,6 +427,10 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
             }
         }
     };
+    let stream = secured.unwrap_or_else(|| Box::new(tcp));
+    let (r, w) = nucleus_server::transport::split(stream);
+    let mut input = BufReader::new(r);
+    let mut out = BufWriter::new(w);
 
     if config.auth.wants_password() {
         let user = params.get("user").cloned().unwrap_or_default();
@@ -509,7 +526,7 @@ pub fn handle(stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> i
     }
 }
 
-fn read_i32(r: &mut impl Read) -> io::Result<i32> {
+fn read_i32(r: &mut (impl Read + ?Sized)) -> io::Result<i32> {
     let mut b = [0u8; 4];
     r.read_exact(&mut b)?;
     Ok(i32::from_be_bytes(b))
