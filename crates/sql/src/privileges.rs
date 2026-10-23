@@ -423,6 +423,9 @@ impl Checker {
 
     /// Whether the current role owns the object (or is an administrator).
     pub fn owns(&self, txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<bool> {
+        if !self.within_ceiling(kind, name, 0) {
+            return Ok(false);
+        }
         if self.who.superuser {
             return Ok(true);
         }
@@ -452,6 +455,9 @@ impl Checker {
         privilege: u32,
         column: Option<&str>,
     ) -> Result<bool> {
+        if !self.within_ceiling(kind, name, privilege) {
+            return Ok(false);
+        }
         if self.owns(txn, kind, name)? {
             return Ok(true);
         }
@@ -465,6 +471,18 @@ impl Checker {
                     || column
                         .is_some_and(|c| e.columns.get(c).is_some_and(|(p, _)| p & privilege != 0))
             }))
+    }
+
+    /// Whether the session's ceiling ([`crate::access::Ceiling`]) lets it
+    /// touch the object: with a table scope, no other table, and no table
+    /// created.
+    fn within_ceiling(&self, kind: Kind, name: &str, privilege: u32) -> bool {
+        let c = &self.who.ceiling;
+        match kind {
+            Kind::Table => c.admits_table(name),
+            Kind::Schema => c.tables.is_none() || privilege & CREATE == 0,
+            _ => true,
+        }
     }
 
     /// Whether the current role has `privilege` on any column of a table

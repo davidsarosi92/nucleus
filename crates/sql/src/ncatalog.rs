@@ -84,6 +84,19 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "tokens",
+        &[
+            ("name", T),
+            ("login", T),
+            ("role", T),
+            ("read_only", B),
+            ("tables", TA),
+            ("valid_until", DataType::TimestampTz),
+            ("created", DataType::TimestampTz),
+            ("created_by", T),
+        ],
+    ),
+    (
         "role_members",
         &[("role", T), ("member", T), ("admin_option", B)],
     ),
@@ -316,6 +329,22 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         .map_or(Value::Null, |n| Value::Int(i64::from(n))),
                     Value::Bool(r.password.is_some()),
                     r.valid_until.map_or(Value::Null, Value::TimestampTz),
+                ]);
+            }
+        }
+        "tokens" => {
+            for t in crate::tokens::visible(txn)? {
+                out.push(vec![
+                    text(t.name),
+                    text(t.login),
+                    text(t.role),
+                    Value::Bool(t.read_only),
+                    t.tables.map_or(Value::Null, |ts| {
+                        Value::Array(ts.into_iter().map(text).collect())
+                    }),
+                    t.valid_until.map_or(Value::Null, Value::TimestampTz),
+                    Value::TimestampTz(t.created),
+                    text(t.created_by),
                 ]);
             }
         }

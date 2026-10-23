@@ -808,6 +808,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 0C <kind> <object>` | an object's ACL (privileges per grantee, and per column) |
 | `00 0D <role> 00 <kind>` | a role's default privileges for objects it makes |
 | `00 0E <table> 00 <policy>` | a row-level security policy |
+| `00 0F <login>` | a token: its role, ceiling, expiry and secret's verifier (§9) |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -1015,6 +1016,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.roles` | `name`, `superuser`, `login`, `inherit`, `createrole`, `connection_limit`, `has_password`, `valid_until` |
 | `nc_catalog.role_members` | `role`, `member`, `admin_option` |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
+| `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by` (the tokens the current role may manage; never a secret) |
 | `nc_catalog.grants` | `kind`, `object`, `column`, `grantee`, `privilege`, `grantable` (the ACLs written out) |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
 
@@ -1288,6 +1290,29 @@ a count, a join, a subquery or a side effect reveals nothing of a hidden
 row (`crates/testkit/slt/32_row_security.slt`, the leak cases among
 them, agrees with PostgreSQL 18 run in one session).
 
+**Tokens** (`tokens.rs`): API keys for programs and AI agents.  `CREATE
+TOKEN name [FOR role] [READ ONLY] [ON [TABLE] t, …] [VALID UNTIL 't']`
+returns one row — `name`, `login` (`nct_` and 16 hex digits) and
+`secret` (64 hex digits), shown this once; only the secret's
+SCRAM-SHA-256 verifier is stored.  A client logs in with `login` as its
+user and `secret` as its password, so every driver, `psql` and any
+PostgreSQL client take a token as they are (and prove it by SCRAM like
+any password).  The session acts as the token's role (`current_user`,
+`session_user`) under the token's *ceiling* (`access::Ceiling`), which
+narrows the role's privileges and holds through `SET ROLE`: `READ ONLY`
+runs every transaction read only (a write is `25006`); `ON TABLE …`
+admits no other table and no new one (`42501`).  Tokens may be made for
+a role that cannot log in.  A role makes and drops its own tokens; a
+member with the admin option, those of its role; an administrator, any
+— an administrator's tokens only an administrator.  A token session
+cannot make tokens or set passwords (`42501`), so no credential outlives
+a revoked token.  `DROP TOKEN [IF EXISTS] name` revokes one; dropping
+its role drops it, renaming follows; a dropped table leaves the tokens
+scoped to it; after `VALID UNTIL` it does not log in (`28P01`, as any
+refusal).  Role names starting `nct_` are reserved.  Row, time and cost
+budgets come with §M14.25's protection step (T6); schema and branch
+scopes when there are schemas and branches.
+
 **Bootstrap.**  A database whose catalog has no administrator that can
 log in with a password is *unclaimed*: the server's `--user` /
 `--password` (default `nucleus` / `nucleus`) log in as an administrator,
@@ -1547,6 +1572,11 @@ the same quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 tokens (T4):** `CREATE TOKEN … [READ ONLY] [ON
+  TABLE …] [VALID UNTIL …]`, `DROP TOKEN`; a login name and a secret,
+  proved by SCRAM in every driver and `psql`; the session runs as the
+  token's role under its ceiling (`access::Ceiling`, kept through `SET
+  ROLE`); `nc_catalog.tokens`.
 - **2026-10-23 — §M14.25 SCRAM on the wire (T4):** `ncp` version 4 —
   the password is proved by SCRAM-SHA-256 (`A` / `a` messages), never
   sent; the server signs back; unknown users get a stable fake salt.

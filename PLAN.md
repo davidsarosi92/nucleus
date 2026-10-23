@@ -995,7 +995,9 @@ security ✅ (policies under a barrier; vector, text and stream reads get
 them as those arrive — §M14.12, §M14.21, §M16.5; the connection context
 in `current_setting` comes with T5); T4 authentication methods (SCRAM on
 the wire ✅ — `ncp` version 4 in every driver, and pg-compat's SASL;
-tokens, TLS, certificates, OIDC, LDAP to come); T5 access rules and privileges by connection
+tokens ✅ — read only, table scope, expiry, revocation, through every
+driver and `psql`; schema and branch scopes when those exist, row, time
+and cost budgets with T6; TLS, certificates, OIDC, LDAP to come); T5 access rules and privileges by connection
 context; T6 protection; T7 audit.
 
 **Order:** right after §M14.19 and §M14.26 (whose `inet` / `cidr` the
@@ -1004,10 +1006,12 @@ much of it builds on roles and row-level security — the MCP server's
 write access (§M14.10), filtered vector search (§M14.12), hybrid search
 (§M14.21), memory for models (§M14.24), sync (§M16.7).
 
-Today there is one user and one password, given on the server's command
-line; `ncp` sends the password in the clear (there is no TLS yet), and
-`--no-auth` admits anyone.  Fine on `127.0.0.1` for development, not
-beyond it.
+Before this milestone there was one user and one password, given on the
+server's command line, sent in the clear, and `--no-auth` admitted
+anyone.  Roles, privileges, row-level security, SCRAM and tokens are in
+now (the steps above); there is no TLS yet, so queries and results still
+travel in the clear: fine on `127.0.0.1` and trusted networks, not
+beyond.
 
 - **Users and roles, in SQL and in the catalog** (principle 8):
   `CREATE ROLE`, `CREATE USER` (a role that may log in), `ALTER`, `DROP`;
@@ -1960,6 +1964,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.25 T4: tokens — a login name and a secret, so
+  every driver and PostgreSQL client takes them as they are; a ceiling
+  (read only, tables) that narrows the role and holds through `SET ROLE`.
 - **2026-10-23** — §M14.25 T4: SCRAM-SHA-256 on the wire — `ncp` version
   4 proves the password and never sends it; all six drivers speak it,
   with the C driver's primitives written in the driver; pg-compat uses

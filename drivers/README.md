@@ -9,7 +9,8 @@ parameters, errors with their SQLSTATE, transactions, passwords).  They
 speak protocol version 4: the password is proved by SCRAM-SHA-256 and
 never sent, registered types arrive in their binary form, and `smallint`,
 `integer`, `real`, `bytea`, `time`, `inet` and `cidr` as each language's
-native (or closest) type.
+native (or closest) type.  A token (`CREATE TOKEN`, DOCS.md §9) is a
+user and a password to each of them: its `login` and its `secret`.
 
 | Language | Where | Values |
 |----------|-------|--------|

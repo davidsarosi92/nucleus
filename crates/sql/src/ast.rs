@@ -75,6 +75,27 @@ pub enum Statement {
         /// Its new name.
         to: String,
     },
+    /// `CREATE TOKEN name [FOR role] [READ ONLY] [ON TABLE t, …] [VALID
+    /// UNTIL 'ts']`.
+    CreateToken {
+        /// Its name.
+        name: String,
+        /// The role it acts as (`None`: the current one).
+        role: Option<String>,
+        /// `READ ONLY`.
+        read_only: bool,
+        /// `ON TABLE …`.
+        tables: Option<Vec<String>>,
+        /// `VALID UNTIL`.
+        valid_until: Option<String>,
+    },
+    /// `DROP TOKEN [IF EXISTS] name`.
+    DropToken {
+        /// The token.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
     /// `DROP ROLE [IF EXISTS] names`.
     DropRole {
         /// The roles.

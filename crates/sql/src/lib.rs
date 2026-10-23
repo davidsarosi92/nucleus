@@ -34,6 +34,7 @@ pub mod privileges;
 pub mod roles;
 pub mod session;
 pub mod stats;
+pub mod tokens;
 pub mod types;
 pub mod uuid;
 

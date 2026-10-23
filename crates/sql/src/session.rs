@@ -360,7 +360,9 @@ impl Session {
                 ));
             }
             if block.txn.is_none() {
-                block.txn = Some(self.kv.begin(options(&block.mode, default, false))?);
+                let mut opts = options(&block.mode, default, false);
+                opts.read_only |= self.who.ceiling.read_only;
+                block.txn = Some(self.kv.begin(opts)?);
                 block.now = crate::datetime::from_system(self.kv.wall_clock());
             }
             let txn = block.txn.as_mut().expect("just started");
@@ -381,7 +383,8 @@ impl Session {
             return r;
         }
         // Autocommit, retried on conflicts.
-        let opts = options(&TxnMode::default(), default, read_only(stmt));
+        let mut opts = options(&TxnMode::default(), default, read_only(stmt));
+        opts.read_only |= self.who.ceiling.read_only;
         let mut attempt = 0;
         loop {
             let mut txn = self.kv.begin(opts)?;
@@ -431,6 +434,9 @@ impl Session {
                 name: "QUERY PLAN".into(),
                 ty: DataType::Text,
             }]),
+            Statement::CreateToken { .. } => Some(columns_of(
+                ["name", "login", "secret"].map(|c| (c.to_string(), Some(DataType::Text))),
+            )),
             Statement::Show(name) => Some(vec![OutColumn {
                 name: name.clone(),
                 ty: DataType::Text,
@@ -614,6 +620,7 @@ pub fn execute(
                         checker.require_owner(&*txn, crate::privileges::Kind::Table, name)?;
                         crate::privileges::forget(txn, crate::privileges::Kind::Table, name)?;
                         crate::policies::forget(txn, name)?;
+                        crate::tokens::forget_table(txn, name)?;
                         // Foreign keys of other tables referencing it.
                         for (child_name, fk_name) in t.referenced_by.clone() {
                             if child_name == t.name || names.contains(&child_name) {
@@ -745,6 +752,38 @@ pub fn execute(
         | Statement::DropRole { .. }
         | Statement::GrantRole { .. }
         | Statement::RevokeRole { .. } => Output::Command(crate::roles::run(txn, stmt)?),
+        Statement::CreateToken {
+            name,
+            role,
+            read_only,
+            tables,
+            valid_until,
+        } => {
+            let (t, secret) = crate::tokens::create(
+                txn,
+                name,
+                role.as_deref(),
+                *read_only,
+                tables.as_deref(),
+                valid_until.as_deref(),
+            )?;
+            Output::Rows {
+                columns: columns_of([
+                    ("name".to_string(), Some(DataType::Text)),
+                    ("login".to_string(), Some(DataType::Text)),
+                    ("secret".to_string(), Some(DataType::Text)),
+                ]),
+                rows: vec![vec![
+                    Value::Text(t.name),
+                    Value::Text(t.login),
+                    Value::Text(secret),
+                ]],
+            }
+        }
+        Statement::DropToken { name, if_exists } => {
+            crate::tokens::drop(txn, name, *if_exists)?;
+            Output::Command("DROP TOKEN".into())
+        }
         Statement::SetRole(_) | Statement::Reset(_) => unreachable!("handled by the session"),
         Statement::SetRowSecurity {
             table,

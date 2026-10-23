@@ -784,6 +784,35 @@ impl<'a> Parser<'a> {
         if self.eat_kw("policy") {
             return self.create_policy();
         }
+        if self.eat_kw("token") {
+            let name = self.ident()?;
+            let (mut role, mut read_only, mut tables, mut valid_until) = (None, false, None, None);
+            loop {
+                if self.eat_kw("for") {
+                    role = Some(self.ident()?);
+                } else if self.eat_kws(&["read", "only"]) {
+                    read_only = true;
+                } else if self.eat_kw("on") {
+                    self.eat_kw("table");
+                    let mut t = vec![self.relation()?];
+                    while self.eat_op(",") {
+                        t.push(self.relation()?);
+                    }
+                    tables = Some(t);
+                } else if self.eat_kws(&["valid", "until"]) {
+                    valid_until = Some(self.string()?);
+                } else {
+                    break;
+                }
+            }
+            return Ok(Statement::CreateToken {
+                name,
+                role,
+                read_only,
+                tables,
+                valid_until,
+            });
+        }
         if self.eat_kw("type") {
             let name = self.ident()?;
             self.expect_kw("as")?;
@@ -1092,6 +1121,11 @@ impl<'a> Parser<'a> {
                 table,
                 if_exists,
             });
+        }
+        if self.eat_kw("token") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let name = self.ident()?;
+            return Ok(Statement::DropToken { name, if_exists });
         }
         if self.eat_kw("role") || self.eat_kw("user") {
             let if_exists = self.eat_kws(&["if", "exists"]);

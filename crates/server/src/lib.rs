@@ -108,6 +108,9 @@ impl Authenticator for Password {
     fn accepts(&self, kv: &dyn Kv, user: &str, password: &str) -> bool {
         let check = || -> nucleus_sql::Result<bool> {
             let txn = kv.begin(nucleus_kv::TxnOptions::read_only())?;
+            if let Some(v) = token_verifier(kv, &*txn, user)? {
+                return Ok(v.is_some_and(|v| v.matches(password)));
+            }
             if nucleus_sql::roles::unclaimed(&*txn)? {
                 return Ok(user == self.user && password == self.password);
             }
@@ -119,6 +122,9 @@ impl Authenticator for Password {
     fn verifier(&self, kv: &dyn Kv, user: &str) -> Option<nucleus_crypto::ScramVerifier> {
         let find = || -> nucleus_sql::Result<Option<nucleus_crypto::ScramVerifier>> {
             let txn = kv.begin(nucleus_kv::TxnOptions::read_only())?;
+            if let Some(v) = token_verifier(kv, &*txn, user)? {
+                return Ok(v);
+            }
             if nucleus_sql::roles::unclaimed(&*txn)? {
                 // The configured password's verifier, salted per user.
                 return Ok((user == self.user).then(|| {
@@ -145,6 +151,23 @@ impl Authenticator for Password {
         };
         find().ok().flatten()
     }
+}
+
+/// For a token's login name (`nct_…`), `Some`: the verifier of its secret
+/// if it may log in now (`None` inside: unknown, expired, its role gone);
+/// for any other name, `None`.
+fn token_verifier(
+    kv: &dyn Kv,
+    txn: &dyn nucleus_kv::KvTxn,
+    user: &str,
+) -> nucleus_sql::Result<Option<Option<nucleus_crypto::ScramVerifier>>> {
+    if !user.starts_with(nucleus_sql::tokens::PREFIX) {
+        return Ok(None);
+    }
+    let now = nucleus_sql::datetime::from_system(kv.wall_clock());
+    Ok(Some(nucleus_sql::tokens::usable(txn, user, now)?.and_then(
+        |t| nucleus_crypto::ScramVerifier::parse(&t.verifier),
+    )))
 }
 
 /// Anyone, without a password.

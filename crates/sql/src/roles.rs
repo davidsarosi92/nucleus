@@ -334,6 +334,12 @@ fn may_manage(txn: &dyn KvTxn, target_superuser: bool) -> Result<()> {
 }
 
 fn apply(txn: &mut dyn KvTxn, role: &mut Role, options: &[RoleOption]) -> Result<()> {
+    // A credential made in a token session would outlive the token.
+    if access::current().token.is_some()
+        && options.iter().any(|o| matches!(o, RoleOption::Password(_)))
+    {
+        return Err(denied("a token session cannot set passwords"));
+    }
     for o in options {
         match o {
             RoleOption::Superuser(b) => role.superuser = *b,
@@ -381,6 +387,7 @@ fn reserved(name: &str) -> bool {
         "public" | "none" | "current_user" | "session_user" | "current_role"
     ) || name.starts_with("pg_")
         || name.starts_with("nc_")
+        || name.starts_with(crate::tokens::PREFIX)
 }
 
 /// Runs a role statement; returns its command tag.
@@ -458,6 +465,7 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
             }
             crate::enums::rename_owner(txn, name, to)?;
             crate::privileges::rename_grantee(txn, name, to)?;
+            crate::tokens::rename_role(txn, name, to)?;
             Ok("ALTER ROLE".into())
         }
         Statement::DropRole { names, if_exists } => {
@@ -493,6 +501,7 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
                         owned.join(", ")
                     )));
                 }
+                crate::tokens::forget_role(txn, name)?;
                 drop(txn, name)?;
             }
             Ok("DROP ROLE".into())
@@ -569,18 +578,37 @@ fn may_grant(txn: &dyn KvTxn, role: &Role) -> Result<()> {
 /// the database does not know it (an unclaimed one admits any name as its
 /// administrator).
 pub fn login_identity(txn: &dyn KvTxn, user: &str) -> Result<access::Who> {
+    if user.starts_with(crate::tokens::PREFIX) {
+        // A token: its role, under its ceiling.
+        let t = crate::tokens::get(txn, user)?.ok_or_else(|| {
+            Error::invalid_authorization(format!("token \"{user}\" does not exist"))
+        })?;
+        let r = get(txn, &t.role)?.ok_or_else(|| no_role(&t.role))?;
+        return Ok(access::Who {
+            session_user: r.name.clone(),
+            user: r.name,
+            superuser: r.superuser,
+            settings: Default::default(),
+            ceiling: t.ceiling(),
+            token: Some(t.name),
+        });
+    }
     match get(txn, user)? {
         Some(r) => Ok(access::Who {
             session_user: user.into(),
             user: user.into(),
             superuser: r.superuser,
             settings: Default::default(),
+            token: None,
+            ceiling: Default::default(),
         }),
         None if unclaimed(txn)? => Ok(access::Who {
             session_user: user.into(),
             user: user.into(),
             superuser: true,
             settings: Default::default(),
+            token: None,
+            ceiling: Default::default(),
         }),
         None => Err(Error::invalid_authorization(format!(
             "role \"{user}\" does not exist"
@@ -606,5 +634,7 @@ pub fn set_role(txn: &dyn KvTxn, login: &access::Who, role: Option<&str>) -> Res
         user: role.into(),
         superuser: r.superuser,
         settings: login.settings.clone(),
+        token: login.token.clone(),
+        ceiling: login.ceiling.clone(),
     })
 }

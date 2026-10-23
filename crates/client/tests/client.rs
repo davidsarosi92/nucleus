@@ -531,3 +531,101 @@ fn roles_decide_logins() {
         .unwrap_err();
     assert!(matches!(err, Error::Server(e) if e.code == "3D000"));
 }
+
+/// Tokens (PLAN.md §M14.25): a login name and a secret, proved by SCRAM as
+/// any password; the session acts as the token's role under its ceiling.
+#[test]
+fn tokens_log_in_under_their_ceiling() {
+    let addr = start(None);
+    let login = |user: &str, password: &str| {
+        Client::connect(Config {
+            user: user.into(),
+            password: Some(password.into()),
+            ..config(addr)
+        })
+    };
+    fn code<T>(r: Result<T, Error>) -> String {
+        match r {
+            Err(Error::Server(e)) => e.code,
+            Err(e) => format!("{e}"),
+            Ok(_) => "ok".into(),
+        }
+    }
+    let mut admin = login("nucleus", "nucleus").unwrap();
+    for sql in [
+        "CREATE USER root SUPERUSER PASSWORD 'root-pw'",
+        "CREATE TABLE notes (id int PRIMARY KEY, body text)",
+        "CREATE TABLE secrets (x int)",
+        "INSERT INTO notes VALUES (1, 'a'), (2, 'b')",
+        "INSERT INTO secrets VALUES (42)",
+        "CREATE ROLE agent",
+        "GRANT SELECT, INSERT ON notes TO agent",
+        "GRANT SELECT ON secrets TO agent",
+        "CREATE ROLE helper",
+        "GRANT SELECT ON secrets TO helper",
+        "GRANT INSERT ON notes TO helper",
+        "GRANT helper TO agent",
+    ] {
+        admin.execute(sql, &[]).unwrap();
+    }
+    let token = |c: &mut Client, sql: &str| -> (String, String) {
+        let r = c.rows(sql, &[]).unwrap();
+        match (&r[0][1], &r[0][2]) {
+            (Value::Text(l), Value::Text(s)) => (l.clone(), s.clone()),
+            other => panic!("{other:?}"),
+        }
+    };
+    let (rl, rs) = token(
+        &mut admin,
+        "CREATE TOKEN reader FOR agent READ ONLY ON TABLE notes",
+    );
+    let (wl, ws) = token(&mut admin, "CREATE TOKEN writer FOR agent");
+    // A token acts as its role.
+    let mut r = login(&rl, &rs).unwrap();
+    assert_eq!(
+        r.rows("SELECT current_user, count(*) FROM notes", &[])
+            .unwrap(),
+        vec![vec![Value::from("agent"), Value::Int(2)]]
+    );
+    // Its ceiling: read only, one table — through SET ROLE too.
+    assert_eq!(
+        code(r.execute("INSERT INTO notes VALUES (3, 'c')", &[])),
+        "25006"
+    );
+    assert_eq!(code(r.execute("SELECT * FROM secrets", &[])), "42501");
+    assert_eq!(code(r.execute("CREATE TABLE mine (x int)", &[])), "42501");
+    r.execute("SET ROLE helper", &[]).unwrap();
+    assert_eq!(code(r.execute("SELECT * FROM secrets", &[])), "42501");
+    assert_eq!(
+        code(r.execute("INSERT INTO notes VALUES (3, 'c')", &[])),
+        "25006"
+    );
+    r.execute("RESET ROLE", &[]).unwrap();
+    // No token can make tokens or set passwords.
+    let mut w = login(&wl, &ws).unwrap();
+    w.execute("INSERT INTO notes VALUES (3, 'c')", &[]).unwrap();
+    assert_eq!(code(w.execute("SELECT x FROM secrets", &[])), "ok");
+    assert_eq!(code(w.execute("CREATE TOKEN more", &[])), "42501");
+    assert_eq!(
+        code(w.execute("ALTER ROLE agent PASSWORD 'mine'", &[])),
+        "42501"
+    );
+    // Wrong secrets, revoked and expired tokens do not log in.
+    assert!(login(&rl, "wrong").is_err());
+    assert!(login(&rl, &ws).is_err());
+    assert!(login("nct_0000000000000000", &rs).is_err());
+    admin.execute("DROP TOKEN reader", &[]).unwrap();
+    assert!(login(&rl, &rs).is_err());
+    let (el, es) = token(
+        &mut admin,
+        "CREATE TOKEN old FOR agent VALID UNTIL '2001-01-01 00:00:00+00'",
+    );
+    assert!(login(&el, &es).is_err());
+    // Claiming the database does not touch tokens; dropping the role does.
+    let mut root = login("root", "root-pw").unwrap();
+    assert!(login(&wl, &ws).is_ok());
+    root.execute("REVOKE ALL ON notes, secrets FROM agent, helper", &[])
+        .unwrap();
+    root.execute("DROP ROLE agent", &[]).unwrap();
+    assert!(login(&wl, &ws).is_err());
+}

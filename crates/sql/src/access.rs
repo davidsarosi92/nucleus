@@ -30,6 +30,27 @@ pub struct Who {
     /// The session's settings (`SET name = value`), for
     /// `current_setting()` — and so for row-level security policies.
     pub settings: std::collections::BTreeMap<String, String>,
+    /// The token the session logged in with ([`crate::tokens`]), by name.
+    pub token: Option<String>,
+    /// What the session may do at most, whatever its roles may.
+    pub ceiling: Ceiling,
+}
+
+/// A ceiling on a session's privileges (a token's, §M14.25's access
+/// rules'): it narrows what the roles may do, never widens it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ceiling {
+    /// No statement may write (`25006`).
+    pub read_only: bool,
+    /// The only tables it may touch (`None`: any); none may be created.
+    pub tables: Option<std::collections::BTreeSet<String>>,
+}
+
+impl Ceiling {
+    /// Whether it lets `table` be touched.
+    pub fn admits_table(&self, table: &str) -> bool {
+        self.tables.as_ref().is_none_or(|t| t.contains(table))
+    }
 }
 
 impl Who {
@@ -40,6 +61,8 @@ impl Who {
             user: SYSTEM_USER.into(),
             superuser: true,
             settings: Default::default(),
+            token: None,
+            ceiling: Ceiling::default(),
         }
     }
 }

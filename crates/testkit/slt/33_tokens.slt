@@ -1,0 +1,119 @@
+# Tokens: API keys for programs and agents — CREATE TOKEN / DROP TOKEN,
+# who may manage them, nc_catalog.tokens.  nucleus-only throughout
+# (PostgreSQL has no tokens); logging in with one, and its ceiling, are
+# tested over real connections (crates/client/tests/client.rs).
+
+# nucleus-only
+statement ok
+CREATE TABLE slt_notes (id int PRIMARY KEY, body text)
+
+# nucleus-only
+statement ok
+CREATE TABLE slt_other (x int)
+
+# nucleus-only
+statement ok
+CREATE ROLE slt_agent
+
+# nucleus-only
+statement ok
+CREATE USER slt_dev
+
+# nucleus-only
+statement ok
+CREATE TOKEN slt_reader FOR slt_agent READ ONLY ON TABLE slt_notes VALID UNTIL '2099-01-01 00:00:00+00'
+
+# nucleus-only: the secret is shown once, never stored.
+query TTBTT
+SELECT name, role, read_only, tables, valid_until FROM nc_catalog.tokens WHERE name LIKE 'slt_%'
+----
+slt_reader slt_agent true {slt_notes} 2099-01-01 00:00:00+00
+
+# nucleus-only
+query B
+SELECT login LIKE 'nct\_%' AND length(login) = 20 FROM nc_catalog.tokens WHERE name = 'slt_reader'
+----
+true
+
+# nucleus-only
+statement error 42710
+CREATE TOKEN slt_reader FOR slt_agent
+
+# nucleus-only
+statement error 42704
+CREATE TOKEN slt_ghost FOR slt_nobody
+
+# nucleus-only
+statement error 42P01
+CREATE TOKEN slt_ghost FOR slt_agent ON TABLE slt_nope
+
+# nucleus-only: a token's login names are the catalog's own.
+statement error reserved
+CREATE ROLE nct_0123456789abcdef
+
+# nucleus-only: a role makes tokens for itself, not for others.
+statement ok
+SET ROLE slt_dev
+
+# nucleus-only
+statement ok
+CREATE TOKEN slt_mine
+
+# nucleus-only
+statement error 42501
+CREATE TOKEN slt_theirs FOR slt_agent
+
+# nucleus-only
+statement error 42501
+DROP TOKEN slt_reader
+
+# nucleus-only: it sees its own tokens only.
+query TT
+SELECT name, role FROM nc_catalog.tokens WHERE name LIKE 'slt_%' ORDER BY name
+----
+slt_mine slt_dev
+
+# nucleus-only
+statement ok
+RESET ROLE
+
+# nucleus-only: dropping a table takes it out of the tokens scoped to it.
+statement ok
+DROP TABLE slt_notes
+
+# nucleus-only
+query TT
+SELECT name, tables FROM nc_catalog.tokens WHERE name LIKE 'slt_%' ORDER BY name
+----
+slt_mine NULL
+slt_reader {}
+
+# nucleus-only
+statement ok
+DROP TOKEN slt_reader
+
+# nucleus-only
+statement error 42704
+DROP TOKEN slt_reader
+
+# nucleus-only
+statement ok
+DROP TOKEN IF EXISTS slt_reader
+
+# nucleus-only: dropping a role drops its tokens.
+statement ok
+DROP ROLE slt_dev
+
+# nucleus-only
+query I
+SELECT count(*) FROM nc_catalog.tokens WHERE name LIKE 'slt_%'
+----
+0
+
+# nucleus-only
+statement ok
+DROP TABLE slt_other
+
+# nucleus-only
+statement ok
+DROP ROLE slt_agent
