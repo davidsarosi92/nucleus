@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Over TLS, SCRAM bound to the session (SCRAM-SHA-256-PLUS) when the
+  server offers it.
 - Client certificates (mutual TLS): `connect({ tlsCert, tlsKey })`.
 - TLS (nucleus PLAN.md §M14.25): `connect({ tls, tlsCa, tlsVerify })`, over
   `node:tls`.

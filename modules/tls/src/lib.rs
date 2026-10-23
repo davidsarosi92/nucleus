@@ -290,14 +290,22 @@ impl Default for ClientTls {
 }
 
 impl nucleus_client::Tls for ClientTls {
-    fn connect(&self, tcp: TcpStream, host: &str) -> io::Result<Box<dyn nucleus_client::Stream>> {
+    fn connect(&self, tcp: TcpStream, host: &str) -> io::Result<nucleus_client::Secured> {
         let name = ServerName::try_from(host.to_string())
             .map_err(|_| invalid(format!("not a host name: {host}")))?;
         let conn =
             rustls::ClientConnection::new(Arc::clone(&self.config), name).map_err(invalid)?;
         let mut s = rustls::StreamOwned::new(conn, tcp);
         handshake(&mut s)?;
-        Ok(Box::new(s))
+        let channel_binding = s
+            .conn
+            .peer_certificates()
+            .and_then(|c| c.first())
+            .and_then(|c| der::server_end_point(c));
+        Ok(nucleus_client::Secured {
+            stream: Box::new(s),
+            channel_binding,
+        })
     }
 }
 

@@ -418,6 +418,9 @@ impl ScramServer {
 #[derive(Debug)]
 pub struct ScramClient {
     password: String,
+    /// The GS2 header, and the channel binding data it binds to (if `p=`).
+    gs2: &'static str,
+    binding: Vec<u8>,
     client_first_bare: String,
     auth: String,
     server_key: [u8; 32],
@@ -429,15 +432,32 @@ impl ScramClient {
     pub fn new(password: &str, client_nonce: &str) -> Self {
         ScramClient {
             password: password.to_string(),
+            gs2: "n,,",
+            binding: Vec::new(),
             client_first_bare: format!("n=,r={client_nonce}"),
             auth: String::new(),
             server_key: [0; 32],
         }
     }
 
+    /// The same exchange over a TLS session whose `tls-server-end-point`
+    /// value is `data`: bound to it if the server `offered` binding
+    /// (SCRAM-SHA-256-PLUS), else saying it could have ("y") — so a server
+    /// that can bind, reached through someone who stripped the offer,
+    /// refuses.
+    pub fn with_channel_binding(mut self, data: Vec<u8>, offered: bool) -> Self {
+        if offered {
+            self.gs2 = "p=tls-server-end-point,,";
+            self.binding = data;
+        } else {
+            self.gs2 = "y,,";
+        }
+        self
+    }
+
     /// The first message.
     pub fn first(&self) -> String {
-        format!("n,,{}", self.client_first_bare)
+        format!("{}{}", self.gs2, self.client_first_bare)
     }
 
     /// The server's first message → the client's final one.
@@ -458,7 +478,9 @@ impl ScramClient {
         let client_key = hmac_sha256(&salted, b"Client Key");
         let stored_key = sha256(&client_key);
         self.server_key = hmac_sha256(&salted, b"Server Key");
-        let without_proof = format!("c=biws,r={nonce}");
+        let mut c = self.gs2.as_bytes().to_vec();
+        c.extend_from_slice(&self.binding);
+        let without_proof = format!("c={},r={nonce}", base64_encode(&c));
         self.auth = format!("{},{server_first},{without_proof}", self.client_first_bare);
         let signature = hmac_sha256(&stored_key, self.auth.as_bytes());
         let proof: Vec<u8> = client_key
@@ -615,6 +637,36 @@ mod tests {
         assert_eq!(server.first("y,,n=,r=cli"), Err(ScramError::Rejected));
         let mut server = ScramServer::new(Some(v), &[0; 16], "srv").with_channel_binding(vec![1]);
         assert!(server.first("n,,n=,r=cli").is_ok() && !server.channel_bound());
+    }
+
+    /// The client's side of channel binding against the server's.
+    #[test]
+    fn scram_client_binds() {
+        let v = ScramVerifier::new("pw", &[3; 16], 4096);
+        let run = |server_data: Option<Vec<u8>>, client_data: Vec<u8>, offered: bool| {
+            let mut server = ScramServer::new(Some(v.clone()), &[0; 16], "srv");
+            if let Some(d) = server_data {
+                server = server.with_channel_binding(d);
+            }
+            let mut client =
+                ScramClient::new("pw", "cli").with_channel_binding(client_data, offered);
+            let first = server.first(&client.first())?;
+            let last = client.respond(&first)?;
+            client.verify(&server.finish(&last)?)
+        };
+        assert_eq!(run(Some(vec![1; 32]), vec![1; 32], true), Ok(()));
+        // Another session's data: a relayed proof.
+        assert_eq!(
+            run(Some(vec![1; 32]), vec![2; 32], true),
+            Err(ScramError::Malformed)
+        );
+        // The offer stripped on the way.
+        assert_eq!(
+            run(Some(vec![1; 32]), vec![1; 32], false),
+            Err(ScramError::Rejected)
+        );
+        // A server that cannot bind takes "y".
+        assert_eq!(run(None, vec![1; 32], false), Ok(()));
     }
 
     #[test]

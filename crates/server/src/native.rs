@@ -404,7 +404,8 @@ fn login(
         log("login", &format!("{user} by its client certificate"));
     } else if config.auth.wants_password() {
         if version >= 4 {
-            match scram(input, out, &**kv, config, &user)? {
+            let binding = tls.and_then(|t| t.channel_binding.as_deref());
+            match scram(input, out, &**kv, config, &user, binding)? {
                 Ok(true) => {}
                 Ok(false) => return Ok(Err(refused())),
                 Err(e) => return Ok(Err(e)),
@@ -420,17 +421,25 @@ fn login(
     })
 }
 
-/// The SCRAM-SHA-256 exchange: `A` names the mechanism, then `a` (client
+/// The SCRAM-SHA-256 exchange: `A` names the mechanisms, then `a` (client
 /// first) / `A` (server first) / `a` (client final) / `A` (server final).
-/// Whether the client proved its password.
+/// Over TLS with a channel binding, SCRAM-SHA-256-PLUS is offered too, and
+/// the client's GS2 header says which it takes.  Whether the client proved
+/// its password.
 fn scram(
     input: &mut impl Read,
     out: &mut impl Write,
     kv: &dyn Kv,
     config: &Config,
     user: &str,
+    binding: Option<&[u8]>,
 ) -> io::Result<Result<bool, Error>> {
     let mut server = crate::scram_server(config, kv, user);
+    let mut mechanisms = "SCRAM-SHA-256";
+    if let Some(b) = binding {
+        server = server.with_channel_binding(b.to_vec());
+        mechanisms = "SCRAM-SHA-256-PLUS SCRAM-SHA-256";
+    }
     let send = |out: &mut dyn Write, s: &str| -> io::Result<()> {
         out.write_all(&Msg::new(b'A').str(s).finish())?;
         out.flush()
@@ -442,13 +451,18 @@ fn scram(
         }
         Ok(Body { b: &body }.str())
     };
-    send(out, "SCRAM-SHA-256")?;
+    send(out, mechanisms)?;
     let first = match receive(input)? {
         Ok(m) => m,
         Err(e) => return Ok(Err(e)),
     };
-    let Ok(server_first) = server.first(&first) else {
-        return Ok(Err(protocol("malformed SCRAM message")));
+    let server_first = match server.first(&first) {
+        Ok(m) => m,
+        // A client that could bind, told it cannot: someone in between.
+        Err(nucleus_crypto::ScramError::Rejected) => return Ok(Ok(false)),
+        Err(nucleus_crypto::ScramError::Malformed) => {
+            return Ok(Err(protocol("malformed SCRAM message")));
+        }
     };
     send(out, &server_first)?;
     let last = match receive(input)? {

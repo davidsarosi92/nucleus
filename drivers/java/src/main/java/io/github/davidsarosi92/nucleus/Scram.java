@@ -12,22 +12,55 @@ import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 
-/** The client's side of a SCRAM-SHA-256 exchange (RFC 5802). */
+/**
+ * The client's side of a SCRAM-SHA-256 exchange (RFC 5802); over TLS bound to the session
+ * (SCRAM-SHA-256-PLUS) when the server offers it, else saying it could have been ("y"), so a
+ * stripped offer is caught.
+ */
 final class Scram {
     private final String password;
     private final String bare;
+    private final String gs2;
+    private final byte[] binding;
     private byte[] auth;
     private byte[] serverKey;
 
-    Scram(String password) {
+    /** {@code binding}: the TLS session's tls-server-end-point value, or null. */
+    Scram(String password, byte[] binding, boolean offered) {
         this.password = password;
         byte[] nonce = new byte[18];
         new SecureRandom().nextBytes(nonce);
         bare = "n=,r=" + Base64.getEncoder().encodeToString(nonce);
+        gs2 = binding == null ? "n,," : offered ? "p=tls-server-end-point,," : "y,,";
+        this.binding = binding != null && offered ? binding : new byte[0];
+    }
+
+    /**
+     * RFC 5929's tls-server-end-point: the server's certificate hashed by its signature's hash
+     * (SHA-256 for MD5 and SHA-1); null when it names none.
+     */
+    static byte[] serverEndPoint(java.security.cert.Certificate cert) {
+        if (!(cert instanceof java.security.cert.X509Certificate x)) return null;
+        String alg = x.getSigAlgName().toUpperCase(java.util.Locale.ROOT);
+        String hash;
+        if (alg.startsWith("SHA256WITH") || alg.startsWith("SHA1WITH") || alg.startsWith("MD5WITH")) {
+            hash = "SHA-256";
+        } else if (alg.startsWith("SHA384WITH")) {
+            hash = "SHA-384";
+        } else if (alg.startsWith("SHA512WITH")) {
+            hash = "SHA-512";
+        } else {
+            return null;
+        }
+        try {
+            return MessageDigest.getInstance(hash).digest(x.getEncoded());
+        } catch (GeneralSecurityException e) {
+            return null;
+        }
     }
 
     String first() {
-        return "n,," + bare;
+        return gs2 + bare;
     }
 
     String respond(String serverFirst) {
@@ -47,7 +80,10 @@ final class Scram {
             byte[] clientKey = hmac(salted, "Client Key".getBytes(StandardCharsets.UTF_8));
             byte[] stored = MessageDigest.getInstance("SHA-256").digest(clientKey);
             serverKey = hmac(salted, "Server Key".getBytes(StandardCharsets.UTF_8));
-            String withoutProof = "c=biws,r=" + nonce;
+            byte[] header = gs2.getBytes(StandardCharsets.UTF_8);
+            byte[] c = java.util.Arrays.copyOf(header, header.length + binding.length);
+            System.arraycopy(binding, 0, c, header.length, binding.length);
+            String withoutProof = "c=" + Base64.getEncoder().encodeToString(c) + ",r=" + nonce;
             auth = (bare + "," + serverFirst + "," + withoutProof).getBytes(StandardCharsets.UTF_8);
             byte[] signature = hmac(stored, auth);
             byte[] proof = new byte[clientKey.length];

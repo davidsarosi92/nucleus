@@ -1439,7 +1439,7 @@ header bytes not included; at most 1 GiB), then the body.
 | Kind | Direction | Body |
 |------|-----------|------|
 | `H` Hello | client → server, first | `u16` version (4; 1–3 still accepted), string user, string database, string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
-| `A` Authentication | server → client | string: the mechanism (`SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
+| `A` Authentication | server → client | string: the mechanisms, space-separated (`SCRAM-SHA-256`; over TLS with a channel binding `SCRAM-SHA-256-PLUS SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
 | `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message |
 | `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |
 | `Q` Query | client → server | string SQL, `u8` result format (0 typed, 1 text), `u16` parameter count, the parameters as values |
@@ -1452,10 +1452,18 @@ header bytes not included; at most 1 GiB), then the body.
 
 **Session.** The client sends Hello.  If the server wants a password and
 the client speaks version 4, they run SCRAM-SHA-256: the server sends `A`
-`SCRAM-SHA-256`; the client `a` client-first (`n,,n=,r=<nonce>`: no
-channel binding, the user is Hello's); the server `A` server-first
-(`r=<nonce>,s=<salt>,i=<iterations>`); the client `a` client-final
-(`c=biws,r=<nonce>,p=<proof>`); the server `A` server-final
+with the mechanisms — `SCRAM-SHA-256`, and over TLS, when the server's
+certificate defines a `tls-server-end-point` value (RFC 5929: the
+certificate hashed by its signature's hash, SHA-256 for MD5 and SHA-1),
+`SCRAM-SHA-256-PLUS SCRAM-SHA-256`; the client `a` client-first
+(`<gs2>n=,r=<nonce>`, the user being Hello's), whose GS2 header picks:
+`p=tls-server-end-point,,` binds the proof to this TLS session (so a man in
+the middle, who has a session of its own with each side, cannot relay
+it), `y,,` says the client could bind but was not offered it (refused by
+a server that can — the offer was stripped on the way), `n,,` no binding;
+the server `A` server-first (`r=<nonce>,s=<salt>,i=<iterations>`); the
+client `a` client-final (`c=<base64 of the GS2 header, and the binding
+data after it when bound>,r=<nonce>,p=<proof>`); the server `A` server-final
 (`v=<signature>`), which the client checks — a server that cannot sign
 does not know the password's verifier, and the client hangs up.  An
 unknown user gets a salt of its own (derived from a server secret), so
@@ -1622,6 +1630,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.25 SCRAM-SHA-256-PLUS on `ncp` (T4):** over TLS the
+  server offers `SCRAM-SHA-256-PLUS SCRAM-SHA-256`; every driver binds its
+  proof to the session (`tls-server-end-point`), or sends `y` when the
+  offer is missing.
 - **2026-10-23 — §M14.25 SCRAM-SHA-256-PLUS (T4):** pg-compat binds SCRAM
   to the TLS session (`tls-server-end-point`; `TlsInfo::channel_binding`),
   checked with `psql channel_binding=require` on RSA SHA-256, RSA SHA-384

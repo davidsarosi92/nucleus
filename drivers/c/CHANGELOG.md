@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Over TLS, SCRAM bound to the session (SCRAM-SHA-256-PLUS,
+  `tls-server-end-point` by OpenSSL) when the server offers it.
 - Client certificates (mutual TLS): `cfg.tls_cert`, `cfg.tls_key`.
 - TLS (nucleus PLAN.md §M14.25) in a build with `NC_WITH_OPENSSL` (`make
   TLS=openssl`): `cfg.tls`, `cfg.tls_ca`, `cfg.tls_no_verify`,

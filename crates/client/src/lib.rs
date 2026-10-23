@@ -59,7 +59,17 @@ impl<T: Read + Write + Send> Stream for T {}
 pub trait Tls: Send + Sync + fmt::Debug {
     /// Runs a handshake on `tcp` as the client, checking the server is
     /// `host` as the implementation requires.
-    fn connect(&self, tcp: TcpStream, host: &str) -> io::Result<Box<dyn Stream>>;
+    fn connect(&self, tcp: TcpStream, host: &str) -> io::Result<Secured>;
+}
+
+/// An encrypted stream.
+pub struct Secured {
+    /// The stream.
+    pub stream: Box<dyn Stream>,
+    /// The session's `tls-server-end-point` value (RFC 5929), which binds
+    /// SCRAM to it (SCRAM-SHA-256-PLUS); `None` if the server's certificate
+    /// defines none.
+    pub channel_binding: Option<Vec<u8>>,
 }
 
 impl Default for Config {
@@ -802,9 +812,12 @@ impl Client {
             }
         };
         stream.set_nodelay(true)?;
-        let stream: Box<dyn Stream> = match &config.tls {
-            Some(tls) => tls.connect(stream, &config.host)?,
-            None => Box::new(stream),
+        let (stream, binding): (Box<dyn Stream>, _) = match &config.tls {
+            Some(tls) => {
+                let s = tls.connect(stream, &config.host)?;
+                (s.stream, s.channel_binding)
+            }
+            None => (Box::new(stream), None),
         };
         let mut c = Client {
             conn: BufReader::new(stream),
@@ -834,13 +847,19 @@ impl Client {
                     let msg = b.str()?;
                     let reply = match scram.as_mut() {
                         None => {
-                            if msg != "SCRAM-SHA-256" {
+                            // The mechanisms offered: PLUS too over TLS.
+                            let offered: Vec<&str> = msg.split(' ').collect();
+                            if !offered.contains(&"SCRAM-SHA-256") {
                                 return Err(Error::Protocol(format!(
                                     "unsupported authentication {msg:?}"
                                 )));
                             }
                             let password = c.config.password.clone().unwrap_or_default();
-                            let client = nucleus_crypto::ScramClient::new(&password, &nonce());
+                            let mut client = nucleus_crypto::ScramClient::new(&password, &nonce());
+                            if let Some(data) = binding.clone() {
+                                let plus = offered.contains(&"SCRAM-SHA-256-PLUS");
+                                client = client.with_channel_binding(data, plus);
+                            }
                             let first = client.first();
                             scram = Some(client);
                             Some(first)

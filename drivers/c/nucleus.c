@@ -566,6 +566,10 @@ typedef struct {
     char bare[64];
     char auth[1024];
     unsigned char server_key[32];
+    /* The GS2 header, and the channel binding it binds to (with "p="). */
+    const char *gs2;
+    unsigned char binding[64];
+    unsigned binding_len;
 } scram_state;
 
 /* The client's first message. */
@@ -575,12 +579,14 @@ static int scram_first(scram_state *st, char *out, size_t size) {
     if (random_bytes(nonce, sizeof nonce) != 0) return -1;
     b64_encode(nonce, sizeof nonce, text);
     snprintf(st->bare, sizeof st->bare, "n=,r=%s", text);
-    return snprintf(out, size, "n,,%s", st->bare) < (int)size ? 0 : -1;
+    return snprintf(out, size, "%s%s", st->gs2, st->bare) < (int)size ? 0 : -1;
 }
 
 /* The server's first message → the client's final one. */
 static int scram_respond(scram_state *st, const char *password, const char *server_first, char *out, size_t size) {
-    char nonce[256], salt64[256], iter[16], without[300];
+    char nonce[256], salt64[256], iter[16], without[400], c64[160];
+    unsigned char c[96];
+    size_t clen = strlen(st->gs2);
     unsigned char salt[192], salted[32], client_key[32], stored[32], sig[32], proof[32];
     char proof64[48];
     long slen;
@@ -595,7 +601,11 @@ static int scram_respond(scram_state *st, const char *password, const char *serv
     hmac_sha256(salted, 32, "Client Key", 10, client_key);
     sha256(client_key, 32, stored);
     hmac_sha256(salted, 32, "Server Key", 10, st->server_key);
-    snprintf(without, sizeof without, "c=biws,r=%s", nonce);
+    /* c= repeats the GS2 header, and the channel binding when bound. */
+    memcpy(c, st->gs2, clen);
+    memcpy(c + clen, st->binding, st->binding_len);
+    b64_encode(c, clen + st->binding_len, c64);
+    snprintf(without, sizeof without, "c=%s,r=%s", c64, nonce);
     if (snprintf(st->auth, sizeof st->auth, "%s,%s,%s", st->bare, server_first, without) >= (int)sizeof st->auth)
         return -1;
     hmac_sha256(stored, 32, st->auth, strlen(st->auth), sig);
@@ -616,6 +626,17 @@ static int scram_verify(const scram_state *st, const char *server_final) {
     hmac_sha256(st->server_key, 32, st->auth, strlen(st->auth), want);
     for (i = 0; i < 32; i++) diff |= (unsigned)(want[i] ^ got[i]);
     return diff ? -1 : 0;
+}
+
+/* Whether the space-separated list has the word. */
+static int has_word(const char *list, const char *word) {
+    size_t n = strlen(word);
+    const char *p = list;
+    while ((p = strstr(p, word)) != NULL) {
+        if ((p == list || p[-1] == ' ') && (p[n] == ' ' || p[n] == 0)) return 1;
+        p += n;
+    }
+    return 0;
 }
 
 /* ---------------------------------------------------------------- network */
@@ -713,6 +734,36 @@ static void drop_conn(nc_conn *c) {
 #endif
     if (c->sock != NC_BAD_SOCKET) nc_closesocket(c->sock);
     free(c);
+}
+
+/* The TLS session's tls-server-end-point value (RFC 5929: the server's
+ * certificate hashed by its signature's hash, SHA-256 for MD5 and SHA-1)
+ * into out (64 bytes); -1 without TLS or a hash. */
+static int end_point(nc_conn *c, unsigned char *out, unsigned *len) {
+#ifdef NC_WITH_OPENSSL
+    X509 *cert;
+    int md = NID_undef, pk = NID_undef, rc = -1;
+    const EVP_MD *digest;
+    if (!c->ssl) return -1;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    cert = SSL_get1_peer_certificate(c->ssl);
+#else
+    cert = SSL_get_peer_certificate(c->ssl);
+#endif
+    if (!cert) return -1;
+    if (OBJ_find_sigid_algs(X509_get_signature_nid(cert), &md, &pk)) {
+        if (md == NID_md5 || md == NID_sha1) md = NID_sha256;
+        digest = md == NID_undef ? NULL : EVP_get_digestbynid(md);
+        if (digest && EVP_MD_size(digest) <= 64 && X509_digest(cert, digest, out, len) == 1) rc = 0;
+    }
+    X509_free(cert);
+    return rc;
+#else
+    (void)c;
+    (void)out;
+    (void)len;
+    return -1;
+#endif
 }
 
 /* Starts TLS on c's socket, as the client: the server sees the handshake
@@ -868,7 +919,15 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
             char *msg = get_str(&r), reply[1024];
             int ok = msg != NULL, send = 1;
             if (ok && !scram_started) {
-                ok = strcmp(msg, "SCRAM-SHA-256") == 0 && scram_first(&scram, reply, sizeof reply) == 0;
+                /* Over TLS: bound to the session if the server offers
+                 * SCRAM-SHA-256-PLUS, else "y" (it could have been). */
+                scram.gs2 = "n,,";
+                scram.binding_len = 0;
+                if (end_point(c, scram.binding, &scram.binding_len) == 0) {
+                    scram.gs2 = has_word(msg, "SCRAM-SHA-256-PLUS") ? "p=tls-server-end-point,," : "y,,";
+                    if (scram.gs2[0] == 'y') scram.binding_len = 0;
+                }
+                ok = has_word(msg, "SCRAM-SHA-256") && scram_first(&scram, reply, sizeof reply) == 0;
                 scram_started = 1;
             } else if (ok && strncmp(msg, "v=", 2) == 0) {
                 ok = scram_verify(&scram, msg) == 0;

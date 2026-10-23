@@ -107,10 +107,16 @@ public final class NucleusClient implements AutoCloseable {
                         String msg = r.str();
                         String reply;
                         if (scram == null) {
-                            if (!msg.equals("SCRAM-SHA-256")) {
+                            List<String> offered = Arrays.asList(msg.split(" "));
+                            if (!offered.contains("SCRAM-SHA-256")) {
                                 throw new NucleusException("unsupported authentication " + msg, (String) null);
                             }
-                            scram = new Scram(config.password == null ? "" : config.password);
+                            byte[] binding = null;
+                            if (s instanceof javax.net.ssl.SSLSocket ssl) {
+                                binding = Scram.serverEndPoint(ssl.getSession().getPeerCertificates()[0]);
+                            }
+                            scram = new Scram(config.password == null ? "" : config.password, binding,
+                                    offered.contains("SCRAM-SHA-256-PLUS"));
                             reply = scram.first();
                         } else if (msg.startsWith("v=")) {
                             scram.verify(msg);

@@ -566,19 +566,64 @@ class Reader {
 }
 
 /** The client's side of a SCRAM-SHA-256 exchange (RFC 5802). */
+/** One DER element: its tag, its contents, and what follows. */
+function der(b: Buffer): [number, Buffer, Buffer] {
+  let n = b[1];
+  let i = 2;
+  if (n & 0x80) {
+    const k = n & 0x7f;
+    n = b.subarray(2, 2 + k).reduce((a, x) => a * 256 + x, 0);
+    i = 2 + k;
+  }
+  return [b[0], b.subarray(i, i + n), b.subarray(i + n)];
+}
+
+/** Signature algorithm OIDs (hex DER) → the hash of their
+ *  tls-server-end-point (RFC 5929: SHA-256 for MD5 and SHA-1). */
+const END_POINT_HASHES: Record<string, string> = {
+  "2a864886f70d010104": "sha256",
+  "2a864886f70d010105": "sha256",
+  "2a864886f70d01010b": "sha256",
+  "2a864886f70d01010c": "sha384",
+  "2a864886f70d01010d": "sha512",
+  "2a8648ce3d0401": "sha256",
+  "2a8648ce3d040302": "sha256",
+  "2a8648ce3d040303": "sha384",
+  "2a8648ce3d040304": "sha512",
+};
+
+/** A certificate's tls-server-end-point value, or null. */
+function serverEndPoint(cert: Buffer): Buffer | null {
+  try {
+    const body = der(cert)[1];
+    const algorithm = der(der(body)[2])[1];
+    const hash = END_POINT_HASHES[der(algorithm)[1].toString("hex")];
+    return hash === undefined ? null : createHash(hash).update(cert).digest();
+  } catch {
+    return null;
+  }
+}
+
+/** The client's side of SCRAM-SHA-256 (RFC 5802); over TLS bound to the
+ *  session (SCRAM-SHA-256-PLUS) when the server offers it, else saying it
+ *  could have been ("y"), so a stripped offer is caught. */
 class Scram {
   private readonly password: Buffer;
   private readonly bare: string;
+  private readonly gs2: string;
+  private readonly binding: Buffer;
   private auth = Buffer.alloc(0);
   private serverKey = Buffer.alloc(0);
 
-  constructor(password: string) {
+  constructor(password: string, binding: Buffer | null = null, offered = false) {
     this.password = Buffer.from(password, "utf8");
     this.bare = `n=,r=${randomBytes(18).toString("base64")}`;
+    this.gs2 = binding === null ? "n,," : offered ? "p=tls-server-end-point,," : "y,,";
+    this.binding = binding !== null && offered ? binding : Buffer.alloc(0);
   }
 
   first(): string {
-    return `n,,${this.bare}`;
+    return `${this.gs2}${this.bare}`;
   }
 
   respond(serverFirst: string): string {
@@ -590,7 +635,8 @@ class Scram {
     const clientKey = createHmac("sha256", salted).update("Client Key").digest();
     const stored = createHash("sha256").update(clientKey).digest();
     this.serverKey = createHmac("sha256", salted).update("Server Key").digest();
-    const withoutProof = `c=biws,r=${nonce}`;
+    const c = Buffer.concat([Buffer.from(this.gs2, "utf8"), this.binding]).toString("base64");
+    const withoutProof = `c=${c},r=${nonce}`;
     this.auth = Buffer.from(`${this.bare},${serverFirst},${withoutProof}`, "utf8");
     const signature = createHmac("sha256", stored).update(this.auth).digest();
     const proof = Buffer.from(clientKey.map((b, i) => b ^ signature[i]));
@@ -716,8 +762,11 @@ export class Client {
         const msg = r.str();
         let reply: string | null;
         if (scram === null) {
-          if (msg !== "SCRAM-SHA-256") throw new NucleusError(`unsupported authentication ${msg}`);
-          scram = new Scram(options.password ?? "nucleus");
+          const offered = msg.split(" ");
+          if (!offered.includes("SCRAM-SHA-256")) throw new NucleusError(`unsupported authentication ${msg}`);
+          const cert = socket instanceof tls.TLSSocket ? socket.getPeerCertificate().raw : undefined;
+          const binding = cert === undefined ? null : serverEndPoint(cert);
+          scram = new Scram(options.password ?? "nucleus", binding, offered.includes("SCRAM-SHA-256-PLUS"));
           reply = scram.first();
         } else if (msg.startsWith("v=")) {
           scram.verify(msg);

@@ -1001,8 +1001,8 @@ and cost budgets with T6; TLS ✅ — the `tls` module over rustls, `ncp`
 by a handshake before Hello and pg-compat by `SSLRequest`, in every
 driver (C with OpenSSL behind a build flag); client certificates ✅ —
 mutual TLS, a certificate naming the user stands in for its password, in
-every driver; SCRAM-SHA-256-PLUS ✅ on pg-compat (`ncp` and its drivers
-next); then OIDC, LDAP); T5 access rules and privileges by connection
+every driver; SCRAM-SHA-256-PLUS ✅ — channel binding on both front ends
+and in every driver; then OIDC, LDAP); T5 access rules and privileges by connection
 context; T6 protection; T7 audit.
 
 **Order:** right after §M14.19 and §M14.26 (whose `inet` / `cidr` the
@@ -1969,7 +1969,8 @@ style) across a thousand seeds without failure.
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
 - **2026-10-23** — §M14.25 T4: SCRAM-SHA-256-PLUS (channel binding) on
-  pg-compat, checked with `psql channel_binding=require`.
+  pg-compat, checked with `psql channel_binding=require`, and on `ncp` in
+  all six drivers (checked by a server that required it).
 - **2026-10-23** — §M14.25 T4: client certificates (mutual TLS) on both
   front ends and in all six drivers.
 - **2026-10-23** — §M14.25 T4: TLS as a module (`modules/tls`, rustls),

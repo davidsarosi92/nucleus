@@ -357,15 +357,60 @@ class _Reader:
 
 # -------------------------------------------------------------- connection
 
-class _Scram:
-    """The client's side of a SCRAM-SHA-256 exchange (RFC 5802)."""
+def _der(b):
+    """One DER element: (tag, contents, the rest)."""
+    tag, n, i = b[0], b[1], 2
+    if n & 0x80:
+        k = n & 0x7F
+        n, i = int.from_bytes(b[2:2 + k], "big"), 2 + k
+    return tag, b[i:i + n], b[i + n:]
 
-    def __init__(self, password):
+
+# Signature algorithm OIDs (DER) → the hash of their tls-server-end-point
+# (RFC 5929: SHA-256 for MD5 and SHA-1).
+_END_POINT_HASHES = {
+    bytes.fromhex("2a864886f70d010104"): "sha256",  # md5WithRSA
+    bytes.fromhex("2a864886f70d010105"): "sha256",  # sha1WithRSA
+    bytes.fromhex("2a864886f70d01010b"): "sha256",
+    bytes.fromhex("2a864886f70d01010c"): "sha384",
+    bytes.fromhex("2a864886f70d01010d"): "sha512",
+    bytes.fromhex("2a8648ce3d0401"): "sha256",  # ecdsa-with-SHA1
+    bytes.fromhex("2a8648ce3d040302"): "sha256",
+    bytes.fromhex("2a8648ce3d040303"): "sha384",
+    bytes.fromhex("2a8648ce3d040304"): "sha512",
+}
+
+
+def _server_end_point(cert):
+    """A certificate's tls-server-end-point value, or None."""
+    try:
+        _, body, _ = _der(cert)
+        _, _, rest = _der(body)  # the to-be-signed part
+        _, algorithm, _ = _der(rest)
+        _, oid, _ = _der(algorithm)
+    except IndexError:
+        return None
+    name = _END_POINT_HASHES.get(bytes(oid))
+    return _hashlib.new(name, cert).digest() if name else None
+
+
+class _Scram:
+    """The client's side of a SCRAM-SHA-256 exchange (RFC 5802); over TLS
+    bound to the session (SCRAM-SHA-256-PLUS) when the server offers it, else
+    saying it could have been ("y"), so a stripped offer is caught."""
+
+    def __init__(self, password, binding=None, offered=False):
         self.password = password.encode("utf-8")
         self.bare = "n=,r=" + _b64.b64encode(_os.urandom(18)).decode()
+        self.gs2, self.binding = b"n,,", b""
+        if binding is not None:
+            if offered:
+                self.gs2, self.binding = b"p=tls-server-end-point,,", binding
+            else:
+                self.gs2 = b"y,,"
 
     def first(self):
-        return "n,," + self.bare
+        return self.gs2.decode() + self.bare
 
     def respond(self, server_first):
         attrs = dict(p.split("=", 1) for p in server_first.split(","))
@@ -376,7 +421,7 @@ class _Scram:
         client_key = _hmac.new(salted, b"Client Key", "sha256").digest()
         stored = _hashlib.sha256(client_key).digest()
         self.server_key = _hmac.new(salted, b"Server Key", "sha256").digest()
-        without_proof = "c=biws,r=" + nonce
+        without_proof = "c=" + _b64.b64encode(self.gs2 + self.binding).decode() + ",r=" + nonce
         self.auth = f"{self.bare},{server_first},{without_proof}".encode()
         signature = _hmac.new(stored, self.auth, "sha256").digest()
         proof = bytes(a ^ b for a, b in zip(client_key, signature))
@@ -423,9 +468,14 @@ class Connection:
             if kind == b"A":
                 msg = r.str()
                 if scram is None:
-                    if msg != "SCRAM-SHA-256":
+                    offered = msg.split(" ")
+                    if "SCRAM-SHA-256" not in offered:
                         raise InterfaceError(f"unsupported authentication {msg!r}")
-                    scram = _Scram(password or "")
+                    binding = None
+                    if isinstance(self._sock, _ssl.SSLSocket):
+                        cert = self._sock.getpeercert(binary_form=True)
+                        binding = _server_end_point(cert) if cert else None
+                    scram = _Scram(password or "", binding, "SCRAM-SHA-256-PLUS" in offered)
                     reply = scram.first()
                 elif msg.startswith("v="):
                     scram.verify(msg)
