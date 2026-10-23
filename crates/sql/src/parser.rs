@@ -744,6 +744,16 @@ impl<'a> Parser<'a> {
             }
             "analyze" => {
                 self.pos += 1;
+                // `ANALYZE QUERY <statement>` (a table named `query` stays
+                // a table).
+                if self.peek_kw("query")
+                    && matches!(self.peek_at(1), Some(Token::Word(w))
+                        if ["select", "with", "values", "table", "update", "delete", "insert"]
+                            .contains(&w.as_str()))
+                {
+                    self.pos += 1;
+                    return Ok(Statement::Lint(Box::new(self.statement()?)));
+                }
                 let table = if self.at_end() || self.peek_op(";") {
                     None
                 } else {

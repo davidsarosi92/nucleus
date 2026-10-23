@@ -27,6 +27,7 @@ pub mod inet;
 pub mod large;
 pub mod laws;
 pub mod lexer;
+pub mod lint;
 pub mod ncatalog;
 pub mod optimizer;
 pub mod parser;

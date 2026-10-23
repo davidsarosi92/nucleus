@@ -495,6 +495,8 @@ work the same locally and remotely:
 | `\indexes [<table>]`, `\di` | indexes |
 | `\fks [<table>]` | foreign keys from or to a table |
 | `\stats <table>` | `ANALYZE` statistics |
+| `\lint <statement>` | the linter's findings (`ANALYZE QUERY`, §8.13), or "No findings." |
+| `\statements` | the 20 statements that took the most time (`nc_catalog.statements`) |
 | `\schemas`, `\dn` · `\types`, `\dT` | schemas, types |
 | `\timing` · `\conninfo` · `\?` · `\q` | timing toggle, connection, help, quit |
 
@@ -1222,7 +1224,7 @@ and views there; bound calls and view scans hold the registered objects,
 so execution needs no lookup.  The built-in functions share one
 implementation behind the same interface.
 
-### 8.13 The SQL analyzer (`profile`, `statements`)
+### 8.13 The SQL analyzer (`profile`, `statements`, `lint`)
 
 **`EXPLAIN ANALYZE <query>`** (also `EXPLAIN (ANALYZE [bool], TIMING
 [bool]) …`; other options are refused with `0A000`) runs the query and
@@ -1250,6 +1252,23 @@ own; `nc_statements_reset()` forgets every role's (an administrator) or
 the caller's own.  They live in the process, by database (a restart
 starts over), at most 5000 statements (the least called makes room);
 statements of the database's own probe sessions are not counted.
+
+**The linter: `ANALYZE QUERY <statement>`** (a query, `UPDATE` or
+`DELETE`; `ANALYZE query` alone still analyzes a table named `query`)
+plans the statement without running it and returns one row per finding:
+`rule`, `place` (the table and the condition, with column names; the
+join; the subquery), `finding` and `fix`.  Rules, over the optimized plan
+and its subqueries:
+
+| Rule | Fires on | Fix |
+|------|----------|-----|
+| `full_scan` | a table read in full for a filter that keeps a tenth of it or less (by the statistics, else the default selectivities) and that an index could serve; not for an analyzed table under 1000 rows | `CREATE INDEX ON t (…)`: the equality columns, then one range column |
+| `index_defeated` | a comparison with a value where the first column of an index (or the primary key) is under a function, arithmetic or a cast (the binder's too), and the scan does not use that index | compare the column itself; move the arithmetic; cast the other side |
+| `foreign_key_without_index` | a foreign key whose columns lead no index, of a table the statement reads — or, for `UPDATE` / `DELETE`, of a table referencing the one changed | `CREATE INDEX ON t (…)` |
+| `cartesian_product` | a join with no condition (or `ON true`) between inputs estimated at more than one row each | a join condition (ignore when every pair is meant) |
+| `not_in_nullable` | `NOT IN (subquery)` whose column can be NULL (nullability followed through scans, filters that reject NULLs, projections, joins, aggregates) | `NOT EXISTS`, or `IS NOT NULL` in the subquery |
+
+`SELECT *` in views comes with views.
 
 ## 9. Server (`nucleus-server`)
 
@@ -1791,6 +1810,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-23 — §M14.9 the linter (A3):** `ANALYZE QUERY <statement>`
+  and `ncsql \lint` — full scans under a selective filter, comparisons
+  that defeat an index, foreign keys without an index, cartesian
+  products, `NOT IN` over a nullable subquery; `ncsql \statements`.
 - **2026-10-23 — §M14.9 `EXPLAIN ANALYZE` and statement statistics (A1,
   A2):** every plan node measured (rows, starts, time) beside the
   estimates; `nc_catalog.statements` per role and normalized statement,

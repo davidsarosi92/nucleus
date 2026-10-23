@@ -1153,7 +1153,9 @@ ANALYZE`'s actual row counts are checked against the results.
 beside the estimates, `TIMING OFF`; the time from `Kv::elapsed`, the
 platform's monotonic clock); A2 statement statistics ✅
 (`nc_catalog.statements`, `nc_statements_reset()`; in the process, by
-database); A3 the linter; A4 the index advisor.
+database); A3 the linter ✅ (`ANALYZE QUERY`, `ncsql \lint`: five rules,
+each with slt cases that fire and that stay quiet; `SELECT *` in views
+waits for views); A4 the index advisor.
 
 ### §M14.10 — AI access ⬜
 
@@ -1990,6 +1992,7 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-23** — §M14.9 A3: the linter.
 - **2026-10-23** — §M14.9 A1–A2: `EXPLAIN ANALYZE` (actual rows checked
   against the results in slt) and statement statistics.
 - **2026-10-23** — §M14.25 shipped (T7: the audit log, with a broken

@@ -580,13 +580,18 @@ impl Plan {
     }
 }
 
-/// An expression as text, for `EXPLAIN`.
+/// An expression as text, for `EXPLAIN` (columns as `#n`).
 pub fn show(e: &Expr) -> String {
+    show_with(e, &|i| format!("#{i}"))
+}
+
+/// The same, column `i` as `col(i)` writes it.
+pub fn show_with(e: &Expr, col: &dyn Fn(usize) -> String) -> String {
     use crate::types::Value;
     match e {
         Expr::Literal(Value::Text(s)) => format!("'{}'", s.replace('\'', "''")),
         Expr::Literal(v) => v.render(),
-        Expr::Column(i) => format!("#{i}"),
+        Expr::Column(i) => col(*i),
         Expr::Outer { depth, index } => format!("outer{depth}.#{index}"),
         Expr::Param(i) => format!("${}", i + 1),
         Expr::Unary(op, e) => format!(
@@ -596,15 +601,27 @@ pub fn show(e: &Expr) -> String {
                 crate::ast::UnaryOp::Plus => "+",
                 crate::ast::UnaryOp::Not => "NOT ",
             },
-            show(e)
+            show_with(e, col)
         ),
-        Expr::Binary(op, l, r) => format!("({} {} {})", show(l), op.symbol(), show(r)),
-        Expr::IsNull(e, n) => format!("{} IS {}NULL", show(e), if *n { "NOT " } else { "" }),
+        Expr::Binary(op, l, r) => format!(
+            "({} {} {})",
+            show_with(l, col),
+            op.symbol(),
+            show_with(r, col)
+        ),
+        Expr::IsNull(e, n) => format!(
+            "{} IS {}NULL",
+            show_with(e, col),
+            if *n { "NOT " } else { "" }
+        ),
         Expr::InList(e, l, n) => format!(
             "{} {}IN ({})",
-            show(e),
+            show_with(e, col),
             if *n { "NOT " } else { "" },
-            l.iter().map(show).collect::<Vec<_>>().join(", ")
+            l.iter()
+                .map(|x| show_with(x, col))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Expr::Like {
             expr,
@@ -613,31 +630,42 @@ pub fn show(e: &Expr) -> String {
             case_insensitive,
         } => format!(
             "{} {}{} {}",
-            show(expr),
+            show_with(expr, col),
             if *negated { "NOT " } else { "" },
             if *case_insensitive { "ILIKE" } else { "LIKE" },
-            show(pattern)
+            show_with(pattern, col)
         ),
         Expr::Case { .. } => "CASE …".into(),
-        Expr::Cast(e, t) => format!("{}::{t}", show(e)),
+        Expr::Cast(e, t) => format!("{}::{t}", show_with(e, col)),
         Expr::Call(f, args) => format!(
             "{}({})",
             f.name(),
-            args.iter().map(show).collect::<Vec<_>>().join(", ")
+            args.iter()
+                .map(|x| show_with(x, col))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Expr::Subquery(s) => match &s.kind {
             SubKind::Scalar => "(subquery)".into(),
             SubKind::Exists => "EXISTS (subquery)".into(),
             SubKind::In(e, n) => {
-                format!("{} {}IN (subquery)", show(e), if *n { "NOT " } else { "" })
+                format!(
+                    "{} {}IN (subquery)",
+                    show_with(e, col),
+                    if *n { "NOT " } else { "" }
+                )
             }
             SubKind::Array => "ARRAY(subquery)".into(),
         },
         Expr::Array(items) => format!(
             "ARRAY[{}]",
-            items.iter().map(show).collect::<Vec<_>>().join(", ")
+            items
+                .iter()
+                .map(|x| show_with(x, col))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
-        Expr::Subscript(a, i) => format!("{}[{}]", show(a), show(i)),
+        Expr::Subscript(a, i) => format!("{}[{}]", show_with(a, col), show_with(i, col)),
         Expr::AnyAll {
             left,
             op,
@@ -645,10 +673,10 @@ pub fn show(e: &Expr) -> String {
             all,
         } => format!(
             "{} {} {}({})",
-            show(left),
+            show_with(left, col),
             op.symbol(),
             if *all { "ALL " } else { "ANY " },
-            show(right)
+            show_with(right, col)
         ),
     }
 }

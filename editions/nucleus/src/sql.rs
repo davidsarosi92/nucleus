@@ -40,6 +40,8 @@ Statements end with ;.  Commands (they read nc_catalog):
   \\indexes [<table>] indexes (also \\di)
   \\fks [<table>]     foreign keys, from or to the table
   \\stats <table>     statistics gathered by ANALYZE
+  \\lint <statement>  what in a statement is likely slow or wrong (ANALYZE QUERY)
+  \\statements        the statements that took the most time (nc_catalog.statements)
   \\schemas           schemas (also \\dn)
   \\types             types (also \\dT)
   \\timing            show how long each command takes (toggle)
@@ -406,6 +408,32 @@ impl Shell {
                 }
                 true
             }
+            ("\\lint", Some(_)) => {
+                let statement = line.trim_start()[cmd.len()..].trim().trim_end_matches(';');
+                match self.fetch(&format!("ANALYZE QUERY {statement}"), out)? {
+                    Some(t) if t.rows.is_empty() => {
+                        writeln!(out, "No findings.").map_err(|e| e.to_string())?;
+                        true
+                    }
+                    Some(t) => {
+                        print_table(out, &t, Some("Findings")).map_err(|e| e.to_string())?;
+                        true
+                    }
+                    None => false,
+                }
+            }
+            ("\\lint", None) => {
+                writeln!(out, "\\lint needs a statement").map_err(|e| e.to_string())?;
+                false
+            }
+            ("\\statements", _) => self.show(
+                "SELECT query, calls, errors, round(total_ms::numeric, 3) AS \"total ms\", \
+                 round(mean_ms::numeric, 3) AS \"mean ms\", rows_read AS \"rows read\", \
+                 rows_returned AS \"rows returned\" FROM nc_catalog.statements \
+                 ORDER BY total_ms DESC LIMIT 20",
+                Some("Statements (most time first)"),
+                out,
+            )?,
             ("\\stats", None) => {
                 writeln!(out, "\\stats needs a table name").map_err(|e| e.to_string())?;
                 false

@@ -276,7 +276,7 @@ fn hash_keys(onp: &[Expr], lw: usize) -> JoinAlgo {
 
 /// `Column(c) op e` with `e` free of this row's columns (and of
 /// subqueries): `(c, op, e)` with `op` as if the column were on the left.
-fn column_bound(p: &Expr) -> Option<(usize, BinaryOp, Expr)> {
+pub(crate) fn column_bound(p: &Expr) -> Option<(usize, BinaryOp, Expr)> {
     let Expr::Binary(op, a, b) = p else {
         return None;
     };
@@ -402,7 +402,7 @@ fn bin(op: BinaryOp, c: usize, e: &Expr) -> Expr {
 // ------------------------------------------------------------- join order
 
 /// The table column a plan's output column comes from, if any.
-fn origin(plan: &Plan, col: usize) -> Option<(&Table, usize)> {
+pub(crate) fn origin(plan: &Plan, col: usize) -> Option<(&Table, usize)> {
     match plan {
         Plan::Scan { table, .. } => Some((table, col)),
         Plan::Filter { input, .. }

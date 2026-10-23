@@ -1,0 +1,136 @@
+# The linter: ANALYZE QUERY <statement> plans it without running it and
+# lists rule, place, finding and fix.  Each rule fires where it should
+# and stays quiet where it should not.  nucleus-only throughout.
+
+statement ok
+CREATE TABLE lc (id INT PRIMARY KEY, email TEXT NOT NULL, region TEXT, score INT)
+
+statement ok
+CREATE INDEX ON lc (email)
+
+statement ok
+CREATE TABLE lo (id INT PRIMARY KEY, lc_id INT REFERENCES lc (id), total INT)
+
+statement ok
+INSERT INTO lc SELECT i, 'c' || i, 'r' || (i % 20), i % 7 FROM generate_series(1, 2000) i
+
+statement ok
+INSERT INTO lo SELECT i, 1 + i % 2000, i FROM generate_series(1, 3000) i
+
+statement ok
+ANALYZE
+
+# nucleus-only: a selective filter on an unindexed column.
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE region = 'r3' AND score > 2
+----
+full_scan lc: ((region = 'r3') AND (score > 2)) every row of lc is read (about 2000) to keep about 67 CREATE INDEX ON lc (region, score)
+
+# nucleus-only: one condition, the finding in full.
+query TTTT
+ANALYZE QUERY SELECT * FROM lc WHERE region = 'r3'
+----
+full_scan lc: (region = 'r3') every row of lc is read (about 2000) to keep about 100 CREATE INDEX ON lc (region)
+
+# nucleus-only: not when the filter keeps much of the table …
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE score > 1
+----
+
+# nucleus-only: … nor when an index serves it.
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE email = 'c5'
+----
+
+# nucleus-only: an indexed column under a function, arithmetic or a cast.
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE lower(email) = 'c5'
+----
+index_defeated lc: (lower(email) = 'c5') the comparison is on an expression of email, not on email itself, so index lc_email_idx cannot serve it compare email itself, or keep the computed value in a column of its own and index that
+
+# nucleus-only
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE id + 1 = 10
+----
+index_defeated lc: ((id + 1)::integer = 10) the comparison is on an expression of id, not on id itself, so the primary key of lc cannot serve it move the arithmetic to the other side, leaving id alone
+
+# nucleus-only
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE id::text = '10'
+----
+index_defeated lc: (id::text = '10') the comparison is on an expression of id, not on id itself, so the primary key of lc cannot serve it compare id with a value of its own type (integer): cast the other side, not the column
+
+# nucleus-only: not for a column no index leads.
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE score + 1 = 3
+----
+
+# nucleus-only: a foreign key without an index, wherever its table is read …
+query TTTT rowsort
+ANALYZE QUERY SELECT lc.email, lo.total FROM lc JOIN lo ON lo.lc_id = lc.id WHERE lc.id = 5
+----
+foreign_key_without_index lo: foreign key lo_lc_id_fkey (lc_id) → lc no index starts with (lc_id): every change of a row of lc scans lo in full, and joins on (lc_id) cannot use an index CREATE INDEX ON lo (lc_id)
+
+# nucleus-only: … and when the table it references is changed.
+query TTTT rowsort
+ANALYZE QUERY DELETE FROM lc WHERE id = 3
+----
+foreign_key_without_index lo: foreign key lo_lc_id_fkey (lc_id) → lc no index starts with (lc_id): every change of a row of lc scans lo in full, and joins on (lc_id) cannot use an index CREATE INDEX ON lo (lc_id)
+
+# nucleus-only: a join without a condition.
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc, lo
+----
+cartesian_product the join of lo and lc every row of one side is paired with every row of the other (about 3000 × 2000 rows) join them on a condition (JOIN … ON …); if every pair is meant, ignore this
+foreign_key_without_index lo: foreign key lo_lc_id_fkey (lc_id) → lc no index starts with (lc_id): every change of a row of lc scans lo in full, and joins on (lc_id) cannot use an index CREATE INDEX ON lo (lc_id)
+
+# nucleus-only: not with one row on a side.
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc, (SELECT max(score) FROM lc) m
+----
+
+# nucleus-only: NOT IN over a column that can be NULL …
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE id NOT IN (SELECT lc_id FROM lo)
+----
+foreign_key_without_index lo: foreign key lo_lc_id_fkey (lc_id) → lc no index starts with (lc_id): every change of a row of lc scans lo in full, and joins on (lc_id) cannot use an index CREATE INDEX ON lo (lc_id)
+not_in_nullable NOT IN (a subquery on lo) the subquery's lo.lc_id can be NULL: one NULL makes NOT IN unknown for every row, so it keeps none write NOT EXISTS (SELECT 1 FROM … WHERE … = …), or add WHERE lo.lc_id IS NOT NULL to the subquery
+
+# nucleus-only: … not over one that cannot.
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE id NOT IN (SELECT lc_id FROM lo WHERE lc_id IS NOT NULL)
+----
+foreign_key_without_index lo: foreign key lo_lc_id_fkey (lc_id) → lc no index starts with (lc_id): every change of a row of lc scans lo in full, and joins on (lc_id) cannot use an index CREATE INDEX ON lo (lc_id)
+
+# nucleus-only
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE region NOT IN (SELECT email FROM lc)
+----
+
+# nucleus-only: with the index, the foreign key finding is gone.
+statement ok
+CREATE INDEX ON lo (lc_id)
+
+# nucleus-only
+query TTTT rowsort
+ANALYZE QUERY DELETE FROM lc WHERE id = 3
+----
+
+# nucleus-only: a statement without findings.
+query TTTT rowsort
+ANALYZE QUERY SELECT * FROM lc WHERE id = 3
+----
+
+# nucleus-only
+statement error 0A000
+ANALYZE QUERY INSERT INTO lc VALUES (1, 'a', 'b', 1)
+
+# nucleus-only: a table named query is still analyzed.
+statement ok
+CREATE TABLE query (a INT)
+
+statement ok
+ANALYZE query
+
+statement ok
+DROP TABLE query, lo, lc

@@ -303,6 +303,8 @@ pub enum Statement {
     Explain(Box<Statement>, ExplainOptions),
     /// `ANALYZE [table]`.
     Analyze(Option<String>),
+    /// `ANALYZE QUERY <statement>`: the linter's findings.
+    Lint(Box<Statement>),
 }
 
 /// `EXPLAIN`'s options.

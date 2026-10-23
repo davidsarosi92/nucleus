@@ -174,7 +174,7 @@ fn options(mode: &TxnMode, default: IsolationLevel, read_only: bool) -> TxnOptio
 fn read_only(stmt: &Statement) -> bool {
     matches!(
         stmt,
-        Statement::Query(_) | Statement::Explain(..) | Statement::Show(_)
+        Statement::Query(_) | Statement::Explain(..) | Statement::Show(_) | Statement::Lint(_)
     )
 }
 
@@ -680,6 +680,7 @@ impl Session {
                 | Statement::Update { .. }
                 | Statement::Delete { .. }
                 | Statement::Explain(..)
+                | Statement::Lint(_)
                 | Statement::Show(_)
                 | Statement::Begin(_)
                 | Statement::Commit
@@ -846,6 +847,9 @@ impl Session {
                 let b = binder.query(q)?;
                 Some(columns_of(b.scope.cols.into_iter().map(|c| (c.name, c.ty))))
             }
+            Statement::Lint(_) => Some(columns_of(
+                ["rule", "place", "finding", "fix"].map(|c| (c.to_string(), Some(DataType::Text))),
+            )),
             Statement::Explain(..) => Some(vec![OutColumn {
                 name: "QUERY PLAN".into(),
                 ty: DataType::Text,
@@ -977,6 +981,43 @@ pub fn execute(
             Output::Rows {
                 columns: columns_of(bound.scope.cols.into_iter().map(|c| (c.name, c.ty))),
                 rows,
+            }
+        }
+        Statement::Lint(inner) => {
+            let ro: &dyn KvTxn = &*txn;
+            let (plan, changed) = match &**inner {
+                Statement::Query(q) => (
+                    optimize(Binder::new(ro, reg).checked().query(q)?.plan, ro),
+                    None,
+                ),
+                Statement::Update { table, filter, .. }
+                | Statement::Delete { table, filter, .. } => (
+                    dml::explain_scan(ro, reg, table, filter.as_ref())?,
+                    catalog::get_table(ro, table)?,
+                ),
+                _ => {
+                    return Err(Error::feature(
+                        "ANALYZE QUERY supports queries, UPDATE and DELETE",
+                    ));
+                }
+            };
+            let text = |s: String| Value::Text(s);
+            Output::Rows {
+                columns: columns_of(
+                    ["rule", "place", "finding", "fix"]
+                        .map(|c| (c.to_string(), Some(DataType::Text))),
+                ),
+                rows: crate::lint::lint(ro, &plan, changed.as_ref())?
+                    .into_iter()
+                    .map(|f| {
+                        vec![
+                            text(f.rule.into()),
+                            text(f.place),
+                            text(f.finding),
+                            text(f.fix),
+                        ]
+                    })
+                    .collect(),
             }
         }
         Statement::Explain(inner, options) if options.analyze => {
