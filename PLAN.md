@@ -269,8 +269,8 @@ are marked ✅.
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC, LDAP), access rules by connection context, row-level security, protection, audit | ✅ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
-| | M14.11 | **In progress (L1–L5 ✅):** Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
-| | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
+| | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
@@ -1193,7 +1193,7 @@ for later: MCP over HTTP (Streamable HTTP) for remote clients, resources
 and prompts, typed parameters (they are bound as literals), hints for
 syntax errors.
 
-### §M14.11 — Large data foundations ⬜
+### §M14.11 — Large data foundations ✅ (DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md`)
 
 Today results are materialized, joins and sorts are in memory, and `ncp`
 sends a whole result at once.  Before claiming large data:
@@ -1236,6 +1236,21 @@ the Python driver without a per-value object, at a rate bound by the
 network, not the driver; and the benchmark suite runs in CI against
 PostgreSQL.
 
+*How it holds (2026-10-27).*  Memory: every place a statement held its
+input whole now stops at a budget and spills — transactions past
+`txn_memory`, operators past `work_mem` —, each checked by running the same
+work small and large (crates/txn/tests/large.rs, crates/sql/tests/spill.rs,
+the crash tests).  Measured on one machine: a load, count, sort and
+self-join peak at 917 MB with 2 million rows and 646 MB with 10 million —
+the peak does not grow with the data (it is the budgets: cache, `work_mem`
+per operator, `txn_memory`, which the size estimates undercount by about
+half).  100 million rows were not run here for lack of disk (10 million
+take 1.6 GB); CI's benchmark runs a million.  numpy: 10 million `bigint`
+values reach numpy in 5.3 s, of which the server's scan alone takes 4.5 s
+— the driver and the network add 0.8 s (80 ns a value), against 13.7 s for
+rows; the bound is the server's scan, §M14.20's.  The benchmark suite
+runs in CI against `postgres:18` (job "benchmarks against PostgreSQL").
+
 **Steps.**  L1 streaming ✅ (the executor hands rows to a sink as it
 produces them — `Session::run_into`; `ncp` version 6 sends them so, with
 a fetch size, `S` after each batch and `F` / `c` from the client; the Rust
@@ -1269,15 +1284,17 @@ collect; streaming `generate_series`; ANALYZE sampling 30 000 rows), L6b
 up to the limit, then hash partitions taken in turn; a recursive
 `UNION`'s rows seen are still held), L6c joins ✅ (grace hash joins with
 NULL keys padded through, block nested loops, a full join keeping only
-a matched bitmap); L7 performance first —
-measured before adding parallelism (a 2-million-row load took 197 s): the
-B+tree decoded every page on a lookup's path and applied a batch key by
-key, so pages are now read in place and batches applied in one sorted
-pass (13 s ✅); next the remaining per-row costs (updates, deletes, scans,
-measured against PostgreSQL on the same machine), then parallel scans over
-key ranges, page compression, and a very large column converted in the
-background in chunks (from §M14.19; `ALTER COLUMN … TYPE` now stashes its
-rows and spills, so it is bounded in memory meanwhile); L8 the benchmark
+a matched bitmap); L7 performance,
+measured before adding parallelism ✅ (a 2-million-row load took 197 s:
+the B+tree decoded every page on a lookup's path and applied a batch key
+by key — pages are now read in place, batches applied in one sorted pass,
+checksums slicing-by-8, the cache larger, scans decoding only the columns
+used; 11 s).  Moved on, where they belong: parallel scans to §M14.20's
+morsel-driven parallelism (the executor's per-row work, not the lack of
+cores, is what the measurements show), page compression to §M14.20's
+columnar segments, and converting a very large column in the background
+in chunks to §M14.18 (`ALTER COLUMN … TYPE` stashes its rows and spills
+meanwhile, so it is bounded in memory); L8 the benchmark
 suite against PostgreSQL, in CI ✅ (`bench/run.py`: one workload — load,
 scans, a sort, a join, reads by key, updates, deletes — through each
 system's own client and server; CI against `postgres:18` with the table
@@ -1309,7 +1326,12 @@ to do both in one system, with vectors and streams beside them
   distances — chosen at run time for the CPU (AVX2, AVX-512, NEON), with
   scalar versions as the reference the law kit compares them against.
 - **Parallel execution**: a query's scans, joins and aggregates split
-  across cores (morsel-driven), building on §M14.11's parallel scans.
+  across cores (morsel-driven), the KV contract giving split points of a
+  key range and snapshots other threads can read (moved here from
+  §M14.11, whose measurements put the executor's per-row work first:
+  `docs/benchmarks.md`).
+- **Page compression** for row storage too (moved from §M14.11), beside
+  the columnar segments' encodings.
 - **Columnar storage.**  Compressed column segments (dictionary,
   run-length, delta, bit-packing — the types' columnar encodings), min /
   max per segment to skip what a predicate rules out, only the needed
@@ -1654,6 +1676,10 @@ command per platform, and the playground runs the tutorial.
 
 ### §M14.18 — Operations ⬜
 
+- **Online schema changes on large tables** (moved from §M14.11, first
+  planned in §M14.19): `ALTER COLUMN … TYPE` converting a very large
+  column in the background in chunks while the table stays writable — it
+  runs as one transaction today, bounded in memory by spilling.
 - Online backups (a checkpoint's pages are immutable: a consistent copy
   without stopping writes), and point-in-time restore from backups plus
   the WAL.
@@ -2059,6 +2085,13 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 shipped (DOCS §5.2, §8.5, §8.7, §10,
+  `docs/benchmarks.md`).  The "done when", as checked: bounded memory —
+  peak RSS 917 MB at 2 million rows, 646 MB at 10 million, the same work;
+  100 million not run locally (disk); numpy 10 million values in 5.3 s
+  with the server's scan 4.5 s of it; the suite in CI against
+  `postgres:18`.  Parallel scans and page compression moved to §M14.20,
+  background column conversion to §M14.18.  Next: §M14.20.
 - **2026-10-27** — §M14.11 L8: the benchmark suite (`bench/run.py`) and
   its CI job against `postgres:18`; the first results and the targets set
   from them are in `docs/benchmarks.md` (1 million rows: loads and updates

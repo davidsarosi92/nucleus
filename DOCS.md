@@ -2091,6 +2091,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 shipped:** streaming and columnar results, bulk
+  load, large transactions, a memory-bounded executor, faster B+tree
+  paths, the benchmark suite in CI.
 - **2026-10-27 — §M14.11 benchmarks (L8):** `bench/run.py`, one workload
   on nucleus and PostgreSQL; a CI job against `postgres:18`;
   `docs/benchmarks.md`.
