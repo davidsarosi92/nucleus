@@ -47,6 +47,7 @@
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
 | `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh` | §M6, §M12, §M14.8 |
 | `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
+| `docs/benchmarks.md`, `bench/` | — | the benchmark suite against PostgreSQL (`bench/run.py`, run in CI), its latest results and targets | §M14.11 |
 
 `crates/` is the core and the public API crates; `modules/` are modules,
 each a folder built to leave the repository (its own README, changelog,
@@ -2090,6 +2091,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 benchmarks (L8):** `bench/run.py`, one workload
+  on nucleus and PostgreSQL; a CI job against `postgres:18`;
+  `docs/benchmarks.md`.
 - **2026-10-27 — §M14.11 scans decode only the columns used (L7):**
   `prune` marks each scan's needed columns; the rest are skipped
   undecoded (out-of-line values unfetched).

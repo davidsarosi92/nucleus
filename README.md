@@ -34,8 +34,12 @@ statistics, a linter (`ANALYZE QUERY`) and an index advisor.  AI models
 pick it up through `nucleus mcp`, a Model Context Protocol server
 ([`modules/mcp`](modules/mcp)); comments on tables and columns explain
 the schema, errors come with a hint, and [`docs/llm.md`](docs/llm.md) is
-the dialect in brief (§M14.10).  Next is the rest of the developer
-platform (§M14.11–§M14.24: large data and analytics, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
+the dialect in brief (§M14.10).  Large data is under way (§M14.11):
+results stream and come as columns (straight into numpy, Arrow, pandas,
+polars), `COPY` and `load` bring data in, transactions and operators
+past their memory spill to disk, and [`docs/benchmarks.md`](docs/benchmarks.md)
+measures it all against PostgreSQL.  Next is the rest of the developer
+platform (§M14.12–§M14.24: analytics, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, …), then
 the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists

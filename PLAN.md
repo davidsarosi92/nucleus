@@ -1277,7 +1277,13 @@ pass (13 s ✅); next the remaining per-row costs (updates, deletes, scans,
 measured against PostgreSQL on the same machine), then parallel scans over
 key ranges, page compression, and a very large column converted in the
 background in chunks (from §M14.19; `ALTER COLUMN … TYPE` now stashes its
-rows and spills, so it is bounded in memory meanwhile); L8 the benchmark suite against PostgreSQL, in CI.
+rows and spills, so it is bounded in memory meanwhile); L8 the benchmark
+suite against PostgreSQL, in CI ✅ (`bench/run.py`: one workload — load,
+scans, a sort, a join, reads by key, updates, deletes — through each
+system's own client and server; CI against `postgres:18` with the table
+in the job summary; results, targets and how to reproduce in
+`docs/benchmarks.md`; TPC-H, ClickBench, a pgbench-like mix and ANN
+recall (§M14.12) to follow).
 
 ### §M14.20 — Analytics: vectorized execution and columnar storage ⬜
 
@@ -2053,6 +2059,11 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 L8: the benchmark suite (`bench/run.py`) and
+  its CI job against `postgres:18`; the first results and the targets set
+  from them are in `docs/benchmarks.md` (1 million rows: loads and updates
+  within 3–5×, reads by key faster, scans 15–30× slower — §M14.20's
+  work).
 - **2026-10-27** — §M14.11 L7: scans decode only the columns the plan
   reads (`prune`, by plan address in the execution context — conservative
   where a subquery could read the row, its mutation caught by the slt

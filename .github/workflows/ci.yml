@@ -74,6 +74,41 @@ jobs:
             exit 1
           fi
 
+  # The benchmark suite against PostgreSQL (PLAN.md §M14.11 L8, docs/
+  # benchmarks.md): the table in the job summary, the numbers as an
+  # artifact.  It fails only when a run fails.
+  bench:
+    name: benchmarks against PostgreSQL
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: bench
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - run: cargo build --release --locked -p nucleus-cli
+      - name: Run the suite
+        env:
+          PGHOST: 127.0.0.1
+          PGUSER: postgres
+          PGPASSWORD: bench
+        run: |
+          set -o pipefail
+          python3 bench/run.py --nucleus target/release/nucleus --rows 1000000 --json bench.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench
+          path: bench.json
+
   # Every target in PLAN.md "Build targets".  `test: true` runs the tests on
   # that target (natively, or a 32-bit binary on a 64-bit kernel); the rest
   # are built, tests included, so they at least link.
