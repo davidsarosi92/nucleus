@@ -734,6 +734,60 @@ pub fn pk_suffix(table: &Table, key: &[u8]) -> Vec<u8> {
     key[table.index_prefix(0).len()..].to_vec()
 }
 
+/// What a join needs besides its inputs.
+#[derive(Clone, Copy)]
+struct JoinSpec<'a> {
+    kind: JoinType,
+    on: Option<&'a Expr>,
+    algo: &'a JoinAlgo,
+    left_width: usize,
+    right_width: usize,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+}
+
+impl<'a> JoinSpec<'a> {
+    fn matches(&self, combined: &Row) -> Result<bool> {
+        match self.on {
+            None => Ok(true),
+            Some(on) => on.holds(&env(combined, self.ctx, self.outer)),
+        }
+    }
+
+    /// A left row with NULLs for the right's columns.
+    fn left_padded(&self, mut l: Row) -> Row {
+        l.extend(std::iter::repeat_n(Value::Null, self.right_width));
+        l
+    }
+
+    /// A right row with NULLs for the left's columns.
+    fn right_padded(&self, r: &[Value]) -> Row {
+        let mut padded = vec![Value::Null; self.left_width];
+        padded.extend_from_slice(r);
+        padded
+    }
+
+    /// Whether unmatched left rows come out (LEFT, FULL).
+    fn keeps_left(&self) -> bool {
+        matches!(self.kind, JoinType::Left | JoinType::Full)
+    }
+
+    /// The hash join keys, if any.
+    fn keys(&self) -> Option<(&'a [Expr], &'a [Expr])> {
+        match self.algo {
+            JoinAlgo::Hash {
+                left_keys,
+                right_keys,
+            } => Some((left_keys, right_keys)),
+            JoinAlgo::NestedLoop => None,
+        }
+    }
+}
+
+/// Joins `left` with `right`: the right input is stashed (past work_mem in
+/// scratch space), then joined in memory, by a grace hash join (both sides
+/// partitioned by key, pairs joined in turn), or by blocks of left rows
+/// read against it (a block nested loop).
 #[allow(clippy::too_many_arguments)]
 fn join<'a>(
     left: &'a Plan,
@@ -744,76 +798,34 @@ fn join<'a>(
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
 ) -> Result<Rows<'a>> {
-    let right_rows = collect(right, ctx, outer)?;
-    let right_width = right.width();
-    let left_rows = build(left, ctx, outer)?;
-    let matches = move |combined: &Row| -> Result<bool> {
-        match on {
-            None => Ok(true),
-            Some(on) => on.holds(&env(combined, ctx, outer)),
-        }
+    let spec = JoinSpec {
+        kind,
+        on,
+        algo,
+        left_width: left.width(),
+        right_width: right.width(),
+        ctx,
+        outer,
     };
-    if kind == JoinType::Full {
-        let widths = (left.width(), right_width);
-        return full_join(widths, left_rows, right_rows, algo, &matches, ctx, outer);
-    }
-    match algo {
-        JoinAlgo::NestedLoop => Ok(Box::new(left_rows.flat_map(move |l| -> Vec<Result<Row>> {
-            let l = match l {
-                Ok(l) => l,
-                Err(e) => return vec![Err(e)],
-            };
-            let mut out = Vec::new();
-            for r in &right_rows {
-                let mut combined = l.clone();
-                combined.extend_from_slice(r);
-                match matches(&combined) {
-                    Ok(true) => out.push(Ok(combined)),
-                    Ok(false) => {}
-                    Err(e) => return vec![Err(e)],
-                }
+    let right_rows = stash(build(right, ctx, outer)?)?;
+    join_with(build(left, ctx, outer)?, right_rows, spec, 0)
+}
+
+fn join_with<'a>(
+    left: Rows<'a>,
+    right: crate::spill::Stored,
+    spec: JoinSpec<'a>,
+    level: u32,
+) -> Result<Rows<'a>> {
+    match right {
+        crate::spill::Stored::Memory(rows) => memory_join(left, rows, spec),
+        crate::spill::Stored::Run(run) => match spec.keys() {
+            Some(keys) if level < crate::spill::MAX_LEVEL => {
+                grace_join(left, run, keys, spec, level)
             }
-            if out.is_empty() && kind == JoinType::Left {
-                let mut padded = l;
-                padded.extend(std::iter::repeat_n(Value::Null, right_width));
-                out.push(Ok(padded));
-            }
-            out
-        }))),
-        JoinAlgo::Hash {
-            left_keys,
-            right_keys,
-        } => {
-            let table = hash_table(&right_rows, right_keys, ctx, outer)?;
-            Ok(Box::new(left_rows.flat_map(move |l| -> Vec<Result<Row>> {
-                let l = match l {
-                    Ok(l) => l,
-                    Err(e) => return vec![Err(e)],
-                };
-                let key = match probe_key(&l, left_keys, ctx, outer) {
-                    Ok(k) => k,
-                    Err(e) => return vec![Err(e)],
-                };
-                let mut out = Vec::new();
-                if let Some(key) = key {
-                    for &i in table.get(&key).into_iter().flatten() {
-                        let mut combined = l.clone();
-                        combined.extend_from_slice(&right_rows[i]);
-                        match matches(&combined) {
-                            Ok(true) => out.push(Ok(combined)),
-                            Ok(false) => {}
-                            Err(e) => return vec![Err(e)],
-                        }
-                    }
-                }
-                if out.is_empty() && kind == JoinType::Left {
-                    let mut padded = l;
-                    padded.extend(std::iter::repeat_n(Value::Null, right_width));
-                    out.push(Ok(padded));
-                }
-                out
-            })))
-        }
+            // (`on` holds the whole condition: keys or not, it decides.)
+            _ => block_join(left, run, spec),
+        },
     }
 }
 
@@ -827,19 +839,14 @@ fn hash_table(
 ) -> Result<HashMap<Vec<Value>, Vec<usize>>> {
     let mut table: HashMap<Vec<Value>, Vec<usize>> = HashMap::new();
     for (i, r) in rows.iter().enumerate() {
-        let e = env(r, ctx, outer);
-        let key = keys
-            .iter()
-            .map(|k| k.eval(&e))
-            .collect::<Result<Vec<_>>>()?;
-        if !key.iter().any(Value::is_null) {
+        if let Some(key) = probe_key(r, keys, ctx, outer)? {
             table.entry(key).or_default().push(i);
         }
     }
     Ok(table)
 }
 
-/// A left row's hash join key; `None` if it has a NULL.
+/// A row's hash join key; `None` if it has a NULL.
 fn probe_key(
     row: &[Value],
     keys: &[Expr],
@@ -854,59 +861,205 @@ fn probe_key(
     Ok((!key.iter().any(Value::is_null)).then_some(key))
 }
 
-/// A full outer join: the left join's rows, then every right row that
-/// matched no left row, NULL-padded on the left.
-fn full_join<'a>(
-    (left_width, right_width): (usize, usize),
-    left_rows: Rows<'a>,
-    right_rows: Vec<Row>,
-    algo: &JoinAlgo,
-    matches: &dyn Fn(&Row) -> Result<bool>,
-    ctx: &Ctx,
-    outer: Option<&Env>,
-) -> Result<Rows<'a>> {
-    let table = match algo {
-        JoinAlgo::Hash { right_keys, .. } => Some(hash_table(&right_rows, right_keys, ctx, outer)?),
-        JoinAlgo::NestedLoop => None,
+/// The right side in memory: each left row probes it (by key, or every
+/// row); a full join then gives the right rows nothing matched.
+fn memory_join<'a>(left: Rows<'a>, right: Vec<Row>, spec: JoinSpec<'a>) -> Result<Rows<'a>> {
+    let table = match spec.keys() {
+        Some((_, right_keys)) => Some(hash_table(&right, right_keys, spec.ctx, spec.outer)?),
+        None => None,
     };
-    let all: Vec<usize> = (0..right_rows.len()).collect();
-    let mut matched = vec![false; right_rows.len()];
-    let mut out = Vec::new();
-    for l in left_rows {
-        let l = l?;
-        let candidates: &[usize] = match (algo, &table) {
-            (JoinAlgo::Hash { left_keys, .. }, Some(t)) => {
-                match probe_key(&l, left_keys, ctx, outer)? {
-                    Some(k) => t.get(&k).map_or(&[], Vec::as_slice),
-                    None => &[],
+    let right = Rc::new(right);
+    let full = spec.kind == JoinType::Full;
+    let matched = Rc::new(std::cell::RefCell::new(vec![
+        false;
+        if full {
+            right.len()
+        } else {
+            0
+        }
+    ]));
+    let (r, m) = (Rc::clone(&right), Rc::clone(&matched));
+    let probe = left.flat_map(move |l| -> Vec<Result<Row>> {
+        let l = match l {
+            Ok(l) => l,
+            Err(e) => return vec![Err(e)],
+        };
+        let by_key: Vec<usize>;
+        let candidates: Box<dyn Iterator<Item = usize>> = match (&table, spec.keys()) {
+            (Some(t), Some((left_keys, _))) => {
+                match probe_key(&l, left_keys, spec.ctx, spec.outer) {
+                    Ok(Some(k)) => {
+                        by_key = t.get(&k).cloned().unwrap_or_default();
+                        Box::new(by_key.into_iter())
+                    }
+                    Ok(None) => Box::new(std::iter::empty()),
+                    Err(e) => return vec![Err(e)],
                 }
             }
-            _ => &all,
+            _ => Box::new(0..r.len()),
         };
-        let mut any = false;
-        for &i in candidates {
+        let mut out = Vec::new();
+        for i in candidates {
             let mut combined = l.clone();
-            combined.extend_from_slice(&right_rows[i]);
-            if matches(&combined)? {
-                matched[i] = true;
-                any = true;
-                out.push(combined);
+            combined.extend_from_slice(&r[i]);
+            match spec.matches(&combined) {
+                Ok(true) => {
+                    if full {
+                        m.borrow_mut()[i] = true;
+                    }
+                    out.push(Ok(combined));
+                }
+                Ok(false) => {}
+                Err(e) => return vec![Err(e)],
             }
         }
-        if !any {
-            let mut padded = l;
-            padded.extend(std::iter::repeat_n(Value::Null, right_width));
-            out.push(padded);
+        if out.is_empty() && spec.keeps_left() {
+            out.push(Ok(spec.left_padded(l)));
+        }
+        out
+    });
+    if !full {
+        return Ok(Box::new(probe));
+    }
+    // After every left row: the right rows nothing matched.
+    let mut tail = None;
+    let unmatched = std::iter::from_fn(move || {
+        let it = tail.get_or_insert_with(|| {
+            let m = matched.borrow();
+            (0..right.len())
+                .filter(|&i| !m[i])
+                .map(|i| Ok(spec.right_padded(&right[i])))
+                .collect::<Vec<_>>()
+                .into_iter()
+        });
+        it.next()
+    });
+    Ok(Box::new(probe.chain(unmatched)))
+}
+
+/// A grace hash join: both sides partitioned by key (rows with a NULL key
+/// match nothing: a left one comes out padded for LEFT and FULL, a right
+/// one for FULL), then each pair of partitions joined, in memory if its
+/// right side fits.
+fn grace_join<'a>(
+    left: Rows<'a>,
+    right: Rc<crate::spill::Sealed>,
+    (left_keys, right_keys): (&'a [Expr], &'a [Expr]),
+    spec: JoinSpec<'a>,
+    level: u32,
+) -> Result<Rows<'a>> {
+    let (ctx, outer) = (spec.ctx, spec.outer);
+    let mut right_parts = crate::spill::Partitions::new(level);
+    let mut right_nulls = crate::spill::Stash::new();
+    for r in right.iter() {
+        let r = r?;
+        match probe_key(&r, right_keys, ctx, outer)? {
+            Some(k) => right_parts.push(&k, &r)?,
+            None if spec.kind == JoinType::Full => right_nulls.push(spec.right_padded(&r))?,
+            None => {}
         }
     }
-    for (r, m) in right_rows.into_iter().zip(matched) {
-        if !m {
-            let mut padded = vec![Value::Null; left_width];
-            padded.extend(r);
-            out.push(padded);
+    let mut left_parts = crate::spill::Partitions::new(level);
+    let mut left_nulls = crate::spill::Stash::new();
+    for l in left {
+        let l = l?;
+        match probe_key(&l, left_keys, ctx, outer)? {
+            Some(k) => left_parts.push(&k, &l)?,
+            None if spec.keeps_left() => left_nulls.push(spec.left_padded(l))?,
+            None => {}
         }
     }
-    Ok(Box::new(out.into_iter().map(Ok)))
+    let pairs: Vec<_> = left_parts
+        .seal_all()?
+        .into_iter()
+        .zip(right_parts.seal_all()?)
+        .collect();
+    let joined = pairs.into_iter().flat_map(move |(l, r)| -> Rows<'a> {
+        let left: Rows<'a> = match l {
+            Some(run) => Box::new(run.iter()),
+            None => Box::new(std::iter::empty()),
+        };
+        let result = (|| {
+            let right = match r {
+                Some(run) => stash(Box::new(run.iter()))?,
+                None => crate::spill::Stored::Memory(Vec::new()),
+            };
+            join_with(left, right, spec, level + 1)
+        })();
+        match result {
+            Ok(rows) => rows,
+            Err(e) => Box::new(std::iter::once(Err(e))),
+        }
+    });
+    Ok(Box::new(
+        joined.chain(left_nulls.seal()?).chain(right_nulls.seal()?),
+    ))
+}
+
+/// A block nested loop: left rows a work_mem's worth at a time, each block
+/// read against every right row; matched right rows remembered for a full
+/// join, whose unmatched right rows come after.
+fn block_join<'a>(
+    mut left: Rows<'a>,
+    right: Rc<crate::spill::Sealed>,
+    spec: JoinSpec<'a>,
+) -> Result<Rows<'a>> {
+    let limit = crate::budget::work_mem();
+    let full = spec.kind == JoinType::Full;
+    let mut matched = vec![
+        0u64;
+        if full {
+            (right.rows() as usize).div_ceil(64)
+        } else {
+            0
+        }
+    ];
+    let mut out = crate::spill::Stash::new();
+    loop {
+        let mut block = Vec::new();
+        let mut bytes = 0;
+        for l in left.by_ref() {
+            let l = l?;
+            bytes += crate::spill::row_bytes(&l);
+            block.push(l);
+            if bytes > limit {
+                break;
+            }
+        }
+        if block.is_empty() {
+            break;
+        }
+        let mut hit = vec![false; block.len()];
+        for (i, r) in right.iter().enumerate() {
+            let r = r?;
+            for (j, l) in block.iter().enumerate() {
+                let mut combined = l.clone();
+                combined.extend_from_slice(&r);
+                if spec.matches(&combined)? {
+                    hit[j] = true;
+                    if full {
+                        matched[i / 64] |= 1 << (i % 64);
+                    }
+                    out.push(combined)?;
+                }
+            }
+        }
+        if spec.keeps_left() {
+            for (l, h) in block.into_iter().zip(hit) {
+                if !h {
+                    out.push(spec.left_padded(l))?;
+                }
+            }
+        }
+    }
+    if full {
+        for (i, r) in right.iter().enumerate() {
+            if matched[i / 64] & (1 << (i % 64)) == 0 {
+                out.push(spec.right_padded(&r?))?;
+            }
+        }
+    }
+    Ok(Box::new(out.seal()?.into_iter()))
 }
 
 /// One aggregate's state in one group.

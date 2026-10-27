@@ -74,6 +74,17 @@ fn sorts_and_materialised_rows_spill_and_agree() {
         "SELECT name FROM t EXCEPT SELECT name FROM t WHERE g < 90 ORDER BY 1",
         "SELECT g FROM t INTERSECT ALL SELECT g FROM t WHERE id < 5000 ORDER BY 1",
         "SELECT name FROM t EXCEPT ALL SELECT name FROM t WHERE id % 3 = 0 ORDER BY 1",
+        // Joins whose right side is past 64 kB: grace hash joins, block
+        // nested loops; NULL keys; left and full joins.
+        "SELECT a.id, b.name FROM t a JOIN t b ON a.id = b.id + 1 ORDER BY 1",
+        "SELECT a.id, b.id FROM t a LEFT JOIN t b ON a.id = b.g * 1000 ORDER BY 1, 2",
+        "SELECT a.k, b.k FROM (SELECT CASE WHEN id % 10 = 0 THEN NULL ELSE id END k FROM t WHERE id < 3000) a \
+           FULL JOIN (SELECT CASE WHEN id % 7 = 0 THEN NULL ELSE id END k FROM t WHERE id > 2000) b \
+           ON a.k = b.k ORDER BY 1 NULLS FIRST, 2 NULLS FIRST",
+        "SELECT count(*), sum(b.id) FROM (SELECT * FROM t WHERE id < 300) a JOIN t b ON b.id < a.id",
+        "SELECT a.id, b.id FROM (SELECT * FROM t WHERE id < 30) a LEFT JOIN t b ON b.id < a.id - 25 ORDER BY 1, 2",
+        "SELECT a.id, b.id FROM (SELECT * FROM t WHERE id < 20) a FULL JOIN t b ON b.id + 19990 < a.id * 1000 \
+           ORDER BY 1 NULLS FIRST, 2",
     ];
     let before = db.scratch_files_made();
     let big = results(&db, "SET work_mem = '64MB'", &queries);

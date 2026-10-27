@@ -981,8 +981,9 @@ Plan nodes: `Scan` (table, access path, filter), `Values`, `Filter`,
 `Cte` (computed once per execution, shared by its references),
 `Recursive` / `WorkTable` (`WITH RECURSIVE`: the step re-runs over the
 previous round until it yields nothing; `UNION` drops repeats, so cycles
-end), `Function` (functions in `FROM`), `Virtual` (catalog tables).  The executor runs them as iterators; joins
-materialise their right input, sorts and aggregates their input.
+end), `Function` (functions in `FROM`), `Virtual` (catalog tables).  The executor runs them as iterators; a join
+stashes its right input, sorts and aggregates take their input — each
+within `work_mem`, below.
 
 **Memory** (`spill`, §M14.11).  What an operator holds is bounded by
 `work_mem` (`SET work_mem = '256MB'`, or the database's setting; default
@@ -1001,8 +1002,16 @@ to the limit; past it, rows of new groups (rows not yet seen; both sides
 of a set operation) go to 32 partitions by a hash of their key, each
 taken in turn after the input — a partition too large splits again, up to
 four levels — so no aggregate's state ever leaves memory, and each
-partition holds every row of its keys.  Still held whole: joins' right
-inputs (§M14.11 L6c) and a recursive `UNION`'s rows seen.
+partition holds every row of its keys.  Joins stash their right input:
+in memory, a hash join probes it by key and a nested loop reads it all
+for each left row (a full join marks the right rows matched and gives
+the rest after); past the limit, a hash join is a grace hash join (both
+sides partitioned by key, each pair joined in turn — a right side still
+too large splits again; rows with a NULL key match nothing, coming out
+padded for LEFT and FULL) and a nested loop reads the right side once per
+`work_mem`'s worth of left rows (a block nested loop, the matched right
+rows of a full join in a bitmap).  Still held whole: a recursive `UNION`'s
+rows seen, and the validated reads of a transaction (§5.2).
 Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context).  Expressions use three-valued logic,
 checked integer arithmetic (`22003`), division by zero (`22012`).
@@ -2059,6 +2068,8 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 joins past work_mem (L6c):** grace hash joins,
+  block nested loops, full joins that no longer collect their output.
 - **2026-10-27 — §M14.11 aggregation, DISTINCT and set operations past
   work_mem (L6b):** groups, rows seen and counts kept in memory up to the
   limit; the rest partitioned by key and taken in turn.
