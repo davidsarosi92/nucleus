@@ -11,6 +11,7 @@
 //! - TLS is a module's [`Tls`] (`nucleus-tls`), in [`Config::tls`]; the
 //!   front ends negotiate it ([`transport`]).
 
+mod columnar;
 mod native;
 pub mod throttle;
 pub mod transport;

@@ -1373,3 +1373,105 @@ fn a_cursors_pauses_are_not_statement_time() {
     }
     assert_eq!(n, 40);
 }
+
+/// Columnar results (PLAN.md §M14.11 L3): every type, NULLs, batches the
+/// size asked for — each cell the value a cursor gives.
+#[test]
+fn columnar_batches_match_rows() {
+    let mut c = Client::connect(config(start(None))).unwrap();
+    c.execute(
+        "CREATE TABLE col (id INT PRIMARY KEY, b BOOLEAN, s SMALLINT, big BIGINT, r REAL, f FLOAT, \
+         n NUMERIC(10, 2), t TEXT, ch CHAR(3), bt BYTEA, d DATE, tm TIME, ts TIMESTAMP, tz TIMESTAMPTZ, \
+         iv INTERVAL, u UUID, ip INET, net CIDR, arr INT[])",
+        &[],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO col SELECT i, i % 2 = 0, i::smallint, i * 1000000000000, i / 4.0, i / 8.0, i / 3.0, \
+         'v' || i, 'c' || (i % 10), decode('ff00', 'hex'), DATE '2024-01-01' + i, TIME '12:00' + i * INTERVAL '1 second', \
+         TIMESTAMP '2024-01-01' + i * INTERVAL '1 hour', TIMESTAMPTZ '2024-01-01 00:00Z' + i * INTERVAL '1 minute', \
+         i * INTERVAL '1 day', gen_random_uuid(), '10.0.0.1'::inet, '10.0.0.0/8'::cidr, ARRAY[i, NULL] \
+         FROM generate_series(1, 2500) i",
+        &[],
+    )
+    .unwrap();
+    // Every third row NULL in every column but the key.
+    c.execute(
+        "UPDATE col SET b = NULL, s = NULL, big = NULL, r = NULL, f = NULL, n = NULL, t = NULL, ch = NULL, \
+         bt = NULL, d = NULL, tm = NULL, ts = NULL, tz = NULL, iv = NULL, u = NULL, ip = NULL, net = NULL, \
+         arr = NULL WHERE id % 3 = 0",
+        &[],
+    )
+    .unwrap();
+    let sql = "SELECT * FROM col ORDER BY id";
+    let rows: Vec<Vec<Value>> = c.rows(sql, &[]).unwrap();
+    let mut batches = c.batches(sql, &[], 1000).unwrap();
+    assert_eq!(batches.columns()[16].ty, Type::Inet);
+    let mut seen = 0;
+    let mut sizes = Vec::new();
+    for batch in &mut batches {
+        let batch = batch.unwrap();
+        sizes.push(batch.rows());
+        for i in 0..batch.rows() {
+            for (col, want) in rows[seen + i].iter().enumerate() {
+                assert_eq!(
+                    &batch.value(i, col).unwrap(),
+                    want,
+                    "row {} column {col}",
+                    seen + i
+                );
+            }
+        }
+        seen += batch.rows();
+    }
+    assert_eq!(sizes, [1000, 1000, 500]);
+    assert_eq!(batches.command(), Some(("SELECT", 2500)));
+    drop(batches);
+
+    // Typed buffers: no value per cell.
+    let mut b = c
+        .batches("SELECT id, big FROM col WHERE id <= 10 ORDER BY id", &[], 0)
+        .unwrap();
+    let batch = b.next().unwrap().unwrap();
+    assert_eq!(
+        batch.column(0).i32s().unwrap(),
+        &(1..=10).collect::<Vec<_>>()[..]
+    );
+    assert!(batch.column(1).is_null(2) && !batch.column(1).is_null(3));
+    assert_eq!(batch.column(1).i64s().unwrap()[3], 4_000_000_000_000);
+    assert!(b.next().is_none());
+    drop(b);
+
+    // Closed early; an empty result has no batch; an error after batches
+    // is the last item.
+    let big = "SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b";
+    let mut b = c.batches(big, &[], 4096).unwrap();
+    assert_eq!(b.next().unwrap().unwrap().rows(), 4096);
+    // (The server waits after each batch: one was sent.)
+    assert_eq!(b.close().unwrap(), ("SELECT".into(), 4096));
+    assert!(
+        c.batches("SELECT * FROM col WHERE false", &[], 0)
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    let items: Vec<_> = c
+        .batches(
+            "SELECT 1 / (250 - i) FROM generate_series(1, 400) i",
+            &[],
+            100,
+        )
+        .unwrap()
+        .collect();
+    assert_eq!(items.len(), 4);
+    assert_eq!(
+        items[..2]
+            .iter()
+            .map(|b| b.as_ref().unwrap().rows())
+            .sum::<usize>(),
+        200
+    );
+    assert_eq!(items[2].as_ref().unwrap().rows(), 49);
+    assert!(matches!(&items[3], Err(Error::Server(e)) if e.code == "22012"));
+    assert_eq!(c.status(), TxnStatus::Idle);
+}

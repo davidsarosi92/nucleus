@@ -14,6 +14,12 @@
 //! for row in c.cursor("SELECT id FROM t", &[], 1000)? {
 //!     println!("{}", row?[0]);
 //! }
+//! // Or a column at a time: typed buffers, no value per cell.
+//! for batch in c.batches("SELECT id FROM t", &[], 65536)? {
+//!     if let Some(ids) = batch?.column(0).i32s() {
+//!         println!("{}", ids.iter().map(|&i| i64::from(i)).sum::<i64>());
+//!     }
+//! }
 //! # Ok::<(), nucleus_client::Error>(())
 //! ```
 
@@ -27,8 +33,8 @@ use std::time::Duration;
 /// `bytea`, `time`, `inet` and `cidr` in theirs, `char(n)` and enums
 /// named as such; 4: the password is proved by SCRAM-SHA-256, never
 /// sent; 5: errors carry a hint; 6: results stream, and a [`Cursor`]
-/// fetches them in batches).
-pub const PROTOCOL_VERSION: u16 = 6;
+/// fetches them in batches; 7: columnar results, [`Client::batches`]).
+pub const PROTOCOL_VERSION: u16 = 7;
 /// A [`Cursor`]'s batch when none is given: rows the server sends before
 /// it waits for the client.
 pub const DEFAULT_FETCH: u32 = 1000;
@@ -1038,7 +1044,10 @@ impl Client {
     ) -> Result<(), Error> {
         let mut body = Vec::new();
         put_str(&mut body, sql);
-        body.push(u8::from(format == Format::Text));
+        body.push(match format {
+            Format::Typed => 0,
+            Format::Text => 1,
+        });
         if self.version >= 6 {
             body.extend_from_slice(&fetch.to_le_bytes());
         }
@@ -1118,7 +1127,47 @@ impl Client {
             0 => DEFAULT_FETCH,
             n => n,
         };
-        self.send_query(sql, params, Format::Typed, fetch)?;
+        self.open(sql, params, 0, fetch)
+    }
+
+    /// Runs one statement and reads its result a batch of `rows` at a time
+    /// (0: the server's choice), each column a typed buffer — no value per
+    /// cell (protocol version 7).  As [`Client::cursor`] otherwise: the
+    /// server waits for each batch to be read, and dropping it early stops
+    /// the statement.
+    pub fn batches(
+        &mut self,
+        sql: &str,
+        params: &[Value],
+        rows: u32,
+    ) -> Result<Batches<'_>, Error> {
+        if self.version < 7 {
+            return Err(Error::Protocol(
+                "columnar results need protocol version 7; the server speaks an older one".into(),
+            ));
+        }
+        Ok(Batches(self.open(sql, params, 2, rows)?))
+    }
+
+    /// Sends `Q` in result format `format` and reads up to the columns.
+    fn open(
+        &mut self,
+        sql: &str,
+        params: &[Value],
+        format: u8,
+        fetch: u32,
+    ) -> Result<Cursor<'_>, Error> {
+        let mut body = Vec::new();
+        put_str(&mut body, sql);
+        body.push(format);
+        if self.version >= 6 {
+            body.extend_from_slice(&fetch.to_le_bytes());
+        }
+        body.extend_from_slice(&(params.len() as u16).to_le_bytes());
+        for p in params {
+            p.encode(&mut body);
+        }
+        self.send(b'Q', &body)?;
         let mut done = None;
         let mut failed = None;
         loop {
@@ -1279,6 +1328,15 @@ impl Iterator for Cursor<'_> {
     type Item = Result<Vec<Value>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let n = self.columns.len();
+        self.next_body(b'D')
+            .map(|body| body.and_then(|b| Input { b: &b }.row(n)))
+    }
+}
+
+impl Cursor<'_> {
+    /// The body of the next `kind` message (`D` a row, `B` a batch).
+    fn next_body(&mut self, data: u8) -> Option<Result<Vec<u8>, Error>> {
         while !self.ready {
             let (kind, body) = match self.client.read() {
                 Ok(m) => m,
@@ -1289,7 +1347,7 @@ impl Iterator for Cursor<'_> {
             };
             let mut b = Input { b: &body };
             let step = match kind {
-                b'D' => return Some(b.row(self.columns.len())),
+                k if k == data => return Some(Ok(body)),
                 // The batch is read: the next.
                 b'S' => self.client.send(b'F', &self.fetch.to_le_bytes()),
                 b'K' => b.tag().map(|t| self.done = Some(t)),
@@ -1313,6 +1371,314 @@ impl Iterator for Cursor<'_> {
             }
         }
         None
+    }
+}
+
+/// One statement's result as it arrives, a batch of rows at a time with a
+/// typed buffer per column ([`Client::batches`]).
+#[derive(Debug)]
+pub struct Batches<'c>(Cursor<'c>);
+
+impl Batches<'_> {
+    /// The result's columns.
+    pub fn columns(&self) -> &[Column] {
+        self.0.columns()
+    }
+
+    /// The command tag and count, once every batch is read.
+    pub fn command(&self) -> Option<(&str, u64)> {
+        self.0.command()
+    }
+
+    /// Stops reading, as [`Cursor::close`].
+    pub fn close(self) -> Result<(String, u64), Error> {
+        self.0.close()
+    }
+}
+
+impl Iterator for Batches<'_> {
+    type Item = Result<Batch, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let types: Vec<Type> = self.0.columns.iter().map(|c| c.ty.clone()).collect();
+        self.0
+            .next_body(b'B')
+            .map(|body| body.and_then(|b| Batch::decode(&b, types)))
+    }
+}
+
+/// Rows of a result, a buffer per column ([`Client::batches`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Batch {
+    rows: usize,
+    types: Vec<Type>,
+    columns: Vec<ColumnBatch>,
+}
+
+/// One column of a [`Batch`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColumnBatch {
+    /// A bit per row, least significant first, set for a value (`None`:
+    /// no NULLs).
+    pub valid: Option<Vec<u8>>,
+    /// The values, NULLs' slots zero or empty.
+    pub data: ColumnData,
+}
+
+/// A column's values, by its type's layout.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ColumnData {
+    /// `boolean`.
+    Bool(Vec<bool>),
+    /// `smallint`.
+    I16(Vec<i16>),
+    /// `integer`, and `date` (days since 2000-01-01).
+    I32(Vec<i32>),
+    /// `bigint`, and `timestamp`, `timestamptz` (µs since 2000-01-01) and
+    /// `time` (µs since midnight).
+    I64(Vec<i64>),
+    /// `real`.
+    F32(Vec<f32>),
+    /// `double precision`.
+    F64(Vec<f64>),
+    /// 16 bytes each: `uuid`, or `interval` (`i32` months, `i32` days, `i64`
+    /// µs).
+    Fixed16(Vec<[u8; 16]>),
+    /// `numeric`: mantissa and scale.
+    Numeric(Vec<(i128, u8)>),
+    /// Variable width: value `i` is `data[offsets[i]..offsets[i + 1]]` —
+    /// UTF-8 for text, `char(n)`, enums and unknown types; the bytes of a
+    /// `bytea` or a registered type; family, mask length and address for
+    /// `inet` and `cidr`; an array in the row format's value encoding.
+    Var {
+        /// One more than the rows.
+        offsets: Vec<u32>,
+        /// The values' bytes.
+        data: Vec<u8>,
+    },
+}
+
+/// How a column of a type is laid out in a batch (DOCS §10).
+fn layout(t: &Type) -> usize {
+    match t {
+        Type::Bool => 1,
+        Type::SmallInt => 2,
+        Type::Integer | Type::Real | Type::Date => 4,
+        Type::Int | Type::Float | Type::Timestamp | Type::TimestampTz | Type::Time => 8,
+        Type::Interval | Type::Uuid => 16,
+        Type::Numeric => 17,
+        _ => 0,
+    }
+}
+
+impl Batch {
+    fn decode(body: &[u8], types: Vec<Type>) -> Result<Batch, Error> {
+        let bad = || Error::Protocol("malformed batch".into());
+        let mut at = 0usize;
+        let take = |at: &mut usize, n: usize| -> Result<&[u8], Error> {
+            let end = at
+                .checked_add(n)
+                .filter(|&e| e <= body.len())
+                .ok_or_else(bad)?;
+            let s = &body[*at..end];
+            *at = end;
+            Ok(s)
+        };
+        let align = |at: &mut usize| *at = at.div_ceil(8) * 8;
+        let rows = u32::from_le_bytes(take(&mut at, 4)?.try_into().unwrap()) as usize;
+        let mut columns = Vec::with_capacity(types.len());
+        for t in &types {
+            let nulls = take(&mut at, 1)?[0] != 0;
+            let valid = if nulls {
+                align(&mut at);
+                Some(take(&mut at, rows.div_ceil(8))?.to_vec())
+            } else {
+                None
+            };
+            align(&mut at);
+            let w = layout(t);
+            let data = if w == 0 {
+                let raw = take(&mut at, (rows + 1) * 4)?;
+                let offsets: Vec<u32> = raw
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| u32::from_le_bytes(*c))
+                    .collect();
+                align(&mut at);
+                let n = *offsets.last().unwrap_or(&0) as usize;
+                if offsets.windows(2).any(|w| w[0] > w[1]) {
+                    return Err(bad());
+                }
+                ColumnData::Var {
+                    data: take(&mut at, n)?.to_vec(),
+                    offsets,
+                }
+            } else {
+                let raw = take(&mut at, rows * w)?;
+                let chunks = raw.chunks_exact(w);
+                match t {
+                    Type::Bool => ColumnData::Bool(chunks.map(|c| c[0] != 0).collect()),
+                    Type::SmallInt => ColumnData::I16(
+                        chunks
+                            .map(|c| i16::from_le_bytes(c.try_into().unwrap()))
+                            .collect(),
+                    ),
+                    Type::Integer | Type::Date => ColumnData::I32(
+                        chunks
+                            .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+                            .collect(),
+                    ),
+                    Type::Real => ColumnData::F32(
+                        chunks
+                            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                            .collect(),
+                    ),
+                    Type::Float => ColumnData::F64(
+                        chunks
+                            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                            .collect(),
+                    ),
+                    Type::Numeric => ColumnData::Numeric(
+                        chunks
+                            .map(|c| (i128::from_le_bytes(c[..16].try_into().unwrap()), c[16]))
+                            .collect(),
+                    ),
+                    Type::Interval | Type::Uuid => {
+                        ColumnData::Fixed16(chunks.map(|c| c.try_into().unwrap()).collect())
+                    }
+                    _ => ColumnData::I64(
+                        chunks
+                            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                            .collect(),
+                    ),
+                }
+            };
+            align(&mut at);
+            columns.push(ColumnBatch { valid, data });
+        }
+        Ok(Batch {
+            rows,
+            types,
+            columns,
+        })
+    }
+
+    /// Its rows.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Column `i`.
+    pub fn column(&self, i: usize) -> &ColumnBatch {
+        &self.columns[i]
+    }
+
+    /// The value at `row` of column `col`, as [`Client::cursor`] would give
+    /// it (building one: for reading a cell, not a column).
+    pub fn value(&self, row: usize, col: usize) -> Result<Value, Error> {
+        let c = &self.columns[col];
+        if c.is_null(row) {
+            return Ok(Value::Null);
+        }
+        let t = &self.types[col];
+        Ok(match &c.data {
+            ColumnData::Bool(v) => Value::Bool(v[row]),
+            ColumnData::I16(v) => Value::SmallInt(v[row]),
+            ColumnData::I32(v) if *t == Type::Date => Value::Date(v[row]),
+            ColumnData::I32(v) => Value::Integer(v[row]),
+            ColumnData::I64(v) => match t {
+                Type::Timestamp => Value::Timestamp(v[row]),
+                Type::TimestampTz => Value::TimestampTz(v[row]),
+                Type::Time => Value::Time(v[row]),
+                _ => Value::Int(v[row]),
+            },
+            ColumnData::F32(v) => Value::Real(v[row]),
+            ColumnData::F64(v) => Value::Float(v[row]),
+            ColumnData::Numeric(v) => Value::Numeric {
+                mantissa: v[row].0,
+                scale: v[row].1,
+            },
+            ColumnData::Fixed16(v) if *t == Type::Uuid => Value::Uuid(v[row]),
+            ColumnData::Fixed16(v) => {
+                let b = &v[row];
+                Value::Interval {
+                    months: i32::from_le_bytes(b[0..4].try_into().unwrap()),
+                    days: i32::from_le_bytes(b[4..8].try_into().unwrap()),
+                    micros: i64::from_le_bytes(b[8..16].try_into().unwrap()),
+                }
+            }
+            ColumnData::Var { .. } => {
+                let b = c.bytes(row).unwrap_or_default();
+                match t {
+                    Type::Bytea => Value::Bytes(b.to_vec()),
+                    Type::Other(name) => Value::Other {
+                        type_name: name.clone(),
+                        bytes: b.to_vec(),
+                    },
+                    Type::Inet | Type::Cidr => {
+                        // The row format's payload, behind its tag.
+                        let mut tagged = vec![if *t == Type::Inet { 18 } else { 19 }];
+                        tagged.extend_from_slice(b);
+                        Value::decode(&mut Input { b: &tagged })?
+                    }
+                    Type::Array(_) => Value::decode(&mut Input { b })?,
+                    _ => Value::Text(
+                        String::from_utf8(b.to_vec())
+                            .map_err(|_| Error::Protocol("text is not UTF-8".into()))?,
+                    ),
+                }
+            }
+        })
+    }
+}
+
+impl ColumnBatch {
+    /// Whether the value at `row` is NULL.
+    pub fn is_null(&self, row: usize) -> bool {
+        self.valid
+            .as_ref()
+            .is_some_and(|v| v[row / 8] & (1 << (row % 8)) == 0)
+    }
+
+    /// The `integer` (or `date`) values.
+    pub fn i32s(&self) -> Option<&[i32]> {
+        match &self.data {
+            ColumnData::I32(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The `bigint` (or timestamp, time) values.
+    pub fn i64s(&self) -> Option<&[i64]> {
+        match &self.data {
+            ColumnData::I64(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The `double precision` values.
+    pub fn f64s(&self) -> Option<&[f64]> {
+        match &self.data {
+            ColumnData::F64(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// A variable-width value's bytes (`None` for NULL or a fixed width).
+    pub fn bytes(&self, row: usize) -> Option<&[u8]> {
+        match &self.data {
+            ColumnData::Var { offsets, data } if !self.is_null(row) => {
+                Some(&data[offsets[row] as usize..offsets[row + 1] as usize])
+            }
+            _ => None,
+        }
+    }
+
+    /// A text value (`None` for NULL, a fixed width or bytes that are not
+    /// UTF-8).
+    pub fn str(&self, row: usize) -> Option<&str> {
+        self.bytes(row).and_then(|b| std::str::from_utf8(b).ok())
     }
 }
 

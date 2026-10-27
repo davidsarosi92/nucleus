@@ -269,7 +269,7 @@ are marked ✅.
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC, LDAP), access rules by connection context, row-level security, protection, audit | ✅ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
-| | M14.11 | **In progress (L1–L2 ✅):** Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
+| | M14.11 | **In progress (L1–L3 ✅):** Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -1244,8 +1244,10 @@ row limit; a cursor's waits are not statement time); L2 cursors in the
 Python, JavaScript, Java, C and C++ drivers ✅ (Python and JavaScript
 `stream`, the DB-API cursor lazy; Java, C and C++ `cursor`; the next
 query ends one left open); L3 the columnar result
-format (`ncp` batches of typed column buffers with validity bitmaps; the
-Rust driver); L4 columnar results in the drivers (numpy, Arrow, pandas,
+format ✅ (`ncp` version 7: batches `B` of a buffer per column — fixed
+widths back to back, variable widths as Arrow's offsets and bytes, a
+validity bitmap, every buffer 8-byte aligned; the Rust driver's
+`Client::batches`); L4 columnar results in the drivers (numpy, Arrow, pandas,
 polars; typed arrays; Java buffers; C and C++ pointers); L5 bulk load
 (`COPY` text/CSV and `ncp` batches, batched inserts in the drivers, a
 DataFrame or Arrow table into a table in one call); L6 spilling (sorts,
@@ -2028,6 +2030,10 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 L3: columnar results — `ncp` version 7's
+  batches (a buffer per column, Arrow's layout for variable widths, a
+  bool a byte, numeric as mantissa and scale), the Rust driver's
+  `Client::batches`; checked cell by cell against the rows for every type.
 - **2026-10-27** — §M14.11 L1–L2: results stream — the executor's rows
   go to a sink as produced (`Session::run_into`), `ncp` version 6 adds a
   fetch size and `S` / `F` / `c`, every driver reads through a cursor

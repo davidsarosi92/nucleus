@@ -26,7 +26,9 @@ use crate::Config;
 /// to `E` (what to do about the error; empty: none).  Version 6 streams:
 /// `Q` carries a fetch size, and a result fetched in batches pauses with
 /// `S` after each until the client asks for more (`F`) or no more (`c`).
-pub const VERSION: u16 = 6;
+/// Version 7 adds the columnar result format (2): batches `B` of a buffer
+/// per column instead of a `D` per row.
+pub const VERSION: u16 = 7;
 /// The oldest it still speaks.
 pub const MIN_VERSION: u16 = 1;
 const MAX_BODY: u32 = 1 << 30;
@@ -126,7 +128,7 @@ fn type_tag(t: DataType, version: u16) -> u8 {
 /// §10).  Its tags 0–10 are the row encoding's version 1, but it is the
 /// protocol's own: the storage may store a value more compactly without
 /// the protocol changing.
-fn wire_value(buf: &mut Vec<u8>, v: &Value, ty: Option<DataType>, version: u16) {
+pub(crate) fn wire_value(buf: &mut Vec<u8>, v: &Value, ty: Option<DataType>, version: u16) {
     let v3 = version >= 3;
     match v {
         Value::Int(i) => match ty {
@@ -364,7 +366,11 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
                         log("query", &sql);
                         let query = Query {
                             sql: &sql,
-                            text: format == 1,
+                            format: match format {
+                                1 => Format::Text,
+                                2 if version >= 7 => Format::Columnar,
+                                _ => Format::Typed,
+                            },
                             fetch,
                             params: &params,
                         };
@@ -747,11 +753,21 @@ fn parameter(r: &mut Reader) -> Result<Value, Error> {
     Ok(v)
 }
 
+/// How a result's rows go.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Format {
+    /// A `D` per row, typed values.
+    Typed,
+    /// A `D` per row, every value as text.
+    Text,
+    /// Batches `B`, a buffer per column (version 7).
+    Columnar,
+}
+
 /// A `Q` message.
 struct Query<'a> {
     sql: &'a str,
-    /// Every value as text.
-    text: bool,
+    format: Format,
     /// Rows per batch (0: the whole result at once).
     fetch: u32,
     params: &'a [Value],
@@ -775,12 +791,15 @@ enum Ran {
 struct Wire<'a, R: Read, W: Write> {
     input: &'a mut R,
     out: &'a mut W,
-    text: bool,
+    format: Format,
     version: u16,
     types: Vec<DataType>,
     fetch: u32,
     /// Rows left in this batch (`None`: no limit).
     left: Option<u32>,
+    /// Columnar: the batch being filled, and its size.
+    pending: Vec<Row>,
+    batch: usize,
     /// The connection failed: the statement stopped on it.
     broken: Option<io::Error>,
     /// How the connection ends instead of going on.
@@ -799,6 +818,16 @@ impl<R: Read, W: Write> Wire<'_, R, W> {
             message: "the connection failed while the result was sent".into(),
             hint: None,
         }
+    }
+
+    /// Columnar: sends the rows gathered as a batch.
+    fn send_batch(&mut self) -> Result<(), Error> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let b = crate::columnar::batch(&self.pending, &self.types, self.version)?;
+        self.pending.clear();
+        self.send(&b)
     }
 
     /// Pauses after a batch: the next one's size (`None`: no limit), or
@@ -838,10 +867,31 @@ impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
         }
         self.types = columns.iter().map(|c| c.ty).collect();
         self.left = (self.fetch > 0).then_some(self.fetch);
+        self.batch = match self.fetch {
+            0 => crate::columnar::DEFAULT_BATCH,
+            n => n as usize,
+        };
         self.send(&m.finish())
     }
 
     fn row(&mut self, row: Row) -> Result<ControlFlow<()>, Error> {
+        if self.format == Format::Columnar {
+            if self.pending.len() >= self.batch {
+                self.send_batch()?;
+                if self.left.is_some() {
+                    match self.suspend()? {
+                        Some(next) => {
+                            self.left = next;
+                            self.batch =
+                                next.map_or(crate::columnar::DEFAULT_BATCH, |n| n as usize);
+                        }
+                        None => return Ok(ControlFlow::Break(())),
+                    }
+                }
+            }
+            self.pending.push(row);
+            return Ok(ControlFlow::Continue(()));
+        }
         if self.left == Some(0) {
             match self.suspend()? {
                 Some(next) => self.left = next,
@@ -853,7 +903,7 @@ impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
         }
         let mut m = Msg::new(b'D');
         for (v, t) in row.iter().zip(&self.types) {
-            m = if self.text && !v.is_null() {
+            m = if self.format == Format::Text && !v.is_null() {
                 m.value(&Value::Text(v.render()), None, self.version)
             } else {
                 m.value(v, Some(*t), self.version)
@@ -917,15 +967,23 @@ fn run<R: Read, W: Write>(
         let mut wire = Wire {
             input: &mut *input,
             out: &mut *out,
-            text: query.text,
+            format: query.format,
             version,
             types: Vec::new(),
             fetch: query.fetch,
             left: None,
+            pending: Vec::new(),
+            batch: crate::columnar::DEFAULT_BATCH,
             broken: None,
             close: None,
         };
-        let r = session.run_into(stmt, params, &mut wire);
+        let mut r = session.run_into(stmt, params, &mut wire);
+        // The last batch, before the end (or the error that ended it).
+        if let Err(e) = wire.send_batch()
+            && r.is_ok()
+        {
+            r = Err(e);
+        }
         if let Some(e) = wire.broken {
             return Err(e);
         }
