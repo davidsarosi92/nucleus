@@ -8,6 +8,8 @@
 //       std::cout << row[0].str() << " " << row[1].str() << "\n";
 //   for (const auto& row : db.cursor("SELECT id FROM t"))  // a large result,
 //       std::cout << row[0].str() << "\n";                 // as it arrives
+//   auto batches = db.batches("SELECT id FROM t");          // a column at a time
+//   while (batches.next()) sum += batches.values<int32_t>(0)[0];
 //
 // Build with drivers/c/nucleus.c (or libnucleus.a) and -Idrivers/c.
 #ifndef NUCLEUS_HPP
@@ -19,6 +21,7 @@
 #include <deque>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -399,6 +402,69 @@ private:
     std::vector<Column> columns_;
 };
 
+/// One statement's result as it arrives, a batch of rows at a time with a
+/// buffer per column (`Connection::batches`): `next()` moves to the next
+/// batch; `values<T>(col)` points into it (valid until the next `next()`).
+class Batches {
+public:
+    explicit Batches(nc_cursor* cur) : cur_(cur), columns_(detail::columns_of(nc_cursor_result(cur))) {}
+    Batches(const Batches&) = delete;
+    Batches& operator=(const Batches&) = delete;
+    Batches(Batches&& o) noexcept : cur_(std::exchange(o.cur_, nullptr)), columns_(std::move(o.columns_)) {}
+    Batches& operator=(Batches&& o) noexcept {
+        if (this != &o) {
+            nc_cursor_close(cur_);
+            cur_ = std::exchange(o.cur_, nullptr);
+            columns_ = std::move(o.columns_);
+        }
+        return *this;
+    }
+    ~Batches() { nc_cursor_close(cur_); }
+
+    const std::vector<Column>& columns() const { return columns_; }
+
+    /// The next batch; false after the last.  Throws the statement's error
+    /// when it fails after batches.
+    bool next() {
+        if (!cur_) return false;
+        nc_error err;
+        int rc = nc_cursor_next(cur_, &err);
+        if (rc < 0) throw Error(err.message, err.code, err.hint);
+        return rc == 1;
+    }
+
+    /// The rows of the current batch.
+    size_t rows() const { return cur_ ? nc_batch_rows(cur_) : 0; }
+
+    /// A fixed-width column's values (`int32_t` for integer and date,
+    /// `int64_t` for bigint and timestamps, `double`, …; see nucleus.h).
+    template <class T> const T* values(size_t col) const {
+        return static_cast<const T*>(nc_batch_data(cur_, col, nullptr));
+    }
+
+    bool is_null(size_t col, size_t row) const { return nc_batch_is_null(cur_, col, row) != 0; }
+
+    /// A variable-width value's bytes (text: UTF-8).
+    std::string_view text(size_t col, size_t row) const {
+        const uint32_t* off = nc_batch_offsets(cur_, col);
+        const char* data = static_cast<const char*>(nc_batch_data(cur_, col, nullptr));
+        if (!off || !data) return {};
+        return std::string_view(data + off[row], off[row + 1] - off[row]);
+    }
+
+    std::string command() const { return cur_ ? nc_command(nc_cursor_result(cur_)) : ""; }
+    uint64_t count() const { return cur_ ? nc_count(nc_cursor_result(cur_)) : 0; }
+
+    /// Stops reading: the server is told to send no more.
+    void close() {
+        if (cur_) nc_cursor_stop(cur_);
+    }
+
+private:
+    nc_cursor* cur_ = nullptr;
+    std::vector<Column> columns_;
+};
+
 inline std::string Value::str() const {
     std::deque<std::vector<nc_value>> store;
     nc_value v = detail::to_c(*this, store);
@@ -474,6 +540,18 @@ public:
         nc_cursor* c = nc_cursor_open(conn_, sql.c_str(), args.data(), args.size(), fetch, &err);
         if (!c) throw Error(err.message, err.code, err.hint);
         return Cursor(c);
+    }
+
+    /// Runs one statement and reads its result `rows` rows at a time (0:
+    /// NC_DEFAULT_BATCH), each column one buffer (protocol version 7).
+    Batches batches(const std::string& sql, const std::vector<Value>& params = {}, unsigned rows = 0) {
+        std::deque<std::vector<nc_value>> store;
+        std::vector<nc_value> args;
+        for (const auto& p : params) args.push_back(detail::to_c(p, store));
+        nc_error err;
+        nc_cursor* c = nc_batches_open(conn_, sql.c_str(), args.data(), args.size(), rows, &err);
+        if (!c) throw Error(err.message, err.code, err.hint);
+        return Batches(c);
     }
 
     /// BEGIN, `body(*this)`, then COMMIT — or ROLLBACK if it throws.

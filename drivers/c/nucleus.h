@@ -34,10 +34,12 @@ extern "C" {
 /* 2: registered types (uuid, modules' types) arrive in their binary form;
  * 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
  * 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
- * a hint; 6: results stream, fetched in batches. */
-#define NC_PROTOCOL_VERSION 6
+ * a hint; 6: results stream, fetched in batches; 7: columnar results. */
+#define NC_PROTOCOL_VERSION 7
 /* Rows a cursor asks the server for at a time. */
 #define NC_DEFAULT_FETCH 1000
+/* Rows a columnar batch holds when none is given. */
+#define NC_DEFAULT_BATCH 65536
 #define NC_DEFAULT_PORT 20035
 
 /* Value and column types (the protocol's tags). */
@@ -165,6 +167,28 @@ const nc_result *nc_cursor_result(const nc_cursor *cur);
 void nc_cursor_stop(nc_cursor *cur);
 /* Stops the statement if it has not ended, and frees the cursor. */
 void nc_cursor_close(nc_cursor *cur);
+
+/* Columnar results (protocol version 7): runs one statement and reads its
+ * result a batch of `rows` rows at a time (0: NC_DEFAULT_BATCH), each column
+ * one buffer.  nc_cursor_next reads the next batch (1, 0 the end, -1 an
+ * error); the accessors below point into it (valid until the next call;
+ * little-endian, 8-byte aligned).  The columns: nc_cursor_result. */
+nc_cursor *nc_batches_open(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, unsigned rows,
+                           nc_error *err);
+size_t nc_batch_rows(const nc_cursor *cur);
+/* A column's data: a fixed width's values back to back — uint8_t
+ * (boolean), int16_t, int32_t (integer; date as days since 2000-01-01),
+ * float, double, int64_t (bigint; timestamps as µs since 2000-01-01, time
+ * as µs since midnight), 16 bytes (interval: int32 months, int32 days,
+ * int64 µs; uuid), 17 (numeric: int128 mantissa, uint8 scale) — or a
+ * variable width's bytes (text, char(n), enums: UTF-8; bytea; inet/cidr:
+ * family, bits, address; arrays: a value as in rows), with its offsets. */
+const void *nc_batch_data(const nc_cursor *cur, size_t col, size_t *len);
+/* rows + 1 offsets into nc_batch_data; NULL for a fixed width. */
+const uint32_t *nc_batch_offsets(const nc_cursor *cur, size_t col);
+/* A bit per row, least significant first, set for a value; NULL: no NULLs. */
+const uint8_t *nc_batch_validity(const nc_cursor *cur, size_t col);
+int nc_batch_is_null(const nc_cursor *cur, size_t col, size_t row);
 
 /* 0 idle, 1 in a transaction block, 2 in a failed block. */
 int nc_status(const nc_conn *c);

@@ -398,6 +398,67 @@ static void cursors(void) {
     nc_close(db);
 }
 
+static void columnar(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    nc_cursor *cur;
+    char t[64], sql[512];
+    size_t total = 0, batches = 0, len;
+    int rc;
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (id INT PRIMARY KEY, big BIGINT, f FLOAT, tx TEXT)", t);
+    nc_result_free(nc_query(db, sql, NULL, 0, &err));
+    snprintf(sql, sizeof sql,
+             "INSERT INTO %s SELECT i, CASE WHEN i %% 3 <> 0 THEN i * 1000000000000 END, i / 8.0, 'v' || i "
+             "FROM generate_series(1, 300) i",
+             t);
+    nc_result_free(nc_query(db, sql, NULL, 0, &err));
+    snprintf(sql, sizeof sql, "SELECT id, big, f, tx FROM %s ORDER BY id", t);
+    cur = nc_batches_open(db, sql, NULL, 0, 128, &err);
+    CHECK(cur != NULL);
+    if (cur) {
+        CHECK(nc_columns(nc_cursor_result(cur)) == 4);
+        while ((rc = nc_cursor_next(cur, &err)) == 1) {
+            size_t n = nc_batch_rows(cur), i;
+            const int32_t *ids = nc_batch_data(cur, 0, &len);
+            const int64_t *big = nc_batch_data(cur, 1, NULL);
+            const double *f = nc_batch_data(cur, 2, NULL);
+            const uint32_t *off = nc_batch_offsets(cur, 3);
+            const char *tx = nc_batch_data(cur, 3, NULL);
+            CHECK(len == n * 4);
+            CHECK(nc_batch_offsets(cur, 0) == NULL && nc_batch_validity(cur, 0) == NULL);
+            for (i = 0; i < n; i++) {
+                int id = (int)(total + i + 1);
+                char want[16];
+                CHECK(ids[i] == id);
+                CHECK(nc_batch_is_null(cur, 1, i) == (id % 3 == 0));
+                if (id % 3) CHECK(big[i] == (int64_t)id * 1000000000000LL);
+                CHECK(f[i] == id / 8.0);
+                snprintf(want, sizeof want, "v%d", id);
+                CHECK(off[i + 1] - off[i] == strlen(want) && memcmp(tx + off[i], want, strlen(want)) == 0);
+            }
+            total += n;
+            batches++;
+        }
+        CHECK(rc == 0 && total == 300 && batches == 3);
+        CHECK(nc_count(nc_cursor_result(cur)) == 300);
+        nc_cursor_close(cur);
+    }
+    /* An error after batches. */
+    cur = nc_batches_open(db, "SELECT 1 / (250 - i) FROM generate_series(1, 400) i", NULL, 0, 100, &err);
+    CHECK(cur != NULL);
+    if (cur) {
+        total = 0;
+        while ((rc = nc_cursor_next(cur, &err)) == 1) total += nc_batch_rows(cur);
+        CHECK(rc == -1 && total == 249 && strcmp(err.code, "22012") == 0);
+        nc_cursor_close(cur);
+    }
+    nc_close(db);
+}
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
@@ -408,6 +469,7 @@ int main(void) {
     token();
     directory();
     cursors();
+    columnar();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

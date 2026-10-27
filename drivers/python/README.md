@@ -31,5 +31,13 @@ Errors are `nucleus.Error` subclasses with `.code` (SQLSTATE) and `.hint`
 reads them as they arrive, the server sending a batch at a time and
 waiting until it is read; closing early stops the statement, and a DB-API
 `cursor().execute()` reads lazily the same way (`itersize` rows a batch;
-one statement; `rowcount` -1 until the last row is read).  Tests:
+one statement; `rowcount` -1 until the last row is read).  Columnar
+results (protocol version 7), without a Python object per value:
+`conn.numpy(sql)` (a dict of numpy arrays, masked where there are NULLs;
+fixed widths read in place from the batch), `conn.arrow(sql)` (a
+`pyarrow.Table`; integers, floats, text and bytea in place, in Arrow's
+own layout), `conn.pandas(sql)`, `conn.polars(sql)`, or batch by batch:
+`for b in conn.batches(sql, rows=65536): b.column("x").to_numpy()`.
+numpy, pyarrow, pandas and polars are optional — needed only by what
+uses them.  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.

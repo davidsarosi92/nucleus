@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Protocol version 7 (nucleus PLAN.md §M14.11): columnar results.
+  `Client.batches(sql, params, { rows })` returns `Batches` of `Batch`es,
+  each column a typed array read in place (`ColumnBatch.values`,
+  `offsets`, `valid`, `isNull`, `get`, `toArray`; `Batch.toRows`).
+  `Column` has the protocol's type `tag`.
 - Protocol version 6 (nucleus PLAN.md §M14.11): results stream.
   `Client.stream(sql, params, { fetch })` returns a `Stream` to read with
   `for await`, a batch at a time; leaving the loop, `close()` or the next

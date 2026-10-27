@@ -29,5 +29,9 @@ it, or null).  Large results stream (protocol version 6): `try
 (NucleusClient.Cursor rows = db.cursor(1000, sql, params…)) { for (var row
 : rows) … }` reads them as they arrive, the server sending a batch at a
 time and waiting until it is read; closing early (or the next query)
-stops the statement.  Tests: `NucleusTest` (a plain
+stops the statement.  Columnar results (protocol version 7): `try
+(NucleusClient.Batches bs = db.batches(65536, sql, params…)) { for (var b :
+bs) b.column("x").ints() … }` — each column a buffer read in place
+(`ints()`, `longs()`, `doubles()`, …; text as `bytes()` and `offset(i)`),
+with `isNull(i)` and `get(i)`.  Tests: `NucleusTest` (a plain
 main); example: `examples/java/Quickstart.java`.

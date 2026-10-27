@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Protocol version 7 (nucleus PLAN.md §M14.11): columnar results.
+  `NucleusClient.batches([rows,] sql, params…)` returns `Batches` of
+  `Batch`es whose `ColumnBatch`es are buffers read in place (`shorts()`,
+  `ints()`, `longs()`, `floats()`, `doubles()`, `bytes()`, `offset(i)`),
+  with `isNull`, `get`, `toList`.  `Column` has the protocol's type `tag`.
 - Protocol version 6 (nucleus PLAN.md §M14.11): results stream.
   `NucleusClient.cursor([fetch,] sql, params…)` returns a `Cursor`
   (`Iterable`, `AutoCloseable`) reading a statement's rows a batch at a

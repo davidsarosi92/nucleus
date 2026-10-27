@@ -13,7 +13,8 @@ SQL dialect (joins of every kind, CTEs, foreign keys; integers by width,
 values stored out of line —, date, time and timestamps, intervals,
 `inet` / `cidr`, `uuid`, enums and arrays) with a cost-based optimizer, its own system catalog
 (`nc_catalog`), and a server that speaks nucleus's own protocol (`ncp`;
-results stream, read a batch at a time through a cursor) —
+results stream, read a batch at a time through a cursor, or columnar —
+straight into numpy, Arrow, pandas and polars) —
 with drivers for Rust, C, C++, Python, JavaScript/TypeScript and Java, and
 the `ncsql` shell — and, optionally, PostgreSQL's.  It is modular
 (§M14.19): every list is a registry, types are modules with abilities the

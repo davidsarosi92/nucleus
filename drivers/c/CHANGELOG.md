@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Protocol version 7 (nucleus PLAN.md §M14.11): columnar results.
+  `nc_batches_open` (`NC_DEFAULT_BATCH`), read with `nc_cursor_next`;
+  `nc_batch_rows`, `nc_batch_data`, `nc_batch_offsets`,
+  `nc_batch_validity`, `nc_batch_is_null` point into the batch.
 - Protocol version 6 (nucleus PLAN.md §M14.11): results stream.
   `nc_cursor_open`, `nc_cursor_next`, `nc_cursor_result`,
   `nc_cursor_stop`, `nc_cursor_close` read a statement's rows a batch at a

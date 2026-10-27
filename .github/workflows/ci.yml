@@ -57,6 +57,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      # The Python driver's columnar results into numpy, Arrow, pandas and
+      # polars (optional for the driver, tested here).
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python3 -m pip install numpy pyarrow pandas polars
       - run: cargo build --release --locked -p nucleus-cli -p nucleus-example
       - name: Driver tests
         # On failure the log's end is also an annotation (job logs need admin).

@@ -244,6 +244,58 @@ public final class NucleusTest {
         }
     }
 
+    static void columnar() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            String t = table();
+            db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, b BOOLEAN, s SMALLINT, big BIGINT, r REAL, f FLOAT, "
+                    + "n NUMERIC(10, 2), tx TEXT, ch CHAR(3), bt BYTEA, d DATE, tm TIME, ts TIMESTAMP, tz TIMESTAMPTZ, "
+                    + "iv INTERVAL, u UUID, ip INET, net CIDR, arr INT[])");
+            db.query("INSERT INTO " + t + " SELECT i, i % 2 = 0, i::smallint, i * 1000000000000, i / 4.0, i / 8.0, "
+                    + "i / 3.0, 'v' || i, 'c' || (i % 10), decode('ff00', 'hex'), DATE '2024-01-01' + i, "
+                    + "TIME '12:00' + i * INTERVAL '1 second', TIMESTAMP '2024-01-01' + i * INTERVAL '1 hour', "
+                    + "TIMESTAMPTZ '2024-01-01 00:00Z' + i * INTERVAL '1 minute', i * INTERVAL '1 day', "
+                    + "gen_random_uuid(), '10.0.0.1'::inet, '10.0.0.0/8'::cidr, ARRAY[i, NULL] "
+                    + "FROM generate_series(1, 300) i");
+            db.query("UPDATE " + t + " SET b = NULL, s = NULL, big = NULL, r = NULL, f = NULL, n = NULL, tx = NULL, "
+                    + "ch = NULL, bt = NULL, d = NULL, tm = NULL, ts = NULL, tz = NULL, iv = NULL, u = NULL, "
+                    + "ip = NULL, net = NULL, arr = NULL WHERE id % 3 = 0");
+            String sql = "SELECT * FROM " + t + " ORDER BY id";
+            List<List<Object>> want = db.query(sql).rows();
+            List<List<Object>> got = new java.util.ArrayList<>();
+            List<Integer> sizes = new java.util.ArrayList<>();
+            try (NucleusClient.Batches bs = db.batches(128, sql)) {
+                for (NucleusClient.Batch b : bs) {
+                    sizes.add(b.rows());
+                    got.addAll(b.toRows());
+                }
+                equal(bs.count(), 300L, "rows sent");
+            }
+            equal(sizes, List.of(128, 128, 44), "batch sizes");
+            for (int i = 0; i < want.size(); i++) {
+                for (int c = 0; c < want.get(i).size(); c++) {
+                    Object w = want.get(i).get(c), g = got.get(i).get(c);
+                    check(w instanceof byte[] ? Arrays.equals((byte[]) w, (byte[]) g) : Objects.equals(w, g),
+                            "row " + i + " column " + c + ": " + g + " vs " + w);
+                }
+            }
+            // Buffers read in place.
+            try (NucleusClient.Batches bs = db.batches("SELECT id, big, f, tx FROM " + t + " ORDER BY id")) {
+                NucleusClient.Batch b = bs.next();
+                equal(b.column("id").ints().get(2), 3, "ints");
+                equal(b.column("big").longs().get(3), 4_000_000_000_000L, "longs");
+                check(b.column("f").isNull(2), "a NULL");
+                equal(b.column("f").doubles().get(3), 0.5, "doubles");
+                equal(b.column("tx").get(0), "v1", "text");
+                check(!bs.hasNext(), "one batch");
+            }
+            int[] n = {0};
+            equal(errorCode(() -> {
+                for (NucleusClient.Batch b : db.batches(100, "SELECT 1 / (250 - i) FROM generate_series(1, 400) i")) n[0] += b.rows();
+            }), "22012", "an error after batches");
+            equal(n[0], 249, "rows before the error");
+        }
+    }
+
     private static void run(String name, Runnable test) {
         test.run();
         passed++;
@@ -261,7 +313,8 @@ public final class NucleusTest {
         run("token", NucleusTest::token);
         run("directory", NucleusTest::directory);
         run("cursors", NucleusTest::cursors);
-        check(passed == 10, "all tests ran");
+        run("columnar", NucleusTest::columnar);
+        check(passed == 11, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

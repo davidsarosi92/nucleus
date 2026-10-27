@@ -19,6 +19,14 @@ def connect(**kw):
     return nucleus.connect(HOST, PORT, **kw)
 
 
+def _has(module):
+    try:
+        __import__(module)
+        return True
+    except ImportError:
+        return False
+
+
 def table():
     return "py_" + uuid.uuid4().hex[:8]
 
@@ -179,6 +187,101 @@ class Conformance(unittest.TestCase):
             with self.assertRaises(nucleus.ProgrammingError):
                 c.stream("SELECT 1; SELECT 2")
             self.assertEqual(c.status, 0)
+
+    def _columnar_table(self, c):
+        t = table()
+        c.execute(f"CREATE TABLE {t} (id INT PRIMARY KEY, b BOOLEAN, s SMALLINT, big BIGINT, r REAL, f FLOAT, "
+                  "n NUMERIC(10, 2), tx TEXT, ch CHAR(3), bt BYTEA, d DATE, tm TIME, ts TIMESTAMP, tz TIMESTAMPTZ, "
+                  "iv INTERVAL, u UUID, ip INET, net CIDR, arr INT[])")
+        c.execute(f"INSERT INTO {t} SELECT i, i % 2 = 0, i::smallint, i * 1000000000000, i / 4.0, i / 8.0, i / 3.0, "
+                  "'v' || i, 'c' || (i % 10), decode('ff00', 'hex'), DATE '2024-01-01' + i, "
+                  "TIME '12:00' + i * INTERVAL '1 second', TIMESTAMP '2024-01-01' + i * INTERVAL '1 hour', "
+                  "TIMESTAMPTZ '2024-01-01 00:00Z' + i * INTERVAL '1 minute', i * INTERVAL '1 day', "
+                  "gen_random_uuid(), '10.0.0.1'::inet, '10.0.0.0/8'::cidr, ARRAY[i, NULL] "
+                  "FROM generate_series(1, 300) i")
+        c.execute(f"UPDATE {t} SET b = NULL, s = NULL, big = NULL, r = NULL, f = NULL, n = NULL, tx = NULL, "
+                  "ch = NULL, bt = NULL, d = NULL, tm = NULL, ts = NULL, tz = NULL, iv = NULL, u = NULL, "
+                  "ip = NULL, net = NULL, arr = NULL WHERE id % 3 = 0")
+        return t
+
+    def test_columnar(self):
+        with connect() as c:
+            t = self._columnar_table(c)
+            sql = f"SELECT * FROM {t} ORDER BY id"
+            want = c.execute(sql).rows
+            got, sizes = [], []
+            with c.batches(sql, rows=128) as bs:
+                for b in bs:
+                    sizes.append(len(b))
+                    got += b.rows()
+            self.assertEqual(sizes, [128, 128, 44])
+            self.assertEqual(bs.count, 300)
+            self.assertEqual(got, want)
+            # An empty result has no batch; an error after batches raises.
+            self.assertEqual(list(c.batches(f"SELECT * FROM {t} WHERE false")), [])
+            n = 0
+            with self.assertRaises(nucleus.DataError):
+                for b in c.batches("SELECT 1 / (250 - i) FROM generate_series(1, 400) i", rows=100):
+                    n += len(b)
+            self.assertEqual(n, 249)
+
+    @unittest.skipUnless(_has("numpy"), "numpy is not installed")
+    def test_numpy(self):
+        import numpy as np
+        with connect() as c:
+            t = self._columnar_table(c)
+            b = next(iter(c.batches(f"SELECT id, f, d, ts, tm, iv, tx FROM {t} ORDER BY id")))
+            ids = b.column("id").to_numpy()
+            # Read in place: the array is a view of the batch.
+            self.assertFalse(ids.flags.owndata)
+            self.assertEqual(ids.dtype, np.int32)
+            self.assertEqual(ids[:3].tolist(), [1, 2, 3])
+            f = b.column("f").to_numpy()
+            self.assertTrue(np.ma.is_masked(f[2]))
+            self.assertEqual(float(f[3]), 0.5)
+            self.assertEqual(str(b.column("d").to_numpy()[0]), "2024-01-02")
+            self.assertEqual(str(b.column("ts").to_numpy()[0]), "2024-01-01T01:00:00.000000")
+            self.assertEqual(int(b.column("tm").to_numpy()[0] / np.timedelta64(1, "s")), 12 * 3600 + 1)
+            self.assertEqual(int(b.column("iv").to_numpy()[0]["days"]), 1)
+            self.assertEqual(b.column("tx").to_numpy()[0], "v1")
+            self.assertIsNone(b.column("tx").to_numpy()[2])
+            cols = c.numpy(f"SELECT id, big FROM {t} ORDER BY id")
+            self.assertEqual(len(cols["id"]), 300)
+            self.assertEqual(int(cols["big"].sum()), sum(i * 10**12 for i in range(1, 301) if i % 3))
+
+    @unittest.skipUnless(_has("pyarrow"), "pyarrow is not installed")
+    def test_arrow(self):
+        import datetime as dt
+        with connect() as c:
+            t = self._columnar_table(c)
+            sql = f"SELECT * FROM {t} ORDER BY id"
+            want = c.execute(sql).rows
+            tab = c.arrow(sql)
+            self.assertEqual(tab.num_rows, 300)
+            self.assertEqual(str(tab.schema.field("tx").type), "string")
+            self.assertEqual(str(tab.schema.field("tz").type), "timestamp[us, tz=UTC]")
+            got = tab.to_pylist()
+            for w, g in zip(want, got):
+                self.assertEqual(g["id"], w[0])
+                self.assertEqual(g["big"], w[3])
+                self.assertEqual(g["n"], w[6])
+                self.assertEqual(g["tx"], w[7])
+                self.assertEqual(g["d"], w[10])
+                self.assertEqual(g["ts"], w[12])
+                self.assertEqual(g["tz"], w[13])
+                self.assertEqual(g["tm"], w[11])
+                self.assertEqual(g["arr"], w[18])
+            self.assertEqual(got[0]["iv"].days, 1)
+            self.assertEqual(c.arrow(f"SELECT id FROM {t} WHERE false").num_rows, 0)
+            if _has("pandas"):
+                df = c.pandas(sql)
+                self.assertEqual(df.shape, (300, 19))
+                self.assertEqual(df["id"].iloc[0], 1)
+            if _has("polars"):
+                pl = c.polars(f"SELECT id, tx FROM {t} ORDER BY id")
+                self.assertEqual(pl.shape, (300, 2))
+                self.assertEqual(pl["tx"][0], "v1")
+            self.assertIsInstance(got[0]["d"], dt.date)
 
     def test_authentication(self):
         with self.assertRaises(nucleus.OperationalError) as e:

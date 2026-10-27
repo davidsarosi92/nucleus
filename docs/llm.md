@@ -12,7 +12,11 @@ what to use instead.  For people the full reference is DOCS.md §8.
   `nucleus` by default); `-c "<sql>"` runs one command.
 - **Drivers:** Rust, Python, JavaScript, Java, C, C++ over nucleus's protocol
   `ncp` (port 20035); PostgreSQL clients through the pg-compat front end
-  (`nucleus server --pg-compat`, port 5432).
+  (`nucleus server --pg-compat`, port 5432).  Large results: a cursor
+  (`conn.stream(sql)` in Python and JavaScript, `cursor` elsewhere) reads
+  them a batch at a time; for analysis read columns, not rows — Python
+  `conn.pandas(sql)`, `conn.polars(sql)`, `conn.arrow(sql)`,
+  `conn.numpy(sql)`; `batches` in every driver.
 
 ## Dialect
 

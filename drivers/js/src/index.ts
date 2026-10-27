@@ -9,6 +9,9 @@
 //   for await (const row of await db.stream("SELECT id FROM t")) {
 //     console.log(row);                    // a large result, as it arrives
 //   }
+//   for await (const batch of await db.batches("SELECT id FROM t")) {
+//     const ids = batch.column(0).values;  // an Int32Array, a column at a time
+//   }
 //   await db.close();
 //
 // Values: boolean, smallint / integer as number, bigint as number (bigint
@@ -27,10 +30,12 @@ import tls from "node:tls";
 // 2: registered types (uuid, modules' types) arrive in their binary form;
 // 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
 // 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
-// a hint; 6: results stream, fetched in batches.
-export const PROTOCOL_VERSION = 6;
+// a hint; 6: results stream, fetched in batches; 7: columnar results.
+export const PROTOCOL_VERSION = 7;
 /** Rows a stream asks the server for at a time. */
 export const DEFAULT_FETCH = 1000;
+/** Rows a columnar batch holds when none is given. */
+export const DEFAULT_BATCH = 65536;
 const EXT = 11;
 const ENUM = 20;
 export const DEFAULT_PORT = 20035;
@@ -293,6 +298,8 @@ export type Value =
 export interface Column {
   name: string;
   type: string;
+  /** The protocol's type tag (tells an enum from a registered type). */
+  tag?: number;
 }
 
 /** One statement's result. */
@@ -700,7 +707,7 @@ export class Client {
   /** The protocol version agreed with the server. */
   version = PROTOCOL_VERSION;
   /** A stream the server is still sending. */
-  active: Stream | null = null;
+  active: Stream<unknown> | null = null;
 
   constructor(socket: net.Socket) {
     this.socket = socket;
@@ -837,7 +844,7 @@ export class Client {
     // A stream left unfinished is closed first: one result at a time.
     void this.active?.close();
     const run = async (): Promise<Result[]> => {
-      this.sendQuery(sql, params, 0);
+      this.sendQuery(sql, params, 0, 0);
       const results: Result[] = [];
       let error: NucleusError | null = null;
       let columns: Column[] | null = null;
@@ -883,8 +890,8 @@ export class Client {
   }
 
   /** Sends `Q`: rows `fetch` at a time (0: all at once; from version 6). */
-  sendQuery(sql: string, params: Value[], fetch: number): void {
-    const w = new Writer().str(sql).u8(0);
+  sendQuery(sql: string, params: Value[], format: number, fetch: number): void {
+    const w = new Writer().str(sql).u8(format);
     if (this.version >= 6) w.u32(fetch);
     w.u16(params.length);
     for (const p of params) w.value(p);
@@ -900,10 +907,25 @@ export class Client {
    * rejects here; after rows, from the iteration.
    */
   stream(sql: string, params: Value[] = [], options: { fetch?: number } = {}): Promise<Stream> {
+    return this.open(new Stream(this, options.fetch || DEFAULT_FETCH), sql, params);
+  }
+
+  /**
+   * Runs one statement and returns its result as `Batches`: `Batch` after
+   * `Batch` of `rows` rows, each column a typed array (`Int32Array`,
+   * `Float64Array`, `BigInt64Array`, …) read in place, without a value
+   * per cell (protocol version 7).  As `stream` otherwise.
+   */
+  batches(sql: string, params: Value[] = [], options: { rows?: number } = {}): Promise<Batches> {
+    if (this.version < 7) return Promise.reject(new NucleusError("columnar results need protocol version 7"));
+    return this.open(new Batches(this, options.rows || DEFAULT_BATCH), sql, params);
+  }
+
+  private open<S extends Stream<unknown>>(s: S, sql: string, params: Value[]): Promise<S> {
     void this.active?.close();
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => (release = resolve));
-    const s = new Stream(this, options.fetch || DEFAULT_FETCH, release);
+    s.release = release;
     this.active = s;
     const run = () => s.start(sql, params);
     const started = this.queue.then(run, run);
@@ -951,7 +973,7 @@ function readColumns(r: Reader): Column[] {
         : tag === EXT || tag === ENUM
           ? r.str()
           : TYPE_NAMES[tag] ?? "unknown";
-    columns.push({ name, type });
+    columns.push({ name, type, tag });
   }
   return columns;
 }
@@ -961,7 +983,7 @@ function readColumns(r: Reader): Column[] {
  * `for await`; `columns`, and once every row is read `command` and
  * `count`.
  */
-export class Stream implements AsyncIterable<Value[]> {
+export class Stream<T = Value[]> implements AsyncIterable<T> {
   columns: Column[] = [];
   /** `SELECT`, …, once the statement has ended. */
   command: string | null = null;
@@ -969,16 +991,26 @@ export class Stream implements AsyncIterable<Value[]> {
   count: number | null = null;
   /** Reads, one after another. */
   op: Promise<unknown> = Promise.resolve();
+  /** Ends the stream's hold on the connection. */
+  release: () => void = () => {};
+  protected format = 0;
+  protected dataKind = "D";
   private client: Client;
   private fetch: number;
-  private release: () => void;
   private error: NucleusError | null = null;
   private ready = false;
 
-  constructor(client: Client, fetch: number, release: () => void) {
+  constructor(client: Client, fetch: number) {
     this.client = client;
     this.fetch = fetch;
-    this.release = release;
+  }
+
+  /** A data message's item. */
+  protected decode(body: Buffer): T {
+    const r = new Reader(body);
+    const row: Value[] = [];
+    for (let i = 0; i < this.columns.length; i++) row.push(r.value());
+    return row as T;
   }
 
   /** Sends the query and reads up to its columns (or its end). */
@@ -986,7 +1018,7 @@ export class Stream implements AsyncIterable<Value[]> {
     const c = this.client;
     if (c.version < 6) this.fetch = 0;
     try {
-      c.sendQuery(sql, params, this.fetch);
+      c.sendQuery(sql, params, this.format, this.fetch);
       for (;;) {
         const m = await c.read();
         const r = new Reader(m.body);
@@ -1029,25 +1061,21 @@ export class Stream implements AsyncIterable<Value[]> {
     this.release();
   }
 
-  /** The next row; `null` after the last. */
-  next(): Promise<Value[] | null> {
+  /** The next row (or batch); `null` after the last. */
+  next(): Promise<T | null> {
     const p = this.op.then(() => this.read());
     this.op = p.catch(() => undefined);
     return p;
   }
 
-  private async read(): Promise<Value[] | null> {
+  private async read(): Promise<T | null> {
     const c = this.client;
     try {
       while (!this.ready) {
         const m = await c.read();
+        if (m.kind === this.dataKind) return this.decode(m.body);
         const r = new Reader(m.body);
         switch (m.kind) {
-          case "D": {
-            const row: Value[] = [];
-            for (let i = 0; i < this.columns.length; i++) row.push(r.value());
-            return row;
-          }
           case "S":
             // The batch is read: the next.
             c.socket.write(frame("F", new Writer().u32(this.fetch).bytes()));
@@ -1103,7 +1131,7 @@ export class Stream implements AsyncIterable<Value[]> {
     return p;
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<Value[]> {
+  [Symbol.asyncIterator](): AsyncIterator<T> {
     return {
       next: async () => {
         const row = await this.next();
@@ -1114,6 +1142,179 @@ export class Stream implements AsyncIterable<Value[]> {
         return { done: true, value: undefined };
       },
     };
+  }
+}
+
+// ---------------------------------------------------------------- columnar
+
+// Fixed widths by type tag (DOCS.md section 10, columnar results).
+const FIXED: Record<number, number> = { 1: 1, 12: 2, 13: 4, 14: 4, 6: 4, 2: 8, 3: 8, 7: 8, 8: 8, 16: 8, 9: 16, 5: 17 };
+
+function widthOf(c: Column): number {
+  if (c.tag === EXT && c.type === "uuid") return 16;
+  return FIXED[c.tag ?? 0] ?? 0;
+}
+
+const align = (at: number) => (at + 7) & ~7;
+
+/** A column's values as a typed array, by type. */
+export type ColumnValues = Uint8Array | Int16Array | Int32Array | Float32Array | Float64Array | BigInt64Array;
+
+/**
+ * One column of a `Batch`.  `values`: the typed array of a fixed-width
+ * column, read in place — `Uint8Array` (boolean, 0 or 1; 16- and 17-byte
+ * types' raw bytes), `Int16Array`, `Int32Array` (integer; date as days
+ * since 2000-01-01), `Float32Array`, `Float64Array`, `BigInt64Array`
+ * (bigint; timestamps as µs since 2000-01-01, time as µs since midnight)
+ * — or a variable-width column's bytes, with `offsets`.  `get(i)` gives
+ * one value as `stream` does.
+ */
+export class ColumnBatch {
+  readonly column: Column;
+  readonly rows: number;
+  /** A bit per row, least significant first, set for a value (`null`: no NULLs). */
+  readonly valid: Uint8Array | null;
+  readonly values: ColumnValues;
+  /** A variable width's offsets (`null` for a fixed width). */
+  readonly offsets: Uint32Array | null;
+
+  constructor(column: Column, rows: number, valid: Uint8Array | null, values: ColumnValues, offsets: Uint32Array | null) {
+    this.column = column;
+    this.rows = rows;
+    this.valid = valid;
+    this.values = values;
+    this.offsets = offsets;
+  }
+
+  isNull(i: number): boolean {
+    return this.valid !== null && (this.valid[i >> 3] & (1 << (i & 7))) === 0;
+  }
+
+  /** The value at row `i`, as `stream` gives it. */
+  get(i: number): Value {
+    if (this.isNull(i)) return null;
+    const c = this.column;
+    const tag = c.tag ?? 0;
+    const v = this.values;
+    const bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    let slot: Uint8Array;
+    const w = widthOf(c);
+    if (w) slot = bytes.subarray(i * w, (i + 1) * w);
+    else slot = bytes.subarray(this.offsets![i], this.offsets![i + 1]);
+    const tagged = (t: number, payload: Uint8Array) => new Reader(Buffer.concat([Buffer.from([t]), payload])).value();
+    const lengthed = (t: number, payload: Uint8Array) => {
+      const n = Buffer.alloc(4);
+      n.writeUInt32LE(payload.length);
+      return tagged(t, Buffer.concat([n, payload]));
+    };
+    if (w && tag !== EXT) return tagged(tag, slot);
+    switch (tag) {
+      case EXT: {
+        const name = new Writer().str(c.type).bytes();
+        const n = Buffer.alloc(4);
+        n.writeUInt32LE(slot.length);
+        return new Reader(Buffer.concat([Buffer.from([EXT]), name, n, slot])).value();
+      }
+      case 15:
+        return Buffer.from(slot);
+      case 18:
+      case 19:
+        return tagged(tag, slot);
+      case 10:
+        return new Reader(Buffer.from(slot)).value();
+      default:
+        return lengthed(4, slot);
+    }
+  }
+
+  /** Every value (a JavaScript value each). */
+  toArray(): Value[] {
+    const out: Value[] = [];
+    for (let i = 0; i < this.rows; i++) out.push(this.get(i));
+    return out;
+  }
+}
+
+/** Rows of a result, a typed array per column (`Client.batches`). */
+export class Batch {
+  readonly columns: Column[];
+  readonly rows: number;
+  private cols: ColumnBatch[] = [];
+
+  constructor(columns: Column[], body: Buffer) {
+    // Typed arrays need their element size's alignment: the body is copied
+    // into a buffer of its own when it is not at a multiple of 8.
+    let b = body;
+    if (body.byteOffset % 8 !== 0) {
+      const copy = new Uint8Array(body.length);
+      copy.set(body);
+      b = Buffer.from(copy.buffer);
+    }
+    this.columns = columns;
+    const n = b.readUInt32LE(0);
+    this.rows = n;
+    let at = 4;
+    const base = b.byteOffset;
+    const view = (at: number, len: number) => new Uint8Array(b.buffer, base + at, len);
+    for (const c of columns) {
+      const nulls = b[at++] !== 0;
+      let valid: Uint8Array | null = null;
+      if (nulls) {
+        at = align(at);
+        valid = view(at, (n + 7) >> 3);
+        at += (n + 7) >> 3;
+      }
+      at = align(at);
+      const w = widthOf(c);
+      let values: ColumnValues;
+      let offsets: Uint32Array | null = null;
+      if (w) {
+        const off = base + at;
+        const tag = c.tag ?? 0;
+        values =
+          w === 2 ? new Int16Array(b.buffer, off, n)
+          : tag === 14 ? new Float32Array(b.buffer, off, n)
+          : w === 4 ? new Int32Array(b.buffer, off, n)
+          : tag === 3 ? new Float64Array(b.buffer, off, n)
+          : w === 8 ? new BigInt64Array(b.buffer, off, n)
+          : view(at, n * w);
+        at += n * w;
+      } else {
+        offsets = new Uint32Array(b.buffer, base + at, n + 1);
+        at = align(at + (n + 1) * 4);
+        const end = offsets[n];
+        values = view(at, end);
+        at += end;
+      }
+      at = align(at);
+      if (at > b.length) throw new NucleusError("malformed batch");
+      this.cols.push(new ColumnBatch(c, n, valid, values, offsets));
+    }
+  }
+
+  /** Column `key` (an index or a name). */
+  column(key: number | string): ColumnBatch {
+    const i = typeof key === "number" ? key : this.columns.findIndex((c) => c.name === key);
+    if (i < 0 || i >= this.cols.length) throw new NucleusError(`no column ${key}`);
+    return this.cols[i];
+  }
+
+  /** The rows (a JavaScript value per cell). */
+  toRows(): Value[][] {
+    const cols = this.cols.map((c) => c.toArray());
+    const out: Value[][] = [];
+    for (let i = 0; i < this.rows; i++) out.push(cols.map((c) => c[i]));
+    return out;
+  }
+}
+
+/** One statement's result as it arrives, `Batch` by `Batch` (`Client.batches`). */
+export class Batches extends Stream<Batch> {
+  protected format = 2;
+  protected dataKind = "B";
+
+  protected decode(body: Buffer): Batch {
+    return new Batch(this.columns, body);
   }
 }
 

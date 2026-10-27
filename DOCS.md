@@ -1848,12 +1848,17 @@ midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
 `Uuid([u8; 16])`, `Other { type_name, bytes }` for another registered
 type; `char(n)` and enum values as text, their columns typed `Char` and
 `Enum(name)`) with `From` conversions for parameters.  Every driver
-speaks protocol version 6 — results read as they arrive, a batch at a
+speaks protocol version 7 — results read as they arrive, a batch at a
 time (Rust `Client::cursor`, Python `Connection.stream` and a lazy DB-API
 cursor, JavaScript `Client.stream` with `for await`, Java
 `NucleusClient.cursor`, C `nc_cursor_open` / `nc_cursor_next`, C++
 `Connection::cursor`; closing one early, or the next query, stops the
-statement) — errors with their hint (`ServerError::hint`,
+statement), and columnar, a buffer per column read in place (`batches`
+in each: Rust typed vectors; Python numpy arrays — `to_numpy()`, fixed
+widths without a copy, NULLs masked — Arrow arrays, and whole results
+as `numpy`, `arrow`, `pandas`, `polars`; JavaScript typed arrays; Java
+`IntBuffer`, `LongBuffer`, `DoubleBuffer` views; C and C++ pointers into
+the batch) — errors with their hint (`ServerError::hint`,
 Python's `.hint`, JavaScript's `hint`, Java's `hint()`, C's
 `nc_error.hint`, C++'s `hint()`) — and logs in by SCRAM-SHA-256 (the C driver with
 its own SHA-256, HMAC, PBKDF2 and base64; the others with their
@@ -1945,6 +1950,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 columnar results in the drivers (L4):**
+  Python (numpy, Arrow, pandas, polars), JavaScript (typed arrays), Java
+  (buffers), C and C++ (pointers) read batches in place.
 - **2026-10-27 — §M14.11 columnar results (L3):** `ncp` version 7's
   result format 2 sends batches `B`, a buffer per column (fixed widths
   back to back, variable widths as offsets and bytes, a validity bitmap,

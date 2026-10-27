@@ -14,7 +14,9 @@ a C driver built with OpenSSL: `Config::tls`, `tls_ca`, `tls_no_verify`,
 results stream (protocol version 6, through the C driver):
 `for (const auto& row : db.cursor(sql, {params…}, fetch))` reads them as
 they arrive, a batch at a time; a `Cursor` destroyed or `close()`d early
-stops the statement.
+stops the statement.  Columnar results: `auto b = db.batches(sql);
+while (b.next()) b.values<int32_t>(0)…` (pointers into the batch;
+`text(col, row)`, `is_null(col, row)`).
 
 ```sh
 cc -std=c99 -c ../c/nucleus.c -o nucleus.o

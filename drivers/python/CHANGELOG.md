@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Protocol version 7 (nucleus PLAN.md §M14.11): columnar results.
+  `Connection.batches(sql, params, rows)` yields `Batch`es whose
+  `ColumnBatch`es become numpy arrays (`to_numpy()`, fixed widths without
+  a copy; dates and timestamps as `datetime64`, NULLs masked) or Arrow
+  arrays (`to_arrow()`, in place where Arrow's layout is the batch's);
+  `Connection.numpy`, `arrow`, `pandas`, `polars` for a whole result.
+  `Column` has the protocol's type `tag`.
 - Protocol version 6 (nucleus PLAN.md §M14.11): results stream.
   `Connection.stream(sql, params, fetch)` iterates a statement's rows as
   they arrive, a batch at a time; closing it (or running another

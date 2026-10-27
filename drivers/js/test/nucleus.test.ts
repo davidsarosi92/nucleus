@@ -155,6 +155,57 @@ test("streams", async () => {
   await db.close();
 });
 
+test("columnar batches", async () => {
+  const db = await connect(options);
+  const t = table();
+  await db.query(`CREATE TABLE ${t} (id INT PRIMARY KEY, b BOOLEAN, s SMALLINT, big BIGINT, r REAL, f FLOAT,
+    n NUMERIC(10, 2), tx TEXT, ch CHAR(3), bt BYTEA, d DATE, tm TIME, ts TIMESTAMP, tz TIMESTAMPTZ,
+    iv INTERVAL, u UUID, ip INET, net CIDR, arr INT[])`);
+  await db.query(`INSERT INTO ${t} SELECT i, i % 2 = 0, i::smallint, i * 1000000000000, i / 4.0, i / 8.0, i / 3.0,
+    'v' || i, 'c' || (i % 10), decode('ff00', 'hex'), DATE '2024-01-01' + i, TIME '12:00' + i * INTERVAL '1 second',
+    TIMESTAMP '2024-01-01' + i * INTERVAL '1 hour', TIMESTAMPTZ '2024-01-01 00:00Z' + i * INTERVAL '1 minute',
+    i * INTERVAL '1 day', gen_random_uuid(), '10.0.0.1'::inet, '10.0.0.0/8'::cidr, ARRAY[i, NULL]
+    FROM generate_series(1, 300) i`);
+  await db.query(`UPDATE ${t} SET b = NULL, s = NULL, big = NULL, r = NULL, f = NULL, n = NULL, tx = NULL, ch = NULL,
+    bt = NULL, d = NULL, tm = NULL, ts = NULL, tz = NULL, iv = NULL, u = NULL, ip = NULL, net = NULL, arr = NULL
+    WHERE id % 3 = 0`);
+  const sql = `SELECT * FROM ${t} ORDER BY id`;
+  const want = (await db.query(sql)).rows;
+  const got: Value[][] = [];
+  const sizes: number[] = [];
+  const bs = await db.batches(sql, [], { rows: 128 });
+  for await (const b of bs) {
+    sizes.push(b.rows);
+    got.push(...b.toRows());
+  }
+  assert.deepEqual(sizes, [128, 128, 44]);
+  assert.equal(bs.count, 300);
+  assert.deepEqual(got, want);
+  // Typed arrays, read in place.
+  for await (const b of await db.batches(`SELECT id, big, f, tx FROM ${t} ORDER BY id`)) {
+    const ids = b.column("id").values;
+    assert.ok(ids instanceof Int32Array);
+    assert.deepEqual([...ids.subarray(0, 3)], [1, 2, 3]);
+    assert.ok(b.column("big").values instanceof BigInt64Array);
+    assert.equal(b.column("big").values[3], 4_000_000_000_000n);
+    assert.ok(b.column("f").isNull(2));
+    assert.equal((b.column("f").values as Float64Array)[3], 0.5);
+    assert.equal(b.column("tx").get(0), "v1");
+  }
+  // Empty: no batch; an error after batches rejects the iteration.
+  let n = 0;
+  for await (const _b of await db.batches(`SELECT * FROM ${t} WHERE false`)) n++;
+  assert.equal(n, 0);
+  await assert.rejects(
+    (async () => {
+      for await (const b of await db.batches("SELECT 1 / (250 - i) FROM generate_series(1, 400) i", [], { rows: 100 })) n += b.rows;
+    })(),
+    (e: NucleusError) => e.code === "22012",
+  );
+  assert.equal(n, 249);
+  await db.close();
+});
+
 test("authentication", async () => {
   await assert.rejects(connect({ ...options, password: "wrong" }), (e: NucleusError) => e.code === "28P01");
 });

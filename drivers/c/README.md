@@ -27,7 +27,11 @@ the password.  Large results stream (protocol version 6):
 (1 a row — row 0 of `nc_cursor_result` —, 0 the end, -1 an error), and
 `nc_cursor_close`; the server sends `fetch` rows at a time and waits until
 they are read, and closing early (`nc_cursor_stop`, `nc_cursor_close`, or
-the next query) stops the statement.
+the next query) stops the statement.  Columnar results (protocol version
+7): `nc_batches_open(db, sql, params, n, rows, &err)`, then
+`nc_cursor_next` a batch at a time; `nc_batch_rows`, `nc_batch_data`
+(a pointer to a column's values: `int32_t *`, `double *`, …),
+`nc_batch_offsets` and `nc_batch_validity` point into the batch.
 
 ```sh
 make                # build/libnucleus.a

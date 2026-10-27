@@ -31,4 +31,9 @@ Large results stream (protocol version 6): `for await (const row of await
 db.stream(sql, params, { fetch: 1000 }))` reads them as they arrive, the
 server sending a batch at a time and waiting until it is read; leaving
 the loop (or `close()`, or the next query) stops the statement.
+Columnar results (protocol version 7): `for await (const b of await
+db.batches(sql, params, { rows: 65536 }))` gives a `Batch` whose columns'
+`values` are typed arrays read in place (`Int32Array`, `Float64Array`,
+`BigInt64Array` for bigint and timestamps — µs since 2000-01-01 —, …;
+text as `offsets` and bytes), with `isNull(i)` and `get(i)`.
 Tests: `npm test`; example: `examples/js/quickstart.ts`.

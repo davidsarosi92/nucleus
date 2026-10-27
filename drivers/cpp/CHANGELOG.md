@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Protocol version 7 (nucleus PLAN.md §M14.11), through the C driver:
+  `Connection::batches(sql, params, rows)` returns `Batches` — `next()`,
+  `rows()`, `values<T>(col)`, `text(col, row)`, `is_null(col, row)`.
 - Protocol version 6 (nucleus PLAN.md §M14.11), through the C driver:
   `Connection::cursor(sql, params, fetch)` returns a `Cursor` (a range of
   rows, or `next(row)`) read a batch at a time; destroyed or `close()`d

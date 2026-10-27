@@ -12,6 +12,8 @@ Pure Python, no dependencies.  The API follows DB-API 2.0 where it fits::
     with conn.stream("SELECT id FROM t") as rows:   # a large result
         for row in rows:                           # read as it arrives
             print(row)
+    df = conn.pandas("SELECT * FROM t")           # columnar: numpy, Arrow,
+                                                  # pandas, polars
     with conn.transaction():
         conn.execute("UPDATE t SET name = $1 WHERE id = $2", ["uno", 1])
 
@@ -43,9 +45,11 @@ import ssl as _ssl
 import struct as _struct
 import uuid as _uuid
 from dataclasses import dataclass as _dataclass
+from dataclasses import field as _field
 
 __all__ = [
-    "connect", "Connection", "Cursor", "Stream", "Result", "Column", "Interval", "Ext",
+    "connect", "Connection", "Cursor", "Stream", "Batches", "Batch", "ColumnBatch",
+    "Result", "Column", "Interval", "Ext",
     "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "ProgrammingError",
     "NotSupportedError", "DEFAULT_PORT", "DEFAULT_FETCH",
@@ -58,11 +62,13 @@ paramstyle = "numeric"  # $1, $2, ...
 # 2: registered types (uuid, modules' types) arrive in their binary form;
 # 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
 # 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
-# a hint; 6: results stream, fetched in batches.
-PROTOCOL_VERSION = 6
+# a hint; 6: results stream, fetched in batches; 7: columnar results.
+PROTOCOL_VERSION = 7
 DEFAULT_PORT = 20035
 # Rows a stream asks the server for at a time.
 DEFAULT_FETCH = 1000
+# Rows a columnar batch holds when none is given.
+DEFAULT_BATCH = 65536
 
 _EPOCH_DATE = _dt.date(2000, 1, 1)
 _EPOCH = _dt.datetime(2000, 1, 1)
@@ -160,6 +166,8 @@ class Column:
 
     name: str
     type: str
+    # The protocol's type tag (tells an enum from a registered type).
+    tag: int = _field(default=0, compare=False, repr=False)
 
 
 @_dataclass
@@ -554,7 +562,7 @@ class Connection:
         Returns a list with each statement's ``Result``; a failing
         statement raises its error, whose ``results`` holds the statements
         before it."""
-        self._send_query(sql, params, text, 0)
+        self._send_query(sql, params, 1 if text else 0, 0)
         results, error = [], None
         columns, rows = None, []
         while True:
@@ -581,13 +589,13 @@ class Connection:
             else:
                 raise InterfaceError(f"unexpected message {kind!r}")
 
-    def _send_query(self, sql, params, text, fetch):
+    def _send_query(self, sql, params, format, fetch):
         # A stream left unfinished is closed first: one result at a time.
         if self._active is not None:
             self._active.close()
         body = bytearray()
         _put_str(body, sql)
-        body.append(1 if text else 0)
+        body.append(format)
         if self._version >= 6:
             body += _struct.pack("<I", fetch)
         body += _struct.pack("<H", len(params))
@@ -603,6 +611,65 @@ class Connection:
         error before the first row raises here; after rows, from the
         iteration."""
         return Stream(self, sql, list(params), fetch or DEFAULT_FETCH)
+
+    def batches(self, sql, params=(), rows=DEFAULT_BATCH):
+        """Runs one statement and returns its result as ``Batches``: ``Batch``
+        after ``Batch`` of ``rows`` rows, a buffer per column, which become
+        numpy or Arrow arrays without a Python object per value (protocol
+        version 7).  The server waits for each batch to be read; closing
+        early stops the statement."""
+        if self._version < 7:
+            raise NotSupportedError("columnar results need protocol version 7")
+        return Batches(self, sql, list(params), rows or DEFAULT_BATCH)
+
+    def numpy(self, sql, params=()):
+        """The result as a dict of numpy arrays by column name (masked where
+        a column has NULLs).  Needs numpy."""
+        import numpy as np
+
+        parts, names = {}, None
+        with self.batches(sql, params) as bs:
+            names = [c.name for c in bs.columns]
+            for b in bs:
+                for i, name in enumerate(names):
+                    parts.setdefault(name, []).append(b.column(i).to_numpy())
+        out = {}
+        for i, name in enumerate(names):
+            arrays = parts.get(name, [])
+            if not arrays:
+                out[name] = ColumnBatch._empty_numpy(bs.columns[i])
+            elif any(isinstance(a, np.ma.MaskedArray) for a in arrays):
+                out[name] = np.ma.concatenate(arrays)
+            else:
+                out[name] = np.concatenate(arrays)
+        return out
+
+    def arrow(self, sql, params=()):
+        """The result as a ``pyarrow.Table``.  Needs pyarrow."""
+        import pyarrow as pa
+
+        with self.batches(sql, params) as bs:
+            batches = [b.to_arrow() for b in bs]
+            if batches:
+                return pa.Table.from_batches(batches)
+            return pa.table({c.name: pa.array([], type=_arrow_type(c)) for c in bs.columns})
+
+    def pandas(self, sql, params=()):
+        """The result as a ``pandas.DataFrame`` (through Arrow when pyarrow
+        is there, else numpy).  Needs pandas."""
+        import pandas as pd
+
+        try:
+            import pyarrow  # noqa: F401
+        except ImportError:
+            return pd.DataFrame(self.numpy(sql, params))
+        return self.arrow(sql, params).to_pandas()
+
+    def polars(self, sql, params=()):
+        """The result as a ``polars.DataFrame``.  Needs polars and pyarrow."""
+        import polars as pl
+
+        return pl.from_arrow(self.arrow(sql, params))
 
     def execute(self, sql, params=()):
         """Runs one statement (or several, returning the last result)."""
@@ -670,7 +737,7 @@ def _columns(r):
             type_name = _TYPE_NAMES.get(r.u8(), "unknown") + "[]"
         elif tag in (_EXT, _ENUM):
             type_name = r.str()
-        columns.append(Column(name, type_name))
+        columns.append(Column(name, type_name, tag))
     return columns
 
 
@@ -678,6 +745,8 @@ class Stream:
     """One statement's rows as they arrive (``Connection.stream``): iterate
     it; ``columns``, and once every row is read ``command`` and ``count``.
     ``close()`` (or leaving a ``with`` block) stops the statement early."""
+
+    _format, _data = 0, b"D"
 
     def __init__(self, conn, sql, params=(), fetch=DEFAULT_FETCH):
         self._conn = conn
@@ -687,7 +756,7 @@ class Stream:
         self.columns = []
         self.command = None
         self.count = None
-        conn._send_query(sql, params, False, self._fetch)
+        conn._send_query(sql, params, self._format, self._fetch)
         while True:
             kind, payload = conn._read()
             r = _Reader(payload)
@@ -713,12 +782,17 @@ class Stream:
         return self
 
     def __next__(self):
+        r = _Reader(self._next_body())
+        return tuple(r.value() for _ in self.columns)
+
+    def _next_body(self):
+        """The body of the next row (or batch)."""
         conn = self._conn
         while not self._ready:
             kind, payload = conn._read()
             r = _Reader(payload)
-            if kind == b"D":
-                return tuple(r.value() for _ in self.columns)
+            if kind == self._data:
+                return payload
             if kind == b"S":
                 # The batch is read: the next.
                 conn._send(b"F", _struct.pack("<I", self._fetch))
@@ -767,6 +841,247 @@ class Stream:
     def __exit__(self, *exc):
         self.close()
         return False
+
+
+
+# ---------------------------------------------------------------- columnar
+
+# Days and µs from 1970-01-01 (numpy's and Arrow's epoch) to 2000-01-01.
+_DAYS_1970 = 10_957
+_US_1970 = 946_684_800_000_000
+# Fixed widths by type tag (DOCS.md §10, columnar results), and the numpy
+# type each is read as.
+_FIXED = {
+    1: (1, "?"), 12: (2, "<i2"), 13: (4, "<i4"), 14: (4, "<f4"), 6: (4, "<i4"),
+    2: (8, "<i8"), 3: (8, "<f8"), 7: (8, "<i8"), 8: (8, "<i8"), 16: (8, "<i8"),
+    9: (16, None), 5: (17, None),
+}
+# The row format's tag a fixed slot is the payload of.
+_ROW_TAG = {12: 12, 13: 13, 14: 14, 6: 6, 1: 1, 2: 2, 3: 3, 7: 7, 8: 8, 16: 16, 9: 9, 5: 5}
+
+
+def _align(at):
+    return (at + 7) & ~7
+
+
+def _width(c):
+    if c.tag == _EXT and c.type == "uuid":
+        return 16
+    return _FIXED.get(c.tag, (0, None))[0]
+
+
+def _arrow_type(c):
+    import pyarrow as pa
+
+    return {
+        1: pa.bool_(), 12: pa.int16(), 13: pa.int32(), 2: pa.int64(), 14: pa.float32(),
+        3: pa.float64(), 6: pa.date32(), 7: pa.timestamp("us"), 8: pa.timestamp("us", tz="UTC"),
+        16: pa.time64("us"), 15: pa.binary(), 9: pa.month_day_nano_interval(),
+    }.get(c.tag, pa.binary(16) if _width(c) == 16 else pa.string())
+
+
+class ColumnBatch:
+    """One column of a ``Batch``: ``to_numpy()``, ``to_arrow()``,
+    ``to_list()``; ``is_null(i)``."""
+
+    def __init__(self, column, rows, body, valid, offsets, data):
+        self.column = column
+        self.rows = rows
+        self._body = body
+        self._valid = valid      # (offset, length) or None: no NULLs
+        self._offsets = offsets  # (offset, length) for a variable width
+        self._data = data        # (offset, length)
+
+    @property
+    def nulls(self):
+        """Whether the column has NULLs in this batch."""
+        return self._valid is not None
+
+    def is_null(self, i):
+        if self._valid is None:
+            return False
+        return not self._body[self._valid[0] + i // 8] >> (i % 8) & 1
+
+    def _slot(self, i):
+        w = _width(self.column)
+        if w:
+            start = self._data[0] + i * w
+            return self._body[start:start + w]
+        a, b = _struct.unpack_from("<II", self._body, self._offsets[0] + 4 * i)
+        return self._body[self._data[0] + a:self._data[0] + b]
+
+    def value(self, i):
+        """The value at row ``i``, as a row of ``Connection.stream`` has it."""
+        if self.is_null(i):
+            return None
+        c, slot = self.column, self._slot(i)
+        if c.tag in _ROW_TAG:
+            return _Reader(bytes([_ROW_TAG[c.tag]]) + slot).value()
+        if c.tag == _EXT:
+            out = bytearray([_EXT])
+            _put_str(out, c.type)
+            out += _struct.pack("<I", len(slot)) + slot
+            return _Reader(bytes(out)).value()
+        if c.tag == 15:
+            return bytes(slot)
+        if c.tag in (18, 19):
+            return _Reader(bytes([c.tag]) + slot).value()
+        if c.tag == 10:
+            return _Reader(slot).value()
+        return slot.decode("utf-8")
+
+    def to_list(self):
+        """The values as Python objects (one per value)."""
+        return [self.value(i) for i in range(self.rows)]
+
+    def _valid_numpy(self):
+        import numpy as np
+
+        a, n = self._valid
+        bits = np.frombuffer(self._body, np.uint8, n, a)
+        return np.unpackbits(bits, bitorder="little")[: self.rows].astype(bool)
+
+    @staticmethod
+    def _empty_numpy(c):
+        import numpy as np
+
+        w = _FIXED.get(c.tag)
+        if w and w[1]:
+            return np.empty(0, w[1])
+        return np.empty(0, object)
+
+    def to_numpy(self):
+        """The column as a numpy array: fixed widths read in place (no copy)
+        — booleans, integers, floats, ``time`` as ``timedelta64[us]``,
+        ``interval`` as a record of months, days and µs; dates and
+        timestamps as ``datetime64`` (shifted to 1970's epoch: one vector
+        add); anything else an object array.  With NULLs, a masked array (an
+        object array holds ``None`` instead)."""
+        import numpy as np
+
+        c, n = self.column, self.rows
+        fixed = _FIXED.get(c.tag)
+        if c.tag == 9:
+            arr = np.frombuffer(self._body, np.dtype([("months", "<i4"), ("days", "<i4"), ("micros", "<i8")]),
+                                n, self._data[0])
+        elif fixed and fixed[1]:
+            arr = np.frombuffer(self._body, fixed[1], n, self._data[0])
+            if c.tag == 6:
+                arr = (arr + _DAYS_1970).astype("datetime64[D]")
+            elif c.tag in (7, 8):
+                arr = (arr + _US_1970).astype("datetime64[us]")
+            elif c.tag == 16:
+                arr = arr.view("timedelta64[us]")
+        else:
+            return np.array(self.to_list() if self.nulls or n else [], dtype=object) if n else np.empty(0, object)
+        if self.nulls:
+            return np.ma.masked_array(arr, mask=~self._valid_numpy())
+        return arr
+
+    def to_arrow(self):
+        """The column as a ``pyarrow.Array``: integers, floats, ``time``,
+        text and ``bytea`` read in place from the batch (Arrow's own
+        layout); booleans, dates and timestamps through numpy; ``numeric``
+        as decimals, ``interval`` as ``month_day_nano`` and the rest from
+        Python values."""
+        import numpy as np
+        import pyarrow as pa
+
+        c, n = self.column, self.rows
+        buf = pa.py_buffer(self._body)
+        valid = buf.slice(*self._valid) if self.nulls else None
+        t = _arrow_type(c)
+        if c.tag in (12, 13, 2, 14, 3, 16) or (c.tag == _EXT and _width(c) == 16):
+            return pa.Array.from_buffers(t, n, [valid, buf.slice(*self._data)])
+        if c.tag in (4, 17, _ENUM, 0, 15) or (c.tag == _EXT and _width(c) == 0):
+            if c.tag == _EXT:
+                t = pa.binary()
+            return pa.Array.from_buffers(t, n, [valid, buf.slice(*self._offsets), buf.slice(*self._data)])
+        mask = ~self._valid_numpy() if self.nulls else None
+        if c.tag in (1, 6, 7, 8):
+            arr = np.frombuffer(self._body, _FIXED[c.tag][1], n, self._data[0])
+            if c.tag == 6:
+                arr = arr + _DAYS_1970
+            elif c.tag in (7, 8):
+                arr = arr + _US_1970
+            return pa.array(arr, type=t, mask=mask)
+        if c.tag == 9:
+            values = [None if v is None else (v.months, v.days, v.microseconds * 1000) for v in self.to_list()]
+            return pa.array(values, type=t)
+        values = self.to_list()
+        if c.tag == 5:
+            return pa.array(values)
+        if c.tag in (18, 19):
+            return pa.array([None if v is None else str(v) for v in values], type=pa.string())
+        return pa.array(values)
+
+
+class Batch:
+    """Rows of a result, a buffer per column (``Connection.batches``):
+    ``len(batch)`` rows; ``column(i or name)``, ``to_numpy()`` (a dict),
+    ``to_arrow()`` (a ``pyarrow.RecordBatch``), ``rows()`` (tuples)."""
+
+    def __init__(self, columns, body):
+        self.columns = columns
+        (self._rows,) = _struct.unpack_from("<I", body, 0)
+        n, at = self._rows, 4
+        self._cols = []
+        for c in columns:
+            nulls = body[at]
+            at += 1
+            valid = None
+            if nulls:
+                at = _align(at)
+                valid = (at, (n + 7) // 8)
+                at += valid[1]
+            at = _align(at)
+            w = _width(c)
+            offsets = None
+            if w:
+                data = (at, n * w)
+                at += n * w
+            else:
+                offsets = (at, (n + 1) * 4)
+                (end,) = _struct.unpack_from("<I", body, at + 4 * n)
+                at = _align(at + offsets[1])
+                data = (at, end)
+                at += end
+            at = _align(at)
+            if at > len(body):
+                raise InterfaceError("malformed batch")
+            self._cols.append(ColumnBatch(c, n, body, valid, offsets, data))
+
+    def __len__(self):
+        return self._rows
+
+    def column(self, key):
+        if isinstance(key, str):
+            key = [c.name for c in self.columns].index(key)
+        return self._cols[key]
+
+    def rows(self):
+        """The rows as tuples (a Python object per value)."""
+        cols = [c.to_list() for c in self._cols]
+        return list(zip(*cols)) if cols else []
+
+    def to_numpy(self):
+        return {c.column.name: c.to_numpy() for c in self._cols}
+
+    def to_arrow(self):
+        import pyarrow as pa
+
+        return pa.RecordBatch.from_arrays([c.to_arrow() for c in self._cols],
+                                          names=[c.name for c in self.columns])
+
+
+class Batches(Stream):
+    """One statement's result as it arrives, ``Batch`` by ``Batch``
+    (``Connection.batches``)."""
+
+    _format, _data = 2, b"B"
+
+    def __next__(self):
+        return Batch(self.columns, self._next_body())
 
 
 class Cursor:

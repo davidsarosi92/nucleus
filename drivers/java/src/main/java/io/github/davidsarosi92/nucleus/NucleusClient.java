@@ -13,6 +13,11 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.DoubleBuffer;
+import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
+import java.nio.LongBuffer;
+import java.nio.ShortBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -42,6 +47,9 @@ import java.util.function.Function;
  *     try (NucleusClient.Cursor rows = db.cursor("SELECT id FROM t")) { // a large result,
  *         for (List<Object> row : rows) System.out.println(row);         // as it arrives
  *     }
+ *     try (NucleusClient.Batches batches = db.batches("SELECT id FROM t")) { // a column at a time
+ *         for (NucleusClient.Batch b : batches) System.out.println(b.column(0).ints().get(0));
+ *     }
  * }
  * }</pre>
  *
@@ -58,11 +66,14 @@ public final class NucleusClient implements AutoCloseable {
     /**
      * 2: registered types (uuid, modules' types) arrive in their binary form; 3: smallint,
      * integer, real, bytea, time, inet and cidr in theirs; 4: the password is proved by
-     * SCRAM-SHA-256, never sent; 5: errors carry a hint; 6: results stream, fetched in batches.
+     * SCRAM-SHA-256, never sent; 5: errors carry a hint; 6: results stream, fetched in batches;
+     * 7: columnar results.
      */
-    public static final int PROTOCOL_VERSION = 6;
+    public static final int PROTOCOL_VERSION = 7;
     /** Rows a cursor asks the server for at a time. */
     public static final int DEFAULT_FETCH = 1000;
+    /** Rows a columnar batch holds when none is given. */
+    public static final int DEFAULT_BATCH = 65536;
     private static final int EXT = 11;
     private static final int ENUM = 20;
     public static final int DEFAULT_PORT = 20035;
@@ -187,7 +198,7 @@ public final class NucleusClient implements AutoCloseable {
     /** Runs {@code sql}; the result of each statement. A failing statement throws its error. */
     public List<Result> queryAll(String sql, Object... params) {
         try {
-            sendQuery(sql, params, 0);
+            sendQuery(sql, params, 0, 0);
             List<Result> results = new ArrayList<>();
             NucleusException error = null;
             List<Column> columns = null;
@@ -228,10 +239,10 @@ public final class NucleusClient implements AutoCloseable {
     }
 
     /** Sends Q: rows {@code fetch} at a time (0: all at once; from version 6). */
-    private void sendQuery(String sql, Object[] params, int fetch) throws IOException {
+    private void sendQuery(String sql, Object[] params, int format, int fetch) throws IOException {
         // A cursor left unfinished is closed first: one result at a time.
         if (active != null) active.close();
-        Writer w = new Writer().str(sql).u8(0);
+        Writer w = new Writer().str(sql).u8(format);
         if (version >= 6) w.i32(fetch);
         w.u16(params.length);
         for (Object p : params) w.value(p);
@@ -250,9 +261,28 @@ public final class NucleusClient implements AutoCloseable {
      * statement. An error before the first row throws here; after rows, from the iteration.
      */
     public Cursor cursor(int fetch, String sql, Object... params) {
-        Cursor c = new Cursor(version >= 6 ? (fetch > 0 ? fetch : DEFAULT_FETCH) : 0);
+        return open(new Cursor(version >= 6 ? (fetch > 0 ? fetch : DEFAULT_FETCH) : 0, 0), sql, params);
+    }
+
+    /** {@link #batches(int, String, Object...)} with {@link #DEFAULT_BATCH}. */
+    public Batches batches(String sql, Object... params) {
+        return batches(DEFAULT_BATCH, sql, params);
+    }
+
+    /**
+     * Runs one statement and returns its result as {@link Batches}: {@link Batch} after {@link
+     * Batch} of {@code rows} rows, each column a buffer read in place ({@link ColumnBatch#ints()},
+     * {@link ColumnBatch#doubles()}, …) without an object per value (protocol version 7). As
+     * {@link #cursor} otherwise.
+     */
+    public Batches batches(int rows, String sql, Object... params) {
+        if (version < 7) throw new NucleusException("columnar results need protocol version 7", (String) null);
+        return new Batches(open(new Cursor(rows > 0 ? rows : DEFAULT_BATCH, 2), sql, params));
+    }
+
+    private Cursor open(Cursor c, String sql, Object[] params) {
         try {
-            sendQuery(sql, params, c.fetch);
+            sendQuery(sql, params, c.format, c.fetch);
             for (;;) {
                 Message m = read();
                 Reader r = new Reader(m.body);
@@ -288,6 +318,7 @@ public final class NucleusClient implements AutoCloseable {
      */
     public final class Cursor implements Iterator<List<Object>>, Iterable<List<Object>>, AutoCloseable {
         private final int fetch;
+        private final int format;
         private List<Column> columns = List.of();
         private String command;
         private long count = -1;
@@ -296,8 +327,9 @@ public final class NucleusClient implements AutoCloseable {
         private boolean ready;
         private List<Object> ahead;
 
-        private Cursor(int fetch) {
+        private Cursor(int fetch, int format) {
             this.fetch = fetch;
+            this.format = format;
         }
 
         /** The result's columns (empty for a statement without rows). */
@@ -327,16 +359,22 @@ public final class NucleusClient implements AutoCloseable {
         }
 
         private List<Object> readRow() {
+            byte[] body = readBody('D');
+            if (body == null) return null;
+            Reader r = new Reader(body);
+            List<Object> row = new ArrayList<>(columns.size());
+            for (int i = 0; i < columns.size(); i++) row.add(r.value());
+            return row;
+        }
+
+        /** The body of the next {@code data} message (D a row, B a batch); null after the last. */
+        private byte[] readBody(char data) {
             try {
                 while (!ready) {
                     Message m = read();
+                    if (m.kind == data) return m.body;
                     Reader r = new Reader(m.body);
                     switch (m.kind) {
-                        case 'D' -> {
-                            List<Object> row = new ArrayList<>(columns.size());
-                            for (int i = 0; i < columns.size(); i++) row.add(r.value());
-                            return row;
-                        }
                         // The batch is read: the next.
                         case 'S' -> send('F', new Writer().i32(fetch).bytes());
                         case 'K' -> {
@@ -397,6 +435,228 @@ public final class NucleusClient implements AutoCloseable {
                 ready = true;
                 throw new NucleusException("connection lost: " + e.getMessage(), e);
             }
+        }
+    }
+
+    /**
+     * One statement's result as it arrives, {@link Batch} by {@link Batch} ({@link #batches}):
+     * iterate it; closing it early stops the statement.
+     */
+    public final class Batches implements Iterator<Batch>, Iterable<Batch>, AutoCloseable {
+        private final Cursor cursor;
+        private Batch ahead;
+
+        private Batches(Cursor cursor) {
+            this.cursor = cursor;
+        }
+
+        /** The result's columns. */
+        public List<Column> columns() { return cursor.columns(); }
+
+        /** {@code SELECT}, …, once the statement has ended (else null). */
+        public String command() { return cursor.command(); }
+
+        /** The rows sent, once the statement has ended (else -1). */
+        public long count() { return cursor.count(); }
+
+        @Override
+        public Iterator<Batch> iterator() { return this; }
+
+        @Override
+        public boolean hasNext() {
+            if (ahead == null) {
+                byte[] body = cursor.readBody('B');
+                if (body != null) ahead = new Batch(cursor.columns(), body);
+            }
+            return ahead != null;
+        }
+
+        @Override
+        public Batch next() {
+            if (!hasNext()) throw new NoSuchElementException();
+            Batch b = ahead;
+            ahead = null;
+            return b;
+        }
+
+        @Override
+        public void close() {
+            ahead = null;
+            cursor.close();
+        }
+    }
+
+    /** Fixed widths by type tag (DOCS.md section 10, columnar results); 0: a variable width. */
+    private static int width(Column c) {
+        if (c.tag() == EXT) return "uuid".equals(c.type()) ? 16 : 0;
+        return switch (c.tag()) {
+            case 1 -> 1;
+            case 12 -> 2;
+            case 13, 14, 6 -> 4;
+            case 2, 3, 7, 8, 16 -> 8;
+            case 9 -> 16;
+            case 5 -> 17;
+            default -> 0;
+        };
+    }
+
+    private static int align(int at) {
+        return (at + 7) & ~7;
+    }
+
+    /**
+     * Rows of a result, a buffer per column ({@link #batches}): {@link #rows()}, {@link
+     * #column(int)}, {@link #toRows()}.
+     */
+    public static final class Batch {
+        private final List<Column> columns;
+        private final int rows;
+        private final List<ColumnBatch> cols = new ArrayList<>();
+
+        private Batch(List<Column> columns, byte[] body) {
+            this.columns = columns;
+            ByteBuffer b = ByteBuffer.wrap(body).order(ByteOrder.LITTLE_ENDIAN);
+            int n = b.getInt(0);
+            this.rows = n;
+            int at = 4;
+            for (Column c : columns) {
+                boolean nulls = body[at++] != 0;
+                int valid = -1;
+                if (nulls) {
+                    at = align(at);
+                    valid = at;
+                    at += (n + 7) / 8;
+                }
+                at = align(at);
+                int w = width(c);
+                int offsets = -1;
+                int data;
+                int length;
+                if (w > 0) {
+                    data = at;
+                    length = n * w;
+                } else {
+                    offsets = at;
+                    at = align(at + (n + 1) * 4);
+                    data = at;
+                    length = b.getInt(offsets + 4 * n);
+                }
+                at = align(data + length);
+                if (at > body.length || length < 0) throw new NucleusException("malformed batch", (String) null);
+                cols.add(new ColumnBatch(c, n, b, valid, offsets, data, length));
+            }
+        }
+
+        /** The rows it holds. */
+        public int rows() { return rows; }
+
+        /** The result's columns. */
+        public List<Column> columns() { return columns; }
+
+        /** Column {@code i}. */
+        public ColumnBatch column(int i) { return cols.get(i); }
+
+        /** The column named {@code name}. */
+        public ColumnBatch column(String name) {
+            for (int i = 0; i < columns.size(); i++) if (columns.get(i).name().equals(name)) return cols.get(i);
+            throw new NoSuchElementException("no column " + name);
+        }
+
+        /** The rows (an object per value). */
+        public List<List<Object>> toRows() {
+            List<List<Object>> out = new ArrayList<>(rows);
+            for (int r = 0; r < rows; r++) {
+                List<Object> row = new ArrayList<>(cols.size());
+                for (ColumnBatch c : cols) row.add(c.get(r));
+                out.add(row);
+            }
+            return out;
+        }
+    }
+
+    /**
+     * One column of a {@link Batch}: its values as a buffer read in place — {@link #shorts()},
+     * {@link #ints()} (integer; date as days since 2000-01-01), {@link #longs()} (bigint;
+     * timestamps as µs since 2000-01-01, time as µs since midnight), {@link #floats()}, {@link
+     * #doubles()}, {@link #bytes()} (booleans a byte each, 16- and 17-byte types, a variable
+     * width's bytes with {@link #offset(int)}) — or {@link #get(int)} one value as a cursor has it.
+     */
+    public static final class ColumnBatch {
+        private final Column column;
+        private final int rows;
+        private final ByteBuffer body;
+        private final int valid;
+        private final int offsets;
+        private final int data;
+        private final int length;
+
+        private ColumnBatch(Column column, int rows, ByteBuffer body, int valid, int offsets, int data, int length) {
+            this.column = column;
+            this.rows = rows;
+            this.body = body;
+            this.valid = valid;
+            this.offsets = offsets;
+            this.data = data;
+            this.length = length;
+        }
+
+        public Column column() { return column; }
+        public int rows() { return rows; }
+
+        /** Whether the column has NULLs in this batch. */
+        public boolean hasNulls() { return valid >= 0; }
+
+        public boolean isNull(int i) {
+            return valid >= 0 && (body.get(valid + i / 8) >> (i % 8) & 1) == 0;
+        }
+
+        /** The data, read in place (little-endian). */
+        public ByteBuffer bytes() {
+            return body.duplicate().position(data).limit(data + length).slice().order(ByteOrder.LITTLE_ENDIAN);
+        }
+
+        public ShortBuffer shorts() { return bytes().asShortBuffer(); }
+        public IntBuffer ints() { return bytes().asIntBuffer(); }
+        public LongBuffer longs() { return bytes().asLongBuffer(); }
+        public FloatBuffer floats() { return bytes().asFloatBuffer(); }
+        public DoubleBuffer doubles() { return bytes().asDoubleBuffer(); }
+
+        /** A variable width's offset {@code i} into {@link #bytes()} (rows + 1 of them). */
+        public int offset(int i) {
+            return body.getInt(offsets + 4 * i);
+        }
+
+        /** The value at row {@code i}, as a cursor gives it. */
+        public Object get(int i) {
+            if (isNull(i)) return null;
+            int w = width(column);
+            int start = w > 0 ? data + i * w : data + offset(i);
+            int n = w > 0 ? w : offset(i + 1) - offset(i);
+            byte[] slot = new byte[n];
+            body.get(start, slot);
+            int tag = column.tag();
+            Writer t = new Writer();
+            if (w > 0 && tag != EXT) {
+                t.u8(tag).raw(ByteBuffer.wrap(slot));
+            } else if (tag == EXT) {
+                t.u8(EXT).str(column.type()).i32(n).raw(ByteBuffer.wrap(slot));
+            } else if (tag == 15) {
+                return slot;
+            } else if (tag == 18 || tag == 19) {
+                t.u8(tag).raw(ByteBuffer.wrap(slot));
+            } else if (tag == 10) {
+                t.raw(ByteBuffer.wrap(slot));
+            } else {
+                return new String(slot, StandardCharsets.UTF_8);
+            }
+            return new Reader(t.bytes()).value();
+        }
+
+        /** Every value (an object each). */
+        public List<Object> toList() {
+            List<Object> out = new ArrayList<>(rows);
+            for (int i = 0; i < rows; i++) out.add(get(i));
+            return out;
         }
     }
 
@@ -594,7 +854,7 @@ public final class NucleusClient implements AutoCloseable {
                 int tag = u8();
                 String type = tag == 10 ? typeName(u8()) + "[]"
                         : tag == EXT || tag == ENUM ? str() : typeName(tag);
-                columns.add(new Column(name, type));
+                columns.add(new Column(name, type, tag));
             }
             return columns;
         }

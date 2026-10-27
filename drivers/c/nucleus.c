@@ -1119,14 +1119,14 @@ static int read_row(nc_result *res, reader *r) {
 static void cursor_drain(nc_cursor *cur);
 
 /* Sends Q: rows fetch at a time (0: all at once; from version 6). */
-static int send_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, unsigned fetch,
-                      nc_error *err) {
+static int send_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, int format,
+                      unsigned fetch, nc_error *err) {
     buf q = {0};
     size_t i;
     /* A cursor left unfinished is ended first: one result at a time. */
     if (c->active) cursor_drain(c->active);
     put_str(&q, sql);
-    put_u8(&q, 0);
+    put_u8(&q, (unsigned)format);
     if (c->version >= 6) put_le(&q, fetch, 4);
     put_le(&q, nparams, 2);
     for (i = 0; i < nparams; i++) {
@@ -1148,7 +1148,7 @@ static int send_query(nc_conn *c, const char *sql, const nc_value *params, size_
 nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, nc_error *err) {
     nc_result *cur = NULL, *last = NULL;
     int failed = 0;
-    if (send_query(c, sql, params, nparams, 0, err) != 0) return NULL;
+    if (send_query(c, sql, params, nparams, 0, 0, err) != 0) return NULL;
     for (;;) {
         char kind;
         unsigned char *body;
@@ -1209,14 +1209,81 @@ nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t 
     }
 }
 
+/* Where a column's buffers are in a batch (offsets into its body). */
+typedef struct {
+    size_t valid;   /* 0: no NULLs */
+    size_t offsets; /* 0: a fixed width */
+    size_t data, len;
+} nc_view;
+
 struct nc_cursor {
     nc_conn *c;
     nc_result *res; /* the columns, the current row, and the tag once ended */
     unsigned fetch;
+    int format;     /* 0 rows, 2 columnar batches */
     int ready;      /* the server has said Ready: nothing more comes */
     int failed;
     nc_error error; /* the statement's error, given at the end */
+    unsigned char *batch; /* the current batch's body */
+    size_t batch_len, batch_rows;
+    nc_view *views;
 };
+
+/* A column's fixed width in a batch (DOCS.md section 10); 0: variable. */
+static size_t batch_width(const nc_column *col) {
+    switch (col->type) {
+    case NC_BOOL: return 1;
+    case NC_SMALLINT: return 2;
+    case NC_INTEGER: case NC_REAL: case NC_DATE: return 4;
+    case NC_INT: case NC_FLOAT: case NC_TIMESTAMP: case NC_TIMESTAMPTZ: case NC_TIME: return 8;
+    case NC_INTERVAL: case NC_UUID: return 16;
+    case NC_NUMERIC: return 17;
+    default: return 0;
+    }
+}
+
+static size_t align8(size_t at) { return (at + 7) & ~(size_t)7; }
+
+/* B: lays out the batch in body (taken); nonzero when malformed. */
+static int read_batch(nc_cursor *cur, unsigned char *body, size_t len) {
+    size_t n, at = 4, i, ncols = cur->res->ncolumns;
+    free(cur->batch);
+    free(cur->views);
+    cur->batch = body;
+    cur->batch_len = len;
+    cur->batch_rows = 0;
+    cur->views = calloc(ncols ? ncols : 1, sizeof *cur->views);
+    if (!cur->views || len < 4) return -1;
+    n = (size_t)body[0] | (size_t)body[1] << 8 | (size_t)body[2] << 16 | (size_t)body[3] << 24;
+    for (i = 0; i < ncols; i++) {
+        nc_view *v = &cur->views[i];
+        size_t w = batch_width(&cur->res->columns[i]);
+        if (at >= len) return -1;
+        if (body[at++]) {
+            at = align8(at);
+            v->valid = at;
+            at += (n + 7) / 8;
+        }
+        at = align8(at);
+        if (w) {
+            v->data = at;
+            v->len = n * w;
+        } else {
+            size_t end;
+            v->offsets = at;
+            if (at + (n + 1) * 4 > len) return -1;
+            end = (size_t)body[at + 4 * n] | (size_t)body[at + 4 * n + 1] << 8 | (size_t)body[at + 4 * n + 2] << 16 |
+                  (size_t)body[at + 4 * n + 3] << 24;
+            at = align8(at + (n + 1) * 4);
+            v->data = at;
+            v->len = end;
+        }
+        at = align8(v->data + v->len);
+        if (at > len) return -1;
+    }
+    cur->batch_rows = n;
+    return 0;
+}
 
 /* Ready: the statement and the cursor's hold on the connection end. */
 static void cursor_end(nc_cursor *cur, const unsigned char *body, size_t len) {
@@ -1231,16 +1298,34 @@ static void clear_row(nc_result *res) {
     res->nrows = 0;
 }
 
+static nc_cursor *cursor_open(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, int format,
+                              unsigned fetch, nc_error *err);
+
 nc_cursor *nc_cursor_open(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, unsigned fetch,
                           nc_error *err) {
+    return cursor_open(c, sql, params, nparams, 0, c->version < 6 ? 0 : fetch ? fetch : NC_DEFAULT_FETCH, err);
+}
+
+nc_cursor *nc_batches_open(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, unsigned rows,
+                           nc_error *err) {
+    if (c->version < 7) {
+        set_error(err, "0A000", "columnar results need protocol version 7");
+        return NULL;
+    }
+    return cursor_open(c, sql, params, nparams, 2, rows ? rows : NC_DEFAULT_BATCH, err);
+}
+
+static nc_cursor *cursor_open(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, int format,
+                              unsigned fetch, nc_error *err) {
     nc_cursor *cur = calloc(1, sizeof *cur);
     if (!cur) {
         set_error(err, "", "out of memory");
         return NULL;
     }
     cur->c = c;
-    cur->fetch = c->version < 6 ? 0 : fetch ? fetch : NC_DEFAULT_FETCH;
-    if (send_query(c, sql, params, nparams, cur->fetch, err) != 0) {
+    cur->format = format;
+    cur->fetch = fetch;
+    if (send_query(c, sql, params, nparams, format, cur->fetch, err) != 0) {
         free(cur);
         return NULL;
     }
@@ -1324,11 +1409,20 @@ int nc_cursor_next(nc_cursor *cur, nc_error *err) {
         r.bad = 0;
         switch (kind) {
         case 'D':
-            if (read_row(cur->res, &r) != 0) {
+            if (cur->format != 0 || read_row(cur->res, &r) != 0) {
                 r.bad = 1;
                 break;
             }
             free(body);
+            return 1;
+        case 'B':
+            /* The batch keeps its body: its buffers are read in place. */
+            if (cur->format != 2 || read_batch(cur, body, len) != 0) {
+                cur->ready = 1;
+                if (c->active == cur) c->active = NULL;
+                set_error(err, "08P01", "malformed batch from the server");
+                return -1;
+            }
             return 1;
         case 'S': {
             /* The batch is read: the next. */
@@ -1372,6 +1466,29 @@ int nc_cursor_next(nc_cursor *cur, nc_error *err) {
 
 const nc_result *nc_cursor_result(const nc_cursor *cur) { return cur->res; }
 
+size_t nc_batch_rows(const nc_cursor *cur) { return cur->batch ? cur->batch_rows : 0; }
+
+const void *nc_batch_data(const nc_cursor *cur, size_t col, size_t *len) {
+    if (!cur->batch || col >= cur->res->ncolumns) return NULL;
+    if (len) *len = cur->views[col].len;
+    return cur->batch + cur->views[col].data;
+}
+
+const uint32_t *nc_batch_offsets(const nc_cursor *cur, size_t col) {
+    if (!cur->batch || col >= cur->res->ncolumns || !cur->views[col].offsets) return NULL;
+    return (const uint32_t *)(const void *)(cur->batch + cur->views[col].offsets);
+}
+
+const uint8_t *nc_batch_validity(const nc_cursor *cur, size_t col) {
+    if (!cur->batch || col >= cur->res->ncolumns || !cur->views[col].valid) return NULL;
+    return cur->batch + cur->views[col].valid;
+}
+
+int nc_batch_is_null(const nc_cursor *cur, size_t col, size_t row) {
+    const uint8_t *v = nc_batch_validity(cur, col);
+    return v ? !(v[row / 8] >> (row % 8) & 1) : 0;
+}
+
 /* Reads to Ready, skipping rows and answering a pause with c. */
 static void cursor_drain(nc_cursor *cur) {
     nc_conn *c = cur->c;
@@ -1407,6 +1524,8 @@ void nc_cursor_close(nc_cursor *cur) {
     if (!cur) return;
     cursor_drain(cur);
     nc_result_free(cur->res);
+    free(cur->batch);
+    free(cur->views);
     free(cur);
 }
 

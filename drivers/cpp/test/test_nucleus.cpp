@@ -181,6 +181,21 @@ int main() {
             CHECK(e.code() == "22012" && n == 299);
         }
         CHECK(db.status() == 0);
+        // Columnar batches.
+        Batches b = db.batches("SELECT i, i * 0.5::float, 'v' || i FROM generate_series(1, 300) i", {}, 128);
+        size_t total = 0, batches = 0;
+        while (b.next()) {
+            const int32_t* ids = b.values<int32_t>(0);
+            const double* half = b.values<double>(1);
+            for (size_t i = 0; i < b.rows(); i++) {
+                int id = static_cast<int>(total + i + 1);
+                CHECK(ids[i] == id && half[i] == id * 0.5);
+                CHECK(b.text(2, i) == "v" + std::to_string(id));
+            }
+            total += b.rows();
+            batches++;
+        }
+        CHECK(total == 300 && batches == 3 && b.count() == 300);
     }
     if (failures) {
         std::cerr << failures << " check(s) failed\n";
