@@ -6,6 +6,8 @@
 //   db.query("INSERT INTO t VALUES ($1, $2)", {1, "one"});
 //   for (const auto& row : db.query("SELECT id, name FROM t").rows)
 //       std::cout << row[0].str() << " " << row[1].str() << "\n";
+//   for (const auto& row : db.cursor("SELECT id FROM t"))  // a large result,
+//       std::cout << row[0].str() << "\n";                 // as it arrives
 //
 // Build with drivers/c/nucleus.c (or libnucleus.a) and -Idrivers/c.
 #ifndef NUCLEUS_HPP
@@ -312,7 +314,90 @@ inline nc_value to_c(const Value& v, std::deque<std::vector<nc_value>>& store) {
     return std::visit(Visit{store}, static_cast<const Variant&>(v));
 }
 
+inline std::vector<Column> columns_of(const nc_result* r) {
+    std::vector<Column> out;
+    for (size_t c = 0; c < nc_columns(r); c++)
+        out.push_back({nc_column_name(r, c), nc_column_type(r, c), nc_column_element(r, c),
+                       nc_column_type_name(r, c) ? nc_column_type_name(r, c) : ""});
+    return out;
+}
+
 } // namespace detail
+
+/// One statement's rows as they arrive (`Connection::cursor`): iterate it,
+/// or call `next`; closes (stopping the statement) when destroyed.
+class Cursor {
+public:
+    explicit Cursor(nc_cursor* cur) : cur_(cur), columns_(detail::columns_of(nc_cursor_result(cur))) {}
+    Cursor(const Cursor&) = delete;
+    Cursor& operator=(const Cursor&) = delete;
+    Cursor(Cursor&& o) noexcept : cur_(std::exchange(o.cur_, nullptr)), columns_(std::move(o.columns_)) {}
+    Cursor& operator=(Cursor&& o) noexcept {
+        if (this != &o) {
+            nc_cursor_close(cur_);
+            cur_ = std::exchange(o.cur_, nullptr);
+            columns_ = std::move(o.columns_);
+        }
+        return *this;
+    }
+    ~Cursor() { nc_cursor_close(cur_); }
+
+    /// The result's columns (empty for a statement without rows).
+    const std::vector<Column>& columns() const { return columns_; }
+
+    /// The next row into `row`; false after the last.  Throws the
+    /// statement's error when it fails after rows.
+    bool next(std::vector<Value>& row) {
+        if (!cur_) return false;
+        nc_error err;
+        int rc = nc_cursor_next(cur_, &err);
+        if (rc < 0) throw Error(err.message, err.code, err.hint);
+        if (rc == 0) return false;
+        const nc_result* r = nc_cursor_result(cur_);
+        row.clear();
+        for (size_t c = 0; c < nc_columns(r); c++) row.push_back(detail::from_c(*nc_value_at(r, 0, c)));
+        return true;
+    }
+
+    /// "SELECT", …, once the statement has ended (else empty).
+    std::string command() const { return cur_ ? nc_command(nc_cursor_result(cur_)) : ""; }
+    /// The rows sent, once the statement has ended.
+    uint64_t count() const { return cur_ ? nc_count(nc_cursor_result(cur_)) : 0; }
+
+    /// Stops reading: the server is told to send no more.  The tag stays.
+    void close() {
+        if (cur_) nc_cursor_stop(cur_);
+    }
+
+    class iterator {
+    public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type = std::vector<Value>;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const value_type*;
+        using reference = const value_type&;
+        iterator() = default;
+        explicit iterator(Cursor* c) : c_(c) { ++*this; }
+        reference operator*() const { return row_; }
+        pointer operator->() const { return &row_; }
+        iterator& operator++() {
+            if (c_ && !c_->next(row_)) c_ = nullptr;
+            return *this;
+        }
+        bool operator==(const iterator& o) const { return c_ == o.c_; }
+        bool operator!=(const iterator& o) const { return c_ != o.c_; }
+
+    private:
+        Cursor* c_ = nullptr;
+        value_type row_;
+    };
+    iterator begin() { return iterator(this); }
+    iterator end() { return iterator(); }
+
+private:
+    nc_cursor* cur_ = nullptr;
+    std::vector<Column> columns_;
+};
 
 inline std::string Value::str() const {
     std::deque<std::vector<nc_value>> store;
@@ -365,9 +450,7 @@ public:
         nc_result* r = nc_query(conn_, sql.c_str(), args.data(), args.size(), &err);
         if (!r) throw Error(err.message, err.code, err.hint);
         Result out;
-        for (size_t c = 0; c < nc_columns(r); c++)
-            out.columns.push_back({nc_column_name(r, c), nc_column_type(r, c), nc_column_element(r, c),
-                                   nc_column_type_name(r, c) ? nc_column_type_name(r, c) : ""});
+        out.columns = detail::columns_of(r);
         for (size_t i = 0; i < nc_rows(r); i++) {
             std::vector<Value> row;
             for (size_t c = 0; c < nc_columns(r); c++) row.push_back(detail::from_c(*nc_value_at(r, i, c)));
@@ -377,6 +460,20 @@ public:
         out.count = nc_count(r);
         nc_result_free(r);
         return out;
+    }
+
+    /// Runs one statement and reads its rows as they arrive, `fetch` at a
+    /// time (0: NC_DEFAULT_FETCH): the server sends a batch and waits until
+    /// it is read.  Throws when the statement fails before its first row.
+    /// Running another statement ends the cursor (what is left is skipped).
+    Cursor cursor(const std::string& sql, const std::vector<Value>& params = {}, unsigned fetch = 0) {
+        std::deque<std::vector<nc_value>> store;
+        std::vector<nc_value> args;
+        for (const auto& p : params) args.push_back(detail::to_c(p, store));
+        nc_error err;
+        nc_cursor* c = nc_cursor_open(conn_, sql.c_str(), args.data(), args.size(), fetch, &err);
+        if (!c) throw Error(err.message, err.code, err.hint);
+        return Cursor(c);
     }
 
     /// BEGIN, `body(*this)`, then COMMIT — or ROLLBACK if it throws.

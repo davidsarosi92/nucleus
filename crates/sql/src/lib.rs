@@ -51,5 +51,5 @@ pub mod uuid;
 pub use ast::Statement;
 pub use error::{Error, Result};
 pub use parser::parse;
-pub use session::{OutColumn, Output, Session, TxnStatus, command_tag};
+pub use session::{OutColumn, Output, Session, Sink, TxnStatus, command_tag};
 pub use types::{DataType, Row, Value};

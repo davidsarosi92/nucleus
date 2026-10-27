@@ -1274,3 +1274,102 @@ fn the_audit_log_records_and_shows_tampering() {
         ]
     );
 }
+
+/// Results stream (PLAN.md §M14.11): a cursor reads a statement's rows a
+/// batch at a time, the server waiting for each; dropped early, it stops
+/// the statement; an error after rows ends it as its last item.
+#[test]
+fn cursors_fetch_in_batches() {
+    let mut c = Client::connect(config(start(None))).unwrap();
+    let mut cur = c
+        .cursor(
+            "SELECT i, 'r' || i FROM generate_series(1, 10000) i",
+            &[],
+            128,
+        )
+        .unwrap();
+    assert_eq!(cur.columns()[1].ty, Type::Text);
+    let mut n = 0i64;
+    for row in &mut cur {
+        let row = row.unwrap();
+        n += 1;
+        assert_eq!(row[0], Value::Integer(n as i32));
+    }
+    assert_eq!(n, 10_000);
+    assert_eq!(cur.command(), Some(("SELECT", 10_000)));
+    drop(cur);
+
+    // Ten billion rows: only what is read is ever produced.
+    let big = "SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b";
+    let mut cur = c.cursor(big, &[], 1000).unwrap();
+    let first: Vec<_> = (&mut cur).take(2500).map(Result::unwrap).collect();
+    assert_eq!(first.len(), 2500);
+    // Closed in the middle of a batch: what was sent is counted.
+    assert_eq!(cur.close().unwrap(), ("SELECT".into(), 3000));
+    // (0: the default batch.)
+    let mut cur = c.cursor(big, &[], 0).unwrap();
+    assert!(cur.next().unwrap().is_ok());
+    drop(cur);
+    assert_eq!(c.status(), TxnStatus::Idle);
+    assert_eq!(
+        c.rows("SELECT 1", &[]).unwrap(),
+        vec![vec![Value::Integer(1)]]
+    );
+
+    // An error before the first row; after rows, as the last item.
+    match c.cursor("SELECT nope", &[], 10) {
+        Err(Error::Server(e)) => assert_eq!(e.code, "42703"),
+        other => panic!("{other:?}"),
+    }
+    let rows: Vec<_> = c
+        .cursor(
+            "SELECT 1 / (500 - i) FROM generate_series(1, 1000) i",
+            &[],
+            100,
+        )
+        .unwrap()
+        .collect();
+    assert_eq!(rows.len(), 500);
+    assert!(rows[..499].iter().all(Result::is_ok));
+    match &rows[499] {
+        Err(Error::Server(e)) => assert_eq!(e.code, "22012"),
+        other => panic!("{other:?}"),
+    }
+
+    // In a block the statement's snapshot stays the block's; a cursor of a
+    // statement without rows has none; batches need one statement.
+    c.execute("BEGIN", &[]).unwrap();
+    let cur = c.cursor("CREATE TABLE cu (id INT)", &[], 10).unwrap();
+    assert!(cur.columns().is_empty());
+    assert_eq!(cur.command(), Some(("CREATE TABLE", 0)));
+    drop(cur);
+    c.execute("INSERT INTO cu SELECT * FROM generate_series(1, 50)", &[])
+        .unwrap();
+    let n = c.cursor("SELECT id FROM cu", &[], 7).unwrap().count();
+    assert_eq!(n, 50);
+    c.execute("COMMIT", &[]).unwrap();
+    match c.cursor("SELECT 1; SELECT 2", &[], 10) {
+        Err(Error::Server(e)) => assert_eq!(e.code, "42601"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Time a cursor's client spends between batches is not the statement's:
+/// a statement timeout counts the server's work only.
+#[test]
+fn a_cursors_pauses_are_not_statement_time() {
+    let mut c = Client::connect(config(start_real(nucleus_server::Config::default()))).unwrap();
+    c.execute("SET statement_timeout = '300ms'", &[]).unwrap();
+    let cur = c
+        .cursor("SELECT i FROM generate_series(1, 40) i", &[], 10)
+        .unwrap();
+    let mut n = 0;
+    for row in cur {
+        row.unwrap();
+        n += 1;
+        if n % 10 == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+    assert_eq!(n, 40);
+}

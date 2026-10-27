@@ -25,5 +25,9 @@ proved by SCRAM-SHA-256, never sent.  TLS: `new Config().tls(true)`
 certificate (a PKCS #8 key); `.token(…)` for an identity token instead of
 the password.  Errors are
 `NucleusException` with `code()` (SQLSTATE) and `hint()` (what to do about
-it, or null).  Tests: `NucleusTest` (a plain
+it, or null).  Large results stream (protocol version 6): `try
+(NucleusClient.Cursor rows = db.cursor(1000, sql, params…)) { for (var row
+: rows) … }` reads them as they arrive, the server sending a batch at a
+time and waiting until it is read; closing early (or the next query)
+stops the statement.  Tests: `NucleusTest` (a plain
 main); example: `examples/java/Quickstart.java`.

@@ -25,7 +25,9 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -37,6 +39,9 @@ import java.util.function.Function;
  *     db.query("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)");
  *     db.query("INSERT INTO t VALUES ($1, $2)", 1, "one");
  *     for (List<Object> row : db.query("SELECT id, name FROM t").rows()) System.out.println(row);
+ *     try (NucleusClient.Cursor rows = db.cursor("SELECT id FROM t")) { // a large result,
+ *         for (List<Object> row : rows) System.out.println(row);         // as it arrives
+ *     }
  * }
  * }</pre>
  *
@@ -53,9 +58,11 @@ public final class NucleusClient implements AutoCloseable {
     /**
      * 2: registered types (uuid, modules' types) arrive in their binary form; 3: smallint,
      * integer, real, bytea, time, inet and cidr in theirs; 4: the password is proved by
-     * SCRAM-SHA-256, never sent; 5: errors carry a hint.
+     * SCRAM-SHA-256, never sent; 5: errors carry a hint; 6: results stream, fetched in batches.
      */
-    public static final int PROTOCOL_VERSION = 5;
+    public static final int PROTOCOL_VERSION = 6;
+    /** Rows a cursor asks the server for at a time. */
+    public static final int DEFAULT_FETCH = 1000;
     private static final int EXT = 11;
     private static final int ENUM = 20;
     public static final int DEFAULT_PORT = 20035;
@@ -77,6 +84,10 @@ public final class NucleusClient implements AutoCloseable {
     private Status status = Status.IDLE;
     private String serverVersion = "";
     private long sessionId;
+    /** The protocol version agreed with the server. */
+    private int version = PROTOCOL_VERSION;
+    /** A cursor the server is still sending. */
+    private Cursor active;
 
     private NucleusClient(Socket socket) throws IOException {
         this.socket = socket;
@@ -147,7 +158,7 @@ public final class NucleusClient implements AutoCloseable {
                         if (reply != null) c.send('a', new Writer().str(reply).bytes());
                     }
                     case 'W' -> {
-                        r.u16();
+                        c.version = r.u16();
                         c.serverVersion = r.str();
                         c.sessionId = r.u32();
                     }
@@ -176,9 +187,7 @@ public final class NucleusClient implements AutoCloseable {
     /** Runs {@code sql}; the result of each statement. A failing statement throws its error. */
     public List<Result> queryAll(String sql, Object... params) {
         try {
-            Writer w = new Writer().str(sql).u8(0).u16(params.length);
-            for (Object p : params) w.value(p);
-            send('Q', w.bytes());
+            sendQuery(sql, params, 0);
             List<Result> results = new ArrayList<>();
             NucleusException error = null;
             List<Column> columns = null;
@@ -188,15 +197,7 @@ public final class NucleusClient implements AutoCloseable {
                 Reader r = new Reader(m.body);
                 switch (m.kind) {
                     case 'C' -> {
-                        int n = r.u16();
-                        columns = new ArrayList<>(n);
-                        for (int i = 0; i < n; i++) {
-                            String name = r.str();
-                            int tag = r.u8();
-                            String type = tag == 10 ? typeName(r.u8()) + "[]"
-                                    : tag == EXT || tag == ENUM ? r.str() : typeName(tag);
-                            columns.add(new Column(name, type));
-                        }
+                        columns = r.columns();
                         rows = new ArrayList<>();
                     }
                     case 'D' -> {
@@ -223,6 +224,179 @@ public final class NucleusClient implements AutoCloseable {
             }
         } catch (IOException e) {
             throw new NucleusException("connection lost: " + e.getMessage(), e);
+        }
+    }
+
+    /** Sends Q: rows {@code fetch} at a time (0: all at once; from version 6). */
+    private void sendQuery(String sql, Object[] params, int fetch) throws IOException {
+        // A cursor left unfinished is closed first: one result at a time.
+        if (active != null) active.close();
+        Writer w = new Writer().str(sql).u8(0);
+        if (version >= 6) w.i32(fetch);
+        w.u16(params.length);
+        for (Object p : params) w.value(p);
+        send('Q', w.bytes());
+    }
+
+    /** {@link #cursor(int, String, Object...)} with {@link #DEFAULT_FETCH}. */
+    public Cursor cursor(String sql, Object... params) {
+        return cursor(DEFAULT_FETCH, sql, params);
+    }
+
+    /**
+     * Runs one statement and returns a {@link Cursor} over its rows, read as they arrive: the
+     * server sends {@code fetch} rows, then waits until they are read, so a result of any size
+     * takes a batch of memory. Closing it early (or running another statement) stops the
+     * statement. An error before the first row throws here; after rows, from the iteration.
+     */
+    public Cursor cursor(int fetch, String sql, Object... params) {
+        Cursor c = new Cursor(version >= 6 ? (fetch > 0 ? fetch : DEFAULT_FETCH) : 0);
+        try {
+            sendQuery(sql, params, c.fetch);
+            for (;;) {
+                Message m = read();
+                Reader r = new Reader(m.body);
+                switch (m.kind) {
+                    case 'C' -> {
+                        c.columns = r.columns();
+                        active = c;
+                        return c;
+                    }
+                    case 'K' -> {
+                        c.command = r.str();
+                        c.count = r.i64();
+                    }
+                    case 'E' -> c.error = r.serverError();
+                    case 'R' -> {
+                        setStatus(m.body);
+                        c.ready = true;
+                        if (c.error != null) throw c.error;
+                        return c;
+                    }
+                    default -> throw new NucleusException("unexpected message " + m.kind, (String) null);
+                }
+            }
+        } catch (IOException e) {
+            throw new NucleusException("connection lost: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * One statement's rows as they arrive ({@link #cursor}): iterate it; {@link #columns()}, and
+     * once every row is read {@link #command()} and {@link #count()}. Closing it early stops the
+     * statement.
+     */
+    public final class Cursor implements Iterator<List<Object>>, Iterable<List<Object>>, AutoCloseable {
+        private final int fetch;
+        private List<Column> columns = List.of();
+        private String command;
+        private long count = -1;
+        private NucleusException error;
+        /** The server has said Ready: nothing more comes. */
+        private boolean ready;
+        private List<Object> ahead;
+
+        private Cursor(int fetch) {
+            this.fetch = fetch;
+        }
+
+        /** The result's columns (empty for a statement without rows). */
+        public List<Column> columns() { return columns; }
+
+        /** {@code SELECT}, …, once the statement has ended (else null). */
+        public String command() { return command; }
+
+        /** The rows sent, once the statement has ended (else -1). */
+        public long count() { return count; }
+
+        @Override
+        public Iterator<List<Object>> iterator() { return this; }
+
+        @Override
+        public boolean hasNext() {
+            if (ahead == null) ahead = readRow();
+            return ahead != null;
+        }
+
+        @Override
+        public List<Object> next() {
+            if (!hasNext()) throw new NoSuchElementException();
+            List<Object> row = ahead;
+            ahead = null;
+            return row;
+        }
+
+        private List<Object> readRow() {
+            try {
+                while (!ready) {
+                    Message m = read();
+                    Reader r = new Reader(m.body);
+                    switch (m.kind) {
+                        case 'D' -> {
+                            List<Object> row = new ArrayList<>(columns.size());
+                            for (int i = 0; i < columns.size(); i++) row.add(r.value());
+                            return row;
+                        }
+                        // The batch is read: the next.
+                        case 'S' -> send('F', new Writer().i32(fetch).bytes());
+                        case 'K' -> {
+                            command = r.str();
+                            count = r.i64();
+                        }
+                        case 'E' -> error = r.serverError();
+                        case 'R' -> {
+                            end(m.body);
+                            if (error != null) {
+                                NucleusException e = error;
+                                error = null;
+                                throw e;
+                            }
+                        }
+                        case 'C' -> {
+                            ready = true;
+                            throw new NucleusException("a cursor runs one statement; this query holds several", (String) null);
+                        }
+                        default -> {
+                            ready = true;
+                            throw new NucleusException("unexpected message " + m.kind, (String) null);
+                        }
+                    }
+                }
+                return null;
+            } catch (IOException e) {
+                ready = true;
+                throw new NucleusException("connection lost: " + e.getMessage(), e);
+            }
+        }
+
+        private void end(byte[] body) {
+            setStatus(body);
+            ready = true;
+            if (active == this) active = null;
+        }
+
+        /** Stops reading: the server is told to send no more, and what it already sent is skipped. */
+        @Override
+        public void close() {
+            ahead = null;
+            try {
+                while (!ready) {
+                    Message m = read();
+                    Reader r = new Reader(m.body);
+                    switch (m.kind) {
+                        case 'S' -> send('c', new byte[0]);
+                        case 'K' -> {
+                            command = r.str();
+                            count = r.i64();
+                        }
+                        case 'R' -> end(m.body);
+                        default -> { }
+                    }
+                }
+            } catch (IOException e) {
+                ready = true;
+                throw new NucleusException("connection lost: " + e.getMessage(), e);
+            }
         }
     }
 
@@ -412,6 +586,19 @@ public final class NucleusClient implements AutoCloseable {
         }
 
         /** An E message: SQLSTATE, message and (from version 5) the hint. */
+        List<Column> columns() {
+            int n = u16();
+            List<Column> columns = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) {
+                String name = str();
+                int tag = u8();
+                String type = tag == 10 ? typeName(u8()) + "[]"
+                        : tag == EXT || tag == ENUM ? str() : typeName(tag);
+                columns.add(new Column(name, type));
+            }
+            return columns;
+        }
+
         NucleusException serverError() {
             String code = str();
             String message = str();

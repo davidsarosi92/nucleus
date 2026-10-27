@@ -9,6 +9,9 @@ Pure Python, no dependencies.  The API follows DB-API 2.0 where it fits::
     conn.execute("INSERT INTO t VALUES ($1, $2)", [1, "one"])
     for row in conn.execute("SELECT id, name FROM t").rows:
         print(row)
+    with conn.stream("SELECT id FROM t") as rows:   # a large result
+        for row in rows:                           # read as it arrives
+            print(row)
     with conn.transaction():
         conn.execute("UPDATE t SET name = $1 WHERE id = $2", ["uno", 1])
 
@@ -42,10 +45,10 @@ import uuid as _uuid
 from dataclasses import dataclass as _dataclass
 
 __all__ = [
-    "connect", "Connection", "Cursor", "Result", "Column", "Interval", "Ext",
+    "connect", "Connection", "Cursor", "Stream", "Result", "Column", "Interval", "Ext",
     "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "ProgrammingError",
-    "NotSupportedError", "DEFAULT_PORT",
+    "NotSupportedError", "DEFAULT_PORT", "DEFAULT_FETCH",
 ]
 
 apilevel = "2.0"
@@ -55,9 +58,11 @@ paramstyle = "numeric"  # $1, $2, ...
 # 2: registered types (uuid, modules' types) arrive in their binary form;
 # 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
 # 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
-# a hint.
-PROTOCOL_VERSION = 5
+# a hint; 6: results stream, fetched in batches.
+PROTOCOL_VERSION = 6
 DEFAULT_PORT = 20035
+# Rows a stream asks the server for at a time.
+DEFAULT_FETCH = 1000
 
 _EPOCH_DATE = _dt.date(2000, 1, 1)
 _EPOCH = _dt.datetime(2000, 1, 1)
@@ -462,6 +467,8 @@ class Connection:
             raise OperationalError(f"cannot connect to {host}:{port}: {e}") from e
         self._sock.settimeout(None)
         self._buf = bytearray()
+        self._version = PROTOCOL_VERSION
+        self._active = None  # a Stream the server is still sending
         self.status = 0  # 0 idle, 1 in a transaction block, 2 failed block
         hello = bytearray(_struct.pack("<H", PROTOCOL_VERSION))
         for s in (user, database, "", client_name):
@@ -510,7 +517,7 @@ class Connection:
                     _put_str(out, reply)
                     self._send(b"a", out)
             elif kind == b"W":
-                r.unpack("<H")
+                (self._version,) = r.unpack("<H")
                 self.server_version = r.str()
                 (self.session_id,) = r.unpack("<I")
             elif kind == b"R":
@@ -547,30 +554,14 @@ class Connection:
         Returns a list with each statement's ``Result``; a failing
         statement raises its error, whose ``results`` holds the statements
         before it."""
-        body = bytearray()
-        _put_str(body, sql)
-        body.append(1 if text else 0)
-        body += _struct.pack("<H", len(params))
-        for p in params:
-            _encode(body, p)
-        self._send(b"Q", body)
+        self._send_query(sql, params, text, 0)
         results, error = [], None
         columns, rows = None, []
         while True:
             kind, payload = self._read()
             r = _Reader(payload)
             if kind == b"C":
-                (n,) = r.unpack("<H")
-                columns = []
-                for _ in range(n):
-                    name = r.str()
-                    tag = r.u8()
-                    type_name = _TYPE_NAMES.get(tag, "unknown")
-                    if tag == 10:
-                        type_name = _TYPE_NAMES.get(r.u8(), "unknown") + "[]"
-                    elif tag in (_EXT, _ENUM):
-                        type_name = r.str()
-                    columns.append(Column(name, type_name))
+                columns = _columns(r)
                 rows = []
             elif kind == b"D":
                 rows.append(tuple(r.value() for _ in columns))
@@ -589,6 +580,29 @@ class Connection:
                 return results
             else:
                 raise InterfaceError(f"unexpected message {kind!r}")
+
+    def _send_query(self, sql, params, text, fetch):
+        # A stream left unfinished is closed first: one result at a time.
+        if self._active is not None:
+            self._active.close()
+        body = bytearray()
+        _put_str(body, sql)
+        body.append(1 if text else 0)
+        if self._version >= 6:
+            body += _struct.pack("<I", fetch)
+        body += _struct.pack("<H", len(params))
+        for p in params:
+            _encode(body, p)
+        self._send(b"Q", body)
+
+    def stream(self, sql, params=(), fetch=DEFAULT_FETCH):
+        """Runs one statement and returns a ``Stream`` of its rows, read as
+        they arrive: the server sends ``fetch`` rows, then waits until they
+        are read, so a result of any size takes a batch of memory.  Closing
+        it early (or running another statement) stops the statement.  An
+        error before the first row raises here; after rows, from the
+        iteration."""
+        return Stream(self, sql, list(params), fetch or DEFAULT_FETCH)
 
     def execute(self, sql, params=()):
         """Runs one statement (or several, returning the last result)."""
@@ -644,26 +658,149 @@ class _Transaction:
         return False
 
 
+def _columns(r):
+    """``C``: the result's columns."""
+    (n,) = r.unpack("<H")
+    columns = []
+    for _ in range(n):
+        name = r.str()
+        tag = r.u8()
+        type_name = _TYPE_NAMES.get(tag, "unknown")
+        if tag == 10:
+            type_name = _TYPE_NAMES.get(r.u8(), "unknown") + "[]"
+        elif tag in (_EXT, _ENUM):
+            type_name = r.str()
+        columns.append(Column(name, type_name))
+    return columns
+
+
+class Stream:
+    """One statement's rows as they arrive (``Connection.stream``): iterate
+    it; ``columns``, and once every row is read ``command`` and ``count``.
+    ``close()`` (or leaving a ``with`` block) stops the statement early."""
+
+    def __init__(self, conn, sql, params=(), fetch=DEFAULT_FETCH):
+        self._conn = conn
+        self._fetch = fetch if conn._version >= 6 else 0
+        self._error = None
+        self._ready = False
+        self.columns = []
+        self.command = None
+        self.count = None
+        conn._send_query(sql, params, False, self._fetch)
+        while True:
+            kind, payload = conn._read()
+            r = _Reader(payload)
+            if kind == b"C":
+                self.columns = _columns(r)
+                conn._active = self
+                return
+            if kind == b"K":
+                self.command = r.str()
+                (self.count,) = r.unpack("<Q")
+            elif kind == b"E":
+                self._error = _server_error(r)
+            elif kind == b"R":
+                conn.status = payload[0]
+                self._ready = True
+                if self._error is not None:
+                    raise self._error
+                return
+            else:
+                raise InterfaceError(f"unexpected message {kind!r}")
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        conn = self._conn
+        while not self._ready:
+            kind, payload = conn._read()
+            r = _Reader(payload)
+            if kind == b"D":
+                return tuple(r.value() for _ in self.columns)
+            if kind == b"S":
+                # The batch is read: the next.
+                conn._send(b"F", _struct.pack("<I", self._fetch))
+            elif kind == b"K":
+                self.command = r.str()
+                (self.count,) = r.unpack("<Q")
+            elif kind == b"E":
+                self._error = _server_error(r)
+            elif kind == b"R":
+                self._end(payload)
+                if self._error is not None:
+                    error, self._error = self._error, None
+                    raise error
+            elif kind == b"C":
+                self._ready = True
+                raise InterfaceError("a stream runs one statement; this query holds several")
+            else:
+                self._ready = True
+                raise InterfaceError(f"unexpected message {kind!r}")
+        raise StopIteration
+
+    def _end(self, payload):
+        self._conn.status = payload[0]
+        self._ready = True
+        if self._conn._active is self:
+            self._conn._active = None
+
+    def close(self):
+        """Stops reading: the server is told to send no more, and what it
+        already sent is skipped."""
+        conn = self._conn
+        while not self._ready:
+            kind, payload = conn._read()
+            r = _Reader(payload)
+            if kind == b"S":
+                conn._send(b"c", b"")
+            elif kind == b"K":
+                self.command = r.str()
+                (self.count,) = r.unpack("<Q")
+            elif kind == b"R":
+                self._end(payload)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
 class Cursor:
-    """A DB-API cursor."""
+    """A DB-API cursor.  ``execute`` runs one statement; its rows are read
+    as they are fetched, ``itersize`` at a time from the server, so
+    ``rowcount`` of a query is -1 until its last row is read."""
 
     arraysize = 1
+    itersize = DEFAULT_FETCH
 
     def __init__(self, conn):
         self.connection = conn
         self.description = None
         self.rowcount = -1
-        self._rows = []
+        self._stream = None
 
     def execute(self, sql, params=()):
-        r = self.connection.execute(sql, list(params))
-        self._rows = list(r.rows)
-        self.rowcount = r.count
+        self.close()
+        s = Stream(self.connection, sql, list(params), self.itersize)
+        self._stream = s
+        self.rowcount = s.count if s.count is not None else -1
         self.description = (
-            [(c.name, c.type, None, None, None, None, None) for c in r.columns]
-            if r.columns else None
+            [(c.name, c.type, None, None, None, None, None) for c in s.columns]
+            if s.columns else None
         )
         return self
+
+    def _next(self):
+        if self._stream is None:
+            return None
+        row = next(self._stream, None)
+        if row is None and self._stream.count is not None:
+            self.rowcount = self._stream.count
+        return row
 
     def executemany(self, sql, seq):
         total = 0
@@ -673,23 +810,31 @@ class Cursor:
         self.rowcount = total
 
     def fetchone(self):
-        return self._rows.pop(0) if self._rows else None
+        return self._next()
 
     def fetchmany(self, size=None):
-        n = size or self.arraysize
-        out, self._rows = self._rows[:n], self._rows[n:]
+        out = []
+        for _ in range(size or self.arraysize):
+            row = self._next()
+            if row is None:
+                break
+            out.append(row)
         return out
 
     def fetchall(self):
-        out, self._rows = self._rows, []
+        out = []
+        while (row := self._next()) is not None:
+            out.append(row)
         return out
 
     def __iter__(self):
-        while self._rows:
-            yield self._rows.pop(0)
+        while (row := self._next()) is not None:
+            yield row
 
     def close(self):
-        self._rows = []
+        if self._stream is not None:
+            self._stream.close()
+            self._stream = None
 
 
 def connect(host="127.0.0.1", port=DEFAULT_PORT, user="nucleus", password="nucleus",

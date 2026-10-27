@@ -339,6 +339,65 @@ static void tls(void) {
     }
 }
 
+static void cursors(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    nc_cursor *cur;
+    nc_result *r;
+    const char *big = "SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b";
+    int i = 0, rc;
+    CHECK(db != NULL);
+    if (!db) return;
+    /* Ten billion rows: only what is read is produced. */
+    cur = nc_cursor_open(db, big, NULL, 0, 500, &err);
+    CHECK(cur != NULL);
+    if (cur) {
+        CHECK(nc_columns(nc_cursor_result(cur)) == 2);
+        CHECK(strcmp(nc_column_name(nc_cursor_result(cur), 1), "b") == 0);
+        while (i < 1201 && nc_cursor_next(cur, &err) == 1) i++;
+        CHECK(i == 1201);
+        CHECK(nc_value_at(nc_cursor_result(cur), 0, 1)->type == NC_INTEGER);
+        nc_cursor_close(cur);
+    }
+    r = nc_query(db, "SELECT 1", NULL, 0, &err);
+    CHECK(r != NULL && nc_rows(r) == 1);
+    nc_result_free(r);
+    cur = nc_cursor_open(db, "SELECT i FROM generate_series(1, 2500) i", NULL, 0, 100, &err);
+    CHECK(cur != NULL);
+    if (cur) {
+        i = 0;
+        while ((rc = nc_cursor_next(cur, &err)) == 1) i++;
+        CHECK(rc == 0 && i == 2500);
+        CHECK(strcmp(nc_command(nc_cursor_result(cur)), "SELECT") == 0);
+        CHECK(nc_count(nc_cursor_result(cur)) == 2500);
+        nc_cursor_close(cur);
+    }
+    /* An error before the first row; after rows, at the end. */
+    CHECK(nc_cursor_open(db, "SELECT nope", NULL, 0, 10, &err) == NULL);
+    CHECK(strcmp(err.code, "42703") == 0);
+    cur = nc_cursor_open(db, "SELECT 1 / (300 - i) FROM generate_series(1, 400) i", NULL, 0, 64, &err);
+    CHECK(cur != NULL);
+    if (cur) {
+        i = 0;
+        while ((rc = nc_cursor_next(cur, &err)) == 1) i++;
+        CHECK(rc == -1 && i == 299 && strcmp(err.code, "22012") == 0);
+        nc_cursor_close(cur);
+    }
+    /* A cursor left unread is ended by the next statement. */
+    cur = nc_cursor_open(db, big, NULL, 0, 0, &err);
+    CHECK(cur != NULL);
+    r = nc_query(db, "SELECT 2", NULL, 0, &err);
+    CHECK(r != NULL && nc_rows(r) == 1);
+    nc_result_free(r);
+    if (cur) CHECK(nc_cursor_next(cur, &err) == 0);
+    nc_cursor_close(cur);
+    CHECK(nc_cursor_open(db, "SELECT 1; SELECT 2", NULL, 0, 10, &err) == NULL);
+    CHECK(strcmp(err.code, "42601") == 0);
+    CHECK(nc_status(db) == 0);
+    nc_close(db);
+}
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
@@ -348,6 +407,7 @@ int main(void) {
     tls();
     token();
     directory();
+    cursors();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

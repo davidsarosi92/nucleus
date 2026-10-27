@@ -10,6 +10,10 @@
  *     nc_value params[] = { nc_int(1), nc_text("one") };
  *     nc_result *r = nc_query(db, "INSERT INTO t VALUES ($1, $2)", params, 2, &err);
  *     nc_result_free(r);
+ *     nc_cursor *rows = nc_cursor_open(db, "SELECT id FROM t", NULL, 0, 0, &err);
+ *     while (rows && nc_cursor_next(rows, &err) == 1)     // a large result,
+ *         use(nc_value_at(nc_cursor_result(rows), 0, 0));  // as it arrives
+ *     nc_cursor_close(rows);
  *     nc_close(db);
  *
  * A result belongs to the caller (nc_result_free); values read from it live
@@ -30,8 +34,10 @@ extern "C" {
 /* 2: registered types (uuid, modules' types) arrive in their binary form;
  * 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
  * 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
- * a hint. */
-#define NC_PROTOCOL_VERSION 5
+ * a hint; 6: results stream, fetched in batches. */
+#define NC_PROTOCOL_VERSION 6
+/* Rows a cursor asks the server for at a time. */
+#define NC_DEFAULT_FETCH 1000
 #define NC_DEFAULT_PORT 20035
 
 /* Value and column types (the protocol's tags). */
@@ -124,6 +130,7 @@ typedef struct nc_error {
 
 typedef struct nc_conn nc_conn;
 typedef struct nc_result nc_result;
+typedef struct nc_cursor nc_cursor;
 
 /* The defaults: 127.0.0.1:20035, user, password and database "nucleus";
  * no TLS. */
@@ -139,6 +146,25 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err);
  * returns the last statement's result; NULL (and err filled) when a
  * statement fails or the connection is lost. */
 nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, nc_error *err);
+
+/* Runs one statement and reads its rows as they arrive, fetch at a time
+ * (0: NC_DEFAULT_FETCH): the server sends a batch and waits until it is
+ * read, so a result of any size takes a batch of memory.  NULL (and err
+ * filled) when the statement fails before its first row.  Running another
+ * statement on the connection ends the cursor (what is left is skipped). */
+nc_cursor *nc_cursor_open(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, unsigned fetch,
+                          nc_error *err);
+/* The next row: 1 a row (row 0 of nc_cursor_result, until the next call),
+ * 0 the end, -1 an error (err filled: the statement's, after its rows). */
+int nc_cursor_next(nc_cursor *cur, nc_error *err);
+/* The columns, the current row, and once the statement has ended its
+ * command and count (the rows sent); read with the result functions. */
+const nc_result *nc_cursor_result(const nc_cursor *cur);
+/* Stops the statement if it has not ended: the server is told to send no
+ * more, and what it sent is skipped.  The command and count stay. */
+void nc_cursor_stop(nc_cursor *cur);
+/* Stops the statement if it has not ended, and frees the cursor. */
+void nc_cursor_close(nc_cursor *cur);
 
 /* 0 idle, 1 in a transaction block, 2 in a failed block. */
 int nc_status(const nc_conn *c);

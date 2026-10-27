@@ -4,13 +4,14 @@
 use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::TcpStream;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use nucleus_kv::Kv;
 use nucleus_server::{Config, FrontEnd};
 use nucleus_sql::ext::{
-    DataType, Decimal, Error, Interval, OutColumn, Output, Registry, Session, Statement, TxnStatus,
-    TypeRef, Value,
+    DataType, Decimal, Error, Interval, OutColumn, Output, Registry, Row, Session, Sink, Statement,
+    TxnStatus, TypeRef, Value,
 };
 
 use crate::PgCompat;
@@ -872,6 +873,84 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
     }
 }
 
+/// `T`: a result's columns, each in its format (text unless 1).
+fn row_description(out: &mut impl Write, columns: &[OutColumn], formats: &[i16]) -> io::Result<()> {
+    let mut m = Msg::new(b'T').i16(columns.len() as i16);
+    for (i, c) in columns.iter().enumerate() {
+        let f = format_for(formats, i);
+        m = m
+            .str(&c.name)
+            .i32(0)
+            .i16(0)
+            .i32(oid(c.ty))
+            .i16(type_size(c.ty))
+            .i32(-1)
+            .i16(f);
+    }
+    out.write_all(&m.finish())
+}
+
+/// `D`: one row.
+fn data_row(
+    out: &mut impl Write,
+    row: &[Value],
+    columns: &[OutColumn],
+    formats: &[i16],
+) -> io::Result<()> {
+    let mut m = Msg::new(b'D').i16(row.len() as i16);
+    for (i, v) in row.iter().enumerate() {
+        if v.is_null() {
+            m = m.i32(-1);
+            continue;
+        }
+        let bytes = if format_for(formats, i) == 1 {
+            binary_value(v, columns.get(i).map_or(DataType::Text, |c| c.ty))
+        } else {
+            text_value(v).into_bytes()
+        };
+        m = m.i32(bytes.len() as i32).bytes(&bytes);
+    }
+    out.write_all(&m.finish())
+}
+
+/// A statement's rows onto the wire as they are produced: `T`, then a `D`
+/// each (PLAN.md §M14.11).
+struct Rows<'a, W: Write> {
+    out: &'a mut W,
+    /// Whether to send `T` (Execute does not: Describe does).
+    describe: bool,
+    formats: &'a [i16],
+    columns: Vec<OutColumn>,
+    /// The connection failed: the statement stopped on it.
+    broken: Option<io::Error>,
+}
+
+impl<W: Write> Rows<'_, W> {
+    fn broke(&mut self, e: io::Error) -> Error {
+        self.broken = Some(e);
+        Error {
+            code: "08006",
+            message: "the connection failed while the result was sent".into(),
+            hint: None,
+        }
+    }
+}
+
+impl<W: Write> Sink for Rows<'_, W> {
+    fn columns(&mut self, columns: &[OutColumn]) -> Result<(), Error> {
+        self.columns = columns.to_vec();
+        if !self.describe {
+            return Ok(());
+        }
+        row_description(self.out, columns, self.formats).map_err(|e| self.broke(e))
+    }
+
+    fn row(&mut self, row: Row) -> Result<ControlFlow<()>, Error> {
+        data_row(self.out, &row, &self.columns, self.formats).map_err(|e| self.broke(e))?;
+        Ok(ControlFlow::Continue(()))
+    }
+}
+
 impl Conn {
     fn ready(&mut self) -> io::Result<()> {
         let status = match self.session.status() {
@@ -884,19 +963,7 @@ impl Conn {
     }
 
     fn row_description(&mut self, columns: &[OutColumn], formats: &[i16]) -> io::Result<()> {
-        let mut m = Msg::new(b'T').i16(columns.len() as i16);
-        for (i, c) in columns.iter().enumerate() {
-            let f = format_for(formats, i);
-            m = m
-                .str(&c.name)
-                .i32(0)
-                .i16(0)
-                .i32(oid(c.ty))
-                .i16(type_size(c.ty))
-                .i32(-1)
-                .i16(f);
-        }
-        self.out.write_all(&m.finish())
+        row_description(&mut self.out, columns, formats)
     }
 
     fn data_row(
@@ -905,20 +972,7 @@ impl Conn {
         columns: &[OutColumn],
         formats: &[i16],
     ) -> io::Result<()> {
-        let mut m = Msg::new(b'D').i16(row.len() as i16);
-        for (i, v) in row.iter().enumerate() {
-            if v.is_null() {
-                m = m.i32(-1);
-                continue;
-            }
-            let bytes = if format_for(formats, i) == 1 {
-                binary_value(v, columns.get(i).map_or(DataType::Text, |c| c.ty))
-            } else {
-                text_value(v).into_bytes()
-            };
-            m = m.i32(bytes.len() as i32).bytes(&bytes);
-        }
-        self.out.write_all(&m.finish())
+        data_row(&mut self.out, row, columns, formats)
     }
 
     fn log(&self, what: &str, text: &str) {
@@ -948,17 +1002,19 @@ impl Conn {
         // first error stops the rest.
         for (stmt, text) in stmts.iter().zip(&texts) {
             self.session.note_text(text);
-            match self.session.run(stmt, &[]) {
-                Ok(out) => {
-                    if let Output::Rows { columns, rows } = &out {
-                        self.row_description(columns, &[])?;
-                        for r in rows {
-                            self.data_row(r, columns, &[])?;
-                        }
-                    }
-                    let tag = nucleus_sql::ext::command_tag(stmt, &out);
-                    self.out.write_all(&Msg::new(b'C').str(&tag).finish())?;
-                }
+            let mut rows = Rows {
+                out: &mut self.out,
+                describe: true,
+                formats: &[],
+                columns: Vec::new(),
+                broken: None,
+            };
+            let r = self.session.run_into(stmt, &[], &mut rows);
+            if let Some(e) = rows.broken {
+                return Err(e);
+            }
+            match r {
+                Ok(tag) => self.out.write_all(&Msg::new(b'C').str(&tag).finish())?,
                 Err(e) => {
                     self.log_error(&e);
                     return send_error(&mut self.out, &e);
@@ -1105,7 +1161,30 @@ impl Conn {
                 .map_err(proto)?;
             return Ok(());
         };
+        if portal.pending.is_none() && max <= 0 {
+            // The whole result: streamed as it is produced.
+            self.session.note_text(&portal.text);
+            let mut rows = Rows {
+                out: &mut self.out,
+                describe: false,
+                formats: &portal.result_formats,
+                columns: Vec::new(),
+                broken: None,
+            };
+            let r = self.session.run_into(&stmt, &portal.params, &mut rows);
+            if let Some(e) = rows.broken {
+                return Err(proto(e));
+            }
+            let tag = r?;
+            self.out
+                .write_all(&Msg::new(b'C').str(&tag).finish())
+                .map_err(proto)?;
+            portal.stmt = None; // a finished portal is not run again
+            self.portals.insert(name, portal);
+            return Ok(());
+        }
         if portal.pending.is_none() {
+            // A row limit: the result is kept, and sent a part at a time.
             self.session.note_text(&portal.text);
             let out = self.session.run(&stmt, &portal.params)?;
             let tag = nucleus_sql::ext::command_tag(&stmt, &out);

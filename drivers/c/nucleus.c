@@ -48,6 +48,8 @@ struct nc_conn {
     int status;
     char server[128];
     uint32_t session;
+    int version;       /* the protocol version agreed with the server */
+    nc_cursor *active; /* a cursor the server is still sending */
 };
 
 typedef struct {
@@ -1028,7 +1030,7 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
         if (kind == 'W') {
             reader r = {body, len, 0, 0};
             char *server;
-            get_le(&r, 2);
+            c->version = (int)get_le(&r, 2);
             server = get_str(&r);
             snprintf(c->server, sizeof c->server, "%s", server ? server : "");
             free(server);
@@ -1067,27 +1069,86 @@ void nc_result_free(nc_result *r) {
     free(r);
 }
 
-nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, nc_error *err) {
+/* C: a result with its columns and no rows yet; NULL when out of memory. */
+static nc_result *read_columns(reader *r) {
+    size_t n = (size_t)get_le(r, 2), i;
+    nc_result *res = calloc(1, sizeof *res);
+    if (res) res->columns = calloc(n ? n : 1, sizeof *res->columns);
+    if (!res || !res->columns) {
+        free(res);
+        return NULL;
+    }
+    for (i = 0; i < n && !r->bad; i++) {
+        res->columns[i].name = get_str(r);
+        res->columns[i].type = (nc_type)get_le(r, 1);
+        if (res->columns[i].type == NC_ARRAY) res->columns[i].element = (nc_type)get_le(r, 1);
+        if (res->columns[i].type == NC_ENUM) res->columns[i].type_name = get_str(r);
+        if (res->columns[i].type == NC_EXT) {
+            res->columns[i].type_name = get_str(r);
+            if (res->columns[i].type_name && strcmp(res->columns[i].type_name, "uuid") == 0)
+                res->columns[i].type = NC_UUID;
+        }
+        res->ncolumns = i + 1;
+    }
+    return res;
+}
+
+/* D: one more row of res; nonzero when malformed or out of memory. */
+static int read_row(nc_result *res, reader *r) {
+    size_t i;
+    if (res->nrows == res->cap_rows) {
+        size_t cap = res->cap_rows ? res->cap_rows * 2 : 16;
+        nc_value *nv = realloc(res->values, cap * (res->ncolumns ? res->ncolumns : 1) * sizeof *nv);
+        if (!nv) return -1;
+        res->values = nv;
+        res->cap_rows = cap;
+    }
+    for (i = 0; i < res->ncolumns; i++) {
+        nc_value *v = &res->values[res->nrows * res->ncolumns + i];
+        if (get_value(r, v) != 0) {
+            free_value(v);
+            for (; i + 1 < res->ncolumns; i++) res->values[res->nrows * res->ncolumns + i + 1].type = NC_NULL;
+            res->nrows++;
+            return -1;
+        }
+    }
+    res->nrows++;
+    return 0;
+}
+
+static void cursor_drain(nc_cursor *cur);
+
+/* Sends Q: rows fetch at a time (0: all at once; from version 6). */
+static int send_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, unsigned fetch,
+                      nc_error *err) {
     buf q = {0};
     size_t i;
-    nc_result *cur = NULL, *last = NULL;
-    int failed = 0;
+    /* A cursor left unfinished is ended first: one result at a time. */
+    if (c->active) cursor_drain(c->active);
     put_str(&q, sql);
     put_u8(&q, 0);
+    if (c->version >= 6) put_le(&q, fetch, 4);
     put_le(&q, nparams, 2);
     for (i = 0; i < nparams; i++) {
         if (put_value(&q, &params[i]) != 0) {
             free(q.b);
             set_error(err, "", "parameter %u has an unknown type", (unsigned)i + 1);
-            return NULL;
+            return -1;
         }
     }
     if (q.failed || send_frame(c, 'Q', &q) != 0) {
         free(q.b);
         set_error(err, "08006", "connection lost");
-        return NULL;
+        return -1;
     }
     free(q.b);
+    return 0;
+}
+
+nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, nc_error *err) {
+    nc_result *cur = NULL, *last = NULL;
+    int failed = 0;
+    if (send_query(c, sql, params, nparams, 0, err) != 0) return NULL;
     for (;;) {
         char kind;
         unsigned char *body;
@@ -1104,45 +1165,12 @@ nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t 
         r.at = 0;
         r.bad = 0;
         switch (kind) {
-        case 'C': {
-            size_t n = (size_t)get_le(&r, 2);
+        case 'C':
             nc_result_free(cur);
-            cur = calloc(1, sizeof *cur);
-            if (cur) cur->columns = calloc(n ? n : 1, sizeof *cur->columns);
-            if (!cur || !cur->columns) break;
-            for (i = 0; i < n && !r.bad; i++) {
-                cur->columns[i].name = get_str(&r);
-                cur->columns[i].type = (nc_type)get_le(&r, 1);
-                if (cur->columns[i].type == NC_ARRAY) cur->columns[i].element = (nc_type)get_le(&r, 1);
-                if (cur->columns[i].type == NC_ENUM) cur->columns[i].type_name = get_str(&r);
-                if (cur->columns[i].type == NC_EXT) {
-                    cur->columns[i].type_name = get_str(&r);
-                    if (cur->columns[i].type_name && strcmp(cur->columns[i].type_name, "uuid") == 0)
-                        cur->columns[i].type = NC_UUID;
-                }
-                cur->ncolumns = i + 1;
-            }
+            cur = read_columns(&r);
             break;
-        }
         case 'D':
-            if (!cur) break;
-            if (cur->nrows == cur->cap_rows) {
-                size_t cap = cur->cap_rows ? cur->cap_rows * 2 : 16;
-                nc_value *nv = realloc(cur->values, cap * (cur->ncolumns ? cur->ncolumns : 1) * sizeof *nv);
-                if (!nv) break;
-                cur->values = nv;
-                cur->cap_rows = cap;
-            }
-            for (i = 0; i < cur->ncolumns; i++) {
-                nc_value *v = &cur->values[cur->nrows * cur->ncolumns + i];
-                if (get_value(&r, v) != 0) {
-                    free_value(v);
-                    r.bad = 1;
-                    for (; i + 1 < cur->ncolumns; i++) cur->values[cur->nrows * cur->ncolumns + i + 1].type = NC_NULL;
-                    break;
-                }
-            }
-            cur->nrows++;
+            if (cur && read_row(cur, &r) != 0) r.bad = 1;
             break;
         case 'K':
             if (!cur) cur = calloc(1, sizeof *cur);
@@ -1181,12 +1209,218 @@ nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t 
     }
 }
 
+struct nc_cursor {
+    nc_conn *c;
+    nc_result *res; /* the columns, the current row, and the tag once ended */
+    unsigned fetch;
+    int ready;      /* the server has said Ready: nothing more comes */
+    int failed;
+    nc_error error; /* the statement's error, given at the end */
+};
+
+/* Ready: the statement and the cursor's hold on the connection end. */
+static void cursor_end(nc_cursor *cur, const unsigned char *body, size_t len) {
+    cur->c->status = len ? body[0] : 0;
+    cur->ready = 1;
+    cur->c->active = NULL;
+}
+
+static void clear_row(nc_result *res) {
+    size_t i;
+    for (i = 0; i < res->nrows * res->ncolumns; i++) free_value(&res->values[i]);
+    res->nrows = 0;
+}
+
+nc_cursor *nc_cursor_open(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, unsigned fetch,
+                          nc_error *err) {
+    nc_cursor *cur = calloc(1, sizeof *cur);
+    if (!cur) {
+        set_error(err, "", "out of memory");
+        return NULL;
+    }
+    cur->c = c;
+    cur->fetch = c->version < 6 ? 0 : fetch ? fetch : NC_DEFAULT_FETCH;
+    if (send_query(c, sql, params, nparams, cur->fetch, err) != 0) {
+        free(cur);
+        return NULL;
+    }
+    for (;;) {
+        char kind;
+        unsigned char *body;
+        size_t len;
+        reader r;
+        if (read_frame(c, &kind, &body, &len) != 0) {
+            nc_cursor_close(cur);
+            set_error(err, "08006", "connection lost");
+            return NULL;
+        }
+        r.b = body;
+        r.len = len;
+        r.at = 0;
+        r.bad = 0;
+        switch (kind) {
+        case 'C':
+            nc_result_free(cur->res);
+            cur->res = read_columns(&r);
+            free(body);
+            if (!cur->res || r.bad) {
+                cur->ready = 1;
+                nc_cursor_close(cur);
+                set_error(err, "08P01", "malformed message from the server");
+                return NULL;
+            }
+            c->active = cur;
+            return cur;
+        case 'K':
+            if (!cur->res) cur->res = calloc(1, sizeof *cur->res);
+            if (cur->res) {
+                cur->res->command = get_str(&r);
+                cur->res->count = get_le(&r, 8);
+            }
+            break;
+        case 'E':
+            server_error(err, body, len);
+            cur->failed = 1;
+            break;
+        case 'R':
+            cursor_end(cur, body, len);
+            free(body);
+            if (cur->failed) {
+                nc_cursor_close(cur);
+                return NULL;
+            }
+            if (!cur->res) cur->res = calloc(1, sizeof *cur->res);
+            return cur;
+        default:
+            r.bad = 1;
+        }
+        free(body);
+        if (r.bad) {
+            cur->ready = 1;
+            nc_cursor_close(cur);
+            set_error(err, "08P01", "malformed message from the server");
+            return NULL;
+        }
+    }
+}
+
+int nc_cursor_next(nc_cursor *cur, nc_error *err) {
+    nc_conn *c = cur->c;
+    if (cur->res) clear_row(cur->res);
+    while (!cur->ready) {
+        char kind;
+        unsigned char *body;
+        size_t len;
+        reader r;
+        if (read_frame(c, &kind, &body, &len) != 0) {
+            cur->ready = 1;
+            if (c->active == cur) c->active = NULL;
+            set_error(err, "08006", "connection lost");
+            return -1;
+        }
+        r.b = body;
+        r.len = len;
+        r.at = 0;
+        r.bad = 0;
+        switch (kind) {
+        case 'D':
+            if (read_row(cur->res, &r) != 0) {
+                r.bad = 1;
+                break;
+            }
+            free(body);
+            return 1;
+        case 'S': {
+            /* The batch is read: the next. */
+            buf f = {0};
+            put_le(&f, cur->fetch, 4);
+            if (f.failed || send_frame(c, 'F', &f) != 0) r.bad = 1;
+            free(f.b);
+            break;
+        }
+        case 'K':
+            free(cur->res->command);
+            cur->res->command = get_str(&r);
+            cur->res->count = get_le(&r, 8);
+            break;
+        case 'E':
+            server_error(&cur->error, body, len);
+            cur->failed = 1;
+            break;
+        case 'R':
+            cursor_end(cur, body, len);
+            free(body);
+            if (cur->failed) {
+                cur->failed = 0;
+                if (err) *err = cur->error;
+                return -1;
+            }
+            return 0;
+        default:
+            r.bad = 1;
+        }
+        free(body);
+        if (r.bad) {
+            cur->ready = 1;
+            if (c->active == cur) c->active = NULL;
+            set_error(err, "08P01", "malformed message from the server");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+const nc_result *nc_cursor_result(const nc_cursor *cur) { return cur->res; }
+
+/* Reads to Ready, skipping rows and answering a pause with c. */
+static void cursor_drain(nc_cursor *cur) {
+    nc_conn *c = cur->c;
+    if (cur->res) clear_row(cur->res);
+    while (!cur->ready) {
+        char kind;
+        unsigned char *body;
+        size_t len;
+        if (read_frame(c, &kind, &body, &len) != 0) {
+            cur->ready = 1;
+            break;
+        }
+        if (kind == 'S') {
+            send_frame(c, 'c', NULL);
+        } else if (kind == 'K' && cur->res) {
+            reader r = {body, len, 0, 0};
+            free(cur->res->command);
+            cur->res->command = get_str(&r);
+            cur->res->count = get_le(&r, 8);
+        } else if (kind == 'R') {
+            cursor_end(cur, body, len);
+        }
+        free(body);
+    }
+    if (c && c->active == cur) c->active = NULL;
+}
+
+void nc_cursor_stop(nc_cursor *cur) {
+    if (cur) cursor_drain(cur);
+}
+
+void nc_cursor_close(nc_cursor *cur) {
+    if (!cur) return;
+    cursor_drain(cur);
+    nc_result_free(cur->res);
+    free(cur);
+}
+
 int nc_status(const nc_conn *c) { return c->status; }
 const char *nc_server_version(const nc_conn *c) { return c->server; }
 uint32_t nc_session_id(const nc_conn *c) { return c->session; }
 
 void nc_close(nc_conn *c) {
     if (!c) return;
+    /* A cursor still open outlives it, ended. */
+    if (c->active) {
+        c->active->ready = 1;
+        c->active->c = NULL;
+    }
     send_frame(c, 'X', NULL);
     drop_conn(c);
 }

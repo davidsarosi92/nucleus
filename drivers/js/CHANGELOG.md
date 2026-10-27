@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Protocol version 6 (nucleus PLAN.md §M14.11): results stream.
+  `Client.stream(sql, params, { fetch })` returns a `Stream` to read with
+  `for await`, a batch at a time; leaving the loop, `close()` or the next
+  query stops the statement.
 - Protocol version 5 (nucleus PLAN.md §M14.10): errors carry a hint,
   `NucleusError.hint` (`null` when there is none).
 - A directory's (LDAP) password through PLAIN, over TLS only.

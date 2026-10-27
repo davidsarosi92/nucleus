@@ -11,6 +11,7 @@
 //! - DDL is transactional: the catalog lives in the same store.
 
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use nucleus_kv::{Isolation, Kv, KvTxn, TxnOptions};
@@ -48,6 +49,74 @@ pub enum Output {
     },
     /// A command tag: `CREATE TABLE`, `INSERT 0 3`, `BEGIN`, …
     Command(String),
+}
+
+/// Where a statement's rows go ([`Session::run_into`]): a query's as the
+/// executor produces them, so a result never has to fit in memory; any
+/// other statement's (`RETURNING`, `SHOW`, `EXPLAIN`) once it is done.
+pub trait Sink {
+    /// The result's columns, before its first row (a statement without
+    /// rows calls neither).
+    fn columns(&mut self, columns: &[OutColumn]) -> Result<()>;
+    /// The next row.  `Break`: neither it nor any after it is wanted — the
+    /// statement ends there, as if its result had.  An error stops the
+    /// statement with it.
+    fn row(&mut self, row: Row) -> Result<ControlFlow<()>>;
+}
+
+/// A sink keeping the whole result: what [`Session::run`] returns.
+#[derive(Default)]
+struct Collect {
+    columns: Option<Vec<OutColumn>>,
+    rows: Vec<Row>,
+}
+
+impl Sink for Collect {
+    fn columns(&mut self, columns: &[OutColumn]) -> Result<()> {
+        self.columns = Some(columns.to_vec());
+        Ok(())
+    }
+    fn row(&mut self, row: Row) -> Result<ControlFlow<()>> {
+        self.rows.push(row);
+        Ok(ControlFlow::Continue(()))
+    }
+}
+
+/// A sink counting what passes to another: whether anything did (a
+/// statement that sent part of its result is not retried) and the rows,
+/// for the statement statistics.
+struct Counted<'s> {
+    sink: &'s mut dyn Sink,
+    started: bool,
+    rows: u64,
+}
+
+impl Sink for Counted<'_> {
+    fn columns(&mut self, columns: &[OutColumn]) -> Result<()> {
+        self.started = true;
+        self.sink.columns(columns)
+    }
+    fn row(&mut self, row: Row) -> Result<ControlFlow<()>> {
+        let flow = self.sink.row(row)?;
+        if flow.is_continue() {
+            self.rows += 1;
+        }
+        Ok(flow)
+    }
+}
+
+/// Hands a finished statement's rows to `sink`; its command tag.
+fn deliver(stmt: &Statement, out: Output, sink: &mut dyn Sink) -> Result<String> {
+    let tag = command_tag(stmt, &out);
+    if let Output::Rows { columns, rows } = out {
+        sink.columns(&columns)?;
+        for row in rows {
+            if sink.row(row)?.is_break() {
+                break;
+            }
+        }
+    }
+    Ok(tag)
 }
 
 /// The command tag of a statement's output, as clients show it: the
@@ -481,13 +550,40 @@ impl Session {
         self.audit_apart(record)
     }
 
-    /// Runs one statement with parameter values.
+    /// Runs one statement with parameter values; its whole result.
     pub fn run(&mut self, stmt: &Statement, params: &[Value]) -> Result<Output> {
-        self.run_statement(stmt, params)
+        let mut all = Collect::default();
+        let out = self.run_into(stmt, params, &mut all)?;
+        Ok(match all.columns {
+            Some(columns) => Output::Rows {
+                columns,
+                rows: all.rows,
+            },
+            None => Output::Command(out),
+        })
+    }
+
+    /// Runs one statement with parameter values, its rows into `sink` (a
+    /// query's as they are produced); its command tag.
+    pub fn run_into(
+        &mut self,
+        stmt: &Statement,
+        params: &[Value],
+        sink: &mut dyn Sink,
+    ) -> Result<String> {
+        self.run_statement(stmt, params, sink)
+            .and_then(|out| deliver(stmt, out, sink))
             .map_err(crate::hint::complete)
     }
 
-    fn run_statement(&mut self, stmt: &Statement, params: &[Value]) -> Result<Output> {
+    /// Runs a statement: one about the session itself returns its output,
+    /// the rest hand their rows to `sink` and return their command tag.
+    fn run_statement(
+        &mut self,
+        stmt: &Statement,
+        params: &[Value],
+        sink: &mut dyn Sink,
+    ) -> Result<Output> {
         match stmt {
             Statement::Begin(mode) => {
                 if self.block.is_none() {
@@ -629,22 +725,34 @@ impl Session {
                 self.charge_rate(&who)?;
                 let budget = self.budget(&who)?;
                 crate::access::with_who(&who, || {
-                    crate::budget::with_budget(budget, || self.run_in_txn(stmt, params))
+                    crate::budget::with_budget(budget, || self.run_in_txn(stmt, params, sink))
                 })
             }
         }
     }
 
-    fn run_in_txn(&mut self, stmt: &Statement, params: &[Value]) -> Result<Output> {
+    /// Runs a statement in a transaction, its rows into `sink`; its
+    /// command tag (as `Output::Command`).
+    fn run_in_txn(
+        &mut self,
+        stmt: &Statement,
+        params: &[Value],
+        sink: &mut dyn Sink,
+    ) -> Result<Output> {
         let text = self.text.take();
         if !self.audited {
             // A session of the database's own (a probe): neither audited
             // nor in the statement statistics.
-            return self.run_unaudited(stmt, params);
+            return self.run_unaudited(stmt, params, sink);
         }
         let (start, read) = (self.kv.elapsed(), crate::budget::scanned());
         crate::audit::begin_statement();
-        let r = self.run_in_txn_audited(stmt, params, text.as_deref());
+        let mut counted = Counted {
+            sink,
+            started: false,
+            rows: 0,
+        };
+        let r = self.run_in_txn_audited(stmt, params, text.as_deref(), &mut counted);
         crate::audit::end_statement();
         // In the statistics when its text is known (every front end
         // notes it, and `execute`).
@@ -656,9 +764,15 @@ impl Session {
             crate::statements::Run {
                 text,
                 user: &crate::access::current().user,
-                elapsed: self.kv.elapsed().saturating_sub(start),
+                elapsed: self.kv.elapsed().saturating_sub(start).saturating_sub(
+                    std::time::Duration::from_micros(crate::budget::waited() as u64),
+                ),
                 rows_read: crate::budget::scanned().saturating_sub(read),
-                rows_returned: r.as_ref().map_or(0, crate::statements::rows_of),
+                rows_returned: match &r {
+                    Ok(_) if counted.started => counted.rows,
+                    Ok(out) => crate::statements::rows_of(out),
+                    Err(_) => 0,
+                },
                 ok: r.is_ok(),
                 at: crate::datetime::from_system(self.kv.wall_clock()),
             },
@@ -666,15 +780,20 @@ impl Session {
         r
     }
 
-    fn run_unaudited(&mut self, stmt: &Statement, params: &[Value]) -> Result<Output> {
+    fn run_unaudited(
+        &mut self,
+        stmt: &Statement,
+        params: &[Value],
+        sink: &mut dyn Sink,
+    ) -> Result<Output> {
         let opts = options(&TxnMode::default(), self.default_isolation, read_only(stmt));
         let mut txn = self.kv.begin(opts)?;
         let now = crate::datetime::from_system(self.kv.wall_clock());
         let out = crate::datetime::with_now(now, &self.kv, || {
-            execute(txn.as_mut(), &self.registry, stmt, params)
+            execute(txn.as_mut(), &self.registry, stmt, params, sink)
         })?;
         txn.commit()?;
-        Ok(out)
+        Ok(Output::Command(deliver(stmt, out, sink)?))
     }
 
     /// Whether a statement changes the catalog: always in the audit log.
@@ -727,6 +846,7 @@ impl Session {
         stmt: &Statement,
         params: &[Value],
         text: Option<&str>,
+        sink: &mut Counted,
     ) -> Result<Output> {
         let ddl = Self::is_ddl(stmt);
         let default = self.default_isolation;
@@ -752,9 +872,11 @@ impl Session {
             let now = block.now;
             let r = r.and_then(|()| {
                 crate::datetime::with_now(now, &self.kv, || {
-                    execute(txn.as_mut(), &self.registry, stmt, params)
+                    execute(txn.as_mut(), &self.registry, stmt, params, sink)
                 })
             });
+            // In a block a result is handed over at once: nothing commits.
+            let r = r.and_then(|out| deliver(stmt, out, sink).map(Output::Command));
             // Recorded in the block's transaction when it went through and
             // the block may write (a block rolled back takes it with it);
             // else apart.
@@ -794,7 +916,7 @@ impl Session {
             let mut apart = None;
             let r = self.check_format(txn.as_mut()).and_then(|()| {
                 crate::datetime::with_now(now, &self.kv, || {
-                    execute(txn.as_mut(), &self.registry, stmt, params)
+                    execute(txn.as_mut(), &self.registry, stmt, params, sink)
                 })
             });
             // In the statement's transaction when it went through and may
@@ -812,12 +934,15 @@ impl Session {
                 }
                 Ok(())
             });
+            // A finished statement's rows (`RETURNING`) are handed over
+            // once it has committed, so a retried one sends them once.
             let r = decided.and(r).and_then(|out| {
                 txn.commit()?;
-                Ok(out)
+                deliver(stmt, out, sink).map(Output::Command)
             });
             match r {
-                Err(e) if e.code == "40001" && attempt < 10 => {
+                // (Not once part of a query's result has gone out.)
+                Err(e) if e.code == "40001" && attempt < 10 && !sink.started => {
                     attempt += 1;
                     self.kv.back_off(attempt);
                 }
@@ -968,11 +1093,15 @@ fn written(tag: &str, w: dml::Written) -> Output {
 }
 
 /// Runs a statement inside `txn`.
+///
+/// A query's rows go to `sink` as they are produced, and its output is its
+/// command tag; any other statement's output is returned whole.
 pub fn execute(
     txn: &mut dyn KvTxn,
     reg: &Registry,
     stmt: &Statement,
     params: &[Value],
+    sink: &mut dyn Sink,
 ) -> Result<Output> {
     crate::privileges::authorize_ddl(&*txn, reg, stmt)?;
     Ok(match stmt {
@@ -982,12 +1111,19 @@ pub fn execute(
             let bound = binder.query(q)?;
             let plan = optimize(bound.plan, ro);
             let ctx = Ctx::new(ro, reg, params);
-            let rows = exec::collect(&plan, &ctx, None)?;
-            crate::budget::charge_rows(rows.len())?;
-            Output::Rows {
-                columns: columns_of(bound.scope.cols.into_iter().map(|c| (c.name, c.ty))),
-                rows,
+            sink.columns(&columns_of(
+                bound.scope.cols.into_iter().map(|c| (c.name, c.ty)),
+            ))?;
+            let mut n = 0;
+            for row in exec::build(&plan, &ctx, None)? {
+                let row = row?;
+                crate::budget::charge_rows(n + 1)?;
+                if sink.row(row)?.is_break() {
+                    break;
+                }
+                n += 1;
             }
+            Output::Command(format!("SELECT {n}"))
         }
         Statement::Comment {
             table,

@@ -142,6 +142,44 @@ class Conformance(unittest.TestCase):
             self.assertEqual(cur.fetchone(), (1, "a"))
             self.assertEqual(cur.fetchall(), [(2, "b")])
 
+    def test_stream(self):
+        with connect() as c:
+            big = "SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b"
+            # Ten billion rows: only what is read is produced.
+            with c.stream(big, fetch=500) as s:
+                self.assertEqual([col.name for col in s.columns], ["a", "b"])
+                for i, row in enumerate(s):
+                    if i == 1200:
+                        break
+            self.assertEqual(s.count, 1500)
+            self.assertEqual(c.execute("SELECT 1").rows, [(1,)])
+            s = c.stream("SELECT i FROM generate_series(1, 2500) i", fetch=100)
+            self.assertEqual(sum(1 for _ in s), 2500)
+            self.assertEqual((s.command, s.count), ("SELECT", 2500))
+            # An error before the first row raises at once; after rows,
+            # from the iteration.
+            with self.assertRaises(nucleus.ProgrammingError):
+                c.stream("SELECT nope")
+            got = []
+            with self.assertRaises(nucleus.DataError) as e:
+                for row in c.stream("SELECT 1 / (300 - i) FROM generate_series(1, 400) i", fetch=64):
+                    got.append(row)
+            self.assertEqual(e.exception.code, "22012")
+            self.assertEqual(len(got), 299)
+            # A stream left unread is closed by the next statement; a
+            # DB-API cursor reads lazily.
+            c.stream(big)
+            cur = c.cursor()
+            cur.itersize = 10
+            cur.execute("SELECT i FROM generate_series(1, 25) i")
+            self.assertEqual(cur.rowcount, -1)
+            self.assertEqual(len(cur.fetchmany(12)), 12)
+            self.assertEqual(len(cur.fetchall()), 13)
+            self.assertEqual(cur.rowcount, 25)
+            with self.assertRaises(nucleus.ProgrammingError):
+                c.stream("SELECT 1; SELECT 2")
+            self.assertEqual(c.status, 0)
+
     def test_authentication(self):
         with self.assertRaises(nucleus.OperationalError) as e:
             connect(password="wrong")

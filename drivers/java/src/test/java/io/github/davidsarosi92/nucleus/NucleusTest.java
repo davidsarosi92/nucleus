@@ -210,6 +210,40 @@ public final class NucleusTest {
         }
     }
 
+    static void cursors() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            String big = "SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b";
+            // Ten billion rows: only what is read is produced.
+            NucleusClient.Cursor c = db.cursor(500, big);
+            equal(c.columns().get(1).name(), "b", "columns");
+            int i = 0;
+            for (List<Object> row : c) {
+                if (++i == 1201) break;
+            }
+            c.close();
+            equal(c.count(), 1500L, "rows sent before the close");
+            equal(db.query("SELECT 1").rows().get(0).get(0), 1, "after a close");
+            try (NucleusClient.Cursor all = db.cursor(100, "SELECT i FROM generate_series(1, 2500) i")) {
+                int n = 0;
+                for (List<Object> row : all) n++;
+                equal(n, 2500, "every row");
+                equal(all.command() + " " + all.count(), "SELECT 2500", "the tag");
+            }
+            // An error before the first row throws at once; after rows, from the iteration.
+            equal(errorCode(() -> db.cursor("SELECT nope")), "42703", "before rows");
+            int[] got = {0};
+            equal(errorCode(() -> {
+                for (List<Object> row : db.cursor(64, "SELECT 1 / (300 - i) FROM generate_series(1, 400) i")) got[0]++;
+            }), "22012", "after rows");
+            equal(got[0], 299, "rows before the error");
+            // A cursor left unread is closed by the next statement.
+            db.cursor(big);
+            equal(db.query("SELECT 2").rows().get(0).get(0), 2, "after an unread cursor");
+            equal(errorCode(() -> db.cursor("SELECT 1; SELECT 2")), "42601", "one statement");
+            equal(db.status(), NucleusClient.Status.IDLE, "idle");
+        }
+    }
+
     private static void run(String name, Runnable test) {
         test.run();
         passed++;
@@ -226,7 +260,8 @@ public final class NucleusTest {
         run("tls", NucleusTest::tls);
         run("token", NucleusTest::token);
         run("directory", NucleusTest::directory);
-        check(passed == 9, "all tests ran");
+        run("cursors", NucleusTest::cursors);
+        check(passed == 10, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

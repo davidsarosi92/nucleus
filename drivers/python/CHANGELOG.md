@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Protocol version 6 (nucleus PLAN.md §M14.11): results stream.
+  `Connection.stream(sql, params, fetch)` iterates a statement's rows as
+  they arrive, a batch at a time; closing it (or running another
+  statement) stops the statement.  The DB-API cursor reads lazily through
+  it: `Cursor.execute` runs one statement, `itersize` rows a batch, and a
+  query's `rowcount` is -1 until its last row is read.
 - Protocol version 5 (nucleus PLAN.md §M14.10): errors carry a hint,
   `Error.hint` (`None` when there is none).
 - A directory's (LDAP) password through PLAIN, over TLS only.

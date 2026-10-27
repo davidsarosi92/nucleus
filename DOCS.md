@@ -1638,7 +1638,8 @@ failure), parameter status (`server_version`
 the transaction status.  Simple query protocol (statements one by one, the
 first error stops the rest) and extended protocol: Parse (parameter types
 inferred, or given), Bind (text or binary parameters), Describe (statement
-and portal), Execute with a row limit (`PortalSuspended`), Sync, Close,
+and portal), Execute (streamed as produced; with a row limit the result
+is kept and sent a part at a time, `PortalSuspended`), Sync, Close,
 Flush; after an error, messages are skipped until Sync.  Types on the wire:
 `bool` 16, `int8` 20 (`int2`/`int4` accepted), `float8` 701 (`float4`
 accepted), `text` 25 (`varchar`, `bpchar`, `name` accepted), `numeric`
@@ -1683,16 +1684,19 @@ header bytes not included; at most 1 GiB), then the body.
 
 | Kind | Direction | Body |
 |------|-----------|------|
-| `H` Hello | client → server, first | `u16` version (5; 1–4 still accepted), string user, string database, string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
+| `H` Hello | client → server, first | `u16` version (6; 1–5 still accepted), string user, string database, string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
 | `A` Authentication | server → client | string: the mechanisms, space-separated (`SCRAM-SHA-256`; over TLS with a channel binding `SCRAM-SHA-256-PLUS SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
 | `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message — or OAUTHBEARER's initial response, or PLAIN's |
 | `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |
-| `Q` Query | client → server | string SQL, `u8` result format (0 typed, 1 text), `u16` parameter count, the parameters as values |
+| `Q` Query | client → server | string SQL, `u8` result format (0 typed, 1 text), version 6: `u32` fetch size (rows per batch; 0: the whole result at once), `u16` parameter count, the parameters as values |
 | `C` Columns | server → client | `u16` count, then per column: string name, type |
 | `D` Row | server → client | one value per column |
 | `K` Done | server → client | string command (`SELECT`, `INSERT`, `CREATE TABLE`, `BEGIN`, …), `u64` rows returned or affected (0 when it does not apply) |
 | `E` Error | server → client | string SQLSTATE (5 characters), string message; version 5: string hint (what to do about it; empty: none) |
 | `R` Ready | server → client | `u8` transaction status: 0 idle, 1 in a transaction block, 2 in a failed block |
+| `S` Suspended | server → client | empty (version 6): a batch is sent; the server waits for `F` or `c` |
+| `F` Fetch | client → server | `u32` the next batch's size (0: the rest at once), after `S` |
+| `c` Close | client → server | empty, after `S`: no more rows — the statement ends there |
 | `X` Bye | client → server | empty; the server closes |
 
 **Session.** The client sends Hello.  If the server wants a password and
@@ -1728,13 +1732,27 @@ by, per statement, `[C D*] K` (Columns and Rows only for statements that
 return rows), and finally Ready.  A failing statement sends Error instead
 of Done, the remaining statements of that Query are skipped, and Ready
 follows.  A Query with parameters must hold one statement; `$1`, `$2`, …
-refer to them.  Transactions are SQL (`BEGIN`, `COMMIT`, `ROLLBACK`), as in
+refer to them.
+
+**Streaming** (version 6).  A query's rows are sent as the executor
+produces them, so a result never has to fit in the server's memory, and
+an error can come after some rows (Error then ends the statement, as
+above).  With a fetch size *n* > 0 (one statement only, else `42601`), the
+server sends *n* rows, then `S`, and waits: `F` asks for the next batch
+(of its size; 0 for the rest), `c` ends the statement there — Done counts
+the rows sent — and `X` closes the connection; anything else is `08P01`
+and the connection closes.  A result of exactly *n* rows ends without
+`S`.  The statement holds its snapshot while it waits, and the time spent
+waiting does not count toward its `statement_timeout`.  Rows of other
+statements (`RETURNING`, `SHOW`, `EXPLAIN`) are sent once the statement has
+committed, so one retried after a conflict sends them once.  Transactions are SQL (`BEGIN`, `COMMIT`, `ROLLBACK`), as in
 §8.7; outside a block every statement commits on its own.
 
 **Versions.**  2 adds registered types (`uuid`, a module's type): tag 11
 below.  3 adds tags 12–20, §M14.26's types.  4 proves the password by
 SCRAM-SHA-256 instead of sending it (§M14.25).  5 adds the hint to `E`
-(§8.14).  An older client gets what
+(§8.14).  6 streams results and fetches them in batches (`Q`'s fetch
+size, `S`, `F`, `c`; §M14.11).  An older client gets what
 its version knows — registered types as text before 2; before 3,
 `smallint` and `integer` as `bigint` (tag 2), `real` as a double (tag 3),
 `bytea`, `time`, `char(n)`, `inet`, `cidr` and enums as text — so older
@@ -1791,7 +1809,10 @@ untyped literal would be).
 `Client::connect(Config)` (defaults: `127.0.0.1:20035`, user, password and
 database `nucleus`), `execute(sql, params) -> Reply` (columns, rows,
 command, count), `rows(sql, params)`, `query(sql, params, Format)` for
-several statements or text results, `status()`, `close()`.  `Value` covers
+several statements or text results, `cursor(sql, params, fetch)` — an
+iterator over a result as it arrives, `fetch` rows at a time (0: 1000);
+`columns()`, `command()`, `close()`, and dropped early it stops the
+statement — `status()`, `close()`.  `Value` covers
 every nucleus type (`SmallInt(i16)`, `Integer(i32)`, `Int(i64)`,
 `Real(f32)`, `Float(f64)`, numeric as mantissa and scale, `Bytes`,
 dates and timestamps as days and µs since 2000-01-01, `Time` as µs since
@@ -1799,7 +1820,12 @@ midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
 `Uuid([u8; 16])`, `Other { type_name, bytes }` for another registered
 type; `char(n)` and enum values as text, their columns typed `Char` and
 `Enum(name)`) with `From` conversions for parameters.  Every driver
-speaks protocol version 5 — errors with their hint (`ServerError::hint`,
+speaks protocol version 6 — results read as they arrive, a batch at a
+time (Rust `Client::cursor`, Python `Connection.stream` and a lazy DB-API
+cursor, JavaScript `Client.stream` with `for await`, Java
+`NucleusClient.cursor`, C `nc_cursor_open` / `nc_cursor_next`, C++
+`Connection::cursor`; closing one early, or the next query, stops the
+statement) — errors with their hint (`ServerError::hint`,
 Python's `.hint`, JavaScript's `hint`, Java's `hint()`, C's
 `nc_error.hint`, C++'s `hint()`) — and logs in by SCRAM-SHA-256 (the C driver with
 its own SHA-256, HMAC, PBKDF2 and base64; the others with their
@@ -1890,6 +1916,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-10-27 — §M14.11 streaming results and cursors (L1, L2):** a
+  query's rows go to the client as the executor produces them; `ncp`
+  version 6 fetches them in batches (`Q`'s fetch size, `S`, `F`, `c`);
+  a cursor in every driver; pg-compat streams simple queries and Execute
+  without a row limit.
 
 - **2026-10-23 — §M14.10 `docs/llm.md` (B4) — §M14.10 shipped:** a
   compact, model-oriented reference of the dialect, its gaps with what to

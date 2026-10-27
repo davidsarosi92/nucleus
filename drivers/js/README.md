@@ -27,4 +27,8 @@ SCRAM-SHA-256, never sent.  TLS: `connect({ tls: true })` (Node's CAs),
 of the password.  Errors are
 `NucleusError` with
 `code` (SQLSTATE) and `hint` (what to do about it, or `null`).  Queries on one connection run one after another.
+Large results stream (protocol version 6): `for await (const row of await
+db.stream(sql, params, { fetch: 1000 }))` reads them as they arrive, the
+server sending a batch at a time and waiting until it is read; leaving
+the loop (or `close()`, or the next query) stops the statement.
 Tests: `npm test`; example: `examples/js/quickstart.ts`.

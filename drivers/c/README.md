@@ -22,7 +22,12 @@ checks the server against the system's CAs, `cfg.tls_ca` against a PEM
 file, `cfg.tls_no_verify = 1` not at all; `cfg.tls_cert` / `tls_key`
 show a client certificate; `nc_tls_supported()` says whether the build
 can.  `cfg.token` logs in with an OpenID Connect identity token instead of
-the password.
+the password.  Large results stream (protocol version 6):
+`nc_cursor_open(db, sql, params, n, fetch, &err)`, then `nc_cursor_next`
+(1 a row — row 0 of `nc_cursor_result` —, 0 the end, -1 an error), and
+`nc_cursor_close`; the server sends `fetch` rows at a time and waits until
+they are read, and closing early (`nc_cursor_stop`, `nc_cursor_close`, or
+the next query) stops the statement.
 
 ```sh
 make                # build/libnucleus.a

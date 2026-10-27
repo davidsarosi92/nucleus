@@ -26,5 +26,10 @@ version 4: the password is proved by SCRAM-SHA-256, never sent.  TLS:
 a client certificate; `token=` for an identity token instead of the
 password.
 Errors are `nucleus.Error` subclasses with `.code` (SQLSTATE) and `.hint`
-(what to do about it, or `None`).  Tests:
+(what to do about it, or `None`).  Large results stream (protocol version
+6): `with conn.stream(sql, params, fetch=1000) as rows: for row in rows:`
+reads them as they arrive, the server sending a batch at a time and
+waiting until it is read; closing early stops the statement, and a DB-API
+`cursor().execute()` reads lazily the same way (`itersize` rows a batch;
+one statement; `rowcount` -1 until the last row is read).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.

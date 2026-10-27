@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Protocol version 6 (nucleus PLAN.md §M14.11), through the C driver:
+  `Connection::cursor(sql, params, fetch)` returns a `Cursor` (a range of
+  rows, or `next(row)`) read a batch at a time; destroyed or `close()`d
+  early it stops the statement.
 - Protocol version 5 (nucleus PLAN.md §M14.10): errors carry a hint,
   `Error::hint()` (empty when there is none).
 - A directory's (LDAP) password through PLAIN, over TLS only.

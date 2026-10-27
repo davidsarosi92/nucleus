@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 
 import { Cidr, connect, Decimal, Inet, Interval, NucleusError, Time } from "../src/index.ts";
+import type { Value } from "../src/index.ts";
 
 const options = {
   host: process.env.NUCLEUS_HOST ?? "127.0.0.1",
@@ -114,6 +115,43 @@ test("transactions", async () => {
   }));
   assert.equal(db.status, "idle");
   assert.deepEqual((await db.query(`SELECT id FROM ${t}`)).rows, [[1]]);
+  await db.close();
+});
+
+test("streams", async () => {
+  const db = await connect(options);
+  const big = "SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b";
+  // Ten billion rows: only what is read is produced.
+  const s = await db.stream(big, [], { fetch: 500 });
+  assert.deepEqual(s.columns.map((c) => c.name), ["a", "b"]);
+  let i = 0;
+  for await (const _row of s) {
+    if (++i === 1201) break;
+  }
+  assert.equal(s.count, 1500);
+  assert.deepEqual((await db.query("SELECT 1")).rows, [[1]]);
+  const all = await db.stream("SELECT i FROM generate_series(1, 2500) i", [], { fetch: 100 });
+  let n = 0;
+  for await (const _row of all) n++;
+  assert.equal(n, 2500);
+  assert.equal(all.command, "SELECT");
+  assert.equal(all.count, 2500);
+  // An error before the first row rejects at once; after rows, from the
+  // iteration.
+  await assert.rejects(db.stream("SELECT nope"), (e: NucleusError) => e.code === "42703");
+  const got: Value[][] = [];
+  await assert.rejects(
+    (async () => {
+      for await (const row of await db.stream("SELECT 1 / (300 - i) FROM generate_series(1, 400) i", [], { fetch: 64 })) got.push(row);
+    })(),
+    (e: NucleusError) => e.code === "22012",
+  );
+  assert.equal(got.length, 299);
+  // A stream left unread is closed by the next statement.
+  await db.stream(big);
+  assert.deepEqual((await db.query("SELECT 2")).rows, [[2]]);
+  await assert.rejects(db.stream("SELECT 1; SELECT 2"), (e: NucleusError) => e.code === "42601");
+  assert.equal(db.status, "idle");
   await db.close();
 });
 

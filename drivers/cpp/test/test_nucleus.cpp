@@ -143,6 +143,45 @@ int main() {
         Connection db(c);
         CHECK(db.query("SELECT 'over tls'").rows[0][0].str() == "over tls");
     }
+    {
+        // Cursors: ten billion rows, only what is read is produced.
+        Connection db(config());
+        const std::string big = "SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b";
+        {
+            Cursor cur = db.cursor(big, {}, 500);
+            CHECK(cur.columns().size() == 2 && cur.columns()[1].name == "b");
+            int n = 0;
+            for (const auto& row : cur) {
+                CHECK(row.size() == 2);
+                if (++n == 1201) break;
+            }
+            cur.close();
+            CHECK(cur.command() == "SELECT" && cur.count() == 1500);
+        }
+        CHECK(db.query("SELECT 1").rows.size() == 1);
+        Cursor all = db.cursor("SELECT i FROM generate_series(1, 2500) i", {}, 100);
+        int n = 0;
+        std::vector<Value> row;
+        while (all.next(row)) n++;
+        CHECK(n == 2500 && all.count() == 2500);
+        try {
+            db.cursor("SELECT nope");
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "42703");
+        }
+        n = 0;
+        try {
+            for (const auto& r : db.cursor("SELECT 1 / (300 - i) FROM generate_series(1, 400) i", {}, 64)) {
+                (void)r;
+                n++;
+            }
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "22012" && n == 299);
+        }
+        CHECK(db.status() == 0);
+    }
     if (failures) {
         std::cerr << failures << " check(s) failed\n";
         return 1;

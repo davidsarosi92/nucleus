@@ -2,6 +2,7 @@
 
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::TcpStream;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use nucleus_kv::Kv;
@@ -10,7 +11,7 @@ use nucleus_sql::ext::TypeRef;
 
 /// The value and type tag of a registered type (version 2).
 const EXT: u8 = 11;
-use nucleus_sql::{DataType, Error, Output, Session, TxnStatus, Value};
+use nucleus_sql::{DataType, Error, OutColumn, Row, Session, Sink, TxnStatus, Value};
 
 use crate::Config;
 
@@ -22,8 +23,10 @@ use crate::Config;
 /// `bigint`, a real as a double, the rest as text.  Version 4 logs in by
 /// SCRAM-SHA-256 (`A` / `a` messages), so a password never crosses the
 /// wire; older clients still send theirs in clear.  Version 5 adds a hint
-/// to `E` (what to do about the error; empty: none).
-pub const VERSION: u16 = 5;
+/// to `E` (what to do about the error; empty: none).  Version 6 streams:
+/// `Q` carries a fetch size, and a result fetched in batches pauses with
+/// `S` after each until the client asks for more (`F`) or no more (`c`).
+pub const VERSION: u16 = 6;
 /// The oldest it still speaks.
 pub const MIN_VERSION: u16 = 1;
 const MAX_BODY: u32 = 1 << 30;
@@ -233,6 +236,9 @@ impl<'a> Body<'a> {
     fn u16(&mut self) -> Result<u16, Error> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
+    fn u32(&mut self) -> Result<u32, Error> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
     fn str(&mut self) -> Result<String, Error> {
         let n = u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as usize;
         String::from_utf8(self.take(n)?.to_vec()).map_err(|_| protocol("string is not UTF-8"))
@@ -340,26 +346,40 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
         let (kind, body) = read_message(&mut input)?;
         match kind {
             b'Q' => {
-                let parsed = (|| -> Result<(String, u8, Vec<Value>), Error> {
+                let parsed = (|| -> Result<(String, u8, u32, Vec<Value>), Error> {
                     let mut b = Body { b: &body };
                     let sql = b.str()?;
                     let format = b.u8()?;
+                    let fetch = if version >= 6 { b.u32()? } else { 0 };
                     let n = b.u16()? as usize;
                     let mut r = Reader::new(b.b);
                     let mut params = Vec::with_capacity(n);
                     for _ in 0..n {
                         params.push(parameter(&mut r)?);
                     }
-                    Ok((sql, format, params))
+                    Ok((sql, format, fetch, params))
                 })();
                 match parsed {
-                    Ok((sql, format, params)) => {
+                    Ok((sql, format, fetch, params)) => {
                         log("query", &sql);
-                        if let Err(e) =
-                            run(&mut session, &sql, format == 1, version, &params, &mut out)?
-                        {
-                            log("error", &format!("{} {}", e.code, e.message));
-                            out.write_all(&error_msg(&e, version))?;
+                        let query = Query {
+                            sql: &sql,
+                            text: format == 1,
+                            fetch,
+                            params: &params,
+                        };
+                        match run(&mut session, &query, version, &mut input, &mut out)? {
+                            Ran::Done => {}
+                            Ran::Failed(e) => {
+                                log("error", &format!("{} {}", e.code, e.message));
+                                out.write_all(&error_msg(&e, version))?;
+                            }
+                            Ran::Close(e) => {
+                                if let Some(e) = e {
+                                    out.write_all(&error_msg(&e, version))?;
+                                }
+                                return out.flush();
+                            }
                         }
                     }
                     Err(e) => out.write_all(&error_msg(&e, version))?,
@@ -639,8 +659,6 @@ fn exchange(
     }
 }
 
-/// Runs a Query's statements, writing their results; the first error is
-/// returned (not yet written).
 /// A parameter: a value in the protocol's encoding (tags 0–10 as the row
 /// encoding's version 1, 11 a registered type's name and binary form,
 /// 12–19 version 3's).
@@ -729,31 +747,154 @@ fn parameter(r: &mut Reader) -> Result<Value, Error> {
     Ok(v)
 }
 
-fn run(
-    session: &mut Session,
-    sql: &str,
+/// A `Q` message.
+struct Query<'a> {
+    sql: &'a str,
+    /// Every value as text.
+    text: bool,
+    /// Rows per batch (0: the whole result at once).
+    fetch: u32,
+    params: &'a [Value],
+}
+
+/// How a `Q` went.
+enum Ran {
+    /// Every statement ran.
+    Done,
+    /// A statement failed: the error to send.
+    Failed(Error),
+    /// The client left while a result waited (`X`), or broke the protocol
+    /// (the error to send): the connection ends.
+    Close(Option<Error>),
+}
+
+/// A statement's rows onto the wire as the executor produces them.  With a
+/// fetch size, after each batch an `S` and a wait for the client: `F`
+/// (the next batch; its size, 0 for the rest) or `c` (no more — the
+/// statement ends there).
+struct Wire<'a, R: Read, W: Write> {
+    input: &'a mut R,
+    out: &'a mut W,
     text: bool,
     version: u16,
-    params: &[Value],
-    out: &mut impl Write,
-) -> io::Result<Result<(), Error>> {
-    let (stmts, texts): (Vec<_>, Vec<_>) = match nucleus_sql::parser::parse_with_text(sql) {
+    types: Vec<DataType>,
+    fetch: u32,
+    /// Rows left in this batch (`None`: no limit).
+    left: Option<u32>,
+    /// The connection failed: the statement stopped on it.
+    broken: Option<io::Error>,
+    /// How the connection ends instead of going on.
+    close: Option<Option<Error>>,
+}
+
+impl<R: Read, W: Write> Wire<'_, R, W> {
+    fn send(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.out.write_all(bytes).map_err(|e| self.broke(e))
+    }
+
+    fn broke(&mut self, e: io::Error) -> Error {
+        self.broken = Some(e);
+        Error {
+            code: "08006",
+            message: "the connection failed while the result was sent".into(),
+            hint: None,
+        }
+    }
+
+    /// Pauses after a batch: the next one's size (`None`: no limit), or
+    /// none when the client wants no more.
+    fn suspend(&mut self) -> Result<Option<Option<u32>>, Error> {
+        self.send(&Msg::new(b'S').finish())?;
+        self.out.flush().map_err(|e| self.broke(e))?;
+        let input = &mut *self.input;
+        match nucleus_sql::budget::paused(|| read_message(input)) {
+            Ok((b'F', body)) => {
+                let n = Body { b: &body }.u32()?;
+                Ok(Some((n > 0).then_some(n)))
+            }
+            Ok((b'c', _)) => Ok(None),
+            Ok((b'X', _)) => {
+                self.close = Some(None);
+                Err(protocol("the client left"))
+            }
+            Ok((other, _)) => {
+                let e = protocol(format!(
+                    "unexpected message {:?} while a result waits for F or c",
+                    other as char
+                ));
+                self.close = Some(Some(e.clone()));
+                Err(e)
+            }
+            Err(e) => Err(self.broke(e)),
+        }
+    }
+}
+
+impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
+    fn columns(&mut self, columns: &[OutColumn]) -> Result<(), Error> {
+        let mut m = Msg::new(b'C').u16(columns.len() as u16);
+        for c in columns {
+            m = m.str(&c.name).ty(Some(c.ty), self.version);
+        }
+        self.types = columns.iter().map(|c| c.ty).collect();
+        self.left = (self.fetch > 0).then_some(self.fetch);
+        self.send(&m.finish())
+    }
+
+    fn row(&mut self, row: Row) -> Result<ControlFlow<()>, Error> {
+        if self.left == Some(0) {
+            match self.suspend()? {
+                Some(next) => self.left = next,
+                None => return Ok(ControlFlow::Break(())),
+            }
+        }
+        if let Some(n) = &mut self.left {
+            *n -= 1;
+        }
+        let mut m = Msg::new(b'D');
+        for (v, t) in row.iter().zip(&self.types) {
+            m = if self.text && !v.is_null() {
+                m.value(&Value::Text(v.render()), None, self.version)
+            } else {
+                m.value(v, Some(*t), self.version)
+            };
+        }
+        self.send(&m.finish())?;
+        Ok(ControlFlow::Continue(()))
+    }
+}
+
+/// Runs a Query's statements, writing their results as they are produced;
+/// the first error is returned (not yet written).
+fn run<R: Read, W: Write>(
+    session: &mut Session,
+    query: &Query,
+    version: u16,
+    input: &mut R,
+    out: &mut W,
+) -> io::Result<Ran> {
+    let (stmts, texts): (Vec<_>, Vec<_>) = match nucleus_sql::parser::parse_with_text(query.sql) {
         Ok(s) => s.into_iter().unzip(),
-        Err(e) => return Ok(Err(e)),
+        Err(e) => return Ok(Ran::Failed(e)),
     };
-    if !params.is_empty() && stmts.len() > 1 {
-        return Ok(Err(Error::syntax(
+    if !query.params.is_empty() && stmts.len() > 1 {
+        return Ok(Ran::Failed(Error::syntax(
             "a query with parameters must hold one statement",
         )));
     }
+    if query.fetch > 0 && stmts.len() > 1 {
+        return Ok(Ran::Failed(Error::syntax(
+            "a query fetched in batches must hold one statement",
+        )));
+    }
     // Parameters take the types their places need (text is parsed).
-    let mut converted = params.to_vec();
+    let mut converted = query.params.to_vec();
     if let [stmt] = stmts.as_slice()
-        && !params.is_empty()
+        && !query.params.is_empty()
     {
         let types = match session.describe(stmt) {
             Ok((types, _)) => types,
-            Err(e) => return Ok(Err(e)),
+            Err(e) => return Ok(Ran::Failed(e)),
         };
         for (v, t) in converted.iter_mut().zip(types) {
             // (An enum's label is converted by the statement, through
@@ -765,7 +906,7 @@ fn run(
             {
                 match v.clone().cast(t) {
                     Ok(c) => *v = c,
-                    Err(e) => return Ok(Err(e)),
+                    Err(e) => return Ok(Ran::Failed(e)),
                 }
             }
         }
@@ -773,32 +914,32 @@ fn run(
     let params = converted.as_slice();
     for (stmt, stmt_text) in stmts.iter().zip(&texts) {
         session.note_text(stmt_text);
-        let output = match session.run(stmt, params) {
-            Ok(o) => o,
-            Err(e) => return Ok(Err(e)),
+        let mut wire = Wire {
+            input: &mut *input,
+            out: &mut *out,
+            text: query.text,
+            version,
+            types: Vec::new(),
+            fetch: query.fetch,
+            left: None,
+            broken: None,
+            close: None,
         };
-        let (command, count) = split_tag(&nucleus_sql::command_tag(stmt, &output));
-        if let Output::Rows { columns, rows } = output {
-            let mut m = Msg::new(b'C').u16(columns.len() as u16);
-            for c in &columns {
-                m = m.str(&c.name).ty(Some(c.ty), version);
-            }
-            out.write_all(&m.finish())?;
-            for row in &rows {
-                let mut m = Msg::new(b'D');
-                for (v, c) in row.iter().zip(&columns) {
-                    m = if text && !v.is_null() {
-                        m.value(&Value::Text(v.render()), None, version)
-                    } else {
-                        m.value(v, Some(c.ty), version)
-                    };
-                }
-                out.write_all(&m.finish())?;
-            }
+        let r = session.run_into(stmt, params, &mut wire);
+        if let Some(e) = wire.broken {
+            return Err(e);
         }
+        if let Some(close) = wire.close {
+            return Ok(Ran::Close(close));
+        }
+        let tag = match r {
+            Ok(tag) => tag,
+            Err(e) => return Ok(Ran::Failed(e)),
+        };
+        let (command, count) = split_tag(&tag);
         out.write_all(&Msg::new(b'K').str(&command).u64(count).finish())?;
     }
-    Ok(Ok(()))
+    Ok(Ran::Done)
 }
 
 #[cfg(test)]

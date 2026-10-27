@@ -10,6 +10,10 @@
 //! for row in c.rows("SELECT id, name FROM t", &[])? {
 //!     println!("{} {}", row[0], row[1]);
 //! }
+//! // A large result, a thousand rows at a time:
+//! for row in c.cursor("SELECT id FROM t", &[], 1000)? {
+//!     println!("{}", row?[0]);
+//! }
 //! # Ok::<(), nucleus_client::Error>(())
 //! ```
 
@@ -22,8 +26,12 @@ use std::time::Duration;
 /// `uuid` arrive in their binary form; 3: `smallint`, `integer`, `real`,
 /// `bytea`, `time`, `inet` and `cidr` in theirs, `char(n)` and enums
 /// named as such; 4: the password is proved by SCRAM-SHA-256, never
-/// sent; 5: errors carry a hint).
-pub const PROTOCOL_VERSION: u16 = 5;
+/// sent; 5: errors carry a hint; 6: results stream, and a [`Cursor`]
+/// fetches them in batches).
+pub const PROTOCOL_VERSION: u16 = 6;
+/// A [`Cursor`]'s batch when none is given: rows the server sends before
+/// it waits for the client.
+pub const DEFAULT_FETCH: u32 = 1000;
 /// The nucleus protocol's default port.
 pub const DEFAULT_PORT: u16 = 20_035;
 
@@ -757,6 +765,40 @@ impl<'a> Input<'a> {
         String::from_utf8(self.take(n)?.to_vec())
             .map_err(|_| Error::Protocol("string is not UTF-8".into()))
     }
+    /// `C`: the result's columns.
+    fn columns(&mut self) -> Result<Vec<Column>, Error> {
+        let n = self.u16()? as usize;
+        let mut columns = Vec::with_capacity(n);
+        for _ in 0..n {
+            let name = self.str()?;
+            let tag = self.u8()?;
+            let ty = match tag {
+                10 => Type::Array(Box::new(type_of_tag(self.u8()?))),
+                11 => match self.str()? {
+                    n if n == "uuid" => Type::Uuid,
+                    n => Type::Other(n),
+                },
+                20 => Type::Enum(self.str()?),
+                _ => type_of_tag(tag),
+            };
+            columns.push(Column { name, ty });
+        }
+        Ok(columns)
+    }
+    /// `D`: a row of `n` values.
+    fn row(&mut self, n: usize) -> Result<Vec<Value>, Error> {
+        let mut row = Vec::with_capacity(n);
+        for _ in 0..n {
+            row.push(Value::decode(self)?);
+        }
+        Ok(row)
+    }
+    /// `K`: the command tag and count.
+    fn tag(&mut self) -> Result<(String, u64), Error> {
+        let command = self.str()?;
+        let count = u64::from_le_bytes(self.take(8)?.try_into().unwrap());
+        Ok((command, count))
+    }
 }
 
 /// A SCRAM nonce from the process's randomly keyed hasher (the operating
@@ -796,6 +838,8 @@ pub struct Client {
     status: TxnStatus,
     server: String,
     session: u32,
+    /// The protocol version agreed with the server.
+    version: u16,
     config: Config,
 }
 
@@ -846,6 +890,7 @@ impl Client {
             status: TxnStatus::Idle,
             server: String::new(),
             session: 0,
+            version: PROTOCOL_VERSION,
             config,
         };
         // Version 4: no password in Hello; the server asks for a proof.
@@ -938,7 +983,7 @@ impl Client {
                     }
                 }
                 b'W' => {
-                    let _version = b.u16()?;
+                    c.version = b.u16()?;
                     c.server = b.str()?;
                     c.session = b.u32()?;
                 }
@@ -977,6 +1022,33 @@ impl Client {
         };
     }
 
+    fn send(&mut self, kind: u8, body: &[u8]) -> Result<(), Error> {
+        self.conn.get_mut().write_all(&frame(kind, body))?;
+        self.conn.get_mut().flush()?;
+        Ok(())
+    }
+
+    /// Sends `Q`: rows `fetch` at a time (0: all at once; from version 6).
+    fn send_query(
+        &mut self,
+        sql: &str,
+        params: &[Value],
+        format: Format,
+        fetch: u32,
+    ) -> Result<(), Error> {
+        let mut body = Vec::new();
+        put_str(&mut body, sql);
+        body.push(u8::from(format == Format::Text));
+        if self.version >= 6 {
+            body.extend_from_slice(&fetch.to_le_bytes());
+        }
+        body.extend_from_slice(&(params.len() as u16).to_le_bytes());
+        for p in params {
+            p.encode(&mut body);
+        }
+        self.send(b'Q', &body)
+    }
+
     /// Runs `sql` (statements separated by `;`; with parameters, one
     /// statement).  Returns each statement's result; a failing statement
     /// ends the list with its error.  `Err` is for the connection.
@@ -986,53 +1058,22 @@ impl Client {
         params: &[Value],
         format: Format,
     ) -> Result<Vec<Result<Reply, ServerError>>, Error> {
-        let mut body = Vec::new();
-        put_str(&mut body, sql);
-        body.push(u8::from(format == Format::Text));
-        body.extend_from_slice(&(params.len() as u16).to_le_bytes());
-        for p in params {
-            p.encode(&mut body);
-        }
-        self.conn.get_mut().write_all(&frame(b'Q', &body))?;
-        self.conn.get_mut().flush()?;
+        self.send_query(sql, params, format, 0)?;
         let mut out = Vec::new();
         let mut current: Option<(Vec<Column>, Vec<Vec<Value>>)> = None;
         loop {
             let (kind, body) = self.read()?;
             let mut b = Input { b: &body };
             match kind {
-                b'C' => {
-                    let n = b.u16()? as usize;
-                    let mut columns = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        let name = b.str()?;
-                        let tag = b.u8()?;
-                        let ty = match tag {
-                            10 => Type::Array(Box::new(type_of_tag(b.u8()?))),
-                            11 => match b.str()? {
-                                n if n == "uuid" => Type::Uuid,
-                                n => Type::Other(n),
-                            },
-                            20 => Type::Enum(b.str()?),
-                            _ => type_of_tag(tag),
-                        };
-                        columns.push(Column { name, ty });
-                    }
-                    current = Some((columns, Vec::new()));
-                }
+                b'C' => current = Some((b.columns()?, Vec::new())),
                 b'D' => {
                     let (columns, rows) = current
                         .as_mut()
                         .ok_or_else(|| Error::Protocol("a row before its columns".into()))?;
-                    let mut row = Vec::with_capacity(columns.len());
-                    for _ in 0..columns.len() {
-                        row.push(Value::decode(&mut b)?);
-                    }
-                    rows.push(row);
+                    rows.push(b.row(columns.len())?);
                 }
                 b'K' => {
-                    let command = b.str()?;
-                    let count = u64::from_le_bytes(b.take(8)?.try_into().unwrap());
+                    let (command, count) = b.tag()?;
                     let (columns, rows, has_rows) = match current.take() {
                         Some((c, r)) => (c, r, true),
                         None => (Vec::new(), Vec::new(), false),
@@ -1052,6 +1093,63 @@ impl Client {
                 b'R' => {
                     self.set_status(&body);
                     return Ok(out);
+                }
+                k => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected message {:?}",
+                        k as char
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Runs one statement and reads its rows as they arrive, `fetch` at a
+    /// time (0: [`DEFAULT_FETCH`]): the server sends a batch and waits
+    /// until the cursor has read it, so neither side holds more than a
+    /// batch.  A cursor dropped before its end tells the server to stop
+    /// (a server older than protocol version 6 sends everything at once,
+    /// and the rest is read and skipped).  The server's error, if the
+    /// statement fails before its first row, is [`Error::Server`]; after
+    /// it, the cursor's last item.
+    pub fn cursor(&mut self, sql: &str, params: &[Value], fetch: u32) -> Result<Cursor<'_>, Error> {
+        let fetch = match fetch {
+            _ if self.version < 6 => 0,
+            0 => DEFAULT_FETCH,
+            n => n,
+        };
+        self.send_query(sql, params, Format::Typed, fetch)?;
+        let mut done = None;
+        let mut failed = None;
+        loop {
+            let (kind, body) = self.read()?;
+            let mut b = Input { b: &body };
+            match kind {
+                b'C' => {
+                    return Ok(Cursor {
+                        columns: b.columns()?,
+                        client: self,
+                        fetch,
+                        done: None,
+                        failed: None,
+                        ready: false,
+                    });
+                }
+                b'K' => done = Some(b.tag()?),
+                b'E' => failed = Some(b.server_error()?),
+                b'R' => {
+                    self.set_status(&body);
+                    if let Some(e) = failed {
+                        return Err(Error::Server(e));
+                    }
+                    return Ok(Cursor {
+                        columns: Vec::new(),
+                        client: self,
+                        fetch,
+                        done,
+                        failed: None,
+                        ready: true,
+                    });
                 }
                 k => {
                     return Err(Error::Protocol(format!(
@@ -1103,5 +1201,123 @@ impl Client {
     pub fn close(mut self) -> io::Result<()> {
         self.conn.get_mut().write_all(&frame(b'X', &[]))?;
         self.conn.get_mut().flush()
+    }
+}
+
+/// One statement's rows as they arrive ([`Client::cursor`]); each item is
+/// a row, or the error that ended the statement.
+pub struct Cursor<'c> {
+    client: &'c mut Client,
+    columns: Vec<Column>,
+    fetch: u32,
+    done: Option<(String, u64)>,
+    failed: Option<ServerError>,
+    /// The server has said Ready: nothing more comes.
+    ready: bool,
+}
+
+impl fmt::Debug for Cursor<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Cursor")
+            .field("columns", &self.columns)
+            .field("fetch", &self.fetch)
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Cursor<'_> {
+    /// The result's columns (empty for a statement without rows).
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
+    }
+
+    /// The command tag and count (`SELECT`, 3), once every row is read.
+    pub fn command(&self) -> Option<(&str, u64)> {
+        self.done.as_ref().map(|(c, n)| (c.as_str(), *n))
+    }
+
+    /// Stops reading: the server is told to send no more, and what it
+    /// already sent is skipped.  The command tag and count of the rows
+    /// sent, or the error that ended the statement.
+    pub fn close(mut self) -> Result<(String, u64), Error> {
+        self.drain()?;
+        if let Some(e) = self.failed.take() {
+            return Err(Error::Server(e));
+        }
+        Ok(self.done.take().unwrap_or_default())
+    }
+
+    /// Reads to Ready, skipping rows and answering a pause with `c`.
+    fn drain(&mut self) -> Result<(), Error> {
+        while !self.ready {
+            let (kind, body) = self.client.read().inspect_err(|_| self.ready = true)?;
+            let mut b = Input { b: &body };
+            match kind {
+                b'D' | b'C' => {}
+                b'S' => self.client.send(b'c', &[])?,
+                b'K' => self.done = Some(b.tag()?),
+                b'E' => self.failed = Some(b.server_error()?),
+                b'R' => {
+                    self.client.set_status(&body);
+                    self.ready = true;
+                }
+                k => {
+                    self.ready = true;
+                    return Err(Error::Protocol(format!(
+                        "unexpected message {:?}",
+                        k as char
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Iterator for Cursor<'_> {
+    type Item = Result<Vec<Value>, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while !self.ready {
+            let (kind, body) = match self.client.read() {
+                Ok(m) => m,
+                Err(e) => {
+                    self.ready = true;
+                    return Some(Err(e));
+                }
+            };
+            let mut b = Input { b: &body };
+            let step = match kind {
+                b'D' => return Some(b.row(self.columns.len())),
+                // The batch is read: the next.
+                b'S' => self.client.send(b'F', &self.fetch.to_le_bytes()),
+                b'K' => b.tag().map(|t| self.done = Some(t)),
+                b'E' => b.server_error().map(|e| self.failed = Some(e)),
+                b'R' => {
+                    self.client.set_status(&body);
+                    self.ready = true;
+                    return self.failed.take().map(|e| Err(Error::Server(e)));
+                }
+                b'C' => Err(Error::Protocol(
+                    "a cursor runs one statement; this query holds several".into(),
+                )),
+                k => Err(Error::Protocol(format!(
+                    "unexpected message {:?}",
+                    k as char
+                ))),
+            };
+            if let Err(e) = step {
+                self.ready = true;
+                return Some(Err(e));
+            }
+        }
+        None
+    }
+}
+
+impl Drop for Cursor<'_> {
+    fn drop(&mut self) {
+        let _ = self.drain();
     }
 }

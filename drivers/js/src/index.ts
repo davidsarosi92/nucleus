@@ -6,6 +6,9 @@
 //   await db.query("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)");
 //   await db.query("INSERT INTO t VALUES ($1, $2)", [1, "one"]);
 //   const { rows } = await db.query("SELECT id, name FROM t");
+//   for await (const row of await db.stream("SELECT id FROM t")) {
+//     console.log(row);                    // a large result, as it arrives
+//   }
 //   await db.close();
 //
 // Values: boolean, smallint / integer as number, bigint as number (bigint
@@ -24,8 +27,10 @@ import tls from "node:tls";
 // 2: registered types (uuid, modules' types) arrive in their binary form;
 // 3: smallint, integer, real, bytea, time, inet and cidr in theirs;
 // 4: the password is proved by SCRAM-SHA-256, never sent; 5: errors carry
-// a hint.
-export const PROTOCOL_VERSION = 5;
+// a hint; 6: results stream, fetched in batches.
+export const PROTOCOL_VERSION = 6;
+/** Rows a stream asks the server for at a time. */
+export const DEFAULT_FETCH = 1000;
 const EXT = 11;
 const ENUM = 20;
 export const DEFAULT_PORT = 20035;
@@ -692,6 +697,10 @@ export class Client {
   status: Status = "idle";
   serverVersion = "";
   sessionId = 0;
+  /** The protocol version agreed with the server. */
+  version = PROTOCOL_VERSION;
+  /** A stream the server is still sending. */
+  active: Stream | null = null;
 
   constructor(socket: net.Socket) {
     this.socket = socket;
@@ -806,7 +815,7 @@ export class Client {
         }
         if (reply !== null) socket.write(frame("a", new Writer().str(reply).bytes()));
       } else if (m.kind === "W") {
-        r.u16();
+        c.version = r.u16();
         c.serverVersion = r.str();
         c.sessionId = r.u32();
       } else if (m.kind === "R") {
@@ -825,10 +834,10 @@ export class Client {
   /** Runs `sql`; the result of each statement.  A failing statement
    * rejects with its error. */
   queryAll(sql: string, params: Value[] = []): Promise<Result[]> {
+    // A stream left unfinished is closed first: one result at a time.
+    void this.active?.close();
     const run = async (): Promise<Result[]> => {
-      const w = new Writer().str(sql).u8(0).u16(params.length);
-      for (const p of params) w.value(p);
-      this.socket.write(frame("Q", w.bytes()));
+      this.sendQuery(sql, params, 0);
       const results: Result[] = [];
       let error: NucleusError | null = null;
       let columns: Column[] | null = null;
@@ -837,23 +846,10 @@ export class Client {
         const m = await this.read();
         const r = new Reader(m.body);
         switch (m.kind) {
-          case "C": {
-            const n = r.u16();
-            columns = [];
-            for (let i = 0; i < n; i++) {
-              const name = r.str();
-              const tag = r.u8();
-              const type =
-                tag === 10
-                  ? `${TYPE_NAMES[r.u8()] ?? "unknown"}[]`
-                  : tag === EXT || tag === ENUM
-                    ? r.str()
-                    : TYPE_NAMES[tag] ?? "unknown";
-              columns.push({ name, type });
-            }
+          case "C":
+            columns = readColumns(r);
             rows = [];
             break;
-          }
           case "D": {
             const row: Value[] = [];
             for (let i = 0; i < (columns?.length ?? 0); i++) row.push(r.value());
@@ -886,6 +882,37 @@ export class Client {
     return next;
   }
 
+  /** Sends `Q`: rows `fetch` at a time (0: all at once; from version 6). */
+  sendQuery(sql: string, params: Value[], fetch: number): void {
+    const w = new Writer().str(sql).u8(0);
+    if (this.version >= 6) w.u32(fetch);
+    w.u16(params.length);
+    for (const p of params) w.value(p);
+    this.socket.write(frame("Q", w.bytes()));
+  }
+
+  /**
+   * Runs one statement and returns a `Stream` of its rows, read as they
+   * arrive (`for await`): the server sends `fetch` rows, then waits until
+   * they are read, so a result of any size takes a batch of memory.
+   * Closing it early — leaving the loop, `close()`, or running another
+   * statement — stops the statement.  An error before the first row
+   * rejects here; after rows, from the iteration.
+   */
+  stream(sql: string, params: Value[] = [], options: { fetch?: number } = {}): Promise<Stream> {
+    void this.active?.close();
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const s = new Stream(this, options.fetch || DEFAULT_FETCH, release);
+    this.active = s;
+    const run = () => s.start(sql, params);
+    const started = this.queue.then(run, run);
+    s.op = started.catch(() => undefined);
+    // The connection is the stream's until it ends.
+    this.queue = started.then(() => held, () => undefined);
+    return started.then(() => s);
+  }
+
   /** Runs one statement (or several: the last one's result). */
   async query(sql: string, params: Value[] = []): Promise<Result> {
     const all = await this.queryAll(sql, params);
@@ -909,6 +936,184 @@ export class Client {
   async close(): Promise<void> {
     await this.queue;
     await new Promise<void>((resolve) => this.socket.end(frame("X", Buffer.alloc(0)), () => resolve()));
+  }
+}
+
+function readColumns(r: Reader): Column[] {
+  const n = r.u16();
+  const columns: Column[] = [];
+  for (let i = 0; i < n; i++) {
+    const name = r.str();
+    const tag = r.u8();
+    const type =
+      tag === 10
+        ? `${TYPE_NAMES[r.u8()] ?? "unknown"}[]`
+        : tag === EXT || tag === ENUM
+          ? r.str()
+          : TYPE_NAMES[tag] ?? "unknown";
+    columns.push({ name, type });
+  }
+  return columns;
+}
+
+/**
+ * One statement's rows as they arrive (`Client.stream`): iterate it with
+ * `for await`; `columns`, and once every row is read `command` and
+ * `count`.
+ */
+export class Stream implements AsyncIterable<Value[]> {
+  columns: Column[] = [];
+  /** `SELECT`, …, once the statement has ended. */
+  command: string | null = null;
+  /** The rows sent, once the statement has ended. */
+  count: number | null = null;
+  /** Reads, one after another. */
+  op: Promise<unknown> = Promise.resolve();
+  private client: Client;
+  private fetch: number;
+  private release: () => void;
+  private error: NucleusError | null = null;
+  private ready = false;
+
+  constructor(client: Client, fetch: number, release: () => void) {
+    this.client = client;
+    this.fetch = fetch;
+    this.release = release;
+  }
+
+  /** Sends the query and reads up to its columns (or its end). */
+  async start(sql: string, params: Value[]): Promise<void> {
+    const c = this.client;
+    if (c.version < 6) this.fetch = 0;
+    try {
+      c.sendQuery(sql, params, this.fetch);
+      for (;;) {
+        const m = await c.read();
+        const r = new Reader(m.body);
+        switch (m.kind) {
+          case "C":
+            this.columns = readColumns(r);
+            return;
+          case "K":
+            this.command = r.str();
+            this.count = Number(r.u64());
+            break;
+          case "E":
+            this.error = r.serverError();
+            break;
+          case "R": {
+            this.end(m.body);
+            const e = this.error;
+            this.error = null;
+            if (e) throw e;
+            return;
+          }
+          default:
+            throw new NucleusError(`unexpected message ${m.kind}`);
+        }
+      }
+    } catch (e) {
+      this.stop();
+      throw e;
+    }
+  }
+
+  private end(body: Buffer): void {
+    this.client.setStatus(body);
+    this.stop();
+  }
+
+  private stop(): void {
+    this.ready = true;
+    if (this.client.active === this) this.client.active = null;
+    this.release();
+  }
+
+  /** The next row; `null` after the last. */
+  next(): Promise<Value[] | null> {
+    const p = this.op.then(() => this.read());
+    this.op = p.catch(() => undefined);
+    return p;
+  }
+
+  private async read(): Promise<Value[] | null> {
+    const c = this.client;
+    try {
+      while (!this.ready) {
+        const m = await c.read();
+        const r = new Reader(m.body);
+        switch (m.kind) {
+          case "D": {
+            const row: Value[] = [];
+            for (let i = 0; i < this.columns.length; i++) row.push(r.value());
+            return row;
+          }
+          case "S":
+            // The batch is read: the next.
+            c.socket.write(frame("F", new Writer().u32(this.fetch).bytes()));
+            break;
+          case "K":
+            this.command = r.str();
+            this.count = Number(r.u64());
+            break;
+          case "E":
+            this.error = r.serverError();
+            break;
+          case "R": {
+            this.end(m.body);
+            const e = this.error;
+            this.error = null;
+            if (e) throw e;
+            break;
+          }
+          case "C":
+            throw new NucleusError("a stream runs one statement; this query holds several");
+          default:
+            throw new NucleusError(`unexpected message ${m.kind}`);
+        }
+      }
+      return null;
+    } catch (e) {
+      if (!this.ready) this.stop();
+      throw e;
+    }
+  }
+
+  /** Stops reading: the server is told to send no more, and what it
+   *  already sent is skipped. */
+  close(): Promise<void> {
+    const p = this.op.then(async () => {
+      const c = this.client;
+      try {
+        while (!this.ready) {
+          const m = await c.read();
+          const r = new Reader(m.body);
+          if (m.kind === "S") c.socket.write(frame("c", Buffer.alloc(0)));
+          else if (m.kind === "K") {
+            this.command = r.str();
+            this.count = Number(r.u64());
+          } else if (m.kind === "R") this.end(m.body);
+        }
+      } catch (e) {
+        if (!this.ready) this.stop();
+        throw e;
+      }
+    });
+    this.op = p.catch(() => undefined);
+    return p;
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<Value[]> {
+    return {
+      next: async () => {
+        const row = await this.next();
+        return row === null ? { done: true, value: undefined } : { done: false, value: row };
+      },
+      return: async () => {
+        await this.close();
+        return { done: true, value: undefined };
+      },
+    };
   }
 }
 

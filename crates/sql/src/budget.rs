@@ -24,6 +24,8 @@ pub struct Budget {
 struct Spent {
     budget: Budget,
     scanned: Cell<u64>,
+    /// µs spent waiting for the client ([`paused`]).
+    waited: Cell<i64>,
 }
 
 thread_local! {
@@ -36,6 +38,7 @@ pub fn with_budget<T>(budget: Budget, f: impl FnOnce() -> T) -> T {
         s.replace(Some(Spent {
             budget,
             scanned: Cell::new(0),
+            waited: Cell::new(0),
         }))
     });
     let out = f();
@@ -69,6 +72,30 @@ pub fn charge_scan() -> Result<()> {
         }
         Ok(())
     })
+}
+
+/// Runs `f`, a wait for the client (a cursor asking for its next rows),
+/// without the wait counting toward the statement's deadline.
+pub fn paused<T>(f: impl FnOnce() -> T) -> T {
+    let start = crate::datetime::clock().ok();
+    let out = f();
+    if let (Some(a), Ok(b)) = (start, crate::datetime::clock()) {
+        SPENT.with(|s| {
+            if let Some(s) = s.borrow_mut().as_mut() {
+                let w = b.saturating_sub(a).max(0);
+                s.waited.set(s.waited.get() + w);
+                if let Some(d) = &mut s.budget.deadline {
+                    *d = d.saturating_add(w);
+                }
+            }
+        });
+    }
+    out
+}
+
+/// The µs the current statement has spent waiting for the client.
+pub fn waited() -> i64 {
+    SPENT.with(|s| s.borrow().as_ref().map_or(0, |s| s.waited.get()))
 }
 
 /// The rows the current statement has read so far.

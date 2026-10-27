@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Protocol version 6 (nucleus PLAN.md §M14.11): results stream.
+  `nc_cursor_open`, `nc_cursor_next`, `nc_cursor_result`,
+  `nc_cursor_stop`, `nc_cursor_close` read a statement's rows a batch at a
+  time (`NC_DEFAULT_FETCH`); the next query or `nc_close` ends a cursor
+  left open.
 - Protocol version 5 (nucleus PLAN.md §M14.10): errors carry a hint,
   `nc_error.hint` (empty when there is none); `nc_error` grew by it.
 - A directory's (LDAP) password through PLAIN, over TLS only.

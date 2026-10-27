@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Protocol version 6 (nucleus PLAN.md §M14.11): results stream.
+  `NucleusClient.cursor([fetch,] sql, params…)` returns a `Cursor`
+  (`Iterable`, `AutoCloseable`) reading a statement's rows a batch at a
+  time; closing it or the next query stops the statement.
 - Protocol version 5 (nucleus PLAN.md §M14.10): errors carry a hint,
   `NucleusException.hint()` (null when there is none).
 - A directory's (LDAP) password through PLAIN, over TLS only.

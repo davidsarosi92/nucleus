@@ -269,7 +269,7 @@ are marked ✅.
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC, LDAP), access rules by connection context, row-level security, protection, audit | ✅ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
-| | M14.11 | **Next:** Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
+| | M14.11 | **In progress (L1–L2 ✅):** Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -1236,6 +1236,24 @@ the Python driver without a per-value object, at a rate bound by the
 network, not the driver; and the benchmark suite runs in CI against
 PostgreSQL.
 
+**Steps.**  L1 streaming ✅ (the executor hands rows to a sink as it
+produces them — `Session::run_into`; `ncp` version 6 sends them so, with
+a fetch size, `S` after each batch and `F` / `c` from the client; the Rust
+driver's `Cursor`; pg-compat streams simple queries and Execute without a
+row limit; a cursor's waits are not statement time); L2 cursors in the
+Python, JavaScript, Java, C and C++ drivers ✅ (Python and JavaScript
+`stream`, the DB-API cursor lazy; Java, C and C++ `cursor`; the next
+query ends one left open); L3 the columnar result
+format (`ncp` batches of typed column buffers with validity bitmaps; the
+Rust driver); L4 columnar results in the drivers (numpy, Arrow, pandas,
+polars; typed arrays; Java buffers; C and C++ pointers); L5 bulk load
+(`COPY` text/CSV and `ncp` batches, batched inserts in the drivers, a
+DataFrame or Arrow table into a table in one call); L6 spilling (sorts,
+hash joins, aggregates and materialised CTEs past a memory budget, to
+temporary files); L7 parallel scans over key ranges, page compression,
+and a very large column converted in the background in chunks (from
+§M14.19); L8 the benchmark suite against PostgreSQL, in CI.
+
 ### §M14.20 — Analytics: vectorized execution and columnar storage ⬜
 
 Runs after §M14.11 (its number only reflects when it was planned).  Why
@@ -2010,6 +2028,12 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 L1–L2: results stream — the executor's rows
+  go to a sink as produced (`Session::run_into`), `ncp` version 6 adds a
+  fetch size and `S` / `F` / `c`, every driver reads through a cursor
+  (closed early, it stops the statement), pg-compat streams; Execute
+  with a row limit still keeps the result (a portal suspended across
+  messages would need the executor to outlive the call).
 - **2026-10-23** — §M14.10 shipped (B3 `nucleus mcp`, B4 `docs/llm.md`).
   Every "done when" holds: an MCP client lists, describes and queries a
   database end to end (`editions/nucleus/tests/cli.rs`), and the common
