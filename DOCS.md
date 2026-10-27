@@ -272,6 +272,9 @@ a cell over 2048 bytes moves its value to an overflow chain (`next u64,
 len u32, data`) and stores `first page, length`.  Internal cell `klen u16,
 child u64, key`; child `i` holds keys in `[keys[i-1], keys[i])`.
 
+**Checksums:** CRC-32C, slicing-by-8 (eight bytes a step, tables built at
+compile time; the same values as the bytewise definition, tested).
+
 **Copy-on-write:** a node is rewritten in place only if its page is
 writable; otherwise copied to a new page (old one freed) and the parent
 updated, up to a new root.  **Balance:** split by bytes; a non-root node
@@ -507,7 +510,7 @@ distributed implementation will provide (§F3).
 
 `Database` is the local implementation: `Database::open(dir, Options)` on
 the real file system, `open_on(platform, dir, Options)` on any platform;
-`checkpoint`, `vacuum`, `latest`, `scratch_files_made`, `close`.  `Options`: `cache_bytes` (8 MiB),
+`checkpoint`, `vacuum`, `latest`, `scratch_files_made`, `close`.  `Options`: `cache_bytes` (128 MiB, a frame allocated when first used),
 `checkpoint_wal_bytes` (64 MiB), `wal_segment_bytes` (16 MiB), `history`
 (0), `txn_memory_bytes` (64 MiB: a transaction's writes held in memory
 before they spill, §5.2).  `tests/contract.rs` holds the contract as a suite any implementation
@@ -2077,6 +2080,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 faster checksums, a larger cache (L7):**
+  CRC-32C by slicing-by-8; buffer frames made when first used; the
+  default page cache 128 MiB.
 - **2026-10-27 — §M14.11 the B+tree's read and write paths (L7):** pages
   read in place (`node::View`) by `get` and cursors; batches applied in
   one sorted pass; leaves packed fuller on sequential inserts.  A

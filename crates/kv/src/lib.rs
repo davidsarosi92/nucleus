@@ -291,7 +291,8 @@ pub fn transact<T>(
 /// Tuning for a [`Database`].
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// Page cache size in bytes (rounded down to 8 KiB pages; at least 16).
+    /// Page cache size in bytes (rounded down to 8 KiB pages; at least 16),
+    /// allocated as pages are first cached.
     pub cache_bytes: usize,
     /// Checkpoint once the WAL holds this many bytes.
     pub checkpoint_wal_bytes: u64,
@@ -307,7 +308,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            cache_bytes: 8 << 20,
+            cache_bytes: 128 << 20,
             checkpoint_wal_bytes: 64 << 20,
             wal_segment_bytes: 16 << 20,
             history: 0,

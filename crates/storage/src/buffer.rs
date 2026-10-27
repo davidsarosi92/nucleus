@@ -57,7 +57,9 @@ pub struct PoolStats {
 /// A page cache over a [`Pager`].
 pub struct BufferPool {
     pager: Arc<Pager>,
-    frames: Box<[Frame]>,
+    /// Each made when first used, so a large pool costs nothing until it
+    /// fills.
+    frames: Box<[std::sync::OnceLock<Frame>]>,
     inner: Mutex<Inner>,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -110,7 +112,7 @@ impl<'a> PageRef<'a> {
     }
 
     fn frame(&self) -> &'a Frame {
-        &self.pool.frames[self.frame]
+        self.pool.frame(self.frame)
     }
 }
 
@@ -124,14 +126,7 @@ impl BufferPool {
     /// A pool of `capacity` frames (at least 1) over `pager`.
     pub fn new(pager: Arc<Pager>, capacity: usize) -> Self {
         let capacity = capacity.max(1);
-        let frames = (0..capacity)
-            .map(|_| Frame {
-                page: RwLock::new(Page::new(PageType::UNUSED)),
-                pins: AtomicU32::new(0),
-                dirty: AtomicBool::new(false),
-                referenced: AtomicBool::new(false),
-            })
-            .collect();
+        let frames = (0..capacity).map(|_| std::sync::OnceLock::new()).collect();
         Self {
             pager,
             frames,
@@ -151,6 +146,16 @@ impl BufferPool {
     /// The pager underneath.
     pub fn pager(&self) -> &Arc<Pager> {
         &self.pager
+    }
+
+    /// Frame `i`, made on first use.
+    fn frame(&self, i: usize) -> &Frame {
+        self.frames[i].get_or_init(|| Frame {
+            page: RwLock::new(Page::new(PageType::UNUSED)),
+            pins: AtomicU32::new(0),
+            dirty: AtomicBool::new(false),
+            referenced: AtomicBool::new(false),
+        })
     }
 
     /// Number of frames.
@@ -173,7 +178,7 @@ impl BufferPool {
     }
 
     fn pin(&self, frame: usize, id: PageId) -> PageRef<'_> {
-        let f = &self.frames[frame];
+        let f = self.frame(frame);
         f.pins.fetch_add(1, Ordering::Acquire);
         f.referenced.store(true, Ordering::Relaxed);
         PageRef {
@@ -193,7 +198,8 @@ impl BufferPool {
         self.misses.fetch_add(1, Ordering::Relaxed);
         let page = self.pager.read_page(id)?;
         let frame = self.victim(&mut inner)?;
-        *self.frames[frame]
+        *self
+            .frame(frame)
             .page
             .write()
             .unwrap_or_else(|e| e.into_inner()) = page;
@@ -213,7 +219,8 @@ impl BufferPool {
                 return Err(e);
             }
         };
-        *self.frames[frame]
+        *self
+            .frame(frame)
             .page
             .write()
             .unwrap_or_else(|e| e.into_inner()) = Page::new(ty);
@@ -224,7 +231,7 @@ impl BufferPool {
     fn install(&self, inner: &mut Inner, frame: usize, id: PageId, dirty: bool) {
         inner.table.insert(id, frame);
         inner.ids[frame] = Some(id);
-        self.frames[frame].dirty.store(dirty, Ordering::Release);
+        self.frame(frame).dirty.store(dirty, Ordering::Release);
     }
 
     /// Frees page `id` (see [`Pager::free`]) and drops it from the cache.
@@ -232,12 +239,12 @@ impl BufferPool {
     pub fn free(&self, id: PageId) -> Result<()> {
         let mut inner = self.lock();
         if let Some(&frame) = inner.table.get(&id) {
-            if self.frames[frame].pins.load(Ordering::Acquire) != 0 {
+            if self.frame(frame).pins.load(Ordering::Acquire) != 0 {
                 return Err(Error::Pinned(id));
             }
             inner.table.remove(&id);
             inner.ids[frame] = None;
-            self.frames[frame].dirty.store(false, Ordering::Release);
+            self.frame(frame).dirty.store(false, Ordering::Release);
             inner.free_frames.push(frame);
         }
         self.pager.free(id)
@@ -258,7 +265,7 @@ impl BufferPool {
         for _ in 0..2 * n {
             let frame = inner.hand;
             inner.hand = (inner.hand + 1) % n;
-            let f = &self.frames[frame];
+            let f = self.frame(frame);
             // Pins only grow under the pool lock, which we hold, so a zero
             // seen here stays zero until we are done.
             if f.pins.load(Ordering::Acquire) != 0 {
@@ -286,7 +293,7 @@ impl BufferPool {
     pub fn flush(&self) -> Result<()> {
         let inner = self.lock();
         for (frame, id) in inner.ids.iter().enumerate() {
-            let (Some(id), f) = (id, &self.frames[frame]) else {
+            let (Some(id), f) = (id, self.frame(frame)) else {
                 continue;
             };
             // Clear the flag before copying: a write that starts after the

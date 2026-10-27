@@ -2053,6 +2053,15 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 L7: CRC-32C by slicing-by-8 (every page read
+  and written checks one); buffer frames allocated when first used, so
+  the default page cache is 128 MiB (was 8 MiB) at no cost to a small
+  database.  2 million rows (`id int pk, v bigint, s text`), release
+  build, against PostgreSQL 18 on the same machine: load 11.3 s / 4.1 s,
+  `count(*)` 1.13 s / 0.067 s, a filtered count 1.29 s / 0.035 s, UPDATE
+  of 500 000 rows 6.1 s / 2.0 s, DELETE of 200 000 4.9 s / 0.2 s, a sort
+  3.2 s / 0.65 s, a self-join 5.2 s / 0.28 s — scans are the largest gap
+  (per-row work in the executor, then no parallel workers).
 - **2026-10-27** — §M14.11 L7 (first part): measured first — a
   2-million-row INSERT took 197 s, nearly all of it decoding whole B+tree
   pages per lookup and applying commit batches key by key.  `get` and
