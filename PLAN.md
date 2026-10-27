@@ -1251,8 +1251,14 @@ validity bitmap, every buffer 8-byte aligned; the Rust driver's
 fixed widths without a copy —, Arrow — in place where its layout is the
 batch's —, pandas, polars; JavaScript typed arrays; Java buffers; C and
 C++ pointers; each checked cell by cell against rows); L5 bulk load
-(`COPY` text/CSV and `ncp` batches, batched inserts in the drivers, a
-DataFrame or Arrow table into a table in one call); L6 spilling (sorts,
+(`COPY` text/CSV and `ncp` batches ✅ — `COPY t FROM STDIN`, each row an
+INSERT's checks, atomic; `ncp`'s `I` / `d` / `B` / `e` / `f`; the Rust
+driver's `copy_in`, `copy_rows`; pg-compat's sub-protocol; `ncsql
+\copy` — then the other drivers' copy and a DataFrame or Arrow table
+into a table in one call); L5b large transactions (a load is one
+transaction, and a transaction's writes are held in memory until it
+commits: past a budget they spill — so 100 million rows load within a
+fixed memory budget); L6 spilling (sorts,
 hash joins, aggregates and materialised CTEs past a memory budget, to
 temporary files); L7 parallel scans over key ranges, page compression,
 and a very large column converted in the background in chunks (from
@@ -2032,6 +2038,12 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 L5 (first part): `COPY … FROM STDIN` — text
+  and CSV parsed as they arrive, typed rows from `ncp` batches, each row
+  checked as an INSERT's, the whole load one transaction; pg-compat's
+  COPY (checked with a real PostgreSQL driver), `ncsql \copy`.  Found:
+  a transaction holds its writes in memory until it commits, so a load
+  is bounded by memory — L5b added.
 - **2026-10-27** — §M14.11 L4: columnar results in every driver — Python
   into numpy, Arrow, pandas and polars (CI installs them), JavaScript
   typed arrays, Java buffers, C and C++ pointers into the batch.

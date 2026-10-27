@@ -679,6 +679,116 @@ impl<'a> Parser<'a> {
 
     // ------------------------------------------------------------ statements
 
+    /// `COPY t [(columns)] FROM STDIN [[WITH] (option [value], …)]`, or
+    /// the older `[WITH] [CSV] [HEADER] [DELIMITER [AS] 'c'] [NULL [AS]
+    /// 'n'] [QUOTE [AS] 'q'] [ESCAPE [AS] 'e']`.
+    fn copy(&mut self) -> Result<Statement> {
+        self.pos += 1;
+        let table = self.relation()?;
+        let columns = if self.peek_op("(") {
+            Some(self.ident_list()?)
+        } else {
+            None
+        };
+        if self.eat_kw("to") {
+            return Err(Error::feature(
+                "COPY TO is not supported: read the result with a query (a cursor, or columnar batches)",
+            ));
+        }
+        self.expect_kw("from")?;
+        if !self.eat_kw("stdin") {
+            return Err(Error::feature(
+                "COPY FROM supports STDIN: the client sends the data",
+            ));
+        }
+        let mut options = crate::ast::CopyOptions::default();
+        let (mut delimiter, mut null) = (None, None);
+        let byte = |p: &mut Self, what: &str| -> Result<u8> {
+            let s = p.string()?;
+            match s.as_bytes() {
+                [b] if b.is_ascii() => Ok(*b),
+                _ => Err(Error::feature(format!(
+                    "COPY {what} must be a single one-byte character"
+                ))),
+            }
+        };
+        let with = self.eat_kw("with");
+        if self.eat_op("(") {
+            loop {
+                let name = self.ident()?;
+                match name.as_str() {
+                    "format" => {
+                        let f = self.ident()?;
+                        options.csv = match f.as_str() {
+                            "csv" => true,
+                            "text" => false,
+                            _ => {
+                                return Err(Error::feature(format!(
+                                    "COPY format \"{f}\" not recognized (text, csv)"
+                                )));
+                            }
+                        };
+                    }
+                    "header" => {
+                        options.header = !(self.eat_kw("false") || self.eat_kw("off"));
+                        let _ = self.eat_kw("true") || self.eat_kw("on");
+                    }
+                    "delimiter" => delimiter = Some(byte(self, "delimiter")?),
+                    "null" => null = Some(self.string()?),
+                    "quote" => options.quote = byte(self, "quote")?,
+                    "escape" => options.escape = byte(self, "escape")?,
+                    _ => {
+                        return Err(Error::feature(format!(
+                            "COPY option \"{name}\" not recognized"
+                        )));
+                    }
+                }
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+            self.expect_op(")")?;
+        } else {
+            let _ = with;
+            loop {
+                if self.eat_kw("csv") {
+                    options.csv = true;
+                } else if self.eat_kw("header") {
+                    options.header = true;
+                } else if self.eat_kw("delimiter") {
+                    self.eat_kw("as");
+                    delimiter = Some(byte(self, "delimiter")?);
+                } else if self.eat_kw("null") {
+                    self.eat_kw("as");
+                    null = Some(self.string()?);
+                } else if self.eat_kw("quote") {
+                    self.eat_kw("as");
+                    options.quote = byte(self, "quote")?;
+                } else if self.eat_kw("escape") {
+                    self.eat_kw("as");
+                    options.escape = byte(self, "escape")?;
+                } else {
+                    break;
+                }
+            }
+        }
+        if options.csv {
+            options.delimiter = b',';
+            options.null = String::new();
+        }
+        if let Some(d) = delimiter {
+            options.delimiter = d;
+        }
+        if let Some(n) = null {
+            options.null = n;
+        }
+        Ok(Statement::Copy {
+            table,
+            columns,
+            options,
+        })
+    }
+
     fn statement(&mut self) -> Result<Statement> {
         let Some(Token::Word(w)) = self.peek() else {
             if self.peek_op("(") {
@@ -737,6 +847,7 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Statement::Show(self.ident()?))
             }
+            "copy" => self.copy(),
             "comment" => {
                 self.pos += 1;
                 self.expect_kw("on")?;

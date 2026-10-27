@@ -139,6 +139,21 @@ fn ncsql_local_and_over_the_network() {
     }
     let (ok, out) = ncsql(&[d, "-c", "\\nope"], "");
     assert!(!ok && out.contains("invalid command"), "{out}");
+    // \copy loads a file (COPY … FROM STDIN), locally …
+    let csv = dir.join("depts.csv");
+    std::fs::write(&csv, "id,name\n2,ops\n3,\"r, d\"\n").unwrap();
+    let f = csv.to_str().unwrap();
+    let (ok, out) = ncsql(
+        &[
+            d,
+            "-c",
+            &format!("\\copy dept FROM '{f}' WITH (FORMAT csv, HEADER)"),
+        ],
+        "",
+    );
+    assert!(ok && out.contains("COPY 2"), "{out}");
+    let (ok, out) = ncsql(&[d, "-c", "\\copy dept FROM '/no/such/file'"], "");
+    assert!(!ok && out.contains("/no/such/file"), "{out}");
 
     // Over the network, against `nucleus server` on a free port.
     let mut server = Command::new(env!("CARGO_BIN_EXE_nucleus"))
@@ -159,7 +174,25 @@ fn ncsql_local_and_over_the_network() {
     let (ok, out) = nucleus(&["sql", d, "-c", "SELECT 1"], "");
     assert!(!ok && out.contains("in use by another process"), "{out}");
     let (ok, out) = ncsql(&["-h", &addr, "-c", "SELECT name FROM dept"], "");
-    assert!(ok && out.contains(" eng "), "{out}");
+    assert!(ok && out.contains(" eng ") && out.contains("r, d"), "{out}");
+    // … and over the network (a duplicate key: nothing stored).
+    std::fs::write(&csv, "4\tqa\n1\tdup\n").unwrap();
+    let (ok, out) = ncsql(&["-h", &addr, "-c", &format!("\\copy dept FROM {f}")], "");
+    assert!(
+        !ok && out.contains("23505") && out.contains("line 2"),
+        "{out}"
+    );
+    std::fs::write(&csv, "4\tqa\n").unwrap();
+    let (ok, out) = ncsql(
+        &[
+            "-h",
+            &addr,
+            "-c",
+            &format!("\\copy dept (id, name) FROM {f}"),
+        ],
+        "",
+    );
+    assert!(ok && out.contains("COPY 1"), "{out}");
     let (ok, out) = ncsql(&["-h", &addr, "-c", "\\fks dept"], "");
     assert!(
         ok && out.contains("emp_dept_id_fkey") && out.contains("cascade"),
@@ -170,7 +203,8 @@ fn ncsql_local_and_over_the_network() {
         "BEGIN;\nDELETE FROM dept;\nCOMMIT;\nSELECT count(*) FROM emp;\n\\conninfo\n",
     );
     assert!(
-        ok && out.contains("DELETE 1") && out.contains(" 0 "),
+        // (eng, and the three \copy loaded.)
+        ok && out.contains("DELETE 4") && out.contains(" 0 "),
         "{out}"
     );
     assert!(out.contains("on 127.0.0.1:"), "{out}");

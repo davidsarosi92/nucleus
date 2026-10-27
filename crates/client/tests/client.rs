@@ -1475,3 +1475,127 @@ fn columnar_batches_match_rows() {
     assert!(matches!(&items[3], Err(Error::Server(e)) if e.code == "22012"));
     assert_eq!(c.status(), TxnStatus::Idle);
 }
+
+/// Bulk load (PLAN.md §M14.11 L5): `COPY … FROM STDIN` in text and CSV,
+/// and typed rows as columnar batches — each row checked as an INSERT's;
+/// a failure stores nothing.
+#[test]
+fn copy_loads_text_csv_and_rows() {
+    let mut c = Client::connect(config(start(None))).unwrap();
+    c.execute(
+        "CREATE TABLE ld (id INT PRIMARY KEY, name TEXT NOT NULL DEFAULT 'none', score FLOAT, born DATE)",
+        &[],
+    )
+    .unwrap();
+    let text = b"1\tann\t1.5\t2000-01-02\n2\tb\\tob\t\\N\t\\N\n";
+    assert_eq!(c.copy_in("COPY ld FROM STDIN", &mut &text[..]).unwrap(), 2);
+    let csv = b"id,score\n3,2.5\n4,\n";
+    assert_eq!(
+        c.copy_in(
+            "COPY ld (id, score) FROM STDIN WITH (FORMAT csv, HEADER)",
+            &mut &csv[..]
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        c.rows("SELECT id, name, score, born FROM ld ORDER BY id", &[])
+            .unwrap(),
+        vec![
+            vec![
+                Value::Integer(1),
+                Value::from("ann"),
+                Value::Float(1.5),
+                Value::Date(1)
+            ],
+            vec![
+                Value::Integer(2),
+                Value::from("b\tob"),
+                Value::Null,
+                Value::Null
+            ],
+            vec![
+                Value::Integer(3),
+                Value::from("none"),
+                Value::Float(2.5),
+                Value::Null
+            ],
+            vec![
+                Value::Integer(4),
+                Value::from("none"),
+                Value::Null,
+                Value::Null
+            ],
+        ]
+    );
+
+    // A bad row (here a duplicate key on the third line) stores nothing,
+    // and says where it was.
+    let bad = b"10\tx\t\\N\t\\N\n11\ty\t\\N\t\\N\n1\tdup\t\\N\t\\N\n";
+    match c.copy_in("COPY ld FROM STDIN", &mut &bad[..]) {
+        Err(Error::Server(e)) => {
+            assert_eq!(e.code, "23505");
+            assert!(e.message.contains("line 3"), "{}", e.message);
+        }
+        other => panic!("{other:?}"),
+    }
+    let bad = b"20\tx\textra\t\\N\tmore\n";
+    match c.copy_in("COPY ld FROM STDIN", &mut &bad[..]) {
+        Err(Error::Server(e)) => assert_eq!(e.code, "22P04"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        c.rows("SELECT count(*) FROM ld", &[]).unwrap(),
+        vec![vec![Value::Int(4)]]
+    );
+
+    // Typed rows, as columnar batches, in one call.
+    let n = c
+        .copy_rows(
+            "COPY ld (id, name, score) FROM STDIN",
+            (100..70_100).map(|i| {
+                vec![
+                    Value::Int(i),
+                    Value::Text(format!("n{i}")),
+                    if i % 7 == 0 {
+                        Value::Null
+                    } else {
+                        Value::Integer(i as i32)
+                    },
+                ]
+            }),
+        )
+        .unwrap();
+    assert_eq!(n, 70_000);
+    assert_eq!(
+        c.rows(
+            "SELECT count(*), sum(score)::bigint, max(name) FROM ld WHERE id >= 100",
+            &[]
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Int(70_000),
+            Value::Int((100..70_100i64).filter(|i| i % 7 != 0).sum()),
+            Value::from("n9999")
+        ]]
+    );
+    match c.copy_rows("COPY ld (id) FROM STDIN", [vec![Value::from("x")]]) {
+        Err(Error::Value(m)) => assert!(m.contains("\"id\""), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    // A COPY through a call without data is refused, and the connection
+    // goes on.
+    match c.execute("COPY ld FROM STDIN", &[]) {
+        Err(Error::Server(e)) => assert_eq!(e.code, "57014"),
+        other => panic!("{other:?}"),
+    }
+    match c.copy_in("COPY nope FROM STDIN", &mut &b""[..]) {
+        Err(Error::Server(e)) => assert_eq!(e.code, "42P01"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(c.status(), TxnStatus::Idle);
+    assert_eq!(
+        c.rows("SELECT 1", &[]).unwrap(),
+        vec![vec![Value::Integer(1)]]
+    );
+}

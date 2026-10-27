@@ -54,6 +54,8 @@ use std::sync::{Arc, OnceLock};
 use nucleus_kv::KvTxn;
 
 pub use crate::ast::Statement;
+pub use crate::budget::paused;
+pub use crate::copy::Chunk as CopyChunk;
 pub use crate::datetime::{
     Interval, parse_date, parse_interval, parse_time_of_day, parse_timestamp,
 };

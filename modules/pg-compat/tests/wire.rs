@@ -382,3 +382,42 @@ fn uuid_through_a_real_driver() {
     };
     assert_eq!(r.get(0), Some("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"));
 }
+
+/// `COPY … FROM STDIN` through a real PostgreSQL driver (PLAN.md §M14.11
+/// L5): text and CSV, an error that stores nothing, and the connection
+/// going on after it.
+#[test]
+fn copy_from_stdin_with_a_real_driver() {
+    use postgres::{Client as Pg, NoTls};
+    let addr = start(Config::default());
+    let mut db = Pg::connect(
+        &format!(
+            "host=127.0.0.1 port={} user=nucleus password=nucleus",
+            addr.port()
+        ),
+        NoTls,
+    )
+    .unwrap();
+    db.batch_execute("CREATE TABLE cp (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+    let mut w = db.copy_in("COPY cp FROM STDIN").unwrap();
+    w.write_all(b"1\tone\n2\t\\N\n").unwrap();
+    assert_eq!(w.finish().unwrap(), 2);
+    let mut w = db
+        .copy_in("COPY cp (id, name) FROM STDIN WITH (FORMAT csv, HEADER)")
+        .unwrap();
+    w.write_all(b"id,name\n3,\"a, b\"\n").unwrap();
+    assert_eq!(w.finish().unwrap(), 1);
+    let mut w = db.copy_in("COPY cp FROM STDIN").unwrap();
+    w.write_all(b"4\tx\n1\tdup\n").unwrap();
+    let e = w.finish().unwrap_err();
+    assert_eq!(e.code().unwrap().code(), "23505");
+    let rows = db
+        .query("SELECT id, name FROM cp ORDER BY id", &[])
+        .unwrap();
+    let got: Vec<(i32, Option<String>)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+    assert_eq!(
+        got,
+        vec![(1, Some("one".into())), (2, None), (3, Some("a, b".into()))]
+    );
+}

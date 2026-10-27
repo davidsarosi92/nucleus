@@ -11,7 +11,9 @@ nucleus database.  nucleus's own interface — the `ncp` protocol,
   `nucleus-tls` module — and GSS declined; trust or SCRAM-SHA-256 (over
   TLS also SCRAM-SHA-256-PLUS, bound to the session) — the
   password is proved, never sent — and the simple and extended query
-  protocols, text and binary formats).
+  protocols, text and binary formats; results streamed as they are
+  produced; `COPY … FROM STDIN`, so `psql`'s `\copy` and drivers'
+  `copy_in` load data).
 - **`PgCompat`** — the SQL side, registered in a session's registry:
   `pg_catalog` (`pg_class`, `pg_attribute`, `pg_constraint`, `pg_index`,
   `pg_type`, `pg_namespace`, …) and `information_schema` as views of the

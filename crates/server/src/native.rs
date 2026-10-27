@@ -27,7 +27,9 @@ use crate::Config;
 /// `Q` carries a fetch size, and a result fetched in batches pauses with
 /// `S` after each until the client asks for more (`F`) or no more (`c`).
 /// Version 7 adds the columnar result format (2): batches `B` of a buffer
-/// per column instead of a `D` per row.
+/// per column instead of a `D` per row; and `COPY … FROM STDIN`: `I`, then
+/// the client's data (`d` bytes, `B` batches of typed rows) to `e` (or
+/// `f`).
 pub const VERSION: u16 = 7;
 /// The oldest it still speaks.
 pub const MIN_VERSION: u16 = 1;
@@ -668,7 +670,7 @@ fn exchange(
 /// A parameter: a value in the protocol's encoding (tags 0–10 as the row
 /// encoding's version 1, 11 a registered type's name and binary form,
 /// 12–19 version 3's).
-fn parameter(r: &mut Reader) -> Result<Value, Error> {
+pub(crate) fn parameter(r: &mut Reader) -> Result<Value, Error> {
     let bad = |_| protocol("malformed parameter");
     let net = |r: &mut Reader| -> Result<nucleus_sql::ext::Net, Error> {
         let family = r.u8().map_err(bad)?;
@@ -800,6 +802,8 @@ struct Wire<'a, R: Read, W: Write> {
     /// Columnar: the batch being filled, and its size.
     pending: Vec<Row>,
     batch: usize,
+    /// `COPY … FROM STDIN`: the columns, while the client's data comes.
+    copying: Option<Vec<DataType>>,
     /// The connection failed: the statement stopped on it.
     broken: Option<io::Error>,
     /// How the connection ends instead of going on.
@@ -859,7 +863,78 @@ impl<R: Read, W: Write> Wire<'_, R, W> {
     }
 }
 
+impl<R: Read, W: Write> Wire<'_, R, W> {
+    /// After a `COPY` that ended early (an error): the client's remaining
+    /// data, read and dropped up to its end.
+    fn skip_copy(&mut self) -> io::Result<()> {
+        while self.copying.is_some() {
+            match read_message(self.input)? {
+                (b'e' | b'f', _) => self.copying = None,
+                (b'X', _) => {
+                    self.copying = None;
+                    self.close = Some(None);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
+    fn copy_in(&mut self, columns: &[OutColumn]) -> Result<(), Error> {
+        if self.version < 7 {
+            return Err(Error::feature(
+                "COPY FROM STDIN needs protocol version 7 (a newer driver)",
+            ));
+        }
+        let mut m = Msg::new(b'I').u16(columns.len() as u16);
+        for c in columns {
+            m = m.str(&c.name).ty(Some(c.ty), self.version);
+        }
+        self.copying = Some(columns.iter().map(|c| c.ty).collect());
+        self.send(&m.finish())?;
+        self.out.flush().map_err(|e| self.broke(e))
+    }
+
+    fn copy_data(&mut self) -> Result<Option<nucleus_sql::copy::Chunk>, Error> {
+        use nucleus_sql::copy::Chunk;
+        let input = &mut *self.input;
+        match nucleus_sql::budget::paused(|| read_message(input)) {
+            Ok((b'd', body)) => Ok(Some(Chunk::Bytes(body))),
+            Ok((b'B', body)) => {
+                let types = self.copying.clone().unwrap_or_default();
+                crate::columnar::rows(&body, &types).map(|r| Some(Chunk::Rows(r)))
+            }
+            Ok((b'e', _)) => {
+                self.copying = None;
+                Ok(None)
+            }
+            Ok((b'f', body)) => {
+                self.copying = None;
+                let why = Body { b: &body }.str().unwrap_or_default();
+                Err(Error::query_canceled(format!(
+                    "COPY from stdin failed: {why}"
+                )))
+            }
+            Ok((b'X', _)) => {
+                self.copying = None;
+                self.close = Some(None);
+                Err(protocol("the client left"))
+            }
+            Ok((other, _)) => {
+                self.copying = None;
+                let e = protocol(format!(
+                    "unexpected message {:?} during COPY data",
+                    other as char
+                ));
+                self.close = Some(Some(e.clone()));
+                Err(e)
+            }
+            Err(e) => Err(self.broke(e)),
+        }
+    }
+
     fn columns(&mut self, columns: &[OutColumn]) -> Result<(), Error> {
         let mut m = Msg::new(b'C').u16(columns.len() as u16);
         for c in columns {
@@ -974,10 +1049,14 @@ fn run<R: Read, W: Write>(
             left: None,
             pending: Vec::new(),
             batch: crate::columnar::DEFAULT_BATCH,
+            copying: None,
             broken: None,
             close: None,
         };
         let mut r = session.run_into(stmt, params, &mut wire);
+        if wire.broken.is_none() {
+            wire.skip_copy()?;
+        }
         // The last batch, before the end (or the error that ended it).
         if let Err(e) = wire.send_batch()
             && r.is_ok()

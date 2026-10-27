@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `COPY … FROM STDIN` (CopyInResponse, CopyData, CopyDone, CopyFail),
+  from simple and extended queries; COPY data after an error is dropped.
+- Results stream: rows are sent as the executor produces them (simple
+  queries, and Execute without a row limit).
 - A role whose password a directory checks (LDAP) logs in by the cleartext
   method over TLS only (`28000` without).
 - SCRAM-SHA-256-PLUS over TLS (`tls-server-end-point` channel binding),

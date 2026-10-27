@@ -133,6 +133,8 @@ pub enum Error {
     Server(ServerError),
     /// Something this driver does not understand.
     Protocol(String),
+    /// A value that cannot be sent as its column's type (`copy_rows`).
+    Value(String),
 }
 
 impl fmt::Display for Error {
@@ -141,6 +143,7 @@ impl fmt::Display for Error {
             Error::Io(e) => write!(f, "{e}"),
             Error::Server(e) => write!(f, "{e}"),
             Error::Protocol(m) => write!(f, "protocol error: {m}"),
+            Error::Value(m) => write!(f, "{m}"),
         }
     }
 }
@@ -846,6 +849,8 @@ pub struct Client {
     session: u32,
     /// The protocol version agreed with the server.
     version: u16,
+    /// A message read while starting a `COPY` that did not begin.
+    copy_pending: Option<(u8, Vec<u8>)>,
     config: Config,
 }
 
@@ -897,6 +902,7 @@ impl Client {
             server: String::new(),
             session: 0,
             version: PROTOCOL_VERSION,
+            copy_pending: None,
             config,
         };
         // Version 4: no password in Hello; the server asks for a proof.
@@ -1099,6 +1105,8 @@ impl Client {
                     current = None;
                     out.push(Err(b.server_error()?));
                 }
+                // A COPY wants data this call has none of.
+                b'I' => self.refuse_copy()?,
                 b'R' => {
                     self.set_status(&body);
                     return Ok(out);
@@ -1186,6 +1194,7 @@ impl Client {
                 }
                 b'K' => done = Some(b.tag()?),
                 b'E' => failed = Some(b.server_error()?),
+                b'I' => self.refuse_copy()?,
                 b'R' => {
                     self.set_status(&body);
                     if let Some(e) = failed {
@@ -1199,6 +1208,141 @@ impl Client {
                         failed: None,
                         ready: true,
                     });
+                }
+                k => {
+                    return Err(Error::Protocol(format!(
+                        "unexpected message {:?}",
+                        k as char
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Runs `COPY … FROM STDIN` (one statement), sending what `data` reads —
+    /// text or CSV, as the statement says — 64 KiB at a time; the rows it
+    /// stored.  A failure to read `data` cancels the statement.
+    pub fn copy_in(&mut self, sql: &str, data: &mut dyn Read) -> Result<u64, Error> {
+        if self.copy_start(sql)?.is_none() {
+            return self.copy_end(None);
+        }
+        let mut buf = vec![0u8; 1 << 16];
+        let failed = loop {
+            match data.read(&mut buf) {
+                Ok(0) => break None,
+                Ok(n) => self.send(b'd', &buf[..n])?,
+                Err(e) => break Some(e.to_string()),
+            }
+        };
+        self.copy_end(failed)
+    }
+
+    /// Runs `COPY t [(columns)] FROM STDIN`, sending `rows` as columnar
+    /// batches of 65536 (each value fitted to its column's type: numbers
+    /// widened or narrowed when they fit); the rows stored.  Bulk loading
+    /// without a statement per row.
+    pub fn copy_rows<I>(&mut self, sql: &str, rows: I) -> Result<u64, Error>
+    where
+        I: IntoIterator<Item = Vec<Value>>,
+    {
+        let Some(columns) = self.copy_start(sql)? else {
+            return self.copy_end(None);
+        };
+        let types: Vec<Type> = columns.iter().map(|c| c.ty.clone()).collect();
+        let mut batch = Vec::with_capacity(1 << 16);
+        let mut failed = None;
+        for row in rows {
+            batch.push(row);
+            if batch.len() == 1 << 16 {
+                match encode_batch(&types, &columns, &batch) {
+                    Ok(b) => self.send(b'B', &b)?,
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
+                }
+                batch.clear();
+            }
+        }
+        if failed.is_none() && !batch.is_empty() {
+            match encode_batch(&types, &columns, &batch) {
+                Ok(b) => self.send(b'B', &b)?,
+                Err(e) => failed = Some(e),
+            }
+        }
+        match failed {
+            None => self.copy_end(None),
+            Some(e) => {
+                // The statement is cancelled; the driver's error is the one
+                // to report.
+                let _ = self.copy_end(Some(e.to_string()));
+                Err(e)
+            }
+        }
+    }
+
+    /// Answers a `COPY` that wants data with `f`.
+    fn refuse_copy(&mut self) -> Result<(), Error> {
+        let mut body = Vec::new();
+        put_str(
+            &mut body,
+            "this call sends no data: use Client::copy_in or copy_rows for COPY FROM STDIN",
+        );
+        self.send(b'f', &body)
+    }
+
+    /// Sends a `COPY` and reads up to `I`: the columns its data holds, or
+    /// none when the statement ended without taking data (an error).
+    fn copy_start(&mut self, sql: &str) -> Result<Option<Vec<Column>>, Error> {
+        if self.version < 7 {
+            return Err(Error::Protocol(
+                "COPY FROM STDIN needs protocol version 7; the server speaks an older one".into(),
+            ));
+        }
+        self.send_query(sql, &[], Format::Typed, 0)?;
+        let (kind, body) = self.read()?;
+        let mut b = Input { b: &body };
+        match kind {
+            b'I' => Ok(Some(b.columns()?)),
+            // An error (or a statement that is not a COPY): the rest is read
+            // by `copy_end`.
+            _ => {
+                self.copy_pending = Some((kind, body));
+                Ok(None)
+            }
+        }
+    }
+
+    /// Ends the data (`e`, or `f` with why) and reads the statement's end.
+    fn copy_end(&mut self, failed: Option<String>) -> Result<u64, Error> {
+        let mut pending = self.copy_pending.take();
+        if pending.is_none() {
+            match failed {
+                None => self.send(b'e', &[])?,
+                Some(why) => {
+                    let mut body = Vec::new();
+                    put_str(&mut body, &why);
+                    self.send(b'f', &body)?;
+                }
+            }
+        }
+        let (mut count, mut error) = (0, None);
+        loop {
+            let (kind, body) = match pending.take() {
+                Some(m) => m,
+                None => self.read()?,
+            };
+            let mut b = Input { b: &body };
+            match kind {
+                b'K' => count = b.tag()?.1,
+                b'E' => error = Some(b.server_error()?),
+                b'C' | b'D' => {}
+                b'R' => {
+                    self.set_status(&body);
+                    return match error {
+                        Some(e) => Err(Error::Server(e)),
+                        None => Ok(count),
+                    };
                 }
                 k => {
                     return Err(Error::Protocol(format!(
@@ -1303,7 +1447,8 @@ impl Cursor<'_> {
             let (kind, body) = self.client.read().inspect_err(|_| self.ready = true)?;
             let mut b = Input { b: &body };
             match kind {
-                b'D' | b'C' => {}
+                b'D' | b'C' | b'B' => {}
+                b'I' => self.client.refuse_copy()?,
                 b'S' => self.client.send(b'c', &[])?,
                 b'K' => self.done = Some(b.tag()?),
                 b'E' => self.failed = Some(b.server_error()?),
@@ -1352,6 +1497,7 @@ impl Cursor<'_> {
                 b'S' => self.client.send(b'F', &self.fetch.to_le_bytes()),
                 b'K' => b.tag().map(|t| self.done = Some(t)),
                 b'E' => b.server_error().map(|e| self.failed = Some(e)),
+                b'I' => self.client.refuse_copy(),
                 b'R' => {
                     self.client.set_status(&body);
                     self.ready = true;
@@ -1372,6 +1518,121 @@ impl Cursor<'_> {
         }
         None
     }
+}
+
+/// A value as column type `t` wants it (numbers widened or narrowed when
+/// they fit, a timestamp of either kind), or none.
+fn fit(v: &Value, t: &Type) -> Option<Value> {
+    let int = match v {
+        Value::SmallInt(i) => Some(i64::from(*i)),
+        Value::Integer(i) => Some(i64::from(*i)),
+        Value::Int(i) => Some(*i),
+        _ => None,
+    };
+    Some(match (t, v) {
+        (Type::Bool, Value::Bool(_))
+        | (Type::Date, Value::Date(_))
+        | (Type::Time, Value::Time(_))
+        | (Type::Interval, Value::Interval { .. })
+        | (Type::Uuid, Value::Uuid(_))
+        | (Type::Numeric, Value::Numeric { .. }) => v.clone(),
+        (Type::SmallInt, _) => Value::SmallInt(i16::try_from(int?).ok()?),
+        (Type::Integer, _) => Value::Integer(i32::try_from(int?).ok()?),
+        (Type::Int, _) => Value::Int(int?),
+        (Type::Real, Value::Real(f)) => Value::Real(*f),
+        (Type::Real, Value::Float(f)) => Value::Real(*f as f32),
+        (Type::Real, _) => Value::Real(int? as f32),
+        (Type::Float, Value::Float(f)) => Value::Float(*f),
+        (Type::Float, Value::Real(f)) => Value::Float(f64::from(*f)),
+        (Type::Float, _) => Value::Float(int? as f64),
+        (Type::Numeric, _) => Value::Numeric {
+            mantissa: i128::from(int?),
+            scale: 0,
+        },
+        (Type::Timestamp, Value::Timestamp(t) | Value::TimestampTz(t)) => Value::Timestamp(*t),
+        (Type::TimestampTz, Value::Timestamp(t) | Value::TimestampTz(t)) => Value::TimestampTz(*t),
+        _ => return None,
+    })
+}
+
+/// A batch of `rows` of columns `types`, as a client sends it for `COPY`
+/// (DOCS §10: the columnar layout).
+fn encode_batch(types: &[Type], columns: &[Column], rows: &[Vec<Value>]) -> Result<Vec<u8>, Error> {
+    let pad = |b: &mut Vec<u8>| {
+        while !b.len().is_multiple_of(8) {
+            b.push(0);
+        }
+    };
+    let mismatch = |c: usize, v: &Value| {
+        Error::Value(format!(
+            "{v:?} cannot be sent as column \"{}\" ({:?})",
+            columns[c].name, types[c]
+        ))
+    };
+    if let Some(r) = rows.iter().find(|r| r.len() != types.len()) {
+        return Err(Error::Value(format!(
+            "a row of {} values for {} columns",
+            r.len(),
+            types.len()
+        )));
+    }
+    let mut b = (rows.len() as u32).to_le_bytes().to_vec();
+    for (c, t) in types.iter().enumerate() {
+        let nulls = rows.iter().any(|r| r[c].is_null());
+        b.push(u8::from(nulls));
+        if nulls {
+            pad(&mut b);
+            let mut bits = vec![0u8; rows.len().div_ceil(8)];
+            for (i, r) in rows.iter().enumerate() {
+                if !r[c].is_null() {
+                    bits[i / 8] |= 1 << (i % 8);
+                }
+            }
+            b.extend_from_slice(&bits);
+        }
+        pad(&mut b);
+        let w = layout(t);
+        if w > 0 {
+            for r in rows {
+                if r[c].is_null() {
+                    b.resize(b.len() + w, 0);
+                    continue;
+                }
+                let v = fit(&r[c], t).ok_or_else(|| mismatch(c, &r[c]))?;
+                let mut tagged = Vec::new();
+                v.encode(&mut tagged);
+                // The payload behind the tag (a uuid's 16 bytes at the end).
+                b.extend_from_slice(&tagged[tagged.len() - w..]);
+            }
+        } else {
+            let mut data = Vec::new();
+            let mut offsets = vec![0u8; 4];
+            for r in rows {
+                match (&r[c], t) {
+                    (Value::Null, _) => {}
+                    (Value::Bytes(x), Type::Bytea) => data.extend_from_slice(x),
+                    (Value::Other { bytes, .. }, Type::Other(_)) => data.extend_from_slice(bytes),
+                    (v @ (Value::Inet { .. } | Value::Cidr { .. }), Type::Inet | Type::Cidr) => {
+                        let mut tagged = Vec::new();
+                        v.encode(&mut tagged);
+                        data.extend_from_slice(&tagged[1..]);
+                    }
+                    (v @ Value::Array(_), Type::Array(_)) => v.encode(&mut data),
+                    (Value::Text(s), _) => data.extend_from_slice(s.as_bytes()),
+                    (v, Type::Text | Type::Char | Type::Enum(_) | Type::Unknown) => {
+                        data.extend_from_slice(v.to_string().as_bytes())
+                    }
+                    (v, _) => return Err(mismatch(c, v)),
+                }
+                offsets.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            }
+            b.extend_from_slice(&offsets);
+            pad(&mut b);
+            b.extend_from_slice(&data);
+        }
+        pad(&mut b);
+    }
+    Ok(b)
 }
 
 /// One statement's result as it arrives, a batch of rows at a time with a

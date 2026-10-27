@@ -72,6 +72,7 @@ codes! {
     no_active_txn => "25P01",
     read_only => "25006",
     feature => "0A000",
+    bad_copy_format => "22P04",
     insufficient_privilege => "42501",
     invalid_schema => "3F000",
     invalid_regex => "2201B",

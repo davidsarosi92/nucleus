@@ -53,7 +53,9 @@ pub enum Output {
 
 /// Where a statement's rows go ([`Session::run_into`]): a query's as the
 /// executor produces them, so a result never has to fit in memory; any
-/// other statement's (`RETURNING`, `SHOW`, `EXPLAIN`) once it is done.
+/// other statement's (`RETURNING`, `SHOW`, `EXPLAIN`) once it is done.  And
+/// where `COPY … FROM STDIN` takes its data from: the client, through the
+/// front end.
 pub trait Sink {
     /// The result's columns, before its first row (a statement without
     /// rows calls neither).
@@ -62,6 +64,19 @@ pub trait Sink {
     /// statement ends there, as if its result had.  An error stops the
     /// statement with it.
     fn row(&mut self, row: Row) -> Result<ControlFlow<()>>;
+
+    /// `COPY … FROM STDIN` begins: the columns its data holds.  A front end
+    /// that cannot take data from its client refuses (the default).
+    fn copy_in(&mut self, _columns: &[OutColumn]) -> Result<()> {
+        Err(Error::feature(
+            "COPY FROM STDIN needs a client that sends the data (a driver's copy, or ncsql's \\copy)",
+        ))
+    }
+
+    /// The next piece of `COPY`'s data; `None` at its end.
+    fn copy_data(&mut self) -> Result<Option<crate::copy::Chunk>> {
+        Ok(None)
+    }
 }
 
 /// A sink keeping the whole result: what [`Session::run`] returns.
@@ -96,12 +111,48 @@ impl Sink for Counted<'_> {
         self.started = true;
         self.sink.columns(columns)
     }
+    fn copy_in(&mut self, columns: &[OutColumn]) -> Result<()> {
+        // (Data taken from the client cannot be taken again: no retry.)
+        self.started = true;
+        self.sink.copy_in(columns)
+    }
+    fn copy_data(&mut self) -> Result<Option<crate::copy::Chunk>> {
+        self.sink.copy_data()
+    }
     fn row(&mut self, row: Row) -> Result<ControlFlow<()>> {
         let flow = self.sink.row(row)?;
         if flow.is_continue() {
             self.rows += 1;
         }
         Ok(flow)
+    }
+}
+
+/// A sink keeping the whole result, `COPY`'s data read from a reader
+/// ([`Session::run_copy`]).
+struct FromReader<'r> {
+    all: Collect,
+    data: &'r mut dyn std::io::Read,
+}
+
+impl Sink for FromReader<'_> {
+    fn columns(&mut self, columns: &[OutColumn]) -> Result<()> {
+        self.all.columns(columns)
+    }
+    fn row(&mut self, row: Row) -> Result<ControlFlow<()>> {
+        self.all.row(row)
+    }
+    fn copy_in(&mut self, _columns: &[OutColumn]) -> Result<()> {
+        Ok(())
+    }
+    fn copy_data(&mut self) -> Result<Option<crate::copy::Chunk>> {
+        let mut buf = vec![0u8; 1 << 16];
+        let n = self
+            .data
+            .read(&mut buf)
+            .map_err(|e| Error::bad_copy_format(format!("could not read COPY data: {e}")))?;
+        buf.truncate(n);
+        Ok((n > 0).then_some(crate::copy::Chunk::Bytes(buf)))
     }
 }
 
@@ -563,6 +614,28 @@ impl Session {
         })
     }
 
+    /// Runs one statement, `COPY … FROM STDIN`'s data read from `data`; its
+    /// whole result.
+    pub fn run_copy(
+        &mut self,
+        stmt: &Statement,
+        params: &[Value],
+        data: &mut dyn std::io::Read,
+    ) -> Result<Output> {
+        let mut sink = FromReader {
+            all: Collect::default(),
+            data,
+        };
+        let out = self.run_into(stmt, params, &mut sink)?;
+        Ok(match sink.all.columns {
+            Some(columns) => Output::Rows {
+                columns,
+                rows: sink.all.rows,
+            },
+            None => Output::Command(out),
+        })
+    }
+
     /// Runs one statement with parameter values, its rows into `sink` (a
     /// query's as they are produced); its command tag.
     pub fn run_into(
@@ -804,6 +877,7 @@ impl Session {
                 | Statement::Insert { .. }
                 | Statement::Update { .. }
                 | Statement::Delete { .. }
+                | Statement::Copy { .. }
                 | Statement::Explain(..)
                 | Statement::Lint(_)
                 | Statement::Show(_)
@@ -1125,6 +1199,14 @@ pub fn execute(
             }
             Output::Command(format!("SELECT {n}"))
         }
+        Statement::Copy {
+            table,
+            columns,
+            options,
+        } => Output::Command(format!(
+            "COPY {}",
+            crate::copy::copy_from(txn, reg, table, columns, options, sink)?
+        )),
         Statement::Comment {
             table,
             column,

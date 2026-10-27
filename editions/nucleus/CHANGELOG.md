@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `ncsql \copy <table> [(<columns>)] FROM '<file>' [WITH (…)]`: loads a
+  text or CSV file through `COPY … FROM STDIN`, locally or remotely.
 - `nucleus mcp`: the `mcp` module's Model Context Protocol server over
   stdin and stdout, for a local database or a server; reads checked by the
   parser and run read-only.

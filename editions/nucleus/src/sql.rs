@@ -42,6 +42,8 @@ Statements end with ;.  Commands (they read nc_catalog):
   \\stats <table>     statistics gathered by ANALYZE
   \\lint <statement>  what in a statement is likely slow or wrong (ANALYZE QUERY)
   \\statements        the statements that took the most time (nc_catalog.statements)
+  \\copy <table> [(<columns>)] FROM '<file>' [WITH (FORMAT csv, HEADER, …)]
+                     load a file (text or CSV) into a table: COPY FROM STDIN
   \\schemas           schemas (also \\dn)
   \\types             types (also \\dT)
   \\timing            show how long each command takes (toggle)
@@ -81,6 +83,25 @@ impl std::fmt::Display for Failure {
         }
         Ok(())
     }
+}
+
+/// `\\copy t [(cols)] FROM 'file' [options]` as the `COPY … FROM STDIN` it
+/// runs, and the file.
+fn copy_command(rest: &str) -> Option<(String, String)> {
+    let lower = rest.to_ascii_lowercase();
+    let at = lower.find(" from ")?;
+    let (target, after) = (rest[..at].trim(), rest[at + 6..].trim_start());
+    let (file, options) = if let Some(q) = after.strip_prefix('\'') {
+        let end = q.find('\'')?;
+        (q[..end].to_string(), &q[end + 1..])
+    } else {
+        let end = after.find(char::is_whitespace).unwrap_or(after.len());
+        (after[..end].to_string(), &after[end..])
+    };
+    if target.is_empty() || file.is_empty() {
+        return None;
+    }
+    Some((format!("COPY {target} FROM STDIN{options}"), file))
 }
 
 /// Where statements run.
@@ -189,6 +210,44 @@ impl Backend {
                     }),
                 })
                 .collect()),
+        }
+    }
+
+    /// Runs `COPY … FROM STDIN` (`sql`) with `data`: its command tag.  `Err`
+    /// only for a lost connection.
+    pub(crate) fn copy(
+        &mut self,
+        sql: &str,
+        data: &mut dyn std::io::Read,
+    ) -> Result<std::result::Result<String, Failure>> {
+        let failure = |code: String, message: String, hint: Option<String>| {
+            Ok(Err(Failure {
+                code,
+                message,
+                hint,
+            }))
+        };
+        match self {
+            Backend::Local { session, .. } => {
+                let stmt = match nucleus_sql::parser::parse(sql) {
+                    Ok(mut s) if s.len() == 1 => s.pop().expect("one"),
+                    Ok(_) => {
+                        return failure("42601".into(), "\\copy takes one statement".into(), None);
+                    }
+                    Err(e) => return failure(e.code.into(), e.message, e.hint),
+                };
+                session.note_text(sql);
+                match session.run_copy(&stmt, &[], data) {
+                    Ok(Output::Command(tag)) => Ok(Ok(tag)),
+                    Ok(Output::Rows { rows, .. }) => Ok(Ok(format!("SELECT {}", rows.len()))),
+                    Err(e) => failure(e.code.into(), e.message, e.hint),
+                }
+            }
+            Backend::Remote(c) => match c.copy_in(sql, data) {
+                Ok(n) => Ok(Ok(format!("COPY {n}"))),
+                Err(nucleus_client::Error::Server(e)) => failure(e.code, e.message, e.hint),
+                Err(e) => Err(format!("connection lost: {e}")),
+            },
         }
     }
 
@@ -456,6 +515,31 @@ impl Shell {
                         true
                     }
                     None => false,
+                }
+            }
+            ("\\copy", _) => {
+                let rest = line.trim_start()[cmd.len()..].trim().trim_end_matches(';');
+                let Some((sql, file)) = copy_command(rest) else {
+                    writeln!(out, "usage: \\copy <table> [(<columns>)] FROM '<file>' [WITH (…)]")
+                        .map_err(|e| e.to_string())?;
+                    return Ok(Some(false));
+                };
+                let mut f = match std::fs::File::open(&file) {
+                    Ok(f) => std::io::BufReader::new(f),
+                    Err(e) => {
+                        writeln!(out, "{file}: {e}").map_err(|e| e.to_string())?;
+                        return Ok(Some(false));
+                    }
+                };
+                match self.backend.copy(&sql, &mut f)? {
+                    Ok(tag) => {
+                        writeln!(out, "{tag}").map_err(|e| e.to_string())?;
+                        true
+                    }
+                    Err(e) => {
+                        writeln!(out, "{e}").map_err(|e| e.to_string())?;
+                        false
+                    }
                 }
             }
             ("\\lint", None) => {

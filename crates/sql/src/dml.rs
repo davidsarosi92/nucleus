@@ -193,7 +193,7 @@ fn row_policy(
 }
 
 /// The row-level security condition `command`'s new rows must pass.
-fn new_row_check(
+pub(crate) fn new_row_check(
     binder: &Binder,
     t: &Table,
     command: crate::policies::Command,
@@ -207,7 +207,7 @@ fn new_row_check(
 }
 
 /// `42501` unless `row` passes the policies' check.
-fn admit(check: &Option<Expr>, t: &Table, row: &[Value], ctx: &Ctx) -> Result<()> {
+pub(crate) fn admit(check: &Option<Expr>, t: &Table, row: &[Value], ctx: &Ctx) -> Result<()> {
     if let Some(c) = check
         && !c.holds(&exec::env(row, ctx, None))?
     {
@@ -297,7 +297,7 @@ fn duplicate(name: &str) -> Error {
 }
 
 /// Stores a new row and its index entries.
-fn insert_row(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<()> {
+pub(crate) fn insert_row(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<()> {
     let t = &w.table;
     let rowid = if t.primary_key.is_empty() {
         Some(catalog::next_rowid(txn, t)?)

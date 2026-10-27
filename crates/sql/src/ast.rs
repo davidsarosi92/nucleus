@@ -305,6 +305,15 @@ pub enum Statement {
     Analyze(Option<String>),
     /// `ANALYZE QUERY <statement>`: the linter's findings.
     Lint(Box<Statement>),
+    /// `COPY t [(columns)] FROM STDIN [WITH (options)]`.
+    Copy {
+        /// The table.
+        table: String,
+        /// The columns the data holds (`None`: every column, in order).
+        columns: Option<Vec<String>>,
+        /// How the data is written.
+        options: CopyOptions,
+    },
     /// `COMMENT ON TABLE t | COLUMN t.c IS 'text' | NULL`.
     Comment {
         /// The table.
@@ -314,6 +323,38 @@ pub enum Statement {
         /// The comment (`None`: removed).
         text: Option<String>,
     },
+}
+
+/// How `COPY`'s data is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyOptions {
+    /// `text` (PostgreSQL's: tab-separated, `\N` for NULL, backslash
+    /// escapes) or `csv`.
+    pub csv: bool,
+    /// The first line names the columns (skipped).
+    pub header: bool,
+    /// Between fields (a tab for text, `,` for CSV).
+    pub delimiter: u8,
+    /// What a NULL is written as (`\N` for text, an unquoted empty field
+    /// for CSV).
+    pub null: String,
+    /// CSV's quote (`"`).
+    pub quote: u8,
+    /// CSV's escape within quotes (the quote itself).
+    pub escape: u8,
+}
+
+impl Default for CopyOptions {
+    fn default() -> Self {
+        CopyOptions {
+            csv: false,
+            header: false,
+            delimiter: b'\t',
+            null: "\\N".into(),
+            quote: b'"',
+            escape: b'"',
+        }
+    }
 }
 
 /// `EXPLAIN`'s options.

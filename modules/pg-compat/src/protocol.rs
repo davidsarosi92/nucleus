@@ -599,14 +599,14 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
         let r = match tag {
             b'Q' => {
                 let sql = Body { b: &body }.cstr()?;
-                conn.simple_query(&sql)?;
+                conn.simple_query(&sql, &mut input)?;
                 conn.ready()?;
                 continue;
             }
             b'P' => conn.parse(&body),
             b'B' => conn.bind(&body),
             b'D' => conn.describe(&body),
-            b'E' => conn.execute(&body),
+            b'E' => conn.execute(&body, &mut input),
             b'C' => conn.close(&body),
             b'S' => {
                 skipping = false;
@@ -619,6 +619,8 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
                 continue;
             }
             b'X' => return Ok(()),
+            // COPY data after the COPY ended (an error): dropped.
+            b'd' | b'c' | b'f' => continue,
             other => Err(Error {
                 code: "08P01",
                 message: format!("unsupported message type {:?}", other as char),
@@ -642,7 +644,7 @@ fn read_i32(r: &mut (impl Read + ?Sized)) -> io::Result<i32> {
     Ok(i32::from_be_bytes(b))
 }
 
-fn read_message(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
+fn read_message<R: Read + ?Sized>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
     let mut tag = [0u8; 1];
     r.read_exact(&mut tag)?;
     let len = read_i32(r)?;
@@ -917,6 +919,8 @@ fn data_row(
 /// each (PLAN.md §M14.11).
 struct Rows<'a, W: Write> {
     out: &'a mut W,
+    /// The client's messages, for `COPY … FROM STDIN`.
+    input: &'a mut dyn Read,
     /// Whether to send `T` (Execute does not: Describe does).
     describe: bool,
     formats: &'a [i16],
@@ -937,6 +941,48 @@ impl<W: Write> Rows<'_, W> {
 }
 
 impl<W: Write> Sink for Rows<'_, W> {
+    fn copy_in(&mut self, columns: &[OutColumn]) -> Result<(), Error> {
+        // CopyInResponse: text, every column text.
+        let mut m = Msg::new(b'G').u8(0).i16(columns.len() as i16);
+        for _ in columns {
+            m = m.i16(0);
+        }
+        self.out.write_all(&m.finish()).map_err(|e| self.broke(e))?;
+        self.out.flush().map_err(|e| self.broke(e))
+    }
+
+    fn copy_data(&mut self) -> Result<Option<nucleus_sql::ext::CopyChunk>, Error> {
+        loop {
+            let input = &mut *self.input;
+            let msg = nucleus_sql::ext::paused(|| read_message(input));
+            match msg {
+                Ok((b'd', body)) => return Ok(Some(nucleus_sql::ext::CopyChunk::Bytes(body))),
+                Ok((b'c', _)) => return Ok(None),
+                Ok((b'f', body)) => {
+                    let why = Body { b: &body }.cstr().unwrap_or_default();
+                    return Err(Error {
+                        code: "57014",
+                        message: format!("COPY from stdin failed: {why}"),
+                        hint: None,
+                    });
+                }
+                // Flush and Sync mean nothing during COPY.
+                Ok((b'H' | b'S', _)) => {}
+                Ok((other, _)) => {
+                    return Err(Error {
+                        code: "08P01",
+                        message: format!(
+                            "unexpected message type {:?} during COPY from stdin",
+                            other as char
+                        ),
+                        hint: None,
+                    });
+                }
+                Err(e) => return Err(self.broke(e)),
+            }
+        }
+    }
+
     fn columns(&mut self, columns: &[OutColumn]) -> Result<(), Error> {
         self.columns = columns.to_vec();
         if !self.describe {
@@ -985,7 +1031,7 @@ impl Conn {
         self.log("error", &format!("{} {}", e.code, e.message));
     }
 
-    fn simple_query(&mut self, sql: &str) -> io::Result<()> {
+    fn simple_query(&mut self, sql: &str, input: &mut dyn Read) -> io::Result<()> {
         self.log("query", sql);
         let (stmts, texts): (Vec<_>, Vec<_>) = match nucleus_sql::ext::parse_with_text(sql) {
             Ok(s) => s.into_iter().unzip(),
@@ -1004,6 +1050,7 @@ impl Conn {
             self.session.note_text(text);
             let mut rows = Rows {
                 out: &mut self.out,
+                input: &mut *input,
                 describe: true,
                 formats: &[],
                 columns: Vec::new(),
@@ -1146,7 +1193,7 @@ impl Conn {
         }
     }
 
-    fn execute(&mut self, body: &[u8]) -> Result<(), Error> {
+    fn execute(&mut self, body: &[u8], input: &mut dyn Read) -> Result<(), Error> {
         let mut b = Body { b: body };
         let name = b.cstr().map_err(proto)?;
         let max = b.i32().map_err(proto)?;
@@ -1166,6 +1213,7 @@ impl Conn {
             self.session.note_text(&portal.text);
             let mut rows = Rows {
                 out: &mut self.out,
+                input,
                 describe: false,
                 formats: &portal.result_formats,
                 columns: Vec::new(),

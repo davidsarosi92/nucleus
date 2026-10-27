@@ -503,6 +503,7 @@ work the same locally and remotely:
 | `\stats <table>` | `ANALYZE` statistics |
 | `\lint <statement>` | the linter's findings (`ANALYZE QUERY`, §8.13), or "No findings." |
 | `\statements` | the 20 statements that took the most time (`nc_catalog.statements`) |
+| `\copy <table> [(<columns>)] FROM '<file>' [WITH (…)]` | loads the file (text, or CSV with `FORMAT csv`) through `COPY … FROM STDIN` (§8.7), locally or over the network |
 | `\schemas`, `\dn` · `\types`, `\dT` | schemas, types |
 | `\timing` · `\conninfo` · `\?` · `\q` | timing toggle, connection, help, quit |
 
@@ -889,7 +890,9 @@ name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`, `COMMENT ON
 TABLE t | COLUMN t.c IS 'text' | NULL` (the owner's; `''` removes it too;
 kept in the table's record, shown in `nc_catalog.tables` and `.columns`,
 `ncsql \d` and pg-compat's `obj_description` / `col_description` /
-`pg_description`).  Table names may
+`pg_description`), `COPY t [(columns)] FROM STDIN [[WITH] (FORMAT text |
+csv, HEADER [bool], DELIMITER 'c', NULL 'n', QUOTE 'q', ESCAPE 'e')]` (or
+the older `WITH CSV HEADER DELIMITER ';' …`; §8.7).  Table names may
 be qualified with `public.` (and, to read, `nc_catalog.`, `pg_catalog.`,
 `information_schema.`).
 
@@ -917,7 +920,7 @@ current_setting` (and the catalog functions of §8.11); aggregates `count
 sum avg min max string_agg array_agg bool_and bool_or every` (with
 `DISTINCT`, `count(*)`, `ORDER BY` inside the call).
 
-Not yet: window functions, `COPY`, `TIMETZ`, time zones other than
+Not yet: window functions, `COPY TO` and `COPY FROM 'file'`, `TIMETZ`, time zones other than
 UTC, multi-dimensional arrays, data-modifying CTEs, `LATERAL`, user
 functions.
 
@@ -965,6 +968,25 @@ wrong assignment type (assignment converts within numbers, within dates
 and timestamps, and from or to text).
 `CREATE INDEX` backfills (and refuses existing duplicates for `UNIQUE`);
 `ADD COLUMN` with a default rewrites existing rows.
+
+**Bulk load** (`copy`, §M14.11).  `COPY t [(columns)] FROM STDIN` loads
+rows the client sends, in one statement: PostgreSQL's text format
+(fields split by a tab, `\N` for NULL, backslash escapes `\t \n \\
+\x41 \101 …`, `\.` ending the data) or CSV (`,`, `"` quoting — newlines
+inside quotes are the field's —, an unquoted empty field NULL, `HEADER`
+skipping the first line), parsed as the data arrives; or typed rows the
+front end decoded (`ncp`'s batches, §10).  Each row is checked and stored
+as an `INSERT`'s: defaults for the columns not named, assignment from
+text, NOT NULL, lengths, CHECK, unique keys and indexes, row-level
+security, the `INSERT` privilege on the columns; foreign keys a chunk of
+4096 rows at a time.  A failing row fails the statement — nothing is
+stored — with the data's line in the message (`… (COPY data, line 3)`);
+`22P04` for a record with too few or too many fields.  It runs in the
+session's transaction (or its own) and is never retried, its data having
+been read.  A front end without a client to read from refuses it
+(`0A000`); `Session::run_copy(stmt, params, reader)` reads it from any
+`Read`.  `COPY … TO` and from a server-side file are not supported (a
+query reads; the client sends files).
 
 Sessions: outside `BEGIN` every statement is its own transaction, retried
 up to 10 times on `40001` (with the KV contract's `back_off`); inside, the KV transaction starts with the
@@ -1691,7 +1713,11 @@ header bytes not included; at most 1 GiB), then the body.
 | `Q` Query | client → server | string SQL, `u8` result format (0 typed, 1 text, 2 columnar — version 7), version 6: `u32` fetch size (rows per batch; 0: the whole result at once), `u16` parameter count, the parameters as values |
 | `C` Columns | server → client | `u16` count, then per column: string name, type |
 | `D` Row | server → client | one value per column |
-| `B` Batch | server → client | version 7, result format 2: rows as a buffer per column (below) |
+| `B` Batch | server → client | version 7, result format 2: rows as a buffer per column (below); client → server during `COPY`: typed rows in the same layout |
+| `I` Copy in | server → client | version 7: a `COPY … FROM STDIN` takes data — `u16` count, then per column: string name, type (as in `C`) |
+| `d` Copy data | client → server | bytes of the `COPY`'s text or CSV, any split |
+| `e` Copy end | client → server | empty: the data is complete |
+| `f` Copy fail | client → server | string: why the client gives up (the statement fails, `57014`) |
 | `K` Done | server → client | string command (`SELECT`, `INSERT`, `CREATE TABLE`, `BEGIN`, …), `u64` rows returned or affected (0 when it does not apply) |
 | `E` Error | server → client | string SQLSTATE (5 characters), string message; version 5: string hint (what to do about it; empty: none) |
 | `R` Ready | server → client | `u8` transaction status: 0 idle, 1 in a transaction block, 2 in a failed block |
@@ -1769,14 +1795,24 @@ body (zero padding before it).  The data by column type:
 | numeric | 17 bytes each: `i128` mantissa, `u8` scale |
 | anything else | variable width: *n* + 1 `u32` offsets, then the bytes value *i* takes from offset *i* to *i* + 1 — UTF-8 for text, `char(n)`, enums and unknown types; the bytes of a `bytea` and a registered type's binary form; family, mask length and address for `inet` and `cidr`; an array as a value (tag 10, as in rows) |
 
-A NULL's slot is zeros, or empty.  Transactions are SQL (`BEGIN`, `COMMIT`, `ROLLBACK`), as in
+A NULL's slot is zeros, or empty.
+
+**COPY FROM STDIN** (version 7).  The statement answers `I` with the
+columns it takes; the client sends `d` (text or CSV bytes, split
+anyhow) or `B` (batches of rows in the columnar layout above, of the
+columns `I` named: each value of its column's type) messages, then `e` —
+or `f` to give up — and the statement ends as any (`K COPY n`, or `E`).
+If it fails before `e`, the server reads and drops the client's data up
+to `e` or `f` before Error.  A query without data to send (a plain
+Query) answers `I` with `f`.  Transactions are SQL (`BEGIN`, `COMMIT`, `ROLLBACK`), as in
 §8.7; outside a block every statement commits on its own.
 
 **Versions.**  2 adds registered types (`uuid`, a module's type): tag 11
 below.  3 adds tags 12–20, §M14.26's types.  4 proves the password by
 SCRAM-SHA-256 instead of sending it (§M14.25).  5 adds the hint to `E`
 (§8.14).  6 streams results and fetches them in batches (`Q`'s fetch
-size, `S`, `F`, `c`; §M14.11).  7 adds the columnar result format (`B`).  An older client gets what
+size, `S`, `F`, `c`; §M14.11).  7 adds the columnar result format (`B`)
+and `COPY FROM STDIN` (`I`, `d`, `e`, `f`).  An older client gets what
 its version knows — registered types as text before 2; before 3,
 `smallint` and `integer` as `bigint` (tag 2), `real` as a double (tag 3),
 `bytea`, `time`, `char(n)`, `inet`, `cidr` and enums as text — so older
@@ -1840,7 +1876,10 @@ statement — `batches(sql, params, rows)`, the same in columnar batches
 (`Batch`: `rows()`, `column(i)` — a `ColumnBatch` with its validity
 bitmap and `ColumnData`, typed vectors `I32`, `I64`, `F64`, …, or offsets
 and bytes; `i32s()`, `i64s()`, `f64s()`, `str(row)`, `is_null(row)` —
-and `value(row, col)`), `status()`, `close()`.  `Value` covers
+and `value(row, col)`), `copy_in(sql, reader)` (`COPY … FROM STDIN`
+with text or CSV from any `Read`) and `copy_rows(sql, rows)` (rows sent
+as columnar batches, each value fitted to its column's type; a value
+that does not fit is `Error::Value`), `status()`, `close()`.  `Value` covers
 every nucleus type (`SmallInt(i16)`, `Integer(i32)`, `Int(i64)`,
 `Real(f32)`, `Float(f64)`, numeric as mantissa and scale, `Bytes`,
 dates and timestamps as days and µs since 2000-01-01, `Time` as µs since
@@ -1950,6 +1989,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 bulk load (L5):** `COPY t [(columns)] FROM
+  STDIN` in text and CSV, parsed as the data arrives, each row checked as
+  an INSERT's; `ncp`'s `I`, `d`, `B`, `e`, `f`; the Rust driver's
+  `copy_in` and `copy_rows`; pg-compat's COPY sub-protocol (psql's
+  `\copy`, drivers' `copy_in`); `ncsql \copy`.
 - **2026-10-27 — §M14.11 columnar results in the drivers (L4):**
   Python (numpy, Arrow, pandas, polars), JavaScript (typed arrays), Java
   (buffers), C and C++ (pointers) read batches in place.

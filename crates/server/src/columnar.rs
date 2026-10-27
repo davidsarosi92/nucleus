@@ -151,6 +151,138 @@ pub fn batch(rows: &[Row], types: &[DataType], version: u16) -> Result<Vec<u8>, 
     Ok(buf)
 }
 
+/// The rows of a client's batch `body` (`COPY … FROM STDIN`) of columns
+/// `types`: each slot read as the parameter of its type it encodes.
+pub fn rows(body: &[u8], types: &[DataType]) -> Result<Vec<Row>, Error> {
+    let bad = || Error {
+        code: "08P01",
+        message: "malformed batch".into(),
+        hint: None,
+    };
+    let take = |at: &mut usize, n: usize| -> Result<std::ops::Range<usize>, Error> {
+        let end = at
+            .checked_add(n)
+            .filter(|&e| e <= body.len())
+            .ok_or_else(bad)?;
+        let r = *at..end;
+        *at = end;
+        Ok(r)
+    };
+    let align = |at: &mut usize| *at = at.div_ceil(8) * 8;
+    let mut at = 0;
+    let n = u32::from_le_bytes(body[take(&mut at, 4)?].try_into().unwrap()) as usize;
+    let mut rows: Vec<Row> = (0..n).map(|_| Vec::with_capacity(types.len())).collect();
+    for &t in types {
+        let nulls = body[take(&mut at, 1)?][0] != 0;
+        let valid = if nulls {
+            align(&mut at);
+            Some(take(&mut at, n.div_ceil(8))?)
+        } else {
+            None
+        };
+        align(&mut at);
+        let is_null = |i: usize| {
+            valid
+                .as_ref()
+                .is_some_and(|v| body[v.start + i / 8] & (1 << (i % 8)) == 0)
+        };
+        // A slot as the parameter it encodes: the type's tag before it.
+        let decode = |tagged: &[u8]| -> Result<Value, Error> {
+            crate::native::parameter(&mut nucleus_sql::encoding::Reader::new(tagged))
+        };
+        match layout(t) {
+            Layout::Fixed(w) => {
+                let data = take(&mut at, n * w)?;
+                for (i, row) in rows.iter_mut().enumerate() {
+                    if is_null(i) {
+                        row.push(Value::Null);
+                        continue;
+                    }
+                    let slot = &body[data.start + i * w..data.start + (i + 1) * w];
+                    let mut tagged = Vec::with_capacity(w + 8);
+                    match t {
+                        DataType::Ext(e) => {
+                            tagged.push(11);
+                            tagged.extend_from_slice(&(e.name().len() as u32).to_le_bytes());
+                            tagged.extend_from_slice(e.name().as_bytes());
+                            tagged.extend_from_slice(&(w as u32).to_le_bytes());
+                        }
+                        // A timestamp's, a date's, … tag; integers by width.
+                        _ => tagged.push(fixed_tag(t)),
+                    }
+                    tagged.extend_from_slice(slot);
+                    row.push(decode(&tagged)?);
+                }
+            }
+            Layout::Var => {
+                let offs = take(&mut at, (n + 1) * 4)?;
+                let off = |i: usize| {
+                    u32::from_le_bytes(
+                        body[offs.start + 4 * i..offs.start + 4 * i + 4]
+                            .try_into()
+                            .unwrap(),
+                    ) as usize
+                };
+                align(&mut at);
+                let data = take(&mut at, off(n))?;
+                for (i, row) in rows.iter_mut().enumerate() {
+                    if is_null(i) {
+                        row.push(Value::Null);
+                        continue;
+                    }
+                    let (a, b) = (off(i), off(i + 1));
+                    if a > b || b > data.len() {
+                        return Err(bad());
+                    }
+                    let slot = &body[data.start + a..data.start + b];
+                    row.push(match t {
+                        DataType::Bytea => Value::Bytea(slot.into()),
+                        DataType::Inet | DataType::Cidr => {
+                            let mut tagged = vec![if t == DataType::Inet { 18 } else { 19 }];
+                            tagged.extend_from_slice(slot);
+                            decode(&tagged)?
+                        }
+                        DataType::Array(_) => decode(slot)?,
+                        DataType::Ext(e) => {
+                            let mut tagged = vec![11];
+                            tagged.extend_from_slice(&(e.name().len() as u32).to_le_bytes());
+                            tagged.extend_from_slice(e.name().as_bytes());
+                            tagged.extend_from_slice(&(slot.len() as u32).to_le_bytes());
+                            tagged.extend_from_slice(slot);
+                            decode(&tagged)?
+                        }
+                        // Text (a char(n)'s or an enum's label: the column
+                        // converts it).
+                        _ => Value::Text(String::from_utf8(slot.to_vec()).map_err(|_| {
+                            Error::invalid_text("invalid byte sequence for encoding \"UTF8\"")
+                        })?),
+                    });
+                }
+            }
+        }
+        align(&mut at);
+    }
+    Ok(rows)
+}
+
+/// The value tag a fixed-width column's slots are the payload of.
+fn fixed_tag(t: DataType) -> u8 {
+    match t {
+        DataType::Bool => 1,
+        DataType::SmallInt => 12,
+        DataType::Integer => 13,
+        DataType::BigInt => 2,
+        DataType::Real => 14,
+        DataType::Float => 3,
+        DataType::Numeric => 5,
+        DataType::Date => 6,
+        DataType::Timestamp => 7,
+        DataType::TimestampTz => 8,
+        DataType::Interval => 9,
+        _ => 16, // time
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +315,41 @@ mod tests {
         assert_eq!(offs, [0, 2, 2, 3]);
         assert_eq!(&body[64..67], b"abc");
         assert_eq!(body.len() % 8, 0);
+    }
+
+    #[test]
+    fn a_batch_reads_back_as_its_rows() {
+        let types = [
+            DataType::Integer,
+            DataType::Text,
+            DataType::Float,
+            DataType::Date,
+            DataType::Bool,
+        ];
+        let rows = vec![
+            vec![
+                Value::Int(1),
+                Value::Text("ab".into()),
+                Value::Float(0.5),
+                Value::Date(3),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Int(-3),
+                Value::Text("c".into()),
+                Value::Float(-1.0),
+                Value::Date(-1),
+                Value::Bool(false),
+            ],
+        ];
+        let b = batch(&rows, &types, 7).unwrap();
+        assert_eq!(super::rows(&b[5..], &types).unwrap(), rows);
     }
 }

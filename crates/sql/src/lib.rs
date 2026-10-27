@@ -13,6 +13,7 @@ pub mod builtin;
 pub mod bytea;
 pub mod catalog;
 pub mod check;
+pub mod copy;
 pub mod datetime;
 pub mod dbsettings;
 pub mod decimal;

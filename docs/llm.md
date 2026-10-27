@@ -44,7 +44,8 @@ to learn what the data means.
 
 **Writes:** `INSERT INTO t [(cols)] VALUES (…), (…) | SELECT … | DEFAULT
 VALUES [RETURNING …]`; `UPDATE t SET a = … [WHERE …] [RETURNING …]`;
-`DELETE FROM t [WHERE …] [RETURNING …]`.
+`DELETE FROM t [WHERE …] [RETURNING …]`; bulk: `COPY t [(cols)] FROM
+STDIN [WITH (FORMAT csv, HEADER)]` with the data sent by the client.
 
 **Queries:** `WITH [RECURSIVE] …`, `SELECT [DISTINCT]`, `FROM` with comma
 joins and `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`, subqueries in
@@ -86,7 +87,8 @@ after an error in a block everything is `25P02` until `ROLLBACK`.
 | `TRUNCATE` | `DELETE FROM t` |
 | `ALTER TABLE … DROP COLUMN`, `RENAME`, `ALTER COLUMN … SET DEFAULT` | a new table and `INSERT … SELECT` |
 | `SELECT … FOR UPDATE` | a `SERIALIZABLE` transaction |
-| `$$` strings, user-defined functions, `COPY`, `TABLESAMPLE`, time zones other than UTC | — |
+| `COPY … TO`, `COPY … FROM 'file'` | a query (`batches` in the drivers); `COPY t FROM STDIN` with the data from the client (a driver's copy, `ncsql \copy`) |
+| `$$` strings, user-defined functions, `TABLESAMPLE`, time zones other than UTC | — |
 
 ## Finding your way
 
