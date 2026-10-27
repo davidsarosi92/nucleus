@@ -62,6 +62,18 @@ fn sorts_and_materialised_rows_spill_and_agree() {
         "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 30000) \
            SELECT count(*), sum(n) FROM r",
         "SELECT i FROM generate_series(1, 1000000000) i LIMIT 3",
+        // Aggregation, DISTINCT and set operations (sorted, to compare).
+        "SELECT name, count(*), sum(id), min(m), string_agg(id::text, ',' ORDER BY id) \
+           FROM t GROUP BY name ORDER BY name",
+        "SELECT g, count(DISTINCT name), array_agg(id ORDER BY id DESC) FROM t GROUP BY g ORDER BY g",
+        "SELECT count(*), sum(id) FROM t",
+        "SELECT DISTINCT name, m FROM t ORDER BY name, m",
+        "SELECT count(*) FROM (SELECT DISTINCT name FROM t) d",
+        "SELECT name FROM t WHERE g < 60 UNION SELECT name FROM t WHERE g > 30 ORDER BY 1",
+        "SELECT name, m FROM t INTERSECT SELECT name, m FROM t WHERE id % 2 = 0 ORDER BY 1, 2",
+        "SELECT name FROM t EXCEPT SELECT name FROM t WHERE g < 90 ORDER BY 1",
+        "SELECT g FROM t INTERSECT ALL SELECT g FROM t WHERE id < 5000 ORDER BY 1",
+        "SELECT name FROM t EXCEPT ALL SELECT name FROM t WHERE id % 3 = 0 ORDER BY 1",
     ];
     let before = db.scratch_files_made();
     let big = results(&db, "SET work_mem = '64MB'", &queries);

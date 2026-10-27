@@ -995,8 +995,14 @@ and the rows a write collects before writing (`INSERT … SELECT`,
 `UPDATE`, `DELETE`, `CREATE INDEX`, rewrites) are kept in memory up to
 the limit, the rest in a run; writes then apply them 4096 rows at a time.
 Table functions stream (`generate_series` makes its rows as they are
-read).  Still held whole: hash aggregation, `DISTINCT`, set operations
-and joins' right inputs (§M14.11 L6b, L6c).
+read).  Hash aggregation, `DISTINCT`, `UNION` and `INTERSECT` / `EXCEPT`
+keep their groups, the rows seen, or the right side's counts in memory up
+to the limit; past it, rows of new groups (rows not yet seen; both sides
+of a set operation) go to 32 partitions by a hash of their key, each
+taken in turn after the input — a partition too large splits again, up to
+four levels — so no aggregate's state ever leaves memory, and each
+partition holds every row of its keys.  Still held whole: joins' right
+inputs (§M14.11 L6c) and a recursive `UNION`'s rows seen.
 Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context).  Expressions use three-valued logic,
 checked integer arithmetic (`22003`), division by zero (`22012`).
@@ -2053,6 +2059,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 aggregation, DISTINCT and set operations past
+  work_mem (L6b):** groups, rows seen and counts kept in memory up to the
+  limit; the rest partitioned by key and taken in turn.
 - **2026-10-27 — §M14.11 a memory-bounded executor, first part (L6a):**
   `work_mem`; external merge sorts; materialised CTEs, recursion and the
   rows writes collect spill to scratch space (the KV contract's

@@ -102,11 +102,9 @@ fn build_node<'a>(
             on,
             algo,
         } => join(left, right, *kind, on.as_ref(), algo, ctx, outer)?,
-        Plan::Aggregate { input, group, aggs } => Box::new(
-            aggregate(build(input, ctx, outer)?, group, aggs, ctx, outer)?
-                .into_iter()
-                .map(Ok),
-        ),
+        Plan::Aggregate { input, group, aggs } => {
+            aggregate(build(input, ctx, outer)?, group, aggs, ctx, outer, 0)?
+        }
         Plan::Sort { input, keys } => {
             // In memory while it fits in work_mem, else by runs merged.
             let keyed = build(input, ctx, outer)?.map(|r| {
@@ -148,13 +146,7 @@ fn build_node<'a>(
                 None => Box::new(rows),
             }
         }
-        Plan::Distinct { input } => {
-            let mut seen = HashSet::new();
-            Box::new(build(input, ctx, outer)?.filter(move |r| match r {
-                Ok(row) => seen.insert(row.clone()),
-                Err(_) => true,
-            }))
-        }
+        Plan::Distinct { input } => Box::new(Distinct::new(build(input, ctx, outer)?, 0)),
         Plan::View { view } => Box::new(
             view.rows(&CallContext::new(ctx.txn, ctx.registry))?
                 .into_iter()
@@ -253,11 +245,7 @@ fn build_node<'a>(
             if *all {
                 Box::new(rows)
             } else {
-                let mut seen = HashSet::new();
-                Box::new(rows.filter(move |r| match r {
-                    Ok(row) => seen.insert(row.clone()),
-                    Err(_) => true,
-                }))
+                Box::new(Distinct::new(Box::new(rows), 0))
             }
         }
         Plan::SetOp {
@@ -265,37 +253,182 @@ fn build_node<'a>(
             left,
             right,
             all,
-        } => {
-            // How often each right row occurs; left rows are matched
-            // against it (multiset semantics for ALL, as in PostgreSQL).
-            let mut counts: HashMap<Row, usize> = HashMap::new();
-            for r in build(right, ctx, outer)? {
-                *counts.entry(r?).or_default() += 1;
-            }
-            let (op, all) = (*op, *all);
-            let mut seen = HashSet::new();
-            Box::new(build(left, ctx, outer)?.filter(move |r| {
-                let Ok(row) = r else { return true };
-                let count = counts.get_mut(row);
-                let keep = match (op, count) {
-                    (SetOp::Intersect, Some(n)) if *n > 0 => {
-                        *n -= 1;
-                        true
-                    }
-                    (SetOp::Intersect, _) => false,
-                    (_, Some(n)) if *n > 0 => {
-                        *n -= 1;
-                        false
-                    }
-                    (_, Some(_)) => all, // EXCEPT ALL: more on the left
-                    (_, None) => true,
-                };
-                // Without ALL each distinct row appears at most once, and
-                // EXCEPT drops a row the right side has at all.
-                keep && (all || seen.insert(row.clone()))
-            }))
-        }
+        } => set_op(
+            *op,
+            *all,
+            build(left, ctx, outer)?,
+            build(right, ctx, outer)?,
+            0,
+        )?,
     })
+}
+
+/// Rows without repeats: those seen kept in memory up to work_mem; past
+/// it, rows not seen go to partitions (by value), each made distinct in
+/// turn after the input.  A row seen before the memory filled is never
+/// in a partition, so no row comes out twice.
+struct Distinct<'a> {
+    input: Option<Rows<'a>>,
+    seen: HashSet<Row>,
+    bytes: usize,
+    limit: usize,
+    level: u32,
+    parts: Option<crate::spill::Partitions>,
+    pending: std::collections::VecDeque<Rc<crate::spill::Sealed>>,
+    tail: Option<Rows<'static>>,
+}
+
+impl<'a> Distinct<'a> {
+    fn new(input: Rows<'a>, level: u32) -> Self {
+        Distinct {
+            input: Some(input),
+            seen: HashSet::new(),
+            bytes: 0,
+            limit: crate::budget::work_mem(),
+            level,
+            parts: None,
+            pending: Default::default(),
+            tail: None,
+        }
+    }
+
+    fn step(&mut self) -> Result<Option<Row>> {
+        loop {
+            if let Some(input) = &mut self.input {
+                let Some(row) = input.next().transpose()? else {
+                    self.input = None;
+                    self.seen = HashSet::new();
+                    if let Some(p) = self.parts.take() {
+                        self.pending = p.seal()?.into();
+                    }
+                    continue;
+                };
+                if self.seen.contains(&row) {
+                    continue;
+                }
+                let size = crate::spill::row_bytes(&row);
+                if self.parts.is_none()
+                    && (self.bytes + size <= self.limit || self.level >= crate::spill::MAX_LEVEL)
+                {
+                    self.bytes += size;
+                    self.seen.insert(row.clone());
+                    return Ok(Some(row));
+                }
+                self.parts
+                    .get_or_insert_with(|| crate::spill::Partitions::new(self.level))
+                    .push(&row, &row)?;
+            } else if let Some(tail) = &mut self.tail {
+                match tail.next().transpose()? {
+                    Some(row) => return Ok(Some(row)),
+                    None => self.tail = None,
+                }
+            } else if let Some(run) = self.pending.pop_front() {
+                self.tail = Some(Box::new(Distinct::new(
+                    Box::new(run.iter()),
+                    self.level + 1,
+                )));
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+impl Iterator for Distinct<'_> {
+    type Item = Result<Row>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.step().transpose()
+    }
+}
+
+/// `INTERSECT` / `EXCEPT` [`ALL`]: how often each right row occurs, and
+/// left rows matched against it (multiset semantics for ALL, as in
+/// PostgreSQL).  Past work_mem, both sides are partitioned by value and
+/// each pair of partitions taken in turn.
+fn set_op<'a>(
+    op: SetOp,
+    all: bool,
+    left: Rows<'a>,
+    right: Rows<'a>,
+    level: u32,
+) -> Result<Rows<'a>> {
+    let limit = crate::budget::work_mem();
+    let mut counts: HashMap<Row, usize> = HashMap::new();
+    let mut bytes = 0;
+    let mut right_parts: Option<crate::spill::Partitions> = None;
+    for r in right {
+        let row = r?;
+        if let Some(p) = &mut right_parts {
+            p.push(&row, &row)?;
+            continue;
+        }
+        if let Some(n) = counts.get_mut(&row) {
+            *n += 1;
+            continue;
+        }
+        let size = crate::spill::row_bytes(&row);
+        if bytes + size > limit && level < crate::spill::MAX_LEVEL {
+            let mut p = crate::spill::Partitions::new(level);
+            for (r, n) in counts.drain() {
+                for _ in 0..n {
+                    p.push(&r, &r)?;
+                }
+            }
+            p.push(&row, &row)?;
+            right_parts = Some(p);
+            continue;
+        }
+        bytes += size;
+        counts.insert(row, 1);
+    }
+    let Some(right_parts) = right_parts else {
+        let kept = left.filter(move |r| {
+            let Ok(row) = r else { return true };
+            match (op, counts.get_mut(row)) {
+                (SetOp::Intersect, Some(n)) if *n > 0 => {
+                    *n -= 1;
+                    true
+                }
+                (SetOp::Intersect, _) => false,
+                (_, Some(n)) if *n > 0 => {
+                    *n -= 1;
+                    false
+                }
+                (_, Some(_)) => all, // EXCEPT ALL: more on the left
+                (_, None) => true,
+            }
+        });
+        // Without ALL each distinct row appears at most once, and EXCEPT
+        // drops a row the right side has at all.
+        return Ok(if all {
+            Box::new(kept)
+        } else {
+            Box::new(Distinct::new(Box::new(kept), level))
+        });
+    };
+    let mut left_parts = crate::spill::Partitions::new(level);
+    for r in left {
+        let row = r?;
+        left_parts.push(&row, &row)?;
+    }
+    let pairs: Vec<_> = left_parts
+        .seal_all()?
+        .into_iter()
+        .zip(right_parts.seal_all()?)
+        .collect();
+    let side = |run: Option<Rc<crate::spill::Sealed>>| -> Rows<'static> {
+        match run {
+            Some(r) => Box::new(r.iter()),
+            None => Box::new(std::iter::empty()),
+        }
+    };
+    Ok(Box::new(pairs.into_iter().flat_map(
+        move |(l, r)| match set_op(op, all, side(l), side(r), level + 1) {
+            Ok(rows) => rows,
+            Err(e) => Box::new(std::iter::once(Err(e))),
+        },
+    )))
 }
 
 /// `generate_series(start, stop [, step])`: numbers, or timestamps with an
@@ -798,13 +931,21 @@ fn feed(agg: &Agg, st: &mut AggState, args: Vec<Value>) -> Result<()> {
     st.acc.add(&args)
 }
 
-fn aggregate(
-    rows: Rows,
-    group: &[Expr],
-    aggs: &[Agg],
-    ctx: &Ctx,
-    outer: Option<&Env>,
-) -> Result<Vec<Row>> {
+/// Groups and their aggregates.  The groups are kept in memory up to
+/// work_mem; past it, rows of groups already there still go to them, and
+/// rows of new groups to partitions (by group key), each aggregated in
+/// turn after the input — so no accumulator ever leaves memory.
+fn aggregate<'a>(
+    rows: Rows<'a>,
+    group: &'a [Expr],
+    aggs: &'a [Agg],
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+    level: u32,
+) -> Result<Rows<'a>> {
+    let limit = crate::budget::work_mem();
+    let mut bytes = 0;
+    let mut parts: Option<crate::spill::Partitions> = None;
     let fresh = || -> Vec<AggState> {
         aggs.iter()
             .map(|a| AggState {
@@ -830,6 +971,19 @@ fn aggregate(
         let gi = match index.get(&key) {
             Some(&i) => i,
             None => {
+                let size = crate::spill::row_bytes(&key) + 96 * aggs.len();
+                // (A grand total is one group: it never partitions.)
+                if parts.is_some()
+                    || (bytes + size > limit
+                        && level < crate::spill::MAX_LEVEL
+                        && !group.is_empty())
+                {
+                    parts
+                        .get_or_insert_with(|| crate::spill::Partitions::new(level))
+                        .push(&key, &row)?;
+                    continue;
+                }
+                bytes += size;
                 index.insert(key.clone(), groups.len());
                 groups.push((key, fresh()));
                 groups.len() - 1
@@ -847,16 +1001,20 @@ fn aggregate(
                     .iter()
                     .map(|k| k.expr.eval(&e))
                     .collect::<Result<Vec<_>>>()?;
+                bytes += crate::spill::row_bytes(&keys) + crate::spill::row_bytes(&args);
                 buffer.push((keys, args));
                 continue;
+            }
+            if st.seen.is_some() {
+                bytes += crate::spill::row_bytes(&args);
             }
             feed(agg, st, args)?;
         }
     }
-    if groups.is_empty() && group.is_empty() {
+    if groups.is_empty() && group.is_empty() && level == 0 {
         groups.push((Vec::new(), fresh())); // aggregates over no rows
     }
-    groups
+    let done: Vec<Row> = groups
         .into_iter()
         .map(|(mut key, states)| {
             for (agg, mut st) in aggs.iter().zip(states) {
@@ -870,7 +1028,19 @@ fn aggregate(
             }
             Ok(key)
         })
-        .collect()
+        .collect::<Result<_>>()?;
+    let runs = match parts {
+        Some(p) => p.seal()?,
+        None => Vec::new(),
+    };
+    Ok(Box::new(done.into_iter().map(Ok).chain(
+        runs.into_iter().flat_map(move |run| {
+            match aggregate(Box::new(run.iter()), group, aggs, ctx, outer, level + 1) {
+                Ok(rows) => rows,
+                Err(e) => Box::new(std::iter::once(Err(e))),
+            }
+        }),
+    )))
 }
 
 /// The order of two rows' sort key values.

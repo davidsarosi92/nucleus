@@ -357,7 +357,6 @@ impl Stored {
             Stored::Run(run) => Box::new(run.iter()),
         }
     }
-
 }
 
 impl IntoIterator for Stored {
@@ -370,6 +369,63 @@ impl IntoIterator for Stored {
             Stored::Memory(rows) => Box::new(rows.into_iter().map(Ok)),
             Stored::Run(run) => Box::new(run.iter()),
         }
+    }
+}
+
+/// Partitions an operator spreads the input past its memory over.
+pub const FAN_OUT: usize = 32;
+/// Partitioning levels at most: past them, a partition is taken in
+/// memory whatever its size (only a huge number of equal keys gets there).
+pub const MAX_LEVEL: u32 = 4;
+
+/// A hash of `key` for partitioning at `level` (each level hashes
+/// differently, so a partition splits again).
+pub fn hash_at(level: u32, key: &[Value]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    level.hash(&mut h);
+    key.hash(&mut h);
+    h.finish()
+}
+
+/// Rows spread over [`FAN_OUT`] runs by a hash of their keys: the part of
+/// an operator's input past its memory, each partition then taken on its
+/// own (rows with equal keys share one).
+pub struct Partitions {
+    runs: Vec<Option<Run>>,
+    level: u32,
+}
+
+impl Partitions {
+    /// Empty partitions at `level`.
+    pub fn new(level: u32) -> Self {
+        Partitions {
+            runs: (0..FAN_OUT).map(|_| None).collect(),
+            level,
+        }
+    }
+
+    /// Adds `row`, by `key`.
+    pub fn push(&mut self, key: &[Value], row: &[Value]) -> Result<()> {
+        let i = (hash_at(self.level, key) % FAN_OUT as u64) as usize;
+        if self.runs[i].is_none() {
+            self.runs[i] = Some(Run::new()?);
+        }
+        self.runs[i].as_mut().expect("just made").push(row)
+    }
+
+    /// The partitions with rows.
+    pub fn seal(self) -> Result<Vec<Rc<Sealed>>> {
+        self.runs.into_iter().flatten().map(Run::seal).collect()
+    }
+
+    /// Every partition, by number (`None`: no rows) — to pair with another
+    /// side's partitions of the same level.
+    pub fn seal_all(self) -> Result<Vec<Option<Rc<Sealed>>>> {
+        self.runs
+            .into_iter()
+            .map(|r| r.map(Run::seal).transpose())
+            .collect()
     }
 }
 
