@@ -232,6 +232,9 @@ pub struct Options {
     pub wal_segment_bytes: u64,
     /// Old versions kept, in commits, beyond what running transactions need.
     pub history: u64,
+    /// A transaction's writes kept in memory, in bytes; past it they spill
+    /// into the store, so a transaction of any size runs in bounded memory.
+    pub txn_memory_bytes: usize,
 }
 
 impl Default for Options {
@@ -241,6 +244,7 @@ impl Default for Options {
             checkpoint_wal_bytes: 64 << 20,
             wal_segment_bytes: 16 << 20,
             history: 0,
+            txn_memory_bytes: 64 << 20,
         }
     }
 }
@@ -281,6 +285,7 @@ impl Database {
                 },
                 checkpoint_wal_bytes: opts.checkpoint_wal_bytes,
                 history: opts.history,
+                txn_memory: opts.txn_memory_bytes,
             },
         )?;
         Ok(Self { engine, platform })

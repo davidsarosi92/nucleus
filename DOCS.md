@@ -363,6 +363,12 @@ descending).  A read at `ts` is one seek to `encode_key(k, ts)`.
 `first_version(k)` and `after_versions(k)` bound all versions of `k`.  A
 user key may be at most 1014 bytes after escaping.
 
+**Reserved keys.**  No encoded key starts with `00` and a byte other than
+`00` or `FF`, so store keys from `00 01` to `00 FF` are the engine's own:
+the *side area* `00 01 ‖ id (u64 BE) ‖ user key → tag ‖ value` (a large
+transaction's spilled writes) and *status records* `00 02 ‖ id → commit
+ts`.  Every walk over versions skips them.
+
 ### 5.2 Engine and transactions
 
 `Engine::open(platform, dir, EngineOptions)` (cheap to clone).
@@ -372,7 +378,7 @@ merges the transaction's own writes), `commit() -> Timestamp`,
 `rollback()`; dropping it rolls back.  `Timestamp` is opaque outside the
 crate (principle 3): compared, printed and parsed (`Display`, `FromStr`),
 never computed with.  `Engine`: `visible`, `checkpoint`,
-`vacuum`, `version_count`, `store`.
+`vacuum`, `version_count`, `side_count`, `store`.
 
 **Snapshot isolation.**  A transaction reads at its start timestamp — the
 engine's *visible* timestamp, which advances only once a commit is durable,
@@ -383,6 +389,26 @@ committer wins); else one WAL batch with the next timestamp, applied at
 once; then the group-commit wait, then *visible* moves.  A checkpoint runs
 when the WAL since the last one exceeds `checkpoint_wal_bytes` (64 MiB).
 Write skew is possible under snapshot isolation (tested and documented).
+
+**Large transactions** (§M14.11).  A transaction keeps its writes in
+memory up to `txn_memory` (64 MiB); past it they *spill* into its own part
+of the side area, under the commit lock, in 1 MiB batches: each key is
+checked as a commit would check it (a newer version, or another
+transaction's spilled write of it → `Conflict`), and from then on any
+commit — any write, even — of that key conflicts.  The transaction reads
+its spilled writes (its own side area ranks above every version; writes
+still in memory above that).  The commit is one batch as always — the
+writes in memory as versions, their spilled copies deleted, and the
+status record (`id → ts`) — so it is atomic however large the
+transaction.  Then the side area is *resolved*: moved into versions at
+`ts`, 4096 entries a batch; until it is, readers merge it — a read looks
+up the versions and every committed side area at or below its snapshot
+within one read of the tree, so a write is in one place or the other,
+never neither — and garbage collection leaves alone the keys it holds.
+A rollback (or a drop) deletes the side area; on opening, the engine
+drops the side areas of transactions that never committed and resolves
+those that did.  Serializable reads validate against the key span a large
+commit wrote (lowest to highest key) beside the recent keys.
 
 **Serializable** (`Isolation::Serializable`, §M14).  The transaction also
 records the keys it read and the key ranges its scans consumed (a scan
@@ -427,7 +453,13 @@ snapshot a concurrent reader takes; GC with pinned snapshots, tombstones
 and vacuum; history; zero bytes and prefixes in keys; model-based scans
 inside transactions; recovery of data and timestamps; a crash at every I/O
 point (both modes).  Mutations caught: no conflict check; a GC watermark
-that ignores running snapshots.
+that ignores running snapshots.  `tests/large.rs`: transactions past their
+budget read, overwrite and delete their spilled writes and commit them;
+rollbacks, drops and crashes leave no side area; conflicts with spilled
+writes both ways; serializable reads against a large commit's span; a
+concurrent reader never sees part of a large commit (the mutation that
+makes readers skip committed side areas is caught); a crash at every
+third I/O point (both modes) with spilling transactions.
 
 ## 6. KV contract (`nucleus-kv`) and the CLI
 
@@ -464,7 +496,8 @@ distributed implementation will provide (§F3).
 the real file system, `open_on(platform, dir, Options)` on any platform;
 `checkpoint`, `vacuum`, `latest`, `close`.  `Options`: `cache_bytes` (8 MiB),
 `checkpoint_wal_bytes` (64 MiB), `wal_segment_bytes` (16 MiB), `history`
-(0).  `tests/contract.rs` holds the contract as a suite any implementation
+(0), `txn_memory_bytes` (64 MiB: a transaction's writes held in memory
+before they spill, §5.2).  `tests/contract.rs` holds the contract as a suite any implementation
 must pass (run on the simulation and on real files, plus 8 threads through
 `Arc<dyn Kv>`).
 
@@ -983,7 +1016,8 @@ security, the `INSERT` privilege on the columns; foreign keys a chunk of
 stored — with the data's line in the message (`… (COPY data, line 3)`);
 `22P04` for a record with too few or too many fields.  It runs in the
 session's transaction (or its own) and is never retried, its data having
-been read.  A front end without a client to read from refuses it
+been read; a load larger than the transaction's memory spills (§5.2), so
+its size is not bound by memory.  A front end without a client to read from refuses it
 (`0A000`); `Session::run_copy(stmt, params, reader)` reads it from any
 `Read`.  `COPY … TO` and from a server-side file are not supported (a
 query reads; the client sends files).
@@ -1997,6 +2031,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 large transactions (L5b):** writes past
+  `txn_memory` spill into the store's side area; the commit stays one
+  atomic batch (a status record), the side area is then moved into
+  versions while readers merge it; rollbacks, drops and crashes leave
+  nothing.
 - **2026-10-27 — §M14.11 bulk load in the drivers (L5):** `copy` with
   text or CSV in every driver; `load` of rows, columns, DataFrames and
   Arrow tables as columnar batches in Python, JavaScript and Java.

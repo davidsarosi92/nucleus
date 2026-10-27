@@ -162,3 +162,61 @@ fn copy_without_data_is_refused_and_options_are_checked() {
         ]
     );
 }
+
+/// A load larger than a transaction's memory (PLAN.md §M14.11 L5b): its
+/// writes spill, the statement and the rest of its block read them —
+/// indexes, foreign keys, updates — and a rollback leaves nothing.
+#[test]
+fn a_load_past_the_transaction_budget() {
+    let kv: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(7)),
+            Path::new("/db"),
+            Options {
+                txn_memory_bytes: 16 << 10,
+                ..Options::default()
+            },
+        )
+        .unwrap(),
+    );
+    let mut s = Session::new(kv);
+    s.execute(
+        "CREATE TABLE p (id INT PRIMARY KEY); INSERT INTO p SELECT * FROM generate_series(0, 9); \
+         CREATE TABLE big (id INT PRIMARY KEY, p INT REFERENCES p (id), name TEXT UNIQUE)",
+    )
+    .unwrap();
+    let data: String = (0..20_000)
+        .map(|i| format!("{i}\t{}\tn{i}\n", i % 10))
+        .collect();
+    s.execute("BEGIN").unwrap();
+    assert_eq!(
+        copy(&mut s, "COPY big FROM STDIN", &data).unwrap(),
+        Output::Command("COPY 20000".into())
+    );
+    // In the same block: the spilled rows, by key, by index, updated.
+    assert_eq!(
+        rows(&mut s, "SELECT count(*), sum(p) FROM big"),
+        vec![vec![Value::Int(20_000), Value::Int(90_000)]]
+    );
+    assert_eq!(
+        rows(&mut s, "SELECT id FROM big WHERE name = 'n12345'"),
+        vec![vec![Value::Int(12_345)]]
+    );
+    let e = copy(&mut s, "COPY big FROM STDIN", "20000\t1\tn5\n").unwrap_err();
+    assert_eq!(e.code, "23505");
+    s.execute("ROLLBACK").unwrap();
+    assert_eq!(
+        rows(&mut s, "SELECT count(*) FROM big"),
+        vec![vec![Value::Int(0)]]
+    );
+    // On its own: committed whole.
+    copy(&mut s, "COPY big FROM STDIN", &data).unwrap();
+    s.execute("UPDATE big SET name = name || '!' WHERE p < 5")
+        .unwrap();
+    assert_eq!(
+        rows(&mut s, "SELECT count(*) FROM big WHERE name LIKE '%!'"),
+        vec![vec![Value::Int(10_000)]]
+    );
+    let e = s.execute("DELETE FROM p WHERE id = 3").unwrap_err();
+    assert_eq!(e.code, "23503");
+}

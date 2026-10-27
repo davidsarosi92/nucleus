@@ -13,6 +13,12 @@
 //! at or after it, if it belongs to `k`, is the newest version `≤ ts`.
 //!
 //! The value tag is 1 for a value, 0 for a tombstone (a delete).
+//!
+//! **Reserved keys.**  An encoded user key never starts with `00` followed
+//! by a byte other than `00` or `FF`, so the store keys from `00 01` up to
+//! `00 FF` belong to the engine: a large transaction's writes, spilled
+//! before it commits (`00 01 | id | user key -> tag | value`, the side
+//! area), and its status once committed (`00 02 | id -> commit ts`).
 
 /// Bytes added by the encoding besides escaping: terminator and timestamp.
 pub const OVERHEAD: usize = 10;
@@ -77,6 +83,42 @@ pub fn decode_key(key: &[u8]) -> Option<(Vec<u8>, u64)> {
     None
 }
 
+/// The first reserved store key: the side area.
+pub const SIDE: [u8; 2] = [0, 1];
+/// The status records of committed transactions whose spilled writes are
+/// still in the side area.
+pub const STATUS: [u8; 2] = [0, 2];
+/// The first store key past the reserved ones.
+pub const RESERVED_END: [u8; 2] = [0, 0xFF];
+
+/// Whether `store_key` is reserved (not a version).
+pub fn is_reserved(store_key: &[u8]) -> bool {
+    store_key >= &SIDE[..] && store_key < &RESERVED_END[..]
+}
+
+/// The side-area key of transaction `id`'s spilled write of `user`.
+pub fn side_key(id: u64, user: &[u8]) -> Vec<u8> {
+    let mut out = side_prefix(id);
+    out.extend_from_slice(user);
+    out
+}
+
+/// The prefix of transaction `id`'s side area.
+pub fn side_prefix(id: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(10);
+    out.extend_from_slice(&SIDE);
+    out.extend_from_slice(&id.to_be_bytes());
+    out
+}
+
+/// Transaction `id`'s status record.
+pub fn status_key(id: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(10);
+    out.extend_from_slice(&STATUS);
+    out.extend_from_slice(&id.to_be_bytes());
+    out
+}
+
 /// The stored form of a value (`None` = tombstone).
 pub fn encode_value(value: Option<&[u8]>) -> Vec<u8> {
     match value {
@@ -133,6 +175,18 @@ mod tests {
             }
             assert!(first_version(u) <= encode_key(u, 9));
         }
+    }
+
+    #[test]
+    fn reserved_keys_are_no_versions() {
+        for user in [&b""[..], b"\x00", b"\x00\x01", b"\xff", b"a"] {
+            for ts in [0, 7, u64::MAX] {
+                assert!(!is_reserved(&encode_key(user, ts)));
+            }
+        }
+        assert!(is_reserved(&side_key(5, b"\x00\x00")) && is_reserved(&status_key(u64::MAX)));
+        assert!(side_key(1, b"\xff\xff") < side_key(2, b""));
+        assert_eq!(decode_key(&side_key(1, b"a")), None);
     }
 
     #[test]

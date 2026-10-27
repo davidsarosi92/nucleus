@@ -1255,10 +1255,13 @@ C++ pointers; each checked cell by cell against rows); L5 bulk load ✅
 INSERT's checks, atomic; `ncp`'s `I` / `d` / `B` / `e` / `f`; the Rust
 driver's `copy_in`, `copy_rows`; pg-compat's sub-protocol; `ncsql
 \copy`; `copy` in every driver, and `load` of a DataFrame, an Arrow
-table, columns or rows in one call — Python, JavaScript, Java); L5b large transactions (a load is one
-transaction, and a transaction's writes are held in memory until it
-commits: past a budget they spill — so 100 million rows load within a
-fixed memory budget); L6 spilling (sorts,
+table, columns or rows in one call — Python, JavaScript, Java); L5b large
+transactions ✅ (past `txn_memory` a transaction's writes spill into the
+store's side area, checked as they spill; the commit is still one atomic
+batch — a status record —, after which the side area moves into
+versions while readers merge it; crash-tested at every I/O point; a
+single-node form of §M21's write intents.  Left: a transaction's read
+set — validated foreign key reads — is still in memory); L6 spilling (sorts,
 hash joins, aggregates and materialised CTEs past a memory budget, to
 temporary files); L7 parallel scans over key ranges, page compression,
 and a very large column converted in the background in chunks (from
@@ -2038,6 +2041,11 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 L5b: large transactions — writes past the
+  budget spill into a reserved side area of the store; commit atomic by a
+  status record; resolution into versions with readers merging the side
+  area meanwhile (a concurrent reader never sees part of a commit);
+  rollback, drop and recovery drop or resolve side areas.
 - **2026-10-27** — §M14.11 L5 done: `copy` in every driver; `load` —
   Python (pandas, pyarrow, numpy columns without a value per cell),
   JavaScript (typed arrays as they are), Java (primitive arrays).
