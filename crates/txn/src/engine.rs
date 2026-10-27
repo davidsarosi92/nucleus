@@ -1095,6 +1095,32 @@ impl Scan<'_> {
         // The first user key this batch leaves for the next (`None`: the
         // range's end).
         let mut upper: Option<Vec<u8>> = None;
+        if sides.is_empty() {
+            // No side area to merge (the usual case): versions straight
+            // into the buffer.
+            let mut last: Option<Vec<u8>> = None;
+            let mut taken = 0;
+            for entry in versions(&tree, Bound::Included(&seek), end)? {
+                let (k, v) = entry?;
+                let (user, ts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
+                if ts > txn.start || last.as_deref() == Some(&user[..]) {
+                    continue; // too new, or an older version of a key already seen
+                }
+                if taken == SCAN_BATCH {
+                    upper = Some(user);
+                    break;
+                }
+                let value = decode_value(&v).ok_or(Error::Corrupt("bad version value"))?;
+                self.buffer
+                    .push_back((user.clone(), value.map(<[u8]>::to_vec)));
+                last = Some(user);
+                taken += 1;
+            }
+            if let Some(u) = upper {
+                self.from = Some(Bound::Included(u));
+            }
+            return Ok(());
+        }
         let mut found: BTreeMap<Vec<u8>, (u64, Option<Vec<u8>>)> = BTreeMap::new();
         let mut last: Option<Vec<u8>> = None;
         for entry in versions(&tree, Bound::Included(&seek), end)? {

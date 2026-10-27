@@ -51,7 +51,9 @@ fn build_node<'a>(
             filter,
             ..
         } => {
-            let rows = scan(table, access, ctx, outer)?;
+            // Only the columns the plan reads (`prune`).
+            let wanted = ctx.needed.get(&(plan as *const Plan as usize));
+            let rows = scan_some(table, access, ctx, outer, wanted.map(Vec::as_slice))?;
             match filter {
                 None => Box::new(rows.map(|r| r.map(|(_, row)| row))),
                 Some(f) => Box::new(rows.filter_map(move |r| match r {
@@ -610,6 +612,17 @@ pub fn scan<'a>(
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
 ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Row)>> + 'a>> {
+    scan_some(table, access, ctx, outer, None)
+}
+
+/// [`scan`], decoding only the columns `wanted` marks (the others NULL).
+pub fn scan_some<'a>(
+    table: &'a Table,
+    access: &'a Access,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+    wanted: Option<&'a [bool]>,
+) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Row)>> + 'a>> {
     let Some((start, end, index)) = key_range(table, access, &env(&[], ctx, outer))? else {
         return Ok(Box::new(std::iter::empty()));
     };
@@ -625,7 +638,7 @@ pub fn scan<'a>(
             Box::new(entries.map(move |e| {
                 crate::budget::charge_scan()?;
                 let (k, v) = e?;
-                let row = crate::large::read_row_with(ctx.txn, table, &k, &v, &mut labels)?;
+                let row = crate::large::read_some(ctx.txn, table, &k, &v, &mut labels, wanted)?;
                 Ok((k, row))
             }))
         }
@@ -641,7 +654,7 @@ pub fn scan<'a>(
                     .txn
                     .get(&k)?
                     .ok_or_else(|| Error::internal("index entry without its row"))?;
-                let row = crate::large::read_row_with(ctx.txn, table, &k, &v, &mut labels)?;
+                let row = crate::large::read_some(ctx.txn, table, &k, &v, &mut labels, wanted)?;
                 Ok((k, row))
             }))
         }
@@ -1084,6 +1097,30 @@ fn feed(agg: &Agg, st: &mut AggState, args: Vec<Value>) -> Result<()> {
     st.acc.add(&args)
 }
 
+/// Adds a row's arguments to an aggregate (or to its `ORDER BY` buffer),
+/// counting the memory a buffer or a `DISTINCT` set grows by.
+fn feed_row(agg: &Agg, st: &mut AggState, e: &Env, bytes: &mut usize) -> Result<()> {
+    let args = agg
+        .args
+        .iter()
+        .map(|a| a.eval(e))
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(buffer) = &mut st.buffer {
+        let keys = agg
+            .order
+            .iter()
+            .map(|k| k.expr.eval(e))
+            .collect::<Result<Vec<_>>>()?;
+        *bytes += crate::spill::row_bytes(&keys) + crate::spill::row_bytes(&args);
+        buffer.push((keys, args));
+        return Ok(());
+    }
+    if st.seen.is_some() {
+        *bytes += crate::spill::row_bytes(&args);
+    }
+    feed(agg, st, args)
+}
+
 /// Groups and their aggregates.  The groups are kept in memory up to
 /// work_mem; past it, rows of groups already there still go to them, and
 /// rows of new groups to partitions (by group key), each aggregated in
@@ -1117,6 +1154,13 @@ fn aggregate<'a>(
             outer,
             ctx,
         };
+        // A grand total is one group: no key to hash.
+        if group.is_empty() && !groups.is_empty() {
+            for (agg, st) in aggs.iter().zip(groups[0].1.iter_mut()) {
+                feed_row(agg, st, &e, &mut bytes)?;
+            }
+            continue;
+        }
         let key = group
             .iter()
             .map(|g| g.eval(&e))
@@ -1143,25 +1187,7 @@ fn aggregate<'a>(
             }
         };
         for (agg, st) in aggs.iter().zip(groups[gi].1.iter_mut()) {
-            let args = agg
-                .args
-                .iter()
-                .map(|a| a.eval(&e))
-                .collect::<Result<Vec<_>>>()?;
-            if let Some(buffer) = &mut st.buffer {
-                let keys = agg
-                    .order
-                    .iter()
-                    .map(|k| k.expr.eval(&e))
-                    .collect::<Result<Vec<_>>>()?;
-                bytes += crate::spill::row_bytes(&keys) + crate::spill::row_bytes(&args);
-                buffer.push((keys, args));
-                continue;
-            }
-            if st.seen.is_some() {
-                bytes += crate::spill::row_bytes(&args);
-            }
-            feed(agg, st, args)?;
+            feed_row(agg, st, &e, &mut bytes)?;
         }
     }
     if groups.is_empty() && group.is_empty() && level == 0 {

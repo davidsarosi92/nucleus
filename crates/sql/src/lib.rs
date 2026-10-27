@@ -39,6 +39,7 @@ pub mod plan;
 pub mod policies;
 pub mod privileges;
 pub mod profile;
+pub mod prune;
 pub mod roles;
 pub mod rules;
 pub mod session;

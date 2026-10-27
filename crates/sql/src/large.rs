@@ -21,9 +21,7 @@ use std::ops::Bound;
 use nucleus_kv::{KvTxn, prefix_end};
 
 use crate::catalog::{self, Table};
-use crate::encoding::{
-    OUT_OF_LINE, ROW_VERSION, Reader, decode_row_with, decode_value, encode_value, out_of_line,
-};
+use crate::encoding::{OUT_OF_LINE, ROW_VERSION, Reader, decode_value, encode_value, out_of_line};
 use crate::enums::Labels;
 use crate::error::{Error, Result};
 use crate::exec::pk_suffix;
@@ -157,8 +155,20 @@ pub fn read_row_with(
     bytes: &[u8],
     labels: &mut Labels,
 ) -> Result<Row> {
+    read_some(txn, t, key, bytes, labels, None)
+}
+
+/// [`read_row_with`], only the columns `wanted` marks (the others NULL).
+pub fn read_some(
+    txn: &dyn KvTxn,
+    t: &Table,
+    key: &[u8],
+    bytes: &[u8],
+    labels: &mut Labels,
+    wanted: Option<&[bool]>,
+) -> Result<Row> {
     let pk = pk_suffix(t, key);
-    let mut row = decode_row_with(bytes, t.columns.len(), &mut |c, len| {
+    let mut row = crate::encoding::decode_some(bytes, t.columns.len(), wanted, &mut |c, len| {
         fetch(txn, t, &pk, c, len)
     })?;
     for (v, c) in row.iter_mut().zip(&t.columns) {

@@ -2053,6 +2053,14 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 L7: scans decode only the columns the plan
+  reads (`prune`, by plan address in the execution context — conservative
+  where a subquery could read the row, its mutation caught by the slt
+  suite); an engine scan without side areas fills its buffer directly; a
+  grand total hashes no key.  A count over 2 million rows 1.0 s → 0.9 s:
+  what remains is per-row copying between the B+tree, the engine and the
+  executor, and pages past the cache — the work of §M14.20 (zero-copy
+  batches, vectorized execution) rather than of more patches here.
 - **2026-10-27** — §M14.11 L7: CRC-32C by slicing-by-8 (every page read
   and written checks one); buffer frames allocated when first used, so
   the default page cache is 128 MiB (was 8 MiB) at no cost to a small

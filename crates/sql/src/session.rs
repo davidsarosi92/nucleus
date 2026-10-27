@@ -1194,7 +1194,8 @@ pub fn execute(
             let mut binder = Binder::new(ro, reg).checked();
             let bound = binder.query(q)?;
             let plan = optimize(bound.plan, ro);
-            let ctx = Ctx::new(ro, reg, params);
+            let mut ctx = Ctx::new(ro, reg, params);
+            ctx.needed = crate::prune::needed(&plan);
             sink.columns(&columns_of(
                 bound.scope.cols.into_iter().map(|c| (c.name, c.ty)),
             ))?;

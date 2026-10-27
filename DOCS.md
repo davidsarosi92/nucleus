@@ -997,6 +997,16 @@ end), `Function` (functions in `FROM`), `Virtual` (catalog tables).  The executo
 stashes its right input, sorts and aggregates take their input — each
 within `work_mem`, below.
 
+**Columns** (`prune`, §M14.11).  Before a query runs, its plan is walked
+from the top with the output columns wanted, each node adding what its
+expressions read; a scan then decodes only the columns needed — the rest
+read as NULL, skipped in the encoding without being built (an out-of-line
+value not even fetched).  An expression with a subquery needs every
+column (a correlated subquery reads its row), as do `DISTINCT`, set
+operations, CTEs and recursion.  Subqueries' own plans decode whole
+rows.  A grand total (an aggregate without `GROUP BY`) keeps one state,
+hashing no key.
+
 **Memory** (`spill`, §M14.11).  What an operator holds is bounded by
 `work_mem` (`SET work_mem = '256MB'`, or the database's setting; default
 64 MiB): past it, the rest goes to scratch space — the KV contract's
@@ -2080,6 +2090,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 scans decode only the columns used (L7):**
+  `prune` marks each scan's needed columns; the rest are skipped
+  undecoded (out-of-line values unfetched).
 - **2026-10-27 — §M14.11 faster checksums, a larger cache (L7):**
   CRC-32C by slicing-by-8; buffer frames made when first used; the
   default page cache 128 MiB.

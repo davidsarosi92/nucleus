@@ -571,6 +571,18 @@ pub fn decode_row_with(
     columns: usize,
     resolve: &mut dyn FnMut(usize, u32) -> Result<Value>,
 ) -> Result<Vec<Value>> {
+    decode_some(b, columns, None, resolve)
+}
+
+/// [`decode_row_with`], decoding only the columns `wanted` marks (`None`:
+/// all): the others are skipped without being built (or fetched, if out of
+/// line) and read as NULL.
+pub fn decode_some(
+    b: &[u8],
+    columns: usize,
+    wanted: Option<&[bool]>,
+    resolve: &mut dyn FnMut(usize, u32) -> Result<Value>,
+) -> Result<Vec<Value>> {
     let bad = |_| Error::internal("malformed row encoding");
     let mut r = Reader::new(b);
     if !(1..=ROW_VERSION).contains(&r.u8().map_err(bad)?) {
@@ -579,16 +591,42 @@ pub fn decode_row_with(
     let n = r.u16().map_err(bad)? as usize;
     let mut row = Vec::with_capacity(columns.max(n));
     for c in 0..n {
+        let want = wanted.is_none_or(|w| w.get(c).copied().unwrap_or(false));
         if r.peek() == Some(OUT_OF_LINE) {
             r.u8().map_err(bad)?;
             let len = r.u32().map_err(bad)?;
-            row.push(resolve(c, len)?);
-        } else {
+            row.push(if want { resolve(c, len)? } else { Value::Null });
+        } else if want {
             row.push(decode_value(&mut r)?);
+        } else {
+            skip_value(&mut r)?;
+            row.push(Value::Null);
         }
     }
     row.resize(columns.max(n), Value::Null);
     Ok(row)
+}
+
+/// Moves past one value's row encoding without building it.
+fn skip_value(r: &mut Reader) -> Result<()> {
+    let bad = |_| Error::internal("malformed row encoding");
+    let fixed = |r: &mut Reader, n: usize| r.take(n).map(|_| ()).map_err(bad);
+    match r.peek() {
+        Some(0) => fixed(r, 1),
+        Some(1) => fixed(r, 2),
+        Some(12) => fixed(r, 3),
+        Some(13 | 14 | 6) => fixed(r, 5),
+        Some(2 | 3 | 7 | 8 | 17) => fixed(r, 9),
+        Some(9) => fixed(r, 17),
+        Some(5) => fixed(r, 18),
+        Some(4 | 18 | 15 | 21) => {
+            r.u8().map_err(bad)?;
+            let n = r.u32().map_err(bad)? as usize;
+            fixed(r, n)
+        }
+        // Arrays, registered types, addresses: decoded and dropped.
+        _ => decode_value(r).map(|_| ()),
+    }
 }
 
 /// The columns of an encoded row stored out of line, and their lengths.

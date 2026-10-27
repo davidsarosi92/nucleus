@@ -292,6 +292,9 @@ pub struct Ctx<'a> {
     pub ctes: RefCell<HashMap<usize, std::rc::Rc<crate::spill::Stored>>>,
     /// The current round's rows of each recursive CTE being computed.
     pub work: RefCell<HashMap<usize, std::rc::Rc<crate::spill::Stored>>>,
+    /// The columns each scan of the statement's plan needs, by the scan's
+    /// address ([`crate::prune`]); a scan not in it decodes every column.
+    pub needed: HashMap<usize, Vec<bool>>,
     /// Table scans are validated reads (foreign key checks).
     pub validated: bool,
     /// Every node measured (`EXPLAIN ANALYZE`).
@@ -308,6 +311,7 @@ impl<'a> Ctx<'a> {
             cache: RefCell::new(HashMap::new()),
             ctes: RefCell::new(HashMap::new()),
             work: RefCell::new(HashMap::new()),
+            needed: HashMap::new(),
             validated: false,
             profile: None,
         }
