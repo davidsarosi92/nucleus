@@ -308,7 +308,12 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            cache_bytes: 128 << 20,
+            // 128 MiB, or 16 MiB in a 32-bit address space.
+            cache_bytes: if cfg!(target_pointer_width = "64") {
+                128 << 20
+            } else {
+                16 << 20
+            },
             checkpoint_wal_bytes: 64 << 20,
             wal_segment_bytes: 16 << 20,
             history: 0,
