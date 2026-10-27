@@ -19,6 +19,24 @@ pub struct Budget {
     pub max_scan: Option<u64>,
     /// The most rows it may return.
     pub max_rows: Option<u64>,
+    /// The memory each of its sorts, hash tables and materialised results
+    /// may hold before the rest goes to scratch space (`work_mem`; `None`:
+    /// [`DEFAULT_WORK_MEM`]).
+    pub work_mem: Option<usize>,
+}
+
+/// `work_mem` when it is not set: 64 MiB.
+pub const DEFAULT_WORK_MEM: usize = 64 << 20;
+
+/// The memory an operator of the current statement may hold
+/// ([`Budget::work_mem`]).
+pub fn work_mem() -> usize {
+    SPENT.with(|s| {
+        s.borrow()
+            .as_ref()
+            .and_then(|s| s.budget.work_mem)
+            .unwrap_or(DEFAULT_WORK_MEM)
+    })
 }
 
 struct Spent {

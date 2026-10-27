@@ -43,6 +43,7 @@ pub mod roles;
 pub mod rules;
 pub mod session;
 pub mod sessions;
+pub mod spill;
 pub mod statements;
 pub mod stats;
 pub mod tokens;

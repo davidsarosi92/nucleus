@@ -375,6 +375,16 @@ pub trait TableFunction: Send + Sync {
 
     /// Its rows, for these argument values.
     fn rows(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Vec<Row>>;
+
+    /// Its rows as they are read, so a large result need not fit in
+    /// memory.  By default [`rows`](Self::rows)'s.
+    fn stream(
+        &self,
+        cx: &CallContext<'_>,
+        args: &[Value],
+    ) -> Result<Box<dyn Iterator<Item = Result<Row>>>> {
+        Ok(Box::new(self.rows(cx, args)?.into_iter().map(Ok)))
+    }
 }
 
 /// A registered table function, as a plan holds it.  Equal when names are.

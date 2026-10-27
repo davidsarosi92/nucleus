@@ -218,24 +218,30 @@ pub(crate) fn admit(check: &Option<Expr>, t: &Table, row: &[Value], ctx: &Ctx) -
 
 /// The rows an `UPDATE` or `DELETE` touches: those the policy lets through
 /// and, then — never on a hidden row — the statement's condition holds for.
+/// Keyed ([`exec::keyed`]) and stashed: collected before anything is
+/// written, in bounded memory.
 fn secure_rows(
     t: &Table,
     access: &Access,
     policy: Option<&Expr>,
     pred: Option<&Expr>,
     ctx: &Ctx,
-) -> Result<Vec<(Vec<u8>, Row)>> {
+) -> Result<crate::spill::Stored> {
     let Some(policy) = policy else {
-        return exec::matching_rows(t, access, pred, ctx);
+        return exec::matching_stash(t, access, pred, ctx);
     };
-    let mut out = Vec::new();
-    for (k, row) in exec::matching_rows(t, access, Some(policy), ctx)? {
+    let mut out = crate::spill::Stash::new();
+    for r in exec::matching(t, access, Some(policy), ctx)? {
+        let (k, row) = r?;
         if pred.map_or(Ok(true), |p| p.holds(&exec::env(&row, ctx, None)))? {
-            out.push((k, row));
+            out.push(exec::keyed(k, row))?;
         }
     }
-    Ok(out)
+    out.seal()
 }
+
+/// Rows a write applies at a time (their foreign keys checked together).
+const CHUNK: usize = 4096;
 
 /// Converts a value for storing in column `c` (assignment cast; an enum's
 /// label read through `txn`'s catalog).
@@ -432,9 +438,11 @@ pub fn insert(
         let check = new_row_check(&binder, &t, crate::policies::Command::Insert)?;
         let writer = Writer::new(ro, reg, t.clone())?;
         let ctx = Ctx::new(ro, reg, params);
-        let source_rows = exec::collect(&plan, &ctx, None)?;
-        let mut rows = Vec::with_capacity(source_rows.len());
-        for src in source_rows {
+        // Collected before anything is written (the source may read the
+        // table), in bounded memory.
+        let mut rows = crate::spill::Stash::new();
+        for src in exec::build(&plan, &ctx, None)? {
+            let src = src?;
             let mut row = Vec::with_capacity(t.columns.len());
             for c in 0..t.columns.len() {
                 row.push(match targets.iter().position(|&x| x == c) {
@@ -444,11 +452,19 @@ pub fn insert(
             }
             writer.validate(&row, &ctx)?;
             admit(&check, &t, &row, &ctx)?;
-            rows.push(row);
+            rows.push(row)?;
         }
-        (rows, writer, ret)
+        (std::rc::Rc::new(rows.seal()?), writer, ret)
     };
-    insert_rows(txn, &writer, &rows)?;
+    let mut chunk = Vec::with_capacity(CHUNK);
+    for r in rows.iter() {
+        chunk.push(r?);
+        if chunk.len() == CHUNK {
+            insert_rows(txn, &writer, &chunk)?;
+            chunk.clear();
+        }
+    }
+    insert_rows(txn, &writer, &chunk)?;
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {
@@ -456,7 +472,7 @@ pub fn insert(
             Some((
                 cols,
                 rows.iter()
-                    .map(|r| project(&exprs, r, &ctx))
+                    .map(|r| project(&exprs, &r?, &ctx))
                     .collect::<Result<_>>()?,
             ))
         }
@@ -526,8 +542,11 @@ pub fn update(
         let check = new_row_check(&binder, &t, crate::policies::Command::Update)?;
         let writer = Writer::new(ro, reg, t.clone())?;
         let ctx = Ctx::new(ro, reg, params);
-        let mut changes = Vec::new();
-        for (key, old) in secure_rows(&t, &access, using.as_ref(), pred.as_ref(), &ctx)? {
+        // Each change kept as key, old row, new row — stashed, so every
+        // row is chosen before any is written, in bounded memory.
+        let mut changes = crate::spill::Stash::new();
+        for r in secure_rows(&t, &access, using.as_ref(), pred.as_ref(), &ctx)?.into_iter() {
+            let (key, old) = exec::unkeyed(r?)?;
             let env = Env {
                 row: &old,
                 outer: None,
@@ -539,11 +558,27 @@ pub fn update(
             }
             writer.validate(&new, &ctx)?;
             admit(&check, &t, &new, &ctx)?;
-            changes.push((key, old, new));
+            let mut change = exec::keyed(key, old);
+            change.extend(new);
+            changes.push(change)?;
         }
-        (changes, writer, ret)
+        (std::rc::Rc::new(changes.seal()?), writer, ret)
     };
-    update_rows(txn, reg, &writer, &changes)?;
+    let width = t.columns.len();
+    let split = |r: Row| -> Result<(Vec<u8>, Row, Row)> {
+        let (key, mut old) = exec::unkeyed(r)?;
+        let new = old.split_off(width);
+        Ok((key, old, new))
+    };
+    let mut chunk = Vec::with_capacity(CHUNK);
+    for r in changes.iter() {
+        chunk.push(split(r?)?);
+        if chunk.len() == CHUNK {
+            update_rows(txn, reg, &writer, &chunk)?;
+            chunk.clear();
+        }
+    }
+    update_rows(txn, reg, &writer, &chunk)?;
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {
@@ -552,7 +587,7 @@ pub fn update(
                 cols,
                 changes
                     .iter()
-                    .map(|(_, _, n)| project(&exprs, n, &ctx))
+                    .map(|r| project(&exprs, &split(r?)?.2, &ctx))
                     .collect::<Result<_>>()?,
             ))
         }
@@ -665,11 +700,25 @@ pub fn delete(
         let using = row_policy(&binder, &t, crate::policies::Command::Delete)?;
         let ctx = Ctx::new(ro, reg, params);
         (
-            secure_rows(&t, &access, using.as_ref(), pred.as_ref(), &ctx)?,
+            std::rc::Rc::new(secure_rows(
+                &t,
+                &access,
+                using.as_ref(),
+                pred.as_ref(),
+                &ctx,
+            )?),
             ret,
         )
     };
-    delete_rows(txn, reg, &t, &rows)?;
+    let mut chunk = Vec::with_capacity(CHUNK);
+    for r in rows.iter() {
+        chunk.push(exec::unkeyed(r?)?);
+        if chunk.len() == CHUNK {
+            delete_rows(txn, reg, &t, &chunk)?;
+            chunk.clear();
+        }
+    }
+    delete_rows(txn, reg, &t, &chunk)?;
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {
@@ -677,7 +726,7 @@ pub fn delete(
             Some((
                 cols,
                 rows.iter()
-                    .map(|(_, r)| project(&exprs, r, &ctx))
+                    .map(|r| project(&exprs, &exec::unkeyed(r?)?.1, &ctx))
                     .collect::<Result<_>>()?,
             ))
         }
@@ -690,12 +739,13 @@ pub fn delete(
 
 /// Writes the entries of a new index for every existing row.
 pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usize) -> Result<()> {
-    let rows: Vec<(Vec<u8>, Row)> = {
+    let rows = {
         let ctx = Ctx::new(&*txn, reg, &[]);
-        exec::matching_rows(table, &Access::Full, None, &ctx)?
+        exec::matching_stash(table, &Access::Full, None, &ctx)?
     };
     let keys = IndexKeys::new(&*txn, reg, table)?;
-    for (key, row) in rows {
+    for r in rows.into_iter() {
+        let (key, row) = exec::unkeyed(r?)?;
         let pk = pk_suffix(table, &key);
         let (k, unique) = keys.entries(&*txn, table, &row, &pk)?.swap_remove(i);
         if unique && txn.get(&k)?.is_some() {
@@ -718,17 +768,19 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
     let end = nucleus_kv::prefix_end(&prefix).expect("table prefix");
     let primary = table.index_prefix(0);
     let primary_end = nucleus_kv::prefix_end(&primary).expect("index prefix");
-    let mut rows = Vec::new();
+    let mut rows = crate::spill::Stash::new();
     for e in txn.scan(
         std::ops::Bound::Included(&primary),
         std::ops::Bound::Excluded(&primary_end),
     )? {
         let (k, v) = e?;
         let row = crate::large::read_row(&*txn, table, &k, &v)?;
-        rows.push((k, row));
+        rows.push(exec::keyed(k, row))?;
     }
+    let rows = rows.seal()?;
     catalog::delete_range(txn, &prefix, Some(&end))?;
-    for (old_key, row) in rows {
+    for r in rows.into_iter() {
+        let (old_key, row) = exec::unkeyed(r?)?;
         let key = if table.primary_key.is_empty() {
             old_key // a hidden row id: an integer, encoded as before
         } else {
@@ -789,11 +841,12 @@ pub fn rewrite_rows(
     table: &Table,
     fill: &Value,
 ) -> Result<()> {
-    let rows: Vec<(Vec<u8>, Row)> = {
+    let rows = {
         let ctx = Ctx::new(&*txn, reg, &[]);
-        exec::matching_rows(table, &Access::Full, None, &ctx)?
+        exec::matching_stash(table, &Access::Full, None, &ctx)?
     };
-    for (key, row) in rows {
+    for r in rows.into_iter() {
+        let (key, row) = exec::unkeyed(r?)?;
         let mut filled = row.clone();
         let last = table.columns.len() - 1;
         filled[last] = fill.clone();

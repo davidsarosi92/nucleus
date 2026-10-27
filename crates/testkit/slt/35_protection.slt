@@ -15,6 +15,7 @@ login_lock_time 15 minutes false
 password_lifetime infinity false
 password_min_length 1 false
 statement_timeout 0 false
+work_mem 64MB false
 
 # nucleus-only
 statement ok

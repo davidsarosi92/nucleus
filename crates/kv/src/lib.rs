@@ -14,8 +14,9 @@
 //! [`Database`] is the local implementation, over `nucleus-txn`.
 
 use std::ops::Bound;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use nucleus_platform::Platform;
@@ -147,6 +148,72 @@ pub trait Kv: Send + Sync {
     /// Fills `buf` with unpredictable bytes (`gen_random_uuid()`): the
     /// platform's (the operating system's generator; a simulation's seed).
     fn random_bytes(&self, buf: &mut [u8]);
+
+    /// Scratch space for work too large for memory — a sort's runs, a hash
+    /// join's partitions: a file of this process's alone, gone when
+    /// dropped (and when the database next opens, after a crash).  The
+    /// default keeps it in memory, for an implementation without files.
+    fn scratch(&self) -> Result<Box<dyn Scratch>> {
+        Ok(Box::new(MemoryScratch::default()))
+    }
+}
+
+/// Scratch space ([`Kv::scratch`]): bytes written and read back by offset.
+pub trait Scratch: Send {
+    /// Writes `data` at `offset`.
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
+    /// Fills `buf` from `offset` (all of it, or an error).
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()>;
+}
+
+/// Scratch space in memory: [`Kv::scratch`]'s default.
+#[derive(Debug, Default)]
+pub struct MemoryScratch(Vec<u8>);
+
+impl Scratch for MemoryScratch {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        let end = offset as usize + data.len();
+        if self.0.len() < end {
+            self.0.resize(end, 0);
+        }
+        self.0[offset as usize..end].copy_from_slice(data);
+        Ok(())
+    }
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let src = self
+            .0
+            .get(offset as usize..offset as usize + buf.len())
+            .ok_or_else(|| Error::Storage("read past the end of scratch space".into()))?;
+        buf.copy_from_slice(src);
+        Ok(())
+    }
+}
+
+/// A scratch file in the database's directory (`scratch/<n>`), removed
+/// when dropped.
+struct FileScratch {
+    file: Box<dyn nucleus_platform::File>,
+    path: PathBuf,
+    platform: Arc<dyn Platform>,
+}
+
+impl Scratch for FileScratch {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        self.file
+            .write_all_at(data, offset)
+            .map_err(|e| Error::Storage(Box::new(e)))
+    }
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        self.file
+            .read_exact_at(buf, offset)
+            .map_err(|e| Error::Storage(Box::new(e)))
+    }
+}
+
+impl Drop for FileScratch {
+    fn drop(&mut self) {
+        let _ = self.platform.fs().remove_file(&self.path);
+    }
 }
 
 /// A transaction.  Dropping it without committing rolls it back.
@@ -255,6 +322,9 @@ impl Default for Options {
 pub struct Database {
     engine: nucleus_txn::Engine,
     platform: Arc<dyn Platform>,
+    /// Where scratch files go (`<dir>/scratch`), and how many were made.
+    scratch_dir: PathBuf,
+    scratch_made: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for Database {
@@ -288,7 +358,32 @@ impl Database {
                 txn_memory: opts.txn_memory_bytes,
             },
         )?;
-        Ok(Self { engine, platform })
+        // Scratch files a crash left behind.
+        let scratch_dir = path.join("scratch");
+        let fs = platform.fs();
+        if fs
+            .exists(&scratch_dir)
+            .map_err(|e| Error::Storage(Box::new(e)))?
+        {
+            for name in fs
+                .list_dir(&scratch_dir)
+                .map_err(|e| Error::Storage(Box::new(e)))?
+            {
+                let _ = fs.remove_file(&scratch_dir.join(name));
+            }
+        }
+        Ok(Self {
+            engine,
+            platform,
+            scratch_dir,
+            scratch_made: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// How many scratch files this handle (and its clones) made — for
+    /// tests that work spilled out of memory.
+    pub fn scratch_files_made(&self) -> u64 {
+        self.scratch_made.load(Ordering::Relaxed)
     }
 
     /// Writes everything to the data file and trims the WAL.
@@ -332,6 +427,26 @@ impl Kv for Database {
 
     fn random_bytes(&self, buf: &mut [u8]) {
         self.platform.rng().fill_unpredictable(buf);
+    }
+
+    fn scratch(&self) -> Result<Box<dyn Scratch>> {
+        let fs = self.platform.fs();
+        fs.create_dir_all(&self.scratch_dir)
+            .map_err(|e| Error::Storage(Box::new(e)))?;
+        let n = self.scratch_made.fetch_add(1, Ordering::Relaxed);
+        let mut id = [0u8; 8];
+        self.platform.rng().fill_bytes(&mut id);
+        let path = self
+            .scratch_dir
+            .join(format!("{n}-{:016x}", u64::from_le_bytes(id)));
+        let file = fs
+            .open(&path, nucleus_platform::OpenMode::CreateNew)
+            .map_err(|e| Error::Storage(Box::new(e)))?;
+        Ok(Box::new(FileScratch {
+            file,
+            path,
+            platform: Arc::clone(&self.platform),
+        }))
     }
 
     /// From 2 µs, doubling up to about 1 ms, plus up to as much again at

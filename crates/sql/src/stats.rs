@@ -11,7 +11,7 @@
 //! predicates get PostgreSQL-like default selectivities.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use nucleus_kv::KvTxn;
 
@@ -88,14 +88,40 @@ impl TableStats {
     }
 }
 
-/// Computes and stores the statistics of one table.
+/// Rows ANALYZE looks at, at most: a uniform sample of a larger table (as
+/// PostgreSQL's 30 000).
+const SAMPLE: usize = 30_000;
+
+/// Computes and stores the statistics of one table: from all its rows, or
+/// from a uniform sample of [`SAMPLE`] (reservoir sampling, by the
+/// database's random numbers) — the row count is always exact.
 pub fn analyze_table(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Result<TableStats> {
-    let rows: Vec<crate::types::Row> = {
+    let (rows, total) = {
         let ctx = Ctx::new(&*txn, reg, &[]);
-        exec::matching_rows(table, &Access::Full, None, &ctx)?
-            .into_iter()
-            .map(|(_, r)| r)
-            .collect()
+        let mut sample: Vec<crate::types::Row> = Vec::new();
+        let mut total = 0u64;
+        for r in exec::matching(table, &Access::Full, None, &ctx)? {
+            let (_, row) = r?;
+            total += 1;
+            if sample.len() < SAMPLE {
+                sample.push(row);
+            } else {
+                let mut b = [0u8; 8];
+                crate::datetime::random_bytes(&mut b)?;
+                let j = u64::from_le_bytes(b) % total;
+                if (j as usize) < SAMPLE {
+                    sample[j as usize] = row;
+                }
+            }
+        }
+        (sample, total)
+    };
+    let scale = |n: u64| -> u64 {
+        if rows.is_empty() {
+            0
+        } else {
+            ((n as f64) * (total as f64) / (rows.len() as f64)).round() as u64
+        }
     };
     let mut columns = Vec::with_capacity(table.columns.len());
     for c in 0..table.columns.len() {
@@ -104,8 +130,23 @@ pub fn analyze_table(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resu
             .map(|r| r[c].clone())
             .filter(|v| !v.is_null())
             .collect();
-        let nulls = (rows.len() - vals.len()) as u64;
-        let distinct = vals.iter().cloned().collect::<HashSet<_>>().len() as u64;
+        let nulls = scale((rows.len() - vals.len()) as u64);
+        let mut counts: HashMap<Value, u64> = HashMap::new();
+        for v in &vals {
+            *counts.entry(v.clone()).or_default() += 1;
+        }
+        let d = counts.len() as u64;
+        let distinct = if (rows.len() as u64) == total {
+            d
+        } else {
+            // A sample: PostgreSQL's estimator (Haas and Stokes' Duj1),
+            // from the values seen once.
+            let n = vals.len() as f64;
+            let f1 = counts.values().filter(|&&k| k == 1).count() as f64;
+            let big = (total - nulls).max(1) as f64;
+            let est = n * d as f64 / (n - f1 + f1 * n / big);
+            (est.round() as u64).clamp(d, total - nulls)
+        };
         vals.sort_by(Value::sort_cmp);
         let mut bounds = Vec::new();
         if !vals.is_empty() {
@@ -122,7 +163,7 @@ pub fn analyze_table(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resu
         });
     }
     let stats = TableStats {
-        rows: rows.len() as u64,
+        rows: total,
         columns,
     };
     txn.put(&catalog::stats_key(table), &stats.encode())?;

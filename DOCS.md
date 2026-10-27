@@ -475,7 +475,11 @@ distributed implementation will provide (§F3).
   (`EXPLAIN ANALYZE`, statement statistics; simulated in a simulation);
   `back_off(attempt)` — the wait before a retry (exponential with
   jitter, through the platform, so a simulation does not wait);
-  `random_bytes(buf)` — unpredictable bytes from the platform.
+  `random_bytes(buf)` — unpredictable bytes from the platform;
+  `scratch()` — scratch space for work too large for memory (a
+  `Scratch`: `write_at`, `read_at`), private, gone when dropped; by
+  default in memory (`MemoryScratch`), for the local implementation files
+  in `<dir>/scratch/` (left-overs removed on opening).
 - `trait KvTxn`: `read_ts`, `get(&self)`, `scan(&self, start, end) ->
   KvIter` (ascending), `get_validated` / `scan_validated` (reads checked
   at commit at any isolation level, §5.2), `put(&mut self)`,
@@ -494,7 +498,7 @@ distributed implementation will provide (§F3).
 
 `Database` is the local implementation: `Database::open(dir, Options)` on
 the real file system, `open_on(platform, dir, Options)` on any platform;
-`checkpoint`, `vacuum`, `latest`, `close`.  `Options`: `cache_bytes` (8 MiB),
+`checkpoint`, `vacuum`, `latest`, `scratch_files_made`, `close`.  `Options`: `cache_bytes` (8 MiB),
 `checkpoint_wal_bytes` (64 MiB), `wal_segment_bytes` (16 MiB), `history`
 (0), `txn_memory_bytes` (64 MiB: a transaction's writes held in memory
 before they spill, §5.2).  `tests/contract.rs` holds the contract as a suite any implementation
@@ -979,6 +983,20 @@ Plan nodes: `Scan` (table, access path, filter), `Values`, `Filter`,
 previous round until it yields nothing; `UNION` drops repeats, so cycles
 end), `Function` (functions in `FROM`), `Virtual` (catalog tables).  The executor runs them as iterators; joins
 materialise their right input, sorts and aggregates their input.
+
+**Memory** (`spill`, §M14.11).  What an operator holds is bounded by
+`work_mem` (`SET work_mem = '256MB'`, or the database's setting; default
+64 MiB): past it, the rest goes to scratch space — the KV contract's
+`scratch()` (§6.1), files in the data directory's `scratch/` — and is read
+back.  Sorts are external merge sorts (sorted runs of a `work_mem`'s
+worth, merged 64 at a time, in passes when there are more; ties keep the
+input's order); materialised CTEs, recursive CTEs' rounds and results,
+and the rows a write collects before writing (`INSERT … SELECT`,
+`UPDATE`, `DELETE`, `CREATE INDEX`, rewrites) are kept in memory up to
+the limit, the rest in a run; writes then apply them 4096 rows at a time.
+Table functions stream (`generate_series` makes its rows as they are
+read).  Still held whole: hash aggregation, `DISTINCT`, set operations
+and joins' right inputs (§M14.11 L6b, L6c).
 Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context).  Expressions use three-valued logic,
 checked integer arithmetic (`22003`), division by zero (`22012`).
@@ -1034,7 +1052,10 @@ server_version | …`.
 ### 8.8 Statistics and costs (`stats`)
 
 `ANALYZE [table]` stores rows, and per column NULLs, distinct values and a
-16-bucket equi-depth histogram.  Selectivities: `=` 1/ndv, ranges from the
+16-bucket equi-depth histogram — from every row of a table up to 30 000
+rows, else from a uniform sample of 30 000 (reservoir sampling; NULLs
+scaled, distinct values by PostgreSQL's Duj1 estimator); the row count is
+exact.  Selectivities: `=` 1/ndv, ranges from the
 histogram, `IS NULL` the null fraction, `IN` n/ndv, `LIKE` 0.1, combined
 by AND/OR/NOT.  For analyzed tables the access path is the cheapest of a
 full scan and every index (a secondary index pays a row fetch per row),
@@ -1548,8 +1569,9 @@ name = value | RESET name` (an administrator's; `dbsettings.rs`, catalog
 `00 11`, `nc_catalog.database_settings`) — `password_min_length`
 (default 1), `password_lifetime` (an interval, default `infinity`),
 `statement_timeout` (default `0`, none), `login_lock_failures` (10),
-`login_lock_time` (`15 minutes`); a duration is milliseconds, `5s`,
-`100ms`, `2min`, `1h`, `1d` or an interval.  *Passwords*: at least
+`login_lock_time` (`15 minutes`), `work_mem` (`64MB`, §8.5); a duration
+is milliseconds, `5s`, `100ms`, `2min`, `1h`, `1d` or an interval; a
+memory size kB, or with `B`, `kB`, `MB`, `GB`, `TB` (at least 64 kB).  *Passwords*: at least
 `password_min_length` characters and not the role's name (`22023`; a
 verifier given as such, from a dump, is not checked); one set without
 `VALID UNTIL` expires after `password_lifetime`.  *Failed logins*
@@ -2031,6 +2053,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 a memory-bounded executor, first part (L6a):**
+  `work_mem`; external merge sorts; materialised CTEs, recursion and the
+  rows writes collect spill to scratch space (the KV contract's
+  `scratch()`); `generate_series` streams; ANALYZE samples tables past
+  30 000 rows.
 - **2026-10-27 — §M14.11 large transactions (L5b):** writes past
   `txn_memory` spill into the store's side area; the commit stays one
   atomic batch (a status record), the side area is then moved into

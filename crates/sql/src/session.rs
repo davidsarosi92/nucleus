@@ -509,13 +509,19 @@ impl Session {
     /// The next statement's budget: the session's `statement_timeout` (or
     /// the database's), and the ceiling's — the tighter of each.
     fn budget(&self, who: &crate::access::Who) -> Result<crate::budget::Budget> {
-        let timeout = match self.settings.get("statement_timeout") {
-            Some(v) => crate::dbsettings::duration(v)?,
-            None => {
-                let txn = self.kv.begin(TxnOptions::read_only())?;
-                crate::dbsettings::duration(&crate::dbsettings::get(&*txn, "statement_timeout")?)?
+        // The session's settings, else the database's (read once).
+        let mut db: Option<Box<dyn KvTxn>> = None;
+        let mut setting = |name: &str| -> Result<String> {
+            if let Some(v) = self.settings.get(name) {
+                return Ok(v.clone());
             }
+            if db.is_none() {
+                db = Some(self.kv.begin(TxnOptions::read_only())?);
+            }
+            crate::dbsettings::get(db.as_deref().expect("just begun"), name)
         };
+        let timeout = crate::dbsettings::duration(&setting("statement_timeout")?)?;
+        let work_mem = crate::dbsettings::memory(&setting("work_mem")?)?;
         let timeout = [(timeout > 0).then_some(timeout), who.ceiling.timeout]
             .into_iter()
             .flatten()
@@ -525,6 +531,7 @@ impl Session {
             deadline: timeout.map(|t| now + t),
             max_scan: who.ceiling.max_scan,
             max_rows: who.ceiling.max_rows,
+            work_mem: Some(work_mem),
         })
     }
 
@@ -712,6 +719,9 @@ impl Session {
                     return Err(Error::cant_change(format!(
                         "parameter \"{name}\" cannot be changed: it is a claim of the login"
                     )));
+                }
+                if name == "work_mem" {
+                    crate::dbsettings::memory(value)?;
                 }
                 if name == "default_transaction_isolation" || name == "transaction_isolation" {
                     self.default_isolation = match value.to_ascii_lowercase().trim_matches('\'') {

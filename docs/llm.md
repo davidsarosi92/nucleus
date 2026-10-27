@@ -67,6 +67,9 @@ current_setting`; aggregates `count sum avg min max string_agg array_agg
 bool_and bool_or` (with `DISTINCT`, and `ORDER BY` inside the call:
 `string_agg(x, ',' ORDER BY x)`).
 
+**Memory:** `SET work_mem = '256MB'` gives each sort and materialised
+result more memory before it spills to disk (default 64MB).
+
 **Transactions:** every statement is its own transaction unless in `BEGIN …
 COMMIT | ROLLBACK`.  Snapshot isolation (`SERIALIZABLE` on request).  On
 `40001` (a conflict with another transaction) run the transaction again;

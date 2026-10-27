@@ -107,11 +107,22 @@ fn build_node<'a>(
                 .into_iter()
                 .map(Ok),
         ),
-        Plan::Sort { input, keys } => Box::new(
-            sort(build(input, ctx, outer)?, keys, ctx, outer)?
-                .into_iter()
-                .map(Ok),
-        ),
+        Plan::Sort { input, keys } => {
+            // In memory while it fits in work_mem, else by runs merged.
+            let keyed = build(input, ctx, outer)?.map(|r| {
+                let row = r?;
+                let e = env(&row, ctx, outer);
+                let k = keys
+                    .iter()
+                    .map(|k| k.expr.eval(&e))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((k, row))
+            });
+            crate::spill::sort(
+                keyed,
+                keys.iter().map(|k| (k.desc, k.nulls_first)).collect(),
+            )?
+        }
         Plan::Limit {
             input,
             limit,
@@ -160,38 +171,42 @@ fn build_node<'a>(
                 .iter()
                 .map(|a| a.eval(&e))
                 .collect::<Result<Vec<_>>>()?;
-            let mut rows: Vec<Row> = match func {
-                TableFunc::Scalar => vec![vec![vals[0].clone()]],
-                TableFunc::Call(f) => f.rows(&CallContext::new(ctx.txn, ctx.registry), &vals)?,
+            let rows: Box<dyn Iterator<Item = Result<Row>>> = match func {
+                TableFunc::Scalar => Box::new(std::iter::once(Ok(vec![vals[0].clone()]))),
+                TableFunc::Call(f) => f.stream(&CallContext::new(ctx.txn, ctx.registry), &vals)?,
             };
-            if !matches!(func, TableFunc::Call(f) if f.name() == "generate_series") {
-                for _ in &rows {
+            // Each row counts as read (generate_series counts its own).
+            let charged = !matches!(func, TableFunc::Call(f) if f.name() == "generate_series");
+            let ordinality = *ordinality;
+            Box::new(rows.enumerate().map(move |(i, r)| {
+                let mut row = r?;
+                if charged {
                     crate::budget::charge_scan()?;
                 }
-            }
-            if *ordinality {
-                for (i, r) in rows.iter_mut().enumerate() {
-                    r.push(Value::Int(i as i64 + 1));
+                if ordinality {
+                    row.push(Value::Int(i as i64 + 1));
                 }
-            }
-            Box::new(rows.into_iter().map(Ok))
+                Ok(row)
+            }))
         }
         Plan::Cte { id, plan, .. } => {
             let cached = ctx.ctes.borrow().get(id).cloned();
             let rows = match cached {
                 Some(rows) => rows,
                 None => {
-                    let rows = Rc::new(collect(plan, ctx, outer)?);
+                    // Materialised once: in memory, or past work_mem in
+                    // scratch space.
+                    let rows = Rc::new(stash(build(plan, ctx, outer)?)?);
                     ctx.ctes.borrow_mut().insert(*id, Rc::clone(&rows));
                     rows
                 }
             };
-            shared(rows)
+            rows.iter()
         }
-        Plan::WorkTable { id, .. } => {
-            let rows = ctx.work.borrow().get(id).cloned().unwrap_or_default();
-            shared(rows)
-        }
+        Plan::WorkTable { id, .. } => match ctx.work.borrow().get(id).cloned() {
+            Some(rows) => rows.iter(),
+            None => Box::new(std::iter::empty()),
+        },
         Plan::Recursive {
             id,
             base,
@@ -199,31 +214,34 @@ fn build_node<'a>(
             all,
         } => {
             let mut seen = HashSet::new();
-            let mut fresh = |rows: Vec<Row>| -> Vec<Row> {
-                if *all {
-                    rows
-                } else {
-                    rows.into_iter()
-                        .filter(|r| seen.insert(r.clone()))
-                        .collect()
+            // The rows of a round not seen before (all of them for UNION
+            // ALL), into the result and the next round.
+            let mut out = crate::spill::Stash::new();
+            let mut fresh = |rows: Rows, out: &mut crate::spill::Stash, counted: bool| {
+                let mut round = crate::spill::Stash::new();
+                for r in rows {
+                    let r = r?;
+                    if counted {
+                        // Each row a round makes counts as read: an endless
+                        // recursion runs into the statement's budget.
+                        crate::budget::charge_scan()?;
+                    }
+                    if *all || seen.insert(r.clone()) {
+                        out.push(r.clone())?;
+                        round.push(r)?;
+                    }
                 }
+                round.seal()
             };
-            let mut out = fresh(collect(base, ctx, outer)?);
-            let mut round = out.clone();
+            let mut round = fresh(build(base, ctx, outer)?, &mut out, false)?;
             while !round.is_empty() {
                 // (The step reads the work table only outside subqueries
                 // and cached CTEs, so no cache holds an earlier round.)
                 ctx.work.borrow_mut().insert(*id, Rc::new(round));
-                round = fresh(collect(step, ctx, outer)?);
-                // Each row a round makes counts as read: an endless
-                // recursion runs into the statement's budget.
-                for _ in &round {
-                    crate::budget::charge_scan()?;
-                }
-                out.extend(round.iter().cloned());
+                round = fresh(build(step, ctx, outer)?, &mut out, true)?;
             }
             ctx.work.borrow_mut().remove(id);
-            Box::new(out.into_iter().map(Ok))
+            out.seal()?.into_iter()
         }
         Plan::SetOp {
             op: SetOp::Union,
@@ -281,13 +299,25 @@ fn build_node<'a>(
 }
 
 /// `generate_series(start, stop [, step])`: numbers, or timestamps with an
-/// interval step.  NULL arguments give no rows.
-/// `generate_series`'s rows (the built-in's implementation).
+/// interval step.  NULL arguments give no rows.  Its rows, materialised
+/// (at most 100 million).
 pub(crate) fn generate_series(vals: &[Value]) -> Result<Vec<Row>> {
+    let mut out = Vec::new();
+    for r in series(vals)? {
+        if out.len() >= 100_000_000 {
+            return Err(Error::out_of_range("generate_series: too many rows"));
+        }
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// `generate_series`'s rows as they are read (the built-in's stream).
+pub(crate) fn series(vals: &[Value]) -> Result<Box<dyn Iterator<Item = Result<Row>>>> {
     use crate::ast::BinaryOp;
     use crate::expr::binary;
     if vals.iter().any(Value::is_null) {
-        return Ok(Vec::new());
+        return Ok(Box::new(std::iter::empty()));
     }
     let (start, stop) = (vals[0].clone(), vals[1].clone());
     let step = match vals.get(2) {
@@ -310,30 +340,37 @@ pub(crate) fn generate_series(vals: &[Value]) -> Result<Vec<Row>> {
         Value::Interval(i) => i.span() > 0,
         v => v.sql_cmp(&Value::Int(0))? == Some(Ordering::Greater),
     };
-    let mut out = Vec::new();
-    let mut cur = start;
-    loop {
-        let o = cur.sql_cmp(&stop)?.expect("not null");
+    let mut cur = Some(start);
+    Ok(Box::new(std::iter::from_fn(move || {
+        let c = cur.take()?;
+        let o = match c.sql_cmp(&stop) {
+            Ok(o) => o.expect("not null"),
+            Err(e) => return Some(Err(e)),
+        };
         if (up && o == Ordering::Greater) || (!up && o == Ordering::Less) {
-            return Ok(out);
-        }
-        if out.len() >= 100_000_000 {
-            return Err(Error::out_of_range("generate_series: too many rows"));
+            return None;
         }
         // Each row made counts as read (and the statement's time runs).
-        crate::budget::charge_scan()?;
-        out.push(vec![cur.clone()]);
-        cur = match binary(BinaryOp::Add, cur, step.clone()) {
-            Ok(v) => v,
-            Err(e) if e.code == "22003" || e.code == "22008" => return Ok(out), // past the end of the type
-            Err(e) => return Err(e),
-        };
-    }
+        if let Err(e) = crate::budget::charge_scan() {
+            return Some(Err(e));
+        }
+        match binary(BinaryOp::Add, c.clone(), step.clone()) {
+            Ok(v) => cur = Some(v),
+            // Past the end of the type: this was the last.
+            Err(e) if e.code == "22003" || e.code == "22008" => {}
+            Err(e) => return Some(Err(e)),
+        }
+        Some(Ok(vec![c]))
+    })))
 }
 
-/// Rows shared behind an `Rc`, cloned as they are read.
-fn shared<'a>(rows: Rc<Vec<Row>>) -> Rows<'a> {
-    Box::new((0..rows.len()).map(move |i| Ok(rows[i].clone())))
+/// `rows` materialised: in memory, or past work_mem in scratch space.
+fn stash(rows: Rows) -> Result<crate::spill::Stored> {
+    let mut s = crate::spill::Stash::new();
+    for r in rows {
+        s.push(r?)?;
+    }
+    s.seal()
 }
 
 /// `v` as a key bound in a column of type `t`.  A bound of the wrong type
@@ -478,7 +515,62 @@ pub fn scan<'a>(
     })
 }
 
-/// Rows (with keys) of `table` matching `filter` — for UPDATE and DELETE.
+/// Rows (with keys) of `table` matching `filter`, as they are read.
+pub fn matching<'a>(
+    table: &'a Table,
+    access: &'a Access,
+    filter: Option<&'a Expr>,
+    ctx: &'a Ctx<'a>,
+) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Row)>> + 'a>> {
+    Ok(Box::new(scan(table, access, ctx, None)?.filter_map(
+        move |r| {
+            let (k, row) = match r {
+                Ok(x) => x,
+                Err(e) => return Some(Err(e)),
+            };
+            match filter.map_or(Ok(true), |f| f.holds(&env(&row, ctx, None))) {
+                Ok(true) => Some(Ok((k, row))),
+                Ok(false) => None,
+                Err(e) => Some(Err(e)),
+            }
+        },
+    )))
+}
+
+/// A row with its key, as a stash keeps it: the key first, as `bytea`.
+pub fn keyed(key: Vec<u8>, row: Row) -> Row {
+    let mut out = Vec::with_capacity(row.len() + 1);
+    out.push(Value::Bytea(key.into()));
+    out.extend(row);
+    out
+}
+
+/// The key and row of a [`keyed`] row.
+pub fn unkeyed(mut row: Row) -> Result<(Vec<u8>, Row)> {
+    let rest = row.split_off(1);
+    match row.pop() {
+        Some(Value::Bytea(k)) => Ok((k.to_vec(), rest)),
+        _ => Err(Error::internal("a stashed row without its key")),
+    }
+}
+
+/// Every keyed row of `table` matching `filter`, stashed (past work_mem in
+/// scratch space): what a write that reads its own table collects first.
+pub fn matching_stash(
+    table: &Table,
+    access: &Access,
+    filter: Option<&Expr>,
+    ctx: &Ctx,
+) -> Result<crate::spill::Stored> {
+    let mut s = crate::spill::Stash::new();
+    for r in matching(table, access, filter, ctx)? {
+        let (k, row) = r?;
+        s.push(keyed(k, row))?;
+    }
+    s.seal()
+}
+
+/// Rows (with keys) of `table` matching `filter`.
 pub fn matching_rows(
     table: &Table,
     access: &Access,
@@ -779,25 +871,6 @@ fn aggregate(
             Ok(key)
         })
         .collect()
-}
-
-fn sort(rows: Rows, keys: &[SortKey], ctx: &Ctx, outer: Option<&Env>) -> Result<Vec<Row>> {
-    let mut keyed = Vec::new();
-    for r in rows {
-        let row = r?;
-        let e = Env {
-            row: &row,
-            outer,
-            ctx,
-        };
-        let k = keys
-            .iter()
-            .map(|k| k.expr.eval(&e))
-            .collect::<Result<Vec<_>>>()?;
-        keyed.push((k, row));
-    }
-    keyed.sort_by(|(a, _), (b, _)| compare_keys(keys, a, b));
-    Ok(keyed.into_iter().map(|(_, r)| r).collect())
 }
 
 /// The order of two rows' sort key values.

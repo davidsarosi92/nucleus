@@ -50,6 +50,41 @@ fn list(v: &str) -> Result<String> {
         .join(","))
 }
 
+fn memory_text(v: &str) -> Result<String> {
+    memory(v)?;
+    Ok(v.trim().trim_matches('\'').to_string())
+}
+
+/// A memory size: a number of kB (as PostgreSQL's `work_mem`), or with a
+/// unit (`kB`, `MB`, `GB`, `TB`; `B`).  At least 64 kB.
+pub fn memory(v: &str) -> Result<usize> {
+    let v = v.trim().trim_matches('\'');
+    let split = v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len());
+    let (n, unit) = (&v[..split], v[split..].trim());
+    let n: u64 = n
+        .parse()
+        .map_err(|_| Error::invalid_parameter(format!("invalid memory size: \"{v}\"")))?;
+    let scale: u64 = match unit {
+        "" | "kB" => 1 << 10,
+        "B" => 1,
+        "MB" => 1 << 20,
+        "GB" => 1 << 30,
+        "TB" => 1 << 40,
+        _ => {
+            return Err(Error::invalid_parameter(format!(
+                "invalid memory size: \"{v}\" (valid units are B, kB, MB, GB and TB)"
+            )));
+        }
+    };
+    let bytes = n.saturating_mul(scale);
+    if bytes < 64 << 10 {
+        return Err(Error::invalid_parameter(format!(
+            "{v} is below the minimum of 64kB"
+        )));
+    }
+    Ok(usize::try_from(bytes).unwrap_or(usize::MAX))
+}
+
 fn duration_text(v: &str) -> Result<String> {
     duration(v)?;
     Ok(v.trim().to_string())
@@ -64,6 +99,12 @@ fn lifetime(v: &str) -> Result<String> {
 
 /// The settings, and their defaults.
 pub const KNOWN: &[Known] = &[
+    Known {
+        name: "work_mem",
+        default: "64MB",
+        description: "the memory each sort, hash table and materialised result of a statement holds before the rest goes to scratch space",
+        check: memory_text,
+    },
     Known {
         name: "password_min_length",
         default: "1",

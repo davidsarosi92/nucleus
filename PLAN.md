@@ -669,7 +669,7 @@ KV space) and 9 (d-os code only in `integrations/d-os`) hold.  The gaps:
 | 4 | the server uses `std::net` directly | scheduled: a network interface in the platform, with a simulated network, comes with §M19 (as principle 4 says, "later network") | — |
 | 5 | the storage and transaction layers are crash-tested, the SQL layer is not: no test crashes the simulation in the middle of DDL and DML run through `Session` | a SQL crash test: random DDL and DML on the simulation, a crash at a random point, reopen — the catalog, every index and the rows agree with each other and with what was reported committed | ✅ |
 | 6 | the page format, WAL batches, rows, catalog records and `ncp` carry versions; the **key encoding and the SQL keyspace layout do not**, so a change to either could not be told from data written before it | a SQL-layer format record at key `00 00` (keyspace layout and key encoding versions), written when a database is first used by the SQL layer and checked on every session: an older version is read (or upgraded), a newer one refused with a clear error; per-type encoding versions come with the `Type` trait below | ✅ |
-| 10 | memory is bounded in the core (buffer pool), not in the executor: sorts, hash joins, hash aggregation and materialised CTEs hold their whole input | scheduled: spilling in §M14.11 | — |
+| 10 | memory is bounded in the core (buffer pool), not in the executor: sorts, hash joins, hash aggregation and materialised CTEs hold their whole input | spilling in §M14.11: sorts, CTEs, recursion and writes' rows (L6a ✅); aggregation, `DISTINCT`, set operations (L6b) and joins (L6c) next | — |
 | 11 | PostgreSQL compatibility is not optional inside the engine: `pg_catalog`, `information_schema` and the `pg_*` functions (`pg_typeof`, `pg_get_constraintdef`, `has_table_privilege`, …) are bound in every session, `ncp` ones included; the parser and binder special-case `pg_catalog`; and `nc_catalog` is looked up *through* `pgcatalog::lookup` | `nc_catalog` stands on its own; the PostgreSQL views, functions, type names and protocol are the module `modules/pg-compat`, registered per session — on in sessions of the PostgreSQL front end, off on `ncp`; the parser no longer knows `pg_catalog`, `oid` or `::regclass` | ✅ |
 | 12 | hard-coded lists: the value types (`DataType`, and a `match` on it in encoding, casts, output, the binder, statistics, `ncp` and `pg`), the scalar functions (`Func`, about seventy, and `Func::lookup`), the aggregates (`AggFunc`), the table functions (`TableFunc`), the catalog views (`ncatalog::definitions`, the `pgcatalog` table), the front ends (the CLI calls `serve` / `serve_pg`), authentication (`Config::accepts`, one user) | the registries and the extension API, below — scalar functions, aggregates, table functions, schemas, catalog views and types (`nucleus_sql::ext`), front ends and authentication (`nucleus_server::{FrontEnd, Authenticator}`) | ✅ |
 
@@ -1261,9 +1261,13 @@ store's side area, checked as they spill; the commit is still one atomic
 batch — a status record —, after which the side area moves into
 versions while readers merge it; crash-tested at every I/O point; a
 single-node form of §M21's write intents.  Left: a transaction's read
-set — validated foreign key reads — is still in memory); L6 spilling (sorts,
-hash joins, aggregates and materialised CTEs past a memory budget, to
-temporary files); L7 parallel scans over key ranges, page compression,
+set — validated foreign key reads — is still in memory); L6 spilling
+past `work_mem` to scratch space (the KV contract's `scratch()`): L6a ✅
+(external merge sorts; materialised CTEs, recursion and the rows writes
+collect; streaming `generate_series`; ANALYZE sampling 30 000 rows), L6b
+hash aggregation, `DISTINCT` and set operations (partitioned past the
+limit), L6c joins (grace hash joins, block nested loops, a streaming full
+join); L7 parallel scans over key ranges, page compression,
 and a very large column converted in the background in chunks (from
 §M14.19); L8 the benchmark suite against PostgreSQL, in CI.
 
@@ -2041,6 +2045,11 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 L6a: `work_mem` (a session and a database
+  setting); the KV contract's `scratch()` (files in `scratch/`, in memory
+  by default); external merge sorts; CTEs, recursion and writes' rows
+  stashed; streaming table functions; ANALYZE by reservoir sample.
+  Checked by running the same statements with 64 kB and 64 MB.
 - **2026-10-27** — §M14.11 L5b: large transactions — writes past the
   budget spill into a reserved side area of the store; commit atomic by a
   status record; resolution into versions with readers merging the side

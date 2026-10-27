@@ -734,6 +734,14 @@ impl TableFunction for GenerateSeries {
     fn rows(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Vec<Row>> {
         crate::exec::generate_series(args)
     }
+
+    fn stream(
+        &self,
+        _: &CallContext<'_>,
+        args: &[Value],
+    ) -> Result<Box<dyn Iterator<Item = Result<Row>>>> {
+        crate::exec::series(args)
+    }
 }
 
 /// `unnest(array)`: its elements.

@@ -289,9 +289,9 @@ pub struct Ctx<'a> {
     /// Uncorrelated subquery results, by plan address.
     pub cache: RefCell<HashMap<usize, std::rc::Rc<Vec<Row>>>>,
     /// CTE results, by CTE id.
-    pub ctes: RefCell<HashMap<usize, std::rc::Rc<Vec<Row>>>>,
+    pub ctes: RefCell<HashMap<usize, std::rc::Rc<crate::spill::Stored>>>,
     /// The current round's rows of each recursive CTE being computed.
-    pub work: RefCell<HashMap<usize, std::rc::Rc<Vec<Row>>>>,
+    pub work: RefCell<HashMap<usize, std::rc::Rc<crate::spill::Stored>>>,
     /// Table scans are validated reads (foreign key checks).
     pub validated: bool,
     /// Every node measured (`EXPLAIN ANALYZE`).
