@@ -26,11 +26,11 @@ use std::collections::BTreeSet;
 use std::ops::Bound;
 use std::sync::Arc;
 
-use crate::buffer::BufferPool;
+use crate::buffer::{BufferPool, PageRef};
 use crate::error::{Error, Result};
 use crate::node::{
     Internal, Leaf, MAX_INLINE_CELL, MAX_KEY, MIN_FILL, Node, OVERFLOW, OVERFLOW_CAPACITY, Val,
-    decode_overflow, encode_overflow, leaf_cell_size,
+    View, decode_overflow, encode_overflow, leaf_cell_size,
 };
 use crate::page::{PAYLOAD_SIZE, PageId};
 
@@ -193,19 +193,28 @@ impl BTree {
 
     // ------------------------------------------------------------------ read
 
-    /// The value of `key`, if present.
+    /// The value of `key`, if present (each page on the way read in
+    /// place).
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let mut id = self.root;
         loop {
-            match self.load(id)? {
-                Node::Internal(n) => id = n.children[n.child_index(key)],
-                Node::Leaf(leaf) => {
-                    return match leaf.search(key) {
-                        Ok(i) => Ok(Some(self.read_val(&leaf.entries[i].1)?)),
-                        Err(_) => Ok(None),
-                    };
-                }
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            let corrupt = |reason| Error::Corrupt { page: id, reason };
+            let v = View::new(&page).map_err(corrupt)?;
+            if !v.is_leaf() {
+                id = v
+                    .child(v.child_index(key).map_err(corrupt)?)
+                    .map_err(corrupt)?;
+                continue;
             }
+            let i = v.partition(|k| k < key).map_err(corrupt)?;
+            if i < v.len() && v.key(i).map_err(corrupt)? == key {
+                let val = v.value(i).map_err(corrupt)?;
+                drop(page);
+                return Ok(Some(self.read_val(&val)?));
+            }
+            return Ok(None);
         }
     }
 
@@ -214,7 +223,8 @@ impl BTree {
         let mut c = Cursor {
             tree: self,
             path: Vec::new(),
-            leaf: Leaf::default(),
+            leaf: None,
+            leaf_len: 0,
             pos: 0,
         };
         c.seek(&[])?;
@@ -311,6 +321,242 @@ impl BTree {
                 }
             }
         }
+    }
+
+    /// Sets each key to its value, as [`insert`](Self::insert) one at a
+    /// time would — but `entries` sorted by key and without repeats, each
+    /// node is read and written once for all the keys that reach it, and
+    /// full leaves are packed to about 7/8 (a run of new keys at the end of
+    /// the tree fills pages instead of leaving them half empty).
+    pub fn insert_sorted(&mut self, entries: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+        let ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = entries
+            .iter()
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect();
+        self.apply_sorted(&ops)
+    }
+
+    /// Sets (`Some`) and removes (`None`) keys — `ops` sorted by key and
+    /// without repeats — as one at a time would, each node read and written
+    /// once for all the keys that reach it.
+    pub fn apply_sorted(&mut self, ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Result<()> {
+        if let Some((k, _)) = ops.iter().find(|(k, _)| k.len() > MAX_KEY) {
+            return Err(Error::KeyTooLarge(k.len()));
+        }
+        debug_assert!(ops.windows(2).all(|w| w[0].0 < w[1].0));
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let vals = ops
+            .iter()
+            .map(|(k, v)| {
+                Ok((
+                    k.clone(),
+                    v.as_ref().map(|v| self.make_val(k, v)).transpose()?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut pieces = self.insert_sorted_at(self.root, vals)?;
+        // Over one page: new roots, a level at a time.
+        while pieces.len() > 1 {
+            let mut keys = Vec::with_capacity(pieces.len() - 1);
+            let mut children = Vec::with_capacity(pieces.len());
+            for (i, (sep, page, _)) in pieces.into_iter().enumerate() {
+                if i > 0 {
+                    keys.push(sep);
+                }
+                children.push(page);
+            }
+            pieces = Vec::new();
+            for (sep, node) in fit(Node::Internal(Internal { keys, children })) {
+                let size = node.size();
+                pieces.push((sep, self.store_new(&node)?, size));
+            }
+        }
+        self.root = pieces[0].1;
+        // An internal root left with one child is replaced by the child.
+        loop {
+            match self.load(self.root)? {
+                Node::Internal(n) if n.keys.is_empty() => {
+                    let old = self.root;
+                    self.root = n.children[0];
+                    self.pool.free(old)?;
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    /// The pages a subtree became after `entries` went in: each with the
+    /// separator before it (empty for the first) and its size.
+    fn insert_sorted_at(
+        &mut self,
+        id: PageId,
+        entries: Vec<(Vec<u8>, Option<Val>)>,
+    ) -> Result<Vec<(Vec<u8>, PageId, usize)>> {
+        match self.load(id)? {
+            Node::Leaf(leaf) => {
+                let mut merged = Vec::with_capacity(leaf.entries.len() + entries.len());
+                let mut old = leaf.entries.into_iter().peekable();
+                let mut new = entries.into_iter().peekable();
+                loop {
+                    let take_new = match (old.peek(), new.peek()) {
+                        (None, None) => break,
+                        (Some(_), None) => false,
+                        (None, Some(_)) => true,
+                        (Some(o), Some(n)) => match o.0.cmp(&n.0) {
+                            std::cmp::Ordering::Less => false,
+                            std::cmp::Ordering::Greater => true,
+                            std::cmp::Ordering::Equal => {
+                                let (_, v) = old.next().expect("peeked");
+                                self.free_val(&v)?;
+                                true
+                            }
+                        },
+                    };
+                    if take_new {
+                        // A removal takes the old entry (if any) with it.
+                        let (k, v) = new.next().expect("peeked");
+                        if let Some(v) = v {
+                            merged.push((k, v));
+                        }
+                    } else {
+                        merged.push(old.next().expect("peeked"));
+                    }
+                }
+                let pieces = pack_leaf(merged);
+                self.store_pieces(id, pieces)
+            }
+            Node::Internal(node) => {
+                // The entries by the child they go to (in order: they are
+                // sorted).
+                let mut groups: Vec<(usize, Vec<(Vec<u8>, Option<Val>)>)> = Vec::new();
+                for e in entries {
+                    let i = node.child_index(&e.0);
+                    match groups.last_mut() {
+                        Some((j, g)) if *j == i => g.push(e),
+                        _ => groups.push((i, vec![e])),
+                    }
+                }
+                let mut groups = groups.into_iter().peekable();
+                let mut keys = Vec::with_capacity(node.keys.len());
+                let mut children = Vec::with_capacity(node.children.len());
+                // Children removals (or smaller values) left under the
+                // minimum fill.
+                let mut small = Vec::with_capacity(node.children.len());
+                for (c, &child) in node.children.iter().enumerate() {
+                    if c > 0 {
+                        keys.push(node.keys[c - 1].clone());
+                    }
+                    if groups.peek().is_some_and(|(i, _)| *i == c) {
+                        let (_, g) = groups.next().expect("peeked");
+                        for (k, (sep, page, size)) in
+                            self.insert_sorted_at(child, g)?.into_iter().enumerate()
+                        {
+                            if k > 0 {
+                                keys.push(sep);
+                            }
+                            children.push(page);
+                            small.push(size < MIN_FILL);
+                        }
+                    } else {
+                        children.push(child);
+                        small.push(false);
+                    }
+                }
+                let mut node = Internal { keys, children };
+                self.normalize(&mut node, small)?;
+                let pieces = fit(Node::Internal(node));
+                self.store_pieces(id, pieces)
+            }
+        }
+    }
+
+    /// Merges or evens out the children of `node` under the minimum fill
+    /// (`small` marks them) until each is full enough or `node` has one
+    /// child.  Several neighbours may be small at once after a batch of
+    /// removals, so a merge is checked again; two internal children merged
+    /// have their own children evened out (a small grandchild may meet
+    /// others at the seam).
+    fn normalize(&mut self, node: &mut Internal, mut small: Vec<bool>) -> Result<()> {
+        let mut i = 0;
+        while i < node.children.len() {
+            if !small[i] || node.children.len() == 1 {
+                i += 1;
+                continue;
+            }
+            let a = if i + 1 < node.children.len() {
+                i
+            } else {
+                i - 1
+            };
+            let b = a + 1;
+            let combined = match (self.load(node.children[a])?, self.load(node.children[b])?) {
+                (Node::Leaf(mut x), Node::Leaf(y)) => {
+                    x.entries.extend(y.entries);
+                    Node::Leaf(x)
+                }
+                (Node::Internal(mut x), Node::Internal(y)) => {
+                    x.keys.push(node.keys[a].clone());
+                    x.keys.extend(y.keys);
+                    x.children.extend(y.children);
+                    let grand = x
+                        .children
+                        .iter()
+                        .map(|&c| Ok(self.load(c)?.size() < MIN_FILL))
+                        .collect::<Result<Vec<bool>>>()?;
+                    if grand.iter().any(|&g| g) {
+                        self.normalize(&mut x, grand)?;
+                    }
+                    Node::Internal(x)
+                }
+                _ => {
+                    return Err(Error::Corrupt {
+                        page: node.children[a],
+                        reason: "siblings of different kinds",
+                    });
+                }
+            };
+            let size = combined.size();
+            if size <= PAYLOAD_SIZE {
+                node.children[a] = self.store(node.children[a], &combined)?;
+                self.pool.free(node.children[b])?;
+                node.keys.remove(a);
+                node.children.remove(b);
+                small.remove(b);
+                small[a] = size < MIN_FILL;
+                i = a;
+            } else {
+                let (l, sep, r) = combined.split();
+                node.children[a] = self.store(node.children[a], &l)?;
+                node.children[b] = self.store(node.children[b], &r)?;
+                node.keys[a] = sep;
+                small[a] = false;
+                small[b] = false;
+                i = b + 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Stores a node's pieces: the first as the new version of `id`, the
+    /// rest in new pages.
+    fn store_pieces(
+        &self,
+        id: PageId,
+        pieces: Vec<(Vec<u8>, Node)>,
+    ) -> Result<Vec<(Vec<u8>, PageId, usize)>> {
+        let mut out = Vec::with_capacity(pieces.len());
+        for (i, (sep, node)) in pieces.into_iter().enumerate() {
+            let size = node.size();
+            let page = if i == 0 {
+                self.store(id, &node)?
+            } else {
+                self.store_new(&node)?
+            };
+            out.push((sep, page, size));
+        }
+        Ok(out)
     }
 
     /// Applies a child's result to its parent `node`, rebalancing an
@@ -523,10 +769,13 @@ impl BTree {
 /// A position between two entries of a tree; moves both ways.
 pub struct Cursor<'t> {
     tree: &'t BTree,
-    /// The internal nodes above the current leaf, and which child we are in.
-    path: Vec<(Internal, usize)>,
-    leaf: Leaf,
-    /// The cursor sits before `leaf.entries[pos]`.
+    /// The internal pages above the current leaf: each with the child we
+    /// are in and its number of children.
+    path: Vec<(PageId, usize, usize)>,
+    /// The current leaf, pinned, read in place.
+    leaf: Option<PageRef<'t>>,
+    leaf_len: usize,
+    /// The cursor sits before entry `pos` of the leaf.
     pos: usize,
 }
 
@@ -538,73 +787,102 @@ impl std::fmt::Debug for Cursor<'_> {
     }
 }
 
-impl Cursor<'_> {
+impl<'t> Cursor<'t> {
     /// Descends from `id` to a leaf, taking at each internal node the child
-    /// `pick` chooses.
-    fn descend(&mut self, mut id: PageId, pick: impl Fn(&Internal) -> usize) -> Result<()> {
+    /// `pick` chooses (pages read in place); `at` then places the cursor in
+    /// the leaf.
+    fn descend(
+        &mut self,
+        mut id: PageId,
+        pick: impl Fn(&View) -> std::result::Result<usize, &'static str>,
+        at: impl Fn(&View) -> std::result::Result<usize, &'static str>,
+    ) -> Result<()> {
         loop {
-            match self.tree.load(id)? {
-                Node::Internal(n) => {
-                    let i = pick(&n);
-                    id = n.children[i];
-                    self.path.push((n, i));
-                }
-                Node::Leaf(leaf) => {
-                    self.leaf = leaf;
-                    return Ok(());
-                }
+            let r = self.tree.pool.fetch(id)?;
+            let page = r.read();
+            let corrupt = |reason| Error::Corrupt { page: id, reason };
+            let v = View::new(&page).map_err(corrupt)?;
+            if v.is_leaf() {
+                self.leaf_len = v.len();
+                self.pos = at(&v).map_err(corrupt)?;
+                drop(page);
+                self.leaf = Some(r);
+                return Ok(());
             }
+            let i = pick(&v).map_err(corrupt)?;
+            let child = v.child(i).map_err(corrupt)?;
+            self.path.push((id, i, v.len() + 1));
+            id = child;
         }
     }
 
     /// Moves before the first entry `>= key`.
     pub fn seek(&mut self, key: &[u8]) -> Result<()> {
         self.path.clear();
-        self.descend(self.tree.root, |n| n.child_index(key))?;
-        self.pos = self
-            .leaf
-            .entries
-            .partition_point(|(k, _)| k.as_slice() < key);
-        Ok(())
+        self.descend(
+            self.tree.root,
+            |v| v.child_index(key),
+            |v| v.partition(|k| k < key),
+        )
     }
 
     /// Moves before the first entry `> key`.
     pub fn seek_after(&mut self, key: &[u8]) -> Result<()> {
         self.path.clear();
-        self.descend(self.tree.root, |n| n.child_index(key))?;
-        self.pos = self
-            .leaf
-            .entries
-            .partition_point(|(k, _)| k.as_slice() <= key);
-        Ok(())
+        self.descend(
+            self.tree.root,
+            |v| v.child_index(key),
+            |v| v.partition(|k| k <= key),
+        )
     }
 
     /// Moves after the last entry.
     pub fn seek_end(&mut self) -> Result<()> {
         self.path.clear();
-        self.descend(self.tree.root, |n| n.children.len() - 1)?;
-        self.pos = self.leaf.entries.len();
-        Ok(())
+        self.descend(self.tree.root, |v| Ok(v.len()), |v| Ok(v.len()))
+    }
+
+    /// Entry `i` of the current leaf.
+    fn entry(&self, i: usize) -> Result<(Vec<u8>, Vec<u8>)> {
+        let r = self.leaf.as_ref().expect("a cursor is always in a leaf");
+        let page = r.read();
+        let corrupt = |reason| Error::Corrupt {
+            page: r.id(),
+            reason,
+        };
+        let v = View::new(&page).map_err(corrupt)?;
+        let key = v.key(i).map_err(corrupt)?.to_vec();
+        let val = v.value(i).map_err(corrupt)?;
+        drop(page);
+        Ok((key, self.tree.read_val(&val)?))
+    }
+
+    /// Child `i` of internal page `id`.
+    fn child(&self, id: PageId, i: usize) -> Result<PageId> {
+        let r = self.tree.pool.fetch(id)?;
+        let page = r.read();
+        let corrupt = |reason| Error::Corrupt { page: id, reason };
+        View::new(&page).and_then(|v| v.child(i)).map_err(corrupt)
     }
 
     /// The entry after the cursor, moving past it.
     pub fn next_entry(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         loop {
-            if let Some((k, v)) = self.leaf.entries.get(self.pos) {
+            if self.pos < self.leaf_len {
+                let e = self.entry(self.pos)?;
                 self.pos += 1;
-                return Ok(Some((k.clone(), self.tree.read_val(v)?)));
+                return Ok(Some(e));
             }
             // Up to the first ancestor with a child to the right, then down
             // its leftmost path.
             loop {
-                let Some((node, i)) = self.path.pop() else {
+                let Some((id, i, n)) = self.path.pop() else {
                     return Ok(None);
                 };
-                if i + 1 < node.children.len() {
-                    let child = node.children[i + 1];
-                    self.path.push((node, i + 1));
-                    self.descend(child, |_| 0)?;
-                    self.pos = 0;
+                if i + 1 < n {
+                    let child = self.child(id, i + 1)?;
+                    self.path.push((id, i + 1, n));
+                    self.descend(child, |_| Ok(0), |_| Ok(0))?;
                     break;
                 }
             }
@@ -616,18 +894,16 @@ impl Cursor<'_> {
         loop {
             if self.pos > 0 {
                 self.pos -= 1;
-                let (k, v) = &self.leaf.entries[self.pos];
-                return Ok(Some((k.clone(), self.tree.read_val(v)?)));
+                return self.entry(self.pos).map(Some);
             }
             loop {
-                let Some((node, i)) = self.path.pop() else {
+                let Some((id, i, n)) = self.path.pop() else {
                     return Ok(None);
                 };
                 if i > 0 {
-                    let child = node.children[i - 1];
-                    self.path.push((node, i - 1));
-                    self.descend(child, |n| n.children.len() - 1)?;
-                    self.pos = self.leaf.entries.len();
+                    let child = self.child(id, i - 1)?;
+                    self.path.push((id, i - 1, n));
+                    self.descend(child, |v| Ok(v.len()), |v| Ok(v.len()))?;
                     break;
                 }
             }
@@ -689,4 +965,66 @@ impl Iterator for Range<'_> {
             None
         }
     }
+}
+/// A node in pieces that each fit a page (even splits): each with the
+/// separator before it (empty for the first).
+fn fit(node: Node) -> Vec<(Vec<u8>, Node)> {
+    let mut out = vec![(Vec::new(), node)];
+    while let Some(i) = out.iter().position(|(_, n)| n.size() > PAYLOAD_SIZE) {
+        let (sep, n) = out.remove(i);
+        let (l, mid, r) = n.split();
+        out.insert(i, (mid, r));
+        out.insert(i, (sep, l));
+    }
+    out
+}
+
+/// A leaf's entries in pieces of about 7/8 of a page each (the last at
+/// least [`MIN_FILL`]): each with its first key as the separator before it
+/// (empty for the first).
+fn pack_leaf(entries: Vec<(Vec<u8>, Val)>) -> Vec<(Vec<u8>, Node)> {
+    const HEADER: usize = 12;
+    let total: usize = HEADER
+        + entries
+            .iter()
+            .map(|(k, v)| leaf_cell_size(k, v))
+            .sum::<usize>();
+    if total <= PAYLOAD_SIZE {
+        return vec![(Vec::new(), Node::Leaf(Leaf { entries }))];
+    }
+    let target = PAYLOAD_SIZE * 7 / 8;
+    let mut pieces: Vec<Vec<(Vec<u8>, Val)>> = vec![Vec::new()];
+    let mut size = HEADER;
+    for (k, v) in entries {
+        let cell = leaf_cell_size(&k, &v);
+        if size + cell > target && !pieces.last().expect("one").is_empty() {
+            pieces.push(Vec::new());
+            size = HEADER;
+        }
+        size += cell;
+        pieces.last_mut().expect("one").push((k, v));
+    }
+    // A small last piece: evened out with the one before.
+    if pieces.len() > 1 && size < MIN_FILL {
+        let last = pieces.pop().expect("two");
+        let mut prev = pieces.pop().expect("two");
+        prev.extend(last);
+        for (_, n) in fit(Node::Leaf(Leaf { entries: prev })) {
+            if let Node::Leaf(l) = n {
+                pieces.push(l.entries);
+            }
+        }
+    }
+    pieces
+        .into_iter()
+        .enumerate()
+        .map(|(i, entries)| {
+            let sep = if i == 0 {
+                Vec::new()
+            } else {
+                entries[0].0.clone()
+            };
+            (sep, Node::Leaf(Leaf { entries }))
+        })
+        .collect()
 }

@@ -1746,13 +1746,13 @@ pub fn execute(
                 let ctx = Ctx::new(&*txn, reg, &[]);
                 w.default_of(t.columns.len() - 1, &ctx)?
             };
-            let has_rows = !exec::matching_rows(
-                &t,
-                &crate::plan::Access::Full,
-                None,
-                &Ctx::new(&*txn, reg, &[]),
-            )?
-            .is_empty();
+            let has_rows = {
+                let ctx = Ctx::new(&*txn, reg, &[]);
+                exec::matching(&t, &crate::plan::Access::Full, None, &ctx)?
+                    .next()
+                    .transpose()?
+                    .is_some()
+            };
             if has_rows {
                 if fill.is_null() && column.not_null {
                     return Err(Error::not_null_violation(format!(
@@ -2320,26 +2320,26 @@ fn alter_column_type(
     }
     // Convert every row (against the old definition), then check it
     // against the new one.
+    let w = dml::Writer::new(&*txn, reg, new.clone())?;
     let rows = {
         let ctx = Ctx::new(&*txn, reg, &[]);
-        let mut rows = Vec::new();
-        for (key, mut row) in exec::matching_rows(&old, &crate::plan::Access::Full, None, &ctx)? {
+        // Stashed: past work_mem in scratch space.
+        let mut rows = crate::spill::Stash::new();
+        for r in exec::matching(&old, &crate::plan::Access::Full, None, &ctx)? {
+            let (key, mut row) = r?;
             let v = conversion.eval(&crate::expr::Env {
                 row: &row,
                 outer: None,
                 ctx: &ctx,
             })?;
             row[c] = dml::assign(ctx.txn, v, &new, c)?;
-            rows.push((key, row));
+            w.validate(&row, &ctx)?;
+            rows.push(exec::keyed(key, row))?;
         }
-        rows
+        rows.seal()?
     };
-    let w = dml::Writer::new(&*txn, reg, new.clone())?;
     {
         let ctx = Ctx::new(&*txn, reg, &[]);
-        for (_, row) in &rows {
-            w.validate(row, &ctx)?;
-        }
         if new.columns[c].default.is_some() {
             w.default_of(c, &ctx)?;
         }
@@ -2420,7 +2420,8 @@ fn add_constraint(
             let check =
                 Binder::new(&*txn, reg).condition(&parse_expr(text)?, &dml::table_scope(&t))?;
             let ctx = Ctx::new(&*txn, reg, &[]);
-            for (_, row) in exec::matching_rows(&t, &crate::plan::Access::Full, None, &ctx)? {
+            for r in exec::matching(&t, &crate::plan::Access::Full, None, &ctx)? {
+                let (_, row) = r?;
                 let env = crate::expr::Env {
                     row: &row,
                     outer: None,

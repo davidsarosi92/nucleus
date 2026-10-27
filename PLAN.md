@@ -1269,9 +1269,15 @@ collect; streaming `generate_series`; ANALYZE sampling 30 000 rows), L6b
 up to the limit, then hash partitions taken in turn; a recursive
 `UNION`'s rows seen are still held), L6c joins ✅ (grace hash joins with
 NULL keys padded through, block nested loops, a full join keeping only
-a matched bitmap); L7 parallel scans over key ranges, page compression,
-and a very large column converted in the background in chunks (from
-§M14.19); L8 the benchmark suite against PostgreSQL, in CI.
+a matched bitmap); L7 performance first —
+measured before adding parallelism (a 2-million-row load took 197 s): the
+B+tree decoded every page on a lookup's path and applied a batch key by
+key, so pages are now read in place and batches applied in one sorted
+pass (13 s ✅); next the remaining per-row costs (updates, deletes, scans,
+measured against PostgreSQL on the same machine), then parallel scans over
+key ranges, page compression, and a very large column converted in the
+background in chunks (from §M14.19; `ALTER COLUMN … TYPE` now stashes its
+rows and spills, so it is bounded in memory meanwhile); L8 the benchmark suite against PostgreSQL, in CI.
 
 ### §M14.20 — Analytics: vectorized execution and columnar storage ⬜
 
@@ -2047,6 +2053,15 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 L7 (first part): measured first — a
+  2-million-row INSERT took 197 s, nearly all of it decoding whole B+tree
+  pages per lookup and applying commit batches key by key.  `get` and
+  cursors now read pages in place (`node::View`); `Store` applies a batch
+  of distinct keys in one sorted pass (`BTree::apply_sorted`: one decode
+  and encode per node touched, leaves packed to 7/8, batched removals
+  rebalanced); the load takes 13 s, a second 200 000-row load into a
+  non-empty database 8.7 s → 0.8 s.  `ALTER COLUMN … TYPE` stashes its
+  rows.
 - **2026-10-27** — §M14.11 L6c (L6 done): joins past `work_mem` — the
   right input stashed; grace hash joins, block nested loops, a full join
   without its output in memory; checked with 64 kB against 64 MB, its

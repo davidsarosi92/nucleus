@@ -280,13 +280,20 @@ sibling, or the pair is split evenly; an internal root with one child is
 replaced by it.
 
 **API:** `create`, `open(root)`, `root`, `get`, `insert`, `remove`,
-`range` / `range_rev` (bounds), `cursor` (`seek`, `seek_after`, `seek_end`,
-`next_entry`, `prev_entry`), `destroy`, `check` (ordering, separators,
-equal leaf depth, minimum fill, overflow lengths, no page used twice;
-returns the pages used).  `&self` reads, `&mut self` writes: callers wrap
-the tree in an `RwLock` (D11).  Nodes are decoded into structs to be read
-or changed — simple, but allocation-heavy (≈ 30 µs per operation in the
-million-operation test); an in-place read path is a known optimisation.
+`apply_sorted(ops)` / `insert_sorted(entries)` (sets and removals sorted
+by key, without repeats: each node read and written once for all the keys
+reaching it; full leaves packed to about 7/8; neighbours a batch of
+removals left under `MIN_FILL` merged until they are not, seams of merged
+internal nodes included), `range` / `range_rev` (bounds), `cursor`
+(`seek`, `seek_after`, `seek_end`, `next_entry`, `prev_entry`), `destroy`,
+`check` (ordering, separators, equal leaf depth, minimum fill, overflow
+lengths, no page used twice; returns the pages used).  `&self` reads,
+`&mut self` writes: callers wrap the tree in an `RwLock` (D11).  **Reads
+in place:** `get` and cursors read pages through `node::View` (binary
+search over the offset table, a key, a child or an entry checked as
+`decode` checks it) and copy out only the entry returned; a cursor keeps
+its leaf pinned and its path as page ids.  Writes decode nodes into
+structs.
 
 ### 4.5 Write-ahead log (`wal::Wal`)
 
@@ -314,7 +321,9 @@ fails with `Error::Locked` ("in use by another process") instead of
 corrupting the database — then creates `dir/data` and `dir/wal/` if
 needed and recovers; returns `Recovery { meta, replayed }`.  `write(&Batch)` appends the batch to the
 WAL and applies it under the tree's write lock (visible at once);
-`wait_durable(lsn)`; `commit` = both.  `read()` gives the tree's read
+`wait_durable(lsn)`; `commit` = both.  A batch whose keys are all
+distinct (every batch the engine writes) is applied in one sorted pass
+(`apply_sorted`); otherwise op by op, in order.  `read()` gives the tree's read
 guard; `get`.  `checkpoint()` syncs the WAL up to the applied LSN, commits
 the pager with root, checkpoint LSN and the last batch's `meta`, then
 truncates the WAL.  `wal_since_checkpoint()` tells callers when to
@@ -2068,6 +2077,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 the B+tree's read and write paths (L7):** pages
+  read in place (`node::View`) by `get` and cursors; batches applied in
+  one sorted pass; leaves packed fuller on sequential inserts.  A
+  2-million-row load: 197 s → 13 s.
 - **2026-10-27 — §M14.11 joins past work_mem (L6c):** grace hash joins,
   block nested loops, full joins that no longer collect their output.
 - **2026-10-27 — §M14.11 aggregation, DISTINCT and set operations past

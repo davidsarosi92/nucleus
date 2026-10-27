@@ -359,6 +359,14 @@ impl Store {
 }
 
 fn apply(tree: &mut BTree, batch: &Batch) -> Result<()> {
+    // When no key comes twice (how the engine writes batches), the order
+    // does not matter: one sorted pass over the tree, a page written once
+    // for all its keys.
+    let mut ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = batch.ops.clone();
+    ops.sort_by(|a, b| a.0.cmp(&b.0));
+    if ops.len() > 1 && ops.windows(2).all(|w| w[0].0 != w[1].0) {
+        return tree.apply_sorted(&ops);
+    }
     for (k, v) in &batch.ops {
         match v {
             Some(v) => tree.insert(k, v)?,

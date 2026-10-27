@@ -317,6 +317,123 @@ impl Node {
     }
 }
 
+/// A node read in place, without decoding it: what a search needs (a
+/// separator, a child, an entry), each checked as [`Node::decode`] checks
+/// it.
+#[derive(Clone, Copy, Debug)]
+pub struct View<'a> {
+    p: &'a [u8],
+    /// Entries (a leaf) or keys (an internal node).
+    n: usize,
+    leaf: bool,
+}
+
+impl<'a> View<'a> {
+    /// The node in `page`.
+    pub fn new(page: &'a Page) -> Decode<Self> {
+        let p = page.payload();
+        let n = u16::from_le_bytes([p[2], p[3]]) as usize;
+        if HEADER + 2 * n > PAYLOAD_SIZE {
+            return Err("node cell count out of range");
+        }
+        let leaf = match (p[0], page.page_type()) {
+            (1, LEAF) => true,
+            (2, INTERNAL) => false,
+            _ => return Err("not a B+tree node"),
+        };
+        Ok(View { p, n, leaf })
+    }
+
+    /// Whether it is a leaf.
+    pub fn is_leaf(&self) -> bool {
+        self.leaf
+    }
+
+    /// Its entries (a leaf) or separator keys (an internal node).
+    pub fn len(&self) -> usize {
+        self.n
+    }
+
+    /// Whether it has none.
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
+    fn cell(&self, i: usize) -> Decode<&'a [u8]> {
+        let off = u16::from_le_bytes([self.p[HEADER + 2 * i], self.p[HEADER + 2 * i + 1]]) as usize;
+        if off < HEADER + 2 * self.n || off >= PAYLOAD_SIZE {
+            return Err("node cell offset out of range");
+        }
+        Ok(&self.p[off..])
+    }
+
+    /// Entry `i`'s key (a leaf), or separator `i` (an internal node).
+    pub fn key(&self, i: usize) -> Decode<&'a [u8]> {
+        let c = self.cell(i)?;
+        let head = if self.leaf { 7 } else { 10 };
+        if c.len() < head {
+            return Err("node cell truncated");
+        }
+        let klen = u16::from_le_bytes([c[0], c[1]]) as usize;
+        c.get(head..head + klen)
+            .ok_or("node cell runs past the page")
+    }
+
+    /// Child `i` of an internal node.
+    pub fn child(&self, i: usize) -> Decode<PageId> {
+        if i == 0 {
+            return Ok(PageId(read_u64(self.p, 4)));
+        }
+        let c = self.cell(i - 1)?;
+        if c.len() < 10 {
+            return Err("internal cell truncated");
+        }
+        Ok(PageId(read_u64(c, 2)))
+    }
+
+    /// The child of an internal node that holds `key`.
+    pub fn child_index(&self, key: &[u8]) -> Decode<usize> {
+        self.partition(|k| k <= key)
+    }
+
+    /// The first `i` whose key fails `pred` (keys for which it holds come
+    /// first), by binary search.
+    pub fn partition(&self, pred: impl Fn(&[u8]) -> bool) -> Decode<usize> {
+        let (mut lo, mut hi) = (0, self.n);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if pred(self.key(mid)?) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(lo)
+    }
+
+    /// Entry `i`'s value (a leaf).
+    pub fn value(&self, i: usize) -> Decode<Val> {
+        let c = self.cell(i)?;
+        if c.len() < 7 {
+            return Err("leaf cell truncated");
+        }
+        let klen = u16::from_le_bytes([c[0], c[1]]) as usize;
+        let flags = c[2];
+        let vlen = read_u32(c, 3) as usize;
+        let v = c
+            .get(7 + klen..7 + klen + vlen)
+            .ok_or("leaf cell runs past the page")?;
+        match (flags, vlen) {
+            (0, _) => Ok(Val::Inline(v.to_vec())),
+            (1, 16) => Ok(Val::Overflow {
+                first: PageId(read_u64(v, 0)),
+                len: read_u64(v, 8),
+            }),
+            _ => Err("leaf cell has unknown flags"),
+        }
+    }
+}
+
 /// The split index `k` in `lo..=hi` that best balances `sizes[..k]` against
 /// `sizes[k..]`.
 fn balance_point(sizes: &[usize], lo: usize, hi: usize) -> usize {

@@ -368,3 +368,61 @@ fn a_million_operations() {
         }
     }
 }
+
+/// Sorted batches (`apply_sorted`, how the store applies a batch): the
+/// same tree contents as one at a time, every invariant kept — new keys at
+/// the end, keys between existing ones, replacements, removals (of keys
+/// there and not, and of most of the tree), large values in overflow
+/// pages, trees of several levels.
+#[test]
+fn sorted_batches_agree_with_the_model() {
+    harness::run("btree_sorted_batches", 6, |seed| {
+        let p = platform(seed);
+        let mut tree = new_tree(&p, 64);
+        let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        let rng = SplitMix64::new(seed);
+        for round in 0..30u64 {
+            let mut batch = BTreeMap::new();
+            let n = 1 + rng.below(if round % 5 == 0 { 3000 } else { 300 });
+            for i in 0..n {
+                let k = match rng.below(3) {
+                    // Appends past every key so far.
+                    0 => format!("z{round:04}{i:06}").into_bytes(),
+                    _ => key(&rng),
+                };
+                batch.insert(k, value(&rng));
+            }
+            // Removals too: keys there, keys not, and (some rounds) most of
+            // the tree, so nodes merge and the root shrinks.
+            let mut ops: BTreeMap<Vec<u8>, Option<Vec<u8>>> =
+                batch.into_iter().map(|(k, v)| (k, Some(v))).collect();
+            let wipe = round % 7 == 6;
+            for k in model.keys() {
+                if wipe || rng.below(4) == 0 {
+                    ops.insert(k.clone(), None);
+                }
+            }
+            for _ in 0..rng.below(50) {
+                ops.entry(key(&rng)).or_insert(None);
+            }
+            let ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = ops.into_iter().collect();
+            tree.apply_sorted(&ops).unwrap();
+            for (k, v) in ops {
+                match v {
+                    Some(v) => {
+                        model.insert(k, v);
+                    }
+                    None => {
+                        model.remove(&k);
+                    }
+                }
+            }
+            let check = tree.check().unwrap();
+            assert_eq!(check.entries, model.len() as u64, "round {round}");
+            if round % 3 == 0 {
+                verify(&tree, &model, &rng);
+            }
+        }
+        verify(&tree, &model, &rng);
+    });
+}

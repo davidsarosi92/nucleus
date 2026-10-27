@@ -803,13 +803,14 @@ pub fn replace_rows(
     txn: &mut dyn KvTxn,
     reg: &Registry,
     table: &Table,
-    rows: Vec<(Vec<u8>, Row)>,
+    rows: crate::spill::Stored,
 ) -> Result<()> {
     let prefix = table.data_prefix();
     let end = nucleus_kv::prefix_end(&prefix).expect("table prefix");
     catalog::delete_range(txn, &prefix, Some(&end))?;
     let keys = IndexKeys::new(&*txn, reg, table)?;
-    for (old_key, row) in rows {
+    for r in rows {
+        let (old_key, row) = exec::unkeyed(r?)?;
         let key = if table.primary_key.is_empty() {
             old_key
         } else {
