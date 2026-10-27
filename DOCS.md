@@ -1897,7 +1897,15 @@ in each: Rust typed vectors; Python numpy arrays — `to_numpy()`, fixed
 widths without a copy, NULLs masked — Arrow arrays, and whole results
 as `numpy`, `arrow`, `pandas`, `polars`; JavaScript typed arrays; Java
 `IntBuffer`, `LongBuffer`, `DoubleBuffer` views; C and C++ pointers into
-the batch) — errors with their hint (`ServerError::hint`,
+the batch), and bulk load through `COPY … FROM STDIN` (§8.7): text or
+CSV in each (Rust `copy_in`, Python `Connection.copy`, JavaScript
+`Client.copy`, Java `copy`, C `nc_copy` / `nc_copy_start` /
+`nc_copy_write` / `nc_copy_end`, C++ `Connection::copy`) and rows or
+columns as columnar batches (Rust `copy_rows`; Python
+`Connection.load` — a pandas DataFrame, a pyarrow Table, a dict of
+columns or rows, numpy columns without a Python object per value;
+JavaScript `Client.load` — typed arrays sent as they are; Java `load` —
+primitive arrays likewise) — errors with their hint (`ServerError::hint`,
 Python's `.hint`, JavaScript's `hint`, Java's `hint()`, C's
 `nc_error.hint`, C++'s `hint()`) — and logs in by SCRAM-SHA-256 (the C driver with
 its own SHA-256, HMAC, PBKDF2 and base64; the others with their
@@ -1989,6 +1997,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-27 — §M14.11 bulk load in the drivers (L5):** `copy` with
+  text or CSV in every driver; `load` of rows, columns, DataFrames and
+  Arrow tables as columnar batches in Python, JavaScript and Java.
 - **2026-10-27 — §M14.11 bulk load (L5):** `COPY t [(columns)] FROM
   STDIN` in text and CSV, parsed as the data arrives, each row checked as
   an INSERT's; `ncp`'s `I`, `d`, `B`, `e`, `f`; the Rust driver's

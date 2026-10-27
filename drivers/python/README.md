@@ -39,5 +39,9 @@ fixed widths read in place from the batch), `conn.arrow(sql)` (a
 own layout), `conn.pandas(sql)`, `conn.polars(sql)`, or batch by batch:
 `for b in conn.batches(sql, rows=65536): b.column("x").to_numpy()`.
 numpy, pyarrow, pandas and polars are optional — needed only by what
-uses them.  Tests:
+uses them.  Bulk load, the other way: `conn.load("t", df)` — a
+DataFrame, an Arrow table, a dict of columns or rows, sent as columnar
+batches in one `COPY` (numpy numbers, dates and timestamps without a
+Python object per value) — and `conn.copy("COPY t FROM STDIN WITH
+(FORMAT csv)", open("t.csv", "rb"))` for text or CSV.  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Bulk load (nucleus PLAN.md §M14.11): `nc_copy_start`, `nc_copy_write`,
+  `nc_copy_end` and `nc_copy` for `COPY … FROM STDIN` with text or CSV.
+  `nc_query` and cursors answer a COPY with a refusal.
 - Protocol version 7 (nucleus PLAN.md §M14.11): columnar results.
   `nc_batches_open` (`NC_DEFAULT_BATCH`), read with `nc_cursor_next`;
   `nc_batch_rows`, `nc_batch_data`, `nc_batch_offsets`,

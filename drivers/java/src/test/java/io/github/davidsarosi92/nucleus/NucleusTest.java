@@ -8,6 +8,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -296,6 +297,42 @@ public final class NucleusTest {
         }
     }
 
+    static void copyAndLoad() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            String t = table();
+            db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, name TEXT DEFAULT 'none', x FLOAT, big BIGINT, "
+                    + "at TIMESTAMPTZ, n NUMERIC(8, 2), ok BOOLEAN, u UUID, tags TEXT[])");
+            equal(db.copy("COPY " + t + " (id, name) FROM STDIN", "1\tann\n2\t\\N\n"), 2L, "copy text");
+            equal(db.copy("COPY " + t + " (id, x) FROM STDIN WITH (FORMAT csv, HEADER)", "id,x\n3,1.5\n"), 1L, "copy csv");
+            NucleusException e = error(() -> db.copy("COPY " + t + " (id) FROM STDIN", "9\n1\n"));
+            check(e.code().equals("23505") && e.getMessage().contains("line 2"), "a bad row: " + e.getMessage());
+            OffsetDateTime at = OffsetDateTime.of(2024, 1, 2, 3, 4, 0, 0, ZoneOffset.UTC);
+            UUID u = UUID.randomUUID();
+            List<List<Object>> rows = List.of(
+                    Arrays.asList(10, "x", 0.5, 7L, at, new BigDecimal("1.25"), true, u, Arrays.asList("a", null)),
+                    Arrays.asList(11, null, null, null, null, null, null, null, null));
+            equal(db.load(t, rows), 2L, "load rows");
+            equal(db.query("SELECT name, x, big, at, n, ok, u, tags FROM " + t + " WHERE id = 10").rows().get(0),
+                    Arrays.asList("x", 0.5, 7L, at, new BigDecimal("1.25"), true, u, Arrays.asList("a", null)), "a loaded row");
+            int[] ids = new int[50_000];
+            double[] xs = new double[50_000];
+            for (int i = 0; i < ids.length; i++) {
+                ids[i] = 100 + i;
+                xs[i] = i / 2.0;
+            }
+            Map<String, Object> cols = new java.util.LinkedHashMap<>();
+            cols.put("id", ids);
+            cols.put("x", xs);
+            equal(db.load(t, cols), 50_000L, "load primitive arrays");
+            equal(db.query("SELECT count(*), sum(x), min(name) FROM " + t + " WHERE id >= 100").rows().get(0),
+                    List.of(50_000L, 49_999.0 * 50_000 / 4, "none"), "the loaded columns");
+            check(error(() -> db.load(t, Map.of("id", List.of(7), "big", List.of("no")))).getMessage().contains("\"big\""), "a bad value");
+            equal(error(() -> db.load(t, Map.of("id", new long[] {1L << 40}))).code(), "22003", "out of range");
+            equal(errorCode(() -> db.query("COPY " + t + " FROM STDIN")), "57014", "COPY without data");
+            equal(db.query("SELECT 1").rows().get(0).get(0), 1, "after");
+        }
+    }
+
     private static void run(String name, Runnable test) {
         test.run();
         passed++;
@@ -314,7 +351,8 @@ public final class NucleusTest {
         run("directory", NucleusTest::directory);
         run("cursors", NucleusTest::cursors);
         run("columnar", NucleusTest::columnar);
-        check(passed == 11, "all tests ran");
+        run("copy and load", NucleusTest::copyAndLoad);
+        check(passed == 12, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

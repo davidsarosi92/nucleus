@@ -35,5 +35,9 @@ Columnar results (protocol version 7): `for await (const b of await
 db.batches(sql, params, { rows: 65536 }))` gives a `Batch` whose columns'
 `values` are typed arrays read in place (`Int32Array`, `Float64Array`,
 `BigInt64Array` for bigint and timestamps — µs since 2000-01-01 —, …;
-text as `offsets` and bytes), with `isNull(i)` and `get(i)`.
+text as `offsets` and bytes), with `isNull(i)` and `get(i)`.  Bulk load:
+`await db.load("t", { id: new Int32Array(…), name: [...] })` (or rows) as
+columnar batches in one `COPY` — typed arrays of the column's width sent
+as they are — and `await db.copy("COPY t FROM STDIN WITH (FORMAT csv)",
+createReadStream("t.csv"))` for text or CSV.
 Tests: `npm test`; example: `examples/js/quickstart.ts`.

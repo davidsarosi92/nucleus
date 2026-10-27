@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Bulk load (nucleus PLAN.md §M14.11): `Connection.load(table, data,
+  columns=None)` sends a pandas DataFrame, a pyarrow Table, a dict of
+  columns or rows as columnar batches in one `COPY … FROM STDIN` (numpy
+  columns encoded without a Python object per value; pandas' missing
+  values as NULL); `Connection.copy(sql, data)` sends text or CSV (bytes,
+  str, a file, chunks).  A plain query answers a COPY with a refusal.
+  SQLSTATE class 57 (cancelled, timed out) is `OperationalError`.
 - Protocol version 7 (nucleus PLAN.md §M14.11): columnar results.
   `Connection.batches(sql, params, rows)` yields `Batch`es whose
   `ColumnBatch`es become numpy arrays (`to_numpy()`, fixed widths without

@@ -269,7 +269,7 @@ are marked ✅.
 | | M14.25 | Identity and access: users and roles, privileges on every object, authentication modules (SCRAM, tokens, certificates, OIDC, LDAP), access rules by connection context, row-level security, protection, audit | ✅ |
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
-| | M14.11 | **In progress (L1–L4 ✅):** Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
+| | M14.11 | **In progress (L1–L5 ✅):** Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, spilling, parallel scans, benchmarks against PostgreSQL | ⬜ |
 | | M14.20 | Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -1250,12 +1250,12 @@ validity bitmap, every buffer 8-byte aligned; the Rust driver's
 `Client::batches`); L4 columnar results in the drivers ✅ (Python numpy —
 fixed widths without a copy —, Arrow — in place where its layout is the
 batch's —, pandas, polars; JavaScript typed arrays; Java buffers; C and
-C++ pointers; each checked cell by cell against rows); L5 bulk load
-(`COPY` text/CSV and `ncp` batches ✅ — `COPY t FROM STDIN`, each row an
+C++ pointers; each checked cell by cell against rows); L5 bulk load ✅
+(`COPY` text/CSV and `ncp` batches — `COPY t FROM STDIN`, each row an
 INSERT's checks, atomic; `ncp`'s `I` / `d` / `B` / `e` / `f`; the Rust
 driver's `copy_in`, `copy_rows`; pg-compat's sub-protocol; `ncsql
-\copy` — then the other drivers' copy and a DataFrame or Arrow table
-into a table in one call); L5b large transactions (a load is one
+\copy`; `copy` in every driver, and `load` of a DataFrame, an Arrow
+table, columns or rows in one call — Python, JavaScript, Java); L5b large transactions (a load is one
 transaction, and a transaction's writes are held in memory until it
 commits: past a budget they spill — so 100 million rows load within a
 fixed memory budget); L6 spilling (sorts,
@@ -2038,6 +2038,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-27** — §M14.11 L5 done: `copy` in every driver; `load` —
+  Python (pandas, pyarrow, numpy columns without a value per cell),
+  JavaScript (typed arrays as they are), Java (primitive arrays).
 - **2026-10-27** — §M14.11 L5 (first part): `COPY … FROM STDIN` — text
   and CSV parsed as they arrive, typed rows from `ncp` batches, each row
   checked as an INSERT's, the whole load one transaction; pg-compat's

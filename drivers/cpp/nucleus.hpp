@@ -19,6 +19,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <istream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -552,6 +553,31 @@ public:
         nc_cursor* c = nc_batches_open(conn_, sql.c_str(), args.data(), args.size(), rows, &err);
         if (!c) throw Error(err.message, err.code, err.hint);
         return Batches(c);
+    }
+
+    /// Runs `COPY … FROM STDIN` (`sql`) with `data` (text or CSV, as the
+    /// statement says); the rows stored.  A bad row stores nothing.
+    uint64_t copy(const std::string& sql, std::string_view data) {
+        nc_error err;
+        int64_t n = nc_copy(conn_, sql.c_str(), data.data(), data.size(), &err);
+        if (n < 0) throw Error(err.message, err.code, err.hint);
+        return static_cast<uint64_t>(n);
+    }
+
+    /// The same with the data read from `in` (a file, …), 64 KiB at a time.
+    uint64_t copy(const std::string& sql, std::istream& in) {
+        nc_error err;
+        int rc = nc_copy_start(conn_, sql.c_str(), &err);
+        if (rc < 0) throw Error(err.message, err.code, err.hint);
+        std::vector<char> buf(1 << 16);
+        while (rc == 1 && in) {
+            in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+            if (in.gcount() > 0 && nc_copy_write(conn_, buf.data(), static_cast<size_t>(in.gcount()), &err) != 0)
+                throw Error(err.message, err.code, err.hint);
+        }
+        int64_t n = nc_copy_end(conn_, rc == 1 && in.bad() ? "the client could not read its data" : nullptr, &err);
+        if (n < 0) throw Error(err.message, err.code, err.hint);
+        return static_cast<uint64_t>(n);
     }
 
     /// BEGIN, `body(*this)`, then COMMIT — or ROLLBACK if it throws.

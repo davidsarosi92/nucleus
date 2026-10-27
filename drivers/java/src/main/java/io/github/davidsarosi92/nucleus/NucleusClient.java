@@ -2,9 +2,11 @@ package io.github.davidsarosi92.nucleus;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -32,6 +34,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.UUID;
 import java.util.function.Function;
@@ -50,6 +53,8 @@ import java.util.function.Function;
  *     try (NucleusClient.Batches batches = db.batches("SELECT id FROM t")) { // a column at a time
  *         for (NucleusClient.Batch b : batches) System.out.println(b.column(0).ints().get(0));
  *     }
+ *     db.load("t", Map.of("id", new int[] {2, 3}, "name", List.of("two", "three")));  // bulk load
+ *     db.copy("COPY t FROM STDIN WITH (FORMAT csv)", Files.newInputStream(Path.of("t.csv")));
  * }
  * }</pre>
  *
@@ -225,6 +230,8 @@ public final class NucleusClient implements AutoCloseable {
                         rows = new ArrayList<>();
                     }
                     case 'E' -> error = r.serverError();
+                    // A COPY wants data this call has none of.
+                    case 'I' -> refuseCopy();
                     case 'R' -> {
                         setStatus(m.body);
                         if (error != null) throw error;
@@ -297,6 +304,7 @@ public final class NucleusClient implements AutoCloseable {
                         c.count = r.i64();
                     }
                     case 'E' -> c.error = r.serverError();
+                    case 'I' -> refuseCopy();
                     case 'R' -> {
                         setStatus(m.body);
                         c.ready = true;
@@ -382,6 +390,7 @@ public final class NucleusClient implements AutoCloseable {
                             count = r.i64();
                         }
                         case 'E' -> error = r.serverError();
+                        case 'I' -> refuseCopy();
                         case 'R' -> {
                             end(m.body);
                             if (error != null) {
@@ -658,6 +667,273 @@ public final class NucleusClient implements AutoCloseable {
             for (int i = 0; i < rows; i++) out.add(get(i));
             return out;
         }
+    }
+
+    private void refuseCopy() throws IOException {
+        send('f', new Writer().str("this call sends no data: use copy or load for COPY FROM STDIN").bytes());
+    }
+
+    /**
+     * Runs {@code COPY … FROM STDIN} ({@code sql}) with what {@code data} reads, in the text or CSV
+     * format the statement names; the rows stored. One statement: a bad row stores nothing (its
+     * error names the line).
+     */
+    public long copy(String sql, InputStream data) {
+        return copyWith(sql, columns -> {
+            byte[] buf = new byte[1 << 16];
+            for (int n; (n = data.read(buf)) > 0; ) send('d', Arrays.copyOf(buf, n));
+        });
+    }
+
+    /** {@link #copy(String, InputStream)} with text. */
+    public long copy(String sql, String data) {
+        return copy(sql, new ByteArrayInputStream(data.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    /** {@link #load(String, List, List)} filling every column, in order. */
+    public long load(String table, List<? extends List<?>> rows) {
+        return load(table, rows, null);
+    }
+
+    /**
+     * Loads {@code rows} into {@code table} in one statement ({@code COPY … FROM STDIN} as columnar
+     * batches), filling {@code columns} (null: every column, in order); the rows stored. A bad row
+     * stores nothing.
+     */
+    public long load(String table, List<? extends List<?>> rows, List<String> columns) {
+        int width = rows.isEmpty() ? 0 : rows.get(0).size();
+        List<Object> cols = new ArrayList<>();
+        for (int c = 0; c < width; c++) {
+            List<Object> col = new ArrayList<>(rows.size());
+            for (List<?> r : rows) {
+                if (r.size() != width) throw new NucleusException("the rows are of different lengths", (String) null);
+                col.add(r.get(c));
+            }
+            cols.add(col);
+        }
+        return loadColumns(table, columns, cols, rows.size());
+    }
+
+    /**
+     * Loads columns by name into {@code table} in one statement: each a {@code List}, an object
+     * array, or a primitive array ({@code int[]}, {@code long[]}, {@code double[]}, {@code float[]},
+     * {@code short[]}, {@code boolean[]} — sent as they are when they match the column's width);
+     * null for NULL. The rows stored; a bad row stores nothing.
+     */
+    public long load(String table, Map<String, ?> columns) {
+        List<String> names = new ArrayList<>(columns.keySet());
+        List<Object> cols = new ArrayList<>(columns.values());
+        int rows = cols.isEmpty() ? 0 : length(cols.get(0));
+        for (Object c : cols) {
+            if (length(c) != rows) throw new NucleusException("the columns are of different lengths", (String) null);
+        }
+        return loadColumns(table, names, cols, rows);
+    }
+
+    private long loadColumns(String table, List<String> names, List<Object> cols, int rows) {
+        String target = names == null ? "" : " (" + String.join(", ", names.stream().map(n -> ident(n, false)).toList()) + ")";
+        return copyWith("COPY " + ident(table, true) + target + " FROM STDIN", announced -> {
+            if (announced.size() != cols.size()) {
+                throw new NucleusException(cols.size() + " columns of data for " + announced.size() + " columns", (String) null);
+            }
+            for (int start = 0; start < rows; start += DEFAULT_BATCH) {
+                send('B', encodeBatch(announced, cols, start, Math.min(rows, start + DEFAULT_BATCH)));
+            }
+        });
+    }
+
+    private interface Sender {
+        void send(List<Column> columns) throws IOException;
+    }
+
+    /** Sends a COPY, then its data, then e (or f when sending failed); the rows stored. */
+    private long copyWith(String sql, Sender sender) {
+        if (version < 7) throw new NucleusException("COPY FROM STDIN needs protocol version 7", (String) null);
+        try {
+            sendQuery(sql, new Object[0], 0, 0);
+            Message first = read();
+            RuntimeException failure = null;
+            if (first.kind == 'I') {
+                List<Column> columns = new Reader(first.body).columns();
+                first = null;
+                try {
+                    sender.send(columns);
+                    send('e', new byte[0]);
+                } catch (IOException | RuntimeException e) {
+                    failure = e instanceof RuntimeException re ? re
+                            : new NucleusException("could not read the data: " + e.getMessage(), e);
+                    send('f', new Writer().str("the client could not send its data: " + e.getMessage()).bytes());
+                }
+            }
+            long count = 0;
+            NucleusException error = null;
+            for (;;) {
+                Message m = first != null ? first : read();
+                first = null;
+                Reader r = new Reader(m.body);
+                switch (m.kind) {
+                    case 'K' -> {
+                        r.str();
+                        count = r.i64();
+                    }
+                    case 'E' -> error = r.serverError();
+                    case 'C', 'D' -> { }
+                    case 'R' -> {
+                        setStatus(m.body);
+                        // The client's own failure, before the server's answer to it.
+                        if (failure != null) throw failure;
+                        if (error != null) throw error;
+                        return count;
+                    }
+                    default -> throw new NucleusException("unexpected message " + m.kind, (String) null);
+                }
+            }
+        } catch (IOException e) {
+            throw new NucleusException("connection lost: " + e.getMessage(), e);
+        }
+    }
+
+    /** A name as SQL takes it: quoted unless a plain lower-case identifier. */
+    private static String ident(String name, boolean dotted) {
+        if (dotted && name.contains(".") && !name.contains("\"")) {
+            return String.join(".", Arrays.stream(name.split("\\.")).map(p -> ident(p, false)).toList());
+        }
+        return name.matches("[a-z_][a-z0-9_]*") ? name : "\"" + name.replace("\"", "\"\"") + "\"";
+    }
+
+    private static int length(Object col) {
+        if (col instanceof List<?> l) return l.size();
+        if (col != null && col.getClass().isArray()) return java.lang.reflect.Array.getLength(col);
+        throw new NucleusException("a column must be a List or an array", (String) null);
+    }
+
+    private static Object at(Object col, int i) {
+        return col instanceof List<?> l ? l.get(i) : java.lang.reflect.Array.get(col, i);
+    }
+
+    private static NucleusException cannotSend(Column c, Object v) {
+        return new NucleusException(v + " cannot be sent as column \"" + c.name() + "\" (" + c.type() + ")", "22P02");
+    }
+
+    /** A value as the Java type column {@code c} is sent as. */
+    private static Object fit(Column c, Object v) {
+        int tag = c.tag();
+        try {
+            return switch (tag) {
+                case 1 -> (Boolean) v;
+                case 12 -> {
+                    long n = whole(c, v);
+                    if (n < Short.MIN_VALUE || n > Short.MAX_VALUE) throw outOfRange(c);
+                    yield (short) n;
+                }
+                case 13 -> {
+                    long n = whole(c, v);
+                    if (n < Integer.MIN_VALUE || n > Integer.MAX_VALUE) throw outOfRange(c);
+                    yield (int) n;
+                }
+                case 2 -> whole(c, v);
+                case 14 -> ((Number) v).floatValue();
+                case 3 -> ((Number) v).doubleValue();
+                case 5 -> v instanceof BigDecimal d ? d
+                        : v instanceof Double || v instanceof Float ? new BigDecimal(v.toString())
+                        : v instanceof Number n ? BigDecimal.valueOf(n.longValue()) : new BigDecimal(v.toString());
+                case 6 -> (LocalDate) v;
+                case 7 -> v instanceof OffsetDateTime o ? o.withOffsetSameInstant(ZoneOffset.UTC).toLocalDateTime()
+                        : v instanceof Instant i ? LocalDateTime.ofInstant(i, ZoneOffset.UTC) : (LocalDateTime) v;
+                case 8 -> v instanceof LocalDateTime l ? l.atOffset(ZoneOffset.UTC)
+                        : v instanceof Instant i ? i.atOffset(ZoneOffset.UTC) : (OffsetDateTime) v;
+                case 16 -> (LocalTime) v;
+                case 9 -> v instanceof Duration d ? d : (Interval) v;
+                default -> v instanceof UUID ? v : UUID.fromString(v.toString());
+            };
+        } catch (ClassCastException | IllegalArgumentException e) {
+            throw cannotSend(c, v);
+        }
+    }
+
+    private static long whole(Column c, Object v) {
+        if (v instanceof Long || v instanceof Integer || v instanceof Short || v instanceof Byte) return ((Number) v).longValue();
+        if (v instanceof Number n && n.doubleValue() == Math.rint(n.doubleValue())) return n.longValue();
+        throw cannotSend(c, v);
+    }
+
+    private static NucleusException outOfRange(Column c) {
+        return new NucleusException("a value of column \"" + c.name() + "\" is out of range for " + c.type(), "22003");
+    }
+
+    /** A B batch of rows start..end of cols (DOCS.md section 10). */
+    private static byte[] encodeBatch(List<Column> columns, List<Object> cols, int start, int end) {
+        int n = end - start;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        Runnable pad = () -> {
+            while (out.size() % 8 != 0) out.write(0);
+        };
+        out.writeBytes(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(n).array());
+        for (int ci = 0; ci < columns.size(); ci++) {
+            Column c = columns.get(ci);
+            Object col = cols.get(ci);
+            boolean primitive = col.getClass().isArray() && col.getClass().getComponentType().isPrimitive();
+            boolean nulls = false;
+            if (!primitive) for (int i = start; i < end && !nulls; i++) nulls = at(col, i) == null;
+            out.write(nulls ? 1 : 0);
+            if (nulls) {
+                pad.run();
+                byte[] bits = new byte[(n + 7) / 8];
+                for (int i = 0; i < n; i++) if (at(col, start + i) != null) bits[i / 8] |= (byte) (1 << (i % 8));
+                out.writeBytes(bits);
+            }
+            pad.run();
+            int w = width(c);
+            if (w > 0) {
+                ByteBuffer bb = ByteBuffer.allocate(n * w).order(ByteOrder.LITTLE_ENDIAN);
+                int tag = c.tag();
+                // A primitive array of the column's own width goes as it is.
+                if (tag == 13 && col instanceof int[] a) bb.asIntBuffer().put(a, start, n);
+                else if (tag == 2 && col instanceof long[] a) bb.asLongBuffer().put(a, start, n);
+                else if (tag == 3 && col instanceof double[] a) bb.asDoubleBuffer().put(a, start, n);
+                else if (tag == 14 && col instanceof float[] a) bb.asFloatBuffer().put(a, start, n);
+                else if (tag == 12 && col instanceof short[] a) bb.asShortBuffer().put(a, start, n);
+                else {
+                    for (int i = 0; i < n; i++) {
+                        Object v = at(col, start + i);
+                        if (v == null) continue;
+                        byte[] tagged = new Writer().value(fit(c, v)).bytes();
+                        bb.put(i * w, tagged, tagged.length - w, w);
+                    }
+                }
+                out.writeBytes(bb.array());
+            } else {
+                ByteBuffer offs = ByteBuffer.allocate((n + 1) * 4).order(ByteOrder.LITTLE_ENDIAN);
+                ByteArrayOutputStream data = new ByteArrayOutputStream();
+                offs.putInt(0);
+                for (int i = 0; i < n; i++) {
+                    Object v = at(col, start + i);
+                    if (v != null) data.writeBytes(varSlot(c, v));
+                    offs.putInt(data.size());
+                }
+                out.writeBytes(offs.array());
+                pad.run();
+                out.writeBytes(data.toByteArray());
+            }
+            pad.run();
+        }
+        return out.toByteArray();
+    }
+
+    /** One value's bytes in a variable-width column. */
+    private static byte[] varSlot(Column c, Object v) {
+        int tag = c.tag();
+        if (tag == 15 || tag == EXT) {
+            if (v instanceof byte[] b) return b;
+            if (v instanceof Ext e) return e.data();
+            throw cannotSend(c, v);
+        }
+        if (tag == 18 || tag == 19) {
+            byte[] tagged = new Writer().value(v).bytes();
+            return Arrays.copyOfRange(tagged, 1, tagged.length);
+        }
+        if (tag == 10) return new Writer().value(v).bytes();
+        return String.valueOf(v).getBytes(StandardCharsets.UTF_8);
     }
 
     /** Runs one statement (or several: the last one's result). */

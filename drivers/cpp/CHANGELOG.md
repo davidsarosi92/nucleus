@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Bulk load, through the C driver: `Connection::copy(sql, data)` with a
+  string or an `std::istream`.
 - Protocol version 7 (nucleus PLAN.md §M14.11), through the C driver:
   `Connection::batches(sql, params, rows)` returns `Batches` — `next()`,
   `rows()`, `values<T>(col)`, `text(col, row)`, `is_null(col, row)`.

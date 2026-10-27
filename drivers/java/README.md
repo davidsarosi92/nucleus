@@ -33,5 +33,9 @@ stops the statement.  Columnar results (protocol version 7): `try
 (NucleusClient.Batches bs = db.batches(65536, sql, params…)) { for (var b :
 bs) b.column("x").ints() … }` — each column a buffer read in place
 (`ints()`, `longs()`, `doubles()`, …; text as `bytes()` and `offset(i)`),
-with `isNull(i)` and `get(i)`.  Tests: `NucleusTest` (a plain
+with `isNull(i)` and `get(i)`.  Bulk load: `db.load("t", Map.of("id", new
+int[] {…}, "name", List.of(…)))` (or rows) as columnar batches in one
+`COPY` — primitive arrays of the column's width sent as they are — and
+`db.copy("COPY t FROM STDIN WITH (FORMAT csv)", inputStream)`.  Tests:
+`NucleusTest` (a plain
 main); example: `examples/java/Quickstart.java`.

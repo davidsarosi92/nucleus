@@ -190,6 +190,19 @@ const uint32_t *nc_batch_offsets(const nc_cursor *cur, size_t col);
 const uint8_t *nc_batch_validity(const nc_cursor *cur, size_t col);
 int nc_batch_is_null(const nc_cursor *cur, size_t col, size_t row);
 
+/* Bulk load (protocol version 7): COPY … FROM STDIN.  nc_copy_start sends
+ * sql: 1 when the server takes data — send it, text or CSV as the statement
+ * says, in pieces of any size with nc_copy_write, then nc_copy_end —, 0 when
+ * the statement ended without taking any (nc_copy_end gives its error), -1
+ * when the connection failed.  nc_copy_end ends the data (fail: NULL, or
+ * why the client gives up: the statement fails) and returns the rows
+ * stored, or -1 with err.  A bad row stores nothing; its error names the
+ * line.  nc_copy does it all for data in memory. */
+int nc_copy_start(nc_conn *c, const char *sql, nc_error *err);
+int nc_copy_write(nc_conn *c, const void *data, size_t len, nc_error *err);
+int64_t nc_copy_end(nc_conn *c, const char *fail, nc_error *err);
+int64_t nc_copy(nc_conn *c, const char *sql, const void *data, size_t len, nc_error *err);
+
 /* 0 idle, 1 in a transaction block, 2 in a failed block. */
 int nc_status(const nc_conn *c);
 const char *nc_server_version(const nc_conn *c);

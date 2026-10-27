@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #include "nucleus.hpp"
@@ -196,6 +197,19 @@ int main() {
             batches++;
         }
         CHECK(total == 300 && batches == 3 && b.count() == 300);
+        // Bulk load.
+        auto t = table();
+        db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, name TEXT)");
+        CHECK(db.copy("COPY " + t + " FROM STDIN", "1\tone\n2\t\\N\n") == 2);
+        std::istringstream csv("3,three\n4,\"f, our\"\n");
+        CHECK(db.copy("COPY " + t + " FROM STDIN WITH (FORMAT csv)", csv) == 2);
+        try {
+            db.copy("COPY " + t + " FROM STDIN", "9\tx\n1\tdup\n");
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "23505");
+        }
+        CHECK(db.query("SELECT count(*) FROM " + t).rows[0][0].str() == "4");
     }
     if (failures) {
         std::cerr << failures << " check(s) failed\n";

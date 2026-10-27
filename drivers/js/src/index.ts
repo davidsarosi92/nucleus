@@ -12,6 +12,8 @@
 //   for await (const batch of await db.batches("SELECT id FROM t")) {
 //     const ids = batch.column(0).values;  // an Int32Array, a column at a time
 //   }
+//   await db.load("t", { id: new Int32Array([2, 3]), name: ["two", "three"] });
+//   await db.copy("COPY t FROM STDIN WITH (FORMAT csv)", createReadStream("t.csv"));
 //   await db.close();
 //
 // Values: boolean, smallint / integer as number, bigint as number (bigint
@@ -23,6 +25,7 @@
 // another registered type as Ext (its name and binary form).
 
 import { createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
+import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import net from "node:net";
 import tls from "node:tls";
@@ -874,6 +877,10 @@ export class Client {
           case "E":
             error = r.serverError();
             break;
+          case "I":
+            // A COPY wants data this call has none of.
+            this.refuseCopy();
+            break;
           case "R":
             this.setStatus(m.body);
             if (error) throw error;
@@ -933,6 +940,96 @@ export class Client {
     // The connection is the stream's until it ends.
     this.queue = started.then(() => held, () => undefined);
     return started.then(() => s);
+  }
+
+  /** Answers a `COPY` that wants data with `f`. */
+  refuseCopy(): void {
+    this.socket.write(
+      frame("f", new Writer().str("this call sends no data: use Client.copy or load for COPY FROM STDIN").bytes()),
+    );
+  }
+
+  /**
+   * Runs `COPY … FROM STDIN` (`sql`) with `data` — a string, bytes, or an
+   * (async) iterable of them such as a file's read stream — in the text or
+   * CSV format the statement names; the rows stored.  One statement: a bad
+   * row stores nothing (its error names the line).
+   */
+  copy(sql: string, data: CopyData): Promise<number> {
+    return this.copyWith(sql, async () => {
+      for await (const chunk of chunksOf(data)) if (chunk.length) await this.write(frame("d", chunk));
+    });
+  }
+
+  /**
+   * Loads `data` into `table` in one statement (`COPY … FROM STDIN` as
+   * columnar batches): rows (arrays of values), or columns by name (typed
+   * arrays — `Int32Array`, `Float64Array`, `BigInt64Array`, … — or arrays,
+   * `null` for NULL).  `options.columns` names the table's columns the data
+   * fills (default: the columns' names; every column, in order, for rows).
+   * Returns the rows stored; a bad row stores nothing.
+   */
+  load(table: string, data: Value[][] | Record<string, ArrayLike<Value> | ColumnValues>, options: { columns?: string[] } = {}): Promise<number> {
+    const { names, cols, rows } = columnsOf(data, options.columns);
+    const target = names ? ` (${names.map((n) => ident(n)).join(", ")})` : "";
+    return this.copyWith(`COPY ${ident(table, true)}${target} FROM STDIN`, async (announced) => {
+      if (announced.length !== cols.length) {
+        throw new NucleusError(`${cols.length} columns of data for ${announced.length} columns`);
+      }
+      for (let start = 0; start < rows; start += DEFAULT_BATCH) {
+        await this.write(frame("B", encodeBatch(announced, cols, start, Math.min(rows, start + DEFAULT_BATCH))));
+      }
+    });
+  }
+
+  /** Writes, waiting while the connection is full. */
+  private async write(b: Buffer): Promise<void> {
+    if (!this.socket.write(b)) await once(this.socket, "drain");
+  }
+
+  /** Sends a COPY, then `send(columns)` its data, then `e` (or `f` when
+   *  sending failed); the rows stored. */
+  private copyWith(sql: string, send: (columns: Column[]) => Promise<void>): Promise<number> {
+    void this.active?.close();
+    const run = async (): Promise<number> => {
+      if (this.version < 7) throw new NucleusError("COPY FROM STDIN needs protocol version 7");
+      this.sendQuery(sql, [], 0, 0);
+      let first: Message | null = await this.read();
+      let failure: unknown = null;
+      if (first.kind === "I") {
+        const columns = readColumns(new Reader(first.body));
+        first = null;
+        try {
+          await send(columns);
+          this.socket.write(frame("e", Buffer.alloc(0)));
+        } catch (e) {
+          failure = e;
+          const why = `the client could not send its data: ${e instanceof Error ? e.message : String(e)}`;
+          this.socket.write(frame("f", new Writer().str(why).bytes()));
+        }
+      }
+      let count = 0;
+      let error: NucleusError | null = null;
+      for (;;) {
+        const m = first ?? (await this.read());
+        first = null;
+        const r = new Reader(m.body);
+        if (m.kind === "K") {
+          r.str();
+          count = Number(r.u64());
+        } else if (m.kind === "E") error = r.serverError();
+        else if (m.kind === "R") {
+          this.setStatus(m.body);
+          // The client's own failure, before the server's answer to it.
+          if (failure) throw failure;
+          if (error) throw error;
+          return count;
+        } else if (m.kind !== "C" && m.kind !== "D") throw new NucleusError(`unexpected message ${m.kind}`);
+      }
+    };
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
   }
 
   /** Runs one statement (or several: the last one's result). */
@@ -1032,6 +1129,9 @@ export class Stream<T = Value[]> implements AsyncIterable<T> {
             break;
           case "E":
             this.error = r.serverError();
+            break;
+          case "I":
+            c.refuseCopy();
             break;
           case "R": {
             this.end(m.body);
@@ -1316,6 +1416,210 @@ export class Batches extends Stream<Batch> {
   protected decode(body: Buffer): Batch {
     return new Batch(this.columns, body);
   }
+}
+
+// --------------------------------------------------------------- bulk load
+
+/** What `Client.copy` sends: text or bytes, or (async) iterables of them. */
+export type CopyData = string | Uint8Array | Iterable<string | Uint8Array> | AsyncIterable<string | Uint8Array>;
+
+async function* chunksOf(data: CopyData): AsyncGenerator<Buffer> {
+  if (typeof data === "string") yield Buffer.from(data);
+  else if (data instanceof Uint8Array) yield Buffer.from(data);
+  else for await (const c of data as AsyncIterable<string | Uint8Array>) yield typeof c === "string" ? Buffer.from(c) : Buffer.from(c);
+}
+
+/** A name as SQL takes it: quoted unless a plain lower-case identifier. */
+function ident(name: string, dotted = false): string {
+  if (dotted && name.includes(".") && !name.includes('"')) return name.split(".").map((p) => ident(p)).join(".");
+  return /^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`;
+}
+
+type LoadColumn = ArrayLike<Value> | ColumnValues;
+
+function columnsOf(
+  data: Value[][] | Record<string, LoadColumn>,
+  columns: string[] | undefined,
+): { names: string[] | null; cols: LoadColumn[]; rows: number } {
+  let names: string[] | null = null;
+  let cols: LoadColumn[];
+  let rows: number;
+  if (Array.isArray(data)) {
+    const width = new Set(data.map((r) => r.length));
+    if (width.size > 1) throw new NucleusError("the rows are of different lengths");
+    const w = data.length ? data[0].length : 0;
+    cols = Array.from({ length: w }, (_, c) => data.map((r) => r[c]));
+    rows = data.length;
+  } else {
+    names = Object.keys(data);
+    cols = names.map((n) => data[n]);
+    const lengths = new Set(cols.map((c) => c.length));
+    if (lengths.size > 1) throw new NucleusError("the columns are of different lengths");
+    rows = cols.length ? cols[0].length : 0;
+  }
+  if (columns) {
+    if (names && columns.length !== names.length) {
+      throw new NucleusError(`${columns.length} column names for ${names.length} columns of data`);
+    }
+    names = columns;
+  }
+  return { names, cols, rows };
+}
+
+function uuidBytes(v: Value): Buffer {
+  const hex = String(v).replace(/[-{}]/g, "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new NucleusError(`${String(v)} is not a uuid`);
+  return Buffer.from(hex, "hex");
+}
+
+/** One value's slot in a fixed-width column of `c`. */
+function fixedSlot(c: Column, v: Value): Buffer {
+  const tag = c.tag ?? 0;
+  const bad = () => new NucleusError(`${String(v)} cannot be sent as column "${c.name}" (${c.type})`);
+  const int = (lo: bigint, hi: bigint): bigint => {
+    let n: bigint;
+    if (typeof v === "bigint") n = v;
+    else if (typeof v === "number" && Number.isInteger(v)) n = BigInt(v);
+    else throw bad();
+    if (n < lo || n > hi) throw new NucleusError(`a value of column "${c.name}" is out of range for ${c.type}`);
+    return n;
+  };
+  const b = Buffer.alloc(tag === 5 ? 17 : (FIXED[tag] ?? 16));
+  switch (tag) {
+    case 1:
+      if (typeof v !== "boolean") throw bad();
+      b[0] = v ? 1 : 0;
+      return b;
+    case 12:
+      b.writeInt16LE(Number(int(-32768n, 32767n)));
+      return b;
+    case 13:
+      b.writeInt32LE(Number(int(-2147483648n, 2147483647n)));
+      return b;
+    case 2:
+      b.writeBigInt64LE(int(-(2n ** 63n), 2n ** 63n - 1n));
+      return b;
+    case 14:
+    case 3:
+      if (typeof v !== "number" && typeof v !== "bigint") throw bad();
+      if (tag === 14) b.writeFloatLE(Number(v));
+      else b.writeDoubleLE(Number(v));
+      return b;
+    case 6:
+      if (!(v instanceof Date)) throw bad();
+      b.writeInt32LE(Math.floor((v.getTime() - EPOCH_MS) / DAY_MS));
+      return b;
+    case 7:
+    case 8:
+      if (v instanceof Date) b.writeBigInt64LE(BigInt(v.getTime() - EPOCH_MS) * 1000n);
+      else if (typeof v === "bigint") b.writeBigInt64LE(v); // µs since 2000-01-01
+      else throw bad();
+      return b;
+    case 16:
+      if (!(v instanceof Time)) throw bad();
+      b.writeBigInt64LE(BigInt(v.micros));
+      return b;
+    case 9:
+      if (!(v instanceof Interval)) throw bad();
+      b.writeInt32LE(v.months, 0);
+      b.writeInt32LE(v.days, 4);
+      b.writeBigInt64LE(BigInt(v.micros), 8);
+      return b;
+    case 5: {
+      const d = v instanceof Decimal ? v : typeof v === "number" || typeof v === "bigint" || typeof v === "string" ? Decimal.parse(String(v)) : null;
+      if (!d) throw bad();
+      const u = BigInt.asUintN(128, d.mantissa);
+      b.writeBigUInt64LE(u & 0xffffffffffffffffn, 0);
+      b.writeBigUInt64LE(u >> 64n, 8);
+      b[16] = d.scale;
+      return b;
+    }
+    default:
+      if (tag === EXT && c.type === "uuid") return uuidBytes(v);
+      throw bad();
+  }
+}
+
+/** One value's bytes in a variable-width column of `c`. */
+function varSlot(c: Column, v: Value): Buffer {
+  const tag = c.tag ?? 0;
+  if (tag === 15 || tag === EXT) {
+    if (v instanceof Ext) return v.data;
+    if (v instanceof Uint8Array) return Buffer.from(v);
+    throw new NucleusError(`${String(v)} cannot be sent as column "${c.name}" (${c.type})`);
+  }
+  if (tag === 18 || tag === 19 || tag === 10) {
+    const b = new Writer().value(tag === 10 ? v : v instanceof Inet ? v : tag === 18 ? Inet.parse(String(v)) : Cidr.parse(String(v))).bytes();
+    return tag === 10 ? b : b.subarray(1);
+  }
+  return Buffer.from(String(v));
+}
+
+/** A `B` batch of rows `start`..`end` of `cols` (DOCS.md §10). */
+function encodeBatch(columns: Column[], cols: LoadColumn[], start: number, end: number): Buffer {
+  const n = end - start;
+  const parts: Buffer[] = [];
+  let len = 0;
+  const push = (b: Buffer) => {
+    parts.push(b);
+    len += b.length;
+  };
+  const pad = () => {
+    if (len % 8) push(Buffer.alloc(8 - (len % 8)));
+  };
+  const head = Buffer.alloc(4);
+  head.writeUInt32LE(n);
+  push(head);
+  columns.forEach((c, ci) => {
+    const col = cols[ci];
+    const isNull = (i: number) => col[i] === null || col[i] === undefined;
+    let nulls = false;
+    for (let i = start; i < end && !nulls; i++) nulls = isNull(i);
+    push(Buffer.from([nulls ? 1 : 0]));
+    if (nulls) {
+      pad();
+      const bits = Buffer.alloc((n + 7) >> 3);
+      for (let i = 0; i < n; i++) if (!isNull(start + i)) bits[i >> 3] |= 1 << (i & 7);
+      push(bits);
+    }
+    pad();
+    const w = widthOf(c);
+    if (w) {
+      const tag = c.tag ?? 0;
+      // A typed array of the column's own width is sent as it is.
+      const same =
+        (tag === 12 && col instanceof Int16Array) ||
+        (tag === 13 && col instanceof Int32Array) ||
+        (tag === 2 && col instanceof BigInt64Array) ||
+        (tag === 14 && col instanceof Float32Array) ||
+        (tag === 3 && col instanceof Float64Array);
+      if (same) {
+        const t = col as Int16Array | Int32Array | BigInt64Array | Float32Array | Float64Array;
+        push(Buffer.from(t.buffer, t.byteOffset + start * w, n * w));
+      } else {
+        const out = Buffer.alloc(n * w);
+        for (let i = 0; i < n; i++) if (!isNull(start + i)) fixedSlot(c, col[start + i] as Value).copy(out, i * w);
+        push(out);
+      }
+    } else {
+      const offs = Buffer.alloc((n + 1) * 4);
+      const data: Buffer[] = [];
+      let at = 0;
+      for (let i = 0; i < n; i++) {
+        if (!isNull(start + i)) {
+          const b = varSlot(c, col[start + i] as Value);
+          data.push(b);
+          at += b.length;
+        }
+        offs.writeUInt32LE(at, (i + 1) * 4);
+      }
+      push(offs);
+      pad();
+      push(Buffer.concat(data));
+    }
+    pad();
+  });
+  return Buffer.concat(parts, len);
 }
 
 /** Opens a connection (the defaults reach a local server as it starts). */

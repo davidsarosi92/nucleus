@@ -14,6 +14,8 @@ Pure Python, no dependencies.  The API follows DB-API 2.0 where it fits::
             print(row)
     df = conn.pandas("SELECT * FROM t")           # columnar: numpy, Arrow,
                                                   # pandas, polars
+    conn.load("t", df)                            # and back, in one call
+    conn.copy("COPY t FROM STDIN WITH (FORMAT csv)", open("t.csv", "rb"))
     with conn.transaction():
         conn.execute("UPDATE t SET name = $1 WHERE id = $2", ["uno", 1])
 
@@ -108,7 +110,8 @@ class DataError(DatabaseError):
 
 
 class OperationalError(DatabaseError):
-    """Connection, authentication, serialization: classes 08, 28, 40, …"""
+    """Connection, authentication, serialization, cancellation: classes 08,
+    28, 40, 57, …"""
 
 
 class IntegrityError(DatabaseError):
@@ -130,7 +133,7 @@ def _server_error(r):
     cls = {
         "22": DataError, "23": IntegrityError, "42": ProgrammingError,
         "0A": NotSupportedError, "08": OperationalError,
-        "28": OperationalError, "40": OperationalError,
+        "28": OperationalError, "40": OperationalError, "57": OperationalError,
     }.get(code[:2], DatabaseError)
     return cls(message, code, hint)
 
@@ -477,6 +480,7 @@ class Connection:
         self._buf = bytearray()
         self._version = PROTOCOL_VERSION
         self._active = None  # a Stream the server is still sending
+        self._copy_pending = None  # a message read starting a COPY that did not begin
         self.status = 0  # 0 idle, 1 in a transaction block, 2 failed block
         hello = bytearray(_struct.pack("<H", PROTOCOL_VERSION))
         for s in (user, database, "", client_name):
@@ -580,6 +584,8 @@ class Connection:
                 columns, rows = None, []
             elif kind == b"E":
                 error = _server_error(r)
+            elif kind == b"I":
+                self._refuse_copy()
             elif kind == b"R":
                 self.status = payload[0]
                 if error is not None:
@@ -603,6 +609,99 @@ class Connection:
             _encode(body, p)
         self._send(b"Q", body)
 
+    def _refuse_copy(self):
+        out = bytearray()
+        _put_str(out, "this call sends no data: use Connection.copy or load for COPY FROM STDIN")
+        self._send(b"f", out)
+
+    def copy(self, sql, data):
+        """Runs ``COPY … FROM STDIN`` (``sql``) with ``data`` — bytes, a str, a
+        binary or text file, or an iterable of such chunks — in the text or
+        CSV format the statement names; the rows stored.  The load is one
+        statement: a bad row stores nothing (its error names the line)."""
+        if self._copy_start(sql) is None:
+            return self._copy_end(None)
+        try:
+            for chunk in _chunks(data):
+                if chunk:
+                    self._send(b"d", chunk)
+        except Exception as e:
+            self._copy_fail(f"the client could not read its data: {e}")
+            raise
+        return self._copy_end(None)
+
+    def load(self, table, data, columns=None):
+        """Loads ``data`` into ``table`` in one statement (``COPY … FROM
+        STDIN`` as columnar batches): a pandas DataFrame, a pyarrow Table or
+        RecordBatch, a dict of columns (numpy arrays — masked ones for NULLs
+        — or lists), or a sequence of rows.  ``columns`` names the table's
+        columns the data fills (default: the data's own names; every column,
+        in order, for rows).  numpy columns of numbers, dates, timestamps
+        and times are sent without a Python object per value.  Returns the
+        rows stored; a bad row stores nothing."""
+        names, cols, n = _columns_of(data, columns)
+        target = f" ({', '.join(_ident(c) for c in names)})" if names else ""
+        announced = self._copy_start(f"COPY {_ident(table, dotted=True)}{target} FROM STDIN")
+        if announced is None:
+            return self._copy_end(None)
+        try:
+            if len(announced) != len(cols):
+                raise ProgrammingError(f"{len(cols)} columns of data for {len(announced)} columns")
+            step = DEFAULT_BATCH
+            for start in range(0, n, step):
+                self._send(b"B", _encode_batch(announced, cols, start, min(n, start + step)))
+        except Exception as e:
+            self._copy_fail(f"the client could not send its data: {e}")
+            raise
+        return self._copy_end(None)
+
+    def _copy_start(self, sql):
+        """Sends a COPY; the columns its data holds, or None when it ended
+        without taking data (an error, read by ``_copy_end``)."""
+        if self._version < 7:
+            raise NotSupportedError("COPY FROM STDIN needs protocol version 7")
+        self._send_query(sql, (), 0, 0)
+        kind, payload = self._read()
+        if kind == b"I":
+            return _columns(_Reader(payload))
+        self._copy_pending = (kind, payload)
+        return None
+
+    def _copy_fail(self, why):
+        """Gives up a COPY whose data the client could not send: the
+        server's answer (its error) is read, the client's own reported."""
+        try:
+            self._copy_end(why)
+        except DatabaseError:
+            pass
+
+    def _copy_end(self, failed):
+        pending, self._copy_pending = self._copy_pending, None
+        if pending is None:
+            if failed is None:
+                self._send(b"e", b"")
+            else:
+                out = bytearray()
+                _put_str(out, failed)
+                self._send(b"f", out)
+        count, error = 0, None
+        while True:
+            kind, payload = pending if pending is not None else self._read()
+            pending = None
+            r = _Reader(payload)
+            if kind == b"K":
+                r.str()
+                (count,) = r.unpack("<Q")
+            elif kind == b"E":
+                error = _server_error(r)
+            elif kind == b"R":
+                self.status = payload[0]
+                if error is not None:
+                    raise error
+                return count
+            elif kind not in (b"C", b"D"):
+                raise InterfaceError(f"unexpected message {kind!r}")
+
     def stream(self, sql, params=(), fetch=DEFAULT_FETCH):
         """Runs one statement and returns a ``Stream`` of its rows, read as
         they arrive: the server sends ``fetch`` rows, then waits until they
@@ -625,6 +724,9 @@ class Connection:
     def numpy(self, sql, params=()):
         """The result as a dict of numpy arrays by column name (masked where
         a column has NULLs).  Needs numpy."""
+        return self._numpy(sql, params)[0]
+
+    def _numpy(self, sql, params):
         import numpy as np
 
         parts, names = {}, None
@@ -642,7 +744,7 @@ class Connection:
                 out[name] = np.ma.concatenate(arrays)
             else:
                 out[name] = np.concatenate(arrays)
-        return out
+        return out, bs.columns
 
     def arrow(self, sql, params=()):
         """The result as a ``pyarrow.Table``.  Needs pyarrow."""
@@ -662,7 +764,13 @@ class Connection:
         try:
             import pyarrow  # noqa: F401
         except ImportError:
-            return pd.DataFrame(self.numpy(sql, params))
+            arrays, columns = self._numpy(sql, params)
+            df = pd.DataFrame(arrays)
+            # timestamptz in UTC, as through Arrow.
+            for c in columns:
+                if c.tag == 8:
+                    df[c.name] = df[c.name].dt.tz_localize("UTC")
+            return df
         return self.arrow(sql, params).to_pandas()
 
     def polars(self, sql, params=()):
@@ -769,6 +877,8 @@ class Stream:
                 (self.count,) = r.unpack("<Q")
             elif kind == b"E":
                 self._error = _server_error(r)
+            elif kind == b"I":
+                conn._refuse_copy()
             elif kind == b"R":
                 conn.status = payload[0]
                 self._ready = True
@@ -1082,6 +1192,270 @@ class Batches(Stream):
 
     def __next__(self):
         return Batch(self.columns, self._next_body())
+
+
+
+# --------------------------------------------------------------- bulk load
+
+def _chunks(data):
+    """``Connection.copy``'s data as byte chunks."""
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        yield bytes(data)
+    elif isinstance(data, str):
+        yield data.encode()
+    elif hasattr(data, "read"):
+        while True:
+            chunk = data.read(1 << 16)
+            if not chunk:
+                return
+            yield chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+    else:
+        for chunk in data:
+            yield chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+
+
+def _ident(name, dotted=False):
+    """A name as SQL takes it: quoted unless a plain lower-case identifier."""
+    if dotted and "." in name and '"' not in name:
+        return ".".join(_ident(p) for p in name.split("."))
+    if name and (name[0].isalpha() or name[0] == "_") and name.isascii() \
+            and all(ch.islower() or ch.isdigit() or ch == "_" for ch in name):
+        return name
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _np():
+    try:
+        import numpy
+        return numpy
+    except ImportError:
+        return None
+
+
+def _columns_of(data, columns):
+    """(names, [(values, null mask or None)], rows) of ``load``'s data."""
+    np = _np()
+    names, cols = None, []
+    if hasattr(data, "column_names") and hasattr(data, "num_rows"):  # pyarrow
+        names = list(data.column_names)
+        for i in range(len(names)):
+            col = data.column(i)
+            if hasattr(col, "combine_chunks"):
+                col = col.combine_chunks()
+            mask = col.is_null().to_numpy(zero_copy_only=False) if col.null_count else None
+            values = col.to_numpy(zero_copy_only=False)
+            cols.append((values, mask))
+        n = data.num_rows
+    elif hasattr(data, "dtypes") and hasattr(data, "columns") and hasattr(data, "iloc"):  # pandas
+        names = [str(c) for c in data.columns]
+        for c in data.columns:
+            sr = data[c]
+            mask = sr.isna().to_numpy()
+            mask = mask if mask.any() else None
+            dtype = sr.dtype
+            if getattr(dtype, "tz", None) is not None:
+                values = sr.dt.tz_convert("UTC").dt.tz_localize(None).to_numpy()
+            elif hasattr(dtype, "numpy_dtype"):  # nullable integers, booleans, floats
+                fill = False if dtype.numpy_dtype.kind == "b" else 0
+                values = sr.to_numpy(dtype=dtype.numpy_dtype, na_value=fill)
+            else:
+                values = sr.to_numpy()
+            cols.append((values, mask))
+        n = len(data)
+    elif isinstance(data, dict):
+        names = list(data)
+        for v in data.values():
+            if np is not None and isinstance(v, np.ma.MaskedArray):
+                mask = np.ma.getmaskarray(v)
+                cols.append((v.data, mask if mask.any() else None))
+            elif np is not None and isinstance(v, np.ndarray) and v.dtype != object:
+                cols.append((v, None))
+            else:
+                v = list(v)
+                mask = [x is None for x in v]
+                cols.append((v, mask if any(mask) else None))
+        lengths = {len(v) for v, _ in cols}
+        if len(lengths) > 1:
+            raise ProgrammingError("the columns are of different lengths")
+        n = lengths.pop() if lengths else 0
+    else:  # rows
+        rows = [tuple(r) for r in data]
+        width = {len(r) for r in rows}
+        if len(width) > 1:
+            raise ProgrammingError("the rows are of different lengths")
+        for v in zip(*rows):
+            v = list(v)
+            mask = [x is None for x in v]
+            cols.append((v, mask if any(mask) else None))
+        n = len(rows)
+    if columns is not None:
+        if names is not None and len(columns) != len(names):
+            raise ProgrammingError(f"{len(columns)} column names for {len(names)} columns of data")
+        names = list(columns)
+    return names, cols, n
+
+
+# struct formats of fixed-width types by tag (per value, without numpy).
+_PACK = {1: "<?", 12: "<h", 13: "<i", 2: "<q", 14: "<f", 3: "<d"}
+_NP_TYPE = {1: "u1", 12: "<i2", 13: "<i4", 2: "<i8", 14: "<f4", 3: "<f8"}
+
+
+def _fixed_values(c, values, mask):
+    """A fixed-width column's slots as bytes (numpy, without a Python object
+    per value, when the values are a numpy array of a fitting kind)."""
+    np = _np()
+    tag = c.tag
+    if np is not None and isinstance(values, np.ndarray) and values.dtype != object:
+        kind = values.dtype.kind
+        arr = None
+        if tag in _NP_TYPE and kind in "biuf":
+            t = np.dtype(_NP_TYPE[tag])
+            if tag != 1 and t.kind == "i" and kind in "fiu" and len(values):
+                live = values if mask is None else values[~mask]
+                if kind == "f" and len(live) and not np.all(np.floor(live) == live):
+                    raise DataError(f"column \"{c.name}\" ({c.type}) takes whole numbers")
+                info = np.iinfo(t)
+                if len(live) and (live.min() < info.min or live.max() > info.max):
+                    raise DataError(f"a value of column \"{c.name}\" is out of range for {c.type}")
+            if mask is not None and kind == "f":
+                values = np.where(mask, 0, values)  # (NULLs' NaN)
+            arr = values.astype(t)
+        elif tag == 6 and kind == "M":
+            arr = (values.astype("datetime64[D]").astype("<i8") - _DAYS_1970).astype("<i4")
+        elif tag in (7, 8) and kind == "M":
+            arr = values.astype("datetime64[us]").astype("<i8") - _US_1970
+        elif tag == 16 and kind == "m":
+            arr = values.astype("timedelta64[us]").astype("<i8")
+        if arr is not None:
+            if mask is not None:
+                arr = arr.copy()
+                arr[mask] = 0
+            return arr.tobytes()
+    w = _FIXED.get(tag, (16, None))[0]
+    out = bytearray()
+    for i, v in enumerate(values):
+        if (mask is not None and mask[i]) or v is None:
+            out += bytes(w)
+        else:
+            out += _fixed_slot(c, v)
+    return bytes(out)
+
+
+def _fixed_slot(c, v):
+    """One value's slot in a fixed-width column."""
+    tag = c.tag
+    np = _np()
+    if np is not None and isinstance(v, np.generic):
+        v = v.item()
+    try:
+        if tag in _PACK:
+            if tag in (12, 13, 2) and isinstance(v, float):
+                if v != int(v):
+                    raise ValueError
+                v = int(v)
+            return _struct.pack(_PACK[tag], v)
+        if tag == 6:
+            if isinstance(v, _dt.datetime):
+                v = v.date()
+            return _struct.pack("<i", (v - _EPOCH_DATE).days)
+        if tag in (7, 8):
+            if isinstance(v, _dt.datetime) and v.tzinfo is not None:
+                v = v.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+            elif isinstance(v, _dt.date) and not isinstance(v, _dt.datetime):
+                v = _dt.datetime(v.year, v.month, v.day)
+            d = v - _EPOCH
+            return _struct.pack("<q", (d.days * 86_400 + d.seconds) * 1_000_000 + d.microseconds)
+        if tag == 16:
+            if isinstance(v, _dt.timedelta):
+                us = (v.days * 86_400 + v.seconds) * 1_000_000 + v.microseconds
+            else:
+                us = ((v.hour * 60 + v.minute) * 60 + v.second) * 1_000_000 + v.microsecond
+            return _struct.pack("<q", us)
+        if tag == 9:
+            if isinstance(v, _dt.timedelta):
+                v = Interval(0, v.days, v.seconds * 1_000_000 + v.microseconds)
+            return _struct.pack("<iiq", v.months, v.days, v.microseconds)
+        if tag == 5:
+            d = v if isinstance(v, _decimal.Decimal) else _decimal.Decimal(str(v))
+            sign, digits, exp = d.as_tuple()
+            m = int("".join(map(str, digits)) or "0")
+            m = -m if sign else m
+            scale = -exp if exp < 0 else 0
+            if exp > 0:
+                m *= 10 ** exp
+            return m.to_bytes(16, "little", signed=True) + bytes([scale])
+        if tag == _EXT and c.type == "uuid":
+            return (v if isinstance(v, _uuid.UUID) else _uuid.UUID(str(v))).bytes
+    except (TypeError, ValueError, AttributeError, _struct.error, OverflowError) as e:
+        raise DataError(f"{v!r} cannot be sent as column \"{c.name}\" ({c.type})") from e
+    raise DataError(f"{v!r} cannot be sent as column \"{c.name}\" ({c.type})")
+
+
+def _var_slot(c, v):
+    """One value's bytes in a variable-width column."""
+    tag = c.tag
+    if tag == 15:
+        return bytes(v)
+    if tag == _EXT:
+        return v.data if isinstance(v, Ext) else bytes(v)
+    if tag in (18, 19):
+        out = bytearray()
+        _encode(out, v)
+        return bytes(out[1:])
+    if tag == 10:
+        out = bytearray()
+        _encode(out, list(v))
+        return bytes(out)
+    if isinstance(v, bytes):
+        return v
+    return str(v).encode()
+
+
+def _encode_batch(columns, cols, start, end):
+    """A ``B`` batch of rows ``start``..``end`` of ``cols`` (DOCS.md §10)."""
+    n = end - start
+    out = bytearray(_struct.pack("<I", n))
+
+    def pad():
+        out.extend(bytes(-len(out) % 8))
+
+    for c, (values, mask) in zip(columns, cols):
+        values = values[start:end]
+        mask = None if mask is None else mask[start:end]
+        np = _np()
+        if mask is not None and np is not None and isinstance(mask, np.ndarray):
+            nulls = bool(mask.any())
+        else:
+            if mask is None and not (np is not None and isinstance(values, np.ndarray) and values.dtype != object):
+                mask = [v is None for v in values]
+            nulls = mask is not None and any(mask)
+        out.append(1 if nulls else 0)
+        if nulls:
+            pad()
+            if np is not None and isinstance(mask, np.ndarray):
+                out += np.packbits(~mask, bitorder="little").tobytes()
+            else:
+                bits = bytearray((n + 7) // 8)
+                for i, m in enumerate(mask):
+                    if not m:
+                        bits[i // 8] |= 1 << (i % 8)
+                out += bits
+        pad()
+        if _width(c):
+            out += _fixed_values(c, values, mask if nulls else None)
+        else:
+            parts, offs, at = [], [0], 0
+            for i, v in enumerate(values):
+                if not (nulls and mask[i]) and v is not None:
+                    b = _var_slot(c, v)
+                    parts.append(b)
+                    at += len(b)
+                offs.append(at)
+            out += _struct.pack(f"<{n + 1}I", *offs)
+            pad()
+            out += b"".join(parts)
+        pad()
+    return bytes(out)
 
 
 class Cursor:

@@ -459,6 +459,51 @@ static void columnar(void) {
     nc_close(db);
 }
 
+static void copy_in(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    char t[64], sql[256];
+    int64_t n;
+    nc_result *r;
+    int i;
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (id INT PRIMARY KEY, name TEXT)", t);
+    nc_result_free(nc_query(db, sql, NULL, 0, &err));
+    snprintf(sql, sizeof sql, "COPY %s FROM STDIN", t);
+    {
+        const char *d = "1\tone\n2\t\\N\n";
+        n = nc_copy(db, sql, d, strlen(d), &err);
+    }
+    CHECK(n == 2);
+    /* Streamed in pieces, CSV. */
+    snprintf(sql, sizeof sql, "COPY %s FROM STDIN WITH (FORMAT csv)", t);
+    CHECK(nc_copy_start(db, sql, &err) == 1);
+    for (i = 3; i < 1003; i++) {
+        char line[32];
+        snprintf(line, sizeof line, "%d,\"n, %d\"\n", i, i);
+        CHECK(nc_copy_write(db, line, strlen(line), &err) == 0);
+    }
+    CHECK(nc_copy_end(db, NULL, &err) == 1000);
+    /* A bad row stores nothing; giving up fails the statement. */
+    snprintf(sql, sizeof sql, "COPY %s FROM STDIN", t);
+    CHECK(nc_copy(db, sql, "5000\tx\n1\tdup\n", strlen("5000\tx\n1\tdup\n"), &err) == -1);
+    CHECK(strcmp(err.code, "23505") == 0 && strstr(err.message, "line 2") != NULL);
+    CHECK(nc_copy_start(db, sql, &err) == 1);
+    CHECK(nc_copy_write(db, "6000\tx\n", strlen("6000\tx\n"), &err) == 0);
+    CHECK(nc_copy_end(db, "changed my mind", &err) == -1 && strcmp(err.code, "57014") == 0);
+    CHECK(nc_copy(db, "COPY nope FROM STDIN", "", 0, &err) == -1 && strcmp(err.code, "42P01") == 0);
+    /* A COPY through nc_query is refused, and the connection goes on. */
+    CHECK(nc_query(db, sql, NULL, 0, &err) == NULL && strcmp(err.code, "57014") == 0);
+    snprintf(sql, sizeof sql, "SELECT count(*) FROM %s", t);
+    r = nc_query(db, sql, NULL, 0, &err);
+    CHECK(r && nc_value_at(r, 0, 0)->as.integer == 1002);
+    nc_result_free(r);
+    nc_close(db);
+}
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
@@ -470,6 +515,7 @@ int main(void) {
     directory();
     cursors();
     columnar();
+    copy_in();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

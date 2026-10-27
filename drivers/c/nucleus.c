@@ -50,6 +50,10 @@ struct nc_conn {
     uint32_t session;
     int version;       /* the protocol version agreed with the server */
     nc_cursor *active; /* a cursor the server is still sending */
+    /* A message read starting a COPY that did not take data. */
+    char copy_kind;
+    unsigned char *copy_body;
+    size_t copy_len;
 };
 
 typedef struct {
@@ -1118,6 +1122,14 @@ static int read_row(nc_result *res, reader *r) {
 
 static void cursor_drain(nc_cursor *cur);
 
+/* Answers a COPY that wants data with f. */
+static void refuse_copy(nc_conn *c) {
+    buf f = {0};
+    put_str(&f, "this call sends no data: use nc_copy for COPY FROM STDIN");
+    if (!f.failed) send_frame(c, 'f', &f);
+    free(f.b);
+}
+
 /* Sends Q: rows fetch at a time (0: all at once; from version 6). */
 static int send_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, int format,
                       unsigned fetch, nc_error *err) {
@@ -1185,6 +1197,10 @@ nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t 
         case 'E':
             server_error(err, body, len);
             failed = 1;
+            break;
+        case 'I':
+            /* A COPY wants data this call has none of. */
+            refuse_copy(c);
             break;
         case 'R':
             c->status = len ? body[0] : 0;
@@ -1367,6 +1383,9 @@ static nc_cursor *cursor_open(nc_conn *c, const char *sql, const nc_value *param
             server_error(err, body, len);
             cur->failed = 1;
             break;
+        case 'I':
+            refuse_copy(c);
+            break;
         case 'R':
             cursor_end(cur, body, len);
             free(body);
@@ -1440,6 +1459,9 @@ int nc_cursor_next(nc_cursor *cur, nc_error *err) {
         case 'E':
             server_error(&cur->error, body, len);
             cur->failed = 1;
+            break;
+        case 'I':
+            refuse_copy(c);
             break;
         case 'R':
             cursor_end(cur, body, len);
@@ -1529,6 +1551,90 @@ void nc_cursor_close(nc_cursor *cur) {
     free(cur);
 }
 
+int nc_copy_start(nc_conn *c, const char *sql, nc_error *err) {
+    char kind;
+    unsigned char *body;
+    size_t len;
+    if (c->version < 7) {
+        set_error(err, "0A000", "COPY FROM STDIN needs protocol version 7");
+        return -1;
+    }
+    if (send_query(c, sql, NULL, 0, 0, 0, err) != 0) return -1;
+    if (read_frame(c, &kind, &body, &len) != 0) {
+        set_error(err, "08006", "connection lost");
+        return -1;
+    }
+    if (kind == 'I') {
+        free(body);
+        return 1;
+    }
+    free(c->copy_body);
+    c->copy_kind = kind;
+    c->copy_body = body;
+    c->copy_len = len;
+    return 0;
+}
+
+int nc_copy_write(nc_conn *c, const void *data, size_t len, nc_error *err) {
+    buf d = {0};
+    int rc;
+    if (len == 0) return 0;
+    put(&d, data, len);
+    rc = d.failed || send_frame(c, 'd', &d) != 0 ? -1 : 0;
+    free(d.b);
+    if (rc) set_error(err, "08006", "connection lost");
+    return rc;
+}
+
+int64_t nc_copy_end(nc_conn *c, const char *fail, nc_error *err) {
+    int64_t count = 0;
+    int failed = 0;
+    if (!c->copy_body) {
+        buf m = {0};
+        if (fail) put_str(&m, fail);
+        if (m.failed || send_frame(c, fail ? 'f' : 'e', &m) != 0) {
+            free(m.b);
+            set_error(err, "08006", "connection lost");
+            return -1;
+        }
+        free(m.b);
+    }
+    for (;;) {
+        char kind;
+        unsigned char *body;
+        size_t len;
+        if (c->copy_body) {
+            kind = c->copy_kind;
+            body = c->copy_body;
+            len = c->copy_len;
+            c->copy_body = NULL;
+        } else if (read_frame(c, &kind, &body, &len) != 0) {
+            set_error(err, "08006", "connection lost");
+            return -1;
+        }
+        if (kind == 'K') {
+            reader r = {body, len, 0, 0};
+            free(get_str(&r));
+            count = (int64_t)get_le(&r, 8);
+        } else if (kind == 'E') {
+            server_error(err, body, len);
+            failed = 1;
+        } else if (kind == 'R') {
+            c->status = len ? body[0] : 0;
+            free(body);
+            return failed ? -1 : count;
+        }
+        free(body);
+    }
+}
+
+int64_t nc_copy(nc_conn *c, const char *sql, const void *data, size_t len, nc_error *err) {
+    int rc = nc_copy_start(c, sql, err);
+    if (rc < 0) return -1;
+    if (rc == 1 && nc_copy_write(c, data, len, err) != 0) return -1;
+    return nc_copy_end(c, NULL, err);
+}
+
 int nc_status(const nc_conn *c) { return c->status; }
 const char *nc_server_version(const nc_conn *c) { return c->server; }
 uint32_t nc_session_id(const nc_conn *c) { return c->session; }
@@ -1541,6 +1647,7 @@ void nc_close(nc_conn *c) {
         c->active->c = NULL;
     }
     send_frame(c, 'X', NULL);
+    free(c->copy_body);
     drop_conn(c);
 }
 

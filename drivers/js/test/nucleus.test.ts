@@ -206,6 +206,32 @@ test("columnar batches", async () => {
   await db.close();
 });
 
+test("copy and load", async () => {
+  const db = await connect(options);
+  const t = table();
+  await db.query(`CREATE TABLE ${t} (id INT PRIMARY KEY, name TEXT DEFAULT 'none', x FLOAT, big BIGINT,
+    at TIMESTAMPTZ, n NUMERIC(8, 2), ok BOOLEAN, u UUID, tags TEXT[])`);
+  assert.equal(await db.copy(`COPY ${t} (id, name) FROM STDIN`, "1\tann\n2\t\\N\n"), 2);
+  assert.equal(await db.copy(`COPY ${t} (id, x) FROM STDIN WITH (FORMAT csv, HEADER)`, ["id,x\n3,", Buffer.from("1.5\n")]), 1);
+  await assert.rejects(db.copy(`COPY ${t} (id) FROM STDIN`, "9\n1\n"), (e: NucleusError) => e.code === "23505" && e.message.includes("line 2"));
+  const at = new Date(Date.UTC(2024, 0, 2, 3, 4));
+  const u = "0b9e1d7c-2a4b-4c5d-8e6f-7a8b9c0d1e2f";
+  assert.equal(await db.load(t, [[10, "x", 0.5, 7n, at, Decimal.parse("1.25"), true, u, ["a", null]], [11, null, null, null, null, null, null, null, null]]), 2);
+  const got = (await db.query(`SELECT name, x, big, at, n, ok, u, tags FROM ${t} WHERE id = 10`)).rows[0];
+  assert.deepEqual(got, ["x", 0.5, 7, at, Decimal.parse("1.25"), true, u, ["a", null]]);
+  // Columns as typed arrays, sent as they are; some columns only.
+  const ids = new Int32Array(50_000).map((_, i) => 100 + i);
+  const xs = new Float64Array(50_000).map((_, i) => i / 2);
+  assert.equal(await db.load(t, { id: ids, x: xs }), 50_000);
+  assert.deepEqual((await db.query(`SELECT count(*), sum(x), min(name) FROM ${t} WHERE id >= 100`)).rows, [[50_000, (49_999 * 50_000) / 4, "none"]]);
+  await assert.rejects(db.load(t, { id: [7], big: ["no"] }), (e: NucleusError) => e.message.includes('"big"'));
+  await assert.rejects(db.load(t, { id: [2 ** 40] }), (e: NucleusError) => e.message.includes("out of range"));
+  // A COPY without data, through a plain query, is refused.
+  await assert.rejects(db.query(`COPY ${t} FROM STDIN`), (e: NucleusError) => e.code === "57014");
+  assert.deepEqual((await db.query("SELECT 1")).rows, [[1]]);
+  await db.close();
+});
+
 test("authentication", async () => {
   await assert.rejects(connect({ ...options, password: "wrong" }), (e: NucleusError) => e.code === "28P01");
 });

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Bulk load (nucleus PLAN.md §M14.11): `Client.load(table, rows |
+  columns, { columns })` as columnar batches in one `COPY … FROM STDIN`;
+  `Client.copy(sql, data)` with text or CSV (a string, bytes, or an
+  (async) iterable such as a read stream), waiting while the connection
+  is full.  A plain query answers a COPY with a refusal.
 - Protocol version 7 (nucleus PLAN.md §M14.11): columnar results.
   `Client.batches(sql, params, { rows })` returns `Batches` of `Batch`es,
   each column a typed array read in place (`ColumnBatch.values`,

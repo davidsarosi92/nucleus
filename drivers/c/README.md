@@ -31,7 +31,10 @@ the next query) stops the statement.  Columnar results (protocol version
 7): `nc_batches_open(db, sql, params, n, rows, &err)`, then
 `nc_cursor_next` a batch at a time; `nc_batch_rows`, `nc_batch_data`
 (a pointer to a column's values: `int32_t *`, `double *`, …),
-`nc_batch_offsets` and `nc_batch_validity` point into the batch.
+`nc_batch_offsets` and `nc_batch_validity` point into the batch.  Bulk
+load: `nc_copy(db, "COPY t FROM STDIN", data, len, &err)`, or
+`nc_copy_start` / `nc_copy_write` (pieces of any size) / `nc_copy_end` —
+text or CSV, as the statement says.
 
 ```sh
 make                # build/libnucleus.a

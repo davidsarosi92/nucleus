@@ -16,7 +16,8 @@ results stream (protocol version 6, through the C driver):
 they arrive, a batch at a time; a `Cursor` destroyed or `close()`d early
 stops the statement.  Columnar results: `auto b = db.batches(sql);
 while (b.next()) b.values<int32_t>(0)…` (pointers into the batch;
-`text(col, row)`, `is_null(col, row)`).
+`text(col, row)`, `is_null(col, row)`).  Bulk load: `db.copy("COPY t FROM
+STDIN", data)` with a string or an `std::istream`.
 
 ```sh
 cc -std=c99 -c ../c/nucleus.c -o nucleus.o

@@ -283,6 +283,87 @@ class Conformance(unittest.TestCase):
                 self.assertEqual(pl["tx"][0], "v1")
             self.assertIsInstance(got[0]["d"], dt.date)
 
+    def test_copy_and_load(self):
+        import datetime as dt
+        with connect() as c:
+            t = table()
+            c.execute(f"CREATE TABLE {t} (id INT PRIMARY KEY, name TEXT DEFAULT 'none', score FLOAT, "
+                      "born DATE, at TIMESTAMPTZ, n NUMERIC(8, 2), ok BOOLEAN, u UUID, tags TEXT[])")
+            self.assertEqual(c.copy(f"COPY {t} (id, name) FROM STDIN", "1\tann\n2\t\\N\n"), 2)
+            self.assertEqual(c.copy(f"COPY {t} (id, score) FROM STDIN WITH (FORMAT csv, HEADER)",
+                                    iter([b"id,score\n3,", b"1.5\n"])), 1)
+            with self.assertRaises(nucleus.IntegrityError) as e:
+                c.copy(f"COPY {t} (id) FROM STDIN", b"9\n1\n")
+            self.assertIn("line 2", str(e.exception))
+            # Rows, as columnar batches.
+            u = uuid.uuid4()
+            n = c.load(t, [(10, "x", 0.5, dt.date(2024, 1, 2), dt.datetime(2024, 1, 2, 3, 4, tzinfo=dt.timezone.utc),
+                            decimal.Decimal("1.25"), True, u, ["a", None]),
+                           (11, None, None, None, None, None, None, None, None)])
+            self.assertEqual(n, 2)
+            got = c.execute(f"SELECT name, score, born, at, n, ok, u, tags FROM {t} WHERE id = 10").rows[0]
+            self.assertEqual(got, ("x", 0.5, dt.date(2024, 1, 2), dt.datetime(2024, 1, 2, 3, 4, tzinfo=dt.timezone.utc),
+                                   decimal.Decimal("1.25"), True, u, ["a", None]))
+            # A dict of lists, some columns only (the rest default).
+            self.assertEqual(c.load(t, {"id": [20, 21], "score": [1, 2]}), 2)
+            self.assertEqual(c.execute(f"SELECT name, score FROM {t} WHERE id = 21").rows, [("none", 2.0)])
+            with self.assertRaises(nucleus.DataError):
+                c.load(t, {"id": [30], "born": ["not a date"]})
+            self.assertEqual(c.execute(f"SELECT count(*) FROM {t} WHERE id = 30").rows, [(0,)])
+            # A COPY without data, through a plain query, is refused.
+            with self.assertRaises(nucleus.OperationalError):
+                c.execute(f"COPY {t} FROM STDIN")
+            self.assertEqual(c.execute("SELECT 1").rows, [(1,)])
+
+    @unittest.skipUnless(_has("numpy") and _has("pandas"), "numpy and pandas are not installed")
+    def test_load_dataframes(self):
+        import numpy as np
+        import pandas as pd
+        with connect() as c:
+            t = table()
+            c.execute(f"CREATE TABLE {t} (id BIGINT PRIMARY KEY, small SMALLINT, x FLOAT, r REAL, d DATE, "
+                      "ts TIMESTAMP, tz TIMESTAMPTZ, label TEXT, flag BOOLEAN)")
+            n = 200_000
+            ids = np.arange(n, dtype=np.int64)
+            df = pd.DataFrame({
+                "id": ids,
+                "small": (ids % 1000).astype(np.int16),
+                "x": ids * 0.5,
+                "r": (ids % 7).astype(np.float32),
+                "d": pd.Timestamp("2024-01-01") + pd.to_timedelta(ids % 365, unit="D"),
+                "ts": pd.Timestamp("2024-01-01") + pd.to_timedelta(ids, unit="s"),
+                "tz": pd.Timestamp("2024-01-01", tz="Europe/Budapest") + pd.to_timedelta(ids, unit="m"),
+                "label": ["l" + str(i % 10) for i in range(n)],
+                "flag": ids % 2 == 0,
+            })
+            df.loc[3, "x"] = np.nan          # pandas' missing value: NULL
+            df["small"] = df["small"].astype("Int16")
+            df.loc[4, "small"] = pd.NA
+            self.assertEqual(c.load(t, df), n)
+            back = c.pandas(f"SELECT * FROM {t} ORDER BY id")
+            self.assertEqual(len(back), n)
+            self.assertTrue(pd.isna(back["x"][3]) and pd.isna(back["small"][4]))
+            self.assertEqual(int(back["small"][1999]), 999)
+            self.assertEqual(float(back["x"][10]), 5.0)
+            self.assertEqual(str(back["d"][1].date() if hasattr(back["d"][1], "date") else back["d"][1]), "2024-01-02")
+            self.assertEqual(str(pd.Timestamp(back["ts"][61])), "2024-01-01 00:01:01")
+            # 2024-01-01 00:00 in Budapest is 2023-12-31 23:00 UTC.
+            self.assertEqual(pd.Timestamp(back["tz"][0]).tz_convert("UTC").strftime("%Y-%m-%d %H:%M"), "2023-12-31 23:00")
+            self.assertEqual(back["label"][12], "l2")
+            self.assertEqual(bool(back["flag"][2]), True)
+            # numpy arrays (a masked one for NULLs) in a dict.
+            t2 = table()
+            c.execute(f"CREATE TABLE {t2} (id INT, v FLOAT)")
+            v = np.ma.masked_array(np.arange(5, dtype=float), mask=[0, 1, 0, 0, 0])
+            self.assertEqual(c.load(t2, {"id": np.arange(5, dtype=np.int32), "v": v}), 5)
+            self.assertEqual(c.execute(f"SELECT count(v), sum(v) FROM {t2}").rows, [(4, 9.0)])
+            with self.assertRaises(nucleus.DataError):
+                c.load(t2, {"id": np.array([2**40]), "v": np.array([1.0])})
+            if _has("pyarrow"):
+                import pyarrow as pa
+                self.assertEqual(c.load(t2, pa.table({"id": pa.array([7, None], pa.int32()), "v": [1.5, 2.5]})), 2)
+                self.assertEqual(c.execute(f"SELECT count(*), count(id) FROM {t2} WHERE v > 1").rows, [(5, 4)])
+
     def test_authentication(self):
         with self.assertRaises(nucleus.OperationalError) as e:
             connect(password="wrong")
