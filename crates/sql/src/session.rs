@@ -1200,6 +1200,22 @@ pub fn execute(
     params: &[Value],
     sink: &mut dyn Sink,
 ) -> Result<Output> {
+    let out = execute_statement(txn, reg, stmt, params, sink);
+    // The tables it wrote: their storages finish (a merge of recent
+    // writes) — unless it failed, and its writes go with it.
+    let done = crate::storage::statement_done(txn, out.is_ok());
+    let out = out?;
+    done?;
+    Ok(out)
+}
+
+fn execute_statement(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    stmt: &Statement,
+    params: &[Value],
+    sink: &mut dyn Sink,
+) -> Result<Output> {
     crate::privileges::authorize_ddl(&*txn, reg, stmt)?;
     Ok(match stmt {
         Statement::Query(q) => {

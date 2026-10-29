@@ -41,7 +41,8 @@ past their memory spill to disk, and [`docs/benchmarks.md`](docs/benchmarks.md)
 measures it all against PostgreSQL.  Analytics is under way (§M14.20):
 scans, filters and aggregates run a batch at a time through kernels
 compiled per CPU (AVX2, AVX-512, NEON) and on every core, with the
-results of a single row-at-a-time pass.  Next is the rest of the developer
+results of a single row-at-a-time pass; a table can be stored as
+compressed column segments (`WITH (storage = column)`).  Next is the rest of the developer
 platform (§M14.12–§M14.24: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, …), then
 the document model (§F2).  See

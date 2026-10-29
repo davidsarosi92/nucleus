@@ -71,7 +71,9 @@ bool_and bool_or` (with `DISTINCT`, and `ORDER BY` inside the call:
 result more memory before it spills to disk (default 64MB).  Scans,
 filters and aggregates run in batches (`batch_size`, default 1024; 0 runs
 row by row) and on all CPUs (`parallel_workers`, default 0 = automatic; 1
-= one thread) — same results either way.
+= one thread) — same results either way.  For analytics tables (many
+rows, queries reading a few columns) `CREATE TABLE … WITH (storage =
+column)` stores them as compressed column segments; same SQL.
 
 **Transactions:** every statement is its own transaction unless in `BEGIN …
 COMMIT | ROLLBACK`.  Snapshot isolation (`SERIALIZABLE` on request).  On

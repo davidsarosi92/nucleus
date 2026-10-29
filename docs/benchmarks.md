@@ -61,6 +61,13 @@ writes reads the old versions too, until vacuum.  Sorts and joins still
 run a row at a time on one thread; deletes pay for a lookup per row in
 the engine's conflict and garbage checks.
 
+**A columnar table** (§M14.20 V7), the same million rows in `WITH
+(storage = column)` (loaded by `INSERT … SELECT` from the row table in
+4.0 s; its columns 32 MB): `sum` 2.0 ms (one thread 12.8 ms; the row
+table 22 / 81 ms), the filtered count 2.4 ms, the 1000-group `GROUP BY`
+19 ms, a read by key 0.3–1.7 ms (0.1 ms).  Not yet in the suite run
+against PostgreSQL.
+
 Earlier runs (at `b03c130`, §M14.11: scans 15–30× slower; after V2:
 5–6×) are in the git history of this file.
 

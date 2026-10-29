@@ -63,6 +63,16 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
     ),
     ("storages", &[("name", T)]),
     (
+        "segments",
+        &[
+            ("table_name", T),
+            ("segment", T),
+            ("rows", I),
+            ("deleted", I),
+            ("bytes", I),
+        ],
+    ),
+    (
         "policies",
         &[
             ("table_name", T),
@@ -436,6 +446,22 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
         "storages" => {
             for name in crate::storage::names() {
                 out.push(vec![text(name)]);
+            }
+        }
+        "segments" => {
+            for t in tables
+                .iter()
+                .filter(|t| t.storage == crate::column_store::COLUMN)
+            {
+                for (id, rows, gone, bytes) in crate::column_store::segment_info(txn, t)? {
+                    out.push(vec![
+                        text(t.name.clone()),
+                        text(format!("{id:016x}")),
+                        Value::Int(rows as i64),
+                        Value::Int(gone as i64),
+                        Value::Int(bytes as i64),
+                    ]);
+                }
             }
         }
         "roles" => {

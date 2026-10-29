@@ -1,8 +1,8 @@
 //! Table storage as a module (PLAN.md §M14.20 V6, principle 12): how a
 //! table's rows are kept is one implementation of [`TableStorage`] among
 //! those registered — `row` built in (a row's values encoded together
-//! under its key, [`crate::large`]'s values out of line), others added by
-//! modules the same way ([`crate::ext::Registry::add_storage`]).  A table
+//! under its key, [`crate::large`]'s values out of line) and `column`
+//! ([`crate::column_store`]) built in, others added by modules the same way ([`crate::ext::Registry::add_storage`]).  A table
 //! names its storage (`CREATE TABLE … WITH (storage = name)`,
 //! [`crate::catalog::Table::storage`]).
 //!
@@ -45,6 +45,21 @@ pub struct Scan<'a> {
     pub wanted: Option<&'a [bool]>,
     /// Reads checked at commit (foreign key checks).
     pub validated: bool,
+    /// What the rows read must satisfy, as far as the plan knows (a
+    /// storage may skip what these rule out; the rows are filtered above
+    /// it anyway).
+    pub bounds: Vec<ColumnBound>,
+}
+
+/// A range a column's values must lie in (`NULL` never does).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColumnBound {
+    /// The column.
+    pub column: usize,
+    /// The least value.
+    pub lower: Bound<crate::types::Value>,
+    /// The greatest.
+    pub upper: Bound<crate::types::Value>,
 }
 
 /// Rows with their row keys, ascending.
@@ -104,6 +119,34 @@ pub trait TableStorage: Send + Sync {
         Ok(Box::new(RowsAsBatches(self.rows(scan)?)))
     }
 
+    /// Up to `parts - 1` row keys inside `[start, end)` that cut it into
+    /// parts of about equal size, ascending (parallel scans).  By default
+    /// the KV's split points of the range.
+    fn split_points(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        start: &[u8],
+        end: Option<&[u8]>,
+        parts: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        let _ = t;
+        Ok(txn.split_points(start, end, parts)?)
+    }
+
+    /// Called after a statement wrote rows of `t` (a storage that keeps
+    /// recent writes apart may merge them in).  By default nothing.
+    fn after_writes(&self, txn: &mut dyn KvTxn, t: &Table) -> Result<()> {
+        let _ = (txn, t);
+        Ok(())
+    }
+
+    /// Called after a statement that wrote rows of `t` failed (its writes
+    /// are rolled back with it).  By default nothing.
+    fn after_failure(&self, t: &Table) {
+        let _ = t;
+    }
+
     /// Every row, checked as stored, problems noted in `problems`
     /// (`crate::check`).  By default, its rows.
     fn check(
@@ -122,6 +165,7 @@ pub trait TableStorage: Send + Sync {
             end,
             wanted: None,
             validated: false,
+            bounds: Vec::new(),
         };
         for r in self.rows(scan)? {
             match r {
@@ -149,13 +193,50 @@ impl BatchSource for RowsAsBatches<'_> {
     }
 }
 
+// ------------------------------------------------------------- statements
+
+thread_local! {
+    /// The tables the current statement wrote rows of.
+    static WRITTEN: std::cell::RefCell<HashMap<u32, Table>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Notes that the current statement wrote rows of `t`.
+pub fn written(t: &Table) {
+    WRITTEN.with(|w| {
+        w.borrow_mut().entry(t.id).or_insert_with(|| t.clone());
+    });
+}
+
+/// After a statement: each table it wrote, its storage's
+/// [`TableStorage::after_writes`] — when it went through (`ok`).
+pub fn statement_done(txn: &mut dyn KvTxn, ok: bool) -> Result<()> {
+    let tables: Vec<Table> = WRITTEN.with(|w| w.borrow_mut().drain().map(|(_, t)| t).collect());
+    if !ok {
+        for t in &tables {
+            if let Ok(s) = of(t) {
+                s.after_failure(t);
+            }
+        }
+        return Ok(());
+    }
+    for t in tables {
+        of(&t)?.after_writes(txn, &t)?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- registry
 
 fn registry() -> &'static RwLock<HashMap<String, Arc<dyn TableStorage>>> {
     static STORAGES: OnceLock<RwLock<HashMap<String, Arc<dyn TableStorage>>>> = OnceLock::new();
     STORAGES.get_or_init(|| {
         let row: Arc<dyn TableStorage> = row_storage();
-        RwLock::new(HashMap::from([(ROW.to_string(), row)]))
+        let column: Arc<dyn TableStorage> = Arc::new(crate::column_store::ColumnStorage);
+        RwLock::new(HashMap::from([
+            (ROW.to_string(), row),
+            (crate::column_store::COLUMN.to_string(), column),
+        ]))
     })
 }
 
@@ -167,8 +248,11 @@ fn row_storage() -> Arc<dyn TableStorage> {
 /// Makes `s` available to tables by its name (a module's, replacing one
 /// of the name registered before — the same module in another registry).
 pub fn register(s: Arc<dyn TableStorage>) -> Result<()> {
-    if s.name() == ROW {
-        return Err(Error::invalid_parameter("the row storage is built in"));
+    if s.name() == ROW || s.name() == crate::column_store::COLUMN {
+        return Err(Error::invalid_parameter(format!(
+            "the {} storage is built in",
+            s.name()
+        )));
     }
     registry()
         .write()

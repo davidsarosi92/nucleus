@@ -41,3 +41,45 @@ CREATE TABLE st_c (id INT PRIMARY KEY) WITH (storage = nowhere)
 # nucleus-only
 statement error 22023
 CREATE TABLE st_c (id INT PRIMARY KEY) WITH (fillfactor = 70)
+
+# Columnar storage: the same SQL; segments in nc_catalog.segments.
+
+# nucleus-only
+statement ok
+CREATE TABLE st_col (id INT PRIMARY KEY, g INT, name TEXT) WITH (storage = column)
+
+# nucleus-only
+statement ok
+INSERT INTO st_col SELECT i, i % 3, 'n' || i FROM generate_series(1, 5000) i
+
+# nucleus-only
+statement ok
+UPDATE st_col SET name = 'changed' WHERE id % 1000 = 0
+
+# nucleus-only
+statement ok
+DELETE FROM st_col WHERE id > 4990
+
+# nucleus-only
+query IIT
+SELECT count(*), sum(g), max(name) FROM st_col
+----
+4990 4990 n999
+
+# nucleus-only
+query IT
+SELECT id, name FROM st_col WHERE id IN (1000, 2000, 4990) ORDER BY id
+----
+1000 changed
+2000 changed
+4990 n4990
+
+# nucleus-only
+query IB
+SELECT count(*), sum(rows) >= 4990 FROM nc_catalog.segments WHERE table_name = 'st_col'
+----
+1 true
+
+# nucleus-only
+statement error 23505
+INSERT INTO st_col VALUES (5, 0, 'again')

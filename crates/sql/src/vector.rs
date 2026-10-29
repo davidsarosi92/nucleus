@@ -135,6 +135,30 @@ impl Vector {
         }
     }
 
+    /// Rows `range` of it, as a vector of their own.
+    pub fn slice(&self, range: std::ops::Range<usize>) -> Vector {
+        let nulls = |n: &Option<Vec<bool>>| {
+            n.as_ref()
+                .and_then(|n| nulls_from(n[range.clone()].to_vec()))
+        };
+        match self {
+            Vector::Const(v) => Vector::Const(v.clone()),
+            Vector::Int(d, n) => Vector::Int(d[range.clone()].to_vec(), nulls(n)),
+            Vector::Float(d, n) => Vector::Float(d[range.clone()].to_vec(), nulls(n)),
+            Vector::Bool(d, n) => Vector::Bool(d[range.clone()].to_vec(), nulls(n)),
+            Vector::Time(k, d, n) => Vector::Time(*k, d[range.clone()].to_vec(), nulls(n)),
+            Vector::Text(o, b, n) => {
+                let (lo, hi) = (o[range.start] as usize, o[range.end] as usize);
+                let offsets = o[range.start..=range.end]
+                    .iter()
+                    .map(|&x| x - lo as u32)
+                    .collect();
+                Vector::Text(offsets, b[lo..hi].to_vec(), nulls(n))
+            }
+            Vector::Values(v) => Vector::Values(v[range].to_vec()),
+        }
+    }
+
     /// Which rows are `NULL`, for a typed vector (`None`: none, or not
     /// typed).
     pub fn nulls(&self) -> Option<&[bool]> {
@@ -1210,6 +1234,64 @@ fn chain(plan: &Plan) -> Option<(&Plan, Vec<(Step<'_>, &Plan)>)> {
     }
 }
 
+/// The column ranges the filters right above a scan imply (before any
+/// projection): conjuncts `column op constant`.
+fn scan_bounds(steps: &[(Step, &Plan)], ctx: &Ctx) -> Vec<crate::storage::ColumnBound> {
+    let mut out = Vec::new();
+    for (step, _) in steps {
+        match step {
+            Step::Filter(p) => bounds_of(p, ctx, &mut out),
+            Step::Project(_) => break,
+        }
+    }
+    out
+}
+
+fn bounds_of(e: &Expr, ctx: &Ctx, out: &mut Vec<crate::storage::ColumnBound>) {
+    use std::ops::Bound::*;
+    let constant = |e: &Expr| match e {
+        Expr::Literal(v) => Some(v.clone()),
+        Expr::Param(i) => ctx.params.get(*i).cloned(),
+        _ => None,
+    };
+    match e {
+        Expr::Binary(BinaryOp::And, l, r) => {
+            bounds_of(l, ctx, out);
+            bounds_of(r, ctx, out);
+        }
+        Expr::Binary(op, l, r) => {
+            let (col, v, op) = match (&**l, &**r) {
+                (Expr::Column(c), x) => match constant(x) {
+                    Some(v) => (*c, v, *op),
+                    None => return,
+                },
+                (x, Expr::Column(c)) => match constant(x) {
+                    Some(v) => (*c, v, flipped(*op)),
+                    None => return,
+                },
+                _ => return,
+            };
+            if v.is_null() {
+                return;
+            }
+            let (lower, upper) = match op {
+                BinaryOp::Eq => (Included(v.clone()), Included(v)),
+                BinaryOp::Lt => (Unbounded, Excluded(v)),
+                BinaryOp::LtEq => (Unbounded, Included(v)),
+                BinaryOp::Gt => (Excluded(v), Unbounded),
+                BinaryOp::GtEq => (Included(v), Unbounded),
+                _ => return,
+            };
+            out.push(crate::storage::ColumnBound {
+                column: col,
+                lower,
+                upper,
+            });
+        }
+        _ => {}
+    }
+}
+
 impl<'a> Pipeline<'a> {
     /// A pipeline for `plan` — when it is a chain that can run so, and
     /// vectorized execution is on.  `rows`: whether its output becomes
@@ -1251,6 +1333,7 @@ impl<'a> Pipeline<'a> {
                     end,
                     wanted: wanted.map(Vec::as_slice),
                     validated: ctx.validated,
+                    bounds: scan_bounds(&steps, ctx),
                 })?)
             }
         };
@@ -1869,9 +1952,13 @@ impl<'a> Morsels<'a> {
         else {
             return Ok(None);
         };
-        let splits = ctx
-            .txn
-            .split_points(&start, end.as_deref(), workers * per_worker)?;
+        let splits = crate::storage::of(table)?.split_points(
+            ctx.txn,
+            table,
+            &start,
+            end.as_deref(),
+            workers * per_worker,
+        )?;
         if splits.is_empty() {
             return Ok(None);
         }

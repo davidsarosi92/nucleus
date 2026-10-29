@@ -607,6 +607,7 @@ pub fn insert_rows(txn: &mut dyn KvTxn, w: &Writer, rows: &[Row]) -> Result<()> 
     for row in rows {
         insert_row(txn, w, row)?;
     }
+    crate::storage::written(&w.table);
     crate::fk::check_children(&*txn, &w.table, rows.iter().map(|r| (None, r)))
 }
 
@@ -648,6 +649,7 @@ pub fn update_rows(
             txn.put(&nk, &new_pk)?;
         }
     }
+    crate::storage::written(t);
     crate::fk::check_children(&*txn, t, changes.iter().map(|(_, o, n)| (Some(o), n)))?;
     if !t.referenced_by.is_empty() {
         let changed: Vec<(Row, Option<Row>)> = changes
@@ -676,6 +678,7 @@ pub fn delete_rows(
             txn.delete(&k)?;
         }
     }
+    crate::storage::written(t);
     if !t.referenced_by.is_empty() {
         let removed: Vec<(Row, Option<Row>)> =
             rows.iter().map(|(_, r)| (r.clone(), None)).collect();
@@ -782,6 +785,7 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
         end: primary_end,
         wanted: None,
         validated: false,
+        bounds: Vec::new(),
     })? {
         let (k, row) = r?;
         rows.push(exec::keyed(k, row))?;
@@ -801,6 +805,7 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
             txn.put(&k, &pk)?;
         }
     }
+    crate::storage::written(table);
     Ok(())
 }
 
@@ -842,6 +847,7 @@ pub fn replace_rows(
             txn.put(&k, &pk)?;
         }
     }
+    crate::storage::written(table);
     Ok(())
 }
 
@@ -864,6 +870,7 @@ pub fn rewrite_rows(
         filled[last] = fill.clone();
         storage.write(txn, table, &key, &filled, Some(&row))?;
     }
+    crate::storage::written(table);
     Ok(())
 }
 

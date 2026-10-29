@@ -1427,7 +1427,15 @@ key, batches, the integrity check's part; a process-wide registry modules
 add to, `row` behind it; `CREATE TABLE … WITH (storage = …)`,
 `nc_catalog.tables.storage`; a module's storage tested through every
 path); V7 columnar storage
-⬜ (segments, delta store, visibility map, min / max); V8 storage per
+✅ (`column`: segments of up to 32 768 rows with disjoint key ranges, a KV
+value per column — bit packing, runs, dictionaries —, content-addressed so
+decoded columns cache; a delta store in the row format; deletion markers
+per row validated against merges; a statement's inserts and updates
+gathered and written to segments when many; scans of only the wanted
+columns, segments skipped by least / greatest; `nc_catalog.segments`; the
+same queries on `row` and `column` tables compared, a delete and a merge of
+one segment shown to conflict; a million-row `sum` 22 → 2 ms.  Left: a
+merge in the background, and segments compressed by LZ too); V8 storage per
 table and per column, converted online ⬜; V9 partitioning ⬜ (range,
 list, hash; pruning; attach / detach; storage per partition; the age
 policy); V10 results columnar end to end, TPC-H and ClickBench against
@@ -2132,6 +2140,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-29** — §M14.20 V7: columnar storage — `WITH (storage =
+  column)`, segments, delta store, markers, merges, skipping by least /
+  greatest values.  A million-row `sum` 22 → 2 ms.
 - **2026-10-29** — §M14.20 V6: table storage as a module — the
   `TableStorage` trait and registry, `row` behind it, `WITH (storage =
   …)`.

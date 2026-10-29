@@ -1273,6 +1273,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.schemas` | `name`, `description` (the session registry's schemas) |
 | `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows`, `owner`, `row_security`, `force_row_security`, `comment`, `storage` (§8.15) |
 | `nc_catalog.storages` | `name` (the table storages registered, §8.15) |
+| `nc_catalog.segments` | `table_name`, `segment` (id, hex), `rows`, `deleted`, `bytes` (encoded) — each segment of each `column` table (§8.15) |
 | `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key` |
 | `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix`, `orderings` (per column, the taught ordering it is indexed in, or NULL) |
 | `nc_catalog.constraints` | `table_id`, `table_name`, `name`, `kind`, `definition` |
@@ -1562,7 +1563,7 @@ constants).  Most rows saved first.  Joins do not give candidates yet
 ### 8.15 Table storage (`storage`, §M14.20)
 
 How a table's rows are kept is a module (principle 12): an implementation
-of `TableStorage` among those registered — `row` built in, others added
+of `TableStorage` among those registered — `row` and `column` built in, others added
 through `Registry::add_storage` (process-wide, so every database's tables
 may name them; `nc_catalog.storages` lists them).  A table names its
 storage: `CREATE TABLE … WITH (storage = name)` (`row` by default; an
@@ -1585,7 +1586,46 @@ table's data prefix, so dropping or truncating a table removes it.
 
 `row` encodes a row's values together under its key (§8.1), a long value
 in chunks under the table's index `u32::MAX` (§M14.26); its batches decode
-the encoding straight into vectors (§8.5).  `crates/sql/tests/storage.rs`
+the encoding straight into vectors (§8.5).
+
+`column` (`column_store`, `segment`) keeps rows as column segments: up to
+32 768 rows with consecutive keys (fewer when wide), one KV value per
+column and one for the row keys, segments covering disjoint key ranges in
+key order, listed in a directory keyed by each one's last key (index
+`u32::MAX - 3`; with its first key, rows, and each column's least and
+greatest values and `NULL`s).  Columns are encoded by what they hold:
+integers, dates, times and timestamps by frame of reference and bit
+packing, or runs; doubles as they are, booleans a bit each; text as a
+dictionary and bit-packed codes when values repeat, else Arrow's offsets
+and bytes; anything else value by value; `NULL`s a bitmap.  A segment's
+id is a hash of its contents, so it never changes and its decoded columns
+are cached by id.  A scan reads only the wanted columns of the segments
+its range overlaps, skips a segment the filters right above it rule out
+(column-constant comparisons against the segment's least and greatest
+values), and hands each run of a segment's rows to the vectorized executor
+as vectors.  *Writes:* rows a statement inserts — and the new versions of
+segment rows it updates — are gathered until it ends (4 segments' worth
+at most, then written at once); then, 4096 or more go to segments
+directly, fewer to a *delta store* in the row storage's format under the
+same keys.  An update or delete of a segment row marks it deleted (a key
+per row, index `u32::MAX - 2`: concurrent deletes do not conflict).  A
+merge rewrites the segments the incoming rows' key range overlaps —
+deleted rows dropped, delta rows moved — so appends make new segments
+and updates rewrite the segments they touch.  Scans merge the segments'
+rows with the delta store's in key order; a key lookup checks the delta
+store, then the segment whose range holds the key.  MVCC and crash safety
+are the KV's: segments, markers and delta rows are versioned keys written
+in their transactions; a marker validates its segment's directory entry
+and a merge the markers it read, so a delete and a merge of one segment
+conflict (`40001`) rather than lose the delete
+(`crates/sql/tests/column.rs`).  The same SQL runs on both storages with
+the same results: the tests run loads, updates, key changes and deletes on
+a `row` and a `column` table and compare every query, a row and a batch
+at a time and in parallel, and the integrity check.  On a million rows
+(`docs/benchmarks.md`): a `sum` 22 → 2 ms (one thread 81 → 13 ms), a
+filtered count 23 → 2.4 ms, a 1000-group `GROUP BY` 35 → 19 ms, the file
+of its columns 32 MB against 61; key lookups 0.1 → 0.3–1.7 ms.  The delta
+store's deleted rows stay as versions until `vacuum`.  `crates/sql/tests/storage.rs`
 registers a module's storage and runs writes, unique and foreign key
 checks, index lookups, scans a row and a batch at a time, in parallel,
 and the integrity check through it, against `row` tables.
@@ -2236,6 +2276,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-29 — §M14.20 columnar storage (V7):** `WITH (storage =
+  column)`: column segments (bit packing, runs, dictionaries), a delta
+  store, deletion markers, merges; scans of only the wanted columns,
+  segments skipped by their least and greatest values;
+  `nc_catalog.segments`.  A million-row `sum` 22 → 2 ms.
 - **2026-10-29 — §M14.20 table storage as a module (V6):** the
   `TableStorage` trait and registry (`Registry::add_storage`), `row`
   behind it; `CREATE TABLE … WITH (storage = name)`,
