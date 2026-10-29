@@ -82,7 +82,7 @@ const DATA: u8 = 0x01;
 /// before, `text`'s 4, and still read as text), `inet` and `cidr` (16, 17);
 /// version 7 an owner, version 8 row-level security, version 9 comments
 /// on the table and its columns; older versions still read.
-const TABLE_VERSION: u8 = 10;
+const TABLE_VERSION: u8 = 11;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -292,6 +292,11 @@ pub struct Table {
     /// How its rows are stored: a registered [`crate::storage::TableStorage`]
     /// (`row` by default).
     pub storage: String,
+    /// `row, column`: the columns the column copy holds (empty: all).
+    pub columnar: Vec<usize>,
+    /// `row, column`: which copy is being built, if one is
+    /// ([`crate::column_store::CopyState`]).
+    pub copy: crate::column_store::CopyState,
 }
 
 impl Table {
@@ -380,6 +385,11 @@ impl Table {
             w.opt_str(c.comment.as_deref());
         }
         w.str(&self.storage);
+        w.u32(self.columnar.len() as u32);
+        for &c in &self.columnar {
+            w.u32(c as u32);
+        }
+        w.u8(self.copy.tag());
         w.0
     }
 
@@ -494,6 +504,13 @@ impl Table {
         } else {
             crate::storage::ROW.to_string()
         };
+        let (mut columnar, mut copy) = (Vec::new(), crate::column_store::CopyState::Ready);
+        if version >= 11 {
+            for _ in 0..r.u32()? {
+                columnar.push(r.u32()? as usize);
+            }
+            copy = crate::column_store::CopyState::of_tag(r.u8()?)?;
+        }
         Ok(Self {
             id,
             name,
@@ -509,6 +526,8 @@ impl Table {
             force_row_security: rls & 2 != 0,
             comment,
             storage,
+            columnar,
+            copy,
         })
     }
 }
@@ -602,6 +621,15 @@ fn id_key(prefix: &[u8], id: u32) -> Vec<u8> {
     let mut k = prefix.to_vec();
     k.extend_from_slice(&id.to_be_bytes());
     k
+}
+
+/// Reads table `name`'s definition validated: the transaction's commit
+/// fails if it changed since its snapshot — what a write does, so it does
+/// not commit over a definition changed under it (a storage conversion's
+/// switch, §M14.20).
+pub fn validate_table(txn: &dyn KvTxn, name: &str) -> Result<()> {
+    txn.get_validated(&table_key(name))?;
+    Ok(())
 }
 
 /// The table named `name`, if it exists.
@@ -1182,7 +1210,9 @@ mod tests {
             row_security: true,
             force_row_security: false,
             comment: Some("everyone we know".into()),
-            storage: "row".into(),
+            storage: "row,column".into(),
+            columnar: vec![0, 2],
+            copy: crate::column_store::CopyState::BuildingColumns,
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));

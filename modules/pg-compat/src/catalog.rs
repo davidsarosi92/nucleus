@@ -554,6 +554,8 @@ fn def_table(k: usize) -> Table {
         force_row_security: false,
         comment: None,
         storage: "row".into(),
+        columnar: Vec::new(),
+        copy: Default::default(),
     }
 }
 

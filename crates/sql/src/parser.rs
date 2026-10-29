@@ -1783,6 +1783,24 @@ impl<'a> Parser<'a> {
                 });
             }
         }
+        if self.eat_kws(&["set", "storage"]) {
+            let mut kinds = vec![self.ident()?];
+            while self.eat_op(",") {
+                kinds.push(self.ident()?);
+            }
+            let columns = if self.eat_op("(") {
+                let cols = self.name_list()?;
+                self.expect_op(")")?;
+                Some(cols)
+            } else {
+                None
+            };
+            return Ok(Statement::SetStorage {
+                table,
+                kinds,
+                columns,
+            });
+        }
         if self.eat_kws(&["drop", "constraint"]) {
             let if_exists = self.eat_kws(&["if", "exists"]);
             let name = self.ident()?;

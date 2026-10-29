@@ -73,7 +73,10 @@ filters and aggregates run in batches (`batch_size`, default 1024; 0 runs
 row by row) and on all CPUs (`parallel_workers`, default 0 = automatic; 1
 = one thread) — same results either way.  For analytics tables (many
 rows, queries reading a few columns) `CREATE TABLE … WITH (storage =
-column)` stores them as compressed column segments; same SQL.
+column)` stores them as compressed column segments; same SQL.  `ALTER TABLE
+t SET STORAGE row, column` keeps both (fast key lookups and fast scans),
+`SET STORAGE column (a, b)` a column copy of some columns; conversions run
+online.
 
 **Transactions:** every statement is its own transaction unless in `BEGIN …
 COMMIT | ROLLBACK`.  Snapshot isolation (`SERIALIZABLE` on request).  On

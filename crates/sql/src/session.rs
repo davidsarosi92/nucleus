@@ -701,6 +701,30 @@ impl Session {
                 }
                 Ok(Output::Command("ROLLBACK".into()))
             }
+            Statement::SetStorage {
+                table,
+                kinds,
+                columns,
+            } => {
+                // In transactions of its own, a part at a time, while
+                // others use the table.
+                if self.block.is_some() {
+                    return Err(Error::active_txn(
+                        "ALTER TABLE … SET STORAGE cannot run inside a transaction block",
+                    ));
+                }
+                let target = {
+                    let txn = self.kv.begin(TxnOptions::read_only())?;
+                    crate::privileges::authorize_ddl(&*txn, &self.registry, stmt)?;
+                    let t = catalog::table(&*txn, table)?;
+                    crate::convert::target(&t, kinds, columns.as_deref())?
+                };
+                let now = crate::datetime::from_system(self.kv.wall_clock());
+                crate::datetime::with_now(now, &self.kv, || {
+                    crate::convert::set_storage(&self.kv, table, target)
+                })?;
+                Ok(Output::Command("ALTER TABLE".into()))
+            }
             Statement::SetTransaction(mode) => {
                 match &mut self.block {
                     Some(b) if b.txn.is_some() => {
@@ -1218,6 +1242,11 @@ fn execute_statement(
 ) -> Result<Output> {
     crate::privileges::authorize_ddl(&*txn, reg, stmt)?;
     Ok(match stmt {
+        Statement::SetStorage { .. } => {
+            return Err(Error::active_txn(
+                "ALTER TABLE … SET STORAGE runs as a statement of its own",
+            ));
+        }
         Statement::Query(q) => {
             let ro: &dyn KvTxn = &*txn;
             let mut binder = Binder::new(ro, reg).checked();
@@ -1984,6 +2013,8 @@ fn create_table(
         force_row_security: false,
         comment: None,
         storage: storage.to_string(),
+        columnar: Vec::new(),
+        copy: crate::column_store::CopyState::Ready,
     };
     for (n, cols) in uniques {
         if catalog::find_index(&*txn, &n)?.is_some() {

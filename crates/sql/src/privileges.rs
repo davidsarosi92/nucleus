@@ -879,6 +879,7 @@ pub fn authorize_ddl(
         Statement::CreateEnum { .. } => c.require(txn, Kind::Schema, "public", CREATE, None)?,
         Statement::CreateIndex { table, .. }
         | Statement::AlterColumnType { table, .. }
+        | Statement::SetStorage { table, .. }
         | Statement::DropConstraint { table, .. }
         | Statement::SetRowSecurity { table, .. }
         | Statement::DropPolicy { table, .. }

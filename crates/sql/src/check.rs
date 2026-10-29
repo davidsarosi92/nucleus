@@ -56,7 +56,7 @@ pub fn check(txn: &dyn KvTxn, reg: &crate::ext::Registry) -> Result<Vec<String>>
     let known: BTreeMap<u32, BTreeSet<u32>> = tables
         .iter()
         .map(|t| {
-            let own = crate::storage::of(t).map(|s| s.index_ids().to_vec());
+            let own = crate::storage::of(t).map(|s| s.index_ids(t));
             let ids = own
                 .unwrap_or_else(|_| vec![0])
                 .into_iter()
@@ -163,11 +163,22 @@ pub(crate) fn row_storage(
     t: &Table,
     problems: &mut Vec<String>,
 ) -> Result<Vec<(Vec<u8>, Row)>> {
+    rows_at(txn, t, 0, problems)
+}
+
+/// [`row_storage`] for rows in its format under index `index` (a column
+/// table's delta store, §M14.20).
+pub(crate) fn rows_at(
+    txn: &dyn KvTxn,
+    t: &Table,
+    index: u32,
+    problems: &mut Vec<String>,
+) -> Result<Vec<(Vec<u8>, Row)>> {
     let mut rows = Vec::new();
     // Values stored out of line: the chunks' common prefix, and length.
     let large = t.index_prefix(crate::large::LARGE_INDEX);
     let mut out_of_line_values: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
-    for (key, value) in scan(txn, &t.index_prefix(0))? {
+    for (key, value) in scan(txn, &t.index_prefix(index))? {
         if let Ok(refs) = out_of_line(&value) {
             for (c, len) in refs {
                 let mut p = large.clone();

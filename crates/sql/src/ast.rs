@@ -42,6 +42,16 @@ pub enum Statement {
         /// `IF NOT EXISTS`.
         if_not_exists: bool,
     },
+    /// `ALTER TABLE t SET STORAGE row | column | row, column [(columns)]`:
+    /// how its rows are stored, converted online.
+    SetStorage {
+        /// Table.
+        table: String,
+        /// `row`, `column`, or both.
+        kinds: Vec<String>,
+        /// The columns a column copy holds (`None`: all).
+        columns: Option<Vec<String>>,
+    },
     /// `ALTER TABLE t ALTER [COLUMN] c [SET DATA] TYPE type [USING expr]`.
     AlterColumnType {
         /// Table.

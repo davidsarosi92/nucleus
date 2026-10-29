@@ -140,10 +140,10 @@ fn column_tables_agree_with_row_tables() {
 }
 
 /// A delete of a segment's row and a merge that rewrites the segment, in
-/// transactions at once: one of them fails (and can run again) — the
-/// delete is never lost.
+/// transactions at once, in either order: both commit (a marker is kept by
+/// the row, so the merge does not conflict with it) and the delete holds.
 #[test]
-fn a_delete_and_a_merge_of_one_segment_conflict() {
+fn a_delete_and_a_merge_of_one_segment_both_hold() {
     for delete_first in [true, false] {
         let db: Arc<dyn Kv> = Arc::new(
             Database::open_on(
@@ -175,14 +175,13 @@ fn a_delete_and_a_merge_of_one_segment_conflict() {
             (&mut merger, &mut deleter)
         };
         first.execute("COMMIT").unwrap();
-        let err = second.execute("COMMIT").unwrap_err();
-        assert_eq!(err.code, "40001", "{err}");
-        if !delete_first {
-            // The delete runs again, over the merged segments.
-            deleter.execute("DELETE FROM c WHERE id = 100").unwrap();
-        }
-        let left = outcome(&mut setup, "SELECT count(*) FROM c WHERE id = 100").unwrap();
-        assert_eq!(left, [["0"]], "delete first: {delete_first}");
+        second.execute("COMMIT").unwrap();
+        let left = outcome(
+            &mut setup,
+            "SELECT count(*), sum(CASE WHEN id = 100 THEN 1 ELSE 0 END) FROM c",
+        )
+        .unwrap();
+        assert_eq!(left, [["10999", "0"]], "delete first: {delete_first}");
         let txn = db.begin(TxnOptions::read_only()).unwrap();
         assert_eq!(
             nucleus_sql::check::check(&*txn, setup.registry()).unwrap(),

@@ -42,7 +42,8 @@ fn chunks_prefix(t: &Table, pk: &[u8], col: usize) -> Vec<u8> {
     k
 }
 
-fn remove_chunks(txn: &mut dyn KvTxn, t: &Table, pk: &[u8], col: usize) -> Result<()> {
+/// Removes the chunks of row `pk`'s column `col` stored out of line.
+pub(crate) fn remove_chunks(txn: &mut dyn KvTxn, t: &Table, pk: &[u8], col: usize) -> Result<()> {
     let p = chunks_prefix(t, pk, col);
     let end = prefix_end(&p).expect("chunk prefix");
     catalog::delete_range(txn, &p, Some(&end))?;

@@ -1563,7 +1563,7 @@ constants).  Most rows saved first.  Joins do not give candidates yet
 ### 8.15 Table storage (`storage`, §M14.20)
 
 How a table's rows are kept is a module (principle 12): an implementation
-of `TableStorage` among those registered — `row` and `column` built in, others added
+of `TableStorage` among those registered — `row`, `column` and `row,column` built in, others added
 through `Registry::add_storage` (process-wide, so every database's tables
 may name them; `nc_catalog.storages` lists them).  A table names its
 storage: `CREATE TABLE … WITH (storage = name)` (`row` by default; an
@@ -1597,8 +1597,9 @@ greatest values and `NULL`s).  Columns are encoded by what they hold:
 integers, dates, times and timestamps by frame of reference and bit
 packing, or runs; doubles as they are, booleans a bit each; text as a
 dictionary and bit-packed codes when values repeat, else Arrow's offsets
-and bytes; anything else value by value; `NULL`s a bitmap.  A segment's
-id is a hash of its contents, so it never changes and its decoded columns
+and bytes; anything else value by value; `NULL`s a bitmap (a segment
+lists the table columns it holds: a partial column copy holds some).  A
+segment's id is a hash of its contents, so it never changes and its decoded columns
 are cached by id.  A scan reads only the wanted columns of the segments
 its range overlaps, skips a segment the filters right above it rule out
 (column-constant comparisons against the segment's least and greatest
@@ -1606,26 +1607,58 @@ values), and hands each run of a segment's rows to the vectorized executor
 as vectors.  *Writes:* rows a statement inserts — and the new versions of
 segment rows it updates — are gathered until it ends (4 segments' worth
 at most, then written at once); then, 4096 or more go to segments
-directly, fewer to a *delta store* in the row storage's format under the
-same keys.  An update or delete of a segment row marks it deleted (a key
-per row, index `u32::MAX - 2`: concurrent deletes do not conflict).  A
-merge rewrites the segments the incoming rows' key range overlaps —
+directly, fewer to a *delta store* in the row storage's format (index
+`u32::MAX - 4`, the rows' key suffixes).  An update or delete of a
+segment row marks it deleted: a marker keyed by the row (index `u32::MAX -
+2`), not by its place in a segment, so it stays right when a merge
+rewrites the segment — deletes do not conflict with merges or with each
+other.  A merge rewrites the segments the incoming rows' key range overlaps —
 deleted rows dropped, delta rows moved — so appends make new segments
 and updates rewrite the segments they touch.  Scans merge the segments'
 rows with the delta store's in key order; a key lookup checks the delta
 store, then the segment whose range holds the key.  MVCC and crash safety
 are the KV's: segments, markers and delta rows are versioned keys written
-in their transactions; a marker validates its segment's directory entry
-and a merge the markers it read, so a delete and a merge of one segment
-conflict (`40001`) rather than lose the delete
-(`crates/sql/tests/column.rs`).  The same SQL runs on both storages with
+in their transactions; a delete and a merge of one segment, in either
+order, both commit and the delete holds (`crates/sql/tests/column.rs`).  The same SQL runs on both storages with
 the same results: the tests run loads, updates, key changes and deletes on
 a `row` and a `column` table and compare every query, a row and a batch
 at a time and in parallel, and the integrity check.  On a million rows
 (`docs/benchmarks.md`): a `sum` 22 → 2 ms (one thread 81 → 13 ms), a
 filtered count 23 → 2.4 ms, a 1000-group `GROUP BY` 35 → 19 ms, the file
 of its columns 32 MB against 61; key lookups 0.1 → 0.3–1.7 ms.  The delta
-store's deleted rows stay as versions until `vacuum`.  `crates/sql/tests/storage.rs`
+store's deleted rows stay as versions until `vacuum`.
+
+`row,column` keeps both copies (HTAP): the rows whole in the row storage —
+which key lookups, row scans and constraint checks read — and a column
+copy of every column or of some, which scans whose columns it holds read.
+Writes go to the row copy and note their keys among the *changed* (index
+`u32::MAX - 5`; a segment row they replace marked), and the column copy
+reads a changed key's row from the row copy; merges take changed keys
+into segments as the `column` storage's merges its delta store.
+
+**Changing a table's storage** (`convert`): `ALTER TABLE t SET STORAGE
+row | column | row, column | column (a, b, …)` (the last a column copy of
+those columns beside the rows) converts the table online — in transactions
+of its own, a part at a time, while other sessions read and write it; not
+inside a transaction block (`25001`).  Building a column copy, the table is
+`row,column` with the copy being built (writes note their keys) and
+segments are written from the rows a segment at a time; building a row
+copy, the table is `row,column` with reads from the column copy and the
+segments' rows not written since copied a thousand at a time; dropping a
+copy, the table switches at once and the copy's keys go afterwards, a
+part at a time.  Between `column` and `row,column` the delta moves over a
+part at a time after the switch (the table reads both meanwhile; writes go
+to the new one), so no step has to catch up with writes.  Each switch is a
+small transaction that rewrites the table's record, and every write reads
+the record validated, so a write begun under the old state fails (`40001`)
+and runs again; a conversion cut short leaves a state that reads and
+writes correctly, and running it again finishes it (the table's record
+keeps the state, `nc_catalog.tables` its storage).
+`crates/sql/tests/convert.rs` converts through every pair with writes
+between, converts while another thread writes (each write retried on
+`40001`), and crashes conversions at I/O points, comparing a row table's
+results and running the integrity check each time.  On a million rows, a
+row table gets its column copy in 0.7 s.  `crates/sql/tests/storage.rs`
 registers a module's storage and runs writes, unique and foreign key
 checks, index lookups, scans a row and a batch at a time, in parallel,
 and the integrity check through it, against `row` tables.
@@ -2276,6 +2309,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-30 — §M14.20 storage per table and per column (V8):** `row,
+  column` (both copies; the column copy of every column or some), `ALTER
+  TABLE … SET STORAGE` converting online in parts with small switches;
+  deletion markers by row; a `column` table's delta store under its own
+  index.
 - **2026-10-29 — §M14.20 columnar storage (V7):** `WITH (storage =
   column)`: column segments (bit packing, runs, dictionaries), a delta
   store, deletion markers, merges; scans of only the wanted columns,

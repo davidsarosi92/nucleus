@@ -14,6 +14,7 @@ pub mod bytea;
 pub mod catalog;
 pub mod check;
 pub mod column_store;
+pub mod convert;
 pub mod copy;
 pub mod datetime;
 pub mod dbsettings;

@@ -127,6 +127,7 @@ impl Writer {
         }
         let keys = IndexKeys::new(txn, reg, &table)?;
         let storage = crate::storage::of(&table)?;
+        catalog::validate_table(txn, &table.name)?;
         Ok(Self {
             table,
             checks,
@@ -671,6 +672,7 @@ pub fn delete_rows(
 ) -> Result<()> {
     let keys = IndexKeys::new(&*txn, reg, t)?;
     let storage = crate::storage::of(t)?;
+    catalog::validate_table(&*txn, &t.name)?;
     for (key, row) in rows {
         storage.remove(txn, t, key)?;
         let pk = pk_suffix(t, key);

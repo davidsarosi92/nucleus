@@ -77,9 +77,9 @@ pub trait TableStorage: Send + Sync {
     /// Its name, as `CREATE TABLE … WITH (storage = name)` gives it.
     fn name(&self) -> &str;
 
-    /// The index ids under the table's data prefix it keeps its data in
+    /// The index ids under the table's data prefix it keeps `t`'s data in
     /// (the integrity check reports keys under others).
-    fn index_ids(&self) -> &[u32];
+    fn index_ids(&self, t: &Table) -> Vec<u32>;
 
     /// Stores `row` under row key `key`: a new row, or (`old`) one replacing
     /// the row stored there.
@@ -233,9 +233,11 @@ fn registry() -> &'static RwLock<HashMap<String, Arc<dyn TableStorage>>> {
     STORAGES.get_or_init(|| {
         let row: Arc<dyn TableStorage> = row_storage();
         let column: Arc<dyn TableStorage> = Arc::new(crate::column_store::ColumnStorage);
+        let both: Arc<dyn TableStorage> = Arc::new(crate::column_store::HtapStorage);
         RwLock::new(HashMap::from([
             (ROW.to_string(), row),
             (crate::column_store::COLUMN.to_string(), column),
+            (crate::column_store::ROW_COLUMN.to_string(), both),
         ]))
     })
 }
@@ -248,7 +250,13 @@ fn row_storage() -> Arc<dyn TableStorage> {
 /// Makes `s` available to tables by its name (a module's, replacing one
 /// of the name registered before — the same module in another registry).
 pub fn register(s: Arc<dyn TableStorage>) -> Result<()> {
-    if s.name() == ROW || s.name() == crate::column_store::COLUMN {
+    if [
+        ROW,
+        crate::column_store::COLUMN,
+        crate::column_store::ROW_COLUMN,
+    ]
+    .contains(&s.name())
+    {
         return Err(Error::invalid_parameter(format!(
             "the {} storage is built in",
             s.name()
@@ -303,8 +311,12 @@ impl TableStorage for RowStorage {
         ROW
     }
 
-    fn index_ids(&self) -> &[u32] {
-        &[0, crate::large::LARGE_INDEX]
+    fn index_ids(&self, t: &Table) -> Vec<u32> {
+        let mut ids = vec![0, crate::large::LARGE_INDEX];
+        if t.copy == crate::column_store::CopyState::DroppingColumns {
+            ids.extend(crate::column_store::COPY_INDEXES); // being removed
+        }
+        ids
     }
 
     fn write(

@@ -25,8 +25,8 @@ impl TableStorage for Counted {
     fn name(&self) -> &str {
         "counted"
     }
-    fn index_ids(&self) -> &[u32] {
-        RowStorage.index_ids()
+    fn index_ids(&self, t: &Table) -> Vec<u32> {
+        RowStorage.index_ids(t)
     }
     fn write(
         &self,
