@@ -244,8 +244,11 @@ two places), `accounting` (free / pending / free-list pages / allocated).
 
 **Header** — pages 0 and 1; copy `seq % 2` holds sequence number `seq`; a
 commit writes the older copy, `open` takes the valid copy with the highest
-`seq`.  Payload: magic `NUCLEUS\0`, format version 1, page size, `seq`, page
-count, first free-list page, free count, 16 meta slots.
+`seq`.  Payload: magic `NUCLEUS\0`, format version (2; version 1 files —
+before compressed values and key prefixes — are read, and say 2 from their
+next commit on, so an older build refuses them rather than misreads them),
+page size, `seq`, page count, first free-list page, free count, 16 meta
+slots.
 
 **Free list** — a chain of free-list pages (`next u64, count u32`, then up
 to 1019 page numbers each), rewritten by every commit into pages the
@@ -267,7 +270,9 @@ copy-on-write fails at once.  `create(type)` allocates a page into a frame;
 `free(id)` drops it (must be unpinned).  Eviction is the clock algorithm
 over unpinned frames; dirty victims are written back first.  `flush`
 writes every dirty frame, `sync` = flush + pager commit.  Page-table
-changes and misses take one pool lock.  Errors: `PoolExhausted` (every
+changes take one pool lock; a miss reads the page without it (and reads
+again if a page was written back meanwhile), so threads reading cold pages
+do not wait on each other.  Errors: `PoolExhausted` (every
 frame pinned), `Pinned`.  `stats()`: hits, misses, evictions, write-backs.
 
 ### 4.4 B+tree (`btree::BTree`, `node`)
@@ -278,6 +283,19 @@ packed from the end.  Leaf cell `klen u16, flags u8, vlen u32, key, value`;
 a cell over 2048 bytes moves its value to an overflow chain (`next u64,
 len u32, data`) and stores `first page, length`.  Internal cell `klen u16,
 child u64, key`; child `i` holds keys in `[keys[i-1], keys[i])`.
+
+**Compression** (§M14.20 V5).  *Key prefixes:* a leaf (kind 3) stores the
+prefix its first and last keys share — so all its keys — once, its cells
+only the rest; sizes, splits and packing count the prefix once, so a leaf
+holds more rows (a table's keys share their table and index ids and the
+high bytes of their primary keys: a million-row table's file 93 → 61 MB).
+Readers compare a key as prefix and rest (`node::KeyRef`).  *Values:* a
+value of 64 bytes or more is stored compressed when that saves an eighth
+— an LZ block (LZ4's block format, `lz.rs`, no dependency), flag 2 in the
+cell (`length u32, block`) or flag 3 in an overflow chain (`first page,
+block length, length`); reads decompress, checking every length and
+offset, so a damaged block is an error.  Large text and documents shrink;
+rows of a few short columns do not (too little repeats within one).
 
 **Checksums:** CRC-32C, slicing-by-8 (eight bytes a step, tables built at
 compile time; the same values as the bytewise definition, tested).
@@ -2185,6 +2203,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-29 — §M14.20 compression (V5):** leaves store their keys'
+  shared prefix once; values of 64 bytes or more are stored LZ-compressed
+  when that pays; format version 2 (version 1 read).  A million-row
+  table's file 93 → 61 MB.
 - **2026-10-29 — §M14.20 parallel execution (V4):** the KV contract's
   `shared`, `split_points` and `parallelism`; aggregates and filtering
   pipelines run on worker threads by morsels, combined in key order;

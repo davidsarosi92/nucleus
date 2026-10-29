@@ -1416,7 +1416,12 @@ states — a capability — and filtering pipelines giving their rows by
 rounds, both in key order, so results, their order and errors are a
 single pass's; exact sums of doubles; `parallel_workers`; scans and
 aggregates of a million rows 1.5–1.8× PostgreSQL's ten workers, from
-5–6×.  Left: joins and sorts in parallel); V5 page compression ⬜; V6 table
+5–6×.  Left: joins and sorts in parallel); V5 page compression ✅ (leaves store
+their keys' shared prefix once — a million-row table's file 93 → 61 MB —
+and values of 64 bytes or more are LZ-compressed when that saves an
+eighth, by a codec of the storage layer's own; format version 2, version
+1 still read.  Compressing whole pages across rows is left to the
+columnar segments, V7, where it pays); V6 table
 storage as a module ⬜ (one trait, `row` behind it); V7 columnar storage
 ⬜ (segments, delta store, visibility map, min / max); V8 storage per
 table and per column, converted online ⬜; V9 partitioning ⬜ (range,
@@ -2123,6 +2128,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-29** — §M14.20 V5: compression — key prefixes stored once
+  per leaf, LZ-compressed values; format version 2.  A million-row
+  table's file 93 → 61 MB.
 - **2026-10-29** — §M14.20 V4: parallel execution — morsels at the KV's
   split points on worker threads, partial aggregate states combined in key
   order, filtering pipelines in rounds; `parallel_workers`; exact double

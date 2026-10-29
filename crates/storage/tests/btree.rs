@@ -63,6 +63,11 @@ fn value(rng: &SplitMix64) -> Vec<u8> {
         _ => rng.below(200) as usize,
     };
     let b = rng.next_u64() as u8;
+    if rng.below(3) == 0 {
+        // Repeats: compressed, in the cell or in overflow pages.
+        let word = [b, b ^ 1, b"x"[0]];
+        return (0..len).map(|i| word[i % 3]).collect();
+    }
     (0..len).map(|i| b.wrapping_add(i as u8)).collect()
 }
 
@@ -195,8 +200,10 @@ fn grows_deep_with_long_keys() {
     let mut tree = new_tree(&p, 64);
     let mut model = BTreeMap::new();
     for i in 0..3000u32 {
-        let mut k = vec![b'k'; 600];
-        k.extend_from_slice(&i.to_be_bytes());
+        // Long keys that differ early (a shared prefix is stored once in
+        // a leaf, so it would not make the tree deep).
+        let mut k = i.reverse_bits().to_be_bytes().to_vec();
+        k.extend_from_slice(&[b'k'; 600]);
         tree.insert(&k, &i.to_le_bytes()).unwrap();
         model.insert(k, i.to_le_bytes().to_vec());
     }

@@ -30,9 +30,13 @@ use crate::buffer::{BufferPool, PageRef};
 use crate::error::{Error, Result};
 use crate::node::{
     Internal, Leaf, MAX_INLINE_CELL, MAX_KEY, MIN_FILL, Node, OVERFLOW, OVERFLOW_CAPACITY, Val,
-    ValRef, View, decode_overflow, encode_overflow, leaf_cell_size,
+    ValRef, View, decode_overflow, encode_overflow, key_prefix, leaf_cell_size, leaf_size,
 };
 use crate::page::{PAYLOAD_SIZE, PageId};
+
+/// Values this long or longer are compressed when that saves enough
+/// (PLAN.md §M14.20 V5).
+pub const COMPRESS_MIN: usize = 64;
 
 /// A B+tree rooted at a page.
 #[derive(Debug)]
@@ -124,20 +128,68 @@ impl BTree {
     // ---------------------------------------------------------------- values
 
     fn make_val(&self, key: &[u8], value: &[u8]) -> Result<Val> {
-        let inline = Val::Inline(value.to_vec());
-        if leaf_cell_size(key, &inline) - 2 <= MAX_INLINE_CELL {
-            return Ok(inline);
+        // Compressed when that saves an eighth or more.
+        let mut block = Vec::new();
+        if value.len() >= COMPRESS_MIN {
+            crate::lz::compress(value, &mut block);
         }
+        let packed = !block.is_empty() && block.len() + 4 <= value.len() - value.len() / 8;
+        let val = if packed {
+            Val::Packed {
+                raw: value.len() as u32,
+                block,
+            }
+        } else {
+            Val::Inline(value.to_vec())
+        };
+        if leaf_cell_size(key, &val) - 2 <= MAX_INLINE_CELL {
+            return Ok(val);
+        }
+        let (stored, raw) = match val {
+            Val::Packed { block, .. } => (block, Some(value.len() as u64)),
+            _ => (value.to_vec(), None),
+        };
         let mut next = PageId(0);
-        for chunk in value.chunks(OVERFLOW_CAPACITY).rev() {
+        for chunk in stored.chunks(OVERFLOW_CAPACITY).rev() {
             let r = self.pool.create(OVERFLOW)?;
             encode_overflow(&mut *r.write()?, next, chunk);
             next = r.id();
         }
         Ok(Val::Overflow {
             first: next,
-            len: value.len() as u64,
+            len: stored.len() as u64,
+            raw,
         })
+    }
+
+    /// Appends the value `v` holds to `out`: decompressed, its overflow
+    /// chain read.  `page`: the leaf, for errors.
+    fn read_ref(&self, page: PageId, v: ValRef, out: &mut Vec<u8>) -> Result<()> {
+        let damaged = || Error::Corrupt {
+            page,
+            reason: "a compressed value does not decompress",
+        };
+        match v {
+            ValRef::Inline(b) => out.extend_from_slice(b),
+            ValRef::Packed { raw, block } => {
+                crate::lz::decompress(block, raw as usize, out).ok_or_else(damaged)?;
+            }
+            ValRef::Overflow {
+                first,
+                len,
+                raw: None,
+            } => self.read_overflow(first, len, out)?,
+            ValRef::Overflow {
+                first,
+                len,
+                raw: Some(raw),
+            } => {
+                let mut block = Vec::new();
+                self.read_overflow(first, len, &mut block)?;
+                crate::lz::decompress(&block, raw as usize, out).ok_or_else(damaged)?;
+            }
+        }
+        Ok(())
     }
 
     /// The pages of an overflow chain, checked against its length.
@@ -179,7 +231,7 @@ impl BTree {
     }
 
     fn free_val(&self, val: &Val) -> Result<()> {
-        if let Val::Overflow { first, len } = val {
+        if let Val::Overflow { first, len, .. } = val {
             for (id, _) in self.overflow_pages(*first, *len)? {
                 self.pool.free(id)?;
             }
@@ -204,17 +256,17 @@ impl BTree {
                     .map_err(corrupt)?;
                 continue;
             }
-            let i = v.partition(|k| k < key).map_err(corrupt)?;
-            if i < v.len() && v.key(i).map_err(corrupt)? == key {
-                return match v.value(i).map_err(corrupt)? {
-                    ValRef::Inline(b) => Ok(Some(b.to_vec())),
-                    ValRef::Overflow { first, len } => {
-                        drop(page);
-                        let mut out = Vec::new();
-                        self.read_overflow(first, len, &mut out)?;
-                        Ok(Some(out))
-                    }
-                };
+            let i = v.partition(|k| k.order(key).is_lt()).map_err(corrupt)?;
+            if i < v.len() && v.key(i).map_err(corrupt)?.is(key) {
+                let val = v.value(i).map_err(corrupt)?;
+                let mut out = Vec::new();
+                if let ValRef::Overflow { first, len, raw } = val {
+                    drop(page);
+                    self.read_ref(id, ValRef::Overflow { first, len, raw }, &mut out)?;
+                } else {
+                    self.read_ref(id, val, &mut out)?;
+                }
+                return Ok(Some(out));
             }
             return Ok(None);
         }
@@ -249,17 +301,18 @@ impl BTree {
                     leaves = true;
                     break;
                 }
-                // Child i holds the keys in [key(i - 1), key(i)).
+                // Child i holds the keys in [key(i - 1), key(i)) (an
+                // internal node's keys are whole: no prefix).
                 for i in 0..=v.len() {
                     let lo = if i == 0 {
                         None
                     } else {
-                        Some(v.key(i - 1).map_err(corrupt)?)
+                        Some(v.key(i - 1).map_err(corrupt)?.rest)
                     };
                     let hi = if i == v.len() {
                         None
                     } else {
-                        Some(v.key(i).map_err(corrupt)?)
+                        Some(v.key(i).map_err(corrupt)?.rest)
                     };
                     let after_start = hi.is_none_or(|h| h > start);
                     let before_end = match (lo, end) {
@@ -805,7 +858,7 @@ impl BTree {
                 }
                 out.entries += leaf.entries.len() as u64;
                 for (_, v) in &leaf.entries {
-                    if let Val::Overflow { first, len } = v {
+                    if let Val::Overflow { first, len, .. } = v {
                         for (page, _) in self.overflow_pages(*first, *len)? {
                             if !out.pages.insert(page.0) {
                                 return Err(Error::Corrupt {
@@ -896,7 +949,7 @@ impl<'t> Cursor<'t> {
         self.descend(
             self.tree.root,
             |v| v.child_index(key),
-            |v| v.partition(|k| k < key),
+            |v| v.partition(|k| k.order(key).is_lt()),
         )
     }
 
@@ -906,7 +959,7 @@ impl<'t> Cursor<'t> {
         self.descend(
             self.tree.root,
             |v| v.child_index(key),
-            |v| v.partition(|k| k <= key),
+            |v| v.partition(|k| k.order(key).is_le()),
         )
     }
 
@@ -934,14 +987,16 @@ impl<'t> Cursor<'t> {
         };
         let v = View::new(&page).map_err(corrupt)?;
         key.clear();
-        key.extend_from_slice(v.key(i).map_err(corrupt)?);
+        v.key(i).map_err(corrupt)?.append_to(key);
         val.clear();
+        let id = r.id();
         match v.value(i).map_err(corrupt)? {
-            ValRef::Inline(b) => val.extend_from_slice(b),
-            ValRef::Overflow { first, len } => {
+            ValRef::Overflow { first, len, raw } => {
                 drop(page);
-                self.tree.read_overflow(first, len, val)?;
+                self.tree
+                    .read_ref(id, ValRef::Overflow { first, len, raw }, val)?;
             }
+            other => self.tree.read_ref(id, other, val)?,
         }
         Ok(())
     }
@@ -1121,25 +1176,35 @@ fn fit(node: Node) -> Vec<(Vec<u8>, Node)> {
 /// least [`MIN_FILL`]): each with its first key as the separator before it
 /// (empty for the first).
 fn pack_leaf(entries: Vec<(Vec<u8>, Val)>) -> Vec<(Vec<u8>, Node)> {
-    const HEADER: usize = 12;
-    let total: usize = HEADER
-        + entries
-            .iter()
-            .map(|(k, v)| leaf_cell_size(k, v))
-            .sum::<usize>();
-    if total <= PAYLOAD_SIZE {
-        return vec![(Vec::new(), Node::Leaf(Leaf { entries }))];
+    let leaf = Leaf { entries };
+    if leaf.size() <= PAYLOAD_SIZE {
+        return vec![(Vec::new(), Node::Leaf(leaf))];
     }
     let target = PAYLOAD_SIZE * 7 / 8;
     let mut pieces: Vec<Vec<(Vec<u8>, Val)>> = vec![Vec::new()];
-    let mut size = HEADER;
-    for (k, v) in entries {
+    // The piece being filled: its cells' bytes, and its size as stored —
+    // its keys' shared prefix stored once.
+    let mut cells = 0;
+    let mut size = leaf_size(0, 0, 0);
+    for (k, v) in leaf.entries {
         let cell = leaf_cell_size(&k, &v);
-        if size + cell > target && !pieces.last().expect("one").is_empty() {
+        let piece = pieces.last().expect("one");
+        let grown = match piece.first() {
+            None => leaf_size(cell, 1, 0),
+            Some((first, _)) => leaf_size(
+                cells + cell,
+                piece.len() + 1,
+                key_prefix(first, &k, piece.len() + 1),
+            ),
+        };
+        if grown > target && !piece.is_empty() {
             pieces.push(Vec::new());
-            size = HEADER;
+            cells = 0;
+            size = leaf_size(cell, 1, 0);
+        } else {
+            size = grown;
         }
-        size += cell;
+        cells += cell;
         pieces.last_mut().expect("one").push((k, v));
     }
     // A small last piece: evened out with the one before.

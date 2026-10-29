@@ -57,8 +57,14 @@ use crate::page::{
     PAGE_SIZE, PAYLOAD_SIZE, Page, PageId, PageType, read_u32, read_u64, write_u32, write_u64,
 };
 
-/// The on-disk format version this code reads and writes.
-pub const FORMAT_VERSION: u32 = 1;
+/// The on-disk format version this code writes.  Version 2 (§M14.20 V5)
+/// added compressed values; this code reads version 1 too (a file's
+/// header says 2 from its next commit on, so older builds refuse it rather
+/// than misread it).
+pub const FORMAT_VERSION: u32 = 2;
+
+/// The oldest format version this code reads.
+pub const OLDEST_FORMAT_VERSION: u32 = 1;
 
 /// The first page that can hold data; 0 and 1 are the header copies.
 pub const FIRST_DATA_PAGE: PageId = PageId(2);
@@ -121,9 +127,10 @@ impl Header {
             return Err(Error::NotADatabase("bad magic".into()));
         }
         let version = read_u32(p, 8);
-        if version != FORMAT_VERSION {
+        if !(OLDEST_FORMAT_VERSION..=FORMAT_VERSION).contains(&version) {
             return Err(Error::NotADatabase(format!(
-                "format version {version}, this build reads {FORMAT_VERSION}"
+                "format version {version}, this build reads {OLDEST_FORMAT_VERSION} to \
+                 {FORMAT_VERSION}"
             )));
         }
         let page_size = read_u32(p, 12);
@@ -626,5 +633,47 @@ fn read_best_header(file: &dyn File) -> Result<Header> {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nucleus_platform::Platform;
+    use nucleus_platform::sim::SimPlatform;
+
+    /// A file of format version 1 (before compressed values) opens; its
+    /// next commit marks it version 2; a version this build does not know
+    /// is refused.
+    #[test]
+    fn older_format_versions_open_and_newer_are_refused() {
+        let p = SimPlatform::new(1);
+        let fs = p.fs();
+        fs.create_dir_all(Path::new("/db")).unwrap();
+        let path = Path::new("/db/data");
+        Pager::create(fs, path).unwrap().close().unwrap();
+        let set_version = |v: u32| {
+            let file = fs.open(path, OpenMode::ReadWrite).unwrap();
+            for id in [PageId(0), PageId(1)] {
+                let mut page = read_raw(file.as_ref(), id).unwrap();
+                write_u32(page.payload_mut(), 8, v);
+                write_raw(file.as_ref(), id, &mut page).unwrap();
+            }
+            file.sync().unwrap();
+        };
+        let version = || {
+            let file = fs.open(path, OpenMode::ReadOnly).unwrap();
+            [PageId(0), PageId(1)]
+                .map(|id| read_u32(read_raw(file.as_ref(), id).unwrap().payload(), 8))
+        };
+        set_version(1);
+        let pager = Pager::open(fs, path).unwrap();
+        pager.set_meta(0, 7).unwrap();
+        pager.sync().unwrap();
+        pager.close().unwrap();
+        assert!(version().contains(&FORMAT_VERSION));
+        assert_eq!(Pager::open(fs, path).unwrap().meta(0), 7);
+        set_version(FORMAT_VERSION + 1);
+        assert!(matches!(Pager::open(fs, path), Err(Error::NotADatabase(_))));
     }
 }
