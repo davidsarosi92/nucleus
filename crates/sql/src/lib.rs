@@ -27,6 +27,7 @@ pub mod ext;
 pub mod fk;
 pub mod hint;
 pub mod inet;
+pub use nucleus_kernels as kernels;
 pub mod large;
 pub mod laws;
 pub mod lexer;

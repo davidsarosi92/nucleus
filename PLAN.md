@@ -1400,8 +1400,16 @@ the rest value by value or row by row; vectorized aggregates through the
 `Aggregate::grouped` capability; a failing batch run again row by row, so
 results and errors are the row executor's; `batch_size`, the test kit's
 scripts run with it at 0, 3 and 1024; `sum` 265 → 90 ms.  Left for later
-steps: joins, sorts and string kernels in batches); V3 SIMD kernels chosen at run time,
-each against its scalar reference ⬜; V4 parallel execution ⬜ (split
+steps: joins and sorts in batches); V3 SIMD kernels chosen at run time,
+each against its scalar reference ✅ (`nucleus-kernels`: dense loops
+compiled per level — AVX2, AVX-512 detected on x86-64, NEON on AArch64 —
+for integer and double comparisons and arithmetic, sums, minima and
+maxima, selection, string equality and `LIKE`, hashing; text and date /
+time vectors; every kernel at every level the CPU has checked against
+its scalar reference, the references against SQL's definitions; the
+crate is the workspace's one exception to forbidden unsafe code, for the
+call into a detected level.  Numerics stay value by value; `vector`
+distances come with the type, §M14.12); V4 parallel execution ⬜ (split
 points, shared snapshots, morsels); V5 page compression ⬜; V6 table
 storage as a module ⬜ (one trait, `row` behind it); V7 columnar storage
 ⬜ (segments, delta store, visibility map, min / max); V8 storage per
@@ -2109,6 +2117,10 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-29** — §M14.20 V3: batch kernels per CPU level
+  (`nucleus-kernels`), tested against scalar references; text and date /
+  time vectors, `LIKE` and string comparisons in kernels.  A million-row
+  `sum` 90 → 77 ms.
 - **2026-10-29** — §M14.20 V2: the vectorized executor — pipelines,
   kernels, vectorized aggregates (`Aggregate::grouped`), `batch_size`;
   integer sums exact in 128 bits (order-independent).  A million-row

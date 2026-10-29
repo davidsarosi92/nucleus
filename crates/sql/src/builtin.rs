@@ -699,6 +699,53 @@ impl GroupAccumulator for Grouped {
         Ok(())
     }
 
+    fn update_all(
+        &mut self,
+        len: usize,
+        group: u32,
+        skip_nulls: bool,
+        args: &[&Vector],
+    ) -> Result<()> {
+        use AggFunc::*;
+        let acc = &mut self.accs[group as usize];
+        match (self.func, args.first()) {
+            (Count, None) => acc.count += len as i64,
+            (Count, Some(a)) if skip_nulls => {
+                acc.count += (0..len).filter(|&r| !a.is_null(r)).count() as i64;
+            }
+            (Sum | Avg, Some(Vector::Int(v, n))) => {
+                let (sum, count) =
+                    crate::kernels::sum_i64(&v[..len], n.as_ref().map(|n| &n[..len]));
+                if count > 0 {
+                    acc.int = Some(acc.int.unwrap_or(0) + sum);
+                    if self.func == Avg {
+                        acc.count += count as i64;
+                    }
+                }
+            }
+            (Min | Max, Some(Vector::Int(v, n)))
+                if matches!(acc.value, Value::Int(_) | Value::Null) =>
+            {
+                let max = self.func == Max;
+                if let Some(x) =
+                    crate::kernels::minmax_i64(&v[..len], n.as_ref().map(|n| &n[..len]), max)
+                {
+                    acc.value = match acc.value {
+                        Value::Int(cur) if (max && cur >= x) || (!max && cur <= x) => {
+                            Value::Int(cur)
+                        }
+                        _ => Value::Int(x),
+                    };
+                }
+            }
+            _ => {
+                let rows = crate::ext::all_rows(len, skip_nulls, args);
+                return self.update(&rows, &vec![group; rows.len()], args);
+            }
+        }
+        Ok(())
+    }
+
     fn finish(&mut self, group: usize) -> Result<Value> {
         self.accs[group].finish()
     }

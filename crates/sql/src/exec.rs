@@ -710,6 +710,7 @@ impl<'a> Entries<'a> {
 
     /// The next entry.
     #[allow(clippy::should_implement_trait)] // it lends from the chunk
+    #[inline]
     pub fn next(&mut self) -> Result<Option<(&[u8], &[u8])>> {
         if self.pos == self.chunk.len() {
             if self.done {

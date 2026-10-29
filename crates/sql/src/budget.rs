@@ -110,6 +110,29 @@ pub fn charge_scan() -> Result<()> {
     })
 }
 
+/// [`charge_scan`] for `n` rows at once (a batch's).
+pub fn charge_scans(n: u64) -> Result<()> {
+    SPENT.with(|s| {
+        let s = s.borrow();
+        let Some(s) = s.as_ref() else {
+            return Ok(());
+        };
+        let before = s.scanned.get();
+        let after = before + n;
+        s.scanned.set(after);
+        if s.budget.max_scan.is_some_and(|m| after > m) {
+            return Err(Error::program_limit(format!(
+                "the statement read more than {} rows, the session's budget",
+                s.budget.max_scan.unwrap_or_default()
+            )));
+        }
+        if after / 64 != before / 64 {
+            check_time(&s.budget)?;
+        }
+        Ok(())
+    })
+}
+
 /// Runs `f`, a wait for the client (a cursor asking for its next rows),
 /// without the wait counting toward the statement's deadline.
 pub fn paused<T>(f: impl FnOnce() -> T) -> T {

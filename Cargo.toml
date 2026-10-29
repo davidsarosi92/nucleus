@@ -20,6 +20,7 @@ nucleus-sql = { version = "0.1.0", path = "crates/sql" }
 nucleus-server = { version = "0.1.0", path = "crates/server" }
 nucleus-client = { version = "0.1.0", path = "crates/client" }
 nucleus-testkit = { version = "0.1.0", path = "crates/testkit" }
+nucleus-kernels = { version = "0.1.0", path = "crates/kernels" }
 nucleus-pg-compat = { version = "0.1.0", path = "modules/pg-compat" }
 nucleus-tls = { version = "0.1.0", path = "modules/tls" }
 nucleus-oidc = { version = "0.1.0", path = "modules/oidc" }

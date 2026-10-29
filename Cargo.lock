@@ -483,6 +483,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-kernels"
+version = "0.1.0"
+
+[[package]]
 name = "nucleus-kv"
 version = "0.1.0"
 dependencies = [
@@ -558,6 +562,7 @@ name = "nucleus-sql"
 version = "0.1.0"
 dependencies = [
  "nucleus-crypto",
+ "nucleus-kernels",
  "nucleus-kv",
  "nucleus-platform",
  "nucleus-testkit",

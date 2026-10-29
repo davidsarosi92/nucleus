@@ -31,8 +31,9 @@ use crate::error::{Error, Result};
 use crate::exec::{Entries, Rows, env};
 use crate::expr::{Ctx, Env, Expr};
 use crate::ext::{Accumulator, AggRef, CallContext, GroupAccumulator};
+use crate::kernels::{self, Arith, Cmp, FArith, MixState, Rhs};
 use crate::plan::{Access, Agg, Plan};
-use crate::types::{DataType, Row, Value, total_cmp};
+use crate::types::{DataType, Row, Value};
 
 /// The first batch of a pipeline: small, so a query that needs only its
 /// first rows reads few ahead; each next one twice the last, up to
@@ -51,12 +52,57 @@ pub enum Vector {
     Float(Vec<f64>, Option<Vec<bool>>),
     /// Booleans, and which are `NULL`.
     Bool(Vec<bool>, Option<Vec<bool>>),
+    /// Text: row `i`'s bytes `bytes[offsets[i]..offsets[i + 1]]` (UTF-8),
+    /// and which are `NULL`.
+    Text(Vec<u32>, Vec<u8>, Option<Vec<bool>>),
+    /// Dates, times or timestamps as their integers (days or µs), and which
+    /// are `NULL`.
+    Time(TimeKind, Vec<i64>, Option<Vec<bool>>),
     /// Any values.
     Values(Vec<Value>),
 }
 
+/// Which kind of date / time a [`Vector::Time`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeKind {
+    /// `date`.
+    Date,
+    /// `time`.
+    Time,
+    /// `timestamp`.
+    Timestamp,
+    /// `timestamptz`.
+    TimestampTz,
+}
+
+impl TimeKind {
+    fn of(v: &Value) -> Option<(TimeKind, i64)> {
+        Some(match v {
+            Value::Date(d) => (TimeKind::Date, i64::from(*d)),
+            Value::Time(t) => (TimeKind::Time, *t),
+            Value::Timestamp(t) => (TimeKind::Timestamp, *t),
+            Value::TimestampTz(t) => (TimeKind::TimestampTz, *t),
+            _ => return None,
+        })
+    }
+
+    fn value(self, x: i64) -> Value {
+        match self {
+            TimeKind::Date => Value::Date(x as i32),
+            TimeKind::Time => Value::Time(x),
+            TimeKind::Timestamp => Value::Timestamp(x),
+            TimeKind::TimestampTz => Value::TimestampTz(x),
+        }
+    }
+}
+
 fn is_null_at(nulls: &Option<Vec<bool>>, i: usize) -> bool {
     nulls.as_ref().is_some_and(|n| n[i])
+}
+
+/// Which rows are `NULL` (`None`: none).
+fn nulls_from(n: Vec<bool>) -> Option<Vec<bool>> {
+    n.contains(&true).then_some(n)
 }
 
 impl Vector {
@@ -67,6 +113,10 @@ impl Vector {
             Vector::Int(d, n) if !is_null_at(n, i) => Value::Int(d[i]),
             Vector::Float(d, n) if !is_null_at(n, i) => Value::Float(d[i]),
             Vector::Bool(d, n) if !is_null_at(n, i) => Value::Bool(d[i]),
+            Vector::Text(o, b, n) if !is_null_at(n, i) => Value::Text(
+                String::from_utf8_lossy(&b[o[i] as usize..o[i + 1] as usize]).into_owned(),
+            ),
+            Vector::Time(k, d, n) if !is_null_at(n, i) => k.value(d[i]),
             Vector::Values(v) => v[i].clone(),
             _ => Value::Null,
         }
@@ -76,51 +126,80 @@ impl Vector {
     pub fn is_null(&self, i: usize) -> bool {
         match self {
             Vector::Const(v) => v.is_null(),
-            Vector::Int(_, n) | Vector::Float(_, n) | Vector::Bool(_, n) => is_null_at(n, i),
+            Vector::Int(_, n)
+            | Vector::Float(_, n)
+            | Vector::Bool(_, n)
+            | Vector::Text(_, _, n)
+            | Vector::Time(_, _, n) => is_null_at(n, i),
             Vector::Values(v) => v[i].is_null(),
         }
     }
 
-    /// `values` as a typed vector when they are all integers, doubles or
-    /// booleans (or `NULL`).
+    /// Which rows are `NULL`, for a typed vector (`None`: none, or not
+    /// typed).
+    pub fn nulls(&self) -> Option<&[bool]> {
+        match self {
+            Vector::Int(_, n)
+            | Vector::Float(_, n)
+            | Vector::Bool(_, n)
+            | Vector::Text(_, _, n)
+            | Vector::Time(_, _, n) => n.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// `values` as a typed vector when they are all of one kind a vector
+    /// types (or `NULL`).
     pub fn typed(values: Vec<Value>) -> Vector {
-        let nulls = |values: &[Value]| {
-            let n: Vec<bool> = values.iter().map(Value::is_null).collect();
-            n.contains(&true).then_some(n)
-        };
+        let nulls = |values: &[Value]| nulls_from(values.iter().map(Value::is_null).collect());
+        let all = |f: fn(&Value) -> bool| values.iter().all(|v| v.is_null() || f(v));
         match values.iter().find(|v| !v.is_null()) {
-            Some(Value::Int(_))
-                if values
-                    .iter()
-                    .all(|v| matches!(v, Value::Int(_) | Value::Null)) =>
-            {
+            Some(Value::Int(_)) if all(|v| matches!(v, Value::Int(_))) => {
                 let data = values
                     .iter()
                     .map(|v| if let Value::Int(i) = v { *i } else { 0 })
                     .collect();
                 Vector::Int(data, nulls(&values))
             }
-            Some(Value::Float(_))
-                if values
-                    .iter()
-                    .all(|v| matches!(v, Value::Float(_) | Value::Null)) =>
-            {
+            Some(Value::Float(_)) if all(|v| matches!(v, Value::Float(_))) => {
                 let data = values
                     .iter()
                     .map(|v| if let Value::Float(f) = v { *f } else { 0.0 })
                     .collect();
                 Vector::Float(data, nulls(&values))
             }
-            Some(Value::Bool(_))
-                if values
-                    .iter()
-                    .all(|v| matches!(v, Value::Bool(_) | Value::Null)) =>
-            {
+            Some(Value::Bool(_)) if all(|v| matches!(v, Value::Bool(_))) => {
                 let data = values
                     .iter()
                     .map(|v| matches!(v, Value::Bool(true)))
                     .collect();
                 Vector::Bool(data, nulls(&values))
+            }
+            Some(Value::Text(_)) if all(|v| matches!(v, Value::Text(_))) => {
+                let mut offsets = Vec::with_capacity(values.len() + 1);
+                let mut bytes = Vec::new();
+                offsets.push(0);
+                for v in &values {
+                    if let Value::Text(s) = v {
+                        bytes.extend_from_slice(s.as_bytes());
+                    }
+                    offsets.push(bytes.len() as u32);
+                }
+                Vector::Text(offsets, bytes, nulls(&values))
+            }
+            Some(first) if TimeKind::of(first).is_some() => {
+                let kind = TimeKind::of(first).expect("a time").0;
+                if !values
+                    .iter()
+                    .all(|v| v.is_null() || TimeKind::of(v).is_some_and(|(k, _)| k == kind))
+                {
+                    return Vector::Values(values);
+                }
+                let data = values
+                    .iter()
+                    .map(|v| TimeKind::of(v).map_or(0, |(_, x)| x))
+                    .collect();
+                Vector::Time(kind, data, nulls(&values))
             }
             _ => Vector::Values(values),
         }
@@ -256,6 +335,38 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
             }
             Rc::new(Vector::Bool(out, None))
         }
+        Expr::Like {
+            expr,
+            pattern,
+            negated,
+            case_insensitive: false,
+        } if matches!(&**pattern, Expr::Literal(Value::Text(_))) => {
+            let x = eval(expr, b, sel, cx)?;
+            let Expr::Literal(Value::Text(p)) = &**pattern else {
+                unreachable!("matched above")
+            };
+            match (&*x, like_shape(p)) {
+                (Vector::Text(o, bytes, n), Some((needle, anchor))) => {
+                    let mut out = vec![false; b.len];
+                    match anchor {
+                        None => kernels::eq_bytes(o, bytes, needle.as_bytes(), &mut out),
+                        Some(a) => kernels::like_bytes(o, bytes, needle.as_bytes(), a, &mut out),
+                    }
+                    if *negated {
+                        out.iter_mut().for_each(|v| *v = !*v);
+                    }
+                    Rc::new(Vector::Bool(out, n.clone()))
+                }
+                _ => {
+                    let mut row = Vec::new();
+                    each(b.len, sel, |i| {
+                        row.clear();
+                        row.extend(b.cols.iter().map(|c| c.value(i)));
+                        e.eval(&cx.env(&row))
+                    })?
+                }
+            }
+        }
         Expr::Cast(x, ty) => {
             let x = eval(x, b, sel, cx)?;
             each(b.len, sel, |i| {
@@ -289,6 +400,30 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
             })?
         }
     })
+}
+
+/// A `LIKE` pattern a kernel matches: the text, and where (`None`: the
+/// whole string) — for patterns with `%` only at their ends, no `_` and no
+/// escapes.
+fn like_shape(p: &str) -> Option<(&str, Option<kernels::Anchor>)> {
+    if p.contains(['_', '\\']) {
+        return None;
+    }
+    let lead = p.starts_with('%');
+    let trail = p.len() > 1 && p.ends_with('%') || (p == "%");
+    let inner = p.trim_matches('%');
+    if inner.contains('%') {
+        return None;
+    }
+    Some((
+        inner,
+        match (lead, trail) {
+            (false, false) => None,
+            (false, true) => Some(kernels::Anchor::Prefix),
+            (true, false) => Some(kernels::Anchor::Suffix),
+            (true, true) => Some(kernels::Anchor::Contains),
+        },
+    ))
 }
 
 /// A vector of `f(i)` over the rows `sel` (typed when it can be).
@@ -346,64 +481,70 @@ fn logic(and: bool, l: &Expr, r: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<
     Ok(Vector::Bool(data, nulls.contains(&true).then_some(nulls)))
 }
 
-/// One operand of a typed kernel: a vector or a constant.
-#[derive(Clone, Copy)]
-enum Side<'a, T> {
-    Vec(&'a [T], Option<&'a [bool]>),
-    Const(T),
-}
-
-impl<T: Copy> Side<'_, T> {
-    fn at(&self, i: usize) -> Option<T> {
-        match self {
-            Side::Vec(d, None) => Some(d[i]),
-            Side::Vec(d, Some(n)) => (!n[i]).then(|| d[i]),
-            Side::Const(c) => Some(*c),
-        }
-    }
-}
-
-fn ints(v: &Vector) -> Option<Side<'_, i64>> {
-    match v {
-        Vector::Int(d, n) => Some(Side::Vec(d, n.as_deref())),
-        Vector::Const(Value::Int(i)) => Some(Side::Const(*i)),
-        _ => None,
-    }
-}
-
-/// `v` as doubles: an integer vector through `widened`, its widening.
-fn as_floats<'a>(v: &'a Vector, widened: &'a Option<Vec<f64>>) -> Option<Side<'a, f64>> {
-    match v {
-        Vector::Float(d, n) => Some(Side::Vec(d, n.as_deref())),
-        Vector::Const(Value::Float(f)) => Some(Side::Const(*f)),
-        Vector::Const(Value::Int(i)) => Some(Side::Const(*i as f64)),
-        Vector::Int(_, n) => widened.as_deref().map(|w| Side::Vec(w, n.as_deref())),
-        _ => None,
-    }
-}
-
-fn widened(v: &Vector) -> Option<Vec<f64>> {
-    match v {
-        Vector::Int(d, _) => Some(d.iter().map(|&i| i as f64).collect()),
-        _ => None,
-    }
-}
-
 fn is_cmp(op: BinaryOp) -> bool {
     use BinaryOp::*;
     matches!(op, Eq | NotEq | Lt | LtEq | Gt | GtEq)
 }
 
-fn cmp_holds(op: BinaryOp, o: std::cmp::Ordering) -> bool {
-    use BinaryOp::*;
-    use std::cmp::Ordering::*;
+/// The kernels' comparison for `op`.
+fn cmp_of(op: BinaryOp) -> Cmp {
     match op {
-        Eq => o == Equal,
-        NotEq => o != Equal,
-        Lt => o == Less,
-        LtEq => o != Greater,
-        Gt => o == Greater,
-        _ => o != Less,
+        BinaryOp::Eq => Cmp::Eq,
+        BinaryOp::NotEq => Cmp::Ne,
+        BinaryOp::Lt => Cmp::Lt,
+        BinaryOp::LtEq => Cmp::Le,
+        BinaryOp::Gt => Cmp::Gt,
+        _ => Cmp::Ge,
+    }
+}
+
+/// `x op y` as `y op' x`.
+fn flipped(op: BinaryOp) -> BinaryOp {
+    match op {
+        BinaryOp::Lt => BinaryOp::Gt,
+        BinaryOp::LtEq => BinaryOp::GtEq,
+        BinaryOp::Gt => BinaryOp::Lt,
+        BinaryOp::GtEq => BinaryOp::LtEq,
+        op => op,
+    }
+}
+
+/// The rows where either side is `NULL`.
+fn either_null(a: Option<&[bool]>, b: Option<&[bool]>, len: usize) -> Option<Vec<bool>> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(n), None) | (None, Some(n)) => Some(n[..len].to_vec()),
+        (Some(a), Some(b)) => nulls_from(a.iter().zip(b).map(|(x, y)| x | y).collect()),
+    }
+}
+
+/// An integer operand: its column (a constant spread over `len`) and its
+/// `NULL`s; `None` for anything else.
+fn int_col(v: &Vector, len: usize) -> Option<(std::borrow::Cow<'_, [i64]>, Option<&[bool]>)> {
+    match v {
+        Vector::Int(d, n) => Some((d[..len].into(), n.as_deref())),
+        Vector::Const(Value::Int(i)) => Some((vec![*i; len].into(), None)),
+        _ => None,
+    }
+}
+
+fn int_rhs(v: &Vector) -> Option<(Rhs<'_, i64>, Option<&[bool]>)> {
+    match v {
+        Vector::Int(d, n) => Some((Rhs::Col(d), n.as_deref())),
+        Vector::Const(Value::Int(i)) => Some((Rhs::Const(*i), None)),
+        _ => None,
+    }
+}
+
+/// A double operand (an integer widened, as a row widens it against a
+/// double).
+fn float_col(v: &Vector, len: usize) -> Option<(std::borrow::Cow<'_, [f64]>, Option<&[bool]>)> {
+    match v {
+        Vector::Float(d, n) => Some((d[..len].into(), n.as_deref())),
+        Vector::Int(d, n) => Some((d[..len].iter().map(|&i| i as f64).collect(), n.as_deref())),
+        Vector::Const(Value::Float(f)) => Some((vec![*f; len].into(), None)),
+        Vector::Const(Value::Int(i)) => Some((vec![*i as f64; len].into(), None)),
+        _ => None,
     }
 }
 
@@ -412,17 +553,29 @@ fn binary(op: BinaryOp, x: &Vector, y: &Vector, len: usize, sel: &Sel) -> Result
     use BinaryOp::*;
     let arith = matches!(op, Add | Sub | Mul | Div | Mod);
     if arith || is_cmp(op) {
-        if let (Some(a), Some(b)) = (ints(x), ints(y)) {
+        if let (Some(a), Some(b)) = (int_col(x, len), int_rhs(y)) {
             return int_kernel(op, a, b, len, sel);
         }
-        // Doubles, an integer side widened (as a row widens it).
         let float_like =
             |v: &Vector| matches!(v, Vector::Float(..) | Vector::Const(Value::Float(_)));
-        if float_like(x) || float_like(y) {
-            let (wx, wy) = (widened(x), widened(y));
-            if let (Some(a), Some(b)) = (as_floats(x, &wx), as_floats(y, &wy)) {
-                return float_kernel(op, a, b, len, sel);
-            }
+        if (float_like(x) || float_like(y))
+            && let (Some(a), Some(b)) = (float_col(x, len), float_col(y, len))
+        {
+            return float_kernel(op, a, b, len, sel);
+        }
+    }
+    if is_cmp(op) {
+        if let Some(v) = cmp_text(op, x, y, len)? {
+            return Ok(v);
+        }
+        if let Some(v) = cmp_text(flipped(op), y, x, len)? {
+            return Ok(v);
+        }
+        if let Some(v) = cmp_time(op, x, y, len) {
+            return Ok(v);
+        }
+        if let Some(v) = cmp_time(flipped(op), y, x, len) {
+            return Ok(v);
         }
     }
     let out = each(len, sel, |i| {
@@ -431,69 +584,91 @@ fn binary(op: BinaryOp, x: &Vector, y: &Vector, len: usize, sel: &Sel) -> Result
     Ok(Rc::try_unwrap(out).unwrap_or_else(|v| (*v).clone()))
 }
 
-fn int_kernel(op: BinaryOp, a: Side<i64>, b: Side<i64>, len: usize, sel: &Sel) -> Result<Vector> {
+fn int_kernel(
+    op: BinaryOp,
+    (a, an): (std::borrow::Cow<[i64]>, Option<&[bool]>),
+    (b, bn): (Rhs<i64>, Option<&[bool]>),
+    len: usize,
+    sel: &Sel,
+) -> Result<Vector> {
     use BinaryOp::*;
-    let mut nulls = vec![false; len];
-    let overflow = || Error::out_of_range("bigint out of range");
-    let zero = || Error::division_by_zero("division by zero");
+    let nulls = either_null(an, bn, len);
+    let null = |i: usize| nulls.as_ref().is_some_and(|n| n[i]);
     if is_cmp(op) {
         let mut out = vec![false; len];
-        for i in sel.iter() {
-            match (a.at(i), b.at(i)) {
-                (Some(x), Some(y)) => out[i] = cmp_holds(op, x.cmp(&y)),
-                _ => nulls[i] = true,
-            }
-        }
-        return Ok(Vector::Bool(out, nulls.contains(&true).then_some(nulls)));
+        kernels::cmp_i64(cmp_of(op), &a, b, &mut out);
+        return Ok(Vector::Bool(out, nulls));
     }
     let mut out = vec![0i64; len];
-    for i in sel.iter() {
-        let (Some(x), Some(y)) = (a.at(i), b.at(i)) else {
-            nulls[i] = true;
-            continue;
-        };
-        out[i] = match op {
-            Add => x.checked_add(y).ok_or_else(overflow)?,
-            Sub => x.checked_sub(y).ok_or_else(overflow)?,
-            Mul => x.checked_mul(y).ok_or_else(overflow)?,
-            Div if y == 0 => return Err(zero()),
-            Div => x.checked_div(y).ok_or_else(overflow)?,
-            _ if y == 0 => return Err(zero()),
-            _ => x.checked_rem(y).unwrap_or(0),
-        };
-    }
-    Ok(Vector::Int(out, nulls.contains(&true).then_some(nulls)))
-}
-
-fn float_kernel(op: BinaryOp, a: Side<f64>, b: Side<f64>, len: usize, sel: &Sel) -> Result<Vector> {
-    use BinaryOp::*;
-    let mut nulls = vec![false; len];
-    if is_cmp(op) {
-        let mut out = vec![false; len];
-        for i in sel.iter() {
-            match (a.at(i), b.at(i)) {
-                (Some(x), Some(y)) => out[i] = cmp_holds(op, total_cmp(x, y)),
-                _ => nulls[i] = true,
+    let over = |_| Error::out_of_range("bigint out of range");
+    match op {
+        Add | Sub | Mul => {
+            let k = match op {
+                Add => Arith::Add,
+                Sub => Arith::Sub,
+                _ => Arith::Mul,
+            };
+            let mut overflow = vec![false; len];
+            kernels::arith_i64(k, &a, b, &mut out, &mut overflow);
+            if let Some(i) = sel.iter().find(|&i| overflow[i] && !null(i)) {
+                return Err(over(i));
             }
         }
-        return Ok(Vector::Bool(out, nulls.contains(&true).then_some(nulls)));
+        _ => {
+            for i in sel.iter().filter(|&i| !null(i)) {
+                let (x, y) = (
+                    a[i],
+                    match b {
+                        Rhs::Col(b) => b[i],
+                        Rhs::Const(c) => c,
+                    },
+                );
+                if y == 0 {
+                    return Err(Error::division_by_zero("division by zero"));
+                }
+                out[i] = match op {
+                    Div => x.checked_div(y).ok_or_else(|| over(i))?,
+                    _ => x.checked_rem(y).unwrap_or(0),
+                };
+            }
+        }
+    }
+    Ok(Vector::Int(out, nulls))
+}
+
+fn float_kernel(
+    op: BinaryOp,
+    (a, an): (std::borrow::Cow<[f64]>, Option<&[bool]>),
+    (b, bn): (std::borrow::Cow<[f64]>, Option<&[bool]>),
+    len: usize,
+    sel: &Sel,
+) -> Result<Vector> {
+    use BinaryOp::*;
+    let nulls = either_null(an, bn, len);
+    let null = |i: usize| nulls.as_ref().is_some_and(|n| n[i]);
+    if is_cmp(op) {
+        let mut out = vec![false; len];
+        kernels::cmp_f64(cmp_of(op), &a, Rhs::Col(&b), &mut out);
+        return Ok(Vector::Bool(out, nulls));
     }
     let mut out = vec![0f64; len];
-    for i in sel.iter() {
-        let (Some(x), Some(y)) = (a.at(i), b.at(i)) else {
-            nulls[i] = true;
-            continue;
-        };
+    match op {
+        Add => kernels::arith_f64(FArith::Add, &a, Rhs::Col(&b), &mut out),
+        Sub => kernels::arith_f64(FArith::Sub, &a, Rhs::Col(&b), &mut out),
+        Mul => kernels::arith_f64(FArith::Mul, &a, Rhs::Col(&b), &mut out),
+        Div => kernels::arith_f64(FArith::Div, &a, Rhs::Col(&b), &mut out),
+        _ => {
+            for i in sel.iter() {
+                out[i] = a[i] % b[i];
+            }
+        }
+    }
+    // What a row would refuse, on the rows in play.
+    for i in sel.iter().filter(|&i| !null(i)) {
+        let (x, y, r) = (a[i], b[i], out[i]);
         if matches!(op, Div | Mod) && y == 0.0 {
             return Err(Error::division_by_zero("division by zero"));
         }
-        let r = match op {
-            Add => x + y,
-            Sub => x - y,
-            Mul => x * y,
-            Div => x / y,
-            _ => x % y,
-        };
         crate::expr::check_float(
             op,
             r.is_infinite(),
@@ -501,9 +676,71 @@ fn float_kernel(op: BinaryOp, a: Side<f64>, b: Side<f64>, len: usize, sel: &Sel)
             [x.is_infinite(), y.is_infinite()],
             [x == 0.0, y == 0.0],
         )?;
-        out[i] = r;
     }
-    Ok(Vector::Float(out, nulls.contains(&true).then_some(nulls)))
+    Ok(Vector::Float(out, nulls))
+}
+
+/// `x op y` for a text vector `x` and text `y` (a vector or a constant).
+fn cmp_text(op: BinaryOp, x: &Vector, y: &Vector, len: usize) -> Result<Option<Vector>> {
+    let Vector::Text(o, b, xn) = x else {
+        return Ok(None);
+    };
+    let at = |o: &[u32], i: usize| o[i] as usize..o[i + 1] as usize;
+    let mut out = vec![false; len];
+    let nulls = match y {
+        Vector::Const(Value::Text(c)) => {
+            if matches!(op, BinaryOp::Eq | BinaryOp::NotEq) {
+                kernels::eq_bytes(o, b, c.as_bytes(), &mut out);
+                if op == BinaryOp::NotEq {
+                    out.iter_mut().for_each(|v| *v = !*v);
+                }
+            } else {
+                let k = cmp_of(op);
+                for (i, v) in out.iter_mut().enumerate() {
+                    *v = cmp_holds(k, b[at(o, i)].cmp(c.as_bytes()));
+                }
+            }
+            xn.clone()
+        }
+        Vector::Text(p, c, yn) => {
+            let k = cmp_of(op);
+            for (i, v) in out.iter_mut().enumerate() {
+                *v = cmp_holds(k, b[at(o, i)].cmp(&c[at(p, i)]));
+            }
+            either_null(xn.as_deref(), yn.as_deref(), len)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(Vector::Bool(out, nulls)))
+}
+
+/// `x op y` for a date / time vector `x` and a value of its kind.
+fn cmp_time(op: BinaryOp, x: &Vector, y: &Vector, len: usize) -> Option<Vector> {
+    let Vector::Time(kind, d, xn) = x else {
+        return None;
+    };
+    let (rhs, yn) = match y {
+        Vector::Time(k, e, yn) if k == kind => (Rhs::Col(&e[..]), yn.as_deref()),
+        Vector::Const(v) => match TimeKind::of(v) {
+            Some((k, c)) if k == *kind => (Rhs::Const(c), None),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let mut out = vec![false; len];
+    kernels::cmp_i64(cmp_of(op), &d[..len], rhs, &mut out);
+    Some(Vector::Bool(out, either_null(xn.as_deref(), yn, len)))
+}
+
+fn cmp_holds(k: Cmp, o: std::cmp::Ordering) -> bool {
+    match k {
+        Cmp::Eq => o.is_eq(),
+        Cmp::Ne => o.is_ne(),
+        Cmp::Lt => o.is_lt(),
+        Cmp::Le => o.is_le(),
+        Cmp::Gt => o.is_gt(),
+        Cmp::Ge => o.is_ge(),
+    }
 }
 
 /// `op x` over the rows `sel`.
@@ -536,7 +773,22 @@ fn unary(op: UnaryOp, x: &Vector, len: usize, sel: &Sel) -> Result<Vector> {
 
 /// The rows of `b` for which `p` holds.
 fn filter(p: &Expr, b: Batch, cx: Cx) -> Result<Batch> {
-    let t = truths(&*eval(p, &b, &b.sel, cx)?, b.len, &b.sel)?;
+    let v = eval(p, &b, &b.sel, cx)?;
+    if let (Vector::Bool(d, n), Sel::All(len)) = (&*v, &b.sel) {
+        let mut rows = Vec::new();
+        match n {
+            None => kernels::select(&d[..*len], &mut rows),
+            Some(n) => {
+                let mask: Vec<bool> = d.iter().zip(n).map(|(&x, &null)| x & !null).collect();
+                kernels::select(&mask[..*len], &mut rows);
+            }
+        }
+        return Ok(Batch {
+            sel: Sel::Rows(rows),
+            ..b
+        });
+    }
+    let t = truths(&v, b.len, &b.sel)?;
     let sel = b.sel.keep(|i| t[i] == 1);
     Ok(Batch { sel, ..b })
 }
@@ -563,6 +815,8 @@ enum Kind {
     Int,
     Float,
     Bool,
+    Text,
+    Time(TimeKind),
     Values,
     Enum,
 }
@@ -573,16 +827,25 @@ enum Builder {
     Int(Vec<i64>, Vec<bool>),
     Float(Vec<f64>, Vec<bool>),
     Bool(Vec<bool>, Vec<bool>),
+    Text(Vec<u32>, Vec<u8>, Vec<bool>),
+    Time(TimeKind, Vec<i64>, Vec<bool>),
     Values(Vec<Value>),
 }
 
 impl Builder {
     fn new(kind: Kind, cap: usize) -> Self {
+        let nulls = || Vec::with_capacity(cap);
         match kind {
             Kind::Skip => Builder::Skip,
-            Kind::Int => Builder::Int(Vec::with_capacity(cap), Vec::with_capacity(cap)),
-            Kind::Float => Builder::Float(Vec::with_capacity(cap), Vec::with_capacity(cap)),
-            Kind::Bool => Builder::Bool(Vec::with_capacity(cap), Vec::with_capacity(cap)),
+            Kind::Int => Builder::Int(Vec::with_capacity(cap), nulls()),
+            Kind::Float => Builder::Float(Vec::with_capacity(cap), nulls()),
+            Kind::Bool => Builder::Bool(Vec::with_capacity(cap), nulls()),
+            Kind::Text => {
+                let mut offsets = Vec::with_capacity(cap + 1);
+                offsets.push(0);
+                Builder::Text(offsets, Vec::with_capacity(cap * 16), nulls())
+            }
+            Kind::Time(k) => Builder::Time(k, Vec::with_capacity(cap), nulls()),
             Kind::Values | Kind::Enum => Builder::Values(Vec::with_capacity(cap)),
         }
     }
@@ -590,7 +853,7 @@ impl Builder {
     fn push_null(&mut self) {
         match self {
             Builder::Skip => {}
-            Builder::Int(d, n) => {
+            Builder::Int(d, n) | Builder::Time(_, d, n) => {
                 d.push(0);
                 n.push(true);
             }
@@ -602,8 +865,18 @@ impl Builder {
                 d.push(false);
                 n.push(true);
             }
+            Builder::Text(o, b, n) => {
+                o.push(b.len() as u32);
+                n.push(true);
+            }
             Builder::Values(v) => v.push(Value::Null),
         }
+    }
+
+    fn push_text(o: &mut Vec<u32>, b: &mut Vec<u8>, n: &mut Vec<bool>, s: &[u8]) {
+        b.extend_from_slice(s);
+        o.push(b.len() as u32);
+        n.push(false);
     }
 
     fn push(&mut self, v: Value) {
@@ -622,6 +895,11 @@ impl Builder {
                 d.push(b);
                 n.push(false);
             }
+            (Builder::Text(o, b, n), Value::Text(s)) => Self::push_text(o, b, n, s.as_bytes()),
+            (Builder::Time(k, d, n), v) if TimeKind::of(&v).is_some_and(|(kv, _)| kv == *k) => {
+                d.push(TimeKind::of(&v).expect("a time").1);
+                n.push(false);
+            }
             (Builder::Values(vals), v) => vals.push(v),
             (_, v) => {
                 // Not the column's usual kind: values from here on.
@@ -632,28 +910,34 @@ impl Builder {
         }
     }
 
+    fn len(&self) -> usize {
+        match self {
+            Builder::Skip => 0,
+            Builder::Int(_, n)
+            | Builder::Float(_, n)
+            | Builder::Bool(_, n)
+            | Builder::Text(_, _, n)
+            | Builder::Time(_, _, n) => n.len(),
+            Builder::Values(v) => v.len(),
+        }
+    }
+
     fn into_values(self) -> Vec<Value> {
+        let n = self.len();
         match self.finish() {
             Vector::Values(v) => v,
-            v => {
-                let n = match &v {
-                    Vector::Int(d, _) => d.len(),
-                    Vector::Float(d, _) => d.len(),
-                    Vector::Bool(d, _) => d.len(),
-                    _ => 0,
-                };
-                (0..n).map(|i| v.value(i)).collect()
-            }
+            v => (0..n).map(|i| v.value(i)).collect(),
         }
     }
 
     fn finish(self) -> Vector {
-        let nulls = |n: Vec<bool>| n.contains(&true).then_some(n);
         match self {
             Builder::Skip => Vector::Const(Value::Null),
-            Builder::Int(d, n) => Vector::Int(d, nulls(n)),
-            Builder::Float(d, n) => Vector::Float(d, nulls(n)),
-            Builder::Bool(d, n) => Vector::Bool(d, nulls(n)),
+            Builder::Int(d, n) => Vector::Int(d, nulls_from(n)),
+            Builder::Float(d, n) => Vector::Float(d, nulls_from(n)),
+            Builder::Bool(d, n) => Vector::Bool(d, nulls_from(n)),
+            Builder::Text(o, b, n) => Vector::Text(o, b, nulls_from(n)),
+            Builder::Time(k, d, n) => Vector::Time(k, d, nulls_from(n)),
             Builder::Values(v) => Vector::Values(v),
         }
     }
@@ -701,6 +985,11 @@ impl<'a> ScanSource<'a> {
                     DataType::SmallInt | DataType::Integer | DataType::BigInt => Kind::Int,
                     DataType::Float => Kind::Float,
                     DataType::Bool => Kind::Bool,
+                    DataType::Text => Kind::Text,
+                    DataType::Date => Kind::Time(TimeKind::Date),
+                    DataType::Time => Kind::Time(TimeKind::Time),
+                    DataType::Timestamp => Kind::Time(TimeKind::Timestamp),
+                    DataType::TimestampTz => Kind::Time(TimeKind::TimestampTz),
                     DataType::Enum(_) => Kind::Enum,
                     _ => Kind::Values,
                 }
@@ -726,10 +1015,10 @@ impl<'a> ScanSource<'a> {
             let Some((key, bytes)) = entries.next()? else {
                 break;
             };
-            crate::budget::charge_scan()?;
             decode_into(self.ctx, self.table, key, bytes, &mut cols)?;
             n += 1;
         }
+        crate::budget::charge_scans(n as u64)?;
         if n == 0 {
             return Ok(None);
         }
@@ -801,6 +1090,28 @@ fn decode_into(ctx: &Ctx, t: &Table, key: &[u8], b: &[u8], cols: &mut [Builder])
             (Builder::Float(d, nulls), Some(3)) => {
                 r.u8().map_err(bad)?;
                 d.push(f64::from_bits(r.u64().map_err(bad)?));
+                nulls.push(false);
+            }
+            (Builder::Text(o, bytes, nulls), Some(4)) => {
+                r.u8().map_err(bad)?;
+                let len = r.u32().map_err(bad)? as usize;
+                Builder::push_text(o, bytes, nulls, r.take(len).map_err(bad)?);
+            }
+            (Builder::Time(k, d, nulls), Some(tag @ (6 | 7 | 8 | 17)))
+                if matches!(
+                    (*k, tag),
+                    (TimeKind::Date, 6)
+                        | (TimeKind::Timestamp, 7)
+                        | (TimeKind::TimestampTz, 8)
+                        | (TimeKind::Time, 17)
+                ) =>
+            {
+                r.u8().map_err(bad)?;
+                d.push(if tag == 6 {
+                    i64::from(r.u32().map_err(bad)? as i32)
+                } else {
+                    r.u64().map_err(bad)? as i64
+                });
                 nulls.push(false);
             }
             (col, _) => col.push(crate::encoding::decode_value(&mut r)?),
@@ -1114,9 +1425,9 @@ enum Keys {
     /// No `GROUP BY`: one group.
     Total,
     /// One integer key (`NULL`'s group apart).
-    Int(HashMap<i64, u32>, Option<u32>),
+    Int(HashMap<i64, u32, MixState>, Option<u32>),
     /// Any keys.
-    Any(HashMap<Vec<Value>, u32>),
+    Any(HashMap<Vec<Value>, u32, MixState>),
 }
 
 /// A vectorized aggregate's state.
@@ -1139,7 +1450,7 @@ impl<'a> Grouping<'a> {
             aggs,
             keys: match group.len() {
                 0 => Keys::Total,
-                _ => Keys::Any(HashMap::new()),
+                _ => Keys::Any(HashMap::default()),
             },
             seen: Vec::new(),
             accs: aggs
@@ -1223,11 +1534,22 @@ impl<'a> Grouping<'a> {
         args: &[Vec<Rc<Vector>>],
         row: &dyn Fn(usize) -> Row,
     ) -> Result<()> {
+        // A grand total over a whole batch: each aggregate fed at once.
+        if let (Keys::Total, Sel::All(len)) = (&self.keys, sel) {
+            let g = self
+                .group_of(&Vec::new, None)
+                .expect("a grand total stays in memory");
+            for ((agg, acc), args) in self.aggs.iter().zip(&mut self.accs).zip(args) {
+                let refs: Vec<&Vector> = args.iter().map(|a| &**a).collect();
+                acc.update_all(*len, g, !agg.func.keeps_nulls(), &refs)?;
+            }
+            return Ok(());
+        }
         // A single integer key: hashed as an integer.
         let int_key = match keys {
             [k] if matches!(**k, Vector::Int(..)) => {
                 if self.seen.is_empty() && matches!(self.keys, Keys::Any(_)) {
-                    self.keys = Keys::Int(HashMap::new(), None);
+                    self.keys = Keys::Int(HashMap::default(), None);
                 }
                 matches!(self.keys, Keys::Int(..))
             }

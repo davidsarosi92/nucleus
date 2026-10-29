@@ -90,6 +90,17 @@ fn chosen_queries_agree() {
         "SELECT count(*) FROM t WHERE a IS NULL OR f IS NULL",
         "SELECT count(*) FROM t WHERE NOT ok AND a BETWEEN -2 AND 5",
         "SELECT id FROM t WHERE s LIKE 'name 1%' AND m = 'ok' ORDER BY id",
+        "SELECT id, s FROM t WHERE s = 'name 3' OR s < 'name 10' ORDER BY id",
+        "SELECT count(*) FROM t WHERE s LIKE '%7' OR s NOT LIKE '%e 1%'",
+        "SELECT count(*) FROM t WHERE s LIKE '%' AND s LIKE 'name 2' AND s LIKE '%me%'",
+        "SELECT count(*) FROM t WHERE s LIKE 'name _' OR s ILIKE 'NAME 3%'",
+        "SELECT id FROM t WHERE upper(s) LIKE 'NAME 3%' AND upper(s) >= 'NAME 35' ORDER BY id",
+        "SELECT count(*) FROM t WHERE s > big OR s = s",
+        "SELECT id, d FROM t WHERE d = DATE '2026-02-01' OR d BETWEEN DATE '2026-12-30' AND \
+           DATE '2027-01-02' ORDER BY id",
+        "SELECT count(*) FROM t WHERE d > now()::date - 1000 AND d + 1 > DATE '2026-03-01'",
+        "SELECT d, count(*) FROM t GROUP BY d ORDER BY d LIMIT 5",
+        "SELECT s, count(*), min(d), max(d) FROM t GROUP BY s ORDER BY s",
         "SELECT id, length(big) FROM t WHERE big IS NOT NULL ORDER BY id",
         "SELECT id, upper(s), coalesce(a, -100), CASE WHEN a > 0 THEN 'p' ELSE 'n' END \
            FROM t WHERE id % 97 = 1 ORDER BY id",

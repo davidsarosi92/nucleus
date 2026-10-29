@@ -337,8 +337,33 @@ pub trait GroupAccumulator {
         args: &[&crate::vector::Vector],
     ) -> Result<()>;
 
+    /// Feeds rows `0..len` all to group `group` (a grand total over a whole
+    /// batch), leaving out those whose first argument is `NULL` when
+    /// `skip_nulls`.  By default through [`update`](Self::update).
+    fn update_all(
+        &mut self,
+        len: usize,
+        group: u32,
+        skip_nulls: bool,
+        args: &[&crate::vector::Vector],
+    ) -> Result<()> {
+        let rows = all_rows(len, skip_nulls, args);
+        self.update(&rows, &vec![group; rows.len()], args)
+    }
+
     /// Group `group`'s result, after its last row.
     fn finish(&mut self, group: usize) -> Result<Value>;
+}
+
+/// Rows `0..len`, without those whose first argument is `NULL` when
+/// `skip_nulls` ([`GroupAccumulator::update_all`]).
+pub fn all_rows(len: usize, skip_nulls: bool, args: &[&crate::vector::Vector]) -> Vec<u32> {
+    match args.first() {
+        Some(a) if skip_nulls => (0..len as u32)
+            .filter(|&r| !a.is_null(r as usize))
+            .collect(),
+        _ => (0..len as u32).collect(),
+    }
 }
 
 /// One group's state of an aggregate.

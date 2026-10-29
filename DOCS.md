@@ -31,6 +31,7 @@
 | `crates/storage` | `nucleus-storage` | page format, pager, buffer pool, B+tree, WAL, store | §M1–§M4 ✅ |
 | `crates/txn` | `nucleus-txn` | MVCC, snapshot isolation, GC | §M5 ✅ |
 | `crates/kv` | `nucleus-kv` | the KV contract and the local `Database` | §M6 ✅ |
+| `crates/kernels` | `nucleus-kernels` | the vectorized executor's batch kernels, compiled per CPU level and chosen at run time | §M14.20 |
 | `crates/sql` | `nucleus-sql` | types, encodings, catalog (`nc_catalog`), parser, binder, optimizer, executor, sessions; the extension API (`ext`) | §M7–§M14.5, §M14.19 |
 | `crates/server` | `nucleus-server` | front ends (the nucleus protocol), authentication | §M12, §M14.7, §M14.19 |
 | `crates/client` | `nucleus-client` | the Rust driver | §M14.6–§M14.8 ✅ |
@@ -59,7 +60,10 @@ module from its packaged form alone (§2).
 
 Workspace-wide: Rust edition 2024, toolchain pinned in `rust-toolchain.toml`
 (rustup installs it on first use), `unsafe_code` forbidden, `missing_docs`
-warned, clippy warnings are errors in CI.
+warned, clippy warnings are errors in CI.  One exception to the first:
+`nucleus-kernels` denies unsafe code instead and allows it in its
+`kernel!` macro alone, to call a kernel's copy compiled for a CPU feature
+once the CPU was found to have it (§8.5).
 
 ## 2. Building and testing
 
@@ -1023,9 +1027,22 @@ first batch is 64 rows, each next one twice the last, up to `batch_size`
 Rows are decoded from the stored encoding straight into the vectors.
 Expressions are evaluated a batch per call: kernels for integer and
 double arithmetic and comparisons (an integer widened against a double,
-as a row widens it), `AND` / `OR` / `NOT`, `IS NULL`; casts and function
-calls a value at a time over the batch's vectors; anything else (`CASE`,
-subqueries, …) a row at a time.  `AND` and `OR` evaluate their right side
+as a row widens it), text comparisons and `LIKE` with `%` only at the
+pattern's ends, comparisons of dates, times and timestamps of one kind,
+`AND` / `OR` / `NOT`, `IS NULL`; casts and function calls a value at a
+time over the batch's vectors; anything else (`CASE`, subqueries,
+numerics, …) a row at a time.  Text is a column of offsets and bytes
+(Arrow's layout), dates and times their integers.  The kernels
+(`nucleus-kernels`) are dense loops over every position of a batch,
+written so the compiler vectorizes them and compiled once per CPU level —
+AVX2 and AVX-512 on x86-64, chosen at run time by feature detection;
+NEON, the baseline, on AArch64 — what can fail (an overflow, a division
+by zero) coming back as a mask the executor checks on the rows in play.
+Each has a scalar reference; `crates/sql/tests/kernels.rs` runs every
+kernel at every level the CPU has against it, on edge values, and the
+references against the SQL layer's own definitions.  Grand totals over a
+whole batch sum and compare integers in a kernel (exact, in two 32-bit
+halves); group keys hash through a seeded multiplicative hash.  `AND` and `OR` evaluate their right side
 only on the rows the left one leaves undecided.  Aggregates over a
 pipeline are vectorized when none has `DISTINCT` or `ORDER BY`: group
 numbers by key (one integer key hashed as an integer), and each
@@ -2134,6 +2151,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-29 — §M14.20 batch kernels (V3):** `nucleus-kernels` —
+  comparisons, arithmetic, sums, minima and maxima, selection, string
+  equality and `LIKE`, hashing — per CPU level (AVX2, AVX-512, NEON),
+  each tested against its scalar reference; text and date / time
+  vectors.  A million-row `sum` 90 → 77 ms.
 - **2026-10-29 — §M14.20 the vectorized executor (V2):** pipelines of
   scans, filters and projections a batch at a time, vectorized
   aggregates (`Aggregate::grouped`), `batch_size`; the test kit's scripts

@@ -1,0 +1,19 @@
+[package]
+name = "nucleus-kernels"
+description = "Batch kernels of nucleus's vectorized executor, chosen per CPU at run time"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+# The workspace forbids unsafe code; this crate only denies it, so that the
+# one place that needs it — calling a kernel compiled for a CPU feature the
+# CPU was found to have — can allow it (`src/lib.rs`, `kernel!`).
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

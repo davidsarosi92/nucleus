@@ -1089,6 +1089,7 @@ impl Chunk {
     }
 
     /// The number of entries.
+    #[inline]
     pub fn len(&self) -> usize {
         self.ents.len()
     }
@@ -1117,17 +1118,20 @@ impl Chunk {
         self.data.extend_from_slice(value);
     }
 
+    #[inline]
     fn end(&self, i: usize) -> usize {
         self.ents.get(i + 1).map_or(self.data.len(), |e| e.0)
     }
 
     /// Entry `i`'s key.
+    #[inline]
     pub fn key(&self, i: usize) -> &[u8] {
         let (k, v) = self.ents[i];
         &self.data[k..v]
     }
 
     /// Entry `i`'s value.
+    #[inline]
     pub fn value(&self, i: usize) -> &[u8] {
         &self.data[self.ents[i].1..self.end(i)]
     }
