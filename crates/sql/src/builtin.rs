@@ -16,6 +16,7 @@ use crate::ext::{
     KeyEncoding, Module, Registry, Returns, ScalarFunction, Signature, TableFunction,
     TableSignature, TotalOrder, Type, Volatility, common_type,
 };
+use crate::fsum::ExactSum;
 use crate::types::{DataType, Row, Value};
 use crate::vector::Vector;
 
@@ -594,6 +595,10 @@ struct Acc {
     /// The integers summed so far (`sum`, `avg`): exactly, whatever their
     /// order, so a sum overflows only if its result does.
     int: Option<i128>,
+    /// The doubles and reals summed so far, exactly (rounded once, at the
+    /// end), and whether they were all reals.
+    float: Option<ExactSum>,
+    real: bool,
 }
 
 impl Acc {
@@ -605,7 +610,104 @@ impl Acc {
             text: None,
             items: None,
             int: None,
+            float: None,
+            real: true,
         }
+    }
+
+    /// Adds a double (`real`: a real) to a `sum` or `avg`.
+    fn add_float(&mut self, x: f64, real: bool) {
+        self.float.get_or_insert_with(ExactSum::new).add(x);
+        self.real &= real;
+        if self.func == AggFunc::Avg {
+            self.count += 1;
+        }
+    }
+
+    /// The state as one value, for [`Acc::combine`] in another thread's
+    /// accumulator: what parallel aggregation passes between workers.
+    fn partial(&self) -> Value {
+        let float = match &self.float {
+            None => Value::Null,
+            Some(f) => {
+                let (partials, special, overflow) = f.parts();
+                Value::Array(vec![
+                    Value::Array(partials.into_iter().map(Value::Float).collect()),
+                    special.map_or(Value::Null, Value::Float),
+                    Value::Bool(overflow),
+                ])
+            }
+        };
+        Value::Array(vec![
+            Value::Int(self.count),
+            self.value.clone(),
+            self.int.map_or(Value::Null, |i| {
+                Value::Bytea(i.to_le_bytes().to_vec().into())
+            }),
+            float,
+            Value::Bool(self.real),
+            self.items.clone().map_or(Value::Null, Value::Array),
+        ])
+    }
+
+    /// Adds a state another accumulator of the same aggregate made
+    /// ([`Acc::partial`]), as if its rows had come after this one's.
+    fn combine(&mut self, partial: Value) -> Result<()> {
+        let bad = || Error::internal("a malformed partial aggregate state");
+        let Value::Array(parts) = partial else {
+            return Err(bad());
+        };
+        let [count, value, int, float, real, items] =
+            <[Value; 6]>::try_from(parts).map_err(|_| bad())?;
+        let Value::Int(count) = count else {
+            return Err(bad());
+        };
+        self.count += count;
+        if !value.is_null() {
+            match self.func {
+                AggFunc::Min | AggFunc::Max | AggFunc::BoolAnd | AggFunc::BoolOr => {
+                    let n = self.count;
+                    self.add(&[value])?;
+                    self.count = n;
+                }
+                _ if self.value.is_null() => self.value = value,
+                _ => {
+                    let v = std::mem::replace(&mut self.value, Value::Null);
+                    self.value = crate::expr::binary(BinaryOp::Add, v, value)?;
+                }
+            }
+        }
+        if let Value::Bytea(b) = int {
+            let i = i128::from_le_bytes(b[..].try_into().map_err(|_| bad())?);
+            self.int = Some(self.int.unwrap_or(0) + i);
+        }
+        if let Value::Array(f) = float {
+            let [partials, special, overflow] = <[Value; 3]>::try_from(f).map_err(|_| bad())?;
+            let Value::Array(partials) = partials else {
+                return Err(bad());
+            };
+            let partials = partials
+                .into_iter()
+                .map(|p| {
+                    if let Value::Float(x) = p {
+                        Ok(x)
+                    } else {
+                        Err(bad())
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let special = match special {
+                Value::Float(x) => Some(x),
+                _ => None,
+            };
+            let other = ExactSum::from_parts(partials, special, overflow == Value::Bool(true));
+            self.float.get_or_insert_with(ExactSum::new).merge(&other);
+            self.real &= real == Value::Bool(true);
+        }
+        if let Value::Array(more) = items {
+            self.items.get_or_insert_with(Vec::new).extend(more);
+        }
+        Ok(())
     }
 
     /// Adds an integer to a `sum` or `avg`.
@@ -616,24 +718,42 @@ impl Acc {
         }
     }
 
-    /// The running sum: the integers' with the other values'.
+    /// The running sum: the integers', the doubles' and the other values'.
     fn total(&mut self) -> Result<Value> {
-        let value = std::mem::replace(&mut self.value, Value::Null);
-        let Some(int) = self.int.take() else {
-            return Ok(value);
-        };
-        let int = match i64::try_from(int) {
-            Ok(i) if self.func == AggFunc::Sum => Value::Int(i),
-            Err(_) if self.func == AggFunc::Sum && value.is_null() => {
-                return Err(Error::out_of_range("bigint out of range"));
-            }
-            _ => Value::Numeric(crate::decimal::Decimal::new(int, 0)?),
-        };
-        if value.is_null() {
-            Ok(int)
-        } else {
-            crate::expr::binary(BinaryOp::Add, value, int)
+        let mut value = std::mem::replace(&mut self.value, Value::Null);
+        let alone = value.is_null() && self.float.is_none();
+        if let Some(int) = self.int.take() {
+            let int = match i64::try_from(int) {
+                Ok(i) if self.func == AggFunc::Sum => Value::Int(i),
+                Err(_) if self.func == AggFunc::Sum && alone => {
+                    return Err(Error::out_of_range("bigint out of range"));
+                }
+                _ => Value::Numeric(crate::decimal::Decimal::new(int, 0)?),
+            };
+            value = if value.is_null() {
+                int
+            } else {
+                crate::expr::binary(BinaryOp::Add, value, int)?
+            };
         }
+        if let Some(f) = self.float.take() {
+            let f = f.total().ok_or_else(crate::types::float_overflow)?;
+            let f = if self.real && self.func == AggFunc::Sum {
+                let r = f as f32;
+                if r.is_infinite() && f.is_finite() {
+                    return Err(crate::types::float_overflow());
+                }
+                Value::Real(r)
+            } else {
+                Value::Float(f)
+            };
+            value = if value.is_null() {
+                f
+            } else {
+                crate::expr::binary(BinaryOp::Add, value, f)?
+            };
+        }
+        Ok(value)
     }
 }
 
@@ -666,6 +786,11 @@ impl GroupAccumulator for Grouped {
             (Sum | Avg, Some(Vector::Int(v, _))) => {
                 for (r, g) in pairs {
                     self.accs[g].add_int(v[r]);
+                }
+            }
+            (Sum | Avg, Some(Vector::Float(v, _))) => {
+                for (r, g) in pairs {
+                    self.accs[g].add_float(v[r], false);
                 }
             }
             (Min | Max, Some(Vector::Int(v, _))) => {
@@ -746,6 +871,20 @@ impl GroupAccumulator for Grouped {
         Ok(())
     }
 
+    fn combinable(&self) -> bool {
+        // A string_agg's separator belongs to the row it follows, which a
+        // partial state does not keep.
+        self.func != AggFunc::StringAgg
+    }
+
+    fn partial(&mut self, group: usize) -> Result<Value> {
+        Ok(self.accs[group].partial())
+    }
+
+    fn combine(&mut self, group: usize, partial: Value) -> Result<()> {
+        self.accs[group].combine(partial)
+    }
+
     fn finish(&mut self, group: usize) -> Result<Value> {
         self.accs[group].finish()
     }
@@ -755,9 +894,20 @@ impl Accumulator for Acc {
     fn add(&mut self, args: &[Value]) -> Result<()> {
         let add = |a: Value, b: Value| crate::expr::binary(BinaryOp::Add, a, b);
         let v = args.first().cloned().unwrap_or(Value::Null);
-        if let (AggFunc::Sum | AggFunc::Avg, Value::Int(i)) = (self.func, &v) {
-            self.add_int(*i);
-            return Ok(());
+        match (self.func, &v) {
+            (AggFunc::Sum | AggFunc::Avg, Value::Int(i)) => {
+                self.add_int(*i);
+                return Ok(());
+            }
+            (AggFunc::Sum | AggFunc::Avg, Value::Float(f)) => {
+                self.add_float(*f, false);
+                return Ok(());
+            }
+            (AggFunc::Sum | AggFunc::Avg, Value::Real(f)) => {
+                self.add_float(f64::from(*f), true);
+                return Ok(());
+            }
+            _ => {}
         }
         match self.func {
             AggFunc::Count => self.count += 1,

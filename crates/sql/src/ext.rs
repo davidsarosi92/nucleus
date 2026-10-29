@@ -65,6 +65,8 @@ pub use crate::inet::Net;
 pub use crate::parser::{parse, parse_with_text};
 pub use crate::session::{OutColumn, Output, Session, Sink, TxnStatus, command_tag, read_only};
 pub use crate::types::{DataType, Row, Value};
+/// The vectorized executor's columns, as batch capabilities see them.
+pub use crate::vector::{TimeKind, Vector};
 
 /// The catalog, read-only, as modules see it: table definitions and their
 /// constraints.
@@ -349,6 +351,31 @@ pub trait GroupAccumulator {
     ) -> Result<()> {
         let rows = all_rows(len, skip_nulls, args);
         self.update(&rows, &vec![group; rows.len()], args)
+    }
+
+    /// Whether [`partial`](Self::partial) and [`combine`](Self::combine)
+    /// work: what aggregating in parallel needs (PLAN.md §M14.20).
+    fn combinable(&self) -> bool {
+        false
+    }
+
+    /// Group `group`'s state as one value, to be
+    /// [`combine`](Self::combine)d into another accumulator of the same
+    /// aggregate.
+    fn partial(&mut self, group: usize) -> Result<Value> {
+        let _ = group;
+        Err(crate::error::Error::internal(
+            "an aggregate that cannot be combined",
+        ))
+    }
+
+    /// Adds a [`partial`](Self::partial) state to group `group`, as if its
+    /// rows had come after the group's.
+    fn combine(&mut self, group: usize, partial: Value) -> Result<()> {
+        let _ = (group, partial);
+        Err(crate::error::Error::internal(
+            "an aggregate that cannot be combined",
+        ))
     }
 
     /// Group `group`'s result, after its last row.

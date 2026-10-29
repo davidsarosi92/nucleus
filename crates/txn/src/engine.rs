@@ -862,6 +862,33 @@ impl Transaction {
         Ok(())
     }
 
+    /// Up to `parts - 1` user keys inside `[start, end)` cutting it into
+    /// parts of about equal size in the store, each of at least
+    /// `min_leaves` of its leaves; ascending ([`BTree::split_keys`]).
+    pub fn split_points(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        parts: usize,
+        min_leaves: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        let tree = self.engine.store.read()?;
+        let lo = first_version(start);
+        let hi = end.map(first_version);
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        for k in tree.split_keys(&lo, hi.as_deref(), parts, min_leaves)? {
+            // Separators are version keys (the reserved ones skipped).
+            if let Some((user, _)) = decode_key(&k)
+                && user.as_slice() > start
+                && end.is_none_or(|e| user.as_slice() < e)
+                && out.last().is_none_or(|l| *l < user)
+            {
+                out.push(user);
+            }
+        }
+        Ok(out)
+    }
+
     /// The keys and values in `(start, end)`, ascending, as this transaction
     /// sees them.
     pub fn scan(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Scan<'_>> {

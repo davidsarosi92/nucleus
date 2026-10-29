@@ -72,6 +72,10 @@ impl Platform for RealPlatform {
     fn rng(&self) -> &dyn Rng {
         &self.rng
     }
+
+    fn parallelism(&self) -> usize {
+        std::thread::available_parallelism().map_or(1, usize::from)
+    }
 }
 
 /// The OS file system.

@@ -157,6 +157,12 @@ thread_local! {
     static WHO: RefCell<Option<Arc<Who>>> = const { RefCell::new(None) };
 }
 
+/// Who the current statement runs as (to run its work on other threads as
+/// them).
+pub fn current_who() -> Option<Arc<Who>> {
+    WHO.with(|w| w.borrow().clone())
+}
+
 /// Runs `f` as `who`.
 pub fn with_who<T>(who: &Arc<Who>, f: impl FnOnce() -> T) -> T {
     let before = WHO.with(|w| w.replace(Some(who.clone())));

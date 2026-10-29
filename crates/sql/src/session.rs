@@ -523,6 +523,10 @@ impl Session {
         let timeout = crate::dbsettings::duration(&setting("statement_timeout")?)?;
         let work_mem = crate::dbsettings::memory(&setting("work_mem")?)?;
         let batch = crate::dbsettings::batch(&setting("batch_size")?)?;
+        let workers = match crate::dbsettings::workers(&setting("parallel_workers")?)? {
+            0 => self.kv.parallelism(),
+            n => n,
+        };
         let timeout = [(timeout > 0).then_some(timeout), who.ceiling.timeout]
             .into_iter()
             .flatten()
@@ -534,6 +538,7 @@ impl Session {
             max_rows: who.ceiling.max_rows,
             work_mem: Some(work_mem),
             batch: Some(batch),
+            workers: Some(workers),
         })
     }
 
@@ -727,6 +732,9 @@ impl Session {
                 }
                 if name == "batch_size" {
                     crate::dbsettings::batch(value)?;
+                }
+                if name == "parallel_workers" {
+                    crate::dbsettings::workers(value)?;
                 }
                 if name == "default_transaction_isolation" || name == "transaction_isolation" {
                     self.default_isolation = match value.to_ascii_lowercase().trim_matches('\'') {

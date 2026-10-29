@@ -225,3 +225,53 @@ fn random_queries_agree() {
     let failed = agree(&db, &queries);
     assert!(failed < queries.len() / 2, "{failed} of the queries failed");
 }
+
+#[test]
+fn parallel_aggregates_agree() {
+    // Big enough to split into morsels; the simulation offers one CPU, so
+    // the workers are asked for.
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(8)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE p (id INT PRIMARY KEY, g INT, x BIGINT, f FLOAT, s TEXT, ok BOOL); \
+         INSERT INTO p SELECT i, i % 37, i::bigint * 7919 % 100003 - 50000, \
+           CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 1000) * 0.1 + 1e-9 * i END, \
+           'name ' || (i % 101), i % 3 = 0 FROM generate_series(1, 60000) i",
+    )
+    .unwrap();
+    let queries = [
+        "SELECT count(*), sum(x), avg(x), min(x), max(x), sum(f), avg(f), min(s), max(s) FROM p",
+        "SELECT count(*), sum(x) FROM p WHERE x % 7 = 3 AND s LIKE 'name 1%'",
+        "SELECT g, count(*), sum(x), avg(f), min(s), bool_and(ok), bool_or(ok) FROM p GROUP BY g",
+        "SELECT s, count(*), sum(f), max(x) FROM p GROUP BY s",
+        "SELECT ok, array_agg(id) FROM p WHERE id % 1000 = 7 GROUP BY ok",
+        "SELECT g % 5, sum(x * 2), count(f) FROM p WHERE f > 50 GROUP BY 1",
+        "SELECT count(*) FROM p WHERE id > 59990",
+        "SELECT string_agg(s, ',') FROM p WHERE id < 5",
+        "SELECT sum(100 / (id - 45000)) FROM p",
+        "SELECT sum(x * 9223372036854775) FROM p",
+        "SELECT * FROM p WHERE x % 7 = 3",
+        "SELECT id, s FROM p WHERE s LIKE '%7' LIMIT 25",
+        "SELECT id, 100 / (id - 45000) FROM p WHERE id > 0",
+        "SELECT id, 100 / (id - 45000) FROM p WHERE id > 0 LIMIT 10",
+        "SELECT id FROM p WHERE id BETWEEN 20000 AND 40000 AND ok",
+        "SELECT g, count(*) FROM (SELECT * FROM p WHERE f < 10) q GROUP BY g ORDER BY g",
+    ];
+    let mut one = session(&db, 1024);
+    one.execute("SET parallel_workers = 1").unwrap();
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    let before = nucleus_sql::vector::parallel_runs();
+    for q in queries {
+        assert_eq!(outcome(&mut many, q), outcome(&mut one, q), "{q}");
+    }
+    assert!(
+        nucleus_sql::vector::parallel_runs() - before >= 10,
+        "the aggregates ran in parallel"
+    );
+}

@@ -26,6 +26,39 @@ pub struct Budget {
     /// Rows per batch of the vectorized executor (`batch_size`; 0: off;
     /// `None`: [`DEFAULT_BATCH`]).
     pub batch: Option<usize>,
+    /// Threads a statement may use (`parallel_workers`, resolved: at least
+    /// 1; `None`: 1).
+    pub workers: Option<usize>,
+}
+
+/// The threads the current statement may use for one scan (1: no
+/// parallelism) — 1 too where vectorized execution is off.
+pub fn workers() -> usize {
+    if batch_size() == 0 {
+        return 1;
+    }
+    SPENT.with(|s| {
+        s.borrow()
+            .as_ref()
+            .and_then(|s| s.budget.workers)
+            .unwrap_or(1)
+            .max(1)
+    })
+}
+
+/// The current statement's budget (to run its work on other threads
+/// within it).
+pub fn current() -> Option<Budget> {
+    SPENT.with(|s| s.borrow().as_ref().map(|s| s.budget.clone()))
+}
+
+/// Counts `n` rows read on another thread for the current statement.
+pub fn add_scanned(n: u64) {
+    SPENT.with(|s| {
+        if let Some(s) = s.borrow().as_ref() {
+            s.scanned.set(s.scanned.get() + n);
+        }
+    });
 }
 
 /// `batch_size` when it is not set.

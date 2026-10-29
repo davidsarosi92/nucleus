@@ -25,6 +25,7 @@ pub mod exec;
 pub mod expr;
 pub mod ext;
 pub mod fk;
+pub mod fsum;
 pub mod hint;
 pub mod inet;
 pub use nucleus_kernels as kernels;
@@ -34,6 +35,7 @@ pub mod lexer;
 pub mod lint;
 pub mod ncatalog;
 pub mod optimizer;
+pub mod parallel;
 pub mod parser;
 
 pub mod plan;

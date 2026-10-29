@@ -47,6 +47,19 @@ pub fn batch(v: &str) -> Result<usize> {
     Ok(n)
 }
 
+fn workers_text(v: &str) -> Result<String> {
+    workers(v).map(|n| n.to_string())
+}
+
+/// A `parallel_workers`: 0 (automatic) to 256.
+pub fn workers(v: &str) -> Result<usize> {
+    let n: usize = whole(v.trim().trim_matches('\''))?.parse().expect("whole");
+    if n > 256 {
+        return Err(Error::invalid_parameter("parallel_workers is at most 256"));
+    }
+    Ok(n)
+}
+
 fn none_or_all(v: &str) -> Result<String> {
     match v.trim().to_ascii_lowercase().as_str() {
         "none" => Ok("none".into()),
@@ -123,6 +136,12 @@ pub const KNOWN: &[Known] = &[
         default: "1024",
         description: "the rows a vectorized operator works on at a time (0: one row at a time — vectorized execution off)",
         check: batch_text,
+    },
+    Known {
+        name: "parallel_workers",
+        default: "0",
+        description: "the threads a statement's large scans and aggregates may use (0: as many as the database's CPUs; 1: none besides its own)",
+        check: workers_text,
     },
     Known {
         name: "password_min_length",

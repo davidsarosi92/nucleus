@@ -187,6 +187,12 @@ pub trait Kv: Send + Sync {
     /// platform's (the operating system's generator; a simulation's seed).
     fn random_bytes(&self, buf: &mut [u8]);
 
+    /// How many threads a statement's work can usefully be split across
+    /// (parallel scans, §M14.20); 1 by default.
+    fn parallelism(&self) -> usize {
+        1
+    }
+
     /// Scratch space for work too large for memory — a sort's runs, a hash
     /// join's partitions: a file of this process's alone, gone when
     /// dropped (and when the database next opens, after a crash).  The
@@ -254,6 +260,34 @@ impl Drop for FileScratch {
     }
 }
 
+/// A transaction's reads, shared by several threads at once
+/// ([`KvTxn::shared`]): the same snapshot, the transaction's own writes
+/// included, each method as [`KvTxn`]'s.
+pub trait KvRead: Sync {
+    /// [`KvTxn::read_ts`].
+    fn read_ts(&self) -> Timestamp;
+    /// [`KvTxn::get`].
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    /// [`KvTxn::scan`].
+    fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>>;
+    /// [`KvTxn::get_validated`].
+    fn get_validated(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    /// [`KvTxn::scan_validated`].
+    fn scan_validated<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>>;
+    /// [`KvTxn::scan_chunks`].
+    fn scan_chunks<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KvChunks + 'a>>;
+    /// [`KvTxn::scan_chunks_validated`].
+    fn scan_chunks_validated<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KvChunks + 'a>>;
+}
+
 /// A transaction.  Dropping it without committing rolls it back.
 pub trait KvTxn: Send {
     /// The snapshot this transaction reads.
@@ -295,6 +329,22 @@ pub trait KvTxn: Send {
         end: Bound<&[u8]>,
     ) -> Result<Box<dyn KvChunks + 'a>> {
         Ok(Box::new(IterChunks(self.scan_validated(start, end)?)))
+    }
+
+    /// The transaction's reads for other threads to share while it is
+    /// borrowed (parallel scans, §M14.20); `None` (the default) when it
+    /// cannot share them.
+    fn shared(&self) -> Option<&dyn KvRead> {
+        None
+    }
+
+    /// Up to `parts - 1` keys inside `[start, end)` (`end` `None`: no
+    /// bound) that cut it into parts of about equal size, ascending — where
+    /// a parallel scan splits its range; none (the default) when the
+    /// implementation cannot tell, or the range is small.
+    fn split_points(&self, start: &[u8], end: Option<&[u8]>, parts: usize) -> Result<Vec<Vec<u8>>> {
+        let _ = (start, end, parts);
+        Ok(Vec::new())
     }
 
     /// Sets `key` to `value`.
@@ -494,6 +544,10 @@ impl Kv for Database {
         self.platform.rng().fill_unpredictable(buf);
     }
 
+    fn parallelism(&self) -> usize {
+        self.platform.parallelism()
+    }
+
     fn scratch(&self) -> Result<Box<dyn Scratch>> {
         let fs = self.platform.fs();
         fs.create_dir_all(&self.scratch_dir)
@@ -526,6 +580,48 @@ impl Kv for Database {
 }
 
 struct LocalTxn(nucleus_txn::Transaction);
+
+/// The fewest leaves a part of a split range has: about 64 × 4 KiB, a few
+/// thousand small rows — less is not worth a thread.
+const SPLIT_MIN_LEAVES: usize = 64;
+
+impl KvRead for LocalTxn {
+    fn read_ts(&self) -> Timestamp {
+        self.0.read_ts()
+    }
+
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.0.get(key)?)
+    }
+
+    fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
+        KvTxn::scan(self, start, end)
+    }
+
+    fn get_validated(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.0.get_validated(key)?)
+    }
+
+    fn scan_validated<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
+        KvTxn::scan_validated(self, start, end)
+    }
+
+    fn scan_chunks<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KvChunks + 'a>> {
+        KvTxn::scan_chunks(self, start, end)
+    }
+
+    fn scan_chunks_validated<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KvChunks + 'a>> {
+        KvTxn::scan_chunks_validated(self, start, end)
+    }
+}
 
 impl KvTxn for LocalTxn {
     fn read_ts(&self) -> Timestamp {
@@ -564,6 +660,14 @@ impl KvTxn for LocalTxn {
         end: Bound<&[u8]>,
     ) -> Result<Box<dyn KvChunks + 'a>> {
         Ok(Box::new(ScanChunks(self.0.scan_validated(start, end)?)))
+    }
+
+    fn shared(&self) -> Option<&dyn KvRead> {
+        Some(self)
+    }
+
+    fn split_points(&self, start: &[u8], end: Option<&[u8]>, parts: usize) -> Result<Vec<Vec<u8>>> {
+        Ok(self.0.split_points(start, end, parts, SPLIT_MIN_LEAVES)?)
     }
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {

@@ -943,6 +943,9 @@ impl Builder {
     }
 }
 
+/// A primary key range: from, to (`None`: the index's end).
+type KeyRange = (Vec<u8>, Option<Vec<u8>>, Option<usize>);
+
 /// A table's rows, a batch at a time, decoded into vectors.
 struct ScanSource<'a> {
     table: &'a Table,
@@ -959,8 +962,15 @@ impl<'a> ScanSource<'a> {
         access: &'a Access,
         wanted: Option<&'a [bool]>,
         cx: Cx<'a>,
+        range: Option<KeyRange>,
     ) -> Result<Self> {
-        let entries = match crate::exec::key_range(table, access, &cx.env(&[]))? {
+        let range = match range {
+            Some(r) => Some(r),
+            None => {
+                crate::exec::key_range(table, access, &cx.env(&[]))?.map(|(s, e, _)| (s, e, None))
+            }
+        };
+        let entries = match range {
             None => None,
             Some((start, end, _)) => {
                 let end = end
@@ -1196,6 +1206,7 @@ impl<'a> Pipeline<'a> {
         ctx: &'a Ctx<'a>,
         outer: Option<&'a Env<'a>>,
         rows: bool,
+        range: Option<KeyRange>,
     ) -> Result<Option<Self>> {
         let max = crate::budget::batch_size();
         if max == 0 {
@@ -1212,7 +1223,7 @@ impl<'a> Pipeline<'a> {
         };
         let cx = Cx { ctx, outer };
         let wanted = ctx.needed.get(&(scan as *const Plan as usize));
-        let source = ScanSource::new(table, access, wanted.map(Vec::as_slice), cx)?;
+        let source = ScanSource::new(table, access, wanted.map(Vec::as_slice), cx, range)?;
         if let Some(p) = ctx.profile {
             let mut nodes: Vec<&Plan> = vec![scan];
             for (_, n) in &steps {
@@ -1322,7 +1333,23 @@ pub fn rows<'a>(
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
 ) -> Result<Option<Rows<'a>>> {
-    let Some(pipe) = Pipeline::new(plan, plan, ctx, outer, true)? else {
+    let filters = chain(plan)
+        .is_some_and(|(_, steps)| steps.iter().any(|(s, _)| matches!(s, Step::Filter(_))));
+    if filters
+        && crate::budget::batch_size() > 0
+        && let Some(work) = Morsels::new(plan, &[], ctx, outer, ROW_MORSELS_PER_WORKER)?
+    {
+        PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Ok(Some(Box::new(ParallelRows {
+            work,
+            plan,
+            next: 0,
+            rows: std::collections::VecDeque::new(),
+            err: None,
+            done: false,
+        })));
+    }
+    let Some(pipe) = Pipeline::new(plan, plan, ctx, outer, true, None)? else {
         return Ok(None);
     };
     Ok(Some(Box::new(BatchRows {
@@ -1620,24 +1647,9 @@ impl<'a> Grouping<'a> {
     }
 }
 
-/// `GROUP BY group` with `aggs` over `input`, vectorized — when the input
-/// is a pipeline and no aggregate has `DISTINCT` or `ORDER BY`.
-pub fn aggregate<'a>(
-    input: &'a Plan,
-    top: &'a Plan,
-    group: &'a [Expr],
-    aggs: &'a [Agg],
-    ctx: &'a Ctx<'a>,
-    outer: Option<&'a Env<'a>>,
-) -> Result<Option<Rows<'a>>> {
-    if aggs.iter().any(|a| a.distinct || !a.order.is_empty()) {
-        return Ok(None);
-    }
-    let Some(mut pipe) = Pipeline::new(input, top, ctx, outer, false)? else {
-        return Ok(None);
-    };
-    let cx = Cx { ctx, outer };
-    let mut g = Grouping::new(group, aggs);
+/// Feeds a pipeline's rows to `g`.
+fn feed(g: &mut Grouping, pipe: &mut Pipeline, cx: Cx) -> Result<()> {
+    let (group, aggs) = (g.group, g.aggs);
     while let Some(out) = pipe.next()? {
         match out {
             Out::Batch(b) => {
@@ -1677,7 +1689,12 @@ pub fn aggregate<'a>(
             }
         }
     }
-    if g.seen.is_empty() && group.is_empty() {
+    Ok(())
+}
+
+/// The groups' rows: key, then each aggregate's result.
+fn finish(g: &mut Grouping) -> Result<Vec<Row>> {
+    if g.seen.is_empty() && g.group.is_empty() {
         g.seen.push(Vec::new()); // aggregates over no rows
         for a in &mut g.accs {
             a.resize(1);
@@ -1691,6 +1708,32 @@ pub fn aggregate<'a>(
         }
         done.push(row);
     }
+    Ok(done)
+}
+
+/// `GROUP BY group` with `aggs` over `input`, vectorized — when the input
+/// is a pipeline and no aggregate has `DISTINCT` or `ORDER BY`.
+pub fn aggregate<'a>(
+    input: &'a Plan,
+    top: &'a Plan,
+    group: &'a [Expr],
+    aggs: &'a [Agg],
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Option<Rows<'a>>> {
+    if aggs.iter().any(|a| a.distinct || !a.order.is_empty()) {
+        return Ok(None);
+    }
+    if let Some(rows) = parallel_aggregate(input, top, group, aggs, ctx, outer)? {
+        return Ok(Some(rows));
+    }
+    let Some(mut pipe) = Pipeline::new(input, top, ctx, outer, false, None)? else {
+        return Ok(None);
+    };
+    let cx = Cx { ctx, outer };
+    let mut g = Grouping::new(group, aggs);
+    feed(&mut g, &mut pipe, cx)?;
+    let done = finish(&mut g)?;
     let runs = match g.parts.take() {
         Some(p) => p.seal()?,
         None => Vec::new(),
@@ -1703,4 +1746,334 @@ pub fn aggregate<'a>(
             }
         }),
     ))))
+}
+
+// ---------------------------------------------------------------- parallel
+
+/// Morsels per worker: enough that one slow morsel does not keep the rest
+/// waiting.
+const MORSELS_PER_WORKER: usize = 4;
+
+static PARALLEL_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many aggregates and pipelines this process has run in parallel
+/// (for tests and diagnostics).
+pub fn parallel_runs() -> u64 {
+    PARALLEL_RUNS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What one morsel's aggregation gives the merge.
+enum Part {
+    /// Its groups' keys, in the order first seen, and each aggregate's
+    /// partial state of each group.
+    Groups(Vec<Vec<Value>>, Vec<Vec<Value>>),
+    /// Its groups outgrew work_mem.
+    TooLarge,
+}
+
+/// Whether `e` gives the same values on any thread: no subqueries (they
+/// would run once per worker), nothing volatile (whose values depend on
+/// the order of calls).
+fn parallel_safe(e: &Expr) -> bool {
+    let mut safe = !e.has_subquery();
+    e.walk(&mut |x| {
+        if let Expr::Call(f, _) = x
+            && f.volatility() == crate::ext::Volatility::Volatile
+        {
+            safe = false;
+        }
+    });
+    safe
+}
+
+/// A chain's scan cut into morsels for worker threads, and what the
+/// workers share.
+struct Morsels<'a> {
+    shared: &'a dyn nucleus_kv::KvRead,
+    ctx: &'a Ctx<'a>,
+    ranges: Vec<KeyRange>,
+    workers: usize,
+}
+
+impl<'a> Morsels<'a> {
+    /// The morsels of `input`'s scan — about `per_worker` a worker — when
+    /// the chain and `exprs` can run in parallel: more than one worker, no
+    /// enclosing row, no `EXPLAIN ANALYZE`, nothing that would differ by
+    /// thread ([`parallel_safe`]), a transaction that shares its reads,
+    /// and a range the KV splits.
+    fn new(
+        input: &'a Plan,
+        exprs: &[&Expr],
+        ctx: &'a Ctx<'a>,
+        outer: Option<&'a Env<'a>>,
+        per_worker: usize,
+    ) -> Result<Option<Self>> {
+        let workers = crate::budget::workers();
+        if workers < 2 || outer.is_some() || ctx.profile.is_some() {
+            return Ok(None);
+        }
+        let Some((scan, steps)) = chain(input) else {
+            return Ok(None);
+        };
+        let Plan::Scan { table, access, .. } = scan else {
+            unreachable!("a chain ends in a scan")
+        };
+        let mut all: Vec<&Expr> = exprs.to_vec();
+        for (step, _) in &steps {
+            match step {
+                Step::Filter(p) => all.push(p),
+                Step::Project(es) => all.extend(es.iter()),
+            }
+        }
+        if !all.iter().all(|e| parallel_safe(e)) {
+            return Ok(None);
+        }
+        let Some(shared) = ctx.txn.shared() else {
+            return Ok(None);
+        };
+        let Some((start, end, _)) = crate::exec::key_range(table, access, &env(&[], ctx, outer))?
+        else {
+            return Ok(None);
+        };
+        let splits = ctx
+            .txn
+            .split_points(&start, end.as_deref(), workers * per_worker)?;
+        if splits.is_empty() {
+            return Ok(None);
+        }
+        let mut bounds = vec![start];
+        bounds.extend(splits);
+        let n = bounds.len();
+        let ranges = (0..n)
+            .map(|i| {
+                let to = if i + 1 < n {
+                    Some(bounds[i + 1].clone())
+                } else {
+                    end.clone()
+                };
+                (bounds[i].clone(), to, None)
+            })
+            .collect();
+        Ok(Some(Morsels {
+            shared,
+            ctx,
+            ranges,
+            workers,
+        }))
+    }
+
+    /// `f` over the morsels `which`, on up to `workers` threads, each with
+    /// a context of its own over the shared reads and the statement's
+    /// ambient state; the results in morsel order.  `stop`: after a morsel
+    /// fails, the later ones need not run (theirs are `None`).
+    fn run<T: Send>(
+        &self,
+        which: std::ops::Range<usize>,
+        stop: bool,
+        f: &(dyn Fn(&Ctx, KeyRange) -> Result<T> + Sync),
+    ) -> Vec<Option<Result<T>>> {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
+        let ambient = crate::parallel::Ambient::capture();
+        let ctx = self.ctx;
+        let (registry, params, needed, validated) =
+            (ctx.registry, ctx.params, &ctx.needed, ctx.validated);
+        let (shared, ranges, workers) = (self.shared, &self.ranges, self.workers);
+        let first = which.start;
+        let n = which.len();
+        let next = AtomicUsize::new(0);
+        let failed = AtomicUsize::new(usize::MAX);
+        let scanned = AtomicU64::new(0);
+        let results: Vec<Mutex<Option<Result<T>>>> = (0..n).map(|_| Mutex::new(None)).collect();
+        std::thread::scope(|sc| {
+            for _ in 0..workers.min(n) {
+                sc.spawn(|| {
+                    let ((), rows) = ambient.run(|| {
+                        loop {
+                            let m = next.fetch_add(1, SeqCst);
+                            if m >= n || (stop && m > failed.load(SeqCst)) {
+                                break;
+                            }
+                            let txn = crate::parallel::SharedTxn(shared);
+                            let mut wctx = Ctx::new(&txn, registry, params);
+                            wctx.needed = needed.clone();
+                            wctx.validated = validated;
+                            let r = f(&wctx, ranges[first + m].clone());
+                            if r.is_err() {
+                                failed.fetch_min(m, SeqCst);
+                            }
+                            *results[m].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                        }
+                    });
+                    scanned.fetch_add(rows, SeqCst);
+                });
+            }
+        });
+        crate::budget::add_scanned(scanned.into_inner());
+        results
+            .into_iter()
+            .map(|r| r.into_inner().unwrap_or_else(|e| e.into_inner()))
+            .collect()
+    }
+}
+
+/// `GROUP BY group` with `aggs` over the pipeline `input`, in parallel: the
+/// scan's key range cut into morsels at the KV's split points, each
+/// aggregated by a worker thread on its own, the morsels' partial states
+/// combined in key order — so groups come out in the order a single pass
+/// sees them, with the same results (sums of doubles are exact, so their
+/// order does not matter).  `None` when it cannot run so: one worker, an
+/// enclosing row, `EXPLAIN ANALYZE`, a subquery or volatile function, an
+/// aggregate that cannot combine states, a transaction that cannot share
+/// its reads, a range too small to split — or groups past work_mem (then
+/// the single pass partitions them).
+fn parallel_aggregate<'a>(
+    input: &'a Plan,
+    top: &'a Plan,
+    group: &'a [Expr],
+    aggs: &'a [Agg],
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Option<Rows<'a>>> {
+    let _ = top;
+    if !aggs
+        .iter()
+        .all(|a| a.func.grouped().is_some_and(|g| g.combinable()))
+    {
+        return Ok(None);
+    }
+    let exprs: Vec<&Expr> = group
+        .iter()
+        .chain(aggs.iter().flat_map(|a| &a.args))
+        .collect();
+    let Some(work) = Morsels::new(input, &exprs, ctx, outer, MORSELS_PER_WORKER)? else {
+        return Ok(None);
+    };
+    let results = work.run(0..work.ranges.len(), true, &|wctx, range| {
+        morsel(input, group, aggs, wctx, range)
+    });
+    // The morsels in key order: the first error is the one a single pass
+    // meets first.
+    let mut g = Grouping::new(group, aggs);
+    for r in results {
+        match r {
+            Some(Err(e)) => return Err(e),
+            Some(Ok(Part::TooLarge)) => return Ok(None),
+            Some(Ok(Part::Groups(keys, states))) => {
+                let mut states: Vec<std::vec::IntoIter<Value>> =
+                    states.into_iter().map(Vec::into_iter).collect();
+                for key in keys {
+                    let Some(gid) = g.group_of(&|| key.clone(), None) else {
+                        return Ok(None); // past work_mem: the single pass partitions
+                    };
+                    for (acc, st) in g.accs.iter_mut().zip(&mut states) {
+                        let state = st
+                            .next()
+                            .ok_or_else(|| Error::internal("a partial state missing"))?;
+                        acc.combine(gid as usize, state)?;
+                    }
+                }
+            }
+            None => return Err(Error::internal("a morsel not aggregated")),
+        }
+    }
+    let done = finish(&mut g)?;
+    PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(Some(Box::new(done.into_iter().map(Ok))))
+}
+
+/// One morsel's aggregation, on a worker.
+fn morsel(input: &Plan, group: &[Expr], aggs: &[Agg], ctx: &Ctx, range: KeyRange) -> Result<Part> {
+    let Some(mut pipe) = Pipeline::new(input, input, ctx, None, false, Some(range))? else {
+        return Err(Error::internal("a morsel's pipeline"));
+    };
+    let mut g = Grouping::new(group, aggs);
+    feed(&mut g, &mut pipe, Cx { ctx, outer: None })?;
+    if g.parts.is_some() {
+        return Ok(Part::TooLarge);
+    }
+    let count = g.seen.len();
+    let states = g
+        .accs
+        .iter_mut()
+        .map(|a| (0..count).map(|i| a.partial(i)).collect::<Result<Vec<_>>>())
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Part::Groups(std::mem::take(&mut g.seen), states))
+}
+
+/// Morsels per worker of a pipeline whose output becomes rows: small, as a
+/// round holds a morsel's rows per worker.
+const ROW_MORSELS_PER_WORKER: usize = 16;
+
+/// A pipeline run in parallel, as rows: rounds of a morsel per worker,
+/// each round's rows given in morsel order — the order, rows and errors of
+/// a single pass (a `LIMIT` above stops after the round it needs).
+struct ParallelRows<'a> {
+    work: Morsels<'a>,
+    plan: &'a Plan,
+    next: usize,
+    rows: std::collections::VecDeque<Row>,
+    err: Option<Error>,
+    done: bool,
+}
+
+impl Iterator for ParallelRows<'_> {
+    type Item = Result<Row>;
+
+    fn next(&mut self) -> Option<Result<Row>> {
+        loop {
+            if let Some(r) = self.rows.pop_front() {
+                return Some(Ok(r));
+            }
+            if let Some(e) = self.err.take() {
+                self.done = true;
+                return Some(Err(e));
+            }
+            let total = self.work.ranges.len();
+            if self.done || self.next >= total {
+                return None;
+            }
+            let end = (self.next + self.work.workers).min(total);
+            let plan = self.plan;
+            let results = self.work.run(self.next..end, false, &|wctx, range| {
+                morsel_rows(plan, wctx, range)
+            });
+            self.next = end;
+            for r in results {
+                let (rows, err) = match r {
+                    Some(Ok(x)) => x,
+                    Some(Err(e)) => (Vec::new(), Some(e)),
+                    None => (Vec::new(), Some(Error::internal("a morsel not run"))),
+                };
+                self.rows.extend(rows);
+                if let Some(e) = err {
+                    self.err = Some(e);
+                    self.next = total;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// One morsel's rows, on a worker: the rows, and the error that ended
+/// them (if one did).
+fn morsel_rows(plan: &Plan, ctx: &Ctx, range: KeyRange) -> Result<(Vec<Row>, Option<Error>)> {
+    let Some(mut pipe) = Pipeline::new(plan, plan, ctx, None, true, Some(range))? else {
+        return Err(Error::internal("a morsel's pipeline"));
+    };
+    let mut out = Vec::new();
+    loop {
+        match pipe.next() {
+            Ok(None) => return Ok((out, None)),
+            Ok(Some(Out::Batch(b))) => out.extend(b.sel.iter().map(|i| b.row(i))),
+            Ok(Some(Out::Rows(rows, err))) => {
+                out.extend(rows);
+                if err.is_some() {
+                    return Ok((out, err));
+                }
+            }
+            Err(e) => return Ok((out, Some(e))),
+        }
+    }
 }

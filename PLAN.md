@@ -1409,8 +1409,14 @@ time vectors; every kernel at every level the CPU has checked against
 its scalar reference, the references against SQL's definitions; the
 crate is the workspace's one exception to forbidden unsafe code, for the
 call into a detected level.  Numerics stay value by value; `vector`
-distances come with the type, §M14.12); V4 parallel execution ⬜ (split
-points, shared snapshots, morsels); V5 page compression ⬜; V6 table
+distances come with the type, §M14.12); V4 parallel execution ✅ (the
+KV contract's `split_points`, `shared` reads and `parallelism`; morsels
+of a pipeline's scan on worker threads, aggregates combining partial
+states — a capability — and filtering pipelines giving their rows by
+rounds, both in key order, so results, their order and errors are a
+single pass's; exact sums of doubles; `parallel_workers`; scans and
+aggregates of a million rows 1.5–1.8× PostgreSQL's ten workers, from
+5–6×.  Left: joins and sorts in parallel); V5 page compression ⬜; V6 table
 storage as a module ⬜ (one trait, `row` behind it); V7 columnar storage
 ⬜ (segments, delta store, visibility map, min / max); V8 storage per
 table and per column, converted online ⬜; V9 partitioning ⬜ (range,
@@ -2117,6 +2123,10 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-29** — §M14.20 V4: parallel execution — morsels at the KV's
+  split points on worker threads, partial aggregate states combined in key
+  order, filtering pipelines in rounds; `parallel_workers`; exact double
+  sums.  A million-row `sum` 77 → 27 ms.
 - **2026-10-29** — §M14.20 V3: batch kernels per CPU level
   (`nucleus-kernels`), tested against scalar references; text and date /
   time vectors, `LIKE` and string comparisons in kernels.  A million-row

@@ -159,6 +159,12 @@ thread_local! {
     static NOW: RefCell<Option<(i64, Arc<dyn Kv>)>> = const { RefCell::new(None) };
 }
 
+/// The statement's time and clock (to run its work on other threads with
+/// them).
+pub fn current() -> Option<(i64, Arc<dyn Kv>)> {
+    NOW.with(|n| n.borrow().clone())
+}
+
 /// A wall-clock time as a timestamp (µs since 2000-01-01).
 pub fn from_system(t: SystemTime) -> i64 {
     let since = t.duration_since(UNIX_EPOCH).unwrap_or_default();

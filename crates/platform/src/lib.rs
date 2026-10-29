@@ -39,6 +39,12 @@ pub trait Platform: Send + Sync {
     fn clock(&self) -> &dyn Clock;
     /// The source of randomness (not cryptographic).
     fn rng(&self) -> &dyn Rng;
+    /// How many threads work can usefully run on at once (the CPUs the
+    /// process may use); 1 by default — and in the simulation, so its runs
+    /// stay single-threaded unless a test asks for more.
+    fn parallelism(&self) -> usize {
+        1
+    }
 }
 
 /// How [`FileSystem::open`] opens a file.  Every mode except `ReadOnly`

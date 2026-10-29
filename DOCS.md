@@ -120,7 +120,9 @@ principle 4).
 
 ### 3.1 Interface
 
-- `Platform` — `fs()`, `clock()`, `rng()`.
+- `Platform` — `fs()`, `clock()`, `rng()`, `parallelism()` (the threads
+  work can usefully run on: the CPUs on the real platform, 1 in the
+  simulation).
 - `FileSystem` — `open(path, OpenMode)`, `remove_file`, `rename` (atomic
   replace), `create_dir_all`, `list_dir` (sorted names), `exists`,
   `sync_dir`.
@@ -493,6 +495,8 @@ distributed implementation will provide (§F3).
   `back_off(attempt)` — the wait before a retry (exponential with
   jitter, through the platform, so a simulation does not wait);
   `random_bytes(buf)` — unpredictable bytes from the platform;
+  `parallelism()` — the threads a statement may split its work across
+  (default 1; the local implementation's platform's);
   `scratch()` — scratch space for work too large for memory (a
   `Scratch`: `write_at`, `read_at`), private, gone when dropped; by
   default in memory (`MemoryScratch`), for the local implementation files
@@ -504,7 +508,12 @@ distributed implementation will provide (§F3).
   `CHUNK_ENTRIES` keys and values packed into one buffer the caller
   reuses, so a large read allocates nothing per entry; provided over
   `scan`, the local implementation fills chunks straight from the
-  engine), `put(&mut self)`,
+  engine), `shared()` (the transaction's reads as a `KvRead` — the same
+  read methods, `Sync` — for worker threads to share while it is borrowed;
+  default `None`), `split_points(start, end, parts)` (up to `parts - 1`
+  keys cutting a range into parts of about equal size, from the B+tree's
+  internal nodes, none smaller than 64 leaves; default none),
+  `put(&mut self)`,
   `delete(&mut self)`,
   `commit(self: Box<Self>) -> Timestamp`, `rollback`.  Reads take `&self`
   so a scan can stay open while the same transaction reads keys.
@@ -1063,6 +1072,28 @@ three on chosen, failing and random queries.  Integer `sum` and `avg`
 accumulate exactly (128 bits), so a sum overflows only when its result
 does, whatever the order.
 
+**Parallelism** (`vector`, `parallel`, §M14.20).  A pipeline's scan
+splits into morsels at the KV's split points (`split_points`), run by
+worker threads — up to `parallel_workers` (default 0: as many as the
+database's CPUs, `Kv::parallelism`; 1 turns it off; the simulation
+offers one) — each with its own execution context over the
+transaction's shared reads (`KvTxn::shared`) and the statement's
+ambient state (who runs it, its time, its budget and deadline).  An
+aggregate's morsels are aggregated apart and their partial states
+combined in key order (`GroupAccumulator::partial` / `combine`, a
+capability: an aggregate without it — `string_agg`, whose separators
+belong to rows — runs in one pass); a pipeline whose output becomes rows
+runs in rounds of a morsel per worker, each round's rows given in morsel
+order.  So the result is a single pass's — groups in the order first
+seen, rows in key order, the first error the one a single pass meets, a
+`LIMIT` stopping after the round it needs.  Sums of doubles and reals are
+exact (Shewchuk's partials, rounded once — `fsum`), so they do not depend
+on the order either.  Not in parallel: an enclosing row (a correlated
+subquery), `EXPLAIN ANALYZE`, a subquery or volatile function in the
+pipeline, groups past `work_mem` (then the single pass partitions).  The
+buffer pool reads a missing page without holding its lock, so workers
+reading cold pages do not wait on each other.
+
 **Memory** (`spill`, §M14.11).  What an operator holds is bounded by
 `work_mem` (`SET work_mem = '256MB'`, or the database's setting; default
 64 MiB): past it, the rest goes to scratch space — the KV contract's
@@ -1372,7 +1403,9 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   (`resize(groups)`, `update(rows, groups, &[&Vector])`, `finish(group)`):
   the states of many groups fed a batch at a time by the vectorized
   executor (§8.5) — a capability; without it the accumulators are fed row
-  by row, with the same result.
+  by row, with the same result.  With `combinable()`, `partial(group)` and
+  `combine(group, partial)` too, its groups are aggregated in parallel:
+  each worker's state as a value, combined in key order.
 - `TableFunction` — `name()`, `arity()`, `resolve(&[ArgInfo]) ->
   TableSignature` (per argument, and the output columns; one column for
   now, named after the function or its alias), `rows(&CallContext,
@@ -1667,7 +1700,8 @@ name = value | RESET name` (an administrator's; `dbsettings.rs`, catalog
 (default 1), `password_lifetime` (an interval, default `infinity`),
 `statement_timeout` (default `0`, none), `login_lock_failures` (10),
 `login_lock_time` (`15 minutes`), `work_mem` (`64MB`, §8.5), `batch_size`
-(`1024`, 0 – 65536, §8.5); a duration
+(`1024`, 0 – 65536, §8.5), `parallel_workers` (`0`, automatic; up to 256,
+§8.5); a duration
 is milliseconds, `5s`, `100ms`, `2min`, `1h`, `1d` or an interval; a
 memory size kB, or with `B`, `kB`, `MB`, `GB`, `TB` (at least 64 kB).  *Passwords*: at least
 `password_min_length` characters and not the role's name (`22023`; a
@@ -2151,6 +2185,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-29 — §M14.20 parallel execution (V4):** the KV contract's
+  `shared`, `split_points` and `parallelism`; aggregates and filtering
+  pipelines run on worker threads by morsels, combined in key order;
+  `parallel_workers`; exact sums of doubles.  A million-row `sum` 77 → 27
+  ms, the 1000-group `GROUP BY` 100 → 37 ms.
 - **2026-10-29 — §M14.20 batch kernels (V3):** `nucleus-kernels` —
   comparisons, arithmetic, sums, minima and maxima, selection, string
   equality and `LIKE`, hashing — per CPU level (AVX2, AVX-512, NEON),

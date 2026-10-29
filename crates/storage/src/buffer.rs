@@ -190,13 +190,41 @@ impl BufferPool {
 
     /// Pins page `id`, reading it from the pager on a miss.
     pub fn fetch(&self, id: PageId) -> Result<PageRef<'_>> {
-        let mut inner = self.lock();
-        if let Some(&frame) = inner.table.get(&id) {
-            self.hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(self.pin(frame, id));
+        loop {
+            let epoch = {
+                let inner = self.lock();
+                if let Some(&frame) = inner.table.get(&id) {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(self.pin(frame, id));
+                }
+                self.writebacks.load(Ordering::Acquire)
+            };
+            // Read without the pool's lock, so other threads' fetches go on
+            // meanwhile (a parallel scan's workers, reading cold pages).
+            let page = self.pager.read_page(id)?;
+            let inner = self.lock();
+            if let Some(&frame) = inner.table.get(&id) {
+                // Another thread read it meanwhile.
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return Ok(self.pin(frame, id));
+            }
+            if self.writebacks.load(Ordering::Acquire) != epoch {
+                // A page went back to the file meanwhile — perhaps this one,
+                // newer than what was read: read it again.
+                continue;
+            }
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            return self.load(inner, id, page);
         }
-        self.misses.fetch_add(1, Ordering::Relaxed);
-        let page = self.pager.read_page(id)?;
+    }
+
+    /// Puts `page`, just read, in a frame for `id`.
+    fn load(
+        &self,
+        mut inner: std::sync::MutexGuard<'_, Inner>,
+        id: PageId,
+        page: Page,
+    ) -> Result<PageRef<'_>> {
         let frame = self.victim(&mut inner)?;
         *self
             .frame(frame)

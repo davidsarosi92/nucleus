@@ -220,6 +220,78 @@ impl BTree {
         }
     }
 
+    /// Up to `parts - 1` keys inside `(start, end)` (`end` `None`: no
+    /// upper bound) that cut the range into parts of about as many leaves
+    /// each — none smaller than `min_leaves` leaves; ascending.  Read from
+    /// the internal nodes over the range, down to the level above the
+    /// leaves (or to where a level spans more than 4096 nodes), so it
+    /// costs a few pages.  What parallel scans split their work by.
+    pub fn split_keys(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        parts: usize,
+        min_leaves: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        let inside = |k: &[u8]| k > start && end.is_none_or(|e| k < e);
+        let mut level = vec![self.root];
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        loop {
+            let mut next = Vec::new();
+            let mut found = Vec::new();
+            let mut leaves = false;
+            for &id in &level {
+                let r = self.pool.fetch(id)?;
+                let page = r.read();
+                let corrupt = |reason| Error::Corrupt { page: id, reason };
+                let v = View::new(&page).map_err(corrupt)?;
+                if v.is_leaf() {
+                    leaves = true;
+                    break;
+                }
+                // Child i holds the keys in [key(i - 1), key(i)).
+                for i in 0..=v.len() {
+                    let lo = if i == 0 {
+                        None
+                    } else {
+                        Some(v.key(i - 1).map_err(corrupt)?)
+                    };
+                    let hi = if i == v.len() {
+                        None
+                    } else {
+                        Some(v.key(i).map_err(corrupt)?)
+                    };
+                    let after_start = hi.is_none_or(|h| h > start);
+                    let before_end = match (lo, end) {
+                        (Some(l), Some(e)) => l < e,
+                        _ => true,
+                    };
+                    if after_start && before_end {
+                        next.push(v.child(i).map_err(corrupt)?);
+                        if let Some(l) = lo
+                            && inside(l)
+                        {
+                            found.push(l.to_vec());
+                        }
+                    }
+                }
+            }
+            if leaves {
+                break; // `keys` are the separators of the leaves
+            }
+            keys = found;
+            if next.len() > 4096 {
+                break;
+            }
+            level = next;
+        }
+        // Here each key starts a leaf (or a subtree of several).
+        let parts = parts.min((keys.len() + 1) / min_leaves.max(1)).max(1);
+        Ok((1..parts)
+            .map(|j| keys[j * keys.len() / parts].clone())
+            .collect())
+    }
+
     /// A cursor, positioned before the first entry.
     pub fn cursor(&self) -> Result<Cursor<'_>> {
         let mut c = Cursor {
