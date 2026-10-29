@@ -67,18 +67,30 @@ pub fn decode_key(key: &[u8]) -> Option<(Vec<u8>, u64)> {
 /// buffer reused).
 pub fn decode_key_into(key: &[u8], user: &mut Vec<u8>) -> Option<u64> {
     user.clear();
-    let mut rest = key;
-    loop {
-        let z = rest.iter().position(|&b| b == 0)?;
-        user.extend_from_slice(&rest[..z]);
-        match rest.get(z + 1) {
+    decode_key_onto(key, user)
+}
+
+/// [`decode_key`], the user key appended to `out`.
+pub fn decode_key_onto(key: &[u8], user: &mut Vec<u8>) -> Option<u64> {
+    // Byte by byte: user keys hold many short runs between zeros (the
+    // big-endian ids of tables and indexes), too short for a search.
+    user.reserve(key.len());
+    let mut i = 0;
+    while i < key.len() {
+        let b = key[i];
+        if b != 0 {
+            user.push(b);
+            i += 1;
+            continue;
+        }
+        match key.get(i + 1) {
             Some(0xFF) => {
                 user.push(0);
-                rest = &rest[z + 2..];
+                i += 2;
             }
             Some(0) => {
-                let ts = rest.get(z + 2..z + 10)?;
-                if rest.len() != z + 10 {
+                let ts = key.get(i + 2..i + 10)?;
+                if key.len() != i + 10 {
                     return None;
                 }
                 return Some(u64::MAX - u64::from_be_bytes(ts.try_into().ok()?));
@@ -86,6 +98,7 @@ pub fn decode_key_into(key: &[u8], user: &mut Vec<u8>) -> Option<u64> {
             _ => return None,
         }
     }
+    None
 }
 
 /// The first reserved store key: the side area.

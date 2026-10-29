@@ -720,7 +720,7 @@ fn in_values<'v>(
     })
 }
 
-fn unary(op: UnaryOp, v: Value) -> Result<Value> {
+pub(crate) fn unary(op: UnaryOp, v: Value) -> Result<Value> {
     Ok(match (op, v) {
         (_, Value::Null) => Value::Null,
         (UnaryOp::Not, v) => Value::Bool(!v.truth()?.expect("not null")),
@@ -949,7 +949,7 @@ fn as_decimal(v: &Value) -> Decimal {
 /// PostgreSQL's float result checks: an infinite result from finite
 /// operands overflows; a zero product or quotient from nonzero operands
 /// underflows (`22003`).
-fn check_float(
+pub(crate) fn check_float(
     op: BinaryOp,
     inf: bool,
     zero: bool,

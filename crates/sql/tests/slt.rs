@@ -24,6 +24,23 @@ fn db() -> Arc<dyn Kv> {
 /// picks some).
 #[test]
 fn sqllogictest_scripts() {
+    scripts_with(None);
+}
+
+/// The scripts again a row at a time (the vectorized executor off): the
+/// same results (PLAN.md §M14.20).
+#[test]
+fn sqllogictest_scripts_row_at_a_time() {
+    scripts_with(Some(0));
+}
+
+/// The scripts again in batches of three rows: batch boundaries everywhere.
+#[test]
+fn sqllogictest_scripts_in_small_batches() {
+    scripts_with(Some(3));
+}
+
+fn scripts_with(batch: Option<usize>) {
     let mut failures = Vec::new();
     let mut ran = 0;
     for (name, script) in nucleus_testkit::core_scripts() {
@@ -31,8 +48,13 @@ fn sqllogictest_scripts() {
             continue;
         }
         let db = db();
-        let mut connect =
-            || -> Box<dyn Connection> { Box::new(Local(Session::new(Arc::clone(&db)))) };
+        let mut connect = || -> Box<dyn Connection> {
+            let mut s = Session::new(Arc::clone(&db));
+            if let Some(n) = batch {
+                s.execute(&format!("SET batch_size = {n}")).unwrap();
+            }
+            Box::new(Local(s))
+        };
         failures.extend(run_script(script, name, &mut connect));
         ran += 1;
     }

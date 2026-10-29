@@ -1393,10 +1393,14 @@ KV contract's `scan_chunks` packs entries into one reused buffer, and the
 B+tree and the engine fill it through reused buffers; `count(*)` 360 →
 200 ms, `sum` 430 → 265 ms; what is left is the executor's value per
 cell);
-V2 the vectorized executor ⬜ (batches with selection vectors through
-scans, filters, projections, aggregates and limits; kernels for the
-built-in types, value by value for the rest; a setting to turn it off,
-the whole test suite run both ways); V3 SIMD kernels chosen at run time,
+V2 the vectorized executor ✅ (pipelines of a scan and the filters and
+projections above it a batch at a time — typed vectors with a selection;
+kernels for integer, double and boolean arithmetic, comparisons and logic,
+the rest value by value or row by row; vectorized aggregates through the
+`Aggregate::grouped` capability; a failing batch run again row by row, so
+results and errors are the row executor's; `batch_size`, the test kit's
+scripts run with it at 0, 3 and 1024; `sum` 265 → 90 ms.  Left for later
+steps: joins, sorts and string kernels in batches); V3 SIMD kernels chosen at run time,
 each against its scalar reference ⬜; V4 parallel execution ⬜ (split
 points, shared snapshots, morsels); V5 page compression ⬜; V6 table
 storage as a module ⬜ (one trait, `row` behind it); V7 columnar storage
@@ -2105,6 +2109,10 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-29** — §M14.20 V2: the vectorized executor — pipelines,
+  kernels, vectorized aggregates (`Aggregate::grouped`), `batch_size`;
+  integer sums exact in 128 bits (order-independent).  A million-row
+  `sum` 265 → 90 ms.
 - **2026-10-29** — §M14.20 started; steps V1–V10 recorded.  V1: batch
   reads through the stack — the KV contract's `scan_chunks`, the B+tree
   and the engine reading through reused buffers (`count(*)` of a million

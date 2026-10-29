@@ -12,11 +12,12 @@ use crate::binder::arith_type;
 use crate::error::{Error, Result};
 use crate::expr::Func;
 use crate::ext::{
-    Accumulator, Aggregate, Arg, ArgInfo, CallContext, Equality, FnRef, Hashing, KeyEncoding,
-    Module, Registry, Returns, ScalarFunction, Signature, TableFunction, TableSignature,
-    TotalOrder, Type, Volatility, common_type,
+    Accumulator, Aggregate, Arg, ArgInfo, CallContext, Equality, FnRef, GroupAccumulator, Hashing,
+    KeyEncoding, Module, Registry, Returns, ScalarFunction, Signature, TableFunction,
+    TableSignature, TotalOrder, Type, Volatility, common_type,
 };
 use crate::types::{DataType, Row, Value};
+use crate::vector::Vector;
 
 /// The built-in module.
 pub struct Builtin;
@@ -568,13 +569,14 @@ impl Aggregate for BuiltinAgg {
     }
 
     fn start(&self) -> Box<dyn Accumulator> {
-        Box::new(Acc {
+        Box::new(Acc::new(self.0))
+    }
+
+    fn grouped(&self) -> Option<Box<dyn GroupAccumulator>> {
+        Some(Box::new(Grouped {
             func: self.0,
-            count: 0,
-            value: Value::Null,
-            text: None,
-            items: None,
-        })
+            accs: Vec::new(),
+        }))
     }
 }
 
@@ -589,12 +591,127 @@ struct Acc {
     text: Option<String>,
     /// `array_agg` so far.
     items: Option<Vec<Value>>,
+    /// The integers summed so far (`sum`, `avg`): exactly, whatever their
+    /// order, so a sum overflows only if its result does.
+    int: Option<i128>,
+}
+
+impl Acc {
+    fn new(func: AggFunc) -> Self {
+        Acc {
+            func,
+            count: 0,
+            value: Value::Null,
+            text: None,
+            items: None,
+            int: None,
+        }
+    }
+
+    /// Adds an integer to a `sum` or `avg`.
+    fn add_int(&mut self, i: i64) {
+        self.int = Some(self.int.unwrap_or(0) + i128::from(i));
+        if self.func == AggFunc::Avg {
+            self.count += 1;
+        }
+    }
+
+    /// The running sum: the integers' with the other values'.
+    fn total(&mut self) -> Result<Value> {
+        let value = std::mem::replace(&mut self.value, Value::Null);
+        let Some(int) = self.int.take() else {
+            return Ok(value);
+        };
+        let int = match i64::try_from(int) {
+            Ok(i) if self.func == AggFunc::Sum => Value::Int(i),
+            Err(_) if self.func == AggFunc::Sum && value.is_null() => {
+                return Err(Error::out_of_range("bigint out of range"));
+            }
+            _ => Value::Numeric(crate::decimal::Decimal::new(int, 0)?),
+        };
+        if value.is_null() {
+            Ok(int)
+        } else {
+            crate::expr::binary(BinaryOp::Add, value, int)
+        }
+    }
+}
+
+/// The built-in aggregates over many groups, fed a batch at a time: each
+/// group's state an [`Acc`], updated in place from typed vectors — the same
+/// state the row-at-a-time path builds.
+struct Grouped {
+    func: AggFunc,
+    accs: Vec<Acc>,
+}
+
+impl GroupAccumulator for Grouped {
+    fn resize(&mut self, groups: usize) {
+        let func = self.func;
+        self.accs.resize_with(groups, || Acc::new(func));
+    }
+
+    fn update(&mut self, rows: &[u32], groups: &[u32], args: &[&Vector]) -> Result<()> {
+        use AggFunc::*;
+        let pairs = rows
+            .iter()
+            .zip(groups)
+            .map(|(&r, &g)| (r as usize, g as usize));
+        match (self.func, args.first()) {
+            (Count, _) => {
+                for (_, g) in pairs {
+                    self.accs[g].count += 1;
+                }
+            }
+            (Sum | Avg, Some(Vector::Int(v, _))) => {
+                for (r, g) in pairs {
+                    self.accs[g].add_int(v[r]);
+                }
+            }
+            (Min | Max, Some(Vector::Int(v, _))) => {
+                let min = self.func == Min;
+                for (r, g) in pairs {
+                    let acc = &mut self.accs[g];
+                    let x = v[r];
+                    match acc.value {
+                        Value::Int(cur) => {
+                            if (min && x < cur) || (!min && x > cur) {
+                                acc.value = Value::Int(x);
+                            }
+                        }
+                        Value::Null => acc.value = Value::Int(x),
+                        _ => acc.add(&[Value::Int(x)])?,
+                    }
+                }
+            }
+            (_, Some(_)) => {
+                for (r, g) in pairs {
+                    let vals: Vec<Value> = args.iter().map(|a| a.value(r)).collect();
+                    self.accs[g].add(&vals)?;
+                }
+            }
+            (_, None) => {
+                for (_, g) in pairs {
+                    self.accs[g].add(&[])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, group: usize) -> Result<Value> {
+        self.accs[group].finish()
+    }
 }
 
 impl Accumulator for Acc {
     fn add(&mut self, args: &[Value]) -> Result<()> {
         let add = |a: Value, b: Value| crate::expr::binary(BinaryOp::Add, a, b);
         let v = args.first().cloned().unwrap_or(Value::Null);
+        if let (AggFunc::Sum | AggFunc::Avg, Value::Int(i)) = (self.func, &v) {
+            self.add_int(*i);
+            return Ok(());
+        }
         match self.func {
             AggFunc::Count => self.count += 1,
             AggFunc::Sum => {
@@ -674,7 +791,8 @@ impl Accumulator for Acc {
     fn finish(&mut self) -> Result<Value> {
         Ok(match self.func {
             AggFunc::Count => Value::Int(self.count),
-            AggFunc::Avg => match std::mem::replace(&mut self.value, Value::Null) {
+            AggFunc::Sum => self.total()?,
+            AggFunc::Avg => match self.total()? {
                 _ if self.count == 0 => Value::Null,
                 Value::Numeric(d) => {
                     Value::Numeric(d.checked_div(crate::decimal::Decimal::from_i64(self.count))?)

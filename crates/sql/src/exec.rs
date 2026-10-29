@@ -44,6 +44,20 @@ fn build_node<'a>(
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
 ) -> Result<Rows<'a>> {
+    // A batch at a time where it can be (PLAN.md §M14.20).
+    match plan {
+        Plan::Scan { .. } | Plan::Filter { .. } | Plan::Secure { .. } | Plan::Project { .. } => {
+            if let Some(rows) = crate::vector::rows(plan, ctx, outer)? {
+                return Ok(rows);
+            }
+        }
+        Plan::Aggregate { input, group, aggs } => {
+            if let Some(rows) = crate::vector::aggregate(input, plan, group, aggs, ctx, outer)? {
+                return Ok(rows);
+            }
+        }
+        _ => {}
+    }
     Ok(match plan {
         Plan::Scan {
             table,
@@ -537,7 +551,7 @@ fn key_bound(v: Value, t: DataType) -> Option<Value> {
 }
 
 /// The KV key range an access path reads: `(start, end, index)`.
-fn key_range(
+pub(crate) fn key_range(
     table: &Table,
     access: &Access,
     e: &Env,
@@ -1178,7 +1192,7 @@ fn feed_row(agg: &Agg, st: &mut AggState, e: &Env, bytes: &mut usize) -> Result<
 /// work_mem; past it, rows of groups already there still go to them, and
 /// rows of new groups to partitions (by group key), each aggregated in
 /// turn after the input — so no accumulator ever leaves memory.
-fn aggregate<'a>(
+pub(crate) fn aggregate<'a>(
     rows: Rows<'a>,
     group: &'a [Expr],
     aggs: &'a [Agg],

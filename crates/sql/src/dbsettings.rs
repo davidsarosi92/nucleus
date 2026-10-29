@@ -34,6 +34,19 @@ fn positive(v: &str) -> Result<String> {
     }
 }
 
+fn batch_text(v: &str) -> Result<String> {
+    batch(v).map(|n| n.to_string())
+}
+
+/// A `batch_size`: rows, at most 65536.
+pub fn batch(v: &str) -> Result<usize> {
+    let n: usize = whole(v.trim().trim_matches('\''))?.parse().expect("whole");
+    if n > 1 << 16 {
+        return Err(Error::invalid_parameter("batch_size is at most 65536"));
+    }
+    Ok(n)
+}
+
 fn none_or_all(v: &str) -> Result<String> {
     match v.trim().to_ascii_lowercase().as_str() {
         "none" => Ok("none".into()),
@@ -104,6 +117,12 @@ pub const KNOWN: &[Known] = &[
         default: "64MB",
         description: "the memory each sort, hash table and materialised result of a statement holds before the rest goes to scratch space",
         check: memory_text,
+    },
+    Known {
+        name: "batch_size",
+        default: "1024",
+        description: "the rows a vectorized operator works on at a time (0: one row at a time — vectorized execution off)",
+        check: batch_text,
     },
     Known {
         name: "password_min_length",

@@ -608,7 +608,7 @@ pub fn decode_some(
 }
 
 /// Moves past one value's row encoding without building it.
-fn skip_value(r: &mut Reader) -> Result<()> {
+pub(crate) fn skip_value(r: &mut Reader) -> Result<()> {
     let bad = |_| Error::internal("malformed row encoding");
     let fixed = |r: &mut Reader, n: usize| r.take(n).map(|_| ()).map_err(bad);
     match r.peek() {

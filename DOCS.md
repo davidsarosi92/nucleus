@@ -1013,6 +1013,39 @@ operations, CTEs and recursion.  Subqueries' own plans decode whole
 rows.  A grand total (an aggregate without `GROUP BY`) keeps one state,
 hashing no key.
 
+**Batches** (`vector`, §M14.20).  A table scan by the primary key (or of
+every row) and the filters and projections above it run as a *pipeline*,
+a batch at a time: a vector per column — integers, doubles and booleans
+typed, with a `NULL` mask; other types a value per row; a column nothing
+reads a `NULL` constant — and a selection of the rows still in play.  The
+first batch is 64 rows, each next one twice the last, up to `batch_size`
+(default 1024; `SET batch_size = 0` runs everything a row at a time).
+Rows are decoded from the stored encoding straight into the vectors.
+Expressions are evaluated a batch per call: kernels for integer and
+double arithmetic and comparisons (an integer widened against a double,
+as a row widens it), `AND` / `OR` / `NOT`, `IS NULL`; casts and function
+calls a value at a time over the batch's vectors; anything else (`CASE`,
+subqueries, …) a row at a time.  `AND` and `OR` evaluate their right side
+only on the rows the left one leaves undecided.  Aggregates over a
+pipeline are vectorized when none has `DISTINCT` or `ORDER BY`: group
+numbers by key (one integer key hashed as an integer), and each
+aggregate fed a batch at a time through `Aggregate::grouped()` — the
+built-ins' states updated in place from typed vectors — or row by row
+through its accumulators; past `work_mem`, rows of new groups go to
+partitions as below.  A pipeline whose output becomes rows (for a sort,
+a join, the client) runs vectorized only when it filters.  The result is
+the row-at-a-time one, errors included: a batch whose evaluation fails is
+run again a row at a time — the rows before the first failing one, then
+its error, so a `LIMIT` that ends first still ends without it.  Under a
+limit on the rows read (a token's ceiling) a statement runs a row at a
+time, since batches read ahead.  `EXPLAIN ANALYZE` shows each node of a
+pipeline with its rows (times include the inputs').  The test kit's
+scripts run with batches of the default size, of 3 rows and with none
+(`crates/sql/tests/slt.rs`); `crates/sql/tests/vector.rs` compares the
+three on chosen, failing and random queries.  Integer `sum` and `avg`
+accumulate exactly (128 bits), so a sum overflows only when its result
+does, whatever the order.
+
 **Memory** (`spill`, §M14.11).  What an operator holds is bounded by
 `work_mem` (`SET work_mem = '256MB'`, or the database's setting; default
 64 MiB): past it, the rest goes to scratch space — the KV contract's
@@ -1318,7 +1351,11 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   skipped), `resolve` (as a function's), `start() -> Box<dyn
   Accumulator>` (`add(&[Value])`, `finish()`), one per group.  The engine
   does the grouping, `DISTINCT` (over the arguments) and `ORDER BY` inside
-  the call.
+  the call.  Optionally `grouped() -> Option<Box<dyn GroupAccumulator>>`
+  (`resize(groups)`, `update(rows, groups, &[&Vector])`, `finish(group)`):
+  the states of many groups fed a batch at a time by the vectorized
+  executor (§8.5) — a capability; without it the accumulators are fed row
+  by row, with the same result.
 - `TableFunction` — `name()`, `arity()`, `resolve(&[ArgInfo]) ->
   TableSignature` (per argument, and the output columns; one column for
   now, named after the function or its alias), `rows(&CallContext,
@@ -1612,7 +1649,8 @@ name = value | RESET name` (an administrator's; `dbsettings.rs`, catalog
 `00 11`, `nc_catalog.database_settings`) — `password_min_length`
 (default 1), `password_lifetime` (an interval, default `infinity`),
 `statement_timeout` (default `0`, none), `login_lock_failures` (10),
-`login_lock_time` (`15 minutes`), `work_mem` (`64MB`, §8.5); a duration
+`login_lock_time` (`15 minutes`), `work_mem` (`64MB`, §8.5), `batch_size`
+(`1024`, 0 – 65536, §8.5); a duration
 is milliseconds, `5s`, `100ms`, `2min`, `1h`, `1d` or an interval; a
 memory size kB, or with `B`, `kB`, `MB`, `GB`, `TB` (at least 64 kB).  *Passwords*: at least
 `password_min_length` characters and not the role's name (`22023`; a
@@ -2096,6 +2134,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-29 — §M14.20 the vectorized executor (V2):** pipelines of
+  scans, filters and projections a batch at a time, vectorized
+  aggregates (`Aggregate::grouped`), `batch_size`; the test kit's scripts
+  run three ways.  A million-row `sum` 265 → 90 ms, the filtered count and
+  the 1000-group `GROUP BY` likewise.
 - **2026-10-29 — §M14.20 batch reads (V1):** the KV contract's
   `scan_chunks`; the B+tree, the engine and table scans read through
   reused buffers instead of allocating per entry.  A million-row

@@ -50,6 +50,7 @@ pub mod stats;
 pub mod tokens;
 pub mod types;
 pub mod uuid;
+pub mod vector;
 
 pub use ast::Statement;
 pub use error::{Error, Result};

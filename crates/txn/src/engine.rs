@@ -10,7 +10,7 @@ use nucleus_storage::{BTree, Batch, Store, StoreOptions};
 
 use crate::error::{Error, Result};
 use crate::mvcc::{
-    self, RESERVED_END, SIDE, STATUS, after_versions, decode_key, decode_key_into, decode_value,
+    self, RESERVED_END, SIDE, STATUS, after_versions, decode_key, decode_key_onto, decode_value,
     encode_key, encode_value, first_version, side_key, side_prefix, status_key,
 };
 
@@ -1034,9 +1034,8 @@ pub struct Scan<'t> {
     buffer: Chunk,
     live: Vec<bool>,
     pos: usize,
-    /// Buffers reused by refills: a store key and value, a user key, the
-    /// previous user key.
-    bufs: [Vec<u8>; 4],
+    /// Buffers reused by refills: a store key and value.
+    bufs: [Vec<u8>; 2],
     writes: std::iter::Peekable<std::collections::btree_map::Range<'t, Vec<u8>, Option<Vec<u8>>>>,
     /// The requested range, and how far it was read: a serializable
     /// transaction depends on the part it consumed.
@@ -1151,7 +1150,7 @@ impl Scan<'_> {
     /// side area's writes the transaction sees: its own, and those of
     /// committed transactions not yet moved into versions — in one read of
     /// the tree.
-    fn refill(&mut self) -> Result<()> {
+    fn refill(&mut self, max: usize, bytes: usize) -> Result<()> {
         let Some(from) = self.from.take() else {
             return Ok(());
         };
@@ -1186,27 +1185,33 @@ impl Scan<'_> {
         self.pos = 0;
         if sides.is_empty() {
             // No side area to merge (the usual case): versions straight
-            // into the buffer, through buffers reused entry to entry.
-            let [k, v, user, prev] = &mut self.bufs;
-            let mut seen = false;
-            let mut taken = 0;
+            // into the buffer, each user key decoded in place.
+            let [k, v] = &mut self.bufs;
+            let buf = &mut self.buffer;
             'ranges: for mut range in versions(&tree, Bound::Included(&seek), end)? {
                 while range.next_into(k, v)? {
-                    let ts = decode_key_into(k, user)
+                    let at = buf.data.len();
+                    let ts = decode_key_onto(k, &mut buf.data)
                         .ok_or(Error::Corrupt("undecodable version key"))?;
-                    if ts > txn.start || (seen && prev == user) {
-                        continue; // too new, or an older version of a key already seen
+                    let user = &buf.data[at..];
+                    let seen = buf
+                        .ents
+                        .last()
+                        .is_some_and(|&(kk, vv)| buf.data[kk..vv] == *user);
+                    if ts > txn.start || seen {
+                        // Too new, or an older version of a key already seen.
+                        buf.data.truncate(at);
+                        continue;
                     }
-                    if taken == SCAN_BATCH {
-                        upper = Some(user.clone());
+                    if buf.ents.len() >= max || at >= bytes {
+                        upper = Some(user.to_vec());
+                        buf.data.truncate(at);
                         break 'ranges;
                     }
                     let value = decode_value(v).ok_or(Error::Corrupt("bad version value"))?;
-                    self.buffer.push(user, value.unwrap_or_default());
+                    buf.ents.push((at, buf.data.len()));
+                    buf.data.extend_from_slice(value.unwrap_or_default());
                     self.live.push(value.is_some());
-                    std::mem::swap(prev, user);
-                    seen = true;
-                    taken += 1;
                 }
             }
             if let Some(u) = upper {
@@ -1225,7 +1230,7 @@ impl Scan<'_> {
             if ts > txn.start || last.as_deref() == Some(&user[..]) {
                 continue; // too new, or an older version of a key already seen
             }
-            if found.len() == SCAN_BATCH {
+            if found.len() == max {
                 upper = Some(user);
                 break;
             }
@@ -1264,7 +1269,7 @@ impl Scan<'_> {
             for (taken, e) in side.enumerate() {
                 let (k, v) = e?;
                 let user = k[10..].to_vec();
-                if taken == SCAN_BATCH {
+                if taken == max {
                     // This side area has more: the batch ends before them.
                     if upper.as_ref().is_none_or(|u| &user < u) {
                         upper = Some(user);
@@ -1296,7 +1301,7 @@ impl Scan<'_> {
     fn advance(&mut self) -> Result<Option<Next<'_>>> {
         loop {
             while self.pos == self.buffer.len() && self.from.is_some() {
-                self.refill()?;
+                self.refill(SCAN_BATCH, usize::MAX)?;
             }
             let store = (self.pos < self.buffer.len()).then_some(self.pos);
             let write = self.writes.peek().map(|(k, _)| *k);
@@ -1332,6 +1337,25 @@ impl Scan<'_> {
     /// from chunk to chunk; false at the end.
     pub fn next_chunk(&mut self, out: &mut Chunk, entries: usize, bytes: usize) -> Result<bool> {
         out.clear();
+        // None of the transaction's own writes left to merge, the read-ahead
+        // used up: the store's next entries are the chunk — read into the
+        // buffer, which becomes `out` as it is.
+        while self.writes.peek().is_none() && self.pos == self.buffer.len() && self.from.is_some() {
+            self.refill(entries.max(1), bytes)?;
+            if !self.live.iter().all(|&l| l) {
+                break; // deletions to skip: entry by entry below
+            }
+            std::mem::swap(out, &mut self.buffer);
+            self.buffer.clear();
+            self.live.clear();
+            self.pos = 0;
+            if !out.is_empty() {
+                if self.validated {
+                    self.last = Some(out.key(out.len() - 1).to_vec());
+                }
+                return Ok(true);
+            }
+        }
         while out.len() < entries.max(1) && out.bytes() < bytes {
             match self.advance()? {
                 Some(Next::Store(i)) => {

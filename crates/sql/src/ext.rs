@@ -311,6 +311,34 @@ pub trait Aggregate: Send + Sync {
 
     /// A fresh state, for one group.
     fn start(&self) -> Box<dyn Accumulator>;
+
+    /// The states of many groups, fed a batch at a time by the vectorized
+    /// executor (PLAN.md §M14.20): a capability — an aggregate without it
+    /// is fed through [`start`](Self::start)'s accumulators, a row at a
+    /// time, with the same result.
+    fn grouped(&self) -> Option<Box<dyn GroupAccumulator>> {
+        None
+    }
+}
+
+/// The states of an aggregate's groups ([`Aggregate::grouped`]).  Groups
+/// are numbered from 0, in the order they were first seen.
+pub trait GroupAccumulator {
+    /// Makes room for `groups` groups (never fewer than before).
+    fn resize(&mut self, groups: usize);
+
+    /// Feeds, for each `i`, row `rows[i]` of the batch's argument vectors
+    /// to group `groups[i]`, in that order (rows whose first argument is
+    /// `NULL` already left out unless the aggregate keeps them).
+    fn update(
+        &mut self,
+        rows: &[u32],
+        groups: &[u32],
+        args: &[&crate::vector::Vector],
+    ) -> Result<()>;
+
+    /// Group `group`'s result, after its last row.
+    fn finish(&mut self, group: usize) -> Result<Value>;
 }
 
 /// One group's state of an aggregate.

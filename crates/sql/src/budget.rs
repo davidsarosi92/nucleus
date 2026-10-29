@@ -23,6 +23,24 @@ pub struct Budget {
     /// may hold before the rest goes to scratch space (`work_mem`; `None`:
     /// [`DEFAULT_WORK_MEM`]).
     pub work_mem: Option<usize>,
+    /// Rows per batch of the vectorized executor (`batch_size`; 0: off;
+    /// `None`: [`DEFAULT_BATCH`]).
+    pub batch: Option<usize>,
+}
+
+/// `batch_size` when it is not set.
+pub const DEFAULT_BATCH: usize = 1024;
+
+/// The rows a vectorized operator of the current statement works on at a
+/// time; 0 runs it a row at a time.  Also 0 under a limit on the rows read:
+/// a batch reads ahead, and would count rows a row-at-a-time read never
+/// reached.
+pub fn batch_size() -> usize {
+    SPENT.with(|s| match s.borrow().as_ref() {
+        Some(s) if s.budget.max_scan.is_some() => 0,
+        Some(s) => s.budget.batch.unwrap_or(DEFAULT_BATCH),
+        None => DEFAULT_BATCH,
+    })
 }
 
 /// `work_mem` when it is not set: 64 MiB.

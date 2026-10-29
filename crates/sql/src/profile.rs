@@ -67,6 +67,22 @@ impl Profile {
         n.time += spent;
     }
 
+    /// Adds to `plan`'s measurements: what an operator that runs several
+    /// plan nodes at once (a vectorized pipeline) reports for the inner
+    /// ones.
+    pub fn record(&self, plan: &Plan, time: Duration, rows: u64, loops: u64) {
+        let mut nodes = self.nodes.borrow_mut();
+        let n = nodes.entry(key(plan)).or_default();
+        n.rows += rows;
+        n.loops += loops;
+        n.time += time;
+    }
+
+    /// The profile's clock (`None`: untimed).
+    pub fn clock(&self) -> Option<Duration> {
+        self.now()
+    }
+
     /// What `plan` did (`None`: it never ran).
     pub fn of(&self, plan: &Plan) -> Option<NodeStats> {
         self.nodes.borrow().get(&key(plan)).copied()

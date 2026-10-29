@@ -68,7 +68,9 @@ bool_and bool_or` (with `DISTINCT`, and `ORDER BY` inside the call:
 `string_agg(x, ',' ORDER BY x)`).
 
 **Memory:** `SET work_mem = '256MB'` gives each sort and materialised
-result more memory before it spills to disk (default 64MB).
+result more memory before it spills to disk (default 64MB).  Scans,
+filters and aggregates run in batches (`batch_size`, default 1024; 0 runs
+row by row — same results).
 
 **Transactions:** every statement is its own transaction unless in `BEGIN …
 COMMIT | ROLLBACK`.  Snapshot isolation (`SERIALIZABLE` on request).  On
