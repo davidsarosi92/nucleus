@@ -61,6 +61,20 @@ pub enum Val {
     },
 }
 
+/// A leaf value as a page holds it (see [`View::value`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValRef<'a> {
+    /// Stored in the cell.
+    Inline(&'a [u8]),
+    /// Stored in overflow pages starting at `first`.
+    Overflow {
+        /// The first overflow page.
+        first: PageId,
+        /// The value's length in bytes.
+        len: u64,
+    },
+}
+
 impl Val {
     fn stored_len(&self) -> usize {
         match self {
@@ -411,8 +425,8 @@ impl<'a> View<'a> {
         Ok(lo)
     }
 
-    /// Entry `i`'s value (a leaf).
-    pub fn value(&self, i: usize) -> Decode<Val> {
+    /// Entry `i`'s value (a leaf), as the page holds it.
+    pub fn value(&self, i: usize) -> Decode<ValRef<'a>> {
         let c = self.cell(i)?;
         if c.len() < 7 {
             return Err("leaf cell truncated");
@@ -424,8 +438,8 @@ impl<'a> View<'a> {
             .get(7 + klen..7 + klen + vlen)
             .ok_or("leaf cell runs past the page")?;
         match (flags, vlen) {
-            (0, _) => Ok(Val::Inline(v.to_vec())),
-            (1, 16) => Ok(Val::Overflow {
+            (0, _) => Ok(ValRef::Inline(v)),
+            (1, 16) => Ok(ValRef::Overflow {
                 first: PageId(read_u64(v, 0)),
                 len: read_u64(v, 8),
             }),

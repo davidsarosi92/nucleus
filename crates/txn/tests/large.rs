@@ -293,3 +293,73 @@ fn crash_at_every_io_point_with_large_transactions() {
         });
     }
 }
+
+/// Reads `(start, end)` a chunk at a time — chunks of at most `entries`
+/// entries, ended early past `bytes`.
+fn chunked(
+    t: &nucleus_txn::Transaction,
+    start: Bound<&[u8]>,
+    end: Bound<&[u8]>,
+    entries: usize,
+    bytes: usize,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut scan = t.scan(start, end).unwrap();
+    let mut chunk = nucleus_txn::Chunk::new();
+    let mut out = Vec::new();
+    while scan.next_chunk(&mut chunk, entries, bytes).unwrap() {
+        assert!(chunk.len() <= entries.max(1));
+        out.extend(chunk.iter().map(|(k, v)| (k.to_vec(), v.to_vec())));
+    }
+    out
+}
+
+#[test]
+fn chunked_scans_read_what_scans_read() {
+    // Versions, deletions, a spilled transaction's side area, another
+    // committed one's not yet resolved, and the reader's own writes: a
+    // chunked scan of any range, in chunks of any size, gives the scan's
+    // entries.
+    let p = Arc::new(SimPlatform::new(7));
+    let e = engine_on(&p, opts()).unwrap();
+    let rng = SplitMix64::new(11);
+    for round in 0..4 {
+        let mut t = e.begin();
+        for _ in 0..300 {
+            let i = rng.below(500) as usize;
+            if rng.below(4) == 0 {
+                t.delete(&key(i)).unwrap();
+            } else {
+                t.put(&key(i), format!("r{round}-{i}").as_bytes()).unwrap();
+            }
+        }
+        t.commit().unwrap();
+    }
+    let mut t = e.begin();
+    for i in (0..500).step_by(3) {
+        t.put(&key(i), b"own").unwrap();
+    }
+    for i in (0..500).step_by(7) {
+        t.delete(&key(i)).unwrap();
+    }
+    let (lo, hi) = (key(40), key(410));
+    for (start, end) in [
+        (Bound::Unbounded, Bound::Unbounded),
+        (Bound::Included(&lo[..]), Bound::Excluded(&hi[..])),
+        (Bound::Excluded(&lo[..]), Bound::Included(&hi[..])),
+    ] {
+        let want: Vec<_> = t.scan(start, end).unwrap().map(Result::unwrap).collect();
+        assert!(!want.is_empty());
+        for (entries, bytes) in [
+            (1, usize::MAX),
+            (3, usize::MAX),
+            (1024, 64),
+            (1024, 1 << 20),
+        ] {
+            assert_eq!(
+                chunked(&t, start, end, entries, bytes),
+                want,
+                "{entries}/{bytes}"
+            );
+        }
+    }
+}

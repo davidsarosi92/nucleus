@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -10,8 +10,8 @@ use nucleus_storage::{BTree, Batch, Store, StoreOptions};
 
 use crate::error::{Error, Result};
 use crate::mvcc::{
-    self, RESERVED_END, SIDE, STATUS, after_versions, decode_key, decode_value, encode_key,
-    encode_value, first_version, side_key, side_prefix, status_key,
+    self, RESERVED_END, SIDE, STATUS, after_versions, decode_key, decode_key_into, decode_value,
+    encode_key, encode_value, first_version, side_key, side_prefix, status_key,
 };
 
 /// A commit timestamp.  Logical for now (PLAN.md principle 3): a counter that
@@ -132,7 +132,7 @@ fn versions<'t>(
     tree: &'t BTree,
     from: Bound<&[u8]>,
     to: Bound<&[u8]>,
-) -> Result<Box<dyn Iterator<Item = nucleus_storage::Result<(Vec<u8>, Vec<u8>)>> + 't>> {
+) -> Result<Vec<nucleus_storage::btree::Range<'t>>> {
     let before_reserved = match from {
         Bound::Unbounded => true,
         Bound::Included(f) | Bound::Excluded(f) => f < &RESERVED_END[..],
@@ -143,7 +143,7 @@ fn versions<'t>(
         Bound::Excluded(t) => t <= k,
     };
     if !before_reserved {
-        return Ok(Box::new(tree.range(from, to)?));
+        return Ok(vec![tree.range(from, to)?]);
     }
     let low_end = if ends_before(&SIDE) {
         to
@@ -152,11 +152,12 @@ fn versions<'t>(
     };
     let low = tree.range(from, low_end)?;
     if ends_before(&RESERVED_END) {
-        return Ok(Box::new(low));
+        return Ok(vec![low]);
     }
-    Ok(Box::new(low.chain(
+    Ok(vec![
+        low,
         tree.range(Bound::Included(&RESERVED_END[..]), to)?,
-    )))
+    ])
 }
 
 /// What a serializable transaction read: keys, and key ranges.
@@ -293,7 +294,10 @@ impl Engine {
                 let tree = self.inner.store.read()?;
                 let unresolved = self.inner.unresolved_ids();
                 let mut pinned = false;
-                for entry in versions(&tree, Bound::Included(&from), Bound::Unbounded)? {
+                for entry in versions(&tree, Bound::Included(&from), Bound::Unbounded)?
+                    .into_iter()
+                    .flatten()
+                {
                     let (k, v) = entry?;
                     let (user, ts) =
                         decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
@@ -337,7 +341,10 @@ impl Engine {
     pub fn version_count(&self) -> Result<u64> {
         let tree = self.inner.store.read()?;
         let mut n = 0;
-        for e in versions(&tree, Bound::Unbounded, Bound::Unbounded)? {
+        for e in versions(&tree, Bound::Unbounded, Bound::Unbounded)?
+            .into_iter()
+            .flatten()
+        {
             e?;
             n += 1;
         }
@@ -868,7 +875,10 @@ impl Transaction {
             txn: self,
             from: Some(start.map(<[u8]>::to_vec)),
             store_end,
-            buffer: VecDeque::new(),
+            buffer: Chunk::default(),
+            live: Vec::new(),
+            pos: 0,
+            bufs: Default::default(),
             writes,
             range: (start.map(<[u8]>::to_vec), end.map(<[u8]>::to_vec)),
             last: None,
@@ -1019,8 +1029,14 @@ pub struct Scan<'t> {
     /// is done).
     from: Option<Bound<Vec<u8>>>,
     store_end: Option<Vec<u8>>,
-    /// Visible store entries read ahead.
-    buffer: VecDeque<Visible>,
+    /// Visible store entries read ahead (a deleted one with an empty
+    /// value and `live` false), and the next one's index.
+    buffer: Chunk,
+    live: Vec<bool>,
+    pos: usize,
+    /// Buffers reused by refills: a store key and value, a user key, the
+    /// previous user key.
+    bufs: [Vec<u8>; 4],
     writes: std::iter::Peekable<std::collections::btree_map::Range<'t, Vec<u8>, Option<Vec<u8>>>>,
     /// The requested range, and how far it was read: a serializable
     /// transaction depends on the part it consumed.
@@ -1057,8 +1073,78 @@ impl std::fmt::Debug for Scan<'_> {
 
 const SCAN_BATCH: usize = 128;
 
-/// A user key and its visible value (`None`: deleted).
-type Visible = (Vec<u8>, Option<Vec<u8>>);
+/// Keys and values packed into one buffer, what a chunked scan fills
+/// ([`Scan::next_chunk`]); reused from chunk to chunk, so reading one
+/// allocates nothing once the buffer has grown.
+#[derive(Clone, Debug, Default)]
+pub struct Chunk {
+    data: Vec<u8>,
+    /// Per entry: where its key starts, where its value starts.
+    ents: Vec<(usize, usize)>,
+}
+
+impl Chunk {
+    /// An empty chunk.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The number of entries.
+    pub fn len(&self) -> usize {
+        self.ents.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.ents.is_empty()
+    }
+
+    /// The bytes the entries take.
+    pub fn bytes(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Removes every entry (the buffer kept).
+    pub fn clear(&mut self) {
+        self.data.clear();
+        self.ents.clear();
+    }
+
+    /// Adds an entry.
+    pub fn push(&mut self, key: &[u8], value: &[u8]) {
+        let k = self.data.len();
+        self.data.extend_from_slice(key);
+        self.ents.push((k, self.data.len()));
+        self.data.extend_from_slice(value);
+    }
+
+    fn end(&self, i: usize) -> usize {
+        self.ents.get(i + 1).map_or(self.data.len(), |e| e.0)
+    }
+
+    /// Entry `i`'s key.
+    pub fn key(&self, i: usize) -> &[u8] {
+        let (k, v) = self.ents[i];
+        &self.data[k..v]
+    }
+
+    /// Entry `i`'s value.
+    pub fn value(&self, i: usize) -> &[u8] {
+        &self.data[self.ents[i].1..self.end(i)]
+    }
+
+    /// The entries in order.
+    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+        (0..self.len()).map(|i| (self.key(i), self.value(i)))
+    }
+}
+
+/// Where a scan's next entry is: the read-ahead buffer, or the
+/// transaction's own writes.
+enum Next<'t> {
+    Store(usize),
+    Write(&'t [u8], &'t [u8]),
+}
 
 impl Scan<'_> {
     /// Reads the next batch of visible versions from the store — and of the
@@ -1095,26 +1181,33 @@ impl Scan<'_> {
         // The first user key this batch leaves for the next (`None`: the
         // range's end).
         let mut upper: Option<Vec<u8>> = None;
+        self.buffer.clear();
+        self.live.clear();
+        self.pos = 0;
         if sides.is_empty() {
             // No side area to merge (the usual case): versions straight
-            // into the buffer.
-            let mut last: Option<Vec<u8>> = None;
+            // into the buffer, through buffers reused entry to entry.
+            let [k, v, user, prev] = &mut self.bufs;
+            let mut seen = false;
             let mut taken = 0;
-            for entry in versions(&tree, Bound::Included(&seek), end)? {
-                let (k, v) = entry?;
-                let (user, ts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
-                if ts > txn.start || last.as_deref() == Some(&user[..]) {
-                    continue; // too new, or an older version of a key already seen
+            'ranges: for mut range in versions(&tree, Bound::Included(&seek), end)? {
+                while range.next_into(k, v)? {
+                    let ts = decode_key_into(k, user)
+                        .ok_or(Error::Corrupt("undecodable version key"))?;
+                    if ts > txn.start || (seen && prev == user) {
+                        continue; // too new, or an older version of a key already seen
+                    }
+                    if taken == SCAN_BATCH {
+                        upper = Some(user.clone());
+                        break 'ranges;
+                    }
+                    let value = decode_value(v).ok_or(Error::Corrupt("bad version value"))?;
+                    self.buffer.push(user, value.unwrap_or_default());
+                    self.live.push(value.is_some());
+                    std::mem::swap(prev, user);
+                    seen = true;
+                    taken += 1;
                 }
-                if taken == SCAN_BATCH {
-                    upper = Some(user);
-                    break;
-                }
-                let value = decode_value(&v).ok_or(Error::Corrupt("bad version value"))?;
-                self.buffer
-                    .push_back((user.clone(), value.map(<[u8]>::to_vec)));
-                last = Some(user);
-                taken += 1;
             }
             if let Some(u) = upper {
                 self.from = Some(Bound::Included(u));
@@ -1123,7 +1216,10 @@ impl Scan<'_> {
         }
         let mut found: BTreeMap<Vec<u8>, (u64, Option<Vec<u8>>)> = BTreeMap::new();
         let mut last: Option<Vec<u8>> = None;
-        for entry in versions(&tree, Bound::Included(&seek), end)? {
+        for entry in versions(&tree, Bound::Included(&seek), end)?
+            .into_iter()
+            .flatten()
+        {
             let (k, v) = entry?;
             let (user, ts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
             if ts > txn.start || last.as_deref() == Some(&user[..]) {
@@ -1186,7 +1282,9 @@ impl Scan<'_> {
             if upper.as_ref().is_some_and(|u| &user >= u) {
                 break;
             }
-            self.buffer.push_back((user, value));
+            self.buffer
+                .push(&user, value.as_deref().unwrap_or_default());
+            self.live.push(value.is_some());
         }
         if let Some(u) = upper {
             self.from = Some(Bound::Included(u));
@@ -1194,37 +1292,63 @@ impl Scan<'_> {
         Ok(())
     }
 
-    fn next_store(&mut self) -> Result<Option<&Visible>> {
-        if self.buffer.is_empty() {
-            self.refill()?;
-        }
-        Ok(self.buffer.front())
-    }
-
-    fn step(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    /// Moves to the next visible entry.
+    fn advance(&mut self) -> Result<Option<Next<'_>>> {
         loop {
-            let store_key = self.next_store()?.map(|(k, _)| k.clone());
-            let write_key = self.writes.peek().map(|(k, _)| (*k).clone());
-            let (key, value) = match (store_key, write_key) {
+            while self.pos == self.buffer.len() && self.from.is_some() {
+                self.refill()?;
+            }
+            let store = (self.pos < self.buffer.len()).then_some(self.pos);
+            let write = self.writes.peek().map(|(k, _)| *k);
+            let from_writes = match (store, write) {
                 (None, None) => return Ok(None),
-                (Some(s), Some(w)) if w <= s => {
-                    if w == s {
-                        self.buffer.pop_front(); // the transaction's own write wins
+                (Some(i), Some(w)) if w[..] <= *self.buffer.key(i) => {
+                    if w[..] == *self.buffer.key(i) {
+                        self.pos += 1; // the transaction's own write wins
                     }
-                    let (k, v) = self.writes.next().expect("peeked");
-                    (k.clone(), v.clone())
+                    true
                 }
-                (None, Some(_)) => {
-                    let (k, v) = self.writes.next().expect("peeked");
-                    (k.clone(), v.clone())
-                }
-                (Some(_), _) => self.buffer.pop_front().expect("peeked"),
+                (None, Some(_)) => true,
+                (Some(_), _) => false,
             };
-            if let Some(v) = value {
-                return Ok(Some((key, v)));
+            if from_writes {
+                let (k, v) = self.writes.next().expect("peeked");
+                if let Some(v) = v {
+                    return Ok(Some(Next::Write(k, v)));
+                }
+            } else {
+                let i = self.pos;
+                self.pos += 1;
+                if self.live[i] {
+                    return Ok(Some(Next::Store(i)));
+                }
             }
             // A tombstone: deleted in this snapshot.
         }
+    }
+
+    /// Replaces `out`'s entries with the next ones — at most `entries` of
+    /// them, and no more once they take `bytes` — through buffers reused
+    /// from chunk to chunk; false at the end.
+    pub fn next_chunk(&mut self, out: &mut Chunk, entries: usize, bytes: usize) -> Result<bool> {
+        out.clear();
+        while out.len() < entries.max(1) && out.bytes() < bytes {
+            match self.advance()? {
+                Some(Next::Store(i)) => {
+                    let (k, v) = (self.buffer.key(i), self.buffer.value(i));
+                    out.push(k, v);
+                }
+                Some(Next::Write(k, v)) => out.push(k, v),
+                None => {
+                    self.done = true;
+                    break;
+                }
+            }
+        }
+        if self.validated && !out.is_empty() {
+            self.last = Some(out.key(out.len() - 1).to_vec());
+        }
+        Ok(!out.is_empty())
     }
 }
 
@@ -1232,9 +1356,18 @@ impl Iterator for Scan<'_> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.step() {
+        let next = match self.advance() {
+            Ok(Some(Next::Store(i))) => Ok(Some((self.buffer.key(i), self.buffer.value(i)))),
+            Ok(Some(Next::Write(k, v))) => Ok(Some((k, v))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        };
+        match next {
             Ok(Some((k, v))) => {
-                self.last = Some(k.clone());
+                let (k, v) = (k.to_vec(), v.to_vec());
+                if self.validated {
+                    self.last = Some(k.clone());
+                }
                 Some(Ok((k, v)))
             }
             Ok(None) => {

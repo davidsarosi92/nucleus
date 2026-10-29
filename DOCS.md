@@ -495,7 +495,12 @@ distributed implementation will provide (§F3).
   in `<dir>/scratch/` (left-overs removed on opening).
 - `trait KvTxn`: `read_ts`, `get(&self)`, `scan(&self, start, end) ->
   KvIter` (ascending), `get_validated` / `scan_validated` (reads checked
-  at commit at any isolation level, §5.2), `put(&mut self)`,
+  at commit at any isolation level, §5.2), `scan_chunks` /
+  `scan_chunks_validated` (the same entries a `Chunk` at a time — up to
+  `CHUNK_ENTRIES` keys and values packed into one buffer the caller
+  reuses, so a large read allocates nothing per entry; provided over
+  `scan`, the local implementation fills chunks straight from the
+  engine), `put(&mut self)`,
   `delete(&mut self)`,
   `commit(self: Box<Self>) -> Timestamp`, `rollback`.  Reads take `&self`
   so a scan can stay open while the same transaction reads keys.
@@ -2091,6 +2096,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-29 — §M14.20 batch reads (V1):** the KV contract's
+  `scan_chunks`; the B+tree, the engine and table scans read through
+  reused buffers instead of allocating per entry.  A million-row
+  `count(*)` 360 → 200 ms, `sum` 430 → 265 ms.
 - **2026-10-27 — §M14.11 shipped:** streaming and columnar results, bulk
   load, large transactions, a memory-bounded executor, faster B+tree
   paths, the benchmark suite in CI.

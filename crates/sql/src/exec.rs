@@ -627,21 +627,28 @@ pub fn scan_some<'a>(
         return Ok(Box::new(std::iter::empty()));
     };
     let end_bound = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+    if index.is_none() {
+        let mut entries = Entries::new(ctx, Bound::Included(&start), end_bound)?;
+        let mut labels = crate::enums::Labels::default();
+        return Ok(Box::new(std::iter::from_fn(move || {
+            let row = (|| {
+                let Some((k, v)) = entries.next()? else {
+                    return Ok(None);
+                };
+                crate::budget::charge_scan()?;
+                let row = crate::large::read_some(ctx.txn, table, k, v, &mut labels, wanted)?;
+                Ok(Some((k.to_vec(), row)))
+            })();
+            row.transpose()
+        })));
+    }
     let entries = if ctx.validated {
         ctx.txn.scan_validated(Bound::Included(&start), end_bound)?
     } else {
         ctx.txn.scan(Bound::Included(&start), end_bound)?
     };
     Ok(match index {
-        None => {
-            let mut labels = crate::enums::Labels::default();
-            Box::new(entries.map(move |e| {
-                crate::budget::charge_scan()?;
-                let (k, v) = e?;
-                let row = crate::large::read_some(ctx.txn, table, &k, &v, &mut labels, wanted)?;
-                Ok((k, row))
-            }))
-        }
+        None => unreachable!("read in chunks above"),
         Some(_) => {
             let base = table.index_prefix(0);
             let mut labels = crate::enums::Labels::default();
@@ -659,6 +666,52 @@ pub fn scan_some<'a>(
             }))
         }
     })
+}
+
+/// A key range's entries read a chunk at a time, each borrowed from the
+/// chunk ([`nucleus_kv::KvTxn::scan_chunks`]).
+pub struct Entries<'a> {
+    chunks: Box<dyn nucleus_kv::KvChunks + 'a>,
+    chunk: nucleus_kv::Chunk,
+    pos: usize,
+    done: bool,
+}
+
+impl<'a> Entries<'a> {
+    /// The entries in `(start, end)`, read as the statement reads
+    /// (validated when it must be).
+    pub fn new(ctx: &'a Ctx<'a>, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Self> {
+        let chunks = if ctx.validated {
+            ctx.txn.scan_chunks_validated(start, end)?
+        } else {
+            ctx.txn.scan_chunks(start, end)?
+        };
+        Ok(Self {
+            chunks,
+            chunk: nucleus_kv::Chunk::new(),
+            pos: 0,
+            done: false,
+        })
+    }
+
+    /// The next entry.
+    #[allow(clippy::should_implement_trait)] // it lends from the chunk
+    pub fn next(&mut self) -> Result<Option<(&[u8], &[u8])>> {
+        if self.pos == self.chunk.len() {
+            if self.done {
+                return Ok(None);
+            }
+            self.pos = 0;
+            self.chunk.clear();
+            if !self.chunks.next_chunk(&mut self.chunk)? {
+                self.done = true;
+                return Ok(None);
+            }
+        }
+        self.pos += 1;
+        let i = self.pos - 1;
+        Ok(Some((self.chunk.key(i), self.chunk.value(i))))
+    }
 }
 
 /// Rows (with keys) of `table` matching `filter`, as they are read.

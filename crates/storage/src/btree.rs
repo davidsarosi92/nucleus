@@ -30,7 +30,7 @@ use crate::buffer::{BufferPool, PageRef};
 use crate::error::{Error, Result};
 use crate::node::{
     Internal, Leaf, MAX_INLINE_CELL, MAX_KEY, MIN_FILL, Node, OVERFLOW, OVERFLOW_CAPACITY, Val,
-    View, decode_overflow, encode_overflow, leaf_cell_size,
+    ValRef, View, decode_overflow, encode_overflow, leaf_cell_size,
 };
 use crate::page::{PAYLOAD_SIZE, PageId};
 
@@ -169,17 +169,13 @@ impl BTree {
         Ok(out)
     }
 
-    fn read_val(&self, val: &Val) -> Result<Vec<u8>> {
-        match val {
-            Val::Inline(v) => Ok(v.clone()),
-            Val::Overflow { first, len } => {
-                let mut out = Vec::with_capacity(*len as usize);
-                for (_, data) in self.overflow_pages(*first, *len)? {
-                    out.extend_from_slice(&data);
-                }
-                Ok(out)
-            }
+    /// Appends the value in the overflow chain at `first` to `out`.
+    fn read_overflow(&self, first: PageId, len: u64, out: &mut Vec<u8>) -> Result<()> {
+        out.reserve(len as usize);
+        for (_, data) in self.overflow_pages(first, len)? {
+            out.extend_from_slice(&data);
         }
+        Ok(())
     }
 
     fn free_val(&self, val: &Val) -> Result<()> {
@@ -210,9 +206,15 @@ impl BTree {
             }
             let i = v.partition(|k| k < key).map_err(corrupt)?;
             if i < v.len() && v.key(i).map_err(corrupt)? == key {
-                let val = v.value(i).map_err(corrupt)?;
-                drop(page);
-                return Ok(Some(self.read_val(&val)?));
+                return match v.value(i).map_err(corrupt)? {
+                    ValRef::Inline(b) => Ok(Some(b.to_vec())),
+                    ValRef::Overflow { first, len } => {
+                        drop(page);
+                        let mut out = Vec::new();
+                        self.read_overflow(first, len, &mut out)?;
+                        Ok(Some(out))
+                    }
+                };
             }
             return Ok(None);
         }
@@ -844,6 +846,14 @@ impl<'t> Cursor<'t> {
 
     /// Entry `i` of the current leaf.
     fn entry(&self, i: usize) -> Result<(Vec<u8>, Vec<u8>)> {
+        let (mut key, mut val) = (Vec::new(), Vec::new());
+        self.entry_into(i, &mut key, &mut val)?;
+        Ok((key, val))
+    }
+
+    /// Entry `i` of the current leaf, into `key` and `val` (replacing what
+    /// they held, their buffers reused).
+    fn entry_into(&self, i: usize, key: &mut Vec<u8>, val: &mut Vec<u8>) -> Result<()> {
         let r = self.leaf.as_ref().expect("a cursor is always in a leaf");
         let page = r.read();
         let corrupt = |reason| Error::Corrupt {
@@ -851,10 +861,17 @@ impl<'t> Cursor<'t> {
             reason,
         };
         let v = View::new(&page).map_err(corrupt)?;
-        let key = v.key(i).map_err(corrupt)?.to_vec();
-        let val = v.value(i).map_err(corrupt)?;
-        drop(page);
-        Ok((key, self.tree.read_val(&val)?))
+        key.clear();
+        key.extend_from_slice(v.key(i).map_err(corrupt)?);
+        val.clear();
+        match v.value(i).map_err(corrupt)? {
+            ValRef::Inline(b) => val.extend_from_slice(b),
+            ValRef::Overflow { first, len } => {
+                drop(page);
+                self.tree.read_overflow(first, len, val)?;
+            }
+        }
+        Ok(())
     }
 
     /// Child `i` of internal page `id`.
@@ -867,17 +884,24 @@ impl<'t> Cursor<'t> {
 
     /// The entry after the cursor, moving past it.
     pub fn next_entry(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let (mut key, mut val) = (Vec::new(), Vec::new());
+        Ok(self.next_into(&mut key, &mut val)?.then_some((key, val)))
+    }
+
+    /// [`next_entry`](Self::next_entry) into `key` and `val` (their buffers
+    /// reused); false at the end.
+    pub fn next_into(&mut self, key: &mut Vec<u8>, val: &mut Vec<u8>) -> Result<bool> {
         loop {
             if self.pos < self.leaf_len {
-                let e = self.entry(self.pos)?;
+                self.entry_into(self.pos, key, val)?;
                 self.pos += 1;
-                return Ok(Some(e));
+                return Ok(true);
             }
             // Up to the first ancestor with a child to the right, then down
             // its leftmost path.
             loop {
                 let Some((id, i, n)) = self.path.pop() else {
-                    return Ok(None);
+                    return Ok(false);
                 };
                 if i + 1 < n {
                     let child = self.child(id, i + 1)?;
@@ -928,6 +952,55 @@ impl std::fmt::Debug for Range<'_> {
     }
 }
 
+impl Range<'_> {
+    /// The next entry into `key` and `val` (their buffers reused): what
+    /// [`Iterator::next`] gives without allocating; false at the end.
+    pub fn next_into(&mut self, key: &mut Vec<u8>, val: &mut Vec<u8>) -> Result<bool> {
+        if self.done {
+            return Ok(false);
+        }
+        let more = if self.reverse {
+            match self.cursor.prev_entry() {
+                Ok(Some((k, v))) => {
+                    (*key, *val) = (k, v);
+                    Ok(true)
+                }
+                Ok(None) => Ok(false),
+                Err(e) => Err(e),
+            }
+        } else {
+            self.cursor.next_into(key, val)
+        };
+        match more {
+            Ok(true) => {}
+            Ok(false) => {
+                self.done = true;
+                return Ok(false);
+            }
+            Err(e) => {
+                self.done = true;
+                return Err(e);
+            }
+        }
+        if self.inside(key) {
+            Ok(true)
+        } else {
+            self.done = true;
+            Ok(false)
+        }
+    }
+
+    fn inside(&self, k: &[u8]) -> bool {
+        match (&self.end, self.reverse) {
+            (Bound::Unbounded, _) => true,
+            (Bound::Included(e), false) => k <= &e[..],
+            (Bound::Excluded(e), false) => k < &e[..],
+            (Bound::Included(e), true) => k >= &e[..],
+            (Bound::Excluded(e), true) => k > &e[..],
+        }
+    }
+}
+
 impl Iterator for Range<'_> {
     type Item = Result<(Vec<u8>, Vec<u8>)>;
 
@@ -951,14 +1024,7 @@ impl Iterator for Range<'_> {
                 return Some(Err(e));
             }
         };
-        let inside = match (&self.end, self.reverse) {
-            (Bound::Unbounded, _) => true,
-            (Bound::Included(e), false) => k <= *e,
-            (Bound::Excluded(e), false) => k < *e,
-            (Bound::Included(e), true) => k >= *e,
-            (Bound::Excluded(e), true) => k > *e,
-        };
-        if inside {
+        if self.inside(&k) {
             Some(Ok((k, v)))
         } else {
             self.done = true;

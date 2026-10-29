@@ -59,28 +59,33 @@ pub fn after_versions(user: &[u8]) -> Vec<u8> {
 /// Splits a store key into user key and timestamp.
 pub fn decode_key(key: &[u8]) -> Option<(Vec<u8>, u64)> {
     let mut user = Vec::with_capacity(key.len());
-    let mut i = 0;
-    while i < key.len() {
-        match (key[i], key.get(i + 1)) {
-            (0, Some(0xFF)) => {
+    let ts = decode_key_into(key, &mut user)?;
+    Some((user, ts))
+}
+
+/// [`decode_key`], the user key into `user` (replacing what it held, its
+/// buffer reused).
+pub fn decode_key_into(key: &[u8], user: &mut Vec<u8>) -> Option<u64> {
+    user.clear();
+    let mut rest = key;
+    loop {
+        let z = rest.iter().position(|&b| b == 0)?;
+        user.extend_from_slice(&rest[..z]);
+        match rest.get(z + 1) {
+            Some(0xFF) => {
                 user.push(0);
-                i += 2;
+                rest = &rest[z + 2..];
             }
-            (0, Some(0)) => {
-                let ts = key.get(i + 2..i + 10)?;
-                if key.len() != i + 10 {
+            Some(0) => {
+                let ts = rest.get(z + 2..z + 10)?;
+                if rest.len() != z + 10 {
                     return None;
                 }
-                return Some((user, u64::MAX - u64::from_be_bytes(ts.try_into().ok()?)));
+                return Some(u64::MAX - u64::from_be_bytes(ts.try_into().ok()?));
             }
-            (0, _) => return None,
-            (b, _) => {
-                user.push(b);
-                i += 1;
-            }
+            _ => return None,
         }
     }
-    None
 }
 
 /// The first reserved store key: the side area.

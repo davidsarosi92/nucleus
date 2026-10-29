@@ -23,7 +23,7 @@ use nucleus_platform::Platform;
 use nucleus_platform::real::RealPlatform;
 use nucleus_storage::StoreOptions;
 
-pub use nucleus_txn::{Isolation, Timestamp};
+pub use nucleus_txn::{Chunk, Isolation, Timestamp};
 
 /// Errors of the KV contract.
 #[derive(Debug)]
@@ -122,6 +122,44 @@ impl TxnOptions {
 
 /// An iterator over `(key, value)` pairs.
 pub type KvIter<'a> = Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + 'a>;
+
+/// A scan read a chunk of entries at a time ([`KvTxn::scan_chunks`]).
+pub trait KvChunks {
+    /// Replaces `out`'s entries with the next ones — about
+    /// [`CHUNK_ENTRIES`], fewer once they take [`CHUNK_BYTES`]; false at
+    /// the end.
+    fn next_chunk(&mut self, out: &mut Chunk) -> Result<bool>;
+}
+
+/// Entries a chunk holds at most.
+pub const CHUNK_ENTRIES: usize = 1024;
+/// The bytes after which a chunk ends early.
+pub const CHUNK_BYTES: usize = 1 << 18;
+
+/// Chunks over a scan's iterator: what a transaction that has no chunked
+/// scan of its own gives.
+struct IterChunks<'a>(KvIter<'a>);
+
+impl KvChunks for IterChunks<'_> {
+    fn next_chunk(&mut self, out: &mut Chunk) -> Result<bool> {
+        out.clear();
+        while out.len() < CHUNK_ENTRIES && out.bytes() < CHUNK_BYTES {
+            let Some(e) = self.0.next() else { break };
+            let (k, v) = e?;
+            out.push(&k, &v);
+        }
+        Ok(!out.is_empty())
+    }
+}
+
+/// An engine scan's chunks.
+struct ScanChunks<'a>(nucleus_txn::Scan<'a>);
+
+impl KvChunks for ScanChunks<'_> {
+    fn next_chunk(&mut self, out: &mut Chunk) -> Result<bool> {
+        Ok(self.0.next_chunk(out, CHUNK_ENTRIES, CHUNK_BYTES)?)
+    }
+}
 
 /// A database that runs transactions.
 pub trait Kv: Send + Sync {
@@ -237,6 +275,27 @@ pub trait KvTxn: Send {
     /// [`scan`](Self::scan), validated as [`get_validated`](Self::get_validated)
     /// over the part of the range consumed.
     fn scan_validated<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>>;
+
+    /// [`scan`](Self::scan) a chunk of entries at a time, packed into one
+    /// buffer the caller reuses — nothing allocated per entry: what large
+    /// reads use.
+    fn scan_chunks<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KvChunks + 'a>> {
+        Ok(Box::new(IterChunks(self.scan(start, end)?)))
+    }
+
+    /// [`scan_chunks`](Self::scan_chunks), validated as
+    /// [`scan_validated`](Self::scan_validated).
+    fn scan_chunks_validated<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KvChunks + 'a>> {
+        Ok(Box::new(IterChunks(self.scan_validated(start, end)?)))
+    }
 
     /// Sets `key` to `value`.
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
@@ -489,6 +548,22 @@ impl KvTxn for LocalTxn {
     fn scan_validated<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
         let scan = self.0.scan_validated(start, end)?;
         Ok(Box::new(scan.map(|r| r.map_err(Error::from))))
+    }
+
+    fn scan_chunks<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KvChunks + 'a>> {
+        Ok(Box::new(ScanChunks(self.0.scan(start, end)?)))
+    }
+
+    fn scan_chunks_validated<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KvChunks + 'a>> {
+        Ok(Box::new(ScanChunks(self.0.scan_validated(start, end)?)))
     }
 
     fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
