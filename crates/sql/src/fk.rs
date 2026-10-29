@@ -73,16 +73,18 @@ fn parent_exists(txn: &dyn KvTxn, parent: &Table, fk: &ForeignKey, vals: &[Value
         ))
     })?;
     let ordered: Vec<Value> = order.iter().map(|&j| vals[j].clone()).collect();
-    let key = match index {
-        None => catalog::row_key(parent, &ordered),
+    match index {
+        None => {
+            let key = catalog::row_key(parent, &ordered);
+            crate::storage::of(parent)?.exists(txn, parent, &key, true)
+        }
         Some(i) => {
             // A unique entry with no NULLs is keyed by its values alone.
             let mut k = parent.index_prefix(parent.indexes[i].id);
             k.extend_from_slice(&encode_key(&ordered));
-            k
+            Ok(txn.get_validated(&k)?.is_some())
         }
-    };
-    Ok(txn.get_validated(&key)?.is_some())
+    }
 }
 
 fn violation_child(child: &Table, fk: &ForeignKey, vals: &[Value]) -> Error {

@@ -58,8 +58,10 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("row_security", B),
             ("force_row_security", B),
             ("comment", T),
+            ("storage", T),
         ],
     ),
+    ("storages", &[("name", T)]),
     (
         "policies",
         &[
@@ -427,7 +429,13 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     Value::Bool(t.row_security),
                     Value::Bool(t.force_row_security),
                     t.comment.clone().map_or(Value::Null, text),
+                    text(t.storage.clone()),
                 ]);
+            }
+        }
+        "storages" => {
+            for name in crate::storage::names() {
+                out.push(vec![text(name)]);
             }
         }
         "roles" => {

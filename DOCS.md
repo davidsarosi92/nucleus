@@ -1271,7 +1271,8 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | Table | Rows |
 |-------|------|
 | `nc_catalog.schemas` | `name`, `description` (the session registry's schemas) |
-| `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows`, `owner` |
+| `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows`, `owner`, `row_security`, `force_row_security`, `comment`, `storage` (§8.15) |
+| `nc_catalog.storages` | `name` (the table storages registered, §8.15) |
 | `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key` |
 | `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix`, `orderings` (per column, the taught ordering it is indexed in, or NULL) |
 | `nc_catalog.constraints` | `table_id`, `table_name`, `name`, `kind`, `definition` |
@@ -1457,7 +1458,8 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   namespace), `add_table_function(f)`, `add_schema(name,
   description, searched)` (a searched schema's views are found by
   unqualified names after the user's tables, as `pg_catalog`'s),
-  `add_view(v)`, `add_type(t)`, `add_alias(name, ty)` (pg-compat's
+  `add_view(v)`, `add_type(t)`, `add_storage(s)` (a table storage, §8.15),
+  `add_alias(name, ty)` (pg-compat's
   `oid`, `name`, `bpchar`, …), and the lookups `function`, `aggregate`,
   `table_function`, `view`, `type_named`, `schemas`, `views`, `types`,
   `modules`.  A session can name only its registry's types; a type is
@@ -1556,6 +1558,37 @@ t (…)`), `statements`, `calls`, `rows_read` and `rows_read_with_index`
 normalized) and `plan` (that statement's plan with the index, with its
 constants).  Most rows saved first.  Joins do not give candidates yet
 (the executor has no index nested loop).
+
+### 8.15 Table storage (`storage`, §M14.20)
+
+How a table's rows are kept is a module (principle 12): an implementation
+of `TableStorage` among those registered — `row` built in, others added
+through `Registry::add_storage` (process-wide, so every database's tables
+may name them; `nc_catalog.storages` lists them).  A table names its
+storage: `CREATE TABLE … WITH (storage = name)` (`row` by default; an
+unknown storage is `42704`, an unknown option `22023`), kept in its
+record (table record version 10) and shown in `nc_catalog.tables.storage`.
+
+The SQL layer reads and writes rows only through the trait, by *row key* —
+the table's primary index prefix and the row's primary key or hidden row
+id — and by ranges of row keys: `write(txn, t, key, row, old)`,
+`remove`, `exists(…, validated)` (primary key and foreign key checks),
+`get(…, wanted, labels)` (a secondary index's rows, which the index finds
+by row key), `rows(Scan)` (a range ascending, only the wanted columns
+decoded), `batches(Scan)` (the same a batch at a time for the vectorized
+executor — by default from `rows`), `check` (the integrity check's part:
+rows as stored, problems noted), `index_ids` (the key spaces it uses
+under the table's data prefix).  Secondary indexes, constraints,
+foreign keys, policies, parallel splits and the executor stay above it,
+the same for every storage; a storage keeps all it stores under the
+table's data prefix, so dropping or truncating a table removes it.
+
+`row` encodes a row's values together under its key (§8.1), a long value
+in chunks under the table's index `u32::MAX` (§M14.26); its batches decode
+the encoding straight into vectors (§8.5).  `crates/sql/tests/storage.rs`
+registers a module's storage and runs writes, unique and foreign key
+checks, index lookups, scans a row and a batch at a time, in parallel,
+and the integrity check through it, against `row` tables.
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -2203,6 +2236,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-29 — §M14.20 table storage as a module (V6):** the
+  `TableStorage` trait and registry (`Registry::add_storage`), `row`
+  behind it; `CREATE TABLE … WITH (storage = name)`,
+  `nc_catalog.tables.storage`, `nc_catalog.storages`.
 - **2026-10-29 — §M14.20 compression (V5):** leaves store their keys'
   shared prefix once; values of 64 bytes or more are stored LZ-compressed
   when that pays; format version 2 (version 1 read).  A million-row

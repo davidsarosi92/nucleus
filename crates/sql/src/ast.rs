@@ -15,6 +15,8 @@ pub enum Statement {
         constraints: Vec<TableConstraint>,
         /// `IF NOT EXISTS`.
         if_not_exists: bool,
+        /// `WITH (name = value, …)`.
+        options: Vec<(String, String)>,
     },
     /// `DROP TABLE`.
     DropTable {

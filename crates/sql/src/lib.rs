@@ -50,6 +50,7 @@ pub mod sessions;
 pub mod spill;
 pub mod statements;
 pub mod stats;
+pub mod storage;
 pub mod tokens;
 pub mod types;
 pub mod uuid;

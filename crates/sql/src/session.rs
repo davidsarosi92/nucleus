@@ -1355,6 +1355,7 @@ pub fn execute(
             columns,
             constraints,
             if_not_exists,
+            options,
         } => {
             if catalog::get_table(&*txn, name)?.is_some() {
                 if *if_not_exists {
@@ -1364,7 +1365,21 @@ pub fn execute(
                     "relation \"{name}\" already exists"
                 )));
             }
-            create_table(txn, reg, name, columns, constraints)?;
+            let mut storage = crate::storage::ROW.to_string();
+            for (key, value) in options {
+                match key.as_str() {
+                    "storage" => {
+                        crate::storage::named(value)?;
+                        storage = value.clone();
+                    }
+                    _ => {
+                        return Err(Error::invalid_parameter(format!(
+                            "unrecognized parameter \"{key}\""
+                        )));
+                    }
+                }
+            }
+            create_table(txn, reg, name, columns, constraints, &storage)?;
             let owner = crate::access::current().user.clone();
             crate::privileges::on_create_table(txn, name, &owner)?;
             Output::Command("CREATE TABLE".into())
@@ -1862,6 +1877,7 @@ fn create_table(
     name: &str,
     specs: &[crate::ast::ColumnSpec],
     constraints: &[TableConstraint],
+    storage: &str,
 ) -> Result<()> {
     let mut columns = Vec::new();
     let mut checks = Vec::new();
@@ -1951,6 +1967,7 @@ fn create_table(
         row_security: false,
         force_row_security: false,
         comment: None,
+        storage: storage.to_string(),
     };
     for (n, cols) in uniques {
         if catalog::find_index(&*txn, &n)?.is_some() {

@@ -1422,7 +1422,11 @@ and values of 64 bytes or more are LZ-compressed when that saves an
 eighth, by a codec of the storage layer's own; format version 2, version
 1 still read.  Compressing whole pages across rows is left to the
 columnar segments, V7, where it pays); V6 table
-storage as a module ⬜ (one trait, `row` behind it); V7 columnar storage
+storage as a module ✅ (`TableStorage`: writes, reads and ranges by row
+key, batches, the integrity check's part; a process-wide registry modules
+add to, `row` behind it; `CREATE TABLE … WITH (storage = …)`,
+`nc_catalog.tables.storage`; a module's storage tested through every
+path); V7 columnar storage
 ⬜ (segments, delta store, visibility map, min / max); V8 storage per
 table and per column, converted online ⬜; V9 partitioning ⬜ (range,
 list, hash; pruning; attach / detach; storage per partition; the age
@@ -2128,6 +2132,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-29** — §M14.20 V6: table storage as a module — the
+  `TableStorage` trait and registry, `row` behind it, `WITH (storage =
+  …)`.
 - **2026-10-29** — §M14.20 V5: compression — key prefixes stored once
   per leaf, LZ-compressed values; format version 2.  A million-row
   table's file 93 → 61 MB.

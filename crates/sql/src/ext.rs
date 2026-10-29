@@ -60,13 +60,15 @@ pub use crate::datetime::{
     Interval, parse_date, parse_interval, parse_time_of_day, parse_timestamp,
 };
 pub use crate::decimal::Decimal;
+pub use crate::enums::Labels;
 pub use crate::error::{Error, Result};
 pub use crate::inet::Net;
 pub use crate::parser::{parse, parse_with_text};
 pub use crate::session::{OutColumn, Output, Session, Sink, TxnStatus, command_tag, read_only};
+pub use crate::storage::{BatchSource, RowIter, Scan as StorageScan, TableStorage};
 pub use crate::types::{DataType, Row, Value};
 /// The vectorized executor's columns, as batch capabilities see them.
-pub use crate::vector::{TimeKind, Vector};
+pub use crate::vector::{Batch, Sel, TimeKind, Vector};
 
 /// The catalog, read-only, as modules see it: table definitions and their
 /// constraints.
@@ -648,6 +650,13 @@ impl Registry {
             self.aggregates.insert((*n).to_string(), a.clone());
         }
         Ok(())
+    }
+
+    /// Adds a table storage (PLAN.md §M14.20): tables then name it in
+    /// `CREATE TABLE … WITH (storage = name)`.  Storages are kept for the
+    /// process (tables of every database may use them).
+    pub fn add_storage(&mut self, s: Arc<dyn crate::storage::TableStorage>) -> Result<()> {
+        crate::storage::register(s)
     }
 
     /// The aggregate called `name`.

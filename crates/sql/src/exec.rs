@@ -640,46 +640,40 @@ pub fn scan_some<'a>(
     let Some((start, end, index)) = key_range(table, access, &env(&[], ctx, outer))? else {
         return Ok(Box::new(std::iter::empty()));
     };
-    let end_bound = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+    let storage = crate::storage::of(table)?;
     if index.is_none() {
-        let mut entries = Entries::new(ctx, Bound::Included(&start), end_bound)?;
-        let mut labels = crate::enums::Labels::default();
-        return Ok(Box::new(std::iter::from_fn(move || {
-            let row = (|| {
-                let Some((k, v)) = entries.next()? else {
-                    return Ok(None);
-                };
-                crate::budget::charge_scan()?;
-                let row = crate::large::read_some(ctx.txn, table, k, v, &mut labels, wanted)?;
-                Ok(Some((k.to_vec(), row)))
-            })();
-            row.transpose()
+        let rows = storage.rows(crate::storage::Scan {
+            txn: ctx.txn,
+            table,
+            start,
+            end,
+            wanted,
+            validated: ctx.validated,
+        })?;
+        return Ok(Box::new(rows.map(|r| {
+            crate::budget::charge_scan()?;
+            r
         })));
     }
+    // A secondary index: its entries hold the rows' primary key suffixes.
+    let end_bound = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
     let entries = if ctx.validated {
         ctx.txn.scan_validated(Bound::Included(&start), end_bound)?
     } else {
         ctx.txn.scan(Bound::Included(&start), end_bound)?
     };
-    Ok(match index {
-        None => unreachable!("read in chunks above"),
-        Some(_) => {
-            let base = table.index_prefix(0);
-            let mut labels = crate::enums::Labels::default();
-            Box::new(entries.map(move |e| {
-                crate::budget::charge_scan()?;
-                let (_, pk) = e?;
-                let mut k = base.clone();
-                k.extend_from_slice(&pk);
-                let v = ctx
-                    .txn
-                    .get(&k)?
-                    .ok_or_else(|| Error::internal("index entry without its row"))?;
-                let row = crate::large::read_some(ctx.txn, table, &k, &v, &mut labels, wanted)?;
-                Ok((k, row))
-            }))
-        }
-    })
+    let base = table.index_prefix(0);
+    let mut labels = crate::enums::Labels::default();
+    Ok(Box::new(entries.map(move |e| {
+        crate::budget::charge_scan()?;
+        let (_, pk) = e?;
+        let mut k = base.clone();
+        k.extend_from_slice(&pk);
+        let row = storage
+            .get(ctx.txn, table, &k, wanted, &mut labels)?
+            .ok_or_else(|| Error::internal("index entry without its row"))?;
+        Ok((k, row))
+    })))
 }
 
 /// A key range's entries read a chunk at a time, each borrowed from the
@@ -695,10 +689,21 @@ impl<'a> Entries<'a> {
     /// The entries in `(start, end)`, read as the statement reads
     /// (validated when it must be).
     pub fn new(ctx: &'a Ctx<'a>, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Self> {
-        let chunks = if ctx.validated {
-            ctx.txn.scan_chunks_validated(start, end)?
+        Self::over(ctx.txn, ctx.validated, start, end)
+    }
+
+    /// The entries in `(start, end)` of `txn` (`validated`: reads checked
+    /// at commit).
+    pub fn over(
+        txn: &'a dyn nucleus_kv::KvTxn,
+        validated: bool,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Self> {
+        let chunks = if validated {
+            txn.scan_chunks_validated(start, end)?
         } else {
-            ctx.txn.scan_chunks(start, end)?
+            txn.scan_chunks(start, end)?
         };
         Ok(Self {
             chunks,

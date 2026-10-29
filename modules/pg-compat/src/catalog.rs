@@ -553,6 +553,7 @@ fn def_table(k: usize) -> Table {
         row_security: false,
         force_row_security: false,
         comment: None,
+        storage: "row".into(),
     }
 }
 

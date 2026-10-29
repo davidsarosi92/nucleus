@@ -946,44 +946,32 @@ impl Builder {
 /// A primary key range: from, to (`None`: the index's end).
 type KeyRange = (Vec<u8>, Option<Vec<u8>>, Option<usize>);
 
-/// A table's rows, a batch at a time, decoded into vectors.
-struct ScanSource<'a> {
+/// The row storage's rows a batch at a time, decoded from their encoding
+/// straight into vectors ([`crate::storage::RowStorage::batches`]).
+pub struct RowBatches<'a> {
     table: &'a Table,
-    /// `None`: an empty key range.
-    entries: Option<Entries<'a>>,
+    entries: Entries<'a>,
     kinds: Vec<Kind>,
     labels: Labels,
-    ctx: &'a Ctx<'a>,
+    txn: &'a dyn nucleus_kv::KvTxn,
 }
 
-impl<'a> ScanSource<'a> {
-    fn new(
-        table: &'a Table,
-        access: &'a Access,
-        wanted: Option<&'a [bool]>,
-        cx: Cx<'a>,
-        range: Option<KeyRange>,
-    ) -> Result<Self> {
-        let range = match range {
-            Some(r) => Some(r),
-            None => {
-                crate::exec::key_range(table, access, &cx.env(&[]))?.map(|(s, e, _)| (s, e, None))
-            }
-        };
-        let entries = match range {
-            None => None,
-            Some((start, end, _)) => {
-                let end = end
-                    .as_deref()
-                    .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
-                Some(Entries::new(
-                    cx.ctx,
-                    std::ops::Bound::Included(&start),
-                    end,
-                )?)
-            }
-        };
-        let kinds = table
+impl<'a> RowBatches<'a> {
+    /// Over `scan`'s range.
+    pub fn new(scan: crate::storage::Scan<'a>) -> Result<Self> {
+        let end = scan
+            .end
+            .as_deref()
+            .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        let entries = Entries::over(
+            scan.txn,
+            scan.validated,
+            std::ops::Bound::Included(&scan.start),
+            end,
+        )?;
+        let wanted = scan.wanted;
+        let kinds = scan
+            .table
             .columns
             .iter()
             .enumerate()
@@ -1006,29 +994,26 @@ impl<'a> ScanSource<'a> {
             })
             .collect();
         Ok(Self {
-            table,
+            table: scan.table,
             entries,
             kinds,
             labels: Labels::default(),
-            ctx: cx.ctx,
+            txn: scan.txn,
         })
     }
+}
 
-    /// The next (at most) `max` rows; `None` at the end.
+impl crate::storage::BatchSource for RowBatches<'_> {
     fn next_batch(&mut self, max: usize) -> Result<Option<Batch>> {
-        let Some(entries) = &mut self.entries else {
-            return Ok(None);
-        };
         let mut cols: Vec<Builder> = self.kinds.iter().map(|&k| Builder::new(k, max)).collect();
         let mut n = 0;
         while n < max {
-            let Some((key, bytes)) = entries.next()? else {
+            let Some((key, bytes)) = self.entries.next()? else {
                 break;
             };
-            decode_into(self.ctx, self.table, key, bytes, &mut cols)?;
+            decode_into(self.txn, self.table, key, bytes, &mut cols)?;
             n += 1;
         }
-        crate::budget::charge_scans(n as u64)?;
         if n == 0 {
             return Ok(None);
         }
@@ -1039,8 +1024,7 @@ impl<'a> ScanSource<'a> {
                 && let Vector::Values(vals) = &mut v
             {
                 for x in vals {
-                    self.labels
-                        .fill(self.ctx.txn, self.table.columns[c].ty, x)?;
+                    self.labels.fill(self.txn, self.table.columns[c].ty, x)?;
                 }
             }
             out.push(Rc::new(v));
@@ -1053,9 +1037,38 @@ impl<'a> ScanSource<'a> {
     }
 }
 
+/// Rows as a batch (a vector per column, typed where the values are);
+/// `None` for no rows.
+pub fn batch_of_rows(rows: Vec<Row>) -> Option<Batch> {
+    let n = rows.len();
+    let width = rows.first()?.len();
+    let mut cols: Vec<Vec<Value>> = (0..width).map(|_| Vec::with_capacity(n)).collect();
+    for row in rows {
+        for (c, v) in row.into_iter().enumerate() {
+            if let Some(col) = cols.get_mut(c) {
+                col.push(v);
+            }
+        }
+    }
+    Some(Batch {
+        len: n,
+        cols: cols
+            .into_iter()
+            .map(|c| Rc::new(Vector::typed(c)))
+            .collect(),
+        sel: Sel::All(n),
+    })
+}
+
 /// Appends a stored row's columns to `cols` (a value stored out of line
 /// fetched only for a column read).
-fn decode_into(ctx: &Ctx, t: &Table, key: &[u8], b: &[u8], cols: &mut [Builder]) -> Result<()> {
+fn decode_into(
+    txn: &dyn nucleus_kv::KvTxn,
+    t: &Table,
+    key: &[u8],
+    b: &[u8],
+    cols: &mut [Builder],
+) -> Result<()> {
     let bad = |_| Error::internal("malformed row encoding");
     let mut r = Reader::new(b);
     if !(1..=crate::encoding::ROW_VERSION).contains(&r.u8().map_err(bad)?) {
@@ -1072,7 +1085,7 @@ fn decode_into(ctx: &Ctx, t: &Table, key: &[u8], b: &[u8], cols: &mut [Builder])
             let len = r.u32().map_err(bad)?;
             if !matches!(col, Builder::Skip) {
                 let pk = crate::exec::pk_suffix(t, key);
-                col.push(crate::large::fetch(ctx.txn, t, &pk, c, len)?);
+                col.push(crate::large::fetch(txn, t, &pk, c, len)?);
             }
             continue;
         }
@@ -1154,7 +1167,8 @@ enum Out {
 /// A table scan and the filters and projections above it, run a batch at
 /// a time.
 pub struct Pipeline<'a> {
-    source: ScanSource<'a>,
+    /// The scan's batches (`None`: an empty key range).
+    source: Option<Box<dyn crate::storage::BatchSource + 'a>>,
     /// The scan's node.
     scan: &'a Plan,
     /// The steps, bottom up, each with its plan node.
@@ -1223,7 +1237,23 @@ impl<'a> Pipeline<'a> {
         };
         let cx = Cx { ctx, outer };
         let wanted = ctx.needed.get(&(scan as *const Plan as usize));
-        let source = ScanSource::new(table, access, wanted.map(Vec::as_slice), cx, range)?;
+        let range = match range {
+            Some(r) => Some(r),
+            None => crate::exec::key_range(table, access, &cx.env(&[]))?,
+        };
+        let source = match range {
+            None => None,
+            Some((start, end, _)) => {
+                Some(crate::storage::of(table)?.batches(crate::storage::Scan {
+                    txn: ctx.txn,
+                    table,
+                    start,
+                    end,
+                    wanted: wanted.map(Vec::as_slice),
+                    validated: ctx.validated,
+                })?)
+            }
+        };
         if let Some(p) = ctx.profile {
             let mut nodes: Vec<&Plan> = vec![scan];
             for (_, n) in &steps {
@@ -1251,9 +1281,13 @@ impl<'a> Pipeline<'a> {
     fn next(&mut self) -> Result<Option<Out>> {
         loop {
             let started = self.cx.ctx.profile.and_then(|p| p.clock());
-            let Some(input) = self.source.next_batch(self.batch)? else {
+            let Some(source) = &mut self.source else {
                 return Ok(None);
             };
+            let Some(input) = source.next_batch(self.batch)? else {
+                return Ok(None);
+            };
+            crate::budget::charge_scans(input.len as u64)?;
             self.batch = (self.batch * 2).min(self.max);
             let out = match self.run(&input, started) {
                 Ok(b) if b.sel.is_empty() => continue,

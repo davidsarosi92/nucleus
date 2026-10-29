@@ -82,7 +82,7 @@ const DATA: u8 = 0x01;
 /// before, `text`'s 4, and still read as text), `inet` and `cidr` (16, 17);
 /// version 7 an owner, version 8 row-level security, version 9 comments
 /// on the table and its columns; older versions still read.
-const TABLE_VERSION: u8 = 9;
+const TABLE_VERSION: u8 = 10;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -289,6 +289,9 @@ pub struct Table {
     pub force_row_security: bool,
     /// `COMMENT ON TABLE`.
     pub comment: Option<String>,
+    /// How its rows are stored: a registered [`crate::storage::TableStorage`]
+    /// (`row` by default).
+    pub storage: String,
 }
 
 impl Table {
@@ -376,6 +379,7 @@ impl Table {
         for c in &self.columns {
             w.opt_str(c.comment.as_deref());
         }
+        w.str(&self.storage);
         w.0
     }
 
@@ -485,6 +489,11 @@ impl Table {
                 c.comment = r.opt_str()?;
             }
         }
+        let storage = if version >= 10 {
+            r.str()?
+        } else {
+            crate::storage::ROW.to_string()
+        };
         Ok(Self {
             id,
             name,
@@ -499,6 +508,7 @@ impl Table {
             row_security: rls & 1 != 0,
             force_row_security: rls & 2 != 0,
             comment,
+            storage,
         })
     }
 }
@@ -1172,6 +1182,7 @@ mod tests {
             row_security: true,
             force_row_security: false,
             comment: Some("everyone we know".into()),
+            storage: "row".into(),
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));

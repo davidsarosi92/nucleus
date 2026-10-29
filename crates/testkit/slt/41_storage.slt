@@ -1,0 +1,43 @@
+# Table storage (PLAN.md §M14.20 V6): a table names how its rows are
+# stored; `row` is built in and the default.
+
+# nucleus-only
+statement ok
+CREATE TABLE st_a (id INT PRIMARY KEY, v TEXT) WITH (storage = row)
+
+# nucleus-only
+statement ok
+CREATE TABLE st_b (id INT PRIMARY KEY, a INT REFERENCES st_a (id), v TEXT) WITH (storage = 'row')
+
+statement ok
+INSERT INTO st_a VALUES (1, 'one'), (2, 'two')
+
+statement ok
+INSERT INTO st_b VALUES (10, 1, 'x'), (20, 2, 'y')
+
+query IT
+SELECT b.id, a.v FROM st_b b JOIN st_a a ON a.id = b.a ORDER BY b.id
+----
+10 one
+20 two
+
+# nucleus-only
+query TT
+SELECT name, storage FROM nc_catalog.tables WHERE name LIKE 'st_%' ORDER BY name
+----
+st_a row
+st_b row
+
+# nucleus-only
+query T
+SELECT name FROM nc_catalog.storages WHERE name = 'row'
+----
+row
+
+# nucleus-only
+statement error 42704
+CREATE TABLE st_c (id INT PRIMARY KEY) WITH (storage = nowhere)
+
+# nucleus-only
+statement error 22023
+CREATE TABLE st_c (id INT PRIMARY KEY) WITH (fillfactor = 70)

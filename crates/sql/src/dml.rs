@@ -104,6 +104,8 @@ pub struct Writer {
     defaults: Vec<Option<Expr>>,
     /// Its index entries.
     pub keys: IndexKeys,
+    /// How its rows are stored.
+    pub storage: std::sync::Arc<dyn crate::storage::TableStorage>,
 }
 
 impl Writer {
@@ -124,11 +126,13 @@ impl Writer {
             });
         }
         let keys = IndexKeys::new(txn, reg, &table)?;
+        let storage = crate::storage::of(&table)?;
         Ok(Self {
             table,
             checks,
             defaults,
             keys,
+            storage,
         })
     }
 
@@ -311,10 +315,10 @@ pub(crate) fn insert_row(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<(
         None
     };
     let key = row_key_of(t, row, rowid);
-    if rowid.is_none() && txn.get(&key)?.is_some() {
+    if rowid.is_none() && w.storage.exists(&*txn, t, &key, false)? {
         return Err(duplicate(&format!("{}_pkey", t.name)));
     }
-    crate::large::write(txn, t, &key, row, None)?;
+    w.storage.write(txn, t, &key, row, None)?;
     let pk = pk_suffix(t, &key);
     for (i, (k, unique)) in w.keys.entries(&*txn, t, row, &pk)?.into_iter().enumerate() {
         if unique && txn.get(&k)?.is_some() {
@@ -622,13 +626,13 @@ pub fn update_rows(
             row_key_of(t, new, None)
         };
         if new_key != *key {
-            if txn.get(&new_key)?.is_some() {
+            if w.storage.exists(&*txn, t, &new_key, false)? {
                 return Err(duplicate(&format!("{}_pkey", t.name)));
             }
-            crate::large::remove(txn, t, key)?;
-            crate::large::write(txn, t, &new_key, new, None)?;
+            w.storage.remove(txn, t, key)?;
+            w.storage.write(txn, t, &new_key, new, None)?;
         } else {
-            crate::large::write(txn, t, key, new, Some(old))?;
+            w.storage.write(txn, t, key, new, Some(old))?;
         }
         let (old_pk, new_pk) = (pk_suffix(t, key), pk_suffix(t, &new_key));
         let olds = w.keys.entries(&*txn, t, old, &old_pk)?;
@@ -664,8 +668,9 @@ pub fn delete_rows(
     rows: &[(Vec<u8>, Row)],
 ) -> Result<()> {
     let keys = IndexKeys::new(&*txn, reg, t)?;
+    let storage = crate::storage::of(t)?;
     for (key, row) in rows {
-        crate::large::remove(txn, t, key)?;
+        storage.remove(txn, t, key)?;
         let pk = pk_suffix(t, key);
         for (k, _) in keys.entries(&*txn, t, row, &pk)? {
             txn.delete(&k)?;
@@ -764,17 +769,21 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
 /// reads both).
 pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Result<()> {
     let keys = IndexKeys::new(&*txn, reg, table)?;
+    let storage = crate::storage::of(table)?;
     let prefix = table.data_prefix();
     let end = nucleus_kv::prefix_end(&prefix).expect("table prefix");
     let primary = table.index_prefix(0);
-    let primary_end = nucleus_kv::prefix_end(&primary).expect("index prefix");
+    let primary_end = nucleus_kv::prefix_end(&primary);
     let mut rows = crate::spill::Stash::new();
-    for e in txn.scan(
-        std::ops::Bound::Included(&primary),
-        std::ops::Bound::Excluded(&primary_end),
-    )? {
-        let (k, v) = e?;
-        let row = crate::large::read_row(&*txn, table, &k, &v)?;
+    for r in storage.rows(crate::storage::Scan {
+        txn: &*txn,
+        table,
+        start: primary,
+        end: primary_end,
+        wanted: None,
+        validated: false,
+    })? {
+        let (k, row) = r?;
         rows.push(exec::keyed(k, row))?;
     }
     let rows = rows.seal()?;
@@ -786,7 +795,7 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
         } else {
             row_key_of(table, &row, None)
         };
-        crate::large::write(txn, table, &key, &row, None)?;
+        storage.write(txn, table, &key, &row, None)?;
         let pk = pk_suffix(table, &key);
         for (k, _) in keys.entries(&*txn, table, &row, &pk)? {
             txn.put(&k, &pk)?;
@@ -809,6 +818,7 @@ pub fn replace_rows(
     let end = nucleus_kv::prefix_end(&prefix).expect("table prefix");
     catalog::delete_range(txn, &prefix, Some(&end))?;
     let keys = IndexKeys::new(&*txn, reg, table)?;
+    let storage = crate::storage::of(table)?;
     for r in rows {
         let (old_key, row) = exec::unkeyed(r?)?;
         let key = if table.primary_key.is_empty() {
@@ -816,10 +826,10 @@ pub fn replace_rows(
         } else {
             row_key_of(table, &row, None)
         };
-        if txn.get(&key)?.is_some() {
+        if storage.exists(&*txn, table, &key, false)? {
             return Err(duplicate(&format!("{}_pkey", table.name)));
         }
-        crate::large::write(txn, table, &key, &row, None)?;
+        storage.write(txn, table, &key, &row, None)?;
         let pk = pk_suffix(table, &key);
         for (i, (k, unique)) in keys
             .entries(&*txn, table, &row, &pk)?
@@ -846,12 +856,13 @@ pub fn rewrite_rows(
         let ctx = Ctx::new(&*txn, reg, &[]);
         exec::matching_stash(table, &Access::Full, None, &ctx)?
     };
+    let storage = crate::storage::of(table)?;
     for r in rows.into_iter() {
         let (key, row) = exec::unkeyed(r?)?;
         let mut filled = row.clone();
         let last = table.columns.len() - 1;
         filled[last] = fill.clone();
-        crate::large::write(txn, table, &key, &filled, Some(&row))?;
+        storage.write(txn, table, &key, &filled, Some(&row))?;
     }
     Ok(())
 }

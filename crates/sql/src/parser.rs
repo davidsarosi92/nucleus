@@ -1185,11 +1185,34 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect_op(")")?;
+        let mut options = Vec::new();
+        if self.eat_kw("with") {
+            self.expect_op("(")?;
+            loop {
+                let key = self.ident()?;
+                self.expect_op("=")?;
+                let value = match self.peek() {
+                    Some(Token::Str(_)) => self.string()?,
+                    Some(Token::Number(n)) => {
+                        let n = n.clone();
+                        self.pos += 1;
+                        n
+                    }
+                    _ => self.ident()?,
+                };
+                options.push((key, value));
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+            self.expect_op(")")?;
+        }
         Ok(Statement::CreateTable {
             name,
             columns,
             constraints,
             if_not_exists,
+            options,
         })
     }
 

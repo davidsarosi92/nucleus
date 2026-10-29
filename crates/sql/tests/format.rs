@@ -158,7 +158,7 @@ fn integer_columns_from_before_widths_read_as_bigint() {
         k
     };
     let mut record = txn.get(&key).unwrap().unwrap();
-    assert_eq!(record[0], 9, "the current table record version");
+    assert_eq!(record[0], 10, "the current table record version");
     record[0] = 5;
     txn.put(&key, &record).unwrap();
     let prefix = t.index_prefix(0);
