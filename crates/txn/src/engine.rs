@@ -243,10 +243,15 @@ impl Engine {
         !lock(&self.inner.unresolved).is_empty()
     }
 
-    /// How many transactions have begun: unchanged over a while, the
-    /// database was idle.
+    /// How many transactions have begun: unchanged over a while, with
+    /// none [`running`](Self::running), the database was idle.
     pub fn activity(&self) -> u64 {
         self.inner.begun.load(Ordering::Relaxed)
+    }
+
+    /// How many transactions are running.
+    pub fn running(&self) -> usize {
+        lock(&self.inner.active).values().sum()
     }
 
     /// The newest snapshot a transaction would see.

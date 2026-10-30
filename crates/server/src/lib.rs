@@ -517,8 +517,8 @@ pub const VACUUM_FORCE_AFTER: std::time::Duration = std::time::Duration::from_se
 /// POLICY`), converting partitions that have aged past them online; every
 /// [`VACUUM_CHECK_EVERY`], when large transactions have committed intents
 /// still read through their status, it vacuums (`Kv::vacuum_background`),
-/// making them versions — when no transaction began since the last check,
-/// stopping as soon as one does (the next idle check goes on from there);
+/// making them versions — when no transaction began since the last check
+/// and none is running, stopping as soon as one begins (the next idle check goes on from there);
 /// after [`VACUUM_FORCE_AFTER`] without one, paced instead (each batch
 /// followed by a pause four times as long).
 pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
@@ -532,14 +532,14 @@ pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
             tick += 1;
             if kv.vacuum_wanted() {
                 let since = *waiting.get_or_insert_with(std::time::Instant::now);
-                let idle = kv.activity() == seen;
+                let idle = kv.activity() == seen && kv.running() == 0;
                 let forced = since.elapsed() >= VACUUM_FORCE_AFTER;
                 if idle || forced {
                     let started = kv.activity();
                     let mut batch = std::time::Instant::now();
                     let mut go_on = || {
                         if !forced {
-                            return kv.activity() == started;
+                            return kv.activity() == started && kv.running() == 0;
                         }
                         let worked = batch.elapsed().min(std::time::Duration::from_millis(50));
                         std::thread::sleep(worked * VACUUM_PAUSE_FACTOR);

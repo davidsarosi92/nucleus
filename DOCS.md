@@ -559,9 +559,10 @@ distributed implementation will provide (§F3).
   entries), `go_on` asked between them — `false` stops the sweep there,
   and the next call goes on from it (with the transactions it began
   with: their statuses go when a sweep has passed every key).
-  `Kv::activity()`: transactions begun so far.  The server's maintenance
-  thread (`nucleus_server::maintain`) vacuums when no transaction began
-  in the last 10 s, stopping at the first one that does; after 10 minutes
+  `Kv::activity()`: transactions begun so far; `Kv::running()`: running
+  now.  The server's maintenance thread (`nucleus_server::maintain`)
+  vacuums when no transaction began in the last 10 s and none is running
+  (a long `COPY` is), stopping at the first one that begins; after 10 minutes
   without such a pause, paced instead (each batch followed by a pause
   four times as long).  Reads resolve intents by their status meanwhile,
   at about the cost of versions; vacuuming during a load's next
@@ -2565,7 +2566,8 @@ checks `psql` with and without TLS.
 ## 12. Change log
 
 - **2026-10-30 — §M14.20 V11, vacuum when idle:** the server's vacuum
-  runs when no transaction began for 10 s, in batches of 2 048 entries,
+  runs when no transaction began for 10 s and none runs, in batches of
+  2 048 entries,
   stopping when one begins and going on from there later
   (`Kv::vacuum_background`, `Kv::activity`); paced after 10 minutes
   without a pause.  At full speed after each large commit it slowed the

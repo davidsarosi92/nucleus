@@ -542,6 +542,9 @@ fn a_stopped_vacuum_goes_on_where_it_stopped() {
         assert_eq!(rows[&key(i)], want, "key {i}");
     }
     let before = e.activity();
-    let _r = e.begin();
-    assert_eq!(e.activity(), before + 1);
+    assert_eq!(e.running(), 0);
+    let r = e.begin();
+    assert_eq!((e.activity(), e.running()), (before + 1, 1));
+    drop(r);
+    assert_eq!(e.running(), 0);
 }

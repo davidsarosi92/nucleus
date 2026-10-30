@@ -216,9 +216,15 @@ pub trait Kv: Send + Sync {
         self.vacuum()
     }
 
-    /// How many transactions have begun so far (unchanged over a while:
-    /// the database was idle).  The default: 0.
+    /// How many transactions have begun so far (unchanged over a while,
+    /// with none [`running`](Kv::running): the database was idle).  The
+    /// default: 0.
     fn activity(&self) -> u64 {
+        0
+    }
+
+    /// How many transactions are running.  The default: 0.
+    fn running(&self) -> usize {
         0
     }
 
@@ -616,6 +622,10 @@ impl Kv for Database {
 
     fn activity(&self) -> u64 {
         self.engine.activity()
+    }
+
+    fn running(&self) -> usize {
+        self.engine.running()
     }
 
     fn vacuum_wanted(&self) -> bool {
