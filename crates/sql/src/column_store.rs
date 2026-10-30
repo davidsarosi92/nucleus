@@ -498,22 +498,84 @@ enum Decoded {
 }
 
 /// Decoded columns by (segment id, column): a segment never changes, so
-/// they stay right.  Bounded; emptied when full.
-fn cache() -> &'static Mutex<(HashMap<(u64, u16), Decoded>, usize)> {
-    static CACHE: OnceLock<Mutex<(HashMap<(u64, u16), Decoded>, usize)>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new((HashMap::new(), 0)))
+/// they stay right.  Bounded by their size; past it, those used longest
+/// ago go — an eighth of the bound at a time, so a table larger than the
+/// cache keeps what its reads come back to (point reads by an index), and
+/// a scan through it evicts in steps rather than all at once.
+#[derive(Default)]
+struct Cache {
+    entries: HashMap<(u64, u16), (Decoded, usize, u64)>,
+    bytes: usize,
+    tick: u64,
 }
 
-const CACHE_ROWS: usize = 64 * SEGMENT_ROWS;
+fn cache() -> &'static Mutex<Cache> {
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Cache::default()))
+}
+
+/// The decoded columns' bound, in bytes.
+const CACHE_BYTES: usize = 256 << 20;
+
+/// About the memory a decoded column holds.
+fn decoded_bytes(d: &Decoded) -> usize {
+    let nulls = |n: &Option<Vec<bool>>| n.as_ref().map_or(0, Vec::len);
+    64 + match d {
+        Decoded::Keys(k) => k.offsets.len() * 4 + k.bytes.len(),
+        Decoded::Column(v) => match &**v {
+            Vector::Const(_) => 32,
+            Vector::Int(d, n) | Vector::Time(_, d, n) => d.len() * 8 + nulls(n),
+            Vector::Float(d, n) => d.len() * 8 + nulls(n),
+            Vector::Bool(d, n) => d.len() + nulls(n),
+            Vector::Text(o, b, n) => o.len() * 4 + b.len() + nulls(n),
+            Vector::Values(v) => v.len() * std::mem::size_of::<Value>(),
+        },
+    }
+}
+
+impl Cache {
+    fn get(&mut self, key: &(u64, u16)) -> Option<Decoded> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.entries.get_mut(key).map(|(d, _, used)| {
+            *used = tick;
+            d.clone()
+        })
+    }
+
+    fn insert(&mut self, key: (u64, u16), d: Decoded) {
+        let size = decoded_bytes(&d);
+        if self.bytes + size > CACHE_BYTES {
+            // The longest unused, until an eighth of the bound is free.
+            let mut by_use: Vec<((u64, u16), u64, usize)> = self
+                .entries
+                .iter()
+                .map(|(k, (_, s, used))| (*k, *used, *s))
+                .collect();
+            by_use.sort_unstable_by_key(|e| e.1);
+            for (k, _, s) in by_use {
+                if self.bytes + size <= CACHE_BYTES - CACHE_BYTES / 8 {
+                    break;
+                }
+                self.entries.remove(&k);
+                self.bytes -= s;
+            }
+        }
+        self.tick += 1;
+        if let Some((_, old, _)) = self.entries.insert(key, (d, size, self.tick)) {
+            self.bytes -= old;
+        }
+        self.bytes += size;
+    }
+}
 
 fn cached(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: u16) -> Result<Decoded> {
     if let Some(d) = cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .0
         .get(&(seg.id, col))
     {
-        return Ok(d.clone());
+        return Ok(d);
     }
     let b = txn
         .get(&chunk_key(t, seg.id, col))?
@@ -523,13 +585,10 @@ fn cached(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: u16) -> Result<Decoded
     } else {
         Decoded::Column(Arc::new(crate::segment::decode(&b)?))
     };
-    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
-    if c.1 + seg.rows > CACHE_ROWS {
-        c.0.clear();
-        c.1 = 0;
-    }
-    c.1 += seg.rows;
-    c.0.insert((seg.id, col), d.clone());
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert((seg.id, col), d.clone());
     Ok(d)
 }
 

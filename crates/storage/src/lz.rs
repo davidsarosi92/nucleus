@@ -123,10 +123,14 @@ pub fn decompress(input: &[u8], size: usize, out: &mut Vec<u8>) -> Option<()> {
         if off == 0 || off > pos - start || pos - start + ml > size {
             return None;
         }
-        // Byte by byte: the match may overlap what it writes.
-        for k in 0..ml {
-            let b = out[pos - off + k];
-            out.push(b);
+        // From `off` back; a match longer than that repeats what it wrote
+        // (so it is copied a period at a time, each copy of what is there).
+        let from = pos - off;
+        let mut left = ml;
+        while left > 0 {
+            let n = left.min(out.len() - from);
+            out.extend_from_within(from..from + n);
+            left -= n;
         }
     }
     (out.len() - start == size).then_some(())

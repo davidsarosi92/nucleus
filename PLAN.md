@@ -1418,7 +1418,8 @@ single pass's; exact sums of doubles; `parallel_workers`; scans and
 aggregates of a million rows 1.5–1.8× PostgreSQL's ten workers, from
 5–6×.  Left: joins and sorts in parallel); V5 page compression ✅ (leaves store
 their keys' shared prefix once — a million-row table's file 93 → 61 MB —
-and values of 64 bytes or more are LZ-compressed when that saves an
+and values of 1 KiB or more (64 bytes at first; rows that short cost a
+decompression per read) are LZ-compressed when that saves an
 eighth, by a codec of the storage layer's own; format version 2, version
 1 still read.  Compressing whole pages across rows is left to the
 columnar segments, V7, where it pays); V6 table

@@ -224,7 +224,9 @@ Payload: 8168 bytes (`PAYLOAD_SIZE`).  Types below 16 belong to the pager
 (0 unused, 1 header, 2 free list); the B+tree uses 16 leaf, 17 internal,
 18 overflow.  Verification names the failure: `checksum mismatch`, `never
 written (all zeros)`, `page id mismatch (misdirected write)`.  `crc32c` is
-a portable table-driven CRC-32C checked against the RFC 3720 vectors.
+CRC-32C by the CPU's instructions where it has them (ARMv8 CRC, SSE 4.2;
+`nucleus_kernels::crc32c`), else portable and table-driven — the same
+value, checked against the RFC 3720 vectors and against each other.
 
 ### 4.2 Pager (`pager::Pager`)
 
@@ -269,10 +271,12 @@ copy; `fsync`.  Any failure poisons the pager.  `create` builds the file as
 copy-on-write fails at once.  `create(type)` allocates a page into a frame;
 `free(id)` drops it (must be unpinned).  Eviction is the clock algorithm
 over unpinned frames; dirty victims are written back first.  `flush`
-writes every dirty frame, `sync` = flush + pager commit.  Page-table
-changes take one pool lock; a miss reads the page without it (and reads
-again if a page was written back meanwhile), so threads reading cold pages
-do not wait on each other.  Errors: `PoolExhausted` (every
+writes every dirty frame, `sync` = flush + pager commit.  The frames are
+split into up to 16 shards (at least 256 frames each; a page always in the
+shard of its id), each with its own page table, free frames, clock hand and
+lock, so a parallel scan's workers do not queue on one lock; a miss reads
+the page without any (and reads again if a page was written back
+meanwhile), so threads reading cold pages do not wait on each other.  Errors: `PoolExhausted` (every
 frame pinned), `Pinned`.  `stats()`: hits, misses, evictions, write-backs.
 
 ### 4.4 B+tree (`btree::BTree`, `node`)
@@ -290,15 +294,19 @@ only the rest; sizes, splits and packing count the prefix once, so a leaf
 holds more rows (a table's keys share their table and index ids and the
 high bytes of their primary keys: a million-row table's file 93 → 61 MB).
 Readers compare a key as prefix and rest (`node::KeyRef`).  *Values:* a
-value of 64 bytes or more is stored compressed when that saves an eighth
+value of 1 KiB or more is stored compressed when that saves an eighth
+(shorter ones save little and would be decompressed at every read — a
+TPC-H scan spent a third of its time so; values stored compressed before
+read as they were)
 — an LZ block (LZ4's block format, `lz.rs`, no dependency), flag 2 in the
 cell (`length u32, block`) or flag 3 in an overflow chain (`first page,
 block length, length`); reads decompress, checking every length and
 offset, so a damaged block is an error.  Large text and documents shrink;
 rows of a few short columns do not (too little repeats within one).
 
-**Checksums:** CRC-32C, slicing-by-8 (eight bytes a step, tables built at
-compile time; the same values as the bytewise definition, tested).
+**Checksums:** CRC-32C — the CPU's instructions where there are (chosen at
+run time), else slicing-by-8 (eight bytes a step, tables built at compile
+time); the same values as the bytewise definition, tested.
 
 **Copy-on-write:** a node is rewritten in place only if its page is
 writable; otherwise copied to a new page (old one freed) and the parent
@@ -1170,7 +1178,9 @@ equalities — when the subquery's rows do not depend on the row
 (uncorrelated `IN`), or when it reads one table (under projections,
 `DISTINCT`, sorts) and refers to the row only in its filter's top-level
 conjuncts, which become the join condition.  The right side keeps only
-the columns the condition reads.  `NOT IN` stays a subquery (its NULL
+the columns the condition reads, and the join goes as deep among the inner
+joins below as the columns it reads allow (a subquery filtering one table
+filters it before the joins).  `NOT IN` stays a subquery (its NULL
 semantics are not an anti join's); so do correlated scalar subqueries.
 `EXPLAIN` prints the plan (columns as `#n`); `EXPLAIN ANALYZE` runs it
 too (§8.13).
@@ -1227,7 +1237,11 @@ full scan and every index (a secondary index pays a row fetch per row),
 `EXPLAIN` shows `rows=`, and chains of up to 8 inner joins are reordered by
 dynamic programming (no cross products unless nothing connects; the
 smaller input becomes the hash build side; a projection restores the
-column order).  Without statistics the rule-based plan is kept.
+column order).  A join's equalities multiply their selectivities, except
+several between the same two inputs whose columns on one side cover a key
+of its table (the primary key, a unique index): those select 1 / its rows
+(each row of the other side meets at most one), where the product would
+take a join on a two-column key for nearly empty.  Without statistics the rule-based plan is kept.
 
 ### 8.9 Tests
 
@@ -2400,6 +2414,14 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-10-30 — §M14.20 V10, from the TPC-H profile:** joins on a key of
+  two columns estimated by the key (Q9 26 → 6.7 s at SF 1); semi and anti
+  joins placed below the inner joins (Q18 25 → 9.6 s); the buffer pool in
+  shards, each its own lock; CRC-32C by the CPU's instructions; LZ matches
+  copied a period at a time, and only values of 1 KiB or more compressed;
+  decoded column segments cached by size, those used longest ago evicted
+  (column tables' point reads no longer decode a segment each).
 
 - **2026-10-30 — §M14.20 TPC-H (V10, second part):** `bench/tpch.py`
   (generated TPC-H data, the 22 queries, results checked against

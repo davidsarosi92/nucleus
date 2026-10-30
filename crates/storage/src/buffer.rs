@@ -16,8 +16,11 @@
 //! rule up front, so a caller that forgets to copy-on-write fails at the
 //! write, not at a later eviction.
 //!
-//! Page table changes and eviction take one pool lock; a miss reads the page
-//! while holding it.  Hits only touch the lock briefly.
+//! The frames are split into shards, a page always in the shard of its
+//! id: each shard's page table, free frames and clock hand behind its own
+//! lock, so threads reading different pages (a parallel scan's workers) do
+//! not queue on one.  A pool too small to split has one shard.  A miss
+//! reads the page without any lock; hits only touch their shard's briefly.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -34,12 +37,26 @@ struct Frame {
     referenced: AtomicBool,
 }
 
+/// One shard: frames `start..end` (by global index) and the pages in them.
 struct Inner {
+    start: usize,
+    end: usize,
     table: HashMap<PageId, usize>,
+    /// By frame, less `start`.
     ids: Vec<Option<PageId>>,
     free_frames: Vec<usize>,
     hand: usize,
 }
+
+impl Inner {
+    fn id(&mut self, frame: usize) -> &mut Option<PageId> {
+        &mut self.ids[frame - self.start]
+    }
+}
+
+/// Frames per shard at least, and shards at most.
+const SHARD_FRAMES: usize = 256;
+const MAX_SHARDS: usize = 16;
 
 /// Counters, for tests and diagnostics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,7 +77,7 @@ pub struct BufferPool {
     /// Each made when first used, so a large pool costs nothing until it
     /// fills.
     frames: Box<[std::sync::OnceLock<Frame>]>,
-    inner: Mutex<Inner>,
+    shards: Box<[Mutex<Inner>]>,
     hits: AtomicU64,
     misses: AtomicU64,
     evictions: AtomicU64,
@@ -127,15 +144,24 @@ impl BufferPool {
     pub fn new(pager: Arc<Pager>, capacity: usize) -> Self {
         let capacity = capacity.max(1);
         let frames = (0..capacity).map(|_| std::sync::OnceLock::new()).collect();
+        let n = (capacity / SHARD_FRAMES).clamp(1, MAX_SHARDS);
+        let shards = (0..n)
+            .map(|i| {
+                let (start, end) = (capacity * i / n, capacity * (i + 1) / n);
+                Mutex::new(Inner {
+                    start,
+                    end,
+                    table: HashMap::new(),
+                    ids: vec![None; end - start],
+                    free_frames: (start..end).rev().collect(),
+                    hand: start,
+                })
+            })
+            .collect();
         Self {
             pager,
             frames,
-            inner: Mutex::new(Inner {
-                table: HashMap::new(),
-                ids: vec![None; capacity],
-                free_frames: (0..capacity).rev().collect(),
-                hand: 0,
-            }),
+            shards,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
@@ -173,8 +199,16 @@ impl BufferPool {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    /// The shard of page `id`, locked.
+    fn lock(&self, id: PageId) -> MutexGuard<'_, Inner> {
+        let n = self.shards.len();
+        let at = if n == 1 {
+            0
+        } else {
+            // Neighbouring pages (a scan's) to different shards.
+            (id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize % n
+        };
+        self.shards[at].lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn pin(&self, frame: usize, id: PageId) -> PageRef<'_> {
@@ -192,7 +226,7 @@ impl BufferPool {
     pub fn fetch(&self, id: PageId) -> Result<PageRef<'_>> {
         loop {
             let epoch = {
-                let inner = self.lock();
+                let inner = self.lock(id);
                 if let Some(&frame) = inner.table.get(&id) {
                     self.hits.fetch_add(1, Ordering::Relaxed);
                     return Ok(self.pin(frame, id));
@@ -202,7 +236,7 @@ impl BufferPool {
             // Read without the pool's lock, so other threads' fetches go on
             // meanwhile (a parallel scan's workers, reading cold pages).
             let page = self.pager.read_page(id)?;
-            let inner = self.lock();
+            let inner = self.lock(id);
             if let Some(&frame) = inner.table.get(&id) {
                 // Another thread read it meanwhile.
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -238,12 +272,13 @@ impl BufferPool {
     /// Allocates a new page of type `ty` and pins it.  The page is dirty: it
     /// reaches the file on eviction or flush.
     pub fn create(&self, ty: PageType) -> Result<PageRef<'_>> {
-        let mut inner = self.lock();
-        let frame = self.victim(&mut inner)?;
-        let id = match self.pager.allocate() {
-            Ok(id) => id,
+        let id = self.pager.allocate()?;
+        let mut inner = self.lock(id);
+        let frame = match self.victim(&mut inner) {
+            Ok(frame) => frame,
             Err(e) => {
-                inner.free_frames.push(frame);
+                drop(inner);
+                let _ = self.pager.free(id);
                 return Err(e);
             }
         };
@@ -258,20 +293,20 @@ impl BufferPool {
 
     fn install(&self, inner: &mut Inner, frame: usize, id: PageId, dirty: bool) {
         inner.table.insert(id, frame);
-        inner.ids[frame] = Some(id);
+        *inner.id(frame) = Some(id);
         self.frame(frame).dirty.store(dirty, Ordering::Release);
     }
 
     /// Frees page `id` (see [`Pager::free`]) and drops it from the cache.
     /// The page must not be pinned.
     pub fn free(&self, id: PageId) -> Result<()> {
-        let mut inner = self.lock();
+        let mut inner = self.lock(id);
         if let Some(&frame) = inner.table.get(&id) {
             if self.frame(frame).pins.load(Ordering::Acquire) != 0 {
                 return Err(Error::Pinned(id));
             }
             inner.table.remove(&id);
-            inner.ids[frame] = None;
+            *inner.id(frame) = None;
             self.frame(frame).dirty.store(false, Ordering::Release);
             inner.free_frames.push(frame);
         }
@@ -288,13 +323,13 @@ impl BufferPool {
         if let Some(frame) = inner.free_frames.pop() {
             return Ok(frame);
         }
-        let n = self.frames.len();
+        let (start, end) = (inner.start, inner.end);
         // Two sweeps: the first may only clear reference bits.
-        for _ in 0..2 * n {
+        for _ in 0..2 * (end - start) {
             let frame = inner.hand;
-            inner.hand = (inner.hand + 1) % n;
+            inner.hand = if frame + 1 == end { start } else { frame + 1 };
             let f = self.frame(frame);
-            // Pins only grow under the pool lock, which we hold, so a zero
+            // Pins only grow under the shard's lock, which we hold, so a zero
             // seen here stays zero until we are done.
             if f.pins.load(Ordering::Acquire) != 0 {
                 continue;
@@ -302,7 +337,9 @@ impl BufferPool {
             if f.referenced.swap(false, Ordering::Relaxed) {
                 continue;
             }
-            let id = inner.ids[frame].expect("a frame outside the free list holds a page");
+            let id = inner
+                .id(frame)
+                .expect("a frame outside the free list holds a page");
             if f.dirty.load(Ordering::Acquire) {
                 let mut page = f.page.write().unwrap_or_else(|e| e.into_inner());
                 self.pager.write_page(id, &mut page)?;
@@ -310,7 +347,7 @@ impl BufferPool {
                 self.writebacks.fetch_add(1, Ordering::Relaxed);
             }
             inner.table.remove(&id);
-            inner.ids[frame] = None;
+            *inner.id(frame) = None;
             self.evictions.fetch_add(1, Ordering::Relaxed);
             return Ok(frame);
         }
@@ -319,9 +356,16 @@ impl BufferPool {
 
     /// Writes every dirty page to the pager.  Pages stay cached.
     pub fn flush(&self) -> Result<()> {
-        let inner = self.lock();
-        for (frame, id) in inner.ids.iter().enumerate() {
-            let (Some(id), f) = (id, self.frame(frame)) else {
+        for shard in &*self.shards {
+            let inner = shard.lock().unwrap_or_else(|e| e.into_inner());
+            self.flush_shard(&inner)?;
+        }
+        Ok(())
+    }
+
+    fn flush_shard(&self, inner: &Inner) -> Result<()> {
+        for (i, id) in inner.ids.iter().enumerate() {
+            let (Some(id), f) = (id, self.frame(inner.start + i)) else {
                 continue;
             };
             // Clear the flag before copying: a write that starts after the

@@ -120,12 +120,23 @@ fn flush_then_reopen() {
 /// the data, so nearly every fetch evicts something.  Every read must see the
 /// thread's last write.
 fn stress(platform: &dyn Platform, path: &Path) {
+    stress_with(platform, path, 16, 40, 4000);
+}
+
+/// [`stress`] over a pool of `frames` (split into shards when large), each
+/// thread with `per_thread` pages.
+fn stress_with(
+    platform: &dyn Platform,
+    path: &Path,
+    frames: usize,
+    per_thread: usize,
+    evictions: u64,
+) {
     let pager = Arc::new(Pager::create(platform.fs(), path).unwrap());
-    let pool = Arc::new(BufferPool::new(pager, 16));
+    let pool = Arc::new(BufferPool::new(pager, frames));
     let threads = 8;
     // More pages per thread than frames, so even a thread running alone
     // evicts on most fetches, whatever the scheduler does.
-    let per_thread = 40;
     let mut pages: Vec<Vec<PageId>> = Vec::new();
     for _ in 0..threads {
         pages.push(make_pages(&pool, per_thread));
@@ -156,7 +167,15 @@ fn stress(platform: &dyn Platform, path: &Path) {
             });
         }
     });
-    assert!(pool.stats().evictions > 4000, "{:?}", pool.stats());
+    assert!(pool.stats().evictions > evictions, "{:?}", pool.stats());
+}
+
+#[test]
+fn concurrent_stress_sharded() {
+    // 1024 frames: four shards, each its own clock; 8 × 1500 pages.
+    let p = SimPlatform::new(2);
+    p.fs().create_dir_all(Path::new("/db")).unwrap();
+    stress_with(&p, Path::new("/db/data"), 1024, 1500, 4000);
 }
 
 #[test]

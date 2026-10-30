@@ -652,6 +652,71 @@ fn join_selectivity<'p>(
     0.33
 }
 
+/// Equalities between the same two inputs whose columns on one side cover
+/// a key of its table (the primary key, a unique index): each row of the
+/// other meets at most one of its rows, so together they select
+/// 1 / its rows — not the product of their selectivities, which takes
+/// them for independent (and a join on a two-column key for none).
+fn keyed_selectivity(
+    leaves: &[(Plan, usize)],
+    conds: &[Expr],
+    mut sel: Vec<f64>,
+    leaf_of: &dyn Fn(usize) -> usize,
+    st: &Stats,
+) -> Vec<f64> {
+    let columns = |c: &Expr| match c {
+        Expr::Binary(BinaryOp::Eq, a, b) => match (&**a, &**b) {
+            (Expr::Column(x), Expr::Column(y)) if leaf_of(*x) != leaf_of(*y) => Some((*x, *y)),
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> = Default::default();
+    for (k, c) in conds.iter().enumerate() {
+        if let Some((x, y)) = columns(c) {
+            let (a, b) = (leaf_of(x), leaf_of(y));
+            groups.entry((a.min(b), a.max(b))).or_default().push(k);
+        }
+    }
+    for ((a, b), ks) in groups {
+        if ks.len() < 2 {
+            continue;
+        }
+        for side in [a, b] {
+            let mut table = None;
+            let mut cols = Vec::new();
+            for &k in &ks {
+                let (x, y) = columns(&conds[k]).expect("an equality");
+                let c = if leaf_of(x) == side { x } else { y };
+                match origin(&leaves[side].0, c - leaves[side].1) {
+                    Some((t, col)) if table.is_none_or(|u: &Table| u.id == t.id) => {
+                        table = Some(t);
+                        cols.push(col);
+                    }
+                    _ => {
+                        table = None;
+                        break;
+                    }
+                }
+            }
+            let Some(t) = table else { continue };
+            let covers = |key: &[usize]| !key.is_empty() && key.iter().all(|c| cols.contains(c));
+            if covers(&t.primary_key) || t.indexes.iter().any(|i| i.unique && covers(&i.columns)) {
+                let product: f64 = ks.iter().map(|&k| sel[k]).product();
+                let keyed = 1.0 / st.rows(t).max(1.0);
+                if keyed > product {
+                    sel[ks[0]] = keyed;
+                    for &k in &ks[1..] {
+                        sel[k] = 1.0;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    sel
+}
+
 fn analyzed(plan: &Plan, st: &Stats) -> bool {
     match plan {
         Plan::Scan { table, .. } => st.of(table).is_some(),
@@ -821,6 +886,7 @@ fn reorder_leaves(leaves: Vec<(Plan, usize)>, conds: Vec<Expr>, st: &Stats) -> O
             )
         })
         .collect();
+    let cond_sel = keyed_selectivity(&leaves, &conds, cond_sel, &leaf_of, st);
     let leaf_rows: Vec<f64> = leaves
         .iter()
         .map(|(p, _)| estimate(p, st).max(1.0))

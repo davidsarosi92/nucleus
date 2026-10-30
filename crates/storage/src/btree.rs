@@ -35,8 +35,10 @@ use crate::node::{
 use crate::page::{PAYLOAD_SIZE, PageId};
 
 /// Values this long or longer are compressed when that saves enough
-/// (PLAN.md §M14.20 V5).
-pub const COMPRESS_MIN: usize = 64;
+/// (PLAN.md §M14.20 V5).  Not shorter ones: a row of a few hundred bytes
+/// saves little, and every read of it would decompress it (a TPC-H scan
+/// spent a third of its time so).
+pub const COMPRESS_MIN: usize = 1024;
 
 /// A B+tree rooted at a page.
 #[derive(Debug)]

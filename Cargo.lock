@@ -574,6 +574,7 @@ dependencies = [
 name = "nucleus-storage"
 version = "0.1.0"
 dependencies = [
+ "nucleus-kernels",
  "nucleus-platform",
 ]
 

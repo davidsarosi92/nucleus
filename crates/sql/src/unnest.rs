@@ -95,19 +95,87 @@ fn joins(mut input: Plan, predicate: Expr) -> (Plan, Vec<Expr>) {
     for p in parts {
         let lw = input.width();
         match candidate(&p).and_then(|(s, kind)| right_side(s, lw).map(|r| (r, kind))) {
-            Some(((right, on), kind)) => {
-                input = Plan::Join {
-                    left: Box::new(input),
-                    right: Box::new(unnest(right)),
-                    kind,
-                    on: Some(on),
-                    algo: JoinAlgo::NestedLoop,
-                };
-            }
+            Some(((right, on), kind)) => input = place(input, unnest(right), on, kind),
             None => rest.push(p),
         }
     }
     (input, rest)
+}
+
+/// The semi or anti join of `input` with `right` on `on`, as deep among
+/// `input`'s inner joins (and the semi and anti joins already there) as
+/// the columns of `input` it reads allow: a subquery that filters one
+/// table filters it before the joins (`(A ⋈ B) ⋉ R` is `(A ⋉ R) ⋈ B` when
+/// the condition reads only `A`).
+fn place(input: Plan, right: Plan, on: Expr, kind: JoinType) -> Plan {
+    let lw = input.width();
+    let reads: Vec<usize> = on.reads().into_iter().filter(|&c| c < lw).collect();
+    match input {
+        Plan::Join {
+            left,
+            right: other,
+            kind: inner @ JoinType::Inner,
+            on: cond,
+            algo,
+        } if !reads.is_empty() => {
+            let ll = left.width();
+            if reads.iter().all(|&c| c < ll) {
+                let on = on.map_columns(&|c| Expr::Column(if c >= lw { c - lw + ll } else { c }));
+                return Plan::Join {
+                    left: Box::new(place(*left, right, on, kind)),
+                    right: other,
+                    kind: inner,
+                    on: cond,
+                    algo,
+                };
+            }
+            if reads.iter().all(|&c| c >= ll) {
+                let rw = other.width();
+                let on =
+                    on.map_columns(&|c| Expr::Column(if c >= lw { c - lw + rw } else { c - ll }));
+                return Plan::Join {
+                    left,
+                    right: Box::new(place(*other, right, on, kind)),
+                    kind: inner,
+                    on: cond,
+                    algo,
+                };
+            }
+            let input = Plan::Join {
+                left,
+                right: other,
+                kind: inner,
+                on: cond,
+                algo,
+            };
+            semi(input, right, on, kind)
+        }
+        // A semi or anti join keeps its left's columns: below it too.
+        Plan::Join {
+            left,
+            right: other,
+            kind: k @ (JoinType::Semi | JoinType::Anti),
+            on: cond,
+            algo,
+        } => Plan::Join {
+            left: Box::new(place(*left, right, on, kind)),
+            right: other,
+            kind: k,
+            on: cond,
+            algo,
+        },
+        input => semi(input, right, on, kind),
+    }
+}
+
+fn semi(input: Plan, right: Plan, on: Expr, kind: JoinType) -> Plan {
+    Plan::Join {
+        left: Box::new(input),
+        right: Box::new(right),
+        kind,
+        on: Some(on),
+        algo: JoinAlgo::NestedLoop,
+    }
 }
 
 /// The deepest reference of `e` to rows above its own (0: none).

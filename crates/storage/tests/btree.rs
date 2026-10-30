@@ -60,6 +60,7 @@ fn value(rng: &SplitMix64) -> Vec<u8> {
     let len = match rng.below(30) {
         0 => 2000 + rng.below(30_000) as usize, // overflow pages
         1 => 0,
+        2 => 1024 + rng.below(900) as usize, // compressed in the cell
         _ => rng.below(200) as usize,
     };
     let b = rng.next_u64() as u8;

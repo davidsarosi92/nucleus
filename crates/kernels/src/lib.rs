@@ -97,6 +97,135 @@ macro_rules! kernel {
     };
 }
 
+// ---------------------------------------------------------------- CRC-32C
+
+/// The CRC-32C (Castagnoli) of `data` — the storage layer's page and WAL
+/// checksum — by the CPU's instructions where it has them (ARMv8 CRC,
+/// SSE 4.2; detected once), else portably: the same value either way.
+pub fn crc32c(data: &[u8]) -> u32 {
+    static HARDWARE: OnceLock<bool> = OnceLock::new();
+    if *HARDWARE.get_or_init(crc_hardware) {
+        return crc32c_hardware(data);
+    }
+    crc32c_portable(data)
+}
+
+/// Whether this CPU has CRC-32C instructions.
+pub fn crc_hardware() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("crc")
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("sse4.2")
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+/// [`crc32c`] by the CPU's instructions (only when [`crc_hardware`]).
+pub fn crc32c_hardware(data: &[u8]) -> u32 {
+    assert!(crc_hardware(), "no CRC-32C instructions on this CPU");
+    #[cfg(target_arch = "aarch64")]
+    #[allow(unsafe_code)]
+    {
+        #[target_feature(enable = "crc")]
+        fn imp(data: &[u8]) -> u32 {
+            use std::arch::aarch64::{__crc32cb, __crc32cd};
+            let mut c = !0u32;
+            let (chunks, rest) = data.as_chunks::<8>();
+            for b in chunks {
+                c = __crc32cd(c, u64::from_le_bytes(*b));
+            }
+            for &b in rest {
+                c = __crc32cb(c, b);
+            }
+            !c
+        }
+        // SAFETY: the CPU has the instructions (checked above).
+        unsafe { imp(data) }
+    }
+    #[cfg(target_arch = "x86_64")]
+    #[allow(unsafe_code)]
+    {
+        #[target_feature(enable = "sse4.2")]
+        fn imp(data: &[u8]) -> u32 {
+            use std::arch::x86_64::{_mm_crc32_u8, _mm_crc32_u64};
+            let mut c = u64::from(!0u32);
+            let (chunks, rest) = data.as_chunks::<8>();
+            for b in chunks {
+                c = _mm_crc32_u64(c, u64::from_le_bytes(*b));
+            }
+            let mut c = c as u32;
+            for &b in rest {
+                c = _mm_crc32_u8(c, b);
+            }
+            !c
+        }
+        // SAFETY: the CPU has the instructions (checked above).
+        unsafe { imp(data) }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        crc32c_portable(data)
+    }
+}
+
+const POLY: u32 = 0x82F6_3B78; // reflected Castagnoli polynomial
+
+/// Slicing-by-8: `TABLES[k][b]` is the CRC of byte `b` followed by `k`
+/// zero bytes, so eight bytes go in per step.
+const TABLES: [[u32; 256]; 8] = {
+    let mut t = [[0u32; 256]; 8];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 { (c >> 1) ^ POLY } else { c >> 1 };
+            k += 1;
+        }
+        t[0][i] = c;
+        i += 1;
+    }
+    let mut k = 1;
+    while k < 8 {
+        let mut i = 0;
+        while i < 256 {
+            let prev = t[k - 1][i];
+            t[k][i] = (prev >> 8) ^ t[0][(prev & 0xFF) as usize];
+            i += 1;
+        }
+        k += 1;
+    }
+    t
+};
+
+/// The CRC-32C of `data`, portably (slicing-by-8, eight bytes a step).
+pub fn crc32c_portable(data: &[u8]) -> u32 {
+    let t = &TABLES;
+    let mut c = !0u32;
+    let (chunks, rest) = data.as_chunks::<8>();
+    for b in chunks {
+        let lo = c ^ u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        c = t[7][(lo & 0xFF) as usize]
+            ^ t[6][((lo >> 8) & 0xFF) as usize]
+            ^ t[5][((lo >> 16) & 0xFF) as usize]
+            ^ t[4][(lo >> 24) as usize]
+            ^ t[3][b[4] as usize]
+            ^ t[2][b[5] as usize]
+            ^ t[1][b[6] as usize]
+            ^ t[0][b[7] as usize];
+    }
+    for &b in rest {
+        c = t[0][((c ^ u32::from(b)) & 0xFF) as usize] ^ (c >> 8);
+    }
+    !c
+}
+
 /// A comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmp {
@@ -618,5 +747,34 @@ pub mod reference {
         (0..mask.len() as u32)
             .filter(|&i| mask[i as usize])
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc32c_by_the_cpu_is_the_portable_one() {
+        assert_eq!(crc32c_portable(b"123456789"), 0xE306_9283);
+        assert_eq!(crc32c(b"123456789"), 0xE306_9283);
+        let data: Vec<u8> = (0..4096u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        if !crc_hardware() {
+            return;
+        }
+        // Every length and alignment around the eight-byte steps.
+        for start in 0..9 {
+            for n in 0..200 {
+                let d = &data[start..start + n];
+                assert_eq!(
+                    crc32c_hardware(d),
+                    crc32c_portable(d),
+                    "start {start}, length {n}"
+                );
+            }
+        }
+        assert_eq!(crc32c_hardware(&data), crc32c_portable(&data));
     }
 }
