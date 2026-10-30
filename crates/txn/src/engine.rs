@@ -107,17 +107,21 @@ struct Inner {
     recent_spans: Mutex<Vec<(Vec<u8>, Vec<u8>, u64)>>,
     /// The next id of a transaction whose writes spill.
     next_id: AtomicU64,
-    /// Transactions whose writes spilled into the side area and that have
-    /// not committed: a commit checks its keys against theirs.  Changed
-    /// under the commit lock.
+    /// Transactions whose writes spilled (as intents) and that have not
+    /// committed: a commit checks its keys against theirs.  Changed under
+    /// the commit lock.
     spilling: Mutex<BTreeSet<u64>>,
-    /// Committed transactions whose spilled writes are still in the side
-    /// area, being moved into versions: id → commit timestamp.  Readers
-    /// see those writes there.
+    /// Committed transactions with intents vacuum has not made versions
+    /// yet: id → commit timestamp.  Readers resolve the intents by it.
     unresolved: Mutex<BTreeMap<u64, u64>>,
     /// How many transactions are in `spilling` or `unresolved` (reads skip
-    /// the side area when none).
+    /// intents when none).
     side_users: AtomicUsize,
+    /// Transactions begun so far ([`Engine::activity`]).
+    begun: AtomicU64,
+    /// A paused vacuum sweep ([`Engine::vacuum_paced`]): where it goes on,
+    /// the committed transactions it makes versions of, what it removed.
+    sweep: Mutex<Option<(Vec<u8>, Vec<(u64, u64)>, u64)>>,
 }
 
 /// Entries vacuum changes per batch (each under the commit lock).
@@ -225,6 +229,8 @@ impl Engine {
                 spilling: Mutex::new(BTreeSet::new()),
                 unresolved: Mutex::new(BTreeMap::new()),
                 side_users: AtomicUsize::new(0),
+                begun: AtomicU64::new(0),
+                sweep: Mutex::new(None),
             }),
         };
         engine.inner.recover_side()?;
@@ -235,6 +241,12 @@ impl Engine {
     /// versions yet.
     pub fn intents_pending(&self) -> bool {
         !lock(&self.inner.unresolved).is_empty()
+    }
+
+    /// How many transactions have begun: unchanged over a while, the
+    /// database was idle.
+    pub fn activity(&self) -> u64 {
+        self.inner.begun.load(Ordering::Relaxed)
     }
 
     /// The newest snapshot a transaction would see.
@@ -270,6 +282,7 @@ impl Engine {
             *active.entry(start).or_insert(0) += 1;
             start
         };
+        self.inner.begun.fetch_add(1, Ordering::Relaxed);
         Ok(Transaction {
             engine: Arc::clone(&self.inner),
             start,
@@ -298,16 +311,19 @@ impl Engine {
     /// sweeps the rest.  After a whole sweep, the transactions committed
     /// before it began have no intent left: their status records go.
     pub fn vacuum(&self) -> Result<u64> {
-        self.vacuum_paced(VACUUM_CHUNK, &mut || {})
+        *lock(&self.inner.sweep) = None;
+        self.vacuum_paced(VACUUM_CHUNK, &mut || true)
     }
 
     /// [`vacuum`](Self::vacuum) in batches of about `chunk` entries,
-    /// `pause` called between them (a background vacuum's: letting the
-    /// statements running go first).
-    pub fn vacuum_paced(&self, chunk: usize, pause: &mut dyn FnMut()) -> Result<u64> {
-        let committed = self.inner.unresolved_ids();
-        let mut removed = 0;
-        let mut from = Vec::new();
+    /// `go_on` asked between them (a background vacuum's): `false` stops
+    /// the sweep there, and the next call goes on from it — with the
+    /// committed transactions it began with, whose statuses go only when a
+    /// sweep has passed every key.  What it removed (in the sweep so far).
+    pub fn vacuum_paced(&self, chunk: usize, go_on: &mut dyn FnMut() -> bool) -> Result<u64> {
+        let (mut from, committed, mut removed) = lock(&self.inner.sweep)
+            .take()
+            .unwrap_or_else(|| (Vec::new(), self.inner.unresolved_ids(), 0));
         loop {
             // In chunks, releasing the commit lock between them.
             let commit = lock(&self.inner.commit);
@@ -389,7 +405,10 @@ impl Engine {
                 Some(n) => from = n,
                 None => return Ok(removed),
             }
-            pause();
+            if !go_on() {
+                *lock(&self.inner.sweep) = Some((from, committed, removed));
+                return Ok(removed);
+            }
         }
     }
 

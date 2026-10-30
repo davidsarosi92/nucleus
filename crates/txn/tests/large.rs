@@ -500,3 +500,48 @@ fn an_older_engines_side_area_is_moved_into_versions() {
     t.commit().unwrap();
     assert_eq!(all(&e).len(), 350);
 }
+
+#[test]
+fn a_stopped_vacuum_goes_on_where_it_stopped() {
+    let p = Arc::new(SimPlatform::new(11));
+    let e = engine_on(&p, opts()).unwrap();
+    let mut big = e.begin();
+    for i in 0..600 {
+        big.put(&key(i), b"big").unwrap();
+    }
+    big.commit().unwrap();
+    let intents = e.intent_count().unwrap();
+    assert!(intents > 500);
+    assert!(e.intents_pending());
+    // Stopped after its first batch: some intents made versions, the
+    // status kept.
+    let mut batches = 0;
+    e.vacuum_paced(64, &mut || {
+        batches += 1;
+        false
+    })
+    .unwrap();
+    assert_eq!(batches, 1);
+    let left = e.intent_count().unwrap();
+    assert!(left < intents && left > 0, "{left} of {intents}");
+    assert!(e.intents_pending());
+    // A transaction committing meanwhile, its writes among the rest.
+    let mut small = e.begin();
+    small.put(&key(5), b"small").unwrap();
+    small.put(&key(590), b"small").unwrap();
+    small.commit().unwrap();
+    // Gone on from there to the end: every intent a version, the status
+    // gone, every value as committed.
+    e.vacuum_paced(64, &mut || true).unwrap();
+    assert_eq!(e.intent_count().unwrap(), 0);
+    assert!(!e.intents_pending());
+    let rows = all(&e);
+    assert_eq!(rows.len(), 600);
+    for i in 0..600 {
+        let want: &[u8] = if i == 5 || i == 590 { b"small" } else { b"big" };
+        assert_eq!(rows[&key(i)], want, "key {i}");
+    }
+    let before = e.activity();
+    let _r = e.begin();
+    assert_eq!(e.activity(), before + 1);
+}

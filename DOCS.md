@@ -555,12 +555,17 @@ distributed implementation will provide (§F3).
   in `<dir>/scratch/` (left-overs removed on opening).
 - `Kv::vacuum()` / `Kv::vacuum_wanted()`: the store's maintenance and
   whether it has work (committed intents to make versions); by default
-  none.  `Kv::vacuum_background(pause)`: the same in small batches (2 048
-  entries), `pause` called between them.  The server's maintenance thread
-  runs it within 10 s of a large commit (`nucleus_server::maintain`),
-  pausing four times as long as each batch took — a fifth of a core, the
-  tree and the commit lock held briefly — so a load's next statements
-  (an index build, `ANALYZE`) are not slowed by it.
+  none.  `Kv::vacuum_background(go_on)`: the same in small batches (2 048
+  entries), `go_on` asked between them — `false` stops the sweep there,
+  and the next call goes on from it (with the transactions it began
+  with: their statuses go when a sweep has passed every key).
+  `Kv::activity()`: transactions begun so far.  The server's maintenance
+  thread (`nucleus_server::maintain`) vacuums when no transaction began
+  in the last 10 s, stopping at the first one that does; after 10 minutes
+  without such a pause, paced instead (each batch followed by a pause
+  four times as long).  Reads resolve intents by their status meanwhile,
+  at about the cost of versions; vacuuming during a load's next
+  statements (an index build, `ANALYZE`) or queries slowed them more.
 - `trait KvTxn`: `read_ts`, `get(&self)`, `scan(&self, start, end) ->
   KvIter` (ascending), `get_validated` / `scan_validated` (reads checked
   at commit at any isolation level, §5.2), `scan_chunks` /
@@ -2559,11 +2564,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
-- **2026-10-30 — §M14.20 V11, background vacuum paced:** the server's
-  vacuum runs in batches of 2 048 entries, each followed by a pause four
-  times as long (`Kv::vacuum_background`); it held the tree for 16 384
-  entries at a time at full speed, slowing the index builds and `ANALYZE`
-  after a load.  TPC-H SF 1 row load 182 → 129 s.
+- **2026-10-30 — §M14.20 V11, vacuum when idle:** the server's vacuum
+  runs when no transaction began for 10 s, in batches of 2 048 entries,
+  stopping when one begins and going on from there later
+  (`Kv::vacuum_background`, `Kv::activity`); paced after 10 minutes
+  without a pause.  At full speed after each large commit it slowed the
+  index builds, `ANALYZE` and queries after a load: TPC-H SF 1 row load
+  182 → 129 s.
 - **2026-10-30 — §M14.20 V10, more from the V12 measurements:** scan
   filters compare with constant expressions' values (computed when the
   plan is made); a column's two range bounds are estimated together; a

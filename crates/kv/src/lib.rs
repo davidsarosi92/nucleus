@@ -209,10 +209,17 @@ pub trait Kv: Send + Sync {
     }
 
     /// [`vacuum`](Kv::vacuum) as a background task: in small batches,
-    /// `pause` called between them.  The default: `vacuum`.
-    fn vacuum_background(&self, pause: &mut dyn FnMut()) -> Result<u64> {
-        let _ = pause;
+    /// `go_on` asked between them — `false` stops it there, and the next
+    /// call goes on from it.  The default: `vacuum`.
+    fn vacuum_background(&self, go_on: &mut dyn FnMut() -> bool) -> Result<u64> {
+        let _ = go_on;
         self.vacuum()
+    }
+
+    /// How many transactions have begun so far (unchanged over a while:
+    /// the database was idle).  The default: 0.
+    fn activity(&self) -> u64 {
+        0
     }
 
     /// Whether [`vacuum`](Kv::vacuum) has intents to make versions (reads
@@ -601,10 +608,14 @@ impl Kv for Database {
         Database::vacuum(self)
     }
 
-    fn vacuum_background(&self, pause: &mut dyn FnMut()) -> Result<u64> {
+    fn vacuum_background(&self, go_on: &mut dyn FnMut() -> bool) -> Result<u64> {
         Ok(self
             .engine
-            .vacuum_paced(nucleus_txn::BACKGROUND_CHUNK, pause)?)
+            .vacuum_paced(nucleus_txn::BACKGROUND_CHUNK, go_on)?)
+    }
+
+    fn activity(&self) -> u64 {
+        self.engine.activity()
     }
 
     fn vacuum_wanted(&self) -> bool {

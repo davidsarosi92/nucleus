@@ -504,35 +504,57 @@ pub const MAINTENANCE_EVERY: std::time::Duration = std::time::Duration::from_sec
 /// How often [`maintain`] looks for committed intents to vacuum.
 pub const VACUUM_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// A background vacuum's pause after each batch, in multiples of the time
-/// the batch took.
+/// A forced background vacuum's pause after each batch, in multiples of
+/// the time the batch took.
 const VACUUM_PAUSE_FACTOR: u32 = 4;
+
+/// How long committed intents wait for an idle database before the
+/// vacuum runs anyway, paced.
+pub const VACUUM_FORCE_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Starts the server's maintenance thread: every [`MAINTENANCE_EVERY`] it
 /// applies the tables' storage policies (`ALTER TABLE … SET STORAGE
 /// POLICY`), converting partitions that have aged past them online; every
 /// [`VACUUM_CHECK_EVERY`], when large transactions have committed intents
-/// still read through their status, it vacuums (`Kv::vacuum_background`:
-/// small batches, each followed by a pause), making them versions.
+/// still read through their status, it vacuums (`Kv::vacuum_background`),
+/// making them versions — when no transaction began since the last check,
+/// stopping as soon as one does (the next idle check goes on from there);
+/// after [`VACUUM_FORCE_AFTER`] without one, paced instead (each batch
+/// followed by a pause four times as long).
 pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let policies_every = (MAINTENANCE_EVERY.as_secs() / VACUUM_CHECK_EVERY.as_secs()).max(1);
         let mut tick = 0u64;
+        let mut seen = kv.activity();
+        let mut waiting: Option<std::time::Instant> = None;
         loop {
             std::thread::sleep(VACUUM_CHECK_EVERY);
             tick += 1;
             if kv.vacuum_wanted() {
-                // Paced: after each batch, a pause four times as long — a
-                // fifth of a core's time, the statements running first.
-                let mut since = std::time::Instant::now();
-                let mut pause = || {
-                    let worked = since.elapsed().min(std::time::Duration::from_millis(50));
-                    std::thread::sleep(worked * VACUUM_PAUSE_FACTOR);
-                    since = std::time::Instant::now();
-                };
-                if let Err(e) = kv.vacuum_background(&mut pause) {
-                    eprintln!("nucleus-server: vacuum: {e}");
+                let since = *waiting.get_or_insert_with(std::time::Instant::now);
+                let idle = kv.activity() == seen;
+                let forced = since.elapsed() >= VACUUM_FORCE_AFTER;
+                if idle || forced {
+                    let started = kv.activity();
+                    let mut batch = std::time::Instant::now();
+                    let mut go_on = || {
+                        if !forced {
+                            return kv.activity() == started;
+                        }
+                        let worked = batch.elapsed().min(std::time::Duration::from_millis(50));
+                        std::thread::sleep(worked * VACUUM_PAUSE_FACTOR);
+                        batch = std::time::Instant::now();
+                        true
+                    };
+                    if let Err(e) = kv.vacuum_background(&mut go_on) {
+                        eprintln!("nucleus-server: vacuum: {e}");
+                    }
                 }
+                if !kv.vacuum_wanted() {
+                    waiting = None;
+                }
+            } else {
+                waiting = None;
             }
             if tick.is_multiple_of(policies_every) {
                 let now = nucleus_sql::datetime::from_system(kv.wall_clock());
@@ -540,6 +562,7 @@ pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
                     eprintln!("nucleus-server: storage policies: {}", e.message);
                 }
             }
+            seen = kv.activity();
         }
     })
 }
