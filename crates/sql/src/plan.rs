@@ -150,6 +150,20 @@ pub enum Plan {
         /// Columns.
         width: usize,
     },
+    /// A partitioned table's rows: its partitions' scans in turn
+    /// ([`crate::partition`]).  A partition whose guard is false when the
+    /// plan runs (or is made) is not read.
+    Append {
+        /// The partitions' plans, in bound order.
+        inputs: Vec<Plan>,
+        /// How the table is partitioned.
+        spec: crate::partition::Spec,
+        /// Each partition's bound and name.
+        parts: Vec<(crate::partition::PartBound, String)>,
+        /// Per partition, what must hold (over no row: constants,
+        /// parameters, enclosing rows) for it to hold a matching row.
+        guards: Vec<Option<Expr>>,
+    },
     /// `UNION` / `EXCEPT` / `INTERSECT` `[ALL]`.
     SetOp {
         /// Which.
@@ -259,6 +273,7 @@ impl Plan {
             | Plan::Limit { input, .. }
             | Plan::Distinct { input } => input.width(),
             Plan::SetOp { left, .. } => left.width(),
+            Plan::Append { inputs, .. } => inputs.first().map_or(0, Plan::width),
             Plan::Cte { plan, .. } => plan.width(),
             Plan::Recursive { base, .. } => base.width(),
             Plan::WorkTable { width, .. } | Plan::Function { width, .. } => *width,
@@ -434,6 +449,18 @@ impl Plan {
                 TableFunc::Scalar => format!("Result: {}", show(&args[0])),
             },
             Plan::View { view } => format!("Catalog Scan on {}.{}", view.schema(), view.name()),
+            Plan::Append { parts, guards, .. } => {
+                let guarded: Vec<String> = parts
+                    .iter()
+                    .zip(guards)
+                    .filter_map(|((_, n), g)| g.as_ref().map(|g| format!("{n} if {}", show(g))))
+                    .collect();
+                if guarded.is_empty() {
+                    "Append".into()
+                } else {
+                    format!("Append (pruned when run: {})", guarded.join("; "))
+                }
+            }
             Plan::SetOp { op, all, .. } => {
                 let name = match op {
                     SetOp::Union => "Union",
@@ -488,6 +515,7 @@ impl Plan {
             | Plan::Function { .. }
             | Plan::View { .. } => vec![],
             Plan::Join { left, right, .. } | Plan::SetOp { left, right, .. } => vec![left, right],
+            Plan::Append { inputs, .. } => inputs.iter().collect(),
             Plan::Recursive { base, step, .. } => vec![base, step],
             Plan::Cte { plan, .. } => vec![plan],
             Plan::Filter { input, .. }
@@ -549,6 +577,7 @@ impl Plan {
             Plan::Limit { limit, offset, .. } => {
                 limit.iter().chain(offset).for_each(f);
             }
+            Plan::Append { guards, .. } => guards.iter().flatten().for_each(f),
             Plan::Distinct { .. }
             | Plan::SetOp { .. }
             | Plan::Cte { .. }

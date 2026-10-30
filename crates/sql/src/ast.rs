@@ -17,6 +17,21 @@ pub enum Statement {
         if_not_exists: bool,
         /// `WITH (name = value, …)`.
         options: Vec<(String, String)>,
+        /// `PARTITION BY RANGE | LIST | HASH (columns)`.
+        partition_by: Option<(String, Vec<String>)>,
+    },
+    /// `CREATE TABLE name PARTITION OF parent FOR VALUES … | DEFAULT`.
+    CreatePartition {
+        /// The partition's name.
+        name: String,
+        /// The partitioned table.
+        parent: String,
+        /// Its bound.
+        bound: PartitionBoundSpec,
+        /// `WITH (name = value, …)`.
+        options: Vec<(String, String)>,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
     },
     /// `DROP TABLE`.
     DropTable {
@@ -1060,4 +1075,27 @@ impl BinaryOp {
             BinaryOp::NotIMatch => "!~*",
         }
     }
+}
+
+/// A partition's bound as written.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PartitionBoundSpec {
+    /// `FROM (…) TO (…)`: `None` for `MINVALUE` / `MAXVALUE`.
+    Range {
+        /// The lower bound.
+        from: Vec<Option<Expr>>,
+        /// The upper bound.
+        to: Vec<Option<Expr>>,
+    },
+    /// `IN (…)`.
+    List(Vec<Expr>),
+    /// `WITH (MODULUS m, REMAINDER r)`.
+    Hash {
+        /// m.
+        modulus: u32,
+        /// r.
+        remainder: u32,
+    },
+    /// `DEFAULT`.
+    Default,
 }

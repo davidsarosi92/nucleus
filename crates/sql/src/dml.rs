@@ -106,6 +106,16 @@ pub struct Writer {
     pub keys: IndexKeys,
     /// How its rows are stored.
     pub storage: std::sync::Arc<dyn crate::storage::TableStorage>,
+    /// A partitioned table: how, and its partitions' writers (rows go to
+    /// them).
+    partitions: Option<(crate::partition::Spec, Vec<Writer>)>,
+    /// A partition: the key a row must have — its partitioning, its bound,
+    /// and (a default partition) its siblings' bounds.
+    bound: Option<(
+        crate::partition::Spec,
+        crate::partition::PartBound,
+        Vec<crate::partition::PartBound>,
+    )>,
 }
 
 impl Writer {
@@ -128,12 +138,40 @@ impl Writer {
         let keys = IndexKeys::new(txn, reg, &table)?;
         let storage = crate::storage::of(&table)?;
         catalog::validate_table(txn, &table.name)?;
+        let partitions = match &table.partition_by {
+            None => None,
+            Some(spec) => Some((
+                spec.clone(),
+                crate::partition::partitions(txn, &table)?
+                    .into_iter()
+                    .map(|p| Writer::new(txn, reg, p))
+                    .collect::<Result<_>>()?,
+            )),
+        };
+        let bound = match &table.partition_of {
+            None => None,
+            Some((parent, b)) => {
+                let parent = catalog::table(txn, parent)?;
+                let spec = parent
+                    .partition_by
+                    .clone()
+                    .ok_or_else(|| Error::internal("a partition of a table not partitioned"))?;
+                let others = crate::partition::partitions(txn, &parent)?
+                    .into_iter()
+                    .filter(|p| p.name != table.name)
+                    .filter_map(|p| p.partition_of.map(|(_, b)| b))
+                    .collect();
+                Some((spec, b.clone(), others))
+            }
+        };
         Ok(Self {
             table,
             checks,
             defaults,
             keys,
             storage,
+            partitions,
+            bound,
         })
     }
 
@@ -178,7 +216,45 @@ impl Writer {
                 )));
             }
         }
+        if let Some((spec, bound, others)) = &self.bound {
+            let key: Vec<Value> = spec.columns.iter().map(|&c| row[c].clone()).collect();
+            let fits = match bound {
+                crate::partition::PartBound::Default => {
+                    !others.iter().any(|b| crate::partition::contains(b, &key))
+                }
+                b => crate::partition::contains(b, &key),
+            };
+            if !fits {
+                return Err(Error::check_violation(format!(
+                    "new row for relation \"{}\" violates partition constraint",
+                    t.name
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// The tables its rows are in: its partitions', or its own.
+    pub fn targets(&self) -> Vec<&Table> {
+        match &self.partitions {
+            Some((_, parts)) => parts.iter().map(|w| &w.table).collect(),
+            None => vec![&self.table],
+        }
+    }
+
+    /// A partitioned table's partition (its writer) a row goes to.
+    fn partition_of(&self, row: &Row) -> Result<Option<usize>> {
+        let Some((spec, parts)) = &self.partitions else {
+            return Ok(None);
+        };
+        let tables: Vec<Table> = parts.iter().map(|w| w.table.clone()).collect();
+        let to = crate::partition::route(spec, &tables, row).map_err(|_| {
+            Error::check_violation(format!(
+                "no partition of relation \"{}\" found for row",
+                self.table.name
+            ))
+        })?;
+        Ok(tables.iter().position(|t| t.name == to.name))
     }
 }
 
@@ -550,40 +626,49 @@ pub fn update(
         // Each change kept as key, old row, new row — stashed, so every
         // row is chosen before any is written, in bounded memory.
         let mut changes = crate::spill::Stash::new();
-        for r in secure_rows(&t, &access, using.as_ref(), pred.as_ref(), &ctx)?.into_iter() {
-            let (key, old) = exec::unkeyed(r?)?;
-            let env = Env {
-                row: &old,
-                outer: None,
-                ctx: &ctx,
-            };
-            let mut new = old.clone();
-            for (c, e) in &sets {
-                new[*c] = assign(ctx.txn, e.eval(&env)?, &t, *c)?;
+        // Each change is the table's (a partition's, by number).
+        for (ti, target) in writer.targets().iter().enumerate() {
+            for r in secure_rows(target, &access, using.as_ref(), pred.as_ref(), &ctx)?.into_iter()
+            {
+                let (key, old) = exec::unkeyed(r?)?;
+                let env = Env {
+                    row: &old,
+                    outer: None,
+                    ctx: &ctx,
+                };
+                let mut new = old.clone();
+                for (c, e) in &sets {
+                    new[*c] = assign(ctx.txn, e.eval(&env)?, &t, *c)?;
+                }
+                writer.validate(&new, &ctx)?;
+                admit(&check, &t, &new, &ctx)?;
+                let mut change = vec![Value::Int(ti as i64)];
+                change.extend(exec::keyed(key, old));
+                change.extend(new);
+                changes.push(change)?;
             }
-            writer.validate(&new, &ctx)?;
-            admit(&check, &t, &new, &ctx)?;
-            let mut change = exec::keyed(key, old);
-            change.extend(new);
-            changes.push(change)?;
         }
         (std::rc::Rc::new(changes.seal()?), writer, ret)
     };
     let width = t.columns.len();
-    let split = |r: Row| -> Result<(Vec<u8>, Row, Row)> {
-        let (key, mut old) = exec::unkeyed(r)?;
+    let split = |mut r: Row| -> Result<(usize, Vec<u8>, Row, Row)> {
+        let rest = r.split_off(1);
+        let Value::Int(ti) = r[0] else {
+            return Err(Error::internal("a change without its table"));
+        };
+        let (key, mut old) = exec::unkeyed(rest)?;
         let new = old.split_off(width);
-        Ok((key, old, new))
+        Ok((ti as usize, key, old, new))
     };
     let mut chunk = Vec::with_capacity(CHUNK);
     for r in changes.iter() {
-        chunk.push(split(r?)?);
+        let (ti, key, old, new) = split(r?)?;
+        chunk.push((ti, key, old, new));
         if chunk.len() == CHUNK {
-            update_rows(txn, reg, &writer, &chunk)?;
-            chunk.clear();
+            apply_updates(txn, reg, &writer, std::mem::take(&mut chunk))?;
         }
     }
-    update_rows(txn, reg, &writer, &chunk)?;
+    apply_updates(txn, reg, &writer, chunk)?;
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {
@@ -592,7 +677,7 @@ pub fn update(
                 cols,
                 changes
                     .iter()
-                    .map(|r| project(&exprs, &split(r?)?.2, &ctx))
+                    .map(|r| project(&exprs, &split(r?)?.3, &ctx))
                     .collect::<Result<_>>()?,
             ))
         }
@@ -603,8 +688,66 @@ pub fn update(
     })
 }
 
+/// Applies changes `(table number, key, old, new)` of [`Writer::targets`]:
+/// in place, or — a partitioned table's row whose new key is another
+/// partition's — moved there (deleted, then inserted).
+fn apply_updates(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    w: &Writer,
+    changes: Vec<(usize, Vec<u8>, Row, Row)>,
+) -> Result<()> {
+    let Some((_, parts)) = &w.partitions else {
+        let chunk: Vec<(Vec<u8>, Row, Row)> =
+            changes.into_iter().map(|(_, k, o, n)| (k, o, n)).collect();
+        return update_rows(txn, reg, w, &chunk);
+    };
+    let mut stay: Vec<Vec<(Vec<u8>, Row, Row)>> = vec![Vec::new(); parts.len()];
+    let mut leave: Vec<Vec<(Vec<u8>, Row)>> = vec![Vec::new(); parts.len()];
+    let mut arrive: Vec<Vec<Row>> = vec![Vec::new(); parts.len()];
+    for (ti, key, old, new) in changes {
+        let to = w.partition_of(&new)?.expect("partitioned");
+        if to == ti {
+            stay[ti].push((key, old, new));
+        } else {
+            leave[ti].push((key, old));
+            arrive[to].push(new);
+        }
+    }
+    for (pw, rows) in parts.iter().zip(&leave) {
+        if !rows.is_empty() {
+            delete_rows(txn, reg, &pw.table, rows)?;
+        }
+    }
+    for (pw, rows) in parts.iter().zip(&stay) {
+        if !rows.is_empty() {
+            update_rows(txn, reg, pw, rows)?;
+        }
+    }
+    for (pw, rows) in parts.iter().zip(&arrive) {
+        if !rows.is_empty() {
+            insert_rows(txn, pw, rows)?;
+        }
+    }
+    Ok(())
+}
+
 /// Stores new rows (validated already), then checks their foreign keys.
 pub fn insert_rows(txn: &mut dyn KvTxn, w: &Writer, rows: &[Row]) -> Result<()> {
+    if let Some((_, parts)) = &w.partitions {
+        // Each row to its partition.
+        let mut by: Vec<Vec<Row>> = vec![Vec::new(); parts.len()];
+        for row in rows {
+            let i = w.partition_of(row)?.expect("partitioned");
+            by[i].push(row.clone());
+        }
+        for (pw, rows) in parts.iter().zip(by) {
+            if !rows.is_empty() {
+                insert_rows(txn, pw, &rows)?;
+            }
+        }
+        return Ok(());
+    }
     for row in rows {
         insert_row(txn, w, row)?;
     }
@@ -699,7 +842,7 @@ pub fn delete(
     params: &[Value],
 ) -> Result<Written> {
     let t = catalog::table(&*txn, table)?;
-    let (rows, ret) = {
+    let rows = {
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro, reg).checked();
         if let Some(c) = binder.checker() {
@@ -709,26 +852,51 @@ pub fn delete(
         let ret = returning(&mut binder, returning_items, &t)?;
         let using = row_policy(&binder, &t, crate::policies::Command::Delete)?;
         let ctx = Ctx::new(ro, reg, params);
-        (
-            std::rc::Rc::new(secure_rows(
-                &t,
-                &access,
-                using.as_ref(),
-                pred.as_ref(),
-                &ctx,
-            )?),
-            ret,
-        )
+        // A partitioned table's rows are its partitions'.
+        let targets: Vec<Table> = match &t.partition_by {
+            None => vec![t.clone()],
+            Some(_) => crate::partition::partitions(ro, &t)?,
+        };
+        let mut rows = crate::spill::Stash::new();
+        for (ti, target) in targets.iter().enumerate() {
+            for r in secure_rows(target, &access, using.as_ref(), pred.as_ref(), &ctx)?.into_iter()
+            {
+                let mut row = vec![Value::Int(ti as i64)];
+                row.extend(r?);
+                rows.push(row)?;
+            }
+        }
+        (std::rc::Rc::new(rows.seal()?), ret, targets)
     };
-    let mut chunk = Vec::with_capacity(CHUNK);
+    let (rows, ret, targets) = (rows.0, rows.1, rows.2);
+    let split = |mut r: Row| -> Result<(usize, Vec<u8>, Row)> {
+        let rest = r.split_off(1);
+        let Value::Int(ti) = r[0] else {
+            return Err(Error::internal("a row without its table"));
+        };
+        let (key, row) = exec::unkeyed(rest)?;
+        Ok((ti as usize, key, row))
+    };
+    let mut by: Vec<Vec<(Vec<u8>, Row)>> = vec![Vec::new(); targets.len()];
+    let flush = |txn: &mut dyn KvTxn, by: &mut Vec<Vec<(Vec<u8>, Row)>>| -> Result<()> {
+        for (target, chunk) in targets.iter().zip(by.iter_mut()) {
+            if !chunk.is_empty() {
+                delete_rows(txn, reg, target, chunk)?;
+                chunk.clear();
+            }
+        }
+        Ok(())
+    };
+    let mut n = 0;
     for r in rows.iter() {
-        chunk.push(exec::unkeyed(r?)?);
-        if chunk.len() == CHUNK {
-            delete_rows(txn, reg, &t, &chunk)?;
-            chunk.clear();
+        let (ti, key, row) = split(r?)?;
+        by[ti].push((key, row));
+        n += 1;
+        if n % CHUNK == 0 {
+            flush(txn, &mut by)?;
         }
     }
-    delete_rows(txn, reg, &t, &chunk)?;
+    flush(txn, &mut by)?;
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {
@@ -736,7 +904,7 @@ pub fn delete(
             Some((
                 cols,
                 rows.iter()
-                    .map(|r| project(&exprs, &exec::unkeyed(r?)?.1, &ctx))
+                    .map(|r| project(&exprs, &split(r?)?.2, &ctx))
                     .collect::<Result<_>>()?,
             ))
         }

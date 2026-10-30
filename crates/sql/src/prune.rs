@@ -120,6 +120,11 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
             walk(left, all(left), out);
             walk(right, all(right), out);
         }
+        Plan::Append { inputs, .. } => {
+            for p in inputs {
+                walk(p, wanted.clone(), out);
+            }
+        }
         Plan::Cte { plan: inner, .. } => walk(inner, all(inner), out),
         Plan::Recursive { base, step, .. } => {
             walk(base, all(base), out);

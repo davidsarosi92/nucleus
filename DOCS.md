@@ -1273,6 +1273,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.schemas` | `name`, `description` (the session registry's schemas) |
 | `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows`, `owner`, `row_security`, `force_row_security`, `comment`, `storage` (§8.15) |
 | `nc_catalog.storages` | `name` (the table storages registered, §8.15) |
+| `nc_catalog.partitions` | `table_name`, `partition`, `strategy` (`range`, `list`, `hash`), `key` (names), `bound` (`FOR VALUES …` or `DEFAULT`), `storage` (§8.16) |
 | `nc_catalog.segments` | `table_name`, `segment` (id, hex), `rows`, `deleted`, `bytes` (encoded) — each segment of each `column` table (§8.15) |
 | `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key` |
 | `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix`, `orderings` (per column, the taught ordering it is indexed in, or NULL) |
@@ -1662,6 +1663,44 @@ row table gets its column copy in 0.7 s.  `crates/sql/tests/storage.rs`
 registers a module's storage and runs writes, unique and foreign key
 checks, index lookups, scans a row and a batch at a time, in parallel,
 and the integrity check through it, against `row` tables.
+
+### 8.16 Partitioning (`partition`, §M14.20)
+
+`CREATE TABLE t (…) PARTITION BY RANGE | LIST | HASH (columns)` makes a
+partitioned table: it holds no rows; its partitions do —
+`CREATE TABLE p PARTITION OF t FOR VALUES FROM (…) TO (…)` (the lower
+bound included, the upper excluded; `MINVALUE` / `MAXVALUE` open; several
+key columns compare in order), `FOR VALUES IN (…)` (list: one column),
+`FOR VALUES WITH (MODULUS m, REMAINDER r)` (hash: `partition_hash(key,
+m)` = `r`, a hash of the key's encoding, the same in every build), or
+`DEFAULT` (range or list: the keys no other partition takes).  A partition
+gets the table's definition — columns, keys, checks, indexes, foreign keys
+— and its own storage (`WITH (storage = …)`, §8.15); overlapping bounds
+are refused, and so is a new bound a default partition already holds rows
+of.  A partitioned table's primary key and unique keys must include its
+partition key (so each lives in one partition); `CREATE INDEX` on it makes
+the index on every partition (`name_partition`); `ADD COLUMN` adds the
+column to every partition; dropping it drops its partitions.  Other schema
+changes of a partitioned table or a partition, and foreign keys
+referencing a partitioned table, are refused for now (`0A000`).
+
+A query of the partitioned table is an `Append` of its partitions' scans
+(under the table's policies), each partition read when reached.  The
+optimizer pushes the predicates into each partition and, from those
+comparing the key's first column (range) or the key (list, hash `=`) with
+a value of no row, derives what a partition must satisfy to hold a match:
+evaluated now when it is a constant (a partition ruled out is not in the
+plan), else kept as a guard evaluated when the plan runs — parameters,
+enclosing rows (`EXPLAIN` shows `Append (pruned when run: …)`).  A row
+inserted into it goes to the partition its key falls in (`23514` when
+none does); one written to a partition directly must fall in its bound
+(`23514`).  `UPDATE` and `DELETE` of it change its partitions' rows — all
+chosen before any is written — and an update that changes a row's key to
+another partition's moves the row (deleted there, inserted in the other).
+`crates/sql/tests/partition.rs` runs random inserts, key-moving updates
+and deletes on a partitioned table (of `row`, `column` and `row,column`
+partitions) and a plain one, compares queries and parameter-pruned ones,
+and runs the integrity check; `42_partitions.slt` covers the statements.
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -2309,6 +2348,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-30 — §M14.20 partitioning (V9, first part):** `PARTITION
+  BY RANGE | LIST | HASH`, `PARTITION OF … FOR VALUES … | DEFAULT`;
+  partitions pruned when the plan is made and when it runs; inserts
+  routed, updates moving rows; indexes and columns on every partition;
+  `nc_catalog.partitions`; `partition_hash`.
 - **2026-10-30 — §M14.20 storage per table and per column (V8):** `row,
   column` (both copies; the column copy of every column or some), `ALTER
   TABLE … SET STORAGE` converting online in parts with small switches;

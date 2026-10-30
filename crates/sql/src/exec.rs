@@ -251,6 +251,35 @@ fn build_node<'a>(
             ctx.work.borrow_mut().remove(id);
             out.seal()?.into_iter()
         }
+        Plan::Append { inputs, guards, .. } => {
+            // The partitions whose guards hold, each read when reached.
+            let e = env(&[], ctx, outer);
+            let mut keep = Vec::new();
+            for (p, g) in inputs.iter().zip(guards) {
+                if g.as_ref().map_or(Ok(true), |g| g.holds(&e))? {
+                    keep.push(p);
+                }
+            }
+            let mut keep = keep.into_iter();
+            let mut cur: Option<Rows<'a>> = None;
+            Box::new(std::iter::from_fn(move || {
+                loop {
+                    if let Some(rows) = &mut cur
+                        && let Some(r) = rows.next()
+                    {
+                        return Some(r);
+                    }
+                    let p = keep.next()?;
+                    match build(p, ctx, outer) {
+                        Ok(rows) => cur = Some(rows),
+                        Err(e) => {
+                            cur = None;
+                            return Some(Err(e));
+                        }
+                    }
+                }
+            }))
+        }
         Plan::SetOp {
             op: SetOp::Union,
             left,

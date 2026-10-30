@@ -306,6 +306,12 @@ pub fn build(
     } else {
         catalog::table(txn, &r.table)?
     };
+    if parent.partition_by.is_some() {
+        return Err(Error::feature(format!(
+            "a foreign key referencing a partitioned table (\"{}\") is not supported yet; reference its partitions",
+            parent.name
+        )));
+    }
     let ref_cols = if r.columns.is_empty() {
         if parent.primary_key.is_empty() {
             return Err(Error::invalid_foreign_key(format!(

@@ -63,6 +63,17 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
     ),
     ("storages", &[("name", T)]),
     (
+        "partitions",
+        &[
+            ("table_name", T),
+            ("partition", T),
+            ("strategy", T),
+            ("key", TA),
+            ("bound", T),
+            ("storage", T),
+        ],
+    ),
+    (
         "segments",
         &[
             ("table_name", T),
@@ -441,6 +452,33 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     t.comment.clone().map_or(Value::Null, text),
                     text(t.storage.clone()),
                 ]);
+            }
+        }
+        "partitions" => {
+            for t in &tables {
+                let Some(spec) = &t.partition_by else {
+                    continue;
+                };
+                let strategy = match spec.kind {
+                    crate::partition::Kind::Range => "range",
+                    crate::partition::Kind::List => "list",
+                    crate::partition::Kind::Hash => "hash",
+                };
+                for p in crate::partition::partitions(txn, t)? {
+                    let bound = p
+                        .partition_of
+                        .as_ref()
+                        .map(|(_, b)| b.render())
+                        .unwrap_or_default();
+                    out.push(vec![
+                        text(t.name.clone()),
+                        text(p.name.clone()),
+                        text(strategy),
+                        names(t, &spec.columns),
+                        text(bound),
+                        text(p.storage.clone()),
+                    ]);
+                }
             }
         }
         "storages" => {

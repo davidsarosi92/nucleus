@@ -39,6 +39,7 @@ pub mod ncatalog;
 pub mod optimizer;
 pub mod parallel;
 pub mod parser;
+pub mod partition;
 
 pub mod plan;
 pub mod policies;

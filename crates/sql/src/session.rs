@@ -1401,6 +1401,7 @@ fn execute_statement(
             constraints,
             if_not_exists,
             options,
+            partition_by,
         } => {
             if catalog::get_table(&*txn, name)?.is_some() {
                 if *if_not_exists {
@@ -1424,7 +1425,35 @@ fn execute_statement(
                     }
                 }
             }
-            create_table(txn, reg, name, columns, constraints, &storage)?;
+            create_table(
+                txn,
+                reg,
+                name,
+                columns,
+                constraints,
+                &storage,
+                partition_by.as_ref(),
+            )?;
+            let owner = crate::access::current().user.clone();
+            crate::privileges::on_create_table(txn, name, &owner)?;
+            Output::Command("CREATE TABLE".into())
+        }
+        Statement::CreatePartition {
+            name,
+            parent,
+            bound,
+            options,
+            if_not_exists,
+        } => {
+            if catalog::get_table(&*txn, name)?.is_some() {
+                if *if_not_exists {
+                    return Ok(Output::Command("CREATE TABLE".into()));
+                }
+                return Err(Error::duplicate_table(format!(
+                    "relation \"{name}\" already exists"
+                )));
+            }
+            create_partition(txn, reg, name, parent, bound, options)?;
             let owner = crate::access::current().user.clone();
             crate::privileges::on_create_table(txn, name, &owner)?;
             Output::Command("CREATE TABLE".into())
@@ -1435,6 +1464,19 @@ fn execute_statement(
             cascade,
         } => {
             let checker = crate::privileges::Checker::new();
+            // A partitioned table's partitions go first, with it.
+            let mut all: Vec<String> = Vec::new();
+            for name in names {
+                if let Some(t) = catalog::get_table(&*txn, name)?
+                    && t.partition_by.is_some()
+                {
+                    for p in crate::partition::partitions(&*txn, &t)? {
+                        all.push(p.name);
+                    }
+                }
+                all.push(name.clone());
+            }
+            let names = &all;
             for name in names {
                 match catalog::get_table(&*txn, name)? {
                     Some(mut t) => {
@@ -1549,6 +1591,24 @@ fn execute_statement(
             t.indexes.push(ix);
             t.next_index_id += 1;
             let i = t.indexes.len() - 1;
+            if let Some(p) = &t.partition_by {
+                if *unique && !p.columns.iter().all(|c| t.indexes[i].columns.contains(c)) {
+                    return Err(Error::feature(
+                        "a unique index of a partitioned table must include the partition key",
+                    ));
+                }
+                // On each partition too.
+                for mut part in crate::partition::partitions(&*txn, &t)? {
+                    let mut px = t.indexes[i].clone();
+                    px.id = part.next_index_id;
+                    px.name = format!("{name}_{}", part.name);
+                    part.indexes.push(px);
+                    part.next_index_id += 1;
+                    let j = part.indexes.len() - 1;
+                    dml::backfill_index(txn, reg, &part, j)?;
+                    catalog::update_table(txn, &part)?;
+                }
+            }
             dml::backfill_index(txn, reg, &t, i)?;
             catalog::update_table(txn, &t)?;
             Output::Command("CREATE INDEX".into())
@@ -1560,6 +1620,7 @@ fn execute_statement(
             typmod,
             using,
         } => {
+            refuse_partitioned(&*txn, table, "ALTER COLUMN … TYPE")?;
             alter_column_type(txn, reg, table, column, ty, typmod, using.as_ref())?;
             Output::Command("ALTER TABLE".into())
         }
@@ -1789,70 +1850,23 @@ fn execute_statement(
             Output::Command("DROP INDEX".into())
         }
         Statement::AddColumn { table, column } => {
-            let mut t = catalog::table(&*txn, table)?;
-            if t.column(&column.name).is_some() {
-                return Err(Error::duplicate_column(format!(
-                    "column \"{}\" of relation \"{table}\" already exists",
-                    column.name
+            let t = catalog::table(&*txn, table)?;
+            if t.partition_of.is_some() {
+                return Err(Error::wrong_object_type(format!(
+                    "cannot add a column to partition \"{table}\": add it to its partitioned table"
                 )));
             }
-            if column.primary_key || column.unique {
-                return Err(Error::feature(
-                    "ADD COLUMN with PRIMARY KEY or UNIQUE is not supported yet",
-                ));
-            }
-            t.columns.push(Column {
-                name: column.name.clone(),
-                ty: crate::binder::column_type(&*txn, reg, &column.ty)?,
-                nullable: !column.not_null,
-                default: column.default.clone(),
-                max_len: column.max_len,
-                numeric: column.numeric,
-                comment: None,
-            });
-            if let Some(check) = &column.check {
-                t.checks
-                    .push((format!("{table}_{}_check", column.name), check.clone()));
-            }
-            catalog::note_stored_types(txn, &t.columns)?;
-            let w = dml::Writer::new(&*txn, reg, t.clone())?;
-            let fill = {
-                let ctx = Ctx::new(&*txn, reg, &[]);
-                w.default_of(t.columns.len() - 1, &ctx)?
-            };
-            let has_rows = {
-                let ctx = Ctx::new(&*txn, reg, &[]);
-                exec::matching(&t, &crate::plan::Access::Full, None, &ctx)?
-                    .next()
-                    .transpose()?
-                    .is_some()
-            };
-            if has_rows {
-                if fill.is_null() && column.not_null {
-                    return Err(Error::not_null_violation(format!(
-                        "column \"{}\" of relation \"{table}\" contains null values",
-                        column.name
-                    )));
-                }
-                if !fill.is_null() {
-                    dml::rewrite_rows(txn, reg, &t, &fill)?;
+            // A partitioned table's partitions get it too.
+            if t.partition_by.is_some() {
+                for p in crate::partition::partitions(&*txn, &t)? {
+                    add_column(txn, reg, &p.name, column)?;
                 }
             }
-            if let Some((name, r)) = &column.references {
-                let fk = crate::fk::build(
-                    &*txn,
-                    &t,
-                    name.as_deref(),
-                    std::slice::from_ref(&column.name),
-                    r,
-                )?;
-                crate::fk::validate_existing(&*txn, reg, &t, &fk)?;
-                crate::fk::attach(txn, &mut t, fk)?;
-            }
-            catalog::update_table(txn, &t)?;
+            add_column(txn, reg, table, column)?;
             Output::Command("ALTER TABLE".into())
         }
         Statement::AddConstraint { table, constraint } => {
+            refuse_partitioned(&*txn, table, "ADD CONSTRAINT")?;
             add_constraint(txn, reg, table, constraint)?;
             Output::Command("ALTER TABLE".into())
         }
@@ -1861,6 +1875,7 @@ fn execute_statement(
             name,
             if_exists,
         } => {
+            refuse_partitioned(&*txn, table, "DROP CONSTRAINT")?;
             drop_constraint(txn, table, name, *if_exists)?;
             Output::Command("ALTER TABLE".into())
         }
@@ -1916,6 +1931,285 @@ fn execute_statement(
     })
 }
 
+/// `ALTER TABLE table ADD COLUMN column`.
+fn add_column(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    table: &str,
+    column: &crate::ast::ColumnSpec,
+) -> Result<()> {
+    let mut t = catalog::table(&*txn, table)?;
+    if t.column(&column.name).is_some() {
+        return Err(Error::duplicate_column(format!(
+            "column \"{}\" of relation \"{table}\" already exists",
+            column.name
+        )));
+    }
+    if column.primary_key || column.unique {
+        return Err(Error::feature(
+            "ADD COLUMN with PRIMARY KEY or UNIQUE is not supported yet",
+        ));
+    }
+    t.columns.push(Column {
+        name: column.name.clone(),
+        ty: crate::binder::column_type(&*txn, reg, &column.ty)?,
+        nullable: !column.not_null,
+        default: column.default.clone(),
+        max_len: column.max_len,
+        numeric: column.numeric,
+        comment: None,
+    });
+    if let Some(check) = &column.check {
+        t.checks
+            .push((format!("{table}_{}_check", column.name), check.clone()));
+    }
+    catalog::note_stored_types(txn, &t.columns)?;
+    let w = dml::Writer::new(&*txn, reg, t.clone())?;
+    let fill = {
+        let ctx = Ctx::new(&*txn, reg, &[]);
+        w.default_of(t.columns.len() - 1, &ctx)?
+    };
+    let has_rows = {
+        let ctx = Ctx::new(&*txn, reg, &[]);
+        exec::matching(&t, &crate::plan::Access::Full, None, &ctx)?
+            .next()
+            .transpose()?
+            .is_some()
+    };
+    if has_rows {
+        if fill.is_null() && column.not_null {
+            return Err(Error::not_null_violation(format!(
+                "column \"{}\" of relation \"{table}\" contains null values",
+                column.name
+            )));
+        }
+        if !fill.is_null() {
+            dml::rewrite_rows(txn, reg, &t, &fill)?;
+        }
+    }
+    if let Some((name, r)) = &column.references {
+        let fk = crate::fk::build(
+            &*txn,
+            &t,
+            name.as_deref(),
+            std::slice::from_ref(&column.name),
+            r,
+        )?;
+        crate::fk::validate_existing(&*txn, reg, &t, &fk)?;
+        crate::fk::attach(txn, &mut t, fk)?;
+    }
+    catalog::update_table(txn, &t)?;
+    Ok(())
+}
+
+/// Refuses `what` on a partitioned table or a partition (their definitions
+/// stay one).
+fn refuse_partitioned(txn: &dyn KvTxn, table: &str, what: &str) -> Result<()> {
+    if let Some(t) = catalog::get_table(txn, table)?
+        && (t.partition_by.is_some() || t.partition_of.is_some())
+    {
+        return Err(Error::feature(format!(
+            "{what} on a partitioned table or a partition is not supported yet"
+        )));
+    }
+    Ok(())
+}
+
+/// The partitioning `PARTITION BY kind (names)` of `table` (whose unique
+/// keys must include it: a key then lives in one partition).
+fn partition_spec(
+    table: &Table,
+    uniques: &[(String, Vec<usize>)],
+    kind: &str,
+    names: &[String],
+) -> Result<crate::partition::Spec> {
+    use crate::partition::Kind;
+    let kind = match kind {
+        "range" => Kind::Range,
+        "list" => Kind::List,
+        "hash" => Kind::Hash,
+        k => {
+            return Err(Error::invalid_parameter(format!(
+                "unrecognized partitioning strategy \"{k}\""
+            )));
+        }
+    };
+    let columns = names
+        .iter()
+        .map(|n| {
+            table.column(n).ok_or_else(|| {
+                Error::undefined_column(format!(
+                    "column \"{n}\" named in partition key does not exist"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if kind == Kind::List && columns.len() != 1 {
+        return Err(Error::invalid_parameter(
+            "cannot use \"list\" partition strategy with more than one column",
+        ));
+    }
+    let keys = std::iter::once(&table.primary_key)
+        .filter(|k| !k.is_empty())
+        .chain(uniques.iter().map(|(_, c)| c));
+    for key in keys {
+        if !columns.iter().all(|c| key.contains(c)) {
+            return Err(Error::feature(
+                "a primary key or unique constraint of a partitioned table must include the partition key",
+            ));
+        }
+    }
+    Ok(crate::partition::Spec { kind, columns })
+}
+
+/// `CREATE TABLE name PARTITION OF parent bound WITH (options)`: a table of
+/// the parent's definition — columns, keys, checks, indexes, foreign keys —
+/// holding the parent's rows in `bound`.
+fn create_partition(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    name: &str,
+    parent_name: &str,
+    bound: &crate::ast::PartitionBoundSpec,
+    options: &[(String, String)],
+) -> Result<()> {
+    use crate::ast::PartitionBoundSpec as B;
+    use crate::partition::{Kind, PartBound};
+    let parent = catalog::table(&*txn, parent_name)?;
+    let Some(spec) = parent.partition_by.clone() else {
+        return Err(Error::wrong_object_type(format!(
+            "\"{parent_name}\" is not partitioned"
+        )));
+    };
+    // The bound's values, of the key columns' types.
+    let value = |txn: &dyn KvTxn, e: &crate::ast::Expr, col: usize| -> Result<Value> {
+        let (bound, _) = Binder::new(txn, reg).expr(e, &Scope::default())?;
+        let ctx = Ctx::new(txn, reg, &[]);
+        let v = bound.eval(&crate::exec::env(&[], &ctx, None))?;
+        dml::assign(txn, v, &parent, col)
+    };
+    let bound = match (bound, spec.kind) {
+        (B::Default, Kind::Hash) => {
+            return Err(Error::invalid_parameter(
+                "a hash-partitioned table may not have a default partition",
+            ));
+        }
+        (B::Default, _) => PartBound::Default,
+        (B::Range { from, to }, Kind::Range) => {
+            let n = spec.columns.len();
+            if from.len() != n || to.len() != n {
+                return Err(Error::invalid_parameter(format!(
+                    "a range bound has {n} values, one per key column"
+                )));
+            }
+            let side = |vals: &[Option<crate::ast::Expr>]| -> Result<Vec<Option<Value>>> {
+                vals.iter()
+                    .zip(&spec.columns)
+                    .map(|(v, &c)| v.as_ref().map(|e| value(&*txn, e, c)).transpose())
+                    .collect()
+            };
+            let (from, to) = (side(from)?, side(to)?);
+            let empty = from.iter().zip(&to).find_map(|(a, b)| match (a, b) {
+                (None, _) | (_, None) => Some(false),
+                (Some(a), Some(b)) => match a.sort_cmp(b) {
+                    std::cmp::Ordering::Equal => None,
+                    o => Some(o == std::cmp::Ordering::Greater),
+                },
+            });
+            if empty.unwrap_or(true) {
+                return Err(Error::invalid_parameter(format!(
+                    "empty range bound specified for partition \"{name}\""
+                )));
+            }
+            PartBound::Range { from, to }
+        }
+        (B::List(vals), Kind::List) => PartBound::List(
+            vals.iter()
+                .map(|e| value(&*txn, e, spec.columns[0]))
+                .collect::<Result<_>>()?,
+        ),
+        (B::Hash { modulus, remainder }, Kind::Hash) => {
+            if *modulus == 0 || remainder >= modulus {
+                return Err(Error::invalid_parameter(
+                    "the remainder of a hash partition must be less than its modulus",
+                ));
+            }
+            PartBound::Hash {
+                modulus: *modulus,
+                remainder: *remainder,
+            }
+        }
+        _ => {
+            return Err(Error::invalid_parameter(format!(
+                "the bound of partition \"{name}\" does not fit how \"{parent_name}\" is partitioned"
+            )));
+        }
+    };
+    let siblings = crate::partition::partitions(&*txn, &parent)?;
+    for s in &siblings {
+        let (_, other) = s.partition_of.as_ref().expect("a partition");
+        if crate::partition::overlaps(&spec, &bound, other) {
+            return Err(Error::invalid_parameter(format!(
+                "partition \"{name}\" would overlap partition \"{}\"",
+                s.name
+            )));
+        }
+    }
+    // A default partition must not hold rows the new one would.
+    if bound != PartBound::Default
+        && let Some(default) = siblings
+            .iter()
+            .find(|s| matches!(s.partition_of, Some((_, PartBound::Default))))
+    {
+        let ctx = Ctx::new(&*txn, reg, &[]);
+        for r in crate::exec::scan(default, &crate::plan::Access::Full, &ctx, None)? {
+            let (_, row) = r?;
+            let key: Vec<Value> = spec.columns.iter().map(|&c| row[c].clone()).collect();
+            if crate::partition::contains(&bound, &key) {
+                return Err(Error::check_violation(format!(
+                    "updated partition constraint for default partition \"{}\" would be violated by some row",
+                    default.name
+                )));
+            }
+        }
+    }
+    let mut storage = crate::storage::ROW.to_string();
+    for (key, v) in options {
+        match key.as_str() {
+            "storage" => {
+                crate::storage::named(v)?;
+                storage = v.clone();
+            }
+            _ => {
+                return Err(Error::invalid_parameter(format!(
+                    "unrecognized parameter \"{key}\""
+                )));
+            }
+        }
+    }
+    let mut child = parent.clone();
+    child.id = 0;
+    child.name = name.to_string();
+    for ix in &mut child.indexes {
+        ix.name = format!("{}_{name}", ix.name);
+    }
+    child.referenced_by = Vec::new();
+    let fks = std::mem::take(&mut child.foreign_keys);
+    child.owner = Some(crate::access::current().user.clone());
+    child.comment = None;
+    child.storage = storage;
+    child.columnar = Vec::new();
+    child.copy = crate::column_store::CopyState::Ready;
+    child.partition_by = None;
+    child.partition_of = Some((parent.name.clone(), bound));
+    child.storage_policy = None;
+    let mut child = catalog::create_table(txn, child)?;
+    for fk in fks {
+        crate::fk::attach(txn, &mut child, fk)?;
+    }
+    Ok(())
+}
+
 fn create_table(
     txn: &mut dyn KvTxn,
     reg: &Registry,
@@ -1923,6 +2217,7 @@ fn create_table(
     specs: &[crate::ast::ColumnSpec],
     constraints: &[TableConstraint],
     storage: &str,
+    partition_by: Option<&(String, Vec<String>)>,
 ) -> Result<()> {
     let mut columns = Vec::new();
     let mut checks = Vec::new();
@@ -2015,7 +2310,13 @@ fn create_table(
         storage: storage.to_string(),
         columnar: Vec::new(),
         copy: crate::column_store::CopyState::Ready,
+        partition_by: None,
+        partition_of: None,
+        storage_policy: None,
     };
+    if let Some((kind, names)) = partition_by {
+        table.partition_by = Some(partition_spec(&table, &uniques, kind, names)?);
+    }
     for (n, cols) in uniques {
         if catalog::find_index(&*txn, &n)?.is_some() {
             return Err(Error::duplicate_table(format!(

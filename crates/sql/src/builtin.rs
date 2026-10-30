@@ -120,6 +120,7 @@ impl Module for Builtin {
             r.add_aggregate(names, Arc::new(BuiltinAgg(*a)))?;
         }
         r.add_table_function(Arc::new(GenerateSeries))?;
+        r.add_function(&["partition_hash"], crate::partition::partition_hash_arc())?;
         for (ty, names, _) in TYPES {
             r.add_builtin_type(names, *ty);
             crate::ext::lawful(type_of(*ty))?;

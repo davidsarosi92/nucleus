@@ -556,6 +556,9 @@ fn def_table(k: usize) -> Table {
         storage: "row".into(),
         columnar: Vec::new(),
         copy: Default::default(),
+        partition_by: None,
+        partition_of: None,
+        storage_policy: None,
     }
 }
 

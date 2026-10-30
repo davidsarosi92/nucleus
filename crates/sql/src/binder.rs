@@ -883,20 +883,48 @@ impl<'a> Binder<'a> {
                     Some(a) => Some(self.policy_condition(&table, &a.using)?),
                     None => None,
                 };
-                let scan = Plan::Scan {
-                    table,
-                    access: Access::Full,
-                    filter: None,
-                    estimate: None,
-                };
-                Ok(Bound {
-                    plan: match policy {
+                let secured = |table: Table| {
+                    let scan = Plan::Scan {
+                        table,
+                        access: Access::Full,
+                        filter: None,
+                        estimate: None,
+                    };
+                    match &policy {
                         Some(policy) => Plan::Secure {
                             input: Box::new(scan),
-                            policy,
+                            policy: policy.clone(),
                         },
                         None => scan,
-                    },
+                    }
+                };
+                // A partitioned table: its partitions in turn, under its
+                // policies.
+                if let Some(spec) = table.partition_by.clone() {
+                    let parts = crate::partition::partitions(self.txn, &table)?;
+                    let plan = if parts.is_empty() {
+                        Plan::Values {
+                            rows: Vec::new(),
+                            width: table.columns.len(),
+                        }
+                    } else {
+                        Plan::Append {
+                            guards: vec![None; parts.len()],
+                            parts: parts
+                                .iter()
+                                .map(|p| {
+                                    let (_, b) = p.partition_of.clone().expect("a partition");
+                                    (b, p.name.clone())
+                                })
+                                .collect(),
+                            inputs: parts.into_iter().map(secured).collect(),
+                            spec,
+                        }
+                    };
+                    return Ok(Bound { plan, scope });
+                }
+                Ok(Bound {
+                    plan: secured(table),
                     scope,
                 })
             }

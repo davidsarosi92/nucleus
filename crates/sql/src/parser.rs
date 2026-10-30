@@ -1166,6 +1166,18 @@ impl<'a> Parser<'a> {
         self.expect_kw("table")?;
         let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
         let name = self.relation()?;
+        if self.eat_kws(&["partition", "of"]) {
+            let parent = self.relation()?;
+            let bound = self.partition_bound()?;
+            let options = self.table_options()?;
+            return Ok(Statement::CreatePartition {
+                name,
+                parent,
+                bound,
+                options,
+                if_not_exists,
+            });
+        }
         self.expect_op("(")?;
         let mut columns = Vec::new();
         let mut constraints = Vec::new();
@@ -1185,6 +1197,28 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect_op(")")?;
+        let partition_by = if self.eat_kws(&["partition", "by"]) {
+            let kind = self.ident()?;
+            self.expect_op("(")?;
+            let cols = self.name_list()?;
+            self.expect_op(")")?;
+            Some((kind, cols))
+        } else {
+            None
+        };
+        let options = self.table_options()?;
+        Ok(Statement::CreateTable {
+            name,
+            columns,
+            constraints,
+            if_not_exists,
+            options,
+            partition_by,
+        })
+    }
+
+    /// `[WITH (name = value, …)]`.
+    fn table_options(&mut self) -> Result<Vec<(String, String)>> {
         let mut options = Vec::new();
         if self.eat_kw("with") {
             self.expect_op("(")?;
@@ -1207,13 +1241,75 @@ impl<'a> Parser<'a> {
             }
             self.expect_op(")")?;
         }
-        Ok(Statement::CreateTable {
-            name,
-            columns,
-            constraints,
-            if_not_exists,
-            options,
-        })
+        Ok(options)
+    }
+
+    /// `FOR VALUES FROM (…) TO (…) | IN (…) | WITH (MODULUS m, REMAINDER r)`
+    /// or `DEFAULT`.
+    fn partition_bound(&mut self) -> Result<crate::ast::PartitionBoundSpec> {
+        use crate::ast::PartitionBoundSpec as B;
+        if self.eat_kw("default") {
+            return Ok(B::Default);
+        }
+        self.expect_kw("for")?;
+        self.expect_kw("values")?;
+        let open_list = |p: &mut Self| -> Result<Vec<Option<Expr>>> {
+            p.expect_op("(")?;
+            let mut out = Vec::new();
+            loop {
+                if p.eat_kw("minvalue") || p.eat_kw("maxvalue") {
+                    out.push(None);
+                } else {
+                    out.push(Some(p.expr()?));
+                }
+                if !p.eat_op(",") {
+                    break;
+                }
+            }
+            p.expect_op(")")?;
+            Ok(out)
+        };
+        if self.eat_kw("from") {
+            let from = open_list(self)?;
+            self.expect_kw("to")?;
+            let to = open_list(self)?;
+            return Ok(B::Range { from, to });
+        }
+        if self.eat_kw("in") {
+            self.expect_op("(")?;
+            let mut vals = vec![self.expr()?];
+            while self.eat_op(",") {
+                vals.push(self.expr()?);
+            }
+            self.expect_op(")")?;
+            return Ok(B::List(vals));
+        }
+        self.expect_kw("with")?;
+        self.expect_op("(")?;
+        let mut modulus = None;
+        let mut remainder = None;
+        loop {
+            let key = self.ident()?;
+            let n: u32 = match self.next() {
+                Some(Token::Number(n)) => n
+                    .parse()
+                    .map_err(|_| self.error("expected a whole number"))?,
+                _ => return Err(self.error("expected a whole number")),
+            };
+            match key.as_str() {
+                "modulus" => modulus = Some(n),
+                "remainder" => remainder = Some(n),
+                _ => return Err(self.error("expected MODULUS or REMAINDER")),
+            }
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        match (modulus, remainder) {
+            (Some(modulus), Some(remainder)) => Ok(B::Hash { modulus, remainder }),
+            _ => Err(self.error("a hash partition needs MODULUS and REMAINDER")),
+        }
     }
 
     fn table_constraint(&mut self) -> Result<TableConstraint> {

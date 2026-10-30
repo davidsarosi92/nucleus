@@ -82,7 +82,7 @@ const DATA: u8 = 0x01;
 /// before, `text`'s 4, and still read as text), `inet` and `cidr` (16, 17);
 /// version 7 an owner, version 8 row-level security, version 9 comments
 /// on the table and its columns; older versions still read.
-const TABLE_VERSION: u8 = 11;
+const TABLE_VERSION: u8 = 12;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -297,6 +297,14 @@ pub struct Table {
     /// `row, column`: which copy is being built, if one is
     /// ([`crate::column_store::CopyState`]).
     pub copy: crate::column_store::CopyState,
+    /// `PARTITION BY …`: a partitioned table (its rows in its partitions).
+    pub partition_by: Option<crate::partition::Spec>,
+    /// `PARTITION OF parent FOR VALUES …`: a partition, of which table, its
+    /// bound.
+    pub partition_of: Option<(String, crate::partition::PartBound)>,
+    /// A partitioned table's storage policy: its partitions whose range
+    /// ended longer ago than `after` are stored as `storage`.
+    pub storage_policy: Option<(String, crate::datetime::Interval)>,
 }
 
 impl Table {
@@ -390,6 +398,32 @@ impl Table {
             w.u32(c as u32);
         }
         w.u8(self.copy.tag());
+        match &self.partition_by {
+            None => {
+                w.u8(0);
+            }
+            Some(spec) => {
+                w.u8(1);
+                spec.encode(&mut w);
+            }
+        }
+        match &self.partition_of {
+            None => {
+                w.u8(0);
+            }
+            Some((parent, bound)) => {
+                w.u8(1).str(parent);
+                bound.encode(&mut w);
+            }
+        }
+        match &self.storage_policy {
+            None => {
+                w.u8(0);
+            }
+            Some((storage, after)) => {
+                w.u8(1).str(storage).value(&Value::Interval(*after));
+            }
+        }
         w.0
     }
 
@@ -511,6 +545,23 @@ impl Table {
             }
             copy = crate::column_store::CopyState::of_tag(r.u8()?)?;
         }
+        let (mut partition_by, mut partition_of, mut storage_policy) = (None, None, None);
+        if version >= 12 {
+            if r.u8()? == 1 {
+                partition_by = Some(crate::partition::Spec::decode(&mut r)?);
+            }
+            if r.u8()? == 1 {
+                let parent = r.str()?;
+                partition_of = Some((parent, crate::partition::PartBound::decode(&mut r)?));
+            }
+            if r.u8()? == 1 {
+                let storage = r.str()?;
+                let Value::Interval(after) = r.value()? else {
+                    return Err(Error::internal("a storage policy without its interval"));
+                };
+                storage_policy = Some((storage, after));
+            }
+        }
         Ok(Self {
             id,
             name,
@@ -528,6 +579,9 @@ impl Table {
             storage,
             columnar,
             copy,
+            partition_by,
+            partition_of,
+            storage_policy,
         })
     }
 }
@@ -1213,6 +1267,25 @@ mod tests {
             storage: "row,column".into(),
             columnar: vec![0, 2],
             copy: crate::column_store::CopyState::BuildingColumns,
+            partition_by: Some(crate::partition::Spec {
+                kind: crate::partition::Kind::Range,
+                columns: vec![1],
+            }),
+            partition_of: Some((
+                "all".into(),
+                crate::partition::PartBound::Range {
+                    from: vec![Some(Value::Int(1))],
+                    to: vec![None],
+                },
+            )),
+            storage_policy: Some((
+                "column".into(),
+                crate::datetime::Interval {
+                    months: 0,
+                    days: 30,
+                    micros: 0,
+                },
+            )),
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));

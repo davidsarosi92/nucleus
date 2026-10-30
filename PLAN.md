@@ -1444,9 +1444,10 @@ delta moved over after its switch, markers kept by row so merges and
 deletes do not conflict; converted through every pair with writes
 between and during, and crashed at I/O points, against a row table;
 choosing rows or columns per query is by the columns a scan needs.
-Left: the analyzer suggesting storage changes, §M14.9); V9 partitioning ⬜ (range,
-list, hash; pruning; attach / detach; storage per partition; the age
-policy); V10 results columnar end to end, TPC-H and ClickBench against
+Left: the analyzer suggesting storage changes, §M14.9); V9 partitioning (range,
+list, hash ✅; pruning when the plan is made and when it runs ✅;
+inserts routed and updates moving rows ✅; storage per partition ✅;
+attach / detach ⬜; the age policy ⬜); V10 results columnar end to end, TPC-H and ClickBench against
 PostgreSQL, the targets recorded ⬜.
 
 **Done when:** every storage mode works per table, per column and per
@@ -2148,6 +2149,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-30** — §M14.20 V9 (first part): partitioning — range, list,
+  hash, default; pruning at plan and run time; routed inserts, moving
+  updates; indexes and columns on every partition.
 - **2026-10-30** — §M14.20 V8: storage per table and per column —
   `row, column`, `ALTER TABLE … SET STORAGE` online, markers by row.
 - **2026-10-29** — §M14.20 V7: columnar storage — `WITH (storage =

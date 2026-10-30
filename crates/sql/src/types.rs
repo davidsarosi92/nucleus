@@ -586,6 +586,19 @@ impl Value {
         })
     }
 
+    /// The value as an SQL literal that gives it back: a number or boolean
+    /// as it is, text quoted, anything else quoted and cast to its type.
+    pub fn render_sql(&self) -> String {
+        match self {
+            Value::Null => "NULL".into(),
+            Value::Bool(b) => if *b { "true" } else { "false" }.into(),
+            Value::Int(_) | Value::Numeric(_) => self.render(),
+            Value::Float(f) if f.is_finite() => self.render(),
+            Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
+            v => format!("'{}'::{}", v.render().replace('\'', "''"), type_name(v)),
+        }
+    }
+
     /// The value as text, the way PostgreSQL prints it (`NULL` as `NULL`).
     pub fn render(&self) -> String {
         match self {

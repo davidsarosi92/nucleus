@@ -53,6 +53,7 @@ codes! {
     duplicate_alias => "42712",
     grouping => "42803",
     type_mismatch => "42804",
+    wrong_object_type => "42809",
     invalid_text => "22P02",
     datetime_format => "22007",
     datetime_overflow => "22008",

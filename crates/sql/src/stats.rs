@@ -189,6 +189,11 @@ pub struct Stats<'a> {
 }
 
 impl<'a> Stats<'a> {
+    /// The transaction it reads through.
+    pub fn txn(&self) -> &'a dyn KvTxn {
+        self.txn
+    }
+
     /// Statistics read through `txn`.
     pub fn new(txn: &'a dyn KvTxn) -> Self {
         Self {

@@ -1,0 +1,171 @@
+# Declarative partitioning (PLAN.md §M14.20 V9): RANGE, LIST, HASH;
+# rows routed to their partitions, partitions left out of scans their
+# filters rule out, rows moved by updates of their keys.
+
+statement ok
+CREATE TABLE m (at DATE NOT NULL, dev INT, v INT, PRIMARY KEY (at, dev)) PARTITION BY RANGE (at)
+
+statement ok
+CREATE TABLE m_09 PARTITION OF m FOR VALUES FROM ('2026-09-01') TO ('2026-10-01')
+
+statement ok
+CREATE TABLE m_10 PARTITION OF m FOR VALUES FROM ('2026-10-01') TO ('2026-11-01')
+
+statement ok
+INSERT INTO m SELECT DATE '2026-09-01' + i % 61, i % 7, i FROM generate_series(1, 400) i
+
+query I
+SELECT count(*) FROM m
+----
+400
+
+query I
+SELECT count(*) FROM m_10
+----
+191
+
+statement error 23514
+INSERT INTO m VALUES ('2026-12-01', 1, 1)
+
+statement error 23514
+INSERT INTO m_09 VALUES ('2026-10-05', 1, 1)
+
+statement error 23505
+INSERT INTO m VALUES ('2026-09-02', 1, 0)
+
+# nucleus-only: only the partition the filter leaves is read.
+query T
+EXPLAIN SELECT v FROM m WHERE at = DATE '2026-10-07' AND dev = 3
+----
+Project: #2
+  Append
+    Index Scan using primary key on m_10 (at = '2026-10-07'::date AND dev = 3) filter: ((#0 = '2026-10-07'::date) AND (#1 = 3))
+
+query II
+SELECT dev, sum(v) FROM m WHERE at >= DATE '2026-10-30' GROUP BY dev ORDER BY dev
+----
+0 546
+1 485
+2 424
+3 363
+4 302
+5 243
+6 181
+
+statement ok
+CREATE TABLE m_rest PARTITION OF m DEFAULT
+
+statement ok
+INSERT INTO m VALUES ('2026-12-01', 9, 1), ('2025-01-01', 2, 2)
+
+# The default holds a row a new partition would.
+statement error 23514
+CREATE TABLE m_11 PARTITION OF m FOR VALUES FROM ('2026-11-01') TO ('2026-12-15')
+
+query T
+SELECT dev FROM m_rest ORDER BY dev
+----
+2
+9
+
+# A key change moves the row.
+statement ok
+UPDATE m SET at = DATE '2026-09-15' WHERE at = DATE '2026-12-01'
+
+query II
+SELECT (SELECT count(*) FROM m_rest), (SELECT count(*) FROM m_09 WHERE at = DATE '2026-09-15' AND dev = 9)
+----
+1 1
+
+statement ok
+DELETE FROM m WHERE v % 10 = 0
+
+query I
+SELECT count(*) FROM m
+----
+362
+
+# nucleus-only
+query TTTTT
+SELECT partition, strategy, key, bound, storage FROM nc_catalog.partitions WHERE table_name = 'm' ORDER BY partition
+----
+m_09 range {at} FOR VALUES FROM ('2026-09-01'::date) TO ('2026-10-01'::date) row
+m_10 range {at} FOR VALUES FROM ('2026-10-01'::date) TO ('2026-11-01'::date) row
+m_rest range {at} DEFAULT row
+
+statement error
+CREATE TABLE m_bad PARTITION OF m FOR VALUES FROM ('2026-09-15') TO ('2026-09-20')
+
+statement error 0A000
+CREATE TABLE p_bad (id INT PRIMARY KEY, g INT) PARTITION BY LIST (g)
+
+# Lists, hashes, a storage per partition, an index on every partition.
+statement ok
+CREATE TABLE ev (id INT, kind TEXT, PRIMARY KEY (id, kind)) PARTITION BY LIST (kind)
+
+# nucleus-only
+statement ok
+CREATE TABLE ev_click PARTITION OF ev FOR VALUES IN ('click', 'tap') WITH (storage = column)
+
+statement ok
+CREATE TABLE ev_view PARTITION OF ev FOR VALUES IN ('view')
+
+statement ok
+INSERT INTO ev SELECT i, (ARRAY['click', 'tap', 'view'])[1 + i % 3] FROM generate_series(1, 3000) i
+
+statement ok
+CREATE INDEX ev_id ON ev (id)
+
+query TI
+SELECT kind, count(*) FROM ev GROUP BY kind ORDER BY kind
+----
+click 1000
+tap 1000
+view 1000
+
+query T
+SELECT kind FROM ev WHERE id = 7
+----
+tap
+
+statement ok
+CREATE TABLE h (id INT PRIMARY KEY, x INT) PARTITION BY HASH (id)
+
+statement ok
+CREATE TABLE h0 PARTITION OF h FOR VALUES WITH (MODULUS 3, REMAINDER 0)
+
+statement ok
+CREATE TABLE h1 PARTITION OF h FOR VALUES WITH (MODULUS 3, REMAINDER 1)
+
+statement ok
+CREATE TABLE h2 PARTITION OF h FOR VALUES WITH (MODULUS 3, REMAINDER 2)
+
+statement ok
+INSERT INTO h SELECT i, i * 2 FROM generate_series(1, 900) i
+
+query IBBB
+SELECT (SELECT count(*) FROM h), (SELECT count(*) FROM h0) BETWEEN 200 AND 400, (SELECT count(*) FROM h1) BETWEEN 200 AND 400, (SELECT count(*) FROM h2) BETWEEN 200 AND 400
+----
+900 true true true
+
+query I
+SELECT x FROM h WHERE id = 450
+----
+900
+
+statement ok
+ALTER TABLE h ADD COLUMN note TEXT DEFAULT 'n'
+
+query TI
+SELECT note, count(*) FROM h GROUP BY note
+----
+n 900
+
+statement error 0A000
+ALTER TABLE h ALTER COLUMN x TYPE BIGINT
+
+statement ok
+DROP TABLE h
+
+statement error 42P01
+SELECT * FROM h1

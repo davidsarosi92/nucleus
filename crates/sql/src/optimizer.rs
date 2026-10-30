@@ -43,7 +43,9 @@ fn push(plan: Plan, st: &Stats) -> Plan {
             conjuncts(predicate, &mut preds);
             push_into(*input, preds, st)
         }
-        Plan::Scan { .. } | Plan::Join { .. } | Plan::Secure { .. } => push_into(plan, vec![], st),
+        Plan::Scan { .. } | Plan::Join { .. } | Plan::Secure { .. } | Plan::Append { .. } => {
+            push_into(plan, vec![], st)
+        }
         Plan::Project { input, exprs } => Plan::Project {
             input: Box::new(push(*input, st)),
             exprs,
@@ -89,6 +91,30 @@ fn push(plan: Plan, st: &Stats) -> Plan {
     }
 }
 
+/// Whether `e` reads nothing that varies while a plan runs (no parameter,
+/// enclosing row, subquery or volatile call): it can be evaluated now.
+fn constant(e: &Expr) -> bool {
+    let mut c = !e.has_subquery();
+    e.walk(&mut |x| match x {
+        Expr::Param(_) | Expr::Outer { .. } | Expr::Column(_) => c = false,
+        Expr::Call(f, _) if f.volatility() != crate::ext::Volatility::Immutable => c = false,
+        _ => {}
+    });
+    c
+}
+
+/// A constant condition's truth now (`None`: it does not evaluate).
+fn fold(e: &Expr, st: &Stats) -> Option<bool> {
+    let reg = crate::ext::Registry::shared_builtin();
+    let ctx = crate::expr::Ctx::new(st.txn(), &reg, &[]);
+    let env = crate::exec::env(&[], &ctx, None);
+    match e.eval(&env).ok()? {
+        crate::Value::Bool(b) => Some(b),
+        crate::Value::Null => Some(false),
+        _ => None,
+    }
+}
+
 fn filtered(plan: Plan, preds: Vec<Expr>) -> Plan {
     match conjunction(preds) {
         None => plan,
@@ -125,6 +151,37 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
         Plan::Filter { input, predicate } => {
             conjuncts(predicate, &mut preds);
             push_into(*input, preds, st)
+        }
+        // A partitioned table: the predicates into each partition, and the
+        // partitions they rule out left out — now when the guard is a
+        // constant, else when the plan runs.
+        Plan::Append {
+            inputs,
+            spec,
+            parts,
+            ..
+        } => {
+            let (mut keep, mut kept_parts, mut kept_guards) = (Vec::new(), Vec::new(), Vec::new());
+            for (input, (bound, name)) in inputs.into_iter().zip(parts) {
+                let guard = crate::partition::guard(&spec, &bound, &preds);
+                let guard = match guard {
+                    Some(g) if constant(&g) => match fold(&g, st) {
+                        Some(false) => continue,
+                        Some(true) => None,
+                        None => Some(g),
+                    },
+                    g => g,
+                };
+                keep.push(push_into(input, preds.clone(), st));
+                kept_parts.push((bound, name));
+                kept_guards.push(guard);
+            }
+            Plan::Append {
+                inputs: keep,
+                spec,
+                parts: kept_parts,
+                guards: kept_guards,
+            }
         }
         // A barrier: the statement's predicates stay above it.  Those that
         // bound a column by a value free of the row may still narrow the
@@ -437,6 +494,7 @@ pub(crate) fn estimate(plan: &Plan, st: &Stats) -> f64 {
             st.rows(table) * filter.as_ref().map_or(1.0, |f| st.selectivity(table, f))
         }),
         Plan::Values { rows, .. } => rows.len() as f64,
+        Plan::Append { inputs, .. } => inputs.iter().map(|p| estimate(p, st)).sum(),
         Plan::Cte { plan, .. } => estimate(plan, st),
         Plan::Recursive { base, .. } => estimate(base, st) * 10.0,
         Plan::WorkTable { .. } => 10.0,
@@ -611,6 +669,17 @@ fn map_children(plan: Plan, f: &dyn Fn(Plan) -> Plan) -> Plan {
             left: b(left),
             right: b(right),
             all,
+        },
+        Plan::Append {
+            inputs,
+            spec,
+            parts,
+            guards,
+        } => Plan::Append {
+            inputs: inputs.into_iter().map(f).collect(),
+            spec,
+            parts,
+            guards,
         },
         p @ (Plan::Scan { .. }
         | Plan::Values { .. }
