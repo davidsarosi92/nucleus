@@ -92,6 +92,17 @@ pub trait TableStorage: Send + Sync {
         old: Option<&Row>,
     ) -> Result<()>;
 
+    /// Stores a new row under `key` unless one is there (`false`).  By
+    /// default [`exists`](Self::exists), then [`write`](Self::write); a
+    /// storage may tell both from one look.
+    fn insert(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<bool> {
+        if self.exists(&*txn, t, key, false)? {
+            return Ok(false);
+        }
+        self.write(txn, t, key, row, None)?;
+        Ok(true)
+    }
+
     /// Removes the row under `key`.
     fn remove(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8]) -> Result<()>;
 
@@ -328,6 +339,10 @@ impl TableStorage for RowStorage {
         old: Option<&Row>,
     ) -> Result<()> {
         crate::large::write(txn, t, key, row, old)
+    }
+
+    fn insert(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<bool> {
+        crate::large::insert(txn, t, key, row)
     }
 
     fn remove(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8]) -> Result<()> {

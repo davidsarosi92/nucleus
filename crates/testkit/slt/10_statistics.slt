@@ -91,12 +91,14 @@ EXPLAIN SELECT count(*) FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON m
 ----
 Project: #0
   Aggregate: count(*)
-    Project: #0, #1, #2, #3, #4, #5
+    Project: #0
       Hash Join (#1 = #0) on (#1 = #2)
         Seq Scan on big (rows=1000)
-        Hash Join (#1 = #0) on (#1 = #2)
-          Seq Scan on mid (rows=100)
-          Seq Scan on small filter: (#1 = 'n3') (rows=1)
+        Project: #0
+          Hash Join (#1 = #0) on (#1 = #2)
+            Seq Scan on mid (rows=100)
+            Project: #0
+              Seq Scan on small filter: (#1 = 'n3') (rows=1)
 
 query I
 SELECT count(*) FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE small.name = 'n3'

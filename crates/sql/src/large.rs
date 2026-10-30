@@ -60,6 +60,26 @@ pub fn write(
     row: &Row,
     old: Option<&Row>,
 ) -> Result<()> {
+    let out = encode(txn, t, key, row, old)?;
+    txn.put(key, &out)?;
+    Ok(())
+}
+
+/// Stores a new row at `key` — unless the key has a row already (`false`),
+/// found by the same look at its versions that guards the write.
+pub fn insert(txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<bool> {
+    let out = encode(txn, t, key, row, None)?;
+    Ok(txn.put_new(key, &out)?)
+}
+
+/// The row's stored value, its long values written out of line.
+fn encode(
+    txn: &mut dyn KvTxn,
+    t: &Table,
+    key: &[u8],
+    row: &Row,
+    old: Option<&Row>,
+) -> Result<Vec<u8>> {
     let pk = pk_suffix(t, key);
     let stored = match old {
         Some(_) => match txn.get(key)? {
@@ -72,16 +92,17 @@ pub fn write(
     out.push(ROW_VERSION);
     out.extend_from_slice(&(row.len() as u16).to_le_bytes());
     for (c, v) in row.iter().enumerate() {
-        let mut enc = Vec::new();
-        encode_value(&mut enc, v);
+        // Encoded in place; moved out when too long to stay.
+        let at = out.len();
+        encode_value(&mut out, v);
         let was = stored.iter().any(|&(sc, _)| sc == c);
-        if enc.len() <= THRESHOLD {
+        if out.len() - at <= THRESHOLD {
             if was {
                 remove_chunks(txn, t, &pk, c)?;
             }
-            out.extend_from_slice(&enc);
             continue;
         }
+        let enc = out.split_off(at);
         let same = was
             && old.and_then(|o| o.get(c)).is_some_and(|o| {
                 let mut before = Vec::new();
@@ -107,8 +128,7 @@ pub fn write(
             remove_chunks(txn, t, &pk, c)?;
         }
     }
-    txn.put(key, &out)?;
-    Ok(())
+    Ok(out)
 }
 
 /// Deletes the row at `key` and its values stored out of line.

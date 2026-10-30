@@ -353,6 +353,26 @@ pub trait KvTxn: Send {
     /// Deletes `key` (no error if absent).
     fn delete(&mut self, key: &[u8]) -> Result<()>;
 
+    /// Sets `key` to `value` unless it has a value (`false`, nothing
+    /// written): [`get`](Self::get), then [`put`](Self::put), by default; an
+    /// implementation may tell both from one look at the key.
+    fn put_new(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        if self.get(key)?.is_some() {
+            return Ok(false);
+        }
+        self.put(key, value)?;
+        Ok(true)
+    }
+
+    /// Declares the keys in `[start, end)` fresh: none has a version yet and
+    /// no other transaction writes one before this one ends (a new index's
+    /// keys, a table made in this transaction).  An implementation may skip,
+    /// for them, what guards against other transactions' writes; the
+    /// default ignores the declaration.  The caller answers for it.
+    fn fresh(&mut self, start: &[u8], end: &[u8]) {
+        let _ = (start, end);
+    }
+
     /// Commits atomically; returns the commit timestamp.  On error nothing
     /// was written.
     fn commit(self: Box<Self>) -> Result<Timestamp>;
@@ -676,6 +696,14 @@ impl KvTxn for LocalTxn {
 
     fn delete(&mut self, key: &[u8]) -> Result<()> {
         Ok(self.0.delete(key)?)
+    }
+
+    fn fresh(&mut self, start: &[u8], end: &[u8]) {
+        self.0.fresh(start, end);
+    }
+
+    fn put_new(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        Ok(self.0.put_new(key, value)?)
     }
 
     fn commit(self: Box<Self>) -> Result<Timestamp> {

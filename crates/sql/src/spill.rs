@@ -602,6 +602,104 @@ pub fn sort(
     Ok(Box::new(Merge::new(&runs, flags, width)?))
 }
 
+/// Rows already sorted in parts (a parallel sort's morsels, in scan order)
+/// merged into one order: in memory when they fit in work_mem, else each
+/// part a run, merged as [`sort`] merges its runs.  Ties go to the earlier
+/// part, so the order is a stable sort's of the parts one after another.
+pub fn merge_sorted(
+    parts: Vec<Vec<(Vec<Value>, Row)>>,
+    flags: Vec<(bool, bool)>,
+) -> Result<Box<dyn Iterator<Item = Result<Row>>>> {
+    let bytes: usize = parts
+        .iter()
+        .flatten()
+        .map(|(k, r)| row_bytes(k) + row_bytes(r))
+        .sum();
+    let flags: Rc<[(bool, bool)]> = flags.into();
+    if bytes <= crate::budget::work_mem() {
+        let mut parts: Vec<std::vec::IntoIter<(Vec<Value>, Row)>> =
+            parts.into_iter().map(Vec::into_iter).collect();
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut rows: Vec<Option<Row>> = vec![None; parts.len()];
+        for (i, p) in parts.iter_mut().enumerate() {
+            if let Some((keys, row)) = p.next() {
+                rows[i] = Some(row);
+                heap.push(PartHead {
+                    keys,
+                    part: i,
+                    flags: Rc::clone(&flags),
+                });
+            }
+        }
+        return Ok(Box::new(std::iter::from_fn(move || {
+            let head = heap.pop()?;
+            let row = rows[head.part].take().expect("a head's row");
+            if let Some((keys, next)) = parts[head.part].next() {
+                rows[head.part] = Some(next);
+                heap.push(PartHead {
+                    keys,
+                    part: head.part,
+                    flags: Rc::clone(&head.flags),
+                });
+            }
+            Some(Ok(row))
+        })));
+    }
+    let width = flags.len();
+    let mut runs = Vec::new();
+    for part in parts {
+        let mut run = Run::new()?;
+        for (keys, row) in part {
+            let mut keyed = keys;
+            keyed.extend(row);
+            run.push(&keyed)?;
+        }
+        runs.push(run.seal()?);
+    }
+    while runs.len() > FAN_IN {
+        let mut merged = Vec::new();
+        for group in runs.chunks(FAN_IN) {
+            let mut m = Merge::new(group, Rc::clone(&flags), width)?;
+            let mut run = Run::new()?;
+            while let Some(keyed) = m.next_keyed()? {
+                run.push(&keyed)?;
+            }
+            merged.push(run.seal()?);
+        }
+        runs = merged;
+    }
+    Ok(Box::new(Merge::new(&runs, flags, width)?))
+}
+
+/// A part's first row's keys, ordered for [`merge_sorted`]'s heap (the
+/// smallest, then the earliest part, on top).
+struct PartHead {
+    keys: Vec<Value>,
+    part: usize,
+    flags: Rc<[(bool, bool)]>,
+}
+
+impl PartialEq for PartHead {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for PartHead {}
+
+impl PartialOrd for PartHead {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PartHead {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // A max-heap: reversed.
+        compare(&self.flags, &other.keys, &self.keys).then(other.part.cmp(&self.part))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

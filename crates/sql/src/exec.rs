@@ -122,6 +122,10 @@ fn build_node<'a>(
             aggregate(build(input, ctx, outer)?, group, aggs, ctx, outer, 0)?
         }
         Plan::Sort { input, keys } => {
+            // A pipeline's rows: sorted in parallel, morsels merged.
+            if let Some(rows) = crate::vector::sorted(input, keys, ctx, outer)? {
+                return Ok(rows);
+            }
             // In memory while it fits in work_mem, else by runs merged.
             let keyed = build(input, ctx, outer)?.map(|r| {
                 let row = r?;
@@ -938,6 +942,32 @@ fn join<'a>(
         return lookup_join(build(left, ctx, outer)?, right, spec);
     }
     let right_rows = stash(build(right, ctx, outer)?)?;
+    // A pipeline probing a table in memory: a batch at a time, in parallel.
+    if let (
+        JoinAlgo::Hash {
+            left_keys,
+            right_keys,
+        },
+        crate::spill::Stored::Memory(_),
+    ) = (algo, &right_rows)
+        && kind != JoinType::Full
+        && crate::vector::probes(left)
+    {
+        let crate::spill::Stored::Memory(rows) = right_rows else {
+            unreachable!("matched above")
+        };
+        return crate::vector::hash_join(
+            left,
+            rows,
+            left_keys,
+            right_keys,
+            kind,
+            on,
+            right.width(),
+            ctx,
+            outer,
+        );
+    }
     join_with(build(left, ctx, outer)?, right_rows, spec, 0)
 }
 
@@ -1004,8 +1034,8 @@ fn hash_table(
     keys: &[Expr],
     ctx: &Ctx,
     outer: Option<&Env>,
-) -> Result<HashMap<Vec<Value>, Vec<usize>>> {
-    let mut table: HashMap<Vec<Value>, Vec<usize>> = HashMap::new();
+) -> Result<crate::fasthash::FastMap<Vec<Value>, Vec<usize>>> {
+    let mut table: crate::fasthash::FastMap<Vec<Value>, Vec<usize>> = Default::default();
     for (i, r) in rows.iter().enumerate() {
         if let Some(key) = probe_key(r, keys, ctx, outer)? {
             table.entry(key).or_default().push(i);
@@ -1316,7 +1346,7 @@ pub(crate) fn aggregate<'a>(
             })
             .collect()
     };
-    let mut index: HashMap<Vec<Value>, usize> = HashMap::new();
+    let mut index: crate::fasthash::FastMap<Vec<Value>, usize> = Default::default();
     let mut groups: Vec<(Vec<Value>, Vec<AggState>)> = Vec::new();
     for r in rows {
         let row = r?;

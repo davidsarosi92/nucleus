@@ -102,21 +102,17 @@ impl Decimal {
         {
             return Err(bad());
         }
-        let digits = format!("{int}{frac}");
-        let digits = digits.trim_start_matches('0');
+        // The digits, leading zeros dropped, as one integer (no string made).
+        let digits = int.bytes().chain(frac.bytes()).skip_while(|&b| b == b'0');
+        let count = digits.clone().count();
         // value = digits × 10^(exp - frac.len())
         let shift = i64::from(exp) - frac.len() as i64;
         let scale = (-shift).max(0);
-        if digits.len() as i64 + shift.max(0) > i64::from(MAX_DIGITS)
-            || scale > i64::from(MAX_DIGITS)
-        {
+        if count as i64 + shift.max(0) > i64::from(MAX_DIGITS) || scale > i64::from(MAX_DIGITS) {
             return Err(overflow());
         }
-        let mut m: i128 = if digits.is_empty() {
-            0
-        } else {
-            digits.parse().map_err(|_| overflow())?
-        };
+        // At most 38 digits: no overflow in an i128.
+        let mut m: i128 = digits.fold(0, |m, b| m * 10 + i128::from(b - b'0'));
         if shift > 0 {
             m = m
                 .checked_mul(pow10(shift as u32).ok_or_else(overflow)?)

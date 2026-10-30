@@ -316,3 +316,52 @@ fn parallel_groups_in_key_order_past_work_mem_agree() {
         "the aggregates ran in parallel"
     );
 }
+
+#[test]
+fn parallel_joins_and_sorts_agree() {
+    // Hash joins probed by morsels of the larger side, sorts of morsels
+    // merged: the rows, their order and errors those of one thread and of
+    // the row-at-a-time executor.
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(10)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE f (id INT PRIMARY KEY, d INT, x BIGINT, s TEXT); \
+         CREATE TABLE dim (id INT PRIMARY KEY, name TEXT, k INT); \
+         INSERT INTO f SELECT i, i % 500, i::bigint * 7919 % 100003, 'v' || (i % 13) \
+         FROM generate_series(1, 60000) i; \
+         INSERT INTO dim SELECT i, 'd' || i, i % 7 FROM generate_series(0, 400) i",
+    )
+    .unwrap();
+    let queries = [
+        "SELECT f.id, dim.name FROM f JOIN dim ON f.d = dim.id WHERE f.x % 11 = 3",
+        "SELECT count(*), sum(f.x) FROM f JOIN dim ON f.d = dim.id AND dim.k <> f.d % 7",
+        "SELECT f.id, dim.name FROM f LEFT JOIN dim ON f.d = dim.id WHERE f.id % 97 = 1",
+        "SELECT count(*) FROM f WHERE EXISTS (SELECT 1 FROM dim WHERE dim.id = f.d AND dim.k = 3)",
+        "SELECT count(*) FROM f WHERE NOT EXISTS (SELECT 1 FROM dim WHERE dim.id = f.d)",
+        "SELECT f.s, dim.name FROM f JOIN dim ON f.s = dim.name || '' WHERE f.id < 100",
+        "SELECT f.id, 100 / (f.id - 30000) FROM f JOIN dim ON f.d = dim.id WHERE f.x > 50",
+        "SELECT id, x FROM f WHERE x % 3 = 0 ORDER BY x DESC, id LIMIT 50",
+        "SELECT s, x FROM f WHERE id % 5 = 0 ORDER BY s, x NULLS FIRST",
+        "SELECT id FROM f WHERE x > 10 ORDER BY 100 / (id - 45000)",
+    ];
+    let mut row = session(&db, 0);
+    let mut one = session(&db, 1024);
+    one.execute("SET parallel_workers = 1").unwrap();
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    let before = nucleus_sql::vector::parallel_runs();
+    for q in queries {
+        let want = outcome(&mut row, q);
+        assert_eq!(outcome(&mut one, q), want, "one thread: {q}");
+        assert_eq!(outcome(&mut many, q), want, "workers: {q}");
+    }
+    assert!(
+        nucleus_sql::vector::parallel_runs() - before >= 8,
+        "the joins and sorts ran in parallel"
+    );
+}

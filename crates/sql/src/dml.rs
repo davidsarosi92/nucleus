@@ -392,10 +392,11 @@ pub(crate) fn insert_row(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<(
         None
     };
     let key = row_key_of(t, row, rowid);
-    if rowid.is_none() && w.storage.exists(&*txn, t, &key, false)? {
+    if rowid.is_some() {
+        w.storage.write(txn, t, &key, row, None)?;
+    } else if !w.storage.insert(txn, t, &key, row)? {
         return Err(duplicate(&format!("{}_pkey", t.name)));
     }
-    w.storage.write(txn, t, &key, row, None)?;
     let pk = pk_suffix(t, &key);
     for (i, (k, unique)) in w.keys.entries(&*txn, t, row, &pk)?.into_iter().enumerate() {
         if unique && txn.get(&k)?.is_some() {
@@ -935,6 +936,12 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
         exec::matching_stash(table, &Access::Full, None, &ctx)?
     };
     let keys = IndexKeys::new(&*txn, reg, table)?;
+    // The new index's keys: none yet, and no other transaction sees the
+    // index before this one commits.
+    let prefix = table.index_prefix(table.indexes[i].id);
+    if let Some(end) = nucleus_kv::prefix_end(&prefix) {
+        txn.fresh(&prefix, &end);
+    }
     for r in rows.into_iter() {
         let (key, row) = exec::unkeyed(r?)?;
         let pk = pk_suffix(table, &key);

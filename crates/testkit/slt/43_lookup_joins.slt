@@ -25,12 +25,14 @@ ANALYZE
 query T
 EXPLAIN SELECT ls.k, lb.v FROM ls JOIN lb ON lb.id = ls.ref
 ----
-Project: #0, #5
-  Project: #3, #4, #5, #0, #1, #2
-    Project: #3, #4, #5, #0, #1, #2
-      Index Nested Loop on (#3 = #1)
-        Seq Scan on ls (rows=5)
-        Index Scan using primary key on lb (id = outer1.#1) filter: (#0 = outer1.#1) (rows=1)
+Project: #0, #1
+  Project: #1, #0
+    Project: #3, #0
+      Index Nested Loop on (#2 = #1)
+        Project: #0, #1
+          Seq Scan on ls (rows=5)
+        Project: #0, #2
+          Index Scan using primary key on lb (id = outer1.#1) filter: (#0 = outer1.#1) (rows=1)
 
 query II
 SELECT ls.k, lb.v FROM ls JOIN lb ON lb.id = ls.ref ORDER BY 1

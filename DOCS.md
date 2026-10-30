@@ -1151,6 +1151,17 @@ rows of a full join in a bitmap).  Still held whole: a recursive `UNION`'s
 rows seen, and the validated reads of a transaction (§5.2).
 Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context) — unless unnested into a join (§8.6).
+A **hash join whose left side is a pipeline** (a scan, its filters and
+projections) and whose right side fits in work_mem runs vectorized: the
+right rows hashed once (`vector::JoinTable`; one integer key as an
+integer, in a table of the executor's own hash, `fasthash`), the left
+side's keys evaluated a batch at a time and probed — on worker threads,
+morsels of the left scan in key order, when it is large — with the rows,
+their order and errors of the row-at-a-time join; a condition that is just
+the integer keys' equality is not checked again per row.  A **sort** of a
+pipeline sorts its morsels on worker threads (keys a batch at a time) and
+merges them (`spill::merge_sorted`; ties to the earlier morsel, so the
+order is a stable sort's).
 An **index nested loop** (`JoinAlgo::Lookup`, `EXPLAIN`: `Index Nested
 Loop`) runs its right side — a table's scan by an index on the join keys,
 the left row's values as `Outer` references — once per left row (inner,
@@ -1188,8 +1199,12 @@ allow and while the rows it meets there are no more (a subquery filtering
 one table filters it before the joins that multiply it, after those that
 narrow it; without statistics, as deep as it goes).
 
-**Index nested loops** (`lookups`, last): a hash join whose right side is
-an analyzed table's scan becomes an index nested loop when an index (the
+**Narrow rows** (`narrow`, last): the columns nothing above a join reads
+are cut from its inputs by projections, every reference above moved with
+them, so a join copies only what is used.
+
+**Index nested loops** (`lookups`): a hash join whose right side is an
+analyzed row table's scan becomes an index nested loop when an index (the
 primary key or a secondary one) leads with the join keys and the lookups
 cost less than hashing the table — each lookup counted as 12 rows of a
 scan, each row a secondary index finds 20 more (its fetch), against the
@@ -2437,6 +2452,16 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-10-30 — §M14.20 V10, vectorized joins and more:** hash joins
+  probed a batch at a time and in parallel; narrow rows through joins;
+  the executor's tables on a fast hash; parallel sorts; decimal sums
+  without dispatch; `CREATE INDEX` writes declared fresh (`KvTxn::fresh`:
+  no conflict checks or old-version collection for a new index's keys);
+  `COPY` and `INSERT` tell a duplicate and a conflict from one look at the
+  key (`KvTxn::put_new`), encode rows without a buffer per value and parse
+  decimals without building strings.  SF 1 on rows, all 22 queries 35 →
+  26 s (Q9 6.7 → 2.9 s, Q13 2.5 → 1.3 s).
 
 - **2026-10-30 — §M14.20 V10, index nested loops:** `JoinAlgo::Lookup`
   chosen by cost; semi and anti joins placed among the ordered joins by

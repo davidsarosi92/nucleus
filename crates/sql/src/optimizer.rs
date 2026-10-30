@@ -35,7 +35,8 @@ use crate::stats::Stats;
 pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let stats = Stats::new(txn);
     let plan = push(crate::unnest::unnest(plan), &stats);
-    lookups(sink(reorder(plan, &stats), &stats), &stats)
+    let plan = lookups(sink(reorder(plan, &stats), &stats), &stats);
+    crate::narrow::narrow(plan)
 }
 
 /// A condition's conjuncts, the conjuncts every branch of an `OR` among
@@ -873,6 +874,11 @@ fn lookup_side(
         return None;
     };
     st.of(&table)?;
+    // A column table's row by key decodes its segment's columns: not a
+    // lookup's few rows' worth (yet).
+    if table.storage != crate::storage::ROW {
+        return None;
+    }
     let column = |e: &Expr| match (e, &cols) {
         (Expr::Column(c), None) => Some(*c),
         (Expr::Column(c), Some(x)) => match x.get(*c) {

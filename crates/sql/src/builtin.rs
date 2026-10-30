@@ -810,6 +810,12 @@ impl GroupAccumulator for Grouped {
                     }
                 }
             }
+            // One argument of any values: each passed as it is.
+            (_, Some(Vector::Values(vals))) if args.len() == 1 => {
+                for (r, g) in pairs {
+                    self.accs[g].add(std::slice::from_ref(&vals[r]))?;
+                }
+            }
             (_, Some(_)) => {
                 for (r, g) in pairs {
                     let vals: Vec<Value> = args.iter().map(|a| a.value(r)).collect();
@@ -906,6 +912,19 @@ impl Accumulator for Acc {
             }
             (AggFunc::Sum | AggFunc::Avg, Value::Real(f)) => {
                 self.add_float(f64::from(*f), true);
+                return Ok(());
+            }
+            // Decimals added as they are (no dispatch, no copy of the sum).
+            (AggFunc::Sum | AggFunc::Avg, Value::Numeric(d))
+                if matches!(self.value, Value::Numeric(_) | Value::Null) =>
+            {
+                self.value = match self.value {
+                    Value::Numeric(sum) => Value::Numeric(sum.checked_add(*d)?),
+                    _ => Value::Numeric(*d),
+                };
+                if self.func == AggFunc::Avg {
+                    self.count += 1;
+                }
                 return Ok(());
             }
             _ => {}

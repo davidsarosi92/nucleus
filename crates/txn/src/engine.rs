@@ -267,6 +267,7 @@ impl Engine {
             isolation: opts.isolation,
             done: false,
             reads: Mutex::new(ReadSet::default()),
+            fresh: Vec::new(),
         })
     }
 
@@ -447,6 +448,54 @@ impl Inner {
                 Ok(Some(value.map(<[u8]>::to_vec)))
             }
         }
+    }
+
+    /// One look at `user`'s versions: the newest one's timestamp (durable or
+    /// not), and the value a reader at `ts` sees ([`Inner::read_at`]'s).
+    #[allow(clippy::type_complexity)]
+    fn newest_and_at(
+        &self,
+        user: &[u8],
+        ts: u64,
+    ) -> Result<(Option<u64>, Option<Option<Vec<u8>>>)> {
+        let unresolved = self.unresolved_ids();
+        let tree = self.store.read()?;
+        let from = first_version(user);
+        let to = after_versions(user);
+        let mut newest = None;
+        let mut best: Option<(u64, Vec<u8>)> = None;
+        for entry in tree.range(Bound::Included(&from), Bound::Excluded(&to))? {
+            let (k, v) = entry?;
+            let (_, vts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
+            newest.get_or_insert(vts);
+            if vts <= ts {
+                best = Some((vts, v));
+                break;
+            }
+        }
+        for (id, cts) in unresolved {
+            let newer = newest.is_none_or(|n| cts > n);
+            let seen = cts <= ts && best.as_ref().is_none_or(|(b, _)| cts > *b);
+            if (newer || seen)
+                && let Some(v) = tree.get(&side_key(id, user))?
+            {
+                if newer {
+                    newest = Some(cts);
+                }
+                if seen {
+                    best = Some((cts, v));
+                }
+            }
+        }
+        let value = match best {
+            None => None,
+            Some((_, v)) => Some(
+                decode_value(&v)
+                    .ok_or(Error::Corrupt("bad version value"))?
+                    .map(<[u8]>::to_vec),
+            ),
+        };
+        Ok((newest, value))
     }
 
     /// The timestamp of the newest version of `user`, durable or not (a
@@ -688,6 +737,8 @@ pub struct Transaction {
     /// ([`Transaction::get_validated`], [`Transaction::scan_validated`]) of
     /// any transaction.
     reads: Mutex<ReadSet>,
+    /// Key ranges declared fresh ([`Transaction::fresh`]).
+    fresh: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl std::fmt::Debug for Transaction {
@@ -779,9 +830,76 @@ impl Transaction {
         self.write(key, Some(value))
     }
 
+    /// Sets `key` to `value` unless this transaction sees a value there
+    /// (`false`, nothing written) — the value it would see and the check for
+    /// a newer version (the write's conflict) from one look at the key's
+    /// versions.
+    pub fn put_new(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        if self.read_only {
+            return Err(Error::ReadOnly);
+        }
+        check_key(key)?;
+        // Written by this transaction: its own value decides.
+        if let Some(w) = self.writes.get(key) {
+            if w.is_some() {
+                return Ok(false);
+            }
+            self.record(key, Some(value))?;
+            return Ok(true);
+        }
+        if let Some(id) = self.spilled
+            && let Some(v) = self.engine.store.get(&side_key(id, key))?
+        {
+            if decode_value(&v)
+                .ok_or(Error::Corrupt("bad side value"))?
+                .is_some()
+            {
+                return Ok(false);
+            }
+            self.record(key, Some(value))?;
+            return Ok(true);
+        }
+        // A fresh key has no versions to look at.
+        if self.is_fresh(key) {
+            self.record(key, Some(value))?;
+            return Ok(true);
+        }
+        if self.isolation == Isolation::Serializable {
+            lock(&self.reads).keys.insert(key.to_vec());
+        }
+        let (newest, seen) = self.engine.newest_and_at(key, self.start)?;
+        if seen.flatten().is_some() {
+            return Ok(false);
+        }
+        if newest.is_some_and(|ts| ts > self.start)
+            || (self.engine.side_users.load(Ordering::Acquire) > 0
+                && self.engine.conflicts(key, self.start, self.spilled)?)
+        {
+            return Err(Error::Conflict { key: key.to_vec() });
+        }
+        self.record(key, Some(value))?;
+        Ok(true)
+    }
+
     /// Deletes `key`.
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
         self.write(key, None)
+    }
+
+    /// Declares the keys in `[start, end)` fresh: none has a version and no
+    /// other transaction writes one before this one ends (a new index's
+    /// keys).  Their writes skip what guards against other transactions —
+    /// the check for a newer version as they are written, spill and
+    /// commit, and the old versions' collection — which for a fresh range
+    /// would find nothing.  The caller answers for the claim.
+    pub fn fresh(&mut self, start: &[u8], end: &[u8]) {
+        self.fresh.push((start.to_vec(), end.to_vec()));
+    }
+
+    fn is_fresh(&self, key: &[u8]) -> bool {
+        self.fresh
+            .iter()
+            .any(|(s, e)| key >= s.as_slice() && key < e.as_slice())
     }
 
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
@@ -793,9 +911,18 @@ impl Transaction {
         // anyway (first committer wins), and the client learns at the
         // statement, as PostgreSQL reports it.  The commit check stays the
         // guarantee — a conflicting commit can still land after this.
-        if !self.writes.contains_key(key) && self.engine.conflicts(key, self.start, self.spilled)? {
+        if !self.writes.contains_key(key)
+            && !self.is_fresh(key)
+            && self.engine.conflicts(key, self.start, self.spilled)?
+        {
             return Err(Error::Conflict { key: key.to_vec() });
         }
+        self.record(key, value)
+    }
+
+    /// Holds a write (checked already), spilling when past the memory
+    /// allowed.
+    fn record(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
         let size = key.len() + value.map_or(0, <[u8]>::len) + WRITE_OVERHEAD;
         match self.writes.insert(key.to_vec(), value.map(<[u8]>::to_vec)) {
             Some(old) => {
@@ -822,7 +949,7 @@ impl Transaction {
             None => engine.next_id.fetch_add(1, Ordering::AcqRel),
         };
         for key in self.writes.keys() {
-            if engine.conflicts(key, self.start, Some(id))? {
+            if !self.is_fresh(key) && engine.conflicts(key, self.start, Some(id))? {
                 return Err(Error::Conflict { key: key.clone() });
             }
         }
@@ -926,7 +1053,7 @@ impl Transaction {
         let (ts, lsn) = {
             let mut last = lock(&engine.commit);
             for key in self.writes.keys() {
-                if engine.conflicts(key, self.start, spilled)? {
+                if !self.is_fresh(key) && engine.conflicts(key, self.start, spilled)? {
                     return Err(Error::Conflict { key: key.clone() });
                 }
             }
@@ -939,7 +1066,9 @@ impl Transaction {
             let wm = engine.current_watermark();
             let mut ops = Vec::with_capacity(self.writes.len() + 1);
             for (key, value) in &self.writes {
-                engine.garbage(key, wm, &mut ops)?;
+                if !self.is_fresh(key) {
+                    engine.garbage(key, wm, &mut ops)?;
+                }
                 ops.push((encode_key(key, ts), Some(encode_value(value.as_deref()))));
                 if let Some(id) = spilled {
                     // Written again after it spilled: this write is the one.

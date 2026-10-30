@@ -183,8 +183,9 @@ EXPLAIN SELECT count(*) FROM so WHERE EXISTS (SELECT * FROM sl WHERE sl.ok = so.
 ----
 Project: #0
   Aggregate: count(*)
-    Semi Hash Join (#0 = #0) on (#3 = #0)
-      Seq Scan on so
+    Semi Hash Join (#0 = #0) on (#1 = #0)
+      Project: #0
+        Seq Scan on so
       Project: #0
         Seq Scan on sl filter: (#3 < #4)
 
@@ -205,9 +206,12 @@ EXPLAIN SELECT count(*) FROM so a, so b WHERE a.ck = b.ck AND b.ok IN (SELECT ok
 ----
 Project: #0
   Aggregate: count(*)
-    Hash Join (#1 = #1) on (#1 = #4)
-      Seq Scan on so
-      Semi Hash Join (#0 = #0) on (#0 = #3)
+    Hash Join (#0 = #0) on (#0 = #1)
+      Project: #1
         Seq Scan on so
-        Project: #0
-          Seq Scan on sl filter: (#2 > 4)
+      Project: #1
+        Semi Hash Join (#0 = #0) on (#0 = #2)
+          Project: #0, #1
+            Seq Scan on so
+          Project: #0
+            Seq Scan on sl filter: (#2 > 4)
