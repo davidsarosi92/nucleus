@@ -504,12 +504,16 @@ pub const MAINTENANCE_EVERY: std::time::Duration = std::time::Duration::from_sec
 /// How often [`maintain`] looks for committed intents to vacuum.
 pub const VACUUM_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// A background vacuum's pause after each batch, in multiples of the time
+/// the batch took.
+const VACUUM_PAUSE_FACTOR: u32 = 4;
+
 /// Starts the server's maintenance thread: every [`MAINTENANCE_EVERY`] it
 /// applies the tables' storage policies (`ALTER TABLE … SET STORAGE
 /// POLICY`), converting partitions that have aged past them online; every
 /// [`VACUUM_CHECK_EVERY`], when large transactions have committed intents
-/// still read through their status, it vacuums (`Kv::vacuum`), making them
-/// versions.
+/// still read through their status, it vacuums (`Kv::vacuum_background`:
+/// small batches, each followed by a pause), making them versions.
 pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let policies_every = (MAINTENANCE_EVERY.as_secs() / VACUUM_CHECK_EVERY.as_secs()).max(1);
@@ -517,10 +521,18 @@ pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
         loop {
             std::thread::sleep(VACUUM_CHECK_EVERY);
             tick += 1;
-            if kv.vacuum_wanted()
-                && let Err(e) = kv.vacuum()
-            {
-                eprintln!("nucleus-server: vacuum: {e}");
+            if kv.vacuum_wanted() {
+                // Paced: after each batch, a pause four times as long — a
+                // fifth of a core's time, the statements running first.
+                let mut since = std::time::Instant::now();
+                let mut pause = || {
+                    let worked = since.elapsed().min(std::time::Duration::from_millis(50));
+                    std::thread::sleep(worked * VACUUM_PAUSE_FACTOR);
+                    since = std::time::Instant::now();
+                };
+                if let Err(e) = kv.vacuum_background(&mut pause) {
+                    eprintln!("nucleus-server: vacuum: {e}");
+                }
             }
             if tick.is_multiple_of(policies_every) {
                 let now = nucleus_sql::datetime::from_system(kv.wall_clock());

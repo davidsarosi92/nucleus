@@ -25,6 +25,7 @@ mod error;
 pub mod mvcc;
 
 pub use engine::{
-    Chunk, Engine, EngineOptions, Isolation, Scan, Timestamp, Transaction, TxnOptions,
+    BACKGROUND_CHUNK, Chunk, Engine, EngineOptions, Isolation, Scan, Timestamp, Transaction,
+    TxnOptions,
 };
 pub use error::{Error, Result};

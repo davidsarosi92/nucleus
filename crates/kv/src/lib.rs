@@ -208,6 +208,13 @@ pub trait Kv: Send + Sync {
         Ok(0)
     }
 
+    /// [`vacuum`](Kv::vacuum) as a background task: in small batches,
+    /// `pause` called between them.  The default: `vacuum`.
+    fn vacuum_background(&self, pause: &mut dyn FnMut()) -> Result<u64> {
+        let _ = pause;
+        self.vacuum()
+    }
+
     /// Whether [`vacuum`](Kv::vacuum) has intents to make versions (reads
     /// resolve them meanwhile, for a little more).  The default: no.
     fn vacuum_wanted(&self) -> bool {
@@ -592,6 +599,12 @@ impl Kv for Database {
 
     fn vacuum(&self) -> Result<u64> {
         Database::vacuum(self)
+    }
+
+    fn vacuum_background(&self, pause: &mut dyn FnMut()) -> Result<u64> {
+        Ok(self
+            .engine
+            .vacuum_paced(nucleus_txn::BACKGROUND_CHUNK, pause)?)
     }
 
     fn vacuum_wanted(&self) -> bool {

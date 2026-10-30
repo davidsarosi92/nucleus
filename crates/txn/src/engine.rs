@@ -123,6 +123,10 @@ struct Inner {
 /// Entries vacuum changes per batch (each under the commit lock).
 const VACUUM_CHUNK: usize = 16_384;
 
+/// … and in the background ([`Engine::vacuum_paced`]): small batches, so
+/// the tree and the commit lock are held only briefly.
+pub const BACKGROUND_CHUNK: usize = 2048;
+
 /// Side-area entries moved or deleted per batch.
 const SIDE_CHUNK: usize = 4096;
 /// Bytes spilled per batch (each applied under the tree's write lock).
@@ -294,6 +298,13 @@ impl Engine {
     /// sweeps the rest.  After a whole sweep, the transactions committed
     /// before it began have no intent left: their status records go.
     pub fn vacuum(&self) -> Result<u64> {
+        self.vacuum_paced(VACUUM_CHUNK, &mut || {})
+    }
+
+    /// [`vacuum`](Self::vacuum) in batches of about `chunk` entries,
+    /// `pause` called between them (a background vacuum's: letting the
+    /// statements running go first).
+    pub fn vacuum_paced(&self, chunk: usize, pause: &mut dyn FnMut()) -> Result<u64> {
         let committed = self.inner.unresolved_ids();
         let mut removed = 0;
         let mut from = Vec::new();
@@ -317,7 +328,7 @@ impl Engine {
                     let (user, ts) =
                         decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
                     if last_user.as_deref() != Some(&user[..]) {
-                        if ops.len() >= VACUUM_CHUNK {
+                        if ops.len() >= chunk.max(1) {
                             next = Some(first_version(&user));
                             break;
                         }
@@ -378,6 +389,7 @@ impl Engine {
                 Some(n) => from = n,
                 None => return Ok(removed),
             }
+            pause();
         }
     }
 
