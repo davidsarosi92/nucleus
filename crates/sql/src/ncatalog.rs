@@ -17,6 +17,9 @@
 //! | `nc_catalog.constraints` | primary key, unique, check, foreign key |
 //! | `nc_catalog.foreign_keys` | foreign key |
 //! | `nc_catalog.statistics` | analyzed column (`ANALYZE`) |
+//! | `nc_catalog.statistics_objects` | `CREATE STATISTICS` |
+//! | `nc_catalog.column_groups` | set of columns counted together (`ANALYZE`) |
+//! | `nc_catalog.dependencies` | functional dependency between two columns (`ANALYZE`) |
 //! | `nc_catalog.operators` | operator outside the grammar's own: a type's distance, a module's, or taught (`ALTER TYPE … ADD OPERATOR`) |
 //! | `nc_catalog.casts` | cast taught (`ALTER TYPE … ADD CAST`) |
 //! | `nc_catalog.orderings` | ordering taught to a type (`ALTER TYPE … ADD ORDERING`) |
@@ -306,6 +309,34 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("nulls", I),
             ("distinct_values", I),
             ("histogram", TA),
+        ],
+    ),
+    (
+        "statistics_objects",
+        &[
+            ("table_id", I),
+            ("table_name", T),
+            ("name", T),
+            ("columns", TA),
+        ],
+    ),
+    (
+        "column_groups",
+        &[
+            ("table_id", I),
+            ("table_name", T),
+            ("columns", TA),
+            ("distinct_values", I),
+        ],
+    ),
+    (
+        "dependencies",
+        &[
+            ("table_id", I),
+            ("table_name", T),
+            ("from_column", T),
+            ("to_column", T),
+            ("degree", F),
         ],
     ),
     (
@@ -827,6 +858,48 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         Value::Int(cs.nulls as i64),
                         Value::Int(cs.distinct as i64),
                         Value::Array(cs.bounds.iter().map(|b| text(b.render())).collect()),
+                    ]);
+                }
+            }
+        }
+        "statistics_objects" => {
+            for t in &tables {
+                for st in &t.statistics {
+                    out.push(vec![
+                        id(t),
+                        text(t.name.clone()),
+                        text(st.name.clone()),
+                        names(t, &st.columns),
+                    ]);
+                }
+            }
+        }
+        "column_groups" => {
+            let stats = Stats::new(txn);
+            for t in &tables {
+                let Some(s) = stats.of(t) else { continue };
+                for g in &s.groups {
+                    out.push(vec![
+                        id(t),
+                        text(t.name.clone()),
+                        names(t, &g.columns),
+                        Value::Int(g.distinct as i64),
+                    ]);
+                }
+            }
+        }
+        "dependencies" => {
+            let stats = Stats::new(txn);
+            for t in &tables {
+                let Some(s) = stats.of(t) else { continue };
+                let name = |c: usize| t.columns.get(c).map_or(Value::Null, |col| text(col.name.clone()));
+                for d in &s.dependencies {
+                    out.push(vec![
+                        id(t),
+                        text(t.name.clone()),
+                        name(d.from),
+                        name(d.to),
+                        Value::Float(d.degree),
                     ]);
                 }
             }

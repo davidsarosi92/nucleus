@@ -638,7 +638,11 @@ pub(crate) fn estimate(plan: &Plan, st: &Stats) -> f64 {
         Plan::Filter { input, .. } => estimate(input, st) * 0.33,
         Plan::Secure { input, .. } => estimate(input, st) * 0.5,
         Plan::Project { input, .. } | Plan::Sort { input, .. } => estimate(input, st),
-        Plan::Distinct { input } => estimate(input, st) * 0.5,
+        Plan::Distinct { input } => {
+            let rows = estimate(input, st);
+            let all: Vec<Expr> = (0..input.width()).map(Expr::Column).collect();
+            groups_of(input, &all, st).map_or(rows * 0.5, |g| g.min(rows).max(1.0))
+        }
         Plan::Limit { input, limit, .. } => match limit {
             Some(Expr::Literal(crate::Value::Int(n))) => estimate(input, st).min(*n as f64),
             _ => estimate(input, st),
@@ -647,7 +651,8 @@ pub(crate) fn estimate(plan: &Plan, st: &Stats) -> f64 {
             if group.is_empty() {
                 1.0
             } else {
-                (estimate(input, st) * 0.1).max(1.0)
+                let rows = estimate(input, st);
+                groups_of(input, group, st).map_or(rows * 0.1, |g| g.min(rows)).max(1.0)
             }
         }
         Plan::Join {
@@ -736,7 +741,9 @@ fn join_selectivity<'p>(
 /// a key of its table (the primary key, a unique index): each row of the
 /// other meets at most one of its rows, so together they select
 /// 1 / its rows — not the product of their selectivities, which takes
-/// them for independent (and a join on a two-column key for none).
+/// them for independent (and a join on a two-column key for none).  Else,
+/// where a side's columns were counted together (`Stats::group_distinct`),
+/// they select 1 / the combinations of the side with more.
 fn keyed_selectivity<'p>(
     conds: &[Expr],
     mut sel: Vec<f64>,
@@ -758,10 +765,11 @@ fn keyed_selectivity<'p>(
             groups.entry((a.min(b), a.max(b))).or_default().push(k);
         }
     }
-    for ((a, b), ks) in groups {
+    'groups: for ((a, b), ks) in groups {
         if ks.len() < 2 {
             continue;
         }
+        let mut sides = Vec::new();
         for side in [a, b] {
             let mut table = None;
             let mut cols = Vec::new();
@@ -779,7 +787,10 @@ fn keyed_selectivity<'p>(
                     }
                 }
             }
-            let Some(t) = table else { continue };
+            let Some(t) = table else {
+                sides.push(None);
+                continue;
+            };
             let covers = |key: &[usize]| !key.is_empty() && key.iter().all(|c| cols.contains(c));
             if covers(&t.primary_key) || t.indexes.iter().any(|i| i.unique && covers(&i.columns)) {
                 let product: f64 = ks.iter().map(|&k| sel[k]).product();
@@ -790,11 +801,38 @@ fn keyed_selectivity<'p>(
                         sel[k] = 1.0;
                     }
                 }
-                break;
+                continue 'groups;
+            }
+            sides.push(Some((t, cols)));
+        }
+        let combos: Vec<(f64, bool)> = sides
+            .iter()
+            .map(|s| s.as_ref().map_or((1.0, false), |(t, cols)| st.group_distinct(t, cols)))
+            .collect();
+        if combos.iter().any(|c| c.1) {
+            sel[ks[0]] = 1.0 / combos[0].0.max(combos[1].0).max(1.0);
+            for &k in &ks[1..] {
+                sel[k] = 1.0;
             }
         }
     }
     sel
+}
+
+/// The groups `exprs` (over `input`'s columns) make, if all are columns of
+/// analyzed tables: their combinations per table, multiplied.
+fn groups_of(input: &Plan, exprs: &[Expr], st: &Stats) -> Option<f64> {
+    let mut per: Vec<(&Table, Vec<usize>)> = Vec::new();
+    for e in exprs {
+        let Expr::Column(c) = e else { return None };
+        let (t, col) = origin(input, *c)?;
+        st.of(t)?;
+        match per.iter_mut().find(|(u, _)| u.id == t.id) {
+            Some((_, cols)) => cols.push(col),
+            None => per.push((t, vec![col])),
+        }
+    }
+    Some(per.iter().map(|(t, cols)| st.group_distinct(t, cols).0).product())
 }
 
 /// Each semi and anti join moved down among the (ordered) inner joins under

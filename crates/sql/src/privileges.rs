@@ -878,6 +878,7 @@ pub fn authorize_ddl(
         }
         Statement::CreateEnum { .. } => c.require(txn, Kind::Schema, "public", CREATE, None)?,
         Statement::CreateIndex { table, .. }
+        | Statement::CreateStatistics { table, .. }
         | Statement::AlterColumnType { table, .. }
         | Statement::SetStorage { table, .. }
         | Statement::SetStoragePolicy { table, .. }
@@ -910,6 +911,11 @@ pub fn authorize_ddl(
         }
         Statement::DropIndex { name, .. } => {
             if let Some((t, _)) = crate::catalog::find_index(txn, name)? {
+                c.require_owner(txn, Kind::Table, &t.name)?;
+            }
+        }
+        Statement::DropStatistics { name, .. } => {
+            if let Some((t, _)) = crate::catalog::find_statistic(txn, name)? {
                 c.require_owner(txn, Kind::Table, &t.name)?;
             }
         }

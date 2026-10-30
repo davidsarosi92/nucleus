@@ -1134,6 +1134,34 @@ impl<'a> Parser<'a> {
         if unique {
             return Err(self.error("expected INDEX"));
         }
+        if self.eat_kw("statistics") {
+            let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
+            let name = self.ident()?;
+            // The kinds (ndistinct, dependencies, mcv): ANALYZE gathers
+            // what it gathers for every group.
+            if self.peek_op("(") {
+                for kind in self.ident_list()? {
+                    if !matches!(kind.as_str(), "ndistinct" | "dependencies" | "mcv") {
+                        return Err(self.error(&format!(
+                            "unrecognized statistics kind \"{kind}\""
+                        )));
+                    }
+                }
+            }
+            self.expect_kw("on")?;
+            let mut columns = vec![self.ident()?];
+            while self.eat_op(",") {
+                columns.push(self.ident()?);
+            }
+            self.expect_kw("from")?;
+            let table = self.relation()?;
+            return Ok(Statement::CreateStatistics {
+                name,
+                table,
+                columns,
+                if_not_exists,
+            });
+        }
         if self.peek_kw("role") || self.peek_kw("user") {
             let user = self.eat_kw("user");
             if !user {
@@ -1616,6 +1644,13 @@ impl<'a> Parser<'a> {
         if self.eat_kw("index") {
             let if_exists = self.eat_kws(&["if", "exists"]);
             return Ok(Statement::DropIndex {
+                name: self.ident()?,
+                if_exists,
+            });
+        }
+        if self.eat_kw("statistics") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            return Ok(Statement::DropStatistics {
                 name: self.ident()?,
                 if_exists,
             });

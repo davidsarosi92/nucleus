@@ -113,7 +113,9 @@ after an error in a block everything is `25P02` until `ROLLBACK`.
   `nc_catalog.columns` (table_name, name, type, nullable, default_expr,
   comment), `nc_catalog.indexes`, `nc_catalog.foreign_keys`,
   `nc_catalog.constraints`, `nc_catalog.types`, `nc_catalog.enums`,
-  `nc_catalog.roles`, `nc_catalog.grants`, `nc_catalog.statistics`.
+  `nc_catalog.roles`, `nc_catalog.grants`, `nc_catalog.statistics`
+  (and `.column_groups`, `.dependencies`: columns counted together —
+  `CREATE STATISTICS s ON a, b FROM t` adds a group, then `ANALYZE t`).
 - **Errors carry a hint:** `column "emial" does not exist (42703)` comes
   with `HINT: Perhaps you meant column "email".`; unknown tables, functions
   and wrong argument counts likewise; a type mismatch names the cast.  Read

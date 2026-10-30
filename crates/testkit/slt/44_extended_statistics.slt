@@ -1,0 +1,158 @@
+# Statistics of columns together (PLAN.md §M14.20 V12): distinct
+# combinations and functional dependencies, for keys, indexes and
+# CREATE STATISTICS.
+
+statement ok
+CREATE TABLE digits (d INT PRIMARY KEY)
+
+statement ok
+INSERT INTO digits VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+
+# zip determines city, city determines region.
+statement ok
+CREATE TABLE addr (id INT PRIMARY KEY, zip INT, city INT, region INT)
+
+statement ok
+INSERT INTO addr SELECT n, n % 100, n % 100 / 10, n % 100 / 50 FROM (SELECT a.d * 100 + b.d * 10 + c.d AS n FROM digits a, digits b, digits c) s
+
+statement ok
+ANALYZE addr
+
+# As independent: 1000 / 100 / 10 = 1 row.
+query T
+EXPLAIN SELECT id FROM addr WHERE zip = 31 AND city = 3
+----
+Project: #0
+  Seq Scan on addr filter: ((#1 = 31) AND (#2 = 3)) (rows=1)
+
+statement ok
+CREATE STATISTICS addr_zip_city ON zip, city FROM addr
+
+statement error 42710
+CREATE STATISTICS addr_zip_city ON zip, city FROM addr
+
+statement ok
+CREATE STATISTICS IF NOT EXISTS addr_zip_city ON zip, city FROM addr
+
+statement ok
+CREATE STATISTICS addr_city_region (dependencies) ON city, region FROM addr
+
+statement error 42P17
+CREATE STATISTICS addr_one ON zip FROM addr
+
+statement error 42P17
+CREATE STATISTICS addr_twice ON zip, zip FROM addr
+
+statement error 42703
+CREATE STATISTICS addr_none ON zip, nope FROM addr
+
+statement error 42601
+CREATE STATISTICS addr_kind (shapes) ON zip, city FROM addr
+
+statement ok
+ANALYZE addr
+
+# Counted together: 100 combinations.
+query T
+EXPLAIN SELECT id FROM addr WHERE zip = 31 AND city = 3
+----
+Project: #0
+  Seq Scan on addr filter: ((#1 = 31) AND (#2 = 3)) (rows=10)
+
+# zip and city together, region determined by city.
+query T
+EXPLAIN SELECT id FROM addr WHERE zip = 31 AND city = 3 AND region = 0
+----
+Project: #0
+  Seq Scan on addr filter: (((#1 = 31) AND (#2 = 3)) AND (#3 = 0)) (rows=10)
+
+query I
+SELECT count(*) FROM addr WHERE zip = 31 AND city = 3 AND region = 0
+----
+10
+
+# Groups of a GROUP BY and joins on both columns: answers unchanged.
+query I
+SELECT count(*) FROM (SELECT zip, city FROM addr GROUP BY zip, city) g
+----
+100
+
+query I
+SELECT count(*) FROM addr a JOIN addr b ON a.zip = b.zip AND a.city = b.city WHERE a.id < 10
+----
+100
+
+query I
+SELECT count(*) FROM (SELECT DISTINCT city, region FROM addr) d
+----
+10
+
+statement ok
+DROP STATISTICS addr_zip_city
+
+statement error 42704
+DROP STATISTICS addr_zip_city
+
+statement ok
+DROP STATISTICS IF EXISTS addr_zip_city
+
+statement ok
+ANALYZE addr
+
+query T
+EXPLAIN SELECT id FROM addr WHERE zip = 31 AND city = 3
+----
+Project: #0
+  Seq Scan on addr filter: ((#1 = 31) AND (#2 = 3)) (rows=1)
+
+# A two-column key: its equalities find one row.
+statement ok
+CREATE TABLE pair (a INT, b INT, v INT, PRIMARY KEY (a, b))
+
+statement ok
+INSERT INTO pair SELECT x.d, y.d, x.d * 10 + y.d FROM digits x, digits y
+
+statement ok
+ANALYZE pair
+
+query I
+SELECT v FROM pair WHERE a = 3 AND b = 4
+----
+34
+
+# Statistics names are the database's; a dropped table frees its own.
+statement ok
+CREATE STATISTICS pair_ab ON a, v FROM pair
+
+statement error 42710
+CREATE STATISTICS pair_ab ON zip, city FROM addr
+
+statement ok
+DROP TABLE pair
+
+statement ok
+CREATE STATISTICS pair_ab ON zip, city FROM addr
+
+# What ANALYZE counted, in nc_catalog.
+query TT rowsort
+SELECT name, array_to_string(columns, ',') FROM nc_catalog.statistics_objects WHERE table_name = 'addr'
+----
+addr_city_region city,region
+pair_ab zip,city
+
+statement ok
+ANALYZE addr
+
+query TI rowsort
+SELECT array_to_string(columns, ','), distinct_values FROM nc_catalog.column_groups WHERE table_name = 'addr'
+----
+city,region 10
+zip,city 100
+
+query TTR rowsort
+SELECT from_column, to_column, degree FROM nc_catalog.dependencies WHERE table_name = 'addr'
+----
+city region 1.000
+city zip 0.000
+region city 0.000
+zip city 1.000

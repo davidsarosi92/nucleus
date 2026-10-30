@@ -559,6 +559,7 @@ fn def_table(k: usize) -> Table {
         partition_by: None,
         partition_of: None,
         storage_policy: None,
+        statistics: Vec::new(),
     }
 }
 
@@ -1288,6 +1289,26 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                 }
             }
         }
+        "pg_statistic_ext" => {
+            for t in &tables {
+                for (i, st) in t.statistics.iter().enumerate() {
+                    out.push(r(&[
+                        ("oid", int(rel_oid(t) + 900 + i as i64)),
+                        ("stxrelid", int(rel_oid(t))),
+                        ("stxname", text(st.name.clone())),
+                        ("stxnamespace", int(NS_PUBLIC)),
+                        ("stxowner", int(t.owner.as_deref().map_or(OWNER, role_oid))),
+                        ("stxstattarget", Value::Null),
+                        ("stxkeys", attnums(&st.columns)),
+                        (
+                            "stxkind",
+                            Value::Array(vec![text("d"), text("f")]),
+                        ),
+                        ("stxexprs", Value::Null),
+                    ]));
+                }
+            }
+        }
         "pg_constraint" => {
             for c in constraints(&tables) {
                 out.push(r(&[
@@ -1626,7 +1647,8 @@ enum PgFn {
     /// `pg_partition_ancestors(relation)`: the relation (nothing is
     /// partitioned).
     PartitionAncestors,
-    /// `pg_get_statisticsobjdef_columns(oid)` (always NULL).
+    /// `pg_get_statisticsobjdef_columns(oid)`: a `CREATE STATISTICS`'s
+    /// columns.
     StatisticsObjColumns,
     /// `pg_relation_is_publishable(oid)` (always false).
     RelationIsPublishable,
@@ -1871,7 +1893,25 @@ fn call(f: PgFn, args: &[Value], txn: &dyn KvTxn, registry: &Registry) -> Result
                 .map_or(Value::Null, Value::Text),
             _ => Value::Null,
         },
-        PgFn::StatisticsObjColumns | PgFn::GetTriggerdef | PgFn::ShobjDescription => Value::Null,
+        PgFn::StatisticsObjColumns => {
+            let Some(oid) = as_int(0) else {
+                return Ok(Value::Null);
+            };
+            catalog::tables(txn)?
+                .iter()
+                .find_map(|t| {
+                    let i = usize::try_from(oid - rel_oid(t) - 900).ok()?;
+                    let st = t.statistics.get(i)?;
+                    let names: Vec<&str> = st
+                        .columns
+                        .iter()
+                        .map(|&c| t.columns[c].name.as_str())
+                        .collect();
+                    Some(Value::Text(names.join(", ")))
+                })
+                .unwrap_or(Value::Null)
+        }
+        PgFn::GetTriggerdef | PgFn::ShobjDescription => Value::Null,
         PgFn::RelationIsPublishable => Value::Bool(false),
         PgFn::EncodingToChar => {
             if as_int(0) == Some(6) {

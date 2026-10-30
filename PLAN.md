@@ -1470,11 +1470,13 @@ wins, atomic commit (one status record), bounded memory; tested as the
 side area is — every I/O point crashed, concurrent writers, the
 simulation — and against it (the same histories, the same results).  The
 single-node form of §M21's write intents, which this makes the
-mechanism itself; V12 statistics across columns ⬜ — distinct counts of
+mechanism itself; V12 statistics across columns ✅ — distinct counts of
 column groups and functional dependencies (as PostgreSQL's `CREATE
 STATISTICS`, and gathered on their own for the columns of every key and
-index), so filters and joins on several dependent columns are estimated
-from them rather than multiplied as independent.
+index), so filters, joins and groupings on several dependent columns are
+estimated from them rather than multiplied as independent (equalities by
+the chain rule over the groups counted, joins by the combinations of the
+side with more, `GROUP BY` by its columns' combinations).
 
 **Done when:** every storage mode works per table, per column and per
 partition, with online conversion between them under crash and
@@ -2175,6 +2177,10 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-30** — §M14.20 V12: statistics across columns — column
+  groups' distinct combinations and functional dependencies (`CREATE
+  STATISTICS`, and every multi-column key and index), used by the
+  estimates of filters, joins and groupings.
 - **2026-10-30** — §M14.20 V11: write intents — large transactions'
   spilled writes as versions stamped with their id, nothing moved after
   the commit; `VACUUM`, run by the server when there are intents.

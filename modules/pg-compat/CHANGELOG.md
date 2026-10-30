@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `pg_statistic_ext` lists each `CREATE STATISTICS`;
+  `pg_get_statisticsobjdef_columns` gives its columns (psql's `\d`).
 - `COPY … FROM STDIN` (CopyInResponse, CopyData, CopyDone, CopyFail),
   from simple and extended queries; COPY data after an error is dropped.
 - Results stream: rows are sent as the executor produces them (simple

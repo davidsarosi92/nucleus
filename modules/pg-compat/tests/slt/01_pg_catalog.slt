@@ -179,3 +179,15 @@ NULL
 
 statement ok
 DROP TABLE slt_pg_commented
+
+# CREATE STATISTICS, as psql's \d reads it.
+statement ok
+CREATE STATISTICS c_pid_amount ON pid, amount FROM c
+
+query TTTBB
+SELECT stxrelid::pg_catalog.regclass, stxname, pg_catalog.pg_get_statisticsobjdef_columns(oid) AS columns, 'd' = any(stxkind) AS ndist_enabled, 'f' = any(stxkind) AS deps_enabled FROM pg_catalog.pg_statistic_ext WHERE stxrelid = 'c'::regclass ORDER BY stxname
+----
+c c_pid_amount pid, amount true true
+
+statement ok
+DROP STATISTICS c_pid_amount

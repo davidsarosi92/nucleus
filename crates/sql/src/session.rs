@@ -1943,6 +1943,66 @@ fn execute_statement(
             crate::enums::drop(txn, name, *if_exists)?;
             Output::Command("DROP TYPE".into())
         }
+        Statement::CreateStatistics {
+            name,
+            table,
+            columns,
+            if_not_exists,
+        } => {
+            if catalog::find_statistic(&*txn, name)?.is_some() {
+                if *if_not_exists {
+                    return Ok(Output::Command("CREATE STATISTICS".into()));
+                }
+                return Err(Error::duplicate_object(format!(
+                    "statistics object \"{name}\" already exists"
+                )));
+            }
+            let mut t = catalog::table(&*txn, table)?;
+            let mut cols = Vec::with_capacity(columns.len());
+            for c in columns {
+                let at = t.column(c).ok_or_else(|| {
+                    Error::undefined_column(format!("column \"{c}\" does not exist"))
+                })?;
+                if cols.contains(&at) {
+                    return Err(Error::invalid_object_definition(format!(
+                        "duplicate column name in statistics definition: \"{c}\""
+                    )));
+                }
+                cols.push(at);
+            }
+            if cols.len() < 2 {
+                return Err(Error::invalid_object_definition(
+                    "extended statistics require at least 2 columns",
+                ));
+            }
+            if cols.len() > crate::stats::GROUP_COLUMNS {
+                return Err(Error::program_limit(format!(
+                    "cannot have more than {} columns in statistics",
+                    crate::stats::GROUP_COLUMNS
+                )));
+            }
+            t.statistics.push(catalog::Statistic {
+                name: name.clone(),
+                columns: cols,
+            });
+            catalog::update_table(txn, &t)?;
+            Output::Command("CREATE STATISTICS".into())
+        }
+        Statement::DropStatistics { name, if_exists } => {
+            match catalog::find_statistic(&*txn, name)? {
+                Some((mut t, i)) => {
+                    t.statistics.remove(i);
+                    catalog::update_table(txn, &t)?;
+                }
+                None if *if_exists => {}
+                None => {
+                    return Err(Error::undefined_object(format!(
+                        "statistics object \"{name}\" does not exist"
+                    )));
+                }
+            }
+            Output::Command("DROP STATISTICS".into())
+        }
         Statement::DropIndex { name, if_exists } => {
             match catalog::find_index(&*txn, name)? {
                 Some((mut t, i)) => {
@@ -2546,6 +2606,7 @@ fn create_table(
         partition_by: None,
         partition_of: None,
         storage_policy: None,
+        statistics: Vec::new(),
     };
     if let Some((kind, names)) = partition_by {
         table.partition_by = Some(partition_spec(&table, &uniques, kind, names)?);

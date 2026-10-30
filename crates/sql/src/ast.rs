@@ -269,6 +269,25 @@ pub enum Statement {
         /// What changes.
         action: TypeAction,
     },
+    /// `CREATE STATISTICS [IF NOT EXISTS] name [(kinds)] ON a, b, … FROM t`:
+    /// statistics of those columns together ([`crate::stats`]).
+    CreateStatistics {
+        /// Name.
+        name: String,
+        /// Table.
+        table: String,
+        /// Columns.
+        columns: Vec<String>,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+    },
+    /// `DROP STATISTICS [IF EXISTS] name`.
+    DropStatistics {
+        /// Name.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
     /// `DROP INDEX`.
     DropIndex {
         /// Index name.

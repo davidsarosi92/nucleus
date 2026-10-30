@@ -65,6 +65,7 @@ codes! {
     check_violation => "23514",
     foreign_key_violation => "23503",
     invalid_foreign_key => "42830",
+    invalid_object_definition => "42P17",
     dependent_objects => "2BP01",
     cardinality => "21000",
     serialization => "40001",

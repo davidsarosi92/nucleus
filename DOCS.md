@@ -1019,7 +1019,11 @@ CONSTRAINT [IF EXISTS] n`, `INSERT … VALUES | SELECT | DEFAULT VALUES
 [RETURNING]`, `UPDATE … SET … [WHERE] [RETURNING]`, `DELETE … [WHERE]
 [RETURNING]`, queries, `BEGIN`/`START TRANSACTION` (`ISOLATION LEVEL …`,
 `READ ONLY|WRITE`), `COMMIT`/`END`, `ROLLBACK`, `SET TRANSACTION …`, `SET
-name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`, `COMMENT ON
+name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`, `CREATE
+STATISTICS [IF NOT EXISTS] name [(ndistinct, dependencies, mcv)] ON a, b
+[, …] FROM t` (2–8 columns counted together by `ANALYZE`; the kinds are
+accepted, every group gets the same; names the database's, the owner's),
+`DROP STATISTICS [IF EXISTS] name`, `COMMENT ON
 TABLE t | COLUMN t.c IS 'text' | NULL` (the owner's; `''` removes it too;
 kept in the table's record, shown in `nc_catalog.tables` and `.columns`,
 `ncsql \d` and pg-compat's `obj_description` / `col_description` /
@@ -1330,7 +1334,28 @@ column order).  A join's equalities multiply their selectivities, except
 several between the same two inputs whose columns on one side cover a key
 of its table (the primary key, a unique index): those select 1 / its rows
 (each row of the other side meets at most one), where the product would
-take a join on a two-column key for nearly empty.  Without statistics the rule-based plan is kept.
+take a join on a two-column key for nearly empty.
+
+Columns are also counted together (§M14.20 V12), per group: the columns
+of the primary key and of each index with two or more (an index's first
+8), and each `CREATE STATISTICS`.  For every set of two or more of a
+group's columns `ANALYZE` stores its distinct combinations (NULL a value;
+Duj1 on a sample), and for each two its functional dependency's degree —
+of the sampled rows whose value of one repeats, the fraction whose group
+agrees on the other (a value seen once tells nothing of a sample; in a
+whole table it determines).  Equalities of columns to values in one AND
+are then estimated together: one row if they cover a key; else by the
+chain rule, from a set counted together (1 / its combinations), each other
+column given those before it — `combinations(T) / combinations(T and it)`
+for the largest T counted with it, else the strongest dependency on one
+of them (`degree + (1 − degree) · its own`, PostgreSQL's), else its own;
+of the sets to start from, the likeliest outcome.  A join's equalities
+between two inputs whose columns on a side were counted together select
+1 / the combinations of the side with more; a `GROUP BY` of columns (and
+a `DISTINCT`) makes, per table, its columns' combinations (counted, or
+their distinct values multiplied), at most its input's rows.
+`nc_catalog.statistics_objects`, `.column_groups` and `.dependencies`
+show them.  Without statistics the rule-based plan is kept.
 
 ### 8.9 Tests
 
@@ -1406,6 +1431,9 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.constraints` | `table_id`, `table_name`, `name`, `kind`, `definition` |
 | `nc_catalog.foreign_keys` | `table_id`, `table_name`, `name`, `columns`, `referenced_table`, `referenced_columns`, `on_delete`, `on_update` |
 | `nc_catalog.statistics` | `table_id`, `table_name`, `column_name`, `rows`, `nulls`, `distinct_values`, `histogram` |
+| `nc_catalog.statistics_objects` | `table_id`, `table_name`, `name`, `columns` — each `CREATE STATISTICS` |
+| `nc_catalog.column_groups` | `table_id`, `table_name`, `columns`, `distinct_values` — each set of columns `ANALYZE` counted together |
+| `nc_catalog.dependencies` | `table_id`, `table_name`, `from_column`, `to_column`, `degree` (0–1) |
 | `nc_catalog.orderings` | `type`, `name`, `mapping`, `used_by` (the indexes in it) |
 | `nc_catalog.operators` | `symbol`, `left_type`, `right_type`, `function`, `source` (`distance`: a type's ability; `registered`: a module's; `taught`) |
 | `nc_catalog.casts` | `from_type`, `to_type`, `function`, `context` |
@@ -1431,9 +1459,10 @@ the PostgreSQL front end's (§9); `ncp` sessions and the embedded
 PostgreSQL's catalog names, so the same catalog is also shown as
 `pg_catalog` (`pg_namespace`, `pg_class`, `pg_attribute`, `pg_attrdef`,
 `pg_type`, `pg_index`, `pg_constraint`, `pg_am`, `pg_collation`,
-`pg_roles`, `pg_database`, `pg_tablespace`, `pg_tables`, `pg_indexes`, and
-empty `pg_policy`, `pg_trigger`, `pg_inherits`, `pg_statistic_ext`,
-`pg_publication*`, `pg_description`, `pg_auth_members`) and
+`pg_roles`, `pg_database`, `pg_tablespace`, `pg_tables`, `pg_indexes`,
+`pg_statistic_ext` (each `CREATE STATISTICS`, its columns by
+`pg_get_statisticsobjdef_columns`), and empty `pg_policy`, `pg_trigger`,
+`pg_inherits`, `pg_publication*`, `pg_description`, `pg_auth_members`) and
 `information_schema` (`schemata`, `tables`, `columns`,
 `table_constraints`, `key_column_usage`), with the functions their queries
 call (`format_type`, `pg_get_expr`, `pg_get_indexdef`,
@@ -2510,6 +2539,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-30 — §M14.20 V12, statistics across columns:** `ANALYZE`
+  counts the columns of every multi-column key, index and `CREATE
+  STATISTICS` together — distinct combinations and functional
+  dependencies — and equalities on several columns, joins on several
+  columns and `GROUP BY` / `DISTINCT` are estimated from them; `CREATE` /
+  `DROP STATISTICS`; `nc_catalog.statistics_objects`, `.column_groups`,
+  `.dependencies`; table record version 13, statistics version 2.
 - **2026-10-30 — §M14.20 V11, write intents:** a large transaction's
   spilled writes are versions stamped with its id (intents), resolved by
   its status; the commit is a status record and nothing moves after it —

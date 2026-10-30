@@ -82,7 +82,7 @@ const DATA: u8 = 0x01;
 /// before, `text`'s 4, and still read as text), `inet` and `cidr` (16, 17);
 /// version 7 an owner, version 8 row-level security, version 9 comments
 /// on the table and its columns; older versions still read.
-const TABLE_VERSION: u8 = 12;
+const TABLE_VERSION: u8 = 13;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -259,6 +259,17 @@ pub struct ForeignKey {
     pub on_update: FkAction,
 }
 
+/// `CREATE STATISTICS`: columns whose values `ANALYZE` counts together
+/// ([`crate::stats`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Statistic {
+    /// Name, unique among the database's statistics.
+    pub name: String,
+    /// The columns by position (two or more, at most
+    /// [`crate::stats::GROUP_COLUMNS`]).
+    pub columns: Vec<usize>,
+}
+
 /// A table definition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Table {
@@ -305,6 +316,8 @@ pub struct Table {
     /// A partitioned table's storage policy: its partitions whose range
     /// ended longer ago than `after` are stored as `storage`.
     pub storage_policy: Option<(String, crate::datetime::Interval)>,
+    /// `CREATE STATISTICS` on it.
+    pub statistics: Vec<Statistic>,
 }
 
 impl Table {
@@ -422,6 +435,13 @@ impl Table {
             }
             Some((storage, after)) => {
                 w.u8(1).str(storage).value(&Value::Interval(*after));
+            }
+        }
+        w.u32(self.statistics.len() as u32);
+        for st in &self.statistics {
+            w.str(&st.name).u32(st.columns.len() as u32);
+            for &c in &st.columns {
+                w.u32(c as u32);
             }
         }
         w.0
@@ -562,6 +582,16 @@ impl Table {
                 storage_policy = Some((storage, after));
             }
         }
+        let mut statistics = Vec::new();
+        if version >= 13 {
+            for _ in 0..r.u32()? {
+                let name = r.str()?;
+                let columns = (0..r.u32()?)
+                    .map(|_| r.u32().map(|c| c as usize))
+                    .collect::<Result<_>>()?;
+                statistics.push(Statistic { name, columns });
+            }
+        }
         Ok(Self {
             id,
             name,
@@ -582,6 +612,7 @@ impl Table {
             partition_by,
             partition_of,
             storage_policy,
+            statistics,
         })
     }
 }
@@ -828,6 +859,16 @@ pub fn drop_table(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
 pub fn find_index(txn: &dyn KvTxn, name: &str) -> Result<Option<(Table, usize)>> {
     for t in tables(txn)? {
         if let Some(i) = t.indexes.iter().position(|i| i.name == name) {
+            return Ok(Some((t, i)));
+        }
+    }
+    Ok(None)
+}
+
+/// The table holding statistics `name` (`CREATE STATISTICS`), if any.
+pub fn find_statistic(txn: &dyn KvTxn, name: &str) -> Result<Option<(Table, usize)>> {
+    for t in tables(txn)? {
+        if let Some(i) = t.statistics.iter().position(|s| s.name == name) {
             return Ok(Some((t, i)));
         }
     }
@@ -1286,6 +1327,10 @@ mod tests {
                     micros: 0,
                 },
             )),
+            statistics: vec![Statistic {
+                name: "people_dep".into(),
+                columns: vec![0, 1],
+            }],
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));
