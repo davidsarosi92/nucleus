@@ -57,6 +57,7 @@ pub mod stats;
 pub mod storage;
 pub mod tokens;
 pub mod types;
+pub mod unnest;
 pub mod uuid;
 pub mod vector;
 

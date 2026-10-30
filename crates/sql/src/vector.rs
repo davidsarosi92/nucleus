@@ -2008,7 +2008,7 @@ enum Part {
 /// Whether `e` gives the same values on any thread: no subqueries (they
 /// would run once per worker), nothing volatile (whose values depend on
 /// the order of calls).
-fn parallel_safe(e: &Expr) -> bool {
+pub(crate) fn parallel_safe(e: &Expr) -> bool {
     let mut safe = !e.has_subquery();
     e.walk(&mut |x| {
         if let Expr::Call(f, _) = x

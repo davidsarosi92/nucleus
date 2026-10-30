@@ -993,7 +993,9 @@ EXCEPT | INTERSECT [ALL]` (INTERSECT binding tighter), `VALUES`, `ORDER BY`
 [NOT] NULL|TRUE|FALSE|DISTINCT FROM`, `[NOT] BETWEEN`, `[NOT] IN (list |
 subquery)`, `[NOT] EXISTS`, `op ANY|SOME|ALL (array | subquery)`, scalar
 subqueries, `[NOT] LIKE / ILIKE`, `~ ~* !~ !~*` (regular expressions,
-linear-time), `CASE`, `CAST` / `::`, typed literals, `E'…'` strings,
+linear-time), `CASE`, `CAST` / `::`, typed literals (`INTERVAL '90' DAY`,
+`INTERVAL '5' DAY TO HOUR`: a bare number counts the last field, the
+value cut below it, as in PostgreSQL), `E'…'` strings,
 `COLLATE` (accepted, ignored: text compares bytewise), `OPERATOR(op)`,
 `$n`, `extract(field FROM x)`.  Functions: `lower upper length trim substr
 replace strpos concat coalesce nullif greatest least abs round trunc floor
@@ -1140,15 +1142,36 @@ padded for LEFT and FULL) and a nested loop reads the right side once per
 rows of a full join in a bitmap).  Still held whole: a recursive `UNION`'s
 rows seen, and the validated reads of a transaction (§5.2).
 Subqueries run per row when correlated, once per execution otherwise
-(cached in the execution context).  Expressions use three-valued logic,
+(cached in the execution context) — unless unnested into a join (§8.6).
+A **semi join** gives each left row some right row matches, once; an
+**anti join** each left row none matches (a NULL key matches nothing, so
+its row comes out of an anti join); both give only the left's columns,
+by hash, grace hash or block nested loop like the others.  Expressions use three-valued logic,
 checked integer arithmetic (`22003`), division by zero (`22012`).
 
 ### 8.6 Optimizer (`optimizer`)
 
-Predicate pushdown (through projections, into join sides, outer-join safe),
-WHERE conjuncts into join conditions, hash joins on equality conjuncts,
+Predicate pushdown (through projections, into join sides, outer-join safe;
+a condition with a subquery stays above a semi or anti join, which only
+drops rows), WHERE conjuncts into join conditions — the conjuncts every
+branch of an `OR` has taken out of it first (`(a AND b) OR (a AND c)` is
+`a AND (b OR c)`; not volatile calls or subqueries), so a join condition
+repeated in each branch joins —, hash joins on equality conjuncts,
 access paths: primary key or index with an equality prefix and a range on
 the next column; the filter always stays, so an access path only narrows.
+A condition whose correlated subquery reads this row's columns goes only
+where they all are, and moving it (a join side, a reordered join, through
+a projection) rewrites the subquery's references with it.
+
+**Unnesting** (`unnest`): a `WHERE` or scan-filter conjunct `EXISTS (…)`,
+`NOT EXISTS (…)` or `x IN (…)` becomes a semi or anti join with the
+subquery's rows — one pass over each, hashed on the correlation's
+equalities — when the subquery's rows do not depend on the row
+(uncorrelated `IN`), or when it reads one table (under projections,
+`DISTINCT`, sorts) and refers to the row only in its filter's top-level
+conjuncts, which become the join condition.  The right side keeps only
+the columns the condition reads.  `NOT IN` stays a subquery (its NULL
+semantics are not an anti join's); so do correlated scalar subqueries.
 `EXPLAIN` prints the plan (columns as `#n`); `EXPLAIN ANALYZE` runs it
 too (§8.13).
 
@@ -2377,6 +2400,17 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-10-30 — §M14.20 TPC-H (V10, second part):** `bench/tpch.py`
+  (generated TPC-H data, the 22 queries, results checked against
+  PostgreSQL's); `EXISTS` / `NOT EXISTS` / `IN` unnested into semi and
+  anti joins; common conjuncts taken out of `OR`; `INTERVAL '90' DAY`
+  literals.  Fixed: a correlated subquery in a join's `WHERE` reading
+  both sides was pushed into one (`XX000 outer column out of range`), and
+  references inside correlated subqueries now follow their rows when the
+  optimizer moves conditions; `COPY` into a `column` table lost its rows
+  (its statement's writes were never finished), and into a partitioned
+  table wrote the parent.
 
 - **2026-10-30 — §M14.20 results columnar end to end (V10, first part):**
   a vectorized query's batches go into `ncp` columnar results as columns

@@ -134,6 +134,54 @@ struct Parser<'a> {
     pos: usize,
 }
 
+/// The fields of an interval literal's qualifier.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum IntervalField {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+    Second,
+}
+
+/// `INTERVAL 's' … last`: a bare number counts `last`s, anything else is
+/// read as an interval; either cut below `last` (as PostgreSQL does).
+fn qualified_interval(s: &str, last: IntervalField) -> Result<crate::datetime::Interval> {
+    use IntervalField as F;
+    let unit = match last {
+        F::Year => "year",
+        F::Month => "month",
+        F::Day => "day",
+        F::Hour => "hour",
+        F::Minute => "minute",
+        F::Second => "second",
+    };
+    let t = s.trim();
+    let mut iv = if t.parse::<f64>().is_ok() {
+        crate::datetime::parse_interval(&format!("{t} {unit}"))?
+    } else {
+        crate::datetime::parse_interval(s)?
+    };
+    const HOUR: i64 = 3_600_000_000;
+    match last {
+        F::Year => {
+            iv.months -= iv.months % 12;
+            iv.days = 0;
+            iv.micros = 0;
+        }
+        F::Month => {
+            iv.days = 0;
+            iv.micros = 0;
+        }
+        F::Day => iv.micros = 0,
+        F::Hour => iv.micros -= iv.micros % HOUR,
+        F::Minute => iv.micros -= iv.micros % 60_000_000,
+        F::Second => {}
+    }
+    Ok(iv)
+}
+
 impl<'a> Parser<'a> {
     fn new(sql: &'a str) -> Result<Self> {
         Ok(Self {
@@ -2590,10 +2638,35 @@ impl<'a> Parser<'a> {
                     let Some(Token::Str(s)) = self.next() else {
                         return Err(self.error("expected a string"));
                     };
-                    Expr::Cast {
-                        expr: Box::new(Expr::Literal(Value::Text(s))),
+                    let is_interval = matches!(
                         ty,
-                        typmod,
+                        SqlType::Builtin {
+                            ty: DataType::Interval,
+                            ..
+                        }
+                    );
+                    if is_interval && let Some(first) = self.interval_field() {
+                        // `INTERVAL '90' DAY`, `INTERVAL '1-2' YEAR TO MONTH`.
+                        let last = if self.eat_kw("to") {
+                            self.interval_field()
+                                .ok_or_else(|| self.error("expected an interval field"))?
+                        } else {
+                            first
+                        };
+                        let iv = qualified_interval(&s, last)?;
+                        Expr::Cast {
+                            expr: Box::new(Expr::Literal(Value::Text(
+                                Value::Interval(iv).render(),
+                            ))),
+                            ty,
+                            typmod,
+                        }
+                    } else {
+                        Expr::Cast {
+                            expr: Box::new(Expr::Literal(Value::Text(s))),
+                            ty,
+                            typmod,
+                        }
                     }
                 }
                 // `uuid '…'`: a registered type's literal.
@@ -2619,6 +2692,24 @@ impl<'a> Parser<'a> {
                 return Err(self.error("expected an expression"));
             }
         })
+    }
+
+    /// An interval literal's field (`YEAR` … `SECOND`), if one comes.
+    fn interval_field(&mut self) -> Option<IntervalField> {
+        let f = match self.peek() {
+            Some(Token::Word(w)) => match w.to_ascii_lowercase().as_str() {
+                "year" => IntervalField::Year,
+                "month" => IntervalField::Month,
+                "day" => IntervalField::Day,
+                "hour" => IntervalField::Hour,
+                "minute" => IntervalField::Minute,
+                "second" => IntervalField::Second,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        self.pos += 1;
+        Some(f)
     }
 
     /// After a type's first word (just consumed): whether the rest of a

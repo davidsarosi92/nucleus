@@ -220,3 +220,45 @@ fn a_load_past_the_transaction_budget() {
     let e = s.execute("DELETE FROM p WHERE id = 3").unwrap_err();
     assert_eq!(e.code, "23503");
 }
+
+/// Into a column table (its statement's rows gathered and written at the
+/// end, as an INSERT's) and into a partitioned table (each row to its
+/// partition, of any storage).
+#[test]
+fn copy_into_column_and_partitioned_tables() {
+    let mut s = session();
+    s.execute(
+        "CREATE TABLE c (k INT PRIMARY KEY, v TEXT) WITH (storage = column); \
+         CREATE TABLE p (k INT PRIMARY KEY, v TEXT) PARTITION BY RANGE (k); \
+         CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (5000); \
+         CREATE TABLE p2 PARTITION OF p FOR VALUES FROM (5000) TO (MAXVALUE) WITH (storage = column)",
+    )
+    .unwrap();
+    let data: String = (1..=9000).map(|i| format!("{i}\tv{i}\n")).collect();
+    for t in ["c", "p"] {
+        let out = copy(&mut s, &format!("COPY {t} FROM STDIN"), &data).unwrap();
+        assert_eq!(out, Output::Command("COPY 9000".into()));
+        assert_eq!(
+            rows(&mut s, &format!("SELECT count(*), sum(k), max(v) FROM {t}")),
+            vec![vec![
+                Value::Int(9000),
+                Value::Int(9000 * 9001 / 2),
+                Value::Text("v999".into())
+            ]]
+        );
+    }
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT (SELECT count(*) FROM p1), (SELECT count(*) FROM p2)"
+        ),
+        vec![vec![Value::Int(4999), Value::Int(4001)]]
+    );
+    // A row no partition takes: the COPY fails, nothing stored.
+    let err = copy(&mut s, "COPY p FROM STDIN", "-1\tx\n").unwrap_err();
+    assert_eq!(err.code, "23514");
+    assert_eq!(
+        rows(&mut s, "SELECT count(*) FROM p WHERE k < 0"),
+        vec![vec![Value::Int(0)]]
+    );
+}

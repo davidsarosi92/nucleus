@@ -1450,7 +1450,11 @@ inserts routed and updates moving rows ✅; storage per partition ✅;
 attach / detach ✅; the age policy ✅); V10 results columnar end to end ✅ (a vectorized query's batches go
 into the columnar result as columns, in parallel too — a million numeric
 rows into numpy 262 → 92 ms from a row table, 241 → 51 ms from a column
-table); TPC-H and ClickBench against PostgreSQL, the targets recorded ⬜.
+table); TPC-H against PostgreSQL measured (`bench/tpch.py`, SF 1: every
+result agrees; 6.5–7.9× PostgreSQL's time — joins a row at a time, column
+tables' point reads; `EXISTS` / `IN` unnested into semi and anti joins on
+the way) 🟡; ClickBench (`bench/clickbench.py`), the speed-ups and the
+targets recorded ⬜.
 
 **Done when:** every storage mode works per table, per column and per
 partition, with online conversion between them under crash and
@@ -2151,6 +2155,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-30** — §M14.20 V10 (second part): TPC-H against
+  PostgreSQL; subqueries unnested into semi and anti joins; correlated
+  subquery and `COPY` fixes.
 - **2026-10-30** — §M14.20 V10 (first part): results columnar end to
   end — batches into `ncp` columnar results without a value per cell.
 - **2026-10-30** — §M14.20 V9 (second part): attach, detach and drop

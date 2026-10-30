@@ -196,6 +196,12 @@ pub enum JoinType {
     Left,
     /// Full outer join.
     Full,
+    /// The left rows some right row matches, once each (an `EXISTS` or
+    /// `IN` subquery, unnested): only the left's columns.
+    Semi,
+    /// The left rows no right row matches (`NOT EXISTS`): only the left's
+    /// columns.
+    Anti,
 }
 
 /// Join algorithms.
@@ -265,7 +271,12 @@ impl Plan {
             Plan::Scan { table, .. } => table.columns.len(),
             Plan::Values { width, .. } => *width,
             Plan::Project { exprs, .. } => exprs.len(),
-            Plan::Join { left, right, .. } => left.width() + right.width(),
+            Plan::Join {
+                left, right, kind, ..
+            } => match kind {
+                JoinType::Semi | JoinType::Anti => left.width(),
+                _ => left.width() + right.width(),
+            },
             Plan::Aggregate { group, aggs, .. } => group.len() + aggs.len(),
             Plan::Filter { input, .. }
             | Plan::Secure { input, .. }
@@ -375,6 +386,8 @@ impl Plan {
                     JoinType::Inner => "",
                     JoinType::Left => "Left ",
                     JoinType::Full => "Full ",
+                    JoinType::Semi => "Semi ",
+                    JoinType::Anti => "Anti ",
                 };
                 let a = match algo {
                     JoinAlgo::NestedLoop => "Nested Loop".to_string(),
@@ -525,6 +538,122 @@ impl Plan {
             | Plan::Sort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::Distinct { input } => vec![input],
+        }
+    }
+
+    /// The inputs of this node, to change.
+    pub fn children_mut(&mut self) -> Vec<&mut Plan> {
+        match self {
+            Plan::Scan { .. }
+            | Plan::Values { .. }
+            | Plan::WorkTable { .. }
+            | Plan::Function { .. }
+            | Plan::View { .. } => vec![],
+            Plan::Join { left, right, .. } | Plan::SetOp { left, right, .. } => vec![left, right],
+            Plan::Append { inputs, .. } => inputs.iter_mut().collect(),
+            Plan::Recursive { base, step, .. } => vec![base, step],
+            Plan::Cte { plan, .. } => vec![plan],
+            Plan::Filter { input, .. }
+            | Plan::Secure { input, .. }
+            | Plan::Project { input, .. }
+            | Plan::Aggregate { input, .. }
+            | Plan::Sort { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::Distinct { input } => vec![input],
+        }
+    }
+
+    /// [`for_each_expr`](Plan::for_each_expr), each expression to change.
+    pub fn for_each_expr_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        match self {
+            Plan::Scan { access, filter, .. } => {
+                if let Access::Key {
+                    prefix,
+                    lower,
+                    upper,
+                    ..
+                } = access
+                {
+                    prefix.iter_mut().for_each(&mut *f);
+                    for b in [lower, upper] {
+                        if let Bound::Included(e) | Bound::Excluded(e) = b {
+                            f(e);
+                        }
+                    }
+                }
+                if let Some(e) = filter {
+                    f(e);
+                }
+            }
+            Plan::Values { rows, .. } => rows.iter_mut().flatten().for_each(f),
+            Plan::Function { args, .. } => args.iter_mut().for_each(f),
+            Plan::Filter { predicate, .. } => f(predicate),
+            Plan::Secure { policy, .. } => f(policy),
+            Plan::Project { exprs, .. } => exprs.iter_mut().for_each(f),
+            Plan::Join { on, algo, .. } => {
+                if let Some(e) = on {
+                    f(e);
+                }
+                if let JoinAlgo::Hash {
+                    left_keys,
+                    right_keys,
+                } = algo
+                {
+                    left_keys.iter_mut().chain(right_keys).for_each(f);
+                }
+            }
+            Plan::Aggregate { group, aggs, .. } => {
+                group.iter_mut().for_each(&mut *f);
+                for a in aggs {
+                    a.args.iter_mut().for_each(&mut *f);
+                    a.order.iter_mut().for_each(|k| f(&mut k.expr));
+                }
+            }
+            Plan::Sort { keys, .. } => keys.iter_mut().for_each(|k| f(&mut k.expr)),
+            Plan::Limit { limit, offset, .. } => {
+                limit.iter_mut().chain(offset).for_each(f);
+            }
+            Plan::Append { guards, .. } => guards.iter_mut().flatten().for_each(f),
+            Plan::Distinct { .. }
+            | Plan::SetOp { .. }
+            | Plan::Cte { .. }
+            | Plan::Recursive { .. }
+            | Plan::WorkTable { .. }
+            | Plan::View { .. } => {}
+        }
+    }
+
+    /// Rewrites the references of this plan — `nesting` subqueries below
+    /// some level — to that level's row (`Outer` at depth `nesting`): each
+    /// becomes `f` of its column, an expression of that level's row lifted
+    /// to here.
+    pub fn remap_level(&mut self, nesting: usize, f: &dyn Fn(usize) -> Expr) {
+        self.for_each_expr_mut(&mut |e| {
+            e.walk_mut(&mut |x| match x {
+                Expr::Outer { depth, index } if *depth == nesting => {
+                    *x = f(*index).lifted(nesting);
+                }
+                Expr::Subquery(s) => s.plan.remap_level(nesting + 1, f),
+                _ => {}
+            })
+        });
+        for c in self.children_mut() {
+            c.remap_level(nesting, f);
+        }
+    }
+
+    /// Adds `by` to the depth of the references of this plan — `nesting`
+    /// subqueries below some level — to that level or above.
+    pub fn deepen(&mut self, nesting: usize, by: usize) {
+        self.for_each_expr_mut(&mut |e| {
+            e.walk_mut(&mut |x| match x {
+                Expr::Outer { depth, .. } if *depth >= nesting => *depth += by,
+                Expr::Subquery(s) => s.plan.deepen(nesting + 1, by),
+                _ => {}
+            })
+        });
+        for c in self.children_mut() {
+            c.deepen(nesting, by);
         }
     }
 

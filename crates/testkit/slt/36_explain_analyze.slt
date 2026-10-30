@@ -78,13 +78,14 @@ Execution: 3 rows
 
 # nucleus-only: a node the run never reached says so.
 query T
-EXPLAIN (ANALYZE, TIMING OFF) SELECT * FROM ea WHERE x > 100 AND id IN (SELECT a_id FROM eb)
+EXPLAIN (ANALYZE, TIMING OFF) SELECT * FROM ea WHERE x > 100 AND id = (SELECT max(a_id) FROM eb)
 ----
 Project: #0, #1 (rows=1) (actual rows=0 loops=1)
-  Seq Scan on ea filter: ((#1 > 100) AND #0 IN (subquery)) (rows=1) (actual rows=0 loops=1)
-    In:
-      Project: #1 (rows=200) (never executed)
-        Seq Scan on eb (rows=200) (never executed)
+  Seq Scan on ea filter: ((#1 > 100) AND (#0 = (subquery))) (rows=1) (actual rows=0 loops=1)
+    Subquery:
+      Project: #0 (rows=1) (never executed)
+        Aggregate: max(#1) (rows=1) (never executed)
+          Seq Scan on eb (rows=200) (never executed)
 Execution: 0 rows
 
 # nucleus-only: a CTE is computed once, whichever reference starts it.

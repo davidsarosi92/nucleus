@@ -122,3 +122,18 @@ SELECT min(ends), max(ends) FROM shifts
 
 statement ok
 DROP TABLE shifts
+
+# Interval literals with a field qualifier (SQL's `INTERVAL '90' DAY`): a
+# bare number counts the last field; the value is cut below it.
+query TTTTTTTT
+SELECT interval '90' day, interval '3' month, interval '1' year, interval '5' day to hour, interval '1 day 2 hours 3 minutes' day, interval '1 day 2 hours 3 minutes' hour, interval '1.5' hour, interval '-2' day
+----
+90 days 3 mons 1 year 05:00:00 1 day 1 day 02:00:00 01:00:00 -2 days
+
+query T
+SELECT date '1998-12-01' - interval '90' day
+----
+1998-09-02 00:00:00
+
+statement error 42601
+SELECT interval '1' day to

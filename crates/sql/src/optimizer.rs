@@ -4,6 +4,8 @@
 //! - **Predicate pushdown**: filter conjuncts move as close to the scans as
 //!   their columns allow — through projections, into join sides (respecting
 //!   outer-join semantics) and into join conditions.
+//! - **Subqueries unnested** (`unnest`): `EXISTS`, `NOT EXISTS` and `IN`
+//!   conjuncts become semi and anti joins where they can.
 //! - **Join algorithm**: a join whose condition has `left = right`
 //!   conjuncts becomes a hash join on them (the right input is the build
 //!   side).
@@ -32,15 +34,82 @@ use crate::stats::Stats;
 /// Optimizes a plan; statistics are read through `txn`.
 pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let stats = Stats::new(txn);
-    let plan = push(plan, &stats);
+    let plan = push(crate::unnest::unnest(plan), &stats);
     reorder(plan, &stats)
+}
+
+/// A condition's conjuncts, the conjuncts every branch of an `OR` among
+/// them has taken out of it: `(a AND b) OR (a AND c)` gives `a` and
+/// `b OR c` (equal under SQL's three truth values), so a join condition
+/// in each branch joins.
+fn split(e: Expr, out: &mut Vec<Expr>) {
+    let mut parts = Vec::new();
+    conjuncts(e, &mut parts);
+    for p in parts {
+        factor(p, out);
+    }
+}
+
+fn disjuncts(e: Expr, out: &mut Vec<Expr>) {
+    match e {
+        Expr::Binary(BinaryOp::Or, l, r) => {
+            disjuncts(*l, out);
+            disjuncts(*r, out);
+        }
+        e => out.push(e),
+    }
+}
+
+fn factor(e: Expr, out: &mut Vec<Expr>) {
+    let mut branches = Vec::new();
+    disjuncts(e.clone(), &mut branches);
+    if branches.len() < 2 {
+        out.push(e);
+        return;
+    }
+    let sets: Vec<Vec<Expr>> = branches
+        .into_iter()
+        .map(|b| {
+            let mut c = Vec::new();
+            conjuncts(b, &mut c);
+            c
+        })
+        .collect();
+    // (Taken out, an expression runs once instead of in each branch: not
+    // for volatile calls or subqueries.)
+    let mut common: Vec<Expr> = Vec::new();
+    for c in &sets[0] {
+        if !common.contains(c)
+            && crate::vector::parallel_safe(c)
+            && sets[1..].iter().all(|s| s.contains(c))
+        {
+            common.push(c.clone());
+        }
+    }
+    if common.is_empty() {
+        out.push(e);
+        return;
+    }
+    let rests: Vec<Option<Expr>> = sets
+        .into_iter()
+        .map(|s| conjunction(s.into_iter().filter(|c| !common.contains(c)).collect()))
+        .collect();
+    out.extend(common);
+    // A branch of only the common conjuncts: the OR holds whenever they do.
+    if rests.iter().all(Option::is_some) {
+        let mut rests = rests.into_iter().flatten();
+        let first = rests.next().expect("two or more");
+        out.push(rests.fold(first, |a, b| {
+            Expr::Binary(BinaryOp::Or, Box::new(a), Box::new(b))
+        }));
+    }
 }
 
 fn push(plan: Plan, st: &Stats) -> Plan {
     match plan {
         Plan::Filter { input, predicate } => {
             let mut preds = Vec::new();
-            conjuncts(predicate, &mut preds);
+            split(predicate, &mut preds);
             push_into(*input, preds, st)
         }
         Plan::Scan { .. } | Plan::Join { .. } | Plan::Secure { .. } | Plan::Append { .. } => {
@@ -230,7 +299,7 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
             // unless they hold subqueries (they would run more often).
             let (through, stay): (Vec<Expr>, Vec<Expr>) = preds
                 .into_iter()
-                .partition(|p| p.columns().iter().all(|&c| !exprs[c].has_subquery()));
+                .partition(|p| p.reads().iter().all(|&c| !exprs[c].has_subquery()));
             let through: Vec<Expr> = through
                 .iter()
                 .map(|p| p.map_columns(&|i| exprs[i].clone()))
@@ -254,7 +323,7 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
             let (mut lp, mut rp, mut onp, mut above) =
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             let side = |e: &Expr| -> (bool, bool) {
-                let cols = e.columns();
+                let cols = e.reads();
                 (cols.iter().all(|&c| c < lw), cols.iter().all(|&c| c >= lw))
             };
             for p in preds {
@@ -262,21 +331,24 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
                     // Both sides of a full join are preserved: nothing
                     // moves below it.
                     (_, JoinType::Full) => above.push(p),
+                    // A semi or anti join only drops rows: a subquery
+                    // runs for fewer of them after it.
+                    (_, JoinType::Semi | JoinType::Anti) if p.has_subquery() => above.push(p),
                     ((true, _), _) => lp.push(p),
                     ((_, true), JoinType::Inner) => rp.push(shift(&p, -(lw as isize))),
                     (_, JoinType::Inner) => onp.push(p),
-                    (_, JoinType::Left) => above.push(p),
+                    (_, JoinType::Left | JoinType::Semi | JoinType::Anti) => above.push(p),
                 }
             }
             if let Some(on) = on {
                 let mut parts = Vec::new();
-                conjuncts(on, &mut parts);
+                split(on, &mut parts);
                 for p in parts {
                     match (side(&p), kind) {
                         (_, JoinType::Full) => onp.push(p),
-                        // Only inner joins may move ON conjuncts on the
-                        // preserved side out of the condition.
-                        ((true, false), JoinType::Inner) => lp.push(p),
+                        // Only inner and semi joins may move ON conjuncts
+                        // on the preserved side out of the condition.
+                        ((true, false), JoinType::Inner | JoinType::Semi) => lp.push(p),
                         ((false, true), _) => rp.push(shift(&p, -(lw as isize))),
                         _ => onp.push(p),
                     }
@@ -547,6 +619,8 @@ pub(crate) fn estimate(plan: &Plan, st: &Stats) -> f64 {
                 JoinType::Inner => out,
                 JoinType::Left => out.max(l),
                 JoinType::Full => out.max(l).max(r),
+                JoinType::Semi => out.min(l).max(1.0),
+                JoinType::Anti => l,
             }
         }
         Plan::SetOp {
@@ -732,11 +806,7 @@ fn reorder_leaves(leaves: Vec<(Plan, usize)>, conds: Vec<Expr>, st: &Stats) -> O
     };
     let cond_mask: Vec<usize> = conds
         .iter()
-        .map(|c| {
-            c.columns()
-                .iter()
-                .fold(0, |m, &col| m | (1 << leaf_of(col)))
-        })
+        .map(|c| c.reads().iter().fold(0, |m, &col| m | (1 << leaf_of(col))))
         .collect();
     let cond_sel: Vec<f64> = conds
         .iter()

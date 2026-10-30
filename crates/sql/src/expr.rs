@@ -548,7 +548,93 @@ impl Expr {
         }
     }
 
-    /// Rewrites column references (and nested expressions) bottom-up.
+    /// Calls `f` on every expression inside this one, then on it (bottom
+    /// up; subquery plans not entered, an `IN` subquery's operand is).
+    pub fn walk_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        match self {
+            Expr::Unary(_, e) | Expr::IsNull(e, _) | Expr::Cast(e, _) => e.walk_mut(f),
+            Expr::Binary(_, l, r) => {
+                l.walk_mut(f);
+                r.walk_mut(f);
+            }
+            Expr::InList(e, list, _) => {
+                e.walk_mut(f);
+                list.iter_mut().for_each(|x| x.walk_mut(f));
+            }
+            Expr::Like { expr, pattern, .. } => {
+                expr.walk_mut(f);
+                pattern.walk_mut(f);
+            }
+            Expr::Case {
+                operand,
+                whens,
+                otherwise,
+            } => {
+                if let Some(o) = operand {
+                    o.walk_mut(f);
+                }
+                for (w, t) in whens {
+                    w.walk_mut(f);
+                    t.walk_mut(f);
+                }
+                if let Some(o) = otherwise {
+                    o.walk_mut(f);
+                }
+            }
+            Expr::Call(_, args) | Expr::Array(args) => args.iter_mut().for_each(|x| x.walk_mut(f)),
+            Expr::Subscript(a, b)
+            | Expr::AnyAll {
+                left: a, right: b, ..
+            } => {
+                a.walk_mut(f);
+                b.walk_mut(f);
+            }
+            Expr::Subquery(s) => {
+                if let SubKind::In(e, _) = &mut s.kind {
+                    e.walk_mut(f);
+                }
+            }
+            Expr::Literal(_) | Expr::Column(_) | Expr::Outer { .. } | Expr::Param(_) => {}
+        }
+        f(self);
+    }
+
+    /// This expression of a row, moved `by` subqueries down: its columns
+    /// become references to the row, its references deeper.
+    pub fn lifted(&self, by: usize) -> Expr {
+        let mut e = self.clone();
+        e.walk_mut(&mut |x| match x {
+            Expr::Column(i) => {
+                *x = Expr::Outer {
+                    depth: by,
+                    index: *i,
+                }
+            }
+            Expr::Outer { depth, .. } => *depth += by,
+            Expr::Subquery(s) => s.plan.deepen(1, by),
+            _ => {}
+        });
+        e
+    }
+
+    /// The columns of this row the expression reads, those its correlated
+    /// subqueries read too.
+    pub fn reads(&self) -> Vec<usize> {
+        let mut out = self.columns();
+        self.walk(&mut |e| {
+            if let Expr::Subquery(s) = e
+                && s.correlated
+            {
+                level_refs(&s.plan, 1, &mut out);
+            }
+        });
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Rewrites column references (and nested expressions) bottom-up —
+    /// correlated subqueries' references to this row too.
     pub fn map_columns(&self, f: &dyn Fn(usize) -> Expr) -> Expr {
         let m = |e: &Expr| Box::new(e.map_columns(f));
         match self {
@@ -601,11 +687,14 @@ impl Expr {
                 all: *all,
             },
             Expr::Subquery(s) => {
-                // Columns inside the subquery are its own; only the IN operand
-                // belongs to this level.
+                // Columns inside the subquery are its own; the IN operand
+                // belongs to this level, and so do its references here.
                 let mut s = s.clone();
                 if let SubKind::In(e, n) = &s.kind {
                     s.kind = SubKind::In(Box::new(e.map_columns(f)), *n);
+                }
+                if s.correlated {
+                    s.plan.remap_level(1, f);
                 }
                 Expr::Subquery(s)
             }
@@ -629,6 +718,20 @@ impl Expr {
         let mut found = false;
         self.walk(&mut |e| found |= matches!(e, Expr::Subquery(_)));
         found
+    }
+}
+
+/// The columns of the row `nesting` subqueries above `plan` that it reads.
+fn level_refs(plan: &Plan, nesting: usize, out: &mut Vec<usize>) {
+    plan.for_each_expr(&mut |e| {
+        e.walk(&mut |x| match x {
+            Expr::Outer { depth, index } if *depth == nesting => out.push(*index),
+            Expr::Subquery(s) => level_refs(&s.plan, nesting + 1, out),
+            _ => {}
+        })
+    });
+    for c in plan.children() {
+        level_refs(c, nesting, out);
     }
 }
 

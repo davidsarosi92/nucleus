@@ -86,6 +86,65 @@ batch's text once and cuts it.)
 Earlier runs (at `b03c130`, §M14.11: scans 15–30× slower; after V2:
 5–6×) are in the git history of this file.
 
+## TPC-H
+
+`bench/tpch.py` (§M14.20 V10): TPC-H's schema, its data generated from a
+fixed seed with the specification's sizes, keys and distributions
+(`bench/tpch_data.py`; not `dbgen`'s text), primary keys and indexes on
+the foreign keys' columns on both systems, the 22 queries with their
+validation parameters (`bench/tpch_queries.py`), each nucleus run's
+results compared with PostgreSQL's (numbers to cents).
+
+```sh
+python3 bench/tpch.py --nucleus target/release/nucleus --sf 1 \
+  --psql "docker exec -i pg psql -U postgres"
+```
+
+2026-10-30, SF 1 (6 million `lineitem` rows), the machine above; one run
+per query; nucleus with every table in rows, and with all but `region` and
+`nation` in columns:
+
+| TPC-H SF 1 | nucleus (row) (ms) | nucleus (column) (ms) | postgresql (ms) | nucleus (row) / PostgreSQL | nucleus (column) / PostgreSQL | results |
+|---|---:|---:|---:|---:|---:|---|
+| Q1 | 1,838.8 | 3,585.0 | 1,510.5 | 1.22× | 2.37× | same |
+| Q2 | 13,699.9 | 13,077.9 | 338.7 | 40.44× | 38.61× | same |
+| Q3 | 3,244.6 | 2,836.3 | 445.7 | 7.28× | 6.36× | same |
+| Q4 | 2,539.8 | 1,550.8 | 157.5 | 16.13× | 9.85× | same |
+| Q5 | 7,517.9 | 5,634.4 | 585.5 | 12.84× | 9.62× | same |
+| Q6 | 1,097.8 | 630.8 | 217.7 | 5.04× | 2.90× | same |
+| Q7 | 6,183.0 | 4,914.1 | 3,300.9 | 1.87× | 1.49× | same |
+| Q8 | 4,735.8 | 2,612.7 | 364.2 | 13.00× | 7.17× | same |
+| Q9 | 26,283.7 | 22,200.5 | 1,607.5 | 16.35× | 13.81× | same |
+| Q10 | 2,355.0 | 1,762.5 | 435.2 | 5.41× | 4.05× | same |
+| Q11 | 1,017.3 | 878.7 | 162.4 | 6.26× | 5.41× | same |
+| Q12 | 2,015.6 | 1,219.2 | 320.5 | 6.29× | 3.80× | same |
+| Q13 | 2,593.2 | 2,442.7 | 405.1 | 6.40× | 6.03× | same |
+| Q14 | 1,445.5 | 836.3 | 220.5 | 6.56× | 3.79× | same |
+| Q15 | 961.3 | 476.7 | 239.5 | 4.01× | 1.99× | same |
+| Q16 | 813.2 | 886.2 | 154.4 | 5.27× | 5.74× | same |
+| Q17 | 6,114.5 | — | 707.4 | 8.64× | — | same |
+| Q18 | 25,319.0 | 21,702.6 | 3,020.9 | 8.38× | 7.18× | same |
+| Q19 | 1,573.6 | 2,472.8 | 59.9 | 26.26× | 41.26× | same |
+| Q20 | 1,501.8 | — | 336.9 | 4.46× | — | same |
+| Q21 | 10,802.9 | 8,292.9 | 1,734.5 | 6.23× | 4.78× | same |
+| Q22 | 1,320.8 | 1,512.0 | 63.5 | 20.80× | 23.81× | same |
+| geometric mean (20 queries) | 3,171.6 | 2,618.2 | 403.7 | 7.86× | 6.49× |  |
+| load (COPY, indexes, ANALYZE; s) | 220.8 | 729.4 | 67.2 |  |  |  |
+
+Every result agrees with PostgreSQL's.  Where the time goes:
+
+- **Joins** run a row at a time on one thread (hash joins, no batches, no
+  morsels): the many-join queries (Q2, Q5, Q8, Q9, Q18, Q21) are 7–40×
+  PostgreSQL's.  Q2's correlated `min` subquery runs once per joined row.
+- **Q17 and Q20 on column tables** passed the 600 s limit: their
+  correlated subqueries read rows by index, and each read of a column
+  table decoded a whole segment column again — its cache of decoded
+  columns was smaller than one table's and emptied whole when full.
+- **Loads**: `COPY` stores row by row in one transaction (3.3× slower in
+  rows; 11× in columns).
+- The single-table scans and aggregates, Q1 and Q6, are 1.2× and 5.0×
+  PostgreSQL's in rows, 2.4× and 2.9× in columns.
+
 ## Targets
 
 Set from this first run (PLAN.md §M14.11 asks for targets from the first

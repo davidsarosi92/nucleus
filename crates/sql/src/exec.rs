@@ -883,9 +883,20 @@ impl<'a> JoinSpec<'a> {
         padded
     }
 
-    /// Whether unmatched left rows come out (LEFT, FULL).
-    fn keeps_left(&self) -> bool {
-        matches!(self.kind, JoinType::Left | JoinType::Full)
+    /// What an unmatched left row gives: padded (LEFT, FULL), itself (an
+    /// anti join), or nothing.
+    fn unmatched(&self, l: Row) -> Option<Row> {
+        match self.kind {
+            JoinType::Left | JoinType::Full => Some(self.left_padded(l)),
+            JoinType::Anti => Some(l),
+            JoinType::Inner | JoinType::Semi => None,
+        }
+    }
+
+    /// Whether a left row comes out once, by itself, when matched or not
+    /// (semi and anti joins).
+    fn existence(&self) -> bool {
+        matches!(self.kind, JoinType::Semi | JoinType::Anti)
     }
 
     /// The hash join keys, if any.
@@ -1019,6 +1030,12 @@ fn memory_join<'a>(left: Rows<'a>, right: Vec<Row>, spec: JoinSpec<'a>) -> Resul
             let mut combined = l.clone();
             combined.extend_from_slice(&r[i]);
             match spec.matches(&combined) {
+                Ok(true) if spec.existence() => {
+                    return match spec.kind {
+                        JoinType::Semi => vec![Ok(l)],
+                        _ => Vec::new(),
+                    };
+                }
                 Ok(true) => {
                     if full {
                         m.borrow_mut()[i] = true;
@@ -1029,8 +1046,10 @@ fn memory_join<'a>(left: Rows<'a>, right: Vec<Row>, spec: JoinSpec<'a>) -> Resul
                 Err(e) => return vec![Err(e)],
             }
         }
-        if out.is_empty() && spec.keeps_left() {
-            out.push(Ok(spec.left_padded(l)));
+        if out.is_empty()
+            && let Some(row) = spec.unmatched(l)
+        {
+            out.push(Ok(row));
         }
         out
     });
@@ -1081,8 +1100,11 @@ fn grace_join<'a>(
         let l = l?;
         match probe_key(&l, left_keys, ctx, outer)? {
             Some(k) => left_parts.push(&k, &l)?,
-            None if spec.keeps_left() => left_nulls.push(spec.left_padded(l))?,
-            None => {}
+            None => {
+                if let Some(row) = spec.unmatched(l) {
+                    left_nulls.push(row)?;
+                }
+            }
         }
     }
     let pairs: Vec<_> = left_parts
@@ -1149,6 +1171,9 @@ fn block_join<'a>(
         for (i, r) in right.iter().enumerate() {
             let r = r?;
             for (j, l) in block.iter().enumerate() {
+                if hit[j] && spec.existence() {
+                    continue;
+                }
                 let mut combined = l.clone();
                 combined.extend_from_slice(&r);
                 if spec.matches(&combined)? {
@@ -1156,15 +1181,17 @@ fn block_join<'a>(
                     if full {
                         matched[i / 64] |= 1 << (i % 64);
                     }
-                    out.push(combined)?;
+                    if !spec.existence() {
+                        out.push(combined)?;
+                    }
                 }
             }
         }
-        if spec.keeps_left() {
-            for (l, h) in block.into_iter().zip(hit) {
-                if !h {
-                    out.push(spec.left_padded(l))?;
-                }
+        for (l, h) in block.into_iter().zip(hit) {
+            if h && spec.kind == JoinType::Semi {
+                out.push(l)?;
+            } else if !h && let Some(row) = spec.unmatched(l) {
+                out.push(row)?;
             }
         }
     }

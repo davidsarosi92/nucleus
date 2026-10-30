@@ -86,3 +86,104 @@ query IT
 SELECT * FROM (VALUES (1, 'x'), (2, 'y')) AS v WHERE column1 > 1
 ----
 2 y
+
+# A correlated subquery in a join's WHERE reading both sides: it stays
+# where both are (not pushed into one side's scan), and its references
+# follow the rows when joins are reordered.
+statement ok
+CREATE TABLE ca (x INT PRIMARY KEY, y INT)
+
+statement ok
+CREATE TABLE cb (k INT PRIMARY KEY, z INT)
+
+statement ok
+INSERT INTO ca VALUES (1, 10), (2, 20), (3, 30)
+
+statement ok
+INSERT INTO cb VALUES (1, 1), (2, 2), (3, 3)
+
+query I
+SELECT count(*) FROM ca, cb WHERE cb.k = ca.x AND ca.y < (SELECT 2 * avg(a2.y) FROM ca a2 WHERE a2.x = cb.k)
+----
+3
+
+query I
+SELECT count(*) FROM cb, ca WHERE cb.k = ca.x AND cb.z < (SELECT max(a2.y) FROM ca a2 WHERE a2.x = ca.x + 1)
+----
+2
+
+query II
+SELECT cb.k, (SELECT a2.y FROM ca a2 WHERE a2.x = cb.k) FROM ca, cb WHERE ca.x = cb.k AND (SELECT a3.y FROM ca a3 WHERE a3.x = cb.z) > 15 ORDER BY 1
+----
+2 20
+3 30
+
+query I
+SELECT count(*) FROM ca WHERE EXISTS (SELECT 1 FROM cb WHERE cb.k = ca.x AND cb.z <> (SELECT min(z) FROM cb c2 WHERE c2.k >= ca.x))
+----
+0
+
+statement ok
+ANALYZE
+
+query I
+SELECT count(*) FROM ca, cb, ca a3 WHERE cb.k = ca.x AND a3.x = cb.z AND ca.y < (SELECT 2 * avg(a2.y) FROM ca a2 WHERE a2.x = cb.k AND a2.y = a3.y)
+----
+3
+
+# EXISTS, NOT EXISTS and IN unnested into semi and anti joins: the results
+# of the subqueries (checked against PostgreSQL 18), NULL keys included.
+statement ok
+CREATE TABLE so (ok INT PRIMARY KEY, ck INT, d DATE)
+
+statement ok
+CREATE TABLE sl (ok INT, ln INT, s INT, cd DATE, rd DATE, PRIMARY KEY (ok, ln))
+
+statement ok
+INSERT INTO so SELECT i, i % 10, date '2020-01-01' + i FROM generate_series(1, 100) i
+
+statement ok
+INSERT INTO sl SELECT i % 50 + 1, i, i % 7, date '2020-01-01' + i % 9, date '2020-01-01' + i % 5 FROM generate_series(1, 300) i
+
+statement ok
+INSERT INTO so VALUES (1000, NULL, NULL)
+
+query I
+SELECT count(*) FROM so WHERE d > date '1990-01-01' AND EXISTS (SELECT * FROM sl WHERE sl.ok = so.ok AND cd < rd)
+----
+35
+
+query I
+SELECT count(*) FROM sl l1 WHERE NOT EXISTS (SELECT * FROM sl l3 WHERE l3.ok = l1.ok AND l3.s <> l1.s AND l3.rd > l3.cd)
+----
+103
+
+query I
+SELECT count(*) FROM so WHERE ok IN (SELECT ok FROM sl WHERE s > 3)
+----
+50
+
+query I
+SELECT count(*) FROM so WHERE NOT EXISTS (SELECT 1 FROM sl WHERE sl.s = so.ck)
+----
+31
+
+query I
+SELECT count(*) FROM so WHERE ck IN (SELECT s FROM sl WHERE sl.ok = so.ok)
+----
+28
+
+query I
+SELECT count(*) FROM so WHERE ok IN (SELECT DISTINCT ok FROM sl ORDER BY ok) AND NOT EXISTS (SELECT 1 FROM sl WHERE sl.ok = so.ok AND sl.s = 6)
+----
+7
+
+query T
+EXPLAIN SELECT count(*) FROM so WHERE EXISTS (SELECT * FROM sl WHERE sl.ok = so.ok AND cd < rd)
+----
+Project: #0
+  Aggregate: count(*)
+    Semi Hash Join (#0 = #0) on (#3 = #0)
+      Seq Scan on so
+      Project: #0
+        Seq Scan on sl filter: (#3 < #4)

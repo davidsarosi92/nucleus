@@ -48,15 +48,26 @@ EXPLAIN SELECT * FROM a WHERE id BETWEEN 2 AND 5
 Project: #0, #1
   Index Scan using primary key on a (id >= 2 AND id <= 5) filter: ((#0 >= 2) AND (#0 <= 5))
 
-# A correlated subquery looks rows up by the outer row's value.
+# A correlated IN subquery becomes a semi join on its correlation and
+# its value, hashed (the right side only the columns it compares).
 query T
 EXPLAIN SELECT * FROM a WHERE x IN (SELECT a_id FROM b WHERE b.id = a.id)
 ----
 Project: #0, #1
-  Seq Scan on a filter: #1 IN (subquery)
-    In (correlated):
-      Project: #1
-        Index Scan using primary key on b (id = outer1.#0) filter: (#0 = outer1.#0)
+  Semi Hash Join (#1 = #1, #0 = #0) on ((#1 = #3) AND (#2 = #0))
+    Seq Scan on a
+    Project: #0, #1
+      Seq Scan on b
+
+# A correlated scalar subquery looks rows up by the outer row's value.
+query T
+EXPLAIN SELECT (SELECT a_id FROM b WHERE b.id = a.id) FROM a
+----
+Project: (subquery)
+  Seq Scan on a
+  Subquery (correlated):
+    Project: #1
+      Index Scan using primary key on b (id = outer1.#0) filter: (#0 = outer1.#0)
 
 # And the answers are right.
 statement ok

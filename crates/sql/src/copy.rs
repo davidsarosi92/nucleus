@@ -11,7 +11,7 @@ use nucleus_kv::KvTxn;
 
 use crate::ast::CopyOptions;
 use crate::catalog::{self, Table};
-use crate::dml::{Writer, assign, insert_row};
+use crate::dml::{Writer, assign, insert_routed};
 use crate::error::{Error, Result};
 use crate::expr::Ctx;
 use crate::ext::Registry;
@@ -354,7 +354,7 @@ pub fn copy_from(
             crate::dml::admit(&check, &t, &row, &ctx)?;
             row
         };
-        insert_row(txn, &writer, &row)?;
+        insert_routed(txn, &writer, &row)?;
         rows.push(row);
         Ok(())
     };

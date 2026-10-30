@@ -71,6 +71,8 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
             ..
         } => {
             let lw = left.width();
+            // (A semi or anti join's condition reads the right row too.)
+            wanted.resize(lw + right.width(), false);
             if let Some(on) = on {
                 read(on, &mut wanted, 0);
             }

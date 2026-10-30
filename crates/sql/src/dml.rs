@@ -732,6 +732,19 @@ fn apply_updates(
     Ok(())
 }
 
+/// One row (validated already) inserted — into its partition, for a
+/// partitioned table — and noted as the statement's write (its storage
+/// finishes at the statement's end); its foreign keys are the caller's.
+pub(crate) fn insert_routed(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<()> {
+    if let Some((_, parts)) = &w.partitions {
+        let i = w.partition_of(row)?.expect("partitioned");
+        return insert_routed(txn, &parts[i], row);
+    }
+    insert_row(txn, w, row)?;
+    crate::storage::written(&w.table);
+    Ok(())
+}
+
 /// Stores new rows (validated already), then checks their foreign keys.
 pub fn insert_rows(txn: &mut dyn KvTxn, w: &Writer, rows: &[Row]) -> Result<()> {
     if let Some((_, parts)) = &w.partitions {
