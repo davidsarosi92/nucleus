@@ -1038,6 +1038,7 @@ impl Transaction {
             last: None,
             done: false,
             validated: self.isolation == Isolation::Serializable,
+            batch: FIRST_BATCH,
         })
     }
 
@@ -1200,6 +1201,8 @@ pub struct Scan<'t> {
     done: bool,
     /// Whether the consumed range joins the read set.
     validated: bool,
+    /// The next refill's entries.
+    batch: usize,
 }
 
 impl Drop for Scan<'_> {
@@ -1227,6 +1230,11 @@ impl std::fmt::Debug for Scan<'_> {
 }
 
 const SCAN_BATCH: usize = 128;
+
+/// The first refill's entries: a scan that wants one entry (the first key
+/// of a range, a `LIMIT 1`) reads a few, not a batch; each refill after
+/// doubles, up to [`SCAN_BATCH`].
+const FIRST_BATCH: usize = 8;
 
 /// Keys and values packed into one buffer, what a chunked scan fills
 /// ([`Scan::next_chunk`]); reused from chunk to chunk, so reading one
@@ -1461,7 +1469,8 @@ impl Scan<'_> {
     fn advance(&mut self) -> Result<Option<Next<'_>>> {
         loop {
             while self.pos == self.buffer.len() && self.from.is_some() {
-                self.refill(SCAN_BATCH, usize::MAX)?;
+                self.refill(self.batch, usize::MAX)?;
+                self.batch = (self.batch * 2).min(SCAN_BATCH);
             }
             let store = (self.pos < self.buffer.len()).then_some(self.pos);
             let write = self.writes.peek().map(|(k, _)| *k);

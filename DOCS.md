@@ -540,9 +540,17 @@ distributed implementation will provide (§F3).
   keys cutting a range into parts of about equal size, from the B+tree's
   internal nodes, none smaller than 64 leaves; default none),
   `put(&mut self)`,
-  `delete(&mut self)`,
+  `delete(&mut self)`, `put_new(key, value) -> bool` (sets a key that has
+  no value, else `false`; by default `get` then `put`, locally one look at
+  the key's versions decides both the value seen and the write's
+  conflict), `fresh(start, end)` (declares a range no version and no other
+  transaction's write can be in until this one ends — a new index's keys:
+  locally, their writes skip the conflict checks and the collection of old
+  versions; by default ignored),
   `commit(self: Box<Self>) -> Timestamp`, `rollback`.  Reads take `&self`
-  so a scan can stay open while the same transaction reads keys.
+  so a scan can stay open while the same transaction reads keys.  A scan
+  reads ahead 8 entries at first, twice as many at each refill up to 128,
+  so one that wants a single entry reads few.
 - `TxnOptions { isolation, read_only, at }` (`read_only()`,
   `serializable()`).
 - `Error`: `Conflict { key }` (the only retryable one — `is_retryable()`),
@@ -2453,6 +2461,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-30 — §M14.20 V10, scans that want one entry:** a
+  transaction's scan reads ahead 8 entries at first, doubling to 128 —
+  a column table's segment lookup read its whole directory per row (an
+  SF 1 `lineitem` loads into columns in 84 s, from most of 729);
+  `DELETE` of short rows without reading them again.
 - **2026-10-30 — §M14.20 V10, vectorized joins and more:** hash joins
   probed a batch at a time and in parallel; narrow rows through joins;
   the executor's tables on a fast hash; parallel sorts; decimal sums

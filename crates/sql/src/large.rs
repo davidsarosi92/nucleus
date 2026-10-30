@@ -131,6 +131,22 @@ fn encode(
     Ok(out)
 }
 
+/// Deletes the row at `key`, whose values are `row`: when none is long
+/// enough to have been stored out of line, without reading it again.
+pub fn remove_row(txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<()> {
+    let mut enc = Vec::new();
+    let short = row.iter().all(|v| {
+        enc.clear();
+        encode_value(&mut enc, v);
+        enc.len() <= THRESHOLD
+    });
+    if short {
+        txn.delete(key)?;
+        return Ok(());
+    }
+    remove(txn, t, key)
+}
+
 /// Deletes the row at `key` and its values stored out of line.
 pub fn remove(txn: &mut dyn KvTxn, t: &Table, key: &[u8]) -> Result<()> {
     if let Some(b) = txn.get(key)? {

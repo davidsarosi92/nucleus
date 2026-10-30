@@ -106,6 +106,14 @@ pub trait TableStorage: Send + Sync {
     /// Removes the row under `key`.
     fn remove(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8]) -> Result<()>;
 
+    /// Removes the row under `key`, `row` being all of it as stored (so a
+    /// storage need not read it again to know what else it keeps):
+    /// [`remove`](Self::remove) by default.
+    fn remove_row(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<()> {
+        let _ = row;
+        self.remove(txn, t, key)
+    }
+
     /// Whether a row is stored under `key` (`validated`: the read is
     /// checked at commit).
     fn exists(&self, txn: &dyn KvTxn, t: &Table, key: &[u8], validated: bool) -> Result<bool>;
@@ -347,6 +355,10 @@ impl TableStorage for RowStorage {
 
     fn remove(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8]) -> Result<()> {
         crate::large::remove(txn, t, key)
+    }
+
+    fn remove_row(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<()> {
+        crate::large::remove_row(txn, t, key, row)
     }
 
     fn exists(&self, txn: &dyn KvTxn, _: &Table, key: &[u8], validated: bool) -> Result<bool> {

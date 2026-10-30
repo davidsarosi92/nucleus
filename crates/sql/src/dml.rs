@@ -831,7 +831,7 @@ pub fn delete_rows(
     let storage = crate::storage::of(t)?;
     catalog::validate_table(&*txn, &t.name)?;
     for (key, row) in rows {
-        storage.remove(txn, t, key)?;
+        storage.remove_row(txn, t, key, row)?;
         let pk = pk_suffix(t, key);
         for (k, _) in keys.entries(&*txn, t, row, &pk)? {
             txn.delete(&k)?;
