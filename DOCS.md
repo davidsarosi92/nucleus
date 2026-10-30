@@ -2168,6 +2168,16 @@ body (zero padding before it).  The data by column type:
 
 A NULL's slot is zeros, or empty.
 
+A query the vectorized executor runs (a scan with filters and
+projections, §8.5) hands its batches to the result as columns — the
+`Sink::takes_batches` / `Sink::batch` hook, `nucleus_sql::vector::batches`
+— and the server copies their typed vectors into the buffers without a
+value per cell (`columnar::Builder`; the same bytes as from rows, which
+other queries still give).  A million rows of three numeric columns
+reach numpy in 92 ms from a row table and 51 ms from a column table (262
+and 241 ms through rows).  The test kit's scripts run once with their
+results taken this way.
+
 **COPY FROM STDIN** (version 7).  The statement answers `I` with the
 columns it takes; the client sends `d` (text or CSV bytes, split
 anyhow) or `B` (batches of rows in the columnar layout above, of the
@@ -2367,6 +2377,13 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-10-30 — §M14.20 results columnar end to end (V10, first part):**
+  a vectorized query's batches go into `ncp` columnar results as columns
+  (`Sink::batch`, `vector::batches`, the server's `columnar::Builder`); a
+  million numeric rows into numpy 262 → 92 ms (row table), 241 → 51 ms
+  (column table); the Python driver cuts text columns from one decoded
+  buffer.
 
 - **2026-10-30 — §M14.20 partitioning (V9, second part):** `ATTACH
   PARTITION`, `DETACH PARTITION`, `DROP PARTITION`; storage policies by

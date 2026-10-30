@@ -1042,7 +1042,39 @@ class ColumnBatch:
 
     def to_list(self):
         """The values as Python objects (one per value)."""
+        if self._is_text():
+            return self._texts()
         return [self.value(i) for i in range(self.rows)]
+
+    def _is_text(self):
+        """Whether the values are UTF-8 text (``value`` decodes them)."""
+        t = self.column.tag
+        return (self._offsets is not None and t not in _ROW_TAG
+                and t not in (_EXT, 15, 18, 19, 10))
+
+    def _texts(self):
+        """A text column's values: the bytes decoded once, then cut."""
+        import array
+
+        n = self.rows
+        offs = array.array("I")
+        a, ln = self._offsets
+        offs.frombytes(bytes(memoryview(self._body)[a:a + ln]))
+        if _struct.pack("=I", 1) != _struct.pack("<I", 1):
+            offs.byteswap()
+        start = self._data[0]
+        raw = bytes(memoryview(self._body)[start:start + offs[n]])
+        s = raw.decode("utf-8")
+        if len(s) == len(raw):
+            # ASCII: the byte offsets are the characters'.
+            out = [s[offs[i]:offs[i + 1]] for i in range(n)]
+        else:
+            out = [raw[offs[i]:offs[i + 1]].decode("utf-8") for i in range(n)]
+        if self.nulls:
+            for i in range(n):
+                if self.is_null(i):
+                    out[i] = None
+        return out
 
     def _valid_numpy(self):
         import numpy as np
@@ -1082,6 +1114,8 @@ class ColumnBatch:
                 arr = (arr + _US_1970).astype("datetime64[us]")
             elif c.tag == 16:
                 arr = arr.view("timedelta64[us]")
+        elif self._is_text() and n:
+            return np.array(self._texts(), dtype=object)
         else:
             return np.array(self.to_list() if self.nulls or n else [], dtype=object) if n else np.empty(0, object)
         if self.nulls:

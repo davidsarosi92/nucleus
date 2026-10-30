@@ -65,6 +65,25 @@ pub trait Sink {
     /// statement with it.
     fn row(&mut self, row: Row) -> Result<ControlFlow<()>>;
 
+    /// Whether it takes a query's rows as [`batch`](Sink::batch)es of
+    /// columns when the executor has them so (a columnar result: no value
+    /// per cell).  No by default.
+    fn takes_batches(&self) -> bool {
+        false
+    }
+
+    /// The next rows, as a batch of columns (its rows in play, in order):
+    /// [`row`](Sink::row) for each by default.  `Break(k)`: the batch's
+    /// first `k` rows were taken, and no more are wanted.
+    fn batch(&mut self, batch: &crate::vector::Batch) -> Result<ControlFlow<usize>> {
+        for (k, i) in batch.sel.iter().enumerate() {
+            if self.row(batch.row(i))?.is_break() {
+                return Ok(ControlFlow::Break(k));
+            }
+        }
+        Ok(ControlFlow::Continue(()))
+    }
+
     /// `COPY … FROM STDIN` begins: the columns its data holds.  A front end
     /// that cannot take data from its client refuses (the default).
     fn copy_in(&mut self, _columns: &[OutColumn]) -> Result<()> {
@@ -124,6 +143,17 @@ impl Sink for Counted<'_> {
         if flow.is_continue() {
             self.rows += 1;
         }
+        Ok(flow)
+    }
+    fn takes_batches(&self) -> bool {
+        self.sink.takes_batches()
+    }
+    fn batch(&mut self, batch: &crate::vector::Batch) -> Result<ControlFlow<usize>> {
+        let flow = self.sink.batch(batch)?;
+        self.rows += match flow {
+            ControlFlow::Continue(()) => batch.sel.len(),
+            ControlFlow::Break(k) => k,
+        } as u64;
         Ok(flow)
     }
 }
@@ -1304,13 +1334,43 @@ fn execute_statement(
                 bound.scope.cols.into_iter().map(|c| (c.name, c.ty)),
             ))?;
             let mut n = 0;
-            for row in exec::build(&plan, &ctx, None)? {
-                let row = row?;
-                crate::budget::charge_rows(n + 1)?;
-                if sink.row(row)?.is_break() {
-                    break;
+            let batches = if sink.takes_batches() {
+                crate::vector::batches(&plan, &ctx, None)?
+            } else {
+                None
+            };
+            if let Some(batches) = batches {
+                'out: for b in batches {
+                    let b = b?;
+                    if crate::budget::charge_rows(n + b.sel.len()).is_err() {
+                        // Past the budget within this batch: its rows up to
+                        // it, then the error, as row by row.
+                        for i in b.sel.iter() {
+                            crate::budget::charge_rows(n + 1)?;
+                            if sink.row(b.row(i))?.is_break() {
+                                break 'out;
+                            }
+                            n += 1;
+                        }
+                        continue;
+                    }
+                    match sink.batch(&b)? {
+                        ControlFlow::Continue(()) => n += b.sel.len(),
+                        ControlFlow::Break(k) => {
+                            n += k;
+                            break;
+                        }
+                    }
                 }
-                n += 1;
+            } else {
+                for row in exec::build(&plan, &ctx, None)? {
+                    let row = row?;
+                    crate::budget::charge_rows(n + 1)?;
+                    if sink.row(row)?.is_break() {
+                        break;
+                    }
+                    n += 1;
+                }
             }
             Output::Command(format!("SELECT {n}"))
         }

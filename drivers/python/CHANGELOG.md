@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Text columns of a batch (`to_list`, `to_numpy`) are decoded once and
+  cut, not value by value: a million short strings 450 → 100 ms.
+
 - Bulk load (nucleus PLAN.md §M14.11): `Connection.load(table, data,
   columns=None)` sends a pandas DataFrame, a pyarrow Table, a dict of
   columns or rows as columnar batches in one `COPY … FROM STDIN` (numpy

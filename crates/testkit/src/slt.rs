@@ -85,6 +85,78 @@ impl Connection for Local {
     }
 }
 
+/// The local session as a [`Connection`] whose results are taken as
+/// batches of columns where the executor has them so — as a columnar
+/// result on the wire takes them (PLAN.md §M14.20 V10).
+pub struct LocalBatches(pub Session);
+
+/// A sink taking batches, keeping their rows.
+#[derive(Default)]
+struct Batches {
+    columns: bool,
+    rows: Vec<nucleus_sql::Row>,
+}
+
+impl nucleus_sql::Sink for Batches {
+    fn columns(&mut self, _: &[nucleus_sql::OutColumn]) -> nucleus_sql::Result<()> {
+        self.columns = true;
+        Ok(())
+    }
+    fn row(&mut self, row: nucleus_sql::Row) -> nucleus_sql::Result<std::ops::ControlFlow<()>> {
+        self.rows.push(row);
+        Ok(std::ops::ControlFlow::Continue(()))
+    }
+    fn takes_batches(&self) -> bool {
+        true
+    }
+    fn batch(
+        &mut self,
+        b: &nucleus_sql::vector::Batch,
+    ) -> nucleus_sql::Result<std::ops::ControlFlow<usize>> {
+        // Through the columns, as a columnar result reads them.
+        let cols: Vec<_> = b.cols.iter().map(|c| c.gather(&b.sel)).collect();
+        for i in 0..b.sel.len() {
+            self.rows.push(cols.iter().map(|c| c.value(i)).collect());
+        }
+        Ok(std::ops::ControlFlow::Continue(()))
+    }
+}
+
+impl Connection for LocalBatches {
+    fn run(&mut self, sql: &str) -> Result<Option<Vec<Vec<Cell>>>, SqlError> {
+        let mut stmts = parse_with_text(sql).map_err(|e| SqlError {
+            code: e.code.into(),
+            message: e.message,
+        })?;
+        if stmts.len() != 1 {
+            return Err(SqlError {
+                code: "42601".into(),
+                message: "expected one statement".into(),
+            });
+        }
+        let (stmt, text) = stmts.remove(0);
+        self.0.note_text(&text);
+        let mut sink = Batches::default();
+        match self.0.run_into(&stmt, &[], &mut sink) {
+            Ok(_) if sink.columns => Ok(Some(
+                sink.rows
+                    .into_iter()
+                    .map(|r| {
+                        r.into_iter()
+                            .map(|v| if v.is_null() { None } else { Some(v.render()) })
+                            .collect()
+                    })
+                    .collect(),
+            )),
+            Ok(_) => Ok(None),
+            Err(e) => Err(SqlError {
+                code: e.code.into(),
+                message: e.message,
+            }),
+        }
+    }
+}
+
 fn format_cell(cell: &Cell, ty: char) -> String {
     let Some(s) = cell else { return "NULL".into() };
     match ty {

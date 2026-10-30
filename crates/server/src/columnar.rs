@@ -11,6 +11,7 @@
 //! at a multiple of 8 from the start of the body (zero padding before it),
 //! so it can be read in place.  A NULL's slot is zeros, or empty.
 
+use nucleus_sql::vector::{Batch, TimeKind, Vector};
 use nucleus_sql::{DataType, Error, Row, Value};
 
 /// Rows per batch when the client asked for no batch size.
@@ -102,53 +103,203 @@ fn var(buf: &mut Vec<u8>, v: &Value, t: DataType, version: u16) {
     }
 }
 
-/// The `B` message for `rows` of columns `types`.
-pub fn batch(rows: &[Row], types: &[DataType], version: u16) -> Result<Vec<u8>, Error> {
-    let mut buf = vec![b'B', 0, 0, 0, 0];
-    buf.extend_from_slice(&(rows.len() as u32).to_le_bytes());
-    for (c, &t) in types.iter().enumerate() {
-        let nulls = rows.iter().any(|r| r[c].is_null());
-        buf.push(u8::from(nulls));
-        if nulls {
-            pad(&mut buf);
-            let mut bits = vec![0u8; rows.len().div_ceil(8)];
-            for (i, r) in rows.iter().enumerate() {
-                if !r[c].is_null() {
-                    bits[i / 8] |= 1 << (i % 8);
-                }
-            }
-            buf.extend_from_slice(&bits);
+/// A column of a batch being built.
+#[derive(Default)]
+struct Col {
+    /// A bit per row, set for a value.
+    valid: Vec<u8>,
+    nulls: bool,
+    /// Fixed: the values; variable: the bytes.
+    data: Vec<u8>,
+    /// Variable: the offsets after each row (`u32`s).
+    offsets: Vec<u8>,
+}
+
+impl Col {
+    fn mark(&mut self, i: usize, value: bool) {
+        if i.is_multiple_of(8) {
+            self.valid.push(0);
         }
-        pad(&mut buf);
-        match layout(t) {
-            Layout::Fixed(w) => {
-                for r in rows {
-                    match &r[c] {
-                        Value::Null => buf.resize(buf.len() + w, 0),
-                        v => fixed(&mut buf, v, t)?,
-                    }
-                }
-            }
-            Layout::Var => {
-                let mut data = Vec::new();
-                let mut offsets = Vec::with_capacity((rows.len() + 1) * 4);
-                offsets.extend_from_slice(&0u32.to_le_bytes());
-                for r in rows {
-                    if !r[c].is_null() {
-                        var(&mut data, &r[c], t, version);
-                    }
-                    offsets.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                }
-                buf.extend_from_slice(&offsets);
-                pad(&mut buf);
-                buf.extend_from_slice(&data);
-            }
+        if value {
+            self.valid[i / 8] |= 1 << (i % 8);
+        } else {
+            self.nulls = true;
         }
-        pad(&mut buf);
     }
-    let len = (buf.len() - 5) as u32;
-    buf[1..5].copy_from_slice(&len.to_le_bytes());
-    Ok(buf)
+}
+
+/// A `B` message built a row or a batch of columns at a time: the same
+/// bytes either way, a batch's typed vectors copied without a value per
+/// cell.
+pub struct Builder {
+    types: Vec<DataType>,
+    version: u16,
+    rows: usize,
+    cols: Vec<Col>,
+}
+
+impl Builder {
+    /// A batch of columns `types`.
+    pub fn new(types: &[DataType], version: u16) -> Self {
+        Self {
+            types: types.to_vec(),
+            version,
+            rows: 0,
+            cols: types.iter().map(|_| Col::default()).collect(),
+        }
+    }
+
+    /// Rows so far.
+    pub fn len(&self) -> usize {
+        self.rows
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+
+    fn value(&mut self, c: usize, v: &Value) -> Result<(), Error> {
+        let t = self.types[c];
+        let i = self.rows;
+        let col = &mut self.cols[c];
+        col.mark(i, !v.is_null());
+        match layout(t) {
+            Layout::Fixed(w) => match v {
+                Value::Null => col.data.resize(col.data.len() + w, 0),
+                v => fixed(&mut col.data, v, t)?,
+            },
+            Layout::Var => {
+                if !v.is_null() {
+                    var(&mut col.data, v, t, self.version);
+                }
+                col.offsets
+                    .extend_from_slice(&(col.data.len() as u32).to_le_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds a row.
+    pub fn push_row(&mut self, row: &Row) -> Result<(), Error> {
+        for (c, v) in row.iter().enumerate().take(self.types.len()) {
+            self.value(c, v)?;
+        }
+        self.rows += 1;
+        Ok(())
+    }
+
+    /// Adds the rows in play of `b` from the `from`-th to before the
+    /// `to`-th.
+    pub fn push_batch(&mut self, b: &Batch, from: usize, to: usize) -> Result<(), Error> {
+        let rows: Vec<usize> = (from..to).map(|k| b.sel.nth(k)).collect();
+        for (c, v) in b.cols.iter().enumerate().take(self.types.len()) {
+            let t = self.types[c];
+            let start = self.rows;
+            let col = &mut self.cols[c];
+            let null = |n: &Option<Vec<bool>>, i: usize| n.as_ref().is_some_and(|n| n[i]);
+            match (layout(t), &**v) {
+                (Layout::Fixed(w @ (2 | 4 | 8)), Vector::Int(d, n))
+                    if matches!(t, DataType::SmallInt | DataType::Integer | DataType::BigInt) =>
+                {
+                    for (k, &i) in rows.iter().enumerate() {
+                        col.mark(start + k, !null(n, i));
+                        let x = if null(n, i) { 0 } else { d[i] };
+                        col.data.extend_from_slice(&x.to_le_bytes()[..w]);
+                    }
+                }
+                (Layout::Fixed(8), Vector::Float(d, n)) if t == DataType::Float => {
+                    for (k, &i) in rows.iter().enumerate() {
+                        col.mark(start + k, !null(n, i));
+                        let x = if null(n, i) { 0.0 } else { d[i] };
+                        col.data.extend_from_slice(&x.to_le_bytes());
+                    }
+                }
+                (Layout::Fixed(1), Vector::Bool(d, n)) if t == DataType::Bool => {
+                    for (k, &i) in rows.iter().enumerate() {
+                        col.mark(start + k, !null(n, i));
+                        col.data.push(u8::from(!null(n, i) && d[i]));
+                    }
+                }
+                (Layout::Fixed(w @ (4 | 8)), Vector::Time(kind, d, n))
+                    if matches!(
+                        (kind, t),
+                        (TimeKind::Date, DataType::Date)
+                            | (TimeKind::Time, DataType::Time)
+                            | (TimeKind::Timestamp, DataType::Timestamp)
+                            | (TimeKind::TimestampTz, DataType::TimestampTz)
+                    ) =>
+                {
+                    for (k, &i) in rows.iter().enumerate() {
+                        col.mark(start + k, !null(n, i));
+                        let x = if null(n, i) { 0 } else { d[i] };
+                        col.data.extend_from_slice(&x.to_le_bytes()[..w]);
+                    }
+                }
+                // A text value's bytes, as `var` sends them.
+                (Layout::Var, Vector::Text(o, bytes, n)) => {
+                    for (k, &i) in rows.iter().enumerate() {
+                        col.mark(start + k, !null(n, i));
+                        if !null(n, i) {
+                            col.data
+                                .extend_from_slice(&bytes[o[i] as usize..o[i + 1] as usize]);
+                        }
+                        col.offsets
+                            .extend_from_slice(&(col.data.len() as u32).to_le_bytes());
+                    }
+                }
+                (_, v) => {
+                    // Anything else value by value.
+                    for (k, &i) in rows.iter().enumerate() {
+                        self.rows = start + k;
+                        self.value(c, &v.value(i))?;
+                    }
+                    self.rows = start;
+                }
+            }
+        }
+        self.rows += rows.len();
+        Ok(())
+    }
+
+    /// The `B` message of the rows so far; the builder is empty after.
+    pub fn finish(&mut self) -> Vec<u8> {
+        let mut buf = vec![b'B', 0, 0, 0, 0];
+        buf.extend_from_slice(&(self.rows as u32).to_le_bytes());
+        for (col, &t) in self.cols.iter_mut().zip(&self.types) {
+            let col = std::mem::take(col);
+            buf.push(u8::from(col.nulls));
+            if col.nulls {
+                pad(&mut buf);
+                buf.extend_from_slice(&col.valid);
+            }
+            pad(&mut buf);
+            match layout(t) {
+                Layout::Fixed(_) => buf.extend_from_slice(&col.data),
+                Layout::Var => {
+                    buf.extend_from_slice(&0u32.to_le_bytes());
+                    buf.extend_from_slice(&col.offsets);
+                    pad(&mut buf);
+                    buf.extend_from_slice(&col.data);
+                }
+            }
+            pad(&mut buf);
+        }
+        self.rows = 0;
+        let len = (buf.len() - 5) as u32;
+        buf[1..5].copy_from_slice(&len.to_le_bytes());
+        buf
+    }
+}
+
+/// The `B` message for `rows` of columns `types`.
+#[cfg(test)]
+fn batch(rows: &[Row], types: &[DataType], version: u16) -> Result<Vec<u8>, Error> {
+    let mut b = Builder::new(types, version);
+    for r in rows {
+        b.push_row(r)?;
+    }
+    Ok(b.finish())
 }
 
 /// The rows of a client's batch `body` (`COPY … FROM STDIN`) of columns
@@ -315,6 +466,62 @@ mod tests {
         assert_eq!(offs, [0, 2, 2, 3]);
         assert_eq!(&body[64..67], b"abc");
         assert_eq!(body.len() % 8, 0);
+    }
+
+    #[test]
+    fn a_batch_of_columns_gives_the_bytes_of_its_rows() {
+        use nucleus_sql::vector::{Batch, Sel};
+        use std::rc::Rc;
+        let types = [
+            DataType::SmallInt,
+            DataType::Integer,
+            DataType::BigInt,
+            DataType::Float,
+            DataType::Bool,
+            DataType::Text,
+            DataType::Date,
+            DataType::Timestamp,
+            DataType::Numeric,
+            DataType::Integer,
+        ];
+        let n = 50;
+        let null = |i: usize, k: usize| (i + k).is_multiple_of(4);
+        let rows: Vec<Row> = (0..n)
+            .map(|i| {
+                let v = |k: usize, v: Value| if null(i, k) { Value::Null } else { v };
+                vec![
+                    v(0, Value::Int(i as i64 - 20)),
+                    v(1, Value::Int(i as i64 * 1000)),
+                    v(2, Value::Int(i as i64 * 1_000_000_007)),
+                    v(3, Value::Float(i as f64 / 3.0)),
+                    v(4, Value::Bool(i % 3 == 0)),
+                    v(5, Value::Text(format!("t{i}"))),
+                    v(6, Value::Date(i as i32 - 9)),
+                    v(7, Value::Timestamp(i as i64 * 60_000_000)),
+                    v(
+                        8,
+                        Value::Numeric(nucleus_sql::decimal::Decimal::from_i64(i as i64)),
+                    ),
+                    Value::Int(7),
+                ]
+            })
+            .collect();
+        let mut cols: Vec<Rc<Vector>> = (0..types.len() - 1)
+            .map(|c| Rc::new(Vector::typed(rows.iter().map(|r| r[c].clone()).collect())))
+            .collect();
+        cols.push(Rc::new(Vector::Const(Value::Int(7))));
+        // Every other row in play, pushed in pieces.
+        let sel: Vec<u32> = (0..n as u32).filter(|i| i % 2 == 1).collect();
+        let b = Batch {
+            len: n,
+            cols,
+            sel: Sel::Rows(sel.clone()),
+        };
+        let mut built = Builder::new(&types, 7);
+        built.push_batch(&b, 0, 7).unwrap();
+        built.push_batch(&b, 7, sel.len()).unwrap();
+        let want: Vec<Row> = sel.iter().map(|&i| rows[i as usize].clone()).collect();
+        assert_eq!(built.finish(), batch(&want, &types, 7).unwrap());
     }
 
     #[test]

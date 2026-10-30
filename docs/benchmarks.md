@@ -68,6 +68,21 @@ table 22 / 81 ms), the filtered count 2.4 ms, the 1000-group `GROUP BY`
 19 ms, a read by key 0.3–1.7 ms (0.1 ms).  Not yet in the suite run
 against PostgreSQL.
 
+**Results into numpy** (§M14.20 V10): a million rows (`id int, x bigint,
+f float, s text`) fetched with the Python driver's `batches()` and every
+column turned into a numpy array, best of three, server and client on
+the same machine — through rows (before V10) and with the executor's
+batches going out as columns:
+
+| query | row table, rows → columns (ms) | row table, batches (ms) | column table, rows → columns (ms) | column table, batches (ms) |
+|---|---:|---:|---:|---:|
+| `SELECT id, x, f` | 262 | 92 | 241 | 51 |
+| `SELECT id, x, f, s` | 789 | 198 | 805 | 162 |
+| `SELECT id, f … WHERE x < 500` (half) | 52 | 33 | 34 | 16 |
+
+(With `s`, the driver's text decoding was most of it: it now decodes a
+batch's text once and cuts it.)
+
 Earlier runs (at `b03c130`, §M14.11: scans 15–30× slower; after V2:
 5–6×) are in the git history of this file.
 

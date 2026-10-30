@@ -159,6 +159,42 @@ impl Vector {
         }
     }
 
+    /// Rows `sel` of it, in order, as a vector of their own.
+    pub fn gather(&self, sel: &Sel) -> Vector {
+        let rows = match sel {
+            Sel::All(n) => return self.slice(0..*n),
+            Sel::Rows(r) => r,
+        };
+        let nulls = |n: &Option<Vec<bool>>| {
+            n.as_ref()
+                .and_then(|n| nulls_from(rows.iter().map(|&i| n[i as usize]).collect()))
+        };
+        fn pick<T: Copy>(d: &[T], rows: &[u32]) -> Vec<T> {
+            rows.iter().map(|&i| d[i as usize]).collect()
+        }
+        match self {
+            Vector::Const(v) => Vector::Const(v.clone()),
+            Vector::Int(d, n) => Vector::Int(pick(d, rows), nulls(n)),
+            Vector::Float(d, n) => Vector::Float(pick(d, rows), nulls(n)),
+            Vector::Bool(d, n) => Vector::Bool(pick(d, rows), nulls(n)),
+            Vector::Time(k, d, n) => Vector::Time(*k, pick(d, rows), nulls(n)),
+            Vector::Text(o, b, n) => {
+                let mut offsets = Vec::with_capacity(rows.len() + 1);
+                let mut bytes = Vec::new();
+                offsets.push(0);
+                for &i in rows {
+                    let i = i as usize;
+                    bytes.extend_from_slice(&b[o[i] as usize..o[i + 1] as usize]);
+                    offsets.push(bytes.len() as u32);
+                }
+                Vector::Text(offsets, bytes, nulls(n))
+            }
+            Vector::Values(v) => {
+                Vector::Values(rows.iter().map(|&i| v[i as usize].clone()).collect())
+            }
+        }
+    }
+
     /// Which rows are `NULL`, for a typed vector (`None`: none, or not
     /// typed).
     pub fn nulls(&self) -> Option<&[bool]> {
@@ -1479,6 +1515,87 @@ pub fn rows<'a>(
     })))
 }
 
+/// A result as batches ([`batches`]).
+pub type Batches<'a> = Box<dyn Iterator<Item = Result<Batch>> + 'a>;
+
+/// `plan` run vectorized, as batches — when it can be (see [`Pipeline`];
+/// not row by row, `batch_size` 0): the rows, their order and the errors
+/// of [`rows`], for a sink that takes columns (a columnar result) without
+/// a value per cell.  A batch run again row by row comes as a batch of
+/// those rows; the batches of a parallel run come in key order.
+pub fn batches<'a>(
+    plan: &'a Plan,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Option<Batches<'a>>> {
+    if crate::budget::batch_size() == 0 {
+        return Ok(None);
+    }
+    let filters = chain(plan)
+        .is_some_and(|(_, steps)| steps.iter().any(|(s, _)| matches!(s, Step::Filter(_))));
+    if filters && let Some(work) = Morsels::new(plan, &[], ctx, outer, ROW_MORSELS_PER_WORKER)? {
+        PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Ok(Some(Box::new(ParallelBatches {
+            work,
+            plan,
+            next: 0,
+            batches: std::collections::VecDeque::new(),
+            err: None,
+            done: false,
+        })));
+    }
+    let Some(pipe) = Pipeline::new(plan, plan, ctx, outer, false, None)? else {
+        return Ok(None);
+    };
+    Ok(Some(Box::new(PipeBatches {
+        pipe,
+        err: None,
+        done: false,
+    })))
+}
+
+/// A pipeline's batches, those run again row by row as batches of their
+/// rows.
+struct PipeBatches<'a> {
+    pipe: Pipeline<'a>,
+    err: Option<Error>,
+    done: bool,
+}
+
+impl Iterator for PipeBatches<'_> {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Result<Batch>> {
+        loop {
+            if self.done {
+                return None;
+            }
+            if let Some(e) = self.err.take() {
+                self.done = true;
+                return Some(Err(e));
+            }
+            match self.pipe.next() {
+                Ok(Some(Out::Batch(b))) if b.sel.is_empty() => {}
+                Ok(Some(Out::Batch(b))) => return Some(Ok(b)),
+                Ok(Some(Out::Rows(rows, err))) => {
+                    self.err = err;
+                    if let Some(b) = batch_of_rows(rows) {
+                        return Some(Ok(b));
+                    }
+                }
+                Ok(None) => {
+                    self.done = true;
+                    return None;
+                }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+            }
+        }
+    }
+}
+
 /// A pipeline's batches as rows.
 struct BatchRows<'a> {
     pipe: Pipeline<'a>,
@@ -2173,6 +2290,95 @@ impl Iterator for ParallelRows<'_> {
                     break;
                 }
             }
+        }
+    }
+}
+
+/// A batch a worker made, its selection applied: the rows, and a vector
+/// per column (sent to the thread that gives the result).
+type Dense = (usize, Vec<Vector>);
+
+fn dense(b: &Batch) -> Dense {
+    (
+        b.sel.len(),
+        b.cols.iter().map(|c| c.gather(&b.sel)).collect(),
+    )
+}
+
+/// [`ParallelRows`] as batches.
+struct ParallelBatches<'a> {
+    work: Morsels<'a>,
+    plan: &'a Plan,
+    next: usize,
+    batches: std::collections::VecDeque<Dense>,
+    err: Option<Error>,
+    done: bool,
+}
+
+impl Iterator for ParallelBatches<'_> {
+    type Item = Result<Batch>;
+
+    fn next(&mut self) -> Option<Result<Batch>> {
+        loop {
+            if let Some((len, cols)) = self.batches.pop_front() {
+                return Some(Ok(Batch {
+                    len,
+                    cols: cols.into_iter().map(Rc::new).collect(),
+                    sel: Sel::All(len),
+                }));
+            }
+            if let Some(e) = self.err.take() {
+                self.done = true;
+                return Some(Err(e));
+            }
+            let total = self.work.ranges.len();
+            if self.done || self.next >= total {
+                return None;
+            }
+            let end = (self.next + self.work.workers).min(total);
+            let plan = self.plan;
+            let results = self.work.run(self.next..end, false, &|wctx, range| {
+                morsel_batches(plan, wctx, range)
+            });
+            self.next = end;
+            for r in results {
+                let (batches, err) = match r {
+                    Some(Ok(x)) => x,
+                    Some(Err(e)) => (Vec::new(), Some(e)),
+                    None => (Vec::new(), Some(Error::internal("a morsel not run"))),
+                };
+                self.batches.extend(batches);
+                if let Some(e) = err {
+                    self.err = Some(e);
+                    self.next = total;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// One morsel's batches, on a worker: the batches, and the error that
+/// ended them (if one did).
+fn morsel_batches(plan: &Plan, ctx: &Ctx, range: KeyRange) -> Result<(Vec<Dense>, Option<Error>)> {
+    let Some(mut pipe) = Pipeline::new(plan, plan, ctx, None, false, Some(range))? else {
+        return Err(Error::internal("a morsel's pipeline"));
+    };
+    let mut out = Vec::new();
+    loop {
+        match pipe.next() {
+            Ok(None) => return Ok((out, None)),
+            Ok(Some(Out::Batch(b))) if b.sel.is_empty() => {}
+            Ok(Some(Out::Batch(b))) => out.push(dense(&b)),
+            Ok(Some(Out::Rows(rows, err))) => {
+                if let Some(b) = batch_of_rows(rows) {
+                    out.push(dense(&b));
+                }
+                if err.is_some() {
+                    return Ok((out, err));
+                }
+            }
+            Err(e) => return Ok((out, Some(e))),
         }
     }
 }

@@ -1447,8 +1447,10 @@ choosing rows or columns per query is by the columns a scan needs.
 Left: the analyzer suggesting storage changes, §M14.9); V9 partitioning (range,
 list, hash ✅; pruning when the plan is made and when it runs ✅;
 inserts routed and updates moving rows ✅; storage per partition ✅;
-attach / detach ✅; the age policy ✅); V10 results columnar end to end, TPC-H and ClickBench against
-PostgreSQL, the targets recorded ⬜.
+attach / detach ✅; the age policy ✅); V10 results columnar end to end ✅ (a vectorized query's batches go
+into the columnar result as columns, in parallel too — a million numeric
+rows into numpy 262 → 92 ms from a row table, 241 → 51 ms from a column
+table); TPC-H and ClickBench against PostgreSQL, the targets recorded ⬜.
 
 **Done when:** every storage mode works per table, per column and per
 partition, with online conversion between them under crash and
@@ -2149,6 +2151,8 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-30** — §M14.20 V10 (first part): results columnar end to
+  end — batches into `ncp` columnar results without a value per cell.
 - **2026-10-30** — §M14.20 V9 (second part): attach, detach and drop
   partitions; storage policies by age, applied by the server.
 - **2026-10-30** — §M14.20 V9 (first part): partitioning — range, list,

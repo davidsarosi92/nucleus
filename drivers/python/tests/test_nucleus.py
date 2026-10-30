@@ -225,6 +225,18 @@ class Conformance(unittest.TestCase):
                     n += len(b)
             self.assertEqual(n, 249)
 
+    def test_text_columns(self):
+        # Text cut from one decoded buffer: ASCII, other letters, NULLs.
+        with connect() as c:
+            sql = ("SELECT CASE WHEN i % 3 = 0 THEN NULL WHEN i % 3 = 1 THEN 'a' || i "
+                   "ELSE 'árvíz' || i END FROM generate_series(1, 50) i")
+            want = [r[0] for r in c.stream(sql)]
+            got = [v for b in c.batches(sql, rows=7) for v in b.column(0).to_list()]
+            self.assertEqual(got, want)
+            ascii_sql = "SELECT 'x' || i FROM generate_series(1, 9) i"
+            self.assertEqual([v for b in c.batches(ascii_sql) for v in b.column(0).to_list()],
+                             [f"x{i}" for i in range(1, 10)])
+
     @unittest.skipUnless(_has("numpy"), "numpy is not installed")
     def test_numpy(self):
         import numpy as np

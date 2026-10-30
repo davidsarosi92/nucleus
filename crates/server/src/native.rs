@@ -800,7 +800,7 @@ struct Wire<'a, R: Read, W: Write> {
     /// Rows left in this batch (`None`: no limit).
     left: Option<u32>,
     /// Columnar: the batch being filled, and its size.
-    pending: Vec<Row>,
+    pending: Option<crate::columnar::Builder>,
     batch: usize,
     /// `COPY … FROM STDIN`: the columns, while the client's data comes.
     copying: Option<Vec<DataType>>,
@@ -826,12 +826,29 @@ impl<R: Read, W: Write> Wire<'_, R, W> {
 
     /// Columnar: sends the rows gathered as a batch.
     fn send_batch(&mut self) -> Result<(), Error> {
-        if self.pending.is_empty() {
+        let Some(b) = self.pending.as_mut().filter(|b| !b.is_empty()) else {
             return Ok(());
-        }
-        let b = crate::columnar::batch(&self.pending, &self.types, self.version)?;
-        self.pending.clear();
+        };
+        let b = b.finish();
         self.send(&b)
+    }
+
+    /// Columnar: room for a row — the full batch sent first, and with a
+    /// fetch size a wait for the client; `Break` when it wants no more.
+    fn room(&mut self) -> Result<ControlFlow<()>, Error> {
+        if self.pending.as_ref().is_some_and(|b| b.len() >= self.batch) {
+            self.send_batch()?;
+            if self.left.is_some() {
+                match self.suspend()? {
+                    Some(next) => {
+                        self.left = next;
+                        self.batch = next.map_or(crate::columnar::DEFAULT_BATCH, |n| n as usize);
+                    }
+                    None => return Ok(ControlFlow::Break(())),
+                }
+            }
+        }
+        Ok(ControlFlow::Continue(()))
     }
 
     /// Pauses after a batch: the next one's size (`None`: no limit), or
@@ -941,6 +958,9 @@ impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
             m = m.str(&c.name).ty(Some(c.ty), self.version);
         }
         self.types = columns.iter().map(|c| c.ty).collect();
+        if self.format == Format::Columnar {
+            self.pending = Some(crate::columnar::Builder::new(&self.types, self.version));
+        }
         self.left = (self.fetch > 0).then_some(self.fetch);
         self.batch = match self.fetch {
             0 => crate::columnar::DEFAULT_BATCH,
@@ -950,22 +970,11 @@ impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
     }
 
     fn row(&mut self, row: Row) -> Result<ControlFlow<()>, Error> {
-        if self.format == Format::Columnar {
-            if self.pending.len() >= self.batch {
-                self.send_batch()?;
-                if self.left.is_some() {
-                    match self.suspend()? {
-                        Some(next) => {
-                            self.left = next;
-                            self.batch =
-                                next.map_or(crate::columnar::DEFAULT_BATCH, |n| n as usize);
-                        }
-                        None => return Ok(ControlFlow::Break(())),
-                    }
-                }
-            }
-            self.pending.push(row);
-            return Ok(ControlFlow::Continue(()));
+        if let Some(flow) = self.columnar(|b| b.push_row(&row).map(|()| 1))? {
+            return Ok(match flow {
+                ControlFlow::Continue(_) => ControlFlow::Continue(()),
+                ControlFlow::Break(()) => ControlFlow::Break(()),
+            });
         }
         if self.left == Some(0) {
             match self.suspend()? {
@@ -986,6 +995,54 @@ impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
         }
         self.send(&m.finish())?;
         Ok(ControlFlow::Continue(()))
+    }
+
+    fn takes_batches(&self) -> bool {
+        self.format == Format::Columnar
+    }
+
+    fn batch(&mut self, b: &nucleus_sql::vector::Batch) -> Result<ControlFlow<usize>, Error> {
+        if self.format != Format::Columnar {
+            for (k, i) in b.sel.iter().enumerate() {
+                if self.row(b.row(i))?.is_break() {
+                    return Ok(ControlFlow::Break(k));
+                }
+            }
+            return Ok(ControlFlow::Continue(()));
+        }
+        // As much as each batch on the wire has room for.
+        let mut k = 0;
+        while k < b.sel.len() {
+            let batch = self.batch;
+            let flow = self.columnar(|p| {
+                let n = (batch.saturating_sub(p.len())).clamp(1, b.sel.len() - k);
+                p.push_batch(b, k, k + n).map(|()| n)
+            })?;
+            match flow {
+                Some(ControlFlow::Continue(n)) => k += n,
+                _ => return Ok(ControlFlow::Break(k)),
+            }
+        }
+        Ok(ControlFlow::Continue(()))
+    }
+}
+
+impl<R: Read, W: Write> Wire<'_, R, W> {
+    /// Columnar: `push` into the batch being built once it has room (its
+    /// rows taken, or `Break` when the client wants no more); `None` for
+    /// another format.
+    fn columnar(
+        &mut self,
+        push: impl FnOnce(&mut crate::columnar::Builder) -> Result<usize, Error>,
+    ) -> Result<Option<ControlFlow<(), usize>>, Error> {
+        if self.format != Format::Columnar {
+            return Ok(None);
+        }
+        if self.room()?.is_break() {
+            return Ok(Some(ControlFlow::Break(())));
+        }
+        let b = self.pending.as_mut().expect("columns before rows");
+        Ok(Some(ControlFlow::Continue(push(b)?)))
     }
 }
 
@@ -1047,7 +1104,7 @@ fn run<R: Read, W: Write>(
             types: Vec::new(),
             fetch: query.fetch,
             left: None,
-            pending: Vec::new(),
+            pending: None,
             batch: crate::columnar::DEFAULT_BATCH,
             copying: None,
             broken: None,

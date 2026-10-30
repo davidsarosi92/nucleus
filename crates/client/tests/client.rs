@@ -1476,6 +1476,90 @@ fn columnar_batches_match_rows() {
     assert_eq!(c.status(), TxnStatus::Idle);
 }
 
+/// Columnar results end to end (PLAN.md §M14.20 V10): a scan's batches go
+/// out as they are — of row and column tables, filtered (in parallel),
+/// any fetch size, an error part way — and give each cell a cursor gives.
+#[test]
+fn columnar_results_from_batches_match_rows() {
+    let mut c = Client::connect(config(start(None))).unwrap();
+    for (t, with) in [("vr", ""), ("vc", " WITH (storage = column)")] {
+        c.execute(
+            &format!(
+                "CREATE TABLE {t} (id INT PRIMARY KEY, s SMALLINT, big BIGINT, f FLOAT, b BOOLEAN, \
+                 t TEXT, d DATE, ts TIMESTAMP, n NUMERIC(8, 2)){with}"
+            ),
+            &[],
+        )
+        .unwrap();
+        c.execute(
+            &format!(
+                "INSERT INTO {t} SELECT i, (i % 300)::smallint, i::bigint * 1000000007, i / 7.0, i % 3 = 0, \
+                 CASE WHEN i % 5 = 0 THEN NULL ELSE 'v' || i END, DATE '2024-01-01' + i % 400, \
+                 TIMESTAMP '2024-01-01' + i * INTERVAL '1 minute', i / 3.0 \
+                 FROM generate_series(1, 30000) i"
+            ),
+            &[],
+        )
+        .unwrap();
+        c.execute(
+            &format!("UPDATE {t} SET big = NULL, f = NULL, d = NULL WHERE id % 11 = 0"),
+            &[],
+        )
+        .unwrap();
+    }
+    for t in ["vr", "vc"] {
+        for sql in [
+            format!("SELECT * FROM {t}"),
+            format!("SELECT id, t, big FROM {t} WHERE id % 7 <> 0 AND f < 3000"),
+            format!("SELECT id * 2, t || '!', f + 1, b FROM {t} WHERE b OR d IS NULL"),
+        ] {
+            let rows: Vec<Vec<Value>> = c.rows(&sql, &[]).unwrap();
+            for fetch in [0, 1000, 333] {
+                let mut seen = 0;
+                let mut batches = c.batches(&sql, &[], fetch).unwrap();
+                for batch in &mut batches {
+                    let batch = batch.unwrap();
+                    if fetch > 0 {
+                        assert!(batch.rows() <= fetch as usize, "{sql}");
+                    }
+                    for i in 0..batch.rows() {
+                        for (col, want) in rows[seen + i].iter().enumerate() {
+                            assert_eq!(
+                                &batch.value(i, col).unwrap(),
+                                want,
+                                "{sql} (fetch {fetch}): row {} column {col}",
+                                seen + i
+                            );
+                        }
+                    }
+                    seen += batch.rows();
+                }
+                assert_eq!(seen, rows.len(), "{sql} (fetch {fetch})");
+                assert_eq!(batches.command(), Some(("SELECT", rows.len() as u64)));
+            }
+        }
+        // An error part way: the rows before it, then the error.
+        let items: Vec<_> = c
+            .batches(&format!("SELECT 1 / (250 - id) FROM {t}"), &[], 100)
+            .unwrap()
+            .collect();
+        assert_eq!(items.len(), 4, "{t}");
+        assert_eq!(
+            items[..3]
+                .iter()
+                .map(|b| b.as_ref().unwrap().rows())
+                .collect::<Vec<_>>(),
+            [100, 100, 49]
+        );
+        assert!(matches!(&items[3], Err(Error::Server(e)) if e.code == "22012"));
+        // Closed early.
+        let mut b = c.batches(&format!("SELECT * FROM {t}"), &[], 4096).unwrap();
+        assert_eq!(b.next().unwrap().unwrap().rows(), 4096);
+        assert_eq!(b.close().unwrap(), ("SELECT".into(), 4096));
+    }
+    assert_eq!(c.status(), TxnStatus::Idle);
+}
+
 /// Bulk load (PLAN.md §M14.11 L5): `COPY … FROM STDIN` in text and CSV,
 /// and typed rows as columnar batches — each row checked as an INSERT's;
 /// a failure stores nothing.
