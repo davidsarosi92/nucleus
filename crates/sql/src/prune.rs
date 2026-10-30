@@ -2,7 +2,8 @@
 //! plan is walked from the top with the output columns wanted, each node
 //! adding what its expressions read; a scan decodes only its needed
 //! columns, the rest reading as NULL (the row keeps its width, so no
-//! position changes).  Conservative: an expression with a subquery needs
+//! position changes).  A subquery's plan is walked too, from all of its own
+//! output.  Conservative: an expression with a subquery needs
 //! every column (a correlated subquery reads the row it runs for), and so
 //! does anything that compares whole rows (`DISTINCT`, set operations) or
 //! is shared (CTEs, recursion).
@@ -37,6 +38,14 @@ fn read(e: &Expr, into: &mut [bool], offset: isize) {
 
 fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>) {
     let all = |p: &Plan| vec![true; p.width()];
+    // The plans of this node's subqueries: each all of its own output.
+    plan.for_each_expr(&mut |e| {
+        e.walk(&mut |x| {
+            if let crate::expr::Expr::Subquery(s) = x {
+                walk(&s.plan, vec![true; s.plan.width()], out);
+            }
+        })
+    });
     match plan {
         Plan::Scan { filter, .. } => {
             if let Some(f) = filter {

@@ -320,7 +320,10 @@ replaced by it.
 by key, without repeats: each node read and written once for all the keys
 reaching it; full leaves packed to about 7/8; neighbours a batch of
 removals left under `MIN_FILL` merged until they are not, seams of merged
-internal nodes included), `range` / `range_rev` (bounds), `cursor`
+internal nodes included), `range` / `range_rev` (bounds; going forward a
+range checks its end on a key before reading the key's value, so the first
+entry past the end — perhaps long, compressed, in overflow pages — is not
+read), `cursor`
 (`seek`, `seek_after`, `seek_end`, `next_entry`, `prev_entry`), `destroy`,
 `check` (ordering, separators, equal leaf depth, minimum fill, overflow
 lengths, no page used twice; returns the pages used).  `&self` reads,
@@ -1058,8 +1061,9 @@ expressions read; a scan then decodes only the columns needed — the rest
 read as NULL, skipped in the encoding without being built (an out-of-line
 value not even fetched).  An expression with a subquery needs every
 column (a correlated subquery reads its row), as do `DISTINCT`, set
-operations, CTEs and recursion.  Subqueries' own plans decode whole
-rows.  A grand total (an aggregate without `GROUP BY`) keeps one state,
+operations, CTEs and recursion.  Subqueries' own plans decode only
+their columns too (a correlated index lookup into a column table, say,
+decodes the two columns it reads, not the segment's every one).  A grand total (an aggregate without `GROUP BY`) keeps one state,
 hashing no key.
 
 **Batches** (`vector`, §M14.20).  A table scan by the primary key (or of
@@ -1212,11 +1216,13 @@ are cut from its inputs by projections, every reference above moved with
 them, so a join copies only what is used.
 
 **Index nested loops** (`lookups`): a hash join whose right side is an
-analyzed row table's scan becomes an index nested loop when an index (the
+analyzed table's scan becomes an index nested loop when an index (the
 primary key or a secondary one) leads with the join keys and the lookups
 cost less than hashing the table — each lookup counted as 12 rows of a
 scan, each row a secondary index finds 20 more (its fetch), against the
-table's rows read once; the rows a lookup reads are all of its key
+table's rows read once; a column table's lookups count four times as
+much and its rows scanned a quarter (its scans read batches of the
+columns wanted, its lookups segments' values); the rows a lookup reads are all of its key
 value's, whatever the filter keeps.  An inner join may look up its left
 side instead (the columns put back in order above).  A lookup join's rows
 are estimated as the left side's times a lookup's.
@@ -1681,10 +1687,16 @@ greatest values and `NULL`s).  Columns are encoded by what they hold:
 integers, dates, times and timestamps by frame of reference and bit
 packing, or runs; doubles as they are, booleans a bit each; text as a
 dictionary and bit-packed codes when values repeat, else Arrow's offsets
-and bytes; anything else value by value; `NULL`s a bitmap (a segment
+and bytes; decimals of one scale whose unscaled values fit 64 bits as
+those integers, by frame of reference and bit packing; anything else value
+by value; `NULL`s a bitmap (a segment
 lists the table columns it holds: a partial column copy holds some).  A
 segment's id is a hash of its contents, so it never changes and its decoded columns
-are cached by id.  A scan reads only the wanted columns of the segments
+are cached by id.  A read of one row (by its key: an index lookup, a
+correlated subquery's) takes each column's value from the column decoded
+if it is cached, else from its encoding as stored — cached instead of the
+column decoded, smaller — read where the value lies (`segment::value_at`:
+every layout but a dictionary's and value by value's).  A scan reads only the wanted columns of the segments
 its range overlaps, skips a segment the filters right above it rule out
 (column-constant comparisons against the segment's least and greatest
 values), and hands each run of a segment's rows to the vectorized executor
@@ -2461,6 +2473,17 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-30 — §M14.20 V10, column tables' point reads:** a B+tree
+  range checks its end on the key before reading the value; decimals of
+  one scale packed as integers in segments; one row's value read from a
+  column's cached encoding (`segment::value_at`); subqueries' scans decode
+  only their columns; index nested loops on column tables, costed as
+  such; `KvTxn::first`; a commit's conflict checks and old versions in one
+  walk per key.  Fixed: an index nested loop's right side reads its left
+  row one level down — the plan walkers that move references now count it
+  (`XX000 outer column out of range` on TPC-H Q2 over column tables).  SF 1
+  in columns: the load 675 → 136 s; Q17 timed out → 1.4 s, Q20 → 0.6 s,
+  Q21 4.7 → 1.2 s.
 - **2026-10-30 — §M14.20 V10, scans that want one entry:** a
   transaction's scan reads ahead 8 entries at first, doubling to 128 —
   a column table's segment lookup read its whole directory per row (an

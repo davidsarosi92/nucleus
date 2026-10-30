@@ -730,8 +730,8 @@ fn level_refs(plan: &Plan, nesting: usize, out: &mut Vec<usize>) {
             _ => {}
         })
     });
-    for c in plan.children() {
-        level_refs(c, nesting, out);
+    for (c, below) in plan.child_levels() {
+        level_refs(c, nesting + below, out);
     }
 }
 

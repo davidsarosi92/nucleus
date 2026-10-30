@@ -7,11 +7,14 @@
 //! - doubles as they are, booleans a bit each;
 //! - text: a dictionary and bit-packed codes when values repeat, else
 //!   offsets and bytes (Arrow's layout);
+//! - decimals of one scale whose unscaled values fit 64 bits: those
+//!   integers, by frame of reference and bit packing;
 //! - anything else: each value's row encoding, back to back.
 //!
 //! `NULL`s are a bitmap beside the values.  Decoding gives the vectorized
 //! executor's vectors directly ([`Vector`]), typed as a scan of the row
-//! storage gives them.
+//! storage gives them; [`value_at`] reads one row's value from the bytes
+//! where the layout allows (a point read: no column decoded for it).
 
 use crate::encoding::{Reader, decode_value, encode_value};
 use crate::error::{Error, Result};
@@ -25,6 +28,16 @@ const FLOATS: u8 = 3;
 const BOOLS: u8 = 4;
 const DICT: u8 = 5;
 const TEXT: u8 = 6;
+const DECIMALS: u8 = 7;
+
+/// A decimal's unscaled value and scale, when the unscaled value fits 64
+/// bits.
+fn dec_of(v: &Value) -> Option<(i64, u32)> {
+    match v {
+        Value::Numeric(d) => Some((i64::try_from(d.mantissa()).ok()?, d.scale())),
+        _ => None,
+    }
+}
 
 fn bad() -> Error {
     Error::internal("a malformed column segment")
@@ -127,6 +140,12 @@ pub fn encode(values: &[Value]) -> Vec<u8> {
         Some(Value::Float(_)) if live().all(|v| matches!(v, Value::Float(_))) => FLOATS,
         Some(Value::Bool(_)) if live().all(|v| matches!(v, Value::Bool(_))) => BOOLS,
         Some(Value::Text(_)) if live().all(|v| matches!(v, Value::Text(_))) => TEXT,
+        Some(f @ Value::Numeric(_))
+            if dec_of(f)
+                .is_some_and(|(_, s)| live().all(|v| dec_of(v).is_some_and(|(_, vs)| vs == s))) =>
+        {
+            DECIMALS
+        }
         _ => VALUES,
     };
     let nulls: Vec<bool> = values.iter().map(Value::is_null).collect();
@@ -233,6 +252,25 @@ pub fn encode(values: &[Value]) -> Vec<u8> {
                 }
             }
         }
+        DECIMALS => {
+            let scale = dec_of(first.expect("a value")).expect("a decimal").1;
+            let ms: Vec<i64> = values
+                .iter()
+                .map(|v| dec_of(v).map_or(0, |(m, _)| m))
+                .collect();
+            let lo = ms.iter().copied().min().unwrap_or(0);
+            let hi = ms.iter().copied().max().unwrap_or(0);
+            let bits = bits_for((hi as i128 - lo as i128) as u64);
+            header(&mut out, DECIMALS);
+            out.push(scale as u8);
+            out.extend_from_slice(&lo.to_le_bytes());
+            out.push(bits);
+            pack(
+                ms.iter().map(|&x| x.wrapping_sub(lo) as u64),
+                bits,
+                &mut out,
+            );
+        }
         _ => {
             header(&mut out, VALUES);
             for v in values {
@@ -241,6 +279,108 @@ pub fn encode(values: &[Value]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// The `bits`-bit value at place `i` of a packed run.
+fn packed_at(b: &[u8], i: usize, bits: u8) -> Result<u64> {
+    if bits == 0 {
+        return Ok(0);
+    }
+    if bits > 64 {
+        return Err(bad());
+    }
+    let start = i * bits as usize;
+    let (byte, shift) = (start / 8, start % 8);
+    let need = (shift + bits as usize).div_ceil(8);
+    let src = b.get(byte..byte + need).ok_or_else(bad)?;
+    let mut acc = 0u128;
+    for (k, &x) in src.iter().enumerate() {
+        acc |= u128::from(x) << (8 * k);
+    }
+    let mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    Ok((acc >> shift) as u64 & mask)
+}
+
+/// Row `i`'s value of a column [`encode`]d, read where it lies — `None`
+/// for a layout that must be decoded whole to reach it (a dictionary, row
+/// encodings back to back).
+pub fn value_at(b: &[u8], i: usize) -> Result<Option<Value>> {
+    let mut r = Reader::new(b);
+    let kind = r.u8().map_err(|_| bad())?;
+    let n = r.u32().map_err(|_| bad())? as usize;
+    if i >= n {
+        return Err(bad());
+    }
+    if r.u8().map_err(|_| bad())? != 0 {
+        let bytes = r.take(n.div_ceil(8)).map_err(|_| bad())?;
+        if packed_at(bytes, i, 1)? == 1 {
+            return Ok(Some(Value::Null));
+        }
+    }
+    let int = |k: u8, x: i64| match time_kind(k) {
+        None if k == 0 => Ok(Value::Int(x)),
+        Some(t) => Ok(t.value(x)),
+        None => Err(bad()),
+    };
+    Ok(Some(match kind {
+        INTS => {
+            let k = r.u8().map_err(|_| bad())?;
+            let lo = r.u64().map_err(|_| bad())? as i64;
+            let bits = r.u8().map_err(|_| bad())?;
+            let rest = r.take(r.remaining()).map_err(|_| bad())?;
+            int(k, lo.wrapping_add(packed_at(rest, i, bits)? as i64))?
+        }
+        RUNS => {
+            let k = r.u8().map_err(|_| bad())?;
+            let runs = r.u32().map_err(|_| bad())? as usize;
+            let mut at = 0;
+            let mut found = None;
+            for _ in 0..runs {
+                let x = r.u64().map_err(|_| bad())? as i64;
+                at += r.u32().map_err(|_| bad())? as usize;
+                if i < at {
+                    found = Some(x);
+                    break;
+                }
+            }
+            int(k, found.ok_or_else(bad)?)?
+        }
+        FLOATS => {
+            r.take(8 * i).map_err(|_| bad())?;
+            Value::Float(f64::from_bits(r.u64().map_err(|_| bad())?))
+        }
+        BOOLS => {
+            let bytes = r.take(n.div_ceil(8)).map_err(|_| bad())?;
+            Value::Bool(packed_at(bytes, i, 1)? == 1)
+        }
+        TEXT => {
+            let total = r.u32().map_err(|_| bad())? as usize;
+            let offsets = r.take(4 * (n + 1)).map_err(|_| bad())?;
+            let o = |k: usize| {
+                u32::from_le_bytes(offsets[4 * k..4 * k + 4].try_into().expect("4")) as usize
+            };
+            let (from, to) = (o(i), o(i + 1));
+            let bytes = r.take(total).map_err(|_| bad())?;
+            let s = bytes.get(from..to).ok_or_else(bad)?;
+            Value::Text(std::str::from_utf8(s).map_err(|_| bad())?.to_string())
+        }
+        DECIMALS => {
+            let scale = r.u8().map_err(|_| bad())?;
+            let lo = r.u64().map_err(|_| bad())? as i64;
+            let bits = r.u8().map_err(|_| bad())?;
+            let rest = r.take(r.remaining()).map_err(|_| bad())?;
+            let m = lo.wrapping_add(packed_at(rest, i, bits)? as i64);
+            Value::Numeric(crate::decimal::Decimal::new(
+                i128::from(m),
+                u32::from(scale),
+            )?)
+        }
+        _ => return Ok(None),
+    }))
 }
 
 /// A column [`encode`]d, as a vector.
@@ -349,6 +489,26 @@ pub fn decode(b: &[u8]) -> Result<Vector> {
             }
             Ok(Vector::Values(vals))
         }
+        DECIMALS => {
+            let scale = u32::from(r.u8().map_err(|_| bad())?);
+            let lo = r.u64().map_err(|_| bad())? as i64;
+            let bits = r.u8().map_err(|_| bad())?;
+            let rest = r.take(r.remaining()).map_err(|_| bad())?;
+            let ms = unpack(rest, n, bits)?;
+            let mut vals = Vec::with_capacity(n);
+            for (i, d) in ms.into_iter().enumerate() {
+                if nulls.as_ref().is_some_and(|z| z[i]) {
+                    vals.push(Value::Null);
+                } else {
+                    let m = lo.wrapping_add(d as i64);
+                    vals.push(Value::Numeric(crate::decimal::Decimal::new(
+                        i128::from(m),
+                        scale,
+                    )?));
+                }
+            }
+            Ok(Vector::Values(vals))
+        }
         _ => Err(bad()),
     }
 }
@@ -391,7 +551,43 @@ mod tests {
         let v = decode(&b).unwrap();
         let back: Vec<Value> = (0..values.len()).map(|i| v.value(i)).collect();
         assert_eq!(back, values);
+        // A point read of each row: what decoding the column gives.
+        for (i, want) in values.iter().enumerate() {
+            if let Some(got) = value_at(&b, i).unwrap() {
+                assert_eq!(&got, want, "row {i}");
+            }
+        }
+        assert!(value_at(&b, values.len()).is_err());
         b.len()
+    }
+
+    #[test]
+    fn decimals_of_one_scale_pack_their_unscaled_values() {
+        let d = |m: i128, s: u32| Value::Numeric(crate::decimal::Decimal::new(m, s).unwrap());
+        let prices: Vec<Value> = (0..1000)
+            .map(|i| {
+                if i % 9 == 0 {
+                    Value::Null
+                } else {
+                    d(90_000 + i * 37, 2)
+                }
+            })
+            .collect();
+        assert!(roundtrip(prices.clone()) < 1000 * 4, "packed");
+        assert_eq!(encode(&prices)[0], DECIMALS);
+        assert!(value_at(&encode(&prices), 5).unwrap().is_some());
+        // Of two scales, or past 64 bits: each value as it is.
+        let mixed = vec![d(15, 1), d(150, 2), Value::Null];
+        roundtrip(mixed.clone());
+        assert_eq!(encode(&mixed)[0], VALUES);
+        let wide = vec![d(i128::from(i64::MAX) * 10, 0), d(1, 0)];
+        roundtrip(wide.clone());
+        assert_eq!(encode(&wide)[0], VALUES);
+        roundtrip(vec![
+            d(-5, 3),
+            d(i128::from(i64::MIN), 3),
+            d(i128::from(i64::MAX), 3),
+        ]);
     }
 
     #[test]

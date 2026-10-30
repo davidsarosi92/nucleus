@@ -86,7 +86,8 @@ impl TimeKind {
         })
     }
 
-    fn value(self, x: i64) -> Value {
+    /// The value of this kind an integer stands for.
+    pub(crate) fn value(self, x: i64) -> Value {
         match self {
             TimeKind::Date => Value::Date(x as i32),
             TimeKind::Time => Value::Time(x),

@@ -77,3 +77,15 @@ SELECT ls.k, (SELECT sum(lb.v) FROM ls s2 JOIN lb ON lb.id = s2.ref WHERE s2.w <
 3 154
 4 119
 5 1112
+
+# A lookup inside a correlated subquery whose outer query has a join: the
+# lookup's right side reads its left row (one level) and the outer row (two),
+# and both stay right when the outer plan's rows are narrowed.
+query III
+SELECT a.k, b.w, (SELECT sum(lb.v) FROM ls s2 JOIN lb ON lb.id = s2.ref AND lb.v > a.w WHERE s2.w <= b.w) FROM ls a JOIN ls b ON b.k = a.k ORDER BY 1
+----
+1 10 35
+2 20 154
+3 30 154
+4 40 119
+5 50 1112

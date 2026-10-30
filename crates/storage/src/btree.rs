@@ -981,6 +981,12 @@ impl<'t> Cursor<'t> {
     /// Entry `i` of the current leaf, into `key` and `val` (replacing what
     /// they held, their buffers reused).
     fn entry_into(&self, i: usize, key: &mut Vec<u8>, val: &mut Vec<u8>) -> Result<()> {
+        self.key_into(i, key)?;
+        self.value_into(i, val)
+    }
+
+    /// Entry `i`'s key into `key`.
+    fn key_into(&self, i: usize, key: &mut Vec<u8>) -> Result<()> {
         let r = self.leaf.as_ref().expect("a cursor is always in a leaf");
         let page = r.read();
         let corrupt = |reason| Error::Corrupt {
@@ -990,6 +996,18 @@ impl<'t> Cursor<'t> {
         let v = View::new(&page).map_err(corrupt)?;
         key.clear();
         v.key(i).map_err(corrupt)?.append_to(key);
+        Ok(())
+    }
+
+    /// Entry `i`'s value into `val`.
+    fn value_into(&self, i: usize, val: &mut Vec<u8>) -> Result<()> {
+        let r = self.leaf.as_ref().expect("a cursor is always in a leaf");
+        let page = r.read();
+        let corrupt = |reason| Error::Corrupt {
+            page: r.id(),
+            reason,
+        };
+        let v = View::new(&page).map_err(corrupt)?;
         val.clear();
         let id = r.id();
         match v.value(i).map_err(corrupt)? {
@@ -1020,9 +1038,25 @@ impl<'t> Cursor<'t> {
     /// [`next_entry`](Self::next_entry) into `key` and `val` (their buffers
     /// reused); false at the end.
     pub fn next_into(&mut self, key: &mut Vec<u8>, val: &mut Vec<u8>) -> Result<bool> {
+        self.next_within(key, val, &|_| true)
+    }
+
+    /// [`next_into`](Self::next_into), the value read only when `keep` holds
+    /// for the key: false at the end and at a key `keep` refuses (its value
+    /// — perhaps long, compressed, in overflow pages — left unread).
+    pub fn next_within(
+        &mut self,
+        key: &mut Vec<u8>,
+        val: &mut Vec<u8>,
+        keep: &dyn Fn(&[u8]) -> bool,
+    ) -> Result<bool> {
         loop {
             if self.pos < self.leaf_len {
-                self.entry_into(self.pos, key, val)?;
+                self.key_into(self.pos, key)?;
+                if !keep(key) {
+                    return Ok(false);
+                }
+                self.value_into(self.pos, val)?;
                 self.pos += 1;
                 return Ok(true);
             }
@@ -1098,7 +1132,13 @@ impl Range<'_> {
                 Err(e) => Err(e),
             }
         } else {
-            self.cursor.next_into(key, val)
+            // The end checked on the key, before its value is read.
+            let end = &self.end;
+            self.cursor.next_within(key, val, &|k| match end {
+                Bound::Unbounded => true,
+                Bound::Included(e) => k <= &e[..],
+                Bound::Excluded(e) => k < &e[..],
+            })
         };
         match more {
             Ok(true) => {}
@@ -1140,7 +1180,15 @@ impl Iterator for Range<'_> {
         let item = if self.reverse {
             self.cursor.prev_entry()
         } else {
-            self.cursor.next_entry()
+            let (mut k, mut v) = (Vec::new(), Vec::new());
+            let end = &self.end;
+            self.cursor
+                .next_within(&mut k, &mut v, &|key| match end {
+                    Bound::Unbounded => true,
+                    Bound::Included(e) => key <= &e[..],
+                    Bound::Excluded(e) => key < &e[..],
+                })
+                .map(|more| more.then_some((k, v)))
         };
         let (k, v) = match item {
             Ok(Some(kv)) => kv,

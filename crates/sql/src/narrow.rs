@@ -278,7 +278,7 @@ fn outer_refs(plan: &Plan, nesting: usize, out: &mut Vec<usize>) {
             _ => {}
         })
     });
-    for c in plan.children() {
-        outer_refs(c, nesting, out);
+    for (c, below) in plan.child_levels() {
+        outer_refs(c, nesting + below, out);
     }
 }

@@ -414,13 +414,10 @@ fn segment_of(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<Option<Segment>>
     let p = t.index_prefix(DIRECTORY);
     let from = dir_key(t, key);
     let to = prefix_end(&p).expect("directory prefix");
-    let Some(e) = txn
-        .scan(Bound::Included(&from), Bound::Excluded(&to))?
-        .next()
-    else {
+    // Just the first entry at or after the key: no read-ahead.
+    let Some((k, v)) = txn.first(Bound::Included(&from), Bound::Excluded(&to))? else {
         return Ok(None);
     };
-    let (k, v) = e?;
     let seg = Segment::decode(&k[p.len()..], &v)?;
     Ok((seg.first.as_slice() <= key).then_some(seg))
 }
@@ -495,7 +492,15 @@ impl Keys {
 enum Decoded {
     Keys(Arc<Keys>),
     Column(Arc<Vector>),
+    /// A column's encoding as stored (decompressed), for point reads of
+    /// one value ([`crate::segment::value_at`]): smaller than the column
+    /// decoded.
+    Raw(Arc<Vec<u8>>),
 }
+
+/// The cache key of a column's encoding as stored (beside its decoded
+/// form's, the column itself).
+const RAW: u16 = 0x8000;
 
 /// Decoded columns by (segment id, column): a segment never changes, so
 /// they stay right.  Bounded by their size; past it, those used longest
@@ -522,6 +527,7 @@ fn decoded_bytes(d: &Decoded) -> usize {
     let nulls = |n: &Option<Vec<bool>>| n.as_ref().map_or(0, Vec::len);
     64 + match d {
         Decoded::Keys(k) => k.offsets.len() * 4 + k.bytes.len(),
+        Decoded::Raw(b) => b.len(),
         Decoded::Column(v) => match &**v {
             Vector::Const(_) => 32,
             Vector::Int(d, n) | Vector::Time(_, d, n) => d.len() * 8 + nulls(n),
@@ -599,6 +605,43 @@ fn keys_of(txn: &dyn KvTxn, t: &Table, seg: &Segment) -> Result<Arc<Keys>> {
     }
 }
 
+/// Row `i` of column `col` of `seg`: from the column decoded if it is
+/// cached, else read from its stored encoding where that allows (the
+/// encoding cached, not the column decoded — a point read's way), else
+/// from the column decoded.
+fn value_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> Result<Value> {
+    if !seg.cols.contains(&(col as u16)) {
+        return Ok(Value::Null);
+    }
+    let decoded = cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(seg.id, col as u16));
+    if let Some(Decoded::Column(v)) = decoded {
+        return Ok(v.value(i));
+    }
+    let key = (seg.id, col as u16 | RAW);
+    let raw = cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key);
+    let raw = match raw {
+        Some(Decoded::Raw(b)) => b,
+        _ => {
+            let b = Arc::new(
+                txn.get(&chunk_key(t, seg.id, col as u16))?
+                    .ok_or_else(|| bad("a column is missing"))?,
+            );
+            cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, Decoded::Raw(Arc::clone(&b)));
+            b
+        }
+    };
+    match crate::segment::value_at(&raw, i)? {
+        Some(v) => Ok(v),
+        None => Ok(column_of(txn, t, seg, col)?.value(i)),
+    }
+}
+
 fn column_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize) -> Result<Arc<Vector>> {
     if !seg.cols.contains(&(col as u16)) {
         // A column added after the segment was written: NULL.
@@ -606,7 +649,7 @@ fn column_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize) -> Result<Ar
     }
     match cached(txn, t, seg, col as u16)? {
         Decoded::Column(v) => Ok(v),
-        Decoded::Keys(_) => Err(bad("a column")),
+        Decoded::Keys(_) | Decoded::Raw(_) => Err(bad("a column")),
     }
 }
 
@@ -673,7 +716,7 @@ fn segment_row(
         if wanted.is_some_and(|w| !w.get(c).copied().unwrap_or(false)) {
             row.push(Value::Null);
         } else {
-            row.push(column_of(txn, t, seg, c)?.value(i));
+            row.push(value_of(txn, t, seg, c, i)?);
         }
     }
     Ok(row)

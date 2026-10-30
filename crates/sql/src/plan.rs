@@ -546,6 +546,35 @@ impl Plan {
         }
     }
 
+    /// The inputs of this node, each with the levels of rows its `Outer`
+    /// references count from here: 1 for an index nested loop's right
+    /// side, which reads the left row as the nearest one (its depth 1),
+    /// else 0.
+    pub fn child_levels(&self) -> Vec<(&Plan, usize)> {
+        match self {
+            Plan::Join {
+                left,
+                right,
+                algo: JoinAlgo::Lookup,
+                ..
+            } => vec![(left, 0), (right, 1)],
+            p => p.children().into_iter().map(|c| (c, 0)).collect(),
+        }
+    }
+
+    /// [`child_levels`](Plan::child_levels), to change.
+    pub fn child_levels_mut(&mut self) -> Vec<(&mut Plan, usize)> {
+        match self {
+            Plan::Join {
+                left,
+                right,
+                algo: JoinAlgo::Lookup,
+                ..
+            } => vec![(left, 0), (right, 1)],
+            p => p.children_mut().into_iter().map(|c| (c, 0)).collect(),
+        }
+    }
+
     /// The inputs of this node, to change.
     pub fn children_mut(&mut self) -> Vec<&mut Plan> {
         match self {
@@ -642,8 +671,8 @@ impl Plan {
                 _ => {}
             })
         });
-        for c in self.children_mut() {
-            c.remap_level(nesting, f);
+        for (c, below) in self.child_levels_mut() {
+            c.remap_level(nesting + below, f);
         }
     }
 
@@ -657,8 +686,8 @@ impl Plan {
                 _ => {}
             })
         });
-        for c in self.children_mut() {
-            c.deepen(nesting, by);
+        for (c, below) in self.child_levels_mut() {
+            c.deepen(nesting + below, by);
         }
     }
 
@@ -737,8 +766,8 @@ impl Plan {
                 _ => {}
             })
         });
-        for c in self.children() {
-            c.outer_depth_at(nesting, max);
+        for (c, below) in self.child_levels() {
+            c.outer_depth_at(nesting + below, max);
         }
     }
 }

@@ -338,6 +338,15 @@ pub trait KvTxn: Send {
         None
     }
 
+    /// The first entry of the range `[start, end)` (bounds as [`scan`]'s),
+    /// for a reader that wants just it: by default the scan's first; an
+    /// implementation may skip the read-ahead a scan does.
+    ///
+    /// [`scan`]: KvTxn::scan
+    fn first(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.scan(start, end)?.next().transpose()
+    }
+
     /// Up to `parts - 1` keys inside `[start, end)` (`end` `None`: no
     /// bound) that cut it into parts of about equal size, ascending — where
     /// a parallel scan splits its range; none (the default) when the
@@ -655,6 +664,10 @@ impl KvTxn for LocalTxn {
     fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
         let scan = self.0.scan(start, end)?;
         Ok(Box::new(scan.map(|r| r.map_err(Error::from))))
+    }
+
+    fn first(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Ok(self.0.first(start, end)?)
     }
 
     fn get_validated(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {

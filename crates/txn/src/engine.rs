@@ -686,34 +686,86 @@ impl Inner {
     /// Deletes for the versions of `user` that no snapshot at or after `wm`
     /// can see: all but the newest at or below `wm`, and that one too if it
     /// is a tombstone.
-    fn garbage(
+    /// A commit's checks of the keys it writes, in one walk over each key's
+    /// versions (and one read of the tree for them all): the first key a
+    /// newer commit wrote — or another transaction has spilled a write of —
+    /// is a conflict (`Some`); else the versions the commit drops go to
+    /// `ops`, those older than the one each keeps.  Fresh keys
+    /// ([`Transaction::fresh`]) are skipped.
+    #[allow(clippy::type_complexity)]
+    fn commit_checks(
         &self,
-        user: &[u8],
+        keys: &mut dyn Iterator<Item = (&[u8], bool)>,
+        start: u64,
+        me: Option<u64>,
         wm: u64,
         ops: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
-    ) -> Result<()> {
+    ) -> Result<Option<Vec<u8>>> {
         let unresolved = self.unresolved_ids();
+        let others: Vec<u64> = if self.side_users.load(Ordering::Acquire) == 0 {
+            Vec::new()
+        } else {
+            lock(&self.spilling)
+                .iter()
+                .copied()
+                .filter(|&id| Some(id) != me)
+                .collect()
+        };
         let tree = self.store.read()?;
-        // A key with a write still in the side area keeps its versions
-        // until that write is moved (its order among them is its commit
-        // timestamp's).
-        if Inner::in_side(&tree, &unresolved, user)? {
-            return Ok(());
-        }
-        let from = encode_key(user, wm);
-        let to = after_versions(user);
-        let mut first = true;
-        for entry in tree.range(Bound::Included(&from), Bound::Excluded(&to))? {
-            let (k, v) = entry?;
-            let tombstone = decode_value(&v)
-                .ok_or(Error::Corrupt("bad version value"))?
-                .is_none();
-            if !first || tombstone {
-                ops.push((k, None));
+        let mut dropped = Vec::new();
+        for (user, fresh) in keys {
+            if fresh {
+                continue;
             }
-            first = false;
+            // Newest first: the first version decides the conflict; those
+            // at or below the watermark past the first (or a tombstone)
+            // can go.
+            dropped.clear();
+            let mut newest = None;
+            let mut kept = false;
+            for entry in tree.range(
+                Bound::Included(&first_version(user)),
+                Bound::Excluded(&after_versions(user)),
+            )? {
+                let (k, v) = entry?;
+                let (_, vts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
+                if newest.is_none() {
+                    if vts > start {
+                        return Ok(Some(user.to_vec()));
+                    }
+                    newest = Some(vts);
+                }
+                if vts <= wm {
+                    let tombstone = decode_value(&v)
+                        .ok_or(Error::Corrupt("bad version value"))?
+                        .is_none();
+                    if kept || tombstone {
+                        dropped.push((k, None));
+                    }
+                    kept = true;
+                }
+            }
+            // A committed write still in a side area: newer, a conflict;
+            // any, and the versions stay until it moves.
+            let mut in_side = false;
+            for &(id, cts) in &unresolved {
+                if tree.get(&side_key(id, user))?.is_some() {
+                    if cts > start {
+                        return Ok(Some(user.to_vec()));
+                    }
+                    in_side = true;
+                }
+            }
+            for &id in &others {
+                if tree.get(&side_key(id, user))?.is_some() {
+                    return Ok(Some(user.to_vec()));
+                }
+            }
+            if !in_side {
+                ops.append(&mut dropped);
+            }
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -1042,6 +1094,17 @@ impl Transaction {
         })
     }
 
+    /// The first visible entry in the range, read without reading ahead.
+    pub fn first(
+        &self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let mut scan = self.scan(start, end)?;
+        scan.batch = 1;
+        scan.next().transpose()
+    }
+
     /// Commits; returns the commit timestamp (the snapshot for a transaction
     /// that wrote nothing).  On [`Error::Conflict`] nothing was written.
     pub fn commit(mut self) -> Result<Timestamp> {
@@ -1053,23 +1116,20 @@ impl Transaction {
         let spilled = self.spilled;
         let (ts, lsn) = {
             let mut last = lock(&engine.commit);
-            for key in self.writes.keys() {
-                if !self.is_fresh(key) && engine.conflicts(key, self.start, spilled)? {
-                    return Err(Error::Conflict { key: key.clone() });
-                }
+            let wm = engine.current_watermark();
+            let mut ops = Vec::with_capacity(self.writes.len() + 1);
+            // Each key's conflict and the versions its write lets go, in
+            // one walk (spilled keys were checked as they spilled, and every
+            // commit since has checked its keys against them).
+            let mut keys = self.writes.keys().map(|k| (k.as_slice(), self.is_fresh(k)));
+            if let Some(key) = engine.commit_checks(&mut keys, self.start, spilled, wm, &mut ops)? {
+                return Err(Error::Conflict { key });
             }
-            // (Spilled keys were checked as they spilled, and every commit
-            // since has checked its keys against them.)
             // Serializable transactions record every read; others only
             // their validated ones.
             self.validate_reads(&engine)?;
             let ts = *last + 1;
-            let wm = engine.current_watermark();
-            let mut ops = Vec::with_capacity(self.writes.len() + 1);
             for (key, value) in &self.writes {
-                if !self.is_fresh(key) {
-                    engine.garbage(key, wm, &mut ops)?;
-                }
                 ops.push((encode_key(key, ts), Some(encode_value(value.as_deref()))));
                 if let Some(id) = spilled {
                     // Written again after it spilled: this write is the one.

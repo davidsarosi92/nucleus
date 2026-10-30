@@ -786,6 +786,9 @@ fn hashed(plan: Plan) -> Plan {
 /// index finds this many more (its fetch from the primary index, ~10 µs).
 const LOOKUP_ROWS: f64 = 12.0;
 const FETCH_ROWS: f64 = 20.0;
+/// A column table's lookup against a row table's, and its scan's rows.
+const COLUMN_LOOKUP: f64 = 4.0;
+const COLUMN_SCAN: f64 = 0.25;
 
 /// Hash joins whose right side is a table's scan, where an index on the
 /// join keys finds a left row's matches for less than reading the whole
@@ -874,11 +877,7 @@ fn lookup_side(
         return None;
     };
     st.of(&table)?;
-    // A column table's row by key decodes its segment's columns: not a
-    // lookup's few rows' worth (yet).
-    if table.storage != crate::storage::ROW {
-        return None;
-    }
+
     let column = |e: &Expr| match (e, &cols) {
         (Expr::Column(c), None) => Some(*c),
         (Expr::Column(c), Some(x)) => match x.get(*c) {
@@ -924,9 +923,16 @@ fn lookup_side(
         .map_or(read, |p| rows * st.selectivity(&table, &p))
         .max(1.0);
     let probes = estimate(left, st).max(1.0);
-    let lookup = probes * (LOOKUP_ROWS + read * if secondary { FETCH_ROWS } else { 1.0 });
+    // A column table scans for less (its batches, the columns read) and
+    // looks a row up for more (segments' columns read).
+    let (look, scan) = if table.storage == crate::storage::ROW {
+        (1.0, 1.0)
+    } else {
+        (COLUMN_LOOKUP, COLUMN_SCAN)
+    };
+    let lookup = look * probes * (LOOKUP_ROWS + read * if secondary { FETCH_ROWS } else { 1.0 });
     let filtered = local.map_or(rows, |p| rows * st.selectivity(&table, &p));
-    let hash = rows + 1.5 * probes + filtered;
+    let hash = scan * (rows + filtered) + 1.5 * probes;
     if lookup >= hash {
         return None;
     }
