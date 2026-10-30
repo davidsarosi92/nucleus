@@ -215,3 +215,35 @@ Project: #0
             Seq Scan on so
           Project: #0
             Seq Scan on sl filter: (#2 > 4)
+
+# A correlated subquery's result kept by the outer values it reads: rows
+# sharing them share it, rows differing in any do not (two levels, NULLs).
+statement ok
+CREATE TABLE memo_o (id INT PRIMARY KEY, g INT, h INT)
+
+statement ok
+INSERT INTO memo_o VALUES (1, 1, 10), (2, 1, 10), (3, 1, 20), (4, 2, 10), (5, NULL, 10), (6, NULL, 10)
+
+statement ok
+CREATE TABLE memo_i (g INT, h INT, v INT)
+
+statement ok
+INSERT INTO memo_i VALUES (1, 10, 1), (1, 10, 2), (1, 20, 4), (2, 10, 8), (2, 20, 16)
+
+query III rowsort
+SELECT id, (SELECT sum(v) FROM memo_i i WHERE i.g = o.g AND i.h = o.h), (SELECT count(*) FROM memo_i i WHERE i.g IS NOT DISTINCT FROM o.g) FROM memo_o o
+----
+1 3 3
+2 3 3
+3 4 3
+4 8 2
+5 NULL 0
+6 NULL 0
+
+query II rowsort
+SELECT o.id, (SELECT max(x.s) FROM (SELECT (SELECT sum(v) FROM memo_i i WHERE i.g = o.g AND i.h = j.h) AS s FROM memo_i j) x) FROM memo_o o WHERE o.g IS NOT NULL
+----
+1 4
+2 4
+3 4
+4 16

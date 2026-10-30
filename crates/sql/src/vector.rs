@@ -2115,8 +2115,13 @@ impl<'a> Morsels<'a> {
         use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
         let ambient = crate::parallel::Ambient::capture();
         let ctx = self.ctx;
-        let (registry, params, needed, validated) =
-            (ctx.registry, ctx.params, &ctx.needed, ctx.validated);
+        let (registry, params, needed, validated, memoize) = (
+            ctx.registry,
+            ctx.params,
+            &ctx.needed,
+            ctx.validated,
+            ctx.memoize,
+        );
         let (shared, ranges, workers) = (self.shared, &self.ranges, self.workers);
         let first = which.start;
         let n = which.len();
@@ -2137,6 +2142,7 @@ impl<'a> Morsels<'a> {
                             let mut wctx = Ctx::new(&txn, registry, params);
                             wctx.needed = needed.clone();
                             wctx.validated = validated;
+                            wctx.memoize = memoize;
                             let r = f(&wctx, ranges[first + m].clone());
                             if r.is_err() {
                                 failed.fetch_min(m, SeqCst);

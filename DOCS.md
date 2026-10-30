@@ -1095,7 +1095,12 @@ value not even fetched).  An expression with a subquery needs every
 column (a correlated subquery reads its row), as do `DISTINCT`, set
 operations, CTEs and recursion.  Subqueries' own plans decode only
 their columns too (a correlated index lookup into a column table, say,
-decodes the two columns it reads, not the segment's every one).  A grand total (an aggregate without `GROUP BY`) keeps one state,
+decodes the two columns it reads, not the segment's every one).  In a
+query, a correlated subquery's result is kept by the values it reads of
+the rows around it (each level's): a row with the same ones reuses it —
+`WHERE l_quantity < (SELECT 0.2 * avg(…) WHERE l_partkey = p_partkey)` runs
+once per part, not per line — unless it calls a volatile function or reads
+a table function (results of up to 1 024 rows, 65 536 per subquery).  A grand total (an aggregate without `GROUP BY`) keeps one state,
 hashing no key.
 
 **Batches** (`vector`, §M14.20).  A table scan by the primary key (or of
@@ -1751,9 +1756,9 @@ key order, listed in a directory keyed by each one's last key (index
 `u32::MAX - 3`; with its first key, rows, and each column's least and
 greatest values and `NULL`s).  Columns are encoded by what they hold:
 integers, dates, times and timestamps by frame of reference and bit
-packing, or runs; doubles as they are, booleans a bit each; text as a
-dictionary and bit-packed codes when values repeat, else Arrow's offsets
-and bytes; decimals of one scale whose unscaled values fit 64 bits as
+packing, or runs; doubles as they are, booleans a bit each; text (and
+`char(n)`, as kinds of its own) as a dictionary and bit-packed codes when
+values repeat, else Arrow's offsets and bytes; decimals of one scale whose unscaled values fit 64 bits as
 those integers, by frame of reference and bit packing; anything else value
 by value; `NULL`s a bitmap (a segment
 lists the table columns it holds: a partial column copy holds some).  A
@@ -1762,7 +1767,7 @@ are cached by id.  A read of one row (by its key: an index lookup, a
 correlated subquery's) takes each column's value from the column decoded
 if it is cached, else from its encoding as stored — cached instead of the
 column decoded, smaller — read where the value lies (`segment::value_at`:
-every layout but a dictionary's and value by value's).  A scan reads only the wanted columns of the segments
+every layout but value by value's).  A scan reads only the wanted columns of the segments
 its range overlaps, skips a segment the filters right above it rule out
 (column-constant comparisons against the segment's least and greatest
 values), and hands each run of a segment's rows to the vectorized executor
@@ -2539,6 +2544,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-30 — §M14.20 V10, from the V12 measurements:** `char(n)`
+  columns are segment dictionaries and offsets of their own (they were
+  stored value by value), and a dictionary's row is read where it lies —
+  a column table's index lookup no longer decodes `l_shipmode`'s segment:
+  TPC-H Q19 on column tables 42 s → 0.19 s; a query's correlated
+  subqueries keep their results by the outer values they read: Q17 1.5 →
+  0.12 s, Q2 0.20 → 0.06 s.
 - **2026-10-30 — §M14.20 V12, statistics across columns:** `ANALYZE`
   counts the columns of every multi-column key, index and `CREATE
   STATISTICS` together — distinct combinations and functional

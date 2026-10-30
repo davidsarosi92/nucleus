@@ -1344,6 +1344,7 @@ fn execute_statement(
             let plan = optimize(bound.plan, ro);
             let mut ctx = Ctx::new(ro, reg, params);
             ctx.needed = crate::prune::needed(&plan);
+            ctx.memoize = true;
             sink.columns(&columns_of(
                 bound.scope.cols.into_iter().map(|c| (c.name, c.ty)),
             ))?;
@@ -1474,6 +1475,7 @@ fn execute_statement(
             let profile = crate::profile::Profile::new(clock.clone());
             let mut ctx = Ctx::new(ro, reg, params);
             ctx.profile = Some(&profile);
+            ctx.memoize = true;
             let start = clock.as_ref().map(|k| k.elapsed());
             let rows = exec::collect(&plan, &ctx, None)?.len();
             let total = clock.zip(start).map(|(k, s)| k.elapsed().saturating_sub(s));

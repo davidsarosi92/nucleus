@@ -299,6 +299,14 @@ pub struct Ctx<'a> {
     pub validated: bool,
     /// Every node measured (`EXPLAIN ANALYZE`).
     pub profile: Option<&'a crate::profile::Profile>,
+    /// Correlated subqueries' results are kept by the outer values they
+    /// read (a query's: nothing it runs writes).
+    pub memoize: bool,
+    /// Those results, by plan address and outer values.
+    pub memo: RefCell<HashMap<(usize, Vec<Value>), std::rc::Rc<Vec<Row>>>>,
+    /// The outer values each correlated subquery reads (`None`: it is not
+    /// kept — a volatile function, a table function), by plan address.
+    pub memo_reads: RefCell<HashMap<usize, Option<Vec<(usize, usize)>>>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -314,6 +322,9 @@ impl<'a> Ctx<'a> {
             needed: HashMap::new(),
             validated: false,
             profile: None,
+            memoize: false,
+            memo: RefCell::new(HashMap::new()),
+            memo_reads: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -735,9 +746,83 @@ fn level_refs(plan: &Plan, nesting: usize, out: &mut Vec<usize>) {
     }
 }
 
+/// Correlated results kept per subquery at most, and rows per result.
+const MEMO_ENTRIES: usize = 65_536;
+const MEMO_ROWS: usize = 1024;
+
+/// The values (level above `plan`, column) a subquery's plan reads of the
+/// rows around it — 1 the row it runs for — or `None` if its result may
+/// differ for the same ones.
+fn outer_reads(plan: &Plan) -> Option<Vec<(usize, usize)>> {
+    fn walk(plan: &Plan, nesting: usize, out: &mut Vec<(usize, usize)>, ok: &mut bool) {
+        if matches!(plan, Plan::Function { .. }) {
+            *ok = false;
+        }
+        plan.for_each_expr(&mut |e| {
+            e.walk(&mut |x| match x {
+                Expr::Outer { depth, index } if *depth >= nesting => {
+                    out.push((depth - nesting + 1, *index));
+                }
+                Expr::Subquery(s) => walk(&s.plan, nesting + 1, out, ok),
+                Expr::Call(f, _) if f.volatility() == crate::ext::Volatility::Volatile => {
+                    *ok = false;
+                }
+                _ => {}
+            })
+        });
+        for (c, below) in plan.child_levels() {
+            walk(c, nesting + below, out, ok);
+        }
+    }
+    let (mut out, mut ok) = (Vec::new(), true);
+    walk(plan, 1, &mut out, &mut ok);
+    out.sort_unstable();
+    out.dedup();
+    ok.then_some(out)
+}
+
+/// A correlated subquery's rows for `env`: kept by the outer values it
+/// reads where the execution allows ([`Ctx::memoize`]).
+fn correlated_rows(sub: &SubPlan, env: &Env) -> Result<std::rc::Rc<Vec<Row>>> {
+    let run = || crate::exec::collect(&sub.plan, env.ctx, Some(env)).map(std::rc::Rc::new);
+    if !env.ctx.memoize {
+        return run();
+    }
+    let at = &sub.plan as *const Plan as usize;
+    let reads = env
+        .ctx
+        .memo_reads
+        .borrow_mut()
+        .entry(at)
+        .or_insert_with(|| outer_reads(&sub.plan))
+        .clone();
+    let Some(reads) = reads else { return run() };
+    let mut key = Vec::with_capacity(reads.len());
+    for (level, index) in reads {
+        let mut e = Some(env);
+        for _ in 1..level {
+            e = e.and_then(|x| x.outer);
+        }
+        match e.and_then(|x| x.row.get(index)) {
+            Some(v) => key.push(v.clone()),
+            None => return run(),
+        }
+    }
+    let key = (at, key);
+    if let Some(rows) = env.ctx.memo.borrow().get(&key) {
+        return Ok(rows.clone());
+    }
+    let rows = run()?;
+    let mut memo = env.ctx.memo.borrow_mut();
+    if rows.len() <= MEMO_ROWS && memo.len() < MEMO_ENTRIES {
+        memo.insert(key, rows.clone());
+    }
+    Ok(rows)
+}
+
 fn subquery(sub: &SubPlan, env: &Env) -> Result<Value> {
     let rows = if sub.correlated {
-        std::rc::Rc::new(crate::exec::collect(&sub.plan, env.ctx, Some(env))?)
+        correlated_rows(sub, env)?
     } else {
         let key = &sub.plan as *const Plan as usize;
         let cached = env.ctx.cache.borrow().get(&key).cloned();

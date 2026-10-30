@@ -5,8 +5,8 @@
 //!   packing (each value less the least, in as many bits as the largest
 //!   difference needs), or runs of equal values when there are few;
 //! - doubles as they are, booleans a bit each;
-//! - text: a dictionary and bit-packed codes when values repeat, else
-//!   offsets and bytes (Arrow's layout);
+//! - text (and `char(n)`, as its own kinds): a dictionary and bit-packed
+//!   codes when values repeat, else offsets and bytes (Arrow's layout);
 //! - decimals of one scale whose unscaled values fit 64 bits: those
 //!   integers, by frame of reference and bit packing;
 //! - anything else: each value's row encoding, back to back.
@@ -29,6 +29,9 @@ const BOOLS: u8 = 4;
 const DICT: u8 = 5;
 const TEXT: u8 = 6;
 const DECIMALS: u8 = 7;
+/// `DICT` and `TEXT` of `char(n)` values.
+const CHAR_DICT: u8 = 8;
+const CHAR_TEXT: u8 = 9;
 
 /// A decimal's unscaled value and scale, when the unscaled value fits 64
 /// bits.
@@ -140,6 +143,7 @@ pub fn encode(values: &[Value]) -> Vec<u8> {
         Some(Value::Float(_)) if live().all(|v| matches!(v, Value::Float(_))) => FLOATS,
         Some(Value::Bool(_)) if live().all(|v| matches!(v, Value::Bool(_))) => BOOLS,
         Some(Value::Text(_)) if live().all(|v| matches!(v, Value::Text(_))) => TEXT,
+        Some(Value::Char(_)) if live().all(|v| matches!(v, Value::Char(_))) => CHAR_TEXT,
         Some(f @ Value::Numeric(_))
             if dec_of(f)
                 .is_some_and(|(_, s)| live().all(|v| dec_of(v).is_some_and(|(_, vs)| vs == s))) =>
@@ -210,18 +214,23 @@ pub fn encode(values: &[Value]) -> Vec<u8> {
                 &mut out,
             );
         }
-        TEXT => {
+        TEXT | CHAR_TEXT => {
             fn text(v: &Value) -> &[u8] {
                 match v {
-                    Value::Text(s) => s.as_bytes(),
+                    Value::Text(s) | Value::Char(s) => s.as_bytes(),
                     _ => &[],
                 }
             }
+            let (dict_kind, text_kind) = if kind == CHAR_TEXT {
+                (CHAR_DICT, CHAR_TEXT)
+            } else {
+                (DICT, TEXT)
+            };
             let mut dict: Vec<&[u8]> = values.iter().filter(|v| !v.is_null()).map(text).collect();
             dict.sort_unstable();
             dict.dedup();
             if dict.len() <= n / 4 && dict.len() < 1 << 20 {
-                header(&mut out, DICT);
+                header(&mut out, dict_kind);
                 out.extend_from_slice(&(dict.len() as u32).to_le_bytes());
                 for d in &dict {
                     out.extend_from_slice(&(d.len() as u32).to_le_bytes());
@@ -238,7 +247,7 @@ pub fn encode(values: &[Value]) -> Vec<u8> {
                 };
                 pack(values.iter().map(code), bits, &mut out);
             } else {
-                header(&mut out, TEXT);
+                header(&mut out, text_kind);
                 let total: usize = values.iter().map(|v| text(v).len()).sum();
                 out.extend_from_slice(&(total as u32).to_le_bytes());
                 let mut at = 0u32;
@@ -357,7 +366,7 @@ pub fn value_at(b: &[u8], i: usize) -> Result<Option<Value>> {
             let bytes = r.take(n.div_ceil(8)).map_err(|_| bad())?;
             Value::Bool(packed_at(bytes, i, 1)? == 1)
         }
-        TEXT => {
+        TEXT | CHAR_TEXT => {
             let total = r.u32().map_err(|_| bad())? as usize;
             let offsets = r.take(4 * (n + 1)).map_err(|_| bad())?;
             let o = |k: usize| {
@@ -366,7 +375,22 @@ pub fn value_at(b: &[u8], i: usize) -> Result<Option<Value>> {
             let (from, to) = (o(i), o(i + 1));
             let bytes = r.take(total).map_err(|_| bad())?;
             let s = bytes.get(from..to).ok_or_else(bad)?;
-            Value::Text(std::str::from_utf8(s).map_err(|_| bad())?.to_string())
+            text_value(kind, s)?
+        }
+        DICT | CHAR_DICT => {
+            // Past the dictionary (lengths to skip by) to the row's code.
+            let m = r.u32().map_err(|_| bad())? as usize;
+            let mut entries = Vec::with_capacity(m.min(n));
+            for _ in 0..m {
+                let len = r.u32().map_err(|_| bad())? as usize;
+                entries.push(r.take(len).map_err(|_| bad())?);
+            }
+            let bits = r.u8().map_err(|_| bad())?;
+            let rest = r.take(r.remaining()).map_err(|_| bad())?;
+            let s = entries
+                .get(packed_at(rest, i, bits)? as usize)
+                .ok_or_else(bad)?;
+            text_value(kind, s)?
         }
         DECIMALS => {
             let scale = r.u8().map_err(|_| bad())?;
@@ -383,8 +407,48 @@ pub fn value_at(b: &[u8], i: usize) -> Result<Option<Value>> {
     }))
 }
 
+/// A text kind's value: `text`, or `char(n)` for the `CHAR_` kinds.
+fn text_value(kind: u8, s: &[u8]) -> Result<Value> {
+    let s = std::str::from_utf8(s).map_err(|_| bad())?.to_string();
+    Ok(if matches!(kind, CHAR_DICT | CHAR_TEXT) {
+        Value::Char(s)
+    } else {
+        Value::Text(s)
+    })
+}
+
+/// `char(n)` values decoded as text: as the row storage gives them, each
+/// a value.
+fn chars(v: Vector) -> Vector {
+    match v {
+        Vector::Text(offsets, bytes, nulls) => Vector::Values(
+            (0..offsets.len() - 1)
+                .map(|i| {
+                    if nulls.as_ref().is_some_and(|z| z[i]) {
+                        Value::Null
+                    } else {
+                        let s = &bytes[offsets[i] as usize..offsets[i + 1] as usize];
+                        Value::Char(String::from_utf8_lossy(s).into_owned())
+                    }
+                })
+                .collect(),
+        ),
+        v => v,
+    }
+}
+
 /// A column [`encode`]d, as a vector.
 pub fn decode(b: &[u8]) -> Result<Vector> {
+    let kind = *b.first().ok_or_else(bad)?;
+    let v = decode_kinds(b)?;
+    Ok(if matches!(kind, CHAR_DICT | CHAR_TEXT) {
+        chars(v)
+    } else {
+        v
+    })
+}
+
+fn decode_kinds(b: &[u8]) -> Result<Vector> {
     let mut r = Reader::new(b);
     let kind = r.u8().map_err(|_| bad())?;
     let n = r.u32().map_err(|_| bad())? as usize;
@@ -446,7 +510,7 @@ pub fn decode(b: &[u8]) -> Result<Vector> {
             let data = unpack(bytes, n, 1)?.into_iter().map(|x| x == 1).collect();
             Ok(Vector::Bool(data, nulls))
         }
-        DICT => {
+        DICT | CHAR_DICT => {
             let m = r.u32().map_err(|_| bad())? as usize;
             let mut dict = Vec::with_capacity(m.min(n));
             for _ in 0..m {
@@ -468,7 +532,7 @@ pub fn decode(b: &[u8]) -> Result<Vector> {
             check_utf8(&bytes)?;
             Ok(Vector::Text(offsets, bytes, nulls))
         }
-        TEXT => {
+        TEXT | CHAR_TEXT => {
             let total = r.u32().map_err(|_| bad())? as usize;
             let mut offsets = Vec::with_capacity(n + 1);
             for _ in 0..=n {
@@ -559,6 +623,46 @@ mod tests {
         }
         assert!(value_at(&b, values.len()).is_err());
         b.len()
+    }
+
+    #[test]
+    fn repeated_text_is_a_dictionary_read_a_row_at_a_time() {
+        let modes = ["AIR", "MAIL", "RAIL", "SHIP", "TRUCK"];
+        let values: Vec<Value> = (0..1000)
+            .map(|i| {
+                if i % 11 == 0 {
+                    Value::Null
+                } else {
+                    Value::Text(modes[i % 5].into())
+                }
+            })
+            .collect();
+        roundtrip(values.clone());
+        let b = encode(&values);
+        assert_eq!(b[0], DICT);
+        assert_eq!(value_at(&b, 3).unwrap(), Some(Value::Text("SHIP".into())));
+        assert_eq!(value_at(&b, 0).unwrap(), Some(Value::Null));
+    }
+
+    #[test]
+    fn char_values_are_text_kinds_of_their_own() {
+        let pad = |s: &str| Value::Char(format!("{s:<10}"));
+        let modes: Vec<Value> = (0..1000)
+            .map(|i| {
+                if i % 13 == 0 {
+                    Value::Null
+                } else {
+                    pad(["AIR", "MAIL", "SHIP"][i % 3])
+                }
+            })
+            .collect();
+        roundtrip(modes.clone());
+        assert_eq!(encode(&modes)[0], CHAR_DICT);
+        assert_eq!(value_at(&encode(&modes), 2).unwrap(), Some(pad("SHIP")));
+        let unique: Vec<Value> = (0..100).map(|i| pad(&format!("c{i}"))).collect();
+        roundtrip(unique.clone());
+        assert_eq!(encode(&unique)[0], CHAR_TEXT);
+        assert_eq!(value_at(&encode(&unique), 7).unwrap(), Some(pad("c7")));
     }
 
     #[test]
