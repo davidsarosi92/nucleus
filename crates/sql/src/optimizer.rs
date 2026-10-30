@@ -652,7 +652,9 @@ pub(crate) fn estimate(plan: &Plan, st: &Stats) -> f64 {
                 1.0
             } else {
                 let rows = estimate(input, st);
-                groups_of(input, group, st).map_or(rows * 0.1, |g| g.min(rows)).max(1.0)
+                groups_of(input, group, st)
+                    .map_or(rows * 0.1, |g| g.min(rows))
+                    .max(1.0)
             }
         }
         Plan::Join {
@@ -807,7 +809,10 @@ fn keyed_selectivity<'p>(
         }
         let combos: Vec<(f64, bool)> = sides
             .iter()
-            .map(|s| s.as_ref().map_or((1.0, false), |(t, cols)| st.group_distinct(t, cols)))
+            .map(|s| {
+                s.as_ref()
+                    .map_or((1.0, false), |(t, cols)| st.group_distinct(t, cols))
+            })
             .collect();
         if combos.iter().any(|c| c.1) {
             sel[ks[0]] = 1.0 / combos[0].0.max(combos[1].0).max(1.0);
@@ -832,7 +837,11 @@ fn groups_of(input: &Plan, exprs: &[Expr], st: &Stats) -> Option<f64> {
             None => per.push((t, vec![col])),
         }
     }
-    Some(per.iter().map(|(t, cols)| st.group_distinct(t, cols).0).product())
+    Some(
+        per.iter()
+            .map(|(t, cols)| st.group_distinct(t, cols).0)
+            .product(),
+    )
 }
 
 /// Each semi and anti join moved down among the (ordered) inner joins under

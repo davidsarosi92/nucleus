@@ -313,7 +313,9 @@ fn together_stats(
             }
             let mut counts: HashMap<Vec<&Value>, u64> = HashMap::new();
             for r in rows {
-                *counts.entry(set.iter().map(|&c| &r[c]).collect()).or_default() += 1;
+                *counts
+                    .entry(set.iter().map(|&c| &r[c]).collect())
+                    .or_default() += 1;
             }
             groups.push(GroupDistinct {
                 distinct: distinct_of(rows.len(), counts.values(), sampled, total),
@@ -678,13 +680,21 @@ fn together(table: &Table, stats: Option<&TableStats>, eqs: &[(usize, f64)]) -> 
                 let non_null = g
                     .columns
                     .iter()
-                    .map(|&c| s.columns.get(c).map_or(1.0, |cs| 1.0 - cs.nulls as f64 / rows))
+                    .map(|&c| {
+                        s.columns
+                            .get(c)
+                            .map_or(1.0, |cs| 1.0 - cs.nulls as f64 / rows)
+                    })
                     .fold(1.0, f64::min);
                 (non_null / (g.distinct as f64).max(1.0), g.columns.clone())
             }
             None => (1.0, Vec::new()),
         };
-        let mut left: Vec<usize> = cols.iter().copied().filter(|c| !covered.contains(c)).collect();
+        let mut left: Vec<usize> = cols
+            .iter()
+            .copied()
+            .filter(|c| !covered.contains(c))
+            .collect();
         while !left.is_empty() {
             let (at, p) = left
                 .iter()

@@ -1142,9 +1142,7 @@ impl<'a> Parser<'a> {
             if self.peek_op("(") {
                 for kind in self.ident_list()? {
                     if !matches!(kind.as_str(), "ndistinct" | "dependencies" | "mcv") {
-                        return Err(self.error(&format!(
-                            "unrecognized statistics kind \"{kind}\""
-                        )));
+                        return Err(self.error(&format!("unrecognized statistics kind \"{kind}\"")));
                     }
                 }
             }

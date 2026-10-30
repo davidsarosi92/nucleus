@@ -892,7 +892,11 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
             let stats = Stats::new(txn);
             for t in &tables {
                 let Some(s) = stats.of(t) else { continue };
-                let name = |c: usize| t.columns.get(c).map_or(Value::Null, |col| text(col.name.clone()));
+                let name = |c: usize| {
+                    t.columns
+                        .get(c)
+                        .map_or(Value::Null, |col| text(col.name.clone()))
+                };
                 for d in &s.dependencies {
                     out.push(vec![
                         id(t),

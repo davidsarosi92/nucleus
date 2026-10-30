@@ -1300,10 +1300,7 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         ("stxowner", int(t.owner.as_deref().map_or(OWNER, role_oid))),
                         ("stxstattarget", Value::Null),
                         ("stxkeys", attnums(&st.columns)),
-                        (
-                            "stxkind",
-                            Value::Array(vec![text("d"), text("f")]),
-                        ),
+                        ("stxkind", Value::Array(vec![text("d"), text("f")])),
                         ("stxexprs", Value::Null),
                     ]));
                 }
