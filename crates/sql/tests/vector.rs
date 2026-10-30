@@ -275,3 +275,44 @@ fn parallel_aggregates_agree() {
         "the aggregates ran in parallel"
     );
 }
+
+#[test]
+fn parallel_groups_in_key_order_past_work_mem_agree() {
+    // Grouped by a prefix of the primary key, the morsels' groups meet only
+    // at their edges: merged without a table of every group, so past
+    // work_mem the parallel run still holds.
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(9)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE q (a INT, b INT, v BIGINT, t TEXT, PRIMARY KEY (a, b)); \
+         INSERT INTO q SELECT i / 3, i % 3, i::bigint * 7919 % 100003, 'v' || (i % 7) \
+         FROM generate_series(1, 60000) i",
+    )
+    .unwrap();
+    let queries = [
+        "SELECT a, count(*), sum(v), min(t) FROM q GROUP BY a ORDER BY a",
+        "SELECT a, b % 2, sum(v) FROM q GROUP BY a, b % 2 ORDER BY 1, 2",
+        "SELECT b, a, max(v) FROM q WHERE v % 5 <> 0 GROUP BY b, a ORDER BY 2, 1",
+        "SELECT a, b, sum(v) FROM q GROUP BY a, b HAVING sum(v) > 99000 ORDER BY 1, 2",
+        "SELECT count(*), sum(c) FROM (SELECT a, count(*) AS c FROM q GROUP BY a) x",
+    ];
+    let mut one = session(&db, 1024);
+    one.execute("SET parallel_workers = 1; SET work_mem = '64kB'")
+        .unwrap();
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4; SET work_mem = '64kB'")
+        .unwrap();
+    let before = nucleus_sql::vector::parallel_runs();
+    for q in queries {
+        assert_eq!(outcome(&mut many, q), outcome(&mut one, q), "{q}");
+    }
+    assert!(
+        nucleus_sql::vector::parallel_runs() - before >= 4,
+        "the aggregates ran in parallel"
+    );
+}

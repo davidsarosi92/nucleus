@@ -35,7 +35,7 @@ use crate::stats::Stats;
 pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let stats = Stats::new(txn);
     let plan = push(crate::unnest::unnest(plan), &stats);
-    reorder(plan, &stats)
+    lookups(sink(reorder(plan, &stats), &stats), &stats)
 }
 
 /// A condition's conjuncts, the conjuncts every branch of an `OR` among
@@ -591,6 +591,21 @@ pub(crate) fn estimate(plan: &Plan, st: &Stats) -> f64 {
             left,
             right,
             kind,
+            algo: JoinAlgo::Lookup,
+            ..
+        } => {
+            // The right side's estimate is a lookup's: per left row.
+            let (l, per) = (estimate(left, st), estimate(right, st));
+            match kind {
+                JoinType::Inner => l * per,
+                JoinType::Left => (l * per).max(l),
+                JoinType::Semi | JoinType::Anti | JoinType::Full => l,
+            }
+        }
+        Plan::Join {
+            left,
+            right,
+            kind,
             on,
             ..
         } => {
@@ -600,18 +615,20 @@ pub(crate) fn estimate(plan: &Plan, st: &Stats) -> f64 {
             if let Some(on) = on {
                 let mut parts = Vec::new();
                 conjuncts(on.clone(), &mut parts);
-                for p in &parts {
-                    sel *= join_selectivity(
-                        p,
-                        |c| {
-                            if c < lw {
-                                origin(left, c)
-                            } else {
-                                origin(right, c - lw)
-                            }
-                        },
-                        st,
-                    );
+                let origin_of = |c: usize| {
+                    if c < lw {
+                        origin(left, c)
+                    } else {
+                        origin(right, c - lw)
+                    }
+                };
+                let each: Vec<f64> = parts
+                    .iter()
+                    .map(|p| join_selectivity(p, origin_of, st))
+                    .collect();
+                let side = |c: usize| usize::from(c >= lw);
+                for s in keyed_selectivity(&parts, each, &side, &origin_of, st) {
+                    sel *= s;
                 }
             }
             let out = l * r * sel;
@@ -657,11 +674,11 @@ fn join_selectivity<'p>(
 /// other meets at most one of its rows, so together they select
 /// 1 / its rows — not the product of their selectivities, which takes
 /// them for independent (and a join on a two-column key for none).
-fn keyed_selectivity(
-    leaves: &[(Plan, usize)],
+fn keyed_selectivity<'p>(
     conds: &[Expr],
     mut sel: Vec<f64>,
     leaf_of: &dyn Fn(usize) -> usize,
+    origin_of: &dyn Fn(usize) -> Option<(&'p Table, usize)>,
     st: &Stats,
 ) -> Vec<f64> {
     let columns = |c: &Expr| match c {
@@ -688,7 +705,7 @@ fn keyed_selectivity(
             for &k in &ks {
                 let (x, y) = columns(&conds[k]).expect("an equality");
                 let c = if leaf_of(x) == side { x } else { y };
-                match origin(&leaves[side].0, c - leaves[side].1) {
+                match origin_of(c) {
                     Some((t, col)) if table.is_none_or(|u: &Table| u.id == t.id) => {
                         table = Some(t);
                         cols.push(col);
@@ -715,6 +732,211 @@ fn keyed_selectivity(
         }
     }
     sel
+}
+
+/// Each semi and anti join moved down among the (ordered) inner joins under
+/// it to where it meets the fewest rows (`unnest::place`), hashed on its
+/// equalities there.
+fn sink(plan: Plan, st: &Stats) -> Plan {
+    match map_children(plan, &|c| sink(c, st)) {
+        Plan::Join {
+            left,
+            right,
+            kind: kind @ (JoinType::Semi | JoinType::Anti),
+            on: Some(on),
+            ..
+        } => {
+            let known = analyzed(&left, st);
+            let rows = |p: &Plan| known.then(|| estimate(p, st));
+            hashed(crate::unnest::place(*left, *right, on, kind, &rows))
+        }
+        other => other,
+    }
+}
+
+/// `plan` with its semi and anti joins without an algorithm yet (as
+/// `unnest::place` makes them) hashed on their equalities.
+fn hashed(plan: Plan) -> Plan {
+    match map_children(plan, &hashed) {
+        Plan::Join {
+            left,
+            right,
+            kind: kind @ (JoinType::Semi | JoinType::Anti),
+            on: Some(on),
+            algo: JoinAlgo::NestedLoop,
+        } => {
+            let mut parts = Vec::new();
+            conjuncts(on.clone(), &mut parts);
+            let algo = hash_keys(&parts, left.width());
+            Plan::Join {
+                left,
+                right,
+                kind,
+                on: Some(on),
+                algo,
+            }
+        }
+        other => other,
+    }
+}
+
+/// An index lookup costs about this many rows of a scan (the descent,
+/// measured: ~7 µs against ~0.7 µs a row scanned), each row a secondary
+/// index finds this many more (its fetch from the primary index, ~10 µs).
+const LOOKUP_ROWS: f64 = 12.0;
+const FETCH_ROWS: f64 = 20.0;
+
+/// Hash joins whose right side is a table's scan, where an index on the
+/// join keys finds a left row's matches for less than reading the whole
+/// table: index nested loops (`JoinAlgo::Lookup`), the right side a scan by
+/// that index of the left row's values.  Analyzed tables only.
+fn lookups(plan: Plan, st: &Stats) -> Plan {
+    match map_children(plan, &|c| lookups(c, st)) {
+        Plan::Join {
+            left,
+            right,
+            kind,
+            on,
+            algo:
+                JoinAlgo::Hash {
+                    left_keys,
+                    right_keys,
+                },
+        } => {
+            let lookup = (kind != JoinType::Full)
+                .then(|| lookup_side(&left, &right, &left_keys, &right_keys, st))
+                .flatten();
+            // An inner join may look the left side up instead (the larger,
+            // which the reordering made the probe side), the columns put
+            // back in order above.
+            let swapped = (kind == JoinType::Inner && lookup.is_none())
+                .then(|| lookup_side(&right, &left, &right_keys, &left_keys, st))
+                .flatten();
+            match (lookup, swapped) {
+                (Some(right), _) => Plan::Join {
+                    left,
+                    right: Box::new(right),
+                    kind,
+                    on,
+                    algo: JoinAlgo::Lookup,
+                },
+                (None, Some(looked_up)) => {
+                    let (lw, rw) = (left.width(), right.width());
+                    let back = |c: usize| Expr::Column(if c < lw { c + rw } else { c - lw });
+                    Plan::Project {
+                        input: Box::new(Plan::Join {
+                            left: right,
+                            right: Box::new(looked_up),
+                            kind,
+                            on: on.map(|e| e.map_columns(&back)),
+                            algo: JoinAlgo::Lookup,
+                        }),
+                        exprs: (0..lw + rw).map(back).collect(),
+                    }
+                }
+                (None, None) => Plan::Join {
+                    left,
+                    right,
+                    kind,
+                    on,
+                    algo: JoinAlgo::Hash {
+                        left_keys,
+                        right_keys,
+                    },
+                },
+            }
+        }
+        other => other,
+    }
+}
+
+/// `right` (a scan, under a projection of columns) as a scan by an index
+/// of `left_keys`' values — when cheaper than hashing it all.
+fn lookup_side(
+    left: &Plan,
+    right: &Plan,
+    left_keys: &[Expr],
+    right_keys: &[Expr],
+    st: &Stats,
+) -> Option<Plan> {
+    // Its references to enclosing rows one level further: the left row is
+    // the nearest now.
+    let mut right = right.clone();
+    right.deepen(1, 1);
+    let (scan, cols) = match right {
+        Plan::Project { input, exprs } if exprs.iter().all(|e| matches!(e, Expr::Column(_))) => {
+            (*input, Some(exprs))
+        }
+        p => (p, None),
+    };
+    let Plan::Scan { table, filter, .. } = scan else {
+        return None;
+    };
+    st.of(&table)?;
+    let column = |e: &Expr| match (e, &cols) {
+        (Expr::Column(c), None) => Some(*c),
+        (Expr::Column(c), Some(x)) => match x.get(*c) {
+            Some(Expr::Column(i)) => Some(*i),
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut preds = Vec::new();
+    if let Some(f) = filter {
+        conjuncts(f, &mut preds);
+    }
+    let local = conjunction(preds.clone());
+    let mut keys = Vec::new();
+    for (l, r) in left_keys.iter().zip(right_keys) {
+        if l.has_subquery() {
+            return None;
+        }
+        keys.push(Expr::Binary(
+            BinaryOp::Eq,
+            Box::new(Expr::Column(column(r)?)),
+            Box::new(l.lifted(1)),
+        ));
+    }
+    preds.extend(keys.iter().cloned());
+    let access = choose_access(&table, &preds, Some(st));
+    let by_row = |e: &Expr| {
+        let mut found = false;
+        e.walk(&mut |x| found |= matches!(x, Expr::Outer { depth: 1, .. }));
+        found
+    };
+    let secondary = match &access {
+        Access::Key { index, prefix, .. } if prefix.iter().any(by_row) => index.is_some(),
+        _ => return None,
+    };
+    // A lookup reads the rows of one key value — all of them, the filter
+    // only drops some after — and gives those the filter keeps.
+    let rows = st.rows(&table).max(1.0);
+    let read = conjunction(keys)
+        .map_or(rows, |p| rows * st.selectivity(&table, &p))
+        .max(1.0);
+    let matches = conjunction(preds.clone())
+        .map_or(read, |p| rows * st.selectivity(&table, &p))
+        .max(1.0);
+    let probes = estimate(left, st).max(1.0);
+    let lookup = probes * (LOOKUP_ROWS + read * if secondary { FETCH_ROWS } else { 1.0 });
+    let filtered = local.map_or(rows, |p| rows * st.selectivity(&table, &p));
+    let hash = rows + 1.5 * probes + filtered;
+    if lookup >= hash {
+        return None;
+    }
+    let scan = Plan::Scan {
+        table,
+        access,
+        filter: conjunction(preds),
+        estimate: Some(matches),
+    };
+    Some(match cols {
+        Some(exprs) => Plan::Project {
+            input: Box::new(scan),
+            exprs,
+        },
+        None => scan,
+    })
 }
 
 fn analyzed(plan: &Plan, st: &Stats) -> bool {
@@ -886,7 +1108,16 @@ fn reorder_leaves(leaves: Vec<(Plan, usize)>, conds: Vec<Expr>, st: &Stats) -> O
             )
         })
         .collect();
-    let cond_sel = keyed_selectivity(&leaves, &conds, cond_sel, &leaf_of, st);
+    let cond_sel = keyed_selectivity(
+        &conds,
+        cond_sel,
+        &leaf_of,
+        &|col| {
+            let l = leaf_of(col);
+            origin(&leaves[l].0, col - leaves[l].1)
+        },
+        st,
+    );
     let leaf_rows: Vec<f64> = leaves
         .iter()
         .map(|(p, _)| estimate(p, st).max(1.0))

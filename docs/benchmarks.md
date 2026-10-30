@@ -103,9 +103,10 @@ python3 bench/tpch.py --nucleus target/release/nucleus --sf 1 \
 > **Not up to date.**  These numbers are of `09a6d55`.  Changes since
 > (join estimates on two-column keys, semi joins placed below joins, the
 > sharded buffer pool, hardware CRC-32C, LZ only for values of 1 KiB or
-> more, the column cache) cut, measured on rows in one session, Q9
-> 26 → 6.7 s, Q18 25 → 9.6 s, Q4 2.5 → 1.9 s, Q6 1.1 → 0.7 s; a full run
-> against PostgreSQL follows the next changes.
+> more, the column cache, index nested loops, semi joins placed by
+> estimate, parallel aggregates in key order) cut, measured on rows in one
+> session, all 22 queries 125 → 35 s (Q2 14 → 0.16 s, Q18 25 → 1.7 s, Q9
+> 26 → 6.7 s); a full run against PostgreSQL follows.
 
 2026-10-30, SF 1 (6 million `lineitem` rows), the machine above; one run
 per query; nucleus with every table in rows, and with all but `region` and

@@ -1151,6 +1151,10 @@ rows of a full join in a bitmap).  Still held whole: a recursive `UNION`'s
 rows seen, and the validated reads of a transaction (§5.2).
 Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context) — unless unnested into a join (§8.6).
+An **index nested loop** (`JoinAlgo::Lookup`, `EXPLAIN`: `Index Nested
+Loop`) runs its right side — a table's scan by an index on the join keys,
+the left row's values as `Outer` references — once per left row (inner,
+left, semi and anti joins).
 A **semi join** gives each left row some right row matches, once; an
 **anti join** each left row none matches (a NULL key matches nothing, so
 its row comes out of an anti join); both give only the left's columns,
@@ -1178,9 +1182,28 @@ equalities — when the subquery's rows do not depend on the row
 (uncorrelated `IN`), or when it reads one table (under projections,
 `DISTINCT`, sorts) and refers to the row only in its filter's top-level
 conjuncts, which become the join condition.  The right side keeps only
-the columns the condition reads, and the join goes as deep among the inner
-joins below as the columns it reads allow (a subquery filtering one table
-filters it before the joins).  `NOT IN` stays a subquery (its NULL
+the columns the condition reads.  Once the inner joins are ordered, each
+semi and anti join moves down among them, as far as the columns it reads
+allow and while the rows it meets there are no more (a subquery filtering
+one table filters it before the joins that multiply it, after those that
+narrow it; without statistics, as deep as it goes).
+
+**Index nested loops** (`lookups`, last): a hash join whose right side is
+an analyzed table's scan becomes an index nested loop when an index (the
+primary key or a secondary one) leads with the join keys and the lookups
+cost less than hashing the table — each lookup counted as 12 rows of a
+scan, each row a secondary index finds 20 more (its fetch), against the
+table's rows read once; the rows a lookup reads are all of its key
+value's, whatever the filter keeps.  An inner join may look up its left
+side instead (the columns put back in order above).  A lookup join's rows
+are estimated as the left side's times a lookup's.
+
+**Parallel aggregates in key order**: grouped by (at least) the leading
+column of the primary key a scan reads in order, the morsels' groups meet
+only at their edges, so the merge keeps only the groups the next morsel
+may go on with and gives the rest as they are done — a million groups do
+not have to fit in `work_mem` at once (they would, merging into one table,
+and the run fell back to one thread partitioning).  `NOT IN` stays a subquery (its NULL
 semantics are not an anti join's); so do correlated scalar subqueries.
 `EXPLAIN` prints the plan (columns as `#n`); `EXPLAIN ANALYZE` runs it
 too (§8.13).
@@ -2415,6 +2438,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-30 — §M14.20 V10, index nested loops:** `JoinAlgo::Lookup`
+  chosen by cost; semi and anti joins placed among the ordered joins by
+  estimate; parallel aggregates in key order merged a morsel edge at a
+  time; key-aware join estimates in every estimate.  SF 1 on rows, all 22
+  queries 125 → 35 s (Q2 14 → 0.16 s, Q18 25 → 1.7 s, Q21 11 → 3.0 s).
 - **2026-10-30 — §M14.20 V10, from the TPC-H profile:** joins on a key of
   two columns estimated by the key (Q9 26 → 6.7 s at SF 1); semi and anti
   joins placed below the inner joins (Q18 25 → 9.6 s); the buffer pool in

@@ -2192,12 +2192,25 @@ fn parallel_aggregate<'a>(
     });
     // The morsels in key order: the first error is the one a single pass
     // meets first.
+    let ordered = ordered_prefix(input, group);
     let mut g = Grouping::new(group, aggs);
+    let mut closed = Vec::new();
     for r in results {
         match r {
             Some(Err(e)) => return Err(e),
             Some(Ok(Part::TooLarge)) => return Ok(None),
             Some(Ok(Part::Groups(keys, states))) => {
+                // Rows in key order, grouped by (at least) a prefix of the
+                // key: a group of an earlier morsel goes on only if it has
+                // this morsel's first prefix — the others are done.
+                if let (Some(at), Some(first)) = (&ordered, keys.first()) {
+                    let open = |k: &[Value]| at.iter().all(|&i| k[i] == first[i]);
+                    if g.seen.iter().any(|k| !open(k)) {
+                        let (done, rest) = close(g, group, aggs, &open)?;
+                        closed.extend(done);
+                        g = rest;
+                    }
+                }
                 let mut states: Vec<std::vec::IntoIter<Value>> =
                     states.into_iter().map(Vec::into_iter).collect();
                 for key in keys {
@@ -2215,9 +2228,73 @@ fn parallel_aggregate<'a>(
             None => return Err(Error::internal("a morsel not aggregated")),
         }
     }
-    let done = finish(&mut g)?;
+    closed.extend(finish(&mut g)?);
     PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Ok(Some(Box::new(done.into_iter().map(Ok))))
+    Ok(Some(Box::new(closed.into_iter().map(Ok))))
+}
+
+/// The positions in `group` of the leading columns of the primary key
+/// `input`'s scan reads in order — when `group` holds at least the first:
+/// the rows of a group are then all within a run of rows sharing those.
+fn ordered_prefix(input: &Plan, group: &[Expr]) -> Option<Vec<usize>> {
+    let (scan, steps) = chain(input)?;
+    let Plan::Scan { table, .. } = scan else {
+        return None;
+    };
+    // A group key's column of the scan, through the projections.
+    let of_scan = |e: &Expr| -> Option<usize> {
+        let &Expr::Column(mut c) = e else { return None };
+        for (step, _) in steps.iter().rev() {
+            if let Step::Project(es) = step {
+                match es.get(c)? {
+                    Expr::Column(i) => c = *i,
+                    _ => return None,
+                }
+            }
+        }
+        Some(c)
+    };
+    let cols: Vec<Option<usize>> = group.iter().map(of_scan).collect();
+    let at: Vec<usize> = table
+        .primary_key
+        .iter()
+        .map_while(|pk| cols.iter().position(|c| *c == Some(*pk)))
+        .collect();
+    (!at.is_empty()).then_some(at)
+}
+
+/// `g` split: the groups not `open`, finished as rows, and a grouping of the
+/// open ones (their partial states carried over).
+fn close<'a>(
+    mut g: Grouping<'a>,
+    group: &'a [Expr],
+    aggs: &'a [Agg],
+    open: &dyn Fn(&[Value]) -> bool,
+) -> Result<(Vec<Row>, Grouping<'a>)> {
+    let mut done = Vec::new();
+    let mut rest = Grouping::new(group, aggs);
+    for (i, key) in std::mem::take(&mut g.seen).into_iter().enumerate() {
+        if open(&key) {
+            let states = g
+                .accs
+                .iter_mut()
+                .map(|a| a.partial(i))
+                .collect::<Result<Vec<_>>>()?;
+            let gid = rest
+                .group_of(&|| key.clone(), None)
+                .ok_or_else(|| Error::internal("an open group past work_mem"))?;
+            for (acc, st) in rest.accs.iter_mut().zip(states) {
+                acc.combine(gid as usize, st)?;
+            }
+        } else {
+            let mut row = key;
+            for a in &mut g.accs {
+                row.push(a.finish(i)?);
+            }
+            done.push(row);
+        }
+    }
+    Ok((done, rest))
 }
 
 /// One morsel's aggregation, on a worker.

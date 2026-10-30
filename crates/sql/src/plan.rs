@@ -209,6 +209,10 @@ pub enum JoinType {
 pub enum JoinAlgo {
     /// For each left row, every right row.
     NestedLoop,
+    /// For each left row, the right input — a table scan by an index whose
+    /// key reads the left row (as `Outer` at depth 1) — run for it: an
+    /// index nested loop; `on` is checked too.
+    Lookup,
     /// A hash table of the right input on `right_keys`, probed with
     /// `left_keys` (equi-join); `on` is checked too.
     Hash {
@@ -391,6 +395,7 @@ impl Plan {
                 };
                 let a = match algo {
                     JoinAlgo::NestedLoop => "Nested Loop".to_string(),
+                    JoinAlgo::Lookup => "Index Nested Loop".to_string(),
                     JoinAlgo::Hash {
                         left_keys,
                         right_keys,

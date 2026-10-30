@@ -95,21 +95,36 @@ fn joins(mut input: Plan, predicate: Expr) -> (Plan, Vec<Expr>) {
     for p in parts {
         let lw = input.width();
         match candidate(&p).and_then(|(s, kind)| right_side(s, lw).map(|r| (r, kind))) {
-            Some(((right, on), kind)) => input = place(input, unnest(right), on, kind),
+            // (Placed among the joins once they are ordered: `optimizer`.)
+            Some(((right, on), kind)) => input = semi(input, unnest(right), on, kind),
             None => rest.push(p),
         }
     }
     (input, rest)
 }
 
-/// The semi or anti join of `input` with `right` on `on`, as deep among
-/// `input`'s inner joins (and the semi and anti joins already there) as
-/// the columns of `input` it reads allow: a subquery that filters one
-/// table filters it before the joins (`(A ⋈ B) ⋉ R` is `(A ⋉ R) ⋈ B` when
-/// the condition reads only `A`).
-fn place(input: Plan, right: Plan, on: Expr, kind: JoinType) -> Plan {
+/// The semi or anti join of `input` with `right` on `on`, moved down among
+/// `input`'s inner joins (through the projections that reorder columns, and
+/// the semi and anti joins already there) as far as the columns of `input`
+/// it reads allow — `(A ⋈ B) ⋉ R` is `(A ⋉ R) ⋈ B` when the condition
+/// reads only `A` — and while the rows it would meet there are no more
+/// than here (`rows`: an estimate; `None` without statistics, when it goes
+/// as deep as it can): a subquery that filters one table filters it before
+/// the joins that multiply it, after those that narrow it.
+pub(crate) fn place(
+    input: Plan,
+    right: Plan,
+    on: Expr,
+    kind: JoinType,
+    rows: &dyn Fn(&Plan) -> Option<f64>,
+) -> Plan {
     let lw = input.width();
     let reads: Vec<usize> = on.reads().into_iter().filter(|&c| c < lw).collect();
+    let here = rows(&input);
+    let fewer = |child: &Plan| match (here, rows(child)) {
+        (Some(h), Some(c)) => c <= h,
+        _ => true,
+    };
     match input {
         Plan::Join {
             left,
@@ -119,23 +134,23 @@ fn place(input: Plan, right: Plan, on: Expr, kind: JoinType) -> Plan {
             algo,
         } if !reads.is_empty() => {
             let ll = left.width();
-            if reads.iter().all(|&c| c < ll) {
+            if reads.iter().all(|&c| c < ll) && fewer(&left) {
                 let on = on.map_columns(&|c| Expr::Column(if c >= lw { c - lw + ll } else { c }));
                 return Plan::Join {
-                    left: Box::new(place(*left, right, on, kind)),
+                    left: Box::new(place(*left, right, on, kind, rows)),
                     right: other,
                     kind: inner,
                     on: cond,
                     algo,
                 };
             }
-            if reads.iter().all(|&c| c >= ll) {
+            if reads.iter().all(|&c| c >= ll) && fewer(&other) {
                 let rw = other.width();
                 let on =
                     on.map_columns(&|c| Expr::Column(if c >= lw { c - lw + rw } else { c - ll }));
                 return Plan::Join {
                     left,
-                    right: Box::new(place(*other, right, on, kind)),
+                    right: Box::new(place(*other, right, on, kind, rows)),
                     kind: inner,
                     on: cond,
                     algo,
@@ -150,6 +165,24 @@ fn place(input: Plan, right: Plan, on: Expr, kind: JoinType) -> Plan {
             };
             semi(input, right, on, kind)
         }
+        // A projection of columns: below it, the columns it takes.
+        Plan::Project {
+            input: below,
+            exprs,
+        } if !reads.is_empty() && reads.iter().all(|&c| matches!(exprs[c], Expr::Column(_))) => {
+            let bw = below.width();
+            let on = on.map_columns(&|c| {
+                if c >= lw {
+                    Expr::Column(c - lw + bw)
+                } else {
+                    exprs[c].clone()
+                }
+            });
+            Plan::Project {
+                input: Box::new(place(*below, right, on, kind, rows)),
+                exprs,
+            }
+        }
         // A semi or anti join keeps its left's columns: below it too.
         Plan::Join {
             left,
@@ -157,8 +190,8 @@ fn place(input: Plan, right: Plan, on: Expr, kind: JoinType) -> Plan {
             kind: k @ (JoinType::Semi | JoinType::Anti),
             on: cond,
             algo,
-        } => Plan::Join {
-            left: Box::new(place(*left, right, on, kind)),
+        } if fewer(&left) => Plan::Join {
+            left: Box::new(place(*left, right, on, kind, rows)),
             right: other,
             kind: k,
             on: cond,

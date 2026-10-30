@@ -906,7 +906,7 @@ impl<'a> JoinSpec<'a> {
                 left_keys,
                 right_keys,
             } => Some((left_keys, right_keys)),
-            JoinAlgo::NestedLoop => None,
+            JoinAlgo::NestedLoop | JoinAlgo::Lookup => None,
         }
     }
 }
@@ -934,8 +934,49 @@ fn join<'a>(
         ctx,
         outer,
     };
+    if *algo == JoinAlgo::Lookup {
+        return lookup_join(build(left, ctx, outer)?, right, spec);
+    }
     let right_rows = stash(build(right, ctx, outer)?)?;
     join_with(build(left, ctx, outer)?, right_rows, spec, 0)
+}
+
+/// An index nested loop: for each left row, the right plan (a scan by an
+/// index on the join keys, reading the left row as `Outer` at depth 1) run
+/// for it, its rows joined as a nested loop's.
+fn lookup_join<'a>(left: Rows<'a>, right: &'a Plan, spec: JoinSpec<'a>) -> Result<Rows<'a>> {
+    Ok(Box::new(left.flat_map(move |l| -> Vec<Result<Row>> {
+        let l = match l {
+            Ok(l) => l,
+            Err(e) => return vec![Err(e)],
+        };
+        let matches = match collect(right, spec.ctx, Some(&env(&l, spec.ctx, spec.outer))) {
+            Ok(rows) => rows,
+            Err(e) => return vec![Err(e)],
+        };
+        let mut out = Vec::new();
+        for r in &matches {
+            let mut combined = l.clone();
+            combined.extend_from_slice(r);
+            match spec.matches(&combined) {
+                Ok(true) if spec.existence() => {
+                    return match spec.kind {
+                        JoinType::Semi => vec![Ok(l)],
+                        _ => Vec::new(),
+                    };
+                }
+                Ok(true) => out.push(Ok(combined)),
+                Ok(false) => {}
+                Err(e) => return vec![Err(e)],
+            }
+        }
+        if out.is_empty()
+            && let Some(row) = spec.unmatched(l)
+        {
+            out.push(Ok(row));
+        }
+        out
+    })))
 }
 
 fn join_with<'a>(

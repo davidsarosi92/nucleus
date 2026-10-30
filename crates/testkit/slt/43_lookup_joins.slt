@@ -1,0 +1,77 @@
+# Index nested loops (PLAN.md §M14.20 V10): a join whose right side is a
+# table read by an index on the join keys, for few left rows, looks each
+# left row's matches up instead of hashing the table — inner, left, semi
+# and anti joins, inside a correlated subquery too (results checked
+# against PostgreSQL 18).
+
+statement ok
+CREATE TABLE lb (id INT PRIMARY KEY, g INT, v INT)
+
+statement ok
+CREATE TABLE ls (k INT PRIMARY KEY, ref INT, w INT)
+
+statement ok
+INSERT INTO lb SELECT i, i % 97, i * 7 % 1000 FROM generate_series(1, 20000) i
+
+statement ok
+INSERT INTO ls VALUES (1, 5, 10), (2, 17, 20), (3, 20001, 30), (4, NULL, 40), (5, 19999, 50)
+
+statement ok
+CREATE INDEX lb_g ON lb (g)
+
+statement ok
+ANALYZE
+
+query T
+EXPLAIN SELECT ls.k, lb.v FROM ls JOIN lb ON lb.id = ls.ref
+----
+Project: #0, #5
+  Project: #3, #4, #5, #0, #1, #2
+    Project: #3, #4, #5, #0, #1, #2
+      Index Nested Loop on (#3 = #1)
+        Seq Scan on ls (rows=5)
+        Index Scan using primary key on lb (id = outer1.#1) filter: (#0 = outer1.#1) (rows=1)
+
+query II
+SELECT ls.k, lb.v FROM ls JOIN lb ON lb.id = ls.ref ORDER BY 1
+----
+1 35
+2 119
+5 993
+
+query II
+SELECT ls.k, lb.v FROM ls LEFT JOIN lb ON lb.id = ls.ref ORDER BY 1
+----
+1 35
+2 119
+3 NULL
+4 NULL
+5 993
+
+query I
+SELECT count(*) FROM ls WHERE EXISTS (SELECT 1 FROM lb WHERE lb.id = ls.ref AND lb.v > 100)
+----
+2
+
+query I
+SELECT count(*) FROM ls WHERE NOT EXISTS (SELECT 1 FROM lb WHERE lb.id = ls.ref)
+----
+2
+
+query III
+SELECT ls.k, count(*), sum(lb.v) FROM ls JOIN lb ON lb.g = ls.k GROUP BY ls.k ORDER BY 1
+----
+1 207 102408
+2 207 101857
+3 207 103306
+4 207 101755
+5 207 103204
+
+query II
+SELECT ls.k, (SELECT sum(lb.v) FROM ls s2 JOIN lb ON lb.id = s2.ref WHERE s2.w <= ls.w AND lb.v > ls.w) FROM ls ORDER BY 1
+----
+1 35
+2 154
+3 154
+4 119
+5 1112
