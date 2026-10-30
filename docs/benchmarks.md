@@ -101,59 +101,65 @@ python3 bench/tpch.py --nucleus target/release/nucleus --sf 1 \
 ```
 
 2026-10-30, SF 1 (6 million `lineitem` rows), the machine above, at
-`04c93f4`; each query's best of three runs; nucleus with every table in
+`940395c`; each query's best of three runs; nucleus with every table in
 rows, and with all but `region` and `nation` in columns; PostgreSQL 18 in
 the same run:
 
 | TPC-H SF 1 | nucleus (row) (ms) | nucleus (column) (ms) | postgresql (ms) | nucleus (row) / PostgreSQL | nucleus (column) / PostgreSQL | results |
 |---|---:|---:|---:|---:|---:|---|
-| Q1 | 992.9 | 975.2 | 990.6 | 1.00× | 0.98× | same |
-| Q2 | 133.1 | — | 172.3 | 0.77× | — | same |
-| Q3 | 1,219.2 | 340.5 | 284.9 | 4.28× | 1.20× | same |
-| Q4 | 598.4 | 1,267.1 | 148.9 | 4.02× | 8.51× | same |
-| Q5 | 2,071.3 | 644.8 | 430.5 | 4.81× | 1.50× | same |
-| Q6 | 640.0 | 446.3 | 194.6 | 3.29× | 2.29× | same |
-| Q7 | 4,078.3 | 3,745.3 | 2,543.9 | 1.60× | 1.47× | same |
-| Q8 | 563.6 | 228.0 | 172.1 | 3.28× | 1.33× | same |
-| Q9 | 2,775.5 | 2,368.1 | 1,302.0 | 2.13× | 1.82× | same |
-| Q10 | 1,095.5 | 837.5 | 341.5 | 3.21× | 2.45× | same |
-| Q11 | 250.4 | 54.1 | 33.3 | 7.53× | 1.63× | same |
-| Q12 | 817.9 | 604.4 | 308.3 | 2.65× | 1.96× | same |
-| Q13 | 1,220.7 | 1,107.7 | 330.8 | 3.69× | 3.35× | same |
-| Q14 | 707.4 | 563.0 | 199.7 | 3.54× | 2.82× | same |
-| Q15 | 572.4 | 345.5 | 206.8 | 2.77× | 1.67× | same |
-| Q16 | 390.3 | 281.2 | 140.4 | 2.78× | 2.00× | same |
-| Q17 | 476.5 | — | 455.1 | 1.05× | — | same |
-| Q18 | 1,151.4 | 843.5 | 1,664.2 | 0.69× | 0.51× | same |
-| Q19 | 770.6 | 840.7 | 18.8 | 41.02× | 44.75× | same |
-| Q20 | 540.0 | — | 242.9 | 2.22× | — | same |
-| Q21 | 2,674.4 | 4,693.9 | 1,524.1 | 1.75× | 3.08× | same |
-| Q22 | 1,033.9 | 788.1 | 32.2 | 32.08× | 24.46× | same |
-| geometric mean (19 queries) | 977.6 | 697.5 | 274.0 | 3.57× | 2.55× |  |
-| load (COPY, indexes, ANALYZE; s) | 145.9 | 675.0 | 41.7 |  |  |  |
+| Q1 | 1,001.6 | 746.3 | 1,001.4 | 1.00× | 0.75× | same |
+| Q2 | 50.8 | 63.4 | 182.8 | 0.28× | 0.35× | same |
+| Q3 | 1,299.2 | 182.3 | 289.1 | 4.49× | 0.63× | same |
+| Q4 | 597.0 | 103.7 | 146.7 | 4.07× | 0.71× | same |
+| Q5 | 2,151.4 | 576.1 | 416.6 | 5.16× | 1.38× | same |
+| Q6 | 443.4 | 155.8 | 195.2 | 2.27× | 0.80× | same |
+| Q7 | 1,928.1 | 255.5 | 2,724.9 | 0.71× | 0.09× | same |
+| Q8 | 655.3 | 159.8 | 187.4 | 3.50× | 0.85× | same |
+| Q9 | 3,110.5 | 2,744.3 | 1,530.2 | 2.03× | 1.79× | same |
+| Q10 | 1,126.2 | 675.4 | 345.1 | 3.26× | 1.96× | same |
+| Q11 | 270.6 | 47.8 | 40.6 | 6.67× | 1.18× | same |
+| Q12 | 827.5 | 585.1 | 301.4 | 2.75× | 1.94× | same |
+| Q13 | 1,259.9 | 1,201.2 | 347.1 | 3.63× | 3.46× | same |
+| Q14 | 502.6 | 187.3 | 198.6 | 2.53× | 0.94× | same |
+| Q15 | 470.4 | 151.9 | 208.9 | 2.25× | 0.73× | same |
+| Q16 | 432.2 | 475.7 | 127.5 | 3.39× | 3.73× | same |
+| Q17 | 61.0 | 103.6 | 479.1 | 0.13× | 0.22× | same |
+| Q18 | 1,404.1 | 866.0 | 1,586.5 | 0.88× | 0.55× | same |
+| Q19 | 142.2 | 168.2 | 18.9 | 7.54× | 8.92× | same |
+| Q20 | 594.1 | 630.5 | 257.8 | 2.30× | 2.45× | same |
+| Q21 | 3,127.0 | 1,223.2 | 1,722.0 | 1.82× | 0.71× | same |
+| Q22 | 392.6 | 236.9 | 35.2 | 11.16× | 6.74× | same |
+| geometric mean (22 queries) | 632.9 | 312.4 | 282.8 | 2.24× | 1.10× |  |
+| load (COPY, indexes, ANALYZE; s) | 118.2 | 125.2 | 26.1 |  |  |  |
 
-Every result agrees with PostgreSQL's.  Against the first run (`09a6d55`:
-7.9× and 6.5× PostgreSQL's time in the geometric mean, a load of 221 s):
-the joins vectorized and in parallel, narrow rows through them, index
-nested loops, semi and anti joins placed by estimate, joins on two-column
-keys estimated by the key, parallel aggregates in key order and parallel
-sorts, the buffer pool in shards, hardware CRC-32C, less LZ.
+Every result agrees with PostgreSQL's.  On column tables nucleus takes
+1.10× PostgreSQL's time in the geometric mean and is faster on 12 of the
+22 queries (Q7 0.26 s against 2.7 s, Q17 0.10 s against 0.48 s); on row
+tables 2.24×.  Against the first run (`09a6d55`: 7.9× and 6.5×, a load
+of 221 s) and the one before this (`04c93f4`: 3.57× and 2.55×; loads
+146 s and 675 s): joins vectorized and in parallel, narrow rows through
+them, index nested loops, semi and anti joins placed by estimate and
+hashing the smaller side, joins on two-column keys estimated by the key,
+statistics across columns (§M14.20 V12), constant comparison operands
+folded and a column's range bounds estimated together, correlated
+subqueries kept by the values they read, `char(n)` and dictionary
+columns read a row at a time from column segments, parallel aggregates
+and sorts, the buffer pool in shards, hardware CRC-32C, less LZ; loads
+from write intents (V11: a large transaction's writes written once) and
+a vacuum that waits for an idle database.
 
 Where the time still goes:
 
-- **Q19 and Q22** (41× and 32×): PostgreSQL finds their few rows through
-  indexes in milliseconds; nucleus hashes a large side.  The lookup costs
-  are next.
-- **Q2, Q17 and Q20 on column tables**: Q2 failed (`XX000 outer column out
-  of range`: a correlated subquery under the new narrowing, a bug), Q17
-  and Q20 passed the limit (a correlated subquery's index lookups into a
-  column table, each a point read of segments).
-- **Loads**: rows 146 s against 42 s — a large transaction's writes are
-  written twice (the side area, then the versions; PLAN V11 removes it);
-  columns 675 s, of which `lineitem`'s `COPY` is 84 s: the rest is being
-  measured.
-- The joins of many tables (Q5, Q7, Q9, Q13, Q21) are 1.5–5×: the
-  build side is still built a row at a time, on one thread.
+- **Q19 and Q22** (9× and 7×): PostgreSQL answers them in 19 and 35 ms
+  through indexes; nucleus still reads more than it must (Q19's lookups
+  each read a part's lines and filter them; Q22 scans `orders` for its
+  anti join).
+- **Q13 and Q16** (3.5×): a left join and a grouping over most of
+  `orders`, and an anti join with a `LIKE` filter; built a row at a time.
+- **Row tables' scans** (Q3–Q6, Q10, Q12: 2.3–5×): a row's every column is
+  decoded where a column table reads only the wanted ones.
+- **Loads** (118 s and 125 s against 26 s): `lineitem`'s `COPY` 40 s,
+  the indexes on it 20–30 s each.
 
 ## Targets
 

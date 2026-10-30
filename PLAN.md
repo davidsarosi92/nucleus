@@ -1452,9 +1452,10 @@ attach / detach ✅; the age policy ✅); V10 results columnar end to end ✅ (a
 into the columnar result as columns, in parallel too — a million numeric
 rows into numpy 262 → 92 ms from a row table, 241 → 51 ms from a column
 table); TPC-H against PostgreSQL measured (`bench/tpch.py`, SF 1: every
-result agrees; 6.5–7.9× PostgreSQL's time — joins a row at a time, column
-tables' point reads; `EXISTS` / `IN` unnested into semi and anti joins on
-the way) 🟡; ClickBench (`bench/clickbench.py`), the speed-ups and the
+result agrees; first 6.5–7.9× PostgreSQL's time, now 1.10× on column
+tables and 2.24× on row tables in the geometric mean, 12 of the 22
+queries faster on column tables; `EXISTS` / `IN` unnested into semi and
+anti joins on the way) 🟡; ClickBench (`bench/clickbench.py`), the speed-ups and the
 targets recorded ⬜; V11 write intents among the versions ✅ — a large
 transaction's spilled writes go straight into the version keyspace as
 *intents* (a version stamped with the transaction's id, not a commit
