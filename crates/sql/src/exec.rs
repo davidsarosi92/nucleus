@@ -909,6 +909,7 @@ impl<'a> JoinSpec<'a> {
             JoinAlgo::Hash {
                 left_keys,
                 right_keys,
+                ..
             } => Some((left_keys, right_keys)),
             JoinAlgo::NestedLoop | JoinAlgo::Lookup => None,
         }
@@ -941,12 +942,44 @@ fn join<'a>(
     if *algo == JoinAlgo::Lookup {
         return lookup_join(build(left, ctx, outer)?, right, spec);
     }
+    // A semi or anti join hashed on its left side (the smaller), when the
+    // right is a pipeline and the left fits in memory.
+    if let JoinAlgo::Hash {
+        left_keys,
+        right_keys,
+        build_left: true,
+    } = algo
+        && matches!(kind, JoinType::Semi | JoinType::Anti)
+        && crate::vector::probes(right)
+    {
+        match stash(build(left, ctx, outer)?)? {
+            crate::spill::Stored::Memory(rows) => {
+                return crate::vector::existence_by_left(
+                    rows,
+                    left.width(),
+                    right,
+                    left_keys,
+                    right_keys,
+                    kind,
+                    on,
+                    ctx,
+                    outer,
+                );
+            }
+            stored => {
+                let left_rows = std::rc::Rc::new(stored).iter();
+                let right_rows = stash(build(right, ctx, outer)?)?;
+                return join_with(left_rows, right_rows, spec, 0);
+            }
+        }
+    }
     let right_rows = stash(build(right, ctx, outer)?)?;
     // A pipeline probing a table in memory: a batch at a time, in parallel.
     if let (
         JoinAlgo::Hash {
             left_keys,
             right_keys,
+            ..
         },
         crate::spill::Stored::Memory(_),
     ) = (algo, &right_rows)

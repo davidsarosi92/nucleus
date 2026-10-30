@@ -92,6 +92,7 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
             if let JoinAlgo::Hash {
                 left_keys,
                 right_keys,
+                ..
             } = algo
             {
                 for k in left_keys {

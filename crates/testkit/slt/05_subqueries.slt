@@ -247,3 +247,50 @@ SELECT o.id, (SELECT max(x.s) FROM (SELECT (SELECT sum(v) FROM memo_i i WHERE i.
 2 4
 3 4
 4 16
+
+# A semi or anti join hashes the smaller side: few left rows, many right
+# rows — the left rows in their order, NULL keys never matching, a
+# condition besides the keys checked.
+statement ok
+CREATE TABLE few (id INT PRIMARY KEY, k INT, lim INT)
+
+statement ok
+INSERT INTO few VALUES (1, 5, 100), (2, 7, 0), (3, NULL, 100), (4, 999999, 100), (5, 5, 0)
+
+statement ok
+CREATE TABLE many (id INT PRIMARY KEY, k INT, v INT)
+
+statement ok
+INSERT INTO many SELECT n, n % 50, n % 7 FROM generate_series(1, 20000) AS g(n)
+
+statement ok
+ANALYZE
+
+query T
+EXPLAIN SELECT id FROM few WHERE EXISTS (SELECT 1 FROM many WHERE many.k = few.k AND many.v < few.lim)
+----
+Project: #0
+  Semi Hash Join (left hashed) (#1 = #0) on ((#3 = #1) AND (#4 < #2))
+    Seq Scan on few (rows=5)
+    Project: #1, #2
+      Seq Scan on many (rows=20000)
+
+query I
+SELECT id FROM few WHERE EXISTS (SELECT 1 FROM many WHERE many.k = few.k AND many.v < few.lim)
+----
+1
+
+query I
+SELECT id FROM few WHERE NOT EXISTS (SELECT 1 FROM many WHERE many.k = few.k AND many.v < few.lim)
+----
+2
+3
+4
+5
+
+query I
+SELECT id FROM few WHERE k IN (SELECT k FROM many)
+----
+1
+2
+5

@@ -39,7 +39,7 @@ EXPLAIN SELECT v FROM m WHERE at = DATE '2026-10-07' AND dev = 3
 ----
 Project: #2
   Append
-    Index Scan using primary key on m_10 (at = '2026-10-07'::date AND dev = 3) filter: ((#0 = '2026-10-07'::date) AND (#1 = 3))
+    Index Scan using primary key on m_10 (at = 2026-10-07 AND dev = 3) filter: ((#0 = 2026-10-07) AND (#1 = 3))
 
 query II
 SELECT dev, sum(v) FROM m WHERE at >= DATE '2026-10-30' GROUP BY dev ORDER BY dev

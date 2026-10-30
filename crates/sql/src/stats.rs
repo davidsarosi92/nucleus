@@ -475,15 +475,21 @@ fn fraction_below(cs: &ColumnStats, v: &Value) -> f64 {
     if b.is_empty() {
         return 0.5;
     }
-    if v.sort_cmp(&b[0]).is_le() {
+    // As numbers where both are (a date's bounds and a timestamp, say),
+    // else in the values' order.
+    let cmp = |x: &Value, y: &Value| match (as_f64(x), as_f64(y)) {
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        _ => x.sort_cmp(y),
+    };
+    if cmp(v, &b[0]).is_le() {
         return 0.0;
     }
-    if v.sort_cmp(&b[b.len() - 1]).is_gt() {
+    if cmp(v, &b[b.len() - 1]).is_gt() {
         return 1.0;
     }
     let buckets = (b.len() - 1).max(1) as f64;
     for i in 0..b.len() - 1 {
-        if v.sort_cmp(&b[i + 1]).is_le() {
+        if cmp(v, &b[i + 1]).is_le() {
             // Linear inside the bucket for numbers, half a bucket otherwise.
             let within = match (as_f64(&b[i]), as_f64(&b[i + 1]), as_f64(v)) {
                 (Some(lo), Some(hi), Some(x)) if hi > lo => (x - lo) / (hi - lo),
@@ -523,12 +529,39 @@ fn selectivity(table: &Table, stats: Option<&TableStats>, pred: &Expr) -> f64 {
             and_parts(pred, &mut parts);
             let mut eqs: Vec<(usize, f64)> = Vec::new();
             let mut rest = 1.0;
+            // A column's lower and upper bound together: the histogram
+            // between them, not the product of each side's.
+            let mut ranges: Vec<(usize, Option<Value>, Option<Value>)> = Vec::new();
             for p in parts {
+                if let Some((c, lower, v)) = range(p)
+                    && stats.is_some_and(|s| s.columns.get(c).is_some())
+                {
+                    let r = match ranges.iter_mut().find(|r| r.0 == c) {
+                        Some(r) => r,
+                        None => {
+                            ranges.push((c, None, None));
+                            ranges.last_mut().expect("pushed")
+                        }
+                    };
+                    let slot = if lower { &mut r.1 } else { &mut r.2 };
+                    if slot.is_none() {
+                        *slot = Some(v);
+                        continue;
+                    }
+                }
                 let s = selectivity(table, stats, p);
                 match equality(p) {
                     Some(c) if !eqs.iter().any(|e| e.0 == c) => eqs.push((c, s)),
                     _ => rest *= s,
                 }
+            }
+            for (c, lo, hi) in ranges {
+                let cs = stats.and_then(|s| s.columns.get(c)).expect("checked");
+                let below = |v: &Option<Value>, none: f64| {
+                    v.as_ref().map_or(none, |v| fraction_below(cs, v))
+                };
+                let frac = (below(&hi, 1.0) - below(&lo, 0.0)).max(0.0);
+                rest *= (frac * non_null(c)).max(1.0 / rows);
             }
             rest * together(table, stats, &eqs)
         }
@@ -587,6 +620,27 @@ fn and_parts<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
             and_parts(b, out);
         }
         e => out.push(e),
+    }
+}
+
+/// A range bound `p` puts on a column with a value: (column, whether it
+/// is a lower bound, the value).
+fn range(p: &Expr) -> Option<(usize, bool, Value)> {
+    let Expr::Binary(op, a, b) = p else {
+        return None;
+    };
+    let (c, v, op) = match (&**a, &**b) {
+        (Expr::Column(c), Expr::Literal(v)) => (*c, v, *op),
+        (Expr::Literal(v), Expr::Column(c)) => (*c, v, flip(*op)),
+        _ => return None,
+    };
+    if v.is_null() {
+        return None;
+    }
+    match op {
+        BinaryOp::Gt | BinaryOp::GtEq => Some((c, true, v.clone())),
+        BinaryOp::Lt | BinaryOp::LtEq => Some((c, false, v.clone())),
+        _ => None,
     }
 }
 

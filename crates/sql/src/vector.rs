@@ -2718,24 +2718,9 @@ pub(crate) fn hash_join<'a>(
     outer: Option<&'a Env<'a>>,
 ) -> Result<Rows<'a>> {
     let table = JoinTable::build(rows, right_keys, ctx, outer)?;
-    // `on` only the keys' equality: decided by an integer table.
-    let lw = left.width();
-    let keys_only = on.is_none_or(|on| {
-        let mut parts = Vec::new();
-        crate::binder::conjuncts(on.clone(), &mut parts);
-        parts.iter().all(|p| {
-            left_keys.iter().zip(right_keys).any(|(l, r)| {
-                let r = r.map_columns(&|c| Expr::Column(c + lw));
-                match p {
-                    Expr::Binary(BinaryOp::Eq, a, b) => {
-                        (**a == *l && **b == r) || (**a == r && **b == *l)
-                    }
-                    _ => false,
-                }
-            })
-        })
-    });
-    let check = on.is_some() && !(keys_only && matches!(table.index, JoinIndex::Int(_)));
+    let check = on.is_some()
+        && !(keys_only(on, left_keys, right_keys, left.width())
+            && matches!(table.index, JoinIndex::Int(_)));
     let probe = Probe {
         table,
         left_keys,
@@ -2770,6 +2755,175 @@ pub(crate) fn hash_join<'a>(
         err: None,
         measured: (Duration::ZERO, 0),
     }))
+}
+
+/// Whether a join's `on` is only its keys' equality (an integer table
+/// decides it).
+fn keys_only(on: Option<&Expr>, left_keys: &[Expr], right_keys: &[Expr], lw: usize) -> bool {
+    on.is_none_or(|on| {
+        let mut parts = Vec::new();
+        crate::binder::conjuncts(on.clone(), &mut parts);
+        parts.iter().all(|p| {
+            left_keys.iter().zip(right_keys).any(|(l, r)| {
+                let r = r.map_columns(&|c| Expr::Column(c + lw));
+                match p {
+                    Expr::Binary(BinaryOp::Eq, a, b) => {
+                        (**a == *l && **b == r) || (**a == r && **b == *l)
+                    }
+                    _ => false,
+                }
+            })
+        })
+    })
+}
+
+/// A semi or anti join hashed on its left rows (`JoinAlgo::Hash`'s
+/// `build_left`): the left rows' keys in a table, the pipeline `right`
+/// probing it a batch at a time — on worker threads when it is large —
+/// marking the left rows it matches; then the left rows in order, those
+/// marked (semi) or not (anti): the rows and order of the join that hashes
+/// its right side.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn existence_by_left<'a>(
+    left: Vec<Row>,
+    left_width: usize,
+    right: &'a Plan,
+    left_keys: &'a [Expr],
+    right_keys: &'a [Expr],
+    kind: crate::plan::JoinType,
+    on: Option<&'a Expr>,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Rows<'a>> {
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    let table = JoinTable::build(left, left_keys, ctx, outer)?;
+    // (`keys_only` reads its first keys as the left row's.)
+    let check = on.is_some()
+        && !(keys_only(on, left_keys, right_keys, left_width)
+            && matches!(table.index, JoinIndex::Int(_)));
+    let probe = Probe {
+        table,
+        left_keys: right_keys,
+        on,
+        kind,
+        right_width: right.width(),
+        check,
+    };
+    let marks: Vec<AtomicBool> = (0..probe.table.rows.len())
+        .map(|_| AtomicBool::new(false))
+        .collect();
+    let mark = |pipe: &mut Pipeline, cx: Cx| -> Result<()> {
+        let one = |key: &dyn Fn() -> Vec<Value>,
+                   int: Option<Option<i64>>,
+                   row: &dyn Fn() -> Row|
+         -> Result<()> {
+            for &c in probe.candidates(key, int) {
+                let c = c as usize;
+                if marks[c].load(Relaxed) {
+                    continue;
+                }
+                if probe.check {
+                    let mut combined = probe.table.rows[c].clone();
+                    combined.extend(row());
+                    let holds =
+                        on.map_or(Ok(true), |on| on.holds(&env(&combined, cx.ctx, cx.outer)))?;
+                    if !holds {
+                        continue;
+                    }
+                }
+                marks[c].store(true, Relaxed);
+            }
+            Ok(())
+        };
+        loop {
+            match pipe.next()? {
+                None => return Ok(()),
+                Some(Out::Batch(b)) => {
+                    let keys = right_keys
+                        .iter()
+                        .map(|k| eval(k, &b, &b.sel, cx))
+                        .collect::<Result<Vec<_>>>()?;
+                    let ints: Option<(&[i64], &Option<Vec<bool>>)> =
+                        match (&probe.table.index, &keys[..]) {
+                            (JoinIndex::Int(_), [k]) => match &**k {
+                                Vector::Int(d, n) => Some((d, n)),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                    for i in b.sel.iter() {
+                        let key = || keys.iter().map(|k| k.value(i)).collect::<Vec<_>>();
+                        let int = ints.map(|(d, n)| (!is_null_at(n, i)).then(|| d[i]));
+                        one(&key, int, &|| b.row(i))?;
+                    }
+                }
+                Some(Out::Rows(rows, err)) => {
+                    for row in rows {
+                        let e = env(&row, cx.ctx, cx.outer);
+                        let k = right_keys
+                            .iter()
+                            .map(|k| k.eval(&e))
+                            .collect::<Result<Vec<_>>>()?;
+                        one(&|| k.clone(), None, &|| row.clone())?;
+                    }
+                    if let Some(e) = err {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    };
+    let mut exprs: Vec<&Expr> = right_keys.iter().collect();
+    exprs.extend(on);
+    if let Some(work) = Morsels::new(right, &exprs, ctx, outer, ROW_MORSELS_PER_WORKER)? {
+        PARALLEL_RUNS.fetch_add(1, Relaxed);
+        let results = work.run(0..work.ranges.len(), true, &|wctx, range| {
+            let Some(mut pipe) = Pipeline::new(right, right, wctx, None, false, Some(range))?
+            else {
+                return Err(Error::internal("a morsel's pipeline"));
+            };
+            mark(
+                &mut pipe,
+                Cx {
+                    ctx: wctx,
+                    outer: None,
+                },
+            )
+        });
+        let mut skipped = false;
+        for r in results {
+            match r {
+                Some(Ok(())) => {}
+                Some(Err(e)) => return Err(e),
+                None => skipped = true,
+            }
+        }
+        if skipped {
+            return Err(Error::internal("a morsel not run"));
+        }
+    } else {
+        let Some(mut pipe) = Pipeline::new(right, right, ctx, outer, false, None)? else {
+            return Err(Error::internal("a semi join's probe pipeline"));
+        };
+        let profile = ctx.profile;
+        let started = profile.and_then(|p| p.clock());
+        mark(&mut pipe, Cx { ctx, outer })?;
+        if let Some(p) = profile
+            && let (Some(t0), Some(t1)) = (started, p.clock())
+        {
+            p.record(right, t1.saturating_sub(t0), 0, 1);
+        }
+    }
+    let semi = kind == crate::plan::JoinType::Semi;
+    let rows: Vec<Row> = probe
+        .table
+        .rows
+        .into_iter()
+        .zip(marks)
+        .filter(|(_, m)| m.load(Relaxed) == semi)
+        .map(|(r, _)| r)
+        .collect();
+    Ok(Box::new(rows.into_iter().map(Ok)))
 }
 
 /// [`hash_join`] on one thread.

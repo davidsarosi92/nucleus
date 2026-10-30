@@ -1218,7 +1218,12 @@ left, semi and anti joins).
 A **semi join** gives each left row some right row matches, once; an
 **anti join** each left row none matches (a NULL key matches nothing, so
 its row comes out of an anti join); both give only the left's columns,
-by hash, grace hash or block nested loop like the others.  Expressions use three-valued logic,
+by hash, grace hash or block nested loop like the others.  Where the left
+side is the smaller by estimate (half the right's or less) a hash join
+hashes it instead (`EXPLAIN`: `Hash Join (left hashed)`): the right
+pipeline probes the left rows' table a batch at a time, on worker threads
+when large, marking the rows it matches; then the left rows in order,
+those marked (semi) or not (anti).  Expressions use three-valued logic,
 checked integer arithmetic (`22003`), division by zero (`22012`).
 
 ### 8.6 Optimizer (`optimizer`)
@@ -1236,7 +1241,12 @@ access paths: primary key or index with an equality prefix and a range on
 the next column; the filter always stays, so an access path only narrows.
 A condition whose correlated subquery reads this row's columns goes only
 where they all are, and moving it (a join side, a reordered join, through
-a projection) rewrites the subquery's references with it.
+a projection) rewrites the subquery's references with it.  A scan
+filter's comparisons with constant expressions compare with their values,
+computed when the plan is made (`o_orderdate < DATE '1993-07-01' +
+INTERVAL '3' MONTH` with `1993-10-01 00:00:00`; not volatile calls,
+parameters or subqueries): estimated from the histogram, checked against
+a segment's least and greatest, and not computed per row.
 
 **Unnesting** (`unnest`): a `WHERE` or scan-filter conjunct `EXISTS (…)`,
 `NOT EXISTS (…)` or `x IN (…)` becomes a semi or anti join with the
@@ -1329,8 +1339,9 @@ versions, §5.2).
 rows, else from a uniform sample of 30 000 (reservoir sampling; NULLs
 scaled, distinct values by PostgreSQL's Duj1 estimator); the row count is
 exact.  Selectivities: `=` 1/ndv, ranges from the
-histogram, `IS NULL` the null fraction, `IN` n/ndv, `LIKE` 0.1, combined
-by AND/OR/NOT.  For analyzed tables the access path is the cheapest of a
+histogram (a column's lower and upper bound in one AND together: the
+histogram between them, not each side's product), `IS NULL` the null
+fraction, `IN` n/ndv, `LIKE` 0.1, combined by AND/OR/NOT.  For analyzed tables the access path is the cheapest of a
 full scan and every index (a secondary index pays a row fetch per row),
 `EXPLAIN` shows `rows=`, and chains of up to 8 inner joins are reordered by
 dynamic programming (no cross products unless nothing connects; the
@@ -2544,6 +2555,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-30 — §M14.20 V10, more from the V12 measurements:** scan
+  filters compare with constant expressions' values (computed when the
+  plan is made); a column's two range bounds are estimated together; a
+  semi or anti join hashes its left side when that is the smaller.  TPC-H
+  SF 1 on column tables: Q4 1.26 → 0.11 s, Q22 0.87 → 0.24 s, Q6 0.49 →
+  0.17 s, Q14 0.57 → 0.18 s, Q3 0.36 → 0.19 s.
 - **2026-10-30 — §M14.20 V10, from the V12 measurements:** `char(n)`
   columns are segment dictionaries and offsets of their own (they were
   stored value by value), and a dictionary's row is read where it lies —

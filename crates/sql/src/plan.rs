@@ -220,6 +220,10 @@ pub enum JoinAlgo {
         left_keys: Vec<Expr>,
         /// Keys over the right row.
         right_keys: Vec<Expr>,
+        /// A semi or anti join's table of the left input instead (the
+        /// smaller), the right rows marking the left rows they match; the
+        /// left rows then given in order, those marked or not.
+        build_left: bool,
     },
 }
 
@@ -399,8 +403,10 @@ impl Plan {
                     JoinAlgo::Hash {
                         left_keys,
                         right_keys,
+                        build_left,
                     } => format!(
-                        "Hash Join ({})",
+                        "Hash Join{} ({})",
+                        if *build_left { " (left hashed)" } else { "" },
                         left_keys
                             .iter()
                             .zip(right_keys)
@@ -631,6 +637,7 @@ impl Plan {
                 if let JoinAlgo::Hash {
                     left_keys,
                     right_keys,
+                    ..
                 } = algo
                 {
                     left_keys.iter_mut().chain(right_keys).for_each(f);
@@ -725,6 +732,7 @@ impl Plan {
                 if let JoinAlgo::Hash {
                     left_keys,
                     right_keys,
+                    ..
                 } = algo
                 {
                     left_keys.iter().chain(right_keys).for_each(f);

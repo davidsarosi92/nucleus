@@ -130,7 +130,7 @@ query T
 EXPLAIN SELECT id FROM hits WHERE addr <<= '10.0.0.0/8'
 ----
 Project: #0
-  Index Scan using hits_addr on hits (addr >= __inet_low(10.0.0.0/8) AND addr <= __inet_high(10.0.0.0/8)) filter: ((network_subeq(#1, 10.0.0.0/8) AND (#1 >= __inet_low(10.0.0.0/8))) AND (#1 <= __inet_high(10.0.0.0/8)))
+  Index Scan using hits_addr on hits (addr >= 10.0.0.0/8 AND addr <= 10.255.255.255) filter: ((network_subeq(#1, 10.0.0.0/8) AND (#1 >= 10.0.0.0/8)) AND (#1 <= 10.255.255.255))
 
 statement ok
 DROP TABLE hits

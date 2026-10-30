@@ -185,6 +185,43 @@ fn fold(e: &Expr, st: &Stats) -> Option<bool> {
     }
 }
 
+/// `p` with its comparisons' constant operands evaluated now
+/// (`d < '1993-07-01'::date + '3 mons'::interval` becomes a comparison with
+/// a value): estimated from the statistics, compared with a segment's
+/// least and greatest, and computed once rather than per row.
+fn folded(p: Expr, st: &Stats) -> Expr {
+    let value = |e: Box<Expr>| -> Box<Expr> {
+        if matches!(*e, Expr::Literal(_)) || !constant(&e) {
+            return e;
+        }
+        let reg = crate::ext::Registry::shared_builtin();
+        let ctx = crate::expr::Ctx::new(st.txn(), &reg, &[]);
+        match e.eval(&crate::exec::env(&[], &ctx, None)) {
+            Ok(v) => Box::new(Expr::Literal(v)),
+            Err(_) => e,
+        }
+    };
+    match p {
+        Expr::Binary(op @ (BinaryOp::And | BinaryOp::Or), a, b) => {
+            Expr::Binary(op, Box::new(folded(*a, st)), Box::new(folded(*b, st)))
+        }
+        Expr::Unary(crate::ast::UnaryOp::Not, e) => {
+            Expr::Unary(crate::ast::UnaryOp::Not, Box::new(folded(*e, st)))
+        }
+        Expr::Binary(
+            op @ (BinaryOp::Eq
+            | BinaryOp::NotEq
+            | BinaryOp::Lt
+            | BinaryOp::LtEq
+            | BinaryOp::Gt
+            | BinaryOp::GtEq),
+            a,
+            b,
+        ) => Expr::Binary(op, value(a), value(b)),
+        other => other,
+    }
+}
+
 fn filtered(plan: Plan, preds: Vec<Expr>) -> Plan {
     match conjunction(preds) {
         None => plan,
@@ -206,6 +243,8 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
             if let Some(f) = filter {
                 conjuncts(f, &mut preds);
             }
+            let preds: Vec<Expr> = preds.into_iter().map(|p| folded(p, st)).collect();
+            let mut preds = preds;
             // (Pushed again — joins reordered, an OR's implications made
             // again —, a conjunct is there once.)
             let mut seen = Vec::with_capacity(preds.len());
@@ -462,6 +501,7 @@ fn hash_keys(onp: &[Expr], lw: usize) -> JoinAlgo {
         JoinAlgo::Hash {
             left_keys,
             right_keys,
+            build_left: false,
         }
     }
 }
@@ -914,6 +954,7 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
                 JoinAlgo::Hash {
                     left_keys,
                     right_keys,
+                    ..
                 },
         } => {
             let existence = matches!(kind, JoinType::Semi | JoinType::Anti);
@@ -948,16 +989,24 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
                         exprs: (0..lw + rw).map(back).collect(),
                     }
                 }
-                (None, None) => Plan::Join {
-                    left,
-                    right,
-                    kind,
-                    on,
-                    algo: JoinAlgo::Hash {
-                        left_keys,
-                        right_keys,
-                    },
-                },
+                (None, None) => {
+                    // A semi or anti join hashes the smaller side.
+                    let build_left = existence
+                        && analyzed(&left, st)
+                        && analyzed(&right, st)
+                        && 2.0 * estimate(&left, st) < estimate(&right, st);
+                    Plan::Join {
+                        left,
+                        right,
+                        kind,
+                        on,
+                        algo: JoinAlgo::Hash {
+                            left_keys,
+                            right_keys,
+                            build_left,
+                        },
+                    }
+                }
             }
         }
         other => other,

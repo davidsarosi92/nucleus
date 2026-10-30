@@ -211,6 +211,7 @@ fn join(
         JoinAlgo::Hash {
             left_keys,
             right_keys,
+            ..
         } => {
             left_keys.iter().for_each(|k| read(k, &mut left_need));
             right_keys.iter().for_each(|k| read(k, &mut right_need));
@@ -246,9 +247,11 @@ fn join(
         JoinAlgo::Hash {
             left_keys,
             right_keys,
+            build_left,
         } => JoinAlgo::Hash {
             left_keys: left_keys.iter().map(|k| moved(k, &lmap)).collect(),
             right_keys: right_keys.iter().map(|k| moved(k, &rmap)).collect(),
+            build_left,
         },
         a => a,
     };
