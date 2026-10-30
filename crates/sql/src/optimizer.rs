@@ -206,6 +206,16 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
             if let Some(f) = filter {
                 conjuncts(f, &mut preds);
             }
+            // (Pushed again — joins reordered, an OR's implications made
+            // again —, a conjunct is there once.)
+            let mut seen = Vec::with_capacity(preds.len());
+            preds.retain(|p| {
+                let new = !seen.contains(p);
+                if new {
+                    seen.push(p.clone());
+                }
+                new
+            });
             let access = choose_access(&table, &preds, Some(st));
             let estimate = st.of(&table).map(|_| {
                 let sel = conjunction(preds.clone()).map_or(1.0, |p| st.selectivity(&table, &p));
@@ -332,9 +342,10 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
                     // Both sides of a full join are preserved: nothing
                     // moves below it.
                     (_, JoinType::Full) => above.push(p),
-                    // A semi or anti join only drops rows: a subquery
-                    // runs for fewer of them after it.
-                    (_, JoinType::Semi | JoinType::Anti) if p.has_subquery() => above.push(p),
+                    // A semi or anti join only drops rows: a correlated
+                    // subquery runs for fewer of them after it (one that
+                    // is not runs once anyway).
+                    (_, JoinType::Semi | JoinType::Anti) if correlated(&p) => above.push(p),
                     ((true, _), _) => lp.push(p),
                     ((_, true), JoinType::Inner) => rp.push(shift(&p, -(lw as isize))),
                     (_, JoinType::Inner) => onp.push(p),
@@ -355,6 +366,20 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
                     }
                 }
             }
+            // What an OR across both sides implies of each: the OR of each
+            // branch's conjuncts on that side, when every branch has some
+            // (`(a1 AND b1) OR (a2 AND b2)` implies `a1 OR a2` of the left)
+            // — pushed down besides the OR, which stays.
+            if kind == JoinType::Inner {
+                for p in onp.iter().chain(&above) {
+                    if let Some(l) = implied(p, &|e| side(e).0) {
+                        lp.push(l);
+                    }
+                    if let Some(r) = implied(p, &|e| side(e).1) {
+                        rp.push(shift(&r, -(lw as isize)));
+                    }
+                }
+            }
             let left = push_into(*left, lp, st);
             let right = push_into(*right, rp, st);
             let algo = hash_keys(&onp, lw);
@@ -371,6 +396,43 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
         }
         other => filtered(push(other, st), preds),
     }
+}
+
+/// Whether `e` holds a subquery that refers to the row it runs for.
+fn correlated(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if let Expr::Subquery(s) = x {
+            found |= s.correlated;
+        }
+    });
+    found
+}
+
+/// What the OR `p` implies of one side (`on_side` of a conjunct): the OR
+/// of each branch's conjuncts on it, when every branch has one (and they
+/// are safe to evaluate on their own: no volatile call, no subquery).
+fn implied(p: &Expr, on_side: &dyn Fn(&Expr) -> bool) -> Option<Expr> {
+    let mut branches = Vec::new();
+    disjuncts(p.clone(), &mut branches);
+    if branches.len() < 2 {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(branches.len());
+    for b in branches {
+        let mut cs = Vec::new();
+        conjuncts(b, &mut cs);
+        let mine: Vec<Expr> = cs
+            .into_iter()
+            .filter(|c| on_side(c) && !c.columns().is_empty() && crate::vector::parallel_safe(c))
+            .collect();
+        parts.push(conjunction(mine)?);
+    }
+    let mut parts = parts.into_iter();
+    let first = parts.next()?;
+    Some(parts.fold(first, |a, b| {
+        Expr::Binary(BinaryOp::Or, Box::new(a), Box::new(b))
+    }))
 }
 
 /// `left = right` conjuncts of a join condition as hash join keys.
@@ -807,14 +869,15 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
                     right_keys,
                 },
         } => {
+            let existence = matches!(kind, JoinType::Semi | JoinType::Anti);
             let lookup = (kind != JoinType::Full)
-                .then(|| lookup_side(&left, &right, &left_keys, &right_keys, st))
+                .then(|| lookup_side(&left, &right, &left_keys, &right_keys, existence, st))
                 .flatten();
             // An inner join may look the left side up instead (the larger,
             // which the reordering made the probe side), the columns put
             // back in order above.
             let swapped = (kind == JoinType::Inner && lookup.is_none())
-                .then(|| lookup_side(&right, &left, &right_keys, &left_keys, st))
+                .then(|| lookup_side(&right, &left, &right_keys, &left_keys, false, st))
                 .flatten();
             match (lookup, swapped) {
                 (Some(right), _) => Plan::Join {
@@ -861,6 +924,7 @@ fn lookup_side(
     right: &Plan,
     left_keys: &[Expr],
     right_keys: &[Expr],
+    existence: bool,
     st: &Stats,
 ) -> Option<Plan> {
     // Its references to enclosing rows one level further: the left row is
@@ -923,6 +987,12 @@ fn lookup_side(
         .map_or(read, |p| rows * st.selectivity(&table, &p))
         .max(1.0);
     let probes = estimate(left, st).max(1.0);
+    // A semi or anti join's lookup stops at its first match.
+    let read = if existence {
+        (read / matches).clamp(1.0, read)
+    } else {
+        read
+    };
     // A column table scans for less (its batches, the columns read) and
     // looks a row up for more (segments' columns read).
     let (look, scan) = if table.storage == crate::storage::ROW {

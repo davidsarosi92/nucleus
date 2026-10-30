@@ -1187,8 +1187,11 @@ checked integer arithmetic (`22003`), division by zero (`22012`).
 ### 8.6 Optimizer (`optimizer`)
 
 Predicate pushdown (through projections, into join sides, outer-join safe;
-a condition with a subquery stays above a semi or anti join, which only
-drops rows), WHERE conjuncts into join conditions — the conjuncts every
+a condition with a correlated subquery stays above a semi or anti join,
+which only drops rows — an uncorrelated one runs once and goes below; an
+`OR` across both sides of an inner join pushes down to each the OR of its
+branches' conjuncts on it, when every branch has one, the `OR` itself
+kept; a scan's filter holds each conjunct once), WHERE conjuncts into join conditions — the conjuncts every
 branch of an `OR` has taken out of it first (`(a AND b) OR (a AND c)` is
 `a AND (b OR c)`; not volatile calls or subqueries), so a join condition
 repeated in each branch joins —, hash joins on equality conjuncts,
@@ -1223,7 +1226,8 @@ scan, each row a secondary index finds 20 more (its fetch), against the
 table's rows read once; a column table's lookups count four times as
 much and its rows scanned a quarter (its scans read batches of the
 columns wanted, its lookups segments' values); the rows a lookup reads are all of its key
-value's, whatever the filter keeps.  An inner join may look up its left
+value's, whatever the filter keeps — a semi or anti join's stop at the
+first match.  An inner join may look up its left
 side instead (the columns put back in order above).  A lookup join's rows
 are estimated as the left side's times a lookup's.
 
@@ -2473,6 +2477,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-30 — §M14.20 V10, OR implications and existence lookups:**
+  an OR across two tables pushes each its implied filter (TPC-H Q19
+  770 → 128 ms); uncorrelated subqueries go below semi and anti joins and
+  existence lookups stop at the first match (Q22 1034 → 386 ms).
 - **2026-10-30 — §M14.20 V10, column tables' point reads:** a B+tree
   range checks its end on the key before reading the value; decimals of
   one scale packed as integers in segments; one row's value read from a

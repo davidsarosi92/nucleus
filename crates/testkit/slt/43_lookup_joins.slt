@@ -89,3 +89,33 @@ SELECT a.k, b.w, (SELECT sum(lb.v) FROM ls s2 JOIN lb ON lb.id = s2.ref AND lb.v
 3 30 154
 4 40 119
 5 50 1112
+
+# An OR across two tables implies a filter of each (the OR of each branch's
+# conjuncts on it), pushed down beside it (checked against PostgreSQL 18).
+query II
+SELECT count(*), sum(lb.v) FROM ls, lb WHERE (lb.id = ls.ref AND ls.w = 10 AND lb.v > 0) OR (lb.id = ls.ref AND ls.w = 50 AND lb.v < 2000)
+----
+2 1028
+
+query T
+EXPLAIN SELECT count(*) FROM ls, lb WHERE (lb.id = ls.ref AND ls.w = 10 AND lb.v > 0) OR (lb.id = ls.ref AND ls.w = 50 AND lb.v < 2000)
+----
+Project: #0
+  Aggregate: count(*)
+    Project: #0
+      Project: #0
+        Index Nested Loop on ((#3 = #1) AND (((#2 = 10) AND (#4 > 0)) OR ((#2 = 50) AND (#4 < 2000))))
+          Seq Scan on ls filter: ((#2 = 10) OR (#2 = 50)) (rows=2)
+          Project: #0, #2
+            Index Scan using primary key on lb (id = outer1.#1) filter: (((#2 > 0) OR (#2 < 2000)) AND (#0 = outer1.#1)) (rows=1)
+
+# Semi and anti joins by lookup stop at a key's first match.
+query I
+SELECT count(*) FROM lb WHERE lb.g < 3 AND NOT EXISTS (SELECT 1 FROM ls WHERE ls.ref = lb.id)
+----
+620
+
+query I
+SELECT count(*) FROM ls WHERE EXISTS (SELECT 1 FROM lb WHERE lb.g = ls.k AND lb.v > 990)
+----
+3

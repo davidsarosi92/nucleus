@@ -980,6 +980,36 @@ fn lookup_join<'a>(left: Rows<'a>, right: &'a Plan, spec: JoinSpec<'a>) -> Resul
             Ok(l) => l,
             Err(e) => return vec![Err(e)],
         };
+        // A semi or anti join: the right rows read until one matches.
+        if spec.existence() {
+            let e = env(&l, spec.ctx, spec.outer);
+            let mut matched = false;
+            match build(right, spec.ctx, Some(&e)) {
+                Ok(rows) => {
+                    for r in rows {
+                        let r = match r {
+                            Ok(r) => r,
+                            Err(e) => return vec![Err(e)],
+                        };
+                        let mut combined = l.clone();
+                        combined.extend_from_slice(&r);
+                        match spec.matches(&combined) {
+                            Ok(true) => {
+                                matched = true;
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(e) => return vec![Err(e)],
+                        }
+                    }
+                }
+                Err(e) => return vec![Err(e)],
+            }
+            return match (spec.kind, matched) {
+                (JoinType::Semi, true) | (JoinType::Anti, false) => vec![Ok(l)],
+                _ => Vec::new(),
+            };
+        }
         let matches = match collect(right, spec.ctx, Some(&env(&l, spec.ctx, spec.outer))) {
             Ok(rows) => rows,
             Err(e) => return vec![Err(e)],
