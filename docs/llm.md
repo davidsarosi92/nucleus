@@ -76,7 +76,13 @@ rows, queries reading a few columns) `CREATE TABLE … WITH (storage =
 column)` stores them as compressed column segments; same SQL.  `ALTER TABLE
 t SET STORAGE row, column` keeps both (fast key lookups and fast scans),
 `SET STORAGE column (a, b)` a column copy of some columns; conversions run
-online.
+online.  Large tables split by a key: `CREATE TABLE ev (at timestamp, …,
+PRIMARY KEY (at, id)) PARTITION BY RANGE (at)` then `CREATE TABLE ev_2026
+PARTITION OF ev FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')` (also
+`LIST`, `HASH … WITH (MODULUS m, REMAINDER r)`, `DEFAULT`); queries skip
+the partitions their filters rule out; `ATTACH` / `DETACH` / `DROP
+PARTITION`.  `ALTER TABLE ev SET STORAGE POLICY (column AFTER interval
+'30 days')` moves aged partitions to columns by itself.
 
 **Transactions:** every statement is its own transaction unless in `BEGIN …
 COMMIT | ROLLBACK`.  Snapshot isolation (`SERIALIZABLE` on request).  On

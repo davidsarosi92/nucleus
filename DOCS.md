@@ -1684,6 +1684,25 @@ column to every partition; dropping it drops its partitions.  Other schema
 changes of a partitioned table or a partition, and foreign keys
 referencing a partitioned table, are refused for now (`0A000`).
 
+`ALTER TABLE t ATTACH PARTITION p FOR VALUES …` makes an existing table a
+partition: it must have the table's columns (names, types, nullability)
+and primary key (`22023` otherwise); its rows must fall in the bound
+(`23514`) and pass the table's checks; its own indexes and foreign keys
+give way to the table's, built over its rows.  `ALTER TABLE t DETACH
+PARTITION p` makes a partition a table of its own again (`42809` when it
+is not one of `t`'s); `ALTER TABLE t DROP PARTITION p` detaches and drops
+it.
+
+A table partitioned by range of a date or timestamp may have a **storage
+policy**: `ALTER TABLE t SET STORAGE POLICY (column AFTER interval '30
+days')` (any storage `SET STORAGE` names, without columns; `NONE` takes
+it away; not in a transaction block, `25001`).  A partition whose range
+ends at least the interval before now is converted online to that
+storage (§8.15) — when the policy is set, and every minute by the
+server's maintenance thread (`nucleus_server::maintain`;
+`nucleus_sql::partition::apply_policies` for embedders) — so recent data
+stays in rows, for writes, and old data goes to columns, for scans.
+
 A query of the partitioned table is an `Append` of its partitions' scans
 (under the table's policies), each partition read when reached.  The
 optimizer pushes the predicates into each partition and, from those
@@ -1700,7 +1719,8 @@ another partition's moves the row (deleted there, inserted in the other).
 `crates/sql/tests/partition.rs` runs random inserts, key-moving updates
 and deletes on a partitioned table (of `row`, `column` and `row,column`
 partitions) and a plain one, compares queries and parameter-pruned ones,
-and runs the integrity check; `42_partitions.slt` covers the statements.
+and runs the integrity check, and applies a storage policy at chosen
+times; `42_partitions.slt` covers the statements.
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -2347,6 +2367,11 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-10-30 — §M14.20 partitioning (V9, second part):** `ATTACH
+  PARTITION`, `DETACH PARTITION`, `DROP PARTITION`; storage policies by
+  age (`SET STORAGE POLICY (storage AFTER interval) | NONE`), applied when
+  set and by the server's maintenance thread.
 
 - **2026-10-30 — §M14.20 partitioning (V9, first part):** `PARTITION
   BY RANGE | LIST | HASH`, `PARTITION OF … FOR VALUES … | DEFAULT`;

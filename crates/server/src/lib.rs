@@ -498,6 +498,24 @@ pub fn serve_front_end(
     Ok(())
 }
 
+/// How often [`maintain`] applies the storage policies.
+pub const MAINTENANCE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Starts the server's maintenance thread: every [`MAINTENANCE_EVERY`] it
+/// applies the tables' storage policies (`ALTER TABLE … SET STORAGE
+/// POLICY`), converting partitions that have aged past them online.
+pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(MAINTENANCE_EVERY);
+            let now = nucleus_sql::datetime::from_system(kv.wall_clock());
+            if let Err(e) = nucleus_sql::partition::apply_policies(&kv, None, now) {
+                eprintln!("nucleus-server: storage policies: {}", e.message);
+            }
+        }
+    })
+}
+
 /// Serves the nucleus protocol on `listener` forever, one thread per
 /// connection.
 pub fn serve(listener: TcpListener, kv: Arc<dyn Kv>, config: Config) -> io::Result<()> {

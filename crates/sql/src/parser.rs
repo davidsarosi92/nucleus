@@ -1879,6 +1879,48 @@ impl<'a> Parser<'a> {
                 });
             }
         }
+        if self.eat_kws(&["attach", "partition"]) {
+            let partition = self.relation()?;
+            let bound = self.partition_bound()?;
+            return Ok(Statement::AttachPartition {
+                table,
+                partition,
+                bound,
+            });
+        }
+        for (words, drop) in [
+            (&["detach", "partition"][..], false),
+            (&["drop", "partition"][..], true),
+        ] {
+            if self.eat_kws(words) {
+                let partition = self.relation()?;
+                return Ok(Statement::DetachPartition {
+                    table,
+                    partition,
+                    drop,
+                });
+            }
+        }
+        if self.eat_kws(&["set", "storage", "policy"]) {
+            if self.eat_kw("none") {
+                return Ok(Statement::SetStoragePolicy {
+                    table,
+                    policy: None,
+                });
+            }
+            self.expect_op("(")?;
+            let mut kinds = vec![self.ident()?];
+            while self.eat_op(",") {
+                kinds.push(self.ident()?);
+            }
+            self.expect_kw("after")?;
+            let after = self.expr()?;
+            self.expect_op(")")?;
+            return Ok(Statement::SetStoragePolicy {
+                table,
+                policy: Some((kinds, after)),
+            });
+        }
         if self.eat_kws(&["set", "storage"]) {
             let mut kinds = vec![self.ident()?];
             while self.eat_op(",") {

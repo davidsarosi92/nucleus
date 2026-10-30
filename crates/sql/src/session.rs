@@ -725,6 +725,28 @@ impl Session {
                 })?;
                 Ok(Output::Command("ALTER TABLE".into()))
             }
+            Statement::SetStoragePolicy { table, policy } => {
+                if self.block.is_some() {
+                    return Err(Error::active_txn(
+                        "ALTER TABLE … SET STORAGE POLICY cannot run inside a transaction block",
+                    ));
+                }
+                let now = crate::datetime::from_system(self.kv.wall_clock());
+                let mut txn = self.kv.begin(TxnOptions::default())?;
+                crate::privileges::authorize_ddl(&*txn, &self.registry, stmt)?;
+                crate::datetime::with_now(now, &self.kv, || {
+                    crate::partition::set_policy(
+                        txn.as_mut(),
+                        &self.registry,
+                        table,
+                        policy.as_ref(),
+                    )
+                })?;
+                txn.commit()?;
+                // Applied now, and from time to time after (the server).
+                crate::partition::apply_policies(&self.kv, Some(table), now)?;
+                Ok(Output::Command("ALTER TABLE".into()))
+            }
             Statement::SetTransaction(mode) => {
                 match &mut self.block {
                     Some(b) if b.txn.is_some() => {
@@ -1242,10 +1264,34 @@ fn execute_statement(
 ) -> Result<Output> {
     crate::privileges::authorize_ddl(&*txn, reg, stmt)?;
     Ok(match stmt {
-        Statement::SetStorage { .. } => {
+        Statement::SetStorage { .. } | Statement::SetStoragePolicy { .. } => {
             return Err(Error::active_txn(
                 "ALTER TABLE … SET STORAGE runs as a statement of its own",
             ));
+        }
+        Statement::AttachPartition {
+            table,
+            partition,
+            bound,
+        } => {
+            attach_partition(txn, reg, table, partition, bound)?;
+            Output::Command("ALTER TABLE".into())
+        }
+        Statement::DetachPartition {
+            table,
+            partition,
+            drop,
+        } => {
+            detach_partition(txn, table, partition)?;
+            if *drop {
+                let stmt = Statement::DropTable {
+                    names: vec![partition.clone()],
+                    if_exists: false,
+                    cascade: false,
+                };
+                execute_statement(txn, reg, &stmt, params, sink)?;
+            }
+            Output::Command("ALTER TABLE".into())
         }
         Statement::Query(q) => {
             let ro: &dyn KvTxn = &*txn;
@@ -2062,20 +2108,117 @@ fn partition_spec(
     Ok(crate::partition::Spec { kind, columns })
 }
 
-/// `CREATE TABLE name PARTITION OF parent bound WITH (options)`: a table of
-/// the parent's definition — columns, keys, checks, indexes, foreign keys —
-/// holding the parent's rows in `bound`.
-fn create_partition(
+/// `ALTER TABLE parent ATTACH PARTITION name bound`: an existing table of
+/// the parent's columns and keys becomes its partition — its rows checked
+/// against the bound and the parent's checks, its indexes and foreign keys
+/// made the parent's.
+fn attach_partition(
     txn: &mut dyn KvTxn,
     reg: &Registry,
-    name: &str,
     parent_name: &str,
+    name: &str,
     bound: &crate::ast::PartitionBoundSpec,
-    options: &[(String, String)],
 ) -> Result<()> {
+    use crate::partition::PartBound;
+    let parent = catalog::table(&*txn, parent_name)?;
+    let mut t = catalog::table(&*txn, name)?;
+    if t.partition_of.is_some() || t.partition_by.is_some() {
+        return Err(Error::wrong_object_type(format!(
+            "\"{name}\" is already a partition or partitioned"
+        )));
+    }
+    let same = t.columns.len() == parent.columns.len()
+        && t.columns
+            .iter()
+            .zip(&parent.columns)
+            .all(|(a, b)| a.name == b.name && a.ty == b.ty && a.nullable == b.nullable)
+        && t.primary_key == parent.primary_key;
+    if !same {
+        return Err(Error::invalid_parameter(format!(
+            "table \"{name}\" does not have the columns and primary key of \"{parent_name}\""
+        )));
+    }
+    let bound = new_bound(txn, reg, &parent, name, bound)?;
+    let spec = parent.partition_by.clone().expect("partitioned");
+    let others: Vec<PartBound> = crate::partition::partitions(&*txn, &parent)?
+        .into_iter()
+        .filter_map(|p| p.partition_of.map(|(_, b)| b))
+        .collect();
+    // Every row in the bound and within the parent's checks.
+    {
+        let w = dml::Writer::new(&*txn, reg, parent.clone())?;
+        let ctx = Ctx::new(&*txn, reg, &[]);
+        for r in exec::scan(&t, &crate::plan::Access::Full, &ctx, None)? {
+            let (_, row) = r?;
+            let key: Vec<Value> = spec.columns.iter().map(|&c| row[c].clone()).collect();
+            let fits = match &bound {
+                PartBound::Default => !others.iter().any(|b| crate::partition::contains(b, &key)),
+                b => crate::partition::contains(b, &key),
+            };
+            if !fits {
+                return Err(Error::check_violation(format!(
+                    "partition constraint of relation \"{name}\" is violated by some row"
+                )));
+            }
+            w.validate(&row, &ctx)?;
+        }
+    }
+    // Its indexes become the parent's (in the parent's order: plans of the
+    // parent name them by place), its foreign keys too.
+    for ix in std::mem::take(&mut t.indexes) {
+        let p = t.index_prefix(ix.id);
+        catalog::delete_range(txn, &p, nucleus_kv::prefix_end(&p).as_deref())?;
+    }
+    while !t.foreign_keys.is_empty() {
+        crate::fk::detach(txn, &mut t, 0)?;
+    }
+    t.checks = parent.checks.clone();
+    for ix in &parent.indexes {
+        let mut ix = ix.clone();
+        ix.id = t.next_index_id;
+        ix.name = format!("{}_{name}", ix.name);
+        t.next_index_id += 1;
+        t.indexes.push(ix);
+        dml::backfill_index(txn, reg, &t, t.indexes.len() - 1)?;
+    }
+    t.partition_of = Some((parent.name.clone(), bound));
+    catalog::update_table(txn, &t)?;
+    for fk in parent.foreign_keys.clone() {
+        crate::fk::validate_existing(&*txn, reg, &t, &fk)?;
+        crate::fk::attach(txn, &mut t, fk)?;
+    }
+    Ok(())
+}
+
+/// `ALTER TABLE parent DETACH PARTITION name`: the partition a table of its
+/// own again.
+fn detach_partition(txn: &mut dyn KvTxn, parent_name: &str, name: &str) -> Result<()> {
+    let mut t = catalog::table(&*txn, name)?;
+    if t.partition_of
+        .as_ref()
+        .is_none_or(|(p, _)| p != parent_name)
+    {
+        return Err(Error::wrong_object_type(format!(
+            "relation \"{name}\" is not a partition of relation \"{parent_name}\""
+        )));
+    }
+    t.partition_of = None;
+    catalog::update_table(txn, &t)
+}
+
+/// The bound `bound` of a new partition `name` of `parent`, its values
+/// evaluated and checked: no overlap with the other partitions, none a
+/// default partition holds rows of.
+fn new_bound(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    parent: &Table,
+    name: &str,
+    bound: &crate::ast::PartitionBoundSpec,
+) -> Result<crate::partition::PartBound> {
     use crate::ast::PartitionBoundSpec as B;
     use crate::partition::{Kind, PartBound};
-    let parent = catalog::table(&*txn, parent_name)?;
+    let parent_name = parent.name.as_str();
     let Some(spec) = parent.partition_by.clone() else {
         return Err(Error::wrong_object_type(format!(
             "\"{parent_name}\" is not partitioned"
@@ -2086,7 +2229,7 @@ fn create_partition(
         let (bound, _) = Binder::new(txn, reg).expr(e, &Scope::default())?;
         let ctx = Ctx::new(txn, reg, &[]);
         let v = bound.eval(&crate::exec::env(&[], &ctx, None))?;
-        dml::assign(txn, v, &parent, col)
+        dml::assign(txn, v, parent, col)
     };
     let bound = match (bound, spec.kind) {
         (B::Default, Kind::Hash) => {
@@ -2145,7 +2288,7 @@ fn create_partition(
             )));
         }
     };
-    let siblings = crate::partition::partitions(&*txn, &parent)?;
+    let siblings = crate::partition::partitions(&*txn, parent)?;
     for s in &siblings {
         let (_, other) = s.partition_of.as_ref().expect("a partition");
         if crate::partition::overlaps(&spec, &bound, other) {
@@ -2173,6 +2316,22 @@ fn create_partition(
             }
         }
     }
+    Ok(bound)
+}
+
+/// `CREATE TABLE name PARTITION OF parent bound WITH (options)`: a table of
+/// the parent's definition — columns, keys, checks, indexes, foreign keys —
+/// holding the parent's rows in `bound`.
+fn create_partition(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    name: &str,
+    parent_name: &str,
+    bound: &crate::ast::PartitionBoundSpec,
+    options: &[(String, String)],
+) -> Result<()> {
+    let parent = catalog::table(&*txn, parent_name)?;
+    let bound = new_bound(txn, reg, &parent, name, bound)?;
     let mut storage = crate::storage::ROW.to_string();
     for (key, v) in options {
         match key.as_str() {

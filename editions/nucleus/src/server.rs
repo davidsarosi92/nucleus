@@ -266,6 +266,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .as_ref()
             .map_or(String::new(), |d| format!("; {}", d.describe()))
     );
+    nucleus_server::maintain(Arc::clone(&kv));
     let mut listeners = listeners.into_iter();
     let (first, first_listener) = listeners.next().expect("ncp");
     for (front, l) in listeners {

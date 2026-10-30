@@ -880,6 +880,9 @@ pub fn authorize_ddl(
         Statement::CreateIndex { table, .. }
         | Statement::AlterColumnType { table, .. }
         | Statement::SetStorage { table, .. }
+        | Statement::SetStoragePolicy { table, .. }
+        | Statement::AttachPartition { table, .. }
+        | Statement::DetachPartition { table, .. }
         | Statement::DropConstraint { table, .. }
         | Statement::SetRowSecurity { table, .. }
         | Statement::DropPolicy { table, .. }

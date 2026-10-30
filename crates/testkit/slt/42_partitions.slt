@@ -169,3 +169,130 @@ DROP TABLE h
 
 statement error 42P01
 SELECT * FROM h1
+
+# Attach, detach, drop a partition.
+statement ok
+CREATE TABLE pm (id INT, k INT, v TEXT, PRIMARY KEY (k, id)) PARTITION BY RANGE (k)
+
+statement ok
+CREATE TABLE pm1 PARTITION OF pm FOR VALUES FROM (0) TO (10)
+
+statement ok
+CREATE INDEX pm_v ON pm (v)
+
+statement ok
+INSERT INTO pm VALUES (1, 5, 'a')
+
+statement ok
+CREATE TABLE pm2 (id INT, k INT, v TEXT, PRIMARY KEY (k, id))
+
+statement ok
+INSERT INTO pm2 VALUES (2, 15, 'b'), (3, 25, 'c')
+
+# A row outside the bound: refused.
+statement error 23514
+ALTER TABLE pm ATTACH PARTITION pm2 FOR VALUES FROM (10) TO (20)
+
+# Overlapping another partition: refused.
+statement error
+ALTER TABLE pm ATTACH PARTITION pm2 FOR VALUES FROM (5) TO (30)
+
+statement ok
+ALTER TABLE pm ATTACH PARTITION pm2 FOR VALUES FROM (10) TO (30)
+
+query ITT
+SELECT id, k, v FROM pm ORDER BY id
+----
+1 5 a
+2 15 b
+3 25 c
+
+query I
+SELECT id FROM pm WHERE v = 'c'
+----
+3
+
+statement error 23514
+INSERT INTO pm2 VALUES (4, 35, 'd')
+
+# Columns that differ: refused.
+statement ok
+CREATE TABLE odd (id INT, k BIGINT, v TEXT, PRIMARY KEY (k, id))
+
+statement error 22023
+ALTER TABLE pm ATTACH PARTITION odd FOR VALUES FROM (30) TO (40)
+
+statement ok
+ALTER TABLE pm DETACH PARTITION pm2
+
+query I
+SELECT count(*) FROM pm
+----
+1
+
+statement ok
+INSERT INTO pm2 VALUES (4, 35, 'd')
+
+query I
+SELECT count(*) FROM pm2
+----
+3
+
+statement error 42809
+ALTER TABLE pm DETACH PARTITION odd
+
+statement ok
+ALTER TABLE pm DROP PARTITION pm1
+
+statement error 42P01
+SELECT * FROM pm1
+
+query I
+SELECT count(*) FROM pm
+----
+0
+
+# A storage policy: partitions of ranges long ended take column storage.
+statement ok
+CREATE TABLE log (at DATE, n INT, PRIMARY KEY (at, n)) PARTITION BY RANGE (at)
+
+statement ok
+CREATE TABLE log_old PARTITION OF log FOR VALUES FROM ('2020-01-01') TO ('2021-01-01')
+
+statement ok
+CREATE TABLE log_new PARTITION OF log FOR VALUES FROM ('2021-01-01') TO (MAXVALUE)
+
+statement ok
+INSERT INTO log VALUES ('2020-06-01', 1), ('2020-07-01', 2), ('2099-01-01', 3)
+
+statement error 42809
+ALTER TABLE pm SET STORAGE POLICY (column AFTER interval '30 days')
+
+statement ok
+ALTER TABLE log SET STORAGE POLICY (column AFTER interval '30 days')
+
+query TT
+SELECT name, storage FROM nc_catalog.tables WHERE name LIKE 'log%' ORDER BY name
+----
+log row
+log_new row
+log_old column
+
+query TI
+SELECT at, n FROM log ORDER BY at
+----
+2020-06-01 1
+2020-07-01 2
+2099-01-01 3
+
+statement ok
+ALTER TABLE log SET STORAGE POLICY NONE
+
+statement ok
+BEGIN
+
+statement error 25001
+ALTER TABLE log SET STORAGE POLICY (column AFTER interval '1 day')
+
+statement ok
+ROLLBACK

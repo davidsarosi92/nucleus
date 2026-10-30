@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `nucleus server` runs a maintenance thread that applies the tables'
+  storage policies (`ALTER TABLE … SET STORAGE POLICY`) every minute.
+
 - `ncsql \copy <table> [(<columns>)] FROM '<file>' [WITH (…)]`: loads a
   text or CSV file through `COPY … FROM STDIN`, locally or remotely.
 - `nucleus mcp`: the `mcp` module's Model Context Protocol server over

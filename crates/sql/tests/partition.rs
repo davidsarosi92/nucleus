@@ -116,3 +116,68 @@ fn partitioned_tables_agree_with_plain_ones() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn a_storage_policy_converts_partitions_as_they_age() {
+    let kv: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(5)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let mut s = Session::new(Arc::clone(&kv));
+    s.execute(
+        "CREATE TABLE ev (at TIMESTAMP, n INT, PRIMARY KEY (at, n)) PARTITION BY RANGE (at); \
+         CREATE TABLE ev_1 PARTITION OF ev FOR VALUES FROM ('2030-01-01') TO ('2030-02-01'); \
+         CREATE TABLE ev_2 PARTITION OF ev FOR VALUES FROM ('2030-02-01') TO ('2030-03-01'); \
+         CREATE TABLE ev_3 PARTITION OF ev FOR VALUES FROM ('2030-03-01') TO ('2030-04-01'); \
+         INSERT INTO ev SELECT timestamp '2030-01-01' + i * interval '1 hour', i \
+         FROM generate_series(0, 2000) i; \
+         ALTER TABLE ev SET STORAGE POLICY (row, column AFTER interval '7 days')",
+    )
+    .unwrap();
+    let storages = |s: &mut Session| {
+        rows(
+            s,
+            "SELECT name, storage FROM nc_catalog.tables WHERE name LIKE 'ev_%' ORDER BY name",
+        )
+        .into_iter()
+        .map(|r| r[1].clone())
+        .collect::<Vec<_>>()
+    };
+    // Every range still ahead of now (the simulated clock is long before).
+    assert_eq!(storages(&mut s), ["row", "row", "row"]);
+    let before = rows(&mut s, "SELECT * FROM ev ORDER BY at");
+    let at = |day: &str| {
+        let d = nucleus_sql::datetime::parse_timestamp(day, false).unwrap();
+        nucleus_sql::partition::apply_policies(&kv, None, d).unwrap();
+    };
+    // Six days after January: not yet.
+    at("2030-02-07 00:00:00");
+    assert_eq!(storages(&mut s), ["row", "row", "row"]);
+    at("2030-02-08 00:00:00");
+    assert_eq!(storages(&mut s), ["row,column", "row", "row"]);
+    // Again: nothing more to do.
+    at("2030-02-09 00:00:00");
+    assert_eq!(storages(&mut s), ["row,column", "row", "row"]);
+    at("2031-01-01 00:00:00");
+    assert_eq!(storages(&mut s), ["row,column", "row,column", "row,column"]);
+    assert_eq!(rows(&mut s, "SELECT * FROM ev ORDER BY at"), before);
+    let txn = kv.begin(TxnOptions::read_only()).unwrap();
+    assert!(
+        nucleus_sql::check::check(&*txn, s.registry())
+            .unwrap()
+            .is_empty()
+    );
+    drop(txn);
+    // No policy: nothing converts.
+    s.execute(
+        "ALTER TABLE ev SET STORAGE POLICY NONE; \
+         CREATE TABLE ev_4 PARTITION OF ev FOR VALUES FROM ('2030-04-01') TO ('2030-05-01')",
+    )
+    .unwrap();
+    at("2032-01-01 00:00:00");
+    assert_eq!(storages(&mut s)[3], "row");
+}

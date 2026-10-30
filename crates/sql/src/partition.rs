@@ -496,6 +496,97 @@ pub fn partition_hash_fn() -> crate::ext::FnRef {
     crate::ext::FnRef::new(partition_hash_arc())
 }
 
+/// `ALTER TABLE name SET STORAGE POLICY (kinds AFTER after) | NONE`: the
+/// partitions of a table partitioned by range of a date or timestamp whose
+/// ranges end `after` before now take the storage `kinds` (see
+/// [`apply_policies`]).
+pub fn set_policy(
+    txn: &mut dyn nucleus_kv::KvTxn,
+    reg: &crate::ext::Registry,
+    name: &str,
+    policy: Option<&(Vec<String>, crate::ast::Expr)>,
+) -> Result<()> {
+    use crate::types::DataType;
+    let mut t = crate::catalog::table(&*txn, name)?;
+    let by_time = t.partition_by.as_ref().is_some_and(|s| {
+        s.kind == Kind::Range
+            && matches!(
+                t.columns[s.columns[0]].ty,
+                DataType::Date | DataType::Timestamp | DataType::TimestampTz
+            )
+    });
+    if !by_time {
+        return Err(Error::wrong_object_type(format!(
+            "a storage policy needs a table partitioned by range of a date or timestamp, \
+             not \"{name}\""
+        )));
+    }
+    t.storage_policy = match policy {
+        None => None,
+        Some((kinds, after)) => {
+            // The storage named as SET STORAGE names it.
+            let storage = match crate::convert::target(&t, kinds, None)? {
+                crate::convert::Target::Row => crate::storage::ROW,
+                crate::convert::Target::Column => crate::column_store::COLUMN,
+                crate::convert::Target::Both(_) => crate::column_store::ROW_COLUMN,
+            };
+            let (bound, _) = crate::binder::Binder::new(&*txn, reg)
+                .expr(after, &crate::binder::Scope::default())?;
+            let ctx = crate::expr::Ctx::new(&*txn, reg, &[]);
+            let Value::Interval(after) = bound.eval(&crate::exec::env(&[], &ctx, None))? else {
+                return Err(Error::invalid_parameter(
+                    "a storage policy takes AFTER an interval",
+                ));
+            };
+            Some((storage.to_string(), after))
+        }
+    };
+    crate::catalog::update_table(txn, &t)
+}
+
+/// Applies the storage policies — of `table`, or of every table — at `now`
+/// (microseconds since 2000-01-01): each range partition whose range ends
+/// at least the policy's interval before `now` is converted online to the
+/// policy's storage, unless it is there already.  The server runs this from
+/// time to time; `SET STORAGE POLICY` runs it once.
+pub fn apply_policies(
+    kv: &std::sync::Arc<dyn nucleus_kv::Kv>,
+    table: Option<&str>,
+    now: i64,
+) -> Result<()> {
+    let txn = kv.begin(nucleus_kv::TxnOptions::read_only())?;
+    let all = crate::catalog::tables(&*txn)?;
+    let mut work = Vec::new();
+    for parent in &all {
+        let Some((storage, after)) = &parent.storage_policy else {
+            continue;
+        };
+        if table.is_some_and(|n| n != parent.name) {
+            continue;
+        }
+        let cutoff = crate::datetime::ts_add(now, after.checked_neg()?)?;
+        for p in partitions(&*txn, parent)? {
+            let Some((_, PartBound::Range { to, .. })) = &p.partition_of else {
+                continue;
+            };
+            let ends = to.first().cloned().flatten().and_then(|v| v.as_timestamp());
+            if ends.is_some_and(|e| e <= cutoff) && p.storage != *storage {
+                let kinds: Vec<String> = storage.split(',').map(str::to_string).collect();
+                work.push((p.name.clone(), crate::convert::target(&p, &kinds, None)?));
+            }
+        }
+    }
+    drop(txn);
+    for (name, to) in work {
+        match crate::convert::set_storage(kv, &name, to) {
+            // Dropped or detached meanwhile: nothing to convert.
+            Err(e) if e.code == "42P01" => {}
+            r => r?,
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -57,6 +57,31 @@ pub enum Statement {
         /// `IF NOT EXISTS`.
         if_not_exists: bool,
     },
+    /// `ALTER TABLE t ATTACH PARTITION p FOR VALUES … | DEFAULT`.
+    AttachPartition {
+        /// The partitioned table.
+        table: String,
+        /// The table to become its partition.
+        partition: String,
+        /// Its bound.
+        bound: PartitionBoundSpec,
+    },
+    /// `ALTER TABLE t DETACH | DROP PARTITION p`.
+    DetachPartition {
+        /// The partitioned table.
+        table: String,
+        /// The partition.
+        partition: String,
+        /// `DROP`: the partition dropped too.
+        drop: bool,
+    },
+    /// `ALTER TABLE t SET STORAGE POLICY (kinds AFTER interval) | NONE`.
+    SetStoragePolicy {
+        /// The partitioned table.
+        table: String,
+        /// The storage its old partitions take, and after how long.
+        policy: Option<(Vec<String>, Expr)>,
+    },
     /// `ALTER TABLE t SET STORAGE row | column | row, column [(columns)]`:
     /// how its rows are stored, converted online.
     SetStorage {
