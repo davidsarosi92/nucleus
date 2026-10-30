@@ -11,3 +11,4 @@ __pycache__/
 
 # Local helper: an interactive SQL prompt (Python driver)
 /nucleus_prompt.py
+.claude/scheduled_tasks.lock
