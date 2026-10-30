@@ -1,7 +1,8 @@
-//! Large transactions (PLAN.md §M14.11 L5b): writes past the memory budget
-//! spill into the store's side area; the transaction reads them, commits
-//! them atomically, or drops them — and a crash anywhere leaves a state
-//! some commit left.
+//! Large transactions (PLAN.md §M14.11 L5b, §M14.20 V11): writes past the
+//! memory budget spill into the store as intents; the transaction reads
+//! them, commits them atomically (one status record: no write written
+//! twice), or drops them — and a crash anywhere leaves a state some commit
+//! left; vacuum makes committed intents versions and removes the rest.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -53,7 +54,7 @@ fn a_transaction_past_its_budget_reads_and_commits_its_writes() {
     for i in 0..2000 {
         t.put(&key(i), format!("v{i}").as_bytes()).unwrap();
     }
-    assert!(e.side_count().unwrap() > 1000, "the writes spilled");
+    assert!(e.intent_count().unwrap() > 1000, "the writes spilled");
     // Its own writes, spilled or not: overwritten, deleted, read back.
     t.put(&key(5), b"again").unwrap();
     t.delete(&key(6)).unwrap();
@@ -89,16 +90,22 @@ fn a_transaction_past_its_budget_reads_and_commits_its_writes() {
             .next()
             .is_none()
     );
-    // After it: all of it, moved into versions.
+    // After it: all of it, its intents read as versions.
     let got = all(&e);
     assert_eq!(got.len(), 1 + 1999 + 2000);
     assert_eq!(got[&key(5)], b"again");
     assert_eq!(got[&key(7)], b"after the second spill");
     assert_eq!(got[&b"\x00first"[..]], b"zero-prefixed");
     assert!(!got.contains_key(&key(6)));
-    assert_eq!(e.side_count().unwrap(), 0);
-    // And after reopening.
+    assert!(e.intent_count().unwrap() > 0, "not written twice");
+    // After reopening, the same; vacuum makes them versions.
     drop(before);
+    drop(e);
+    let e = engine_on(&p, opts()).unwrap();
+    assert_eq!(all(&e), got);
+    e.vacuum().unwrap();
+    assert_eq!(e.intent_count().unwrap(), 0);
+    assert_eq!(all(&e), got);
     drop(e);
     let e = engine_on(&p, opts()).unwrap();
     assert_eq!(all(&e), got);
@@ -112,16 +119,16 @@ fn rolled_back_or_dropped_spills_leave_nothing() {
     for i in 0..1000 {
         t.put(&key(i), b"x").unwrap();
     }
-    assert!(e.side_count().unwrap() > 0);
+    assert!(e.intent_count().unwrap() > 0);
     t.rollback();
-    assert_eq!(e.side_count().unwrap(), 0);
+    assert_eq!(e.intent_count().unwrap(), 0);
     {
         let mut t = e.begin();
         for i in 0..1000 {
             t.put(&key(i), b"y").unwrap();
         }
     }
-    assert_eq!(e.side_count().unwrap(), 0);
+    assert_eq!(e.intent_count().unwrap(), 0);
     assert!(all(&e).is_empty());
     // A crash with spilled writes: dropped on opening.
     let mut t = e.begin();
@@ -132,8 +139,14 @@ fn rolled_back_or_dropped_spills_leave_nothing() {
     drop(e);
     p.sim_fs().crash();
     let e = engine_on(&p, opts()).unwrap();
-    assert_eq!(e.side_count().unwrap(), 0);
+    // Aborted: passed over by readers, then swept.
     assert!(all(&e).is_empty());
+    let mut w = e.begin();
+    w.put(&key(3), b"after").unwrap();
+    w.commit().unwrap();
+    e.vacuum().unwrap();
+    assert_eq!(e.intent_count().unwrap(), 0);
+    assert_eq!(all(&e).len(), 1);
 }
 
 #[test]
@@ -174,7 +187,7 @@ fn conflicts_with_spilled_writes_either_way() {
     } else {
         assert!(big.commit().is_err());
     }
-    assert_eq!(e.side_count().unwrap(), 0);
+    assert_eq!(e.intent_count().unwrap(), 0);
     assert_eq!(all(&e).len(), 2);
 }
 
@@ -284,11 +297,17 @@ fn crash_at_every_io_point_with_large_transactions() {
                     all(&e) == states[k],
                     "{mode:?} op {n}: state is not that of commit {k}"
                 );
-                assert_eq!(
-                    e.side_count().unwrap(),
-                    0,
-                    "{mode:?} op {n}: side area left"
+                e.vacuum().unwrap();
+                assert!(
+                    all(&e) == states[k],
+                    "{mode:?} op {n}: vacuum changed the state"
                 );
+                assert_eq!(
+                    e.intent_count().unwrap(),
+                    0,
+                    "{mode:?} op {n}: intents left after vacuum"
+                );
+                assert_eq!(e.side_count().unwrap(), 0, "{mode:?} op {n}: side area");
             }
         });
     }
@@ -362,4 +381,122 @@ fn chunked_scans_read_what_scans_read() {
             );
         }
     }
+}
+
+#[test]
+fn committed_intents_rank_with_versions_through_vacuum() {
+    let p = Arc::new(SimPlatform::new(7));
+    let e = engine_on(&p, opts()).unwrap();
+    let mut seed = e.begin();
+    seed.put(&key(1), b"v0").unwrap();
+    seed.commit().unwrap();
+    let at_v0 = e.begin();
+    let mut late = e.begin(); // a writer from before the big commit
+    // A large commit: key 1 (among many) an intent committed at its time.
+    let mut big = e.begin();
+    for i in 0..500 {
+        big.put(&key(i), b"big").unwrap();
+    }
+    assert!(e.intent_count().unwrap() > 400);
+    big.commit().unwrap();
+    let at_big = e.begin();
+    // A small commit over it: a version newer than the intent.
+    let mut small = e.begin();
+    small.put(&key(1), b"small").unwrap();
+    small.commit().unwrap();
+    let at_small = e.begin();
+    let check = |what: &str| {
+        assert_eq!(
+            at_v0.get(&key(1)).unwrap().as_deref(),
+            Some(&b"v0"[..]),
+            "{what}"
+        );
+        assert_eq!(at_v0.get(&key(2)).unwrap(), None, "{what}");
+        assert_eq!(
+            at_big.get(&key(1)).unwrap().as_deref(),
+            Some(&b"big"[..]),
+            "{what}"
+        );
+        assert_eq!(
+            at_small.get(&key(1)).unwrap().as_deref(),
+            Some(&b"small"[..]),
+            "{what}"
+        );
+        assert_eq!(
+            at_small.get(&key(2)).unwrap().as_deref(),
+            Some(&b"big"[..]),
+            "{what}"
+        );
+        let seen: Vec<_> = at_big
+            .scan(Bound::Included(&key(0)), Bound::Excluded(&key(3)))
+            .unwrap()
+            .map(|r| r.unwrap().1)
+            .collect();
+        assert_eq!(seen, vec![b"big".to_vec(); 3], "{what}");
+        let seen: Vec<_> = at_small
+            .scan(Bound::Included(&key(0)), Bound::Excluded(&key(3)))
+            .unwrap()
+            .map(|r| r.unwrap().1)
+            .collect();
+        assert_eq!(
+            seen,
+            vec![b"big".to_vec(), b"small".to_vec(), b"big".to_vec()],
+            "{what}"
+        );
+    };
+    check("intents");
+    // A writer that began before the big commit conflicts with its intents.
+    assert!(matches!(
+        late.put(&key(7), b"late"),
+        Err(Error::Conflict { .. })
+    ));
+    drop(late);
+    e.vacuum().unwrap();
+    assert_eq!(e.intent_count().unwrap(), 0);
+    check("versions");
+    drop((at_v0, at_big, at_small));
+    let latest = all(&e);
+    assert_eq!(latest[&key(1)], b"small");
+    assert_eq!(latest.len(), 500);
+}
+
+#[test]
+fn an_older_engines_side_area_is_moved_into_versions() {
+    use nucleus_txn::mvcc::{encode_value, side_key, status_key};
+    let p = Arc::new(SimPlatform::new(8));
+    {
+        let e = engine_on(&p, opts()).unwrap();
+        let mut t = e.begin();
+        t.put(&key(0), b"before").unwrap();
+        t.commit().unwrap();
+        // What an older engine left: transaction 5's side area committed
+        // at 9 (its status record), transaction 6's never committed.
+        let mut ops = Vec::new();
+        for i in 0..50 {
+            ops.push((side_key(5, &key(i)), Some(encode_value(Some(b"old")))));
+            ops.push((
+                side_key(6, &key(i + 100)),
+                Some(encode_value(Some(b"gone"))),
+            ));
+        }
+        ops.push((status_key(5), Some(2u64.to_be_bytes().to_vec())));
+        let lsn = e
+            .store()
+            .write(&nucleus_storage::Batch { meta: 2, ops })
+            .unwrap();
+        e.store().wait_durable(lsn).unwrap();
+    }
+    let e = engine_on(&p, opts()).unwrap();
+    assert_eq!(e.side_count().unwrap(), 0);
+    let got = all(&e);
+    assert_eq!(got.len(), 50);
+    assert_eq!(got[&key(0)], b"old");
+    assert!(!got.contains_key(&key(100)));
+    // New ids are past the old ones.
+    let mut t = e.begin();
+    for i in 0..300 {
+        t.put(&key(i + 1000), b"new").unwrap();
+    }
+    t.commit().unwrap();
+    assert_eq!(all(&e).len(), 350);
 }

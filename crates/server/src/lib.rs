@@ -501,16 +501,32 @@ pub fn serve_front_end(
 /// How often [`maintain`] applies the storage policies.
 pub const MAINTENANCE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How often [`maintain`] looks for committed intents to vacuum.
+pub const VACUUM_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Starts the server's maintenance thread: every [`MAINTENANCE_EVERY`] it
 /// applies the tables' storage policies (`ALTER TABLE … SET STORAGE
-/// POLICY`), converting partitions that have aged past them online.
+/// POLICY`), converting partitions that have aged past them online; every
+/// [`VACUUM_CHECK_EVERY`], when large transactions have committed intents
+/// still read through their status, it vacuums (`Kv::vacuum`), making them
+/// versions.
 pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let policies_every = (MAINTENANCE_EVERY.as_secs() / VACUUM_CHECK_EVERY.as_secs()).max(1);
+        let mut tick = 0u64;
         loop {
-            std::thread::sleep(MAINTENANCE_EVERY);
-            let now = nucleus_sql::datetime::from_system(kv.wall_clock());
-            if let Err(e) = nucleus_sql::partition::apply_policies(&kv, None, now) {
-                eprintln!("nucleus-server: storage policies: {}", e.message);
+            std::thread::sleep(VACUUM_CHECK_EVERY);
+            tick += 1;
+            if kv.vacuum_wanted()
+                && let Err(e) = kv.vacuum()
+            {
+                eprintln!("nucleus-server: vacuum: {e}");
+            }
+            if tick.is_multiple_of(policies_every) {
+                let now = nucleus_sql::datetime::from_system(kv.wall_clock());
+                if let Err(e) = nucleus_sql::partition::apply_policies(&kv, None, now) {
+                    eprintln!("nucleus-server: storage policies: {}", e.message);
+                }
             }
         }
     })

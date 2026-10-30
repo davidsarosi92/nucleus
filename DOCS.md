@@ -411,11 +411,20 @@ descending).  A read at `ts` is one seek to `encode_key(k, ts)`.
 `first_version(k)` and `after_versions(k)` bound all versions of `k`.  A
 user key may be at most 1014 bytes after escaping.
 
+**Intents.**  A large transaction's spilled writes are versions too —
+*write intents* — stamped not with a commit timestamp but with the
+transaction's id from the top of the range (`intent_ts(id) = u64::MAX -
+id`, at or above `INTENT_FLOOR` = 2⁶³), so a key's intents come before its
+versions.
+
 **Reserved keys.**  No encoded key starts with `00` and a byte other than
 `00` or `FF`, so store keys from `00 01` to `00 FF` are the engine's own:
-the *side area* `00 01 ‖ id (u64 BE) ‖ user key → tag ‖ value` (a large
-transaction's spilled writes) and *status records* `00 02 ‖ id → commit
-ts`.  Every walk over versions skips them.
+*status records* `00 02 ‖ id → commit ts` (a large transaction that
+committed), the next transaction id `00 03 → id` (written before a
+transaction's first intents, so no later one is given an id an intent
+has), and an older engine's *side area* `00 01 ‖ id (u64 BE) ‖ user key →
+tag ‖ value`, moved into versions when such a database opens.  Every walk
+over versions skips them.
 
 ### 5.2 Engine and transactions
 
@@ -426,7 +435,8 @@ merges the transaction's own writes), `commit() -> Timestamp`,
 `rollback()`; dropping it rolls back.  `Timestamp` is opaque outside the
 crate (principle 3): compared, printed and parsed (`Display`, `FromStr`),
 never computed with.  `Engine`: `visible`, `checkpoint`,
-`vacuum`, `version_count`, `side_count`, `store`.
+`vacuum`, `intents_pending`, `version_count`, `intent_count`,
+`side_count`, `store`.
 
 **Snapshot isolation.**  A transaction reads at its start timestamp — the
 engine's *visible* timestamp, which advances only once a commit is durable,
@@ -438,25 +448,32 @@ once; then the group-commit wait, then *visible* moves.  A checkpoint runs
 when the WAL since the last one exceeds `checkpoint_wal_bytes` (64 MiB).
 Write skew is possible under snapshot isolation (tested and documented).
 
-**Large transactions** (§M14.11).  A transaction keeps its writes in
-memory up to `txn_memory` (64 MiB); past it they *spill* into its own part
-of the side area, under the commit lock, in 1 MiB batches: each key is
-checked as a commit would check it (a newer version, or another
-transaction's spilled write of it → `Conflict`), and from then on any
-commit — any write, even — of that key conflicts.  The transaction reads
-its spilled writes (its own side area ranks above every version; writes
-still in memory above that).  The commit is one batch as always — the
-writes in memory as versions, their spilled copies deleted, and the
-status record (`id → ts`) — so it is atomic however large the
-transaction.  Then the side area is *resolved*: moved into versions at
-`ts`, 4096 entries a batch; until it is, readers merge it — a read looks
-up the versions and every committed side area at or below its snapshot
-within one read of the tree, so a write is in one place or the other,
-never neither — and garbage collection leaves alone the keys it holds.
-A rollback (or a drop) deletes the side area; on opening, the engine
-drops the side areas of transactions that never committed and resolves
-those that did.  Serializable reads validate against the key span a large
-commit wrote (lowest to highest key) beside the recent keys.
+**Large transactions** (§M14.11, §M14.20 V11).  A transaction keeps its
+writes in memory up to `txn_memory` (64 MiB); past it they *spill* into the
+store as its *intents*, under the commit lock, in 1 MiB batches: each key
+is checked as a commit would check it (a newer version, or another running
+transaction's intent of it → `Conflict`), and from then on any commit —
+any write, even — of that key conflicts.  A reader resolves an intent by
+its transaction's status: its own (above every version; writes still in
+memory above that), committed at a timestamp (a version at that
+timestamp, ranked with the others), or neither — running or aborted — and
+passed over.  The commit is one batch as always — the writes in memory as
+versions (their intents deleted) and the status record (`id → ts`) — so
+it is atomic however large the transaction, and **each write is written
+once**: nothing moves after the commit.  `vacuum()` later rewrites
+committed intents as versions at their timestamps and deletes aborted
+ones; once a whole sweep is done (durable), the statuses of the
+transactions committed before it began are dropped.  Meanwhile reads pay
+a little for them (a read of a key with intents walks them before its
+versions; a scan merges them in one streaming pass), and garbage
+collection leaves alone the keys that have one.  A rollback (or a drop)
+aborts the transaction — its intents nobody sees from then — and deletes
+them in the key span it spilled; on opening, the status records say which
+transactions committed, every other's intents are aborted (vacuum sweeps
+them).  Serializable reads validate against the key span a large commit
+wrote (lowest to highest key) beside the recent keys.  Store reads let a
+waiting writer go first (a few hundred yields at most), so a stream of
+scans over a large transaction's intents does not keep it from spilling.
 
 **Serializable** (`Isolation::Serializable`, §M14).  The transaction also
 records the keys it read and the key ranges its scans consumed (a scan
@@ -484,9 +501,10 @@ Snapshots register under the same lock the watermark is read under, so GC
 never removes a version a snapshot can see.  `begin_with(at)` reads an older
 snapshot within the history window (read-only), else `SnapshotTooOld`.
 
-**Scans** read the store in batches of 128 visible keys, re-seeking each
-time, so no store lock is held between calls; MVCC makes the re-seek
-consistent.  Reverse scans are not implemented yet.
+**Scans** read the store in batches — 8 visible keys at first, twice as
+many each time up to 128, and no more than 4096 entries passed over
+(intents nobody sees, versions too new) — re-seeking each time, so no
+store lock is held between calls; MVCC makes the re-seek consistent.  Reverse scans are not implemented yet.
 
 Errors: `Storage`, `Conflict { key }`, `SnapshotTooOld`, `ReadOnly`,
 `KeyTooLarge`, `Corrupt`; `is_retryable()`.
@@ -502,12 +520,17 @@ and vacuum; history; zero bytes and prefixes in keys; model-based scans
 inside transactions; recovery of data and timestamps; a crash at every I/O
 point (both modes).  Mutations caught: no conflict check; a GC watermark
 that ignores running snapshots.  `tests/large.rs`: transactions past their
-budget read, overwrite and delete their spilled writes and commit them;
-rollbacks, drops and crashes leave no side area; conflicts with spilled
-writes both ways; serializable reads against a large commit's span; a
-concurrent reader never sees part of a large commit (the mutation that
-makes readers skip committed side areas is caught); a crash at every
-third I/O point (both modes) with spilling transactions.
+budget read, overwrite and delete their spilled writes and commit them
+(their intents read as versions, then vacuumed into them, the same after
+reopening); rollbacks and drops leave no intent, crashes leave aborted
+ones vacuum removes; conflicts with intents both ways; committed intents
+ranked with newer and older versions for readers at three snapshots,
+through vacuum; an older engine's side area moved into versions on
+opening (its uncommitted one dropped, new ids past its ids); serializable
+reads against a large commit's span; a concurrent reader never sees part
+of a large commit, and does not keep the writer from spilling; a crash at
+every third I/O point (both modes) with spilling transactions, each state
+a commit's, vacuumed to no intent.
 
 ## 6. KV contract (`nucleus-kv`) and the CLI
 
@@ -530,6 +553,10 @@ distributed implementation will provide (§F3).
   `Scratch`: `write_at`, `read_at`), private, gone when dropped; by
   default in memory (`MemoryScratch`), for the local implementation files
   in `<dir>/scratch/` (left-overs removed on opening).
+- `Kv::vacuum()` / `Kv::vacuum_wanted()`: the store's maintenance and
+  whether it has work (committed intents to make versions); by default
+  none.  The server's maintenance thread runs `vacuum` within 10 s of a
+  large commit (`nucleus_server::maintain`).
 - `trait KvTxn`: `read_ts`, `get(&self)`, `scan(&self, start, end) ->
   KvIter` (ascending), `get_validated` / `scan_validated` (reads checked
   at commit at any isolation level, §5.2), `scan_chunks` /
@@ -541,7 +568,8 @@ distributed implementation will provide (§F3).
   read methods, `Sync` — for worker threads to share while it is borrowed;
   default `None`), `split_points(start, end, parts)` (up to `parts - 1`
   keys cutting a range into parts of about equal size, from the B+tree's
-  internal nodes, none smaller than 64 leaves; default none),
+  internal nodes, none smaller than 64 leaves; default none), `first(start,
+  end)` (the range's first entry, without a scan's read-ahead),
   `put(&mut self)`,
   `delete(&mut self)`, `put_new(key, value) -> bool` (sets a key that has
   no value, else `false`; by default `get` then `put`, locally one look at
@@ -1281,6 +1309,11 @@ default_transaction_isolation`; `SHOW transaction_isolation |
 server_version | …`.
 
 ### 8.8 Statistics and costs (`stats`)
+
+`VACUUM` (PostgreSQL's options and tables accepted; the whole database
+either way; not in a transaction block, `25001`) runs the KV's maintenance
+(`Kv::vacuum`: versions no snapshot sees removed, committed intents made
+versions, §5.2).
 
 `ANALYZE [table]` stores rows, and per column NULLs, distinct values and a
 16-bucket equi-depth histogram — from every row of a table up to 30 000
@@ -2477,6 +2510,14 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-10-30 — §M14.20 V11, write intents:** a large transaction's
+  spilled writes are versions stamped with its id (intents), resolved by
+  its status; the commit is a status record and nothing moves after it —
+  every write of a load or an index build written once; `VACUUM` (SQL,
+  `Kv::vacuum`) makes committed intents versions, and the server's
+  maintenance thread runs it when there are some; store readers let
+  waiting writers first; index builds read their rows in chunks.  SF 1:
+  `lineitem`'s `COPY` 52 → 38 s, an index on it 30 → 18 s.
 - **2026-10-30 — §M14.20 V10, OR implications and existence lookups:**
   an OR across two tables pushes each its implied filter (TPC-H Q19
   770 → 128 ms); uncorrelated subqueries go below semi and anti joins and

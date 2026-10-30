@@ -14,11 +14,20 @@
 //!
 //! The value tag is 1 for a value, 0 for a tombstone (a delete).
 //!
+//! **Intents.**  A large transaction's writes, spilled before it commits,
+//! are versions too — *write intents* — whose timestamp is the
+//! transaction's id from the top of the range ([`intent_ts`]: `u64::MAX -
+//! id`, at or above [`INTENT_FLOOR`]), so a key's intents come before its
+//! versions.  A reader resolves one by the transaction's status: its own
+//! writes, committed at a timestamp, or neither (running or aborted).
+//!
 //! **Reserved keys.**  An encoded user key never starts with `00` followed
 //! by a byte other than `00` or `FF`, so the store keys from `00 01` up to
-//! `00 FF` belong to the engine: a large transaction's writes, spilled
-//! before it commits (`00 01 | id | user key -> tag | value`, the side
-//! area), and its status once committed (`00 02 | id -> commit ts`).
+//! `00 FF` belong to the engine: a large transaction's status once
+//! committed (`00 02 | id -> commit ts`), the next transaction id
+//! (`00 03 -> id`), and the side area of earlier versions of the engine,
+//! which spilled writes apart (`00 01 | id | user key -> tag | value`),
+//! moved into versions when an older database opens.
 
 /// Bytes added by the encoding besides escaping: terminator and timestamp.
 pub const OVERHEAD: usize = 10;
@@ -100,6 +109,23 @@ pub fn decode_key_onto(key: &[u8], user: &mut Vec<u8>) -> Option<u64> {
     }
     None
 }
+
+/// The lowest timestamp of an intent: commit timestamps stay below it.
+pub const INTENT_FLOOR: u64 = 1 << 63;
+
+/// The timestamp intents of transaction `id` carry.
+pub fn intent_ts(id: u64) -> u64 {
+    u64::MAX - id
+}
+
+/// The transaction whose intent a version of timestamp `ts` is, if it is
+/// one.
+pub fn intent_of(ts: u64) -> Option<u64> {
+    (ts >= INTENT_FLOOR).then(|| u64::MAX - ts)
+}
+
+/// The record of the next transaction id (above every intent's).
+pub const NEXT_ID: [u8; 2] = [0, 3];
 
 /// The first reserved store key: the side area.
 pub const SIDE: [u8; 2] = [0, 1];

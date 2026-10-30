@@ -755,6 +755,15 @@ impl Session {
                 })?;
                 Ok(Output::Command("ALTER TABLE".into()))
             }
+            Statement::Vacuum => {
+                if self.block.is_some() {
+                    return Err(Error::active_txn(
+                        "VACUUM cannot run inside a transaction block",
+                    ));
+                }
+                self.kv.vacuum()?;
+                Ok(Output::Command("VACUUM".into()))
+            }
             Statement::SetStoragePolicy { table, policy } => {
                 if self.block.is_some() {
                     return Err(Error::active_txn(
@@ -1297,6 +1306,11 @@ fn execute_statement(
         Statement::SetStorage { .. } | Statement::SetStoragePolicy { .. } => {
             return Err(Error::active_txn(
                 "ALTER TABLE … SET STORAGE runs as a statement of its own",
+            ));
+        }
+        Statement::Vacuum => {
+            return Err(Error::active_txn(
+                "VACUUM cannot run inside a transaction block",
             ));
         }
         Statement::AttachPartition {

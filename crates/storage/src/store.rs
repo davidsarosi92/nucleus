@@ -145,6 +145,9 @@ pub struct Recovery {
 pub struct Store {
     pool: Arc<BufferPool>,
     tree: RwLock<BTree>,
+    /// Writers waiting for the tree: new readers let them go first (a
+    /// while), so a stream of scans does not keep a writer out.
+    writers_waiting: std::sync::atomic::AtomicUsize,
     wal: Wal,
     /// Serialises writers and checkpoints; holds the applied LSN and meta.
     writer: Mutex<(Lsn, u64)>,
@@ -239,6 +242,7 @@ impl Store {
         let store = Self {
             pool,
             tree: RwLock::new(tree),
+            writers_waiting: std::sync::atomic::AtomicUsize::new(0),
             wal,
             writer: Mutex::new((applied, meta)),
             checkpoint_lsn: AtomicU64::new(checkpoint),
@@ -274,7 +278,9 @@ impl Store {
         let mut w = self.writer();
         self.check()?;
         let result = self.wal.append(&batch.encode()).and_then(|lsn| {
+            self.writers_waiting.fetch_add(1, Ordering::AcqRel);
             let mut tree = self.tree.write().unwrap_or_else(|e| e.into_inner());
+            self.writers_waiting.fetch_sub(1, Ordering::AcqRel);
             apply(&mut tree, batch)?;
             Ok(lsn)
         });
@@ -308,6 +314,15 @@ impl Store {
     /// The tree, for reading.  Hold the guard briefly: writers wait for it.
     pub fn read(&self) -> Result<RwLockReadGuard<'_, BTree>> {
         self.check()?;
+        // A writer waiting goes first — for a few hundred yields at most
+        // (a reader that holds the tree already, reading again, must not
+        // wait for a writer that waits for it).
+        for _ in 0..256 {
+            if self.writers_waiting.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            std::thread::yield_now();
+        }
         Ok(self.tree.read().unwrap_or_else(|e| e.into_inner()))
     }
 

@@ -931,10 +931,6 @@ pub fn delete(
 
 /// Writes the entries of a new index for every existing row.
 pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usize) -> Result<()> {
-    let rows = {
-        let ctx = Ctx::new(&*txn, reg, &[]);
-        exec::matching_stash(table, &Access::Full, None, &ctx)?
-    };
     let keys = IndexKeys::new(&*txn, reg, table)?;
     // The new index's keys: none yet, and no other transaction sees the
     // index before this one commits.
@@ -942,20 +938,51 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
     if let Some(end) = nucleus_kv::prefix_end(&prefix) {
         txn.fresh(&prefix, &end);
     }
-    for r in rows.into_iter() {
-        let (key, row) = exec::unkeyed(r?)?;
-        let pk = pk_suffix(table, &key);
-        let (k, unique) = keys.entries(&*txn, table, &row, &pk)?.swap_remove(i);
-        if unique && txn.get(&k)?.is_some() {
-            return Err(Error::unique_violation(format!(
-                "could not create unique index \"{}\": key is duplicated",
-                table.indexes[i].name
-            )));
+    let storage = crate::storage::of(table)?;
+    let rows_prefix = table.index_prefix(0);
+    let rows_end = nucleus_kv::prefix_end(&rows_prefix);
+    let mut start = rows_prefix;
+    loop {
+        // The rows a chunk at a time — the scan let go before the
+        // entries are written, so nothing is stashed aside.
+        let chunk: Vec<(Vec<u8>, Row)> = storage
+            .rows(crate::storage::Scan {
+                txn: &*txn,
+                table,
+                start: start.clone(),
+                end: rows_end.clone(),
+                wanted: None,
+                validated: false,
+                bounds: Vec::new(),
+            })?
+            .take(BACKFILL_ROWS)
+            .collect::<Result<_>>()?;
+        let Some((last, _)) = chunk.last() else {
+            return Ok(());
+        };
+        let mut next = last.clone();
+        next.push(0);
+        let full = chunk.len() == BACKFILL_ROWS;
+        for (key, row) in chunk {
+            let pk = pk_suffix(table, &key);
+            let (k, unique) = keys.entries(&*txn, table, &row, &pk)?.swap_remove(i);
+            if unique && txn.get(&k)?.is_some() {
+                return Err(Error::unique_violation(format!(
+                    "could not create unique index \"{}\": key is duplicated",
+                    table.indexes[i].name
+                )));
+            }
+            txn.put(&k, &pk)?;
         }
-        txn.put(&k, &pk)?;
+        if !full {
+            return Ok(());
+        }
+        start = next;
     }
-    Ok(())
 }
+
+/// Rows an index build reads at a time.
+const BACKFILL_ROWS: usize = 65_536;
 
 /// Every key of a table — its rows' and its indexes' — written again in
 /// the current key encoding (an upgrade from an older one; the decoder

@@ -10,8 +10,9 @@ use nucleus_storage::{BTree, Batch, Store, StoreOptions};
 
 use crate::error::{Error, Result};
 use crate::mvcc::{
-    self, RESERVED_END, SIDE, STATUS, after_versions, decode_key, decode_key_onto, decode_value,
-    encode_key, encode_value, first_version, side_key, side_prefix, status_key,
+    self, NEXT_ID, RESERVED_END, SIDE, STATUS, after_versions, decode_key, decode_key_onto,
+    decode_value, encode_key, encode_value, first_version, intent_of, intent_ts, side_prefix,
+    status_key,
 };
 
 /// A commit timestamp.  Logical for now (PLAN.md principle 3): a counter that
@@ -119,6 +120,9 @@ struct Inner {
     side_users: AtomicUsize,
 }
 
+/// Entries vacuum changes per batch (each under the commit lock).
+const VACUUM_CHUNK: usize = 16_384;
+
 /// Side-area entries moved or deleted per batch.
 const SIDE_CHUNK: usize = 4096;
 /// Bytes spilled per batch (each applied under the tree's write lock).
@@ -223,6 +227,12 @@ impl Engine {
         Ok(engine)
     }
 
+    /// Whether committed transactions have intents vacuum has not made
+    /// versions yet.
+    pub fn intents_pending(&self) -> bool {
+        !lock(&self.inner.unresolved).is_empty()
+    }
+
     /// The newest snapshot a transaction would see.
     pub fn visible(&self) -> Timestamp {
         Timestamp(self.inner.visible.load(Ordering::Acquire))
@@ -277,23 +287,27 @@ impl Engine {
         Ok(self.inner.store.checkpoint()?)
     }
 
-    /// Removes every version no snapshot can see any more.  Returns how many
-    /// were removed.  Commits also collect the old versions of the keys they
-    /// write; this sweeps the rest.
+    /// Removes every version no snapshot can see any more, makes committed
+    /// transactions' intents versions at their commit timestamps and
+    /// deletes aborted ones'.  Returns how many entries it removed.
+    /// Commits also collect the old versions of the keys they write; this
+    /// sweeps the rest.  After a whole sweep, the transactions committed
+    /// before it began have no intent left: their status records go.
     pub fn vacuum(&self) -> Result<u64> {
+        let committed = self.inner.unresolved_ids();
         let mut removed = 0;
         let mut from = Vec::new();
         loop {
             // In chunks, releasing the commit lock between them.
             let commit = lock(&self.inner.commit);
             let wm = self.inner.current_watermark();
+            let others = self.inner.others(None);
             let mut ops = Vec::new();
             let mut last_user: Option<Vec<u8>> = None;
             let mut kept_one = false;
             let mut next = None;
             {
                 let tree = self.inner.store.read()?;
-                let unresolved = self.inner.unresolved_ids();
                 let mut pinned = false;
                 for entry in versions(&tree, Bound::Included(&from), Bound::Unbounded)?
                     .into_iter()
@@ -303,15 +317,28 @@ impl Engine {
                     let (user, ts) =
                         decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
                     if last_user.as_deref() != Some(&user[..]) {
-                        if ops.len() >= 512 {
+                        if ops.len() >= VACUUM_CHUNK {
                             next = Some(first_version(&user));
                             break;
                         }
-                        // A key with a write still in the side area keeps
-                        // its versions until that write is moved.
-                        pinned = Inner::in_side(&tree, &unresolved, &user)?;
-                        last_user = Some(user);
+                        last_user = Some(user.clone());
                         kept_one = false;
+                        pinned = false;
+                    }
+                    if let Some(id) = intent_of(ts) {
+                        // A key with an intent keeps its versions this sweep.
+                        pinned = true;
+                        if let Some(&(_, cts)) = committed.iter().find(|&&(u, _)| u == id) {
+                            ops.push((encode_key(&user, cts), Some(v)));
+                            ops.push((k, None));
+                            removed += 1;
+                        } else if !others.contains(&id)
+                            && !lock(&self.inner.unresolved).contains_key(&id)
+                        {
+                            ops.push((k, None)); // aborted
+                            removed += 1;
+                        }
+                        continue;
                     }
                     if ts > wm || pinned {
                         continue; // still needed by someone
@@ -321,15 +348,31 @@ impl Engine {
                         .is_none();
                     if kept_one || tombstone {
                         ops.push((k, None));
+                        removed += 1;
                     }
                     kept_one = true;
                 }
             }
-            removed += ops.len() as u64;
+            if next.is_none() {
+                // The whole keyspace swept: these transactions' intents are
+                // all versions now.
+                for &(id, _) in &committed {
+                    ops.push((status_key(id), None));
+                }
+            }
             if !ops.is_empty() {
                 let lsn = self.inner.store.write(&Batch { meta: *commit, ops })?;
                 drop(commit);
-                self.inner.store.wait_durable(lsn)?;
+                if next.is_none() {
+                    // Durable — and with it every batch before (the log is
+                    // in order) — before the statuses are forgotten: an
+                    // intent never outlives its status.
+                    self.inner.store.wait_durable(lsn)?;
+                    for &(id, _) in &committed {
+                        lock(&self.inner.unresolved).remove(&id);
+                        self.inner.side_users.fetch_sub(1, Ordering::AcqRel);
+                    }
+                }
             }
             match next {
                 Some(n) => from = n,
@@ -352,15 +395,28 @@ impl Engine {
         Ok(n)
     }
 
-    /// Entries in the side area: writes of large transactions not yet
-    /// moved into versions — for tests.
+    /// Intents in the store — committed ones vacuum has not made versions
+    /// yet, running and aborted ones' — for tests.
+    pub fn intent_count(&self) -> Result<u64> {
+        let tree = self.inner.store.read()?;
+        let mut n = 0;
+        for e in versions(&tree, Bound::Unbounded, Bound::Unbounded)?
+            .into_iter()
+            .flatten()
+        {
+            let (k, _) = e?;
+            if decode_key(&k).is_some_and(|(_, ts)| intent_of(ts).is_some()) {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Entries in an older engine's side area — for tests.
     pub fn side_count(&self) -> Result<u64> {
         let tree = self.inner.store.read()?;
         let mut n = 0;
-        for e in tree.range(
-            Bound::Included(&SIDE[..]),
-            Bound::Excluded(&RESERVED_END[..]),
-        )? {
+        for e in tree.range(Bound::Included(&SIDE[..]), Bound::Excluded(&STATUS[..]))? {
             e?;
             n += 1;
         }
@@ -404,155 +460,139 @@ impl Inner {
             .collect()
     }
 
-    /// Whether any of `unresolved` holds a write of `user`.
-    fn in_side(tree: &BTree, unresolved: &[(u64, u64)], user: &[u8]) -> Result<bool> {
-        for &(id, _) in unresolved {
-            if tree.get(&side_key(id, user))?.is_some() {
-                return Ok(true);
-            }
+    /// The running transactions with intents, but `me`.
+    fn others(&self, me: Option<u64>) -> Vec<u64> {
+        if self.side_users.load(Ordering::Acquire) == 0 {
+            return Vec::new();
         }
-        Ok(false)
+        lock(&self.spilling)
+            .iter()
+            .copied()
+            .filter(|&id| Some(id) != me)
+            .collect()
     }
 
-    /// The newest version of `user` visible at `ts`: `Some(Some(v))` a value,
-    /// `Some(None)` a tombstone, `None` no version at all — among the
-    /// versions and the side area's writes of committed transactions.
-    fn read_at(&self, user: &[u8], ts: u64) -> Result<Option<Option<Vec<u8>>>> {
-        let unresolved = self.unresolved_ids();
-        // One read of the tree: a side write moved into a version is in
-        // one place or the other, never neither.
-        let tree = self.store.read()?;
-        let from = encode_key(user, ts);
-        let to = after_versions(user);
-        let mut best: Option<(u64, Vec<u8>)> = None;
-        if let Some(entry) = tree
-            .range(Bound::Included(&from), Bound::Excluded(&to))?
-            .next()
-        {
-            let (k, v) = entry?;
-            let (_, vts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
-            best = Some((vts, v));
-        }
-        for (id, cts) in unresolved {
-            if cts <= ts
-                && best.as_ref().is_none_or(|(b, _)| cts > *b)
-                && let Some(v) = tree.get(&side_key(id, user))?
-            {
-                best = Some((cts, v));
-            }
-        }
-        match best {
-            None => Ok(None),
-            Some((_, v)) => {
-                let value = decode_value(&v).ok_or(Error::Corrupt("bad version value"))?;
-                Ok(Some(value.map(<[u8]>::to_vec)))
-            }
-        }
+    /// The newest version of `user` visible at `ts` to transaction `me` (its
+    /// own intents first): `Some(Some(v))` a value, `Some(None)` a
+    /// tombstone, `None` no version at all.
+    fn read_at(&self, user: &[u8], ts: u64, me: Option<u64>) -> Result<Option<Option<Vec<u8>>>> {
+        Ok(self.look(user, ts, me, false)?.1)
     }
 
-    /// One look at `user`'s versions: the newest one's timestamp (durable or
-    /// not), and the value a reader at `ts` sees ([`Inner::read_at`]'s).
+    /// One look at `user`'s versions for transaction `me` reading at `ts`:
+    /// whether writing it conflicts — a newer commit wrote it (a version,
+    /// or an intent committed after `ts`), or another running transaction
+    /// has an intent of it — and the value `me` sees (its own intent, else
+    /// the newest of the committed intents and versions at or below `ts`).
+    /// `conflict_only`: the value is not wanted (the walk stops sooner).
     #[allow(clippy::type_complexity)]
-    fn newest_and_at(
+    fn look(
         &self,
         user: &[u8],
         ts: u64,
-    ) -> Result<(Option<u64>, Option<Option<Vec<u8>>>)> {
+        me: Option<u64>,
+        conflict_only: bool,
+    ) -> Result<(bool, Option<Option<Vec<u8>>>)> {
         let unresolved = self.unresolved_ids();
+        let others = self.others(me);
         let tree = self.store.read()?;
-        let from = first_version(user);
-        let to = after_versions(user);
-        let mut newest = None;
+        let decode = |v: &[u8]| -> Result<Option<Vec<u8>>> {
+            Ok(decode_value(v)
+                .ok_or(Error::Corrupt("bad version value"))?
+                .map(<[u8]>::to_vec))
+        };
+        if unresolved.is_empty() && others.is_empty() && me.is_none() {
+            // No intent anyone sees: the versions alone (an intent left by
+            // an aborted transaction sorts first and is passed over).
+            let from = if conflict_only {
+                first_version(user)
+            } else {
+                encode_key(user, ts)
+            };
+            let to = after_versions(user);
+            for entry in tree.range(Bound::Included(&from), Bound::Excluded(&to))? {
+                let (k, v) = entry?;
+                let (_, vts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
+                if intent_of(vts).is_some() {
+                    continue;
+                }
+                if conflict_only {
+                    return Ok((vts > ts, None));
+                }
+                return Ok((false, Some(decode(&v)?)));
+            }
+            return Ok((false, None));
+        }
+        let mut conflict = false;
         let mut best: Option<(u64, Vec<u8>)> = None;
-        for entry in tree.range(Bound::Included(&from), Bound::Excluded(&to))? {
+        let mut regular = false;
+        for entry in tree.range(
+            Bound::Included(&first_version(user)),
+            Bound::Excluded(&after_versions(user)),
+        )? {
             let (k, v) = entry?;
             let (_, vts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
-            newest.get_or_insert(vts);
-            if vts <= ts {
-                best = Some((vts, v));
-                break;
-            }
-        }
-        for (id, cts) in unresolved {
-            let newer = newest.is_none_or(|n| cts > n);
-            let seen = cts <= ts && best.as_ref().is_none_or(|(b, _)| cts > *b);
-            if (newer || seen)
-                && let Some(v) = tree.get(&side_key(id, user))?
+            let rank = match intent_of(vts) {
+                Some(id) if Some(id) == me => Some(u64::MAX),
+                Some(id) => match unresolved.iter().find(|&&(u, _)| u == id) {
+                    Some(&(_, cts)) if cts > ts => {
+                        conflict = true;
+                        None
+                    }
+                    Some(&(_, cts)) => Some(cts),
+                    None => {
+                        conflict |= others.contains(&id);
+                        None // running (another's) or aborted: not seen
+                    }
+                },
+                None => {
+                    // The first version: newer than the snapshot conflicts;
+                    // the first at or below it is the newest seen.
+                    if !regular && vts > ts {
+                        conflict = true;
+                        if conflict_only {
+                            break;
+                        }
+                    }
+                    regular = true;
+                    if vts > ts {
+                        continue;
+                    }
+                    if best.as_ref().is_none_or(|(b, _)| vts > *b) {
+                        best = Some((vts, v));
+                    }
+                    break;
+                }
+            };
+            if let Some(r) = rank
+                && best.as_ref().is_none_or(|(b, _)| r > *b)
             {
-                if newer {
-                    newest = Some(cts);
-                }
-                if seen {
-                    best = Some((cts, v));
-                }
+                best = Some((r, v));
+            }
+            if conflict && conflict_only {
+                break;
             }
         }
         let value = match best {
             None => None,
-            Some((_, v)) => Some(
-                decode_value(&v)
-                    .ok_or(Error::Corrupt("bad version value"))?
-                    .map(<[u8]>::to_vec),
-            ),
+            Some((_, v)) => Some(decode(&v)?),
         };
-        Ok((newest, value))
-    }
-
-    /// The timestamp of the newest version of `user`, durable or not (a
-    /// committed write still in the side area included).
-    fn newest_ts(&self, user: &[u8]) -> Result<Option<u64>> {
-        let unresolved = self.unresolved_ids();
-        let tree = self.store.read()?;
-        let from = first_version(user);
-        let to = after_versions(user);
-        let mut newest = match tree
-            .range(Bound::Included(&from), Bound::Excluded(&to))?
-            .next()
-        {
-            None => None,
-            Some(entry) => {
-                let (k, _) = entry?;
-                decode_key(&k).map(|(_, ts)| ts)
-            }
-        };
-        for (id, cts) in unresolved {
-            if newest.is_none_or(|n| cts > n) && tree.get(&side_key(id, user))?.is_some() {
-                newest = Some(cts);
-            }
-        }
-        Ok(newest)
+        Ok((conflict, value))
     }
 
     /// Whether writing `user` conflicts for a transaction that read at
-    /// `start` (spilled as `me`): a newer commit wrote it, or another
-    /// transaction has spilled a write of it.
+    /// `start` (`me`, if it has intents): see [`Inner::look`].
     fn conflicts(&self, user: &[u8], start: u64, me: Option<u64>) -> Result<bool> {
-        if self.newest_ts(user)?.is_some_and(|ts| ts > start) {
-            return Ok(true);
-        }
-        if self.side_users.load(Ordering::Acquire) == 0 {
-            return Ok(false);
-        }
-        let others: Vec<u64> = lock(&self.spilling)
-            .iter()
-            .copied()
-            .filter(|&id| Some(id) != me)
-            .collect();
-        if others.is_empty() {
-            return Ok(false);
-        }
-        let tree = self.store.read()?;
-        for id in others {
-            if tree.get(&side_key(id, user))?.is_some() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(self.look(user, start, me, true)?.0)
     }
 
-    /// The side area as the engine found it on opening: the writes of
-    /// transactions that never committed are dropped, those of committed
-    /// ones moved into versions.
+    /// The transactions as the engine found them on opening: those with a
+    /// status record committed — their intents read as versions at its
+    /// timestamp until vacuum makes them versions —, every other one's
+    /// intents aborted (passed over, and swept by vacuum); the next id
+    /// past every id used.  An older engine's side area: the writes of
+    /// transactions that never committed dropped, those of committed ones
+    /// moved into versions.
     fn recover_side(&self) -> Result<()> {
         let mut unresolved = Vec::new();
         let mut max_id = 0;
@@ -573,6 +613,14 @@ impl Inner {
                 unresolved.push((id, ts));
                 max_id = max_id.max(id);
             }
+            if let Some(v) = tree.get(&NEXT_ID)? {
+                let next = u64::from_be_bytes(
+                    v[..]
+                        .try_into()
+                        .map_err(|_| Error::Corrupt("bad next id record"))?,
+                );
+                max_id = max_id.max(next.saturating_sub(1));
+            }
             if let Some(e) = tree
                 .range_rev(Bound::Included(&SIDE[..]), Bound::Excluded(&STATUS[..]))?
                 .next()
@@ -587,7 +635,9 @@ impl Inner {
             }
         }
         self.next_id.store(max_id + 1, Ordering::Release);
-        // Every id in the side area without a status never committed.
+        // Every id in the side area without a status never committed; the
+        // ids with one there committed under an older engine.
+        let mut sided = BTreeSet::new();
         let mut id = 0u64;
         loop {
             let found = {
@@ -609,6 +659,8 @@ impl Inner {
             let Some(found) = found else { break };
             if !unresolved.iter().any(|&(u, _)| u == found) {
                 self.drop_side(found)?;
+            } else {
+                sided.insert(found);
             }
             if found == u64::MAX {
                 break;
@@ -620,9 +672,49 @@ impl Inner {
             self.side_users.fetch_add(1, Ordering::AcqRel);
         }
         for (id, ts) in unresolved {
-            self.resolve(id, ts)?;
+            if sided.contains(&id) {
+                self.resolve(id, ts)?;
+            }
         }
         Ok(())
+    }
+
+    /// Deletes the intents of aborted transaction `id` among the keys
+    /// `lo..=hi`, a batch at a time.
+    fn drop_intents(&self, id: u64, lo: &[u8], hi: &[u8]) -> Result<()> {
+        let mut from = first_version(lo);
+        let to = after_versions(hi);
+        let mine = intent_ts(id);
+        loop {
+            let last = lock(&self.commit);
+            let mut ops = Vec::new();
+            let mut next = None;
+            {
+                let tree = self.store.read()?;
+                for e in versions(&tree, Bound::Included(&from), Bound::Excluded(&to))?
+                    .into_iter()
+                    .flatten()
+                {
+                    let (k, _) = e?;
+                    let (user, ts) =
+                        decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
+                    if ts == mine {
+                        ops.push((k, None));
+                        if ops.len() == SIDE_CHUNK {
+                            next = Some(after_versions(&user));
+                            break;
+                        }
+                    }
+                }
+            }
+            if !ops.is_empty() {
+                self.store.write(&Batch { meta: *last, ops })?;
+            }
+            match next {
+                Some(n) => from = n,
+                None => return Ok(()),
+            }
+        }
     }
 
     /// Deletes transaction `id`'s side area, a batch at a time.
@@ -683,14 +775,12 @@ impl Inner {
         }
     }
 
-    /// Deletes for the versions of `user` that no snapshot at or after `wm`
-    /// can see: all but the newest at or below `wm`, and that one too if it
-    /// is a tombstone.
     /// A commit's checks of the keys it writes, in one walk over each key's
     /// versions (and one read of the tree for them all): the first key a
-    /// newer commit wrote — or another transaction has spilled a write of —
-    /// is a conflict (`Some`); else the versions the commit drops go to
-    /// `ops`, those older than the one each keeps.  Fresh keys
+    /// newer commit wrote — or another running transaction has an intent
+    /// of — is a conflict (`Some`); else the versions the commit lets go go
+    /// to `ops` (those older than the one it keeps; none of a key with an
+    /// intent still to be made a version).  Fresh keys
     /// ([`Transaction::fresh`]) are skipped.
     #[allow(clippy::type_complexity)]
     fn commit_checks(
@@ -702,25 +792,20 @@ impl Inner {
         ops: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
     ) -> Result<Option<Vec<u8>>> {
         let unresolved = self.unresolved_ids();
-        let others: Vec<u64> = if self.side_users.load(Ordering::Acquire) == 0 {
-            Vec::new()
-        } else {
-            lock(&self.spilling)
-                .iter()
-                .copied()
-                .filter(|&id| Some(id) != me)
-                .collect()
-        };
+        let others = self.others(me);
         let tree = self.store.read()?;
         let mut dropped = Vec::new();
         for (user, fresh) in keys {
             if fresh {
                 continue;
             }
-            // Newest first: the first version decides the conflict; those
-            // at or below the watermark past the first (or a tombstone)
-            // can go.
+            // Intents first: another's running, or committed after the
+            // snapshot, conflicts; any but an aborted one pins the
+            // versions.  Then the versions, newest first: the first decides
+            // the conflict; those at or below the watermark past the first
+            // (or a tombstone) can go.
             dropped.clear();
+            let mut pinned = false;
             let mut newest = None;
             let mut kept = false;
             for entry in tree.range(
@@ -729,6 +814,19 @@ impl Inner {
             )? {
                 let (k, v) = entry?;
                 let (_, vts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
+                if let Some(id) = intent_of(vts) {
+                    if Some(id) == me {
+                        pinned = true;
+                    } else if let Some(&(_, cts)) = unresolved.iter().find(|&&(u, _)| u == id) {
+                        if cts > start {
+                            return Ok(Some(user.to_vec()));
+                        }
+                        pinned = true;
+                    } else if others.contains(&id) {
+                        return Ok(Some(user.to_vec()));
+                    }
+                    continue;
+                }
                 if newest.is_none() {
                     if vts > start {
                         return Ok(Some(user.to_vec()));
@@ -745,23 +843,7 @@ impl Inner {
                     kept = true;
                 }
             }
-            // A committed write still in a side area: newer, a conflict;
-            // any, and the versions stay until it moves.
-            let mut in_side = false;
-            for &(id, cts) in &unresolved {
-                if tree.get(&side_key(id, user))?.is_some() {
-                    if cts > start {
-                        return Ok(Some(user.to_vec()));
-                    }
-                    in_side = true;
-                }
-            }
-            for &id in &others {
-                if tree.get(&side_key(id, user))?.is_some() {
-                    return Ok(Some(user.to_vec()));
-                }
-            }
-            if !in_side {
+            if !pinned {
                 ops.append(&mut dropped);
             }
         }
@@ -804,12 +886,15 @@ impl std::fmt::Debug for Transaction {
 
 impl Drop for Transaction {
     fn drop(&mut self) {
-        // Spilled writes of a transaction that did not commit: dropped (on
-        // a failure here, by the next open).
+        // The intents of a transaction that did not commit: aborted once it
+        // stops running (no reader sees them, no writer conflicts with
+        // them), then deleted (on a failure here, by vacuum).
         if let Some(id) = self.spilled.take() {
             lock(&self.engine.spilling).remove(&id);
             self.engine.side_users.fetch_sub(1, Ordering::AcqRel);
-            let _ = self.engine.drop_side(id);
+            if let Some((lo, hi)) = self.span.take() {
+                let _ = self.engine.drop_intents(id, &lo, &hi);
+            }
         }
         let mut active = lock(&self.engine.active);
         if let Some(n) = active.get_mut(&self.start) {
@@ -849,13 +934,10 @@ impl Transaction {
         if self.isolation == Isolation::Serializable {
             lock(&self.reads).keys.insert(key.to_vec());
         }
-        if let Some(id) = self.spilled
-            && let Some(v) = self.engine.store.get(&side_key(id, key))?
-        {
-            let value = decode_value(&v).ok_or(Error::Corrupt("bad side value"))?;
-            return Ok(value.map(<[u8]>::to_vec));
-        }
-        Ok(self.engine.read_at(key, self.start)?.flatten())
+        Ok(self
+            .engine
+            .read_at(key, self.start, self.spilled)?
+            .flatten())
     }
 
     /// [`get`](Self::get), and the commit fails if a commit after this
@@ -899,34 +981,20 @@ impl Transaction {
             self.record(key, Some(value))?;
             return Ok(true);
         }
-        if let Some(id) = self.spilled
-            && let Some(v) = self.engine.store.get(&side_key(id, key))?
-        {
-            if decode_value(&v)
-                .ok_or(Error::Corrupt("bad side value"))?
-                .is_some()
-            {
-                return Ok(false);
-            }
-            self.record(key, Some(value))?;
-            return Ok(true);
-        }
-        // A fresh key has no versions to look at.
-        if self.is_fresh(key) {
+        // A fresh key has no versions to look at (but this transaction's
+        // own intents, once it spilled).
+        if self.is_fresh(key) && self.spilled.is_none() {
             self.record(key, Some(value))?;
             return Ok(true);
         }
         if self.isolation == Isolation::Serializable {
             lock(&self.reads).keys.insert(key.to_vec());
         }
-        let (newest, seen) = self.engine.newest_and_at(key, self.start)?;
+        let (conflict, seen) = self.engine.look(key, self.start, self.spilled, false)?;
         if seen.flatten().is_some() {
             return Ok(false);
         }
-        if newest.is_some_and(|ts| ts > self.start)
-            || (self.engine.side_users.load(Ordering::Acquire) > 0
-                && self.engine.conflicts(key, self.start, self.spilled)?)
-        {
+        if conflict && !self.is_fresh(key) {
             return Err(Error::Conflict { key: key.to_vec() });
         }
         self.record(key, Some(value))?;
@@ -989,9 +1057,9 @@ impl Transaction {
         Ok(())
     }
 
-    /// Moves the writes held in memory into the side area (the
-    /// transaction's own part of the store, which no one else reads before
-    /// it commits).  Under the commit lock, each key is checked as a commit
+    /// Moves the writes held in memory into the store as intents (versions
+    /// stamped with this transaction's id, which no one else sees before it
+    /// commits).  Under the commit lock, each key is checked as a commit
     /// would check it; from then on, a commit of the same key conflicts.
     fn spill(&mut self) -> Result<()> {
         let engine = Arc::clone(&self.engine);
@@ -1019,10 +1087,16 @@ impl Transaction {
             });
         }
         let mut ops = Vec::new();
+        // The next id past this one, before its intents (so no later
+        // transaction is given an id an intent of this one has).
+        ops.push((NEXT_ID.to_vec(), Some((id + 1).to_be_bytes().to_vec())));
         let mut bytes = 0;
         for (key, value) in std::mem::take(&mut self.writes) {
             bytes += key.len() + value.as_ref().map_or(0, Vec::len) + 16;
-            ops.push((side_key(id, &key), Some(encode_value(value.as_deref()))));
+            ops.push((
+                encode_key(&key, intent_ts(id)),
+                Some(encode_value(value.as_deref())),
+            ));
             if bytes >= SPILL_CHUNK {
                 engine.store.write(&Batch {
                     meta: *last,
@@ -1133,20 +1207,22 @@ impl Transaction {
                 ops.push((encode_key(key, ts), Some(encode_value(value.as_deref()))));
                 if let Some(id) = spilled {
                     // Written again after it spilled: this write is the one.
-                    ops.push((side_key(id, key), None));
+                    ops.push((encode_key(key, intent_ts(id)), None));
                 }
             }
             if let Some(id) = spilled {
-                // The commit: the side area's writes are this
-                // transaction's at `ts`.
+                // The commit: this transaction's intents are versions at
+                // `ts` (and become them, as vacuum rewrites them).
                 ops.push((status_key(id), Some(ts.to_be_bytes().to_vec())));
             }
             let lsn = engine.store.write(&Batch { meta: ts, ops })?;
             *last = ts;
             if let Some(id) = spilled {
+                // Committed before it stops running: a writer never finds
+                // its intents neither (a reader at `ts` starts after both).
                 lock(&engine.unresolved).insert(id, ts);
                 lock(&engine.spilling).remove(&id);
-                self.spilled = None; // the side area is the commit's now
+                self.spilled = None; // its intents are the commit's now
             }
             let mut recent = lock(&engine.recent);
             for key in self.writes.keys() {
@@ -1167,12 +1243,6 @@ impl Transaction {
         };
         engine.store.wait_durable(lsn)?;
         engine.visible.fetch_max(ts, Ordering::AcqRel);
-        if let Some(id) = spilled {
-            // Committed: the side area's writes move into versions.  Readers
-            // find them there meanwhile; a failure here is finished when the
-            // engine next opens.
-            let _ = engine.resolve(id, ts);
-        }
         if engine.store.wal_since_checkpoint() > engine.opts.checkpoint_wal_bytes {
             let _commit = lock(&engine.commit);
             if engine.store.wal_since_checkpoint() > engine.opts.checkpoint_wal_bytes {
@@ -1290,6 +1360,10 @@ impl std::fmt::Debug for Scan<'_> {
 }
 
 const SCAN_BATCH: usize = 128;
+
+/// Store entries a refill passes over (intents no one sees, versions too
+/// new) before it ends its batch, letting the tree's lock go.
+const PASS_LIMIT: usize = 4096;
 
 /// The first refill's entries: a scan that wants one entry (the first key
 /// of a range, a `LIMIT 1`) reads a few, not a batch; each refill after
@@ -1416,6 +1490,7 @@ impl Scan<'_> {
             // into the buffer, each user key decoded in place.
             let [k, v] = &mut self.bufs;
             let buf = &mut self.buffer;
+            let mut passed = 0;
             'ranges: for mut range in versions(&tree, Bound::Included(&seek), end)? {
                 while range.next_into(k, v)? {
                     let at = buf.data.len();
@@ -1426,6 +1501,17 @@ impl Scan<'_> {
                         .ents
                         .last()
                         .is_some_and(|&(kk, vv)| buf.data[kk..vv] == *user);
+                    if !seen && ts > txn.start {
+                        // Too new (another's intent, a later commit): passed
+                        // over — many of them, and the batch ends here, the
+                        // tree's lock let go, the key read again next time.
+                        passed += 1;
+                        if passed >= PASS_LIMIT {
+                            upper = Some(user.to_vec());
+                            buf.data.truncate(at);
+                            break 'ranges;
+                        }
+                    }
                     if ts > txn.start || seen {
                         // Too new, or an older version of a key already seen.
                         buf.data.truncate(at);
@@ -1447,77 +1533,70 @@ impl Scan<'_> {
             }
             return Ok(());
         }
-        let mut found: BTreeMap<Vec<u8>, (u64, Option<Vec<u8>>)> = BTreeMap::new();
-        let mut last: Option<Vec<u8>> = None;
-        for entry in versions(&tree, Bound::Included(&seek), end)?
-            .into_iter()
-            .flatten()
-        {
-            let (k, v) = entry?;
-            let (user, ts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
-            if ts > txn.start || last.as_deref() == Some(&user[..]) {
-                continue; // too new, or an older version of a key already seen
+        // Intents seen — committed ones at their commit timestamps, the
+        // transaction's own above everything — against the versions: per
+        // user key the highest ranked.
+        let rank_of = |id: u64| sides.iter().find(|&&(i, _)| i == id).map(|&(_, r)| r);
+        // A user key's versions come together (intents first): the best so
+        // far — rank, live, value — goes out when the next key begins.
+        let [k, v] = &mut self.bufs;
+        let (buf, live) = (&mut self.buffer, &mut self.live);
+        let mut user: Vec<u8> = Vec::new();
+        let mut next: Vec<u8> = Vec::new();
+        let mut value: Vec<u8> = Vec::new();
+        let mut best: Option<(u64, bool)> = None;
+        let mut have = false;
+        let mut taken = false;
+        let mut passed = 0;
+        let flush = |buf: &mut Chunk, live: &mut Vec<bool>, user: &[u8], best, value: &[u8]| {
+            if let Some((_, alive)) = best {
+                buf.push(user, if alive { value } else { &[] });
+                live.push(alive);
             }
-            if found.len() == max {
-                upper = Some(user);
-                break;
-            }
-            let value = decode_value(&v).ok_or(Error::Corrupt("bad version value"))?;
-            found.insert(user.clone(), (ts, value.map(<[u8]>::to_vec)));
-            last = Some(user);
-        }
-        let range_end = &self.range.1;
-        for (id, rank) in sides {
-            let prefix = side_prefix(id);
-            let with = |k: &[u8]| {
-                let mut p = prefix.clone();
-                p.extend_from_slice(k);
-                p
-            };
-            let lo = match &from {
-                Bound::Unbounded => Bound::Included(prefix.clone()),
-                Bound::Included(k) => Bound::Included(with(k)),
-                Bound::Excluded(k) => Bound::Excluded(with(k)),
-            };
-            let hi = match (&upper, range_end) {
-                (Some(u), _) => Bound::Excluded(with(u)),
-                (None, Bound::Unbounded) => Bound::Excluded(side_prefix(id.wrapping_add(1))),
-                (None, Bound::Included(e)) => Bound::Included(with(e)),
-                (None, Bound::Excluded(e)) => Bound::Excluded(with(e)),
-            };
-            let hi = if id == u64::MAX && matches!((&upper, range_end), (None, Bound::Unbounded)) {
-                Bound::Excluded(STATUS.to_vec())
-            } else {
-                hi
-            };
-            let side = tree.range(
-                lo.as_ref().map(Vec::as_slice),
-                hi.as_ref().map(Vec::as_slice),
-            )?;
-            for (taken, e) in side.enumerate() {
-                let (k, v) = e?;
-                let user = k[10..].to_vec();
-                if taken == max {
-                    // This side area has more: the batch ends before them.
-                    if upper.as_ref().is_none_or(|u| &user < u) {
-                        upper = Some(user);
+        };
+        'ranges: for mut range in versions(&tree, Bound::Included(&seek), end)? {
+            while range.next_into(k, v)? {
+                next.clear();
+                let ts = decode_key_onto(k, &mut next)
+                    .ok_or(Error::Corrupt("undecodable version key"))?;
+                if !have || next != user {
+                    if have {
+                        flush(buf, live, &user, best, &value);
                     }
-                    break;
+                    if buf.len() >= max || passed >= PASS_LIMIT {
+                        upper = Some(next.clone());
+                        have = false;
+                        break 'ranges;
+                    }
+                    std::mem::swap(&mut user, &mut next);
+                    have = true;
+                    best = None;
+                    taken = false;
                 }
-                let value = decode_value(&v).ok_or(Error::Corrupt("bad side value"))?;
-                let newer = found.get(&user).is_none_or(|(r, _)| rank > *r);
-                if newer {
-                    found.insert(user, (rank, value.map(<[u8]>::to_vec)));
+                passed += 1;
+                let rank = match intent_of(ts) {
+                    Some(id) => match rank_of(id) {
+                        Some(r) => r,
+                        None => continue, // running, aborted, or committed later
+                    },
+                    None => {
+                        if ts > txn.start || taken {
+                            continue; // too new, or an older version
+                        }
+                        taken = true;
+                        ts
+                    }
+                };
+                if best.is_none_or(|(r, _)| rank > r) {
+                    let stored = decode_value(v).ok_or(Error::Corrupt("bad version value"))?;
+                    value.clear();
+                    value.extend_from_slice(stored.unwrap_or_default());
+                    best = Some((rank, stored.is_some()));
                 }
             }
         }
-        for (user, (_, value)) in found {
-            if upper.as_ref().is_some_and(|u| &user >= u) {
-                break;
-            }
-            self.buffer
-                .push(&user, value.as_deref().unwrap_or_default());
-            self.live.push(value.is_some());
+        if have {
+            flush(buf, live, &user, best, &value);
         }
         if let Some(u) = upper {
             self.from = Some(Bound::Included(u));

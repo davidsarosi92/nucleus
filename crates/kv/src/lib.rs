@@ -200,6 +200,19 @@ pub trait Kv: Send + Sync {
     fn scratch(&self) -> Result<Box<dyn Scratch>> {
         Ok(Box::new(MemoryScratch::default()))
     }
+
+    /// Maintenance: removes the versions no snapshot can see, and makes
+    /// committed large transactions' intents versions; how many entries it
+    /// removed.  The default has nothing to do.
+    fn vacuum(&self) -> Result<u64> {
+        Ok(0)
+    }
+
+    /// Whether [`vacuum`](Kv::vacuum) has intents to make versions (reads
+    /// resolve them meanwhile, for a little more).  The default: no.
+    fn vacuum_wanted(&self) -> bool {
+        false
+    }
 }
 
 /// Scratch space ([`Kv::scratch`]): bytes written and read back by offset.
@@ -575,6 +588,14 @@ impl Kv for Database {
 
     fn parallelism(&self) -> usize {
         self.platform.parallelism()
+    }
+
+    fn vacuum(&self) -> Result<u64> {
+        Database::vacuum(self)
+    }
+
+    fn vacuum_wanted(&self) -> bool {
+        self.engine.intents_pending()
     }
 
     fn scratch(&self) -> Result<Box<dyn Scratch>> {

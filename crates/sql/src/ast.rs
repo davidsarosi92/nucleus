@@ -355,6 +355,10 @@ pub enum Statement {
     Explain(Box<Statement>, ExplainOptions),
     /// `ANALYZE [table]`.
     Analyze(Option<String>),
+    /// `VACUUM [options] [table, …]`: the database's maintenance (versions
+    /// no snapshot sees removed, committed intents made versions) — of all
+    /// of it, whatever tables are named.
+    Vacuum,
     /// `ANALYZE QUERY <statement>`: the linter's findings.
     Lint(Box<Statement>),
     /// `COPY t [(columns)] FROM STDIN [WITH (options)]`.
