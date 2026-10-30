@@ -1455,7 +1455,26 @@ table); TPC-H against PostgreSQL measured (`bench/tpch.py`, SF 1: every
 result agrees; 6.5–7.9× PostgreSQL's time — joins a row at a time, column
 tables' point reads; `EXISTS` / `IN` unnested into semi and anti joins on
 the way) 🟡; ClickBench (`bench/clickbench.py`), the speed-ups and the
-targets recorded ⬜.
+targets recorded ⬜; V11 write intents among the versions ⬜ — a large
+transaction's spilled writes go straight into the version keyspace as
+*intents* (a version stamped with the transaction's id, not a commit
+timestamp: readers resolve it by the transaction's status — its own,
+committed at a timestamp, aborted —, conflicts see it as the write it
+is), instead of a side area moved into versions after the commit: every
+write of a load, an index build or a large `UPDATE` / `DELETE` written
+once; committed intents rewritten as versions lazily (by vacuum, or the
+next writer of the key), aborted ones dropped the same way; recovery
+reads the statuses, an unfinished transaction's intents aborted.  The
+guarantees stay: snapshot isolation and serializability, first committer
+wins, atomic commit (one status record), bounded memory; tested as the
+side area is — every I/O point crashed, concurrent writers, the
+simulation — and against it (the same histories, the same results).  The
+single-node form of §M21's write intents, which this makes the
+mechanism itself; V12 statistics across columns ⬜ — distinct counts of
+column groups and functional dependencies (as PostgreSQL's `CREATE
+STATISTICS`, and gathered on their own for the columns of every key and
+index), so filters and joins on several dependent columns are estimated
+from them rather than multiplied as independent.
 
 **Done when:** every storage mode works per table, per column and per
 partition, with online conversion between them under crash and
