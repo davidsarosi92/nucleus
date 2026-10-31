@@ -815,12 +815,47 @@ pub fn matching_stash(
     filter: Option<&Expr>,
     ctx: &Ctx,
 ) -> Result<crate::spill::Stored> {
+    if let Some(s) = matching_stash_vectorized(table, access, filter, ctx)? {
+        return Ok(s);
+    }
     let mut s = crate::spill::Stash::new();
     for r in matching(table, access, filter, ctx)? {
         let (k, row) = r?;
         s.push(keyed(k, row))?;
     }
     s.seal()
+}
+
+/// [`matching_stash`] through the vectorized executor — the scan and the
+/// filter a batch at a time, in parallel when they can be — for a table
+/// whose rows are keyed by their primary key (each row's key is computed
+/// from its values, so the scan need not carry it); `None` when the scan
+/// cannot run so.  The rows, their order and the errors are a single
+/// pass's ([`crate::vector::rows`]).
+fn matching_stash_vectorized(
+    table: &Table,
+    access: &Access,
+    filter: Option<&Expr>,
+    ctx: &Ctx,
+) -> Result<Option<crate::spill::Stored>> {
+    if table.primary_key.is_empty() {
+        return Ok(None);
+    }
+    let plan = Plan::Scan {
+        table: table.clone(),
+        access: access.clone(),
+        filter: filter.cloned(),
+        estimate: None,
+    };
+    let Some(rows) = crate::vector::rows(&plan, ctx, None)? else {
+        return Ok(None);
+    };
+    let mut s = crate::spill::Stash::new();
+    for r in rows {
+        let row = r?;
+        s.push(keyed(row_key_of(table, &row, None), row))?;
+    }
+    Ok(Some(s.seal()?))
 }
 
 /// Rows (with keys) of `table` matching `filter`.

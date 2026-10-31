@@ -29,10 +29,11 @@ use std::sync::Arc;
 use crate::buffer::{BufferPool, PageRef};
 use crate::error::{Error, Result};
 use crate::node::{
-    Internal, Leaf, MAX_INLINE_CELL, MAX_KEY, MIN_FILL, Node, OVERFLOW, OVERFLOW_CAPACITY, Val,
-    ValRef, View, decode_overflow, encode_overflow, key_prefix, leaf_cell_size, leaf_size,
+    Internal, LEAF, Leaf, MAX_INLINE_CELL, MAX_KEY, MIN_FILL, Node, OVERFLOW, OVERFLOW_CAPACITY,
+    Val, ValRef, View, balance_point, cell_size, decode_overflow, encode_leaf, encode_overflow,
+    key_prefix, leaf_cell_size, leaf_size,
 };
-use crate::page::{PAYLOAD_SIZE, PageId};
+use crate::page::{PAYLOAD_SIZE, Page, PageId};
 
 /// Values this long or longer are compressed when that saves enough
 /// (PLAN.md §M14.20 V5).  Not shorter ones: a row of a few hundred bytes
@@ -349,22 +350,27 @@ impl BTree {
 
     /// A cursor, positioned before the first entry.
     pub fn cursor(&self) -> Result<Cursor<'_>> {
-        let mut c = Cursor {
+        let mut c = self.unplaced();
+        c.seek(&[])?;
+        Ok(c)
+    }
+
+    /// A cursor not yet in a leaf: every use seeks first.
+    fn unplaced(&self) -> Cursor<'_> {
+        Cursor {
             tree: self,
             path: Vec::new(),
             leaf: None,
             leaf_len: 0,
             pos: 0,
-        };
-        c.seek(&[])?;
-        Ok(c)
+        }
     }
 
     /// The entries with keys in `(start, end)`, in ascending order.
     pub fn range(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Range<'_>> {
-        let mut cursor = self.cursor()?;
+        let mut cursor = self.unplaced();
         match start {
-            Bound::Unbounded => {}
+            Bound::Unbounded => cursor.seek(&[])?,
             Bound::Included(k) => cursor.seek(k)?,
             Bound::Excluded(k) => cursor.seek_after(k)?,
         }
@@ -378,7 +384,7 @@ impl BTree {
 
     /// The entries with keys in `(start, end)`, in descending order.
     pub fn range_rev(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Range<'_>> {
-        let mut cursor = self.cursor()?;
+        let mut cursor = self.unplaced();
         match end {
             Bound::Unbounded => cursor.seek_end()?,
             Bound::Included(k) => cursor.seek_after(k)?,
@@ -523,39 +529,21 @@ impl BTree {
         id: PageId,
         entries: Vec<(Vec<u8>, Option<Val>)>,
     ) -> Result<Vec<(Vec<u8>, PageId, usize)>> {
+        // A leaf is merged as its page holds it, nothing decoded.
+        let old = {
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            let v = View::new(&page).map_err(|reason| Error::Corrupt { page: id, reason })?;
+            v.is_leaf().then(|| page.clone())
+        };
+        if let Some(old) = old {
+            return self.merge_leaf(id, &old, &entries);
+        }
         match self.load(id)? {
-            Node::Leaf(leaf) => {
-                let mut merged = Vec::with_capacity(leaf.entries.len() + entries.len());
-                let mut old = leaf.entries.into_iter().peekable();
-                let mut new = entries.into_iter().peekable();
-                loop {
-                    let take_new = match (old.peek(), new.peek()) {
-                        (None, None) => break,
-                        (Some(_), None) => false,
-                        (None, Some(_)) => true,
-                        (Some(o), Some(n)) => match o.0.cmp(&n.0) {
-                            std::cmp::Ordering::Less => false,
-                            std::cmp::Ordering::Greater => true,
-                            std::cmp::Ordering::Equal => {
-                                let (_, v) = old.next().expect("peeked");
-                                self.free_val(&v)?;
-                                true
-                            }
-                        },
-                    };
-                    if take_new {
-                        // A removal takes the old entry (if any) with it.
-                        let (k, v) = new.next().expect("peeked");
-                        if let Some(v) = v {
-                            merged.push((k, v));
-                        }
-                    } else {
-                        merged.push(old.next().expect("peeked"));
-                    }
-                }
-                let pieces = pack_leaf(merged);
-                self.store_pieces(id, pieces)
-            }
+            Node::Leaf(_) => Err(Error::Corrupt {
+                page: id,
+                reason: "a leaf read as an internal node",
+            }),
             Node::Internal(node) => {
                 // The entries by the child they go to (in order: they are
                 // sorted).
@@ -599,6 +587,87 @@ impl BTree {
                 self.store_pieces(id, pieces)
             }
         }
+    }
+
+    /// The pages leaf `id` (its page `old`, copied out: the first piece
+    /// may be written over it) became after `entries` (sorted; `None`
+    /// removes) went in — its cells and the new ones merged by reference,
+    /// cut into pieces as [`pack_leaf`] cuts, and encoded straight into
+    /// the pages.
+    fn merge_leaf(
+        &self,
+        id: PageId,
+        old: &Page,
+        entries: &[(Vec<u8>, Option<Val>)],
+    ) -> Result<Vec<(Vec<u8>, PageId, usize)>> {
+        let corrupt = |reason| Error::Corrupt { page: id, reason };
+        let v = View::new(old).map_err(corrupt)?;
+        let n = v.len();
+        // The old keys whole (a page stores their shared prefix once), in
+        // one buffer.
+        let mut arena = Vec::new();
+        let mut ends = Vec::with_capacity(n);
+        for i in 0..n {
+            v.key(i).map_err(corrupt)?.append_to(&mut arena);
+            ends.push(arena.len());
+        }
+        let old_key = |i: usize| &arena[if i == 0 { 0 } else { ends[i - 1] }..ends[i]];
+        let mut merged: Vec<(&[u8], ValRef)> = Vec::with_capacity(n + entries.len());
+        let (mut i, mut j) = (0, 0);
+        while i < n || j < entries.len() {
+            let take_new = if i == n {
+                true
+            } else if j == entries.len() {
+                false
+            } else {
+                match old_key(i).cmp(&entries[j].0) {
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => {
+                        // Replaced (or removed): its overflow pages go.
+                        if let ValRef::Overflow { first, len, .. } = v.value(i).map_err(corrupt)? {
+                            for (page, _) in self.overflow_pages(first, len)? {
+                                self.pool.free(page)?;
+                            }
+                        }
+                        i += 1;
+                        true
+                    }
+                }
+            };
+            if take_new {
+                if let Some(val) = &entries[j].1 {
+                    merged.push((&entries[j].0, val.as_ref()));
+                }
+                j += 1;
+            } else {
+                merged.push((old_key(i), v.value(i).map_err(corrupt)?));
+                i += 1;
+            }
+        }
+        let mut out = Vec::new();
+        for (p, range) in pack_cells(&merged).into_iter().enumerate() {
+            let cells = &merged[range];
+            let page = if p == 0 && self.pool.is_writable(id) {
+                let r = self.pool.fetch(id)?;
+                encode_leaf(&mut *r.write()?, cells);
+                id
+            } else {
+                let r = self.pool.create(LEAF)?;
+                encode_leaf(&mut *r.write()?, cells);
+                if p == 0 {
+                    self.pool.free(id)?;
+                }
+                r.id()
+            };
+            let sep = if p == 0 {
+                Vec::new()
+            } else {
+                cells[0].0.to_vec()
+            };
+            out.push((sep, page, cells_size(cells)));
+        }
+        Ok(out)
     }
 
     /// Merges or evens out the children of `node` under the minimum fill
@@ -955,6 +1024,33 @@ impl<'t> Cursor<'t> {
         )
     }
 
+    /// [`seek`](Self::seek), without a descent when `key` falls inside
+    /// the current leaf (after its first key, at or before its last): for
+    /// seeks to keys near one another, most stay in the leaf they are in.
+    pub fn seek_near(&mut self, key: &[u8]) -> Result<()> {
+        if let Some(r) = &self.leaf
+            && self.leaf_len > 0
+        {
+            let page = r.read();
+            let corrupt = |reason| Error::Corrupt {
+                page: r.id(),
+                reason,
+            };
+            let v = View::new(&page).map_err(corrupt)?;
+            if v.key(0).map_err(corrupt)?.order(key).is_lt()
+                && !v
+                    .key(self.leaf_len - 1)
+                    .map_err(corrupt)?
+                    .order(key)
+                    .is_lt()
+            {
+                self.pos = v.partition(|k| k.order(key).is_lt()).map_err(corrupt)?;
+                return Ok(());
+            }
+        }
+        self.seek(key)
+    }
+
     /// Moves before the first entry `> key`.
     pub fn seek_after(&mut self, key: &[u8]) -> Result<()> {
         self.path.clear();
@@ -1222,9 +1318,83 @@ fn fit(node: Node) -> Vec<(Vec<u8>, Node)> {
     out
 }
 
+/// The encoded size of a leaf of `cells`.
+fn cells_size(cells: &[(&[u8], ValRef)]) -> usize {
+    let bytes = cells.iter().map(|(k, v)| cell_size(k, *v)).sum();
+    let prefix = match (cells.first(), cells.last()) {
+        (Some((a, _)), Some((b, _))) => key_prefix(a, b, cells.len()),
+        _ => 0,
+    };
+    leaf_size(bytes, cells.len(), prefix)
+}
+
+/// [`pack_leaf`] of cells by reference: the ranges of `cells` each piece
+/// holds — the same pieces.
+fn pack_cells(cells: &[(&[u8], ValRef)]) -> Vec<std::ops::Range<usize>> {
+    if cells_size(cells) <= PAYLOAD_SIZE {
+        return std::iter::once(0..cells.len()).collect();
+    }
+    let target = PAYLOAD_SIZE * 7 / 8;
+    let mut pieces: Vec<std::ops::Range<usize>> = std::iter::once(0..0).collect();
+    let mut bytes = 0;
+    let mut size = leaf_size(0, 0, 0);
+    for (i, (k, v)) in cells.iter().enumerate() {
+        let cell = cell_size(k, *v);
+        let piece = pieces.last().expect("one").clone();
+        let grown = if piece.is_empty() {
+            leaf_size(cell, 1, 0)
+        } else {
+            leaf_size(
+                bytes + cell,
+                piece.len() + 1,
+                key_prefix(cells[piece.start].0, k, piece.len() + 1),
+            )
+        };
+        if grown > target && !piece.is_empty() {
+            pieces.push(i..i);
+            bytes = 0;
+            size = leaf_size(cell, 1, 0);
+        } else {
+            size = grown;
+        }
+        bytes += cell;
+        pieces.last_mut().expect("one").end = i + 1;
+    }
+    // A small last piece: evened out with the one before (as `fit` splits
+    // a leaf: by bytes, until each piece fits).
+    if pieces.len() > 1 && size < MIN_FILL {
+        let last = pieces.pop().expect("two");
+        let prev = pieces.pop().expect("two");
+        fit_cells(cells, prev.start..last.end, &mut pieces);
+    }
+    pieces
+}
+
+/// `range` of `cells` in pieces that each fit a page, split as
+/// [`Node::split`] splits a leaf, appended to `out` in order.
+fn fit_cells(
+    cells: &[(&[u8], ValRef)],
+    range: std::ops::Range<usize>,
+    out: &mut Vec<std::ops::Range<usize>>,
+) {
+    if cells_size(&cells[range.clone()]) <= PAYLOAD_SIZE {
+        out.push(range);
+        return;
+    }
+    let sizes: Vec<usize> = cells[range.clone()]
+        .iter()
+        .map(|(k, v)| cell_size(k, *v))
+        .collect();
+    let k = range.start + balance_point(&sizes, 1, sizes.len() - 1);
+    fit_cells(cells, range.start..k, out);
+    fit_cells(cells, k..range.end, out);
+}
+
 /// A leaf's entries in pieces of about 7/8 of a page each (the last at
 /// least [`MIN_FILL`]): each with its first key as the separator before it
-/// (empty for the first).
+/// (empty for the first).  Decoded entries: the reference [`pack_cells`]
+/// is checked against.
+#[cfg(test)]
 fn pack_leaf(entries: Vec<(Vec<u8>, Val)>) -> Vec<(Vec<u8>, Node)> {
     let leaf = Leaf { entries };
     if leaf.size() <= PAYLOAD_SIZE {
@@ -1280,4 +1450,96 @@ fn pack_leaf(entries: Vec<(Vec<u8>, Val)>) -> Vec<(Vec<u8>, Node)> {
             (sep, Node::Leaf(Leaf { entries }))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `pack_cells` cuts a leaf where `pack_leaf` (decoded entries) does,
+    /// over leaves of every shape: short and long keys sharing prefixes or
+    /// not, inline, compressed and overflow values, pieces left small.
+    #[test]
+    fn pack_cells_cuts_as_pack_leaf() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        for round in 0..2000 {
+            let count = 1 + next(400) as usize;
+            let shared = next(40) as usize;
+            let mut keys: Vec<Vec<u8>> = (0..count)
+                .map(|_| {
+                    let mut k = vec![b'k'; shared];
+                    let len = next(if round % 7 == 0 { 300 } else { 12 }) as usize;
+                    k.extend((0..len).map(|_| next(256) as u8));
+                    k
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            let entries: Vec<(Vec<u8>, Val)> = keys
+                .into_iter()
+                .map(|k| {
+                    let v = match next(10) {
+                        0 => Val::Packed {
+                            raw: 999,
+                            block: vec![3; next(200) as usize],
+                        },
+                        1 => Val::Overflow {
+                            first: PageId(7),
+                            len: 50_000,
+                            raw: (next(2) == 0).then_some(80_000),
+                        },
+                        _ => Val::Inline(vec![
+                            1;
+                            next(if round % 5 == 0 { 1500 } else { 60 }) as usize
+                        ]),
+                    };
+                    (k, v)
+                })
+                .collect();
+            let refs: Vec<(&[u8], ValRef)> = entries
+                .iter()
+                .map(|(k, v)| (k.as_slice(), v.as_ref()))
+                .collect();
+            let got: Vec<(Vec<u8>, Vec<(Vec<u8>, Val)>)> = pack_cells(&refs)
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let sep = if i == 0 {
+                        Vec::new()
+                    } else {
+                        entries[r.start].0.clone()
+                    };
+                    (sep, entries[r].to_vec())
+                })
+                .collect();
+            let want: Vec<(Vec<u8>, Vec<(Vec<u8>, Val)>)> = pack_leaf(entries.clone())
+                .into_iter()
+                .map(|(sep, n)| match n {
+                    Node::Leaf(l) => (sep, l.entries),
+                    Node::Internal(_) => unreachable!("leaves"),
+                })
+                .collect();
+            assert_eq!(got, want, "round {round}");
+            for (_, piece) in &got {
+                let refs: Vec<(&[u8], ValRef)> = piece
+                    .iter()
+                    .map(|(k, v)| (k.as_slice(), v.as_ref()))
+                    .collect();
+                assert!(cells_size(&refs) <= PAYLOAD_SIZE, "round {round}");
+                assert_eq!(
+                    cells_size(&refs),
+                    Node::Leaf(Leaf {
+                        entries: piece.clone()
+                    })
+                    .size()
+                );
+            }
+        }
+    }
 }

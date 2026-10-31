@@ -622,6 +622,28 @@ impl Inner {
         Ok(self.look(user, start, me, true)?.0)
     }
 
+    /// [`conflicts`](Self::conflicts), answered without a look at the tree
+    /// when what recent commits wrote tells: `recent` holds every key a
+    /// commit after a running transaction's snapshot wrote (with the
+    /// newest such commit), so a key there newer than `start` conflicts and
+    /// one absent does not — unless another running transaction has
+    /// intents (only the tree shows them) or a spilled commit's span covers
+    /// the key (a span is coarser than its keys); then the tree decides.
+    fn write_conflicts(&self, user: &[u8], start: u64, me: Option<u64>) -> Result<bool> {
+        if self.others(me).is_empty() {
+            if lock(&self.recent).get(user).is_some_and(|&t| t > start) {
+                return Ok(true);
+            }
+            let spanned = lock(&self.recent_spans)
+                .iter()
+                .any(|(lo, hi, t)| *t > start && lo.as_slice() <= user && user <= hi.as_slice());
+            if !spanned {
+                return Ok(false);
+            }
+        }
+        self.conflicts(user, start, me)
+    }
+
     /// The transactions as the engine found them on opening: those with a
     /// status record committed — their intents read as versions at its
     /// timestamp until vacuum makes them versions —, every other one's
@@ -830,6 +852,10 @@ impl Inner {
         let unresolved = self.unresolved_ids();
         let others = self.others(me);
         let tree = self.store.read()?;
+        // One cursor for all the keys (they come in order): most seeks
+        // stay in the leaf the last one ended in.
+        let mut cursor = tree.cursor()?;
+        let (mut k, mut v) = (Vec::new(), Vec::new());
         let mut dropped = Vec::new();
         for (user, fresh) in keys {
             if fresh {
@@ -844,11 +870,9 @@ impl Inner {
             let mut pinned = false;
             let mut newest = None;
             let mut kept = false;
-            for entry in tree.range(
-                Bound::Included(&first_version(user)),
-                Bound::Excluded(&after_versions(user)),
-            )? {
-                let (k, v) = entry?;
+            let end = after_versions(user);
+            cursor.seek_near(&first_version(user))?;
+            while cursor.next_within(&mut k, &mut v, &|key| key < &end[..])? {
                 let (_, vts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
                 if let Some(id) = intent_of(vts) {
                     if Some(id) == me {
@@ -874,7 +898,7 @@ impl Inner {
                         .ok_or(Error::Corrupt("bad version value"))?
                         .is_none();
                     if kept || tombstone {
-                        dropped.push((k, None));
+                        dropped.push((k.clone(), None));
                     }
                     kept = true;
                 }
@@ -1069,7 +1093,7 @@ impl Transaction {
         // guarantee — a conflicting commit can still land after this.
         if !self.writes.contains_key(key)
             && !self.is_fresh(key)
-            && self.engine.conflicts(key, self.start, self.spilled)?
+            && self.engine.write_conflicts(key, self.start, self.spilled)?
         {
             return Err(Error::Conflict { key: key.to_vec() });
         }
@@ -1269,8 +1293,16 @@ impl Transaction {
             }
             if recent.len() > RECENT_PRUNE || lock(&engine.recent_spans).len() > 64 {
                 // Nobody started before the oldest running transaction can
-                // still commit, so older writes cannot conflict any more.
-                let oldest = lock(&engine.active).keys().next().copied().unwrap_or(ts);
+                // still commit, so older writes cannot conflict any more —
+                // nor can a transaction begin before the visible snapshot
+                // (which lags the commits until they are durable).
+                let visible = engine.visible.load(Ordering::Acquire);
+                let oldest = lock(&engine.active)
+                    .keys()
+                    .next()
+                    .copied()
+                    .unwrap_or(visible)
+                    .min(visible);
                 recent.retain(|_, t| *t > oldest);
                 lock(&engine.recent_spans).retain(|(_, _, t)| *t > oldest);
             }

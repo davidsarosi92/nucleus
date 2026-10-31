@@ -324,15 +324,21 @@ internal nodes included), `range` / `range_rev` (bounds; going forward a
 range checks its end on a key before reading the key's value, so the first
 entry past the end — perhaps long, compressed, in overflow pages — is not
 read), `cursor`
-(`seek`, `seek_after`, `seek_end`, `next_entry`, `prev_entry`), `destroy`,
+(`seek`, `seek_after`, `seek_near`, `seek_end`, `next_entry`, `prev_entry`), `destroy`,
 `check` (ordering, separators, equal leaf depth, minimum fill, overflow
 lengths, no page used twice; returns the pages used).  `&self` reads,
 `&mut self` writes: callers wrap the tree in an `RwLock` (D11).  **Reads
 in place:** `get` and cursors read pages through `node::View` (binary
 search over the offset table, a key, a child or an entry checked as
 `decode` checks it) and copy out only the entry returned; a cursor keeps
-its leaf pinned and its path as page ids.  Writes decode nodes into
-structs.
+its leaf pinned and its path as page ids, and `seek_near` stays in its
+leaf when the key falls inside it (seeks to nearby keys in order — a
+commit's checks — mostly without a descent).  Writes decode nodes into
+structs, but a sorted batch's leaves (`apply_sorted`, so every commit):
+a leaf's cells and the new entries are merged by reference and encoded
+straight into the page (`node::encode_leaf`; the pieces cut as before,
+checked against the decoded packing), so a commit that touches every leaf
+allocates nothing per entry.
 
 ### 4.5 Write-ahead log (`wal::Wal`)
 
@@ -479,13 +485,17 @@ scans over a large transaction's intents does not keep it from spilling.
 records the keys it read and the key ranges its scans consumed (a scan
 counts up to the last row taken).  The engine keeps the keys of recent
 commits with their timestamps (pruned below the oldest running
-transaction once it holds 4096 keys).  At commit, if any recorded key or
+transaction — and the visible snapshot, which a transaction may still
+begin at while a commit waits to be durable — once it holds 4096 keys).  At commit, if any recorded key or
 range was written by a commit newer than the snapshot, the commit fails
 with a retryable `Conflict`.  Read-only transactions never conflict.  This
 is FoundationDB's read-conflict check rather than Cahill's SSI (D12): more
 aborts in some patterns, much less state, and it distributes.  A write
 whose key already has a newer version fails at the write, under both
-levels.
+levels — told by the recent commits' keys (every commit after a running
+snapshot is among them), without a look at the tree, unless another
+running transaction has intents or a large commit's span covers the key;
+the commit's own check stays the guarantee.
 
 **Validated reads** (§M14.5).  `get_validated` / `scan_validated` record
 the key or consumed range in the same read set at *any* isolation level, so
@@ -1173,7 +1183,10 @@ belong to rows — runs in one pass); a pipeline whose output becomes rows
 runs in rounds of a morsel per worker, each round's rows given in morsel
 order.  So the result is a single pass's — groups in the order first
 seen, rows in key order, the first error the one a single pass meets, a
-`LIMIT` stopping after the round it needs.  Sums of doubles and reals are
+`LIMIT` stopping after the round it needs.  `UPDATE` and `DELETE` find
+their rows the same way (vectorized, in parallel when they can be) when
+the table is keyed by a primary key — each row's key computed from its
+values; a policy, or a table keyed by hidden row ids, scans row by row.  Sums of doubles and reals are
 exact (Shewchuk's partials, rounded once — `fsum`), so they do not depend
 on the order either.  Not in parallel: an enclosing row (a correlated
 subquery), `EXPLAIN ANALYZE`, a subquery or volatile function in the
@@ -2565,6 +2578,16 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-01 — §M14.20, the write path:** `UPDATE` and `DELETE` find
+  their rows by the vectorized, parallel scan; a write's early conflict
+  check answered by the recent commits' keys; a B+tree range descends
+  once (it descended twice), a commit's checks walk one cursor
+  (`Cursor::seek_near`), and a sorted batch's leaves are merged by
+  reference and encoded in place (`node::encode_leaf`), nothing decoded.
+  Fixed: the recent keys were pruned past the visible snapshot, which a
+  transaction could still begin at — its serializable reads could miss a
+  conflict.  `bench/run.py`: a 10% delete 826 → 341 ms, a 25% update
+  1 896 → 1 150 ms.
 - **2026-10-30 — §M14.20 V11, vacuum when idle:** the server's vacuum
   runs when no transaction began for 10 s and none runs, in batches of
   2 048 entries,

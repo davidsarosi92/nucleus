@@ -365,3 +365,72 @@ fn parallel_joins_and_sorts_agree() {
         "the joins and sorts ran in parallel"
     );
 }
+
+#[test]
+fn parallel_writes_agree() {
+    // `UPDATE` and `DELETE` find their rows through the vectorized scan, in
+    // parallel on a large table: what they change, what they return and
+    // their errors are those of one thread and of the row-at-a-time
+    // executor — inside a transaction too, its own writes seen.
+    fn database(seed: u64) -> Database {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(seed)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        session(&db, 0)
+            .execute(
+                "CREATE TABLE w (id INT PRIMARY KEY, g INT, x BIGINT, s TEXT); \
+                 CREATE INDEX w_x ON w (x); \
+                 CREATE TABLE h (a INT, b TEXT); \
+                 INSERT INTO w SELECT i, i % 37, i::bigint * 7919 % 100003, 'v' || (i % 13) \
+                 FROM generate_series(1, 60000) i; \
+                 INSERT INTO h SELECT i % 100, 'h' || i FROM generate_series(1, 20000) i",
+            )
+            .unwrap();
+        db
+    }
+    let statements = [
+        "DELETE FROM w WHERE id % 10 = 0",
+        "UPDATE w SET x = x + 1 WHERE id % 4 = 0 AND s LIKE 'v1%'",
+        "DELETE FROM w WHERE 100 / (id - 45001) > 1",
+        "UPDATE w SET s = s || '!' WHERE 100 / (id - 30001) > 0",
+        "DELETE FROM w WHERE g = 5 RETURNING id, x",
+        "BEGIN; UPDATE w SET g = 99 WHERE id % 7 = 1; \
+         DELETE FROM w WHERE g = 99 AND id % 2 = 0 RETURNING id; COMMIT",
+        "BEGIN; INSERT INTO w SELECT i, 98, i, 'new' FROM generate_series(70000, 80000) i; \
+         UPDATE w SET x = -x WHERE g = 98 AND id % 3 = 0 RETURNING id, x; COMMIT",
+        "DELETE FROM h WHERE a % 3 = 0",
+        "UPDATE h SET b = upper(b) WHERE a < 10",
+        "SELECT count(*), sum(id), sum(x), min(s), max(s), sum(g) FROM w",
+        "SELECT id, x FROM w WHERE x BETWEEN 1000 AND 1100 ORDER BY id",
+        "SELECT a, count(*), min(b), max(b) FROM h GROUP BY a ORDER BY a",
+    ];
+    // Any output, rendered.
+    fn run(s: &mut Session, sql: &str) -> String {
+        match s.execute(sql) {
+            Ok(out) => format!("{out:?}"),
+            Err(e) => format!("{} {}", e.code, e.message),
+        }
+    }
+    let (a, b, c) = (database(11), database(11), database(11));
+    let mut row = session(&a, 0);
+    let mut one = session(&b, 1024);
+    one.execute("SET parallel_workers = 1").unwrap();
+    let mut many = session(&c, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    let before = nucleus_sql::vector::parallel_runs();
+    let mut errors = 0;
+    for q in statements {
+        let want = run(&mut row, q);
+        assert_eq!(run(&mut one, q), want, "one thread: {q}");
+        assert_eq!(run(&mut many, q), want, "workers: {q}");
+        errors += usize::from(want.starts_with("22012"));
+    }
+    assert_eq!(errors, 2, "both divisions by zero failed");
+    assert!(
+        nucleus_sql::vector::parallel_runs() - before >= 6,
+        "the writes found their rows in parallel"
+    );
+}

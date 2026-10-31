@@ -56,6 +56,24 @@ Writes are the gap: a delete pays for a lookup per row in the engine's
 conflict and garbage checks, a load and an update for encoding and
 writing each row's versions.
 
+**Writes since** (2026-11-01, nucleus alone; the same machine, the ratio
+against PostgreSQL's times above): `UPDATE` and `DELETE` find their rows
+by the parallel vectorized scan, a write's early conflict check no longer
+reads the tree, a commit's checks walk one cursor, and a commit's leaves
+are merged and encoded without being decoded:
+
+| 1,000,000 rows | before (ms) | now (ms) | ratio then → now |
+|---|---:|---:|---:|
+| load (INSERT … SELECT) | 3,193 | 2,700–2,960 | 3.3× → 2.8–3.1× |
+| update 25% | 1,896 | 1,135–1,160 | 2.2× → 1.4× |
+| delete 10% | 827 | 340 | 7.5× → 3.2× |
+
+What the delete's 340 ms is now (a profile): applying the commit's
+tombstones to the tree about 30%, per-row bookkeeping (the write set,
+the recent keys, key encoding, the stash) about 25%, the parallel scan
+15%, the commit's walk over each key's versions (its conflict and the
+versions it lets go) 10%.
+
 **A columnar table** (§M14.20 V7), the same million rows in `WITH
 (storage = column)` (loaded by `INSERT … SELECT` from the row table in
 4.0 s; its columns 32 MB): `sum` 2.0 ms (one thread 12.8 ms; the row
@@ -248,7 +266,7 @@ against PostgreSQL 18 in the same run:
 | column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 8.9×, Q22 6.7×, Q16 3.7×, Q13 3.5×; ClickBench Q18 4.3×, Q39 3.2× | no |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | 2.24×, 2.51× | no |
 | loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 3.3×; 4.5× (row), 4.8× (column); 2.8× | no |
-| updates and deletes ≤ 2× (`bench/run.py`) | 2.2×, 7.5× | no |
+| updates and deletes ≤ 2× (`bench/run.py`) | 1.4×, 3.2× (2026-11-01, against 10-31's PostgreSQL) | updates yes, deletes no |
 | scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.2–2.1×; sort 1.9×; self-join 3.8× | joins no |
 | reads by key ≤ 1× (`bench/run.py`) | 0.5× | yes |
 

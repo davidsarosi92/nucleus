@@ -2185,6 +2185,12 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20: the write path — `UPDATE` / `DELETE` find
+  their rows by the parallel vectorized scan; early conflict checks from
+  the recent commits' keys; a commit's leaves merged without decoding;
+  a 10% delete 7.5× → 3.2× PostgreSQL's time, a 25% update 2.2× → 1.4×
+  (the update target met).  Fixed: recent keys pruned past the visible
+  snapshot.
 - **2026-10-31** — §M14.20: ClickBench against PostgreSQL measured (a
   column table 0.34× of its time) and the targets recorded
   (`docs/benchmarks.md`).

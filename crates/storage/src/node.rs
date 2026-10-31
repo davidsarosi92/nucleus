@@ -26,9 +26,11 @@
 //!
 //! Overflow page payload: `next u64 (0 = last), len u32, data`.
 //!
-//! Nodes are decoded into [`Leaf`] / [`Internal`] to be read or changed and
-//! encoded back.  Simple and hard to get wrong; the cost is a copy per node
-//! visited.
+//! Reads go through a [`View`] of the page in place.  Nodes are decoded
+//! into [`Leaf`] / [`Internal`] to be changed and encoded back — simple and
+//! hard to get wrong, at a copy per node — but for a batch of sorted
+//! changes to a leaf (every bulk write): its cells and the new ones are
+//! merged by reference and written by [`encode_leaf`], nothing decoded.
 
 use crate::page::{PAYLOAD_SIZE, Page, PageId, PageType, read_u32, read_u64, write_u32, write_u64};
 
@@ -103,12 +105,24 @@ pub enum ValRef<'a> {
 }
 
 impl Val {
+    /// It, borrowed: as a page would hold it.
+    pub fn as_ref(&self) -> ValRef<'_> {
+        match self {
+            Val::Inline(v) => ValRef::Inline(v),
+            Val::Packed { raw, block } => ValRef::Packed { raw: *raw, block },
+            &Val::Overflow { first, len, raw } => ValRef::Overflow { first, len, raw },
+        }
+    }
+}
+
+impl ValRef<'_> {
+    /// The bytes it takes in a cell.
     fn stored_len(&self) -> usize {
         match self {
-            Val::Inline(v) => v.len(),
-            Val::Packed { block, .. } => 4 + block.len(),
-            Val::Overflow { raw: None, .. } => 16,
-            Val::Overflow { raw: Some(_), .. } => 24,
+            ValRef::Inline(v) => v.len(),
+            ValRef::Packed { block, .. } => 4 + block.len(),
+            ValRef::Overflow { raw: None, .. } => 16,
+            ValRef::Overflow { raw: Some(_), .. } => 24,
         }
     }
 }
@@ -141,7 +155,74 @@ pub enum Node {
 
 /// The encoded size of a leaf cell (offset slot included).
 pub fn leaf_cell_size(key: &[u8], val: &Val) -> usize {
+    cell_size(key, val.as_ref())
+}
+
+/// [`leaf_cell_size`] of a value as a page holds it.
+pub fn cell_size(key: &[u8], val: ValRef) -> usize {
     2 + 7 + key.len() + val.stored_len()
+}
+
+/// Writes a leaf of `entries` (in key order, borrowed: from a page being
+/// rewritten, or new) into `page` — the leaf [`Node::encode`] writes for
+/// the same entries, without a decoded [`Leaf`].
+pub fn encode_leaf(page: &mut Page, entries: &[(&[u8], ValRef)]) {
+    page.set_page_type(LEAF);
+    let p = page.payload_mut();
+    // Every byte is written: the header here, the free space between the
+    // offsets and the cells at the end (zeroed, as a fresh page's).
+    p[..HEADER].fill(0);
+    let mut end = PAYLOAD_SIZE;
+    let plen = match (entries.first(), entries.last()) {
+        (Some((a, _)), Some((b, _))) => key_prefix(a, b, entries.len()),
+        _ => 0,
+    };
+    // The key prefix first, at the end; its length and offset in the
+    // header.
+    p[0] = 1;
+    if plen > 0 {
+        end -= plen;
+        p[end..end + plen].copy_from_slice(&entries[0].0[..plen]);
+        p[4..6].copy_from_slice(&(plen as u16).to_le_bytes());
+        p[6..8].copy_from_slice(&(end as u16).to_le_bytes());
+        p[0] = 3;
+    }
+    p[2..4].copy_from_slice(&(entries.len() as u16).to_le_bytes());
+    let mut slot = HEADER;
+    for (key, val) in entries {
+        let key = &key[plen..];
+        let vlen = val.stored_len();
+        end -= 7 + key.len() + vlen;
+        let c = &mut p[end..end + 7 + key.len() + vlen];
+        c[0..2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+        c[2] = match val {
+            ValRef::Inline(_) => 0,
+            ValRef::Packed { .. } => 2,
+            ValRef::Overflow { raw: None, .. } => 1,
+            ValRef::Overflow { raw: Some(_), .. } => 3,
+        };
+        c[3..7].copy_from_slice(&(vlen as u32).to_le_bytes());
+        c[7..7 + key.len()].copy_from_slice(key);
+        let v = &mut c[7 + key.len()..];
+        match *val {
+            ValRef::Inline(b) => v.copy_from_slice(b),
+            ValRef::Packed { raw, block } => {
+                v[0..4].copy_from_slice(&raw.to_le_bytes());
+                v[4..].copy_from_slice(block);
+            }
+            ValRef::Overflow { first, len, raw } => {
+                v[0..8].copy_from_slice(&first.0.to_le_bytes());
+                v[8..16].copy_from_slice(&len.to_le_bytes());
+                if let Some(raw) = raw {
+                    v[16..24].copy_from_slice(&raw.to_le_bytes());
+                }
+            }
+        }
+        p[slot..slot + 2].copy_from_slice(&(end as u16).to_le_bytes());
+        slot += 2;
+    }
+    debug_assert!(slot <= end, "leaf overflows its page");
+    p[slot..end].fill(0);
 }
 
 fn internal_cell_size(key: &[u8]) -> usize {
@@ -265,82 +346,34 @@ impl Node {
 
     /// Writes this node into `page` (type included).
     pub fn encode(&self, page: &mut Page) {
-        page.set_page_type(self.page_type());
+        let node = match self {
+            Node::Leaf(leaf) => {
+                let refs: Vec<(&[u8], ValRef)> = leaf
+                    .entries
+                    .iter()
+                    .map(|(k, v)| (k.as_slice(), v.as_ref()))
+                    .collect();
+                return encode_leaf(page, &refs);
+            }
+            Node::Internal(node) => node,
+        };
+        page.set_page_type(INTERNAL);
         let p = page.payload_mut();
         p.fill(0);
         let mut end = PAYLOAD_SIZE;
         let mut slot = HEADER;
-        // A leaf's key prefix: first, at the end, its length and offset in
-        // the header.
-        if let Node::Leaf(leaf) = self {
-            let plen = leaf.prefix();
-            if plen > 0 {
-                end -= plen;
-                p[end..end + plen].copy_from_slice(&leaf.entries[0].0[..plen]);
-                p[4..6].copy_from_slice(&(plen as u16).to_le_bytes());
-                p[6..8].copy_from_slice(&(end as u16).to_le_bytes());
-            }
-        }
-        let mut put_cell = |p: &mut [u8], cell: &[u8]| {
-            end -= cell.len();
-            p[end..end + cell.len()].copy_from_slice(cell);
+        p[0] = 2;
+        p[2..4].copy_from_slice(&(node.keys.len() as u16).to_le_bytes());
+        write_u64(p, 4, node.children[0].0);
+        for (key, child) in node.keys.iter().zip(&node.children[1..]) {
+            let len = 10 + key.len();
+            end -= len;
+            let c = &mut p[end..end + len];
+            c[0..2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            c[2..10].copy_from_slice(&child.0.to_le_bytes());
+            c[10..].copy_from_slice(key);
             p[slot..slot + 2].copy_from_slice(&(end as u16).to_le_bytes());
             slot += 2;
-        };
-        let mut cell = Vec::with_capacity(MAX_INLINE_CELL + 32);
-        match self {
-            Node::Leaf(leaf) => {
-                let plen = leaf.prefix();
-                p[0] = 1;
-                p[2..4].copy_from_slice(&(leaf.entries.len() as u16).to_le_bytes());
-                if plen > 0 {
-                    p[0] = 3;
-                }
-                for (key, val) in &leaf.entries {
-                    let key = &key[plen..];
-                    cell.clear();
-                    cell.extend_from_slice(&(key.len() as u16).to_le_bytes());
-                    match val {
-                        Val::Inline(v) => {
-                            cell.push(0);
-                            cell.extend_from_slice(&(v.len() as u32).to_le_bytes());
-                            cell.extend_from_slice(key);
-                            cell.extend_from_slice(v);
-                        }
-                        Val::Packed { raw, block } => {
-                            cell.push(2);
-                            cell.extend_from_slice(&(4 + block.len() as u32).to_le_bytes());
-                            cell.extend_from_slice(key);
-                            cell.extend_from_slice(&raw.to_le_bytes());
-                            cell.extend_from_slice(block);
-                        }
-                        Val::Overflow { first, len, raw } => {
-                            cell.push(if raw.is_some() { 3 } else { 1 });
-                            let vlen: u32 = if raw.is_some() { 24 } else { 16 };
-                            cell.extend_from_slice(&vlen.to_le_bytes());
-                            cell.extend_from_slice(key);
-                            cell.extend_from_slice(&first.0.to_le_bytes());
-                            cell.extend_from_slice(&len.to_le_bytes());
-                            if let Some(raw) = raw {
-                                cell.extend_from_slice(&raw.to_le_bytes());
-                            }
-                        }
-                    }
-                    put_cell(p, &cell);
-                }
-            }
-            Node::Internal(node) => {
-                p[0] = 2;
-                p[2..4].copy_from_slice(&(node.keys.len() as u16).to_le_bytes());
-                write_u64(p, 4, node.children[0].0);
-                for (key, child) in node.keys.iter().zip(&node.children[1..]) {
-                    cell.clear();
-                    cell.extend_from_slice(&(key.len() as u16).to_le_bytes());
-                    cell.extend_from_slice(&child.0.to_le_bytes());
-                    cell.extend_from_slice(key);
-                    put_cell(p, &cell);
-                }
-            }
         }
         debug_assert!(slot <= end, "node overflows its page");
     }
@@ -617,7 +650,7 @@ impl<'a> View<'a> {
 
 /// The split index `k` in `lo..=hi` that best balances `sizes[..k]` against
 /// `sizes[k..]`.
-fn balance_point(sizes: &[usize], lo: usize, hi: usize) -> usize {
+pub(crate) fn balance_point(sizes: &[usize], lo: usize, hi: usize) -> usize {
     let total: usize = sizes.iter().sum();
     let mut left = sizes[..lo].iter().sum::<usize>();
     let mut best = (usize::MAX, lo);
@@ -695,6 +728,26 @@ mod tests {
                 ),
             ],
         }));
+    }
+
+    #[test]
+    fn a_leaf_written_over_another_is_byte_for_byte_a_fresh_one() {
+        let leaf = |n: u32, len: usize| {
+            Node::Leaf(Leaf {
+                entries: (0..n)
+                    .map(|i| (i.to_be_bytes().to_vec(), Val::Inline(vec![0xAB; len])))
+                    .collect(),
+            })
+        };
+        let mut dirty = Page::new(PageType::UNUSED);
+        leaf(150, 40).encode(&mut dirty);
+        let mut fresh = Page::new(PageType::UNUSED);
+        for small in [leaf(3, 5), leaf(0, 0), leaf(1, 3000)] {
+            small.encode(&mut dirty);
+            small.encode(&mut fresh);
+            assert!(dirty == fresh);
+            assert_eq!(Node::decode(&dirty).unwrap(), small);
+        }
     }
 
     #[test]
