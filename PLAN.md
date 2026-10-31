@@ -1299,8 +1299,9 @@ suite against PostgreSQL, in CI ✅ (`bench/run.py`: one workload — load,
 scans, a sort, a join, reads by key, updates, deletes — through each
 system's own client and server; CI against `postgres:18` with the table
 in the job summary; results, targets and how to reproduce in
-`docs/benchmarks.md`; TPC-H, ClickBench, a pgbench-like mix and ANN
-recall (§M14.12) to follow).
+`docs/benchmarks.md`; TPC-H and ClickBench since, run locally
+(`bench/tpch.py`, `bench/clickbench.py`, §M14.20); a pgbench-like mix and
+ANN recall (§M14.12) to follow).
 
 ### §M14.20 — Analytics: vectorized execution and columnar storage ⬜
 
@@ -1455,8 +1456,14 @@ table); TPC-H against PostgreSQL measured (`bench/tpch.py`, SF 1: every
 result agrees; first 6.5–7.9× PostgreSQL's time, now 1.10× on column
 tables and 2.24× on row tables in the geometric mean, 12 of the 22
 queries faster on column tables; `EXISTS` / `IN` unnested into semi and
-anti joins on the way) 🟡; ClickBench (`bench/clickbench.py`), the speed-ups and the
-targets recorded ⬜; V11 write intents among the versions ✅ — a large
+anti joins on the way) ✅; ClickBench (`bench/clickbench.py`, the first
+million rows: every result agrees, but for ties at a `LIMIT`; 0.34× of
+PostgreSQL's time on a column table, 2.51× on a row table) ✅; the
+targets recorded ✅ (`docs/benchmarks.md`, Targets: column tables at most
+0.8× PostgreSQL's time on TPC-H and 0.5× on ClickBench in the geometric
+mean, no query above 3×; row tables within 2×; loads, updates and
+deletes within 2×, scans, sorts and joins within 3×, reads by key at
+least even — met so far: ClickBench, scans and sorts, reads by key); V11 write intents among the versions ✅ — a large
 transaction's spilled writes go straight into the version keyspace as
 *intents* (a version stamped with the transaction's id, not a commit
 timestamp: readers resolve it by the transaction's status — its own,
@@ -2178,6 +2185,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-10-31** — §M14.20: ClickBench against PostgreSQL measured (a
+  column table 0.34× of its time) and the targets recorded
+  (`docs/benchmarks.md`).
 - **2026-10-30** — §M14.20 V12: statistics across columns — column
   groups' distinct combinations and functional dependencies (`CREATE
   STATISTICS`, and every multi-column key and index), used by the
