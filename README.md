@@ -43,8 +43,8 @@ scans, filters and aggregates run a batch at a time through kernels
 compiled per CPU (AVX2, AVX-512, NEON) and on every core, with the
 results of a single row-at-a-time pass; a table can be stored as
 compressed column segments (`WITH (storage = column)`).  On TPC-H (SF 1)
-column tables take 0.67× PostgreSQL's time in the geometric mean (row
-tables 1.27×), on ClickBench (a million rows) 0.31×, every result the
+column tables take 0.47× PostgreSQL's time in the geometric mean (row
+tables 1.11×), on ClickBench (a million rows) 0.24×, every result the
 same.  Next is the rest of the developer
 platform (§M14.12–§M14.24: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, …), then

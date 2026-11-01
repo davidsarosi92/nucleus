@@ -258,46 +258,67 @@ python3 bench/tpch.py --nucleus target/release/nucleus --sf 1 \
 ```
 
 2026-11-01, SF 1 (6 million `lineitem` rows), the machine above, nucleus
-on `14c3445` with the changes below; each query's best of three runs;
-nucleus with every table in rows, and with all but `region` and `nation`
-in columns; PostgreSQL 18.6 in the same run:
+on `f95a6c3`; each query's best of three runs; nucleus with every table
+in rows, and with all but `region` and `nation` in columns; PostgreSQL
+18.6 in the same run:
 
 | TPC-H SF 1 | nucleus (row) (ms) | nucleus (column) (ms) | postgresql (ms) | nucleus (row) / PostgreSQL | nucleus (column) / PostgreSQL | results |
 |---|---:|---:|---:|---:|---:|---|
-| Q1 | 809.5 | 534.7 | 995.5 | 0.81× | 0.54× | same |
-| Q2 | 40.6 | 50.2 | 167.5 | 0.24× | 0.30× | same |
-| Q3 | 468.8 | 153.6 | 292.9 | 1.60× | 0.52× | same |
-| Q4 | 223.9 | 69.8 | 146.3 | 1.53× | 0.48× | same |
-| Q5 | 1,010.0 | 527.7 | 442.0 | 2.29× | 1.19× | same |
-| Q6 | 482.5 | 135.3 | 194.5 | 2.48× | 0.70× | same |
-| Q7 | 665.1 | 234.1 | 2,821.7 | 0.24× | 0.08× | same |
-| Q8 | 217.8 | 135.7 | 176.9 | 1.23× | 0.77× | same |
-| Q9 | 2,950.3 | 2,436.7 | 1,345.3 | 2.19× | 1.81× | same |
-| Q10 | 604.3 | 460.2 | 321.5 | 1.88× | 1.43× | same |
-| Q11 | 179.0 | 50.8 | 32.8 | 5.45× | 1.55× | same |
-| Q12 | 504.2 | 109.8 | 303.0 | 1.66× | 0.36× | same |
-| Q13 | 424.1 | 367.0 | 335.9 | 1.26× | 1.09× | same |
-| Q14 | 458.7 | 119.0 | 197.3 | 2.33× | 0.60× | same |
-| Q15 | 498.6 | 133.3 | 205.9 | 2.42× | 0.65× | same |
-| Q16 | 224.6 | 124.9 | 125.3 | 1.79× | 1.00× | same |
-| Q17 | 40.2 | 81.4 | 454.4 | 0.09× | 0.18× | same |
-| Q18 | 1,334.1 | 885.3 | 1,615.0 | 0.83× | 0.55× | same |
-| Q19 | 45.1 | 58.0 | 17.5 | 2.57× | 3.31× | same |
-| Q20 | 511.5 | 546.1 | 232.7 | 2.20× | 2.35× | same |
-| Q21 | 997.9 | 501.8 | 1,593.3 | 0.63× | 0.31× | same |
-| Q22 | 67.0 | 15.7 | 34.4 | 1.95× | 0.45× | same |
-| geometric mean (22 queries) | 345.6 | 182.1 | 272.2 | 1.27× | 0.67× |  |
-| load (COPY, indexes, ANALYZE; s) | 75.7 | 94.0 | 27.1 |  |  |  |
+| Q1 | 499.4 | 184.5 | 989.5 | 0.50× | 0.19× | same |
+| Q2 | 41.3 | 49.3 | 177.9 | 0.23× | 0.28× | same |
+| Q3 | 520.7 | 133.5 | 289.2 | 1.80× | 0.46× | same |
+| Q4 | 231.9 | 67.8 | 147.9 | 1.57× | 0.46× | same |
+| Q5 | 836.4 | 333.6 | 423.0 | 1.98× | 0.79× | same |
+| Q6 | 444.4 | 78.9 | 194.1 | 2.29× | 0.41× | same |
+| Q7 | 669.8 | 206.1 | 2,751.7 | 0.24× | 0.07× | same |
+| Q8 | 216.8 | 101.7 | 171.1 | 1.27× | 0.59× | same |
+| Q9 | 1,462.3 | 948.0 | 1,370.3 | 1.07× | 0.69× | same |
+| Q10 | 614.0 | 436.4 | 329.7 | 1.86× | 1.32× | same |
+| Q11 | 179.3 | 39.9 | 40.6 | 4.41× | 0.98× | same |
+| Q12 | 558.4 | 90.5 | 303.6 | 1.84× | 0.30× | same |
+| Q13 | 182.7 | 98.9 | 337.4 | 0.54× | 0.29× | same |
+| Q14 | 530.9 | 101.5 | 201.2 | 2.64× | 0.50× | same |
+| Q15 | 474.5 | 70.0 | 204.5 | 2.32× | 0.34× | same |
+| Q16 | 226.2 | 126.0 | 124.9 | 1.81× | 1.01× | same |
+| Q17 | 42.0 | 75.6 | 461.7 | 0.09× | 0.16× | same |
+| Q18 | 686.2 | 343.8 | 1,615.6 | 0.42× | 0.21× | same |
+| Q19 | 43.2 | 55.4 | 17.8 | 2.42× | 3.11× | same |
+| Q20 | 494.0 | 504.6 | 261.2 | 1.89× | 1.93× | same |
+| Q21 | 908.3 | 494.9 | 1,561.0 | 0.58× | 0.32× | same |
+| Q22 | 76.6 | 14.5 | 33.3 | 2.30× | 0.43× | same |
+| geometric mean (22 queries) | 307.4 | 129.8 | 276.2 | 1.11× | 0.47× |  |
+| load (COPY, indexes, ANALYZE; s) | 73.6 | 91.1 | 23.8 |  |  |  |
 
 Every result agrees with PostgreSQL's.  On column tables nucleus takes
-0.67× PostgreSQL's time in the geometric mean and is faster on 14 of the
-22 queries (Q7 0.23 s against 2.82 s, Q17 0.08 s against 0.45 s), even
-on Q16; on row tables 1.27×, faster on 6.  One run each: the row tables'
-times varied by whole queries between runs at `e2d1afa` (Q1 and Q3 1.7
-and 3.2 s in one, 1.0 and 1.2 s in the next, Q21 2.9 and 5.6 s), not
-explained then and not looked at again since.
+0.47× PostgreSQL's time in the geometric mean and is faster on 18 of the
+22 queries (Q1 0.18 s against 0.99 s, Q7 0.21 s against 2.75 s, Q18 0.34
+s against 1.62 s); slower on Q10 (1.32×), Q16 (1.01×), Q20 (1.93×) and
+Q19 (3.11×, 55 ms against 18).  On row tables 1.11×, faster on 7.
 
-Against the run before (on `6b22808` with the changes committed as
+Against the run before (on `14c3445`: 0.67× and 1.27×), the changes of
+§M14.20 V13 (on column / row tables):
+
+- Key filters (`keyfilter`): a hash join's narrowed right side hands
+  its keys to the scans below its probe side, which skip segments and
+  drop rows before the join.  Q5 528 → 334 ms, 1,010 → 836.
+- Eager aggregation (`eager`): Q13's count of orders a customer
+  grouped by `o_custkey` below the left join — 1.5 million rows
+  through the join become 100,000 groups.  Q13 367 → 99 ms, 424 → 183.
+- Aggregation tables: groups merged by hash part on the workers, those
+  in key order finished there, compact partial states, a salted table
+  hashing a batch's keys in place (`keytable`).  Q18 885 → 344 ms,
+  1,334 → 686.
+- Join tables on two integer keys hashed as a pair, a build side that
+  is no pipeline gathered in columns rather than spilled as rows past
+  work_mem.  Q9 2,437 → 948 ms, 2,950 → 1,462.
+- Decimal vectors (`Vector::Dec`): one scale's mantissas, `+ - *` and
+  comparisons on them, `sum` / `avg` straight from them — no value a
+  row.  Q1 535 → 185 ms, 810 → 499; Q6 135 → 79; Q15 133 → 70; Q14
+  119 → 102; Q3 154 → 134.
+- Dictionary segments filtered on their entries (`DictFilter`): Q12
+  110 → 91 ms, Q19 58 → 55.
+
+The run before it, against the run on `6b22808` with the changes committed as
 `14c3445`: 0.75× and 1.40×; Q13 1,273 / 1,467 ms on column / row
 tables, Q16 420 / 379):
 
@@ -374,17 +395,17 @@ a vacuum that waits for an idle database.
 
 Where the time still goes:
 
-- **Q13** (1.09×): the join's 1.5 million rows come out as rows, and
-  the grouping over them is a row at a time.
-- **Q19** (3.31×): its ~14,000 `lineitem` rows are each fetched by key
+- **Q19** (3.11×): its ~14,000 `lineitem` rows are each fetched by key
   from the column table — the delta store, the segment directory and the
-  deletion markers each a look at the tree, per row — on the workers now,
-  where PostgreSQL reads a heap tuple each (19 ms).
-- **Row tables** (1.27×): Q11 5.5×, Q19 2.6×, Q6 2.5× the highest;
-  a row's every column decoded where a column table reads only the wanted
-  ones.
-- **Loads** (76 s and 94 s against 27 s: 2.8× and 3.5×): on 10-30
-  `lineitem`'s `COPY` was 40 s, the indexes on it 20–30 s each.
+  deletion markers each a look at the tree, per row — on the workers,
+  where PostgreSQL reads a heap tuple each (18 ms).
+- **Q20** (1.93×) and **Q10** (1.32×): correlated and join-heavy plans
+  whose groupings and lookups still run partly a row at a time.
+- **Row tables** (1.11×): Q11 4.4×, Q14 2.6×, Q19 2.4×, Q6 2.3× the
+  highest; a row's every column decoded where a column table reads only
+  the wanted ones.
+- **Loads** (74 s and 91 s against 24 s: 3.1× and 3.8×): `lineitem`'s
+  `COPY` and the indexes on it.
 
 ## ClickBench
 
@@ -402,75 +423,83 @@ python3 bench/clickbench.py --nucleus target/release/nucleus --rows 1000000 \
 ```
 
 2026-11-01, the first million rows, the machine above, nucleus on
-`14c3445` with the changes of the TPC-H run above; each query's best of
+`f95a6c3`, as the TPC-H run above; each query's best of
 three runs; nucleus with `hits` in rows and in columns; PostgreSQL 18.6
 in the same run:
 
 | ClickBench, 1,000,000 rows | nucleus (row) (ms) | nucleus (column) (ms) | postgresql (ms) | nucleus (row) / PostgreSQL | nucleus (column) / PostgreSQL | results |
 |---|---:|---:|---:|---:|---:|---|
-| Q0 | 203.2 | 2.8 | 61.0 | 3.33× | 0.05× | same |
-| Q1 | 205.1 | 3.2 | 71.8 | 2.86× | 0.04× | same |
-| Q2 | 251.7 | 3.4 | 78.5 | 3.20× | 0.04× | same |
-| Q3 | 207.1 | 3.2 | 60.1 | 3.45× | 0.05× | same |
-| Q4 | 1,432.0 | 591.8 | 202.2 | 7.08× | 2.93× | same |
-| Q5 | 1,377.4 | 575.5 | 346.9 | 3.97× | 1.66× | same |
-| Q6 | 216.3 | 13.9 | 61.5 | 3.51× | 0.23× | same |
-| Q7 | 204.8 | 3.4 | 77.4 | 2.65× | 0.04× | same |
-| Q8 | 1,460.6 | 671.9 | 324.5 | 4.50× | 2.07× | same |
-| Q9 | 1,555.5 | 747.0 | 442.2 | 3.52× | 1.69× | same |
-| Q10 | 235.1 | 18.7 | 75.5 | 3.11× | 0.25× | same |
-| Q11 | 240.2 | 20.3 | 77.6 | 3.09× | 0.26× | differs (ties at the LIMIT) |
-| Q12 | 231.4 | 24.3 | 90.6 | 2.56× | 0.27× | same |
-| Q13 | 300.1 | 82.2 | 140.8 | 2.13× | 0.58× | same |
-| Q14 | 253.8 | 28.4 | 232.3 | 1.09× | 0.12× | same |
-| Q15 | 309.5 | 56.3 | 102.9 | 3.01× | 0.55× | same |
-| Q16 | 394.3 | 106.4 | 290.3 | 1.36× | 0.37× | same |
-| Q17 | 289.8 | 77.4 | 275.7 | 1.05× | 0.28× | differs (ties at the LIMIT) |
-| Q18 | 2,639.0 | 1,444.3 | 342.1 | 7.72× | 4.22× | differs (ties at the LIMIT) |
-| Q19 | 224.6 | 3.8 | 60.7 | 3.70× | 0.06× | same |
-| Q20 | 212.7 | 7.0 | 98.0 | 2.17× | 0.07× | same |
-| Q21 | 210.5 | 7.5 | 114.0 | 1.85× | 0.07× | same |
-| Q22 | 233.4 | 14.7 | 143.1 | 1.63× | 0.10× | same rows (ties ordered differently) |
-| Q23 | 219.7 | 146.5 | 99.8 | 2.20× | 1.47× | same rows (ties ordered differently) |
-| Q24 | 214.0 | 12.1 | 84.0 | 2.55× | 0.14× | same |
-| Q25 | 213.9 | 12.7 | 76.4 | 2.80× | 0.17× | same |
-| Q26 | 216.4 | 14.3 | 78.0 | 2.77× | 0.18× | same |
-| Q27 | 239.3 | 46.7 | 142.6 | 1.68× | 0.33× | same |
-| Q28 | 440.8 | 252.0 | 2,913.3 | 0.15× | 0.09× | differs (ties at the LIMIT) |
-| Q29 | 456.1 | 286.2 | 393.2 | 1.16× | 0.73× | same |
-| Q30 | 240.0 | 37.6 | 233.4 | 1.03× | 0.16× | differs (ties at the LIMIT) |
-| Q31 | 323.7 | 104.2 | 128.0 | 2.53× | 0.81× | differs (ties at the LIMIT) |
-| Q32 | 3,970.8 | 2,916.1 | 983.9 | 4.04× | 2.96× | differs (ties at the LIMIT) |
-| Q33 | 2,150.3 | 997.4 | 580.7 | 3.70× | 1.72× | same |
-| Q34 | 2,105.1 | 992.0 | 565.3 | 3.72× | 1.75× | same |
-| Q35 | 326.5 | 122.5 | 141.8 | 2.30× | 0.86× | same rows (ties ordered differently) |
-| Q36 | 495.4 | 275.2 | 256.9 | 1.93× | 1.07× | same |
-| Q37 | 248.9 | 43.4 | 161.1 | 1.54× | 0.27× | same |
-| Q38 | 219.8 | 14.7 | 131.7 | 1.67× | 0.11× | differs (ties at the LIMIT) |
-| Q39 | 2,873.3 | 1,708.5 | 540.2 | 5.32× | 3.16× | differs (ties at the LIMIT) |
-| Q40 | 234.7 | 23.6 | 205.4 | 1.14× | 0.11× | differs (ties at the LIMIT) |
-| Q41 | 214.4 | 12.7 | 200.1 | 1.07× | 0.06× | same |
-| Q42 | 231.2 | 22.0 | 147.3 | 1.57× | 0.15× | same |
-| geometric mean (43 queries) | 394.1 | 52.6 | 170.6 | 2.31× | 0.31× |  |
-| load (COPY, ANALYZE; s) | 17.5 | 19.8 | 7.6 |  |  |  |
+| Q0 | 210.4 | 2.8 | 70.3 | 2.99× | 0.04× | same |
+| Q1 | 211.8 | 3.2 | 87.4 | 2.42× | 0.04× | same |
+| Q2 | 207.8 | 3.1 | 77.4 | 2.68× | 0.04× | same |
+| Q3 | 212.2 | 3.0 | 60.9 | 3.48× | 0.05× | same |
+| Q4 | 1,389.7 | 591.8 | 206.8 | 6.72× | 2.86× | same |
+| Q5 | 1,385.2 | 581.5 | 351.8 | 3.94× | 1.65× | same |
+| Q6 | 213.7 | 14.3 | 70.6 | 3.03× | 0.20× | same |
+| Q7 | 205.7 | 3.4 | 77.5 | 2.65× | 0.04× | same |
+| Q8 | 1,453.0 | 656.9 | 345.4 | 4.21× | 1.90× | same |
+| Q9 | 1,529.4 | 746.2 | 466.4 | 3.28× | 1.60× | same |
+| Q10 | 246.1 | 21.1 | 76.5 | 3.22× | 0.28× | same |
+| Q11 | 246.6 | 21.9 | 77.1 | 3.20× | 0.28× | differs (ties at the LIMIT) |
+| Q12 | 217.1 | 15.4 | 90.4 | 2.40× | 0.17× | same |
+| Q13 | 290.4 | 82.9 | 143.3 | 2.03× | 0.58× | same |
+| Q14 | 219.3 | 16.6 | 247.8 | 0.89× | 0.07× | same |
+| Q15 | 236.9 | 36.6 | 102.4 | 2.31× | 0.36× | same |
+| Q16 | 263.7 | 58.2 | 292.4 | 0.90× | 0.20× | same |
+| Q17 | 227.5 | 23.4 | 273.4 | 0.83× | 0.09× | differs (ties at the LIMIT) |
+| Q18 | 2,104.0 | 1,046.5 | 339.7 | 6.19× | 3.08× | differs (ties at the LIMIT) |
+| Q19 | 236.0 | 3.8 | 59.7 | 3.95× | 0.06× | same |
+| Q20 | 207.2 | 7.2 | 97.8 | 2.12× | 0.07× | same |
+| Q21 | 207.9 | 6.3 | 114.9 | 1.81× | 0.05× | same |
+| Q22 | 242.8 | 11.9 | 142.7 | 1.70× | 0.08× | same rows (ties ordered differently) |
+| Q23 | 225.3 | 138.0 | 102.6 | 2.20× | 1.34× | same |
+| Q24 | 212.7 | 12.5 | 80.7 | 2.64× | 0.15× | same |
+| Q25 | 215.2 | 13.4 | 75.4 | 2.86× | 0.18× | same |
+| Q26 | 214.9 | 15.4 | 75.4 | 2.85× | 0.20× | same |
+| Q27 | 236.9 | 39.3 | 140.9 | 1.68× | 0.28× | same |
+| Q28 | 400.5 | 235.7 | 2,918.7 | 0.14× | 0.08× | differs (ties at the LIMIT) |
+| Q29 | 451.0 | 291.9 | 392.2 | 1.15× | 0.74× | same |
+| Q30 | 221.8 | 22.9 | 122.3 | 1.81× | 0.19× | differs (ties at the LIMIT) |
+| Q31 | 249.2 | 53.6 | 125.4 | 1.99× | 0.43× | differs (ties at the LIMIT) |
+| Q32 | 3,966.2 | 2,937.3 | 934.8 | 4.24× | 3.14× | differs (ties at the LIMIT) |
+| Q33 | 1,533.9 | 436.3 | 541.5 | 2.83× | 0.81× | same |
+| Q34 | 1,650.4 | 546.9 | 563.4 | 2.93× | 0.97× | same |
+| Q35 | 258.3 | 62.9 | 138.6 | 1.86× | 0.45× | same rows (ties ordered differently) |
+| Q36 | 300.8 | 99.0 | 260.3 | 1.16× | 0.38× | same |
+| Q37 | 225.5 | 24.6 | 162.7 | 1.39× | 0.15× | same |
+| Q38 | 212.0 | 10.1 | 132.3 | 1.60× | 0.08× | differs (ties at the LIMIT) |
+| Q39 | 2,298.8 | 1,167.1 | 535.5 | 4.29× | 2.18× | differs (ties at the LIMIT) |
+| Q40 | 216.7 | 15.4 | 206.7 | 1.05× | 0.07× | differs (ties at the LIMIT) |
+| Q41 | 211.6 | 9.3 | 200.2 | 1.06× | 0.05× | same |
+| Q42 | 217.3 | 18.8 | 150.1 | 1.45× | 0.13× | same |
+| geometric mean (43 queries) | 361.7 | 41.3 | 170.0 | 2.13× | 0.24× |  |
+| load (COPY, ANALYZE; s) | 17.3 | 19.6 | 7.3 |  |  |  |
 
 Every result agrees, but for ties at a `LIMIT` (the same rows where the
-order is total).  On a column table nucleus takes a third of
-PostgreSQL's time in the geometric mean (0.31×) and is faster on 32 of
+order is total).  On a column table nucleus takes a quarter of
+PostgreSQL's time in the geometric mean (0.24×) and is faster on 35 of
 the 43 queries; the counts and aggregates over a few columns (Q0–Q3,
-Q7, Q19) take 3–4 ms against 60–79.  Slower: the distinct counts and
-groupings over large text keys (Q4, Q5, Q8, Q9: 1.7–2.9×; Q18, Q39:
-3.2–4.2×), `SearchPhrase` groupings (Q32–Q34: 1.8–3.0×) and Q23
-(`SELECT *` … `ORDER BY` a large text: 1.5×).  On a row table 2.31×:
-every query decodes each row's 105 columns.  The loads 17.5 s and
-19.8 s against 7.6 s (2.3× and 2.6×).  Against the run before (on
-`6b22808`, 0.32× and 2.32×) the same within the variation: the TPC-H
-changes above touch few of these queries.  That run, against the run at `e2d1afa`
-(0.34× and 2.47×; loads 18.7 s and 20.9 s against 7.2 s): the row
-table's queries about a tenth faster (its `char(n)` columns a vector
-now), the column table's within the variation but for Q23, 220 → 146 ms
-(the cache of decoded columns no longer evicting what `SELECT *` comes
-back to — not measured apart).
+Q7, Q19) take 3–4 ms against 60–87.  Slower: the distinct counts (Q4,
+Q5, Q8, Q9: 1.6–2.9× — `count(DISTINCT …)` is not vectorized yet),
+the groupings over large text keys (Q18 3.1×, Q32 3.1×, Q39 2.2×) and
+Q23 (`SELECT *` … `ORDER BY` a large text: 1.3×).  On a row table
+2.13×: every query decodes each row's 105 columns.  The loads 17.3 s
+and 19.6 s against 7.3 s (2.4× and 2.7×).
+
+Against the run before (on `14c3445`: 0.31× and 2.31×), the changes of
+the TPC-H run above: the groupings of many groups — merged by hash part
+on the workers, keys hashed and compared in place in a salted table —
+Q33 997 → 436 ms, Q34 992 → 547, Q36 275 → 99, Q31 104 → 54, Q35 123 →
+63, Q16 106 → 58, Q17 77 → 23, Q18 1,444 → 1,047, Q39 1,709 → 1,167;
+dictionary filters Q12 24 → 15, Q14 28 → 17, Q30 38 → 23; on the row
+table the same groupings about a quarter faster (Q33 2,150 → 1,534).
+That run, against the one on `6b22808` (0.32× and 2.32×): the same
+within the variation.  The one before it, against the run at
+`e2d1afa` (0.34× and 2.47×; loads 18.7 s and 20.9 s against 7.2 s):
+the row table's queries about a tenth faster (its `char(n)` columns a
+vector now), the column table's within the variation but for Q23, 220 →
+146 ms (the cache of decoded columns no longer evicting what
+`SELECT *` comes back to — not measured apart).
 
 ## Targets
 
@@ -484,11 +513,11 @@ machine against PostgreSQL 18 in the same run:
 
 | target | now | met |
 |---|---|---|
-| TPC-H SF 1, column tables: geometric mean ≤ 0.8× PostgreSQL's time | 0.67× (0.75× in the run before) | yes |
-| ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.31× | yes |
-| column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 3.3×; ClickBench Q18 4.2×, Q39 3.2× (Q32 3.0×, Q4 2.9×; TPC-H Q13 1.1×, Q16 1.0×) | no |
-| row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 1.27× (1.40×), ClickBench 2.31× | TPC-H yes, ClickBench no |
-| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 0.9×; TPC-H 2.8× (row), 3.5× (column); ClickBench 2.3×, 2.6× | `bench/run.py` yes, the others no |
+| TPC-H SF 1, column tables: geometric mean ≤ 0.8× PostgreSQL's time | 0.47× (0.67× in the run before) | yes |
+| ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.24× (0.31×) | yes |
+| column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 3.1×; ClickBench Q32 3.1×, Q18 3.1× (Q4 2.9×, Q39 2.2×; TPC-H Q20 1.9×) | no |
+| row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 1.11× (1.27×), ClickBench 2.13× (2.31×) | TPC-H yes, ClickBench no |
+| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 0.9×; TPC-H 3.1× (row), 3.8× (column); ClickBench 2.4×, 2.7× | `bench/run.py` yes, the others no |
 | updates and deletes ≤ 2× (`bench/run.py`) | update 0.9×, delete 1.3× | yes |
 | scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.0–2.0× (sort 2.0×, count(*) 1.7×, self-join 1.6×) | yes |
 | reads by key ≤ 1× (`bench/run.py`) | 0.6× | yes |

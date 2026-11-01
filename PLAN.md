@@ -1453,12 +1453,12 @@ attach / detach ✅; the age policy ✅); V10 results columnar end to end ✅ (a
 into the columnar result as columns, in parallel too — a million numeric
 rows into numpy 262 → 92 ms from a row table, 241 → 51 ms from a column
 table); TPC-H against PostgreSQL measured (`bench/tpch.py`, SF 1: every
-result agrees; first 6.5–7.9× PostgreSQL's time, now 0.67× on column
-tables and 1.27× on row tables in the geometric mean, 14 of the 22
+result agrees; first 6.5–7.9× PostgreSQL's time, now 0.47× on column
+tables and 1.11× on row tables in the geometric mean, 18 of the 22
 queries faster on column tables; `EXISTS` / `IN` unnested into semi and
 anti joins on the way) ✅; ClickBench (`bench/clickbench.py`, the first
-million rows: every result agrees, but for ties at a `LIMIT`; 0.31× of
-PostgreSQL's time on a column table, 2.31× on a row table) ✅; the
+million rows: every result agrees, but for ties at a `LIMIT`; 0.24× of
+PostgreSQL's time on a column table, 2.13× on a row table) ✅; the
 targets recorded ✅ (`docs/benchmarks.md`, Targets: column tables at most
 0.8× PostgreSQL's time on TPC-H and 0.5× on ClickBench in the geometric
 mean, no query above 3×; row tables within 2×; loads, updates and
@@ -1466,7 +1466,7 @@ deletes within 2×, scans, sorts and joins within 3×, reads by key at
 least even — met so far: TPC-H and ClickBench on column tables, TPC-H
 on row tables, and every `bench/run.py` target: loads, updates and
 deletes, scans, sorts and joins, reads by key; left: TPC-H Q19,
-ClickBench Q18 and Q39 above 3×, ClickBench on a row table, the TPC-H
+ClickBench Q18 and Q32 above 3×, ClickBench on a row table, the TPC-H
 and ClickBench loads); V11 write intents among the versions ✅ — a large
 transaction's spilled writes go straight into the version keyspace as
 *intents* (a version stamped with the transaction's id, not a commit
@@ -1508,9 +1508,14 @@ codes, not text); prefetching in hash probes ✅ (Chen & Ailamaki: a
 batch's lookups before its output, so their misses overlap — safe code,
 no prefetch instruction; 2–8 % on the joins — and, found on the way,
 join tables on two integer keys and build sides that are no pipeline
-gathered in columns, not spilled as rows: TPC-H Q9); division by constants without dividing (libdivide),
-FSST string compression with `LIKE` on the compressed strings, and
-expressions fused into one loop (the numeric libraries' expression
+gathered in columns, not spilled as rows: TPC-H Q9); division by
+constants without dividing (libdivide) — measured, not taken: 0.6 →
+0.37 ns a row on AArch64, and no query of the suites divides a row by a
+run-time constant (the date functions' constants the compiler's
+already); FSST string compression with `LIKE` on the compressed strings
+— deferred: the suites' `LIKE` filters already run 7–14× faster than
+PostgreSQL's on dictionary codes and the substring kernel, so it waits
+for a storage-size goal; and expressions fused into one loop (the numeric libraries' expression
 templates) — for decimals, typed vectors ✅ (one scale's mantissas, `+ −
 *` and comparisons on them, sums straight from them, no value a row:
 TPC-H Q1 2.5×, Q6 1.7×).
