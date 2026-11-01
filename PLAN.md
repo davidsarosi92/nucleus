@@ -1511,7 +1511,9 @@ join tables on two integer keys and build sides that are no pipeline
 gathered in columns, not spilled as rows: TPC-H Q9); division by constants without dividing (libdivide),
 FSST string compression with `LIKE` on the compressed strings, and
 expressions fused into one loop (the numeric libraries' expression
-templates).
+templates) — for decimals, typed vectors ✅ (one scale's mantissas, `+ −
+*` and comparisons on them, sums straight from them, no value a row:
+TPC-H Q1 2.5×, Q6 1.7×).
 
 **Done when:** every storage mode works per table, per column and per
 partition, with online conversion between them under crash and

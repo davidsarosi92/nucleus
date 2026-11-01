@@ -61,6 +61,10 @@ pub enum Vector {
     /// Dates, times or timestamps as their integers (days or µs), and which
     /// are `NULL`.
     Time(TimeKind, Vec<i64>, Option<Vec<bool>>),
+    /// Decimals at one scale: their mantissas (each within
+    /// [`crate::decimal::MAX_DIGITS`] digits; a `NULL`'s 0), and which are
+    /// `NULL`.
+    Dec(u32, Vec<i128>, Option<Vec<bool>>),
     /// Any values.
     Values(Vec<Value>),
     /// Text or `char(n)` values by their codes in a dictionary (its
@@ -130,6 +134,9 @@ impl Vector {
                 String::from_utf8_lossy(&b[o[i] as usize..o[i + 1] as usize]).into_owned(),
             ),
             Vector::Time(k, d, n) if !is_null_at(n, i) => k.value(d[i]),
+            Vector::Dec(s, d, n) if !is_null_at(n, i) => {
+                Value::Numeric(crate::decimal::Decimal::raw(d[i], *s))
+            }
             Vector::Values(v) => v[i].clone(),
             Vector::Dict(d, c, n) if !is_null_at(n, i) => d.value(c[i] as usize),
             _ => Value::Null,
@@ -146,6 +153,7 @@ impl Vector {
             | Vector::Text(_, _, n)
             | Vector::Char(_, _, n)
             | Vector::Time(_, _, n)
+            | Vector::Dec(_, _, n)
             | Vector::Dict(_, _, n) => is_null_at(n, i),
             Vector::Values(v) => v[i].is_null(),
         }
@@ -194,6 +202,7 @@ impl Vector {
             Vector::Float(d, n) => Vector::Float(d[range.clone()].to_vec(), nulls(n)),
             Vector::Bool(d, n) => Vector::Bool(d[range.clone()].to_vec(), nulls(n)),
             Vector::Time(k, d, n) => Vector::Time(*k, d[range.clone()].to_vec(), nulls(n)),
+            Vector::Dec(s, d, n) => Vector::Dec(*s, d[range.clone()].to_vec(), nulls(n)),
             Vector::Text(o, b, n) | Vector::Char(o, b, n) => {
                 let (lo, hi) = (o[range.start] as usize, o[range.end] as usize);
                 let offsets = o[range.start..=range.end]
@@ -226,6 +235,7 @@ impl Vector {
             Vector::Float(d, n) => Vector::Float(pick(d, rows), nulls(n)),
             Vector::Bool(d, n) => Vector::Bool(pick(d, rows), nulls(n)),
             Vector::Time(k, d, n) => Vector::Time(*k, pick(d, rows), nulls(n)),
+            Vector::Dec(s, d, n) => Vector::Dec(*s, pick(d, rows), nulls(n)),
             Vector::Text(o, b, n) | Vector::Char(o, b, n) => {
                 let mut offsets = Vec::with_capacity(rows.len() + 1);
                 let mut bytes = Vec::new();
@@ -254,6 +264,7 @@ impl Vector {
             | Vector::Text(_, _, n)
             | Vector::Char(_, _, n)
             | Vector::Time(_, _, n)
+            | Vector::Dec(_, _, n)
             | Vector::Dict(_, _, n) => n.as_deref(),
             _ => None,
         }
@@ -328,6 +339,21 @@ impl Vector {
                     .map(|v| TimeKind::of(v).map_or(0, |(_, x)| x))
                     .collect();
                 Vector::Time(kind, data, nulls(&values))
+            }
+            Some(Value::Numeric(first))
+                if values.iter().all(|v| match v {
+                    Value::Numeric(d) => d.scale() == first.scale(),
+                    v => v.is_null(),
+                }) =>
+            {
+                let data = values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Numeric(d) => d.mantissa(),
+                        _ => 0,
+                    })
+                    .collect();
+                Vector::Dec(first.scale(), data, nulls(&values))
             }
             _ => Vector::Values(values),
         }
@@ -748,6 +774,13 @@ fn binary(op: BinaryOp, x: &Vector, y: &Vector, len: usize, sel: &Sel) -> Result
         {
             return float_kernel(op, a, b, len, sel);
         }
+        let dec_like = |v: &Vector| matches!(v, Vector::Dec(..) | Vector::Const(Value::Numeric(_)));
+        if (dec_like(x) || dec_like(y))
+            && let (Some(a), Some(b)) = (dec_operand(x, len), dec_operand(y, len))
+            && let Some(v) = dec_kernel(op, a, b, len, sel)?
+        {
+            return Ok(v);
+        }
     }
     if is_cmp(op) {
         if let Some(v) = cmp_text(op, x, y, len)? {
@@ -863,6 +896,163 @@ fn float_kernel(
         )?;
     }
     Ok(Vector::Float(out, nulls))
+}
+
+/// A decimal operand's mantissas: a row's each, or one for all.
+enum DecRows<'a> {
+    Col(std::borrow::Cow<'a, [i128]>),
+    One(i128),
+}
+
+impl DecRows<'_> {
+    #[inline]
+    fn at(&self, i: usize) -> i128 {
+        match self {
+            DecRows::Col(d) => d[i],
+            DecRows::One(m) => *m,
+        }
+    }
+
+    /// Each mantissa times `f` (raised to a larger scale), and whether that
+    /// overflowed, by row (`None`: no row did).
+    fn raised(self, f: i128, len: usize) -> (DecRows<'static>, Option<Vec<bool>>) {
+        if f == 1 {
+            return match self {
+                DecRows::One(m) => (DecRows::One(m), None),
+                DecRows::Col(d) => (DecRows::Col(d.into_owned().into()), None),
+            };
+        }
+        match self {
+            DecRows::One(m) => match m.checked_mul(f) {
+                Some(r) => (DecRows::One(r), None),
+                None => (DecRows::One(0), Some(vec![true; len])),
+            },
+            DecRows::Col(d) => {
+                let mut over = vec![false; len];
+                let out = d[..len]
+                    .iter()
+                    .zip(&mut over)
+                    .map(|(&m, o)| {
+                        m.checked_mul(f).unwrap_or_else(|| {
+                            *o = true;
+                            0
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let over = over.contains(&true).then_some(over);
+                (DecRows::Col(out.into()), over)
+            }
+        }
+    }
+}
+
+/// A decimal operand: its mantissas, their scale, and its `NULL`s — an
+/// integer a decimal of scale 0, as a row widens it ([`Decimal::from_i64`]);
+/// `None` for anything else.
+///
+/// [`Decimal::from_i64`]: crate::decimal::Decimal::from_i64
+fn dec_operand(v: &Vector, len: usize) -> Option<(DecRows<'_>, u32, Option<&[bool]>)> {
+    match v {
+        Vector::Dec(s, d, n) => Some((DecRows::Col(d[..len].into()), *s, n.as_deref())),
+        Vector::Int(d, n) => Some((
+            DecRows::Col(d[..len].iter().map(|&i| i128::from(i)).collect()),
+            0,
+            n.as_deref(),
+        )),
+        Vector::Const(Value::Numeric(d)) => Some((DecRows::One(d.mantissa()), d.scale(), None)),
+        Vector::Const(Value::Int(i)) => Some((DecRows::One(i128::from(*i)), 0, None)),
+        _ => None,
+    }
+}
+
+/// `x op y` on decimals, as [`crate::decimal::Decimal`] computes it a row
+/// at a time: `+` and `-` at the larger scale (raising the other side
+/// first), `*` at the sum of the scales, a result past the digits a
+/// decimal may have an error on a row in play; a comparison at the larger
+/// scale.  `None`: not one it computes (`/`, `%`, or a comparison whose
+/// raising overflows — the digits compare then).
+fn dec_kernel(
+    op: BinaryOp,
+    (a, sa, an): (DecRows, u32, Option<&[bool]>),
+    (b, sb, bn): (DecRows, u32, Option<&[bool]>),
+    len: usize,
+    sel: &Sel,
+) -> Result<Option<Vector>> {
+    use crate::decimal::{LIMIT, MAX_DIGITS, overflow, pow10};
+    use BinaryOp::*;
+    if !matches!(op, Add | Sub | Mul) && !is_cmp(op) {
+        return Ok(None);
+    }
+    let nulls = either_null(an, bn, len);
+    let live = |i: usize| !nulls.as_ref().is_some_and(|n| n[i]);
+    let fits = |r: Option<i128>| r.filter(|r| r.unsigned_abs() <= LIMIT);
+    if op == Mul {
+        let s = sa + sb;
+        let mut out = vec![0i128; len];
+        let mut over = false;
+        for (i, o) in out.iter_mut().enumerate() {
+            match fits(a.at(i).checked_mul(b.at(i))) {
+                Some(r) => *o = r,
+                None => over = true,
+            }
+        }
+        let past = |i: usize| s > MAX_DIGITS || fits(a.at(i).checked_mul(b.at(i))).is_none();
+        if (over || s > MAX_DIGITS) && sel.iter().any(|i| live(i) && past(i)) {
+            return Err(overflow());
+        }
+        return Ok(Some(Vector::Dec(s.min(MAX_DIGITS), out, nulls)));
+    }
+    // At the larger scale (at most `MAX_DIGITS`: a power of ten that fits).
+    let s = sa.max(sb);
+    let up = |d: u32| pow10(s - d).expect("within the digits");
+    let (a, a_over) = a.raised(up(sa), len);
+    let (b, b_over) = b.raised(up(sb), len);
+    let raised_over =
+        |i: usize| a_over.as_ref().is_some_and(|o| o[i]) || b_over.as_ref().is_some_and(|o| o[i]);
+    let any_over = a_over.is_some() || b_over.is_some();
+    if is_cmp(op) {
+        if any_over && sel.iter().any(|i| live(i) && raised_over(i)) {
+            return Ok(None);
+        }
+        let want = |o: std::cmp::Ordering| match op {
+            Eq => o.is_eq(),
+            NotEq => o.is_ne(),
+            Lt => o.is_lt(),
+            LtEq => o.is_le(),
+            Gt => o.is_gt(),
+            _ => o.is_ge(),
+        };
+        let out = (0..len).map(|i| want(a.at(i).cmp(&b.at(i)))).collect();
+        return Ok(Some(Vector::Bool(out, nulls)));
+    }
+    let mut out = vec![0i128; len];
+    let mut over = any_over;
+    for (i, o) in out.iter_mut().enumerate() {
+        let r = if op == Add {
+            a.at(i).checked_add(b.at(i))
+        } else {
+            a.at(i).checked_sub(b.at(i))
+        };
+        match fits(r) {
+            Some(r) => *o = r,
+            None => over = true,
+        }
+    }
+    if over {
+        let past = |i: usize| {
+            raised_over(i)
+                || fits(if op == Add {
+                    a.at(i).checked_add(b.at(i))
+                } else {
+                    a.at(i).checked_sub(b.at(i))
+                })
+                .is_none()
+        };
+        if sel.iter().any(|i| live(i) && past(i)) {
+            return Err(overflow());
+        }
+    }
+    Ok(Some(Vector::Dec(s, out, nulls)))
 }
 
 /// A text or `char(n)` vector's layout, and whether it is `char(n)` (its
@@ -1365,6 +1555,8 @@ enum Kind {
     Time(TimeKind),
     Values,
     Enum,
+    /// Decimals: as values, then one scale's mantissas when they share one.
+    Numeric,
 }
 
 /// A vector being built.
@@ -1398,7 +1590,7 @@ impl Builder {
                 }
             }
             Kind::Time(k) => Builder::Time(k, Vec::with_capacity(cap), nulls()),
-            Kind::Values | Kind::Enum => Builder::Values(Vec::with_capacity(cap)),
+            Kind::Values | Kind::Enum | Kind::Numeric => Builder::Values(Vec::with_capacity(cap)),
         }
     }
 
@@ -1546,6 +1738,7 @@ impl<'a> RowBatches<'a> {
                     DataType::Timestamp => Kind::Time(TimeKind::Timestamp),
                     DataType::TimestampTz => Kind::Time(TimeKind::TimestampTz),
                     DataType::Enum(_) => Kind::Enum,
+                    DataType::Numeric => Kind::Numeric,
                     _ => Kind::Values,
                 }
             })
@@ -1577,6 +1770,11 @@ impl crate::storage::BatchSource for RowBatches<'_> {
         let mut out: Vec<Rc<Vector>> = Vec::with_capacity(cols.len());
         for (c, b) in cols.into_iter().enumerate() {
             let mut v = b.finish();
+            if self.kinds[c] == Kind::Numeric
+                && let Vector::Values(vals) = v
+            {
+                v = Vector::typed(vals);
+            }
             if self.kinds[c] == Kind::Enum
                 && let Vector::Values(vals) = &mut v
             {

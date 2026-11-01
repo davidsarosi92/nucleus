@@ -843,6 +843,29 @@ impl Acc {
         }
     }
 
+    /// Adds a decimal to a `sum` or `avg`, as [`Acc::add`] adds it.
+    #[inline]
+    fn add_dec(&mut self, d: crate::decimal::Decimal) -> Result<()> {
+        match self.value {
+            // At the sum's scale (a column's): its mantissas added.
+            Value::Numeric(sum) if sum.scale() == d.scale() => {
+                let m = sum
+                    .mantissa()
+                    .checked_add(d.mantissa())
+                    .filter(|m| m.unsigned_abs() <= crate::decimal::LIMIT)
+                    .ok_or_else(crate::decimal::overflow)?;
+                self.value = Value::Numeric(crate::decimal::Decimal::raw(m, d.scale()));
+            }
+            Value::Numeric(sum) => self.value = Value::Numeric(sum.checked_add(d)?),
+            Value::Null => self.value = Value::Numeric(d),
+            _ => return self.add(&[Value::Numeric(d)]),
+        }
+        if self.func == AggFunc::Avg {
+            self.count += 1;
+        }
+        Ok(())
+    }
+
     /// The running sum: the integers', the doubles' and the other values'.
     fn total(&mut self) -> Result<Value> {
         let mut value = std::mem::replace(&mut self.value, Value::Null);
@@ -928,6 +951,11 @@ impl GroupAccumulator for Grouped {
                     self.accs[g].add_float(v[r], false);
                 }
             }
+            (Sum | Avg, Some(Vector::Dec(s, v, _))) => {
+                for (r, g) in pairs {
+                    self.accs[g].add_dec(crate::decimal::Decimal::raw(v[r], *s))?;
+                }
+            }
             (Min | Max, Some(Vector::Int(v, _))) => {
                 let min = self.func == Min;
                 for (r, g) in pairs {
@@ -986,6 +1014,13 @@ impl GroupAccumulator for Grouped {
                     acc.int = Some(acc.int.unwrap_or(0) + sum);
                     if self.func == Avg {
                         acc.count += count as i64;
+                    }
+                }
+            }
+            (Sum | Avg, Some(Vector::Dec(s, v, n))) => {
+                for (r, &m) in v[..len].iter().enumerate() {
+                    if !n.as_ref().is_some_and(|n| n[r]) {
+                        acc.add_dec(crate::decimal::Decimal::raw(m, *s))?;
                     }
                 }
             }

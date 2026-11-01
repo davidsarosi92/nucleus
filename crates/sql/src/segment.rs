@@ -557,20 +557,24 @@ fn decode_kinds(b: &[u8]) -> Result<Vector> {
             let lo = r.u64().map_err(|_| bad())? as i64;
             let bits = r.u8().map_err(|_| bad())?;
             let rest = r.take(r.remaining()).map_err(|_| bad())?;
-            let ms = unpack(rest, n, bits)?;
-            let mut vals = Vec::with_capacity(n);
-            for (i, d) in ms.into_iter().enumerate() {
-                if nulls.as_ref().is_some_and(|z| z[i]) {
-                    vals.push(Value::Null);
-                } else {
-                    let m = lo.wrapping_add(d as i64);
-                    vals.push(Value::Numeric(crate::decimal::Decimal::new(
-                        i128::from(m),
-                        scale,
-                    )?));
-                }
+            if scale > crate::decimal::MAX_DIGITS {
+                return Err(bad());
             }
-            Ok(Vector::Values(vals))
+            // As stored: one scale, each row's mantissa (a `NULL`'s 0; an
+            // `i64`'s within the digits a decimal may have).
+            let ms = unpack(rest, n, bits)?;
+            let data = ms
+                .into_iter()
+                .enumerate()
+                .map(|(i, d)| {
+                    if nulls.as_ref().is_some_and(|z| z[i]) {
+                        0
+                    } else {
+                        i128::from(lo.wrapping_add(d as i64))
+                    }
+                })
+                .collect();
+            Ok(Vector::Dec(scale, data, nulls))
         }
         _ => Err(bad()),
     }

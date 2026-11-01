@@ -1191,14 +1191,21 @@ hashing no key.
 **Batches** (`vector`, §M14.20).  A table scan by the primary key (or of
 every row) and the filters and projections above it run as a *pipeline*,
 a batch at a time: a vector per column — integers, doubles and booleans
-typed, with a `NULL` mask; other types a value per row; a column nothing
+typed, with a `NULL` mask; decimals of one scale their 128-bit
+mantissas (`Vector::Dec`: a column store's decimal segment as stored, a
+row table's numeric column when its rows share a scale); other types a
+value per row; a column nothing
 reads a `NULL` constant — and a selection of the rows still in play.  The
 first batch is 64 rows, each next one twice the last, up to `batch_size`
 (default 1024; `SET batch_size = 0` runs everything a row at a time).
 Rows are decoded from the stored encoding straight into the vectors.
 Expressions are evaluated a batch per call: kernels for integer and
 double arithmetic and comparisons (an integer widened against a double,
-as a row widens it), text and `char(n)` comparisons (a `char(n)` side
+as a row widens it), decimal `+`, `-`, `*` and comparisons on the
+mantissas (an integer a decimal of scale 0; `+`, `-` and comparisons at
+the larger scale, `*` at the sum — `Decimal`'s rules, a result past 38
+digits failing on a row in play; a comparison whose raising would
+overflow compared value by value), text and `char(n)` comparisons (a `char(n)` side
 without its trailing blanks, as a row compares it) and `LIKE` whose only
 wildcard is `%` (at the ends: a prefix, suffix or substring; within too:
 its parts found in order, each after the last — `'%special%requests%'`;
@@ -1213,7 +1220,7 @@ through the function's batch kernel when it has one
 (`ScalarFunction::call_batch`, §8.12: `substr` over text and `char(n)`
 with constant positions), else casts and calls a value at a time over
 the batch's vectors; anything else (`CASE`, correlated subqueries,
-numerics, …) a row at a time.  Text is a column of offsets and bytes
+decimal `/`, …) a row at a time.  Text is a column of offsets and bytes
 (Arrow's layout), `char(n)` the same as stored (blank-padded), a vector
 of its own from row and column storage alike; dates and times their
 integers.  The kernels
@@ -1237,7 +1244,8 @@ its key's hash, so a slot of another salt is passed over unread), the
 row's key hashed and compared from the batch's vectors as they are — no
 key built to look a group up, only a new group's —, and each
 aggregate fed a batch at a time through `Aggregate::grouped()` — the
-built-ins' states updated in place from typed vectors — or row by row
+built-ins' states updated in place from typed vectors (a decimal `sum`
+or `avg` adding the mantissas at its scale) — or row by row
 through its accumulators; past `work_mem`, rows of new groups go to
 partitions as below.  A pipeline whose output becomes rows (for a sort,
 a join, the client) runs vectorized only when it filters.  The result is
@@ -2762,6 +2770,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-01 — §M14.20 V13, decimal vectors:** `Vector::Dec` —
+  decimals of one scale as their mantissas, decoded so from a column
+  store's decimal segments and a row table's numeric columns —, kernels
+  for their `+`, `-`, `*` and comparisons (`vector::dec_kernel`), and
+  `sum` / `avg` adding them at their scale.  TPC-H SF 1 on column tables
+  Q1 467 → 185 ms, Q6 143 → 82, Q14 120 → 97, Q15 101 → 74, Q3 162 →
+  133; on row tables Q1 784 → 493.
 - **2026-11-01 — §M14.20 V13, key filters, eager aggregation, parallel
   merges:** `keyfilter` — an inner or semi hash join whose right side was
   narrowed hands its integer keys (range, a list of up to 64, else a

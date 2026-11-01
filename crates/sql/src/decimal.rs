@@ -15,7 +15,8 @@ use crate::error::{Error, Result};
 
 /// The most significant digits a value may have.
 pub const MAX_DIGITS: u32 = 38;
-const LIMIT: u128 = 10u128.pow(MAX_DIGITS) - 1;
+/// The greatest mantissa's magnitude.
+pub(crate) const LIMIT: u128 = 10u128.pow(MAX_DIGITS) - 1;
 
 /// An exact decimal number.
 #[derive(Clone, Copy, Debug)]
@@ -24,11 +25,11 @@ pub struct Decimal {
     scale: u8,
 }
 
-fn overflow() -> Error {
+pub(crate) fn overflow() -> Error {
     Error::out_of_range("value overflows numeric format")
 }
 
-fn pow10(n: u32) -> Option<i128> {
+pub(crate) fn pow10(n: u32) -> Option<i128> {
     10i128.checked_pow(n)
 }
 
@@ -59,6 +60,16 @@ impl Decimal {
     /// `m × 10^-scale`.
     pub fn new(m: i128, scale: u32) -> Result<Self> {
         checked(m, scale)
+    }
+
+    /// `m × 10^-scale` for an `m` and `scale` already in range (a typed
+    /// vector's row, checked when it was made).
+    pub(crate) fn raw(m: i128, scale: u32) -> Self {
+        debug_assert!(m.unsigned_abs() <= LIMIT && scale <= MAX_DIGITS);
+        Decimal {
+            m,
+            scale: scale as u8,
+        }
     }
 
     /// The unscaled integer.

@@ -1128,3 +1128,104 @@ fn dictionary_filters_agree() {
         }
     }
 }
+
+#[test]
+fn decimal_kernels_agree() {
+    // Decimal arithmetic and comparisons on one scale's mantissas, and sums
+    // and averages straight from them: the rows and errors of the same
+    // statements a row at a time — column segments and delta rows, row
+    // tables, NULLs, integers among them, mixed scales, overflows (past 38
+    // digits; a product's scale past 38) on rows in play or not, and
+    // comparisons too far apart in scale to align.
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(37)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    for (t, storage) in [("r", "row"), ("c", "column")] {
+        s.execute(&format!(
+            "CREATE TABLE {t} (id INT PRIMARY KEY, g INT, k INT, p NUMERIC(12, 2), \
+               d NUMERIC(4, 2), q NUMERIC(10, 0), h NUMERIC(38, 0), u NUMERIC) \
+               WITH (storage = {storage}); \
+             INSERT INTO {t} SELECT i, i % 7, CASE WHEN i % 9 = 0 THEN NULL ELSE i % 100 END, \
+               CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 100000) / 100.0 END::numeric(12, 2), \
+               ((i % 11) / 100.0)::numeric(4, 2), (i % 1000)::numeric(10, 0), \
+               10000000000000000000000000000000000000::numeric(38, 0) + i, \
+               CASE WHEN i % 2 = 0 THEN 1.5 ELSE 2.25 END \
+               FROM generate_series(1, 70000) i; \
+             UPDATE {t} SET p = 0.01 WHERE id % 1000 = 1; \
+             DELETE FROM {t} WHERE id % 997 = 0; \
+             INSERT INTO {t} SELECT i, 1, 2, 3.5, 0.5, 7, 9, 0.125 FROM generate_series(70001, 70300) i"
+        ))
+        .unwrap();
+    }
+    let segments = outcome(
+        &mut s,
+        "SELECT count(*) FROM nc_catalog.segments WHERE table_name = 'c'",
+    )
+    .unwrap();
+    assert!(segments[0][0].parse::<i64>().unwrap() >= 2, "{segments:?}");
+    let big = "10000000000000000000000000000000";
+    let selects = [
+        "sum(p), avg(p), min(p), max(p), count(p)".to_string(),
+        "sum(p * (1 - d)), sum(p * (1 - d) * (1 + d)), avg(d)".to_string(),
+        "sum(p + id), sum(id * d), sum(p - k), sum(k * p), sum(q - p)".to_string(),
+        "sum(u), sum(u * d), sum(u + p)".to_string(),
+        "max(h + h), min(h - p), sum(h - h)".to_string(),
+        // Errors: past 38 digits, on every row or some.
+        "sum(h)".to_string(),
+        "max(h * 10)".to_string(),
+        format!("sum(p * {big})"),
+        "sum(d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d)"
+            .to_string(),
+    ];
+    let filters = [
+        "true",
+        "d BETWEEN 0.05 AND 0.07",
+        "p > 500 AND p <= 600.5",
+        "d = 0.04 OR p < 1",
+        "p - d > 999",
+        "p >= q",
+        "p * 2 = q",
+        "k < p",
+        "h > 5",
+        "h > 0.000001",
+        "u = 1.50",
+        "p IS NULL",
+        // An overflow on rows the filter drops (none), and on rows it keeps.
+        &format!("id < 5 AND p * {big} > 0"),
+        &format!("id > 1500 AND p * {big} > 0"),
+    ];
+    let mut queries = Vec::new();
+    for f in filters {
+        for sel in &selects {
+            for t in ["r", "c"] {
+                queries.push(format!("SELECT {sel} FROM {t} WHERE {f}"));
+            }
+        }
+        for t in ["r", "c"] {
+            queries.push(format!(
+                "SELECT g, sum(p * (1 - d)), avg(p), count(*) FROM {t} WHERE {f} \
+                 GROUP BY g ORDER BY g"
+            ));
+        }
+        for t in ["r", "c"] {
+            queries.push(format!(
+                "SELECT id, p * (1 - d), p + d, d - 1 FROM {t} WHERE {f} AND id % 701 = 0 \
+                 ORDER BY id"
+            ));
+        }
+    }
+    let errors = agree(&db, &queries);
+    assert!(errors > 0, "the overflows were met");
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    // The same statement on r and on c.
+    for pair in queries.chunks(2) {
+        let want = outcome(&mut s, &pair[0]);
+        assert_eq!(outcome(&mut s, &pair[1]), want, "{}", pair[1]);
+        assert_eq!(outcome(&mut many, &pair[1]), want, "workers: {}", pair[1]);
+    }
+}
