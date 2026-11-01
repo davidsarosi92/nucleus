@@ -598,3 +598,130 @@ fn parallel_lookups_agree() {
         );
     }
 }
+
+#[test]
+fn columnar_join_tables_agree() {
+    // A hash join's table made by workers holds its rows a column at a
+    // time: every kind of value, NULLs, a column of only NULLs and
+    // constants come back as a row-at-a-time join gives them.
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(14)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TYPE tone AS ENUM ('low', 'mid', 'high'); \
+         CREATE TABLE f (id INT PRIMARY KEY, k INT, b BIGINT, x FLOAT, r REAL, ok BOOL, \
+           s TEXT, c char(3), n NUMERIC, d DATE, ts TIMESTAMP, t tone, bin BYTEA, z INT); \
+         INSERT INTO f SELECT i, \
+           CASE WHEN i % 7 = 0 THEN NULL ELSE i % 25000 END, \
+           i::bigint * 7919 % 100003, \
+           CASE WHEN i % 11 = 0 THEN NULL ELSE i / 8.0 END, (i % 9)::real / 4, \
+           CASE WHEN i % 5 = 0 THEN NULL ELSE i % 3 = 0 END, \
+           CASE WHEN i % 13 = 0 THEN NULL ELSE 'é' || (i % 41) END, \
+           CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 6)::text END, \
+           (i % 101) / 3.0, DATE '2026-01-01' + i % 400, \
+           TIMESTAMP '2026-01-01 00:00:00' + (i % 1000) * INTERVAL '1 minute', \
+           (ARRAY['low', 'mid', 'high'])[1 + i % 3]::tone, \
+           CASE WHEN i % 19 = 0 THEN NULL ELSE ('k' || (i % 255))::bytea END, \
+           NULL \
+         FROM generate_series(1, 50000) i",
+    )
+    .unwrap();
+    let queries = [
+        "SELECT a.id, b.* FROM f a JOIN f b ON a.id = b.k WHERE a.id % 997 = 1",
+        "SELECT a.id, b.id, b.s, b.c, b.z FROM f a LEFT JOIN f b ON a.id = b.k * 3 \
+           WHERE a.id % 499 = 2",
+        "SELECT count(*), count(b.x), sum(b.n), min(b.ts), max(b.c) FROM f a \
+           JOIN f b ON a.id = b.k",
+        "SELECT a.id, b.id, b.t FROM f a JOIN f b ON a.s = b.s AND a.c = b.c \
+           WHERE a.id < 4 AND b.id % 101 = 0",
+        "SELECT a.id, b.id FROM f a JOIN f b ON a.c = b.c AND a.d = b.d WHERE a.id < 30",
+        "SELECT a.id, b.one, b.k FROM f a JOIN (SELECT k, 1 AS one, 'x' AS s FROM f) b \
+           ON a.id = b.k WHERE a.id % 1999 = 0",
+        "SELECT count(*) FROM f a LEFT JOIN f b ON a.id = b.z",
+    ];
+    let mut row = session(&db, 0);
+    let mut one = session(&db, 1024);
+    one.execute("SET parallel_workers = 1").unwrap();
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    let before = nucleus_sql::vector::parallel_runs();
+    for q in queries {
+        let want = outcome(&mut row, q);
+        assert!(want.is_ok(), "{q}: {want:?}");
+        assert_eq!(outcome(&mut one, q), want, "one thread: {q}");
+        assert_eq!(outcome(&mut many, q), want, "workers: {q}");
+    }
+    assert!(
+        nucleus_sql::vector::parallel_runs() - before >= 5,
+        "the tables were made by workers"
+    );
+}
+
+#[test]
+fn like_patterns_and_in_subqueries_agree() {
+    // `%` inside a pattern (a kernel of its own), `IN (subquery)` as a
+    // list — hashed when long, NULLs in it, text against char(n) — on
+    // row and column tables; and the subqueries run once, before workers
+    // look up or scan with them.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(15)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE w (id INT PRIMARY KEY, g INT, s TEXT, c char(6)) \
+               WITH (storage = {storage}); \
+             CREATE TABLE few (k INT PRIMARY KEY, ref INT, s TEXT); \
+             INSERT INTO w SELECT i, CASE WHEN i % 10 = 0 THEN NULL ELSE i % 300 END, \
+               CASE WHEN i % 23 = 0 THEN NULL \
+                 ELSE (ARRAY['ab', 'xaybz', 'ñaña', 'a%b', 'zzab', ''])[1 + i % 6] || (i % 7) END, \
+               CASE WHEN i % 29 = 0 THEN NULL ELSE 'c' || (i % 9) END \
+             FROM generate_series(1, 30000) i; \
+             INSERT INTO few SELECT i, i * 37 % 31000, 'c' || (i % 12) \
+               FROM generate_series(1, 400) i; \
+             ANALYZE"
+        ))
+        .unwrap();
+        let queries: Vec<String> = [
+            "SELECT id, s FROM w WHERE s LIKE '%a%b%' ORDER BY id LIMIT 40",
+            "SELECT count(*) FROM w WHERE s NOT LIKE '%a%b%'",
+            "SELECT count(*) FROM w WHERE s LIKE 'x%y%z%'",
+            "SELECT count(*) FROM w WHERE s LIKE 'ñ%a%3'",
+            "SELECT count(*) FROM w WHERE s LIKE 'a%%b%' OR s LIKE '%%'",
+            "SELECT count(*) FROM w WHERE c LIKE 'c%3%'",
+            "SELECT count(*) FROM w WHERE c LIKE '%c%'",
+            "SELECT count(*) FROM w WHERE g IN (SELECT k FROM few WHERE k < 5)",
+            "SELECT count(*) FROM w WHERE g IN (SELECT k * 2 FROM few)",
+            "SELECT count(*) FROM w WHERE g NOT IN (SELECT k FROM few)",
+            "SELECT count(*) FROM w WHERE g NOT IN (SELECT CASE WHEN k = 3 THEN NULL ELSE k END \
+               FROM few)",
+            "SELECT count(*) FROM w WHERE c IN (SELECT s FROM few)",
+            "SELECT count(*) FROM w WHERE s IN (SELECT 'ab' || k FROM few WHERE k < 20)",
+            "SELECT count(*) FROM w WHERE g IN (SELECT 100 / (k - 7) FROM few)",
+            "SELECT few.k, w.s FROM few JOIN w ON w.id = few.ref \
+               AND w.g NOT IN (SELECT k FROM few WHERE k % 3 = 0) ORDER BY few.k",
+        ]
+        .iter()
+        .map(|q| q.to_string())
+        .collect();
+        assert_eq!(agree(&db, &queries), 1, "{storage}: one division by zero");
+        let mut one = session(&db, 1024);
+        one.execute("SET parallel_workers = 1").unwrap();
+        let mut many = session(&db, 1024);
+        many.execute("SET parallel_workers = 4").unwrap();
+        for q in &queries {
+            assert_eq!(
+                outcome(&mut many, q),
+                outcome(&mut one, q),
+                "{storage}: {q}"
+            );
+        }
+    }
+}

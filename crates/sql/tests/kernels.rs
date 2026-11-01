@@ -236,3 +236,73 @@ fn the_references_are_sql_s_definitions() {
         }
     }
 }
+
+/// Strings of up to `max` words — long enough for a search's blocks.
+fn long_strings(rng: &SplitMix64, n: usize, max: u64) -> (Vec<u32>, Vec<u8>) {
+    let words = [
+        "", "a", "ab", "abc", "ba", "xabcx", "héllo", "llo", "special", "requests",
+    ];
+    let mut offsets = vec![0u32];
+    let mut bytes = Vec::new();
+    for _ in 0..n {
+        for _ in 0..rng.below(max + 1) {
+            bytes.extend_from_slice(words[rng.below(words.len() as u64) as usize].as_bytes());
+        }
+        offsets.push(bytes.len() as u32);
+    }
+    (offsets, bytes)
+}
+
+#[test]
+fn pattern_kernels_match_their_reference_and_sql() {
+    // `%` inside a pattern: the parts found in order, each after the last.
+    let rng = SplitMix64::new(16);
+    let patterns = [
+        "%a%b%",
+        "a%b",
+        "%abc%llo",
+        "ab%%c%",
+        "%special%requests%",
+        "x%héllo%x",
+        "%ba%ab%ba%",
+        "%llollo%a",
+    ];
+    for (n, max) in [(0, 0), (1, 3), (70, 3), (300, 12), (200, 40)] {
+        let (offsets, bytes) = long_strings(&rng, n, max);
+        for p in patterns {
+            let parts: Vec<&[u8]> = p.split('%').map(str::as_bytes).collect();
+            let want = reference::like_parts(&offsets, &bytes, &parts);
+            let sql: Vec<bool> = offsets
+                .windows(2)
+                .map(|w| {
+                    let s = std::str::from_utf8(&bytes[w[0] as usize..w[1] as usize]).unwrap();
+                    nucleus_sql::expr::like(s, p)
+                })
+                .collect();
+            assert_eq!(want, sql, "{p}: the reference is SQL's");
+            for level in kernels::levels() {
+                let mut out = vec![false; n];
+                kernels::like_parts_at(level, &offsets, &bytes, &parts, &mut out);
+                assert_eq!(out, want, "{level:?} {p} {n}");
+            }
+        }
+        for needle in ["a", "abc", "héllo", "requests", "special requests"] {
+            for level in kernels::levels() {
+                let mut out = vec![false; n];
+                kernels::like_bytes_at(
+                    level,
+                    &offsets,
+                    &bytes,
+                    needle.as_bytes(),
+                    Anchor::Contains,
+                    &mut out,
+                );
+                assert_eq!(
+                    out,
+                    reference::like_bytes(&offsets, &bytes, needle.as_bytes(), Anchor::Contains),
+                    "{level:?} {needle} {n}"
+                );
+            }
+        }
+    }
+}

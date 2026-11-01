@@ -498,31 +498,75 @@ kernel! {
     }
 }
 
+kernel! {
+    /// `out[i]`: whether string `i` matches the `LIKE` pattern whose only
+    /// wildcard is `%`, given as the text between them (`parts`: the
+    /// pattern split at each `%`, so at least two) — the first part a
+    /// prefix, the last a suffix, the ones between found in order, each
+    /// after the last (the leftmost match of each leaves the most room for
+    /// the rest, so it is the only one to try).
+    fn like_parts / like_parts_at(offsets: &[u32], bytes: &[u8], parts: &[&[u8]], out: &mut [bool]) {
+        let (first, last) = (parts[0], parts[parts.len() - 1]);
+        let middle = &parts[1..parts.len() - 1];
+        for (i, o) in out.iter_mut().enumerate() {
+            let s = &bytes[offsets[i] as usize..offsets[i + 1] as usize];
+            *o = s.len() >= first.len() + last.len()
+                && s.starts_with(first)
+                && s.ends_with(last)
+                && {
+                    let mut rest = &s[first.len()..s.len() - last.len()];
+                    middle.iter().all(|m| match find(rest, m) {
+                        Some(at) => {
+                            rest = &rest[at + m.len()..];
+                            true
+                        }
+                        None => false,
+                    })
+                };
+        }
+    }
+}
+
 /// Whether `needle` occurs in `hay`: candidates by its first byte, then
 /// compared.
 #[inline(always)]
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    let Some((&first, rest)) = needle.split_first() else {
-        return true;
-    };
-    if hay.len() < needle.len() {
-        return false;
+    find(hay, needle).is_some()
+}
+
+/// Where `needle` first occurs in `hay`: candidates where its first and
+/// its last byte both are, 32 starts at a time (compares the compiler
+/// makes vector instructions of), then compared.
+#[inline(always)]
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    let n = needle.len();
+    match n {
+        0 => return Some(0),
+        _ if hay.len() < n => return None,
+        1 => return hay.iter().position(|&b| b == needle[0]),
+        _ => {}
     }
-    let last = hay.len() - needle.len();
+    let (first, last, inner) = (needle[0], needle[n - 1], &needle[1..n - 1]);
+    // Candidate starts: `0..end`.
+    let end = hay.len() - n + 1;
+    const W: usize = 32;
     let mut i = 0;
-    while i <= last {
-        match hay[i..=last].iter().position(|&b| b == first) {
-            None => return false,
-            Some(p) => {
-                i += p;
-                if &hay[i + 1..i + needle.len()] == rest {
-                    return true;
-                }
-                i += 1;
-            }
+    while i + W <= end {
+        let (a, b) = (&hay[i..i + W], &hay[i + n - 1..i + n - 1 + W]);
+        let mut mask = 0u32;
+        for j in 0..W {
+            mask |= u32::from((a[j] == first) & (b[j] == last)) << j;
         }
+        while mask != 0 {
+            let j = mask.trailing_zeros() as usize;
+            if &hay[i + j + 1..i + j + n - 1] == inner {
+                return Some(i + j);
+            }
+            mask &= mask - 1;
+        }
+        i += W;
     }
-    false
+    (i..end).find(|&k| hay[k] == first && hay[k + n - 1] == last && &hay[k + 1..k + n - 1] == inner)
 }
 
 kernel! {
@@ -739,6 +783,28 @@ pub mod reference {
                     needle.is_empty() || s.windows(needle.len()).any(|w| w == needle)
                 }
             })
+            .collect()
+    }
+
+    /// [`super::like_parts`]: each string matched as the pattern's
+    /// characters, by backtracking (`%` the only wildcard).
+    pub fn like_parts(offsets: &[u32], bytes: &[u8], parts: &[&[u8]]) -> Vec<bool> {
+        fn matches(s: &[u8], p: &[Option<u8>]) -> bool {
+            match p.split_first() {
+                None => s.is_empty(),
+                Some((None, rest)) => (0..=s.len()).any(|k| matches(&s[k..], rest)),
+                Some((Some(c), rest)) => s.first() == Some(c) && matches(&s[1..], rest),
+            }
+        }
+        let mut pattern = Vec::new();
+        for (k, part) in parts.iter().enumerate() {
+            if k > 0 {
+                pattern.push(None);
+            }
+            pattern.extend(part.iter().map(|&b| Some(b)));
+        }
+        strings(offsets, bytes)
+            .map(|s| matches(s, &pattern))
             .collect()
     }
 

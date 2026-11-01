@@ -79,7 +79,7 @@ pub enum TimeKind {
 }
 
 impl TimeKind {
-    fn of(v: &Value) -> Option<(TimeKind, i64)> {
+    pub(crate) fn of(v: &Value) -> Option<(TimeKind, i64)> {
         Some(match v {
             Value::Date(d) => (TimeKind::Date, i64::from(*d)),
             Value::Time(t) => (TimeKind::Time, *t),
@@ -411,6 +411,21 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
         {
             Rc::new(Vector::Const(e.eval(&cx.env(&[]))?))
         }
+        // An uncorrelated `IN (subquery)`: its rows (run once) as a list.
+        Expr::Subquery(s) if !s.correlated && matches!(s.kind, crate::expr::SubKind::In(..)) => {
+            let crate::expr::SubKind::In(operand, negated) = &s.kind else {
+                unreachable!("matched above")
+            };
+            let rows = crate::expr::uncorrelated_rows(s, &cx.env(&[]))?;
+            let x = eval(operand, b, sel, cx)?;
+            let consts: Vec<&Value> = rows.iter().map(|r| &r[0]).collect();
+            match in_consts(&x, &consts, *negated, b.len, sel) {
+                Some(v) => Rc::new(v),
+                None => each(b.len, sel, |i| {
+                    crate::expr::in_values(&x.value(i), consts.iter().copied(), *negated)
+                })?,
+            }
+        }
         Expr::Column(i) => b
             .cols
             .get(*i)
@@ -447,11 +462,19 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
             };
             // A char(n) matches as stored, blanks included (as a row does).
             match (&*x, like_shape(p)) {
-                (Vector::Text(o, bytes, n) | Vector::Char(o, bytes, n), Some((needle, anchor))) => {
+                (Vector::Text(o, bytes, n) | Vector::Char(o, bytes, n), Some(shape)) => {
                     let mut out = vec![false; b.len];
-                    match anchor {
-                        None => kernels::eq_bytes(o, bytes, needle.as_bytes(), &mut out),
-                        Some(a) => kernels::like_bytes(o, bytes, needle.as_bytes(), a, &mut out),
+                    match shape {
+                        LikeShape::Whole(needle) => {
+                            kernels::eq_bytes(o, bytes, needle.as_bytes(), &mut out)
+                        }
+                        LikeShape::At(needle, a) => {
+                            kernels::like_bytes(o, bytes, needle.as_bytes(), a, &mut out)
+                        }
+                        LikeShape::Parts(parts) => {
+                            let parts: Vec<&[u8]> = parts.iter().map(|p| p.as_bytes()).collect();
+                            kernels::like_parts(o, bytes, &parts, &mut out)
+                        }
                     }
                     if *negated {
                         out.iter_mut().for_each(|v| *v = !*v);
@@ -516,10 +539,19 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
     })
 }
 
-/// A `LIKE` pattern a kernel matches: the text, and where (`None`: the
-/// whole string) — for patterns with `%` only at their ends, no `_` and no
-/// escapes.
-fn like_shape(p: &str) -> Option<(&str, Option<kernels::Anchor>)> {
+/// How a kernel matches a `LIKE` pattern.
+enum LikeShape<'p> {
+    /// No wildcard: the whole string.
+    Whole(&'p str),
+    /// `%` only at an end, or both.
+    At(&'p str, kernels::Anchor),
+    /// `%` within too: the text between them.
+    Parts(Vec<&'p str>),
+}
+
+/// The kernel for a `LIKE` pattern — for patterns whose only wildcard is
+/// `%`, with no escapes.
+fn like_shape(p: &str) -> Option<LikeShape<'_>> {
     if p.contains(['_', '\\']) {
         return None;
     }
@@ -527,17 +559,14 @@ fn like_shape(p: &str) -> Option<(&str, Option<kernels::Anchor>)> {
     let trail = p.len() > 1 && p.ends_with('%') || (p == "%");
     let inner = p.trim_matches('%');
     if inner.contains('%') {
-        return None;
+        return Some(LikeShape::Parts(p.split('%').collect()));
     }
-    Some((
-        inner,
-        match (lead, trail) {
-            (false, false) => None,
-            (false, true) => Some(kernels::Anchor::Prefix),
-            (true, false) => Some(kernels::Anchor::Suffix),
-            (true, true) => Some(kernels::Anchor::Contains),
-        },
-    ))
+    Some(match (lead, trail) {
+        (false, false) => LikeShape::Whole(inner),
+        (false, true) => LikeShape::At(inner, kernels::Anchor::Prefix),
+        (true, false) => LikeShape::At(inner, kernels::Anchor::Suffix),
+        (true, true) => LikeShape::At(inner, kernels::Anchor::Contains),
+    })
 }
 
 /// A vector of `f(i)` over the rows `sel` (typed when it can be).
@@ -861,6 +890,71 @@ fn cmp_text(op: BinaryOp, x: &Vector, y: &Vector, len: usize) -> Result<Option<V
     Ok(Some(Vector::Bool(out, nulls)))
 }
 
+/// `x [NOT] IN (consts)` by a kernel — a text or integer vector, and
+/// values of its kind, none `NULL` (a `NULL` item makes a miss `NULL`) —
+/// the values in a hash set when there are many; `None` when it cannot.
+fn in_consts(
+    x: &Vector,
+    consts: &[&Value],
+    negated: bool,
+    len: usize,
+    sel: &Sel,
+) -> Option<Vector> {
+    /// More items than this are looked up in a hash set.
+    const SCAN: usize = 8;
+    if consts.iter().any(|c| c.is_null()) {
+        return None;
+    }
+    let mut out = vec![false; len];
+    let nulls = if let Some((o, b, n, char)) = text_view(x) {
+        let needles: Vec<&[u8]> = consts
+            .iter()
+            .map(|c| text_const(c))
+            .collect::<Option<_>>()?;
+        if needles.len() > SCAN {
+            let set: std::collections::HashSet<&[u8], crate::fasthash::FastBuild> =
+                needles.into_iter().collect();
+            for i in sel.iter() {
+                out[i] = set.contains(text_at(o, b, char, i));
+            }
+        } else {
+            for i in sel.iter() {
+                out[i] = needles.contains(&text_at(o, b, char, i));
+            }
+        }
+        n.clone()
+    } else if let Vector::Int(d, n) = x {
+        let ints: Vec<i64> = consts
+            .iter()
+            .map(|c| {
+                if let Value::Int(i) = c {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .collect::<Option<_>>()?;
+        if ints.len() > SCAN {
+            let set: std::collections::HashSet<i64, crate::fasthash::FastBuild> =
+                ints.into_iter().collect();
+            for i in sel.iter() {
+                out[i] = set.contains(&d[i]);
+            }
+        } else {
+            for i in sel.iter() {
+                out[i] = ints.contains(&d[i]);
+            }
+        }
+        n.clone()
+    } else {
+        return None;
+    };
+    if negated {
+        out.iter_mut().for_each(|v| *v = !*v);
+    }
+    Some(Vector::Bool(out, nulls))
+}
+
 /// `x [NOT] IN (items)` over the rows `sel`, the items evaluated as
 /// vectors: kernels for a text, `char(n)` or integer `x` against
 /// constants of its kind, else a value at a time — `x` and the items only,
@@ -875,47 +969,12 @@ fn in_list(
     let consts: Option<Vec<&Value>> = items
         .iter()
         .map(|v| match &**v {
-            Vector::Const(c) if !c.is_null() => Some(c),
+            Vector::Const(c) => Some(c),
             _ => None,
         })
         .collect();
-    if let Some(consts) = consts {
-        let mut out = vec![false; len];
-        let typed = if let Some((o, b, n, char)) = text_view(x) {
-            let needles: Option<Vec<&[u8]>> = consts.iter().map(|c| text_const(c)).collect();
-            needles.map(|needles| {
-                for i in sel.iter() {
-                    let s = text_at(o, b, char, i);
-                    out[i] = needles.contains(&s);
-                }
-                n.clone()
-            })
-        } else if let Vector::Int(d, n) = x {
-            let ints: Option<Vec<i64>> = consts
-                .iter()
-                .map(|c| {
-                    if let Value::Int(i) = c {
-                        Some(*i)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            ints.map(|ints| {
-                for i in sel.iter() {
-                    out[i] = ints.contains(&d[i]);
-                }
-                n.clone()
-            })
-        } else {
-            None
-        };
-        if let Some(nulls) = typed {
-            if negated {
-                out.iter_mut().for_each(|v| *v = !*v);
-            }
-            return Ok(Vector::Bool(out, nulls));
-        }
+    if let Some(v) = consts.and_then(|c| in_consts(x, &c, negated, len, sel)) {
+        return Ok(v);
     }
     let out = each(len, sel, |i| {
         crate::expr::in_values(
@@ -2180,15 +2239,27 @@ enum Part {
 /// would run once per worker), nothing volatile (whose values depend on
 /// the order of calls).
 pub(crate) fn parallel_safe(e: &Expr) -> bool {
-    let mut safe = !e.has_subquery();
+    !e.has_subquery() && !volatile(e)
+}
+
+/// [`parallel_safe`] for `e` run under `ctx`: its uncorrelated subqueries
+/// allowed, run once here first ([`crate::expr::prime_subqueries`]) —
+/// their rows cached, which the workers are given.
+pub(crate) fn parallel_safe_in(e: &Expr, ctx: &Ctx) -> bool {
+    !volatile(e) && (!e.has_subquery() || crate::expr::prime_subqueries(e, ctx))
+}
+
+/// Whether `e` calls a volatile function (outside its subqueries).
+fn volatile(e: &Expr) -> bool {
+    let mut found = false;
     e.walk(&mut |x| {
         if let Expr::Call(f, _) = x
             && f.volatility() == crate::ext::Volatility::Volatile
         {
-            safe = false;
+            found = true;
         }
     });
-    safe
+    found
 }
 
 /// A chain's scan cut into morsels for worker threads, and what the
@@ -2230,7 +2301,7 @@ impl<'a> Morsels<'a> {
                 Step::Project(es) => all.extend(es.iter()),
             }
         }
-        if !all.iter().all(|e| parallel_safe(e)) {
+        if !all.iter().all(|e| parallel_safe_in(e, ctx)) {
             return Ok(None);
         }
         let Some(shared) = ctx.txn.shared() else {
@@ -2310,6 +2381,8 @@ pub(crate) fn on_workers<T: Send>(
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
     let ambient = crate::parallel::Ambient::capture();
+    // The uncorrelated subqueries' rows run so far (`parallel_safe_in`).
+    let cache = ctx.cache.borrow().clone();
     let (registry, params, needed, validated, memoize) = (
         ctx.registry,
         ctx.params,
@@ -2335,6 +2408,9 @@ pub(crate) fn on_workers<T: Send>(
                         wctx.needed = needed.clone();
                         wctx.validated = validated;
                         wctx.memoize = memoize;
+                        if !cache.is_empty() {
+                            *wctx.cache.get_mut() = cache.clone();
+                        }
                         let r = f(&wctx, m);
                         if r.is_err() {
                             failed.fetch_min(m, SeqCst);
@@ -2684,8 +2760,47 @@ fn morsel_rows(plan: &Plan, ctx: &Ctx, range: KeyRange) -> Result<(Vec<Row>, Opt
 
 /// A hash join's build side: the right rows, by key.
 pub(crate) struct JoinTable {
-    rows: Vec<Row>,
+    rows: Held,
     index: JoinIndex,
+}
+
+/// A join table's rows: as they came (rows already in memory), or a column
+/// at a time (gathered from batches: no allocation per row, and a fraction
+/// of a row's memory for numbers).
+enum Held {
+    Rows(Vec<Row>),
+    Columns(crate::columns::Columns),
+}
+
+impl Held {
+    fn len(&self) -> usize {
+        match self {
+            Held::Rows(r) => r.len(),
+            Held::Columns(c) => c.len(),
+        }
+    }
+
+    /// Row `r`'s values appended to `out`.
+    fn extend_row(&self, r: usize, out: &mut Row) {
+        match self {
+            Held::Rows(rows) => out.extend_from_slice(&rows[r]),
+            Held::Columns(c) => c.extend_row(r, out),
+        }
+    }
+
+    /// The rows, in order.
+    fn into_rows(self) -> Vec<Row> {
+        match self {
+            Held::Rows(r) => r,
+            Held::Columns(c) => (0..c.len())
+                .map(|r| {
+                    let mut row = Vec::new();
+                    c.extend_row(r, &mut row);
+                    row
+                })
+                .collect(),
+        }
+    }
 }
 
 enum JoinIndex {
@@ -2758,14 +2873,12 @@ impl JoinTable {
     /// `rows` by their `keys` (a row with a NULL key left out: NULL equals
     /// nothing).
     fn build(rows: Vec<Row>, keys: &[Expr], ctx: &Ctx, outer: Option<&Env>) -> Result<Self> {
-        let mut values = Vec::with_capacity(rows.len() * keys.len());
+        let mut values = crate::columns::Columns::new(keys.len());
         for r in &rows {
             let e = env(r, ctx, outer);
-            for k in keys {
-                values.push(k.eval(&e)?);
-            }
+            values.push_row(keys.iter().map(|k| k.eval(&e)).collect::<Result<_>>()?);
         }
-        Ok(Self::of(rows, values, keys.len()))
+        Ok(Self::of(Held::Rows(rows), values))
     }
 
     /// The table of the pipeline `right` (a hash join's build side), made
@@ -2788,7 +2901,8 @@ impl JoinTable {
         PARALLEL_RUNS.fetch_add(1, Relaxed);
         let limit = crate::budget::work_mem();
         let bytes = AtomicUsize::new(0);
-        type Part = Option<(Vec<Row>, Result<Vec<Value>>)>;
+        let width = right.width();
+        type Part = Option<(crate::columns::Columns, Result<crate::columns::Columns>)>;
         let results = work.run(0..work.ranges.len(), true, &|wctx, range| -> Result<Part> {
             let Some(mut pipe) = Pipeline::new(right, right, wctx, None, false, Some(range))?
             else {
@@ -2798,11 +2912,12 @@ impl JoinTable {
                 ctx: wctx,
                 outer: None,
             };
-            let (mut rows, mut values) = (Vec::new(), Vec::new());
+            let mut rows = crate::columns::Columns::new(width);
+            let mut values = crate::columns::Columns::new(keys.len());
             // The first key error, kept until the scan is done: a scan's
             // error comes first.
             let mut key_err = None;
-            let mut size = 0;
+            let mut size;
             loop {
                 match pipe.next()? {
                     None => break,
@@ -2813,46 +2928,35 @@ impl JoinTable {
                                 .map(|k| eval(k, &b, &b.sel, cx))
                                 .collect::<Result<Vec<_>>>()
                             {
-                                Ok(vs) => {
-                                    for i in b.sel.iter() {
-                                        values.extend(vs.iter().map(|v| v.value(i)));
-                                    }
-                                }
+                                Ok(vs) => values.push_vectors(&vs, &b.sel),
                                 Err(e) => key_err = Some(e),
                             }
                         }
-                        for i in b.sel.iter() {
-                            let r = b.row(i);
-                            size += crate::spill::row_bytes(&r);
-                            rows.push(r);
-                        }
+                        rows.push_batch(&b);
                     }
                     Some(Out::Rows(batch, err)) => {
                         for r in batch {
                             if key_err.is_none() {
                                 let e = env(&r, wctx, None);
-                                for k in keys {
-                                    match k.eval(&e) {
-                                        Ok(v) => values.push(v),
-                                        Err(e) => {
-                                            key_err = Some(e);
-                                            break;
-                                        }
-                                    }
+                                match keys.iter().map(|k| k.eval(&e)).collect::<Result<_>>() {
+                                    Ok(k) => values.push_row(k),
+                                    Err(e) => key_err = Some(e),
                                 }
                             }
-                            size += crate::spill::row_bytes(&r);
-                            rows.push(r);
+                            rows.push_row(r);
                         }
                         if let Some(e) = err {
                             return Err(e);
                         }
                     }
                 }
+                // The table's memory: the rows and their keys' values.
+                size = rows.bytes() + values.bytes();
                 if bytes.load(Relaxed) + size > limit {
                     return Ok(None);
                 }
             }
+            let size = rows.bytes() + values.bytes();
             if bytes.fetch_add(size, Relaxed) + size > limit {
                 return Ok(None);
             }
@@ -2867,33 +2971,24 @@ impl JoinTable {
                 None => return Err(Error::internal("a morsel not run")),
             }
         }
-        let n = parts.iter().map(|(r, _)| r.len()).sum();
-        let mut rows = Vec::with_capacity(n);
-        let mut values = Vec::with_capacity(n * keys.len());
+        let mut rows = crate::columns::Columns::new(width);
+        let mut values = crate::columns::Columns::new(keys.len());
         for (r, v) in parts {
-            rows.extend(r);
-            values.extend(v?);
+            rows.append(r);
+            values.append(v?);
         }
-        Ok(Some(Self::of(rows, values, keys.len())))
+        Ok(Some(Self::of(Held::Columns(rows), values)))
     }
 
-    /// `rows` by their keys' values: `width` values a row, in `values`.
-    fn of(rows: Vec<Row>, values: Vec<Value>, width: usize) -> Self {
-        let ints = width == 1
-            && values
-                .iter()
-                .all(|k| matches!(k, Value::Int(_) | Value::Null));
-        let index = if ints {
-            JoinIndex::Int(Groups::new(values.iter().map(|k| match k {
-                Value::Int(x) => Some(*x),
-                _ => None,
-            })))
-        } else {
-            let mut values = values.into_iter();
-            JoinIndex::Any(Groups::new((0..rows.len()).map(|_| {
-                let k: Vec<Value> = values.by_ref().take(width).collect();
+    /// `rows` by their keys' values (`values`: a row's keys a row).
+    fn of(rows: Held, values: crate::columns::Columns) -> Self {
+        let index = match values.ints() {
+            Some(ints) => JoinIndex::Int(Groups::new(ints)),
+            None => JoinIndex::Any(Groups::new((0..values.len()).map(|r| {
+                let mut k = Vec::new();
+                values.extend_row(r, &mut k);
                 (!k.iter().any(Value::is_null)).then_some(k)
-            })))
+            }))),
         };
         JoinTable { rows, index }
     }
@@ -2944,10 +3039,9 @@ impl Probe<'_> {
         use crate::plan::JoinType;
         let mut matched = false;
         for &r in candidates {
-            let right = &self.table.rows[r as usize];
             if self.check {
                 let mut combined = left();
-                combined.extend_from_slice(right);
+                self.table.rows.extend_row(r as usize, &mut combined);
                 let holds = self
                     .on
                     .map_or(Ok(true), |on| on.holds(&env(&combined, cx.ctx, cx.outer)))?;
@@ -2963,7 +3057,7 @@ impl Probe<'_> {
                 matched = true;
                 if matches!(self.kind, JoinType::Inner | JoinType::Left) {
                     let mut combined = left();
-                    combined.extend_from_slice(right);
+                    self.table.rows.extend_row(r as usize, &mut combined);
                     out.push(combined);
                     continue;
                 }
@@ -3204,7 +3298,8 @@ pub(crate) fn existence_by_left<'a>(
                     continue;
                 }
                 if probe.check {
-                    let mut combined = probe.table.rows[c].clone();
+                    let mut combined = Vec::new();
+                    probe.table.rows.extend_row(c, &mut combined);
                     combined.extend(row());
                     let holds =
                         on.map_or(Ok(true), |on| on.holds(&env(&combined, cx.ctx, cx.outer)))?;
@@ -3299,6 +3394,7 @@ pub(crate) fn existence_by_left<'a>(
     let rows: Vec<Row> = probe
         .table
         .rows
+        .into_rows()
         .into_iter()
         .zip(marks)
         .filter(|(_, m)| m.load(Relaxed) == semi)

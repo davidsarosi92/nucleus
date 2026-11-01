@@ -50,7 +50,7 @@ pub fn row_bytes(row: &[Value]) -> usize {
     24 + row.iter().map(value_bytes).sum::<usize>()
 }
 
-fn value_bytes(v: &Value) -> usize {
+pub(crate) fn value_bytes(v: &Value) -> usize {
     32 + match v {
         Value::Text(s) | Value::Char(s) => s.len(),
         Value::Bytea(b) | Value::Ext(_, b) => b.len(),

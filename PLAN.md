@@ -1453,19 +1453,19 @@ attach / detach ✅; the age policy ✅); V10 results columnar end to end ✅ (a
 into the columnar result as columns, in parallel too — a million numeric
 rows into numpy 262 → 92 ms from a row table, 241 → 51 ms from a column
 table); TPC-H against PostgreSQL measured (`bench/tpch.py`, SF 1: every
-result agrees; first 6.5–7.9× PostgreSQL's time, now 0.75× on column
-tables and 1.40× on row tables in the geometric mean, 13 of the 22
+result agrees; first 6.5–7.9× PostgreSQL's time, now 0.67× on column
+tables and 1.27× on row tables in the geometric mean, 14 of the 22
 queries faster on column tables; `EXISTS` / `IN` unnested into semi and
 anti joins on the way) ✅; ClickBench (`bench/clickbench.py`, the first
-million rows: every result agrees, but for ties at a `LIMIT`; 0.32× of
-PostgreSQL's time on a column table, 2.32× on a row table) ✅; the
+million rows: every result agrees, but for ties at a `LIMIT`; 0.31× of
+PostgreSQL's time on a column table, 2.31× on a row table) ✅; the
 targets recorded ✅ (`docs/benchmarks.md`, Targets: column tables at most
 0.8× PostgreSQL's time on TPC-H and 0.5× on ClickBench in the geometric
 mean, no query above 3×; row tables within 2×; loads, updates and
 deletes within 2×, scans, sorts and joins within 3×, reads by key at
 least even — met so far: TPC-H and ClickBench on column tables, TPC-H
 on row tables, and every `bench/run.py` target: loads, updates and
-deletes, scans, sorts and joins, reads by key; left: TPC-H Q13 and Q16,
+deletes, scans, sorts and joins, reads by key; left: TPC-H Q19,
 ClickBench Q18 and Q39 above 3×, ClickBench on a row table, the TPC-H
 and ClickBench loads); V11 write intents among the versions ✅ — a large
 transaction's spilled writes go straight into the version keyspace as
@@ -2189,6 +2189,15 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20: TPC-H Q13 and Q16 — a hash join's table
+  made by the workers holds its rows and keys a column at a time (Q13's
+  `orders` side fits work_mem now, where it spilled); `LIKE` with `%`
+  inside a pattern a kernel; `NOT LIKE` estimated as the rest of `LIKE`;
+  uncorrelated `IN (subquery)` a list kernel, and uncorrelated
+  subqueries run once before workers look up or scan with them.  TPC-H
+  SF 1: 0.67× PostgreSQL's time on column tables (from 0.75×), 1.27× on
+  row tables (from 1.40×); Q13 3.8× → 1.09×, Q16 3.4× → 1.00×;
+  ClickBench 0.31× and 2.31× (`docs/benchmarks.md`).
 - **2026-11-01** — §M14.20: TPC-H Q19 and Q22 — `char(n)` columns a
   vector of their own (row and column storage), `IN` lists of constants
   a kernel, scalar functions' batch kernels (`ScalarFunction::

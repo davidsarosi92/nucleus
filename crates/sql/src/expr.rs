@@ -287,7 +287,7 @@ pub struct Ctx<'a> {
     /// Parameter values.
     pub params: &'a [Value],
     /// Uncorrelated subquery results, by plan address.
-    pub cache: RefCell<HashMap<usize, std::rc::Rc<Vec<Row>>>>,
+    pub cache: RefCell<HashMap<usize, std::sync::Arc<Vec<Row>>>>,
     /// CTE results, by CTE id.
     pub ctes: RefCell<HashMap<usize, std::rc::Rc<crate::spill::Stored>>>,
     /// The current round's rows of each recursive CTE being computed.
@@ -821,19 +821,13 @@ fn correlated_rows(sub: &SubPlan, env: &Env) -> Result<std::rc::Rc<Vec<Row>>> {
 }
 
 fn subquery(sub: &SubPlan, env: &Env) -> Result<Value> {
-    let rows = if sub.correlated {
-        correlated_rows(sub, env)?
+    let (correlated, shared);
+    let rows: &[Row] = if sub.correlated {
+        correlated = correlated_rows(sub, env)?;
+        &correlated
     } else {
-        let key = &sub.plan as *const Plan as usize;
-        let cached = env.ctx.cache.borrow().get(&key).cloned();
-        match cached {
-            Some(rows) => rows,
-            None => {
-                let rows = std::rc::Rc::new(crate::exec::collect(&sub.plan, env.ctx, Some(env))?);
-                env.ctx.cache.borrow_mut().insert(key, rows.clone());
-                rows
-            }
-        }
+        shared = uncorrelated_rows(sub, env)?;
+        &shared
     };
     Ok(match &sub.kind {
         SubKind::Exists => Value::Bool(!rows.is_empty()),
@@ -851,6 +845,53 @@ fn subquery(sub: &SubPlan, env: &Env) -> Result<Value> {
             in_values(&v, rows.iter().map(|r| &r[0]), *negated)?
         }
         SubKind::Array => Value::Array(rows.iter().map(|r| r[0].clone()).collect()),
+    })
+}
+
+/// An uncorrelated subquery's rows: run once a statement, then cached.
+pub(crate) fn uncorrelated_rows(sub: &SubPlan, env: &Env) -> Result<std::sync::Arc<Vec<Row>>> {
+    let key = &sub.plan as *const Plan as usize;
+    let cached = env.ctx.cache.borrow().get(&key).cloned();
+    Ok(match cached {
+        Some(rows) => rows,
+        None => {
+            let rows = std::sync::Arc::new(crate::exec::collect(&sub.plan, env.ctx, Some(env))?);
+            env.ctx.cache.borrow_mut().insert(key, rows.clone());
+            rows
+        }
+    })
+}
+
+/// Runs the uncorrelated subqueries of `e` whose rows are not cached yet,
+/// caching them — so worker threads given the cache need not run them.
+/// `false` when one cannot be: it is correlated, or reads a volatile
+/// function, or fails (a run in order then meets it where it would; a
+/// subquery that cannot fail and reads nothing that changes gives the same
+/// rows whenever it runs).
+pub(crate) fn prime_subqueries(e: &Expr, ctx: &Ctx) -> bool {
+    let mut subs = Vec::new();
+    e.walk(&mut |x| {
+        if let Expr::Subquery(s) = x {
+            subs.push(&**s);
+        }
+    });
+    subs.into_iter().all(|s| {
+        let key = &s.plan as *const Plan as usize;
+        if ctx.cache.borrow().contains_key(&key) {
+            return true;
+        }
+        if s.correlated || outer_reads(&s.plan).is_none_or(|r| !r.is_empty()) {
+            return false;
+        }
+        match crate::exec::collect(&s.plan, ctx, None) {
+            Ok(rows) => {
+                ctx.cache
+                    .borrow_mut()
+                    .insert(key, std::sync::Arc::new(rows));
+                true
+            }
+            Err(_) => false,
+        }
     })
 }
 
@@ -1218,19 +1259,30 @@ pub fn with_regex<T>(
 
 /// SQL `LIKE`: `%` any run, `_` any one character, `\` escapes.
 pub fn like(s: &str, p: &str) -> bool {
+    // ASCII as bytes (no copy); otherwise as characters, `_` one of them.
+    if s.is_ascii() && p.is_ascii() {
+        return like_units(s.as_bytes(), p.as_bytes(), *b"%_\\");
+    }
     let s: Vec<char> = s.chars().collect();
     let p: Vec<char> = p.chars().collect();
+    like_units(&s, &p, ['%', '_', '\\'])
+}
+
+/// [`like`] over code units (bytes or characters), `special` the units of
+/// `%`, `_` and the escape.
+fn like_units<T: Copy + Eq>(s: &[T], p: &[T], special: [T; 3]) -> bool {
+    let [pct, one, esc] = special;
     // Iterative matching with backtracking to the last `%`.
     let (mut i, mut j) = (0, 0);
     let (mut star, mut mark) = (None, 0);
     while i < s.len() {
-        if j < p.len() && p[j] == '\\' && j + 1 < p.len() && p[j + 1] == s[i] {
+        if j < p.len() && p[j] == esc && j + 1 < p.len() && p[j + 1] == s[i] {
             i += 1;
             j += 2;
-        } else if j < p.len() && (p[j] == '_' || (p[j] == s[i] && p[j] != '%' && p[j] != '\\')) {
+        } else if j < p.len() && (p[j] == one || (p[j] == s[i] && p[j] != pct && p[j] != esc)) {
             i += 1;
             j += 1;
-        } else if j < p.len() && p[j] == '%' {
+        } else if j < p.len() && p[j] == pct {
             star = Some(j);
             mark = i;
             j += 1;
@@ -1242,7 +1294,7 @@ pub fn like(s: &str, p: &str) -> bool {
             return false;
         }
     }
-    while j < p.len() && p[j] == '%' {
+    while j < p.len() && p[j] == pct {
         j += 1;
     }
     j == p.len()
@@ -1618,6 +1670,12 @@ mod tests {
             ("axb", "a\\%b", false),
             ("abcabc", "%bc%bc", true),
             ("mississippi", "%iss%pi", true),
+            // `_` is a character, not a byte.
+            ("héllo", "h_llo", true),
+            ("héllo", "h__llo", false),
+            ("hé", "%_", true),
+            ("a_b", "a\\_b", true),
+            ("axb", "a\\_b", false),
         ] {
             assert_eq!(like(s, p), want, "{s} LIKE {p}");
         }

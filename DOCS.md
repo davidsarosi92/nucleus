@@ -1199,12 +1199,16 @@ Rows are decoded from the stored encoding straight into the vectors.
 Expressions are evaluated a batch per call: kernels for integer and
 double arithmetic and comparisons (an integer widened against a double,
 as a row widens it), text and `char(n)` comparisons (a `char(n)` side
-without its trailing blanks, as a row compares it) and `LIKE` with `%`
-only at the pattern's ends, `IN` lists of constants over text, `char(n)`
-and integers (other lists value by value, over the operand and the items
-only), comparisons of dates, times and timestamps of one kind, `AND` /
-`OR` / `NOT`, `IS NULL`; an uncorrelated scalar, `EXISTS` or `ARRAY`
-subquery once (its rows are cached for the statement); function calls
+without its trailing blanks, as a row compares it) and `LIKE` whose only
+wildcard is `%` (at the ends: a prefix, suffix or substring; within too:
+its parts found in order, each after the last — `'%special%requests%'`;
+substrings searched for by their first and last bytes, 32 places at a
+time), `IN` lists of constants over text, `char(n)` and integers (in a
+hash set past eight; other lists value by value, over the operand and the
+items only), comparisons of dates, times and timestamps of one kind,
+`AND` / `OR` / `NOT`, `IS NULL`; an uncorrelated scalar, `EXISTS` or
+`ARRAY` subquery once (its rows are cached for the statement), an
+uncorrelated `IN (subquery)` as the list of its rows; function calls
 through the function's batch kernel when it has one
 (`ScalarFunction::call_batch`, §8.12: `substr` over text and `char(n)`
 with constant positions), else casts and calls a value at a time over
@@ -1308,7 +1312,10 @@ their order and errors of the row-at-a-time join; a condition that is just
 the integer keys' equality is not checked again per row.  When the right
 side is a pipeline too, the workers collect it — morsels in key order,
 their rows and keys' values joined in order, so the table is a single
-pass's — unless it passes work_mem (then it is stashed, and spills).  A **sort** of a
+pass's — a column at a time (`columns::Columns`: an array a column, typed
+while its values are of one kind — an integer 9 bytes, not a `Value`'s
+32 —, no allocation per row), unless it passes work_mem (then it is
+stashed, and spills).  A **sort** of a
 pipeline sorts its morsels on worker threads (keys a batch at a time) and
 merges them (`spill::merge_sorted`; ties to the earlier morsel, so the
 order is a stable sort's).
@@ -1320,9 +1327,14 @@ left rows read in blocks (256 at first, each next twice the last, up to
 16 384), a block cut into pieces the workers look up over the shared
 reads, the pieces' rows given in the left rows' order — a single pass's
 rows, and its error where it would stop.  Not under `EXPLAIN ANALYZE`,
-for an enclosing row, for a lookup or condition with a subquery or a
-volatile call, or while a statement on the thread holds rows it inserted
-into a column table unstored (only that thread's reads see them).
+for an enclosing row, for a lookup or condition with a correlated
+subquery or a volatile call, or while a statement on the thread holds
+rows it inserted into a column table unstored (only that thread's reads
+see them).  An uncorrelated subquery there — or in a parallel scan's
+filters — runs once on the statement's thread first, its rows cached and
+given to the workers (`vector::parallel_safe_in`); one that reads a
+volatile function or fails keeps the work on one thread, which meets it
+where a single pass would.
 A **semi join** gives each left row some right row matches, once; an
 **anti join** each left row none matches (a NULL key matches nothing, so
 its row comes out of an anti join); both give only the left's columns,
@@ -1449,7 +1461,7 @@ scaled, distinct values by PostgreSQL's Duj1 estimator); the row count is
 exact.  Selectivities: `=` 1/ndv, ranges from the
 histogram (a column's lower and upper bound in one AND together: the
 histogram between them, not each side's product), `IS NULL` the null
-fraction, `IN` n/ndv, `LIKE` 0.1, combined by AND/OR/NOT.  For analyzed tables the access path is the cheapest of a
+fraction, `IN` n/ndv, `LIKE` 0.1 (`NOT LIKE` 0.9), combined by AND/OR/NOT.  For analyzed tables the access path is the cheapest of a
 full scan and every index (a secondary index pays a row fetch per row),
 `EXPLAIN` shows `rows=`, and chains of up to 8 inner joins are reordered by
 dynamic programming (no cross products unless nothing connects; the
@@ -2670,6 +2682,18 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-01 — §M14.20, TPC-H Q13 and Q16:** `columns::Columns` —
+  rows a column at a time — for the hash join tables the workers make
+  (the keys too); `kernels::like_parts` (`LIKE` with `%` inside the
+  pattern), substrings found by their first and last bytes 32 places at
+  a time, the row-at-a-time `LIKE` over bytes for ASCII; `NOT LIKE`'s
+  selectivity 0.9; uncorrelated `IN (subquery)` through the `IN`-list
+  kernel (`in_consts`, a hash set past eight items);
+  `expr::prime_subqueries` / `vector::parallel_safe_in`: uncorrelated
+  subqueries run once before workers use them, the cache shared with
+  the workers (`Arc` rows).  TPC-H SF 1 0.67× / 1.27× PostgreSQL's time
+  (column / row tables), ClickBench 0.31× / 2.31×
+  (`docs/benchmarks.md`).
 - **2026-11-01 — §M14.20, TPC-H Q19 and Q22:** `Vector::Char`
   (`char(n)` from row and column storage, compared without trailing
   blanks), an `IN`-list kernel, `ScalarFunction::call_batch` (`substr`'s

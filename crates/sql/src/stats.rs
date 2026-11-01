@@ -584,7 +584,14 @@ fn selectivity(table: &Table, stats: Option<&TableStats>, pred: &Expr) -> f64 {
             }
             _ => 0.5,
         },
-        Expr::Like { .. } => 0.1,
+        // A tenth of the rows match a pattern; the rest do not.
+        Expr::Like { negated, .. } => {
+            if *negated {
+                0.9
+            } else {
+                0.1
+            }
+        }
         Expr::Binary(op, a, b) => {
             let (c, v, op) = match (&**a, &**b) {
                 (Expr::Column(c), e) if e.columns().is_empty() => (*c, e, *op),

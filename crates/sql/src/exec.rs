@@ -1156,46 +1156,48 @@ const LOOKUP_BLOCK_MAX: usize = 16_384;
 /// over what: more than one worker, no enclosing row, no `EXPLAIN
 /// ANALYZE`, nothing that would differ by thread in the lookup or the
 /// condition (a scan, perhaps under a projection, of expressions
-/// [`crate::vector::parallel_safe`]), no rows a statement has written and
+/// [`crate::vector::parallel_safe_in`]), no rows a statement has written and
 /// a thread of its own keeps (a column table's insert buffer), and a
 /// transaction that shares its reads.
 fn parallel_lookups<'a>(
     right: &Plan,
     spec: &JoinSpec<'a>,
 ) -> Option<(&'a dyn nucleus_kv::KvRead, usize)> {
-    use crate::vector::parallel_safe;
-    fn safe(p: &Plan) -> bool {
-        match p {
-            Plan::Scan { access, filter, .. } => {
-                filter.as_ref().is_none_or(parallel_safe)
-                    && match access {
-                        Access::Full => true,
-                        Access::Key {
-                            prefix,
-                            lower,
-                            upper,
-                            ..
-                        } => {
-                            let bound = |b: &Bound<Expr>| match b {
-                                Bound::Included(e) | Bound::Excluded(e) => parallel_safe(e),
-                                Bound::Unbounded => true,
-                            };
-                            prefix.iter().all(parallel_safe) && bound(lower) && bound(upper)
-                        }
-                    }
-            }
-            Plan::Project { input, exprs } => exprs.iter().all(parallel_safe) && safe(input),
-            _ => false,
-        }
-    }
     let workers = crate::budget::workers();
     if workers < 2
         || spec.outer.is_some()
         || spec.ctx.profile.is_some()
-        || !spec.on.is_none_or(parallel_safe)
-        || !safe(right)
         || crate::column_store::statement_buffered()
     {
+        return None;
+    }
+    let safe = |e: &Expr| crate::vector::parallel_safe_in(e, spec.ctx);
+    let scan_safe = |p: &Plan| match p {
+        Plan::Scan { access, filter, .. } => {
+            filter.as_ref().is_none_or(safe)
+                && match access {
+                    Access::Full => true,
+                    Access::Key {
+                        prefix,
+                        lower,
+                        upper,
+                        ..
+                    } => {
+                        let bound = |b: &Bound<Expr>| match b {
+                            Bound::Included(e) | Bound::Excluded(e) => safe(e),
+                            Bound::Unbounded => true,
+                        };
+                        prefix.iter().all(safe) && bound(lower) && bound(upper)
+                    }
+                }
+        }
+        _ => false,
+    };
+    let right_safe = match right {
+        Plan::Project { input, exprs } => exprs.iter().all(safe) && scan_safe(input),
+        p => scan_safe(p),
+    };
+    if !right_safe || !spec.on.is_none_or(safe) {
         return None;
     }
     Some((spec.ctx.txn.shared()?, workers))
