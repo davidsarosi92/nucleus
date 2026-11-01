@@ -2499,48 +2499,212 @@ pub(crate) struct JoinTable {
 
 enum JoinIndex {
     /// One key, an integer in every right row that has one.
-    Int(crate::fasthash::FastMap<i64, Vec<u32>>),
+    Int(Groups<i64>),
     /// Anything else.
-    Any(crate::fasthash::FastMap<Vec<Value>, Vec<u32>>),
+    Any(Groups<Vec<Value>>),
+}
+
+/// Row numbers grouped by key: each key's, ascending, side by side in one
+/// array — no allocation per key, to make or to free.
+struct Groups<K> {
+    /// Each key's group.
+    map: crate::fasthash::FastMap<K, u32>,
+    /// Where each group starts in `rows` (and, one more, where it ends).
+    starts: Vec<u32>,
+    rows: Vec<u32>,
+}
+
+impl<K: std::hash::Hash + Eq> Groups<K> {
+    /// The row numbers of `keys` (one a row; `None` in no group).
+    fn new(keys: impl ExactSizeIterator<Item = Option<K>>) -> Self {
+        const NONE: u32 = u32::MAX;
+        let mut map: crate::fasthash::FastMap<K, u32> = Default::default();
+        map.reserve(keys.len());
+        let mut group = Vec::with_capacity(keys.len());
+        let mut counts: Vec<u32> = Vec::new();
+        for k in keys {
+            let Some(k) = k else {
+                group.push(NONE);
+                continue;
+            };
+            let next = counts.len() as u32;
+            let g = *map.entry(k).or_insert(next);
+            if g == next {
+                counts.push(0);
+            }
+            counts[g as usize] += 1;
+            group.push(g);
+        }
+        let mut starts = Vec::with_capacity(counts.len() + 1);
+        let mut at = 0u32;
+        for c in &counts {
+            starts.push(at);
+            at += c;
+        }
+        starts.push(at);
+        let mut fill = starts[..counts.len()].to_vec();
+        let mut rows = vec![0u32; at as usize];
+        for (i, g) in group.into_iter().enumerate() {
+            if g != NONE {
+                rows[fill[g as usize] as usize] = i as u32;
+                fill[g as usize] += 1;
+            }
+        }
+        Groups { map, starts, rows }
+    }
+
+    /// The rows of key `k`, ascending.
+    fn get<Q: std::hash::Hash + Eq + ?Sized>(&self, k: &Q) -> Option<&[u32]>
+    where
+        K: std::borrow::Borrow<Q>,
+    {
+        let g = *self.map.get(k)? as usize;
+        Some(&self.rows[self.starts[g] as usize..self.starts[g + 1] as usize])
+    }
 }
 
 impl JoinTable {
     /// `rows` by their `keys` (a row with a NULL key left out: NULL equals
     /// nothing).
     fn build(rows: Vec<Row>, keys: &[Expr], ctx: &Ctx, outer: Option<&Env>) -> Result<Self> {
-        let mut values = Vec::with_capacity(rows.len());
+        let mut values = Vec::with_capacity(rows.len() * keys.len());
         for r in &rows {
             let e = env(r, ctx, outer);
-            let k = keys
-                .iter()
-                .map(|k| k.eval(&e))
-                .collect::<Result<Vec<_>>>()?;
-            values.push(k);
+            for k in keys {
+                values.push(k.eval(&e)?);
+            }
         }
-        let ints = keys.len() == 1
+        Ok(Self::of(rows, values, keys.len()))
+    }
+
+    /// The table of the pipeline `right` (a hash join's build side), made
+    /// on worker threads: morsels of its scan in key order, each collected
+    /// with its keys' values by a worker, joined in order — the rows, each
+    /// key's order and the error a single pass's (a scan's error before a
+    /// key's).  `None` when it cannot run so ([`Morsels::new`]) or the rows
+    /// pass work_mem (the caller stashes them, spilling).
+    pub(crate) fn parallel(
+        right: &Plan,
+        keys: &[Expr],
+        ctx: &Ctx,
+        outer: Option<&Env>,
+    ) -> Result<Option<Self>> {
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        let exprs: Vec<&Expr> = keys.iter().collect();
+        let Some(work) = Morsels::new(right, &exprs, ctx, outer, ROW_MORSELS_PER_WORKER)? else {
+            return Ok(None);
+        };
+        PARALLEL_RUNS.fetch_add(1, Relaxed);
+        let limit = crate::budget::work_mem();
+        let bytes = AtomicUsize::new(0);
+        type Part = Option<(Vec<Row>, Result<Vec<Value>>)>;
+        let results = work.run(0..work.ranges.len(), true, &|wctx, range| -> Result<Part> {
+            let Some(mut pipe) = Pipeline::new(right, right, wctx, None, false, Some(range))?
+            else {
+                return Err(Error::internal("a morsel's pipeline"));
+            };
+            let cx = Cx {
+                ctx: wctx,
+                outer: None,
+            };
+            let (mut rows, mut values) = (Vec::new(), Vec::new());
+            // The first key error, kept until the scan is done: a scan's
+            // error comes first.
+            let mut key_err = None;
+            let mut size = 0;
+            loop {
+                match pipe.next()? {
+                    None => break,
+                    Some(Out::Batch(b)) => {
+                        if key_err.is_none() {
+                            match keys
+                                .iter()
+                                .map(|k| eval(k, &b, &b.sel, cx))
+                                .collect::<Result<Vec<_>>>()
+                            {
+                                Ok(vs) => {
+                                    for i in b.sel.iter() {
+                                        values.extend(vs.iter().map(|v| v.value(i)));
+                                    }
+                                }
+                                Err(e) => key_err = Some(e),
+                            }
+                        }
+                        for i in b.sel.iter() {
+                            let r = b.row(i);
+                            size += crate::spill::row_bytes(&r);
+                            rows.push(r);
+                        }
+                    }
+                    Some(Out::Rows(batch, err)) => {
+                        for r in batch {
+                            if key_err.is_none() {
+                                let e = env(&r, wctx, None);
+                                for k in keys {
+                                    match k.eval(&e) {
+                                        Ok(v) => values.push(v),
+                                        Err(e) => {
+                                            key_err = Some(e);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            size += crate::spill::row_bytes(&r);
+                            rows.push(r);
+                        }
+                        if let Some(e) = err {
+                            return Err(e);
+                        }
+                    }
+                }
+                if bytes.load(Relaxed) + size > limit {
+                    return Ok(None);
+                }
+            }
+            if bytes.fetch_add(size, Relaxed) + size > limit {
+                return Ok(None);
+            }
+            Ok(Some((rows, key_err.map_or(Ok(values), Err))))
+        });
+        let mut parts = Vec::with_capacity(results.len());
+        for r in results {
+            match r {
+                Some(Ok(Some(part))) => parts.push(part),
+                Some(Ok(None)) => return Ok(None), // past work_mem
+                Some(Err(e)) => return Err(e),
+                None => return Err(Error::internal("a morsel not run")),
+            }
+        }
+        let n = parts.iter().map(|(r, _)| r.len()).sum();
+        let mut rows = Vec::with_capacity(n);
+        let mut values = Vec::with_capacity(n * keys.len());
+        for (r, v) in parts {
+            rows.extend(r);
+            values.extend(v?);
+        }
+        Ok(Some(Self::of(rows, values, keys.len())))
+    }
+
+    /// `rows` by their keys' values: `width` values a row, in `values`.
+    fn of(rows: Vec<Row>, values: Vec<Value>, width: usize) -> Self {
+        let ints = width == 1
             && values
                 .iter()
-                .all(|k| matches!(k[0], Value::Int(_) | Value::Null));
+                .all(|k| matches!(k, Value::Int(_) | Value::Null));
         let index = if ints {
-            let mut m: crate::fasthash::FastMap<i64, Vec<u32>> = Default::default();
-            m.reserve(rows.len());
-            for (i, k) in values.iter().enumerate() {
-                if let Value::Int(x) = k[0] {
-                    m.entry(x).or_default().push(i as u32);
-                }
-            }
-            JoinIndex::Int(m)
+            JoinIndex::Int(Groups::new(values.iter().map(|k| match k {
+                Value::Int(x) => Some(*x),
+                _ => None,
+            })))
         } else {
-            let mut m: crate::fasthash::FastMap<Vec<Value>, Vec<u32>> = Default::default();
-            m.reserve(rows.len());
-            for (i, k) in values.into_iter().enumerate() {
-                if !k.iter().any(Value::is_null) {
-                    m.entry(k).or_default().push(i as u32);
-                }
-            }
-            JoinIndex::Any(m)
+            let mut values = values.into_iter();
+            JoinIndex::Any(Groups::new((0..rows.len()).map(|_| {
+                let k: Vec<Value> = values.by_ref().take(width).collect();
+                (!k.iter().any(Value::is_null)).then_some(k)
+            })))
         };
-        Ok(JoinTable { rows, index })
+        JoinTable { rows, index }
     }
 }
 
@@ -2575,7 +2739,7 @@ impl Probe<'_> {
                 }
             }
         };
-        found.map_or(&[], Vec::as_slice)
+        found.unwrap_or(&[])
     }
 
     /// One left row's output.
@@ -2718,6 +2882,32 @@ pub(crate) fn hash_join<'a>(
     outer: Option<&'a Env<'a>>,
 ) -> Result<Rows<'a>> {
     let table = JoinTable::build(rows, right_keys, ctx, outer)?;
+    hash_join_table(
+        left,
+        table,
+        left_keys,
+        right_keys,
+        kind,
+        on,
+        right_width,
+        ctx,
+        outer,
+    )
+}
+
+/// [`hash_join`] with its table made.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hash_join_table<'a>(
+    left: &'a Plan,
+    table: JoinTable,
+    left_keys: &'a [Expr],
+    right_keys: &'a [Expr],
+    kind: crate::plan::JoinType,
+    on: Option<&'a Expr>,
+    right_width: usize,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Rows<'a>> {
     let check = on.is_some()
         && !(keys_only(on, left_keys, right_keys, left.width())
             && matches!(table.index, JoinIndex::Int(_)));

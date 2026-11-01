@@ -2185,6 +2185,10 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20: the self-join — a hash join's right side
+  collected on worker threads when it is a pipeline, its table without an
+  allocation per key: 1.7× PostgreSQL's time (4.2× before); every
+  `bench/run.py` target met.
 - **2026-11-01** — §M14.20: the load — one look at the tree for a run
   of new keys (not one per row), a spill's keys checked as a commit's,
   no intent delete for keys written after the spill outside its span:

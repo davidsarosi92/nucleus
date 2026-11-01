@@ -150,6 +150,21 @@ Against PostgreSQL (two runs each, alternating, the best):
 
 The rest as before (count 2.1×, sort 2.0×, reads by key 0.6×).
 
+Then the self-join (profiled: its right side — a million rows — scanned
+and stashed on one thread ~40% of its time, its table built on one
+thread with a vector allocated per key ~19%, those vectors freed ~8%; the
+probe already on the workers): the right side collected by the workers,
+morsels of its scan in key order, its keys evaluated a batch at a time;
+the table each key's row numbers side by side in one array.  Against
+PostgreSQL (two runs each, alternating, the best; PostgreSQL's plan a
+parallel hash join on three processes):
+
+| 1,000,000 rows | nucleus `76d7cfb` (ms) | nucleus now (ms) | PostgreSQL (ms) | ratio now |
+|---|---:|---:|---:|---:|
+| self-join | 476 | 191 | 112 | 1.7× |
+
+The rest within the run-to-run noise of the runs above.
+
 **A columnar table** (§M14.20 V7), the same million rows in `WITH
 (storage = column)` (loaded by `INSERT … SELECT` from the row table in
 4.0 s; its columns 32 MB): `sum` 2.0 ms (one thread 12.8 ms; the row
@@ -343,7 +358,7 @@ against PostgreSQL 18 in the same run:
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | 2.24×, 2.51× | no |
 | loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 1.2–1.4× (2026-11-01, as PostgreSQL's own time varies); 4.5× (row), 4.8× (column); 2.8× (TPC-H and ClickBench not measured again since 10-31) | `bench/run.py` yes, the others no |
 | updates and deletes ≤ 2× (`bench/run.py`) | 0.9×, 1.0–1.7× (2026-11-01; the delete 127 ms) | yes |
-| scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.1–2.1×; sort 2.0×; self-join 4.2× (2026-11-01) | joins no |
+| scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.1–2.1×; sort 2.0×; self-join 1.7× (2026-11-01) | yes |
 | reads by key ≤ 1× (`bench/run.py`) | 0.6× (2026-11-01) | yes |
 
 Ratios are best-of-three times on one machine in one run; the CI's

@@ -348,17 +348,42 @@ fn parallel_joins_and_sorts_agree() {
         "SELECT id, x FROM f WHERE x % 3 = 0 ORDER BY x DESC, id LIMIT 50",
         "SELECT s, x FROM f WHERE id % 5 = 0 ORDER BY s, x NULLS FIRST",
         "SELECT id FROM f WHERE x > 10 ORDER BY 100 / (id - 45000)",
+        // Both sides large: the table made by workers too — each key's
+        // rows in order, a key's error after the scan's.
+        "SELECT count(*), sum(a.x), sum(b.x) FROM f a JOIN f b ON a.id = b.x",
+        "SELECT a.id, b.id FROM f a JOIN f b ON a.id = b.d WHERE a.id < 30",
+        "SELECT count(*) FROM f a JOIN f b ON a.id = b.x AND a.s = b.s",
+        "SELECT count(*), count(b.id) FROM f a LEFT JOIN f b ON a.id = b.x * 2",
+        "SELECT count(*) FROM f a JOIN f b ON a.id = 100 / (b.id - 30000)",
+        "SELECT count(*) FROM f a JOIN f b ON 100 / (a.id - 30000) = b.x",
     ];
     let mut row = session(&db, 0);
     let mut one = session(&db, 1024);
     one.execute("SET parallel_workers = 1").unwrap();
     let mut many = session(&db, 1024);
     many.execute("SET parallel_workers = 4").unwrap();
+    // A table past work_mem: stashed, not made by workers — and a join
+    // that spills partitions its rows, so their order is its own.
+    let sorted = |r: Result<Vec<Vec<String>>, String>| {
+        r.map(|mut rows| {
+            rows.sort();
+            rows
+        })
+    };
+    let mut small = session(&db, 1024);
+    small
+        .execute("SET parallel_workers = 4; SET work_mem = '64kB'")
+        .unwrap();
     let before = nucleus_sql::vector::parallel_runs();
     for q in queries {
         let want = outcome(&mut row, q);
         assert_eq!(outcome(&mut one, q), want, "one thread: {q}");
         assert_eq!(outcome(&mut many, q), want, "workers: {q}");
+        assert_eq!(
+            sorted(outcome(&mut small, q)),
+            sorted(want.clone()),
+            "past work_mem: {q}"
+        );
     }
     assert!(
         nucleus_sql::vector::parallel_runs() - before >= 8,

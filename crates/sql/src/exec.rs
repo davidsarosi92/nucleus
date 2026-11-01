@@ -1008,6 +1008,29 @@ fn join<'a>(
             }
         }
     }
+    // Both sides pipelines: the table made on worker threads, when it fits.
+    if let JoinAlgo::Hash {
+        left_keys,
+        right_keys,
+        ..
+    } = algo
+        && kind != JoinType::Full
+        && crate::vector::probes(left)
+        && crate::vector::probes(right)
+        && let Some(table) = crate::vector::JoinTable::parallel(right, right_keys, ctx, outer)?
+    {
+        return crate::vector::hash_join_table(
+            left,
+            table,
+            left_keys,
+            right_keys,
+            kind,
+            on,
+            right.width(),
+            ctx,
+            outer,
+        );
+    }
     let right_rows = stash(build(right, ctx, outer)?)?;
     // A pipeline probing a table in memory: a batch at a time, in parallel.
     if let (

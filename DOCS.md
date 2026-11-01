@@ -1287,11 +1287,15 @@ Subqueries run per row when correlated, once per execution otherwise
 A **hash join whose left side is a pipeline** (a scan, its filters and
 projections) and whose right side fits in work_mem runs vectorized: the
 right rows hashed once (`vector::JoinTable`; one integer key as an
-integer, in a table of the executor's own hash, `fasthash`), the left
+integer, in a table of the executor's own hash, `fasthash`; each key's
+row numbers side by side in one array, no allocation per key), the left
 side's keys evaluated a batch at a time and probed — on worker threads,
 morsels of the left scan in key order, when it is large — with the rows,
 their order and errors of the row-at-a-time join; a condition that is just
-the integer keys' equality is not checked again per row.  A **sort** of a
+the integer keys' equality is not checked again per row.  When the right
+side is a pipeline too, the workers collect it — morsels in key order,
+their rows and keys' values joined in order, so the table is a single
+pass's — unless it passes work_mem (then it is stashed, and spills).  A **sort** of a
 pipeline sorts its morsels on worker threads (keys a batch at a time) and
 merges them (`spill::merge_sorted`; ties to the earlier morsel, so the
 order is a stable sort's).
@@ -2638,6 +2642,13 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-01 — §M14.20, the self-join:** a hash join whose right side
+  is a pipeline has it collected (its keys evaluated a batch at a time)
+  on worker threads, morsels in key order; the table groups each key's
+  row numbers in one array (it allocated a vector per key, to make and
+  to free).  `SELECT count(*) FROM b x JOIN b y ON x.id = y.v` over 1M
+  rows ~490 → ~190 ms: 1.7× PostgreSQL's (4.2× before).
 
 - **2026-11-01 — §M14.20, the load:** `put_new` notes the run of keys
   without an entry up to the tree's next one, and a bulk insert of new
