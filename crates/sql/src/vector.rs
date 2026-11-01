@@ -63,6 +63,12 @@ pub enum Vector {
     Time(TimeKind, Vec<i64>, Option<Vec<bool>>),
     /// Any values.
     Values(Vec<Value>),
+    /// Text or `char(n)` values by their codes in a dictionary (its
+    /// entries a [`Vector::Text`] or [`Vector::Char`] without `NULL`s),
+    /// and which are `NULL`: a column store's dictionary segment as it is
+    /// stored.  Only between a scan and the filter that asked for it
+    /// ([`DictFilter`]), which tests the entries rather than the rows.
+    Dict(std::sync::Arc<Vector>, Vec<u32>, Option<Vec<bool>>),
 }
 
 /// Which kind of date / time a [`Vector::Time`] holds.
@@ -125,6 +131,7 @@ impl Vector {
             ),
             Vector::Time(k, d, n) if !is_null_at(n, i) => k.value(d[i]),
             Vector::Values(v) => v[i].clone(),
+            Vector::Dict(d, c, n) if !is_null_at(n, i) => d.value(c[i] as usize),
             _ => Value::Null,
         }
     }
@@ -138,9 +145,41 @@ impl Vector {
             | Vector::Bool(_, n)
             | Vector::Text(_, _, n)
             | Vector::Char(_, _, n)
-            | Vector::Time(_, _, n) => is_null_at(n, i),
+            | Vector::Time(_, _, n)
+            | Vector::Dict(_, _, n) => is_null_at(n, i),
             Vector::Values(v) => v[i].is_null(),
         }
+    }
+
+    /// A [`Vector::Dict`]'s rows as text (or `char(n)`), the bytes of only
+    /// the rows `sel` (the others empty, never read); `None` for any other
+    /// vector.
+    pub(crate) fn undict(&self, sel: &Sel) -> Option<Vector> {
+        let Vector::Dict(d, codes, nulls) = self else {
+            return None;
+        };
+        let (Vector::Text(eo, eb, _) | Vector::Char(eo, eb, _)) = &**d else {
+            return None;
+        };
+        let mut offsets = vec![0u32; codes.len() + 1];
+        let mut bytes = Vec::new();
+        let mut at = 0;
+        for i in sel.iter() {
+            // (The rows before `i` not in play: empty.)
+            for o in &mut offsets[at + 1..=i] {
+                *o = bytes.len() as u32;
+            }
+            if !is_null_at(nulls, i) {
+                let c = codes[i] as usize;
+                bytes.extend_from_slice(&eb[eo[c] as usize..eo[c + 1] as usize]);
+            }
+            offsets[i + 1] = bytes.len() as u32;
+            at = i + 1;
+        }
+        for o in &mut offsets[at + 1..] {
+            *o = bytes.len() as u32;
+        }
+        Some(d.same_text(offsets, bytes, nulls.clone()))
     }
 
     /// Rows `range` of it, as a vector of their own.
@@ -164,6 +203,7 @@ impl Vector {
                 self.same_text(offsets, b[lo..hi].to_vec(), nulls(n))
             }
             Vector::Values(v) => Vector::Values(v[range].to_vec()),
+            Vector::Dict(d, c, n) => Vector::Dict(d.clone(), c[range.clone()].to_vec(), nulls(n)),
         }
     }
 
@@ -200,6 +240,7 @@ impl Vector {
             Vector::Values(v) => {
                 Vector::Values(rows.iter().map(|&i| v[i as usize].clone()).collect())
             }
+            Vector::Dict(d, c, n) => Vector::Dict(d.clone(), pick(c, rows), nulls(n)),
         }
     }
 
@@ -212,7 +253,8 @@ impl Vector {
             | Vector::Bool(_, n)
             | Vector::Text(_, _, n)
             | Vector::Char(_, _, n)
-            | Vector::Time(_, _, n) => n.as_deref(),
+            | Vector::Time(_, _, n)
+            | Vector::Dict(_, _, n) => n.as_deref(),
             _ => None,
         }
     }
@@ -1078,6 +1120,224 @@ fn keep_keys(filters: &[(usize, std::sync::Arc<crate::keyfilter::KeyFilter>)], b
     Batch { sel, ..b }
 }
 
+static DICT_TESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many dictionaries' entries this process has tested a filter's
+/// conjunct on ([`DictFilter`]; for tests and diagnostics).
+pub fn dictionary_tests() -> u64 {
+    DICT_TESTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A filter right above a scan whose leading conjuncts each test one text
+/// column against constants, and cannot fail (PLAN.md §M14.20 V13): on a
+/// dictionary segment's rows ([`Vector::Dict`]) a conjunct is tested on
+/// the dictionary's entries — once a segment — and the rows whose entry
+/// it holds FALSE for are dropped before the filter runs: they would
+/// leave at it, an `AND` whose left part is false reading no further (so
+/// no error of a later conjunct is skipped).  The dictionaries' text is
+/// then made for the rows left only, and the filter runs as it would.
+struct DictFilter<'a> {
+    /// The step it goes before.
+    step: usize,
+    /// The conjuncts: the column each tests, and it.
+    preds: Vec<(usize, &'a Expr)>,
+    /// The filter's other conjuncts, in order (`None`: none) — what is
+    /// left to test of a row every conjunct above held TRUE for.
+    rest: Option<Expr>,
+    /// Each conjunct's last dictionary, and its entries' truth (1, 0;
+    /// -1: `NULL`).
+    seen: std::cell::RefCell<Vec<Option<(std::sync::Arc<Vector>, Rc<Vec<i8>>)>>>,
+}
+
+impl<'a> DictFilter<'a> {
+    /// The one for `steps`: their first filter, if only key filters come
+    /// before it, and its leading conjuncts that qualify.
+    fn of(steps: &[(Step<'a>, &'a Plan)]) -> Option<Self> {
+        let (step, p) = steps.iter().enumerate().find_map(|(i, (s, _))| match s {
+            Step::Keys(_) => None,
+            Step::Filter(p) => Some(Some((i, *p))),
+            Step::Project(_) => Some(None),
+        })??;
+        let mut preds = Vec::new();
+        Self::leading(p, &mut preds);
+        if preds.is_empty() {
+            return None;
+        }
+        let mut all = Vec::new();
+        crate::binder::conjuncts(p.clone(), &mut all);
+        let rest = all
+            .into_iter()
+            .skip(preds.len())
+            .reduce(|a, b| Expr::Binary(BinaryOp::And, Box::new(a), Box::new(b)));
+        Some(DictFilter {
+            step,
+            seen: std::cell::RefCell::new(vec![None; preds.len()]),
+            preds,
+            rest,
+        })
+    }
+
+    /// The conjuncts of `e` that qualify, from the first on (whether all
+    /// did).
+    fn leading(e: &'a Expr, out: &mut Vec<(usize, &'a Expr)>) -> bool {
+        if let Expr::Binary(BinaryOp::And, l, r) = e {
+            return Self::leading(l, out) && Self::leading(r, out);
+        }
+        let mut col = None;
+        match Self::tests(e, &mut col) {
+            true if let Some(c) = col => {
+                out.push((c, e));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `e` tests the one column `col` against constants, by what
+    /// cannot fail (comparisons, `IN`, `LIKE`, `IS NULL`, `NOT`, `AND`,
+    /// `OR`).
+    fn tests(e: &Expr, col: &mut Option<usize>) -> bool {
+        use BinaryOp::*;
+        match e {
+            Expr::Column(c) => *col.get_or_insert(*c) == *c,
+            Expr::Literal(_) => true,
+            Expr::Binary(Eq | NotEq | Lt | LtEq | Gt | GtEq | And | Or, a, b) => {
+                Self::tests(a, col) && Self::tests(b, col)
+            }
+            Expr::Unary(crate::ast::UnaryOp::Not, a) | Expr::IsNull(a, _) => Self::tests(a, col),
+            Expr::InList(a, list, _) => {
+                list.iter().all(|x| matches!(x, Expr::Literal(_))) && Self::tests(a, col)
+            }
+            Expr::Like { expr, pattern, .. } => {
+                matches!(**pattern, Expr::Literal(_)) && Self::tests(expr, col)
+            }
+            _ => false,
+        }
+    }
+
+    /// The text columns it tests.
+    fn columns(&self) -> Vec<usize> {
+        let mut cols: Vec<usize> = self.preds.iter().map(|(c, _)| *c).collect();
+        cols.sort_unstable();
+        cols.dedup();
+        cols
+    }
+
+    /// `b` with the rows a conjunct's entry holds FALSE for dropped, and
+    /// its dictionaries made text — gathered into a batch of their own
+    /// when at most half are left (the kernels after it then compute
+    /// those alone).
+    ///
+    /// With it, whether every conjunct was tested so and held TRUE for
+    /// every row left (then only [`rest`](Self::rest) remains to test).
+    fn apply(&self, mut b: Batch, cx: Cx) -> (Batch, bool) {
+        let mut dropped = false;
+        let mut decided = true;
+        if !b.sel.is_empty() {
+            for (k, (c, e)) in self.preds.iter().enumerate() {
+                let v = b.cols[*c].clone();
+                let Vector::Dict(d, codes, nulls) = &*v else {
+                    decided = false;
+                    continue;
+                };
+                let Some(truth) = self.truth(k, d, *c, e, b.cols.len(), cx) else {
+                    decided = false;
+                    continue;
+                };
+                let mut unsure = false;
+                b.sel = b.sel.keep(|i| {
+                    if is_null_at(nulls, i) {
+                        unsure = true;
+                        return true;
+                    }
+                    match truth[codes[i] as usize] {
+                        0 => false,
+                        1 => true,
+                        _ => {
+                            unsure = true;
+                            true
+                        }
+                    }
+                });
+                decided &= !unsure;
+                dropped = true;
+            }
+        }
+        if dropped && b.sel.len() * 2 <= b.len {
+            let n = b.sel.len();
+            let cols = b
+                .cols
+                .iter()
+                .map(|c| {
+                    let v = c.gather(&b.sel);
+                    Rc::new(v.undict(&Sel::All(n)).unwrap_or(v))
+                })
+                .collect();
+            let b = Batch {
+                len: n,
+                cols,
+                sel: Sel::All(n),
+            };
+            return (b, decided);
+        }
+        for col in &mut b.cols {
+            if let Some(v) = col.undict(&b.sel) {
+                *col = Rc::new(v);
+            }
+        }
+        (b, decided)
+    }
+
+    /// Conjunct `k`'s truth on dictionary `d`'s entries (`None` when it
+    /// fails on them: then the filter alone decides).
+    fn truth(
+        &self,
+        k: usize,
+        d: &std::sync::Arc<Vector>,
+        col: usize,
+        e: &Expr,
+        width: usize,
+        cx: Cx,
+    ) -> Option<Rc<Vec<i8>>> {
+        let mut seen = self.seen.borrow_mut();
+        if let Some((last, truth)) = &seen[k]
+            && std::sync::Arc::ptr_eq(last, d)
+        {
+            return Some(truth.clone());
+        }
+        let (Vector::Text(o, _, _) | Vector::Char(o, _, _)) = &**d else {
+            return None;
+        };
+        let m = o.len() - 1;
+        let entries = Batch {
+            len: m,
+            cols: (0..width)
+                .map(|j| {
+                    Rc::new(if j == col {
+                        (**d).clone()
+                    } else {
+                        Vector::Const(Value::Null)
+                    })
+                })
+                .collect(),
+            sel: Sel::All(m),
+        };
+        let r = eval(e, &entries, &entries.sel, cx).ok()?;
+        let truth: Rc<Vec<i8>> = Rc::new(
+            (0..m)
+                .map(|i| match r.value(i) {
+                    Value::Bool(true) => 1,
+                    Value::Bool(false) => 0,
+                    _ => -1,
+                })
+                .collect(),
+        );
+        seen[k] = Some((d.clone(), truth.clone()));
+        DICT_TESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(truth)
+    }
+}
+
 /// `exprs` over the rows of `b`.
 fn project(exprs: &[Expr], b: Batch, cx: Cx) -> Result<Batch> {
     let cols = exprs
@@ -1479,6 +1739,8 @@ pub struct Pipeline<'a> {
     cx: Cx<'a>,
     batch: usize,
     max: usize,
+    /// Its first filter's tests of dictionaries' entries.
+    dict: Option<DictFilter<'a>>,
 }
 
 /// The scan, and the filters and projections above it, of a chain that
@@ -1605,6 +1867,7 @@ impl<'a> Pipeline<'a> {
             unreachable!("a chain ends in a scan")
         };
         let cx = Cx { ctx, outer };
+        let dict = DictFilter::of(&steps);
         let wanted = ctx.needed.get(&(scan as *const Plan as usize));
         let range = match range {
             Some(r) => Some(r),
@@ -1621,6 +1884,7 @@ impl<'a> Pipeline<'a> {
                     wanted: wanted.map(Vec::as_slice),
                     validated: ctx.validated,
                     bounds: scan_bounds(&steps, ctx),
+                    dicts: dict.as_ref().map(DictFilter::columns).unwrap_or_default(),
                 })?)
             }
         };
@@ -1645,6 +1909,7 @@ impl<'a> Pipeline<'a> {
             cx,
             batch: FIRST_BATCH.min(max),
             max,
+            dict,
         }))
     }
 
@@ -1684,20 +1949,34 @@ impl<'a> Pipeline<'a> {
             }
         };
         let mut b = input.clone();
-        let mut steps = self.steps.iter().peekable();
+        let mut steps = self.steps.iter().enumerate().peekable();
         if steps
             .peek()
-            .is_none_or(|(_, n)| !std::ptr::eq(*n, self.scan))
+            .is_none_or(|(_, (_, n))| !std::ptr::eq(*n, self.scan))
         {
             record(self.scan, &b);
         }
-        while let Some((step, node)) = steps.next() {
-            b = match step {
-                Step::Filter(p) => filter(p, b, self.cx)?,
-                Step::Project(exprs) => project(exprs, b, self.cx)?,
-                Step::Keys(filters) => keep_keys(filters, b),
+        while let Some((i, (step, node))) = steps.next() {
+            let mut decided = None;
+            if let Some(d) = &self.dict
+                && d.step == i
+            {
+                let (tested, all) = d.apply(b, self.cx);
+                b = tested;
+                decided = all.then_some(&d.rest);
+            }
+            b = match (step, decided) {
+                // Its leading conjuncts TRUE for every row left.
+                (Step::Filter(_), Some(None)) => b,
+                (Step::Filter(_), Some(Some(rest))) => filter(rest, b, self.cx)?,
+                (Step::Filter(p), None) => filter(p, b, self.cx)?,
+                (Step::Project(exprs), _) => project(exprs, b, self.cx)?,
+                (Step::Keys(filters), _) => keep_keys(filters, b),
             };
-            if steps.peek().is_none_or(|(_, n)| !std::ptr::eq(*n, *node)) {
+            if steps
+                .peek()
+                .is_none_or(|(_, (_, n))| !std::ptr::eq(*n, *node))
+            {
                 record(node, &b);
             }
         }

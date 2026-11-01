@@ -49,6 +49,10 @@ pub struct Scan<'a> {
     /// storage may skip what these rule out; the rows are filtered above
     /// it anyway).
     pub bounds: Vec<ColumnBound>,
+    /// The text columns a dictionary-encoded storage may give as codes in
+    /// their dictionary ([`crate::vector::Vector::Dict`]: for a filter
+    /// that tests the dictionary's entries); others always as text.
+    pub dicts: Vec<usize>,
 }
 
 /// A range a column's values must lie in (`NULL` never does).
@@ -185,6 +189,7 @@ pub trait TableStorage: Send + Sync {
             wanted: None,
             validated: false,
             bounds: Vec::new(),
+            dicts: Vec::new(),
         };
         for r in self.rows(scan)? {
             match r {

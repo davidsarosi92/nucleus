@@ -219,6 +219,7 @@ fn build_columns(kv: &Arc<dyn Kv>, name: &str) -> Result<()> {
                 wanted: None,
                 validated: false,
                 bounds: Vec::new(),
+                dicts: Vec::new(),
             })? {
                 rows.push(r?);
                 if rows.len() == SEGMENT_ROWS {

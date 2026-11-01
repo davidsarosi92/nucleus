@@ -997,6 +997,7 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
                 wanted: None,
                 validated: false,
                 bounds: Vec::new(),
+                dicts: Vec::new(),
             })?
             .take(BACKFILL_ROWS)
             .collect::<Result<_>>()?;
@@ -1046,6 +1047,7 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
         wanted: None,
         validated: false,
         bounds: Vec::new(),
+        dicts: Vec::new(),
     })? {
         let (k, row) = r?;
         rows.push(exec::keyed(k, row))?;

@@ -1502,8 +1502,9 @@ partial states, a hash array with a salt beside the groups' keys (the
 keys hashed and compared from the batch's vectors), direct indexing for
 a narrow integer range ✅ (ClickHouse's two-level tables, DuckDB's salt
 and perfect hash; TPC-H Q18, Q1); predicates on a dictionary's
-values (a text column's `=`, `IN` and `LIKE` once per distinct value,
-then its codes); prefetching in hash probes ✅ (Chen & Ailamaki: a
+values ✅ (a text column's `=`, `IN` and `LIKE` once per distinct value,
+then its codes: 1.3–3.6× on such filters, the segment cache holding
+codes, not text); prefetching in hash probes ✅ (Chen & Ailamaki: a
 batch's lookups before its output, so their misses overlap — safe code,
 no prefetch instruction; 2–8 % on the joins — and, found on the way,
 join tables on two integer keys and build sides that are no pipeline

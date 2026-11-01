@@ -693,6 +693,7 @@ pub fn scan_some<'a>(
             wanted,
             validated: ctx.validated,
             bounds: Vec::new(),
+            dicts: Vec::new(),
         })?;
         return Ok(Box::new(rows.map(|r| {
             crate::budget::charge_scan()?;

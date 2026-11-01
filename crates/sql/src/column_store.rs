@@ -248,6 +248,7 @@ fn delta_items<'a>(
                     wanted,
                     validated,
                     bounds: Vec::new(),
+                    dicts: Vec::new(),
                 })?
                 .map(move |r| r.map(|(k, row)| (back(t, &k), Some(row)))),
         ),
@@ -601,6 +602,12 @@ fn decoded_bytes(d: &Decoded) -> usize {
             Vector::Bool(d, n) => d.len() + nulls(n),
             Vector::Text(o, b, n) | Vector::Char(o, b, n) => o.len() * 4 + b.len() + nulls(n),
             Vector::Values(v) => v.len() * std::mem::size_of::<Value>(),
+            Vector::Dict(d, c, n) => match &**d {
+                Vector::Text(o, b, _) | Vector::Char(o, b, _) => {
+                    c.len() * 4 + nulls(n) + o.len() * 4 + b.len()
+                }
+                _ => c.len() * 4 + nulls(n),
+            },
         },
     }
 }
@@ -1122,6 +1129,8 @@ enum Run {
 struct Merged<'a> {
     txn: &'a dyn KvTxn,
     t: &'a Table,
+    /// The columns a dictionary segment gives as codes ([`Scan::dicts`]).
+    dicts: Vec<usize>,
     wanted: Option<&'a [bool]>,
     validated: bool,
     end: Option<Vec<u8>>,
@@ -1142,6 +1151,7 @@ impl<'a> Merged<'a> {
             wanted,
             validated,
             bounds,
+            dicts,
         } = scan;
         let segs = segments(txn, t, &start, end.as_deref())?
             .into_iter()
@@ -1152,6 +1162,7 @@ impl<'a> Merged<'a> {
         let mut m = Merged {
             txn,
             t,
+            dicts,
             wanted,
             validated,
             end,
@@ -1308,6 +1319,12 @@ impl BatchSource for Merged<'_> {
                         let v = column_of(self.txn, self.t, &seg, c)?;
                         cols.push(Rc::new(match &*v {
                             Vector::Const(x) => Vector::Const(x.clone()),
+                            // A dictionary's codes for a filter that asked
+                            // for them; its text for anything else.
+                            Vector::Dict(..) if !self.dicts.contains(&c) => v
+                                .slice(range.clone())
+                                .undict(&Sel::All(len))
+                                .expect("a dictionary"),
                             v => v.slice(range.clone()),
                         }));
                     }
@@ -1492,6 +1509,7 @@ fn check_segments(
             wanted: None,
             validated: false,
             bounds: Vec::new(),
+            dicts: Vec::new(),
         },
         delta,
     )?
@@ -2030,5 +2048,6 @@ fn vector_len(v: &Vector) -> usize {
         Vector::Bool(d, _) => d.len(),
         Vector::Text(o, _, _) | Vector::Char(o, _, _) => o.len() - 1,
         Vector::Values(v) => v.len(),
+        Vector::Dict(_, c, _) => c.len(),
     }
 }

@@ -1977,7 +1977,19 @@ every layout but value by value's).  A scan reads only the wanted columns of the
 its range overlaps, skips a segment the filters right above it rule out
 (column-constant comparisons against the segment's least and greatest
 values), and hands each run of a segment's rows to the vectorized executor
-as vectors.  *Writes:* rows a statement inserts — and the new versions of
+as vectors.  A dictionary column is decoded — and cached — as it is
+stored, its entries and each row's code (`Vector::Dict`, a fraction of
+its text's memory); a scan gives it as text, or as codes to a filter right
+above that asked for them (`Scan::dicts`): the filter's leading conjuncts
+that test the column against constants by what cannot fail (comparisons,
+`IN`, `LIKE`, `IS NULL`, `NOT`, `AND`, `OR`) are tested on the entries,
+once a segment, and a row whose entry one holds FALSE for is dropped
+before the filter runs — the rows an `AND` would drop reading no further,
+so no later conjunct's error is skipped.  The rows left are made text
+(gathered into a batch of their own when at most half are left), and
+when every such conjunct held TRUE for each, only the filter's other
+conjuncts are tested (lineitem's 6 million rows: `l_shipmode = 'MAIL'`
+16 → 12 ms, `IN` 20 → 14 ms, `LIKE '%PERSON'` 29 → 8 ms).  *Writes:* rows a statement inserts — and the new versions of
 segment rows it updates — are gathered until it ends (4 segments' worth
 at most, then written at once); then, 4096 or more go to segments
 directly, fewer to a *delta store* in the row storage's format (index
@@ -2766,7 +2778,10 @@ checks `psql` with and without TLS.
   table hashing and comparing a batch's vectors in place (`keytable`);
   join tables on two integer keys hashed as a pair, a batch's lookups
   before its output, and a build side that is no pipeline gathered in
-  columns (`JoinTable::gather`; spilled past work_mem as before).
+  columns (`JoinTable::gather`; spilled past work_mem as before);
+  dictionary segments decoded and cached as codes and entries
+  (`Vector::Dict`), a filter's leading tests of such a column tried on
+  the entries once a segment (`vector::DictFilter`, `Scan::dicts`).
   TPC-H SF 1 on column tables Q1 535 → 471 ms, Q5 528 → 354, Q9 2437 →
   946, Q13 367 → 99, Q18 885 → 373; on row tables Q5 1010 → 793, Q9 2950
   → 1423, Q13 424 → 173, Q18 1334 → 747.  ClickBench on column tables

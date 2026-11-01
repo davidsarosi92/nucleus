@@ -1033,3 +1033,98 @@ fn join_and_group_tables_agree() {
         }
     }
 }
+
+#[test]
+fn dictionary_filters_agree() {
+    // A filter's leading tests of a text column against constants, on a
+    // column table's dictionary segments, tested on the dictionary's
+    // entries: the rows and errors of the same filter on a row table —
+    // segments and delta rows, NULLs, char(n), and a conjunct after them
+    // that fails on rows they drop (no error) or keep (the error).
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(31)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    for (t, storage) in [("r", "row"), ("c", "column")] {
+        s.execute(&format!(
+            "CREATE TABLE {t} (id INT PRIMARY KEY, mode TEXT, kind CHAR(8), v INT) \
+               WITH (storage = {storage}); \
+             INSERT INTO {t} SELECT i, \
+               CASE WHEN i % 23 = 0 THEN NULL ELSE (ARRAY['AIR', 'MAIL', 'SHIP', 'TRUCK', \
+                 'RAIL', 'FOB', 'REG AIR'])[1 + i % 7] END, \
+               CASE WHEN i % 5 = 0 THEN 'big' ELSE 'small' || (i % 3) END, i % 1000 \
+               FROM generate_series(1, 70000) i; \
+             UPDATE {t} SET mode = 'MAIL!' WHERE id % 1000 = 1; \
+             DELETE FROM {t} WHERE id % 997 = 0; \
+             INSERT INTO {t} SELECT i, 'late', 'late', 7 FROM generate_series(70001, 70500) i"
+        ))
+        .unwrap();
+    }
+    let segments = outcome(
+        &mut s,
+        "SELECT count(*) FROM nc_catalog.segments WHERE table_name = 'c'",
+    )
+    .unwrap();
+    assert!(segments[0][0].parse::<i64>().unwrap() >= 2, "{segments:?}");
+    let filters = [
+        "mode = 'MAIL'",
+        "mode <> 'MAIL'",
+        "mode IN ('AIR', 'REG AIR', 'late')",
+        "mode NOT IN ('AIR', 'SHIP')",
+        "mode LIKE '%AI%'",
+        "mode NOT LIKE 'R%'",
+        "mode ILIKE 'mail%'",
+        "mode IS NULL",
+        "mode IS NOT NULL AND kind = 'big'",
+        "NOT (mode = 'SHIP' OR mode = 'FOB')",
+        "mode > 'M' AND mode <= 'SHIP'",
+        "mode = NULL",
+        "kind = 'big'",
+        "kind IN ('small1', 'late')",
+        "kind LIKE 'small%' AND mode = 'TRUCK'",
+        // A conjunct after them that fails: on rows they drop (no error),
+        // on rows they keep (the error).
+        // (`v = 1`'s rows are all 'MAIL!'.)
+        "mode = 'MAIL' AND 100 / (v - 1) > 0",
+        "mode = 'TRUCK' AND 100 / (v - 3) > 0",
+        "mode IS NULL AND 100 / (v - 46) > 0",
+        // First, it decides alone.
+        "100 / (v - 3) > 0 AND mode = 'MAIL'",
+        "mode = 'AIR' AND v > 500",
+    ];
+    let mut queries = Vec::new();
+    for f in filters {
+        for t in ["r", "c"] {
+            queries.push(format!(
+                "SELECT count(*), min(id), max(id) FROM {t} WHERE {f}"
+            ));
+            queries.push(format!(
+                "SELECT id, mode, kind FROM {t} WHERE {f} AND id % 101 = 0"
+            ));
+        }
+    }
+    let before = nucleus_sql::vector::dictionary_tests();
+    let errors = agree(&db, &queries);
+    assert_eq!(
+        errors,
+        3 * 2 * 2,
+        "three failing filters, two tables, two queries"
+    );
+    assert!(
+        nucleus_sql::vector::dictionary_tests() - before >= 20,
+        "the dictionaries' entries were tested"
+    );
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    // (A filter's queries: on r, count and rows; then on c.)
+    for four in queries.chunks(4) {
+        for (r, c) in [(&four[0], &four[2]), (&four[1], &four[3])] {
+            let want = outcome(&mut s, r);
+            assert_eq!(outcome(&mut s, c), want, "{c}");
+            assert_eq!(outcome(&mut many, c), want, "workers: {c}");
+        }
+    }
+}

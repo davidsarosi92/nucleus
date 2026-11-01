@@ -507,18 +507,29 @@ fn decode_kinds(b: &[u8]) -> Result<Vector> {
             }
             let bits = r.u8().map_err(|_| bad())?;
             let rest = r.take(r.remaining()).map_err(|_| bad())?;
-            let codes = unpack(rest, n, bits)?;
-            let mut offsets = Vec::with_capacity(n + 1);
+            // As stored: the entries, and each row's code (a `NULL`'s 0).
+            let mut codes = Vec::with_capacity(n);
+            for (i, c) in unpack(rest, n, bits)?.into_iter().enumerate() {
+                let null = nulls.as_ref().is_some_and(|z| z[i]);
+                if !null && c as usize >= dict.len() {
+                    return Err(bad());
+                }
+                codes.push(if null { 0 } else { c as u32 });
+            }
+            let mut offsets = Vec::with_capacity(dict.len() + 1);
             let mut bytes = Vec::new();
             offsets.push(0u32);
-            for (i, &c) in codes.iter().enumerate() {
-                if !nulls.as_ref().is_some_and(|z| z[i]) {
-                    bytes.extend_from_slice(dict.get(c as usize).ok_or_else(bad)?);
-                }
+            for d in &dict {
+                check_utf8(d)?;
+                bytes.extend_from_slice(d);
                 offsets.push(bytes.len() as u32);
             }
-            check_utf8(&bytes)?;
-            Ok(Vector::Text(offsets, bytes, nulls))
+            let entries = if kind == CHAR_DICT {
+                Vector::Char(offsets, bytes, None)
+            } else {
+                Vector::Text(offsets, bytes, None)
+            };
+            Ok(Vector::Dict(std::sync::Arc::new(entries), codes, nulls))
         }
         TEXT | CHAR_TEXT => {
             let total = r.u32().map_err(|_| bad())? as usize;
