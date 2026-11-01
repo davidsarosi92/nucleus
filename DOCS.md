@@ -2621,6 +2621,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-01 — §M14.20, a delete's rows stashed once:** `DELETE` from a
+  table that is not partitioned writes the rows as the scan stashed them
+  (key first), without stashing each again behind its partition's
+  number.  A 10% delete ~160 → ~141 ms (1.96× PostgreSQL's time in the
+  same run).
+
 - **2026-11-01 — §M14.20, the write set and the recent keys without a
   tree per key:** a transaction's writes are a sorted vector while they
   come in order (a B-tree map once they do not), and a large commit's

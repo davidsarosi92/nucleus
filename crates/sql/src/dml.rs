@@ -872,23 +872,32 @@ pub fn delete(
             None => vec![t.clone()],
             Some(_) => crate::partition::partitions(ro, &t)?,
         };
-        let mut rows = crate::spill::Stash::new();
-        for (ti, target) in targets.iter().enumerate() {
-            for r in secure_rows(target, &access, using.as_ref(), pred.as_ref(), &ctx)?.into_iter()
-            {
-                let mut row = vec![Value::Int(ti as i64)];
-                row.extend(r?);
-                rows.push(row)?;
+        // One table: its rows as found (each its key, then its values);
+        // partitions': each also with its partition's number first.
+        let rows = if let [target] = &targets[..] {
+            secure_rows(target, &access, using.as_ref(), pred.as_ref(), &ctx)?
+        } else {
+            let mut rows = crate::spill::Stash::new();
+            for (ti, target) in targets.iter().enumerate() {
+                for r in
+                    secure_rows(target, &access, using.as_ref(), pred.as_ref(), &ctx)?.into_iter()
+                {
+                    let mut row = vec![Value::Int(ti as i64)];
+                    row.extend(r?);
+                    rows.push(row)?;
+                }
             }
-        }
-        (rows.seal()?, ret, targets)
+            rows.seal()?
+        };
+        (rows, ret, targets)
     };
     let (rows, ret, targets) = (rows.0, rows.1, rows.2);
     let count = rows.len() as u64;
+    let one = targets.len() == 1;
     let split = |mut r: Row| -> Result<(usize, Vec<u8>, Row)> {
-        let ti = table_number(&r)?;
-        let key = take_key(&mut r, 1)?;
-        r.drain(..2);
+        let (ti, at) = if one { (0, 0) } else { (table_number(&r)?, 1) };
+        let key = take_key(&mut r, at)?;
+        r.drain(..=at);
         Ok((ti, key, r))
     };
     let mut by: Vec<Vec<(Vec<u8>, Row)>> = vec![Vec::new(); targets.len()];

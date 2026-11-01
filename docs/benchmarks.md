@@ -112,6 +112,17 @@ comparison, where it was two tree lookups and two inserts):
 
 The hot updates above (100,000 rows, 20 times): 5.5 → 4.6 s.
 
+Then a `DELETE` from a table that is not partitioned no longer stashes
+its rows a second time (to put the partition's number before each): the
+delete 139–147 ms against PostgreSQL's 70–74 (1.96×, the median), the
+update 818 against 726 (1.1×), the load 1,995 against 1,018 (1.96×).
+Where the delete's time goes now (timed by phase, 1M rows, 100,000
+deleted): finding and stashing the rows ~57 ms (the filtered scan alone
+~35), writing them ~19, the commit ~70 — of which applying the batch to
+the tree ~50 (14,768 leaves: found 5, prepared on the workers 18–21,
+installed one by one with the internal nodes ~17, a window's workers and
+its installs not yet overlapping) and the WAL's sync ~10.
+
 **A columnar table** (§M14.20 V7), the same million rows in `WITH
 (storage = column)` (loaded by `INSERT … SELECT` from the row table in
 4.0 s; its columns 32 MB): `sum` 2.0 ms (one thread 12.8 ms; the row
@@ -303,8 +314,8 @@ against PostgreSQL 18 in the same run:
 | ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.34× | yes |
 | column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 8.9×, Q22 6.7×, Q16 3.7×, Q13 3.5×; ClickBench Q18 4.3×, Q39 3.2× | no |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | 2.24×, 2.51× | no |
-| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 2.0× (2026-11-01); 4.5× (row), 4.8× (column); 2.8× | `bench/run.py` yes, the others no |
-| updates and deletes ≤ 2× (`bench/run.py`) | 1.0×, 2.2× (2026-11-01) | updates yes, deletes no |
+| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 1.96× (2026-11-01); 4.5× (row), 4.8× (column); 2.8× | `bench/run.py` yes (at the edge), the others no |
+| updates and deletes ≤ 2× (`bench/run.py`) | 1.1×, 1.96× (2026-11-01) | yes (deletes at the edge) |
 | scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.1–2.0×; sort 2.0×; self-join 4.3× (2026-11-01) | joins no |
 | reads by key ≤ 1× (`bench/run.py`) | 0.5× (2026-11-01) | yes |
 
