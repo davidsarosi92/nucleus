@@ -304,6 +304,9 @@ pub struct Ctx<'a> {
     pub memoize: bool,
     /// Those results, by plan address and outer values.
     pub memo: RefCell<HashMap<(usize, Vec<Value>), std::rc::Rc<Vec<Row>>>>,
+    /// The hash joins' key filters on the scans below them
+    /// ([`crate::keyfilter`]), by the scan's address.
+    pub(crate) key_filters: RefCell<crate::keyfilter::Registry>,
     /// The outer values each correlated subquery reads (`None`: it is not
     /// kept — a volatile function, a table function), by plan address.
     pub memo_reads: RefCell<HashMap<usize, Option<Vec<(usize, usize)>>>>,
@@ -324,6 +327,7 @@ impl<'a> Ctx<'a> {
             profile: None,
             memoize: false,
             memo: RefCell::new(HashMap::new()),
+            key_filters: RefCell::new(HashMap::new()),
             memo_reads: RefCell::new(HashMap::new()),
         }
     }

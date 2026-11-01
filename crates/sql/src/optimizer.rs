@@ -35,7 +35,8 @@ use crate::stats::Stats;
 pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let stats = Stats::new(txn);
     let plan = push(crate::unnest::unnest(plan), &stats);
-    let plan = lookups(sink(reorder(plan, &stats), &stats), &stats);
+    let plan = sink(reorder(plan, &stats), &stats);
+    let plan = lookups(crate::eager::eager(plan, &stats), &stats);
     crate::narrow::narrow(plan)
 }
 
@@ -866,6 +867,11 @@ fn keyed_selectivity<'p>(
 
 /// The groups `exprs` (over `input`'s columns) make, if all are columns of
 /// analyzed tables: their combinations per table, multiplied.
+/// The groups `exprs` (columns) make of `input`'s rows, by the statistics.
+pub(crate) fn groups_of_exprs(input: &Plan, exprs: &[Expr], st: &Stats) -> Option<f64> {
+    groups_of(input, exprs, st)
+}
+
 fn groups_of(input: &Plan, exprs: &[Expr], st: &Stats) -> Option<f64> {
     let mut per: Vec<(&Table, Vec<usize>)> = Vec::new();
     for e in exprs {
@@ -1151,7 +1157,7 @@ fn reorder(plan: Plan, st: &Stats) -> Plan {
     reorder_leaves(leaves, conds, st).unwrap_or_else(|| map_children(fallback, &|c| reorder(c, st)))
 }
 
-fn map_children(plan: Plan, f: &dyn Fn(Plan) -> Plan) -> Plan {
+pub(crate) fn map_children(plan: Plan, f: &dyn Fn(Plan) -> Plan) -> Plan {
     let b = |p: Box<Plan>| Box::new(f(*p));
     match plan {
         Plan::Filter { input, predicate } => Plan::Filter {

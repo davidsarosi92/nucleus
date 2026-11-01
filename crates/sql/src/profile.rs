@@ -36,6 +36,8 @@ pub struct NodeStats {
 pub struct Profile {
     clock: Option<Arc<dyn Kv>>,
     nodes: RefCell<HashMap<usize, NodeStats>>,
+    /// The scans a hash join's key filter narrowed (`crate::keyfilter`).
+    keyed: RefCell<std::collections::HashSet<usize>>,
 }
 
 fn key(plan: &Plan) -> usize {
@@ -48,6 +50,7 @@ impl Profile {
         Self {
             clock,
             nodes: RefCell::new(HashMap::new()),
+            keyed: RefCell::new(Default::default()),
         }
     }
 
@@ -65,6 +68,11 @@ impl Profile {
         n.rows += rows;
         n.loops += loops;
         n.time += spent;
+    }
+
+    /// Notes that a hash join's key filter narrowed the scan `plan`.
+    pub(crate) fn keyed(&self, plan: &Plan) {
+        self.keyed.borrow_mut().insert(key(plan));
     }
 
     /// Adds to `plan`'s measurements: what an operator that runs several
@@ -151,6 +159,9 @@ pub fn explain(
                     let _ = write!(s, " time={}", ms(n.time));
                 }
                 s.push(')');
+                if profile.keyed.borrow().contains(&key(node)) {
+                    s.push_str(" (join key filter)");
+                }
             }
         }
         s

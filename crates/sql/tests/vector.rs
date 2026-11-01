@@ -725,3 +725,228 @@ fn like_patterns_and_in_subqueries_agree() {
         }
     }
 }
+
+#[test]
+fn key_filters_agree() {
+    // A hash join's keys narrow the scans below its probe side: the rows
+    // and errors of every executor stay the same — a row at a time, by
+    // batches, on workers, past work_mem — and EXPLAIN ANALYZE says so.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(17)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE fact (id INT PRIMARY KEY, d INT, e INT, v INT, s TEXT) \
+               WITH (storage = {storage}); \
+             CREATE TABLE dim (id INT PRIMARY KEY, k INT, name TEXT); \
+             CREATE TABLE p (id INT, g INT) PARTITION BY RANGE (id); \
+             CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (20000); \
+             CREATE TABLE p2 PARTITION OF p FOR VALUES FROM (20000) TO (90000); \
+             INSERT INTO fact SELECT i, CASE WHEN i % 13 = 0 THEN NULL ELSE i % 5000 END, \
+               i % 97, i % 1000, 'v' || (i % 7) FROM generate_series(1, 40000) i; \
+             INSERT INTO dim SELECT i, i % 10, 'd' || i FROM generate_series(0, 4999) i; \
+             INSERT INTO p SELECT i, i % 300 FROM generate_series(0, 50000) i; \
+             ANALYZE"
+        ))
+        .unwrap();
+        let queries: Vec<String> = [
+            // A few keys (a list), many (a Bloom filter), none.
+            "SELECT f.id, dim.name FROM fact f JOIN dim ON f.d = dim.id WHERE dim.k = 3 \
+               AND dim.id < 200",
+            "SELECT count(*), sum(f.v) FROM fact f JOIN dim ON f.d = dim.id WHERE dim.k <> 3",
+            "SELECT count(*) FROM fact f JOIN dim ON f.d = dim.id WHERE dim.k > 100",
+            // An error on a row that joins, and one on rows the key filter
+            // drops (no error then): the same in every executor.
+            "SELECT f.id, 100 / (f.v - 503) FROM fact f JOIN dim ON f.d = dim.id \
+               WHERE dim.k = 3 AND dim.id < 1000",
+            "SELECT count(*) FROM fact f JOIN dim ON f.d = dim.id WHERE dim.k = 1 \
+               AND 100 / (f.v - 500) > 0",
+            // Through another join, a projection, a sort; two keys; a semi join.
+            "SELECT f.id, a.name, b.name FROM fact f JOIN dim a ON f.d = a.id \
+               JOIN dim b ON f.e = b.id WHERE a.k = 2 AND b.k = 7 ORDER BY f.id",
+            "SELECT x.id FROM (SELECT id, d FROM fact ORDER BY v) x JOIN dim ON x.d = dim.id \
+               WHERE dim.k = 4 ORDER BY x.id LIMIT 20",
+            "SELECT count(*) FROM fact f JOIN dim ON f.d = dim.id AND f.e = dim.k \
+               WHERE dim.name LIKE 'd1%'",
+            "SELECT count(*) FROM fact f WHERE f.d IN (SELECT id FROM dim WHERE k = 5)",
+            // Not narrowed: a left join, an anti join, a whole table.
+            "SELECT count(*), count(dim.id) FROM fact f LEFT JOIN dim ON f.d = dim.id \
+               AND dim.k = 3",
+            "SELECT count(*) FROM fact f WHERE NOT EXISTS (SELECT 1 FROM dim WHERE dim.id = f.d \
+               AND dim.k = 3)",
+            "SELECT count(*) FROM fact f JOIN dim ON f.d = dim.id",
+            // Partitions, and a correlated subquery that joins once per row.
+            "SELECT count(*) FROM p JOIN dim ON p.g = dim.id WHERE dim.k = 6",
+            "SELECT dim.id, (SELECT count(*) FROM fact f JOIN dim d2 ON f.d = d2.id \
+               WHERE d2.k = dim.k AND d2.id < 300) FROM dim WHERE dim.id < 12",
+        ]
+        .iter()
+        .map(|q| q.to_string())
+        .collect();
+        assert_eq!(agree(&db, &queries), 1, "{storage}: one division by zero");
+        let mut one = session(&db, 1024);
+        one.execute("SET parallel_workers = 1").unwrap();
+        let mut many = session(&db, 1024);
+        many.execute("SET parallel_workers = 4").unwrap();
+        let mut small = session(&db, 1024);
+        small
+            .execute("SET parallel_workers = 4; SET work_mem = '64kB'")
+            .unwrap();
+        let sorted = |r: Result<Vec<Vec<String>>, String>| {
+            r.map(|mut rows| {
+                rows.sort();
+                rows
+            })
+        };
+        for q in &queries {
+            let want = outcome(&mut one, q);
+            assert_eq!(outcome(&mut many, q), want, "{storage} workers: {q}");
+            assert_eq!(
+                sorted(outcome(&mut small, q)),
+                sorted(want),
+                "{storage} work_mem: {q}"
+            );
+        }
+        let plan = outcome(&mut many, &format!("EXPLAIN ANALYZE {}", queries[0])).unwrap();
+        assert!(
+            plan.iter()
+                .any(|l| l[0].contains("Scan on fact") && l[0].contains("join key filter")),
+            "{storage}: {plan:?}"
+        );
+        let plan = outcome(&mut many, &format!("EXPLAIN ANALYZE {}", queries[9])).unwrap();
+        assert!(
+            !plan.iter().any(|l| l[0].contains("join key filter")),
+            "{storage}: a left join filters nothing: {plan:?}"
+        );
+    }
+}
+
+#[test]
+fn eager_aggregates_and_parallel_merges_agree() {
+    // A grouping by a join's left key aggregated on the right side first
+    // (eager aggregation), and many groups merged on the workers — in key
+    // order or not: the rows, their order and the errors of a single pass.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(23)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE c (id INT PRIMARY KEY, name TEXT, k INT); \
+             CREATE TABLE u (id INT UNIQUE, name TEXT); \
+             CREATE TABLE o (id INT PRIMARY KEY, cid INT, amt BIGINT, f FLOAT, n NUMERIC, \
+               s TEXT, ok BOOL, big BIGINT) WITH (storage = {storage}); \
+             CREATE TABLE q (a INT, b INT, v BIGINT, big BIGINT, PRIMARY KEY (a, b)) \
+               WITH (storage = {storage}); \
+             INSERT INTO c SELECT i, 'c' || i, i % 10 FROM generate_series(1, 3000) i; \
+             INSERT INTO u SELECT i, 'u' || i FROM generate_series(1, 3000) i; \
+             INSERT INTO u VALUES (NULL, 'none'), (NULL, 'none again'); \
+             INSERT INTO o SELECT i, CASE WHEN i % 17 = 0 THEN NULL ELSE i % 2400 END, \
+               i::bigint * 7919 % 100003, CASE WHEN i % 13 = 0 THEN NULL ELSE i * 0.25 END, \
+               (i % 101) / 3.0, 's' || (i % 41), i % 3 = 0, \
+               CASE WHEN i % 50 = 0 THEN 5000000000000000000 ELSE i END \
+               FROM generate_series(1, 60000) i; \
+             INSERT INTO q SELECT i / 3, i % 3, i::bigint * 7919 % 100003, \
+               CASE WHEN i / 3 % 7000 = 999 THEN 5000000000000000000 ELSE i END \
+               FROM generate_series(1, 60000) i; \
+             ANALYZE"
+        ))
+        .unwrap();
+        let eager = [
+            "SELECT c.id, count(o.id) FROM c LEFT JOIN o ON c.id = o.cid GROUP BY c.id",
+            "SELECT c.id, c.name, count(*), count(o.f), min(o.s), max(o.amt), bool_and(o.ok), \
+               bool_or(o.ok) FROM c LEFT JOIN o ON c.id = o.cid GROUP BY c.id, c.name \
+               ORDER BY c.id",
+            "SELECT c.id, count(*), min(o.f) FROM c JOIN o ON o.cid = c.id \
+               GROUP BY c.id ORDER BY 2 DESC, 1",
+            "SELECT n, count(*) FROM (SELECT c.id, count(o.id) AS n FROM c LEFT JOIN o \
+               ON c.id = o.cid AND o.s NOT LIKE 's1%' GROUP BY c.id) x GROUP BY n ORDER BY 1",
+        ];
+        let not_eager = [
+            // Not the left side's key; an aggregate that can fail; a unique
+            // index's NULLs (a group of their own); more than the keys; a
+            // join that keeps few of the rows (its key filter narrows them).
+            "SELECT c.id, count(*), min(o.f) FROM c JOIN o ON o.cid = c.id WHERE c.k = 3 \
+               GROUP BY c.id ORDER BY 2 DESC, 1",
+            "SELECT c.k, count(o.id) FROM c LEFT JOIN o ON c.id = o.cid GROUP BY c.k ORDER BY 1",
+            "SELECT c.id, sum(o.amt) FROM c LEFT JOIN o ON c.id = o.cid GROUP BY c.id",
+            "SELECT u.id, count(o.id) FROM u LEFT JOIN o ON u.id = o.cid GROUP BY u.id",
+            "SELECT c.id, count(o.id) FROM c LEFT JOIN o ON c.id = o.cid AND o.amt > c.k * 1000 \
+               GROUP BY c.id",
+        ];
+        let merges = [
+            // Many groups in no key order (merged a hash part a worker),
+            // with and without an order.
+            "SELECT amt % 30011, count(*), count(f), sum(amt), sum(n), sum(f), min(s), max(f), \
+               bool_or(ok) FROM o GROUP BY 1",
+            "SELECT cid, s, count(*), max(amt) FROM o GROUP BY cid, s ORDER BY 3 DESC, 1, 2 \
+               LIMIT 50",
+            // A bigint sum past its range: the first group a single pass
+            // finishes fails.
+            "SELECT id % 20000, sum(big) FROM o GROUP BY 1",
+            // In key order: the morsels' edge groups merged, the others
+            // finished on the workers.
+            "SELECT a, count(*), sum(v), min(v) FROM q GROUP BY a",
+            "SELECT a, b, sum(v) FROM q GROUP BY a, b HAVING sum(v) > 99000",
+            "SELECT a, sum(big) FROM q GROUP BY a",
+            "SELECT id, count(*), sum(n) FROM o GROUP BY id",
+        ];
+        let queries: Vec<String> = eager
+            .iter()
+            .chain(&not_eager)
+            .chain(&merges)
+            .map(|q| q.to_string())
+            .collect();
+        assert_eq!(agree(&db, &queries), 2, "{storage}: two bigint overflows");
+        let mut one = session(&db, 1024);
+        one.execute("SET parallel_workers = 1").unwrap();
+        let mut many = session(&db, 1024);
+        many.execute("SET parallel_workers = 4").unwrap();
+        let mut small = session(&db, 1024);
+        small
+            .execute("SET parallel_workers = 4; SET work_mem = '64kB'")
+            .unwrap();
+        // (Past work_mem, partitioned: the rows of a query with no order
+        // in another.)
+        let sorted = |r: Result<Vec<Vec<String>>, String>| {
+            r.map(|mut rows| {
+                rows.sort();
+                rows
+            })
+        };
+        let before = nucleus_sql::vector::parallel_runs();
+        for q in &queries {
+            let want = outcome(&mut one, q);
+            assert_eq!(outcome(&mut many, q), want, "{storage} workers: {q}");
+            assert_eq!(
+                sorted(outcome(&mut small, q)),
+                sorted(want),
+                "{storage} work_mem: {q}"
+            );
+        }
+        assert!(
+            nucleus_sql::vector::parallel_runs() - before >= 10,
+            "{storage}: the aggregates ran in parallel"
+        );
+        // Rewritten: the join over an aggregate (not only an aggregate over
+        // the join).
+        let mut aggregated_below = |q: &str| {
+            let plan = outcome(&mut many, &format!("EXPLAIN {q}")).unwrap();
+            let join = plan.iter().position(|l| l[0].contains("Join")).unwrap();
+            plan[join..].iter().any(|l| l[0].contains("Aggregate"))
+        };
+        for q in eager {
+            assert!(aggregated_below(q), "{storage} eager: {q}");
+        }
+        for q in not_eager {
+            assert!(!aggregated_below(q), "{storage} not eager: {q}");
+        }
+    }
+}

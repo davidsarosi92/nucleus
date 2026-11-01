@@ -1257,7 +1257,20 @@ ambient state (who runs it, its time, its budget and deadline).  An
 aggregate's morsels are aggregated apart and their partial states
 combined in key order (`GroupAccumulator::partial` / `combine`, a
 capability: an aggregate without it — `string_agg`, whose separators
-belong to rows — runs in one pass); a pipeline whose output becomes rows
+belong to rows — runs in one pass).  Many groups (16 384 partial ones or
+more) in no order of their keys are merged on the workers too: each
+morsel splits its groups into 64 parts by their keys' hashes, and each
+part is merged on a worker (ClickHouse's two-level tables) — the rows
+then put in the order a single pass first saw them, the first error by
+that order (a combining one before any finishing one), the merge's
+memory checked against `work_mem` (past it, the single pass
+partitions).  Groups in key order are merged as §8.6
+says.  The builtin states pass between workers compactly: `count` an
+integer (its own accumulator, a count a group), `min`, `max`,
+`bool_and`, `bool_or` their value, a `sum` of no doubles its value (or
+its integer sum's bytes); a group's accumulators grow by half again, not
+a group at a time, and a single integer key is found and placed in one
+probe.  A pipeline whose output becomes rows
 runs in rounds of a morsel per worker, each round's rows given in morsel
 order.  So the result is a single pass's — groups in the order first
 seen, rows in key order, the first error the one a single pass meets, a
@@ -1315,7 +1328,21 @@ their rows and keys' values joined in order, so the table is a single
 pass's — a column at a time (`columns::Columns`: an array a column, typed
 while its values are of one kind — an integer 9 bytes, not a `Value`'s
 32 —, no allocation per row), unless it passes work_mem (then it is
-stashed, and spills).  A **sort** of a
+stashed, and spills).  **Key filters** (`keyfilter`): once an inner or
+semi join that hashes its right side has that side in hand — narrowed by
+a filter, a join or a group, not a whole table — the integer values of
+each key go into a filter (their least and greatest; the values
+themselves when 64 or fewer, else a Bloom filter, a word a key, three
+bits in it) for the table scans below the probe side that key's column
+comes from (through projections, filters, sorts, partitions and the
+joins that keep their rows: not a limit, a group, the padded side of an
+outer join).  The scan drops a row whose key no right row has, before
+its own filter — that row would leave at the join —, and a column store
+skips the segments whose least and greatest values miss the keys'
+range.  The filter is made in every executor alike (a row at a time,
+by batches, on workers, past work_mem), so their rows and errors agree;
+an error on a row only the key filter drops does not come.  `EXPLAIN
+ANALYZE` marks the scan `(join key filter)`.  A **sort** of a
 pipeline sorts its morsels on worker threads (keys a batch at a time) and
 merges them (`spill::merge_sorted`; ties to the earlier morsel, so the
 order is a stable sort's).
@@ -1400,10 +1427,32 @@ are estimated as the left side's times a lookup's.
 
 **Parallel aggregates in key order**: grouped by (at least) the leading
 column of the primary key a scan reads in order, the morsels' groups meet
-only at their edges, so the merge keeps only the groups the next morsel
-may go on with and gives the rest as they are done — a million groups do
-not have to fit in `work_mem` at once (they would, merging into one table,
-and the run fell back to one thread partitioning).  `NOT IN` stays a subquery (its NULL
+only at their edges — the groups of a morsel's first and last prefix —
+so each morsel finishes the others itself, on its worker, and hands over
+only its edges' partial states, merged in the morsel order (TPC-H Q18's
+`GROUP BY l_orderkey`, 1.5 million groups: 600 → 240 ms).  A million
+groups do not have to fit in `work_mem` at once (they would, merging into
+one table, and the run fell back to one thread partitioning); a group
+that fails to finish is the one a single pass finishes first.
+
+**Eager aggregation** (`eager`; Yan & Larson): a grouping by a join's
+left key — the key of the left side's single table, its primary key —
+whose aggregates read only right columns and cannot fail
+(`Aggregate::infallible`: `count`, `min`, `max`, `bool_and`, `bool_or`)
+is computed on the right side first, by its join key, and then joined:
+`c LEFT JOIN o … GROUP BY c.id` becomes `c LEFT JOIN (SELECT cid,
+count(…) FROM o GROUP BY cid)`, a group a customer through the join
+rather than a row an order (TPC-H Q13, 367 → 111 ms on column tables).
+A left row no right row matches gets what its aggregate gives for the
+padded row (`count(x)` 0, `count(*)` 1, `min(x)` `NULL`).  It holds when
+the join is inner or left on key equalities only, the right side has at
+most half as many groups as rows, and the join keeps at least half of
+them (else its key filter narrows the right side more cheaply than a
+grouping of all of it); an inner join is tried both ways round, and
+through a projection of columns.  Not for a unique index (its `NULL`s
+repeat) or an aggregate that can fail (the right rows no left row
+matches are aggregated too, and their error would come where the join
+gave none).  `NOT IN` stays a subquery (its NULL
 semantics are not an anti join's); so do correlated scalar subqueries.
 `EXPLAIN` prints the plan (columns as `#n`); `EXPLAIN ANALYZE` runs it
 too (§8.13).
@@ -1721,7 +1770,11 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   executor (§8.5) — a capability; without it the accumulators are fed row
   by row, with the same result.  With `combinable()`, `partial(group)` and
   `combine(group, partial)` too, its groups are aggregated in parallel:
-  each worker's state as a value, combined in key order.
+  each worker's state as a value, combined in key order (`resize` may be
+  asked for more groups than are used: room for them).  `infallible()`
+  (default false): no input makes it fail, so the optimizer may compute
+  it below a join, over rows the join would drop (eager aggregation,
+  §8.6).
 - `TableFunction` — `name()`, `arity()`, `resolve(&[ArgInfo]) ->
   TableSignature` (per argument, and the output columns; one column for
   now, named after the function or its alias), `rows(&CallContext,
@@ -1797,7 +1850,8 @@ prints the plan with, on every node, the optimizer's estimate beside what
 the node did: `(rows=40) (actual rows=38 loops=1 time=0.120 ms)` — rows
 over all its starts, the starts (a nested loop's inner side, a correlated
 subquery: once per outer row), and the time spent in it, its inputs
-included.  A node the run never reached says `(never executed)`; the last
+included; a scan a hash join's key filter narrowed adds `(join key
+filter)` (§8.5).  A node the run never reached says `(never executed)`; the last
 line is `Execution: n rows in t ms`.  `TIMING OFF` leaves the times out
 (repeatable output, for tests).  Time is the database's monotonic clock
 (`Kv::elapsed`).  The query runs with the session's privileges, budget and
@@ -2682,6 +2736,21 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-01 — §M14.20 V13, key filters, eager aggregation, parallel
+  merges:** `keyfilter` — an inner or semi hash join whose right side was
+  narrowed hands its integer keys (range, a list of up to 64, else a
+  Bloom filter) to the scans below its probe side (`Step::Keys`, the
+  range a column store's segment bound; every executor alike, `EXPLAIN
+  ANALYZE` marks the scan); `eager` — a grouping by a join's left key
+  over infallible aggregates of the right side computed below the join
+  (`Aggregate::infallible`); parallel aggregates of many groups merged on
+  the workers a hash part each (`MERGE_PARTS`), those in key order
+  finished on the workers but for each morsel's edges; compact partial
+  states (`count`, `min`/`max`/`bool_*`, `sum` of no doubles), the
+  accumulators grown by half again, one probe for an integer key.
+  TPC-H SF 1 on column tables Q5 528 → 358 ms, Q9 2437 → 1699, Q13 367
+  → 111, Q18 885 → 401; on row tables Q5 1010 → 848, Q9 2950 → 2394,
+  Q13 424 → 182, Q18 1334 → 807.
 - **2026-11-01 — §M14.20, TPC-H Q13 and Q16:** `columns::Columns` —
   rows a column at a time — for the hash join tables the workers make
   (the keys too); `kernels::like_parts` (`LIKE` with `%` inside the

@@ -1488,7 +1488,25 @@ STATISTICS`, and gathered on their own for the columns of every key and
 index), so filters, joins and groupings on several dependent columns are
 estimated from them rather than multiplied as independent (equalities by
 the chain rule over the groups counted, joins by the combinations of the
-side with more, `GROUP BY` by its columns' combinations).
+side with more, `GROUP BY` by its columns' combinations); V13 what other
+engines do, taken over (2026-11-01: DuckDB, ClickHouse, HyPer / Umbra,
+Velox, the numeric libraries) — key filters from hash joins ✅ (a
+join's integer keys — their range, a list, a Bloom filter — narrow the
+scans below its probe side and skip column segments; DuckDB's
+join-filter pushdown, made in every executor alike); eager aggregation ✅
+(a grouping by a join's key below the join: Yan & Larson; TPC-H Q13 —
+the groupjoin, fused with the join, Moerkotte & Neumann, later if it
+measures); the aggregation table — merged by hash part on the workers
+past many groups, groups in key order finished on the workers, compact
+partial states ✅ (ClickHouse's two-level tables; TPC-H Q18) — a hash
+array with a salt beside the groups' rows, direct indexing for a small
+integer range (DuckDB's); predicates on a dictionary's
+values (a text column's `=`, `IN` and `LIKE` once per distinct value,
+then its codes); prefetching in hash probes (Chen & Ailamaki, kept only
+if it measures); division by constants without dividing (libdivide),
+FSST string compression with `LIKE` on the compressed strings, and
+expressions fused into one loop (the numeric libraries' expression
+templates).
 
 **Done when:** every storage mode works per table, per column and per
 partition, with online conversion between them under crash and
@@ -2189,6 +2207,12 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20 V13: what other engines do, the first three —
+  key filters from hash joins (the scans below a join's probe side
+  narrowed by its keys: Q5 1.19× → 0.81× PostgreSQL's time on column
+  tables, Q9 1.81× → 1.26×); eager aggregation (Q13 1.09× → 0.33×); the
+  morsels' groups merged on the workers, those in key order finished
+  there (Q18 0.55× → 0.25×).
 - **2026-11-01** — §M14.20: TPC-H Q13 and Q16 — a hash join's table
   made by the workers holds its rows and keys a column at a time (Q13's
   `orders` side fits work_mem now, where it spilled); `LIKE` with `%`

@@ -567,6 +567,14 @@ impl Aggregate for BuiltinAgg {
         self.0 == AggFunc::Count
     }
 
+    /// Counts, least and greatest values and the boolean ones cannot fail.
+    fn infallible(&self) -> bool {
+        matches!(
+            self.0,
+            AggFunc::Count | AggFunc::Min | AggFunc::Max | AggFunc::BoolAnd | AggFunc::BoolOr
+        )
+    }
+
     /// `array_agg` keeps `NULL`s.
     fn keeps_nulls(&self) -> bool {
         self.0 == AggFunc::ArrayAgg
@@ -634,10 +642,65 @@ impl Aggregate for BuiltinAgg {
     }
 
     fn grouped(&self) -> Option<Box<dyn GroupAccumulator>> {
+        if self.0 == AggFunc::Count {
+            return Some(Box::new(CountGroups(Vec::new())));
+        }
         Some(Box::new(Grouped {
             func: self.0,
             accs: Vec::new(),
         }))
+    }
+}
+
+/// `count`'s groups: a count each (no state beside it, and an integer
+/// for a partial one).
+struct CountGroups(Vec<i64>);
+
+impl GroupAccumulator for CountGroups {
+    fn resize(&mut self, groups: usize) {
+        self.0.resize(groups, 0);
+    }
+
+    fn update(&mut self, _rows: &[u32], groups: &[u32], _args: &[&Vector]) -> Result<()> {
+        for &g in groups {
+            self.0[g as usize] += 1;
+        }
+        Ok(())
+    }
+
+    fn update_all(
+        &mut self,
+        len: usize,
+        group: u32,
+        skip_nulls: bool,
+        args: &[&Vector],
+    ) -> Result<()> {
+        self.0[group as usize] += match args.first() {
+            Some(a) if skip_nulls => (0..len).filter(|&r| !a.is_null(r)).count() as i64,
+            _ => len as i64,
+        };
+        Ok(())
+    }
+
+    fn combinable(&self) -> bool {
+        true
+    }
+
+    fn partial(&mut self, group: usize) -> Result<Value> {
+        Ok(Value::Int(self.0[group]))
+    }
+
+    fn combine(&mut self, group: usize, partial: Value) -> Result<()> {
+        match partial {
+            Value::Int(n) => self.0[group] += n,
+            Value::Null => {}
+            _ => return Err(Error::internal("a malformed partial count")),
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, group: usize) -> Result<Value> {
+        Ok(Value::Int(self.0[group]))
     }
 }
 
@@ -657,7 +720,7 @@ struct Acc {
     int: Option<i128>,
     /// The doubles and reals summed so far, exactly (rounded once, at the
     /// end), and whether they were all reals.
-    float: Option<ExactSum>,
+    float: Option<Box<ExactSum>>,
     real: bool,
 }
 
@@ -677,7 +740,7 @@ impl Acc {
 
     /// Adds a double (`real`: a real) to a `sum` or `avg`.
     fn add_float(&mut self, x: f64, real: bool) {
-        self.float.get_or_insert_with(ExactSum::new).add(x);
+        self.float.get_or_insert_with(Default::default).add(x);
         self.real &= real;
         if self.func == AggFunc::Avg {
             self.count += 1;
@@ -761,7 +824,9 @@ impl Acc {
                 _ => None,
             };
             let other = ExactSum::from_parts(partials, special, overflow == Value::Bool(true));
-            self.float.get_or_insert_with(ExactSum::new).merge(&other);
+            self.float
+                .get_or_insert_with(Default::default)
+                .merge(&other);
             self.real &= real == Value::Bool(true);
         }
         if let Value::Array(more) = items {
@@ -823,6 +888,16 @@ impl Acc {
 struct Grouped {
     func: AggFunc,
     accs: Vec<Acc>,
+}
+
+impl Grouped {
+    /// Whether a group's state is its value alone (its partial state too).
+    fn compact(&self) -> bool {
+        matches!(
+            self.func,
+            AggFunc::Min | AggFunc::Max | AggFunc::BoolAnd | AggFunc::BoolOr
+        )
+    }
 }
 
 impl GroupAccumulator for Grouped {
@@ -944,10 +1019,59 @@ impl GroupAccumulator for Grouped {
     }
 
     fn partial(&mut self, group: usize) -> Result<Value> {
-        Ok(self.accs[group].partial())
+        // A least, greatest or boolean value is its own state.
+        if self.compact() {
+            return Ok(self.accs[group].value.clone());
+        }
+        // A sum of no doubles: its value (an integer sum's, as bytes).
+        let acc = &self.accs[group];
+        if self.func == AggFunc::Sum && acc.float.is_none() {
+            match acc.int {
+                None => return Ok(acc.value.clone()),
+                Some(i) if acc.value.is_null() => {
+                    return Ok(Value::Bytea(i.to_le_bytes().to_vec().into()));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(acc.partial())
     }
 
     fn combine(&mut self, group: usize, partial: Value) -> Result<()> {
+        if self.compact() {
+            if !partial.is_null() {
+                let acc = &mut self.accs[group];
+                let n = acc.count;
+                acc.add(&[partial])?;
+                acc.count = n;
+            }
+            return Ok(());
+        }
+        if self.func == AggFunc::Sum {
+            let acc = &mut self.accs[group];
+            match partial {
+                Value::Array(_) => {}
+                Value::Null => return Ok(()),
+                Value::Bytea(b) => {
+                    let i = i128::from_le_bytes(
+                        b[..]
+                            .try_into()
+                            .map_err(|_| Error::internal("a malformed partial sum"))?,
+                    );
+                    acc.int = Some(acc.int.unwrap_or(0) + i);
+                    return Ok(());
+                }
+                v if acc.value.is_null() => {
+                    acc.value = v;
+                    return Ok(());
+                }
+                v => {
+                    let s = std::mem::replace(&mut acc.value, Value::Null);
+                    acc.value = crate::expr::binary(BinaryOp::Add, s, v)?;
+                    return Ok(());
+                }
+            }
+        }
         self.accs[group].combine(partial)
     }
 

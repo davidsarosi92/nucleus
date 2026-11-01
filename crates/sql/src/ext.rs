@@ -326,6 +326,14 @@ pub trait Aggregate: Send + Sync {
         false
     }
 
+    /// Whether it never fails, whatever rows of its argument types it is
+    /// fed (`count`, `min`, `max`; not a sum, which can overflow): a
+    /// capability — the optimizer may then aggregate rows a join would
+    /// drop before it does (eager aggregation, PLAN.md §M14.20 V13).
+    fn infallible(&self) -> bool {
+        false
+    }
+
     /// Types a call (as [`ScalarFunction::resolve`]; [`Returns::Constant`]
     /// is not allowed).
     fn resolve(&self, args: &[ArgInfo]) -> Result<Signature>;

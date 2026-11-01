@@ -42,8 +42,8 @@ EXPLAIN (ANALYZE, TIMING OFF) SELECT ea.x, eb.y FROM ea JOIN eb ON ea.id = eb.a_
 Project: #0, #1 (rows=89) (actual rows=80 loops=1)
   Project: #3, #1 (rows=89) (actual rows=80 loops=1)
     Hash Join (#0 = #0) on (#2 = #0) (rows=89) (actual rows=80 loops=1)
-      Project: #1, #2 (rows=200) (actual rows=200 loops=1)
-        Seq Scan on eb (rows=200) (actual rows=200 loops=1)
+      Project: #1, #2 (rows=200) (actual rows=80 loops=1)
+        Seq Scan on eb (rows=200) (actual rows=80 loops=1) (join key filter)
       Seq Scan on ea filter: (#1 > 5) (rows=44) (actual rows=40 loops=1)
 Execution: 80 rows
 

@@ -50,6 +50,9 @@ pub fn row_bytes(row: &[Value]) -> usize {
     24 + row.iter().map(value_bytes).sum::<usize>()
 }
 
+/// [`row_bytes`] of a row of one integer.
+pub(crate) const INT_KEY_BYTES: usize = 24 + 32;
+
 pub(crate) fn value_bytes(v: &Value) -> usize {
     32 + match v {
         Value::Text(s) | Value::Char(s) => s.len(),

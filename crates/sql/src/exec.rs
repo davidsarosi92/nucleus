@@ -68,6 +68,16 @@ fn build_node<'a>(
             // Only the columns the plan reads (`prune`).
             let wanted = ctx.needed.get(&(plan as *const Plan as usize));
             let rows = scan_some(table, access, ctx, outer, wanted.map(Vec::as_slice))?;
+            // The hash joins' key filters first, as a pipeline has them.
+            let keys = crate::keyfilter::of_scan(ctx, plan);
+            let rows: Box<dyn Iterator<Item = Result<(Vec<u8>, Row)>>> = if keys.is_empty() {
+                Box::new(rows)
+            } else {
+                Box::new(rows.filter(move |r| {
+                    r.as_ref()
+                        .map_or(true, |(_, row)| crate::keyfilter::passes(&keys, row))
+                }))
+            };
             match filter {
                 None => Box::new(rows.map(|r| r.map(|(_, row)| row))),
                 Some(f) => Box::new(rows.filter_map(move |r| match r {
@@ -1019,6 +1029,15 @@ fn join<'a>(
         && crate::vector::probes(right)
         && let Some(table) = crate::vector::JoinTable::parallel(right, right_keys, ctx, outer)?
     {
+        if !matches!(
+            algo,
+            JoinAlgo::Hash {
+                build_left: true,
+                ..
+            }
+        ) {
+            crate::keyfilter::register(ctx, left, right, kind, left_keys, &|j| table.key_ints(j));
+        }
         return crate::vector::hash_join_table(
             left,
             table,
@@ -1032,6 +1051,32 @@ fn join<'a>(
         );
     }
     let right_rows = stash(build(right, ctx, outer)?)?;
+    // The key filters for the left side's scans, from the right rows.
+    // (Not for a join that hashes its left side: it reads the left first.)
+    if let JoinAlgo::Hash {
+        left_keys,
+        right_keys,
+        build_left: false,
+    } = algo
+    {
+        let values = match &right_rows {
+            crate::spill::Stored::Memory(rows) => crate::keyfilter::key_values(
+                rows.iter().map(|r| Ok(std::borrow::Cow::Borrowed(r))),
+                right_keys,
+                ctx,
+                outer,
+            ),
+            crate::spill::Stored::Run(run) => crate::keyfilter::key_values(
+                std::rc::Rc::new(crate::spill::Stored::Run(run.clone()))
+                    .iter()
+                    .map(|r| r.map(std::borrow::Cow::Owned)),
+                right_keys,
+                ctx,
+                outer,
+            ),
+        };
+        crate::keyfilter::register(ctx, left, right, kind, left_keys, &|j| values[j].clone());
+    }
     // A pipeline probing a table in memory: a batch at a time, in parallel.
     if let (
         JoinAlgo::Hash {
