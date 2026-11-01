@@ -29,11 +29,29 @@ PGHOST=127.0.0.1 PGUSER=postgres python3 bench/run.py \
 python3 bench/run.py --nucleus target/release/nucleus --no-pg   # nucleus alone
 ```
 
-## Latest local run
+## Local runs
 
-2026-10-31, Apple M2 Pro (macOS, 12 cores), nucleus release build at
-`3043e69`; PostgreSQL 18 in Docker (Linux VM, 10 CPUs) with its
-defaults, parallel workers included.
+Apple M2 Pro (macOS, 12 cores), nucleus release builds; PostgreSQL 18 in
+Docker (Linux VM, 10 CPUs) with its defaults, parallel workers included.
+
+**Latest** (2026-11-01, nucleus at `e2d1afa`, PostgreSQL 18.6 in the
+same session; nucleus three runs, PostgreSQL two, each step's best):
+
+| 1,000,000 rows | nucleus (ms) | PostgreSQL (ms) | ratio |
+|---|---:|---:|---:|
+| load (INSERT … SELECT) | 1,111 | 936 | 1.2× |
+| count(*) | 28.6 | 12.5 | 2.3× |
+| filtered count | 25.3 | 15.2 | 1.7× |
+| sum | 23.8 | 14.9 | 1.6× |
+| group by (1000 groups) | 34.6 | 33.2 | 1.0× |
+| sort | 294 | 154 | 1.9× |
+| self-join | 189 | 112 | 1.7× |
+| point reads (1000 by key) | 56.5 | 96.9 | 0.6× |
+| update 25% | 733 | 719 | 1.0× |
+| delete 10% | 135 | 74.6 | 1.8× |
+| count after writes | 36.2 | 20.1 | 1.8× |
+
+How it got there, oldest first.  2026-10-31, nucleus at `3043e69`:
 
 | 1,000,000 rows | nucleus (ms) | PostgreSQL (ms) | ratio | nucleus on 2026-10-29 (ms) |
 |---|---:|---:|---:|---:|
@@ -53,7 +71,7 @@ defaults, parallel workers included.
 systems' — Docker's file system and the laptop's disk; PostgreSQL's were
 6–7× faster here than on 10-29.  Compare them within one run.)
 
-What the numbers say: scans and aggregates are 1.2–2.1× PostgreSQL's
+What the numbers said then: scans and aggregates are 1.2–2.1× PostgreSQL's
 time on a row table (they were 15–30× at `b03c130`), reads by key twice
 as fast.  Sorts and joins went parallel and vectorized since 10-29
 (3–4× faster); the self-join still builds its table a row at a time.
@@ -166,9 +184,10 @@ parallel hash join on three processes):
 
 | 1,000,000 rows | nucleus `76d7cfb` (ms) | nucleus now (ms) | PostgreSQL (ms) | ratio now |
 |---|---:|---:|---:|---:|
-| self-join | 476 | 191 | 112 | 1.7× |
+| self-join | 476 | 189 | 112 | 1.7× |
 
-The rest within the run-to-run noise of the runs above.
+The whole run is the **Latest** table at the top of this section; the
+rest within the run-to-run noise of the runs above.
 
 **A columnar table** (§M14.20 V7), the same million rows in `WITH
 (storage = column)` (loaded by `INSERT … SELECT` from the row table in
@@ -267,7 +286,7 @@ Where the time still goes:
   through indexes; nucleus still reads more than it must (Q19's lookups
   each read a part's lines and filter them; Q22 scans `orders` for its
   anti join).
-- **Q13 and Q16** (3.5×): a left join and a grouping over most of
+- **Q13 and Q16** (3.5× and 3.7×): a left join and a grouping over most of
   `orders`, and an anti join with a `LIKE` filter; built a row at a time.
 - **Row tables' scans** (Q3–Q6, Q10, Q12: 2.3–5×): a row's every column is
   decoded where a column table reads only the wanted ones.
@@ -358,8 +377,9 @@ PLAN.md §M14.11 asks for targets set from the first results, and
 transactional workloads stay within their margin.  First set from the
 first `bench/run.py` run (`79506d4`, 2026-10-27) — within 2× of PostgreSQL on loads
 and updates, within 3× on scans, sorts and joins, at least even on reads
-by key —, now recorded from the runs above (2026-10-31), on this machine
-against PostgreSQL 18 in the same run:
+by key —, now recorded from the runs above (`bench/run.py` 2026-11-01,
+TPC-H 2026-10-30, ClickBench 2026-10-31), on this machine against
+PostgreSQL 18 in the same run:
 
 | target | now | met |
 |---|---|---|
@@ -367,9 +387,9 @@ against PostgreSQL 18 in the same run:
 | ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.34× | yes |
 | column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 8.9×, Q22 6.7×, Q16 3.7×, Q13 3.5×; ClickBench Q18 4.3×, Q39 3.2× | no |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | 2.24×, 2.51× | no |
-| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 1.2–1.4× (2026-11-01, as PostgreSQL's own time varies); 4.5× (row), 4.8× (column); 2.8× (TPC-H and ClickBench not measured again since 10-31) | `bench/run.py` yes, the others no |
-| updates and deletes ≤ 2× (`bench/run.py`) | 0.9×, 1.0–1.7× (2026-11-01; the delete 127 ms) | yes |
-| scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.1–2.1×; sort 2.0×; self-join 1.7× (2026-11-01) | yes |
+| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 1.2–1.4× (2026-11-01, as PostgreSQL's own time varies); 4.5× (row), 4.8× (column); 2.8× (TPC-H and ClickBench not measured again since 10-30 and 10-31) | `bench/run.py` yes, the others no |
+| updates and deletes ≤ 2× (`bench/run.py`) | update 0.9–1.0×, delete 1.7–1.8× (2026-11-01; the delete 127–135 ms) | yes |
+| scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.0–2.3× (count(*) the highest); sort 1.9–2.0×; self-join 1.7× (2026-11-01) | yes |
 | reads by key ≤ 1× (`bench/run.py`) | 0.6× (2026-11-01) | yes |
 
 Ratios are best-of-three times on one machine in one run; the CI's
