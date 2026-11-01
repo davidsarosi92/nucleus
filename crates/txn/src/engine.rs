@@ -15,6 +15,8 @@ use crate::mvcc::{
     decode_value, encode_key, encode_value, first_version, intent_of, intent_ts, side_prefix,
     status_key,
 };
+use crate::recent::Recent;
+use crate::writes::WriteSet;
 
 /// A commit timestamp.  Logical for now (PLAN.md principle 3): a counter that
 /// increases by one per committed read-write transaction.  Opaque above
@@ -98,14 +100,12 @@ struct Inner {
     /// Start timestamps of running transactions (with counts), guarding
     /// their versions from garbage collection.
     active: Mutex<BTreeMap<u64, usize>>,
-    /// Keys written by recent commits, with the newest commit timestamp:
-    /// what serializable transactions validate their reads against.
-    /// Entries no running transaction can conflict with are pruned.
-    /// Changed only under the commit lock.
-    recent: Mutex<BTreeMap<Vec<u8>, u64>>,
-    /// Key spans of recent commits that spilled — (lowest, highest, commit
-    /// timestamp) — which reads validate against beside `recent`.
-    recent_spans: Mutex<Vec<(Vec<u8>, Vec<u8>, u64)>>,
+    /// What recent commits wrote (keys, and the spans of those that
+    /// spilled), with their timestamps: what writes check conflicts and
+    /// serializable transactions validate their reads against.  Commits
+    /// no running transaction can conflict with are pruned.  Changed only
+    /// under the commit lock.
+    recent: Mutex<Recent>,
     /// The next id of a transaction whose writes spill.
     next_id: AtomicU64,
     /// Transactions whose writes spilled (as intents) and that have not
@@ -180,9 +180,6 @@ struct ReadSet {
     ranges: Vec<(Bound<Vec<u8>>, Bound<Vec<u8>>)>,
 }
 
-/// Prune `recent` once it holds this many keys.
-const RECENT_PRUNE: usize = 4096;
-
 /// Whether `(start, end)` is a non-empty, well-formed range (BTreeMap
 /// panics on the others).
 fn valid_range(start: &Bound<Vec<u8>>, end: &Bound<Vec<u8>>) -> bool {
@@ -224,8 +221,7 @@ impl Engine {
                 commit: Mutex::new(recovery.meta),
                 visible: AtomicU64::new(recovery.meta),
                 active: Mutex::new(BTreeMap::new()),
-                recent: Mutex::new(BTreeMap::new()),
-                recent_spans: Mutex::new(Vec::new()),
+                recent: Mutex::new(Recent::default()),
                 next_id: AtomicU64::new(1),
                 spilling: Mutex::new(BTreeSet::new()),
                 unresolved: Mutex::new(BTreeMap::new()),
@@ -292,7 +288,7 @@ impl Engine {
         Ok(Transaction {
             engine: Arc::clone(&self.inner),
             start,
-            writes: BTreeMap::new(),
+            writes: WriteSet::default(),
             write_bytes: 0,
             spilled: None,
             span: None,
@@ -632,13 +628,12 @@ impl Inner {
     /// the key (a span is coarser than its keys); then the tree decides.
     fn write_conflicts(&self, user: &[u8], start: u64, me: Option<u64>) -> Result<bool> {
         if self.others(me).is_empty() {
-            if lock(&self.recent).get(user).is_some_and(|&t| t > start) {
+            let recent = lock(&self.recent);
+            let since = recent.since(start);
+            if since.wrote(user) {
                 return Ok(true);
             }
-            let spanned = lock(&self.recent_spans)
-                .iter()
-                .any(|(lo, hi, t)| *t > start && lo.as_slice() <= user && user <= hi.as_slice());
-            if !spanned {
+            if !since.spanned(user) {
                 return Ok(false);
             }
         }
@@ -852,16 +847,12 @@ impl Inner {
         let mut keys = keys.filter(|&(_, fresh)| !fresh).map(|(user, _)| user);
         if others.is_empty() {
             let recent = lock(&self.recent);
-            let spans = lock(&self.recent_spans);
-            let spans: Vec<_> = spans.iter().filter(|(_, _, t)| *t > start).collect();
+            let since = recent.since(start);
             for user in keys {
-                if recent.get(user).is_some_and(|&t| t > start) {
+                if since.wrote(user) {
                     return Ok(Some(user.to_vec()));
                 }
-                if spans
-                    .iter()
-                    .any(|(lo, hi, _)| lo.as_slice() <= user && user <= hi.as_slice())
-                {
+                if since.spanned(user) {
                     look.push(user);
                 }
             }
@@ -963,7 +954,7 @@ pub struct Transaction {
     engine: Arc<Inner>,
     start: u64,
     /// The writes held in memory (the newest of each key).
-    writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    writes: WriteSet,
     /// About how much memory `writes` takes.
     write_bytes: usize,
     /// The transaction's id in the side area, once its writes spilled.
@@ -1150,7 +1141,7 @@ impl Transaction {
     /// allowed.
     fn record(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
         let size = key.len() + value.map_or(0, <[u8]>::len) + WRITE_OVERHEAD;
-        match self.writes.insert(key.to_vec(), value.map(<[u8]>::to_vec)) {
+        match self.writes.insert(key, value.map(<[u8]>::to_vec)) {
             Some(old) => {
                 let was = key.len() + old.map_or(0, |v| v.len()) + WRITE_OVERHEAD;
                 self.write_bytes = (self.write_bytes + size).saturating_sub(was);
@@ -1184,9 +1175,7 @@ impl Transaction {
             engine.side_users.fetch_add(1, Ordering::AcqRel);
             self.spilled = Some(id);
         }
-        if let (Some((lo, _)), Some((hi, _))) =
-            (self.writes.first_key_value(), self.writes.last_key_value())
-        {
+        if let (Some(lo), Some(hi)) = (self.writes.first_key(), self.writes.last_key()) {
             self.span = Some(match self.span.take() {
                 None => (lo.clone(), hi.clone()),
                 Some((a, b)) => (a.min(lo.clone()), b.max(hi.clone())),
@@ -1256,7 +1245,7 @@ impl Transaction {
             Bound::Included(k) => Some(after_versions(k)),
             Bound::Excluded(k) => Some(first_version(k)),
         };
-        let writes = self.writes.range::<[u8], _>((start, end)).peekable();
+        let writes = self.writes.range(start, end).peekable();
         Ok(Scan {
             txn: self,
             from: Some(start.map(<[u8]>::to_vec)),
@@ -1302,14 +1291,16 @@ impl Transaction {
             // spilled, and every commit since has checked its keys against
             // them).
             let mut keys = self.writes.keys().map(|k| (k.as_slice(), self.is_fresh(k)));
-            if let Some(key) = engine.commit_conflict(&mut keys, self.start, spilled)? {
+            let conflict = engine.commit_conflict(&mut keys, self.start, spilled)?;
+            drop(keys);
+            if let Some(key) = conflict {
                 return Err(Error::Conflict { key });
             }
             // Serializable transactions record every read; others only
             // their validated ones.
             self.validate_reads(&engine)?;
             let ts = *last + 1;
-            for (key, value) in &self.writes {
+            for (key, value) in self.writes.iter() {
                 ops.push((encode_key(key, ts), Some(encode_value(value.as_deref()))));
                 if let Some(id) = spilled {
                     // Written again after it spilled: this write is the one.
@@ -1336,14 +1327,16 @@ impl Transaction {
                 self.spilled = None; // its intents are the commit's now
             }
             let mut recent = lock(&engine.recent);
-            // The write set is done with: its keys move.
-            for (key, _) in std::mem::take(&mut self.writes) {
-                recent.insert(key, ts);
-            }
+            // The write set is done with: its keys move (in order).
+            let keys = std::mem::take(&mut self.writes)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            recent.add(keys, ts);
             if let Some((lo, hi)) = self.span.take() {
-                lock(&engine.recent_spans).push((lo, hi, ts));
+                recent.add_span(lo, hi, ts);
             }
-            if recent.len() > RECENT_PRUNE || lock(&engine.recent_spans).len() > 64 {
+            if recent.wants_prune() {
                 // Nobody started before the oldest running transaction can
                 // still commit, so older writes cannot conflict any more —
                 // nor can a transaction begin before the visible snapshot
@@ -1355,8 +1348,7 @@ impl Transaction {
                     .copied()
                     .unwrap_or(visible)
                     .min(visible);
-                recent.retain(|_, t| *t > oldest);
-                lock(&engine.recent_spans).retain(|(_, _, t)| *t > oldest);
+                recent.prune(oldest);
             }
             drop(recent);
             (ts, lsn)
@@ -1378,33 +1370,30 @@ impl Transaction {
     fn validate_reads(&self, engine: &Inner) -> Result<()> {
         let reads = lock(&self.reads);
         let recent = lock(&engine.recent);
-        let spans = lock(&engine.recent_spans);
-        let spans: Vec<_> = spans.iter().filter(|(_, _, t)| *t > self.start).collect();
+        let since = recent.since(self.start);
         for k in &reads.keys {
-            if recent.get(k).is_some_and(|&ts| ts > self.start) {
-                return Err(Error::Conflict { key: k.clone() });
-            }
-            if spans.iter().any(|(lo, hi, _)| lo <= k && k <= hi) {
+            if since.wrote(k) || since.spanned(k) {
                 return Err(Error::Conflict { key: k.clone() });
             }
         }
         for (s, e) in &reads.ranges {
             // A span a large commit wrote, overlapping a range read.
-            let below_end = |k: &Vec<u8>| match e {
+            let below_end = |k: &[u8]| match e {
                 Bound::Unbounded => true,
-                Bound::Included(e) => k <= e,
-                Bound::Excluded(e) => k < e,
+                Bound::Included(e) => k <= e.as_slice(),
+                Bound::Excluded(e) => k < e.as_slice(),
             };
-            let above_start = |k: &Vec<u8>| match s {
+            let above_start = |k: &[u8]| match s {
                 Bound::Unbounded => true,
-                Bound::Included(s) => k >= s,
-                Bound::Excluded(s) => k > s,
+                Bound::Included(s) => k >= s.as_slice(),
+                Bound::Excluded(s) => k > s.as_slice(),
             };
-            if let Some((lo, _, _)) = spans
+            if let Some((lo, _)) = since
+                .spans()
                 .iter()
-                .find(|(lo, hi, _)| below_end(lo) && above_start(hi))
+                .find(|(lo, hi)| below_end(lo) && above_start(hi))
             {
-                return Err(Error::Conflict { key: lo.clone() });
+                return Err(Error::Conflict { key: lo.to_vec() });
             }
         }
         for (s, e) in &reads.ranges {
@@ -1412,11 +1401,8 @@ impl Transaction {
                 continue;
             }
             let bounds = (s.as_ref().map(Vec::as_slice), e.as_ref().map(Vec::as_slice));
-            if let Some((k, _)) = recent
-                .range::<[u8], _>(bounds)
-                .find(|(_, ts)| **ts > self.start)
-            {
-                return Err(Error::Conflict { key: k.clone() });
+            if let Some(key) = since.wrote_in(bounds) {
+                return Err(Error::Conflict { key });
             }
         }
         Ok(())
@@ -1443,7 +1429,7 @@ pub struct Scan<'t> {
     pos: usize,
     /// Buffers reused by refills: a store key and value.
     bufs: [Vec<u8>; 2],
-    writes: std::iter::Peekable<std::collections::btree_map::Range<'t, Vec<u8>, Option<Vec<u8>>>>,
+    writes: std::iter::Peekable<crate::writes::Range<'t>>,
     /// The requested range, and how far it was read: a serializable
     /// transaction depends on the part it consumed.
     range: (Bound<Vec<u8>>, Bound<Vec<u8>>),

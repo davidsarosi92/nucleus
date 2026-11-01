@@ -23,6 +23,8 @@
 mod engine;
 mod error;
 pub mod mvcc;
+mod recent;
+mod writes;
 
 pub use engine::{
     BACKGROUND_CHUNK, Chunk, Engine, EngineOptions, Isolation, Scan, Timestamp, Transaction,

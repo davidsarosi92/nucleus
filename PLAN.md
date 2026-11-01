@@ -2185,6 +2185,10 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20: the write set a sorted vector while writes
+  come in order, a large commit's keys one sorted run among the recent
+  commits': against PostgreSQL in the same run, a 10% delete 2.2×, a 25%
+  update 1.0×, the load 2.0× (the update and load targets met).
 - **2026-11-01** — §M14.20: garbage collected as leaves are rewritten —
   a commit's batch drops the versions no snapshot sees from the leaves it
   writes anyway (a compaction filter, not logged), instead of walking its

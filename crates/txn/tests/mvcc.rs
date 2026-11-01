@@ -115,6 +115,68 @@ fn first_committer_wins() {
 }
 
 #[test]
+fn a_large_commit_conflicts_as_a_small_one_does() {
+    // A commit of many keys is kept as the run of its keys, a small one's
+    // keys one by one: writers and readers that began before either
+    // conflict with them alike — at the write, at the commit, and when
+    // they validate a read of a key or a range.
+    let (_p, e) = engine();
+    let key = |i: u32| format!("k{i:05}").into_bytes();
+    let serializable = || {
+        e.begin_with(TxnOptions {
+            isolation: nucleus_txn::Isolation::Serializable,
+            ..TxnOptions::default()
+        })
+        .unwrap()
+    };
+    for (lo, n) in [(0u32, 5u32), (1000, 3000)] {
+        let early = e.begin();
+        let mut late = e.begin();
+        late.put(&key(lo + 2), b"late").unwrap(); // before the commit
+        let reads_key = serializable();
+        reads_key.get(&key(lo + 3)).unwrap();
+        let reads_range = serializable();
+        let _ = reads_range
+            .scan(
+                Bound::Included(&key(lo + 1)[..]),
+                Bound::Excluded(&key(lo + 4)[..]),
+            )
+            .unwrap()
+            .count();
+        let reads_other = serializable();
+        reads_other.get(&key(lo + n + 10)).unwrap();
+
+        let mut t = e.begin();
+        for i in lo..lo + n {
+            t.put(&key(i), b"v").unwrap();
+        }
+        t.commit().unwrap();
+
+        let mut early = early;
+        assert!(
+            matches!(early.put(&key(lo + 1), b"x"), Err(Error::Conflict { .. })),
+            "{n} keys: at the write"
+        );
+        early.put(&key(lo + n + 1), b"x").unwrap(); // not written: no conflict
+        early.commit().unwrap();
+        assert!(
+            matches!(late.commit(), Err(Error::Conflict { .. })),
+            "{n} keys: at the commit"
+        );
+        for (mut t, what) in [(reads_key, "a key read"), (reads_range, "a range read")] {
+            t.put(b"elsewhere", b"x").unwrap();
+            assert!(
+                matches!(t.commit(), Err(Error::Conflict { .. })),
+                "{n} keys: {what}"
+            );
+        }
+        let mut t = reads_other;
+        t.put(b"elsewhere", b"y").unwrap();
+        t.commit().unwrap();
+    }
+}
+
+#[test]
 fn write_skew_is_possible_under_snapshot_isolation() {
     // Two doctors on call; each goes off call if the other is still on.
     // Under snapshot isolation both succeed (documented; §M14 fixes it).

@@ -86,25 +86,31 @@ commits' collection by walking each key's versions took 6.6 s and left a
 after either.  Without any collection at commit (vacuum's alone, the
 alternative weighed) it was 8.4 s, 311 MB and a 78 ms scan.
 
-**Against PostgreSQL again** (2026-11-01, `a6d85e0`; PostgreSQL 18.6 in
-the same container, its `psql` beside it; three runs of each side, the
-median): PostgreSQL's own writes came out faster than on 10-31 (the
-delete 72 ms, not 106; the update 744, not 840), so the ratios of the
-writes are higher than the ones above, measured against 10-31's times.
+**Against PostgreSQL again** (2026-11-01; PostgreSQL 18.6 in the same
+container, its `psql` beside it; three runs of each side, the median, in
+the same session): PostgreSQL's own writes came out faster than on 10-31
+(the delete 72–74 ms, not 106; the update 744–758, not 840), so the
+ratios of the writes are higher than the ones above, measured against
+10-31's times.  First at `a6d85e0` (garbage collected by the compaction
+filter), then with the write set a sorted vector and a large commit's
+keys one run among the recent commits' (per written row a push and one
+comparison, where it was two tree lookups and two inserts):
 
-| 1,000,000 rows | nucleus (ms) | PostgreSQL (ms) | ratio |
-|---|---:|---:|---:|
-| load (INSERT … SELECT) | 2,335 | 1,026 | 2.3× |
-| count(*) | 26 | 13 | 2.0× |
-| filtered count | 26 | 15 | 1.7× |
-| sum | 24 | 14 | 1.7× |
-| group by (1000 groups) | 37 | 33 | 1.1× |
-| sort | 317 | 146 | 2.2× |
-| self-join | 453 | 109 | 4.2× |
-| point reads (1000 by key) | 59 | 104 | 0.6× |
-| update 25% | 992 | 744 | 1.3× |
-| delete 10% | 225 | 72 | 3.1× |
-| count after writes | 32 | 20 | 1.6× |
+| 1,000,000 rows | nucleus `a6d85e0` (ms) | nucleus now (ms) | PostgreSQL (ms) | ratio now |
+|---|---:|---:|---:|---:|
+| load (INSERT … SELECT) | 2,335 | 2,045 | 1,015 | 2.0× |
+| count(*) | 26 | 26 | 13 | 2.0× |
+| filtered count | 26 | 25 | 16 | 1.5× |
+| sum | 24 | 25 | 15 | 1.6× |
+| group by (1000 groups) | 37 | 37 | 34 | 1.1× |
+| sort | 317 | 298 | 151 | 2.0× |
+| self-join | 453 | 489 | 115 | 4.3× |
+| point reads (1000 by key) | 59 | 57 | 108 | 0.5× |
+| update 25% | 992 | 782 | 758 | 1.0× |
+| delete 10% | 225 | 160 | 74 | 2.2× |
+| count after writes | 32 | 36 | 19 | 1.9× |
+
+The hot updates above (100,000 rows, 20 times): 5.5 → 4.6 s.
 
 **A columnar table** (§M14.20 V7), the same million rows in `WITH
 (storage = column)` (loaded by `INSERT … SELECT` from the row table in
@@ -297,10 +303,10 @@ against PostgreSQL 18 in the same run:
 | ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.34× | yes |
 | column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 8.9×, Q22 6.7×, Q16 3.7×, Q13 3.5×; ClickBench Q18 4.3×, Q39 3.2× | no |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | 2.24×, 2.51× | no |
-| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 2.3× (2026-11-01); 4.5× (row), 4.8× (column); 2.8× | no |
-| updates and deletes ≤ 2× (`bench/run.py`) | 1.3×, 3.1× (2026-11-01) | updates yes, deletes no |
-| scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.1–2.0×; sort 2.2×; self-join 4.2× (2026-11-01) | joins no |
-| reads by key ≤ 1× (`bench/run.py`) | 0.6× (2026-11-01) | yes |
+| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 2.0× (2026-11-01); 4.5× (row), 4.8× (column); 2.8× | `bench/run.py` yes, the others no |
+| updates and deletes ≤ 2× (`bench/run.py`) | 1.0×, 2.2× (2026-11-01) | updates yes, deletes no |
+| scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.1–2.0×; sort 2.0×; self-join 4.3× (2026-11-01) | joins no |
+| reads by key ≤ 1× (`bench/run.py`) | 0.5× (2026-11-01) | yes |
 
 Ratios are best-of-three times on one machine in one run; the CI's
 shared runners are too noisy to fail on them yet, so a target is checked

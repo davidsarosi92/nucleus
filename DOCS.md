@@ -461,7 +461,12 @@ never computed with.  `Engine`: `visible`, `checkpoint`,
 
 **Snapshot isolation.**  A transaction reads at its start timestamp — the
 engine's *visible* timestamp, which advances only once a commit is durable,
-so nobody reads what a crash could undo.  Writes are buffered.  Commit,
+so nobody reads what a crash could undo.  Writes are buffered — the
+newest of each key, in key order: a sorted vector while they come in
+order (a statement writes the rows a scan found; a write past the last
+key is a push, the question whether a key was written already one
+comparison), a write a little out of order moved into place, and a
+B-tree map from the first far out of order on (`writes.rs`).  Commit,
 under the commit lock: for each written key, if its newest version (durable
 or not) is newer than the snapshot → `Error::Conflict` (retryable; first
 committer wins); else one WAL batch with the next timestamp, applied at
@@ -500,9 +505,15 @@ scans over a large transaction's intents does not keep it from spilling.
 **Serializable** (`Isolation::Serializable`, §M14).  The transaction also
 records the keys it read and the key ranges its scans consumed (a scan
 counts up to the last row taken).  The engine keeps the keys of recent
-commits with their timestamps (pruned below the oldest running
-transaction — and the visible snapshot, which a transaction may still
-begin at while a commit waits to be durable — once it holds 4096 keys).  At commit, if any recorded key or
+commits with their timestamps (`recent.rs`): a small commit's in a map, a
+large one's (256 keys or more) as the sorted run its write set already
+is, moved — no key inserted one by one —, a spilled one's as its span;
+the commits before a snapshot are skipped as a whole when a question is
+asked for it.  Pruned below the oldest running transaction — and the
+visible snapshot, which a transaction may still begin at while a commit
+waits to be durable — once the map holds 4096 keys, or there are 64
+spans or 32 runs; runs a long snapshot keeps past that go into the map.
+At commit, if any recorded key or
 range was written by a commit newer than the snapshot, the commit fails
 with a retryable `Conflict`.  Read-only transactions never conflict.  This
 is FoundationDB's read-conflict check rather than Cahill's SSI (D12): more
@@ -554,11 +565,15 @@ and vacuum; commits collecting over many leaves, batches of every size,
 snapshots of every age reading what they began with, through a crash and
 replay, about a version a key left (the filter's own cases — a tombstone a
 leaf ends with, a leaf beginning inside a key's versions, intents,
-reserved keys — in `engine.rs`); history; zero bytes and prefixes in keys; model-based scans
+reserved keys — in `engine.rs`); a large commit (its keys one run)
+conflicting as a small one does, at the write, at the commit and for
+validated key and range reads (the write set's and the recent keys' own
+cases in `writes.rs`, `recent.rs`); history; zero bytes and prefixes in keys; model-based scans
 inside transactions; recovery of data and timestamps; a crash at every I/O
 point (both modes).  Mutations caught: no conflict check; a GC watermark
 that ignores running snapshots; a commit's collection dropping a tombstone
-a leaf ends with, or a version at the watermark plus one.  `tests/large.rs`: transactions past their
+a leaf ends with, or a version at the watermark plus one; the recent
+keys' runs left out of a key's or a range's question.  `tests/large.rs`: transactions past their
 budget read, overwrite and delete their spilled writes and commit them
 (their intents read as versions, then vacuumed into them, the same after
 reopening); rollbacks and drops leave no intent, crashes leave aborted
@@ -2605,6 +2620,15 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-01 — §M14.20, the write set and the recent keys without a
+  tree per key:** a transaction's writes are a sorted vector while they
+  come in order (a B-tree map once they do not), and a large commit's
+  keys join the recent commits' as one sorted run; the commits before a
+  snapshot are skipped as a whole.  Per written row: a push and one
+  comparison, where it was two tree lookups and two inserts.  A 10%
+  delete ~225 → ~160 ms, a 25% update ~935 → ~785 ms, the load
+  ~2 300 → ~2 000 ms; 20 updates of 100 000 rows 5.5 → 4.6 s.
 
 - **2026-11-01 — §M14.20, garbage collected as leaves are rewritten:** a
   commit no longer walks its keys' versions to delete the old ones; its
