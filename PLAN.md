@@ -2185,6 +2185,10 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20: a commit's leaves prepared on workers while
+  the walk installs earlier ones (swapped into the pool, not copied): a
+  10% delete ~136 ms, 1.3–1.9× PostgreSQL's (its own time varied 75–107
+  ms in the run).
 - **2026-11-01** — §M14.20: a delete's rows stashed once (not again
   with a partition number when there is one table): the 10% delete
   1.96× PostgreSQL's time — the `bench/run.py` write targets met, the

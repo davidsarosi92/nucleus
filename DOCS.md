@@ -340,11 +340,18 @@ straight into the page (`node::encode_leaf`; the pieces cut as before,
 checked against the decoded packing), so a commit that touches every leaf
 allocates nothing per entry.  A batch reaching many leaves (64 or more)
 prepares them on workers (`set_workers`; the store gives the platform's
-CPUs, the simulation one): the leaves it reaches found first, then, a
-window at a time, each merged and encoded into a page of its own on a
-worker, installed as the walk reaches it — pages freed and taken in the
-order one thread takes them, so the tree is the same page for page
-(tested so, with a filter and without).  **Compaction filter:**
+CPUs, the simulation one): the leaves it reaches found first, then the
+workers claim them in order (a counter) and merge and encode each into
+a page of its own, at most 128 per worker ahead of the walk, while the
+walk installs each as it reaches it — the page swapped into the pool's
+frame, not copied — and rebuilds the internal nodes; pages freed and
+taken in the order one thread takes them, so the tree is the same page
+for page (tested so, with a filter and without, and through a pool of
+48 frames that evicts all the time).  A worker reads only its leaf and
+the leaf's overflow pages, which the walk touches only once it installs
+that leaf; the two sides meet without a shared lock per leaf (each
+result in its own slot; a condition variable only for a worker too far
+ahead, or the walk finding its leaf not ready).  **Compaction filter:**
 `apply_sorted_filtered(ops, &dyn LeafFilter)` lets the layer above drop
 entries of the leaves the batch rewrites anyway — `drops(entries, drop)`
 sees a leaf's keys and short values after the batch went in, one leaf at
@@ -2620,6 +2627,14 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-01 — §M14.20, a commit's leaves prepared while others are
+  installed:** a sorted batch's workers run for the whole batch, a
+  window ahead of the walk that installs their leaves (it waited for each
+  window, and they for its installs); prepared pages are swapped into
+  the pool's frames, not copied.  The 14,768 leaves of the 10% delete:
+  installed in ~24 ms (the walk was ~37, waiting for windows ~20 of
+  them).  A 10% delete ~144 → ~136 ms, a 25% update ~773 → ~750 ms.
 
 - **2026-11-01 — §M14.20, a delete's rows stashed once:** `DELETE` from a
   table that is not partitioned writes the rows as the scan stashed them

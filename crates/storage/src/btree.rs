@@ -24,7 +24,8 @@
 
 use std::collections::BTreeSet;
 use std::ops::Bound;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use crate::buffer::{BufferPool, PageRef};
 use crate::error::{Error, Result};
@@ -120,6 +121,16 @@ impl BTree {
     /// caller's).  The tree it makes is the same, page for page.
     pub fn set_workers(&mut self, n: usize) {
         self.workers = n.max(1);
+    }
+
+    /// The tree as threads see it that read its pages while this one
+    /// writes others (a batch's workers): the same pages, the same pool.
+    fn reader(&self) -> BTree {
+        BTree {
+            pool: Arc::clone(&self.pool),
+            root: self.root,
+            workers: 1,
+        }
     }
 
     /// The root page.  Changes as the tree is modified.
@@ -549,8 +560,43 @@ impl BTree {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut prep = Prep::new(self, &vals, filter)?;
-        let mut pieces = self.insert_sorted_at(self.root, &vals, 0, &mut prep)?;
+        // A batch reaching many leaves: workers prepare them (merged,
+        // filtered, encoded into pages of their own) a window ahead of
+        // this thread, which installs each as its walk reaches it — the
+        // pages freed and taken in the order one thread takes them.
+        let jobs = if self.workers > 1 && vals.len() >= PARALLEL_LEAVES {
+            let mut jobs = Vec::new();
+            self.leaf_jobs(self.root, &vals, 0, &mut jobs)?;
+            if jobs.len() < PARALLEL_LEAVES {
+                jobs.clear();
+            }
+            jobs
+        } else {
+            Vec::new()
+        };
+        let ahead = self.workers * AHEAD_PER_WORKER;
+        let shared = Shared::new(jobs.len(), ahead);
+        // What the workers read through: the same pages, none of which
+        // this thread changes before it installs the leaf they are for.
+        let reader = self.reader();
+        let workers = self.workers.min(jobs.len());
+        let mut pieces = std::thread::scope(|sc| {
+            if workers > 0 {
+                PARALLEL_BATCHES.with(|n| n.set(n.get() + 1));
+            }
+            for _ in 0..workers {
+                sc.spawn(|| shared.work(&reader, &jobs, &vals, filter));
+            }
+            // Stops the workers however the walk ends (an error, a panic).
+            let _stop = Stop(&shared);
+            let mut prep = Prep {
+                jobs: &jobs,
+                shared: &shared,
+                next: 0,
+                filter,
+            };
+            self.insert_sorted_at(self.root, &vals, 0, &mut prep)
+        })?;
         // Over one page: new roots, a level at a time.
         while pieces.len() > 1 {
             let mut keys = Vec::with_capacity(pieces.len() - 1);
@@ -592,7 +638,7 @@ impl BTree {
         prep: &mut Prep,
     ) -> Result<Vec<(Vec<u8>, PageId, usize)>> {
         // A leaf prepared on a worker: installed.
-        if let Some(p) = prep.take(self, id, at..at + entries.len())? {
+        if let Some(p) = prep.take(id, at..at + entries.len())? {
             return self.install_leaf(id, p);
         }
         // A leaf is merged as its page holds it, nothing decoded.
@@ -847,11 +893,10 @@ impl BTree {
             self.pool.free(page)?;
         }
         let mut out = Vec::with_capacity(p.pieces.len());
-        for (i, (sep, page, size)) in p.pieces.into_iter().enumerate() {
-            let at = self.leaf_page(id, i, |w| {
-                w.set_page_type(LEAF);
-                w.payload_mut().copy_from_slice(page.payload());
-            })?;
+        for (i, (sep, mut page, size)) in p.pieces.into_iter().enumerate() {
+            // The prepared page goes into the frame as it is (no copy);
+            // its header is the pool's to stamp when written back.
+            let at = self.leaf_page(id, i, |w| std::mem::swap(w, &mut page))?;
             out.push((sep, at, size));
         }
         Ok(out)
@@ -893,45 +938,6 @@ impl BTree {
             from += g.len();
         }
         Ok(())
-    }
-
-    /// `jobs` (runs of `batch`) prepared on the tree's workers.
-    #[allow(clippy::type_complexity)]
-    fn prepare_window(
-        &self,
-        jobs: &[Job],
-        batch: &[(Vec<u8>, Option<Val>)],
-        filter: Option<&dyn LeafFilter>,
-    ) -> Result<std::collections::HashMap<PageId, (std::ops::Range<usize>, Prepared)>> {
-        use std::sync::Mutex;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        PARALLEL_WINDOWS.fetch_add(1, Ordering::Relaxed);
-        let next = AtomicUsize::new(0);
-        let results: Vec<Mutex<Option<Result<Prepared>>>> =
-            jobs.iter().map(|_| Mutex::new(None)).collect();
-        std::thread::scope(|sc| {
-            for _ in 0..self.workers.min(jobs.len()) {
-                sc.spawn(|| {
-                    loop {
-                        let j = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(job) = jobs.get(j) else {
-                            break;
-                        };
-                        let r = self.prepare_leaf(job.id, &batch[job.run.clone()], filter);
-                        *results[j].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
-                    }
-                });
-            }
-        });
-        let mut out = std::collections::HashMap::with_capacity(jobs.len());
-        for (job, r) in jobs.iter().zip(results) {
-            let r = r
-                .into_inner()
-                .unwrap_or_else(|e| e.into_inner())
-                .expect("every job ran");
-            out.insert(job.id, (job.run.clone(), r?));
-        }
-        Ok(out)
     }
 
     /// Merges or evens out the children of `node` under the minimum fill
@@ -1705,83 +1711,195 @@ struct Prepared {
     pieces: Vec<(Vec<u8>, Page, usize)>,
 }
 
-/// Leaves a sorted batch reaches, prepared ahead on workers a window at a
-/// time (so the pages waiting stay few), taken as the batch reaches them.
+/// A sorted batch's walk over the tree: the leaves prepared for it, taken
+/// in order as the walk reaches them.
 struct Prep<'b> {
-    /// The batch.
-    batch: &'b [(Vec<u8>, Option<Val>)],
+    /// Every leaf the batch reaches, in order (none: every leaf merged by
+    /// the walk itself).
+    jobs: &'b [Job],
+    shared: &'b Shared,
+    /// The next job to take.
+    next: usize,
     /// What drops entries of the leaves rewritten.
     filter: Option<&'b dyn LeafFilter>,
-    /// Every leaf the batch reaches, in order.
-    jobs: Vec<Job>,
-    next: usize,
-    /// Prepared leaves, each with the run it was prepared for.
-    ready: std::collections::HashMap<PageId, (std::ops::Range<usize>, Prepared)>,
 }
 
-/// Windows of leaves prepared on workers so far ([`parallel_windows`]).
-static PARALLEL_WINDOWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+impl Prep<'_> {
+    /// Leaf `id`'s preparation for the batch's run `run` — the next job's,
+    /// waited for —; `None` when it is not the next job (merged where it
+    /// is, then).
+    fn take(&mut self, id: PageId, run: std::ops::Range<usize>) -> Result<Option<Prepared>> {
+        match self.jobs.get(self.next) {
+            Some(job) if job.id == id && job.run == run => {
+                self.next += 1;
+                self.shared.take(self.next - 1, id).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+}
 
-/// How many windows of a sorted batch's leaves were prepared on workers
-/// (in this process) — for tests that the parallel path ran.
-pub fn parallel_windows() -> u64 {
-    PARALLEL_WINDOWS.load(std::sync::atomic::Ordering::Relaxed)
+/// The workers' and the walk's meeting point.  Jobs are claimed in order
+/// by a counter and each one's result left in its own slot, so neither
+/// side takes a shared lock per leaf; a condition variable is waited on
+/// only by a worker too far ahead of the walk, or by the walk when the
+/// leaf it needs is not ready.
+struct Shared {
+    /// The next job to claim.
+    claimed: AtomicUsize,
+    /// Jobs below this may be prepared.
+    limit: AtomicUsize,
+    /// The walk is over (workers stop), or a worker panicked.
+    stop: AtomicBool,
+    failed: AtomicBool,
+    /// Each job's result, once prepared.
+    slots: Vec<Mutex<Option<Result<Prepared>>>>,
+    /// Who is waiting: workers for room, the walk for a leaf.
+    waiting_workers: AtomicUsize,
+    walk_waits: AtomicBool,
+    wait: Mutex<()>,
+    room: Condvar,
+    ready: Condvar,
+    /// How many jobs past the one the walk takes may be prepared.
+    ahead: usize,
+}
+
+impl Shared {
+    fn new(jobs: usize, ahead: usize) -> Self {
+        Shared {
+            claimed: AtomicUsize::new(0),
+            limit: AtomicUsize::new(ahead.min(jobs)),
+            stop: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            slots: (0..jobs).map(|_| Mutex::new(None)).collect(),
+            waiting_workers: AtomicUsize::new(0),
+            walk_waits: AtomicBool::new(false),
+            wait: Mutex::new(()),
+            room: Condvar::new(),
+            ready: Condvar::new(),
+            ahead,
+        }
+    }
+
+    fn wait_lock(&self) -> MutexGuard<'_, ()> {
+        self.wait.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A worker: claims the next job, waits for room ahead of the walk,
+    /// prepares it.
+    fn work(
+        &self,
+        tree: &BTree,
+        jobs: &[Job],
+        batch: &[(Vec<u8>, Option<Val>)],
+        filter: Option<&dyn LeafFilter>,
+    ) {
+        /// Tells the walk when a worker panics, so it does not wait for
+        /// a leaf that will not come.
+        struct Panicking<'a>(&'a Shared);
+        impl Drop for Panicking<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    self.0.failed.store(true, Ordering::SeqCst);
+                    let _w = self.0.wait_lock();
+                    self.0.ready.notify_all();
+                }
+            }
+        }
+        let _guard = Panicking(self);
+        loop {
+            let j = self.claimed.fetch_add(1, Ordering::Relaxed);
+            if j >= jobs.len() {
+                return;
+            }
+            if j >= self.limit.load(Ordering::SeqCst) {
+                let mut w = self.wait_lock();
+                self.waiting_workers.fetch_add(1, Ordering::SeqCst);
+                while j >= self.limit.load(Ordering::SeqCst) && !self.stop.load(Ordering::SeqCst) {
+                    w = self.room.wait(w).unwrap_or_else(|e| e.into_inner());
+                }
+                self.waiting_workers.fetch_sub(1, Ordering::SeqCst);
+            }
+            if self.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            let job = &jobs[j];
+            let r = tree.prepare_leaf(job.id, &batch[job.run.clone()], filter);
+            *self.slots[j].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+            // Either the walk sees the result, or this sees it waiting.
+            fence(Ordering::SeqCst);
+            if self.walk_waits.load(Ordering::SeqCst) {
+                let _w = self.wait_lock();
+                self.ready.notify_all();
+            }
+        }
+    }
+
+    /// Job `j`'s preparation (of leaf `id`), waited for; room made ahead.
+    fn take(&self, j: usize, id: PageId) -> Result<Prepared> {
+        let n = self.slots.len();
+        // Room ahead in steps, not a wake-up per leaf.
+        let limit = self.limit.load(Ordering::SeqCst);
+        if j + self.ahead / 2 >= limit && limit < n {
+            self.limit
+                .store((j + 1 + self.ahead).min(n), Ordering::SeqCst);
+            if self.waiting_workers.load(Ordering::SeqCst) > 0 {
+                let _w = self.wait_lock();
+                self.room.notify_all();
+            }
+        }
+        let slot = |s: &Self| s.slots[j].lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(r) = slot(self) {
+            return r;
+        }
+        let mut w = self.wait_lock();
+        self.walk_waits.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        let r = loop {
+            if let Some(r) = slot(self) {
+                break r;
+            }
+            if self.failed.load(Ordering::SeqCst) {
+                break Err(Error::Corrupt {
+                    page: id,
+                    reason: "a worker preparing leaves failed",
+                });
+            }
+            w = self.ready.wait(w).unwrap_or_else(|e| e.into_inner());
+        };
+        self.walk_waits.store(false, Ordering::SeqCst);
+        drop(w);
+        r
+    }
+}
+
+/// Stops the workers when dropped.
+struct Stop<'a>(&'a Shared);
+
+impl Drop for Stop<'_> {
+    fn drop(&mut self) {
+        self.0.stop.store(true, Ordering::SeqCst);
+        let _w = self.0.wait_lock();
+        self.0.room.notify_all();
+    }
+}
+
+thread_local! {
+    /// Batches applied on this thread whose leaves were prepared on
+    /// workers ([`parallel_batches`]).
+    static PARALLEL_BATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many sorted batches applied on this thread had their leaves
+/// prepared on workers — for tests that the parallel path ran.
+pub fn parallel_batches() -> u64 {
+    PARALLEL_BATCHES.with(std::cell::Cell::get)
 }
 
 /// Leaves at least this many, or the batch is applied on one thread.
 const PARALLEL_LEAVES: usize = 64;
-/// Leaves prepared a window at a time, per worker.
-const WINDOW_PER_WORKER: usize = 128;
-
-impl<'b> Prep<'b> {
-    /// The leaves `batch` reaches — none when the tree has one worker or
-    /// the batch reaches few leaves.
-    fn new(
-        tree: &BTree,
-        batch: &'b [(Vec<u8>, Option<Val>)],
-        filter: Option<&'b dyn LeafFilter>,
-    ) -> Result<Self> {
-        let mut prep = Prep {
-            batch,
-            filter,
-            jobs: Vec::new(),
-            next: 0,
-            ready: std::collections::HashMap::new(),
-        };
-        if tree.workers > 1 && batch.len() >= PARALLEL_LEAVES {
-            tree.leaf_jobs(tree.root, batch, 0, &mut prep.jobs)?;
-            if prep.jobs.len() < PARALLEL_LEAVES {
-                prep.jobs.clear();
-            }
-        }
-        Ok(prep)
-    }
-
-    /// Leaf `id`'s preparation for the batch's run `run`, if it was
-    /// prepared for that (the next window prepared first when `id` begins
-    /// it); else the leaf is merged where it is.
-    fn take(
-        &mut self,
-        tree: &BTree,
-        id: PageId,
-        run: std::ops::Range<usize>,
-    ) -> Result<Option<Prepared>> {
-        if self.jobs.is_empty() {
-            return Ok(None);
-        }
-        if !self.ready.contains_key(&id) && self.jobs.get(self.next).is_some_and(|j| j.id == id) {
-            let end = (self.next + tree.workers * WINDOW_PER_WORKER).min(self.jobs.len());
-            self.ready =
-                tree.prepare_window(&self.jobs[self.next..end], self.batch, self.filter)?;
-            self.next = end;
-        }
-        Ok(self
-            .ready
-            .remove(&id)
-            .filter(|(r, _)| *r == run)
-            .map(|(_, p)| p))
-    }
-}
+/// Leaves a worker may prepare ahead of the walk (so many pages held).
+const AHEAD_PER_WORKER: usize = 128;
 
 /// A leaf's entries in pieces of about 7/8 of a page each (the last at
 /// least [`MIN_FILL`]): each with its first key as the separator before it

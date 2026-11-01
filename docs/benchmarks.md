@@ -123,6 +123,15 @@ the tree ~50 (14,768 leaves: found 5, prepared on the workers 18–21,
 installed one by one with the internal nodes ~17, a window's workers and
 its installs not yet overlapping) and the WAL's sync ~10.
 
+Then the workers prepare leaves for the whole batch, a window ahead of
+the walk installing them, and a prepared page is swapped into the
+pool's frame rather than copied: the walk ~24 ms, never waiting long.
+Against PostgreSQL in the same run (three each, the median): the delete
+137 ms (130–143) against 106 (75–107: PostgreSQL's own delete varied in
+this run; 70–76 in the runs before), 1.3× — 1.8× against its typical
+time; the update 760 against 782 (1.0×); the load 1,991 against 920
+(2.2×, PostgreSQL's load fast in this run: 909–1,162).
+
 **A columnar table** (§M14.20 V7), the same million rows in `WITH
 (storage = column)` (loaded by `INSERT … SELECT` from the row table in
 4.0 s; its columns 32 MB): `sum` 2.0 ms (one thread 12.8 ms; the row
@@ -314,8 +323,8 @@ against PostgreSQL 18 in the same run:
 | ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.34× | yes |
 | column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 8.9×, Q22 6.7×, Q16 3.7×, Q13 3.5×; ClickBench Q18 4.3×, Q39 3.2× | no |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | 2.24×, 2.51× | no |
-| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 1.96× (2026-11-01); 4.5× (row), 4.8× (column); 2.8× | `bench/run.py` yes (at the edge), the others no |
-| updates and deletes ≤ 2× (`bench/run.py`) | 1.1×, 1.96× (2026-11-01) | yes (deletes at the edge) |
+| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 1.96–2.2× (2026-11-01, as PostgreSQL's own time varies); 4.5× (row), 4.8× (column); 2.8× | `bench/run.py` at the edge, the others no |
+| updates and deletes ≤ 2× (`bench/run.py`) | 1.0×, 1.3–1.9× (2026-11-01; the delete 130–143 ms) | yes |
 | scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.1–2.0×; sort 2.0×; self-join 4.3× (2026-11-01) | joins no |
 | reads by key ≤ 1× (`bench/run.py`) | 0.5× (2026-11-01) | yes |
 

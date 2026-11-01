@@ -443,7 +443,14 @@ fn sorted_batches_agree_with_the_model() {
 /// rewritten in place, some copied).
 #[test]
 fn batches_on_workers_make_the_same_tree() {
-    same_tree_on_workers(false);
+    same_tree_on_workers(false, 4096);
+}
+
+#[test]
+fn batches_on_workers_through_a_small_pool_make_the_same_tree() {
+    // Workers pinning the leaves they read while the walk takes and frees
+    // pages, through a pool that evicts all the time.
+    same_tree_on_workers(true, 48);
 }
 
 /// Drops every entry whose key ends in a multiple of 5 (a pure function of
@@ -460,16 +467,16 @@ impl LeafFilter for DropFifths {
 
 #[test]
 fn filtered_batches_on_workers_make_the_same_tree() {
-    same_tree_on_workers(true);
+    same_tree_on_workers(true, 4096);
 }
 
 /// A tree built by batches on one worker and on four: the same pages,
 /// byte for byte — `filtered`, with [`DropFifths`] dropping entries of the
-/// leaves rewritten.
-fn same_tree_on_workers(filtered: bool) {
+/// leaves rewritten; through a pool of `frames`.
+fn same_tree_on_workers(filtered: bool, frames: usize) {
     let build = |workers: usize| {
         let p = platform(41);
-        let mut tree = new_tree(&p, 4096);
+        let mut tree = new_tree(&p, frames);
         tree.set_workers(workers);
         let rng = SplitMix64::new(7);
         let mut model = BTreeMap::new();
@@ -549,11 +556,12 @@ fn same_tree_on_workers(filtered: bool) {
         (tree.root(), pages, acc.free, acc.pending, check.depth)
     };
     let one = build(1);
-    let before = nucleus_storage::btree::parallel_windows();
+    let before = nucleus_storage::btree::parallel_batches();
     let many = build(4);
     assert!(
-        nucleus_storage::btree::parallel_windows() - before >= 8,
-        "leaves prepared on workers"
+        nucleus_storage::btree::parallel_batches() - before >= 6,
+        "leaves prepared on workers: {} batches",
+        nucleus_storage::btree::parallel_batches() - before
     );
     assert!(one.4 >= 3, "a tree deep enough for internal nodes");
     assert_eq!(one.0, many.0, "the same root");
