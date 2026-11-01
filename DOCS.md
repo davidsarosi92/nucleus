@@ -316,7 +316,7 @@ sibling, or the pair is split evenly; an internal root with one child is
 replaced by it.
 
 **API:** `create`, `open(root)`, `root`, `get`, `insert`, `remove`,
-`apply_sorted(ops)` / `insert_sorted(entries)` (sets and removals sorted
+`set_workers(n)`, `apply_sorted(ops)` / `insert_sorted(entries)` (sets and removals sorted
 by key, without repeats: each node read and written once for all the keys
 reaching it; full leaves packed to about 7/8; neighbours a batch of
 removals left under `MIN_FILL` merged until they are not, seams of merged
@@ -338,7 +338,13 @@ structs, but a sorted batch's leaves (`apply_sorted`, so every commit):
 a leaf's cells and the new entries are merged by reference and encoded
 straight into the page (`node::encode_leaf`; the pieces cut as before,
 checked against the decoded packing), so a commit that touches every leaf
-allocates nothing per entry.
+allocates nothing per entry.  A batch reaching many leaves (64 or more)
+prepares them on workers (`set_workers`; the store gives the platform's
+CPUs, the simulation one): the leaves it reaches found first, then, a
+window at a time, each merged and encoded into a page of its own on a
+worker, installed as the walk reaches it — pages freed and taken in the
+order one thread takes them, so the tree is the same page for page
+(tested so).
 
 ### 4.5 Write-ahead log (`wal::Wal`)
 
@@ -2578,6 +2584,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-01 — §M14.20, a commit's leaves on workers:** a sorted batch
+  reaching 64 leaves or more merges and encodes them on the CPUs
+  (`BTree::set_workers`), installed in order, so the tree is the one a
+  thread makes, page for page; entries go to a node's children by a
+  search per child.  A 10% delete ~310 → ~260 ms, a 25% update
+  ~1 050 → ~975 ms.
 - **2026-11-01 — §M14.20, less per written row:** `UPDATE` and `DELETE`
   consume their stashed rows (copied only for `RETURNING`), a delete
   computes index keys only for a table with indexes, a row's key is

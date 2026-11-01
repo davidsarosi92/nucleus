@@ -216,6 +216,9 @@ impl Store {
         } else {
             BTree::open(Arc::clone(&pool), PageId(root))
         };
+        // A large commit's leaves prepared on the CPUs there are (one in
+        // the simulation).
+        tree.set_workers(platform.parallelism());
         let wal = Wal::open(Arc::clone(&platform), &wal_dir, opts.wal_segment_size)?;
 
         let checkpoint = pager.meta(META_CHECKPOINT_LSN);

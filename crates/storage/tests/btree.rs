@@ -434,3 +434,87 @@ fn sorted_batches_agree_with_the_model() {
         verify(&tree, &model, &rng);
     });
 }
+
+/// Sorted batches applied with leaves prepared on workers make the tree
+/// one thread makes — the same root, the same pages, byte for byte, the
+/// same pages free — through inserts, replacements (overflow values too),
+/// removals that empty leaves, and commits between (so some pages are
+/// rewritten in place, some copied).
+#[test]
+fn batches_on_workers_make_the_same_tree() {
+    let build = |workers: usize| {
+        let p = platform(41);
+        let mut tree = new_tree(&p, 4096);
+        tree.set_workers(workers);
+        let rng = SplitMix64::new(7);
+        let mut model = BTreeMap::new();
+        for round in 0..12 {
+            let mut ops: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
+            let n = 200 + rng.below(6000) as usize;
+            for _ in 0..n {
+                let k = if round > 0 && rng.below(2) == 0 {
+                    // An existing key: replaced or removed.
+                    let i = rng.below(model.len().max(1) as u64) as usize;
+                    match model.keys().nth(i) {
+                        Some(k) => Vec::clone(k),
+                        None => continue,
+                    }
+                } else {
+                    // Long keys: internal nodes of few children, so a
+                    // deep tree.
+                    let mut k = vec![b'r'; 120];
+                    k.extend_from_slice(&rng.below(200_000).to_be_bytes());
+                    k
+                };
+                let v = if rng.below(4) == 0 {
+                    None
+                } else {
+                    Some(value(&rng))
+                };
+                ops.insert(k, v);
+            }
+            if round % 4 == 3 {
+                // A removal of most keys, leaving leaves under the minimum.
+                for k in model.keys().filter(|_| rng.below(10) < 8) {
+                    ops.insert(k.clone(), None);
+                }
+            }
+            let ops: Vec<_> = ops.into_iter().collect();
+            tree.apply_sorted(&ops).unwrap();
+            for (k, v) in ops {
+                match v {
+                    Some(v) => model.insert(k, v),
+                    None => model.remove(&k),
+                };
+            }
+            if round % 3 == 1 {
+                commit(&tree).unwrap();
+            }
+        }
+        verify(&tree, &model, &rng);
+        let check = tree.check().unwrap();
+        let pages: Vec<(u64, Vec<u8>)> = check
+            .pages
+            .iter()
+            .map(|&id| {
+                let r = tree.pool().fetch(PageId(id)).unwrap();
+                let page = r.read();
+                (id, page.payload().to_vec())
+            })
+            .collect();
+        let acc = tree.pool().pager().accounting();
+        (tree.root(), pages, acc.free, acc.pending, check.depth)
+    };
+    let one = build(1);
+    let before = nucleus_storage::btree::parallel_windows();
+    let many = build(4);
+    assert!(
+        nucleus_storage::btree::parallel_windows() - before >= 8,
+        "leaves prepared on workers"
+    );
+    assert!(one.4 >= 3, "a tree deep enough for internal nodes");
+    assert_eq!(one.0, many.0, "the same root");
+    assert_eq!(one.1.len(), many.1.len(), "as many pages");
+    assert!(one.1 == many.1, "the same pages, byte for byte");
+    assert_eq!((one.2, one.3), (many.2, many.3), "the same pages free");
+}

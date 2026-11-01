@@ -46,6 +46,9 @@ pub const COMPRESS_MIN: usize = 1024;
 pub struct BTree {
     pool: Arc<BufferPool>,
     root: PageId,
+    /// Threads a sorted batch's leaves may be prepared on
+    /// ([`BTree::set_workers`]).
+    workers: usize,
 }
 
 /// The result of changing a subtree: its (possibly new) root page and its
@@ -74,12 +77,27 @@ impl BTree {
             Node::Leaf(Leaf::default()).encode(&mut *r.write()?);
             r.id()
         };
-        Ok(Self { pool, root })
+        Ok(Self {
+            pool,
+            root,
+            workers: 1,
+        })
     }
 
     /// Opens the tree rooted at `root`.
     pub fn open(pool: Arc<BufferPool>, root: PageId) -> Self {
-        Self { pool, root }
+        Self {
+            pool,
+            root,
+            workers: 1,
+        }
+    }
+
+    /// Lets a large sorted batch ([`apply_sorted`](Self::apply_sorted))
+    /// prepare its leaves on up to `n` threads (1, the default: on the
+    /// caller's).  The tree it makes is the same, page for page.
+    pub fn set_workers(&mut self, n: usize) {
+        self.workers = n.max(1);
     }
 
     /// The root page.  Changes as the tree is modified.
@@ -491,7 +509,8 @@ impl BTree {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut pieces = self.insert_sorted_at(self.root, vals)?;
+        let mut prep = Prep::new(self, &vals)?;
+        let mut pieces = self.insert_sorted_at(self.root, &vals, 0, &mut prep)?;
         // Over one page: new roots, a level at a time.
         while pieces.len() > 1 {
             let mut keys = Vec::with_capacity(pieces.len() - 1);
@@ -522,13 +541,20 @@ impl BTree {
         }
     }
 
-    /// The pages a subtree became after `entries` went in: each with the
-    /// separator before it (empty for the first) and its size.
+    /// The pages a subtree became after `entries` (from `at` in the batch)
+    /// went in: each with the separator before it (empty for the first)
+    /// and its size.
     fn insert_sorted_at(
         &mut self,
         id: PageId,
-        entries: Vec<(Vec<u8>, Option<Val>)>,
+        entries: &[(Vec<u8>, Option<Val>)],
+        at: usize,
+        prep: &mut Prep,
     ) -> Result<Vec<(Vec<u8>, PageId, usize)>> {
+        // A leaf prepared on a worker: installed.
+        if let Some(p) = prep.take(self, id, at..at + entries.len())? {
+            return self.install_leaf(id, p);
+        }
         // A leaf is merged as its page holds it, nothing decoded.
         let old = {
             let r = self.pool.fetch(id)?;
@@ -537,7 +563,7 @@ impl BTree {
             v.is_leaf().then(|| page.clone())
         };
         if let Some(old) = old {
-            return self.merge_leaf(id, &old, &entries);
+            return self.merge_leaf(id, &old, entries);
         }
         match self.load(id)? {
             Node::Leaf(_) => Err(Error::Corrupt {
@@ -545,17 +571,15 @@ impl BTree {
                 reason: "a leaf read as an internal node",
             }),
             Node::Internal(node) => {
-                // The entries by the child they go to (in order: they are
-                // sorted).
-                let mut groups: Vec<(usize, Vec<(Vec<u8>, Option<Val>)>)> = Vec::new();
-                for e in entries {
-                    let i = node.child_index(&e.0);
-                    match groups.last_mut() {
-                        Some((j, g)) if *j == i => g.push(e),
-                        _ => groups.push((i, vec![e])),
-                    }
-                }
-                let mut groups = groups.into_iter().peekable();
+                let mut from = at;
+                let mut groups = child_groups(&node, entries)
+                    .into_iter()
+                    .map(|(i, g)| {
+                        let start = from;
+                        from += g.len();
+                        (i, g, start)
+                    })
+                    .peekable();
                 let mut keys = Vec::with_capacity(node.keys.len());
                 let mut children = Vec::with_capacity(node.children.len());
                 // Children removals (or smaller values) left under the
@@ -565,10 +589,12 @@ impl BTree {
                     if c > 0 {
                         keys.push(node.keys[c - 1].clone());
                     }
-                    if groups.peek().is_some_and(|(i, _)| *i == c) {
-                        let (_, g) = groups.next().expect("peeked");
-                        for (k, (sep, page, size)) in
-                            self.insert_sorted_at(child, g)?.into_iter().enumerate()
+                    if groups.peek().is_some_and(|(i, _, _)| *i == c) {
+                        let (_, g, start) = groups.next().expect("peeked");
+                        for (k, (sep, page, size)) in self
+                            .insert_sorted_at(child, g, start, prep)?
+                            .into_iter()
+                            .enumerate()
                         {
                             if k > 0 {
                                 keys.push(sep);
@@ -600,19 +626,43 @@ impl BTree {
         old: &Page,
         entries: &[(Vec<u8>, Option<Val>)],
     ) -> Result<Vec<(Vec<u8>, PageId, usize)>> {
-        let corrupt = |reason| Error::Corrupt { page: id, reason };
-        let v = View::new(old).map_err(corrupt)?;
-        let n = v.len();
-        // The old keys whole (a page stores their shared prefix once), in
-        // one buffer.
-        let mut arena = Vec::new();
-        let mut ends = Vec::with_capacity(n);
-        for i in 0..n {
-            v.key(i).map_err(corrupt)?.append_to(&mut arena);
-            ends.push(arena.len());
+        let v = View::new(old).map_err(|reason| Error::Corrupt { page: id, reason })?;
+        let (arena, ends) = old_keys(id, &v)?;
+        let (merged, freed) = self.merge_cells(id, &v, &arena, &ends, entries)?;
+        for page in freed {
+            self.pool.free(page)?;
         }
+        let mut out = Vec::new();
+        for (p, range) in pack_cells(&merged).into_iter().enumerate() {
+            let cells = &merged[range];
+            let page = self.leaf_page(id, p, |page| encode_leaf(page, cells))?;
+            let sep = if p == 0 {
+                Vec::new()
+            } else {
+                cells[0].0.to_vec()
+            };
+            out.push((sep, page, cells_size(cells)));
+        }
+        Ok(out)
+    }
+
+    /// Leaf `id`'s cells (`v`, its old keys whole in `arena` up to `ends`)
+    /// and `entries` merged by reference, and the overflow pages of the
+    /// values replaced or removed (to free).
+    #[allow(clippy::type_complexity)]
+    fn merge_cells<'a>(
+        &self,
+        id: PageId,
+        v: &View<'a>,
+        arena: &'a [u8],
+        ends: &[usize],
+        entries: &'a [(Vec<u8>, Option<Val>)],
+    ) -> Result<(Vec<(&'a [u8], ValRef<'a>)>, Vec<PageId>)> {
+        let corrupt = |reason| Error::Corrupt { page: id, reason };
+        let n = ends.len();
         let old_key = |i: usize| &arena[if i == 0 { 0 } else { ends[i - 1] }..ends[i]];
         let mut merged: Vec<(&[u8], ValRef)> = Vec::with_capacity(n + entries.len());
+        let mut freed = Vec::new();
         let (mut i, mut j) = (0, 0);
         while i < n || j < entries.len() {
             let take_new = if i == n {
@@ -627,7 +677,7 @@ impl BTree {
                         // Replaced (or removed): its overflow pages go.
                         if let ValRef::Overflow { first, len, .. } = v.value(i).map_err(corrupt)? {
                             for (page, _) in self.overflow_pages(first, len)? {
-                                self.pool.free(page)?;
+                                freed.push(page);
                             }
                         }
                         i += 1;
@@ -645,27 +695,148 @@ impl BTree {
                 i += 1;
             }
         }
-        let mut out = Vec::new();
-        for (p, range) in pack_cells(&merged).into_iter().enumerate() {
-            let cells = &merged[range];
-            let page = if p == 0 && self.pool.is_writable(id) {
-                let r = self.pool.fetch(id)?;
-                encode_leaf(&mut *r.write()?, cells);
-                id
-            } else {
-                let r = self.pool.create(LEAF)?;
-                encode_leaf(&mut *r.write()?, cells);
-                if p == 0 {
-                    self.pool.free(id)?;
-                }
-                r.id()
-            };
-            let sep = if p == 0 {
-                Vec::new()
-            } else {
-                cells[0].0.to_vec()
-            };
-            out.push((sep, page, cells_size(cells)));
+        Ok((merged, freed))
+    }
+
+    /// The page piece `p` of leaf `id` goes to — the first over `id` when
+    /// it is writable, else (and the rest) a new one, `id` freed — written
+    /// by `write`.
+    fn leaf_page(&self, id: PageId, p: usize, write: impl FnOnce(&mut Page)) -> Result<PageId> {
+        if p == 0 && self.pool.is_writable(id) {
+            let r = self.pool.fetch(id)?;
+            write(&mut *r.write()?);
+            return Ok(id);
+        }
+        let r = self.pool.create(LEAF)?;
+        write(&mut *r.write()?);
+        if p == 0 {
+            self.pool.free(id)?;
+        }
+        Ok(r.id())
+    }
+
+    /// [`merge_leaf`](Self::merge_leaf)'s work that only reads, for a
+    /// worker: the pieces encoded into pages of their own, the overflow
+    /// pages to free.
+    fn prepare_leaf(&self, id: PageId, entries: &[(Vec<u8>, Option<Val>)]) -> Result<Prepared> {
+        let old = {
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            page.clone()
+        };
+        let v = View::new(&old).map_err(|reason| Error::Corrupt { page: id, reason })?;
+        if !v.is_leaf() {
+            return Err(Error::Corrupt {
+                page: id,
+                reason: "a leaf read as an internal node",
+            });
+        }
+        let (arena, ends) = old_keys(id, &v)?;
+        let (merged, freed) = self.merge_cells(id, &v, &arena, &ends, entries)?;
+        let pieces = pack_cells(&merged)
+            .into_iter()
+            .enumerate()
+            .map(|(p, range)| {
+                let cells = &merged[range];
+                let mut page = Page::new(LEAF);
+                encode_leaf(&mut page, cells);
+                let sep = if p == 0 {
+                    Vec::new()
+                } else {
+                    cells[0].0.to_vec()
+                };
+                (sep, page, cells_size(cells))
+            })
+            .collect();
+        Ok(Prepared { freed, pieces })
+    }
+
+    /// Writes a prepared leaf as [`merge_leaf`](Self::merge_leaf) would:
+    /// the same pages freed and taken, in the same order.
+    fn install_leaf(&self, id: PageId, p: Prepared) -> Result<Vec<(Vec<u8>, PageId, usize)>> {
+        for page in p.freed {
+            self.pool.free(page)?;
+        }
+        let mut out = Vec::with_capacity(p.pieces.len());
+        for (i, (sep, page, size)) in p.pieces.into_iter().enumerate() {
+            let at = self.leaf_page(id, i, |w| {
+                w.set_page_type(LEAF);
+                w.payload_mut().copy_from_slice(page.payload());
+            })?;
+            out.push((sep, at, size));
+        }
+        Ok(out)
+    }
+
+    /// The leaves under `id` that sorted `entries` (from `at` in the batch)
+    /// reach, in order, each with its run of the batch — grouped as
+    /// [`insert_sorted_at`](Self::insert_sorted_at) groups them.
+    fn leaf_jobs(
+        &self,
+        id: PageId,
+        entries: &[(Vec<u8>, Option<Val>)],
+        at: usize,
+        out: &mut Vec<(PageId, std::ops::Range<usize>)>,
+    ) -> Result<()> {
+        let leaf = {
+            let r = self.pool.fetch(id)?;
+            let page = r.read();
+            View::new(&page)
+                .map_err(|reason| Error::Corrupt { page: id, reason })?
+                .is_leaf()
+        };
+        if leaf {
+            out.push((id, at..at + entries.len()));
+            return Ok(());
+        }
+        let Node::Internal(node) = self.load(id)? else {
+            return Err(Error::Corrupt {
+                page: id,
+                reason: "an internal node read as a leaf",
+            });
+        };
+        let mut from = at;
+        for (i, g) in child_groups(&node, entries) {
+            self.leaf_jobs(node.children[i], g, from, out)?;
+            from += g.len();
+        }
+        Ok(())
+    }
+
+    /// `jobs` (runs of `batch`) prepared on the tree's workers.
+    #[allow(clippy::type_complexity)]
+    fn prepare_window(
+        &self,
+        jobs: &[(PageId, std::ops::Range<usize>)],
+        batch: &[(Vec<u8>, Option<Val>)],
+    ) -> Result<std::collections::HashMap<PageId, (std::ops::Range<usize>, Prepared)>> {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        PARALLEL_WINDOWS.fetch_add(1, Ordering::Relaxed);
+        let next = AtomicUsize::new(0);
+        let results: Vec<Mutex<Option<Result<Prepared>>>> =
+            jobs.iter().map(|_| Mutex::new(None)).collect();
+        std::thread::scope(|sc| {
+            for _ in 0..self.workers.min(jobs.len()) {
+                sc.spawn(|| {
+                    loop {
+                        let j = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((id, range)) = jobs.get(j) else {
+                            break;
+                        };
+                        let r = self.prepare_leaf(*id, &batch[range.clone()]);
+                        *results[j].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                    }
+                });
+            }
+        });
+        let mut out = std::collections::HashMap::with_capacity(jobs.len());
+        for ((id, range), r) in jobs.iter().zip(results) {
+            let r = r
+                .into_inner()
+                .unwrap_or_else(|e| e.into_inner())
+                .expect("every job ran");
+            out.insert(*id, (range.clone(), r?));
         }
         Ok(out)
     }
@@ -1388,6 +1559,122 @@ fn fit_cells(
     let k = range.start + balance_point(&sizes, 1, sizes.len() - 1);
     fit_cells(cells, range.start..k, out);
     fit_cells(cells, k..range.end, out);
+}
+
+/// The keys of leaf `v` (page `id`) whole, one after another, and where
+/// each ends.
+fn old_keys(id: PageId, v: &View) -> Result<(Vec<u8>, Vec<usize>)> {
+    let mut arena = Vec::new();
+    let mut ends = Vec::with_capacity(v.len());
+    for i in 0..v.len() {
+        v.key(i)
+            .map_err(|reason| Error::Corrupt { page: id, reason })?
+            .append_to(&mut arena);
+        ends.push(arena.len());
+    }
+    Ok((arena, ends))
+}
+
+/// Sorted `entries` by the child of `node` they go to: each child's index
+/// and its run of them.
+#[allow(clippy::type_complexity)]
+fn child_groups<'e>(
+    node: &Internal,
+    entries: &'e [(Vec<u8>, Option<Val>)],
+) -> Vec<(usize, &'e [(Vec<u8>, Option<Val>)])> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    while start < entries.len() {
+        // Child `i` holds the keys below separator `i`: its run ends at the
+        // first entry not below it (a search per child, not per entry).
+        let i = node.child_index(&entries[start].0);
+        let end = match node.keys.get(i) {
+            Some(sep) => {
+                start + entries[start..].partition_point(|(k, _)| k.as_slice() < sep.as_slice())
+            }
+            None => entries.len(),
+        };
+        groups.push((i, &entries[start..end]));
+        start = end;
+    }
+    groups
+}
+
+/// A leaf merged on a worker ([`BTree::prepare_leaf`]), to install.
+struct Prepared {
+    freed: Vec<PageId>,
+    pieces: Vec<(Vec<u8>, Page, usize)>,
+}
+
+/// Leaves a sorted batch reaches, prepared ahead on workers a window at a
+/// time (so the pages waiting stay few), taken as the batch reaches them.
+struct Prep<'b> {
+    /// The batch.
+    batch: &'b [(Vec<u8>, Option<Val>)],
+    /// Every leaf the batch reaches, in order, with its run of the batch.
+    jobs: Vec<(PageId, std::ops::Range<usize>)>,
+    next: usize,
+    /// Prepared leaves, each with the run it was prepared for.
+    ready: std::collections::HashMap<PageId, (std::ops::Range<usize>, Prepared)>,
+}
+
+/// Windows of leaves prepared on workers so far ([`parallel_windows`]).
+static PARALLEL_WINDOWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many windows of a sorted batch's leaves were prepared on workers
+/// (in this process) — for tests that the parallel path ran.
+pub fn parallel_windows() -> u64 {
+    PARALLEL_WINDOWS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Leaves at least this many, or the batch is applied on one thread.
+const PARALLEL_LEAVES: usize = 64;
+/// Leaves prepared a window at a time, per worker.
+const WINDOW_PER_WORKER: usize = 128;
+
+impl<'b> Prep<'b> {
+    /// The leaves `batch` reaches — none when the tree has one worker or
+    /// the batch reaches few leaves.
+    fn new(tree: &BTree, batch: &'b [(Vec<u8>, Option<Val>)]) -> Result<Self> {
+        let mut prep = Prep {
+            batch,
+            jobs: Vec::new(),
+            next: 0,
+            ready: std::collections::HashMap::new(),
+        };
+        if tree.workers > 1 && batch.len() >= PARALLEL_LEAVES {
+            tree.leaf_jobs(tree.root, batch, 0, &mut prep.jobs)?;
+            if prep.jobs.len() < PARALLEL_LEAVES {
+                prep.jobs.clear();
+            }
+        }
+        Ok(prep)
+    }
+
+    /// Leaf `id`'s preparation for the batch's run `run`, if it was
+    /// prepared for that (the next window prepared first when `id` begins
+    /// it); else the leaf is merged where it is.
+    fn take(
+        &mut self,
+        tree: &BTree,
+        id: PageId,
+        run: std::ops::Range<usize>,
+    ) -> Result<Option<Prepared>> {
+        if self.jobs.is_empty() {
+            return Ok(None);
+        }
+        if !self.ready.contains_key(&id) && self.jobs.get(self.next).is_some_and(|(j, _)| *j == id)
+        {
+            let end = (self.next + tree.workers * WINDOW_PER_WORKER).min(self.jobs.len());
+            self.ready = tree.prepare_window(&self.jobs[self.next..end], self.batch)?;
+            self.next = end;
+        }
+        Ok(self
+            .ready
+            .remove(&id)
+            .filter(|(r, _)| *r == run)
+            .map(|(_, p)| p))
+    }
 }
 
 /// A leaf's entries in pieces of about 7/8 of a page each (the last at
