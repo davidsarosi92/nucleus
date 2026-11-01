@@ -1275,6 +1275,9 @@ impl Transaction {
                 // `ts` (and become them, as vacuum rewrites them).
                 ops.push((status_key(id), Some(ts.to_be_bytes().to_vec())));
             }
+            // In key order (sorted runs: the versions let go, the writes),
+            // so the store applies the batch as it is.
+            ops.sort_by(|a, b| a.0.cmp(&b.0));
             let lsn = engine.store.write(&Batch { meta: ts, ops })?;
             *last = ts;
             if let Some(id) = spilled {
@@ -1285,8 +1288,9 @@ impl Transaction {
                 self.spilled = None; // its intents are the commit's now
             }
             let mut recent = lock(&engine.recent);
-            for key in self.writes.keys() {
-                recent.insert(key.clone(), ts);
+            // The write set is done with: its keys move.
+            for (key, _) in std::mem::take(&mut self.writes) {
+                recent.insert(key, ts);
             }
             if let Some((lo, hi)) = self.span.take() {
                 lock(&engine.recent_spans).push((lo, hi, ts));

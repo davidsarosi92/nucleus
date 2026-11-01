@@ -649,20 +649,20 @@ pub fn update(
                 changes.push(change)?;
             }
         }
-        (std::rc::Rc::new(changes.seal()?), writer, ret)
+        (changes.seal()?, writer, ret)
     };
     let width = t.columns.len();
+    let count = changes.len() as u64;
     let split = |mut r: Row| -> Result<(usize, Vec<u8>, Row, Row)> {
-        let rest = r.split_off(1);
-        let Value::Int(ti) = r[0] else {
-            return Err(Error::internal("a change without its table"));
-        };
-        let (key, mut old) = exec::unkeyed(rest)?;
-        let new = old.split_off(width);
-        Ok((ti as usize, key, old, new))
+        let ti = table_number(&r)?;
+        let key = take_key(&mut r, 1)?;
+        r.drain(..2);
+        let new = r.split_off(width);
+        Ok((ti, key, r, new))
     };
+    let (each, kept) = consume_or_keep(changes, ret.is_some());
     let mut chunk = Vec::with_capacity(CHUNK);
-    for r in changes.iter() {
+    for r in each {
         let (ti, key, old, new) = split(r?)?;
         chunk.push((ti, key, old, new));
         if chunk.len() == CHUNK {
@@ -674,6 +674,7 @@ pub fn update(
         None => None,
         Some((exprs, cols)) => {
             let ctx = Ctx::new(&*txn, reg, params);
+            let changes = kept.ok_or_else(|| Error::internal("the rows RETURNING reads"))?;
             Some((
                 cols,
                 changes
@@ -683,10 +684,7 @@ pub fn update(
             ))
         }
     };
-    Ok(Written {
-        count: changes.len() as u64,
-        returning,
-    })
+    Ok(Written { count, returning })
 }
 
 /// Applies changes `(table number, key, old, new)` of [`Writer::targets`]:
@@ -832,6 +830,9 @@ pub fn delete_rows(
     catalog::validate_table(&*txn, &t.name)?;
     for (key, row) in rows {
         storage.remove_row(txn, t, key, row)?;
+        if t.indexes.is_empty() {
+            continue;
+        }
         let pk = pk_suffix(t, key);
         for (k, _) in keys.entries(&*txn, t, row, &pk)? {
             txn.delete(&k)?;
@@ -880,16 +881,15 @@ pub fn delete(
                 rows.push(row)?;
             }
         }
-        (std::rc::Rc::new(rows.seal()?), ret, targets)
+        (rows.seal()?, ret, targets)
     };
     let (rows, ret, targets) = (rows.0, rows.1, rows.2);
+    let count = rows.len() as u64;
     let split = |mut r: Row| -> Result<(usize, Vec<u8>, Row)> {
-        let rest = r.split_off(1);
-        let Value::Int(ti) = r[0] else {
-            return Err(Error::internal("a row without its table"));
-        };
-        let (key, row) = exec::unkeyed(rest)?;
-        Ok((ti as usize, key, row))
+        let ti = table_number(&r)?;
+        let key = take_key(&mut r, 1)?;
+        r.drain(..2);
+        Ok((ti, key, r))
     };
     let mut by: Vec<Vec<(Vec<u8>, Row)>> = vec![Vec::new(); targets.len()];
     let flush = |txn: &mut dyn KvTxn, by: &mut Vec<Vec<(Vec<u8>, Row)>>| -> Result<()> {
@@ -901,8 +901,9 @@ pub fn delete(
         }
         Ok(())
     };
+    let (each, kept) = consume_or_keep(rows, ret.is_some());
     let mut n = 0;
-    for r in rows.iter() {
+    for r in each {
         let (ti, key, row) = split(r?)?;
         by[ti].push((key, row));
         n += 1;
@@ -915,6 +916,7 @@ pub fn delete(
         None => None,
         Some((exprs, cols)) => {
             let ctx = Ctx::new(&*txn, reg, params);
+            let rows = kept.ok_or_else(|| Error::internal("the rows RETURNING reads"))?;
             Some((
                 cols,
                 rows.iter()
@@ -923,10 +925,42 @@ pub fn delete(
             ))
         }
     };
-    Ok(Written {
-        count: rows.len() as u64,
-        returning,
-    })
+    Ok(Written { count, returning })
+}
+
+/// A stash's rows to apply — consumed, or, when `keep` (`RETURNING` reads
+/// them again), read from the stash kept.
+#[allow(clippy::type_complexity)]
+fn consume_or_keep(
+    rows: crate::spill::Stored,
+    keep: bool,
+) -> (
+    Box<dyn Iterator<Item = Result<Row>>>,
+    Option<std::rc::Rc<crate::spill::Stored>>,
+) {
+    if keep {
+        let rows = std::rc::Rc::new(rows);
+        (rows.iter(), Some(rows))
+    } else {
+        (rows.into_iter(), None)
+    }
+}
+
+/// The table number a stashed write's row starts with.
+fn table_number(r: &Row) -> Result<usize> {
+    match r.first() {
+        Some(Value::Int(ti)) => Ok(*ti as usize),
+        _ => Err(Error::internal("a stashed write without its table")),
+    }
+}
+
+/// The key a stashed write's row holds at `at` (as [`exec::keyed`] puts
+/// it), taken out.
+fn take_key(r: &mut Row, at: usize) -> Result<Vec<u8>> {
+    match r.get_mut(at).map(|v| std::mem::replace(v, Value::Null)) {
+        Some(Value::Bytea(k)) => Ok(k.to_vec()),
+        _ => Err(Error::internal("a stashed write without its key")),
+    }
 }
 
 /// Writes the entries of a new index for every existing row.

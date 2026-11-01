@@ -34,7 +34,8 @@ pub const OVERHEAD: usize = 10;
 
 /// `user` with every `00` doubled to `00 FF`.
 pub fn escape(user: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(user.len() + OVERHEAD);
+    let zeros = user.iter().filter(|&&b| b == 0).count();
+    let mut out = Vec::with_capacity(user.len() + zeros + OVERHEAD);
     for &b in user {
         out.push(b);
         if b == 0 {

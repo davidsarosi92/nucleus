@@ -1239,8 +1239,14 @@ pub fn delete_cast(txn: &mut dyn KvTxn, from: &str, to: &str) -> Result<()> {
 
 /// A row's primary index key.
 pub fn row_key(table: &Table, pk: &[Value]) -> Vec<u8> {
-    let mut k = table.index_prefix(0);
-    k.extend_from_slice(&crate::encoding::encode_key(pk));
+    // `index_prefix(0)` and the values' key encoding, in one buffer.
+    let mut k = Vec::with_capacity(9 + 10 * pk.len());
+    k.push(DATA);
+    k.extend_from_slice(&table.id.to_be_bytes());
+    k.extend_from_slice(&0u32.to_be_bytes());
+    for v in pk {
+        crate::encoding::encode_key_value(&mut k, v);
+    }
     k
 }
 

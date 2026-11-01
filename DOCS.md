@@ -2578,6 +2578,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-01 — §M14.20, less per written row:** `UPDATE` and `DELETE`
+  consume their stashed rows (copied only for `RETURNING`), a delete
+  computes index keys only for a table with indexes, a row's key is
+  encoded in one buffer, and a commit's batch is sorted by the engine and
+  applied as it is (the store copied and sorted it).  A 10% delete
+  341 → ~310 ms, a 25% update ~1 150 → ~1 050 ms, the load
+  ~2 800 → ~2 500 ms.
 - **2026-11-01 — §M14.20, the write path:** `UPDATE` and `DELETE` find
   their rows by the vectorized, parallel scan; a write's early conflict
   check answered by the recent commits' keys; a B+tree range descends

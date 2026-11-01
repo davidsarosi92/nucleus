@@ -377,6 +377,10 @@ fn apply(tree: &mut BTree, batch: &Batch) -> Result<()> {
     // When no key comes twice (how the engine writes batches), the order
     // does not matter: one sorted pass over the tree, a page written once
     // for all its keys.
+    // (Already sorted — how the engine writes its commits —, as it is.)
+    if batch.ops.len() > 1 && batch.ops.windows(2).all(|w| w[0].0 < w[1].0) {
+        return tree.apply_sorted(&batch.ops);
+    }
     let mut ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = batch.ops.clone();
     ops.sort_by(|a, b| a.0.cmp(&b.0));
     if ops.len() > 1 && ops.windows(2).all(|w| w[0].0 != w[1].0) {

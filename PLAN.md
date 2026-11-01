@@ -2185,6 +2185,9 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20: less per written row (stashes consumed,
+  keys encoded once, commit batches sorted by the engine): a 10% delete
+  ~2.9×, a 25% update ~1.3×, the load ~2.6× PostgreSQL's 10-31 time.
 - **2026-11-01** — §M14.20: the write path — `UPDATE` / `DELETE` find
   their rows by the parallel vectorized scan; early conflict checks from
   the recent commits' keys; a commit's leaves merged without decoding;
