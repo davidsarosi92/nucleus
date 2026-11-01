@@ -417,22 +417,10 @@ fn text_value(kind: u8, s: &[u8]) -> Result<Value> {
     })
 }
 
-/// `char(n)` values decoded as text: as the row storage gives them, each
-/// a value.
+/// `char(n)` values decoded as text: a char vector of the same bytes.
 fn chars(v: Vector) -> Vector {
     match v {
-        Vector::Text(offsets, bytes, nulls) => Vector::Values(
-            (0..offsets.len() - 1)
-                .map(|i| {
-                    if nulls.as_ref().is_some_and(|z| z[i]) {
-                        Value::Null
-                    } else {
-                        let s = &bytes[offsets[i] as usize..offsets[i + 1] as usize];
-                        Value::Char(String::from_utf8_lossy(s).into_owned())
-                    }
-                })
-                .collect(),
-        ),
+        Vector::Text(offsets, bytes, nulls) => Vector::Char(offsets, bytes, nulls),
         v => v,
     }
 }

@@ -30,7 +30,8 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Bound;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use nucleus_kv::{KvTxn, prefix_end};
 
@@ -509,18 +510,83 @@ const RAW: u16 = 0x8000;
 /// a scan through it evicts in steps rather than all at once.
 #[derive(Default)]
 struct Cache {
-    entries: HashMap<(u64, u16), (Decoded, usize, u64)>,
-    bytes: usize,
-    tick: u64,
+    entries: HashMap<(u64, u16), (Decoded, usize, AtomicU64)>,
 }
 
-fn cache() -> &'static Mutex<Cache> {
-    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(Cache::default()))
+/// The cache's shards: a column's by its key, so threads reading different
+/// columns (a parallel join's lookups) take different locks.
+const CACHE_SHARDS: usize = 16;
+
+fn shard_at(i: usize) -> &'static RwLock<Cache> {
+    static CACHE: OnceLock<Vec<RwLock<Cache>>> = OnceLock::new();
+    let shards = CACHE.get_or_init(|| {
+        (0..CACHE_SHARDS)
+            .map(|_| RwLock::new(Cache::default()))
+            .collect()
+    });
+    &shards[i]
 }
 
-/// The decoded columns' bound, in bytes.
+fn cache(key: &(u64, u16)) -> &'static RwLock<Cache> {
+    let h = (key.0 ^ (u64::from(key.1) << 48)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    shard_at((h >> 32) as usize % CACHE_SHARDS)
+}
+
+/// A cached column (a hit only reads its shard).
+fn cache_get(key: &(u64, u16)) -> Option<Decoded> {
+    cache(key)
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+}
+
+/// Caches `d` under `key`: past the bound (all shards' together), the
+/// columns used longest ago in any shard go first, until an eighth of the
+/// bound is free — one shard's lock held at a time.
+fn cache_insert(key: (u64, u16), d: Decoded) {
+    let size = decoded_bytes(&d);
+    if CACHE_TOTAL.load(Relaxed) + size > CACHE_BYTES {
+        evict(size);
+    }
+    cache(&key)
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key, d, size);
+}
+
+/// Drops the columns used longest ago, across the shards, until `room`
+/// more bytes fit an eighth below the bound.
+fn evict(room: usize) {
+    let mut by_use: Vec<((u64, u16), u64)> = Vec::new();
+    for shard in 0..CACHE_SHARDS {
+        let c = shard_at(shard).read().unwrap_or_else(|e| e.into_inner());
+        by_use.extend(
+            c.entries
+                .iter()
+                .map(|(k, (_, _, used))| (*k, used.load(Relaxed))),
+        );
+    }
+    by_use.sort_unstable_by_key(|e| e.1);
+    for (k, _) in by_use {
+        if CACHE_TOTAL.load(Relaxed) + room <= CACHE_BYTES - CACHE_BYTES / 8 {
+            break;
+        }
+        cache(&k)
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&k);
+    }
+}
+
+/// The decoded columns' bound, in bytes (all shards' together).
 const CACHE_BYTES: usize = 256 << 20;
+
+/// The bytes the shards hold.
+static CACHE_TOTAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// When a cached column was last used: a clock that moves on with each
+/// column cached (an approximate order of use is enough to evict by).
+static CACHE_CLOCK: AtomicU64 = AtomicU64::new(0);
 
 /// About the memory a decoded column holds.
 fn decoded_bytes(d: &Decoded) -> usize {
@@ -533,54 +599,37 @@ fn decoded_bytes(d: &Decoded) -> usize {
             Vector::Int(d, n) | Vector::Time(_, d, n) => d.len() * 8 + nulls(n),
             Vector::Float(d, n) => d.len() * 8 + nulls(n),
             Vector::Bool(d, n) => d.len() + nulls(n),
-            Vector::Text(o, b, n) => o.len() * 4 + b.len() + nulls(n),
+            Vector::Text(o, b, n) | Vector::Char(o, b, n) => o.len() * 4 + b.len() + nulls(n),
             Vector::Values(v) => v.len() * std::mem::size_of::<Value>(),
         },
     }
 }
 
 impl Cache {
-    fn get(&mut self, key: &(u64, u16)) -> Option<Decoded> {
-        self.tick += 1;
-        let tick = self.tick;
-        self.entries.get_mut(key).map(|(d, _, used)| {
-            *used = tick;
+    fn get(&self, key: &(u64, u16)) -> Option<Decoded> {
+        self.entries.get(key).map(|(d, _, used)| {
+            used.store(CACHE_CLOCK.load(Relaxed), Relaxed);
             d.clone()
         })
     }
 
-    fn insert(&mut self, key: (u64, u16), d: Decoded) {
-        let size = decoded_bytes(&d);
-        if self.bytes + size > CACHE_BYTES {
-            // The longest unused, until an eighth of the bound is free.
-            let mut by_use: Vec<((u64, u16), u64, usize)> = self
-                .entries
-                .iter()
-                .map(|(k, (_, s, used))| (*k, *used, *s))
-                .collect();
-            by_use.sort_unstable_by_key(|e| e.1);
-            for (k, _, s) in by_use {
-                if self.bytes + size <= CACHE_BYTES - CACHE_BYTES / 8 {
-                    break;
-                }
-                self.entries.remove(&k);
-                self.bytes -= s;
-            }
+    fn insert(&mut self, key: (u64, u16), d: Decoded, size: usize) {
+        let tick = CACHE_CLOCK.fetch_add(1, Relaxed) + 1;
+        CACHE_TOTAL.fetch_add(size, Relaxed);
+        if let Some((_, old, _)) = self.entries.insert(key, (d, size, AtomicU64::new(tick))) {
+            CACHE_TOTAL.fetch_sub(old, Relaxed);
         }
-        self.tick += 1;
-        if let Some((_, old, _)) = self.entries.insert(key, (d, size, self.tick)) {
-            self.bytes -= old;
+    }
+
+    fn remove(&mut self, key: &(u64, u16)) {
+        if let Some((_, size, _)) = self.entries.remove(key) {
+            CACHE_TOTAL.fetch_sub(size, Relaxed);
         }
-        self.bytes += size;
     }
 }
 
 fn cached(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: u16) -> Result<Decoded> {
-    if let Some(d) = cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&(seg.id, col))
-    {
+    if let Some(d) = cache_get(&(seg.id, col)) {
         return Ok(d);
     }
     let b = txn
@@ -591,10 +640,7 @@ fn cached(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: u16) -> Result<Decoded
     } else {
         Decoded::Column(Arc::new(crate::segment::decode(&b)?))
     };
-    cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert((seg.id, col), d.clone());
+    cache_insert((seg.id, col), d.clone());
     Ok(d)
 }
 
@@ -613,15 +659,12 @@ fn value_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> 
     if !seg.cols.contains(&(col as u16)) {
         return Ok(Value::Null);
     }
-    let decoded = cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&(seg.id, col as u16));
+    let decoded = cache_get(&(seg.id, col as u16));
     if let Some(Decoded::Column(v)) = decoded {
         return Ok(v.value(i));
     }
     let key = (seg.id, col as u16 | RAW);
-    let raw = cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key);
+    let raw = cache_get(&key);
     let raw = match raw {
         Some(Decoded::Raw(b)) => b,
         _ => {
@@ -629,10 +672,7 @@ fn value_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> 
                 txn.get(&chunk_key(t, seg.id, col as u16))?
                     .ok_or_else(|| bad("a column is missing"))?,
             );
-            cache()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(key, Decoded::Raw(Arc::clone(&b)));
+            cache_insert(key, Decoded::Raw(Arc::clone(&b)));
             b
         }
     };
@@ -755,6 +795,12 @@ fn note_written(t: &Table) {
 
 fn buffered<T>(t: &Table, f: impl FnOnce(&mut std::collections::BTreeMap<Vec<u8>, Row>) -> T) -> T {
     BUFFER.with(|b| f(b.borrow_mut().entry(t.id).or_default()))
+}
+
+/// Whether a statement on this thread has inserted rows into a `column`
+/// table that are not yet stored (only this thread's reads see them).
+pub(crate) fn statement_buffered() -> bool {
+    BUFFER.with(|b| b.borrow().values().any(|rows| !rows.is_empty()))
 }
 
 fn take_buffer(t: &Table) -> std::collections::BTreeMap<Vec<u8>, Row> {
@@ -1982,7 +2028,7 @@ fn vector_len(v: &Vector) -> usize {
         Vector::Int(d, _) | Vector::Time(_, d, _) => d.len(),
         Vector::Float(d, _) => d.len(),
         Vector::Bool(d, _) => d.len(),
-        Vector::Text(o, _, _) => o.len() - 1,
+        Vector::Text(o, _, _) | Vector::Char(o, _, _) => o.len() - 1,
         Vector::Values(v) => v.len(),
     }
 }

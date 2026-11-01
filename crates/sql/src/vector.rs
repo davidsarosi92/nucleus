@@ -55,6 +55,9 @@ pub enum Vector {
     /// Text: row `i`'s bytes `bytes[offsets[i]..offsets[i + 1]]` (UTF-8),
     /// and which are `NULL`.
     Text(Vec<u32>, Vec<u8>, Option<Vec<bool>>),
+    /// `char(n)` values as stored (blank-padded), laid out as
+    /// [`Vector::Text`]: compared without their trailing blanks.
+    Char(Vec<u32>, Vec<u8>, Option<Vec<bool>>),
     /// Dates, times or timestamps as their integers (days or µs), and which
     /// are `NULL`.
     Time(TimeKind, Vec<i64>, Option<Vec<bool>>),
@@ -117,6 +120,9 @@ impl Vector {
             Vector::Text(o, b, n) if !is_null_at(n, i) => Value::Text(
                 String::from_utf8_lossy(&b[o[i] as usize..o[i + 1] as usize]).into_owned(),
             ),
+            Vector::Char(o, b, n) if !is_null_at(n, i) => Value::Char(
+                String::from_utf8_lossy(&b[o[i] as usize..o[i + 1] as usize]).into_owned(),
+            ),
             Vector::Time(k, d, n) if !is_null_at(n, i) => k.value(d[i]),
             Vector::Values(v) => v[i].clone(),
             _ => Value::Null,
@@ -131,6 +137,7 @@ impl Vector {
             | Vector::Float(_, n)
             | Vector::Bool(_, n)
             | Vector::Text(_, _, n)
+            | Vector::Char(_, _, n)
             | Vector::Time(_, _, n) => is_null_at(n, i),
             Vector::Values(v) => v[i].is_null(),
         }
@@ -148,13 +155,13 @@ impl Vector {
             Vector::Float(d, n) => Vector::Float(d[range.clone()].to_vec(), nulls(n)),
             Vector::Bool(d, n) => Vector::Bool(d[range.clone()].to_vec(), nulls(n)),
             Vector::Time(k, d, n) => Vector::Time(*k, d[range.clone()].to_vec(), nulls(n)),
-            Vector::Text(o, b, n) => {
+            Vector::Text(o, b, n) | Vector::Char(o, b, n) => {
                 let (lo, hi) = (o[range.start] as usize, o[range.end] as usize);
                 let offsets = o[range.start..=range.end]
                     .iter()
                     .map(|&x| x - lo as u32)
                     .collect();
-                Vector::Text(offsets, b[lo..hi].to_vec(), nulls(n))
+                self.same_text(offsets, b[lo..hi].to_vec(), nulls(n))
             }
             Vector::Values(v) => Vector::Values(v[range].to_vec()),
         }
@@ -179,7 +186,7 @@ impl Vector {
             Vector::Float(d, n) => Vector::Float(pick(d, rows), nulls(n)),
             Vector::Bool(d, n) => Vector::Bool(pick(d, rows), nulls(n)),
             Vector::Time(k, d, n) => Vector::Time(*k, pick(d, rows), nulls(n)),
-            Vector::Text(o, b, n) => {
+            Vector::Text(o, b, n) | Vector::Char(o, b, n) => {
                 let mut offsets = Vec::with_capacity(rows.len() + 1);
                 let mut bytes = Vec::new();
                 offsets.push(0);
@@ -188,7 +195,7 @@ impl Vector {
                     bytes.extend_from_slice(&b[o[i] as usize..o[i + 1] as usize]);
                     offsets.push(bytes.len() as u32);
                 }
-                Vector::Text(offsets, bytes, nulls(n))
+                self.same_text(offsets, bytes, nulls(n))
             }
             Vector::Values(v) => {
                 Vector::Values(rows.iter().map(|&i| v[i as usize].clone()).collect())
@@ -204,8 +211,17 @@ impl Vector {
             | Vector::Float(_, n)
             | Vector::Bool(_, n)
             | Vector::Text(_, _, n)
+            | Vector::Char(_, _, n)
             | Vector::Time(_, _, n) => n.as_deref(),
             _ => None,
+        }
+    }
+
+    /// A text vector of the same kind as this one (`text` or `char(n)`).
+    fn same_text(&self, offsets: Vec<u32>, bytes: Vec<u8>, nulls: Option<Vec<bool>>) -> Vector {
+        match self {
+            Vector::Char(..) => Vector::Char(offsets, bytes, nulls),
+            _ => Vector::Text(offsets, bytes, nulls),
         }
     }
 
@@ -236,17 +252,26 @@ impl Vector {
                     .collect();
                 Vector::Bool(data, nulls(&values))
             }
-            Some(Value::Text(_)) if all(|v| matches!(v, Value::Text(_))) => {
+            Some(first @ (Value::Text(_) | Value::Char(_)))
+                if values.iter().all(|v| {
+                    v.is_null() || std::mem::discriminant(v) == std::mem::discriminant(first)
+                }) =>
+            {
+                let char = matches!(first, Value::Char(_));
                 let mut offsets = Vec::with_capacity(values.len() + 1);
                 let mut bytes = Vec::new();
                 offsets.push(0);
                 for v in &values {
-                    if let Value::Text(s) = v {
+                    if let Value::Text(s) | Value::Char(s) = v {
                         bytes.extend_from_slice(s.as_bytes());
                     }
                     offsets.push(bytes.len() as u32);
                 }
-                Vector::Text(offsets, bytes, nulls(&values))
+                if char {
+                    Vector::Char(offsets, bytes, nulls(&values))
+                } else {
+                    Vector::Text(offsets, bytes, nulls(&values))
+                }
             }
             Some(first) if TimeKind::of(first).is_some() => {
                 let kind = TimeKind::of(first).expect("a time").0;
@@ -372,6 +397,20 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
     Ok(match e {
         Expr::Literal(v) => Rc::new(Vector::Const(v.clone())),
         Expr::Param(_) | Expr::Outer { .. } => Rc::new(Vector::Const(e.eval(&cx.env(&[]))?)),
+        // An uncorrelated subquery runs once per statement (its rows
+        // cached): its value is the same for every row — evaluated here,
+        // with rows in play, as a row would evaluate it.
+        Expr::Subquery(s)
+            if !s.correlated
+                && matches!(
+                    s.kind,
+                    crate::expr::SubKind::Scalar
+                        | crate::expr::SubKind::Exists
+                        | crate::expr::SubKind::Array
+                ) =>
+        {
+            Rc::new(Vector::Const(e.eval(&cx.env(&[]))?))
+        }
         Expr::Column(i) => b
             .cols
             .get(*i)
@@ -406,8 +445,9 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
             let Expr::Literal(Value::Text(p)) = &**pattern else {
                 unreachable!("matched above")
             };
+            // A char(n) matches as stored, blanks included (as a row does).
             match (&*x, like_shape(p)) {
-                (Vector::Text(o, bytes, n), Some((needle, anchor))) => {
+                (Vector::Text(o, bytes, n) | Vector::Char(o, bytes, n), Some((needle, anchor))) => {
                     let mut out = vec![false; b.len];
                     match anchor {
                         None => kernels::eq_bytes(o, bytes, needle.as_bytes(), &mut out),
@@ -428,6 +468,14 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
                 }
             }
         }
+        Expr::InList(x, list, negated) => {
+            let x = eval(x, b, sel, cx)?;
+            let items = list
+                .iter()
+                .map(|item| eval(item, b, sel, cx))
+                .collect::<Result<Vec<_>>>()?;
+            Rc::new(in_list(&x, &items, *negated, b.len, sel)?)
+        }
         Expr::Cast(x, ty) => {
             let x = eval(x, b, sel, cx)?;
             each(b.len, sel, |i| {
@@ -440,6 +488,11 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
                 .map(|a| eval(a, b, sel, cx))
                 .collect::<Result<Vec<_>>>()?;
             let call = CallContext::new(cx.ctx.txn, cx.ctx.registry);
+            // The function's batch kernel, when it has one for these.
+            let refs: Vec<&Vector> = args.iter().map(|a| &**a).collect();
+            if let Some(v) = f.call_batch(&call, &refs, b.len, sel) {
+                return Ok(Rc::new(v?));
+            }
             let mut vals = Vec::with_capacity(args.len());
             each(b.len, sel, |i| {
                 vals.clear();
@@ -741,38 +794,137 @@ fn float_kernel(
     Ok(Vector::Float(out, nulls))
 }
 
-/// `x op y` for a text vector `x` and text `y` (a vector or a constant).
+/// A text or `char(n)` vector's layout, and whether it is `char(n)` (its
+/// rows compared without their trailing blanks).
+pub(crate) fn text_view(v: &Vector) -> Option<(&[u32], &[u8], &Option<Vec<bool>>, bool)> {
+    match v {
+        Vector::Text(o, b, n) => Some((o, b, n, false)),
+        Vector::Char(o, b, n) => Some((o, b, n, true)),
+        _ => None,
+    }
+}
+
+/// A text or `char(n)` constant's bytes as a comparison sees them.
+fn text_const(v: &Value) -> Option<&[u8]> {
+    match v {
+        Value::Text(s) => Some(s.as_bytes()),
+        Value::Char(s) => Some(crate::types::unpadded(s).as_bytes()),
+        _ => None,
+    }
+}
+
+/// Row `i` of a text layout, a `char(n)`'s without its trailing blanks.
+pub(crate) fn text_at<'b>(o: &[u32], b: &'b [u8], char: bool, i: usize) -> &'b [u8] {
+    let s = &b[o[i] as usize..o[i + 1] as usize];
+    if char {
+        let end = s.iter().rposition(|&c| c != b' ').map_or(0, |p| p + 1);
+        &s[..end]
+    } else {
+        s
+    }
+}
+
+/// `x op y` for a text or `char(n)` vector `x` and text `y` (a vector or a
+/// constant) — a `char(n)` side without its trailing blanks, as a row
+/// compares it.
 fn cmp_text(op: BinaryOp, x: &Vector, y: &Vector, len: usize) -> Result<Option<Vector>> {
-    let Vector::Text(o, b, xn) = x else {
+    let Some((o, b, xn, xc)) = text_view(x) else {
         return Ok(None);
     };
-    let at = |o: &[u32], i: usize| o[i] as usize..o[i + 1] as usize;
     let mut out = vec![false; len];
+    let k = cmp_of(op);
     let nulls = match y {
-        Vector::Const(Value::Text(c)) => {
-            if matches!(op, BinaryOp::Eq | BinaryOp::NotEq) {
-                kernels::eq_bytes(o, b, c.as_bytes(), &mut out);
+        Vector::Const(c) if text_const(c).is_some() => {
+            let c = text_const(c).expect("text");
+            if !xc && matches!(op, BinaryOp::Eq | BinaryOp::NotEq) {
+                kernels::eq_bytes(o, b, c, &mut out);
                 if op == BinaryOp::NotEq {
                     out.iter_mut().for_each(|v| *v = !*v);
                 }
             } else {
-                let k = cmp_of(op);
                 for (i, v) in out.iter_mut().enumerate() {
-                    *v = cmp_holds(k, b[at(o, i)].cmp(c.as_bytes()));
+                    *v = cmp_holds(k, text_at(o, b, xc, i).cmp(c));
                 }
             }
             xn.clone()
         }
-        Vector::Text(p, c, yn) => {
-            let k = cmp_of(op);
+        y => {
+            let Some((p, c, yn, yc)) = text_view(y) else {
+                return Ok(None);
+            };
             for (i, v) in out.iter_mut().enumerate() {
-                *v = cmp_holds(k, b[at(o, i)].cmp(&c[at(p, i)]));
+                *v = cmp_holds(k, text_at(o, b, xc, i).cmp(text_at(p, c, yc, i)));
             }
             either_null(xn.as_deref(), yn.as_deref(), len)
         }
-        _ => return Ok(None),
     };
     Ok(Some(Vector::Bool(out, nulls)))
+}
+
+/// `x [NOT] IN (items)` over the rows `sel`, the items evaluated as
+/// vectors: kernels for a text, `char(n)` or integer `x` against
+/// constants of its kind, else a value at a time — `x` and the items only,
+/// as a row compares them.
+fn in_list(
+    x: &Vector,
+    items: &[Rc<Vector>],
+    negated: bool,
+    len: usize,
+    sel: &Sel,
+) -> Result<Vector> {
+    let consts: Option<Vec<&Value>> = items
+        .iter()
+        .map(|v| match &**v {
+            Vector::Const(c) if !c.is_null() => Some(c),
+            _ => None,
+        })
+        .collect();
+    if let Some(consts) = consts {
+        let mut out = vec![false; len];
+        let typed = if let Some((o, b, n, char)) = text_view(x) {
+            let needles: Option<Vec<&[u8]>> = consts.iter().map(|c| text_const(c)).collect();
+            needles.map(|needles| {
+                for i in sel.iter() {
+                    let s = text_at(o, b, char, i);
+                    out[i] = needles.contains(&s);
+                }
+                n.clone()
+            })
+        } else if let Vector::Int(d, n) = x {
+            let ints: Option<Vec<i64>> = consts
+                .iter()
+                .map(|c| {
+                    if let Value::Int(i) = c {
+                        Some(*i)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            ints.map(|ints| {
+                for i in sel.iter() {
+                    out[i] = ints.contains(&d[i]);
+                }
+                n.clone()
+            })
+        } else {
+            None
+        };
+        if let Some(nulls) = typed {
+            if negated {
+                out.iter_mut().for_each(|v| *v = !*v);
+            }
+            return Ok(Vector::Bool(out, nulls));
+        }
+    }
+    let out = each(len, sel, |i| {
+        crate::expr::in_values(
+            &x.value(i),
+            items.iter().map(|v| v.value(i)).collect::<Vec<_>>().iter(),
+            negated,
+        )
+    })?;
+    Ok(Rc::try_unwrap(out).unwrap_or_else(|v| (*v).clone()))
 }
 
 /// `x op y` for a date / time vector `x` and a value of its kind.
@@ -877,6 +1029,7 @@ enum Kind {
     Float,
     Bool,
     Text,
+    Char,
     Time(TimeKind),
     Values,
     Enum,
@@ -889,6 +1042,7 @@ enum Builder {
     Float(Vec<f64>, Vec<bool>),
     Bool(Vec<bool>, Vec<bool>),
     Text(Vec<u32>, Vec<u8>, Vec<bool>),
+    Char(Vec<u32>, Vec<u8>, Vec<bool>),
     Time(TimeKind, Vec<i64>, Vec<bool>),
     Values(Vec<Value>),
 }
@@ -901,10 +1055,15 @@ impl Builder {
             Kind::Int => Builder::Int(Vec::with_capacity(cap), nulls()),
             Kind::Float => Builder::Float(Vec::with_capacity(cap), nulls()),
             Kind::Bool => Builder::Bool(Vec::with_capacity(cap), nulls()),
-            Kind::Text => {
+            Kind::Text | Kind::Char => {
                 let mut offsets = Vec::with_capacity(cap + 1);
                 offsets.push(0);
-                Builder::Text(offsets, Vec::with_capacity(cap * 16), nulls())
+                let bytes = Vec::with_capacity(cap * 16);
+                if kind == Kind::Char {
+                    Builder::Char(offsets, bytes, nulls())
+                } else {
+                    Builder::Text(offsets, bytes, nulls())
+                }
             }
             Kind::Time(k) => Builder::Time(k, Vec::with_capacity(cap), nulls()),
             Kind::Values | Kind::Enum => Builder::Values(Vec::with_capacity(cap)),
@@ -926,7 +1085,7 @@ impl Builder {
                 d.push(false);
                 n.push(true);
             }
-            Builder::Text(o, b, n) => {
+            Builder::Text(o, b, n) | Builder::Char(o, b, n) => {
                 o.push(b.len() as u32);
                 n.push(true);
             }
@@ -956,7 +1115,9 @@ impl Builder {
                 d.push(b);
                 n.push(false);
             }
-            (Builder::Text(o, b, n), Value::Text(s)) => Self::push_text(o, b, n, s.as_bytes()),
+            (Builder::Text(o, b, n), Value::Text(s)) | (Builder::Char(o, b, n), Value::Char(s)) => {
+                Self::push_text(o, b, n, s.as_bytes())
+            }
             (Builder::Time(k, d, n), v) if TimeKind::of(&v).is_some_and(|(kv, _)| kv == *k) => {
                 d.push(TimeKind::of(&v).expect("a time").1);
                 n.push(false);
@@ -978,6 +1139,7 @@ impl Builder {
             | Builder::Float(_, n)
             | Builder::Bool(_, n)
             | Builder::Text(_, _, n)
+            | Builder::Char(_, _, n)
             | Builder::Time(_, _, n) => n.len(),
             Builder::Values(v) => v.len(),
         }
@@ -998,6 +1160,7 @@ impl Builder {
             Builder::Float(d, n) => Vector::Float(d, nulls_from(n)),
             Builder::Bool(d, n) => Vector::Bool(d, nulls_from(n)),
             Builder::Text(o, b, n) => Vector::Text(o, b, nulls_from(n)),
+            Builder::Char(o, b, n) => Vector::Char(o, b, nulls_from(n)),
             Builder::Time(k, d, n) => Vector::Time(k, d, nulls_from(n)),
             Builder::Values(v) => Vector::Values(v),
         }
@@ -1045,6 +1208,7 @@ impl<'a> RowBatches<'a> {
                     DataType::Float => Kind::Float,
                     DataType::Bool => Kind::Bool,
                     DataType::Text => Kind::Text,
+                    DataType::Char => Kind::Char,
                     DataType::Date => Kind::Time(TimeKind::Date),
                     DataType::Time => Kind::Time(TimeKind::Time),
                     DataType::Timestamp => Kind::Time(TimeKind::Timestamp),
@@ -1176,7 +1340,8 @@ fn decode_into(
                 d.push(f64::from_bits(r.u64().map_err(bad)?));
                 nulls.push(false);
             }
-            (Builder::Text(o, bytes, nulls), Some(4)) => {
+            (Builder::Text(o, bytes, nulls), Some(4))
+            | (Builder::Char(o, bytes, nulls), Some(18)) => {
                 r.u8().map_err(bad)?;
                 let len = r.u32().map_err(bad)? as usize;
                 Builder::push_text(o, bytes, nulls, r.take(len).map_err(bad)?);
@@ -1997,6 +2162,11 @@ pub fn parallel_runs() -> u64 {
     PARALLEL_RUNS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Counts a run on worker threads made outside this module (tests).
+pub(crate) fn note_parallel_run() {
+    PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// What one morsel's aggregation gives the merge.
 enum Part {
     /// Its groups' keys, in the order first seen, and each aggregate's
@@ -2111,55 +2281,76 @@ impl<'a> Morsels<'a> {
         stop: bool,
         f: &(dyn Fn(&Ctx, KeyRange) -> Result<T> + Sync),
     ) -> Vec<Option<Result<T>>> {
-        use std::sync::Mutex;
-        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
-        let ambient = crate::parallel::Ambient::capture();
-        let ctx = self.ctx;
-        let (registry, params, needed, validated, memoize) = (
-            ctx.registry,
-            ctx.params,
-            &ctx.needed,
-            ctx.validated,
-            ctx.memoize,
-        );
-        let (shared, ranges, workers) = (self.shared, &self.ranges, self.workers);
-        let first = which.start;
-        let n = which.len();
-        let next = AtomicUsize::new(0);
-        let failed = AtomicUsize::new(usize::MAX);
-        let scanned = AtomicU64::new(0);
-        let results: Vec<Mutex<Option<Result<T>>>> = (0..n).map(|_| Mutex::new(None)).collect();
-        std::thread::scope(|sc| {
-            for _ in 0..workers.min(n) {
-                sc.spawn(|| {
-                    let ((), rows) = ambient.run(|| {
-                        loop {
-                            let m = next.fetch_add(1, SeqCst);
-                            if m >= n || (stop && m > failed.load(SeqCst)) {
-                                break;
-                            }
-                            let txn = crate::parallel::SharedTxn(shared);
-                            let mut wctx = Ctx::new(&txn, registry, params);
-                            wctx.needed = needed.clone();
-                            wctx.validated = validated;
-                            wctx.memoize = memoize;
-                            let r = f(&wctx, ranges[first + m].clone());
-                            if r.is_err() {
-                                failed.fetch_min(m, SeqCst);
-                            }
-                            *results[m].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
-                        }
-                    });
-                    scanned.fetch_add(rows, SeqCst);
-                });
-            }
-        });
-        crate::budget::add_scanned(scanned.into_inner());
-        results
-            .into_iter()
-            .map(|r| r.into_inner().unwrap_or_else(|e| e.into_inner()))
-            .collect()
+        let (ranges, first) = (&self.ranges, which.start);
+        on_workers(
+            self.ctx,
+            self.shared,
+            self.workers,
+            which.len(),
+            stop,
+            &|wctx, m| f(wctx, ranges[first + m].clone()),
+        )
     }
+}
+
+/// `f` over the items `0..n`, on up to `workers` threads, each with a
+/// context of its own over the shared reads `shared` of `ctx`'s
+/// transaction and the statement's ambient state (who, the time, the
+/// budget; the rows read counted for the statement); the results in item
+/// order.  `stop`: after an item fails, the later ones need not run
+/// (theirs are `None`).
+pub(crate) fn on_workers<T: Send>(
+    ctx: &Ctx,
+    shared: &dyn nucleus_kv::KvRead,
+    workers: usize,
+    n: usize,
+    stop: bool,
+    f: &(dyn Fn(&Ctx, usize) -> Result<T> + Sync),
+) -> Vec<Option<Result<T>>> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
+    let ambient = crate::parallel::Ambient::capture();
+    let (registry, params, needed, validated, memoize) = (
+        ctx.registry,
+        ctx.params,
+        &ctx.needed,
+        ctx.validated,
+        ctx.memoize,
+    );
+    let next = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(usize::MAX);
+    let scanned = AtomicU64::new(0);
+    let results: Vec<Mutex<Option<Result<T>>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|sc| {
+        for _ in 0..workers.min(n) {
+            sc.spawn(|| {
+                let ((), rows) = ambient.run(|| {
+                    loop {
+                        let m = next.fetch_add(1, SeqCst);
+                        if m >= n || (stop && m > failed.load(SeqCst)) {
+                            break;
+                        }
+                        let txn = crate::parallel::SharedTxn(shared);
+                        let mut wctx = Ctx::new(&txn, registry, params);
+                        wctx.needed = needed.clone();
+                        wctx.validated = validated;
+                        wctx.memoize = memoize;
+                        let r = f(&wctx, m);
+                        if r.is_err() {
+                            failed.fetch_min(m, SeqCst);
+                        }
+                        *results[m].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                    }
+                });
+                scanned.fetch_add(rows, SeqCst);
+            });
+        }
+    });
+    crate::budget::add_scanned(scanned.into_inner());
+    results
+        .into_iter()
+        .map(|r| r.into_inner().unwrap_or_else(|e| e.into_inner()))
+        .collect()
 }
 
 /// `GROUP BY group` with `aggs` over the pipeline `input`, in parallel: the

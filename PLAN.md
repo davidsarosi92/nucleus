@@ -270,7 +270,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ⬜ |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V12 shipped; benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
@@ -1303,7 +1303,7 @@ in the job summary; results, targets and how to reproduce in
 (`bench/tpch.py`, `bench/clickbench.py`, §M14.20); a pgbench-like mix and
 ANN recall (§M14.12) to follow).
 
-### §M14.20 — Analytics: vectorized execution and columnar storage ⬜
+### §M14.20 — Analytics: vectorized execution and columnar storage ◐
 
 Runs after §M14.11 (its number only reflects when it was planned).  Why
 nucleus can compete with PostgreSQL on large data: PostgreSQL stores rows
@@ -1453,18 +1453,21 @@ attach / detach ✅; the age policy ✅); V10 results columnar end to end ✅ (a
 into the columnar result as columns, in parallel too — a million numeric
 rows into numpy 262 → 92 ms from a row table, 241 → 51 ms from a column
 table); TPC-H against PostgreSQL measured (`bench/tpch.py`, SF 1: every
-result agrees; first 6.5–7.9× PostgreSQL's time, now 1.03× on column
-tables and 2.34× on row tables in the geometric mean, 12 of the 22
+result agrees; first 6.5–7.9× PostgreSQL's time, now 0.75× on column
+tables and 1.40× on row tables in the geometric mean, 13 of the 22
 queries faster on column tables; `EXISTS` / `IN` unnested into semi and
 anti joins on the way) ✅; ClickBench (`bench/clickbench.py`, the first
-million rows: every result agrees, but for ties at a `LIMIT`; 0.34× of
-PostgreSQL's time on a column table, 2.47× on a row table) ✅; the
+million rows: every result agrees, but for ties at a `LIMIT`; 0.32× of
+PostgreSQL's time on a column table, 2.32× on a row table) ✅; the
 targets recorded ✅ (`docs/benchmarks.md`, Targets: column tables at most
 0.8× PostgreSQL's time on TPC-H and 0.5× on ClickBench in the geometric
 mean, no query above 3×; row tables within 2×; loads, updates and
 deletes within 2×, scans, sorts and joins within 3×, reads by key at
-least even — met so far: ClickBench, and every `bench/run.py` target:
-loads, updates and deletes, scans, sorts and joins, reads by key); V11 write intents among the versions ✅ — a large
+least even — met so far: TPC-H and ClickBench on column tables, TPC-H
+on row tables, and every `bench/run.py` target: loads, updates and
+deletes, scans, sorts and joins, reads by key; left: TPC-H Q13 and Q16,
+ClickBench Q18 and Q39 above 3×, ClickBench on a row table, the TPC-H
+and ClickBench loads); V11 write intents among the versions ✅ — a large
 transaction's spilled writes go straight into the version keyspace as
 *intents* (a version stamped with the transaction's id, not a commit
 timestamp: readers resolve it by the transaction's status — its own,
@@ -2186,6 +2189,17 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20: TPC-H Q19 and Q22 — `char(n)` columns a
+  vector of their own (row and column storage), `IN` lists of constants
+  a kernel, scalar functions' batch kernels (`ScalarFunction::
+  call_batch`, `substr` the first), uncorrelated subqueries evaluated
+  once in a batch; index nested loops on worker threads; the buffer
+  pool's hits under a read lock of their shard, the column store's cache
+  of decoded columns in shards the same way (one bound for all).  TPC-H
+  SF 1: 0.75× PostgreSQL's time on column tables (from 1.03×; the
+  target, 0.8×, met), 1.40× on row tables (from 2.34×; within 2×); Q22
+  7.2× → 1.0×, Q19 7.9× → 2.95× on column tables; ClickBench 0.32× and
+  2.32×; `bench/run.py` within its targets (`docs/benchmarks.md`).
 - **2026-11-01** — §M14.20: TPC-H and ClickBench measured again at
   `e2d1afa`: TPC-H 1.03× PostgreSQL's time on column tables (1.10× on
   10-30), 2.34× on row tables (2.24×; a second run 2.26×, the row

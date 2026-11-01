@@ -885,7 +885,7 @@ pub fn setting(name: &str) -> Option<String> {
 }
 
 /// `v IN (items)` with SQL's NULL rules.
-fn in_values<'v>(
+pub(crate) fn in_values<'v>(
     v: &Value,
     items: impl Iterator<Item = &'v Value>,
     negated: bool,

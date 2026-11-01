@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::error::{Error, Result};
 use crate::page::{Page, PageId, PageType};
@@ -41,7 +41,7 @@ struct Frame {
 struct Inner {
     start: usize,
     end: usize,
-    table: HashMap<PageId, usize>,
+    table: HashMap<PageId, usize, PageHash>,
     /// By frame, less `start`.
     ids: Vec<Option<PageId>>,
     free_frames: Vec<usize>,
@@ -51,6 +51,36 @@ struct Inner {
 impl Inner {
     fn id(&mut self, frame: usize) -> &mut Option<PageId> {
         &mut self.ids[frame - self.start]
+    }
+}
+
+/// A page id's hash: one multiplication (a page table is looked up on
+/// every fetch; SipHash's resistance to chosen keys buys nothing here).
+#[derive(Clone, Copy, Default)]
+struct PageHash;
+
+impl std::hash::BuildHasher for PageHash {
+    type Hasher = PageHasher;
+    fn build_hasher(&self) -> PageHasher {
+        PageHasher(0)
+    }
+}
+
+#[derive(Default)]
+struct PageHasher(u64);
+
+impl std::hash::Hasher for PageHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(b)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0 ^ x).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 ^= self.0 >> 29;
     }
 }
 
@@ -77,7 +107,9 @@ pub struct BufferPool {
     /// Each made when first used, so a large pool costs nothing until it
     /// fills.
     frames: Box<[std::sync::OnceLock<Frame>]>,
-    shards: Box<[Mutex<Inner>]>,
+    /// Locked for reading to find a page and pin it (a hit), for writing
+    /// to change what the shard holds.
+    shards: Box<[RwLock<Inner>]>,
     hits: AtomicU64,
     misses: AtomicU64,
     evictions: AtomicU64,
@@ -148,10 +180,10 @@ impl BufferPool {
         let shards = (0..n)
             .map(|i| {
                 let (start, end) = (capacity * i / n, capacity * (i + 1) / n);
-                Mutex::new(Inner {
+                RwLock::new(Inner {
                     start,
                     end,
-                    table: HashMap::new(),
+                    table: HashMap::default(),
                     ids: vec![None; end - start],
                     free_frames: (start..end).rev().collect(),
                     hand: start,
@@ -199,8 +231,8 @@ impl BufferPool {
         }
     }
 
-    /// The shard of page `id`, locked.
-    fn lock(&self, id: PageId) -> MutexGuard<'_, Inner> {
+    /// The shard of page `id`.
+    fn shard(&self, id: PageId) -> &RwLock<Inner> {
         let n = self.shards.len();
         let at = if n == 1 {
             0
@@ -208,13 +240,22 @@ impl BufferPool {
             // Neighbouring pages (a scan's) to different shards.
             (id.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize % n
         };
-        self.shards[at].lock().unwrap_or_else(|e| e.into_inner())
+        &self.shards[at]
+    }
+
+    /// The shard of page `id`, locked to change it.
+    fn lock(&self, id: PageId) -> RwLockWriteGuard<'_, Inner> {
+        self.shard(id).write().unwrap_or_else(|e| e.into_inner())
     }
 
     fn pin(&self, frame: usize, id: PageId) -> PageRef<'_> {
         let f = self.frame(frame);
         f.pins.fetch_add(1, Ordering::Acquire);
-        f.referenced.store(true, Ordering::Relaxed);
+        // Written only when it changes: a hot page's frame is not written
+        // by every thread that pins it.
+        if !f.referenced.load(Ordering::Relaxed) {
+            f.referenced.store(true, Ordering::Relaxed);
+        }
         PageRef {
             pool: self,
             frame,
@@ -226,7 +267,11 @@ impl BufferPool {
     pub fn fetch(&self, id: PageId) -> Result<PageRef<'_>> {
         loop {
             let epoch = {
-                let inner = self.lock(id);
+                // A hit only reads the shard: many threads find their pages
+                // in it at once (a parallel join's lookups all descend from
+                // the same root).  Pins grow under either lock, and an
+                // eviction, which takes it for writing, sees them.
+                let inner = self.shard(id).read().unwrap_or_else(|e| e.into_inner());
                 if let Some(&frame) = inner.table.get(&id) {
                     self.hits.fetch_add(1, Ordering::Relaxed);
                     return Ok(self.pin(frame, id));
@@ -255,7 +300,7 @@ impl BufferPool {
     /// Puts `page`, just read, in a frame for `id`.
     fn load(
         &self,
-        mut inner: std::sync::MutexGuard<'_, Inner>,
+        mut inner: RwLockWriteGuard<'_, Inner>,
         id: PageId,
         page: Page,
     ) -> Result<PageRef<'_>> {
@@ -329,8 +374,8 @@ impl BufferPool {
             let frame = inner.hand;
             inner.hand = if frame + 1 == end { start } else { frame + 1 };
             let f = self.frame(frame);
-            // Pins only grow under the shard's lock, which we hold, so a zero
-            // seen here stays zero until we are done.
+            // Pins only grow under the shard's lock, which we hold for
+            // writing, so a zero seen here stays zero until we are done.
             if f.pins.load(Ordering::Acquire) != 0 {
                 continue;
             }
@@ -357,7 +402,7 @@ impl BufferPool {
     /// Writes every dirty page to the pager.  Pages stay cached.
     pub fn flush(&self) -> Result<()> {
         for shard in &*self.shards {
-            let inner = shard.lock().unwrap_or_else(|e| e.into_inner());
+            let inner = shard.write().unwrap_or_else(|e| e.into_inner());
             self.flush_shard(&inner)?;
         }
         Ok(())

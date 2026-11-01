@@ -274,7 +274,11 @@ over unpinned frames; dirty victims are written back first.  `flush`
 writes every dirty frame, `sync` = flush + pager commit.  The frames are
 split into up to 16 shards (at least 256 frames each; a page always in the
 shard of its id), each with its own page table, free frames, clock hand and
-lock, so a parallel scan's workers do not queue on one lock; a miss reads
+reader/writer lock, so a parallel scan's workers do not queue on one lock.
+A hit only reads its shard's page table (threads whose lookups all descend
+from one root share it), a change writes it; a frame's pin count and
+reference bit are atomics, the bit written only when it changes, and the
+page table hashes a page id with one multiplication.  A miss reads
 the page without any (and reads again if a page was written back
 meanwhile), so threads reading cold pages do not wait on each other.  Errors: `PoolExhausted` (every
 frame pinned), `Pinned`.  `stats()`: hits, misses, evictions, write-backs.
@@ -1194,12 +1198,21 @@ first batch is 64 rows, each next one twice the last, up to `batch_size`
 Rows are decoded from the stored encoding straight into the vectors.
 Expressions are evaluated a batch per call: kernels for integer and
 double arithmetic and comparisons (an integer widened against a double,
-as a row widens it), text comparisons and `LIKE` with `%` only at the
-pattern's ends, comparisons of dates, times and timestamps of one kind,
-`AND` / `OR` / `NOT`, `IS NULL`; casts and function calls a value at a
-time over the batch's vectors; anything else (`CASE`, subqueries,
+as a row widens it), text and `char(n)` comparisons (a `char(n)` side
+without its trailing blanks, as a row compares it) and `LIKE` with `%`
+only at the pattern's ends, `IN` lists of constants over text, `char(n)`
+and integers (other lists value by value, over the operand and the items
+only), comparisons of dates, times and timestamps of one kind, `AND` /
+`OR` / `NOT`, `IS NULL`; an uncorrelated scalar, `EXISTS` or `ARRAY`
+subquery once (its rows are cached for the statement); function calls
+through the function's batch kernel when it has one
+(`ScalarFunction::call_batch`, §8.12: `substr` over text and `char(n)`
+with constant positions), else casts and calls a value at a time over
+the batch's vectors; anything else (`CASE`, correlated subqueries,
 numerics, …) a row at a time.  Text is a column of offsets and bytes
-(Arrow's layout), dates and times their integers.  The kernels
+(Arrow's layout), `char(n)` the same as stored (blank-padded), a vector
+of its own from row and column storage alike; dates and times their
+integers.  The kernels
 (`nucleus-kernels`) are dense loops over every position of a batch,
 written so the compiler vectorizes them and compiled once per CPU level —
 AVX2 and AVX-512 on x86-64, chosen at run time by feature detection;
@@ -1302,7 +1315,14 @@ order is a stable sort's).
 An **index nested loop** (`JoinAlgo::Lookup`, `EXPLAIN`: `Index Nested
 Loop`) runs its right side — a table's scan by an index on the join keys,
 the left row's values as `Outer` references — once per left row (inner,
-left, semi and anti joins).
+left, semi and anti joins).  It runs on worker threads when it can: the
+left rows read in blocks (256 at first, each next twice the last, up to
+16 384), a block cut into pieces the workers look up over the shared
+reads, the pieces' rows given in the left rows' order — a single pass's
+rows, and its error where it would stop.  Not under `EXPLAIN ANALYZE`,
+for an enclosing row, for a lookup or condition with a subquery or a
+volatile call, or while a statement on the thread holds rows it inserted
+into a column table unstored (only that thread's reads see them).
 A **semi join** gives each left row some right row matches, once; an
 **anti join** each left row none matches (a NULL key matches nothing, so
 its row comes out of an anti join); both give only the left's columns,
@@ -1670,7 +1690,11 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   only when the first lies in a range computed from the second: two
   functions giving the bounds; the binder adds the comparisons beside the
   call, for index ranges — `inet <<= cidr` uses it), `call(&CallContext,
-  &[Value])`.
+  &[Value])`, and optionally `call_batch(&CallContext, &[&Vector], len,
+  &Sel) -> Option<Result<Vector>>`: a batch kernel for the vectorized
+  executor (§8.5), the values for the rows in play — `NULL`s and errors
+  as `call` gives them; `None` (the default) for arguments it has no
+  kernel for, and `call` is made a row at a time.
   `CallContext` gives the statement's transaction, the registry,
   `now()`, `clock()` and `random(buf)` (all through the database's
   platform).
@@ -1862,7 +1886,10 @@ those integers, by frame of reference and bit packing; anything else value
 by value; `NULL`s a bitmap (a segment
 lists the table columns it holds: a partial column copy holds some).  A
 segment's id is a hash of its contents, so it never changes and its decoded columns
-are cached by id.  A read of one row (by its key: an index lookup, a
+are cached by id (in 16 shards by key, a hit locking its shard only to
+read; the size bound, 256 MB, is all shards' together, and past it the
+columns used longest ago in any shard go, an eighth of the bound at a
+time).  A read of one row (by its key: an index lookup, a
 correlated subquery's) takes each column's value from the column decoded
 if it is cached, else from its encoding as stored — cached instead of the
 column decoded, smaller — read where the value lies (`segment::value_at`:
@@ -2643,6 +2670,16 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-01 — §M14.20, TPC-H Q19 and Q22:** `Vector::Char`
+  (`char(n)` from row and column storage, compared without trailing
+  blanks), an `IN`-list kernel, `ScalarFunction::call_batch` (`substr`'s
+  kernel), uncorrelated subqueries evaluated once per batch evaluation;
+  index nested loops on worker threads (`vector::on_workers`, shared
+  with the morsels); the buffer pool's hits under its shard's read lock,
+  page ids hashed by one multiplication; the column store's cache of
+  decoded columns in 16 read-locked shards under one bound.  TPC-H SF 1
+  0.75× / 1.40× PostgreSQL's time (column / row tables), ClickBench
+  0.32× / 2.32× (`docs/benchmarks.md`).
 - **2026-11-01 — §M14.20, TPC-H and ClickBench again** (at `e2d1afa`,
   `docs/benchmarks.md`): TPC-H SF 1 1.03× PostgreSQL's time on column
   tables and 2.34× on row tables in the geometric mean (1.10× and 2.24×

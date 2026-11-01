@@ -242,6 +242,23 @@ pub trait ScalarFunction: Send + Sync {
 
     /// Computes the value.
     fn call(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Value>;
+
+    /// A batch kernel (the vectorized executor, PLAN.md §M14.20): the
+    /// values for the rows `sel` of argument vectors of `len` positions —
+    /// those [`call`](Self::call) gives, `NULL`s and errors included (the
+    /// kernel handles `NULL` arguments itself, strict or not).  `None`: no
+    /// kernel for these arguments, and `call` is made a row at a time (the
+    /// default).
+    fn call_batch(
+        &self,
+        cx: &CallContext<'_>,
+        args: &[&Vector],
+        len: usize,
+        sel: &Sel,
+    ) -> Option<Result<Vector>> {
+        let _ = (cx, args, len, sel);
+        None
+    }
 }
 
 /// A registered function, as a bound expression holds it.  Two are equal

@@ -18,7 +18,7 @@ use crate::ext::{
 };
 use crate::fsum::ExactSum;
 use crate::types::{DataType, Row, Value};
-use crate::vector::Vector;
+use crate::vector::{Sel, Vector};
 
 /// The built-in module.
 pub struct Builtin;
@@ -217,6 +217,65 @@ impl ScalarFunction for BuiltinFn {
             f => crate::expr::func(f, args.to_vec()),
         }
     }
+
+    fn call_batch(
+        &self,
+        _: &CallContext<'_>,
+        args: &[&Vector],
+        len: usize,
+        sel: &Sel,
+    ) -> Option<Result<Vector>> {
+        match self.func {
+            Func::Substr => substr_batch(args, len, sel).map(Ok),
+            _ => None,
+        }
+    }
+}
+
+/// `substr(text, from [, count])` over a text or `char(n)` vector (a
+/// char without its trailing blanks) with constant positions: characters
+/// `from .. from + count`, as [`crate::expr::func`] takes them.  `None`
+/// for anything else (bytea, positions that vary, `NULL` or negative
+/// counts — the row's way decides those).
+fn substr_batch(args: &[&Vector], len: usize, sel: &Sel) -> Option<Vector> {
+    let (o, b, nulls, char) = crate::vector::text_view(args.first()?)?;
+    let int = |v: &Vector| match v {
+        Vector::Const(Value::Int(i)) => Some(*i),
+        _ => None,
+    };
+    let from = int(args.get(1)?)?;
+    let count = match args.get(2) {
+        Some(v) => Some(int(v).filter(|&c| c >= 0)?),
+        None => None,
+    };
+    let start = from.max(1);
+    let end = count.map_or(i64::MAX, |c| from.saturating_add(c).max(start));
+    // Characters [a, b) of the string, as a byte range.
+    let (a, z) = ((start - 1) as usize, (end - 1).max(0) as usize);
+    let mut offsets = Vec::with_capacity(len + 1);
+    let mut bytes = Vec::new();
+    offsets.push(0u32);
+    let mut rows = sel.iter().peekable();
+    for i in 0..len {
+        if rows.peek() == Some(&i) {
+            rows.next();
+            if !nulls.as_ref().is_some_and(|n| n[i]) {
+                let s = crate::vector::text_at(o, b, char, i);
+                let range = if s.is_ascii() {
+                    a.min(s.len())..z.min(s.len())
+                } else {
+                    let t = std::str::from_utf8(s).ok()?;
+                    let at = |k: usize| t.char_indices().nth(k).map_or(t.len(), |(p, _)| p);
+                    at(a)..at(z.max(a))
+                };
+                if range.start < range.end {
+                    bytes.extend_from_slice(&s[range]);
+                }
+            }
+        }
+        offsets.push(bytes.len() as u32);
+    }
+    Some(Vector::Text(offsets, bytes, nulls.clone()))
 }
 
 /// The array functions and `regexp_replace`, which take `NULL`s their

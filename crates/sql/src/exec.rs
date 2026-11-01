@@ -1064,70 +1064,250 @@ fn join<'a>(
 
 /// An index nested loop: for each left row, the right plan (a scan by an
 /// index on the join keys, reading the left row as `Outer` at depth 1) run
-/// for it, its rows joined as a nested loop's.
+/// for it, its rows joined as a nested loop's — on worker threads when it
+/// can ([`ParallelLookups`]).
 fn lookup_join<'a>(left: Rows<'a>, right: &'a Plan, spec: JoinSpec<'a>) -> Result<Rows<'a>> {
-    Ok(Box::new(left.flat_map(move |l| -> Vec<Result<Row>> {
-        let l = match l {
-            Ok(l) => l,
-            Err(e) => return vec![Err(e)],
-        };
-        // A semi or anti join: the right rows read until one matches.
-        if spec.existence() {
-            let e = env(&l, spec.ctx, spec.outer);
-            let mut matched = false;
-            match build(right, spec.ctx, Some(&e)) {
-                Ok(rows) => {
-                    for r in rows {
-                        let r = match r {
-                            Ok(r) => r,
-                            Err(e) => return vec![Err(e)],
-                        };
-                        let mut combined = l.clone();
-                        combined.extend_from_slice(&r);
-                        match spec.matches(&combined) {
-                            Ok(true) => {
-                                matched = true;
-                                break;
-                            }
-                            Ok(false) => {}
-                            Err(e) => return vec![Err(e)],
+    if let Some((shared, workers)) = parallel_lookups(right, &spec) {
+        return Ok(Box::new(ParallelLookups {
+            left,
+            right,
+            spec,
+            shared,
+            workers,
+            block: LOOKUP_BLOCK,
+            out: std::collections::VecDeque::new(),
+            done: false,
+        }));
+    }
+    Ok(Box::new(left.flat_map(move |l| match l {
+        Ok(l) => lookup_one(l, right, &spec),
+        Err(e) => vec![Err(e)],
+    })))
+}
+
+/// What one left row of an index nested loop gives: its joined rows (a
+/// semi or anti join's: the row itself, or nothing), or an error.
+fn lookup_one(l: Row, right: &Plan, spec: &JoinSpec) -> Vec<Result<Row>> {
+    // A semi or anti join: the right rows read until one matches.
+    if spec.existence() {
+        let e = env(&l, spec.ctx, spec.outer);
+        let mut matched = false;
+        match build(right, spec.ctx, Some(&e)) {
+            Ok(rows) => {
+                for r in rows {
+                    let r = match r {
+                        Ok(r) => r,
+                        Err(e) => return vec![Err(e)],
+                    };
+                    let mut combined = l.clone();
+                    combined.extend_from_slice(&r);
+                    match spec.matches(&combined) {
+                        Ok(true) => {
+                            matched = true;
+                            break;
                         }
+                        Ok(false) => {}
+                        Err(e) => return vec![Err(e)],
                     }
                 }
-                Err(e) => return vec![Err(e)],
             }
-            return match (spec.kind, matched) {
-                (JoinType::Semi, true) | (JoinType::Anti, false) => vec![Ok(l)],
-                _ => Vec::new(),
-            };
-        }
-        let matches = match collect(right, spec.ctx, Some(&env(&l, spec.ctx, spec.outer))) {
-            Ok(rows) => rows,
             Err(e) => return vec![Err(e)],
+        }
+        return match (spec.kind, matched) {
+            (JoinType::Semi, true) | (JoinType::Anti, false) => vec![Ok(l)],
+            _ => Vec::new(),
         };
-        let mut out = Vec::new();
-        for r in &matches {
-            let mut combined = l.clone();
-            combined.extend_from_slice(r);
-            match spec.matches(&combined) {
-                Ok(true) if spec.existence() => {
-                    return match spec.kind {
-                        JoinType::Semi => vec![Ok(l)],
-                        _ => Vec::new(),
-                    };
+    }
+    let matches = match collect(right, spec.ctx, Some(&env(&l, spec.ctx, spec.outer))) {
+        Ok(rows) => rows,
+        Err(e) => return vec![Err(e)],
+    };
+    let mut out = Vec::new();
+    for r in &matches {
+        let mut combined = l.clone();
+        combined.extend_from_slice(r);
+        match spec.matches(&combined) {
+            Ok(true) if spec.existence() => {
+                return match spec.kind {
+                    JoinType::Semi => vec![Ok(l)],
+                    _ => Vec::new(),
+                };
+            }
+            Ok(true) => out.push(Ok(combined)),
+            Ok(false) => {}
+            Err(e) => return vec![Err(e)],
+        }
+    }
+    if out.is_empty()
+        && let Some(row) = spec.unmatched(l)
+    {
+        out.push(Ok(row));
+    }
+    out
+}
+
+/// The first block of left rows an index nested loop looks up on worker
+/// threads; each next one twice the last, up to [`LOOKUP_BLOCK_MAX`] (so a
+/// query that wants few rows looks few up ahead).
+const LOOKUP_BLOCK: usize = 256;
+const LOOKUP_BLOCK_MAX: usize = 16_384;
+
+/// Whether an index nested loop's lookups can run on worker threads, and
+/// over what: more than one worker, no enclosing row, no `EXPLAIN
+/// ANALYZE`, nothing that would differ by thread in the lookup or the
+/// condition (a scan, perhaps under a projection, of expressions
+/// [`crate::vector::parallel_safe`]), no rows a statement has written and
+/// a thread of its own keeps (a column table's insert buffer), and a
+/// transaction that shares its reads.
+fn parallel_lookups<'a>(
+    right: &Plan,
+    spec: &JoinSpec<'a>,
+) -> Option<(&'a dyn nucleus_kv::KvRead, usize)> {
+    use crate::vector::parallel_safe;
+    fn safe(p: &Plan) -> bool {
+        match p {
+            Plan::Scan { access, filter, .. } => {
+                filter.as_ref().is_none_or(parallel_safe)
+                    && match access {
+                        Access::Full => true,
+                        Access::Key {
+                            prefix,
+                            lower,
+                            upper,
+                            ..
+                        } => {
+                            let bound = |b: &Bound<Expr>| match b {
+                                Bound::Included(e) | Bound::Excluded(e) => parallel_safe(e),
+                                Bound::Unbounded => true,
+                            };
+                            prefix.iter().all(parallel_safe) && bound(lower) && bound(upper)
+                        }
+                    }
+            }
+            Plan::Project { input, exprs } => exprs.iter().all(parallel_safe) && safe(input),
+            _ => false,
+        }
+    }
+    let workers = crate::budget::workers();
+    if workers < 2
+        || spec.outer.is_some()
+        || spec.ctx.profile.is_some()
+        || !spec.on.is_none_or(parallel_safe)
+        || !safe(right)
+        || crate::column_store::statement_buffered()
+    {
+        return None;
+    }
+    Some((spec.ctx.txn.shared()?, workers))
+}
+
+/// An index nested loop on worker threads: the left rows read a block at a
+/// time, the block cut into pieces the workers look up, the pieces' rows
+/// given in the left rows' order — a single pass's rows, and its error
+/// where it would stop (the rows before it, then the error).
+struct ParallelLookups<'a> {
+    left: Rows<'a>,
+    right: &'a Plan,
+    spec: JoinSpec<'a>,
+    shared: &'a dyn nucleus_kv::KvRead,
+    workers: usize,
+    block: usize,
+    out: std::collections::VecDeque<Result<Row>>,
+    done: bool,
+}
+
+impl ParallelLookups<'_> {
+    /// The next block's rows into `out`.
+    fn fill(&mut self) {
+        let mut rows = Vec::with_capacity(self.block);
+        let mut failed = None;
+        while rows.len() < self.block {
+            match self.left.next() {
+                None => {
+                    self.done = true;
+                    break;
                 }
-                Ok(true) => out.push(Ok(combined)),
-                Ok(false) => {}
-                Err(e) => return vec![Err(e)],
+                Some(Ok(r)) => rows.push(r),
+                Some(Err(e)) => {
+                    failed = Some(e);
+                    break;
+                }
             }
         }
-        if out.is_empty()
-            && let Some(row) = spec.unmatched(l)
-        {
-            out.push(Ok(row));
+        self.block = (self.block * 2).min(LOOKUP_BLOCK_MAX);
+        if !rows.is_empty() {
+            crate::vector::note_parallel_run();
+            let pieces = (self.workers * 4).min(rows.len());
+            let per = rows.len().div_ceil(pieces);
+            let chunks: Vec<&[Row]> = rows.chunks(per).collect();
+            let (right, s) = (self.right, self.spec);
+            let (kind, on, algo, left_width, right_width) =
+                (s.kind, s.on, s.algo, s.left_width, s.right_width);
+            let results = crate::vector::on_workers(
+                self.spec.ctx,
+                self.shared,
+                self.workers,
+                chunks.len(),
+                false,
+                &|wctx, m| {
+                    let spec = JoinSpec {
+                        kind,
+                        on,
+                        algo,
+                        left_width,
+                        right_width,
+                        ctx: wctx,
+                        outer: None,
+                    };
+                    let mut out = Vec::new();
+                    for l in chunks[m] {
+                        let got = lookup_one(l.clone(), right, &spec);
+                        let failed = got.iter().any(Result::is_err);
+                        out.extend(got);
+                        if failed {
+                            break;
+                        }
+                    }
+                    Ok(out)
+                },
+            );
+            for r in results {
+                let got = match r {
+                    Some(Ok(got)) => got,
+                    Some(Err(e)) => vec![Err(e)],
+                    None => vec![Err(Error::internal("a lookup piece not run"))],
+                };
+                for row in got {
+                    let failed = row.is_err();
+                    self.out.push_back(row);
+                    if failed {
+                        self.done = true;
+                        return;
+                    }
+                }
+            }
         }
-        out
-    })))
+        if let Some(e) = failed {
+            self.out.push_back(Err(e));
+            self.done = true;
+        }
+    }
+}
+
+impl Iterator for ParallelLookups<'_> {
+    type Item = Result<Row>;
+
+    fn next(&mut self) -> Option<Result<Row>> {
+        loop {
+            if let Some(r) = self.out.pop_front() {
+                return Some(r);
+            }
+            if self.done {
+                return None;
+            }
+            self.fill();
+        }
+    }
 }
 
 fn join_with<'a>(

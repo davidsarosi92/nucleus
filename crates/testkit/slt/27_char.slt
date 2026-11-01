@@ -72,3 +72,54 @@ abc| longe|
 
 statement ok
 DROP TABLE codes
+
+# IN lists, substr and comparisons with text of char(n) columns (the
+# vectorized executor's char vectors, §M14.20).
+
+query BBBB
+SELECT 'ab'::char(4) IN ('ab', 'cd'), 'ab '::text IN ('ab'::char(3)), 'ab'::char(3) IN ('ab ', 'x'), 'ab'::char(4) NOT IN ('ab  ')
+----
+true false true false
+
+query TTT
+SELECT substr('ab'::char(4), 1, 3) || '|', substring('é b'::char(5) from 2 for 3) || '|', substr('abc'::char(5), 3) || '|'
+----
+ab|  b| c|
+
+statement ok
+CREATE TABLE codes2 (code char(3) PRIMARY KEY, name character(5))
+
+statement ok
+INSERT INTO codes2 VALUES ('ab', 'x'), ('a', 'longe'), ('abc', 'x')
+
+query T
+SELECT code || '|' FROM codes2 WHERE code IN ('ab', 'abc ') ORDER BY code
+----
+ab|
+abc|
+
+query T
+SELECT code || '|' FROM codes2 WHERE code NOT IN ('ab') ORDER BY code
+----
+a|
+abc|
+
+query TI
+SELECT substr(code, 1, 1) || '|', count(*) FROM codes2 GROUP BY 1 ORDER BY 1
+----
+a| 3
+
+query T
+SELECT code || '|' FROM codes2 WHERE substring(code from 2 for 2) IN ('b', 'bc') ORDER BY code
+----
+ab|
+abc|
+
+query T
+SELECT code || '|' FROM codes2 WHERE code = name OR name = 'x' ORDER BY code
+----
+ab|
+abc|
+
+statement ok
+DROP TABLE codes2

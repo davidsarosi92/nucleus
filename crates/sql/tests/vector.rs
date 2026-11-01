@@ -459,3 +459,142 @@ fn parallel_writes_agree() {
         "the writes found their rows in parallel"
     );
 }
+
+/// `char(n)` columns as char vectors, against text and themselves; `IN`
+/// lists, `substr` and `LIKE` over them; an uncorrelated subquery in a
+/// filter — the same in row and column tables at every batch size.
+#[test]
+fn char_text_in_lists_and_substr_agree() {
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(12)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 0);
+        s.execute(&format!(
+            "CREATE TABLE c (id INT PRIMARY KEY, k char(6), j char(3), t TEXT, n INT) \
+             WITH (storage = {storage}); \
+             INSERT INTO c SELECT i, \
+               CASE WHEN i % 17 = 0 THEN NULL WHEN i % 5 = 0 THEN 'é' || (i % 7) \
+                 ELSE 'ab' || (i % 9) END, \
+               CASE WHEN i % 4 = 0 THEN '' ELSE (i % 3)::text END, \
+               CASE WHEN i % 13 = 0 THEN NULL WHEN i % 3 = 0 THEN 'ab' || (i % 9) || ' ' \
+                 ELSE 'ab' || (i % 9) END, \
+               CASE WHEN i % 11 = 0 THEN NULL ELSE i % 6 END \
+             FROM generate_series(1, 2500) i"
+        ))
+        .unwrap();
+        let queries: Vec<String> = [
+            "SELECT id, k || '|' FROM c WHERE k = 'ab3' ORDER BY id",
+            "SELECT count(*) FROM c WHERE k = 'ab3   '",
+            "SELECT count(*) FROM c WHERE k <> 'ab3' AND k > 'ab1' AND k <= 'é4'",
+            "SELECT count(*) FROM c WHERE k = 'ab3'::char(2)",
+            "SELECT count(*) FROM c WHERE k = t",
+            "SELECT count(*) FROM c WHERE t = k OR k < t",
+            "SELECT count(*) FROM c WHERE k = j OR j = ''",
+            "SELECT count(*) FROM c WHERE k IN ('ab1', 'ab2 ', 'é3')",
+            "SELECT count(*) FROM c WHERE k NOT IN ('ab1', 'ab2')",
+            "SELECT count(*) FROM c WHERE k IN ('ab1', NULL)",
+            "SELECT count(*) FROM c WHERE k NOT IN ('ab1', NULL)",
+            "SELECT count(*) FROM c WHERE t IN ('ab3', 'ab3 ', 'ab4')",
+            "SELECT count(*) FROM c WHERE t IN ('ab3'::char(4), 'ab4')",
+            "SELECT count(*) FROM c WHERE n IN (1, 3, 5)",
+            "SELECT count(*) FROM c WHERE n NOT IN (1, 3, 5)",
+            "SELECT count(*) FROM c WHERE n IN (1, 2.0)",
+            "SELECT count(*) FROM c WHERE n IN (1, id % 4)",
+            "SELECT count(*) FROM c WHERE id IN (n, n + 1, 7)",
+            "SELECT substr(k, 1, 2), count(*) FROM c GROUP BY 1 ORDER BY 1",
+            "SELECT id, substring(k from 2 for 1) || '|', substr(t, 3) || '|', substr(k, 0, 2), \
+               substr(k, -1), substr(t, 2, 0), substr(k, 3, 100) || '|' FROM c \
+               WHERE id % 7 = 1 ORDER BY id",
+            "SELECT count(*) FROM c WHERE substring(k from 1 for 1) IN ('a', 'é')",
+            "SELECT count(*) FROM c WHERE substr(k, 1, 2) IN ('ab') AND substr(t, 1, 2) = 'ab'",
+            "SELECT id, substr(k, 1, n) FROM c WHERE id < 40 ORDER BY id",
+            "SELECT id, substr(k, 1, -1) FROM c WHERE id < 40 ORDER BY id",
+            "SELECT count(*) FROM c WHERE k LIKE 'ab%' OR k LIKE '%3' OR k LIKE 'ab3'",
+            "SELECT count(*) FROM c WHERE k LIKE 'ab3   '",
+            "SELECT count(*) FROM c WHERE n > (SELECT avg(n) FROM c WHERE k IN ('ab1', 'ab2'))",
+            "SELECT count(*) FROM c WHERE n = (SELECT n FROM c WHERE id < 3)",
+            "SELECT count(*) FROM c WHERE id < 0 AND n = (SELECT n FROM c WHERE id < 3)",
+            "SELECT count(*) FROM c WHERE EXISTS (SELECT 1 FROM c WHERE k = 'zz') OR n = 1",
+            "SELECT k, j, count(*) FROM c GROUP BY k, j ORDER BY k, j",
+            "SELECT max(k) || '|', min(j) || '|' FROM c",
+        ]
+        .iter()
+        .map(|q| q.to_string())
+        .collect();
+        let errors = agree(&db, &queries);
+        assert_eq!(
+            errors, 2,
+            "{storage}: the subquery of rows and substr's negative count"
+        );
+    }
+}
+
+/// Index nested loops on worker threads give a single pass's rows, in its
+/// order, and its errors: inner, left, semi and anti joins, by the primary
+/// key and by a secondary index, on row and column tables.
+#[test]
+fn parallel_lookups_agree() {
+    // (A column table's lookups cost more: fewer left rows look up.)
+    for (storage, few) in [("row", 1500), ("column", 120)] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(13)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE big (id INT PRIMARY KEY, g INT, v INT, s char(4)) \
+             WITH (storage = {storage}); \
+             CREATE TABLE few (k INT PRIMARY KEY, ref INT, w INT); \
+             INSERT INTO big SELECT i, i % 997, i * 7 % 1000, (i % 5)::text \
+               FROM generate_series(1, 40000) i; \
+             INSERT INTO few SELECT i, CASE WHEN i % 9 = 0 THEN NULL ELSE i * 37 % 45000 END, \
+               i % 4 FROM generate_series(1, {few}) i; \
+             CREATE INDEX big_g ON big (g); \
+             ANALYZE"
+        ))
+        .unwrap();
+        let queries = [
+            "SELECT few.k, big.v, big.s FROM few JOIN big ON big.id = few.ref ORDER BY few.k",
+            "SELECT few.k, big.v FROM few JOIN big ON big.id = few.ref",
+            "SELECT few.k, big.v FROM few LEFT JOIN big ON big.id = few.ref AND big.v > 300",
+            "SELECT k FROM few WHERE EXISTS (SELECT 1 FROM big WHERE big.id = few.ref AND v < 500)",
+            "SELECT k FROM few WHERE NOT EXISTS (SELECT 1 FROM big WHERE big.id = few.ref)",
+            "SELECT few.k, count(*) FROM few JOIN big ON big.g = few.k WHERE few.k < 60 \
+               GROUP BY few.k ORDER BY few.k",
+            "SELECT few.k, big.id FROM few JOIN big ON big.g = few.k AND big.s IN ('1', '3') \
+               WHERE few.k < 40",
+            "SELECT few.k, big.v / (big.v - 700) FROM few JOIN big ON big.id = few.ref",
+            "SELECT few.k, big.v FROM few JOIN big ON big.id = few.ref LIMIT 7",
+        ];
+        let mut one = session(&db, 1024);
+        one.execute("SET parallel_workers = 1").unwrap();
+        let mut many = session(&db, 1024);
+        many.execute("SET parallel_workers = 4").unwrap();
+        let looked_up = queries
+            .iter()
+            .filter(|q| {
+                let plan = outcome(&mut many, &format!("EXPLAIN {q}")).unwrap();
+                plan.iter().any(|l| l[0].contains("Index Nested Loop"))
+            })
+            .count();
+        assert!(looked_up >= 3, "{storage}: {looked_up} index nested loops");
+        let before = nucleus_sql::vector::parallel_runs();
+        for q in queries {
+            assert_eq!(
+                outcome(&mut many, q),
+                outcome(&mut one, q),
+                "{storage}: {q}"
+            );
+        }
+        assert!(
+            nucleus_sql::vector::parallel_runs() - before >= looked_up as u64,
+            "{storage}: the lookups ran on workers"
+        );
+    }
+}
