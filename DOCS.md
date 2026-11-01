@@ -1229,7 +1229,13 @@ whole batch sum and compare integers in a kernel (exact, in two 32-bit
 halves); group keys hash through a seeded multiplicative hash.  `AND` and `OR` evaluate their right side
 only on the rows the left one leaves undecided.  Aggregates over a
 pipeline are vectorized when none has `DISTINCT` or `ORDER BY`: group
-numbers by key (one integer key hashed as an integer), and each
+numbers by key — one integer key by a direct index while the keys lie in
+a range of up to 65 536 values (the range found as they come, grown
+twofold), hashed as an integer past it; any other key by a salted table
+(`keytable`, DuckDB's: slots of a group's number and the upper half of
+its key's hash, so a slot of another salt is passed over unread), the
+row's key hashed and compared from the batch's vectors as they are — no
+key built to look a group up, only a new group's —, and each
 aggregate fed a batch at a time through `Aggregate::grouped()` — the
 built-ins' states updated in place from typed vectors — or row by row
 through its accumulators; past `work_mem`, rows of new groups go to
@@ -1317,9 +1323,13 @@ Subqueries run per row when correlated, once per execution otherwise
 A **hash join whose left side is a pipeline** (a scan, its filters and
 projections) and whose right side fits in work_mem runs vectorized: the
 right rows hashed once (`vector::JoinTable`; one integer key as an
-integer, in a table of the executor's own hash, `fasthash`; each key's
-row numbers side by side in one array, no allocation per key), the left
-side's keys evaluated a batch at a time and probed — on worker threads,
+integer, two as a pair of them, in a table of the executor's own hash,
+`fasthash`; each key's row numbers side by side in one array, no
+allocation per key), the left side's keys evaluated a batch at a time
+and probed — the batch's lookups all first, then its output, so lookups
+that depend only on their keys overlap their cache misses (what
+prefetching does in a hash probe; no `unsafe` prefetch instruction), no
+key built for a lookup — on worker threads,
 morsels of the left scan in key order, when it is large — with the rows,
 their order and errors of the row-at-a-time join; a condition that is just
 the integer keys' equality is not checked again per row.  When the right
@@ -1328,7 +1338,11 @@ their rows and keys' values joined in order, so the table is a single
 pass's — a column at a time (`columns::Columns`: an array a column, typed
 while its values are of one kind — an integer 9 bytes, not a `Value`'s
 32 —, no allocation per row), unless it passes work_mem (then it is
-stashed, and spills).  **Key filters** (`keyfilter`): once an inner or
+stashed, and spills).  A right side that is not a pipeline (a join's
+output, a group's) is gathered in columns the same way, its keys then
+evaluated — after every row, as when stashed —, and probed as above;
+once the columns pass work_mem, the rows gathered so far and the rest
+are stashed instead.  **Key filters** (`keyfilter`): once an inner or
 semi join that hashes its right side has that side in hand — narrowed by
 a filter, a join or a group, not a whole table — the integer values of
 each key go into a filter (their least and greatest; the values
@@ -2747,10 +2761,16 @@ checks `psql` with and without TLS.
   the workers a hash part each (`MERGE_PARTS`), those in key order
   finished on the workers but for each morsel's edges; compact partial
   states (`count`, `min`/`max`/`bool_*`, `sum` of no doubles), the
-  accumulators grown by half again, one probe for an integer key.
-  TPC-H SF 1 on column tables Q5 528 → 358 ms, Q9 2437 → 1699, Q13 367
-  → 111, Q18 885 → 401; on row tables Q5 1010 → 848, Q9 2950 → 2394,
-  Q13 424 → 182, Q18 1334 → 807.
+  accumulators grown by half again, one probe for an integer key;
+  groups by a direct index over a narrow integer range, else a salted
+  table hashing and comparing a batch's vectors in place (`keytable`);
+  join tables on two integer keys hashed as a pair, a batch's lookups
+  before its output, and a build side that is no pipeline gathered in
+  columns (`JoinTable::gather`; spilled past work_mem as before).
+  TPC-H SF 1 on column tables Q1 535 → 471 ms, Q5 528 → 354, Q9 2437 →
+  946, Q13 367 → 99, Q18 885 → 373; on row tables Q5 1010 → 793, Q9 2950
+  → 1423, Q13 424 → 173, Q18 1334 → 747.  ClickBench on column tables
+  0.31× → 0.26× PostgreSQL's time.
 - **2026-11-01 — §M14.20, TPC-H Q13 and Q16:** `columns::Columns` —
   rows a column at a time — for the hash join tables the workers make
   (the keys too); `kernels::like_parts` (`LIKE` with `%` inside the

@@ -34,6 +34,7 @@ pub mod fsum;
 pub mod hint;
 pub mod inet;
 mod keyfilter;
+mod keytable;
 pub use nucleus_kernels as kernels;
 pub mod large;
 pub mod laws;

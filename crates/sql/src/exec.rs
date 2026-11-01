@@ -1050,7 +1050,46 @@ fn join<'a>(
             outer,
         );
     }
-    let right_rows = stash(build(right, ctx, outer)?)?;
+    // A pipeline probing a table: its right side gathered in columns, when
+    // they fit.
+    let gathered = match algo {
+        JoinAlgo::Hash {
+            left_keys,
+            right_keys,
+            build_left: false,
+        } if kind != JoinType::Full && crate::vector::probes(left) => {
+            match crate::vector::JoinTable::gather(
+                build(right, ctx, outer)?,
+                right.width(),
+                right_keys,
+                ctx,
+                outer,
+            )? {
+                crate::vector::Gathered::Table(table) => {
+                    crate::keyfilter::register(ctx, left, right, kind, left_keys, &|j| {
+                        table.key_ints(j)
+                    });
+                    return crate::vector::hash_join_table(
+                        left,
+                        table,
+                        left_keys,
+                        right_keys,
+                        kind,
+                        on,
+                        right.width(),
+                        ctx,
+                        outer,
+                    );
+                }
+                crate::vector::Gathered::Stored(stored) => Some(stored),
+            }
+        }
+        _ => None,
+    };
+    let right_rows = match gathered {
+        Some(stored) => stored,
+        None => stash(build(right, ctx, outer)?)?,
+    };
     // The key filters for the left side's scans, from the right rows.
     // (Not for a join that hashes its left side: it reads the left first.)
     if let JoinAlgo::Hash {

@@ -1943,9 +1943,9 @@ enum Keys {
     /// No `GROUP BY`: one group.
     Total,
     /// One integer key (`NULL`'s group apart).
-    Int(HashMap<i64, u32, MixState>, Option<u32>),
-    /// Any keys.
-    Any(HashMap<Vec<Value>, u32, MixState>),
+    Int(crate::keytable::IntKeys, Option<u32>),
+    /// Any keys: found by their hashes, compared with `seen`'s.
+    Any(crate::keytable::KeyTable),
 }
 
 /// A vectorized aggregate's state.
@@ -1962,6 +1962,8 @@ struct Grouping<'a> {
     limit: usize,
     parts: Option<crate::spill::Partitions>,
 }
+
+use crate::keytable::KeyRef;
 
 /// Room for at least `n` groups in `accs`, which have room for `room`:
 /// grown by half again (not a group at a time, a call an accumulator).
@@ -1981,7 +1983,7 @@ impl<'a> Grouping<'a> {
             aggs,
             keys: match group.len() {
                 0 => Keys::Total,
-                _ => Keys::Any(HashMap::default()),
+                _ => Keys::Any(Default::default()),
             },
             seen: Vec::new(),
             accs: aggs
@@ -2004,14 +2006,12 @@ impl<'a> Grouping<'a> {
 
     /// The group of the row with key `key` (made if new), or `None` when
     /// the row goes to a partition (past work_mem, as a row would).
-    fn group_of(&mut self, key: &dyn Fn() -> Vec<Value>, int: Option<Option<i64>>) -> Option<u32> {
+    fn group_of(&mut self, key: KeyRef, int: Option<Option<i64>>) -> Option<u32> {
         // An integer key: looked up and placed in one probe.
         if let (Keys::Int(m, _), Some(Some(i))) = (&mut self.keys, int) {
-            use std::collections::hash_map::Entry;
-            let slot = match m.entry(i) {
-                Entry::Occupied(e) => return Some(*e.get()),
-                Entry::Vacant(v) => v,
-            };
+            if let Some(g) = m.get(i) {
+                return Some(g);
+            }
             let size = crate::spill::INT_KEY_BYTES + 96 * self.aggs.len();
             if self.parts.is_some()
                 || (self.bytes + size > self.limit && crate::spill::MAX_LEVEL > 0)
@@ -2020,22 +2020,25 @@ impl<'a> Grouping<'a> {
             }
             self.bytes += size;
             let g = self.seen.len() as u32;
-            slot.insert(g);
+            m.insert(i, g);
             self.seen.push(vec![Value::Int(i)]);
             make_room(&mut self.accs, &mut self.room, self.seen.len());
             return Some(g);
         }
+        let mut hash = 0;
         let found = match (&self.keys, int) {
             (Keys::Total, _) => self.seen.first().map(|_| 0),
-            (Keys::Int(m, _), Some(Some(i))) => m.get(&i).copied(),
             (Keys::Int(_, null), Some(None)) => *null,
-            (Keys::Any(m), _) => m.get(&key()).copied(),
-            (Keys::Int(..), None) => unreachable!("an integer key"),
+            (Keys::Any(t), _) => {
+                hash = key.hash(&t.state);
+                t.find(hash, |g| key.eq(&self.seen[g as usize]))
+            }
+            (Keys::Int(..), _) => unreachable!("an integer key"),
         };
         if found.is_some() {
             return found;
         }
-        let key = key();
+        let key = key.to_vec();
         let size = crate::spill::row_bytes(&key) + 96 * self.aggs.len();
         if self.parts.is_some()
             || (self.bytes + size > self.limit
@@ -2048,13 +2051,8 @@ impl<'a> Grouping<'a> {
         let g = self.seen.len() as u32;
         match (&mut self.keys, int) {
             (Keys::Total, _) => {}
-            (Keys::Int(m, _), Some(Some(i))) => {
-                m.insert(i, g);
-            }
             (Keys::Int(_, null), _) => *null = Some(g),
-            (Keys::Any(m), _) => {
-                m.insert(key.clone(), g);
-            }
+            (Keys::Any(t), _) => t.insert(hash),
         }
         self.seen.push(key);
         make_room(&mut self.accs, &mut self.room, self.seen.len());
@@ -2064,13 +2062,11 @@ impl<'a> Grouping<'a> {
     /// Switches integer keys to any keys.
     fn widen(&mut self) {
         if let Keys::Int(..) = self.keys {
-            let m = self
-                .seen
-                .iter()
-                .enumerate()
-                .map(|(g, k)| (k.clone(), g as u32))
-                .collect();
-            self.keys = Keys::Any(m);
+            let mut t = crate::keytable::KeyTable::default();
+            for k in &self.seen {
+                t.insert(KeyRef::Values(k).hash(&t.state));
+            }
+            self.keys = Keys::Any(t);
         }
     }
 
@@ -2087,7 +2083,7 @@ impl<'a> Grouping<'a> {
         // A grand total over a whole batch: each aggregate fed at once.
         if let (Keys::Total, Sel::All(len)) = (&self.keys, sel) {
             let g = self
-                .group_of(&Vec::new, None)
+                .group_of(KeyRef::Values(&[]), None)
                 .expect("a grand total stays in memory");
             for ((agg, acc), args) in self.aggs.iter().zip(&mut self.accs).zip(args) {
                 let refs: Vec<&Vector> = args.iter().map(|a| &**a).collect();
@@ -2099,7 +2095,7 @@ impl<'a> Grouping<'a> {
         let int_key = match keys {
             [k] if matches!(**k, Vector::Int(..)) => {
                 if self.seen.is_empty() && matches!(self.keys, Keys::Any(_)) {
-                    self.keys = Keys::Int(HashMap::default(), None);
+                    self.keys = Keys::Int(Default::default(), None);
                 }
                 matches!(self.keys, Keys::Int(..))
             }
@@ -2111,13 +2107,13 @@ impl<'a> Grouping<'a> {
         let mut rows = Vec::with_capacity(sel.len());
         let mut groups = Vec::with_capacity(sel.len());
         for i in sel.iter() {
-            let key = || keys.iter().map(|k| k.value(i)).collect::<Vec<_>>();
+            let key = KeyRef::Batch(keys, i);
             let int = int_key.then(|| (!keys[0].is_null(i)).then(|| keys[0].value(i)));
             let int = int.map(|v| match v {
                 Some(Value::Int(x)) => Some(x),
                 _ => None,
             });
-            match self.group_of(&key, int) {
+            match self.group_of(key, int) {
                 Some(g) => {
                     rows.push(i as u32);
                     groups.push(g);
@@ -2125,7 +2121,7 @@ impl<'a> Grouping<'a> {
                 None => self
                     .parts
                     .get_or_insert_with(|| crate::spill::Partitions::new(0))
-                    .push(&key(), &row(i))?,
+                    .push(&key.to_vec(), &row(i))?,
             }
         }
         for ((agg, acc), args) in self.aggs.iter().zip(&mut self.accs).zip(args) {
@@ -2746,7 +2742,7 @@ fn parallel_aggregate<'a>(
                 let mut states: Vec<std::vec::IntoIter<Value>> =
                     states.into_iter().map(Vec::into_iter).collect();
                 for key in keys {
-                    let Some(gid) = g.group_of(&|| key.clone(), None) else {
+                    let Some(gid) = g.group_of(KeyRef::Values(&key), None) else {
                         return Ok(None); // past work_mem: the single pass partitions
                     };
                     for (acc, st) in g.accs.iter_mut().zip(&mut states) {
@@ -3210,6 +3206,8 @@ impl Held {
 enum JoinIndex {
     /// One key, an integer in every right row that has one.
     Int(Groups<i64>),
+    /// Two keys, integers in every right row that has them.
+    Pair(Groups<(i64, i64)>),
     /// Anything else.
     Any(Groups<Vec<Value>>),
 }
@@ -3390,6 +3388,11 @@ impl JoinTable {
         match &self.index {
             JoinIndex::Int(g) if j == 0 => Some(g.map.keys().copied().collect()),
             JoinIndex::Int(_) => None,
+            JoinIndex::Pair(g) => match j {
+                0 => Some(g.map.keys().map(|k| k.0).collect()),
+                1 => Some(g.map.keys().map(|k| k.1).collect()),
+                _ => None,
+            },
             JoinIndex::Any(g) => g
                 .map
                 .keys()
@@ -3401,11 +3404,65 @@ impl JoinTable {
         }
     }
 
+    /// A hash join's build side gathered a column at a time, its keys then
+    /// evaluated (after every row, as when stashed: a row's error before a
+    /// key's) — or, once its columns pass work_mem, its rows stashed as
+    /// [`crate::exec`] stashes them (spilling).
+    pub(crate) fn gather(
+        mut rows: Rows,
+        width: usize,
+        keys: &[Expr],
+        ctx: &Ctx,
+        outer: Option<&Env>,
+    ) -> Result<Gathered> {
+        let limit = crate::budget::work_mem();
+        let mut held = crate::columns::Columns::new(width);
+        while let Some(r) = rows.next() {
+            held.push_row(r?);
+            if held.pushed_bytes() > limit {
+                let mut stash = crate::spill::Stash::new();
+                for i in 0..held.len() {
+                    let mut row = Vec::with_capacity(width);
+                    held.extend_row(i, &mut row);
+                    stash.push(row)?;
+                }
+                drop(held);
+                for r in rows {
+                    stash.push(r?)?;
+                }
+                return Ok(Gathered::Stored(stash.seal()?));
+            }
+        }
+        let columns: Option<Vec<usize>> = keys
+            .iter()
+            .map(|k| match k {
+                Expr::Column(c) => Some(*c),
+                _ => None,
+            })
+            .collect();
+        let values = match columns {
+            Some(cols) => held.project(&cols),
+            None => {
+                let mut values = crate::columns::Columns::new(keys.len());
+                let mut row = Vec::with_capacity(width);
+                for i in 0..held.len() {
+                    row.clear();
+                    held.extend_row(i, &mut row);
+                    let e = env(&row, ctx, outer);
+                    values.push_row(keys.iter().map(|k| k.eval(&e)).collect::<Result<_>>()?);
+                }
+                values
+            }
+        };
+        Ok(Gathered::Table(Self::of(Held::Columns(held), values)))
+    }
+
     /// `rows` by their keys' values (`values`: a row's keys a row).
     fn of(rows: Held, values: crate::columns::Columns) -> Self {
-        let index = match values.ints() {
-            Some(ints) => JoinIndex::Int(Groups::new(ints)),
-            None => JoinIndex::Any(Groups::new((0..values.len()).map(|r| {
+        let index = match (values.ints(), values.int_pairs()) {
+            (Some(ints), _) => JoinIndex::Int(Groups::new(ints)),
+            (None, Some(pairs)) => JoinIndex::Pair(Groups::new(pairs)),
+            (None, None) => JoinIndex::Any(Groups::new((0..values.len()).map(|r| {
                 let mut k = Vec::new();
                 values.extend_row(r, &mut k);
                 (!k.iter().any(Value::is_null)).then_some(k)
@@ -3413,6 +3470,13 @@ impl JoinTable {
         };
         JoinTable { rows, index }
     }
+}
+
+/// A hash join's build side gathered ([`JoinTable::gather`]).
+pub(crate) enum Gathered {
+    Table(JoinTable),
+    /// Past work_mem: its rows, stashed.
+    Stored(crate::spill::Stored),
 }
 
 /// How a hash join's left rows probe its table.
@@ -3429,16 +3493,15 @@ struct Probe<'a> {
 
 impl Probe<'_> {
     /// The right rows a left key matches.
-    fn candidates(&self, key: &dyn Fn() -> Vec<Value>, int: Option<Option<i64>>) -> &[u32] {
-        let found = match (&self.table.index, int) {
-            (JoinIndex::Int(m), Some(Some(x))) => m.get(&x),
-            (JoinIndex::Int(_), Some(None)) => None,
-            (JoinIndex::Int(m), None) => match key().first() {
-                Some(Value::Int(x)) => m.get(x),
+    fn candidates(&self, key: KeyRef) -> &[u32] {
+        let found = match &self.table.index {
+            JoinIndex::Int(m) => key.int(0).and_then(|x| m.get(&x)),
+            JoinIndex::Pair(m) => match (key.int(0), key.int(1)) {
+                (Some(a), Some(b)) => m.get(&(a, b)),
                 _ => None,
             },
-            (JoinIndex::Any(m), _) => {
-                let k = key();
+            JoinIndex::Any(m) => {
+                let k = key.to_vec();
                 if k.iter().any(Value::is_null) {
                     None
                 } else {
@@ -3505,17 +3568,15 @@ impl Probe<'_> {
             .iter()
             .map(|k| eval(k, b, &b.sel, cx))
             .collect::<Result<Vec<_>>>()?;
-        let ints: Option<(&[i64], &Option<Vec<bool>>)> = match (&self.table.index, &keys[..]) {
-            (JoinIndex::Int(_), [k]) => match &**k {
-                Vector::Int(d, n) => Some((d, n)),
-                _ => None,
-            },
-            _ => None,
-        };
-        for i in b.sel.iter() {
-            let key = || keys.iter().map(|k| k.value(i)).collect::<Vec<_>>();
-            let int = ints.map(|(d, n)| (!is_null_at(n, i)).then(|| d[i]));
-            let c = self.candidates(&key, int);
+        // The whole batch's lookups first, then its output: lookups that
+        // depend on nothing but their keys, back to back, overlap their
+        // cache misses (what prefetching in a hash probe is for).
+        let found: Vec<&[u32]> = b
+            .sel
+            .iter()
+            .map(|i| self.candidates(KeyRef::Batch(&keys, i)))
+            .collect();
+        for (i, c) in b.sel.iter().zip(found) {
             if c.is_empty()
                 && matches!(
                     self.kind,
@@ -3538,7 +3599,7 @@ impl Probe<'_> {
                 .iter()
                 .map(|k| k.eval(&e))
                 .collect::<Result<Vec<_>>>()?;
-            let c = self.candidates(&|| k.clone(), None);
+            let c = self.candidates(KeyRef::Values(&k));
             self.emit(&|| row.clone(), c, cx, out)?;
         }
         Ok(())
@@ -3616,7 +3677,7 @@ pub(crate) fn hash_join_table<'a>(
 ) -> Result<Rows<'a>> {
     let check = on.is_some()
         && !(keys_only(on, left_keys, right_keys, left.width())
-            && matches!(table.index, JoinIndex::Int(_)));
+            && matches!(table.index, JoinIndex::Int(_) | JoinIndex::Pair(_)));
     let probe = Probe {
         table,
         left_keys,
@@ -3696,7 +3757,7 @@ pub(crate) fn existence_by_left<'a>(
     // (`keys_only` reads its first keys as the left row's.)
     let check = on.is_some()
         && !(keys_only(on, left_keys, right_keys, left_width)
-            && matches!(table.index, JoinIndex::Int(_)));
+            && matches!(table.index, JoinIndex::Int(_) | JoinIndex::Pair(_)));
     let probe = Probe {
         table,
         left_keys: right_keys,
@@ -3709,11 +3770,8 @@ pub(crate) fn existence_by_left<'a>(
         .map(|_| AtomicBool::new(false))
         .collect();
     let mark = |pipe: &mut Pipeline, cx: Cx| -> Result<()> {
-        let one = |key: &dyn Fn() -> Vec<Value>,
-                   int: Option<Option<i64>>,
-                   row: &dyn Fn() -> Row|
-         -> Result<()> {
-            for &c in probe.candidates(key, int) {
+        let one = |key: KeyRef, row: &dyn Fn() -> Row| -> Result<()> {
+            for &c in probe.candidates(key) {
                 let c = c as usize;
                 if marks[c].load(Relaxed) {
                     continue;
@@ -3740,18 +3798,8 @@ pub(crate) fn existence_by_left<'a>(
                         .iter()
                         .map(|k| eval(k, &b, &b.sel, cx))
                         .collect::<Result<Vec<_>>>()?;
-                    let ints: Option<(&[i64], &Option<Vec<bool>>)> =
-                        match (&probe.table.index, &keys[..]) {
-                            (JoinIndex::Int(_), [k]) => match &**k {
-                                Vector::Int(d, n) => Some((d, n)),
-                                _ => None,
-                            },
-                            _ => None,
-                        };
                     for i in b.sel.iter() {
-                        let key = || keys.iter().map(|k| k.value(i)).collect::<Vec<_>>();
-                        let int = ints.map(|(d, n)| (!is_null_at(n, i)).then(|| d[i]));
-                        one(&key, int, &|| b.row(i))?;
+                        one(KeyRef::Batch(&keys, i), &|| b.row(i))?;
                     }
                 }
                 Some(Out::Rows(rows, err)) => {
@@ -3761,7 +3809,7 @@ pub(crate) fn existence_by_left<'a>(
                             .iter()
                             .map(|k| k.eval(&e))
                             .collect::<Result<Vec<_>>>()?;
-                        one(&|| k.clone(), None, &|| row.clone())?;
+                        one(KeyRef::Values(&k), &|| row.clone())?;
                     }
                     if let Some(e) = err {
                         return Err(e);

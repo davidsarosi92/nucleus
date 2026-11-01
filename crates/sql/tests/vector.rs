@@ -950,3 +950,86 @@ fn eager_aggregates_and_parallel_merges_agree() {
         }
     }
 }
+
+#[test]
+fn join_and_group_tables_agree() {
+    // The tables a join and a grouping keep: two integer keys hashed as a
+    // pair, a join's output gathered as a build side in columns (spilled
+    // when it outgrows work_mem), groups found by a salted hash of the
+    // batch's own vectors or by a direct index over a narrow integer
+    // range — the rows and errors of the row-at-a-time executor.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(29)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE a (id INT PRIMARY KEY, x INT, y INT, t TEXT, c CHAR(6), v BIGINT) \
+               WITH (storage = {storage}); \
+             CREATE TABLE b (id INT PRIMARY KEY, x INT, y INT, w INT); \
+             INSERT INTO a SELECT i, CASE WHEN i % 19 = 0 THEN NULL ELSE i % 300 END, i % 7, \
+               't' || (i % 53), CASE WHEN i % 4 = 0 THEN 'ab' ELSE 'ab' || (i % 3) END, \
+               CASE WHEN i % 1000 = 0 THEN -9223372036854775807 + i ELSE i % 400 - 200 END \
+               FROM generate_series(1, 30000) i; \
+             INSERT INTO b SELECT i, i % 350, i % 5, i % 11 FROM generate_series(1, 4000) i; \
+             INSERT INTO b VALUES (5001, NULL, 1, 1), (5002, 3, NULL, 2); \
+             ANALYZE"
+        ))
+        .unwrap();
+        let queries: Vec<String> = [
+            // Two integer keys: alone (the pair decides), with more to check.
+            "SELECT count(*), sum(b.w) FROM a JOIN b ON a.x = b.x AND a.y = b.y",
+            "SELECT count(*), sum(b.w) FROM a JOIN b ON a.x = b.x AND a.y = b.y AND b.w > a.v",
+            "SELECT a.id, b.id FROM a LEFT JOIN b ON a.x = b.x AND a.y = b.y WHERE a.id < 60 \
+               ORDER BY 1, 2",
+            "SELECT count(*) FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.x = a.x AND b.y = a.y)",
+            // A join's output as a build side; an error in its rows, and in
+            // a key computed from them.
+            "SELECT count(*), sum(j.w) FROM a JOIN (SELECT b.x, b.y, b.w FROM b JOIN b b2 \
+               ON b.id = b2.id + 1) j ON a.x = j.x AND a.y = j.y",
+            "SELECT count(*), sum(j.q) FROM a JOIN (SELECT b.x, 10 / (b.w - 4) AS q FROM b \
+               JOIN b b2 ON b.id = b2.id) j ON a.x = j.x",
+            "SELECT count(*) FROM a JOIN (SELECT b.x, b.w FROM b JOIN b b2 ON b.id = b2.id) j \
+               ON a.x = j.x + 100 / (j.w - 6)",
+            // Groups: text, char (its blanks), several keys, a narrow integer
+            // range that widens to the extremes.
+            "SELECT t, count(*), min(v) FROM a GROUP BY t",
+            "SELECT c, count(*) FROM a GROUP BY c",
+            "SELECT x, t, c, count(*), max(v) FROM a GROUP BY x, t, c",
+            "SELECT y, count(*) FROM a GROUP BY y",
+            "SELECT v, count(*) FROM a GROUP BY v",
+            "SELECT v % 1000, count(*) FROM a GROUP BY 1 HAVING count(*) > 70",
+            "SELECT x, count(*) FROM a GROUP BY x",
+        ]
+        .iter()
+        .map(|q| q.to_string())
+        .collect();
+        assert_eq!(agree(&db, &queries), 2, "{storage}: two divisions by zero");
+        let mut one = session(&db, 1024);
+        one.execute("SET parallel_workers = 1").unwrap();
+        let mut many = session(&db, 1024);
+        many.execute("SET parallel_workers = 4").unwrap();
+        let mut small = session(&db, 1024);
+        small
+            .execute("SET parallel_workers = 4; SET work_mem = '64kB'")
+            .unwrap();
+        let sorted = |r: Result<Vec<Vec<String>>, String>| {
+            r.map(|mut rows| {
+                rows.sort();
+                rows
+            })
+        };
+        for q in &queries {
+            let want = outcome(&mut one, q);
+            assert_eq!(outcome(&mut many, q), want, "{storage} workers: {q}");
+            assert_eq!(
+                sorted(outcome(&mut small, q)),
+                sorted(want),
+                "{storage} work_mem: {q}"
+            );
+        }
+    }
+}

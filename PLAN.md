@@ -1498,12 +1498,16 @@ join-filter pushdown, made in every executor alike); eager aggregation ✅
 the groupjoin, fused with the join, Moerkotte & Neumann, later if it
 measures); the aggregation table — merged by hash part on the workers
 past many groups, groups in key order finished on the workers, compact
-partial states ✅ (ClickHouse's two-level tables; TPC-H Q18) — a hash
-array with a salt beside the groups' rows, direct indexing for a small
-integer range (DuckDB's); predicates on a dictionary's
+partial states, a hash array with a salt beside the groups' keys (the
+keys hashed and compared from the batch's vectors), direct indexing for
+a narrow integer range ✅ (ClickHouse's two-level tables, DuckDB's salt
+and perfect hash; TPC-H Q18, Q1); predicates on a dictionary's
 values (a text column's `=`, `IN` and `LIKE` once per distinct value,
-then its codes); prefetching in hash probes (Chen & Ailamaki, kept only
-if it measures); division by constants without dividing (libdivide),
+then its codes); prefetching in hash probes ✅ (Chen & Ailamaki: a
+batch's lookups before its output, so their misses overlap — safe code,
+no prefetch instruction; 2–8 % on the joins — and, found on the way,
+join tables on two integer keys and build sides that are no pipeline
+gathered in columns, not spilled as rows: TPC-H Q9); division by constants without dividing (libdivide),
 FSST string compression with `LIKE` on the compressed strings, and
 expressions fused into one loop (the numeric libraries' expression
 templates).
@@ -2210,9 +2214,11 @@ style) across a thousand seeds without failure.
 - **2026-11-01** — §M14.20 V13: what other engines do, the first three —
   key filters from hash joins (the scans below a join's probe side
   narrowed by its keys: Q5 1.19× → 0.81× PostgreSQL's time on column
-  tables, Q9 1.81× → 1.26×); eager aggregation (Q13 1.09× → 0.33×); the
-  morsels' groups merged on the workers, those in key order finished
-  there (Q18 0.55× → 0.25×).
+  tables); eager aggregation (Q13 1.09× → 0.29×); the morsels' groups
+  merged on the workers, those in key order finished there (Q18 0.55× →
+  0.23×); the aggregation table with salts and a direct index (Q1 0.54×
+  → 0.47×); batch probes, pair keys and build sides gathered in columns
+  (Q9 1.81× → 0.70×).  ClickBench on column tables 0.31× → 0.26×.
 - **2026-11-01** — §M14.20: TPC-H Q13 and Q16 — a hash join's table
   made by the workers holds its rows and keys a column at a time (Q13's
   `orders` side fits work_mem now, where it spilled); `LIKE` with `%`

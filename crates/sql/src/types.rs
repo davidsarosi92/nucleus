@@ -1038,7 +1038,7 @@ impl Hash for Value {
     }
 }
 
-fn hash_number<H: Hasher>(f: f64, state: &mut H) {
+pub(crate) fn hash_number<H: Hasher>(f: f64, state: &mut H) {
     1u8.hash(state);
     let f = if f == 0.0 { 0.0 } else { f }; // -0 == 0
     if f.is_nan() {

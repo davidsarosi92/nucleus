@@ -9,10 +9,13 @@ use crate::vector::{Batch, Sel, TimeKind, Vector};
 pub(crate) struct Columns {
     cols: Vec<Col>,
     len: usize,
+    /// The memory of the rows pushed one at a time, roughly.
+    pushed: usize,
 }
 
 /// One column: typed while every value is of one kind (or `NULL`), any
 /// values once they are not.
+#[derive(Clone)]
 enum Col {
     /// Only `NULL`s so far: how many.
     Nulls(usize),
@@ -212,6 +215,7 @@ impl Columns {
         Columns {
             cols: (0..width).map(|_| Col::Nulls(0)).collect(),
             len: 0,
+            pushed: 0,
         }
     }
 
@@ -243,12 +247,53 @@ impl Columns {
         Some((0..self.len).map(move |i| n.get(i).is_some_and(|&n| !n).then(|| d[i])))
     }
 
+    /// Two integer columns' values, `None` where either is `NULL` — when
+    /// they are (or only `NULL`s).
+    pub(crate) fn int_pairs(
+        &self,
+    ) -> Option<impl ExactSizeIterator<Item = Option<(i64, i64)>> + '_> {
+        fn col(c: &Col) -> Option<(&[i64], &[bool])> {
+            match c {
+                Col::Int(d, n) => Some((d, n)),
+                Col::Nulls(_) => Some((&[], &[])),
+                _ => None,
+            }
+        }
+        let [a, b] = &self.cols[..] else {
+            return None;
+        };
+        let ((da, na), (db, nb)) = (col(a)?, col(b)?);
+        let live = |d: &[i64], n: &[bool], i: usize| n.get(i).is_some_and(|&n| !n).then(|| d[i]);
+        Some((0..self.len).map(move |i| Some((live(da, na, i)?, live(db, nb, i)?))))
+    }
+
     /// A row appended.
     pub(crate) fn push_row(&mut self, row: Row) {
         for (col, v) in self.cols.iter_mut().zip(row) {
+            self.pushed += match &v {
+                Value::Null | Value::Int(_) | Value::Float(_) | Value::Bool(_) => 9,
+                Value::Text(s) | Value::Char(s) => 5 + s.len(),
+                v if TimeKind::of(v).is_some() => 9,
+                v => crate::spill::value_bytes(v),
+            };
             col.push(v);
         }
         self.len += 1;
+    }
+
+    /// The memory of the rows [`push_row`](Self::push_row) added, roughly
+    /// (counted as they came: no pass over them).
+    pub(crate) fn pushed_bytes(&self) -> usize {
+        self.pushed
+    }
+
+    /// Columns `cols` of these rows, copied.
+    pub(crate) fn project(&self, cols: &[usize]) -> Columns {
+        Columns {
+            cols: cols.iter().map(|&c| self.cols[c].clone()).collect(),
+            len: self.len,
+            pushed: 0,
+        }
     }
 
     /// `other`'s rows appended after these.
