@@ -450,6 +450,17 @@ impl Value {
 
     /// Converts to `ty` (a SQL `CAST`).
     pub fn cast(self, ty: DataType) -> Result<Value> {
+        // The common cases first: a row's values cast to their columns'
+        // types (mostly theirs already).
+        match (&self, ty) {
+            (Value::Int(_), DataType::BigInt) | (Value::Text(_), DataType::Text) => {
+                return Ok(self);
+            }
+            (&Value::Int(i), DataType::SmallInt | DataType::Integer) => {
+                return Ok(Value::Int(fit_int(i, ty)?));
+            }
+            _ => {}
+        }
         let bad = |v: &Value| Error::invalid_text(format!("cannot cast {} to {ty}", v.render()));
         Ok(match (self, ty) {
             (Value::Null, _) => Value::Null,

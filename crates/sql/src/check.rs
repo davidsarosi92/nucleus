@@ -115,10 +115,10 @@ fn check_table(
         let pk = pk_suffix(t, &key);
         for (i, (want, (k, _))) in expected
             .iter_mut()
-            .zip(keys.entries(txn, t, &row, &pk)?)
+            .zip(keys.entries(txn, t, &row, pk)?)
             .enumerate()
         {
-            if want.insert(k, pk.clone()).is_some() {
+            if want.insert(k, pk.to_vec()).is_some() {
                 problems.push(format!(
                     "{}: row {row:?} duplicates another in unique index {}",
                     t.name, t.indexes[i].name
@@ -182,7 +182,7 @@ pub(crate) fn rows_at(
         if let Ok(refs) = out_of_line(&value) {
             for (c, len) in refs {
                 let mut p = large.clone();
-                p.extend_from_slice(&pk_suffix(t, &key));
+                p.extend_from_slice(pk_suffix(t, &key));
                 p.extend_from_slice(&(c as u16).to_be_bytes());
                 out_of_line_values.insert(p, u64::from(len));
             }

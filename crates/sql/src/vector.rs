@@ -1146,7 +1146,7 @@ fn decode_into(
             let len = r.u32().map_err(bad)?;
             if !matches!(col, Builder::Skip) {
                 let pk = crate::exec::pk_suffix(t, key);
-                col.push(crate::large::fetch(txn, t, &pk, c, len)?);
+                col.push(crate::large::fetch(txn, t, pk, c, len)?);
             }
             continue;
         }

@@ -976,11 +976,18 @@ pub fn binary(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
             }
             // A char(n) joins as text: without its trailing blanks.
             (a, b) => {
-                let text = |v: &Value| match v {
-                    Value::Char(s) => crate::types::unpadded(s).to_string(),
+                // Onto the left text itself, when it is one.
+                let mut out = match a {
+                    Value::Text(s) => s,
+                    Value::Char(s) => crate::types::unpadded(&s).to_string(),
                     v => v.render(),
                 };
-                Value::Text(format!("{}{}", text(&a), text(&b)))
+                match &b {
+                    Value::Text(s) => out.push_str(s),
+                    Value::Char(s) => out.push_str(crate::types::unpadded(s)),
+                    v => out.push_str(&v.render()),
+                }
+                Value::Text(out)
             }
         },
         Match | NotMatch | IMatch | NotIMatch => {

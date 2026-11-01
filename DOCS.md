@@ -477,21 +477,32 @@ B-tree map from the first far out of order on (`writes.rs`).  Commit,
 under the commit lock: for each written key, if its newest version (durable
 or not) is newer than the snapshot → `Error::Conflict` (retryable; first
 committer wins); else one WAL batch with the next timestamp, applied at
-once; then the group-commit wait, then *visible* moves.  A checkpoint runs
+once (its ops built in key order, as the write set is: not sorted
+again); then the group-commit wait, then *visible* moves.  `put_new` (an
+`INSERT`'s write: set the key unless it has a value) looks at the key's
+versions — and, finding no entry of the key at all, notes the run of
+keys up to the tree's next entry: the next `put_new` inside it needs no
+look (whatever committed before the snapshot was in the tree then, and a
+later commit of such a key conflicts at commit as it would have at the
+look).  A bulk insert of new keys in key order looks at the tree once,
+not once a row; the run ends at a spill, where its own intents enter the
+tree.  A checkpoint runs
 when the WAL since the last one exceeds `checkpoint_wal_bytes` (64 MiB).
 Write skew is possible under snapshot isolation (tested and documented).
 
 **Large transactions** (§M14.11, §M14.20 V11).  A transaction keeps its
 writes in memory up to `txn_memory` (64 MiB); past it they *spill* into the
 store as its *intents*, under the commit lock, in 1 MiB batches: each key
-is checked as a commit would check it (a newer version, or another running
-transaction's intent of it → `Conflict`), and from then on any commit —
+is checked as a commit checks it (a newer version, or another running
+transaction's intent of it → `Conflict`; told by the recent commits'
+keys where they tell, else by the tree), and from then on any commit —
 any write, even — of that key conflicts.  A reader resolves an intent by
 its transaction's status: its own (above every version; writes still in
 memory above that), committed at a timestamp (a version at that
 timestamp, ranked with the others), or neither — running or aborted — and
 passed over.  The commit is one batch as always — the writes in memory as
-versions (their intents deleted) and the status record (`id → ts`) — so
+versions (the intents of those inside the spilled span deleted) and the
+status record (`id → ts`) — so
 it is atomic however large the transaction, and **each write is written
 once**: nothing moves after the commit.  `vacuum()` later rewrites
 committed intents as versions at their timestamps and deletes aborted
@@ -2627,6 +2638,18 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-01 — §M14.20, the load:** `put_new` notes the run of keys
+  without an entry up to the tree's next one, and a bulk insert of new
+  keys in order looks at the tree once, not once a row; a spill checks
+  its keys as a commit does (the recent commits' keys first), not by a
+  look at the tree per key; a spilled transaction's commit deletes the
+  intents only of the keys inside its spilled span (it deleted one for
+  every key written after the spill) and builds its ops in key order,
+  without a sort.  Per row of the load, fewer allocations: the primary
+  key's suffix borrowed, `||` appending to its left text, the casts to a
+  column's own type first.  The 1M-row `INSERT … SELECT` ~2,000 →
+  ~1,250 ms through the server (~1,080 embedded): 1.2–1.4× PostgreSQL's.
 
 - **2026-11-01 — §M14.20, a commit's leaves prepared while others are
   installed:** a sorted batch's workers run for the whole batch, a

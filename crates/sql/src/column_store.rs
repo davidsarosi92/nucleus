@@ -664,7 +664,7 @@ fn deleted(txn: &dyn KvTxn, t: &Table, seg: &Segment, validated: bool) -> Result
         txn.scan(Bound::Included(&from), Bound::Excluded(&to))?
     };
     let keys = keys_of(txn, t, seg)?;
-    let prefix = t.index_prefix(DELETED).len();
+    let prefix = crate::catalog::INDEX_PREFIX_LEN;
     let mut out = BTreeSet::new();
     for e in scan {
         let (k, _) = e?;
@@ -688,7 +688,7 @@ fn locate(
     let Some(seg) = segment_of(txn, t, key)? else {
         return Ok(None);
     };
-    let prefix = t.index_prefix(0).len();
+    let prefix = crate::catalog::INDEX_PREFIX_LEN;
     let keys = keys_of(txn, t, &seg)?;
     let i = keys.search(&key[prefix..]);
     if i == keys.len() || keys.get(i) != &key[prefix..] {
@@ -804,7 +804,7 @@ fn write_segment(
     rows: &[(Vec<u8>, Row)],
     cols: &[usize],
 ) -> Result<()> {
-    let prefix = t.index_prefix(0).len();
+    let prefix = crate::catalog::INDEX_PREFIX_LEN;
     let suffixes: Vec<&[u8]> = rows.iter().map(|(k, _)| &k[prefix..]).collect();
     let mut chunks = vec![Keys::encode(&suffixes)];
     let mut stats = Vec::with_capacity(cols.len());

@@ -398,11 +398,11 @@ pub(crate) fn insert_row(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<(
         return Err(duplicate(&format!("{}_pkey", t.name)));
     }
     let pk = pk_suffix(t, &key);
-    for (i, (k, unique)) in w.keys.entries(&*txn, t, row, &pk)?.into_iter().enumerate() {
+    for (i, (k, unique)) in w.keys.entries(&*txn, t, row, pk)?.into_iter().enumerate() {
         if unique && txn.get(&k)?.is_some() {
             return Err(duplicate(&t.indexes[i].name));
         }
-        txn.put(&k, &pk)?;
+        txn.put(&k, pk)?;
     }
     Ok(())
 }
@@ -792,8 +792,8 @@ pub fn update_rows(
             w.storage.write(txn, t, key, new, Some(old))?;
         }
         let (old_pk, new_pk) = (pk_suffix(t, key), pk_suffix(t, &new_key));
-        let olds = w.keys.entries(&*txn, t, old, &old_pk)?;
-        let news = w.keys.entries(&*txn, t, new, &new_pk)?;
+        let olds = w.keys.entries(&*txn, t, old, old_pk)?;
+        let news = w.keys.entries(&*txn, t, new, new_pk)?;
         for (i, ((ok, _), (nk, unique))) in olds.into_iter().zip(news).enumerate() {
             if ok == nk && old_pk == new_pk {
                 continue;
@@ -802,7 +802,7 @@ pub fn update_rows(
             if unique && txn.get(&nk)?.is_some() {
                 return Err(duplicate(&t.indexes[i].name));
             }
-            txn.put(&nk, &new_pk)?;
+            txn.put(&nk, new_pk)?;
         }
     }
     crate::storage::written(t);
@@ -834,7 +834,7 @@ pub fn delete_rows(
             continue;
         }
         let pk = pk_suffix(t, key);
-        for (k, _) in keys.entries(&*txn, t, row, &pk)? {
+        for (k, _) in keys.entries(&*txn, t, row, pk)? {
             txn.delete(&k)?;
         }
     }
@@ -1008,14 +1008,14 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
         let full = chunk.len() == BACKFILL_ROWS;
         for (key, row) in chunk {
             let pk = pk_suffix(table, &key);
-            let (k, unique) = keys.entries(&*txn, table, &row, &pk)?.swap_remove(i);
+            let (k, unique) = keys.entries(&*txn, table, &row, pk)?.swap_remove(i);
             if unique && txn.get(&k)?.is_some() {
                 return Err(Error::unique_violation(format!(
                     "could not create unique index \"{}\": key is duplicated",
                     table.indexes[i].name
                 )));
             }
-            txn.put(&k, &pk)?;
+            txn.put(&k, pk)?;
         }
         if !full {
             return Ok(());
@@ -1061,8 +1061,8 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
         };
         storage.write(txn, table, &key, &row, None)?;
         let pk = pk_suffix(table, &key);
-        for (k, _) in keys.entries(&*txn, table, &row, &pk)? {
-            txn.put(&k, &pk)?;
+        for (k, _) in keys.entries(&*txn, table, &row, pk)? {
+            txn.put(&k, pk)?;
         }
     }
     crate::storage::written(table);
@@ -1097,14 +1097,14 @@ pub fn replace_rows(
         storage.write(txn, table, &key, &row, None)?;
         let pk = pk_suffix(table, &key);
         for (i, (k, unique)) in keys
-            .entries(&*txn, table, &row, &pk)?
+            .entries(&*txn, table, &row, pk)?
             .into_iter()
             .enumerate()
         {
             if unique && txn.get(&k)?.is_some() {
                 return Err(duplicate(&table.indexes[i].name));
             }
-            txn.put(&k, &pk)?;
+            txn.put(&k, pk)?;
         }
     }
     crate::storage::written(table);

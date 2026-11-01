@@ -389,7 +389,7 @@ fn clean_rows(kv: &Arc<dyn Kv>, name: &str) -> Result<()> {
                 let pk = crate::exec::pk_suffix(&t, k);
                 for (c, _) in crate::encoding::out_of_line(v)? {
                     if !delta.iter().any(|&(d, _)| d == c) {
-                        crate::large::remove_chunks(txn, &t, &pk, c)?;
+                        crate::large::remove_chunks(txn, &t, pk, c)?;
                     }
                 }
                 txn.delete(k)?;

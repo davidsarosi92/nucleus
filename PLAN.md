@@ -2185,6 +2185,11 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20: the load — one look at the tree for a run
+  of new keys (not one per row), a spill's keys checked as a commit's,
+  no intent delete for keys written after the spill outside its span:
+  the 1M-row `INSERT … SELECT` 1.2–1.4× PostgreSQL's time (2.0–2.2×
+  before); the `bench/run.py` load target met.
 - **2026-11-01** — §M14.20: a commit's leaves prepared on workers while
   the walk installs earlier ones (swapped into the pool, not copied): a
   10% delete ~136 ms, 1.3–1.9× PostgreSQL's (its own time varied 75–107

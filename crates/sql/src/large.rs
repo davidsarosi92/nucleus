@@ -98,7 +98,7 @@ fn encode(
         let was = stored.iter().any(|&(sc, _)| sc == c);
         if out.len() - at <= THRESHOLD {
             if was {
-                remove_chunks(txn, t, &pk, c)?;
+                remove_chunks(txn, t, pk, c)?;
             }
             continue;
         }
@@ -111,9 +111,9 @@ fn encode(
             });
         if !same {
             if was {
-                remove_chunks(txn, t, &pk, c)?;
+                remove_chunks(txn, t, pk, c)?;
             }
-            let prefix = chunks_prefix(t, &pk, c);
+            let prefix = chunks_prefix(t, pk, c);
             for (n, chunk) in enc.chunks(CHUNK).enumerate() {
                 let mut k = prefix.clone();
                 k.extend_from_slice(&(n as u32).to_be_bytes());
@@ -125,7 +125,7 @@ fn encode(
     }
     for &(c, _) in &stored {
         if c >= row.len() {
-            remove_chunks(txn, t, &pk, c)?;
+            remove_chunks(txn, t, pk, c)?;
         }
     }
     Ok(out)
@@ -152,7 +152,7 @@ pub fn remove(txn: &mut dyn KvTxn, t: &Table, key: &[u8]) -> Result<()> {
     if let Some(b) = txn.get(key)? {
         let pk = pk_suffix(t, key);
         for (c, _) in out_of_line(&b)? {
-            remove_chunks(txn, t, &pk, c)?;
+            remove_chunks(txn, t, pk, c)?;
         }
     }
     txn.delete(key)?;
@@ -205,7 +205,7 @@ pub fn read_some(
     wanted: Option<&[bool]>,
 ) -> Result<Row> {
     let mut row = crate::encoding::decode_some(bytes, t.columns.len(), wanted, &mut |c, len| {
-        fetch(txn, t, &pk_suffix(t, key), c, len)
+        fetch(txn, t, pk_suffix(t, key), c, len)
     })?;
     for (v, c) in row.iter_mut().zip(&t.columns) {
         if matches!(c.ty, DataType::Enum(_)) {

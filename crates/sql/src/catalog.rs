@@ -73,6 +73,8 @@ pub fn note_stored_types(txn: &mut dyn KvTxn, columns: &[Column]) -> Result<()> 
     Ok(())
 }
 const DATA: u8 = 0x01;
+/// The length of [`Table::index_prefix`]: the tag, table id, index id.
+pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// Version 2 added `NUMERIC(p, s)` modifiers, version 3 foreign keys,
 /// version 4 registered types (tag `7F` and the type's name), version 5
 /// indexes in taught orderings, version 6 `smallint` and `integer` (type
@@ -326,7 +328,8 @@ impl Table {
         self.columns.iter().position(|c| c.name == name)
     }
 
-    /// The key prefix of index `index_id` (0 = primary).
+    /// The key prefix of index `index_id` (0 = primary): of
+    /// [`INDEX_PREFIX_LEN`] bytes.
     pub fn index_prefix(&self, index_id: u32) -> Vec<u8> {
         let mut k = vec![DATA];
         k.extend_from_slice(&self.id.to_be_bytes());

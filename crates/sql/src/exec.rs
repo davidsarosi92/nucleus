@@ -885,8 +885,8 @@ pub fn pk_of(table: &Table, row: &[Value]) -> Vec<Value> {
 }
 
 /// The key bytes after a table's primary index prefix.
-pub fn pk_suffix(table: &Table, key: &[u8]) -> Vec<u8> {
-    key[table.index_prefix(0).len()..].to_vec()
+pub fn pk_suffix<'k>(_table: &Table, key: &'k [u8]) -> &'k [u8] {
+    &key[crate::catalog::INDEX_PREFIX_LEN..]
 }
 
 /// What a join needs besides its inputs.

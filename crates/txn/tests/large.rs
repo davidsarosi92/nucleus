@@ -192,6 +192,64 @@ fn conflicts_with_spilled_writes_either_way() {
 }
 
 #[test]
+fn put_new_finds_what_is_there_across_runs_of_new_keys_and_spills() {
+    // A bulk insert in key order: one look at the tree covers the run of
+    // keys up to its next entry — not past an existing key, a spill (its
+    // own intents enter the tree) or a key someone commits meanwhile.
+    let p = Arc::new(SimPlatform::new(4));
+    let e = engine_on(&p, opts()).unwrap();
+    let mut setup = e.begin();
+    for i in [100, 200, 900] {
+        setup.put(&key(i), b"old").unwrap();
+    }
+    setup.commit().unwrap();
+    let mut t = e.begin();
+    for i in 0..600 {
+        let fresh = t.put_new(&key(i), b"new").unwrap();
+        assert_eq!(fresh, i != 100 && i != 200, "key {i}");
+        if i == 300 {
+            assert!(e.intent_count().unwrap() > 0, "the writes spilled");
+            // Its own: held, or spilled (before and after the existing
+            // key the run looked at stopped at).
+            for k in [299, 250, 5] {
+                assert!(!t.put_new(&key(k), b"again").unwrap(), "key {k}");
+            }
+        }
+    }
+    assert!(!t.put_new(&key(900), b"new").unwrap(), "the run's end");
+    t.commit().unwrap();
+    let rows = all(&e);
+    assert_eq!(rows.len(), 601);
+    assert_eq!(rows[&key(100)], b"old");
+    assert_eq!(rows[&key(5)], b"new");
+
+    // A key committed after the snapshot, inside a run already looked at:
+    // the commit (or the spill before it) conflicts, as without the run.
+    let mut t = e.begin();
+    assert!(t.put_new(&key(1000), b"t").unwrap());
+    let mut other = e.begin();
+    other.put(&key(1005), b"other").unwrap();
+    other.commit().unwrap();
+    let mut failed = false;
+    for i in 1001..1100 {
+        match t.put_new(&key(i), b"t") {
+            Ok(fresh) => assert!(fresh),
+            Err(Error::Conflict { .. }) => {
+                failed = true;
+                break;
+            }
+            Err(err) => panic!("{err}"),
+        }
+    }
+    if !failed {
+        assert!(matches!(t.commit(), Err(Error::Conflict { .. })));
+    }
+    let rows = all(&e);
+    assert_eq!(rows[&key(1005)], b"other");
+    assert!(!rows.contains_key(&key(1000)));
+}
+
+#[test]
 fn serializable_reads_validate_against_a_large_commit() {
     let p = Arc::new(SimPlatform::new(4));
     let e = engine_on(&p, opts()).unwrap();
