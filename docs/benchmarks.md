@@ -5,8 +5,10 @@ L8).  The suite is `bench/run.py`: one workload — a 4-column table loaded
 by `INSERT … SELECT`, counts, a filtered scan, a sum, a 1000-group
 `GROUP BY`, a sort, a self-join, 1000 reads by key, an update of a quarter
 of the rows and a delete of a tenth — run statement by statement through
-each system's own client with `\timing`, both as client and server
-(`nucleus server` with `nucleus sql -h`; `psql`).  A step repeated three
+each system's own client with `\timing`, both as client and server:
+nucleus as `nucleus server` driven by `nucleus sql -h` over its own
+protocol, `ncp`; PostgreSQL, the baseline, through `psql`.  nucleus's
+PostgreSQL protocol (`--pg-compat`) is not used.  A step repeated three
 times reports its best; the point reads their total.
 
 CI runs it on every push to `main` with a million rows against the
@@ -18,7 +20,10 @@ when a run fails: shared runners are too noisy for thresholds yet.
 
 ```sh
 cargo build --release -p nucleus-cli
-# PostgreSQL reachable through the usual PG* variables (or --pg "…"):
+# nucleus: --nucleus names the binary; the script starts its server on a
+# fresh directory and drives it with `nucleus sql -h`.
+# PostgreSQL (the baseline): psql, reached through the usual PG* variables
+# (or --pg "…"); they concern only PostgreSQL.
 PGHOST=127.0.0.1 PGUSER=postgres python3 bench/run.py \
   --nucleus target/release/nucleus --rows 1000000 --json bench.json
 python3 bench/run.py --nucleus target/release/nucleus --no-pg   # nucleus alone
@@ -197,7 +202,11 @@ fixed seed with the specification's sizes, keys and distributions
 (`bench/tpch_data.py`; not `dbgen`'s text), primary keys and indexes on
 the foreign keys' columns on both systems, the 22 queries with their
 validation parameters (`bench/tpch_queries.py`), each nucleus run's
-results compared with PostgreSQL's (numbers to cents).
+results compared with PostgreSQL's (numbers to cents).  nucleus runs as
+its own server, driven by `nucleus sql -h` (loads by its `\copy`) and
+read back by the Python driver; `--psql` gives only the command that
+reaches PostgreSQL, the baseline (here in Docker; `--no-pg` leaves it
+out).
 
 ```sh
 python3 bench/tpch.py --nucleus target/release/nucleus --sf 1 \
@@ -271,7 +280,9 @@ Where the time still goes:
 PostgreSQL schema) and 43 queries, from the ClickBench repository at a
 fixed commit, on the first `--rows` rows of its data, each system's
 results checked against the other's (a query whose `LIMIT` may cut ties
-differently is reported, not failed).
+differently is reported, not failed).  nucleus and PostgreSQL are driven
+as for TPC-H: nucleus through its own client and driver, PostgreSQL
+through the `--psql` command.
 
 ```sh
 python3 bench/clickbench.py --nucleus target/release/nucleus --rows 1000000 \
