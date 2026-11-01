@@ -2643,6 +2643,15 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-01 — §M14.20, TPC-H and ClickBench again** (at `e2d1afa`,
+  `docs/benchmarks.md`): TPC-H SF 1 1.03× PostgreSQL's time on column
+  tables and 2.34× on row tables in the geometric mean (1.10× and 2.24×
+  on 10-30); ClickBench 0.34× and 2.47× (0.34× and 2.51×); the loads
+  faster (TPC-H 98 s / 111 s from 118 s / 125 s, ClickBench 18.7 s /
+  20.9 s from 21.7 s / 21.4 s).  Row tables' times vary between runs by
+  whole queries (Q3 3.2 s in one run, 1.2 s in the next); not yet
+  explained.
+
 - **2026-11-01 — §M14.20, the self-join:** a hash join whose right side
   is a pipeline has it collected (its keys evaluated a batch at a time)
   on worker threads, morsels in key order; the table groups each key's

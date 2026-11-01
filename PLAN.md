@@ -1453,17 +1453,18 @@ attach / detach ✅; the age policy ✅); V10 results columnar end to end ✅ (a
 into the columnar result as columns, in parallel too — a million numeric
 rows into numpy 262 → 92 ms from a row table, 241 → 51 ms from a column
 table); TPC-H against PostgreSQL measured (`bench/tpch.py`, SF 1: every
-result agrees; first 6.5–7.9× PostgreSQL's time, now 1.10× on column
-tables and 2.24× on row tables in the geometric mean, 12 of the 22
+result agrees; first 6.5–7.9× PostgreSQL's time, now 1.03× on column
+tables and 2.34× on row tables in the geometric mean, 12 of the 22
 queries faster on column tables; `EXISTS` / `IN` unnested into semi and
 anti joins on the way) ✅; ClickBench (`bench/clickbench.py`, the first
 million rows: every result agrees, but for ties at a `LIMIT`; 0.34× of
-PostgreSQL's time on a column table, 2.51× on a row table) ✅; the
+PostgreSQL's time on a column table, 2.47× on a row table) ✅; the
 targets recorded ✅ (`docs/benchmarks.md`, Targets: column tables at most
 0.8× PostgreSQL's time on TPC-H and 0.5× on ClickBench in the geometric
 mean, no query above 3×; row tables within 2×; loads, updates and
 deletes within 2×, scans, sorts and joins within 3×, reads by key at
-least even — met so far: ClickBench, scans and sorts, reads by key); V11 write intents among the versions ✅ — a large
+least even — met so far: ClickBench, and every `bench/run.py` target:
+loads, updates and deletes, scans, sorts and joins, reads by key); V11 write intents among the versions ✅ — a large
 transaction's spilled writes go straight into the version keyspace as
 *intents* (a version stamped with the transaction's id, not a commit
 timestamp: readers resolve it by the transaction's status — its own,
@@ -2185,6 +2186,13 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20: TPC-H and ClickBench measured again at
+  `e2d1afa`: TPC-H 1.03× PostgreSQL's time on column tables (1.10× on
+  10-30), 2.34× on row tables (2.24×; a second run 2.26×, the row
+  tables' times varying by whole queries between runs — not yet
+  explained); ClickBench 0.34× and 2.47× (0.34× and 2.51×); loads
+  98 s / 111 s against 26 s (118 s / 125 s) and 18.7 s / 20.9 s against
+  7.2 s (21.7 s / 21.4 s).
 - **2026-11-01** — §M14.20: the self-join — a hash join's right side
   collected on worker threads when it is a pipeline, its table without an
   allocation per key: 1.7× PostgreSQL's time (4.2× before); every
