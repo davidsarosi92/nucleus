@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use nucleus_platform::Platform;
+use nucleus_storage::btree::{LeafEntry, LeafFilter};
 use nucleus_storage::node::MAX_KEY;
 use nucleus_storage::{BTree, Batch, Store, StoreOptions};
 
@@ -312,8 +313,8 @@ impl Engine {
     /// Removes every version no snapshot can see any more, makes committed
     /// transactions' intents versions at their commit timestamps and
     /// deletes aborted ones'.  Returns how many entries it removed.
-    /// Commits also collect the old versions of the keys they write; this
-    /// sweeps the rest.  After a whole sweep, the transactions committed
+    /// Commits also collect the old versions in the leaves they rewrite
+    /// (all but a tombstone a leaf ends with); this sweeps the rest.  After a whole sweep, the transactions committed
     /// before it began have no intent left: their status records go.
     pub fn vacuum(&self) -> Result<u64> {
         *lock(&self.inner.sweep) = None;
@@ -833,81 +834,127 @@ impl Inner {
         }
     }
 
-    /// A commit's checks of the keys it writes, in one walk over each key's
-    /// versions (and one read of the tree for them all): the first key a
-    /// newer commit wrote — or another running transaction has an intent
-    /// of — is a conflict (`Some`); else the versions the commit lets go go
-    /// to `ops` (those older than the one it keeps; none of a key with an
-    /// intent still to be made a version).  Fresh keys
+    /// A commit's check of the keys it writes: the first a newer commit
+    /// wrote — or another running transaction has an intent of — is a
+    /// conflict.  Answered from what recent commits wrote
+    /// ([`write_conflicts`](Self::write_conflicts)) where that tells; the
+    /// rest (a spilled commit's span covers them, or another transaction
+    /// has intents) by the tree, in one walk with one cursor.  Fresh keys
     /// ([`Transaction::fresh`]) are skipped.
-    #[allow(clippy::type_complexity)]
-    fn commit_checks(
+    fn commit_conflict(
         &self,
         keys: &mut dyn Iterator<Item = (&[u8], bool)>,
         start: u64,
         me: Option<u64>,
-        wm: u64,
-        ops: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
     ) -> Result<Option<Vec<u8>>> {
-        let unresolved = self.unresolved_ids();
         let others = self.others(me);
+        let mut look: Vec<&[u8]> = Vec::new();
+        let mut keys = keys.filter(|&(_, fresh)| !fresh).map(|(user, _)| user);
+        if others.is_empty() {
+            let recent = lock(&self.recent);
+            let spans = lock(&self.recent_spans);
+            let spans: Vec<_> = spans.iter().filter(|(_, _, t)| *t > start).collect();
+            for user in keys {
+                if recent.get(user).is_some_and(|&t| t > start) {
+                    return Ok(Some(user.to_vec()));
+                }
+                if spans
+                    .iter()
+                    .any(|(lo, hi, _)| lo.as_slice() <= user && user <= hi.as_slice())
+                {
+                    look.push(user);
+                }
+            }
+        } else {
+            look.extend(&mut keys);
+        }
+        if look.is_empty() {
+            return Ok(None);
+        }
+        let unresolved = self.unresolved_ids();
         let tree = self.store.read()?;
-        // One cursor for all the keys (they come in order): most seeks
-        // stay in the leaf the last one ended in.
+        // The keys come in order: most seeks stay in the leaf the last one
+        // ended in.
         let mut cursor = tree.cursor()?;
         let (mut k, mut v) = (Vec::new(), Vec::new());
-        let mut dropped = Vec::new();
-        for (user, fresh) in keys {
-            if fresh {
-                continue;
-            }
+        for user in look {
             // Intents first: another's running, or committed after the
-            // snapshot, conflicts; any but an aborted one pins the
-            // versions.  Then the versions, newest first: the first decides
-            // the conflict; those at or below the watermark past the first
-            // (or a tombstone) can go.
-            dropped.clear();
-            let mut pinned = false;
-            let mut newest = None;
-            let mut kept = false;
+            // snapshot, conflicts.  Then the newest version decides.
             let end = after_versions(user);
             cursor.seek_near(&first_version(user))?;
             while cursor.next_within(&mut k, &mut v, &|key| key < &end[..])? {
                 let (_, vts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
                 if let Some(id) = intent_of(vts) {
-                    if Some(id) == me {
-                        pinned = true;
-                    } else if let Some(&(_, cts)) = unresolved.iter().find(|&&(u, _)| u == id) {
-                        if cts > start {
-                            return Ok(Some(user.to_vec()));
-                        }
-                        pinned = true;
-                    } else if others.contains(&id) {
+                    let committed_after = unresolved.iter().any(|&(u, cts)| u == id && cts > start);
+                    if Some(id) != me && (committed_after || others.contains(&id)) {
                         return Ok(Some(user.to_vec()));
                     }
                     continue;
                 }
-                if newest.is_none() {
-                    if vts > start {
-                        return Ok(Some(user.to_vec()));
-                    }
-                    newest = Some(vts);
+                if vts > start {
+                    return Ok(Some(user.to_vec()));
                 }
-                if vts <= wm {
-                    let tombstone = decode_value(&v)
-                        .ok_or(Error::Corrupt("bad version value"))?
-                        .is_none();
-                    if kept || tombstone {
-                        dropped.push((k.clone(), None));
+                break;
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// What a commit's leaf rewrites drop ([`LeafFilter`]): of every key in
+/// the leaves the commit writes anyway, the versions no snapshot can see
+/// any more — at or below the watermark `wm`, under the newest such one
+/// (or that one too, a tombstone) — as vacuum would.
+///
+/// A leaf may hold only part of a key's versions, and it is enough: a
+/// version is garbage under any version at or below `wm` newer than it, so
+/// the newer ones in an earlier leaf only make one more of them (the one
+/// kept here) garbage too.  Intents do not matter: they rank above every
+/// version (resolved, a key's newest), so whatever becomes of them, no
+/// snapshot reads under the newest version at or below `wm`.  Only a
+/// tombstone the leaf ends with stays — older versions of its key may
+/// follow in the next leaf, and would read as live without it.
+///
+/// Not logged: after a crash, replay brings what it dropped back — unseen
+/// by any snapshot still, and vacuum's to sweep.
+struct Collect {
+    wm: u64,
+}
+
+impl LeafFilter for Collect {
+    fn drops(&self, entries: &[LeafEntry], drop: &mut [bool]) {
+        // `escape(user) 00 00`: what a key's versions share.
+        fn run_of(key: &[u8]) -> Option<&[u8]> {
+            let n = key.len().checked_sub(mvcc::OVERHEAD)?;
+            (key[n..n + 2] == [0, 0] && !mvcc::is_reserved(key)).then(|| &key[..n + 2])
+        }
+        let mut i = 0;
+        while i < entries.len() {
+            let Some(run) = run_of(entries[i].key) else {
+                i += 1;
+                continue;
+            };
+            let mut end = i + 1;
+            while end < entries.len()
+                && entries[end].key.len() == run.len() + 8
+                && entries[end].key.starts_with(run)
+            {
+                end += 1;
+            }
+            let mut kept = false;
+            for (j, e) in entries[..end].iter().enumerate().skip(i) {
+                let at = u64::from_be_bytes(e.key[run.len()..].try_into().expect("8 bytes"));
+                // An intent's timestamp is above any watermark.
+                if u64::MAX - at <= self.wm {
+                    let tombstone = e.inline == Some(&[0][..]);
+                    if kept || (tombstone && end < entries.len()) {
+                        drop[j] = true;
                     }
                     kept = true;
                 }
             }
-            if !pinned {
-                ops.append(&mut dropped);
-            }
+            i = end;
         }
-        Ok(None)
     }
 }
 
@@ -1070,8 +1117,7 @@ impl Transaction {
     /// other transaction writes one before this one ends (a new index's
     /// keys).  Their writes skip what guards against other transactions —
     /// the check for a newer version as they are written, spill and
-    /// commit, and the old versions' collection — which for a fresh range
-    /// would find nothing.  The caller answers for the claim.
+    /// commit — which for a fresh range would find nothing.  The caller answers for the claim.
     pub fn fresh(&mut self, start: &[u8], end: &[u8]) {
         self.fresh.push((start.to_vec(), end.to_vec()));
     }
@@ -1252,11 +1298,11 @@ impl Transaction {
             let mut last = lock(&engine.commit);
             let wm = engine.current_watermark();
             let mut ops = Vec::with_capacity(self.writes.len() + 1);
-            // Each key's conflict and the versions its write lets go, in
-            // one walk (spilled keys were checked as they spilled, and every
-            // commit since has checked its keys against them).
+            // Each key's conflict (spilled keys were checked as they
+            // spilled, and every commit since has checked its keys against
+            // them).
             let mut keys = self.writes.keys().map(|k| (k.as_slice(), self.is_fresh(k)));
-            if let Some(key) = engine.commit_checks(&mut keys, self.start, spilled, wm, &mut ops)? {
+            if let Some(key) = engine.commit_conflict(&mut keys, self.start, spilled)? {
                 return Err(Error::Conflict { key });
             }
             // Serializable transactions record every read; others only
@@ -1275,10 +1321,12 @@ impl Transaction {
                 // `ts` (and become them, as vacuum rewrites them).
                 ops.push((status_key(id), Some(ts.to_be_bytes().to_vec())));
             }
-            // In key order (sorted runs: the versions let go, the writes),
-            // so the store applies the batch as it is.
+            // In key order, so the store applies the batch as it is; the
+            // leaves it rewrites lose what no snapshot can see any more.
             ops.sort_by(|a, b| a.0.cmp(&b.0));
-            let lsn = engine.store.write(&Batch { meta: ts, ops })?;
+            let lsn = engine
+                .store
+                .write_filtered(&Batch { meta: ts, ops }, &Collect { wm })?;
             *last = ts;
             if let Some(id) = spilled {
                 // Committed before it stops running: a writer never finds
@@ -1780,5 +1828,88 @@ impl Iterator for Scan<'_> {
             }
             Err(e) => Some(Err(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Which of `leaf` (keys and stored values) [`Collect`] drops.
+    fn dropped(wm: u64, leaf: &[(Vec<u8>, Vec<u8>)]) -> Vec<bool> {
+        let entries: Vec<_> = leaf
+            .iter()
+            .map(|(k, v)| LeafEntry {
+                key: k,
+                inline: Some(v),
+            })
+            .collect();
+        let mut drop = vec![false; leaf.len()];
+        Collect { wm }.drops(&entries, &mut drop);
+        drop
+    }
+
+    fn version(user: &[u8], ts: u64, value: Option<&[u8]>) -> (Vec<u8>, Vec<u8>) {
+        (encode_key(user, ts), encode_value(value))
+    }
+
+    #[test]
+    fn collect_drops_what_no_snapshot_sees() {
+        let leaf = [
+            version(b"a", 9, Some(b"a9")),
+            version(b"a", 5, Some(b"a5")),
+            version(b"a", 3, Some(b"a3")), // under the newest at or below 5
+            version(b"b", 4, None),        // a tombstone no snapshot needs
+            version(b"b", 2, Some(b"b2")),
+            version(b"c", 1, Some(b"c1")),
+        ];
+        assert_eq!(dropped(5, &leaf), [false, false, true, true, true, false]);
+        // Nothing at or below the watermark but the newest: nothing goes.
+        assert_eq!(dropped(0, &leaf), [false; 6]);
+    }
+
+    #[test]
+    fn collect_keeps_a_tombstone_the_leaf_ends_with() {
+        let leaf = [
+            version(b"a", 3, Some(b"a3")),
+            version(b"b", 4, None),
+            version(b"b", 2, Some(b"b2")),
+        ];
+        // `b`'s versions may go on in the next leaf: its tombstone stays,
+        // what is under it here goes.
+        assert_eq!(dropped(9, &leaf), [false, false, true]);
+        assert_eq!(dropped(9, &leaf[..2]), [false, false]);
+        // A leaf that begins inside `a`'s versions (newer ones before it):
+        // the first here at or below the watermark stays, which is one
+        // more than needed, never one too few.
+        let leaf = [
+            version(b"a", 3, Some(b"a3")),
+            version(b"a", 1, None),
+            version(b"a", 0, Some(b"a0")),
+            version(b"b", 1, Some(b"b1")),
+        ];
+        assert_eq!(dropped(9, &leaf), [false, true, true, false]);
+    }
+
+    #[test]
+    fn collect_skips_intents_and_reserved_keys() {
+        let leaf = [
+            (status_key(7), 3u64.to_be_bytes().to_vec()),
+            (NEXT_ID.to_vec(), 8u64.to_be_bytes().to_vec()),
+            version(b"a", intent_ts(7), Some(b"mine")),
+            version(b"a", 5, Some(b"a5")),
+            version(b"a", 3, Some(b"a3")),
+            version(b"b\x00", 5, Some(b"b5")),
+            version(b"b\x00", 3, Some(b"b3")),
+            version(b"b\x00\x00", 3, Some(b"c3")),
+            version(b"b\x00\x00", 2, Some(b"c2")),
+            version(b"d", 1, Some(b"d1")),
+        ];
+        assert_eq!(
+            dropped(9, &leaf),
+            [
+                false, false, false, false, true, false, true, false, true, false
+            ]
+        );
     }
 }

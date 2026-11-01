@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use nucleus_platform::{FileSystem, Platform};
 
-use crate::btree::BTree;
+use crate::btree::{BTree, LeafFilter};
 use crate::buffer::BufferPool;
 use crate::error::{Error, Result};
 use crate::node::MAX_KEY;
@@ -235,7 +235,7 @@ impl Store {
         }
         wal.replay(applied, |lsn, payload| {
             let batch = Batch::decode(payload)?;
-            apply(&mut tree, &batch)?;
+            apply(&mut tree, &batch, None)?;
             meta = batch.meta;
             replayed += 1;
             applied = lsn + 16 + payload.len() as u64;
@@ -274,6 +274,18 @@ impl Store {
     /// this returns; durable once [`Store::wait_durable`] with the returned
     /// LSN returns.
     pub fn write(&self, batch: &Batch) -> Result<Lsn> {
+        self.write_with(batch, None)
+    }
+
+    /// [`write`](Store::write), `filter` dropping entries of the leaves the
+    /// batch rewrites ([`LeafFilter`]) — not logged: what it drops must be
+    /// garbage the layer above can live with finding again after a crash
+    /// (replay applies the batch without it).
+    pub fn write_filtered(&self, batch: &Batch, filter: &dyn LeafFilter) -> Result<Lsn> {
+        self.write_with(batch, Some(filter))
+    }
+
+    fn write_with(&self, batch: &Batch, filter: Option<&dyn LeafFilter>) -> Result<Lsn> {
         if let Some((k, _)) = batch.ops.iter().find(|(k, _)| k.len() > MAX_KEY) {
             return Err(Error::KeyTooLarge(k.len()));
         }
@@ -284,7 +296,7 @@ impl Store {
             self.writers_waiting.fetch_add(1, Ordering::AcqRel);
             let mut tree = self.tree.write().unwrap_or_else(|e| e.into_inner());
             self.writers_waiting.fetch_sub(1, Ordering::AcqRel);
-            apply(&mut tree, batch)?;
+            apply(&mut tree, batch, filter)?;
             Ok(lsn)
         });
         match result {
@@ -376,18 +388,25 @@ impl Store {
     }
 }
 
-fn apply(tree: &mut BTree, batch: &Batch) -> Result<()> {
+fn apply(tree: &mut BTree, batch: &Batch, filter: Option<&dyn LeafFilter>) -> Result<()> {
+    let sorted = |tree: &mut BTree, ops: &[(Vec<u8>, Option<Vec<u8>>)]| match filter {
+        Some(f) => tree.apply_sorted_filtered(ops, f),
+        None => tree.apply_sorted(ops),
+    };
     // When no key comes twice (how the engine writes batches), the order
     // does not matter: one sorted pass over the tree, a page written once
     // for all its keys.
     // (Already sorted — how the engine writes its commits —, as it is.)
-    if batch.ops.len() > 1 && batch.ops.windows(2).all(|w| w[0].0 < w[1].0) {
-        return tree.apply_sorted(&batch.ops);
+    // A filter wants the sorted pass even for one key (it acts as leaves
+    // are rewritten).
+    let many = batch.ops.len() > 1 || (filter.is_some() && !batch.ops.is_empty());
+    if many && batch.ops.windows(2).all(|w| w[0].0 < w[1].0) {
+        return sorted(tree, &batch.ops);
     }
     let mut ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = batch.ops.clone();
     ops.sort_by(|a, b| a.0.cmp(&b.0));
     if ops.len() > 1 && ops.windows(2).all(|w| w[0].0 != w[1].0) {
-        return tree.apply_sorted(&ops);
+        return sorted(tree, &ops);
     }
     for (k, v) in &batch.ops {
         match v {

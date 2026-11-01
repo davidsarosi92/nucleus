@@ -344,7 +344,13 @@ CPUs, the simulation one): the leaves it reaches found first, then, a
 window at a time, each merged and encoded into a page of its own on a
 worker, installed as the walk reaches it — pages freed and taken in the
 order one thread takes them, so the tree is the same page for page
-(tested so).
+(tested so, with a filter and without).  **Compaction filter:**
+`apply_sorted_filtered(ops, &dyn LeafFilter)` lets the layer above drop
+entries of the leaves the batch rewrites anyway — `drops(entries, drop)`
+sees a leaf's keys and short values after the batch went in, one leaf at
+a time on whichever thread prepares it, so it must be a pure function of
+them (the MVCC engine drops the versions no snapshot sees, §5); a dropped
+entry's overflow pages are freed with the rest.
 
 ### 4.5 Write-ahead log (`wal::Wal`)
 
@@ -372,7 +378,10 @@ fails with `Error::Locked` ("in use by another process") instead of
 corrupting the database — then creates `dir/data` and `dir/wal/` if
 needed and recovers; returns `Recovery { meta, replayed }`.  `write(&Batch)` appends the batch to the
 WAL and applies it under the tree's write lock (visible at once);
-`wait_durable(lsn)`; `commit` = both.  A batch whose keys are all
+`wait_durable(lsn)`; `commit` = both.  `write_filtered(&Batch, filter)`
+applies it through a `LeafFilter` (§4.4) — not logged: replay applies the
+batch without it, so what a filter drops must be garbage its layer can
+find again after a crash.  A batch whose keys are all
 distinct (every batch the engine writes) is applied in one sorted pass
 (`apply_sorted`); otherwise op by op, in order.  `read()` gives the tree's read
 guard; `get`.  `checkpoint()` syncs the WAL up to the applied LSN, commits
@@ -477,8 +486,9 @@ committed intents as versions at their timestamps and deletes aborted
 ones; once a whole sweep is done (durable), the statuses of the
 transactions committed before it began are dropped.  Meanwhile reads pay
 a little for them (a read of a key with intents walks them before its
-versions; a scan merges them in one streaming pass), and garbage
-collection leaves alone the keys that have one.  A rollback (or a drop)
+versions; a scan merges them in one streaming pass), and vacuum leaves
+alone the keys that have one (a commit's collection need not: an intent
+ranks above every version).  A rollback (or a drop)
 aborts the transaction — its intents nobody sees from then — and deletes
 them in the key span it spilled; on opening, the status records say which
 transactions committed, every other's intents are aborted (vacuum sweeps
@@ -501,7 +511,9 @@ whose key already has a newer version fails at the write, under both
 levels — told by the recent commits' keys (every commit after a running
 snapshot is among them), without a look at the tree, unless another
 running transaction has intents or a large commit's span covers the key;
-the commit's own check stays the guarantee.
+the commit's own check — told the same way under the commit lock, the
+tree read, with one cursor, only for the keys the recent ones cannot
+answer — stays the guarantee.
 
 **Validated reads** (§M14.5).  `get_validated` / `scan_validated` record
 the key or consumed range in the same read set at *any* isolation level, so
@@ -510,9 +522,15 @@ becoming serializable: its commit fails if a newer commit wrote what it
 read.  Foreign key checks use them (§8.10).
 
 **Garbage collection.**  Watermark = the oldest running snapshot (or
-*visible*) minus `history` commits.  A commit also deletes, for each key it
-writes, every version but the newest at or below the watermark (and that
-one if it is a tombstone); `vacuum()` does the same for all keys, in chunks.
+*visible*) minus `history` commits.  Garbage is every version but the
+newest at or below the watermark (and that one if it is a tombstone).  A
+commit drops it from the leaves it rewrites anyway — a compaction filter
+on its batch (`Collect`, §4.4), for every key in those leaves, with no read
+or write of its own: a leaf may hold only part of a key's versions, which
+is enough (newer ones in an earlier leaf only make one more garbage), but a
+tombstone a leaf ends with stays (older versions of its key may go on in
+the next leaf).  What it drops is not logged; after a crash, replay brings
+it back, invisible still.  `vacuum()` sweeps all keys, in chunks.
 Snapshots register under the same lock the watermark is read under, so GC
 never removes a version a snapshot can see.  `begin_with(at)` reads an older
 snapshot within the history window (read-only), else `SnapshotTooOld`.
@@ -532,10 +550,15 @@ reads, no phantoms); uncommitted writes invisible; first committer wins;
 write skew possible; no lost updates (6 threads incrementing with retries);
 transfers between 8 accounts from 4 threads keep the total in every
 snapshot a concurrent reader takes; GC with pinned snapshots, tombstones
-and vacuum; history; zero bytes and prefixes in keys; model-based scans
+and vacuum; commits collecting over many leaves, batches of every size,
+snapshots of every age reading what they began with, through a crash and
+replay, about a version a key left (the filter's own cases — a tombstone a
+leaf ends with, a leaf beginning inside a key's versions, intents,
+reserved keys — in `engine.rs`); history; zero bytes and prefixes in keys; model-based scans
 inside transactions; recovery of data and timestamps; a crash at every I/O
 point (both modes).  Mutations caught: no conflict check; a GC watermark
-that ignores running snapshots.  `tests/large.rs`: transactions past their
+that ignores running snapshots; a commit's collection dropping a tombstone
+a leaf ends with, or a version at the watermark plus one.  `tests/large.rs`: transactions past their
 budget read, overwrite and delete their spilled writes and commit them
 (their intents read as versions, then vacuumed into them, the same after
 reopening); rollbacks and drops leave no intent, crashes leave aborted
@@ -602,8 +625,7 @@ distributed implementation will provide (§F3).
   the key's versions decides both the value seen and the write's
   conflict), `fresh(start, end)` (declares a range no version and no other
   transaction's write can be in until this one ends — a new index's keys:
-  locally, their writes skip the conflict checks and the collection of old
-  versions; by default ignored),
+  locally, their writes skip the conflict checks; by default ignored),
   `commit(self: Box<Self>) -> Timestamp`, `rollback`.  Reads take `&self`
   so a scan can stay open while the same transaction reads keys.  A scan
   reads ahead 8 entries at first, twice as many at each refill up to 128,
@@ -2583,6 +2605,15 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-01 — §M14.20, garbage collected as leaves are rewritten:** a
+  commit no longer walks its keys' versions to delete the old ones; its
+  batch drops them from the leaves it rewrites anyway (a compaction
+  filter, `BTree::apply_sorted_filtered` / `Store::write_filtered`, not
+  logged), for every key there, and its conflict check is answered by the
+  recent commits' keys, the tree read only for the rest.  A 10% delete
+  ~260 → ~225 ms, a 25% update ~975 → ~935 ms; 20 updates of 100 000 rows
+  6.6 → 5.5 s, the table 32 → 28 MB.
 
 - **2026-11-01 — §M14.20, a commit's leaves on workers:** a sorted batch
   reaching 64 leaves or more merges and encodes them on the CPUs

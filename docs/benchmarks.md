@@ -63,19 +63,28 @@ reads the tree, a commit's checks walk one cursor, and a commit's leaves
 are merged and encoded without being decoded; then less per row — stashed
 rows consumed rather than copied, keys encoded in one buffer, a commit's
 batch sorted by the engine and applied as it is; then a commit's leaves
-merged on the CPUs:
+merged on the CPUs; then garbage dropped from the leaves a commit rewrites
+(a compaction filter) instead of a walk over its keys' versions, the
+commit's conflict check answered by the recent commits' keys:
 
 | 1,000,000 rows | before (ms) | now (ms) | ratio then → now |
 |---|---:|---:|---:|
 | load (INSERT … SELECT) | 3,193 | 2,240–2,520 | 3.3× → 2.3–2.6× |
-| update 25% | 1,896 | 950–1,000 | 2.2× → 1.1–1.2× |
-| delete 10% | 827 | 255–270 | 7.5× → 2.4–2.5× |
+| update 25% | 1,896 | 910–1,020 | 2.2× → 1.1–1.2× |
+| delete 10% | 827 | 220–230 | 7.5× → 2.1–2.2× |
 
-What the delete's 260 ms is now (a profile): applying the commit's
-tombstones to the tree about 15%, the commit's walk over each key's
-versions (its conflict and the versions it lets go) about 10%, the
-recent keys 5%, the parallel scan 15%, the rest per-row bookkeeping (the
-write set, key encoding, the stash, the WAL).
+What the delete's ~225 ms is now (a profile): finding the rows (the
+parallel scan) about 20%, the per-row write (the write set, key
+encoding) about 17%, the commit about half — applying its batch to the
+tree (the leaves merged and filtered on the workers) about 20%, the rest
+building and sorting the batch, the WAL record and the recent keys — and
+the WAL's sync a few percent.
+
+Hot updates (100,000 rows, each updated 20 times, a statement each): the
+commits' collection by walking each key's versions took 6.6 s and left a
+32 MB table; the compaction filter 5.5 s and 28 MB, a full scan 3.7 ms
+after either.  Without any collection at commit (vacuum's alone, the
+alternative weighed) it was 8.4 s, 311 MB and a 78 ms scan.
 
 **A columnar table** (§M14.20 V7), the same million rows in `WITH
 (storage = column)` (loaded by `INSERT … SELECT` from the row table in
@@ -269,7 +278,7 @@ against PostgreSQL 18 in the same run:
 | column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 8.9×, Q22 6.7×, Q16 3.7×, Q13 3.5×; ClickBench Q18 4.3×, Q39 3.2× | no |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | 2.24×, 2.51× | no |
 | loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 3.3×; 4.5× (row), 4.8× (column); 2.8× | no |
-| updates and deletes ≤ 2× (`bench/run.py`) | 1.2×, 2.5× (2026-11-01, against 10-31's PostgreSQL) | updates yes, deletes no |
+| updates and deletes ≤ 2× (`bench/run.py`) | 1.1–1.2×, 2.1–2.2× (2026-11-01, against 10-31's PostgreSQL) | updates yes, deletes no |
 | scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 1.2–2.1×; sort 1.9×; self-join 3.8× | joins no |
 | reads by key ≤ 1× (`bench/run.py`) | 0.5× | yes |
 

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use nucleus_platform::harness;
 use nucleus_platform::sim::{CrashMode, Faults, SimPlatform};
 use nucleus_platform::{Platform, Rng, SplitMix64};
+use nucleus_storage::btree::{LeafEntry, LeafFilter};
 use nucleus_storage::node::MAX_KEY;
 use nucleus_storage::{BTree, BufferPool, Error, PageId, Pager};
 
@@ -442,6 +443,30 @@ fn sorted_batches_agree_with_the_model() {
 /// rewritten in place, some copied).
 #[test]
 fn batches_on_workers_make_the_same_tree() {
+    same_tree_on_workers(false);
+}
+
+/// Drops every entry whose key ends in a multiple of 5 (a pure function of
+/// the leaf, as a filter must be).
+struct DropFifths;
+
+impl LeafFilter for DropFifths {
+    fn drops(&self, entries: &[LeafEntry], drop: &mut [bool]) {
+        for (e, d) in entries.iter().zip(drop) {
+            *d = e.key.last().is_some_and(|b| b % 5 == 0);
+        }
+    }
+}
+
+#[test]
+fn filtered_batches_on_workers_make_the_same_tree() {
+    same_tree_on_workers(true);
+}
+
+/// A tree built by batches on one worker and on four: the same pages,
+/// byte for byte — `filtered`, with [`DropFifths`] dropping entries of the
+/// leaves rewritten.
+fn same_tree_on_workers(filtered: bool) {
     let build = |workers: usize| {
         let p = platform(41);
         let mut tree = new_tree(&p, 4096);
@@ -480,7 +505,11 @@ fn batches_on_workers_make_the_same_tree() {
                 }
             }
             let ops: Vec<_> = ops.into_iter().collect();
-            tree.apply_sorted(&ops).unwrap();
+            if filtered {
+                tree.apply_sorted_filtered(&ops, &DropFifths).unwrap();
+            } else {
+                tree.apply_sorted(&ops).unwrap();
+            }
             for (k, v) in ops {
                 match v {
                     Some(v) => model.insert(k, v),
@@ -491,7 +520,21 @@ fn batches_on_workers_make_the_same_tree() {
                 commit(&tree).unwrap();
             }
         }
-        verify(&tree, &model, &rng);
+        if filtered {
+            // What is there is as written; what is not, the filter dropped
+            // (and some of what it would drop is in leaves not rewritten).
+            let mut have = BTreeMap::new();
+            for e in tree.range(Bound::Unbounded, Bound::Unbounded).unwrap() {
+                let (k, v) = e.unwrap();
+                assert_eq!(model.get(&k), Some(&v), "an entry as written");
+                have.insert(k, v);
+            }
+            let gone = model.keys().filter(|k| !have.contains_key(*k));
+            assert!(gone.clone().all(|k| k.last().unwrap() % 5 == 0));
+            assert!(gone.count() > 100, "the filter dropped entries");
+        } else {
+            verify(&tree, &model, &rng);
+        }
         let check = tree.check().unwrap();
         let pages: Vec<(u64, Vec<u8>)> = check
             .pages

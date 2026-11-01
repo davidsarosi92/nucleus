@@ -262,6 +262,91 @@ fn old_versions_are_collected() {
 }
 
 #[test]
+fn commits_collect_only_what_no_snapshot_sees() {
+    // Keys over many leaves, written in batches of all sizes (hot keys
+    // among them), snapshots of every age open meanwhile: each reads what
+    // it read when it began, through the commits' collection — and a crash
+    // (replay brings back what the collection dropped) changes none of it.
+    harness::run(
+        "txn_commits_collect_only_what_no_snapshot_sees",
+        4,
+        |seed| {
+            type Model = BTreeMap<Vec<u8>, Vec<u8>>;
+            let p = Arc::new(SimPlatform::new(seed));
+            let mut e = engine_on(&p, opts()).unwrap();
+            let rng = SplitMix64::new(seed);
+            let mut model = Model::new();
+            let mut snaps: Vec<(nucleus_txn::Transaction, Model)> = Vec::new();
+            let read = |t: &nucleus_txn::Transaction| -> Model {
+                t.scan(Bound::Unbounded, Bound::Unbounded)
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect()
+            };
+            for round in 0..60 {
+                let mut t = e.begin();
+                let n = match rng.below(3) {
+                    0 => 1 + rng.below(4),
+                    1 => 20 + rng.below(60),
+                    _ => 150 + rng.below(250),
+                };
+                for _ in 0..n {
+                    let k = if rng.below(3) == 0 {
+                        format!("hot{}", rng.below(6))
+                    } else {
+                        format!("key{:04}", rng.below(600))
+                    }
+                    .into_bytes();
+                    if rng.below(4) == 0 {
+                        t.delete(&k).unwrap();
+                        model.remove(&k);
+                    } else {
+                        let v = vec![round as u8; 40 + rng.below(160) as usize];
+                        t.put(&k, &v).unwrap();
+                        model.insert(k, v);
+                    }
+                }
+                t.commit().unwrap();
+                if rng.below(3) == 0 {
+                    snaps.push((e.begin(), model.clone()));
+                }
+                if !snaps.is_empty() && rng.below(3) == 0 {
+                    snaps.remove(rng.below(snaps.len() as u64) as usize);
+                }
+                for (t, m) in &snaps {
+                    assert_eq!(&read(t), m, "round {round}: a snapshot moved");
+                }
+                if round == 30 {
+                    snaps.clear();
+                    drop(e);
+                    p.sim_fs().crash();
+                    e = engine_on(&p, opts()).unwrap();
+                    assert_eq!(read(&e.begin()), model, "after the crash");
+                }
+            }
+            snaps.clear();
+            // With no snapshot open, a commit rewriting every leaf leaves about
+            // a version a key: its own, the one under it, and a tombstone a
+            // leaf ends with here and there.
+            let mut t = e.begin();
+            for k in model.keys() {
+                t.put(k, b"last").unwrap();
+            }
+            t.commit().unwrap();
+            let live = model.len() as u64;
+            let versions = e.version_count().unwrap();
+            assert!(
+                versions <= 2 * live + live / 4,
+                "{versions} versions of {live} keys"
+            );
+            e.vacuum().unwrap();
+            assert_eq!(e.version_count().unwrap(), live);
+            assert_eq!(read(&e.begin()).len() as u64, live);
+        },
+    );
+}
+
+#[test]
 fn history_keeps_old_snapshots_readable() {
     let p = Arc::new(SimPlatform::new(1));
     let e = engine_on(

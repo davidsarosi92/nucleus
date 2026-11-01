@@ -2185,6 +2185,12 @@ style) across a thousand seeds without failure.
   `bigint`), checked against PostgreSQL 18; row encoding version 2 (2-,
   4- or 8-byte integers); `ncp` given its own value encoder, so storage
   encodings no longer leak into the protocol.
+- **2026-11-01** — §M14.20: garbage collected as leaves are rewritten —
+  a commit's batch drops the versions no snapshot sees from the leaves it
+  writes anyway (a compaction filter, not logged), instead of walking its
+  keys' versions; its conflict check from the recent commits' keys: a 10%
+  delete ~2.1×, a 25% update ~1.1× PostgreSQL's 10-31 time; repeated
+  updates faster and the table smaller.
 - **2026-11-01** — §M14.20: a commit's leaves merged on the CPUs (the
   tree the same page for page): a 10% delete ~2.5×, a 25% update ~1.2×
   PostgreSQL's 10-31 time.

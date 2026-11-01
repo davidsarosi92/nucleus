@@ -69,6 +69,28 @@ pub struct TreeCheck {
     pub pages: BTreeSet<u64>,
 }
 
+/// An entry of a leaf a sorted batch rewrites, as a [`LeafFilter`] sees
+/// it.
+#[derive(Clone, Copy, Debug)]
+pub struct LeafEntry<'a> {
+    /// The key.
+    pub key: &'a [u8],
+    /// The value, when the cell holds it as it is (not compressed, not in
+    /// overflow pages — so a short one).
+    pub inline: Option<&'a [u8]>,
+}
+
+/// Drops entries of the leaves a sorted batch rewrites
+/// ([`BTree::apply_sorted_filtered`]) — a compaction filter: the leaf is
+/// written anyway, so what the layer above knows to be garbage goes with
+/// no read or write of its own.  It sees one leaf at a time, after the
+/// batch went in, on whichever thread prepares the leaf: a pure function
+/// of what it is given.
+pub trait LeafFilter: Sync {
+    /// Marks in `drop` (all false on entry) the `entries` to go.
+    fn drops(&self, entries: &[LeafEntry], drop: &mut [bool]);
+}
+
 impl BTree {
     /// Creates an empty tree.
     pub fn create(pool: Arc<BufferPool>) -> Result<Self> {
@@ -493,6 +515,24 @@ impl BTree {
     /// without repeats — as one at a time would, each node read and written
     /// once for all the keys that reach it.
     pub fn apply_sorted(&mut self, ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Result<()> {
+        self.apply_sorted_with(ops, None)
+    }
+
+    /// [`apply_sorted`](Self::apply_sorted), `filter` dropping entries of
+    /// the leaves the batch rewrites ([`LeafFilter`]).
+    pub fn apply_sorted_filtered(
+        &mut self,
+        ops: &[(Vec<u8>, Option<Vec<u8>>)],
+        filter: &dyn LeafFilter,
+    ) -> Result<()> {
+        self.apply_sorted_with(ops, Some(filter))
+    }
+
+    fn apply_sorted_with(
+        &mut self,
+        ops: &[(Vec<u8>, Option<Vec<u8>>)],
+        filter: Option<&dyn LeafFilter>,
+    ) -> Result<()> {
         if let Some((k, _)) = ops.iter().find(|(k, _)| k.len() > MAX_KEY) {
             return Err(Error::KeyTooLarge(k.len()));
         }
@@ -509,7 +549,7 @@ impl BTree {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut prep = Prep::new(self, &vals)?;
+        let mut prep = Prep::new(self, &vals, filter)?;
         let mut pieces = self.insert_sorted_at(self.root, &vals, 0, &mut prep)?;
         // Over one page: new roots, a level at a time.
         while pieces.len() > 1 {
@@ -563,7 +603,7 @@ impl BTree {
             v.is_leaf().then(|| page.clone())
         };
         if let Some(old) = old {
-            return self.merge_leaf(id, &old, entries);
+            return self.merge_leaf(id, &old, entries, prep.filter);
         }
         match self.load(id)? {
             Node::Leaf(_) => Err(Error::Corrupt {
@@ -625,10 +665,12 @@ impl BTree {
         id: PageId,
         old: &Page,
         entries: &[(Vec<u8>, Option<Val>)],
+        filter: Option<&dyn LeafFilter>,
     ) -> Result<Vec<(Vec<u8>, PageId, usize)>> {
         let v = View::new(old).map_err(|reason| Error::Corrupt { page: id, reason })?;
         let (arena, ends) = old_keys(id, &v)?;
-        let (merged, freed) = self.merge_cells(id, &v, &arena, &ends, entries)?;
+        let (mut merged, mut freed) = self.merge_cells(id, &v, &arena, &ends, entries)?;
+        self.filter_cells(&mut merged, &mut freed, filter)?;
         for page in freed {
             self.pool.free(page)?;
         }
@@ -698,6 +740,47 @@ impl BTree {
         Ok((merged, freed))
     }
 
+    /// The cells `filter` drops taken out of `merged` (a leaf's), their
+    /// overflow pages added to `freed`.
+    fn filter_cells(
+        &self,
+        merged: &mut Vec<(&[u8], ValRef)>,
+        freed: &mut Vec<PageId>,
+        filter: Option<&dyn LeafFilter>,
+    ) -> Result<()> {
+        let Some(filter) = filter else {
+            return Ok(());
+        };
+        let entries: Vec<LeafEntry> = merged
+            .iter()
+            .map(|(key, v)| LeafEntry {
+                key,
+                inline: match v {
+                    ValRef::Inline(b) => Some(b),
+                    _ => None,
+                },
+            })
+            .collect();
+        let mut drop = vec![false; entries.len()];
+        filter.drops(&entries, &mut drop);
+        if !drop.contains(&true) {
+            return Ok(());
+        }
+        for (&(_, v), _) in merged.iter().zip(&drop).filter(|(_, d)| **d) {
+            if let ValRef::Overflow { first, len, .. } = v {
+                for (page, _) in self.overflow_pages(first, len)? {
+                    freed.push(page);
+                }
+            }
+        }
+        let mut i = 0;
+        merged.retain(|_| {
+            i += 1;
+            !drop[i - 1]
+        });
+        Ok(())
+    }
+
     /// The page piece `p` of leaf `id` goes to — the first over `id` when
     /// it is writable, else (and the rest) a new one, `id` freed — written
     /// by `write`.
@@ -718,7 +801,12 @@ impl BTree {
     /// [`merge_leaf`](Self::merge_leaf)'s work that only reads, for a
     /// worker: the pieces encoded into pages of their own, the overflow
     /// pages to free.
-    fn prepare_leaf(&self, id: PageId, entries: &[(Vec<u8>, Option<Val>)]) -> Result<Prepared> {
+    fn prepare_leaf(
+        &self,
+        id: PageId,
+        entries: &[(Vec<u8>, Option<Val>)],
+        filter: Option<&dyn LeafFilter>,
+    ) -> Result<Prepared> {
         let old = {
             let r = self.pool.fetch(id)?;
             let page = r.read();
@@ -732,7 +820,8 @@ impl BTree {
             });
         }
         let (arena, ends) = old_keys(id, &v)?;
-        let (merged, freed) = self.merge_cells(id, &v, &arena, &ends, entries)?;
+        let (mut merged, mut freed) = self.merge_cells(id, &v, &arena, &ends, entries)?;
+        self.filter_cells(&mut merged, &mut freed, filter)?;
         let pieces = pack_cells(&merged)
             .into_iter()
             .enumerate()
@@ -776,7 +865,7 @@ impl BTree {
         id: PageId,
         entries: &[(Vec<u8>, Option<Val>)],
         at: usize,
-        out: &mut Vec<(PageId, std::ops::Range<usize>)>,
+        out: &mut Vec<Job>,
     ) -> Result<()> {
         let leaf = {
             let r = self.pool.fetch(id)?;
@@ -786,7 +875,10 @@ impl BTree {
                 .is_leaf()
         };
         if leaf {
-            out.push((id, at..at + entries.len()));
+            out.push(Job {
+                id,
+                run: at..at + entries.len(),
+            });
             return Ok(());
         }
         let Node::Internal(node) = self.load(id)? else {
@@ -807,8 +899,9 @@ impl BTree {
     #[allow(clippy::type_complexity)]
     fn prepare_window(
         &self,
-        jobs: &[(PageId, std::ops::Range<usize>)],
+        jobs: &[Job],
         batch: &[(Vec<u8>, Option<Val>)],
+        filter: Option<&dyn LeafFilter>,
     ) -> Result<std::collections::HashMap<PageId, (std::ops::Range<usize>, Prepared)>> {
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -821,22 +914,22 @@ impl BTree {
                 sc.spawn(|| {
                     loop {
                         let j = next.fetch_add(1, Ordering::Relaxed);
-                        let Some((id, range)) = jobs.get(j) else {
+                        let Some(job) = jobs.get(j) else {
                             break;
                         };
-                        let r = self.prepare_leaf(*id, &batch[range.clone()]);
+                        let r = self.prepare_leaf(job.id, &batch[job.run.clone()], filter);
                         *results[j].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
                     }
                 });
             }
         });
         let mut out = std::collections::HashMap::with_capacity(jobs.len());
-        for ((id, range), r) in jobs.iter().zip(results) {
+        for (job, r) in jobs.iter().zip(results) {
             let r = r
                 .into_inner()
                 .unwrap_or_else(|e| e.into_inner())
                 .expect("every job ran");
-            out.insert(*id, (range.clone(), r?));
+            out.insert(job.id, (job.run.clone(), r?));
         }
         Ok(out)
     }
@@ -1600,6 +1693,12 @@ fn child_groups<'e>(
     groups
 }
 
+/// A leaf a batch reaches: its page, its run of the batch.
+struct Job {
+    id: PageId,
+    run: std::ops::Range<usize>,
+}
+
 /// A leaf merged on a worker ([`BTree::prepare_leaf`]), to install.
 struct Prepared {
     freed: Vec<PageId>,
@@ -1611,8 +1710,10 @@ struct Prepared {
 struct Prep<'b> {
     /// The batch.
     batch: &'b [(Vec<u8>, Option<Val>)],
-    /// Every leaf the batch reaches, in order, with its run of the batch.
-    jobs: Vec<(PageId, std::ops::Range<usize>)>,
+    /// What drops entries of the leaves rewritten.
+    filter: Option<&'b dyn LeafFilter>,
+    /// Every leaf the batch reaches, in order.
+    jobs: Vec<Job>,
     next: usize,
     /// Prepared leaves, each with the run it was prepared for.
     ready: std::collections::HashMap<PageId, (std::ops::Range<usize>, Prepared)>,
@@ -1635,9 +1736,14 @@ const WINDOW_PER_WORKER: usize = 128;
 impl<'b> Prep<'b> {
     /// The leaves `batch` reaches — none when the tree has one worker or
     /// the batch reaches few leaves.
-    fn new(tree: &BTree, batch: &'b [(Vec<u8>, Option<Val>)]) -> Result<Self> {
+    fn new(
+        tree: &BTree,
+        batch: &'b [(Vec<u8>, Option<Val>)],
+        filter: Option<&'b dyn LeafFilter>,
+    ) -> Result<Self> {
         let mut prep = Prep {
             batch,
+            filter,
             jobs: Vec::new(),
             next: 0,
             ready: std::collections::HashMap::new(),
@@ -1663,10 +1769,10 @@ impl<'b> Prep<'b> {
         if self.jobs.is_empty() {
             return Ok(None);
         }
-        if !self.ready.contains_key(&id) && self.jobs.get(self.next).is_some_and(|(j, _)| *j == id)
-        {
+        if !self.ready.contains_key(&id) && self.jobs.get(self.next).is_some_and(|j| j.id == id) {
             let end = (self.next + tree.workers * WINDOW_PER_WORKER).min(self.jobs.len());
-            self.ready = tree.prepare_window(&self.jobs[self.next..end], self.batch)?;
+            self.ready =
+                tree.prepare_window(&self.jobs[self.next..end], self.batch, self.filter)?;
             self.next = end;
         }
         Ok(self
