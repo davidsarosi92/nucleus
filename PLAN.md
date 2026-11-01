@@ -2190,7 +2190,8 @@ style) across a thousand seeds without failure.
   writes anyway (a compaction filter, not logged), instead of walking its
   keys' versions; its conflict check from the recent commits' keys: a 10%
   delete ~2.1×, a 25% update ~1.1× PostgreSQL's 10-31 time; repeated
-  updates faster and the table smaller.
+  updates faster and the table smaller.  Against a fresh PostgreSQL run
+  (faster writes than on 10-31): the delete 3.1×, the update 1.3×.
 - **2026-11-01** — §M14.20: a commit's leaves merged on the CPUs (the
   tree the same page for page): a 10% delete ~2.5×, a 25% update ~1.2×
   PostgreSQL's 10-31 time.
