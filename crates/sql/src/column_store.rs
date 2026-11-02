@@ -858,7 +858,14 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
+/// Counts a row the statement writes to `t` — and notes `t` among the
+/// statement's tables at once ([`crate::storage::written`]), so that if
+/// the statement fails later, even before its caller notes the table,
+/// [`after_failure`](TableStorage::after_failure) drops what it gathered:
+/// rows kept here for the statement's end must never outlive it (they
+/// would be stored by the next statement on this thread).
 fn note_written(t: &Table) {
+    crate::storage::written(t);
     WRITTEN.with(|w| *w.borrow_mut().entry(t.id).or_default() += 1);
 }
 

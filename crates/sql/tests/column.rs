@@ -302,3 +302,42 @@ fn concurrent_writes_of_a_column_table_conflict_as_rows_do() {
         }
     }
 }
+
+/// A statement that fails part-way through a column table's writes
+/// leaves nothing behind for the next statement: the rows it gathered go
+/// with it (they are kept per table until the statement ends, and a
+/// failure before the table was noted as written once left them there —
+/// the next statement on the same thread then stored them).
+#[test]
+fn a_failed_statement_leaves_no_gathered_rows() {
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(8)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let mut s = Session::new(Arc::clone(&db));
+    s.execute(
+        "CREATE TABLE c (id INT PRIMARY KEY, u INT) WITH (storage = column); \
+         INSERT INTO c SELECT i, i FROM generate_series(1, 5000) i; \
+         CREATE UNIQUE INDEX c_u ON c (u)",
+    )
+    .unwrap();
+    // The update's new row is gathered, then its index entry conflicts.
+    let e = s.execute("UPDATE c SET u = 5 WHERE id = 6").unwrap_err();
+    assert_eq!(e.code, "23505", "{e:?}");
+    s.execute("INSERT INTO c VALUES (9999, 9999)").unwrap();
+    let got = outcome(
+        &mut s,
+        "SELECT count(*), count(DISTINCT id), sum(CASE WHEN id = 6 THEN u END) FROM c",
+    )
+    .unwrap();
+    assert_eq!(got, [["5001", "5001", "6"]]);
+    let txn = db.begin(TxnOptions::read_only()).unwrap();
+    assert_eq!(
+        nucleus_sql::check::check(&*txn, s.registry()).unwrap(),
+        Vec::<String>::new()
+    );
+}

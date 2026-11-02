@@ -1,6 +1,7 @@
 //! Writes: INSERT, UPDATE, DELETE — constraints and index maintenance.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use nucleus_kv::KvTxn;
 
@@ -81,18 +82,382 @@ impl IndexKeys {
             outer: None,
             ctx: &ctx,
         };
-        let mut out = Vec::with_capacity(t.indexes.len());
-        for (i, maps) in self.maps.iter().enumerate() {
-            let mut vals = Vec::with_capacity(maps.len());
-            for (&c, m) in t.indexes[i].columns.iter().zip(maps) {
-                vals.push(match m {
-                    None => row[c].clone(),
-                    Some(e) => e.eval(&env)?,
-                });
-            }
-            out.push(index_key(t, i, vals, pk));
+        (0..self.maps.len())
+            .map(|i| self.entry_in(&env, t, row, pk, i))
+            .collect()
+    }
+
+    /// Index `i`'s entry of `row` alone ([`entries`](Self::entries)'
+    /// `i`-th): what an index build needs, not every index's.
+    pub fn entry(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        row: &Row,
+        pk: &[u8],
+        i: usize,
+    ) -> Result<(Vec<u8>, bool)> {
+        static NONE: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+        let ctx = Ctx::new(txn, NONE.get_or_init(Registry::empty), &[]);
+        let env = Env {
+            row,
+            outer: None,
+            ctx: &ctx,
+        };
+        self.entry_in(&env, t, row, pk, i)
+    }
+
+    fn entry_in(
+        &self,
+        env: &Env,
+        t: &Table,
+        row: &Row,
+        pk: &[u8],
+        i: usize,
+    ) -> Result<(Vec<u8>, bool)> {
+        let maps = &self.maps[i];
+        let mut vals = Vec::with_capacity(maps.len());
+        for (&c, m) in t.indexes[i].columns.iter().zip(maps) {
+            vals.push(match m {
+                None => row[c].clone(),
+                Some(e) => e.eval(env)?,
+            });
         }
-        Ok(out)
+        Ok(index_key(t, i, vals, pk))
+    }
+}
+
+/// Index entries gathered for a build (PLAN.md §M14.20 W2) — of a new
+/// index, or of every index of a table whose rows are rewritten — then
+/// written in key order: sorted in memory up to the statement's
+/// `work_mem` (shared by the indexes built at once), past it as sorted
+/// runs in scratch space merged.  In key order the writes are appends —
+/// the write set keeps them as a sorted vector and its spills append to
+/// the tree, which packs its leaves full (as PostgreSQL's `nbtsort` builds
+/// a B-tree from a sorted run) —, and a unique index's duplicates are
+/// neighbours, found without a look at the tree.
+pub struct IndexBuild {
+    indexes: Vec<usize>,
+    sorters: Vec<EntrySorter>,
+}
+
+impl IndexBuild {
+    /// A build of the indexes `indexes` (positions in the table's list).
+    pub fn new(indexes: Vec<usize>) -> Self {
+        let budget = crate::budget::work_mem() / indexes.len().max(1);
+        let sorters = indexes.iter().map(|_| EntrySorter::new(budget)).collect();
+        Self { indexes, sorters }
+    }
+
+    /// The entries of `row` (primary key bytes `pk`) in each index built.
+    pub fn add(
+        &mut self,
+        keys: &IndexKeys,
+        txn: &dyn KvTxn,
+        t: &Table,
+        row: &Row,
+        pk: &[u8],
+    ) -> Result<()> {
+        for (s, &i) in self.sorters.iter_mut().zip(&self.indexes) {
+            let (k, unique) = keys.entry(txn, t, row, pk, i)?;
+            s.entries.push(&k, pk, unique);
+            s.spill_past_budget()?;
+        }
+        Ok(())
+    }
+
+    /// Entries of the `n`-th index built, made elsewhere (on a worker).
+    fn extend(&mut self, n: usize, entries: Entries) -> Result<()> {
+        self.sorters[n].entries.append(entries);
+        self.sorters[n].spill_past_budget()
+    }
+
+    /// Writes every index's entries in key order; a unique index's
+    /// duplicate is `duplicate(index name)`.
+    pub fn write(
+        self,
+        txn: &mut dyn KvTxn,
+        t: &Table,
+        duplicate: &dyn Fn(&str) -> Error,
+    ) -> Result<()> {
+        for (s, i) in self.sorters.into_iter().zip(self.indexes) {
+            let mut last_unique: Option<Vec<u8>> = None;
+            s.each(&mut |k, pk, unique| {
+                if unique {
+                    if last_unique.as_deref() == Some(k) {
+                        return Err(duplicate(&t.indexes[i].name));
+                    }
+                    let last = last_unique.get_or_insert_with(Vec::new);
+                    last.clear();
+                    last.extend_from_slice(k);
+                }
+                Ok(txn.put(k, pk)?)
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Index entries in one buffer — keys and primary keys side by side, no
+/// allocation of their own — and, per entry, its place and its key's first
+/// eight bytes as a number: most comparisons of a sort end there, without
+/// a look at the bytes (PostgreSQL's abbreviated keys, the normalized key
+/// prefix of DuckDB's sort).
+#[derive(Default)]
+struct Entries {
+    bytes: Vec<u8>,
+    items: Vec<Item>,
+}
+
+#[derive(Clone, Copy)]
+struct Item {
+    /// The key's first eight bytes, big-endian, zeros past its end.
+    prefix: u64,
+    /// Where the key starts in the buffer, the primary key right after.
+    at: usize,
+    key: u32,
+    pk: u32,
+    unique: bool,
+}
+
+impl Entries {
+    fn push(&mut self, k: &[u8], pk: &[u8], unique: bool) {
+        let mut prefix = [0u8; 8];
+        let n = k.len().min(8);
+        prefix[..n].copy_from_slice(&k[..n]);
+        self.items.push(Item {
+            prefix: u64::from_be_bytes(prefix),
+            at: self.bytes.len(),
+            key: k.len() as u32,
+            pk: pk.len() as u32,
+            unique,
+        });
+        self.bytes.extend_from_slice(k);
+        self.bytes.extend_from_slice(pk);
+    }
+
+    fn append(&mut self, other: Entries) {
+        if self.items.is_empty() {
+            *self = other;
+            return;
+        }
+        let shift = self.bytes.len();
+        self.bytes.extend_from_slice(&other.bytes);
+        self.items.extend(other.items.into_iter().map(|it| Item {
+            at: it.at + shift,
+            ..it
+        }));
+    }
+
+    /// The memory held.
+    fn size(&self) -> usize {
+        self.bytes.len() + self.items.len() * std::mem::size_of::<Item>()
+    }
+
+    fn key(&self, it: &Item) -> &[u8] {
+        key_in(&self.bytes, it)
+    }
+
+    fn pk(&self, it: &Item) -> &[u8] {
+        let from = it.at + it.key as usize;
+        &self.bytes[from..from + it.pk as usize]
+    }
+
+    /// Sorts the entries by key: cut in parts sorted on threads of their
+    /// own, the parts merged.
+    fn sort(&mut self) {
+        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        let chunk = self.items.len().div_ceil(threads).max(SORT_CHUNK);
+        let bytes = &self.bytes;
+        let items = &mut self.items;
+        std::thread::scope(|sc| {
+            for part in items.chunks_mut(chunk) {
+                sc.spawn(|| part.sort_unstable_by(|a, b| cmp_in(bytes, a, b)));
+            }
+        });
+        if items.len() > chunk {
+            let parts: Vec<&[Item]> = items.chunks(chunk).collect();
+            let at: Vec<std::cell::Cell<usize>> =
+                parts.iter().map(|_| Default::default()).collect();
+            let mut merged = Vec::with_capacity(items.len());
+            merge(
+                parts.len(),
+                |p| at[p].get() < parts[p].len(),
+                |a, b| cmp_in(bytes, &parts[a][at[a].get()], &parts[b][at[b].get()]).is_lt(),
+                |p| {
+                    merged.push(parts[p][at[p].get()]);
+                    at[p].set(at[p].get() + 1);
+                    Ok(())
+                },
+            )
+            .expect("an in-memory merge does not fail");
+            *items = merged;
+        }
+    }
+}
+
+fn key_in<'a>(bytes: &'a [u8], it: &Item) -> &'a [u8] {
+    &bytes[it.at..it.at + it.key as usize]
+}
+
+/// Entries' order: by the keys' first bytes as numbers, the bytes past
+/// them only where those are equal.
+fn cmp_in(bytes: &[u8], a: &Item, b: &Item) -> std::cmp::Ordering {
+    a.prefix
+        .cmp(&b.prefix)
+        .then_with(|| key_in(bytes, a).cmp(key_in(bytes, b)))
+}
+
+/// A k-way merge of `n` sorted sources: `live(i)` whether source `i` has
+/// an entry, `less(i, j)` whether its entry comes before `j`'s, `take(i)`
+/// consumes its entry (and moves to its next) — a binary heap of the
+/// sources, the entries where they are.
+fn merge(
+    n: usize,
+    mut live: impl FnMut(usize) -> bool,
+    mut less: impl FnMut(usize, usize) -> bool,
+    mut take: impl FnMut(usize) -> Result<()>,
+) -> Result<()> {
+    let mut heap: Vec<usize> = (0..n).filter(|&i| live(i)).collect();
+    let sift = |heap: &mut Vec<usize>, less: &mut dyn FnMut(usize, usize) -> bool, mut i: usize| loop {
+        let (l, r) = (2 * i + 1, 2 * i + 2);
+        let mut m = i;
+        if l < heap.len() && less(heap[l], heap[m]) {
+            m = l;
+        }
+        if r < heap.len() && less(heap[r], heap[m]) {
+            m = r;
+        }
+        if m == i {
+            break;
+        }
+        heap.swap(i, m);
+        i = m;
+    };
+    for i in (0..heap.len() / 2).rev() {
+        sift(&mut heap, &mut less, i);
+    }
+    while let Some(&top) = heap.first() {
+        take(top)?;
+        if !live(top) {
+            let last = heap.pop().expect("a source");
+            if heap.is_empty() {
+                break;
+            }
+            heap[0] = last;
+        }
+        sift(&mut heap, &mut less, 0);
+    }
+    Ok(())
+}
+
+/// Entries a sort thread takes at least (fewer are sorted on one).
+const SORT_CHUNK: usize = 1 << 16;
+
+/// One index's entries in key order (bytewise, as the tree orders them),
+/// in bounded memory.
+struct EntrySorter {
+    budget: usize,
+    entries: Entries,
+    runs: Vec<Rc<crate::spill::Sealed>>,
+}
+
+impl EntrySorter {
+    fn new(budget: usize) -> Self {
+        Self {
+            budget,
+            entries: Entries::default(),
+            runs: Vec::new(),
+        }
+    }
+
+    fn spill_past_budget(&mut self) -> Result<()> {
+        if self.entries.size() > self.budget {
+            self.spill()?;
+        }
+        Ok(())
+    }
+
+    /// The entries, sorted, as a run in scratch space: records of key
+    /// length, key, primary key and the uniqueness flag.
+    fn spill(&mut self) -> Result<()> {
+        let mut e = std::mem::take(&mut self.entries);
+        e.sort();
+        let mut run = crate::spill::Run::new()?;
+        for it in &e.items {
+            run.push_record(&[
+                &it.key.to_le_bytes(),
+                e.key(it),
+                e.pk(it),
+                &[u8::from(it.unique)],
+            ])?;
+        }
+        self.runs.push(run.seal()?);
+        Ok(())
+    }
+
+    /// Calls `f(key, primary key, unique)` for every entry in key order
+    /// (equal keys in no particular order: only a unique index has any, and
+    /// they are an error).
+    fn each(mut self, f: &mut dyn FnMut(&[u8], &[u8], bool) -> Result<()>) -> Result<()> {
+        if self.runs.is_empty() {
+            self.entries.sort();
+            let e = &self.entries;
+            return e
+                .items
+                .iter()
+                .try_for_each(|it| f(e.key(it), e.pk(it), it.unique));
+        }
+        if !self.entries.items.is_empty() {
+            self.spill()?;
+        }
+        // Each run's next record, copied (into a buffer of its own, reused)
+        // out of the run's block.
+        let mut runs: Vec<crate::spill::RunIter> =
+            self.runs.iter().map(crate::spill::Sealed::iter).collect();
+        let mut heads: Vec<Option<Vec<u8>>> = vec![None; runs.len()];
+        let bad = || Error::internal("a malformed index entry in scratch space");
+        let advance = |run: &mut crate::spill::RunIter, head: &mut Option<Vec<u8>>| -> Result<()> {
+            match run.next_record()? {
+                Some(rec) => {
+                    let buf = head.get_or_insert_with(Vec::new);
+                    buf.clear();
+                    buf.extend_from_slice(rec);
+                }
+                None => *head = None,
+            }
+            Ok(())
+        };
+        let split = |rec: &[u8]| -> Result<(usize, usize)> {
+            let n = u32::from_le_bytes(rec.get(..4).ok_or_else(bad)?.try_into().unwrap()) as usize;
+            if rec.len() < 5 + n {
+                return Err(bad());
+            }
+            Ok((4 + n, rec.len() - 1))
+        };
+        for (run, head) in runs.iter_mut().zip(&mut heads) {
+            advance(run, head)?;
+        }
+        let heads = std::cell::RefCell::new(heads);
+        merge(
+            runs.len(),
+            |i| heads.borrow()[i].is_some(),
+            |a, b| {
+                let h = heads.borrow();
+                let key = |i: usize| {
+                    let rec = h[i].as_deref().unwrap_or(&[]);
+                    split(rec).map_or(&rec[..0], |(k, _)| &rec[4..k])
+                };
+                key(a) < key(b)
+            },
+            |i| {
+                let mut h = heads.borrow_mut();
+                let rec = h[i].as_deref().ok_or_else(bad)?;
+                let (k, end) = split(rec)?;
+                f(&rec[4..k], &rec[k..end], rec[end] != 0)?;
+                advance(&mut runs[i], &mut h[i])
+            },
+        )
     }
 }
 
@@ -972,7 +1337,11 @@ fn take_key(r: &mut Row, at: usize) -> Result<Vec<u8>> {
     }
 }
 
-/// Writes the entries of a new index for every existing row.
+/// Writes the entries of a new index for every existing row: the rows
+/// read with only the index's columns decoded — in parts of the table on
+/// the statement's workers, a round of parts at a time (so memory stays
+/// within a round's entries and the sort's `work_mem`) — and its entries
+/// sorted and written in key order ([`IndexBuild`]).
 pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usize) -> Result<()> {
     let keys = IndexKeys::new(&*txn, reg, table)?;
     // The new index's keys: none yet, and no other transaction sees the
@@ -982,51 +1351,95 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
         txn.fresh(&prefix, &end);
     }
     let storage = crate::storage::of(table)?;
+    let mut wanted = vec![false; table.columns.len()];
+    for &c in &table.indexes[i].columns {
+        wanted[c] = true;
+    }
     let rows_prefix = table.index_prefix(0);
     let rows_end = nucleus_kv::prefix_end(&rows_prefix);
-    let mut start = rows_prefix;
-    loop {
-        // The rows a chunk at a time — the scan let go before the
-        // entries are written, so nothing is stashed aside.
-        let chunk: Vec<(Vec<u8>, Row)> = storage
-            .rows(crate::storage::Scan {
-                txn: &*txn,
-                table,
-                start: start.clone(),
-                end: rows_end.clone(),
-                wanted: None,
-                validated: false,
-                bounds: Vec::new(),
-                dicts: Vec::new(),
-            })?
-            .take(BACKFILL_ROWS)
-            .collect::<Result<_>>()?;
-        let Some((last, _)) = chunk.last() else {
-            return Ok(());
-        };
-        let mut next = last.clone();
-        next.push(0);
-        let full = chunk.len() == BACKFILL_ROWS;
-        for (key, row) in chunk {
+    // The entries of the rows in `[start, end)`, each given to `to`.
+    let part = |ro: &dyn KvTxn,
+                start: Vec<u8>,
+                end: Option<Vec<u8>>,
+                to: &mut dyn FnMut(&[u8], &[u8], bool) -> Result<()>|
+     -> Result<()> {
+        for r in storage.rows(crate::storage::Scan {
+            txn: ro,
+            table,
+            start,
+            end,
+            wanted: Some(&wanted),
+            validated: false,
+            bounds: Vec::new(),
+            dicts: Vec::new(),
+        })? {
+            let (key, row) = r?;
             let pk = pk_suffix(table, &key);
-            let (k, unique) = keys.entries(&*txn, table, &row, pk)?.swap_remove(i);
-            if unique && txn.get(&k)?.is_some() {
-                return Err(Error::unique_violation(format!(
-                    "could not create unique index \"{}\": key is duplicated",
-                    table.indexes[i].name
-                )));
+            let (k, unique) = keys.entry(ro, table, &row, pk, i)?;
+            to(&k, pk, unique)?;
+        }
+        Ok(())
+    };
+    let mut build = IndexBuild::new(vec![i]);
+    {
+        let ro: &dyn KvTxn = &*txn;
+        let workers = crate::budget::workers();
+        let shared = ro.shared().filter(|_| workers > 1);
+        let cuts = match shared {
+            Some(_) => {
+                storage.split_points(ro, table, &rows_prefix, rows_end.as_deref(), BUILD_PARTS)?
             }
-            txn.put(&k, pk)?;
+            None => Vec::new(),
+        };
+        if let (Some(shared), false) = (shared, cuts.is_empty()) {
+            let mut bounds = Vec::with_capacity(cuts.len() + 1);
+            let mut from = rows_prefix.clone();
+            for c in cuts {
+                bounds.push((from, Some(c.clone())));
+                from = c;
+            }
+            bounds.push((from, rows_end.clone()));
+            let ctx = Ctx::new(ro, reg, &[]);
+            for round in bounds.chunks(workers) {
+                let got =
+                    crate::vector::on_workers(&ctx, shared, workers, round.len(), true, &|w, m| {
+                        let (start, end) = round[m].clone();
+                        let mut out = Entries::default();
+                        part(w.txn, start, end, &mut |k, pk, u| {
+                            out.push(k, pk, u);
+                            Ok(())
+                        })?;
+                        Ok(out)
+                    });
+                for entries in got {
+                    let entries = entries
+                        .ok_or_else(|| Error::internal("a part of an index build did not run"))??;
+                    build.extend(0, entries)?;
+                }
+            }
+        } else {
+            let s = &mut build.sorters[0];
+            part(
+                ro,
+                rows_prefix.clone(),
+                rows_end.clone(),
+                &mut |k, pk, u| {
+                    s.entries.push(k, pk, u);
+                    s.spill_past_budget()
+                },
+            )?;
         }
-        if !full {
-            return Ok(());
-        }
-        start = next;
     }
+    build.write(txn, table, &|name| {
+        Error::unique_violation(format!(
+            "could not create unique index \"{name}\": key is duplicated"
+        ))
+    })
 }
 
-/// Rows an index build reads at a time.
-const BACKFILL_ROWS: usize = 65_536;
+/// Parts of a table an index build reads at most (each a worker's turn):
+/// many, so a round of them is a small share of a large table.
+const BUILD_PARTS: usize = 1024;
 
 /// Every key of a table — its rows' and its indexes' — written again in
 /// the current key encoding (an upgrade from an older one; the decoder
@@ -1054,6 +1467,7 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
     }
     let rows = rows.seal()?;
     catalog::delete_range(txn, &prefix, Some(&end))?;
+    let mut build = IndexBuild::new((0..table.indexes.len()).collect());
     for r in rows.into_iter() {
         let (old_key, row) = exec::unkeyed(r?)?;
         let key = if table.primary_key.is_empty() {
@@ -1062,11 +1476,9 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
             row_key_of(table, &row, None)
         };
         storage.write(txn, table, &key, &row, None)?;
-        let pk = pk_suffix(table, &key);
-        for (k, _) in keys.entries(&*txn, table, &row, pk)? {
-            txn.put(&k, pk)?;
-        }
+        build.add(&keys, &*txn, table, &row, pk_suffix(table, &key))?;
     }
+    build.write(txn, table, &duplicate)?;
     crate::storage::written(table);
     Ok(())
 }
@@ -1086,6 +1498,7 @@ pub fn replace_rows(
     catalog::delete_range(txn, &prefix, Some(&end))?;
     let keys = IndexKeys::new(&*txn, reg, table)?;
     let storage = crate::storage::of(table)?;
+    let mut build = IndexBuild::new((0..table.indexes.len()).collect());
     for r in rows {
         let (old_key, row) = exec::unkeyed(r?)?;
         let key = if table.primary_key.is_empty() {
@@ -1097,18 +1510,9 @@ pub fn replace_rows(
             return Err(duplicate(&format!("{}_pkey", table.name)));
         }
         storage.write(txn, table, &key, &row, None)?;
-        let pk = pk_suffix(table, &key);
-        for (i, (k, unique)) in keys
-            .entries(&*txn, table, &row, pk)?
-            .into_iter()
-            .enumerate()
-        {
-            if unique && txn.get(&k)?.is_some() {
-                return Err(duplicate(&table.indexes[i].name));
-            }
-            txn.put(&k, pk)?;
-        }
+        build.add(&keys, &*txn, table, &row, pk_suffix(table, &key))?;
     }
+    build.write(txn, table, &duplicate)?;
     crate::storage::written(table);
     Ok(())
 }

@@ -407,6 +407,17 @@ Where the time still goes:
 - **Loads** (74 s and 91 s against 24 s: 3.1× and 3.8×): `lineitem`'s
   `COPY` and the indexes on it.
 
+The load since, phase by phase (§M14.20 V14; SF 1, row tables, the same
+machine, PostgreSQL 18 beside it in the same session; full runs of the
+suite come when §M14.20 closes):
+
+| step | `COPY` | `CREATE INDEX` | `ANALYZE` | total (s) |
+|---|---:|---:|---:|---:|
+| profiled (`4cc9ff4`) | 27.6 | 40.3 | 11.5 | 79.4 |
+| W1: Algorithm L, ordered syncs, 1 GiB checkpoints | 26.2 | | 5.5 | 69.8 |
+| W2: one sorted index builder, parallel | 23.0 | 15.8 | 6.8 | 45.6 |
+| PostgreSQL 18 | 18.3 | 5.5 | 5.3 | 29.1 |
+
 ## ClickBench
 
 `bench/clickbench.py` (§M14.20 V10): ClickBench's `hits` table (its

@@ -225,7 +225,8 @@ pub fn encode_leaf(page: &mut Page, entries: &[(&[u8], ValRef)]) {
     p[slot..end].fill(0);
 }
 
-fn internal_cell_size(key: &[u8]) -> usize {
+/// The encoded size of an internal node's cell of `key`.
+pub fn internal_cell_size(key: &[u8]) -> usize {
     2 + 10 + key.len()
 }
 

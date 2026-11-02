@@ -182,3 +182,49 @@ fn writes_collect_their_rows_past_work_mem() {
     let e = s.execute("SET work_mem = '1kB'").unwrap_err();
     assert_eq!(e.code, "22023");
 }
+
+/// Index builds (PLAN.md §M14.20 W2) sort their entries, past `work_mem`
+/// in sorted runs merged: the same index, and the same duplicates found,
+/// with 64 kB as with the default — for `CREATE INDEX`, `CREATE UNIQUE
+/// INDEX` and `ALTER COLUMN … TYPE`, which rebuilds every index.
+#[test]
+fn index_builds_sort_past_work_mem() {
+    for (mem, storage) in [("64MB", "row"), ("64kB", "row"), ("64kB", "column")] {
+        let kv: Arc<dyn Kv> = Arc::new(database());
+        let mut s = Session::new(kv.clone());
+        s.execute(&format!("SET work_mem = '{mem}'")).unwrap();
+        s.execute(&format!(
+            "CREATE TABLE t (id INT PRIMARY KEY, a INT, b TEXT, u INT) WITH (storage = {storage}); \
+             INSERT INTO t SELECT i, (i * 7919) % 1000, 'v' || ((i * 31) % 97), \
+                    CASE WHEN i % 10 = 0 THEN NULL ELSE i END FROM generate_series(1, 20000) i; \
+             CREATE INDEX t_a ON t (a, b); \
+             CREATE UNIQUE INDEX t_u ON t (u)"
+        ))
+        .unwrap();
+        // Duplicates in different runs: the 7919-stride keys wrap around.
+        let e = s.execute("CREATE UNIQUE INDEX t_bad ON t (a)").unwrap_err();
+        assert_eq!(e.code, "23505", "{mem}: {e:?}");
+        let e = s.execute("UPDATE t SET u = 5 WHERE id = 6").unwrap_err();
+        assert_eq!(e.code, "23505", "{mem}: {e:?}");
+        s.execute("ALTER TABLE t ALTER COLUMN a TYPE BIGINT")
+            .unwrap_or_else(|e| panic!("{mem} {storage}: {e:?}"));
+        for q in [
+            "SELECT count(*), sum(id) FROM t WHERE a = 17",
+            "SELECT id FROM t WHERE a = 999 AND b = 'v5' ORDER BY id",
+            "SELECT count(*) FROM t WHERE u BETWEEN 100 AND 200",
+        ] {
+            let with_index = rows(&mut s, q);
+            let without = rows(
+                &mut s,
+                &q.replace("FROM t WHERE", "FROM t WHERE id > 0 AND"),
+            );
+            assert_eq!(with_index, without, "{mem} {storage}: {q}");
+        }
+        let txn = kv.begin(nucleus_kv::TxnOptions::read_only()).unwrap();
+        assert_eq!(
+            nucleus_sql::check::check(&*txn, s.registry()).unwrap(),
+            Vec::<String>::new(),
+            "{mem} {storage}"
+        );
+    }
+}

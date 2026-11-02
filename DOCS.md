@@ -334,7 +334,9 @@ replaced by it.
 **API:** `create`, `open(root)`, `root`, `get`, `insert`, `remove`,
 `set_workers(n)`, `apply_sorted(ops)` / `insert_sorted(entries)` (sets and removals sorted
 by key, without repeats: each node read and written once for all the keys
-reaching it; full leaves packed to about 7/8; neighbours a batch of
+reaching it; full leaves and full internal nodes packed to about 7/8, a
+small last piece evened out with the one before — a sorted build's
+appends leave its pages full, as PostgreSQL's `nbtsort` does; neighbours a batch of
 removals left under `MIN_FILL` merged until they are not, seams of merged
 internal nodes included), `range` / `range_rev` (bounds; going forward a
 range checks its end on a key before reading the key's value, so the first
@@ -1321,8 +1323,9 @@ back.  Sorts are external merge sorts (sorted runs of a `work_mem`'s
 worth, merged 64 at a time, in passes when there are more; ties keep the
 input's order); materialised CTEs, recursive CTEs' rounds and results,
 and the rows a write collects before writing (`INSERT … SELECT`,
-`UPDATE`, `DELETE`, `CREATE INDEX`, rewrites) are kept in memory up to
-the limit, the rest in a run; writes then apply them 4096 rows at a time.
+`UPDATE`, `DELETE`, rewrites) are kept in memory up to the limit, the
+rest in a run; writes then apply them 4096 rows at a time.  Index builds
+sort their entries within the same limit (§8.7, *Index builds*).
 Table functions stream (`generate_series` makes its rows as they are
 read).  Hash aggregation, `DISTINCT`, `UNION` and `INTERSECT` / `EXCEPT`
 keep their groups, the rows seen, or the right side's counts in memory up
@@ -1502,6 +1505,25 @@ wrong assignment type (assignment converts within numbers, within dates
 and timestamps, and from or to text).
 `CREATE INDEX` backfills (and refuses existing duplicates for `UNIQUE`);
 `ADD COLUMN` with a default rewrites existing rows.
+
+**Index builds** (`dml::IndexBuild`, §M14.20 W2) — a new index's
+entries, and every index's when `ALTER … TYPE` or a key change rewrites
+a table's rows — are gathered, sorted and written in key order.
+`CREATE INDEX` reads only the index's columns, in up to 1024 parts of the
+table (`split_points`) scanned a round at a time on the statement's
+workers, and computes only that index's keys.  The entries lie in one
+buffer — keys and primary keys side by side, no allocation per entry —
+with, per entry, its place and its key's first eight bytes as a number,
+on which most comparisons end (PostgreSQL's abbreviated keys, DuckDB's
+normalized-key prefix).  Up to `work_mem` (shared by the indexes built
+at once) they are sorted in memory, in parts on threads of their own and
+the parts merged; past it each `work_mem`'s worth becomes one sorted run
+of byte records in scratch space (`spill::Run::push_record`), and the
+runs are merged by a heap of run positions, the keys left where they
+are.  A unique index's duplicates are neighbours in that order — found
+without a look at the tree (`23505`); the writes go to the index's
+`fresh` range in key order, which the write set keeps as appends and
+`apply_sorted` packs into full pages.
 
 **Bulk load** (`copy`, §M14.11).  `COPY t [(columns)] FROM STDIN` loads
 rows the client sends, in one statement: PostgreSQL's text format
@@ -2043,7 +2065,11 @@ small writes to different keys never conflict.  A write past the last
 segment claims the directory to its end, so two writers appending there
 at once may conflict even with different keys (one retries); tested for
 every pair of large and small writes, overlapping or not, in either order
-(`crates/sql/tests/column.rs`).  The same SQL runs on both storages with
+(`crates/sql/tests/column.rs`).  A statement that fails part way leaves
+nothing gathered: a table is registered for the statement's clean-up
+when its first row is gathered, so the rows of a statement that fails —
+say on a unique index while updating — are dropped with it, never
+stored by the next statement on the thread.  The same SQL runs on both storages with
 the same results: the tests run loads, updates, key changes and deletes on
 a `row` and a `column` table and compare every query, a row and a batch
 at a time and in parallel, and the integrity check.  On a million rows
@@ -2805,6 +2831,25 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-02 — §M14.20 W2, one sorted bulk path:** `CREATE INDEX`,
+  `ALTER … TYPE` and key rewrites build their indexes through
+  `IndexBuild`: only the index's columns read, in parallel; entries in one
+  buffer with abbreviated keys, sorted in parallel, past `work_mem` one
+  run of byte records per spill merged by a heap; uniqueness by
+  neighbours; written in key order into the fresh range; internal nodes
+  packed to 7/8 as leaves are.  `exec::index_entry` (unused) removed.
+  Fixed: a column-table statement that failed part way left its gathered
+  rows for the next statement on the thread, which stored them past the
+  unique checks.  TPC-H SF 1 row load 69.8 → 45.6 s (its indexes 40.3 s
+  when profiled, now 15.8 s).
+- **2026-11-02 — §M14.20 W1, quick gains:** `ANALYZE` by Algorithm L
+  (11.5 → 5.5 s on `lineitem`), row decoding stops after the last wanted
+  column, checkpoints after 1 GiB, `--sync ordered|full` (D17), 64 KiB
+  wire buffers, the JS driver's frames joined once.  Load 79.4 → 69.8 s.
+- **2026-11-02 — §M14.20 W0, column tables' concurrent writes:**
+  overlapping writers conflict (`40001`) as on a row table; the second's
+  rows were lost.
 
 - **2026-11-01 — §M14.20 V13, decimal vectors:** `Vector::Dec` —
   decimals of one scale as their mantissas, decoded so from a column

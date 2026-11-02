@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W1 ✅, W2–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W2 ✅, W3–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
@@ -1551,6 +1551,13 @@ the speed-up is made once, in the merged one.  The work, in this order:
   appending past the last segment at once may (the claim runs to the
   directory's end — W3's statement view makes it exact).  Tested for every
   pair of large and small writes, overlapping or not, in either order.
+  A second one, found while building W2: a column-table statement that
+  failed part way (a unique violation on a secondary index during an
+  `UPDATE`) left its gathered rows in the thread's statement buffer — the
+  table was registered for the statement's clean-up only after a
+  successful write —, and the next statement on that thread, even in
+  another database, stored them past the unique checks.  A table is now
+  registered when its first row is gathered; tested.
 - **W1 — quick, safe gains** ✅.  `ANALYZE`: Li's Algorithm L from
   SplitMix64 seeded once, instead of an OS entropy call per row (55 % of
   its time) — `lineitem`'s 11.5 → 5.5 s, PostgreSQL's 5.3; a chi-squared
@@ -1569,15 +1576,34 @@ the speed-up is made once, in the merged one.  The work, in this order:
   ahead helps only a stream with an explicit fetch size — a plain query
   and a columnar fetch never pause —, so it goes with the drivers' work
   (W8).
-- **W2 — one sorted bulk path.**  `CREATE INDEX`, `ALTER … TYPE` and key
-  rewrites: only the index's columns read, by the parallel vectorized
-  scan; one index's key computed, not every index's; the entries sorted
-  (the spill sorter, runs on the workers), uniqueness by neighbours, then
-  written in key order into the `fresh` range, which the write set takes
-  as appends and `apply_sorted` packs to 7/8 (as PostgreSQL's `nbtsort`);
-  internal nodes packed as leaves are.  The four copies of "a row, its
-  index entries, the unique checks" become one per-row path and this
-  bulk builder; `exec::index_entry` (unused) goes.
+- **W2 — one sorted bulk path** ✅.  `CREATE INDEX`, `ALTER … TYPE` and
+  key rewrites build their indexes through one builder,
+  `dml::IndexBuild`: `CREATE INDEX` reads only the index's columns, in up
+  to 1024 parts scanned a round at a time on the statement's workers, and
+  computes only that index's keys; the entries are sorted, a unique
+  index's duplicates found as neighbours, and written in key order into
+  the `fresh` range, which the write set takes as appends and
+  `apply_sorted` packs to 7/8 (PostgreSQL's `nbtsort`); internal nodes
+  are now packed as leaves are (they were split in halves and stayed half
+  full).  The sort, step by step, each measured on `lineitem`'s index on
+  `l_suppkey`: the sorted build alone took the load 69.8 → 60.9 s; the
+  parallel scan and parallel in-memory sort → 51.3 s (47.1 with the
+  scratch disk cleaned); the external merge had ~90 runs (one per sort
+  thread per spill), entries through `Value` encoding and a key copy per
+  heap step — now one run of byte records per spill
+  (`spill::Run::push_record`, the existing scratch runs) and a heap of run
+  positions, the merge 1.7 → 0.5 s, the index 7.85 → 6.1 s; entries in one
+  buffer with abbreviated keys (PostgreSQL's tuplesort, DuckDB's
+  normalized-key sort: the key's first eight bytes as a number, most
+  comparisons ending there; no allocation per entry) → 5.4 s; an index
+  key in one allocation, not three.  The TPC-H SF 1 row load 69.8 →
+  45.6 s, its indexes 15.8 s (PostgreSQL's 5.5).  What is left of the
+  index on `l_suppkey` (5.4 s): ~2.9 s scanning, most of it page reads
+  past the buffer pool (W5's read-ahead), and ~2.3 s writing key by key
+  through the write set and the WAL (W4, D16).  `exec::index_entry`
+  (unused) removed.  Moved: the per-row path of `INSERT` / `COPY` (a row,
+  its index entries, the unique checks) is still its own — it becomes one
+  with W3's row builder.
 - **W3 — one row builder, batches into storage.**  `COPY` and `INSERT`
   share one bound row builder (today two); parsers bound per column once,
   from bytes to values without a string per field; `ncp`'s binary batches
@@ -2609,3 +2635,11 @@ style) across a thousand seeds without failure.
 - **2026-11-02** — §M14.20 W0: concurrent writes of a column table
   conflict as a row table's do (a correctness bug: two overlapping writers
   both committed and the second's rows were lost); DOCS §8.15.
+- **2026-11-02** — §M14.20 W1: `ANALYZE` by Algorithm L, decoding to the
+  last wanted column, 1 GiB checkpoints, D17's sync policy, 64 KiB wire
+  buffers; the TPC-H SF 1 load 79.4 → 69.8 s.
+- **2026-11-02** — §M14.20 W2: one sorted index builder for `CREATE
+  INDEX`, `ALTER … TYPE` and key rewrites (parallel scan, abbreviated keys,
+  one run per spill, uniqueness by neighbours), internal nodes packed;
+  fixed a failed column-table statement's rows outliving it; the load
+  69.8 → 45.6 s.  DOCS §3, §8.7, §8.15.

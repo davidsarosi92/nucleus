@@ -32,7 +32,7 @@ use crate::error::{Error, Result};
 use crate::node::{
     Internal, LEAF, Leaf, MAX_INLINE_CELL, MAX_KEY, MIN_FILL, Node, OVERFLOW, OVERFLOW_CAPACITY,
     Val, ValRef, View, balance_point, cell_size, decode_overflow, encode_leaf, encode_overflow,
-    key_prefix, leaf_cell_size, leaf_size,
+    internal_cell_size, key_prefix, leaf_cell_size, leaf_size,
 };
 use crate::page::{PAYLOAD_SIZE, Page, PageId};
 
@@ -695,7 +695,7 @@ impl BTree {
                 }
                 let mut node = Internal { keys, children };
                 self.normalize(&mut node, small)?;
-                let pieces = fit(Node::Internal(node));
+                let pieces = pack_internal(node);
                 self.store_pieces(id, pieces)
             }
         }
@@ -1588,6 +1588,62 @@ fn fit(node: Node) -> Vec<(Vec<u8>, Node)> {
     out
 }
 
+/// An internal node a sorted batch grew, in pieces that each fit a page:
+/// packed to about 7/8 as [`pack_cells`] packs leaves (a sorted build's
+/// appends would leave [`fit`]'s even halves half full for good), a small
+/// last piece evened out with the one before.  Each piece has a key (two
+/// children) at least; each with the separator before it (empty for the
+/// first).
+fn pack_internal(node: Internal) -> Vec<(Vec<u8>, Node)> {
+    if node.size() <= PAYLOAD_SIZE {
+        return vec![(Vec::new(), Node::Internal(node))];
+    }
+    let target = PAYLOAD_SIZE * 7 / 8;
+    let empty = || Internal {
+        keys: Vec::new(),
+        children: Vec::new(),
+    };
+    let base = empty().size();
+    let Internal { keys, children } = node;
+    let mut children = children.into_iter();
+    let mut out: Vec<(Vec<u8>, Internal)> = Vec::new();
+    let mut sep = Vec::new();
+    let mut cur = empty();
+    cur.children.extend(children.next());
+    let mut size = base;
+    for (k, c) in keys.into_iter().zip(children) {
+        let cell = internal_cell_size(&k);
+        if size + cell > target && !cur.keys.is_empty() {
+            out.push((
+                std::mem::replace(&mut sep, k),
+                std::mem::replace(&mut cur, empty()),
+            ));
+            cur.children.push(c);
+            size = base;
+        } else {
+            cur.keys.push(k);
+            cur.children.push(c);
+            size += cell;
+        }
+    }
+    out.push((sep, cur));
+    let mut pieces: Vec<(Vec<u8>, Node)> = Vec::with_capacity(out.len() + 1);
+    if out.len() > 1 && out.last().is_some_and(|(_, n)| n.size() < MIN_FILL) {
+        let (last_sep, last) = out.pop().expect("two");
+        let (prev_sep, mut prev) = out.pop().expect("two");
+        prev.keys.push(last_sep);
+        prev.keys.extend(last.keys);
+        prev.children.extend(last.children);
+        let mut even = fit(Node::Internal(prev));
+        even[0].0 = prev_sep;
+        pieces.extend(out.into_iter().map(|(s, n)| (s, Node::Internal(n))));
+        pieces.extend(even);
+    } else {
+        pieces.extend(out.into_iter().map(|(s, n)| (s, Node::Internal(n))));
+    }
+    pieces
+}
+
 /// The encoded size of a leaf of `cells`.
 fn cells_size(cells: &[(&[u8], ValRef)]) -> usize {
     let bytes = cells.iter().map(|(k, v)| cell_size(k, *v)).sum();
@@ -2051,6 +2107,58 @@ mod tests {
                     .size()
                 );
             }
+        }
+    }
+
+    /// `pack_internal` keeps every key and child in order (the separators
+    /// between pieces are the keys that moved up), each piece fits a page
+    /// with two children at least, and all but the last two are packed.
+    #[test]
+    fn pack_internal_packs_and_keeps_order() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        for round in 0..500 {
+            let count = 2 + next(if round % 3 == 0 { 2000 } else { 400 }) as usize;
+            let mut keys: Vec<Vec<u8>> = (0..count)
+                .map(|_| {
+                    (0..4 + next(if round % 5 == 0 { 200 } else { 20 }))
+                        .map(|_| next(256) as u8)
+                        .collect()
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            let children: Vec<PageId> = (0..=keys.len() as u64).map(PageId).collect();
+            let node = Internal {
+                keys: keys.clone(),
+                children: children.clone(),
+            };
+            let pieces = pack_internal(node);
+            let (mut got_keys, mut got_children) = (Vec::new(), Vec::new());
+            for (i, (sep, n)) in pieces.iter().enumerate() {
+                let Node::Internal(n) = n else {
+                    unreachable!("internal")
+                };
+                assert!(n.size() <= PAYLOAD_SIZE, "round {round}");
+                assert!(!n.keys.is_empty(), "round {round}");
+                assert_eq!(n.children.len(), n.keys.len() + 1);
+                assert_eq!(sep.is_empty(), i == 0, "round {round}");
+                if i > 0 {
+                    got_keys.push(sep.clone());
+                }
+                if i + 2 < pieces.len() {
+                    assert!(n.size() > PAYLOAD_SIZE * 3 / 4, "round {round}");
+                }
+                got_keys.extend(n.keys.iter().cloned());
+                got_children.extend(n.children.iter().copied());
+            }
+            assert_eq!(got_keys, keys, "round {round}");
+            assert_eq!(got_children, children, "round {round}");
         }
     }
 }

@@ -331,10 +331,16 @@ impl Table {
     /// The key prefix of index `index_id` (0 = primary): of
     /// [`INDEX_PREFIX_LEN`] bytes.
     pub fn index_prefix(&self, index_id: u32) -> Vec<u8> {
-        let mut k = vec![DATA];
-        k.extend_from_slice(&self.id.to_be_bytes());
-        k.extend_from_slice(&index_id.to_be_bytes());
+        let mut k = Vec::with_capacity(INDEX_PREFIX_LEN);
+        self.push_index_prefix(&mut k, index_id);
         k
+    }
+
+    /// [`index_prefix`](Self::index_prefix) appended to `out`.
+    pub fn push_index_prefix(&self, out: &mut Vec<u8>, index_id: u32) {
+        out.push(DATA);
+        out.extend_from_slice(&self.id.to_be_bytes());
+        out.extend_from_slice(&index_id.to_be_bytes());
     }
 
     /// The prefix of every key of the table.

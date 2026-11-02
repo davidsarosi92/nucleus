@@ -158,6 +158,23 @@ impl Run {
         Ok(())
     }
 
+    /// Appends a record of bytes of the caller's own layout: a run holds
+    /// rows ([`push`](Self::push)) or records, read back by
+    /// [`RunIter::next_record`] — for sorts of bytes (an index build's
+    /// entries) that need no values.
+    pub fn push_record(&mut self, parts: &[&[u8]]) -> Result<()> {
+        let n: usize = parts.iter().map(|p| p.len()).sum();
+        self.buf.extend_from_slice(&(n as u32).to_le_bytes());
+        for p in parts {
+            self.buf.extend_from_slice(p);
+        }
+        self.rows += 1;
+        if self.buf.len() >= BLOCK {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<()> {
         if !self.buf.is_empty() {
             self.scratch
@@ -241,6 +258,21 @@ impl RunIter {
         self.block = block;
         self.pos = 0;
         Ok(true)
+    }
+
+    /// The next record of a run of records ([`Run::push_record`]), valid
+    /// until the next call.
+    pub fn next_record(&mut self) -> Result<Option<&[u8]>> {
+        if !self.fill(4)? {
+            return Ok(None);
+        }
+        let n = u32::from_le_bytes(self.block[self.pos..self.pos + 4].try_into().unwrap()) as usize;
+        if !self.fill(4 + n)? {
+            return Err(Error::internal("a scratch run ends inside a record"));
+        }
+        let at = self.pos + 4;
+        self.pos = at + n;
+        Ok(Some(&self.block[at..at + n]))
     }
 
     fn next_row(&mut self) -> Result<Option<Row>> {
