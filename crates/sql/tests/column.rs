@@ -189,3 +189,116 @@ fn a_delete_and_a_merge_of_one_segment_both_hold() {
         );
     }
 }
+
+/// Two transactions write a column table at once — each many rows (they
+/// go to segments) or few (to the delta store), their keys overlapping or
+/// not — committed in either order.  Overlapping keys conflict as in a row
+/// table: the second to commit fails, retryable, and none of the first's
+/// rows is lost; writes to different keys keep every row they commit.
+/// (Segments are listed by their last key, so two segments over the same
+/// keys do not share a key to conflict on; their reads of the directory
+/// and the delta store are what conflicts.)
+#[test]
+fn concurrent_writes_of_a_column_table_conflict_as_rows_do() {
+    // (first key, rows): many rows go to segments, few to the delta store.
+    let shapes: [(&str, i64, i64); 6] = [
+        ("many", 1, 10_000),
+        ("many, overlapping", 5_001, 10_000),
+        ("many, after", 20_001, 10_000),
+        ("few", 2, 10),
+        ("few, inside", 4_001, 10),
+        ("few, after", 50_001, 10),
+    ];
+    for a in 0..shapes.len() {
+        for b in 0..shapes.len() {
+            for a_first in [true, false] {
+                let db: Arc<dyn Kv> = Arc::new(
+                    Database::open_on(
+                        Arc::new(SimPlatform::new(7)),
+                        Path::new("/db"),
+                        Options::default(),
+                    )
+                    .unwrap(),
+                );
+                let mut setup = Session::new(Arc::clone(&db));
+                setup
+                    .execute("CREATE TABLE c (id INT PRIMARY KEY, w INT) WITH (storage = column)")
+                    .unwrap();
+                let mut sa = Session::new(Arc::clone(&db));
+                let mut sb = Session::new(Arc::clone(&db));
+                let ins = |w: usize, (_, from, n): (&str, i64, i64)| {
+                    format!(
+                        "INSERT INTO c SELECT i, {w} FROM generate_series({from}, {}) i",
+                        from + n - 1
+                    )
+                };
+                sa.execute("BEGIN").unwrap();
+                sb.execute("BEGIN").unwrap();
+                sa.execute(&ins(1, shapes[a])).unwrap();
+                sb.execute(&ins(2, shapes[b])).unwrap();
+                let (first, second) = if a_first {
+                    (&mut sa, &mut sb)
+                } else {
+                    (&mut sb, &mut sa)
+                };
+                let first_ok = first.execute("COMMIT").is_ok();
+                let second_ok = match second.execute("COMMIT") {
+                    Ok(_) => true,
+                    Err(e) => {
+                        assert_eq!(e.code, "40001", "{e:?}");
+                        false
+                    }
+                };
+                let what = format!("{} / {}, a first: {a_first}", shapes[a].0, shapes[b].0);
+                assert!(first_ok, "{what}");
+                let keys = |(_, from, n): (&str, i64, i64)| from..from + n;
+                let (ka, kb) = (keys(shapes[a]), keys(shapes[b]));
+                let overlap = ka.start < kb.end && kb.start < ka.end;
+                if overlap {
+                    assert!(!second_ok, "{what}: overlapping writes both committed");
+                }
+                // Few rows each, to different keys: no conflict (a write
+                // to segments past the last one may conflict with another
+                // there — its claim of the directory runs to the end —,
+                // never one to the delta store with another).
+                if !overlap && shapes[a].0.starts_with("few") && shapes[b].0.starts_with("few") {
+                    assert!(
+                        second_ok,
+                        "{what}: small writes to different keys conflicted"
+                    );
+                }
+                // Every committed writer's rows are there, under its mark.
+                let (ok_a, ok_b) = if a_first {
+                    (true, second_ok)
+                } else {
+                    (second_ok, true)
+                };
+                let expect =
+                    |ok: bool, r: &std::ops::Range<i64>| if ok { r.end - r.start } else { 0 };
+                let got = outcome(
+                    &mut setup,
+                    "SELECT count(*), count(DISTINCT id), \
+                            sum(CASE WHEN w = 1 THEN 1 ELSE 0 END), \
+                            sum(CASE WHEN w = 2 THEN 1 ELSE 0 END) FROM c",
+                )
+                .unwrap();
+                let (na, nb) = (expect(ok_a, &ka), expect(ok_b, &kb));
+                let total = (na + nb).to_string();
+                let mark = |n: i64| {
+                    if na + nb == 0 {
+                        String::new()
+                    } else {
+                        n.to_string()
+                    }
+                };
+                assert_eq!(got, [[total.clone(), total, mark(na), mark(nb)]], "{what}");
+                let txn = db.begin(TxnOptions::read_only()).unwrap();
+                assert_eq!(
+                    nucleus_sql::check::check(&*txn, setup.registry()).unwrap(),
+                    Vec::<String>::new(),
+                    "{what}"
+                );
+            }
+        }
+    }
+}

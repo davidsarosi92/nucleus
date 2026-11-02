@@ -2012,7 +2012,21 @@ rows with the delta store's in key order; a key lookup checks the delta
 store, then the segment whose range holds the key.  MVCC and crash safety
 are the KV's: segments, markers and delta rows are versioned keys written
 in their transactions; a delete and a merge of one segment, in either
-order, both commit and the delete holds (`crates/sql/tests/column.rs`).  The same SQL runs on both storages with
+order, both commit and the delete holds (`crates/sql/tests/column.rs`).
+*Concurrent writes* conflict as a row table's do: the directory is keyed
+by a segment's last key, so two segments over the same keys need not
+share a key to conflict on — instead a merge reads the directory
+*validated* from its first incoming key through the first entry past its
+last (to the directory's end without one) and the delta store's keys in
+that range, and a statement that stores rows in the delta store reads the
+directory the same way for its keys.  A segment another transaction
+commits over those keys meanwhile, or a delta row among them, fails the
+later commit with a retryable `40001`, and no committed row is lost;
+small writes to different keys never conflict.  A write past the last
+segment claims the directory to its end, so two writers appending there
+at once may conflict even with different keys (one retries); tested for
+every pair of large and small writes, overlapping or not, in either order
+(`crates/sql/tests/column.rs`).  The same SQL runs on both storages with
 the same results: the tests run loads, updates, key changes and deletes on
 a `row` and a `column` table and compare every query, a row and a batch
 at a time and in parallel, and the integrity check.  On a million rows

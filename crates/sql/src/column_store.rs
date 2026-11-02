@@ -411,6 +411,67 @@ fn segments(txn: &dyn KvTxn, t: &Table, start: &[u8], end: Option<&[u8]>) -> Res
     Ok(out)
 }
 
+/// The segments whose key ranges meet `[lo, hi]`, in key order.  Read
+/// `validated`, the directory is claimed for the keys a write stores
+/// there: through the first entry past `hi` (to the directory's end
+/// without one), so a segment another transaction commits over any of
+/// these keys meanwhile — its entry inside the range read, or one it
+/// rewrote — fails this transaction's commit.  Entries are keyed by a
+/// segment's last key, so two segments over the same keys need not share
+/// one; this read is what makes their writes conflict.
+fn segments_through(
+    txn: &dyn KvTxn,
+    t: &Table,
+    lo: &[u8],
+    hi: &[u8],
+    validated: bool,
+) -> Result<Vec<Segment>> {
+    let p = t.index_prefix(DIRECTORY);
+    let from = dir_key(t, lo);
+    let to = prefix_end(&p).expect("directory prefix");
+    let scan = if validated {
+        txn.scan_validated(Bound::Included(&from), Bound::Excluded(&to))?
+    } else {
+        txn.scan(Bound::Included(&from), Bound::Excluded(&to))?
+    };
+    let mut out = Vec::new();
+    for e in scan {
+        let (k, v) = e?;
+        let seg = Segment::decode(&k[p.len()..], &v)?;
+        if seg.first.as_slice() > hi {
+            break; // read: the claim ends at this entry
+        }
+        out.push(seg);
+    }
+    Ok(out)
+}
+
+/// Claims the delta store's keys in `[lo, hi]` for a merge that moves
+/// rows there into segments: a row another transaction commits into the
+/// delta store there meanwhile fails this one's commit (it would be a
+/// second row under a key the merge stores, or one the merge missed).
+fn claim_delta(txn: &dyn KvTxn, t: &Table, lo: &[u8], hi: &[u8]) -> Result<()> {
+    let (from, to) = (moved(t, lo, DELTA), moved(t, hi, DELTA));
+    for e in txn.scan_validated(Bound::Included(&from), Bound::Included(&to))? {
+        e?;
+    }
+    Ok(())
+}
+
+/// Claims the directory for `rows` (keyed, ascending) a statement stores
+/// in the delta store ([`segments_through`]): a merge committed over
+/// their keys meanwhile conflicts with them.
+fn claim_for_delta(
+    txn: &dyn KvTxn,
+    t: &Table,
+    rows: &std::collections::BTreeMap<Vec<u8>, Row>,
+) -> Result<()> {
+    if let (Some((lo, _)), Some((hi, _))) = (rows.first_key_value(), rows.last_key_value()) {
+        segments_through(txn, t, lo, hi, true)?;
+    }
+    Ok(())
+}
+
 /// The segment whose key range holds `key`, if any.
 fn segment_of(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<Option<Segment>> {
     let p = t.index_prefix(DIRECTORY);
@@ -820,6 +881,7 @@ fn take_buffer(t: &Table) -> std::collections::BTreeMap<Vec<u8>, Row> {
 fn flush_buffer(txn: &mut dyn KvTxn, t: &Table) -> Result<()> {
     let rows = take_buffer(t);
     if t.copy == CopyState::MovingFromChanged {
+        claim_for_delta(&*txn, t, &rows)?;
         for (k, row) in rows {
             RowStorage.write(txn, t, &moved(t, &k, DELTA), &row, None)?;
         }
@@ -1048,10 +1110,11 @@ fn merge_with(
     let Some((lo, hi)) = range else {
         return Ok(());
     };
-    let old: Vec<Segment> = segments(&*txn, t, &lo, None)?
-        .into_iter()
-        .take_while(|s| s.first <= hi)
-        .collect();
+    // The segments the incoming keys fall among, and the delta store's
+    // keys among them, claimed: a write committed over them meanwhile
+    // conflicts with this merge.
+    let old = segments_through(&*txn, t, &lo, &hi, true)?;
+    claim_delta(&*txn, t, &lo, &hi)?;
     let mut incoming = Incoming {
         delta: stash.seal()?.into_iter().peekable(),
         extra: extra.into_iter().peekable(),
@@ -1660,6 +1723,7 @@ impl TableStorage for ColumnStorage {
         {
             return merge(txn, t, rows, Delta::Own);
         }
+        claim_for_delta(&*txn, t, &rows)?;
         for (k, row) in rows {
             RowStorage.write(txn, t, &moved(t, &k, DELTA), &row, None)?;
         }
