@@ -237,6 +237,9 @@ are marked ✅.
 | D13 | System catalog naming (§M14.5) | ✅ **nucleus's own `nc_catalog`** (2026-10-17), in nucleus's terms (table ids, key prefixes, statistics); `pg_catalog` / `information_schema` only as a compatibility layer on top, because PostgreSQL clients hard-code those names — nucleus is PostgreSQL-compatible, not PostgreSQL | expose only `pg_catalog` (simpler, but makes PostgreSQL's names nucleus's identity) |
 | D14 | Client protocol (§M14.7) | ✅ **nucleus's own protocol, `ncp`** (2026-10-17): little-endian frames, nucleus's typed value encoding on the wire, port 20035; nucleus's own drivers (Rust, C, C++, Python, JS/TS, Java).  The PostgreSQL protocol becomes an optional module (`--pg-compat`, off by default), frozen: kept working for psql and existing tools, not extended for tool-specific catalog queries | the PostgreSQL protocol as the only client protocol (every PostgreSQL tool works, but nucleus stays a PostgreSQL look-alike); dropping it entirely (no psql, no PostgreSQL tools) |
 | D15 | Versioning (open) | Proposed: one semantic version for the server, CLI and Rust crates (`Cargo.toml`); each **format** versioned on its own and checked on open — the on-disk store (pager header), the catalog records (table definitions, already versioned), the row encoding, the WAL, and the client protocol (`ncp`'s Hello version, negotiated); drivers versioned per language but tied to the protocol version they speak; upgrades read older formats and refuse newer ones, and a release note lists format changes | to decide before the first tagged release, before publishing drivers, before a module leaves this repo (§M14.19) and before an embedded edition ships a file format to devices (§M14.23) |
+| D16 | Bulk loads without the WAL (§M14.20 W4) | ✅ **Yes, switchable** (2026-11-02): writes into a range a transaction declared *fresh* (a new table's or index's keys, which no one else sees before it commits) skip the WAL, and its commit makes them durable by a checkpoint before the commit record; they are written as final versions, not intents a vacuum rewrites (PostgreSQL's `wal_level = minimal` and `COPY FREEZE`, CockroachDB's `AddSSTable`).  A setting turns it off; it is off by force when anything needs the whole WAL — replicas (§M17.5), point-in-time restore (§M14.18), §F3 | every write logged (the safe, slower default of a replicated system) |
+| D17 | Sync policy (§M14.20 W1) | ✅ **`sync = ordered` by default, `full` as a setting** (2026-11-02): `ordered` asks the OS for ordered writes — on macOS `F_BARRIERFSYNC` — so the database is never corrupt and a crash of the process or the OS loses nothing, but a power loss may lose the last commits; `full` flushes the drive's cache at each commit (`F_FULLFSYNC`), so a commit survives power loss.  Where the OS has no cheaper ordering (Linux's `fdatasync`), both are the same.  PostgreSQL's and SQLite's defaults on macOS are the weaker of the two | `full` always (today's behaviour: every commit and checkpoint pays a drive-cache flush) |
+| D18 | Format changes for speed (§M14.20 W7) | ✅ **Now** (2026-11-02), each with its version bumped and the older format still read (principle 6): column offsets in the row format, column chunks as extents, a batch's WAL record laid out as the tree applies it | later, behind a migration |
 
 ---
 
@@ -270,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V12 shipped; benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0 ✅, W1–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
@@ -1520,6 +1523,100 @@ templates) — for decimals, typed vectors ✅ (one scale's mantissas, `+ −
 *` and comparisons on them, sums straight from them, no value a row:
 TPC-H Q1 2.5×, Q6 1.7×).
 
+**V14 — the whole engine reviewed (2026-11-02).**  Before the remaining
+targets, the TPC-H load was profiled phase by phase (SF 1, row tables,
+against PostgreSQL 18 in the same session: `COPY` 27.6 s against 18.3,
+`CREATE INDEX` 40.3 s against 5.5, `ANALYZE` 11.5 s against 5.3; a
+column table's `lineitem` `COPY` 36.5 s against 13.4) and then every
+layer read for speed — storage, transactions and the KV contract, the
+SQL write paths, the executor, columnar storage and the planner, the
+server, protocol and drivers — asking also what is built twice and what
+existing machinery a fix should reuse.  The rule taken from it (with
+`CLAUDE.md`: prior art is looked at — numeric libraries, algorithms and
+optimization models, other engines — then thought through, measured and
+bettered, never copied): **one mechanism per job** — where the review
+found the same work done in several places, they are merged first and
+the speed-up is made once, in the merged one.  The work, in this order:
+
+- **W0 — concurrent writes of a column table** ✅ (a correctness bug the
+  review found: two transactions writing overlapping keys to a column
+  table both committed, the second's rows lost behind an overlapping
+  segment — the directory is keyed by a segment's last key, so the two
+  segments shared no key to conflict on).  A merge now reads the
+  directory validated from its first incoming key through the first
+  entry past its last, and the delta store's keys in that range; a
+  statement storing rows in the delta store reads the directory the same
+  way.  The later of two overlapping writers fails with `40001`, as in a
+  row table; small writes to different keys never conflict; two writers
+  appending past the last segment at once may (the claim runs to the
+  directory's end — W3's statement view makes it exact).  Tested for every
+  pair of large and small writes, overlapping or not, in either order.
+- **W1 — quick, safe gains.**  `ANALYZE`: the platform's seeded
+  generator instead of an OS entropy call per row (55 % of its time), Li's
+  Algorithm L (O(k·log(N/k)) draws, not N), only sampled rows decoded;
+  row decoding stopping after the last wanted column; the write set's
+  `fresh` test before its lookup; the checkpoint after 1 GiB of WAL, not
+  64 MiB (configurable, as PostgreSQL's `max_wal_size`); the sync policy
+  of D17; the JS driver's quadratic buffer, 64 KiB write buffers on the
+  server, the next result batch requested while the client handles one.
+- **W2 — one sorted bulk path.**  `CREATE INDEX`, `ALTER … TYPE` and key
+  rewrites: only the index's columns read, by the parallel vectorized
+  scan; one index's key computed, not every index's; the entries sorted
+  (the spill sorter, runs on the workers), uniqueness by neighbours, then
+  written in key order into the `fresh` range, which the write set takes
+  as appends and `apply_sorted` packs to 7/8 (as PostgreSQL's `nbtsort`);
+  internal nodes packed as leaves are.  The four copies of "a row, its
+  index entries, the unique checks" become one per-row path and this
+  bulk builder; `exec::index_entry` (unused) goes.
+- **W3 — one row builder, batches into storage.**  `COPY` and `INSERT`
+  share one bound row builder (today two); parsers bound per column once,
+  from bytes to values without a string per field; `ncp`'s binary batches
+  decoded straight into vectors (their layout is the executor's); parsing
+  in parallel on the workers (DuckDB's parallel CSV, Instant Loading);
+  `TableStorage::insert_batch`, a column table encoding segments from
+  typed vectors with the kernels' minima and maxima (three row-to-column
+  builders and four min / max computations made one); one statement
+  write context instead of three thread-locals, holding a column table's
+  directory view — existence checks per batch, not per row (keys past the
+  greatest stored one need no look), the KV's `Gap` extended rather than a
+  second negative cache; row ids reserved per batch; foreign keys
+  deduplicated per chunk; partitions routed by their bounds without
+  cloning every partition per row.
+- **W4 — durability with one owner.**  One checkpoint trigger (today in
+  spill and in commit, both under the commit lock), run in the
+  background; WAL segments removed with one directory sync; no data sync
+  at a segment's rollover; ordering-only syncs where ordering is all that
+  is needed; then a checkpoint off the writer lock (copy-on-write epochs).
+  Then D16: bulk loads into fresh ranges without the WAL, written as final
+  versions, not intents a vacuum rewrites.
+- **W5 — reads, and reads after a load.**  Each spilled transaction's key
+  span kept, so reads outside it skip the intent path (today every read
+  takes it until a vacuum); read-ahead and coalesced reads; the pager's
+  checks without its mutex; a smaller `Value`; decimals cached as 64-bit
+  mantissas, a scan-resistant segment cache; one copy of a written byte
+  where there are four or five; CRC-32C interleaved.
+- **W6 — the queries above 3×.**  `count(DISTINCT)` planned as a
+  grouping (the vectorized, parallel one); top-N; typed aggregate states
+  and one key table for groupings, `DISTINCT`, set operations and join
+  lookups (four or five maps today), one hasher, hashes a column at a
+  time, dictionary codes as group keys; sorts on normalized keys with one
+  comparator; Q19's per-row directory lookups through W3's view;
+  expressions materializing only their columns, `CASE` vectorized; joins
+  emitting batches (left from V2).
+- **W7 — formats (D18).**  Column offsets in the row format (a row
+  table's late decoding: ClickBench on a row table 2.13×); a column
+  chunk stored as extents, not an overflow chain; one buffer for a batch's
+  WAL record and its tree application.
+- **W8 — per-statement costs** (what AI agents' traffic pays most): a
+  catalog epoch, and on it a session's catalog, settings and plan cache
+  (pg-compat's prepared statements onto the same); one bind for describe
+  and run; pipelining and array binds in the drivers; one `ncp-wire` crate
+  for the server and the Rust client (four encoders and decoders today);
+  the C and Python drivers' buffering.
+
+Each step records what it took from where, and what it measured, here
+and in `docs/benchmarks.md`.
+
 **Done when:** every storage mode works per table, per column and per
 partition, with online conversion between them under crash and
 concurrency tests, the same query giving the same result in each mode;
@@ -2492,3 +2589,11 @@ style) across a thousand seeds without failure.
 - **2026-10-18** — §M14.26: `real`, and PostgreSQL's float output for
   `double precision` too; `INSERT … VALUES` bound against its target
   columns, as PostgreSQL does.
+- **2026-11-02** — §M14.20 V14: the TPC-H load profiled phase by phase
+  and the whole engine read for speed and for work done twice; the plan
+  W0–W8 and the rule "one mechanism per job"; D16 (bulk loads without the
+  WAL, switchable), D17 (`sync = ordered` by default), D18 (format
+  changes now); `CLAUDE.md` (prior art as a source of ideas, not copies).
+- **2026-11-02** — §M14.20 W0: concurrent writes of a column table
+  conflict as a row table's do (a correctness bug: two overlapping writers
+  both committed and the second's rows were lost); DOCS §8.15.
