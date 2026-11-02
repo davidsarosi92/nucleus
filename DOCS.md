@@ -148,9 +148,21 @@ succeeds — callers must treat it as fatal for that data.
 
 ### 3.2 Real platform (`real::RealPlatform`)
 
-`std` only.  `sync` = `File::sync_all`, which std implements as `fsync` on
-Linux/d-os, `fcntl(F_FULLFSYNC)` on macOS (verified in std's
-`sys/fs/unix.rs`) and `FlushFileBuffers` on Windows.  Positional I/O is
+`std`, but for one call.  `sync` follows the platform's `SyncPolicy`
+(PLAN.md D17; `RealPlatform::with_sync`, the KV's `Options::sync`, the
+server's `--sync`): `Full` is `File::sync_all`, which std implements as
+`fsync` on Linux/d-os, `fcntl(F_FULLFSYNC)` on macOS (verified in std's
+`sys/fs/unix.rs`) and `FlushFileBuffers` on Windows; `Ordered`, the
+default, is the same except on macOS, where it is
+`fcntl(F_BARRIERFSYNC)` — the writes before it reach the drive before any
+after it, without flushing the drive's cache, so files are never left
+inconsistent and a crash of the process or the OS loses nothing synced,
+while a power loss may lose the last syncs (as PostgreSQL's and SQLite's
+macOS defaults).  A file system without barriers gets the full sync.
+That `fcntl` is the crate's only unsafe code (std has no such call;
+`barrier_sync`).  The simulation's sync is the full one: a power loss
+under `Ordered` leaves the files as a crash before the last syncs would,
+which the simulation tests.  Positional I/O is
 `pread`/`pwrite`, on Windows `seek_read`/`seek_write` (std maps
 `ERROR_HANDLE_EOF` to `Ok(0)`).  `sync_dir` opens and `fsync`s the directory
 on POSIX and only checks that it exists on Windows (directories cannot be
@@ -491,7 +503,8 @@ later commit of such a key conflicts at commit as it would have at the
 look).  A bulk insert of new keys in key order looks at the tree once,
 not once a row; the run ends at a spill, where its own intents enter the
 tree.  A checkpoint runs
-when the WAL since the last one exceeds `checkpoint_wal_bytes` (64 MiB).
+when the WAL since the last one exceeds `checkpoint_wal_bytes` (1 GiB, as
+PostgreSQL's `max_wal_size`; 64 MiB on 32-bit targets).
 Write skew is possible under snapshot isolation (tested and documented).
 
 **Large transactions** (§M14.11, §M14.20 V11).  A transaction keeps its
@@ -680,7 +693,7 @@ distributed implementation will provide (§F3).
 `Database` is the local implementation: `Database::open(dir, Options)` on
 the real file system, `open_on(platform, dir, Options)` on any platform;
 `checkpoint`, `vacuum`, `latest`, `scratch_files_made`, `close`.  `Options`: `cache_bytes` (128 MiB — 16 MiB on 32-bit targets —, a frame allocated when first used),
-`checkpoint_wal_bytes` (64 MiB), `wal_segment_bytes` (16 MiB), `history`
+`checkpoint_wal_bytes` (1 GiB — 64 MiB on 32-bit targets), `wal_segment_bytes` (16 MiB), `history`
 (0), `txn_memory_bytes` (64 MiB: a transaction's writes held in memory
 before they spill, §5.2).  `tests/contract.rs` holds the contract as a suite any implementation
 must pass (run on the simulation and on real files, plus 8 threads through
@@ -1176,7 +1189,8 @@ within `work_mem`, below.
 from the top with the output columns wanted, each node adding what its
 expressions read; a scan then decodes only the columns needed — the rest
 read as NULL, skipped in the encoding without being built (an out-of-line
-value not even fetched).  An expression with a subquery needs every
+value not even fetched), and a row's encoding not read at all past the
+last column wanted (`count(*)` reads none of it).  An expression with a subquery needs every
 column (a correlated subquery reads its row), as do `DISTINCT`, set
 operations, CTEs and recursion.  Subqueries' own plans decode only
 their columns too (a correlated index lookup into a column table, say,
@@ -1527,9 +1541,12 @@ versions, §5.2).
 
 `ANALYZE [table]` stores rows, and per column NULLs, distinct values and a
 16-bucket equi-depth histogram — from every row of a table up to 30 000
-rows, else from a uniform sample of 30 000 (reservoir sampling; NULLs
-scaled, distinct values by PostgreSQL's Duj1 estimator); the row count is
-exact.  Selectivities: `=` 1/ndv, ranges from the
+rows, else from a uniform sample of 30 000 (reservoir sampling by Li's
+Algorithm L — the gap to the next row taken drawn at once, about
+k·(1 + ln(N/k)) draws for N rows rather than one each, from SplitMix64
+seeded once from `Kv::random_bytes`: lineitem's `ANALYZE` 11.5 → 5.5 s;
+NULLs scaled, distinct values by PostgreSQL's Duj1 estimator); the row
+count is exact.  Selectivities: `=` 1/ndv, ranges from the
 histogram (a column's lower and upper bound in one AND together: the
 histogram between them, not each side's product), `IS NULL` the null
 fraction, `IN` n/ndv, `LIKE` 0.1 (`NOT LIKE` 0.9), combined by AND/OR/NOT.  For analyzed tables the access path is the cheapest of a
@@ -2150,7 +2167,12 @@ a wider type, `22012` NULLIF, `21000` LIMIT 1, `42P07` IF NOT EXISTS,
 nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
+                     [--sync ordered|full]
 ```
+
+`--sync` sets how far commits and checkpoints sync (§3.2, D17):
+`ordered` (the default) or `full`, which also flushes the drive's cache
+(on macOS).  Both front ends read and write through 64 KiB buffers.
 
 The server speaks **the nucleus protocol** (§10, `nucleus_server::serve`)
 on `--listen` (default `127.0.0.1:20035`).  **Who logs in is the

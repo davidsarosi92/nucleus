@@ -23,6 +23,7 @@ use nucleus_platform::Platform;
 use nucleus_platform::real::RealPlatform;
 use nucleus_storage::StoreOptions;
 
+pub use nucleus_platform::SyncPolicy;
 pub use nucleus_txn::{Chunk, Isolation, Timestamp};
 
 /// Errors of the KV contract.
@@ -474,6 +475,10 @@ pub struct Options {
     /// A transaction's writes kept in memory, in bytes; past it they spill
     /// into the store, so a transaction of any size runs in bounded memory.
     pub txn_memory_bytes: usize,
+    /// How far [`Database::open`]'s syncs go: ordered writes (the default)
+    /// or the drive's cache flushed too ([`SyncPolicy`], PLAN.md D17).
+    /// [`Database::open_on`] takes its platform's.
+    pub sync: SyncPolicy,
 }
 
 impl Default for Options {
@@ -485,10 +490,17 @@ impl Default for Options {
             } else {
                 16 << 20
             },
-            checkpoint_wal_bytes: 64 << 20,
+            // 1 GiB (PostgreSQL's `max_wal_size`), or 64 MiB on 32-bit
+            // targets: more WAL between checkpoints, fewer of them.
+            checkpoint_wal_bytes: if cfg!(target_pointer_width = "64") {
+                1 << 30
+            } else {
+                64 << 20
+            },
             wal_segment_bytes: 16 << 20,
             history: 0,
             txn_memory_bytes: 64 << 20,
+            sync: SyncPolicy::default(),
         }
     }
 }
@@ -515,7 +527,8 @@ impl std::fmt::Debug for Database {
 impl Database {
     /// Opens (or creates) the database in directory `path`.
     pub fn open(path: impl AsRef<Path>, opts: Options) -> Result<Self> {
-        let platform = RealPlatform::new().map_err(|e| Error::Storage(Box::new(e)))?;
+        let platform =
+            RealPlatform::with_sync(opts.sync).map_err(|e| Error::Storage(Box::new(e)))?;
         Self::open_on(Arc::new(platform), path.as_ref(), opts)
     }
 

@@ -172,11 +172,14 @@ impl TableStats {
 const SAMPLE: usize = 30_000;
 
 /// Computes and stores the statistics of one table: from all its rows, or
-/// from a uniform sample of [`SAMPLE`] (reservoir sampling, by the
-/// database's random numbers) — the row count is always exact.
+/// from a uniform sample of [`SAMPLE`] ([`Reservoir`], seeded once from
+/// the database's random numbers) — the row count is always exact.
 pub fn analyze_table(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Result<TableStats> {
     let (rows, total) = {
         let ctx = Ctx::new(&*txn, reg, &[]);
+        let mut seed = [0u8; 8];
+        crate::datetime::random_bytes(&mut seed)?;
+        let mut reservoir = Reservoir::new(SAMPLE, u64::from_le_bytes(seed));
         let mut sample: Vec<crate::types::Row> = Vec::new();
         let mut total = 0u64;
         for r in exec::matching(table, &Access::Full, None, &ctx)? {
@@ -184,13 +187,8 @@ pub fn analyze_table(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resu
             total += 1;
             if sample.len() < SAMPLE {
                 sample.push(row);
-            } else {
-                let mut b = [0u8; 8];
-                crate::datetime::random_bytes(&mut b)?;
-                let j = u64::from_le_bytes(b) % total;
-                if (j as usize) < SAMPLE {
-                    sample[j as usize] = row;
-                }
+            } else if let Some(slot) = reservoir.offer(total) {
+                sample[slot] = row;
             }
         }
         (sample, total)
@@ -244,6 +242,78 @@ pub fn analyze_table(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resu
     };
     txn.put(&catalog::stats_key(table), &stats.encode())?;
     Ok(stats)
+}
+
+/// Reservoir sampling by Li's Algorithm L ("Reservoir-sampling algorithms
+/// of time complexity O(n(1 + log(N/n)))", ACM TOMS 1994): after the
+/// reservoir's first `size` items, the gap to the next item taken is drawn
+/// at once (geometric, its parameter shrinking as the stream grows), so a
+/// stream of N items costs about `size · (1 + ln(N / size))` random draws,
+/// not N — and the sample is as uniform as one random draw per item (the
+/// classic Algorithm R) makes it.  The draws come from SplitMix64 (the
+/// kernels' [`mix`](crate::kernels::mix) over a counter) seeded once from
+/// the database's random numbers, not from the operating system per item.
+struct Reservoir {
+    size: usize,
+    /// SplitMix64's counter.
+    state: u64,
+    /// The largest of `size` uniforms so far, in Algorithm L's terms `W`.
+    w: f64,
+    /// The (1-based) position of the next item the reservoir takes.
+    next: u64,
+}
+
+impl Reservoir {
+    fn new(size: usize, seed: u64) -> Self {
+        let mut r = Self {
+            size,
+            state: seed,
+            w: 1.0,
+            next: size as u64,
+        };
+        r.w = r.shrink(1.0);
+        r.next = r.after(size as u64);
+        r
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        crate::kernels::mix(self.state)
+    }
+
+    /// A uniform in (0, 1), never 0.
+    fn uniform(&mut self) -> f64 {
+        ((self.next_u64() >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    }
+
+    /// `w` times the largest of `size` new uniforms.
+    fn shrink(&mut self, w: f64) -> f64 {
+        w * (self.uniform().ln() / self.size as f64).exp()
+    }
+
+    /// The position taken after `at`: a geometric gap.
+    fn after(&mut self, at: u64) -> u64 {
+        let gap = (self.uniform().ln() / (1.0 - self.w).ln()).floor();
+        // A gap past what a u64 holds (w underflowed): never again.
+        let gap = if gap.is_finite() && gap < u64::MAX as f64 {
+            gap as u64
+        } else {
+            u64::MAX
+        };
+        at.saturating_add(gap).saturating_add(1)
+    }
+
+    /// Whether the `seen`-th item (1-based, past the first `size`, each
+    /// offered in turn) replaces one in the reservoir, and which.
+    fn offer(&mut self, seen: u64) -> Option<usize> {
+        if seen != self.next {
+            return None;
+        }
+        let slot = (self.next_u64() % self.size as u64) as usize;
+        self.w = self.shrink(self.w);
+        self.next = self.after(seen);
+        Some(slot)
+    }
 }
 
 /// The distinct values among `n` sampled, from how often each was seen:
@@ -784,4 +854,47 @@ fn flip(op: BinaryOp) -> BinaryOp {
 /// there when the optimizer had statistics).
 pub fn annotate(_txn: &dyn KvTxn, plan: Plan) -> Result<Plan> {
     Ok(plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Reservoir;
+
+    /// Algorithm L's sample is uniform: over many runs, every stretch of
+    /// the stream is sampled as often as its share (a chi-squared test,
+    /// seeded, so not flaky), and it takes about `k · ln(N / k)` items
+    /// past the first `k`, not one draw per item.
+    #[test]
+    fn algorithm_l_samples_uniformly_with_few_draws() {
+        let (k, n, runs, buckets) = (100usize, 10_000u64, 2_000u64, 100usize);
+        let mut hits = vec![0u64; buckets];
+        let mut taken = 0u64;
+        for run in 0..runs {
+            let mut r = Reservoir::new(k, 0x5eed ^ run.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            let mut sample: Vec<u64> = (1..=k as u64).collect();
+            for seen in k as u64 + 1..=n {
+                if let Some(slot) = r.offer(seen) {
+                    sample[slot] = seen;
+                    taken += 1;
+                }
+            }
+            for s in sample {
+                hits[((s - 1) * buckets as u64 / n) as usize] += 1;
+            }
+        }
+        // Each bucket expects runs · k / buckets.
+        let expect = (runs * k as u64 / buckets as u64) as f64;
+        let chi2: f64 = hits
+            .iter()
+            .map(|&h| (h as f64 - expect).powi(2) / expect)
+            .sum();
+        // 99 degrees of freedom: p = 0.001 at about 148.
+        assert!(chi2 < 148.0, "chi-squared {chi2}: {hits:?}");
+        let per_run = taken as f64 / runs as f64;
+        let ideal = k as f64 * (n as f64 / k as f64).ln();
+        assert!(
+            (per_run - ideal).abs() < ideal * 0.1,
+            "{per_run} taken a run, ideal {ideal}"
+        );
+    }
 }

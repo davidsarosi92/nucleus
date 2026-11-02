@@ -1756,12 +1756,17 @@ impl<'a> RowBatches<'a> {
 impl crate::storage::BatchSource for RowBatches<'_> {
     fn next_batch(&mut self, max: usize) -> Result<Option<Batch>> {
         let mut cols: Vec<Builder> = self.kinds.iter().map(|&k| Builder::new(k, max)).collect();
+        // Past the last column wanted, a row is not read at all.
+        let upto = cols
+            .iter()
+            .rposition(|c| !matches!(c, Builder::Skip))
+            .map_or(0, |c| c + 1);
         let mut n = 0;
         while n < max {
             let Some((key, bytes)) = self.entries.next()? else {
                 break;
             };
-            decode_into(self.txn, self.table, key, bytes, &mut cols)?;
+            decode_into(self.txn, self.table, key, bytes, &mut cols[..upto])?;
             n += 1;
         }
         if n == 0 {
@@ -1832,7 +1837,7 @@ fn decode_into(
     let n = r.u16().map_err(bad)? as usize;
     for c in 0..n {
         let Some(col) = cols.get_mut(c) else {
-            break; // stored past the table's columns: not read
+            break; // stored past the columns wanted (or the table's): not read
         };
         let tag = r.peek();
         if tag == Some(OUT_OF_LINE) {

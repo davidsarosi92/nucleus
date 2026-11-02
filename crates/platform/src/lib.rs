@@ -31,6 +31,30 @@ pub mod sim;
 
 pub use rng::SplitMix64;
 
+/// How far a real file system's [`File::sync`] goes (PLAN.md D17).
+///
+/// - `Ordered` (the default): the writes before a sync reach the drive
+///   before any after it — on macOS `fcntl(F_BARRIERFSYNC)` — so the files
+///   are never left inconsistent, and a crash of the process or the
+///   operating system loses nothing synced; a power loss may lose the last
+///   syncs (the drive's cache is not flushed).  PostgreSQL's and SQLite's
+///   defaults on macOS are of this kind.
+/// - `Full`: each sync flushes the drive's cache too (`F_FULLFSYNC` on
+///   macOS), so what was synced survives a power loss.
+///
+/// Where the operating system has no cheaper ordering (Linux's `fsync`,
+/// Windows' `FlushFileBuffers`) both are the full sync.  The simulation's
+/// sync is always the full one: a power loss under `Ordered` leaves the
+/// files as a crash before the last syncs would, which it tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SyncPolicy {
+    /// Ordered writes; the drive's cache not flushed.
+    #[default]
+    Ordered,
+    /// The drive's cache flushed at each sync.
+    Full,
+}
+
 /// One environment: a file system, a clock and a source of randomness.
 pub trait Platform: Send + Sync {
     /// The file system.

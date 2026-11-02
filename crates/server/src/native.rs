@@ -15,6 +15,11 @@ use nucleus_sql::{DataType, Error, OutColumn, Row, Session, Sink, TxnStatus, Val
 
 use crate::Config;
 
+/// The connection's read and write buffers: 64 KiB, so a large result
+/// goes out in few writes (and, over TLS, in full-size records) rather
+/// than one per 8 KiB.
+const WIRE_BUFFER: usize = 64 << 10;
+
 /// The newest protocol version this server speaks.  Version 2 adds
 /// registered types (value and type tag 11: name and binary form); a
 /// version-1 client gets them as text.  Version 3 adds tags 12–20
@@ -316,8 +321,8 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
         Box::new(stream)
     };
     let (r, w) = crate::transport::split(stream);
-    let mut input = BufReader::new(r);
-    let mut out = BufWriter::new(w);
+    let mut input = BufReader::with_capacity(WIRE_BUFFER, r);
+    let mut out = BufWriter::with_capacity(WIRE_BUFFER, w);
 
     // Hello, and the login it starts.
     let hello = login(

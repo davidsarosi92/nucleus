@@ -40,6 +40,7 @@ usage:
                       [--ldap-search-dn <dn> --ldap-search-password <pw>])
                       [--ldap-starttls] [--ldap-ca <pem file>]]
                      [--trusted-proxy <cidr> …] [--max-connections <n>] [--insecure]
+                     [--sync ordered|full]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
@@ -52,7 +53,10 @@ usage:
                                     with LDAP, the directory checks the passwords
                                     of roles without their own (over TLS).  Beyond
                                     loopback it refuses the default password of an
-                                    unclaimed database and --no-auth unless --insecure
+                                    unclaimed database and --no-auth unless --insecure;
+                                    --sync full flushes the drive's cache at each
+                                    commit (on macOS; the default, ordered, keeps
+                                    writes in order without it)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

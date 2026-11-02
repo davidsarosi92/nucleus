@@ -4,7 +4,11 @@
 //!
 //! - **Durability.**  [`File::sync`] is `std::fs::File::sync_all`: `fsync` on
 //!   Linux and d-os, `fcntl(F_FULLFSYNC)` on macOS (plain `fsync` there does
-//!   not flush the drive cache), `FlushFileBuffers` on Windows.
+//!   not flush the drive cache), `FlushFileBuffers` on Windows — under
+//!   [`SyncPolicy::Ordered`] (the default) on macOS
+//!   `fcntl(F_BARRIERFSYNC)` instead: ordered writes, the drive's cache not
+//!   flushed.  That one call is the crate's only unsafe code (`std` offers
+//!   no such sync), allowed where it is made.
 //! - **Positional I/O.**  `pread`/`pwrite` on POSIX; on Windows
 //!   `ReadFile`/`WriteFile` with the offset in an `OVERLAPPED`.
 //! - **Atomic replace.**  `rename` on POSIX; on Windows `std` uses
@@ -19,7 +23,7 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::{Clock, File, FileSystem, OpenMode, Platform, Rng, SplitMix64};
+use crate::{Clock, File, FileSystem, OpenMode, Platform, Rng, SplitMix64, SyncPolicy};
 
 /// The operating system: real files, the real clock, randomness seeded from
 /// the OS.
@@ -51,9 +55,14 @@ impl RealPlatform {
     /// Creates the platform.  Fails only if the OS refuses to provide a
     /// random seed.
     pub fn new() -> io::Result<Self> {
+        Self::with_sync(SyncPolicy::default())
+    }
+
+    /// [`new`](Self::new), its files synced as `sync` says.
+    pub fn with_sync(sync: SyncPolicy) -> io::Result<Self> {
         let seed = getrandom::u64().map_err(|e| io::Error::other(e.to_string()))?;
         Ok(Self {
-            fs: RealFs,
+            fs: RealFs { sync },
             clock: RealClock {
                 origin: Instant::now(),
             },
@@ -78,9 +87,11 @@ impl Platform for RealPlatform {
     }
 }
 
-/// The OS file system.
+/// The OS file system, its files synced as [`SyncPolicy`] says.
 #[derive(Debug)]
-pub struct RealFs;
+pub struct RealFs {
+    sync: SyncPolicy,
+}
 
 /// A lock held through the OS (`flock` / `LockFileEx`) on an open file.
 struct RealLock {
@@ -129,7 +140,10 @@ impl FileSystem for RealFs {
                 format!("{} is a directory", path.display()),
             ));
         }
-        Ok(Box::new(RealFile { file }))
+        Ok(Box::new(RealFile {
+            file,
+            sync: self.sync,
+        }))
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -158,7 +172,7 @@ impl FileSystem for RealFs {
 
     #[cfg(unix)]
     fn sync_dir(&self, path: &Path) -> io::Result<()> {
-        fs::File::open(path)?.sync_all()
+        sync_file(&fs::File::open(path)?, self.sync)
     }
 
     #[cfg(not(unix))]
@@ -179,6 +193,37 @@ impl FileSystem for RealFs {
 #[derive(Debug)]
 struct RealFile {
     file: fs::File,
+    sync: SyncPolicy,
+}
+
+/// Syncs `file` as `policy` says ([`SyncPolicy`]).
+fn sync_file(file: &fs::File, policy: SyncPolicy) -> io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    if policy == SyncPolicy::Ordered {
+        return barrier_sync(file);
+    }
+    let _ = policy;
+    file.sync_all()
+}
+
+/// `fcntl(F_BARRIERFSYNC)`: the file's writes so far reach the drive before
+/// any later one, without flushing the drive's cache.  A file system that
+/// does not support it gets the full sync (as SQLite does).
+#[cfg(target_vendor = "apple")]
+#[allow(unsafe_code)]
+fn barrier_sync(file: &fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    /// From `<sys/fcntl.h>`.
+    const F_BARRIERFSYNC: i32 = 85;
+    // SAFETY: a command without an argument, on a descriptor `file` owns
+    // and keeps open for the call.
+    if unsafe { fcntl(file.as_raw_fd(), F_BARRIERFSYNC) } == -1 {
+        return file.sync_all();
+    }
+    Ok(())
 }
 
 impl File for RealFile {
@@ -205,7 +250,7 @@ impl File for RealFile {
     }
 
     fn sync(&self) -> io::Result<()> {
-        self.file.sync_all()
+        sync_file(&self.file, self.sync)
     }
 
     fn size(&self) -> io::Result<u64> {

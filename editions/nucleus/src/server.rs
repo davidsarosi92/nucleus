@@ -29,6 +29,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut ldap: std::collections::BTreeMap<&str, String> = Default::default();
     let mut trusted_proxies = Vec::new();
     let mut max_connections = None;
+    let mut sync = nucleus_kv::SyncPolicy::default();
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -46,6 +47,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--user" => user = rest.next().ok_or("--user needs a name")?.clone(),
             "--password" => password = Some(rest.next().ok_or("--password needs a value")?.clone()),
             "--no-auth" => password = None,
+            "--sync" => {
+                sync = match rest.next().map(String::as_str) {
+                    Some("ordered") => nucleus_kv::SyncPolicy::Ordered,
+                    Some("full") => nucleus_kv::SyncPolicy::Full,
+                    _ => return Err("--sync takes ordered or full".into()),
+                }
+            }
             "--log-queries" => log_queries = true,
             "--insecure" => insecure = true,
             "--tls-cert" => tls_cert = Some(rest.next().ok_or("--tls-cert needs a file")?.clone()),
@@ -192,7 +200,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
         max_connections,
         throttle: Default::default(),
     };
-    let db = Database::open(dir, Options::default()).map_err(|e| e.to_string())?;
+    let opts = Options {
+        sync,
+        ..Options::default()
+    };
+    let db = Database::open(dir, opts).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);
     let mut plan = vec![("ncp".to_string(), listen)];
     plan.extend(extra);

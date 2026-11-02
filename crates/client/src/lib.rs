@@ -897,7 +897,7 @@ impl Client {
             None => (Box::new(stream), None),
         };
         let mut c = Client {
-            conn: BufReader::new(stream),
+            conn: BufReader::with_capacity(64 << 10, stream),
             status: TxnStatus::Idle,
             server: String::new(),
             session: 0,

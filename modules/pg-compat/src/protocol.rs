@@ -16,6 +16,11 @@ use nucleus_sql::ext::{
 
 use crate::PgCompat;
 
+/// The connection's read and write buffers: 64 KiB, so a large result
+/// goes out in few writes (and, over TLS, in full-size records) rather
+/// than one per 8 KiB.
+const WIRE_BUFFER: usize = 64 << 10;
+
 /// The front end's sessions' registry: `base` (the server's) and
 /// [`PgCompat`], which PostgreSQL clients need (`pg_catalog`, the `pg_*`
 /// functions).  Made once per base registry.
@@ -435,7 +440,7 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
                 break params;
             }
             v => {
-                let mut out = BufWriter::new(s);
+                let mut out = BufWriter::with_capacity(WIRE_BUFFER, s);
                 send_error(
                     &mut out,
                     &Error {
@@ -455,8 +460,8 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
     };
     let stream = secured.unwrap_or_else(|| Box::new(tcp));
     let (r, w) = nucleus_server::transport::split(stream);
-    let mut input = BufReader::new(r);
-    let mut out = BufWriter::new(w);
+    let mut input = BufReader::with_capacity(WIRE_BUFFER, r);
+    let mut out = BufWriter::with_capacity(WIRE_BUFFER, w);
 
     let user = params.get("user").cloned().unwrap_or_default();
     if let Some(why) = config.throttle.locked(&*kv, &user) {

@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0 ✅, W1–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W1 ✅, W2–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
@@ -1551,14 +1551,24 @@ the speed-up is made once, in the merged one.  The work, in this order:
   appending past the last segment at once may (the claim runs to the
   directory's end — W3's statement view makes it exact).  Tested for every
   pair of large and small writes, overlapping or not, in either order.
-- **W1 — quick, safe gains.**  `ANALYZE`: the platform's seeded
-  generator instead of an OS entropy call per row (55 % of its time), Li's
-  Algorithm L (O(k·log(N/k)) draws, not N), only sampled rows decoded;
-  row decoding stopping after the last wanted column; the write set's
-  `fresh` test before its lookup; the checkpoint after 1 GiB of WAL, not
-  64 MiB (configurable, as PostgreSQL's `max_wal_size`); the sync policy
-  of D17; the JS driver's quadratic buffer, 64 KiB write buffers on the
-  server, the next result batch requested while the client handles one.
+- **W1 — quick, safe gains** ✅.  `ANALYZE`: Li's Algorithm L from
+  SplitMix64 seeded once, instead of an OS entropy call per row (55 % of
+  its time) — `lineitem`'s 11.5 → 5.5 s, PostgreSQL's 5.3; a chi-squared
+  test holds the sample uniform and the draws near k·ln(N/k).  Row
+  decoding stops after the last wanted column.  The write set's `fresh`
+  test before its lookup.  The checkpoint after 1 GiB of WAL, not 64 MiB
+  (PostgreSQL's `max_wal_size`; 64 MiB on 32-bit targets).  D17's sync
+  policy: `ordered` by default (`F_BARRIERFSYNC` on macOS), `full` by
+  `--sync full`.  64 KiB read and write buffers on both front ends and the
+  Rust client; the JS driver joins a frame's chunks once, not at every
+  chunk (quadratic in a large frame).  Measured: the TPC-H SF 1 load on
+  row tables 79.4 → 69.8 s (`ANALYZE` the most, `COPY` 27.6 → 26.2 s —
+  the syncs inside it 16 % → 6.5 % of its profile, the rest being real
+  writes, W4's).  Moved: decoding only the sampled rows needs a sampling
+  method of the table storage (W3); requesting the next result batch
+  ahead helps only a stream with an explicit fetch size — a plain query
+  and a columnar fetch never pause —, so it goes with the drivers' work
+  (W8).
 - **W2 — one sorted bulk path.**  `CREATE INDEX`, `ALTER … TYPE` and key
   rewrites: only the index's columns read, by the parallel vectorized
   scan; one index's key computed, not every index's; the entries sorted
@@ -1576,7 +1586,8 @@ the speed-up is made once, in the merged one.  The work, in this order:
   `TableStorage::insert_batch`, a column table encoding segments from
   typed vectors with the kernels' minima and maxima (three row-to-column
   builders and four min / max computations made one); one statement
-  write context instead of three thread-locals, holding a column table's
+  write context instead of three thread-locals, a sampling method of the
+  table storage (so `ANALYZE` decodes only the rows it keeps, from W1), holding a column table's
   directory view — existence checks per batch, not per row (keys past the
   greatest stored one need no look), the KV's `Gap` extended rather than a
   second negative cache; row ids reserved per batch; foreign keys
@@ -1612,7 +1623,8 @@ the speed-up is made once, in the merged one.  The work, in this order:
   (pg-compat's prepared statements onto the same); one bind for describe
   and run; pipelining and array binds in the drivers; one `ncp-wire` crate
   for the server and the Rust client (four encoders and decoders today);
-  the C and Python drivers' buffering.
+  the C and Python drivers' buffering; the next result batch requested
+  while the client handles one (from W1).
 
 Each step records what it took from where, and what it measured, here
 and in `docs/benchmarks.md`.

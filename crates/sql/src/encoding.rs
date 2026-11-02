@@ -590,7 +590,11 @@ pub fn decode_some(
     }
     let n = r.u16().map_err(bad)? as usize;
     let mut row = Vec::with_capacity(columns.max(n));
-    for c in 0..n {
+    // Past the last column wanted, the row is not read at all.
+    let upto = wanted.map_or(n, |w| {
+        w.iter().rposition(|&x| x).map_or(0, |c| c + 1).min(n)
+    });
+    for c in 0..upto {
         let want = wanted.is_none_or(|w| w.get(c).copied().unwrap_or(false));
         if r.peek() == Some(OUT_OF_LINE) {
             r.u8().map_err(bad)?;

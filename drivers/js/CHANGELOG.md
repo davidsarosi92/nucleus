@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Faster reads of large results (nucleus PLAN.md §M14.20 W1): a frame's
+  chunks are joined once, when the frame is whole, instead of at every
+  chunk, which made a large frame's read quadratic in its size.
 - Bulk load (nucleus PLAN.md §M14.11): `Client.load(table, rows |
   columns, { columns })` as columnar batches in one `COPY … FROM STDIN`;
   `Client.copy(sql, data)` with text or CSV (a string, bytes, or an

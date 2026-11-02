@@ -83,7 +83,13 @@ impl Default for EngineOptions {
     fn default() -> Self {
         Self {
             store: StoreOptions::default(),
-            checkpoint_wal_bytes: 64 << 20,
+            // 1 GiB (PostgreSQL's `max_wal_size`), or 64 MiB on 32-bit
+            // targets: more WAL between checkpoints, fewer of them.
+            checkpoint_wal_bytes: if cfg!(target_pointer_width = "64") {
+                1 << 30
+            } else {
+                64 << 20
+            },
             history: 0,
             txn_memory: 64 << 20,
         }
@@ -1200,8 +1206,10 @@ impl Transaction {
         // anyway (first committer wins), and the client learns at the
         // statement, as PostgreSQL reports it.  The commit check stays the
         // guarantee — a conflicting commit can still land after this.
-        if !self.writes.contains_key(key)
-            && !self.is_fresh(key)
+        // (A fresh key first: no one else can have written it, and that
+        // test is cheaper than the write set's lookup.)
+        if !self.is_fresh(key)
+            && !self.writes.contains_key(key)
             && self.engine.write_conflicts(key, self.start, self.spilled)?
         {
             return Err(Error::Conflict { key: key.to_vec() });

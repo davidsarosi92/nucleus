@@ -699,7 +699,11 @@ type Status = "idle" | "transaction" | "failed";
 /** A connection to a nucleus server. */
 export class Client {
   socket: net.Socket;
-  buffer: Buffer = Buffer.alloc(0);
+  /** Bytes received and not yet delivered: chunks, joined only once a
+   *  whole frame is in (joining at every chunk would copy a large frame
+   *  over and over — quadratic in its size). */
+  chunks: Buffer[] = [];
+  received = 0;
   waiting: ((m: Message | Error) => void) | null = null;
   closedError: Error | null = null;
   queue: Promise<unknown> = Promise.resolve();
@@ -715,7 +719,8 @@ export class Client {
   constructor(socket: net.Socket) {
     this.socket = socket;
     socket.on("data", (chunk: Buffer) => {
-      this.buffer = Buffer.concat([this.buffer, chunk]);
+      this.chunks.push(chunk);
+      this.received += chunk.length;
       this.deliver();
     });
     const fail = (e: Error) => {
@@ -728,15 +733,25 @@ export class Client {
     socket.on("close", () => fail(new NucleusError("the server closed the connection")));
   }
 
+  /** The first chunk holding at least `n` bytes (the chunks joined if
+   *  they must be). */
+  head(n: number): Buffer {
+    if (this.chunks[0].length < n) this.chunks = [Buffer.concat(this.chunks, this.received)];
+    return this.chunks[0];
+  }
+
   deliver(): void {
-    if (!this.waiting || this.buffer.length < 5) return;
-    const n = this.buffer.readUInt32LE(1);
-    if (this.buffer.length < 5 + n) return;
+    if (!this.waiting || this.received < 5) return;
+    const n = this.head(5).readUInt32LE(1);
+    if (this.received < 5 + n) return;
+    const b = this.head(5 + n);
     const m = {
-      kind: this.buffer.toString("latin1", 0, 1),
-      body: this.buffer.subarray(5, 5 + n),
+      kind: b.toString("latin1", 0, 1),
+      body: b.subarray(5, 5 + n),
     };
-    this.buffer = this.buffer.subarray(5 + n);
+    if (b.length === 5 + n) this.chunks.shift();
+    else this.chunks[0] = b.subarray(5 + n);
+    this.received -= 5 + n;
     const w = this.waiting;
     this.waiting = null;
     w(m);
@@ -744,7 +759,7 @@ export class Client {
 
   read(): Promise<Message> {
     return new Promise((resolve, reject) => {
-      if (this.closedError && this.buffer.length < 5) return reject(this.closedError);
+      if (this.closedError && this.received < 5) return reject(this.closedError);
       this.waiting = (m) => (m instanceof Error ? reject(m) : resolve(m));
       this.deliver();
     });
