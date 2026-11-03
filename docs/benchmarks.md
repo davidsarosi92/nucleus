@@ -440,6 +440,8 @@ same machine, alternating with the step before):
 | W5: page checks without the pager's lock, read-ahead, CRC-32C interleaved | 8.9 | 4.6 |
 | W5: `Value` 64 → 32 bytes | 8.4 | 4.3 |
 | W5: decimal mantissas 64-bit while they fit | 8.5 | 4.25 |
+| W6: groupings past `work_mem` on the workers | 8.6 | 4.2 |
+| W6: top-N | 8.6 | 4.2 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
@@ -452,8 +454,12 @@ same machine, alternating with the step before):
 |---|---:|---:|---:|---:|---:|
 | W5 | 9.0 | 38.5 | 2,510 | 936 | 1,095 |
 | W6: groupings past `work_mem` on the workers | 5.1 | 33.7 | 623 | 239 | 330 |
+| W6: top-N, a sort below a `LIMIT` keeping its rows only | 4.7 | 30.1 | 525 | 169 | 261 |
 
-(Also Q33 429 → 194 ms, Q34 514 → 216; slower, Q36 86 → 101 ms and,
+(Top-N also Q24 11.2 → 5.4 ms, Q25 12.8 → 5.9, Q26 13.3 → 6.5, Q33 192
+→ 140; between the two steps the machine's runs moved by a tenth, so
+each step's row is against its own run of the step before.  The
+groupings' step: also Q33 429 → 194 ms, Q34 514 → 216; slower, Q36 86 → 101 ms and,
 on TPC-H, Q13 147 → 179 ms on row tables, 87 → 108 on column tables:
 groups that recur in every morsel, whose tables together now stay
 within `work_mem` — PLAN.md §M14.20 W6.)
@@ -583,7 +589,7 @@ machine against PostgreSQL 18 in the same run:
 |---|---|---|
 | TPC-H SF 1, column tables: geometric mean ≤ 0.8× PostgreSQL's time | 0.47× (0.67× in the run before) | yes |
 | ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.24× (0.31×) | yes |
-| column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 3.1×; ClickBench Q4 2.9× (Q32 3.1× and Q18 3.1× → 0.7× by W6's step, against the same PostgreSQL times; TPC-H Q20 1.9×) | no |
+| column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 3.1×; ClickBench Q4 2.9× (Q32 3.1× → 0.56× and Q18 3.1× → 0.50× by W6's steps, against the same PostgreSQL times; TPC-H Q20 1.9×) | no |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 1.11× (1.27×), ClickBench 2.13× (2.31×) | TPC-H yes, ClickBench no |
 | loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 0.9×; TPC-H 3.1× (row), 3.8× (column); ClickBench 2.4×, 2.7× | `bench/run.py` yes, the others no |
 | updates and deletes ≤ 2× (`bench/run.py`) | update 0.9×, delete 1.3× | yes |

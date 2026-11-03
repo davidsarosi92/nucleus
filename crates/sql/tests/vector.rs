@@ -255,6 +255,81 @@ fn many_groups_past_work_mem_spill_on_the_workers() {
 }
 
 #[test]
+fn a_limit_over_a_sort_keeps_its_rows_only() {
+    // `ORDER BY … LIMIT n OFFSET m` keeps only the first n + m rows (a
+    // heap, the rows built only when kept): rows m.. of the full sort —
+    // ties in the input's order —, its first error; on one thread and on
+    // workers, a row or a batch at a time, the heap past work_mem falling
+    // back to the full sort.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(37)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE o (id INT PRIMARY KEY, k INT, t TEXT, x INT) \
+               WITH (storage = {storage}); \
+             INSERT INTO o SELECT i, CASE WHEN i % 17 = 0 THEN NULL ELSE (i * 7919) % 50 END, \
+               't' || ((i * 31) % 997), CASE WHEN i = 23456 THEN 0 ELSE i % 13 + 1 END \
+               FROM generate_series(1, 30000) i; \
+             ANALYZE"
+        ))
+        .unwrap();
+        // (A query, its rows with no LIMIT, and the slices taken.)
+        let queries = [
+            "SELECT id, k FROM o ORDER BY k",
+            "SELECT id, k, t FROM o ORDER BY k DESC NULLS LAST, t",
+            "SELECT * FROM o WHERE x > 3 ORDER BY t DESC",
+            "SELECT k, count(*), min(id) FROM o GROUP BY k ORDER BY count(*) DESC",
+            "SELECT t, count(*) AS c, sum(x) FROM o GROUP BY t ORDER BY c, t DESC",
+            // An error in a key, at one row.
+            "SELECT id FROM o ORDER BY 100 / x, id",
+        ];
+        let slices: [(usize, usize); 5] = [(0, 0), (10, 0), (7, 3), (100, 250), (6000, 20)];
+        let mut sessions = Vec::new();
+        for (batch, workers, mem) in [
+            (0, 1, "64MB"),
+            (3, 1, "64MB"),
+            (1024, 1, "64MB"),
+            (1024, 4, "64MB"),
+            (1024, 4, "64kB"),
+            (0, 1, "64kB"),
+        ] {
+            let mut s = session(&db, batch);
+            s.execute(&format!(
+                "SET parallel_workers = {workers}; SET work_mem = '{mem}'"
+            ))
+            .unwrap();
+            sessions.push((
+                format!("{storage} batch {batch} workers {workers} {mem}"),
+                s,
+            ));
+        }
+        let mut full = session(&db, 1024);
+        full.execute("SET parallel_workers = 1").unwrap();
+        for q in queries {
+            let all = outcome(&mut full, q);
+            for &(n, m) in &slices {
+                let want = all
+                    .clone()
+                    .map(|rows| rows.into_iter().skip(m).take(n).collect::<Vec<_>>());
+                let limited = format!("{q} LIMIT {n} OFFSET {m}");
+                for (name, s) in &mut sessions {
+                    assert_eq!(outcome(s, &limited), want, "{name}: {limited}");
+                }
+            }
+        }
+        assert!(
+            outcome(&mut full, queries[5]).is_err(),
+            "{storage}: a division by zero"
+        );
+    }
+}
+
+#[test]
 fn random_queries_agree() {
     let db = database();
     let rng = SplitMix64::new(3);

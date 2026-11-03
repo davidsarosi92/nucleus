@@ -310,6 +310,9 @@ pub struct Ctx<'a> {
     /// The outer values each correlated subquery reads (`None`: it is not
     /// kept — a volatile function, a table function), by plan address.
     pub memo_reads: RefCell<HashMap<usize, Option<Vec<(usize, usize)>>>>,
+    /// The rows a `LIMIT` takes of the sort right below it (with those it
+    /// skips), by the sort's address: the sort keeps only those.
+    pub(crate) bounds: RefCell<HashMap<usize, usize>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -329,6 +332,7 @@ impl<'a> Ctx<'a> {
             memo: RefCell::new(HashMap::new()),
             key_filters: RefCell::new(HashMap::new()),
             memo_reads: RefCell::new(HashMap::new()),
+            bounds: RefCell::new(HashMap::new()),
         }
     }
 }

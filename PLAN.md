@@ -1933,6 +1933,36 @@ the speed-up is made once, in the merged one.  The work, in this order:
   `work_mem` at 2 GB both are as before.  Next for them: one table a
   worker across its morsels (DuckDB's thread-local tables), which needs
   the merge to take a group's least rank rather than its first.
+  *Done — top-N*: a sort right below a `LIMIT` keeps only the rows the
+  limit takes and skips (`spill::Top`, PostgreSQL's bounded sort,
+  `tuplesort_set_bound`): the pairs gathered up to twice that many — fewer
+  are sorted as they are —, then the least become a max-heap by (keys,
+  the order given), a row past its greatest turned away by one
+  comparison; so the rows are those of the full sort, ties in the input's
+  order.  A parallel sort's morsels keep a heap each and build a row only
+  when its keys enter it (Q24's `SELECT SearchPhrase … ORDER BY
+  EventTime LIMIT 10` built every row of the scan).  Past `work_mem` the
+  heap gives way to the full external sort, with the rows it kept in the
+  order given.  The bound reaches the sort through the context (`Ctx::
+  bounds`, by the sort's address), so the sort node is built and
+  measured as before.  Not taken: a separate top-N operator (DuckDB's
+  `PhysicalTopN`) — one sort, bounded or not; a heap from the first row
+  (Q41, `LIMIT 10 OFFSET 1000` over about as many groups, 8.3 → 9.5 ms,
+  hence PostgreSQL's 2k); the heap's greatest pushed into the scan as a
+  filter on the column segments' least and greatest values (DuckDB's
+  top-N dynamic filters, 2024) — left for the scans' own step.  Tested:
+  `ORDER BY … LIMIT n OFFSET m` gives rows m.. of the full sort and its
+  error, on row and column tables, a row or a batch at a time, on one
+  thread and on workers, past `work_mem` (the fall-back); mutations caught
+  (a tie admitted, the heap's tie order, the fall-back's rows dropped,
+  the gathered pairs' cut, the bound without the offset).  Measured,
+  alternating with the step before, two rounds: ClickBench on a column
+  table, the 43 queries 5.21 / 5.10 → 4.71 / 4.73 s (geometric mean 33.3
+  → 30.1 ms): Q32 610 → 525 ms, Q18 241 → 169, Q39 325 → 261, Q33 192 →
+  140, Q34 201 → 155, Q24 11.2 → 5.4, Q25 12.8 → 5.9, Q26 13.3 → 6.5.
+  TPC-H unchanged (row tables 8.8 → 8.6 s, column 4.2 s; Q20 on rows,
+  best of five 434–457 → 481–527 ms, is the same in the best of forty,
+  445 → 443 ms, and its profile is the same: reads of pages).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3038,3 +3068,7 @@ style) across a thousand seeds without failure.
   Q32 2.5 → 0.62 s, Q18 0.95 → 0.24 s, Q39 1.10 → 0.33 s (the 43 queries
   9.06 → 5.13 s), TPC-H Q13 147 → 179 ms (its groups recur in every
   morsel); `bench/phases.py clickbench`.  DOCS §8.5.
+- **2026-11-03** — §M14.20 W6: top-N — a sort below a `LIMIT` keeps only
+  its rows in a heap (gathered to 2k first, as PostgreSQL), a parallel
+  sort's morsels building a row only when it enters; ClickBench 5.1 →
+  4.7 s (Q32 610 → 525 ms, Q24 11.2 → 5.4).  DOCS §8.5.

@@ -4800,13 +4800,37 @@ impl Iterator for ParallelJoin<'_> {
 
 // ------------------------------------------------------------------ sorts
 
+/// A morsel's pairs being sorted: all of them, or (with a bound) the
+/// least.
+struct Sorting {
+    all: Vec<(Vec<Value>, Row)>,
+    top: Option<crate::spill::Top>,
+}
+
+impl Sorting {
+    /// A pair, its row built only when kept.
+    fn take(&mut self, keys: Vec<Value>, row: impl FnOnce() -> Row) {
+        match &mut self.top {
+            Some(t) => {
+                if t.admits(&keys) {
+                    t.push(keys, row());
+                }
+            }
+            None => self.all.push((keys, row())),
+        }
+    }
+}
+
 /// `ORDER BY keys` over the pipeline `input`, in parallel: each morsel's
 /// rows sorted on a worker (their keys evaluated a batch at a time), the
 /// sorted morsels merged ([`crate::spill::merge_sorted`]) — the order of
-/// the single pass's stable sort, its first error the same.
+/// the single pass's stable sort, its first error the same.  With
+/// `bound`, a morsel keeps only its first `bound` ([`crate::spill::Top`]),
+/// a row built only when its keys put it among them.
 pub(crate) fn sorted<'a>(
     input: &'a Plan,
     keys: &'a [crate::plan::SortKey],
+    bound: Option<usize>,
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
 ) -> Result<Option<Rows<'a>>> {
@@ -4826,16 +4850,19 @@ pub(crate) fn sorted<'a>(
             ctx: wctx,
             outer: None,
         };
-        let by_row = |row: Row, out: &mut Vec<(Vec<Value>, Row)>| -> Result<()> {
+        let mut sink = Sorting {
+            all: Vec::new(),
+            top: bound.map(|k| crate::spill::Top::new(k, flags.clone().into())),
+        };
+        let by_row = |row: Row, sink: &mut Sorting| -> Result<()> {
             let e = env(&row, wctx, None);
             let k = exprs
                 .iter()
                 .map(|x| x.eval(&e))
                 .collect::<Result<Vec<_>>>()?;
-            out.push((k, row));
+            sink.take(k, || row);
             Ok(())
         };
-        let mut out: Vec<(Vec<Value>, Row)> = Vec::new();
         while let Some(o) = pipe.next()? {
             match o {
                 Out::Batch(b) => {
@@ -4846,20 +4873,20 @@ pub(crate) fn sorted<'a>(
                     {
                         Ok(kv) => {
                             for i in b.sel.iter() {
-                                out.push((kv.iter().map(|k| k.value(i)).collect(), b.row(i)));
+                                sink.take(kv.iter().map(|k| k.value(i)).collect(), || b.row(i));
                             }
                         }
                         // A row at a time decides.
                         Err(_) => {
                             for i in b.sel.iter() {
-                                by_row(b.row(i), &mut out)?;
+                                by_row(b.row(i), &mut sink)?;
                             }
                         }
                     }
                 }
                 Out::Rows(rows, err) => {
                     for row in rows {
-                        by_row(row, &mut out)?;
+                        by_row(row, &mut sink)?;
                     }
                     if let Some(e) = err {
                         return Err(e);
@@ -4867,6 +4894,10 @@ pub(crate) fn sorted<'a>(
                 }
             }
         }
+        if let Some(t) = sink.top {
+            return Ok(t.into_sorted());
+        }
+        let mut out = sink.all;
         out.sort_by(|(a, _), (b, _)| crate::spill::compare(&flags, a, b));
         Ok(out)
     });

@@ -1479,7 +1479,10 @@ reading cold pages do not wait on each other.
 `scratch()` (§6.1), files in the data directory's `scratch/` — and is read
 back.  Sorts are external merge sorts (sorted runs of a `work_mem`'s
 worth, merged 64 at a time, in passes when there are more; ties keep the
-input's order); materialised CTEs, recursive CTEs' rounds and results,
+input's order) — under a `LIMIT` (a sort right below it), only the rows
+it takes and skips, kept in a heap of that many once twice as many
+came (`spill::Top`, PostgreSQL's bounded sort) while it fits, a row turned away by one
+comparison, and the full sort past `work_mem`; materialised CTEs, recursive CTEs' rounds and results,
 and the rows a write collects before writing (`INSERT … SELECT`,
 `UPDATE`, `DELETE`, rewrites) are kept in memory up to the limit, the
 rest in a run; writes then apply them 4096 rows at a time.  Index builds
@@ -1542,7 +1545,8 @@ an error on a row only the key filter drops does not come.  `EXPLAIN
 ANALYZE` marks the scan `(join key filter)`.  A **sort** of a
 pipeline sorts its morsels on worker threads (keys a batch at a time) and
 merges them (`spill::merge_sorted`; ties to the earlier morsel, so the
-order is a stable sort's).
+order is a stable sort's); under a `LIMIT` each morsel keeps its own
+heap of the rows taken, a row built only when its keys enter it.
 An **index nested loop** (`JoinAlgo::Lookup`, `EXPLAIN`: `Index Nested
 Loop`) runs its right side — a table's scan by an index on the join keys,
 the left row's values as `Outer` references — once per left row (inner,
@@ -3051,6 +3055,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-03 — §M14.20 W6, top-N:** a sort right below a `LIMIT`
+  keeps only the rows the limit takes and skips — a heap of that many
+  (`spill::Top`; ties in the input's order, so the rows of the full
+  sort), its rows built only when their keys enter, on each morsel of a
+  parallel sort; past `work_mem` the full sort, as before (§8.5).
 
 - **2026-11-03 — §M14.20 W6, groupings past `work_mem` on the workers:**
   one bound for a parallel aggregate's groups — past `work_mem` a running

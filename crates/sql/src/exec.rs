@@ -132,8 +132,13 @@ fn build_node<'a>(
             aggregate(build(input, ctx, outer)?, group, aggs, ctx, outer, 0)?
         }
         Plan::Sort { input, keys } => {
+            // Under a LIMIT: only the rows it takes kept (a top-N).
+            let bound = ctx
+                .bounds
+                .borrow_mut()
+                .remove(&(plan as *const Plan as usize));
             // A pipeline's rows: sorted in parallel, morsels merged.
-            if let Some(rows) = crate::vector::sorted(input, keys, ctx, outer)? {
+            if let Some(rows) = crate::vector::sorted(input, keys, bound, ctx, outer)? {
                 return Ok(rows);
             }
             // In memory while it fits in work_mem, else by runs merged.
@@ -149,6 +154,7 @@ fn build_node<'a>(
             crate::spill::sort(
                 keyed,
                 keys.iter().map(|k| (k.desc, k.nulls_first)).collect(),
+                bound,
             )?
         }
         Plan::Limit {
@@ -170,6 +176,13 @@ fn build_node<'a>(
                 count(limit, "LIMIT")?,
                 count(offset, "OFFSET")?.unwrap_or(0),
             );
+            if let (Plan::Sort { .. }, Some(n)) = (&**input, limit)
+                && let Some(k) = n.checked_add(offset)
+            {
+                ctx.bounds
+                    .borrow_mut()
+                    .insert(&**input as *const Plan as usize, k);
+            }
             let rows = build(input, ctx, outer)?.skip(offset);
             match limit {
                 Some(n) => Box::new(rows.take(n)),

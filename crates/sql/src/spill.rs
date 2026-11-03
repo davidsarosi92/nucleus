@@ -7,7 +7,8 @@
 //! - [`Stash`]: rows kept in memory up to the limit, the rest in a run (a
 //!   materialised result: a CTE, the rows a write collects first).
 //! - [`sort`]: an external merge sort — sorted runs of a memory's worth,
-//!   merged (a pass at a time when there are many).
+//!   merged (a pass at a time when there are many); bounded by a `LIMIT`,
+//!   a heap of the rows it takes ([`Top`]).
 //!
 //! Rows are encoded with the row encoding's values (`encoding`), except
 //! enum values, which keep their label: a run is read back exactly as it
@@ -603,9 +604,145 @@ impl Iterator for Merge {
     }
 }
 
+/// The least `k` (keys, row) pairs under `flags` of those given, ties in
+/// the order given — the first `k` of [`sort`]'s stable order — kept in a
+/// heap of `k` (PostgreSQL's bounded sort, `tuplesort_set_bound`): a pair
+/// past the heap's greatest is turned away by one comparison
+/// ([`admits`](Self::admits)), before its row need be built.  As
+/// PostgreSQL's, the pairs are only gathered up to `2k` — fewer are
+/// sorted as they are — and then the least `k` become the heap.
+pub struct Top {
+    k: usize,
+    flags: Rc<[(bool, bool)]>,
+    /// The pairs gathered, then (once `heaped`) a max-heap by (keys, the
+    /// order given).
+    heap: Vec<(Vec<Value>, u64, Row)>,
+    heaped: bool,
+    next: u64,
+    bytes: usize,
+}
+
+impl Top {
+    /// Room for `k` pairs.
+    pub fn new(k: usize, flags: Rc<[(bool, bool)]>) -> Self {
+        Top {
+            k,
+            flags,
+            heap: Vec::with_capacity(k.min(1 << 16)),
+            heaped: false,
+            next: 0,
+            bytes: 0,
+        }
+    }
+
+    /// Whether a pair with keys `keys`, given now, is among the least `k`
+    /// so far.
+    pub fn admits(&self, keys: &[Value]) -> bool {
+        !self.heaped
+            || (self.k > 0 && compare(&self.flags, keys, &self.heap[0].0) == Ordering::Less)
+    }
+
+    /// Takes a pair it [`admits`](Self::admits).
+    pub fn push(&mut self, keys: Vec<Value>, row: Row) {
+        let at = self.next;
+        self.next += 1;
+        self.bytes += row_bytes(&keys) + row_bytes(&row);
+        if !self.heaped {
+            self.heap.push((keys, at, row));
+            if self.heap.len() >= 2 * self.k.max(1) {
+                // The least k, greatest first: a max-heap as it is.
+                let flags = Rc::clone(&self.flags);
+                self.heap
+                    .sort_by(|a, b| compare(&flags, &b.0, &a.0).then(b.1.cmp(&a.1)));
+                let cut = self.heap.len() - self.k;
+                for (k, _, r) in self.heap.drain(..cut) {
+                    self.bytes -= row_bytes(&k) + row_bytes(&r);
+                }
+                self.heaped = true;
+            }
+            return;
+        }
+        // In place of the greatest, sifted down.
+        let old = std::mem::replace(&mut self.heap[0], (keys, at, row));
+        self.bytes -= row_bytes(&old.0) + row_bytes(&old.2);
+        let (n, mut i) = (self.heap.len(), 0);
+        loop {
+            let (l, r) = (2 * i + 1, 2 * i + 2);
+            let mut top = i;
+            if l < n && self.before(top, l) {
+                top = l;
+            }
+            if r < n && self.before(top, r) {
+                top = r;
+            }
+            if top == i {
+                break;
+            }
+            self.heap.swap(i, top);
+            i = top;
+        }
+    }
+
+    /// Whether pair `a` comes before pair `b`.
+    fn before(&self, a: usize, b: usize) -> bool {
+        let (x, y) = (&self.heap[a], &self.heap[b]);
+        compare(&self.flags, &x.0, &y.0).then(x.1.cmp(&y.1)) == Ordering::Less
+    }
+
+    /// About how much memory its pairs take.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Its pairs in order.
+    pub fn into_sorted(self) -> Vec<(Vec<Value>, Row)> {
+        let flags = self.flags;
+        let mut heap = self.heap;
+        heap.sort_by(|a, b| compare(&flags, &a.0, &b.0).then(a.1.cmp(&b.1)));
+        heap.truncate(self.k);
+        heap.into_iter().map(|(k, _, r)| (k, r)).collect()
+    }
+
+    /// Its pairs in the order given.
+    fn into_given(self) -> Vec<(Vec<Value>, Row)> {
+        let mut heap = self.heap;
+        heap.sort_by_key(|p| p.1);
+        heap.into_iter().map(|(k, _, r)| (k, r)).collect()
+    }
+}
+
 /// Sorts `(keys, row)` pairs by `flags`: in memory while they fit in
-/// `work_mem`, else by sorted runs merged.  The rows, in order.
+/// `work_mem`, else by sorted runs merged.  The rows, in order — with
+/// `bound`, only the first `bound` (a `LIMIT`'s rows and those it skips),
+/// kept in a [`Top`] while it fits in `work_mem`.
 pub fn sort(
+    rows: impl Iterator<Item = Result<(Vec<Value>, Row)>>,
+    flags: Vec<(bool, bool)>,
+    bound: Option<usize>,
+) -> Result<Box<dyn Iterator<Item = Result<Row>>>> {
+    let Some(k) = bound else {
+        return sort_all(rows, flags);
+    };
+    let limit = crate::budget::work_mem();
+    let mut rows = rows;
+    let mut top = Top::new(k, flags.clone().into());
+    for r in rows.by_ref() {
+        let (keys, row) = r?;
+        if top.admits(&keys) {
+            top.push(keys, row);
+            if top.bytes() > limit {
+                // Too large for a heap in memory: sorted with the rest
+                // (those it turned away are not among the first `k`).
+                let given = top.into_given();
+                return sort_all(given.into_iter().map(Ok).chain(rows), flags);
+            }
+        }
+    }
+    Ok(Box::new(top.into_sorted().into_iter().map(|(_, r)| Ok(r))))
+}
+
+/// [`sort`] without a bound.
+fn sort_all(
     rows: impl Iterator<Item = Result<(Vec<Value>, Row)>>,
     flags: Vec<(bool, bool)>,
 ) -> Result<Box<dyn Iterator<Item = Result<Row>>>> {
@@ -803,7 +940,7 @@ mod tests {
                 ..Default::default()
             },
             || {
-                sort(rows, vec![(true, false), (false, false)])
+                sort(rows, vec![(true, false), (false, false)], None)
                     .unwrap()
                     .map(|r| match r.unwrap()[0] {
                         Value::Int(k) => k,
