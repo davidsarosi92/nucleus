@@ -2182,6 +2182,39 @@ the speed-up is made once, in the merged one.  The work, in this order:
   loss above gone, and below the 257 before it); on row tables 8.56 /
   8.20 → 8.05 / 7.98 s; ClickBench 2.47 / 2.47 → 2.41 / 2.37 s (Q32 427
   / 442 → 408 / 412 ms).
+  *Done — a column table's point reads* (profiled first: Q20 on the
+  workers, its 66,000 `lineitem` lookups 87% of the time on one thread —
+  per lookup the segment directory's tree (1.3 µs), its entry decoded,
+  every column's least and greatest values among it (0.4 µs), the row
+  keys' binary search (1.45 µs: fifteen steps over 32,768 keys, each a
+  miss or two), the delete marker's tree (0.6 µs), the delta store's
+  (0.65 µs)).  A segment's id is its contents' hash, so its directory
+  entry is decoded once and cached by id with its columns; and its row
+  keys keep every 32nd key's first 8 bytes as a big-endian number
+  (`Keys::marks`, 8 kB a segment): a search finds the run between two
+  marks in that array — a mark below the probe's prefix is a key below
+  it, one above a key above it, equal prefixes widen the run — then
+  searches those keys only.  ClickHouse's sparse primary index (a mark
+  every 8,192 rows over granules it reads whole) taken at a point read's
+  scale; a B+-tree's inner level; not taken: an Eytzinger or B-tree
+  layout of the keys themselves (Khuong and Morin, "Array Layouts for
+  Comparison-Based Searching", 2017) — variable-length keys, and the
+  marks leave a search two or three misses.  Not taken either, after
+  measuring: the three trees each lookup still descends (directory,
+  marker, delta: 1.3 + 0.6 + 0.65 µs of a lookup's 4.6) — a statement's
+  snapshot of a column table's directory and of its markers' and delta's
+  emptiness would spare them, but the storage interface gives a lookup a
+  transaction, not the statement, and the trees' own reads are what the
+  next W (W7, extents) changes.  Tested: the marks' search against a
+  plain one — keys sharing their first 8 bytes in runs across marks,
+  keys shorter than 8 bytes, probes between, before and after every key
+  — and by the suite's lookups; mutations caught (a run's first key
+  skipped, equal prefixes not widening).  Measured, alternating with the
+  step before, two rounds: TPC-H on column tables 3.77 / 3.73 → 3.77 /
+  3.74 s — Q19 40.4 / 39.7 → 37.7 / 36.7 ms, Q20 170 / 167 → 162 / 156,
+  Q21 420 / 425 → 440 / 426 (within its rounds' spread: 426 against
+  425) —; row tables and
+  ClickBench unchanged (row tables read no segments).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3321,3 +3354,7 @@ style) across a thousand seeds without failure.
   less common nodes in `eval_other`): 1,680 → 480 bytes a node; TPC-H
   on column tables 3.92 → 3.75 s, row tables 8.4 → 8.0, ClickBench 2.47
   → 2.39.  DOCS §8.5.
+- **2026-11-04** — §M14.20 W6: a column table's point reads — a
+  segment's directory entry decoded once (cached by id), its row keys
+  searched through marks first.  TPC-H Q19 40 → 37 ms, Q20 167 → 156.
+  DOCS §8.15.

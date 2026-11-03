@@ -2282,7 +2282,10 @@ segment's id is a hash of its contents, so it never changes and its decoded colu
 are cached by id (in 16 shards by key, a hit locking its shard only to
 read; the size bound, 256 MB, is all shards' together, and past it the
 columns used longest ago in any shard go, an eighth of the bound at a
-time).  A read of one row (by its key: an index lookup, a
+time) — its directory entry decoded too, once (a lookup's), and its row
+keys with every 32nd key's first 8 bytes as a number beside them (a
+search narrows to 32 keys in that small array first, ClickHouse's marks).
+A read of one row (by its key: an index lookup, a
 correlated subquery's) takes each column's value from the column decoded
 if it is cached, else from its encoding as stored — cached instead of the
 column decoded, smaller — read where the value lies (`segment::value_at`:
@@ -3120,6 +3123,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-04 — §M14.20 W6, a column table's point reads:** a segment's
+  directory entry decoded once and cached by its id (it decoded every
+  column's least and greatest values a lookup); its row keys searched
+  through marks — every 32nd key's first 8 bytes — first.  TPC-H Q19
+  40 → 37 ms, Q20 167 → 156.
 
 - **2026-11-04 — §M14.20 W6, a small frame for `Expr::eval`:** its
   less common nodes evaluated in `eval_other`, so each node of a row's

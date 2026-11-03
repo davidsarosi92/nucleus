@@ -450,6 +450,7 @@ same machine, alternating with the step before):
 | W6: shared reads without a queue | 9.5 | 4.4 |
 | W6: correlated subqueries on the workers | 8.6 | 3.9 |
 | W6: a small frame for `Expr::eval` | 8.0 | 3.75 |
+| W6: a column table's point reads | 8.1 | 3.75 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
@@ -469,6 +470,7 @@ same machine, alternating with the step before):
 | W6: shared reads without a queue | 2.6 | 21.2 | 504 | 179 | 293 |
 | W6: correlated subqueries on the workers | 2.5 | 20.0 | 438 | 169 | 281 |
 | W6: a small frame for `Expr::eval` | 2.4 | 19.7 | 408 | 162 | 270 |
+| W6: a column table's point reads | 2.4 | 19.7 | 407 | 163 | 263 |
 
 (Correlated subqueries on the workers: TPC-H Q20 on column tables 577 →
 173 ms, Q2 49 → 25, Q17 88 → 31; on row tables Q20 509 → 175, Q17 43 →

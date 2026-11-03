@@ -473,7 +473,7 @@ fn claim_for_delta(
 }
 
 /// The segment whose key range holds `key`, if any.
-fn segment_of(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<Option<Segment>> {
+fn segment_of(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<Option<Arc<Segment>>> {
     let p = t.index_prefix(DIRECTORY);
     let from = dir_key(t, key);
     let to = prefix_end(&p).expect("directory prefix");
@@ -481,7 +481,7 @@ fn segment_of(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<Option<Segment>>
     let Some((k, v)) = txn.first(Bound::Included(&from), Bound::Excluded(&to))? else {
         return Ok(None);
     };
-    let seg = Segment::decode(&k[p.len()..], &v)?;
+    let seg = entry(&k[p.len()..], &v)?;
     Ok((seg.first.as_slice() <= key).then_some(seg))
 }
 
@@ -492,6 +492,24 @@ fn segment_of(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<Option<Segment>>
 struct Keys {
     offsets: Vec<u32>,
     bytes: Vec<u8>,
+    /// Every [`MARK`]th key's first 8 bytes, a big-endian number: a search
+    /// narrows to a run of keys in this small array first, where each
+    /// step of a search over the keys themselves is a miss or two in
+    /// memory (`offsets`, then `bytes`) — ClickHouse's marks of its
+    /// primary key, a B+-tree's inner level.
+    marks: Vec<u64>,
+}
+
+/// Keys between two marks ([`Keys::marks`]).
+const MARK: usize = 32;
+
+/// The first 8 bytes of `key` as a big-endian number (zeros past its
+/// end): `a < b` gives `prefix(a) <= prefix(b)`.
+fn prefix(key: &[u8]) -> u64 {
+    let mut b = [0u8; 8];
+    let n = key.len().min(8);
+    b[..n].copy_from_slice(&key[..n]);
+    u64::from_be_bytes(b)
 }
 
 impl Keys {
@@ -503,9 +521,19 @@ impl Keys {
         &self.bytes[self.offsets[i] as usize..self.offsets[i + 1] as usize]
     }
 
-    /// The first row whose key is `>= suffix`.
+    /// The first row whose key is `>= suffix`: the marks first — a mark
+    /// whose prefix is below `suffix`'s is a key below it, one whose
+    /// prefix is above a key above it —, then the keys between.
     fn search(&self, suffix: &[u8]) -> usize {
-        let (mut lo, mut hi) = (0, self.len());
+        let p = prefix(suffix);
+        let below = self.marks.partition_point(|&m| m < p);
+        let not_above = below + self.marks[below..].partition_point(|&m| m == p);
+        let mut lo = if below == 0 {
+            0
+        } else {
+            (below - 1) * MARK + 1
+        };
+        let mut hi = (not_above * MARK).min(self.len());
         while lo < hi {
             let mid = (lo + hi) / 2;
             if self.get(mid) < suffix {
@@ -546,7 +574,16 @@ impl Keys {
         {
             return Err(bad("row key offsets"));
         }
-        Ok(Keys { offsets, bytes })
+        let mut keys = Keys {
+            offsets,
+            bytes,
+            marks: Vec::new(),
+        };
+        keys.marks = (0..keys.len())
+            .step_by(MARK)
+            .map(|i| prefix(keys.get(i)))
+            .collect();
+        Ok(keys)
     }
 }
 
@@ -559,6 +596,25 @@ enum Decoded {
     /// one value ([`crate::segment::value_at`]): smaller than the column
     /// decoded.
     Raw(Arc<Vec<u8>>),
+    /// A segment's directory entry, decoded: a lookup's, the same for the
+    /// segment's id as long as it lives (a merge writes new segments).
+    Entry(Arc<Segment>),
+}
+
+/// The cache key of a segment's directory entry (its column number: no
+/// table has this many columns, nor this many less [`RAW`]).
+const ENTRY: u16 = u16::MAX - 1;
+
+/// The directory entry `v` (its key's suffix `last`), decoded once for
+/// its segment and kept in the cache.
+fn entry(last: &[u8], v: &[u8]) -> Result<Arc<Segment>> {
+    let id = Reader::new(v).u64().map_err(|_| bad("directory entry"))?;
+    if let Some(Decoded::Entry(seg)) = cache_get(&(id, ENTRY)) {
+        return Ok(seg);
+    }
+    let seg = Arc::new(Segment::decode(last, v)?);
+    cache_insert((id, ENTRY), Decoded::Entry(Arc::clone(&seg)));
+    Ok(seg)
 }
 
 /// The cache key of a column's encoding as stored (beside its decoded
@@ -654,7 +710,8 @@ static CACHE_CLOCK: AtomicU64 = AtomicU64::new(0);
 fn decoded_bytes(d: &Decoded) -> usize {
     let nulls = |n: &Option<Vec<bool>>| n.as_ref().map_or(0, Vec::len);
     64 + match d {
-        Decoded::Keys(k) => k.offsets.len() * 4 + k.bytes.len(),
+        Decoded::Keys(k) => k.offsets.len() * 4 + k.bytes.len() + k.marks.len() * 8,
+        Decoded::Entry(e) => e.first.len() + e.last.len() + e.cols.len() * 2 + e.stats.len() * 80,
         Decoded::Raw(b) => b.len(),
         Decoded::Column(v) => match &**v {
             Vector::Const(_) => 32,
@@ -792,7 +849,7 @@ fn stored_column(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize) -> Resul
     }
     match cached(txn, t, seg, col as u16)? {
         Decoded::Column(v) => Ok(v),
-        Decoded::Keys(_) | Decoded::Raw(_) => Err(bad("a column")),
+        Decoded::Keys(_) | Decoded::Raw(_) | Decoded::Entry(_) => Err(bad("a column")),
     }
 }
 
@@ -827,7 +884,7 @@ fn locate(
     t: &Table,
     key: &[u8],
     validated: bool,
-) -> Result<Option<(Segment, usize)>> {
+) -> Result<Option<(Arc<Segment>, usize)>> {
     match segment_of(txn, t, key)? {
         None => Ok(None),
         Some(seg) => locate_in(txn, t, key, validated, seg),
@@ -840,8 +897,8 @@ fn locate_in(
     t: &Table,
     key: &[u8],
     validated: bool,
-    seg: Segment,
-) -> Result<Option<(Segment, usize)>> {
+    seg: Arc<Segment>,
+) -> Result<Option<(Arc<Segment>, usize)>> {
     let prefix = crate::catalog::INDEX_PREFIX_LEN;
     let keys = keys_of(txn, t, &seg)?;
     let i = keys.search(&key[prefix..]);
@@ -2018,7 +2075,7 @@ fn exists_plain(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<bool> {
     t.push_index_prefix(&mut k, DIRECTORY);
     k.extend_from_slice(key);
     let seg = match txn.first(Bound::Included(&k), Bound::Excluded(&end_of(DIRECTORY)))? {
-        Some((d, v)) => Some(Segment::decode(&d[INDEX_PREFIX_LEN..], &v)?),
+        Some((d, v)) => Some(entry(&d[INDEX_PREFIX_LEN..], &v)?),
         None => None,
     };
     // The key in the delta store.
@@ -2420,5 +2477,49 @@ fn vector_len(v: &Vector) -> usize {
         Vector::Text(o, _, _) | Vector::Char(o, _, _) => o.len() - 1,
         Vector::Values(v) => v.len(),
         Vector::Dict(_, c, _) => c.len(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The marks' search finds what a search over the keys alone does:
+    /// keys sharing their first 8 bytes in runs past a mark, keys shorter
+    /// than 8 bytes (a prefix's zeros), probes between, before and after.
+    #[test]
+    fn marked_search_is_the_plain_one() {
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        for i in 0u32..700 {
+            // Runs of 100 keys with one 8-byte prefix, then short ones.
+            let mut k = vec![1, 2, 3, 4, (i / 100) as u8, 0, 0, 7];
+            k.extend_from_slice(&i.to_be_bytes());
+            keys.push(k);
+        }
+        for i in 0u8..90 {
+            keys.push(vec![9, i]);
+            keys.push(vec![9, i, 0]);
+        }
+        keys.sort();
+        keys.dedup();
+        let refs: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+        let k = Keys::decode(&Keys::encode(&refs)).unwrap();
+        assert_eq!(k.marks.len(), keys.len().div_ceil(MARK));
+        let mut probes: Vec<Vec<u8>> = keys.clone();
+        for key in &keys {
+            let mut more = key.clone();
+            more.push(0);
+            probes.push(more);
+            let mut less = key.clone();
+            less.pop();
+            probes.push(less);
+        }
+        probes.extend([vec![], vec![0], vec![255; 12], vec![1, 2, 3, 4, 3]]);
+        for p in probes {
+            let want = keys.partition_point(|x| x.as_slice() < p.as_slice());
+            assert_eq!(k.search(&p), want, "{p:?}");
+        }
+        let empty = Keys::decode(&Keys::encode(&[])).unwrap();
+        assert_eq!(empty.search(b"x"), 0);
     }
 }
