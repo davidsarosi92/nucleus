@@ -272,9 +272,17 @@ pub enum Value {
     /// A value of a registered type: the type and the value's canonical
     /// bytes (equal values have equal bytes).
     Ext(TypeRef, Arc<[u8]>),
-    /// An enum's value.
-    Enum(crate::enums::EnumValue),
+    /// An enum's value (behind a pointer: it is 48 bytes, and a
+    /// [`Value`] 32 — §M14.20 W5).
+    Enum(Arc<crate::enums::EnumValue>),
 }
+
+// A value is 32 bytes on 64-bit targets: a tag and 24 (a string, a
+// decimal, an address), the larger ones behind a pointer (§M14.20 W5: it
+// was 64, its decimals' and addresses' 16-byte alignment and an enum's
+// 48 bytes doubling every row and batch).
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<Value>() == 32);
 
 impl Value {
     /// A value of the registered type `ty` from its canonical bytes.

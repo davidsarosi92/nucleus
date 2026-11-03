@@ -150,11 +150,11 @@ impl EnumDef {
                     self.name
                 ))
             })?;
-        Ok(Value::Enum(EnumValue {
+        Ok(Value::Enum(Arc::new(EnumValue {
             ty: Some(EnumRef::named(&self.name)),
             key: k.as_slice().into(),
             label: l.as_str().into(),
-        }))
+        })))
     }
 
     fn label_of(&self, key: &[u8]) -> Option<&str> {
@@ -407,6 +407,7 @@ impl Labels {
                     ev.key
                 ))
             })?;
+        let ev = Arc::make_mut(ev);
         ev.ty = Some(e);
         ev.label = label.into();
         Ok(())

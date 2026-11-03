@@ -1830,6 +1830,17 @@ the speed-up is made once, in the merged one.  The work, in this order:
   committing, the same after a restart; the ranges kept apart and within
   eight; mutations caught (each edge's comparison, the commit's look, the
   merging pass's buffers).
+  *Done — a smaller `Value`*: 64 → 32 bytes.  It was 64 because two
+  variants held 128-bit integers (a decimal's mantissa, an address), whose
+  16-byte alignment rounded everything up, and an enum's value took 48;
+  now the two are `repr(C, packed(8))`, the 128-bit field first (24
+  bytes; a field is read by copy, never by reference) and an enum's value sits
+  behind an `Arc` (`Labels::fill` changes it with `Arc::make_mut`).  A
+  compile-time assertion keeps it at 32.  Measured, the 22 queries,
+  alternating with the step before: row tables 8.90 → 8.37 s (Q9 1243 →
+  1082 ms, Q20 526 → 448), column tables 4.58 → 4.31 s.  Not taken: a
+  `Box` for decimals (an allocation per value in the aggregates TPC-H
+  lives in).
 - **W6 — the queries above 3×.**  `count(DISTINCT)` planned as a
   grouping (the vectorized, parallel one); top-N; typed aggregate states
   and one key table for groupings, `DISTINCT`, set operations and join
@@ -2927,3 +2938,7 @@ style) across a thousand seeds without failure.
   transaction's intents' keys kept as up to eight ranges, so only the
   reads they reach merge intents; the merging pass decodes in place;
   Q6 over a just loaded `lineitem` 385 → 330 ms.  DOCS §5.2.
+- **2026-11-03** — §M14.20 W5: `Value` 64 → 32 bytes (decimals and
+  addresses aligned to 8, enum values behind an `Arc`); the 22 TPC-H
+  queries 8.90 → 8.37 s on row tables, 4.58 → 4.31 s on column tables.
+  DOCS §8.1.

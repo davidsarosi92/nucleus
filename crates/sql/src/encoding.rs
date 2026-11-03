@@ -339,11 +339,11 @@ pub fn decode_key_value(b: &[u8]) -> Result<(Value, usize)> {
 /// An enum value with its sort key alone: reading the row fills in its
 /// type and label ([`crate::enums::Labels`]).
 fn unresolved_enum(key: &[u8]) -> Value {
-    Value::Enum(crate::enums::EnumValue {
+    Value::Enum(std::sync::Arc::new(crate::enums::EnumValue {
         ty: None,
         key: key.into(),
         label: "".into(),
-    })
+    }))
 }
 
 /// Decodes `n` values from the front of `b`; returns them and the bytes used.

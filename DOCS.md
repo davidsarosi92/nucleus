@@ -979,6 +979,12 @@ Entry point: `Session::new(Arc<dyn Kv>)`, then `execute(sql)` or
 
 ### 8.1 Types and encodings (`types`, `encoding`, `decimal`, `datetime`)
 
+A value in memory (`types::Value`) is 32 bytes on 64-bit targets — a
+tag and up to 24: a string, a decimal (its 128-bit mantissa aligned to 8
+bytes, `repr(C, packed(8))`), an address; an enum's value behind an `Arc` —
+checked when the crate compiles (§M14.20 W5: it was 64, which every row
+and batch paid).
+
 | Type | Names | Value |
 |------|-------|-------|
 | boolean | `BOOLEAN`, `BOOL` | |

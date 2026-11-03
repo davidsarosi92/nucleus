@@ -438,6 +438,7 @@ same machine, alternating with the step before):
 |---|---:|---:|
 | W3b | 10.0 | 4.6 |
 | W5: page checks without the pager's lock, read-ahead, CRC-32C interleaved | 8.9 | 4.6 |
+| W5: `Value` 64 → 32 bytes | 8.4 | 4.3 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)

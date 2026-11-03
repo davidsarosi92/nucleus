@@ -18,8 +18,10 @@ pub const MAX_DIGITS: u32 = 38;
 /// The greatest mantissa's magnitude.
 pub(crate) const LIMIT: u128 = 10u128.pow(MAX_DIGITS) - 1;
 
-/// An exact decimal number.
+/// An exact decimal number.  Aligned to 8 bytes, not 16 (`i128`'s), so
+/// it takes 24 and a [`Value`](crate::types::Value) 32 (§M14.20 W5).
 #[derive(Clone, Copy, Debug)]
+#[repr(C, packed(8))]
 pub struct Decimal {
     m: i128,
     scale: u8,

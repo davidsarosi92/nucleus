@@ -20,13 +20,15 @@ use crate::ext::{
 };
 use crate::types::{DataType, Value};
 
-/// An address and mask length: an `inet` or a `cidr` value.
+/// An address and mask length: an `inet` or a `cidr` value.  Aligned to
+/// 8 bytes, not 16 (`u128`'s), so a [`Value`] is 32 (§M14.20 W5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C, packed(8))]
 pub struct Net {
-    /// IPv6 (else IPv4).
-    pub v6: bool,
     /// The address (IPv4 in the low 32 bits).
     pub addr: u128,
+    /// IPv6 (else IPv4).
+    pub v6: bool,
     /// The mask length.
     pub bits: u8,
 }
@@ -98,7 +100,7 @@ impl Net {
             .cmp(&other.v6)
             .then((self.addr & self.mask()).cmp(&(other.addr & other.mask())))
             .then(self.bits.cmp(&other.bits))
-            .then(self.addr.cmp(&other.addr))
+            .then({ self.addr }.cmp(&{ other.addr }))
     }
 
     fn addr_bytes(self, a: u128) -> Vec<u8> {
