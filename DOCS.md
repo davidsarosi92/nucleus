@@ -597,7 +597,20 @@ transactions committed before it began are dropped.  Meanwhile reads pay
 a little for them (a read of a key with intents walks them before its
 versions; a scan merges them in one streaming pass), and vacuum leaves
 alone the keys that have one (a commit's collection need not: an intent
-ranks above every version).  A rollback (or a drop)
+ranks above every version).  Only the reads its intents can reach pay
+(§M14.20 W5): a spilled transaction keeps the ranges of its intents' keys
+— up to eight, disjoint; a key past them starts one of its own, and
+beyond eight the two neighbours whose facing keys share the longest
+prefix become one, so a load's catalog key, its rows and its index stay
+apart and the tables between them stay out — running and, once
+committed, until vacuum (after a restart they are not known: every read
+counts them).  A scan or a key's read that no range reaches takes the
+plain path, as with no intents at all; a write's conflict check looks at
+the tree only for keys another's running ranges cover (or a large
+commit's span).  The merging pass decodes each key into the batch once,
+its value replaced by a better ranked version's (TPC-H Q6 over a just
+loaded `lineitem`: 385 → 330 ms, 301 ms vacuumed; a query of `orders`
+loaded before it, 67 → 51 ms, as fast as vacuumed).  A rollback (or a drop)
 aborts the transaction — its intents nobody sees from then — and deletes
 them in the key span it spilled; on opening, the status records say which
 transactions committed, every other's intents are aborted (vacuum sweeps
@@ -658,7 +671,8 @@ aborts in some patterns, much less state, and it distributes.  A write
 whose key already has a newer version fails at the write, under both
 levels — told by the recent commits' keys (every commit after a running
 snapshot is among them), without a look at the tree, unless another
-running transaction has intents or a large commit's span covers the key;
+running transaction's intents' ranges or a large commit's span cover the
+key;
 the commit's own check — told the same way under the commit lock, the
 tree read, with one cursor, only for the keys the recent ones cannot
 answer — stays the guarantee.

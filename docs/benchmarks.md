@@ -442,6 +442,11 @@ same machine, alternating with the step before):
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
 
+Reads right after a load whose `COPY` spilled (into a table made before
+it), before the vacuum makes its intents versions (W5): Q6 over
+`lineitem` 385 → 330 ms (301 ms vacuumed); a query of `orders`, loaded
+and vacuumed before, 67 → 51 ms (50 ms vacuumed).
+
 ## ClickBench
 
 `bench/clickbench.py` (§M14.20 V10): ClickBench's `hits` table (its

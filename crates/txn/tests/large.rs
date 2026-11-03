@@ -607,3 +607,95 @@ fn a_stopped_vacuum_goes_on_where_it_stopped() {
     drop(r);
     assert_eq!(e.running(), 0);
 }
+
+#[test]
+fn intents_are_read_only_where_their_span_reaches() {
+    let p = Arc::new(SimPlatform::new(17));
+    let e = engine_on(&p, opts()).unwrap();
+    let mut model = BTreeMap::new();
+    let mut base = e.begin();
+    for i in 0..1000 {
+        base.put(&key(i), b"base").unwrap();
+        model.insert(key(i), b"base".to_vec());
+    }
+    base.commit().unwrap();
+    e.vacuum().unwrap();
+    let before = e.begin(); // a snapshot older than A's commit
+    // A: committed, its intents unresolved over k000200..=k000399.
+    // The spans' edges written first, so they spill (the writes after the
+    // last spill are versions at the commit, not intents).
+    let mut a = e.begin();
+    for i in [200, 399].into_iter().chain(201..399) {
+        a.put(&key(i), b"a").unwrap();
+        model.insert(key(i), b"a".to_vec());
+    }
+    a.commit().unwrap();
+    // A writer of a key B is about to spill: it conflicts at its commit.
+    let mut inside = e.begin();
+    inside.put(&key(650), b"c").unwrap();
+    // B: running, its intents over k000600..=k000799.
+    let mut b = e.begin();
+    for i in [600, 799].into_iter().chain(601..799) {
+        b.put(&key(i), b"b").unwrap();
+    }
+    assert!(e.intent_count().unwrap() >= 300, "both spilled");
+    let check = |e: &Engine, model: &BTreeMap<Vec<u8>, Vec<u8>>| {
+        let t = e.begin();
+        let k = |i: usize| key(i);
+        // Ranges ending and starting at the spans' edges, inside, between.
+        let ranges = [
+            (Bound::Unbounded, Bound::Unbounded),
+            (Bound::Unbounded, Bound::Excluded(k(200))),
+            (Bound::Unbounded, Bound::Included(k(200))),
+            (Bound::Excluded(k(399)), Bound::Unbounded),
+            (Bound::Included(k(399)), Bound::Excluded(k(600))),
+            (Bound::Excluded(k(150)), Bound::Excluded(k(250))),
+            (Bound::Excluded(k(199)), Bound::Included(k(210))),
+            (Bound::Included(k(400)), Bound::Included(k(599))),
+            (Bound::Included(k(650)), Bound::Excluded(k(900))),
+        ];
+        for (lo, hi) in ranges {
+            let lo_ref = lo.as_ref().map(Vec::as_slice);
+            let hi_ref = hi.as_ref().map(Vec::as_slice);
+            let got: Vec<_> = t
+                .scan(lo_ref, hi_ref)
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            let want: Vec<_> = model
+                .range::<Vec<u8>, _>((lo.clone(), hi.clone()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            assert_eq!(got, want, "{lo:?} .. {hi:?}");
+        }
+        for i in [0, 199, 200, 300, 399, 400, 599, 600, 700, 799, 800] {
+            assert_eq!(t.get(&k(i)).unwrap().as_ref(), model.get(&k(i)), "{i}");
+        }
+    };
+    check(&e, &model);
+    // The older snapshot sees none of A.
+    assert_eq!(
+        before.get(&key(300)).unwrap().as_deref(),
+        Some(&b"base"[..])
+    );
+    // Writers: inside B's span one conflicts (at its write, or at its
+    // commit when it wrote first), one outside commits.
+    assert!(inside.commit().is_err(), "a key B's running intents hold");
+    let mut late = e.begin();
+    assert!(late.put(&key(651), b"c").is_err());
+    drop(late);
+    let mut outside = e.begin();
+    outside.put(&key(100), b"d").unwrap();
+    outside.commit().unwrap();
+    model.insert(key(100), b"d".to_vec());
+    check(&e, &model);
+    drop((b, before));
+    // Reopened, A's span is not known: its intents read everywhere.
+    drop(e);
+    let e = engine_on(&p, opts()).unwrap();
+    assert!(e.intent_count().unwrap() > 0, "A still unresolved");
+    check(&e, &model);
+    e.vacuum().unwrap();
+    assert_eq!(e.intent_count().unwrap(), 0);
+    check(&e, &model);
+}

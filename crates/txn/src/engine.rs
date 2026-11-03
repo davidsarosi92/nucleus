@@ -127,12 +127,15 @@ struct Inner {
     /// The next id of a transaction whose writes spill.
     next_id: AtomicU64,
     /// Transactions whose writes spilled (as intents) and that have not
-    /// committed: a commit checks its keys against theirs.  Changed under
-    /// the commit lock.
-    spilling: Mutex<BTreeSet<u64>>,
+    /// committed, with the span of their intents' keys: a commit checks
+    /// its keys inside a span against their intents.  Changed under the
+    /// commit lock.
+    spilling: Mutex<BTreeMap<u64, Spans>>,
     /// Committed transactions with intents vacuum has not made versions
-    /// yet: id → commit timestamp.  Readers resolve the intents by it.
-    unresolved: Mutex<BTreeMap<u64, u64>>,
+    /// yet: id → commit timestamp and the span of the intents' keys (`None`
+    /// after a restart: unknown, so everywhere).  Readers resolve the
+    /// intents by it — only the reads a span covers (§M14.20 W5).
+    unresolved: Mutex<BTreeMap<u64, (u64, Option<Spans>)>>,
     /// How many transactions are in `spilling` or `unresolved` (reads skip
     /// intents when none).
     side_users: AtomicUsize,
@@ -248,6 +251,91 @@ const SPILL_CHUNK: usize = 1 << 20;
 /// What a write costs in memory beside its key and value (about).
 const WRITE_OVERHEAD: usize = 64;
 
+/// A range of keys, both ends included.
+type Span = (Vec<u8>, Vec<u8>);
+
+/// How many ranges [`Spans`] keeps.
+const SPANS: usize = 8;
+
+/// Up to [`SPANS`] disjoint ranges, in order, covering the keys of a
+/// spilled transaction's intents (§M14.20 W5): a read none of them
+/// reaches skips the intents' path.  One range from the least key to the
+/// greatest would cover whatever lies between — a load writes a catalog
+/// key and its table's rows, and every table between them would read
+/// through its intents —, so a key past the ranges starts one of its own,
+/// and past [`SPANS`] the two neighbours whose facing keys share the
+/// longest prefix (likeliest the same table, the same index) become one.
+#[derive(Clone, Debug, Default)]
+struct Spans {
+    ranges: Vec<Span>,
+    /// The common prefix's length of each pair of neighbours' facing keys.
+    gaps: Vec<usize>,
+}
+
+impl Spans {
+    /// Covers `key` too (keys in ascending order are the cheap case).
+    fn add(&mut self, key: &[u8]) {
+        let i = self.ranges.partition_point(|(_, hi)| hi.as_slice() < key);
+        if i < self.ranges.len() && self.ranges[i].0.as_slice() <= key {
+            return; // inside
+        }
+        if i == self.ranges.len() && i > 0 {
+            // Past the last range.
+            let shared = common_prefix(&self.ranges[i - 1].1, key);
+            if self.ranges.len() < SPANS {
+                self.ranges.push((key.to_vec(), key.to_vec()));
+                self.gaps.push(shared);
+                return;
+            }
+            if self.gaps.iter().all(|&g| g <= shared) {
+                // Its gap the narrowest: the last range grows.
+                self.ranges[i - 1].1 = key.to_vec();
+                return;
+            }
+        }
+        self.ranges.insert(i, (key.to_vec(), key.to_vec()));
+        self.gaps = self
+            .ranges
+            .windows(2)
+            .map(|w| common_prefix(&w[0].1, &w[1].0))
+            .collect();
+        if self.ranges.len() > SPANS {
+            let j = (0..self.gaps.len())
+                .max_by_key(|&j| self.gaps[j])
+                .expect("more than one range");
+            let (_, hi) = self.ranges.remove(j + 1);
+            self.ranges[j].1 = hi;
+            self.gaps.remove(j);
+        }
+    }
+
+    /// Whether a range reaches into the keys from `start` to `end`.
+    fn overlaps(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
+        self.ranges.iter().any(|s| overlaps(s, start, end))
+    }
+}
+
+/// How many bytes `a` and `b` begin with alike.
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
+/// Whether `span` and the keys from `start` to `end` share a key.
+fn overlaps(span: &Span, start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
+    let (lo, hi) = (&span.0[..], &span.1[..]);
+    let from = match start {
+        Bound::Unbounded => true,
+        Bound::Included(s) => hi >= s,
+        Bound::Excluded(s) => hi > s,
+    };
+    let to = match end {
+        Bound::Unbounded => true,
+        Bound::Included(e) => lo <= e,
+        Bound::Excluded(e) => lo < e,
+    };
+    from && to
+}
+
 /// The store's entries in `[from, to)` that are versions: the reserved
 /// keys (`00 01` – `00 FF`) skipped.
 fn versions<'t>(
@@ -345,7 +433,7 @@ impl Engine {
                 active: Mutex::new(BTreeMap::new()),
                 recent: Mutex::new(Recent::default()),
                 next_id: AtomicU64::new(1),
-                spilling: Mutex::new(BTreeSet::new()),
+                spilling: Mutex::new(BTreeMap::new()),
                 unresolved: Mutex::new(BTreeMap::new()),
                 side_users: AtomicUsize::new(0),
                 begun: AtomicU64::new(0),
@@ -415,6 +503,7 @@ impl Engine {
             write_bytes: 0,
             spilled: None,
             span: None,
+            spans: Spans::default(),
             read_only: opts.read_only || opts.at.is_some(),
             isolation: opts.isolation,
             done: false,
@@ -610,24 +699,36 @@ impl Inner {
     /// with their commit timestamps (none, without taking the lock, when
     /// no transaction uses the side area).
     fn unresolved_ids(&self) -> Vec<(u64, u64)> {
+        self.unresolved_over(Bound::Unbounded, Bound::Unbounded)
+    }
+
+    /// [`unresolved_ids`](Self::unresolved_ids) with intents of keys in
+    /// `[start, end]` (a span overlapping it).
+    fn unresolved_over(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Vec<(u64, u64)> {
         if self.side_users.load(Ordering::Acquire) == 0 {
             return Vec::new();
         }
         lock(&self.unresolved)
             .iter()
-            .map(|(&id, &ts)| (id, ts))
+            .filter(|(_, (_, spans))| spans.as_ref().is_none_or(|s| s.overlaps(start, end)))
+            .map(|(&id, &(ts, _))| (id, ts))
             .collect()
     }
 
     /// The running transactions with intents, but `me`.
     fn others(&self, me: Option<u64>) -> Vec<u64> {
+        self.other_spans(me).into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// [`others`](Self::others), with the spans of their intents' keys.
+    fn other_spans(&self, me: Option<u64>) -> Vec<(u64, Spans)> {
         if self.side_users.load(Ordering::Acquire) == 0 {
             return Vec::new();
         }
         lock(&self.spilling)
             .iter()
-            .copied()
-            .filter(|&id| Some(id) != me)
+            .filter(|&(&id, _)| Some(id) != me)
+            .map(|(&id, span)| (id, span.clone()))
             .collect()
     }
 
@@ -656,8 +757,14 @@ impl Inner {
         conflict_only: bool,
         gap: Option<&mut Option<Gap>>,
     ) -> Result<(bool, Option<Option<Vec<u8>>>)> {
-        let unresolved = self.unresolved_ids();
-        let others = self.others(me);
+        let at = Bound::Included(user);
+        let unresolved = self.unresolved_over(at, at);
+        let others: Vec<u64> = self
+            .other_spans(me)
+            .into_iter()
+            .filter(|(_, spans)| spans.overlaps(at, at))
+            .map(|(id, _)| id)
+            .collect();
         let tree = self.store.read()?;
         let decode = |v: &[u8]| -> Result<Option<Vec<u8>>> {
             Ok(decode_value(v)
@@ -887,7 +994,7 @@ impl Inner {
             id = found + 1;
         }
         for &(id, ts) in &unresolved {
-            lock(&self.unresolved).insert(id, ts);
+            lock(&self.unresolved).insert(id, (ts, None));
             self.side_users.fetch_add(1, Ordering::AcqRel);
         }
         for (id, ts) in unresolved {
@@ -1060,22 +1167,24 @@ impl Inner {
         start: u64,
         me: Option<u64>,
     ) -> Result<Option<Vec<u8>>> {
-        let others = self.others(me);
+        let spans = self.other_spans(me);
+        let others: Vec<u64> = spans.iter().map(|&(id, _)| id).collect();
         let mut look: Vec<&[u8]> = Vec::new();
-        let mut keys = keys.filter(|&(_, fresh)| !fresh).map(|(user, _)| user);
-        if others.is_empty() {
+        let keys = keys.filter(|&(_, fresh)| !fresh).map(|(user, _)| user);
+        {
             let recent = lock(&self.recent);
             let since = recent.since(start);
             for user in keys {
                 if since.wrote(user) {
                     return Ok(Some(user.to_vec()));
                 }
-                if since.spanned(user) {
+                // A key a span covers — a large commit's, or another's
+                // running intents' — is for the tree to decide.
+                let at = Bound::Included(user);
+                if since.spanned(user) || spans.iter().any(|(_, s)| s.overlaps(at, at)) {
                     look.push(user);
                 }
             }
-        } else {
-            look.extend(&mut keys);
         }
         if look.is_empty() {
             return Ok(None);
@@ -1220,6 +1329,8 @@ pub struct Transaction {
     spilled: Option<u64>,
     /// The lowest and highest key spilled.
     span: Option<(Vec<u8>, Vec<u8>)>,
+    /// The ranges of the keys spilled ([`Spans`]).
+    spans: Spans,
     read_only: bool,
     isolation: Isolation,
     done: bool,
@@ -1689,7 +1800,6 @@ impl Transaction {
         self.gap = None; // its intents enter the tree
         lock(&self.empty).clear();
         if self.spilled.is_none() {
-            lock(&engine.spilling).insert(id);
             engine.side_users.fetch_add(1, Ordering::AcqRel);
             self.spilled = Some(id);
         }
@@ -1699,6 +1809,11 @@ impl Transaction {
                 Some((a, b)) => (a.min(lo.clone()), b.max(hi.clone())),
             });
         }
+        // Before its intents enter the tree (under the commit lock).
+        for key in self.writes.keys() {
+            self.spans.add(key);
+        }
+        lock(&engine.spilling).insert(id, self.spans.clone());
         let mut ops = Vec::new();
         // The next id past this one, before its intents (so no later
         // transaction is given an id an intent of this one has).
@@ -1905,7 +2020,7 @@ impl Transaction {
             if let Some(id) = spilled {
                 // Committed before it stops running: a writer never finds
                 // its intents neither (a reader at `ts` starts after both).
-                lock(&engine.unresolved).insert(id, ts);
+                lock(&engine.unresolved).insert(id, (ts, Some(std::mem::take(&mut self.spans))));
                 lock(&engine.spilling).remove(&id);
                 self.spilled = None; // its intents are the commit's now
             }
@@ -2146,7 +2261,10 @@ impl Scan<'_> {
         // timestamp (a version at or below the snapshot), the
         // transaction's own above everything.
         let mut sides: Vec<(u64, u64)> = engine
-            .unresolved_ids()
+            .unresolved_over(
+                from.as_ref().map(Vec::as_slice),
+                self.range.1.as_ref().map(Vec::as_slice),
+            )
             .into_iter()
             .filter(|&(_, ts)| ts <= txn.start)
             .collect();
@@ -2221,39 +2339,43 @@ impl Scan<'_> {
         // transaction's own above everything — against the versions: per
         // user key the highest ranked.
         let rank_of = |id: u64| sides.iter().find(|&&(i, _)| i == id).map(|&(_, r)| r);
-        // A user key's versions come together (intents first): the best so
-        // far — rank, live, value — goes out when the next key begins.
+        // A user key's versions come together (intents first).  Its bytes
+        // are decoded once into the batch; its entry is pushed at the
+        // first version seen and its value replaced by a better ranked one
+        // (`best`); a key with none seen is taken out again.
         let [k, v] = &mut self.bufs;
         let (buf, live) = (&mut self.buffer, &mut self.live);
-        let mut user: Vec<u8> = Vec::new();
-        let mut next: Vec<u8> = Vec::new();
-        let mut value: Vec<u8> = Vec::new();
-        let mut best: Option<(u64, bool)> = None;
-        let mut have = false;
+        let mut key: Option<(usize, usize)> = None;
+        let mut best: Option<u64> = None;
         let mut taken = false;
         let mut passed = 0;
-        let flush = |buf: &mut Chunk, live: &mut Vec<bool>, user: &[u8], best, value: &[u8]| {
-            if let Some((_, alive)) = best {
-                buf.push(user, if alive { value } else { &[] });
-                live.push(alive);
-            }
-        };
         'ranges: for mut range in versions(&tree, Bound::Included(&seek), end)? {
             while range.next_into(k, v)? {
-                next.clear();
-                let ts = decode_key_onto(k, &mut next)
+                let at = buf.data.len();
+                let ts = decode_key_onto(k, &mut buf.data)
                     .ok_or(Error::Corrupt("undecodable version key"))?;
-                if !have || next != user {
-                    if have {
-                        flush(buf, live, &user, best, &value);
+                if let Some((ks, ke)) = key
+                    && buf.data[ks..ke] == buf.data[at..]
+                {
+                    buf.data.truncate(at);
+                } else {
+                    let mut ks = at;
+                    if let Some((last, _)) = key
+                        && best.is_none()
+                    {
+                        // The last key had no version seen: its bytes go.
+                        let n = buf.data.len() - at;
+                        buf.data.copy_within(at.., last);
+                        buf.data.truncate(last + n);
+                        ks = last;
                     }
                     if buf.len() >= max || passed >= PASS_LIMIT {
-                        upper = Some(next.clone());
-                        have = false;
+                        upper = Some(buf.data[ks..].to_vec());
+                        buf.data.truncate(ks);
+                        key = None;
                         break 'ranges;
                     }
-                    std::mem::swap(&mut user, &mut next);
-                    have = true;
+                    key = Some((ks, buf.data.len()));
                     best = None;
                     taken = false;
                 }
@@ -2271,16 +2393,25 @@ impl Scan<'_> {
                         ts
                     }
                 };
-                if best.is_none_or(|(r, _)| rank > r) {
+                if best.is_none_or(|r| rank > r) {
                     let stored = decode_value(v).ok_or(Error::Corrupt("bad version value"))?;
-                    value.clear();
-                    value.extend_from_slice(stored.unwrap_or_default());
-                    best = Some((rank, stored.is_some()));
+                    let (ks, ke) = key.expect("a key is being read");
+                    if best.is_none() {
+                        buf.ents.push((ks, ke));
+                        live.push(stored.is_some());
+                    } else {
+                        buf.data.truncate(ke);
+                        *live.last_mut().expect("its entry") = stored.is_some();
+                    }
+                    buf.data.extend_from_slice(stored.unwrap_or_default());
+                    best = Some(rank);
                 }
             }
         }
-        if have {
-            flush(buf, live, &user, best, &value);
+        if let Some((ks, _)) = key
+            && best.is_none()
+        {
+            buf.data.truncate(ks);
         }
         if let Some(u) = upper {
             self.from = Some(Bound::Included(u));
@@ -2398,6 +2529,58 @@ impl Iterator for Scan<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spans_keep_apart_what_lies_apart() {
+        fn at(k: &[u8]) -> (Bound<&[u8]>, Bound<&[u8]>) {
+            (Bound::Included(k), Bound::Included(k))
+        }
+        // A load: a catalog key, its rows, its index (other tables between).
+        let mut s = Spans::default();
+        s.add(b"c\x01next");
+        let row = |i: u32| [&b"t7\x00"[..], &i.to_be_bytes()].concat();
+        let entry = |i: u32| [&b"t7\x01"[..], &(i * 7).to_be_bytes()].concat();
+        for i in 0..1000 {
+            s.add(&row(i));
+        }
+        for i in 0..1000 {
+            s.add(&entry(i));
+        }
+        // The joins kept the widest gaps: catalog | rows | index.
+        assert!(s.ranges.len() <= SPANS);
+        for k in [&b"c\x01next"[..], &row(0), &row(999), &entry(500)] {
+            let (lo, hi) = at(k);
+            assert!(s.overlaps(lo, hi));
+        }
+        for k in [&b"t3\x00a"[..], b"c\x02", b"t8", b"a"] {
+            let (lo, hi) = at(k);
+            assert!(!s.overlaps(lo, hi), "{k:?}");
+        }
+        assert!(s.overlaps(
+            Bound::Excluded(b"t3"),
+            Bound::Excluded(b"t7\x00\x00\x00\x00\x01")
+        ));
+        assert!(!s.overlaps(Bound::Excluded(b"c\x01next"), Bound::Excluded(&row(0))));
+        // Twenty groups, in any order: at most eight ranges, every key
+        // covered, neighbours with the longest shared prefix joined.
+        let mut s = Spans::default();
+        let mut rng = 7u64;
+        let mut keys = Vec::new();
+        for _ in 0..2000 {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let g = (rng >> 40) % 20;
+            let key = format!("g{g:02}/{}", rng >> 50).into_bytes();
+            s.add(&key);
+            keys.push(key);
+            assert!(s.ranges.len() <= SPANS);
+            assert!(s.ranges.windows(2).all(|w| w[0].1 < w[1].0));
+            assert!(s.ranges.iter().all(|(lo, hi)| lo <= hi));
+        }
+        for k in &keys {
+            let (lo, hi) = at(k);
+            assert!(s.overlaps(lo, hi));
+        }
+    }
 
     /// Which of `leaf` (keys and stored values) [`Collect`] drops.
     fn dropped(wm: u64, leaf: &[(Vec<u8>, Vec<u8>)]) -> Vec<bool> {

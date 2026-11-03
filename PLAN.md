@@ -1804,6 +1804,32 @@ the speed-up is made once, in the merged one.  The work, in this order:
   segment cache).  Not taken: `preadv` into the frames (a second `unsafe`
   call in the platform crate, for a copy of 8 KiB per page); an
   asynchronous read-ahead (the scan's workers read in parallel already).
+  *Done — reads past intents* (measured first: `lineitem` and `orders`
+  each loaded by a spilled `COPY` into a table made before it, then read
+  before and after a vacuum: Q6 382 → 336 ms, Q12 432 → 383 ms; and every
+  read in the database merged intents while any were unresolved — a query
+  of `orders`, loaded and vacuumed before `lineitem`, 70 → 67 ms the same
+  way).  A spilled transaction's intents' keys kept as ranges, running and
+  committed until vacuum, and only the reads they reach take the merging
+  path — scans by their range, a key's read and a commit's conflict check
+  by the key.  One range from the least key to the greatest (as the
+  serializable check keeps) covered every table between a load's catalog
+  key and its rows, so `orders` gained nothing; up to eight disjoint
+  ranges, the neighbours whose facing keys share the longest prefix joined
+  past eight (a greedy agglomerative merge by the keys' own similarity:
+  the engine knows nothing of tables), and `orders` read 51 ms beside 50
+  vacuumed.  The merging pass decoded each version's key into a buffer of
+  its own and copied key and value twice; now a key is decoded into the
+  batch once and its value replaced in place by a better ranked version's
+  (the plain path's way): Q6 over the intents 385 → 330 ms (301 ms
+  vacuumed).  The ranges are not in the status record (a format change for
+  a window that lasts until the next idle vacuum): after a restart every
+  read counts the intents, as before.  Tested: scans from and to each
+  range's edges, keys at the edges, an older snapshot, a writer inside a
+  running range conflicting at its write and at its commit and one outside
+  committing, the same after a restart; the ranges kept apart and within
+  eight; mutations caught (each edge's comparison, the commit's look, the
+  merging pass's buffers).
 - **W6 — the queries above 3×.**  `count(DISTINCT)` planned as a
   grouping (the vectorized, parallel one); top-N; typed aggregate states
   and one key table for groupings, `DISTINCT`, set operations and join
@@ -2897,3 +2923,7 @@ style) across a thousand seeds without failure.
   without its lock, coalesced reads ahead of a cursor (a window ramping
   1 → 16 pages), CRC-32C in three interleaved streams; the 22 TPC-H
   queries on row tables 10.0 → 8.9 s.  DOCS §4.1–§4.3.
+- **2026-11-03** — §M14.20 W5, reads past intents: a spilled
+  transaction's intents' keys kept as up to eight ranges, so only the
+  reads they reach merge intents; the merging pass decodes in place;
+  Q6 over a just loaded `lineitem` 385 → 330 ms.  DOCS §5.2.
