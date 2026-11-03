@@ -325,3 +325,169 @@ fn crash_at_every_io_point() {
         });
     }
 }
+
+/// Batches with checkpoints whose second half runs after more batches
+/// (§M14.20 W4): writes go on between [`Store::checkpoint_begin`] and
+/// [`Checkpoint::finish`](nucleus_storage::Checkpoint::finish), copying the
+/// frozen pages they change.  Returns the models after each batch and how
+/// many were acknowledged.
+fn workload_overlapping(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Model>, usize) {
+    let rng = SplitMix64::new(seed);
+    let mut models = vec![Model::new()];
+    let mut acked = 0;
+    let _ = (|| -> Result<(), Error> {
+        let (store, _) = open(p)?;
+        let mut model = Model::new();
+        let mut running = None;
+        for i in 1..=24u64 {
+            let b = random_batch(&rng, i);
+            apply(&mut model, &b);
+            models.push(model.clone());
+            let lsn = store.write(&b)?;
+            if rng.below(3) == 0 {
+                store.wait_durable(lsn)?;
+                acked = acked.max(i as usize);
+            }
+            if i % 5 == 0 && running.is_none() {
+                // Frozen here: this batch and those before it.
+                running = Some((store.checkpoint_begin()?, i as usize));
+            } else if i % 5 == 2
+                && let Some((c, upto)) = running.take()
+            {
+                c.finish()?;
+                acked = acked.max(upto); // the checkpoint made them durable
+            }
+        }
+        if let Some((c, upto)) = running.take() {
+            c.finish()?;
+            acked = acked.max(upto);
+        }
+        Ok(())
+    })();
+    (models, acked)
+}
+
+#[test]
+fn checkpoints_overlapping_writes() {
+    // Without a crash: everything there, the pager's accounts exact.
+    let p = sim(7);
+    let (models, acked) = workload_overlapping(&p, 7);
+    assert!(acked >= 20, "acked {acked}");
+    let (store, rec) = open(&p).unwrap();
+    let k = rec.meta as usize;
+    assert!(k >= acked);
+    assert_eq!(contents(&store), models[k]);
+    store.pool().pager().check().unwrap();
+    store.read().unwrap().check().unwrap();
+}
+
+#[test]
+fn crash_at_every_io_point_of_overlapping_checkpoints() {
+    for mode in [CrashMode::DropUnsynced, CrashMode::Torn] {
+        harness::run("store_crash_overlapping_checkpoints", 8, |seed| {
+            let dry = sim(seed);
+            let (models, _) = workload_overlapping(&dry, seed);
+            let total = dry.sim_fs().op_count();
+            for n in 1..=total {
+                let p = sim(seed);
+                p.sim_fs().set_faults(Faults {
+                    crash_mode: mode,
+                    ..Faults::default()
+                });
+                p.sim_fs().crash_after_ops(n);
+                let (_, acked) = workload_overlapping(&p, seed);
+                assert_eq!(
+                    p.sim_fs().crash_count(),
+                    1,
+                    "op {n} of {total} did not crash"
+                );
+                let ctx = format!("{mode:?} crash at op {n}");
+                let (store, rec) = open(&p).unwrap_or_else(|e| panic!("{ctx}: reopen failed: {e}"));
+                let k = rec.meta as usize;
+                assert!(
+                    k >= acked && k < models.len(),
+                    "{ctx}: recovered batch {k}, acked {acked}"
+                );
+                assert!(
+                    contents(&store) == models[k],
+                    "{ctx}: not the state after batch {k}"
+                );
+                store
+                    .read()
+                    .unwrap()
+                    .check()
+                    .unwrap_or_else(|e| panic!("{ctx}: tree: {e}"));
+                store
+                    .pool()
+                    .pager()
+                    .check()
+                    .unwrap_or_else(|e| panic!("{ctx}: pager: {e}"));
+            }
+        });
+    }
+}
+
+/// Writers and a checkpointer at once, on real files (§M14.20 W4): every
+/// checkpoint's slow half runs while writers copy its pages, evict them,
+/// free them and grow the file.  Then the store, reopened, holds every
+/// write.
+#[test]
+fn checkpoints_while_writing_on_real_files() {
+    let dir = std::env::temp_dir().join(format!("nucleus-ckpt-{}", std::process::id()));
+    let real: Arc<dyn Platform> = Arc::new(RealPlatform::new().unwrap());
+    let o = StoreOptions {
+        cache_pages: 16,
+        wal_segment_size: 64 << 10,
+    };
+    let (store, _) = Store::open(Arc::clone(&real), &dir, &o).unwrap();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let checkpoints = std::sync::atomic::AtomicU64::new(0);
+    std::thread::scope(|s| {
+        let writers: Vec<_> = (0..4u8)
+            .map(|t| {
+                let store = &store;
+                s.spawn(move || {
+                    let rng = SplitMix64::new(u64::from(t) + 1);
+                    let mut model = Model::new();
+                    for i in 0..400u32 {
+                        let ops: Vec<_> = (0..1 + rng.below(8))
+                            .map(|_| {
+                                let k = format!("{t}-{:03}", rng.below(300)).into_bytes();
+                                let v = (rng.below(5) != 0)
+                                    .then(|| vec![i as u8; rng.below(600) as usize]);
+                                (k, v)
+                            })
+                            .collect();
+                        let b = Batch { meta: 0, ops };
+                        store.commit(&b).unwrap();
+                        apply(&mut model, &b);
+                    }
+                    model
+                })
+            })
+            .collect();
+        s.spawn(|| {
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                store.checkpoint().unwrap();
+                checkpoints.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        let mut model = Model::new();
+        for w in writers {
+            model.extend(w.join().unwrap());
+        }
+        done.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(contents(&store), model);
+        store.read().unwrap().check().unwrap();
+    });
+    assert!(checkpoints.load(std::sync::atomic::Ordering::Relaxed) > 2);
+    let model = contents(&store);
+    store.pool().pager().check().unwrap();
+    drop(store);
+    let (store, _) = Store::open(real, &dir, &o).unwrap();
+    assert_eq!(contents(&store), model);
+    store.pool().pager().check().unwrap();
+    store.read().unwrap().check().unwrap();
+    drop(store);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

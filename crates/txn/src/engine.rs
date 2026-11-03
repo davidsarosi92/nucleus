@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use nucleus_platform::Platform;
 use nucleus_storage::btree::{LeafEntry, LeafFilter};
@@ -97,8 +97,12 @@ impl Default for EngineOptions {
 }
 
 struct Inner {
-    store: Store,
+    store: Arc<Store>,
     opts: EngineOptions,
+    /// The background checkpointer, where the platform has threads to
+    /// spare (§M14.20 W4); without one, checkpoints run where they fall
+    /// due.
+    checkpointer: Option<Checkpointer>,
     /// The commit lock: the last commit timestamp handed out.
     commit: Mutex<u64>,
     /// Every commit up to here is durable and applied: new snapshots start here.
@@ -129,6 +133,92 @@ struct Inner {
     /// A paused vacuum sweep ([`Engine::vacuum_paced`]): where it goes on,
     /// the committed transactions it makes versions of, what it removed.
     sweep: Mutex<Option<(Vec<u8>, Vec<(u64, u64)>, u64)>>,
+}
+
+/// The thread that checkpoints when the WAL since the last checkpoint
+/// passes [`EngineOptions::checkpoint_wal_bytes`] — off the writers' path:
+/// a checkpoint's slow half runs while they write (`Store::checkpoint_begin`).
+struct Checkpointer {
+    signal: Arc<Signal>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// What wakes the checkpointer: (a checkpoint is due, stop).
+#[derive(Default)]
+struct Signal {
+    state: Mutex<(bool, bool)>,
+    wake: Condvar,
+}
+
+impl Checkpointer {
+    fn start(store: Arc<Store>, limit: u64) -> std::io::Result<Self> {
+        let signal = Arc::new(Signal::default());
+        let s = Arc::clone(&signal);
+        let thread = std::thread::Builder::new()
+            .name("nucleus-checkpoint".into())
+            .spawn(move || {
+                loop {
+                    {
+                        let mut st = lock(&s.state);
+                        while !st.0 && !st.1 {
+                            st = s.wake.wait(st).unwrap_or_else(|e| e.into_inner());
+                        }
+                        if st.1 {
+                            return;
+                        }
+                        st.0 = false;
+                    }
+                    // A failure poisons the store: every later write and
+                    // read reports it.
+                    if store.checkpoint_past(limit).is_err() {
+                        return;
+                    }
+                }
+            })?;
+        Ok(Self {
+            signal,
+            thread: Some(thread),
+        })
+    }
+
+    fn wake(&self) {
+        lock(&self.signal.state).0 = true;
+        self.signal.wake.notify_one();
+    }
+}
+
+impl Drop for Checkpointer {
+    /// Stops the thread, after the checkpoint it may be running: the store
+    /// (and its directory's lock) goes with the engine, not after it.
+    fn drop(&mut self) {
+        lock(&self.signal.state).1 = true;
+        self.signal.wake.notify_one();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Inner {
+    /// The one checkpoint trigger (§M14.20 W4), after every write to the
+    /// store: past `checkpoint_wal_bytes` of WAL since the last checkpoint,
+    /// the checkpointer is woken; without one — or when it falls behind,
+    /// past twice that — the checkpoint runs here (waiting for one
+    /// running).
+    fn checkpoint_if_due(&self) -> Result<()> {
+        let limit = self.opts.checkpoint_wal_bytes;
+        let over = self.store.wal_since_checkpoint();
+        if over <= limit {
+            return Ok(());
+        }
+        match &self.checkpointer {
+            Some(c) if over <= limit.saturating_mul(2) => c.wake(),
+            _ => {
+                self.store.checkpoint_past(limit)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Entries vacuum changes per batch (each under the commit lock).
@@ -219,10 +309,23 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 impl Engine {
     /// Opens (or creates) the database in `dir` and recovers it.
     pub fn open(platform: Arc<dyn Platform>, dir: &Path, opts: EngineOptions) -> Result<Self> {
+        let threads = platform.parallelism();
         let (store, recovery) = Store::open(platform, dir, &opts.store)?;
+        let store = Arc::new(store);
+        // (The simulation's single thread checkpoints where it falls due,
+        // so its runs stay deterministic.)
+        let checkpointer = if threads > 1 {
+            Some(
+                Checkpointer::start(Arc::clone(&store), opts.checkpoint_wal_bytes)
+                    .map_err(nucleus_storage::Error::Io)?,
+            )
+        } else {
+            None
+        };
         let engine = Self {
             inner: Arc::new(Inner {
                 store,
+                checkpointer,
                 opts,
                 commit: Mutex::new(recovery.meta),
                 visible: AtomicU64::new(recovery.meta),
@@ -308,9 +411,9 @@ impl Engine {
         })
     }
 
-    /// Makes the database file current (see `Store::checkpoint`).
+    /// Makes the database file current (see `Store::checkpoint`); commits
+    /// go on while its slow half runs.
     pub fn checkpoint(&self) -> Result<()> {
-        let _commit = lock(&self.inner.commit);
         Ok(self.inner.store.checkpoint()?)
     }
 
@@ -1316,10 +1419,7 @@ impl Transaction {
             engine.store.write(&Batch { meta: *last, ops })?;
         }
         self.write_bytes = 0;
-        if engine.store.wal_since_checkpoint() > engine.opts.checkpoint_wal_bytes {
-            engine.store.checkpoint()?;
-        }
-        Ok(())
+        engine.checkpoint_if_due()
     }
 
     /// Up to `parts - 1` user keys inside `[start, end)` cutting it into
@@ -1508,12 +1608,7 @@ impl Transaction {
         };
         engine.store.wait_durable(lsn)?;
         engine.visible.fetch_max(ts, Ordering::AcqRel);
-        if engine.store.wal_since_checkpoint() > engine.opts.checkpoint_wal_bytes {
-            let _commit = lock(&engine.commit);
-            if engine.store.wal_since_checkpoint() > engine.opts.checkpoint_wal_bytes {
-                engine.store.checkpoint()?;
-            }
-        }
+        engine.checkpoint_if_due()?;
         Ok(Timestamp(ts))
     }
 

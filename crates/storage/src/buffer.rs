@@ -347,8 +347,17 @@ impl BufferPool {
     pub fn free(&self, id: PageId) -> Result<()> {
         let mut inner = self.lock(id);
         if let Some(&frame) = inner.table.get(&id) {
-            if self.frame(frame).pins.load(Ordering::Acquire) != 0 {
+            let f = self.frame(frame);
+            if f.pins.load(Ordering::Acquire) != 0 {
                 return Err(Error::Pinned(id));
+            }
+            // A page of a commit in flight, copied since: the frozen state
+            // still holds it, so its contents go to the file first.
+            if f.dirty.load(Ordering::Acquire) && self.pager.is_frozen(id) {
+                let mut page = f.page.write().unwrap_or_else(|e| e.into_inner());
+                self.pager.write_page(id, &mut page)?;
+                f.dirty.store(false, Ordering::Release);
+                self.writebacks.fetch_add(1, Ordering::Relaxed);
             }
             inner.table.remove(&id);
             *inner.id(frame) = None;
@@ -403,16 +412,30 @@ impl BufferPool {
     pub fn flush(&self) -> Result<()> {
         for shard in &*self.shards {
             let inner = shard.write().unwrap_or_else(|e| e.into_inner());
-            self.flush_shard(&inner)?;
+            self.flush_shard(&inner, |_| true)?;
         }
         Ok(())
     }
 
-    fn flush_shard(&self, inner: &Inner) -> Result<()> {
+    /// Writes the dirty pages of the commit in flight ([`Pager::freeze`])
+    /// to the pager — while writers go on, copying them as they change
+    /// them.  Pages stay cached.
+    pub fn flush_frozen(&self) -> Result<()> {
+        for shard in &*self.shards {
+            let inner = shard.write().unwrap_or_else(|e| e.into_inner());
+            self.flush_shard(&inner, |id| self.pager.is_frozen(id))?;
+        }
+        Ok(())
+    }
+
+    fn flush_shard(&self, inner: &Inner, wanted: impl Fn(PageId) -> bool) -> Result<()> {
         for (i, id) in inner.ids.iter().enumerate() {
             let (Some(id), f) = (id, self.frame(inner.start + i)) else {
                 continue;
             };
+            if !f.dirty.load(Ordering::Acquire) || !wanted(*id) {
+                continue;
+            }
             // Clear the flag before copying: a write that starts after the
             // copy sets it again and is flushed next time.
             if f.dirty.swap(false, Ordering::AcqRel) {

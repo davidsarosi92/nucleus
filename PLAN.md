@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W3 ✅, W4, W3b, W5–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W3 ✅, W4 (the checkpoint ✅, D16 next), W3b, W5–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -1659,6 +1659,35 @@ the speed-up is made once, in the merged one.  The work, in this order:
   is needed; then a checkpoint off the writer lock (copy-on-write epochs).
   Then D16: bulk loads into fresh ranges without the WAL, written as final
   versions, not intents a vacuum rewrites.
+  *Done — the checkpoint* (profiled first: in `lineitem`'s row `COPY`,
+  10.7 s, the statement's thread spent 0.41 s in checkpoints under the
+  commit lock and 0.22 s in segment rollovers' syncs; in `CREATE INDEX` no
+  checkpoint fell due).  A checkpoint in two halves: the pager's commit
+  split into `freeze` — the state as it is taken as the next to commit,
+  its pages no longer writable (writers copy them as they copy durable
+  ones; LMDB's and the copy-on-write B-trees' rule, applied per epoch)
+  but still written back, its free list's pages taken out of the free
+  set — and `commit_frozen`, which writes free list and header without
+  the lock; the store's `checkpoint_begin` freezes under the writer lock
+  and returns, `finish` syncs the WAL, writes back the frozen pages and
+  commits while writes go on.  One trigger, after every write to the
+  store, waking a checkpointer thread (inline in the simulation, or when
+  the WAL passes twice the limit).  WAL segments before a checkpoint
+  deleted with one directory sync, `open` deleting again any a crash left
+  (a log left with no segment starts at the checkpoint's LSN — a case the
+  new crash test found: a segment created after the freeze at exactly the
+  frozen LSN lost its entry).  Ordering-only syncs (`File::sync_order`, a
+  barrier on macOS) for a segment's rollover and for a commit's pages
+  before its header — they matter under `--sync full`; the default was a
+  barrier already.  The rollover sync itself stays: it lets `open` tell a
+  torn tail from corruption (PostgreSQL syncs a finished segment too).
+  Tested: a crash at every I/O point of batches written between a
+  checkpoint's halves (both crash modes, 8 seeds), writers and a
+  checkpointer thread on real files; mutations caught — no write-back of
+  a frozen page freed, no flush of frozen pages, frozen pages left
+  writable, free-list pages handed to writers, no deletion of left-over
+  segments, an empty log started at 0.  Measured: the TPC-H SF 1 row load
+  37.9 → 35.3 s (`lineitem`'s `COPY` 10.4 → 9.6 s).  *Next:* D16.
 - **W3b — batches into storage** (moved from W3, above, onto D16's write
   path): `insert_batch`, segments from typed vectors, `ncp` batches into
   vectors, parse and store overlapped, the sampling method.
@@ -2740,3 +2769,8 @@ style) across a thousand seeds without failure.
   through the KV's remembered empty ranges (`Transaction::first`); the
   row load 45.6 → 37.9 s, a column `lineitem` `COPY` 36.5 → 12.8 s; the
   batch work moved to W3b after W4.  DOCS §6.1, §8.7, §8.15.
+- **2026-11-03** — §M14.20 W4, the checkpoint: in two halves (the pager's
+  `freeze` / `commit_frozen`), its slow half off the writer lock; one
+  trigger and a checkpointer thread; WAL segments deleted with one
+  directory sync; ordering-only syncs (`File::sync_order`); the row load
+  37.9 → 35.3 s.  DOCS §3.1, §4.2, §4.3, §4.5–§4.7, §5.

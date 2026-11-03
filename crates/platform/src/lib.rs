@@ -141,6 +141,16 @@ pub trait File: Send + Sync {
     /// behaves that way.
     fn sync(&self) -> io::Result<()>;
 
+    /// Orders the writes so far before any later one, whatever the
+    /// [`SyncPolicy`]: what a sync is needed for when a later full sync
+    /// makes everything durable anyway (a segment's records before the
+    /// next's; a commit's pages before its header).  On macOS
+    /// `fcntl(F_BARRIERFSYNC)`; where there is no cheaper ordering, and by
+    /// default, [`sync`](Self::sync).  Failure is as `sync`'s.
+    fn sync_order(&self) -> io::Result<()> {
+        self.sync()
+    }
+
     /// The current length of the file in bytes.
     fn size(&self) -> io::Result<u64>;
 

@@ -26,10 +26,12 @@
 //! and callers waiting for earlier LSNs return without another.
 //!
 //! Directory changes are ordered so that a crash can only ever lose a
-//! *suffix* of the log (unsynced writes) or a *prefix* (segments being
-//! deleted), never leave a gap: before a new segment is created, the
-//! previous one is synced and so is the directory entry naming it; segments
-//! are deleted oldest first, one directory sync each.
+//! *suffix* of the log (unsynced writes) or leave back some of the
+//! segments being deleted: before a new segment is created, the previous
+//! one is synced and so is the directory entry naming it; segments wholly
+//! before a checkpoint are deleted together, with one directory sync
+//! (§M14.20 W4) — a crash may keep any of them, and opening from the
+//! checkpoint deletes again those that lie before the segment holding it.
 //!
 //! # Opening
 //!
@@ -103,6 +105,18 @@ impl Wal {
     /// Opens (or creates) the log in directory `dir`, which must exist.
     /// Segments roll over at about `segment_size` bytes.
     pub fn open(platform: Arc<dyn Platform>, dir: &Path, segment_size: u64) -> Result<Self> {
+        Self::open_from(platform, dir, segment_size, 0)
+    }
+
+    /// [`open`](Self::open) for a reader starting at `from` (a checkpoint's
+    /// LSN): the segments before the one holding it are left over from a
+    /// deletion a crash interrupted, and are deleted.
+    pub fn open_from(
+        platform: Arc<dyn Platform>,
+        dir: &Path,
+        segment_size: u64,
+        from: Lsn,
+    ) -> Result<Self> {
         let fs = platform.fs();
         let mut starts = Vec::new();
         for name in fs.list_dir(dir)? {
@@ -115,9 +129,21 @@ impl Wal {
             }
         }
         starts.sort_unstable();
+        if let Some(keep) = starts.iter().rposition(|&s| s <= from)
+            && keep > 0
+        {
+            for &start in &starts[..keep] {
+                fs.remove_file(&dir.join(segment_name(start)))?;
+            }
+            fs.sync_dir(dir)?;
+            starts.drain(..keep);
+        }
 
         let mut segments = Vec::new();
-        let mut end = starts.first().copied().unwrap_or(0);
+        // No segment left: the log starts at the reader's start (a crash
+        // lost the entry of a segment created there — before anything in
+        // it was durable, as a sync makes its entry durable too).
+        let mut end = starts.first().copied().unwrap_or(from);
         let count = starts.len();
         for (i, start) in starts.into_iter().enumerate() {
             if start != end {
@@ -195,7 +221,10 @@ impl Wal {
             // and lose the old: a gap in the log.
             let file = Arc::clone(&current.file);
             let dir_dirty = s.dir_dirty;
-            let synced = file.sync().and_then(|()| {
+            // (Ordering is all it needs: the sync that makes a record of
+            // the new segment durable flushes these too — a barrier where
+            // the platform has one, §M14.20 W4.)
+            let synced = file.sync_order().and_then(|()| {
                 if dir_dirty {
                     self.platform.fs().sync_dir(&self.dir)
                 } else {
@@ -299,13 +328,13 @@ impl Wal {
         if doomed.is_empty() {
             return Ok(());
         }
-        // One at a time, oldest first, each removal durable before the
-        // next: unsynced directory changes can survive a crash in any
-        // combination, and only removing a prefix keeps the log contiguous.
+        // All, then one directory sync: a crash may keep any of them (an
+        // unsynced directory's changes survive in any combination), and
+        // opening from the checkpoint deletes them again (`open_from`).
         for path in &doomed {
             self.platform.fs().remove_file(path)?;
-            self.platform.fs().sync_dir(&self.dir)?;
         }
+        self.platform.fs().sync_dir(&self.dir)?;
         Ok(())
     }
 

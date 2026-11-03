@@ -165,10 +165,38 @@ struct State {
     pending: BTreeSet<u64>,
     /// The pages holding the durable free list: free after the next commit.
     freelist_pages: Vec<u64>,
-    /// Allocated since the last commit: the only pages that may be written.
+    /// Allocated since the last commit (or freeze): the only pages that may
+    /// be changed.
     allocated: BTreeSet<u64>,
+    /// A commit in flight ([`Pager::freeze`]), until it is durable.
+    frozen: Option<FrozenPages>,
+    /// Pages the file holds at least: a write past them extends it, which
+    /// happens under the state lock so a commit's extension never races
+    /// one (and never cuts it short).
+    known_len: u64,
     /// A sync failed; refuse everything.
     poisoned: bool,
+}
+
+/// The pages of a commit in flight.
+#[derive(Debug)]
+struct FrozenPages {
+    /// Allocated before the freeze: the new state's pages, no longer to be
+    /// changed (a writer copies them) but still to be written back.
+    pages: BTreeSet<u64>,
+    /// Durable pages freed before the freeze: free once it is durable.
+    carry: BTreeSet<u64>,
+    /// The pages its free list goes into.
+    list_pages: Vec<u64>,
+}
+
+/// A state frozen by [`Pager::freeze`], for [`Pager::commit_frozen`]: its
+/// header and its free list.
+#[derive(Debug)]
+pub struct Frozen {
+    hdr: Header,
+    list_pages: Vec<u64>,
+    free: Vec<u64>,
 }
 
 /// Where every page of the file stands, from [`Pager::accounting`].
@@ -184,6 +212,9 @@ pub struct Accounting {
     pub freelist_pages: BTreeSet<u64>,
     /// Allocated since the last commit.
     pub allocated: BTreeSet<u64>,
+    /// A commit in flight's ([`Pager::freeze`]): its pages, the durable
+    /// pages it frees, its free list's pages.
+    pub frozen: BTreeSet<u64>,
 }
 
 /// A database file as an array of pages.  Shareable between threads: page
@@ -263,6 +294,7 @@ impl Pager {
     }
 
     fn with(file: Box<dyn File>, hdr: Header, free: BTreeSet<u64>, fl: Vec<u64>) -> Self {
+        let known_len = file.size().map_or(0, |n| n / PAGE_SIZE as u64);
         Self {
             file,
             state: Mutex::new(State {
@@ -272,9 +304,29 @@ impl Pager {
                 pending: BTreeSet::new(),
                 freelist_pages: fl,
                 allocated: BTreeSet::new(),
+                frozen: None,
+                known_len,
                 poisoned: false,
             }),
         }
+    }
+
+    /// Writes `page` at `id`; past the pages the file is known to hold,
+    /// under the state lock (an extension of the file).
+    fn write_at(&self, id: PageId, page: &mut Page) -> Result<()> {
+        if id.0 < self.lock().known_len {
+            return write_raw(self.file.as_ref(), id, page);
+        }
+        let mut s = self.lock();
+        write_raw(self.file.as_ref(), id, page)?;
+        s.known_len = s.known_len.max(id.0 + 1);
+        Ok(())
+    }
+
+    /// Whether `id` may be written back: allocated since the last freeze,
+    /// or frozen and not yet durable.
+    fn may_write(s: &State, id: u64) -> bool {
+        s.allocated.contains(&id) || s.frozen.as_ref().is_some_and(|f| f.pages.contains(&id))
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -306,25 +358,35 @@ impl Pager {
     }
 
     /// Writes `page` at `id`, stamping its id and checksum.  Only pages
-    /// allocated since the last sync may be written.
+    /// allocated since the last sync may be written — and, while a commit
+    /// is in flight, the pages it froze (written back unchanged).
     pub fn write_page(&self, id: PageId, page: &mut Page) -> Result<()> {
         {
             let s = self.begin()?;
             Self::check_data_page(&s, id)?;
-            if !s.allocated.contains(&id.0) {
+            if !Self::may_write(&s, id.0) {
                 return Err(Error::Immutable(id));
             }
         }
         if page.page_type() < PageType::FIRST_USER {
             return Err(Error::InvalidPage(id));
         }
-        write_raw(self.file.as_ref(), id, page)
+        self.write_at(id, page)
     }
 
-    /// Whether `id` was allocated since the last sync, so may be written in
-    /// place rather than copied.
+    /// Whether `id` was allocated since the last sync (or freeze), so may
+    /// be changed in place rather than copied.
     pub fn is_writable(&self, id: PageId) -> bool {
         self.lock().allocated.contains(&id.0)
+    }
+
+    /// Whether `id` belongs to a commit in flight and is not durable yet:
+    /// its contents must reach the file before the commit's header does.
+    pub fn is_frozen(&self, id: PageId) -> bool {
+        self.lock()
+            .frozen
+            .as_ref()
+            .is_some_and(|f| f.pages.contains(&id.0))
     }
 
     /// Allocates a page: the lowest free one, else a new one at the end of
@@ -354,6 +416,9 @@ impl Pager {
         } else if s.free.contains(&id.0)
             || s.pending.contains(&id.0)
             || s.freelist_pages.contains(&id.0)
+            || s.frozen
+                .as_ref()
+                .is_some_and(|f| f.carry.contains(&id.0) || f.list_pages.contains(&id.0))
         {
             return Err(Error::InvalidPage(id)); // a double free
         } else {
@@ -397,6 +462,14 @@ impl Pager {
             pending: s.pending.clone(),
             freelist_pages: s.freelist_pages.iter().copied().collect(),
             allocated: s.allocated.clone(),
+            frozen: s.frozen.as_ref().map_or_else(BTreeSet::new, |f| {
+                f.pages
+                    .iter()
+                    .chain(&f.carry)
+                    .chain(&f.list_pages)
+                    .copied()
+                    .collect()
+            }),
         }
     }
 
@@ -405,12 +478,8 @@ impl Pager {
     /// the pager is poisoned: what reached the disk is unknown, so the handle
     /// must be dropped and the file reopened.
     pub fn sync(&self) -> Result<()> {
-        let mut s = self.begin()?;
-        let result = self.commit(&mut s);
-        if result.is_err() {
-            s.poisoned = true;
-        }
-        result
+        let frozen = self.freeze(&[])?;
+        self.commit_frozen(frozen)
     }
 
     /// Syncs and drops the pager.
@@ -418,31 +487,90 @@ impl Pager {
         self.sync()
     }
 
-    fn commit(&self, s: &mut State) -> Result<()> {
-        // Free in the new state: free now, freed durable pages, and the
-        // pages of the old free list.  The new free list must go into pages
-        // the durable state does not use: free ones, or new ones.
-        let mut free = s.free.clone();
-        let mut carry: BTreeSet<u64> = s.pending.iter().copied().collect();
-        carry.extend(s.freelist_pages.iter().copied());
+    /// The first half of a commit (§M14.20 W4): the state as it is now —
+    /// every page allocated so far, the meta slots with `meta` set — is the
+    /// next to be made durable, by [`commit_frozen`](Self::commit_frozen).
+    /// Its pages may no longer be changed (a writer copies them, as it
+    /// copies durable ones), so writing goes on meanwhile into pages the
+    /// frozen state does not use: what is allocated now on comes from pages
+    /// free in it, or past its end, and what is freed now on is free only
+    /// after the next commit.  The frozen pages still to be written must
+    /// reach the file before `commit_frozen` (the buffer pool writes them
+    /// back: [`BufferPool::flush_frozen`](crate::buffer::BufferPool::flush_frozen)).
+    ///
+    /// # Panics
+    ///
+    /// If a commit is already in flight: one at a time (the store's
+    /// checkpoints are serialized).
+    pub fn freeze(&self, meta: &[(usize, u64)]) -> Result<Frozen> {
+        let mut s = self.begin()?;
+        assert!(s.frozen.is_none(), "a commit is already in flight");
+        for &(slot, value) in meta {
+            s.hdr.meta[slot] = value;
+        }
+        // Free in the new state: free now, durable pages freed, and the
+        // pages of the durable free list.  The new free list goes into
+        // pages neither state uses: free ones (taken out, so no writer gets
+        // them meanwhile), or new ones.
+        let carry = std::mem::take(&mut s.pending);
         let mut list_pages = Vec::new();
-        let mut page_count = s.hdr.page_count;
-        while list_pages.len() * IDS_PER_FREELIST_PAGE < free.len() + carry.len() {
-            match free.pop_first() {
+        let others = carry.len() + s.freelist_pages.len();
+        while list_pages.len() * IDS_PER_FREELIST_PAGE < s.free.len() + others {
+            match s.free.pop_first() {
                 Some(id) => list_pages.push(id),
                 None => {
-                    list_pages.push(page_count);
-                    page_count += 1;
+                    list_pages.push(s.hdr.page_count);
+                    s.hdr.page_count += 1;
                 }
             }
         }
-        free.extend(carry);
+        let mut free = s.free.clone();
+        free.extend(&carry);
+        free.extend(&s.freelist_pages);
+        let mut hdr = s.hdr.clone();
+        hdr.seq = s.durable.seq + 1;
+        hdr.freelist_head = list_pages.first().copied().unwrap_or(0);
+        hdr.free_count = free.len() as u64;
+        let pages = std::mem::take(&mut s.allocated);
+        s.frozen = Some(FrozenPages {
+            pages,
+            carry,
+            list_pages: list_pages.clone(),
+        });
+        Ok(Frozen {
+            hdr,
+            list_pages,
+            free: free.into_iter().collect(),
+        })
+    }
 
-        // Write the new free list.
-        let ids: Vec<u64> = free.iter().copied().collect();
-        let mut chunks = ids.chunks(IDS_PER_FREELIST_PAGE);
-        for (i, &page_id) in list_pages.iter().enumerate() {
-            let next = list_pages.get(i + 1).copied().unwrap_or(0);
+    /// The second half of a commit: `frozen`'s free list and header
+    /// written, durable after its pages — without the state lock, so pages
+    /// are allocated, freed and written meanwhile.  If this fails the pager
+    /// is poisoned (see [`sync`](Self::sync)).
+    pub fn commit_frozen(&self, frozen: Frozen) -> Result<()> {
+        let result = self.write_frozen(&frozen);
+        let mut s = self.lock();
+        if let Err(e) = result {
+            s.poisoned = true;
+            return Err(e);
+        }
+        let f = s.frozen.take().expect("the commit in flight");
+        let old_list = std::mem::replace(&mut s.freelist_pages, f.list_pages);
+        s.free.extend(f.carry);
+        s.free.extend(old_list);
+        s.hdr.seq = frozen.hdr.seq;
+        s.durable = frozen.hdr;
+        Ok(())
+    }
+
+    fn write_frozen(&self, f: &Frozen) -> Result<()> {
+        if self.lock().poisoned {
+            return Err(Error::Poisoned);
+        }
+        let mut chunks = f.free.chunks(IDS_PER_FREELIST_PAGE);
+        for (i, &page_id) in f.list_pages.iter().enumerate() {
+            let next = f.list_pages.get(i + 1).copied().unwrap_or(0);
             let chunk = chunks.next().unwrap_or(&[]);
             let mut page = Page::new(PageType::FREELIST);
             let p = page.payload_mut();
@@ -451,31 +579,26 @@ impl Pager {
             for (j, id) in chunk.iter().enumerate() {
                 write_u64(p, 16 + 8 * j, *id);
             }
-            write_raw(self.file.as_ref(), PageId(page_id), &mut page)?;
+            self.write_at(PageId(page_id), &mut page)?;
         }
-
-        // The file must be as long as the header will claim (allocated pages
-        // nobody wrote yet exist as zeros).
-        let len = page_count * PAGE_SIZE as u64;
-        if self.file.size()? < len {
-            self.file.set_len(len)?;
+        // The file must be as long as the header will claim (allocated
+        // pages nobody wrote yet exist as zeros) — extended under the state
+        // lock, which every write past the known length takes, so it never
+        // cuts one short.
+        {
+            let mut s = self.lock();
+            if s.known_len < f.hdr.page_count {
+                if self.file.size()? < f.hdr.page_count * PAGE_SIZE as u64 {
+                    self.file.set_len(f.hdr.page_count * PAGE_SIZE as u64)?;
+                }
+                s.known_len = f.hdr.page_count;
+            }
         }
-        self.file.sync()?; // the data the new header refers to
-
-        let mut next = s.hdr.clone();
-        next.seq = s.durable.seq + 1;
-        next.page_count = page_count;
-        next.freelist_head = list_pages.first().copied().unwrap_or(0);
-        next.free_count = free.len() as u64;
-        write_header(self.file.as_ref(), &next)?;
+        // The data the new header refers to, before it (ordering is all it
+        // needs: the header's sync makes both durable).
+        self.file.sync_order()?;
+        write_header(self.file.as_ref(), &f.hdr)?;
         self.file.sync()?; // the header itself
-
-        s.hdr = next.clone();
-        s.durable = next;
-        s.free = free;
-        s.pending.clear();
-        s.freelist_pages = list_pages;
-        s.allocated.clear();
         Ok(())
     }
 
@@ -491,8 +614,15 @@ impl Pager {
         if pages != s.freelist_pages {
             return Err(corrupt("free list pages differ from the pager's"));
         }
+        let none = BTreeSet::new();
+        let (frozen, carry, list) = match &s.frozen {
+            Some(f) => (&f.pages, &f.carry, f.list_pages.as_slice()),
+            None => (&none, &none, &[][..]),
+        };
         // Durable-free = free now or allocated since, within the durable
-        // page count (pages past it were never on the durable list).
+        // page count (pages past it were never on the durable list) — told
+        // only between commits (while one is in flight, a page freed since
+        // its freeze may have been on the durable list or not).
         let expect: BTreeSet<u64> = s
             .free
             .iter()
@@ -500,7 +630,7 @@ impl Pager {
             .copied()
             .filter(|&id| id < s.durable.page_count)
             .collect();
-        if on_disk != expect {
+        if s.frozen.is_none() && on_disk != expect {
             return Err(corrupt("free list on disk differs from the pager's"));
         }
         let mut seen = BTreeSet::new();
@@ -510,6 +640,9 @@ impl Pager {
             .chain(&s.pending)
             .chain(&s.freelist_pages)
             .chain(&s.allocated)
+            .chain(frozen)
+            .chain(carry)
+            .chain(list)
         {
             if *id < FIRST_DATA_PAGE.0 || *id >= s.hdr.page_count || !seen.insert(*id) {
                 return Err(Error::Corrupt {

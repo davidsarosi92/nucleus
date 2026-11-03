@@ -128,6 +128,9 @@ principle 4).
   `sync_dir`.
 - `File` — positional only, no cursor, all `&self` (shareable between
   threads): `read_at`, `write_at`, `read_exact_at`, `write_all_at`, `sync`,
+  `sync_order` (the writes so far ordered before any later one, whatever
+  the sync policy — a barrier on macOS, `sync` elsewhere and by default:
+  for a sync whose writes a later full sync makes durable anyway),
   `size`, `set_len`.
 - `OpenMode` — `ReadOnly`, `ReadWrite`, `Create`, `CreateNew`; none
   truncates.
@@ -271,8 +274,24 @@ new state.  Nothing leaks: after a crash every page is live, free, or
 beyond the page count.
 
 **`sync` order:** write the new free list; extend the file to the page
-count (unwritten allocated pages become zeros); `fsync`; write the header
-copy; `fsync`.  Any failure poisons the pager.  `create` builds the file as
+count (unwritten allocated pages become zeros); a sync ordering the
+pages before the header (`sync_order`); write the header copy; `fsync`.
+Any failure poisons the pager.
+
+**A commit in two halves** (§M14.20 W4): `sync` is `freeze(meta)` then
+`commit_frozen`.  `freeze`, under the pager's lock, takes the state as it
+is — the pages allocated so far, the meta slots — as the next to commit,
+computes its free list (its pages taken out of the free set, or past the
+end) and returns at once; its pages are *frozen*: no longer writable (a
+writer copies them, as it copies durable pages), still written back
+(`write_page` accepts them; `is_frozen`).  Writing goes on meanwhile in
+pages the frozen state does not use — allocated from its free pages or
+past its end; a page freed after the freeze is free only after the next
+commit.  `commit_frozen` writes the free list and the header without the
+lock.  A write past the pages the file is known to hold takes the lock,
+as the commit's extension of the file does, so the two never race (by
+construction; a single-threaded simulation cannot interleave them).  One
+commit in flight at a time.  `create` builds the file as
 `<path>.creating`, syncs it, renames it into place and syncs the directory.
 
 ### 4.3 Buffer pool (`buffer::BufferPool`)
@@ -281,7 +300,10 @@ copy; `fsync`.  Any failure poisons the pager.  `create` builds the file as
 `PageRef::read()` / `write()` take the frame's reader/writer latch, and
 `write()` marks it dirty — after checking the pager's rule, so a missing
 copy-on-write fails at once.  `create(type)` allocates a page into a frame;
-`free(id)` drops it (must be unpinned).  Eviction is the clock algorithm
+`free(id)` drops it (must be unpinned; a dirty page of a commit in flight
+is written back first — the frozen state still holds it).
+`flush_frozen` writes back the dirty pages of the commit in flight while
+writers go on.  Eviction is the clock algorithm
 over unpinned frames; dirty victims are written back first.  `flush`
 writes every dirty frame, `sync` = flush + pager commit.  The frames are
 split into up to 16 shards (at least 256 frames each; a page always in the
@@ -388,9 +410,17 @@ once); `replay(from, f)`; `truncate_before(lsn)`; `size`, `start`, `end`,
 
 **Crash rules.**  `open` cuts a torn tail of the last segment; a bad record
 anywhere else is corruption.  Before a new segment is created, the previous
-one *and its directory entry* are synced; segments are deleted oldest
-first, one directory sync each — so a crash loses only a suffix or a
-prefix, never leaves a gap (a torn-crash sweep found both rules missing).
+one is synced — an ordering sync (`sync_order`): the sync that makes a
+record of the new segment durable flushes it too, and a barrier orders it
+before the new segment's directory entry, so a non-last segment is never
+torn — and so is its directory entry.  (Kept, not dropped as §M14.20 W4
+first planned: it is what lets `open` tell a torn tail from corruption;
+PostgreSQL also syncs a finished segment.)  Segments wholly before a
+checkpoint are deleted together with one directory sync (W4; they were
+one sync each): a crash may keep any of them, and `open_from(…, from)` —
+the store opens from its checkpoint's LSN — deletes again those before
+the segment holding it; a log left with no segment starts at `from` (a
+segment created there whose entry a crash lost held nothing durable).
 A failed `fsync` poisons the log.
 
 ### 4.6 Store (`store::Store`)
@@ -409,9 +439,15 @@ batch without it, so what a filter drops must be garbage its layer can
 find again after a crash.  A batch whose keys are all
 distinct (every batch the engine writes) is applied in one sorted pass
 (`apply_sorted`); otherwise op by op, in order.  `read()` gives the tree's read
-guard; `get`.  `checkpoint()` syncs the WAL up to the applied LSN, commits
-the pager with root, checkpoint LSN and the last batch's `meta`, then
-truncates the WAL.  `wal_since_checkpoint()` tells callers when to
+guard; `get`.  `checkpoint()` is `checkpoint_begin()` then `finish()`
+(§M14.20 W4): `checkpoint_begin`, under the writer lock, freezes the tree
+as it is — root, the LSN applied, the last batch's `meta` —
+(`Pager::freeze`) and returns; `finish`, writes going on, syncs the WAL
+up to that LSN, writes back the frozen pages (`flush_frozen`), commits
+the pager (`commit_frozen`) and truncates the WAL.  Writers wait only for
+the freeze; one checkpoint at a time; `checkpoint_past(bytes)` runs one
+only if the WAL since the last (after any running ends) is past
+`bytes`.  `wal_since_checkpoint()` tells callers when to
 checkpoint.  A `Batch` is `meta: u64` (the transaction layer's commit
 timestamp) and ordered puts/deletes; its WAL encoding is versioned.  Keys
 over `MAX_KEY` are refused before logging.  Any failure poisons the store.
@@ -437,7 +473,9 @@ corruption.  Options: `cache_pages` (default 1024), `wal_segment_size`
 - `store.rs` — replay, acknowledged vs. unacknowledged writes, WAL
   truncation, corruption, poisoning, concurrency, real files, and a crash
   at every I/O point (both modes, 8 seeds) of batches with unsynced writes
-  piling up across segments and checkpoints.
+  piling up across segments and checkpoints; the same with batches written
+  between a checkpoint's halves (W4), and writers with a checkpointer
+  thread on real files.
 
 Mutations each caught by these tests: writing committed pages in place,
 reusing freed committed pages before a commit, header before data, skipped
@@ -504,9 +542,16 @@ look (whatever committed before the snapshot was in the tree then, and a
 later commit of such a key conflicts at commit as it would have at the
 look).  A bulk insert of new keys in key order looks at the tree once,
 not once a row; the run ends at a spill, where its own intents enter the
-tree.  A checkpoint runs
+tree.  A checkpoint is due
 when the WAL since the last one exceeds `checkpoint_wal_bytes` (1 GiB, as
-PostgreSQL's `max_wal_size`; 64 MiB on 32-bit targets).
+PostgreSQL's `max_wal_size`; 64 MiB on 32-bit targets) — asked in one
+place after every write to the store (a commit's, a spill's; §M14.20
+W4: it was two, both under the commit lock).  Where the platform has
+threads to spare (`parallelism() > 1`) a checkpointer thread is woken
+and runs it — its slow half while commits go on (§4.6) —; in the
+simulation, or when the WAL passes twice the limit (the thread fell
+behind), it runs where it fell due, waiting for one running.  The
+thread stops with the engine, after the checkpoint it may be running.
 Write skew is possible under snapshot isolation (tested and documented).
 
 **Large transactions** (§M14.11, §M14.20 V11).  A transaction keeps its

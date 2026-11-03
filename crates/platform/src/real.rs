@@ -253,6 +253,10 @@ impl File for RealFile {
         sync_file(&self.file, self.sync)
     }
 
+    fn sync_order(&self) -> io::Result<()> {
+        sync_file(&self.file, SyncPolicy::Ordered)
+    }
+
     fn size(&self) -> io::Result<u64> {
         Ok(self.file.metadata()?.len())
     }

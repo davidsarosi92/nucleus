@@ -39,7 +39,7 @@ use crate::buffer::BufferPool;
 use crate::error::{Error, Result};
 use crate::node::MAX_KEY;
 use crate::page::PageId;
-use crate::pager::Pager;
+use crate::pager::{Frozen, Pager};
 use crate::wal::{Lsn, Wal};
 
 const META_ROOT: usize = 0;
@@ -149,8 +149,11 @@ pub struct Store {
     /// while), so a stream of scans does not keep a writer out.
     writers_waiting: std::sync::atomic::AtomicUsize,
     wal: Wal,
-    /// Serialises writers and checkpoints; holds the applied LSN and meta.
+    /// Serialises writers (and a checkpoint's freeze); holds the applied
+    /// LSN and meta.
     writer: Mutex<(Lsn, u64)>,
+    /// One checkpoint at a time.
+    checkpointing: Mutex<()>,
     checkpoint_lsn: AtomicU64,
     poisoned: AtomicBool,
     /// The exclusive lock on the directory (`LOCK`).
@@ -219,9 +222,14 @@ impl Store {
         // A large commit's leaves prepared on the CPUs there are (one in
         // the simulation).
         tree.set_workers(platform.parallelism());
-        let wal = Wal::open(Arc::clone(&platform), &wal_dir, opts.wal_segment_size)?;
-
         let checkpoint = pager.meta(META_CHECKPOINT_LSN);
+        let wal = Wal::open_from(
+            Arc::clone(&platform),
+            &wal_dir,
+            opts.wal_segment_size,
+            checkpoint,
+        )?;
+
         let mut meta = pager.meta(META_USER);
         let mut replayed = 0;
         let mut applied = checkpoint.max(wal.start());
@@ -248,6 +256,7 @@ impl Store {
             writers_waiting: std::sync::atomic::AtomicUsize::new(0),
             wal,
             writer: Mutex::new((applied, meta)),
+            checkpointing: Mutex::new(()),
             checkpoint_lsn: AtomicU64::new(checkpoint),
             poisoned: AtomicBool::new(false),
             _lock: lock,
@@ -347,24 +356,58 @@ impl Store {
     }
 
     /// Makes the current tree the data file's committed state and drops the
-    /// WAL segments before it.
+    /// WAL segments before it ([`checkpoint_begin`](Self::checkpoint_begin)
+    /// then [`Checkpoint::finish`]).
     pub fn checkpoint(&self) -> Result<()> {
+        self.checkpoint_begin()?.finish()
+    }
+
+    /// The first, short half of a checkpoint (§M14.20 W4): under the
+    /// writer lock, the tree as it is now — its root, the LSN applied, the
+    /// last batch's meta — frozen as the next committed state
+    /// ([`Pager::freeze`]).  The rest, [`Checkpoint::finish`], runs without
+    /// the lock: writes go on meanwhile, copying the frozen pages they
+    /// change.  Waits for a checkpoint already running.
+    pub fn checkpoint_begin(&self) -> Result<Checkpoint<'_>> {
         self.check()?;
+        let running = self.checkpointing.lock().unwrap_or_else(|e| e.into_inner());
+        self.begin_running(running)
+    }
+
+    /// A checkpoint, if the WAL since the last one (once any running has
+    /// ended) is past `bytes`; whether it ran.  Callers that find the WAL
+    /// long at once do not checkpoint one after another.
+    pub fn checkpoint_past(&self, bytes: u64) -> Result<bool> {
+        self.check()?;
+        let running = self.checkpointing.lock().unwrap_or_else(|e| e.into_inner());
+        if self.wal_since_checkpoint() <= bytes {
+            return Ok(false);
+        }
+        self.begin_running(running)?.finish()?;
+        Ok(true)
+    }
+
+    fn begin_running<'a>(&'a self, running: MutexGuard<'a, ()>) -> Result<Checkpoint<'a>> {
         let w = self.writer();
+        self.check()?;
         let (lsn, meta) = *w;
-        let result = (|| {
-            self.wal.sync_to(lsn)?; // nothing in the checkpoint may be less durable than the WAL
-            let tree = self.tree.read().unwrap_or_else(|e| e.into_inner());
-            let pager = self.pool.pager();
-            pager.set_meta(META_ROOT, tree.root().0)?;
-            pager.set_meta(META_CHECKPOINT_LSN, lsn)?;
-            pager.set_meta(META_USER, meta)?;
-            self.pool.sync()?;
-            self.checkpoint_lsn.store(lsn, Ordering::Release);
-            self.wal.truncate_before(lsn)
-        })();
+        let root = self.tree.read().unwrap_or_else(|e| e.into_inner()).root();
+        let frozen = self
+            .pool
+            .pager()
+            .freeze(&[
+                (META_ROOT, root.0),
+                (META_CHECKPOINT_LSN, lsn),
+                (META_USER, meta),
+            ])
+            .inspect_err(|_| self.poisoned.store(true, Ordering::Release))?;
         drop(w);
-        result.inspect_err(|_| self.poisoned.store(true, Ordering::Release))
+        Ok(Checkpoint {
+            store: self,
+            lsn,
+            frozen,
+            _running: running,
+        })
     }
 
     /// WAL bytes written since the last checkpoint — how much a crash would
@@ -385,6 +428,35 @@ impl Store {
     /// Checkpoints and closes the store.
     pub fn close(self) -> Result<()> {
         self.checkpoint()
+    }
+}
+
+/// A checkpoint begun ([`Store::checkpoint_begin`]).
+#[must_use = "a checkpoint begun is finished by `finish`"]
+pub struct Checkpoint<'a> {
+    store: &'a Store,
+    lsn: Lsn,
+    frozen: Frozen,
+    _running: MutexGuard<'a, ()>,
+}
+
+impl Checkpoint<'_> {
+    /// The rest of the checkpoint, writes going on: the WAL durable up to
+    /// the frozen LSN, the frozen pages written back, the pager's header
+    /// committed, the WAL before the LSN dropped.  A failure poisons the
+    /// store.
+    pub fn finish(self) -> Result<()> {
+        let s = self.store;
+        let lsn = self.lsn;
+        let result = (|| {
+            // Nothing in the checkpoint may be less durable than the WAL.
+            s.wal.sync_to(lsn)?;
+            s.pool.flush_frozen()?;
+            s.pool.pager().commit_frozen(self.frozen)?;
+            s.checkpoint_lsn.store(lsn, Ordering::Release);
+            s.wal.truncate_before(lsn)
+        })();
+        result.inspect_err(|_| s.poisoned.store(true, Ordering::Release))
     }
 }
 

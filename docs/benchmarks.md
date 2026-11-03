@@ -418,6 +418,7 @@ suite come when §M14.20 closes):
 | W2: one sorted index builder, parallel | 23.0 | 15.8 | 6.8 | 45.6 |
 | W3: one row builder, parsing in parallel | 14.5 | 16.6 | 6.9 | 37.9 |
 | W3, column tables | 17.9 | 12.1 | 6.4 | 36.4 |
+| W4: checkpoints off the writer lock | 13.4 | 15.2 | 6.7 | 35.3 |
 | PostgreSQL 18 | 18.3 | 5.5 | 5.3 | 29.1 |
 
 (`lineitem`'s `COPY` alone, W2 → W3: a row table 17.5 → 10.4 s, a
