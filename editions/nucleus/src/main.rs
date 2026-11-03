@@ -40,7 +40,7 @@ usage:
                       [--ldap-search-dn <dn> --ldap-search-password <pw>])
                       [--ldap-starttls] [--ldap-ca <pem file>]]
                      [--trusted-proxy <cidr> …] [--max-connections <n>] [--insecure]
-                     [--sync ordered|full]
+                     [--sync ordered|full] [--wal minimal|full]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
@@ -56,7 +56,9 @@ usage:
                                     unclaimed database and --no-auth unless --insecure;
                                     --sync full flushes the drive's cache at each
                                     commit (on macOS; the default, ordered, keeps
-                                    writes in order without it)
+                                    writes in order without it); --wal full logs
+                                    a new index's entries too (the default,
+                                    minimal, checkpoints at its commit instead)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

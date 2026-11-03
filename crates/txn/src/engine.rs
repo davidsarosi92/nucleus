@@ -11,9 +11,9 @@ use nucleus_storage::{BTree, Batch, Store, StoreOptions};
 
 use crate::error::{Error, Result};
 use crate::mvcc::{
-    self, NEXT_ID, RESERVED_END, SIDE, STATUS, after_versions, decode_key, decode_key_onto,
-    decode_value, encode_key, encode_value, first_version, intent_of, intent_ts, side_prefix,
-    status_key,
+    self, NEXT_ID, RESERVED_END, SIDE, STATUS, UNLOGGED, after_versions, decode_key,
+    decode_key_onto, decode_value, encode_key, encode_value, first_version, intent_of, intent_ts,
+    side_prefix, status_key, unlogged_key,
 };
 use crate::recent::Recent;
 use crate::writes::WriteSet;
@@ -77,6 +77,13 @@ pub struct EngineOptions {
     /// bytes; past it they spill into the store (the side area, §5.3), so
     /// a transaction of any size runs in bounded memory.
     pub txn_memory: usize,
+    /// Write what a transaction puts into a range it declared fresh
+    /// ([`Transaction::fresh`]) without the WAL, as final versions; its
+    /// commit makes them durable by a checkpoint before the commit record
+    /// (PLAN.md D16; PostgreSQL's `wal_level = minimal`).  Off, every write
+    /// is logged — what anything replaying the whole WAL needs (a replica,
+    /// a point-in-time restore).
+    pub wal_minimal: bool,
 }
 
 impl Default for EngineOptions {
@@ -92,6 +99,7 @@ impl Default for EngineOptions {
             },
             history: 0,
             txn_memory: 64 << 20,
+            wal_minimal: true,
         }
     }
 }
@@ -133,6 +141,11 @@ struct Inner {
     /// A paused vacuum sweep ([`Engine::vacuum_paced`]): where it goes on,
     /// the committed transactions it makes versions of, what it removed.
     sweep: Mutex<Option<(Vec<u8>, Vec<(u64, u64)>, u64)>>,
+    /// The fresh ranges running transactions write without the WAL
+    /// (D16), `[start, end)`; none overlaps another.  No other transaction
+    /// may put an entry into one: a spill or a commit with a key in one
+    /// conflicts.  Changed under the commit lock (taken first).
+    unlogged: Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
 }
 
 /// The thread that checkpoints when the WAL since the last checkpoint
@@ -337,6 +350,7 @@ impl Engine {
                 side_users: AtomicUsize::new(0),
                 begun: AtomicU64::new(0),
                 sweep: Mutex::new(None),
+                unlogged: Mutex::new(Vec::new()),
             }),
         };
         engine.inner.recover_side()?;
@@ -406,6 +420,7 @@ impl Engine {
             done: false,
             reads: Mutex::new(ReadSet::default()),
             fresh: Vec::new(),
+            pending: Mutex::new(Pending::default()),
             gap: None,
             empty: Mutex::new(Vec::new()),
         })
@@ -779,6 +794,25 @@ impl Inner {
     /// transactions that never committed dropped, those of committed ones
     /// moved into versions.
     fn recover_side(&self) -> Result<()> {
+        // Fresh ranges written without the WAL by transactions that never
+        // committed (D16): what of them a checkpoint holds goes.
+        loop {
+            let mark = {
+                let tree = self.store.read()?;
+                match tree
+                    .range(Bound::Included(&UNLOGGED[..]), Bound::Excluded(&[0, 5][..]))?
+                    .next()
+                {
+                    None => None,
+                    Some(e) => {
+                        let (k, end) = e?;
+                        Some((k[2..].to_vec(), end))
+                    }
+                }
+            };
+            let Some((start, end)) = mark else { break };
+            self.drop_unlogged(&start, &end)?;
+        }
         let mut unresolved = Vec::new();
         let mut max_id = 0;
         {
@@ -924,6 +958,59 @@ impl Inner {
             }
             self.store.write(&Batch { meta: *last, ops })?;
         }
+    }
+
+    /// Deletes every entry of the fresh range `[start, end)` written without
+    /// the WAL by a transaction that did not commit, a batch at a time,
+    /// then its mark (the last batch) — logged deletes: replayed after a
+    /// crash, they delete what the checkpoint holds of them; a crash
+    /// before the mark goes, and the next opening deletes again.  The
+    /// range is then free for others.
+    fn drop_unlogged(&self, start: &[u8], end: &[u8]) -> Result<()> {
+        let (from, to) = (first_version(start), first_version(end));
+        loop {
+            let last = lock(&self.commit);
+            let mut ops = Vec::new();
+            {
+                let tree = self.store.read()?;
+                for e in versions(&tree, Bound::Included(&from), Bound::Excluded(&to))?
+                    .into_iter()
+                    .flatten()
+                {
+                    let (k, _) = e?;
+                    ops.push((k, None));
+                    if ops.len() == SIDE_CHUNK {
+                        break;
+                    }
+                }
+            }
+            let done = ops.is_empty();
+            if done {
+                ops.push((unlogged_key(start), None));
+            }
+            self.store.write(&Batch { meta: *last, ops })?;
+            if done {
+                lock(&self.unlogged).retain(|(s, _)| s != start);
+                return Ok(());
+            }
+        }
+    }
+
+    /// The first key of `writes` inside a fresh range another running
+    /// transaction writes without the WAL (`own`: the starts of the
+    /// caller's): a conflict — its abort would delete the range whole.
+    /// Called under the commit lock.
+    fn unlogged_conflict(&self, writes: &WriteSet, own: &[&[u8]]) -> Option<Vec<u8>> {
+        let ranges = lock(&self.unlogged);
+        ranges
+            .iter()
+            .filter(|(s, _)| !own.contains(&s.as_slice()))
+            .find_map(|(s, e)| {
+                writes
+                    .range(Bound::Included(s), Bound::Excluded(e))
+                    .next()
+                    .map(|(k, _)| k.clone())
+            })
     }
 
     /// Moves committed transaction `id`'s side area into versions at `ts`,
@@ -1142,7 +1229,10 @@ pub struct Transaction {
     /// any transaction.
     reads: Mutex<ReadSet>,
     /// Key ranges declared fresh ([`Transaction::fresh`]).
-    fresh: Vec<(Vec<u8>, Vec<u8>)>,
+    fresh: Vec<Fresh>,
+    /// Writes into fresh ranges to go into the store without the WAL
+    /// (D16), gathered into batches; reads write them first.
+    pending: Mutex<Pending>,
     /// The last run of keys [`put_new`](Transaction::put_new) found
     /// without an entry in the tree (until this transaction's own intents
     /// enter it).
@@ -1157,6 +1247,49 @@ pub struct Transaction {
 
 /// Ranges a transaction remembers the store as empty in, at most.
 const EMPTY_RANGES: usize = 8;
+
+/// A range a transaction declared fresh.
+#[derive(Debug)]
+struct Fresh {
+    start: Vec<u8>,
+    end: Vec<u8>,
+    /// How its values are written.
+    mode: FreshMode,
+    /// The highest key this transaction wrote in it (by either path): a
+    /// key above it has no entry anywhere, so it may be written without
+    /// the WAL — keys in order, as a load or an index build writes them.
+    high: Option<Vec<u8>>,
+}
+
+#[derive(Debug, PartialEq)]
+enum FreshMode {
+    /// Not written yet (or the WAL is not minimal).
+    Untried,
+    /// Through the write set and the WAL: the store held an entry in it,
+    /// or another transaction writes an overlapping range unlogged.
+    Logged,
+    /// Values above `high` go into the store without the WAL; the range
+    /// is marked and registered ([`Inner::unlogged`]).
+    Unlogged,
+}
+
+/// Unlogged writes not in the store yet.
+#[derive(Default)]
+struct Pending {
+    ops: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    bytes: usize,
+}
+
+/// What [`Transaction::put_unlogged`] did.
+enum Unlogged {
+    /// Written (pending).
+    Written,
+    /// At or below what this transaction wrote in the unlogged range
+    /// before: it may have an entry — the regular path, which sees it.
+    Behind,
+    /// Not an unlogged write: the regular path.
+    No,
+}
 
 /// Whether the range `gap` holds the range `[start, end]` (as bounds).
 fn covers(gap: &(Bound<Vec<u8>>, Bound<Vec<u8>>), start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
@@ -1188,6 +1321,28 @@ impl std::fmt::Debug for Transaction {
 
 impl Drop for Transaction {
     fn drop(&mut self) {
+        // Fresh ranges written without the WAL: deleted (on a failure here,
+        // by the next opening, which finds their marks).
+        let unlogged: Vec<_> = self
+            .fresh
+            .iter()
+            .filter(|f| f.mode == FreshMode::Unlogged)
+            .map(|f| (f.start.clone(), f.end.clone()))
+            .collect();
+        if !unlogged.is_empty() {
+            self.pending
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .ops
+                .clear();
+            for (start, end) in unlogged {
+                if self.engine.drop_unlogged(&start, &end).is_err() {
+                    // (The store is poisoned.)
+                    let _last = lock(&self.engine.commit);
+                    lock(&self.engine.unlogged).retain(|(s, _)| *s != start);
+                }
+            }
+        }
         // The intents of a transaction that did not commit: aborted once it
         // stops running (no reader sees them, no writer conflicts with
         // them), then deleted (on a failure here, by vacuum).
@@ -1233,6 +1388,7 @@ impl Transaction {
         if let Some(w) = self.writes.get(key) {
             return Ok(w.clone());
         }
+        self.flush_unlogged()?;
         if self.isolation == Isolation::Serializable {
             lock(&self.reads).keys.insert(key.to_vec());
         }
@@ -1284,10 +1440,23 @@ impl Transaction {
             return Ok(true);
         }
         // A fresh key has no versions to look at (but this transaction's
-        // own intents, once it spilled).
-        if self.is_fresh(key) && self.spilled.is_none() {
-            self.record(key, Some(value))?;
-            return Ok(true);
+        // own: intents, once it spilled, and what it wrote without the WAL).
+        if let Some(i) = self.fresh_index(key) {
+            match self.put_unlogged(i, key, value)? {
+                Unlogged::Written => return Ok(true),
+                Unlogged::Behind => {}
+                Unlogged::No if self.spilled.is_none() => {
+                    self.record(key, Some(value))?;
+                    return Ok(true);
+                }
+                Unlogged::No => {}
+            }
+        }
+        // What the tree is looked at for has to be in it (a gap found
+        // before would not know it).
+        if !lock(&self.pending).ops.is_empty() {
+            self.flush_unlogged()?;
+            self.gap = None;
         }
         if self.isolation == Isolation::Serializable {
             lock(&self.reads).keys.insert(key.to_vec());
@@ -1314,19 +1483,133 @@ impl Transaction {
         self.write(key, None)
     }
 
-    /// Declares the keys in `[start, end)` fresh: none has a version and no
-    /// other transaction writes one before this one ends (a new index's
-    /// keys).  Their writes skip what guards against other transactions —
+    /// Declares the keys in `[start, end)` fresh: none has a version, no
+    /// other transaction writes one before this one ends, and none reads
+    /// them before it commits (a new index's keys).  Their writes skip what guards against other transactions —
     /// the check for a newer version as they are written, spill and
     /// commit — which for a fresh range would find nothing.  The caller answers for the claim.
+    ///
+    /// With [`EngineOptions::wal_minimal`], values written into it in key
+    /// order skip the WAL too (D16): they go into the store as versions at
+    /// this transaction's snapshot — in a range no one else reads before
+    /// the commit — and the commit checkpoints before its commit record;
+    /// a rollback, or a crash before the commit, deletes the whole range.
+    /// Declined (the writes logged) when the store holds an entry in the
+    /// range, or another running transaction writes an overlapping one so.
     pub fn fresh(&mut self, start: &[u8], end: &[u8]) {
-        self.fresh.push((start.to_vec(), end.to_vec()));
+        self.fresh.push(Fresh {
+            start: start.to_vec(),
+            end: end.to_vec(),
+            mode: FreshMode::Untried,
+            high: None,
+        });
     }
 
     fn is_fresh(&self, key: &[u8]) -> bool {
+        self.fresh_index(key).is_some()
+    }
+
+    fn fresh_index(&self, key: &[u8]) -> Option<usize> {
         self.fresh
             .iter()
-            .any(|(s, e)| key >= s.as_slice() && key < e.as_slice())
+            .position(|f| key >= f.start.as_slice() && key < f.end.as_slice())
+    }
+
+    /// A value for fresh range `i`, written without the WAL if it may be
+    /// (the range registered on its first write).
+    fn put_unlogged(&mut self, i: usize, key: &[u8], value: &[u8]) -> Result<Unlogged> {
+        if !self.engine.opts.wal_minimal {
+            return Ok(Unlogged::No);
+        }
+        if self.fresh[i].mode == FreshMode::Untried {
+            self.fresh[i].mode = if self.register_unlogged(i)? {
+                FreshMode::Unlogged
+            } else {
+                FreshMode::Logged
+            };
+        }
+        let f = &mut self.fresh[i];
+        if f.mode != FreshMode::Unlogged {
+            return Ok(Unlogged::No);
+        }
+        if f.high.as_deref().is_some_and(|h| key <= h) {
+            return Ok(Unlogged::Behind);
+        }
+        let high = f.high.get_or_insert_with(Vec::new);
+        high.clear();
+        high.extend_from_slice(key);
+        // What this transaction knew of the store around the key no longer
+        // holds.
+        if self.gap.as_ref().is_some_and(|g| g.holds(key)) {
+            self.gap = None;
+        }
+        let empty = self.empty.get_mut().unwrap_or_else(|e| e.into_inner());
+        if !empty.is_empty() {
+            empty.retain(|g| !covers(g, Bound::Included(key), Bound::Included(key)));
+        }
+        let pending = self.pending.get_mut().unwrap_or_else(|e| e.into_inner());
+        pending.bytes += key.len() + value.len() + 16;
+        pending
+            .ops
+            .push((encode_key(key, self.start), Some(encode_value(Some(value)))));
+        if pending.bytes >= SPILL_CHUNK {
+            self.flush_unlogged()?;
+        }
+        Ok(Unlogged::Written)
+    }
+
+    /// Registers fresh range `i` to be written without the WAL: under the
+    /// commit lock, unless another running transaction so writes an
+    /// overlapping range or the store holds an entry in it (a commit after
+    /// this snapshot's, or anyone's intent: a rollback deletes the range
+    /// whole), its mark logged.  Whether it was.
+    fn register_unlogged(&mut self, i: usize) -> Result<bool> {
+        let engine = Arc::clone(&self.engine);
+        let (start, end) = (&self.fresh[i].start, &self.fresh[i].end);
+        let last = lock(&engine.commit);
+        let mut ranges = lock(&engine.unlogged);
+        if ranges
+            .iter()
+            .any(|(s, e)| s.as_slice() < end.as_slice() && start.as_slice() < e.as_slice())
+        {
+            return Ok(false);
+        }
+        {
+            let tree = engine.store.read()?;
+            let (from, to) = (first_version(start), first_version(end));
+            for mut r in versions(&tree, Bound::Included(&from), Bound::Excluded(&to))? {
+                if let Some(e) = r.next() {
+                    e?;
+                    return Ok(false);
+                }
+            }
+        }
+        engine.store.write(&Batch {
+            meta: *last,
+            ops: vec![(unlogged_key(start), Some(end.clone()))],
+        })?;
+        ranges.push((start.clone(), end.clone()));
+        Ok(true)
+    }
+
+    /// Writes the pending unlogged writes into the store.
+    fn flush_unlogged(&self) -> Result<()> {
+        let mut pending = lock(&self.pending);
+        if pending.ops.is_empty() {
+            return Ok(());
+        }
+        let ops = std::mem::take(&mut pending.ops);
+        pending.bytes = 0;
+        Ok(self.engine.store.write_unlogged(&Batch { meta: 0, ops })?)
+    }
+
+    /// The starts of the fresh ranges this transaction writes unlogged.
+    fn unlogged_starts(&self) -> Vec<&[u8]> {
+        self.fresh
+            .iter()
+            .filter(|f| f.mode == FreshMode::Unlogged)
+            .map(|f| f.start.as_slice())
+            .collect()
     }
 
     fn write(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
@@ -1334,6 +1617,13 @@ impl Transaction {
             return Err(Error::ReadOnly);
         }
         check_key(key)?;
+        if let Some(v) = value
+            && !self.fresh.is_empty()
+            && let Some(i) = self.fresh_index(key)
+            && let Unlogged::Written = self.put_unlogged(i, key, v)?
+        {
+            return Ok(());
+        }
         // Fail early when a newer version exists: the commit would fail
         // anyway (first committer wins), and the client learns at the
         // statement, as PostgreSQL reports it.  The commit check stays the
@@ -1352,6 +1642,16 @@ impl Transaction {
     /// Holds a write (checked already), spilling when past the memory
     /// allowed.
     fn record(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
+        if !self.fresh.is_empty()
+            && let Some(i) = self.fresh_index(key)
+        {
+            let f = &mut self.fresh[i];
+            if f.high.as_deref().is_none_or(|h| key > h) {
+                let high = f.high.get_or_insert_with(Vec::new);
+                high.clear();
+                high.extend_from_slice(key);
+            }
+        }
         let size = key.len() + value.map_or(0, <[u8]>::len) + WRITE_OVERHEAD;
         match self.writes.insert(key, value.map(<[u8]>::to_vec)) {
             Some(old) => {
@@ -1381,6 +1681,9 @@ impl Transaction {
         let conflict = engine.commit_conflict(&mut keys, self.start, Some(id))?;
         drop(keys);
         if let Some(key) = conflict {
+            return Err(Error::Conflict { key });
+        }
+        if let Some(key) = engine.unlogged_conflict(&self.writes, &self.unlogged_starts()) {
             return Err(Error::Conflict { key });
         }
         self.gap = None; // its intents enter the tree
@@ -1432,6 +1735,7 @@ impl Transaction {
         parts: usize,
         min_leaves: usize,
     ) -> Result<Vec<Vec<u8>>> {
+        self.flush_unlogged()?;
         let tree = self.engine.store.read()?;
         let lo = first_version(start);
         let hi = end.map(first_version);
@@ -1452,6 +1756,7 @@ impl Transaction {
     /// The keys and values in `(start, end)`, ascending, as this transaction
     /// sees them.
     pub fn scan(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Scan<'_>> {
+        self.flush_unlogged()?;
         let store_end = match end {
             Bound::Unbounded => None,
             Bound::Included(k) => Some(after_versions(k)),
@@ -1522,10 +1827,17 @@ impl Transaction {
     /// that wrote nothing).  On [`Error::Conflict`] nothing was written.
     pub fn commit(mut self) -> Result<Timestamp> {
         self.done = true;
-        if self.writes.is_empty() && self.spilled.is_none() {
+        let unlogged = self.fresh.iter().any(|f| f.mode == FreshMode::Unlogged);
+        if self.writes.is_empty() && self.spilled.is_none() && !unlogged {
             return Ok(Timestamp(self.start));
         }
         let engine = Arc::clone(&self.engine);
+        if unlogged {
+            // What was written without the WAL is durable before the
+            // commit record is (D16).  Commits go on meanwhile.
+            self.flush_unlogged()?;
+            engine.store.checkpoint()?;
+        }
         let spilled = self.spilled;
         let (ts, lsn) = {
             let mut last = lock(&engine.commit);
@@ -1540,6 +1852,9 @@ impl Transaction {
             if let Some(key) = conflict {
                 return Err(Error::Conflict { key });
             }
+            if let Some(key) = engine.unlogged_conflict(&self.writes, &self.unlogged_starts()) {
+                return Err(Error::Conflict { key });
+            }
             // Serializable transactions record every read; others only
             // their validated ones.
             self.validate_reads(&engine)?;
@@ -1551,6 +1866,10 @@ impl Transaction {
                 // The commit: this transaction's intents are versions at
                 // `ts` (and become them, as vacuum rewrites them).
                 ops.push((status_key(id), Some(ts.to_be_bytes().to_vec())));
+            }
+            // The unlogged ranges' marks go with the commit record.
+            for f in self.fresh.iter().filter(|f| f.mode == FreshMode::Unlogged) {
+                ops.push((unlogged_key(&f.start), None));
             }
             for (key, value) in self.writes.iter() {
                 if let Some(id) = spilled
@@ -1572,6 +1891,17 @@ impl Transaction {
                 .store
                 .write_filtered(&Batch { meta: ts, ops }, &Collect { wm })?;
             *last = ts;
+            if unlogged {
+                let mut ranges = lock(&engine.unlogged);
+                for f in self
+                    .fresh
+                    .iter_mut()
+                    .filter(|f| f.mode == FreshMode::Unlogged)
+                {
+                    ranges.retain(|(s, _)| *s != f.start);
+                    f.mode = FreshMode::Logged; // committed: nothing to delete
+                }
+            }
             if let Some(id) = spilled {
                 // Committed before it stops running: a writer never finds
                 // its intents neither (a reader at `ts` starts after both).

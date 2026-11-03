@@ -25,9 +25,11 @@
 //! by a byte other than `00` or `FF`, so the store keys from `00 01` up to
 //! `00 FF` belong to the engine: a large transaction's status once
 //! committed (`00 02 | id -> commit ts`), the next transaction id
-//! (`00 03 -> id`), and the side area of earlier versions of the engine,
-//! which spilled writes apart (`00 01 | id | user key -> tag | value`),
-//! moved into versions when an older database opens.
+//! (`00 03 -> id`), the marks of fresh ranges written without the WAL
+//! (`00 04 | start -> end`, [`unlogged_key`]), and the side area of
+//! earlier versions of the engine, which spilled writes apart (`00 01 | id
+//! | user key -> tag | value`), moved into versions when an older database
+//! opens.
 
 /// Bytes added by the encoding besides escaping: terminator and timestamp.
 pub const OVERHEAD: usize = 10;
@@ -133,6 +135,12 @@ pub const SIDE: [u8; 2] = [0, 1];
 /// The status records of committed transactions whose spilled writes are
 /// still in the side area.
 pub const STATUS: [u8; 2] = [0, 2];
+/// The marks of fresh ranges a running transaction writes without the
+/// WAL (PLAN.md D16): `00 04 | start -> end`.  Its commit deletes them;
+/// one found at recovery is a transaction that never committed, its range
+/// deleted.  (Running transactions' ranges never overlap: the start names
+/// one.)
+pub const UNLOGGED: [u8; 2] = [0, 4];
 /// The first store key past the reserved ones.
 pub const RESERVED_END: [u8; 2] = [0, 0xFF];
 
@@ -161,6 +169,15 @@ pub fn status_key(id: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(10);
     out.extend_from_slice(&STATUS);
     out.extend_from_slice(&id.to_be_bytes());
+    out
+}
+
+/// The mark of the fresh range from `start` a running transaction writes
+/// without the WAL.
+pub fn unlogged_key(start: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + start.len());
+    out.extend_from_slice(&UNLOGGED);
+    out.extend_from_slice(start);
     out
 }
 
@@ -230,6 +247,7 @@ mod tests {
             }
         }
         assert!(is_reserved(&side_key(5, b"\x00\x00")) && is_reserved(&status_key(u64::MAX)));
+        assert!(is_reserved(&unlogged_key(b"\xff\xff")) && is_reserved(&unlogged_key(b"")));
         assert!(side_key(1, b"\xff\xff") < side_key(2, b""));
         assert_eq!(decode_key(&side_key(1, b"a")), None);
     }

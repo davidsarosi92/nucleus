@@ -438,7 +438,11 @@ applies it through a `LeafFilter` (§4.4) — not logged: replay applies the
 batch without it, so what a filter drops must be garbage its layer can
 find again after a crash.  A batch whose keys are all
 distinct (every batch the engine writes) is applied in one sorted pass
-(`apply_sorted`); otherwise op by op, in order.  `read()` gives the tree's read
+(`apply_sorted`); otherwise op by op, in order.  `write_unlogged(&Batch)`
+applies a batch without logging it (D16): durable only once a checkpoint
+after it is, lost by a crash before — the transaction layer marks what it
+writes so first, in a logged record, and checkpoints before the commit
+that needs it (§5.2).  `read()` gives the tree's read
 guard; `get`.  `checkpoint()` is `checkpoint_begin()` then `finish()`
 (§M14.20 W4): `checkpoint_begin`, under the writer lock, freezes the tree
 as it is — root, the LSN applied, the last batch's `meta` —
@@ -506,9 +510,10 @@ versions.
 *status records* `00 02 ‖ id → commit ts` (a large transaction that
 committed), the next transaction id `00 03 → id` (written before a
 transaction's first intents, so no later one is given an id an intent
-has), and an older engine's *side area* `00 01 ‖ id (u64 BE) ‖ user key →
-tag ‖ value`, moved into versions when such a database opens.  Every walk
-over versions skips them.
+has), the *marks* of fresh ranges a running transaction writes without
+the WAL `00 04 ‖ start → end` (§5.2), and an older engine's *side area*
+`00 01 ‖ id (u64 BE) ‖ user key → tag ‖ value`, moved into versions when
+such a database opens.  Every walk over versions skips them.
 
 ### 5.2 Engine and transactions
 
@@ -583,6 +588,39 @@ them).  Serializable reads validate against the key span a large commit
 wrote (lowest to highest key) beside the recent keys.  Store reads let a
 waiting writer go first (a few hundred yields at most), so a stream of
 scans over a large transaction's intents does not keep it from spilling.
+
+**Fresh ranges without the WAL** (D16, §M14.20 W4; PostgreSQL's
+`wal_level = minimal` and `COPY FREEZE`, CockroachDB's `AddSSTable`).
+`fresh(start, end)` declares a range no version is in, no other
+transaction writes before this one ends and none reads before it commits
+(a new index's keys): its writes skip the conflict checks.  With
+`EngineOptions::wal_minimal` (the default; `--wal full` turns it off, as
+anything replaying the whole WAL — a replica, a point-in-time restore —
+will) its values skip the WAL too.  The first write registers the range,
+under the commit lock: declined — the writes logged as any — when another
+running transaction writes an overlapping range so, or the store holds
+any entry in it (a commit after this snapshot's, anyone's intent: what a
+rollback would delete); else its mark `00 04 ‖ start → end` is logged.
+Then each value above the highest key the transaction wrote in the range
+(by either path: a key above it has no entry anywhere) goes into the
+store as a **final version at the transaction's snapshot** — not an
+intent a vacuum rewrites — gathered into 1 MiB batches
+(`Store::write_unlogged`); a key at or below it (out of order, or written
+again) takes the regular path, whose write wins.  The transaction's reads
+write the gathered batch first; `put_new`'s run of keys found empty and
+`first`'s empty ranges forget where such a write enters them.  The commit
+writes the rest, **checkpoints** (commits go on meanwhile, §4.6) and then
+logs its commit record, which deletes the marks: what the commit record
+says committed is in the database file before it.  A spill or a commit
+of anyone else with a key inside a registered range conflicts.  A
+rollback deletes every entry of the range (logged deletes, in batches)
+and then its mark; on opening, every mark left — a transaction a crash
+ended — has its range deleted the same way.  Before its commit the range
+is readable at snapshots from the transaction's on — no one reads it,
+which the caller answers for (a new index nobody else's catalog shows);
+after it, it is an ordinary one.  A rollback writes a delete per entry to
+the WAL (rollbacks of index builds are rare; a range delete would make
+it one record).
 
 **Serializable** (`Isolation::Serializable`, §M14).  The transaction also
 records the keys it read and the key ranges its scans consumed (a scan
@@ -666,7 +704,28 @@ opening (its uncommitted one dropped, new ids past its ids); serializable
 reads against a large commit's span; a concurrent reader never sees part
 of a large commit, and does not keep the writer from spilling; a crash at
 every third I/O point (both modes) with spilling transactions, each state
-a commit's, vacuumed to no intent.
+a commit's, vacuumed to no intent.  `tests/unlogged.rs` (D16): a fresh
+range's load writes almost no WAL (and the same load with `wal_minimal`
+off writes it all), reads back pending and stored, commits versions — no
+intent, no mark left — and survives a crash after its commit; a rollback,
+a drop, and a crash before the commit (with a checkpoint midway, half of
+the range in the database file) delete the range, which is free again
+after; declined for a snapshot older than a commit into the range (whose
+entry its rollback keeps) and for a range overlapping another's; others'
+commits and spills into a range being written so conflict; `put_new`
+sees an unlogged write inside a run it found empty; a model test (8
+seeds) of in-order, out-of-order and repeated writes, deletes, `put_new`,
+`get`, `first` and scans, with spills, through commit, crash and vacuum;
+a crash at every I/O point (both modes) of loads past the cache with a
+rollback among them, each state a commit's, no mark left.  Mutations
+caught (14): no checkpoint at the commit, a rollback keeping the range,
+recovery ignoring marks, no check of the store at registration, others'
+commits or spills into the range let through, reads not writing the
+pending batch first (`get`, `scan`), `first`'s empty ranges or
+`put_new`'s run kept across an unlogged write, marks left by the commit,
+the highest key not raised by logged writes, overlapping ranges both
+registered, `put_new` looking at the tree before the pending batch is in
+it.
 
 ## 6. KV contract (`nucleus-kv`) and the CLI
 
@@ -726,8 +785,9 @@ distributed implementation will provide (§F3).
   no value, else `false`; by default `get` then `put`, locally one look at
   the key's versions decides both the value seen and the write's
   conflict), `fresh(start, end)` (declares a range no version and no other
-  transaction's write can be in until this one ends — a new index's keys:
-  locally, their writes skip the conflict checks; by default ignored),
+  transaction's write can be in until this one ends, and no one else reads
+  before it commits — a new index's keys: locally, their writes skip the
+  conflict checks, and their values the WAL, §5.2; by default ignored),
   `commit(self: Box<Self>) -> Timestamp`, `rollback`.  Reads take `&self`
   so a scan can stay open while the same transaction reads keys.  A scan
   reads ahead 8 entries at first, twice as many at each refill up to 128,
@@ -1572,8 +1632,9 @@ of byte records in scratch space (`spill::Run::push_record`), and the
 runs are merged by a heap of run positions, the keys left where they
 are.  A unique index's duplicates are neighbours in that order — found
 without a look at the tree (`23505`); the writes go to the index's
-`fresh` range in key order, which the write set keeps as appends and
-`apply_sorted` packs into full pages.
+`fresh` range in key order: into the store as they come, without the WAL
+(D16, §5.2), `apply_sorted` packing them into full pages — or, with
+`--wal full`, through the write set, which keeps them as appends.
 
 **Bulk load** (`copy`, §M14.11).  `COPY t [(columns)] FROM STDIN` loads
 rows the client sends, in one statement: PostgreSQL's text format
@@ -2269,12 +2330,14 @@ a wider type, `22012` NULLIF, `21000` LIMIT 1, `42P07` IF NOT EXISTS,
 nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
-                     [--sync ordered|full]
+                     [--sync ordered|full] [--wal minimal|full]
 ```
 
 `--sync` sets how far commits and checkpoints sync (§3.2, D17):
 `ordered` (the default) or `full`, which also flushes the drive's cache
-(on macOS).  Both front ends read and write through 64 KiB buffers.
+(on macOS).  `--wal` (D16): `minimal` (the default) writes a new index's
+entries without the WAL and checkpoints at its commit; `full` logs every
+write.  Both front ends read and write through 64 KiB buffers.
 
 The server speaks **the nucleus protocol** (§10, `nucleus_server::serve`)
 on `--listen` (default `127.0.0.1:20035`).  **Who logs in is the

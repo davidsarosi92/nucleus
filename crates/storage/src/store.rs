@@ -320,6 +320,24 @@ impl Store {
         }
     }
 
+    /// Applies `batch` to the tree without logging it (PLAN.md D16): it is
+    /// durable only once a checkpoint after it is, and a crash before that
+    /// loses it — what the layer above must be able to find again and
+    /// delete (the transaction layer marks such a range in a logged record
+    /// first, and its commit checkpoints before the commit record).
+    pub fn write_unlogged(&self, batch: &Batch) -> Result<()> {
+        if let Some((k, _)) = batch.ops.iter().find(|(k, _)| k.len() > MAX_KEY) {
+            return Err(Error::KeyTooLarge(k.len()));
+        }
+        self.check()?;
+        let _w = self.writer();
+        self.check()?;
+        self.writers_waiting.fetch_add(1, Ordering::AcqRel);
+        let mut tree = self.tree.write().unwrap_or_else(|e| e.into_inner());
+        self.writers_waiting.fetch_sub(1, Ordering::AcqRel);
+        apply(&mut tree, batch, None).inspect_err(|_| self.poisoned.store(true, Ordering::Release))
+    }
+
     /// Returns once every write up to `lsn` is durable.
     pub fn wait_durable(&self, lsn: Lsn) -> Result<()> {
         self.check()?;

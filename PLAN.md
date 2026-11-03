@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W3 ✅, W4 (the checkpoint ✅, D16 next), W3b, W5–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W4 ✅, W3b, W5–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -1652,7 +1652,7 @@ the speed-up is made once, in the merged one.  The work, in this order:
   vectors, parsing overlapped with storing (the parse reads through the
   writer's shared transaction today, so they take turns), and the
   storage's sampling method for `ANALYZE` (from W1).
-- **W4 — durability with one owner.**  One checkpoint trigger (today in
+- **W4 — durability with one owner** ✅.  One checkpoint trigger (today in
   spill and in commit, both under the commit lock), run in the
   background; WAL segments removed with one directory sync; no data sync
   at a segment's rollover; ordering-only syncs where ordering is all that
@@ -1687,7 +1687,39 @@ the speed-up is made once, in the merged one.  The work, in this order:
   a frozen page freed, no flush of frozen pages, frozen pages left
   writable, free-list pages handed to writers, no deletion of left-over
   segments, an empty log started at 0.  Measured: the TPC-H SF 1 row load
-  37.9 → 35.3 s (`lineitem`'s `COPY` 10.4 → 9.6 s).  *Next:* D16.
+  37.9 → 35.3 s (`lineitem`'s `COPY` 10.4 → 9.6 s).
+  *Done — D16* (PostgreSQL's `wal_level = minimal`, where a table or
+  index made in the transaction is synced at its commit instead of
+  logged, and `COPY FREEZE`, rows written frozen; CockroachDB's
+  `AddSSTable`, ingested files instead of logged writes).  Taken: no WAL
+  for a range nobody else sees, made durable by a sync before the commit
+  record; the rows final at once.  Made nucleus's: the "sync" is the
+  checkpoint (copy-on-write: what is not in the WAL is in the database
+  file once a checkpoint after it is, and nothing else need be flushed
+  by hand); the range is marked in a logged record, so recovery knows
+  what a crash left and deletes it — PostgreSQL's equivalent drops the
+  relation file, which nucleus does not have.  A value written into a
+  range declared fresh (`Transaction::fresh`), above the highest key the
+  transaction wrote there, goes into the store as a version at the
+  transaction's snapshot, in 1 MiB batches (`Store::write_unlogged`); the
+  first write registers the range under the commit lock — declined when
+  the store holds any entry in it (a commit after the snapshot, an
+  intent) or another transaction writes an overlapping one so — and logs
+  its mark (`00 04 ‖ start → end`); others' commits and spills into it
+  conflict; the transaction's reads write the batch first; the commit
+  checkpoints, then logs its record, which deletes the marks; a rollback,
+  or recovery for a mark left, deletes the range.  `EngineOptions` /
+  `Options::wal_minimal`, the server's `--wal minimal|full`.  Tested
+  (`tests/unlogged.rs`): a crash at every I/O point of loads past the
+  cache, both modes; rollback, drop and crash before the commit; the
+  stale snapshot and the overlapping range declined; a model test of the
+  transaction's own reads and writes; 14 mutations caught.  Measured,
+  TPC-H SF 1, the same binary: the indexes 17.0 s with `--wal full`, 13.5
+  and 13.9 s minimal (`l_suppkey`'s 6.8 → 5.2 s), the whole row load 38.2
+  → 34.0 and 35.6 s — the `COPY`s and `ANALYZE` are untouched and vary
+  by a second between runs.  Not covered: a `COPY` into an empty table
+  made in an earlier transaction — not fresh (others see the table);
+  W3b's batches go through the same path where a range is.
 - **W3b — batches into storage** (moved from W3, above, onto D16's write
   path): `insert_batch`, segments from typed vectors, `ncp` batches into
   vectors, parse and store overlapped, the sampling method.
@@ -2774,3 +2806,8 @@ style) across a thousand seeds without failure.
   trigger and a checkpointer thread; WAL segments deleted with one
   directory sync; ordering-only syncs (`File::sync_order`); the row load
   37.9 → 35.3 s.  DOCS §3.1, §4.2, §4.3, §4.5–§4.7, §5.
+- **2026-11-03** — §M14.20 W4, D16: values written into a fresh range
+  skip the WAL, stored as final versions; the range marked in a logged
+  record, checkpointed before the commit record, deleted on a rollback or
+  by recovery; `--wal minimal|full`; `CREATE INDEX` on SF 1 17.0 → 13.5 s.
+  DOCS §4.6, §5.1–§5.3, §6, §8, §9.

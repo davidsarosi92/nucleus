@@ -411,11 +411,13 @@ pub trait KvTxn: Send {
         Ok(true)
     }
 
-    /// Declares the keys in `[start, end)` fresh: none has a version yet and
-    /// no other transaction writes one before this one ends (a new index's
-    /// keys, a table made in this transaction).  An implementation may skip,
-    /// for them, what guards against other transactions' writes; the
-    /// default ignores the declaration.  The caller answers for it.
+    /// Declares the keys in `[start, end)` fresh: none has a version yet,
+    /// no other transaction writes one before this one ends, and none
+    /// reads them before it commits (a new index's keys, a table made in
+    /// this transaction).  An implementation may skip, for them, what
+    /// guards against other transactions — locally the conflict checks,
+    /// and the WAL (PLAN.md D16) —; the default ignores the declaration.
+    /// The caller answers for it.
     fn fresh(&mut self, start: &[u8], end: &[u8]) {
         let _ = (start, end);
     }
@@ -483,6 +485,10 @@ pub struct Options {
     /// or the drive's cache flushed too ([`SyncPolicy`], PLAN.md D17).
     /// [`Database::open_on`] takes its platform's.
     pub sync: SyncPolicy,
+    /// Bulk writes into ranges a transaction declared fresh (a new index's
+    /// keys) skip the WAL, made durable by a checkpoint at the commit
+    /// (PLAN.md D16; the default).  Off, every write is logged.
+    pub wal_minimal: bool,
 }
 
 impl Default for Options {
@@ -505,6 +511,7 @@ impl Default for Options {
             history: 0,
             txn_memory_bytes: 64 << 20,
             sync: SyncPolicy::default(),
+            wal_minimal: true,
         }
     }
 }
@@ -550,6 +557,7 @@ impl Database {
                 checkpoint_wal_bytes: opts.checkpoint_wal_bytes,
                 history: opts.history,
                 txn_memory: opts.txn_memory_bytes,
+                wal_minimal: opts.wal_minimal,
             },
         )?;
         // Scratch files a crash left behind.

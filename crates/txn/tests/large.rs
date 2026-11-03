@@ -26,6 +26,7 @@ fn opts() -> EngineOptions {
         checkpoint_wal_bytes: 1 << 20,
         history: 0,
         txn_memory: 2048,
+        wal_minimal: true,
     }
 }
 

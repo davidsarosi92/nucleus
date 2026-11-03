@@ -30,6 +30,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut trusted_proxies = Vec::new();
     let mut max_connections = None;
     let mut sync = nucleus_kv::SyncPolicy::default();
+    let mut wal_minimal = true;
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -52,6 +53,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     Some("ordered") => nucleus_kv::SyncPolicy::Ordered,
                     Some("full") => nucleus_kv::SyncPolicy::Full,
                     _ => return Err("--sync takes ordered or full".into()),
+                }
+            }
+            "--wal" => {
+                wal_minimal = match rest.next().map(String::as_str) {
+                    Some("minimal") => true,
+                    Some("full") => false,
+                    _ => return Err("--wal takes minimal or full".into()),
                 }
             }
             "--log-queries" => log_queries = true,
@@ -202,6 +210,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
     let opts = Options {
         sync,
+        wal_minimal,
         ..Options::default()
     };
     let db = Database::open(dir, opts).map_err(|e| e.to_string())?;

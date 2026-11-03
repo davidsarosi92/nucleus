@@ -24,6 +24,7 @@ fn engine() -> Engine {
         // Small: the writes spill now and then, their intents entering
         // the store.
         txn_memory: 4096,
+        wal_minimal: true,
     };
     Engine::open(p as Arc<dyn Platform>, Path::new("/db"), opts).unwrap()
 }
