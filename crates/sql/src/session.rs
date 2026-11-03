@@ -2099,7 +2099,7 @@ fn execute_statement(
             dml::delete(txn, reg, table, filter.as_ref(), returning, params)?,
         ),
         Statement::Analyze(table) => {
-            crate::stats::analyze(txn, reg, table.as_deref())?;
+            crate::stats::analyze(txn, table.as_deref())?;
             Output::Command("ANALYZE".into())
         }
         Statement::Begin(_)

@@ -237,20 +237,22 @@ pub fn contains(bound: &PartBound, key: &[Value]) -> bool {
     }
 }
 
-/// The partition of `partitions` (of a table partitioned by `spec`) a row
-/// goes to.
-pub fn route<'a>(spec: &Spec, partitions: &'a [Table], row: &[Value]) -> Result<&'a Table> {
+/// The place, among partitions of a table partitioned by `spec` whose
+/// bounds are `bounds` (in order), of the one a row goes to: the first
+/// whose bound holds its key, else the default partition.
+pub fn route<'a>(
+    spec: &Spec,
+    bounds: impl Iterator<Item = Option<&'a PartBound>> + Clone,
+    row: &[Value],
+) -> Result<usize> {
     let key: Vec<Value> = spec.columns.iter().map(|&c| row[c].clone()).collect();
-    fn bound(t: &Table) -> Option<&PartBound> {
-        t.partition_of.as_ref().map(|(_, b)| b)
-    }
-    partitions
-        .iter()
-        .find(|t| bound(t).is_some_and(|b| contains(b, &key)))
+    bounds
+        .clone()
+        .position(|b| b.is_some_and(|b| contains(b, &key)))
         .or_else(|| {
-            partitions
-                .iter()
-                .find(|t| matches!(bound(t), Some(PartBound::Default)))
+            bounds
+                .clone()
+                .position(|b| matches!(b, Some(PartBound::Default)))
         })
         .ok_or_else(|| {
             Error::check_violation(format!(

@@ -421,10 +421,15 @@ suite come when §M14.20 closes):
 | W4: checkpoints off the writer lock | 13.4 | 15.2 | 6.7 | 35.3 |
 | W4, D16: a new index's entries without the WAL | 13.4 | 13.5 | 7.1 | 34.0 |
 | … the same binary, `--wal full` | 14.0 | 17.0 | 7.3 | 38.2 |
+| W3b: batches into storage, parse and store overlapped, sampling by the storage | 12.3 | 12.8 | 3.9 | 29.0 |
+| W3b, column tables | 12.2 | 12.4 | 3.2 | 27.8 |
 | PostgreSQL 18 | 18.3 | 5.5 | 5.3 | 29.1 |
 
 (`lineitem`'s `COPY` alone, W2 → W3: a row table 17.5 → 10.4 s, a
-column table 36.5 → 12.8 s; PostgreSQL's 13.4 s.)
+column table 36.5 → 12.8 s; PostgreSQL's 13.4 s.  W3b, alternating runs
+with W4's binary on a loaded machine: the row load 36.9 / 31.9 → 30.4 /
+29.0 s; the column load 33.8 / 34.3 → 26.2 / 25.7 s, its `lineitem`
+`COPY` 12.2 → 7.8–8.5 s, its `ANALYZE` 5.7 → 2.9–3.2 s.)
 
 ## ClickBench
 

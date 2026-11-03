@@ -1664,9 +1664,27 @@ of records and — when every default, check and policy is safe off the
 statement's thread and the transaction can share its reads — parses and
 builds them in parts of 2048 on the statement's workers (DuckDB's
 parallel CSV reader, Instant Loading), a row table's rows encoded there
-too (`TableStorage::encode_new`, stored by `insert_encoded`); the rows
-are stored in order on the statement's thread, so a failure names the
-first failing line as a serial load would.  A front end without a client to read from refuses it
+too (`TableStorage::encode_new`); the rows are stored in order on the
+statement's thread, so a failure names the first failing line as a
+serial load would.  Parsing and storing overlap (§M14.20 W3b): a parser
+thread parses on the workers, reading through the writer's transaction
+behind a lock (`nucleus_kv::Locked`), while the statement's thread stores
+what was parsed; the chunks waiting to be parsed are bounded (4), the
+parsed batches drained before each read.  `ncp`'s binary batches (§10)
+are built into rows on the same parser thread.
+
+Every insert — `INSERT`, `COPY`, an `UPDATE` moving rows between
+partitions — stores through one batch path (`dml::insert_batch`): rows
+handed over owned, routed to their partitions by bounds, their row ids
+reserved per batch (`catalog::next_rowids`), their index entries and
+foreign-key keys computed first, then handed to the storage
+(`TableStorage::insert_batch`; by default row by row).  A foreign key's
+keys are deduplicated by their encoding and checked once each.  The
+first error in row order wins, and a statement failing on its own data
+skips the foreign-key checks, so a bad record is reported before a
+missing parent (PostgreSQL's order).  A column table (§8.15) takes an
+ascending batch into its gathered rows at once when nothing stored lies
+between its first and last key.  A front end without a client to read from refuses it
 (`0A000`); `Session::run_copy(stmt, params, reader)` reads it from any
 `Read`.  `COPY … TO` and from a server-side file are not supported (a
 query reads; the client sends files).
@@ -1694,7 +1712,12 @@ Algorithm L — the gap to the next row taken drawn at once, about
 k·(1 + ln(N/k)) draws for N rows rather than one each, from SplitMix64
 seeded once from `Kv::random_bytes`: lineitem's `ANALYZE` 11.5 → 5.5 s;
 NULLs scaled, distinct values by PostgreSQL's Duj1 estimator); the row
-count is exact.  Selectivities: `=` 1/ndv, ranges from the
+count is exact.  The storage samples (`TableStorage::sample`, offered
+rows through `stats::Sample`, which builds a row only when it takes it):
+a row table reads every entry but decodes only the rows taken, a column
+table decodes a segment's columns only when the sample takes one of its
+rows (§M14.20 W3b: `lineitem` 5.5 → 2.7 s in a row table, the column
+load's `ANALYZE` 5.7 → 2.9 s).  Selectivities: `=` 1/ndv, ranges from the
 histogram (a column's lower and upper bound in one AND together: the
 histogram between them, not each side's product), `IS NULL` the null
 fraction, `IN` n/ndv, `LIKE` 0.1 (`NOT LIKE` 0.9), combined by AND/OR/NOT.  For analyzed tables the access path is the cheapest of a
@@ -2205,8 +2228,18 @@ comparison — then at the directory's first segment ending at or after
 the key and, when none does, at the delta store's first row at or after
 it: both `first` reads, which the transaction answers from memory inside
 a range it found empty (§6.1), so a load's ascending keys read the store
-once each time rows are stored, not once a row.  A segment's columns are
-encoded on threads of their own (a share of the columns each).  The same SQL runs on both storages with
+once each time rows are stored, not once a row.  A batch (§8.7) that is
+strictly ascending and meets no stored row — none gathered between its
+first and last key, no segment there, no delta row — is gathered whole
+without a check per row; any other batch goes row by row.  A segment is
+built from typed vectors (§M14.20 W3b): the rows moved, not copied, into
+columns transposed in parts on threads, each column joined and encoded on
+threads of its own (`Vector::typed`, the one row-to-column builder;
+integer least and greatest values from the kernels; a text column's
+dictionary chosen by a distinct count that stops past a quarter of the
+rows).  Values read from a segment are stored values; an enum's labels
+come from the reading transaction's catalog (`Labels::fill`), so a
+renamed label reads renamed.  The same SQL runs on both storages with
 the same results: the tests run loads, updates, key changes and deletes on
 a `row` and a `column` table and compare every query, a row and a batch
 at a time and in parallel, and the integrity check.  On a million rows
@@ -2971,6 +3004,16 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-03 — §M14.20 W3b, batches into storage:** one batch insert
+  path (`dml::insert_batch`, `TableStorage::insert_batch`) for `INSERT`,
+  `COPY` and partition moves — rows owned, row ids per batch, foreign-key
+  keys deduplicated, the first error in row order; a column table's
+  ascending batch gathered at once; segments built from typed vectors on
+  threads (the same bytes as before); `COPY`'s parse overlapped with its
+  stores (`nucleus_kv::Locked`); `TableStorage::sample`, so `ANALYZE`
+  builds only the rows it takes.  Fixed: enum values read from a column
+  segment lost their labels.  TPC-H SF 1: row load ~34 → ~30 s, column
+  load ~34 → ~26 s (§8.7, §8.8, §8.15).
 - **2026-11-02 — §M14.20 W2, one sorted bulk path:** `CREATE INDEX`,
   `ALTER … TYPE` and key rewrites build their indexes through
   `IndexBuild`: only the index's columns read, in parallel; entries in one

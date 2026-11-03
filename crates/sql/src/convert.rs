@@ -229,7 +229,7 @@ fn build_columns(kv: &Arc<dyn Kv>, name: &str) -> Result<()> {
             if rows.is_empty() {
                 return Ok(false);
             }
-            crate::column_store::append_segment(txn, &t, &rows)?;
+            crate::column_store::append_segment(txn, &t, rows)?;
             Ok(true)
         })?;
         if !more {

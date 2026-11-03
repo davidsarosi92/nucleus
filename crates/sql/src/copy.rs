@@ -8,8 +8,8 @@
 use nucleus_kv::KvTxn;
 
 use crate::ast::CopyOptions;
-use crate::catalog;
-use crate::dml::{RowBuilder, Writer, insert_routed};
+use crate::catalog::{self, Table};
+use crate::dml::{Built, RowBuilder, Writer, insert_batch};
 use crate::error::{Error, Result};
 use crate::expr::Ctx;
 use crate::ext::Registry;
@@ -25,9 +25,6 @@ pub enum Chunk {
     /// Rows of the columns announced, typed (the protocol decoded them).
     Rows(Vec<Row>),
 }
-
-/// Rows whose foreign keys are checked together.
-const STEP: usize = 4096;
 
 /// The data cut into complete lines or records as it arrives — a scan
 /// for their ends, cheap, so the records can be parsed in parallel.
@@ -356,113 +353,273 @@ pub fn copy_from(
             })
             .collect::<Vec<_>>(),
     )?;
-    let arity = |n: usize| -> Result<()> {
-        if n == targets.len() {
-            return Ok(());
-        }
-        Err(Error::bad_copy_format(if n < targets.len() {
-            format!("missing data for column \"{}\"", t.columns[targets[n]].name)
-        } else {
-            "extra data after last expected column".to_string()
-        }))
+    let load = Load {
+        builder: &builder,
+        options,
+        targets,
+        table: &t,
     };
-    let mut fields = Fields::new(options.clone());
     let workers = crate::budget::workers();
-    let parallel = workers > 1 && builder.parallel_safe() && txn.shared().is_some();
-    let mut count = 0u64;
+    if workers > 1 && builder.parallel_safe() && txn.shared().is_some() {
+        return load.pipelined(txn, reg, sink, workers);
+    }
+    // One thread: read, parse, store, in turn.
+    let mut fields = Fields::new(options.clone());
     let mut batch = Batch::default();
-    // Built rows (with their lines, for errors), and the stored rows whose
-    // foreign keys are checked next.
-    let mut built: Vec<(Row, u64, Option<Vec<u8>>)> = Vec::new();
-    let mut rows: Vec<Row> = Vec::new();
+    let mut count = 0u64;
     loop {
         let chunk = sink.copy_data()?;
         let last = chunk.is_none();
-        // A record that fails to build fails the statement after the rows
-        // before it are stored (their errors first, as row by row).
-        let mut fed = Ok(());
-        match chunk {
-            Some(Chunk::Rows(typed)) => {
-                let ctx = Ctx::new(&*txn, reg, &[]);
-                fed = typed.into_iter().try_for_each(|r| {
-                    arity(r.len())?;
-                    built.push((builder.build_values(&ctx, r)?, 0, None));
-                    Ok(())
-                });
-            }
-            Some(Chunk::Bytes(b)) => fields.split(&b, false, &mut batch),
-            None => fields.split(&[], true, &mut batch),
-        }
-        if batch.data.len() >= LOAD_BATCH || (last && !batch.records.is_empty()) {
-            let b = std::mem::take(&mut batch);
-            let ro: &dyn KvTxn = &*txn;
-            let ctx = Ctx::new(ro, reg, &[]);
-            // The records `range` of the batch, parsed and built.
-            let part = |ctx: &Ctx,
-                        range: std::ops::Range<usize>|
-             -> Result<Vec<(Row, u64, Option<Vec<u8>>)>> {
-                let mut parser = Parser::default();
-                let mut out = Vec::with_capacity(range.len());
-                for i in range {
-                    let (raw, line) = b.raw(i);
-                    let row = parser.parse(options, raw, line).and_then(|rec| {
-                        arity(rec.len())
-                            .and_then(|()| builder.build_text(ctx, &rec))
-                            .map_err(|e| at_line(e, line))
-                    })?;
-                    let encoded = builder.writer.encode_new(&row);
-                    out.push((row, line, encoded));
-                }
-                Ok(out)
-            };
-            let n = b.records.len();
-            let shared = ro.shared().filter(|_| parallel && n >= 2 * PART_RECORDS);
-            if let Some(shared) = shared {
-                let parts = n.div_ceil(PART_RECORDS);
-                let got = crate::vector::on_workers(&ctx, shared, workers, parts, true, &|w, m| {
-                    part(w, m * PART_RECORDS..((m + 1) * PART_RECORDS).min(n))
-                });
-                for r in got {
-                    match r {
-                        Some(Ok(mut rs)) => built.append(&mut rs),
-                        Some(Err(e)) => {
-                            fed = Err(e);
-                            break;
-                        }
-                        None => break,
-                    }
-                }
-            } else {
-                match part(&ctx, 0..n) {
-                    Ok(mut rs) => built.append(&mut rs),
-                    Err(e) => fed = Err(e),
-                }
-            }
-        }
-        for (row, line, encoded) in built.drain(..) {
-            insert_routed(txn, &builder.writer, &row, encoded)
-                .map_err(|e| if line > 0 { at_line(e, line) } else { e })?;
-            rows.push(row);
-            if rows.len() >= STEP {
-                crate::fk::check_children(
-                    &*txn,
-                    &builder.writer.table,
-                    rows.iter().map(|r| (None, r)),
-                )?;
-                count += rows.len() as u64;
-                rows.clear();
-            }
-        }
+        let mut built = Vec::new();
+        let fed = {
+            let ctx = Ctx::new(&*txn, reg, &[]);
+            load.feed(&ctx, None, 1, &mut fields, &mut batch, chunk, &mut built)
+        };
+        count += load.store(txn, built, fed.is_ok())?;
         fed?;
         if last {
-            crate::fk::check_children(
-                &*txn,
-                &builder.writer.table,
-                rows.iter().map(|r| (None, r)),
-            )?;
-            count += rows.len() as u64;
             return Ok(count);
         }
+    }
+}
+
+/// A row built from a record — its line (0: typed rows, which have none)
+/// and its storage's form made beforehand, if any.
+type Parsed = (Row, u64, Option<Vec<u8>>);
+
+/// What parsing a load's records and storing its rows share.
+struct Load<'a> {
+    builder: &'a RowBuilder,
+    options: &'a CopyOptions,
+    targets: &'a [usize],
+    table: &'a Table,
+}
+
+impl Load<'_> {
+    fn arity(&self, n: usize) -> Result<()> {
+        if n == self.targets.len() {
+            return Ok(());
+        }
+        Err(Error::bad_copy_format(if n < self.targets.len() {
+            format!(
+                "missing data for column \"{}\"",
+                self.table.columns[self.targets[n]].name
+            )
+        } else {
+            "extra data after last expected column".to_string()
+        }))
+    }
+
+    /// Takes in a chunk of the data (`None`: its end): typed rows built,
+    /// bytes cut into records, and the records parsed and built once they
+    /// make a batch (at the end, whatever is left) — on `workers` over
+    /// `shared` when there are many.  The rows go to `out` up to the first
+    /// that fails, whose error is returned: it fails the statement after
+    /// the rows before it are stored (their errors first, as row by row).
+    #[allow(clippy::too_many_arguments)]
+    fn feed(
+        &self,
+        ctx: &Ctx,
+        shared: Option<&dyn nucleus_kv::KvRead>,
+        workers: usize,
+        fields: &mut Fields,
+        batch: &mut Batch,
+        chunk: Option<Chunk>,
+        out: &mut Vec<Parsed>,
+    ) -> Result<()> {
+        let last = chunk.is_none();
+        match chunk {
+            Some(Chunk::Rows(typed)) => {
+                for r in typed {
+                    self.arity(r.len())?;
+                    out.push((self.builder.build_values(ctx, r)?, 0, None));
+                }
+                return Ok(());
+            }
+            Some(Chunk::Bytes(b)) => fields.split(&b, false, batch),
+            None => fields.split(&[], true, batch),
+        }
+        if !(batch.data.len() >= LOAD_BATCH || (last && !batch.records.is_empty())) {
+            return Ok(());
+        }
+        let b = std::mem::take(batch);
+        let n = b.records.len();
+        match shared.filter(|_| workers > 1 && n >= 2 * PART_RECORDS) {
+            Some(shared) => {
+                let parts = n.div_ceil(PART_RECORDS);
+                let got = crate::vector::on_workers(ctx, shared, workers, parts, false, &|w, m| {
+                    let mut rows = Vec::new();
+                    let r = self.records(
+                        w,
+                        &b,
+                        m * PART_RECORDS..((m + 1) * PART_RECORDS).min(n),
+                        &mut rows,
+                    );
+                    Ok((rows, r))
+                });
+                for r in got {
+                    let (mut rows, r) = r.expect("every part runs")?;
+                    out.append(&mut rows);
+                    r?;
+                }
+                Ok(())
+            }
+            None => self.records(ctx, &b, 0..n, out),
+        }
+    }
+
+    /// The records `range` of `b` parsed and built into `out`, up to the
+    /// first that fails.
+    fn records(
+        &self,
+        ctx: &Ctx,
+        b: &Batch,
+        range: std::ops::Range<usize>,
+        out: &mut Vec<Parsed>,
+    ) -> Result<()> {
+        let mut parser = Parser::default();
+        out.reserve(range.len());
+        for i in range {
+            let (raw, line) = b.raw(i);
+            let row = parser.parse(self.options, raw, line).and_then(|rec| {
+                self.arity(rec.len())
+                    .and_then(|()| self.builder.build_text(ctx, &rec))
+                    .map_err(|e| at_line(e, line))
+            })?;
+            let encoded = self.builder.writer.encode_new(&row);
+            out.push((row, line, encoded));
+        }
+        Ok(())
+    }
+
+    /// Stores built rows as one batch ([`insert_batch`]; `fks`: their
+    /// foreign keys checked); how many.
+    fn store(&self, txn: &mut dyn KvTxn, built: Vec<Parsed>, fks: bool) -> Result<u64> {
+        if built.is_empty() {
+            return Ok(0);
+        }
+        let mut lines = Vec::with_capacity(built.len());
+        let rows: Vec<Built> = built
+            .into_iter()
+            .enumerate()
+            .map(|(place, (row, line, encoded))| {
+                lines.push(line);
+                Built {
+                    row,
+                    encoded,
+                    place,
+                }
+            })
+            .collect();
+        let count = rows.len() as u64;
+        insert_batch(
+            txn,
+            &self.builder.writer,
+            rows,
+            fks,
+            &|place, e| match lines[place] {
+                0 => e,
+                line => at_line(e, line),
+            },
+        )?;
+        Ok(count)
+    }
+
+    /// The load with parsing beside storing (PLAN.md §M14.20 W3b): a
+    /// thread of its own cuts and parses the data — its batches on the
+    /// statement's workers — while the statement's thread reads the data
+    /// and stores what is parsed.  The transaction is locked between them
+    /// ([`nucleus_kv::Locked`]): the parse's reads (an enum's labels, the
+    /// catalog) wait out a store, and see the transaction as between two
+    /// stores — as a parse between them on one thread would.  At most a
+    /// few chunks wait for the parser, and what it parsed from them for the
+    /// store.
+    fn pipelined(
+        &self,
+        txn: &mut dyn KvTxn,
+        reg: &Registry,
+        sink: &mut dyn Sink,
+        workers: usize,
+    ) -> Result<u64> {
+        use std::sync::mpsc::{channel, sync_channel};
+        let locked = nucleus_kv::Locked::new(txn);
+        let ambient = crate::parallel::Ambient::capture();
+        let (to_parse, chunks) = sync_channel::<Option<Chunk>>(4);
+        // Unbounded, so the parser never waits to hand over: what it holds
+        // is what the few chunks sent since the last look made.
+        let (to_store, parsed) = channel::<(Vec<Parsed>, Result<()>, bool)>();
+        std::thread::scope(|sc| {
+            let (locked, ambient) = (&locked, &ambient);
+            let parser = sc.spawn(move || {
+                ambient
+                    .run(|| {
+                        let reads = crate::parallel::SharedTxn(locked);
+                        let ctx = Ctx::new(&reads, reg, &[]);
+                        let mut fields = Fields::new(self.options.clone());
+                        let mut batch = Batch::default();
+                        // Until the data ends, a record fails, or the
+                        // statement stops listening.
+                        while let Ok(chunk) = chunks.recv() {
+                            let last = chunk.is_none();
+                            let mut out = Vec::new();
+                            let fed = self.feed(
+                                &ctx,
+                                Some(locked),
+                                workers,
+                                &mut fields,
+                                &mut batch,
+                                chunk,
+                                &mut out,
+                            );
+                            let stop = last || fed.is_err();
+                            if (!out.is_empty() || stop) && to_store.send((out, fed, last)).is_err()
+                            {
+                                return;
+                            }
+                            if stop {
+                                return;
+                            }
+                        }
+                    })
+                    .1
+            });
+            // What the parser hands over, stored: whether it was the end.
+            let mut count = 0u64;
+            let mut store = |(rows, fed, last): (Vec<Parsed>, Result<()>, bool)| -> Result<bool> {
+                count += self.store(&mut **locked.lock(), rows, fed.is_ok())?;
+                fed?;
+                Ok(last)
+            };
+            let stopped = || Error::internal("the COPY parser stopped");
+            let done = (|| -> Result<()> {
+                let mut reading = true;
+                loop {
+                    // What is parsed, stored before the next chunk is read.
+                    while let Ok(p) = parsed.try_recv() {
+                        if store(p)? {
+                            return Ok(());
+                        }
+                    }
+                    if reading {
+                        let chunk = sink.copy_data()?;
+                        reading = chunk.is_some();
+                        // A parser gone stopped at a failure: it handed
+                        // that over last.
+                        if to_parse.send(chunk).is_err() {
+                            reading = false;
+                        }
+                    } else if store(parsed.recv().map_err(|_| stopped())?)? {
+                        return Ok(());
+                    }
+                }
+            })();
+            drop((to_parse, parsed));
+            match parser.join() {
+                Ok(scanned) => crate::budget::add_scanned(scanned),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+            done.map(|()| count)
+        })
     }
 }
 

@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W4 ✅, W3b, W5–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W4 and W3b ✅, W5–W8 next (D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -1720,9 +1720,60 @@ the speed-up is made once, in the merged one.  The work, in this order:
   by a second between runs.  Not covered: a `COPY` into an empty table
   made in an earlier transaction — not fresh (others see the table);
   W3b's batches go through the same path where a range is.
-- **W3b — batches into storage** (moved from W3, above, onto D16's write
+- **W3b — batches into storage** ✅ (moved from W3, above, onto D16's write
   path): `insert_batch`, segments from typed vectors, `ncp` batches into
   vectors, parse and store overlapped, the sampling method.
+  *Done.*  One batch path, `dml::insert_batch`, for `INSERT`, `COPY` and
+  an `UPDATE`'s partition moves (it was a row at a time through
+  `insert_row` / `insert_routed`): rows handed over owned, partitions
+  routed by their bounds (`partition::route`, no table cloned per row),
+  row ids reserved per batch (`catalog::next_rowids`), index entries and
+  foreign keys computed before the rows are handed on, a foreign key's
+  keys deduplicated by their encoding and checked once each; the first
+  error in row order wins, and a statement failing on its data skips the
+  foreign-key checks (PostgreSQL's order: the bad record is reported, not
+  a missing parent).  `TableStorage::insert_batch` (default: row by row);
+  a column table gathers an ascending batch at once (`BTreeMap::append`)
+  when nothing stored lies between its first and last key — the gathered
+  rows, the directory's segment there, the delta store —, else row by row.
+  Segments from typed vectors (Arrow's layout; DuckDB's and ClickHouse's
+  column writers): rows moved, not cloned, into columns transposed in
+  parts on threads; `Vector::typed` the one row-to-column builder;
+  integer minima and maxima from the kernels; dictionary or plain text
+  decided by a distinct count that stops past n/4 — byte for byte the old
+  encoder's output (kept in the tests as a reference, 400 random columns
+  compared).  Parse and store overlapped (DuckDB's parallel CSV reader,
+  Instant Loading's pipelining): a parser thread parses on the workers
+  over the writer's transaction behind a lock (`nucleus_kv::Locked`, a
+  `KvRead`), while the statement's thread stores what was parsed — the
+  chunk queue bounded, the parsed queue drained before each read so the
+  two never wait on each other.  The sampling method
+  (`TableStorage::sample`, from W1): PostgreSQL's `ANALYZE` reads every
+  block but forms only the sampled tuples; here Li's Algorithm L tells
+  which rows the sample takes, and a row table decodes only those
+  (`stats::Sample::offer` takes a closure), a column table decodes a
+  segment's columns only when the sample takes one of its rows, and builds
+  only the rows taken.  `ncp`'s binary batches: decoding them straight
+  into vectors not taken — `insert_batch` takes rows (checks, policies,
+  index entries and foreign keys are per row), and a vector path beside
+  it would be a second insert path; they are built on the parser thread,
+  so they are overlapped with storing as text is.  Found by the new tests:
+  enum values read from a column segment lost their labels and type (the
+  segment cache keeps stored values; the reading transaction's catalog now
+  labels them, `Labels::fill`).  Tested: workers 1 and 4 load the same
+  rows and fail at the same line into row, column, descending and
+  partitioned tables, an enum made in the same transaction; a batch's
+  first bad row; a bad record before a missing parent; batches meeting
+  stored rows (gathered, delta, segments, a key twice in a batch); both
+  samples against the rows a scan gives; mutations caught (the dictionary
+  boundary, the point read's labels, the ascending test, the
+  foreign-key skip, a segment row's index).  Measured, TPC-H SF 1,
+  alternating with the previous binary: the row load 36.9 / 31.9 →
+  30.4 / 29.0 s (`ANALYZE` 6.7 / 6.4 → 3.5 / 3.9 s); the column load
+  33.8 / 34.3 → 26.2 / 25.7 s (`lineitem`'s `COPY` 12.2 → 7.8–8.1 s,
+  `ANALYZE` 5.7 → 2.9 s) — PostgreSQL's 29.1 s.  What is left of the
+  column `COPY`: LZ compression and the puts on the statement's thread;
+  of the row `COPY`: the write set's spills and page evictions (W5).
 - **W5 — reads, and reads after a load.**  Each spilled transaction's key
   span kept, so reads outside it skip the intent path (today every read
   takes it until a vacuum); read-ahead and coalesced reads; the pager's
@@ -2811,3 +2862,10 @@ style) across a thousand seeds without failure.
   record, checkpointed before the commit record, deleted on a rollback or
   by recovery; `--wal minimal|full`; `CREATE INDEX` on SF 1 17.0 → 13.5 s.
   DOCS §4.6, §5.1–§5.3, §6, §8, §9.
+- **2026-11-03** — §M14.20 W3b: one batch insert path for `INSERT`,
+  `COPY` and partition moves (`dml::insert_batch`,
+  `TableStorage::insert_batch`), segments built from typed vectors on
+  threads, `COPY`'s parse overlapped with its stores, `ANALYZE` through
+  the storage's sampling method (`TableStorage::sample`); fixed enum
+  labels read from column segments; the row load 34.0 → 29.0 s, the
+  column load 34 → 26–28 s.  DOCS §8.7, §8.8, §8.15.

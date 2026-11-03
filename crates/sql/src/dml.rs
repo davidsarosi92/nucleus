@@ -622,14 +622,16 @@ impl Writer {
         let Some((spec, parts)) = &self.partitions else {
             return Ok(None);
         };
-        let tables: Vec<Table> = parts.iter().map(|w| w.table.clone()).collect();
-        let to = crate::partition::route(spec, &tables, row).map_err(|_| {
+        let bounds = parts
+            .iter()
+            .map(|w| w.table.partition_of.as_ref().map(|(_, b)| b));
+        let to = crate::partition::route(spec, bounds, row).map_err(|_| {
             Error::check_violation(format!(
                 "no partition of relation \"{}\" found for row",
                 self.table.name
             ))
         })?;
-        Ok(tables.iter().position(|t| t.name == to.name))
+        Ok(Some(to))
     }
 }
 
@@ -903,43 +905,6 @@ fn duplicate(name: &str) -> Error {
     ))
 }
 
-/// Stores a new row and its index entries (`encoded`: its storage's
-/// [`encode_new`](crate::storage::TableStorage::encode_new) form, made
-/// beforehand).
-pub(crate) fn insert_row(
-    txn: &mut dyn KvTxn,
-    w: &Writer,
-    row: &Row,
-    encoded: Option<Vec<u8>>,
-) -> Result<()> {
-    let t = &w.table;
-    let rowid = if t.primary_key.is_empty() {
-        Some(catalog::next_rowid(txn, t)?)
-    } else {
-        None
-    };
-    let key = row_key_of(t, row, rowid);
-    let stored = match encoded {
-        Some(e) => w.storage.insert_encoded(txn, t, &key, row, e)?,
-        None if rowid.is_some() => {
-            w.storage.write(txn, t, &key, row, None)?;
-            true
-        }
-        None => w.storage.insert(txn, t, &key, row)?,
-    };
-    if !stored {
-        return Err(duplicate(&format!("{}_pkey", t.name)));
-    }
-    let pk = pk_suffix(t, &key);
-    for (i, (k, unique)) in w.keys.entries(&*txn, t, row, pk)?.into_iter().enumerate() {
-        if unique && txn.get(&k)?.is_some() {
-            return Err(duplicate(&t.indexes[i].name));
-        }
-        txn.put(&k, pk)?;
-    }
-    Ok(())
-}
-
 fn returning(
     binder: &mut Binder,
     items: &[SelectItem],
@@ -1043,11 +1008,10 @@ pub fn insert(
     for r in rows.iter() {
         chunk.push(r?);
         if chunk.len() == CHUNK {
-            insert_rows(txn, &writer, &chunk)?;
-            chunk.clear();
+            insert_rows(txn, &writer, std::mem::take(&mut chunk))?;
         }
     }
-    insert_rows(txn, &writer, &chunk)?;
+    insert_rows(txn, &writer, chunk)?;
     let returning = match ret {
         None => None,
         Some((exprs, cols)) => {
@@ -1224,53 +1188,168 @@ fn apply_updates(
             update_rows(txn, reg, pw, rows)?;
         }
     }
-    for (pw, rows) in parts.iter().zip(&arrive) {
-        if !rows.is_empty() {
-            insert_rows(txn, pw, rows)?;
-        }
+    for (pw, rows) in parts.iter().zip(arrive) {
+        insert_rows(txn, pw, rows)?;
     }
     Ok(())
 }
 
-/// One row (validated already) inserted — into its partition, for a
-/// partitioned table — and noted as the statement's write (its storage
-/// finishes at the statement's end); its foreign keys are the caller's.
-pub(crate) fn insert_routed(
+/// A new row for [`insert_batch`]: built and checked already, its
+/// storage's [`encode_new`](crate::storage::TableStorage::encode_new) form
+/// if made beforehand, and its place (what an error at it names).
+pub(crate) struct Built {
+    pub row: Row,
+    pub encoded: Option<Vec<u8>>,
+    pub place: usize,
+}
+
+/// An error, and the place of the row it is at (`None`: at no one row).
+type Failed = (Option<usize>, Error);
+
+/// Stores new rows — built and checked already, handed over — and their
+/// index entries, then checks their foreign keys: one path for `INSERT`,
+/// `COPY` and rows an `UPDATE` moves between partitions (PLAN.md §M14.20
+/// W3b).  A partitioned table's rows go to their partitions, routed by the
+/// bounds; hidden row ids are taken for the batch at once; the rows go to
+/// the storage at once ([`crate::storage::TableStorage::insert_batch`]);
+/// each referenced key is checked once.  An error at a row goes through
+/// `at` with the row's place — the first row's in their order, as a row
+/// at a time would fail.  `fks`: whether to check the foreign keys (not
+/// when the statement fails after these rows anyway: its own error is the
+/// one, as the checks come at a statement's end).
+pub(crate) fn insert_batch(
     txn: &mut dyn KvTxn,
     w: &Writer,
-    row: &Row,
-    encoded: Option<Vec<u8>>,
+    rows: Vec<Built>,
+    fks: bool,
+    at: &dyn Fn(usize, Error) -> Error,
 ) -> Result<()> {
-    if let Some((_, parts)) = &w.partitions {
-        let i = w.partition_of(row)?.expect("partitioned");
-        return insert_routed(txn, &parts[i], row, None);
+    store_batch(txn, w, rows, fks).map_err(|(place, e)| match place {
+        Some(p) => at(p, e),
+        None => e,
+    })
+}
+
+/// The first of two errors, by the place of their rows (one at no row, a
+/// foreign key's or the store's, is a later one).
+fn first_failure(a: Option<Failed>, b: Failed) -> Failed {
+    match a {
+        Some(a) if a.0.is_some_and(|p| b.0.is_none_or(|q| p < q)) => a,
+        _ => b,
     }
-    insert_row(txn, w, row, encoded)?;
-    crate::storage::written(&w.table);
+}
+
+fn store_batch(
+    txn: &mut dyn KvTxn,
+    w: &Writer,
+    rows: Vec<Built>,
+    fks: bool,
+) -> std::result::Result<(), Failed> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if let Some((_, parts)) = &w.partitions {
+        // Each row to its partition, in order — up to a row that fits none,
+        // which fails after the rows before it.
+        let mut by: Vec<Vec<Built>> = (0..parts.len()).map(|_| Vec::new()).collect();
+        let mut fail = None;
+        for b in rows {
+            match w.partition_of(&b.row) {
+                Ok(i) => by[i.expect("partitioned")].push(b),
+                Err(e) => {
+                    fail = Some((Some(b.place), e));
+                    break;
+                }
+            }
+        }
+        // Of the partitions' errors, the first row's.
+        let mut first: Option<Failed> = None;
+        for (pw, rows) in parts.iter().zip(by) {
+            if let Err(f) = store_batch(txn, pw, rows, fks) {
+                first = Some(first_failure(first, f));
+            }
+        }
+        return match (first, fail) {
+            (Some(f), _) | (None, Some(f)) => Err(f),
+            (None, None) => Ok(()),
+        };
+    }
+    let t = &w.table;
+    let at_row = |place: usize| move |e: Error| (Some(place), e);
+    let none = |e: Error| (None, e);
+    let first_id = if t.primary_key.is_empty() {
+        Some(catalog::next_rowids(txn, t, rows.len() as u64).map_err(none)?)
+    } else {
+        None
+    };
+    // The keys rows reference, and each row's key and index entries, made
+    // before the rows are handed over — up to a row whose entries fail,
+    // which fails after the rows before it.
+    let fk_keys = (fks && !t.foreign_keys.is_empty())
+        .then(|| crate::fk::child_keys(t, rows.iter().map(|b| (None, &b.row))));
+    let indexed = !t.indexes.is_empty();
+    let mut places = Vec::with_capacity(rows.len());
+    let mut entries: Vec<(Vec<u8>, Vec<(Vec<u8>, bool)>)> = Vec::new();
+    let mut batch = Vec::with_capacity(rows.len());
+    let mut fail = None;
+    for (i, b) in rows.into_iter().enumerate() {
+        let key = row_key_of(t, &b.row, first_id.map(|f| f + i as i64));
+        if indexed {
+            let pk = pk_suffix(t, &key);
+            match w.keys.entries(&*txn, t, &b.row, pk) {
+                Ok(es) => entries.push((pk.to_vec(), es)),
+                Err(e) => {
+                    fail = Some((Some(b.place), e));
+                    break;
+                }
+            }
+        }
+        places.push(b.place);
+        batch.push(crate::storage::NewRow {
+            key,
+            row: b.row,
+            encoded: b.encoded,
+        });
+    }
+    let stored = batch.len();
+    let dup = w
+        .storage
+        .insert_batch(txn, t, batch, first_id.is_some())
+        .map_err(none)?;
+    for (i, (pk, es)) in entries.into_iter().enumerate().take(dup.unwrap_or(stored)) {
+        for (j, (k, unique)) in es.into_iter().enumerate() {
+            if unique && txn.get(&k).map_err(|e| none(e.into()))?.is_some() {
+                return Err((Some(places[i]), duplicate(&t.indexes[j].name)));
+            }
+            txn.put(&k, &pk).map_err(|e| none(e.into()))?;
+        }
+    }
+    if let Some(i) = dup {
+        return Err(at_row(places[i])(duplicate(&format!("{}_pkey", t.name))));
+    }
+    if let Some(f) = fail {
+        return Err(f);
+    }
+    crate::storage::written(t);
+    if let Some(keys) = fk_keys {
+        crate::fk::check_keys(&*txn, t, &keys).map_err(none)?;
+    }
     Ok(())
 }
 
-/// Stores new rows (validated already), then checks their foreign keys.
-pub fn insert_rows(txn: &mut dyn KvTxn, w: &Writer, rows: &[Row]) -> Result<()> {
-    if let Some((_, parts)) = &w.partitions {
-        // Each row to its partition.
-        let mut by: Vec<Vec<Row>> = vec![Vec::new(); parts.len()];
-        for row in rows {
-            let i = w.partition_of(row)?.expect("partitioned");
-            by[i].push(row.clone());
-        }
-        for (pw, rows) in parts.iter().zip(by) {
-            if !rows.is_empty() {
-                insert_rows(txn, pw, &rows)?;
-            }
-        }
-        return Ok(());
-    }
-    for row in rows {
-        insert_row(txn, w, row, None)?;
-    }
-    crate::storage::written(&w.table);
-    crate::fk::check_children(&*txn, &w.table, rows.iter().map(|r| (None, r)))
+/// Stores new rows (validated already), then checks their foreign keys
+/// ([`insert_batch`]).
+pub fn insert_rows(txn: &mut dyn KvTxn, w: &Writer, rows: Vec<Row>) -> Result<()> {
+    let rows = rows
+        .into_iter()
+        .enumerate()
+        .map(|(place, row)| Built {
+            row,
+            encoded: None,
+            place,
+        })
+        .collect();
+    insert_batch(txn, w, rows, true, &|_, e| e)
 }
 
 /// Replaces rows `(key, old, new)` (validated already) and their index

@@ -154,6 +154,35 @@ fn a_module_s_storage_holds_tables() {
         nucleus_sql::check::check(&*txn, s.registry()).unwrap(),
         Vec::<String>::new()
     );
+    // ANALYZE's sample: the row storage decodes only the rows it takes,
+    // the module's storage offers every row it reads (the default) — the
+    // same rows taken from the same draws.
+    let sampled = |name: &str| {
+        let t = nucleus_sql::catalog::table(&*txn, name).unwrap();
+        let start = t.index_prefix(0);
+        let end = nucleus_kv::prefix_end(&start);
+        let mut sample = Sample::new(500, 7);
+        nucleus_sql::storage::of(&t)
+            .unwrap()
+            .sample(
+                StorageScan {
+                    txn: &*txn,
+                    table: &t,
+                    start,
+                    end,
+                    wanted: None,
+                    validated: false,
+                    bounds: Vec::new(),
+                    dicts: Vec::new(),
+                },
+                &mut sample,
+            )
+            .unwrap();
+        (sample.seen(), sample.into_rows())
+    };
+    let (seen, taken) = sampled("c_row");
+    assert_eq!((seen, taken.len()), (17_143, 500));
+    assert_eq!(sampled("c_counted"), (seen, taken));
     assert_eq!(
         rows(
             &mut s,

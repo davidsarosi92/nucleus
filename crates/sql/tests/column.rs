@@ -341,3 +341,151 @@ fn a_failed_statement_leaves_no_gathered_rows() {
         Vec::<String>::new()
     );
 }
+
+/// An enum's values in segments read with their labels, as the reading
+/// transaction's catalog gives them (a bug found by W3b's load test: they
+/// read without label or type): in rows, in batches, by key, after a
+/// label is renamed with the segments' columns already cached.
+#[test]
+fn enum_values_in_segments_read_their_labels() {
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(11)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let mut s = Session::new(db);
+    s.execute(
+        "CREATE TYPE mood AS ENUM ('sad', 'ok', 'glad'); \
+         CREATE TABLE r (id INT PRIMARY KEY, m mood, x INT); \
+         CREATE TABLE c (id INT PRIMARY KEY, m mood, x INT) WITH (storage = column); \
+         INSERT INTO r SELECT i, (ARRAY['sad', 'ok', 'glad'])[1 + i % 3]::mood, i * 7 FROM generate_series(1, 9000) i; \
+         INSERT INTO c SELECT * FROM r; \
+         CREATE INDEX ON r (x); CREATE INDEX ON c (x)",
+    )
+    .unwrap();
+    let queries = [
+        "SELECT min(m::text), max(m::text), count(*) FROM TT",
+        "SELECT m, count(*) FROM TT GROUP BY m ORDER BY m",
+        "SELECT id, m FROM TT WHERE id IN (3, 4, 5) ORDER BY id",
+        "SELECT * FROM TT WHERE id = 8000",
+        "SELECT m FROM TT WHERE x = 777", // by the index: a point read
+        "SELECT count(*) FROM TT WHERE m = 'ok'",
+        "SELECT m::text || '!' FROM TT ORDER BY id LIMIT 4",
+    ];
+    for q in queries {
+        both(&mut s, q);
+    }
+    s.execute("ALTER TYPE mood RENAME VALUE 'ok' TO 'fine'")
+        .unwrap();
+    for q in queries {
+        both(&mut s, &q.replace("'ok'", "'fine'"));
+    }
+    assert_eq!(
+        outcome(&mut s, "SELECT m FROM c WHERE x = 7").unwrap(),
+        vec![vec!["fine".to_string()]]
+    );
+}
+
+/// A batch of rows in key order goes to a column table at once when the
+/// table holds none of its keys (PLAN.md §M14.20 W3b) — so a batch that
+/// meets a stored row must find it: rows gathered by the statement, rows
+/// in the delta store, rows in segments; as a row table does.
+#[test]
+fn a_batch_meeting_stored_rows_finds_their_keys() {
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(12)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let mut s = Session::new(db);
+    s.execute(
+        "CREATE TABLE r (id INT PRIMARY KEY, v TEXT); \
+         CREATE TABLE c (id INT PRIMARY KEY, v TEXT) WITH (storage = column)",
+    )
+    .unwrap();
+    for sql in [
+        // The second batch (rows 4097 on: 100 to 4195, in order) meets the
+        // first, gathered.
+        "INSERT INTO TT SELECT i, 'a' FROM generate_series(1, 4096) i \
+         UNION ALL SELECT i, 'b' FROM generate_series(100, 4195) i",
+        // A few rows, left in the delta store; then a batch over one.
+        "INSERT INTO TT VALUES (50000, 'd'), (50010, 'd')",
+        "INSERT INTO TT SELECT i, 'e' FROM generate_series(49000, 50005) i",
+        "INSERT INTO TT SELECT i, 'e' FROM generate_series(50011, 60000) i",
+        // Rows in segments (the load above); a batch past them, one over
+        // their last.
+        "INSERT INTO TT SELECT i, 'f' FROM generate_series(59990, 61000) i",
+        "INSERT INTO TT SELECT i, 'f' FROM generate_series(60001, 61000) i",
+        "INSERT INTO TT SELECT i, 'g' FROM generate_series(1, 10) i",
+        "INSERT INTO TT SELECT i, 'g' FROM generate_series(0, 1) i",
+        // A key twice in a row within a batch.
+        "INSERT INTO TT VALUES (70000, 'h'), (70000, 'i')",
+        "INSERT INTO TT SELECT 80000 + i / 2, 'j' FROM generate_series(0, 5000) i",
+    ] {
+        both(&mut s, sql);
+        both(&mut s, "SELECT count(*), sum(id), min(v), max(v) FROM TT");
+    }
+}
+
+#[test]
+fn a_column_sample_takes_what_the_rows_give() {
+    use nucleus_sql::ext::{Sample, StorageScan};
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(13)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let mut s = Session::new(db.clone());
+    s.execute(
+        "CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy'); \
+         CREATE TABLE c (id INT PRIMARY KEY, x INT, s TEXT, m mood) WITH (storage = column); \
+         INSERT INTO c SELECT i, i % 97, 'name ' || (i % 13), \
+             CASE i % 3 WHEN 0 THEN 'sad' WHEN 1 THEN 'ok' ELSE 'happy' END::mood \
+             FROM generate_series(1, 100000) i; \
+         DELETE FROM c WHERE id % 10 = 3; \
+         UPDATE c SET x = -x WHERE id % 1000 = 7; \
+         INSERT INTO c VALUES (0, 1, 'first', 'ok'), (100001, 2, 'last', NULL)",
+    )
+    .unwrap();
+    let txn = db.begin(TxnOptions::read_only()).unwrap();
+    let t = nucleus_sql::catalog::table(&*txn, "c").unwrap();
+    let storage = nucleus_sql::storage::of(&t).unwrap();
+    let scan = || {
+        let start = t.index_prefix(0);
+        let end = nucleus_kv::prefix_end(&start);
+        StorageScan {
+            txn: &*txn,
+            table: &t,
+            start,
+            end,
+            wanted: None,
+            validated: false,
+            bounds: Vec::new(),
+            dicts: Vec::new(),
+        }
+    };
+    // Its own sample (segments decoded only when a row of theirs is taken)
+    // against the one every row of a scan makes: the same rows, the same
+    // draws — sizes that take from every segment, from a few, and all.
+    for size in [500, 3, 200_000] {
+        let mut own = Sample::new(size, 11);
+        storage.sample(scan(), &mut own).unwrap();
+        let mut every = Sample::new(size, 11);
+        for kr in storage.rows(scan()).unwrap() {
+            let (_, row) = kr.unwrap();
+            every.offer(|| Ok(row)).unwrap();
+        }
+        assert_eq!(own.seen(), 90_002, "{size}");
+        assert_eq!(own.seen(), every.seen(), "{size}");
+        assert_eq!(own.into_rows(), every.into_rows(), "{size}");
+    }
+}

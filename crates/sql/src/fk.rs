@@ -112,21 +112,56 @@ pub fn check_children<'r>(
     child: &Table,
     rows: impl Iterator<Item = (Option<&'r Row>, &'r Row)> + Clone,
 ) -> Result<()> {
-    for fk in &child.foreign_keys {
+    check_keys(txn, child, &child_keys(child, rows))
+}
+
+/// The keys `rows` (new or changed rows of `child`, as
+/// [`check_children`] takes them) reference by each of `child`'s foreign
+/// keys — each key once, in the order first seen (PLAN.md §M14.20 W3b: a
+/// load's rows reference few parents many times), so they can be checked
+/// after the rows are handed to storage ([`check_keys`]).  Keys are told
+/// apart by their key encoding, which is what the parent's lookup reads.
+pub fn child_keys<'r>(
+    child: &Table,
+    rows: impl Iterator<Item = (Option<&'r Row>, &'r Row)> + Clone,
+) -> Vec<Vec<Vec<Value>>> {
+    child
+        .foreign_keys
+        .iter()
+        .map(|fk| {
+            let mut seen: std::collections::HashSet<Vec<u8>, crate::fasthash::FastBuild> =
+                Default::default();
+            let mut out = Vec::new();
+            for (old, new) in rows.clone() {
+                let Some(vals) = key_values(new, &fk.columns) else {
+                    continue;
+                };
+                if old.is_some_and(|o| fk.columns.iter().all(|&c| o[c] == new[c])) {
+                    continue; // the key did not change
+                }
+                if seen.insert(encode_key(&vals)) {
+                    out.push(vals);
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// Checks that the parents of `keys` ([`child_keys`]) exist.
+pub fn check_keys(txn: &dyn KvTxn, child: &Table, keys: &[Vec<Vec<Value>>]) -> Result<()> {
+    for (fk, keys) in child.foreign_keys.iter().zip(keys) {
+        if keys.is_empty() {
+            continue;
+        }
         let parent = if fk.table == child.name {
             child.clone()
         } else {
             catalog::table(txn, &fk.table)?
         };
-        for (old, new) in rows.clone() {
-            let Some(vals) = key_values(new, &fk.columns) else {
-                continue;
-            };
-            if old.is_some_and(|o| fk.columns.iter().all(|&c| o[c] == new[c])) {
-                continue; // the key did not change
-            }
-            if !parent_exists(txn, &parent, fk, &vals)? {
-                return Err(violation_child(child, fk, &vals));
+        for vals in keys {
+            if !parent_exists(txn, &parent, fk, vals)? {
+                return Err(violation_child(child, fk, vals));
             }
         }
     }

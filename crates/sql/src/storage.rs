@@ -76,6 +76,16 @@ pub trait BatchSource {
     fn next_batch(&mut self, max: usize) -> Result<Option<Batch>>;
 }
 
+/// A new row as [`TableStorage::insert_batch`] takes it.
+pub struct NewRow {
+    /// Its row key.
+    pub key: Vec<u8>,
+    /// Its values.
+    pub row: Row,
+    /// Its [`TableStorage::encode_new`] form, if made beforehand.
+    pub encoded: Option<Vec<u8>>,
+}
+
 /// How a table's rows are stored.
 pub trait TableStorage: Send + Sync {
     /// Its name, as `CREATE TABLE … WITH (storage = name)` gives it.
@@ -105,6 +115,36 @@ pub trait TableStorage: Send + Sync {
         }
         self.write(txn, t, key, row, None)?;
         Ok(true)
+    }
+
+    /// Stores new rows, handed over, in their order — each under its key
+    /// unless a row is there: the batch stops at the first such row and
+    /// gives its place (the rows before it stored).  `new_keys`: the keys
+    /// are new (hidden row ids), so no row is there.  By default row by
+    /// row, [`insert_encoded`](Self::insert_encoded) or
+    /// [`insert`](Self::insert) ([`write`](Self::write) for new keys); a
+    /// storage may store a batch at once.
+    fn insert_batch(
+        &self,
+        txn: &mut dyn KvTxn,
+        t: &Table,
+        rows: Vec<NewRow>,
+        new_keys: bool,
+    ) -> Result<Option<usize>> {
+        for (i, r) in rows.into_iter().enumerate() {
+            let stored = match r.encoded {
+                Some(e) => self.insert_encoded(txn, t, &r.key, &r.row, e)?,
+                None if new_keys => {
+                    self.write(txn, t, &r.key, &r.row, None)?;
+                    true
+                }
+                None => self.insert(txn, t, &r.key, &r.row)?,
+            };
+            if !stored {
+                return Ok(Some(i));
+            }
+        }
+        Ok(None)
     }
 
     /// A new row's stored form made without the transaction — on any
@@ -163,6 +203,17 @@ pub trait TableStorage: Send + Sync {
     /// [`rows`](Self::rows), a value per cell.
     fn batches<'a>(&self, scan: Scan<'a>) -> Result<Box<dyn BatchSource + 'a>> {
         Ok(Box::new(RowsAsBatches(self.rows(scan)?)))
+    }
+
+    /// The rows of a range offered to `sample` in key order (`ANALYZE`):
+    /// by default every row read and offered; a storage may make only the
+    /// rows the sample takes.
+    fn sample(&self, scan: Scan<'_>, sample: &mut crate::stats::Sample) -> Result<()> {
+        for r in self.rows(scan)? {
+            let (_, row) = r?;
+            sample.offer(|| Ok(row))?;
+        }
+        Ok(())
     }
 
     /// Up to `parts - 1` row keys inside `[start, end)` that cut it into
@@ -497,6 +548,27 @@ impl TableStorage for RowStorage {
 
     fn batches<'a>(&self, scan: Scan<'a>) -> Result<Box<dyn BatchSource + 'a>> {
         Ok(Box::new(crate::vector::RowBatches::new(scan)?))
+    }
+
+    fn sample(&self, scan: Scan<'_>, sample: &mut crate::stats::Sample) -> Result<()> {
+        // Each entry offered as stored, decoded only when taken.
+        let end = scan
+            .end
+            .as_deref()
+            .map_or(Bound::Unbounded, Bound::Excluded);
+        let mut entries = crate::exec::Entries::over(
+            scan.txn,
+            scan.validated,
+            Bound::Included(&scan.start),
+            end,
+        )?;
+        let mut labels = Labels::default();
+        while let Some((k, v)) = entries.next()? {
+            sample.offer(|| {
+                crate::large::read_some(scan.txn, scan.table, k, v, &mut labels, scan.wanted)
+            })?;
+        }
+        Ok(())
     }
 
     fn check(

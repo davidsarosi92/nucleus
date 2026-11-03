@@ -322,6 +322,65 @@ pub trait KvRead: Sync {
     ) -> Result<Box<dyn KvChunks + 'a>>;
 }
 
+/// A transaction behind a lock, its reads shared by other threads while
+/// its owner writes between them (a load parsing beside its stores:
+/// PLAN.md §M14.20 W3b).  Each read takes the lock — a scan is read whole
+/// under it —, so a read sees the transaction as it is between two of the
+/// owner's writes, as a read on the owner's thread would.
+pub struct Locked<'t>(std::sync::Mutex<&'t mut dyn KvTxn>);
+
+impl<'t> Locked<'t> {
+    /// `txn`, locked.
+    pub fn new(txn: &'t mut dyn KvTxn) -> Self {
+        Self(std::sync::Mutex::new(txn))
+    }
+
+    /// The transaction, held until the guard drops (the owner's writes).
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, &'t mut dyn KvTxn> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl KvRead for Locked<'_> {
+    fn read_ts(&self) -> Timestamp {
+        self.lock().read_ts()
+    }
+
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.lock().get(key)
+    }
+
+    fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
+        let all: Vec<_> = self.lock().scan(start, end)?.collect();
+        Ok(Box::new(all.into_iter()))
+    }
+
+    fn get_validated(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.lock().get_validated(key)
+    }
+
+    fn scan_validated<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
+        let all: Vec<_> = self.lock().scan_validated(start, end)?.collect();
+        Ok(Box::new(all.into_iter()))
+    }
+
+    fn scan_chunks<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KvChunks + 'a>> {
+        Ok(Box::new(IterChunks(self.scan(start, end)?)))
+    }
+
+    fn scan_chunks_validated<'a>(
+        &'a self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Box<dyn KvChunks + 'a>> {
+        Ok(Box::new(IterChunks(self.scan_validated(start, end)?)))
+    }
+}
+
 /// A transaction.  Dropping it without committing rolls it back.
 pub trait KvTxn: Send {
     /// The snapshot this transaction reads.

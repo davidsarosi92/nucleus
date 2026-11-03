@@ -31,10 +31,8 @@ use crate::ast::{BinaryOp, UnaryOp};
 use crate::catalog::{self, Table};
 use crate::encoding::{Reader, Writer};
 use crate::error::Result;
-use crate::exec;
-use crate::expr::{Ctx, Expr};
-use crate::ext::Registry;
-use crate::plan::{Access, Plan};
+use crate::expr::Expr;
+use crate::plan::Plan;
 use crate::types::Value;
 
 /// Rows assumed for a table never analyzed.
@@ -172,26 +170,31 @@ impl TableStats {
 const SAMPLE: usize = 30_000;
 
 /// Computes and stores the statistics of one table: from all its rows, or
-/// from a uniform sample of [`SAMPLE`] ([`Reservoir`], seeded once from
-/// the database's random numbers) — the row count is always exact.
-pub fn analyze_table(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Result<TableStats> {
+/// from a uniform sample of [`SAMPLE`] ([`Sample`], seeded once from the
+/// database's random numbers; the table's storage decodes only the rows it
+/// takes) — the row count is always exact.
+pub fn analyze_table(txn: &mut dyn KvTxn, table: &Table) -> Result<TableStats> {
     let (rows, total) = {
-        let ctx = Ctx::new(&*txn, reg, &[]);
         let mut seed = [0u8; 8];
         crate::datetime::random_bytes(&mut seed)?;
-        let mut reservoir = Reservoir::new(SAMPLE, u64::from_le_bytes(seed));
-        let mut sample: Vec<crate::types::Row> = Vec::new();
-        let mut total = 0u64;
-        for r in exec::matching(table, &Access::Full, None, &ctx)? {
-            let (_, row) = r?;
-            total += 1;
-            if sample.len() < SAMPLE {
-                sample.push(row);
-            } else if let Some(slot) = reservoir.offer(total) {
-                sample[slot] = row;
-            }
-        }
-        (sample, total)
+        let mut sample = Sample::new(SAMPLE, u64::from_le_bytes(seed));
+        let start = table.index_prefix(0);
+        let end = nucleus_kv::prefix_end(&start);
+        crate::storage::of(table)?.sample(
+            crate::storage::Scan {
+                txn: &*txn,
+                table,
+                start,
+                end,
+                wanted: None,
+                validated: false,
+                bounds: Vec::new(),
+                dicts: Vec::new(),
+            },
+            &mut sample,
+        )?;
+        let total = sample.seen();
+        (sample.into_rows(), total)
     };
     let scale = |n: u64| -> u64 {
         if rows.is_empty() {
@@ -242,6 +245,51 @@ pub fn analyze_table(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resu
     };
     txn.put(&catalog::stats_key(table), &stats.encode())?;
     Ok(stats)
+}
+
+/// A uniform sample of a table's rows as its storage reads them
+/// ([`crate::storage::TableStorage::sample`]): each row offered in key
+/// order, and made — decoded — only when the [`Reservoir`] takes it, so a
+/// large table's `ANALYZE` decodes about `size · (1 + ln(N / size))` rows,
+/// not N (PLAN.md §M14.20 W3b).
+pub struct Sample {
+    reservoir: Reservoir,
+    rows: Vec<crate::types::Row>,
+    seen: u64,
+}
+
+impl Sample {
+    /// A sample of at most `size` rows, its draws from `seed`.
+    pub fn new(size: usize, seed: u64) -> Self {
+        Self {
+            reservoir: Reservoir::new(size, seed),
+            rows: Vec::new(),
+            seen: 0,
+        }
+    }
+
+    /// Offers the next row, made by `row` only if the sample takes it (each
+    /// row counted against the statement's scan budget).
+    pub fn offer(&mut self, row: impl FnOnce() -> Result<crate::types::Row>) -> Result<()> {
+        crate::budget::charge_scan()?;
+        self.seen += 1;
+        if self.rows.len() < self.reservoir.size {
+            self.rows.push(row()?);
+        } else if let Some(slot) = self.reservoir.offer(self.seen) {
+            self.rows[slot] = row()?;
+        }
+        Ok(())
+    }
+
+    /// How many rows were offered.
+    pub fn seen(&self) -> u64 {
+        self.seen
+    }
+
+    /// The rows taken.
+    pub fn into_rows(self) -> Vec<crate::types::Row> {
+        self.rows
+    }
 }
 
 /// Reservoir sampling by Li's Algorithm L ("Reservoir-sampling algorithms
@@ -432,13 +480,13 @@ fn dependency(rows: &[crate::types::Row], from: usize, to: usize, sampled: bool)
 }
 
 /// `ANALYZE [table]`.
-pub fn analyze(txn: &mut dyn KvTxn, reg: &Registry, table: Option<&str>) -> Result<()> {
+pub fn analyze(txn: &mut dyn KvTxn, table: Option<&str>) -> Result<()> {
     let tables = match table {
         Some(name) => vec![catalog::table(&*txn, name)?],
         None => catalog::tables(&*txn)?,
     };
     for t in tables {
-        analyze_table(txn, reg, &t)?;
+        analyze_table(txn, &t)?;
     }
     Ok(())
 }

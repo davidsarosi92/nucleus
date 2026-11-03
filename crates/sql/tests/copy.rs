@@ -262,3 +262,158 @@ fn copy_into_column_and_partitioned_tables() {
         vec![vec![Value::Int(0)]]
     );
 }
+
+/// A load parsed beside its stores (PLAN.md §M14.20 W3b): with workers,
+/// a thread parses the data while the statement's thread stores it — the
+/// same rows, the same errors at the same lines, as one thread taking
+/// turns; the parse reading the transaction (an enum made in it) between
+/// stores.  Past several parse batches (4 MiB each), into a row table, a
+/// column table (keys in order, and not) and a partitioned one.
+#[test]
+fn a_load_parsed_beside_its_stores() {
+    let pad = "x".repeat(80);
+    let data = |n: usize, desc: bool| -> String {
+        let row = |i: usize| format!("{i}\t{}\tok\t{pad}\n", i % 97);
+        if desc {
+            (1..=n).rev().map(row).collect()
+        } else {
+            (1..=n).map(row).collect()
+        }
+    };
+    let n = 60_000; // ~6 MiB
+    let mut results = Vec::new();
+    for workers in [1, 4] {
+        let mut s = session();
+        s.execute(&format!("SET parallel_workers = {workers}"))
+            .unwrap();
+        s.execute(
+            "BEGIN; CREATE TYPE mood AS ENUM ('sad', 'ok'); \
+             CREATE TABLE r (k INT PRIMARY KEY, g INT, m mood, pad TEXT); \
+             CREATE TABLE c (k INT PRIMARY KEY, g INT, m mood, pad TEXT) WITH (storage = column); \
+             CREATE TABLE d (k INT PRIMARY KEY, g INT, m mood, pad TEXT) WITH (storage = column); \
+             CREATE TABLE p (k INT PRIMARY KEY, g INT, m mood, pad TEXT) PARTITION BY RANGE (k); \
+             CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (25000); \
+             CREATE TABLE p2 PARTITION OF p FOR VALUES FROM (25000) TO (MAXVALUE) WITH (storage = column)",
+        )
+        .unwrap();
+        let mut got = Vec::new();
+        for (t, desc) in [("r", false), ("c", false), ("d", true), ("p", false)] {
+            let out = copy(&mut s, &format!("COPY {t} FROM STDIN"), &data(n, desc)).unwrap();
+            assert_eq!(out, Output::Command(format!("COPY {n}")));
+            got.push(rows(
+                &mut s,
+                &format!(
+                    "SELECT count(*), sum(k), sum(g), min(m::text), max(length(pad)) FROM {t}"
+                ),
+            ));
+        }
+        s.execute("COMMIT").unwrap();
+        assert_eq!(
+            got[0],
+            vec![vec![
+                Value::Int(n as i64),
+                Value::Int((n * (n + 1) / 2) as i64),
+                Value::Int((1..=n).map(|i| (i % 97) as i64).sum()),
+                Value::Text("ok".into()),
+                Value::Int(80),
+            ]]
+        );
+        assert!(got.iter().all(|g| *g == got[0]), "{got:?}");
+        // Errors: a bad record deep in the second batch, a key loaded
+        // twice there, and a key twice before a bad record (the rows before
+        // a bad one are stored first: their error is the one).
+        let mut errors = Vec::new();
+        for (t, bad) in [
+            ("r", 0),
+            ("c", 0),
+            ("p", 0),
+            ("r", 1),
+            ("c", 1),
+            ("p", 1),
+            ("r", 2),
+            ("c", 2),
+            ("p", 3),
+        ] {
+            let mut d = data(n, false);
+            let line = 51_234;
+            let mut lines: Vec<String> = d.lines().map(str::to_string).collect();
+            match bad {
+                0 => lines[line - 1] = "51234\tnot a number\tok\tx".into(),
+                1 => lines[line - 1] = lines[100].clone(),
+                // Twice, in two partitions: the first row's error.
+                3 => {
+                    lines[line - 1] = lines[30_000].clone();
+                    lines[line + 10] = lines[100].clone();
+                }
+                _ => {
+                    lines[line - 1] = lines[100].clone();
+                    lines[line + 5] = "1\t2\t3".into();
+                }
+            }
+            d = lines.join("\n") + "\n";
+            s.execute(&format!("DELETE FROM {t}")).unwrap();
+            let e = copy(&mut s, &format!("COPY {t} FROM STDIN"), &d).unwrap_err();
+            assert!(
+                e.message.contains(&format!("line {line})")),
+                "{t} {bad}: {}",
+                e.message
+            );
+            errors.push((e.code, e.message));
+        }
+        results.push((got, errors));
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+/// Of a batch's errors, the first row's, as a row at a time (PLAN.md
+/// §M14.20 W3b): a key twice before a unique value twice, and after; a
+/// row no partition takes after a key twice, and before.
+#[test]
+fn a_batch_fails_at_its_first_bad_row() {
+    let mut s = session();
+    s.execute(
+        "CREATE TABLE u (id INT PRIMARY KEY, name TEXT UNIQUE); \
+         CREATE TABLE p (k INT PRIMARY KEY) PARTITION BY RANGE (k); \
+         CREATE TABLE p1 PARTITION OF p FOR VALUES FROM (0) TO (10); \
+         CREATE TABLE p2 PARTITION OF p FOR VALUES FROM (10) TO (20) WITH (storage = column)",
+    )
+    .unwrap();
+    for (sql, names) in [
+        (
+            "INSERT INTO u VALUES (1, 'a'), (1, 'b'), (2, 'a')",
+            "u_pkey",
+        ),
+        (
+            "INSERT INTO u VALUES (1, 'a'), (2, 'a'), (1, 'b')",
+            "u_name",
+        ),
+        ("INSERT INTO p VALUES (15), (3), (15), (3)", "p2_pkey"),
+        ("INSERT INTO p VALUES (3), (15), (3), (15)", "p1_pkey"),
+        ("INSERT INTO p VALUES (3), (3), (99)", "p1_pkey"),
+        ("INSERT INTO p VALUES (3), (99), (3)", "partition"),
+    ] {
+        let e = s.execute(sql).unwrap_err();
+        assert!(e.message.contains(names), "{sql}: {}", e.message);
+    }
+}
+
+/// A load's foreign keys are checked as a statement's end would check
+/// them: a bad record later in the same batch fails the load with its own
+/// error, not the missing parent's — one thread or parsing beside the
+/// stores alike.
+#[test]
+fn a_bad_record_fails_before_a_missing_parent() {
+    for workers in [1, 4] {
+        let mut s = session();
+        s.execute(&format!(
+            "SET parallel_workers = {workers}; \
+             CREATE TABLE parent (id INT PRIMARY KEY); INSERT INTO parent VALUES (1); \
+             CREATE TABLE child (id INT PRIMARY KEY, parent INT REFERENCES parent (id))"
+        ))
+        .unwrap();
+        let e = copy(&mut s, "COPY child FROM STDIN", "1\t1\n2\t9\n3\tthree\n").unwrap_err();
+        assert_eq!(e.code, "22P02", "{workers}: {}", e.message);
+        let e = copy(&mut s, "COPY child FROM STDIN", "1\t1\n2\t9\n3\t1\n").unwrap_err();
+        assert_eq!(e.code, "23503", "{workers}: {}", e.message);
+    }
+}

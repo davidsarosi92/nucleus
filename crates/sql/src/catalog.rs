@@ -822,13 +822,14 @@ pub fn next_sequence(txn: &mut dyn KvTxn, name: &str) -> Result<u64> {
     Ok(next)
 }
 
-/// The next hidden row id of `table`.
-pub fn next_rowid(txn: &mut dyn KvTxn, table: &Table) -> Result<i64> {
+/// The next `n` hidden row ids of `table` (one read and one write for a
+/// batch of rows): the first of them.
+pub fn next_rowids(txn: &mut dyn KvTxn, table: &Table, n: u64) -> Result<i64> {
     let key = id_key(ROWID, table.id);
     let next = txn
         .get(&key)?
         .map_or(1, |b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])));
-    txn.put(&key, &(next + 1).to_le_bytes())?;
+    txn.put(&key, &(next + n).to_le_bytes())?;
     Ok(next as i64)
 }
 

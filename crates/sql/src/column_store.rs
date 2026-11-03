@@ -39,7 +39,7 @@ use crate::catalog::{INDEX_PREFIX_LEN, Table};
 use crate::encoding::{Reader, Writer, decode_value};
 use crate::enums::Labels;
 use crate::error::{Error, Result};
-use crate::storage::{BatchSource, ColumnBound, RowIter, RowStorage, Scan, TableStorage};
+use crate::storage::{BatchSource, ColumnBound, NewRow, RowIter, RowStorage, Scan, TableStorage};
 use crate::types::{Row, Value};
 use crate::vector::{Batch, Sel, Vector};
 
@@ -724,7 +724,15 @@ fn keys_of(txn: &dyn KvTxn, t: &Table, seg: &Segment) -> Result<Arc<Keys>> {
 /// cached, else read from its stored encoding where that allows (the
 /// encoding cached, not the column decoded — a point read's way), else
 /// from the column decoded.
+/// An enum's value given its label.
 fn value_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> Result<Value> {
+    let mut v = stored_value(txn, t, seg, col, i)?;
+    Labels::default().fill(txn, t.columns[col].ty, &mut v)?;
+    Ok(v)
+}
+
+/// [`value_of`] as stored (an enum's value without its label).
+fn stored_value(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> Result<Value> {
     if !seg.cols.contains(&(col as u16)) {
         return Ok(Value::Null);
     }
@@ -747,11 +755,36 @@ fn value_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize, i: usize) -> 
     };
     match crate::segment::value_at(&raw, i)? {
         Some(v) => Ok(v),
-        None => Ok(column_of(txn, t, seg, col)?.value(i)),
+        None => Ok(stored_column(txn, t, seg, col)?.value(i)),
     }
 }
 
+/// Column `col` of `seg`, decoded — an enum's values given their labels:
+/// the cache holds them without, as stored, for the labels are the
+/// catalog's as the reading transaction sees it (`ALTER TYPE … RENAME
+/// VALUE` changes them).
 fn column_of(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize) -> Result<Arc<Vector>> {
+    let v = stored_column(txn, t, seg, col)?;
+    let ty = t.columns[col].ty;
+    if !matches!(ty, crate::types::DataType::Enum(_)) {
+        return Ok(v);
+    }
+    let mut labels = Labels::default();
+    let mut v = Arc::unwrap_or_clone(v);
+    match &mut v {
+        Vector::Values(vals) => {
+            for x in vals {
+                labels.fill(txn, ty, x)?;
+            }
+        }
+        Vector::Const(x) => labels.fill(txn, ty, x)?,
+        _ => {}
+    }
+    Ok(Arc::new(v))
+}
+
+/// [`column_of`] as stored (an enum's values without their labels).
+fn stored_column(txn: &dyn KvTxn, t: &Table, seg: &Segment, col: usize) -> Result<Arc<Vector>> {
     if !seg.cols.contains(&(col as u16)) {
         // A column added after the segment was written: NULL.
         return Ok(Arc::new(Vector::Const(Value::Null)));
@@ -890,6 +923,69 @@ fn is_gathered(t: &Table, key: &[u8]) -> bool {
     })
 }
 
+/// Rows the statement inserts or changes (keyed), gathered for its end —
+/// appended at once when they come after every row gathered — and stored
+/// in segments when they are many (counted, and gathered, in one look at
+/// the statement's context).
+fn gather(txn: &mut dyn KvTxn, t: &Table, rows: Vec<(Vec<u8>, Row)>) -> Result<()> {
+    let full = crate::storage::with_writes(t, |w| {
+        w.rows += rows.len();
+        let after = match (w.gathered.last_key_value(), rows.first()) {
+            (Some((last, _)), Some((first, _))) => first > last,
+            _ => true,
+        };
+        if after && rows.len() > 1 {
+            let mut more: std::collections::BTreeMap<Vec<u8>, Row> = rows.into_iter().collect();
+            w.gathered.append(&mut more);
+        } else {
+            for (k, row) in rows {
+                w.gathered.insert(k, row);
+            }
+        }
+        w.gathered.len() >= BUFFER_ROWS
+    });
+    if full {
+        flush_buffer(txn, t)?;
+    }
+    Ok(())
+}
+
+/// Whether `t` holds no row keyed in `[first, last]` — none gathered, in
+/// the delta store or in a segment — as one look at each tells (a segment
+/// the range meets counts as holding one): what lets a load's batch skip
+/// a look a row ([`ColumnStorage::insert_batch`]).  Read unvalidated, as
+/// [`exists_plain`] reads; `false` for a table whose copy is not ready.
+fn none_between(txn: &dyn KvTxn, t: &Table, first: &[u8], last: &[u8]) -> Result<bool> {
+    if t.copy != CopyState::Ready {
+        return Ok(false);
+    }
+    let range = (Bound::Included(first), Bound::Included(last));
+    if crate::storage::peek_writes(t, |w| {
+        w.is_some_and(|w| w.gathered.range::<[u8], _>(range).next().is_some())
+    }) {
+        return Ok(false);
+    }
+    // The first segment ending at or after `first` (the directory is keyed
+    // by a segment's last key), if it starts by `last`.
+    let mut k = Vec::with_capacity(INDEX_PREFIX_LEN + first.len());
+    t.push_index_prefix(&mut k, DIRECTORY);
+    k.extend_from_slice(first);
+    if let Some((d, v)) = txn.first(
+        Bound::Included(&k),
+        Bound::Excluded(&t.index_end(DIRECTORY)),
+    )? && Segment::decode(&d[INDEX_PREFIX_LEN..], &v)?
+        .first
+        .as_slice()
+        <= last
+    {
+        return Ok(false);
+    }
+    let (lo, hi) = (moved(t, first, DELTA), moved(t, last, DELTA));
+    Ok(txn
+        .first(Bound::Included(&lo), Bound::Included(&hi))?
+        .is_none())
+}
+
 /// The rows gathered, taken to be stored.
 fn take_buffer(t: &Table) -> std::collections::BTreeMap<Vec<u8>, Row> {
     crate::storage::with_writes(t, |w| std::mem::take(&mut w.gathered))
@@ -932,43 +1028,88 @@ fn copy_columns(t: &Table) -> Vec<usize> {
     }
 }
 
-/// Writes `rows` (keyed, ascending) as one segment of the columns `cols`.
+/// Writes `rows` (keyed, ascending) as one segment of the columns `cols`,
+/// their values moved into the columns (no value copied).
 fn write_segment(
     txn: &mut dyn KvTxn,
     t: &Table,
-    rows: &[(Vec<u8>, Row)],
+    rows: Vec<(Vec<u8>, Row)>,
     cols: &[usize],
 ) -> Result<()> {
     let prefix = crate::catalog::INDEX_PREFIX_LEN;
-    let suffixes: Vec<&[u8]> = rows.iter().map(|(k, _)| &k[prefix..]).collect();
-    let mut chunks = vec![Keys::encode(&suffixes)];
-    // Each column's statistics and encoding: on threads of their own, a
-    // share of the columns each (they are independent).
-    let column = |c: usize| {
-        let col: Vec<Value> = rows
-            .iter()
-            .map(|(_, r)| r.get(c).cloned().unwrap_or(Value::Null))
-            .collect();
-        (crate::segment::stats(&col), crate::segment::encode(&col))
-    };
+    let n = rows.len();
     let threads = crate::budget::workers().min(cols.len());
-    let encoded: Vec<_> = if threads > 1 && rows.len() >= SEGMENT_ROWS / 4 {
-        let share = cols.len().div_ceil(threads);
+    let (keys, encoded): (Vec<Vec<u8>>, Vec<_>) = if threads > 1 && n >= SEGMENT_ROWS / 4 {
+        // On threads: the rows cut into parts, each taken apart into its
+        // columns; then each column's parts joined, encoded and measured,
+        // a share of the columns each (they are independent).
+        let mut rows = rows;
+        let mut parts = Vec::with_capacity(threads);
+        let size = n.div_ceil(threads);
+        while rows.len() > size {
+            parts.push(rows.split_off(rows.len() - size));
+        }
+        parts.push(rows);
+        parts.reverse();
         std::thread::scope(|sc| {
-            let parts: Vec<_> = cols
-                .chunks(share)
-                .map(|part| sc.spawn(|| part.iter().map(|&c| column(c)).collect::<Vec<_>>()))
+            let split: Vec<_> = parts
+                .into_iter()
+                .map(|part| sc.spawn(|| columns_of(part, cols)))
                 .collect();
-            parts
+            let mut keys = Vec::with_capacity(n);
+            // [column][part]
+            let mut columns: Vec<Vec<Vec<Value>>> = cols.iter().map(|_| Vec::new()).collect();
+            for h in split {
+                let (k, cs) = h.join().expect("taking rows apart does not panic");
+                keys.extend(k);
+                for (column, part) in columns.iter_mut().zip(cs) {
+                    column.push(part);
+                }
+            }
+            let share = cols.len().div_ceil(threads);
+            let mut shares = Vec::with_capacity(threads);
+            let mut columns = columns.into_iter();
+            loop {
+                let share: Vec<Vec<Vec<Value>>> = columns.by_ref().take(share).collect();
+                if share.is_empty() {
+                    break;
+                }
+                shares.push(share);
+            }
+            let encoded: Vec<_> = shares
+                .into_iter()
+                .map(|share| {
+                    sc.spawn(move || {
+                        share
+                            .into_iter()
+                            .map(|parts| {
+                                let mut column = Vec::with_capacity(n);
+                                for p in parts {
+                                    column.extend(p);
+                                }
+                                crate::segment::encode(column)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            let encoded = encoded
                 .into_iter()
                 .flat_map(|h| h.join().expect("a column's encoding does not panic"))
-                .collect()
+                .collect();
+            (keys, encoded)
         })
     } else {
-        cols.iter().map(|&c| column(c)).collect()
+        let (keys, columns) = columns_of(rows, cols);
+        (
+            keys,
+            columns.into_iter().map(crate::segment::encode).collect(),
+        )
     };
+    let suffixes: Vec<&[u8]> = keys.iter().map(|k| &k[prefix..]).collect();
+    let mut chunks = vec![Keys::encode(&suffixes)];
     let mut stats = Vec::with_capacity(cols.len());
-    for (s, chunk) in encoded {
+    for (chunk, s) in encoded {
         stats.push(s);
         chunks.push(chunk);
     }
@@ -979,14 +1120,34 @@ fn write_segment(
     }
     let seg = Segment {
         id,
-        first: rows[0].0.clone(),
-        last: rows[rows.len() - 1].0.clone(),
-        rows: rows.len(),
+        first: keys[0].clone(),
+        last: keys[n - 1].clone(),
+        rows: n,
         cols: cols.iter().map(|&c| c as u16).collect(),
         stats,
     };
     txn.put(&dir_key(t, &seg.last), &seg.encode())?;
     Ok(())
+}
+
+/// Keyed rows taken apart: their keys, and the columns `cols` of them,
+/// each value moved (no value copied).
+fn columns_of(rows: Vec<(Vec<u8>, Row)>, cols: &[usize]) -> (Vec<Vec<u8>>, Vec<Vec<Value>>) {
+    let mut keys = Vec::with_capacity(rows.len());
+    let mut columns: Vec<Vec<Value>> = cols
+        .iter()
+        .map(|_| Vec::with_capacity(rows.len()))
+        .collect();
+    for (k, mut row) in rows {
+        for (column, &c) in columns.iter_mut().zip(cols) {
+            column.push(
+                row.get_mut(c)
+                    .map_or(Value::Null, |v| std::mem::replace(v, Value::Null)),
+            );
+        }
+        keys.push(k);
+    }
+    (keys, columns)
 }
 
 /// Removes `seg`: its columns, the markers of its rows, its directory
@@ -1029,8 +1190,7 @@ impl SegmentWriter<'_> {
 
     fn flush(&mut self, txn: &mut dyn KvTxn) -> Result<()> {
         if !self.rows.is_empty() {
-            write_segment(txn, self.t, &self.rows, &self.cols)?;
-            self.rows.clear();
+            write_segment(txn, self.t, std::mem::take(&mut self.rows), &self.cols)?;
         }
         self.bytes = 0;
         Ok(())
@@ -1057,35 +1217,31 @@ fn aside(key: Vec<u8>, row: Option<Row>) -> Row {
 type Item = (Vec<u8>, Option<Row>, bool);
 
 impl Incoming {
-    fn delta_key(&mut self) -> Result<Option<Vec<u8>>> {
-        match self.delta.peek() {
-            None => Ok(None),
-            Some(Ok(row)) => match row.first() {
-                Some(Value::Bytea(k)) => Ok(Some(k.to_vec())),
-                _ => Err(Error::internal("a row copied aside without its key")),
-            },
-            Some(Err(_)) => Err(self.delta.next().expect("peeked").expect_err("an error")),
+    /// The next row's key, and whether it comes from the delta (borrowed:
+    /// a merge asks once or twice a row).
+    fn peek(&mut self) -> Result<Option<(&[u8], bool)>> {
+        if let Some(Err(_)) = self.delta.peek() {
+            return Err(self.delta.next().expect("peeked").expect_err("an error"));
         }
-    }
-
-    /// The next row's key.
-    fn peek(&mut self) -> Result<Option<Vec<u8>>> {
-        let d = self.delta_key()?;
-        let e = self.extra.peek().map(|(k, _)| k.clone());
+        let d = match self.delta.peek() {
+            Some(Ok(row)) => match row.first() {
+                Some(Value::Bytea(k)) => Some(&k[..]),
+                _ => return Err(Error::internal("a row copied aside without its key")),
+            },
+            _ => None,
+        };
+        let e = self.extra.peek().map(|(k, _)| k.as_slice());
         Ok(match (d, e) {
-            (Some(d), Some(e)) => Some(d.min(e)),
-            (d, e) => d.or(e),
+            (None, None) => None,
+            (Some(d), None) => Some((d, true)),
+            (None, Some(e)) => Some((e, false)),
+            (Some(d), Some(e)) => Some(if d <= e { (d, true) } else { (e, false) }),
         })
     }
 
     fn next(&mut self) -> Result<Option<Item>> {
-        let d = self.delta_key()?;
-        let e = self.extra.peek().map(|(k, _)| k.clone());
-        let from_delta = match (&d, &e) {
-            (None, None) => return Ok(None),
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (Some(d), Some(e)) => d <= e,
+        let Some((_, from_delta)) = self.peek()? else {
+            return Ok(None);
         };
         if !from_delta {
             let (k, row) = self.extra.next().expect("peeked");
@@ -1186,18 +1342,18 @@ fn merge_with(
         // over it (a new segment may end at its last key).
         let keys = keys_of(&*txn, t, seg)?;
         let vectors = (0..t.columns.len())
-            .map(|c| column_of(&*txn, t, seg, c))
+            .map(|c| stored_column(&*txn, t, seg, c))
             .collect::<Result<Vec<_>>>()?;
         let gone = deleted(&*txn, t, seg, false)?;
         drop_segment(txn, t, seg)?;
         for i in 0..seg.rows {
             let mut key = start.clone();
             key.extend_from_slice(keys.get(i));
-            while incoming.peek()?.is_some_and(|k| k < key) {
+            while incoming.peek()?.is_some_and(|(k, _)| k < key.as_slice()) {
                 let r = incoming.next()?.expect("peeked");
                 take(txn, &mut out, r)?;
             }
-            if incoming.peek()?.is_some_and(|k| k == key) {
+            if incoming.peek()?.is_some_and(|(k, _)| k == key.as_slice()) {
                 let r = incoming.next()?.expect("peeked");
                 take(txn, &mut out, r)?; // the new row (or none) replaces it
                 continue;
@@ -1502,6 +1658,39 @@ fn merged_rows<'a>(scan: Scan<'a>, delta: Delta) -> Result<RowIter<'a>> {
     })))
 }
 
+/// [`TableStorage::sample`] through the segments and the delta: a
+/// segment's columns decoded when the sample first takes one of its rows
+/// (not at all when it takes none), a row made of them only when taken.
+fn merged_sample(scan: Scan<'_>, delta: Delta, sample: &mut crate::stats::Sample) -> Result<()> {
+    let mut m = Merged::new(scan, delta)?;
+    while let Some(run) = m.next_run(SEGMENT_ROWS)? {
+        match run {
+            Run::Delta(rows) => {
+                for (_, row) in rows {
+                    sample.offer(|| Ok(row))?;
+                }
+            }
+            Run::Segment { seg, live, .. } => {
+                let mut cols: Option<Vec<Arc<Vector>>> = None;
+                for &i in &live {
+                    sample.offer(|| {
+                        let cols = match &mut cols {
+                            Some(cols) => cols,
+                            None => cols.insert(
+                                (0..m.t.columns.len())
+                                    .map(|c| column_of(m.txn, m.t, &seg, c))
+                                    .collect::<Result<Vec<_>>>()?,
+                            ),
+                        };
+                        Ok(cols.iter().map(|v| v.value(i as usize)).collect())
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Segment boundaries in `[start, end)`: where a parallel scan splits.
 fn segment_splits(
     txn: &dyn KvTxn,
@@ -1664,17 +1853,34 @@ impl TableStorage for ColumnStorage {
             mark(txn, t, key)?;
         }
         // An insert, or a change of one: gathered for the statement's end,
-        // and stored in segments when they are many (counted, and gathered,
-        // in one look at the statement's context).
-        let full = crate::storage::with_writes(t, |w| {
-            w.rows += 1;
-            w.gathered.insert(key.to_vec(), row.clone());
-            w.gathered.len() >= BUFFER_ROWS
-        });
-        if full {
-            flush_buffer(txn, t)?;
+        // and stored in segments when they are many.
+        gather(txn, t, vec![(key.to_vec(), row.clone())])
+    }
+
+    fn insert_batch(
+        &self,
+        txn: &mut dyn KvTxn,
+        t: &Table,
+        rows: Vec<NewRow>,
+        new_keys: bool,
+    ) -> Result<Option<usize>> {
+        // A batch in ascending key order where the table holds no row (a
+        // load's, past every row): two looks for the batch, not two a row,
+        // and the rows gathered as they are handed over.
+        let ascending = rows.windows(2).all(|w| w[0].key < w[1].key);
+        if let (true, Some(first), Some(last)) = (ascending, rows.first(), rows.last())
+            && (new_keys || none_between(&*txn, t, &first.key, &last.key)?)
+        {
+            gather(txn, t, rows.into_iter().map(|r| (r.key, r.row)).collect())?;
+            return Ok(None);
         }
-        Ok(())
+        for (i, r) in rows.into_iter().enumerate() {
+            if !new_keys && self.exists(&*txn, t, &r.key, false)? {
+                return Ok(Some(i));
+            }
+            gather(txn, t, vec![(r.key, r.row)])?;
+        }
+        Ok(None)
     }
 
     fn remove(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8]) -> Result<()> {
@@ -1735,6 +1941,11 @@ impl TableStorage for ColumnStorage {
     fn rows<'a>(&self, scan: Scan<'a>) -> Result<RowIter<'a>> {
         let delta = delta_of(scan.table);
         merged_rows(scan, delta)
+    }
+
+    fn sample(&self, scan: Scan<'_>, sample: &mut crate::stats::Sample) -> Result<()> {
+        let delta = delta_of(scan.table);
+        merged_sample(scan, delta, sample)
     }
 
     fn batches<'a>(&self, scan: Scan<'a>) -> Result<Box<dyn BatchSource + 'a>> {
@@ -1958,6 +2169,20 @@ impl TableStorage for HtapStorage {
         RowStorage.rows(scan)
     }
 
+    fn sample(&self, scan: Scan<'_>, sample: &mut crate::stats::Sample) -> Result<()> {
+        if matches!(
+            scan.table.copy,
+            CopyState::BuildingRows | CopyState::MovingFromDelta
+        ) {
+            for r in self.rows(scan)? {
+                let (_, row) = r?;
+                sample.offer(|| Ok(row))?;
+            }
+            return Ok(());
+        }
+        RowStorage.sample(scan, sample)
+    }
+
     fn batches<'a>(&self, scan: Scan<'a>) -> Result<Box<dyn BatchSource + 'a>> {
         if Self::columnar(scan.table, scan.wanted) {
             let delta = delta_of(scan.table);
@@ -2045,7 +2270,7 @@ pub fn last_key(txn: &dyn KvTxn, t: &Table) -> Result<Option<Vec<u8>>> {
 
 /// Writes `rows` (keyed, ascending, after every segment) as a segment of
 /// the column copy.
-pub fn append_segment(txn: &mut dyn KvTxn, t: &Table, rows: &[(Vec<u8>, Row)]) -> Result<()> {
+pub fn append_segment(txn: &mut dyn KvTxn, t: &Table, rows: Vec<(Vec<u8>, Row)>) -> Result<()> {
     write_segment(txn, t, rows, &copy_columns(t))
 }
 
