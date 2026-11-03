@@ -2719,8 +2719,13 @@ impl<'a> Grouping<'a> {
     }
 }
 
-/// Feeds a pipeline's rows to `g`.
-fn feed(g: &mut Grouping, pipe: &mut Pipeline, cx: Cx) -> Result<()> {
+/// Feeds a pipeline's rows to `g`, calling `after` after each batch.
+fn feed<'a>(
+    g: &mut Grouping<'a>,
+    pipe: &mut Pipeline,
+    cx: Cx,
+    after: &mut dyn FnMut(&mut Grouping<'a>) -> Result<()>,
+) -> Result<()> {
     let (group, aggs) = (g.group, g.aggs);
     while let Some(out) = pipe.next()? {
         match out {
@@ -2760,6 +2765,7 @@ fn feed(g: &mut Grouping, pipe: &mut Pipeline, cx: Cx) -> Result<()> {
                 }
             }
         }
+        after(g)?;
     }
     Ok(())
 }
@@ -2804,7 +2810,7 @@ pub fn aggregate<'a>(
     };
     let cx = Cx { ctx, outer };
     let mut g = Grouping::new(group, aggs);
-    feed(&mut g, &mut pipe, cx)?;
+    feed(&mut g, &mut pipe, cx, &mut |_| Ok(()))?;
     let done = finish(&mut g)?;
     let runs = match g.parts.take() {
         Some(p) => p.seal()?,
@@ -2873,26 +2879,32 @@ fn unbucket(mut buckets: Vec<Bucket>, aggs: usize) -> (Vec<Vec<Value>>, Vec<Vec<
 /// The morsels' groups (in key order) merged on the workers, a merge part
 /// each, and finished: the rows a single pass gives, in its order — each
 /// group where it was first seen (its first morsel, its place there), the
-/// first error by that order.  `None` past work_mem (the single pass then
-/// partitions).
+/// first error by that order.  A morsel's groups in scratch ([`Spilled`])
+/// are read back by part, before those it kept.  Rows past half of
+/// `work_mem` in all come a part at a time instead, each part's in that
+/// order — those that did not fit beside the others' from scratch.
 fn merge_parallel(
     cells: &[Vec<std::sync::Mutex<Option<Bucket>>>],
+    spills: &[Option<Spilled>],
+    width: usize,
     aggs: &[Agg],
-    ctx: &Ctx,
-    shared: &dyn nucleus_kv::KvRead,
-    workers: usize,
-) -> Result<Option<Vec<Row>>> {
-    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    work: &Morsels,
+    spend: &Spend,
+) -> Result<Rows<'static>> {
     // (A rank: the morsel, the place there.  An error's: 0 while merging —
     // every merge comes before any finish — 1 while finishing.)
     type Rank = (u32, u32);
-    type Merged = (Vec<(Rank, Row)>, Option<((u8, Rank), Error)>);
-    let bytes = AtomicUsize::new(0);
-    let limit = crate::budget::work_mem();
+    /// A part's rows: in memory with their ranks, or in scratch.
+    enum Merged {
+        Memory(Vec<(Rank, Row)>),
+        Run(std::sync::Arc<crate::spill::Sealed>),
+    }
+    type Done = (Merged, usize, Option<((u8, Rank), Error)>);
+    let (ctx, shared, workers) = (work.ctx, work.shared, work.workers);
     let results = on_workers(ctx, shared, workers, MERGE_PARTS, false, &|_,
                                                                          b|
      -> Result<
-        Merged,
+        Done,
     > {
         let mut map: HashMap<Vec<Value>, u32, MixState> = HashMap::default();
         let mut ranks: Vec<Rank> = Vec::new();
@@ -2902,61 +2914,102 @@ fn merge_parallel(
             .collect();
         let mut size = 0;
         let mut room = 0;
+        let mut add = |m: u32,
+                       key: Vec<Value>,
+                       i: u32,
+                       states: &mut dyn Iterator<Item = Value>|
+         -> Option<((u8, Rank), Error)> {
+            let next = ranks.len() as u32;
+            let mut fresh = false;
+            let gid = *map.entry(key).or_insert_with_key(|k| {
+                fresh = true;
+                size += crate::spill::row_bytes(k) + 96 * aggs.len();
+                next
+            });
+            if fresh {
+                ranks.push((m, i));
+                make_room(&mut accs, &mut room, ranks.len());
+            }
+            for acc in accs.iter_mut() {
+                let st = states.next().unwrap_or(Value::Null);
+                if let Err(e) = acc.combine(gid as usize, st) {
+                    return Some(((0, (m, i)), e));
+                }
+            }
+            None
+        };
         for (m, cell) in cells[b].iter().enumerate() {
+            let m32 = m as u32;
+            if let Some(sp) = &spills[m] {
+                for flush in &sp.flushes {
+                    let (from, to) = flush[b];
+                    for row in sp.run.range(from, to) {
+                        let mut row = row?;
+                        let states = row.split_off(1 + width);
+                        let Value::Int(i) = row[0] else {
+                            return Err(Error::internal("a spilled group's place"));
+                        };
+                        row.remove(0);
+                        if let Some(err) = add(m32, row, i as u32, &mut states.into_iter()) {
+                            return Ok((Merged::Memory(Vec::new()), 0, Some(err)));
+                        }
+                    }
+                }
+            }
             let Some(bucket) = cell.lock().unwrap_or_else(|e| e.into_inner()).take() else {
                 continue;
             };
             let mut states: Vec<std::vec::IntoIter<Value>> =
                 bucket.states.into_iter().map(Vec::into_iter).collect();
             for (key, &i) in bucket.keys.into_iter().zip(&bucket.places) {
-                let next = ranks.len() as u32;
-                let mut fresh = false;
-                let gid = *map.entry(key).or_insert_with_key(|k| {
-                    fresh = true;
-                    size += crate::spill::row_bytes(k) + 96 * aggs.len();
-                    next
-                });
-                if fresh {
-                    ranks.push((m as u32, i));
-                    make_room(&mut accs, &mut room, ranks.len());
-                }
-                for (acc, st) in accs.iter_mut().zip(&mut states) {
-                    let st = st.next().unwrap_or(Value::Null);
-                    if let Err(e) = acc.combine(gid as usize, st) {
-                        return Ok((Vec::new(), Some(((0, (m as u32, i)), e))));
-                    }
+                let mut row_states = states.iter_mut().map(|s| s.next().unwrap_or(Value::Null));
+                if let Some(err) = add(m32, key, i, &mut row_states) {
+                    return Ok((Merged::Memory(Vec::new()), 0, Some(err)));
                 }
             }
         }
-        bytes.fetch_add(size, Relaxed);
         let mut keys: Vec<Vec<Value>> = vec![Vec::new(); ranks.len()];
         for (k, g) in map {
             keys[g as usize] = k;
         }
+        // In first-seen order: the groups were numbered so.
         let mut rows = Vec::with_capacity(keys.len());
+        let mut failed = None;
         for (g, key) in keys.into_iter().enumerate() {
             let mut row = key;
             for a in &mut accs {
                 match a.finish(g) {
                     Ok(v) => row.push(v),
-                    Err(e) => return Ok((rows, Some(((1, ranks[g]), e)))),
+                    Err(e) => {
+                        failed = Some(((1, ranks[g]), e));
+                        break;
+                    }
                 }
+            }
+            if failed.is_some() {
+                break;
             }
             rows.push((ranks[g], row));
         }
-        Ok((rows, None))
+        if failed.is_some() || spend.keep(&spend.merged, size) {
+            return Ok((Merged::Memory(rows), size, failed));
+        }
+        let mut run = crate::spill::Run::new()?;
+        for (_, row) in rows {
+            run.push(&row)?;
+        }
+        Ok((Merged::Run(run.seal()?), size, None))
     });
-    if bytes.into_inner() > limit {
-        return Ok(None);
-    }
-    let mut all = Vec::new();
+    let mut parts = Vec::with_capacity(MERGE_PARTS);
+    let mut total = 0;
     let mut first_err: Option<((u8, Rank), Error)> = None;
     for r in results {
-        let (rows, err) = match r {
+        let (merged, size, err) = match r {
             Some(r) => r?,
             None => return Err(Error::internal("a merge part not run")),
         };
-        all.extend(rows);
+        total += size;
+        parts.push(merged);
         if let Some((rank, e)) = err
             && first_err.as_ref().is_none_or(|(r, _)| rank < *r)
         {
@@ -2966,8 +3019,26 @@ fn merge_parallel(
     if let Some((_, e)) = first_err {
         return Err(e);
     }
-    all.sort_unstable_by_key(|(rank, _)| *rank);
-    Ok(Some(all.into_iter().map(|(_, row)| row).collect()))
+    if total <= spend.half {
+        // All in memory: in the order a single pass gives.
+        let mut all = Vec::new();
+        for p in parts {
+            match p {
+                Merged::Memory(rows) => all.extend(rows),
+                Merged::Run(_) => return Err(Error::internal("a merge part in scratch")),
+            }
+        }
+        all.sort_unstable_by_key(|(rank, _)| *rank);
+        return Ok(Box::new(all.into_iter().map(|(_, row)| Ok(row))));
+    }
+    Ok(Box::new(parts.into_iter().flat_map(
+        |p| -> Box<dyn Iterator<Item = Result<Row>>> {
+            match p {
+                Merged::Memory(rows) => Box::new(rows.into_iter().map(|(_, row)| Ok(row))),
+                Merged::Run(run) => Box::new(run.iter()),
+            }
+        },
+    )))
 }
 
 static PARALLEL_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2978,6 +3049,14 @@ pub fn parallel_runs() -> u64 {
     PARALLEL_RUNS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+static SPILLED_GROUPINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many parallel aggregates this process has run with groups written
+/// to scratch by their morsels (for tests and diagnostics).
+pub fn spilled_groupings() -> u64 {
+    SPILLED_GROUPINGS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Counts a run on worker threads made outside this module (tests).
 pub(crate) fn note_parallel_run() {
     PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2986,8 +3065,12 @@ pub(crate) fn note_parallel_run() {
 /// What one morsel's aggregation gives the merge.
 enum Part {
     /// Its groups, a merge part of the keys' hashes at a time
-    /// ([`MERGE_PARTS`]; all in one when there is no `GROUP BY`).
-    Groups(Vec<Bucket>),
+    /// ([`MERGE_PARTS`]; all in one when there is no `GROUP BY`) — those
+    /// past its share of `work_mem` in scratch.
+    Groups {
+        buckets: Vec<Bucket>,
+        spilled: Option<Spilled>,
+    },
     /// (Rows in key order, grouped by a prefix of the key.)  Its groups no
     /// other morsel can have — of neither its first prefix nor its last —
     /// finished, each with its place, up to the first that fails, and that
@@ -3242,8 +3325,10 @@ fn parallel_aggregate<'a>(
     } else {
         1
     };
+    let spend = Spend::new(work.workers);
+    let spend = (parts == MERGE_PARTS).then_some(&spend);
     let results = work.run(0..work.ranges.len(), true, &|wctx, range| {
-        morsel(input, group, aggs, wctx, range, parts, ordered.as_deref())
+        morsel(input, group, aggs, wctx, range, ordered.as_deref(), spend)
     });
     if ordered.is_some() {
         let rows = merge_ordered(results, aggs)?;
@@ -3252,25 +3337,29 @@ fn parallel_aggregate<'a>(
     }
     // Many groups, in no order of their keys: merged on the workers, a part
     // of the keys' hashes each.
-    let partials: usize = results
-        .iter()
-        .map(|r| match r {
-            Some(Ok(Part::Groups(b))) => b.iter().map(|b| b.keys.len()).sum(),
-            _ => 0,
-        })
-        .sum();
-    if parts == MERGE_PARTS && partials >= PARALLEL_MERGE {
+    let (partials, spilled) = results.iter().fold((0, false), |(n, s), r| match r {
+        Some(Ok(Part::Groups { buckets, spilled })) => (
+            n + buckets.iter().map(|b| b.keys.len()).sum::<usize>(),
+            s || spilled.is_some(),
+        ),
+        _ => (n, s),
+    });
+    if let Some(spend) = spend
+        && (partials >= PARALLEL_MERGE || spilled)
+    {
         // Each merge part's buckets, a morsel's each, in key order.
         let mut cells: Vec<Vec<std::sync::Mutex<Option<Bucket>>>> =
             (0..MERGE_PARTS).map(|_| Vec::new()).collect();
+        let mut spills = Vec::with_capacity(results.len());
         for r in results {
             match r {
                 Some(Err(e)) => return Err(e),
                 Some(Ok(Part::TooLarge)) => return Ok(None),
-                Some(Ok(Part::Groups(buckets))) => {
+                Some(Ok(Part::Groups { buckets, spilled })) => {
                     for (cell, b) in cells.iter_mut().zip(buckets) {
                         cell.push(std::sync::Mutex::new(Some(b)));
                     }
+                    spills.push(spilled);
                 }
                 Some(Ok(Part::Ordered { .. })) => {
                     return Err(Error::internal("an ordered morsel unordered"));
@@ -3278,9 +3367,12 @@ fn parallel_aggregate<'a>(
                 None => return Err(Error::internal("a morsel not aggregated")),
             }
         }
-        let rows = merge_parallel(&cells, aggs, ctx, work.shared, work.workers)?;
+        if spilled {
+            SPILLED_GROUPINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let rows = merge_parallel(&cells, &spills, group.len(), aggs, &work, spend)?;
         PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return Ok(rows.map(|rows| -> Rows<'a> { Box::new(rows.into_iter().map(Ok)) }));
+        return Ok(Some(rows));
     }
     let mut g = Grouping::new(group, aggs);
     for r in results {
@@ -3290,7 +3382,12 @@ fn parallel_aggregate<'a>(
             Some(Ok(Part::Ordered { .. })) => {
                 return Err(Error::internal("an ordered morsel unordered"));
             }
-            Some(Ok(Part::Groups(buckets))) => {
+            Some(Ok(Part::Groups {
+                spilled: Some(_), ..
+            })) => {
+                return Err(Error::internal("spilled groups merged in one table"));
+            }
+            Some(Ok(Part::Groups { buckets, .. })) => {
                 let (keys, states) = unbucket(buckets, aggs.len());
                 let mut states: Vec<std::vec::IntoIter<Value>> =
                     states.into_iter().map(Vec::into_iter).collect();
@@ -3482,28 +3579,80 @@ fn edges(mut g: Grouping, aggs: usize, at: &[usize]) -> Result<Part> {
     })
 }
 
-/// One morsel's aggregation, on a worker.
-/// (Its groups split into `parts` buckets by their keys' hashes.)
-fn morsel(
-    input: &Plan,
-    group: &[Expr],
-    aggs: &[Agg],
-    ctx: &Ctx,
-    range: KeyRange,
-    parts: usize,
-    ordered: Option<&[usize]>,
-) -> Result<Part> {
-    let Some(mut pipe) = Pipeline::new(input, input, ctx, None, false, Some(range))? else {
-        return Err(Error::internal("a morsel's pipeline"));
-    };
-    let mut g = Grouping::new(group, aggs);
-    feed(&mut g, &mut pipe, Cx { ctx, outer: None })?;
-    if g.parts.is_some() {
-        return Ok(Part::TooLarge);
+/// An unordered parallel aggregate's memory, `work_mem` (DuckDB's
+/// radix-partitioned aggregation; Kuiper et al., ICDE 2024): the running
+/// morsels' groups and those the morsels done kept — past it, a morsel
+/// holding its fair share or more writes its groups to scratch
+/// ([`flush`]) and goes on with none; a morsel done keeps its groups in
+/// memory while those kept fit in half, and the merged parts' rows are
+/// kept within the other half.
+struct Spend {
+    limit: usize,
+    half: usize,
+    /// A running morsel's fair share: half among the workers.
+    share: usize,
+    running: std::sync::atomic::AtomicUsize,
+    kept: std::sync::atomic::AtomicUsize,
+    merged: std::sync::atomic::AtomicUsize,
+}
+
+impl Spend {
+    fn new(workers: usize) -> Self {
+        let limit = crate::budget::work_mem();
+        Spend {
+            limit,
+            half: limit / 2,
+            share: limit / (2 * workers.max(1)),
+            running: Default::default(),
+            kept: Default::default(),
+            merged: Default::default(),
+        }
     }
-    if let Some(at) = ordered {
-        return edges(g, aggs.len(), at);
+
+    /// A running morsel's groups grown from `from` to `to` bytes: whether
+    /// it is to write them to scratch.
+    fn grown(&self, from: usize, to: usize) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let running = self.running.fetch_add(to - from, Relaxed) + to - from;
+        to >= self.share && running + self.kept.load(Relaxed) > self.limit
     }
+
+    /// A running morsel's `bytes` no longer held.
+    fn release(&self, bytes: usize) {
+        self.running
+            .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether `bytes` more fit in `of`'s half (then counted).
+    fn keep(&self, of: &std::sync::atomic::AtomicUsize, bytes: usize) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        of.try_update(Relaxed, Relaxed, |k| {
+            (k + bytes <= self.half).then_some(k + bytes)
+        })
+        .is_ok()
+    }
+}
+
+/// A morsel's groups written to scratch past its share of `work_mem`: a
+/// flush at a time, each flush's groups by merge part — rows of a group's
+/// place in the morsel, its key and its partial states — and each part's
+/// byte range in the run.
+struct Spilled {
+    run: std::sync::Arc<crate::spill::Sealed>,
+    flushes: Vec<Vec<(u64, u64)>>,
+}
+
+/// A [`Spilled`] being written.
+struct Spilling {
+    run: crate::spill::Run,
+    flushes: Vec<Vec<(u64, u64)>>,
+    /// The places of the groups written so far.
+    base: u32,
+}
+
+/// `g`'s groups as partial states, split into `parts` buckets by their
+/// keys' hashes; each group's place `base` on from where `g` saw it.
+fn buckets(g: &mut Grouping, parts: usize, base: u32) -> Result<Vec<Bucket>> {
     let count = g.seen.len();
     let states = g
         .accs
@@ -3512,16 +3661,16 @@ fn morsel(
         .collect::<Result<Vec<_>>>()?;
     let seen = std::mem::take(&mut g.seen);
     if parts == 1 {
-        return Ok(Part::Groups(vec![Bucket {
-            places: (0..seen.len() as u32).collect(),
+        return Ok(vec![Bucket {
+            places: (base..base + seen.len() as u32).collect(),
             keys: seen,
             states,
-        }]));
+        }]);
     }
     let mut buckets: Vec<Bucket> = (0..parts)
         .map(|_| Bucket {
             keys: Vec::new(),
-            states: vec![Vec::new(); aggs.len()],
+            states: vec![Vec::new(); g.aggs.len()],
             places: Vec::new(),
         })
         .collect();
@@ -3538,9 +3687,106 @@ fn morsel(
             );
         }
         bucket.keys.push(k);
-        bucket.places.push(i as u32);
+        bucket.places.push(base + i as u32);
     }
-    Ok(Part::Groups(buckets))
+    Ok(buckets)
+}
+
+/// Writes `g`'s groups to `out` (a flush, by merge part) and empties `g`.
+fn flush(g: &mut Grouping, out: &mut Option<Spilling>) -> Result<()> {
+    if g.seen.is_empty() {
+        return Ok(());
+    }
+    let w = match out {
+        Some(w) => w,
+        None => out.insert(Spilling {
+            run: crate::spill::Run::new()?,
+            flushes: Vec::new(),
+            base: 0,
+        }),
+    };
+    let n = g.seen.len() as u32;
+    let mut ranges = Vec::with_capacity(MERGE_PARTS);
+    let mut row = Vec::new();
+    for b in buckets(g, MERGE_PARTS, w.base)? {
+        let from = w.run.at();
+        let mut states: Vec<std::vec::IntoIter<Value>> =
+            b.states.into_iter().map(Vec::into_iter).collect();
+        for (key, place) in b.keys.into_iter().zip(b.places) {
+            row.clear();
+            row.push(Value::Int(place as i64));
+            row.extend(key);
+            for st in &mut states {
+                row.push(st.next().unwrap_or(Value::Null));
+            }
+            w.run.push(&row)?;
+        }
+        ranges.push((from, w.run.at()));
+    }
+    w.flushes.push(ranges);
+    w.base += n;
+    *g = Grouping::new(g.group, g.aggs);
+    g.limit = usize::MAX;
+    Ok(())
+}
+
+/// One morsel's aggregation, on a worker.
+/// (With `spend` its groups are split into [`MERGE_PARTS`] buckets by
+/// their keys' hashes, and past its share go to scratch; else into one.)
+fn morsel(
+    input: &Plan,
+    group: &[Expr],
+    aggs: &[Agg],
+    ctx: &Ctx,
+    range: KeyRange,
+    ordered: Option<&[usize]>,
+    spend: Option<&Spend>,
+) -> Result<Part> {
+    let parts = if spend.is_some() { MERGE_PARTS } else { 1 };
+    let Some(mut pipe) = Pipeline::new(input, input, ctx, None, false, Some(range))? else {
+        return Err(Error::internal("a morsel's pipeline"));
+    };
+    let mut g = Grouping::new(group, aggs);
+    let cx = Cx { ctx, outer: None };
+    let mut spilling = None;
+    match spend {
+        Some(spend) => {
+            g.limit = usize::MAX;
+            let mut held = 0;
+            let fed = feed(&mut g, &mut pipe, cx, &mut |g| {
+                if spend.grown(held, g.bytes) {
+                    spend.release(g.bytes);
+                    held = 0;
+                    flush(g, &mut spilling)?;
+                } else {
+                    held = g.bytes;
+                }
+                Ok(())
+            });
+            spend.release(held);
+            fed?;
+            if !spend.keep(&spend.kept, g.bytes) {
+                flush(&mut g, &mut spilling)?;
+            }
+        }
+        None => feed(&mut g, &mut pipe, cx, &mut |_| Ok(()))?,
+    }
+    if g.parts.is_some() {
+        return Ok(Part::TooLarge);
+    }
+    if let Some(at) = ordered {
+        return edges(g, aggs.len(), at);
+    }
+    let base = spilling.as_ref().map_or(0, |w| w.base);
+    let buckets = buckets(&mut g, parts, base)?;
+    let spilled = match spilling {
+        Some(w) => Some(Spilled {
+            run: w.run.seal()?,
+            flushes: w.flushes,
+        }),
+        None => None,
+    };
+    Ok(Part::Groups { buckets, spilled })
 }
 
 /// Morsels per worker of a pipeline whose output becomes rows: small, as a

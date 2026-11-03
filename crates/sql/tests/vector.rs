@@ -169,6 +169,92 @@ fn groups_past_work_mem_agree() {
 }
 
 #[test]
+fn many_groups_past_work_mem_spill_on_the_workers() {
+    // Many groups in no order of their keys, past work_mem: the morsels
+    // write their groups to scratch and the parts read them back on the
+    // workers (no one thread partitioning) — the rows of one pass, and its
+    // first error; a part at a time, each in the order first seen, so
+    // whatever the morsels.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(31)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE g (id INT PRIMARY KEY, k BIGINT, v BIGINT, t TEXT) \
+               WITH (storage = {storage}); \
+             INSERT INTO g SELECT i, (i * 7919) % 20000, \
+               CASE WHEN i % 9973 = 0 THEN 9223372036854775807 ELSE i END, \
+               CASE WHEN i % 5 = 0 THEN NULL ELSE 'v' || (i % 3000) END \
+               FROM generate_series(1, 60000) i; \
+             ANALYZE"
+        ))
+        .unwrap();
+        let queries = [
+            "SELECT k, count(*), min(v), max(t) FROM g GROUP BY k",
+            "SELECT k % 7000, t, count(*), sum(id) FROM g GROUP BY 1, 2",
+            "SELECT k, avg(id), count(t) FROM g WHERE id % 3 <> 0 GROUP BY k",
+            // Sums past a bigint: the first group a single pass finishes.
+            "SELECT k, sum(v) FROM g GROUP BY k",
+        ];
+        let mut one = session(&db, 1024);
+        one.execute("SET parallel_workers = 1").unwrap();
+        let mut many = session(&db, 1024);
+        many.execute("SET parallel_workers = 4").unwrap();
+        let mut small = session(&db, 1024);
+        small
+            .execute("SET parallel_workers = 4; SET work_mem = '64kB'")
+            .unwrap();
+        let mut two = session(&db, 1024);
+        two.execute("SET parallel_workers = 2; SET work_mem = '64kB'")
+            .unwrap();
+        let sorted = |r: Result<Vec<Vec<String>>, String>| {
+            r.map(|mut rows| {
+                rows.sort();
+                rows
+            })
+        };
+        let before = nucleus_sql::vector::spilled_groupings();
+        for q in queries {
+            let want = outcome(&mut one, q);
+            assert_eq!(outcome(&mut many, q), want, "{storage} workers: {q}");
+            let spilled = outcome(&mut small, q);
+            assert_eq!(outcome(&mut two, q), spilled, "{storage} order: {q}");
+            assert_eq!(sorted(spilled), sorted(want), "{storage} work_mem: {q}");
+        }
+        assert!(
+            outcome(&mut one, queries[3]).is_err(),
+            "{storage}: an overflow"
+        );
+        // Few groups, each met by every morsel (in an order turning by one
+        // each round): a morsel done past half of work_mem writes its
+        // groups to scratch, and the rows fit in memory — so they come in
+        // the order a single pass first sees them.
+        let mut mid = session(&db, 1024);
+        mid.execute("SET parallel_workers = 4; SET work_mem = '1MB'")
+            .unwrap();
+        let few = "SELECT (id % 1999 + id / 1999) % 1999, count(*) FROM g GROUP BY 1";
+        let at = nucleus_sql::vector::spilled_groupings();
+        assert_eq!(
+            outcome(&mut mid, few),
+            outcome(&mut one, few),
+            "{storage}: {few}"
+        );
+        assert!(
+            nucleus_sql::vector::spilled_groupings() > at,
+            "{storage}: few groups spilled"
+        );
+        assert!(
+            nucleus_sql::vector::spilled_groupings() - before >= queries.len() as u64,
+            "{storage}: the groups went to scratch on the workers"
+        );
+    }
+}
+
+#[test]
 fn random_queries_agree() {
     let db = database();
     let rng = SplitMix64::new(3);

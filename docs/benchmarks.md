@@ -444,6 +444,20 @@ same machine, alternating with the step before):
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
 
+ClickBench's 43 queries since, on a column table (`bench/phases.py
+clickbench`, the first million rows, each query's best of three; the
+same machine, alternating with the step before):
+
+| step | sum (s) | geometric mean (ms) | Q32 (ms) | Q18 (ms) | Q39 (ms) |
+|---|---:|---:|---:|---:|---:|
+| W5 | 9.0 | 38.5 | 2,510 | 936 | 1,095 |
+| W6: groupings past `work_mem` on the workers | 5.1 | 33.7 | 623 | 239 | 330 |
+
+(Also Q33 429 → 194 ms, Q34 514 → 216; slower, Q36 86 → 101 ms and,
+on TPC-H, Q13 147 → 179 ms on row tables, 87 → 108 on column tables:
+groups that recur in every morsel, whose tables together now stay
+within `work_mem` — PLAN.md §M14.20 W6.)
+
 Reads right after a load whose `COPY` spilled (into a table made before
 it), before the vacuum makes its intents versions (W5): Q6 over
 `lineitem` 385 → 330 ms (301 ms vacuumed); a query of `orders`, loaded
@@ -452,7 +466,9 @@ and vacuumed before, 67 → 51 ms (50 ms vacuumed).
 How these steps are measured: `bench/phases.py` — `load` times each
 table's `COPY`, each index and `ANALYZE`; `reads` loads, then times the
 22 queries right after the load (`first`), as the best of `--runs`
-(`best`) and, with `--vacuum`, after a `VACUUM`.  The data is
+(`best`) and, with `--vacuum`, after a `VACUUM`.  `clickbench` loads
+`hits` and times its 43 queries the same way, from `bench/clickbench.py`'s
+cache (`create.sql`, `queries.sql`, `hits-N.tsv`).  The data is
 `bench/tpch.py --data DIR`'s generated `*.tbl` files (SF 1).  A step is
 compared with the commit before it built in a worktree into its own
 target directory (`target/base`), the two binaries run alternating, two
@@ -567,7 +583,7 @@ machine against PostgreSQL 18 in the same run:
 |---|---|---|
 | TPC-H SF 1, column tables: geometric mean ≤ 0.8× PostgreSQL's time | 0.47× (0.67× in the run before) | yes |
 | ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.24× (0.31×) | yes |
-| column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 3.1×; ClickBench Q32 3.1×, Q18 3.1× (Q4 2.9×, Q39 2.2×; TPC-H Q20 1.9×) | no |
+| column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 3.1×; ClickBench Q4 2.9× (Q32 3.1× and Q18 3.1× → 0.7× by W6's step, against the same PostgreSQL times; TPC-H Q20 1.9×) | no |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 1.11× (1.27×), ClickBench 2.13× (2.31×) | TPC-H yes, ClickBench no |
 | loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 0.9×; TPC-H 3.1× (row), 3.8× (column); ClickBench 2.4×, 2.7× | `bench/run.py` yes, the others no |
 | updates and deletes ≤ 2× (`bench/run.py`) | update 0.9×, delete 1.3× | yes |

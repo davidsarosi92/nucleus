@@ -1442,10 +1442,17 @@ more) in no order of their keys are merged on the workers too: each
 morsel splits its groups into 64 parts by their keys' hashes, and each
 part is merged on a worker (ClickHouse's two-level tables) — the rows
 then put in the order a single pass first saw them, the first error by
-that order (a combining one before any finishing one), the merge's
-memory checked against `work_mem` (past it, the single pass
-partitions).  Groups in key order are merged as §8.6
-says.  The builtin states pass between workers compactly: `count` an
+that order (a combining one before any finishing one).  All of it within
+`work_mem` (DuckDB's radix-partitioned aggregation): the running morsels
+share half of it, a share each — past its share a morsel writes its
+groups' partial states to scratch space, part by part, and goes on with
+an empty table —, a morsel done keeps its groups in memory only while
+those kept fit in the other half, and a part reads a morsel's spilled
+groups back before those it kept, so each group's place and the errors
+are those of a merge in memory.  Merged rows past half of `work_mem` in
+all come a part at a time, each part's in the order first seen, those
+that did not fit beside the others from scratch space.  Groups in key
+order are merged as §8.6 says.  The builtin states pass between workers compactly: `count` an
 integer (its own accumulator, a count a group), `min`, `max`,
 `bool_and`, `bool_or` their value, a `sum` of no doubles its value (or
 its integer sum's bytes); a group's accumulators grow by half again, not
@@ -1461,7 +1468,8 @@ values; a policy, or a table keyed by hidden row ids, scans row by row.  Sums of
 exact (Shewchuk's partials, rounded once — `fsum`), so they do not depend
 on the order either.  Not in parallel: an enclosing row (a correlated
 subquery), `EXPLAIN ANALYZE`, a subquery or volatile function in the
-pipeline, groups past `work_mem` (then the single pass partitions).  The
+pipeline, groups in key order past `work_mem` in a morsel, or merged on
+the statement's thread past it (then the single pass partitions).  The
 buffer pool reads a missing page without holding its lock, so workers
 reading cold pages do not wait on each other.
 
@@ -3043,6 +3051,16 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-03 — §M14.20 W6, groupings past `work_mem` on the workers:**
+  one bound for a parallel aggregate's groups — past `work_mem` a running
+  morsel writes its partial states to scratch by merge part and goes on
+  empty, a morsel done keeps its groups while they fit in half; the merge
+  parts read them back on the workers (they no longer give up and leave
+  it to one thread partitioning rows); merged rows past half of
+  `work_mem` a part at a time.  Scratch runs are shared between threads
+  and read by byte ranges (`Run::at`, `Sealed::range`).  ClickBench Q32
+  2.5 → 0.62 s (§8.5).
 
 - **2026-11-03 — §M14.20 W3b, batches into storage:** one batch insert
   path (`dml::insert_batch`, `TableStorage::insert_batch`) for `INSERT`,

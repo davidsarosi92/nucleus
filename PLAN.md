@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W5 and W3b ✅, W6–W8 next (D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W5 and W3b ✅, W6 under way, W7–W8 next (D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -1888,6 +1888,51 @@ the speed-up is made once, in the merged one.  The work, in this order:
   key: W3's remembered ranges serve only keys not stored);
   expressions materializing only their columns, `CASE` vectorized; joins
   emitting batches (left from V2).
+  *Done — groupings past `work_mem`, on the workers* (profiled first:
+  ClickBench Q32, `GROUP BY WatchID, ClientIP` — a million groups — on a
+  column table, 2.5 s against PostgreSQL's 0.93 s; with `work_mem` at 2
+  GB 0.52 s, Q18 0.98 → 0.21 s, Q39 1.15 → 0.24 s.  The parallel
+  aggregate ran its morsels and merge parts to the end, found the merged
+  groups past `work_mem` and threw it all away; one thread then aggregated
+  again, its new groups' rows into partitions, each aggregated a row at a
+  time — and the morsels, each with a `work_mem` of its own, had held
+  more than `work_mem` together all along).  Now one bound for the whole
+  aggregate (DuckDB's radix-partitioned aggregation, Kuiper et al.,
+  "Robust External Hash Aggregation in the Solid State Age", ICDE 2024;
+  ClickHouse's two-level tables gave the 64 parts): past `work_mem`, a
+  running morsel holding at least its fair share writes its groups'
+  partial states to scratch space, by merge part (one run a morsel, each
+  part's byte range kept: `Run::at`, `Sealed::range`; runs readable from
+  any thread, `Arc`), and goes on with an empty table; a morsel done keeps
+  its groups in memory while those kept fit in half of `work_mem`; each
+  merge part reads a morsel's spilled groups back before those it kept,
+  so places and errors are a merge in memory's; merged rows past half of
+  `work_mem` come a part at a time (each part's in the order first seen,
+  so the same whatever the morsels), those that did not fit from scratch.
+  Not taken: PostgreSQL's way, the input rows partitioned (it is what the
+  single pass does, and it stays for aggregates without partial states
+  and for one thread); a fixed share per running morsel (`work_mem` /
+  2·workers: Q36's long URLs spilled though the whole fitted, 86 → 116
+  ms).  Tested: many groups past `work_mem` give a single pass's rows and
+  error and go to scratch on the workers; two and four workers give the
+  same order; few groups met by every morsel, spilled, come in a single
+  pass's order; the 43 ClickBench queries' results the previous build's
+  at 64 MB and 4 MB but for ties at a `LIMIT`; mutations caught (spilled
+  groups lost, no flush).  Not caught by a test: a morsel's spilled
+  groups read after those it kept (in the simulation's tables no morsel
+  both spills while running and keeps the rest).  Measured, alternating
+  with W5's binary, two rounds: ClickBench on a column table, the sum of
+  the 43 queries 9.06 / 9.03 → 5.13 / 5.54 s (geometric mean 38.2 → 34
+  ms): Q32 2,545 → 623–695 ms, Q18 948 → 240, Q39 1,095 → 330, Q33 429 →
+  194–383, Q34 514 → 216–371; Q36 86 → 101–103 ms.  TPC-H unchanged in
+  sum (row tables 8.63 → 8.60 / 8.73 s, column 4.19 → 4.15 / 4.22 s; Q20
+  on rows 533 → 462–492 ms) but Q13, 147 → 179 ms on rows, 87 → 108 on
+  columns.  Q13 and Q36 are the bound's price: their groups recur in
+  every morsel (`c_custkey` over `orders`, a URL), so the morsels'
+  tables together pass `work_mem` though the merged groups fit — with
+  `work_mem` at 2 GB both are as before.  Next for them: one table a
+  worker across its morsels (DuckDB's thread-local tables), which needs
+  the merge to take a group's least rank rather than its first.
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -2987,3 +3032,9 @@ style) across a thousand seeds without failure.
   cache tried and not taken (TPC-H 4.20 → 6.72 s), the write path's
   copies measured (1.7 % of a `COPY`) and left; `bench/phases.py`, a
   step's load and reads measured against another build; next W6.
+- **2026-11-03** — §M14.20 W6: groupings past `work_mem` on the workers —
+  morsels write their groups' partial states to scratch by merge part,
+  the parts read them back, one bound for the whole aggregate; ClickBench
+  Q32 2.5 → 0.62 s, Q18 0.95 → 0.24 s, Q39 1.10 → 0.33 s (the 43 queries
+  9.06 → 5.13 s), TPC-H Q13 147 → 179 ms (its groups recur in every
+  morsel); `bench/phases.py clickbench`.  DOCS §8.5.

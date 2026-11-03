@@ -333,7 +333,7 @@ struct Distinct<'a> {
     limit: usize,
     level: u32,
     parts: Option<crate::spill::Partitions>,
-    pending: std::collections::VecDeque<Rc<crate::spill::Sealed>>,
+    pending: std::collections::VecDeque<std::sync::Arc<crate::spill::Sealed>>,
     tail: Option<Rows<'static>>,
 }
 
@@ -476,7 +476,7 @@ fn set_op<'a>(
         .into_iter()
         .zip(right_parts.seal_all()?)
         .collect();
-    let side = |run: Option<Rc<crate::spill::Sealed>>| -> Rows<'static> {
+    let side = |run: Option<std::sync::Arc<crate::spill::Sealed>>| -> Rows<'static> {
         match run {
             Some(r) => Box::new(r.iter()),
             None => Box::new(std::iter::empty()),
@@ -1537,7 +1537,7 @@ fn memory_join<'a>(left: Rows<'a>, right: Vec<Row>, spec: JoinSpec<'a>) -> Resul
 /// right side fits.
 fn grace_join<'a>(
     left: Rows<'a>,
-    right: Rc<crate::spill::Sealed>,
+    right: std::sync::Arc<crate::spill::Sealed>,
     (left_keys, right_keys): (&'a [Expr], &'a [Expr]),
     spec: JoinSpec<'a>,
     level: u32,
@@ -1598,7 +1598,7 @@ fn grace_join<'a>(
 /// join, whose unmatched right rows come after.
 fn block_join<'a>(
     mut left: Rows<'a>,
-    right: Rc<crate::spill::Sealed>,
+    right: std::sync::Arc<crate::spill::Sealed>,
     spec: JoinSpec<'a>,
 ) -> Result<Rows<'a>> {
     let limit = crate::budget::work_mem();

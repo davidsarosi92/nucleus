@@ -2,7 +2,8 @@
 //! past its share of memory (`work_mem`) goes to scratch space — the KV
 //! contract's ([`nucleus_kv::Kv::scratch`]) — and is read back from there.
 //!
-//! - [`Run`]: rows written in order, sealed, then read any number of times.
+//! - [`Run`]: rows written in order, sealed, then read any number of times,
+//!   whole or by byte ranges, from any thread.
 //! - [`Stash`]: rows kept in memory up to the limit, the rest in a run (a
 //!   materialised result: a CTE, the rows a write collects first).
 //! - [`sort`]: an external merge sort — sorted runs of a memory's worth,
@@ -15,6 +16,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use nucleus_kv::Scratch;
 
@@ -191,11 +193,17 @@ impl Run {
         self.rows
     }
 
+    /// Where the next row starts: with an earlier one, the byte range of
+    /// the rows between ([`Sealed::range`]).
+    pub fn at(&self) -> u64 {
+        self.len + self.buf.len() as u64
+    }
+
     /// Done writing: the run to read.
-    pub fn seal(mut self) -> Result<Rc<Sealed>> {
+    pub fn seal(mut self) -> Result<Arc<Sealed>> {
         self.flush()?;
-        Ok(Rc::new(Sealed {
-            scratch: self.scratch,
+        Ok(Arc::new(Sealed {
+            scratch: Mutex::new(self.scratch),
             len: self.len,
             rows: self.rows,
             enums: self.enums.values,
@@ -203,9 +211,10 @@ impl Run {
     }
 }
 
-/// A run, written: read it with [`Sealed::iter`], as often as wanted.
+/// A run, written: read it with [`Sealed::iter`] or by ranges, as often as
+/// wanted and from any thread (a block's read holds its lock).
 pub struct Sealed {
-    scratch: Box<dyn Scratch>,
+    scratch: Mutex<Box<dyn Scratch>>,
     len: u64,
     rows: u64,
     enums: Vec<Value>,
@@ -218,10 +227,17 @@ impl Sealed {
     }
 
     /// Its rows, from the first.
-    pub fn iter(self: &Rc<Self>) -> RunIter {
+    pub fn iter(self: &Arc<Self>) -> RunIter {
+        self.range(0, self.len)
+    }
+
+    /// Its rows from byte `from` to `to` — where they started and ended
+    /// as it was written ([`Run::at`]).
+    pub fn range(self: &Arc<Self>, from: u64, to: u64) -> RunIter {
         RunIter {
-            run: Rc::clone(self),
-            at: 0,
+            run: Arc::clone(self),
+            at: from,
+            end: to.min(self.len),
             block: Vec::new(),
             pos: 0,
         }
@@ -230,9 +246,11 @@ impl Sealed {
 
 /// A run's rows, read a block at a time.
 pub struct RunIter {
-    run: Rc<Sealed>,
+    run: Arc<Sealed>,
     /// Where `block` starts in scratch space.
     at: u64,
+    /// Where its rows end.
+    end: u64,
     block: Vec<u8>,
     pos: usize,
 }
@@ -244,7 +262,7 @@ impl RunIter {
             return Ok(true);
         }
         let start = self.at + self.pos as u64;
-        let left = self.run.len - start;
+        let left = self.end.saturating_sub(start);
         if left < n as u64 {
             return Ok(false);
         }
@@ -252,6 +270,8 @@ impl RunIter {
         let mut block = vec![0u8; take];
         self.run
             .scratch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .read_at(start, &mut block)
             .map_err(storage)?;
         self.at = start;
@@ -362,7 +382,7 @@ pub enum Stored {
     /// In memory.
     Memory(Vec<Row>),
     /// In scratch space.
-    Run(Rc<Sealed>),
+    Run(Arc<Sealed>),
 }
 
 impl Stored {
@@ -450,13 +470,13 @@ impl Partitions {
     }
 
     /// The partitions with rows.
-    pub fn seal(self) -> Result<Vec<Rc<Sealed>>> {
+    pub fn seal(self) -> Result<Vec<Arc<Sealed>>> {
         self.runs.into_iter().flatten().map(Run::seal).collect()
     }
 
     /// Every partition, by number (`None`: no rows) — to pair with another
     /// side's partitions of the same level.
-    pub fn seal_all(self) -> Result<Vec<Option<Rc<Sealed>>>> {
+    pub fn seal_all(self) -> Result<Vec<Option<Arc<Sealed>>>> {
         self.runs
             .into_iter()
             .map(|r| r.map(Run::seal).transpose())
@@ -538,7 +558,7 @@ struct Merge {
 }
 
 impl Merge {
-    fn new(runs: &[Rc<Sealed>], flags: Rc<[(bool, bool)]>, width: usize) -> Result<Self> {
+    fn new(runs: &[Arc<Sealed>], flags: Rc<[(bool, bool)]>, width: usize) -> Result<Self> {
         let mut m = Merge {
             runs: runs.iter().map(Sealed::iter).collect(),
             heap: BinaryHeap::new(),
@@ -594,8 +614,8 @@ pub fn sort(
     let width = flags.len();
     let mut buffer: Vec<(Vec<Value>, Row)> = Vec::new();
     let mut bytes = 0;
-    let mut runs: Vec<Rc<Sealed>> = Vec::new();
-    let write = |buffer: &mut Vec<(Vec<Value>, Row)>| -> Result<Rc<Sealed>> {
+    let mut runs: Vec<Arc<Sealed>> = Vec::new();
+    let write = |buffer: &mut Vec<(Vec<Value>, Row)>| -> Result<Arc<Sealed>> {
         buffer.sort_by(|(a, _), (b, _)| compare(&flags, a, b));
         let mut run = Run::new()?;
         for (keys, row) in buffer.drain(..) {

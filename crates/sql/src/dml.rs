@@ -1,7 +1,7 @@
 //! Writes: INSERT, UPDATE, DELETE — constraints and index maintenance.
 
 use std::collections::HashSet;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use nucleus_kv::KvTxn;
 
@@ -359,7 +359,7 @@ const SORT_CHUNK: usize = 1 << 16;
 struct EntrySorter {
     budget: usize,
     entries: Entries,
-    runs: Vec<Rc<crate::spill::Sealed>>,
+    runs: Vec<Arc<crate::spill::Sealed>>,
 }
 
 impl EntrySorter {
