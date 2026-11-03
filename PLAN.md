@@ -2167,6 +2167,21 @@ the speed-up is made once, in the merged one.  The work, in this order:
   million groups costs half again.  The row-at-a-time `Expr::eval` keeps a
   1.7 kB frame for every node (`#1 > 300` is three), which its largest
   arms size; the next step gives it a small one.
+  *Done — a small frame for `Expr::eval`*: its common nodes (columns,
+  literals, parameters, the operators, `IS NULL`) stay in it, the others
+  go to `eval_other` (not inlined), and the error a missing parameter
+  makes is built out of line — the frame 1,680 → 480 bytes a node.  The
+  compilers' rule of outlining the cold paths of a hot function (LLVM's
+  hot/cold splitting pass); not taken: PostgreSQL's
+  `ExecInterpExpr` — an expression compiled to a flat array of steps run
+  by one loop, no recursion — which a row-at-a-time path not meant to
+  stay hot does not repay, now that the vectorized path takes most rows.
+  Tested by the whole suite (no behaviour changes).  Measured,
+  alternating with the step before, two rounds: TPC-H on column tables
+  3.92 / 3.92 → 3.74 / 3.75 s (Q18 305 / 313 → 267 / 262 ms: the layout
+  loss above gone, and below the 257 before it); on row tables 8.56 /
+  8.20 → 8.05 / 7.98 s; ClickBench 2.47 / 2.47 → 2.41 / 2.37 s (Q32 427
+  / 442 → 408 / 412 ms).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3302,3 +3317,7 @@ style) across a thousand seeds without failure.
   buffer pool frames and shards on cache lines of their own.  TPC-H Q20
   on column tables 577 → 173 ms, Q2 49 → 25, Q17 88 → 31; on row tables
   Q20 509 → 175.  DOCS §8.5.
+- **2026-11-04** — §M14.20 W6: a small frame for `Expr::eval` (its
+  less common nodes in `eval_other`): 1,680 → 480 bytes a node; TPC-H
+  on column tables 3.92 → 3.75 s, row tables 8.4 → 8.0, ClickBench 2.47
+  → 2.39.  DOCS §8.5.

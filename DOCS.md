@@ -1395,7 +1395,11 @@ through the function's batch kernel when it has one
 (`ScalarFunction::call_batch`, §8.12: `substr` over text and `char(n)`
 with constant positions), else casts and calls a value at a time over
 the batch's vectors; anything else (`CASE`, correlated subqueries,
-decimal `/`, …) a row at a time.  Text is a column of offsets and bytes
+decimal `/`, …) a row at a time.  A row at a time, `Expr::eval` takes
+its common nodes (columns, literals, parameters, operators, `IS NULL`)
+itself and the others in a function of their own (`eval_other`), so each
+node of a row's expression takes a small frame (480 bytes, not 1.7 kB).
+Text is a column of offsets and bytes
 (Arrow's layout), `char(n)` the same as stored (blank-padded), a vector
 of its own from row and column storage alike; dates and times their
 integers.  The kernels
@@ -3116,6 +3120,11 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-04 — §M14.20 W6, a small frame for `Expr::eval`:** its
+  less common nodes evaluated in `eval_other`, so each node of a row's
+  expression takes 480 bytes of stack, not 1.7 kB (TPC-H Q18 305 → 262
+  ms on column tables).
 
 - **2026-11-03 — §M14.20 W6, correlated subqueries on the workers:** a
   correlated subquery runs on worker threads for each row, as on the

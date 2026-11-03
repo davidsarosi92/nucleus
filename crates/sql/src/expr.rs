@@ -349,8 +349,19 @@ pub struct Env<'a> {
     pub ctx: &'a Ctx<'a>,
 }
 
+/// (Out of [`Expr::eval`]'s frame.)
+#[cold]
+#[inline(never)]
+fn no_parameter(i: usize) -> Error {
+    Error::invalid_parameter(format!("there is no parameter ${}", i + 1))
+}
+
 impl Expr {
-    /// Evaluates the expression.
+    /// The expression's value for `env`'s rows.  Its common nodes here,
+    /// the others in [`Expr::eval_other`]: the frame of a function with
+    /// one `match` is sized by its largest arm, and every node of a row's
+    /// expression takes one (PLAN.md §M14.20 W6: 1.7 kB a node, an
+    /// `#1 > 300` three of them, when all the arms were here).
     pub fn eval(&self, env: &Env) -> Result<Value> {
         Ok(match self {
             Expr::Literal(v) => v.clone(),
@@ -371,9 +382,12 @@ impl Expr {
                     .cloned()
                     .ok_or_else(|| Error::internal("outer column out of range"))?
             }
-            Expr::Param(i) => env.ctx.params.get(*i).cloned().ok_or_else(|| {
-                Error::invalid_parameter(format!("there is no parameter ${}", i + 1))
-            })?,
+            Expr::Param(i) => env
+                .ctx
+                .params
+                .get(*i)
+                .cloned()
+                .ok_or_else(|| no_parameter(*i))?,
             Expr::Unary(op, e) => unary(*op, e.eval(env)?)?,
             Expr::Binary(BinaryOp::And, l, r) => {
                 let a = l.eval(env)?.truth()?;
@@ -399,6 +413,14 @@ impl Expr {
             }
             Expr::Binary(op, l, r) => binary(*op, l.eval(env)?, r.eval(env)?)?,
             Expr::IsNull(e, negated) => Value::Bool(e.eval(env)?.is_null() != *negated),
+            _ => return self.eval_other(env),
+        })
+    }
+
+    /// [`Expr::eval`]'s other nodes.
+    #[inline(never)]
+    fn eval_other(&self, env: &Env) -> Result<Value> {
+        Ok(match self {
             Expr::InList(e, list, negated) => {
                 let v = e.eval(env)?;
                 let mut items = Vec::with_capacity(list.len());
@@ -508,6 +530,13 @@ impl Expr {
                     Value::Bool(*all)
                 }
             }
+            Expr::Literal(_)
+            | Expr::Column(_)
+            | Expr::Outer { .. }
+            | Expr::Param(_)
+            | Expr::Unary(..)
+            | Expr::Binary(..)
+            | Expr::IsNull(..) => unreachable!("evaluated by Expr::eval"),
         })
     }
 
