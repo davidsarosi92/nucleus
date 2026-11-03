@@ -569,3 +569,46 @@ fn same_tree_on_workers(filtered: bool, frames: usize) {
     assert!(one.1 == many.1, "the same pages, byte for byte");
     assert_eq!((one.2, one.3), (many.2, many.3), "the same pages free");
 }
+
+#[test]
+fn a_scan_reads_ahead_and_a_short_range_does_not() {
+    let p = platform(41);
+    let mut tree = new_tree(&p, 4096);
+    let entries: Vec<(Vec<u8>, Vec<u8>)> = (0..50_000u64)
+        .map(|i| (i.to_be_bytes().to_vec(), vec![i as u8; 40]))
+        .collect();
+    tree.insert_sorted(&entries).unwrap();
+    commit(&tree).unwrap();
+    // Short ranges, far apart, on a cold pool: each reads the leaves it
+    // needs (at most two of ~400) and its path, no leaves ahead.
+    let tree = reopen(&p, 4096).unwrap();
+    for r in 0..20u64 {
+        let lo = (r * 2400 + 7 * r).to_be_bytes();
+        let hi = (r * 2400 + 7 * r + 50).to_be_bytes();
+        let mut range = tree
+            .range(Bound::Included(&lo[..]), Bound::Excluded(&hi[..]))
+            .unwrap();
+        let (mut k, mut v) = (Vec::new(), Vec::new());
+        let mut n = 0;
+        while range.next_into(&mut k, &mut v).unwrap() {
+            n += 1;
+        }
+        assert_eq!(n, 50);
+    }
+    let s = tree.pool().stats();
+    assert!(s.misses <= 20 * 2 + 8, "{s:?}");
+    // A full scan on a cold pool: most leaves arrive read ahead, so their
+    // fetches hit (besides their parents' — without it, about one hit per
+    // miss).
+    let tree = reopen(&p, 4096).unwrap();
+    let mut range = tree.range(Bound::Unbounded, Bound::Unbounded).unwrap();
+    let (mut k, mut v) = (Vec::new(), Vec::new());
+    let mut n = 0u64;
+    while range.next_into(&mut k, &mut v).unwrap() {
+        assert_eq!(k, n.to_be_bytes());
+        n += 1;
+    }
+    assert_eq!(n, 50_000);
+    let s = tree.pool().stats();
+    assert!(s.hits * 10 > s.misses * 18, "{s:?}");
+}

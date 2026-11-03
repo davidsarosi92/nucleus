@@ -431,6 +431,17 @@ with W4's binary on a loaded machine: the row load 36.9 / 31.9 → 30.4 /
 29.0 s; the column load 33.8 / 34.3 → 26.2 / 25.7 s, its `lineitem`
 `COPY` 12.2 → 7.8–8.5 s, its `ANALYZE` 5.7 → 2.9–3.2 s.)
 
+The 22 queries since (SF 1, the sum of each query's best of three, the
+same machine, alternating with the step before):
+
+| step | row tables (s) | column tables (s) |
+|---|---:|---:|
+| W3b | 10.0 | 4.6 |
+| W5: page checks without the pager's lock, read-ahead, CRC-32C interleaved | 8.9 | 4.6 |
+
+(Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
+336, Q18 782 → 611.)
+
 ## ClickBench
 
 `bench/clickbench.py` (§M14.20 V10): ClickBench's `hits` table (its

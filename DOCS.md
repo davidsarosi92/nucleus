@@ -240,7 +240,10 @@ Payload: 8168 bytes (`PAYLOAD_SIZE`).  Types below 16 belong to the pager
 18 overflow.  Verification names the failure: `checksum mismatch`, `never
 written (all zeros)`, `page id mismatch (misdirected write)`.  `crc32c` is
 CRC-32C by the CPU's instructions where it has them (ARMv8 CRC, SSE 4.2;
-`nucleus_kernels::crc32c`), else portable and table-driven — the same
+`nucleus_kernels::crc32c`; three streams over neighbouring blocks at
+once, joined by shifting with tables — Mark Adler's `crc32c.c`, Intel's
+iSCSI paper —, an 8 KiB page in 353 ns rather than one stream's 934 on
+Apple M-series, §M14.20 W5), else portable and table-driven — the same
 value, checked against the RFC 3720 vectors and against each other.
 
 ### 4.2 Pager (`pager::Pager`)
@@ -253,11 +256,15 @@ one epoch is free at once.  So a crash at any moment leaves the last
 committed state untouched, and `sync` moves to a new one with one header
 write.
 
-**API.**  `create`, `open`; `read_page`, `write_page`, `is_writable`,
+**API.**  `create`, `open`; `read_page`, `read_pages` (a run of
+neighbouring pages in one read, each verified), `write_page`, `is_writable`,
 `allocate` (lowest free page, else grows the file), `free` (refuses double
 frees); `meta`/`set_meta` (16 `u64` slots committed atomically with the
 pages); `sync`, `close`; `check` (on-disk free list vs. memory, no page in
 two places), `accounting` (free / pending / free-list pages / allocated).
+A read checks its page id against the page count and the poisoned flag
+mirrored in atomics, not under the pager's lock (§M14.20 W5: a parallel
+scan's workers queued on it — 14 % of TPC-H Q1's time on row tables).
 
 **Header** — pages 0 and 1; copy `seq % 2` holds sequence number `seq`; a
 commit writes the older copy, `open` takes the valid copy with the highest
@@ -314,7 +321,17 @@ from one root share it), a change writes it; a frame's pin count and
 reference bit are atomics, the bit written only when it changes, and the
 page table hashes a page id with one multiplication.  A miss reads
 the page without any (and reads again if a page was written back
-meanwhile), so threads reading cold pages do not wait on each other.  Errors: `PoolExhausted` (every
+meanwhile), so threads reading cold pages do not wait on each other.
+`read_ahead(ids)` reads a run of consecutive page ids (up to 16, 128 KiB —
+PostgreSQL's `io_combine_limit`) with one read, into frames not yet
+referenced, so the clock takes them first if unused; pages cached
+meanwhile are kept, and a write-back meanwhile drops the rest.  A B+tree
+cursor moving to a leaf that is not cached reads the parent's next leaves
+with it, the window growing with the leaves it has moved through since
+its last seek (1, 2, 4 … 16, as Linux's read-ahead ramps up), so an index
+lookup's entries across a leaf's end read one page and a scan soon reads
+16 at a time (§M14.20 W5: with the pager's lock gone, `pread` 23 % →
+10 % of TPC-H Q1's time on row tables).  Errors: `PoolExhausted` (every
 frame pinned), `Pinned`.  `stats()`: hits, misses, evictions, write-backs.
 
 ### 4.4 B+tree (`btree::BTree`, `node`)

@@ -27,7 +27,7 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use crate::buffer::{BufferPool, PageRef};
+use crate::buffer::{BufferPool, PageRef, READ_AHEAD};
 use crate::error::{Error, Result};
 use crate::node::{
     Internal, LEAF, Leaf, MAX_INLINE_CELL, MAX_KEY, MIN_FILL, Node, OVERFLOW, OVERFLOW_CAPACITY,
@@ -414,6 +414,7 @@ impl BTree {
             leaf: None,
             leaf_len: 0,
             pos: 0,
+            run: 0,
         }
     }
 
@@ -1245,6 +1246,12 @@ pub struct Cursor<'t> {
     leaf_len: usize,
     /// The cursor sits before entry `pos` of the leaf.
     pos: usize,
+    /// Leaves moved to one after another since the last seek: the
+    /// read-ahead's window grows with them (1, 2, 4 … [`READ_AHEAD`]
+    /// leaves), so an index lookup's few entries across a leaf's end read
+    /// one page and a scan soon reads many — Linux's read-ahead ramps up
+    /// the same way.
+    run: u32,
 }
 
 impl std::fmt::Debug for Cursor<'_> {
@@ -1287,6 +1294,7 @@ impl<'t> Cursor<'t> {
     /// Moves before the first entry `>= key`.
     pub fn seek(&mut self, key: &[u8]) -> Result<()> {
         self.path.clear();
+        self.run = 0;
         self.descend(
             self.tree.root,
             |v| v.child_index(key),
@@ -1324,6 +1332,7 @@ impl<'t> Cursor<'t> {
     /// Moves before the first entry `> key`.
     pub fn seek_after(&mut self, key: &[u8]) -> Result<()> {
         self.path.clear();
+        self.run = 0;
         self.descend(
             self.tree.root,
             |v| v.child_index(key),
@@ -1334,6 +1343,7 @@ impl<'t> Cursor<'t> {
     /// Moves after the last entry.
     pub fn seek_end(&mut self) -> Result<()> {
         self.path.clear();
+        self.run = 0;
         self.descend(self.tree.root, |v| Ok(v.len()), |v| Ok(v.len()))
     }
 
@@ -1427,19 +1437,47 @@ impl<'t> Cursor<'t> {
                 return Ok(true);
             }
             // Up to the first ancestor with a child to the right, then down
-            // its leftmost path.
+            // its leftmost path.  The next leaf, if not cached, is read with
+            // the parent's next leaves after it (a read-ahead, its window
+            // growing with the run of leaves).
+            let window = 1usize << self.run.min(READ_AHEAD.trailing_zeros());
+            self.run = self.run.saturating_add(1);
+            let mut parent = window > 1;
             loop {
                 let Some((id, i, n)) = self.path.pop() else {
                     return Ok(false);
                 };
                 if i + 1 < n {
-                    let child = self.child(id, i + 1)?;
+                    let child = if parent {
+                        self.next_children(id, i + 1, n.min(i + 1 + window))?
+                    } else {
+                        self.child(id, i + 1)?
+                    };
                     self.path.push((id, i + 1, n));
                     self.descend(child, |_| Ok(0), |_| Ok(0))?;
                     break;
                 }
+                parent = false;
             }
         }
+    }
+
+    /// Child `i` of the leaves' parent `id`; when it is not cached, it and
+    /// the children after it before `n` are read ahead together.
+    fn next_children(&self, id: PageId, i: usize, n: usize) -> Result<PageId> {
+        let r = self.tree.pool.fetch(id)?;
+        let page = r.read();
+        let corrupt = |reason| Error::Corrupt { page: id, reason };
+        let v = View::new(&page).map_err(corrupt)?;
+        let child = v.child(i).map_err(corrupt)?;
+        if !self.tree.pool.contains(child) {
+            let ids = (i..n)
+                .map(|j| v.child(j).map_err(corrupt))
+                .collect::<Result<Vec<_>>>()?;
+            drop(page);
+            self.tree.pool.read_ahead(&ids);
+        }
+        Ok(child)
     }
 
     /// The entry before the cursor, moving before it.

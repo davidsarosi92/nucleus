@@ -192,3 +192,37 @@ fn concurrent_stress_real() {
     stress(&RealPlatform::new().unwrap(), &dir.join("data"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn read_ahead_caches_a_run_and_keeps_what_is_cached() {
+    let (_p, a) = pool(64);
+    let ids = make_pages(&a, 32);
+    a.flush().unwrap();
+    // A second pool over the same file: one page changed in it, not yet
+    // written back — newer than the file.
+    let b = BufferPool::new(Arc::clone(a.pager()), 64);
+    write_u64_at(
+        b.fetch(ids[5]).unwrap().write().unwrap().payload_mut(),
+        0,
+        999,
+    );
+    let before = b.stats();
+    b.read_ahead(&ids[..20]);
+    // One read of 16 pages (READ_AHEAD), the changed one left as it was.
+    assert_eq!(b.stats().misses - before.misses, 15);
+    for (i, id) in ids[..16].iter().enumerate() {
+        assert_eq!(tag(&b, *id), if i == 5 { 999 } else { id.0 });
+    }
+    let s = b.stats();
+    assert_eq!((s.hits - before.hits, s.misses - before.misses), (16, 15));
+    // Not consecutive, or past the file's end: nothing read.
+    b.read_ahead(&[ids[20], ids[22]]);
+    b.read_ahead(&[ids[31], PageId(ids[31].0 + 1)]);
+    assert_eq!(b.stats().misses, s.misses);
+    // A pool smaller than the run: its pages still right.
+    let c = BufferPool::new(Arc::clone(a.pager()), 4);
+    c.read_ahead(&ids[16..]);
+    for id in &ids[16..] {
+        assert_eq!(tag(&c, *id), id.0);
+    }
+}

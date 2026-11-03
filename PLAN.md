@@ -1780,6 +1780,30 @@ the speed-up is made once, in the merged one.  The work, in this order:
   checks without its mutex; a smaller `Value`; decimals cached as 64-bit
   mantissas, a scan-resistant segment cache; one copy of a written byte
   where there are four or five; CRC-32C interleaved.
+  *Done — page reads* (profiled first, TPC-H SF 1 on row tables: in Q1
+  13.8 % of the busy time waited on the pager's mutex, held only to check
+  a page id, and 17.3 % was `pread`, a page at a time from the OS cache).
+  The checks against the page count and the poisoned flag mirrored in
+  atomics (the count only grows); then `pread` 22.7 %.  Coalesced reads
+  (PostgreSQL 17's read stream, `io_combine_limit` = 128 kB): a cursor
+  moving to a leaf not cached reads the parent's next leaves with it, up
+  to 16 pages in one read into frames the clock takes first if unused —
+  at first a fixed 16, which sped the scans (Q1 −20 %, Q6 −30 %) but
+  slowed index lookups whose entries crossed a leaf's end (Q17 2×, Q21
+  +20 %), so the window ramps up with the leaves moved through since the
+  last seek, 1, 2, 4 … 16 (Linux's read-ahead): `pread` 9.8 %, no query
+  slower.  CRC-32C with three interleaved streams joined by table shifts
+  (Mark Adler's `crc32c.c`; Intel, "Fast CRC Computation for iSCSI
+  Polynomial Using CRC32 Instruction"): an 8 KiB page 934 → 353 ns.
+  Tested: a run read once, a page dirty in the pool kept, nothing read for
+  ids not consecutive or past the end, a pool smaller than the run; short
+  ranges on a cold pool read no leaves ahead, a full scan's leaves arrive
+  read ahead; CRC lengths around the blocks; mutations caught.  Measured,
+  the 22 queries on row tables, alternating with W3b's binary: 10.0 →
+  8.9 s (column tables unchanged, 4.6 s: their segments come from the
+  segment cache).  Not taken: `preadv` into the frames (a second `unsafe`
+  call in the platform crate, for a copy of 8 KiB per page); an
+  asynchronous read-ahead (the scan's workers read in parallel already).
 - **W6 — the queries above 3×.**  `count(DISTINCT)` planned as a
   grouping (the vectorized, parallel one); top-N; typed aggregate states
   and one key table for groupings, `DISTINCT`, set operations and join
@@ -2869,3 +2893,7 @@ style) across a thousand seeds without failure.
   the storage's sampling method (`TableStorage::sample`); fixed enum
   labels read from column segments; the row load 34.0 → 29.0 s, the
   column load 34 → 26–28 s.  DOCS §8.7, §8.8, §8.15.
+- **2026-11-03** — §M14.20 W5, page reads: the pager's page checks
+  without its lock, coalesced reads ahead of a cursor (a window ramping
+  1 → 16 pages), CRC-32C in three interleaved streams; the 22 TPC-H
+  queries on row tables 10.0 → 8.9 s.  DOCS §4.1–§4.3.

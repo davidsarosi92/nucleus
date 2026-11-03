@@ -88,6 +88,9 @@ impl std::hash::Hasher for PageHasher {
 const SHARD_FRAMES: usize = 256;
 const MAX_SHARDS: usize = 16;
 
+/// Pages read at once ahead of a scan ([`BufferPool::read_ahead`]): 128 KiB.
+pub const READ_AHEAD: usize = 16;
+
 /// Counters, for tests and diagnostics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PoolStats {
@@ -294,6 +297,60 @@ impl BufferPool {
             }
             self.misses.fetch_add(1, Ordering::Relaxed);
             return self.load(inner, id, page);
+        }
+    }
+
+    /// Whether page `id` is in a frame.
+    pub fn contains(&self, id: PageId) -> bool {
+        self.shard(id)
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .table
+            .contains_key(&id)
+    }
+
+    /// Reads ahead: the run of consecutive page ids at the start of `ids`
+    /// (at most [`READ_AHEAD`]; the caller found `ids[0]` not cached), with
+    /// one read of the file, into frames — those not cached meanwhile,
+    /// unpinned and not yet referenced, so the clock takes them first if
+    /// they go unused.  PostgreSQL's read stream combines a scan's
+    /// neighbouring blocks into one read the same way (`io_combine_limit`,
+    /// 128 kB).  Only an optimisation: on any failure nothing more is
+    /// cached, and each page's own fetch reads (and reports) it.
+    pub fn read_ahead(&self, ids: &[PageId]) {
+        let Some(&first) = ids.first() else { return };
+        let n = ids
+            .iter()
+            .take(READ_AHEAD)
+            .enumerate()
+            .take_while(|&(k, &id)| id.0 == first.0 + k as u64)
+            .count();
+        if n < 2 {
+            return;
+        }
+        let epoch = self.writebacks.load(Ordering::Acquire);
+        let Ok(pages) = self.pager.read_pages(first, n) else {
+            return;
+        };
+        for (page, id) in pages.into_iter().zip(first.0..) {
+            let id = PageId(id);
+            let mut inner = self.lock(id);
+            if self.writebacks.load(Ordering::Acquire) != epoch {
+                // A page went back to the file meanwhile: what was read may
+                // be older than it.
+                return;
+            }
+            if inner.table.contains_key(&id) {
+                continue;
+            }
+            let Ok(frame) = self.victim(&mut inner) else {
+                return;
+            };
+            let f = self.frame(frame);
+            *f.page.write().unwrap_or_else(|e| e.into_inner()) = page;
+            f.referenced.store(false, Ordering::Relaxed);
+            self.install(&mut inner, frame, id, false);
+            self.misses.fetch_add(1, Ordering::Relaxed);
         }
     }
 

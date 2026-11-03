@@ -48,6 +48,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use nucleus_platform::{File, FileSystem, OpenMode};
@@ -222,6 +223,13 @@ pub struct Accounting {
 pub struct Pager {
     file: Box<dyn File>,
     state: Mutex<State>,
+    /// The state's page count and poisoned flag, mirrored (changed under
+    /// the state lock, read without it): a page read checks its id against
+    /// them, so concurrent reads never meet on the lock (§M14.20 W5).  The
+    /// count only grows; a reader learns a page's id from a tree published
+    /// after the page was allocated, so it never sees a count too small.
+    pages: AtomicU64,
+    poisoned: AtomicBool,
 }
 
 impl std::fmt::Debug for Pager {
@@ -296,6 +304,8 @@ impl Pager {
     fn with(file: Box<dyn File>, hdr: Header, free: BTreeSet<u64>, fl: Vec<u64>) -> Self {
         let known_len = file.size().map_or(0, |n| n / PAGE_SIZE as u64);
         Self {
+            pages: AtomicU64::new(hdr.page_count),
+            poisoned: AtomicBool::new(false),
             file,
             state: Mutex::new(State {
                 durable: hdr.clone(),
@@ -353,8 +363,50 @@ impl Pager {
 
     /// Reads and verifies page `id`.
     pub fn read_page(&self, id: PageId) -> Result<Page> {
-        Self::check_data_page(&*self.begin()?, id)?;
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(Error::Poisoned);
+        }
+        if id < FIRST_DATA_PAGE || id.0 >= self.pages.load(Ordering::Acquire) {
+            return Err(Error::InvalidPage(id));
+        }
         read_raw(self.file.as_ref(), id)
+    }
+
+    /// Reads and verifies the `n` pages from `first` on with one read of
+    /// the file (a scan's read-ahead, §M14.20 W5).
+    pub fn read_pages(&self, first: PageId, n: usize) -> Result<Vec<Page>> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(Error::Poisoned);
+        }
+        let end = first.0.checked_add(n as u64);
+        if first < FIRST_DATA_PAGE || end.is_none_or(|e| e > self.pages.load(Ordering::Acquire)) {
+            return Err(Error::InvalidPage(first));
+        }
+        let mut buf = vec![0u8; n * PAGE_SIZE];
+        match self.file.read_exact_at(&mut buf, first.offset()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(Error::Corrupt {
+                    page: first,
+                    reason: "never written (past end of file)",
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
+        buf.as_chunks::<PAGE_SIZE>()
+            .0
+            .iter()
+            .zip(first.0..)
+            .map(|(bytes, id)| {
+                let mut page = Page::new(PageType::UNUSED);
+                page.bytes_mut().copy_from_slice(bytes);
+                page.verify(PageId(id)).map_err(|reason| Error::Corrupt {
+                    page: PageId(id),
+                    reason,
+                })?;
+                Ok(page)
+            })
+            .collect()
     }
 
     /// Writes `page` at `id`, stamping its id and checksum.  Only pages
@@ -398,6 +450,7 @@ impl Pager {
             Some(id) => id,
             None => {
                 s.hdr.page_count += 1;
+                self.pages.store(s.hdr.page_count, Ordering::Release);
                 s.hdr.page_count - 1
             }
         };
@@ -521,6 +574,7 @@ impl Pager {
                 None => {
                     list_pages.push(s.hdr.page_count);
                     s.hdr.page_count += 1;
+                    self.pages.store(s.hdr.page_count, Ordering::Release);
                 }
             }
         }
@@ -553,6 +607,7 @@ impl Pager {
         let mut s = self.lock();
         if let Err(e) = result {
             s.poisoned = true;
+            self.poisoned.store(true, Ordering::Release);
             return Err(e);
         }
         let f = s.frozen.take().expect("the commit in flight");
