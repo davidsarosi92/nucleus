@@ -241,20 +241,21 @@ fn encode_vector(v: Vector, n: usize) -> (Vec<u8>, Stats) {
             let stats = measured(&v, nulls, &|i, j| key(i).cmp(key(j)));
             (out, stats)
         }
-        Vector::Dec(scale, ms, nulls) if ms.iter().all(|&m| i64::try_from(m).is_ok()) => {
+        Vector::Dec(scale, ms, nulls) if (0..ms.len()).all(|i| i64::try_from(ms.at(i)).is_ok()) => {
             header(&mut out, DECIMALS, n, nulls.as_deref());
-            let lo = ms.iter().copied().min().unwrap_or(0) as i64;
-            let hi = ms.iter().copied().max().unwrap_or(0) as i64;
+            let at = |i: usize| ms.at(i) as i64;
+            let lo = (0..ms.len()).map(at).min().unwrap_or(0);
+            let hi = (0..ms.len()).map(at).max().unwrap_or(0);
             let bits = bits_for((hi as i128 - lo as i128) as u64);
             out.push(*scale as u8);
             out.extend_from_slice(&lo.to_le_bytes());
             out.push(bits);
             pack(
-                ms.iter().map(|&x| (x as i64).wrapping_sub(lo) as u64),
+                (0..ms.len()).map(|i| at(i).wrapping_sub(lo) as u64),
                 bits,
                 &mut out,
             );
-            let stats = measured(&v, nulls, &|i, j| ms[i].cmp(&ms[j]));
+            let stats = measured(&v, nulls, &|i, j| ms.at(i).cmp(&ms.at(j)));
             (out, stats)
         }
         _ => {
@@ -634,11 +635,15 @@ fn decode_kinds(b: &[u8]) -> Result<Vector> {
                     if nulls.as_ref().is_some_and(|z| z[i]) {
                         0
                     } else {
-                        i128::from(lo.wrapping_add(d as i64))
+                        lo.wrapping_add(d as i64)
                     }
                 })
                 .collect();
-            Ok(Vector::Dec(scale, data, nulls))
+            Ok(Vector::Dec(
+                scale,
+                crate::vector::Mantissas::Narrow(data),
+                nulls,
+            ))
         }
         _ => Err(bad()),
     }

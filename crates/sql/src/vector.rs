@@ -64,7 +64,7 @@ pub enum Vector {
     /// Decimals at one scale: their mantissas (each within
     /// [`crate::decimal::MAX_DIGITS`] digits; a `NULL`'s 0), and which are
     /// `NULL`.
-    Dec(u32, Vec<i128>, Option<Vec<bool>>),
+    Dec(u32, Mantissas, Option<Vec<bool>>),
     /// Any values.
     Values(Vec<Value>),
     /// Text or `char(n)` values by their codes in a dictionary (its
@@ -73,6 +73,75 @@ pub enum Vector {
     /// stored.  Only between a scan and the filter that asked for it
     /// ([`DictFilter`]), which tests the entries rather than the rows.
     Dict(std::sync::Arc<Vector>, Vec<u32>, Option<Vec<bool>>),
+}
+
+/// A decimal vector's mantissas: 64-bit ones while each fits — as a column
+/// segment stores them, so a cached column takes half the memory and a
+/// scan reads half the bytes (§M14.20 W5) —, else 128-bit (a product's,
+/// a sum's).  Read a row at a time widened ([`at`](Self::at)).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Mantissas {
+    /// Each fits 64 bits.
+    Narrow(Vec<i64>),
+    /// Any.
+    Wide(Vec<i128>),
+}
+
+impl Mantissas {
+    /// How many.
+    pub fn len(&self) -> usize {
+        match self {
+            Mantissas::Narrow(d) => d.len(),
+            Mantissas::Wide(d) => d.len(),
+        }
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Row `i`'s.
+    #[inline]
+    pub fn at(&self, i: usize) -> i128 {
+        match self {
+            Mantissas::Narrow(d) => i128::from(d[i]),
+            Mantissas::Wide(d) => d[i],
+        }
+    }
+
+    /// Narrow when every one fits.
+    pub fn of(wide: Vec<i128>) -> Self {
+        if wide.iter().all(|&m| i64::try_from(m).is_ok()) {
+            Mantissas::Narrow(wide.into_iter().map(|m| m as i64).collect())
+        } else {
+            Mantissas::Wide(wide)
+        }
+    }
+
+    fn slice(&self, range: std::ops::Range<usize>) -> Self {
+        match self {
+            Mantissas::Narrow(d) => Mantissas::Narrow(d[range].to_vec()),
+            Mantissas::Wide(d) => Mantissas::Wide(d[range].to_vec()),
+        }
+    }
+
+    fn pick(&self, rows: &[u32]) -> Self {
+        match self {
+            Mantissas::Narrow(d) => {
+                Mantissas::Narrow(rows.iter().map(|&i| d[i as usize]).collect())
+            }
+            Mantissas::Wide(d) => Mantissas::Wide(rows.iter().map(|&i| d[i as usize]).collect()),
+        }
+    }
+
+    /// The first `len` as an operand, borrowed.
+    fn rows(&self, len: usize) -> DecRows<'_> {
+        match self {
+            Mantissas::Narrow(d) => DecRows::Narrow(&d[..len]),
+            Mantissas::Wide(d) => DecRows::Col(d[..len].into()),
+        }
+    }
 }
 
 /// Which kind of date / time a [`Vector::Time`] holds.
@@ -135,7 +204,7 @@ impl Vector {
             ),
             Vector::Time(k, d, n) if !is_null_at(n, i) => k.value(d[i]),
             Vector::Dec(s, d, n) if !is_null_at(n, i) => {
-                Value::Numeric(crate::decimal::Decimal::raw(d[i], *s))
+                Value::Numeric(crate::decimal::Decimal::raw(d.at(i), *s))
             }
             Vector::Values(v) => v[i].clone(),
             Vector::Dict(d, c, n) if !is_null_at(n, i) => d.value(c[i] as usize),
@@ -202,7 +271,7 @@ impl Vector {
             Vector::Float(d, n) => Vector::Float(d[range.clone()].to_vec(), nulls(n)),
             Vector::Bool(d, n) => Vector::Bool(d[range.clone()].to_vec(), nulls(n)),
             Vector::Time(k, d, n) => Vector::Time(*k, d[range.clone()].to_vec(), nulls(n)),
-            Vector::Dec(s, d, n) => Vector::Dec(*s, d[range.clone()].to_vec(), nulls(n)),
+            Vector::Dec(s, d, n) => Vector::Dec(*s, d.slice(range.clone()), nulls(n)),
             Vector::Text(o, b, n) | Vector::Char(o, b, n) => {
                 let (lo, hi) = (o[range.start] as usize, o[range.end] as usize);
                 let offsets = o[range.start..=range.end]
@@ -235,7 +304,7 @@ impl Vector {
             Vector::Float(d, n) => Vector::Float(pick(d, rows), nulls(n)),
             Vector::Bool(d, n) => Vector::Bool(pick(d, rows), nulls(n)),
             Vector::Time(k, d, n) => Vector::Time(*k, pick(d, rows), nulls(n)),
-            Vector::Dec(s, d, n) => Vector::Dec(*s, pick(d, rows), nulls(n)),
+            Vector::Dec(s, d, n) => Vector::Dec(*s, d.pick(rows), nulls(n)),
             Vector::Text(o, b, n) | Vector::Char(o, b, n) => {
                 let mut offsets = Vec::with_capacity(rows.len() + 1);
                 let mut bytes = Vec::new();
@@ -353,7 +422,7 @@ impl Vector {
                         _ => 0,
                     })
                     .collect();
-                Vector::Dec(first.scale(), data, nulls(&values))
+                Vector::Dec(first.scale(), Mantissas::of(data), nulls(&values))
             }
             _ => Vector::Values(values),
         }
@@ -898,50 +967,52 @@ fn float_kernel(
     Ok(Vector::Float(out, nulls))
 }
 
-/// A decimal operand's mantissas: a row's each, or one for all.
+/// A decimal operand's mantissas: a row's each (128-bit, or 64-bit read
+/// widened — a narrow column's or an integer column's, not copied), or one
+/// for all.
 enum DecRows<'a> {
     Col(std::borrow::Cow<'a, [i128]>),
+    Narrow(&'a [i64]),
     One(i128),
 }
 
-impl DecRows<'_> {
+impl<'a> DecRows<'a> {
     #[inline]
     fn at(&self, i: usize) -> i128 {
         match self {
             DecRows::Col(d) => d[i],
+            DecRows::Narrow(d) => i128::from(d[i]),
             DecRows::One(m) => *m,
         }
     }
 
     /// Each mantissa times `f` (raised to a larger scale), and whether that
-    /// overflowed, by row (`None`: no row did).
-    fn raised(self, f: i128, len: usize) -> (DecRows<'static>, Option<Vec<bool>>) {
+    /// overflowed, by row (`None`: no row did).  Times 1, as they are.
+    fn raised(self, f: i128, len: usize) -> (DecRows<'a>, Option<Vec<bool>>) {
         if f == 1 {
-            return match self {
-                DecRows::One(m) => (DecRows::One(m), None),
-                DecRows::Col(d) => (DecRows::Col(d.into_owned().into()), None),
-            };
+            return (self, None);
         }
+        let column = |m: &mut dyn Iterator<Item = i128>| {
+            let mut over = vec![false; len];
+            let out = m
+                .zip(&mut over)
+                .map(|(m, o)| {
+                    m.checked_mul(f).unwrap_or_else(|| {
+                        *o = true;
+                        0
+                    })
+                })
+                .collect::<Vec<_>>();
+            let over = over.contains(&true).then_some(over);
+            (DecRows::Col(out.into()), over)
+        };
         match self {
             DecRows::One(m) => match m.checked_mul(f) {
                 Some(r) => (DecRows::One(r), None),
                 None => (DecRows::One(0), Some(vec![true; len])),
             },
-            DecRows::Col(d) => {
-                let mut over = vec![false; len];
-                let out = d[..len]
-                    .iter()
-                    .zip(&mut over)
-                    .map(|(&m, o)| {
-                        m.checked_mul(f).unwrap_or_else(|| {
-                            *o = true;
-                            0
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let over = over.contains(&true).then_some(over);
-                (DecRows::Col(out.into()), over)
-            }
+            DecRows::Col(d) => column(&mut d[..len].iter().copied()),
+            DecRows::Narrow(d) => column(&mut d[..len].iter().map(|&m| i128::from(m))),
         }
     }
 }
@@ -953,12 +1024,8 @@ impl DecRows<'_> {
 /// [`Decimal::from_i64`]: crate::decimal::Decimal::from_i64
 fn dec_operand(v: &Vector, len: usize) -> Option<(DecRows<'_>, u32, Option<&[bool]>)> {
     match v {
-        Vector::Dec(s, d, n) => Some((DecRows::Col(d[..len].into()), *s, n.as_deref())),
-        Vector::Int(d, n) => Some((
-            DecRows::Col(d[..len].iter().map(|&i| i128::from(i)).collect()),
-            0,
-            n.as_deref(),
-        )),
+        Vector::Dec(s, d, n) => Some((d.rows(len), *s, n.as_deref())),
+        Vector::Int(d, n) => Some((DecRows::Narrow(&d[..len]), 0, n.as_deref())),
         Vector::Const(Value::Numeric(d)) => Some((DecRows::One(d.mantissa()), d.scale(), None)),
         Vector::Const(Value::Int(i)) => Some((DecRows::One(i128::from(*i)), 0, None)),
         _ => None,
@@ -1000,7 +1067,11 @@ fn dec_kernel(
         if (over || s > MAX_DIGITS) && sel.iter().any(|i| live(i) && past(i)) {
             return Err(overflow());
         }
-        return Ok(Some(Vector::Dec(s.min(MAX_DIGITS), out, nulls)));
+        return Ok(Some(Vector::Dec(
+            s.min(MAX_DIGITS),
+            Mantissas::Wide(out),
+            nulls,
+        )));
     }
     // At the larger scale (at most `MAX_DIGITS`: a power of ten that fits).
     let s = sa.max(sb);
@@ -1052,7 +1123,7 @@ fn dec_kernel(
             return Err(overflow());
         }
     }
-    Ok(Some(Vector::Dec(s, out, nulls)))
+    Ok(Some(Vector::Dec(s, Mantissas::Wide(out), nulls)))
 }
 
 /// A text or `char(n)` vector's layout, and whether it is `char(n)` (its

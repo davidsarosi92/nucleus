@@ -1841,6 +1841,15 @@ the speed-up is made once, in the merged one.  The work, in this order:
   1082 ms, Q20 526 → 448), column tables 4.58 → 4.31 s.  Not taken: a
   `Box` for decimals (an allocation per value in the aggregates TPC-H
   lives in).
+  *Done — decimals as 64-bit mantissas*: a decimal vector's mantissas
+  (`vector::Mantissas`) are 64-bit while each fits — as a segment stores
+  them, so a cached column takes half the memory (`lineitem`'s four
+  decimal columns 384 → 192 MB beside the 256 MB cache) — else 128-bit (a
+  product's, a sum's); the kernels read either through `DecRows`, a
+  narrow column (and an integer column, which was copied widened) without
+  a copy, and raising by 1 no longer copies the column.  Measured, the 22
+  queries, alternating: column tables 4.33 → 4.25 s (Q6 77 → 67 ms, Q18
+  303 → 277 ms); row tables within the noise (8.63 → 8.50 s).
 - **W6 — the queries above 3×.**  `count(DISTINCT)` planned as a
   grouping (the vectorized, parallel one); top-N; typed aggregate states
   and one key table for groupings, `DISTINCT`, set operations and join
@@ -2942,3 +2951,6 @@ style) across a thousand seeds without failure.
   addresses aligned to 8, enum values behind an `Arc`); the 22 TPC-H
   queries 8.90 → 8.37 s on row tables, 4.58 → 4.31 s on column tables.
   DOCS §8.1.
+- **2026-11-03** — §M14.20 W5: decimal vectors' mantissas 64-bit while
+  they fit (a cached decimal column half the size); column tables 4.33 →
+  4.25 s.  DOCS §8.5.

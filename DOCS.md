@@ -1354,9 +1354,12 @@ hashing no key.
 **Batches** (`vector`, §M14.20).  A table scan by the primary key (or of
 every row) and the filters and projections above it run as a *pipeline*,
 a batch at a time: a vector per column — integers, doubles and booleans
-typed, with a `NULL` mask; decimals of one scale their 128-bit
-mantissas (`Vector::Dec`: a column store's decimal segment as stored, a
-row table's numeric column when its rows share a scale); other types a
+typed, with a `NULL` mask; decimals of one scale their mantissas
+(`Vector::Dec`: a column store's decimal segment as stored, a row table's
+numeric column when its rows share a scale — 64-bit while each fits,
+`Mantissas::Narrow`, so a cached decimal column takes half the memory,
+else 128-bit; the kernels read either, widening as they go, §M14.20 W5);
+other types a
 value per row; a column nothing
 reads a `NULL` constant — and a selection of the rows still in play.  The
 first batch is 64 rows, each next one twice the last, up to `batch_size`

@@ -953,7 +953,7 @@ impl GroupAccumulator for Grouped {
             }
             (Sum | Avg, Some(Vector::Dec(s, v, _))) => {
                 for (r, g) in pairs {
-                    self.accs[g].add_dec(crate::decimal::Decimal::raw(v[r], *s))?;
+                    self.accs[g].add_dec(crate::decimal::Decimal::raw(v.at(r), *s))?;
                 }
             }
             (Min | Max, Some(Vector::Int(v, _))) => {
@@ -1018,9 +1018,9 @@ impl GroupAccumulator for Grouped {
                 }
             }
             (Sum | Avg, Some(Vector::Dec(s, v, n))) => {
-                for (r, &m) in v[..len].iter().enumerate() {
+                for r in 0..len {
                     if !n.as_ref().is_some_and(|n| n[r]) {
-                        acc.add_dec(crate::decimal::Decimal::raw(m, *s))?;
+                        acc.add_dec(crate::decimal::Decimal::raw(v.at(r), *s))?;
                     }
                 }
             }
