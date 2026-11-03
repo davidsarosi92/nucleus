@@ -400,7 +400,9 @@ Where the time still goes:
   deletion markers each a look at the tree, per row — on the workers,
   where PostgreSQL reads a heap tuple each (18 ms).
 - **Q20** (1.93×) and **Q10** (1.32×): correlated and join-heavy plans
-  whose groupings and lookups still run partly a row at a time.
+  whose groupings and lookups still run partly a row at a time.  (Since,
+  by `bench/phases.py`: Q20's subquery runs on the workers, 0.66× —
+  PLAN.md §M14.20 W6.)
 - **Row tables** (1.11×): Q11 4.4×, Q14 2.6×, Q19 2.4×, Q6 2.3× the
   highest; a row's every column decoded where a column table reads only
   the wanted ones.
@@ -446,6 +448,7 @@ same machine, alternating with the step before):
 | W6: typed aggregate states | 9.0 | 4.2 |
 | W6: `DISTINCT` inside aggregates as groupings | 9.2 | 4.5 |
 | W6: shared reads without a queue | 9.5 | 4.4 |
+| W6: correlated subqueries on the workers | 8.6 | 3.9 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
@@ -463,6 +466,13 @@ same machine, alternating with the step before):
 | W6: typed aggregate states | 4.7 | 29.5 | 445 | 161 | 271 |
 | W6: `DISTINCT` inside aggregates as groupings | 2.4 | 20.0 | 430 | 168 | 277 |
 | W6: shared reads without a queue | 2.6 | 21.2 | 504 | 179 | 293 |
+| W6: correlated subqueries on the workers | 2.5 | 20.0 | 438 | 169 | 281 |
+
+(Correlated subqueries on the workers: TPC-H Q20 on column tables 577 →
+173 ms, Q2 49 → 25, Q17 88 → 31; on row tables Q20 509 → 175, Q17 43 →
+19.  Q18 on column tables 257 → 290 ms from code layout, not from code
+it runs — PLAN.md §M14.20 W6.  The base build gave TPC-H 8.6 / 4.3 s and
+ClickBench 2.5 s in the same rounds.)
 
 (Shared reads: TPC-H Q19 on column tables 65 → 45 ms, Q21 543 → 462;
 the step's rows, like the one before it, measured on a machine slower
@@ -614,7 +624,7 @@ machine against PostgreSQL 18 in the same run:
 |---|---|---|
 | TPC-H SF 1, column tables: geometric mean ≤ 0.8× PostgreSQL's time | 0.47× (0.67× in the run before) | yes |
 | ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.24× (0.31×) | yes |
-| column tables: no TPC-H or ClickBench query above 3× | none since W6 (against the same PostgreSQL times: TPC-H Q19 3.1× → 2.5×; ClickBench Q32 3.1× → 0.46×, Q18 3.1× → 0.49×, Q4 2.9× → 0.07×; the highest now TPC-H Q19 2.5×, Q20 1.9×) | yes, by `bench/phases.py` (to be confirmed by a full `bench/run.py` run against PostgreSQL) |
+| column tables: no TPC-H or ClickBench query above 3× | none since W6 (against the same PostgreSQL times: TPC-H Q19 3.1× → 2.5×; ClickBench Q32 3.1× → 0.46×, Q18 3.1× → 0.49×, Q4 2.9× → 0.07×; the highest now TPC-H Q19 2.5×; Q20 1.9× → 0.66×) | yes, by `bench/phases.py` (to be confirmed by a full `bench/run.py` run against PostgreSQL) |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 1.11× (1.27×), ClickBench 2.13× (2.31×) | TPC-H yes, ClickBench no |
 | loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 0.9×; TPC-H 3.1× (row), 3.8× (column); ClickBench 2.4×, 2.7× | `bench/run.py` yes, the others no |
 | updates and deletes ≤ 2× (`bench/run.py`) | update 0.9×, delete 1.3× | yes |

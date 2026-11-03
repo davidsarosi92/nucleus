@@ -2108,6 +2108,65 @@ the speed-up is made once, in the merged one.  The work, in this order:
   tables, best of twenty, Q19 43 → 40 ms, Q21 1,040 → 910 (best of
   three moves by a tenth either way); ClickBench unchanged (2.62 / 2.59
   → 2.62 / 2.61 s).
+  *Done — correlated subqueries on the workers* (profiled first: TPC-H
+  Q20 on column tables, 557 ms against PostgreSQL's 261, 2.1×: its
+  condition `ps_availqty > (SELECT 0.5 * sum(l_quantity) …)` stays above
+  the semi join with `part` and runs its subquery — an index scan of
+  `lineitem_part_supp` — 8,876 times on the statement's thread, 550 of
+  the 571 ms; 87% of that the column table's point reads).  Not
+  decorrelated (Neumann and Kemper, "Unnesting Arbitrary Queries", as
+  DuckDB and HyPer): a join with the subquery's rows grouped by `l_partkey,
+  l_suppkey` computes groups no outer row asks for and evaluates the
+  subquery's expressions over other rows in another order — an error
+  (an overflowing `sum`, a division in its filter) where the statement
+  had none, or another first one —, and nucleus's rewrites keep errors
+  where a single pass meets them (eager aggregation takes only infallible
+  aggregates for the same reason).  Taken instead: the same per-row
+  evaluation on the workers, as PostgreSQL's planner allows a correlated
+  `SubPlan` in a parallel plan when the parameters it reads are of the
+  level right outside and its own plan, recursively, is parallel safe
+  (pgsql-hackers, "parallelize queries containing subplans", 2017 —
+  Robert Haas's point that the check must recurse into the subplan).
+  `expr::ready_subqueries` readies a correlated subquery for the workers
+  when the statement is a query (nothing it runs writes), no rows it
+  inserted are held unstored on its thread, and the subquery reads only
+  the row it runs for and nothing that differs by thread or run (no
+  volatile or table function, no CTE, work table or catalog view, its own
+  subqueries included); pipelines and an index nested loop's lookups then
+  take such conditions; and a filter or projection over rows that are not
+  a pipeline's (Q20's, a semi join's) runs them on the workers the way the
+  lookups do — the lookups' block iterator made one for both
+  (`exec::OnWorkers`: the input in blocks of 256 doubling to 16,384, each
+  cut into pieces for the workers, the rows in the input's order, the
+  first error where a single pass stops, none from rows a `LIMIT` never
+  reaches).  On the way: the buffer pool's frames and shards each on a
+  cache line of their own (128 bytes; they shared lines, three frames to
+  one) and its hits counted in their shard (one counter all threads
+  wrote): Q20 on ten workers 199 / 202 → 174 / 175 ms, best of ten.  Not
+  taken (yet): optimistic latches for the tree's upper pages (LeanStore,
+  Leis et al. 2018; Umbra) — the root's pin and its shard's lock are
+  still written by every lookup's descent (some 10% of the workers'
+  samples); the point reads themselves (next).  Tested: a filter and a
+  projection whose subqueries run for each row — over a semi join's rows,
+  over a pipeline's, nested, reading a CTE (kept on one thread) — give one
+  thread's rows (row and column tables, four workers, and the row path),
+  the same errors (in the subquery's rows, after it, and of two the first
+  in row order), and none where a `LIMIT` stops before an erroring row;
+  mutations caught (the pieces' rows out of order; correlated subqueries
+  kept off the workers).  Measured, alternating with the step before, two
+  rounds: TPC-H on column tables 4.35 / 4.32 → 3.89 / 3.95 s — Q20 577 →
+  173 ms (0.66× PostgreSQL's), Q2 49 → 25, Q17 88 → 31, Q21 458 → 432 —;
+  on row tables 8.76 / 8.52 → 8.64 / 8.52 s — Q20 509 → 175, Q2 41 → 26,
+  Q17 43 → 19 (Q6's 315 → 363 was noise: best of ten 338 / 356 against
+  320 / 335) —; ClickBench unchanged (2.49 / 2.46 → 2.52 / 2.45 s).  One
+  loss: Q18 on column tables 257 → 290 ms (three rounds, best of twenty,
+  either order), from no code it runs — a build with the subquery change
+  but not `exec.rs`'s is as fast as before, one with `exec.rs`'s but its
+  new paths never taken as slow —: `Expr::eval`'s instructions are the
+  same, 36 bytes further on, and its per-row filter over Q18's 1.5
+  million groups costs half again.  The row-at-a-time `Expr::eval` keeps a
+  1.7 kB frame for every node (`#1 > 300` is three), which its largest
+  arms size; the next step gives it a small one.
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3236,3 +3295,10 @@ style) across a thousand seeds without failure.
   read-ahead, unlogged writes flushed only with a fresh range;
   `EXPLAIN ANALYZE` reads only the columns needed (Q19 18.6 s → 145 ms
   under it).  TPC-H Q19 on column tables 65 → 45 ms, Q21 543 → 462.
+- **2026-11-03** — §M14.20 W6: correlated subqueries on the workers —
+  per row, as on one thread (`expr::ready_subqueries`), in pipelines,
+  lookups, and filters and projections over other rows
+  (`exec::OnWorkers`, the lookups' block iterator made one for both);
+  buffer pool frames and shards on cache lines of their own.  TPC-H Q20
+  on column tables 577 → 173 ms, Q2 49 → 25, Q17 88 → 31; on row tables
+  Q20 509 → 175.  DOCS §8.5.

@@ -3106,11 +3106,12 @@ pub(crate) fn parallel_safe(e: &Expr) -> bool {
     !e.has_subquery() && !volatile(e)
 }
 
-/// [`parallel_safe`] for `e` run under `ctx`: its uncorrelated subqueries
-/// allowed, run once here first ([`crate::expr::prime_subqueries`]) —
-/// their rows cached, which the workers are given.
+/// [`parallel_safe`] for `e` run under `ctx`: its subqueries allowed where
+/// [`crate::expr::ready_subqueries`] readies them — the uncorrelated ones
+/// run once here first (their rows cached, which the workers are given),
+/// the correlated ones run by the workers for each row.
 pub(crate) fn parallel_safe_in(e: &Expr, ctx: &Ctx) -> bool {
-    !volatile(e) && (!e.has_subquery() || crate::expr::prime_subqueries(e, ctx))
+    !volatile(e) && (!e.has_subquery() || crate::expr::ready_subqueries(e, ctx))
 }
 
 /// Whether `e` calls a volatile function (outside its subqueries).

@@ -870,13 +870,40 @@ pub(crate) fn uncorrelated_rows(sub: &SubPlan, env: &Env) -> Result<std::sync::A
     })
 }
 
-/// Runs the uncorrelated subqueries of `e` whose rows are not cached yet,
-/// caching them — so worker threads given the cache need not run them.
-/// `false` when one cannot be: it is correlated, or reads a volatile
-/// function, or fails (a run in order then meets it where it would; a
-/// subquery that cannot fail and reads nothing that changes gives the same
-/// rows whenever it runs).
-pub(crate) fn prime_subqueries(e: &Expr, ctx: &Ctx) -> bool {
+/// Whether `plan` (its subqueries' too) reads a CTE, a recursive CTE's work
+/// table or a catalog view: rows kept in the context of the thread that
+/// runs the statement, or made from the session's.
+fn reads_context(plan: &Plan) -> bool {
+    let mut found = matches!(
+        plan,
+        Plan::Cte { .. } | Plan::WorkTable { .. } | Plan::View { .. }
+    );
+    plan.for_each_expr(&mut |e| {
+        e.walk(&mut |x| {
+            if let Expr::Subquery(s) = x {
+                found |= reads_context(&s.plan);
+            }
+        })
+    });
+    found || plan.children().into_iter().any(reads_context)
+}
+
+/// Readies the subqueries of `e` to run where worker threads evaluate it
+/// (PLAN.md §M14.20 W6); `false` when one cannot:
+///
+/// - an uncorrelated one runs here first, its rows cached — so the workers,
+///   given the cache, need not run it; not when it reads a volatile
+///   function, or fails (a run in order then meets it where it would; a
+///   subquery that cannot fail and reads nothing that changes gives the
+///   same rows whenever it runs);
+/// - a correlated one runs on the workers for each row, as it would here
+///   — when the statement writes nothing (a query: [`Ctx::memoize`]), no
+///   rows it wrote are seen by this thread alone
+///   ([`crate::storage::gathered_any`]), and the subquery reads only the
+///   row it runs for and nothing that differs by thread or run: no
+///   volatile function, no table function ([`outer_reads`]), no CTE, work
+///   table or catalog view ([`reads_context`]).
+pub(crate) fn ready_subqueries(e: &Expr, ctx: &Ctx) -> bool {
     let mut subs = Vec::new();
     e.walk(&mut |x| {
         if let Expr::Subquery(s) = x {
@@ -888,7 +915,13 @@ pub(crate) fn prime_subqueries(e: &Expr, ctx: &Ctx) -> bool {
         if ctx.cache.borrow().contains_key(&key) {
             return true;
         }
-        if s.correlated || outer_reads(&s.plan).is_none_or(|r| !r.is_empty()) {
+        if s.correlated {
+            return ctx.memoize
+                && !crate::storage::gathered_any()
+                && !reads_context(&s.plan)
+                && outer_reads(&s.plan).is_some_and(|r| r.iter().all(|&(level, _)| level == 1));
+        }
+        if outer_reads(&s.plan).is_none_or(|r| !r.is_empty()) {
             return false;
         }
         match crate::exec::collect(&s.plan, ctx, None) {

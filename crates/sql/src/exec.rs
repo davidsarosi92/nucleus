@@ -104,6 +104,21 @@ fn build_node<'a>(
             policy: predicate,
         } => {
             let rows = build(input, ctx, outer)?;
+            if let Some((shared, workers)) = rows_on_workers(&[predicate], ctx, outer) {
+                let each = move |wctx: &Ctx, row: Row| match predicate.holds(&env(&row, wctx, None))
+                {
+                    Ok(true) => vec![Ok(row)],
+                    Ok(false) => vec![],
+                    Err(e) => vec![Err(e)],
+                };
+                return Ok(Box::new(OnWorkers::new(
+                    rows,
+                    ctx,
+                    shared,
+                    workers,
+                    Box::new(each),
+                )));
+            }
             Box::new(rows.filter_map(move |r| match r {
                 Err(e) => Some(Err(e)),
                 Ok(row) => match predicate.holds(&env(&row, ctx, outer)) {
@@ -115,6 +130,20 @@ fn build_node<'a>(
         }
         Plan::Project { input, exprs } => {
             let rows = build(input, ctx, outer)?;
+            let all: Vec<&Expr> = exprs.iter().collect();
+            if let Some((shared, workers)) = rows_on_workers(&all, ctx, outer) {
+                let each = move |wctx: &Ctx, row: Row| {
+                    let e = env(&row, wctx, None);
+                    vec![exprs.iter().map(|x| x.eval(&e)).collect()]
+                };
+                return Ok(Box::new(OnWorkers::new(
+                    rows,
+                    ctx,
+                    shared,
+                    workers,
+                    Box::new(each),
+                )));
+            }
             Box::new(rows.map(move |r| {
                 let row = r?;
                 let e = env(&row, ctx, outer);
@@ -1163,19 +1192,35 @@ fn join<'a>(
 /// An index nested loop: for each left row, the right plan (a scan by an
 /// index on the join keys, reading the left row as `Outer` at depth 1) run
 /// for it, its rows joined as a nested loop's — on worker threads when it
-/// can ([`ParallelLookups`]).
+/// can ([`OnWorkers`]).
 fn lookup_join<'a>(left: Rows<'a>, right: &'a Plan, spec: JoinSpec<'a>) -> Result<Rows<'a>> {
     if let Some((shared, workers)) = parallel_lookups(right, &spec) {
-        return Ok(Box::new(ParallelLookups {
+        let (kind, on, algo, left_width, right_width) = (
+            spec.kind,
+            spec.on,
+            spec.algo,
+            spec.left_width,
+            spec.right_width,
+        );
+        let each = move |wctx: &Ctx, l: Row| {
+            let spec = JoinSpec {
+                kind,
+                on,
+                algo,
+                left_width,
+                right_width,
+                ctx: wctx,
+                outer: None,
+            };
+            lookup_one(l, right, &spec)
+        };
+        return Ok(Box::new(OnWorkers::new(
             left,
-            right,
-            spec,
+            spec.ctx,
             shared,
             workers,
-            block: LOOKUP_BLOCK,
-            out: std::collections::VecDeque::new(),
-            done: false,
-        }));
+            Box::new(each),
+        )));
     }
     Ok(Box::new(left.flat_map(move |l| match l {
         Ok(l) => lookup_one(l, right, &spec),
@@ -1301,28 +1346,52 @@ fn parallel_lookups<'a>(
     Some((spec.ctx.txn.shared()?, workers))
 }
 
-/// An index nested loop on worker threads: the left rows read a block at a
-/// time, the block cut into pieces the workers look up, the pieces' rows
-/// given in the left rows' order — a single pass's rows, and its error
-/// where it would stop (the rows before it, then the error).
-struct ParallelLookups<'a> {
-    left: Rows<'a>,
-    right: &'a Plan,
-    spec: JoinSpec<'a>,
+/// Rows made on worker threads, a row of the input at a time: the input
+/// read a block at a time, the block cut into pieces, each piece's rows
+/// given to `each` on a worker (with a context of its own), the results in
+/// the input's order — a single pass's rows, and its error where it would
+/// stop (the rows before it, then the error; one a consumer stops short of
+/// is never seen).  An index nested loop's lookups ([`lookup_join`]), and
+/// the filters and projections whose subqueries run for each row
+/// ([`rows_on_workers`]).
+struct OnWorkers<'a> {
+    input: Rows<'a>,
+    ctx: &'a Ctx<'a>,
     shared: &'a dyn nucleus_kv::KvRead,
     workers: usize,
+    /// What a row of the input gives: rows, or an error.
+    each: Box<dyn Fn(&Ctx, Row) -> Vec<Result<Row>> + Sync + 'a>,
     block: usize,
     out: std::collections::VecDeque<Result<Row>>,
     done: bool,
 }
 
-impl ParallelLookups<'_> {
+impl<'a> OnWorkers<'a> {
+    fn new(
+        input: Rows<'a>,
+        ctx: &'a Ctx<'a>,
+        shared: &'a dyn nucleus_kv::KvRead,
+        workers: usize,
+        each: Box<dyn Fn(&Ctx, Row) -> Vec<Result<Row>> + Sync + 'a>,
+    ) -> Self {
+        OnWorkers {
+            input,
+            ctx,
+            shared,
+            workers,
+            each,
+            block: LOOKUP_BLOCK,
+            out: std::collections::VecDeque::new(),
+            done: false,
+        }
+    }
+
     /// The next block's rows into `out`.
     fn fill(&mut self) {
         let mut rows = Vec::with_capacity(self.block);
         let mut failed = None;
         while rows.len() < self.block {
-            match self.left.next() {
+            match self.input.next() {
                 None => {
                     self.done = true;
                     break;
@@ -1340,28 +1409,17 @@ impl ParallelLookups<'_> {
             let pieces = (self.workers * 4).min(rows.len());
             let per = rows.len().div_ceil(pieces);
             let chunks: Vec<&[Row]> = rows.chunks(per).collect();
-            let (right, s) = (self.right, self.spec);
-            let (kind, on, algo, left_width, right_width) =
-                (s.kind, s.on, s.algo, s.left_width, s.right_width);
+            let each = &self.each;
             let results = crate::vector::on_workers(
-                self.spec.ctx,
+                self.ctx,
                 self.shared,
                 self.workers,
                 chunks.len(),
                 false,
                 &|wctx, m| {
-                    let spec = JoinSpec {
-                        kind,
-                        on,
-                        algo,
-                        left_width,
-                        right_width,
-                        ctx: wctx,
-                        outer: None,
-                    };
                     let mut out = Vec::new();
-                    for l in chunks[m] {
-                        let got = lookup_one(l.clone(), right, &spec);
+                    for r in chunks[m] {
+                        let got = each(wctx, r.clone());
                         let failed = got.iter().any(Result::is_err);
                         out.extend(got);
                         if failed {
@@ -1375,7 +1433,7 @@ impl ParallelLookups<'_> {
                 let got = match r {
                     Some(Ok(got)) => got,
                     Some(Err(e)) => vec![Err(e)],
-                    None => vec![Err(Error::internal("a lookup piece not run"))],
+                    None => vec![Err(Error::internal("a piece of rows not run"))],
                 };
                 for row in got {
                     let failed = row.is_err();
@@ -1394,7 +1452,7 @@ impl ParallelLookups<'_> {
     }
 }
 
-impl Iterator for ParallelLookups<'_> {
+impl Iterator for OnWorkers<'_> {
     type Item = Result<Row>;
 
     fn next(&mut self) -> Option<Result<Row>> {
@@ -1408,6 +1466,35 @@ impl Iterator for ParallelLookups<'_> {
             self.fill();
         }
     }
+}
+
+/// Whether a filter's or projection's expressions `exprs` go to worker
+/// threads ([`OnWorkers`]), and over what: a subquery among them that runs
+/// for each row (correlated — the work that pays for the threads), nothing
+/// that would differ by thread ([`crate::vector::parallel_safe_in`]), more
+/// than one worker, no enclosing row, no `EXPLAIN ANALYZE`, and a
+/// transaction that shares its reads.
+fn rows_on_workers<'a>(
+    exprs: &[&Expr],
+    ctx: &'a Ctx<'a>,
+    outer: Option<&Env>,
+) -> Option<(&'a dyn nucleus_kv::KvRead, usize)> {
+    let workers = crate::budget::workers();
+    if workers < 2 || outer.is_some() || ctx.profile.is_some() {
+        return None;
+    }
+    let mut correlated = false;
+    for e in exprs {
+        e.walk(&mut |x| correlated |= matches!(x, Expr::Subquery(s) if s.correlated));
+    }
+    if !correlated
+        || !exprs
+            .iter()
+            .all(|e| crate::vector::parallel_safe_in(e, ctx))
+    {
+        return None;
+    }
+    Some((ctx.txn.shared()?, workers))
 }
 
 fn join_with<'a>(

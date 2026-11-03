@@ -319,7 +319,10 @@ reader/writer lock, so a parallel scan's workers do not queue on one lock.
 A hit only reads its shard's page table (threads whose lookups all descend
 from one root share it), a change writes it; a frame's pin count and
 reference bit are atomics, the bit written only when it changes, and the
-page table hashes a page id with one multiplication.  A miss reads
+page table hashes a page id with one multiplication.  Each shard (with
+its hit counter) and each frame takes a 128-byte cache line of its own,
+so threads pinning neighbouring frames or finding pages in neighbouring
+shards do not write one line.  A miss reads
 the page without any (and reads again if a page was written back
 meanwhile), so threads reading cold pages do not wait on each other.
 `read_ahead(ids)` reads a run of consecutive page ids (up to 16, 128 KiB —
@@ -1481,11 +1484,35 @@ the table is keyed by a primary key — each row's key computed from its
 values; a policy, or a table keyed by hidden row ids, scans row by row.  Sums of doubles and reals are
 exact (Shewchuk's partials, rounded once — `fsum`), so they do not depend
 on the order either.  Not in parallel: an enclosing row (a correlated
-subquery), `EXPLAIN ANALYZE`, a subquery or volatile function in the
-pipeline, groups in key order past `work_mem` in a morsel, or merged on
-the statement's thread past it (then the single pass partitions).  The
-buffer pool reads a missing page without holding its lock, so workers
-reading cold pages do not wait on each other.
+subquery's own plan), `EXPLAIN ANALYZE`, a volatile function or a
+subquery the workers cannot run in the pipeline (below), groups in key
+order past `work_mem` in a morsel, or merged on the statement's thread
+past it (then the single pass partitions).  The buffer pool reads a
+missing page without holding its lock, so workers reading cold pages do
+not wait on each other; its shards and frames take a cache line each
+(128 bytes), and a hit is counted in its shard, so workers finding pages
+do not write one line (a lookup's every descent starts at the same
+root).
+
+Subqueries where workers evaluate (`expr::ready_subqueries`): an
+uncorrelated one runs once on the statement's thread first, its rows
+cached and given to the workers; one that reads a volatile function or
+fails keeps the work on one thread, which meets it where a single pass
+would.  A correlated one runs on the workers for each row, as it would
+on the statement's thread, when the statement is a query (nothing it
+runs writes), no rows it inserted into a column table are held unstored
+on the thread, and the subquery reads only the row it runs for (not one
+further out) and nothing that differs by thread or run — no volatile
+function, no table function, no CTE, recursive CTE's work table or
+catalog view, its own subqueries included (PostgreSQL's rule for a
+correlated `SubPlan` in a parallel plan, the check recursing into it).
+A filter or projection whose subquery runs for each row over rows that
+are not a pipeline's — a join's (TPC-H Q20: a condition with a
+correlated subquery stays above a semi join) — runs on worker threads
+the way an index nested loop's lookups do (`exec::OnWorkers`, below):
+its input read in blocks, each block's pieces evaluated on the workers,
+the rows given in the input's order, its error where a single pass
+would stop, and none from rows a `LIMIT` stops short of.
 
 **Memory** (`spill`, §M14.11).  What an operator holds is bounded by
 `work_mem` (`SET work_mem = '256MB'`, or the database's setting; default
@@ -1568,15 +1595,13 @@ left, semi and anti joins).  It runs on worker threads when it can: the
 left rows read in blocks (256 at first, each next twice the last, up to
 16 384), a block cut into pieces the workers look up over the shared
 reads, the pieces' rows given in the left rows' order — a single pass's
-rows, and its error where it would stop.  Not under `EXPLAIN ANALYZE`,
-for an enclosing row, for a lookup or condition with a correlated
-subquery or a volatile call, or while a statement on the thread holds
-rows it inserted into a column table unstored (only that thread's reads
-see them).  An uncorrelated subquery there — or in a parallel scan's
-filters — runs once on the statement's thread first, its rows cached and
-given to the workers (`vector::parallel_safe_in`); one that reads a
-volatile function or fails keeps the work on one thread, which meets it
-where a single pass would.
+rows, and its error where it would stop (`exec::OnWorkers`, which a
+filter's or projection's subqueries share, §8.5 "Subqueries where
+workers evaluate").  Not under `EXPLAIN ANALYZE`, for an enclosing row,
+for a lookup or condition with a volatile call or a subquery the workers
+cannot run (`vector::parallel_safe_in`), or while a statement on the
+thread holds rows it inserted into a column table unstored (only that
+thread's reads see them).
 A **semi join** gives each left row some right row matches, once; an
 **anti join** each left row none matches (a NULL key matches nothing, so
 its row comes out of an anti join); both give only the left's columns,
@@ -3091,6 +3116,16 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-03 — §M14.20 W6, correlated subqueries on the workers:** a
+  correlated subquery runs on worker threads for each row, as on the
+  statement's thread, in a query whose subquery reads only the row it
+  runs for and nothing that differs by thread (`expr::ready_subqueries`);
+  a filter or projection with one over rows that are not a pipeline's
+  runs in blocks on the workers (`exec::OnWorkers`, shared with an index
+  nested loop's lookups); the buffer pool's frames and shards take a
+  cache line each, its hits counted by shard.  TPC-H Q20 577 → 173 ms on
+  column tables.
 
 - **2026-11-03 — §M14.20 W6, shared reads without a queue:** the
   engine's intent statuses and running ranges under a reader-writer

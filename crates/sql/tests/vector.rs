@@ -1676,3 +1676,87 @@ fn column_lookups_on_workers_agree() {
         "the lookups ran on workers"
     );
 }
+
+#[test]
+fn correlated_subqueries_on_workers_agree() {
+    // TPC-H Q20's shape (§M14.20 W6): a filter, or a projection, whose
+    // subquery runs for each row — over a join's rows, or a pipeline's —
+    // evaluated on workers: the rows of one thread, its first error where
+    // it stops, and no error from the rows a LIMIT stops short of.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(53)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE o (id INT PRIMARY KEY, k INT, v INT, pad TEXT); \
+             CREATE TABLE p (id INT PRIMARY KEY, name TEXT); \
+             CREATE TABLE c (id INT PRIMARY KEY, g INT, v INT) WITH (storage = {storage}); \
+             INSERT INTO o SELECT i, i * 37 % 700, i % 400, repeat('x', 60) \
+               FROM generate_series(1, 20000) i; \
+             INSERT INTO p SELECT i, 'p' || i FROM generate_series(0, 49) i; \
+             INSERT INTO c SELECT i, i % 700, i * 7 % 1000 FROM generate_series(1, 20000) i; \
+             DELETE FROM c WHERE id % 17 = 0; \
+             CREATE INDEX c_g ON c (g); \
+             ANALYZE"
+        ))
+        .unwrap();
+        // (`id % 10 = 0` first: the subqueries run for a tenth of the rows.)
+        let queries = [
+            // Over a join's rows (TPC-H Q20's: a semi join's): a filter, a
+            // projection.
+            "SELECT id, k FROM o WHERE id % 10 = 0 AND k IN (SELECT id * 10 FROM p) \
+               AND v > (SELECT 0.002 * sum(c.v) FROM c WHERE c.g = o.k)",
+            "SELECT o.id, (SELECT count(*) FROM c WHERE c.g = o.k AND c.v < o.v) \
+               FROM o JOIN p ON p.id = o.k % 50 WHERE o.id % 10 = 0 ORDER BY o.id",
+            // A pipeline's.
+            "SELECT id FROM o WHERE id % 10 = 0 AND v > (SELECT avg(v) FROM c WHERE c.g = o.k)",
+            "SELECT id, (SELECT max(c.v) FROM c WHERE c.g = o.k) FROM o WHERE id % 10 = 0",
+            // Nested: the inner one reads the row of the outer subquery.
+            "SELECT id FROM o WHERE id % 10 = 0 AND v > (SELECT avg(c.v) FROM c \
+               WHERE c.g = o.k AND c.v < (SELECT max(c2.v) FROM c c2 WHERE c2.g = c.g + 1))",
+            // Errors: of the subquery's rows, after the subquery, and the
+            // first in row order of two.
+            "SELECT id FROM o WHERE id % 10 = 0 AND k IN (SELECT id * 10 FROM p) \
+               AND (SELECT sum(c.v / (c.v - 300)) FROM c WHERE c.g = o.k) > 0",
+            "SELECT id FROM o WHERE id % 10 = 0 \
+               AND (SELECT count(*) FROM c WHERE c.g = o.k) / (id - 19000) >= 0",
+            "SELECT o.id, (SELECT count(*) FROM c WHERE c.g = o.k) / (o.id - 19000), \
+               CAST(CASE WHEN o.id = 12000 THEN 'x' ELSE '1' END AS INT) \
+               FROM o JOIN p ON p.id = o.k % 50 WHERE o.id % 10 = 0",
+            "SELECT id FROM o WHERE (SELECT count(*) FROM c WHERE c.g = o.k) / (6 - id) >= 0 \
+               LIMIT 3",
+            "SELECT id FROM o WHERE k IN (SELECT id * 37 FROM p) \
+               AND (SELECT count(*) FROM c WHERE c.g = o.k) / (6 - id) >= 0 LIMIT 3",
+            // A CTE's rows, which only the statement's thread has.
+            "WITH w AS (SELECT g, v FROM c WHERE v < 100) \
+               SELECT id FROM o WHERE id % 10 = 0 AND k IN (SELECT id * 10 FROM p) \
+               AND v > (SELECT coalesce(sum(w.v), 0) FROM w WHERE w.g = o.k)",
+        ];
+        let mut one = session(&db, 1024);
+        one.execute("SET parallel_workers = 1").unwrap();
+        let mut many = session(&db, 1024);
+        many.execute("SET parallel_workers = 4").unwrap();
+        let mut row = session(&db, 0);
+        let mut failed = Vec::new();
+        let mut parallel = 0;
+        for q in queries {
+            let want = outcome(&mut one, q);
+            let before = nucleus_sql::vector::parallel_runs();
+            assert_eq!(outcome(&mut many, q), want, "{storage}: {q}");
+            parallel += usize::from(nucleus_sql::vector::parallel_runs() > before);
+            assert_eq!(outcome(&mut row, q), want, "{storage} rows: {q}");
+            if let Err(e) = want {
+                failed.push(e);
+            }
+        }
+        assert_eq!(failed.len(), 3, "{storage}: {failed:?}");
+        assert!(failed[2].contains("invalid input syntax"), "{failed:?}");
+        // All but the CTE's, and the LIMITs' over a pipeline (its morsels
+        // in parallel after the first's rows only, which suffice).
+        assert!(parallel >= 9, "{storage}: {parallel} ran on workers");
+    }
+}

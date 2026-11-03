@@ -30,11 +30,32 @@ use crate::error::{Error, Result};
 use crate::page::{Page, PageId, PageType};
 use crate::pager::Pager;
 
+/// A frame, and a shard ([`Shard`]), take a cache line of their own (128
+/// bytes on Apple's cores; two lines of 64 elsewhere, which adjacent-line
+/// prefetch fetches together): threads pinning neighbouring frames, or
+/// finding pages in neighbouring shards, do not write the same line.
+#[repr(align(128))]
 struct Frame {
     page: RwLock<Page>,
     pins: AtomicU32,
     dirty: AtomicBool,
     referenced: AtomicBool,
+}
+
+/// A shard's lock, and the hits found in it — counted on the line the
+/// lock already writes, not on one every thread's hits write.
+#[repr(align(128))]
+struct Shard {
+    inner: RwLock<Inner>,
+    hits: AtomicU64,
+}
+
+impl std::ops::Deref for Shard {
+    type Target = RwLock<Inner>;
+
+    fn deref(&self) -> &RwLock<Inner> {
+        &self.inner
+    }
 }
 
 /// One shard: frames `start..end` (by global index) and the pages in them.
@@ -112,8 +133,7 @@ pub struct BufferPool {
     frames: Box<[std::sync::OnceLock<Frame>]>,
     /// Locked for reading to find a page and pin it (a hit), for writing
     /// to change what the shard holds.
-    shards: Box<[RwLock<Inner>]>,
-    hits: AtomicU64,
+    shards: Box<[Shard]>,
     misses: AtomicU64,
     evictions: AtomicU64,
     writebacks: AtomicU64,
@@ -183,21 +203,23 @@ impl BufferPool {
         let shards = (0..n)
             .map(|i| {
                 let (start, end) = (capacity * i / n, capacity * (i + 1) / n);
-                RwLock::new(Inner {
-                    start,
-                    end,
-                    table: HashMap::default(),
-                    ids: vec![None; end - start],
-                    free_frames: (start..end).rev().collect(),
-                    hand: start,
-                })
+                Shard {
+                    inner: RwLock::new(Inner {
+                        start,
+                        end,
+                        table: HashMap::default(),
+                        ids: vec![None; end - start],
+                        free_frames: (start..end).rev().collect(),
+                        hand: start,
+                    }),
+                    hits: AtomicU64::new(0),
+                }
             })
             .collect();
         Self {
             pager,
             frames,
             shards,
-            hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             writebacks: AtomicU64::new(0),
@@ -227,7 +249,11 @@ impl BufferPool {
     /// The counters so far.
     pub fn stats(&self) -> PoolStats {
         PoolStats {
-            hits: self.hits.load(Ordering::Relaxed),
+            hits: self
+                .shards
+                .iter()
+                .map(|s| s.hits.load(Ordering::Relaxed))
+                .sum(),
             misses: self.misses.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             writebacks: self.writebacks.load(Ordering::Relaxed),
@@ -235,7 +261,7 @@ impl BufferPool {
     }
 
     /// The shard of page `id`.
-    fn shard(&self, id: PageId) -> &RwLock<Inner> {
+    fn shard(&self, id: PageId) -> &Shard {
         let n = self.shards.len();
         let at = if n == 1 {
             0
@@ -274,9 +300,10 @@ impl BufferPool {
                 // in it at once (a parallel join's lookups all descend from
                 // the same root).  Pins grow under either lock, and an
                 // eviction, which takes it for writing, sees them.
-                let inner = self.shard(id).read().unwrap_or_else(|e| e.into_inner());
+                let shard = self.shard(id);
+                let inner = shard.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(&frame) = inner.table.get(&id) {
-                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    shard.hits.fetch_add(1, Ordering::Relaxed);
                     return Ok(self.pin(frame, id));
                 }
                 self.writebacks.load(Ordering::Acquire)
@@ -287,7 +314,7 @@ impl BufferPool {
             let inner = self.lock(id);
             if let Some(&frame) = inner.table.get(&id) {
                 // Another thread read it meanwhile.
-                self.hits.fetch_add(1, Ordering::Relaxed);
+                self.shard(id).hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(self.pin(frame, id));
             }
             if self.writebacks.load(Ordering::Acquire) != epoch {
