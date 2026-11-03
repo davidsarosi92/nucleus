@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use nucleus_platform::Platform;
 use nucleus_storage::btree::{LeafEntry, LeafFilter};
@@ -130,12 +130,12 @@ struct Inner {
     /// committed, with the span of their intents' keys: a commit checks
     /// its keys inside a span against their intents.  Changed under the
     /// commit lock.
-    spilling: Mutex<BTreeMap<u64, Spans>>,
+    spilling: RwLock<BTreeMap<u64, Spans>>,
     /// Committed transactions with intents vacuum has not made versions
     /// yet: id → commit timestamp and the span of the intents' keys (`None`
     /// after a restart: unknown, so everywhere).  Readers resolve the
     /// intents by it — only the reads a span covers (§M14.20 W5).
-    unresolved: Mutex<BTreeMap<u64, (u64, Option<Spans>)>>,
+    unresolved: RwLock<BTreeMap<u64, (u64, Option<Spans>)>>,
     /// How many transactions are in `spilling` or `unresolved` (reads skip
     /// intents when none).
     side_users: AtomicUsize,
@@ -407,6 +407,17 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// `m` read: what every read of the side area's statuses takes (shared by
+/// the workers reading at once, §M14.20 W6).
+fn read<T>(m: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    m.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `m` to change.
+fn write<T>(m: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    m.write().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Engine {
     /// Opens (or creates) the database in `dir` and recovers it.
     pub fn open(platform: Arc<dyn Platform>, dir: &Path, opts: EngineOptions) -> Result<Self> {
@@ -433,8 +444,8 @@ impl Engine {
                 active: Mutex::new(BTreeMap::new()),
                 recent: Mutex::new(Recent::default()),
                 next_id: AtomicU64::new(1),
-                spilling: Mutex::new(BTreeMap::new()),
-                unresolved: Mutex::new(BTreeMap::new()),
+                spilling: RwLock::new(BTreeMap::new()),
+                unresolved: RwLock::new(BTreeMap::new()),
                 side_users: AtomicUsize::new(0),
                 begun: AtomicU64::new(0),
                 sweep: Mutex::new(None),
@@ -448,7 +459,7 @@ impl Engine {
     /// Whether committed transactions have intents vacuum has not made
     /// versions yet.
     pub fn intents_pending(&self) -> bool {
-        !lock(&self.inner.unresolved).is_empty()
+        !read(&self.inner.unresolved).is_empty()
     }
 
     /// How many transactions have begun: unchanged over a while, with
@@ -577,7 +588,7 @@ impl Engine {
                             ops.push((k, None));
                             removed += 1;
                         } else if !others.contains(&id)
-                            && !lock(&self.inner.unresolved).contains_key(&id)
+                            && !read(&self.inner.unresolved).contains_key(&id)
                         {
                             ops.push((k, None)); // aborted
                             removed += 1;
@@ -613,7 +624,7 @@ impl Engine {
                     // intent never outlives its status.
                     self.inner.store.wait_durable(lsn)?;
                     for &(id, _) in &committed {
-                        lock(&self.inner.unresolved).remove(&id);
+                        write(&self.inner.unresolved).remove(&id);
                         self.inner.side_users.fetch_sub(1, Ordering::AcqRel);
                     }
                 }
@@ -708,7 +719,7 @@ impl Inner {
         if self.side_users.load(Ordering::Acquire) == 0 {
             return Vec::new();
         }
-        lock(&self.unresolved)
+        read(&self.unresolved)
             .iter()
             .filter(|(_, (_, spans))| spans.as_ref().is_none_or(|s| s.overlaps(start, end)))
             .map(|(&id, &(ts, _))| (id, ts))
@@ -725,7 +736,7 @@ impl Inner {
         if self.side_users.load(Ordering::Acquire) == 0 {
             return Vec::new();
         }
-        lock(&self.spilling)
+        read(&self.spilling)
             .iter()
             .filter(|&(&id, _)| Some(id) != me)
             .map(|(&id, span)| (id, span.clone()))
@@ -994,7 +1005,7 @@ impl Inner {
             id = found + 1;
         }
         for &(id, ts) in &unresolved {
-            lock(&self.unresolved).insert(id, (ts, None));
+            write(&self.unresolved).insert(id, (ts, None));
             self.side_users.fetch_add(1, Ordering::AcqRel);
         }
         for (id, ts) in unresolved {
@@ -1147,7 +1158,7 @@ impl Inner {
             }
             self.store.write(&Batch { meta: *last, ops })?;
             if done {
-                lock(&self.unresolved).remove(&id);
+                write(&self.unresolved).remove(&id);
                 self.side_users.fetch_sub(1, Ordering::AcqRel);
                 return Ok(());
             }
@@ -1458,7 +1469,7 @@ impl Drop for Transaction {
         // stops running (no reader sees them, no writer conflicts with
         // them), then deleted (on a failure here, by vacuum).
         if let Some(id) = self.spilled.take() {
-            lock(&self.engine.spilling).remove(&id);
+            write(&self.engine.spilling).remove(&id);
             self.engine.side_users.fetch_sub(1, Ordering::AcqRel);
             if let Some((lo, hi)) = self.span.take() {
                 let _ = self.engine.drop_intents(id, &lo, &hi);
@@ -1705,6 +1716,11 @@ impl Transaction {
 
     /// Writes the pending unlogged writes into the store.
     fn flush_unlogged(&self) -> Result<()> {
+        // None without a fresh range (only writes into one are pending):
+        // no lock a read the workers share would contend for.
+        if self.fresh.is_empty() {
+            return Ok(());
+        }
         let mut pending = lock(&self.pending);
         if pending.ops.is_empty() {
             return Ok(());
@@ -1813,7 +1829,7 @@ impl Transaction {
         for key in self.writes.keys() {
             self.spans.add(key);
         }
-        lock(&engine.spilling).insert(id, self.spans.clone());
+        write(&engine.spilling).insert(id, self.spans.clone());
         let mut ops = Vec::new();
         // The next id past this one, before its intents (so no later
         // transaction is given an id an intent of this one has).
@@ -1895,6 +1911,20 @@ impl Transaction {
         })
     }
 
+    /// The first entry of `[start, end)` as [`first`](Self::first) finds
+    /// it, without read-ahead — and without remembering an empty range:
+    /// for the threads that share this transaction's reads, which would
+    /// contend for the memory (PLAN.md §M14.20 W6).
+    pub fn first_shared(
+        &self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let mut scan = self.scan(start, end)?;
+        scan.batch = 1;
+        scan.next().transpose()
+    }
+
     /// The first visible entry in the range, read without reading ahead.
     ///
     /// A range the store was found empty in before (and that no own intent
@@ -1915,10 +1945,7 @@ impl Transaction {
                 .range(start, end)
                 .find_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone()))));
         }
-        let mut scan = self.scan(start, end)?;
-        scan.batch = 1;
-        let got = scan.next().transpose()?;
-        drop(scan);
+        let got = self.first_shared(start, end)?;
         // The store showed nothing before the entry found (or in the whole
         // range) — known for sure where none of this transaction's own
         // writes lie, which could have hidden one of its entries.
@@ -2020,8 +2047,8 @@ impl Transaction {
             if let Some(id) = spilled {
                 // Committed before it stops running: a writer never finds
                 // its intents neither (a reader at `ts` starts after both).
-                lock(&engine.unresolved).insert(id, (ts, Some(std::mem::take(&mut self.spans))));
-                lock(&engine.spilling).remove(&id);
+                write(&engine.unresolved).insert(id, (ts, Some(std::mem::take(&mut self.spans))));
+                write(&engine.spilling).remove(&id);
                 self.spilled = None; // its intents are the commit's now
             }
             let mut recent = lock(&engine.recent);

@@ -308,6 +308,13 @@ pub trait KvRead: Sync {
     fn get_validated(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
     /// [`KvTxn::scan_validated`].
     fn scan_validated<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>>;
+    /// [`KvTxn::first`] — without the read-ahead, and remembering nothing
+    /// the threads sharing the reads would contend for (a lookup's
+    /// segment, asked once a row on each worker: PLAN.md §M14.20 W6).  By
+    /// default the scan's first.
+    fn first(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.scan(start, end)?.next().transpose()
+    }
     /// [`KvTxn::scan_chunks`].
     fn scan_chunks<'a>(
         &'a self,
@@ -353,6 +360,10 @@ impl KvRead for Locked<'_> {
     fn scan<'a>(&'a self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<KvIter<'a>> {
         let all: Vec<_> = self.lock().scan(start, end)?.collect();
         Ok(Box::new(all.into_iter()))
+    }
+
+    fn first(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.lock().first(start, end)
     }
 
     fn get_validated(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -756,6 +767,10 @@ const SPLIT_MIN_LEAVES: usize = 64;
 impl KvRead for LocalTxn {
     fn read_ts(&self) -> Timestamp {
         self.0.read_ts()
+    }
+
+    fn first(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Ok(self.0.first_shared(start, end)?)
     }
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {

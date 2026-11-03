@@ -604,8 +604,13 @@ beyond eight the two neighbours whose facing keys share the longest
 prefix become one, so a load's catalog key, its rows and its index stay
 apart and the tables between them stay out — running and, once
 committed, until vacuum (after a restart they are not known: every read
-counts them).  A scan or a key's read that no range reaches takes the
-plain path, as with no intents at all; a write's conflict check looks at
+counts them).  The statuses and the running ranges are read under a
+reader-writer lock, so the workers sharing a transaction's reads look
+at them at once (a mutex queued them: TPC-H Q19's lookups on a just
+loaded `lineitem`, §M14.20 W6), and a read flushes pending unlogged
+writes (D16) only in a transaction that has a fresh range.  A scan or a
+key's read that no range reaches takes the plain path, as with no
+intents at all; a write's conflict check looks at
 the tree only for keys another's running ranges cover (or a large
 commit's span).  The merging pass decodes each key into the batch once,
 its value replaced by a better ranked version's (TPC-H Q6 over a just
@@ -801,8 +806,9 @@ distributed implementation will provide (§F3).
   reuses, so a large read allocates nothing per entry; provided over
   `scan`, the local implementation fills chunks straight from the
   engine), `shared()` (the transaction's reads as a `KvRead` — the same
-  read methods, `Sync` — for worker threads to share while it is borrowed;
-  default `None`), `split_points(start, end, parts)` (up to `parts - 1`
+  read methods, `Sync` — for worker threads to share while it is borrowed,
+  `first` among them without the empty ranges remembered, which the
+  workers would contend for; default `None`), `split_points(start, end, parts)` (up to `parts - 1`
   keys cutting a range into parts of about equal size, from the B+tree's
   internal nodes, none smaller than 64 leaves; default none), `first(start,
   end)` (the range's first entry, without a scan's read-ahead; the
@@ -2147,7 +2153,8 @@ line is `Execution: n rows in t ms`.  `TIMING OFF` leaves the times out
 (repeatable output, for tests).  Time is the database's monotonic clock
 (`Kv::elapsed`).  The query runs with the session's privileges, budget and
 row-level security, like the query itself; only queries for now (`UPDATE`
-and `DELETE` have plain `EXPLAIN`).  A large gap between `rows=` and
+and `DELETE` have plain `EXPLAIN`); it reads the columns the query
+reads, as it would run.  A large gap between `rows=` and
 `actual rows=` points at stale or missing statistics (`ANALYZE`).
 
 **Statement statistics** (`nc_catalog.statements`): every statement a
@@ -3084,6 +3091,14 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-03 — §M14.20 W6, shared reads without a queue:** the
+  engine's intent statuses and running ranges under a reader-writer
+  lock; `KvRead::first` (a worker's lookup of a column table's segment
+  without read-ahead); no lock for unlogged writes in a transaction
+  without a fresh range; `EXPLAIN ANALYZE` reads only the columns the
+  query needs (TPC-H Q19's took 18.6 s, every column of `lineitem` a
+  row).
 
 - **2026-11-03 — §M14.20 W6, `DISTINCT` inside aggregates as groupings:**
   `count(DISTINCT x)` and the aggregates beside it become a grouping by

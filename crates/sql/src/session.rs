@@ -1475,6 +1475,10 @@ fn execute_statement(
             let profile = crate::profile::Profile::new(clock.clone());
             let mut ctx = Ctx::new(ro, reg, params);
             ctx.profile = Some(&profile);
+            // The columns the query reads, as it runs without EXPLAIN (a
+            // column table's lookups read every column without: TPC-H Q19
+            // 18.6 s against 49 ms).
+            ctx.needed = crate::prune::needed(&plan);
             ctx.memoize = true;
             let start = clock.as_ref().map(|k| k.elapsed());
             let rows = exec::collect(&plan, &ctx, None)?.len();

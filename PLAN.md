@@ -2070,6 +2070,44 @@ the speed-up is made once, in the merged one.  The work, in this order:
   85 → 22, Q22 12.7 → 7.0 — Q4 now 0.07× PostgreSQL's, and no ClickBench
   query on a column table above 3×.  TPC-H unchanged (its one `DISTINCT`
   call, Q16's, is over a join: 128 ms on both).
+  *Done — shared reads without a queue* (profiled first: TPC-H Q19 on
+  column tables, 65 ms against PostgreSQL's 17.8, 3.1×; its 477 parts
+  each look up some 30 `lineitem` rows by `lineitem_part_supp`, the
+  lookups on the workers).  Not what the plan above guessed — the
+  segments a part's rows lie in are scattered, so a segment kept for the
+  next key would not serve —, but the workers queueing: each lookup is
+  three reads (the delta store, the segment directory, the row's delete
+  marker), and every read of a just loaded table took the engine's
+  mutex over the committed transactions with intents (`unresolved`,
+  16k of the profile's samples); the directory's `first` went through a
+  whole scan (`KvRead` had none) with its read-ahead; and every read
+  locked the transaction's pending unlogged writes.  Now the statuses
+  and the running ranges are under a reader-writer lock; `KvRead::first`
+  reads one entry (`Transaction::first_shared`: no read-ahead, and no
+  empty range remembered — the workers would contend for that memory);
+  a read flushes unlogged writes only in a transaction that has a fresh
+  range (`flush_unlogged`).  Found on the way: `EXPLAIN ANALYZE` read
+  every column (it never set the columns needed), so Q19 under it took
+  18.6 s — every `lineitem` column of every row looked up, past the
+  segment cache —; now 145 ms.  Not taken: a statement's view of a
+  column table (directory, markers, delta) kept for its lookups — the
+  workers' threads outlive a statement, and the reads are cheap enough
+  once they no longer queue; lock-free statuses (an epoch-swapped
+  snapshot) — the reader-writer lock left no wait in the profile.
+  Tested: a Q19-shaped join — a row table split into morsels, each row
+  looking up a column table by a secondary index, rows deleted from the
+  segments and some in the delta store — gives one thread's rows on four
+  workers (no test before ran a column table's lookups on workers: the
+  lookups' test had too few outer rows to split); mutations caught (the
+  shared `first` finding nothing, in the engine's reads and in
+  `SharedTxn`; unlogged writes never flushed).  Not covered by a test:
+  `EXPLAIN ANALYZE`'s columns (no observable but time).  Measured,
+  alternating with the step before, two rounds: TPC-H on column tables
+  4.50 / 4.82 → 4.39 / 4.41 s, Q19 65 / 66 → 46 / 45 ms (2.5× now: no
+  query on column tables above 3×), Q21 511 / 575 → 454 / 471; on row
+  tables, best of twenty, Q19 43 → 40 ms, Q21 1,040 → 910 (best of
+  three moves by a tenth either way); ClickBench unchanged (2.62 / 2.59
+  → 2.62 / 2.61 s).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3193,3 +3231,8 @@ style) across a thousand seeds without failure.
   states; then by group) — the vectorized, parallel grouping, where it
   was a set a group a row at a time; `Aggregate::order_free`; ClickBench
   4.9 → 2.4 s (Q4 547 → 14 ms, Q9 728 → 74).  DOCS §8.6, §8.12.
+- **2026-11-03** — §M14.20 W6: shared reads without a queue — intent
+  statuses under a reader-writer lock, `KvRead::first` without
+  read-ahead, unlogged writes flushed only with a fresh range;
+  `EXPLAIN ANALYZE` reads only the columns needed (Q19 18.6 s → 145 ms
+  under it).  TPC-H Q19 on column tables 65 → 45 ms, Q21 543 → 462.

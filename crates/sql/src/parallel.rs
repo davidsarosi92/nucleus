@@ -36,6 +36,14 @@ impl KvTxn for SharedTxn<'_> {
         self.0.scan(start, end)
     }
 
+    fn first(
+        &self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+    ) -> nucleus_kv::Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.0.first(start, end)
+    }
+
     fn get_validated(&self, key: &[u8]) -> nucleus_kv::Result<Option<Vec<u8>>> {
         self.0.get_validated(key)
     }

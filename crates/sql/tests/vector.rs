@@ -1619,3 +1619,60 @@ fn distinct_aggregates_as_groupings_agree() {
         "one grouping over a join: {plan:?}"
     );
 }
+
+#[test]
+fn column_lookups_on_workers_agree() {
+    // TPC-H Q19's shape: an outer table split into morsels, each row
+    // looking up a column table's rows by a secondary index — each row
+    // found through the table's segment directory on a worker (the shared
+    // reads' `first`, §M14.20 W6): the rows of one thread, and with rows
+    // deleted from the segments and some in the delta store.
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(47)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE o (id INT PRIMARY KEY, k INT, pad TEXT); \
+         CREATE TABLE c (id INT PRIMARY KEY, g INT, v INT) WITH (storage = column); \
+         INSERT INTO o SELECT i, i * 37 % 4000, repeat('x', 60) FROM generate_series(1, 20000) i; \
+         INSERT INTO c SELECT i, i % 4000, i * 7 % 1000 FROM generate_series(1, 40000) i; \
+         DELETE FROM c WHERE id % 13 = 0; \
+         INSERT INTO c VALUES (40001, 3, 1), (40002, 37, 2); \
+         CREATE INDEX c_g ON c (g); \
+         ANALYZE",
+    )
+    .unwrap();
+    let segments = outcome(
+        &mut s,
+        "SELECT count(*) FROM nc_catalog.segments WHERE table_name = 'c'",
+    )
+    .unwrap();
+    assert!(segments[0][0].parse::<i64>().unwrap() >= 1, "{segments:?}");
+    let q = "SELECT o.id, c.id, c.v FROM o JOIN c ON c.g = o.k WHERE o.k < 4";
+    let plan = outcome(&mut s, &format!("EXPLAIN {q}")).unwrap();
+    assert!(
+        plan.iter().any(|l| l[0].contains("Index Nested Loop")),
+        "{plan:?}"
+    );
+    let mut one = session(&db, 1024);
+    one.execute("SET parallel_workers = 1").unwrap();
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    let sorted = |r: Result<Vec<Vec<String>>, String>| {
+        r.map(|mut rows| {
+            rows.sort();
+            rows
+        })
+    };
+    let before = nucleus_sql::vector::parallel_runs();
+    let want = sorted(outcome(&mut one, q));
+    assert!(want.as_ref().is_ok_and(|r| r.len() > 100), "{want:?}");
+    assert_eq!(sorted(outcome(&mut many, q)), want, "{q}");
+    assert!(
+        nucleus_sql::vector::parallel_runs() > before,
+        "the lookups ran on workers"
+    );
+}
