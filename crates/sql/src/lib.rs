@@ -20,6 +20,7 @@ pub mod copy;
 pub mod datetime;
 pub mod dbsettings;
 pub mod decimal;
+mod distinct;
 pub mod dml;
 mod eager;
 pub mod encoding;

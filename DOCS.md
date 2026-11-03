@@ -1401,7 +1401,8 @@ references against the SQL layer's own definitions.  Grand totals over a
 whole batch sum and compare integers in a kernel (exact, in two 32-bit
 halves); group keys hash through a seeded multiplicative hash.  `AND` and `OR` evaluate their right side
 only on the rows the left one leaves undecided.  Aggregates over a
-pipeline are vectorized when none has `DISTINCT` or `ORDER BY`: group
+pipeline are vectorized when none has `DISTINCT` or `ORDER BY` (most
+`DISTINCT` calls the optimizer makes two groupings, §8.6): group
 numbers by key — one integer key by a direct index while the keys lie in
 a range of up to 65 536 values (the range found as they come, grown
 twofold), hashed as an integer past it; any other key by a salted table
@@ -1660,7 +1661,24 @@ grouping of all of it); an inner join is tried both ways round, and
 through a projection of columns.  Not for a unique index (its `NULL`s
 repeat) or an aggregate that can fail (the right rows no left row
 matches are aggregated too, and their error would come where the join
-gave none).  `NOT IN` stays a subquery (its NULL
+gave none).
+
+**`DISTINCT` inside aggregates as groupings** (`distinct`, §M14.20 W6):
+`SELECT g, count(DISTINCT x), sum(y) … GROUP BY g` is aggregated twice —
+by `g, x`, the other aggregates giving their partial states
+(`partial sum(y)` in `EXPLAIN`), then by `g`, the `DISTINCT` one fed
+each `x` once and the others combining the partial states (`combined
+sum`) — so both are the vectorized, parallel grouping within
+`work_mem`, where a `DISTINCT` call kept a set of values a group, a row
+at a time on one thread (ClickBench Q4, `count(DISTINCT UserID)`, 558 →
+15 ms).  It holds when the `DISTINCT` calls share their arguments, no
+call has an `ORDER BY`, every aggregate's result is the same in any
+order of its rows (`Aggregate::order_free`: not `array_agg` or
+`string_agg`), the others have partial states and the input is a
+pipeline (a scan through filters and projections — over a join's rows,
+a row at a time, the two groupings would only hash each row twice:
+TPC-H Q16 127 → 192 ms); the result is the set's, `NULL`s and errors
+included.  `NOT IN` stays a subquery (its NULL
 semantics are not an anti join's); so do correlated scalar subqueries.
 `EXPLAIN` prints the plan (columns as `#n`); `EXPLAIN ANALYZE` runs it
 too (§8.13).
@@ -2045,7 +2063,9 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   asked for more groups than are used: room for them).  `infallible()`
   (default false): no input makes it fail, so the optimizer may compute
   it below a join, over rows the join would drop (eager aggregation,
-  §8.6).
+  §8.6).  `order_free()` (default false): its result is the same in any
+  order of its rows, so a `DISTINCT` call of it may be fed its values
+  grouped first (§8.6).
 - `TableFunction` — `name()`, `arity()`, `resolve(&[ArgInfo]) ->
   TableSignature` (per argument, and the output columns; one column for
   now, named after the function or its alias), `rows(&CallContext,
@@ -3064,6 +3084,13 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-03 — §M14.20 W6, `DISTINCT` inside aggregates as groupings:**
+  `count(DISTINCT x)` and the aggregates beside it become a grouping by
+  the group and `x` (the others' partial states) and one by the group
+  (the `DISTINCT` call fed `x`, the others combining) — both the
+  vectorized, parallel grouping; `Aggregate::order_free` says which
+  aggregates may be fed so (§8.6, §8.12).
 
 - **2026-11-03 — §M14.20 W6, typed aggregate states:** a grouping's
   `min`, `max`, `bool_and` and `bool_or` keep a value a group, its `sum`

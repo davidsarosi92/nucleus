@@ -335,6 +335,15 @@ pub trait Aggregate: Send + Sync {
         false
     }
 
+    /// Whether its result is the same whatever the order its rows come in
+    /// (`count`, `sum`, `min`; not `array_agg`): a capability — a
+    /// `DISTINCT` call may then be fed its values grouped first, the
+    /// other aggregates beside it combining partial states (PLAN.md
+    /// §M14.20 W6).
+    fn order_free(&self) -> bool {
+        false
+    }
+
     /// Types a call (as [`ScalarFunction::resolve`]; [`Returns::Constant`]
     /// is not allowed).
     fn resolve(&self, args: &[ArgInfo]) -> Result<Signature>;

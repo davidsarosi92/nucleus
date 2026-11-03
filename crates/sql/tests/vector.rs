@@ -1491,3 +1491,131 @@ fn typed_aggregate_states_agree() {
     }
     assert_eq!(errors, 6, "sum(b) overflows, on r and c, grouped or not");
 }
+
+#[test]
+fn distinct_aggregates_as_groupings_agree() {
+    // `count(DISTINCT x)` and the aggregates beside it planned as two
+    // groupings (§M14.20 W6): the rows and errors of the same call with an
+    // `ORDER BY` inside, which keeps the set of values a group — a row or a
+    // batch at a time, on workers, past work_mem; NULLs, equal numerics of
+    // other scales, no rows, errors in an argument and in a sum.
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(43)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    for (t, storage) in [("r", "row"), ("c", "column")] {
+        s.execute(&format!(
+            "CREATE TABLE {t} (id INT PRIMARY KEY, g INT, k INT, a INT, b BIGINT, \
+               u NUMERIC, f FLOAT, s TEXT) WITH (storage = {storage}); \
+             INSERT INTO {t} SELECT i, i % 7, (i * 7919) % 6000, \
+               CASE WHEN i % 11 = 0 THEN NULL ELSE i % 23 - 11 END, \
+               CASE WHEN i % 4999 = 0 THEN 9223372036854775807 ELSE i END, \
+               CASE WHEN i % 3 = 0 THEN 1.5 WHEN i % 3 = 1 THEN 1.50 ELSE 2.25 END, \
+               (i % 50) / 7.0, \
+               CASE WHEN i % 5 = 0 THEN NULL ELSE 'v' || (i % 300) END \
+               FROM generate_series(1, 30000) i; \
+             DELETE FROM {t} WHERE id % 997 = 0"
+        ))
+        .unwrap();
+    }
+    // Each with `{o}` where the reference has its ORDER BY.
+    let calls = [
+        "SELECT count(DISTINCT k{o}) FROM {t}",
+        "SELECT g, count(DISTINCT k{o}) FROM {t} GROUP BY g",
+        "SELECT k % 100, count(DISTINCT s{o}), count(*) FROM {t} GROUP BY 1",
+        "SELECT g, sum(a), count(*), avg(f), count(DISTINCT k{o}), min(s), max(u) \
+           FROM {t} GROUP BY g",
+        "SELECT g, sum(DISTINCT a{o}), count(DISTINCT a{o}), avg(DISTINCT a{o}) FROM {t} GROUP BY g",
+        "SELECT count(DISTINCT u{o}), sum(DISTINCT u{o}), min(DISTINCT u{o}) FROM {t}",
+        // Not two groupings: DISTINCT calls of other arguments, an
+        // aggregate whose values come in the rows' order.
+        "SELECT g, count(DISTINCT a{o}), count(DISTINCT k{o}) FROM {t} GROUP BY g",
+        "SELECT g, count(DISTINCT a{o}), array_agg(id) FROM {t} WHERE id < 200 GROUP BY g",
+        // Over a join: one grouping.
+        "SELECT y.g, count(DISTINCT x.k{o}) FROM {t} x JOIN {t} y ON x.id = y.k \
+           WHERE y.id < 3000 GROUP BY y.g",
+        "SELECT count(DISTINCT k{o}), sum(a) FROM {t} WHERE id < 0",
+        "SELECT g, count(DISTINCT k{o}) FROM {t} WHERE id < 0 GROUP BY g",
+        "SELECT g, count(DISTINCT k{o}) FROM {t} GROUP BY g HAVING count(DISTINCT k{o}) > 800",
+        "SELECT g, (SELECT count(DISTINCT x.k{o}) FROM {t} x WHERE x.g = y.g AND x.id < 900) \
+           FROM {t} y WHERE y.id < 20",
+        // Errors: in the DISTINCT call's argument, in a sum beside it.
+        "SELECT g, count(DISTINCT 100 / (id - 500){o}) FROM {t} GROUP BY g",
+        "SELECT g, sum(b), count(DISTINCT k{o}) FROM {t} GROUP BY g",
+        "SELECT count(DISTINCT k{o}), sum(100 / (id - 20000)) FROM {t}",
+    ];
+    let sorted = |r: Result<Vec<Vec<String>>, String>| {
+        r.map(|mut rows| {
+            rows.sort();
+            rows
+        })
+    };
+    let mut sessions: Vec<(String, Session)> = Vec::new();
+    for (name, batch, set) in [
+        ("rows", 0, ""),
+        ("batches of 3", 3, ""),
+        ("batches", 1024, ""),
+        ("workers", 1024, "SET parallel_workers = 4"),
+        (
+            "work_mem",
+            1024,
+            "SET parallel_workers = 4; SET work_mem = '64kB'",
+        ),
+    ] {
+        let mut s = session(&db, batch);
+        if !set.is_empty() {
+            s.execute(set).unwrap();
+        }
+        sessions.push((name.to_string(), s));
+    }
+    let mut errors = 0;
+    let before = nucleus_sql::vector::parallel_runs();
+    for t in ["r", "c"] {
+        for call in calls {
+            let q = call.replace("{t}", t);
+            let reference = q.replace("{o}", " ORDER BY 1");
+            let reference = reference
+                .replace("x.k ORDER BY 1", "x.k ORDER BY x.k")
+                .replace("k ORDER BY 1", "k ORDER BY k")
+                .replace("s ORDER BY 1", "s ORDER BY s")
+                .replace("a ORDER BY 1", "a ORDER BY a")
+                .replace("u ORDER BY 1", "u ORDER BY u")
+                .replace(
+                    "(id - 500) ORDER BY 1",
+                    "(id - 500) ORDER BY 100 / (id - 500)",
+                );
+            let q = q.replace("{o}", "");
+            let want = sorted(outcome(&mut sessions[0].1, &reference));
+            for (name, s) in &mut sessions {
+                assert_eq!(sorted(outcome(s, &q)), want, "{name}: {q}");
+            }
+            errors += usize::from(want.is_err());
+        }
+    }
+    assert_eq!(errors, 6, "the three errors, on r and c");
+    assert!(
+        nucleus_sql::vector::parallel_runs() > before,
+        "DISTINCT calls ran on the workers"
+    );
+    let plan = outcome(
+        &mut sessions[0].1,
+        "EXPLAIN SELECT g, sum(a), count(DISTINCT k) FROM c GROUP BY g",
+    )
+    .unwrap();
+    assert!(
+        format!("{plan:?}").contains("partial sum"),
+        "two groupings: {plan:?}"
+    );
+    let plan = outcome(
+        &mut sessions[0].1,
+        "EXPLAIN SELECT y.g, count(DISTINCT x.k) FROM c x JOIN c y ON x.id = y.k GROUP BY y.g",
+    )
+    .unwrap();
+    assert!(
+        format!("{plan:?}").contains("DISTINCT"),
+        "one grouping over a join: {plan:?}"
+    );
+}

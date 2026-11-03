@@ -444,6 +444,7 @@ same machine, alternating with the step before):
 | W6: top-N | 8.6 | 4.2 |
 | W6: a decimal division in one step | 8.7 | 4.25 |
 | W6: typed aggregate states | 9.0 | 4.2 |
+| W6: `DISTINCT` inside aggregates as groupings | 9.2 | 4.5 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
@@ -459,6 +460,12 @@ same machine, alternating with the step before):
 | W6: top-N, a sort below a `LIMIT` keeping its rows only | 4.7 | 30.1 | 525 | 169 | 261 |
 | W6: a decimal division in one step (an average's) | 4.7 | 29.8 | 508 | 172 | 259 |
 | W6: typed aggregate states | 4.7 | 29.5 | 445 | 161 | 271 |
+| W6: `DISTINCT` inside aggregates as groupings | 2.4 | 20.0 | 430 | 168 | 277 |
+
+(`DISTINCT` as groupings: Q4 547 → 14 ms, Q5 549 → 12.5, Q8 607 → 24, Q9
+728 → 74, Q13 85 → 22.  TPC-H in that step, 9.2 / 4.5 s, is the step
+before's build in the same rounds too, 9.4 / 4.46 s: the machine slower
+that evening, not the step.)
 
 (Typed aggregate states also Q6 14.3 → 6.2 ms, Q36 80 → 70, Q28 240 →
 218; slower Q27 36 → 39 ms — `length(URL)`'s strings, not its aggregate;
@@ -598,7 +605,7 @@ machine against PostgreSQL 18 in the same run:
 |---|---|---|
 | TPC-H SF 1, column tables: geometric mean ≤ 0.8× PostgreSQL's time | 0.47× (0.67× in the run before) | yes |
 | ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.24× (0.31×) | yes |
-| column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 3.1×; ClickBench Q4 2.9× (Q32 3.1× → 0.56× and Q18 3.1× → 0.50× by W6's steps, against the same PostgreSQL times; TPC-H Q20 1.9×) | no |
+| column tables: no TPC-H or ClickBench query above 3× | TPC-H Q19 3.1×; ClickBench none since W6 (against the same PostgreSQL times: Q32 3.1× → 0.46×, Q18 3.1× → 0.49×, Q4 2.9× → 0.07×; TPC-H Q20 1.9×) | no (Q19) |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 1.11× (1.27×), ClickBench 2.13× (2.31×) | TPC-H yes, ClickBench no |
 | loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 0.9×; TPC-H 3.1× (row), 3.8× (column); ClickBench 2.4×, 2.7× | `bench/run.py` yes, the others no |
 | updates and deletes ≤ 2× (`bench/run.py`) | update 0.9×, delete 1.3× | yes |

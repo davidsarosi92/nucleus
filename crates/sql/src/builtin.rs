@@ -575,6 +575,12 @@ impl Aggregate for BuiltinAgg {
         )
     }
 
+    /// All but `string_agg` and `array_agg`, whose values come in the
+    /// order of their rows (a sum of doubles is exact, so in any order).
+    fn order_free(&self) -> bool {
+        !matches!(self.0, AggFunc::StringAgg | AggFunc::ArrayAgg)
+    }
+
     /// `array_agg` keeps `NULL`s.
     fn keeps_nulls(&self) -> bool {
         self.0 == AggFunc::ArrayAgg

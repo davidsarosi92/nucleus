@@ -2017,6 +2017,12 @@ pub struct Pipeline<'a> {
     dict: Option<DictFilter<'a>>,
 }
 
+/// Whether `plan` is a chain the vectorized executor runs as a pipeline
+/// (a scan through filters and projections).
+pub(crate) fn pipelined(plan: &Plan) -> bool {
+    chain(plan).is_some()
+}
+
 /// The scan, and the filters and projections above it, of a chain that
 /// ends in a table scan by the primary key (or every row); `None` for
 /// anything else.

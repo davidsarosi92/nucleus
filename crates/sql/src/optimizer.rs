@@ -37,7 +37,7 @@ pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let plan = push(crate::unnest::unnest(plan), &stats);
     let plan = sink(reorder(plan, &stats), &stats);
     let plan = lookups(crate::eager::eager(plan, &stats), &stats);
-    crate::narrow::narrow(plan)
+    crate::narrow::narrow(crate::distinct::two_level(plan))
 }
 
 /// A condition's conjuncts, the conjuncts every branch of an `OR` among

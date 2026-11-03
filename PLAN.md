@@ -2028,6 +2028,48 @@ the speed-up is made once, in the merged one.  The work, in this order:
   tables 4.42 / 4.25 → 4.27 / 4.13 s (Q18 287 / 274 → 253 / 243 ms, Q13
   112 → 103 / 101, Q1 166 → 158 / 148); on row tables unchanged (8.92 /
   9.05 → 9.16 / 8.86 s, the pread-bound queries' noise).
+  *Done — `DISTINCT` inside aggregates as groupings*: a `DISTINCT` call
+  kept a set of values a group, so its whole aggregate ran a row at a
+  time on one thread (ClickBench Q4, `count(DISTINCT UserID)`, 558 ms:
+  2.9× PostgreSQL's; Q5, Q8, Q9 each 0.55–0.73 s).  Now the optimizer
+  (`distinct::two_level`) makes it two groupings — by the group and the
+  `DISTINCT` arguments, the other aggregates giving their partial states
+  (an aggregate `partial f` whose result is `f`'s `GroupAccumulator::
+  partial`), then by the group, the `DISTINCT` call fed each value once
+  and the others combining (`combined f`) — both the vectorized,
+  parallel grouping within `work_mem`.  It holds when the `DISTINCT`
+  calls share their arguments, no call has an `ORDER BY`, every
+  aggregate gives the same result in any order of its rows (a new
+  capability, `Aggregate::order_free`: not `array_agg`, `string_agg`)
+  and has partial states, and the input is a pipeline.  Taken from
+  Calcite's `AggregateExpandDistinctAggregatesRule` and Spark's
+  `RewriteDistinctAggregates` (the two groupings), with the engine's own
+  partial states in place of their SQL ones (a sum of sums, an average
+  as a sum and a count: other types, and a partial sum that overflows
+  where the whole does not).  Not taken: DuckDB's distinct hash tables
+  inside the aggregate operator (one mechanism: the grouping as it is);
+  PostgreSQL's sort of each `DISTINCT` call's rows; ClickHouse's
+  `uniqExact` — a set a group as the state, what this was; Spark's
+  `Expand` for calls of other arguments (each row once a set of them) —
+  those stay a set a group; over a join's rows, still a row at a time,
+  the two groupings only hash each row twice (TPC-H Q16 127 → 192 ms,
+  so not there until joins emit batches).  Tested: the rows and errors of
+  the same calls with an `ORDER BY` inside (a set a group, as before) —
+  grouped and not, `NULL`s, equal numerics of other scales, no rows,
+  `HAVING`, a correlated subquery, an error in the `DISTINCT` argument
+  and in a sum beside it — a row or a batch at a time, on workers, past
+  `work_mem`; calls of other arguments, `array_agg` beside, a join's
+  rows: one grouping; the 43 ClickBench queries' results the previous
+  build's at 64 MB and 4 MB but for ties at a `LIMIT`; mutations caught
+  (the `DISTINCT` call's columns, the partial states' columns, the
+  arguments' or the order's condition dropped, a partial finished as a
+  result, the pipeline's condition dropped).  Measured, alternating with
+  the step before, two rounds: ClickBench on a column table 5.01 / 4.82
+  → 2.45 / 2.41 s (geometric mean 31.1 → 20.0 ms): Q4 547 → 14 ms, Q5
+  549 → 12.5, Q8 607 → 24, Q9 728 → 74, Q10 22 → 5.5, Q11 23 → 6, Q13
+  85 → 22, Q22 12.7 → 7.0 — Q4 now 0.07× PostgreSQL's, and no ClickBench
+  query on a column table above 3×.  TPC-H unchanged (its one `DISTINCT`
+  call, Q16's, is over a join: 128 ms on both).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3146,3 +3188,8 @@ style) across a thousand seeds without failure.
   grouping counts each accumulator's own bytes a group against
   `work_mem`; ClickBench Q32 531 → 445 ms, Q6 14 → 6; TPC-H column Q18
   280 → 248.  DOCS §8.5, §8.12.
+- **2026-11-03** — §M14.20 W6: `DISTINCT` inside aggregates planned as
+  two groupings (by group and value, the other aggregates' partial
+  states; then by group) — the vectorized, parallel grouping, where it
+  was a set a group a row at a time; `Aggregate::order_free`; ClickBench
+  4.9 → 2.4 s (Q4 547 → 14 ms, Q9 728 → 74).  DOCS §8.6, §8.12.
