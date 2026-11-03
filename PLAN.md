@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W4 and W3b ✅, W5–W8 next (D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W5 and W3b ✅, W6–W8 next (D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -1850,6 +1850,35 @@ the speed-up is made once, in the merged one.  The work, in this order:
   a copy, and raising by 1 no longer copies the column.  Measured, the 22
   queries, alternating: column tables 4.33 → 4.25 s (Q6 77 → 67 ms, Q18
   303 → 277 ms); row tables within the noise (8.63 → 8.50 s).
+  *Not taken — a scan-resistant segment cache.*  The cache evicts the
+  columns used longest ago, an eighth of its bound at a time; a scan of a
+  table larger than it keeps nothing from one run to the next.  Tried:
+  TinyLFU's admission (Einziger, Friedman and Manes 2017; Caffeine) — a
+  count-min sketch of how often each column is asked for, and a full
+  cache letting a column in only over a less asked-for victim.  In a
+  model it did what it should (a 150-column scan through 100 slots, ten
+  times: 0 hits → 900+; twenty hot columns between a scan's: 0 → 500+),
+  but on TPC-H SF 1's column tables it lost: 4.20 → 6.72 s, the hot
+  `lineitem` columns' counts saturating and keeping a small table's
+  columns (Q11, Q16) out; aging every 10 000 counts (Caffeine's ten times
+  the entries) still 4.76 s.  The 22 queries' columns nearly fit the 256
+  MB, so least-recently-used is what they want.  Left as it is; the
+  question comes back with a working set past the cache (SF 10, or the
+  §M14.20 closing runs) — then W-TinyLFU's recency window (1 % in plain
+  LRU before the admission test) or S3-FIFO (Yang et al., SOSP 2023: a
+  small FIFO, a main one, a ghost list), measured the same way.
+  *Not taken — one copy of a written byte.*  Profiled first (`lineitem`'s
+  `COPY` into a row table, 9.1 s): `memmove` is 4.7 % of the busy time,
+  and of it the write path's own copies — into the write set, the
+  version's encoding, the store's batch, the WAL record, the leaf — about
+  1.7 %; the rest is parsing and encoding the rows, which must be done.
+  Not worth reshaping the write set's representation for; the WAL record
+  and the tree's application sharing one buffer stays W7's.
+  *W5 done* (2026-11-03): page reads, reads past intents, a 32-byte
+  `Value`, 64-bit decimal mantissas; the 22 TPC-H SF 1 queries on row
+  tables 10.0 → 8.5 s, on column tables 4.6 → 4.25 s.  **W6 is next**;
+  each step measured with `bench/phases.py` against the commit before it
+  (`docs/benchmarks.md`, "How these steps are measured").
 - **W6 — the queries above 3×.**  `count(DISTINCT)` planned as a
   grouping (the vectorized, parallel one); top-N; typed aggregate states
   and one key table for groupings, `DISTINCT`, set operations and join
@@ -2954,3 +2983,7 @@ style) across a thousand seeds without failure.
 - **2026-11-03** — §M14.20 W5: decimal vectors' mantissas 64-bit while
   they fit (a cached decimal column half the size); column tables 4.33 →
   4.25 s.  DOCS §8.5.
+- **2026-11-03** — §M14.20 W5 done: TinyLFU admission for the segment
+  cache tried and not taken (TPC-H 4.20 → 6.72 s), the write path's
+  copies measured (1.7 % of a `COPY`) and left; `bench/phases.py`, a
+  step's load and reads measured against another build; next W6.

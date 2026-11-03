@@ -449,6 +449,16 @@ it), before the vacuum makes its intents versions (W5): Q6 over
 `lineitem` 385 → 330 ms (301 ms vacuumed); a query of `orders`, loaded
 and vacuumed before, 67 → 51 ms (50 ms vacuumed).
 
+How these steps are measured: `bench/phases.py` — `load` times each
+table's `COPY`, each index and `ANALYZE`; `reads` loads, then times the
+22 queries right after the load (`first`), as the best of `--runs`
+(`best`) and, with `--vacuum`, after a `VACUUM`.  The data is
+`bench/tpch.py --data DIR`'s generated `*.tbl` files (SF 1).  A step is
+compared with the commit before it built in a worktree into its own
+target directory (`target/base`), the two binaries run alternating, two
+rounds or more: the machine's load moves a run by 10 % and more.  The
+script's header has the commands.
+
 ## ClickBench
 
 `bench/clickbench.py` (§M14.20 V10): ClickBench's `hits` table (its
