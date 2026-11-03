@@ -234,7 +234,7 @@ fn many_groups_past_work_mem_spill_on_the_workers() {
         // groups to scratch, and the rows fit in memory — so they come in
         // the order a single pass first sees them.
         let mut mid = session(&db, 1024);
-        mid.execute("SET parallel_workers = 4; SET work_mem = '1MB'")
+        mid.execute("SET parallel_workers = 4; SET work_mem = '256kB'")
             .unwrap();
         let few = "SELECT (id % 1999 + id / 1999) % 1999, count(*) FROM g GROUP BY 1";
         let at = nucleus_sql::vector::spilled_groupings();
@@ -1389,4 +1389,105 @@ fn decimal_kernels_agree() {
         assert_eq!(outcome(&mut s, &pair[1]), want, "{}", pair[1]);
         assert_eq!(outcome(&mut many, &pair[1]), want, "workers: {}", pair[1]);
     }
+}
+
+#[test]
+fn typed_aggregate_states_agree() {
+    // Sums and means of integers and of decimals kept as exact sums and
+    // row counts, least and greatest values as values (§M14.20 W6): the
+    // rows and errors of a row at a time — and of the general states they
+    // turn into when a sum meets another scale or kind, on one worker or
+    // across workers' partial states, kept or spilled past work_mem.
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(41)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    for (t, storage) in [("r", "row"), ("c", "column")] {
+        s.execute(&format!(
+            "CREATE TABLE {t} (id INT PRIMARY KEY, g INT, k INT, a INT, b BIGINT, \
+               p NUMERIC(12, 2), d NUMERIC(4, 2), u NUMERIC, f FLOAT, s TEXT, ok BOOL, \
+               iv INTERVAL) WITH (storage = {storage}); \
+             INSERT INTO {t} SELECT i, i % 7, (i * 7919) % 9000, \
+               CASE WHEN i % 11 = 0 THEN NULL ELSE i % 23 - 11 END, \
+               CASE WHEN i % 4999 = 0 THEN 9223372036854775807 ELSE i END, \
+               CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 100000) / 100.0 END::numeric(12, 2), \
+               ((i % 11) / 100.0)::numeric(4, 2), \
+               CASE WHEN i % 2 = 0 THEN 1.5 ELSE 2.25 END, \
+               CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 50) / 7.0 END, \
+               CASE WHEN i % 5 = 0 THEN NULL ELSE 'v' || (i % 300) END, \
+               CASE WHEN i % 3 = 0 THEN NULL ELSE i % 4 = 0 END, \
+               (i % 90) * INTERVAL '1 minute' \
+               FROM generate_series(1, 40000) i; \
+             DELETE FROM {t} WHERE id % 997 = 0; \
+             INSERT INTO {t} SELECT i, i % 7, i % 9000, 5, 6, 7.25, 0.5, 0.125, 1.0, 'w', true, \
+               INTERVAL '1 hour' FROM generate_series(40001, 40300) i"
+        ))
+        .unwrap();
+    }
+    let selects = [
+        "sum(a), avg(a), min(a), max(a), count(a)",
+        "sum(p), avg(p), min(p), max(p), sum(d), avg(d)",
+        "sum(u), avg(u), min(u), max(u)",
+        "sum(f), avg(f), min(s), max(s), bool_and(ok), bool_or(ok)",
+        "avg(iv), min(iv), max(iv), sum(iv)",
+        "sum(a * p), avg(p - a), sum(p * d)",
+        // Past a bigint: an error, but the mean's (a numeric).
+        "sum(b)",
+        "avg(b), min(b), max(b)",
+    ];
+    // One aggregate fed sums of two kinds or scales: integers then
+    // decimals, decimals at two scales, integers or decimals then values
+    // (a batch a row at a time: its division by zero guarded).
+    let mixed = [
+        "SELECT k % 50, sum(x), avg(x) FROM (SELECT k, CASE WHEN a = 0 THEN 0 ELSE 100 / a END \
+           AS x FROM {t}) q GROUP BY 1",
+        "SELECT g, sum(x), avg(x) FROM (SELECT g, a::bigint AS x FROM {t} WHERE id > 20000 \
+           UNION ALL SELECT g, CASE WHEN id % 2 = 0 THEN a ELSE b END FROM {t} WHERE id < 3000) q \
+           GROUP BY g",
+        "SELECT g, sum(x), avg(x) FROM (SELECT g, a::numeric AS x FROM {t} \
+           UNION ALL SELECT g, p FROM {t}) q GROUP BY g",
+        "SELECT k, sum(x), avg(x), min(x) FROM (SELECT k, p AS x FROM {t} \
+           UNION ALL SELECT k, p * d FROM {t} WHERE id % 3 = 0) q GROUP BY k",
+        "SELECT g, sum(x), avg(x) FROM (SELECT g, p AS x FROM {t} WHERE id > 20000 \
+           UNION ALL SELECT g, CASE WHEN id % 2 = 0 THEN p ELSE u END FROM {t} WHERE id < 3000) q \
+           GROUP BY g",
+    ];
+    let mut queries = Vec::new();
+    for t in ["r", "c"] {
+        for sel in selects {
+            queries.push(format!("SELECT {sel} FROM {t}"));
+            queries.push(format!("SELECT g, {sel} FROM {t} GROUP BY g"));
+            queries.push(format!("SELECT k, {sel} FROM {t} GROUP BY k"));
+        }
+        for q in mixed {
+            queries.push(q.replace("{t}", t));
+        }
+    }
+    let sorted = |r: Result<Vec<Vec<String>>, String>| {
+        r.map(|mut rows| {
+            rows.sort();
+            rows
+        })
+    };
+    let mut one = session(&db, 0);
+    let mut three = session(&db, 3);
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    let mut small = session(&db, 3);
+    small
+        .execute("SET parallel_workers = 4; SET work_mem = '64kB'")
+        .unwrap();
+    let mut errors = 0;
+    for q in &queries {
+        let want = sorted(outcome(&mut one, q));
+        assert_eq!(sorted(outcome(&mut s, q)), want, "batches: {q}");
+        assert_eq!(sorted(outcome(&mut three, q)), want, "batches of 3: {q}");
+        assert_eq!(sorted(outcome(&mut many, q)), want, "workers: {q}");
+        assert_eq!(sorted(outcome(&mut small, q)), want, "work_mem: {q}");
+        errors += usize::from(want.is_err());
+    }
+    assert_eq!(errors, 6, "sum(b) overflows, on r and c, grouped or not");
 }

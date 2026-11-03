@@ -1982,6 +1982,52 @@ the speed-up is made once, in the merged one.  The work, in this order:
   / 167 → 146 / 144); TPC-H unchanged (row tables 8.78 → 8.75 / 8.60 s,
   column 4.18–4.30 → 4.22–4.34 s; Q1, Q9 and Q18 the same in the best of
   thirty).
+  *Done — typed aggregate states*: a grouping's built-in states were an
+  `Acc` a group and aggregate, 144 bytes whatever the aggregate (Q32's
+  million groups: allocating and reading them, 4.9k of its 38k samples),
+  counted against `work_mem` as a guessed 96.  Now each aggregate keeps a
+  column of the state it needs (`builtin::States`): `min`, `max`,
+  `bool_and`, `bool_or` a value (32 bytes; any type, one mechanism), a
+  `sum` or `avg` of integers or of decimals at one scale an exact 128-bit
+  sum and a row count (24), chosen by its first rows or partial state;
+  anything else — doubles, intervals, `string_agg`, `array_agg` — and a
+  sum that meets another scale or kind turns into `Acc`s, made from the
+  typed state, so results are the same whichever.  An `avg`'s partial
+  state is its rows and sum (it was the six-part `Acc` state); a sum's
+  and a value's as before.  The accumulator says what a group takes
+  (`GroupAccumulator::group_bytes`, ClickHouse's `sizeOfData`; by default
+  96), and a grouping counts that against `work_mem` — so a `count` (8
+  bytes) no longer spills as if it held 96.  Taken from DataFusion's
+  `GroupsAccumulator` (2023: a vector per state across groups — the shape
+  `GroupAccumulator` already had, now with its states typed) and
+  ClickHouse's state sizes.  Not taken: DuckDB's states in the hash
+  table's row beside the key (one allocation, the key's cache line) —
+  that is the one key table's step; 64-bit sums with an overflow check
+  (DuckDB sums into 128 bits too, and the exact sum is what makes a sum
+  overflow only when its result does); integer least and greatest values
+  as `i64`s beside a bit (a value serves every type; Q6's
+  `min(EventDate)` already 14 → 6 ms, no row's arguments built as a
+  vector any more).  Tested: sums and means of integers and decimals,
+  least and greatest values of each kind, on row and column tables,
+  grouped by few and many keys, a row at a time, by batches of 3 and of
+  1,024, on workers and past `work_mem` — and one aggregate fed integers
+  then decimals, decimals at two scales, decimals then values, integers
+  then a batch a row at a time; mutations caught (the integer sum lost
+  turning into `Acc`s, a mean's rows miscounted when combined or in its
+  partial state, a bigint sum's overflow dropped, a sum of another scale
+  taken as its state's, a least value's first row lost).  The few-groups
+  spill test's `work_mem` 1 MB → 256 kB (its counts now 8 bytes).
+  Measured, alternating with the step before, two rounds: ClickBench on a
+  column table 4.79 / 4.79 → 4.64 / 4.76 s (geometric mean 30.3 → 29.5
+  ms): Q32 522 / 540 → 438 / 451 ms, Q6 14.3 → 6.2, Q36 80 / 83 → 70 / 73,
+  Q28 240 / 234 → 218 / 222, Q18 170 / 173 → 164 / 158 (Q33, Q34, Q39
+  move by a fifth from run to run on either build); slower, Q27 36 → 39
+  ms in every round — not its aggregate (its updates' samples 780 → 688)
+  but `length(URL)`'s string a row, more of it in the allocator's tiny
+  zone: left for expressions reading text in place.  TPC-H on column
+  tables 4.42 / 4.25 → 4.27 / 4.13 s (Q18 287 / 274 → 253 / 243 ms, Q13
+  112 → 103 / 101, Q1 166 → 158 / 148); on row tables unchanged (8.92 /
+  9.05 → 9.16 / 8.86 s, the pread-bound queries' noise).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3094,3 +3140,9 @@ style) across a thousand seeds without failure.
 - **2026-11-03** — §M14.20 W6: a decimal division in one 128-bit
   division when the scaled dividend fits (the long division for the
   rest); ClickBench 4.86 → 4.73 s (Q32 540 → 508 ms).
+- **2026-11-03** — §M14.20 W6: typed aggregate states — a value a group
+  for `min`/`max`/`bool_*`, an exact sum and a row count for a `sum` or
+  `avg` of integers or one scale's decimals, `Acc`s for the rest; a
+  grouping counts each accumulator's own bytes a group against
+  `work_mem`; ClickBench Q32 531 → 445 ms, Q6 14 → 6; TPC-H column Q18
+  280 → 248.  DOCS §8.5, §8.12.

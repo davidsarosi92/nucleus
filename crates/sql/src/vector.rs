@@ -2512,6 +2512,9 @@ struct Grouping<'a> {
     /// The groups the accumulators have room for.
     room: usize,
     bytes: usize,
+    /// The bytes a group's states take, as the accumulators tell
+    /// ([`GroupAccumulator::group_bytes`]).
+    state_bytes: usize,
     limit: usize,
     parts: Option<crate::spill::Partitions>,
 }
@@ -2531,7 +2534,7 @@ fn make_room(accs: &mut [Box<dyn GroupAccumulator>], room: &mut usize, n: usize)
 
 impl<'a> Grouping<'a> {
     fn new(group: &'a [Expr], aggs: &'a [Agg]) -> Self {
-        Grouping {
+        let mut g = Grouping {
             group,
             aggs,
             keys: match group.len() {
@@ -2552,9 +2555,12 @@ impl<'a> Grouping<'a> {
                 .collect(),
             room: 0,
             bytes: 0,
+            state_bytes: 0,
             limit: crate::budget::work_mem(),
             parts: None,
-        }
+        };
+        g.state_bytes = g.accs.iter().map(|a| a.group_bytes()).sum();
+        g
     }
 
     /// The group of the row with key `key` (made if new), or `None` when
@@ -2565,7 +2571,7 @@ impl<'a> Grouping<'a> {
             if let Some(g) = m.get(i) {
                 return Some(g);
             }
-            let size = crate::spill::INT_KEY_BYTES + 96 * self.aggs.len();
+            let size = crate::spill::INT_KEY_BYTES + self.state_bytes;
             if self.parts.is_some()
                 || (self.bytes + size > self.limit && crate::spill::MAX_LEVEL > 0)
             {
@@ -2592,7 +2598,7 @@ impl<'a> Grouping<'a> {
             return found;
         }
         let key = key.to_vec();
-        let size = crate::spill::row_bytes(&key) + 96 * self.aggs.len();
+        let size = crate::spill::row_bytes(&key) + self.state_bytes;
         if self.parts.is_some()
             || (self.bytes + size > self.limit
                 && crate::spill::MAX_LEVEL > 0
@@ -2693,6 +2699,8 @@ impl<'a> Grouping<'a> {
                 _ => acc.update(&rows, &groups, &refs)?,
             }
         }
+        // A state's kind may follow its first rows.
+        self.state_bytes = self.accs.iter().map(|a| a.group_bytes()).sum();
         Ok(())
     }
 
@@ -2912,6 +2920,7 @@ fn merge_parallel(
             .iter()
             .map(|a| a.func.grouped().expect("combinable"))
             .collect();
+        let per_group: usize = accs.iter().map(|a| a.group_bytes()).sum();
         let mut size = 0;
         let mut room = 0;
         let mut add = |m: u32,
@@ -2923,7 +2932,7 @@ fn merge_parallel(
             let mut fresh = false;
             let gid = *map.entry(key).or_insert_with_key(|k| {
                 fresh = true;
-                size += crate::spill::row_bytes(k) + 96 * aggs.len();
+                size += crate::spill::row_bytes(k) + per_group;
                 next
             });
             if fresh {

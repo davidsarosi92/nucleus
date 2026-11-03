@@ -357,6 +357,12 @@ pub trait GroupAccumulator {
     /// Makes room for `groups` groups (never fewer than before).
     fn resize(&mut self, groups: usize);
 
+    /// About the bytes a group's state takes: what a grouping counts
+    /// against `work_mem` for it.  By default a guess.
+    fn group_bytes(&self) -> usize {
+        96
+    }
+
     /// Feeds, for each `i`, row `rows[i]` of the batch's argument vectors
     /// to group `groups[i]`, in that order (rows whose first argument is
     /// `NULL` already left out unless the aggregate keeps them).

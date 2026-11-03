@@ -645,10 +645,7 @@ impl Aggregate for BuiltinAgg {
         if self.0 == AggFunc::Count {
             return Some(Box::new(CountGroups(Vec::new())));
         }
-        Some(Box::new(Grouped {
-            func: self.0,
-            accs: Vec::new(),
-        }))
+        Some(Box::new(Grouped::new(self.0)))
     }
 }
 
@@ -659,6 +656,10 @@ struct CountGroups(Vec<i64>);
 impl GroupAccumulator for CountGroups {
     fn resize(&mut self, groups: usize) {
         self.0.resize(groups, 0);
+    }
+
+    fn group_bytes(&self) -> usize {
+        std::mem::size_of::<i64>()
     }
 
     fn update(&mut self, _rows: &[u32], groups: &[u32], _args: &[&Vector]) -> Result<()> {
@@ -905,88 +906,287 @@ impl Acc {
     }
 }
 
-/// The built-in aggregates over many groups, fed a batch at a time: each
-/// group's state an [`Acc`], updated in place from typed vectors — the same
-/// state the row-at-a-time path builds.
+/// The built-in aggregates over many groups (`count`'s are
+/// [`CountGroups`]), fed a batch at a time: each group's state in a column
+/// of the kind its aggregate and argument need (§M14.20 W6) — a value for
+/// a least, greatest or boolean one, an exact sum and a row count for a
+/// sum or mean of integers or of decimals at one scale, else the [`Acc`]
+/// the row-at-a-time path builds.  The results are the same whichever.
 struct Grouped {
     func: AggFunc,
-    accs: Vec<Acc>,
+    /// The groups made room for.
+    len: usize,
+    states: States,
+}
+
+/// [`Grouped`]'s states.
+enum States {
+    /// A `sum` or `avg` before its first rows or partial state, which
+    /// choose between [`States::Sums`] and [`States::Accs`].
+    Unset,
+    /// `min`, `max`, `bool_and`, `bool_or`: a group's value is its whole
+    /// state (`NULL`: no row yet).
+    Values(Vec<Value>),
+    /// A `sum` or `avg` of integers (`scale` `None`) or of decimals at one
+    /// scale: each group's exact sum (a decimal's mantissa, in range) and
+    /// its rows (a `sum`'s: not 0 once it has one).
+    Sums {
+        scale: Option<u32>,
+        sums: Vec<i128>,
+        rows: Vec<i64>,
+    },
+    /// Any other state, or a sum of other values than its first ones.
+    Accs(Vec<Acc>),
+}
+
+/// Two decimal mantissas added, in range.
+#[inline]
+fn add_mantissas(a: i128, b: i128) -> Result<i128> {
+    a.checked_add(b)
+        .filter(|m| m.unsigned_abs() <= crate::decimal::LIMIT)
+        .ok_or_else(crate::decimal::overflow)
+}
+
+/// An integer sum as a partial state: its 16 bytes.
+fn int_partial(i: i128) -> Value {
+    Value::Bytea(i.to_le_bytes().to_vec().into())
+}
+
+/// The integer sum of an [`int_partial`].
+fn int_of_partial(b: &[u8]) -> Result<i128> {
+    Ok(i128::from_le_bytes(
+        b.try_into()
+            .map_err(|_| Error::internal("a malformed partial sum"))?,
+    ))
+}
+
+/// Folds a value (not `NULL`) into a `min`, `max`, `bool_and` or
+/// `bool_or`'s value so far (`NULL`: none).
+fn fold(func: AggFunc, cur: &mut Value, v: Value) -> Result<()> {
+    match func {
+        AggFunc::Min | AggFunc::Max => {
+            let replace = cur.is_null() || {
+                let o = v.sql_cmp(cur)?.expect("not null");
+                if func == AggFunc::Min {
+                    o.is_lt()
+                } else {
+                    o.is_gt()
+                }
+            };
+            if replace {
+                *cur = v;
+            }
+        }
+        _ => {
+            let x = v.truth()?.expect("not null");
+            *cur = Value::Bool(match *cur {
+                Value::Bool(y) if func == AggFunc::BoolAnd => x && y,
+                Value::Bool(y) => x || y,
+                _ => x,
+            });
+        }
+    }
+    Ok(())
 }
 
 impl Grouped {
-    /// Whether a group's state is its value alone (its partial state too).
-    fn compact(&self) -> bool {
-        matches!(
-            self.func,
-            AggFunc::Min | AggFunc::Max | AggFunc::BoolAnd | AggFunc::BoolOr
-        )
+    fn new(func: AggFunc) -> Self {
+        use AggFunc::*;
+        let states = match func {
+            Min | Max | BoolAnd | BoolOr => States::Values(Vec::new()),
+            Sum | Avg => States::Unset,
+            _ => States::Accs(Vec::new()),
+        };
+        Grouped {
+            func,
+            len: 0,
+            states,
+        }
+    }
+
+    /// The sums and rows of integers (`scale` `None`) or of decimals at
+    /// `scale`: chosen if no state is yet, `None` if another is.
+    fn sums(&mut self, scale: Option<u32>) -> Option<(&mut [i128], &mut [i64])> {
+        if let States::Unset = self.states {
+            self.states = States::Sums {
+                scale,
+                sums: vec![0; self.len],
+                rows: vec![0; self.len],
+            };
+        }
+        match &mut self.states {
+            States::Sums {
+                scale: s,
+                sums,
+                rows,
+            } if *s == scale => Some((sums, rows)),
+            _ => None,
+        }
+    }
+
+    /// The states as [`Acc`]s, made from the typed ones if need be.
+    fn accs(&mut self) -> &mut [Acc] {
+        let func = self.func;
+        let accs = match std::mem::replace(&mut self.states, States::Unset) {
+            States::Accs(a) => a,
+            States::Unset => (0..self.len).map(|_| Acc::new(func)).collect(),
+            States::Values(v) => v
+                .into_iter()
+                .map(|value| Acc {
+                    value,
+                    ..Acc::new(func)
+                })
+                .collect(),
+            States::Sums { scale, sums, rows } => sums
+                .into_iter()
+                .zip(rows)
+                .map(|(sum, n)| {
+                    let mut acc = Acc::new(func);
+                    if n > 0 {
+                        match scale {
+                            None => acc.int = Some(sum),
+                            Some(s) => {
+                                acc.value = Value::Numeric(crate::decimal::Decimal::raw(sum, s));
+                            }
+                        }
+                        if func == AggFunc::Avg {
+                            acc.count = n;
+                        }
+                    }
+                    acc
+                })
+                .collect(),
+        };
+        self.states = States::Accs(accs);
+        match &mut self.states {
+            States::Accs(a) => a,
+            _ => unreachable!("just made"),
+        }
     }
 }
 
 impl GroupAccumulator for Grouped {
     fn resize(&mut self, groups: usize) {
         let func = self.func;
-        self.accs.resize_with(groups, || Acc::new(func));
+        self.len = groups;
+        match &mut self.states {
+            States::Unset => {}
+            States::Values(v) => v.resize(groups, Value::Null),
+            States::Sums { sums, rows, .. } => {
+                sums.resize(groups, 0);
+                rows.resize(groups, 0);
+            }
+            States::Accs(a) => a.resize_with(groups, || Acc::new(func)),
+        }
+    }
+
+    fn group_bytes(&self) -> usize {
+        match &self.states {
+            States::Values(_) => std::mem::size_of::<Value>(),
+            States::Unset | States::Sums { .. } => {
+                std::mem::size_of::<i128>() + std::mem::size_of::<i64>()
+            }
+            States::Accs(_) => std::mem::size_of::<Acc>(),
+        }
     }
 
     fn update(&mut self, rows: &[u32], groups: &[u32], args: &[&Vector]) -> Result<()> {
         use AggFunc::*;
-        let pairs = rows
-            .iter()
-            .zip(groups)
-            .map(|(&r, &g)| (r as usize, g as usize));
-        match (self.func, args.first()) {
-            (Count, _) => {
-                for (_, g) in pairs {
-                    self.accs[g].count += 1;
+        let func = self.func;
+        let pairs = || {
+            rows.iter()
+                .zip(groups)
+                .map(|(&r, &g)| (r as usize, g as usize))
+        };
+        if let States::Values(vals) = &mut self.states {
+            let min = func == Min;
+            match args.first() {
+                Some(Vector::Int(v, _)) if matches!(func, Min | Max) => {
+                    for (r, g) in pairs() {
+                        let x = v[r];
+                        match &mut vals[g] {
+                            Value::Int(cur) => {
+                                if (min && x < *cur) || (!min && x > *cur) {
+                                    *cur = x;
+                                }
+                            }
+                            Value::Null => vals[g] = Value::Int(x),
+                            cur => fold(func, cur, Value::Int(x))?,
+                        }
+                    }
                 }
+                Some(Vector::Values(v)) => {
+                    for (r, g) in pairs() {
+                        fold(func, &mut vals[g], v[r].clone())?;
+                    }
+                }
+                Some(a) => {
+                    for (r, g) in pairs() {
+                        fold(func, &mut vals[g], a.value(r))?;
+                    }
+                }
+                None => {}
             }
+            return Ok(());
+        }
+        match (func, args.first()) {
             (Sum | Avg, Some(Vector::Int(v, _))) => {
-                for (r, g) in pairs {
-                    self.accs[g].add_int(v[r]);
-                }
-            }
-            (Sum | Avg, Some(Vector::Float(v, _))) => {
-                for (r, g) in pairs {
-                    self.accs[g].add_float(v[r], false);
+                if let Some((sums, n)) = self.sums(None) {
+                    for (r, g) in pairs() {
+                        sums[g] += i128::from(v[r]);
+                        n[g] += 1;
+                    }
+                    return Ok(());
                 }
             }
             (Sum | Avg, Some(Vector::Dec(s, v, _))) => {
-                for (r, g) in pairs {
-                    self.accs[g].add_dec(crate::decimal::Decimal::raw(v.at(r), *s))?;
+                if let Some((sums, n)) = self.sums(Some(*s)) {
+                    for (r, g) in pairs() {
+                        sums[g] = add_mantissas(sums[g], v.at(r))?;
+                        n[g] += 1;
+                    }
+                    return Ok(());
                 }
             }
-            (Min | Max, Some(Vector::Int(v, _))) => {
-                let min = self.func == Min;
-                for (r, g) in pairs {
-                    let acc = &mut self.accs[g];
-                    let x = v[r];
-                    match acc.value {
-                        Value::Int(cur) => {
-                            if (min && x < cur) || (!min && x > cur) {
-                                acc.value = Value::Int(x);
-                            }
-                        }
-                        Value::Null => acc.value = Value::Int(x),
-                        _ => acc.add(&[Value::Int(x)])?,
-                    }
+            _ => {}
+        }
+        let accs = self.accs();
+        match (func, args.first()) {
+            (Count, _) => {
+                for (_, g) in pairs() {
+                    accs[g].count += 1;
+                }
+            }
+            (Sum | Avg, Some(Vector::Int(v, _))) => {
+                for (r, g) in pairs() {
+                    accs[g].add_int(v[r]);
+                }
+            }
+            (Sum | Avg, Some(Vector::Float(v, _))) => {
+                for (r, g) in pairs() {
+                    accs[g].add_float(v[r], false);
+                }
+            }
+            (Sum | Avg, Some(Vector::Dec(s, v, _))) => {
+                for (r, g) in pairs() {
+                    accs[g].add_dec(crate::decimal::Decimal::raw(v.at(r), *s))?;
                 }
             }
             // One argument of any values: each passed as it is.
             (_, Some(Vector::Values(vals))) if args.len() == 1 => {
-                for (r, g) in pairs {
-                    self.accs[g].add(std::slice::from_ref(&vals[r]))?;
+                for (r, g) in pairs() {
+                    accs[g].add(std::slice::from_ref(&vals[r]))?;
                 }
             }
             (_, Some(_)) => {
-                for (r, g) in pairs {
+                for (r, g) in pairs() {
                     let vals: Vec<Value> = args.iter().map(|a| a.value(r)).collect();
-                    self.accs[g].add(&vals)?;
+                    accs[g].add(&vals)?;
                 }
             }
             (_, None) => {
-                for (_, g) in pairs {
-                    self.accs[g].add(&[])?;
+                for (_, g) in pairs() {
+                    accs[g].add(&[])?;
                 }
             }
         }
@@ -1001,50 +1201,48 @@ impl GroupAccumulator for Grouped {
         args: &[&Vector],
     ) -> Result<()> {
         use AggFunc::*;
-        let acc = &mut self.accs[group as usize];
-        match (self.func, args.first()) {
-            (Count, None) => acc.count += len as i64,
-            (Count, Some(a)) if skip_nulls => {
-                acc.count += (0..len).filter(|&r| !a.is_null(r)).count() as i64;
-            }
-            (Sum | Avg, Some(Vector::Int(v, n))) => {
-                let (sum, count) =
-                    crate::kernels::sum_i64(&v[..len], n.as_ref().map(|n| &n[..len]));
-                if count > 0 {
-                    acc.int = Some(acc.int.unwrap_or(0) + sum);
-                    if self.func == Avg {
-                        acc.count += count as i64;
-                    }
-                }
-            }
-            (Sum | Avg, Some(Vector::Dec(s, v, n))) => {
-                for r in 0..len {
-                    if !n.as_ref().is_some_and(|n| n[r]) {
-                        acc.add_dec(crate::decimal::Decimal::raw(v.at(r), *s))?;
-                    }
-                }
-            }
-            (Min | Max, Some(Vector::Int(v, n)))
-                if matches!(acc.value, Value::Int(_) | Value::Null) =>
+        let (func, g) = (self.func, group as usize);
+        match (func, &mut self.states, args.first()) {
+            (Min | Max, States::Values(vals), Some(Vector::Int(v, n)))
+                if matches!(vals[g], Value::Int(_) | Value::Null) =>
             {
-                let max = self.func == Max;
+                let max = func == Max;
                 if let Some(x) =
                     crate::kernels::minmax_i64(&v[..len], n.as_ref().map(|n| &n[..len]), max)
                 {
-                    acc.value = match acc.value {
+                    vals[g] = match vals[g] {
                         Value::Int(cur) if (max && cur >= x) || (!max && cur <= x) => {
                             Value::Int(cur)
                         }
                         _ => Value::Int(x),
                     };
                 }
+                return Ok(());
             }
-            _ => {
-                let rows = crate::ext::all_rows(len, skip_nulls, args);
-                return self.update(&rows, &vec![group; rows.len()], args);
+            (Sum | Avg, _, Some(Vector::Int(v, n))) => {
+                if let Some((sums, rows)) = self.sums(None) {
+                    let (sum, count) =
+                        crate::kernels::sum_i64(&v[..len], n.as_ref().map(|n| &n[..len]));
+                    sums[g] += sum;
+                    rows[g] += count as i64;
+                    return Ok(());
+                }
             }
+            (Sum | Avg, _, Some(Vector::Dec(s, v, n))) => {
+                if let Some((sums, rows)) = self.sums(Some(*s)) {
+                    for r in 0..len {
+                        if !n.as_ref().is_some_and(|n| n[r]) {
+                            sums[g] = add_mantissas(sums[g], v.at(r))?;
+                            rows[g] += 1;
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+            _ => {}
         }
-        Ok(())
+        let rows = crate::ext::all_rows(len, skip_nulls, args);
+        self.update(&rows, &vec![group; rows.len()], args)
     }
 
     fn combinable(&self) -> bool {
@@ -1053,65 +1251,118 @@ impl GroupAccumulator for Grouped {
         self.func != AggFunc::StringAgg
     }
 
+    /// A least, greatest or boolean value is its own partial state; a sum
+    /// its value (an integer one's as its 16 bytes, [`int_partial`]); a
+    /// mean the pair of its rows and its sum; any other an
+    /// [`Acc::partial`].  `NULL`: no row.
     fn partial(&mut self, group: usize) -> Result<Value> {
-        // A least, greatest or boolean value is its own state.
-        if self.compact() {
-            return Ok(self.accs[group].value.clone());
-        }
-        // A sum of no doubles: its value (an integer sum's, as bytes).
-        let acc = &self.accs[group];
-        if self.func == AggFunc::Sum && acc.float.is_none() {
-            match acc.int {
-                None => return Ok(acc.value.clone()),
-                Some(i) if acc.value.is_null() => {
-                    return Ok(Value::Bytea(i.to_le_bytes().to_vec().into()));
+        let func = self.func;
+        let pair = |n: i64, sum: Value| match func {
+            AggFunc::Avg => Value::Array(vec![Value::Int(n), sum]),
+            _ => sum,
+        };
+        Ok(match &self.states {
+            States::Unset => Value::Null,
+            States::Values(v) => v[group].clone(),
+            States::Sums { rows, .. } if rows[group] == 0 => Value::Null,
+            States::Sums { scale, sums, rows } => pair(
+                rows[group],
+                match scale {
+                    None => int_partial(sums[group]),
+                    Some(s) => Value::Numeric(crate::decimal::Decimal::raw(sums[group], *s)),
+                },
+            ),
+            States::Accs(accs) => {
+                let acc = &accs[group];
+                let sum = match (acc.int, &acc.value) {
+                    _ if acc.float.is_some() || acc.items.is_some() => None,
+                    (None, v) => Some(v.clone()),
+                    (Some(i), Value::Null) => Some(int_partial(i)),
+                    _ => None,
+                };
+                match (func, sum) {
+                    (AggFunc::Sum, Some(s)) => s,
+                    (AggFunc::Avg, Some(_)) if acc.count == 0 => Value::Null,
+                    (AggFunc::Avg, Some(s)) => pair(acc.count, s),
+                    _ => acc.partial(),
                 }
-                Some(_) => {}
             }
-        }
-        Ok(acc.partial())
+        })
     }
 
     fn combine(&mut self, group: usize, partial: Value) -> Result<()> {
-        if self.compact() {
-            if !partial.is_null() {
-                let acc = &mut self.accs[group];
-                let n = acc.count;
-                acc.add(&[partial])?;
-                acc.count = n;
-            }
+        let func = self.func;
+        if partial.is_null() {
             return Ok(());
         }
-        if self.func == AggFunc::Sum {
-            let acc = &mut self.accs[group];
-            match partial {
-                Value::Array(_) => {}
-                Value::Null => return Ok(()),
-                Value::Bytea(b) => {
-                    let i = i128::from_le_bytes(
-                        b[..]
-                            .try_into()
-                            .map_err(|_| Error::internal("a malformed partial sum"))?,
-                    );
-                    acc.int = Some(acc.int.unwrap_or(0) + i);
-                    return Ok(());
-                }
-                v if acc.value.is_null() => {
-                    acc.value = v;
-                    return Ok(());
-                }
-                v => {
-                    let s = std::mem::replace(&mut acc.value, Value::Null);
-                    acc.value = crate::expr::binary(BinaryOp::Add, s, v)?;
-                    return Ok(());
-                }
+        if let States::Values(v) = &mut self.states {
+            return fold(func, &mut v[group], partial);
+        }
+        let bad = || Error::internal("a malformed partial aggregate state");
+        // A sum's value, or a mean's rows and sum; else an Acc's state.
+        let (n, sum) = match (func, partial) {
+            (AggFunc::Avg, Value::Array(a)) if a.len() == 2 => {
+                let [n, sum] = <[Value; 2]>::try_from(a).map_err(|_| bad())?;
+                let Value::Int(n) = n else {
+                    return Err(bad());
+                };
+                (n, sum)
+            }
+            (AggFunc::Sum, sum) if !matches!(sum, Value::Array(_)) => (1, sum),
+            (_, p) => return self.accs()[group].combine(p),
+        };
+        let typed = match &sum {
+            Value::Bytea(b) => Some((None, int_of_partial(b)?)),
+            Value::Numeric(d) => Some((Some(d.scale()), d.mantissa())),
+            _ => None,
+        };
+        if let Some((scale, m)) = typed
+            && let Some((sums, rows)) = self.sums(scale)
+        {
+            sums[group] = match scale {
+                None => sums[group] + m,
+                Some(_) => add_mantissas(sums[group], m)?,
+            };
+            rows[group] += n;
+            return Ok(());
+        }
+        let acc = &mut self.accs()[group];
+        if func == AggFunc::Avg {
+            acc.count += n;
+        }
+        match sum {
+            Value::Bytea(b) => acc.int = Some(acc.int.unwrap_or(0) + int_of_partial(&b)?),
+            v if acc.value.is_null() => acc.value = v,
+            v => {
+                let s = std::mem::replace(&mut acc.value, Value::Null);
+                acc.value = crate::expr::binary(BinaryOp::Add, s, v)?;
             }
         }
-        self.accs[group].combine(partial)
+        Ok(())
     }
 
     fn finish(&mut self, group: usize) -> Result<Value> {
-        self.accs[group].finish()
+        let func = self.func;
+        match &mut self.states {
+            States::Unset => Ok(Value::Null),
+            States::Values(v) => Ok(std::mem::replace(&mut v[group], Value::Null)),
+            States::Sums { rows, .. } if rows[group] == 0 => Ok(Value::Null),
+            States::Sums { scale, sums, rows } => {
+                let sum = sums[group];
+                Ok(match (func, *scale) {
+                    (AggFunc::Sum, None) => Value::Int(
+                        i64::try_from(sum)
+                            .map_err(|_| Error::out_of_range("bigint out of range"))?,
+                    ),
+                    (AggFunc::Sum, Some(s)) => Value::Numeric(crate::decimal::Decimal::raw(sum, s)),
+                    (_, s) => Value::Numeric(
+                        crate::decimal::Decimal::new(sum, s.unwrap_or(0))?
+                            .checked_div(crate::decimal::Decimal::from_i64(rows[group]))?,
+                    ),
+                })
+            }
+            States::Accs(a) => a[group].finish(),
+        }
     }
 }
 
@@ -1184,18 +1435,8 @@ impl Accumulator for Acc {
                 };
                 self.count += 1;
             }
-            AggFunc::Min | AggFunc::Max => {
-                let replace = self.value.is_null() || {
-                    let o = v.sql_cmp(&self.value)?.expect("not null");
-                    if self.func == AggFunc::Min {
-                        o.is_lt()
-                    } else {
-                        o.is_gt()
-                    }
-                };
-                if replace {
-                    self.value = v;
-                }
+            AggFunc::Min | AggFunc::Max | AggFunc::BoolAnd | AggFunc::BoolOr => {
+                fold(self.func, &mut self.value, v)?
             }
             AggFunc::StringAgg => {
                 let text = v.render();
@@ -1211,14 +1452,6 @@ impl Accumulator for Acc {
                 });
             }
             AggFunc::ArrayAgg => self.items.get_or_insert_with(Vec::new).push(v),
-            AggFunc::BoolAnd | AggFunc::BoolOr => {
-                let x = v.truth()?.expect("not null");
-                self.value = Value::Bool(match self.value {
-                    Value::Bool(y) if self.func == AggFunc::BoolAnd => x && y,
-                    Value::Bool(y) => x || y,
-                    _ => x,
-                });
-            }
         }
         Ok(())
     }

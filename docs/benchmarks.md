@@ -443,6 +443,7 @@ same machine, alternating with the step before):
 | W6: groupings past `work_mem` on the workers | 8.6 | 4.2 |
 | W6: top-N | 8.6 | 4.2 |
 | W6: a decimal division in one step | 8.7 | 4.25 |
+| W6: typed aggregate states | 9.0 | 4.2 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
@@ -457,6 +458,12 @@ same machine, alternating with the step before):
 | W6: groupings past `work_mem` on the workers | 5.1 | 33.7 | 623 | 239 | 330 |
 | W6: top-N, a sort below a `LIMIT` keeping its rows only | 4.7 | 30.1 | 525 | 169 | 261 |
 | W6: a decimal division in one step (an average's) | 4.7 | 29.8 | 508 | 172 | 259 |
+| W6: typed aggregate states | 4.7 | 29.5 | 445 | 161 | 271 |
+
+(Typed aggregate states also Q6 14.3 → 6.2 ms, Q36 80 → 70, Q28 240 →
+218; slower Q27 36 → 39 ms — `length(URL)`'s strings, not its aggregate;
+on TPC-H column tables Q18 287 → 253 ms, Q13 112 → 103.  Row tables'
+sums move by 0.3 s from round to round on either build.)
 
 (Top-N also Q24 11.2 → 5.4 ms, Q25 12.8 → 5.9, Q26 13.3 → 6.5, Q33 192
 → 140; between the two steps the machine's runs moved by a tenth, so

@@ -1410,8 +1410,12 @@ its key's hash, so a slot of another salt is passed over unread), the
 row's key hashed and compared from the batch's vectors as they are — no
 key built to look a group up, only a new group's —, and each
 aggregate fed a batch at a time through `Aggregate::grouped()` — the
-built-ins' states updated in place from typed vectors (a decimal `sum`
-or `avg` adding the mantissas at its scale) — or row by row
+built-ins' states a column each, of the kind the aggregate and its
+argument need — a value for `min`, `max`, `bool_and`, `bool_or`, an
+exact sum and a row count for a `sum` or `avg` of integers or of
+decimals at one scale (their mantissas added), else a general state a
+group, which such a sum becomes when it meets another scale or kind —,
+updated in place from typed vectors — or row by row
 through its accumulators; past `work_mem`, rows of new groups go to
 partitions as below.  A pipeline whose output becomes rows (for a sort,
 a join, the client) runs vectorized only when it filters.  The result is
@@ -1455,7 +1459,10 @@ that did not fit beside the others from scratch space.  Groups in key
 order are merged as §8.6 says.  The builtin states pass between workers compactly: `count` an
 integer (its own accumulator, a count a group), `min`, `max`,
 `bool_and`, `bool_or` their value, a `sum` of no doubles its value (or
-its integer sum's bytes); a group's accumulators grow by half again, not
+its integer sum's bytes), an `avg` of no doubles the pair of its rows
+and that; what a group's states take counts against `work_mem` as each
+accumulator says (`GroupAccumulator::group_bytes`: 24 bytes for such a
+sum, 32 for a value, 8 for a count); a group's accumulators grow by half again, not
 a group at a time, and a single integer key is found and placed in one
 probe.  A pipeline whose output becomes rows
 runs in rounds of a morsel per worker, each round's rows given in morsel
@@ -2027,7 +2034,9 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   Accumulator>` (`add(&[Value])`, `finish()`), one per group.  The engine
   does the grouping, `DISTINCT` (over the arguments) and `ORDER BY` inside
   the call.  Optionally `grouped() -> Option<Box<dyn GroupAccumulator>>`
-  (`resize(groups)`, `update(rows, groups, &[&Vector])`, `finish(group)`):
+  (`resize(groups)`, `update(rows, groups, &[&Vector])`, `finish(group)`,
+  and `group_bytes()`, about the bytes a group's state takes — by
+  default 96 —, what a grouping counts against `work_mem`):
   the states of many groups fed a batch at a time by the vectorized
   executor (§8.5) — a capability; without it the accumulators are fed row
   by row, with the same result.  With `combinable()`, `partial(group)` and
@@ -3055,6 +3064,14 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-03 — §M14.20 W6, typed aggregate states:** a grouping's
+  `min`, `max`, `bool_and` and `bool_or` keep a value a group, its `sum`
+  and `avg` of integers or of decimals at one scale an exact sum and a
+  row count (a general state a group for the rest, and for a sum that
+  meets another scale or kind); an `avg`'s partial state is its rows and
+  sum; a grouping counts its states' bytes as the accumulators tell
+  (`GroupAccumulator::group_bytes`), so fewer groups spill (§8.5, §8.12).
 
 - **2026-11-03 — §M14.20 W6, a decimal division in one step:** `/` on
   numerics divides once when the dividend scaled up by the digits asked
