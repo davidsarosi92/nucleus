@@ -35,7 +35,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use nucleus_kv::{KvTxn, prefix_end};
 
-use crate::catalog::Table;
+use crate::catalog::{INDEX_PREFIX_LEN, Table};
 use crate::encoding::{Reader, Writer, decode_value};
 use crate::enums::Labels;
 use crate::error::{Error, Result};
@@ -794,9 +794,20 @@ fn locate(
     key: &[u8],
     validated: bool,
 ) -> Result<Option<(Segment, usize)>> {
-    let Some(seg) = segment_of(txn, t, key)? else {
-        return Ok(None);
-    };
+    match segment_of(txn, t, key)? {
+        None => Ok(None),
+        Some(seg) => locate_in(txn, t, key, validated, seg),
+    }
+}
+
+/// [`locate`] in `seg`, the segment whose range holds `key`.
+fn locate_in(
+    txn: &dyn KvTxn,
+    t: &Table,
+    key: &[u8],
+    validated: bool,
+    seg: Segment,
+) -> Result<Option<(Segment, usize)>> {
     let prefix = crate::catalog::INDEX_PREFIX_LEN;
     let keys = keys_of(txn, t, &seg)?;
     let i = keys.search(&key[prefix..]);
@@ -850,37 +861,38 @@ fn mark(txn: &mut dyn KvTxn, t: &Table, key: &[u8]) -> Result<bool> {
 /// versions until a vacuum).
 const BUFFER_ROWS: usize = 4 * SEGMENT_ROWS;
 
-thread_local! {
-    /// Rows each table's statement wrote so far.
-    static WRITTEN: std::cell::RefCell<HashMap<u32, usize>> = std::cell::RefCell::new(HashMap::new());
-    /// The rows each table's statement inserted, not yet stored.
-    static BUFFER: std::cell::RefCell<HashMap<u32, std::collections::BTreeMap<Vec<u8>, Row>>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-/// Counts a row the statement writes to `t` — and notes `t` among the
-/// statement's tables at once ([`crate::storage::written`]), so that if
-/// the statement fails later, even before its caller notes the table,
-/// [`after_failure`](TableStorage::after_failure) drops what it gathered:
-/// rows kept here for the statement's end must never outlive it (they
-/// would be stored by the next statement on this thread).
+/// Counts a row the statement writes to `t` — and so notes `t` among the
+/// statement's tables at once ([`crate::storage::with_writes`]): the rows
+/// gathered for the statement's end live in its context and never outlive
+/// it, even when it fails before its caller notes the table.
 fn note_written(t: &Table) {
-    crate::storage::written(t);
-    WRITTEN.with(|w| *w.borrow_mut().entry(t.id).or_default() += 1);
+    crate::storage::with_writes(t, |w| w.rows += 1);
 }
 
 fn buffered<T>(t: &Table, f: impl FnOnce(&mut std::collections::BTreeMap<Vec<u8>, Row>) -> T) -> T {
-    BUFFER.with(|b| f(b.borrow_mut().entry(t.id).or_default()))
+    crate::storage::with_writes(t, |w| f(&mut w.gathered))
 }
 
-/// Whether a statement on this thread has inserted rows into a `column`
-/// table that are not yet stored (only this thread's reads see them).
-pub(crate) fn statement_buffered() -> bool {
-    BUFFER.with(|b| b.borrow().values().any(|rows| !rows.is_empty()))
+/// The row gathered under `key`, if the statement gathered it.
+fn gathered(t: &Table, key: &[u8]) -> Option<Row> {
+    crate::storage::peek_writes(t, |w| w.and_then(|w| w.gathered.get(key).cloned()))
 }
 
+fn is_gathered(t: &Table, key: &[u8]) -> bool {
+    crate::storage::peek_writes(t, |w| {
+        w.is_some_and(|w| {
+            // Past the last key — a load's every question — is one
+            // comparison, not a search.
+            w.gathered
+                .last_key_value()
+                .is_some_and(|(last, _)| key <= last.as_slice() && w.gathered.contains_key(key))
+        })
+    })
+}
+
+/// The rows gathered, taken to be stored.
 fn take_buffer(t: &Table) -> std::collections::BTreeMap<Vec<u8>, Row> {
-    BUFFER.with(|b| b.borrow_mut().remove(&t.id).unwrap_or_default())
+    crate::storage::with_writes(t, |w| std::mem::take(&mut w.gathered))
 }
 
 /// A full buffer of a `column` table: into segments — or, while changed
@@ -930,14 +942,35 @@ fn write_segment(
     let prefix = crate::catalog::INDEX_PREFIX_LEN;
     let suffixes: Vec<&[u8]> = rows.iter().map(|(k, _)| &k[prefix..]).collect();
     let mut chunks = vec![Keys::encode(&suffixes)];
-    let mut stats = Vec::with_capacity(cols.len());
-    for &c in cols {
+    // Each column's statistics and encoding: on threads of their own, a
+    // share of the columns each (they are independent).
+    let column = |c: usize| {
         let col: Vec<Value> = rows
             .iter()
             .map(|(_, r)| r.get(c).cloned().unwrap_or(Value::Null))
             .collect();
-        stats.push(crate::segment::stats(&col));
-        chunks.push(crate::segment::encode(&col));
+        (crate::segment::stats(&col), crate::segment::encode(&col))
+    };
+    let threads = crate::budget::workers().min(cols.len());
+    let encoded: Vec<_> = if threads > 1 && rows.len() >= SEGMENT_ROWS / 4 {
+        let share = cols.len().div_ceil(threads);
+        std::thread::scope(|sc| {
+            let parts: Vec<_> = cols
+                .chunks(share)
+                .map(|part| sc.spawn(|| part.iter().map(|&c| column(c)).collect::<Vec<_>>()))
+                .collect();
+            parts
+                .into_iter()
+                .flat_map(|h| h.join().expect("a column's encoding does not panic"))
+                .collect()
+        })
+    } else {
+        cols.iter().map(|&c| column(c)).collect()
+    };
+    let mut stats = Vec::with_capacity(cols.len());
+    for (s, chunk) in encoded {
+        stats.push(s);
+        chunks.push(chunk);
     }
     let id = segment_id(t, &chunks);
     txn.put(&chunk_key(t, id, KEYS), &chunks[0])?;
@@ -1620,21 +1653,23 @@ impl TableStorage for ColumnStorage {
         row: &Row,
         old: Option<&Row>,
     ) -> Result<()> {
-        note_written(t);
-        let in_delta = moved(t, key, DELTA);
-        if old.is_some() && !buffered(t, |b| b.contains_key(key)) && txn.get(&in_delta)?.is_some() {
-            return RowStorage.write(txn, t, &in_delta, row, old); // a delta row
-        }
-        if old.is_some() && !buffered(t, |b| b.contains_key(key)) {
+        if old.is_some() && !is_gathered(t, key) {
+            let in_delta = moved(t, key, DELTA);
+            if txn.get(&in_delta)?.is_some() {
+                note_written(t);
+                return RowStorage.write(txn, t, &in_delta, row, old); // a delta row
+            }
             // A segment's row: marked deleted, its new version gathered as
             // an insert is.
             mark(txn, t, key)?;
         }
         // An insert, or a change of one: gathered for the statement's end,
-        // and stored in segments when they are many.
-        let full = buffered(t, |b| {
-            b.insert(key.to_vec(), row.clone());
-            b.len() >= BUFFER_ROWS
+        // and stored in segments when they are many (counted, and gathered,
+        // in one look at the statement's context).
+        let full = crate::storage::with_writes(t, |w| {
+            w.rows += 1;
+            w.gathered.insert(key.to_vec(), row.clone());
+            w.gathered.len() >= BUFFER_ROWS
         });
         if full {
             flush_buffer(txn, t)?;
@@ -1659,9 +1694,13 @@ impl TableStorage for ColumnStorage {
     }
 
     fn exists(&self, txn: &dyn KvTxn, t: &Table, key: &[u8], validated: bool) -> Result<bool> {
-        if buffered(t, |b| b.contains_key(key))
-            || RowStorage.exists(txn, t, &moved(t, key, DELTA), validated)?
-        {
+        if is_gathered(t, key) {
+            return Ok(true);
+        }
+        if !validated && t.copy == CopyState::Ready {
+            return exists_plain(txn, t, key);
+        }
+        if RowStorage.exists(txn, t, &moved(t, key, DELTA), validated)? {
             return Ok(true);
         }
         if t.copy == CopyState::MovingFromChanged && txn.get(&moved(t, key, CHANGED))?.is_some() {
@@ -1678,7 +1717,7 @@ impl TableStorage for ColumnStorage {
         wanted: Option<&[bool]>,
         labels: &mut Labels,
     ) -> Result<Option<Row>> {
-        if let Some(row) = buffered(t, |b| b.get(key).cloned()) {
+        if let Some(row) = gathered(t, key) {
             return Ok(Some(row));
         }
         if let Some(row) = RowStorage.get(txn, t, &moved(t, key, DELTA), wanted, labels)? {
@@ -1715,8 +1754,8 @@ impl TableStorage for ColumnStorage {
     }
 
     fn after_writes(&self, txn: &mut dyn KvTxn, t: &Table) -> Result<()> {
-        let written = WRITTEN.with(|w| w.borrow_mut().remove(&t.id).unwrap_or(0));
-        let rows = take_buffer(t);
+        let w = crate::storage::take_writes(t);
+        let (written, rows) = (w.rows, w.gathered);
         if written == 0 && rows.is_empty() {
             return Ok(());
         }
@@ -1737,11 +1776,6 @@ impl TableStorage for ColumnStorage {
         Ok(())
     }
 
-    fn after_failure(&self, t: &Table) {
-        WRITTEN.with(|w| w.borrow_mut().remove(&t.id));
-        take_buffer(t);
-    }
-
     fn check(
         &self,
         txn: &dyn KvTxn,
@@ -1752,6 +1786,48 @@ impl TableStorage for ColumnStorage {
         crate::check::rows_at(txn, t, DELTA, problems)?;
         check_segments(txn, t, delta_of(t), problems)
     }
+}
+
+/// [`ColumnStorage::exists`] of a key not gathered, unvalidated, in a
+/// table with no copy being moved: the directory's first segment ending at
+/// or after the key, and — when every segment ends before it — the delta
+/// store's first row at or after it.  Both are `first` reads, which the
+/// transaction answers from memory inside a range it found empty before
+/// (`KvTxn::first`): a load's ascending keys past every stored row read
+/// the store once each time it stores rows, not once a row (PLAN.md
+/// §M14.20 W3).
+fn exists_plain(txn: &dyn KvTxn, t: &Table, key: &[u8]) -> Result<bool> {
+    // Once a row, so the keys are built in one buffer.
+    let end_of = |index: u32| t.index_end(index);
+    let suffix = &key[INDEX_PREFIX_LEN..];
+    // The first segment ending at or after the key (the directory is keyed
+    // by a segment's last key).
+    let mut k = Vec::with_capacity(INDEX_PREFIX_LEN + key.len());
+    t.push_index_prefix(&mut k, DIRECTORY);
+    k.extend_from_slice(key);
+    let seg = match txn.first(Bound::Included(&k), Bound::Excluded(&end_of(DIRECTORY)))? {
+        Some((d, v)) => Some(Segment::decode(&d[INDEX_PREFIX_LEN..], &v)?),
+        None => None,
+    };
+    // The key in the delta store.
+    k.clear();
+    t.push_index_prefix(&mut k, DELTA);
+    k.extend_from_slice(suffix);
+    let in_delta = k;
+    let Some(seg) = seg else {
+        // Every segment ends before the key: the delta store's first row
+        // at or after it tells the rest.
+        return Ok(txn
+            .first(Bound::Included(&in_delta), Bound::Excluded(&end_of(DELTA)))?
+            .is_some_and(|(d, _)| d == in_delta));
+    };
+    if RowStorage.exists(txn, t, &in_delta, false)? {
+        return Ok(true);
+    }
+    if seg.first.as_slice() > key {
+        return Ok(false);
+    }
+    Ok(locate_in(txn, t, key, false, seg)?.is_some())
 }
 
 /// The name of the storage keeping both copies.
@@ -1905,7 +1981,7 @@ impl TableStorage for HtapStorage {
     }
 
     fn after_writes(&self, txn: &mut dyn KvTxn, t: &Table) -> Result<()> {
-        let written = WRITTEN.with(|w| w.borrow_mut().remove(&t.id).unwrap_or(0));
+        let written = crate::storage::take_writes(t).rows;
         if written == 0 || t.copy != CopyState::Ready {
             return Ok(()); // (a copy being built takes the changes in at its end)
         }
@@ -1913,10 +1989,6 @@ impl TableStorage for HtapStorage {
             merge(txn, t, Default::default(), Delta::Changed)?;
         }
         Ok(())
-    }
-
-    fn after_failure(&self, t: &Table) {
-        WRITTEN.with(|w| w.borrow_mut().remove(&t.id));
     }
 
     fn check(

@@ -273,7 +273,8 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W2 ✅, W3–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W3 ✅, W4, W3b, W5–W8 next (D16–D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
@@ -1549,7 +1550,8 @@ the speed-up is made once, in the merged one.  The work, in this order:
   way.  The later of two overlapping writers fails with `40001`, as in a
   row table; small writes to different keys never conflict; two writers
   appending past the last segment at once may (the claim runs to the
-  directory's end — W3's statement view makes it exact).  Tested for every
+  directory's end; W3 left it so — an exact claim needs the batch's last
+  key, W3b's).  Tested for every
   pair of large and small writes, overlapping or not, in either order.
   A second one, found while building W2: a column-table statement that
   failed part way (a unique violation on a secondary index during an
@@ -1572,7 +1574,7 @@ the speed-up is made once, in the merged one.  The work, in this order:
   row tables 79.4 → 69.8 s (`ANALYZE` the most, `COPY` 27.6 → 26.2 s —
   the syncs inside it 16 % → 6.5 % of its profile, the rest being real
   writes, W4's).  Moved: decoding only the sampled rows needs a sampling
-  method of the table storage (W3); requesting the next result batch
+  method of the table storage (W3, then W3b); requesting the next result batch
   ahead helps only a stream with an explicit fetch size — a plain query
   and a columnar fetch never pause —, so it goes with the drivers' work
   (W8).
@@ -1604,21 +1606,52 @@ the speed-up is made once, in the merged one.  The work, in this order:
   (unused) removed.  Moved: the per-row path of `INSERT` / `COPY` (a row,
   its index entries, the unique checks) is still its own — it becomes one
   with W3's row builder.
-- **W3 — one row builder, batches into storage.**  `COPY` and `INSERT`
-  share one bound row builder (today two); parsers bound per column once,
-  from bytes to values without a string per field; `ncp`'s binary batches
-  decoded straight into vectors (their layout is the executor's); parsing
-  in parallel on the workers (DuckDB's parallel CSV, Instant Loading);
-  `TableStorage::insert_batch`, a column table encoding segments from
-  typed vectors with the kernels' minima and maxima (three row-to-column
-  builders and four min / max computations made one); one statement
-  write context instead of three thread-locals, a sampling method of the
-  table storage (so `ANALYZE` decodes only the rows it keeps, from W1), holding a column table's
-  directory view — existence checks per batch, not per row (keys past the
-  greatest stored one need no look), the KV's `Gap` extended rather than a
-  second negative cache; row ids reserved per batch; foreign keys
-  deduplicated per chunk; partitions routed by their bounds without
-  cloning every partition per row.
+- **W3 — one row builder** ✅.  `COPY` and `INSERT` build rows through
+  one bound builder, `dml::RowBuilder` (the target columns, defaults,
+  checks and policies bound once; it was two paths).  Text fields parse
+  straight to their column's type (`Value::from_text`: numbers, decimals,
+  dates, timestamps without a string per field; anything else as the cast
+  from text it was), a record's fields in one buffer, its UTF-8 checked
+  once, and a record in column order built as it is read.  Parsing in
+  parallel (DuckDB's parallel CSV reader, Instant Loading): `COPY` takes
+  4 MiB of records, parses and builds them in parts of 2048 on the
+  statement's workers when its defaults, checks and policies are safe off
+  its thread, a row table's rows encoded there too
+  (`TableStorage::encode_new` / `insert_encoded`); they are stored in
+  order on the statement's thread, so errors name the line a serial load
+  would.  One statement context (`storage::TableWrites`) instead of the
+  column store's two thread-locals.  A column table's existence checks:
+  the plan's "statement view" was first built in SQL (a key past which
+  the statement knew nothing was stored: `lineitem` 22.4 → 15.3 s, 12.9
+  with the columns encoded in parallel), then
+  replaced, as planned, by the KV's own: `Transaction::first` remembers
+  up to 8 ranges it found the store empty in (none of its writes there)
+  until its intents next enter the store, and answers looks inside them
+  from its write set — one mechanism, which every `first` caller gets,
+  correct by construction (a random model test against a scan, with
+  spills and others' commits, and a test that fails if a spill does not
+  forget).  It cost 12.9 → 15 s at first — per row two lookups in the
+  statement's context, a search of the gathered rows, seven allocations —
+  and was made cheap: the keys built in one buffer (`Table::index_end`
+  for an index's end), one look at the context per write, the gathered
+  rows' last key compared before a search → 12.7 s.  A segment's columns
+  encoded on threads of their own.  Measured, TPC-H SF 1: `lineitem`'s
+  `COPY` into a row table 17.5 → 10.4 s, a column table 36.5 → 12.8 s
+  (PostgreSQL 13.4 s); the whole row load 45.6 → 37.9 s, its `COPY`s 23.0
+  → 14.5 s (PostgreSQL 18.3 s); the column load 36.4 s.  What is left of
+  the column `COPY` (profiled): storing segments on the statement's
+  thread while the parse waits (~3.7 s, ~1 s of it LZ and the write set),
+  the parse waiting while rows are stored (~1.4 s), a row cloned into the
+  gathered rows (~0.5 s).  Moved, as **W3b** after W4 (their write path
+  is D16's): `TableStorage::insert_batch` — rows handed over owned, a
+  column table's segments built from typed vectors with the kernels'
+  minima and maxima (three row-to-column builders, four min / max
+  computations made one), row ids reserved per batch, foreign keys
+  deduplicated per chunk, partitions routed by their bounds without
+  cloning each per row —, `ncp`'s binary batches decoded straight into
+  vectors, parsing overlapped with storing (the parse reads through the
+  writer's shared transaction today, so they take turns), and the
+  storage's sampling method for `ANALYZE` (from W1).
 - **W4 — durability with one owner.**  One checkpoint trigger (today in
   spill and in commit, both under the commit lock), run in the
   background; WAL segments removed with one directory sync; no data sync
@@ -1626,6 +1659,9 @@ the speed-up is made once, in the merged one.  The work, in this order:
   is needed; then a checkpoint off the writer lock (copy-on-write epochs).
   Then D16: bulk loads into fresh ranges without the WAL, written as final
   versions, not intents a vacuum rewrites.
+- **W3b — batches into storage** (moved from W3, above, onto D16's write
+  path): `insert_batch`, segments from typed vectors, `ncp` batches into
+  vectors, parse and store overlapped, the sampling method.
 - **W5 — reads, and reads after a load.**  Each spilled transaction's key
   span kept, so reads outside it skip the intent path (today every read
   takes it until a vacuum); read-ahead and coalesced reads; the pager's
@@ -1637,7 +1673,8 @@ the speed-up is made once, in the merged one.  The work, in this order:
   and one key table for groupings, `DISTINCT`, set operations and join
   lookups (four or five maps today), one hasher, hashes a column at a
   time, dictionary codes as group keys; sorts on normalized keys with one
-  comparator; Q19's per-row directory lookups through W3's view;
+  comparator; Q19's per-row directory lookups (the segment found kept for the next
+  key: W3's remembered ranges serve only keys not stored);
   expressions materializing only their columns, `CASE` vectorized; joins
   emitting batches (left from V2).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
@@ -1665,6 +1702,56 @@ recorded targets, transactional workloads stay within the recorded
 margin of it, every SIMD kernel matches its scalar reference under the
 law kit, and a table's columnar copy stays consistent with its rows under
 crash and concurrency tests.
+
+### §M14.27 — Statistics and numerical analysis on large data ⬜
+
+**First a study, then the plan.**  Can nucleus give mathematical and
+statistical functions over large data — fast, exact where exactness is
+promised, in bounded memory — that make it useful to AI models, to the
+developers building AI applications and to those who build and train AI
+itself?  Nothing of the kind is in the engine yet (no `stddev`, no
+`variance`); the analytics engine of §M14.20 (vectorized, parallel
+aggregates, column storage, SIMD kernels) is what it would run on.
+
+The study answers, and records here:
+
+- **Who needs what.**  An AI agent analysing data for a user (summaries,
+  "what is unusual here"); an AI application's developer (feature
+  statistics, data quality, drift between two periods or two model
+  versions, evaluation metrics over logged outputs); those who train
+  models (dataset statistics, deduplication, sampling, train / test
+  splits, statistics of embeddings).  Which questions they ask, and how
+  they ask them today (pandas / numpy / scipy after an export, Spark,
+  DuckDB, a warehouse).
+- **The function families**, each with its numerical method and its
+  parallel, mergeable state: moments — mean, variance and standard
+  deviation (population and sample), skewness, kurtosis, by Welford's and
+  Chan's mergeable updates rather than sums of squares, which cancel;
+  deviation from the mean, z-scores and outliers (as window functions too);
+  correlation, covariance, linear regression (PostgreSQL's `corr`,
+  `covar_*`, `regr_*`); quantiles and the median, exact and approximate
+  (t-digest, KLL), histograms; distinct counts (HyperLogLog), frequent
+  items (count-min, space-saving); sampling (`TABLESAMPLE`, reservoirs —
+  Algorithm L is already in `ANALYZE`); distances and statistics over
+  vectors (with §M14.12); hypothesis tests and distribution distances
+  (Kolmogorov–Smirnov, population stability, KL divergence) for drift;
+  moving and windowed statistics over time.
+- **Prior art**, read for ideas, not copied (`CLAUDE.md`): PostgreSQL's
+  aggregates and their numeric care, DuckDB's and ClickHouse's statistical
+  and approximate aggregates, numpy / scipy, Apache DataSketches, BLAS /
+  LAPACK for what is linear algebra, the papers behind each method.
+- **The fit with nucleus's principles**: exact by default and approximate
+  only by name (`approx_…`); results reproducible across threads and runs
+  (an order-independent merge, or a stated bound); bounded memory;
+  everything as type capabilities and kernels that modules can extend
+  (principle 12); usable through the MCP server and `docs/llm.md` so an AI
+  model finds and uses them unaided; what to measure against (PostgreSQL,
+  DuckDB, numpy over the same data).
+
+**Done when:** the study is written here — the needs, the families
+chosen and their order, the methods and their error bounds, the
+benchmarks — and the steps it leads to are planned as this milestone's
+own, agreed before they are built.
 
 ### §M14.12 — Vectors ⬜
 
@@ -2643,3 +2730,13 @@ style) across a thousand seeds without failure.
   one run per spill, uniqueness by neighbours), internal nodes packed;
   fixed a failed column-table statement's rows outliving it; the load
   69.8 → 45.6 s.  DOCS §3, §8.7, §8.15.
+- **2026-11-03** — §M14.27 added: statistics and numerical analysis on
+  large data for AI models and AI developers — a study first (who needs
+  what, the function families and their mergeable methods, prior art, the
+  fit with the principles), then the plan.
+- **2026-11-03** — §M14.20 W3: one row builder for `COPY` and `INSERT`,
+  text parsed straight to column types, `COPY` parsed and built in
+  parallel, one statement context, a column table's existence checks
+  through the KV's remembered empty ranges (`Transaction::first`); the
+  row load 45.6 → 37.9 s, a column `lineitem` `COPY` 36.5 → 12.8 s; the
+  batch work moved to W3b after W4.  DOCS §6.1, §8.7, §8.15.

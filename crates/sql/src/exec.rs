@@ -1252,7 +1252,7 @@ fn parallel_lookups<'a>(
     if workers < 2
         || spec.outer.is_some()
         || spec.ctx.profile.is_some()
-        || crate::column_store::statement_buffered()
+        || crate::storage::gathered_any()
     {
         return None;
     }

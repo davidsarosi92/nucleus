@@ -304,6 +304,7 @@ impl Engine {
             reads: Mutex::new(ReadSet::default()),
             fresh: Vec::new(),
             gap: None,
+            empty: Mutex::new(Vec::new()),
         })
     }
 
@@ -1043,6 +1044,34 @@ pub struct Transaction {
     /// without an entry in the tree (until this transaction's own intents
     /// enter it).
     gap: Option<Gap>,
+    /// Ranges in which the store shows this transaction nothing — found by
+    /// [`first`](Transaction::first), kept until its own intents enter the
+    /// store (a snapshot's view of the store changes only by them); inside
+    /// one, its own writes alone decide a read.  `put_new`'s [`Gap`] is
+    /// the stronger fact (no entry of anyone), for writes.
+    empty: Mutex<Vec<(Bound<Vec<u8>>, Bound<Vec<u8>>)>>,
+}
+
+/// Ranges a transaction remembers the store as empty in, at most.
+const EMPTY_RANGES: usize = 8;
+
+/// Whether the range `gap` holds the range `[start, end]` (as bounds).
+fn covers(gap: &(Bound<Vec<u8>>, Bound<Vec<u8>>), start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
+    let lower = match (&gap.0, start) {
+        (Bound::Unbounded, _) => true,
+        (_, Bound::Unbounded) => false,
+        (Bound::Included(g), Bound::Included(s) | Bound::Excluded(s)) => g.as_slice() <= s,
+        (Bound::Excluded(g), Bound::Included(s)) => g.as_slice() < s,
+        (Bound::Excluded(g), Bound::Excluded(s)) => g.as_slice() <= s,
+    };
+    let upper = match (&gap.1, end) {
+        (Bound::Unbounded, _) => true,
+        (_, Bound::Unbounded) => false,
+        (Bound::Excluded(g), Bound::Included(e)) => e < g.as_slice(),
+        (Bound::Excluded(g) | Bound::Included(g), Bound::Excluded(e)) => e <= g.as_slice(),
+        (Bound::Included(g), Bound::Included(e)) => e <= g.as_slice(),
+    };
+    lower && upper
 }
 
 impl std::fmt::Debug for Transaction {
@@ -1252,6 +1281,7 @@ impl Transaction {
             return Err(Error::Conflict { key });
         }
         self.gap = None; // its intents enter the tree
+        lock(&self.empty).clear();
         if self.spilled.is_none() {
             lock(&engine.spilling).insert(id);
             engine.side_users.fetch_add(1, Ordering::AcqRel);
@@ -1346,14 +1376,46 @@ impl Transaction {
     }
 
     /// The first visible entry in the range, read without reading ahead.
+    ///
+    /// A range the store was found empty in before (and that no own intent
+    /// entered since) is answered from this transaction's own writes: a
+    /// load's look for "anything at or after this key" — a column table's
+    /// directory and delta store, keys in ascending order — reads the store
+    /// once, not once a key.  (Not under serializable isolation, whose
+    /// reads are each recorded.)
     pub fn first(
         &self,
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let remember = self.isolation != Isolation::Serializable;
+        if remember && lock(&self.empty).iter().any(|g| covers(g, start, end)) {
+            return Ok(self
+                .writes
+                .range(start, end)
+                .find_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone()))));
+        }
         let mut scan = self.scan(start, end)?;
         scan.batch = 1;
-        scan.next().transpose()
+        let got = scan.next().transpose()?;
+        drop(scan);
+        // The store showed nothing before the entry found (or in the whole
+        // range) — known for sure where none of this transaction's own
+        // writes lie, which could have hidden one of its entries.
+        if remember {
+            let to = match &got {
+                Some((k, _)) => Bound::Excluded(k.as_slice()),
+                None => end,
+            };
+            if self.writes.range(start, to).next().is_none() {
+                let mut empty = lock(&self.empty);
+                if empty.len() == EMPTY_RANGES {
+                    empty.remove(0);
+                }
+                empty.push((start.map(<[u8]>::to_vec), to.map(<[u8]>::to_vec)));
+            }
+        }
+        Ok(got)
     }
 
     /// Commits; returns the commit timestamp (the snapshot for a transaction

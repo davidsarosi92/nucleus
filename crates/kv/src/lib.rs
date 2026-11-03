@@ -374,7 +374,11 @@ pub trait KvTxn: Send {
 
     /// The first entry of the range `[start, end)` (bounds as [`scan`]'s),
     /// for a reader that wants just it: by default the scan's first; an
-    /// implementation may skip the read-ahead a scan does.
+    /// implementation may skip the read-ahead a scan does, and may answer
+    /// a look inside a range it found empty before from what the
+    /// transaction wrote since (the engine's transactions do: a load's
+    /// "anything at or after this key?", asked once a row, reads the store
+    /// once).
     ///
     /// [`scan`]: KvTxn::scan
     fn first(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {

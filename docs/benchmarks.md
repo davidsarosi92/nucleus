@@ -416,7 +416,12 @@ suite come when §M14.20 closes):
 | profiled (`4cc9ff4`) | 27.6 | 40.3 | 11.5 | 79.4 |
 | W1: Algorithm L, ordered syncs, 1 GiB checkpoints | 26.2 | | 5.5 | 69.8 |
 | W2: one sorted index builder, parallel | 23.0 | 15.8 | 6.8 | 45.6 |
+| W3: one row builder, parsing in parallel | 14.5 | 16.6 | 6.9 | 37.9 |
+| W3, column tables | 17.9 | 12.1 | 6.4 | 36.4 |
 | PostgreSQL 18 | 18.3 | 5.5 | 5.3 | 29.1 |
+
+(`lineitem`'s `COPY` alone, W2 → W3: a row table 17.5 → 10.4 s, a
+column table 36.5 → 12.8 s; PostgreSQL's 13.4 s.)
 
 ## ClickBench
 

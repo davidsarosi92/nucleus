@@ -597,6 +597,24 @@ impl Value {
         })
     }
 
+    /// `s` as a value of `ty` — [`cast`](Self::cast) of `Value::Text(s)`,
+    /// without making the text a value first (a load's fields: the common
+    /// types parsed straight from the field, the others through `cast`).
+    pub fn from_text(s: &str, ty: DataType) -> Result<Value> {
+        Ok(match ty {
+            DataType::Text => Value::Text(s.to_owned()),
+            DataType::Char => Value::Char(s.to_owned()),
+            t if t.is_integer() => Value::Int(parse_int(s, t)?),
+            DataType::Numeric => Value::Numeric(Decimal::parse(s)?),
+            DataType::Date => Value::Date(datetime::parse_date(s)?),
+            DataType::Float => Value::Float(parse_double(s)?),
+            DataType::Real => Value::Real(parse_real(s)?),
+            DataType::Timestamp => Value::Timestamp(datetime::parse_timestamp(s, false)?),
+            DataType::TimestampTz => Value::TimestampTz(datetime::parse_timestamp(s, true)?),
+            t => Value::Text(s.to_owned()).cast(t)?,
+        })
+    }
+
     /// The value as an SQL literal that gives it back: a number or boolean
     /// as it is, text quoted, anything else quoted and cast to its type.
     pub fn render_sql(&self) -> String {
@@ -916,6 +934,21 @@ pub fn fit_char(s: &str, n: u32, explicit: bool) -> Result<String> {
     Ok(out)
 }
 
+/// [`fit_char`] of an owned string (an assignment's, not explicit): padded
+/// in place, the common fit of ASCII text found without counting.
+pub fn fit_char_owned(mut s: String, n: u32) -> Result<String> {
+    let len = if s.is_ascii() {
+        s.len()
+    } else {
+        s.chars().count()
+    };
+    if len > n as usize {
+        return fit_char(&s, n, false);
+    }
+    s.extend(std::iter::repeat_n(' ', n as usize - len));
+    Ok(s)
+}
+
 /// `22003` for a value outside integer type `t`.
 pub fn int_overflow(t: DataType) -> Error {
     Error::out_of_range(format!("{t} out of range"))
@@ -1060,6 +1093,84 @@ pub type Row = Vec<Value>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `from_text` is `cast` of the text: the same value, of the same
+    /// type, or the same error, for every type a load parses straight.
+    #[test]
+    fn from_text_is_cast_of_text() {
+        let types = [
+            DataType::Text,
+            DataType::Char,
+            DataType::SmallInt,
+            DataType::Integer,
+            DataType::BigInt,
+            DataType::Numeric,
+            DataType::Date,
+            DataType::Float,
+            DataType::Real,
+            DataType::Timestamp,
+            DataType::TimestampTz,
+            DataType::Bool,
+            DataType::Interval,
+            DataType::Time,
+            DataType::Bytea,
+        ];
+        let inputs = [
+            "",
+            " ",
+            "0",
+            "-0",
+            "1",
+            " 42 ",
+            "+7",
+            "-32768",
+            "32768",
+            "2147483648",
+            "9223372036854775807",
+            "9223372036854775808",
+            "1.5",
+            "-0.000",
+            "1e3",
+            "1e-400",
+            "NaN",
+            "inf",
+            "-Infinity",
+            "12.3456789012345678901234567890",
+            "abc",
+            "t",
+            "off",
+            "1998-12-01",
+            "1998-13-01",
+            "epoch",
+            "infinity",
+            "2020-02-29 12:34:56.789",
+            "2020-02-29 12:34:56+02",
+            "12:30",
+            "1 day 02:00",
+            "\\x4142",
+            "Ünnep",
+            "a\tb",
+        ];
+        for ty in types {
+            for s in inputs {
+                let want = Value::Text(s.to_string()).cast(ty);
+                let got = Value::from_text(s, ty);
+                match (&got, &want) {
+                    (Ok(g), Ok(w)) => {
+                        assert_eq!(format!("{g:?}"), format!("{w:?}"), "{s:?} as {ty}")
+                    }
+                    (Err(g), Err(w)) => {
+                        assert_eq!(
+                            (&g.code, &g.message),
+                            (&w.code, &w.message),
+                            "{s:?} as {ty}"
+                        )
+                    }
+                    _ => panic!("{s:?} as {ty}: {got:?} against {want:?}"),
+                }
+            }
+        }
+    }
 
     #[test]
     fn comparisons() {

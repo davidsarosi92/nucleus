@@ -266,7 +266,7 @@ impl Entries {
     /// Sorts the entries by key: cut in parts sorted on threads of their
     /// own, the parts merged.
     fn sort(&mut self) {
-        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        let threads = crate::budget::workers();
         let chunk = self.items.len().div_ceil(threads).max(SORT_CHUNK);
         let bytes = &self.bytes;
         let items = &mut self.items;
@@ -599,6 +599,16 @@ impl Writer {
         Ok(())
     }
 
+    /// A new row's stored form made beforehand, on any thread (`None` for a
+    /// partitioned table — its partitions may store rows differently — or a
+    /// row its storage stores otherwise).
+    pub fn encode_new(&self, row: &Row) -> Option<Vec<u8>> {
+        if self.partitions.is_some() {
+            return None;
+        }
+        self.storage.encode_new(&self.table, row)
+    }
+
     /// The tables its rows are in: its partitions', or its own.
     pub fn targets(&self) -> Vec<&Table> {
         match &self.partitions {
@@ -620,6 +630,133 @@ impl Writer {
             ))
         })?;
         Ok(tables.iter().position(|t| t.name == to.name))
+    }
+}
+
+/// The columns `columns` names of `t` (all, without a list): an `INSERT`'s
+/// or a `COPY`'s.
+pub fn target_columns(t: &Table, columns: &Option<Vec<String>>) -> Result<Vec<usize>> {
+    let Some(names) = columns else {
+        return Ok((0..t.columns.len()).collect());
+    };
+    let mut seen = HashSet::new();
+    names
+        .iter()
+        .map(|n| {
+            let i = t.column(n).ok_or_else(|| {
+                Error::undefined_column(format!(
+                    "column \"{n}\" of relation \"{}\" does not exist",
+                    t.name
+                ))
+            })?;
+            if !seen.insert(i) {
+                return Err(Error::duplicate_column(format!(
+                    "column \"{n}\" specified more than once"
+                )));
+            }
+            Ok(i)
+        })
+        .collect()
+}
+
+/// New rows of a table from the values a statement gives for some of its
+/// columns — `INSERT`'s source rows, `COPY`'s fields or typed rows (PLAN.md
+/// §M14.20 W3: one builder, bound once per statement): each value assigned
+/// to its column, the other columns' defaults, then the constraints of a
+/// new row and the row-level security check.
+pub struct RowBuilder {
+    /// The table's writer.
+    pub writer: Writer,
+    /// The columns given, in order.
+    targets: Vec<usize>,
+    /// The columns not given (their defaults taken).
+    rest: Vec<usize>,
+    /// The targets are every column, in order.
+    in_order: bool,
+    check: Option<Expr>,
+}
+
+impl RowBuilder {
+    /// A builder of rows given `targets`' values, checked by `check` (the
+    /// policies' condition for new rows).
+    pub fn new(writer: Writer, targets: Vec<usize>, check: Option<Expr>) -> Self {
+        let rest = (0..writer.table.columns.len())
+            .filter(|c| !targets.contains(c))
+            .collect();
+        let in_order = targets.iter().copied().eq(0..writer.table.columns.len());
+        Self {
+            writer,
+            targets,
+            rest,
+            in_order,
+            check,
+        }
+    }
+
+    /// The columns given.
+    pub fn targets(&self) -> &[usize] {
+        &self.targets
+    }
+
+    /// Whether rows can be built on any thread, in any order: the
+    /// defaults taken, the checks and the policy's condition neither
+    /// volatile (`nextval`, `random()`) nor with subqueries.
+    pub fn parallel_safe(&self) -> bool {
+        let w = &self.writer;
+        w.defaults
+            .iter()
+            .flatten()
+            .all(crate::vector::parallel_safe)
+            && w.checks
+                .iter()
+                .all(|(_, e)| crate::vector::parallel_safe(e))
+            && self.check.as_ref().is_none_or(crate::vector::parallel_safe)
+    }
+
+    /// The row of `vals`, the first targets' values (fewer: the rest take
+    /// their defaults).
+    pub fn build_values(&self, ctx: &Ctx, vals: Vec<Value>) -> Result<Row> {
+        let t = &self.writer.table;
+        let mut row = vec![Value::Null; t.columns.len()];
+        let n = vals.len().min(self.targets.len());
+        for (&c, v) in self.targets.iter().zip(vals) {
+            row[c] = assign(ctx.txn, v, t, c)?;
+        }
+        self.finish(row, n, ctx)
+    }
+
+    /// The row of a `COPY` record's fields, one per target (counted by the
+    /// caller), parsed straight into the columns' types.
+    pub(crate) fn build_text(&self, ctx: &Ctx, rec: &crate::copy::Record) -> Result<Row> {
+        let t = &self.writer.table;
+        let field = |i: usize, c: usize| match rec.get(i) {
+            Some(s) => assign_text(ctx.txn, s, t, c),
+            None => Ok(Value::Null),
+        };
+        // Every column, in order (the common load): the row made as it is
+        // parsed, without a row of NULLs first.
+        if self.in_order {
+            let row = (0..t.columns.len())
+                .map(|c| field(c, c))
+                .collect::<Result<Row>>()?;
+            return self.finish(row, self.targets.len(), ctx);
+        }
+        let mut row = vec![Value::Null; t.columns.len()];
+        for (i, &c) in self.targets.iter().enumerate() {
+            row[c] = field(i, c)?;
+        }
+        self.finish(row, self.targets.len(), ctx)
+    }
+
+    /// Defaults for the columns not given (and the targets past the first
+    /// `given`), then the checks.
+    fn finish(&self, mut row: Row, given: usize, ctx: &Ctx) -> Result<Row> {
+        for &c in self.rest.iter().chain(&self.targets[given..]) {
+            row[c] = self.writer.default_of(c, ctx)?;
+        }
+        self.writer.validate(&row, ctx)?;
+        admit(&self.check, &self.writer.table, &row, ctx)?;
+        Ok(row)
     }
 }
 
@@ -723,18 +860,36 @@ pub fn assign(txn: &dyn KvTxn, v: Value, table: &Table, c: usize) -> Result<Valu
         }
         _ => crate::enums::cast(txn, v, col.ty)?,
     };
+    fit_column(col, v)
+}
+
+/// [`assign`] of the text `s` (a load's field), parsed straight into
+/// the column's type.
+pub fn assign_text(txn: &dyn KvTxn, s: &str, table: &Table, c: usize) -> Result<Value> {
+    let col = &table.columns[c];
+    match col.ty {
+        DataType::Enum(_) => assign(txn, Value::Text(s.to_owned()), table, c),
+        ty => fit_column(col, Value::from_text(s, ty)?),
+    }
+}
+
+/// A value of column `col`'s type made to fit it: its length, `char(n)`'s
+/// padding, `numeric(p, s)`'s scale.
+fn fit_column(col: &crate::catalog::Column, v: Value) -> Result<Value> {
+    // A string's bytes are at least its characters: most need no count.
     if let (Some(max), Value::Text(s)) = (col.max_len, &v)
+        && s.len() > max as usize
         && s.chars().count() > max as usize
     {
         return Err(Error::string_too_long(format!(
             "value too long for type character varying({max})"
         )));
     }
-    if let Value::Char(s) = &v {
-        return Ok(match col.max_len {
-            Some(n) => Value::Char(crate::types::fit_char(s, n, false)?),
-            None => v,
-        });
+    if let Value::Char(s) = v {
+        return Ok(Value::Char(match col.max_len {
+            Some(n) => crate::types::fit_char_owned(s, n)?,
+            None => s,
+        }));
     }
     if let (Some((p, s)), Value::Numeric(d)) = (col.numeric, &v) {
         return Ok(Value::Numeric(d.fit(p, s)?));
@@ -748,8 +903,15 @@ fn duplicate(name: &str) -> Error {
     ))
 }
 
-/// Stores a new row and its index entries.
-pub(crate) fn insert_row(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<()> {
+/// Stores a new row and its index entries (`encoded`: its storage's
+/// [`encode_new`](crate::storage::TableStorage::encode_new) form, made
+/// beforehand).
+pub(crate) fn insert_row(
+    txn: &mut dyn KvTxn,
+    w: &Writer,
+    row: &Row,
+    encoded: Option<Vec<u8>>,
+) -> Result<()> {
     let t = &w.table;
     let rowid = if t.primary_key.is_empty() {
         Some(catalog::next_rowid(txn, t)?)
@@ -757,9 +919,15 @@ pub(crate) fn insert_row(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<(
         None
     };
     let key = row_key_of(t, row, rowid);
-    if rowid.is_some() {
-        w.storage.write(txn, t, &key, row, None)?;
-    } else if !w.storage.insert(txn, t, &key, row)? {
+    let stored = match encoded {
+        Some(e) => w.storage.insert_encoded(txn, t, &key, row, e)?,
+        None if rowid.is_some() => {
+            w.storage.write(txn, t, &key, row, None)?;
+            true
+        }
+        None => w.storage.insert(txn, t, &key, row)?,
+    };
+    if !stored {
         return Err(duplicate(&format!("{}_pkey", t.name)));
     }
     let pk = pk_suffix(t, &key);
@@ -833,29 +1001,7 @@ pub fn insert(
     params: &[Value],
 ) -> Result<Written> {
     let t = catalog::table(&*txn, table)?;
-    let targets: Vec<usize> = match columns {
-        None => (0..t.columns.len()).collect(),
-        Some(names) => {
-            let mut seen = HashSet::new();
-            names
-                .iter()
-                .map(|n| {
-                    let i = t.column(n).ok_or_else(|| {
-                        Error::undefined_column(format!(
-                            "column \"{n}\" of relation \"{}\" does not exist",
-                            t.name
-                        ))
-                    })?;
-                    if !seen.insert(i) {
-                        return Err(Error::duplicate_column(format!(
-                            "column \"{n}\" specified more than once"
-                        )));
-                    }
-                    Ok(i)
-                })
-                .collect::<Result<_>>()?
-        }
-    };
+    let targets = target_columns(&t, columns)?;
     let (rows, writer, ret) = {
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro, reg).checked();
@@ -883,25 +1029,15 @@ pub fn insert(
         }
         let ret = returning(&mut binder, returning_items, &t)?;
         let check = new_row_check(&binder, &t, crate::policies::Command::Insert)?;
-        let writer = Writer::new(ro, reg, t.clone())?;
+        let builder = RowBuilder::new(Writer::new(ro, reg, t.clone())?, targets, check);
         let ctx = Ctx::new(ro, reg, params);
         // Collected before anything is written (the source may read the
         // table), in bounded memory.
         let mut rows = crate::spill::Stash::new();
         for src in exec::build(&plan, &ctx, None)? {
-            let src = src?;
-            let mut row = Vec::with_capacity(t.columns.len());
-            for c in 0..t.columns.len() {
-                row.push(match targets.iter().position(|&x| x == c) {
-                    Some(j) if j < src.len() => assign(ro, src[j].clone(), &t, c)?,
-                    _ => writer.default_of(c, &ctx)?,
-                });
-            }
-            writer.validate(&row, &ctx)?;
-            admit(&check, &t, &row, &ctx)?;
-            rows.push(row)?;
+            rows.push(builder.build_values(&ctx, src?)?)?;
         }
-        (std::rc::Rc::new(rows.seal()?), writer, ret)
+        (std::rc::Rc::new(rows.seal()?), builder.writer, ret)
     };
     let mut chunk = Vec::with_capacity(CHUNK);
     for r in rows.iter() {
@@ -1099,12 +1235,17 @@ fn apply_updates(
 /// One row (validated already) inserted — into its partition, for a
 /// partitioned table — and noted as the statement's write (its storage
 /// finishes at the statement's end); its foreign keys are the caller's.
-pub(crate) fn insert_routed(txn: &mut dyn KvTxn, w: &Writer, row: &Row) -> Result<()> {
+pub(crate) fn insert_routed(
+    txn: &mut dyn KvTxn,
+    w: &Writer,
+    row: &Row,
+    encoded: Option<Vec<u8>>,
+) -> Result<()> {
     if let Some((_, parts)) = &w.partitions {
         let i = w.partition_of(row)?.expect("partitioned");
-        return insert_routed(txn, &parts[i], row);
+        return insert_routed(txn, &parts[i], row, None);
     }
-    insert_row(txn, w, row)?;
+    insert_row(txn, w, row, encoded)?;
     crate::storage::written(&w.table);
     Ok(())
 }
@@ -1126,7 +1267,7 @@ pub fn insert_rows(txn: &mut dyn KvTxn, w: &Writer, rows: &[Row]) -> Result<()> 
         return Ok(());
     }
     for row in rows {
-        insert_row(txn, w, row)?;
+        insert_row(txn, w, row, None)?;
     }
     crate::storage::written(&w.table);
     crate::fk::check_children(&*txn, &w.table, rows.iter().map(|r| (None, r)))

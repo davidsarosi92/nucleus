@@ -670,7 +670,12 @@ distributed implementation will provide (§F3).
   default `None`), `split_points(start, end, parts)` (up to `parts - 1`
   keys cutting a range into parts of about equal size, from the B+tree's
   internal nodes, none smaller than 64 leaves; default none), `first(start,
-  end)` (the range's first entry, without a scan's read-ahead),
+  end)` (the range's first entry, without a scan's read-ahead; the
+  engine's transaction, outside `SERIALIZABLE`, remembers up to 8 ranges
+  it found the store empty in — where none of its own writes lay — until
+  its intents next enter the store, and answers a look inside one from
+  its write set: a load's look past the stored rows reads the store once,
+  not once a row),
   `put(&mut self)`,
   `delete(&mut self)`, `put_new(key, value) -> bool` (sets a key that has
   no value, else `false`; by default `get` then `put`, locally one look at
@@ -1540,7 +1545,22 @@ stored — with the data's line in the message (`… (COPY data, line 3)`);
 `22P04` for a record with too few or too many fields.  It runs in the
 session's transaction (or its own) and is never retried, its data having
 been read; a load larger than the transaction's memory spills (§5.2), so
-its size is not bound by memory.  A front end without a client to read from refuses it
+its size is not bound by memory.
+
+`COPY` and `INSERT` build their rows through one builder
+(`dml::RowBuilder`, §M14.20 W3): the target columns bound once, a text
+field parsed straight to its column's type (`Value::from_text` — no
+string per field for numbers, dates and timestamps; anything else as a
+cast from text), the record's fields in one buffer, and when the fields
+come in the table's column order the row built as they are read; then
+the defaults, the checks and the policies.  `COPY` collects up to 4 MiB
+of records and — when every default, check and policy is safe off the
+statement's thread and the transaction can share its reads — parses and
+builds them in parts of 2048 on the statement's workers (DuckDB's
+parallel CSV reader, Instant Loading), a row table's rows encoded there
+too (`TableStorage::encode_new`, stored by `insert_encoded`); the rows
+are stored in order on the statement's thread, so a failure names the
+first failing line as a serial load would.  A front end without a client to read from refuses it
 (`0A000`); `Session::run_copy(stmt, params, reader)` reads it from any
 `Read`.  `COPY … TO` and from a server-side file are not supported (a
 query reads; the client sends files).
@@ -2069,7 +2089,18 @@ every pair of large and small writes, overlapping or not, in either order
 nothing gathered: a table is registered for the statement's clean-up
 when its first row is gathered, so the rows of a statement that fails —
 say on a unique index while updating — are dropped with it, never
-stored by the next statement on the thread.  The same SQL runs on both storages with
+stored by the next statement on the thread.  What a statement keeps per
+table it writes — the rows written and gathered — is one statement
+context (`storage::TableWrites`, behind `with_writes` / `peek_writes` /
+`take_writes`; §M14.20 W3), cleared when the statement ends, whatever
+its outcome.  An existence check (a key's uniqueness on insert) looks at
+the gathered rows — past the last one, a load's every key, one
+comparison — then at the directory's first segment ending at or after
+the key and, when none does, at the delta store's first row at or after
+it: both `first` reads, which the transaction answers from memory inside
+a range it found empty (§6.1), so a load's ascending keys read the store
+once each time rows are stored, not once a row.  A segment's columns are
+encoded on threads of their own (a share of the columns each).  The same SQL runs on both storages with
 the same results: the tests run loads, updates, key changes and deletes on
 a `row` and a `column` table and compare every query, a row and a batch
 at a time and in parallel, and the integrity check.  On a million rows

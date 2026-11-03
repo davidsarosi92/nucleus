@@ -343,6 +343,17 @@ impl Table {
         out.extend_from_slice(&index_id.to_be_bytes());
     }
 
+    /// The end of index `index_id`'s keys (past every key with its prefix):
+    /// the next index's prefix, the prefixes being of one length.
+    pub fn index_end(&self, index_id: u32) -> [u8; INDEX_PREFIX_LEN] {
+        let next = index_id.checked_add(1).expect("an index id below u32::MAX");
+        let mut k = [0; INDEX_PREFIX_LEN];
+        k[0] = DATA;
+        k[1..5].copy_from_slice(&self.id.to_be_bytes());
+        k[5..].copy_from_slice(&next.to_be_bytes());
+        k
+    }
+
     /// The prefix of every key of the table.
     pub fn data_prefix(&self) -> Vec<u8> {
         let mut k = vec![DATA];

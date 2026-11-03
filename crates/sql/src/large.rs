@@ -72,6 +72,23 @@ pub fn insert(txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<b
     Ok(txn.put_new(key, &out)?)
 }
 
+/// A new row's stored value when none of its values is long enough to go
+/// out of line (`None` when one is): what [`insert`] stores, made without
+/// the transaction — on any thread (a load's workers).
+pub fn encode_inline(row: &Row) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(3 + row.len() * 9);
+    out.push(ROW_VERSION);
+    out.extend_from_slice(&(row.len() as u16).to_le_bytes());
+    for v in row {
+        let at = out.len();
+        encode_value(&mut out, v);
+        if out.len() - at > THRESHOLD {
+            return None;
+        }
+    }
+    Some(out)
+}
+
 /// The row's stored value, its long values written out of line.
 fn encode(
     txn: &mut dyn KvTxn,

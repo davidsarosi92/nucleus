@@ -107,6 +107,29 @@ pub trait TableStorage: Send + Sync {
         Ok(true)
     }
 
+    /// A new row's stored form made without the transaction — on any
+    /// thread, as a load's workers parse — if this storage has one (`None`:
+    /// by default, and for a row it stores otherwise);
+    /// [`insert_encoded`](Self::insert_encoded) stores it.
+    fn encode_new(&self, t: &Table, row: &Row) -> Option<Vec<u8>> {
+        let _ = (t, row);
+        None
+    }
+
+    /// [`insert`](Self::insert) of a row given its
+    /// [`encode_new`](Self::encode_new) form.
+    fn insert_encoded(
+        &self,
+        txn: &mut dyn KvTxn,
+        t: &Table,
+        key: &[u8],
+        row: &Row,
+        encoded: Vec<u8>,
+    ) -> Result<bool> {
+        let _ = encoded;
+        self.insert(txn, t, key, row)
+    }
+
     /// Removes the row under `key`.
     fn remove(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8]) -> Result<()>;
 
@@ -219,35 +242,76 @@ impl BatchSource for RowsAsBatches<'_> {
 
 // ------------------------------------------------------------- statements
 
+/// What the current statement wrote to one table, kept for its end — one
+/// context for a statement's writes (PLAN.md §M14.20 W3; they were three
+/// thread-locals): a storage's gathered rows and counts live in it and die
+/// with the statement, whether it goes through or fails.
+#[derive(Default)]
+pub struct TableWrites {
+    /// Rows written (for a storage that counts them).
+    pub rows: usize,
+    /// Rows inserted, not yet stored (a `column` table gathers them).
+    pub gathered: std::collections::BTreeMap<Vec<u8>, Row>,
+}
+
 thread_local! {
-    /// The tables the current statement wrote rows of.
-    static WRITTEN: std::cell::RefCell<HashMap<u32, Table>> =
+    /// The tables the current statement wrote rows of, and what it wrote.
+    static STATEMENT: std::cell::RefCell<HashMap<u32, (Table, TableWrites)>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
 /// Notes that the current statement wrote rows of `t`.
 pub fn written(t: &Table) {
-    WRITTEN.with(|w| {
-        w.borrow_mut().entry(t.id).or_insert_with(|| t.clone());
-    });
+    with_writes(t, |_| ());
+}
+
+/// `f` on the current statement's writes to `t` (noting `t` among its
+/// tables).
+pub fn with_writes<T>(t: &Table, f: impl FnOnce(&mut TableWrites) -> T) -> T {
+    STATEMENT.with(|s| {
+        let mut s = s.borrow_mut();
+        f(&mut s
+            .entry(t.id)
+            .or_insert_with(|| (t.clone(), TableWrites::default()))
+            .1)
+    })
+}
+
+/// `f` on the current statement's writes to `t`, if it wrote any — for a
+/// read, which notes nothing.
+pub fn peek_writes<T>(t: &Table, f: impl FnOnce(Option<&TableWrites>) -> T) -> T {
+    STATEMENT.with(|s| f(s.borrow().get(&t.id).map(|(_, w)| w)))
+}
+
+/// The current statement's writes to `t`, taken.
+pub fn take_writes(t: &Table) -> TableWrites {
+    with_writes(t, std::mem::take)
+}
+
+/// Whether the current statement gathered rows of some table that are
+/// not yet stored (only this thread's reads see them).
+pub fn gathered_any() -> bool {
+    STATEMENT.with(|s| s.borrow().values().any(|(_, w)| !w.gathered.is_empty()))
 }
 
 /// After a statement: each table it wrote, its storage's
-/// [`TableStorage::after_writes`] — when it went through (`ok`).
+/// [`TableStorage::after_writes`] when it went through (`ok`), else
+/// [`TableStorage::after_failure`]; then what it wrote is dropped.
 pub fn statement_done(txn: &mut dyn KvTxn, ok: bool) -> Result<()> {
-    let tables: Vec<Table> = WRITTEN.with(|w| w.borrow_mut().drain().map(|(_, t)| t).collect());
-    if !ok {
+    let tables: Vec<Table> =
+        STATEMENT.with(|s| s.borrow().values().map(|(t, _)| t.clone()).collect());
+    let done = if ok {
+        tables.iter().try_for_each(|t| of(t)?.after_writes(txn, t))
+    } else {
         for t in &tables {
             if let Ok(s) = of(t) {
                 s.after_failure(t);
             }
         }
-        return Ok(());
-    }
-    for t in tables {
-        of(&t)?.after_writes(txn, &t)?;
-    }
-    Ok(())
+        Ok(())
+    };
+    STATEMENT.with(|s| s.borrow_mut().clear());
+    done
 }
 
 // ---------------------------------------------------------------- registry
@@ -356,6 +420,21 @@ impl TableStorage for RowStorage {
 
     fn insert(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<bool> {
         crate::large::insert(txn, t, key, row)
+    }
+
+    fn encode_new(&self, _: &Table, row: &Row) -> Option<Vec<u8>> {
+        crate::large::encode_inline(row)
+    }
+
+    fn insert_encoded(
+        &self,
+        txn: &mut dyn KvTxn,
+        _: &Table,
+        key: &[u8],
+        _: &Row,
+        encoded: Vec<u8>,
+    ) -> Result<bool> {
+        Ok(txn.put_new(key, &encoded)?)
     }
 
     fn remove(&self, txn: &mut dyn KvTxn, t: &Table, key: &[u8]) -> Result<()> {
