@@ -1963,6 +1963,25 @@ the speed-up is made once, in the merged one.  The work, in this order:
   TPC-H unchanged (row tables 8.8 → 8.6 s, column 4.2 s; Q20 on rows,
   best of five 434–457 → 481–527 ms, is the same in the best of forty,
   445 → 443 ms, and its profile is the same: reads of pages).
+  *Done — a decimal division in one step*: a quotient whose dividend,
+  scaled up by the digits asked for and one more, fits 128 bits (an
+  average's sum and count do) is one hardware division, rounded on that
+  last digit — the digits the long division made one at a time, a 128-bit
+  division each (Q32's million averages: 5 % of its profile).  The long
+  division stays for the rest (PostgreSQL's `div_var` is one too, in
+  base 10,000; DuckDB and Arrow's 128-bit decimals scale and divide once,
+  and so does this, but a dividend that does not fit goes to the long
+  division instead of an error).  On the way: the long division failed a
+  quotient that fits when the divisor, scaled up, did not (a tiny
+  dividend over a huge divisor: 0.000, not an overflow).  Tested: 200,000
+  random quotients — mantissas of every length, scales either way, both
+  signs — are the long division's; mutations caught (no rounding digit,
+  rounding at 4, the sign).  Measured, alternating with top-N, two
+  rounds: ClickBench on a column table 4.85 / 4.87 → 4.75 / 4.70 s
+  (geometric mean 30.7 → 29.8 ms; Q32 555 / 524 → 513 / 503 ms, Q33 159
+  / 167 → 146 / 144); TPC-H unchanged (row tables 8.78 → 8.75 / 8.60 s,
+  column 4.18–4.30 → 4.22–4.34 s; Q1, Q9 and Q18 the same in the best of
+  thirty).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3072,3 +3091,6 @@ style) across a thousand seeds without failure.
   its rows in a heap (gathered to 2k first, as PostgreSQL), a parallel
   sort's morsels building a row only when it enters; ClickBench 5.1 →
   4.7 s (Q32 610 → 525 ms, Q24 11.2 → 5.4).  DOCS §8.5.
+- **2026-11-03** — §M14.20 W6: a decimal division in one 128-bit
+  division when the scaled dividend fits (the long division for the
+  rest); ClickBench 4.86 → 4.73 s (Q32 540 → 508 ms).

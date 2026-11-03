@@ -3056,6 +3056,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-03 — §M14.20 W6, a decimal division in one step:** `/` on
+  numerics divides once when the dividend scaled up by the digits asked
+  for (and one to round on) fits 128 bits, else by long division as
+  before; a tiny dividend over a huge divisor gives its zero, not an
+  overflow.
+
 - **2026-11-03 — §M14.20 W6, top-N:** a sort right below a `LIMIT`
   keeps only the rows the limit takes and skips — a heap of that many
   (`spill::Top`; ties in the input's order, so the rows of the full

@@ -329,9 +329,32 @@ impl Decimal {
         if other.m == 0 {
             return Err(Error::division_by_zero("division by zero"));
         }
-        // q = m1 / m2 × 10^(rscale + s2 - s1), by long division.
+        // q = m1 / m2 × 10^(rscale + s2 - s1).
         let k = i64::from(rscale) + i64::from(other.scale) - i64::from(self.scale);
-        let (mut a, b) = (self.m.unsigned_abs(), other.m.unsigned_abs());
+        let (a, b) = (self.m.unsigned_abs(), other.m.unsigned_abs());
+        let sign = |m: i128| if (self.m < 0) != (other.m < 0) { -m } else { m };
+        // In one division when m1 × 10^(k+1) fits (an average's sum and
+        // count do): the quotient with one digit more, rounded on it — the
+        // digits the long division below makes one at a time.
+        if let Some(a10) = u32::try_from(k + 1)
+            .ok()
+            .and_then(|e| 10u128.checked_pow(e))
+            .and_then(|p| a.checked_mul(p))
+        {
+            let q10 = a10 / b;
+            let q = q10 / 10 + u128::from(q10 % 10 >= 5);
+            if q > LIMIT {
+                return Err(overflow());
+            }
+            return checked(sign(q as i128), rscale);
+        }
+        checked(sign(Self::long_div(a, b, k)? as i128), rscale)
+    }
+
+    /// `a / b × 10^k` rounded on the next digit, by long division, a digit
+    /// at a time.
+    fn long_div(a: u128, b: u128, k: i64) -> Result<u128> {
+        let mut a = a;
         let mut b = b;
         if k < 0 {
             b = b
@@ -362,8 +385,7 @@ impl Decimal {
         if q > LIMIT {
             return Err(overflow());
         }
-        let m = q as i128;
-        checked(if (self.m < 0) != (other.m < 0) { -m } else { m }, rscale)
+        Ok(q)
     }
 
     /// `self % other` (sign of `self`, as PostgreSQL).
@@ -509,6 +531,61 @@ mod tests {
         }
         assert!(Decimal::parse(&"9".repeat(39)).is_err());
         assert!(Decimal::parse(&"9".repeat(38)).is_ok());
+    }
+
+    #[test]
+    fn one_division_is_the_long_division() {
+        // div_at's single division against the digit-at-a-time one, over
+        // mantissas of every length, scales either way, both signs; and a
+        // quotient that fits though the divisor scaled up does not.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..200_000 {
+            let m = |n: &mut dyn FnMut() -> u64| -> i128 {
+                let digits = (n() % 39) as u32;
+                let v = ((u128::from(n()) << 64) | u128::from(n())) % 10u128.pow(digits).max(1);
+                if n().is_multiple_of(2) {
+                    v as i128
+                } else {
+                    -(v as i128)
+                }
+            };
+            let (m1, m2) = (m(&mut next), m(&mut next));
+            if m2 == 0 {
+                continue;
+            }
+            let (s1, s2, rs) = (
+                (next() % 39) as u32,
+                (next() % 39) as u32,
+                (next() % 39) as u32,
+            );
+            let (a, b) = (Decimal::raw(m1, s1), Decimal::raw(m2, s2));
+            let k = i64::from(rs) + i64::from(s2) - i64::from(s1);
+            let want = Decimal::long_div(m1.unsigned_abs(), m2.unsigned_abs(), k).and_then(|q| {
+                let q = q as i128;
+                checked(if (m1 < 0) != (m2 < 0) { -q } else { q }, rs)
+            });
+            let got = a.div_at(b, rs);
+            match (&got, &want) {
+                // The long division scales the divisor up first (k < 0),
+                // which can pass 38 digits though the quotient fits: it
+                // fails where the single division need not.
+                (Ok(_), Err(_)) if k < 0 => {}
+                _ => assert_eq!(
+                    got.as_ref().map_err(|e| e.code),
+                    want.as_ref().map_err(|e| e.code),
+                    "{a} / {b} at {rs}"
+                ),
+            }
+        }
+        let tiny = Decimal::raw(-68_565_694, 18);
+        let huge = Decimal::raw(-42_762_834_188_382_892_803_427_302_860_904_933_237, 14);
+        assert_eq!(tiny.div_at(huge, 3).unwrap().to_string(), "0.000");
     }
 
     #[test]
