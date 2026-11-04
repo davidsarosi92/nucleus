@@ -2215,6 +2215,36 @@ the speed-up is made once, in the merged one.  The work, in this order:
   Q21 420 / 425 → 440 / 426 (within its rounds' spread: 426 against
   425) —; row tables and
   ClickBench unchanged (row tables read no segments).
+  *Done — one grouping table a worker*: the price of the step above it
+  that bounds groupings by `work_mem` (Q13, Q36: groups recurring in
+  every morsel, so the morsels' tables together passed `work_mem` though
+  the merged groups fit).  A worker now keeps one table across the
+  morsels it takes (DuckDB's thread-local hash tables, HyPer's morsel
+  workers): a group's rank is its morsel and place in it (`(morsel <<
+  32) | place`, a spilled group's too), a merge part takes a group's
+  least rank rather than its first, and the merged groups are finished
+  in rank order — the order a single pass first saw them, whichever
+  worker took which morsel.  Only when every aggregate is `order_free`
+  (`array_agg` combines, but its elements come in the order fed).
+  Adaptive: on its second morsel a worker sees whether its groups recur
+  (fewer than half new); when they do not (`GROUP BY WatchID, ClientIP`)
+  it hands each morsel's table over as before, so places stay cheap and
+  nothing waits for the worker's end — keeping them had cost Q32 413 →
+  470 ms.  Not taken: a shared concurrent table (DuckDB's earlier one,
+  Leis et al.'s for HyPer) — its atomic inserts cost every row what the
+  per-worker merge costs a group.  Tested by the suite's groupings on
+  two and four workers, spilled and kept (a single pass's order and
+  error); a morsel that spilled on the way says nothing of recurrence
+  (its table was emptied: a subtraction that overflowed, caught by the
+  suite in a debug build, wrapped in the release one measured first);
+  mutations caught (the first rank kept rather than the least, finished
+  in part order, `array_agg` let through).  Measured, alternating with
+  the step before, two rounds: TPC-H on column tables 3.82 / 3.78 →
+  3.79 / 3.77 s — Q13 109 / 105 → 94 / 97 ms; on row tables (the build
+  before the fix) 8.18 / 8.28 → 7.83 / 8.00 s, Q13 175 / 184 → 164 /
+  167; ClickBench 2.43 / 2.41 → 2.46 / 2.43 s — Q32 423 / 415 → 430 /
+  420 ms, Q36 71 / 73 → 75 / 79 (the rank sort at the end; Q36's groups
+  fit `work_mem` since typed states, so the bound no longer cost it).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3358,3 +3388,7 @@ style) across a thousand seeds without failure.
   segment's directory entry decoded once (cached by id), its row keys
   searched through marks first.  TPC-H Q19 40 → 37 ms, Q20 167 → 156.
   DOCS §8.15.
+- **2026-11-04** — §M14.20 W6: one grouping table a worker across its
+  morsels (groups ranked by morsel and place, finished in rank order;
+  handed over per morsel when groups do not recur).  TPC-H Q13 on column
+  tables 107 → 95 ms, on row tables 180 → 165.  DOCS §8.5.

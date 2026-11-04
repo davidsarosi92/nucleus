@@ -1469,8 +1469,14 @@ those kept fit in the other half, and a part reads a morsel's spilled
 groups back before those it kept, so each group's place and the errors
 are those of a merge in memory.  Merged rows past half of `work_mem` in
 all come a part at a time, each part's in the order first seen, those
-that did not fit beside the others from scratch space.  Groups in key
-order are merged as §8.6 says.  The builtin states pass between workers compactly: `count` an
+that did not fit beside the others from scratch space.  When every
+aggregate is order-free (not `array_agg`, not `string_agg`), a worker
+keeps one table across the morsels it takes, unless its second morsel
+shows its groups do not recur (then each morsel's table is handed over
+as before); a group's rank is its morsel and its place in it, a merge
+takes a group's least, and the merged groups are finished in rank
+order — a single pass's order whichever worker took which morsel.
+Groups in key order are merged as §8.6 says.  The builtin states pass between workers compactly: `count` an
 integer (its own accumulator, a count a group), `min`, `max`,
 `bool_and`, `bool_or` their value, a `sum` of no doubles its value (or
 its integer sum's bytes), an `avg` of no doubles the pair of its rows

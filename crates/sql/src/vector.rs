@@ -2866,28 +2866,9 @@ struct Bucket {
     keys: Vec<Vec<Value>>,
     states: Vec<Vec<Value>>,
     places: Vec<u32>,
-}
-
-/// A morsel's buckets as its groups in the order it saw them: keys, and
-/// each aggregate's partial states.
-fn unbucket(mut buckets: Vec<Bucket>, aggs: usize) -> (Vec<Vec<Value>>, Vec<Vec<Value>>) {
-    if buckets.len() == 1 {
-        // One bucket: in the order seen already.
-        let b = buckets.pop().expect("a bucket");
-        return (b.keys, b.states);
-    }
-    let n: usize = buckets.iter().map(|b| b.keys.len()).sum();
-    let mut keys: Vec<Vec<Value>> = vec![Vec::new(); n];
-    let mut states: Vec<Vec<Value>> = vec![vec![Value::Null; n]; aggs];
-    for mut b in buckets {
-        for (j, (k, &at)) in b.keys.into_iter().zip(&b.places).enumerate() {
-            keys[at as usize] = k;
-            for (a, st) in states.iter_mut().zip(&mut b.states) {
-                a[at as usize] = std::mem::replace(&mut st[j], Value::Null);
-            }
-        }
-    }
-    (keys, states)
+    /// Each group's morsel, first seen there (with its place there, its
+    /// rank); none for an ordered morsel's edges (their morsel's).
+    morsels: Vec<u32>,
 }
 
 /// The morsels' groups (in key order) merged on the workers, a merge part
@@ -2944,6 +2925,10 @@ fn merge_parallel(
             if fresh {
                 ranks.push((m, i));
                 make_room(&mut accs, &mut room, ranks.len());
+            } else {
+                // (The parts come by worker, not in rank order.)
+                let r = &mut ranks[gid as usize];
+                *r = (*r).min((m, i));
             }
             for acc in accs.iter_mut() {
                 let st = states.next().unwrap_or(Value::Null);
@@ -2953,19 +2938,19 @@ fn merge_parallel(
             }
             None
         };
-        for (m, cell) in cells[b].iter().enumerate() {
-            let m32 = m as u32;
-            if let Some(sp) = &spills[m] {
+        for (c, cell) in cells[b].iter().enumerate() {
+            if let Some(sp) = &spills[c] {
                 for flush in &sp.flushes {
                     let (from, to) = flush[b];
                     for row in sp.run.range(from, to) {
                         let mut row = row?;
                         let states = row.split_off(1 + width);
-                        let Value::Int(i) = row[0] else {
+                        let Value::Int(rank) = row[0] else {
                             return Err(Error::internal("a spilled group's place"));
                         };
                         row.remove(0);
-                        if let Some(err) = add(m32, row, i as u32, &mut states.into_iter()) {
+                        let (m, i) = ((rank >> 32) as u32, rank as u32);
+                        if let Some(err) = add(m, row, i, &mut states.into_iter()) {
                             return Ok((Merged::Memory(Vec::new()), 0, Some(err)));
                         }
                     }
@@ -2976,9 +2961,14 @@ fn merge_parallel(
             };
             let mut states: Vec<std::vec::IntoIter<Value>> =
                 bucket.states.into_iter().map(Vec::into_iter).collect();
-            for (key, &i) in bucket.keys.into_iter().zip(&bucket.places) {
+            for ((key, &i), &m) in bucket
+                .keys
+                .into_iter()
+                .zip(&bucket.places)
+                .zip(&bucket.morsels)
+            {
                 let mut row_states = states.iter_mut().map(|s| s.next().unwrap_or(Value::Null));
-                if let Some(err) = add(m32, key, i, &mut row_states) {
+                if let Some(err) = add(m, key, i, &mut row_states) {
                     return Ok((Merged::Memory(Vec::new()), 0, Some(err)));
                 }
             }
@@ -2987,11 +2977,14 @@ fn merge_parallel(
         for (k, g) in map {
             keys[g as usize] = k;
         }
-        // In first-seen order: the groups were numbered so.
+        // In first-seen order: by rank (the parts came by morsel or by
+        // worker, so the numbering may not be).
+        let mut order: Vec<usize> = (0..keys.len()).collect();
+        order.sort_unstable_by_key(|&g| ranks[g]);
         let mut rows = Vec::with_capacity(keys.len());
         let mut failed = None;
-        for (g, key) in keys.into_iter().enumerate() {
-            let mut row = key;
+        for g in order {
+            let mut row = std::mem::take(&mut keys[g]);
             for a in &mut accs {
                 match a.finish(g) {
                     Ok(v) => row.push(v),
@@ -3228,6 +3221,32 @@ impl<'a> Morsels<'a> {
             &|wctx, m| f(wctx, ranges[first + m].clone()),
         )
     }
+
+    /// [`Morsels::run`] over all the morsels with a state each worker keeps
+    /// across the morsels it takes (`init`, then `f` for each — given the
+    /// morsel's number —, then `end`, on the worker): the morsels' results
+    /// in morsel order, and the workers' ends.  A worker takes its morsels
+    /// in increasing order.
+    fn run_kept<S, T: Send, U: Send>(
+        &self,
+        init: &(dyn Fn() -> S + Sync),
+        f: &(dyn Fn(&Ctx, &mut S, usize, KeyRange) -> Result<T> + Sync),
+        end: &(dyn Fn(S) -> U + Sync),
+    ) -> (Vec<Option<Result<T>>>, Vec<U>) {
+        let ranges = &self.ranges;
+        on_workers_kept(
+            self.ctx,
+            self.shared,
+            self.workers,
+            ranges.len(),
+            true,
+            Kept3 {
+                init,
+                each: &|wctx, st, m| f(wctx, st, m, ranges[m].clone()),
+                end,
+            },
+        )
+    }
 }
 
 /// `f` over the items `0..n`, on up to `workers` threads, each with a
@@ -3244,6 +3263,43 @@ pub(crate) fn on_workers<T: Send>(
     stop: bool,
     f: &(dyn Fn(&Ctx, usize) -> Result<T> + Sync),
 ) -> Vec<Option<Result<T>>> {
+    on_workers_kept(
+        ctx,
+        shared,
+        workers,
+        n,
+        stop,
+        Kept3 {
+            init: &|| (),
+            each: &|wctx, _, m| f(wctx, m),
+            end: &|_| (),
+        },
+    )
+    .0
+}
+
+/// What a worker does with the state it keeps ([`on_workers_kept`]): makes
+/// it, gives it each item, and turns it into what the worker gives back.
+pub(crate) struct Kept3<'f, S, T, U> {
+    pub(crate) init: &'f (dyn Fn() -> S + Sync),
+    pub(crate) each: &'f (dyn Fn(&Ctx, &mut S, usize) -> Result<T> + Sync),
+    pub(crate) end: &'f (dyn Fn(S) -> U + Sync),
+}
+
+/// [`on_workers`] with a state each worker keeps across the items it takes
+/// (made by `init` on the worker, given to `f` with each item, and turned
+/// by `end` into what the worker gives back): the items' results in item
+/// order, and the workers' ends in no order.  A worker takes its items in
+/// increasing order.
+pub(crate) fn on_workers_kept<S, T: Send, U: Send>(
+    ctx: &Ctx,
+    shared: &dyn nucleus_kv::KvRead,
+    workers: usize,
+    n: usize,
+    stop: bool,
+    kept: Kept3<'_, S, T, U>,
+) -> (Vec<Option<Result<T>>>, Vec<U>) {
+    let Kept3 { init, each: f, end } = kept;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
     let ambient = crate::parallel::Ambient::capture();
@@ -3262,10 +3318,12 @@ pub(crate) fn on_workers<T: Send>(
     let failed = AtomicUsize::new(usize::MAX);
     let scanned = AtomicU64::new(0);
     let results: Vec<Mutex<Option<Result<T>>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    let ends: Mutex<Vec<U>> = Mutex::new(Vec::new());
     std::thread::scope(|sc| {
         for _ in 0..workers.min(n) {
             sc.spawn(|| {
-                let ((), rows) = ambient.run(|| {
+                let (u, rows) = ambient.run(|| {
+                    let mut state = init();
                     loop {
                         let m = next.fetch_add(1, SeqCst);
                         if m >= n || (stop && m > failed.load(SeqCst)) {
@@ -3282,22 +3340,28 @@ pub(crate) fn on_workers<T: Send>(
                         if !key_filters.is_empty() {
                             *wctx.key_filters.get_mut() = key_filters.clone();
                         }
-                        let r = f(&wctx, m);
+                        let r = f(&wctx, &mut state, m);
                         if r.is_err() {
                             failed.fetch_min(m, SeqCst);
                         }
                         *results[m].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
                     }
+                    end(state)
                 });
+                ends.lock().unwrap_or_else(|e| e.into_inner()).push(u);
                 scanned.fetch_add(rows, SeqCst);
             });
         }
     });
     crate::budget::add_scanned(scanned.into_inner());
-    results
+    let results = results
         .into_iter()
         .map(|r| r.into_inner().unwrap_or_else(|e| e.into_inner()))
-        .collect()
+        .collect();
+    (
+        results,
+        ends.into_inner().unwrap_or_else(|e| e.into_inner()),
+    )
 }
 
 /// `GROUP BY group` with `aggs` over the pipeline `input`, in parallel: the
@@ -3343,9 +3407,48 @@ fn parallel_aggregate<'a>(
     };
     let spend = Spend::new(work.workers);
     let spend = (parts == MERGE_PARTS).then_some(&spend);
-    let results = work.run(0..work.ranges.len(), true, &|wctx, range| {
-        morsel(input, group, aggs, wctx, range, ordered.as_deref(), spend)
-    });
+    let results: Vec<Option<Result<Part>>> = match spend {
+        // A table a worker ([`Kept`]).
+        Some(spend) if aggs.iter().all(|a| a.func.order_free()) => {
+            let (morsels, ends) = work.run_kept(
+                &|| Kept::new(group, aggs),
+                &|wctx, kept, m, range| kept.feed(input, wctx, (m as u32, range), spend),
+                &|kept| kept.end(spend),
+            );
+            // A morsel's error first, in morsel order; then a worker's, the
+            // one whose first morsel comes first.
+            let mut parts = Vec::new();
+            for r in morsels {
+                match r {
+                    Some(Err(e)) => return Err(e),
+                    Some(Ok(handed)) => parts.extend(handed.map(Ok)),
+                    None => return Err(Error::internal("a morsel not aggregated")),
+                }
+            }
+            let mut ends = ends;
+            ends.sort_by_key(|(first, _)| *first);
+            parts.extend(ends.into_iter().map(|(_, part)| part));
+            parts.into_iter().map(Some).collect()
+        }
+        _ => {
+            work.run_kept(
+                &|| (),
+                &|wctx, _, m, range| {
+                    morsel(
+                        input,
+                        group,
+                        aggs,
+                        wctx,
+                        (m as u32, range),
+                        ordered.as_deref(),
+                        spend,
+                    )
+                },
+                &|_| (),
+            )
+            .0
+        }
+    };
     if ordered.is_some() {
         let rows = merge_ordered(results, aggs)?;
         PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3390,7 +3493,9 @@ fn parallel_aggregate<'a>(
         PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return Ok(Some(rows));
     }
-    let mut g = Grouping::new(group, aggs);
+    // Few: merged here, in the order of their ranks (a single pass's).
+    type Entry = ((u32, u32), Vec<Value>, Vec<Value>);
+    let mut all: Vec<Entry> = Vec::new();
     for r in results {
         match r {
             Some(Err(e)) => return Err(e),
@@ -3404,22 +3509,29 @@ fn parallel_aggregate<'a>(
                 return Err(Error::internal("spilled groups merged in one table"));
             }
             Some(Ok(Part::Groups { buckets, .. })) => {
-                let (keys, states) = unbucket(buckets, aggs.len());
-                let mut states: Vec<std::vec::IntoIter<Value>> =
-                    states.into_iter().map(Vec::into_iter).collect();
-                for key in keys {
-                    let Some(gid) = g.group_of(KeyRef::Values(&key), None) else {
-                        return Ok(None); // past work_mem: the single pass partitions
-                    };
-                    for (acc, st) in g.accs.iter_mut().zip(&mut states) {
-                        let state = st
-                            .next()
-                            .ok_or_else(|| Error::internal("a partial state missing"))?;
-                        acc.combine(gid as usize, state)?;
+                for b in buckets {
+                    let mut states: Vec<std::vec::IntoIter<Value>> =
+                        b.states.into_iter().map(Vec::into_iter).collect();
+                    for ((key, place), m) in b.keys.into_iter().zip(b.places).zip(b.morsels) {
+                        let st = states
+                            .iter_mut()
+                            .map(|s| s.next().unwrap_or(Value::Null))
+                            .collect();
+                        all.push(((m, place), key, st));
                     }
                 }
             }
             None => return Err(Error::internal("a morsel not aggregated")),
+        }
+    }
+    all.sort_unstable_by_key(|(rank, _, _)| *rank);
+    let mut g = Grouping::new(group, aggs);
+    for (_, key, states) in all {
+        let Some(gid) = g.group_of(KeyRef::Values(&key), None) else {
+            return Ok(None); // past work_mem: the single pass partitions
+        };
+        for (acc, state) in g.accs.iter_mut().zip(states) {
+            acc.combine(gid as usize, state)?;
         }
     }
     let rows = finish(&mut g)?;
@@ -3553,6 +3665,7 @@ fn edges(mut g: Grouping, aggs: usize, at: &[usize]) -> Result<Part> {
         keys: Vec::new(),
         states: vec![Vec::new(); aggs],
         places: Vec::new(),
+        morsels: Vec::new(),
     };
     let (Some(first), Some(last)) = (seen.first().cloned(), seen.last().cloned()) else {
         return Ok(Part::Ordered {
@@ -3662,13 +3775,17 @@ struct Spilled {
 struct Spilling {
     run: crate::spill::Run,
     flushes: Vec<Vec<(u64, u64)>>,
-    /// The places of the groups written so far.
-    base: u32,
 }
 
 /// `g`'s groups as partial states, split into `parts` buckets by their
-/// keys' hashes; each group's place `base` on from where `g` saw it.
-fn buckets(g: &mut Grouping, parts: usize, base: u32) -> Result<Vec<Bucket>> {
+/// keys' hashes; each group's place `base` on from where `g` saw it, and
+/// its morsel the one `morsel_of` gives for that place.
+fn buckets(
+    g: &mut Grouping,
+    parts: usize,
+    base: u32,
+    morsel_of: &dyn Fn(u32) -> u32,
+) -> Result<Vec<Bucket>> {
     let count = g.seen.len();
     let states = g
         .accs
@@ -3677,8 +3794,10 @@ fn buckets(g: &mut Grouping, parts: usize, base: u32) -> Result<Vec<Bucket>> {
         .collect::<Result<Vec<_>>>()?;
     let seen = std::mem::take(&mut g.seen);
     if parts == 1 {
+        let places: Vec<u32> = (base..base + seen.len() as u32).collect();
         return Ok(vec![Bucket {
-            places: (base..base + seen.len() as u32).collect(),
+            morsels: places.iter().map(|&p| morsel_of(p)).collect(),
+            places,
             keys: seen,
             states,
         }]);
@@ -3688,6 +3807,7 @@ fn buckets(g: &mut Grouping, parts: usize, base: u32) -> Result<Vec<Bucket>> {
             keys: Vec::new(),
             states: vec![Vec::new(); g.aggs.len()],
             places: Vec::new(),
+            morsels: Vec::new(),
         })
         .collect();
     let hasher = MixState::default();
@@ -3703,13 +3823,22 @@ fn buckets(g: &mut Grouping, parts: usize, base: u32) -> Result<Vec<Bucket>> {
             );
         }
         bucket.keys.push(k);
-        bucket.places.push(base + i as u32);
+        let place = base + i as u32;
+        bucket.places.push(place);
+        bucket.morsels.push(morsel_of(place));
     }
     Ok(buckets)
 }
 
-/// Writes `g`'s groups to `out` (a flush, by merge part) and empties `g`.
-fn flush(g: &mut Grouping, out: &mut Option<Spilling>) -> Result<()> {
+/// Writes `g`'s groups to `out` (a flush, by merge part; each group's rank
+/// as its morsel and place — `base` on, then moved past them — one
+/// integer) and empties `g`.
+fn flush(
+    g: &mut Grouping,
+    out: &mut Option<Spilling>,
+    base: &mut u32,
+    morsel_of: &dyn Fn(u32) -> u32,
+) -> Result<()> {
     if g.seen.is_empty() {
         return Ok(());
     }
@@ -3718,19 +3847,18 @@ fn flush(g: &mut Grouping, out: &mut Option<Spilling>) -> Result<()> {
         None => out.insert(Spilling {
             run: crate::spill::Run::new()?,
             flushes: Vec::new(),
-            base: 0,
         }),
     };
     let n = g.seen.len() as u32;
     let mut ranges = Vec::with_capacity(MERGE_PARTS);
     let mut row = Vec::new();
-    for b in buckets(g, MERGE_PARTS, w.base)? {
+    for b in buckets(g, MERGE_PARTS, *base, morsel_of)? {
         let from = w.run.at();
         let mut states: Vec<std::vec::IntoIter<Value>> =
             b.states.into_iter().map(Vec::into_iter).collect();
-        for (key, place) in b.keys.into_iter().zip(b.places) {
+        for ((key, place), m) in b.keys.into_iter().zip(b.places).zip(b.morsels) {
             row.clear();
-            row.push(Value::Int(place as i64));
+            row.push(Value::Int((i64::from(m) << 32) | i64::from(place)));
             row.extend(key);
             for st in &mut states {
                 row.push(st.next().unwrap_or(Value::Null));
@@ -3740,7 +3868,7 @@ fn flush(g: &mut Grouping, out: &mut Option<Spilling>) -> Result<()> {
         ranges.push((from, w.run.at()));
     }
     w.flushes.push(ranges);
-    w.base += n;
+    *base += n;
     *g = Grouping::new(g.group, g.aggs);
     g.limit = usize::MAX;
     Ok(())
@@ -3754,10 +3882,11 @@ fn morsel(
     group: &[Expr],
     aggs: &[Agg],
     ctx: &Ctx,
-    range: KeyRange,
+    (m, range): (u32, KeyRange),
     ordered: Option<&[usize]>,
     spend: Option<&Spend>,
 ) -> Result<Part> {
+    let morsel_of = |_: u32| m;
     let parts = if spend.is_some() { MERGE_PARTS } else { 1 };
     let Some(mut pipe) = Pipeline::new(input, input, ctx, None, false, Some(range))? else {
         return Err(Error::internal("a morsel's pipeline"));
@@ -3765,6 +3894,7 @@ fn morsel(
     let mut g = Grouping::new(group, aggs);
     let cx = Cx { ctx, outer: None };
     let mut spilling = None;
+    let mut base = 0;
     match spend {
         Some(spend) => {
             g.limit = usize::MAX;
@@ -3773,7 +3903,7 @@ fn morsel(
                 if spend.grown(held, g.bytes) {
                     spend.release(g.bytes);
                     held = 0;
-                    flush(g, &mut spilling)?;
+                    flush(g, &mut spilling, &mut base, &morsel_of)?;
                 } else {
                     held = g.bytes;
                 }
@@ -3782,7 +3912,7 @@ fn morsel(
             spend.release(held);
             fed?;
             if !spend.keep(&spend.kept, g.bytes) {
-                flush(&mut g, &mut spilling)?;
+                flush(&mut g, &mut spilling, &mut base, &morsel_of)?;
             }
         }
         None => feed(&mut g, &mut pipe, cx, &mut |_| Ok(()))?,
@@ -3793,8 +3923,7 @@ fn morsel(
     if let Some(at) = ordered {
         return edges(g, aggs.len(), at);
     }
-    let base = spilling.as_ref().map_or(0, |w| w.base);
-    let buckets = buckets(&mut g, parts, base)?;
+    let buckets = buckets(&mut g, parts, base, &morsel_of)?;
     let spilled = match spilling {
         Some(w) => Some(Spilled {
             run: w.run.seal()?,
@@ -3803,6 +3932,153 @@ fn morsel(
         None => None,
     };
     Ok(Part::Groups { buckets, spilled })
+}
+
+/// A worker's groups across the morsels it takes ([`Morsels::run_kept`]),
+/// when every aggregate's result is the same in any order of its rows
+/// ([`crate::ext::Aggregate::order_free`]): a group recurring in every
+/// morsel is one partial state a worker, not one a morsel (TPC-H Q13's
+/// customers, ClickBench Q36's pages).  Each group keeps a single pass's
+/// rank — the morsel it was first seen in, and its place among the groups
+/// first seen there: a worker takes its morsels in increasing order, so
+/// the first of them to hold a group is the first it sees it in, and the
+/// merge takes a group's least rank.
+struct Kept<'a> {
+    g: Grouping<'a>,
+    spilling: Option<Spilling>,
+    /// The place the table's first group has (those before it written or
+    /// handed over).
+    base: u32,
+    /// What of the workers' `work_mem` share the groups hold.
+    held: usize,
+    /// The place each morsel's new groups start at, with the morsel.
+    starts: Vec<(u32, u32)>,
+    /// Whether the groups recur, once a second morsel has told.
+    recur: Option<bool>,
+}
+
+impl<'a> Kept<'a> {
+    fn new(group: &'a [Expr], aggs: &'a [Agg]) -> Self {
+        let mut g = Grouping::new(group, aggs);
+        g.limit = usize::MAX;
+        Kept {
+            g,
+            spilling: None,
+            base: 0,
+            held: 0,
+            starts: Vec::new(),
+            recur: None,
+        }
+    }
+
+    /// The morsel a group's place belongs to.
+    fn morsel_of(starts: &[(u32, u32)], place: u32) -> u32 {
+        let at = starts.partition_point(|&(p, _)| p <= place);
+        starts[at.saturating_sub(1)].1
+    }
+
+    /// Morsel `m`'s rows (its key range `range`) into the groups.  The
+    /// worker's second morsel tells whether the groups recur: not if it
+    /// brought new groups half as many as there were (ClickBench Q32's, a
+    /// key a row).  Then the groups are handed over as a part after each
+    /// morsel, the table started anew — as a morsel's own table would —:
+    /// a table kept for groups that do not recur only grows past the
+    /// caches and the worker's share of `work_mem`.
+    fn feed(
+        &mut self,
+        input: &Plan,
+        ctx: &Ctx,
+        (m, range): (u32, KeyRange),
+        spend: &Spend,
+    ) -> Result<Option<Part>> {
+        let Some(mut pipe) = Pipeline::new(input, input, ctx, None, false, Some(range))? else {
+            return Err(Error::internal("a morsel's pipeline"));
+        };
+        let Kept {
+            g,
+            spilling,
+            base,
+            held,
+            starts,
+            recur,
+        } = self;
+        let had = g.seen.len();
+        starts.push((*base + had as u32, m));
+        let cx = Cx { ctx, outer: None };
+        let mut flushed = false;
+        feed(g, &mut pipe, cx, &mut |g| {
+            if spend.grown(*held, g.bytes) {
+                spend.release(g.bytes);
+                *held = 0;
+                flushed = true;
+                flush(g, spilling, base, &|p| Kept::morsel_of(starts, p))?;
+            } else {
+                *held = g.bytes;
+            }
+            Ok(())
+        })?;
+        if flushed {
+            // The table was emptied on the way: no word on recurrence.
+            return Ok(None);
+        }
+        if had > 0 && recur.is_none() {
+            *recur = Some((g.seen.len() - had) * 2 < had);
+        }
+        if *recur != Some(false) {
+            return Ok(None);
+        }
+        // Handed over, as a morsel's groups were.
+        spend.release(*held);
+        *held = 0;
+        let morsel_of = |p| Kept::morsel_of(starts, p);
+        if !spend.keep(&spend.kept, g.bytes) {
+            flush(g, spilling, base, &morsel_of)?;
+            return Ok(None);
+        }
+        let n = g.seen.len() as u32;
+        let buckets = buckets(g, MERGE_PARTS, *base, &morsel_of)?;
+        *base += n;
+        *g = Grouping::new(g.group, g.aggs);
+        g.limit = usize::MAX;
+        Ok(Some(Part::Groups {
+            buckets,
+            spilled: None,
+        }))
+    }
+
+    /// The groups as a part (the first morsel the worker took, to choose
+    /// between workers' errors).
+    fn end(self, spend: &Spend) -> (u32, Result<Part>) {
+        let first = self.starts.first().map_or(u32::MAX, |&(_, m)| m);
+        let Kept {
+            mut g,
+            mut spilling,
+            mut base,
+            held,
+            starts,
+            ..
+        } = self;
+        let part = (|| {
+            spend.release(held);
+            let morsel_of = |p| Kept::morsel_of(&starts, p);
+            if !spend.keep(&spend.kept, g.bytes) {
+                flush(&mut g, &mut spilling, &mut base, &morsel_of)?;
+            }
+            if g.parts.is_some() {
+                return Ok(Part::TooLarge);
+            }
+            let buckets = buckets(&mut g, MERGE_PARTS, base, &morsel_of)?;
+            let spilled = match spilling {
+                Some(w) => Some(Spilled {
+                    run: w.run.seal()?,
+                    flushes: w.flushes,
+                }),
+                None => None,
+            };
+            Ok(Part::Groups { buckets, spilled })
+        })();
+        (first, part)
+    }
 }
 
 /// Morsels per worker of a pipeline whose output becomes rows: small, as a
