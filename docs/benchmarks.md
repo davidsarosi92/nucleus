@@ -455,6 +455,7 @@ same machine, alternating with the step before):
 | W6: joins inside pipelines | 7.2 | 2.3 |
 | W6: `CASE` by batches | 6.9 | 2.25 |
 | W6: one key table for groupings and joins | 7.05 | 2.3 |
+| W6: sorts on normalized keys | 7.15 | 2.3 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
@@ -479,6 +480,7 @@ same machine, alternating with the step before):
 | W6: joins inside pipelines | 2.45 | 20.3 | 440 | 167 | 276 |
 | W6: `CASE` by batches | 2.34 | 19.7 | 414 | 165 | 231 |
 | W6: one key table for groupings and joins | 2.35 | 19.85 | 414 | 165 | 230 |
+| W6: sorts on normalized keys | 2.35 | 19.75 | 418 | 161 | 231 |
 
 (Correlated subqueries on the workers: TPC-H Q20 on column tables 577 →
 173 ms, Q2 49 → 25, Q17 88 → 31; on row tables Q20 509 → 175, Q17 43 →

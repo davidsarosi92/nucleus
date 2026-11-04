@@ -485,6 +485,91 @@ impl Partitions {
     }
 }
 
+/// `pairs` sorted by their keys as [`compare`] orders them, ties in the
+/// order they came (a stable sort) — by normalized keys when it can: each
+/// row's keys as one byte string whose bytewise order is theirs (DuckDB's
+/// and the System R line's normalized keys; here the index keys'
+/// encoding, `encoding::encode_key_value`, each value after a byte that
+/// places a `NULL` first or last, a descending key's bytes inverted), so
+/// a comparison is one `memcmp`.  Only when every key column holds values
+/// of one kind whose encoding orders as `compare` does (integers, text,
+/// `char(n)`, dates, times, timestamps, booleans; `NULL`s anywhere) —
+/// not doubles (`NaN`, `-0`), decimals or mixed kinds.
+pub(crate) fn sort_keyed<R>(flags: &[(bool, bool)], pairs: &mut Vec<(Vec<Value>, R)>) {
+    const NORMALIZED_FROM: usize = 64;
+    if pairs.len() >= NORMALIZED_FROM
+        && let Some((bytes, ends)) = normalized(flags, pairs)
+    {
+        let key = |i: u32| {
+            let i = i as usize;
+            let start = if i == 0 { 0 } else { ends[i - 1] as usize };
+            &bytes[start..ends[i] as usize]
+        };
+        let mut order: Vec<u32> = (0..pairs.len() as u32).collect();
+        order.sort_by(|&a, &b| key(a).cmp(key(b)));
+        let mut taken: Vec<Option<(Vec<Value>, R)>> = pairs.drain(..).map(Some).collect();
+        pairs.extend(
+            order
+                .iter()
+                .map(|&i| taken[i as usize].take().expect("each once")),
+        );
+        return;
+    }
+    pairs.sort_by(|(a, _), (b, _)| compare(flags, a, b));
+}
+
+/// The normalized keys of `pairs` ([`sort_keyed`]): their bytes one after
+/// another and where each ends — `None` when a column's kinds do not
+/// allow it.
+fn normalized<R>(flags: &[(bool, bool)], pairs: &[(Vec<Value>, R)]) -> Option<(Vec<u8>, Vec<u32>)> {
+    fn kind(v: &Value) -> Option<u8> {
+        Some(match v {
+            Value::Int(_) => 1,
+            Value::Text(_) => 2,
+            Value::Char(_) => 3,
+            Value::Date(_) => 4,
+            Value::Timestamp(_) => 5,
+            Value::TimestampTz(_) => 6,
+            Value::Time(_) => 7,
+            Value::Bool(_) => 8,
+            _ => return None,
+        })
+    }
+    for j in 0..flags.len() {
+        let mut seen = None;
+        for (keys, _) in pairs {
+            let v = &keys[j];
+            if v.is_null() {
+                continue;
+            }
+            let k = kind(v)?;
+            match seen {
+                None => seen = Some(k),
+                Some(s) if s == k => {}
+                Some(_) => return None,
+            }
+        }
+    }
+    let mut bytes = Vec::with_capacity(pairs.len() * (flags.len() * 10));
+    let mut ends = Vec::with_capacity(pairs.len());
+    for (keys, _) in pairs {
+        for (v, &(desc, nulls_first)) in keys.iter().zip(flags) {
+            if v.is_null() {
+                bytes.push(if nulls_first { 0x00 } else { 0x02 });
+                continue;
+            }
+            bytes.push(0x01);
+            let at = bytes.len();
+            crate::encoding::encode_key_value(&mut bytes, v);
+            if desc {
+                bytes[at..].iter_mut().for_each(|b| *b = !*b);
+            }
+        }
+        ends.push(u32::try_from(bytes.len()).ok()?);
+    }
+    Some((bytes, ends))
+}
+
 /// The order of sort key values under `flags` (descending, NULLs first),
 /// one per key.
 pub fn compare(flags: &[(bool, bool)], a: &[Value], b: &[Value]) -> Ordering {
@@ -753,7 +838,7 @@ fn sort_all(
     let mut bytes = 0;
     let mut runs: Vec<Arc<Sealed>> = Vec::new();
     let write = |buffer: &mut Vec<(Vec<Value>, Row)>| -> Result<Arc<Sealed>> {
-        buffer.sort_by(|(a, _), (b, _)| compare(&flags, a, b));
+        sort_keyed(&flags, buffer);
         let mut run = Run::new()?;
         for (keys, row) in buffer.drain(..) {
             let mut keyed = keys;
@@ -772,7 +857,7 @@ fn sort_all(
         }
     }
     if runs.is_empty() {
-        buffer.sort_by(|(a, _), (b, _)| compare(&flags, a, b));
+        sort_keyed(&flags, &mut buffer);
         return Ok(Box::new(buffer.into_iter().map(|(_, r)| Ok(r))));
     }
     if !buffer.is_empty() {
@@ -895,6 +980,77 @@ impl Ord for PartHead {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalized_keys_sort_as_compare_does() {
+        // Random keys of every kind normalized keys take — texts that are
+        // prefixes of each other, with zero bytes, padded char(n), NULLs —
+        // under every direction and NULL placement, and kinds they do not
+        // take (falling back): the order of a stable sort by `compare`.
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let texts = ["", "a", "ab", "abc", "a\0", "a\0b", "b", "\0", "ab\0", "zz"];
+        for round in 0..40 {
+            let kinds = [round % 9, (round / 9) % 9];
+            let value = |k: u64, r: u64| -> Value {
+                if r.is_multiple_of(7) {
+                    return Value::Null;
+                }
+                match k {
+                    0 => Value::Int(
+                        (r % 11) as i64 - 5
+                            + if r.is_multiple_of(13) {
+                                i64::MIN / 2
+                            } else {
+                                0
+                            },
+                    ),
+                    1 => Value::Text(texts[(r % 10) as usize].to_string()),
+                    2 => Value::Char(format!("{:<4}", texts[(r % 6) as usize])),
+                    3 => Value::Date((r % 9) as i32 - 4),
+                    4 => Value::Timestamp((r % 9) as i64 * 1000 - 3000),
+                    5 => Value::Bool(r.is_multiple_of(2)),
+                    6 => Value::Time((r % 5) as i64),
+                    7 => Value::Float((r % 5) as f64 - 2.0),
+                    _ => {
+                        if r.is_multiple_of(2) {
+                            Value::Int((r % 5) as i64)
+                        } else {
+                            Value::Float((r % 9) as f64 / 2.0 - 1.0)
+                        }
+                    }
+                }
+            };
+            let pairs: Vec<(Vec<Value>, usize)> = (0..300)
+                .map(|i| {
+                    let keys = kinds.iter().map(|&k| value(k, next())).collect();
+                    (keys, i)
+                })
+                .collect();
+            for flags in [
+                [(false, false), (false, false)],
+                [(true, false), (false, true)],
+                [(false, true), (true, true)],
+                [(true, true), (true, false)],
+            ] {
+                let mut want = pairs.clone();
+                want.sort_by(|(a, _), (b, _)| compare(&flags, a, b));
+                let mut got = pairs.clone();
+                sort_keyed(&flags, &mut got);
+                let order = |v: &[(Vec<Value>, usize)]| v.iter().map(|p| p.1).collect::<Vec<_>>();
+                assert_eq!(
+                    order(&got),
+                    order(&want),
+                    "kinds {kinds:?}, flags {flags:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_run_reads_back_what_was_written() {

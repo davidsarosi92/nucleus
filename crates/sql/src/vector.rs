@@ -5730,7 +5730,7 @@ pub(crate) fn sorted<'a>(
             return Ok(t.into_sorted());
         }
         let mut out = sink.all;
-        out.sort_by(|(a, _), (b, _)| crate::spill::compare(&flags, a, b));
+        crate::spill::sort_keyed(&flags, &mut out);
         Ok(out)
     });
     let mut parts = Vec::with_capacity(results.len());

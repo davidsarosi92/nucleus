@@ -1621,7 +1621,14 @@ by batches, on workers, past work_mem), so their rows and errors agree;
 an error on a row only the key filter drops does not come.  `EXPLAIN
 ANALYZE` marks the scan `(join key filter)`.  A **sort** of a
 pipeline sorts its morsels on worker threads (keys a batch at a time) and
-merges them (`spill::merge_sorted`; ties to the earlier morsel, so the
+merges them; a morsel, or a sort's buffer in memory, is ordered by
+normalized keys when its key columns each hold one kind whose index
+encoding orders as the comparison does (integers, text, `char(n)`,
+dates, times, timestamps, booleans): each row's keys one byte string
+(`encoding::encode_key_value` after a byte placing a `NULL` first or
+last, a descending key's bytes inverted), compared by `memcmp`, ties in
+the order they came (`spill::sort_keyed`); doubles, decimals and mixed
+kinds keep the comparison.  The morsels are then merged (`spill::merge_sorted`; ties to the earlier morsel, so the
 order is a stable sort's); under a `LIMIT` each morsel keeps its own
 heap of the rows taken, a row built only when its keys enter it.
 An **index nested loop** (`JoinAlgo::Lookup`, `EXPLAIN`: `Index Nested

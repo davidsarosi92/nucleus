@@ -1884,7 +1884,7 @@ the speed-up is made once, in the merged one.  The work, in this order:
   and one key table for groupings, `DISTINCT`, set operations and join
   lookups (four or five maps today; groupings and joins done), one hasher, hashes a column at a
   time, dictionary codes as group keys; sorts on normalized keys with one
-  comparator; Q19's per-row directory lookups (the segment found kept for the next
+  comparator (done); Q19's per-row directory lookups (the segment found kept for the next
   key: W3's remembered ranges serve only keys not stored);
   expressions materializing only their columns, `CASE` vectorized (done);
   joins emitting batches (left from V2: done, joins inside pipelines).
@@ -2344,6 +2344,39 @@ the speed-up is made once, in the merged one.  The work, in this order:
   2.30 / 2.30 s, row tables 6.96 / 6.95 → 7.08 / 7.03 (within the
   rounds' spread), ClickBench 2.36 / 2.33 → 2.37 / 2.33; one mechanism
   rather than two, not a speed-up.
+  *Done — sorts on normalized keys* (profiled first: ClickBench's sorts,
+  Q24–Q26, are top-N heaps of 6–7 ms — nothing to gain there; a whole
+  sort of a million rows by `(EventTime, WatchID)` took 375 ms on the
+  workers, its sort node 880 ms on one thread past the scan's 280, and by
+  `(URL, EventTime)` 775 ms).  A morsel's sort, and a sort's buffer in
+  memory, compare each row's keys as one byte string when every key
+  column holds one kind whose index encoding orders as `compare` does
+  (`spill::sort_keyed`: `encoding::encode_key_value` — one mechanism for
+  index keys and sort keys — after a byte placing a `NULL` first or last,
+  a descending key's bytes inverted; a stable sort of row numbers by
+  `memcmp`, the rows then moved once).  DuckDB's normalized keys (Raasveldt,
+  "Fastest table sort in the West", 2021) and the System R line's; not
+  taken: DuckDB's fixed-width key prefix with a tie-breaking comparator
+  and its radix sort (the gain measured is the comparisons' — the rest
+  of a sort is building and merging rows, `Value`s), doubles and decimals
+  (`NaN`, `-0`, a decimal's scale: they keep the comparator).  Tested:
+  random keys of every kind it takes — texts that are prefixes of each
+  other, with zero bytes, padded `char(n)`, `NULL`s — under every
+  direction and `NULL` placement, and kinds it does not (an integer and a
+  double mixed: falls back), against a stable sort by `compare`;
+  mutations caught (a descending key not inverted, `NULL` places swapped,
+  an unstable sort, a mixed column normalized).  Measured, alternating
+  with the step before: the whole sorts 421 / 436 → 377 / 368 ms and 978
+  / 793 → 893 / 730; the benchmarks unchanged (TPC-H on column tables
+  2.32 / 2.34 → 2.30 / 2.33 s, row tables 7.11 / 7.04 → 7.19 / 7.12,
+  ClickBench 2.37 / 2.33 → 2.33 / 2.37).
+  *W6 closed* (2026-11-04).  Left, recorded rather than done: hashes a
+  column at a time and dictionary codes as group keys (a grouping's
+  time over ClickBench is now its aggregates' and its keys' text, no
+  query measured above 3× waits on them); `DISTINCT` and set operations
+  on the row-at-a-time path in maps of their own, one hasher for
+  `fasthash` and `MixState`; the open `LIMIT`-over-a-failing-join
+  finding above.
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3503,3 +3536,7 @@ style) across a thousand seeds without failure.
 - **2026-11-04** — §M14.20 W6: one key table for groupings and joins (a
   join's keys in `keytable`'s `IntKeys` / `KeyTable`, no key built a
   probe).  Speed unchanged.  DOCS §8.5.
+- **2026-11-04** — §M14.20 W6: sorts on normalized keys (a row's keys
+  one byte string, the index encoding's, compared by `memcmp`, when its
+  key columns allow).  A whole sort of a million rows 430 → 370 ms;
+  benchmarks unchanged.  W6 closed.  DOCS §8.5.
