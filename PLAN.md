@@ -1882,7 +1882,7 @@ the speed-up is made once, in the merged one.  The work, in this order:
 - **W6 — the queries above 3×.**  `count(DISTINCT)` planned as a
   grouping (the vectorized, parallel one); top-N; typed aggregate states
   and one key table for groupings, `DISTINCT`, set operations and join
-  lookups (four or five maps today), one hasher, hashes a column at a
+  lookups (four or five maps today; groupings and joins done), one hasher, hashes a column at a
   time, dictionary codes as group keys; sorts on normalized keys with one
   comparator; Q19's per-row directory lookups (the segment found kept for the next
   key: W3's remembered ranges serve only keys not stored);
@@ -2323,6 +2323,27 @@ the speed-up is made once, in the merged one.  The work, in this order:
   ClickBench 2.39 / 2.37 → 2.34 / 2.34 s — Q39 273 / 270 → 232 / 230 ms
   (`CASE WHEN … THEN Referer ELSE '' END`); TPC-H unchanged (column 2.29
   / 2.26 → 2.26 / 2.25 s, row 7.07 / 6.97 → 7.00 / 6.88).
+  *Done — one key table for groupings and joins*: a join table found
+  its keys in hash maps of its own (`Groups<K>` over `FastMap`; any
+  other keys as a `Vec<Value>` built for every probe row), a grouping in
+  `keytable`'s.  Now a join's single integer key goes into `IntKeys` (a
+  direct index while the keys span at most 65,536 values — TPC-H's
+  nation, supplier and the like —, hashed beyond) and any other key into
+  `KeyTable`, a probe's key hashed and compared from the batch's
+  vectors; a pair of integers stays a pair in `FastMap` (no such table
+  for groupings yet).  `Runs` gives each key's rows.  Not taken yet:
+  `DISTINCT` and set operations on the row-at-a-time path keep
+  `HashSet<Row>` (the vectorized `DISTINCT` is a grouping already); one
+  hasher for the rest (`fasthash`'s and `MixState`'s mix differ, no
+  query measured needs it).  Tested by the suite's joins (text, `char`,
+  mixed and `NULL` keys, on workers and past work_mem).  Not caught by a
+  test, as expected: keys not compared beyond the salt (32 bits of the
+  hash: a wrong match needs a collision), `NULL` probe keys not skipped
+  (no table group holds one).  Measured, alternating with the step
+  before, two rounds: unchanged — TPC-H on column tables 2.26 / 2.31 →
+  2.30 / 2.30 s, row tables 6.96 / 6.95 → 7.08 / 7.03 (within the
+  rounds' spread), ClickBench 2.36 / 2.33 → 2.37 / 2.33; one mechanism
+  rather than two, not a speed-up.
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3479,3 +3500,6 @@ style) across a thousand seeds without failure.
   rows left, each branch over the rows it takes); expressions still run a
   row at a time read only their columns.  ClickBench Q39 270 → 230 ms.
   DOCS §8.5.
+- **2026-11-04** — §M14.20 W6: one key table for groupings and joins (a
+  join's keys in `keytable`'s `IntKeys` / `KeyTable`, no key built a
+  probe).  Speed unchanged.  DOCS §8.5.

@@ -1563,10 +1563,12 @@ Subqueries run per row when correlated, once per execution otherwise
 (cached in the execution context) — unless unnested into a join (§8.6).
 A **hash join whose left side is a pipeline** (a scan, its filters and
 projections) and whose right side fits in work_mem runs vectorized: the
-right rows hashed once (`vector::JoinTable`; one integer key as an
-integer, two as a pair of them, in a table of the executor's own hash,
-`fasthash`; each key's row numbers side by side in one array, no
-allocation per key), the left side's keys evaluated a batch at a time
+right rows hashed once (`vector::JoinTable`, its keys found as a
+grouping finds its groups — `keytable`: one integer key in `IntKeys`, a
+direct index over a narrow range; other keys in `KeyTable`, a probe's
+key hashed and compared from the batch's vectors with no key built; two
+integers as a pair in the executor's own hash, `fasthash` —; each key's
+row numbers side by side in one array, no allocation per key), the left side's keys evaluated a batch at a time
 and probed — the batch's lookups all first, then its output, so lookups
 that depend only on their keys overlap their cache misses (what
 prefetching does in a hash probe; no `unsafe` prefetch instruction), no

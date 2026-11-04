@@ -4466,45 +4466,50 @@ impl Held {
     }
 }
 
+/// A join table's rows by key, found as a grouping finds its groups
+/// (`crate::keytable`: one key table for both).
 enum JoinIndex {
-    /// One key, an integer in every right row that has one.
-    Int(Groups<i64>),
+    /// One key, an integer in every right row that has one: a direct index
+    /// over a narrow range, hashed beyond (`IntKeys`); each group's key.
+    Int(crate::keytable::IntKeys, Vec<i64>, Runs),
     /// Two keys, integers in every right row that has them.
-    Pair(Groups<(i64, i64)>),
-    /// Anything else.
-    Any(Groups<Vec<Value>>),
+    Pair(crate::fasthash::FastMap<(i64, i64), u32>, Runs),
+    /// Anything else: by the keys' hashes, a probe's key compared from the
+    /// batch's vectors as they are (no key built a probe); each group's
+    /// key.
+    Any(crate::keytable::KeyTable, Vec<Vec<Value>>, Runs),
 }
 
-/// Row numbers grouped by key: each key's, ascending, side by side in one
+/// Row numbers by group: each group's, ascending, side by side in one
 /// array — no allocation per key, to make or to free.
-struct Groups<K> {
-    /// Each key's group.
-    map: crate::fasthash::FastMap<K, u32>,
+struct Runs {
     /// Where each group starts in `rows` (and, one more, where it ends).
     starts: Vec<u32>,
     rows: Vec<u32>,
 }
 
-impl<K: std::hash::Hash + Eq> Groups<K> {
-    /// The row numbers of `keys` (one a row; `None` in no group).
-    fn new(keys: impl ExactSizeIterator<Item = Option<K>>) -> Self {
+impl Runs {
+    /// The rows of `keys` (one a row; `None` in no group), each key's group
+    /// found or made by `group` (given the next group's number).
+    fn of<K>(
+        keys: impl ExactSizeIterator<Item = Option<K>>,
+        mut group: impl FnMut(K, u32) -> u32,
+    ) -> Self {
         const NONE: u32 = u32::MAX;
-        let mut map: crate::fasthash::FastMap<K, u32> = Default::default();
-        map.reserve(keys.len());
-        let mut group = Vec::with_capacity(keys.len());
+        let mut of = Vec::with_capacity(keys.len());
         let mut counts: Vec<u32> = Vec::new();
         for k in keys {
             let Some(k) = k else {
-                group.push(NONE);
+                of.push(NONE);
                 continue;
             };
             let next = counts.len() as u32;
-            let g = *map.entry(k).or_insert(next);
+            let g = group(k, next);
             if g == next {
                 counts.push(0);
             }
             counts[g as usize] += 1;
-            group.push(g);
+            of.push(g);
         }
         let mut starts = Vec::with_capacity(counts.len() + 1);
         let mut at = 0u32;
@@ -4515,22 +4520,19 @@ impl<K: std::hash::Hash + Eq> Groups<K> {
         starts.push(at);
         let mut fill = starts[..counts.len()].to_vec();
         let mut rows = vec![0u32; at as usize];
-        for (i, g) in group.into_iter().enumerate() {
+        for (i, g) in of.into_iter().enumerate() {
             if g != NONE {
                 rows[fill[g as usize] as usize] = i as u32;
                 fill[g as usize] += 1;
             }
         }
-        Groups { map, starts, rows }
+        Runs { starts, rows }
     }
 
-    /// The rows of key `k`, ascending.
-    fn get<Q: std::hash::Hash + Eq + ?Sized>(&self, k: &Q) -> Option<&[u32]>
-    where
-        K: std::borrow::Borrow<Q>,
-    {
-        let g = *self.map.get(k)? as usize;
-        Some(&self.rows[self.starts[g] as usize..self.starts[g + 1] as usize])
+    /// Group `g`'s rows, ascending.
+    fn get(&self, g: u32) -> &[u32] {
+        let g = g as usize;
+        &self.rows[self.starts[g] as usize..self.starts[g + 1] as usize]
     }
 }
 
@@ -4649,16 +4651,15 @@ impl JoinTable {
     /// of the rows it holds (a row with a `NULL` key is in no group).
     pub(crate) fn key_ints(&self, j: usize) -> Option<Vec<i64>> {
         match &self.index {
-            JoinIndex::Int(g) if j == 0 => Some(g.map.keys().copied().collect()),
-            JoinIndex::Int(_) => None,
-            JoinIndex::Pair(g) => match j {
-                0 => Some(g.map.keys().map(|k| k.0).collect()),
-                1 => Some(g.map.keys().map(|k| k.1).collect()),
+            JoinIndex::Int(_, keys, _) if j == 0 => Some(keys.clone()),
+            JoinIndex::Int(..) => None,
+            JoinIndex::Pair(m, _) => match j {
+                0 => Some(m.keys().map(|k| k.0).collect()),
+                1 => Some(m.keys().map(|k| k.1).collect()),
                 _ => None,
             },
-            JoinIndex::Any(g) => g
-                .map
-                .keys()
+            JoinIndex::Any(_, keys, _) => keys
+                .iter()
                 .map(|k| match k.get(j) {
                     Some(Value::Int(x)) => Some(*x),
                     _ => None,
@@ -4734,13 +4735,43 @@ impl JoinTable {
     /// `rows` by their keys' values (`values`: a row's keys a row).
     fn of(rows: Held, values: crate::columns::Columns) -> Self {
         let index = match (values.ints(), values.int_pairs()) {
-            (Some(ints), _) => JoinIndex::Int(Groups::new(ints)),
-            (None, Some(pairs)) => JoinIndex::Pair(Groups::new(pairs)),
-            (None, None) => JoinIndex::Any(Groups::new((0..values.len()).map(|r| {
-                let mut k = Vec::new();
-                values.extend_row(r, &mut k);
-                (!k.iter().any(Value::is_null)).then_some(k)
-            }))),
+            (Some(ints), _) => {
+                let (mut table, mut keys) = (crate::keytable::IntKeys::default(), Vec::new());
+                let runs = Runs::of(ints, |x, next| {
+                    table.get(x).unwrap_or_else(|| {
+                        table.insert(x, next);
+                        keys.push(x);
+                        next
+                    })
+                });
+                JoinIndex::Int(table, keys, runs)
+            }
+            (None, Some(pairs)) => {
+                let mut map: crate::fasthash::FastMap<(i64, i64), u32> = Default::default();
+                map.reserve(pairs.len());
+                let runs = Runs::of(pairs, |k, next| *map.entry(k).or_insert(next));
+                JoinIndex::Pair(map, runs)
+            }
+            (None, None) => {
+                let (mut table, mut keys) = (crate::keytable::KeyTable::default(), Vec::new());
+                let all = (0..values.len()).map(|r| {
+                    let mut k = Vec::new();
+                    values.extend_row(r, &mut k);
+                    (!k.iter().any(Value::is_null)).then_some(k)
+                });
+                let runs = Runs::of(all, |k: Vec<Value>, next| {
+                    let h = KeyRef::Values(&k).hash(&table.state);
+                    match table.find(h, |g| keys[g as usize] == k) {
+                        Some(g) => g,
+                        None => {
+                            table.insert(h);
+                            keys.push(k);
+                            next
+                        }
+                    }
+                });
+                JoinIndex::Any(table, keys, runs)
+            }
         };
         JoinTable { rows, index }
     }
@@ -4778,7 +4809,7 @@ impl<'a> Probe<'a> {
     ) -> Self {
         let check = on.is_some()
             && !(keys_only(on, left_keys, right_keys, left_width)
-                && matches!(table.index, JoinIndex::Int(_) | JoinIndex::Pair(_)));
+                && matches!(table.index, JoinIndex::Int(..) | JoinIndex::Pair(..)));
         Probe {
             table,
             left_keys,
@@ -4903,17 +4934,17 @@ impl<'a> Probe<'a> {
     /// The right rows a left key matches.
     fn candidates(&self, key: KeyRef) -> &[u32] {
         let found = match &self.table.index {
-            JoinIndex::Int(m) => key.int(0).and_then(|x| m.get(&x)),
-            JoinIndex::Pair(m) => match (key.int(0), key.int(1)) {
-                (Some(a), Some(b)) => m.get(&(a, b)),
+            JoinIndex::Int(t, _, runs) => key.int(0).and_then(|x| t.get(x)).map(|g| runs.get(g)),
+            JoinIndex::Pair(m, runs) => match (key.int(0), key.int(1)) {
+                (Some(a), Some(b)) => m.get(&(a, b)).map(|&g| runs.get(g)),
                 _ => None,
             },
-            JoinIndex::Any(m) => {
-                let k = key.to_vec();
-                if k.iter().any(Value::is_null) {
+            JoinIndex::Any(t, keys, runs) => {
+                if key.has_null() {
                     None
                 } else {
-                    m.get(&k)
+                    t.find(key.hash(&t.state), |g| key.eq(&keys[g as usize]))
+                        .map(|g| runs.get(g))
                 }
             }
         };
@@ -5356,7 +5387,7 @@ pub(crate) fn existence_by_left<'a>(
     // (`keys_only` reads its first keys as the left row's.)
     let check = on.is_some()
         && !(keys_only(on, left_keys, right_keys, left_width)
-            && matches!(table.index, JoinIndex::Int(_) | JoinIndex::Pair(_)));
+            && matches!(table.index, JoinIndex::Int(..) | JoinIndex::Pair(..)));
     let probe = Probe {
         table: std::sync::Arc::new(table),
         left_keys: right_keys,

@@ -71,6 +71,14 @@ impl KeyRef<'_> {
         }
     }
 
+    /// Whether a value of it is `NULL`.
+    pub(crate) fn has_null(self) -> bool {
+        match self {
+            KeyRef::Values(vs) => vs.iter().any(Value::is_null),
+            KeyRef::Batch(cols, i) => cols.iter().any(|c| c.is_null(i)),
+        }
+    }
+
     /// The key as values.
     pub(crate) fn to_vec(self) -> Vec<Value> {
         match self {
