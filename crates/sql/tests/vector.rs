@@ -1918,3 +1918,46 @@ fn joins_in_pipelines_agree() {
         );
     }
 }
+
+#[test]
+fn case_by_batches_agrees() {
+    // `CASE` a batch at a time (§M14.20 W6): each `WHEN` over the rows no
+    // earlier one took, a `THEN` over the rows it takes — so an error in
+    // a branch no row takes does not come —, `ELSE` over the rest; and the
+    // expressions still evaluated a row at a time reading only their
+    // columns.
+    let db = database();
+    let queries: Vec<String> = [
+        "SELECT id, CASE WHEN a > 5 THEN 'big' WHEN a > 0 THEN 'small' WHEN a IS NULL \
+           THEN NULL ELSE 'neg' END FROM t ORDER BY id",
+        "SELECT id, CASE WHEN a > 5 THEN a * 10 WHEN f > 3 THEN f END FROM t ORDER BY id",
+        "SELECT id, CASE WHEN ok THEN n WHEN NOT ok THEN a ELSE 0 END FROM t ORDER BY id",
+        "SELECT id, CASE a WHEN 1 THEN 'one' WHEN 2 THEN 'two' WHEN NULL THEN 'null' \
+           ELSE s END FROM t ORDER BY id",
+        "SELECT id, CASE m WHEN 'ok' THEN d ELSE d + 1 END FROM t ORDER BY id",
+        "SELECT id, CASE WHEN id = 50 THEN 0 ELSE 100 / (id - 50) END FROM t ORDER BY id",
+        "SELECT id, CASE WHEN a > 0 THEN CASE WHEN b % 2 = 0 THEN 'pe' ELSE 'po' END \
+           ELSE CASE WHEN ok THEN 'nt' END END FROM t ORDER BY id",
+        "SELECT count(*) FROM t WHERE CASE WHEN a > 0 THEN f > 2 ELSE ok END",
+        "SELECT CASE WHEN a > 0 THEN 'p' ELSE 'n' END, count(*), sum(b) FROM t GROUP BY 1 \
+           ORDER BY 1",
+        "SELECT sum(CASE WHEN m = 'happy' THEN b ELSE 0 END), \
+           sum(CASE WHEN m = 'sad' THEN n END) FROM t",
+        "SELECT id, CASE WHEN big IS NOT NULL THEN length(big) END FROM t ORDER BY id",
+        // A row at a time, their columns only.
+        "SELECT id, s ILIKE 'NAME 1%', s LIKE '%' || (id % 10) FROM t WHERE id % 7 = 3 \
+           ORDER BY id",
+        "SELECT id, (SELECT max(u.b) FROM t u WHERE u.a = t.a AND u.id < 40) FROM t \
+           WHERE id % 50 = 1 ORDER BY id",
+        // Errors: in a branch taken, in a WHEN past those that took the
+        // row, in the ELSE.
+        "SELECT id, CASE WHEN id > 2000 THEN 100 / (id - 2500) ELSE 1 END FROM t ORDER BY id",
+        "SELECT id, CASE WHEN id < 100 THEN 1 WHEN 100 / (id - 700) > 0 THEN 2 END \
+           FROM t ORDER BY id",
+        "SELECT id, CASE WHEN id < 2990 THEN 1 ELSE s::int END FROM t ORDER BY id",
+    ]
+    .iter()
+    .map(|q| q.to_string())
+    .collect();
+    assert_eq!(agree(&db, &queries), 3, "the error cases fail");
+}

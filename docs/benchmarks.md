@@ -453,6 +453,7 @@ same machine, alternating with the step before):
 | W6: a column table's point reads | 8.1 | 3.75 |
 | W6: one grouping table a worker | 7.9 | 3.8 |
 | W6: joins inside pipelines | 7.2 | 2.3 |
+| W6: `CASE` by batches | 6.9 | 2.25 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
@@ -475,6 +476,7 @@ same machine, alternating with the step before):
 | W6: a column table's point reads | 2.4 | 19.7 | 407 | 163 | 263 |
 | W6: one grouping table a worker | 2.4 | 19.9 | 425 | 166 | 273 |
 | W6: joins inside pipelines | 2.45 | 20.3 | 440 | 167 | 276 |
+| W6: `CASE` by batches | 2.34 | 19.7 | 414 | 165 | 231 |
 
 (Correlated subqueries on the workers: TPC-H Q20 on column tables 577 →
 173 ms, Q2 49 → 25, Q17 88 → 31; on row tables Q20 509 → 175, Q17 43 →

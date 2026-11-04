@@ -1394,8 +1394,12 @@ uncorrelated `IN (subquery)` as the list of its rows; function calls
 through the function's batch kernel when it has one
 (`ScalarFunction::call_batch`, §8.12: `substr` over text and `char(n)`
 with constant positions), else casts and calls a value at a time over
-the batch's vectors; anything else (`CASE`, correlated subqueries,
-decimal `/`, …) a row at a time.  A row at a time, `Expr::eval` takes
+the batch's vectors; `CASE` a branch at a time — each `WHEN` over the
+rows no earlier one took, its `THEN` over the rows it takes, `ELSE` over
+the rest, so each row evaluates what it would alone; anything else
+(correlated subqueries, decimal `/`, `ILIKE`, …) a row at a time, each
+row holding only the columns the expression reads (a long text it does
+not read is not copied).  A row at a time, `Expr::eval` takes
 its common nodes (columns, literals, parameters, operators, `IS NULL`)
 itself and the others in a function of their own (`eval_other`), so each
 node of a row's expression takes a small frame (480 bytes, not 1.7 kB).

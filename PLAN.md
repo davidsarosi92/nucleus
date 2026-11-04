@@ -1886,8 +1886,8 @@ the speed-up is made once, in the merged one.  The work, in this order:
   time, dictionary codes as group keys; sorts on normalized keys with one
   comparator; Q19's per-row directory lookups (the segment found kept for the next
   key: W3's remembered ranges serve only keys not stored);
-  expressions materializing only their columns, `CASE` vectorized; joins
-  emitting batches (left from V2: done, joins inside pipelines).
+  expressions materializing only their columns, `CASE` vectorized (done);
+  joins emitting batches (left from V2: done, joins inside pipelines).
   *Done — groupings past `work_mem`, on the workers* (profiled first:
   ClickBench Q32, `GROUP BY WatchID, ClientIP` — a million groups — on a
   column table, 2.5 s against PostgreSQL's 0.93 s; with `work_mem` at 2
@@ -2298,6 +2298,31 @@ the speed-up is made once, in the merged one.  The work, in this order:
   171, Q14 92 → 59, Q13 99 → 60; on row tables 8.38 / 8.01 → 7.16 / 7.21
   s (Q9 1,136 → 530, Q18 552 → 444, Q13 170 → 128); ClickBench 2.50 /
   2.47 → 2.48 / 2.42 s (no joins).
+  *Done — `CASE` by batches, rows reading their columns only*: a `CASE`
+  went a row at a time, and every expression that does — `CASE`,
+  `ILIKE`, a correlated subquery, … — built each row with all the
+  batch's columns (a long `URL` copied for a test of two integers).  Now
+  `CASE` runs a branch at a time: each `WHEN` over the rows no earlier
+  one took, its `THEN` over those it takes, `ELSE` over the rest
+  (`logic`'s way for `AND` / `OR`: a row evaluates what it would alone,
+  so a branch no row takes raises nothing); what still goes a row at a
+  time holds only the columns the expression reads (`Expr::reads`, a
+  correlated subquery's included).  Both `#[inline(never)]`: inlined into
+  `eval`, their frames slowed every expression on row tables (TPC-H Q6
+  299 → 360 ms, Q14 288 → 351, as with `Expr::eval` before).  Not taken:
+  typed branch results merged without `Value`s (the merge is a fraction
+  of the branches' work).  Tested: searched and simple `CASE` (a `NULL`
+  operand, a `WHEN NULL`), nested, in a filter, a grouping key, under
+  sums, mixed types; errors in a branch taken, in a `WHEN` after one that
+  took the row, in `ELSE`, and none from a branch no row takes — against
+  the row-at-a-time executor and batches of 3.  Mutations caught: a row
+  left for later `WHEN`s after one took it; the row fallback reading no
+  columns.  Not caught (the batch's error sends it a row at a time, which
+  decides): `THEN` or `ELSE` over more rows than they take — slower, the
+  same rows.  Measured, alternating with the step before, two rounds:
+  ClickBench 2.39 / 2.37 → 2.34 / 2.34 s — Q39 273 / 270 → 232 / 230 ms
+  (`CASE WHEN … THEN Referer ELSE '' END`); TPC-H unchanged (column 2.29
+  / 2.26 → 2.26 / 2.25 s, row 7.07 / 6.97 → 7.00 / 6.88).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3450,3 +3475,7 @@ style) across a thousand seeds without failure.
   joins over joins and the grouping above them run on the workers.
   TPC-H on column tables 3.8 → 2.3 s (Q9 882 → 243 ms, Q5 308 → 80), on
   row tables 8.0 → 7.2.  DOCS §8.5.
+- **2026-11-04** — §M14.20 W6: `CASE` by batches (each `WHEN` over the
+  rows left, each branch over the rows it takes); expressions still run a
+  row at a time read only their columns.  ClickBench Q39 270 → 230 ms.
+  DOCS §8.5.

@@ -618,14 +618,7 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
                     }
                     Rc::new(Vector::Bool(out, n.clone()))
                 }
-                _ => {
-                    let mut row = Vec::new();
-                    each(b.len, sel, |i| {
-                        row.clear();
-                        row.extend(b.cols.iter().map(|c| c.value(i)));
-                        e.eval(&cx.env(&row))
-                    })?
-                }
+                _ => by_rows(e, b, sel, cx)?,
             }
         }
         Expr::InList(x, list, negated) => {
@@ -664,16 +657,93 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
                 }
             })?
         }
+        Expr::Case {
+            operand,
+            whens,
+            otherwise,
+        } => Rc::new(case(
+            operand.as_deref(),
+            whens,
+            otherwise.as_deref(),
+            b,
+            sel,
+            cx,
+        )?),
         // The rest a row at a time.
-        _ => {
-            let mut row = Vec::new();
-            each(b.len, sel, |i| {
-                row.clear();
-                row.extend(b.cols.iter().map(|c| c.value(i)));
-                e.eval(&cx.env(&row))
-            })?
-        }
+        _ => by_rows(e, b, sel, cx)?,
     })
+}
+
+/// `e` a row at a time over the rows `sel` of `b`, each row holding only
+/// the columns `e` reads (the others `NULL`: a long text it does not read
+/// is not copied).
+#[inline(never)]
+fn by_rows(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
+    let reads: Vec<usize> = e
+        .reads()
+        .into_iter()
+        .filter(|&c| c < b.cols.len())
+        .collect();
+    let mut row = vec![Value::Null; b.cols.len()];
+    each(b.len, sel, |i| {
+        for &c in &reads {
+            row[c] = b.cols[c].value(i);
+        }
+        e.eval(&cx.env(&row))
+    })
+}
+
+/// `CASE` over the rows `sel` of `b`: each `WHEN` evaluated over the rows
+/// no earlier one took, its `THEN` over the rows it takes, `ELSE` over
+/// the rest — what a row evaluates, and no more.
+#[inline(never)]
+fn case(
+    operand: Option<&Expr>,
+    whens: &[(Expr, Expr)],
+    otherwise: Option<&Expr>,
+    b: &Batch,
+    sel: &Sel,
+    cx: Cx,
+) -> Result<Vector> {
+    let operand = operand.map(|o| eval(o, b, sel, cx)).transpose()?;
+    let mut out = vec![Value::Null; b.len];
+    let mut rest = sel.clone();
+    for (when, then) in whens {
+        if rest.is_empty() {
+            break;
+        }
+        let w = eval(when, b, &rest, cx)?;
+        let hit = match &operand {
+            Some(x) => {
+                let mut hit = vec![false; b.len];
+                for i in rest.iter() {
+                    hit[i] = x.value(i).sql_eq(&w.value(i))? == Some(true);
+                }
+                hit
+            }
+            None => truths(&w, b.len, &rest)?
+                .into_iter()
+                .map(|t| t == 1)
+                .collect(),
+        };
+        let taken = rest.keep(|i| hit[i]);
+        if !taken.is_empty() {
+            let v = eval(then, b, &taken, cx)?;
+            for i in taken.iter() {
+                out[i] = v.value(i);
+            }
+            rest = rest.keep(|i| !hit[i]);
+        }
+    }
+    if let Some(o) = otherwise
+        && !rest.is_empty()
+    {
+        let v = eval(o, b, &rest, cx)?;
+        for i in rest.iter() {
+            out[i] = v.value(i);
+        }
+    }
+    Ok(Vector::typed(out))
 }
 
 /// How a kernel matches a `LIKE` pattern.
