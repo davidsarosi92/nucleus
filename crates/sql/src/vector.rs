@@ -32,7 +32,7 @@ use crate::exec::{Entries, Rows, env};
 use crate::expr::{Ctx, Env, Expr};
 use crate::ext::{Accumulator, AggRef, CallContext, GroupAccumulator};
 use crate::kernels::{self, Arith, Cmp, FArith, MixState, Rhs};
-use crate::plan::{Access, Agg, Plan};
+use crate::plan::{Access, Agg, JoinAlgo, JoinType, Plan};
 use crate::types::{DataType, Row, Value};
 
 /// The first batch of a pipeline: small, so a query that needs only its
@@ -184,7 +184,7 @@ fn is_null_at(nulls: &Option<Vec<bool>>, i: usize) -> bool {
 }
 
 /// Which rows are `NULL` (`None`: none).
-fn nulls_from(n: Vec<bool>) -> Option<Vec<bool>> {
+pub(crate) fn nulls_from(n: Vec<bool>) -> Option<Vec<bool>> {
     n.contains(&true).then_some(n)
 }
 
@@ -1417,7 +1417,7 @@ impl<'a> DictFilter<'a> {
         let (step, p) = steps.iter().enumerate().find_map(|(i, (s, _))| match s {
             Step::Keys(_) => None,
             Step::Filter(p) => Some(Some((i, *p))),
-            Step::Project(_) => Some(None),
+            Step::Project(_) | Step::Probe(_) => Some(None),
         })??;
         let mut preds = Vec::new();
         Self::leading(p, &mut preds);
@@ -1987,6 +1987,9 @@ enum Step<'a> {
     /// The hash joins' key filters on the scan (`crate::keyfilter`):
     /// each column's.
     Keys(Vec<(usize, std::sync::Arc<crate::keyfilter::KeyFilter>)>),
+    /// A hash join's probe of its table (made before the pipeline runs:
+    /// [`prepare`]).
+    Probe(Box<Probe<'a>>),
 }
 
 /// What a pipeline produced.
@@ -2020,14 +2023,46 @@ pub struct Pipeline<'a> {
 /// Whether `plan` is a chain the vectorized executor runs as a pipeline
 /// (a scan through filters and projections).
 pub(crate) fn pipelined(plan: &Plan) -> bool {
-    chain(plan).is_some()
+    chain(plan, None).is_some()
 }
 
 /// The scan, and the filters and projections above it, of a chain that
-/// ends in a table scan by the primary key (or every row); `None` for
+/// ends in a table scan by the primary key (or every row) — and the hash
+/// joins probing `tables` above it, for their left sides; `None` for
 /// anything else.
-fn chain(plan: &Plan) -> Option<(&Plan, Vec<(Step<'_>, &Plan)>)> {
+fn chain<'p>(
+    plan: &'p Plan,
+    tables: Option<&Tables>,
+) -> Option<(&'p Plan, Vec<(Step<'p>, &'p Plan)>)> {
     match plan {
+        Plan::Join {
+            left,
+            right,
+            kind,
+            on,
+            algo:
+                JoinAlgo::Hash {
+                    left_keys,
+                    right_keys,
+                    build_left: false,
+                },
+        } if probing(*kind) => {
+            let Some(Built::Table(table)) = tables?.get(&address(plan)) else {
+                return None;
+            };
+            let (scan, mut steps) = chain(left, tables)?;
+            let probe = Probe::new(
+                table.clone(),
+                left.width(),
+                left_keys,
+                right_keys,
+                *kind,
+                on.as_ref(),
+                right.width(),
+            );
+            steps.push((Step::Probe(Box::new(probe)), plan));
+            Some((scan, steps))
+        }
         Plan::Scan { access, filter, .. } => {
             if matches!(access, Access::Key { index: Some(_), .. }) {
                 return None;
@@ -2040,12 +2075,12 @@ fn chain(plan: &Plan) -> Option<(&Plan, Vec<(Step<'_>, &Plan)>)> {
             input,
             policy: predicate,
         } => {
-            let (scan, mut steps) = chain(input)?;
+            let (scan, mut steps) = chain(input, tables)?;
             steps.push((Step::Filter(predicate), plan));
             Some((scan, steps))
         }
         Plan::Project { input, exprs } => {
-            let (scan, mut steps) = chain(input)?;
+            let (scan, mut steps) = chain(input, tables)?;
             steps.push((Step::Project(exprs), plan));
             Some((scan, steps))
         }
@@ -2061,7 +2096,7 @@ fn scan_bounds(steps: &[(Step, &Plan)], ctx: &Ctx) -> Vec<crate::storage::Column
         match step {
             Step::Filter(p) => bounds_of(p, ctx, &mut out),
             Step::Keys(filters) => out.extend(filters.iter().map(|(c, f)| f.bound(*c))),
-            Step::Project(_) => break,
+            Step::Project(_) | Step::Probe(_) => break,
         }
     }
     out
@@ -2128,7 +2163,7 @@ impl<'a> Pipeline<'a> {
         if max == 0 {
             return Ok(None);
         }
-        let Some((scan, mut steps)) = chain(plan) else {
+        let Some((scan, mut steps)) = chain(plan, Some(&ctx.join_tables.borrow())) else {
             return Ok(None);
         };
         // The key filters first: what they drop no step above sees.
@@ -2139,7 +2174,7 @@ impl<'a> Pipeline<'a> {
         if rows
             && !steps
                 .iter()
-                .any(|(s, _)| matches!(s, Step::Filter(_) | Step::Keys(_)))
+                .any(|(s, _)| matches!(s, Step::Filter(_) | Step::Keys(_) | Step::Probe(_)))
         {
             return Ok(None);
         }
@@ -2252,6 +2287,7 @@ impl<'a> Pipeline<'a> {
                 (Step::Filter(p), None) => filter(p, b, self.cx)?,
                 (Step::Project(exprs), _) => project(exprs, b, self.cx)?,
                 (Step::Keys(filters), _) => keep_keys(filters, b),
+                (Step::Probe(p), _) => p.apply(b, self.cx)?,
             };
             if steps
                 .peek()
@@ -2267,33 +2303,57 @@ impl<'a> Pipeline<'a> {
     /// batch: a row at a time decides).
     fn redo(&self, input: &Batch) -> Out {
         let mut rows = Vec::new();
-        'rows: for i in input.sel.iter() {
-            let mut row = input.row(i);
-            for (step, _) in &self.steps {
-                match step {
-                    Step::Keys(filters) => {
-                        if !crate::keyfilter::passes(filters, &row) {
-                            continue 'rows;
-                        }
-                    }
-                    Step::Filter(p) => match p.holds(&self.cx.env(&row)) {
-                        Ok(true) => {}
-                        Ok(false) => continue 'rows,
-                        Err(e) => return Out::Rows(rows, Some(e)),
-                    },
-                    Step::Project(exprs) => {
-                        let e = self.cx.env(&row);
-                        match exprs.iter().map(|x| x.eval(&e)).collect::<Result<Row>>() {
-                            Ok(r) => row = r,
-                            Err(e) => return Out::Rows(rows, Some(e)),
-                        }
-                    }
-                }
+        for i in input.sel.iter() {
+            if let Err(e) = self.through(input.row(i), 0, &mut rows) {
+                return Out::Rows(rows, Some(e));
             }
-            rows.push(row);
         }
         Out::Rows(rows, None)
     }
+
+    /// `row` through the steps from `from` on, the rows it gives appended
+    /// to `out` (a join's, each in turn, before the error that stopped
+    /// it).
+    fn through(&self, mut row: Row, from: usize, out: &mut Vec<Row>) -> Result<()> {
+        for (k, (step, _)) in self.steps.iter().enumerate().skip(from) {
+            match step {
+                Step::Keys(filters) => {
+                    if !crate::keyfilter::passes(filters, &row) {
+                        return Ok(());
+                    }
+                }
+                Step::Filter(p) => {
+                    if !p.holds(&self.cx.env(&row))? {
+                        return Ok(());
+                    }
+                }
+                Step::Project(exprs) => {
+                    let e = self.cx.env(&row);
+                    row = exprs.iter().map(|x| x.eval(&e)).collect::<Result<Row>>()?;
+                }
+                Step::Probe(p) => {
+                    let mut joined = Vec::new();
+                    let r = p.rows(vec![row], self.cx, &mut joined);
+                    for j in joined {
+                        self.through(j, k + 1, out)?;
+                    }
+                    return r;
+                }
+            }
+        }
+        out.push(row);
+        Ok(())
+    }
+}
+
+/// Whether the chain `plan` filters or joins (so running it on workers
+/// gains).
+fn filters_or_probes(plan: &Plan, ctx: &Ctx) -> bool {
+    chain(plan, Some(&ctx.join_tables.borrow())).is_some_and(|(_, steps)| {
+        steps
+            .iter()
+            .any(|(s, _)| matches!(s, Step::Filter(_) | Step::Probe(_)))
+    })
 }
 
 /// `plan` run vectorized, as rows — when it can be (see [`Pipeline`]).
@@ -2302,8 +2362,8 @@ pub fn rows<'a>(
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
 ) -> Result<Option<Rows<'a>>> {
-    let filters = chain(plan)
-        .is_some_and(|(_, steps)| steps.iter().any(|(s, _)| matches!(s, Step::Filter(_))));
+    let tables = prepare(plan, ctx, outer)?;
+    let filters = filters_or_probes(plan, ctx);
     if filters
         && crate::budget::batch_size() > 0
         && let Some(work) = Morsels::new(plan, &[], ctx, outer, ROW_MORSELS_PER_WORKER)?
@@ -2319,6 +2379,7 @@ pub fn rows<'a>(
         })));
     }
     let Some(pipe) = Pipeline::new(plan, plan, ctx, outer, true, None)? else {
+        tables.keep();
         return Ok(None);
     };
     Ok(Some(Box::new(BatchRows {
@@ -2347,8 +2408,8 @@ pub fn batches<'a>(
     if crate::budget::batch_size() == 0 {
         return Ok(None);
     }
-    let filters = chain(plan)
-        .is_some_and(|(_, steps)| steps.iter().any(|(s, _)| matches!(s, Step::Filter(_))));
+    let tables = prepare(plan, ctx, outer)?;
+    let filters = filters_or_probes(plan, ctx);
     if filters && let Some(work) = Morsels::new(plan, &[], ctx, outer, ROW_MORSELS_PER_WORKER)? {
         PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return Ok(Some(Box::new(ParallelBatches {
@@ -2361,6 +2422,7 @@ pub fn batches<'a>(
         })));
     }
     let Some(pipe) = Pipeline::new(plan, plan, ctx, outer, false, None)? else {
+        tables.keep();
         return Ok(None);
     };
     Ok(Some(Box::new(PipeBatches {
@@ -2816,12 +2878,15 @@ pub fn aggregate<'a>(
     if aggs.iter().any(|a| a.distinct || !a.order.is_empty()) {
         return Ok(None);
     }
+    let tables = prepare(input, ctx, outer)?;
     if let Some(rows) = parallel_aggregate(input, top, group, aggs, ctx, outer)? {
         return Ok(Some(rows));
     }
     let Some(mut pipe) = Pipeline::new(input, top, ctx, outer, false, None)? else {
+        tables.keep();
         return Ok(None);
     };
+    drop(tables);
     let cx = Cx { ctx, outer };
     let mut g = Grouping::new(group, aggs);
     feed(&mut g, &mut pipe, cx, &mut |_| Ok(()))?;
@@ -3127,6 +3192,8 @@ struct Morsels<'a> {
     ctx: &'a Ctx<'a>,
     ranges: Vec<KeyRange>,
     workers: usize,
+    /// The join tables its pipelines probe, for the workers' contexts.
+    tables: Shared,
 }
 
 impl<'a> Morsels<'a> {
@@ -3146,7 +3213,7 @@ impl<'a> Morsels<'a> {
         if workers < 2 || outer.is_some() || ctx.profile.is_some() {
             return Ok(None);
         }
-        let Some((scan, steps)) = chain(input) else {
+        let Some((scan, steps)) = chain(input, Some(&ctx.join_tables.borrow())) else {
             return Ok(None);
         };
         let Plan::Scan { table, access, .. } = scan else {
@@ -3157,6 +3224,7 @@ impl<'a> Morsels<'a> {
             match step {
                 Step::Filter(p) => all.push(p),
                 Step::Project(es) => all.extend(es.iter()),
+                Step::Probe(p) => all.extend(p.left_keys.iter().chain(p.on)),
                 Step::Keys(_) => {}
             }
         }
@@ -3198,6 +3266,7 @@ impl<'a> Morsels<'a> {
             ctx,
             ranges,
             workers,
+            tables: snapshot(&ctx.join_tables.borrow()),
         }))
     }
 
@@ -3212,14 +3281,20 @@ impl<'a> Morsels<'a> {
         f: &(dyn Fn(&Ctx, KeyRange) -> Result<T> + Sync),
     ) -> Vec<Option<Result<T>>> {
         let (ranges, first) = (&self.ranges, which.start);
-        on_workers(
+        on_workers_kept(
             self.ctx,
             self.shared,
             self.workers,
             which.len(),
             stop,
-            &|wctx, m| f(wctx, ranges[first + m].clone()),
+            Kept3 {
+                init: &|| (),
+                each: &|wctx, _, m| f(wctx, ranges[first + m].clone()),
+                end: &|_| (),
+                tables: &self.tables,
+            },
         )
+        .0
     }
 
     /// [`Morsels::run`] over all the morsels with a state each worker keeps
@@ -3244,6 +3319,7 @@ impl<'a> Morsels<'a> {
                 init,
                 each: &|wctx, st, m| f(wctx, st, m, ranges[m].clone()),
                 end,
+                tables: &self.tables,
             },
         )
     }
@@ -3273,6 +3349,7 @@ pub(crate) fn on_workers<T: Send>(
             init: &|| (),
             each: &|wctx, _, m| f(wctx, m),
             end: &|_| (),
+            tables: &Shared::new(),
         },
     )
     .0
@@ -3284,6 +3361,8 @@ pub(crate) struct Kept3<'f, S, T, U> {
     pub(crate) init: &'f (dyn Fn() -> S + Sync),
     pub(crate) each: &'f (dyn Fn(&Ctx, &mut S, usize) -> Result<T> + Sync),
     pub(crate) end: &'f (dyn Fn(S) -> U + Sync),
+    /// The join tables the items' pipelines probe.
+    pub(crate) tables: &'f Shared,
 }
 
 /// [`on_workers`] with a state each worker keeps across the items it takes
@@ -3299,7 +3378,12 @@ pub(crate) fn on_workers_kept<S, T: Send, U: Send>(
     stop: bool,
     kept: Kept3<'_, S, T, U>,
 ) -> (Vec<Option<Result<T>>>, Vec<U>) {
-    let Kept3 { init, each: f, end } = kept;
+    let Kept3 {
+        init,
+        each: f,
+        end,
+        tables,
+    } = kept;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
     let ambient = crate::parallel::Ambient::capture();
@@ -3339,6 +3423,12 @@ pub(crate) fn on_workers_kept<S, T: Send, U: Send>(
                         }
                         if !key_filters.is_empty() {
                             *wctx.key_filters.get_mut() = key_filters.clone();
+                        }
+                        if !tables.is_empty() {
+                            *wctx.join_tables.get_mut() = tables
+                                .iter()
+                                .map(|(j, t)| (*j, Built::Table(t.clone())))
+                                .collect();
                         }
                         let r = f(&wctx, &mut state, m);
                         if r.is_err() {
@@ -3629,7 +3719,7 @@ fn merge_ordered(results: Vec<Option<Result<Part>>>, aggs: &[Agg]) -> Result<Opt
 /// `input`'s scan reads in order — when `group` holds at least the first:
 /// the rows of a group are then all within a run of rows sharing those.
 fn ordered_prefix(input: &Plan, group: &[Expr]) -> Option<Vec<usize>> {
-    let (scan, steps) = chain(input)?;
+    let (scan, steps) = chain(input, None)?;
     let Plan::Scan { table, .. } = scan else {
         return None;
     };
@@ -4279,6 +4369,18 @@ impl Held {
         }
     }
 
+    /// Column `c` of rows `rows` (`None`: a `NULL`), as a vector.
+    fn column(&self, c: usize, rows: &[Option<u32>]) -> Vector {
+        match self {
+            Held::Columns(cols) => cols.gather(c, rows),
+            Held::Rows(held) => Vector::typed(
+                rows.iter()
+                    .map(|r| r.map_or(Value::Null, |i| held[i as usize][c].clone()))
+                    .collect(),
+            ),
+        }
+    }
+
     /// The rows, in order.
     fn into_rows(self) -> Vec<Row> {
         match self {
@@ -4548,6 +4650,17 @@ impl JoinTable {
         Ok(Gathered::Table(Self::of(Held::Columns(held), values)))
     }
 
+    /// Its rows, in order, as rows.
+    fn rows_in_order(&self) -> Vec<Row> {
+        (0..self.rows.len())
+            .map(|r| {
+                let mut row = Vec::new();
+                self.rows.extend_row(r, &mut row);
+                row
+            })
+            .collect()
+    }
+
     /// `rows` by their keys' values (`values`: a row's keys a row).
     fn of(rows: Held, values: crate::columns::Columns) -> Self {
         let index = match (values.ints(), values.int_pairs()) {
@@ -4571,8 +4684,8 @@ pub(crate) enum Gathered {
 }
 
 /// How a hash join's left rows probe its table.
-struct Probe<'a> {
-    table: JoinTable,
+pub(crate) struct Probe<'a> {
+    table: std::sync::Arc<JoinTable>,
     left_keys: &'a [Expr],
     on: Option<&'a Expr>,
     kind: crate::plan::JoinType,
@@ -4582,7 +4695,141 @@ struct Probe<'a> {
     check: bool,
 }
 
-impl Probe<'_> {
+impl<'a> Probe<'a> {
+    /// The probe of `table` by a join's left rows (`left_width` wide).
+    fn new(
+        table: std::sync::Arc<JoinTable>,
+        left_width: usize,
+        left_keys: &'a [Expr],
+        right_keys: &'a [Expr],
+        kind: JoinType,
+        on: Option<&'a Expr>,
+        right_width: usize,
+    ) -> Self {
+        let check = on.is_some()
+            && !(keys_only(on, left_keys, right_keys, left_width)
+                && matches!(table.index, JoinIndex::Int(_) | JoinIndex::Pair(_)));
+        Probe {
+            table,
+            left_keys,
+            on,
+            kind,
+            right_width,
+            check,
+        }
+    }
+
+    /// A batch of left rows probed, as a batch (a pipeline's step): the
+    /// rows, and their order, of [`Probe::batch`] — each left row's
+    /// matches in the table's order, a left join's unmatched row with
+    /// `NULL`s, a semi or anti join's rows as they were.  `on` beyond the
+    /// keys is evaluated over every candidate pair at once (an error there
+    /// sends the batch a row at a time, as a pipeline's errors do).
+    fn apply(&self, b: Batch, cx: Cx) -> Result<Batch> {
+        let keys = self
+            .left_keys
+            .iter()
+            .map(|k| eval(k, &b, &b.sel, cx))
+            .collect::<Result<Vec<_>>>()?;
+        let found: Vec<(u32, &[u32])> = b
+            .sel
+            .iter()
+            .map(|i| (i as u32, self.candidates(KeyRef::Batch(&keys, i))))
+            .collect();
+        let semi = self.kind == JoinType::Semi;
+        let existence = matches!(self.kind, JoinType::Semi | JoinType::Anti);
+        if !self.check {
+            if existence {
+                let rows = found
+                    .iter()
+                    .filter(|(_, c)| c.is_empty() != semi)
+                    .map(|&(i, _)| i)
+                    .collect();
+                return Ok(Batch {
+                    sel: Sel::Rows(rows),
+                    ..b
+                });
+            }
+            let outer = self.kind == JoinType::Left;
+            let (mut l, mut r) = (Vec::new(), Vec::new());
+            for &(i, c) in &found {
+                if c.is_empty() && outer {
+                    l.push(i);
+                    r.push(None);
+                }
+                for &x in c {
+                    l.push(i);
+                    r.push(Some(x));
+                }
+            }
+            return Ok(self.joined(&b, l, &r));
+        }
+        // Every candidate pair, `on` over them all.
+        let (mut l, mut r) = (Vec::new(), Vec::new());
+        for &(i, c) in &found {
+            for &x in c {
+                l.push(i);
+                r.push(Some(x));
+            }
+        }
+        let on = self.on.expect("checked: there is an `on`");
+        let pairs = filter(on, self.joined(&b, l.clone(), &r), cx)?;
+        if self.kind == JoinType::Inner {
+            return Ok(pairs);
+        }
+        let mut held = vec![false; l.len()];
+        for p in pairs.sel.iter() {
+            held[p] = true;
+        }
+        // Each left row's pairs are consecutive.
+        let mut at = 0;
+        if existence {
+            let mut rows = Vec::new();
+            for &(i, c) in &found {
+                let matched = held[at..at + c.len()].contains(&true);
+                at += c.len();
+                if matched == semi {
+                    rows.push(i);
+                }
+            }
+            return Ok(Batch {
+                sel: Sel::Rows(rows),
+                ..b
+            });
+        }
+        let (mut l2, mut r2) = (Vec::new(), Vec::new());
+        for &(i, c) in &found {
+            let mut matched = false;
+            for k in at..at + c.len() {
+                if held[k] {
+                    matched = true;
+                    l2.push(i);
+                    r2.push(r[k]);
+                }
+            }
+            at += c.len();
+            if !matched {
+                l2.push(i);
+                r2.push(None);
+            }
+        }
+        Ok(self.joined(&b, l2, &r2))
+    }
+
+    /// The pairs of `b`'s rows `left` and the table's rows `right` (`None`:
+    /// `NULL`s), as a batch.
+    fn joined(&self, b: &Batch, left: Vec<u32>, right: &[Option<u32>]) -> Batch {
+        let n = left.len();
+        let picked = Sel::Rows(left);
+        let mut cols: Vec<Rc<Vector>> = b.cols.iter().map(|c| Rc::new(c.gather(&picked))).collect();
+        cols.extend((0..self.right_width).map(|c| Rc::new(self.table.rows.column(c, right))));
+        Batch {
+            len: n,
+            cols,
+            sel: Sel::All(n),
+        }
+    }
+
     /// The right rows a left key matches.
     fn candidates(&self, key: KeyRef) -> &[u32] {
         let found = match &self.table.index {
@@ -4716,9 +4963,16 @@ impl Probe<'_> {
     }
 }
 
-/// Whether `left` can be a vectorized hash join's probe side (a pipeline).
-pub(crate) fn probes(left: &Plan) -> bool {
-    crate::budget::batch_size() > 0 && chain(left).is_some()
+/// Whether `plan` can be read a batch at a time as it is (a pipeline with
+/// no joins: a hash join's build side).
+pub(crate) fn probes(plan: &Plan) -> bool {
+    crate::budget::batch_size() > 0 && chain(plan, None).is_some()
+}
+
+/// Whether `left` can be a vectorized hash join's probe side: a pipeline,
+/// once the tables of the hash joins in it are made ([`prepare`]).
+pub(crate) fn probe_side(left: &Plan) -> bool {
+    crate::budget::batch_size() > 0 && shaped(left)
 }
 
 /// A hash join of the pipeline `left` with the right rows `rows` (in
@@ -4726,23 +4980,24 @@ pub(crate) fn probes(left: &Plan) -> bool {
 /// integer), the left side's keys evaluated a batch at a time and probed —
 /// on worker threads, morsels of the left scan in key order, when it is
 /// large enough; the rows, their order and errors those of the row-at-a-
-/// time join.
+/// time join.  `Err(rows)` when `left` is not a pipeline after all (a join
+/// in it hashed a side past work_mem): the right rows back.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hash_join<'a>(
     left: &'a Plan,
     rows: Vec<Row>,
     left_keys: &'a [Expr],
     right_keys: &'a [Expr],
-    kind: crate::plan::JoinType,
+    kind: JoinType,
     on: Option<&'a Expr>,
     right_width: usize,
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
-) -> Result<Rows<'a>> {
+) -> Result<std::result::Result<Rows<'a>, Vec<Row>>> {
     let table = JoinTable::build(rows, right_keys, ctx, outer)?;
     hash_join_table(
         left,
-        table,
+        std::sync::Arc::new(table),
         left_keys,
         right_keys,
         kind,
@@ -4757,31 +5012,34 @@ pub(crate) fn hash_join<'a>(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hash_join_table<'a>(
     left: &'a Plan,
-    table: JoinTable,
+    table: std::sync::Arc<JoinTable>,
     left_keys: &'a [Expr],
     right_keys: &'a [Expr],
-    kind: crate::plan::JoinType,
+    kind: JoinType,
     on: Option<&'a Expr>,
     right_width: usize,
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
-) -> Result<Rows<'a>> {
-    let check = on.is_some()
-        && !(keys_only(on, left_keys, right_keys, left.width())
-            && matches!(table.index, JoinIndex::Int(_) | JoinIndex::Pair(_)));
-    let probe = Probe {
+) -> Result<std::result::Result<Rows<'a>, Vec<Row>>> {
+    let tables = prepare(left, ctx, outer)?;
+    if chain(left, Some(&ctx.join_tables.borrow())).is_none() {
+        tables.keep();
+        return Ok(Err(table.rows_in_order()));
+    }
+    let probe = Probe::new(
         table,
+        left.width(),
         left_keys,
-        on,
+        right_keys,
         kind,
+        on,
         right_width,
-        check,
-    };
+    );
     let mut exprs: Vec<&Expr> = left_keys.iter().collect();
     exprs.extend(on);
     if let Some(work) = Morsels::new(left, &exprs, ctx, outer, ROW_MORSELS_PER_WORKER)? {
         PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return Ok(Box::new(ParallelJoin {
+        return Ok(Ok(Box::new(ParallelJoin {
             work,
             plan: left,
             probe,
@@ -4789,12 +5047,12 @@ pub(crate) fn hash_join_table<'a>(
             rows: std::collections::VecDeque::new(),
             err: None,
             done: false,
-        }));
+        })));
     }
     let Some(pipe) = Pipeline::new(left, left, ctx, outer, false, None)? else {
         return Err(Error::internal("a hash join's probe pipeline"));
     };
-    Ok(Box::new(JoinRows {
+    Ok(Ok(Box::new(JoinRows {
         pipe: Some(pipe),
         left,
         probe,
@@ -4802,7 +5060,187 @@ pub(crate) fn hash_join_table<'a>(
         rows: std::collections::VecDeque::new(),
         err: None,
         measured: (Duration::ZERO, 0),
-    }))
+    })))
+}
+
+/// The hash joins' tables a pipeline probes, by the join's address
+/// ([`prepare`]).
+pub(crate) type Tables = HashMap<usize, Built>;
+
+/// A hash join's build side, made before the pipeline probing it runs.
+pub(crate) enum Built {
+    Table(std::sync::Arc<JoinTable>),
+    /// Past work_mem: its rows, stashed, for [`crate::exec`]'s join (the
+    /// pipeline above it does not run as one).
+    Stored(crate::spill::Stored),
+}
+
+/// The tables a pipeline's workers probe.
+type Shared = Vec<(usize, std::sync::Arc<JoinTable>)>;
+
+fn snapshot(tables: &Tables) -> Shared {
+    tables
+        .iter()
+        .filter_map(|(j, b)| match b {
+            Built::Table(t) => Some((*j, t.clone())),
+            Built::Stored(_) => None,
+        })
+        .collect()
+}
+
+fn address(plan: &Plan) -> usize {
+    plan as *const Plan as usize
+}
+
+/// Whether a hash join of `kind` probes in a pipeline.
+fn probing(kind: JoinType) -> bool {
+    matches!(
+        kind,
+        JoinType::Inner | JoinType::Left | JoinType::Semi | JoinType::Anti
+    )
+}
+
+/// Whether `plan` is a chain once its hash joins' tables are made: a scan,
+/// filters and projections, and hash joins on their right sides probed by
+/// their left.
+fn shaped(plan: &Plan) -> bool {
+    match plan {
+        Plan::Scan { access, .. } => !matches!(access, Access::Key { index: Some(_), .. }),
+        Plan::Filter { input, .. } | Plan::Secure { input, .. } | Plan::Project { input, .. } => {
+            shaped(input)
+        }
+        Plan::Join {
+            left,
+            kind,
+            algo: JoinAlgo::Hash {
+                build_left: false, ..
+            },
+            ..
+        } => probing(*kind) && shaped(left),
+        _ => false,
+    }
+}
+
+/// The hash joins in the chain `plan` with their tables made — each right
+/// side run as [`crate::exec`]'s join runs it (on the workers when it is a
+/// pipeline, else gathered), outermost first as it runs them, and its key
+/// filter handed to the scans below — so a pipeline can probe them (HyPer's
+/// morsel-driven pipelines, the probe a step of the pipeline: Leis et al.,
+/// SIGMOD 2014).  A right side past work_mem is stashed, and the joins
+/// below it are left alone: the pipeline does not run as one, and
+/// `crate::exec`'s join takes the stashed rows (and the tables made above
+/// them) rather than running the right side again.  Not with an enclosing
+/// row (a correlated subquery's plan runs again for every row), nor when
+/// vectorized execution is off.  The guard returned drops the tables once
+/// the pipelines are made (they keep what they probe); kept
+/// ([`Prepared::keep`]) when the caller does not run the pipeline, for the
+/// row-at-a-time executor running it instead.
+pub(crate) fn prepare<'a>(
+    plan: &'a Plan,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Prepared<'a>> {
+    let mut made = Prepared {
+        ctx,
+        joins: Vec::new(),
+        keep: false,
+    };
+    if crate::budget::batch_size() > 0 && outer.is_none() && shaped(plan) {
+        make(plan, ctx, &mut made.joins)?;
+    }
+    Ok(made)
+}
+
+fn make<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, joins: &mut Vec<usize>) -> Result<()> {
+    match plan {
+        Plan::Filter { input, .. } | Plan::Secure { input, .. } | Plan::Project { input, .. } => {
+            make(input, ctx, joins)
+        }
+        Plan::Join {
+            left,
+            right,
+            kind,
+            algo:
+                JoinAlgo::Hash {
+                    left_keys,
+                    right_keys,
+                    build_left: false,
+                },
+            ..
+        } => {
+            let at = address(plan);
+            joins.push(at);
+            // Made by a caller that then did not run the pipeline: as made.
+            let made = ctx
+                .join_tables
+                .borrow()
+                .get(&at)
+                .map(|b| matches!(b, Built::Table(_)));
+            match made {
+                Some(true) => return make(left, ctx, joins),
+                Some(false) => return Ok(()),
+                None => {}
+            }
+            let mut table = None;
+            if probes(right) {
+                table = JoinTable::parallel(right, right_keys, ctx, None)?;
+            }
+            let table = match table {
+                Some(t) => t,
+                None => match JoinTable::gather(
+                    crate::exec::build(right, ctx, None)?,
+                    right.width(),
+                    right_keys,
+                    ctx,
+                    None,
+                )? {
+                    Gathered::Table(t) => t,
+                    Gathered::Stored(rows) => {
+                        ctx.join_tables.borrow_mut().insert(at, Built::Stored(rows));
+                        return Ok(());
+                    }
+                },
+            };
+            crate::keyfilter::register(ctx, left, right, *kind, left_keys, &|j| table.key_ints(j));
+            ctx.join_tables
+                .borrow_mut()
+                .insert(at, Built::Table(std::sync::Arc::new(table)));
+            make(left, ctx, joins)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The join `node`'s build side made by a [`prepare`] whose pipeline did
+/// not run, taken.
+pub(crate) fn take_built(ctx: &Ctx, node: &Plan) -> Option<Built> {
+    ctx.join_tables.borrow_mut().remove(&address(node))
+}
+
+/// The tables [`prepare`] made: dropped with it, unless kept.
+pub(crate) struct Prepared<'a> {
+    ctx: &'a Ctx<'a>,
+    joins: Vec<usize>,
+    keep: bool,
+}
+
+impl Prepared<'_> {
+    /// The tables kept for the row-at-a-time executor (the caller does not
+    /// run the pipeline).
+    pub(crate) fn keep(mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for Prepared<'_> {
+    fn drop(&mut self) {
+        if !self.keep && !self.joins.is_empty() {
+            let mut tables = self.ctx.join_tables.borrow_mut();
+            for j in &self.joins {
+                tables.remove(j);
+            }
+        }
+    }
 }
 
 /// Whether a join's `on` is only its keys' equality (an integer table
@@ -4850,7 +5288,7 @@ pub(crate) fn existence_by_left<'a>(
         && !(keys_only(on, left_keys, right_keys, left_width)
             && matches!(table.index, JoinIndex::Int(_) | JoinIndex::Pair(_)));
     let probe = Probe {
-        table,
+        table: std::sync::Arc::new(table),
         left_keys: right_keys,
         on,
         kind,
@@ -4951,8 +5389,9 @@ pub(crate) fn existence_by_left<'a>(
         }
     }
     let semi = kind == crate::plan::JoinType::Semi;
-    let rows: Vec<Row> = probe
-        .table
+    let table = std::sync::Arc::try_unwrap(probe.table)
+        .map_err(|_| Error::internal("a join table still shared"))?;
+    let rows: Vec<Row> = table
         .rows
         .into_rows()
         .into_iter()

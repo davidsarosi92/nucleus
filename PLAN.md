@@ -1887,7 +1887,7 @@ the speed-up is made once, in the merged one.  The work, in this order:
   comparator; Q19's per-row directory lookups (the segment found kept for the next
   key: W3's remembered ranges serve only keys not stored);
   expressions materializing only their columns, `CASE` vectorized; joins
-  emitting batches (left from V2).
+  emitting batches (left from V2: done, joins inside pipelines).
   *Done — groupings past `work_mem`, on the workers* (profiled first:
   ClickBench Q32, `GROUP BY WatchID, ClientIP` — a million groups — on a
   column table, 2.5 s against PostgreSQL's 0.93 s; with `work_mem` at 2
@@ -2245,6 +2245,59 @@ the speed-up is made once, in the merged one.  The work, in this order:
   167; ClickBench 2.43 / 2.41 → 2.46 / 2.43 s — Q32 423 / 415 → 430 /
   420 ms, Q36 71 / 73 → 75 / 79 (the rank sort at the end; Q36's groups
   fit `work_mem` since typed states, so the bound no longer cost it).
+  *Done — joins inside pipelines* (profiled first: TPC-H Q9 on column
+  tables, 878 ms on the workers against 1,430 on one — only the lowest
+  join's probe ran on them; the three joins above it, their projections
+  and the grouping ran a row at a time on one thread, as every join over
+  a join did: Q5, Q7, Q10 alike).  An inner, left, semi or anti hash join
+  whose left side is a pipeline is now a step of it (`Step::Probe`), so
+  a chain of joins and the grouping, sort or projection above it run as
+  one pipeline on the morsels of the lowest scan — HyPer's morsel-driven
+  pipelines (Leis et al., "Morsel-Driven Parallelism", SIGMOD 2014; the
+  probe as a pipeline operator, its hash tables built before the
+  pipeline that probes them).  `vector::prepare` makes the tables before
+  the pipeline runs, outermost join first as the row-at-a-time join runs
+  its right sides, each with its key filter; the workers' contexts get
+  them, and they drop once the pipelines are made (`Prepared`, a guard).
+  A probe joins a batch into a batch: the left columns gathered by the
+  matched rows, the table's from its columns (`Columns::gather`), a left
+  join's unmatched rows with `NULL`s, a semi or anti join's by the
+  selection alone; `on` beyond the keys over every candidate pair at
+  once (an error there sends the batch a row at a time, which then
+  fans out each row's matches through the steps above).  A right side
+  past `work_mem` is stashed and the pipeline does not run as one: the
+  row-at-a-time join takes the stashed rows and the tables made above
+  them (`take_built`), so no side runs twice.  Not with an enclosing row
+  (a correlated subquery's plan runs again per row: its tables would be
+  stale); a recursive CTE's term makes them each round.  Not taken:
+  DuckDB's and Velox's way, the probe emitting through a selection vector
+  over the table's rows (late materialization of the build side) — the
+  gather is a copy a matched row, and the columns read above a join are
+  few after pruning; worth measuring once a join's output feeds only a
+  grouping.  Tested: joins over joins under groupings, projections and
+  sorts, fan-out, left joins with `on` beyond the keys, semi and anti
+  joins in the chain, text and `NULL` keys, errors in `on` and above, a
+  build side that is itself joins, a correlated subquery's and a
+  recursive CTE's joins, a stashed side mid-chain, `EXPLAIN ANALYZE` —
+  against the row-at-a-time executor, one thread, batches of 3 and
+  `work_mem` 64 kB, on row and column tables; TPC-H's 22 results the
+  previous build's on column and row tables, at 1 MB `work_mem`, one
+  worker and `batch_size` 0.  Mutations caught: a left join's unmatched
+  rows dropped (with and without `on`), semi and anti inverted, the
+  tables never dropped (the recursive CTE's term probing a stale table
+  never ends).  Not caught: a table made by an earlier caller not
+  adopted (the row-at-a-time join then makes the rest: the same rows,
+  slower); a join's rows before its error given after it (visible only
+  under a `LIMIT`, see below).  Found on the way, not from this step: a
+  `LIMIT` over a join whose `on` fails on a later candidate gives the
+  rows or the error depending on the statements the session ran before
+  — on the row-at-a-time executor too (`batch_size` 0); open.  Measured,
+  alternating with the step before, two rounds: TPC-H on column tables
+  4.00 / 3.78 → 2.30 / 2.27 s (geometric mean 107 → 77 ms): Q9 882 → 243
+  ms, Q5 308 → 80, Q10 391 → 142, Q7 198 → 89, Q3 123 → 75, Q18 264 →
+  171, Q14 92 → 59, Q13 99 → 60; on row tables 8.38 / 8.01 → 7.16 / 7.21
+  s (Q9 1,136 → 530, Q18 552 → 444, Q13 170 → 128); ClickBench 2.50 /
+  2.47 → 2.48 / 2.42 s (no joins).
 - **W7 — formats (D18).**  Column offsets in the row format (a row
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
@@ -3392,3 +3445,8 @@ style) across a thousand seeds without failure.
   morsels (groups ranked by morsel and place, finished in rank order;
   handed over per morsel when groups do not recur).  TPC-H Q13 on column
   tables 107 → 95 ms, on row tables 180 → 165.  DOCS §8.5.
+- **2026-11-04** — §M14.20 W6: joins inside pipelines — a hash join
+  probed as a step of the pipeline below it, its table made first, so
+  joins over joins and the grouping above them run on the workers.
+  TPC-H on column tables 3.8 → 2.3 s (Q9 882 → 243 ms, Q5 308 → 80), on
+  row tables 8.0 → 7.2.  DOCS §8.5.

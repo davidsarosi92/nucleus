@@ -1760,3 +1760,161 @@ fn correlated_subqueries_on_workers_agree() {
         assert!(parallel >= 9, "{storage}: {parallel} ran on workers");
     }
 }
+
+#[test]
+fn joins_in_pipelines_agree() {
+    // Hash joins probed as steps of the pipeline below them (§M14.20 W6):
+    // joins over joins, the groupings and sorts above them, on workers —
+    // the rows, their order and the first error of the row-at-a-time
+    // executor and of one thread; a build side past work_mem leaves the
+    // chain to the row-at-a-time join with the tables already made; a
+    // recursive CTE's term makes its tables again each round.
+    for storage in ["row", "column"] {
+        let db = Database::open_on(
+            Arc::new(SimPlatform::new(61)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap();
+        let mut s = session(&db, 1024);
+        s.execute(&format!(
+            "CREATE TABLE f (id INT PRIMARY KEY, d INT, e INT, x BIGINT, s TEXT) \
+               WITH (storage = {storage}); \
+             CREATE TABLE d1 (id INT PRIMARY KEY, name TEXT, k INT, c CHAR(4)); \
+             CREATE TABLE d2 (id INT PRIMARY KEY, label TEXT, w FLOAT); \
+             INSERT INTO f SELECT i, i % 500, i % 61, i::bigint * 7919 % 100003, \
+               CASE WHEN i % 9 = 0 THEN NULL ELSE 'v' || (i % 13) END \
+               FROM generate_series(1, 40000) i; \
+             INSERT INTO d1 SELECT i, 'd' || i, i % 7, 'c' || (i % 5) \
+               FROM generate_series(0, 450) i WHERE i % 10 <> 3; \
+             INSERT INTO d1 SELECT 1000 + i, 'dup', i % 7, NULL FROM generate_series(0, 20) i; \
+             INSERT INTO d2 SELECT i, CASE WHEN i % 4 = 0 THEN NULL ELSE 'l' || i END, i / 4.0 \
+               FROM generate_series(0, 50) i WHERE i <> 17; \
+             ANALYZE"
+        ))
+        .unwrap();
+        let queries = [
+            // Joins over joins, a grouping above (TPC-H Q5's, Q9's shape).
+            "SELECT d2.label, count(*), sum(f.x) FROM f JOIN d1 ON f.d = d1.id \
+               JOIN d2 ON d1.k * 7 + f.e % 7 = d2.id GROUP BY d2.label",
+            "SELECT d1.k, d2.w, sum(f.x * d2.w), min(f.s) FROM f JOIN d1 ON f.d = d1.id \
+               JOIN d2 ON f.e = d2.id WHERE f.x % 3 <> 1 GROUP BY d1.k, d2.w",
+            // Rows in order: a projection, a filter on both sides' columns.
+            "SELECT f.id, d1.name, d2.label FROM f JOIN d1 ON f.d = d1.id \
+               JOIN d2 ON f.e = d2.id WHERE f.id % 37 = 1 AND d2.w > d1.k",
+            // Fan-out: a key matching many rows (`dup`).
+            "SELECT f.id, a.id, b.id FROM f JOIN d1 a ON f.e % 7 = a.k \
+               JOIN d1 b ON a.name = b.name WHERE f.id < 40",
+            // Left joins: unmatched rows with NULLs, `on` beyond the keys.
+            "SELECT f.id, d1.name, d2.label FROM f LEFT JOIN d1 ON f.d = d1.id \
+               LEFT JOIN d2 ON f.e = d2.id AND d2.w < 10 WHERE f.id % 53 = 2",
+            "SELECT count(*), count(d1.id), count(d2.id) FROM f \
+               LEFT JOIN d1 ON f.d = d1.id AND d1.c <> 'c1' JOIN d2 ON f.e = d2.id",
+            "SELECT f.id, d1.name, d2.id FROM f JOIN d1 ON f.d = d1.id \
+               LEFT JOIN d2 ON f.e = d2.id AND d2.w > f.id % 7 WHERE f.id % 29 = 4",
+            // Semi and anti joins in the chain, with `on` beyond the keys.
+            "SELECT d2.id, count(*) FROM f JOIN d2 ON f.e = d2.id \
+               WHERE f.d IN (SELECT id FROM d1 WHERE k = 3) GROUP BY d2.id",
+            "SELECT count(*), sum(f.x) FROM f JOIN d2 ON f.e = d2.id \
+               WHERE NOT EXISTS (SELECT 1 FROM d1 WHERE d1.id = f.d AND d1.k > f.e % 5)",
+            "SELECT count(*) FROM f WHERE EXISTS (SELECT 1 FROM d1 WHERE d1.id = f.d \
+               AND d1.name <> f.s) AND f.e IN (SELECT id FROM d2 WHERE w > 3)",
+            // Text keys, NULL keys.
+            "SELECT f.s, d1.c, count(*) FROM f JOIN d1 ON f.s = 'v' || d1.k \
+               JOIN d2 ON f.e = d2.id GROUP BY f.s, d1.c",
+            // Errors: in a join's `on`, in the projection above, the first
+            // of two in row order (a batch run again a row at a time).
+            "SELECT count(*) FROM f JOIN d1 ON f.d = d1.id \
+               JOIN d2 ON f.e = d2.id AND 100 / (d2.id - 20) > f.e - 100",
+            "SELECT f.id, 100 / (f.id - 31000) FROM f JOIN d1 ON f.d = d1.id \
+               JOIN d2 ON f.e = d2.id",
+            "SELECT f.id, CAST(CASE WHEN f.id = 24400 THEN 'x' ELSE '1' END AS INT), \
+               10 / (f.id - 30000) FROM f JOIN d1 ON f.d = d1.id JOIN d2 ON f.e = d2.id",
+            // Sorted, limited.
+            "SELECT f.id, d1.name FROM f JOIN d1 ON f.d = d1.id JOIN d2 ON f.e = d2.id \
+               ORDER BY d2.w DESC, f.id LIMIT 25",
+            "SELECT f.id FROM f JOIN d1 ON f.d = d1.id JOIN d2 ON f.e = d2.id \
+               WHERE 10 / (40000 - f.id) >= 0 LIMIT 5",
+            // A build side that is itself joins (made by its own pipeline).
+            "SELECT count(*), sum(f.x) FROM f JOIN (SELECT d1.id, d2.w FROM d1 \
+               JOIN d2 ON d1.k = d2.id) j ON f.d = j.id",
+            // A correlated subquery whose plan holds the joins.
+            "SELECT d2.id, (SELECT count(*) FROM f JOIN d1 ON f.d = d1.id \
+               WHERE f.e = d2.id AND d1.k = 2) FROM d2 ORDER BY d2.id",
+            // A recursive CTE's term: its tables made again each round.
+            "WITH RECURSIVE r(n, v) AS (SELECT 0, 5 UNION ALL \
+               SELECT r.n + 1, (f.x % 50)::int FROM f JOIN r ON f.e = r.v \
+               JOIN d2 ON f.e = d2.id WHERE r.n < 4 AND f.id % 101 = r.n) \
+               SELECT n, count(*), sum(v) FROM r GROUP BY n ORDER BY n",
+        ];
+        let mut one = session(&db, 1024);
+        one.execute("SET parallel_workers = 1").unwrap();
+        let mut many = session(&db, 1024);
+        many.execute("SET parallel_workers = 4").unwrap();
+        let mut row = session(&db, 0);
+        let mut tiny = session(&db, 3);
+        let mut small = session(&db, 1024);
+        small
+            .execute("SET parallel_workers = 4; SET work_mem = '64kB'")
+            .unwrap();
+        let mut failed = Vec::new();
+        let mut parallel = 0;
+        for q in queries {
+            let want = outcome(&mut row, q);
+            assert_eq!(outcome(&mut one, q), want, "{storage} one thread: {q}");
+            assert_eq!(outcome(&mut tiny, q), want, "{storage} batches of 3: {q}");
+            let before = nucleus_sql::vector::parallel_runs();
+            assert_eq!(outcome(&mut many, q), want, "{storage} workers: {q}");
+            parallel += usize::from(nucleus_sql::vector::parallel_runs() > before);
+            // Past work_mem a grouping's or a join's order may be its own.
+            let sorted = |r: Result<Vec<Vec<String>>, String>| {
+                r.map(|mut rows| {
+                    rows.sort();
+                    rows
+                })
+            };
+            assert_eq!(
+                sorted(outcome(&mut small, q)),
+                sorted(want.clone()),
+                "{storage} past work_mem: {q}"
+            );
+            if let Err(e) = want {
+                failed.push(e);
+            }
+        }
+        assert_eq!(failed.len(), 3, "{storage}: {failed:?}");
+        assert!(failed[2].contains("invalid input syntax"), "{failed:?}");
+        assert!(parallel >= 12, "{storage}: {parallel} ran on workers");
+        // A build side past work_mem in the middle of the chain: the joins
+        // above it made once, its rows taken by the row-at-a-time join.
+        let q = "SELECT d2.id, count(*), sum(a.x) FROM f a JOIN f b ON a.id = b.x \
+                 JOIN d2 ON a.e = d2.id GROUP BY d2.id";
+        let want = outcome(&mut row, q);
+        assert_eq!(
+            outcome(&mut small, q).map(|mut r| {
+                r.sort();
+                r
+            }),
+            want.map(|mut r| {
+                r.sort();
+                r
+            }),
+            "{storage}: a stashed side"
+        );
+        // EXPLAIN ANALYZE: one thread, every node measured.
+        let mut s = session(&db, 1024);
+        let plan = outcome(
+            &mut s,
+            "EXPLAIN ANALYZE SELECT d2.label, count(*) FROM f JOIN d1 ON f.d = d1.id \
+               JOIN d2 ON f.e = d2.id GROUP BY d2.label",
+        )
+        .unwrap();
+        let text: Vec<String> = plan.into_iter().flatten().collect();
+        assert!(text.iter().any(|l| l.contains("Hash Join")), "{text:?}");
+        assert!(
+            text.iter()
+                .all(|l| l.starts_with("Execution") || l.contains("actual rows=")),
+            "{text:?}"
+        );
+    }
+}

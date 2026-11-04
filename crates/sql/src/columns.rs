@@ -334,6 +334,56 @@ impl Columns {
         self.len += other.len;
     }
 
+    /// Column `c`'s rows `rows` (`None`: a `NULL`), as a vector.
+    pub(crate) fn gather(&self, c: usize, rows: &[Option<u32>]) -> Vector {
+        fn pick<T: Copy + Default>(d: &[T], rows: &[Option<u32>]) -> Vec<T> {
+            rows.iter()
+                .map(|r| r.map_or(T::default(), |i| d[i as usize]))
+                .collect()
+        }
+        let nulls = |n: &[bool]| {
+            crate::vector::nulls_from(
+                rows.iter()
+                    .map(|r| r.is_none_or(|i| n[i as usize]))
+                    .collect(),
+            )
+        };
+        match &self.cols[c] {
+            Col::Nulls(_) => Vector::Const(Value::Null),
+            Col::Int(d, n) => Vector::Int(pick(d, rows), nulls(n)),
+            Col::Float(d, n) => Vector::Float(pick(d, rows), nulls(n)),
+            Col::Bool(d, n) => Vector::Bool(pick(d, rows), nulls(n)),
+            Col::Time(k, d, n) => Vector::Time(*k, pick(d, rows), nulls(n)),
+            Col::Text(char, o, b, n) => {
+                let mut offsets = Vec::with_capacity(rows.len() + 1);
+                let mut bytes = Vec::new();
+                offsets.push(0);
+                // A NULL's place holds no bytes.
+                for &i in rows.iter().flatten() {
+                    let i = i as usize;
+                    bytes.extend_from_slice(&b[o[i] as usize..o[i + 1] as usize]);
+                }
+                let mut at = 0;
+                for r in rows {
+                    if let &Some(i) = r {
+                        at += o[i as usize + 1] - o[i as usize];
+                    }
+                    offsets.push(at);
+                }
+                if *char {
+                    Vector::Char(offsets, bytes, nulls(n))
+                } else {
+                    Vector::Text(offsets, bytes, nulls(n))
+                }
+            }
+            Col::Values(v) => Vector::typed(
+                rows.iter()
+                    .map(|r| r.map_or(Value::Null, |i| v[i as usize].clone()))
+                    .collect(),
+            ),
+        }
+    }
+
     /// Row `r`'s values appended to `out`.
     pub(crate) fn extend_row(&self, r: usize, out: &mut Row) {
         out.extend(self.cols.iter().map(|c| c.get(r)));

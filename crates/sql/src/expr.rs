@@ -313,6 +313,9 @@ pub struct Ctx<'a> {
     /// The rows a `LIMIT` takes of the sort right below it (with those it
     /// skips), by the sort's address: the sort keeps only those.
     pub(crate) bounds: RefCell<HashMap<usize, usize>>,
+    /// The hash joins' tables a pipeline probes, made before it runs
+    /// ([`crate::vector::prepare`]), by the join's address.
+    pub(crate) join_tables: RefCell<crate::vector::Tables>,
 }
 
 impl<'a> Ctx<'a> {
@@ -333,6 +336,7 @@ impl<'a> Ctx<'a> {
             key_filters: RefCell::new(HashMap::new()),
             memo_reads: RefCell::new(HashMap::new()),
             bounds: RefCell::new(HashMap::new()),
+            join_tables: RefCell::new(HashMap::new()),
         }
     }
 }

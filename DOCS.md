@@ -1579,7 +1579,27 @@ stashed, and spills).  A right side that is not a pipeline (a join's
 output, a group's) is gathered in columns the same way, its keys then
 evaluated — after every row, as when stashed —, and probed as above;
 once the columns pass work_mem, the rows gathered so far and the rest
-are stashed instead.  **Key filters** (`keyfilter`): once an inner or
+are stashed instead.  **Joins inside pipelines**: an inner, left, semi or
+anti hash join whose left side is such a pipeline is itself a step of
+it (`vector::Step::Probe`), so joins over joins, and the grouping, sort
+or projection above them, run as one pipeline, on the workers' morsels
+of the lowest scan.  Before it runs, `vector::prepare` makes each join's
+table in turn — outermost first, as the row-at-a-time join runs its
+right sides —, with its key filter; the workers' contexts get the
+tables (`Ctx::join_tables`), which drop once the pipelines that probe
+them are made.  A probe step joins a batch into a batch: each left row's
+matches in the table's order, its columns gathered from the left batch
+and from the table's columns (`Columns::gather`), a left join's
+unmatched rows with `NULL`s, a semi or anti join's rows by the
+selection alone; an `on` beyond the keys is evaluated over every
+candidate pair at once, and an error there runs the batch again a row
+at a time, so the rows before it and the error are the row-at-a-time
+join's.  A right side past work_mem is stashed, the pipeline above it
+does not run as one, and the row-at-a-time join takes the stashed rows
+and the tables made above them (`vector::take_built`) — nothing runs
+twice.  Not with an enclosing row (a correlated subquery's plan, which
+runs again per row); a recursive CTE's term makes its tables each
+round.  **Key filters** (`keyfilter`): once an inner or
 semi join that hashes its right side has that side in hand — narrowed by
 a filter, a join or a group, not a whole table — the integer values of
 each key go into a filter (their least and greatest; the values

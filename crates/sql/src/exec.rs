@@ -156,7 +156,7 @@ fn build_node<'a>(
             kind,
             on,
             algo,
-        } => join(left, right, *kind, on.as_ref(), algo, ctx, outer)?,
+        } => join(plan, left, right, *kind, on.as_ref(), algo, ctx, outer)?,
         Plan::Aggregate { input, group, aggs } => {
             aggregate(build(input, ctx, outer)?, group, aggs, ctx, outer, 0)?
         }
@@ -1010,6 +1010,7 @@ impl<'a> JoinSpec<'a> {
 /// read against it (a block nested loop).
 #[allow(clippy::too_many_arguments)]
 fn join<'a>(
+    node: &'a Plan,
     left: &'a Plan,
     right: &'a Plan,
     kind: JoinType,
@@ -1030,6 +1031,43 @@ fn join<'a>(
     if *algo == JoinAlgo::Lookup {
         return lookup_join(build(left, ctx, outer)?, right, spec);
     }
+    // A probe side's run that did not become a pipeline made this join's
+    // build side already (`crate::vector::prepare`): it is taken.
+    let made = match algo {
+        JoinAlgo::Hash {
+            build_left: false, ..
+        } => crate::vector::take_built(ctx, node),
+        _ => None,
+    };
+    let made = match made {
+        Some(crate::vector::Built::Table(table)) => {
+            let JoinAlgo::Hash {
+                left_keys,
+                right_keys,
+                ..
+            } = algo
+            else {
+                unreachable!("a hash join's table")
+            };
+            return probe_or_join(
+                crate::vector::hash_join_table(
+                    left,
+                    table,
+                    left_keys,
+                    right_keys,
+                    kind,
+                    on,
+                    right.width(),
+                    ctx,
+                    outer,
+                )?,
+                left,
+                spec,
+            );
+        }
+        Some(crate::vector::Built::Stored(rows)) => Some(rows),
+        None => None,
+    };
     // A semi or anti join hashed on its left side (the smaller), when the
     // right is a pipeline and the left fits in memory.
     if let JoinAlgo::Hash {
@@ -1067,8 +1105,9 @@ fn join<'a>(
         right_keys,
         ..
     } = algo
+        && made.is_none()
         && kind != JoinType::Full
-        && crate::vector::probes(left)
+        && crate::vector::probe_side(left)
         && crate::vector::probes(right)
         && let Some(table) = crate::vector::JoinTable::parallel(right, right_keys, ctx, outer)?
     {
@@ -1081,26 +1120,31 @@ fn join<'a>(
         ) {
             crate::keyfilter::register(ctx, left, right, kind, left_keys, &|j| table.key_ints(j));
         }
-        return crate::vector::hash_join_table(
+        return probe_or_join(
+            crate::vector::hash_join_table(
+                left,
+                std::sync::Arc::new(table),
+                left_keys,
+                right_keys,
+                kind,
+                on,
+                right.width(),
+                ctx,
+                outer,
+            )?,
             left,
-            table,
-            left_keys,
-            right_keys,
-            kind,
-            on,
-            right.width(),
-            ctx,
-            outer,
+            spec,
         );
     }
     // A pipeline probing a table: its right side gathered in columns, when
     // they fit.
     let gathered = match algo {
+        _ if made.is_some() => made,
         JoinAlgo::Hash {
             left_keys,
             right_keys,
             build_left: false,
-        } if kind != JoinType::Full && crate::vector::probes(left) => {
+        } if kind != JoinType::Full && crate::vector::probe_side(left) => {
             match crate::vector::JoinTable::gather(
                 build(right, ctx, outer)?,
                 right.width(),
@@ -1112,16 +1156,20 @@ fn join<'a>(
                     crate::keyfilter::register(ctx, left, right, kind, left_keys, &|j| {
                         table.key_ints(j)
                     });
-                    return crate::vector::hash_join_table(
+                    return probe_or_join(
+                        crate::vector::hash_join_table(
+                            left,
+                            std::sync::Arc::new(table),
+                            left_keys,
+                            right_keys,
+                            kind,
+                            on,
+                            right.width(),
+                            ctx,
+                            outer,
+                        )?,
                         left,
-                        table,
-                        left_keys,
-                        right_keys,
-                        kind,
-                        on,
-                        right.width(),
-                        ctx,
-                        outer,
+                        spec,
                     );
                 }
                 crate::vector::Gathered::Stored(stored) => Some(stored),
@@ -1169,24 +1217,46 @@ fn join<'a>(
         crate::spill::Stored::Memory(_),
     ) = (algo, &right_rows)
         && kind != JoinType::Full
-        && crate::vector::probes(left)
+        && crate::vector::probe_side(left)
     {
         let crate::spill::Stored::Memory(rows) = right_rows else {
             unreachable!("matched above")
         };
-        return crate::vector::hash_join(
+        return probe_or_join(
+            crate::vector::hash_join(
+                left,
+                rows,
+                left_keys,
+                right_keys,
+                kind,
+                on,
+                right.width(),
+                ctx,
+                outer,
+            )?,
             left,
-            rows,
-            left_keys,
-            right_keys,
-            kind,
-            on,
-            right.width(),
-            ctx,
-            outer,
+            spec,
         );
     }
     join_with(build(left, ctx, outer)?, right_rows, spec, 0)
+}
+
+/// A vectorized hash join's rows — or, when its left side did not become a
+/// pipeline, the right rows it gave back joined a row at a time.
+fn probe_or_join<'a>(
+    probed: std::result::Result<Rows<'a>, Vec<Row>>,
+    left: &'a Plan,
+    spec: JoinSpec<'a>,
+) -> Result<Rows<'a>> {
+    match probed {
+        Ok(rows) => Ok(rows),
+        Err(right) => join_with(
+            build(left, spec.ctx, spec.outer)?,
+            crate::spill::Stored::Memory(right),
+            spec,
+            0,
+        ),
+    }
 }
 
 /// An index nested loop: for each left row, the right plan (a scan by an
