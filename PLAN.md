@@ -2703,6 +2703,30 @@ the speed-up is made once, in the merged one.  The work, in this order:
   call 11.3 / 12.4 µs a row, against 185 / 184 one at a time; the
   parameterized point read through the C driver 28 / 27 → 25 / 25 µs
   (macOS's clock in whole µs), its 99th percentile 78 / 63 → 40 / 46.
+  *One wire format crate.*  The protocol was written down four times in
+  Rust: the server's values (through the storage's row encoding, whose
+  tags 0–10 the protocol once shared — and whose tags past them mean
+  other things: a parameter tagged 17 was read as a `time`), its
+  parameters, its columnar batches both ways, and the Rust driver's own
+  encoder and decoder.  `nucleus-wire` (`crates/wire`, named like the
+  other crates) holds them once: the versions, message kinds and value
+  tags by name; frames (`frame`, `begin_frame` / `end_frame`,
+  `read_frame`, `message_waiting`); a body's fields (`Reader`); a
+  value's encoding (`put::…`) and decoding (`read_value` into a
+  `WireValue`, which each end maps onto its own values); the columnar
+  layout's widths and padding.  The server encodes the protocol's values
+  itself now, so the storage's row encoding can change without the
+  wire.  Not taken: one value type for both ends — the server's rows
+  would be converted value by value on the hottest path; the protocol's
+  vocabulary and codecs shared, each end's values its own, is the
+  boundary.  Tests: the crate's round trips and cut bodies (malformed,
+  never a panic); a script comparing the old and new servers' replies
+  byte for byte (every type as rows and as columnar batches, parameters,
+  an error: identical); every driver's suite.  Measured, alternating, two
+  rounds: per statement the same (a parameterized point read 25.5 / 25.5
+  → 25.6 / 25.7 µs); a million rows of four columns read as rows 486 /
+  479 → 460 / 446 ms, as columnar batches 147 / 149 → 147 / 146
+  (`crates/client/examples/bigread.rs`, new).
 
 Each step records what it took from where, and what it measured, here
 and in `docs/benchmarks.md`.

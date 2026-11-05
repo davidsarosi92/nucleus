@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 nucleus-crypto.workspace = true
+nucleus-wire.workspace = true
 
 [dev-dependencies]
 nucleus-kv.workspace = true

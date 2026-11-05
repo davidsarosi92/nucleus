@@ -263,6 +263,10 @@ Inserts 100 rows a call (`Client::execute_many`: pipelined, one commit
 for all), per row: 11.3 / 12.4 µs, against 185 / 184 one at a time.
 Through the C driver, the parameterized point read: 28 / 27 µs, 25 / 25
 with a frame in one write and replies read through a buffer.
+A million rows of a bigint, a text, a numeric and a timestamp read whole
+(`crates/client/examples/bigread.rs`), median ms: as rows 479 → 446 with
+the server encoding the protocol's values itself (`nucleus-wire`), as
+columnar batches 149 → 146.
 
 Through the PostgreSQL front end (`--pg-compat`), the `postgres` driver's
 prepared statements (`modules/pg-compat/examples/pg_latency.rs`, the

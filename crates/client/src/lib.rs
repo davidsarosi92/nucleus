@@ -28,6 +28,10 @@ use std::io::{self, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream};
 use std::time::Duration;
 
+use nucleus_wire::{
+    Malformed, Reader, WireValue, columnar, frame, put, read_frame, read_value, tag,
+};
+
 /// The protocol version this driver speaks (2: registered types such as
 /// `uuid` arrive in their binary form; 3: `smallint`, `integer`, `real`,
 /// `bytea`, `time`, `inet` and `cidr` in theirs, `char(n)` and enums
@@ -207,23 +211,23 @@ pub enum Type {
 
 fn type_of_tag(t: u8) -> Type {
     match t {
-        1 => Type::Bool,
-        2 => Type::Int,
-        3 => Type::Float,
-        4 => Type::Text,
-        5 => Type::Numeric,
-        6 => Type::Date,
-        7 => Type::Timestamp,
-        8 => Type::TimestampTz,
-        9 => Type::Interval,
-        12 => Type::SmallInt,
-        13 => Type::Integer,
-        14 => Type::Real,
-        15 => Type::Bytea,
-        16 => Type::Time,
-        17 => Type::Char,
-        18 => Type::Inet,
-        19 => Type::Cidr,
+        tag::BOOL => Type::Bool,
+        tag::BIGINT => Type::Int,
+        tag::DOUBLE => Type::Float,
+        tag::TEXT => Type::Text,
+        tag::NUMERIC => Type::Numeric,
+        tag::DATE => Type::Date,
+        tag::TIMESTAMP => Type::Timestamp,
+        tag::TIMESTAMPTZ => Type::TimestampTz,
+        tag::INTERVAL => Type::Interval,
+        tag::SMALLINT => Type::SmallInt,
+        tag::INTEGER => Type::Integer,
+        tag::REAL => Type::Real,
+        tag::BYTEA => Type::Bytea,
+        tag::TIME => Type::Time,
+        tag::CHAR => Type::Char,
+        tag::INET => Type::Inet,
+        tag::CIDR => Type::Cidr,
         _ => Type::Unknown,
     }
 }
@@ -377,178 +381,106 @@ impl<T: Into<Value>> From<Option<T>> for Value {
 impl Value {
     fn encode(&self, out: &mut Vec<u8>) {
         match self {
-            Value::Null => out.push(0),
-            Value::Bool(b) => out.extend_from_slice(&[1, u8::from(*b)]),
-            Value::SmallInt(i) => {
-                out.push(12);
-                out.extend_from_slice(&i.to_le_bytes());
-            }
-            Value::Integer(i) => {
-                out.push(13);
-                out.extend_from_slice(&i.to_le_bytes());
-            }
-            Value::Int(i) => {
-                out.push(2);
-                out.extend_from_slice(&i.to_le_bytes());
-            }
-            Value::Real(f) => {
-                out.push(14);
-                out.extend_from_slice(&f.to_le_bytes());
-            }
-            Value::Float(f) => {
-                out.push(3);
-                out.extend_from_slice(&f.to_le_bytes());
-            }
-            Value::Bytes(b) => {
-                out.push(15);
-                out.extend_from_slice(&(b.len() as u32).to_le_bytes());
-                out.extend_from_slice(b);
-            }
-            Value::Time(t) => {
-                out.push(16);
-                out.extend_from_slice(&t.to_le_bytes());
-            }
+            Value::Null => put::null(out),
+            Value::Bool(b) => put::bool(out, *b),
+            Value::SmallInt(i) => put::smallint(out, *i),
+            Value::Integer(i) => put::integer(out, *i),
+            Value::Int(i) => put::bigint(out, *i),
+            Value::Real(f) => put::real(out, *f),
+            Value::Float(f) => put::double(out, *f),
+            Value::Bytes(b) => put::bytea(out, b),
+            Value::Time(t) => put::time(out, *t),
             Value::Inet { addr, bits } | Value::Cidr { addr, bits } => {
-                out.push(if matches!(self, Value::Inet { .. }) {
-                    18
-                } else {
-                    19
-                });
+                let cidr = matches!(self, Value::Cidr { .. });
                 match addr {
-                    IpAddr::V4(a) => {
-                        out.extend_from_slice(&[4, *bits]);
-                        out.extend_from_slice(&a.octets());
-                    }
-                    IpAddr::V6(a) => {
-                        out.extend_from_slice(&[6, *bits]);
-                        out.extend_from_slice(&a.octets());
-                    }
+                    IpAddr::V4(a) => put::net(out, cidr, 4, *bits, &a.octets()),
+                    IpAddr::V6(a) => put::net(out, cidr, 6, *bits, &a.octets()),
                 }
             }
-            Value::Text(s) => {
-                out.push(4);
-                out.extend_from_slice(&(s.len() as u32).to_le_bytes());
-                out.extend_from_slice(s.as_bytes());
-            }
-            Value::Numeric { mantissa, scale } => {
-                out.push(5);
-                out.extend_from_slice(&mantissa.to_le_bytes());
-                out.push(*scale);
-            }
-            Value::Date(d) => {
-                out.push(6);
-                out.extend_from_slice(&d.to_le_bytes());
-            }
-            Value::Timestamp(t) | Value::TimestampTz(t) => {
-                out.push(if matches!(self, Value::Timestamp(_)) {
-                    7
-                } else {
-                    8
-                });
-                out.extend_from_slice(&t.to_le_bytes());
-            }
+            Value::Text(s) => put::text(out, s),
+            Value::Numeric { mantissa, scale } => put::numeric(out, *mantissa, *scale),
+            Value::Date(d) => put::date(out, *d),
+            Value::Timestamp(t) => put::timestamp(out, *t, false),
+            Value::TimestampTz(t) => put::timestamp(out, *t, true),
             Value::Interval {
                 months,
                 days,
                 micros,
-            } => {
-                out.push(9);
-                out.extend_from_slice(&months.to_le_bytes());
-                out.extend_from_slice(&days.to_le_bytes());
-                out.extend_from_slice(&micros.to_le_bytes());
-            }
+            } => put::interval(out, *months, *days, *micros),
             Value::Array(items) => {
-                out.push(10);
-                out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+                put::array(out, items.len());
                 for v in items {
                     v.encode(out);
                 }
             }
-            Value::Uuid(b) => encode_ext(out, "uuid", b),
-            Value::Other { type_name, bytes } => encode_ext(out, type_name, bytes),
+            Value::Uuid(b) => put::ext(out, "uuid", b),
+            Value::Other { type_name, bytes } => put::ext(out, type_name, bytes),
         }
     }
 
     fn decode(r: &mut Input) -> Result<Value, Error> {
-        Ok(match r.u8()? {
-            0 => Value::Null,
-            1 => Value::Bool(r.u8()? != 0),
-            2 => Value::Int(r.i64()?),
-            12 => Value::SmallInt(i16::from_le_bytes(r.take(2)?.try_into().unwrap())),
-            13 => Value::Integer(r.i32()?),
-            14 => Value::Real(f32::from_bits(r.u32()?)),
-            15 => {
-                let n = r.u32()? as usize;
-                Value::Bytes(r.take(n)?.to_vec())
-            }
-            16 => Value::Time(r.i64()?),
-            tag @ (18 | 19) => {
-                let (family, bits) = (r.u8()?, r.u8()?);
-                let addr = match family {
-                    4 => IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(r.take(4)?).unwrap())),
-                    6 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(r.take(16)?).unwrap())),
-                    f => return Err(Error::Protocol(format!("unknown address family {f}"))),
-                };
-                if tag == 18 {
-                    Value::Inet { addr, bits }
-                } else {
-                    Value::Cidr { addr, bits }
-                }
-            }
-            3 => Value::Float(f64::from_bits(r.i64()? as u64)),
-            4 => Value::Text(r.str()?),
-            5 => {
-                let m = i128::from_le_bytes(r.take(16)?.try_into().unwrap());
-                Value::Numeric {
-                    mantissa: m,
-                    scale: r.u8()?,
-                }
-            }
-            6 => Value::Date(r.i32()?),
-            7 => Value::Timestamp(r.i64()?),
-            8 => Value::TimestampTz(r.i64()?),
-            9 => Value::Interval {
-                months: r.i32()?,
-                days: r.i32()?,
-                micros: r.i64()?,
+        Ok(Value::from_wire(read_value(&mut r.r)?))
+    }
+
+    /// The driver's value for what the protocol carried.
+    fn from_wire(v: WireValue) -> Value {
+        match v {
+            WireValue::Null => Value::Null,
+            WireValue::Bool(b) => Value::Bool(b),
+            WireValue::SmallInt(i) => Value::SmallInt(i),
+            WireValue::Integer(i) => Value::Integer(i),
+            WireValue::BigInt(i) => Value::Int(i),
+            WireValue::Real(f) => Value::Real(f),
+            WireValue::Double(f) => Value::Float(f),
+            WireValue::Text(s) => Value::Text(s),
+            WireValue::Numeric { mantissa, scale } => Value::Numeric { mantissa, scale },
+            WireValue::Date(d) => Value::Date(d),
+            WireValue::Timestamp(t) => Value::Timestamp(t),
+            WireValue::TimestampTz(t) => Value::TimestampTz(t),
+            WireValue::Interval {
+                months,
+                days,
+                micros,
+            } => Value::Interval {
+                months,
+                days,
+                micros,
             },
-            10 => {
-                let n = r.u32()? as usize;
-                let mut items = Vec::with_capacity(n.min(4096));
-                for _ in 0..n {
-                    items.push(Value::decode(r)?);
-                }
-                Value::Array(items)
+            WireValue::Array(items) => {
+                Value::Array(items.into_iter().map(Value::from_wire).collect())
             }
-            11 => {
-                let type_name = r.str()?;
-                let n = r.u32()? as usize;
-                let bytes = r.take(n)?;
-                match (type_name.as_str(), <[u8; 16]>::try_from(bytes)) {
+            WireValue::Ext { type_name, bytes } => {
+                match (type_name.as_str(), <[u8; 16]>::try_from(bytes.as_slice())) {
                     ("uuid", Ok(b)) => Value::Uuid(b),
-                    _ => Value::Other {
-                        type_name,
-                        bytes: bytes.to_vec(),
-                    },
+                    _ => Value::Other { type_name, bytes },
                 }
             }
-            t => return Err(Error::Protocol(format!("unknown value tag {t}"))),
-        })
+            WireValue::Bytea(b) => Value::Bytes(b),
+            WireValue::Time(t) => Value::Time(t),
+            WireValue::Net {
+                cidr,
+                family,
+                bits,
+                addr,
+            } => {
+                let addr = if family == 4 {
+                    IpAddr::V4(Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]))
+                } else {
+                    IpAddr::V6(Ipv6Addr::from(addr))
+                };
+                if cidr {
+                    Value::Cidr { addr, bits }
+                } else {
+                    Value::Inet { addr, bits }
+                }
+            }
+        }
     }
 
     /// Whether this is NULL.
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
-}
-
-/// A registered type's value: tag 11, its name, its binary form.
-fn encode_ext(out: &mut Vec<u8>, name: &str, bytes: &[u8]) {
-    out.push(11);
-    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
-    out.extend_from_slice(name.as_bytes());
-    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(bytes);
 }
 
 /// The canonical text of a uuid's 16 bytes (`8-4-4-4-12`, lower case).
@@ -727,26 +659,27 @@ pub enum TxnStatus {
 }
 
 struct Input<'a> {
-    b: &'a [u8],
+    r: Reader<'a>,
+}
+
+impl From<Malformed> for Error {
+    fn from(e: Malformed) -> Self {
+        Error::Protocol(e.0.into())
+    }
 }
 
 impl<'a> Input<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        if self.b.len() < n {
-            return Err(Error::Protocol("message too short".into()));
-        }
-        let (h, t) = self.b.split_at(n);
-        self.b = t;
-        Ok(h)
+    fn new(b: &'a [u8]) -> Self {
+        Self { r: Reader::new(b) }
     }
     fn u8(&mut self) -> Result<u8, Error> {
-        Ok(self.take(1)?[0])
+        Ok(self.r.u8()?)
     }
     /// The `E` message's fields: the hint, from version 5, follows.
     fn server_error(&mut self) -> Result<ServerError, Error> {
         let code = self.str()?;
         let message = self.str()?;
-        let hint = if self.b.is_empty() {
+        let hint = if self.r.is_empty() {
             None
         } else {
             Some(self.str()?).filter(|h| !h.is_empty())
@@ -758,21 +691,13 @@ impl<'a> Input<'a> {
         })
     }
     fn u16(&mut self) -> Result<u16, Error> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+        Ok(self.r.u16()?)
     }
     fn u32(&mut self) -> Result<u32, Error> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    fn i32(&mut self) -> Result<i32, Error> {
-        Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    fn i64(&mut self) -> Result<i64, Error> {
-        Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        Ok(self.r.u32()?)
     }
     fn str(&mut self) -> Result<String, Error> {
-        let n = self.u32()? as usize;
-        String::from_utf8(self.take(n)?.to_vec())
-            .map_err(|_| Error::Protocol("string is not UTF-8".into()))
+        Ok(self.r.str()?)
     }
     /// `C`: the result's columns.
     fn columns(&mut self) -> Result<Vec<Column>, Error> {
@@ -782,12 +707,12 @@ impl<'a> Input<'a> {
             let name = self.str()?;
             let tag = self.u8()?;
             let ty = match tag {
-                10 => Type::Array(Box::new(type_of_tag(self.u8()?))),
-                11 => match self.str()? {
+                tag::ARRAY => Type::Array(Box::new(type_of_tag(self.u8()?))),
+                tag::EXT => match self.str()? {
                     n if n == "uuid" => Type::Uuid,
                     n => Type::Other(n),
                 },
-                20 => Type::Enum(self.str()?),
+                tag::ENUM => Type::Enum(self.str()?),
                 _ => type_of_tag(tag),
             };
             columns.push(Column { name, ty });
@@ -805,7 +730,7 @@ impl<'a> Input<'a> {
     /// `K`: the command tag and count.
     fn tag(&mut self) -> Result<(String, u64), Error> {
         let command = self.str()?;
-        let count = u64::from_le_bytes(self.take(8)?.try_into().unwrap());
+        let count = self.r.u64()?;
         Ok((command, count))
     }
 }
@@ -828,16 +753,8 @@ fn nonce() -> String {
     nucleus_crypto::base64_encode(&bytes)
 }
 
-fn frame(kind: u8, body: &[u8]) -> Vec<u8> {
-    let mut m = vec![kind];
-    m.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    m.extend_from_slice(body);
-    m
-}
-
 fn put_str(b: &mut Vec<u8>, s: &str) {
-    b.extend_from_slice(&(s.len() as u32).to_le_bytes());
-    b.extend_from_slice(s.as_bytes());
+    put::str(b, s);
 }
 
 /// How many bytes of statements [`Client::pipeline`] sends before it
@@ -927,7 +844,7 @@ impl Client {
         let mut scram: Option<nucleus_crypto::ScramClient> = None;
         loop {
             let (kind, body) = c.read()?;
-            let mut b = Input { b: &body };
+            let mut b = Input::new(&body);
             match kind {
                 b'A' => {
                     let msg = b.str()?;
@@ -1022,15 +939,10 @@ impl Client {
     }
 
     fn read(&mut self) -> Result<(u8, Vec<u8>), Error> {
-        let mut h = [0u8; 5];
-        self.conn.read_exact(&mut h)?;
-        let len = u32::from_le_bytes(h[1..5].try_into().unwrap());
-        if len > 1 << 30 {
-            return Err(Error::Protocol("message too large".into()));
-        }
-        let mut body = vec![0u8; len as usize];
-        self.conn.read_exact(&mut body)?;
-        Ok((h[0], body))
+        read_frame(&mut self.conn).map_err(|e| match e.kind() {
+            io::ErrorKind::InvalidData => Error::Protocol(e.to_string()),
+            _ => Error::Io(e),
+        })
     }
 
     fn set_status(&mut self, body: &[u8]) {
@@ -1169,7 +1081,7 @@ impl Client {
         let mut current: Option<(Vec<Column>, Vec<Vec<Value>>)> = None;
         loop {
             let (kind, body) = self.read()?;
-            let mut b = Input { b: &body };
+            let mut b = Input::new(&body);
             match kind {
                 b'C' => current = Some((b.columns()?, Vec::new())),
                 b'D' => {
@@ -1271,7 +1183,7 @@ impl Client {
         let mut failed = None;
         loop {
             let (kind, body) = self.read()?;
-            let mut b = Input { b: &body };
+            let mut b = Input::new(&body);
             match kind {
                 b'C' => {
                     return Ok(Cursor {
@@ -1392,7 +1304,7 @@ impl Client {
         }
         self.send_query(sql, &[], Format::Typed, 0)?;
         let (kind, body) = self.read()?;
-        let mut b = Input { b: &body };
+        let mut b = Input::new(&body);
         match kind {
             b'I' => Ok(Some(b.columns()?)),
             // An error (or a statement that is not a COPY): the rest is read
@@ -1423,7 +1335,7 @@ impl Client {
                 Some(m) => m,
                 None => self.read()?,
             };
-            let mut b = Input { b: &body };
+            let mut b = Input::new(&body);
             match kind {
                 b'K' => count = b.tag()?.1,
                 b'E' => error = Some(b.server_error()?),
@@ -1536,7 +1448,7 @@ impl Cursor<'_> {
     fn drain(&mut self) -> Result<(), Error> {
         while !self.ready {
             let (kind, body) = self.client.read().inspect_err(|_| self.ready = true)?;
-            let mut b = Input { b: &body };
+            let mut b = Input::new(&body);
             match kind {
                 b'D' | b'C' | b'B' => {}
                 b'I' => self.client.refuse_copy()?,
@@ -1566,7 +1478,7 @@ impl Iterator for Cursor<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         let n = self.columns.len();
         self.next_body(b'D')
-            .map(|body| body.and_then(|b| Input { b: &b }.row(n)))
+            .map(|body| body.and_then(|b| Input::new(&b).row(n)))
     }
 }
 
@@ -1581,7 +1493,7 @@ impl Cursor<'_> {
                     return Some(Err(e));
                 }
             };
-            let mut b = Input { b: &body };
+            let mut b = Input::new(&body);
             let step = match kind {
                 k if k == data => return Some(Ok(body)),
                 // The batch is read: the next.
@@ -1649,11 +1561,7 @@ fn fit(v: &Value, t: &Type) -> Option<Value> {
 /// A batch of `rows` of columns `types`, as a client sends it for `COPY`
 /// (DOCS §10: the columnar layout).
 fn encode_batch(types: &[Type], columns: &[Column], rows: &[Vec<Value>]) -> Result<Vec<u8>, Error> {
-    let pad = |b: &mut Vec<u8>| {
-        while !b.len().is_multiple_of(8) {
-            b.push(0);
-        }
-    };
+    let pad = |b: &mut Vec<u8>| columnar::pad(b, 0);
     let mismatch = |c: usize, v: &Value| {
         Error::Value(format!(
             "{v:?} cannot be sent as column \"{}\" ({:?})",
@@ -1813,13 +1721,34 @@ pub enum ColumnData {
 /// How a column of a type is laid out in a batch (DOCS §10).
 fn layout(t: &Type) -> usize {
     match t {
-        Type::Bool => 1,
-        Type::SmallInt => 2,
-        Type::Integer | Type::Real | Type::Date => 4,
-        Type::Int | Type::Float | Type::Timestamp | Type::TimestampTz | Type::Time => 8,
-        Type::Interval | Type::Uuid => 16,
-        Type::Numeric => 17,
-        _ => 0,
+        Type::Uuid => columnar::width(tag::EXT, Some("uuid")),
+        t => columnar::width(tag_of_type(t), None),
+    }
+}
+
+/// A column type's tag (its own type's, for the columnar layout).
+fn tag_of_type(t: &Type) -> u8 {
+    match t {
+        Type::Bool => tag::BOOL,
+        Type::SmallInt => tag::SMALLINT,
+        Type::Integer => tag::INTEGER,
+        Type::Int => tag::BIGINT,
+        Type::Real => tag::REAL,
+        Type::Float => tag::DOUBLE,
+        Type::Numeric => tag::NUMERIC,
+        Type::Date => tag::DATE,
+        Type::Timestamp => tag::TIMESTAMP,
+        Type::TimestampTz => tag::TIMESTAMPTZ,
+        Type::Time => tag::TIME,
+        Type::Interval => tag::INTERVAL,
+        Type::Bytea => tag::BYTEA,
+        Type::Inet => tag::INET,
+        Type::Cidr => tag::CIDR,
+        Type::Char => tag::CHAR,
+        Type::Array(_) => tag::ARRAY,
+        Type::Uuid | Type::Other(_) => tag::EXT,
+        Type::Enum(_) => tag::ENUM,
+        Type::Text | Type::Unknown => tag::TEXT,
     }
 }
 
@@ -1836,7 +1765,7 @@ impl Batch {
             *at = end;
             Ok(s)
         };
-        let align = |at: &mut usize| *at = at.div_ceil(8) * 8;
+        let align = |at: &mut usize| *at = columnar::align(*at);
         let rows = u32::from_le_bytes(take(&mut at, 4)?.try_into().unwrap()) as usize;
         let mut columns = Vec::with_capacity(types.len());
         for t in &types {
@@ -1972,9 +1901,9 @@ impl Batch {
                         // The row format's payload, behind its tag.
                         let mut tagged = vec![if *t == Type::Inet { 18 } else { 19 }];
                         tagged.extend_from_slice(b);
-                        Value::decode(&mut Input { b: &tagged })?
+                        Value::decode(&mut Input::new(&tagged))?
                     }
-                    Type::Array(_) => Value::decode(&mut Input { b })?,
+                    Type::Array(_) => Value::decode(&mut Input::new(b))?,
                     _ => Value::Text(
                         String::from_utf8(b.to_vec())
                             .map_err(|_| Error::Protocol("text is not UTF-8".into()))?,

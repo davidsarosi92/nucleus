@@ -450,6 +450,7 @@ dependencies = [
  "nucleus-server",
  "nucleus-sql",
  "nucleus-testkit",
+ "nucleus-wire",
 ]
 
 [[package]]
@@ -555,6 +556,7 @@ dependencies = [
  "nucleus-kv",
  "nucleus-platform",
  "nucleus-sql",
+ "nucleus-wire",
 ]
 
 [[package]]
@@ -606,6 +608,10 @@ dependencies = [
  "nucleus-platform",
  "nucleus-storage",
 ]
+
+[[package]]
+name = "nucleus-wire"
+version = "0.1.0"
 
 [[package]]
 name = "num-conv"

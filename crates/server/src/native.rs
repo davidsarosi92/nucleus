@@ -6,12 +6,9 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use nucleus_kv::Kv;
-use nucleus_sql::encoding::{Reader, decode_value, encode_value};
 use nucleus_sql::ext::TypeRef;
-
-/// The value and type tag of a registered type (version 2).
-const EXT: u8 = 11;
 use nucleus_sql::{DataType, Error, OutColumn, Row, Session, Sink, TxnStatus, Value};
+use nucleus_wire::{Reader, WireValue, message_waiting, put, read_value, tag};
 
 use crate::Config;
 
@@ -20,7 +17,7 @@ use crate::Config;
 /// than one per 8 KiB.
 const WIRE_BUFFER: usize = 64 << 10;
 
-/// The newest protocol version this server speaks.  Version 2 adds
+/// The newest protocol version this server speaks ([`nucleus_wire::VERSION`]).  Version 2 adds
 /// registered types (value and type tag 11: name and binary form); a
 /// version-1 client gets them as text.  Version 3 adds tags 12–20
 /// (`smallint`, `integer`, `real`, `bytea`, `time`, `char(n)`, `inet`,
@@ -35,10 +32,9 @@ const WIRE_BUFFER: usize = 64 << 10;
 /// per column instead of a `D` per row; and `COPY … FROM STDIN`: `I`, then
 /// the client's data (`d` bytes, `B` batches of typed rows) to `e` (or
 /// `f`).
-pub const VERSION: u16 = 7;
+pub const VERSION: u16 = nucleus_wire::VERSION;
 /// The oldest it still speaks.
-pub const MIN_VERSION: u16 = 1;
-const MAX_BODY: u32 = 1 << 30;
+pub const MIN_VERSION: u16 = nucleus_wire::MIN_VERSION;
 
 /// An outgoing message.
 struct Msg {
@@ -47,36 +43,35 @@ struct Msg {
 
 impl Msg {
     fn new(kind: u8) -> Self {
-        Self {
-            buf: vec![kind, 0, 0, 0, 0],
-        }
+        let mut buf = Vec::new();
+        nucleus_wire::begin_frame(&mut buf, kind);
+        Self { buf }
     }
     fn u8(mut self, v: u8) -> Self {
         self.buf.push(v);
         self
     }
     fn u16(mut self, v: u16) -> Self {
-        self.buf.extend_from_slice(&v.to_le_bytes());
+        put::u16(&mut self.buf, v);
         self
     }
     fn u32(mut self, v: u32) -> Self {
-        self.buf.extend_from_slice(&v.to_le_bytes());
+        put::u32(&mut self.buf, v);
         self
     }
     fn u64(mut self, v: u64) -> Self {
-        self.buf.extend_from_slice(&v.to_le_bytes());
+        put::u64(&mut self.buf, v);
         self
     }
     fn str(mut self, s: &str) -> Self {
-        self = self.u32(s.len() as u32);
-        self.buf.extend_from_slice(s.as_bytes());
+        put::str(&mut self.buf, s);
         self
     }
     fn ty(mut self, t: Option<DataType>, version: u16) -> Self {
         match t {
-            Some(DataType::Ext(t)) if version >= 2 => self.u8(EXT).str(t.name()),
-            Some(DataType::Enum(e)) if version >= 3 => self.u8(ENUM).str(e.name()),
-            None => self.u8(0),
+            Some(DataType::Ext(t)) if version >= 2 => self.u8(tag::EXT).str(t.name()),
+            Some(DataType::Enum(e)) if version >= 3 => self.u8(tag::ENUM).str(e.name()),
+            None => self.u8(tag::NULL),
             Some(t @ DataType::Array(e)) => {
                 self = self.u8(type_tag(t, version));
                 self.u8(type_tag(*e, version))
@@ -89,89 +84,70 @@ impl Msg {
         self
     }
     fn finish(mut self) -> Vec<u8> {
-        let len = (self.buf.len() - 5) as u32;
-        self.buf[1..5].copy_from_slice(&len.to_le_bytes());
+        nucleus_wire::end_frame(&mut self.buf, 0);
         self.buf
     }
 }
 
-/// An enum column's type tag (version 3): its name follows.
-const ENUM: u8 = 20;
-
 /// A column type's tag in protocol `version` (DOCS §10).
-fn type_tag(t: DataType, version: u16) -> u8 {
+pub(crate) fn type_tag(t: DataType, version: u16) -> u8 {
     let v3 = version >= 3;
     match t {
-        DataType::Bool => 1,
-        DataType::SmallInt if v3 => 12,
-        DataType::Integer if v3 => 13,
-        DataType::SmallInt | DataType::Integer | DataType::BigInt => 2,
-        DataType::Real if v3 => 14,
-        DataType::Real | DataType::Float => 3,
-        DataType::Bytea if v3 => 15,
-        DataType::Time if v3 => 16,
-        DataType::Char if v3 => 17,
-        DataType::Inet if v3 => 18,
-        DataType::Cidr if v3 => 19,
+        DataType::Bool => tag::BOOL,
+        DataType::SmallInt if v3 => tag::SMALLINT,
+        DataType::Integer if v3 => tag::INTEGER,
+        DataType::SmallInt | DataType::Integer | DataType::BigInt => tag::BIGINT,
+        DataType::Real if v3 => tag::REAL,
+        DataType::Real | DataType::Float => tag::DOUBLE,
+        DataType::Bytea if v3 => tag::BYTEA,
+        DataType::Time if v3 => tag::TIME,
+        DataType::Char if v3 => tag::CHAR,
+        DataType::Inet if v3 => tag::INET,
+        DataType::Cidr if v3 => tag::CIDR,
         DataType::Text
         | DataType::Char
         | DataType::Bytea
         | DataType::Time
         | DataType::Inet
-        | DataType::Cidr => 4,
-        DataType::Numeric => 5,
-        DataType::Date => 6,
-        DataType::Timestamp => 7,
-        DataType::TimestampTz => 8,
-        DataType::Interval => 9,
-        DataType::Array(_) => 10,
+        | DataType::Cidr => tag::TEXT,
+        DataType::Numeric => tag::NUMERIC,
+        DataType::Date => tag::DATE,
+        DataType::Timestamp => tag::TIMESTAMP,
+        DataType::TimestampTz => tag::TIMESTAMPTZ,
+        DataType::Interval => tag::INTERVAL,
+        DataType::Array(_) => tag::ARRAY,
         // Registered types (to version-1 clients) and enums (before
         // version 3) travel as text.
-        DataType::Ext(_) | DataType::Enum(_) => 4,
+        DataType::Ext(_) | DataType::Enum(_) => tag::TEXT,
     }
 }
 
 /// Appends a value of column type `ty` in the protocol's encoding (DOCS
-/// §10).  Its tags 0–10 are the row encoding's version 1, but it is the
-/// protocol's own: the storage may store a value more compactly without
-/// the protocol changing.
+/// §10, [`nucleus_wire`]) — the protocol's own, not the storage's.
 pub(crate) fn wire_value(buf: &mut Vec<u8>, v: &Value, ty: Option<DataType>, version: u16) {
     let v3 = version >= 3;
     match v {
+        Value::Null => put::null(buf),
+        Value::Bool(b) => put::bool(buf, *b),
         Value::Int(i) => match ty {
-            Some(DataType::SmallInt) if v3 => {
-                buf.push(12);
-                buf.extend_from_slice(&(*i as i16).to_le_bytes());
-            }
-            Some(DataType::Integer) if v3 => {
-                buf.push(13);
-                buf.extend_from_slice(&(*i as i32).to_le_bytes());
-            }
-            _ => {
-                buf.push(2);
-                buf.extend_from_slice(&i.to_le_bytes());
-            }
+            Some(DataType::SmallInt) if v3 => put::smallint(buf, *i as i16),
+            Some(DataType::Integer) if v3 => put::integer(buf, *i as i32),
+            _ => put::bigint(buf, *i),
         },
-        Value::Real(f) if v3 => {
-            buf.push(14);
-            buf.extend_from_slice(&f.to_le_bytes());
-        }
-        Value::Real(f) => {
-            buf.push(3);
-            buf.extend_from_slice(&f64::from(*f).to_le_bytes());
-        }
-        Value::Bytea(b) if v3 => {
-            buf.push(15);
-            buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
-            buf.extend_from_slice(b);
-        }
-        Value::Time(t) if v3 => {
-            buf.push(16);
-            buf.extend_from_slice(&t.to_le_bytes());
-        }
+        Value::Real(f) if v3 => put::real(buf, *f),
+        Value::Real(f) => put::double(buf, f64::from(*f)),
+        Value::Float(f) => put::double(buf, *f),
+        Value::Text(s) => put::text(buf, s),
+        Value::Numeric(d) => put::numeric(buf, d.mantissa(), d.scale() as u8),
+        Value::Date(d) => put::date(buf, *d),
+        Value::Timestamp(t) => put::timestamp(buf, *t, false),
+        Value::TimestampTz(t) => put::timestamp(buf, *t, true),
+        Value::Interval(i) => put::interval(buf, i.months, i.days, i.micros),
+        Value::Bytea(b) if v3 => put::bytea(buf, b),
+        Value::Time(t) if v3 => put::time(buf, *t),
         Value::Inet(n) | Value::Cidr(n) if v3 => {
-            buf.push(if matches!(v, Value::Inet(_)) { 18 } else { 19 });
-            buf.extend(n.to_bytes());
+            let b = n.to_bytes();
+            put::net(buf, matches!(v, Value::Cidr(_)), b[0], b[1], &b[2..]);
         }
         // char(n) and enum values are text (their column types say what
         // they are); older clients get the others as text too.
@@ -180,25 +156,17 @@ pub(crate) fn wire_value(buf: &mut Vec<u8>, v: &Value, ty: Option<DataType>, ver
         | Value::Char(_)
         | Value::Inet(_)
         | Value::Cidr(_)
-        | Value::Enum(_) => encode_value(buf, &Value::Text(v.render())),
+        | Value::Enum(_) => put::text(buf, &v.render()),
         Value::Array(items) => {
-            buf.push(10);
-            buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
+            put::array(buf, items.len());
             let elem = ty.and_then(DataType::element);
             for item in items {
                 wire_value(buf, item, elem, version);
             }
         }
-        Value::Ext(t, bytes) if version >= 2 => {
-            buf.push(EXT);
-            buf.extend_from_slice(&(t.name().len() as u32).to_le_bytes());
-            buf.extend_from_slice(t.name().as_bytes());
-            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(bytes);
-        }
+        Value::Ext(t, bytes) if version >= 2 => put::ext(buf, t.name(), bytes),
         // Registered types travel as text to version-1 clients.
-        Value::Ext(..) => encode_value(buf, &Value::Text(v.render())),
-        v => encode_value(buf, v),
+        Value::Ext(..) => put::text(buf, &v.render()),
     }
 }
 
@@ -211,53 +179,34 @@ fn protocol(what: impl Into<String>) -> Error {
 }
 
 fn read_message<R: Read + ?Sized>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
-    let mut h = [0u8; 5];
-    r.read_exact(&mut h)?;
-    let len = u32::from_le_bytes(h[1..5].try_into().unwrap());
-    if len > MAX_BODY {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "message too large",
-        ));
-    }
-    let mut body = vec![0u8; len as usize];
-    r.read_exact(&mut body)?;
-    Ok((h[0], body))
-}
-
-/// Whether `buffered` holds a whole message.
-fn message_waiting(buffered: &[u8]) -> bool {
-    buffered.len() >= 5
-        && buffered.len() - 5 >= u32::from_le_bytes(buffered[1..5].try_into().unwrap()) as usize
+    nucleus_wire::read_frame(r)
 }
 
 /// Reads the fields of a client message.
 struct Body<'a> {
-    b: &'a [u8],
+    r: Reader<'a>,
 }
 
 impl<'a> Body<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        if self.b.len() < n {
-            return Err(protocol("message too short"));
-        }
-        let (h, t) = self.b.split_at(n);
-        self.b = t;
-        Ok(h)
+    fn new(b: &'a [u8]) -> Self {
+        Self { r: Reader::new(b) }
     }
     fn u8(&mut self) -> Result<u8, Error> {
-        Ok(self.take(1)?[0])
+        self.r.u8().map_err(malformed)
     }
     fn u16(&mut self) -> Result<u16, Error> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+        self.r.u16().map_err(malformed)
     }
     fn u32(&mut self) -> Result<u32, Error> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        self.r.u32().map_err(malformed)
     }
     fn str(&mut self) -> Result<String, Error> {
-        let n = u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as usize;
-        String::from_utf8(self.take(n)?.to_vec()).map_err(|_| protocol("string is not UTF-8"))
+        self.r.str().map_err(malformed)
     }
+}
+
+fn malformed(e: nucleus_wire::Malformed) -> Error {
+    protocol(e.0)
 }
 
 /// `E` for a session of `version` (0: before one was agreed).
@@ -362,12 +311,12 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
         match kind {
             b'Q' => {
                 let parsed = (|| -> Result<(String, u8, u32, Vec<Value>), Error> {
-                    let mut b = Body { b: &body };
+                    let mut b = Body::new(&body);
                     let sql = b.str()?;
                     let format = b.u8()?;
                     let fetch = if version >= 6 { b.u32()? } else { 0 };
                     let n = b.u16()? as usize;
-                    let mut r = Reader::new(b.b);
+                    let mut r = b.r;
                     let mut params = Vec::with_capacity(n);
                     for _ in 0..n {
                         params.push(parameter(&mut r)?);
@@ -439,7 +388,7 @@ fn login(
         if kind != b'H' {
             return Err(protocol("expected Hello"));
         }
-        let mut b = Body { b: &body };
+        let mut b = Body::new(&body);
         let version = b.u16()?;
         if version < MIN_VERSION {
             return Err(protocol(format!(
@@ -615,7 +564,7 @@ fn exchange(
         if kind != b'a' {
             return Ok(Err(protocol("expected an authentication response")));
         }
-        Ok(Body { b: &body }.str())
+        Ok(Body::new(&body).str())
     };
     send(out, &mechanisms)?;
     let first = match receive(input)? {
@@ -686,88 +635,81 @@ fn exchange(
 /// encoding's version 1, 11 a registered type's name and binary form,
 /// 12–19 version 3's).
 pub(crate) fn parameter(r: &mut Reader) -> Result<Value, Error> {
+    let v = read_value(r).map_err(|_| protocol("malformed parameter"))?;
+    from_wire(v)
+}
+
+/// The value a parameter carried.
+fn from_wire(v: WireValue) -> Result<Value, Error> {
     let bad = |_| protocol("malformed parameter");
-    let net = |r: &mut Reader| -> Result<nucleus_sql::ext::Net, Error> {
-        let family = r.u8().map_err(bad)?;
-        let bits = r.u8().map_err(bad)?;
-        let n = match family {
-            4 => 4,
-            6 => 16,
-            _ => return Err(protocol("malformed parameter")),
-        };
-        let mut b = vec![family, bits];
-        b.extend_from_slice(r.take(n).map_err(bad)?);
-        nucleus_sql::ext::Net::from_bytes(&b).ok_or_else(|| protocol("malformed parameter"))
-    };
-    match r.peek() {
-        Some(12) => {
-            r.u8().map_err(bad)?;
-            return Ok(Value::Int(i64::from(r.u16().map_err(bad)? as i16)));
+    Ok(match v {
+        WireValue::Null => Value::Null,
+        WireValue::Bool(b) => Value::Bool(b),
+        WireValue::SmallInt(i) => Value::Int(i64::from(i)),
+        WireValue::Integer(i) => Value::Int(i64::from(i)),
+        WireValue::BigInt(i) => Value::Int(i),
+        WireValue::Real(f) => Value::Real(f),
+        WireValue::Double(f) => Value::Float(f),
+        WireValue::Text(s) => Value::Text(s),
+        WireValue::Numeric { mantissa, scale } => {
+            Value::Numeric(nucleus_sql::ext::Decimal::new(mantissa, u32::from(scale)).map_err(bad)?)
         }
-        Some(13) => {
-            r.u8().map_err(bad)?;
-            return Ok(Value::Int(i64::from(r.u32().map_err(bad)? as i32)));
+        WireValue::Date(d) => Value::Date(d),
+        WireValue::Timestamp(t) => Value::Timestamp(t),
+        WireValue::TimestampTz(t) => Value::TimestampTz(t),
+        WireValue::Interval {
+            months,
+            days,
+            micros,
+        } => Value::Interval(nucleus_sql::ext::Interval {
+            months,
+            days,
+            micros,
+        }),
+        WireValue::Array(items) => {
+            Value::Array(items.into_iter().map(from_wire).collect::<Result<_, _>>()?)
         }
-        Some(14) => {
-            r.u8().map_err(bad)?;
-            return Ok(Value::Real(f32::from_bits(r.u32().map_err(bad)?)));
-        }
-        Some(15) => {
-            r.u8().map_err(bad)?;
-            let n = r.u32().map_err(bad)? as usize;
-            return Ok(Value::Bytea(r.take(n).map_err(bad)?.into()));
-        }
-        Some(16) => {
-            r.u8().map_err(bad)?;
-            let t = r.u64().map_err(bad)? as i64;
+        WireValue::Bytea(b) => Value::Bytea(b.into()),
+        WireValue::Time(t) => {
             if !(0..=86_400_000_000).contains(&t) {
                 return Err(protocol("malformed parameter: a time of day out of range"));
             }
-            return Ok(Value::Time(t));
+            Value::Time(t)
         }
-        Some(18) => {
-            r.u8().map_err(bad)?;
-            return Ok(Value::Inet(net(r)?));
-        }
-        Some(19) => {
-            r.u8().map_err(bad)?;
-            let n = net(r)?;
-            if n.network() != n {
+        WireValue::Net {
+            cidr,
+            family,
+            bits,
+            addr,
+        } => {
+            let mut b = vec![family, bits];
+            b.extend_from_slice(&addr[..nucleus_wire::net_len(family)]);
+            let n = nucleus_sql::ext::Net::from_bytes(&b)
+                .ok_or_else(|| protocol("malformed parameter"))?;
+            if !cidr {
+                Value::Inet(n)
+            } else if n.network() != n {
                 return Err(Error::invalid_text(
                     "invalid cidr value: it has bits set to the right of its mask",
                 ));
+            } else {
+                Value::Cidr(n)
             }
-            return Ok(Value::Cidr(n));
         }
-        Some(10) => {
-            r.u8().map_err(bad)?;
-            let n = r.u32().map_err(bad)? as usize;
-            let mut items = Vec::with_capacity(n.min(4096));
-            for _ in 0..n {
-                items.push(parameter(r)?);
-            }
-            return Ok(Value::Array(items));
+        WireValue::Ext { type_name, bytes } => {
+            let t = TypeRef::named(&type_name).ok_or_else(|| Error {
+                code: "42704",
+                message: format!("type \"{type_name}\" does not exist"),
+                hint: None,
+            })?;
+            // The binary form is the canonical one; checked, as any input is.
+            let v = Value::ext(t, bytes);
+            t.imp()
+                .input(&t.imp().output(&v))
+                .map_err(|_| protocol("malformed parameter"))?;
+            v
         }
-        _ => {}
-    }
-    if r.peek() != Some(EXT) {
-        return decode_value(r).map_err(bad);
-    }
-    r.u8().map_err(bad)?;
-    let name = r.str().map_err(bad)?;
-    let n = r.u32().map_err(bad)? as usize;
-    let bytes = r.take(n).map_err(bad)?;
-    let t = TypeRef::named(&name).ok_or_else(|| Error {
-        code: "42704",
-        message: format!("type \"{name}\" does not exist"),
-        hint: None,
-    })?;
-    // The binary form is the canonical one; checked, as any input is.
-    let v = Value::ext(t, bytes.to_vec());
-    t.imp()
-        .input(&t.imp().output(&v))
-        .map_err(|_| protocol("malformed parameter"))?;
-    Ok(v)
+    })
 }
 
 /// How a result's rows go.
@@ -874,7 +816,7 @@ impl<R: Read, W: Write> Wire<'_, R, W> {
         let input = &mut *self.input;
         match nucleus_sql::budget::paused(|| read_message(input)) {
             Ok((b'F', body)) => {
-                let n = Body { b: &body }.u32()?;
+                let n = Body::new(&body).u32()?;
                 Ok(Some((n > 0).then_some(n)))
             }
             Ok((b'c', _)) => Ok(None),
@@ -944,7 +886,7 @@ impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
             }
             Ok((b'f', body)) => {
                 self.copying = None;
-                let why = Body { b: &body }.str().unwrap_or_default();
+                let why = Body::new(&body).str().unwrap_or_default();
                 Err(Error::query_canceled(format!(
                     "COPY from stdin failed: {why}"
                 )))

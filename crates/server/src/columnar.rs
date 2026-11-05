@@ -13,6 +13,7 @@
 
 use nucleus_sql::vector::{Batch, TimeKind, Vector};
 use nucleus_sql::{DataType, Error, Row, Value};
+use nucleus_wire::{Reader, columnar, put, tag};
 
 /// Rows per batch when the client asked for no batch size.
 pub const DEFAULT_BATCH: usize = 16_384;
@@ -27,27 +28,19 @@ enum Layout {
 }
 
 fn layout(t: DataType) -> Layout {
-    match t {
-        DataType::Bool => Layout::Fixed(1),
-        DataType::SmallInt => Layout::Fixed(2),
-        DataType::Integer | DataType::Real | DataType::Date => Layout::Fixed(4),
-        DataType::BigInt
-        | DataType::Float
-        | DataType::Timestamp
-        | DataType::TimestampTz
-        | DataType::Time => Layout::Fixed(8),
-        DataType::Interval => Layout::Fixed(16),
-        DataType::Numeric => Layout::Fixed(17),
-        DataType::Ext(e) if e.name() == "uuid" => Layout::Fixed(16),
-        _ => Layout::Var,
+    let width = match t {
+        DataType::Ext(e) => columnar::width(tag::EXT, Some(e.name())),
+        t => columnar::width(crate::native::type_tag(t, nucleus_wire::VERSION), None),
+    };
+    match width {
+        0 => Layout::Var,
+        w => Layout::Fixed(w),
     }
 }
 
 fn pad(buf: &mut Vec<u8>) {
     // Relative to the body, after the frame's 5 header bytes.
-    while !(buf.len() - 5).is_multiple_of(8) {
-        buf.push(0);
-    }
+    columnar::pad(buf, 5);
 }
 
 fn mismatch(v: &Value, t: DataType) -> Error {
@@ -78,10 +71,10 @@ fn fixed(buf: &mut Vec<u8>, v: &Value, t: DataType) -> Result<(), Error> {
             buf.extend_from_slice(&i.micros.to_le_bytes());
         }
         (DataType::Ext(_), Value::Ext(_, b)) if b.len() == 16 => buf.extend_from_slice(b),
-        (DataType::Numeric, Value::Numeric(_)) => {
-            // The `i128` mantissa and `u8` scale, as a row's value has them.
+        (DataType::Numeric, Value::Numeric(d)) => {
+            // The `i128` mantissa and `u8` scale, as the value's are.
             let mut tagged = Vec::with_capacity(18);
-            nucleus_sql::encoding::encode_value(&mut tagged, v);
+            put::numeric(&mut tagged, d.mantissa(), d.scale() as u8);
             buf.extend_from_slice(&tagged[1..]);
         }
         _ => return Err(mismatch(v, t)),
@@ -319,7 +312,7 @@ pub fn rows(body: &[u8], types: &[DataType]) -> Result<Vec<Row>, Error> {
         *at = end;
         Ok(r)
     };
-    let align = |at: &mut usize| *at = at.div_ceil(8) * 8;
+    let align = |at: &mut usize| *at = columnar::align(*at);
     let mut at = 0;
     let n = u32::from_le_bytes(body[take(&mut at, 4)?].try_into().unwrap()) as usize;
     let mut rows: Vec<Row> = (0..n).map(|_| Vec::with_capacity(types.len())).collect();
@@ -339,7 +332,7 @@ pub fn rows(body: &[u8], types: &[DataType]) -> Result<Vec<Row>, Error> {
         };
         // A slot as the parameter it encodes: the type's tag before it.
         let decode = |tagged: &[u8]| -> Result<Value, Error> {
-            crate::native::parameter(&mut nucleus_sql::encoding::Reader::new(tagged))
+            crate::native::parameter(&mut Reader::new(tagged))
         };
         match layout(t) {
             Layout::Fixed(w) => {
@@ -352,16 +345,13 @@ pub fn rows(body: &[u8], types: &[DataType]) -> Result<Vec<Row>, Error> {
                     let slot = &body[data.start + i * w..data.start + (i + 1) * w];
                     let mut tagged = Vec::with_capacity(w + 8);
                     match t {
-                        DataType::Ext(e) => {
-                            tagged.push(11);
-                            tagged.extend_from_slice(&(e.name().len() as u32).to_le_bytes());
-                            tagged.extend_from_slice(e.name().as_bytes());
-                            tagged.extend_from_slice(&(w as u32).to_le_bytes());
-                        }
+                        DataType::Ext(e) => put::ext(&mut tagged, e.name(), slot),
                         // A timestamp's, a date's, … tag; integers by width.
-                        _ => tagged.push(fixed_tag(t)),
+                        _ => {
+                            tagged.push(crate::native::type_tag(t, nucleus_wire::VERSION));
+                            tagged.extend_from_slice(slot);
+                        }
                     }
-                    tagged.extend_from_slice(slot);
                     row.push(decode(&tagged)?);
                 }
             }
@@ -389,17 +379,18 @@ pub fn rows(body: &[u8], types: &[DataType]) -> Result<Vec<Row>, Error> {
                     row.push(match t {
                         DataType::Bytea => Value::Bytea(slot.into()),
                         DataType::Inet | DataType::Cidr => {
-                            let mut tagged = vec![if t == DataType::Inet { 18 } else { 19 }];
+                            let mut tagged = vec![if t == DataType::Inet {
+                                tag::INET
+                            } else {
+                                tag::CIDR
+                            }];
                             tagged.extend_from_slice(slot);
                             decode(&tagged)?
                         }
                         DataType::Array(_) => decode(slot)?,
                         DataType::Ext(e) => {
-                            let mut tagged = vec![11];
-                            tagged.extend_from_slice(&(e.name().len() as u32).to_le_bytes());
-                            tagged.extend_from_slice(e.name().as_bytes());
-                            tagged.extend_from_slice(&(slot.len() as u32).to_le_bytes());
-                            tagged.extend_from_slice(slot);
+                            let mut tagged = Vec::with_capacity(slot.len() + 16);
+                            put::ext(&mut tagged, e.name(), slot);
                             decode(&tagged)?
                         }
                         // Text (a char(n)'s or an enum's label: the column
@@ -414,24 +405,6 @@ pub fn rows(body: &[u8], types: &[DataType]) -> Result<Vec<Row>, Error> {
         align(&mut at);
     }
     Ok(rows)
-}
-
-/// The value tag a fixed-width column's slots are the payload of.
-fn fixed_tag(t: DataType) -> u8 {
-    match t {
-        DataType::Bool => 1,
-        DataType::SmallInt => 12,
-        DataType::Integer => 13,
-        DataType::BigInt => 2,
-        DataType::Real => 14,
-        DataType::Float => 3,
-        DataType::Numeric => 5,
-        DataType::Date => 6,
-        DataType::Timestamp => 7,
-        DataType::TimestampTz => 8,
-        DataType::Interval => 9,
-        _ => 16, // time
-    }
 }
 
 #[cfg(test)]

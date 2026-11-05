@@ -1,0 +1,12 @@
+[package]
+name = "nucleus-wire"
+description = "The nucleus protocol's (ncp) wire format: frames, tags, values, the columnar layout — one definition for the server and the Rust driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

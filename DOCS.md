@@ -33,6 +33,7 @@
 | `crates/kv` | `nucleus-kv` | the KV contract and the local `Database` | §M6 ✅ |
 | `crates/kernels` | `nucleus-kernels` | the vectorized executor's batch kernels, compiled per CPU level and chosen at run time | §M14.20 |
 | `crates/sql` | `nucleus-sql` | types, encodings, catalog (`nc_catalog`), parser, binder, optimizer, executor, sessions; the extension API (`ext`) | §M7–§M14.5, §M14.19 |
+| `crates/wire` | `nucleus-wire` | the nucleus protocol's wire format, for both ends: versions, message kinds, value tags, frames, values, the columnar layout (§10) | §M14.20 W8 |
 | `crates/server` | `nucleus-server` | front ends (the nucleus protocol), authentication | §M12, §M14.7, §M14.19 |
 | `crates/client` | `nucleus-client` | the Rust driver | §M14.6–§M14.8 ✅ |
 | `crates/testkit` | `nucleus-testkit` | the sqllogictest runner and the SQL layer's scripts, for the core, front ends and modules | §M14.19 |
@@ -2926,7 +2927,13 @@ Linux) uses the real `psql`, including `\d`, `\d+`, `\dt`, `\di`, `\dn`,
 
 nucleus's own client protocol (D14): what `nucleus server` speaks by
 default and what nucleus's drivers (§11) implement.  This section is the
-whole specification.
+whole specification; `nucleus-wire` (`crates/wire`) is its one Rust
+definition — versions, message kinds, value tags, frames, a value's
+encoding and decoding, the columnar layout — which the server and the
+Rust driver each map their own values onto.  The protocol's encoding is
+its own: the server no longer writes values in the storage's row
+encoding (whose tags 0–10 it once shared), so either can change
+without the other.
 
 **Transport.** TCP, default port **20035** (`NC` in ASCII).  Every integer
 is **little-endian**.  A *string* is a `u32` byte length and that many
@@ -3266,6 +3273,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W8, one wire format crate:** `nucleus-wire`
+  holds the protocol's versions, kinds, tags, frames, values and columnar
+  layout; the server and the Rust driver use it instead of their four
+  encoders and decoders, the server no longer through the storage's row
+  encoding.  The same bytes on the wire, every type checked.
 
 - **2026-11-05 — §M14.20 W8, every driver pipelines:** `pipeline` and
   `execute_many` (`executeMany`) in Python, JavaScript, Java, C and C++
