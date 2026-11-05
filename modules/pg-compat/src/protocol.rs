@@ -1038,20 +1038,20 @@ impl Conn {
 
     fn simple_query(&mut self, sql: &str, input: &mut dyn Read) -> io::Result<()> {
         self.log("query", sql);
-        let (stmts, texts): (Vec<_>, Vec<_>) = match nucleus_sql::ext::parse_with_text(sql) {
-            Ok(s) => s.into_iter().unzip(),
+        let parsed = match self.session.parse(sql) {
+            Ok(p) => p,
             Err(e) => {
                 self.log_error(&e);
                 return send_error(&mut self.out, &e);
             }
         };
-        if stmts.is_empty() {
+        if parsed.is_empty() {
             return self.out.write_all(&Msg::new(b'I').finish());
         }
         // Several statements in one Query run in one implicit transaction
         // in PostgreSQL; here each runs on its own (autocommit), and the
         // first error stops the rest.
-        for (stmt, text) in stmts.iter().zip(&texts) {
+        for (stmt, text) in parsed.iter() {
             self.session.note_text(text);
             let mut rows = Rows {
                 out: &mut self.out,
@@ -1086,13 +1086,13 @@ impl Conn {
         for _ in 0..n {
             given.push(b.i32().map_err(proto)?);
         }
-        let mut stmts = nucleus_sql::ext::parse(&sql)?;
-        if stmts.len() > 1 {
+        let parsed = self.session.parse(&sql)?;
+        if parsed.len() > 1 {
             return Err(Error::syntax(
                 "cannot insert multiple commands into a prepared statement",
             ));
         }
-        let stmt = stmts.pop();
+        let stmt = parsed.first().map(|(s, _)| s.clone());
         let text = sql.trim().trim_end_matches(';').trim_end().to_string();
         let (mut params, columns) = match &stmt {
             Some(s) => self.session.describe(s, Some(&text))?,

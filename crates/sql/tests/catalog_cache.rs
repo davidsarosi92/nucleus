@@ -234,3 +234,52 @@ fn an_entry_by_text_serves_the_same_statement_only() {
     }
     assert_eq!(run(&b), vec![vec![Value::Text("one".into())]]);
 }
+
+/// A text's statements are kept the second time it comes, as parsing it
+/// gives them; a text that does not parse is refused each time.
+#[test]
+fn texts_parsed_again_are_parsed_alike() {
+    let mut s = Session::new(db());
+    let sql = "SELECT 1; select  2 AS two ;";
+    let fresh = nucleus_sql::ext::parse_with_text(sql).unwrap();
+    let (first, second, third) = (
+        s.parse(sql).unwrap(),
+        s.parse(sql).unwrap(),
+        s.parse(sql).unwrap(),
+    );
+    for p in [&first, &second, &third] {
+        assert_eq!(&p[..], &fresh[..]);
+    }
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert!(Arc::ptr_eq(&second, &third));
+    for _ in 0..3 {
+        assert!(s.parse("SELEC 1").is_err());
+    }
+}
+
+/// A statement's runs are counted under its normalized text, kept or not.
+#[test]
+fn statistics_count_a_kept_text() {
+    let kv = db();
+    let mut s = Session::new(kv.clone());
+    s.execute("CREATE TABLE stk (id INT PRIMARY KEY)").unwrap();
+    rows(&mut s, "SELECT nc_statements_reset()");
+    for sql in [
+        "SELECT * FROM stk WHERE id = 1",
+        "SELECT * FROM stk WHERE id = 1",
+        "SELECT * FROM stk WHERE id = 1",
+        "select * from stk where id = 2",
+    ] {
+        rows(&mut s, sql);
+    }
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT query, calls FROM nc_catalog.statements WHERE query LIKE '%stk%' AND query NOT LIKE '%nc_catalog%'"
+        ),
+        vec![vec![
+            Value::Text("SELECT * FROM stk WHERE id = $1".into()),
+            Value::Int(4)
+        ]]
+    );
+}

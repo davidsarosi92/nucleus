@@ -1060,23 +1060,23 @@ fn run<R: Read, W: Write>(
     input: &mut R,
     out: &mut W,
 ) -> io::Result<Ran> {
-    let (stmts, texts): (Vec<_>, Vec<_>) = match nucleus_sql::parser::parse_with_text(query.sql) {
-        Ok(s) => s.into_iter().unzip(),
+    let parsed = match session.parse(query.sql) {
+        Ok(p) => p,
         Err(e) => return Ok(Ran::Failed(e)),
     };
-    if !query.params.is_empty() && stmts.len() > 1 {
+    if !query.params.is_empty() && parsed.len() > 1 {
         return Ok(Ran::Failed(Error::syntax(
             "a query with parameters must hold one statement",
         )));
     }
-    if query.fetch > 0 && stmts.len() > 1 {
+    if query.fetch > 0 && parsed.len() > 1 {
         return Ok(Ran::Failed(Error::syntax(
             "a query fetched in batches must hold one statement",
         )));
     }
     // Parameters take the types their places need (text is parsed).
     let mut converted = query.params.to_vec();
-    if let ([stmt], [text]) = (stmts.as_slice(), texts.as_slice())
+    if let [(stmt, text)] = &parsed[..]
         && !query.params.is_empty()
     {
         let types = match session.describe(stmt, Some(text)) {
@@ -1099,7 +1099,7 @@ fn run<R: Read, W: Write>(
         }
     }
     let params = converted.as_slice();
-    for (stmt, stmt_text) in stmts.iter().zip(&texts) {
+    for (stmt, stmt_text) in parsed.iter() {
         session.note_text(stmt_text);
         let mut wire = Wire {
             input: &mut *input,

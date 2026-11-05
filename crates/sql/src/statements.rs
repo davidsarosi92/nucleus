@@ -56,6 +56,8 @@ pub struct Stat {
 pub struct Run<'a> {
     /// Its text.
     pub text: &'a str,
+    /// Its text [`normalize`]d.
+    pub normalized: &'a (String, String),
     /// The role that ran it.
     pub user: &'a str,
     /// How long it took.
@@ -130,12 +132,12 @@ pub fn normalize(text: &str) -> (String, String) {
 
 /// Records one run in `kv`'s statistics.
 pub fn record(kv: &Arc<dyn Kv>, run: Run) {
-    let (key, shown) = normalize(run.text);
+    let (key, shown) = run.normalized;
     let Ok(mut all) = STATS.lock() else {
         return;
     };
     let table = all.entry(database(kv)).or_default();
-    let id = (run.user.to_string(), key);
+    let id = (run.user.to_string(), key.clone());
     if !table.contains_key(&id) && table.len() >= MAX {
         // The least called (the oldest of those) makes room.
         if let Some(evict) = table
@@ -148,7 +150,7 @@ pub fn record(kv: &Arc<dyn Kv>, run: Run) {
     }
     let s = table.entry(id).or_insert_with(|| Stat {
         user: run.user.to_string(),
-        query: shown,
+        query: shown.clone(),
         calls: 0,
         errors: 0,
         total: Duration::ZERO,
@@ -167,7 +169,7 @@ pub fn record(kv: &Arc<dyn Kv>, run: Run) {
     s.rows_read += run.rows_read;
     s.rows_returned += run.rows_returned;
     s.last = run.at;
-    if run.ok {
+    if run.ok && s.sample != run.text {
         s.sample = run.text.to_string();
     }
 }

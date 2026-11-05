@@ -268,7 +268,15 @@ pub struct Session {
     /// … for this identity (held, so a new one is never at its address):
     /// a plan was checked for who ran it.
     catalog_who: Arc<crate::access::Who>,
+    /// Statements as parsed, by their text ([`Session::parse`]).
+    parsed: crate::by_text::ByText<String, Parsed>,
+    /// Statements' keys in the statistics, by their text
+    /// ([`crate::statements::normalize`]).
+    normalized: crate::by_text::ByText<String, Arc<(String, String)>>,
 }
+
+/// A text's statements, each with its own text.
+pub type Parsed = Arc<[(Statement, String)]>;
 
 impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -363,6 +371,8 @@ impl Session {
             audited: true,
             catalog: Default::default(),
             catalog_who: Arc::new(crate::access::Who::system()),
+            parsed: Default::default(),
+            normalized: Default::default(),
         }
     }
 
@@ -615,11 +625,25 @@ impl Session {
     /// Parses and runs every statement in `sql`; stops at the first error.
     pub fn execute(&mut self, sql: &str) -> Result<Vec<Output>> {
         let mut out = Vec::new();
-        for (stmt, text) in crate::parser::parse_with_text(sql)? {
-            self.note_text(&text);
-            out.push(self.run(&stmt, &[])?);
+        for (stmt, text) in self.parse(sql)?.iter() {
+            self.note_text(text);
+            out.push(self.run(stmt, &[])?);
         }
         Ok(out)
+    }
+
+    /// `sql`'s statements, each with its text
+    /// ([`crate::parser::parse_with_text`]) — kept by the text the second
+    /// time it comes ([`crate::by_text`]): parsing reads nothing but it.
+    pub fn parse(&mut self, sql: &str) -> Result<Parsed> {
+        if let Some(p) = self.parsed.get(sql) {
+            return Ok(p.clone());
+        }
+        let p: Parsed = crate::parser::parse_with_text(sql)?.into();
+        if self.parsed.admits(sql) {
+            self.parsed.keep(sql.to_string(), p.clone());
+        }
+        Ok(p)
     }
 
     /// The text of the statement [`Session::run`] runs next, for the audit
@@ -966,10 +990,21 @@ impl Session {
         let Some(text) = text.as_deref() else {
             return r;
         };
+        let normalized = match self.normalized.get(text) {
+            Some(n) => n.clone(),
+            None => {
+                let n = Arc::new(crate::statements::normalize(text));
+                if self.normalized.admits(text) {
+                    self.normalized.keep(text.to_string(), n.clone());
+                }
+                n
+            }
+        };
         crate::statements::record(
             &self.kv,
             crate::statements::Run {
                 text,
+                normalized: &normalized,
                 user: &crate::access::current().user,
                 elapsed: self.kv.elapsed().saturating_sub(start).saturating_sub(
                     std::time::Duration::from_micros(crate::budget::waited() as u64),

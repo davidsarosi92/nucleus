@@ -253,6 +253,7 @@ and more from run to run):
 | a session's catalog cache | 24.9 | 38.5 | 42.1 | 188 | 295 |
 | a point read set up as one | 23.8 | 35.9 | 39.8 | 179 | 196 |
 | a session's plans by their text | 20.8 | 36.2 | 29.1 | 182 | 186 |
+| a session's texts parsed and normalized once | 20.4 | 36.5 | 25.8 | 172 | 178 |
 
 Through the PostgreSQL front end (`--pg-compat`), the `postgres` driver's
 prepared statements (`modules/pg-compat/examples/pg_latency.rs`, the
@@ -262,6 +263,7 @@ same table), median µs:
 |---|---:|---:|
 | plans by their text (`971a603`) | 40.4 | 189 |
 | prepared statements checked at Bind | 40.6 | 192 |
+| texts parsed and normalized once | 39.4 | 197 |
 
 ## TPC-H
 

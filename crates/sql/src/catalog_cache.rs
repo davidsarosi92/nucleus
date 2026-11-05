@@ -57,64 +57,60 @@ pub(crate) enum Part {
     Describe,
 }
 
-impl Part {
-    /// Whether its entries are by a statement's text: kept once the text
-    /// came again ([`SEEN`]), and no more than [`KEPT`] of them.
-    fn by_text(self) -> bool {
-        matches!(self, Part::Plan | Part::Describe)
-    }
-}
-
-/// How many entries by text a session keeps; past it they all go.
-const KEPT: usize = 512;
-
-/// How many texts a session remembers having seen once; past it it
-/// forgets them all.
-const SEEN: usize = 4096;
+/// An entry kept by a statement's text ([`crate::by_text`]).
+type ByText = crate::by_text::ByText<String, Box<dyn Any + Send>>;
 
 /// A session's cache.
 #[derive(Default)]
 pub struct CatalogCache {
     /// The snapshot its entries were read at.
     at: Option<Timestamp>,
+    /// What was read of the catalog.
     entries: HashMap<(Part, String), Box<dyn Any + Send>>,
-    /// How many of `entries` are by text.
-    by_text: usize,
-    /// Hashes of the texts seen once (TinyLFU's doorkeeper: a text with
-    /// literals in it, never again the same, is not kept).
-    seen: std::collections::HashSet<u64>,
+    /// Plans and descriptions, by their statements' texts.
+    plans: ByText,
+    descriptions: ByText,
 }
 
 impl CatalogCache {
-    /// Whether an entry for `part` of `name` may be kept.
+    /// The entries by text `part` is kept in, if it is kept by text.
+    fn by_text(&mut self, part: Part) -> Option<&mut ByText> {
+        match part {
+            Part::Plan => Some(&mut self.plans),
+            Part::Describe => Some(&mut self.descriptions),
+            _ => None,
+        }
+    }
+
+    fn get(&mut self, part: Part, name: &str) -> Option<&(dyn Any + Send)> {
+        match part {
+            Part::Plan => self.plans.get(name),
+            Part::Describe => self.descriptions.get(name),
+            _ => self.entries.get(&(part, name.to_string())),
+        }
+        .map(|b| &**b)
+    }
+
+    /// Whether an entry for `part` of `name` may be kept: always, but by
+    /// text only once the text came again.
     fn admits(&mut self, part: Part, name: &str) -> bool {
-        if !part.by_text() {
-            return true;
-        }
-        let hash = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            name.hash(&mut h);
-            h.finish()
-        };
-        if self.seen.contains(&hash) {
-            return true;
-        }
-        if self.seen.len() >= SEEN {
-            self.seen.clear();
-        }
-        self.seen.insert(hash);
-        false
+        self.by_text(part).is_none_or(|t| t.admits(name))
     }
 
     fn keep(&mut self, part: Part, name: &str, v: Box<dyn Any + Send>) {
-        if part.by_text() && self.by_text >= KEPT {
-            self.entries.retain(|(p, _), _| !p.by_text());
-            self.by_text = 0;
+        match self.by_text(part) {
+            Some(t) => t.keep(name.to_string(), v),
+            None => {
+                self.entries.insert((part, name.to_string()), v);
+            }
         }
-        if self.entries.insert((part, name.to_string()), v).is_none() && part.by_text() {
-            self.by_text += 1;
-        }
+    }
+
+    /// Drops every entry: the catalog read is not current.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.plans.clear();
+        self.descriptions.clear();
     }
 }
 
@@ -189,8 +185,7 @@ pub(crate) fn memo_fitting<T: Clone + Send + 'static>(
         if cache.at.is_some_and(|at| txn.watched_as_at(at)) {
             return Some(
                 cache
-                    .entries
-                    .get(&(part, name.to_string()))
+                    .get(part, name)
                     .and_then(|v| v.downcast_ref::<T>())
                     .filter(|v| fits(v))
                     .cloned(),
@@ -198,8 +193,7 @@ pub(crate) fn memo_fitting<T: Clone + Send + 'static>(
         }
         let now = txn.read_ts();
         if txn.watched_as_at(now) {
-            cache.entries.clear();
-            cache.by_text = 0;
+            cache.clear();
             cache.at = Some(now);
             return Some(None);
         }
@@ -221,32 +215,5 @@ pub(crate) fn memo_fitting<T: Clone + Send + 'static>(
             Ok(v)
         }
         None => read(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn texts_are_kept_when_seen_again_and_no_more_than_kept() {
-        let mut c = CatalogCache::default();
-        assert!(c.admits(Part::Table, "t"), "not by text: always");
-        assert!(!c.admits(Part::Plan, "q"));
-        assert!(c.admits(Part::Plan, "q"));
-        for i in 0..KEPT {
-            c.keep(Part::Plan, &format!("q{i}"), Box::new(i));
-        }
-        c.keep(Part::Table, "t", Box::new(0usize));
-        assert_eq!(c.by_text, KEPT);
-        // One more: the entries by text go, the others stay.
-        c.keep(Part::Describe, "d", Box::new(0usize));
-        assert_eq!(c.by_text, 1);
-        assert_eq!(c.entries.len(), 2);
-        // The texts seen once are forgotten past SEEN.
-        for i in 0..SEEN {
-            c.admits(Part::Plan, &format!("s{i}"));
-        }
-        assert!(!c.admits(Part::Plan, "q"));
     }
 }

@@ -1322,6 +1322,13 @@ changes (`SET ROLE`, a login).  Only the statement a session runs is
 kept by its text (`catalog_cache::with_text`), not those a function runs
 inside it.
 
+A session keeps two more things by a statement's text, with the same
+admission and bound (`by_text::ByText`, the one type every entry by a
+text is kept in): what the text parses to (`Session::parse`, which
+`execute` and both front ends use) and its key in the statement
+statistics (`statements::normalize`).  Neither reads the catalog, so
+neither empties with it, nor with the session's identity.
+
 The format record (principle 6) is checked by a session's first
 statement and written by the first write to a database the SQL layer has
 not used; a newer format than the build reads is refused with `0A000`
@@ -3237,6 +3244,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W8, a session's texts parsed and normalized
+  once:** a session keeps a text's statements as parsed
+  (`Session::parse`) and its key in the statement statistics, with the
+  plans' admission (`by_text::ByText`, one type for every entry by a
+  text).  A parameterized point read on one connection 29.3 → 25.8 µs.
 
 - **2026-11-05 — §M14.20 W8, pg-compat's prepared statements on the
   session's cache:** Parse describes by the statement's text, and Bind

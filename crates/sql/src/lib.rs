@@ -10,6 +10,7 @@ pub mod audit;
 pub mod binder;
 pub mod budget;
 pub mod builtin;
+mod by_text;
 pub mod bytea;
 pub mod catalog;
 pub mod catalog_cache;

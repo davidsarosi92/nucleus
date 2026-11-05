@@ -104,7 +104,8 @@ fn copy_command(rest: &str) -> Option<(String, String)> {
     Some((format!("COPY {target} FROM STDIN{options}"), file))
 }
 
-/// Where statements run.
+/// Where statements run (one per process: its size does not matter).
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Backend {
     Local {
         session: Session,
@@ -120,7 +121,7 @@ impl Backend {
     pub(crate) fn execute(&mut self, sql: &str) -> Result<Vec<std::result::Result<Res, Failure>>> {
         match self {
             Backend::Local { session, .. } => {
-                let stmts = match nucleus_sql::parser::parse_with_text(sql) {
+                let stmts = match session.parse(sql) {
                     Ok(s) => s,
                     Err(e) => {
                         return Ok(vec![Err(Failure {
@@ -131,9 +132,9 @@ impl Backend {
                     }
                 };
                 let mut out = Vec::new();
-                for (stmt, text) in stmts {
-                    session.note_text(&text);
-                    match session.run(&stmt, &[]) {
+                for (stmt, text) in stmts.iter() {
+                    session.note_text(text);
+                    match session.run(stmt, &[]) {
                         Ok(Output::Command(tag)) => out.push(Ok(Res::Command(tag))),
                         Ok(Output::Rows { columns, rows }) => out.push(Ok(Res::Rows(Table {
                             types: columns.iter().map(|c| c.ty.name().to_string()).collect(),

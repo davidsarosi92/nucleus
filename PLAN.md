@@ -2630,6 +2630,30 @@ the speed-up is made once, in the merged one.  The work, in this order:
   point read costs 40 µs to the native protocol's 29: next to look at.
   `INSERT` / `UPDATE` / `DELETE` plans are not kept yet (their time is
   their commit's).
+  *A session's texts, parsed and normalized once.*  What the profile of
+  the parameterized point read showed next: the statement statistics
+  tokenized each statement's text again to normalize it (8 % of the
+  session thread's busy time), and the parser read it each time (7 %).  A session
+  now keeps both by the text — its statements as parsed
+  (`Session::parse`, which `execute`, the native server, `ncsql`'s local
+  database and pg-compat's simple query and `Parse` use) and its key and shown form in the
+  statistics — with the plans' admission and bound, the one type every
+  entry by a text is kept in (`by_text::ByText`: the doorkeeper, 512
+  entries, 4 096 texts remembered).  Neither reads the catalog, so
+  neither empties with it.  Taken: Oracle's *soft parse* — the library
+  cache finds a statement by its text's hash and skips the parse —,
+  per session.  Not taken: pg_stat_statements' key from the parsed tree
+  (a hash over the tree after analysis, no second pass over the text) —
+  every statement's tree walked to spare a repeated text's lookup; for a
+  text never seen again the second tokenization stays, and handing the
+  parser's tokens to the statistics is what would spare it.  Tests: a
+  text parsed again equal to a fresh parse, kept the third time, an
+  error each time; runs counted under the normalized text kept or not.
+  Measured, alternating with the step before, two rounds: a point read
+  with a parameter 29.4 / 29.2 → 25.8 / 25.8 µs, `SELECT 1` 21.6 / 21.7 → 20.8 / 20.4, with a literal 36.7 / 36.5 → 37.0 / 36.5
+  (unchanged: a new text each time); a prepared point read through
+  pg-compat 41.0 / 40.5 → 39.3 / 39.4 µs; TPC-H on row tables 7.06 / 6.83 → 6.79 / 7.19 (the machine: the queries
+  run what they ran) s.
 
 Each step records what it took from where, and what it measured, here
 and in `docs/benchmarks.md`.
