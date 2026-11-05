@@ -2416,6 +2416,21 @@ the speed-up is made once, in the merged one.  The work, in this order:
   378 → 344), on column tables and ClickBench on a column table
   unchanged.  Results the same but for ties at a `LIMIT` (Q18, Q32,
   Q39, as before).
+  *Page reads without zeroing* (2026-11-05), from the same profile: a
+  read of the file allocated and zeroed its run of up to 16 pages, then
+  allocated and zeroed each page and copied it in — `memset` and the
+  kernel's `madvise` 8 % of `count(*)`'s time.  Now each thread keeps
+  its read buffer and each page is copied out of it once, unzeroed
+  (`pager::read_run`, for one page and for a run); and a batch scan
+  reading no column does not parse its rows' headers.  Reading into the
+  frames themselves (no copy at all) would need the pool to hand out its
+  victims before the read — not taken until a profile asks again.
+  Measured, alternating with the step before, two rounds: ClickBench on
+  a row table 6.68 / 6.39 → 6.16 / 6.09 s, geometric mean 140 / 135 →
+  128 / 126 ms, Q0 93 → 78; TPC-H on row tables 6.59 / 6.44 → 6.59 /
+  6.55 s and on column tables 2.20 / 2.16 → 2.16 / 2.15 (the page
+  reads alone, before the header skip), ClickBench on a column table
+  unchanged.
 - **W8 — per-statement costs** (what AI agents' traffic pays most): a
   catalog epoch, and on it a session's catalog, settings and plan cache
   (pg-compat's prepared statements onto the same); one bind for describe
@@ -3636,3 +3651,7 @@ style) across a thousand seeds without failure.
   one-byte length; versions 1 and 2 still read.  ClickBench on a row
   table 7.2 → 6.25 s (geometric mean 155 → 130 ms), its file 984 → 902
   MB; TPC-H on row tables 6.6 → 6.45 s.  DOCS §8.1.
+- **2026-11-05** — §M14.20 W7: page reads without zeroing (each thread's
+  read buffer kept, a page copied out once), and no row headers parsed
+  for a scan reading no column.  ClickBench on a row table 6.5 → 6.1 s.
+  DOCS §4.2.

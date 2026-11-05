@@ -457,6 +457,7 @@ same machine, alternating with the step before):
 | W6: one key table for groupings and joins | 7.05 | 2.3 |
 | W6: sorts on normalized keys | 7.15 | 2.3 |
 | W7: row format version 3 (column offsets, short lengths) | 6.45 | 2.15 |
+| W7: page reads without zeroing | 6.55 | 2.15 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
@@ -494,6 +495,7 @@ ClickBench on a row table since (the same runs, `--storage row`):
 |---|---:|---:|---:|---:|---:|---:|
 | W6 (`1db6bd9`) | 7.23 | 155 | 519 | 267 | 356 | 984 |
 | W7: row format version 3 | 6.25 | 130 | 511 | 247 | 330 | 902 |
+| W7: page reads without zeroing | 6.1 | 127 | 504 | 242 | 345 | 902 |
 
 (A scan of the row table reads the whole file, past the 128 MiB cache,
 at every query: `pread`, page checks and copies are most of its time,

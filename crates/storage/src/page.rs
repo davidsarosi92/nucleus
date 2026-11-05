@@ -79,6 +79,14 @@ impl Page {
         page
     }
 
+    /// A page holding `bytes` (a whole page, as read from the file).
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Self {
+        assert_eq!(bytes.len(), PAGE_SIZE, "a page is {PAGE_SIZE} bytes");
+        Self {
+            bytes: bytes.into(),
+        }
+    }
+
     /// The page type.
     pub fn page_type(&self) -> PageType {
         PageType(self.bytes[4])

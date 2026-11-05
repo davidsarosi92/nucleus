@@ -1970,6 +1970,9 @@ fn decode_into(
     b: &[u8],
     cols: &mut [Builder],
 ) -> Result<()> {
+    if cols.is_empty() {
+        return Ok(()); // no column read (`count(*)`): the row is not looked at
+    }
     let bad = |_| Error::internal("malformed row encoding");
     let h = crate::encoding::row_header(b)?;
     let n = h.n;

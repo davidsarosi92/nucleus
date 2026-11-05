@@ -257,7 +257,9 @@ committed state untouched, and `sync` moves to a new one with one header
 write.
 
 **API.**  `create`, `open`; `read_page`, `read_pages` (a run of
-neighbouring pages in one read, each verified), `write_page`, `is_writable`,
+neighbouring pages in one read, each verified; reads go through a buffer
+each thread keeps, so a page is copied once into its own memory and
+nothing is zeroed first), `write_page`, `is_writable`,
 `allocate` (lowest free page, else grows the file), `free` (refuses double
 frees); `meta`/`set_meta` (16 `u64` slots committed atomically with the
 pages); `sync`, `close`; `check` (on-disk free list vs. memory, no page in
@@ -3171,6 +3173,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W7, page reads without zeroing:** the file is
+  read into a buffer each thread keeps, each page copied out once (a
+  read had allocated and zeroed both its run and every page); a batch
+  scan reading no column (`count(*)`) does not look into its rows.
+  ClickBench on a row table 6.5 → 6.1 s, its `count(*)` 93 → 78 ms.
 
 - **2026-11-05 — §M14.20 W7, row format version 3:** an offset every
   16 columns, so a scan reading a few of a wide row's columns skips at

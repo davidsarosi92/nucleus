@@ -382,31 +382,7 @@ impl Pager {
         if first < FIRST_DATA_PAGE || end.is_none_or(|e| e > self.pages.load(Ordering::Acquire)) {
             return Err(Error::InvalidPage(first));
         }
-        let mut buf = vec![0u8; n * PAGE_SIZE];
-        match self.file.read_exact_at(&mut buf, first.offset()) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err(Error::Corrupt {
-                    page: first,
-                    reason: "never written (past end of file)",
-                });
-            }
-            Err(e) => return Err(e.into()),
-        }
-        buf.as_chunks::<PAGE_SIZE>()
-            .0
-            .iter()
-            .zip(first.0..)
-            .map(|(bytes, id)| {
-                let mut page = Page::new(PageType::UNUSED);
-                page.bytes_mut().copy_from_slice(bytes);
-                page.verify(PageId(id)).map_err(|reason| Error::Corrupt {
-                    page: PageId(id),
-                    reason,
-                })?;
-                Ok(page)
-            })
-            .collect()
+        read_run(self.file.as_ref(), first, n)
     }
 
     /// Writes `page` at `id`, stamping its id and checksum.  Only pages
@@ -711,20 +687,48 @@ impl Pager {
 }
 
 fn read_raw(file: &dyn File, id: PageId) -> Result<Page> {
-    let mut page = Page::new(PageType::UNUSED);
-    match file.read_exact_at(page.bytes_mut(), id.offset()) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-            return Err(Error::Corrupt {
-                page: id,
-                reason: "never written (past end of file)",
-            });
+    let mut pages = read_run(file, id, 1)?;
+    Ok(pages.pop().expect("one page read"))
+}
+
+thread_local! {
+    /// A thread's buffer for reads of the file, kept between them: a read
+    /// neither allocates nor zeroes what it is about to overwrite.
+    static READ_BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Reads and verifies the `n` pages from `first` on with one read of the
+/// file, into the thread's buffer, each copied out once into its page.
+fn read_run(file: &dyn File, first: PageId, n: usize) -> Result<Vec<Page>> {
+    READ_BUFFER.with_borrow_mut(|buf| {
+        if buf.len() < n * PAGE_SIZE {
+            buf.resize(n * PAGE_SIZE, 0);
         }
-        Err(e) => return Err(e.into()),
-    }
-    page.verify(id)
-        .map_err(|reason| Error::Corrupt { page: id, reason })?;
-    Ok(page)
+        let buf = &mut buf[..n * PAGE_SIZE];
+        match file.read_exact_at(buf, first.offset()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(Error::Corrupt {
+                    page: first,
+                    reason: "never written (past end of file)",
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
+        buf.as_chunks::<PAGE_SIZE>()
+            .0
+            .iter()
+            .zip(first.0..)
+            .map(|(bytes, id)| {
+                let page = Page::from_bytes(bytes);
+                page.verify(PageId(id)).map_err(|reason| Error::Corrupt {
+                    page: PageId(id),
+                    reason,
+                })?;
+                Ok(page)
+            })
+            .collect()
+    })
 }
 
 fn write_raw(file: &dyn File, id: PageId, page: &mut Page) -> Result<()> {
