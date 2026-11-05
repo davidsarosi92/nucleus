@@ -21,7 +21,7 @@ use std::ops::Bound;
 use nucleus_kv::{KvTxn, prefix_end};
 
 use crate::catalog::{self, Table};
-use crate::encoding::{OUT_OF_LINE, ROW_VERSION, Reader, decode_value, encode_value, out_of_line};
+use crate::encoding::{Reader, RowWriter, decode_value, encode_row_value, out_of_line};
 use crate::enums::Labels;
 use crate::error::{Error, Result};
 use crate::exec::pk_suffix;
@@ -76,17 +76,14 @@ pub fn insert(txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Result<b
 /// out of line (`None` when one is): what [`insert`] stores, made without
 /// the transaction — on any thread (a load's workers).
 pub fn encode_inline(row: &Row) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(3 + row.len() * 9);
-    out.push(ROW_VERSION);
-    out.extend_from_slice(&(row.len() as u16).to_le_bytes());
+    let mut w = RowWriter::new(row.len());
     for v in row {
-        let at = out.len();
-        encode_value(&mut out, v);
-        if out.len() - at > THRESHOLD {
+        let at = w.value(v);
+        if w.since(at).len() > THRESHOLD {
             return None;
         }
     }
-    Some(out)
+    Some(w.finish())
 }
 
 /// The row's stored value, its long values written out of line.
@@ -105,25 +102,22 @@ fn encode(
         },
         None => Vec::new(),
     };
-    let mut out = Vec::with_capacity(3 + row.len() * 9);
-    out.push(ROW_VERSION);
-    out.extend_from_slice(&(row.len() as u16).to_le_bytes());
+    let mut w = RowWriter::new(row.len());
     for (c, v) in row.iter().enumerate() {
         // Encoded in place; moved out when too long to stay.
-        let at = out.len();
-        encode_value(&mut out, v);
+        let at = w.value(v);
         let was = stored.iter().any(|&(sc, _)| sc == c);
-        if out.len() - at <= THRESHOLD {
+        if w.since(at).len() <= THRESHOLD {
             if was {
                 remove_chunks(txn, t, pk, c)?;
             }
             continue;
         }
-        let enc = out.split_off(at);
+        let enc = w.take_last(at);
         let same = was
             && old.and_then(|o| o.get(c)).is_some_and(|o| {
                 let mut before = Vec::new();
-                encode_value(&mut before, o);
+                encode_row_value(&mut before, o);
                 before == enc
             });
         if !same {
@@ -137,15 +131,14 @@ fn encode(
                 txn.put(&k, chunk)?;
             }
         }
-        out.push(OUT_OF_LINE);
-        out.extend_from_slice(&(enc.len() as u32).to_le_bytes());
+        w.out_of_line(enc.len() as u32);
     }
     for &(c, _) in &stored {
         if c >= row.len() {
             remove_chunks(txn, t, pk, c)?;
         }
     }
-    Ok(out)
+    Ok(w.finish())
 }
 
 /// Deletes the row at `key`, whose values are `row`: when none is long
@@ -154,7 +147,7 @@ pub fn remove_row(txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Resu
     let mut enc = Vec::new();
     let short = row.iter().all(|v| {
         enc.clear();
-        encode_value(&mut enc, v);
+        encode_row_value(&mut enc, v);
         enc.len() <= THRESHOLD
     });
     if short {

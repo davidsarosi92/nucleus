@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use crate::ast::{BinaryOp, UnaryOp};
 use crate::catalog::Table;
-use crate::encoding::{OUT_OF_LINE, Reader};
+use crate::encoding::OUT_OF_LINE;
 use crate::enums::Labels;
 use crate::error::{Error, Result};
 use crate::exec::{Entries, Rows, env};
@@ -1971,27 +1971,30 @@ fn decode_into(
     cols: &mut [Builder],
 ) -> Result<()> {
     let bad = |_| Error::internal("malformed row encoding");
-    let mut r = Reader::new(b);
-    if !(1..=crate::encoding::ROW_VERSION).contains(&r.u8().map_err(bad)?) {
-        return Err(Error::internal("malformed row encoding"));
-    }
-    let n = r.u16().map_err(bad)? as usize;
-    for c in 0..n {
-        let Some(col) = cols.get_mut(c) else {
-            break; // stored past the columns wanted (or the table's): not read
-        };
+    let h = crate::encoding::row_header(b)?;
+    let n = h.n;
+    let mut r = h.reader();
+    let mut at = 0;
+    for (c, col) in cols.iter_mut().enumerate().take(n) {
+        // Columns not read are passed over, to the offset before the next
+        // one read when the row has one (stored past the columns wanted, or
+        // the table's: not read).
+        if matches!(col, Builder::Skip) {
+            continue;
+        }
+        if at != c {
+            h.seek(&mut at, &mut r, c)?;
+        }
+        at = c + 1;
         let tag = r.peek();
         if tag == Some(OUT_OF_LINE) {
             r.u8().map_err(bad)?;
             let len = r.u32().map_err(bad)?;
-            if !matches!(col, Builder::Skip) {
-                let pk = crate::exec::pk_suffix(t, key);
-                col.push(crate::large::fetch(txn, t, pk, c, len)?);
-            }
+            let pk = crate::exec::pk_suffix(t, key);
+            col.push(crate::large::fetch(txn, t, pk, c, len)?);
             continue;
         }
         match (col, tag) {
-            (Builder::Skip, _) => crate::encoding::skip_value(&mut r)?,
             (col, Some(0)) => {
                 r.u8().map_err(bad)?;
                 col.push_null();
@@ -2020,6 +2023,12 @@ fn decode_into(
             | (Builder::Char(o, bytes, nulls), Some(18)) => {
                 r.u8().map_err(bad)?;
                 let len = r.u32().map_err(bad)? as usize;
+                Builder::push_text(o, bytes, nulls, r.take(len).map_err(bad)?);
+            }
+            (Builder::Text(o, bytes, nulls), Some(22))
+            | (Builder::Char(o, bytes, nulls), Some(23)) => {
+                r.u8().map_err(bad)?;
+                let len = usize::from(r.u8().map_err(bad)?);
                 Builder::push_text(o, bytes, nulls, r.take(len).map_err(bad)?);
             }
             (Builder::Time(k, d, nulls), Some(tag @ (6 | 7 | 8 | 17)))

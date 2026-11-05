@@ -1188,13 +1188,22 @@ encoding).  Key encoding version 2 (the format record, §8.2): version 1
 wrote a `NULL` array element as `01 00`, before the others — the law kit
 caught the disagreement — and the first write to a version-1 database
 rewrites the keys of every table with an array in a key
-(`dml::rewrite_keys`; the decoder reads both).  Row encoding: version `02`, column count, tagged values
+(`dml::rewrite_keys`; the decoder reads both).  Row encoding: version `03`, column count, the
+offsets of columns 16, 32, … (`u16` from the row's start; `FFFF` for one
+past 64 KiB, reached by reading on from the mark before it), tagged values
 (missing trailing columns read as NULL, so `ADD COLUMN` needs no rewrite
 unless it has a default); an integer is tag `12` (2 bytes), `13` (4) or
 `2` (8), the fewest that hold it (version `01`, still read, had only `2`);
 a real is tag `14`, a bytea `15`; a registered type's value is tag `11`,
-its id, its encoding version and its canonical bytes; and tag `16` (a
-`u32` length) is a value stored out of line.
+its id, its encoding version and its canonical bytes; tag `16` (a
+`u32` length) is a value stored out of line; text, `char(n)`, bytea and
+an enum shorter than 256 bytes are tags `22`–`25` with a `u8` length
+rather than a `u32` (`encoding::RowWriter`, `encode_row_value`; the wire
+keeps `encode_value`'s).  A scan reading a few of a row's columns jumps
+to the mark before each and skips the values between (`RowHeader::seek`,
+for the row-at-a-time and the batch decoders alike).  Version `02` (no
+offsets, no tags `22`–`25`) still reads; a row is written in `03` when
+next written (§M14.20 W7, D18).
 
 **Large values out of line** (`large`).  A value whose encoding is longer
 than 2 000 bytes (`large::THRESHOLD`) — a file in a `bytea`, a document
@@ -3162,6 +3171,14 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W7, row format version 3:** an offset every
+  16 columns, so a scan reading a few of a wide row's columns skips at
+  most 15 values to each (`RowHeader::seek`, both decoders); text,
+  `char(n)`, bytea and enums under 256 bytes with a one-byte length
+  (tags 22–25, rows only — the wire unchanged); one row writer
+  (`encoding::RowWriter`).  Versions 1 and 2 still read.  ClickBench on a
+  row table 7.2 → 6.25 s, its file 984 → 902 MB.
 
 - **2026-11-04 — §M14.20 W6, a column table's point reads:** a segment's
   directory entry decoded once and cached by its id (it decoded every

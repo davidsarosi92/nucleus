@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W5 and W3b ✅, W6 under way, W7–W8 next (D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W6 and W3b ✅, W7 under way (D18), W8 next; benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
@@ -2382,6 +2382,40 @@ the speed-up is made once, in the merged one.  The work, in this order:
   table's late decoding: ClickBench on a row table 2.13×); a column
   chunk stored as extents, not an overflow chain; one buffer for a batch's
   WAL record and its tree application.
+  *Row format version 3* (2026-11-05).  Profiled first, not assumed:
+  ClickBench on a row table reads the whole table at every query, a
+  984 MB file past the 128 MiB cache, and of a scan's time `pread`, the
+  pages' checks, zeroing and copies are about two thirds (`count(*)`,
+  which decodes nothing, 140 ms; Q2, two columns, 120), decompressing the
+  rows over 1 KiB another tenth, decoding the columns read at most an
+  eighth.  So an offset for every column — 210 bytes on `hits`' rows of
+  about 860, a quarter more to read — was *not taken*: PostgreSQL has none
+  either (it caches the offsets of a row's fixed-width prefix,
+  `attcacheoff`), nor does InnoDB; SQLite's record header has a type per
+  column, from which offsets are summed.  Taken instead: an offset every
+  16 columns (`u16`, `FFFF` past 64 KiB; 12 bytes on `hits`), so a read
+  skips at most 15 values to a column — and the bytes a scan reads cut:
+  text, `char(n)`, bytea and enums under 256 bytes with a one-byte length
+  (tags 22–25, rows only; the wire keeps `encode_value`'s four bytes).
+  One writer for every stored row (`encoding::RowWriter`, used by
+  `large::encode` and `encode_inline` alike) and one seek for both
+  decoders (`RowHeader::seek`); rows of version 2 and 1 still read, and a
+  row is written in version 3 when next written.  `hits` 984 → 902 MB.
+  Tested: rows of 1 to 200 columns, offsets past 64 KiB, every pick of
+  columns, against the values and against the same rows in version 2; a
+  table of version-2 and version-3 rows side by side, a row at a time and
+  by batches (it found a version-2 row of more than 16 columns
+  overrunning the offsets it does not have); mutations caught (an offset
+  off by one, a mark's column, a short length skipped wrong) — not
+  caught: giving up at an `FFFF` mark rather than taking the one before
+  (only slower).  Measured, alternating with the step before, two
+  rounds: ClickBench on a row table 7.30 / 7.16 → 6.25 / 6.25 s,
+  geometric mean 157 / 153 → 130 / 130 ms (each of the 43 queries
+  faster, Q40 165 → 108; `SELECT *`'s Q23 174 → 157 once a read in order
+  skips the seek); TPC-H on row tables 6.64 / 6.60 → 6.45 / 6.43 s (Q12
+  378 → 344), on column tables and ClickBench on a column table
+  unchanged.  Results the same but for ties at a `LIMIT` (Q18, Q32,
+  Q39, as before).
 - **W8 — per-statement costs** (what AI agents' traffic pays most): a
   catalog epoch, and on it a session's catalog, settings and plan cache
   (pg-compat's prepared statements onto the same); one bind for describe
@@ -3597,3 +3631,8 @@ style) across a thousand seeds without failure.
   orthogonal to the row / column layout — a study first (workloads and
   their amplifications, the shape behind the KV contract, compaction,
   prior art), then the plan.
+- **2026-11-05** — §M14.20 W7: row format version 3 — an offset every 16
+  columns, text, `char(n)`, bytea and enums under 256 bytes with a
+  one-byte length; versions 1 and 2 still read.  ClickBench on a row
+  table 7.2 → 6.25 s (geometric mean 155 → 130 ms), its file 984 → 902
+  MB; TPC-H on row tables 6.6 → 6.45 s.  DOCS §8.1.

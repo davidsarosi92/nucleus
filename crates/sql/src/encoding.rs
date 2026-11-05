@@ -26,7 +26,10 @@
 //! Every encoding is self-delimiting, so a key can be split back into its
 //! values (`decode_key_value`).
 //!
-//! **Rows** — `02` (version), column count `u16`, then per column a tag
+//! **Rows** — `03` (version), column count `u16`, then the offsets of
+//! columns 16, 32, … from the row's start (`u16` each; `FFFF` for one
+//! past 64 KiB, found by reading on from the mark before it), then per
+//! column a tag
 //! (`0` null, `1` bool, `2` an integer in 8 bytes, `12` in 2, `13` in 4 —
 //! the fewest that hold the value, whatever the column's width — `3` double,
 //! `14` real (4 bytes), `15` bytea (a `u32` length and the bytes), `16` a
@@ -37,10 +40,13 @@
 //! timestamptz `i64`, `9` interval: months `i32`, days `i32`, µs `i64`,
 //! `10` array: a `u32` count, then each element tagged the same way; `11` a
 //! registered type: its stable id `u32`, its encoding version `u16`, a
-//! `u32` length and its canonical bytes) and its bytes (little-endian; text
-//! with a `u32` length).  A row shorter than its table
-//! (a column added later) reads the missing columns as `NULL`.  Version 1
-//! (before tags 12 and 13) still reads.
+//! `u32` length and its canonical bytes; `22` text, `23` char(n), `24`
+//! bytea and `25` an enum shorter than 256 bytes, with a `u8` length) and
+//! its bytes (little-endian; text with a `u32` length).  A row shorter
+//! than its table (a column added later) reads the missing columns as
+//! `NULL`.  Version 2 (no offsets, no tags 22 to 25) and version 1 (before
+//! tags 12 to 21) still read.  The offsets let a scan reading a few of
+//! many columns skip to them (§M14.20 W7, D18).
 //!
 //! Keys hold every integer in 8 bytes, whatever its type: a `smallint`
 //! and a `bigint` that are equal have equal keys, so an index serves a
@@ -358,18 +364,108 @@ pub fn decode_key(b: &[u8], n: usize) -> Result<(Vec<Value>, usize)> {
     Ok((values, at))
 }
 
-/// Version 2 added tags 12 to 21; version 1 rows still read.
-pub const ROW_VERSION: u8 = 2;
+/// Version 3 added the column offsets and tags 22 to 25, version 2 tags
+/// 12 to 21; versions 1 and 2 still read.
+pub const ROW_VERSION: u8 = 3;
+
+/// A row's offsets mark every this many columns.
+pub const STRIDE: usize = 16;
+
+/// An offset past what a `u16` holds.
+const FAR: u16 = u16::MAX;
 
 /// Encodes a row.
 pub fn encode_row(row: &[Value]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(3 + row.len() * 9);
-    out.push(ROW_VERSION);
-    out.extend_from_slice(&(row.len() as u16).to_le_bytes());
+    let mut w = RowWriter::new(row.len());
     for v in row {
-        encode_value(&mut out, v);
+        w.value(v);
     }
-    out
+    w.finish()
+}
+
+/// Builds a stored row a column at a time: the header, then each column's
+/// value, its offset noted when it starts at a mark.
+pub struct RowWriter {
+    out: Vec<u8>,
+    /// The columns begun.
+    col: usize,
+}
+
+impl RowWriter {
+    /// A row of `n` columns.
+    pub fn new(n: usize) -> Self {
+        let marks = n.saturating_sub(1) / STRIDE;
+        let mut out = Vec::with_capacity(3 + 2 * marks + n * 9);
+        out.push(ROW_VERSION);
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+        out.resize(3 + 2 * marks, 0);
+        Self { out, col: 0 }
+    }
+
+    /// Begins the next column; where it starts.
+    fn begin(&mut self) -> usize {
+        let at = self.out.len();
+        let c = self.col;
+        if c > 0 && c.is_multiple_of(STRIDE) {
+            let m = 3 + 2 * (c / STRIDE - 1);
+            let off = u16::try_from(at).ok().filter(|&o| o != FAR).unwrap_or(FAR);
+            self.out[m..m + 2].copy_from_slice(&off.to_le_bytes());
+        }
+        self.col += 1;
+        at
+    }
+
+    /// Appends the next column's value; where its encoding starts.
+    pub fn value(&mut self, v: &Value) -> usize {
+        let at = self.begin();
+        encode_row_value(&mut self.out, v);
+        at
+    }
+
+    /// Appends the next column as a value stored out of line, `len` bytes
+    /// of encoding.
+    pub fn out_of_line(&mut self, len: u32) {
+        self.begin();
+        self.out.push(OUT_OF_LINE);
+        self.out.extend_from_slice(&len.to_le_bytes());
+    }
+
+    /// Takes the last column's encoding from `at` back out of the row (to
+    /// store it out of line in its place: [`Self::out_of_line`]).
+    pub fn take_last(&mut self, at: usize) -> Vec<u8> {
+        self.col -= 1;
+        self.out.split_off(at)
+    }
+
+    /// The bytes written since `at`.
+    pub fn since(&self, at: usize) -> &[u8] {
+        &self.out[at..]
+    }
+
+    /// The row's bytes.
+    pub fn finish(self) -> Vec<u8> {
+        self.out
+    }
+}
+
+/// Appends one value's encoding in a row: [`encode_value`]'s, but text,
+/// `char(n)`, bytea and enums shorter than 256 bytes with a `u8` length
+/// (tags 22 to 25).
+pub fn encode_row_value(out: &mut Vec<u8>, v: &Value) {
+    let (tag, b) = match v {
+        Value::Text(s) => (22, s.as_bytes()),
+        Value::Char(s) => (23, s.as_bytes()),
+        Value::Bytea(b) => (24, &b[..]),
+        Value::Enum(e) => (25, &e.key[..]),
+        _ => return encode_value(out, v),
+    };
+    match u8::try_from(b.len()) {
+        Ok(n) => {
+            out.extend_from_slice(&[tag, n]);
+            out.extend_from_slice(b);
+        }
+        Err(_) => encode_value(out, v),
+    }
 }
 
 /// Appends one value's row encoding: its tag, then its bytes.
@@ -473,6 +569,20 @@ pub fn decode_value(r: &mut Reader) -> Result<Value> {
         1 => Value::Bool(r.u8().map_err(bad)? == 1),
         2 => Value::Int(r.u64().map_err(bad)? as i64),
         18 => Value::Char(r.str().map_err(bad)?),
+        tag @ 22..=25 => {
+            let n = usize::from(r.u8().map_err(bad)?);
+            let b = r.take(n).map_err(bad)?;
+            let text = || {
+                String::from_utf8(b.to_vec())
+                    .map_err(|_| Error::internal("record string not UTF-8"))
+            };
+            match tag {
+                22 => Value::Text(text()?),
+                23 => Value::Char(text()?),
+                24 => Value::Bytea(b.into()),
+                _ => unresolved_enum(b),
+            }
+        }
         21 => {
             let n = r.u32().map_err(bad)? as usize;
             unresolved_enum(r.take(n).map_err(bad)?)
@@ -584,31 +694,102 @@ pub fn decode_some(
     resolve: &mut dyn FnMut(usize, u32) -> Result<Value>,
 ) -> Result<Vec<Value>> {
     let bad = |_| Error::internal("malformed row encoding");
-    let mut r = Reader::new(b);
-    if !(1..=ROW_VERSION).contains(&r.u8().map_err(bad)?) {
-        return Err(Error::internal("malformed row encoding"));
-    }
-    let n = r.u16().map_err(bad)? as usize;
-    let mut row = Vec::with_capacity(columns.max(n));
+    let h = row_header(b)?;
+    let n = h.n;
+    let mut row = vec![Value::Null; columns.max(n)];
     // Past the last column wanted, the row is not read at all.
     let upto = wanted.map_or(n, |w| {
         w.iter().rposition(|&x| x).map_or(0, |c| c + 1).min(n)
     });
-    for c in 0..upto {
-        let want = wanted.is_none_or(|w| w.get(c).copied().unwrap_or(false));
+    let mut r = h.reader();
+    let mut at = 0;
+    for (c, slot) in row.iter_mut().enumerate().take(upto) {
+        if !wanted.is_none_or(|w| w.get(c).copied().unwrap_or(false)) {
+            continue;
+        }
+        if at != c {
+            h.seek(&mut at, &mut r, c)?;
+        }
+        at = c + 1;
         if r.peek() == Some(OUT_OF_LINE) {
             r.u8().map_err(bad)?;
             let len = r.u32().map_err(bad)?;
-            row.push(if want { resolve(c, len)? } else { Value::Null });
-        } else if want {
-            row.push(decode_value(&mut r)?);
+            *slot = resolve(c, len)?;
         } else {
-            skip_value(&mut r)?;
-            row.push(Value::Null);
+            *slot = decode_value(&mut r)?;
         }
     }
-    row.resize(columns.max(n), Value::Null);
     Ok(row)
+}
+
+/// A stored row's header (any version): its column count, its offsets.
+pub(crate) struct RowHeader<'a> {
+    b: &'a [u8],
+    /// The columns stored.
+    pub n: usize,
+    /// The offsets of columns [`STRIDE`], 2 × [`STRIDE`], … (version 3).
+    marks: &'a [u8],
+    /// Where column 0 starts.
+    start: usize,
+}
+
+/// Reads a stored row's header.
+pub(crate) fn row_header(b: &[u8]) -> Result<RowHeader<'_>> {
+    let bad = || Error::internal("malformed row encoding");
+    let (&version, rest) = b.split_first().ok_or_else(bad)?;
+    if !(1..=ROW_VERSION).contains(&version) || rest.len() < 2 {
+        return Err(bad());
+    }
+    let n = usize::from(u16::from_le_bytes([rest[0], rest[1]]));
+    let marks = if version >= 3 {
+        2 * (n.saturating_sub(1) / STRIDE)
+    } else {
+        0
+    };
+    let start = 3 + marks;
+    if b.len() < start {
+        return Err(bad());
+    }
+    Ok(RowHeader {
+        b,
+        n,
+        marks: &b[3..start],
+        start,
+    })
+}
+
+impl<'a> RowHeader<'a> {
+    /// A reader at column 0.
+    pub(crate) fn reader(&self) -> Reader<'a> {
+        Reader::new(&self.b[self.start..])
+    }
+
+    /// Moves `r`, at column `*at`, to column `c` (at or after it): to the
+    /// last offset at or before `c` when that is ahead, then past the
+    /// values between.
+    pub(crate) fn seek(&self, at: &mut usize, r: &mut Reader<'a>, c: usize) -> Result<()> {
+        // Rows before version 3 have no marks.
+        let mut m = (c / STRIDE).min(self.marks.len() / 2);
+        while m > 0 && m * STRIDE > *at {
+            let i = 2 * (m - 1);
+            let off = u16::from_le_bytes([self.marks[i], self.marks[i + 1]]);
+            if off != FAR {
+                let off = usize::from(off);
+                if off < self.start || off > self.b.len() {
+                    return Err(Error::internal("malformed row encoding"));
+                }
+                *r = Reader::new(&self.b[off..]);
+                *at = m * STRIDE;
+                break;
+            }
+            m -= 1;
+        }
+        while *at < c {
+            skip_value(r)?;
+            *at += 1;
+        }
+        Ok(())
+    }
 }
 
 /// Moves past one value's row encoding without building it.
@@ -626,6 +807,13 @@ pub(crate) fn skip_value(r: &mut Reader) -> Result<()> {
         Some(4 | 18 | 15 | 21) => {
             r.u8().map_err(bad)?;
             let n = r.u32().map_err(bad)? as usize;
+            fixed(r, n)
+        }
+        // A value stored out of line: its tag and length.
+        Some(OUT_OF_LINE) => fixed(r, 5),
+        Some(22..=25) => {
+            r.u8().map_err(bad)?;
+            let n = usize::from(r.u8().map_err(bad)?);
             fixed(r, n)
         }
         // Arrays, registered types, addresses: decoded and dropped.
@@ -891,6 +1079,90 @@ mod tests {
         let wider = decode_row(&encode_row(&[Value::Int(1)]), 3).unwrap();
         assert_eq!(wider, vec![Value::Int(1), Value::Null, Value::Null]);
         assert!(decode_row(b"\x02", 1).is_err());
+    }
+
+    /// A row as version 2 wrote it: no offsets, text with `u32` lengths.
+    fn version_2(row: &[Value]) -> Vec<u8> {
+        let mut out = vec![2];
+        out.extend_from_slice(&(row.len() as u16).to_le_bytes());
+        for v in row {
+            encode_value(&mut out, v);
+        }
+        out
+    }
+
+    /// Rows wide and long enough to have offsets (and offsets past 64 KiB),
+    /// read whole and a few columns at a time, agree with their values —
+    /// and so do the same rows as version 2 wrote them.
+    #[test]
+    fn offsets_find_the_columns_read() {
+        let short = |i: usize| Value::Text("x".repeat(i % 7));
+        let mid = |i: usize| Value::Text("y".repeat(255 + i % 3));
+        let long = |_: usize| Value::Bytea(vec![7; 1900].into());
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        for width in [1, 15, 16, 17, 33, 105, 200] {
+            rows.push((0..width).map(short).collect());
+            rows.push(
+                (0..width)
+                    .map(|i| match i % 4 {
+                        0 => Value::Int(i as i64 * 1_000_003),
+                        1 => mid(i),
+                        2 => Value::Null,
+                        _ => sample()[i % sample().len()].clone(),
+                    })
+                    .collect(),
+            );
+        }
+        // Past 64 KiB from column 34 or so on: those offsets are `FAR`.
+        rows.push((0..100).map(long).collect());
+        let same = |a: &Value, b: &Value| a == b || (a.is_null() && b.is_null());
+        for row in &rows {
+            let n = row.len();
+            for b in [encode_row(row), version_2(row)] {
+                let all = decode_row(&b, n).unwrap();
+                assert!(all.iter().zip(row).all(|(a, b)| same(a, b)));
+                for pick in [
+                    vec![n - 1],
+                    vec![0, n / 2, n - 1],
+                    (0..n).step_by(5).collect(),
+                    (n / 3..n).step_by(17).collect(),
+                ] {
+                    let wanted: Vec<bool> = (0..n).map(|c| pick.contains(&c)).collect();
+                    let got =
+                        decode_some(&b, n, Some(&wanted), &mut |_, _| unreachable!()).unwrap();
+                    for c in 0..n {
+                        if wanted[c] {
+                            assert!(same(&got[c], &row[c]), "{n} columns, column {c}");
+                        } else {
+                            assert!(got[c].is_null());
+                        }
+                    }
+                }
+            }
+        }
+        let far = encode_row(&rows[rows.len() - 1]);
+        let h = row_header(&far).unwrap();
+        assert!(h.marks.chunks(2).any(|m| m == [0xFF, 0xFF]));
+        assert!(h.marks.chunks(2).any(|m| m != [0xFF, 0xFF]));
+        // Short text costs two bytes of header, not five.
+        assert_eq!(
+            encode_row(&[Value::Text("ab".into())]),
+            [3, 1, 0, 22, 2, b'a', b'b']
+        );
+        // A mark pointing outside the row is an error, not a wrong value.
+        let mut bad = encode_row(&rows[11]);
+        bad[3..5].copy_from_slice(&1u16.to_le_bytes());
+        let mut wanted = vec![false; rows[11].len()];
+        wanted[20] = true;
+        assert!(
+            decode_some(
+                &bad,
+                wanted.len(),
+                Some(&wanted),
+                &mut |_, _| unreachable!()
+            )
+            .is_err()
+        );
     }
 
     #[test]

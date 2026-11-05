@@ -456,6 +456,7 @@ same machine, alternating with the step before):
 | W6: `CASE` by batches | 6.9 | 2.25 |
 | W6: one key table for groupings and joins | 7.05 | 2.3 |
 | W6: sorts on normalized keys | 7.15 | 2.3 |
+| W7: row format version 3 (column offsets, short lengths) | 6.45 | 2.15 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
@@ -481,6 +482,22 @@ same machine, alternating with the step before):
 | W6: `CASE` by batches | 2.34 | 19.7 | 414 | 165 | 231 |
 | W6: one key table for groupings and joins | 2.35 | 19.85 | 414 | 165 | 230 |
 | W6: sorts on normalized keys | 2.35 | 19.75 | 418 | 161 | 231 |
+| W7: row format version 3 | 2.2 | 19.0 | 389 | 153 | 222 |
+
+(W7's rows were measured on a faster morning than W6's: the step before
+gave TPC-H 6.62 / 2.16 s and ClickBench 2.28 s, 19.4 ms, in the same
+rounds.)
+
+ClickBench on a row table since (the same runs, `--storage row`):
+
+| step | sum (s) | geometric mean (ms) | Q32 (ms) | Q18 (ms) | Q39 (ms) | file (MB) |
+|---|---:|---:|---:|---:|---:|---:|
+| W6 (`1db6bd9`) | 7.23 | 155 | 519 | 267 | 356 | 984 |
+| W7: row format version 3 | 6.25 | 130 | 511 | 247 | 330 | 902 |
+
+(A scan of the row table reads the whole file, past the 128 MiB cache,
+at every query: `pread`, page checks and copies are most of its time,
+decoding at most an eighth — PLAN.md §M14.20 W7.)
 
 (Correlated subqueries on the workers: TPC-H Q20 on column tables 577 →
 173 ms, Q2 49 → 25, Q17 88 → 31; on row tables Q20 509 → 175, Q17 43 →
