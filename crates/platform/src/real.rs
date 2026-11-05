@@ -32,6 +32,9 @@ pub struct RealPlatform {
     fs: RealFs,
     clock: RealClock,
     rng: OsRng,
+    /// [`Platform::parallelism`], asked of the OS once (a system call
+    /// each time otherwise, and statements ask).
+    parallelism: usize,
 }
 
 /// Fast randomness (seeded from the operating system once), and the
@@ -67,6 +70,7 @@ impl RealPlatform {
                 origin: Instant::now(),
             },
             rng: OsRng(SplitMix64::new(seed)),
+            parallelism: std::thread::available_parallelism().map_or(1, usize::from),
         })
     }
 }
@@ -83,7 +87,7 @@ impl Platform for RealPlatform {
     }
 
     fn parallelism(&self) -> usize {
-        std::thread::available_parallelism().map_or(1, usize::from)
+        self.parallelism
     }
 }
 

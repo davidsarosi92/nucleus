@@ -356,30 +356,25 @@ impl BTree {
                     break;
                 }
                 // Child i holds the keys in [key(i - 1), key(i)) (an
-                // internal node's keys are whole: no prefix).
-                for i in 0..=v.len() {
+                // internal node's keys are whole: no prefix): from the
+                // child holding `start` (found by binary search) to the
+                // last that begins before `end`.
+                for i in v.child_index(start).map_err(corrupt)?..=v.len() {
                     let lo = if i == 0 {
                         None
                     } else {
                         Some(v.key(i - 1).map_err(corrupt)?.rest)
                     };
-                    let hi = if i == v.len() {
-                        None
-                    } else {
-                        Some(v.key(i).map_err(corrupt)?.rest)
-                    };
-                    let after_start = hi.is_none_or(|h| h > start);
-                    let before_end = match (lo, end) {
-                        (Some(l), Some(e)) => l < e,
-                        _ => true,
-                    };
-                    if after_start && before_end {
-                        next.push(v.child(i).map_err(corrupt)?);
-                        if let Some(l) = lo
-                            && inside(l)
-                        {
-                            found.push(l.to_vec());
-                        }
+                    if let (Some(l), Some(e)) = (lo, end)
+                        && l >= e
+                    {
+                        break;
+                    }
+                    next.push(v.child(i).map_err(corrupt)?);
+                    if let Some(l) = lo
+                        && inside(l)
+                    {
+                        found.push(l.to_vec());
                     }
                 }
             }

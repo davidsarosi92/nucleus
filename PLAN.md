@@ -2559,6 +2559,21 @@ the speed-up is made once, in the merged one.  The work, in this order:
   (literal), `SELECT 1` 28.3 / 28.3 → 24.8 / 24.9; writes within the
   noise of their fsyncs; TPC-H on row tables 6.85 / 6.55 → 6.68 / 6.47 s
   (unchanged, as it should be).
+  *A point read set up as one.*  Three costs the profile showed beside
+  the catalog: a scan of one key of a unique index was offered to the
+  parallel workers — its key range computed and the B+tree asked for
+  split points, a row at most to share — and now is not; the B+tree's
+  `split_keys` looked at every child of every node on its way down, and
+  now finds the children in the range by binary search (what its point
+  descents already did; a test compares it with the old walk over trees
+  three and four levels deep, bounds between keys and on them); and the
+  real platform asked the OS for its CPU count — a system call — each
+  statement, now once.  Measured, alternating with the step before, two
+  rounds: a point read 38.7 / 38.9 → 35.7 / 35.9 µs (literal), 42.5 /
+  42.9 → 40.0 / 39.8 (parameter), `SELECT 1` 24.5 / 24.8 → 23.8 / 23.8;
+  TPC-H on row tables 6.69 / 6.60 / 6.59 → 6.60 / 7.00 / 6.65 s (the
+  second round slower on every query alike: the machine), on column
+  tables 2.08 / 2.08 → 2.08 / 2.12.
 
 Each step records what it took from where, and what it measured, here
 and in `docs/benchmarks.md`.

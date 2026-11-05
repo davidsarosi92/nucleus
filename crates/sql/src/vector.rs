@@ -3267,6 +3267,18 @@ fn volatile(e: &Expr) -> bool {
     found
 }
 
+/// Whether `access` reads one key of a unique index (the primary key's,
+/// or a unique one's) — a row at most, nothing to share out.
+fn one_key(table: &Table, access: &Access) -> bool {
+    let Access::Key { index, prefix, .. } = access else {
+        return false;
+    };
+    match index {
+        None => !table.primary_key.is_empty() && prefix.len() == table.primary_key.len(),
+        Some(i) => table.indexes[*i].unique && prefix.len() == table.indexes[*i].columns.len(),
+    }
+}
+
 /// A chain's scan cut into morsels for worker threads, and what the
 /// workers share.
 struct Morsels<'a> {
@@ -3301,6 +3313,9 @@ impl<'a> Morsels<'a> {
         let Plan::Scan { table, access, .. } = scan else {
             unreachable!("a chain ends in a scan")
         };
+        if one_key(table, access) {
+            return Ok(None);
+        }
         let mut all: Vec<&Expr> = exprs.to_vec();
         for (step, _) in &steps {
             match step {

@@ -121,8 +121,8 @@ principle 4).
 ### 3.1 Interface
 
 - `Platform` — `fs()`, `clock()`, `rng()`, `parallelism()` (the threads
-  work can usefully run on: the CPUs on the real platform, 1 in the
-  simulation).
+  work can usefully run on: the CPUs on the real platform, asked of the
+  OS once, when it is made; 1 in the simulation).
 - `FileSystem` — `open(path, OpenMode)`, `remove_file`, `rename` (atomic
   replace), `create_dir_all`, `list_dir` (sorted names), `exists`,
   `sync_dir`.
@@ -840,7 +840,8 @@ distributed implementation will provide (§F3).
   `first` among them without the empty ranges remembered, which the
   workers would contend for; default `None`), `split_points(start, end, parts)` (up to `parts - 1`
   keys cutting a range into parts of about equal size, from the B+tree's
-  internal nodes, none smaller than 64 leaves; default none), `first(start,
+  internal nodes — each node's children in the range found by binary
+  search —, none smaller than 64 leaves; default none), `first(start,
   end)` (the range's first entry, without a scan's read-ahead; the
   engine's transaction, outside `SERIALIZABLE`, remembers up to 8 ranges
   it found the store empty in — where none of its own writes lay — until
@@ -1505,7 +1506,8 @@ accumulate exactly (128 bits), so a sum overflows only when its result
 does, whatever the order.
 
 **Parallelism** (`vector`, `parallel`, §M14.20).  A pipeline's scan
-splits into morsels at the KV's split points (`split_points`), run by
+(not one of a single key of a unique index: a row at most) splits into
+morsels at the KV's split points (`split_points`), run by
 worker threads — up to `parallel_workers` (default 0: as many as the
 database's CPUs, `Kv::parallelism`; 1 turns it off; the simulation
 offers one) — each with its own execution context over the
@@ -3217,6 +3219,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W8, a point read set up as one:** a scan of
+  one key of a unique index is not cut into morsels; `split_keys` finds
+  each node's children in the range by binary search; the real platform
+  asks the OS for its CPUs once.  A point read on one connection 38.8 →
+  35.8 µs (literal), 42.7 → 39.9 (parameter).
 
 - **2026-11-05 — §M14.20 W8, a session's catalog cache:** the KV store
   watches key ranges (`Kv::watch`, `KvTxn::watched_as_at`); a session

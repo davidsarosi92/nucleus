@@ -251,6 +251,7 @@ and more from run to run):
 |---|---:|---:|---:|---:|---:|
 | W7 closed (`7b5f092`) | 28.3 | 45.5 | 52.1 | 193 | 292 |
 | a session's catalog cache | 24.9 | 38.5 | 42.1 | 188 | 295 |
+| a point read set up as one | 23.8 | 35.9 | 39.8 | 179 | 196 |
 
 ## TPC-H
 

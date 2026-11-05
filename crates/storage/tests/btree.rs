@@ -612,3 +612,99 @@ fn a_scan_reads_ahead_and_a_short_range_does_not() {
     let s = tree.pool().stats();
     assert!(s.hits * 10 > s.misses * 18, "{s:?}");
 }
+
+/// `split_keys` as it was before it searched each node (§M14.20 W8): every
+/// child of every node on a level looked at.
+fn split_keys_by_scanning(
+    tree: &BTree,
+    start: &[u8],
+    end: Option<&[u8]>,
+    parts: usize,
+    min_leaves: usize,
+) -> Vec<Vec<u8>> {
+    use nucleus_storage::node::View;
+    let inside = |k: &[u8]| k > start && end.is_none_or(|e| k < e);
+    let mut level = vec![tree.root()];
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    loop {
+        let (mut next, mut found, mut leaves) = (Vec::new(), Vec::new(), false);
+        for &id in &level {
+            let r = tree.pool().fetch(id).unwrap();
+            let page = r.read();
+            let v = View::new(&page).unwrap();
+            if v.is_leaf() {
+                leaves = true;
+                break;
+            }
+            for i in 0..=v.len() {
+                let lo = (i > 0).then(|| v.key(i - 1).unwrap().rest);
+                let hi = (i < v.len()).then(|| v.key(i).unwrap().rest);
+                let after_start = hi.is_none_or(|h| h > start);
+                let before_end = match (lo, end) {
+                    (Some(l), Some(e)) => l < e,
+                    _ => true,
+                };
+                if after_start && before_end {
+                    next.push(v.child(i).unwrap());
+                    if let Some(l) = lo
+                        && inside(l)
+                    {
+                        found.push(l.to_vec());
+                    }
+                }
+            }
+        }
+        if leaves {
+            break;
+        }
+        keys = found;
+        if next.len() > 4096 {
+            break;
+        }
+        level = next;
+    }
+    let parts = parts.min((keys.len() + 1) / min_leaves.max(1)).max(1);
+    (1..parts)
+        .map(|j| keys[j * keys.len() / parts].clone())
+        .collect()
+}
+
+#[test]
+fn split_keys_agree_with_scanning_each_node() {
+    harness::run("btree_split_keys", 4, |seed| {
+        let p = platform(seed);
+        let mut tree = new_tree(&p, 256);
+        let rng = SplitMix64::new(seed);
+        // Ordered keys of a few widths: trees three and four levels deep.
+        let width = 8 + rng.below(40) as usize;
+        let n = 20_000 + rng.below(40_000) as usize;
+        for i in 0..n {
+            let mut k = format!("{:0width$}", i * 7).into_bytes();
+            k.extend_from_slice(&[b'x'; 3]);
+            tree.insert(&k, b"value").unwrap();
+        }
+        // Bounds between keys, and on them (a node's separator is one).
+        let at = |i: u64| {
+            let mut k = format!("{:0width$}", i).into_bytes();
+            if rng.below(2) == 0 {
+                k = format!("{:0width$}", i / 7 * 7).into_bytes();
+                k.extend_from_slice(&[b'x'; 3]);
+            }
+            k
+        };
+        for _ in 0..300 {
+            let a = rng.below(n as u64 * 8);
+            let b = a + rng.below(n as u64 * 8 + 1 - a);
+            let start = if rng.below(8) == 0 { Vec::new() } else { at(a) };
+            let end = (rng.below(8) != 0).then(|| at(b));
+            for (parts, min_leaves) in [(2, 1), (8, 1), (48, 4), (1000, 1)] {
+                assert_eq!(
+                    tree.split_keys(&start, end.as_deref(), parts, min_leaves)
+                        .unwrap(),
+                    split_keys_by_scanning(&tree, &start, end.as_deref(), parts, min_leaves),
+                    "{start:?}..{end:?} in {parts}"
+                );
+            }
+        }
+    });
+}
