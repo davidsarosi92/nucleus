@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W6 and W3b ✅, W7 under way (D18), W8 next; benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W7 and W3b ✅, W8 next; benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
@@ -2501,6 +2501,19 @@ the speed-up is made once, in the merged one.  The work, in this order:
   (row), 2.15 / 2.14 → 2.11 / 2.14 (column) — its Q9, slower in those
   rounds, the same or faster alone (262 / 262 → 257 / 227 ms, seven
   runs each).
+  *W7 closed* (2026-11-05).  Of the three formats D18 named, the row
+  format's offsets were taken one in 16 columns, with shorter lengths;
+  extents and the shared WAL buffer were measured and not taken (1–1.5 %
+  and 1 %).  What the profiles found instead was taken: page reads
+  without zeroing, the file grown ahead, LZ by wild copies.  Since W6,
+  alternating with each step before it: ClickBench on a row table 7.2 →
+  5.9 s (geometric mean 155 → 122 ms, its file 984 → 902 MB), the TPC-H
+  load on row tables 56 → 27 s and on column tables 34 → 22, a logged
+  `COPY` 22 → 9 s; TPC-H's queries 6.6 → 6.4 s (row), 2.16 → 2.12
+  (column); ClickBench on a column table 19.4 → 18.15 ms.  Left,
+  recorded: extents for a working set past the cache, the WAL's segments
+  preallocated and recycled, reading into the buffer pool's frames
+  without a copy.  **W8 is next.**
 - **W8 — per-statement costs** (what AI agents' traffic pays most): a
   catalog epoch, and on it a session's catalog, settings and plan cache
   (pg-compat's prepared statements onto the same); one bind for describe
@@ -3734,3 +3747,6 @@ style) across a thousand seeds without failure.
   fixed 16-byte pieces into room past the output's end), 2–2.5× the
   decoder before.  ClickBench on a column table 19.1 → 18.15 ms
   geometric mean, its `SELECT *` 133 → 116.  DOCS §4.4.
+- **2026-11-05** — §M14.20 W7 closed: ClickBench on a row table 7.2 →
+  5.9 s, the TPC-H load on row tables 56 → 27 s; extents and the shared
+  WAL buffer measured and not taken.  W8 next.
