@@ -149,6 +149,14 @@ struct Inner {
     /// may put an entry into one: a spill or a commit with a key in one
     /// conflicts.  Changed under the commit lock (taken first).
     unlogged: Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// Key ranges watched ([`Engine::watch`]), `[start, end)`: a commit
+    /// writing into one raises `watched_at`.  Changed under the commit
+    /// lock (taken first).
+    watched: RwLock<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// The highest commit timestamp that wrote into a watched range (or
+    /// at which a range began to be watched) — raised under the commit
+    /// lock before the commit is visible.
+    watched_at: AtomicU64,
 }
 
 /// The thread that checkpoints when the WAL since the last checkpoint
@@ -450,6 +458,8 @@ impl Engine {
                 begun: AtomicU64::new(0),
                 sweep: Mutex::new(None),
                 unlogged: Mutex::new(Vec::new()),
+                watched: RwLock::new(Vec::new()),
+                watched_at: AtomicU64::new(recovery.meta),
             }),
         };
         engine.inner.recover_side()?;
@@ -466,6 +476,20 @@ impl Engine {
     /// none [`running`](Self::running), the database was idle.
     pub fn activity(&self) -> u64 {
         self.inner.begun.load(Ordering::Relaxed)
+    }
+
+    /// Watches the keys from `start` to `end` (exclusive): from now on a
+    /// commit writing one of them raises the mark
+    /// [`Transaction::watched_as_at`] reads — what lets a reader keep
+    /// what it derived from those keys (a catalog) across transactions.
+    pub fn watch(&self, start: &[u8], end: &[u8]) {
+        let last = lock(&self.inner.commit);
+        let mut watched = write(&self.inner.watched);
+        if !watched.iter().any(|(s, e)| s == start && e == end) {
+            watched.push((start.to_vec(), end.to_vec()));
+            // What was derived before is not known to be current.
+            self.inner.watched_at.fetch_max(*last, Ordering::SeqCst);
+        }
     }
 
     /// How many transactions are running.
@@ -1505,6 +1529,29 @@ impl Transaction {
         self.isolation
     }
 
+    /// Whether this transaction sees the watched keys ([`Engine::watch`])
+    /// as a snapshot at `at` saw them: no commit since the later of the
+    /// two wrote one, nor did this transaction.  False for a serializable
+    /// transaction that writes (its reads must be recorded to validate).
+    pub fn watched_as_at(&self, at: Timestamp) -> bool {
+        if self.isolation == Isolation::Serializable && !self.read_only {
+            return false;
+        }
+        self.engine.watched_at.load(Ordering::SeqCst) <= self.start.min(at.0)
+            && !self.wrote_watched()
+    }
+
+    /// Whether this transaction wrote into a watched range.
+    fn wrote_watched(&self) -> bool {
+        let watched = read(&self.engine.watched);
+        watched.iter().any(|(s, e)| {
+            let (start, end) = (Bound::Included(s.as_slice()), Bound::Excluded(e.as_slice()));
+            self.writes.range(start, end).next().is_some()
+                || self.spans.overlaps(start, end)
+                || self.fresh.iter().any(|f| f.start < *e && *s < f.end)
+        })
+    }
+
     /// The value of `key` in this transaction (its own writes included).
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if let Some(w) = self.writes.get(key) {
@@ -2001,6 +2048,11 @@ impl Transaction {
             // their validated ones.
             self.validate_reads(&engine)?;
             let ts = *last + 1;
+            if self.wrote_watched() {
+                // Before the commit is visible: a snapshot that sees it
+                // sees the mark.
+                engine.watched_at.fetch_max(ts, Ordering::SeqCst);
+            }
             // In key order, so the store applies the batch as it is (the
             // leaves it rewrites lose what no snapshot can see any more):
             // built in it, sorted only should that fail.

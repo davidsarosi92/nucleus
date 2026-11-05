@@ -12,6 +12,7 @@ pub mod budget;
 pub mod builtin;
 pub mod bytea;
 pub mod catalog;
+pub mod catalog_cache;
 pub mod check;
 pub mod column_store;
 mod columns;

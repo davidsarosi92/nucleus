@@ -234,6 +234,15 @@ pub trait Kv: Send + Sync {
     fn vacuum_wanted(&self) -> bool {
         false
     }
+
+    /// Watches the keys from `start` to `end` (exclusive) for
+    /// [`KvTxn::watched_as_at`]: what a caller derives from them (a
+    /// catalog) may be kept across transactions while none commits a
+    /// write there.  The default watches nothing (and every transaction
+    /// answers `false`).
+    fn watch(&self, start: &[u8], end: &[u8]) {
+        let _ = (start, end);
+    }
 }
 
 /// Scratch space ([`Kv::scratch`]): bytes written and read back by offset.
@@ -492,6 +501,16 @@ pub trait KvTxn: Send {
         let _ = (start, end);
     }
 
+    /// Whether this transaction reads the [watched](Kv::watch) keys as a
+    /// snapshot at `at` read them — so what was derived from them there
+    /// holds here: no commit between the two snapshots wrote one, nor did
+    /// this transaction, and its reads need not be recorded (not a
+    /// serializable transaction that writes).  The default: no.
+    fn watched_as_at(&self, at: Timestamp) -> bool {
+        let _ = at;
+        false
+    }
+
     /// Commits atomically; returns the commit timestamp.  On error nothing
     /// was written.
     fn commit(self: Box<Self>) -> Result<Timestamp>;
@@ -727,6 +746,10 @@ impl Kv for Database {
         self.engine.intents_pending()
     }
 
+    fn watch(&self, start: &[u8], end: &[u8]) {
+        self.engine.watch(start, end);
+    }
+
     fn scratch(&self) -> Result<Box<dyn Scratch>> {
         let fs = self.platform.fs();
         fs.create_dir_all(&self.scratch_dir)
@@ -867,6 +890,10 @@ impl KvTxn for LocalTxn {
 
     fn fresh(&mut self, start: &[u8], end: &[u8]) {
         self.0.fresh(start, end);
+    }
+
+    fn watched_as_at(&self, at: Timestamp) -> bool {
+        self.0.watched_as_at(at)
     }
 
     fn put_new(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {

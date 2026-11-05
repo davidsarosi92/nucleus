@@ -723,6 +723,20 @@ many each time up to 128, and no more than 4096 entries passed over
 (intents nobody sees, versions too new) — re-seeking each time, so no
 store lock is held between calls; MVCC makes the re-seek consistent.  Reverse scans are not implemented yet.
 
+**Watched ranges** (§M14.20 W8; SQLite's schema cookie, made
+snapshot-aware).  `Engine::watch(start, end)` adds a key range to the
+watched ones; a commit that wrote into one — in memory, spilled or into
+a fresh range — raises one mark, `watched_at`, to its timestamp under the
+commit lock, before the commit is visible, and a range begins to be
+watched with the mark at the last commit.  `watched_as_at(at)` answers
+whether a transaction reads the watched keys as a snapshot at `at` did:
+the mark at or below both its snapshot and `at`, and none of its own
+writes in a watched range; never for a serializable transaction that
+writes (its reads must be recorded).  A snapshot at or past a commit
+sees its mark, so what a reader derived from the watched keys at `at`
+(the SQL layer's catalog, §8.2) holds for every transaction that answers
+yes.
+
 Errors: `Storage`, `Conflict { key }`, `SnapshotTooOld`, `ReadOnly`,
 `KeyTooLarge`, `Corrupt`; `is_retryable()`.
 
@@ -841,6 +855,10 @@ distributed implementation will provide (§F3).
   transaction's write can be in until this one ends, and no one else reads
   before it commits — a new index's keys: locally, their writes skip the
   conflict checks, and their values the WAL, §5.2; by default ignored),
+  `watched_as_at(at)` (whether it reads the keys `Kv::watch(start, end)`
+  watches as a snapshot at `at` did — no commit between the two, nor
+  this transaction, wrote one; §5.2; by default `false`, and `Kv::watch`
+  does nothing),
   `commit(self: Box<Self>) -> Timestamp`, `rollback`.  Reads take `&self`
   so a scan can stay open while the same transaction reads keys.  A scan
   reads ahead 8 entries at first, twice as many at each refill up to 128,
@@ -1272,8 +1290,23 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 A unique index entry is keyed by the index values alone (unless one is
 NULL), so two transactions inserting the same value write the same key and
 the second conflicts; other entries append the primary key.  The catalog is
-read through the statement's own transaction, so DDL is transactional and
-needs no cache invalidation.
+read through the statement's own transaction, so DDL is transactional.
+
+**A session's catalog cache** (`catalog_cache`, §M14.20 W8) keeps what
+its statements derived from the catalog — tables' definitions, database
+settings, objects' ACLs and owners, an identity's effective roles — for
+the statements after.  A session asks the KV store to watch the catalog's
+keys (`00 00`–`00 01` and `00 04`–`00 11`: not the counters, which
+inserts change, nor the audit log) and lends its cache to the thread
+running its statement; a lookup (`memo`) uses the cache when the
+transaction reads the catalog as the snapshot the cache was filled at
+(`KvTxn::watched_as_at`, §5.2), else empties it and fills it at the
+transaction's snapshot if that reads the current catalog, else reads the
+catalog itself: an older snapshot (a transaction begun before another's
+DDL, `AS OF`), a transaction that wrote the catalog, a serializable one
+that writes.  Work on other threads, and any other implementation of the
+KV contract, read the catalog as before.  A parameterized point read on
+one connection: 52 → 42 µs.
 
 The format record (principle 6) is checked by a session's first
 statement and written by the first write to a database the SQL layer has
@@ -3184,6 +3217,13 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W8, a session's catalog cache:** the KV store
+  watches key ranges (`Kv::watch`, `KvTxn::watched_as_at`); a session
+  keeps tables, database settings, ACLs, owners and effective roles
+  across statements while no commit writes the catalog — never for a
+  snapshot that reads it otherwise.  A parameterized point read on one
+  connection 52 → 42 µs, `SELECT 1` 28 → 25.
 
 - **2026-11-05 — §M14.20 W7, LZ by wild copies:** the decoder copies
   literals and matches in fixed 16-byte pieces into room left past the

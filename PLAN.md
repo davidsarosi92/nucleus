@@ -2521,6 +2521,44 @@ the speed-up is made once, in the merged one.  The work, in this order:
   for the server and the Rust client (four encoders and decoders today);
   the C and Python drivers' buffering; the next result batch requested
   while the client handles one (from W1).
+  Measured first (`crates/client/examples/latency.rs`, one connection,
+  20 000 statements each, median): `SELECT 1` 28 µs, a point read 42
+  (literal) / 48 (parameter), an insert 184, an update by key 197.  A
+  profile of the parameterized point read: the binder about 40 % of the
+  session thread's busy time — the privilege checks (roles, ACLs and
+  owners read and decoded each statement) most of it, the table's
+  definition decoded —, database settings read 10 %, a parallel scan's
+  morsels and split points set up for one key 5 %, parsing 8 %, the
+  optimizer 6 %.
+  *The catalog epoch and a session's catalog cache.*  The KV store
+  watches key ranges: a commit writing into one raises one mark under the
+  commit lock, before it is visible, and a transaction answers whether
+  it reads the watched keys as a snapshot at a given timestamp did
+  (`Kv::watch`, `KvTxn::watched_as_at`; DOCS §5.2).  A session keeps
+  what its statements derived from the catalog — tables, database
+  settings, ACLs, owners, effective roles — and uses it while that
+  holds; a snapshot that reads the catalog otherwise (begun before
+  another's DDL, `AS OF`, its own DDL, serializable and writing) reads
+  the catalog itself (DOCS §8.2).  Taken: SQLite's *schema cookie* — one
+  counter, bumped by every schema change and checked by each statement,
+  the schema reloaded when it moved —, made snapshot-aware: SQLite has
+  one writer and its readers see the newest schema, nucleus's snapshots
+  each see their own.  Not taken: PostgreSQL's per-object invalidation
+  messages (each backend's relcache and syscache entries invalidated by
+  a shared queue read at command start) — finer, but a queue to keep,
+  and catalog writes are rare; one mark is enough until a measurement
+  says otherwise.  DuckDB versions its catalog entries per transaction;
+  nucleus's catalog is already MVCC in the KV store, so the cache only
+  has to know when it is current.  Tests: another session's DDL, `GRANT`
+  / `REVOKE` and role membership, a database setting, an older snapshot
+  beside a newer one, a transaction's own DDL rolled back, serializable;
+  in the engine, spilled writes; mutations caught (the validity check,
+  the mark not raised, a transaction's own writes, the spilled span).
+  Measured, alternating with the step before, two rounds: a point read
+  52.2 / 52.1 → 41.8 / 42.1 µs (parameter), 44.9 / 45.5 → 38.5 / 38.5
+  (literal), `SELECT 1` 28.3 / 28.3 → 24.8 / 24.9; writes within the
+  noise of their fsyncs; TPC-H on row tables 6.85 / 6.55 → 6.68 / 6.47 s
+  (unchanged, as it should be).
 
 Each step records what it took from where, and what it measured, here
 and in `docs/benchmarks.md`.

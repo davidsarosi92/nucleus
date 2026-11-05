@@ -259,6 +259,9 @@ pub struct Session {
     /// Whether its statements go to the audit log (not a session of the
     /// server's own, as one that checks a membership's condition).
     audited: bool,
+    /// What its statements read of the catalog, kept while it holds
+    /// ([`crate::catalog_cache`]).
+    catalog: crate::catalog_cache::CatalogCache,
 }
 
 impl std::fmt::Debug for Session {
@@ -338,6 +341,7 @@ impl Session {
 
     /// A new session with the functions and views of `registry`.
     pub fn with_registry(kv: Arc<dyn Kv>, registry: Arc<Registry>) -> Self {
+        crate::catalog_cache::watch(&*kv);
         Self {
             kv,
             registry,
@@ -351,6 +355,7 @@ impl Session {
             recent: std::collections::VecDeque::new(),
             text: None,
             audited: true,
+            catalog: Default::default(),
         }
     }
 
@@ -688,9 +693,19 @@ impl Session {
         params: &[Value],
         sink: &mut dyn Sink,
     ) -> Result<String> {
-        self.run_statement(stmt, params, sink)
-            .and_then(|out| deliver(stmt, out, sink))
-            .map_err(crate::hint::complete)
+        self.with_catalog(|s| {
+            s.run_statement(stmt, params, sink)
+                .and_then(|out| deliver(stmt, out, sink))
+                .map_err(crate::hint::complete)
+        })
+    }
+
+    /// Runs `f` with the session's catalog cache lent to this thread.
+    fn with_catalog<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let cache = std::mem::take(&mut self.catalog);
+        let (out, cache) = crate::catalog_cache::with(cache, || f(self));
+        self.catalog = cache;
+        out
     }
 
     /// Runs a statement: one about the session itself returns its output,
@@ -1143,6 +1158,13 @@ impl Session {
     /// The parameter types and result columns of a statement, without
     /// running it (for the extended query protocol).
     pub fn describe(
+        &mut self,
+        stmt: &Statement,
+    ) -> Result<(Vec<Option<DataType>>, Option<Vec<OutColumn>>)> {
+        self.with_catalog(|s| s.describe_here(stmt))
+    }
+
+    fn describe_here(
         &mut self,
         stmt: &Statement,
     ) -> Result<(Vec<Option<DataType>>, Option<Vec<OutColumn>>)> {

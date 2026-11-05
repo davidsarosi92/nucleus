@@ -227,15 +227,26 @@ fn decode(b: &[u8]) -> Result<Acl> {
 /// The owner of an object: a table's maker; the rest belong to the
 /// administrators (`None`).
 pub fn owner(txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<Option<String>> {
-    Ok(match kind {
-        Kind::Table => crate::catalog::get_table(txn, name)?.and_then(|t| t.owner),
-        Kind::Type => crate::enums::get(txn, name)?.and_then(|e| e.owner),
-        _ => None,
+    if !matches!(kind, Kind::Table | Kind::Type) {
+        return Ok(None);
+    }
+    crate::catalog_cache::memo(txn, crate::catalog_cache::Part::Owner(kind), name, || {
+        Ok(match kind {
+            Kind::Table => crate::catalog::get_table(txn, name)?.and_then(|t| t.owner),
+            _ => crate::enums::get(txn, name)?.and_then(|e| e.owner),
+        })
     })
 }
 
 /// An object's ACL: its record, or its kind's default.
 pub fn acl(txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<Acl> {
+    crate::catalog_cache::memo(txn, crate::catalog_cache::Part::Acl(kind), name, || {
+        read_acl(txn, kind, name)
+    })
+}
+
+/// [`acl`], read from the catalog.
+fn read_acl(txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<Acl> {
     if let Some(b) = txn.get(&acl_key(kind, name))? {
         return decode(&b);
     }
@@ -405,7 +416,22 @@ impl Checker {
         if let Some(r) = &*self.roles.borrow() {
             return Ok(r.clone());
         }
-        let mut r = crate::roles::effective_for(txn, &self.who)?;
+        let who = &self.who;
+        let mut key = format!("{}\0{}", who.user, who.session_user);
+        for r in &who.session_roles {
+            key.push('\0');
+            key.push_str(r);
+        }
+        for (r, m) in &who.suspended {
+            key.push_str("\0\0");
+            key.push_str(r);
+            key.push('\0');
+            key.push_str(m);
+        }
+        let mut r =
+            crate::catalog_cache::memo(txn, crate::catalog_cache::Part::Roles, &key, || {
+                crate::roles::effective_for(txn, who)
+            })?;
         r.insert(PUBLIC.into());
         *self.roles.borrow_mut() = Some(r.clone());
         Ok(r)

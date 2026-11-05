@@ -239,6 +239,19 @@ batch's text once and cuts it.)
 Earlier runs (at `b03c130`, §M14.11: scans 15–30× slower; after V2:
 5–6×) are in the git history of this file.
 
+**Per-statement costs** (PLAN.md §M14.20 W8): one statement at a time on
+one connection, what an AI agent's traffic pays —
+`crates/client/examples/latency.rs` against a `nucleus server --no-auth`
+(a 100 000-row table `(k BIGINT PRIMARY KEY, v TEXT, n INT)`), 20 000 of
+each, the median in µs; each step alternating with the one before, two
+rounds, the second shown (writes wait on their fsyncs, and move by 10 %
+and more from run to run):
+
+| step | `SELECT 1` | point read, literal | point read, parameter | insert | update by key |
+|---|---:|---:|---:|---:|---:|
+| W7 closed (`7b5f092`) | 28.3 | 45.5 | 52.1 | 193 | 292 |
+| a session's catalog cache | 24.9 | 38.5 | 42.1 | 188 | 295 |
+
 ## TPC-H
 
 `bench/tpch.py` (§M14.20 V10): TPC-H's schema, its data generated from a

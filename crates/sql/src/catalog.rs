@@ -744,9 +744,11 @@ pub fn get_table(txn: &dyn KvTxn, name: &str) -> Result<Option<Table>> {
     {
         return Ok(Some(t));
     }
-    txn.get(&table_key(name))?
-        .map(|b| Table::decode(&b))
-        .transpose()
+    crate::catalog_cache::memo(txn, crate::catalog_cache::Part::Table, name, || {
+        txn.get(&table_key(name))?
+            .map(|b| Table::decode(&b))
+            .transpose()
+    })
 }
 
 thread_local! {

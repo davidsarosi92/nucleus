@@ -211,9 +211,11 @@ fn key(name: &str) -> Vec<u8> {
 /// A setting's value (its default when not set).
 pub fn get(txn: &dyn KvTxn, name: &str) -> Result<String> {
     let k = known(name)?;
-    Ok(match txn.get(&key(name))? {
-        Some(v) => String::from_utf8_lossy(&v).into_owned(),
-        None => k.default.to_string(),
+    crate::catalog_cache::memo(txn, crate::catalog_cache::Part::Setting, name, || {
+        Ok(match txn.get(&key(name))? {
+            Some(v) => String::from_utf8_lossy(&v).into_owned(),
+            None => k.default.to_string(),
+        })
     })
 }
 
