@@ -460,6 +460,7 @@ same machine, alternating with the step before):
 | W6: sorts on normalized keys | 7.15 | 2.3 |
 | W7: row format version 3 (column offsets, short lengths) | 6.45 | 2.15 |
 | W7: page reads without zeroing | 6.55 | 2.15 |
+| W7: LZ blocks decoded by wild copies | 6.4 | 2.12 |
 
 (Q1 on row tables 508 → 429 ms, Q6 446 → 340, Q14 511 → 360, Q15 494 →
 336, Q18 782 → 611.)
@@ -486,6 +487,7 @@ same machine, alternating with the step before):
 | W6: one key table for groupings and joins | 2.35 | 19.85 | 414 | 165 | 230 |
 | W6: sorts on normalized keys | 2.35 | 19.75 | 418 | 161 | 231 |
 | W7: row format version 3 | 2.2 | 19.0 | 389 | 153 | 222 |
+| W7: LZ blocks decoded by wild copies | 2.2 | 18.15 | 397 | 153 | 221 |
 
 (W7's rows were measured on a faster morning than W6's: the step before
 gave TPC-H 6.62 / 2.16 s and ClickBench 2.28 s, 19.4 ms, in the same
@@ -498,6 +500,7 @@ ClickBench on a row table since (the same runs, `--storage row`):
 | W6 (`1db6bd9`) | 7.23 | 155 | 519 | 267 | 356 | 984 |
 | W7: row format version 3 | 6.25 | 130 | 511 | 247 | 330 | 902 |
 | W7: page reads without zeroing | 6.1 | 127 | 504 | 242 | 345 | 902 |
+| W7: LZ blocks decoded by wild copies | 5.9 | 122 | 510 | 228 | 346 | 902 |
 
 (A scan of the row table reads the whole file, past the 128 MiB cache,
 at every query: `pread`, page checks and copies are most of its time,

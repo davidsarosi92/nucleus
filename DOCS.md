@@ -365,7 +365,14 @@ read as they were)
 — an LZ block (LZ4's block format, `lz.rs`, no dependency), flag 2 in the
 cell (`length u32, block`) or flag 3 in an overflow chain (`first page,
 block length, length`); reads decompress, checking every length and
-offset, so a damaged block is an error.  Large text and documents shrink;
+offset, so a damaged block is an error.  The decoder copies as LZ4's
+does, in fixed 16-byte pieces that may run past a sequence's end into
+room left after the output (a match overlapping itself a byte at a time
+for 16 bytes, then 8 at a time a multiple of its period back), so a
+short sequence is a few loads and stores, not a call to `memmove`:
+2–2.5× the plain decoder on `hits`' text (1.2 → 2.4 GB/s in 1 KiB
+blocks, 1.7 → 4.1 in 64 KiB), tested against it on blocks whole, cut
+and damaged.  Large text and documents shrink;
 rows of a few short columns do not (too little repeats within one).
 
 **Checksums:** CRC-32C — the CPU's instructions where there are (chosen at
@@ -3177,6 +3184,11 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W7, LZ by wild copies:** the decoder copies
+  literals and matches in fixed 16-byte pieces into room left past the
+  output (LZ4's way), 2–2.5× the one before; ClickBench's `SELECT *` on a
+  column table 133 → 116 ms.
 
 - **2026-11-05 — §M14.20 W7, the file grown ahead:** the pager writes
   zeros ahead of the pages it allocates, an eighth of the file at a time

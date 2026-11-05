@@ -2472,6 +2472,35 @@ the speed-up is made once, in the merged one.  The work, in this order:
   the same machine: what grew since is the file system's cost of
   growing the file (the disk fuller), not bisected further — this step
   takes it away either way.
+  *LZ blocks decoded by wild copies* (2026-11-05).  Decompressing values
+  was the profiles' largest single item left: 29 % of ClickBench's
+  `SELECT *` on a column table (its chunks' LZ blocks), a tenth of a row
+  table's scan (rows over 1 KiB).  The decoder appended each sequence
+  with `extend_from_slice` / `extend_from_within` — a capacity check and
+  a call to `memmove` each, for literals and matches mostly under 16
+  bytes.  Taken from LZ4's decoder (its "wild copy"): the output sized
+  first with 32 bytes of room past its end, literals and matches copied
+  in fixed 16-byte pieces that may overrun a sequence (what follows
+  writes over the excess), a match overlapping itself a byte at a time
+  for 16 bytes and then 8 at a time from a multiple of its period 8 to 16
+  back — in safe Rust (fixed-length `copy_from_slice` / `copy_within`
+  compile to plain loads and stores), every length and offset checked as
+  before.  Not taken: LZ4's 4-byte period table for offsets under 8 (the
+  byte loop it replaces runs 16 bytes once per such match).  Measured on
+  `hits`' first 32 MB of text, decoded in blocks: 1 KiB 1.19 → 2.35
+  GB/s, 8 KiB 1.72 → 3.76, 64 KiB 1.66 → 4.14.  Tested against the plain
+  decoder (kept in the tests) on periodic runs of every period to 20,
+  random data, and the blocks cut, with a bit flipped and made up — the
+  same result, `None` alike, and a failure leaves the output as it was;
+  mutations caught (the period's multiple, the bytes copied one at a
+  time, the overlap bound, the literals' bound).  Measured, alternating
+  with the step before, two rounds: ClickBench on a column table 2.24 /
+  2.23 → 2.20 / 2.20 s, geometric mean 19.0 / 19.2 → 18.1 / 18.2 ms (Q23
+  133 → 116); on a row table 6.34 / 5.75 → 5.86 / 5.92 s (the rounds
+  apart by more than the change); TPC-H 6.55 / 6.40 → 6.34 / 6.44 s
+  (row), 2.15 / 2.14 → 2.11 / 2.14 (column) — its Q9, slower in those
+  rounds, the same or faster alone (262 / 262 → 257 / 227 ms, seven
+  runs each).
 - **W8 — per-statement costs** (what AI agents' traffic pays most): a
   catalog epoch, and on it a session's catalog, settings and plan cache
   (pg-compat's prepared statements onto the same); one bind for describe
@@ -3701,3 +3730,7 @@ style) across a thousand seeds without failure.
   on row tables 56 → 27 s, on column tables 34 → 22; a logged `COPY` of
   `lineitem` 22 → 9 s.  W7's extents and shared WAL buffer measured and
   not taken (1–1.5 % and 1 % of the time).  DOCS §4.2.
+- **2026-11-05** — §M14.20 W7: LZ blocks decoded by wild copies (LZ4's:
+  fixed 16-byte pieces into room past the output's end), 2–2.5× the
+  decoder before.  ClickBench on a column table 19.1 → 18.15 ms
+  geometric mean, its `SELECT *` 133 → 116.  DOCS §4.4.
