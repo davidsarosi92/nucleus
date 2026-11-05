@@ -46,8 +46,9 @@ compressed column segments (`WITH (storage = column)`).  On TPC-H (SF 1)
 column tables take 0.47× PostgreSQL's time in the geometric mean (row
 tables 1.11×), on ClickBench (a million rows) 0.24×, every result the
 same.  Next is the rest of the developer
-platform (§M14.12–§M14.24: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
-browser and phones, memory for AI models, branches, time travel, …), then
+platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
+browser and phones, memory for AI models, branches, time travel, a B+tree
+or an LSM tree chosen per table, …), then
 the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.

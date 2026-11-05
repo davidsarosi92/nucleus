@@ -223,7 +223,7 @@ are marked ✅.
 | # | Question | Proposal | Alternatives / notes |
 |---|----------|----------|----------------------|
 | D1 | Language | ✅ **Rust** (settled 2026-10-16) — memory safety + concurrency (buffer pool, MVCC, Raft) | rejected: C, Zig, Go |
-| D2 | First storage engine | ✅ **B+tree** (copy-on-write, or in-place + WAL) | LSM tree: better for writes, but compaction adds complexity; can come later as a second engine behind the KV contract |
+| D2 | First storage engine | ✅ **B+tree** (copy-on-write, or in-place + WAL) | LSM tree: better for writes, but compaction adds complexity; can come later as a second engine behind the KV contract — now planned per table (§M14.28) |
 | D3 | Concurrency model | ✅ **Threads + locks** in the engine, async only in the network layer | thread-per-core (shared-nothing) — revisit in phase 3 |
 | D4 | SQL dialect | ✅ **PostgreSQL-like** subset (clients: D14) | familiar to most developers; with the optional PostgreSQL protocol it also gives existing clients (psql, drivers) |
 | D5 | Isolation | ✅ **Snapshot Isolation** first, **Serializable (SSI)** later | — |
@@ -275,6 +275,7 @@ are marked ✅.
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W5 and W3b ✅, W6 under way, W7–W8 next (D18); benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
+| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
@@ -2453,6 +2454,58 @@ chosen and their order, the methods and their error bounds, the
 benchmarks — and the steps it leads to are planned as this milestone's
 own, agreed before they are built.
 
+### §M14.28 — B+tree or LSM tree, chosen per table ⬜
+
+**First a study, then the plan.**  Today every table lives in the one
+copy-on-write B+tree (D2, D10); an LSM tree was left for later, "as a
+second engine behind the KV contract".  This milestone makes it a choice
+per table, as the row / column layout is (§M14.20): `CREATE TABLE …
+WITH (engine = btree | lsm)`, `ALTER TABLE … SET (engine = …)` converting
+online, and the engine orthogonal to the layout (a row or a column table
+on either; a partition its own, so recent data can sit in an LSM tree
+and older in the B+tree).  Indexes follow their table unless given their
+own.
+
+The study answers, and records here:
+
+- **Who needs it.**  Write-heavy tables: event and log ingestion, the
+  streams of §M16.5, time series, an AI application's logged prompts and
+  outputs, embeddings written in bulk (§M14.22) — where a B+tree's
+  random page writes and copy-on-write path cost most; and what each
+  engine's read, write and space amplification is on them, measured.
+- **The shape behind the KV contract** (principle 1): the KV routes a
+  table's key range to its engine; one transaction, MVCC and WAL across
+  both (a commit touching tables on both engines stays atomic); the
+  checkpoint and recovery of D10 for memtables and flushed runs;
+  compaction scheduled against foreground work (§M14.20 W1's workers),
+  its I/O bounded; tombstones and range deletes (`DROP`, `TRUNCATE`, the
+  vacuum's versions); scans merging runs, with prefix bloom filters for
+  lookups; the fresh-range bulk loads of D16 as ingested sorted runs;
+  branches and time travel (§M14.13, §M14.14) on immutable runs; the
+  embedded editions' footprint (§M14.23); the deterministic simulation
+  (principle 4) covering compaction and crashes in it.
+- **Prior art**, read for ideas, not copied (`CLAUDE.md`): O'Neil et al.,
+  "The Log-Structured Merge-Tree" (1996); LevelDB and RocksDB (leveled and
+  universal compaction, column families — a per-table engine in all but
+  name), Bigtable, Cassandra and ScyllaDB; WiredTiger, which offered a B
+  tree or an LSM tree per table (`type=lsm`) and later deprecated its LSM
+  tree — why is part of the study; MyRocks (an LSM engine under a B-tree
+  database, chosen per table); WiscKey (keys and values apart); Monkey
+  and Dostoevsky (bloom filters and merge policy tuned as an optimization
+  problem); bLSM and PebblesDB; CockroachDB's move to Pebble.
+- **The fit with nucleus's principles**: one KV contract, so SQL,
+  documents and streams need not know which engine holds a table; one
+  file and WAL layout (D6) or a reason recorded to leave it; the format
+  versioned and older ones read (D15, D18); measured against the B+tree on
+  the §M14.11 suite and on write-heavy workloads before it is
+  recommended for any.
+
+**Done when:** the study is written here — the workloads and their
+measured amplifications, the design behind the KV contract, the
+compaction policy chosen and why, what is left to the B+tree — and the
+steps it leads to are planned as this milestone's own, agreed before
+they are built.
+
 ### §M14.12 — Vectors ⬜
 
 Embeddings beside the data they describe, in the same transactions.
@@ -3540,3 +3593,7 @@ style) across a thousand seeds without failure.
   one byte string, the index encoding's, compared by `memcmp`, when its
   key columns allow).  A whole sort of a million rows 430 → 370 ms;
   benchmarks unchanged.  W6 closed.  DOCS §8.5.
+- **2026-11-05** — §M14.28 added: B+tree or LSM tree chosen per table,
+  orthogonal to the row / column layout — a study first (workloads and
+  their amplifications, the shape behind the KV contract, compaction,
+  prior art), then the plan.
