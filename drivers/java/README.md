@@ -36,6 +36,10 @@ bs) b.column("x").ints() … }` — each column a buffer read in place
 with `isNull(i)` and `get(i)`.  Bulk load: `db.load("t", Map.of("id", new
 int[] {…}, "name", List.of(…)))` (or rows) as columnar batches in one
 `COPY` — primitive arrays of the column's width sent as they are — and
-`db.copy("COPY t FROM STDIN WITH (FORMAT csv)", inputStream)`.  Tests:
+`db.copy("COPY t FROM STDIN WITH (FORMAT csv)", inputStream)`.  Many
+statements in one round trip: `db.pipeline(List.of(new Statement(sql,
+params…), …))` (each one's `Reply`: its result or its error); one
+statement for many rows, all or none, one commit for all:
+`db.executeMany(sql, rows)`.  Tests:
 `NucleusTest` (a plain
 main); example: `examples/java/Quickstart.java`.

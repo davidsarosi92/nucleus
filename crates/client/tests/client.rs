@@ -1771,3 +1771,45 @@ fn pipelined_large_replies_do_not_deadlock() {
         .expect("the pipeline finishes");
     assert!(ok);
 }
+
+/// A statement run for many rows of parameters: all or none, one
+/// transaction of its own outside a block, in the block inside one.
+#[test]
+fn execute_many_is_all_or_none() {
+    let mut c = Client::connect(config(start(None))).unwrap();
+    c.execute("CREATE TABLE em (k INT PRIMARY KEY, v TEXT)", &[])
+        .unwrap();
+    let rows: Vec<[Value; 2]> = (0..5000)
+        .map(|i| [Value::Int(i), Value::from("x")])
+        .collect();
+    let refs: Vec<&[Value]> = rows.iter().map(|r| &r[..]).collect();
+    let sql = "INSERT INTO em VALUES ($1, $2)";
+    assert_eq!(c.execute_many(sql, &refs).unwrap(), 5000);
+    assert_eq!(c.status(), TxnStatus::Idle);
+    let count = |c: &mut Client| c.rows("SELECT count(*) FROM em", &[]).unwrap()[0][0].clone();
+    assert_eq!(count(&mut c), Value::Int(5000));
+
+    // A duplicate key in the middle: none of them stays.
+    let more: Vec<[Value; 2]> = (5000..6000)
+        .chain([10])
+        .chain(6000..7000)
+        .map(|i| [Value::Int(i), Value::from("y")])
+        .collect();
+    let refs: Vec<&[Value]> = more.iter().map(|r| &r[..]).collect();
+    match c.execute_many(sql, &refs) {
+        Err(Error::Server(e)) => assert_eq!(e.code, "23505"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(c.status(), TxnStatus::Idle);
+    assert_eq!(count(&mut c), Value::Int(5000));
+    assert_eq!(c.execute_many(sql, &[]).unwrap(), 0);
+
+    // Inside a block: in it, and a failure fails the block.
+    c.execute("BEGIN", &[]).unwrap();
+    assert_eq!(c.execute_many(sql, &refs[..1000]).unwrap(), 1000);
+    assert_eq!(c.status(), TxnStatus::InBlock);
+    assert!(c.execute_many(sql, &refs[..1]).is_err());
+    assert_eq!(c.status(), TxnStatus::Failed);
+    c.execute("ROLLBACK", &[]).unwrap();
+    assert_eq!(count(&mut c), Value::Int(5000));
+}

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Pipelining, through the C driver: `Connection::pipeline(statements)`
+  gives each statement's `Result` or `Error` in its place;
+  `Connection::execute_many(sql, rows)` runs a statement for many rows,
+  all or none.
+
 - Bulk load, through the C driver: `Connection::copy(sql, data)` with a
   string or an `std::istream`.
 - Protocol version 7 (nucleus PLAN.md §M14.11), through the C driver:

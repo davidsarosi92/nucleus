@@ -2678,8 +2678,31 @@ the speed-up is made once, in the merged one.  The work, in this order:
   in bytes needs no second mode of I/O.  Measured, alternating, two
   rounds, the new client on both: a point read 100 at a time 11.5 / 11.5
   → 5.8 / 5.9 µs a statement (one at a time 25.7); the other statements
-  as before.  Left: the other drivers (Python's `executemany`, C, Java,
-  JavaScript), and array binds — one statement, many parameter rows.
+  as before.
+  *Every driver pipelines; a statement for many rows.*  `pipeline` in
+  Python, JavaScript, Java, C and C++ as in Rust (the same window, each
+  statement's result or error in its place), and `execute_many`
+  (`executeMany`) — one statement for many rows of parameters — on it:
+  outside a transaction block the rows run in one of their own (`BEGIN`,
+  the rows, `COMMIT`, in the same pipeline), so they are all or none and
+  cost one commit; inside one they run in it.  This is what array binds
+  are for (JDBC's `executeBatch`, psycopg's `executemany` in pipeline
+  mode); the protocol needs no message for them — a `Q` per row costs
+  its parse and plan from the session's cache — and the transaction is
+  PostgreSQL's implicit one up to `Sync`, made explicit.  Python's DB-API
+  `executemany` is it now: before, it ran a statement at a time, each
+  committed alone, and a failure left the rows before it.  The C
+  driver's buffering (from W1): a frame went out in two `send`s, and was
+  read in two `recv`s and more; now one `send`, and replies read through
+  a 64 KiB buffer (the others already buffered: Python reads 64 KiB at a
+  time, Java through a `BufferedInputStream`, JavaScript by chunks).
+  Tests in each driver: order kept over many windows, a failure in its
+  place, a text without statements, a failed block's statements after
+  it, and a statement for many rows all or none; mutation caught (the
+  rows not in a transaction of their own).  Measured: inserts 100 rows a
+  call 11.3 / 12.4 µs a row, against 185 / 184 one at a time; the
+  parameterized point read through the C driver 28 / 27 → 25 / 25 µs
+  (macOS's clock in whole µs), its 99th percentile 78 / 63 → 40 / 46.
 
 Each step records what it took from where, and what it measured, here
 and in `docs/benchmarks.md`.

@@ -34,7 +34,11 @@ the next query) stops the statement.  Columnar results (protocol version
 `nc_batch_offsets` and `nc_batch_validity` point into the batch.  Bulk
 load: `nc_copy(db, "COPY t FROM STDIN", data, len, &err)`, or
 `nc_copy_start` / `nc_copy_write` (pieces of any size) / `nc_copy_end` —
-text or CSV, as the statement says.
+text or CSV, as the statement says.  Many statements in one round trip:
+`nc_pipeline(db, stmts, n, results, errors, &err)` (`nc_statement`s;
+each one's result, or NULL and its error); one statement for many rows,
+all or none, one commit for all: `nc_execute_many(db, sql, rows, nrows,
+nparams, &err)`.
 
 ```sh
 make                # build/libnucleus.a

@@ -259,6 +259,10 @@ The parameterized point read sent 100 at a time (`Client::pipeline`),
 per statement, median µs: 11.5 with the server flushing each reply
 (`ffb5fac`), 5.9 with its replies written together (the client the same
 on both).
+Inserts 100 rows a call (`Client::execute_many`: pipelined, one commit
+for all), per row: 11.3 / 12.4 µs, against 185 / 184 one at a time.
+Through the C driver, the parameterized point read: 28 / 27 µs, 25 / 25
+with a frame in one write and replies read through a buffer.
 
 Through the PostgreSQL front end (`--pg-compat`), the `postgres` driver's
 prepared statements (`modules/pg-compat/examples/pg_latency.rs`, the

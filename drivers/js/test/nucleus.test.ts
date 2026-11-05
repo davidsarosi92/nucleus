@@ -278,3 +278,32 @@ test("tls", { skip: process.env.NUCLEUS_TLS_CA === undefined && "the server has 
     await byCert.close();
   }
 });
+
+test("pipelines and executeMany", async () => {
+  const db = await connect(options);
+  const t = table();
+  await db.query(`CREATE TABLE ${t} (k INT PRIMARY KEY, v TEXT)`);
+  const ins = `INSERT INTO ${t} VALUES ($1, $2)`;
+  const rows: Value[][] = [];
+  for (let i = 0; i < 3000; i++) rows.push([i, "x"]);
+  assert.equal(await db.executeMany(ins, rows), 3000);
+  assert.equal(db.status, "idle");
+  const reads: (string | [string, Value[]])[] = [];
+  for (let i = 2999; i >= 0; i--) reads.push([`SELECT k FROM ${t} WHERE k = $1`, [i]]);
+  reads.splice(10, 0, "SELECT * FROM nosuch");
+  reads.splice(20, 0, "");
+  const r = await db.pipeline(reads);
+  assert.equal(r.length, 3002);
+  assert.ok(r[10] instanceof NucleusError && r[10].code === "42P01");
+  assert.equal((r[20] as { command: string }).command, "");
+  const keys = r.filter((_, i) => i !== 10 && i !== 20).map((x) => (x as { rows: Value[][] }).rows[0][0]);
+  assert.deepEqual(keys, Array.from({ length: 3000 }, (_, i) => 2999 - i));
+  // A duplicate key in the middle: none of them stays.
+  const more: Value[][] = [];
+  for (let i = 3000; i < 4000; i++) more.push([i, "y"]);
+  more[500][0] = 10;
+  await assert.rejects(db.executeMany(ins, more), (e: NucleusError) => e.code === "23505");
+  assert.equal(db.status, "idle");
+  assert.deepEqual((await db.query(`SELECT count(*) FROM ${t}`)).rows, [[3000]]);
+  await db.close();
+});

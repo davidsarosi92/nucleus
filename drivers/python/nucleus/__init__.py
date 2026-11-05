@@ -7,6 +7,8 @@ Pure Python, no dependencies.  The API follows DB-API 2.0 where it fits::
     conn = nucleus.connect()            # 127.0.0.1:20035, user/password "nucleus"
     conn.execute("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)")
     conn.execute("INSERT INTO t VALUES ($1, $2)", [1, "one"])
+    conn.execute_many("INSERT INTO t VALUES ($1, $2)",   # one round trip,
+                      [[2, "two"], [3, "three"]])        # all or none
     for row in conn.execute("SELECT id, name FROM t").rows:
         print(row)
     with conn.stream("SELECT id FROM t") as rows:   # a large result
@@ -71,6 +73,9 @@ DEFAULT_PORT = 20035
 DEFAULT_FETCH = 1000
 # Rows a columnar batch holds when none is given.
 DEFAULT_BATCH = 65536
+# Bytes of statements a pipeline sends before it reads their replies: less
+# than the sockets' buffers hold (DOCS.md section 10, Pipelining).
+PIPELINE_WINDOW = 32 << 10
 
 _EPOCH_DATE = _dt.date(2000, 1, 1)
 _EPOCH = _dt.datetime(2000, 1, 1)
@@ -189,6 +194,10 @@ class Result:
 
 
 # ------------------------------------------------------------------ values
+
+def _frame(kind, body):
+    return kind + _struct.pack("<I", len(body)) + bytes(body)
+
 
 def _put_str(out, s):
     b = s.encode("utf-8")
@@ -543,7 +552,7 @@ class Connection:
                 raise InterfaceError(f"unexpected message {kind!r}")
 
     def _send(self, kind, body):
-        self._sock.sendall(kind + _struct.pack("<I", len(body)) + bytes(body))
+        self._sock.sendall(_frame(kind, body))
 
     def _fill(self, n):
         while len(self._buf) < n:
@@ -567,6 +576,72 @@ class Connection:
         statement raises its error, whose ``results`` holds the statements
         before it."""
         self._send_query(sql, params, 1 if text else 0, 0)
+        results, error = self._replies()
+        if error is not None:
+            error.results = results
+            raise error
+        return results
+
+    def pipeline(self, statements):
+        """Runs each of ``statements`` — ``(sql, params)`` pairs, or SQL
+        alone — sent without waiting for the replies before (pipelined):
+        a round trip for many.  Returns a list with, in each statement's
+        place, its ``Result`` (a text of several statements: its last
+        one's) or its error (an ``Error``, not raised).  Each runs as if
+        sent alone: one that fails does not stop the rest (inside a
+        transaction block the rest fail as the block has).  No ``COPY
+        FROM STDIN``.  They go out ``PIPELINE_WINDOW`` bytes at a time, the
+        replies read before more is sent, so neither side waits on the
+        other's writes."""
+        if self._active is not None:
+            self._active.close()
+        out = []
+        pending = iter(statements)
+        nxt = next(pending, None)
+        while nxt is not None:
+            window, n = bytearray(), 0
+            while nxt is not None:
+                sql, params = (nxt, ()) if isinstance(nxt, str) else nxt
+                m = _frame(b"Q", self._query_body(sql, params, 0, 0))
+                if n > 0 and len(window) + len(m) > PIPELINE_WINDOW:
+                    break
+                window += m
+                n += 1
+                nxt = next(pending, None)
+            self._sock.sendall(window)
+            for _ in range(n):
+                results, error = self._replies()
+                if error is not None:
+                    error.results = results
+                    out.append(error)
+                else:
+                    out.append(results[-1] if results else Result([], [], "", 0))
+        return out
+
+    def execute_many(self, sql, rows):
+        """Runs ``sql`` once for each of ``rows`` (its parameters),
+        pipelined, all or none: outside a transaction block in one of their
+        own (one commit for all), inside one in it.  Returns the rows
+        affected or returned, all told; the first failure raises — and
+        nothing it ran outside a block stays (a block it ran in has
+        failed)."""
+        rows = list(rows)
+        if not rows:
+            return 0
+        own = self.status == 0
+        statements = [(sql, r) for r in rows]
+        if own:
+            statements = [("BEGIN", ())] + statements + [("COMMIT", ())]
+        count = 0
+        for r in self.pipeline(statements):
+            if isinstance(r, Error):
+                raise r
+            count += r.count
+        return count
+
+    def _replies(self):
+        """The replies to one Query, up to Ready: the results, and the
+        error that ended them (or None)."""
         results, error = [], None
         columns, rows = None, []
         while True:
@@ -588,10 +663,7 @@ class Connection:
                 self._refuse_copy()
             elif kind == b"R":
                 self.status = payload[0]
-                if error is not None:
-                    error.results = results
-                    raise error
-                return results
+                return results, error
             else:
                 raise InterfaceError(f"unexpected message {kind!r}")
 
@@ -599,6 +671,9 @@ class Connection:
         # A stream left unfinished is closed first: one result at a time.
         if self._active is not None:
             self._active.close()
+        self._send(b"Q", self._query_body(sql, params, format, fetch))
+
+    def _query_body(self, sql, params, format, fetch):
         body = bytearray()
         _put_str(body, sql)
         body.append(format)
@@ -607,7 +682,7 @@ class Connection:
         body += _struct.pack("<H", len(params))
         for p in params:
             _encode(body, p)
-        self._send(b"Q", body)
+        return body
 
     def _refuse_copy(self):
         out = bytearray()
@@ -1526,11 +1601,11 @@ class Cursor:
         return row
 
     def executemany(self, sql, seq):
-        total = 0
-        for params in seq:
-            self.execute(sql, params)
-            total += self.rowcount
-        self.rowcount = total
+        """``sql`` for each parameter set of ``seq``, pipelined, all or
+        none (``Connection.execute_many``)."""
+        self.close()
+        self.description = None
+        self.rowcount = self.connection.execute_many(sql, [list(p) for p in seq])
 
     def fetchone(self):
         return self._next()

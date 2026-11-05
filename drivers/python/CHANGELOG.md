@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Pipelining (nucleus PLAN.md §M14.20 W8): `Connection.pipeline(statements)`
+  sends statements without waiting for each reply and gives each one's
+  `Result` or `Error` (not raised) in its place, `PIPELINE_WINDOW` bytes
+  at a time; `Connection.execute_many(sql, rows)` runs a statement for
+  many rows, all or none, in one transaction of their own outside a
+  block — and the DB-API `Cursor.executemany` is it (it ran a statement
+  at a time, each committed alone).
+
 - Text columns of a batch (`to_list`, `to_numpy`) are decoded once and
   cut, not value by value: a million short strings 450 → 100 ms.
 

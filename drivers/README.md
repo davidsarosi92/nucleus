@@ -13,8 +13,11 @@ per column, without a value per cell (`batches` in each; Python into
 numpy, Arrow, pandas and polars) — and load in bulk through `COPY … FROM
 STDIN` (`copy` with text or CSV in each; `load` of rows or columns as
 columnar batches in Python — DataFrames and Arrow tables too —,
-JavaScript and Java; Rust `copy_in` / `copy_rows`) — Rust sends many
-statements in one round trip (`pipeline`) — errors carry a hint (what to do about them),
+JavaScript and Java; Rust `copy_in` / `copy_rows`) — send many
+statements in one round trip (`pipeline` in each), and run one statement
+for many rows of parameters all or none, one commit for all
+(`execute_many`; JavaScript and Java `executeMany`, Python's DB-API
+`executemany` too) — errors carry a hint (what to do about them),
 the password is proved by SCRAM-SHA-256 and never sent, registered types arrive in their binary form, and `smallint`,
 `integer`, `real`, `bytea`, `time`, `inet` and `cidr` as each language's
 native (or closest) type.  Each can use TLS — the server's certificate

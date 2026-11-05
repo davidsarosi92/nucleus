@@ -1137,6 +1137,32 @@ impl Client {
         Ok(out)
     }
 
+    /// Runs `sql` once for each of `rows` (its parameters), pipelined
+    /// ([`Client::pipeline`]), all or none: outside a transaction block
+    /// in one of their own (one commit for all), inside one in it.  The
+    /// rows affected or returned, all told; the first failure is
+    /// [`Error::Server`] — and nothing it ran outside a block stays (the
+    /// block it ran in, if one was open, has failed).
+    pub fn execute_many(&mut self, sql: &str, rows: &[&[Value]]) -> Result<u64, Error> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let own = self.status == TxnStatus::Idle;
+        let mut statements: Vec<(&str, &[Value])> = Vec::with_capacity(rows.len() + 2);
+        if own {
+            statements.push(("BEGIN", &[]));
+        }
+        statements.extend(rows.iter().map(|r| (sql, *r)));
+        if own {
+            statements.push(("COMMIT", &[]));
+        }
+        let mut count = 0;
+        for r in self.pipeline(&statements)? {
+            count += r.map_err(Error::Server)?.count;
+        }
+        Ok(count)
+    }
+
     /// The replies to one `Q`, up to its `R`.
     fn replies(&mut self) -> Result<Vec<Result<Reply, ServerError>>, Error> {
         let mut out = Vec::new();

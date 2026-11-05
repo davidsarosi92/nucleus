@@ -504,6 +504,83 @@ static void copy_in(void) {
     nc_close(db);
 }
 
+/* Statements pipelined: each one's result in its place, a failure in
+ * its place and the rest run, over many windows; execute_many all or
+ * none. */
+static void pipelines(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    char t[64], ins[160], sel[160], cnt[160];
+    enum { N = 3000 };
+    static nc_value keys[N + 1000][2];
+    static nc_statement stmts[N + 3];
+    static nc_result *results[N + 3];
+    static nc_error errors[N + 3];
+    nc_result *r;
+    size_t i, at;
+    int ok = 1;
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(ins, sizeof ins, "CREATE TABLE %s (k INT PRIMARY KEY, v TEXT)", t);
+    nc_result_free(must(db, ins, NULL, 0));
+    snprintf(ins, sizeof ins, "INSERT INTO %s VALUES ($1, $2)", t);
+    snprintf(sel, sizeof sel, "SELECT k FROM %s WHERE k = $1", t);
+    snprintf(cnt, sizeof cnt, "SELECT count(*) FROM %s", t);
+    for (i = 0; i < N; i++) {
+        keys[i][0] = nc_int((int64_t)i);
+        keys[i][1] = nc_text("x");
+    }
+    CHECK(nc_execute_many(db, ins, &keys[0][0], N, 2, &err) == N);
+    CHECK(nc_status(db) == 0);
+
+    /* Reads in reverse, with a failure, an empty text and two statements. */
+    for (i = 0, at = 0; i < N + 3; i++) {
+        if (i == 10) {
+            stmts[i].sql = "SELECT * FROM nosuch";
+        } else if (i == 20) {
+            stmts[i].sql = "";
+        } else if (i == 30) {
+            stmts[i].sql = "SELECT 1; SELECT 2";
+        } else {
+            stmts[i].sql = sel;
+            stmts[i].params = &keys[N - 1 - at][0];
+            stmts[i].nparams = 1;
+            at++;
+            continue;
+        }
+        stmts[i].params = NULL;
+        stmts[i].nparams = 0;
+    }
+    CHECK(nc_pipeline(db, stmts, N + 3, results, errors, &err) == 0);
+    CHECK(results[10] == NULL && strcmp(errors[10].code, "42P01") == 0);
+    CHECK(results[20] != NULL && nc_rows(results[20]) == 0 && strcmp(nc_command(results[20]), "") == 0);
+    CHECK(results[30] != NULL && strcmp(text_of(results[30], 0, 0), "2") == 0);
+    for (i = 0, at = 0; i < N + 3; i++) {
+        if (i == 10 || i == 20 || i == 30) continue;
+        if (!results[i] || nc_rows(results[i]) != 1 || nc_value_at(results[i], 0, 0)->as.integer != (int64_t)(N - 1 - at))
+            ok = 0;
+        at++;
+    }
+    CHECK(ok);
+    for (i = 0; i < N + 3; i++) nc_result_free(results[i]);
+
+    /* A duplicate key in the middle: none of them stays. */
+    for (i = 0; i < 1000; i++) {
+        keys[i][0] = nc_int((int64_t)(N + i));
+        keys[i][1] = nc_text("y");
+    }
+    keys[500][0] = nc_int(10);
+    CHECK(nc_execute_many(db, ins, &keys[0][0], 1000, 2, &err) == -1);
+    CHECK(strcmp(err.code, "23505") == 0);
+    CHECK(nc_status(db) == 0);
+    r = must(db, cnt, NULL, 0);
+    CHECK(r && strcmp(text_of(r, 0, 0), "3000") == 0);
+    nc_result_free(r);
+    nc_close(db);
+}
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
@@ -516,6 +593,7 @@ int main(void) {
     cursors();
     columnar();
     copy_in();
+    pipelines();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

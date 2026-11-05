@@ -508,14 +508,9 @@ public:
     }
     ~Connection() { nc_close(conn_); }
 
-    /// Runs one statement (or several: the last one's result).
-    Result query(const std::string& sql, const std::vector<Value>& params = {}) {
-        std::deque<std::vector<nc_value>> store;
-        std::vector<nc_value> args;
-        for (const auto& p : params) args.push_back(detail::to_c(p, store));
-        nc_error err;
-        nc_result* r = nc_query(conn_, sql.c_str(), args.data(), args.size(), &err);
-        if (!r) throw Error(err.message, err.code, err.hint);
+  private:
+    /// `r` as a Result (freed).
+    static Result take(nc_result* r) {
         Result out;
         out.columns = detail::columns_of(r);
         for (size_t i = 0; i < nc_rows(r); i++) {
@@ -527,6 +522,73 @@ public:
         out.count = nc_count(r);
         nc_result_free(r);
         return out;
+    }
+
+  public:
+
+    /// Runs one statement (or several: the last one's result).
+    Result query(const std::string& sql, const std::vector<Value>& params = {}) {
+        std::deque<std::vector<nc_value>> store;
+        std::vector<nc_value> args;
+        for (const auto& p : params) args.push_back(detail::to_c(p, store));
+        nc_error err;
+        nc_result* r = nc_query(conn_, sql.c_str(), args.data(), args.size(), &err);
+        if (!r) throw Error(err.message, err.code, err.hint);
+        return take(r);
+    }
+
+    /// A statement of a pipeline: its SQL and parameters.
+    using Statement = std::pair<std::string, std::vector<Value>>;
+
+    /// Runs `statements` sent without waiting for the replies before
+    /// (pipelined, nc_pipeline): a round trip for many.  In each one's
+    /// place its Result (a text of several statements: the last one's) or
+    /// its Error, not thrown.  Each runs as if sent alone: one that fails
+    /// does not stop the rest (inside a transaction block the rest fail as
+    /// the block has).  No COPY FROM STDIN.  Throws for the connection.
+    std::vector<std::variant<Result, Error>> pipeline(const std::vector<Statement>& statements) {
+        std::deque<std::vector<nc_value>> store;
+        std::vector<std::vector<nc_value>> args(statements.size());
+        std::vector<nc_statement> stmts(statements.size());
+        for (size_t i = 0; i < statements.size(); i++) {
+            for (const auto& p : statements[i].second) args[i].push_back(detail::to_c(p, store));
+            stmts[i] = nc_statement{statements[i].first.c_str(), args[i].data(), args[i].size()};
+        }
+        std::vector<nc_result*> results(statements.size());
+        std::vector<nc_error> errors(statements.size());
+        nc_error err;
+        if (nc_pipeline(conn_, stmts.data(), stmts.size(), results.data(), errors.data(), &err) != 0)
+            throw Error(err.message, err.code, err.hint);
+        std::vector<std::variant<Result, Error>> out;
+        out.reserve(statements.size());
+        for (size_t i = 0; i < statements.size(); i++) {
+            if (results[i])
+                out.emplace_back(take(results[i]));
+            else
+                out.emplace_back(Error(errors[i].message, errors[i].code, errors[i].hint));
+        }
+        return out;
+    }
+
+    /// Runs `sql` once for each of `rows` (its parameters), pipelined, all
+    /// or none (nc_execute_many): outside a transaction block in one of
+    /// their own, inside one in it.  The rows affected or returned, all
+    /// told; throws the first failure (nothing it ran outside a block
+    /// stays; a block it ran in has failed).
+    uint64_t execute_many(const std::string& sql, const std::vector<std::vector<Value>>& rows) {
+        if (rows.empty()) return 0;
+        const size_t n = rows.front().size();
+        std::deque<std::vector<nc_value>> store;
+        std::vector<nc_value> args;
+        args.reserve(rows.size() * n);
+        for (const auto& row : rows) {
+            if (row.size() != n) throw Error("every row needs the same number of parameters", "", "");
+            for (const auto& p : row) args.push_back(detail::to_c(p, store));
+        }
+        nc_error err;
+        int64_t count = nc_execute_many(conn_, sql.c_str(), args.data(), rows.size(), n, &err);
+        if (count < 0) throw Error(err.message, err.code, err.hint);
+        return uint64_t(count);
     }
 
     /// Runs one statement and reads its rows as they arrive, `fetch` at a

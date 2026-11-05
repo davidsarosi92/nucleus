@@ -17,7 +17,10 @@ they arrive, a batch at a time; a `Cursor` destroyed or `close()`d early
 stops the statement.  Columnar results: `auto b = db.batches(sql);
 while (b.next()) b.values<int32_t>(0)…` (pointers into the batch;
 `text(col, row)`, `is_null(col, row)`).  Bulk load: `db.copy("COPY t FROM
-STDIN", data)` with a string or an `std::istream`.
+STDIN", data)` with a string or an `std::istream`.  Many statements in
+one round trip: `db.pipeline({{sql, params}, …})` (each one's `Result`
+or `Error`, in a `std::variant`); one statement for many rows, all or
+none: `db.execute_many(sql, rows)`.
 
 ```sh
 cc -std=c99 -c ../c/nucleus.c -o nucleus.o

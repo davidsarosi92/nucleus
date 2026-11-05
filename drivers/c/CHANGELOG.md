@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Pipelining (nucleus PLAN.md §M14.20 W8): `nc_pipeline` sends
+  statements (`nc_statement`) without waiting for each reply and gives
+  each one's result or error in its place, `NC_PIPELINE_WINDOW` bytes at
+  a time; `nc_execute_many` runs a statement for many rows of parameters,
+  all or none, in one transaction of their own outside a block.  A frame
+  goes out in one `send`, and replies are read through a 64 KiB buffer
+  (a frame was two `send`s and two `recv`s): a point read 27.5 → 25 µs.
+
 - Bulk load (nucleus PLAN.md §M14.11): `nc_copy_start`, `nc_copy_write`,
   `nc_copy_end` and `nc_copy` for `COPY … FROM STDIN` with text or CSV.
   `nc_query` and cursors answer a COPY with a refusal.

@@ -39,5 +39,8 @@ text as `offsets` and bytes), with `isNull(i)` and `get(i)`.  Bulk load:
 `await db.load("t", { id: new Int32Array(…), name: [...] })` (or rows) as
 columnar batches in one `COPY` — typed arrays of the column's width sent
 as they are — and `await db.copy("COPY t FROM STDIN WITH (FORMAT csv)",
-createReadStream("t.csv"))` for text or CSV.
+createReadStream("t.csv"))` for text or CSV.  Many statements in one
+round trip: `await db.pipeline([[sql, params], …])` (each one's `Result`,
+or its `NucleusError` in its place); one statement for many rows, all or
+none, one commit for all: `await db.executeMany(sql, rows)`.
 Tests: `npm test`; example: `examples/js/quickstart.ts`.

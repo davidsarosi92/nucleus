@@ -42,6 +42,9 @@ export const DEFAULT_BATCH = 65536;
 const EXT = 11;
 const ENUM = 20;
 export const DEFAULT_PORT = 20035;
+/** Bytes of statements a pipeline sends before it reads their replies:
+ *  less than the sockets' buffers hold (DOCS.md section 10, Pipelining). */
+export const PIPELINE_WINDOW = 32 << 10;
 
 const EPOCH_MS = Date.UTC(2000, 0, 1);
 const DAY_MS = 86_400_000;
@@ -863,6 +866,84 @@ export class Client {
     void this.active?.close();
     const run = async (): Promise<Result[]> => {
       this.sendQuery(sql, params, 0, 0);
+      const [results, error] = await this.replies();
+      if (error) throw error;
+      return results;
+    };
+    // One query at a time on a connection.
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * Runs each of `statements` — `[sql, params]` pairs, or SQL alone —
+   * sent without waiting for the replies before (pipelined): a round trip
+   * for many.  In each one's place its `Result` (a text of several
+   * statements: its last one's) or its error (a `NucleusError`, not
+   * thrown).  Each runs as if sent alone: one that fails does not stop
+   * the rest (inside a transaction block the rest fail as the block has).
+   * No COPY FROM STDIN.  They go out `PIPELINE_WINDOW` bytes at a time,
+   * the replies read before more is sent.
+   */
+  pipeline(statements: (string | [string, Value[]])[]): Promise<(Result | NucleusError)[]> {
+    void this.active?.close();
+    const run = async (): Promise<(Result | NucleusError)[]> => {
+      const out: (Result | NucleusError)[] = [];
+      let at = 0;
+      while (at < statements.length) {
+        const window: Buffer[] = [];
+        let size = 0;
+        let end = at;
+        while (end < statements.length) {
+          const s = statements[end];
+          const [sql, params] = typeof s === "string" ? [s, []] : s;
+          const m = frame("Q", this.queryBody(sql, params, 0, 0));
+          if (end > at && size + m.length > PIPELINE_WINDOW) break;
+          window.push(m);
+          size += m.length;
+          end++;
+        }
+        this.socket.write(Buffer.concat(window, size));
+        for (; at < end; at++) {
+          const [results, error] = await this.replies();
+          out.push(error ?? results[results.length - 1] ?? new Result([], [], "", 0));
+        }
+      }
+      return out;
+    };
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * Runs `sql` once for each of `rows` (its parameters), pipelined, all
+   * or none: outside a transaction block in one of their own (one commit
+   * for all), inside one in it.  The rows affected or returned, all told;
+   * the first failure rejects — nothing it ran outside a block stays (a
+   * block it ran in has failed).
+   */
+  async executeMany(sql: string, rows: Value[][]): Promise<number> {
+    if (rows.length === 0) return 0;
+    const own = this.status === "idle";
+    const statements: [string, Value[]][] = rows.map((r) => [sql, r]);
+    if (own) {
+      statements.unshift(["BEGIN", []]);
+      statements.push(["COMMIT", []]);
+    }
+    let count = 0;
+    for (const r of await this.pipeline(statements)) {
+      if (r instanceof NucleusError) throw r;
+      count += r.count;
+    }
+    return count;
+  }
+
+  /** The replies to one `Q`, up to its `R`: the results, and the error
+   *  that ended them (or null). */
+  private async replies(): Promise<[Result[], NucleusError | null]> {
+    {
       const results: Result[] = [];
       let error: NucleusError | null = null;
       let columns: Column[] | null = null;
@@ -898,26 +979,26 @@ export class Client {
             break;
           case "R":
             this.setStatus(m.body);
-            if (error) throw error;
-            return results;
+            return [results, error];
           default:
             throw new NucleusError(`unexpected message ${m.kind}`);
         }
       }
-    };
-    // One query at a time on a connection.
-    const next = this.queue.then(run, run);
-    this.queue = next.catch(() => undefined);
-    return next;
+    }
   }
 
   /** Sends `Q`: rows `fetch` at a time (0: all at once; from version 6). */
   sendQuery(sql: string, params: Value[], format: number, fetch: number): void {
+    this.socket.write(frame("Q", this.queryBody(sql, params, format, fetch)));
+  }
+
+  /** The body of a `Q`. */
+  queryBody(sql: string, params: Value[], format: number, fetch: number): Buffer {
     const w = new Writer().str(sql).u8(format);
     if (this.version >= 6) w.u32(fetch);
     w.u16(params.length);
     for (const p of params) w.value(p);
-    this.socket.write(frame("Q", w.bytes()));
+    return w.bytes();
   }
 
   /**

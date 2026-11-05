@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Pipelining (nucleus PLAN.md §M14.20 W8): `Client.pipeline(statements)`
+  sends statements without waiting for each reply and gives each one's
+  `Result` or `NucleusError` in its place, `PIPELINE_WINDOW` bytes at a
+  time; `Client.executeMany(sql, rows)` runs a statement for many rows,
+  all or none, in one transaction of their own outside a block.
+
 - Faster reads of large results (nucleus PLAN.md §M14.20 W1): a frame's
   chunks are joined once, when the frame is whole, instead of at every
   chunk, which made a large frame's read quadratic in its size.

@@ -39,6 +39,9 @@ typedef int nc_socket;
 #define nc_closesocket close
 #endif
 
+/* Bytes a connection reads from its socket at a time. */
+#define NC_READ_BUFFER (64u << 10)
+
 struct nc_conn {
     nc_socket sock;
 #ifdef NC_WITH_OPENSSL
@@ -54,6 +57,9 @@ struct nc_conn {
     char copy_kind;
     unsigned char *copy_body;
     size_t copy_len;
+    /* What was received and not yet read: one recv for many frames. */
+    unsigned char in[NC_READ_BUFFER];
+    size_t in_at, in_len;
 };
 
 typedef struct {
@@ -691,37 +697,66 @@ static int send_all(nc_conn *c, const unsigned char *p, size_t n) {
     return 0;
 }
 
+/* Receives what the socket has, up to n bytes, into p: the count, or -1. */
+static long recv_some(nc_conn *c, unsigned char *p, size_t n) {
+#ifdef NC_WITH_OPENSSL
+    if (c->ssl) {
+        int k = SSL_read(c->ssl, p, n > INT_MAX ? INT_MAX : (int)n);
+        return k <= 0 ? -1 : k;
+    }
+#endif
+#ifdef _WIN32
+    int k = recv(c->sock, (char *)p, n > INT_MAX ? INT_MAX : (int)n, 0);
+#else
+    ssize_t k = recv(c->sock, p, n, 0);
+#endif
+    return k <= 0 ? -1 : (long)k;
+}
+
+/* Reads n bytes into p: from the buffer, then the socket (a large read
+ * straight into p, a small one through the buffer). */
 static int recv_all(nc_conn *c, unsigned char *p, size_t n) {
     while (n > 0) {
-#ifdef NC_WITH_OPENSSL
-        if (c->ssl) {
-            int k = SSL_read(c->ssl, p, n > INT_MAX ? INT_MAX : (int)n);
-            if (k <= 0) return -1;
+        size_t have = c->in_len - c->in_at;
+        if (have > 0) {
+            size_t k = have < n ? have : n;
+            memcpy(p, c->in + c->in_at, k);
+            c->in_at += k;
+            p += k;
+            n -= k;
+            continue;
+        }
+        if (n >= sizeof c->in) {
+            long k = recv_some(c, p, n);
+            if (k < 0) return -1;
             p += k;
             n -= (size_t)k;
             continue;
         }
-#endif
-#ifdef _WIN32
-        int k = recv(c->sock, (char *)p, (int)n, 0);
-#else
-        ssize_t k = recv(c->sock, p, n, 0);
-#endif
-        if (k <= 0) return -1;
-        p += k;
-        n -= (size_t)k;
+        long k = recv_some(c, c->in, sizeof c->in);
+        if (k < 0) return -1;
+        c->in_at = 0;
+        c->in_len = (size_t)k;
     }
     return 0;
 }
 
-static int send_frame(nc_conn *c, char kind, const buf *body) {
-    unsigned char h[5];
+/* Appends a frame (kind, length, body) to w. */
+static void put_frame(buf *w, char kind, const buf *body) {
     size_t n = body ? body->len : 0;
-    int i;
-    h[0] = (unsigned char)kind;
-    for (i = 0; i < 4; i++) h[1 + i] = (unsigned char)(n >> (8 * i));
-    if (send_all(c, h, 5) != 0) return -1;
-    return n ? send_all(c, body->b, n) : 0;
+    put_u8(w, (unsigned char)kind);
+    put_le(w, n, 4);
+    if (n) put(w, body->b, n);
+}
+
+/* Sends a frame in one write. */
+static int send_frame(nc_conn *c, char kind, const buf *body) {
+    buf f = {0};
+    int r;
+    put_frame(&f, kind, body);
+    r = f.failed ? -1 : send_all(c, f.b, f.len);
+    free(f.b);
+    return r;
 }
 
 /* Reads one frame; the body is malloc'd (free it). */
@@ -1130,23 +1165,33 @@ static void refuse_copy(nc_conn *c) {
     free(f.b);
 }
 
+/* The body of a Q into q; nonzero (err filled) for a parameter of an
+ * unknown type. */
+static int query_body(nc_conn *c, buf *q, const char *sql, const nc_value *params, size_t nparams, int format,
+                      unsigned fetch, nc_error *err) {
+    size_t i;
+    put_str(q, sql);
+    put_u8(q, (unsigned)format);
+    if (c->version >= 6) put_le(q, fetch, 4);
+    put_le(q, nparams, 2);
+    for (i = 0; i < nparams; i++) {
+        if (put_value(q, &params[i]) != 0) {
+            set_error(err, "", "parameter %u has an unknown type", (unsigned)i + 1);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* Sends Q: rows fetch at a time (0: all at once; from version 6). */
 static int send_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, int format,
                       unsigned fetch, nc_error *err) {
     buf q = {0};
-    size_t i;
     /* A cursor left unfinished is ended first: one result at a time. */
     if (c->active) cursor_drain(c->active);
-    put_str(&q, sql);
-    put_u8(&q, (unsigned)format);
-    if (c->version >= 6) put_le(&q, fetch, 4);
-    put_le(&q, nparams, 2);
-    for (i = 0; i < nparams; i++) {
-        if (put_value(&q, &params[i]) != 0) {
-            free(q.b);
-            set_error(err, "", "parameter %u has an unknown type", (unsigned)i + 1);
-            return -1;
-        }
+    if (query_body(c, &q, sql, params, nparams, format, fetch, err) != 0) {
+        free(q.b);
+        return -1;
     }
     if (q.failed || send_frame(c, 'Q', &q) != 0) {
         free(q.b);
@@ -1157,10 +1202,13 @@ static int send_query(nc_conn *c, const char *sql, const nc_value *params, size_
     return 0;
 }
 
-nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, nc_error *err) {
+/* The replies to one Q, up to its R: the last statement's result, or NULL
+ * (err filled) when one failed or none ran ("no result"); *lost set when
+ * the connection is. */
+static nc_result *read_replies(nc_conn *c, nc_error *err, int *lost) {
     nc_result *cur = NULL, *last = NULL;
     int failed = 0;
-    if (send_query(c, sql, params, nparams, 0, 0, err) != 0) return NULL;
+    *lost = 0;
     for (;;) {
         char kind;
         unsigned char *body;
@@ -1170,6 +1218,7 @@ nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t 
             nc_result_free(cur);
             nc_result_free(last);
             set_error(err, "08006", "connection lost");
+            *lost = 1;
             return NULL;
         }
         r.b = body;
@@ -1220,9 +1269,114 @@ nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t 
             nc_result_free(cur);
             nc_result_free(last);
             set_error(err, "08P01", "malformed message from the server");
+            *lost = 1;
             return NULL;
         }
     }
+}
+
+nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, nc_error *err) {
+    int lost;
+    if (send_query(c, sql, params, nparams, 0, 0, err) != 0) return NULL;
+    return read_replies(c, err, &lost);
+}
+
+int nc_pipeline(nc_conn *c, const nc_statement *stmts, size_t n, nc_result **results, nc_error *errors,
+                nc_error *err) {
+    size_t done = 0, i;
+    nc_error scratch;
+    for (i = 0; i < n; i++) results[i] = NULL;
+    if (c->active) cursor_drain(c->active);
+    while (done < n) {
+        buf w = {0};
+        size_t end = done;
+        while (end < n) {
+            buf q = {0};
+            size_t before = w.len;
+            if (query_body(c, &q, stmts[end].sql, stmts[end].params, stmts[end].nparams, 0, 0, err) != 0) {
+                /* Those sent before are answered and read: in step. */
+                free(q.b);
+                free(w.b);
+                return -1;
+            }
+            if (end > done && before + 5 + q.len > NC_PIPELINE_WINDOW) {
+                free(q.b);
+                break;
+            }
+            put_frame(&w, 'Q', &q);
+            free(q.b);
+            end++;
+        }
+        if (w.failed || send_all(c, w.b, w.len) != 0) {
+            free(w.b);
+            set_error(err, "08006", "connection lost");
+            return -1;
+        }
+        free(w.b);
+        for (; done < end; done++) {
+            int lost;
+            nc_error *e = errors ? &errors[done] : &scratch;
+            memset(e, 0, sizeof *e);
+            results[done] = read_replies(c, e, &lost);
+            if (lost) {
+                *err = *e;
+                return -1;
+            }
+            if (!results[done] && strcmp(e->message, "no result") == 0 && e->code[0] == 0) {
+                /* A text without statements: an empty result. */
+                results[done] = calloc(1, sizeof *results[done]);
+                if (results[done]) results[done]->command = calloc(1, 1);
+                memset(e, 0, sizeof *e);
+            }
+        }
+    }
+    return 0;
+}
+
+int64_t nc_execute_many(nc_conn *c, const char *sql, const nc_value *rows, size_t nrows, size_t nparams,
+                        nc_error *err) {
+    int own = c->status == 0;
+    size_t n = nrows + (own ? 2 : 0), i, at = 0;
+    nc_statement *stmts;
+    nc_result **results;
+    nc_error *errors;
+    int64_t count = 0;
+    int failed = 0;
+    if (nrows == 0) return 0;
+    stmts = calloc(n, sizeof *stmts);
+    results = calloc(n, sizeof *results);
+    errors = calloc(n, sizeof *errors);
+    if (!stmts || !results || !errors) {
+        free(stmts);
+        free(results);
+        free(errors);
+        set_error(err, "", "out of memory");
+        return -1;
+    }
+    if (own) stmts[at++].sql = "BEGIN";
+    for (i = 0; i < nrows; i++, at++) {
+        stmts[at].sql = sql;
+        stmts[at].params = rows + i * nparams;
+        stmts[at].nparams = nparams;
+    }
+    if (own) stmts[at++].sql = "COMMIT";
+    if (nc_pipeline(c, stmts, n, results, errors, err) != 0) {
+        failed = 1;
+    } else {
+        for (i = 0; i < n; i++) {
+            if (!results[i]) {
+                if (!failed) *err = errors[i];
+                failed = 1;
+            } else {
+                count += (int64_t)results[i]->count;
+            }
+        }
+    }
+    for (i = 0; i < n; i++) nc_result_free(results[i]);
+    free(stmts);
+    free(results);
+    free(errors);
+    return failed ? -1 : count;
 }
 
 /* Where a column's buffers are in a batch (offsets into its body). */

@@ -211,6 +211,39 @@ int main() {
         }
         CHECK(db.query("SELECT count(*) FROM " + t).rows[0][0].str() == "4");
     }
+    {
+        // Pipelines, and a statement for many rows all or none.
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE TABLE " + t + " (k BIGINT PRIMARY KEY, v TEXT)");
+        std::vector<std::vector<Value>> rows;
+        for (int64_t i = 0; i < 3000; i++) rows.push_back({i, "x"});
+        CHECK(db.execute_many("INSERT INTO " + t + " VALUES ($1, $2)", rows) == 3000);
+        std::vector<Connection::Statement> reads;
+        for (int64_t i = 2999; i >= 0; i--) reads.push_back({"SELECT k FROM " + t + " WHERE k = $1", {i}});
+        reads.insert(reads.begin() + 10, {"SELECT * FROM nosuch", {}});
+        auto r = db.pipeline(reads);
+        CHECK(r.size() == 3001);
+        CHECK(std::holds_alternative<Error>(r[10]) && std::get<Error>(r[10]).code() == "42P01");
+        bool in_order = true;
+        for (size_t i = 0, k = 2999; i < r.size(); i++) {
+            if (i == 10) continue;
+            const auto* res = std::get_if<Result>(&r[i]);
+            if (!res || res->rows.size() != 1 || res->rows[0][0].str() != std::to_string(k)) in_order = false;
+            k--;
+        }
+        CHECK(in_order);
+        rows.clear();
+        for (int64_t i = 3000; i < 4000; i++) rows.push_back({i, "y"});
+        rows[500][0] = int64_t{10};
+        try {
+            db.execute_many("INSERT INTO " + t + " VALUES ($1, $2)", rows);
+            CHECK(false);
+        } catch (const Error& e) {
+            CHECK(e.code() == "23505");
+        }
+        CHECK(db.query("SELECT count(*) FROM " + t).rows[0][0].str() == "3000");
+    }
     if (failures) {
         std::cerr << failures << " check(s) failed\n";
         return 1;

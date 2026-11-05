@@ -70,6 +70,34 @@ public final class NucleusTest {
         }
     }
 
+    static void pipelines() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            String t = table();
+            db.query("CREATE TABLE " + t + " (k BIGINT PRIMARY KEY, v TEXT)");
+            String ins = "INSERT INTO " + t + " VALUES ($1, $2)";
+            List<Object[]> rows = new java.util.ArrayList<>();
+            for (long i = 0; i < 3000; i++) rows.add(new Object[] {i, "x"});
+            equal(db.executeMany(ins, rows), 3000L, "executeMany");
+            equal(db.status(), NucleusClient.Status.IDLE, "status");
+            List<NucleusClient.Statement> reads = new java.util.ArrayList<>();
+            for (long i = 2999; i >= 0; i--) reads.add(new NucleusClient.Statement("SELECT k FROM " + t + " WHERE k = $1", i));
+            reads.add(10, new NucleusClient.Statement("SELECT * FROM nosuch"));
+            List<NucleusClient.Reply> r = db.pipeline(reads);
+            equal(r.size(), 3001, "replies");
+            check(!r.get(10).ok() && r.get(10).error().code().equals("42P01"), "the failure in its place");
+            long k = 2999;
+            for (int i = 0; i < r.size(); i++) {
+                if (i == 10) continue;
+                equal(r.get(i).result().rows().get(0).get(0), k--, "in order");
+            }
+            List<Object[]> more = new java.util.ArrayList<>();
+            for (long i = 3000; i < 4000; i++) more.add(new Object[] {i, "y"});
+            more.get(500)[0] = 10L;
+            equal(errorCode(() -> db.executeMany(ins, more)), "23505", "a duplicate");
+            equal(db.query("SELECT count(*) FROM " + t).rows().get(0).get(0), 3000L, "none of them stayed");
+        }
+    }
+
     static void uuid() {
         try (NucleusClient db = NucleusClient.connect(config())) {
             String t = table();
@@ -352,7 +380,8 @@ public final class NucleusTest {
         run("cursors", NucleusTest::cursors);
         run("columnar", NucleusTest::columnar);
         run("copy and load", NucleusTest::copyAndLoad);
-        check(passed == 12, "all tests ran");
+        run("pipelines", NucleusTest::pipelines);
+        check(passed == 13, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

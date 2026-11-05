@@ -4,7 +4,8 @@
 //! Each kind of statement (or those whose name holds ONLY) runs N times
 //! (default 20,000); printed are the median and the 99th percentile in µs
 //! and the statements a second.  Last, the parameterized point read sent
-//! 100 at a time ([`Client::pipeline`]), per statement.
+//! 100 at a time ([`Client::pipeline`]), per statement, and inserts 100
+//! rows a call ([`Client::execute_many`]), per row.
 
 use std::time::Instant;
 
@@ -129,6 +130,42 @@ fn main() {
         for i in 0..rounds {
             let t = Instant::now();
             batch(&mut c, i * 100);
+            times.push(t.elapsed().as_nanos() as u64 / 100);
+        }
+        let total = all.elapsed().as_secs_f64();
+        times.sort_unstable();
+        println!(
+            "{name:28} median {:7.1} µs  p99 {:7.1} µs  {:8.0} /s",
+            times[rounds / 2] as f64 / 1e3,
+            times[rounds * 99 / 100] as f64 / 1e3,
+            (rounds * 100) as f64 / total
+        );
+    }
+    // Inserts, 100 rows a call (`execute_many`: pipelined, one commit):
+    // the time per row.
+    let name = "insert, 100 by execute_many";
+    if name.contains(&only) {
+        let mut next = 10_000_000i64;
+        let mut batch = |c: &mut Client| {
+            let rows: Vec<[Value; 3]> = (0..100)
+                .map(|_| {
+                    next += 1;
+                    [Value::Int(next), Value::Text("new".into()), Value::Int(7)]
+                })
+                .collect();
+            let refs: Vec<&[Value]> = rows.iter().map(|r| &r[..]).collect();
+            c.execute_many("INSERT INTO lat_kv VALUES ($1, $2, $3)", &refs)
+                .expect("runs");
+        };
+        let rounds = (n / 100).max(1);
+        for _ in 0..rounds / 10 {
+            batch(&mut c);
+        }
+        let mut times = Vec::with_capacity(rounds);
+        let all = Instant::now();
+        for _ in 0..rounds {
+            let t = Instant::now();
+            batch(&mut c);
             times.push(t.elapsed().as_nanos() as u64 / 100);
         }
         let total = all.elapsed().as_secs_f64();

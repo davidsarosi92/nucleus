@@ -82,6 +82,11 @@ public final class NucleusClient implements AutoCloseable {
     private static final int EXT = 11;
     private static final int ENUM = 20;
     public static final int DEFAULT_PORT = 20035;
+    /**
+     * Bytes of statements a pipeline sends before it reads their replies: less than the
+     * sockets' buffers hold (DOCS.md section 10, Pipelining).
+     */
+    public static final int PIPELINE_WINDOW = 32 << 10;
 
     private static final LocalDate EPOCH_DATE = LocalDate.of(2000, 1, 1);
     private static final LocalDateTime EPOCH = LocalDateTime.of(2000, 1, 1, 0, 0);
@@ -205,6 +210,88 @@ public final class NucleusClient implements AutoCloseable {
         try {
             sendQuery(sql, params, 0, 0);
             List<Result> results = new ArrayList<>();
+            NucleusException error = replies(results);
+            if (error != null) throw error;
+            return results;
+        } catch (IOException e) {
+            throw new NucleusException("connection lost: " + e.getMessage(), e);
+        }
+    }
+
+    /** A statement of a pipeline: its SQL and parameters. */
+    public record Statement(String sql, Object... params) {}
+
+    /** What one statement of a pipeline gave: its result, or (result null) its error. */
+    public record Reply(Result result, NucleusException error) {
+        /** Whether it went through. */
+        public boolean ok() { return error == null; }
+    }
+
+    /**
+     * Runs {@code statements} sent without waiting for the replies before (pipelined): a round
+     * trip for many. In each one's place its {@link Reply}: its result (a text of several
+     * statements: the last one's), or its error, not thrown. Each runs as if sent alone: one
+     * that fails does not stop the rest (inside a transaction block the rest fail as the block
+     * has). No COPY FROM STDIN. They go out {@link #PIPELINE_WINDOW} bytes at a time, the
+     * replies read before more is sent, so neither side waits on the other's writes.
+     */
+    public List<Reply> pipeline(List<Statement> statements) {
+        try {
+            if (active != null) active.close();
+            List<Reply> answers = new ArrayList<>(statements.size());
+            int at = 0;
+            while (at < statements.size()) {
+                int end = at;
+                int size = 0;
+                List<byte[]> window = new ArrayList<>();
+                while (end < statements.size()) {
+                    Statement st = statements.get(end);
+                    byte[] body = queryBody(st.sql(), st.params() == null ? new Object[0] : st.params(), 0, 0);
+                    if (end > at && size + 5 + body.length > PIPELINE_WINDOW) break;
+                    window.add(body);
+                    size += 5 + body.length;
+                    end++;
+                }
+                for (byte[] body : window) write('Q', body);
+                out.flush();
+                for (; at < end; at++) {
+                    List<Result> results = new ArrayList<>();
+                    NucleusException error = replies(results);
+                    answers.add(error != null ? new Reply(null, error)
+                            : new Reply(results.isEmpty() ? new Result(List.of(), List.of(), "", 0)
+                                    : results.get(results.size() - 1), null));
+                }
+            }
+            return answers;
+        } catch (IOException e) {
+            throw new NucleusException("connection lost: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Runs {@code sql} once for each of {@code rows} (its parameters), pipelined, all or none:
+     * outside a transaction block in one of their own (one commit for all), inside one in it.
+     * The rows affected or returned, all told; throws the first failure — nothing it ran
+     * outside a block stays (a block it ran in has failed).
+     */
+    public long executeMany(String sql, List<Object[]> rows) {
+        if (rows.isEmpty()) return 0;
+        boolean own = status == Status.IDLE;
+        List<Statement> statements = new ArrayList<>(rows.size() + 2);
+        if (own) statements.add(new Statement("BEGIN"));
+        for (Object[] r : rows) statements.add(new Statement(sql, r));
+        if (own) statements.add(new Statement("COMMIT"));
+        long count = 0;
+        for (Reply r : pipeline(statements)) {
+            if (!r.ok()) throw r.error();
+            count += r.result().count();
+        }
+        return count;
+    }
+
+    /** The replies to one Q, up to its R, into {@code results}; the error that ended them, or null. */
+    private NucleusException replies(List<Result> results) throws IOException {
+        {
             NucleusException error = null;
             List<Column> columns = null;
             List<List<Object>> rows = new ArrayList<>();
@@ -234,14 +321,11 @@ public final class NucleusClient implements AutoCloseable {
                     case 'I' -> refuseCopy();
                     case 'R' -> {
                         setStatus(m.body);
-                        if (error != null) throw error;
-                        return results;
+                        return error;
                     }
                     default -> throw new NucleusException("unexpected message " + m.kind, (String) null);
                 }
             }
-        } catch (IOException e) {
-            throw new NucleusException("connection lost: " + e.getMessage(), e);
         }
     }
 
@@ -249,11 +333,16 @@ public final class NucleusClient implements AutoCloseable {
     private void sendQuery(String sql, Object[] params, int format, int fetch) throws IOException {
         // A cursor left unfinished is closed first: one result at a time.
         if (active != null) active.close();
+        send('Q', queryBody(sql, params, format, fetch));
+    }
+
+    /** The body of a Q. */
+    private byte[] queryBody(String sql, Object[] params, int format, int fetch) {
         Writer w = new Writer().str(sql).u8(format);
         if (version >= 6) w.i32(fetch);
         w.u16(params.length);
         for (Object p : params) w.value(p);
-        send('Q', w.bytes());
+        return w.bytes();
     }
 
     /** {@link #cursor(int, String, Object...)} with {@link #DEFAULT_FETCH}. */
@@ -979,11 +1068,16 @@ public final class NucleusClient implements AutoCloseable {
     private record Message(char kind, byte[] body) {}
 
     private void send(char kind, byte[] body) throws IOException {
+        write(kind, body);
+        out.flush();
+    }
+
+    /** A frame into the output buffer, not yet flushed. */
+    private void write(char kind, byte[] body) throws IOException {
         ByteBuffer h = ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN);
         h.put((byte) kind).putInt(body.length);
         out.write(h.array());
         out.write(body);
-        out.flush();
     }
 
     private Message read() throws IOException {

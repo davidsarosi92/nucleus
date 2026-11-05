@@ -149,6 +149,36 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err);
  * statement fails or the connection is lost. */
 nc_result *nc_query(nc_conn *c, const char *sql, const nc_value *params, size_t nparams, nc_error *err);
 
+/* A statement of a pipeline: its SQL and parameters. */
+typedef struct nc_statement {
+    const char *sql;
+    const nc_value *params;
+    size_t nparams;
+} nc_statement;
+
+/* Bytes of statements nc_pipeline sends before it reads their replies:
+ * less than the sockets' buffers hold (DOCS.md section 10, Pipelining). */
+#define NC_PIPELINE_WINDOW (32u << 10)
+
+/* Runs n statements sent without waiting for the replies before
+ * (pipelined): a round trip for many.  results[i] gets each one's result
+ * as nc_query's (NULL when it failed, errors[i] filled if errors is not
+ * NULL; a text without statements: an empty result).  Each runs as if
+ * sent alone: one that fails does not stop the rest (inside a
+ * transaction block the rest fail as the block has).  No COPY FROM STDIN.
+ * 0, or -1 (err filled) when the connection is lost or a parameter has an
+ * unknown type; free each result. */
+int nc_pipeline(nc_conn *c, const nc_statement *stmts, size_t n, nc_result **results, nc_error *errors,
+                nc_error *err);
+
+/* Runs sql once for each of nrows rows of nparams parameters (rows holds
+ * them row after row), pipelined, all or none: outside a transaction block
+ * in one of their own (one commit for all), inside one in it.  The rows
+ * affected or returned, all told, or -1 (err filled: the first failure —
+ * nothing it ran outside a block stays; a block it ran in has failed). */
+int64_t nc_execute_many(nc_conn *c, const char *sql, const nc_value *rows, size_t nrows, size_t nparams,
+                        nc_error *err);
+
 /* Runs one statement and reads its rows as they arrive, fetch at a time
  * (0: NC_DEFAULT_FETCH): the server sends a batch and waits until it is
  * read, so a result of any size takes a batch of memory.  NULL (and err

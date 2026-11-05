@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Pipelining (nucleus PLAN.md §M14.20 W8):
+  `NucleusClient.pipeline(List<Statement>)` sends statements without
+  waiting for each reply and gives each one's `Reply` (its result or its
+  error) in its place, `PIPELINE_WINDOW` bytes at a time;
+  `executeMany(sql, rows)` runs a statement for many rows, all or none,
+  in one transaction of their own outside a block.
+
 - Bulk load (nucleus PLAN.md §M14.11): `NucleusClient.load(table, rows
   [, columns])` and `load(table, Map<String, ?>)` (lists, object or
   primitive arrays) as columnar batches in one `COPY … FROM STDIN`;

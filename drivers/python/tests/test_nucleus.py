@@ -150,6 +150,57 @@ class Conformance(unittest.TestCase):
             self.assertEqual(cur.fetchone(), (1, "a"))
             self.assertEqual(cur.fetchall(), [(2, "b")])
 
+    def test_pipeline(self):
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE TABLE {t} (k INT PRIMARY KEY, v TEXT)")
+            r = c.pipeline([(f"INSERT INTO {t} VALUES ($1, $2)", [i, f"v{i}"]) for i in range(3000)])
+            self.assertEqual(len(r), 3000)
+            self.assertTrue(all(x.count == 1 for x in r))
+            reads = [(f"SELECT v FROM {t} WHERE k = $1", [i]) for i in reversed(range(3000))]
+            reads.insert(10, "SELECT * FROM nosuch")
+            reads.insert(20, "")
+            reads.insert(30, "SELECT 1; SELECT 2")
+            r = c.pipeline(reads)
+            self.assertEqual(len(r), 3003)
+            self.assertIsInstance(r[10], nucleus.ProgrammingError)
+            self.assertEqual(r[10].code, "42P01")
+            self.assertEqual(r[20].command, "")
+            self.assertEqual(r[30].rows, [(2,)])
+            values = [x.rows[0][0] for i, x in enumerate(r) if i not in (10, 20, 30)]
+            self.assertEqual(values, [f"v{i}" for i in reversed(range(3000))])
+            r = c.pipeline(["BEGIN", f"INSERT INTO {t} VALUES (5000, 'x')", "SELECT 1 / 0",
+                            f"INSERT INTO {t} VALUES (5001, 'y')", "ROLLBACK", f"SELECT count(*) FROM {t}"])
+            self.assertEqual((r[2].code, r[3].code), ("22012", "25P02"))
+            self.assertEqual(r[5].rows, [(3000,)])
+            self.assertEqual(c.status, 0)
+            self.assertEqual(c.execute("SELECT 7").rows, [(7,)])
+
+    def test_execute_many_all_or_none(self):
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE TABLE {t} (k INT PRIMARY KEY, v TEXT)")
+            sql = f"INSERT INTO {t} VALUES ($1, $2)"
+            self.assertEqual(c.execute_many(sql, ([i, "x"] for i in range(5000))), 5000)
+            self.assertEqual(c.status, 0)
+            count = lambda: c.execute(f"SELECT count(*) FROM {t}").rows[0][0]  # noqa: E731
+            self.assertEqual(count(), 5000)
+            # A duplicate key in the middle: none of them stays.
+            keys = list(range(5000, 6000)) + [10] + list(range(6000, 7000))
+            with self.assertRaises(nucleus.IntegrityError):
+                c.execute_many(sql, [[k, "y"] for k in keys])
+            self.assertEqual((c.status, count()), (0, 5000))
+            self.assertEqual(c.execute_many(sql, []), 0)
+            # Inside a block: in it, and a failure fails the block.
+            c.execute("BEGIN")
+            self.assertEqual(c.execute_many(sql, [[k, "y"] for k in keys[:1000]]), 1000)
+            self.assertEqual(c.status, 1)
+            with self.assertRaises(nucleus.IntegrityError):
+                c.execute_many(sql, [[10, "z"]])
+            self.assertEqual(c.status, 2)
+            c.rollback()
+            self.assertEqual(count(), 5000)
+
     def test_stream(self):
         with connect() as c:
             big = "SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b"

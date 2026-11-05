@@ -43,5 +43,9 @@ uses them.  Bulk load, the other way: `conn.load("t", df)` — a
 DataFrame, an Arrow table, a dict of columns or rows, sent as columnar
 batches in one `COPY` (numpy numbers, dates and timestamps without a
 Python object per value) — and `conn.copy("COPY t FROM STDIN WITH
-(FORMAT csv)", open("t.csv", "rb"))` for text or CSV.  Tests:
+(FORMAT csv)", open("t.csv", "rb"))` for text or CSV.  Many
+statements in one round trip: `conn.pipeline([(sql, params), …])` (each
+one's `Result`, or its `Error` in its place); one statement for many
+rows, all or none, one commit for all: `conn.execute_many(sql, rows)`
+(and the DB-API `cursor.executemany`).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.

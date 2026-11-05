@@ -3168,7 +3168,14 @@ columns as columnar batches (Rust `copy_rows`; Python
 `Connection.load` — a pandas DataFrame, a pyarrow Table, a dict of
 columns or rows, numpy columns without a Python object per value;
 JavaScript `Client.load` — typed arrays sent as they are; Java `load` —
-primitive arrays likewise) — errors with their hint (`ServerError::hint`,
+primitive arrays likewise), pipelines (§10, *Pipelining*: Rust
+`Client::pipeline`, Python `Connection.pipeline`, JavaScript
+`Client.pipeline`, Java `pipeline`, C `nc_pipeline`, C++
+`Connection::pipeline` — each statement's result or error in its place)
+and a statement for many rows of parameters (`execute_many`; JavaScript
+and Java `executeMany`; Python's DB-API `executemany`): pipelined, all or
+none — outside a transaction block in one of their own, so one commit
+for all — errors with their hint (`ServerError::hint`,
 Python's `.hint`, JavaScript's `hint`, Java's `hint()`, C's
 `nc_error.hint`, C++'s `hint()`) — and logs in by SCRAM-SHA-256 (the C driver with
 its own SHA-256, HMAC, PBKDF2 and base64; the others with their
@@ -3259,6 +3266,13 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W8, every driver pipelines:** `pipeline` and
+  `execute_many` (`executeMany`) in Python, JavaScript, Java, C and C++
+  as in Rust; a statement for many rows runs all or none, one commit for
+  all — an insert 185 → 11.5 µs a row, 100 a call.  The C driver sends a
+  frame in one write and reads through a buffer: a point read 27.5 → 25
+  µs.
 
 - **2026-11-05 — §M14.20 W8, pipelining:** the server flushes its
   replies only when no next message waits in its read buffer; the Rust
