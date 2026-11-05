@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W7 and W3b ✅, W8 next; benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W8 and W3b ✅; benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
@@ -2513,8 +2513,8 @@ the speed-up is made once, in the merged one.  The work, in this order:
   (column); ClickBench on a column table 19.4 → 18.15 ms.  Left,
   recorded: extents for a working set past the cache, the WAL's segments
   preallocated and recycled, reading into the buffer pool's frames
-  without a copy.  **W8 is next.**
-- **W8 — per-statement costs** (what AI agents' traffic pays most): a
+  without a copy.
+- **W8 — per-statement costs** ✅ (what AI agents' traffic pays most): a
   catalog epoch, and on it a session's catalog, settings and plan cache
   (pg-compat's prepared statements onto the same); one bind for describe
   and run; pipelining and array binds in the drivers; one `ncp-wire` crate
@@ -2727,6 +2727,47 @@ the speed-up is made once, in the merged one.  The work, in this order:
   → 25.6 / 25.7 µs); a million rows of four columns read as rows 486 /
   479 → 460 / 446 ms, as columnar batches 147 / 149 → 147 / 146
   (`crates/client/examples/bigread.rs`, new).
+  *The next batch made while the client reads one* (from W1).  With a
+  fetch size the server sent a batch and `S`, then sat waiting for `F`
+  while the client worked through the batch, and the client waited for
+  the next one to be made after asking.  Now the rows after an `S` are
+  made and held — up to a batch of the size last asked for — and go out
+  when `F` comes: as many as it asks for, another `S` after them if
+  some are left (a columnar batch read ahead and larger than asked for is
+  cut, its rows decoded and rebuilt — a size change no driver makes), or
+  dropped on `c`, Done counting the rows sent.  The protocol is unchanged:
+  the client cannot send `F` ahead itself, since one arriving after the
+  result's end would be read as the next message.  An error in a row
+  read ahead ends the statement even when `c` follows (the session has
+  failed it; a sort's input would have failed the same way before any
+  row went out).  Taken: PostgreSQL's portals run only on `Execute`, and
+  libpq's `PQsetSingleRowMode` / chunked mode only spare memory — neither
+  reads ahead; this is the double buffering of a cursor's fetch that
+  Oracle's prefetch (`OCI_ATTR_PREFETCH_ROWS`) and JDBC's fetch size do on
+  the client side, moved to the server, where the rows are made.  Not
+  taken: a thread making rows while another sends them — the executor
+  already hands rows to the sink in order, and the sink holding a batch
+  is all the overlap a fetch needs.  Tests: the rows after a pause made
+  before the client asks for them (by `clock_timestamp()`), batches of
+  every size asked for by hand, row by row and columnar, smaller and
+  larger than read ahead, stopped, exactly a batch more; mutations
+  caught (one row read ahead, the count of rows sent, the columnar cut).
+  Measured, alternating, two rounds, the new client on both: a million
+  rows through a cursor, 1000 a batch, as rows 600 / 615 → 461 / 466 ms,
+  as columnar batches 178 / 180 → 165 / 166; a Python stream of a
+  million rows, 1000 a batch, summing them 2787 / 2810 → 2429 / 2370 ms;
+  whole results (no fetch size) the same, 453 / 454 → 466 / 459 and 147 /
+  150 → 146 / 148.
+  *W8 closed* (2026-11-05).  Since W7, alternating with each step before
+  it: `SELECT 1` 28.3 → 20.4 µs, a point read with a parameter 52.1 →
+  25.8 and with a literal 45.5 → 36.5; 100 point reads pipelined 5.8 µs
+  each, inserts 100 a call 11.5 µs a row against 185 one at a time; a
+  cursor of a million rows 600 → 461 ms.  One wire format crate for the
+  server and the Rust driver, one by-text cache for plans, parsed
+  statements and the statistics' keys.  Left, recorded: pg-compat's
+  prepared point read (39.4 µs against the native 25.8); `INSERT` /
+  `UPDATE` / `DELETE` plans kept; a plan per parameter value; the
+  statistics' second tokenization of a text never repeated.
 
 Each step records what it took from where, and what it measured, here
 and in `docs/benchmarks.md`.
@@ -3956,3 +3997,8 @@ style) across a thousand seeds without failure.
 - **2026-11-05** — §M14.20 W7 closed: ClickBench on a row table 7.2 →
   5.9 s, the TPC-H load on row tables 56 → 27 s; extents and the shared
   WAL buffer measured and not taken.  W8 next.
+- **2026-11-05** — §M14.20 W8 closed: a session's catalog, plans,
+  parsed statements and statistics' keys kept by text; pipelining and a
+  statement for many rows in every driver; one wire format crate; the
+  next result batch made while the client reads one.  `SELECT 1` 28.3 →
+  20.4 µs, a parameterized point read 52.1 → 25.8, 5.8 pipelined.

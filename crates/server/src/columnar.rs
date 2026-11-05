@@ -255,6 +255,14 @@ impl Builder {
         Ok(())
     }
 
+    /// Drops the rows so far.
+    pub fn clear(&mut self) {
+        self.rows = 0;
+        for c in &mut self.cols {
+            *c = Col::default();
+        }
+    }
+
     /// The `B` message of the rows so far; the builder is empty after.
     pub fn finish(&mut self) -> Vec<u8> {
         let mut buf = vec![b'B', 0, 0, 0, 0];

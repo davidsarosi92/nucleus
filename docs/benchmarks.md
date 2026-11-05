@@ -266,7 +266,11 @@ with a frame in one write and replies read through a buffer.
 A million rows of a bigint, a text, a numeric and a timestamp read whole
 (`crates/client/examples/bigread.rs`), median ms: as rows 479 → 446 with
 the server encoding the protocol's values itself (`nucleus-wire`), as
-columnar batches 149 → 146.
+columnar batches 149 → 146.  The same through a cursor, 1000 rows a
+batch, with the server making the next batch while the client reads one:
+as rows 600 / 615 → 461 / 466 ms, as columnar batches 178 / 180 → 165 /
+166; a Python stream of a million rows of three columns, 1000 a batch
+(`Connection.stream`, the rows summed), 2787 / 2810 → 2429 / 2370 ms.
 
 Through the PostgreSQL front end (`--pg-compat`), the `postgres` driver's
 prepared statements (`modules/pg-compat/examples/pg_latency.rs`, the

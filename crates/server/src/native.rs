@@ -1,5 +1,6 @@
 //! The nucleus protocol (`ncp`, DOCS §10): one connection.
 
+use std::collections::VecDeque;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::TcpStream;
 use std::ops::ControlFlow;
@@ -746,19 +747,33 @@ enum Ran {
 /// A statement's rows onto the wire as the executor produces them.  With a
 /// fetch size, after each batch an `S` and a wait for the client: `F`
 /// (the next batch; its size, 0 for the rest) or `c` (no more — the
-/// statement ends there).
+/// statement ends there).  While the client handles a batch, the next is
+/// produced: the rows after an `S` wait here, up to a batch of the size
+/// last asked for, and go out when the client asks for them (or are
+/// dropped when it wants no more).
 struct Wire<'a, R: Read, W: Write> {
-    input: &'a mut R,
+    input: &'a mut BufReader<R>,
     out: &'a mut W,
     format: Format,
     version: u16,
     types: Vec<DataType>,
     fetch: u32,
-    /// Rows left in this batch (`None`: no limit).
+    /// Rows left in the batch the client asked for (`None`: no limit).
     left: Option<u32>,
-    /// Columnar: the batch being filled, and its size.
+    /// Columnar: the batch being filled.
     pending: Option<crate::columnar::Builder>,
+    /// Rows a batch holds: columnar, one `B`'s; with a fetch size, the
+    /// size last asked for (what is read ahead).
     batch: usize,
+    /// An `S` sent, the client's answer not read yet.
+    waiting: bool,
+    /// Rows (`D` messages) produced while `waiting`; columnar ones wait in
+    /// `pending`.
+    ahead: VecDeque<Vec<u8>>,
+    /// Rows sent.
+    sent: u64,
+    /// The client wanted no more (`c`).
+    stopped: bool,
     /// `COPY … FROM STDIN`: the columns, while the client's data comes.
     copying: Option<Vec<DataType>>,
     /// The connection failed: the statement stopped on it.
@@ -786,43 +801,69 @@ impl<R: Read, W: Write> Wire<'_, R, W> {
         let Some(b) = self.pending.as_mut().filter(|b| !b.is_empty()) else {
             return Ok(());
         };
+        self.sent += b.len() as u64;
         let b = b.finish();
         self.send(&b)
     }
 
-    /// Columnar: room for a row — the full batch sent first, and with a
-    /// fetch size a wait for the client; `Break` when it wants no more.
+    /// Columnar: room for a row — a full batch sent first, and with a
+    /// fetch size an `S` after it; `Break` when the client wants no more.
     fn room(&mut self) -> Result<ControlFlow<()>, Error> {
-        if self.pending.as_ref().is_some_and(|b| b.len() >= self.batch) {
-            self.send_batch()?;
-            if self.left.is_some() {
-                match self.suspend()? {
-                    Some(next) => {
-                        self.left = next;
-                        self.batch = next.map_or(crate::columnar::DEFAULT_BATCH, |n| n as usize);
-                    }
-                    None => return Ok(ControlFlow::Break(())),
+        loop {
+            let len = self.pending.as_ref().map_or(0, |b| b.len());
+            if self.waiting && (len >= self.batch || self.answered()) {
+                if self.resolve()?.is_break() {
+                    return Ok(ControlFlow::Break(()));
+                }
+                continue;
+            }
+            if !self.waiting && len >= self.batch {
+                self.send_batch()?;
+                if self.left.is_some() {
+                    self.pause()?;
                 }
             }
+            return Ok(ControlFlow::Continue(()));
         }
-        Ok(ControlFlow::Continue(()))
     }
 
-    /// Pauses after a batch: the next one's size (`None`: no limit), or
-    /// none when the client wants no more.
-    fn suspend(&mut self) -> Result<Option<Option<u32>>, Error> {
+    /// Sends `S` after a batch: what is produced until the client answers
+    /// waits.
+    fn pause(&mut self) -> Result<(), Error> {
         self.send(&Msg::new(b'S').finish())?;
         self.out.flush().map_err(|e| self.broke(e))?;
+        self.waiting = true;
+        Ok(())
+    }
+
+    /// Whether the client's answer to `S` has come (without waiting for
+    /// it).
+    fn answered(&self) -> bool {
+        self.waiting && message_waiting(self.input.buffer())
+    }
+
+    /// The client's answer to `S`: on `F` the rows read ahead go out, as
+    /// many as it asked for (another `S` after them when more are left); on
+    /// `c` they are dropped and `Break`.
+    fn resolve(&mut self) -> Result<ControlFlow<()>, Error> {
+        self.waiting = false;
         let input = &mut *self.input;
-        match nucleus_sql::budget::paused(|| read_message(input)) {
+        let next = match nucleus_sql::budget::paused(|| read_message(input)) {
             Ok((b'F', body)) => {
                 let n = Body::new(&body).u32()?;
-                Ok(Some((n > 0).then_some(n)))
+                (n > 0).then_some(n)
             }
-            Ok((b'c', _)) => Ok(None),
+            Ok((b'c', _)) => {
+                self.stopped = true;
+                self.ahead.clear();
+                if let Some(b) = &mut self.pending {
+                    b.clear();
+                }
+                return Ok(ControlFlow::Break(()));
+            }
             Ok((b'X', _)) => {
                 self.close = Some(None);
-                Err(protocol("the client left"))
+                return Err(protocol("the client left"));
             }
             Ok((other, _)) => {
                 let e = protocol(format!(
@@ -830,14 +871,59 @@ impl<R: Read, W: Write> Wire<'_, R, W> {
                     other as char
                 ));
                 self.close = Some(Some(e.clone()));
-                Err(e)
+                return Err(e);
             }
-            Err(e) => Err(self.broke(e)),
+            Err(e) => return Err(self.broke(e)),
+        };
+        self.left = next;
+        self.batch = next.map_or(crate::columnar::DEFAULT_BATCH, |n| n as usize);
+        if let Some(b) = &mut self.pending {
+            // More read ahead than asked for: a batch of the size asked
+            // for, the rest kept (rare: drivers ask for the same size).
+            if b.len() > self.batch {
+                let rows = crate::columnar::rows(&b.finish()[5..], &self.types)?;
+                for r in &rows[..self.batch] {
+                    b.push_row(r)?;
+                }
+                self.send_batch()?;
+                let b = self.pending.as_mut().expect("columnar");
+                for r in &rows[self.batch..] {
+                    b.push_row(r)?;
+                }
+                self.pause()?;
+            }
+            return Ok(ControlFlow::Continue(()));
         }
+        while !self.ahead.is_empty() {
+            if self.left == Some(0) {
+                self.pause()?;
+                break;
+            }
+            let m = self.ahead.pop_front().expect("a row");
+            self.sent_row();
+            self.send(&m)?;
+        }
+        Ok(ControlFlow::Continue(()))
     }
-}
 
-impl<R: Read, W: Write> Wire<'_, R, W> {
+    fn sent_row(&mut self) {
+        if let Some(n) = &mut self.left {
+            *n -= 1;
+        }
+        self.sent += 1;
+    }
+
+    /// The statement's end (or the error that ended it): the rows read
+    /// ahead go out as the client asks for them, then the last batch.
+    fn finish(&mut self) -> Result<(), Error> {
+        while self.waiting {
+            if self.resolve()?.is_break() {
+                return Ok(());
+            }
+        }
+        self.send_batch()
+    }
+
     /// After a `COPY` that ended early (an error): the client's remaining
     /// data, read and dropped up to its end.
     fn skip_copy(&mut self) -> io::Result<()> {
@@ -933,14 +1019,13 @@ impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
                 ControlFlow::Break(()) => ControlFlow::Break(()),
             });
         }
-        if self.left == Some(0) {
-            match self.suspend()? {
-                Some(next) => self.left = next,
-                None => return Ok(ControlFlow::Break(())),
+        while self.waiting && (self.ahead.len() >= self.batch || self.answered()) {
+            if self.resolve()?.is_break() {
+                return Ok(ControlFlow::Break(()));
             }
         }
-        if let Some(n) = &mut self.left {
-            *n -= 1;
+        if !self.waiting && self.left == Some(0) {
+            self.pause()?;
         }
         let mut m = Msg::new(b'D');
         for (v, t) in row.iter().zip(&self.types) {
@@ -950,7 +1035,13 @@ impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
                 m.value(v, Some(*t), self.version)
             };
         }
-        self.send(&m.finish())?;
+        let m = m.finish();
+        if self.waiting {
+            self.ahead.push_back(m);
+        } else {
+            self.sent_row();
+            self.send(&m)?;
+        }
         Ok(ControlFlow::Continue(()))
     }
 
@@ -1009,7 +1100,7 @@ fn run<R: Read, W: Write>(
     session: &mut Session,
     query: &Query,
     version: u16,
-    input: &mut R,
+    input: &mut BufReader<R>,
     out: &mut W,
 ) -> io::Result<Ran> {
     let parsed = match session.parse(query.sql) {
@@ -1063,6 +1154,10 @@ fn run<R: Read, W: Write>(
             left: None,
             pending: None,
             batch: crate::columnar::DEFAULT_BATCH,
+            waiting: false,
+            ahead: VecDeque::new(),
+            sent: 0,
+            stopped: false,
             copying: None,
             broken: None,
             close: None,
@@ -1071,8 +1166,11 @@ fn run<R: Read, W: Write>(
         if wire.broken.is_none() {
             wire.skip_copy()?;
         }
-        // The last batch, before the end (or the error that ended it).
-        if let Err(e) = wire.send_batch()
+        // The rows read ahead and the last batch, before the end (or the
+        // error that ended it).
+        if wire.broken.is_none()
+            && wire.close.is_none()
+            && let Err(e) = wire.finish()
             && r.is_ok()
         {
             r = Err(e);
@@ -1087,7 +1185,11 @@ fn run<R: Read, W: Write>(
             Ok(tag) => tag,
             Err(e) => return Ok(Ran::Failed(e)),
         };
-        let (command, count) = split_tag(&tag);
+        let (command, mut count) = split_tag(&tag);
+        if wire.stopped {
+            // Rows read ahead and dropped are not the client's.
+            count = wire.sent;
+        }
         out.write_all(&Msg::new(b'K').str(&command).u64(count).finish())?;
     }
     Ok(Ran::Done)

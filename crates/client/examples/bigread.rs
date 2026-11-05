@@ -2,8 +2,8 @@
 //! `cargo run --release -p nucleus-client --example bigread -- PORT [ROWS]`
 //! against a running server (`--no-auth`).  A table of ROWS rows (default
 //! 1,000,000) of a bigint, a text, a numeric and a timestamp is read
-//! whole, as rows and as columnar batches, five times each; printed is
-//! the median in ms.
+//! whole, as rows and as columnar batches, and through a cursor of 1000
+//! rows a batch both ways, five times each; printed is the median in ms.
 
 use std::time::Instant;
 
@@ -57,10 +57,30 @@ fn main() {
         assert_eq!(got, n);
         batches.push(t.elapsed().as_secs_f64() * 1e3);
     }
+    let mut cursor = Vec::new();
+    for _ in 0..5 {
+        let t = Instant::now();
+        let got = c.cursor(sql, &[], 1000).expect("reads").count() as u64;
+        assert_eq!(got, n);
+        cursor.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    let mut cursor_batches = Vec::new();
+    for _ in 0..5 {
+        let t = Instant::now();
+        let mut b = c.batches(sql, &[], 1000).expect("reads");
+        let mut got = 0u64;
+        for batch in &mut b {
+            got += batch.expect("a batch").rows() as u64;
+        }
+        assert_eq!(got, n);
+        cursor_batches.push(t.elapsed().as_secs_f64() * 1e3);
+    }
     println!(
-        "{n} rows: as rows {:.0} ms, as columnar batches {:.0} ms",
+        "{n} rows: as rows {:.0} ms, as columnar batches {:.0} ms; 1000 at a time: rows {:.0} ms, batches {:.0} ms",
         median(rows),
-        median(batches)
+        median(batches),
+        median(cursor),
+        median(cursor_batches)
     );
     c.execute("DROP TABLE big_read", &[]).expect("drops");
 }

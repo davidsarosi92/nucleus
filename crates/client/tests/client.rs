@@ -1813,3 +1813,127 @@ fn execute_many_is_all_or_none() {
     c.execute("ROLLBACK", &[]).unwrap();
     assert_eq!(count(&mut c), Value::Int(5000));
 }
+
+/// While the client handles a batch, the server produces the next
+/// (PLAN.md §M14.20 W8): the rows after a pause are made before the
+/// client asks for them.
+#[test]
+fn the_next_batch_is_made_while_the_client_reads() {
+    let mut c = Client::connect(config(start_real(nucleus_server::Config::default()))).unwrap();
+    let mut cur = c
+        .cursor(
+            "SELECT i, clock_timestamp() FROM generate_series(1, 20) i",
+            &[],
+            10,
+        )
+        .unwrap();
+    let at = |row: Vec<Value>| match row[1] {
+        Value::TimestampTz(t) => t,
+        ref v => panic!("{v:?}"),
+    };
+    let tenth = at(cur.nth(9).unwrap().unwrap());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let last = at(cur.nth(9).unwrap().unwrap());
+    assert!(
+        last - tenth < 150_000,
+        "the 20th row made {} µs after the 10th",
+        last - tenth
+    );
+    assert!(cur.next().is_none());
+}
+
+/// The batches a client asks for, of any size, row by row and columnar,
+/// with what was read ahead kept or dropped (by hand: drivers ask for the
+/// same size each time).
+#[test]
+fn batches_of_the_sizes_asked_for() {
+    use std::io::{Read, Write};
+    let addr = start_real(nucleus_server::Config::trust());
+    let frame = |kind: u8, body: &[u8]| {
+        let mut f = vec![kind];
+        f.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        f.extend_from_slice(body);
+        f
+    };
+    let string = |b: &mut Vec<u8>, s: &str| {
+        b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        b.extend_from_slice(s.as_bytes());
+    };
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut hello = 7u16.to_le_bytes().to_vec();
+    for part in ["nucleus", "", "nucleus", ""] {
+        string(&mut hello, part);
+    }
+    s.write_all(&frame(b'H', &hello)).unwrap();
+    // The kinds read up to the next S, K or R; a batch as `B<rows>`, a
+    // run of rows as `D<count>`, K with its count.
+    let upto = |s: &mut std::net::TcpStream| -> String {
+        let mut seen = String::new();
+        let mut rows = 0;
+        loop {
+            let mut head = [0u8; 5];
+            s.read_exact(&mut head)
+                .unwrap_or_else(|e| panic!("{e} after {seen:?} and {rows} rows"));
+            let mut body = vec![0u8; u32::from_le_bytes(head[1..].try_into().unwrap()) as usize];
+            s.read_exact(&mut body).unwrap();
+            if head[0] != b'D' && rows > 0 {
+                seen += &format!("D{rows} ");
+                rows = 0;
+            }
+            match head[0] {
+                b'D' => rows += 1,
+                b'B' => seen += &format!("B{} ", u32::from_le_bytes(body[..4].try_into().unwrap())),
+                b'K' => {
+                    let n = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
+                    let count = u64::from_le_bytes(body[4 + n..].try_into().unwrap());
+                    seen += &format!("K{count} ");
+                }
+                b'S' => return seen + "S",
+                b'E' => return seen + &format!("E{:?}", String::from_utf8_lossy(&body)),
+                b'R' => return seen + "R",
+                b'C' | b'W' => {}
+                k => seen += &format!("{} ", k as char),
+            }
+        }
+    };
+    assert_eq!(upto(&mut s), "R");
+    let query = |s: &mut std::net::TcpStream, format: u8, fetch: u32| {
+        let mut q = Vec::new();
+        string(&mut q, "SELECT i, 'r' || i FROM generate_series(1, 35) i");
+        q.push(format);
+        q.extend_from_slice(&fetch.to_le_bytes());
+        q.extend_from_slice(&0u16.to_le_bytes());
+        s.write_all(&frame(b'Q', &q)).unwrap();
+    };
+    let ask =
+        |s: &mut std::net::TcpStream, n: u32| s.write_all(&frame(b'F', &n.to_le_bytes())).unwrap();
+    let stop = |s: &mut std::net::TcpStream| s.write_all(&frame(b'c', &[])).unwrap();
+    for format in [0u8, 2] {
+        let d = if format == 0 { 'D' } else { 'B' };
+        // Fewer than read ahead, more, then the rest.
+        query(&mut s, format, 10);
+        assert_eq!(upto(&mut s), format!("{d}10 S"));
+        ask(&mut s, 4);
+        assert_eq!(upto(&mut s), format!("{d}4 S"));
+        ask(&mut s, 3);
+        assert_eq!(upto(&mut s), format!("{d}3 S"));
+        ask(&mut s, 12);
+        assert_eq!(upto(&mut s), format!("{d}12 S"));
+        ask(&mut s, 0);
+        assert_eq!(upto(&mut s), format!("{d}6 K35 R"));
+        // Stopped: what was read ahead is not counted.
+        query(&mut s, format, 10);
+        assert_eq!(upto(&mut s), format!("{d}10 S"));
+        ask(&mut s, 10);
+        assert_eq!(upto(&mut s), format!("{d}10 S"));
+        stop(&mut s);
+        assert_eq!(upto(&mut s), "K20 R");
+        // Exactly a batch more: no pause after it.
+        query(&mut s, format, 25);
+        assert_eq!(upto(&mut s), format!("{d}25 S"));
+        ask(&mut s, 10);
+        assert_eq!(upto(&mut s), format!("{d}10 K35 R"));
+    }
+}

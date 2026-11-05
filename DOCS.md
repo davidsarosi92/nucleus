@@ -3028,7 +3028,13 @@ server sends *n* rows, then `S`, and waits: `F` asks for the next batch
 the rows sent — and `X` closes the connection; anything else is `08P01`
 and the connection closes.  A result of exactly *n* rows ends without
 `S`.  The statement holds its snapshot while it waits, and the time spent
-waiting does not count toward its `statement_timeout`.  Rows of other
+waiting does not count toward its `statement_timeout`.  While the client
+handles a batch the server makes the next: the rows after an `S` are
+produced and held — up to a batch of the size last asked for — and sent
+when `F` comes, or dropped on `c` (Done counts the rows sent, never those
+dropped).  So an error in a row read ahead ends the statement with its
+Error even when the client then sends `c`, as a sort's would have before
+any row was sent.  Rows of other
 statements (`RETURNING`, `SHOW`, `EXPLAIN`) are sent once the statement has
 committed, so one retried after a conflict sends them once.
 
@@ -3273,6 +3279,11 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W8, the next batch made ahead:** with a fetch
+  size, the server makes the next batch while the client reads one, and
+  sends it when asked (drops it on `c`): a cursor of a million rows, 1000
+  a batch, 600 → 461 ms; a Python stream 2.8 → 2.4 s.  W8 closed.
 
 - **2026-11-05 — §M14.20 W8, one wire format crate:** `nucleus-wire`
   holds the protocol's versions, kinds, tags, frames, values and columnar
