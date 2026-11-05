@@ -169,14 +169,16 @@ struct Ext {
 
 struct Value;
 using Array = std::vector<Value>;
+/// A `vector`: its components.
+using Vector = std::vector<float>;
 using Variant = std::variant<std::monostate, bool, int64_t, double, std::string, Numeric, Date, Timestamp,
                              TimestampTz, Interval, Array, Uuid, Ext, SmallInt, Integer, Real, Bytes, Time,
-                             Inet, Cidr>;
+                             Inet, Cidr, Vector>;
 
 /// A value: NULL (monostate), bool, int64 (bigint), double, text (also
 /// char(n) and enums), numeric, date, timestamp, timestamptz, interval, an
 /// array, a uuid, another registered type's value, smallint, integer,
-/// real, bytea, time, inet, cidr.
+/// real, bytea, time, inet, cidr, a vector (std::vector<float>).
 struct Value : Variant {
     using Variant::Variant;
     Value() = default;
@@ -217,7 +219,7 @@ struct Column {
     std::string name;
     nc_type type;
     nc_type element;       // for arrays
-    std::string type_name; // for registered types ("uuid", …) and enums
+    std::string type_name; // for registered types ("uuid", "vector", …) and enums
 };
 
 /// One statement's result.
@@ -264,6 +266,7 @@ inline Value from_c(const nc_value& v) {
         std::copy(std::begin(v.as.uuid.bytes), std::end(v.as.uuid.bytes), u.bytes.begin());
         return Value(u);
     }
+    case NC_VECTOR: return Value(Vector(v.as.vector.ptr, v.as.vector.ptr + v.as.vector.len));
     case NC_EXT:
         return Value(Ext{v.as.ext.type_name, std::vector<uint8_t>(v.as.ext.data, v.as.ext.data + v.as.ext.len)});
     default: return Value();
@@ -300,6 +303,7 @@ inline nc_value to_c(const Value& v, std::deque<std::vector<nc_value>>& store) {
             std::copy(u.bytes.begin(), u.bytes.end(), c.bytes);
             return nc_uuid_value(c);
         }
+        nc_value operator()(const Vector& f) const { return nc_vector(f.data(), f.size()); }
         nc_value operator()(const Ext& e) const { return nc_ext(e.type_name.c_str(), e.data.data(), e.data.size()); }
         nc_value operator()(const SmallInt& i) const { return nc_smallint(i.value); }
         nc_value operator()(const Integer& i) const { return nc_integer(i.value); }

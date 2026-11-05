@@ -18,7 +18,8 @@ enums), `bytes` (bytea; `bytearray` too as a parameter), `datetime.date`,
 `datetime.time` (24:00:00 as `time.max`), `datetime.datetime` (naive for
 timestamp, UTC for timestamptz), `nucleus.Interval` (and `timedelta` as a
 parameter), `ipaddress.ip_interface` (inet; an address as a parameter),
-`ipaddress.ip_network` (cidr), `uuid.UUID`, `list`, `None`; another
+`ipaddress.ip_network` (cidr), `uuid.UUID`, `array('f')` (vector; a
+float32 numpy array too as a parameter), `list`, `None`; another
 registered type is `nucleus.Ext` (its name and binary form).  Protocol
 version 4: the password is proved by SCRAM-SHA-256, never sent.  TLS:
 `connect(tls=True)` (the system's CAs), `tls_ca="ca.pem"`,

@@ -2286,7 +2286,7 @@ fn add_column(
     }
     t.columns.push(Column {
         name: column.name.clone(),
-        ty: crate::binder::column_type(&*txn, reg, &column.ty)?,
+        ty: crate::binder::column_type_with(&*txn, reg, &column.ty, column.max_len)?,
         nullable: !column.not_null,
         default: column.default.clone(),
         max_len: column.max_len,
@@ -2679,7 +2679,7 @@ fn create_table(
         }
         columns.push(Column {
             name: s.name.clone(),
-            ty: crate::binder::column_type(&*txn, reg, &s.ty)?,
+            ty: crate::binder::column_type_with(&*txn, reg, &s.ty, s.max_len)?,
             nullable: !s.not_null,
             default: s.default.clone(),
             max_len: s.max_len,
@@ -3134,6 +3134,7 @@ fn alter_column_type(
         }
     };
     let mut new = old.clone();
+    crate::binder::check_modifier(to, typmod.max_len)?;
     new.columns[c].ty = to;
     new.columns[c].max_len = typmod.max_len;
     new.columns[c].numeric = typmod.numeric;

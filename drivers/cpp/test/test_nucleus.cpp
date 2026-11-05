@@ -103,6 +103,21 @@ int main() {
         CHECK(r.rows[0][1].as<Uuid>().bytes[6] >> 4 == 4);
     }
     {
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, v vector(3))");
+        auto ins = "INSERT INTO " + t + " VALUES ($1, $2)";
+        db.query(ins, {1, Vector{1, 2, 3}});
+        db.query(ins, {2, Vector{4, 6, 3}});
+        db.query(ins, {3, Vector{1, 2, 3.5f}});
+        auto r = db.query("SELECT id, v FROM " + t + " ORDER BY v <-> $1 LIMIT 2", {Vector{1, 2, 3.4f}});
+        CHECK(r.columns[1].type == NC_VECTOR && r.columns[1].type_name == "vector");
+        CHECK(r.rows[0][0].as<Integer>().value == 3);
+        CHECK(r.rows[1][1] == Value(Vector{1, 2, 3}));
+        CHECK(r.rows[0][1].str() == "[1,2,3.5]");
+        CHECK(error_code(db, "INSERT INTO " + t + " VALUES (9, '[1,2]')") == "22000");
+    }
+    {
         // §M14.26's types, natively (protocol version 3).
         Connection db(config());
         auto t = table();

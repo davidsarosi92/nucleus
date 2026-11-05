@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Vectors (nucleus PLAN.md §M14.12): a `vector` value is a
+  `Float32Array`, sent and read in rows, batches and `load`.
+
 - Pipelining (nucleus PLAN.md §M14.20 W8): `Client.pipeline(statements)`
   sends statements without waiting for each reply and gives each one's
   `Result` or `NucleusError` in its place, `PIPELINE_WINDOW` bytes at a

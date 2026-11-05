@@ -21,7 +21,8 @@
 // as Decimal (exact), text, char(n) and enums as string, bytea as Buffer,
 // date / timestamp / timestamptz as Date (UTC; read with millisecond
 // precision), time as Time, interval as Interval, inet as Inet, cidr as
-// Cidr, uuid as its canonical string, arrays as arrays, NULL as null;
+// Cidr, uuid as its canonical string, vector as Float32Array, arrays as
+// arrays, NULL as null;
 // another registered type as Ext (its name and binary form).
 
 import { createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
@@ -279,6 +280,20 @@ export class Ext {
   }
 }
 
+/** A vector's binary form: its components as little-endian float32s. */
+function vectorBytes(v: Float32Array): Buffer {
+  const b = Buffer.alloc(v.length * 4);
+  for (let i = 0; i < v.length; i++) b.writeFloatLE(v[i], i * 4);
+  return b;
+}
+
+/** A vector from its binary form. */
+function vectorOf(b: Buffer): Float32Array {
+  const v = new Float32Array(b.length / 4);
+  for (let i = 0; i < v.length; i++) v[i] = b.readFloatLE(i * 4);
+  return v;
+}
+
 /** A uuid's canonical text (`8-4-4-4-12`, lower case) from its 16 bytes. */
 export function uuidText(b: Buffer): string {
   const h = b.toString("hex");
@@ -298,6 +313,7 @@ export type Value =
   | Inet
   | Buffer
   | Uint8Array
+  | Float32Array
   | Ext
   | Value[];
 
@@ -432,6 +448,12 @@ class Writer {
       // (A Cidr is an Inet too.)
       this.u8(v instanceof Cidr ? 19 : 18).u8(v.bytes.length === 4 ? 4 : 6).u8(v.bits);
       this.parts.push(v.bytes);
+      return this;
+    }
+    if (v instanceof Float32Array) {
+      const data = vectorBytes(v);
+      this.u8(EXT).str("vector").u32(data.length);
+      this.parts.push(data);
       return this;
     }
     if (v instanceof Uint8Array) {
@@ -592,6 +614,7 @@ class Reader {
         this.need(n);
         const data = Buffer.from(this.b.subarray(this.at, this.at + n));
         this.at += n;
+        if (name === "vector") return vectorOf(data);
         return name === "uuid" && n === 16 ? uuidText(data) : new Ext(name, data);
       }
       default:
@@ -1641,6 +1664,7 @@ function varSlot(c: Column, v: Value): Buffer {
   const tag = c.tag ?? 0;
   if (tag === 15 || tag === EXT) {
     if (v instanceof Ext) return v.data;
+    if (v instanceof Float32Array) return vectorBytes(v);
     if (v instanceof Uint8Array) return Buffer.from(v);
     throw new NucleusError(`${String(v)} cannot be sent as column "${c.name}" (${c.type})`);
   }

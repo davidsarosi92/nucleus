@@ -878,6 +878,12 @@ pub fn assign_text(txn: &dyn KvTxn, s: &str, table: &Table, c: usize) -> Result<
 /// A value of column `col`'s type made to fit it: its length, `char(n)`'s
 /// padding, `numeric(p, s)`'s scale.
 fn fit_column(col: &crate::catalog::Column, v: Value) -> Result<Value> {
+    // A registered type's modifier (`vector(3)`).
+    if let (DataType::Ext(t), Some(n)) = (col.ty, col.max_len)
+        && !v.is_null()
+    {
+        return t.imp().fit(v, n);
+    }
     // A string's bytes are at least its characters: most need no count.
     if let (Some(max), Value::Text(s)) = (col.max_len, &v)
         && s.len() > max as usize

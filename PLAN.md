@@ -276,7 +276,7 @@ are marked ✅.
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W8 and W3b ✅; benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 to agree |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ⬜ |
-| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1 |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
@@ -3048,7 +3048,7 @@ compaction policy chosen and why, what is left to the B+tree — and the
 steps it leads to are planned as this milestone's own, agreed before
 they are built.
 
-### §M14.12 — Vectors ⬜
+### §M14.12 — Vectors ◐ (V1: the type, exact search, every driver)
 
 Embeddings beside the data they describe, in the same transactions.
 `vector` is a **built-in type with every capability** — it matters most
@@ -3094,6 +3094,67 @@ reference that the capability model is proven on:
     never returns, or is shaped by, rows the session may not see.
 - Later, as further encodings or types on the same model: half precision,
   int8 and binary quantization, sparse vectors.
+
+**V1 ✅ (2026-11-06) — the type, exact search, every driver.**
+
+- `vector` / `vector(n)` (1–16000 components, pgvector's limit) as a
+  registered type in `crates/sql/src/vectors.rs`, on the capability
+  model: canonical bytes are the components as little-endian `f32`s
+  (`-0` stored as `0`, so equal vectors are equal bytes); equality and
+  hashing on them; the total order component by component, then the
+  shorter first (pgvector's, which is PostgreSQL's arrays'); an
+  order-preserving key encoding (`01`, a sortable `u32` per component,
+  `00`), so a vector is a key, sorted, `UNIQUE` and B-tree indexed.  The
+  law kit has a `vector` generator (`-0`, extremes, shared prefixes,
+  lengths 1–4) and passes on it.
+- The capability model grew what `vector` needed, each a `Type` method
+  any module's type can use (§8.12 in DOCS): `arithmetic()` (operators
+  the type defines: `+ - * ||`), a modifier (`modifier(n)` checked where
+  `type(n)` is written, `fit(v, n)` on every write and cast), casts
+  (`cast_from`, `cast_to`: `real[]` and any numeric array both ways;
+  `text` as for every type), and `aggregate(name)` (a type's own `sum`
+  and `avg`).
+- Distances `<->` (the type's `Distance`), `<=>`, `<#>`, `<+>` and their
+  functions; `ORDER BY v <-> $1 LIMIT k` is the exact search.  Each
+  distance is a `nucleus-kernels` kernel over the stored bytes: sixteen
+  running `f32` sums, component `i` into sum `i mod 16`, added in a fixed
+  order — so a distance is the same bits on NEON, AVX2 and AVX-512 and in
+  the reference (a test checks it at every level for lengths 0–1536).
+  FAISS and pgvector leave the order to the compiler and fuse multiplies
+  into adds where the CPU can (results that differ by machine); a fixed
+  order keeps principle 4's determinism (its cost against a fused,
+  unordered kernel is to be measured with the benchmark below).
+- Functions `vector_dims` / `dims`, `vector_norm` / `l2_norm` / `norm`,
+  `l2_normalize` / `normalize`, `subvector`, `inner_product`; `avg` and
+  `sum` exact per component (`fsum::ExactSum`, §M14.27 item 10's
+  centroids; pgvector sums in `float8`, order-dependent).
+- `ncp`: tag 11 named `vector`, its bytes as stored (little-endian, so a
+  driver reads a column in place: numpy, `Float32Array`, C `float*`).
+  Drivers: Rust `Value::Vector(Vec<f32>)`, C `NC_VECTOR` / `nc_vector`,
+  C++ `std::vector<float>`, Python `array('f')` (float32 numpy arrays
+  sent too), JavaScript `Float32Array`, Java `float[]` — each tested
+  both ways, in rows, batches and bulk loads where the driver has them.
+- `crates/testkit/slt/45_vector.slt` (pgvector's definitions; nucleus's
+  SQLSTATEs) in every slt mode; `docs/llm.md` names the type and the
+  operators.
+
+*Measured* (`bench/vectors/knn.py`, Apple M-series, release build):
+not yet run — `bench/vectors/knn.py` (exact search against numpy's brute
+force and pgvector, the answers compared) is written; its numbers come
+with V2.
+
+*Left, as steps of their own:* **V2** `v[i]`, slices and `UPDATE … SET
+v[i] = …`; Arrow's `fixed_size_list<float32>` for batches; pg-compat
+sending `vector` as pgvector's text so its clients work.  **V3**
+statistics for the optimizer (dimension, norms, sampled distance
+quantiles).  **V4** the HNSW index (Malkov and Yashunin 2018; pgvector's
+and Lucene's builds read for ideas — graph pages in the KV, versions
+checked against the snapshot on the way out, deletions by marking and a
+repair pass) with a recall suite on public data (SIFT1M, GloVe-100,
+ann-benchmarks' method).  **V5** filtered search as specified above (ACORN's
+predicate-aware traversal, Patel et al. 2024, and Qdrant's filterable
+HNSW are the prior art to read).  **V6** half, int8 and binary
+quantization; sparse vectors.
 
 **Done when:** the law kit passes on `vector`; every capability above
 works through SQL, `ncp` and all six drivers; exact search matches a
@@ -4172,3 +4233,9 @@ style) across a thousand seeds without failure.
   power sums the same bits always, 8.9 ns a value by a superaccumulator);
   the families chosen with their methods, bounds and prior art; steps
   S1–S8, to be agreed before they are built.
+- **2026-11-06** — §M14.12 V1: `vector(n)` as a registered type with
+  every capability (equality, hashing, order, key encoding, distances
+  `<-> <=> <#> <+>`, arithmetic, a modifier, casts, exact `sum` / `avg`);
+  distance kernels with a fixed summation order, the same bits at every
+  SIMD level; exact nearest-neighbour search; a native mapping in all six
+  drivers; the law kit passes on it.

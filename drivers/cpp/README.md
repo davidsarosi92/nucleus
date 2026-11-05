@@ -6,7 +6,8 @@ Header-only C++17 over the C driver: `nucleus::Connection` (RAII; throws
 text, `Numeric`, `Date`, `Timestamp`, `TimestampTz`, `Interval`, `Array`,
 `Uuid` — 16 bytes, `Uuid::parse` — and `Ext`, another registered type's name
 and binary form; protocol version 3's `SmallInt`, `Integer`, `Real`,
-`Bytes`, `Time`, `Inet` and `Cidr` — `Inet::parse`, `Cidr::parse`),
+`Bytes`, `Time`, `Inet` and `Cidr` — `Inet::parse`, `Cidr::parse` — and
+`Vector`, a `std::vector<float>`),
 `transaction([](Connection&) { … })`.  Protocol version 4 (through the C
 driver): the password is proved by SCRAM-SHA-256, never sent.  TLS with
 a C driver built with OpenSSL: `Config::tls`, `tls_ca`, `tls_no_verify`,

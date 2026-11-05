@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Vectors (nucleus PLAN.md §M14.12): a `vector` value is a `float[]`,
+  sent and read in rows, batches and `load` (a column of them as
+  `float[][]`).
+
 - Pipelining (nucleus PLAN.md §M14.20 W8):
   `NucleusClient.pipeline(List<Statement>)` sends statements without
   waiting for each reply and gives each one's `Reply` (its result or its

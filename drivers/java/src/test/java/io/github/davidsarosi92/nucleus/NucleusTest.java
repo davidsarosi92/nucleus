@@ -113,6 +113,32 @@ public final class NucleusTest {
         }
     }
 
+    static void vector() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            String t = table();
+            db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, v vector(3))");
+            List<Object[]> rows = List.of(
+                    new Object[] {1, new float[] {1, 2, 3}},
+                    new Object[] {2, new float[] {4, 6, 3}},
+                    new Object[] {3, new float[] {1, 2, 3.5f}},
+                    new Object[] {4, null});
+            equal(db.executeMany("INSERT INTO " + t + " VALUES ($1, $2)", rows), 4L, "vectors inserted");
+            Result r = db.query("SELECT id, v FROM " + t + " WHERE v IS NOT NULL ORDER BY v <-> $1 LIMIT 2", new float[] {1, 2, 3.4f});
+            equal(r.columns().get(1).type(), "vector", "vector column type");
+            equal(r.rows().get(0).get(0), 3, "the nearest");
+            equal(r.rows().get(1).get(0), 1, "the next nearest");
+            check(Arrays.equals((float[]) r.rows().get(1).get(1), new float[] {1, 2, 3}), "a vector read");
+            try (NucleusClient.Batches bs = db.batches("SELECT v FROM " + t + " ORDER BY id")) {
+                NucleusClient.Batch b = bs.next();
+                check(Arrays.equals((float[]) b.column("v").get(2), new float[] {1, 2, 3.5f}), "a vector in a batch");
+                check(b.column("v").isNull(3), "a NULL vector");
+            }
+            db.load(t, Map.of("id", new int[] {5, 6}, "v", new float[][] {{0, 0, 1}, {0, 1, 0}}));
+            equal(db.query("SELECT count(*) FROM " + t + " WHERE v <-> '[0,0,1]' < 1.5").rows().get(0).get(0), 2L, "vectors loaded");
+            equal(errorCode(() -> db.query("INSERT INTO " + t + " VALUES (7, $1)", new float[] {1, 2})), "22000", "the wrong dimensions");
+        }
+    }
+
     static void coreTypes() {
         try (NucleusClient db = NucleusClient.connect(config())) {
             String t = table();
@@ -370,6 +396,7 @@ public final class NucleusTest {
     public static void main(String[] args) {
         run("types both ways", NucleusTest::typesBothWays);
         run("uuid", NucleusTest::uuid);
+        run("vector", NucleusTest::vector);
         run("core types", NucleusTest::coreTypes);
         run("errors", NucleusTest::errors);
         run("transactions", NucleusTest::transactions);
@@ -381,7 +408,7 @@ public final class NucleusTest {
         run("columnar", NucleusTest::columnar);
         run("copy and load", NucleusTest::copyAndLoad);
         run("pipelines", NucleusTest::pipelines);
-        check(passed == 13, "all tests ran");
+        check(passed == 14, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

@@ -83,6 +83,36 @@ test("uuid", async () => {
   await db.close();
 });
 
+test("vector", async () => {
+  const db = await connect(options);
+  const t = table();
+  await db.query(`CREATE TABLE ${t} (id INT PRIMARY KEY, v vector(3))`);
+  const rows: Value[][] = [
+    [1, new Float32Array([1, 2, 3])],
+    [2, new Float32Array([4, 6, 3])],
+    [3, new Float32Array([1, 2, 3.5])],
+    [4, null],
+  ];
+  assert.equal(await db.executeMany(`INSERT INTO ${t} VALUES ($1, $2)`, rows), 4);
+  const q = `SELECT id, v FROM ${t} WHERE v IS NOT NULL ORDER BY v <-> $1 LIMIT 2`;
+  const r = await db.query(q, [new Float32Array([1, 2, 3.4])]);
+  assert.equal(r.columns[1].type, "vector");
+  assert.deepEqual(
+    r.rows.map((x) => x[0]),
+    [3, 1],
+  );
+  assert.deepEqual(r.rows[1][1], new Float32Array([1, 2, 3]));
+  // The same values in batches.
+  for await (const b of await db.batches(`SELECT v FROM ${t} ORDER BY id`)) {
+    assert.deepEqual(b.column("v").get(2), new Float32Array([1, 2, 3.5]));
+    assert.ok(b.column("v").isNull(3));
+  }
+  assert.equal(await db.load(t, { id: [5, 6], v: [new Float32Array([0, 0, 1]), new Float32Array([0, 1, 0])] }), 2);
+  assert.deepEqual((await db.query(`SELECT id FROM ${t} WHERE v <-> '[0,0,1]' < 1.5 ORDER BY id`)).rows, [[5], [6]]);
+  await assert.rejects(db.query(`INSERT INTO ${t} VALUES (7, $1)`, [new Float32Array([1, 2])]), (e: NucleusError) => e.code === "22000");
+  await db.close();
+});
+
 test("errors", async () => {
   const db = await connect(options);
   await assert.rejects(db.query("SELECT * FROM nosuch"), (e: NucleusError) => e.code === "42P01");

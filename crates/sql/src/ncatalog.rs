@@ -424,6 +424,7 @@ pub fn type_text(c: &Column) -> String {
         (DataType::Text, Some(n), _) => format!("varchar({n})"),
         (DataType::Char, Some(n), _) => format!("char({n})"),
         (DataType::Numeric, _, Some((p, s))) => format!("numeric({p},{s})"),
+        (DataType::Ext(t), Some(n), _) => format!("{}({n})", t.name()),
         (DataType::Timestamp, ..) => "timestamp".into(),
         (DataType::TimestampTz, ..) => "timestamptz".into(),
         (t, ..) => t.name().into(),

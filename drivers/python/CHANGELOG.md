@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Vectors (nucleus PLAN.md §M14.12): a `vector` value is an
+  `array('f')`; one or a one-dimensional float32 numpy array is sent as
+  a vector, in parameters, `executemany` and `load`.
+
 - Pipelining (nucleus PLAN.md §M14.20 W8): `Connection.pipeline(statements)`
   sends statements without waiting for each reply and gives each one's
   `Result` or `Error` (not raised) in its place, `PIPELINE_WINDOW` bytes

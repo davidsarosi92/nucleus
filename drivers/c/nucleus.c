@@ -151,6 +151,17 @@ static int put_value(buf *w, const nc_value *v) {
         put_ext(w, v->as.ext.type_name, v->as.ext.data, v->as.ext.len);
         return 0;
     }
+    if (v->type == NC_VECTOR) {
+        put_u8(w, NC_EXT);
+        put_str(w, "vector");
+        put_le(w, 4 * v->as.vector.len, 4);
+        for (i = 0; i < v->as.vector.len; i++) {
+            uint32_t bits;
+            memcpy(&bits, &v->as.vector.ptr[i], 4);
+            put_le(w, bits, 4);
+        }
+        return 0;
+    }
     put_u8(w, (unsigned)v->type);
     switch (v->type) {
     case NC_NULL: break;
@@ -257,6 +268,7 @@ static void free_value(nc_value *v) {
         free((void *)v->as.ext.type_name);
         free((void *)v->as.ext.data);
     }
+    if (v->type == NC_VECTOR) free((void *)v->as.vector.ptr);
     if (v->type == NC_ARRAY) {
         for (i = 0; i < v->as.array.len; i++) free_value((nc_value *)&v->as.array.items[i]);
         free((void *)v->as.array.items);
@@ -347,6 +359,21 @@ static int get_value(reader *r, nc_value *v) {
             free(name);
             v->type = NC_UUID;
             memcpy(v->as.uuid.bytes, p, 16);
+            break;
+        }
+        if (strcmp(name, "vector") == 0 && n % 4 == 0) {
+            float *f = malloc(n ? n : 1);
+            size_t k;
+            free(name);
+            if (!f) return -1;
+            for (k = 0; k < n / 4; k++) {
+                uint32_t bits = (uint32_t)p[4 * k] | (uint32_t)p[4 * k + 1] << 8 | (uint32_t)p[4 * k + 2] << 16 |
+                                (uint32_t)p[4 * k + 3] << 24;
+                memcpy(&f[k], &bits, 4);
+            }
+            v->type = NC_VECTOR;
+            v->as.vector.ptr = f;
+            v->as.vector.len = n / 4;
             break;
         }
         data = malloc(n ? n : 1);
@@ -1126,6 +1153,8 @@ static nc_result *read_columns(reader *r) {
             res->columns[i].type_name = get_str(r);
             if (res->columns[i].type_name && strcmp(res->columns[i].type_name, "uuid") == 0)
                 res->columns[i].type = NC_UUID;
+            if (res->columns[i].type_name && strcmp(res->columns[i].type_name, "vector") == 0)
+                res->columns[i].type = NC_VECTOR;
         }
         res->ncolumns = i + 1;
     }
@@ -1968,6 +1997,14 @@ nc_value nc_uuid_value(nc_uuid u) {
     return v;
 }
 
+nc_value nc_vector(const float *components, size_t dims) {
+    nc_value v = nc_null();
+    v.type = NC_VECTOR;
+    v.as.vector.ptr = components;
+    v.as.vector.len = dims;
+    return v;
+}
+
 nc_value nc_ext(const char *type_name, const uint8_t *data, size_t len) {
     nc_value v = nc_null();
     v.type = NC_EXT;
@@ -2113,6 +2150,17 @@ static size_t fmt_time(char *out, size_t size, int64_t us_of_day) {
     }
 }
 
+/* A float in the shortest digits that read back to it. */
+static size_t fmt_real4(char *out, size_t size, float f) {
+    char tmp[32];
+    int p;
+    for (p = 1; p < 9; p++) {
+        snprintf(tmp, sizeof tmp, "%.*g", p, (double)f);
+        if (strtof(tmp, NULL) == f) break;
+    }
+    return (size_t)snprintf(out, size, "%.*g", p, (double)f);
+}
+
 size_t nc_format(const nc_value *v, char *buf, size_t size) {
     char tmp[128];
     size_t n = 0, i;
@@ -2126,15 +2174,14 @@ size_t nc_format(const nc_value *v, char *buf, size_t size) {
     case NC_SMALLINT:
     case NC_INTEGER: return (size_t)snprintf(buf, size, "%lld", (long long)v->as.integer);
     case NC_FLOAT: return (size_t)snprintf(buf, size, "%.17g", v->as.real);
-    case NC_REAL: {
-        /* The shortest digits that read back to the same float. */
-        int p;
-        for (p = 1; p < 9; p++) {
-            snprintf(tmp, sizeof tmp, "%.*g", p, (double)v->as.real4);
-            if (strtof(tmp, NULL) == v->as.real4) break;
+    case NC_REAL: return fmt_real4(buf, size, v->as.real4);
+    case NC_VECTOR:
+        n = (size_t)snprintf(buf, size, "[");
+        for (i = 0; i < v->as.vector.len; i++) {
+            if (i) n += (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, ",");
+            n += fmt_real4(n < size ? buf + n : NULL, n < size ? size - n : 0, v->as.vector.ptr[i]);
         }
-        return (size_t)snprintf(buf, size, "%.*g", p, (double)v->as.real4);
-    }
+        return n + (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, "]");
     case NC_BYTEA:
         n = (size_t)snprintf(buf, size, "\\x");
         for (i = 0; i < v->as.bytes.len; i++)

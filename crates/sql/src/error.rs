@@ -58,6 +58,7 @@ codes! {
     datetime_format => "22007",
     datetime_overflow => "22008",
     out_of_range => "22003",
+    data_exception => "22000",
     division_by_zero => "22012",
     string_too_long => "22001",
     not_null_violation => "23502",

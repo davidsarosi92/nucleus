@@ -205,8 +205,24 @@ pub enum Type {
     Array(Box<Type>),
     /// `uuid`.
     Uuid,
+    /// `vector`: `f32` components.
+    Vector,
     /// Another registered type, by name.
     Other(String),
+}
+
+/// A vector's binary form: its components as little-endian `f32`s.
+fn vector_bytes(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|c| c.to_le_bytes()).collect()
+}
+
+/// A vector from its binary form.
+fn vector_of(b: &[u8]) -> Vec<f32> {
+    b.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
+        .collect()
 }
 
 fn type_of_tag(t: u8) -> Type {
@@ -295,6 +311,8 @@ pub enum Value {
     Array(Vec<Value>),
     /// A `uuid`: its 16 bytes.
     Uuid([u8; 16]),
+    /// A `vector`: its components.
+    Vector(Vec<f32>),
     /// A value of another registered type: its name and binary form.
     Other {
         /// The type's name.
@@ -360,6 +378,18 @@ impl From<IpAddr> for Value {
     }
 }
 
+impl From<Vec<f32>> for Value {
+    fn from(v: Vec<f32>) -> Self {
+        Value::Vector(v)
+    }
+}
+
+impl From<&[f32]> for Value {
+    fn from(v: &[f32]) -> Self {
+        Value::Vector(v.to_vec())
+    }
+}
+
 impl From<f64> for Value {
     fn from(f: f64) -> Self {
         Value::Float(f)
@@ -414,6 +444,7 @@ impl Value {
                 }
             }
             Value::Uuid(b) => put::ext(out, "uuid", b),
+            Value::Vector(v) => put::ext(out, "vector", &vector_bytes(v)),
             Value::Other { type_name, bytes } => put::ext(out, type_name, bytes),
         }
     }
@@ -452,6 +483,7 @@ impl Value {
             WireValue::Ext { type_name, bytes } => {
                 match (type_name.as_str(), <[u8; 16]>::try_from(bytes.as_slice())) {
                     ("uuid", Ok(b)) => Value::Uuid(b),
+                    ("vector", _) => Value::Vector(vector_of(&bytes)),
                     _ => Value::Other { type_name, bytes },
                 }
             }
@@ -592,6 +624,16 @@ impl fmt::Display for Value {
                 micros,
             } => write!(f, "{months} mons {days} days {micros} us"),
             Value::Uuid(b) => f.write_str(&uuid_text(b)),
+            Value::Vector(v) => {
+                f.write_str("[")?;
+                for (i, c) in v.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{c}")?;
+                }
+                f.write_str("]")
+            }
             Value::Other { bytes, .. } => {
                 f.write_str("\\x")?;
                 bytes.iter().try_for_each(|b| write!(f, "{b:02x}"))
@@ -710,6 +752,7 @@ impl<'a> Input<'a> {
                 tag::ARRAY => Type::Array(Box::new(type_of_tag(self.u8()?))),
                 tag::EXT => match self.str()? {
                     n if n == "uuid" => Type::Uuid,
+                    n if n == "vector" => Type::Vector,
                     n => Type::Other(n),
                 },
                 tag::ENUM => Type::Enum(self.str()?),
@@ -1611,6 +1654,7 @@ fn encode_batch(types: &[Type], columns: &[Column], rows: &[Vec<Value>]) -> Resu
                     (Value::Null, _) => {}
                     (Value::Bytes(x), Type::Bytea) => data.extend_from_slice(x),
                     (Value::Other { bytes, .. }, Type::Other(_)) => data.extend_from_slice(bytes),
+                    (Value::Vector(v), Type::Vector) => data.extend_from_slice(&vector_bytes(v)),
                     (v @ (Value::Inet { .. } | Value::Cidr { .. }), Type::Inet | Type::Cidr) => {
                         let mut tagged = Vec::new();
                         v.encode(&mut tagged);
@@ -1746,7 +1790,7 @@ fn tag_of_type(t: &Type) -> u8 {
         Type::Cidr => tag::CIDR,
         Type::Char => tag::CHAR,
         Type::Array(_) => tag::ARRAY,
-        Type::Uuid | Type::Other(_) => tag::EXT,
+        Type::Uuid | Type::Vector | Type::Other(_) => tag::EXT,
         Type::Enum(_) => tag::ENUM,
         Type::Text | Type::Unknown => tag::TEXT,
     }
@@ -1897,6 +1941,7 @@ impl Batch {
                         type_name: name.clone(),
                         bytes: b.to_vec(),
                     },
+                    Type::Vector => Value::Vector(vector_of(b)),
                     Type::Inet | Type::Cidr => {
                         // The row format's payload, behind its tag.
                         let mut tagged = vec![if *t == Type::Inet { 18 } else { 19 }];

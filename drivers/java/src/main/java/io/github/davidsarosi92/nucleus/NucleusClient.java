@@ -62,10 +62,10 @@ import java.util.function.Function;
  * Float, double → Double, numeric → BigDecimal, text, char(n) and enums → String, bytea →
  * byte[], date → LocalDate, time → LocalTime (24:00:00, which it cannot hold, as
  * LocalTime.MAX), timestamp → LocalDateTime, timestamptz → OffsetDateTime (UTC), interval →
- * {@link Interval}, inet → {@link Inet}, cidr → {@link Cidr}, uuid → UUID, arrays → List, NULL
- * → null; another registered type → {@link Ext} (its name and binary form). Parameters take
- * the same types (and Byte, InetAddress, Instant, Duration, arrays and Collections). One thread
- * at a time per connection.
+ * {@link Interval}, inet → {@link Inet}, cidr → {@link Cidr}, uuid → UUID, vector → float[],
+ * arrays → List, NULL → null; another registered type → {@link Ext} (its name and binary form).
+ * Parameters take the same types (and Byte, InetAddress, Instant, Duration, object arrays and
+ * Collections). One thread at a time per connection.
  */
 public final class NucleusClient implements AutoCloseable {
     /**
@@ -1009,12 +1009,20 @@ public final class NucleusClient implements AutoCloseable {
         return out.toByteArray();
     }
 
+    /** A vector's binary form: its components as little-endian floats. */
+    private static byte[] vectorBytes(float[] v) {
+        ByteBuffer bb = ByteBuffer.allocate(4 * v.length).order(ByteOrder.LITTLE_ENDIAN);
+        bb.asFloatBuffer().put(v);
+        return bb.array();
+    }
+
     /** One value's bytes in a variable-width column. */
     private static byte[] varSlot(Column c, Object v) {
         int tag = c.tag();
         if (tag == 15 || tag == EXT) {
             if (v instanceof byte[] b) return b;
             if (v instanceof Ext e) return e.data();
+            if (v instanceof float[] f) return vectorBytes(f);
             throw cannotSend(c, v);
         }
         if (tag == 18 || tag == 19) {
@@ -1186,6 +1194,7 @@ public final class NucleusClient implements AutoCloseable {
                 return ext("uuid", bb.array());
             }
             if (v instanceof Ext x) return ext(x.typeName(), x.data());
+            if (v instanceof float[] x) return ext("vector", vectorBytes(x));
             if (v instanceof Collection<?> items) {
                 u8(10).i32(items.size());
                 for (Object item : items) value(item);
@@ -1301,6 +1310,11 @@ public final class NucleusClient implements AutoCloseable {
                     if (name.equals("uuid") && data.length == 16) {
                         ByteBuffer bb = ByteBuffer.wrap(data); // big-endian
                         yield new UUID(bb.getLong(), bb.getLong());
+                    }
+                    if (name.equals("vector") && data.length % 4 == 0) {
+                        float[] f = new float[data.length / 4];
+                        ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(f);
+                        yield f;
                     }
                     yield new Ext(name, data);
                 }

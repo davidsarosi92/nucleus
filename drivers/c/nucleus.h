@@ -65,7 +65,8 @@ typedef enum nc_type {
     NC_INET = 18,     /* as.net */
     NC_CIDR = 19,     /* as.net */
     NC_ENUM = 20,     /* a column only: an enum (nc_column_type_name); its values are NC_TEXT */
-    NC_UUID = 100 /* uuid (on the wire, NC_EXT named "uuid") */
+    NC_UUID = 100,  /* uuid (on the wire, NC_EXT named "uuid") */
+    NC_VECTOR = 101 /* vector: float components (on the wire, NC_EXT named "vector") */
 } nc_type;
 
 /* A uuid: its 16 bytes. */
@@ -93,6 +94,7 @@ struct nc_value {
         struct { int32_t months, days; int64_t micros; } interval;
         struct { const nc_value *items; size_t len; } array;
         nc_uuid uuid;
+        struct { const float *ptr; size_t len; } vector; /* len components */
         struct { const char *type_name; const uint8_t *data; size_t len; } ext;
     } as;
 };
@@ -212,7 +214,8 @@ size_t nc_batch_rows(const nc_cursor *cur);
  * as µs since midnight), 16 bytes (interval: int32 months, int32 days,
  * int64 µs; uuid), 17 (numeric: int128 mantissa, uint8 scale) — or a
  * variable width's bytes (text, char(n), enums: UTF-8; bytea; inet/cidr:
- * family, bits, address; arrays: a value as in rows), with its offsets. */
+ * family, bits, address; arrays: a value as in rows; a vector: its
+ * components as floats), with its offsets. */
 const void *nc_batch_data(const nc_cursor *cur, size_t col, size_t *len);
 /* rows + 1 offsets into nc_batch_data; NULL for a fixed width. */
 const uint32_t *nc_batch_offsets(const nc_cursor *cur, size_t col);
@@ -246,8 +249,8 @@ size_t nc_columns(const nc_result *r);
 const char *nc_column_name(const nc_result *r, size_t col);
 nc_type nc_column_type(const nc_result *r, size_t col);
 nc_type nc_column_element(const nc_result *r, size_t col); /* for NC_ARRAY columns */
-/* A registered type's or an enum's name ("uuid", …) for NC_UUID, NC_EXT and
- * NC_ENUM columns, else NULL. */
+/* A registered type's or an enum's name ("uuid", "vector", …) for NC_UUID,
+ * NC_VECTOR, NC_EXT and NC_ENUM columns, else NULL. */
 const char *nc_column_type_name(const nc_result *r, size_t col);
 size_t nc_rows(const nc_result *r);
 const nc_value *nc_value_at(const nc_result *r, size_t row, size_t col);
@@ -279,6 +282,8 @@ nc_value nc_timestamptz(int64_t micros);
 nc_value nc_interval(int32_t months, int32_t days, int64_t micros);
 nc_value nc_array(const nc_value *items, size_t len);
 nc_value nc_uuid_value(nc_uuid u);
+/* A vector of dims components (they must outlive the query). */
+nc_value nc_vector(const float *components, size_t dims);
 /* A registered type's value from its name and binary form (both must
  * outlive the query). */
 nc_value nc_ext(const char *type_name, const uint8_t *data, size_t len);

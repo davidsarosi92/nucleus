@@ -107,7 +107,7 @@ fn seed_of(name: &str) -> u64 {
 
 // ---------------------------------------------------------- generators
 
-/// The kit's generator for a built-in type, an array of one, or `uuid`.
+/// The kit's generator for a built-in type, an array of one, `uuid` or `vector`.
 pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
     Some(match ty {
         DataType::Bool => Box::new(|g: &mut Gen| Value::Bool(g.one_in(2))),
@@ -251,6 +251,22 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
                 b.iter_mut().skip(1).for_each(|x| *x = 0);
             }
             Value::ext(t, b)
+        }),
+        DataType::Ext(t) if t.name() == "vector" => Box::new(move |g: &mut Gen| {
+            // Few distinct components and lengths, so equal prefixes,
+            // a shorter vector before a longer one and -0 meet often.
+            let n = 1 + g.below(4) as usize;
+            let c: Vec<f32> = (0..n)
+                .map(|_| match g.below(3) {
+                    0 => *g.pick(&[0.0, -0.0, 1.0, -1.5, f32::MAX, f32::MIN, 1e-45, -1e-45]),
+                    1 => (g.below(8) as f32 - 4.0) / 2.0,
+                    _ => {
+                        let f = f32::from_bits(g.u64() as u32);
+                        if f.is_finite() { f } else { 0.5 }
+                    }
+                })
+                .collect();
+            nucleus_sql::vectors::value(&c)
         }),
         DataType::Ext(_) | DataType::Enum(_) => return None,
     })

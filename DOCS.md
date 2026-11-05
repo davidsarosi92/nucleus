@@ -1048,6 +1048,7 @@ and batch paid).
 | cidr | `CIDR` | an IPv4 or IPv6 network (host bits zero) |
 | arrays | `type[]` | one dimension, elements of the type or NULL |
 | uuid | `UUID` | 16 bytes, a registered type (§8.12) |
+| vector | `VECTOR`, `VECTOR(n)` | 1–16000 `float4` components, a registered type (§8.12) |
 | enums | `CREATE TYPE name AS ENUM (…)` | a label of the database's enum |
 | registered types | their name (`geopoint`) | a module's type: its canonical bytes (§8.12) |
 
@@ -1064,6 +1065,36 @@ increasing within a process — the recommended key, new rows land at the
 end of the index), `uuid_extract_version(u)` (for RFC 9562 variants),
 `uuid_extract_timestamp(u)` (versions 1 and 7).  `crates/testkit/slt/20_uuid.slt`'s
 expected results came from PostgreSQL 18.
+
+**`vector`** (`vectors.rs`, §M14.12) is built the same way, on every
+capability a type can have.  Its canonical bytes are its components as
+little-endian `f32`s (`-0` stored as `0`, so equal vectors are equal
+bytes); text `'[1,2.5,-3]'`, each component printed in the shorter of its
+shortest decimal and exponent forms (`1e-7`); NaN, infinities, an empty
+vector and more than 16000 components refused.  `vector(n)` checks the
+dimensions on every write and cast (`22000`, "expected 3 dimensions, not
+2"; `nc_catalog.columns` shows `vector(3)`).  Casts to and from `real[]`
+(and from any numeric array; a NULL element is `23502`) and `text`.
+Equality and hashing on the bytes (`DISTINCT`, `GROUP BY`, `UNIQUE`,
+hash joins); a total order — component by component, then the shorter
+first — with an order-preserving key encoding (`01`, then per component
+its sortable big-endian bits, `00` at the end), so a vector can be a
+primary key, sorted and B-tree indexed.  Distances: `<->` Euclidean (the
+type's `Distance`), and as operators `<=>` cosine (NaN for a zero vector,
+as pgvector), `<#>` the negated inner product, `<+>` taxicab; as functions
+`l2_distance`, `cosine_distance`, `negative_inner_product`,
+`inner_product`, `l1_distance`.  Each is a `nucleus-kernels` kernel over
+the stored bytes — sixteen running `f32` sums added in a fixed order, so
+the result is the same bits at every SIMD level (NEON, AVX2, AVX-512) —
+and `ORDER BY v <-> $1 LIMIT k` is an exact nearest-neighbour search (a
+top-k over the scan).  Vectors of different dimensions are `22000`.
+Arithmetic component by component (`+`, `-`, `*`) and `||`
+(concatenation), the type's `Arithmetic`; functions `vector_dims` /
+`dims`, `vector_norm` / `l2_norm` / `norm`, `l2_normalize` / `normalize`
+(a zero vector stays zero), `subvector(v, from, count)`.  Aggregates `sum`
+and `avg` (centroids), each component summed exactly (`fsum::ExactSum`,
+§M14.27) and rounded once.  `crates/testkit/slt/45_vector.slt` follows
+pgvector's definitions.
 
 **Integers by width.**  An integer literal is `integer` if it fits, else
 `bigint` (PostgreSQL's rule).  Arithmetic on two integers has the wider
@@ -2229,7 +2260,15 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   not: `equality()` (`Equality`), `hashing()` (`Hashing`), `ordering()`
   (`TotalOrder`), `key_encoding()` (`KeyEncoding`: order-preserving,
   self-delimiting), `distance()` (`Distance`: an operator and a
-  distance); `encoding_version()`; `examples()` (on which registration
+  distance), `arithmetic()` (`Arithmetic`: the binary operators it
+  defines — `+`, `-`, `*`, `||` … — and `apply(op, a, b)`; the binder
+  calls it through `ArithmeticFn`); a modifier — `modifier(n)` checks
+  `type(n)` when a column or cast names it (by default: the type takes
+  none, `42601`), `fit(v, n)` checks or fits a value to it on every write
+  and on a cast (`FitFn`); casts — `cast_from(v)` from another type,
+  `cast_to(v, t)` to one (`None`: not this type's cast, the built-in
+  rules apply); `aggregate(name)` (its own `sum`, `avg`, … — chosen by
+  the first argument's type before the built-in one); `encoding_version()`; `examples()` (on which registration
   checks the laws: a type that breaks one is not registered).  A
   registered type's values are
   `Value::Ext(TypeRef, bytes)` — `Value::ext(t, bytes)`, `v.ext_bytes()`
@@ -2270,7 +2309,7 @@ engine's own comparisons and hashing (`Value`'s) agree with the type's.
 `Registry::add_type` checks them on the type's examples;
 `laws::check(ty, generator, cases)` on generated values (`laws::Gen`, a
 seeded generator; `laws::generator(ty)` for the built-in types, their
-arrays and `uuid`).  `crates/sql/tests/laws.rs` runs the kit on every
+arrays, `uuid` and `vector`).  `crates/sql/tests/laws.rs` runs the kit on every
 built-in type and array, and shows a broken type caught and refused.
 
 `tests/extension.rs` is a module from outside the crate adding a
@@ -3056,6 +3095,7 @@ body (zero padding before it).  The data by column type:
 | bigint · timestamp, timestamptz, time · double | `i64` · `i64` (µs) · `f64` each |
 | interval | 16 bytes each: `i32` months, `i32` days, `i64` µs |
 | uuid | its 16 bytes each |
+| vector | variable width: its components, little-endian `f32`s (4-byte aligned, read in place as floats) |
 | numeric | 17 bytes each: `i128` mantissa, `u8` scale |
 | anything else | variable width: *n* + 1 `u32` offsets, then the bytes value *i* takes from offset *i* to *i* + 1 — UTF-8 for text, `char(n)`, enums and unknown types; the bytes of a `bytea` and a registered type's binary form; family, mask length and address for `inet` and `cidr`; an array as a value (tag 10, as in rows) |
 
@@ -3114,7 +3154,7 @@ smallint, 13 integer, 14 real, 15 bytea, 16 time, 17 `char(n)`, 18 inet,
 | 8 | timestamptz | `i64` µs since 2000-01-01 00:00 UTC |
 | 9 | interval | `i32` months, `i32` days, `i64` µs |
 | 10 | array | `u32` count, then each element as a value |
-| 11 | a registered type (version 2) | string type name, `u32` length, the value's binary (canonical) form — for `uuid` its 16 bytes |
+| 11 | a registered type (version 2) | string type name, `u32` length, the value's binary (canonical) form — for `uuid` its 16 bytes, for `vector` its components as little-endian `f32`s |
 | 12 | smallint (version 3) | `i16` |
 | 13 | integer (version 3) | `i32` |
 | 14 | real (version 3) | `f32` (IEEE 754 bits) |
@@ -3160,7 +3200,8 @@ every nucleus type (`SmallInt(i16)`, `Integer(i32)`, `Int(i64)`,
 `Real(f32)`, `Float(f64)`, numeric as mantissa and scale, `Bytes`,
 dates and timestamps as days and µs since 2000-01-01, `Time` as µs since
 midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
-`Uuid([u8; 16])`, `Other { type_name, bytes }` for another registered
+`Uuid([u8; 16])`, `Vector(Vec<f32>)` (also from `Vec<f32>` and
+`&[f32]`), `Other { type_name, bytes }` for another registered
 type; `char(n)` and enum values as text, their columns typed `Char` and
 `Enum(name)`) with `From` conversions for parameters.  Every driver
 speaks protocol version 7 — results read as they arrive, a batch at a
@@ -3218,10 +3259,12 @@ Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
 accessors (`nc_rows`, `nc_value_at`, `nc_column_type`, `nc_command`,
 `nc_count`), `nc_format` (text as `ncsql` prints it), value constructors
 (`nc_int`, `nc_text`, `nc_numeric`, `nc_date`, `nc_array`, `nc_uuid_value`,
-`nc_ext`, `nc_smallint`, `nc_integer`, `nc_real`, `nc_bytea`, `nc_time`,
+`nc_vector`, `nc_ext`, `nc_smallint`, `nc_integer`, `nc_real`, `nc_bytea`, `nc_time`,
 `nc_inet`, `nc_cidr`, …), `nc_uuid_parse`, `nc_inet_parse`,
 `nc_result_free`, `nc_close`.  `uuid` is `NC_UUID` (an `nc_uuid` of 16
-bytes), another registered type `NC_EXT` (name and bytes;
+bytes), `vector` `NC_VECTOR` (`as.vector`: a `float` pointer and the
+dimensions; in a batch the column's bytes are the floats), another
+registered type `NC_EXT` (name and bytes;
 `nc_column_type_name`); `NC_SMALLINT` / `NC_INTEGER` in `as.integer`,
 `NC_REAL` in `as.real4`, `NC_BYTEA` a pointer and length, `NC_TIME` µs
 since midnight, `NC_INET` / `NC_CIDR` a family, mask length and address;
@@ -3234,7 +3277,8 @@ since midnight, `NC_INET` / `NC_CIDR` a family, mask length and address;
 `std::variant` (NULL, bool, int64, double, string, `Numeric`, `Date`,
 `Timestamp`, `TimestampTz`, `Interval`, `Array`, `Uuid`, `Ext`,
 `SmallInt`, `Integer`, `Real`, `Bytes`, `Time`, `Inet`, `Cidr` — the last
-seven wrappers, so an `int` literal stays a bigint parameter).
+seven wrappers, so an `int` literal stays a bigint parameter —, and
+`Vector`, a `std::vector<float>`).
 
 **Python:** `drivers/python`, package `nucleus` (pure Python 3.8+).
 `nucleus.connect()`, `conn.execute(sql, params)` → `Result` (`rows`,
@@ -3243,7 +3287,9 @@ statements, `with conn.transaction():`, DB-API cursors; values as `bool`,
 `int`, `float` (a real by its shortest digits), `Decimal`, `str`, `bytes`,
 `date`, `time` (24:00:00 as `time.max`), `datetime` (naive / UTC),
 `Interval`, `ipaddress` interfaces (inet) and networks (cidr),
-`uuid.UUID`, `list`, `nucleus.Ext` (another registered type); errors are `nucleus.Error` subclasses by SQLSTATE class
+`uuid.UUID`, `list`, a vector as an `array('f')` (sent from one or from
+a one-dimensional float32 numpy array), `nucleus.Ext` (another registered
+type); errors are `nucleus.Error` subclasses by SQLSTATE class
 (`IntegrityError` for 23, `ProgrammingError` for 42, …).
 
 **JavaScript / TypeScript:** `drivers/js`, package `nucleus-db` (Node;
@@ -3253,7 +3299,8 @@ TypeScript source that Node 22.6+ runs directly, `npm run build` for
 and reals as `number` (`bigint` beyond 2^53; a real by its shortest
 digits), `Decimal` (exact, with `parse` / `toString`), `Buffer` (bytea),
 `Date` for dates and timestamps (UTC; millisecond precision when read),
-`Time`, `Interval`, `Inet` / `Cidr`, uuid as its canonical string, `Ext`
+`Time`, `Interval`, `Inet` / `Cidr`, uuid as its canonical string, a
+vector as a `Float32Array`, `Ext`
 (another registered type), arrays, `null`; errors are `NucleusError` with `code`.
 
 **Java:** `drivers/java`, package `io.github.davidsarosi92.nucleus` (Java
@@ -3262,7 +3309,8 @@ digits), `Decimal` (exact, with `parse` / `toString`), `Buffer` (bytea),
 `transaction(fn)`, `NucleusException` with `code()`; values as `Boolean`,
 `Short`, `Integer`, `Long`, `Float`, `Double`, `BigDecimal`, `String`,
 `byte[]`, `LocalDate`, `LocalTime`, `LocalDateTime`, `OffsetDateTime`
-(UTC), `Interval`, `Inet` / `Cidr` (over `InetAddress`), `UUID`, `Ext`
+(UTC), `Interval`, `Inet` / `Cidr` (over `InetAddress`), `UUID`,
+`float[]` (a vector; a column of them in `load` as `float[][]`), `Ext`
 (another registered type), `List`.
 
 **Tests and examples.**  Every driver has the same conformance cases
@@ -3279,6 +3327,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-06 — §M14.12 V1, vectors:** `vector` / `vector(n)` (§8.1),
+  the `Type` capabilities it needed (`arithmetic`, `modifier` / `fit`,
+  `cast_from` / `cast_to`, `aggregate`), distance kernels in
+  `nucleus-kernels`, `ncp` tag 11 named `vector`, and every driver's
+  native float array (§11); `45_vector.slt`.
 
 - **2026-11-05 — §M14.20 W8, the next batch made ahead:** with a fetch
   size, the server makes the next batch while the client reads one, and

@@ -45,7 +45,10 @@ results of a single row-at-a-time pass; a table can be stored as
 compressed column segments (`WITH (storage = column)`).  On TPC-H (SF 1)
 column tables take 0.47× PostgreSQL's time in the geometric mean (row
 tables 1.11×), on ClickBench (a million rows) 0.24×, every result the
-same.  Next is the rest of the developer
+same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
+operators, exact nearest-neighbour search through SIMD kernels whose
+results are the same on every CPU, and a native float array in every
+driver.  Next is the rest of the developer
 platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then

@@ -28,16 +28,18 @@ Values map to Python types: boolean -> bool, smallint, integer and bigint
 as time.max), timestamp -> datetime.datetime (naive), timestamptz ->
 datetime.datetime (UTC), interval -> nucleus.Interval, inet ->
 ipaddress.ip_interface, cidr -> ipaddress.ip_network, uuid -> uuid.UUID,
-arrays -> list, NULL -> None; another registered type -> nucleus.Ext (its
+vector -> array.array('f'), arrays -> list, NULL -> None; another registered type -> nucleus.Ext (its
 name and binary form).  Parameters take the same types (and
 datetime.timedelta for intervals, bytearray for bytea, an ipaddress
-address for an inet).
+address for an inet, a float32 numpy array for a vector).
 
 The connection runs each statement in its own transaction unless a
 transaction block is open (``BEGIN`` or ``with conn.transaction()``).
 """
 
+import array as _array
 import datetime as _dt
+import sys as _sys
 import base64 as _b64
 import decimal as _decimal
 import hashlib as _hashlib
@@ -268,6 +270,8 @@ def _encode(out, v):
         out += _struct.pack("<iiq", v.months, v.days, v.microseconds)
     elif isinstance(v, _uuid.UUID):
         _encode_ext(out, "uuid", v.bytes)
+    elif _is_vector(v):
+        _encode_ext(out, "vector", _vector_bytes(v))
     elif isinstance(v, Ext):
         _encode_ext(out, v.type_name, v.data)
     elif isinstance(v, (list, tuple)):
@@ -277,6 +281,33 @@ def _encode(out, v):
             _encode(out, item)
     else:
         raise InterfaceError(f"cannot send a {type(v).__name__} as a nucleus value")
+
+
+def _is_vector(v):
+    """An ``array('f')``, or a one-dimensional float32 numpy array."""
+    if isinstance(v, _array.array):
+        return v.typecode == "f"
+    dtype = getattr(v, "dtype", None)
+    return dtype is not None and str(dtype) == "float32" and getattr(v, "ndim", 0) == 1
+
+
+def _vector_bytes(v):
+    """A vector's binary form: little-endian float32s."""
+    if isinstance(v, _array.array):
+        if _sys.byteorder == "big":
+            v = _array.array("f", v)
+            v.byteswap()
+        return v.tobytes()
+    return v.astype("<f4").tobytes()
+
+
+def _vector_of(data):
+    """A vector from its binary form, as ``array('f')``."""
+    a = _array.array("f")
+    a.frombytes(data)
+    if _sys.byteorder == "big":
+        a.byteswap()
+    return a
 
 
 def _encode_net(out, tag, addr, bits):
@@ -382,6 +413,8 @@ class _Reader:
             data = bytes(self.take(n))
             if name == "uuid" and n == 16:
                 return _uuid.UUID(bytes=data)
+            if name == "vector":
+                return _vector_of(data)
             return Ext(name, data)
         raise InterfaceError(f"unknown value tag {tag}")
 
@@ -1506,6 +1539,8 @@ def _var_slot(c, v):
     if tag == 15:
         return bytes(v)
     if tag == _EXT:
+        if _is_vector(v):
+            return _vector_bytes(v)
         return v.data if isinstance(v, Ext) else bytes(v)
     if tag in (18, 19):
         out = bytearray()

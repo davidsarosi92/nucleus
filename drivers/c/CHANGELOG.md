@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Vectors (nucleus PLAN.md §M14.12): `NC_VECTOR` values (`as.vector`: a
+  `float` pointer and the dimensions), `nc_vector(components, dims)`; a
+  batch's vector column is its floats with offsets.
+
 - Pipelining (nucleus PLAN.md §M14.20 W8): `nc_pipeline` sends
   statements (`nc_statement`) without waiting for each reply and gives
   each one's result or error in its place, `NC_PIPELINE_WINDOW` bytes at

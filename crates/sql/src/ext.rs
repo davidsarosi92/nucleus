@@ -950,6 +950,51 @@ pub trait Type: std::any::Any + Send + Sync {
         None
     }
 
+    /// Arithmetic between two of its values (`+`, `-`, `*`, `||`): a
+    /// vector's, component-wise.
+    fn arithmetic(&self) -> Option<&dyn Arithmetic> {
+        None
+    }
+
+    /// Accepts the modifier `n` of `name(n)` (`vector(3)`); by default
+    /// the type takes none.
+    fn modifier(&self, n: u32) -> Result<()> {
+        let _ = n;
+        Err(Error::syntax(format!(
+            "type {} takes no modifier",
+            self.name()
+        )))
+    }
+
+    /// A value of the type made to fit the modifier `n` a column or a cast
+    /// gave it (checked on every write).
+    fn fit(&self, v: Value, n: u32) -> Result<Value> {
+        let _ = n;
+        Ok(v)
+    }
+
+    /// A cast of another type's value `v` into this one (`CAST(x AS t)`),
+    /// beside text's; `None`: no such cast.
+    fn cast_from(&self, v: &Value) -> Option<Result<Value>> {
+        let _ = v;
+        None
+    }
+
+    /// A cast of this type's value `v` into `to`, beside text's; `None`:
+    /// no such cast.
+    fn cast_to(&self, v: &Value, to: DataType) -> Option<Result<Value>> {
+        let _ = (v, to);
+        None
+    }
+
+    /// The aggregate `name` over values of this type, when the type has
+    /// its own (`avg` of vectors: a centroid) — chosen over the
+    /// registry's by the first argument's type.
+    fn aggregate(&self, name: &str) -> Option<Arc<dyn Aggregate>> {
+        let _ = name;
+        None
+    }
+
     /// The version of its stored form (rows record it per value).
     fn encoding_version(&self) -> u16 {
         1
@@ -1010,6 +1055,15 @@ pub trait KeyEncoding: Send + Sync {
 
     /// The value at the start of `b` and the bytes it took.
     fn decode(&self, b: &[u8]) -> Result<(Value, usize)>;
+}
+
+/// Arithmetic between two values of a type ([`Type::arithmetic`]).
+pub trait Arithmetic: Send + Sync {
+    /// The operators it has, of `+`, `-`, `*` and `||`.
+    fn operators(&self) -> &[&str];
+
+    /// `a op b`, two non-`NULL` values of the type.
+    fn apply(&self, op: &str, a: &Value, b: &Value) -> Result<Value>;
 }
 
 /// A distance.
@@ -1174,6 +1228,90 @@ impl ScalarFunction for DistanceFn {
             .distance()
             .ok_or_else(|| Error::internal("a distance without one"))?;
         Ok(Value::Float(d.distance(&args[0], &args[1])?))
+    }
+}
+
+/// A registered type's modifier applied to a value ([`Type::fit`]), as a
+/// cast to `type(n)` calls it.
+pub struct FitFn {
+    ty: DataType,
+    n: u32,
+    name: String,
+}
+
+impl FitFn {
+    /// `ty`'s modifier `n`.
+    pub fn of(ty: DataType, n: u32) -> FnRef {
+        let t = crate::builtin::type_of(ty);
+        FnRef::new(Arc::new(FitFn {
+            ty,
+            n,
+            name: format!("{}({n})", t.name()),
+        }))
+    }
+}
+
+impl ScalarFunction for FitFn {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn arity(&self) -> RangeInclusive<usize> {
+        1..=1
+    }
+    fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
+        Ok(Signature::new(
+            vec![Arg::Untyped(self.ty)],
+            Returns::Type(Some(self.ty)),
+        ))
+    }
+    fn volatility(&self) -> Volatility {
+        Volatility::Immutable
+    }
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        crate::builtin::type_of(self.ty).fit(args[0].clone(), self.n)
+    }
+}
+
+/// A type's [`Arithmetic`] operator, as the function it calls.
+pub struct ArithmeticFn {
+    ty: DataType,
+    op: &'static str,
+    name: String,
+}
+
+impl ArithmeticFn {
+    /// `op` (one of `+ - * ||`) of `ty` (which has it).
+    pub fn of(ty: DataType, op: &'static str) -> FnRef {
+        let t = crate::builtin::type_of(ty);
+        FnRef::new(Arc::new(ArithmeticFn {
+            ty,
+            op,
+            name: format!("{op}({})", t.name()),
+        }))
+    }
+}
+
+impl ScalarFunction for ArithmeticFn {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn arity(&self) -> RangeInclusive<usize> {
+        2..=2
+    }
+    fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
+        Ok(Signature::new(
+            vec![Arg::Untyped(self.ty); 2],
+            Returns::Type(Some(self.ty)),
+        ))
+    }
+    fn volatility(&self) -> Volatility {
+        Volatility::Immutable
+    }
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        crate::builtin::type_of(self.ty)
+            .arithmetic()
+            .ok_or_else(|| Error::internal("arithmetic without it"))?
+            .apply(self.op, &args[0], &args[1])
     }
 }
 

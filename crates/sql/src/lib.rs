@@ -69,6 +69,7 @@ pub mod types;
 pub mod unnest;
 pub mod uuid;
 pub mod vector;
+pub mod vectors;
 
 pub use ast::Statement;
 pub use error::{Error, Result};

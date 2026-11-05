@@ -177,6 +177,63 @@ static void uuids(void) {
     nc_close(db);
 }
 
+static void vectors(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    char t[64], sql[256];
+    static const float a[] = {1, 2, 3}, b[] = {4, 6, 3}, c[] = {1, 2, 3.5f}, q[] = {1, 2, 3.4f};
+    const float *rows[] = {a, b, c};
+    nc_value p[2];
+    nc_result *r;
+    nc_cursor *cur;
+    int i;
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (id INT PRIMARY KEY, v vector(3))", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES ($1, $2)", t);
+    for (i = 0; i < 3; i++) {
+        p[0] = nc_int(i + 1);
+        p[1] = nc_vector(rows[i], 3);
+        nc_result_free(must(db, sql, p, 2));
+    }
+    p[0] = nc_vector(q, 3);
+    snprintf(sql, sizeof sql, "SELECT id, v FROM %s ORDER BY v <-> $1 LIMIT 2", t);
+    r = must(db, sql, p, 1);
+    if (r) {
+        CHECK(nc_column_type(r, 1) == NC_VECTOR);
+        CHECK(strcmp(nc_column_type_name(r, 1), "vector") == 0);
+        CHECK(nc_value_at(r, 0, 0)->as.integer == 3);
+        CHECK(nc_value_at(r, 1, 1)->type == NC_VECTOR && nc_value_at(r, 1, 1)->as.vector.len == 3);
+        CHECK(memcmp(nc_value_at(r, 1, 1)->as.vector.ptr, a, sizeof a) == 0);
+        CHECK(strcmp(text_of(r, 0, 1), "[1,2,3.5]") == 0);
+        nc_result_free(r);
+    }
+    /* In a batch: a column's bytes are the floats. */
+    snprintf(sql, sizeof sql, "SELECT v FROM %s ORDER BY id", t);
+    cur = nc_batches_open(db, sql, NULL, 0, 0, &err);
+    CHECK(cur != NULL);
+    if (cur) {
+        CHECK(nc_cursor_next(cur, &err) == 1);
+        if (nc_batch_rows(cur) == 3) {
+            const float *f = (const float *)nc_batch_data(cur, 0, NULL);
+            const uint32_t *off = nc_batch_offsets(cur, 0);
+            CHECK(off != NULL && off[2] == 24 && off[3] == 36);
+            CHECK(f != NULL && memcmp(f + 6, c, sizeof c) == 0);
+        } else {
+            CHECK(0);
+        }
+        nc_cursor_close(cur);
+    }
+    p[0] = nc_vector(a, 2);
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES (9, $1)", t);
+    r = nc_query(db, sql, p, 1, &err);
+    CHECK(r == NULL && strcmp(err.code, "22000") == 0);
+    nc_close(db);
+}
+
 static void core_types(void) {
     nc_error err;
     nc_config cfg = config();
@@ -585,6 +642,7 @@ int main(void) {
     types_both_ways();
     errors_and_transactions();
     uuids();
+    vectors();
     core_types();
     authentication();
     tls();

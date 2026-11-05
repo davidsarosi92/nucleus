@@ -127,6 +127,7 @@ impl Module for Builtin {
             crate::ext::lawful(type_of(ty.array_of().expect("arrays")))?;
         }
         crate::uuid::register(r)?;
+        crate::vectors::register(r)?;
         crate::bytea::register(r)?;
         crate::inet::register(r)?;
         crate::statements::register(r)?;

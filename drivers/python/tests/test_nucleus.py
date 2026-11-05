@@ -70,6 +70,32 @@ class Conformance(unittest.TestCase):
             self.assertEqual(r.rows[0][2].version, 4)
             self.assertEqual(c.execute(f"SELECT n FROM {t} WHERE id = $1", [str(u).upper()]).rows, [(1,)])
 
+    def test_vector(self):
+        import array
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE TABLE {t} (id INT PRIMARY KEY, v vector(3))")
+            c.execute_many(f"INSERT INTO {t} VALUES ($1, $2)", [
+                (1, array.array("f", [1, 2, 3])), (2, array.array("f", [4, 6, 3])),
+                (3, array.array("f", [-1, 0.5, 1e-7]))])
+            r = c.execute(f"SELECT id, v, v <-> $1 FROM {t} ORDER BY v <-> $1 LIMIT 2",
+                          [array.array("f", [1, 2, 3.5])])
+            self.assertEqual(r.columns[1].type, "vector")
+            self.assertEqual([row[0] for row in r.rows], [1, 3])
+            self.assertEqual(r.rows[0][1], array.array("f", [1, 2, 3]))
+            self.assertEqual(r.rows[0][2], 0.5)
+            self.assertEqual(c.execute(f"SELECT v::text FROM {t} WHERE id = 3").rows, [("[-1,0.5,1e-7]",)])
+            with self.assertRaises(nucleus.DataError):
+                c.execute(f"INSERT INTO {t} VALUES (4, $1)", [array.array("f", [1])])
+            batch = next(iter(c.batches(f"SELECT v FROM {t} ORDER BY id")))
+            self.assertEqual(batch.column(0).to_list()[2], array.array("f", [-1, 0.5, 1e-7]))
+            self.assertEqual(c.load(t, {"id": [5, 6], "v": [array.array("f", [0, 0, 1]), array.array("f", [0, 1, 0])]}), 2)
+            self.assertEqual(c.execute(f"SELECT id FROM {t} WHERE v <-> '[0,0,1]' < 1.5 ORDER BY id").rows, [(3,), (5,), (6,)])
+            if _has("numpy"):
+                import numpy as np
+                q = np.array([4, 6, 3], dtype=np.float32)
+                self.assertEqual(c.execute(f"SELECT id FROM {t} WHERE v = $1", [q]).rows, [(2,)])
+
     def test_core_types(self):
         import ipaddress
         t = table()

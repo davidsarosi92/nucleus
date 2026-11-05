@@ -27,9 +27,18 @@ Parameters `$1`, `$2` … .  Statements end with `;`.
 **Types:** `boolean`, `smallint`, `integer` (`int`), `bigint`, `real`,
 `double precision` (`float`), `numeric(p, s)` (exact, ≤ 38 digits), `text`,
 `varchar(n)`, `char(n)`, `bytea`, `date`, `time`, `timestamp`,
-`timestamptz`, `interval`, `uuid`, `inet`, `cidr`, arrays `type[]` (one
-dimension), enums (`CREATE TYPE mood AS ENUM ('sad', 'ok')`).  An integer
-literal is `integer` if it fits, `1.5` is `numeric`.  Sessions are in UTC.
+`timestamptz`, `interval`, `uuid`, `inet`, `cidr`, `vector(n)`, arrays
+`type[]` (one dimension), enums (`CREATE TYPE mood AS ENUM ('sad', 'ok')`).
+An integer literal is `integer` if it fits, `1.5` is `numeric`.  Sessions
+are in UTC.
+
+**Vectors** (embeddings, as pgvector): `embedding vector(768)`, literals
+`'[0.1, 0.2, …]'` (or a driver's float array as a parameter); distances
+`<->` (Euclidean), `<=>` (cosine), `<#>` (negative inner product), `<+>`
+(taxicab); the nearest rows: `SELECT id FROM docs WHERE tenant = $2
+ORDER BY embedding <=> $1 LIMIT 10` (exact, no index yet); `+ - *` and
+`||` component-wise, `vector_dims`, `vector_norm`, `l2_normalize`,
+`subvector`, `avg(embedding)` (a centroid).
 
 **Tables:** `CREATE TABLE [IF NOT EXISTS] t (id bigint PRIMARY KEY, name
 text NOT NULL DEFAULT '', email text UNIQUE, score int CHECK (score >= 0),

@@ -760,11 +760,124 @@ kernel! {
     }
 }
 
+// ------------------------------------------------------------- distances
+
+/// Floats a distance kernel adds in parallel: sixteen running sums, each
+/// over every sixteenth component, added together at the end in a fixed
+/// order — so a distance is the same bits at every level (no level fuses
+/// a multiply into an add), and NEON, AVX2 and AVX-512 each keep the
+/// sixteen sums in their registers.
+pub const LANES: usize = 16;
+
+/// Sixteen running sums of `term(x, y)` over the components of `a` and `b`
+/// (little-endian `f32`s, a vector's stored form; as many as the shorter
+/// has), component `i` in sum `i % 16`, added up in a fixed order (as
+/// `f64`).  A whole block of sixteen at a time, as fixed-size arrays, so
+/// the compiler keeps the sums in registers without bounds checks.
+#[inline(always)]
+fn lanes(a: &[u8], b: &[u8], term: impl Fn(f32, f32) -> f32) -> f64 {
+    let n = a.len().min(b.len()) / 4;
+    let (a, b) = (&a[..4 * n], &b[..4 * n]);
+    let mut acc = [0f32; LANES];
+    let (ab, ra) = a.as_chunks::<{ 4 * LANES }>();
+    let (bb, rb) = b.as_chunks::<{ 4 * LANES }>();
+    for (x, y) in ab.iter().zip(bb) {
+        for l in 0..LANES {
+            let xi = f32::from_le_bytes([x[4 * l], x[4 * l + 1], x[4 * l + 2], x[4 * l + 3]]);
+            let yi = f32::from_le_bytes([y[4 * l], y[4 * l + 1], y[4 * l + 2], y[4 * l + 3]]);
+            acc[l] += term(xi, yi);
+        }
+    }
+    let (ra, rb) = (ra.as_chunks::<4>().0, rb.as_chunks::<4>().0);
+    for (l, (x, y)) in ra.iter().zip(rb).enumerate() {
+        acc[l] += term(f32::from_le_bytes(*x), f32::from_le_bytes(*y));
+    }
+    acc.iter().map(|&s| f64::from(s)).sum()
+}
+
+kernel! {
+    /// The squared Euclidean distance of two vectors stored as
+    /// little-endian `f32`s (the same number of them).
+    fn l2_squared / l2_squared_at(a: &[u8], b: &[u8]) -> f64 {
+        lanes(a, b, |x, y| (x - y) * (x - y))
+    }
+}
+
+kernel! {
+    /// The inner product of two vectors stored as little-endian `f32`s.
+    fn dot / dot_at(a: &[u8], b: &[u8]) -> f64 {
+        lanes(a, b, |x, y| x * y)
+    }
+}
+
+kernel! {
+    /// The taxicab (L1) distance of two vectors stored as little-endian
+    /// `f32`s.
+    fn l1 / l1_at(a: &[u8], b: &[u8]) -> f64 {
+        lanes(a, b, |x, y| (x - y).abs())
+    }
+}
+
+kernel! {
+    /// The inner product of two vectors and the squares of their norms
+    /// (the cosine distance's parts).
+    fn dot_norms / dot_norms_at(a: &[u8], b: &[u8]) -> (f64, f64, f64) {
+        (
+            lanes(a, b, |x, y| x * y),
+            lanes(a, a, |x, y| x * y),
+            lanes(b, b, |x, y| x * y),
+        )
+    }
+}
+
 /// The kernels' definitions, a value at a time — what the tests hold the
 /// kernels to.
 pub mod reference {
-    use super::{Anchor, Arith, Cmp, FArith, Rhs};
+    use super::{Anchor, Arith, Cmp, FArith, LANES, Rhs};
     use std::cmp::Ordering;
+
+    fn floats(b: &[u8]) -> Vec<f32> {
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
+            .collect()
+    }
+
+    /// The sum of `terms`, component `i` into running sum `i % 16`, the
+    /// sums added in order: the kernels' order.
+    fn lanes(terms: impl Iterator<Item = f32>) -> f64 {
+        let mut acc = [0f32; LANES];
+        for (i, t) in terms.enumerate() {
+            acc[i % LANES] += t;
+        }
+        acc.iter().map(|&a| f64::from(a)).sum()
+    }
+
+    /// [`super::l2_squared`], a component at a time.
+    pub fn l2_squared(a: &[u8], b: &[u8]) -> f64 {
+        lanes(
+            floats(a)
+                .iter()
+                .zip(floats(b))
+                .map(|(x, y)| (x - y) * (x - y)),
+        )
+    }
+
+    /// [`super::dot`], a component at a time.
+    pub fn dot(a: &[u8], b: &[u8]) -> f64 {
+        lanes(floats(a).iter().zip(floats(b)).map(|(x, y)| x * y))
+    }
+
+    /// [`super::l1`], a component at a time.
+    pub fn l1(a: &[u8], b: &[u8]) -> f64 {
+        lanes(floats(a).iter().zip(floats(b)).map(|(x, y)| (x - y).abs()))
+    }
+
+    /// [`super::dot_norms`], a component at a time.
+    pub fn dot_norms(a: &[u8], b: &[u8]) -> (f64, f64, f64) {
+        (dot(a, b), dot(a, a), dot(b, b))
+    }
 
     fn rhs<T: Copy>(b: &Rhs<T>, i: usize) -> T {
         match b {
@@ -923,6 +1036,52 @@ pub mod reference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distances_at_every_level_are_the_reference() {
+        let mut x = 0x9e37_79b9_u32;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x as f32 / u32::MAX as f32 - 0.5) * 8.0
+        };
+        for n in [0, 1, 3, 15, 16, 17, 31, 64, 100, 768, 1536] {
+            let bytes = |v: Vec<f32>| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+            let a = bytes((0..n).map(|_| next()).collect());
+            let b = bytes((0..n).map(|_| next()).collect());
+            for level in levels() {
+                let same = |x: f64, y: f64| x.to_bits() == y.to_bits();
+                assert!(
+                    same(l2_squared_at(level, &a, &b), reference::l2_squared(&a, &b)),
+                    "{n}"
+                );
+                assert!(same(dot_at(level, &a, &b), reference::dot(&a, &b)), "{n}");
+                assert!(same(l1_at(level, &a, &b), reference::l1(&a, &b)), "{n}");
+                let (k, r) = (dot_norms_at(level, &a, &b), reference::dot_norms(&a, &b));
+                assert!(same(k.0, r.0) && same(k.1, r.1) && same(k.2, r.2), "{n}");
+            }
+            // Against plain arithmetic in doubles: within f32's rounding.
+            let (fa, fb) = (reference_floats(&a), reference_floats(&b));
+            let want: f64 = fa
+                .iter()
+                .zip(&fb)
+                .map(|(x, y)| f64::from(x - y).powi(2))
+                .sum();
+            assert!(
+                (l2_squared(&a, &b) - want).abs() <= 1e-4 * want.max(1.0),
+                "{n}"
+            );
+        }
+    }
+
+    fn reference_floats(b: &[u8]) -> Vec<f32> {
+        b.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
+            .collect()
+    }
 
     #[test]
     fn crc32c_by_the_cpu_is_the_portable_one() {

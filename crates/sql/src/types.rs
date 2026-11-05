@@ -507,6 +507,12 @@ impl Value {
             (v @ Value::Ext(..), DataType::Ext(t)) if v.data_type() == Some(DataType::Ext(t)) => v,
             (Value::Text(s), DataType::Ext(t)) => t.imp().input(&s)?,
             (Value::Ext(t, b), DataType::Text) => Value::Text(t.imp().output(&Value::Ext(t, b))),
+            (v, DataType::Ext(t)) if t.imp().cast_from(&v).is_some() => {
+                t.imp().cast_from(&v).expect("checked")?
+            }
+            (Value::Ext(t, b), to) if t.imp().cast_to(&Value::Ext(t, b.clone()), to).is_some() => {
+                t.imp().cast_to(&Value::Ext(t, b), to).expect("checked")?
+            }
             (v @ Value::Bool(_), DataType::Bool)
             | (v @ Value::Int(_), DataType::BigInt)
             | (v @ Value::Float(_), DataType::Float)

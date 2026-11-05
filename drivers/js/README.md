@@ -19,7 +19,7 @@ digits —, double; bigint too, or `bigint` beyond 2^53), `Decimal` (exact),
 parameter), `Date` (date, timestamp, timestamptz — UTC, millisecond
 precision when read), `Time` (time of day, µs), `Interval`, `Inet` and
 `Cidr` (`.bytes`, `.bits`, `.address`, `parse`, `toString`), uuid as its
-canonical string, arrays, `null`; another registered type is `Ext` (its
+canonical string, `Float32Array` (vector), arrays, `null`; another registered type is `Ext` (its
 name and binary form).  Protocol version 4: the password is proved by
 SCRAM-SHA-256, never sent.  TLS: `connect({ tls: true })` (Node's CAs),
 `tlsCa: "ca.pem"`, `tlsVerify: false` (encrypted, unverified); `tlsCert`,

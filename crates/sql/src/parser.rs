@@ -1512,12 +1512,26 @@ impl<'a> Parser<'a> {
             // Not a built-in name: one the registry may know.
             let name = w.clone();
             self.pos += 1;
-            if self.peek_op("(") || self.peek_op("[") {
+            // One modifier (`vector(3)`), which the type checks.
+            let mut typmod = TypeMod::default();
+            if self.eat_op("(") {
+                match self.next() {
+                    Some(Token::Number(n)) => {
+                        typmod.max_len = Some(
+                            n.parse::<u32>()
+                                .map_err(|_| Error::syntax("bad type modifier"))?,
+                        );
+                    }
+                    _ => return Err(self.error("expected a number")),
+                }
+                self.expect_op(")")?;
+            }
+            if self.peek_op("[") {
                 return Err(Error::feature(format!(
-                    "modifiers and arrays of type {name} are not supported yet"
+                    "arrays of type {name} are not supported yet"
                 )));
             }
-            return Ok((SqlType::Named { schema, name }, TypeMod::default()));
+            return Ok((SqlType::Named { schema, name }, typmod));
         }
         let ty = DataType::parse(&refs).ok_or_else(|| self.error("expected a type"))?;
         let (ty, typmod) = self.builtin_rest(ty)?;

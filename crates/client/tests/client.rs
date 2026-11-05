@@ -1937,3 +1937,44 @@ fn batches_of_the_sizes_asked_for() {
         assert_eq!(upto(&mut s), format!("{d}10 K35 R"));
     }
 }
+
+/// `vector` (PLAN.md §M14.12) both ways: `Vec<f32>` as a parameter and a
+/// result, as rows and as columnar batches, and the nearest by distance.
+#[test]
+fn vectors_both_ways() {
+    let mut c = Client::connect(config(start(None))).unwrap();
+    c.execute("CREATE TABLE emb (id INT PRIMARY KEY, v vector(3))", &[])
+        .unwrap();
+    c.execute_many(
+        "INSERT INTO emb VALUES ($1, $2)",
+        &[
+            &[Value::Int(1), Value::from(vec![1.0f32, 2.0, 3.0])][..],
+            &[Value::Int(2), Value::from(vec![4.0f32, 6.0, 3.0])][..],
+            &[Value::Int(3), Value::from(vec![-1.0f32, 0.5, 1e-7])][..],
+        ],
+    )
+    .unwrap();
+    let rows = c
+        .rows(
+            "SELECT id, v, v <-> $1 FROM emb ORDER BY v <-> $1 LIMIT 2",
+            &[Value::from(vec![1.0f32, 2.0, 3.5])],
+        )
+        .unwrap();
+    assert_eq!(rows[0][0], Value::Integer(1));
+    assert_eq!(rows[0][1], Value::Vector(vec![1.0, 2.0, 3.0]));
+    assert_eq!(rows[0][2], Value::Float(0.5));
+    assert_eq!(rows[1][0], Value::Integer(3));
+    assert_eq!(rows[0][1].to_string(), "[1,2,3]");
+    let mut batches = c.batches("SELECT v FROM emb ORDER BY id", &[], 0).unwrap();
+    assert_eq!(batches.columns()[0].ty, Type::Vector);
+    let b = batches.next().unwrap().unwrap();
+    assert_eq!(b.value(2, 0).unwrap(), Value::Vector(vec![-1.0, 0.5, 1e-7]));
+    drop(batches);
+    match c.execute(
+        "INSERT INTO emb VALUES (4, $1)",
+        &[Value::from(vec![1.0f32])],
+    ) {
+        Err(Error::Server(e)) => assert_eq!(e.code, "22000"),
+        other => panic!("{other:?}"),
+    }
+}

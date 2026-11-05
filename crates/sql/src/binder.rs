@@ -1378,6 +1378,15 @@ impl<'a> Binder<'a> {
                 }
                 bound.push((x, t));
             }
+            // A type's own aggregate of the name (`avg` of vectors).
+            let func = match bound.first().and_then(|b| b.1) {
+                Some(DataType::Ext(t)) => t
+                    .imp()
+                    .aggregate(name)
+                    .map(crate::ext::AggRef::new)
+                    .unwrap_or(func),
+                _ => func,
+            };
             let sig = func.resolve(&arg_info(&bound))?;
             let (args, common) = self.apply_signature(name, sig.args, bound)?;
             let ty = match sig.returns {
@@ -1928,6 +1937,11 @@ impl<'a> Binder<'a> {
                     // … and to char(n) truncates or pads.
                     e = Expr::Call(builtin::func(Func::CharFit), vec![e, lit(n)]);
                 }
+                if let (DataType::Ext(_), Some(n)) = (ty, typmod.max_len) {
+                    // A registered type's modifier, which it checks.
+                    check_modifier(*ty, Some(n))?;
+                    e = Expr::Call(crate::ext::FitFn::of(*ty, n), vec![e]);
+                }
                 (e, Some(*ty))
             }
             A::Function {
@@ -2019,7 +2033,13 @@ impl<'a> Binder<'a> {
     /// operands' types.
     fn operator(&mut self, op: &str, l: Typed, r: Typed) -> Result<Typed> {
         let name = |t: Option<DataType>| t.map_or("unknown", |t| crate::builtin::type_of(t).name());
-        if let (Some(a), Some(b)) = (l.1, r.1) {
+        // An untyped side (`NULL`) takes the other's type.
+        let (lt, rt) = match (l.1, r.1) {
+            (Some(a), None) => (Some(a), Some(a)),
+            (None, Some(b)) => (Some(b), Some(b)),
+            t => t,
+        };
+        if let (Some(a), Some(b)) = (lt, rt) {
             if a == b
                 && crate::builtin::type_of(a)
                     .distance()
@@ -2336,13 +2356,28 @@ impl<'a> Binder<'a> {
         } else {
             (l, lt, r, rt)
         };
-        let (l, lt, r, rt) = if op == Concat {
+        // A registered type's own arithmetic (a vector's `+`, `||`).
+        let own = |t: Option<DataType>| match t {
+            Some(t @ DataType::Ext(e)) => e
+                .imp()
+                .arithmetic()
+                .and_then(|a| a.operators().iter().find(|o| **o == op.symbol()).copied())
+                .map(|o| (t, o)),
+            _ => None,
+        };
+        let (l, lt, r, rt) = if op == Concat && own(lt).is_none() && own(rt).is_none() {
             (l, lt, r, rt)
         } else {
             let (l, (_, lt)) = self.coerce(rt, l, lt)?;
             let (r, (_, rt)) = self.coerce(lt, r, rt)?;
             (l, lt, r, rt)
         };
+        if let Some((t, o)) = own(lt)
+            && rt == lt
+        {
+            let f = crate::ext::ArithmeticFn::of(t, o);
+            return Ok((Expr::Call(f, vec![l, r]), Some(t)));
+        }
         let ty = match op {
             And | Or => {
                 expect(lt, DataType::Bool, op.symbol())?;
@@ -2678,6 +2713,28 @@ pub fn column_type(txn: &dyn KvTxn, registry: &Registry, t: &ast::SqlType) -> Re
         };
         Error::undefined_object(format!("type \"{name}\" does not exist"))
     })
+}
+
+/// [`column_type`] with the modifier written after it (`vector(3)`),
+/// checked by the type.
+pub fn column_type_with(
+    txn: &dyn KvTxn,
+    registry: &Registry,
+    t: &ast::SqlType,
+    modifier: Option<u32>,
+) -> Result<DataType> {
+    let ty = column_type(txn, registry, t)?;
+    check_modifier(ty, modifier)?;
+    Ok(ty)
+}
+
+/// A registered type's modifier checked by the type (the built-in types'
+/// are checked by the grammar).
+pub fn check_modifier(ty: DataType, modifier: Option<u32>) -> Result<()> {
+    match (ty, modifier) {
+        (DataType::Ext(t), Some(n)) => t.imp().modifier(n),
+        _ => Ok(()),
+    }
 }
 
 /// The collation of `e` written at its top (`x COLLATE name`).

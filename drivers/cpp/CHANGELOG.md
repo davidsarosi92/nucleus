@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Vectors (nucleus PLAN.md §M14.12): `nucleus::Vector`, a
+  `std::vector<float>`, in `Value`.
+
 - Pipelining, through the C driver: `Connection::pipeline(statements)`
   gives each statement's `Result` or `Error` in its place;
   `Connection::execute_many(sql, rows)` runs a statement for many rows,
