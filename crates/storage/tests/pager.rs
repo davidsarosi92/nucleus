@@ -92,6 +92,57 @@ fn works_on_the_real_file_system() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The file grows ahead of its pages, in zeros (an eighth of it, 1 MiB at
+/// least): a database whose file is longer than its header claims opens,
+/// and the pages allocated later are written over those zeros.
+#[test]
+fn the_file_grows_ahead_in_chunks() {
+    let p = platform(3);
+    let size = || {
+        p.fs()
+            .open(Path::new(DB), OpenMode::ReadOnly)
+            .unwrap()
+            .size()
+            .unwrap()
+    };
+    let pager = Pager::create(p.fs(), Path::new(DB)).unwrap();
+    let ids: Vec<PageId> = (0..3).map(|_| pager.allocate().unwrap()).collect();
+    for (i, id) in ids.iter().enumerate() {
+        pager.write_page(*id, &mut page_with(i as u64)).unwrap();
+    }
+    pager.sync().unwrap();
+    // One write past the end grew it by 1 MiB of zeros, not a page.
+    assert_eq!(size(), FIRST_DATA_PAGE.0 * PAGE_SIZE as u64 + (1 << 20));
+    drop(pager);
+    let pager = Pager::open(p.fs(), Path::new(DB)).unwrap();
+    for (i, id) in ids.iter().enumerate() {
+        assert!(same_payload(
+            &pager.read_page(*id).unwrap(),
+            &page_with(i as u64)
+        ));
+    }
+    // 300 more pages: past the first chunk, a second.
+    let more: Vec<PageId> = (0..300).map(|_| pager.allocate().unwrap()).collect();
+    for (i, id) in more.iter().enumerate().rev() {
+        pager
+            .write_page(*id, &mut page_with(100 + i as u64))
+            .unwrap();
+    }
+    pager.sync().unwrap();
+    let pages = FIRST_DATA_PAGE.0 + 303;
+    assert!(size() >= pages * PAGE_SIZE as u64);
+    assert!(size() <= (pages + 128) * PAGE_SIZE as u64 + (1 << 20));
+    drop(pager);
+    let pager = Pager::open(p.fs(), Path::new(DB)).unwrap();
+    for (i, id) in more.iter().enumerate() {
+        assert!(same_payload(
+            &pager.read_page(*id).unwrap(),
+            &page_with(100 + i as u64)
+        ));
+    }
+    pager.check().unwrap();
+}
+
 #[test]
 fn create_refuses_an_existing_file() {
     let p = platform(1);

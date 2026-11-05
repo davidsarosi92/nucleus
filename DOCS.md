@@ -260,7 +260,11 @@ write.
 neighbouring pages in one read, each verified; reads go through a buffer
 each thread keeps, so a page is copied once into its own memory and
 nothing is zeroed first), `write_page`, `is_writable`,
-`allocate` (lowest free page, else grows the file), `free` (refuses double
+`allocate` (lowest free page, else grows the file — on disk ahead of
+the pages, by zeros an eighth of its length at a time, 1 to 64 MiB: a
+write into blocks the file has costs a fraction of one that makes APFS
+allocate them; zeros past the header's page count are not the
+database's), `free` (refuses double
 frees); `meta`/`set_meta` (16 `u64` slots committed atomically with the
 pages); `sync`, `close`; `check` (on-disk free list vs. memory, no page in
 two places), `accounting` (free / pending / free-list pages / allocated).
@@ -3173,6 +3177,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W7, the file grown ahead:** the pager writes
+  zeros ahead of the pages it allocates, an eighth of the file at a time
+  (1–64 MiB), so a page written past the old end lands in blocks the
+  file already has.  The TPC-H load on row tables 56 → 27 s; a logged
+  `COPY` of `lineitem` 22 → 9 s.
 
 - **2026-11-05 — §M14.20 W7, page reads without zeroing:** the file is
   read into a buffer each thread keeps, each page copied out once (a

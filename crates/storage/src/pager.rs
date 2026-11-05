@@ -328,9 +328,10 @@ impl Pager {
             return write_raw(self.file.as_ref(), id, page);
         }
         let mut s = self.lock();
-        write_raw(self.file.as_ref(), id, page)?;
-        s.known_len = s.known_len.max(id.0 + 1);
-        Ok(())
+        if id.0 >= s.known_len {
+            s.known_len = extend(self.file.as_ref(), s.known_len, id.0 + 1)?;
+        }
+        write_raw(self.file.as_ref(), id, page)
     }
 
     /// Whether `id` may be written back: allocated since the last freeze,
@@ -729,6 +730,38 @@ fn read_run(file: &dyn File, first: PageId, n: usize) -> Result<Vec<Page>> {
             })
             .collect()
     })
+}
+
+/// The fewest pages the file grows by: 1 MiB.
+const EXTEND_MIN: u64 = 128;
+/// The most: 64 MiB.
+const EXTEND_MAX: u64 = 8192;
+
+/// Grows the file, `known` pages long, to hold `upto` pages at least —
+/// by zeros written ahead, an eighth of its length (1 to 64 MiB) at a
+/// time; returns its new length in pages.  A write that allocates the
+/// file's blocks costs many times one into blocks it has (on APFS 8 KiB
+/// pages written past the end took 47 µs each, into zeros written ahead
+/// in 1 MiB pieces 2 µs, the zeros included 8: §M14.20 W7), as
+/// PostgreSQL's extension of a relation by many blocks at once and
+/// SQLite's `SQLITE_FCNTL_CHUNK_SIZE` know.  Pages past the header's
+/// count are not the database's: zeros there are ignored, and later
+/// allocations write over them.
+fn extend(file: &dyn File, known: u64, upto: u64) -> Result<u64> {
+    let have = file.size()? / PAGE_SIZE as u64;
+    let from = known.max(have);
+    if from >= upto {
+        return Ok(from);
+    }
+    let to = upto.max(from + (from / 8).clamp(EXTEND_MIN, EXTEND_MAX));
+    let zeros = vec![0u8; EXTEND_MIN as usize * PAGE_SIZE];
+    let mut at = from;
+    while at < to {
+        let n = (to - at).min(EXTEND_MIN);
+        file.write_all_at(&zeros[..n as usize * PAGE_SIZE], at * PAGE_SIZE as u64)?;
+        at += n;
+    }
+    Ok(to)
 }
 
 fn write_raw(file: &dyn File, id: PageId, page: &mut Page) -> Result<()> {

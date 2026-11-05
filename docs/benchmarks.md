@@ -425,6 +425,8 @@ suite come when §M14.20 closes):
 | … the same binary, `--wal full` | 14.0 | 17.0 | 7.3 | 38.2 |
 | W3b: batches into storage, parse and store overlapped, sampling by the storage | 12.3 | 12.8 | 3.9 | 29.0 |
 | W3b, column tables | 12.2 | 12.4 | 3.2 | 27.8 |
+| W7, the step before (`92641b3`, today's machine) | 27.8 | 34.4 | 4.6 | 66.7 |
+| W7: the file grown ahead, by zeros | 14.5 | 12.9 | 1.8 | 29.3 |
 | PostgreSQL 18 | 18.3 | 5.5 | 5.3 | 29.1 |
 
 (`lineitem`'s `COPY` alone, W2 → W3: a row table 17.5 → 10.4 s, a

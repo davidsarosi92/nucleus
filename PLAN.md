@@ -2431,6 +2431,47 @@ the speed-up is made once, in the merged one.  The work, in this order:
   6.55 s and on column tables 2.20 / 2.16 → 2.16 / 2.15 (the page
   reads alone, before the header skip), ClickBench on a column table
   unchanged.
+  *The file grown ahead* (2026-11-05).  W7's other two formats were
+  measured before being built, and neither is taken.  *A column chunk
+  as an extent:* on ClickBench's `SELECT *` over a column table
+  (`hits`, 407 MB) reading the overflow chains is 1–1.5 % of the time,
+  decompressing the chunks' LZ blocks 29 %; the suites' first runs, cold,
+  are within a tenth of their best — the chunks are in the cache, and an
+  extent saves only the cold read's single-page reads (the chain's pages
+  allocated last to first, so read-ahead never joins them).  Left for a
+  working set past the cache.  *One buffer for a batch's WAL record and
+  its tree:* the copies are about 1 % of a logged `COPY` (`memmove` from
+  `Transaction::record`, `Wal::append`, `encode_leaf` together), as W4
+  found.  What that profile showed instead: a logged `COPY` of
+  `lineitem` (into a table made in an earlier transaction, outside D16)
+  spent more than half its statement's time in `pwrite`, evicting a
+  dirty page for each page it made — and a write that makes the file
+  longer costs APFS far more than one into blocks the file has (8 KiB
+  pages written at the end 47 µs each; into zeros written ahead in 1 MiB
+  pieces 2 µs, 8 with the zeros).  Taken: the pager grows the file ahead
+  of its pages, by zeros an eighth of its length at a time, 1 to 64 MiB
+  (`pager::extend`, under the state lock every write past the known
+  length already took) — as PostgreSQL extends a relation by many blocks
+  at once (16) and SQLite by `SQLITE_FCNTL_CHUNK_SIZE`; `F_PREALLOCATE`
+  measured the same as zeros and needs an `fcntl` the platform crate
+  would have to allow; zeros past the header's page count are ignored on
+  open and written over by later allocations.  Not taken: the same for
+  the WAL's segments (a small commit with an ordered sync 206 → 174 µs
+  into zeros written ahead, with a full sync no better — not enough to
+  preallocate and recycle segments yet).  Tested: the file grown in
+  chunks, reopened longer than its header says, its zeros written over;
+  the pager's crash at every I/O point covers the zeros' writes.
+  Measured, alternating with the step before: the load of TPC-H SF 1 on
+  row tables 56.6 / 55.2 → 26.3 / 27.9 s (by phase, one run each: the
+  `COPY`s 27.8 → 14.5 s, `lineitem`'s 23.5 → 10.0, the indexes 34.4 →
+  12.9, `ANALYZE` 4.6 → 1.8; total 66.7 → 29.3), on column tables 34.4
+  / 32.8 → 22.1 / 21.3 s; a logged `COPY` of `lineitem` 24.2 / 21.1 →
+  9.6 / 8.8 s; ClickBench's load (into a new table, the file growing in
+  one checkpoint's large writes) and every query unchanged.  The step
+  before's row load, 44–57 s in today's runs, had been 29 s at W3b on
+  the same machine: what grew since is the file system's cost of
+  growing the file (the disk fuller), not bisected further — this step
+  takes it away either way.
 - **W8 — per-statement costs** (what AI agents' traffic pays most): a
   catalog epoch, and on it a session's catalog, settings and plan cache
   (pg-compat's prepared statements onto the same); one bind for describe
@@ -3655,3 +3696,8 @@ style) across a thousand seeds without failure.
   read buffer kept, a page copied out once), and no row headers parsed
   for a scan reading no column.  ClickBench on a row table 6.5 → 6.1 s.
   DOCS §4.2.
+- **2026-11-05** — §M14.20 W7: the data file grown ahead of its pages,
+  by zeros an eighth of its length at a time (1–64 MiB).  The TPC-H load
+  on row tables 56 → 27 s, on column tables 34 → 22; a logged `COPY` of
+  `lineitem` 22 → 9 s.  W7's extents and shared WAL buffer measured and
+  not taken (1–1.5 % and 1 % of the time).  DOCS §4.2.
