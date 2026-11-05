@@ -1311,9 +1311,9 @@ one connection: 52 → 42 µs.
 
 The same cache keeps **a query's plan** (bound, checked, optimized,
 pruned: `session::Planned`) and **a statement's description**
-(`Session::describe`) by the statement's text — the text a front end
-notes for it (`note_text`; the native server notes it before it
-describes a query with parameters).  An entry holds its statement and
+(`Session::describe(stmt, text)`) by the statement's text — the text a
+front end notes for a statement it runs (`note_text`), and gives when it
+describes one.  An entry holds its statement and
 serves an equal one only; a kept plan replays the tables its privilege
 checks looked at (`audit_tables`).  A text is kept the second time it
 comes (its hash remembered the first, up to 4 096), at most 512 of them,
@@ -2885,7 +2885,12 @@ failure), parameter status (`server_version`
 16.0 (nucleus), UTF8, ISO dates), backend key data, `ReadyForQuery` with
 the transaction status.  Simple query protocol (statements one by one, the
 first error stops the rest) and extended protocol: Parse (parameter types
-inferred, or given), Bind (text or binary parameters), Describe (statement
+inferred, or given; the description kept by the statement's text in the
+session's cache, §8.2), Bind (text or binary parameters; the statement
+described again against the catalog as it is — from the cache while the
+catalog holds — and refused with `0A000` "cached plan must not change
+result type" when its result columns changed since Parse, as PostgreSQL
+refuses it), Describe (statement
 and portal), Execute (streamed as produced; with a row limit the result
 is kept and sent a part at a time, `PortalSuspended`), Sync, Close,
 Flush; after an error, messages are skipped until Sync.  Types on the wire:
@@ -3232,6 +3237,13 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W8, pg-compat's prepared statements on the
+  session's cache:** Parse describes by the statement's text, and Bind
+  describes again (from the cache while the catalog holds), refusing a
+  statement whose result changed since Parse with `0A000`, as PostgreSQL
+  does — before, it kept Parse's description and ran the new plan.  A
+  prepared point read through `postgres` unchanged, 40.7 µs.
 
 - **2026-11-05 — §M14.20 W8, a session's plans by their text:** a
   query's plan and a statement's description kept by its text while the

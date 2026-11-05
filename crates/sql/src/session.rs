@@ -1171,17 +1171,20 @@ impl Session {
     }
 
     /// The parameter types and result columns of a statement, without
-    /// running it (for the extended query protocol).
+    /// running it (for the extended query protocol) — kept by its `text`,
+    /// when given, while the catalog holds.
     pub fn describe(
         &mut self,
         stmt: &Statement,
+        text: Option<&str>,
     ) -> Result<(Vec<Option<DataType>>, Option<Vec<OutColumn>>)> {
-        self.with_catalog(|s| s.describe_here(stmt))
+        self.with_catalog(|s| s.describe_here(stmt, text))
     }
 
     fn describe_here(
         &mut self,
         stmt: &Statement,
+        text: Option<&str>,
     ) -> Result<(Vec<Option<DataType>>, Option<Vec<OutColumn>>)> {
         let own;
         let txn: &dyn KvTxn = match self.block.as_ref().and_then(|b| b.txn.as_deref()) {
@@ -1191,8 +1194,7 @@ impl Session {
                 own.as_ref()
             }
         };
-        // By the text noted for it, while the catalog holds.
-        let Some(text) = self.text.as_deref() else {
+        let Some(text) = text else {
             return Self::describe_in(txn, &self.registry, stmt);
         };
         let reg = &self.registry;

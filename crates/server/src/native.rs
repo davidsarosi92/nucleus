@@ -1079,9 +1079,7 @@ fn run<R: Read, W: Write>(
     if let ([stmt], [text]) = (stmts.as_slice(), texts.as_slice())
         && !query.params.is_empty()
     {
-        // Its text noted first: the description is kept by it.
-        session.note_text(text);
-        let types = match session.describe(stmt) {
+        let types = match session.describe(stmt, Some(text)) {
             Ok((types, _)) => types,
             Err(e) => return Ok(Ran::Failed(e)),
         };

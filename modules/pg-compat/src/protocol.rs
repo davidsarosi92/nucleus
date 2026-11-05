@@ -1093,8 +1093,9 @@ impl Conn {
             ));
         }
         let stmt = stmts.pop();
+        let text = sql.trim().trim_end_matches(';').trim_end().to_string();
         let (mut params, columns) = match &stmt {
-            Some(s) => self.session.describe(s)?,
+            Some(s) => self.session.describe(s, Some(&text))?,
             None => (vec![], None),
         };
         if params.len() < given.len() {
@@ -1109,7 +1110,7 @@ impl Conn {
             name,
             Prepared {
                 stmt,
-                text: sql.trim().trim_end_matches(';').trim_end().to_string(),
+                text,
                 params,
                 columns,
             },
@@ -1126,6 +1127,20 @@ impl Conn {
             message: format!("prepared statement \"{name}\" does not exist"),
             hint: None,
         })?;
+        // Checked against the catalog as it is now (the session keeps the
+        // description by its text while the catalog holds): a statement
+        // whose result changed since it was prepared is refused, as
+        // PostgreSQL refuses it.
+        if let Some(stmt) = &p.stmt {
+            let (_, columns) = self.session.describe(stmt, Some(&p.text))?;
+            if columns != p.columns {
+                return Err(Error {
+                    code: "0A000",
+                    message: "cached plan must not change result type".into(),
+                    hint: None,
+                });
+            }
+        }
         let nf = b.i16().map_err(proto)? as usize;
         let mut formats = Vec::with_capacity(nf);
         for _ in 0..nf {

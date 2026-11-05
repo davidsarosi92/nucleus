@@ -210,16 +210,12 @@ fn an_entry_by_text_serves_the_same_statement_only() {
         parse("SELECT x FROM t WHERE x = $1"),
         parse("SELECT y, x FROM t WHERE y = $1"),
     );
-    // A text noted that is not the statement's (a front end's mistake);
+    // A text given that is not the statement's (a front end's mistake);
     // the first kept once seen again.
-    let mut describe = |stmt| {
-        s.note_text("the same text");
-        s.describe(stmt).unwrap()
-    };
+    let mut describe = |stmt| s.describe(stmt, Some("the same text")).unwrap();
     let (pa, ca) = describe(&a);
     assert_eq!(describe(&a), (pa.clone(), ca.clone()));
-    s.note_text("the same text");
-    let (pb, cb) = s.describe(&b).unwrap();
+    let (pb, cb) = describe(&b);
     assert_ne!(pa, pb);
     assert_eq!(ca.unwrap().len(), 1);
     assert_eq!(cb.unwrap().len(), 2);

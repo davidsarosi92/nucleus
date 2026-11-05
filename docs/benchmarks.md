@@ -254,6 +254,15 @@ and more from run to run):
 | a point read set up as one | 23.8 | 35.9 | 39.8 | 179 | 196 |
 | a session's plans by their text | 20.8 | 36.2 | 29.1 | 182 | 186 |
 
+Through the PostgreSQL front end (`--pg-compat`), the `postgres` driver's
+prepared statements (`modules/pg-compat/examples/pg_latency.rs`, the
+same table), median µs:
+
+| step | prepared point read | prepared update by key |
+|---|---:|---:|
+| plans by their text (`971a603`) | 40.4 | 189 |
+| prepared statements checked at Bind | 40.6 | 192 |
+
 ## TPC-H
 
 `bench/tpch.py` (§M14.20 V10): TPC-H's schema, its data generated from a

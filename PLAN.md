@@ -2610,10 +2610,26 @@ the speed-up is made once, in the merged one.  The work, in this order:
   costs; TPC-H on row tables 6.81 / 6.85 → 7.26 / 6.79 s, its Q9 the
   difference and alone the same or faster (base 525 / 547 → 495 / 510
   ms, nine runs each).
-  Left for the next step: pg-compat's prepared statements keep their own
-  description from `Parse` (stale after DDL, where PostgreSQL re-plans);
-  they go onto these entries, and `INSERT` / `UPDATE` / `DELETE` plans
-  with them.
+  *pg-compat's prepared statements on the same entries.*  `Parse` kept
+  its description and `Execute` ran whatever the catalog then planned: a
+  driver that had read two columns got three after another session's
+  `ALTER TABLE`.  Now `Parse` describes by the statement's text, and
+  `Bind` describes again — from the session's cache while the catalog
+  holds — and refuses a statement whose result columns changed with
+  `0A000` "cached plan must not change result type", as PostgreSQL does
+  (`plancache.c`'s revalidation of a statement with a fixed result); its
+  plan comes from the same entries, by the text `Execute` notes.
+  `Session::describe` takes the text explicitly (no hidden noted text).
+  Test: through the `postgres` driver, a statement prepared, another
+  session's `ALTER TABLE`, the statement refused, another one whose
+  result held still run, and the first prepared again; mutation caught
+  (the check skipped).  Measured, alternating with the step before, two
+  rounds (`modules/pg-compat/examples/pg_latency.rs`, new): a prepared
+  point read 41.0 / 40.4 → 40.8 / 40.6 µs, an update by key 193 / 189 →
+  190 / 192 — the check costs nothing seen.  Through this front end a
+  point read costs 40 µs to the native protocol's 29: next to look at.
+  `INSERT` / `UPDATE` / `DELETE` plans are not kept yet (their time is
+  their commit's).
 
 Each step records what it took from where, and what it measured, here
 and in `docs/benchmarks.md`.

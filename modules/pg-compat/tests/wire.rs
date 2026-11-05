@@ -320,6 +320,43 @@ fn a_real_driver_with_the_extended_protocol() {
     assert!(msgs.len() >= 4);
 }
 
+/// A prepared statement is checked at each bind against the catalog as it
+/// is: run again while its result is the same, refused (`0A000`, as
+/// PostgreSQL refuses it) once another session's DDL changed it, and fine
+/// prepared again.
+#[test]
+fn a_prepared_statement_whose_result_changed_is_refused() {
+    use postgres::{Client as Pg, NoTls, error::SqlState};
+
+    let addr = start(Config::trust());
+    let url = format!(
+        "host={} port={} user=test dbname=nucleus",
+        addr.ip(),
+        addr.port()
+    );
+    let (mut a, mut b) = (
+        Pg::connect(&url, NoTls).unwrap(),
+        Pg::connect(&url, NoTls).unwrap(),
+    );
+    a.batch_execute(
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, v TEXT); INSERT INTO t VALUES (1, 'x')",
+    )
+    .unwrap();
+    let all = a.prepare("SELECT * FROM t WHERE id = $1").unwrap();
+    let one = a.prepare("SELECT v FROM t WHERE id = $1").unwrap();
+    for _ in 0..3 {
+        assert_eq!(a.query(&all, &[&1i64]).unwrap()[0].len(), 2);
+    }
+    // Another session's DDL that keeps `one`'s result as it was.
+    b.batch_execute("ALTER TABLE t ADD COLUMN w INT").unwrap();
+    let err = a.query(&all, &[&1i64]).unwrap_err();
+    assert_eq!(err.code(), Some(&SqlState::FEATURE_NOT_SUPPORTED));
+    let row = a.query_one(&one, &[&1i64]).unwrap();
+    assert_eq!(row.get::<_, String>(0), "x");
+    let all = a.prepare("SELECT * FROM t WHERE id = $1").unwrap();
+    assert_eq!(a.query(&all, &[&1i64]).unwrap()[0].len(), 3);
+}
+
 /// A uuid as PostgreSQL drivers see it: type `uuid` (oid 2950), its 16
 /// bytes in binary format, its canonical text in text format.
 #[test]
