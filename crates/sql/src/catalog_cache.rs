@@ -51,7 +51,26 @@ pub(crate) enum Part {
     Owner(crate::privileges::Kind),
     /// The roles whose privileges an identity has.
     Roles,
+    /// A query's plan, by its text ([`statement_text`]).
+    Plan,
+    /// A statement's parameter types and result columns, by its text.
+    Describe,
 }
+
+impl Part {
+    /// Whether its entries are by a statement's text: kept once the text
+    /// came again ([`SEEN`]), and no more than [`KEPT`] of them.
+    fn by_text(self) -> bool {
+        matches!(self, Part::Plan | Part::Describe)
+    }
+}
+
+/// How many entries by text a session keeps; past it they all go.
+const KEPT: usize = 512;
+
+/// How many texts a session remembers having seen once; past it it
+/// forgets them all.
+const SEEN: usize = 4096;
 
 /// A session's cache.
 #[derive(Default)]
@@ -59,10 +78,80 @@ pub struct CatalogCache {
     /// The snapshot its entries were read at.
     at: Option<Timestamp>,
     entries: HashMap<(Part, String), Box<dyn Any + Send>>,
+    /// How many of `entries` are by text.
+    by_text: usize,
+    /// Hashes of the texts seen once (TinyLFU's doorkeeper: a text with
+    /// literals in it, never again the same, is not kept).
+    seen: std::collections::HashSet<u64>,
+}
+
+impl CatalogCache {
+    /// Whether an entry for `part` of `name` may be kept.
+    fn admits(&mut self, part: Part, name: &str) -> bool {
+        if !part.by_text() {
+            return true;
+        }
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            name.hash(&mut h);
+            h.finish()
+        };
+        if self.seen.contains(&hash) {
+            return true;
+        }
+        if self.seen.len() >= SEEN {
+            self.seen.clear();
+        }
+        self.seen.insert(hash);
+        false
+    }
+
+    fn keep(&mut self, part: Part, name: &str, v: Box<dyn Any + Send>) {
+        if part.by_text() && self.by_text >= KEPT {
+            self.entries.retain(|(p, _), _| !p.by_text());
+            self.by_text = 0;
+        }
+        if self.entries.insert((part, name.to_string()), v).is_none() && part.by_text() {
+            self.by_text += 1;
+        }
+    }
 }
 
 thread_local! {
     static CURRENT: RefCell<Option<CatalogCache>> = const { RefCell::new(None) };
+    /// The text of the statement a session runs, for its plan's entry.
+    static TEXT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` (the statement `stmt`'s execution) with its text known to
+/// [`statement_text`] — a query's: its plan is kept by it.
+pub(crate) fn with_text<T>(
+    stmt: &crate::ast::Statement,
+    text: Option<&str>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let text = text.filter(|_| matches!(stmt, crate::ast::Statement::Query(_)));
+    let before = TEXT.with(|t| t.replace(text.map(str::to_string)));
+    let out = f();
+    TEXT.with(|t| *t.borrow_mut() = before);
+    out
+}
+
+/// The text [`with_text`] gave, once (a statement run inside the first —
+/// a function's — finds none).
+pub(crate) fn statement_text() -> Option<String> {
+    TEXT.with(|t| t.borrow_mut().take())
+}
+
+/// Whether an entry for `part` of `name` would be kept now (a text seen
+/// before), noting it seen: to do what only a kept entry needs only then.
+pub(crate) fn admits(part: Part, name: &str) -> bool {
+    CURRENT.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .is_some_and(|cache| cache.admits(part, name))
+    })
 }
 
 /// Runs `f` with `cache` lent to this thread; the cache back.
@@ -81,6 +170,19 @@ pub(crate) fn memo<T: Clone + Send + 'static>(
     name: &str,
     read: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    memo_fitting(txn, part, name, |_| true, read)
+}
+
+/// [`memo`], an entry kept only if it `fits` (else read again and kept
+/// in its place): an entry by a statement's text holds the statement, to
+/// be the same.
+pub(crate) fn memo_fitting<T: Clone + Send + 'static>(
+    txn: &dyn KvTxn,
+    part: Part,
+    name: &str,
+    fits: impl Fn(&T) -> bool,
+    read: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let usable = CURRENT.with(|c| {
         let mut c = c.borrow_mut();
         let cache = c.as_mut()?;
@@ -89,12 +191,15 @@ pub(crate) fn memo<T: Clone + Send + 'static>(
                 cache
                     .entries
                     .get(&(part, name.to_string()))
-                    .and_then(|v| v.downcast_ref::<T>().cloned()),
+                    .and_then(|v| v.downcast_ref::<T>())
+                    .filter(|v| fits(v))
+                    .cloned(),
             );
         }
         let now = txn.read_ts();
         if txn.watched_as_at(now) {
             cache.entries.clear();
+            cache.by_text = 0;
             cache.at = Some(now);
             return Some(None);
         }
@@ -107,14 +212,41 @@ pub(crate) fn memo<T: Clone + Send + 'static>(
             // entries).
             let v = read()?;
             CURRENT.with(|c| {
-                if let Some(cache) = c.borrow_mut().as_mut() {
-                    cache
-                        .entries
-                        .insert((part, name.to_string()), Box::new(v.clone()));
+                if let Some(cache) = c.borrow_mut().as_mut()
+                    && cache.admits(part, name)
+                {
+                    cache.keep(part, name, Box::new(v.clone()));
                 }
             });
             Ok(v)
         }
         None => read(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn texts_are_kept_when_seen_again_and_no_more_than_kept() {
+        let mut c = CatalogCache::default();
+        assert!(c.admits(Part::Table, "t"), "not by text: always");
+        assert!(!c.admits(Part::Plan, "q"));
+        assert!(c.admits(Part::Plan, "q"));
+        for i in 0..KEPT {
+            c.keep(Part::Plan, &format!("q{i}"), Box::new(i));
+        }
+        c.keep(Part::Table, "t", Box::new(0usize));
+        assert_eq!(c.by_text, KEPT);
+        // One more: the entries by text go, the others stay.
+        c.keep(Part::Describe, "d", Box::new(0usize));
+        assert_eq!(c.by_text, 1);
+        assert_eq!(c.entries.len(), 2);
+        // The texts seen once are forgotten past SEEN.
+        for i in 0..SEEN {
+            c.admits(Part::Plan, &format!("s{i}"));
+        }
+        assert!(!c.admits(Part::Plan, "q"));
     }
 }

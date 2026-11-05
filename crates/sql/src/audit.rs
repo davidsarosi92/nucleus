@@ -282,6 +282,11 @@ pub fn touched(table: &str) {
     });
 }
 
+/// The tables noted so far (none when not noting).
+pub(crate) fn noted() -> BTreeSet<String> {
+    TOUCHED.with(|t| t.borrow().clone().unwrap_or_default())
+}
+
 /// The tables noted since [`begin_statement`].
 pub fn end_statement() -> BTreeSet<String> {
     TOUCHED.with(|t| t.borrow_mut().take().unwrap_or_default())

@@ -1309,6 +1309,19 @@ that writes.  Work on other threads, and any other implementation of the
 KV contract, read the catalog as before.  A parameterized point read on
 one connection: 52 → 42 µs.
 
+The same cache keeps **a query's plan** (bound, checked, optimized,
+pruned: `session::Planned`) and **a statement's description**
+(`Session::describe`) by the statement's text — the text a front end
+notes for it (`note_text`; the native server notes it before it
+describes a query with parameters).  An entry holds its statement and
+serves an equal one only; a kept plan replays the tables its privilege
+checks looked at (`audit_tables`).  A text is kept the second time it
+comes (its hash remembered the first, up to 4 096), at most 512 of them,
+all dropped past that; the cache empties when the session's identity
+changes (`SET ROLE`, a login).  Only the statement a session runs is
+kept by its text (`catalog_cache::with_text`), not those a function runs
+inside it.
+
 The format record (principle 6) is checked by a session's first
 statement and written by the first write to a database the SQL layer has
 not used; a newer format than the build reads is refused with `0A000`
@@ -3219,6 +3232,11 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W8, a session's plans by their text:** a
+  query's plan and a statement's description kept by its text while the
+  catalog holds, once the text came again (at most 512); a parameterized
+  point read on one connection 39.2 → 29.0 µs.
 
 - **2026-11-05 — §M14.20 W8, a point read set up as one:** a scan of
   one key of a unique index is not cut into morsels; `split_keys` finds

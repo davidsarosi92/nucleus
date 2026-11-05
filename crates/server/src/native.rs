@@ -1076,9 +1076,11 @@ fn run<R: Read, W: Write>(
     }
     // Parameters take the types their places need (text is parsed).
     let mut converted = query.params.to_vec();
-    if let [stmt] = stmts.as_slice()
+    if let ([stmt], [text]) = (stmts.as_slice(), texts.as_slice())
         && !query.params.is_empty()
     {
+        // Its text noted first: the description is kept by it.
+        session.note_text(text);
         let types = match session.describe(stmt) {
             Ok((types, _)) => types,
             Err(e) => return Ok(Ran::Failed(e)),

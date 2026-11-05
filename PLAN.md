@@ -2574,6 +2574,46 @@ the speed-up is made once, in the merged one.  The work, in this order:
   TPC-H on row tables 6.69 / 6.60 / 6.59 → 6.60 / 7.00 / 6.65 s (the
   second round slower on every query alike: the machine), on column
   tables 2.08 / 2.08 → 2.08 / 2.12.
+  *A session's plans, by their text.*  On the same mark, a session keeps
+  a query's plan — bound, its privileges checked, optimized, pruned —
+  and a statement's description (its parameters' types, its columns) by
+  the statement's text: the server describes a query with parameters
+  and then runs it, and both bound it each time.  An entry holds its
+  statement and serves the same one only (a text noted for another is
+  read again, not trusted); a kept plan replays the tables its checks
+  looked at, for the audit log's `audit_tables`; the cache empties when
+  the session's identity changes (`SET ROLE`: a plan's privileges and
+  row-level security were checked for who ran it).  Taken: PostgreSQL's
+  plan cache for prepared statements (`plancache.c`: a plan kept and
+  invalidated with the relations it depends on), here for every query by
+  its text, as MySQL's and Oracle's shared cursors are found by theirs —
+  without their sharing across sessions (a lock and memory to bound; one
+  session's plans first).  TinyLFU's *doorkeeper*: a text is kept the
+  second time it comes, so a query with its literals inline — never the
+  same text twice — costs nothing to keep and pushes nothing out; at
+  most 512 texts are kept, all dropped past it.  Not taken (yet): a
+  plan per parameter value (PostgreSQL's custom plans) — the optimizer
+  does not look at parameters' values today.  Tests: a kept plan under
+  `SET ROLE` with row-level security and without the privilege, the
+  audit log of a kept plan, a description by a text noted for another
+  statement, the doorkeeper and the bound; mutations caught (the
+  statement compared, the cache emptied for a new identity, the tables
+  replayed).  A query not kept is planned where it runs, as before: a
+  first version that planned every query into the kept form (boxed,
+  shared) ran TPC-H's Q18 15 % slower even with nothing kept (430 / 393
+  → 481 / 475 ms, alternating, twice; the profiles alike — not
+  explained), and as it is now 401 / 400 → 406 / 390.  Measured,
+  alternating with the step before, two rounds: a point read with a
+  parameter 39.3 / 39.0 → 28.9 / 29.1 µs, `SELECT 1` 23.6 / 23.5 → 21.4
+  / 20.8; with a literal (a new text each time, never kept) 35.5 / 35.5
+  → 36.4 / 36.2 — the text hashed and remembered, what the doorkeeper
+  costs; TPC-H on row tables 6.81 / 6.85 → 7.26 / 6.79 s, its Q9 the
+  difference and alone the same or faster (base 525 / 547 → 495 / 510
+  ms, nine runs each).
+  Left for the next step: pg-compat's prepared statements keep their own
+  description from `Parse` (stale after DDL, where PostgreSQL re-plans);
+  they go onto these entries, and `INSERT` / `UPDATE` / `DELETE` plans
+  with them.
 
 Each step records what it took from where, and what it measured, here
 and in `docs/benchmarks.md`.

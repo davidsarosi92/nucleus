@@ -28,6 +28,9 @@ use crate::optimizer::optimize;
 use crate::parser::{parse, parse_expr};
 use crate::types::{DataType, Row, Value};
 
+/// A statement's parameter types and result columns.
+type Described = (Vec<Option<DataType>>, Option<Vec<OutColumn>>);
+
 /// A result column.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutColumn {
@@ -260,8 +263,11 @@ pub struct Session {
     /// server's own, as one that checks a membership's condition).
     audited: bool,
     /// What its statements read of the catalog, kept while it holds
-    /// ([`crate::catalog_cache`]).
+    /// ([`crate::catalog_cache`]) …
     catalog: crate::catalog_cache::CatalogCache,
+    /// … for this identity (held, so a new one is never at its address):
+    /// a plan was checked for who ran it.
+    catalog_who: Arc<crate::access::Who>,
 }
 
 impl std::fmt::Debug for Session {
@@ -356,6 +362,7 @@ impl Session {
             text: None,
             audited: true,
             catalog: Default::default(),
+            catalog_who: Arc::new(crate::access::Who::system()),
         }
     }
 
@@ -702,6 +709,10 @@ impl Session {
 
     /// Runs `f` with the session's catalog cache lent to this thread.
     fn with_catalog<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        if !Arc::ptr_eq(&self.catalog_who, &self.who) {
+            self.catalog = Default::default();
+            self.catalog_who = self.who.clone();
+        }
         let cache = std::mem::take(&mut self.catalog);
         let (out, cache) = crate::catalog_cache::with(cache, || f(self));
         self.catalog = cache;
@@ -1069,7 +1080,9 @@ impl Session {
             let now = block.now;
             let r = r.and_then(|()| {
                 crate::datetime::with_now(now, &self.kv, || {
-                    execute(txn.as_mut(), &self.registry, stmt, params, sink)
+                    crate::catalog_cache::with_text(stmt, text, || {
+                        execute(txn.as_mut(), &self.registry, stmt, params, sink)
+                    })
                 })
             });
             // In a block a result is handed over at once: nothing commits.
@@ -1113,7 +1126,9 @@ impl Session {
             let mut apart = None;
             let r = self.check_format(txn.as_mut()).and_then(|()| {
                 crate::datetime::with_now(now, &self.kv, || {
-                    execute(txn.as_mut(), &self.registry, stmt, params, sink)
+                    crate::catalog_cache::with_text(stmt, text, || {
+                        execute(txn.as_mut(), &self.registry, stmt, params, sink)
+                    })
                 })
             });
             // In the statement's transaction when it went through and may
@@ -1176,7 +1191,24 @@ impl Session {
                 own.as_ref()
             }
         };
-        let mut binder = Binder::new(txn, &self.registry).checked();
+        // By the text noted for it, while the catalog holds.
+        let Some(text) = self.text.as_deref() else {
+            return Self::describe_in(txn, &self.registry, stmt);
+        };
+        let reg = &self.registry;
+        let d = crate::catalog_cache::memo_fitting(
+            txn,
+            crate::catalog_cache::Part::Describe,
+            text,
+            |d: &Arc<(Statement, Described)>| d.0 == *stmt,
+            || Ok(Arc::new((stmt.clone(), Self::describe_in(txn, reg, stmt)?))),
+        )?;
+        Ok(d.1.clone())
+    }
+
+    /// [`Session::describe`] in `txn`.
+    fn describe_in(txn: &dyn KvTxn, reg: &Arc<Registry>, stmt: &Statement) -> Result<Described> {
+        let mut binder = Binder::new(txn, reg).checked();
         let columns = match stmt {
             Statement::Query(q) => {
                 let b = binder.query(q)?;
@@ -1296,6 +1328,38 @@ fn written(tag: &str, w: dml::Written) -> Output {
     }
 }
 
+/// A query bound, checked and optimized: what a session keeps of it by
+/// its text while the catalog holds ([`crate::catalog_cache`]).
+pub(crate) struct Planned {
+    /// The query (an entry is used for the same one only).
+    query: crate::ast::Query,
+    /// Boxed: the plan's nodes are where `needed` says (by address).
+    plan: Box<crate::plan::Plan>,
+    needed: std::collections::HashMap<usize, Vec<bool>>,
+    columns: Vec<OutColumn>,
+    /// The tables its privilege checks looked at.
+    touched: Vec<String>,
+}
+
+/// Binds (checking privileges), optimizes and prunes `q`, to be kept.
+fn plan_query(txn: &dyn KvTxn, reg: &Registry, q: &crate::ast::Query) -> Result<Arc<Planned>> {
+    let before = crate::audit::noted();
+    let bound = Binder::new(txn, reg).checked().query(q)?;
+    let plan = Box::new(optimize(bound.plan, txn));
+    let needed = crate::prune::needed(&plan);
+    let touched = crate::audit::noted()
+        .into_iter()
+        .filter(|t| !before.contains(t))
+        .collect();
+    Ok(Arc::new(Planned {
+        query: q.clone(),
+        plan,
+        needed,
+        columns: columns_of(bound.scope.cols.into_iter().map(|c| (c.name, c.ty))),
+        touched,
+    }))
+}
+
 /// Runs a statement inside `txn`.
 ///
 /// A query's rows go to `sink` as they are produced, and its output is its
@@ -1361,18 +1425,43 @@ fn execute_statement(
         }
         Statement::Query(q) => {
             let ro: &dyn KvTxn = &*txn;
-            let mut binder = Binder::new(ro, reg).checked();
-            let bound = binder.query(q)?;
-            let plan = optimize(bound.plan, ro);
+            // Kept by its text once the text came again; else planned
+            // here, as it is run.
+            let text = crate::catalog_cache::statement_text()
+                .filter(|t| crate::catalog_cache::admits(crate::catalog_cache::Part::Plan, t));
+            let (kept, fresh);
             let mut ctx = Ctx::new(ro, reg, params);
-            ctx.needed = crate::prune::needed(&plan);
             ctx.memoize = true;
-            sink.columns(&columns_of(
-                bound.scope.cols.into_iter().map(|c| (c.name, c.ty)),
-            ))?;
+            let plan = match text {
+                Some(text) => {
+                    kept = crate::catalog_cache::memo_fitting(
+                        ro,
+                        crate::catalog_cache::Part::Plan,
+                        &text,
+                        |p: &Arc<Planned>| p.query == *q,
+                        || plan_query(ro, reg, q),
+                    )?;
+                    // What its checks looked at (for the audit log).
+                    for t in &kept.touched {
+                        crate::audit::touched(t);
+                    }
+                    ctx.needed = kept.needed.clone();
+                    sink.columns(&kept.columns)?;
+                    &*kept.plan
+                }
+                None => {
+                    let bound = Binder::new(ro, reg).checked().query(q)?;
+                    fresh = optimize(bound.plan, ro);
+                    ctx.needed = crate::prune::needed(&fresh);
+                    sink.columns(&columns_of(
+                        bound.scope.cols.into_iter().map(|c| (c.name, c.ty)),
+                    ))?;
+                    &fresh
+                }
+            };
             let mut n = 0;
             let batches = if sink.takes_batches() {
-                crate::vector::batches(&plan, &ctx, None)?
+                crate::vector::batches(plan, &ctx, None)?
             } else {
                 None
             };
@@ -1400,7 +1489,7 @@ fn execute_statement(
                     }
                 }
             } else {
-                for row in exec::build(&plan, &ctx, None)? {
+                for row in exec::build(plan, &ctx, None)? {
                     let row = row?;
                     crate::budget::charge_rows(n + 1)?;
                     if sink.row(row)?.is_break() {
