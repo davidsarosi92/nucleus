@@ -274,7 +274,7 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W8 and W3b ✅; benchmark targets left (`docs/benchmarks.md`, Targets) |
-| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ⬜ |
+| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 to agree |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ⬜ |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ⬜ |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -2783,7 +2783,7 @@ margin of it, every SIMD kernel matches its scalar reference under the
 law kit, and a table's columnar copy stays consistent with its rows under
 crash and concurrency tests.
 
-### §M14.27 — Statistics and numerical analysis on large data ⬜
+### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; steps to agree)
 
 **First a study, then the plan.**  Can nucleus give mathematical and
 statistical functions over large data — fast, exact where exactness is
@@ -2793,40 +2793,203 @@ itself?  Nothing of the kind is in the engine yet (no `stddev`, no
 `variance`); the analytics engine of §M14.20 (vectorized, parallel
 aggregates, column storage, SIMD kernels) is what it would run on.
 
-The study answers, and records here:
+**The study** (2026-11-05; what it asked is kept in its answers).
 
-- **Who needs what.**  An AI agent analysing data for a user (summaries,
-  "what is unusual here"); an AI application's developer (feature
-  statistics, data quality, drift between two periods or two model
-  versions, evaluation metrics over logged outputs); those who train
-  models (dataset statistics, deduplication, sampling, train / test
-  splits, statistics of embeddings).  Which questions they ask, and how
-  they ask them today (pandas / numpy / scipy after an export, Spark,
-  DuckDB, a warehouse).
-- **The function families**, each with its numerical method and its
-  parallel, mergeable state: moments — mean, variance and standard
-  deviation (population and sample), skewness, kurtosis, by Welford's and
-  Chan's mergeable updates rather than sums of squares, which cancel;
-  deviation from the mean, z-scores and outliers (as window functions too);
-  correlation, covariance, linear regression (PostgreSQL's `corr`,
-  `covar_*`, `regr_*`); quantiles and the median, exact and approximate
-  (t-digest, KLL), histograms; distinct counts (HyperLogLog), frequent
-  items (count-min, space-saving); sampling (`TABLESAMPLE`, reservoirs —
-  Algorithm L is already in `ANALYZE`); distances and statistics over
-  vectors (with §M14.12); hypothesis tests and distribution distances
-  (Kolmogorov–Smirnov, population stability, KL divergence) for drift;
-  moving and windowed statistics over time.
-- **Prior art**, read for ideas, not copied (`CLAUDE.md`): PostgreSQL's
-  aggregates and their numeric care, DuckDB's and ClickHouse's statistical
-  and approximate aggregates, numpy / scipy, Apache DataSketches, BLAS /
-  LAPACK for what is linear algebra, the papers behind each method.
-- **The fit with nucleus's principles**: exact by default and approximate
-  only by name (`approx_…`); results reproducible across threads and runs
-  (an order-independent merge, or a stated bound); bounded memory;
-  everything as type capabilities and kernels that modules can extend
-  (principle 12); usable through the MCP server and `docs/llm.md` so an AI
-  model finds and uses them unaided; what to measure against (PostgreSQL,
-  DuckDB, numpy over the same data).
+*Who needs what, and how they get it today.*
+
+- **An AI agent analysing data for a user** asks first "what is in this
+  table" — per column the count, the `NULL`s, the distinct values, the
+  range, the mean and spread, the quartiles (pandas' `describe()`,
+  DuckDB's `SUMMARIZE`) — then "what is unusual" (values far from the
+  mean or outside the quartiles' fences, groups whose rate moved), then
+  "how does A relate to B" (correlation, a fitted line, a share by group).
+  Today it exports rows into pandas, or writes `sum(x * x)` by hand —
+  the formula that cancels (measured below).  It needs the functions to
+  exist under the names it was trained on (PostgreSQL's and DuckDB's),
+  one statement each, and to find them through the MCP server.
+- **An AI application's developer** needs the same over logged prompts,
+  outputs, scores and latencies: data quality (null and distinct rates,
+  ranges, a column's type drifting), **drift** between two periods or two
+  model versions (a statistic per feature and a test of whether two
+  distributions differ: Kolmogorov–Smirnov, the population stability
+  index, Jensen–Shannon divergence, χ² for categories — TensorFlow Data
+  Validation's and Amazon Deequ's checks), evaluation metrics over logged
+  outputs (precision and recall are counts with filters; ROC AUC is a
+  rank sum, the Mann–Whitney U; calibration is a binned mean), latency
+  percentiles (p50, p95, p99 — exact or within a stated error), and
+  moving averages over time.  Today: a warehouse job or a notebook after
+  an export; Deequ runs them as Spark aggregations (with HyperLogLog and
+  KLL sketches).
+- **Those who train models** need dataset statistics at scale (per
+  feature moments and quantiles to normalize with — computed once, the
+  same on every rerun), deduplication (exact by hash; near by MinHash),
+  **reproducible** sampling and train / test splits (the same rows each
+  run, whatever the thread count: a split by a stable hash of the key,
+  not by `random()`), stratified samples, and statistics of embeddings
+  (centroids, norms, a covariance) — with §M14.12.  Today: Spark,
+  numpy over Parquet, DuckDB.
+
+*Measured: what the usual methods give* (a standalone program, 10⁷
+doubles, Apple M-series, one core; best of five).  The sample variance
+of `1e9 + U(0,1)` (values on a large offset, as timestamps and ids are)
+and of `N(0,1)`, against the exact value (power sums kept exactly and
+rounded once; a two-pass exact computation agrees bit for bit;
+`bench/variance/`):
+
+| method | relative error, offset data | relative error, N(0,1) | distinct results, 20 runs of 8 workers | ns a value |
+|---|---:|---:|---:|---:|
+| sums of x and x² in doubles (ClickHouse's `varSamp`) | 1.1 × 10⁹ (meaningless) | 3 × 10⁻¹⁴ | — | 0.86 |
+| Youngs–Cramer (PostgreSQL's `float8_accum` since 12) | 1.0 × 10⁻³ | 1.2 × 10⁻¹³ | — | 1.15 |
+| Welford, merged by Chan et al. (DuckDB's `stddev`) | 9.1 × 10⁻¹⁰ | 1.2 × 10⁻¹³ | 20 and 19 | 4.7 |
+| exact power sums, Shewchuk expansions (`fsum.rs`) | 0 | 0 | 1 | 17 and 60 |
+| exact power sums, a superaccumulator (Neal 2015, scalar) | 0 | 0 | 1 | 8.9 |
+| numpy `var(ddof=1)` (two passes, in memory) | — | — | — | 0.73 |
+
+So: the textbook formula is unusable on real data; PostgreSQL's method
+loses three digits on it; Welford is accurate but gives a different last
+digit for every split of the rows among workers — 20 runs, 20 answers —
+which breaks reproducibility (principle: results reproducible across
+threads and runs); exact sums cost more, and how much depends on the
+accumulator: Shewchuk's expansions grow with the spread of magnitudes
+(x² as two doubles, 60 ns), a fixed superaccumulator does not (67
+chunks of 32 bits in 64-bit integers, an addition three integer adds;
+8.9 ns for Σx and Σx² together, 4.0 ns for one sum, scalar and
+unvectorized).
+
+*The function families, chosen, with their methods and bounds.*
+
+1. **One exact accumulator for every floating-point aggregate.**  `sum`
+   and `avg` of doubles are exact already (§M14.20 V4, Shewchuk); moments
+   need the same of x², x³, x⁴ and xy, which a product's exact parts
+   (`fma`: x·y = hi + lo exactly) feed.  Taken: Neal's superaccumulator
+   ("Fast exact summation using small and large superaccumulators",
+   2015) as the one exact accumulator (one mechanism per job: it replaces
+   `ExactSum` in `sum` / `avg` once measured faster), its additions
+   vectorized as a kernel (the chunks' index computed per lane, the
+   integer adds scattered; ReproBLAS's binned sums, Demmel & Nguyen, are
+   the fallback idea if the scatter does not vectorize — reproducible,
+   not exact, and cheaper).  A result is computed from the exact sums and
+   rounded once: the variance as Σ(x − m)² = Σx² − 2mΣx + n·m², exactly,
+   for m the rounded mean, then divided — the same bits from any split,
+   any order, row or column storage.  Integers and `numeric` keep exact
+   integer sums (`i128`, then `numeric`), as PostgreSQL does.  The
+   accumulator subtracts exactly too, so a sliding window frame removes
+   the row leaving it without drift.
+2. **Moments**: `var_samp` / `variance`, `var_pop`, `stddev_samp` /
+   `stddev`, `stddev_pop` (PostgreSQL's names), `skewness`, `kurtosis`
+   (DuckDB's; sample-corrected, as its and Excel's are), z-scores and
+   outliers through window functions (item 5).  Bound: the exact value
+   rounded once, then the division and square root rounded (≤ 1.5 ulp).
+3. **Two variables**: `corr`, `covar_pop`, `covar_samp`, `regr_slope`,
+   `regr_intercept`, `regr_r2`, `regr_count`, `regr_avgx`, `regr_avgy`,
+   `regr_sxx`, `regr_syy`, `regr_sxy` (PostgreSQL's, the SQL standard's),
+   from exact Σx, Σy, Σx², Σy², Σxy.
+4. **Quantiles, exact by default**: `percentile_cont(f) WITHIN GROUP
+   (ORDER BY x)` and `percentile_disc` (one fraction or an array of
+   them), `median(x)`, `mode() WITHIN GROUP …` — ordered-set aggregates,
+   which nucleus's grammar lacks today.  Not by sorting everything: by
+   selection — Floyd–Rivest in memory, and past a memory bound a radix
+   selection over the values' order-preserving keys (the key encoding
+   every type already has): one pass counts the top 16 bits' buckets, the
+   next keeps only the bucket holding the wanted rank, so an exact
+   median of 10⁹ rows needs two or three passes over the column and a
+   bucket's rows of memory.  `histogram` (equi-width, or by
+   `width_bucket`, PostgreSQL's) and equi-depth by quantiles.
+5. **Window functions**, a prerequisite nucleus does not have: `OVER
+   (PARTITION BY … ORDER BY … frame)`, every aggregate as a window
+   aggregate, `row_number`, `rank`, `dense_rank`, `percent_rank`,
+   `cume_dist`, `ntile`, `lag`, `lead`, `first_value`, `last_value`,
+   `nth_value`.  Taken: Leis et al., "Efficient Processing of Window
+   Functions in Analytical SQL Queries" (VLDB 2015, HyPer; DuckDB's
+   segment trees) for frames over any aggregate, and the exact
+   accumulator's subtraction for sliding sums and moments in O(1) a row.
+6. **Approximate, only by name and only where exactness costs memory**,
+   each sketch chosen for a merge that does not depend on order, so the
+   approximation is the same in every run:
+   - `approx_count_distinct(x)`: HyperLogLog++ (Heule, Nunkesser, Hall
+     2013: the sparse form for small counts, bias correction), precision
+     14 — 16 KiB, a standard error of 0.81 %; registers merged by
+     maximum.  The hash is a stable one with a fixed seed, versioned as
+     a format (`fasthash` is seeded per process, so it cannot be).
+   - `approx_percentile(x, f)`: DDSketch (Masson, Rim, Lee, VLDB 2019):
+     logarithmic buckets, every quantile within a relative error α of
+     the true value (1 % by default), merged by adding counts.  Not
+     taken as the default: t-digest (Dunning) and KLL (Karnin, Lang,
+     Liberty 2016; Apache DataSketches, Deequ) — their compactions depend
+     on the order of merges, so the answer moves with the thread count;
+     ClickHouse's `quantile`, a reservoir of 8192, is not even the same
+     between two runs.  DDSketch's error is relative to the value, so on
+     data far from zero (timestamps) the exact quantile of item 4 is the
+     one to use; the documentation says so.
+   - `approx_top_k(x, k)`: Space-Saving (Metwally, Agrawal, El Abbadi
+     2005), mergeable (Agarwal et al., "Mergeable Summaries", 2012), ties
+     broken by value so the merge is deterministic; each count with its
+     error bound.
+   - Sketches as values: `hll` and `ddsketch` types (registered, as
+     principle 12 wants) with `…_agg`, `…_merge` and their readers, so a
+     rollup table can keep a day's sketch and a month be merged from
+     them.
+7. **Sampling and splits**: `TABLESAMPLE BERNOULLI (p) | SYSTEM (p)
+   [REPEATABLE (seed)]` (PostgreSQL's; `SYSTEM` by morsels of the
+   storage); `reservoir_sample(x, n)` (Li's Algorithm L, which `ANALYZE`
+   already uses); `hash_unit(key [, seed])`, a stable hash of a value
+   into [0, 1), so `WHERE hash_unit(id) < 0.8` is the same training set
+   on every run, version and machine.  Near-duplicates (MinHash) wait for
+   §M14.21's analyzers.
+8. **Drift and tests**: `ks_test(x, side)` — the two-sample
+   Kolmogorov–Smirnov statistic and its p-value, `side` telling the two
+   samples apart (exact through item 4's sort, or over two DDSketches) —,
+   `psi(x, side, bins)`, `js_divergence`, `chisq_test(category, side)`;
+   ROC AUC as `auc(score, label)` (the rank sum).  Each named as scipy
+   names its counterpart where one exists, so a model reaches for the
+   right one.
+9. **`SUMMARIZE t`** (DuckDB's statement) and an MCP tool of the same:
+   one scan of every column — count, `NULL`s, approximate distinct,
+   minimum, maximum, mean, standard deviation, the quartiles — the first
+   thing an agent asks of a table it has not seen; `docs/llm.md` lists
+   the families with an example each.
+10. **Vectors** (§M14.12): `avg` and `sum` of vectors (centroids,
+    exactly, the accumulator per component), norms' statistics, and a
+    covariance of embeddings — a Σ xxᵀ, a matrix product (BLAS's
+    `syrk`), which is the one place a BLAS-style blocked kernel is worth
+    writing.  Principal components and clustering stay out of the engine
+    (export through columnar batches, measured at 147 ms a million rows).
+
+*The fit with the principles.*  Exact by default (items 1–5); approximate
+only under `approx_…` names, each with a stated bound and a merge that
+is the same in any order (item 6); reproducible bit for bit across
+threads, morsels, row and column storage — tested as a law (an
+aggregate over any split of its rows equals it over one); memory bounded
+(selection with spilling, fixed-size sketches); every function a
+registered aggregate or function, the sketches registered types, the
+kernels type capabilities (principle 12); names from PostgreSQL first,
+DuckDB second (principle 11's "familiar names, our own design").
+
+*Benchmarks to run* (each step against the one before, and against
+PostgreSQL 18 and numpy on the same data): accuracy on adversarial data
+(offsets, wide dynamic ranges, ill-conditioned regression) against
+Python's `fractions`; the split law at 1, 2, 8 and 32 workers; TPC-H's
+`lineitem` (`stddev`, `corr`, `percentile_cont` by group); ClickBench's
+`hits` (`approx_count_distinct(UserID)`, latency-like percentiles); the
+time a value of each accumulator; memory of the exact median of 10⁸
+rows under a 64 MiB bound.
+
+*Steps*, each its own commit, measured, in this order — **to be agreed
+before they are built**:
+
+- **S1 — the exact accumulator**: the superaccumulator as a vectorized
+  kernel, `sum` / `avg` of doubles on it (replacing `ExactSum` where
+  faster), the split law in the test kit.
+- **S2 — moments**: item 2 over doubles, integers and `numeric`.
+- **S3 — two variables**: item 3.
+- **S4 — window functions**: item 5.
+- **S5 — ordered sets**: `WITHIN GROUP`, item 4's exact quantiles with
+  spilling selection, `histogram`, `width_bucket`.
+- **S6 — sketches**: item 6, the sketch types included.
+- **S7 — sampling and splits**: item 7.
+- **S8 — drift, tests and `SUMMARIZE`**: items 8 and 9, the MCP tool,
+  `docs/llm.md`.
+- Vectors' statistics with §M14.12.
 
 **Done when:** the study is written here — the needs, the families
 chosen and their order, the methods and their error bounds, the
@@ -4002,3 +4165,10 @@ style) across a thousand seeds without failure.
   statement for many rows in every driver; one wire format crate; the
   next result batch made while the client reads one.  `SELECT 1` 28.3 →
   20.4 µs, a parameterized point read 52.1 → 25.8, 5.8 pipelined.
+- **2026-11-05** — §M14.27, the study: who needs which statistics and
+  how they get them today; variance methods measured (the textbook
+  formula meaningless on offset data, PostgreSQL's three digits short,
+  Welford a different last digit for every split among workers, exact
+  power sums the same bits always, 8.9 ns a value by a superaccumulator);
+  the families chosen with their methods, bounds and prior art; steps
+  S1–S8, to be agreed before they are built.

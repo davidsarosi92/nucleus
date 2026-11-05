@@ -1,0 +1,112 @@
+//! A copy of `crates/sql/src/fsum.rs`'s `ExactSum` (Shewchuk), for `var.rs`.
+#![allow(dead_code)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExactSum {
+    /// Non-overlapping partial sums, increasing in magnitude.
+    partials: Vec<f64>,
+    /// The sum of the infinities and `NaN`s added (`None`: none).
+    special: Option<f64>,
+    /// A partial sum overflowed.
+    overflow: bool,
+}
+
+impl ExactSum {
+    /// An empty sum.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds `x`.
+    pub fn add(&mut self, mut x: f64) {
+        if !x.is_finite() {
+            self.special = Some(self.special.map_or(x, |s| s + x));
+            return;
+        }
+        let mut i = 0;
+        for j in 0..self.partials.len() {
+            let mut y = self.partials[j];
+            if x.abs() < y.abs() {
+                std::mem::swap(&mut x, &mut y);
+            }
+            let hi = x + y;
+            if !hi.is_finite() {
+                self.overflow = true;
+                return;
+            }
+            let lo = y - (hi - x);
+            if lo != 0.0 {
+                self.partials[i] = lo;
+                i += 1;
+            }
+            x = hi;
+        }
+        self.partials.truncate(i);
+        self.partials.push(x);
+    }
+
+    /// Adds everything `other` holds.
+    pub fn merge(&mut self, other: &ExactSum) {
+        for &p in &other.partials {
+            self.add(p);
+        }
+        if let Some(s) = other.special {
+            self.add(s);
+        }
+        self.overflow |= other.overflow;
+    }
+
+    /// The sum, correctly rounded; `None` when it overflowed (finite values
+    /// whose sum is beyond a double).
+    pub fn total(&self) -> Option<f64> {
+        if let Some(s) = self.special {
+            return Some(s);
+        }
+        if self.overflow {
+            return None;
+        }
+        let p = &self.partials;
+        let mut n = p.len();
+        let mut hi = 0.0;
+        if n > 0 {
+            n -= 1;
+            hi = p[n];
+            let mut lo = 0.0;
+            while n > 0 {
+                let x = hi;
+                n -= 1;
+                let y = p[n];
+                hi = x + y;
+                let yr = hi - x;
+                lo = y - yr;
+                if lo != 0.0 {
+                    break;
+                }
+            }
+            // Round half to even across the partials left.
+            if n > 0 && ((lo < 0.0 && p[n - 1] < 0.0) || (lo > 0.0 && p[n - 1] > 0.0)) {
+                let y = lo * 2.0;
+                let x = hi + y;
+                if y == x - hi {
+                    hi = x;
+                }
+            }
+        }
+        hi.is_finite().then_some(hi)
+    }
+
+    /// The state as values: the partials, the special sum, whether it
+    /// overflowed (for [`ExactSum::from_parts`]).
+    pub fn parts(&self) -> (Vec<f64>, Option<f64>, bool) {
+        (self.partials.clone(), self.special, self.overflow)
+    }
+
+    /// A state from [`ExactSum::parts`].
+    pub fn from_parts(partials: Vec<f64>, special: Option<f64>, overflow: bool) -> Self {
+        ExactSum {
+            partials,
+            special,
+            overflow,
+        }
+    }
+}
+
