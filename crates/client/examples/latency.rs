@@ -3,7 +3,8 @@
 //! latency -- PORT [N] [ONLY]` against a running server (`--no-auth`).
 //! Each kind of statement (or those whose name holds ONLY) runs N times
 //! (default 20,000); printed are the median and the 99th percentile in µs
-//! and the statements a second.
+//! and the statements a second.  Last, the parameterized point read sent
+//! 100 at a time ([`Client::pipeline`]), per statement.
 
 use std::time::Instant;
 
@@ -101,6 +102,42 @@ fn main() {
             times[n / 2] as f64 / 1e3,
             times[n * 99 / 100] as f64 / 1e3,
             n as f64 / total
+        );
+    }
+    // The parameterized point read, 100 at a time pipelined: the time
+    // per statement (a batch's over 100).
+    let name = "point read, 100 pipelined";
+    if name.contains(&only) {
+        let batch = |c: &mut Client, from: usize| {
+            let keys: Vec<[Value; 1]> = (from..from + 100)
+                .map(|i| [Value::Int((i % 100_000 + 1) as i64)])
+                .collect();
+            let statements: Vec<(&str, &[Value])> = keys
+                .iter()
+                .map(|k| ("SELECT v, n FROM lat_kv WHERE k = $1", &k[..]))
+                .collect();
+            for r in c.pipeline(&statements).expect("runs") {
+                r.expect("succeeds");
+            }
+        };
+        let rounds = (n / 100).max(1);
+        for i in 0..rounds / 10 {
+            batch(&mut c, i * 100);
+        }
+        let mut times = Vec::with_capacity(rounds);
+        let all = Instant::now();
+        for i in 0..rounds {
+            let t = Instant::now();
+            batch(&mut c, i * 100);
+            times.push(t.elapsed().as_nanos() as u64 / 100);
+        }
+        let total = all.elapsed().as_secs_f64();
+        times.sort_unstable();
+        println!(
+            "{name:28} median {:7.1} µs  p99 {:7.1} µs  {:8.0} /s",
+            times[rounds / 2] as f64 / 1e3,
+            times[rounds * 99 / 100] as f64 / 1e3,
+            (rounds * 100) as f64 / total
         );
     }
     run(&mut c, "DROP TABLE lat_kv", &[]);

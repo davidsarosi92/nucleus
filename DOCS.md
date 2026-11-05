@@ -2999,6 +2999,19 @@ of Done, the remaining statements of that Query are skipped, and Ready
 follows.  A Query with parameters must hold one statement; `$1`, `$2`, …
 refer to them.
 
+**Pipelining.**  A client may send Queries without waiting for the
+replies to those before: the server reads and answers them in order,
+each as if sent alone (one that fails does not skip the next; inside a
+transaction block the next ones fail as the block has).  The server
+writes its replies when it has read every whole message the client sent
+— Ready is flushed only when no next message is waiting in its read
+buffer — so a pipeline's replies go out together.  A client keeps what
+it has sent and not had answered below what the sockets' buffers hold
+(the Rust driver: 32 KiB, `PIPELINE_WINDOW`), reading the replies before
+sending more: else both sides can wait on writes the other is not
+reading.  A pipelined statement is not a `COPY FROM STDIN` (the next
+Query would be read as its data, `08P01`) nor fetched in batches.
+
 **Streaming** (version 6).  A query's rows are sent as the executor
 produces them, so a result never has to fit in the server's memory, and
 an error can come after some rows (Error then ends the statement, as
@@ -3127,7 +3140,9 @@ and bytes; `i32s()`, `i64s()`, `f64s()`, `str(row)`, `is_null(row)` —
 and `value(row, col)`), `copy_in(sql, reader)` (`COPY … FROM STDIN`
 with text or CSV from any `Read`) and `copy_rows(sql, rows)` (rows sent
 as columnar batches, each value fitted to its column's type; a value
-that does not fit is `Error::Value`), `status()`, `close()`.  `Value` covers
+that does not fit is `Error::Value`), `pipeline(&[(sql, params)])` —
+statements sent without waiting for each reply (§10, *Pipelining*), each
+one's result or error in its place —, `status()`, `close()`.  `Value` covers
 every nucleus type (`SmallInt(i16)`, `Integer(i32)`, `Int(i64)`,
 `Real(f32)`, `Float(f64)`, numeric as mantissa and scale, `Bytes`,
 dates and timestamps as days and µs since 2000-01-01, `Time` as µs since
@@ -3244,6 +3259,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-05 — §M14.20 W8, pipelining:** the server flushes its
+  replies only when no next message waits in its read buffer; the Rust
+  driver's `Client::pipeline` sends statements 32 KiB at a time and reads
+  their replies.  A point read 100 at a time costs 5.8 µs each, one at a
+  time 25.7.
 
 - **2026-11-05 — §M14.20 W8, a session's texts parsed and normalized
   once:** a session keeps a text's statements as parsed

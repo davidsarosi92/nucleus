@@ -1683,3 +1683,91 @@ fn copy_loads_text_csv_and_rows() {
         vec![vec![Value::Integer(1)]]
     );
 }
+
+/// Statements sent pipelined: each one's result in order, a failure in
+/// its place and the rest run, a transaction's failure kept by the
+/// statements after it, over many windows.
+#[test]
+fn pipelined_statements_answer_in_order() {
+    let mut c = Client::connect(config(start(None))).unwrap();
+    c.execute("CREATE TABLE pl (k INT PRIMARY KEY, v TEXT)", &[])
+        .unwrap();
+    let rows: Vec<[Value; 2]> = (0..3000)
+        .map(|i| [Value::Int(i), Value::from(format!("v{i}").as_str())])
+        .collect();
+    let inserts: Vec<(&str, &[Value])> = rows
+        .iter()
+        .map(|r| ("INSERT INTO pl VALUES ($1, $2)", &r[..]))
+        .collect();
+    let r = c.pipeline(&inserts).unwrap();
+    assert_eq!(r.len(), 3000);
+    assert!(r.iter().all(|r| r.as_ref().unwrap().count == 1));
+
+    let keys: Vec<[Value; 1]> = (0..3000).rev().map(|i| [Value::Int(i)]).collect();
+    let mut reads: Vec<(&str, &[Value])> = keys
+        .iter()
+        .map(|k| ("SELECT v FROM pl WHERE k = $1", &k[..]))
+        .collect();
+    reads.insert(10, ("SELECT * FROM nosuch", &[]));
+    reads.insert(20, ("", &[]));
+    reads.insert(30, ("SELECT 1; SELECT 2", &[]));
+    let r = c.pipeline(&reads).unwrap();
+    assert_eq!(r.len(), 3003);
+    assert_eq!(r[10].as_ref().unwrap_err().code, "42P01");
+    let empty = r[20].as_ref().unwrap();
+    assert_eq!((empty.command.as_str(), empty.has_rows), ("", false));
+    assert_eq!(r[30].as_ref().unwrap().rows, vec![vec![Value::Integer(2)]]);
+    let values: Vec<Value> = r
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| ![10, 20, 30].contains(i))
+        .map(|(_, r)| r.as_ref().unwrap().rows[0][0].clone())
+        .collect();
+    let expected: Vec<Value> = (0..3000)
+        .rev()
+        .map(|i| Value::from(format!("v{i}").as_str()))
+        .collect();
+    assert_eq!(values, expected);
+
+    let r = c
+        .pipeline(&[
+            ("BEGIN", &[]),
+            ("INSERT INTO pl VALUES (5000, 'x')", &[]),
+            ("SELECT 1/0", &[]),
+            ("INSERT INTO pl VALUES (5001, 'y')", &[]),
+            ("ROLLBACK", &[]),
+            ("SELECT count(*) FROM pl", &[]),
+        ])
+        .unwrap();
+    assert_eq!(r[2].as_ref().unwrap_err().code, "22012");
+    assert_eq!(r[3].as_ref().unwrap_err().code, "25P02");
+    assert_eq!(r[5].as_ref().unwrap().rows, vec![vec![Value::Int(3000)]]);
+    assert_eq!(c.status(), TxnStatus::Idle);
+    // The connection goes on as before.
+    assert_eq!(
+        c.rows("SELECT 7", &[]).unwrap(),
+        vec![vec![Value::Integer(7)]]
+    );
+}
+
+/// Many statements with large replies: sent in windows, neither side
+/// waits for the other's writes for ever.
+#[test]
+fn pipelined_large_replies_do_not_deadlock() {
+    let addr = start(None);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut c = Client::connect(config(addr)).unwrap();
+        // 2 000 statements of 1 KiB, each answered by 20 KiB.
+        let sql = format!("SELECT repeat('x', 20000) /* {} */", "p".repeat(1000));
+        let statements: Vec<(&str, &[Value])> =
+            (0..2000).map(|_| (sql.as_str(), &[][..])).collect();
+        let r = c.pipeline(&statements).unwrap();
+        tx.send(r.iter().all(|r| r.is_ok()) && r.len() == 2000)
+            .unwrap();
+    });
+    let ok = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .expect("the pipeline finishes");
+    assert!(ok);
+}

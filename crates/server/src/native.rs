@@ -225,6 +225,12 @@ fn read_message<R: Read + ?Sized>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
     Ok((h[0], body))
 }
 
+/// Whether `buffered` holds a whole message.
+fn message_waiting(buffered: &[u8]) -> bool {
+    buffered.len() >= 5
+        && buffered.len() - 5 >= u32::from_le_bytes(buffered[1..5].try_into().unwrap()) as usize
+}
+
 /// Reads the fields of a client message.
 struct Body<'a> {
     b: &'a [u8],
@@ -398,9 +404,13 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
                     Err(e) => out.write_all(&error_msg(&e, version))?,
                 }
                 out.write_all(&ready_msg(session.status()))?;
-                out.flush()?;
+                // A client that sent the next message already (pipelined)
+                // gets the replies together: written when it waits.
+                if !message_waiting(input.buffer()) {
+                    out.flush()?;
+                }
             }
-            b'X' => return Ok(()),
+            b'X' => return out.flush(),
             other => {
                 out.write_all(&error_msg(
                     &protocol(format!("unexpected message {:?}", other as char)),

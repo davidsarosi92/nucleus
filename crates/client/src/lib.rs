@@ -840,6 +840,13 @@ fn put_str(b: &mut Vec<u8>, s: &str) {
     b.extend_from_slice(s.as_bytes());
 }
 
+/// How many bytes of statements [`Client::pipeline`] sends before it
+/// reads their replies: less than a socket's buffers hold (16 KiB sent
+/// plus 128 KiB received, Linux's and macOS's defaults), so a window is
+/// written whole while the server is held up writing replies nobody
+/// reads yet.
+pub const PIPELINE_WINDOW: usize = 32 << 10;
+
 /// A connection to a nucleus server.
 pub struct Client {
     /// Reads are buffered; writes go out a frame at a time.
@@ -1048,6 +1055,12 @@ impl Client {
         format: Format,
         fetch: u32,
     ) -> Result<(), Error> {
+        let body = self.query_body(sql, params, format, fetch);
+        self.send(b'Q', &body)
+    }
+
+    /// The body of a `Q`.
+    fn query_body(&self, sql: &str, params: &[Value], format: Format, fetch: u32) -> Vec<u8> {
         let mut body = Vec::new();
         put_str(&mut body, sql);
         body.push(match format {
@@ -1061,7 +1074,7 @@ impl Client {
         for p in params {
             p.encode(&mut body);
         }
-        self.send(b'Q', &body)
+        body
     }
 
     /// Runs `sql` (statements separated by `;`; with parameters, one
@@ -1074,6 +1087,58 @@ impl Client {
         format: Format,
     ) -> Result<Vec<Result<Reply, ServerError>>, Error> {
         self.send_query(sql, params, format, 0)?;
+        self.replies()
+    }
+
+    /// Runs each of `statements` as [`Client::execute`] would — its
+    /// result, or the server's error in its place — sending them without
+    /// waiting for the replies before (pipelined): a round trip for many.
+    /// Each runs on its own, as if sent alone: one that fails does not
+    /// stop the rest (inside `BEGIN` … `COMMIT` the rest fail as the
+    /// transaction has), and a text of several statements gives its last
+    /// one's result (none: an empty reply).  No `COPY FROM STDIN` (the
+    /// server would read the next statement as its data, and close the
+    /// connection).  They go out [`PIPELINE_WINDOW`] bytes at a time, each
+    /// window's replies read before the next is sent: a window fits in
+    /// the sockets' buffers, so neither side waits on the other's writes.
+    /// `Err` is for the connection.
+    pub fn pipeline(
+        &mut self,
+        statements: &[(&str, &[Value])],
+    ) -> Result<Vec<Result<Reply, ServerError>>, Error> {
+        let mut out = Vec::with_capacity(statements.len());
+        let mut rest = statements;
+        while !rest.is_empty() {
+            let mut window = Vec::new();
+            let mut n = 0;
+            for (sql, params) in rest {
+                let m = frame(b'Q', &self.query_body(sql, params, Format::Typed, 0));
+                if n > 0 && window.len() + m.len() > PIPELINE_WINDOW {
+                    break;
+                }
+                window.extend_from_slice(&m);
+                n += 1;
+            }
+            self.conn.get_mut().write_all(&window)?;
+            self.conn.get_mut().flush()?;
+            for _ in 0..n {
+                out.push(self.replies()?.pop().unwrap_or_else(|| {
+                    Ok(Reply {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        command: String::new(),
+                        count: 0,
+                        has_rows: false,
+                    })
+                }));
+            }
+            rest = &rest[n..];
+        }
+        Ok(out)
+    }
+
+    /// The replies to one `Q`, up to its `R`.
+    fn replies(&mut self) -> Result<Vec<Result<Reply, ServerError>>, Error> {
         let mut out = Vec::new();
         let mut current: Option<(Vec<Column>, Vec<Vec<Value>>)> = None;
         loop {

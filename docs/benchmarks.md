@@ -255,6 +255,11 @@ and more from run to run):
 | a session's plans by their text | 20.8 | 36.2 | 29.1 | 182 | 186 |
 | a session's texts parsed and normalized once | 20.4 | 36.5 | 25.8 | 172 | 178 |
 
+The parameterized point read sent 100 at a time (`Client::pipeline`),
+per statement, median µs: 11.5 with the server flushing each reply
+(`ffb5fac`), 5.9 with its replies written together (the client the same
+on both).
+
 Through the PostgreSQL front end (`--pg-compat`), the `postgres` driver's
 prepared statements (`modules/pg-compat/examples/pg_latency.rs`, the
 same table), median µs:

@@ -2650,10 +2650,36 @@ the speed-up is made once, in the merged one.  The work, in this order:
   text parsed again equal to a fresh parse, kept the third time, an
   error each time; runs counted under the normalized text kept or not.
   Measured, alternating with the step before, two rounds: a point read
-  with a parameter 29.4 / 29.2 → 25.8 / 25.8 µs, `SELECT 1` 21.6 / 21.7 → 20.8 / 20.4, with a literal 36.7 / 36.5 → 37.0 / 36.5
-  (unchanged: a new text each time); a prepared point read through
-  pg-compat 41.0 / 40.5 → 39.3 / 39.4 µs; TPC-H on row tables 7.06 / 6.83 → 6.79 / 7.19 (the machine: the queries
-  run what they ran) s.
+  with a parameter 29.4 / 29.2 → 25.8 / 25.8 µs, `SELECT 1` 21.6 / 21.7
+  → 20.8 / 20.4, with a literal 36.7 / 36.5 → 37.0 / 36.5 (unchanged: a
+  new text each time); a prepared point read through pg-compat 41.0 /
+  40.5 → 39.3 / 39.4 µs; TPC-H on row tables 7.06 / 6.83 → 6.79 / 7.19 s
+  (the machine: the queries run what they ran).
+  *Pipelining.*  A profile of the server and the client side by side
+  (the parameterized point read, 25 µs): the server works 5.7 µs of it
+  and spends 3.6 in `sendto`, the client 1.3 and 2.1; the rest is the
+  loopback's wake-ups.  What is left of one statement's cost is the
+  round trip, and an agent sends many statements at once.  The protocol
+  always let a client send its next Query before reading the reply (the
+  server answers in order), but the server flushed after each Ready.
+  Now it flushes only when no next whole message waits in its read
+  buffer, and the Rust driver's `Client::pipeline(&[(sql, params)])`
+  sends statements and reads their replies, each as `execute`'s (a
+  failure in its place, the rest run).  It sends at most 32 KiB before it
+  reads (`PIPELINE_WINDOW`): with both sides only writing — the client
+  its statements, the server replies it does not yet read — they would
+  wait on each other once the sockets' buffers fill; a window that fits
+  in them is always written whole (a test sends 2 MB of statements
+  answered by 40 MB, and without the window hangs).  Taken: PostgreSQL's
+  pipeline mode (libpq 14: queries sent before their results are read,
+  the server flushing at `Sync`) and Redis's replies gathered and written
+  when its input is drained; not taken: libpq's non-blocking socket,
+  reading while it writes, to avoid the same deadlock — a window bounded
+  in bytes needs no second mode of I/O.  Measured, alternating, two
+  rounds, the new client on both: a point read 100 at a time 11.5 / 11.5
+  → 5.8 / 5.9 µs a statement (one at a time 25.7); the other statements
+  as before.  Left: the other drivers (Python's `executemany`, C, Java,
+  JavaScript), and array binds — one statement, many parameter rows.
 
 Each step records what it took from where, and what it measured, here
 and in `docs/benchmarks.md`.
