@@ -99,6 +99,16 @@ several at once (`percentile_cont(ARRAY[0.5, 0.95, 0.99]) WITHIN GROUP
 `median(x)`.  Buckets: `width_bucket(x, low, high, n)` (0 below, `n + 1`
 from `high`), `width_bucket(x, ARRAY[bounds])`, and `histogram(x, low,
 high, n)` — the `n + 2` bucket counts as a `bigint[]` in one pass.
+Approximate, fixed memory, the same result every run:
+`approx_count_distinct(x)` (±0.81 %; near exact below about 4000 distinct),
+`approx_percentile(x, 0.95)` or `approx_percentile(x, ARRAY[0.5, 0.99])`
+(within 1 % of the value — use `percentile_cont` for values far from
+zero, such as timestamps), `approx_top_k(x, 10)` and
+`approx_top_k_counts(x, 10)` (the most frequent values and their
+counts).  Sketches to keep and merge later: `hll_agg(x)` →
+`hll_merge(h)` → `hll_count(h)`; `ddsketch_agg(x)` →
+`ddsketch_merge(s)` → `ddsketch_quantile(s, 0.99)` (e.g. one row per
+day, merged for a month).
 
 **Memory:** `SET work_mem = '256MB'` gives each sort and materialised
 result more memory before it spills to disk (default 64MB).  Scans,

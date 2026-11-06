@@ -1,0 +1,135 @@
+# Sketches (PLAN.md §M14.27 S6): approx_count_distinct and hll,
+# approx_percentile and ddsketch, approx_top_k.  A sketch is a function
+# of its values — the same bytes in every executor and run.
+
+statement ok
+CREATE TABLE s (id INT, g TEXT, x DOUBLE PRECISION, n INT, w TEXT)
+
+statement ok
+INSERT INTO s SELECT i, CASE WHEN i % 3 = 0 THEN 'a' ELSE 'b' END, i / 4.0, i % 10, 'w' || (i % 7) FROM generate_series(1, 1000) AS t(i)
+
+statement ok
+INSERT INTO s VALUES (1001, 'c', NULL, NULL, NULL)
+
+# Small counts: the sparse sketch is exact.
+query IIIII
+SELECT approx_count_distinct(id), approx_count_distinct(x), approx_count_distinct(n), approx_count_distinct(w), approx_count_distinct(g) FROM s
+----
+1001 1000 10 7 3
+
+# Equal values count once whatever their form.
+query II
+SELECT approx_count_distinct(v), count(DISTINCT v) FROM (VALUES (1.0), (1.00), (1), (2.5), (2.50)) t(v)
+----
+2 2
+
+query TII
+SELECT g, approx_count_distinct(id), approx_count_distinct(x) FROM s GROUP BY g ORDER BY g
+----
+a 333 333
+b 667 667
+c 1 0
+
+# No rows: 0, as count's.
+query I
+SELECT approx_count_distinct(id) FROM s WHERE id < 0
+----
+0
+
+# Sketches as values: a group's kept, the union merged.
+statement ok
+CREATE TABLE days (g TEXT, h hll, d ddsketch)
+
+statement ok
+INSERT INTO days SELECT g, hll_agg(id), ddsketch_agg(x) FROM s GROUP BY g
+
+query III
+SELECT hll_count(hll_merge(h)), hll_cardinality(hll_merge(h)), ddsketch_count(ddsketch_merge(d)) FROM days
+----
+1001 1001 1000
+
+query T
+SELECT (SELECT hll_merge(h) FROM days) = (SELECT hll_agg(id) FROM s)
+----
+t
+
+query TI
+SELECT g, hll_count(h) FROM days ORDER BY g
+----
+a 333
+b 667
+c 1
+
+query T
+SELECT hll_agg(n)::text FROM s WHERE n < 2
+----
+\x010e000497671dc1c0af76
+
+query I
+SELECT hll_count('\x010e00'::hll)
+----
+0
+
+# Quantiles within 1 % of the value at rank ⌊f · (n − 1)⌋.
+query RTR
+SELECT approx_percentile(x, 0.5), approx_percentile(x, ARRAY[0, 0.25, 0.75, 1])::text, approx_quantile(n, 0.9) FROM s
+----
+124.377 {0.25248866930929514,62.187203635385686,188.25613791251644,248.76017323770037} 7.926
+
+query TR
+SELECT g, approx_percentile(x, 0.5) FROM s GROUP BY g ORDER BY g
+----
+a 124.377
+b 124.377
+c NULL
+
+query TRR
+SELECT (SELECT ddsketch_merge(d) FROM days) = (SELECT ddsketch_agg(x) FROM s), (SELECT ddsketch_quantile(ddsketch_merge(d), 0.5) FROM days), (SELECT ddsketch_quantile(ddsketch_agg(x, 0.05), 0.5) FROM s)
+----
+t 124.377 122.334
+
+# Edges as SQL orders them: NaN the greatest, infinities, zero.
+query TTTT
+SELECT approx_percentile(v, 0)::text, approx_percentile(v, 0.5)::text, approx_percentile(v, 0.8)::text, approx_percentile(v, 1)::text FROM (VALUES ('-Infinity'::float8), ('0'), ('-0'), ('1e-320'), ('Infinity'), ('NaN')) t(v)
+----
+-Infinity 0 Infinity NaN
+
+query T
+SELECT approx_percentile(x, 0.5) FROM s WHERE id < 0
+----
+NULL
+
+# The most frequent values, ties to the least; their counts.
+query TT
+SELECT approx_top_k(w, 3)::text, approx_top_k_counts(w, 3)::text FROM s
+----
+{w1,w2,w3} {143,143,143}
+
+query TT
+SELECT g, approx_top_k(n, 2)::text FROM s GROUP BY g ORDER BY g
+----
+a {3,6}
+b {0,1}
+c NULL
+
+# Errors.
+statement error 22003
+SELECT approx_percentile(x, 1.5) FROM s
+
+statement error 22023
+SELECT approx_top_k(w, 0) FROM s
+
+statement error 42883
+SELECT approx_percentile(w, 0.5) FROM s
+
+statement error 42883
+SELECT hll_count(x) FROM s
+
+statement error 22023
+SELECT '\x0102'::hll
+
+statement error 0A000
+SELECT '\x020e00'::hll
+
+statement error 22003
+SELECT ddsketch_agg(x, 2) FROM s

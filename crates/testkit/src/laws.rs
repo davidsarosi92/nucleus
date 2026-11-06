@@ -268,6 +268,32 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
                 .collect();
             nucleus_sql::vectors::value(&c)
         }),
+        DataType::Ext(t) if t.name() == "hll" => Box::new(move |g: &mut Gen| {
+            // Few values, so equal sketches meet; now and then a dense one.
+            let n = if g.one_in(8) { 5000 } else { g.below(6) };
+            let from = g.below(3) * 1000;
+            let mut h = nucleus_sql::hll::Hll::new();
+            for i in from..from + n {
+                h.add_hash(nucleus_sql::stablehash::hash_int(i as i64));
+            }
+            Value::ext(t, h.to_bytes())
+        }),
+        DataType::Ext(t) if t.name() == "ddsketch" => Box::new(move |g: &mut Gen| {
+            let mut s = nucleus_sql::ddsketch::DdSketch::new(*g.pick(&[0.01, 0.05])).unwrap();
+            for _ in 0..g.below(5) {
+                s.add(*g.pick(&[
+                    0.0,
+                    -1.5,
+                    2.0,
+                    1e300,
+                    -1e-300,
+                    f64::NAN,
+                    f64::INFINITY,
+                    7.25,
+                ]));
+            }
+            Value::ext(t, s.to_bytes())
+        }),
         DataType::Ext(_) | DataType::Enum(_) => return None,
     })
 }

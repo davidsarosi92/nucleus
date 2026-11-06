@@ -346,6 +346,23 @@ accumulator's (with 1 GB: 499 ms).  An exact median of 10⁸ values
 `sum`'s 18.0 s and 146 MB: the values past `work_mem` go to scratch
 space and are selected a partition at a time.
 
+Sketches (§M14.27 S6) beside the exact answers, same table, best of
+five, the better of two rounds (2026-11-06; PostgreSQL has no
+approximate aggregates):
+
+| query | sketch (ms) | exact, nucleus (ms) | exact, PostgreSQL 18 (ms) |
+|---|---:|---:|---:|
+| distinct `id`: `approx_count_distinct` / `count(DISTINCT)` | 172 | 941 | 1,126 |
+| the same by 1000 groups | 352 | 1,658 | 878 |
+| p50, p95, p99 of `y`: `approx_percentile` / `percentile_cont` | 207 | 747 | 2,240 |
+| the 3 most frequent of `id % 1000`: `approx_top_k` / `mode` (one) | 248 | 757 | 1,353 |
+
+`approx_count_distinct(id)` gives 10,029,981 (+0.30 %), by groups of
+10,000 9,937–9,973; `approx_percentile` of `y` 0, 2.6524e16 (−0.04 %),
+1.2549e19 (+0.83 %).  The sketches' bytes are the same in every
+executor and run.  `count(DISTINCT)` by groups is behind PostgreSQL's
+(PLAN.md §M14.27 S6, next).
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

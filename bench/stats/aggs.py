@@ -58,10 +58,19 @@ QUERIES = {
                           "FROM t GROUP BY g ORDER BY g LIMIT 3",
     "mode": "SELECT mode() WITHIN GROUP (ORDER BY id % 1000) FROM t",
     "histogram": "SELECT histogram(x, 1e9, 1e9 + 1, 100)[51] FROM t",
+    # Sketches (S6), beside their exact counterparts.
+    "count distinct": "SELECT count(DISTINCT id) FROM t",
+    "approx_count_distinct": "SELECT approx_count_distinct(id) FROM t",
+    "approx_count_distinct 1000 groups": "SELECT g, approx_count_distinct(id) FROM t "
+                                         "GROUP BY g ORDER BY g LIMIT 3",
+    "count distinct 1000 groups": "SELECT g, count(DISTINCT id) FROM t GROUP BY g ORDER BY g LIMIT 3",
+    "approx_percentile": "SELECT approx_percentile(y, ARRAY[0.5, 0.95, 0.99]) FROM t",
+    "approx_top_k": "SELECT approx_top_k(id % 1000, 3) FROM t",
 }
 
 # PostgreSQL has no skewness, kurtosis or histogram.
-NOT_PG = {"skewness, kurtosis", "histogram"}
+NOT_PG = {"skewness, kurtosis", "histogram", "approx_count_distinct",
+          "approx_count_distinct 1000 groups", "approx_percentile", "approx_top_k"}
 
 
 def start(binary, port):

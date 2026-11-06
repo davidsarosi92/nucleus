@@ -1582,6 +1582,42 @@ type.  `histogram(x, low, high, count)` is the `count + 2` counts of
 `histogram(x, bounds)` the `len + 1`; counts combine, so a histogram
 aggregates in parallel.
 
+**Sketches** (`stablehash`, `hll`, `ddsketch`, `topk`, §M14.27 S6).
+Approximate only by name, each within a stated bound and fixed in size.
+A sketch keeps hashes from `stablehash` — xxHash64 (seed 0) of a value's
+key encoding, so equal values hash alike in any form (`1.0`, `1.00`) and
+the hash is the same on every machine and version: a format, unlike
+`fasthash`'s per-process seed.  `approx_count_distinct(x)` is
+HyperLogLog++: sparse (the set of 25-bit hash prefixes with their ranks,
+near exact) up to 4096 prefixes, then 2¹⁴ registers (16 KiB, a standard
+error of 0.81 %), read by Ertl's improved estimator — `+`, `*`, `/`, `√`
+only, no bias tables, so an estimate is the same bits everywhere.
+`approx_percentile(x, f)` (`approx_quantile`, `f` a fraction or an
+array) is DDSketch: buckets of a factor `(1 + α) / (1 − α)` (α = 1 %),
+found by DDSketch's cubically interpolated logarithm (exponent plus a
+cubic of the significand) — a quantile within `α` of the value at rank
+`⌊f · (n − 1)⌋`; at most 2048 buckets a sign (about 17 decades at 1 %),
+the smallest magnitudes folded into the least kept past that; zero, the
+infinities and NaN counted apart and ordered as SQL orders them.  Its
+error is relative to the value, so on data far from zero (timestamps,
+`1e9 + …`) a bucket spans millions and `percentile_cont` is the one to
+use.  Both merge by maximum or by adding counts, and a sketch is a
+function of the values it saw — their order, the workers, row or column
+storage do not change its bytes (tested as a law in every executor).  As
+values: the registered types `hll` and `ddsketch` (text form their
+canonical bytes in hex, casts to and from `bytea`), made by `hll_agg(x)`
+and `ddsketch_agg(x [, α])`, merged by `hll_merge` and `ddsketch_merge`,
+read by `hll_count` (`hll_cardinality`), `ddsketch_quantile(s, f)` and
+`ddsketch_count` — a rollup keeps a day's sketch and merges a month from
+them.  `approx_top_k(x, k)` and `approx_top_k_counts(x, k)` are the
+most frequent values and their counts, ties to the least value:
+Misra–Gries counts in the mergeable form (exact until more than `2C`
+distinct values, `C = max(1024, 8k)`, then the `(C + 1)`-th greatest
+count taken from all), each count low by at most `(n − Σ counts) / (C +
+1)`; exact and order-free while `x` has at most `2C` distinct values,
+otherwise the same in every run of a plan (its states merge in the
+morsels' order: it is not `order_free`).
+
 **Columns** (`prune`, §M14.11).  Before a query runs, its plan is walked
 from the top with the output columns wanted, each node adding what its
 expressions read; a scan then decodes only the columns needed — the rest
@@ -3552,6 +3588,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.27 S6, sketches:** `stablehash` (xxHash64 of
+  the key encoding); `approx_count_distinct`, `hll_agg`, `hll_merge`,
+  `hll_count` and the type `hll` (HyperLogLog++, Ertl's estimator);
+  `approx_percentile` / `approx_quantile`, `ddsketch_agg`,
+  `ddsketch_merge`, `ddsketch_quantile`, `ddsketch_count` and the type
+  `ddsketch`; `approx_top_k`, `approx_top_k_counts` (§8.5, *Sketches*).
 - **2026-11-06 — §M14.27 S5, ordered sets:** `percentile_cont`,
   `percentile_disc`, `mode` `WITHIN GROUP (ORDER BY …)`, `median`,
   `width_bucket`, `histogram` (§8.5, *Ordered sets*);

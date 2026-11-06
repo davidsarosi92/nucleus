@@ -274,7 +274,7 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
-| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's) |
+| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -2797,7 +2797,7 @@ Every result the same, but for ties at a `LIMIT`.  Left as findings,
 not targets: the `LIMIT`-over-a-failing-join finding (W6), TPC-H Q19 on
 column tables (an `OR` of conjunctions across a join, 1.93×).
 
-### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S5, S4·sort ✅)
+### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S6, S4·sort ✅)
 
 **First a study, then the plan.**  Can nucleus give mathematical and
 statistical functions over large data — fast, exact where exactness is
@@ -3361,7 +3361,81 @@ before they are built**:
   accumulator's partial state is built in memory (workers' runs could
   be handed over instead); `generate_series` runs on one thread at
   ~180 ns a row.
-- **S6 — sketches**: item 6, the sketch types included.
+- **S6 — sketches** ✅ (2026-11-06): item 6, the sketch types included.
+  *Built:* `stablehash` — xxHash64, seed 0, of a value's key encoding
+  (equal values hash alike in any form; integers and doubles from their
+  encoding built on the stack), a format the sketches store.
+  `approx_count_distinct(x)` — HyperLogLog++: sparse, the sorted set of
+  25-bit prefixes with their ranks (buffered, merged in batches), up to
+  4096 of them, then 2¹⁴ one-byte registers; read by Ertl's improved
+  estimator.  `approx_percentile(x, f)` / `approx_quantile` — DDSketch,
+  α = 1 %, its cubically interpolated mapping, 2048 buckets a sign
+  collapsing the lowest, zero, ±∞ and NaN counted apart.
+  `approx_top_k(x, k)`, `approx_top_k_counts(x, k)` — Misra–Gries in
+  the batched, mergeable form.  The types `hll` and `ddsketch`
+  (registered; equality and hashing on canonical bytes, text form hex,
+  casts with `bytea`, versioned formats), `hll_agg` / `hll_merge` /
+  `hll_count` (`hll_cardinality`), `ddsketch_agg(x [, α])` /
+  `ddsketch_merge` / `ddsketch_quantile` / `ddsketch_count`.  Every
+  sketch combines, so it aggregates on the workers.
+  Tests: xxHash64 against the reference's vectors, the quick forms
+  against the key encoding; HLL within its error from 0 to 10⁶
+  distinct, the same bytes from any split and merge order (a sparse
+  merge turning dense part way — a bug the first SQL run showed, its
+  test catching the old code); DDSketch within α at α = 0.1 %, 1 %, 5 %
+  over its reach, its mapping monotone with every bucket at most `γ`
+  wide, the same bytes from any order with collapsing, SQL's order of
+  the edges (two mutations — the negative buckets' order, the fold —
+  caught); top-k within its bound on a skewed stream, exact in any
+  order with few values.  `sketches.rs`: the same bytes in five
+  settings (a row at a time, batches, four workers, `work_mem` 64 kB,
+  one thread), merged sketches equal to the whole table's, bounds
+  against the exact answers; `50_sketches.slt` (the formats' text form
+  among its expectations).
+  *Prior art:* HyperLogLog++ (Heule, Nunkesser, Hall, EDBT 2013) —
+  taken: precision 14, the sparse form at precision 25 and its ranks;
+  not taken: its empirical bias tables and linear counting, replaced by
+  Ertl's estimator (2017; Redis uses it), which needs neither and
+  computes with `+ * / √` only — the same bits on every machine; the
+  sparse form's varint compression (not yet: 4 bytes an entry).
+  DDSketch (Masson, Rim, Lee, VLDB 2019; DataDog's `sketches-java`) —
+  taken: the relative-error buckets, the cubically interpolated mapping
+  (no `ln`, whose last bit is the platform's), the collapsing-lowest
+  store of 2048 buckets; `ln γ` by its series and the inverse by
+  Newton's method in fixed steps, to keep every library function out.
+  Not taken: t-digest and KLL (their compactions depend on merge order),
+  ClickHouse's sampled `quantile` (differs between runs).  Frequent
+  items: Misra–Gries (1982) / Space-Saving (Metwally et al. 2005) in
+  Agarwal et al.'s mergeable form ("Mergeable Summaries", PODS 2012) —
+  taken, batched (reduce at `2C`); recorded where it falls short of the
+  study's line: no summary that returns the values themselves merges
+  the same in any order, so past `2C` distinct values its counts depend
+  on where reductions fell, and it is not `order_free` (its morsels
+  merge in their order: the same every run of a plan, not across worker
+  counts).  The hash: xxHash64 (Collet) for its specification and test
+  vectors in every language, over MurmurHash3 (DataSketches') and
+  wyhash; hashing the key encoding rather than a value's own bytes
+  follows the principle that one encoding defines equality.
+  *Measured* (10M rows of `bench/stats/aggs.py`'s table, best of five,
+  the better of two rounds): `approx_count_distinct(id)` 172 ms against
+  `count(DISTINCT id)` 941 (PostgreSQL 1126), +0.30 %; by 1000 groups
+  352 against 1658 (PostgreSQL 878), 9937–9973 for 10,000;
+  `approx_percentile(y, [0.5, 0.95, 0.99])` 207 against
+  `percentile_cont`'s 747 (PostgreSQL 2240), −0.04 % / +0.83 %;
+  `approx_top_k(id % 1000, 3)` 248 against `mode`'s 757.  On `x`
+  (1e9 + a fraction) every value falls in one bucket — 1 % of 1e9 —
+  as the study warned: the documentation sends such data to
+  `percentile_cont`.  `bench/phases.py` two rounds alternating
+  against S5's build: ClickBench (column) geometric mean 17.7 / 17.9 →
+  17.6 / 18.5 ms, TPC-H (row) 230.5 / 233.5 → 230.5 / 229.3 — the same
+  within the noise (the step only registers functions and types).
+  *Next, recorded here:* `count(DISTINCT)` by many groups is twice
+  PostgreSQL's time (its own step: a distinct aggregate's per-group
+  sets); a sketch's `group_bytes` is a guess (256), where a dense HLL
+  takes 16 KiB — many groups' dense sketches are not yet counted against
+  `work_mem` as they are; the sparse form's entries as varint deltas;
+  precision other than 14 (the format has its byte); the counts' error
+  bounds as values (a record type).
 - **S7 — sampling and splits**: item 7.
 - **S8 — drift, tests and `SUMMARIZE`**: items 8 and 9, the MCP tool,
   `docs/llm.md`.
@@ -4994,6 +5068,11 @@ style) across a thousand seeds without failure.
   functions, PostgreSQL's semantics and errors; a `Sort` per window,
   the final `ORDER BY` left out when the last window gives it; `avg`
   of doubles rounded once.
+- **2026-11-06** — §M14.27 S6: sketches — `approx_count_distinct`
+  (HyperLogLog++, Ertl's estimator), `approx_percentile` (DDSketch),
+  `approx_top_k` (Misra–Gries), the `hll` and `ddsketch` types; a
+  stable hash (xxHash64 of the key encoding); a sketch the same bytes
+  in every run and executor.
 - **2026-11-06** — §M14.27 S5: ordered-set aggregates — exact
   `percentile_cont` / `percentile_disc` / `mode` `WITHIN GROUP`,
   `median`, by selection over order-preserving keys, combinable, a

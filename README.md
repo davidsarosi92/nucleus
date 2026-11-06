@@ -60,7 +60,10 @@ over doubles from exact sums —, and window functions (`OVER`, every
 aggregate over any frame) over a parallel sort that spills past
 `work_mem` and is left out when a primary key's scan already gives the
 order, and exact quantiles (`percentile_cont`, `percentile_disc`,
-`mode` and `median`, by selection), `width_bucket` and `histogram`.
+`mode` and `median`, by selection), `width_bucket` and `histogram`,
+and sketches that give the same answer every run
+(`approx_count_distinct`, `approx_percentile`, `approx_top_k`, and the
+`hll` and `ddsketch` types to keep and merge).
 Next is the rest of the developer
 platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree

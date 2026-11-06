@@ -131,6 +131,9 @@ impl Module for Builtin {
         crate::moments::register(r)?;
         crate::quantile::register(r)?;
         crate::buckets::register(r)?;
+        crate::hll::register(r)?;
+        crate::ddsketch::register(r)?;
+        crate::topk::register(r)?;
         crate::regression::register(r)?;
         crate::bytea::register(r)?;
         crate::inet::register(r)?;
