@@ -49,7 +49,7 @@ def start_nucleus(binary, port):
     for _ in range(600):
         try:
             return s, dir, nucleus.connect("127.0.0.1", port, password=None)
-        except OSError:
+        except (OSError, nucleus.OperationalError):
             time.sleep(0.1)
     s.kill()
     raise RuntimeError("the server did not start")
@@ -86,15 +86,15 @@ def main():
 
     s, dir, c = start_nucleus(o.binary, o.port)
     try:
-        c.query("CREATE TABLE items (id INT PRIMARY KEY, v vector(%d))" % o.dims)
+        c.execute("CREATE TABLE items (id INT PRIMARY KEY, v vector(%d))" % o.dims)
         t0 = time.perf_counter()
         c.load("items", {"id": np.arange(o.rows, dtype=np.int32), "v": list(x)})
         load_s = time.perf_counter() - t0
-        c.query("VACUUM ANALYZE items")
+        c.execute("VACUUM ANALYZE items")
         sql = f"SELECT id FROM items ORDER BY v <-> $1, id LIMIT {o.k}"
         wrong, times = 0, []
         for i, q in enumerate(qs):
-            ms, rows = best(lambda q=q: c.query(sql, (q,)).rows, 3)
+            ms, rows = best(lambda q=q: c.execute(sql, (q,)).rows, 3)
             times.append(ms)
             got = [r[0] for r in rows]
             if got != list(want[i]):

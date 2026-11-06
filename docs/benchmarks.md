@@ -691,6 +691,21 @@ vector now), the column table's within the variation but for Q23, 220 →
 146 ms (the cache of decoded columns no longer evicting what
 `SELECT *` comes back to — not measured apart).
 
+## Vectors
+
+Exact nearest neighbours (PLAN.md §M14.12; `bench/vectors/knn.py
+target/release/nucleus --pg`): 100,000 random vectors of 768 dimensions
+(293 MiB), the ten nearest of 20 queries, median; 2026-11-06.
+
+| | ms | GiB/s read | answers differing from numpy's |
+|---|---:|---:|---:|
+| numpy brute force (one core) | 57 | 5.1 | — |
+| nucleus `ORDER BY v <-> $1 LIMIT 10` | 206 | 1.4 | 0 of 20 |
+| pgvector (PostgreSQL 18, no index) | 155 | 1.8 | 0 of 20 |
+
+Loading the 100,000 vectors: nucleus 21 s (Python `load`, a list of
+numpy arrays), pgvector 42 s (`COPY` of text through `psql`).
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

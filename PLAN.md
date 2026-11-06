@@ -3341,11 +3341,23 @@ reference that the capability model is proven on:
   operators.
 
 *Measured* (`bench/vectors/knn.py`, Apple M-series, release build):
-not yet run — `bench/vectors/knn.py` (exact search against numpy's brute
-force and pgvector, the answers compared) is written; its numbers come
-with V2.
+100,000 random vectors of 768 dimensions (293 MiB), the ten nearest
+of 20 queries, median; pgvector (image `pgvector/pgvector:pg18`), no index:
 
-*Left, as steps of their own:* **V2** `v[i]`, slices and `UPDATE … SET
+| | ms | GiB/s read | answers differing from numpy's |
+|---|---:|---:|---:|
+| numpy brute force (one core) | 57 | 5.1 | — |
+| nucleus `ORDER BY v <-> $1 LIMIT 10` | 206 | 1.4 | 0 of 20 |
+| pgvector, exact | 155 | 1.8 | 0 of 20 |
+
+Exact, and the same answers as the reference — but not yet bound by
+memory bandwidth as specified: about 2 µs a row, where the kernel needs
+a tenth of that.  Where the rest goes (the scan making a value of each
+3 KiB vector, the top-k a row at a time, parallelism) is V2's first
+question.
+
+*Left, as steps of their own:* **V2** the exact search bound by
+bandwidth (above), `v[i]`, slices and `UPDATE … SET
 v[i] = …`; Arrow's `fixed_size_list<float32>` for batches; pg-compat
 sending `vector` as pgvector's text so its clients work.  **V3**
 statistics for the optimizer (dimension, norms, sampled distance
