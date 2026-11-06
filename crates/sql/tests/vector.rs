@@ -387,6 +387,50 @@ fn random_queries_agree() {
     assert!(failed < queries.len() / 2, "{failed} of the queries failed");
 }
 
+/// The split law (PLAN.md §M14.27 S1): a sum or mean of doubles is the
+/// exact sum rounded once, the same bits however its rows are split among
+/// workers and batches — checked against an integer reference.
+#[test]
+fn double_sums_are_exact_under_any_split() {
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(9)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    // k · 2^e: |k| ≤ 1000, e in [−20, 20] — exact doubles whose sum is
+    // an integer in units of 2⁻²⁰.
+    s.execute(
+        "CREATE TABLE fs (id INT PRIMARY KEY, g INT, f FLOAT); \
+         INSERT INTO fs SELECT i, i % 7, \
+           ((i::bigint * 7919) % 2001 - 1000)::float8 * power(2::float8, (i % 41) - 20) \
+           FROM generate_series(1, 50000) i",
+    )
+    .unwrap();
+    let units = |i: i64| -> i128 { i128::from((i * 7919) % 2001 - 1000) << ((i % 41) as u32) };
+    let rounded = |u: i128| u as f64 / f64::from(1u32 << 20);
+    let total: i128 = (1..=50000).map(units).sum();
+    let group: Vec<i128> = (0..7)
+        .map(|g| (1..=50000).filter(|i| i % 7 == g).map(units).sum())
+        .collect();
+    let num = |v: &str| v.parse::<f64>().unwrap();
+    for workers in [1, 2, 8, 32] {
+        for batch in [0, 3, 1024] {
+            let mut x = session(&db, batch);
+            x.execute(&format!("SET parallel_workers = {workers}"))
+                .unwrap();
+            let r = outcome(&mut x, "SELECT sum(f), avg(f) FROM fs").unwrap();
+            assert_eq!(num(&r[0][0]), rounded(total), "{workers} {batch}");
+            assert_eq!(num(&r[0][1]), rounded(total) / 50000.0, "{workers} {batch}");
+            let r = outcome(&mut x, "SELECT g, sum(f) FROM fs GROUP BY g ORDER BY g").unwrap();
+            for (g, row) in r.iter().enumerate() {
+                assert_eq!(num(&row[1]), rounded(group[g]), "{workers} {batch} {g}");
+            }
+        }
+    }
+}
+
 #[test]
 fn parallel_aggregates_agree() {
     // Big enough to split into morsels; the simulation offers one CPU, so

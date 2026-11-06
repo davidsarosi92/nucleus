@@ -1647,8 +1647,13 @@ seen, rows in key order, the first error the one a single pass meets, a
 their rows the same way (vectorized, in parallel when they can be) when
 the table is keyed by a primary key — each row's key computed from its
 values; a policy, or a table keyed by hidden row ids, scans row by row.  Sums of doubles and reals are
-exact (Shewchuk's partials, rounded once — `fsum`), so they do not depend
-on the order either.  Not in parallel: an enclosing row (a correlated
+exact (`fsum::ExactSum`, §M14.27 S1: Neal's superaccumulator — the sum
+as an integer in units of 2⁻¹⁰⁷⁵, in 32-bit chunks held in 64-bit
+words, only the chunks touched kept; an addition or subtraction is three
+integer additions, `add_product` adds x·y exactly through a fused
+multiply-add; the result rounded once to nearest even from the integer;
+a worker's state passed as bytes), so they do not depend on the order
+either.  Not in parallel: an enclosing row (a correlated
 subquery's own plan), `EXPLAIN ANALYZE`, a volatile function or a
 subquery the workers cannot run in the pipeline (below), groups in key
 order past `work_mem` in a morsel, or merged on the statement's thread
@@ -3385,6 +3390,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.27 S1, the exact accumulator:** `fsum::ExactSum`
+  is Neal's superaccumulator (§8.5, *Parallelism*): additions, exact
+  subtraction and products, rounding from the integer; the split law
+  tested at 1–32 workers.
 - **2026-11-06 — §M14.12 V2b, components by position:** `x[i]`,
   `x[lo:hi]`, `UPDATE … SET x[i] = v` for arrays and vectors (§8.1),
   through the type capability `Elements` (§8.12); Python vectors as

@@ -836,6 +836,23 @@ stored out of line; the type interning table's lock a value).
 Loading the 100,000 vectors: nucleus 21 s (Python `load`, a list of
 numpy arrays), pgvector 42 s (`COPY` of text through `psql`).
 
+## Statistics
+
+Aggregates over doubles (PLAN.md §M14.27; `bench/stats/aggs.py BASE NEW
+--rows 10000000`): a table of 10 million rows — `x` on a large offset
+(1e9 + a fraction), `y` spread over 30 decades — each query's best of
+five, builds alternating round by round, answers compared.  2026-11-06,
+§M14.27 S1 (Shewchuk's partials → one superaccumulator), two rounds:
+
+| query | before (ms) | after (ms) |
+|---|---:|---:|
+| `sum(x)` | 217 / 183 | 171 / 189 |
+| `avg(y)` | 219 / 207 | 171 / 185 |
+| `sum(x)` by 1000 groups | 197 / 209 | 197 / 197 |
+| `avg(y)` by a million groups | 2,278 / 2,486 | 2,369 / 2,486 |
+
+The same answers to the bit; the scan, not the accumulator, is the cost.
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

@@ -274,7 +274,7 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
-| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 to agree |
+| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -2797,7 +2797,7 @@ Every result the same, but for ties at a `LIMIT`.  Left as findings,
 not targets: the `LIMIT`-over-a-failing-join finding (W6), TPC-H Q19 on
 column tables (an `OR` of conjunctions across a join, 1.93×).
 
-### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; steps to agree)
+### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1 ✅)
 
 **First a study, then the plan.**  Can nucleus give mathematical and
 statistical functions over large data — fast, exact where exactness is
@@ -2991,9 +2991,43 @@ rows under a 64 MiB bound.
 *Steps*, each its own commit, measured, in this order — **to be agreed
 before they are built**:
 
-- **S1 — the exact accumulator**: the superaccumulator as a vectorized
+- **S1 — the exact accumulator** ✅ (2026-11-06; the steps agreed: "legyen
+  meg az S, L és V lépések"): the superaccumulator as a vectorized
   kernel, `sum` / `avg` of doubles on it (replacing `ExactSum` where
   faster), the split law in the test kit.
+  *Built:* `fsum::ExactSum` is Neal's small superaccumulator — one
+  exact accumulator, Shewchuk's partials gone (their routine is kept only
+  as the tests' oracle).  Two departures from Neal's, each measured or
+  forced: (1) only the chunks a sum has touched are kept, a window grown
+  as values come — Neal's 67 chunks are 536 bytes, a state a group, and
+  a grouping of a million groups would carry half a gigabyte; values of
+  like magnitude touch three or four; (2) the result is rounded from the
+  integer itself — the chunks made non-negative digits, the top 53 bits,
+  the next bit and a sticky bit, the exponent field read off the bit
+  position — not by summing the chunks as doubles, which overflow at
+  the top of the range where the sum does not (`[MAX, MAX, −MAX]`).
+  Subtraction (a window frame's leaving row, S4) and `add_product` (x·y
+  as its rounded product and the product's error from a fused
+  multiply-add, for S2's Σx², Σxy) are the same three integer additions.
+  A worker's state passes as bytes (the window, its place), not as
+  doubles.  Tests: Shewchuk's summation as the oracle over 2000 random
+  sets of any finite doubles (subnormals, the largest, cancellations,
+  ties), an integer reference, splits and merges both ways, and — in
+  `crates/sql/tests/vector.rs` — the split law: `sum` and `avg` of 50,000
+  doubles spread over 2⁴⁰ of magnitude, ungrouped and by group, the same
+  bits as an integer reference rounded once at 1, 2, 8 and 32 workers
+  and batch sizes 0, 3 and 1024; three mutations of the rounding, each
+  caught (one only after a test with its sticky bit in the lowest chunk
+  was added).
+  *Measured* (`bench/stats/aggs.py`, 10M rows, alternating builds, best
+  of five): `sum` of doubles 217 / 183 → 171 / 189 ms, `avg` of values
+  spread over 30 decades 219 / 207 → 171 / 185, a sum by 1000 groups 197 /
+  209 → 197 / 197, an `avg` by a million groups 2278 / 2486 → 2369 / 2486
+  — the same answers, the same time: the scan, not the accumulator, is
+  the cost.  *Not taken:* a vectorized kernel for the additions (the
+  scatter of three adds a lane) — nothing to gain while the accumulator
+  is not what a query waits on; to be measured again under S2's moments,
+  which add four sums a value.
 - **S2 — moments**: item 2 over doubles, integers and `numeric`.
 - **S3 — two variables**: item 3.
 - **S4 — window functions**: item 5.
@@ -4614,3 +4648,6 @@ style) across a thousand seeds without failure.
 - **2026-11-06** — §M14.20 ✅: the full runs against PostgreSQL meet
   every target — TPC-H 0.25× / 0.77×, ClickBench 0.11× / 0.89×, loads
   0.55–1.1×, `bench/run.py` within its margins.
+- **2026-11-06** — §M14.27 S1: one exact accumulator — Neal's
+  superaccumulator in a window of chunks, rounded from the integer,
+  exact subtraction and products; the split law tested at 1–32 workers.

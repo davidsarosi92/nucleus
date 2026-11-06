@@ -760,14 +760,7 @@ impl Acc {
     fn partial(&self) -> Value {
         let float = match &self.float {
             None => Value::Null,
-            Some(f) => {
-                let (partials, special, overflow) = f.parts();
-                Value::Array(vec![
-                    Value::Array(partials.into_iter().map(Value::Float).collect()),
-                    special.map_or(Value::Null, Value::Float),
-                    Value::Bool(overflow),
-                ])
-            }
+            Some(f) => Value::Bytea(f.to_bytes().into()),
         };
         Value::Array(vec![
             Value::Int(self.count),
@@ -812,26 +805,8 @@ impl Acc {
             let i = i128::from_le_bytes(b[..].try_into().map_err(|_| bad())?);
             self.int = Some(self.int.unwrap_or(0) + i);
         }
-        if let Value::Array(f) = float {
-            let [partials, special, overflow] = <[Value; 3]>::try_from(f).map_err(|_| bad())?;
-            let Value::Array(partials) = partials else {
-                return Err(bad());
-            };
-            let partials = partials
-                .into_iter()
-                .map(|p| {
-                    if let Value::Float(x) = p {
-                        Ok(x)
-                    } else {
-                        Err(bad())
-                    }
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let special = match special {
-                Value::Float(x) => Some(x),
-                _ => None,
-            };
-            let other = ExactSum::from_parts(partials, special, overflow == Value::Bool(true));
+        if let Value::Bytea(f) = float {
+            let other = ExactSum::from_bytes(&f).ok_or_else(bad)?;
             self.float
                 .get_or_insert_with(Default::default)
                 .merge(&other);
