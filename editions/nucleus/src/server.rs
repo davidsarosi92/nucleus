@@ -31,6 +31,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut max_connections = None;
     let mut sync = nucleus_kv::SyncPolicy::default();
     let mut wal_minimal = true;
+    let mut cache_bytes = None;
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -61,6 +62,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     Some("full") => false,
                     _ => return Err("--wal takes minimal or full".into()),
                 }
+            }
+            "--cache" => {
+                let v = rest.next().ok_or("--cache needs a size")?;
+                cache_bytes = Some(nucleus_sql::dbsettings::memory(v).map_err(|e| e.message)?);
             }
             "--log-queries" => log_queries = true,
             "--insecure" => insecure = true,
@@ -208,10 +213,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         max_connections,
         throttle: Default::default(),
     };
+    let defaults = Options::default();
     let opts = Options {
         sync,
         wal_minimal,
-        ..Options::default()
+        cache_bytes: cache_bytes.unwrap_or(defaults.cache_bytes),
+        ..defaults
     };
     let db = Database::open(dir, opts).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);

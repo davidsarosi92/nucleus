@@ -5,7 +5,7 @@ vectors read per second) reported.  With `--pg`, the same through
 pgvector in Docker (image pgvector/pgvector:pg18), exact (no index).
 
     python3 -I bench/vectors/knn.py BINARY [--rows 100000] [--dims 768]
-        [--queries 20] [--k 10] [--port 21010] [--pg]
+        [--queries 20] [--k 10] [--port 21010] [--cache 1GB] [--pg]
 
 The nucleus server is started on a fresh database in a temporary
 directory and stopped at the end."""
@@ -42,9 +42,12 @@ def numpy_knn(x, q, k):
     return idx[np.lexsort((idx, d[idx]))]
 
 
-def start_nucleus(binary, port):
+def start_nucleus(binary, port, cache):
     dir = tempfile.mkdtemp(prefix="nucleus-knn-")
-    s = subprocess.Popen([binary, "server", os.path.join(dir, "db"), "--listen", f"127.0.0.1:{port}", "--no-auth"],
+    args = [binary, "server", os.path.join(dir, "db"), "--listen", f"127.0.0.1:{port}", "--no-auth"]
+    if cache:
+        args += ["--cache", cache]
+    s = subprocess.Popen(args,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(600):
         try:
@@ -71,6 +74,8 @@ def main():
     a.add_argument("--k", type=int, default=10)
     a.add_argument("--port", type=int, default=21010)
     a.add_argument("--pg", action="store_true")
+    a.add_argument("--cache", default="1GB",
+                   help="nucleus's page cache (pgvector gets shared_buffers=1GB); '' for the server's default")
     o = a.parse_args()
 
     rng = np.random.default_rng(7)
@@ -84,7 +89,7 @@ def main():
     np_ms = min(best(lambda q=q: numpy_knn(x, q, o.k), 3)[0] for q in qs[:5])
     print(f"numpy brute force          {np_ms:8.1f} ms  {mib / np_ms * 1000 / 1024:5.2f} GiB/s")
 
-    s, dir, c = start_nucleus(o.binary, o.port)
+    s, dir, c = start_nucleus(o.binary, o.port, o.cache)
     try:
         c.execute("CREATE TABLE items (id INT PRIMARY KEY, v vector(%d))" % o.dims)
         t0 = time.perf_counter()

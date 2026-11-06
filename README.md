@@ -47,8 +47,10 @@ column tables take 0.47× PostgreSQL's time in the geometric mean (row
 tables 1.11×), on ClickBench (a million rows) 0.24×, every result the
 same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
 operators, exact nearest-neighbour search through SIMD kernels whose
-results are the same on every CPU, and a native float array in every
-driver.  Next is the rest of the developer
+results are the same on every CPU — the ten nearest of 100,000
+768-dimension vectors in 48 ms, faster than numpy's brute force and 3.5×
+pgvector's exact search (`docs/benchmarks.md`) —, and a native float
+array in every driver.  Next is the rest of the developer
 platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then

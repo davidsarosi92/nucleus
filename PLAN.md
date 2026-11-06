@@ -276,7 +276,7 @@ are marked ✅.
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W8 and W3b ✅; benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 to agree |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
-| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1 |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
@@ -3395,8 +3395,56 @@ a tenth of that.  Where the rest goes (the scan making a value of each
 3 KiB vector, the top-k a row at a time, parallelism) is V2's first
 question.
 
-*Left, as steps of their own:* **V2** the exact search bound by
-bandwidth (above), `v[i]`, slices and `UPDATE … SET
+**V2 — the exact search bound by bandwidth** ✅ (2026-11-06; the steps
+agreed: "legyen meg az S, L és V lépések").  The question above, answered
+by profiles (`sample`, the query repeated):
+
+1. *The page cache.*  The server's default cache is 128 MiB; the table,
+   293 MiB of vectors, did not fit, so every query read it again through
+   `pread` and checked each page's checksum — while pgvector ran with
+   `shared_buffers = 1GB`.  Taken: the server's `--cache <size>`
+   (PostgreSQL's `shared_buffers`; the KV's `Options::cache_bytes`), and
+   `knn.py` gives nucleus the same 1 GB.
+2. *A seek a vector.*  A 3 KiB vector is longer than a row keeps
+   (§M14.26: 2000 bytes) and lives out of line, in chunks keyed by its
+   row; a scan read each by a scan of its own (a B+tree descent, the
+   versions resolved).  Taken: `large::Chunks`, one scan of the chunks
+   from the first row holding one to the scan's end, walked beside the
+   rows' — the chunks are keyed by the row's key, so they come in the
+   rows' order — reading a value's chunks until they hold its length (no
+   read-ahead) and decoding a one-chunk value from the chunk as read: a
+   merge of two ordered ranges where there were point lookups, for
+   every type stored out of line (`bytea`, long text).  The row-at-a-time
+   executor keeps its lookups (a row at a time is its contract).
+3. *A lock a value.*  Decoding a registered type's value looks its type
+   up by id in the process's interning table, under a mutex — taken by
+   every worker of a parallel scan for every row, where the profile
+   waited most.  Taken: each thread keeps the type it last looked up
+   (by id and by name; a real type only, a stand-in for a missing one
+   may give way); `vectors::vector_type` was a lookup by name a call.
+
+Measured (`bench/vectors/knn.py`, 100k × 768, the median of 10
+queries; one run each, alternating where two builds):
+
+| | ms | GiB/s |
+|---|---:|---:|
+| before (128 MiB cache) | 233 – 243 | 1.2 |
+| chunks read in row order (128 MiB) | 178 – 180 | 1.6 |
+| … and a 1 GB cache | 128 | 2.2 |
+| … and the type looked up once a thread | 53 | 5.4 |
+| … and no read-ahead, one copy less | **48** | **6.0** |
+| numpy brute force (one core) | 55 – 58 | 4.9 – 5.2 |
+| pgvector, exact (1 GB `shared_buffers`) | 155 – 167 | 1.7 – 1.8 |
+
+The same answers as numpy's throughout.  TPC-H unchanged
+(`bench/phases.py reads`, alternating: the sums of the best times 8219 / 7531 → 7612 / 8110 ms).  What the profile
+shows now: copies (the B+tree's overflow pages into the scan's chunk,
+the chunk into the value) as much as the distance kernel, then
+allocations — a value of each vector.  Left, measured when worth it: a
+batch kind for fixed-width values (the bytes of a column of vectors in
+one buffer, no value each) and the distance as a batch kernel over it.
+
+*Left, as steps of their own:* **V2b** `v[i]`, slices and `UPDATE … SET
 v[i] = …`; Arrow's `fixed_size_list<float32>` for batches; pg-compat
 sending `vector` as pgvector's text so its clients work.  **V3**
 statistics for the optimizer (dimension, norms, sampled distance
@@ -4505,3 +4553,7 @@ style) across a thousand seeds without failure.
   append); on ext4 a one-row commit 16.6 → 4.4 KiB and ~4× faster; a
   checkpoint's segment drop made safe against a crash before the new
   segment's entry is durable.  Steps S, L and V agreed to be built.
+- **2026-11-06** — §M14.12 V2: the exact search bound by bandwidth —
+  values out of line read beside a scan's rows (`large::Chunks`), type
+  lookups kept a thread, the server's `--cache`; 100k × 768 nearest
+  neighbours 233 → 48 ms (numpy 57, pgvector exact 167).

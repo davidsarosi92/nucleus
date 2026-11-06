@@ -1843,6 +1843,8 @@ pub struct RowBatches<'a> {
     kinds: Vec<Kind>,
     labels: Labels,
     txn: &'a dyn nucleus_kv::KvTxn,
+    /// The values stored out of line, read beside the rows.
+    large: crate::large::Chunks<'a>,
 }
 
 impl<'a> RowBatches<'a> {
@@ -1890,6 +1892,12 @@ impl<'a> RowBatches<'a> {
             kinds,
             labels: Labels::default(),
             txn: scan.txn,
+            large: crate::large::Chunks::new(
+                scan.txn,
+                scan.table,
+                scan.validated,
+                scan.end.as_deref(),
+            ),
         })
     }
 }
@@ -1907,7 +1915,7 @@ impl crate::storage::BatchSource for RowBatches<'_> {
             let Some((key, bytes)) = self.entries.next()? else {
                 break;
             };
-            decode_into(self.txn, self.table, key, bytes, &mut cols[..upto])?;
+            decode_into(&mut self.large, self.table, key, bytes, &mut cols[..upto])?;
             n += 1;
         }
         if n == 0 {
@@ -1964,7 +1972,7 @@ pub fn batch_of_rows(rows: Vec<Row>) -> Option<Batch> {
 /// Appends a stored row's columns to `cols` (a value stored out of line
 /// fetched only for a column read).
 fn decode_into(
-    txn: &dyn nucleus_kv::KvTxn,
+    large: &mut crate::large::Chunks,
     t: &Table,
     key: &[u8],
     b: &[u8],
@@ -1994,7 +2002,7 @@ fn decode_into(
             r.u8().map_err(bad)?;
             let len = r.u32().map_err(bad)?;
             let pk = crate::exec::pk_suffix(t, key);
-            col.push(crate::large::fetch(txn, t, pk, c, len)?);
+            col.push(large.fetch(t, pk, c, len)?);
             continue;
         }
         match (col, tag) {

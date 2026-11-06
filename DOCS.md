@@ -1305,8 +1305,16 @@ removed with their row, in its transaction: a snapshot sees the chunks of
 the row version it sees, a rollback or a crash leaves none behind (the
 crash test writes large values), a changed primary key moves them, and
 dropping the table removes them.  An update that leaves a large value as
-it was writes none of its chunks.  The consistency check finds a value
-missing chunks and chunks without their value.  A registered type's id is
+it was writes none of its chunks.  A batch scan of the rows
+(`RowBatches`) reads the values it needs through `large::Chunks`: one
+scan of the chunks from the first row holding one to the scan's end,
+walked beside the rows' (the chunks' keys follow the rows'), each
+value's chunks read until they hold its length and a one-chunk value
+decoded from the chunk as read — a step a value where a seek was
+(§M14.12 V2: a scan of 768-float vectors 2.3× faster on its own); the
+row-at-a-time executor looks each value up (`large::fetch`).  The
+consistency check finds a value missing chunks and chunks without their
+value.  A registered type's id is
 the FNV-1a hash of its name, the same in every process (two names with
 one id are refused when registered).
 
@@ -2302,7 +2310,10 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   (`CanonicalBytes` implements both), so they agree by construction; its
   type is `DataType::Ext(TypeRef)`.  `TypeRef` is the type interned once
   per name (small, `Copy`): `name()`, `id()`, `imp()`,
-  `TypeRef::named(name)`.  The catalog stores a registered type by name;
+  `TypeRef::named(name)`, `TypeRef::by_id(id)` (each thread keeps the
+  real type it last looked up either way, so decoding a column of a
+  registered type takes the interning table's lock once, not a value —
+  §M14.12 V2, where every worker of a parallel scan waited on it).  The catalog stores a registered type by name;
   a database naming a type this process has never registered still opens
   (`TypeRef::named_or_missing`: values print as hex, input fails naming
   the missing type).  `ncp` sends registered types as text for now (their
@@ -2665,10 +2676,11 @@ a wider type, `22012` NULLIF, `21000` LIMIT 1, `42P07` IF NOT EXISTS,
 nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
-                     [--sync ordered|full] [--wal minimal|full]
+                     [--sync ordered|full] [--wal minimal|full] [--cache <size>]
 ```
 
-`--sync` sets how far commits and checkpoints sync (§3.2, D17):
+`--cache` sizes the page cache (default `128MB`; units as `work_mem`'s:
+`kB`, `MB`, `GB`) — PostgreSQL's `shared_buffers`.  `--sync` sets how far commits and checkpoints sync (§3.2, D17):
 `ordered` (the default) or `full`, which also flushes the drive's cache
 (on macOS).  `--wal` (D16): `minimal` (the default) writes a new index's
 entries without the WAL and checkpoints at its commit; `full` logs every
@@ -3354,6 +3366,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.12 V2, the exact search bound by bandwidth:**
+  `large::Chunks` (values out of line read beside a batch scan's rows,
+  §8.1), type lookups kept a thread (§8.12), the server's `--cache`
+  (§9).  100k × 768 nearest neighbours 233 → 48 ms, numpy's 55.
 - **2026-11-06 — §M14.28 L0, the commit's bytes:** the real platform's
   sync is `fdatasync` on Linux (§3.2); `FileSystem::writes_in_place`
   (false on Apple's systems); where true, WAL segments grown ahead by

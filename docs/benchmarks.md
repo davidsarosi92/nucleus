@@ -695,13 +695,18 @@ vector now), the column table's within the variation but for Q23, 220 →
 
 Exact nearest neighbours (PLAN.md §M14.12; `bench/vectors/knn.py
 target/release/nucleus --pg`): 100,000 random vectors of 768 dimensions
-(293 MiB), the ten nearest of 20 queries, median; 2026-11-06.
+(293 MiB), the ten nearest of 20 queries, median; nucleus with a 1 GB
+page cache (`--cache 1GB`) as pgvector has `shared_buffers = 1GB`;
+2026-11-06, after §M14.12 V2.
 
 | | ms | GiB/s read | answers differing from numpy's |
 |---|---:|---:|---:|
-| numpy brute force (one core) | 57 | 5.1 | — |
-| nucleus `ORDER BY v <-> $1 LIMIT 10` | 206 | 1.4 | 0 of 20 |
-| pgvector (PostgreSQL 18, no index) | 155 | 1.8 | 0 of 20 |
+| numpy brute force (one core) | 57 | 5.0 | — |
+| nucleus `ORDER BY v <-> $1 LIMIT 10` | 48 | 6.0 | 0 of 20 |
+| pgvector (PostgreSQL 18, no index) | 167 | 1.7 | 0 of 20 |
+
+Before V2: nucleus 206 ms (its default 128 MiB cache; a lookup a vector
+stored out of line; the type interning table's lock a value).
 
 Loading the 100,000 vectors: nucleus 21 s (Python `load`, a list of
 numpy arrays), pgvector 42 s (`COPY` of text through `psql`).

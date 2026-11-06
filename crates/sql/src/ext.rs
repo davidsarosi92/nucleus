@@ -1136,8 +1136,15 @@ impl TypeRef {
     /// The interned type called `name`, if a registry has registered one
     /// in this process.
     pub fn named(name: &str) -> Option<TypeRef> {
+        if let Some(t) = LAST_NAMED.get()
+            && t.name() == name
+        {
+            return Some(t);
+        }
         let t = interned().lock().unwrap_or_else(|e| e.into_inner());
-        t.by_name.get(name).copied()
+        let found = t.by_name.get(name).copied();
+        remember(&LAST_NAMED, found);
+        found
     }
 
     /// The interned `name`, or a stand-in for a type this process has no
@@ -1152,11 +1159,39 @@ impl TypeRef {
     /// The interned type with stable id `id`, or a stand-in (named by the
     /// id) when this process has none.
     pub fn by_id(id: u32) -> TypeRef {
+        if let Some(t) = LAST_BY_ID.get()
+            && t.id() == id
+        {
+            return t;
+        }
         let found = {
             let t = interned().lock().unwrap_or_else(|e| e.into_inner());
             t.by_id.get(&id).copied()
         };
+        remember(&LAST_BY_ID, found);
         found.unwrap_or_else(|| Self::named_or_missing(&format!("type #{id:08x}")))
+    }
+}
+
+// The type each thread last looked up, by name and by id: a column of
+// values decodes one type a value, and the interning table's lock taken
+// for each — by every worker of a parallel scan — was where a scan of
+// vectors waited most (§M14.12 V2).  Only a real type is kept: a
+// stand-in for a missing one may give way to the real one, a real one is
+// never replaced.
+thread_local! {
+    static LAST_NAMED: std::cell::Cell<Option<TypeRef>> = const { std::cell::Cell::new(None) };
+    static LAST_BY_ID: std::cell::Cell<Option<TypeRef>> = const { std::cell::Cell::new(None) };
+}
+
+fn remember(
+    last: &'static std::thread::LocalKey<std::cell::Cell<Option<TypeRef>>>,
+    t: Option<TypeRef>,
+) {
+    if let Some(t) = t
+        && !is_missing(t)
+    {
+        last.set(Some(t));
     }
 }
 

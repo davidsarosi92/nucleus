@@ -188,6 +188,84 @@ pub fn fetch(txn: &dyn KvTxn, t: &Table, pk: &[u8], col: usize, len: u32) -> Res
     decode_value(&mut Reader::new(&enc))
 }
 
+/// Values stored out of line read in the order of their rows, for a scan
+/// (§M14.12 V2): one scan of the chunks from the first row holding one to
+/// the scan's end, walked beside the rows' own, in place of a scan of
+/// each value's chunks — a seek a value (a 768-float embedding is one)
+/// becomes a step.  Opened at the first value met; the rows must come in
+/// key order, the columns of a row in theirs.
+pub struct Chunks<'a> {
+    txn: &'a dyn KvTxn,
+    validated: bool,
+    /// The chunks' key the scan ends before (`None`: the table's).
+    end: Option<Vec<u8>>,
+    entries: Option<crate::exec::Entries<'a>>,
+}
+
+impl<'a> Chunks<'a> {
+    /// For a scan of `t`'s rows ending before row key `end` (`None`: the
+    /// table's end).
+    pub fn new(txn: &'a dyn KvTxn, t: &Table, validated: bool, end: Option<&[u8]>) -> Self {
+        Self {
+            txn,
+            validated,
+            end: Some(match end {
+                // A row's key: the chunks of the rows before it.
+                Some(e) if e.starts_with(&t.index_prefix(0)) => {
+                    let mut k = t.index_prefix(LARGE_INDEX);
+                    k.extend_from_slice(pk_suffix(t, e));
+                    k
+                }
+                // Past the rows (the primary index's end).
+                _ => prefix_end(&t.index_prefix(LARGE_INDEX)).expect("chunk prefix"),
+            }),
+            entries: None,
+        }
+    }
+
+    /// The value of row `pk`'s column `col`, `len` bytes of encoding: as
+    /// [`fetch`].  Its chunks are read until they hold `len` bytes, so
+    /// nothing past them is read; a value of one chunk (a vector's) is
+    /// decoded from the chunk as read.
+    pub fn fetch(&mut self, t: &Table, pk: &[u8], col: usize, len: u32) -> Result<Value> {
+        let p = chunks_prefix(t, pk, col);
+        if self.entries.is_none() {
+            let end = self.end.take().expect("opened once");
+            self.entries = Some(crate::exec::Entries::over(
+                self.txn,
+                self.validated,
+                Bound::Included(&p),
+                Bound::Excluded(&end),
+            )?);
+        }
+        let entries = self.entries.as_mut().expect("opened above");
+        let len = len as usize;
+        let mut enc = Vec::new();
+        while enc.len() < len {
+            let Some((k, v)) = entries.next()? else { break };
+            if !k.starts_with(&p) {
+                if k > p.as_slice() {
+                    break; // past it: its chunks are missing
+                }
+                // Chunks of rows or columns not read, or of rows deleted.
+                continue;
+            }
+            if enc.is_empty() && v.len() == len {
+                return decode_value(&mut Reader::new(v));
+            }
+            enc.extend_from_slice(v);
+        }
+        if enc.len() != len {
+            return Err(Error::internal(format!(
+                "{}: a value stored out of line has {} of its {len} bytes",
+                t.name,
+                enc.len()
+            )));
+        }
+        decode_value(&mut Reader::new(&enc))
+    }
+}
+
 /// Decodes the row stored at `key`, reading its values stored out of line
 /// (and its enums' labels).
 pub fn read_row(txn: &dyn KvTxn, t: &Table, key: &[u8], bytes: &[u8]) -> Result<Row> {

@@ -252,3 +252,103 @@ fn the_check_finds_lost_and_orphaned_chunks() {
         "{problems:#?}"
     );
 }
+
+/// A scan reads the values stored out of line beside its rows, one scan
+/// of their chunks (§M14.12 V2): every mix of rows — large in one column,
+/// in both, in neither, `NULL`, several chunks, rows deleted and changed
+/// in the open transaction — reads back as written, over the whole table
+/// and over ranges, a column or both, batch by batch and row by row.
+#[test]
+fn scans_read_values_out_of_line_in_row_order() {
+    let (kv, _) = setup();
+    let mut s = Session::new(kv.clone());
+    s.execute("CREATE TABLE files (id INT PRIMARY KEY, body TEXT, n INT, note TEXT)")
+        .unwrap();
+    // Row i: body large when i % 3 == 0 (several chunks when i % 9 == 0),
+    // note large when i % 4 == 0, NULL when i % 5 == 0.
+    let body = |i: i64| -> Option<String> {
+        if i % 9 == 0 {
+            Some(format!("{i}").repeat(40_000))
+        } else if i % 3 == 0 {
+            Some(format!("b{i}").repeat(700))
+        } else {
+            Some(format!("small{i}"))
+        }
+    };
+    let note = |i: i64| -> Option<String> {
+        if i % 5 == 0 {
+            None
+        } else if i % 4 == 0 {
+            Some(format!("n{i}").repeat(900))
+        } else {
+            Some(format!("note{i}"))
+        }
+    };
+    let lit = |v: Option<String>| v.map_or("NULL".to_string(), |v| format!("'{v}'"));
+    for i in 1..=120 {
+        s.execute(&format!(
+            "INSERT INTO files VALUES ({i}, {}, {i}, {})",
+            lit(body(i)),
+            lit(note(i))
+        ))
+        .unwrap();
+    }
+    // Deleted and changed in an open transaction, read inside it.
+    s.execute("BEGIN").unwrap();
+    s.execute("DELETE FROM files WHERE id % 7 = 0").unwrap();
+    s.execute("UPDATE files SET note = repeat('u', 3000) WHERE id % 11 = 0")
+        .unwrap();
+    let alive = |i: i64| i % 7 != 0;
+    let note_now = |i: i64| {
+        if i % 11 == 0 {
+            Some("u".repeat(3000))
+        } else {
+            note(i)
+        }
+    };
+    let len = |v: Option<String>| v.map_or("NULL".to_string(), |v| v.len().to_string());
+    for batch in ["1024", "0"] {
+        s.execute(&format!("SET batch_size = {batch}")).unwrap();
+        for (lo, hi) in [(1, 120), (17, 64), (90, 120)] {
+            let range = format!("id BETWEEN {lo} AND {hi}");
+            let want = |cols: &dyn Fn(i64) -> Vec<String>| -> Vec<Vec<String>> {
+                (lo..=hi).filter(|&i| alive(i)).map(cols).collect()
+            };
+            assert_eq!(
+                rows(
+                    &mut s,
+                    &format!(
+                        "SELECT id, length(body), length(note) FROM files WHERE {range} ORDER BY id"
+                    )
+                ),
+                want(&|i| vec![i.to_string(), len(body(i)), len(note_now(i))]),
+                "both, {range}, batch {batch}"
+            );
+            assert_eq!(
+                rows(
+                    &mut s,
+                    &format!("SELECT id, length(note) FROM files WHERE {range} ORDER BY id")
+                ),
+                want(&|i| vec![i.to_string(), len(note_now(i))]),
+                "note, {range}, batch {batch}"
+            );
+            assert_eq!(
+                rows(
+                    &mut s,
+                    &format!(
+                        "SELECT id, md5(body) FROM files WHERE {range} AND n % 9 = 0 ORDER BY id"
+                    )
+                ),
+                rows(
+                    &mut s,
+                    &format!(
+                        "SELECT id, md5(repeat(id::text, 40000)) FROM files WHERE {range} AND n % 9 = 0 ORDER BY id"
+                    )
+                ),
+                "several chunks, {range}, batch {batch}"
+            );
+        }
+    }
+    s.execute("COMMIT").unwrap();
+    consistent(&*kv);
+}
