@@ -82,6 +82,12 @@ pub mod catalog {
     pub use crate::roles::{Membership, Role, all as roles, memberships};
 }
 
+/// The `vector` type as modules see it ([`crate::vectors`]): its values
+/// from and to components, checked as the type checks them.
+pub mod vectors {
+    pub use crate::vectors::{MAX_DIMS, checked, components, data_type, dims, value};
+}
+
 /// Who the current statement runs as ([`crate::access`]).
 pub use crate::access::{Context, Who, current as current_who};
 /// Records a login refused before a session could be had ([`crate::audit`]).

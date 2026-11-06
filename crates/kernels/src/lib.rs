@@ -139,6 +139,7 @@ pub fn crc_hardware() -> bool {
 pub fn crc32c_hardware(data: &[u8]) -> u32 {
     assert!(crc_hardware(), "no CRC-32C instructions on this CPU");
     // The interleaved loop over `$step` (eight bytes) and `$byte`.
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     macro_rules! interleaved {
         ($data:expr, $step:expr, $byte:expr) => {{
             let mut data: &[u8] = $data;
@@ -209,16 +210,21 @@ pub fn crc32c_hardware(data: &[u8]) -> u32 {
 
 /// The interleaved blocks' lengths (powers of two): three of [`LONG`]
 /// while they fit, then of [`SHORT`].
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 const LONG: usize = 2048;
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 const SHORT: usize = 256;
 
 /// The raw CRC register followed by [`LONG`] / [`SHORT`] zero bytes, a
 /// byte of the register at a time (`[k][b]`: byte `k` being `b`).
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 static ZEROS_LONG: [[u32; 256]; 4] = zeros_table(LONG);
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 static ZEROS_SHORT: [[u32; 256]; 4] = zeros_table(SHORT);
 
 /// `crc` followed by the zeros `zeros` is the table of.
 #[inline(always)]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 fn shift(zeros: &[[u32; 256]; 4], crc: u32) -> u32 {
     zeros[0][(crc & 0xFF) as usize]
         ^ zeros[1][((crc >> 8) & 0xFF) as usize]
@@ -227,6 +233,7 @@ fn shift(zeros: &[[u32; 256]; 4], crc: u32) -> u32 {
 }
 
 /// The 32 × 32 GF(2) matrix `mat` times `vec`.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 const fn gf2_times(mat: &[u32; 32], mut vec: u32) -> u32 {
     let (mut sum, mut i) = (0, 0);
     while vec != 0 {
@@ -239,6 +246,7 @@ const fn gf2_times(mat: &[u32; 32], mut vec: u32) -> u32 {
     sum
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 const fn gf2_square(mat: &[u32; 32]) -> [u32; 32] {
     let mut sq = [0u32; 32];
     let mut n = 0;
@@ -251,6 +259,7 @@ const fn gf2_square(mat: &[u32; 32]) -> [u32; 32] {
 
 /// The table of appending `len` zero bytes (a power of two) to the raw
 /// register: the operator for one zero bit squared up to it.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 const fn zeros_table(len: usize) -> [[u32; 256]; 4] {
     let mut op = [0u32; 32];
     op[0] = POLY;

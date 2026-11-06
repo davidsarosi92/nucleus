@@ -847,7 +847,7 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                     return Err(bad("vector"));
                 }
                 let cs: Vec<f32> = cs.iter().map(|c| f32::from_be_bytes(*c)).collect();
-                nucleus_sql::vectors::checked(&cs)?
+                nucleus_sql::ext::vectors::checked(&cs)?
             }
             (Some(DataType::Array(elem)), _) => {
                 let int = |at: usize| -> Result<i32, Error> {
@@ -1498,11 +1498,11 @@ mod tests {
     #[test]
     fn vector_binary_matches_pgvector() {
         let _ = nucleus_sql::ext::Registry::builtin();
-        let v = nucleus_sql::vectors::value(&[1.0, -2.5]);
-        let b = binary_value(&v, nucleus_sql::vectors::data_type());
+        let v = nucleus_sql::ext::vectors::value(&[1.0, -2.5]);
+        let b = binary_value(&v, nucleus_sql::ext::vectors::data_type());
         assert_eq!(hex(&b), "000200003f800000c0200000");
         let ty = type_of_oid(crate::catalog::VECTOR as i32);
-        assert_eq!(ty, Some(nucleus_sql::vectors::data_type()));
+        assert_eq!(ty, Some(nucleus_sql::ext::vectors::data_type()));
         assert_eq!(decode_param(&b, 1, ty).unwrap(), v);
         // A count the bytes disagree with, a non-finite component, none.
         for bad in [
