@@ -1451,6 +1451,17 @@ fn unary(op: UnaryOp, x: &Vector, len: usize, sel: &Sel) -> Result<Vector> {
     }
 }
 
+/// How many of the `n` rows of the columns `cols` `p` holds for,
+/// evaluated as a batch (the statistics' estimates on a sample).
+pub(crate) fn count_true(p: &Expr, cols: Vec<Vector>, n: usize, ctx: &Ctx) -> Result<usize> {
+    let b = Batch {
+        len: n,
+        cols: cols.into_iter().map(Rc::new).collect(),
+        sel: Sel::All(n),
+    };
+    Ok(filter(p, b, Cx { ctx, outer: None })?.sel.len())
+}
+
 /// The rows of `b` for which `p` holds.
 fn filter(p: &Expr, b: Batch, cx: Cx) -> Result<Batch> {
     let v = eval(p, &b, &b.sel, cx)?;

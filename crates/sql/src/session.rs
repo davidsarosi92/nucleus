@@ -3181,6 +3181,7 @@ fn alter_column_type(
     }
     dml::replace_rows(txn, reg, &new, rows)?;
     txn.delete(&catalog::stats_key(&new))?; // the old type's statistics
+    catalog::delete_stats_sample(txn, &new)?;
     catalog::note_stored_types(txn, &new.columns)?;
     catalog::update_table(txn, &new)
 }

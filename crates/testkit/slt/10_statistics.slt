@@ -135,6 +135,37 @@ SELECT count(*) FROM t WHERE k = 1 AND v BETWEEN 100 AND 199
 ----
 50
 
+# A star: two small dimensions joined only through the fact table are not
+# joined to each other first (no cross product while conditions connect
+# the chain), though their product is smaller than the fact table.
+statement ok
+CREATE TABLE star (id INT PRIMARY KEY, a INT, b INT)
+
+statement ok
+INSERT INTO star SELECT id, id % 10, id / 100 FROM t
+
+statement ok
+ANALYZE star
+
+query T
+EXPLAIN SELECT count(*) FROM star JOIN small s1 ON star.a = s1.id JOIN small s2 ON star.b = s2.id
+----
+Aggregate: count(*)
+  Project: #0
+    Hash Join (#1 = #0) on (#1 = #2)
+      Project: #0, #1
+        Hash Join (#2 = #0) on (#2 = #3)
+          Seq Scan on star (rows=1000)
+          Project: #0
+            Seq Scan on small (rows=10)
+      Project: #0
+        Seq Scan on small (rows=10)
+
+query I
+SELECT count(*) FROM star JOIN small s1 ON star.a = s1.id JOIN small s2 ON star.b = s2.id
+----
+1000
+
 # VACUUM: the database's maintenance (PostgreSQL's forms accepted), not in a
 # transaction block.
 statement ok

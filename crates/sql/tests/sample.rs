@@ -178,3 +178,72 @@ fn a_reservoir_sample_is_the_same_every_run() {
         }
     }
 }
+
+/// The estimate `EXPLAIN` shows for the scan of `sql`'s plan (it shows
+/// one once the table was analyzed).
+fn estimate(s: &mut Session, sql: &str) -> f64 {
+    let plan: Vec<String> = values(s, &format!("EXPLAIN {sql}"))
+        .into_iter()
+        .map(|r| match &r[0] {
+            Value::Text(t) => t.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let line = plan
+        .iter()
+        .find(|l| l.contains("Scan") && l.contains("(rows="))
+        .unwrap_or_else(|| panic!("{plan:?}"));
+    let at = line.rfind("(rows=").unwrap() + 6;
+    line[at..line[at..].find(')').unwrap() + at]
+        .parse()
+        .unwrap()
+}
+
+/// ANALYZE keeps a sample of rows, and a predicate the statistics cannot
+/// describe — a distance below a radius, a pattern, a function of a
+/// column — is estimated on it (PLAN.md §M14.12 V3).
+#[test]
+fn predicates_beyond_the_statistics_are_estimated_on_a_sample() {
+    let mut s = session(14);
+    s.execute(
+        "CREATE TABLE e (id INT PRIMARY KEY, v VECTOR(3), w TEXT);
+         INSERT INTO e SELECT i, ARRAY[(i % 100) / 100.0, (i % 37) / 37.0, (i % 11) / 11.0]::vector,
+             'w' || (i % 50) FROM generate_series(1, 20000) AS t(i)",
+    )
+    .unwrap();
+    let cases = [
+        "SELECT id FROM e WHERE v <-> '[0,0,0]' < 0.5",
+        "SELECT id FROM e WHERE v <=> '[1,0,0]' > 0.3",
+        "SELECT id FROM e WHERE w LIKE 'w1%'",
+        "SELECT id FROM e WHERE id % 7 = 0",
+        "SELECT id FROM e WHERE length(w) = 2",
+    ];
+    s.execute("ANALYZE e").unwrap();
+    for q in cases {
+        let actual = values(&mut s, &format!("SELECT count(*) FROM ({q}) x"));
+        let Value::Int(actual) = actual[0][0] else {
+            panic!()
+        };
+        let est = estimate(&mut s, q);
+        // A thousand rows sampled: within a few points of the truth.
+        let error = (est - actual as f64).abs() / 20_000.0;
+        assert!(error < 0.05, "{q}: {est} for {actual}");
+    }
+    // A parameter is not known when planning: the default, no error.
+    let stmt =
+        nucleus_sql::parser::parse_one("SELECT count(*) FROM e WHERE v <-> $1 < 0.5").unwrap();
+    let out = s
+        .run(&stmt, &[nucleus_sql::vectors::value(&[0.0, 0.0, 0.0])])
+        .unwrap();
+    let Output::Rows { rows, .. } = out else {
+        panic!()
+    };
+    assert_eq!(rows[0][0], Value::Int(1599));
+    // A column added since: the sample is of other columns, not used.
+    s.execute("ALTER TABLE e ADD COLUMN z INT").unwrap();
+    let est = estimate(&mut s, "SELECT id FROM e WHERE w LIKE 'w1%'");
+    assert_eq!(est, 2000.0, "the default tenth");
+    s.execute("ANALYZE e").unwrap();
+    let est = estimate(&mut s, "SELECT id FROM e WHERE w LIKE 'w1%'");
+    assert!((est - 4400.0).abs() < 1000.0, "{est}");
+}

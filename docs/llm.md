@@ -183,7 +183,9 @@ after an error in a block everything is `25P02` until `ROLLBACK`.
   the hint before retrying.
 - `EXPLAIN <query>` shows the plan; `EXPLAIN ANALYZE <query>` runs it and
   shows each step's actual rows beside the estimate (run `ANALYZE` when they
-  differ a lot).
+  differ a lot).  `LIKE`, a distance bound or a function of a column is
+  estimated on up to 1,000 rows `ANALYZE` keeps, so analyze again after
+  the data changes a lot.
 - `ANALYZE QUERY <query | UPDATE | DELETE>` lints a statement without
   running it: full scans an index would serve (with the `CREATE INDEX`),
   indexed columns hidden in functions, foreign keys without an index,

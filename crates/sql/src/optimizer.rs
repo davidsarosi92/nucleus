@@ -16,8 +16,9 @@
 //! - **Costs** (§M13): for tables with statistics (`ANALYZE`), the access
 //!   path is the cheapest of a full scan and every usable index, and chains
 //!   of inner joins are reordered by dynamic programming over their inputs
-//!   (up to 8), avoiding cross products, with the smaller input as the hash
-//!   build side.  Without statistics, the rule-based choice and the written
+//!   (up to 8) over the subsets the conditions connect (a cross product
+//!   only where they leave the chain in pieces), with the smaller input as
+//!   the hash build side.  Without statistics, the rule-based choice and the written
 //!   join order are kept.
 
 use std::ops::Bound;
@@ -1041,13 +1042,15 @@ fn hashed(plan: Plan) -> Plan {
     }
 }
 
-/// An index lookup costs about this many rows of a scan (the descent,
-/// measured: ~7 µs against ~0.7 µs a row scanned), each row a secondary
-/// index finds this many more (its fetch from the primary index, ~10 µs).
-const LOOKUP_ROWS: f64 = 12.0;
-const FETCH_ROWS: f64 = 20.0;
+/// An index lookup costs about this many rows of a scan, each row a
+/// secondary index finds this many more (its fetch from the primary
+/// index).  Measured on TPC-H's row tables, one thread (§M14.12 V3): a
+/// lookup into `orders` by its key 2.9 µs, a row `lineitem`'s index on
+/// `l_partkey` finds 5.8 µs, against 0.07–0.1 µs a hash join's row.
+const LOOKUP_ROWS: f64 = 40.0;
+const FETCH_ROWS: f64 = 60.0;
 /// A column table's lookup against a row table's, and its scan's rows.
-const COLUMN_LOOKUP: f64 = 4.0;
+const COLUMN_LOOKUP: f64 = 1.2;
 const COLUMN_SCAN: f64 = 0.25;
 
 /// Hash joins whose right side is a table's scan, where an index on the
@@ -1433,40 +1436,54 @@ fn reorder_leaves(leaves: Vec<(Plan, usize)>, conds: Vec<Expr>, st: &Stats) -> O
             .iter()
             .any(|m| m & a != 0 && m & b != 0 && m & !(a | b) == 0)
     };
-    let mut best: Vec<Option<(f64, Tree)>> = vec![None; full + 1];
-    for i in 0..n {
-        best[1 << i] = Some((leaf_rows[i], Tree::Leaf(i)));
-    }
     let mut masks: Vec<usize> = (1..=full).filter(|m| m.count_ones() >= 2).collect();
     masks.sort_by_key(|m| m.count_ones());
-    for mask in masks {
-        let out = rows_of(mask);
-        for allow_cross in [false, true] {
-            let mut a = (mask - 1) & mask;
-            while a > 0 {
-                let b = mask & !a;
-                if let (Some((ca, ta)), Some((cb, tb))) = (&best[a], &best[b]) {
-                    let joined = connected(a, b);
-                    if joined || allow_cross {
-                        let (ra, rb) = (rows_of(a), rows_of(b));
-                        let step = if joined { ra + 1.5 * rb + out } else { ra * rb };
-                        let cost = ca + cb + step;
-                        if best[mask].as_ref().is_none_or(|(c, _)| cost < *c) {
-                            best[mask] = Some((
-                                cost,
-                                Tree::Node(Box::new(ta.clone()), Box::new(tb.clone())),
-                            ));
+    // Connected subsets only (DPccp's space, PostgreSQL's
+    // `have_relevant_joinclause`): a cross product of two inputs the
+    // conditions join only through a third is never planned.  Only a
+    // chain the conditions leave in pieces joins them by cross products.
+    let mut tree = None;
+    for allow_cross in [false, true] {
+        let mut best: Vec<Option<(f64, Tree)>> = vec![None; full + 1];
+        for i in 0..n {
+            best[1 << i] = Some((leaf_rows[i], Tree::Leaf(i)));
+        }
+        for &mask in &masks {
+            let out = rows_of(mask);
+            for cross in [false, true] {
+                if cross && !allow_cross {
+                    break;
+                }
+                let mut a = (mask - 1) & mask;
+                while a > 0 {
+                    let b = mask & !a;
+                    if let (Some((ca, ta)), Some((cb, tb))) = (&best[a], &best[b]) {
+                        let joined = connected(a, b);
+                        if joined || cross {
+                            let (ra, rb) = (rows_of(a), rows_of(b));
+                            let step = if joined { ra + 1.5 * rb + out } else { ra * rb };
+                            let cost = ca + cb + step;
+                            if best[mask].as_ref().is_none_or(|(c, _)| cost < *c) {
+                                best[mask] = Some((
+                                    cost,
+                                    Tree::Node(Box::new(ta.clone()), Box::new(tb.clone())),
+                                ));
+                            }
                         }
                     }
+                    a = (a - 1) & mask;
                 }
-                a = (a - 1) & mask;
-            }
-            if best[mask].is_some() {
-                break;
+                if best[mask].is_some() {
+                    break;
+                }
             }
         }
+        if let Some((_, t)) = best[full].take() {
+            tree = Some(t);
+            break;
+        }
     }
-    let (_, tree) = best[full].clone()?;
+    let tree = tree?;
     let mut assigned = vec![false; conds.len()];
     let leaves: Vec<(Plan, usize, usize)> = leaves
         .into_iter()

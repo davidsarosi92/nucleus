@@ -875,7 +875,7 @@ pub fn drop_table(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
     txn.delete(&table_key(&table.name))?;
     txn.delete(&id_key(ROWID, table.id))?;
     txn.delete(&id_key(STATS, table.id))?;
-    Ok(())
+    delete_stats_sample(txn, table)
 }
 
 /// The table holding index `name`, if any.
@@ -901,6 +901,23 @@ pub fn find_statistic(txn: &dyn KvTxn, name: &str) -> Result<Option<(Table, usiz
 /// The statistics key of a table.
 pub fn stats_key(table: &Table) -> Vec<u8> {
     id_key(STATS, table.id)
+}
+
+/// The key of a table's kept sample rows (`ANALYZE`'s, for estimates
+/// the statistics cannot make): the statistics key and `01`, holding
+/// their count; each column's values under it and the column's number
+/// (`u16`), so an estimate reads the columns it needs only.
+pub fn stats_sample_key(table: &Table) -> Vec<u8> {
+    let mut k = stats_key(table);
+    k.push(0x01);
+    k
+}
+
+/// Deletes a table's kept sample rows, every column's.
+pub fn delete_stats_sample(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
+    let k = stats_sample_key(table);
+    delete_range(txn, &k, prefix_end(&k).as_deref())?;
+    Ok(())
 }
 
 /// What a constraint is.

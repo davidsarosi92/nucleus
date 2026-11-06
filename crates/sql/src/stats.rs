@@ -34,6 +34,7 @@ use crate::error::Result;
 use crate::expr::Expr;
 use crate::plan::Plan;
 use crate::types::Value;
+use crate::vector::Vector;
 
 /// Rows assumed for a table never analyzed.
 pub const DEFAULT_ROWS: f64 = 1000.0;
@@ -169,15 +170,93 @@ impl TableStats {
 /// PostgreSQL's 30 000).
 const SAMPLE: usize = 30_000;
 
+/// Rows of the sample kept for estimates ([`stats_sample`]), at most, and
+/// their bytes at most (a table of 768-dimension vectors keeps about 330).
+const KEPT_ROWS: usize = 1000;
+const KEPT_BYTES: usize = 1 << 20;
+const KEPT_VERSION: u8 = 1;
+
+/// Keeps `KEPT_ROWS` of ANALYZE's sampled rows (a uniform choice of them,
+/// by `seed`) under the table's sample key, a column to a key, so a
+/// predicate the statistics cannot estimate is estimated on them
+/// ([`Stats::selectivity`]) from the columns it reads.
+fn keep_sample(
+    txn: &mut dyn KvTxn,
+    table: &Table,
+    rows: &[crate::types::Row],
+    seed: u64,
+) -> Result<()> {
+    catalog::delete_stats_sample(txn, table)?;
+    // A uniform choice of the reservoir's slots (its slots are not each
+    // a uniform choice of the rows: the first ones keep early rows more
+    // often).
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    let mut state = seed ^ 0x5eed_5a3f_1e00_0001;
+    let take = order.len().min(KEPT_ROWS);
+    for i in 0..take {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let r = crate::kernels::mix(state);
+        let j = i + (r % (order.len() - i) as u64) as usize;
+        order.swap(i, j);
+    }
+    let width = table.columns.len();
+    let mut cols: Vec<Vec<Value>> = (0..width).map(|_| Vec::new()).collect();
+    let (mut bytes, mut scratch) = (0usize, Vec::new());
+    for &i in &order[..take] {
+        if bytes > KEPT_BYTES {
+            break;
+        }
+        for (c, v) in cols.iter_mut().zip(&rows[i]) {
+            scratch.clear();
+            crate::encoding::encode_value(&mut scratch, v);
+            bytes += scratch.len();
+            c.push(v.clone());
+        }
+    }
+    let n = cols.first().map_or(0, Vec::len);
+    let key = catalog::stats_sample_key(table);
+    let mut w = Writer::default();
+    w.u8(KEPT_VERSION).u32(width as u32).u32(n as u32);
+    txn.put(&key, &w.0)?;
+    // Each column as a column table's segment holds it: decoded straight
+    // into the vector a batch evaluates.
+    for (c, col) in cols.into_iter().enumerate() {
+        let mut k = key.clone();
+        k.extend_from_slice(&(c as u16).to_be_bytes());
+        txn.put(&k, &crate::segment::encode(col).0)?;
+    }
+    Ok(())
+}
+
+/// The kept sample rows' count ([`keep_sample`]), if they are of the
+/// table's present columns.
+fn kept_rows(txn: &dyn KvTxn, table: &Table) -> Option<usize> {
+    let b = txn.get(&catalog::stats_sample_key(table)).ok()??;
+    let mut r = Reader::new(&b);
+    if r.u8().ok()? != KEPT_VERSION || r.u32().ok()? as usize != table.columns.len() {
+        return None;
+    }
+    Some(r.u32().ok()? as usize)
+}
+
+/// Column `c`'s kept sample values (as many as [`kept_rows`] says), as
+/// a vector.
+fn kept_column(txn: &dyn KvTxn, table: &Table, c: usize) -> Option<Vector> {
+    let mut k = catalog::stats_sample_key(table);
+    k.extend_from_slice(&(c as u16).to_be_bytes());
+    crate::segment::decode(&txn.get(&k).ok()??).ok()
+}
+
 /// Computes and stores the statistics of one table: from all its rows, or
 /// from a uniform sample of [`SAMPLE`] ([`Sample`], seeded once from the
 /// database's random numbers; the table's storage decodes only the rows it
 /// takes) — the row count is always exact.
 pub fn analyze_table(txn: &mut dyn KvTxn, table: &Table) -> Result<TableStats> {
+    let mut seed = [0u8; 8];
+    crate::datetime::random_bytes(&mut seed)?;
+    let seed = u64::from_le_bytes(seed);
     let (rows, total) = {
-        let mut seed = [0u8; 8];
-        crate::datetime::random_bytes(&mut seed)?;
-        let mut sample = Sample::new(SAMPLE, u64::from_le_bytes(seed));
+        let mut sample = Sample::new(SAMPLE, seed);
         let start = table.index_prefix(0);
         let end = nucleus_kv::prefix_end(&start);
         crate::storage::of(table)?.sample(
@@ -244,6 +323,7 @@ pub fn analyze_table(txn: &mut dyn KvTxn, table: &Table) -> Result<TableStats> {
         dependencies,
     };
     txn.put(&catalog::stats_key(table), &stats.encode())?;
+    keep_sample(txn, table, &rows, seed)?;
     Ok(stats)
 }
 
@@ -424,6 +504,11 @@ pub fn analyze(txn: &mut dyn KvTxn, table: Option<&str>) -> Result<()> {
 pub struct Stats<'a> {
     txn: &'a dyn KvTxn,
     cache: RefCell<HashMap<u32, Option<TableStats>>>,
+    /// Tables' kept sample row counts (read when an estimate first needs
+    /// them).
+    samples: RefCell<HashMap<u32, Option<usize>>>,
+    /// Predicates estimated on a sample, and their estimates.
+    estimated: RefCell<Vec<(u32, Expr, Option<f64>)>>,
 }
 
 impl<'a> Stats<'a> {
@@ -437,7 +522,71 @@ impl<'a> Stats<'a> {
         Self {
             txn,
             cache: RefCell::new(HashMap::new()),
+            samples: RefCell::new(HashMap::new()),
+            estimated: RefCell::new(Vec::new()),
         }
+    }
+
+    /// `table`'s kept sample rows of the columns `cols` only (in that
+    /// order), as a batch's vectors, and their count — if it was analyzed
+    /// since its columns last changed.
+    fn sample(&self, table: &Table, cols: &[usize]) -> Option<(Vec<Vector>, usize)> {
+        let n = (*self
+            .samples
+            .borrow_mut()
+            .entry(table.id)
+            .or_insert_with(|| kept_rows(self.txn, table)))?;
+        let vectors = cols
+            .iter()
+            .map(|&c| kept_column(self.txn, table, c))
+            .collect::<Option<_>>()?;
+        Some((vectors, n))
+    }
+
+    /// The fraction of the kept sample rows for which `pred` is true —
+    /// for a predicate the statistics cannot estimate (a function of
+    /// columns, a distance below a radius, two columns compared, a
+    /// pattern), evaluated as the executor would: `None` without a sample,
+    /// or when `pred` cannot be evaluated here (a subquery, a volatile
+    /// function, a parameter not yet bound, an error).  No match counts
+    /// as half of one.
+    fn sampled(&self, table: &Table, pred: &Expr) -> Option<f64> {
+        if pred.has_subquery() || volatile(pred) {
+            return None;
+        }
+        // A plan's passes ask again of the same predicates.
+        if let Some((_, _, s)) = self
+            .estimated
+            .borrow()
+            .iter()
+            .find(|(t, p, _)| *t == table.id && p == pred)
+        {
+            return *s;
+        }
+        let s = self.count_sampled(table, pred);
+        self.estimated
+            .borrow_mut()
+            .push((table.id, pred.clone(), s));
+        s
+    }
+
+    fn count_sampled(&self, table: &Table, pred: &Expr) -> Option<f64> {
+        let mut cols = pred.reads();
+        cols.sort_unstable();
+        cols.dedup();
+        if cols.iter().any(|&c| c >= table.columns.len()) {
+            return None;
+        }
+        let (vectors, n) = self.sample(table, &cols)?;
+        if n == 0 {
+            return None;
+        }
+        let pred =
+            pred.map_columns(&|c| Expr::Column(cols.binary_search(&c).expect("a column it reads")));
+        let reg = crate::ext::Registry::shared_builtin();
+        let ctx = crate::expr::Ctx::new(self.txn, &reg, &[]);
+        let hits = crate::vector::count_true(&pred, vectors, n, &ctx).ok()?;
+        Some((hits as f64).max(0.5) / n as f64)
     }
 
     /// The statistics of `table`, if it was analyzed.
@@ -463,7 +612,8 @@ impl<'a> Stats<'a> {
     /// The fraction of `table`'s rows satisfying `pred` (over its columns).
     pub fn selectivity(&self, table: &Table, pred: &Expr) -> f64 {
         let stats = self.of(table);
-        selectivity(table, stats.as_ref(), pred).clamp(0.0, 1.0)
+        let sampled = |p: &Expr| self.sampled(table, p);
+        selectivity(table, stats.as_ref(), &sampled, pred).clamp(0.0, 1.0)
     }
 
     /// The distinct combinations of columns `cols` of `table` (estimated),
@@ -555,7 +705,29 @@ fn const_value(e: &Expr) -> Option<Value> {
     }
 }
 
-fn selectivity(table: &Table, stats: Option<&TableStats>, pred: &Expr) -> f64 {
+/// Whether `e` calls a volatile function.
+fn volatile(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if let Expr::Call(f, _) = x
+            && f.volatility() == crate::ext::Volatility::Volatile
+        {
+            found = true;
+        }
+    });
+    found
+}
+
+/// `pred`'s selectivity: from the statistics where they describe it (a
+/// column against a value, `IS NULL`, `IN`, ranges, equalities counted
+/// together), else on the kept sample rows (`sampled`), else
+/// PostgreSQL-like defaults.
+fn selectivity(
+    table: &Table,
+    stats: Option<&TableStats>,
+    sampled: &dyn Fn(&Expr) -> Option<f64>,
+    pred: &Expr,
+) -> f64 {
     let rows = stats.map_or(DEFAULT_ROWS, |s| s.rows as f64).max(1.0);
     let col = |c: usize| stats.and_then(|s| s.columns.get(c));
     let non_null = |c: usize| col(c).map_or(1.0, |cs| 1.0 - cs.nulls as f64 / rows);
@@ -596,7 +768,7 @@ fn selectivity(table: &Table, stats: Option<&TableStats>, pred: &Expr) -> f64 {
                         continue;
                     }
                 }
-                let s = selectivity(table, stats, p);
+                let s = selectivity(table, stats, sampled, p);
                 match equality(p) {
                     Some(c) if !eqs.iter().any(|e| e.0 == c) => eqs.push((c, s)),
                     _ => rest *= s,
@@ -613,37 +785,34 @@ fn selectivity(table: &Table, stats: Option<&TableStats>, pred: &Expr) -> f64 {
             rest * together(table, stats, &eqs)
         }
         Expr::Binary(BinaryOp::Or, a, b) => {
-            let (x, y) = (selectivity(table, stats, a), selectivity(table, stats, b));
+            let (x, y) = (
+                selectivity(table, stats, sampled, a),
+                selectivity(table, stats, sampled, b),
+            );
             x + y - x * y
         }
-        Expr::Unary(UnaryOp::Not, e) => 1.0 - selectivity(table, stats, e),
+        Expr::Unary(UnaryOp::Not, e) => 1.0 - selectivity(table, stats, sampled, e),
         Expr::IsNull(e, negated) => match &**e {
             Expr::Column(c) => {
                 let s = col(*c).map_or(0.05, |cs| cs.nulls as f64 / rows);
                 if *negated { 1.0 - s } else { s }
             }
-            _ => 0.5,
+            _ => sampled(pred).unwrap_or(0.5),
         },
         Expr::InList(e, list, negated) => match &**e {
             Expr::Column(c) => {
                 let s = (list.len() as f64 / distinct(*c)).min(1.0) * non_null(*c);
                 if *negated { 1.0 - s } else { s }
             }
-            _ => 0.5,
+            _ => sampled(pred).unwrap_or(0.5),
         },
-        // A tenth of the rows match a pattern; the rest do not.
-        Expr::Like { negated, .. } => {
-            if *negated {
-                0.9
-            } else {
-                0.1
-            }
-        }
+        // Without a sample, a tenth of the rows match a pattern.
+        Expr::Like { negated, .. } => sampled(pred).unwrap_or(if *negated { 0.9 } else { 0.1 }),
         Expr::Binary(op, a, b) => {
             let (c, v, op) = match (&**a, &**b) {
                 (Expr::Column(c), e) if e.columns().is_empty() => (*c, e, *op),
                 (e, Expr::Column(c)) if e.columns().is_empty() => (*c, e, flip(*op)),
-                _ => return 0.33,
+                _ => return sampled(pred).unwrap_or(0.33),
             };
             match op {
                 BinaryOp::Eq => non_null(c) / distinct(c),
@@ -660,10 +829,10 @@ fn selectivity(table: &Table, stats: Option<&TableStats>, pred: &Expr) -> f64 {
                     };
                     (frac * non_null(c)).max(1.0 / rows)
                 }
-                _ => 0.5,
+                _ => sampled(pred).unwrap_or(0.5),
             }
         }
-        _ => 0.5,
+        _ => sampled(pred).unwrap_or(0.5),
     }
 }
 

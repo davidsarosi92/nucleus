@@ -1347,6 +1347,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 02 <sequence>` | counter (`table_id`) |
 | `00 03 <table id>` | next hidden row id (tables without a primary key) |
 | `00 04 <table id>` | statistics (§8.8) |
+| `00 04 <table id> 01` | the rows `ANALYZE` keeps for estimates (§8.8) |
 | `00 05 <type> 00 <ordering>` | an ordering taught to a type: its mapping (SQL over `value`) |
 | `00 06 <symbol> 00 <left> 00 <right>` | an operator taught: its function |
 | `00 07 <from> 00 <to>` | a cast taught: its function and context |
@@ -2308,7 +2309,16 @@ rows (§M14.20 W3b: `lineitem` 5.5 → 2.7 s in a row table, the column
 load's `ANALYZE` 5.7 → 2.9 s).  Selectivities: `=` 1/ndv, ranges from the
 histogram (a column's lower and upper bound in one AND together: the
 histogram between them, not each side's product), `IS NULL` the null
-fraction, `IN` n/ndv, `LIKE` 0.1 (`NOT LIKE` 0.9), combined by AND/OR/NOT.  For analyzed tables the access path is the cheapest of a
+fraction, `IN` n/ndv, combined by AND/OR/NOT.  What the statistics cannot
+estimate — `LIKE`, a distance below a bound, `id % 7 = 0`, any function
+of a column — is counted on a sample `ANALYZE` keeps (§M14.12 V3; Oracle's
+dynamic sampling, stored rather than read at planning): up to 1,000 of
+its sampled rows, at most 1 MiB, under `00 04 <table id> 01`, read once
+per planning and evaluated by the predicate itself (matches / rows, at
+least half a row); a predicate with a subquery or a volatile call, one
+that fails on a sampled row, or a table whose columns changed since
+falls back to the defaults (`LIKE` 0.1, `NOT LIKE` 0.9, other
+comparisons 0.33, the rest 0.5).  For analyzed tables the access path is the cheapest of a
 full scan and every index (a secondary index pays a row fetch per row),
 `EXPLAIN` shows `rows=`, and chains of up to 8 inner joins are reordered by
 dynamic programming (no cross products unless nothing connects; the

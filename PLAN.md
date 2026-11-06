@@ -276,7 +276,7 @@ are marked ✅.
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
-| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
@@ -3910,7 +3910,7 @@ compaction policy chosen and why, what is left to the B+tree — and the
 steps it leads to are planned as this milestone's own, agreed before
 they are built.
 
-### §M14.12 — Vectors ◐ (V1: the type, exact search, every driver; V2: bound by bandwidth; V2b: positions, numpy / Arrow, pgvector's clients)
+### §M14.12 — Vectors ◐ (V1: the type, exact search, every driver; V2: bound by bandwidth; V2b: positions, numpy / Arrow, pgvector's clients; V3: estimates on a kept sample)
 
 Embeddings beside the data they describe, in the same transactions.
 `vector` is a **built-in type with every capability** — it matters most
@@ -4102,9 +4102,70 @@ one buffer, no value each) and the distance as a batch kernel over it.
 TPC-H unchanged (`bench/phases.py reads`, alternating, the sums of the
 best times: 8575 / 7888 → 7749 / 7874 ms).
 
-*Left, as steps of their own:* **V3**
-statistics for the optimizer (dimension, norms, sampled distance
-quantiles).  **V4** the HNSW index (Malkov and Yashunin 2018; pgvector's
+*Done — V3, estimates on a kept sample* (2026-11-06).  A distance
+below a bound was estimated as any comparison the statistics cannot
+read: a third of the rows, whatever the bound.  Norms, a dimension's
+spread or sampled distance quantiles (the plan) would estimate a
+distance to a constant vector only, and only through a model of the
+distance's distribution; the kept sample estimates any condition the
+histograms cannot — a distance to a parameter, `LIKE`, `id % 7 = 0`,
+`length(w) = 2` — by running it.  `ANALYZE` keeps up to 1,000 of the
+rows it sampled (at most 1 MiB; drawn from Algorithm L's reservoir by
+a partial Fisher–Yates shuffle) under `00 04 <table id> 01`; planning
+reads them once per table and evaluates the condition on them (matches
+/ rows, at least half a row); a subquery, a volatile call, an error on
+a sampled row or columns changed since `ANALYZE` (the row width
+differs; a type change or `DROP TABLE` deletes the rows) fall back to
+the defaults.  Prior art: Oracle's dynamic sampling (it reads blocks at
+planning time; nucleus stores the rows at `ANALYZE` and reads one key,
+so planning never scans), PostgreSQL's defaults (`DEFAULT_MATCH_SEL`
+and its fixed thirds, kept as the fallback), SQL Server's sampled
+statistics.  Not taken: the dimension statistics and norms (M14.27
+item 10 keeps them as aggregates); a sample per index. While testing:
+the join order's dynamic programming planned a cross product of two
+inputs a third joins (a star's dimensions) whenever its estimate was
+lowest — a chain's subsets now join only along conditions (DPccp's
+connected subsets, PostgreSQL's `have_relevant_joinclause`), a cross
+product only for a chain they leave in pieces, as DOCS §8.8 already
+said.  Tests: estimates within 5 % of the actual rows for a distance to
+a constant and to a parameter, `LIKE`, `id % 7 = 0` and `length(w) =
+2`; the default after `ADD COLUMN`, the sample again after `ANALYZE`;
+a star's plan without a cross product (`10_statistics.slt`).
+Measured, and a cost recalibrated: with `p_name LIKE '%green%'`
+estimated right (10,800 parts, not 20,000) TPC-H Q9 on row tables took
+an index nested loop into `lineitem` by `l_partkey` (324,000 rows
+fetched) for the hash join over all 6M — 527 → 900 ms.  The lookup's
+constants dated from before W7's scans: measured again on one thread, a
+lookup into `orders` by its key 2.9 µs, a row the `l_partkey` index
+finds 5.8 µs, a hash join's row 0.07–0.1 µs — `LOOKUP_ROWS` 12 → 40,
+`FETCH_ROWS` 20 → 60, `COLUMN_LOOKUP` 4 → 1.2 (a column table's lookup
+as it was); both joins then hash (`orders` 1,782 → 1,256 ms, `lineitem`
+by part 1,908 → 1,092 ms).  Reading the kept rows whole cost planning
+3–4 ms on ClickBench's 105 columns: each column is kept under a key of
+its own, as a column table's segment encodes it (`segment::encode`,
+decoded straight into the batch's vector), and only the condition's
+columns are read and evaluated as a batch — `EXPLAIN` of ClickBench's
+Q20 0.18 → 0.24 ms, Q22 0.23 → 0.74 ms (4.2 ms before).  Measured,
+alternating with S8, two rounds, geometric means: TPC-H on row tables
+228.6 / 225.7 → 210.2 / 208.8 ms (Q21 944 → 521, Q7 621 → 447, Q16 193
+→ 157; Q18 469 → 674: its `HAVING sum(l_quantity) > 300` estimated a
+third, as PostgreSQL does, 57 rows in fact — the old constants' lookups
+won by mistake; the adaptive join below is the answer), column tables
+76.4 / 75.6 → 73.4 / 76.0 ms (Q21 402 → 169 in some runs: its plan
+follows the sample `ANALYZE` draws), ClickBench on column tables 18.1 /
+17.5 → 17.4 / 17.8 ms, on row tables 144.6 / 139.0 → 139.5 / 135.4 ms.
+Against PostgreSQL 18.6 (`docs/benchmarks.md`): TPC-H 0.25× on column
+tables, 0.76× on row tables (0.77× before); ClickBench 0.10× and 0.83×
+(0.11×, 0.89×); every result the same, but for ties at a `LIMIT`.
+
+*Next, recorded:* **an adaptive join** — a lookup join that buffers its
+outer rows up to the point where the hash join becomes cheaper and
+switches at run time (Oracle's adaptive plans, 12c: a statistics
+collector at the inflection point; SQL Server's adaptive joins, 2017),
+so a misestimated outer side (Q18's `HAVING`) costs neither plan's
+worst case.
+
+*Left, as steps of their own:* **V4** the HNSW index (Malkov and Yashunin 2018; pgvector's
 and Lucene's builds read for ideas — graph pages in the KV, versions
 checked against the snapshot on the way out, deletions by marking and a
 repair pass) with a recall suite on public data (SIFT1M, GloVe-100,
@@ -5255,3 +5316,15 @@ style) across a thousand seeds without failure.
   (`ORDER BY` 2–4× faster at 10M rows, past PostgreSQL's); a `Sort` a
   primary key's scan gives left out; unfiltered chains on the workers,
   a `LIMIT`'s bound down to the scan.
+- **2026-11-06** — §M14.27 S7: sampling and splits — `TABLESAMPLE`
+  (`BERNOULLI`, `SYSTEM`, `REPEATABLE` by the primary key's hash) on the
+  workers, `hash_unit`, `random()`, `reservoir_sample` (Algorithm L, one
+  reservoir with `ANALYZE`'s, merged hypergeometrically).
+- **2026-11-06** — §M14.27 S8: drift tests — `ks_test`, `auc`, `psi`
+  over the values in order, `js_divergence`, `chisq_test` over their
+  counts, scipy's and scikit-learn's answers; `SUMMARIZE` and the MCP
+  tool `summarize_table`.
+- **2026-11-06** — §M14.12 V3: conditions the statistics cannot estimate
+  (a distance bound, `LIKE`, functions of columns) counted on up to
+  1,000 rows `ANALYZE` keeps; join orders without cross products while
+  conditions connect the chain.

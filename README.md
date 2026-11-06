@@ -44,15 +44,16 @@ compiled per CPU (AVX2, AVX-512, NEON) and on every core, with the
 results of a single row-at-a-time pass; a table can be stored as
 compressed column segments (`WITH (storage = column)`).  On TPC-H (SF 1)
 column tables take 0.25× PostgreSQL's time in the geometric mean (row
-tables 0.77×), on ClickBench (a million rows) 0.11× (row 0.89×), loads
+tables 0.76×), on ClickBench (a million rows) 0.10× (row 0.83×), loads
 faster than PostgreSQL's, every result the same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
 operators, exact nearest-neighbour search through SIMD kernels whose
 results are the same on every CPU — the ten nearest of 100,000
 768-dimension vectors in 48 ms, faster than numpy's brute force and 3.5×
 pgvector's exact search (`docs/benchmarks.md`) —, a native float
 array in every driver (in Python an `(n, d)` numpy array or Arrow
-`fixed_size_list`), and pgvector's own clients over the PostgreSQL
-protocol.  Statistics have begun (§M14.27): sums of doubles kept exactly
+`fixed_size_list`), pgvector's own clients over the PostgreSQL
+protocol, and estimates for a distance bound — or any condition the
+statistics cannot estimate — counted on rows `ANALYZE` keeps.  Statistics have begun (§M14.27): sums of doubles kept exactly
 and rounded once, so a parallel `sum` gives the same bits every run, and
 `variance`, `stddev`, `skewness`, `kurtosis`, `corr` and linear
 regression (`regr_*`) — PostgreSQL's digits over integers and decimals,
