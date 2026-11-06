@@ -1113,8 +1113,11 @@ pub enum Expr {
         distinct: bool,
         /// `count(*)`.
         star: bool,
-        /// `ORDER BY` inside an aggregate's parentheses.
+        /// `ORDER BY` inside an aggregate's parentheses, or its `WITHIN
+        /// GROUP (ORDER BY …)`.
         order_by: Vec<OrderItem>,
+        /// `order_by` is `WITHIN GROUP`'s (an ordered-set aggregate's).
+        within_group: bool,
     },
 }
 

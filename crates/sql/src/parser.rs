@@ -2819,6 +2819,7 @@ impl<'a> Parser<'a> {
                         distinct: false,
                         star: false,
                         order_by: vec![],
+                        within_group: false,
                     }
                 }
                 _ if DataType::is_prefix(&[w.as_str()]) && self.typed_literal_ahead() => {
@@ -2970,6 +2971,7 @@ impl<'a> Parser<'a> {
                     distinct: false,
                     star: false,
                     order_by: vec![],
+                    within_group: false,
                 });
             }
             self.pos = save;
@@ -2980,6 +2982,7 @@ impl<'a> Parser<'a> {
             distinct: false,
             star: false,
             order_by: vec![],
+            within_group: false,
         };
         // position(sub IN s): strpos(s, sub).
         if first == "position" && self.peek_op("(") {
@@ -3035,12 +3038,33 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect_op(")")?;
+            let within_group = self.eat_kws(&["within", "group"]);
+            if within_group {
+                if !order_by.is_empty() {
+                    return Err(
+                        self.error("cannot use multiple ORDER BY clauses with WITHIN GROUP")
+                    );
+                }
+                if distinct {
+                    return Err(self.error("cannot use DISTINCT with WITHIN GROUP"));
+                }
+                if star {
+                    return Err(self.error("WITHIN GROUP does not take (*)"));
+                }
+                self.expect_op("(")?;
+                if !self.eat_kws(&["order", "by"]) {
+                    return Err(self.error("WITHIN GROUP takes (ORDER BY …)"));
+                }
+                order_by = self.order_items()?;
+                self.expect_op(")")?;
+            }
             let call = Expr::Function {
                 name: first,
                 args,
                 distinct,
                 star,
                 order_by,
+                within_group,
             };
             if self.eat_kw("over") {
                 let over = if self.eat_op("(") {
@@ -3219,6 +3243,7 @@ impl<'a> Parser<'a> {
                         distinct: false,
                         star: false,
                         order_by: vec![],
+                        within_group: false,
                     };
                     if negated {
                         Expr::Unary {
@@ -3237,6 +3262,7 @@ impl<'a> Parser<'a> {
                         distinct: false,
                         star: false,
                         order_by: vec![],
+                        within_group: false,
                     };
                     if negated {
                         Expr::Unary {

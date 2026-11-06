@@ -195,7 +195,9 @@ fn any_node(e: &ast::Expr, f: &dyn Fn(&ast::Expr) -> bool) -> bool {
     }
     let any = |e: &ast::Expr| any_node(e, f);
     match e {
-        A::Function { args, .. } => args.iter().any(any),
+        A::Function { args, order_by, .. } => {
+            args.iter().any(any) || order_by.iter().any(|o| any(&o.expr))
+        }
         A::Window { func, over } => {
             let args = match &**func {
                 A::Function { args, .. } => args.iter().any(any),
@@ -587,6 +589,7 @@ impl<'a> Binder<'a> {
                     distinct: false,
                     star: false,
                     order_by: vec![],
+                    within_group: false,
                 };
                 let (x, t) = self.expr(&call, &empty)?;
                 (TableFunc::Scalar, vec![x], t)
@@ -1495,6 +1498,87 @@ impl<'a> Binder<'a> {
         }
     }
 
+    /// An ordered-set aggregate's call, `name(args) WITHIN GROUP (ORDER BY
+    /// x)`: the aggregate called with `[x, args…, descending]`
+    /// ([`crate::ext::Aggregate::ordered_set`]).
+    fn ordered_set_call(
+        &mut self,
+        name: &str,
+        func: crate::ext::AggRef,
+        args: &[ast::Expr],
+        order_by: &[ast::OrderItem],
+        g: &mut Grouping,
+    ) -> Result<Typed> {
+        let from = g.from.clone();
+        let [o] = order_by else {
+            return Err(Error::undefined_function(format!(
+                "function {name} WITHIN GROUP of {} values does not exist",
+                order_by.len()
+            ))
+            .with_hint(format!("{name} orders one value.")));
+        };
+        if o.using.is_some() || matches!(o.expr, ast::Expr::Collate { .. }) {
+            return Err(Error::feature(format!(
+                "COLLATE and USING are not implemented for {name}"
+            )));
+        }
+        let mut bound = Vec::with_capacity(args.len() + 2);
+        for a in std::iter::once(&o.expr).chain(args) {
+            if contains_agg(self.registry, a) {
+                return Err(Error::grouping("aggregate function calls cannot be nested"));
+            }
+            bound.push(self.expr(a, &from)?);
+        }
+        bound.push((Expr::Literal(Value::Bool(o.desc)), Some(DataType::Bool)));
+        if !func.arity().contains(&bound.len()) {
+            return Err(Error::undefined_function(format!(
+                "function {name} with {} direct arguments does not exist",
+                args.len()
+            ))
+            .with_hint(match func.arity().start() - 2 {
+                1 => format!("{name} takes one direct argument."),
+                n => format!("{name} takes {n} direct arguments."),
+            }));
+        }
+        let sig = func.resolve(&arg_info(&bound))?;
+        let (args, common) = self.apply_signature(name, sig.args, bound)?;
+        let ty = match sig.returns {
+            Returns::Type(t) => t,
+            Returns::Common => common,
+            Returns::Constant(_) => {
+                return Err(Error::internal(format!(
+                    "aggregate {name} resolved to a constant"
+                )));
+            }
+        };
+        let ctx = crate::expr::Ctx::new(self.txn, self.registry, &[]);
+        let env = crate::exec::env(&[], &ctx, None);
+        let direct: Vec<Option<Value>> = args[1..args.len() - 1]
+            .iter()
+            .map(|a| {
+                crate::optimizer::constant(a)
+                    .then(|| a.eval(&env).ok())
+                    .flatten()
+            })
+            .collect();
+        func.check_direct(&direct)?;
+        let agg = Agg {
+            func,
+            args,
+            distinct: false,
+            order: Vec::new(),
+        };
+        let slot = match g.aggs.iter().position(|a| *a == agg) {
+            Some(j) => j,
+            None => {
+                g.aggs.push(agg);
+                g.agg_types.push(ty);
+                g.aggs.len() - 1
+            }
+        };
+        Ok((Expr::Column(g.group.len() + slot), ty))
+    }
+
     /// Binds an expression over a grouped input: aggregate calls become
     /// aggregate outputs, grouped expressions group outputs, and any other
     /// column reference is an error.
@@ -1509,10 +1593,23 @@ impl<'a> Binder<'a> {
             distinct,
             star,
             order_by,
+            within_group,
         } = e
             && let Some(func) = self.registry.aggregate(name).cloned()
         {
             self.execute(name)?;
+            if func.ordered_set() != *within_group {
+                return Err(Error::wrong_object_type(if *within_group {
+                    format!(
+                        "{name} is not an ordered-set aggregate, so it cannot have WITHIN GROUP"
+                    )
+                } else {
+                    format!("WITHIN GROUP is required for ordered-set aggregate {name}")
+                }));
+            }
+            if *within_group {
+                return self.ordered_set_call(name, func, args, order_by, g);
+            }
             let from = g.from.clone();
             let mut order = Vec::new();
             for o in order_by {
@@ -1713,10 +1810,21 @@ impl<'a> Binder<'a> {
             distinct,
             star,
             order_by,
+            within_group,
         } = func
         else {
             return Err(Error::syntax("OVER follows a function call"));
         };
+        if *within_group
+            || self
+                .registry
+                .aggregate(name)
+                .is_some_and(|a| a.ordered_set())
+        {
+            return Err(Error::feature(format!(
+                "OVER is not supported for ordered-set aggregate {name}"
+            )));
+        }
         if *distinct {
             return Err(Error::feature(
                 "DISTINCT is not implemented for window functions",
@@ -2513,8 +2621,14 @@ impl<'a> Binder<'a> {
                 distinct,
                 star,
                 order_by,
+                within_group,
             } => {
                 let f = match self.registry.function(name) {
+                    Some(_) if *within_group => {
+                        return Err(Error::wrong_object_type(format!(
+                            "WITHIN GROUP specified, but {name} is not an aggregate function"
+                        )));
+                    }
                     Some(_) if *star || *distinct || !order_by.is_empty() => {
                         return Err(Error::syntax(format!(
                             "{name}(*), DISTINCT and ORDER BY are only for aggregates"

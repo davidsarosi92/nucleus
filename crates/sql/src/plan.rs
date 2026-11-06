@@ -621,6 +621,21 @@ impl Plan {
                 let mut parts: Vec<String> = aggs
                     .iter()
                     .map(|a| {
+                        if a.func.ordered_set()
+                            && let [
+                                x,
+                                direct @ ..,
+                                Expr::Literal(crate::types::Value::Bool(desc)),
+                            ] = &a.args[..]
+                        {
+                            return format!(
+                                "{}({}) WITHIN GROUP (ORDER BY {}{})",
+                                a.func.name(),
+                                direct.iter().map(show).collect::<Vec<_>>().join(", "),
+                                show(x),
+                                if *desc { " DESC" } else { "" }
+                            );
+                        }
                         let arg = if a.args.is_empty() {
                             "*".to_string()
                         } else {

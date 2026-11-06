@@ -1539,6 +1539,49 @@ nested call or a conflicting window; 42803 for a window inside an
 aggregate; 22013, 22014, 22016 for a negative frame offset, `ntile` or
 `nth_value` below one).
 
+**Ordered sets** (`quantile`, `buckets`, §M14.27 S5).
+`percentile_cont(f)`, `percentile_disc(f)` and `mode()` `WITHIN GROUP
+(ORDER BY x [DESC])` — PostgreSQL's ordered-set aggregates — and
+`median(x)` (DuckDB's: `percentile_cont(0.5)` of numbers and intervals,
+`percentile_disc(0.5)` of any other ordered type).  The binder gives an
+ordered-set aggregate (`Aggregate::ordered_set`) the arguments `[x, f…,
+descending]` and shows the call as written in `EXPLAIN`; `WITHIN GROUP`
+on another aggregate, an ordered-set one without it, or `OVER` one are
+errors (42809, 42809, 0A000).  A fraction may be an array (an array
+results); a constant one is checked when the call is bound
+(`Aggregate::check_direct`), a computed one from the group's first row;
+a fraction outside `[0, 1]` is 22003.  Exact, by selection rather than
+by a sort: a group's values are kept as they come — integers, booleans,
+dates, times and doubles as order-preserving 8-byte keys (a double's
+bits, its sign flipped or all bits if negative, one NaN), other types as
+values — and its result is the values at a few ranks, each found by
+`select_nth_unstable` (introselect, O(n)), the next above the last;
+`mode` sorts its group and counts runs (ties to the first in the call's
+order).  States combine: a partial state is the fraction and the
+group's values (keys as bytes), so values are collected on every worker
+and gathered for the selection.  Past `work_mem` an accumulator moves
+its values to scratch space and adds to them there.  Keys go as (group,
+key) records into a run, read back by partitions of half of `work_mem`:
+groups that fit are packed whole, a larger group is split by a count of
+its keys over 2¹⁶ slices of their range into ranges that fit — a slice
+of one key kept as a count, not a value — so each rank is selected in
+the one partition that holds it: each key written twice and read three
+times (to count, to partition, to select) whatever the run's size —
+radix selection, not a merge sort's log-many passes.  Other values go into a `Sorter` of (group,
+value), read once in group order.  `percentile_cont` interpolates as
+PostgreSQL does — the values at `floor` and `ceil` of `f·(n − 1)` in the
+call's order, `lo + t·(hi − lo)` — with `t` and the interpolation each a
+fused multiply-add (PostgreSQL's results as its arm64 build computes
+them; an x86-64 build rounds twice).  `width_bucket(x, low,
+high, count)` is PostgreSQL's over doubles (its steps, its errors:
+2201G) and over decimals (exact: `floor(count·(x − low) / (high − low))
++ 1` in wide integers), integers taking the doubles'; `width_bucket(x,
+bounds)` counts the array's lower bounds at or below `x`, any ordered
+type.  `histogram(x, low, high, count)` is the `count + 2` counts of
+`width_bucket`'s buckets (below the range first, past it last),
+`histogram(x, bounds)` the `len + 1`; counts combine, so a histogram
+aggregates in parallel.
+
 **Columns** (`prune`, §M14.11).  Before a query runs, its plan is walked
 from the top with the output columns wanted, each node adding what its
 expressions read; a scan then decodes only the columns needed — the rest
@@ -1592,7 +1635,10 @@ through the function's batch kernel when it has one
 with constant positions), else casts and calls a value at a time over
 the batch's vectors; `CASE` a branch at a time — each `WHEN` over the
 rows no earlier one took, its `THEN` over the rows it takes, `ELSE` over
-the rest, so each row evaluates what it would alone; anything else
+the rest, so each row evaluates what it would alone; an expression of
+constants (an operator, cast or immutable call of constant operands, an
+`ARRAY[0.5, 0.95]` of literals) once per batch, as a constant vector —
+not a value per row; anything else
 (correlated subqueries, decimal `/`, `ILIKE`, …) a row at a time, each
 row holding only the columns the expression reads (a long text it does
 not read is not copied).  A row at a time, `Expr::eval` takes
@@ -3506,6 +3552,14 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.27 S5, ordered sets:** `percentile_cont`,
+  `percentile_disc`, `mode` `WITHIN GROUP (ORDER BY …)`, `median`,
+  `width_bucket`, `histogram` (§8.5, *Ordered sets*);
+  `Aggregate::ordered_set` and `check_direct`; the grammar's `WITHIN
+  GROUP`; exact selection over order-preserving 8-byte keys, combinable
+  partial states, a radix-partitioned spill past `work_mem`; constant
+  expressions evaluated once per batch in the vectorized executor (§8.5,
+  *Batches*).
 - **2026-11-06 — §M14.27 S4·sort, the sort and provided orders:**
   `sorter` — normalized-key records with an abbreviated prefix, chunks
   sorted stably in memory or in scratch runs with a sparse index, a

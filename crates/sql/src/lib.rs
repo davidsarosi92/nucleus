@@ -9,6 +9,7 @@ pub mod ast;
 pub mod audit;
 pub mod bigint;
 pub mod binder;
+pub mod buckets;
 pub mod budget;
 pub mod builtin;
 mod by_text;
@@ -51,6 +52,7 @@ pub mod optimizer;
 pub mod parallel;
 pub mod parser;
 pub mod partition;
+pub mod quantile;
 
 pub mod plan;
 pub mod policies;

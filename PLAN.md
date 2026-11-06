@@ -274,7 +274,7 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
-| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted) |
+| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -2797,7 +2797,7 @@ Every result the same, but for ties at a `LIMIT`.  Left as findings,
 not targets: the `LIMIT`-over-a-failing-join finding (W6), TPC-H Q19 on
 column tables (an `OR` of conjunctions across a join, 1.93×).
 
-### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S4, S4·sort ✅)
+### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S5, S4·sort ✅)
 
 **First a study, then the plan.**  Can nucleus give mathematical and
 statistical functions over large data — fast, exact where exactness is
@@ -3288,8 +3288,79 @@ before they are built**:
   held; a sort's records narrower than the row (only the columns read
   above it); a sort's scratch runs shared by the workers rather than
   one file a part.
-- **S5 — ordered sets**: `WITHIN GROUP`, item 4's exact quantiles with
-  spilling selection, `histogram`, `width_bucket`.
+- **S5 — ordered sets** ✅ (2026-11-06): `WITHIN GROUP`, item 4's
+  exact quantiles with spilling selection, `histogram`, `width_bucket`.
+  *Built:* `percentile_cont`, `percentile_disc` (a fraction or an array
+  of them) and `mode()` `WITHIN GROUP (ORDER BY x [DESC])`, and
+  `median(x)`; PostgreSQL's semantics, results and errors (42809, 0A000
+  for `OVER`, 22003 for a fraction outside `[0, 1]` — a constant one
+  checked when bound, so even over no rows, as PostgreSQL's final
+  function does), its interpolation with fused multiply-adds (its arm64
+  build's bits).  A group's values are kept as order-preserving 8-byte
+  keys (integers, booleans, dates, times, doubles) or as values (any
+  other ordered type); its result is found by selection at the ranks
+  wanted, each above the last (`select_nth_unstable`), `mode` by a sort
+  and runs.  States combine — a partial state is the fraction and the
+  values, keys as bytes — so values are collected on every worker.  Past
+  `work_mem` keys go to a scratch run of (group, key) records, read
+  back radix-partitioned: groups packed whole into partitions of half
+  of `work_mem`, a larger group split into key ranges by a count over
+  2¹⁶ slices of its range (a slice of one key kept as a count), so each
+  rank is selected in the one partition holding it — every key written
+  twice and read three times, whatever the size; other types go to the
+  sorter.  `width_bucket` — PostgreSQL's over doubles step for step,
+  exact over decimals (wide integers), and by an array of lower bounds
+  of any ordered type — and `histogram(x, low, high, count)` /
+  `histogram(x, bounds)`, its counts as a `bigint[]` (combinable).
+  On the way, in the vectorized executor: an expression of constants
+  (an operator, cast or immutable call of constant operands, an
+  `ARRAY[…]` of literals) is evaluated once per batch, not per row —
+  `histogram(x, 0.0, 1.0, 10)`'s coerced bounds and `ARRAY[0.5, 0.95,
+  0.99]` had cost as much as the aggregate itself.
+  Tests: `49_ordered_sets.slt` (expectations from PostgreSQL 18, in all
+  four executors), `ordered_sets.rs` — 30,000 rows, 23 groups, against
+  the definitions (sorted values, ranks read off) in five settings,
+  `work_mem` 64 kB among them, NaN, infinities and NULLs; selection at
+  every rank, key order as SQL's, the radix partitions against a sort
+  (two mutations of the partitioning — a single-key slice's key and the
+  shift's condition — caught, as were a spilled rank offset and an
+  in-memory selection skip).
+  *Prior art:* PostgreSQL's `orderedsetaggs.c` — taken: the semantics,
+  the errors, the fraction checked first; not taken: a tuplesort per
+  group (a full sort for a few ranks, one thread).  DuckDB's quantile
+  aggregates — taken: `median` and its typing, selection (`nth_element`)
+  rather than a sort in memory.  Selection: Rust's introselect
+  (quickselect with median-of-medians fallback, O(n) worst case) chosen
+  over Floyd–Rivest, whose sampling wins on large in-memory arrays by
+  a constant only, and over a heap.  Radix selection over
+  order-preserving keys (as GPU and external-memory quantile selection
+  do, e.g. Alabi et al., "Fast k-selection algorithms for GPUs", 2012):
+  taken for the spill, its two-pass histogram bounding the I/O where
+  an external merge sort's passes grow with the input.  Approximate
+  quantiles (t-digest, KLL) are S6's.
+  *Measured* (10M rows of `bench/stats/aggs.py`'s table, best of two,
+  `work_mem` 64 MB; PostgreSQL 18 with 4 MB): `median` 613 ms
+  (PostgreSQL 2249, numpy one core 26), `p50, p95, p99` 668 (2240),
+  `percentile_disc` 618 (2374; numpy 44), `median` of 1000 groups 615
+  (550: PostgreSQL's 4 MB is per group, nucleus's `work_mem` per
+  accumulator; 499 with 1 GB), `mode` 736 (1333), `histogram` 167 (`sum`
+  185).  The first, non-combinable design (one thread, through the
+  sorter): 5388 / 8444 / 5264 / 4268 / 3360 / 416.  10⁸ values of
+  `generate_series` to one exact median: 23.0 s and 216 MB peak against
+  `sum`'s 18.0 s and 146 MB (`work_mem` 16 MB: 19.5 s, 168 MB) — memory
+  bounded by `work_mem`.  `bench/phases.py` two rounds alternating
+  against S4·sort's build: ClickBench (column) geometric mean 17.9 /
+  18.5 → 19.4 / 18.7 ms, its two outliers (Q22 7.4 → 10.9, Q10 5.2 →
+  6.5) measured again seven runs × three rounds alternating — Q22 6.4–6.9
+  → 6.5–6.8, Q10 5.4–5.5 → 5.1–5.2, Q23 and Q34 the same: noise; TPC-H
+  (row) 237.8 / 232.7 → 227.7 / 230.5, the same within the noise.
+  *Next, recorded here:* a median over a sliding window frame keeps
+  segment-tree value bags (an order-statistic tree is the step); a
+  single-key-range slice larger than a partition is loaded whole; an
+  out-of-order read of a spilled sort restarts it; a spilled
+  accumulator's partial state is built in memory (workers' runs could
+  be handed over instead); `generate_series` runs on one thread at
+  ~180 ns a row.
 - **S6 — sketches**: item 6, the sketch types included.
 - **S7 — sampling and splits**: item 7.
 - **S8 — drift, tests and `SUMMARIZE`**: items 8 and 9, the MCP tool,
@@ -4923,6 +4994,11 @@ style) across a thousand seeds without failure.
   functions, PostgreSQL's semantics and errors; a `Sort` per window,
   the final `ORDER BY` left out when the last window gives it; `avg`
   of doubles rounded once.
+- **2026-11-06** — §M14.27 S5: ordered-set aggregates — exact
+  `percentile_cont` / `percentile_disc` / `mode` `WITHIN GROUP`,
+  `median`, by selection over order-preserving keys, combinable, a
+  radix-partitioned spill past `work_mem` (3–4× PostgreSQL's);
+  `width_bucket`, `histogram`; constant expressions once per batch.
 - **2026-11-06** — §M14.27 S4·sort: one sorter for every full sort —
   normalized keys with an abbreviated prefix, chunks in memory or in
   indexed scratch runs, a merge split into key ranges on the workers

@@ -49,10 +49,19 @@ QUERIES = {
     "moving avg 10 rows": "SELECT sum(a) FROM (SELECT avg(x) OVER (PARTITION BY g ORDER BY id "
                           "ROWS BETWEEN 9 PRECEDING AND CURRENT ROW) AS a FROM t) q",
     "lag": "SELECT sum(d) FROM (SELECT x - lag(x) OVER (ORDER BY id) AS d FROM t) q",
+    # Ordered sets (S5): exact quantiles, the mode, a histogram.
+    "median": "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM t",
+    "p50, p95, p99": "SELECT percentile_cont(ARRAY[0.5, 0.95, 0.99]) WITHIN GROUP "
+                     "(ORDER BY y) FROM t",
+    "percentile_disc": "SELECT percentile_disc(0.9) WITHIN GROUP (ORDER BY x) FROM t",
+    "median 1000 groups": "SELECT g, percentile_cont(0.5) WITHIN GROUP (ORDER BY x) "
+                          "FROM t GROUP BY g ORDER BY g LIMIT 3",
+    "mode": "SELECT mode() WITHIN GROUP (ORDER BY id % 1000) FROM t",
+    "histogram": "SELECT histogram(x, 1e9, 1e9 + 1, 100)[51] FROM t",
 }
 
-# PostgreSQL has no skewness or kurtosis.
-NOT_PG = {"skewness, kurtosis"}
+# PostgreSQL has no skewness, kurtosis or histogram.
+NOT_PG = {"skewness, kurtosis", "histogram"}
 
 
 def start(binary, port):
@@ -104,7 +113,9 @@ def numpy_times(rows):
     out = {}
     for name, f in [("variance", lambda: np.var(x, ddof=1)),
                     ("sum", lambda: np.sum(x)),
-                    ("corr", lambda: np.corrcoef(x, i)[0, 1])]:
+                    ("corr", lambda: np.corrcoef(x, i)[0, 1]),
+                    ("median", lambda: np.median(x)),
+                    ("percentile_disc", lambda: np.percentile(x, 90, method="inverted_cdf"))]:
         t = []
         for _ in range(5):
             s = time.perf_counter()

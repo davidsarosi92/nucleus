@@ -84,6 +84,7 @@ codes! {
     insufficient_privilege => "42501",
     invalid_schema => "3F000",
     invalid_regex => "2201B",
+    invalid_width_bucket => "2201G",
     invalid_parameter => "22023",
     array_subscript => "2202E",
     object_in_use => "55006",

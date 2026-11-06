@@ -573,6 +573,14 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
         }
         Expr::Binary(op, l, r) => {
             let (x, y) = (eval(l, b, sel, cx)?, eval(r, b, sel, cx)?);
+            // Of constants, a constant: computed once, not per row.
+            if let (Vector::Const(a), Vector::Const(c)) = (&*x, &*y) {
+                return Ok(Rc::new(Vector::Const(crate::expr::binary(
+                    *op,
+                    a.clone(),
+                    c.clone(),
+                )?)));
+            }
             Rc::new(binary(*op, &x, &y, b.len, sel)?)
         }
         Expr::Unary(op, x) => {
@@ -631,6 +639,13 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
         }
         Expr::Cast(x, ty) => {
             let x = eval(x, b, sel, cx)?;
+            if let Vector::Const(v) = &*x {
+                return Ok(Rc::new(Vector::Const(crate::enums::cast(
+                    cx.ctx.txn,
+                    v.clone(),
+                    *ty,
+                )?)));
+            }
             each(b.len, sel, |i| {
                 crate::enums::cast(cx.ctx.txn, x.value(i), *ty)
             })?
@@ -641,6 +656,24 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
                 .map(|a| eval(a, b, sel, cx))
                 .collect::<Result<Vec<_>>>()?;
             let call = CallContext::new(cx.ctx.txn, cx.ctx.registry);
+            // An immutable call of constants is a constant.
+            if f.volatility() == crate::ext::Volatility::Immutable
+                && let Some(vals) = args
+                    .iter()
+                    .map(|a| match &**a {
+                        Vector::Const(v) => Some(v.clone()),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<Value>>>()
+            {
+                return Ok(Rc::new(Vector::Const(
+                    if f.strict() && vals.iter().any(Value::is_null) {
+                        Value::Null
+                    } else {
+                        f.call(&call, &vals)?
+                    },
+                )));
+            }
             // The function's batch kernel, when it has one for these.
             let refs: Vec<&Vector> = args.iter().map(|a| &**a).collect();
             if let Some(v) = f.call_batch(&call, &refs, b.len, sel) {
@@ -669,6 +702,8 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
             sel,
             cx,
         )?),
+        // A constant (`ARRAY[0.5, 0.95]`, say): evaluated once, not per row.
+        _ if crate::optimizer::constant(e) => Rc::new(Vector::Const(e.eval(&cx.env(&[]))?)),
         // The rest a row at a time.
         _ => by_rows(e, b, sel, cx)?,
     })

@@ -90,7 +90,15 @@ however the rows are split.  Window functions as PostgreSQL's: `f(…) OVER
 rank dense_rank percent_rank cume_dist ntile lag lead first_value
 last_value nth_value` (top n per group: `SELECT … FROM (SELECT …,
 row_number() OVER (PARTITION BY g ORDER BY x DESC) AS rn FROM t) q WHERE
-rn <= 3`).
+rn <= 3`).  Exact quantiles as PostgreSQL's ordered-set aggregates:
+`percentile_cont(0.95) WITHIN GROUP (ORDER BY latency)` (interpolated;
+numbers and intervals), `percentile_disc(0.95) WITHIN GROUP (ORDER BY
+x)` (an actual value, any ordered type), an array of fractions for
+several at once (`percentile_cont(ARRAY[0.5, 0.95, 0.99]) WITHIN GROUP
+(ORDER BY x)` gives an array), `mode() WITHIN GROUP (ORDER BY x)`, and
+`median(x)`.  Buckets: `width_bucket(x, low, high, n)` (0 below, `n + 1`
+from `high`), `width_bucket(x, ARRAY[bounds])`, and `histogram(x, low,
+high, n)` — the `n + 2` bucket counts as a `bigint[]` in one pass.
 
 **Memory:** `SET work_mem = '256MB'` gives each sort and materialised
 result more memory before it spills to disk (default 64MB).  Scans,

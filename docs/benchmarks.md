@@ -326,6 +326,26 @@ accumulator loses the fractions past 10¹⁶), and of 200,000 ten-row
 moving averages PostgreSQL rounds 98,995 to another double than the
 exact average's (by up to 2 ulps; nucleus none).
 
+Exact quantiles over the same table (§M14.27 S5), best of five, the
+better of two rounds (2026-11-06); nucleus with its default `work_mem`
+of 64 MB per worker, PostgreSQL with its 4 MB:
+
+| query | nucleus (ms) | PostgreSQL 18 (ms) | numpy (ms) |
+|---|---:|---:|---:|
+| `percentile_cont(0.5)` of `x` | 613 | 2,249 | 26 |
+| `percentile_cont(ARRAY[0.5, 0.95, 0.99])` of `y` | 668 | 2,240 | |
+| `percentile_disc(0.9)` of `x` | 618 | 2,374 | 44 |
+| `percentile_cont(0.5)` of `x` by 1000 groups | 615 | 550 | |
+| `mode()` of `id % 1000` | 736 | 1,333 | |
+| `histogram(x, …, 100)` | 167 | — | |
+
+The results are PostgreSQL's and numpy's, bit for bit.  PostgreSQL's
+`work_mem` holds each group's values (1000 × 4 MB), nucleus's one
+accumulator's (with 1 GB: 499 ms).  An exact median of 10⁸ values
+(`generate_series`) takes 23.0 s and 216 MB at its peak, against
+`sum`'s 18.0 s and 146 MB: the values past `work_mem` go to scratch
+space and are selected a partition at a time.
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

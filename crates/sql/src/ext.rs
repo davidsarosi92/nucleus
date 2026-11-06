@@ -344,6 +344,24 @@ pub trait Aggregate: Send + Sync {
         false
     }
 
+    /// Whether it is an **ordered-set** aggregate, called `name(direct
+    /// arguments) WITHIN GROUP (ORDER BY x)` (`percentile_cont`, `mode`):
+    /// the binder then gives it the arguments `[x, direct…, descending]`,
+    /// the last a `boolean` constant, and refuses `WITHIN GROUP` on any
+    /// other aggregate and a call of this one without it.
+    fn ordered_set(&self) -> bool {
+        false
+    }
+
+    /// Checks an ordered-set call's direct arguments known when it is
+    /// bound (`None`: not a constant), as its result would — so a bad
+    /// constant is an error even over no rows (PostgreSQL's final
+    /// functions check them first).  By default nothing.
+    fn check_direct(&self, direct: &[Option<Value>]) -> Result<()> {
+        let _ = direct;
+        Ok(())
+    }
+
     /// Types a call (as [`ScalarFunction::resolve`]; [`Returns::Constant`]
     /// is not allowed).
     fn resolve(&self, args: &[ArgInfo]) -> Result<Signature>;

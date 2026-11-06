@@ -266,7 +266,7 @@ fn push(plan: Plan, st: &Stats) -> Plan {
 
 /// Whether `e` reads nothing that varies while a plan runs (no parameter,
 /// enclosing row, subquery or volatile call): it can be evaluated now.
-fn constant(e: &Expr) -> bool {
+pub(crate) fn constant(e: &Expr) -> bool {
     let mut c = !e.has_subquery();
     e.walk(&mut |x| match x {
         Expr::Param(_) | Expr::Outer { .. } | Expr::Column(_) => c = false,

@@ -1,0 +1,243 @@
+# Ordered-set aggregates and buckets (PLAN.md §M14.27 S5):
+# percentile_cont, percentile_disc and mode WITHIN GROUP (ORDER BY …),
+# width_bucket.  Expectations from PostgreSQL 18.
+
+statement ok
+CREATE TABLE m (id INT, g TEXT, x DOUBLE PRECISION, n INT, d DATE, ts TIMESTAMP, iv INTERVAL, c NUMERIC, t TEXT)
+
+statement ok
+INSERT INTO m VALUES (1, 'a', 1.5, 10, '2024-01-03', '2024-01-01 10:00', '1 hour', 1.25, 'pear'), (2, 'a', 4, 20, '2024-01-01', '2024-01-02 11:00', '3 hours', 2.5, 'apple'), (3, 'a', -2, 20, '2024-01-02', '2024-01-01 09:30', '2 days', 0.125, 'fig'), (4, 'b', 10, 30, '2023-12-31', '2024-02-01 00:00', '30 minutes', 7, 'apple'), (5, 'b', NULL, NULL, NULL, NULL, NULL, NULL, NULL), (6, 'b', 3, 30, '2024-03-01', '2024-01-05 12:00', '1 day 2 hours', -1.5, 'kiwi'), (7, 'c', NULL, NULL, NULL, NULL, NULL, NULL, NULL), (8, 'd', 0.25, 40, '2024-05-05', '2024-05-05 05:05', '5 seconds', 3.75, 'fig')
+
+# The median of a whole table: interpolated, and taken.
+query RRTT
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x), percentile_cont(0.5) WITHIN GROUP (ORDER BY n), percentile_disc(0.5) WITHIN GROUP (ORDER BY x)::text, percentile_disc(0.5) WITHIN GROUP (ORDER BY n)::text FROM m
+----
+2.250 25.000 1.5 20
+
+# Any fraction, its ends included; integers interpolate as doubles.
+query RRRRRR
+SELECT percentile_cont(0) WITHIN GROUP (ORDER BY x), percentile_cont(1) WITHIN GROUP (ORDER BY x), percentile_cont(0.1) WITHIN GROUP (ORDER BY x), percentile_cont(0.9) WITHIN GROUP (ORDER BY n), percentile_disc(0) WITHIN GROUP (ORDER BY x), percentile_disc(1) WITHIN GROUP (ORDER BY n) FROM m
+----
+-2.000 10.000 -0.875 35.000 -2.000 40.000
+
+# By group; a group whose values are all NULL gives NULL.
+query TRRTT
+SELECT g, percentile_cont(0.25) WITHIN GROUP (ORDER BY x), percentile_cont(0.75) WITHIN GROUP (ORDER BY n), percentile_disc(0.5) WITHIN GROUP (ORDER BY d)::text, mode() WITHIN GROUP (ORDER BY t) FROM m GROUP BY g ORDER BY g
+----
+a -0.250 20.000 2024-01-02 apple
+b 4.750 30.000 2023-12-31 apple
+c NULL NULL NULL NULL
+d 0.250 40.000 2024-05-05 fig
+
+# DESC: the order the fraction counts in (PostgreSQL's bits).
+query TTTT
+SELECT percentile_cont(0.3) WITHIN GROUP (ORDER BY x DESC)::text, percentile_cont(0.3) WITHIN GROUP (ORDER BY x)::text, percentile_disc(0.3) WITHIN GROUP (ORDER BY x DESC)::text, percentile_disc(0.3) WITHIN GROUP (ORDER BY x)::text FROM m
+----
+3.5 0.8749999999999999 4 0.25
+
+# An array of fractions gives an array (a NULL fraction a NULL).
+query TTT
+SELECT percentile_cont(ARRAY[0, 0.25, 0.5, 0.75, 1]) WITHIN GROUP (ORDER BY x)::text, percentile_disc(ARRAY[0.5, NULL, 0.1]) WITHIN GROUP (ORDER BY t)::text, percentile_cont(ARRAY[0.5]) WITHIN GROUP (ORDER BY iv)::text FROM m
+----
+{-2,0.5625,2.25,3.75,10} {fig,NULL,apple} {02:00:00}
+
+# Other types: intervals interpolate; dates, timestamps, decimals and
+# text are taken.
+query TTTTT
+SELECT percentile_cont(0.4) WITHIN GROUP (ORDER BY iv)::text, percentile_disc(0.4) WITHIN GROUP (ORDER BY ts)::text, percentile_disc(0.4) WITHIN GROUP (ORDER BY c)::text, percentile_disc(0.4) WITHIN GROUP (ORDER BY t), percentile_disc(0.6) WITHIN GROUP (ORDER BY d DESC)::text FROM m
+----
+01:00:00 2024-01-02 11:00:00 1.25 fig 2024-01-02
+
+# mode: the most frequent value, ties to the first in the call's order.
+query TTTT
+SELECT mode() WITHIN GROUP (ORDER BY t), mode() WITHIN GROUP (ORDER BY t DESC), mode() WITHIN GROUP (ORDER BY n), mode() WITHIN GROUP (ORDER BY n DESC)::text FROM m
+----
+apple fig 20 30
+
+# No rows: NULL — but a fraction outside [0, 1] is still an error.
+query TTT
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x)::text, percentile_disc(ARRAY[0.1]) WITHIN GROUP (ORDER BY x)::text, mode() WITHIN GROUP (ORDER BY x)::text FROM m WHERE id > 100
+----
+NULL NULL NULL
+
+statement error 22003
+SELECT percentile_disc(7) WITHIN GROUP (ORDER BY x) FROM m WHERE id > 100
+
+# A NULL fraction gives NULL.
+query T
+SELECT percentile_cont(NULL) WITHIN GROUP (ORDER BY x)::text FROM m
+----
+NULL
+
+# With other aggregates, in HAVING and ORDER BY.
+query TIRR
+SELECT g, count(*), sum(x), percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM m GROUP BY g HAVING percentile_cont(0.5) WITHIN GROUP (ORDER BY x) > 0 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY x) DESC
+----
+b 3 13.000 6.500
+a 3 3.500 1.500
+d 1 0.250 0.250
+
+# The fraction from an expression of the group.
+query TR
+SELECT g, percentile_cont(CASE WHEN g = 'a' THEN 0 ELSE 1 END) WITHIN GROUP (ORDER BY x) FROM m GROUP BY g ORDER BY g
+----
+a -2.000
+b 10.000
+c NULL
+d 0.250
+
+# Doubles' edges: infinities, NaN (the greatest), -0.
+query TTTT
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY v)::text, percentile_cont(0.9) WITHIN GROUP (ORDER BY v)::text, percentile_disc(0.99) WITHIN GROUP (ORDER BY v)::text, percentile_disc(0) WITHIN GROUP (ORDER BY v)::text FROM (VALUES ('-Infinity'::float8), ('NaN'), ('1'), ('-0'), ('Infinity'), ('2.5')) t(v)
+----
+1.75 NaN NaN -Infinity
+
+query TT
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY v)::text, percentile_cont(0.25) WITHIN GROUP (ORDER BY v)::text FROM (VALUES ('Infinity'::float8), ('Infinity'), ('-Infinity')) t(v)
+----
+Infinity NaN
+
+# Errors: a fraction outside [0, 1] (when there are rows); OVER.
+statement error 22003
+SELECT percentile_cont(1.5) WITHIN GROUP (ORDER BY x) FROM m
+
+statement error 22003
+SELECT percentile_disc(ARRAY[0.5, -0.1]) WITHIN GROUP (ORDER BY x) FROM m
+
+statement error 22003
+SELECT percentile_cont('NaN'::float8) WITHIN GROUP (ORDER BY x) FROM m
+
+statement error 0A000
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) OVER () FROM m
+
+# width_bucket: equal widths over doubles and (exactly) numerics, the
+# buckets below and past the range, a reversed range.
+query IIIIIIII
+SELECT width_bucket(5.35, 0.024, 10.06, 5), width_bucket(5.35::float8, 0.024, 10.06, 5), width_bucket(-1, 0, 10, 5), width_bucket(10, 0, 10, 5), width_bucket(9.99, 0, 10, 5), width_bucket(3, 10, 0, 4), width_bucket(10, 10, 0, 4), width_bucket(0, 10, 0, 4)
+----
+3 3 0 6 5 3 1 5
+
+query IIII
+SELECT width_bucket(0.3, 0, 0.9, 3), width_bucket(0.3::float8, 0, 0.9, 3), width_bucket(1e300::float8, -1e308, 1e308, 10), width_bucket('Infinity'::float8, 0, 1, 4)
+----
+2 2 6 5
+
+# By an array of lower bounds, of any ordered type.
+query IIIII
+SELECT width_bucket(7, ARRAY[1, 3, 5, 10]), width_bucket(0, ARRAY[1, 3]), width_bucket(3, ARRAY[1, 3]), width_bucket('c', ARRAY['a', 'b', 'd']), width_bucket(DATE '2024-02-01', ARRAY[DATE '2024-01-01', DATE '2024-03-01'])
+----
+3 0 2 2 1
+
+query TI
+SELECT g, width_bucket(n, 0, 50, 5) FROM m WHERE n IS NOT NULL ORDER BY id
+----
+a 2
+a 3
+a 3
+b 4
+b 4
+d 5
+
+query I
+SELECT width_bucket(NULL::float8, 0, 1, 2)
+----
+NULL
+
+statement error 2201G
+SELECT width_bucket(1, 1, 1, 3)
+
+statement error 2201G
+SELECT width_bucket(1, 0, 1, 0)
+
+statement error 2201G
+SELECT width_bucket('NaN'::float8, 0, 1, 2)
+
+statement error 2201G
+SELECT width_bucket(1, 0, 'Infinity'::float8, 2)
+
+statement error 22004
+SELECT width_bucket(1, ARRAY[1, NULL])
+
+statement error 22003
+SELECT width_bucket(7, 1, 6, 2147483647)
+
+# nucleus-only: median(x) (DuckDB's) — percentile_cont(0.5) of numbers
+# and intervals, percentile_disc(0.5) of any other type.
+query RRTTT
+SELECT median(x), median(n), median(iv)::text, median(d)::text, median(t) FROM m
+----
+2.250 25.000 02:00:00 2024-01-02 fig
+
+query TR
+SELECT g, median(x) FROM m GROUP BY g ORDER BY g
+----
+a 1.500
+b 6.500
+c NULL
+d 0.250
+
+# nucleus-only: median is a plain aggregate, so a window one too.
+query R
+SELECT median(x) OVER (PARTITION BY g) FROM m ORDER BY id
+----
+1.500
+1.500
+1.500
+6.500
+6.500
+6.500
+NULL
+0.250
+
+# nucleus-only: histogram — the count of each of width_bucket's buckets
+# (below the range first, past it last).
+query TTT
+SELECT histogram(x, 0, 10, 5)::text, histogram(n, ARRAY[15, 25, 35])::text, histogram(c, 0, 4, 2)::text FROM m
+----
+{1,2,1,1,0,0,1} {1,2,2,1} {1,2,2,1}
+
+query TT
+SELECT g, histogram(x, 0, 10, 2)::text FROM m GROUP BY g ORDER BY g
+----
+a {1,2,0,0}
+b {0,1,0,1}
+c NULL
+d {0,1,0,0}
+
+query T
+SELECT histogram(x, 0, 10, 2)::text FROM m WHERE id > 100
+----
+NULL
+
+statement error 2201G
+SELECT histogram(x, 5, 5, 2) FROM m
+
+# nucleus-only: EXPLAIN shows the call as written.
+query T
+EXPLAIN SELECT percentile_disc(ARRAY[0.1, 0.9]) WITHIN GROUP (ORDER BY x DESC), mode() WITHIN GROUP (ORDER BY t) FROM m
+----
+Aggregate: percentile_disc(ARRAY[0.1, 0.9]::double precision[]) WITHIN GROUP (ORDER BY #2 DESC), mode() WITHIN GROUP (ORDER BY #8)
+  Seq Scan on m
+
+# nucleus-only codes (PostgreSQL finds no function of these argument
+# types, 42883): WITHIN GROUP and ordered-set aggregates go together.
+statement error 42809
+SELECT sum(x) WITHIN GROUP (ORDER BY x) FROM m
+
+statement error 42809
+SELECT percentile_cont(0.5) FROM m
+
+statement error 42809
+SELECT lower('a') WITHIN GROUP (ORDER BY 1)
+
+statement error 42883
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY t) FROM m
+
+statement error 42883
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x, n) FROM m
+
+statement error 42883
+SELECT percentile_cont(0.5, 0.2) WITHIN GROUP (ORDER BY x) FROM m
+
+statement error 42601
+SELECT percentile_cont(0.5 ORDER BY x) WITHIN GROUP (ORDER BY x) FROM m
