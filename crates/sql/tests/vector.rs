@@ -496,6 +496,94 @@ fn moments_are_the_same_under_any_split() {
 }
 
 #[test]
+fn regressions_are_the_same_under_any_split() {
+    use nucleus_sql::bigint::BigInt;
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(10)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    // x = k · 2^(e − 20), y = 3x + j · 2^−10: spread over 2⁴⁰, a line
+    // with noise.
+    s.execute(
+        "CREATE TABLE rs (id INT PRIMARY KEY, g INT, x FLOAT, y FLOAT, b BIGINT); \
+         INSERT INTO rs SELECT i, i % 5, \
+           ((i::bigint * 7919) % 2001 - 1000)::float8 * power(2::float8, (i % 41) - 20), \
+           3 * ((i::bigint * 7919) % 2001 - 1000)::float8 * power(2::float8, (i % 41) - 20) \
+             + ((i::bigint * 104729) % 1001 - 500)::float8 / 1024, \
+           (i::bigint * 2654435761) % 1000003 \
+           FROM generate_series(1, 30000) i; \
+         UPDATE rs SET x = NULL WHERE id % 97 = 0; \
+         UPDATE rs SET y = NULL WHERE id % 89 = 0",
+    )
+    .unwrap();
+    let all = "corr(y, x), covar_pop(y, x), covar_samp(y, x), regr_slope(y, x), \
+               regr_intercept(y, x), regr_r2(y, x), regr_count(y, x), regr_avgx(y, x), \
+               regr_avgy(y, x), regr_sxx(y, x), regr_syy(y, x), regr_sxy(y, x)";
+    let queries = [
+        format!("SELECT {all} FROM rs"),
+        format!("SELECT g, {all} FROM rs GROUP BY g ORDER BY g"),
+        "SELECT corr(b, id), regr_slope(b, x) FROM rs".to_string(),
+        "SELECT g, corr(y, x) FROM rs WHERE id % 7 = 3 GROUP BY g ORDER BY g".to_string(),
+    ];
+    let mut want: Vec<Result<Vec<Vec<String>>, String>> = Vec::new();
+    for workers in [1, 2, 8, 32] {
+        for batch in [0, 3, 1024] {
+            let mut z = session(&db, batch);
+            z.execute(&format!("SET parallel_workers = {workers}"))
+                .unwrap();
+            for (k, q) in queries.iter().enumerate() {
+                let got = outcome(&mut z, q);
+                assert!(got.is_ok(), "{q}: {got:?}");
+                if want.len() <= k {
+                    want.push(got);
+                } else {
+                    assert_eq!(got, want[k], "{workers} workers, batch {batch}: {q}");
+                }
+            }
+        }
+    }
+    // The slope Cxy / Cxx, exactly in units of 2⁻²⁰ (x) and 2⁻¹⁰ (y's
+    // noise), rounded once.
+    let (mut n, mut sx, mut sy, mut sxx, mut sxy) = (
+        0u128,
+        BigInt::zero(),
+        BigInt::zero(),
+        BigInt::zero(),
+        BigInt::zero(),
+    );
+    for i in 1..=30000i64 {
+        if i % 97 == 0 || i % 89 == 0 {
+            continue;
+        }
+        let k = i128::from((i * 7919) % 2001 - 1000);
+        let e = (i % 41) as u64;
+        let j = i128::from((i * 104729) % 1001 - 500);
+        // x in units of 2^−20; y = 3x + j·2^−10, in units of 2^−20.
+        let x = BigInt::from_i128(k).shl(e);
+        let y = BigInt::from_i128(3 * k)
+            .shl(e)
+            .add(&BigInt::from_i128(j).shl(10));
+        n += 1;
+        sxx = sxx.add(&x.mul(&x));
+        sxy = sxy.add(&x.mul(&y));
+        sx = sx.add(&x);
+        sy = sy.add(&y);
+    }
+    let nb = BigInt::from_u128(n);
+    let cxx = nb.mul(&sxx).sub(&sx.mul(&sx));
+    let cxy = nb.mul(&sxy).sub(&sx.mul(&sy));
+    let t = (cxx.bits() + 60).saturating_sub(cxy.bits());
+    let (q, r) = cxy.abs().shl(t).div_big(&cxx);
+    let exact = q.to_f64(-(t as i64), !r.is_zero());
+    let got: f64 = want[0].as_ref().unwrap()[0][3].parse().unwrap();
+    assert_eq!(got, exact);
+    assert_eq!(want[0].as_ref().unwrap()[0][6], n.to_string());
+}
+
+#[test]
 fn parallel_aggregates_agree() {
     // Big enough to split into morsels; the simulation offers one CPU, so
     // the workers are asked for.

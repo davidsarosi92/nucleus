@@ -5,9 +5,11 @@
 //! Each is computed from exact power sums, so its result is the same bits
 //! however the rows are split among workers and batches:
 //!
-//! - Doubles: Σx, Σx², Σx³, Σx⁴ in [`ExactSum`]s — a power as its rounded
-//!   value and the rounding's error, from fused multiply-adds, so the sums
-//!   are exact (unless an error falls below 2⁻¹⁰⁷⁴).  A variance is the
+//! - Doubles: Σx, Σx², Σx³, Σx⁴ in [`ExactSum`]s — x² added exactly (its
+//!   significands' product, [`ExactSum::add_product`]), x³ and x⁴ as
+//!   exact products of x² = h + l (h rounded, l its error from a fused
+//!   multiply-add), so the sums are exact (unless a term falls below
+//!   2⁻¹⁰⁷⁴).  A variance is the
 //!   exact `(n·Σx² − (Σx)²) / (n·(n − 1))` rounded once (PostgreSQL's
 //!   Youngs–Cramer update, DuckDB's Welford and the textbook formula each
 //!   lose digits, measured in the study); a standard deviation its square
@@ -173,10 +175,10 @@ impl State {
             self.overflow = true;
             return;
         }
-        let l = x.mul_add(x, -h);
-        self.f[1].add(h);
-        self.f[1].add(l);
+        self.f[1].add_product(x, x);
         if order >= 3 {
+            // x² = h + l exactly (a fused multiply-add's error).
+            let l = x.mul_add(x, -h);
             // x³ = h·x + l·x.
             if !(h * x).is_finite() {
                 self.overflow = true;
@@ -184,16 +186,16 @@ impl State {
             }
             self.f[2].add_product(h, x);
             self.f[2].add_product(l, x);
-        }
-        if order >= 4 {
-            // x⁴ = h² + 2·h·l + l².
-            if !(h * h).is_finite() {
-                self.overflow = true;
-                return;
+            if order >= 4 {
+                // x⁴ = h² + 2·h·l + l².
+                if !(h * h).is_finite() {
+                    self.overflow = true;
+                    return;
+                }
+                self.f[3].add_product(h, h);
+                self.f[3].add_product(2.0 * h, l);
+                self.f[3].add_product(l, l);
             }
-            self.f[3].add_product(h, h);
-            self.f[3].add_product(2.0 * h, l);
-            self.f[3].add_product(l, l);
         }
     }
 
@@ -486,7 +488,7 @@ impl State {
 }
 
 /// `Σ vᵢ · 2^eᵢ` as one `v · 2^e`.
-fn combine(terms: &[(BigInt, i64)]) -> (BigInt, i64) {
+pub(crate) fn combine(terms: &[(BigInt, i64)]) -> (BigInt, i64) {
     let e = terms.iter().map(|t| t.1).min().unwrap_or(0);
     let v = terms.iter().fold(BigInt::zero(), |acc, (v, x)| {
         acc.add(&v.shl((x - e) as u64))
@@ -505,6 +507,42 @@ fn quotient(c: &(BigInt, i64), d: u128) -> f64 {
     let t = (dbits + 56).saturating_sub(v.bits());
     let (q, r) = v.shl(t).divmod_mag(d);
     q.to_f64(e - t as i64, r != 0)
+}
+
+/// `a / b` (each `v · 2^e`, `b` not zero), rounded once to a double.
+pub(crate) fn ratio(a: &(BigInt, i64), b: &(BigInt, i64)) -> f64 {
+    let ((va, ea), (vb, eb)) = (a, b);
+    if va.is_zero() {
+        return 0.0;
+    }
+    // Enough quotient bits to round on: 56 and more.
+    let t = (vb.bits() + 56).saturating_sub(va.bits());
+    let (q, r) = va.clone().abs().shl(t).div_big(vb);
+    let x = q.to_f64(ea - eb - t as i64, !r.is_zero());
+    if va.is_negative() != vb.is_negative() {
+        -x
+    } else {
+        x
+    }
+}
+
+/// `√(a / b)` (each `v · 2^e`, both positive), rounded once: the floor of
+/// the root of the floor of the scaled quotient is the floor of the exact
+/// root, and the root is exact only when both steps were.
+pub(crate) fn sqrt_ratio(a: &(BigInt, i64), b: &(BigInt, i64)) -> f64 {
+    let ((va, ea), (vb, eb)) = (a, b);
+    if va.is_zero() {
+        return 0.0;
+    }
+    // A quotient of 116 bits and more, its exponent even: a root of 58.
+    let mut t = (vb.bits() + 118).saturating_sub(va.bits());
+    if (ea - eb - t as i64).rem_euclid(2) != 0 {
+        t += 1;
+    }
+    let (q, r) = va.clone().abs().shl(t).div_big(vb);
+    let s = q.isqrt();
+    let exact = r.is_zero() && s.mul(&s).cmp_value(&q).is_eq();
+    s.to_f64((ea - eb - t as i64) / 2, !exact)
 }
 
 /// `v · 2^e` as `m · 2^x`, `m` in [1, 2) (rounded once).
@@ -671,6 +709,33 @@ mod tests {
         assert_eq!(quotient(&(v, -(53 + k as i64)), 3), 1.0 + f64::EPSILON);
         let tie = BigInt::from_u128(3 * ((1u128 << 53) + 1)).shl(k);
         assert_eq!(quotient(&(tie, -(53 + k as i64)), 3), 1.0);
+    }
+
+    /// Ratios and roots rounded on what lies below their last bit: just
+    /// above the tie between 1 and 1 + 2⁻⁵² rounds up, the tie itself to
+    /// even.
+    #[test]
+    fn ratios_and_roots_round_on_their_remainder() {
+        let k = 70;
+        let mid = BigInt::from_u128((1u128 << 53) + 1).shl(k);
+        let e = -(53 + k as i64);
+        let three = (BigInt::from_u128(3), 0);
+        let above = BigInt::from_u128(3).mul(&mid).add(&BigInt::from_u128(1));
+        assert_eq!(ratio(&(above, e), &three), 1.0 + f64::EPSILON);
+        assert_eq!(ratio(&(BigInt::from_u128(3).mul(&mid), e), &three), 1.0);
+        assert_eq!(
+            ratio(&(BigInt::from_u128(3).mul(&mid).negated(), e), &three),
+            -1.0
+        );
+        let one = (BigInt::from_u128(1), 0);
+        let sq = mid.mul(&mid);
+        assert_eq!(
+            sqrt_ratio(&(sq.add(&BigInt::from_u128(1)), 2 * e), &one),
+            1.0 + f64::EPSILON
+        );
+        assert_eq!(sqrt_ratio(&(sq, 2 * e), &one), 1.0);
+        // √(1/2), its exponent odd.
+        assert_eq!(sqrt_ratio(&one, &(BigInt::from_u128(2), 0)), 0.5f64.sqrt());
     }
 
     #[test]

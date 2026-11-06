@@ -1650,8 +1650,9 @@ values; a policy, or a table keyed by hidden row ids, scans row by row.  Sums of
 exact (`fsum::ExactSum`, §M14.27 S1: Neal's superaccumulator — the sum
 as an integer in units of 2⁻¹⁰⁷⁵, in 32-bit chunks held in 64-bit
 words, only the chunks touched kept; an addition or subtraction is three
-integer additions, `add_product` adds x·y exactly through a fused
-multiply-add; the result rounded once to nearest even from the integer;
+integer additions, `add_product` adds x·y exactly — the significands'
+106-bit product from one 128-bit multiplication, added as five chunks;
+the result rounded once to nearest even from the integer;
 a worker's state passed as bytes — the chunks carried, all but the top
 in four bytes, without the zeros at either end — and added from them
 without building a state), so they do not depend on the order either.
@@ -1659,8 +1660,8 @@ So do the moments (`moments`, §M14.27 S2): `var_samp` / `variance`,
 `var_pop`, `stddev_samp` / `stddev`, `stddev_pop`, `skewness`,
 `kurtosis`, one `GroupAccumulator` for all, combinable, its state the
 row count and the power sums.  Over doubles Σx … Σx⁴ are `ExactSum`s,
-each power added as its rounded value and its error (`add_product`'s
-fused multiply-add: x² = h + l exactly, then h·x, l·x, h², 2hl, l²), so
+each power added exactly (x² one `add_product`; x² = h + l by a fused
+multiply-add, then x³ as h·x + l·x and x⁴ as h² + 2hl + l²), so
 the central sums are exact integers — C₂ = nΣx² − (Σx)², C₃, C₄ — formed
 in `bigint::BigInt` (sign and magnitude, base 2³², only at the end) and
 rounded once: the variance as C₂/(n(n−1)) rounded from the integer
@@ -1674,7 +1675,22 @@ decimals the variance and standard deviation are PostgreSQL's
 scale; the result at PostgreSQL's scale (`select_div_scale`: 16
 significant digits, at least twice the input's), half away from zero,
 the root an integer square root — the same digits, up to `numeric`'s 38
-(beyond: 22003, where PostgreSQL prints 39).  Not in parallel: an enclosing row (a correlated
+(beyond: 22003, where PostgreSQL prints 39).  The two-variable
+aggregates (`regression`, §M14.27 S3) — `corr`, `covar_pop`,
+`covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2`, `regr_count`,
+`regr_avgx`, `regr_avgy`, `regr_sxx`, `regr_syy`, `regr_sxy`,
+PostgreSQL's, arguments `(y, x)`, doubles — keep n and only the sums
+their result needs of Σx, Σy, Σx², Σy², Σxy (`ExactSum`s; integers read
+from their vectors without a `Value` each), so Cxx = nΣx² − (Σx)², Cyy
+and Cxy = nΣxy − ΣxΣy are exact integers, and each result is one ratio
+of them rounded once (`moments::ratio`, Knuth's long division in
+`BigInt::div_big`); `corr` the root of the exact Cxy²/(CxxCyy), rounded
+once (`moments::sqrt_ratio`: the floor of the root of the floor is the
+floor of the root, exact only if both steps were).  PostgreSQL's rules:
+a row with either value `NULL` left out; `NULL` without rows, for
+`covar_samp` with one, and where x does not vary (and y, for `corr`);
+r² 1 for a horizontal line; `NaN` where an infinite or `NaN` input
+enters.  Not in parallel: an enclosing row (a correlated
 subquery's own plan), `EXPLAIN ANALYZE`, a volatile function or a
 subquery the workers cannot run in the pipeline (below), groups in key
 order past `work_mem` in a morsel, or merged on the statement's thread
@@ -3411,6 +3427,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.27 S3, two variables:** `corr`, `covar_pop`,
+  `covar_samp` and the `regr_*` family (§8.5, *Parallelism*);
+  `ExactSum::add_product` one exact step; `BigInt::div_big` Knuth's long
+  division.
 - **2026-11-06 — §M14.27 S2, moments:** `variance`, `var_pop`,
   `stddev`, `stddev_pop` (and the `_samp` names), `skewness`, `kurtosis`
   (§8.5, *Parallelism*), `bigint::BigInt` and `Wide`; `ExactSum`'s

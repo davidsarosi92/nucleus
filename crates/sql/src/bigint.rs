@@ -342,28 +342,86 @@ impl BigInt {
         BigInt { neg: self.neg, mag }
     }
 
-    /// The magnitudes' quotient and remainder (schoolbook, a bit at a
-    /// time: for the square root's iteration, a few hundred bits).
-    fn div_big(&self, d: &BigInt) -> (BigInt, BigInt) {
+    /// The magnitudes' quotient and remainder: Knuth's Algorithm D
+    /// (TAOCP vol. 2, 4.3.1; as Hacker's Delight's `divmnu`), a digit of
+    /// 32 bits at a time.
+    pub fn div_big(&self, d: &BigInt) -> (BigInt, BigInt) {
+        assert!(!d.is_zero(), "a division by zero");
         if let Some(small) = d.to_i128().map(i128::unsigned_abs).filter(|v| v >> 96 == 0) {
             let (q, r) = self.divmod_mag(small);
             return (q, BigInt::from_u128(r));
         }
-        let mut q = vec![0u32; self.mag.len()];
-        let mut r = BigInt::zero();
-        let d = d.clone().abs();
-        for i in (0..self.bits()).rev() {
-            r = r.shl(1);
-            if self.bit(i) {
-                r = r.add(&BigInt::from_u128(1));
+        let (u, v) = (&self.mag, &d.mag);
+        if cmp_mag(u, v) == Ordering::Less {
+            return (BigInt::zero(), self.clone().abs());
+        }
+        let (m, n) = (u.len(), v.len());
+        // Normalized: the divisor's top bit set.
+        let sh = v[n - 1].leading_zeros();
+        let shift = |x: &[u32], extra: bool| -> Vec<u32> {
+            let mut out = Vec::with_capacity(x.len() + 1);
+            let mut carry = 0u32;
+            for &w in x {
+                out.push((w << sh) | carry);
+                carry = if sh == 0 { 0 } else { w >> (32 - sh) };
             }
-            if cmp_mag(&r.mag, &d.mag) != Ordering::Less {
-                r = r.sub(&d);
-                q[(i / 32) as usize] |= 1 << (i % 32);
+            if extra {
+                out.push(carry);
+            }
+            out
+        };
+        let vn = shift(v, false);
+        let mut un = shift(u, true);
+        let mut q = vec![0u32; m - n + 1];
+        const B: u64 = 1 << 32;
+        for j in (0..=m - n).rev() {
+            let top = (u64::from(un[j + n]) << 32) | u64::from(un[j + n - 1]);
+            let mut qhat = top / u64::from(vn[n - 1]);
+            let mut rhat = top % u64::from(vn[n - 1]);
+            while qhat >= B || qhat * u64::from(vn[n - 2]) > (rhat << 32) + u64::from(un[j + n - 2])
+            {
+                qhat -= 1;
+                rhat += u64::from(vn[n - 1]);
+                if rhat >= B {
+                    break;
+                }
+            }
+            // un[j ..= j + n] −= qhat · vn.
+            let mut k: i64 = 0;
+            for i in 0..n {
+                let p = qhat * u64::from(vn[i]);
+                let t = i64::from(un[i + j]) - k - (p & 0xffff_ffff) as i64;
+                un[i + j] = t as u32;
+                k = (p >> 32) as i64 - (t >> 32);
+            }
+            let t = i64::from(un[j + n]) - k;
+            un[j + n] = t as u32;
+            q[j] = qhat as u32;
+            if t < 0 {
+                // One too many: add the divisor back.
+                q[j] = q[j].wrapping_sub(1);
+                let mut c = 0u64;
+                for i in 0..n {
+                    let t = u64::from(un[i + j]) + u64::from(vn[i]) + c;
+                    un[i + j] = t as u32;
+                    c = t >> 32;
+                }
+                un[j + n] = un[j + n].wrapping_add(c as u32);
             }
         }
+        // The remainder, shifted back.
+        let mut r: Vec<u32> = (0..n)
+            .map(|i| {
+                if sh == 0 {
+                    un[i]
+                } else {
+                    (un[i] >> sh) | (un[i + 1] << (32 - sh))
+                }
+            })
+            .collect();
         trim(&mut q);
-        (BigInt { neg: false, mag: q }, r)
+        trim(&mut r);
+        (BigInt { neg: false, mag: q }, BigInt { neg: false, mag: r })
     }
 
     /// `self · 2^exp`, correctly rounded to a double (to nearest, ties to
@@ -603,6 +661,49 @@ mod tests {
 
     fn b(v: i128) -> BigInt {
         BigInt::from_i128(v)
+    }
+
+    /// Long division against its own identity — a = q·d + r, 0 ≤ r < d —
+    /// over random magnitudes, the cases that correct a digit's estimate
+    /// (a divisor's top digit near the dividend's, the add-back) among
+    /// them.
+    #[test]
+    fn long_division_holds() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..3000 {
+            let make = |next: &mut dyn FnMut() -> u64| {
+                let len = next() % 9 + 1;
+                let ws: Vec<u64> = (0..len)
+                    .map(|_| match next() % 4 {
+                        0 => 0,
+                        1 => u64::MAX,
+                        2 => 1 << 63,
+                        _ => next(),
+                    })
+                    .collect();
+                BigInt::from_words(&ws).abs()
+            };
+            let a = make(&mut next);
+            let d = make(&mut next);
+            if d.is_zero() {
+                continue;
+            }
+            let (q, r) = a.div_big(&d);
+            assert_eq!(q.mul(&d).add(&r).cmp_value(&a), Ordering::Equal);
+            assert_eq!(r.cmp_value(&d), Ordering::Less);
+            assert!(!r.is_negative());
+        }
+        // The add-back step: Knuth's own example shape.
+        let a = BigInt::from_words(&[0, 0x8000_0000_0000_0000, 0x7fff_ffff_ffff_ffff]);
+        let d = BigInt::from_words(&[1, 0x8000_0000_0000_0000, 0]);
+        let (q, r) = a.div_big(&d);
+        assert_eq!(q.mul(&d).add(&r).cmp_value(&a), Ordering::Equal);
     }
 
     #[test]

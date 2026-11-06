@@ -36,6 +36,9 @@ QUERIES = {
     "stddev 1000 groups": "SELECT g, stddev(x) FROM t GROUP BY g ORDER BY g LIMIT 3",
     "variance of integers": "SELECT variance(id) FROM t",
     "skewness, kurtosis": "SELECT skewness(x), kurtosis(x) FROM t",
+    "corr": "SELECT corr(x, id) FROM t",
+    "regression 1000 groups": "SELECT g, regr_slope(x, id), regr_intercept(x, id) "
+                              "FROM t GROUP BY g ORDER BY g LIMIT 3",
 }
 
 # PostgreSQL has no skewness or kurtosis.
@@ -82,15 +85,16 @@ def generate(rows):
     import numpy as np
     i = np.arange(1, rows + 1, dtype=np.int64)
     x = 1e9 + ((i * 2654435761) % 1000003).astype(np.float64) / 1000003
-    return x
+    return i, x
 
 
 def numpy_times(rows):
     import numpy as np
-    x = generate(rows)
+    i, x = generate(rows)
     out = {}
     for name, f in [("variance", lambda: np.var(x, ddof=1)),
-                    ("sum", lambda: np.sum(x))]:
+                    ("sum", lambda: np.sum(x)),
+                    ("corr", lambda: np.corrcoef(x, i)[0, 1])]:
         t = []
         for _ in range(5):
             s = time.perf_counter()

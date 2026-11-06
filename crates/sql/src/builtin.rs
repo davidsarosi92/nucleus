@@ -129,6 +129,7 @@ impl Module for Builtin {
         crate::uuid::register(r)?;
         crate::vectors::register(r)?;
         crate::moments::register(r)?;
+        crate::regression::register(r)?;
         crate::bytea::register(r)?;
         crate::inet::register(r)?;
         crate::statements::register(r)?;

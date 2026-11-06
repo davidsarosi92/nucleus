@@ -274,7 +274,7 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
-| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments) |
+| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -2797,7 +2797,7 @@ Every result the same, but for ties at a `LIMIT`.  Left as findings,
 not targets: the `LIMIT`-over-a-failing-join finding (W6), TPC-H Q19 on
 column tables (an `OR` of conjunctions across a join, 1.93×).
 
-### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S2 ✅)
+### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S3 ✅)
 
 **First a study, then the plan.**  Can nucleus give mathematical and
 statistical functions over large data — fast, exact where exactness is
@@ -3078,7 +3078,54 @@ before they are built**:
   geometric mean 19.8 / 19.8 → 19.3 / 18.9 ms, TPC-H (row) 240.5 / 232.2
   → 225.5 / 231.9 ms; Q27's 42 → 47 ms, run alone three times
   alternating, was noise (47 / 43 / 43 → 42 / 39 / 39).
-- **S3 — two variables**: item 3.
+- **S3 — two variables** ✅ (2026-11-06): item 3.
+  *Built:* `regression` — `corr`, `covar_pop`, `covar_samp`,
+  `regr_slope`, `regr_intercept`, `regr_r2`, `regr_count`, `regr_avgx`,
+  `regr_avgy`, `regr_sxx`, `regr_syy`, `regr_sxy`, PostgreSQL's
+  (arguments `(y, x)`, doubles, its `NULL` / `NaN` / horizontal- and
+  vertical-line rules, checked against PostgreSQL 18 case by case).  A
+  group keeps n and only the sums its result needs of Σx, Σy, Σx², Σy²,
+  Σxy; Cxx, Cyy, Cxy are exact integers and each result one exact ratio
+  rounded once, `corr` the exact root of Cxy²/(CxxCyy) rounded once.  On
+  the way: `ExactSum::add_product` adds the significands' 106-bit
+  product in one step (five chunks) instead of a fused multiply-add's
+  two terms — exact down to 2⁻⁹⁶⁹ rather than 2⁻¹⁰²¹, and one addition a
+  product instead of two (the moments' x² and x⁴ too); `BigInt::div_big`
+  is Knuth's long division instead of a bit at a time (a ratio of two
+  300-bit integers a group, a million groups); the integers of a batch
+  are read from their vector, not converted a `Value` at a time.
+  Tests: `47_regression.slt` in every mode; the split law for all twelve
+  at 1–32 workers and three batch sizes, the slope against a `BigInt`
+  reference; the long division against its identity over 3000 random
+  operands (the add-back step mutated: caught); ratios and roots at a
+  tie and just above it (the root's sticky bit mutated: caught); random
+  products against fused multiply-adds (the product's top chunk
+  mutated: caught).
+  *Prior art:* PostgreSQL's `float8_regr_accum` and its finals — the
+  semantics taken, the computation not: its Youngs–Cramer update rounds
+  a row at a time, and on the benchmark's `corr(x, id)` (x near 10⁹,
+  spread 1) it answered −1.667e−6 and −3.056e−6 in two runs (its
+  workers' order) where the exact value is −3.459e−6 (numpy's two-pass
+  `corrcoef` −3.4589588653e−6, 11 digits); on four
+  rows near 10⁹ its slope is wrong from the seventh digit, and its
+  correlations of small data are an ulp off.  Kulisch's long accumulator
+  (an exact dot product: significands multiplied in integers, added to a
+  fixed-point register) — taken for `add_product`, in Neal's windowed
+  chunks.  Knuth's Algorithm D (TAOCP 4.3.1, as Hacker's Delight's
+  `divmnu`) — taken.
+  *Measured* (`bench/stats/aggs.py`, 10M rows, builds alternating with
+  S2's, best of five, two rounds; PostgreSQL 18 with its parallel
+  workers; numpy one core): `corr(x, id)` 217 / 220 ms (PostgreSQL 173,
+  numpy 37), slope and intercept by 1000 groups 277 / 281 (367); before
+  the exact product and the integers read from their vector, 258 /
+  345 (`ExactSum::put` was the top frame).  The moments with the new
+  product: `variance` 207 / 210 → 214 / 214, `skewness` and `kurtosis`
+  294 / 294 → 307 / 296 — the same within the noise (the scan is their
+  cost: `sum` alone 164 / 160).  `bench/phases.py` against S2's build,
+  two rounds: ClickBench (column) geometric mean 18.9 / 19.4 → 19.1 /
+  18.8 ms, TPC-H (row) 234.0 / 226.1 → 228.8 / 227.4 ms; TPC-H Q15's
+  307 → 344 ms, run alone three times alternating, was noise (best 288
+  → 284).
 - **S4 — window functions**: item 5.
 - **S5 — ordered sets**: `WITHIN GROUP`, item 4's exact quantiles with
   spilling selection, `histogram`, `width_bucket`.
@@ -4705,3 +4752,6 @@ style) across a thousand seeds without failure.
   digits over integers and decimals, the exact value rounded once over
   doubles; `ExactSum`'s state smaller (`avg` by a million groups 3.2 →
   2.0 s).
+- **2026-11-06** — §M14.27 S3: two variables — `corr`, `covar_*`,
+  `regr_*` as PostgreSQL's, from exact sums rounded once; exact products
+  in one step, Knuth's long division.

@@ -80,8 +80,11 @@ bool_and bool_or` (with `DISTINCT`, and `ORDER BY` inside the call:
 `string_agg(x, ',' ORDER BY x)`); statistics `variance` / `var_samp`,
 `var_pop`, `stddev` / `stddev_samp`, `stddev_pop` (`numeric` for integers
 and decimals, as PostgreSQL's; `double precision` otherwise), `skewness`,
-`kurtosis` (sample-corrected, as DuckDB's and Excel's) — over doubles the
-exact value rounded once, the same bits however the rows are split.
+`kurtosis` (sample-corrected, as DuckDB's and Excel's), `corr(y, x)`,
+`covar_pop`, `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2`,
+`regr_count`, `regr_avgx`, `regr_avgy`, `regr_sxx`, `regr_syy`,
+`regr_sxy` — over doubles the exact value rounded once, the same bits
+however the rows are split.
 
 **Memory:** `SET work_mem = '256MB'` gives each sort and materialised
 result more memory before it spills to disk (default 64MB).  Scans,

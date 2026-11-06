@@ -54,8 +54,9 @@ array in every driver (in Python an `(n, d)` numpy array or Arrow
 `fixed_size_list`), and pgvector's own clients over the PostgreSQL
 protocol.  Statistics have begun (§M14.27): sums of doubles kept exactly
 and rounded once, so a parallel `sum` gives the same bits every run, and
-`variance`, `stddev`, `skewness`, `kurtosis` — PostgreSQL's digits over
-integers and decimals, the exact value over doubles.  Next is the rest of the developer
+`variance`, `stddev`, `skewness`, `kurtosis`, `corr` and linear
+regression (`regr_*`) — PostgreSQL's digits over integers and decimals,
+over doubles from exact sums.  Next is the rest of the developer
 platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then

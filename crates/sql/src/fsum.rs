@@ -54,18 +54,59 @@ impl ExactSum {
         self.put(x, true);
     }
 
-    /// Adds `x · y` exactly: its rounded product and the product's error,
-    /// which a fused multiply-add gives exactly (unless the error is below
-    /// the smallest double, 2⁻¹⁰⁷⁴ — then it is that close).
+    /// Adds `x · y` exactly: the product of the two significands, 106
+    /// bits in one 128-bit multiplication, added at its place in one step
+    /// (unless the product is below 2⁻⁹⁶⁹: its bits below 2⁻¹⁰⁷⁵, the
+    /// accumulator's unit, are then dropped).  An infinite or `NaN`
+    /// product is added as one.
     #[inline]
     pub fn add_product(&mut self, x: f64, y: f64) {
-        let hi = x * y;
-        if !hi.is_finite() {
-            self.add(hi);
+        let prod = x * y;
+        if !prod.is_finite() {
+            self.add(prod);
             return;
         }
-        self.add(hi);
-        self.add(x.mul_add(y, -hi));
+        let (Some((mx, ex)), Some((my, ey))) = (significand(x), significand(y)) else {
+            return; // a zero
+        };
+        let mut p = u128::from(mx) * u128::from(my);
+        // Its lowest bit's place, in units of 2⁻¹⁰⁷⁵.
+        let mut at = ex + ey - 1075;
+        if at < 0 {
+            p >>= (-at).min(127);
+            at = 0;
+            if p == 0 {
+                return;
+            }
+        }
+        let (i, bit) = ((at >> 5) as usize, (at & 31) as u32);
+        // p · 2^bit: up to 137 bits, five chunks.
+        let lo = p << bit;
+        let hi = if bit == 0 {
+            0
+        } else {
+            (p >> (128 - bit)) as u64
+        };
+        let c = [
+            (lo as u64 & 0xffff_ffff) as i64,
+            ((lo >> 32) as u64 & 0xffff_ffff) as i64,
+            ((lo >> 64) as u64 & 0xffff_ffff) as i64,
+            ((lo >> 96) as u64) as i64,
+            hi as i64,
+        ];
+        let used = (bit + 128 - p.leading_zeros()).div_ceil(32) as usize;
+        self.cover(i, i + used);
+        let at = i - self.lo;
+        let w = &mut self.chunks[at..at + used];
+        if (x < 0.0) != (y < 0.0) {
+            w.iter_mut().zip(&c).for_each(|(w, c)| *w -= c);
+        } else {
+            w.iter_mut().zip(&c).for_each(|(w, c)| *w += c);
+        }
+        self.adds += 1;
+        if self.adds == CARRY_EVERY {
+            self.carry();
+        }
     }
 
     #[inline]
@@ -293,6 +334,20 @@ impl ExactSum {
             self.special = Some(self.special.map_or(s, |t| t + s));
         }
         Some(())
+    }
+}
+
+/// A finite double's significand and the place of its lowest bit (its
+/// exponent field, 1 for a subnormal); `None` for a zero.
+#[inline]
+fn significand(x: f64) -> Option<(u64, i64)> {
+    let bits = x.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as i64;
+    let mant = bits & ((1u64 << 52) - 1);
+    match exp {
+        0 if mant == 0 => None,
+        0 => Some((mant, 1)),
+        _ => Some((mant | 1 << 52, exp)),
     }
 }
 
@@ -545,5 +600,40 @@ mod tests {
         let mut s = ExactSum::new();
         s.add_product(1e300, 1e300);
         assert_eq!(s.total(), Some(f64::INFINITY));
+        // Random products of any sign, 2⁻⁴²³ … 2³⁷⁷, against h + l from a
+        // fused multiply-add (exact here: no error below the subnormals).
+        let mut seed = 0x853c_49e6_748f_ea9bu64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut p, mut q) = (ExactSum::new(), ExactSum::new());
+        for _ in 0..20_000 {
+            let mut one = || {
+                let x = f64::from_bits(next() & !(0xfffu64 << 52) | ((next() % 800 + 600) << 52));
+                if next() % 2 == 0 { x } else { -x }
+            };
+            let (x, y) = (one(), one());
+            p.add_product(x, y);
+            let h = x * y;
+            q.add(h);
+            q.add(x.mul_add(y, -h));
+        }
+        let ((a, ea), (b, eb)) = (p.exact().unwrap(), q.exact().unwrap());
+        let e = ea.min(eb);
+        assert!(
+            a.shl((ea - e) as u64)
+                .cmp_value(&b.shl((eb - e) as u64))
+                .is_eq()
+        );
+        assert_eq!(p.total(), q.total());
+        // A subnormal factor, a product far below the doubles' least.
+        let mut p = ExactSum::new();
+        p.add_product(5e-324, 2f64.powi(60));
+        assert_eq!(p.total(), Some(5e-324 * 2f64.powi(60)));
+        p.add_product(-3.0, 1.5);
+        assert_eq!(p.total(), Some(5e-324 * 2f64.powi(60) - 4.5));
     }
 }
