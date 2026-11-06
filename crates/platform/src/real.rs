@@ -2,9 +2,11 @@
 //!
 //! Built on `std` only, which already does the right thing per OS:
 //!
-//! - **Durability.**  [`File::sync`] is `std::fs::File::sync_all`: `fsync` on
-//!   Linux and d-os, `fcntl(F_FULLFSYNC)` on macOS (plain `fsync` there does
-//!   not flush the drive cache), `FlushFileBuffers` on Windows — under
+//! - **Durability.**  [`File::sync`] is `std::fs::File::sync_data`:
+//!   `fdatasync` on Linux and d-os (a length change made durable, the times
+//!   left — PostgreSQL's and SQLite's choice there), `fcntl(F_FULLFSYNC)`
+//!   on macOS (plain `fsync` there does not flush the drive cache),
+//!   `FlushFileBuffers` on Windows — under
 //!   [`SyncPolicy::Ordered`] (the default) on macOS
 //!   `fcntl(F_BARRIERFSYNC)` instead: ordered writes, the drive's cache not
 //!   flushed.  That one call is the crate's only unsafe code (`std` offers
@@ -176,7 +178,19 @@ impl FileSystem for RealFs {
 
     #[cfg(unix)]
     fn sync_dir(&self, path: &Path) -> io::Result<()> {
-        sync_file(&fs::File::open(path)?, self.sync)
+        let dir = fs::File::open(path)?;
+        #[cfg(target_vendor = "apple")]
+        return sync_file(&dir, self.sync);
+        // A directory's entries by the full `fsync`, as PostgreSQL syncs
+        // them: `fdatasync`'s "data" of a directory is not specified.
+        #[cfg(not(target_vendor = "apple"))]
+        dir.sync_all()
+    }
+
+    fn writes_in_place(&self) -> bool {
+        // APFS writes a changed block elsewhere (copy-on-write): measured,
+        // an overwrite synced costs it 16 KiB, an append 10–11 (§M14.28 L0).
+        !cfg!(target_vendor = "apple")
     }
 
     #[cfg(not(unix))]
@@ -207,7 +221,7 @@ fn sync_file(file: &fs::File, policy: SyncPolicy) -> io::Result<()> {
         return barrier_sync(file);
     }
     let _ = policy;
-    file.sync_all()
+    file.sync_data()
 }
 
 /// `fcntl(F_BARRIERFSYNC)`: the file's writes so far reach the drive before

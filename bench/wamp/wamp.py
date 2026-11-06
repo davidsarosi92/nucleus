@@ -7,7 +7,13 @@ wrote (macOS's proc_pid_rusage); PostgreSQL 18 in Docker: CHECKPOINT, the
 bytes the container's cgroup wrote.
 
     python3 -I bench/wamp/wamp.py nucleus BINARY DB-DIR PORT [PHASES]
+    python3 -I bench/wamp/wamp.py nucleus-docker VOLUME BINARY PORT [PHASES]
     python3 -I bench/wamp/wamp.py pg [PHASES]
+
+nucleus-docker runs a Linux build of the server (BINARY, a path inside
+the Docker volume VOLUME, mounted at /t) in a container, its database on
+an ext4 volume, and counts the bytes the Docker VM's disk wrote, the
+file system's journal included (nothing else may run in Docker then).
 
 PHASES: phase numbers, comma-separated (default 0,1,2,3,4); 5 is the
 steady state, 5M rows 100 a transaction into the table phase 1 filled.
@@ -65,36 +71,91 @@ PHASES = [
     ("100 rows a transaction, random keys, 5M rows", S),
 ]
 
-if sys.argv[1] == "nucleus":
+def sh(*a, **k):
+    return subprocess.run(a, check=True, capture_output=True, text=True, **k).stdout
+
+def cgroup_written(name):
+    total = 0
+    for line in sh("docker", "exec", name, "cat", "/sys/fs/cgroup/io.stat").splitlines():
+        for f in line.split()[1:]:
+            k, v = f.split("=")
+            if k == "wbytes":
+                total += int(v)
+    return total
+
+def wait_port(port):
+    for _ in range(6000):
+        try:
+            socket.create_connection(("127.0.0.1", port)).close(); return
+        except OSError:
+            time.sleep(0.1)
+
+if sys.argv[1] in ("nucleus", "nucleus-docker"):
     import nucleus
-    binary, db, port = sys.argv[2], sys.argv[3], int(sys.argv[4])
-    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
-    class Info(ctypes.Structure):
-        _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [(f"f{i}", ctypes.c_uint64) for i in range(40)]
-    def written(pid):
-        info = Info()
-        assert libc.proc_pid_rusage(pid, 2, ctypes.byref(info)) == 0
-        return info.f17
-    def size():
-        return sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(db) for f in fs)
-    def start():
-        s = subprocess.Popen([binary, "server", db, "--listen", f"127.0.0.1:{port}", "--no-auth"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(6000):
+    def connect():
+        # Docker's port forward accepts before the server listens.
+        for _ in range(600):
             try:
-                socket.create_connection(("127.0.0.1", port)).close(); break
-            except OSError:
+                return nucleus.connect("127.0.0.1", port, password=None)
+            except (OSError, nucleus.OperationalError):
                 time.sleep(0.1)
-        return s
+        return nucleus.connect("127.0.0.1", port, password=None)
+    if sys.argv[1] == "nucleus":
+        binary, db, port = sys.argv[2], sys.argv[3], int(sys.argv[4])
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        class Info(ctypes.Structure):
+            _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [(f"f{i}", ctypes.c_uint64) for i in range(40)]
+        def written(s):
+            info = Info()
+            assert libc.proc_pid_rusage(s.pid, 2, ctypes.byref(info)) == 0
+            return info.f17
+        def size():
+            return sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(db) for f in fs)
+        def start():
+            s = subprocess.Popen([binary, "server", db, "--listen", f"127.0.0.1:{port}", "--no-auth"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            wait_port(port)
+            return s
+        def stop(s):
+            s.terminate(); s.wait()
+        cleanup = lambda: None
+    else:
+        volume, binary, port = sys.argv[2], sys.argv[3], int(sys.argv[4])
+        NAME = "nucleus-wamp-nc"
+        subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+        sh("docker", "run", "-d", "--rm", "--name", NAME, "-p", f"127.0.0.1:{port}:{port}",
+           "-v", f"{volume}:/t:ro", "-v", "/db", "debian:bookworm-slim", "sleep", "infinity")
+        def written(s):
+            # The VM's disk, journal included (the cgroup's count leaves
+            # out the file system's journal, written by a kernel thread);
+            # nothing else may run in Docker meanwhile.
+            total = 0
+            for line in sh("docker", "exec", NAME, "cat", "/proc/diskstats").splitlines():
+                f = line.split()
+                if f[2].startswith(("vd", "sd", "nvme")) and not f[2][-1].isdigit():
+                    total += int(f[9]) * 512
+            return total
+        def size():
+            return int(sh("docker", "exec", NAME, "du", "-sb", "/db").split()[0])
+        def start():
+            sh("docker", "exec", "-d", NAME, binary, "server", "/db/x", "--listen", f"0.0.0.0:{port}", "--no-auth", "--insecure")
+            wait_port(port)
+            return None
+        def stop(s):
+            # SIGTERM, as the process above gets: no shutdown checkpoint.
+            sh("docker", "exec", NAME, "sh", "-c",
+               "pids=$(for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = nucleus ] && echo ${p#/proc/}; done); "
+               "kill $pids; for p in $pids; do while [ -e /proc/$p ]; do sleep 0.1; done; done")
+        cleanup = lambda: subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
     s = start()
-    c = nucleus.connect("127.0.0.1", port, password=None)
+    c = connect()
     for t in ("seq", "rnd"):
         c.execute(f"CREATE TABLE {t} (k BIGINT PRIMARY KEY, v TEXT)")
-    c.close(); s.terminate(); s.wait()
+    c.close(); stop(s)
     def phase(i):
         s = start()
-        c = nucleus.connect("127.0.0.1", port, password=None)
-        w0, t0 = stable(lambda: written(s.pid)), time.perf_counter()
+        c = connect()
+        w0, t0 = stable(lambda: written(s)), time.perf_counter()
         if i < 2:
             t, key = ("seq", "g") if i == 0 else ("rnd", RANDOM_KEY)
             for j in range(N // CH):
@@ -108,33 +169,34 @@ if sys.argv[1] == "nucleus":
             for j in range(0, len(keys), 100):
                 c.execute_many("INSERT INTO rnd VALUES ($1, repeat('z', 100))", [[k] for k in keys[j:j + 100]])
         secs = time.perf_counter() - t0
-        w1 = stable(lambda: written(s.pid))
-        c.close(); s.terminate(); s.wait()
+        w1 = stable(lambda: written(s))
+        c.close(); stop(s)
         # The pages the phase dirtied, made durable by recovery's checkpoint.
-        s = start()
-        w2 = stable(lambda: written(s.pid))
-        s.terminate(); s.wait()
+        if sys.argv[1] == "nucleus":
+            s = start()
+            w2 = stable(lambda: written(s))
+        else:
+            # The container's counter goes on: what recovery adds to it.
+            w = stable(lambda: written(s))
+            s = start()
+            w2 = stable(lambda: written(s)) - w
+        stop(s)
         report(PHASES[i][0], PHASES[i][1], secs, (w1 - w0) + w2, size())
         print(f"    (during {(w1 - w0) / 2**20:.0f} MiB, its checkpoint after {w2 / 2**20:.0f} MiB)", flush=True)
-    for i in CHOSEN:
-        phase(i)
+    try:
+        for i in CHOSEN:
+            phase(i)
+    finally:
+        cleanup()
 else:
     NAME = "nucleus-wamp-pg"
-    def sh(*a, **k):
-        return subprocess.run(a, check=True, capture_output=True, text=True, **k).stdout
     def psql(sql=None, file=None):
         cmd = ["docker", "exec", "-i", NAME, "psql", "-q", "-U", "postgres", "-v", "ON_ERROR_STOP=1"]
         if sql:
             cmd += ["-c", sql]
         return subprocess.run(cmd, check=True, capture_output=True, text=True, input=file).stdout
     def written():
-        total = 0
-        for line in sh("docker", "exec", NAME, "cat", "/sys/fs/cgroup/io.stat").splitlines():
-            for f in line.split()[1:]:
-                k, v = f.split("=")
-                if k == "wbytes":
-                    total += int(v)
-        return total
+        return cgroup_written(NAME)
     def size():
         return int(sh("docker", "exec", NAME, "du", "-sb", "/var/lib/postgresql").split()[0])
     subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)

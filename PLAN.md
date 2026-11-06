@@ -275,7 +275,7 @@ are marked ✅.
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W8 and W3b ✅; benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 to agree |
-| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study |
+| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1 |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
@@ -2996,7 +2996,7 @@ chosen and their order, the methods and their error bounds, the
 benchmarks — and the steps it leads to are planned as this milestone's
 own, agreed before they are built.
 
-### §M14.28 — B+tree or LSM tree, chosen per table ◐ (study written; steps to agree)
+### §M14.28 — B+tree or LSM tree, chosen per table ◐ (study written; L0 ✅)
 
 **First a study, then the plan.**  Today every table lives in the one
 copy-on-write B+tree (D2, D10); an LSM tree was left for later, "as a
@@ -3222,12 +3222,51 @@ range-scan latency (p50, p99) while compaction runs; YCSB's A (50 %
 updates), B (5 %) and E (scans); the §M14.11 suite on an LSM table;
 recovery time after a crash mid-compaction.
 
-*Steps*, each its own commit, measured, in this order — **to be agreed
-before they are built**:
+*Steps*, each its own commit, measured, in this order (agreed
+2026-11-06: "legyen meg az S, L és V lépések"):
 
-- **L0 — the commit's bytes**: WAL segments preallocated and recycled
+- **L0 — the commit's bytes** ✅: WAL segments preallocated and recycled
   (left in W7), so a commit writes its block and no metadata; the bytes a
   commit costs measured on APFS and ext4.  Both engines gain.
+  *Measured first* (a probe: 3000 appends of 220 bytes, each synced;
+  bytes the device wrote): on **ext4** (Docker's Linux VM) into a file
+  that grows 16.7 KiB and ~400 µs a commit, by `fsync` or `fdatasync`;
+  into zeros written ahead, or a recycled file, 5.7 KiB by `fsync` and
+  **4.2 KiB, ~80 µs by `fdatasync`**.  On **APFS** the reverse: a file
+  that grows 10–12 KiB a commit, zeros written ahead or a recycled file
+  16.2 KiB — APFS writes a changed block elsewhere (copy-on-write), so an
+  overwrite allocates as an append does and costs more metadata; the
+  time is the same (~180 µs ordered).  So the 16 KiB a commit measured
+  above on APFS is the file system's, and PostgreSQL's 8 KiB was
+  measured on ext4 in a cgroup that leaves out the journal: not the same
+  quantity.  *Taken*: the platform's sync is `fdatasync` on Linux
+  (PostgreSQL's `wal_sync_method` default there, and SQLite's); a
+  file system says whether it writes in place
+  (`FileSystem::writes_in_place`: not on Apple's systems); where it does,
+  the WAL grows a segment ahead of its records by zeros a mebibyte at a
+  time and keeps the segments a checkpoint drops as spares, renamed into
+  the next ones, as many as that checkpoint dropped (PostgreSQL's
+  recycled segments, `wal_recycle`; its zero-filled new segments,
+  `wal_init_zero`) — APFS keeps segments that grow.  A spare's old
+  records are not cleared: each record's checksum folds in its LSN
+  (D10), so none passes at its new place (PostgreSQL relies on its
+  pages' addresses the same way); a torn record of the log's own at the
+  end is written over by zeros on open.  The simulation answers
+  `writes_in_place` by its seed, so every seeded crash test runs both
+  ways; it found, with recycling, that a checkpoint could drop old
+  segments before the directory entry of the segment holding it was
+  durable — a crash keeping an older segment but losing the newer left
+  a log ending before the checkpoint.  The deletions before had the same
+  window; fixed for both by a directory sync first.  *Measured*, the
+  server on ext4 (Docker's Linux VM, `bench/wamp/wamp.py
+  nucleus-docker`), against the step before: 100k one-row commits
+  41.8 / 58.3 / 58.3 → 15.2 / 14.6 / 13.6 s, the
+  disk's bytes a commit 16.6 / 17.0 → 4.4 KiB (write amplification 157 →
+  41); 100 rows a transaction 4.2 / 4.2 / 4.4 → 3.3 / 4.0 / 3.8 s (its bytes 39 → 35
+  MiB, the new segment's zeros included).  macOS unchanged by
+  construction (segments grow there as before), confirmed by
+  `bench/phases.py`: the TPC-H SF 1 load on row tables 32.5 / 26.2 → 26.9 / 26.4 s (the first
+  run cold).
 - **L1 — the engine boundary**: the KV routes a key range to an engine
   behind the store's interface (get, scan, apply a batch, checkpoint);
   one WAL; a second, trivial engine (a sorted map flushed whole at a
@@ -4460,3 +4499,9 @@ style) across a thousand seeds without failure.
   distance kernels with a fixed summation order, the same bits at every
   SIMD level; exact nearest-neighbour search; a native mapping in all six
   drivers; the law kit passes on it.
+- **2026-11-06** — §M14.28 L0: the commit's bytes — `fdatasync` on Linux,
+  WAL segments grown ahead by zeros and recycled where the file system
+  writes in place (not APFS, measured: an overwrite costs it more than an
+  append); on ext4 a one-row commit 16.6 → 4.4 KiB and ~4× faster; a
+  checkpoint's segment drop made safe against a crash before the new
+  segment's entry is durable.  Steps S, L and V agreed to be built.

@@ -33,13 +33,29 @@
 //! (§M14.20 W4) — a crash may keep any of them, and opening from the
 //! checkpoint deletes again those that lie before the segment holding it.
 //!
+//! # Preallocated and recycled segments
+//!
+//! Where the file system writes over a file's blocks in place
+//! ([`FileSystem::writes_in_place`](nucleus_platform::FileSystem::writes_in_place):
+//! ext4, XFS, NTFS), a segment is grown ahead of its records by zeros, a
+//! mebibyte at a time, and the segments a checkpoint drops are kept as
+//! spares (`<20 digits>.spare`) and renamed into the next segments, as
+//! many as the last checkpoint dropped (PostgreSQL's recycled segments).
+//! A commit's sync then writes its block and no metadata: on ext4 4 KiB
+//! and ~80 µs a small commit, against 17 KiB and ~400 µs into a file that
+//! grows (PLAN.md §M14.28 L0).  A spare's old records carry older LSNs,
+//! so none passes for a record at its new place.  On a copy-on-write file
+//! system (APFS) an overwrite costs more than an append, and segments grow
+//! as they are written and are deleted when dropped.
+//!
 //! # Opening
 //!
 //! [`Wal::open`] reads every segment.  The first record that fails its
 //! checksum, is cut short, or carries the wrong LSN ends the log: in the last
 //! segment that is a torn tail of writes that were never reported durable,
-//! and it is cut off; anywhere else it is corruption.  A failed `fsync`
-//! poisons the log.
+//! and it is cut off (or, in a preallocated segment, written over by
+//! zeros); a segment before the last must end where the next begins, or
+//! it is corruption.  A failed `fsync` poisons the log.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -52,6 +68,9 @@ use crate::page::PageId;
 
 const RECORD_HEADER: u64 = 16;
 
+/// A preallocated segment grows ahead of its records by this much.
+const GROW: u64 = 1 << 20;
+
 /// A log sequence number: a byte position in the log.
 pub type Lsn = u64;
 
@@ -59,6 +78,9 @@ struct Segment {
     start: Lsn,
     path: PathBuf,
     file: Arc<dyn File>,
+    /// The file's length (preallocated segments: how far it is zeros or
+    /// old records ahead of the log).
+    len: u64,
 }
 
 struct State {
@@ -68,6 +90,8 @@ struct State {
     /// A segment was created whose directory entry is not yet synced.
     dir_dirty: bool,
     poisoned: bool,
+    /// Dropped segments kept for reuse (preallocated segments only).
+    spares: Vec<PathBuf>,
 }
 
 /// The write-ahead log.
@@ -75,6 +99,8 @@ pub struct Wal {
     platform: Arc<dyn Platform>,
     dir: PathBuf,
     segment_size: u64,
+    /// Segments preallocated and recycled ([`FileSystem::writes_in_place`](nucleus_platform::FileSystem::writes_in_place)).
+    in_place: bool,
     state: Mutex<State>,
     /// Serialises `fsync`s; holds the LSN known durable.
     durable: Mutex<Lsn>,
@@ -91,6 +117,19 @@ impl std::fmt::Debug for Wal {
 
 fn segment_name(start: Lsn) -> String {
     format!("{start:020}.wal")
+}
+
+fn spare_name(start: Lsn) -> String {
+    format!("{start:020}.spare")
+}
+
+/// The LSN a file name of `suffix` stands for.
+fn named(name: &str, suffix: &str) -> Option<Result<Lsn>> {
+    let n = name.strip_suffix(suffix).filter(|n| n.len() == 20)?;
+    Some(
+        n.parse::<Lsn>()
+            .map_err(|_| corrupt("bad segment file name")),
+    )
 }
 
 fn corrupt(reason: &'static str) -> Error {
@@ -118,14 +157,21 @@ impl Wal {
         from: Lsn,
     ) -> Result<Self> {
         let fs = platform.fs();
+        let in_place = fs.writes_in_place();
         let mut starts = Vec::new();
+        let mut spares = Vec::new();
         for name in fs.list_dir(dir)? {
             let name = name.to_string_lossy();
-            if let Some(n) = name.strip_suffix(".wal").filter(|n| n.len() == 20) {
-                starts.push(
-                    n.parse::<Lsn>()
-                        .map_err(|_| corrupt("bad segment file name"))?,
-                );
+            if let Some(start) = named(&name, ".wal") {
+                starts.push(start?);
+            } else if let Some(start) = named(&name, ".spare") {
+                let path = dir.join(spare_name(start?));
+                if in_place {
+                    spares.push(path);
+                } else {
+                    // Moved from a file system that writes in place.
+                    fs.remove_file(&path)?;
+                }
             }
         }
         starts.sort_unstable();
@@ -144,34 +190,53 @@ impl Wal {
         // lost the entry of a segment created there — before anything in
         // it was durable, as a sync makes its entry durable too).
         let mut end = starts.first().copied().unwrap_or(from);
-        let count = starts.len();
-        for (i, start) in starts.into_iter().enumerate() {
+        for (i, &start) in starts.iter().enumerate() {
             if start != end {
                 return Err(corrupt("gap between log segments"));
             }
             let path = dir.join(segment_name(start));
             let file: Arc<dyn File> = Arc::from(fs.open(&path, OpenMode::ReadWrite)?);
             let valid = scan(file.as_ref(), start, |_, _| Ok(()))?;
-            let len = file.size()?;
-            if valid < len {
-                if i + 1 < count {
+            let mut len = file.size()?;
+            if let Some(&next) = starts.get(i + 1) {
+                // A segment before the last ends where the next begins
+                // (what follows its records, if anything, is zeros or
+                // older records of a recycled file).
+                if start + valid != next {
                     return Err(corrupt("damaged record before the last log segment"));
                 }
-                file.set_len(valid)?; // the torn tail
-                file.sync()?;
+            } else if valid < len {
+                // The torn tail.
+                if !in_place {
+                    file.set_len(valid)?;
+                    file.sync()?;
+                    len = valid;
+                } else if !zeros_or_older(file.as_ref(), start, valid)? {
+                    // A torn record of this log's own: zeros over the
+                    // rest, so nothing of it is read past a later record.
+                    zero(file.as_ref(), valid, len)?;
+                    file.sync()?;
+                }
             }
             end = start + valid;
-            segments.push(Segment { start, path, file });
+            segments.push(Segment {
+                start,
+                path,
+                file,
+                len,
+            });
         }
         let wal = Self {
             platform,
             dir: dir.to_path_buf(),
             segment_size: segment_size.max(RECORD_HEADER + 1),
+            in_place,
             state: Mutex::new(State {
                 segments,
                 end,
                 dir_dirty: false,
                 poisoned: false,
+                spares,
             }),
             durable: Mutex::new(end),
         };
@@ -187,9 +252,22 @@ impl Wal {
     }
 
     fn new_segment(&self, s: &mut State, start: Lsn) -> Result<()> {
+        let fs = self.platform.fs();
         let path = self.dir.join(segment_name(start));
-        let file: Arc<dyn File> = Arc::from(self.platform.fs().open(&path, OpenMode::CreateNew)?);
-        s.segments.push(Segment { start, path, file });
+        let file: Arc<dyn File> = match s.spares.pop() {
+            Some(spare) => {
+                fs.rename(&spare, &path)?;
+                Arc::from(fs.open(&path, OpenMode::ReadWrite)?)
+            }
+            None => Arc::from(fs.open(&path, OpenMode::CreateNew)?),
+        };
+        let len = file.size()?;
+        s.segments.push(Segment {
+            start,
+            path,
+            file,
+            len,
+        });
         s.dir_dirty = true;
         Ok(())
     }
@@ -245,8 +323,17 @@ impl Wal {
         rec.extend_from_slice(&record_crc(lsn, payload).to_le_bytes());
         rec.extend_from_slice(&lsn.to_le_bytes());
         rec.extend_from_slice(payload);
-        let seg = s.segments.last().expect("the log always has a segment");
-        seg.file.write_all_at(&rec, lsn - seg.start)?;
+        let in_place = self.in_place;
+        let segment_size = self.segment_size;
+        let seg = s.segments.last_mut().expect("the log always has a segment");
+        let at = lsn - seg.start;
+        if in_place && at + len > seg.len {
+            // Zeros ahead of the records, so their syncs carry no length.
+            let to = (at + len).max((seg.len + GROW).min(segment_size));
+            zero(seg.file.as_ref(), seg.len, to)?;
+            seg.len = to;
+        }
+        seg.file.write_all_at(&rec, at)?;
         s.end = lsn + len;
         Ok(s.end)
     }
@@ -317,24 +404,45 @@ impl Wal {
     /// Deletes the segments that hold only records before `lsn`.  The
     /// segment being written is always kept.
     pub fn truncate_before(&self, lsn: Lsn) -> Result<()> {
-        let doomed: Vec<PathBuf> = {
-            let mut s = self.lock();
-            let mut doomed = Vec::new();
-            while s.segments.len() > 1 && s.segments[1].start <= lsn {
-                doomed.push(s.segments.remove(0).path);
-            }
-            doomed
-        };
+        let fs = self.platform.fs();
+        // The segment holding `lsn` may be new, its directory entry not yet
+        // durable: it must be before any older one leaves, or a crash could
+        // keep an older segment and lose it — a log ending before the
+        // checkpoint.
+        if self.lock().segments.get(1).is_some_and(|g| g.start <= lsn) {
+            fs.sync_dir(&self.dir)?;
+        }
+        let mut s = self.lock();
+        let mut doomed = Vec::new();
+        while s.segments.len() > 1 && s.segments[1].start <= lsn {
+            doomed.push(s.segments.remove(0));
+        }
         if doomed.is_empty() {
             return Ok(());
         }
         // All, then one directory sync: a crash may keep any of them (an
         // unsynced directory's changes survive in any combination), and
         // opening from the checkpoint deletes them again (`open_from`).
-        for path in &doomed {
-            self.platform.fs().remove_file(path)?;
+        // Preallocated, as many are kept as spares as this checkpoint
+        // dropped — what the next will need — and the rest deleted.  (The
+        // state lock is held: a new segment may not take a spare whose
+        // rename is still to come.)
+        let keep = if self.in_place { doomed.len() } else { 0 };
+        for seg in doomed {
+            if s.spares.len() < keep {
+                let spare = self.dir.join(spare_name(seg.start));
+                fs.rename(&seg.path, &spare)?;
+                s.spares.push(spare);
+            } else {
+                fs.remove_file(&seg.path)?;
+            }
         }
-        self.platform.fs().sync_dir(&self.dir)?;
+        while s.spares.len() > keep {
+            let spare = s.spares.remove(0);
+            fs.remove_file(&spare)?;
+        }
+        drop(s);
+        fs.sync_dir(&self.dir)?;
         Ok(())
     }
 
@@ -343,6 +451,30 @@ impl Wal {
         let s = self.lock();
         s.end - s.segments[0].start
     }
+}
+
+/// Whether what follows the records of the segment starting at `start`,
+/// at `at`, is zeros (or nothing) or a record older than the segment (a
+/// recycled file's) — not a torn record of its own.
+fn zeros_or_older(file: &dyn File, start: Lsn, at: u64) -> Result<bool> {
+    let mut header = [0u8; RECORD_HEADER as usize];
+    let n = file.read_at(&mut header, at)?;
+    if header[..n].iter().all(|&b| b == 0) {
+        return Ok(true);
+    }
+    Ok(n == header.len() && u64::from_le_bytes(header[8..16].try_into().unwrap()) < start)
+}
+
+/// Writes zeros over `from..to`.
+fn zero(file: &dyn File, from: u64, to: u64) -> Result<()> {
+    let zeros = vec![0u8; (to - from).min(GROW) as usize];
+    let mut at = from;
+    while at < to {
+        let n = (to - at).min(GROW) as usize;
+        file.write_all_at(&zeros[..n], at)?;
+        at += n as u64;
+    }
+    Ok(())
 }
 
 fn record_crc(lsn: Lsn, payload: &[u8]) -> u32 {

@@ -63,8 +63,14 @@ fn apply(model: &mut Model, batch: &Batch) {
     }
 }
 
+fn wal_files(p: &SimPlatform, suffix: &str) -> Vec<std::ffi::OsString> {
+    let mut names = p.fs().list_dir(Path::new("/db/wal")).unwrap();
+    names.retain(|n| n.to_string_lossy().ends_with(suffix));
+    names
+}
+
 fn wal_segments(p: &SimPlatform) -> usize {
-    p.fs().list_dir(Path::new("/db/wal")).unwrap().len()
+    wal_files(p, ".wal").len()
 }
 
 #[test]
@@ -148,6 +154,64 @@ fn checkpoints_truncate_the_wal() {
     store.read().unwrap().check().unwrap();
 }
 
+/// Where the file system writes in place, segments are grown ahead by
+/// zeros and the ones a checkpoint drops are kept and reused (§M14.28 L0);
+/// on a copy-on-write one they grow as written and are deleted.
+#[test]
+fn dropped_segments_are_recycled_where_files_are_written_in_place() {
+    for in_place in [true, false] {
+        let p = sim(1);
+        p.sim_fs().set_writes_in_place(in_place);
+        let (store, _) = open(&p).unwrap();
+        let rng = SplitMix64::new(2);
+        let mut model = Model::new();
+        let mut meta = 0;
+        for round in 0..4 {
+            for _ in 0..60 {
+                meta += 1;
+                let b = random_batch(&rng, meta);
+                store.commit(&b).unwrap();
+                apply(&mut model, &b);
+            }
+            store.checkpoint().unwrap();
+            let spares = wal_files(&p, ".spare").len();
+            if in_place {
+                assert!(spares > 2, "round {round}: spares {spares}");
+            } else {
+                assert_eq!(spares, 0);
+            }
+        }
+        // The current segment grown ahead of its records (to its full
+        // length, segments being small here).
+        let names = wal_files(&p, ".wal");
+        let last = Path::new("/db/wal").join(names.last().unwrap());
+        let len = p
+            .fs()
+            .open(&last, OpenMode::ReadOnly)
+            .unwrap()
+            .size()
+            .unwrap();
+        if in_place {
+            assert_eq!(len, opts().wal_segment_size, "preallocated");
+        }
+        drop(store);
+        let (store, rec) = open(&p).unwrap();
+        assert_eq!(rec.meta, meta);
+        assert_eq!(contents(&store), model);
+        // Reused again after reopening.
+        for _ in 0..60 {
+            meta += 1;
+            let b = random_batch(&rng, meta);
+            store.commit(&b).unwrap();
+            apply(&mut model, &b);
+        }
+        drop(store);
+        let (store, rec) = open(&p).unwrap();
+        assert_eq!(rec.meta, meta);
+        assert_eq!(contents(&store), model);
+    }
+}
+
 #[test]
 fn a_damaged_record_before_the_last_segment_is_corruption() {
     let p = sim(1);
@@ -157,7 +221,7 @@ fn a_damaged_record_before_the_last_segment_is_corruption() {
         store.commit(&random_batch(&rng, i)).unwrap();
     }
     drop(store);
-    let mut names = p.fs().list_dir(Path::new("/db/wal")).unwrap();
+    let mut names = wal_files(&p, ".wal");
     names.sort();
     let first = Path::new("/db/wal").join(&names[0]);
     let f = p.fs().open(&first, OpenMode::ReadWrite).unwrap();

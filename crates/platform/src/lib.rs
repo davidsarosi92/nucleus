@@ -110,6 +110,17 @@ pub trait FileSystem: Send + Sync {
     /// durable.
     fn sync_dir(&self, path: &Path) -> io::Result<()>;
 
+    /// Whether writing over blocks a file already has costs less to make
+    /// durable than writing past its end: true where blocks are
+    /// overwritten in place (ext4, XFS, NTFS), so a sync of such a write
+    /// carries no metadata; false on a copy-on-write file system (APFS),
+    /// where an overwrite allocates as an append does and costs more
+    /// metadata besides.  The WAL preallocates and recycles its segments
+    /// only where it is true (PLAN.md §M14.28 L0).
+    fn writes_in_place(&self) -> bool {
+        true
+    }
+
     /// Takes an exclusive lock named by the file at `path` (created if
     /// missing; its contents are not used), held until the returned guard
     /// is dropped.  It excludes other processes and other locks of this

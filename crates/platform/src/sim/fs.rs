@@ -126,6 +126,8 @@ struct State {
     /// Held locks: path → the id of the guard holding it.
     locks: BTreeMap<PathBuf, u64>,
     next_lock: u64,
+    /// What [`FileSystem::writes_in_place`] answers.
+    in_place: bool,
 }
 
 /// The simulated file system.  Cloning gives another handle to the same one.
@@ -152,6 +154,9 @@ impl SimFs {
                 rng: SplitMix64::new(seed),
                 locks: BTreeMap::new(),
                 next_lock: 1,
+                // Both answers, by the seed, so the seeded tests run both
+                // ways of writing the WAL.
+                in_place: seed & 1 == 0,
             })),
         }
     }
@@ -161,6 +166,12 @@ impl SimFs {
         // state behind (every mutation completes under the lock), so the
         // poison flag carries no information here.
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Sets what [`FileSystem::writes_in_place`] answers (by default it
+    /// follows the seed: true for an even one).
+    pub fn set_writes_in_place(&self, in_place: bool) {
+        self.lock().in_place = in_place;
     }
 
     /// The faults currently injected.
@@ -385,6 +396,10 @@ impl Drop for SimLock {
 }
 
 impl FileSystem for SimFs {
+    fn writes_in_place(&self) -> bool {
+        self.lock().in_place
+    }
+
     fn lock(&self, path: &Path) -> io::Result<Box<dyn crate::Lock>> {
         // Not an operation for crash scheduling: locks live outside the
         // simulated disk.

@@ -725,12 +725,27 @@ runs where they differ.
 | 100k rows, 100 a transaction, random keys | 27 | 6.6 |
 | 5M rows, 100 a transaction, random keys (steady state) | 29.4 | 29.6 |
 
-A commit costs nucleus ~16 KiB (its WAL segment grows, so each sync
-writes metadata too), PostgreSQL ~8 KiB; the 100k-row phases end in a
-forced checkpoint, the steady state is the comparison that holds.
+A commit costs nucleus ~16 KiB on APFS whatever the WAL does — APFS
+writes a changed block elsewhere, so an overwrite costs more than an
+append there (§M14.28 L0) —; PostgreSQL's ~8 KiB is a cgroup's count on
+ext4, which leaves out the file system's journal: not the same quantity.
+The 100k-row phases end in a forced checkpoint; the steady state is the
+comparison that holds.
+
+On **ext4** (Docker's Linux VM; the server built for Linux, the bytes
+the VM's disk wrote, journal included; `nucleus-docker` below), one-row
+commits before and after §M14.28 L0 (WAL segments grown ahead by zeros
+and recycled, `fdatasync`), three runs each, alternating:
+
+| phase | before L0 | L0 |
+|---|---:|---:|
+| 100k rows, one a transaction, keys in order: time | 41.8 – 58.3 s | 13.6 – 15.2 s |
+| … bytes a commit (the disk's, two runs) | 16.6 – 17.0 KiB | 4.4 KiB |
+| 100k rows, 100 a transaction: time | 4.2 – 4.4 s | 3.3 – 4.0 s |
 
 ```sh
 python3 -I bench/wamp/wamp.py nucleus target/release/nucleus /tmp/wamp-db 21006 [0,1,2,3,4,5]
+python3 -I bench/wamp/wamp.py nucleus-docker VOLUME /t/nucleus 21500 [2,4]   # a Linux build in VOLUME
 python3 -I bench/wamp/wamp.py pg [0,1,2,3,4,5]     # Docker, postgres:18-alpine
 ```
 

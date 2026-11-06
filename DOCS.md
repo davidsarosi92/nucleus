@@ -154,9 +154,11 @@ succeeds — callers must treat it as fatal for that data.
 
 `std`, but for one call.  `sync` follows the platform's `SyncPolicy`
 (PLAN.md D17; `RealPlatform::with_sync`, the KV's `Options::sync`, the
-server's `--sync`): `Full` is `File::sync_all`, which std implements as
-`fsync` on Linux/d-os, `fcntl(F_FULLFSYNC)` on macOS (verified in std's
-`sys/fs/unix.rs`) and `FlushFileBuffers` on Windows; `Ordered`, the
+server's `--sync`): `Full` is `File::sync_data`, which std implements as
+`fdatasync` on Linux/d-os (a length change made durable, the file's
+times not — PostgreSQL's and SQLite's choice there; PLAN.md §M14.28 L0),
+`fcntl(F_FULLFSYNC)` on macOS (verified in std's `sys/fs/unix.rs`) and
+`FlushFileBuffers` on Windows; `Ordered`, the
 default, is the same except on macOS, where it is
 `fcntl(F_BARRIERFSYNC)` — the writes before it reach the drive before any
 after it, without flushing the drive's cache, so files are never left
@@ -169,9 +171,15 @@ under `Ordered` leaves the files as a crash before the last syncs would,
 which the simulation tests.  Positional I/O is
 `pread`/`pwrite`, on Windows `seek_read`/`seek_write` (std maps
 `ERROR_HANDLE_EOF` to `Ok(0)`).  `sync_dir` opens and `fsync`s the directory
-on POSIX and only checks that it exists on Windows (directories cannot be
-opened as files there; NTFS journals metadata).  The RNG seed comes from
-`getrandom`.
+on POSIX (the full `fsync`: what `fdatasync` makes of a directory is not
+specified; on macOS by the policy) and only checks that it exists on
+Windows (directories cannot be opened as files there; NTFS journals
+metadata).  `FileSystem::writes_in_place` is true but on Apple's systems:
+APFS writes a changed block elsewhere (copy-on-write), so a synced
+overwrite costs it more than an append (measured: 16 KiB written a small
+commit against 10–11); the simulation answers by its seed (or
+`SimFs::set_writes_in_place`), so the seeded tests run both ways.  The
+RNG seed comes from `getrandom`.
 
 ### 3.3 Simulated platform (`sim::SimPlatform`)
 
@@ -442,8 +450,22 @@ payload`.  `append` → LSN past the record; `sync_to(lsn)` is group commit
 once); `replay(from, f)`; `truncate_before(lsn)`; `size`, `start`, `end`,
 `durable`.
 
-**Crash rules.**  `open` cuts a torn tail of the last segment; a bad record
-anywhere else is corruption.  Before a new segment is created, the previous
+**Preallocated and recycled segments** (where `writes_in_place`; PLAN.md
+§M14.28 L0).  A segment is grown ahead of its records by zeros, a
+mebibyte at a time up to the segment size, so a commit's sync writes its
+block and no length; the segments a checkpoint drops are renamed to
+spares (`<20 digits>.spare`, kept up to as many as that checkpoint
+dropped, the rest deleted) and renamed into the next segments
+(PostgreSQL's recycled segments).  A spare's old records carry older
+LSNs, which the checksum folds in, so none passes for a record at its new
+place.  Elsewhere (APFS) segments grow as written and dropped ones are
+deleted, as before; spares found there are deleted.
+
+**Crash rules.**  `open` cuts a torn tail of the last segment — in a
+preallocated one, writes zeros over the rest of it if what follows the
+records is not zeros or a record older than the segment (a torn record of
+its own, whose bytes a later record must not leave behind); a segment
+before the last must end where the next begins, or it is corruption.  Before a new segment is created, the previous
 one is synced — an ordering sync (`sync_order`): the sync that makes a
 record of the new segment durable flushes it too, and a barrier orders it
 before the new segment's directory entry, so a non-last segment is never
@@ -455,7 +477,11 @@ one sync each): a crash may keep any of them, and `open_from(…, from)` —
 the store opens from its checkpoint's LSN — deletes again those before
 the segment holding it; a log left with no segment starts at `from` (a
 segment created there whose entry a crash lost held nothing durable).
-A failed `fsync` poisons the log.
+Before dropping any, `truncate_before` syncs the directory: the segment
+holding the checkpoint may be new, its entry not yet durable, and a crash
+that kept an older segment but lost it would leave a log ending before
+the checkpoint (found by the simulation with recycling, 2026-11-06; the
+deletions before had the same window).  A failed `fsync` poisons the log.
 
 ### 4.6 Store (`store::Store`)
 
@@ -3328,6 +3354,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.28 L0, the commit's bytes:** the real platform's
+  sync is `fdatasync` on Linux (§3.2); `FileSystem::writes_in_place`
+  (false on Apple's systems); where true, WAL segments grown ahead by
+  zeros and recycled as spares (§4.5); `truncate_before` syncs the
+  directory before dropping segments (a window the simulation found).
+  On ext4 a one-row commit 16.6 → 4.4 KiB written, ~4× faster.
 - **2026-11-06 — §M14.12 V1, vectors:** `vector` / `vector(n)` (§8.1),
   the `Type` capabilities it needed (`arithmetic`, `modifier` / `fit`,
   `cast_from` / `cast_to`, `aggregate`), distance kernels in
