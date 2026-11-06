@@ -1,0 +1,33 @@
+# SUMMARIZE (PLAN.md §M14.27 S8b): one row a column of a table or a
+# query, from one scan.  approx_unique and the approx_q* quartiles are
+# HyperLogLog++'s and DDSketch's (within 1 % of the value).
+
+statement ok
+CREATE TABLE su (id INT PRIMARY KEY, name TEXT, score DOUBLE PRECISION, ok BOOLEAN)
+
+statement ok
+INSERT INTO su SELECT i, CASE WHEN i % 4 = 0 THEN NULL ELSE 'n' || (i % 3) END, i * 0.5, i % 2 = 0 FROM generate_series(1, 200) AS t(i)
+
+query TTTTIRRRRRIR
+SUMMARIZE su
+----
+id integer 1 200 200 100.500 57.879 49.957 99.917 148.557 200 0.000
+name text n0 n2 3 NULL NULL NULL NULL NULL 200 25.000
+score double precision 0.5 100 200 50.250 28.940 24.978 49.957 74.277 200 0.000
+ok boolean NULL NULL 2 NULL NULL NULL NULL NULL 200 0.000
+
+# A query's columns: d = id here.
+query TTTTIRRRRRIR
+SUMMARIZE SELECT score * 2 AS d, name FROM su WHERE id <= 10
+----
+d double precision 1 10 10 5.500 3.028 3.000 5.022 7.040 10 0.000
+name text n0 n2 3 NULL NULL NULL NULL NULL 10 20.000
+
+# No rows: a row a column, the count 0.
+query TTTTIRRRRRIR
+SUMMARIZE SELECT id FROM su WHERE false
+----
+id integer NULL NULL 0 NULL NULL NULL NULL NULL 0 NULL
+
+statement error 42P01
+SUMMARIZE nope

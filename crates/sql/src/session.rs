@@ -103,9 +103,9 @@ pub trait Sink {
 
 /// A sink keeping the whole result: what [`Session::run`] returns.
 #[derive(Default)]
-struct Collect {
+pub(crate) struct Collect {
     columns: Option<Vec<OutColumn>>,
-    rows: Vec<Row>,
+    pub(crate) rows: Vec<Row>,
 }
 
 impl Sink for Collect {
@@ -338,11 +338,15 @@ fn options(mode: &TxnMode, default: IsolationLevel, read_only: bool) -> TxnOptio
 }
 
 /// Whether a statement only reads (a query, `EXPLAIN`, `SHOW`, `ANALYZE
-/// QUERY`).
+/// QUERY`, `SUMMARIZE`).
 pub fn read_only(stmt: &Statement) -> bool {
     matches!(
         stmt,
-        Statement::Query(_) | Statement::Explain(..) | Statement::Show(_) | Statement::Lint(_)
+        Statement::Query(_)
+            | Statement::Explain(..)
+            | Statement::Show(_)
+            | Statement::Lint(_)
+            | Statement::Summarize(_)
     )
 }
 
@@ -1049,6 +1053,7 @@ impl Session {
                 | Statement::Copy { .. }
                 | Statement::Explain(..)
                 | Statement::Lint(_)
+                | Statement::Summarize(_)
                 | Statement::Show(_)
                 | Statement::Begin(_)
                 | Statement::Commit
@@ -1254,6 +1259,7 @@ impl Session {
             Statement::Lint(_) => Some(columns_of(
                 ["rule", "place", "finding", "fix"].map(|c| (c.to_string(), Some(DataType::Text))),
             )),
+            Statement::Summarize(_) => Some(crate::summarize::columns()),
             Statement::Explain(..) => Some(vec![OutColumn {
                 name: "QUERY PLAN".into(),
                 ty: DataType::Text,
@@ -1417,7 +1423,7 @@ pub fn execute(
     Ok(out)
 }
 
-fn execute_statement(
+pub(crate) fn execute_statement(
     txn: &mut dyn KvTxn,
     reg: &Registry,
     stmt: &Statement,
@@ -1572,6 +1578,7 @@ fn execute_statement(
             catalog::update_table(txn, &t)?;
             Output::Command("COMMENT".into())
         }
+        Statement::Summarize(source) => crate::summarize::run(txn, reg, source, params)?,
         Statement::Lint(inner) => {
             let ro: &dyn KvTxn = &*txn;
             let (plan, changed) = match &**inner {

@@ -1,0 +1,58 @@
+# Drift and tests (PLAN.md §M14.27 S8): ks_test, auc, psi,
+# js_divergence, chisq_test.  The expectations are scipy's and
+# scikit-learn's on the same rows (ks_2samp, roc_auc_score,
+# chi2_contingency, jensenshannon(base=2) squared) to 14 digits; the
+# KS statistic is the exact quotient h / (m·n) correctly rounded
+# (scipy's 0.0949796472184532 is one unit in the last place above).
+
+statement ok
+CREATE TABLE dr (i INT PRIMARY KEY, x INT, s BOOLEAN, y INT)
+
+statement ok
+INSERT INTO dr SELECT i, (i * 37) % 101, i % 3 = 0, i % 2 FROM generate_series(1, 100) AS t(i)
+
+# Kolmogorov–Smirnov: {statistic, p-value}, exact at this size.
+query T
+SELECT ks_test(x, s)::text FROM dr
+----
+{0.09497964721845319,0.9729855219917274}
+
+# No rows: NULL.
+query T
+SELECT ks_test(x, i % 2 = 0)::text FROM (SELECT i, x FROM dr UNION ALL SELECT i + 1, x FROM dr) q WHERE false
+----
+NULL
+
+# The area under the ROC curve, ties counted half.
+query R
+SELECT auc(x % 10, s OR (y = 0 AND i < 40)) FROM dr
+----
+0.685
+
+# χ² on a 2 × 2 table, Yates-corrected as scipy's: {statistic, p, dof}.
+query T
+SELECT chisq_test(y, s OR (y = 0 AND i < 40))::text FROM dr
+----
+{4.871175523349437,0.027308891754922265,1}
+
+query R
+SELECT js_divergence(y, s) FROM dr
+----
+0.000
+
+query R
+SELECT psi(x, s, 4) >= 0 FROM dr
+----
+t
+
+# No rows on a side: NULL.
+query T
+SELECT ks_test(x, s) IS NULL AND auc(x, s) IS NULL AND chisq_test(y, s) IS NULL FROM dr WHERE s
+----
+t
+
+statement error 22023
+SELECT psi(x, s, 0) FROM dr
+
+statement error 42883
+SELECT ks_test(x, 'a') FROM dr

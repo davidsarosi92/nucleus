@@ -274,7 +274,7 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
-| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`) |
+| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -2797,7 +2797,7 @@ Every result the same, but for ties at a `LIMIT`.  Left as findings,
 not targets: the `LIMIT`-over-a-failing-join finding (W6), TPC-H Q19 on
 column tables (an `OR` of conjunctions across a join, 1.93×).
 
-### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S7, S4·sort ✅)
+### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S8 ✅)
 
 **First a study, then the plan.**  Can nucleus give mathematical and
 statistical functions over large data — fast, exact where exactness is
@@ -3510,8 +3510,106 @@ before they are built**:
   rather than the draws); `setseed`; `ln` and `exp` of our own (as
   DDSketch avoids them) would make Algorithm L's samples the same on
   every machine.
-- **S8 — drift, tests and `SUMMARIZE`**: items 8 and 9, the MCP tool,
+- **S8a — drift and tests** ✅ (2026-11-06): item 8 (S8 split in two:
+  the tests, then `SUMMARIZE`).
+  *Built:* `ks_test(x, side)`, `auc(score, label)`, `psi(x, side [,
+  bins])` over the values in order; `js_divergence(x, side)`,
+  `chisq_test(x, side)` over each value's counts; `side` a boolean,
+  false the reference.  The first three keep each side as the ordered
+  sets keep their values — `quantile::Doubles`, a thin face on S5's
+  groups (8-byte keys, `work_mem`, the radix-partitioned spill, partial
+  states from the workers): one store, not a second — and walk both
+  sides once in ascending order, merged, the compared side's distinct
+  values in memory up to half of `work_mem`, then in a scratch run.
+  The KS statistic is found in integers (`max |a·n − b·m|`), its p-value
+  exact up to 10,000 values a side by the lattice-path recurrence with
+  the outside counted directly, Stephens' asymptotic form past that;
+  the AUC is twice the Mann–Whitney U in integers, divided once; PSI's
+  bins are the reference's equal-frequency ranks, found during the walk.
+  The counted two sum in their values' encoding order (order-free), a
+  χ² p-value by the regularized incomplete gamma function (series /
+  Lentz, `ln Γ` by Lanczos), Yates' correction at one degree of freedom
+  as scipy applies it.  While measuring: `mode` and the walks sorted
+  10M keys with the standard library's sort — `quantile::sort_keys`, an
+  LSD radix sort skipping the bytes every key shares (found by one
+  OR of XORs), now sorts them.
+  Tests: `drift.rs` — scipy's and scikit-learn's answers on 30,000- and
+  9,000-row tables (exact and asymptotic KS, AUC, PSI by its
+  definition, χ² with 4 degrees of freedom, JS), the same bits in five
+  settings (four workers; `work_mem` 64 kB spilling both sides and the
+  walk's run); per group as the group alone; `NULL`s and empty sides;
+  types refused.  Unit tests: the exact p-value by hand, χ²'s 5 % points
+  at 1 and 10 degrees of freedom, the Kolmogorov tail continuous where
+  its two series meet, the radix sort against the standard sort.
+  `52_drift.slt` (scipy's numbers to 14 digits; the KS statistic the
+  correctly rounded quotient, scipy's one unit in the last place above).
+  *Prior art:* scipy's `ks_2samp` — taken: its default (exact up to
+  10,000 a side), its statistic over ties, the p-value it computes (the
+  probability of leaving the band, Hodges 1957); not taken: its
+  asymptotic `kstwo` (Simard and L'Ecuyer's exact one-sample
+  distribution at `round(m·n/(m+n))`: a larger piece of numerical code,
+  recorded) — Stephens' (1970) corrected Kolmogorov limit instead, as
+  Numerical Recipes' `probks`.  scikit-learn's `roc_auc_score` — its
+  value, by the rank sum instead of the curve's trapezoids (equal with
+  ties counted half).  PSI has no reference implementation: the
+  industry's form (Siddiqi, *Credit Risk Scorecards*, 2006) with deciles
+  of the reference and the common 10⁻⁴ floor for empty bins, both
+  stated.  scipy's `chi2_contingency` and `jensenshannon` (base 2,
+  squared, so a divergence, not its distance).  The study's other route
+  — KS over two DDSketches — not taken: exact is cheap enough (below);
+  it stays the way for sketches already kept (with S6's types).  Radix
+  sort: LSD over bytes, as ClickHouse's `RadixSort.h` sorts numbers and
+  DuckDB sorts its normalized keys; measured against pdqsort on 10M
+  keys: faster with up to six differing bytes, slower with eight (so
+  those keep pdqsort).
+  *Measured* (10M rows of `bench/stats/aggs.py`'s table, halves by
+  `id % 2`, best of five, the better of two rounds): `ks_test(x, …)`
+  854 ms — 373 with `work_mem` 1 GB, where nothing spills; scipy's
+  `ks_2samp` on the two halves already in numpy arrays 407 —; `auc(y,
+  …)` 899 (scikit-learn 1,327); `psi(x, …)` 888; `chisq_test(id
+  % 100, g < 500)` 282; `js_divergence` 275.  `mode` of 10M
+  doubles in memory 390 → 316 ms, of `id % 1000` 317 → 298, past
+  `work_mem` 887 → 828 (the radix sort).  `bench/phases.py` against
+  S7's build, S8a alone: ClickBench (column) 17.6 / 17.8 → 18.3 / 18.2
+  ms, TPC-H (row) 236.9 / 227.0 → 232.6 / 229.0 (measured again with
+  S8b, below).
+  *Next, recorded here:* the asymptotic KS p-value by `kstwo`'s exact
+  distribution (scipy's digits); KS over two DDSketches (a bound, for
+  kept sketches); the spill of 10M keys costs more than the test (373
+  ms in memory, 2.3× that at the default `work_mem`) — a spill that
+  writes each key once; `psi` with the bins given as edges; a record
+  type for `{statistic, p-value}` (now arrays).
+- **S8b — `SUMMARIZE`** ✅ (2026-11-06): item 9, the MCP tool,
   `docs/llm.md`.
+  *Built:* `SUMMARIZE t` and `SUMMARIZE <query>` — one aggregate query
+  over the source (`count`, `approx_count_distinct`, `min` / `max` as
+  text for ordered types, `avg`, `stddev` and `approx_percentile` of the
+  quartiles for numbers), so one parallel scan of every column, its one
+  row turned into a row a column; read-only and described (prepared
+  statements know its columns).  The MCP tool `summarize_table`, named
+  in the server's instructions as the first look at a table.
+  `docs/llm.md` lists every family with an example (S1–S8).
+  Tests: `summarize.rs` — the figures are the aggregates' own, the same
+  in five settings and in row and column storage; `53_summarize.slt`
+  (a table, a query, no rows, an unknown table); the CLI's MCP test
+  calls the tool.
+  *Prior art:* DuckDB's `SUMMARIZE` — taken: the statement, the columns
+  and their order; changed: its approximate quartiles `q25`, `q50`,
+  `q75` are `approx_q25` … here (the study's line: approximate only
+  under an `approx_` name; DuckDB names `approx_unique` so but not
+  those), the mean and deviation as doubles (DuckDB gives text), the
+  `NULL` share as a double.  pandas' `describe()` and Polars'
+  `describe()` give the same figures a column (count, mean, std,
+  min, quartiles, max): a model meets one of these shapes.
+  *Measured:* `SUMMARIZE t` of `bench/stats/aggs.py`'s 10M rows, four
+  columns: 624 ms (`sum(x)` 183, `approx_percentile` of one column 195).
+  `bench/phases.py` two rounds alternating against S7's build (S8a and
+  S8b together): ClickBench (column) geometric mean 17.7 / 17.7 → 17.8 /
+  17.8 ms, TPC-H (row) 242.1 / 232.5 → 241.9 / 230.8 — the same within
+  the noise (S8a's 18.3 earlier was noise).
+  *Next, recorded here:* `SUMMARIZE` as a `FROM` item (DuckDB allows
+  `FROM (SUMMARIZE t)`); its figures for vectors (§M14.12) and arrays
+  (lengths); exact quartiles on request.
 - Vectors' statistics with §M14.12.
 
 **Done when:** the study is written here — the needs, the families

@@ -250,6 +250,8 @@ fn an_mcp_client_lists_describes_and_queries() {
             "name": "sample_rows", "arguments": { "table": "customers", "limit": 2 } } }),
         json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {
             "name": "explain", "arguments": { "sql": "SELECT * FROM customers WHERE id = 2" } } }),
+        json!({ "jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {
+            "name": "summarize_table", "arguments": { "table": "customers" } } }),
     ];
     let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
     let (ok, out) = nucleus(&["mcp", d], &input);
@@ -258,11 +260,11 @@ fn an_mcp_client_lists_describes_and_queries() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
         .collect();
-    assert_eq!(replies.len(), 9, "{out}");
+    assert_eq!(replies.len(), 10, "{out}");
     let by_id = |id: u64| replies.iter().find(|r| r["id"] == id).unwrap();
     let content = |id: u64| &by_id(id)["result"]["structuredContent"];
     assert_eq!(by_id(1)["result"]["serverInfo"]["name"], "nucleus");
-    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(by_id(2)["result"]["tools"].as_array().unwrap().len(), 7);
     assert_eq!(
         content(3)["tables"],
         json!([{ "name": "customers", "comment": "People who buy", "rows": null }])
@@ -292,6 +294,15 @@ fn an_mcp_client_lists_describes_and_queries() {
         plan.contains("Index Scan using primary key on customers"),
         "{plan}"
     );
+    // One row a column, from SUMMARIZE.
+    let columns = &content(10)["columns"];
+    assert_eq!(columns[0]["column_name"], "id");
+    assert_eq!(
+        (&columns[0]["min"], &columns[0]["max"]),
+        (&json!("1"), &json!("3"))
+    );
+    assert_eq!(columns[2]["approx_unique"], 2);
+    assert_eq!(columns[2]["null_percentage"], 0.0);
     // The rows are all still there.
     let (_, out) = nucleus(&["sql", d, "-c", "SELECT count(*) FROM customers"], "");
     assert!(out.contains(" 3 "), "{out}");

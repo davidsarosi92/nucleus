@@ -65,7 +65,10 @@ and sketches that give the same answer every run
 (`approx_count_distinct`, `approx_percentile`, `approx_top_k`, and the
 `hll` and `ddsketch` types to keep and merge), and samples
 (`TABLESAMPLE … REPEATABLE`, the same rows everywhere; `hash_unit` for
-stable train/test splits; `reservoir_sample`).
+stable train/test splits; `reservoir_sample`), and tests for drift
+named as scipy names them (`ks_test`, `auc`, `psi`, `js_divergence`,
+`chisq_test`), and `SUMMARIZE t` — every column's range, distinct
+count, mean, quartiles and NULLs in one scan (also an MCP tool).
 Next is the rest of the developer
 platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree

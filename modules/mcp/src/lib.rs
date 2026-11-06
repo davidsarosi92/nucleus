@@ -80,8 +80,9 @@ pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05
 const INSTRUCTIONS: &str = "\
 A nucleus database (SQL, PostgreSQL-like dialect; nucleus's own catalog is \
 nc_catalog).  Start with list_tables, then describe_table for the ones you \
-need: comments explain what tables and columns mean.  query runs read-only \
-SQL (parameters as $1, $2 …); errors come with a hint (the name meant, the \
+need: comments explain what tables and columns mean; summarize_table gives \
+each column's range, distinct count, mean, quartiles and NULLs in one scan.  \
+query runs read-only SQL (parameters as $1, $2 …); errors come with a hint (the name meant, the \
 cast that would work).  explain shows a plan; lint lists what in a statement \
 is likely slow or wrong.";
 
@@ -292,6 +293,17 @@ impl<'a> Server<'a> {
                 "annotations": read_only,
             }),
             json!({
+                "name": "summarize_table",
+                "title": "Summarize a table",
+                "description": "One row per column of a table: type, min, max, approximate distinct count, mean, standard deviation, quartiles (approximate), row count and the percentage of NULLs — from one scan (SUMMARIZE). The first look at data you have not seen.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "table": { "type": "string", "description": "The table's name." } },
+                    "required": ["table"],
+                },
+                "annotations": read_only,
+            }),
+            json!({
                 "name": "query",
                 "title": "Run a read-only query",
                 "description": format!(
@@ -490,6 +502,10 @@ impl<'a> Server<'a> {
                 let answers =
                     self.read_only(&format!("SELECT * FROM {} LIMIT {limit}", ident(&table)))?;
                 Ok(self.rows(answers))
+            }
+            "summarize_table" => {
+                let table = text("table")?;
+                Ok(json!({ "columns": self.objects(&format!("SUMMARIZE {}", ident(&table)))? }))
             }
             "query" => {
                 let sql = text("sql")?;

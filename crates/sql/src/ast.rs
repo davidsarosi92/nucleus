@@ -380,6 +380,9 @@ pub enum Statement {
     Vacuum,
     /// `ANALYZE QUERY <statement>`: the linter's findings.
     Lint(Box<Statement>),
+    /// `SUMMARIZE t` or `SUMMARIZE <query>` (DuckDB's): one row a column
+    /// of the source, the query's text (`SELECT * FROM t` for a table).
+    Summarize(String),
     /// `COPY t [(columns)] FROM STDIN [WITH (options)]`.
     Copy {
         /// The table.

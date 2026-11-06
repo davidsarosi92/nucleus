@@ -74,13 +74,22 @@ QUERIES = {
     "reservoir_sample": "SELECT array_length(reservoir_sample(x, 1000), 1) FROM t",
     "order by random() limit": "SELECT count(*), sum(x) FROM (SELECT x FROM t "
                                "ORDER BY random() LIMIT 1000) q",
+    # Drift and tests (S8): two halves of the table compared.
+    "ks_test": "SELECT ks_test(x, id % 2 = 0) FROM t",
+    "auc": "SELECT auc(y, id % 2 = 0) FROM t",
+    "psi": "SELECT psi(x, id % 2 = 0) FROM t",
+    "chisq_test": "SELECT chisq_test(id % 100, g < 500) FROM t",
+    "js_divergence": "SELECT js_divergence(id % 100, g < 500) FROM t",
+    # SUMMARIZE (S8b): every column's figures, one scan.
+    "summarize": "SUMMARIZE t",
 }
 
-# PostgreSQL has no skewness, kurtosis, histogram, sketches, hash_unit or
-# reservoir_sample.
+# PostgreSQL has no skewness, kurtosis, histogram, sketches, hash_unit,
+# reservoir_sample or tests.
 NOT_PG = {"skewness, kurtosis", "histogram", "approx_count_distinct",
           "approx_count_distinct 1000 groups", "approx_percentile", "approx_top_k",
-          "hash_unit split", "reservoir_sample"}
+          "hash_unit split", "reservoir_sample", "ks_test", "auc", "psi", "chisq_test",
+          "js_divergence", "summarize"}
 
 
 def start(binary, port):

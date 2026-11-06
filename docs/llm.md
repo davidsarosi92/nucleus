@@ -6,7 +6,8 @@ what to use instead.  For people the full reference is DOCS.md §8.
 ## Connecting
 
 - **MCP:** `nucleus mcp <dir>` (or `nucleus mcp -h host:port -U user`) —
-  tools `list_tables`, `describe_table`, `sample_rows`, `query` (read-only,
+  tools `list_tables`, `describe_table`, `sample_rows`, `summarize_table`
+  (each column's min, max, distinct count, mean, quartiles, NULLs), `query` (read-only,
   `$1`… in `params`), `explain`, `lint`; `execute` with `--allow-writes`.
 - **Shell:** `ncsql <dir>` or `ncsql -h 127.0.0.1:20035` (user and password
   `nucleus` by default); `-c "<sql>"` runs one command.
@@ -116,6 +117,17 @@ and `WHERE hash_unit(id) >= 0.8` (a second argument as the seed);
 `reservoir_sample(x, 100 [, seed])` — 100 values as an array, uniform,
 the same every run — unlike `ORDER BY random() LIMIT n` (also there),
 which differs each time.
+Drift between two samples, `side` a boolean (false the reference, true
+the new data): `SELECT ks_test(x, side) FROM t` → `{statistic, p-value}`
+(scipy's `ks_2samp`); `auc(score, label)` (ROC AUC, label true =
+positive); `psi(x, side)` (population stability index, 10 bins of the
+reference; > 0.2 is usually called a shift); `js_divergence(category,
+side)` (0 to 1); `chisq_test(category, side)` → `{statistic, p-value,
+dof}`.  E.g. this week against last: `SELECT ks_test(latency, day >=
+current_date - 7) FROM requests WHERE day >= current_date - 14`.
+**First look at a table:** `SUMMARIZE t` (or `SUMMARIZE SELECT …`) — one
+row per column: type, min, max, approx_unique, avg, std,
+approx_q25/q50/q75, count, null_percentage, from one scan.
 
 **Memory:** `SET work_mem = '256MB'` gives each sort and materialised
 result more memory before it spills to disk (default 64MB).  Scans,

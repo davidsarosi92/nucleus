@@ -999,7 +999,7 @@ it as a command (`{"command": "nucleus", "args": ["mcp", "/path/to/db"]}`)
 and gets the tools: `list_tables` (name, comment, analyzed rows),
 `describe_table` (columns with type, nullability, default and comment;
 primary key, indexes, foreign keys, referencing tables), `sample_rows`,
-`query` (`$1`… from `params`, bound as literals), `explain` (and
+`summarize_table` (`SUMMARIZE`), `query` (`$1`… from `params`, bound as literals), `explain` (and
 `analyze`), `lint` (`ANALYZE QUERY`), and with `--allow-writes`
 `execute`.  The initialize answer's instructions tell the model where to
 start.
@@ -1649,6 +1649,62 @@ drawing without replacement how many values each gives (from the rows
 each saw), so the result is uniform and the same every run of a plan —
 not `order_free`, its gaps computed with `ln` and `exp`.  `n` is 1 to
 10⁶ (`22023` otherwise).
+
+**Drift and tests** (`drift`, §M14.27 S8).  Two samples of one column
+told apart by a boolean `side` — `false` the reference, `true` the
+sample compared (an integer 0 / 1 converts); a row with either `NULL`
+is left out, and a side without rows gives `NULL`.  Named as scipy and
+scikit-learn name their counterparts, with their answers.
+`ks_test(x, side)` is the two-sample Kolmogorov–Smirnov test
+(`ks_2samp`): `{statistic, p-value}`, the statistic — the largest gap
+between the two empirical distribution functions, ties stepping
+together — found in integers (`max |a·n − b·m|` over `m·n`, rounded
+once); the p-value exact while neither side has more than 10,000 values
+(the share of random interleavings that leave the band, by the
+lattice-path recurrence, the outside counted directly so a small p
+keeps its digits), past that the Kolmogorov distribution at
+`(√e + 0.12 + 0.11/√e)·D`, `e = m·n/(m + n)` (Stephens; scipy's
+`asymp` takes the finite-sample distribution — at 15,000 a side 0.4134
+where this gives 0.4144).  `auc(score, label)` is the area under the ROC curve,
+`label` true for the positives (`roc_auc_score`): the Mann–Whitney rank
+sum, ties counted half, in integers.  `psi(x, side [, bins])` is the
+population stability index over `bins` (10; 1 to 10,000) bins of equal
+frequency in the reference — the edges the reference's values at ranks
+`⌊k·m/bins⌋`, a value in the bin of the edges at or below it, ties in
+one bin — `Σ (q − p)·ln(q/p)`, an empty bin's share counted as 10⁻⁴
+when the other side's is not.  These three keep each side's values as
+the ordered sets do (`quantile::Doubles`, `work_mem`, spilling,
+combined from the workers) and walk both in ascending order once, the
+compared side's distinct values held in memory up to half of `work_mem`
+and read back from scratch space past it.  Over categories (any type,
+equal by the key encoding): `js_divergence(x, side)`, the
+Jensen–Shannon divergence of the two sides' distributions in base 2 (0
+to 1; scipy's `jensenshannon(p, q, base=2)` squared), and
+`chisq_test(x, side)`, Pearson's χ² test of homogeneity on the 2 × k
+table (`chi2_contingency`, Yates' correction at one degree of freedom):
+`{statistic, p-value, degrees of freedom}`, the p-value the regularized
+upper incomplete gamma function (series below `a + 1`, Lentz's continued
+fraction above, `ln Γ` by Lanczos).  Their counts are a map per group,
+at most `work_mem` of distinct values (`54000` past it: bin first with
+`width_bucket`), summed in the values' order, so neither result depends
+on the rows' order.  The ordered sets' 8-byte keys are sorted by an LSD
+radix sort (`quantile::sort_keys`): a byte a pass, the bytes every key
+shares skipped, the standard library's sort for fewer than 4096 keys or
+more than six differing bytes.
+
+**`SUMMARIZE`** (`summarize`, §M14.27 S8b).  `SUMMARIZE t` or
+`SUMMARIZE <query>` (DuckDB's statement) returns one row a column of
+the source: `column_name`, `column_type`, `min` and `max` (as text, for
+numbers, text, enums, dates and times), `approx_unique`
+(`approx_count_distinct`), `avg` and `std` (numbers), `approx_q25`,
+`approx_q50`, `approx_q75` (`approx_percentile`, numbers), `count` (the
+rows) and `null_percentage` (two decimals) — DuckDB's columns, except
+that its approximate quartiles `q25` … are named `approx_` here, as
+nucleus names everything approximate.  It is one aggregate query over
+the source (`SELECT count(*), count(c0), approx_count_distinct(c0),
+min(c0)::text, … FROM (<source>) AS summarized(c0, …)`), so one scan
+of every column, in parallel, its result turned into rows; a read (the
+MCP tool `summarize_table` runs it).  Not yet a `FROM` item.
 
 **Columns** (`prune`, §M14.11).  Before a query runs, its plan is walked
 from the top with the output columns wanted, each node adding what its
@@ -3622,6 +3678,14 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.27 S8b, `SUMMARIZE`:** the statement
+  (`Statement::Summarize`, `summarize`), read-only and described; the
+  MCP tool `summarize_table` (§8.5, *`SUMMARIZE`*; MCP in §6).
+- **2026-11-06 — §M14.27 S8a, drift and tests:** `ks_test`, `auc`,
+  `psi`, `js_divergence`, `chisq_test` (§8.5, *Drift and tests*);
+  `quantile::Doubles` (the ordered sets' store for walks in order);
+  `quantile::sort_keys`, an LSD radix sort for 8-byte keys (`mode` and
+  the walks).
 - **2026-11-06 — §M14.27 S7, sampling and splits:** `TABLESAMPLE
   BERNOULLI | SYSTEM (p) [REPEATABLE (seed)]` (a filter by the primary
   key's stable hash with `REPEATABLE`), `hash_unit`, `reservoir_sample`,

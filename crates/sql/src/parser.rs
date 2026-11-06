@@ -848,6 +848,20 @@ impl<'a> Parser<'a> {
         };
         match w.as_str() {
             "select" | "values" | "with" => Ok(Statement::Query(self.query()?)),
+            "summarize" => {
+                self.pos += 1;
+                let query = self.peek_op("(")
+                    || ["select", "values", "with", "table"]
+                        .iter()
+                        .any(|k| self.peek_kw(k));
+                let source = if query {
+                    self.text_of(|p| p.query())?.1
+                } else {
+                    let (_, name) = self.text_of(|p| p.relation())?;
+                    format!("SELECT * FROM {name}")
+                };
+                Ok(Statement::Summarize(source))
+            }
             "create" => self.create(),
             "drop" => self.drop(),
             "alter" => self.alter(),

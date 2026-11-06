@@ -377,6 +377,26 @@ rounds (2026-11-06); each query sums the sample (`count(*), sum(x)`):
 nucleus's `REPEATABLE` sample is the same rows on every machine and in
 row and column storage; PostgreSQL's depends on the pages.
 
+Drift and tests (§M14.27 S8a), same table, its halves by `id % 2`
+(the categories `id % 100` by `g < 500`), best of five, the better of
+two rounds (2026-11-06); PostgreSQL has none, so scipy and
+scikit-learn 1.9 on the same values, already in numpy arrays:
+
+| query | nucleus (ms) | Python (ms) |
+|---|---:|---:|
+| `ks_test(x, side)` | 854 (373 with `work_mem` 1 GB) | 407 (`ks_2samp`) |
+| `auc(y, side)` | 899 | 1,327 (`roc_auc_score`) |
+| `psi(x, side)` | 888 | — |
+| `chisq_test(category, side)` | 282 | — |
+| `js_divergence(category, side)` | 275 | — |
+
+At the default `work_mem` (64 MB) the 80 MB of keys go to scratch
+space; in memory the scan and the test together beat scipy's test
+alone.
+
+`SUMMARIZE t` (§M14.27 S8b) of the same table, four columns, one scan:
+624 ms (`sum(x)` 183).
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

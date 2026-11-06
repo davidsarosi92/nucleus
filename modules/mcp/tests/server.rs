@@ -80,6 +80,7 @@ fn initialize_and_list_tools() {
             "list_tables",
             "describe_table",
             "sample_rows",
+            "summarize_table",
             "query",
             "explain",
             "lint"
@@ -168,7 +169,7 @@ fn writes_when_allowed() {
             .as_array()
             .unwrap()
             .len();
-        assert_eq!(names, 7);
+        assert_eq!(names, 8);
         let r = call(
             &mut s,
             2,

@@ -373,7 +373,7 @@ impl Vals {
         match self {
             Vals::Empty => {}
             Vals::Keys(k, mut v) => {
-                v.sort_unstable();
+                sort_keys(&mut v);
                 for run in v.chunk_by(|a, b| a == b) {
                     visit(k.value(run[0]), run.len() as u64);
                 }
@@ -385,6 +385,49 @@ impl Vals {
                 }
             }
         }
+    }
+}
+
+/// Sorts 8-byte keys: least significant digit first, a byte a pass, the
+/// bytes every key shares skipped (found in one read, their counts in a
+/// second) — a double's sign and exponent, an integer's high bytes are
+/// usually one value.  Below a few thousand keys, or with more than
+/// six bytes that differ (measured: eight passes lose to the standard
+/// library's sort), that sort.  (LSD radix sort, as ClickHouse's
+/// `RadixSort` sorts numbers; PLAN.md §M14.27 S8.)
+pub(crate) fn sort_keys(v: &mut Vec<u64>) {
+    if v.len() < 4096 {
+        v.sort_unstable();
+        return;
+    }
+    // The bits that differ anywhere, in one cheap read.
+    let first = v[0];
+    let differ = v.iter().fold(0u64, |m, &k| m | (k ^ first));
+    let bytes: Vec<u32> = (0..8).filter(|b| (differ >> (8 * b)) & 0xff != 0).collect();
+    if bytes.len() > 6 {
+        v.sort_unstable();
+        return;
+    }
+    let mut counts = vec![[0usize; 256]; bytes.len()];
+    for &k in v.iter() {
+        for (c, &b) in counts.iter_mut().zip(&bytes) {
+            c[(k >> (8 * b)) as usize & 0xff] += 1;
+        }
+    }
+    let mut other = vec![0u64; v.len()];
+    for (c, &b) in counts.iter_mut().zip(&bytes) {
+        let mut at = 0;
+        for slot in c.iter_mut() {
+            let k = *slot;
+            *slot = at;
+            at += k;
+        }
+        for &k in v.iter() {
+            let d = (k >> (8 * b)) as usize & 0xff;
+            other[c[d]] = k;
+            c[d] += 1;
+        }
+        std::mem::swap(v, &mut other);
     }
 }
 
@@ -724,8 +767,8 @@ impl Radix {
     /// ones at a time with its length.
     fn visit(&mut self, g: usize, visit: &mut dyn FnMut(u64, u64)) -> Result<()> {
         let place = self.prepare()?.place[g].clone();
-        fn runs(v: &mut [u64], visit: &mut dyn FnMut(u64, u64)) {
-            v.sort_unstable();
+        fn runs(v: &mut Vec<u64>, visit: &mut dyn FnMut(u64, u64)) {
+            sort_keys(v);
             for run in v.chunk_by(|a, b| a == b) {
                 visit(run[0], run.len() as u64);
             }
@@ -1297,6 +1340,59 @@ impl GroupAccumulator for Groups {
     }
 }
 
+/// Doubles kept for walks in order — the two-sample tests' store
+/// ([`crate::drift`]): the ordered sets' groups, every value a double's
+/// 8-byte key, held, spilled past `work_mem` and combined as theirs are.
+pub(crate) struct Doubles(Groups);
+
+impl Doubles {
+    pub(crate) fn new() -> Doubles {
+        Doubles(Groups::new(Layout {
+            kind: Kind::Disc,
+            fraction: None,
+            desc: None,
+        }))
+    }
+
+    pub(crate) fn resize(&mut self, groups: usize) {
+        GroupAccumulator::resize(&mut self.0, groups);
+    }
+
+    /// Adds `x` to group `g` (`-0` as `0`, so the two are one value).
+    pub(crate) fn push(&mut self, g: usize, x: f64) -> Result<()> {
+        self.0.groups[g].spec.get_or_insert(Spec::of(None, false));
+        self.0.push_key(g, KeyKind::Float, float_key(x + 0.0))
+    }
+
+    /// Group `g`'s count of values.
+    pub(crate) fn count(&self, g: usize) -> u64 {
+        self.0.groups[g].n
+    }
+
+    /// Hands `visit` group `g`'s values in ascending order (`NaN` last),
+    /// each distinct one once with its count; they are gone afterwards.
+    pub(crate) fn visit(&mut self, g: usize, visit: &mut dyn FnMut(f64, u64)) -> Result<()> {
+        self.0.visit_sorted(g, false, &mut |v, c| {
+            if let Value::Float(x) = v {
+                visit(x, c);
+            }
+        })
+    }
+
+    /// The order of two values as their keys sort.
+    pub(crate) fn cmp(a: f64, b: f64) -> Ordering {
+        float_key(a).cmp(&float_key(b))
+    }
+
+    pub(crate) fn partial(&mut self, g: usize) -> Result<Value> {
+        self.0.partial_of(g)
+    }
+
+    pub(crate) fn combine(&mut self, g: usize, partial: Value) -> Result<()> {
+        self.0.combine_from(g, partial)
+    }
+}
+
 /// One group's state (the row-at-a-time executor's).
 struct One(Groups);
 
@@ -1338,6 +1434,27 @@ mod tests {
         for w in [i64::MIN, -1, 0, 1, i64::MAX].windows(2) {
             assert!(int_key(w[0]) < int_key(w[1]));
             assert_eq!(int_of(int_key(w[0])), w[0]);
+        }
+    }
+
+    #[test]
+    fn keys_sort_as_the_standard_sort() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        for (n, mask) in [
+            (5000, u64::MAX),
+            (10_000, 0xffff),
+            (7000, 0xff00_0000_0000_00ff),
+        ] {
+            let mut v: Vec<u64> = (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                    (x ^ (x >> 29)) & mask
+                })
+                .collect();
+            let mut want = v.clone();
+            want.sort_unstable();
+            sort_keys(&mut v);
+            assert_eq!(v, want);
         }
     }
 

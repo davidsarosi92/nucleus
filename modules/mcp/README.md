@@ -17,6 +17,7 @@ edition gives it a local directory or a server: `nucleus mcp`.
 | `list_tables` | the tables: name, comment, analyzed row count |
 | `describe_table` | columns (type, nullable, default, comment), primary key, indexes, foreign keys, referencing tables |
 | `sample_rows` | a few rows of a table |
+| `summarize_table` | one row a column: type, min, max, approximate distinct count, mean, deviation, quartiles, count, `NULL` share (`SUMMARIZE`) |
 | `query` | read-only SQL, `$1`… from `params`; rows (at most `max_rows`, the rest counted) |
 | `explain` | the plan; with `analyze`, run (read-only) with actual rows and times |
 | `lint` | what in a statement is likely slow or wrong, with the fix (`ANALYZE QUERY`) |
