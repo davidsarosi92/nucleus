@@ -4204,14 +4204,119 @@ hashed), column tables 71.8 / 75.8 → 74.5 / 71.4 (Q18 177 → 165, the
 rest within noise); ClickBench column 17.3 / 17.8 → 17.1 / 17.0, row
 148.7 / 132.1 → 145.8 / 133.9 (no joins: noise).
 
-*Left, as steps of their own:* **V4** the HNSW index (Malkov and Yashunin 2018; pgvector's
-and Lucene's builds read for ideas — graph pages in the KV, versions
-checked against the snapshot on the way out, deletions by marking and a
-repair pass) with a recall suite on public data (SIFT1M, GloVe-100,
-ann-benchmarks' method).  **V5** filtered search as specified above (ACORN's
+*Left, as steps of their own:* **V4** the HNSW index (below: the design
+agreed so far and the measurement that decides it).  **V5** filtered search as specified above (ACORN's
 predicate-aware traversal, Patel et al. 2024, and Qdrant's filterable
 HNSW are the prior art to read).  **V6** half, int8 and binary
 quantization; sparse vectors.
+
+*Next — V4, the HNSW index: where the graph lives* (planned 2026-11-06;
+nothing built yet).  The approximate index (Malkov and Yashunin 2018)
+the optimizer uses for `ORDER BY v <-> q LIMIT k`, one per distance,
+kept transactionally consistent with its table, with a recall suite on
+public data (ann-benchmarks' method).  The open question is where the
+graph lives; it is decided by measuring three storage models built as
+prototypes on one HNSW core, before the engine gets any of them.
+
+The three storage models:
+
+- **(A) One shared graph** (pgvector's): a KV key per node (its vector
+  and out-edges per layer); edges added to an existing node as keys of
+  their own (`node, from`) so concurrent inserts do not write the same
+  key; a node's list rewritten (pruned to `M_max` by the heuristic) only
+  when its added edges pile up.  Always one graph, no merges.  Its cost:
+  every hop of a search is a KV read (~3 µs measured for a point read),
+  ~1,000–3,000 per search at 1 M vectors — some milliseconds — and a
+  node read cannot be cached by version from above the KV contract.
+- **(B) Segments** (Lucene's per-segment graphs, Milvus' growing and
+  sealed segments): immutable graph segments, each keyed by a hash of its
+  contents (as the column store's segments, §M14.20 V7), so decoded
+  graphs are cached in memory and a hop is a memory access; rows written
+  since go to a delta (a key per row: no conflicts), searched exactly;
+  the delta sealed into a new segment after a statement wrote enough
+  rows, in its transaction; segments merged by a tiered policy (Lucene's
+  `TieredMergePolicy`; a merge inserts the smaller graphs into a copy of
+  the largest, Lucene's merge on an initial graph).  Its cost: a search
+  visits every segment; a large merge is a long write.
+- **(C) The combination** (the design proposed): one graph, as (A), but
+  stored as (B) stores — immutable, content-hashed pages: vector pages
+  never rewritten (new nodes go to new pages), adjacency pages apart from
+  them; a delta as (B)'s, searched exactly; the delta *folded into the
+  one graph* in a batch (not a new segment), the new nodes' edges to
+  existing nodes kept as small keys beside their page (as (A)'s) until a
+  page's pile is large enough to rewrite it.  FreshDiskANN (Singh et al.
+  2021) is the nearest prior art: an immutable graph, a fresh in-memory
+  index beside it, merged in the background.  The two others are its
+  extremes: a fold threshold of one row is (A); never folding is an
+  exact search over the delta alone.
+
+Common to all three: MVCC and crashes from the KV contract (a snapshot
+reads the page directory, segments or nodes, and the delta, as of
+itself; a rolled-back writer's nodes vanish with it); a row deleted or
+updated after it entered the graph found on the way out (the row read in
+the snapshot, the distance recomputed from the indexed vector), marked
+deleted by a key per row (the column store's `DELETED`), repaired at a
+fold, a merge or `VACUUM` (pgvector's repair of neighbours); the graph
+built deterministically (a node's level from a hash of its key, inserts
+in key order — principle 4's same results for the same data and
+history).
+
+Adaptive behaviour on top (any of the three): the optimizer chooses the
+graph or an exact search by cost — exact on small tables and narrow
+filters, and earlier on column tables, whose exact search reads only the
+vector column; the fold (C) or seal (B) threshold from the same costs
+(fold when scanning the delta costs a set share of a graph search), not
+a fixed row count; a search that finds fewer than `k` visible rows
+widens (`ef` doubled — pgvector 0.8's iterative index scans).  Settings,
+as pgvector's: `WITH (m = 16, ef_construction = 64)` on the index,
+`ef_search` (40) in the session; one mechanism, no switch between
+models.  Row and column tables share the index: it keeps its own copy of
+the vectors (pgvector's element tuples), so their difference is in the
+costs only (a point read ~3.5 µs on a row table, ~8 µs on a column
+table; the exact search far cheaper on columns).
+
+*The measurement* (agreed 2026-11-06: build (A) and (B) beside (C) once,
+to know, not to assume, that they do not pay):
+
+- Where: a prototype crate `bench/ann/` (its own `[workspace]`, not a
+  member of the repository's, so CI does not build it; target dir
+  `target/ann`), on `nucleus-kv` (the real KV, through its contract, as
+  the engine would use it), `nucleus-kernels` (the distance kernels) and
+  `nucleus-platform`.  One HNSW core (insert with the neighbour-selection
+  heuristic, layered greedy search, `ef`), three storage adapters behind
+  one trait (nodes and edges in and out, the delta, fold / seal / merge).
+- Data: ann-benchmarks' `sift-128-euclidean` (1 M, L2) and
+  `glove-100-angular` (1.18 M, cosine), their HDF5 files from
+  ann-benchmarks.com, converted once by a small Python script (`h5py`)
+  to raw `f32` files with the ground truth, under `target/ann-data`
+  (kept like `target/tpch-sf1`; `target/` pruning must spare it).
+- Same parameters for all: `M` 16, `ef_construction` 64, `ef_search`
+  10–400; each model in its best reasonable form — (A) with and without a
+  node cache (bounded, by key and the version read), (B) with and
+  without merges.
+- Measured, each on 1 and 10 threads: recall@10 against `ef_search`
+  and latency / QPS (the recall–speed curve); a build by inserts — the
+  throughput, the conflicts and retries with concurrent writers, the
+  bytes written to the KV per row (write amplification); searches during
+  writes and from an old snapshot; memory; build time.  On a quiet
+  machine (`uptime`'s load and `fseventsd` checked first), the server
+  not running.
+- Afterwards: the numbers and the decision recorded here; the losing
+  adapters deleted; the winner built into the engine — an index kind
+  registered (principle 12: `CREATE INDEX … USING hnsw (v
+  vector_l2_ops)`, the index method a registry, not a hard-coded B-tree),
+  maintained by DML, chosen by the optimizer, `EXPLAIN` showing it — with
+  the recall suite in `bench/` and tests (the graph's results against
+  the exact search's, MVCC, rollbacks, crashes in a fold).
+
+Where to start next session: write `bench/ann/` (the core first, checked
+against the exact search on 10,000 random vectors: recall ≥ 0.99 at
+`ef_search` 200), then the data script, then (C), (A), (B) — in that
+order, (C) the one to build well.  Also open: `docs/benchmarks.md`'s
+TPC-H table was run under load (load average 12, `fseventsd` at 99 %),
+so its Q8 on column tables reads 132.2 ms — the A/B before it had 82
+against 84 ms; re-run `bench/tpch.py` on a quiet machine and replace the
+table.
 
 **Done when:** the law kit passes on `vector`; every capability above
 works through SQL, `ncp` and all six drivers; exact search matches a
