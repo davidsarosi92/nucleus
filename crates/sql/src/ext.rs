@@ -956,6 +956,12 @@ pub trait Type: std::any::Any + Send + Sync {
         None
     }
 
+    /// Elements by position: `v[i]`, slices `v[lo:hi]` and `UPDATE …
+    /// SET v[i] = x` (a vector's components).
+    fn elements(&self) -> Option<&dyn Elements> {
+        None
+    }
+
     /// Accepts the modifier `n` of `name(n)` (`vector(3)`); by default
     /// the type takes none.
     fn modifier(&self, n: u32) -> Result<()> {
@@ -1064,6 +1070,29 @@ pub trait Arithmetic: Send + Sync {
 
     /// `a op b`, two non-`NULL` values of the type.
     fn apply(&self, op: &str, a: &Value, b: &Value) -> Result<Value>;
+}
+
+/// A value's elements by position ([`Type::elements`]).  SQL's
+/// positions are 1-based; these are 0-based and in range — what is out
+/// of range, `NULL` or empty the caller decides, the same for every type
+/// (as for arrays).
+pub trait Elements: Send + Sync {
+    /// The type of an element.
+    fn element_type(&self) -> DataType;
+
+    /// How many elements a non-`NULL` value has.
+    fn count(&self, v: &Value) -> Result<usize>;
+
+    /// Element `i`.
+    fn get(&self, v: &Value, i: usize) -> Result<Value>;
+
+    /// Elements `from..to` as a value of the type (`from <= to`; an empty
+    /// one is the type's to refuse).
+    fn slice(&self, v: &Value, from: usize, to: usize) -> Result<Value>;
+
+    /// `v` with element `i` replaced by `x` (of the element type, not
+    /// `NULL` unless the type allows it).
+    fn with(&self, v: &Value, i: usize, x: &Value) -> Result<Value>;
 }
 
 /// A distance.

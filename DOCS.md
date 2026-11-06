@@ -1117,7 +1117,12 @@ top-k over the scan).  Vectors of different dimensions are `22000`.
 Arithmetic component by component (`+`, `-`, `*`) and `||`
 (concatenation), the type's `Arithmetic`; functions `vector_dims` /
 `dims`, `vector_norm` / `l2_norm` / `norm`, `l2_normalize` / `normalize`
-(a zero vector stays zero), `subvector(v, from, count)`.  Aggregates `sum`
+(a zero vector stays zero), `subvector(v, from, count)`.  Components by
+position (the type's `Elements`, the same mechanism as arrays'): `v[i]`
+a `real`, 1-based, NULL out of range; `v[lo:hi]` a vector, bounds
+clamped, an empty slice `22023`; `UPDATE … SET v[i] = x` inside the
+vector's dimension (`2202E` outside it, `22000` for a NULL component).
+Aggregates `sum`
 and `avg` (centroids), each component summed exactly (`fsum::ExactSum`,
 §M14.27) and rounded once.  `crates/testkit/slt/45_vector.slt` follows
 pgvector's definitions.
@@ -1264,7 +1269,10 @@ PostgreSQL's ISO style (`2024-03-10 12:05:06+00`, `1 year 2 mons 3 days
 by the calendar, the day clamped), `timestamp - timestamp` (days and
 time), `interval × / number`.  Typed literals: `DATE '…'`, `INTERVAL '…'`,
 any `type 'text'`.  Arrays: `'{a,"b c",NULL}'`, `ARRAY[…]`,
-`ARRAY(subquery)`, `a[i]` (1-based, NULL out of range), `||`.
+`ARRAY(subquery)`, `a[i]` (1-based, NULL out of range), slices
+`a[lo:hi]` / `a[:hi]` / `a[lo:]` (bounds clamped, PostgreSQL's), `UPDATE …
+SET a[i] = x` (the array grown with NULLs, a NULL array taken as empty,
+`2202E` below 1 or for a NULL position), `||`.
 
 Key encoding (order-preserving, self-delimiting): `00` NULL; `01` bool;
 `02` + `i ^ i64::MIN` big-endian; `03` + sign-flipped/inverted IEEE bits
@@ -2165,8 +2173,9 @@ indexes and constraints numbered after it (the module's `catalog.rs` has
 the table).
 One role, `nucleus`.  This is what makes `psql`'s `\d`, `\d table`,
 `\d+`, `\dt`, `\di`, `\dv`, `\dn`, `\du`, `\l` work; `\df` and others
-that need functions, sequences or permissions do not.  `pg_typeof(x)` is
-one of its functions too.
+that need functions, sequences or permissions do not.  `pg_typeof(x)` and
+`to_regtype(name)` (a type's oid by its `pg_type` or SQL name, NULL when
+there is none) are among its functions too.
 
 **Teaching a type an ordering** (§M14.19): `ALTER TYPE t ADD ORDERING
 name BY mapping` — `mapping` is SQL over `value` (a `t`), into a type with
@@ -2296,7 +2305,11 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   self-delimiting), `distance()` (`Distance`: an operator and a
   distance), `arithmetic()` (`Arithmetic`: the binary operators it
   defines — `+`, `-`, `*`, `||` … — and `apply(op, a, b)`; the binder
-  calls it through `ArithmeticFn`); a modifier — `modifier(n)` checks
+  calls it through `ArithmeticFn`), `elements()` (`Elements`:
+  `element_type()`, `count`, `get`, `slice`, `with` — 0-based and in
+  range, the binder and evaluator doing SQL's 1-based positions and
+  clamping — for `x[i]`, `x[lo:hi]` and `SET x[i] = v`; a type without
+  it cannot be subscripted, `42804`); a modifier — `modifier(n)` checks
   `type(n)` when a column or cast names it (by default: the type takes
   none, `42601`), `fit(v, n)` checks or fits a value to it on every write
   and on a cast (`FitFn`); casts — `cast_from(v)` from another type,
@@ -2982,7 +2995,11 @@ Flush; after an error, messages are skipped until Sync.  Types on the wire:
 `bool` 16, `int8` 20 (`int2`/`int4` accepted), `float8` 701 (`float4`
 accepted), `text` 25 (`varchar`, `bpchar`, `name` accepted), `numeric`
 1700, `date` 1082, `timestamp` 1114, `timestamptz` 1184, `interval` 1186,
-and their arrays, `uuid` 2950 (binary: its 16 bytes); other registered
+and their arrays, `uuid` 2950 (binary: its 16 bytes), `vector` 13201
+(`pg_type` lists it — pgvector's oid is per database, its clients look it
+up with `to_regtype('vector')` — text `[1,2,3]`, binary pgvector's: the
+dimension count and an unused `int16`, then big-endian `float4`s; psycopg
+with pgvector's `register_vector` works both ways); other registered
 types as `text`; text and binary formats for all of them (binary numeric
 and dates checked against PostgreSQL's `*_send`).
 
@@ -3249,7 +3266,9 @@ cursor, JavaScript `Client.stream` with `for await`, Java
 `Connection::cursor`; closing one early, or the next query, stops the
 statement), and columnar, a buffer per column read in place (`batches`
 in each: Rust typed vectors; Python numpy arrays — `to_numpy()`, fixed
-widths without a copy, NULLs masked — Arrow arrays, and whole results
+widths without a copy, NULLs masked, a `vector` column an `(n, d)`
+`float32` array when its vectors share a dimension — Arrow arrays
+(`vector` as `fixed_size_list<float32>`), and whole results
 as `numpy`, `arrow`, `pandas`, `polars`; JavaScript typed arrays; Java
 `IntBuffer`, `LongBuffer`, `DoubleBuffer` views; C and C++ pointers into
 the batch), and bulk load through `COPY … FROM STDIN` (§8.7): text or
@@ -3366,6 +3385,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.12 V2b, components by position:** `x[i]`,
+  `x[lo:hi]`, `UPDATE … SET x[i] = v` for arrays and vectors (§8.1),
+  through the type capability `Elements` (§8.12); Python vectors as
+  `(n, d)` numpy and Arrow `fixed_size_list<float32>` (§10); pg-compat's
+  `vector` oid, `to_regtype` and pgvector's binary format (§9).
 - **2026-11-06 — §M14.12 V2, the exact search bound by bandwidth:**
   `large::Chunks` (values out of line read beside a batch scan's rows,
   §8.1), type lookups kept a thread (§8.12), the server's `--cache`

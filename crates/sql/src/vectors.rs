@@ -16,8 +16,8 @@ use std::sync::Arc;
 use crate::error::{Error, Result};
 use crate::ext::{
     Accumulator, Aggregate, Arg, ArgInfo, Arithmetic, CallContext, CanonicalBytes, Distance,
-    Equality, Hashing, KeyEncoding, Registry, Returns, ScalarFunction, Signature, TotalOrder, Type,
-    TypeRef, Volatility,
+    Elements, Equality, Hashing, KeyEncoding, Registry, Returns, ScalarFunction, Signature,
+    TotalOrder, Type, TypeRef, Volatility,
 };
 use crate::fsum::ExactSum;
 use crate::types::{DataType, Value};
@@ -325,6 +325,9 @@ impl Type for VectorType {
     fn arithmetic(&self) -> Option<&dyn Arithmetic> {
         Some(&Elementwise)
     }
+    fn elements(&self) -> Option<&dyn Elements> {
+        Some(self)
+    }
     fn modifier(&self, n: u32) -> Result<()> {
         if n == 0 || n as usize > MAX_DIMS {
             return Err(Error::invalid_parameter(format!(
@@ -568,6 +571,43 @@ impl Accumulator for VectorAcc {
             return Err(Error::out_of_range("value out of range: overflow"));
         }
         Ok(value(&out))
+    }
+}
+
+impl Elements for VectorType {
+    fn element_type(&self) -> DataType {
+        DataType::Real
+    }
+
+    fn count(&self, v: &Value) -> Result<usize> {
+        dims(v)
+    }
+
+    fn get(&self, v: &Value, i: usize) -> Result<Value> {
+        let b = bytes(v)?;
+        let c = b
+            .get(i * 4..i * 4 + 4)
+            .ok_or_else(|| Error::internal("a component out of range"))?;
+        Ok(Value::Real(f32::from_le_bytes(c.try_into().unwrap())))
+    }
+
+    fn slice(&self, v: &Value, from: usize, to: usize) -> Result<Value> {
+        let c = components(v)?;
+        checked(&c[from..to])
+    }
+
+    fn with(&self, v: &Value, i: usize, x: &Value) -> Result<Value> {
+        let mut c = components(v)?;
+        c[i] = match x {
+            Value::Real(f) => *f,
+            Value::Null => {
+                return Err(Error::data_exception(
+                    "a vector's component must not be NULL",
+                ));
+            }
+            _ => return Err(Error::internal("a vector component not a real")),
+        };
+        checked(&c)
     }
 }
 

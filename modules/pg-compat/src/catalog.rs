@@ -51,6 +51,9 @@ pub const NS_NC: i64 = 13_100;
 pub const OWNER: i64 = 10;
 /// PostgreSQL's `uuid`.
 pub const UUID: i64 = 2950;
+/// nucleus's `vector`: an oid of its own, as pgvector's is per database
+/// (its clients look it up with `to_regtype('vector')`).
+pub const VECTOR: i64 = 13_201;
 const ROLE: &str = "nucleus";
 const DATABASE_OID: i64 = 16_383;
 
@@ -686,6 +689,7 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Inet => 869,
         DataType::Cidr => 650,
         DataType::Ext(t) if t.name() == "uuid" => UUID,
+        DataType::Ext(t) if t.name() == "vector" => VECTOR,
         // Registered types PostgreSQL has no oid for are shown as text.
         // Enums too: PostgreSQL gives each its own oid, nucleus sends labels.
         DataType::Ext(_) | DataType::Enum(_) => 25,
@@ -739,6 +743,13 @@ const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
     (2205, "regclass", 4, "N", 0, 2210, 0),
     (2950, "uuid", 16, "U", 0, 2951, 0),
     (2951, "_uuid", -1, "A", 2950, 0, 0),
+    (VECTOR, "vector", -1, "U", 0, VECTOR + 1, 0),
+    (VECTOR + 1, "_vector", -1, "A", VECTOR, 0, 0),
+    // PostgreSQL's `bit`, which nucleus does not have: listed because
+    // pgvector's clients look it up beside `vector` and require it.  A
+    // value sent as `bit` is refused (no type has its oid).
+    (1560, "bit", -1, "V", 0, 1561, 0),
+    (1561, "_bit", -1, "A", 1560, 0, 0),
     (1000, "_bool", -1, "A", 16, 0, 0),
     (1002, "_char", -1, "A", 18, 0, 0),
     (1003, "_name", -1, "A", 19, 0, 950),
@@ -758,6 +769,17 @@ const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
     (1231, "_numeric", -1, "A", 1700, 0, 0),
     (2210, "_regclass", -1, "A", 2205, 0, 0),
 ];
+
+/// `to_regtype(name)`: the oid of the type `name` names (as `pg_type`
+/// spells it or as `format_type` shows it, `pg_catalog.` allowed).
+fn type_by_name(name: &str) -> Option<i64> {
+    let n = name.trim().to_ascii_lowercase();
+    let n = n.strip_prefix("pg_catalog.").unwrap_or(&n);
+    TYPES
+        .iter()
+        .find(|t| t.1 == n || format_type(t.0, None).as_deref() == Some(n))
+        .map(|t| t.0)
+}
 
 /// `format_type(oid, typmod)`: a type's SQL name.
 pub fn format_type(oid: i64, typmod: Option<i64>) -> Option<String> {
@@ -791,6 +813,12 @@ pub fn format_type(oid: i64, typmod: Option<i64>) -> Option<String> {
         },
         2205 => "regclass".into(),
         2950 => "uuid".into(),
+        // pgvector's typmod is the dimension count itself.
+        VECTOR => match typmod.filter(|n| *n > 0) {
+            Some(n) => format!("vector({n})"),
+            None => "vector".into(),
+        },
+        1560 => "bit".into(),
         _ => {
             let (_, _, _, _, elem, _, _) = TYPES.iter().find(|t| t.0 == oid)?;
             return format_type(*elem, typmod).map(|e| format!("{e}[]"));
@@ -1666,6 +1694,8 @@ enum PgFn {
     BackendPid,
     /// `pg_typeof(x)`: the argument's type name, a constant.
     TypeOf,
+    /// `to_regtype(name)`: a type's oid, or NULL when there is none.
+    ToRegType,
 }
 
 /// The functions: names (the first is shown by `EXPLAIN`) and argument
@@ -1720,6 +1750,7 @@ const FUNCTIONS: &[(PgFn, &[&str], RangeInclusive<usize>)] = &[
     ),
     (PgFn::BackendPid, &["pg_backend_pid"], 0..=0),
     (PgFn::TypeOf, &["pg_typeof"], 1..=1),
+    (PgFn::ToRegType, &["to_regtype"], 1..=1),
 ];
 
 struct PgFunction {
@@ -1753,7 +1784,7 @@ impl ScalarFunction for PgFunction {
                 vec![Arg::Untyped(I)],
                 Returns::Type(Some(I)),
             )),
-            PgFn::BackendPid => keep(I),
+            PgFn::BackendPid | PgFn::ToRegType => keep(I),
             PgFn::TypeOf => Ok(Signature::new(
                 vec![Arg::Keep],
                 Returns::Constant(Value::Text(match args[0].ty {
@@ -1801,6 +1832,10 @@ fn call(f: PgFn, args: &[Value], txn: &dyn KvTxn, registry: &Registry) -> Result
         PgFn::RegType => match as_int(0) {
             Some(oid) => Value::Text(format_type(oid, None).unwrap_or_else(|| oid.to_string())),
             None => Value::Null,
+        },
+        PgFn::ToRegType => match args.first() {
+            Some(Value::Text(s)) => type_by_name(s).map_or(Value::Null, Value::Int),
+            _ => Value::Null,
         },
         PgFn::RegNamespace => match as_int(0) {
             Some(oid) => Value::Text(ns_name(oid).map_or_else(|| oid.to_string(), str::to_string)),

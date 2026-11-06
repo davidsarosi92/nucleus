@@ -95,6 +95,7 @@ fn oid(t: DataType) -> i32 {
 fn type_of_oid(o: i32) -> Option<DataType> {
     Some(match o {
         2950 => DataType::Ext(TypeRef::named("uuid")?),
+        o if i64::from(o) == crate::catalog::VECTOR => DataType::Ext(TypeRef::named("vector")?),
         BOOL => DataType::Bool,
         INT2 => DataType::SmallInt,
         INT4 => DataType::Integer,
@@ -696,6 +697,17 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
     match (v, ty) {
         // PostgreSQL's binary uuid is its 16 bytes, as nucleus's canonical form.
         (Value::Ext(t, bytes), _) if t.name() == "uuid" => bytes.to_vec(),
+        // pgvector's binary vector: the dimension count and an unused
+        // int16, then the components as big-endian float4s.
+        (Value::Ext(t, bytes), _) if t.name() == "vector" => {
+            let mut out = Vec::with_capacity(4 + bytes.len());
+            out.extend_from_slice(&((bytes.len() / 4) as i16).to_be_bytes());
+            out.extend_from_slice(&[0, 0]);
+            for c in bytes.as_chunks::<4>().0 {
+                out.extend(c.iter().rev());
+            }
+            out
+        }
         (Value::Bool(b), _) => vec![u8::from(*b)],
         // PostgreSQL's binary bytea is its bytes.
         (Value::Bytea(b), _) => b.to_vec(),
@@ -827,6 +839,16 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                 Value::TimestampTz(i64::from_be_bytes(bytes.try_into().unwrap()))
             }
             (Some(DataType::Ext(t)), 16) if t.name() == "uuid" => Value::ext(t, bytes.to_vec()),
+            (Some(DataType::Ext(t)), _) if t.name() == "vector" => {
+                let (head, body) = bytes.split_at_checked(4).ok_or_else(|| bad("vector"))?;
+                let dims = i16::from_be_bytes([head[0], head[1]]);
+                let (cs, rest) = body.as_chunks::<4>();
+                if dims < 0 || dims as usize != cs.len() || !rest.is_empty() {
+                    return Err(bad("vector"));
+                }
+                let cs: Vec<f32> = cs.iter().map(|c| f32::from_be_bytes(*c)).collect();
+                nucleus_sql::vectors::checked(&cs)?
+            }
             (Some(DataType::Array(elem)), _) => {
                 let int = |at: usize| -> Result<i32, Error> {
                     Ok(i32::from_be_bytes(
@@ -1469,6 +1491,33 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// pgvector's binary vector (its `vector_send` / `vector_recv`): the
+    /// dimension count, an unused int16, big-endian float4s.
+    #[test]
+    fn vector_binary_matches_pgvector() {
+        let _ = nucleus_sql::ext::Registry::builtin();
+        let v = nucleus_sql::vectors::value(&[1.0, -2.5]);
+        let b = binary_value(&v, nucleus_sql::vectors::data_type());
+        assert_eq!(hex(&b), "000200003f800000c0200000");
+        let ty = type_of_oid(crate::catalog::VECTOR as i32);
+        assert_eq!(ty, Some(nucleus_sql::vectors::data_type()));
+        assert_eq!(decode_param(&b, 1, ty).unwrap(), v);
+        // A count the bytes disagree with, a non-finite component, none.
+        for bad in [
+            "000300003f800000c0200000",
+            "000200003f800000c02000",
+            "000100007fc00000",
+            "00000000",
+            "0002",
+        ] {
+            let bytes: Vec<u8> = (0..bad.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&bad[i..i + 2], 16).unwrap())
+                .collect();
+            assert!(decode_param(&bytes, 1, ty).is_err(), "{bad}");
+        }
     }
 
     #[test]

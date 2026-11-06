@@ -276,7 +276,7 @@ are marked ✅.
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W8 and W3b ✅; benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 to agree |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
-| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57) |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
@@ -3289,7 +3289,7 @@ compaction policy chosen and why, what is left to the B+tree — and the
 steps it leads to are planned as this milestone's own, agreed before
 they are built.
 
-### §M14.12 — Vectors ◐ (V1: the type, exact search, every driver)
+### §M14.12 — Vectors ◐ (V1: the type, exact search, every driver; V2: bound by bandwidth; V2b: positions, numpy / Arrow, pgvector's clients)
 
 Embeddings beside the data they describe, in the same transactions.
 `vector` is a **built-in type with every capability** — it matters most
@@ -3444,9 +3444,44 @@ allocations — a value of each vector.  Left, measured when worth it: a
 batch kind for fixed-width values (the bytes of a column of vectors in
 one buffer, no value each) and the distance as a batch kernel over it.
 
-*Left, as steps of their own:* **V2b** `v[i]`, slices and `UPDATE … SET
-v[i] = …`; Arrow's `fixed_size_list<float32>` for batches; pg-compat
-sending `vector` as pgvector's text so its clients work.  **V3**
+**V2b — components by position, numpy and Arrow, pgvector's clients** ✅
+(2026-11-06).
+
+- `v[i]`, `v[lo:hi]` and `UPDATE … SET v[i] = x` — and the same for
+  arrays, which had `a[i]` only: one mechanism, a type capability
+  `Elements` (`element_type`, `count`, `get`, `slice`, `with`; 0-based,
+  in range), which a registered type has or not, the binder and the
+  evaluator doing SQL's 1-based positions, clamping and errors once for
+  both.  PostgreSQL's array rules taken as they are (a slice's bounds
+  clamped, an assignment past the end growing the array with NULLs, a
+  NULL array taken as empty); a vector differs only where it must: an
+  empty slice and a position outside the dimension are errors (`22023`,
+  `2202E`), since no vector is empty and a column's dimension is fixed.
+  pgvector has no subscripts (`subvector` only); its users ask for them.
+- Python: a `vector` column of a batch is a `(n, d)` `float32` numpy
+  array over the batch's bytes (no copy; NULL rows zeros and masked in
+  `to_numpy`), and Arrow's `fixed_size_list<float32>` (`to_arrow`; the
+  layout Arrow, Lance and pandas' Arrow types read).  A column whose
+  vectors differ in dimension stays objects.
+- pg-compat: `vector` has an oid (13201; pgvector's is whatever the
+  extension got, and its clients look it up by name), a row in `pg_type`,
+  `to_regtype(name)`, pgvector's text and its binary format both ways
+  (`vector_send` / `vector_recv`: the dimension count, an unused `int16`,
+  big-endian `float4`s).  Checked with pgvector's own Python client
+  (psycopg 3, `register_vector`, numpy in and `Vector` out, text and
+  binary).  `register_vector` also requires `bit` to exist: `pg_type`
+  lists PostgreSQL's `bit` (nucleus has none; a value sent as one is
+  refused).  *Not yet:* a driver that resolves an unknown oid through
+  `pg_type` with oid-typed parameters and results — rust-postgres (so
+  the `pgvector` crate), sqlx — needs pg-compat's catalog columns typed
+  `oid` and `"char"` as PostgreSQL's are, where nucleus has `bigint` and
+  `text`: a pg-compat step of its own (a wire type per catalog column),
+  not a vector one.
+
+TPC-H unchanged (`bench/phases.py reads`, alternating, the sums of the
+best times: 8575 / 7888 → 7749 / 7874 ms).
+
+*Left, as steps of their own:* **V3**
 statistics for the optimizer (dimension, norms, sampled distance
 quantiles).  **V4** the HNSW index (Malkov and Yashunin 2018; pgvector's
 and Lucene's builds read for ideas — graph pages in the KV, versions
@@ -4557,3 +4592,8 @@ style) across a thousand seeds without failure.
   values out of line read beside a scan's rows (`large::Chunks`), type
   lookups kept a thread, the server's `--cache`; 100k × 768 nearest
   neighbours 233 → 48 ms (numpy 57, pgvector exact 167).
+- **2026-11-06** — §M14.12 V2b: `x[i]`, `x[lo:hi]`, `SET x[i] = v` for
+  arrays and vectors through one capability (`Elements`); vectors as
+  `(n, d)` numpy and Arrow `fixed_size_list<float32>` in Python;
+  pg-compat's `vector` (oid 13201, `to_regtype`, pgvector's binary),
+  pgvector's psycopg client working.

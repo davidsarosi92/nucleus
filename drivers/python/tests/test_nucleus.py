@@ -95,6 +95,24 @@ class Conformance(unittest.TestCase):
                 import numpy as np
                 q = np.array([4, 6, 3], dtype=np.float32)
                 self.assertEqual(c.execute(f"SELECT id FROM {t} WHERE v = $1", [q]).rows, [(2,)])
+                # A column of vectors: an (n, d) float32 array, read in place.
+                m = next(iter(c.batches(f"SELECT v FROM {t} ORDER BY id"))).column(0).to_numpy()
+                self.assertEqual((m.shape, m.dtype), ((5, 3), np.float32))
+                self.assertFalse(m.flags.owndata)
+                self.assertEqual(m[1].tolist(), [4, 6, 3])
+                c.execute(f"INSERT INTO {t} VALUES (7, NULL)")
+                m = next(iter(c.batches(f"SELECT v FROM {t} ORDER BY id"))).column(0).to_numpy()
+                self.assertTrue(np.ma.is_masked(m[5, 0]))
+                self.assertEqual(m[4].tolist(), [0, 1, 0])
+                if _has("pyarrow"):
+                    a = c.arrow(f"SELECT v FROM {t} ORDER BY id").column("v")
+                    self.assertEqual(str(a.type), "fixed_size_list<item: float>[3]")
+                    self.assertEqual(a.to_pylist()[1], [4, 6, 3])
+                    self.assertIsNone(a.to_pylist()[5])
+            # Components by position.
+            self.assertEqual(c.execute(f"SELECT v[2], v[2:3]::text FROM {t} WHERE id = 2").rows, [(6.0, "[6,3]")])
+            c.execute(f"UPDATE {t} SET v[3] = 9 WHERE id = 2")
+            self.assertEqual(c.execute(f"SELECT v FROM {t} WHERE id = 2").rows[0][0], array.array("f", [4, 6, 9]))
 
     def test_core_types(self):
         import ipaddress

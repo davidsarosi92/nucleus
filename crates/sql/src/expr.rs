@@ -68,6 +68,10 @@ pub enum Expr {
     Array(Vec<Expr>),
     /// `array[index]`.
     Subscript(Box<Expr>, Box<Expr>),
+    /// `a[lo:hi]`, a bound left out the first or the last.
+    Slice(Box<Expr>, Option<Box<Expr>>, Option<Box<Expr>>),
+    /// `a` with element `i` replaced by `v` (`UPDATE … SET a[i] = v`).
+    WithElement(Box<Expr>, Box<Expr>, Box<Expr>),
     /// `left op ANY|ALL (array)`.
     AnyAll {
         /// The left operand.
@@ -499,8 +503,19 @@ impl Expr {
                     .into_iter()
                     .nth((n - 1) as usize)
                     .unwrap_or(Value::Null),
+                (v @ Value::Ext(t, _), Value::Int(n)) if n >= 1 => match t.imp().elements() {
+                    Some(e) if (n as usize) <= e.count(&v)? => e.get(&v, n as usize - 1)?,
+                    _ => Value::Null,
+                },
                 _ => Value::Null, // out of range, NULL, or not an array
             },
+            Expr::Slice(a, lo, hi) => {
+                let a = a.eval(env)?;
+                let bound = |x: &Option<Box<Expr>>| x.as_ref().map(|x| x.eval(env)).transpose();
+                let (lo, hi) = (bound(lo)?, bound(hi)?);
+                slice(a, lo, hi)?
+            }
+            Expr::WithElement(a, i, v) => with_element(a.eval(env)?, i.eval(env)?, v.eval(env)?)?,
             Expr::AnyAll {
                 left,
                 op,
@@ -591,6 +606,15 @@ impl Expr {
                 a.walk(f);
                 b.walk(f);
             }
+            Expr::Slice(a, lo, hi) => {
+                a.walk(f);
+                lo.iter().chain(hi).for_each(|x| x.walk(f));
+            }
+            Expr::WithElement(a, i, v) => {
+                a.walk(f);
+                i.walk(f);
+                v.walk(f);
+            }
             Expr::Subquery(s) => {
                 if let SubKind::In(e, _) = &s.kind {
                     e.walk(f);
@@ -640,6 +664,15 @@ impl Expr {
             } => {
                 a.walk_mut(f);
                 b.walk_mut(f);
+            }
+            Expr::Slice(a, lo, hi) => {
+                a.walk_mut(f);
+                lo.iter_mut().chain(hi).for_each(|x| x.walk_mut(f));
+            }
+            Expr::WithElement(a, i, v) => {
+                a.walk_mut(f);
+                i.walk_mut(f);
+                v.walk_mut(f);
             }
             Expr::Subquery(s) => {
                 if let SubKind::In(e, _) = &mut s.kind {
@@ -727,6 +760,8 @@ impl Expr {
             ),
             Expr::Array(items) => Expr::Array(items.iter().map(|x| x.map_columns(f)).collect()),
             Expr::Subscript(a, i) => Expr::Subscript(m(a), m(i)),
+            Expr::Slice(a, lo, hi) => Expr::Slice(m(a), lo.as_deref().map(m), hi.as_deref().map(m)),
+            Expr::WithElement(a, i, v) => Expr::WithElement(m(a), m(i), m(v)),
             Expr::AnyAll {
                 left,
                 op,
@@ -1724,6 +1759,85 @@ pub(crate) fn func(f: Func, mut args: Vec<Value>) -> Result<Value> {
         // The rest before the NULL check above.
         _ => unreachable!("{} is evaluated above", f.name()),
     })
+}
+
+/// `a[lo:hi]` (1-based, inclusive, a bound `None` when left out): the
+/// bounds clamped to the elements there are, as PostgreSQL slices arrays;
+/// `NULL` for a `NULL` value or bound.
+fn slice(a: Value, lo: Option<Value>, hi: Option<Value>) -> Result<Value> {
+    let int = |b: Option<Value>, default: i64| match b {
+        None => Some(default),
+        Some(Value::Int(n)) => Some(n),
+        Some(_) => None, // NULL
+    };
+    let count = match &a {
+        Value::Array(items) => items.len(),
+        Value::Ext(t, _) => match t.imp().elements() {
+            Some(e) => e.count(&a)?,
+            None => return Ok(Value::Null),
+        },
+        _ => return Ok(Value::Null),
+    };
+    let (Some(lo), Some(hi)) = (int(lo, 1), int(hi, count as i64)) else {
+        return Ok(Value::Null);
+    };
+    let from = lo.clamp(1, count as i64 + 1) as usize - 1;
+    let to = (hi.clamp(0, count as i64) as usize).max(from);
+    Ok(match a {
+        Value::Array(items) => Value::Array(items[from..to].to_vec()),
+        Value::Ext(t, _) => t
+            .imp()
+            .elements()
+            .expect("checked above")
+            .slice(&a, from, to)?,
+        _ => unreachable!("matched above"),
+    })
+}
+
+/// `a` with element `i` (1-based) replaced by `v`: an array grows with
+/// `NULL`s to reach it (a `NULL` array is an empty one, as PostgreSQL's
+/// one-dimensional arrays); a type with elements by position (a vector)
+/// keeps its length, so a position past it is an error.
+fn with_element(a: Value, i: Value, v: Value) -> Result<Value> {
+    let Value::Int(n) = i else {
+        return Err(Error::array_subscript(
+            "array subscript in assignment must not be null",
+        ));
+    };
+    match a {
+        Value::Array(_) | Value::Null if n < 1 => {
+            Err(Error::array_subscript("array subscript out of range"))
+        }
+        Value::Array(mut items) => {
+            let at = n as usize - 1;
+            if items.len() <= at {
+                items.resize(at + 1, Value::Null);
+            }
+            items[at] = v;
+            Ok(Value::Array(items))
+        }
+        Value::Null => {
+            let mut items = vec![Value::Null; n as usize];
+            items[n as usize - 1] = v;
+            Ok(Value::Array(items))
+        }
+        Value::Ext(t, _) => {
+            let e = t.imp().elements().ok_or_else(|| {
+                Error::type_mismatch(format!("cannot subscript type {}", t.name()))
+            })?;
+            let count = e.count(&a)?;
+            if n < 1 || n as usize > count {
+                return Err(Error::array_subscript(format!(
+                    "{} subscript {n} out of range: it has {count}",
+                    t.name()
+                )));
+            }
+            e.with(&a, n as usize - 1, &v)
+        }
+        _ => Err(Error::type_mismatch(
+            "cannot subscript a value that is not an array",
+        )),
+    }
 }
 
 #[cfg(test)]

@@ -1200,17 +1200,50 @@ class ColumnBatch:
             return np.empty(0, w[1])
         return np.empty(0, object)
 
+    def _is_vector(self):
+        return self.column.tag == _EXT and self.column.type == "vector"
+
+    def _vector_rows(self):
+        """A vector column as an (n, d) float32 array and its NULLs (a bool
+        array, or None): read in place when every value is there and of one
+        dimension, else copied with zeros in NULL rows; ``None`` when the
+        non-NULL values' dimensions differ."""
+        import numpy as np
+
+        n = self.rows
+        offs = np.frombuffer(self._body, "<u4", n + 1, self._offsets[0])
+        lens = np.diff(offs) // 4
+        nulls = ~self._valid_numpy() if self.nulls else None
+        dims = np.unique(lens if nulls is None else lens[~nulls])
+        if len(dims) > 1:
+            return None
+        d = int(dims[0]) if len(dims) else 0
+        flat = np.frombuffer(self._body, "<f4", int(offs[n]) // 4, self._data[0])
+        if nulls is None:
+            return flat.reshape(n, d), None
+        out = np.zeros((n, d), np.float32)
+        out[~nulls] = flat.reshape(-1, d) if d else flat.reshape(-1, 0)
+        return out, nulls
+
     def to_numpy(self):
         """The column as a numpy array: fixed widths read in place (no copy)
         — booleans, integers, floats, ``time`` as ``timedelta64[us]``,
         ``interval`` as a record of months, days and µs; dates and
         timestamps as ``datetime64`` (shifted to 1970's epoch: one vector
-        add); anything else an object array.  With NULLs, a masked array (an
+        add); vectors of one dimension as an (n, d) ``float32`` array, read
+        in place without NULLs; anything else an object array.  With NULLs, a masked array (an
         object array holds ``None`` instead)."""
         import numpy as np
 
         c, n = self.column, self.rows
         fixed = _FIXED.get(c.tag)
+        if self._is_vector() and n:
+            got = self._vector_rows()
+            if got is not None:
+                arr, nulls = got
+                if nulls is None:
+                    return arr
+                return np.ma.masked_array(arr, mask=np.repeat(nulls[:, None], arr.shape[1], axis=1))
         if c.tag == 9:
             arr = np.frombuffer(self._body, np.dtype([("months", "<i4"), ("days", "<i4"), ("micros", "<i8")]),
                                 n, self._data[0])
@@ -1233,7 +1266,7 @@ class ColumnBatch:
     def to_arrow(self):
         """The column as a ``pyarrow.Array``: integers, floats, ``time``,
         text and ``bytea`` read in place from the batch (Arrow's own
-        layout); booleans, dates and timestamps through numpy; ``numeric``
+        layout); vectors of one dimension as ``fixed_size_list<float32>``; booleans, dates and timestamps through numpy; ``numeric``
         as decimals, ``interval`` as ``month_day_nano`` and the rest from
         Python values."""
         import numpy as np
@@ -1243,6 +1276,13 @@ class ColumnBatch:
         buf = pa.py_buffer(self._body)
         valid = buf.slice(*self._valid) if self.nulls else None
         t = _arrow_type(c)
+        if self._is_vector() and n:
+            got = self._vector_rows()
+            if got is not None:
+                arr, nulls = got
+                d = arr.shape[1]
+                values = pa.array(arr.reshape(-1), type=pa.float32())
+                return pa.FixedSizeListArray.from_arrays(values, d, mask=None if nulls is None else pa.array(nulls))
         if c.tag in (12, 13, 2, 14, 3, 16) or (c.tag == _EXT and _width(c) == 16):
             return pa.Array.from_buffers(t, n, [valid, buf.slice(*self._data)])
         if c.tag in (4, 17, _ENUM, 0, 15) or (c.tag == _EXT and _width(c) == 0):

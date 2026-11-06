@@ -866,6 +866,16 @@ pub fn show_with(e: &Expr, col: &dyn Fn(usize) -> String) -> String {
                 .join(", ")
         ),
         Expr::Subscript(a, i) => format!("{}[{}]", show_with(a, col), show_with(i, col)),
+        Expr::Slice(a, lo, hi) => {
+            let b = |x: &Option<Box<Expr>>| x.as_ref().map_or(String::new(), |x| show_with(x, col));
+            format!("{}[{}:{}]", show_with(a, col), b(lo), b(hi))
+        }
+        Expr::WithElement(a, i, v) => format!(
+            "{} with [{}] = {}",
+            show_with(a, col),
+            show_with(i, col),
+            show_with(v, col)
+        ),
         Expr::AnyAll {
             left,
             op,

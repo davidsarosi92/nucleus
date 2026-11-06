@@ -37,7 +37,8 @@ results (protocol version 7), without a Python object per value:
 `conn.numpy(sql)` (a dict of numpy arrays, masked where there are NULLs;
 fixed widths read in place from the batch), `conn.arrow(sql)` (a
 `pyarrow.Table`; integers, floats, text and bytea in place, in Arrow's
-own layout), `conn.pandas(sql)`, `conn.polars(sql)`, or batch by batch:
+own layout; a `vector` column a `fixed_size_list<float32>`, and in
+`numpy` an `(n, d)` float32 array read in place), `conn.pandas(sql)`, `conn.polars(sql)`, or batch by batch:
 `for b in conn.batches(sql, rows=65536): b.column("x").to_numpy()`.
 numpy, pyarrow, pandas and polars are optional — needed only by what
 uses them.  Bulk load, the other way: `conn.load("t", df)` — a

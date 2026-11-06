@@ -192,3 +192,44 @@ SELECT tag, avg(v), sum(v) FROM items GROUP BY tag ORDER BY tag
 a [2,3.3333333,3.1666667] [6,10,9.5]
 b [-0.5,0,0.5] [-1,0,1]
 c NULL NULL
+
+# Components by position (§M14.12 V2b): v[i] a real, out of range NULL;
+# slices v[lo:hi], bounds clamped, an empty one refused (no vector has no
+# component); UPDATE … SET v[i] = x, inside the vector's dimension.
+query RRRR
+SELECT ('[1,2.5,3]'::vector)[2], ('[1,2.5,3]'::vector)[0], ('[1,2.5,3]'::vector)[4], ('[1,2,3]'::vector)[NULL]
+----
+2.500 NULL NULL NULL
+
+query TTTT
+SELECT ('[1,2,3,4]'::vector)[2:3], ('[1,2,3,4]'::vector)[:2], ('[1,2,3,4]'::vector)[3:], ('[1,2,3,4]'::vector)[-5:9]
+----
+[2,3] [1,2] [3,4] [1,2,3,4]
+
+statement error 22023
+SELECT ('[1,2,3]'::vector)[3:2]
+
+query R
+SELECT v[3] FROM items WHERE id = 5
+----
+3.500
+
+statement ok
+UPDATE items SET v[2] = 9.5 WHERE id = 1
+
+query T
+SELECT v FROM items WHERE id = 1
+----
+[1,9.5,3]
+
+statement error 2202E
+UPDATE items SET v[4] = 1 WHERE id = 1
+
+statement error 22000
+UPDATE items SET v[1] = NULL WHERE id = 1
+
+statement error 2202E
+UPDATE items SET v[NULL] = 1 WHERE id = 1
+
+statement error 42804
+SELECT tag[1] FROM items

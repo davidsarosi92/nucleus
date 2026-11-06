@@ -5,6 +5,10 @@
 - Vectors (nucleus PLAN.md §M14.12): a `vector` value is an
   `array('f')`; one or a one-dimensional float32 numpy array is sent as
   a vector, in parameters, `executemany` and `load`.
+- Vector columns in batches (§M14.12 V2b): `to_numpy()` an `(n, d)`
+  float32 array over the batch's bytes (NULL rows masked), `to_arrow()`
+  a `fixed_size_list<float32>`; a column whose vectors differ in
+  dimension stays objects.
 
 - Pipelining (nucleus PLAN.md §M14.20 W8): `Connection.pipeline(statements)`
   sends statements without waiting for each reply and gives each one's

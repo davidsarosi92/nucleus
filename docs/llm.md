@@ -38,7 +38,10 @@ are in UTC.
 (taxicab); the nearest rows: `SELECT id FROM docs WHERE tenant = $2
 ORDER BY embedding <=> $1 LIMIT 10` (exact, no index yet); `+ - *` and
 `||` component-wise, `vector_dims`, `vector_norm`, `l2_normalize`,
-`subvector`, `avg(embedding)` (a centroid).
+`subvector`, `avg(embedding)` (a centroid); components by position as
+arrays' elements: `embedding[1]` (a `real`), `embedding[1:256]` (a
+vector), `UPDATE docs SET embedding[3] = 0.5`.  Over the PostgreSQL
+protocol pgvector's clients work (`register_vector` with psycopg).
 
 **Tables:** `CREATE TABLE [IF NOT EXISTS] t (id bigint PRIMARY KEY, name
 text NOT NULL DEFAULT '', email text UNIQUE, score int CHECK (score >= 0),

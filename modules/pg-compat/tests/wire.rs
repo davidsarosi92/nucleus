@@ -420,6 +420,48 @@ fn uuid_through_a_real_driver() {
     assert_eq!(r.get(0), Some("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"));
 }
 
+/// A vector over the wire (PLAN.md §M14.12 V2b): `to_regtype` finds the
+/// type, and its text is pgvector's.  (The binary format is checked in
+/// the protocol's unit tests; a driver that looks an unknown oid up in
+/// `pg_type` through oid-typed parameters, as rust-postgres does, is not
+/// served yet: PLAN.md §M14.12 V2b.)
+#[test]
+fn vector_over_the_wire() {
+    use postgres::{Client as Pg, NoTls};
+    let addr = start(Config::trust());
+    let url = format!(
+        "host={} port={} user=test dbname=nucleus",
+        addr.ip(),
+        addr.port()
+    );
+    let mut pg = Pg::connect(&url, NoTls).unwrap();
+    pg.batch_execute(
+        "CREATE TABLE items (id INT PRIMARY KEY, embedding vector(3));
+         INSERT INTO items VALUES (1, '[0.5,-1.25,3]'), (2, '[4,5,6]')",
+    )
+    .unwrap();
+    let oid = pg
+        .query_one(
+            "SELECT to_regtype('vector'), to_regtype('pg_catalog.int4'), to_regtype('nope')",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(oid.get::<_, Option<i64>>(0), Some(13_201));
+    assert_eq!(oid.get::<_, Option<i64>>(1), Some(23));
+    assert_eq!(oid.get::<_, Option<i64>>(2), None);
+    let text = pg
+        .simple_query("SELECT embedding FROM items ORDER BY embedding <-> '[4,5,5]'")
+        .unwrap();
+    let rows: Vec<_> = text
+        .iter()
+        .filter_map(|m| match m {
+            postgres::SimpleQueryMessage::Row(r) => Some(r.get(0).unwrap().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows, ["[4,5,6]", "[0.5,-1.25,3]"]);
+}
+
 /// `COPY … FROM STDIN` through a real PostgreSQL driver (PLAN.md §M14.11
 /// L5): text and CSV, an error that stores nothing, and the connection
 /// going on after it.

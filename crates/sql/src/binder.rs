@@ -171,6 +171,14 @@ fn contains_agg(r: &Registry, e: &ast::Expr) -> bool {
         }
         A::Array(items) => items.iter().any(&contains_agg),
         A::Subscript { expr, index } => contains_agg(expr) || contains_agg(index),
+        A::Slice { expr, lower, upper } => {
+            contains_agg(expr)
+                || lower.as_deref().is_some_and(contains_agg)
+                || upper.as_deref().is_some_and(contains_agg)
+        }
+        A::WithElement { expr, index, value } => {
+            contains_agg(expr) || contains_agg(index) || contains_agg(value)
+        }
         A::AnyAll { left, right, .. } => contains_agg(left) || contains_agg(right),
         A::Literal(_)
         | A::Column { .. }
@@ -179,6 +187,23 @@ fn contains_agg(r: &Registry, e: &ast::Expr) -> bool {
         | A::Subquery(_)
         | A::ArraySubquery(_) => false,
     }
+}
+
+/// The element type of a type that has elements by position: an array's,
+/// or a registered type's with [`crate::ext::Elements`] (a vector's
+/// `real`); an error for any other.
+fn elements_of(t: DataType) -> Result<Option<DataType>> {
+    if let Some(e) = t.element() {
+        return Ok(Some(e));
+    }
+    if let DataType::Ext(r) = t
+        && let Some(e) = r.imp().elements()
+    {
+        return Ok(Some(e.element_type()));
+    }
+    Err(Error::type_mismatch(format!(
+        "cannot subscript type {t} because it is not an array"
+    )))
 }
 
 /// The output name of a select-list expression without an alias.
@@ -190,7 +215,7 @@ fn default_name(e: &ast::Expr) -> String {
         ast::Expr::Case { .. } => "case".into(),
         ast::Expr::Exists { .. } => "exists".into(),
         ast::Expr::Array(_) | ast::Expr::ArraySubquery(_) => "array".into(),
-        ast::Expr::Subscript { expr, .. } => default_name(expr),
+        ast::Expr::Subscript { expr, .. } | ast::Expr::Slice { expr, .. } => default_name(expr),
         _ => "?column?".into(),
     }
 }
@@ -1651,22 +1676,39 @@ impl<'a> Binder<'a> {
             A::Subscript { expr, index } => {
                 let (a, at) = sub(expr, self)?;
                 let (i, it) = sub(index, self)?;
-                let (i, (_, it)) = self.coerce(Some(DataType::Integer), i, it)?;
-                if let Some(t) = it.filter(|t| !t.is_integer()) {
-                    return Err(Error::type_mismatch(format!(
-                        "array subscript must have type integer, not type {t}"
-                    )));
+                let i = self.subscript(i, it)?;
+                let element = at.map(elements_of).transpose()?.flatten();
+                (Expr::Subscript(Box::new(a), Box::new(i)), element)
+            }
+            A::Slice { expr, lower, upper } => {
+                let (a, at) = sub(expr, self)?;
+                if let Some(t) = at {
+                    elements_of(t)?;
                 }
-                if at.is_some_and(|t| t.element().is_none()) {
-                    return Err(Error::type_mismatch(format!(
-                        "cannot subscript type {} because it is not an array",
-                        at.unwrap()
-                    )));
-                }
-                (
-                    Expr::Subscript(Box::new(a), Box::new(i)),
-                    at.and_then(DataType::element),
-                )
+                let mut bound = |x: &Option<Box<ast::Expr>>| -> Result<Option<Box<Expr>>> {
+                    x.as_deref()
+                        .map(|x| {
+                            let (i, it) = sub(x, self)?;
+                            Ok(Box::new(self.subscript(i, it)?))
+                        })
+                        .transpose()
+                };
+                let (lo, hi) = (bound(lower)?, bound(upper)?);
+                (Expr::Slice(Box::new(a), lo, hi), at)
+            }
+            A::WithElement { expr, index, value } => {
+                let (a, at) = sub(expr, self)?;
+                let (i, it) = sub(index, self)?;
+                let i = self.subscript(i, it)?;
+                let element = at.map(elements_of).transpose()?.flatten();
+                let (v, vt) = sub(value, self)?;
+                let (v, (_, vt)) = self.coerce(element, v, vt)?;
+                // Stored as the element type (`2.5` into a vector: a real).
+                let v = match (element, vt) {
+                    (Some(e), Some(t)) if e != t => Expr::Cast(Box::new(v), e),
+                    _ => v,
+                };
+                (Expr::WithElement(Box::new(a), Box::new(i), Box::new(v)), at)
             }
             A::AnyAll {
                 left,
@@ -2276,6 +2318,17 @@ impl<'a> Binder<'a> {
             )));
         }
         Ok((x, Some(DataType::Text)))
+    }
+
+    /// A subscript's position: an integer (an untyped one made one).
+    fn subscript(&mut self, i: Expr, it: Option<DataType>) -> Result<Expr> {
+        let (i, (_, it)) = self.coerce(Some(DataType::Integer), i, it)?;
+        if let Some(t) = it.filter(|t| !t.is_integer()) {
+            return Err(Error::type_mismatch(format!(
+                "array subscript must have type integer, not type {t}"
+            )));
+        }
+        Ok(i)
     }
 
     /// Gives an untyped side (a text literal, `NULL`, a parameter) the type

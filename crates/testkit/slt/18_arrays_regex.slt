@@ -172,3 +172,39 @@ SELECT pg_catalog.lower('ABC')
 ----
 abc
 
+
+# Slices and assignments to an element (§M14.12 V2b: one mechanism with
+# vectors' components).
+query TTTT
+SELECT (ARRAY[1,2,3,4])[2:3], (ARRAY[1,2,3,4])[:2], (ARRAY[1,2,3,4])[3:], (ARRAY[1,2,3])[3:2]
+----
+{2,3} {1,2} {3,4} {}
+
+statement ok
+CREATE TABLE elems (id INT PRIMARY KEY, a INT[])
+
+statement ok
+INSERT INTO elems VALUES (1, '{1,2,3}'), (2, NULL)
+
+statement ok
+UPDATE elems SET a[2] = 20
+
+query IT
+SELECT id, a FROM elems ORDER BY id
+----
+1 {1,20,3}
+2 {NULL,20}
+
+statement ok
+UPDATE elems SET a[5] = 5 WHERE id = 1
+
+query T
+SELECT a FROM elems WHERE id = 1
+----
+{1,20,3,NULL,5}
+
+statement error 2202E
+UPDATE elems SET a[0] = 1
+
+statement ok
+DROP TABLE elems

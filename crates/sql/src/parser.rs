@@ -2138,8 +2138,29 @@ impl<'a> Parser<'a> {
         let mut assignments = Vec::new();
         loop {
             let col = self.ident()?;
+            // `col[i] = x`: the column set to itself with element i
+            // replaced.
+            let index = if self.eat_op("[") {
+                let i = self.expr()?;
+                self.expect_op("]")?;
+                Some(i)
+            } else {
+                None
+            };
             self.expect_op("=")?;
-            assignments.push((col, self.expr()?));
+            let value = self.expr()?;
+            let value = match index {
+                Some(index) => Expr::WithElement {
+                    expr: Box::new(Expr::Column {
+                        table: None,
+                        name: col.clone(),
+                    }),
+                    index: Box::new(index),
+                    value: Box::new(value),
+                },
+                None => value,
+            };
+            assignments.push((col, value));
             if !self.eat_op(",") {
                 break;
             }
@@ -2547,12 +2568,30 @@ impl<'a> Parser<'a> {
             if self.eat_op("::") {
                 e = self.cast_to(e)?;
             } else if self.eat_op("[") {
-                let index = self.expr()?;
-                self.expect_op("]")?;
-                e = Expr::Subscript {
-                    expr: Box::new(e),
-                    index: Box::new(index),
+                let lower = if self.peek_op(":") {
+                    None
+                } else {
+                    Some(Box::new(self.expr()?))
                 };
+                if self.eat_op(":") {
+                    let upper = if self.peek_op("]") {
+                        None
+                    } else {
+                        Some(Box::new(self.expr()?))
+                    };
+                    self.expect_op("]")?;
+                    e = Expr::Slice {
+                        expr: Box::new(e),
+                        lower,
+                        upper,
+                    };
+                } else {
+                    self.expect_op("]")?;
+                    e = Expr::Subscript {
+                        expr: Box::new(e),
+                        index: lower.expect("parsed above"),
+                    };
+                }
             } else if self.eat_kw("collate") {
                 // A text ordering, maybe schema-qualified (the schema is
                 // the binder's to check; the name is the ordering's).

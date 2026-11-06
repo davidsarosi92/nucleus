@@ -977,12 +977,33 @@ pub enum Expr {
     Array(Vec<Expr>),
     /// `ARRAY(subquery)`: the subquery's single column as an array.
     ArraySubquery(Box<Query>),
-    /// `array[index]` (1-based).
+    /// `array[index]` (1-based): an array's element, or one of a type
+    /// with elements (a vector's component).
     Subscript {
         /// The array.
         expr: Box<Expr>,
         /// The position.
         index: Box<Expr>,
+    },
+    /// `array[lower:upper]` (1-based, inclusive; a bound left out is the
+    /// first or the last).
+    Slice {
+        /// The array.
+        expr: Box<Expr>,
+        /// The first position.
+        lower: Option<Box<Expr>>,
+        /// The last position.
+        upper: Option<Box<Expr>>,
+    },
+    /// `expr` with element `index` replaced by `value`: what `UPDATE …
+    /// SET col[index] = value` assigns to `col`.
+    WithElement {
+        /// The array.
+        expr: Box<Expr>,
+        /// The position.
+        index: Box<Expr>,
+        /// The new element.
+        value: Box<Expr>,
     },
     /// `left op ANY (array)` / `left op ALL (array)` (a subquery stands for
     /// the array of its rows).

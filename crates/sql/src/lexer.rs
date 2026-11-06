@@ -16,7 +16,7 @@ pub enum Token {
     /// `$n`.
     Param(usize),
     /// Punctuation or an operator: `( ) [ ] , ; . * + - / % = <> != < <= >
-    /// >= || :: ~ ~* !~ !~*`.
+    /// >= || :: : ~ ~* !~ !~*`.
     Op(&'static str),
     /// Any other operator (`<->`, `@>`): one a module or `ALTER TYPE …
     /// ADD OPERATOR` brings; the grammar has one place for them.
@@ -35,8 +35,8 @@ const OP_CHARS: &[u8] = b"+-*/<>=~!@#%^&|`?";
 
 /// Longest first, so `<=` is not read as `<` `=`.
 const OPS: &[&str] = &[
-    "!~*", "<>", "!~", "!=", "~*", "<=", ">=", "||", "::", "(", ")", "[", "]", ",", ";", ".", "*",
-    "+", "-", "/", "%", "=", "<", ">", "~",
+    "!~*", "<>", "!~", "!=", "~*", "<=", ">=", "||", "::", ":", "(", ")", "[", "]", ",", ";", ".",
+    "*", "+", "-", "/", "%", "=", "<", ">", "~",
 ];
 
 /// The body of an `E'…'` string from just after its opening quote: C-style
