@@ -43,8 +43,8 @@ scans, filters and aggregates run a batch at a time through kernels
 compiled per CPU (AVX2, AVX-512, NEON) and on every core, with the
 results of a single row-at-a-time pass; a table can be stored as
 compressed column segments (`WITH (storage = column)`).  On TPC-H (SF 1)
-column tables take 0.25× PostgreSQL's time in the geometric mean (row
-tables 0.69×), on ClickBench (a million rows) 0.10× (row 0.82×), loads
+column tables take 0.24× PostgreSQL's time in the geometric mean (row
+tables 0.66×), on ClickBench (a million rows) 0.10× (row 0.82×), loads
 faster than PostgreSQL's, every result the same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
 operators, exact nearest-neighbour search through SIMD kernels whose
 results are the same on every CPU — the ten nearest of 100,000
@@ -53,7 +53,10 @@ pgvector's exact search (`docs/benchmarks.md`) —, a native float
 array in every driver (in Python an `(n, d)` numpy array or Arrow
 `fixed_size_list`), pgvector's own clients over the PostgreSQL
 protocol, and estimates for a distance bound — or any condition the
-statistics cannot estimate — counted on rows `ANALYZE` keeps; a hash join whose right side turns out
+statistics cannot estimate — counted on rows `ANALYZE` keeps; the HNSW
+index's storage chosen by measuring three models on the KV (`bench/ann/`:
+at pgvector's recall 3.5× its searches a second, 3× its inserts; built
+into the engine next); a hash join whose right side turns out
 smaller than estimated looks its left side up instead (an adaptive
 join).  Statistics have begun (§M14.27): sums of doubles kept exactly
 and rounded once, so a parallel `sum` gives the same bits every run, and

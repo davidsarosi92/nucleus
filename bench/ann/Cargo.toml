@@ -1,0 +1,24 @@
+# The HNSW prototypes (PLAN.md §M14.12 V4): one HNSW core and the storage
+# models it is measured on.  Its own workspace, not a member of the
+# repository's, so CI does not build it; build it with
+# `CARGO_TARGET_DIR=target/ann cargo build --release` from here.
+[package]
+name = "nucleus-ann-bench"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "HNSW storage-model prototypes for nucleus (a measurement, not a product)"
+
+[workspace]
+
+[dependencies]
+nucleus-kv = { path = "../../crates/kv" }
+nucleus-kernels = { path = "../../crates/kernels" }
+nucleus-platform = { path = "../../crates/platform" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

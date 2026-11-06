@@ -276,7 +276,7 @@ are marked ✅.
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
-| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps) |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C), 3.5× pgvector's searches at its recall, 3× its inserts) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
@@ -3910,7 +3910,7 @@ compaction policy chosen and why, what is left to the B+tree — and the
 steps it leads to are planned as this milestone's own, agreed before
 they are built.
 
-### §M14.12 — Vectors ◐ (V1: the type, exact search, every driver; V2: bound by bandwidth; V2b: positions, numpy / Arrow, pgvector's clients; V3: estimates on a kept sample)
+### §M14.12 — Vectors ◐ (V1: the type, exact search, every driver; V2: bound by bandwidth; V2b: positions, numpy / Arrow, pgvector's clients; V3: estimates on a kept sample; V4: the HNSW index's storage, measured)
 
 Embeddings beside the data they describe, in the same transactions.
 `vector` is a **built-in type with every capability** — it matters most
@@ -4210,8 +4210,8 @@ predicate-aware traversal, Patel et al. 2024, and Qdrant's filterable
 HNSW are the prior art to read).  **V6** half, int8 and binary
 quantization; sparse vectors.
 
-*Next — V4, the HNSW index: where the graph lives* (planned 2026-11-06;
-nothing built yet).  The approximate index (Malkov and Yashunin 2018)
+*V4, the HNSW index: where the graph lives* (planned 2026-11-06;
+measured 2026-11-06/07, below).  The approximate index (Malkov and Yashunin 2018)
 the optimizer uses for `ORDER BY v <-> q LIMIT k`, one per distance,
 kept transactionally consistent with its table, with a recall suite on
 public data (ann-benchmarks' method).  The open question is where the
@@ -4309,14 +4309,161 @@ to know, not to assume, that they do not pay):
   the recall suite in `bench/` and tests (the graph's results against
   the exact search's, MVCC, rollbacks, crashes in a fold).
 
-Where to start next session: write `bench/ann/` (the core first, checked
-against the exact search on 10,000 random vectors: recall ≥ 0.99 at
-`ef_search` 200), then the data script, then (C), (A), (B) — in that
-order, (C) the one to build well.  Also open: `docs/benchmarks.md`'s
-TPC-H table was run under load (load average 12, `fseventsd` at 99 %),
-so its Q8 on column tables reads 132.2 ms — the A/B before it had 82
-against 84 ms; re-run `bench/tpch.py` on a quiet machine and replace the
-table.
+*Done — the measurement* (2026-11-06/07; `bench/ann/`, decided: **(C)**).
+The three models on the real KV, one HNSW core (`hnsw.rs`: the paper's
+algorithms with hnswlib's heuristic, a node's level from a hash of it;
+batch inserts as ParlayANN's — Manohar et al. 2024 — prefix-doubled
+batches, each new node's candidates joined with its batch's as
+NN-descent's local join, Dong et al. 2011, since a batch of neighbours
+in SIFT's data order otherwise misses each other: recall 0.937 at
+`ef` 40, against 0.940 one at a time and 0.915 unjoined, built 4–6×
+faster).  The core matches hnswlib on the same data.  ann-benchmarks'
+SIFT (1 M, L2) and GloVe (1.18 M, cosine): 90 % built at once, the rest
+inserted by 10 writers (a transaction a row) while one thread keeps the
+index up and one searches; `M` 16, `ef_construction` 64; 2,000 queries;
+µs a search on one thread, recall@10.  10 threads:
+
+| SIFT-1M | (A) shared graph | (B) segments | (C) combined |
+|---|---:|---:|---:|
+| built (900 k rows) | 51.6 s | 54.2 s | 54.9 s |
+| after: `ef` 60 (recall 0.93) | 706 µs | 1,227 µs (11 graphs) | **252 µs** |
+| inserts, 10 writers | 1,768 rows/s | **8,162** | 5,374 |
+| a search while they write (`ef` 40) | 2,636 µs | 1,295 | **751** |
+| bytes written per row inserted | 1,122 | 1,070 | 2,774 |
+
+| GloVe-1.18M | (A) | (B) | (C) |
+|---|---:|---:|---:|
+| after: `ef` 80 (recall 0.74) | 1,068 µs | 868 µs (3 graphs) | **415 µs** |
+| inserts, 10 writers | 864 rows/s | **6,853** | 5,964 |
+| a search while they write | 2,554 µs | 2,164 | **1,459** |
+
+(A) pays a KV read a hop (~3 µs; its vector cache leaves the edges): 3–4×
+(C)'s search, a fifth of its inserts.  (B) inserts fastest (a seal
+builds a small graph alone) but a search visits every segment: 2–5×
+(C)'s once there are several, and its size tiers (log₁₀ of the rows)
+split ~10,000-row segments across two classes, so they never merged.  On
+one thread (writers, upkeep and build alike) the order holds; (C)'s
+single-threaded fold (~380 µs a row) then falls behind the writers, its
+delta grows to ~17–25 k rows and a search meanwhile takes 2.3–3.6 ms —
+the fold must get workers in the engine, and the upkeep's sizes must
+keep up with the inflow, not only weigh the costs below.
+
+pgvector 0.8 (`pgvector/pgvector:pg18`, `bench/ann/pgvector_ref.py`: the
+clients in the container, `pgbench` and `psql` on its socket) on the
+same SIFT data and settings: built in 58.8 s on 10 workers; at recall
+~0.93 a search 894 µs (`ef` 40) where (C) takes 256 µs (`ef` 60), 5,564
+searches a second on 10 clients against 20,849; at 0.99, 2,818 µs against
+~650–800; 2,141 rows/s inserted by 10 writers (against 6,795), a search
+meanwhile 1,571 µs (against 909 at lower recall, ~1.2 ms at the same).
+Its numbers include SQL (parse, plan, protocol: tens of µs); (C)'s are
+calls in a process — the engine's will tell.
+
+*How (C) got there* — each step measured A/B on SIFT-1M, alternating:
+
+1. **Chunks in memory, pages on disk.**  (C) was 31–35 % slower than the
+   same graph in memory (230–241 µs against 171–178 at `ef` 40); cache-
+   line alignment of vector pages changed nothing; 4,096-node pages
+   closed the gap — the cost was three dependent loads a distance
+   (directory, `Arc`, buffer).  Pages stay 64 nodes (what a write
+   rewrites); in memory they are decoded into 4,096-node chunks keyed by
+   a hash of their pages' ids: 176–184 µs, `ef` 200 643 against 800–825.
+2. **Sealed epochs** (an LSM's immutable memtable).  The open epoch is
+   closed every few thousand rows, folded or not; a closed epoch no longer
+   changes, so a search reads it from memory, only the open one from the
+   KV: a search over ~8.5 k delta rows 2,250–2,355 → 796–849 µs.
+3. **No VACUUM after a fold.**  With epochs a search starts past the
+   folded keys; the VACUUM cost a fixed ~600 ms a fold: inserts 4,600 →
+   7,300 rows/s.
+4. **Folds sized by cost** — an economic order quantity (Harris 1913):
+   B* = √(2Kλ/h), K a fold's fixed cost (the intercept of a line fitted
+   to folds' times against their rows, compactions left out — their cost
+   is the patches'), λ the rows a second, h a waiting row's cost to the
+   searches a second (ns a row a search, measured: ~160 from memory,
+   ~470 from the KV); a seal the same with a close's cost (its
+   transaction and the writes it sends back) and the KV's extra.  Sizes
+   land at 230–500 rows a fold, 1,100–1,300 a seal.
+5. **A directory in parts** (path copying, as a persistent B-tree): the
+   page list was rewritten whole by every fold (~260 KB at 1 M rows), now
+   256-page parts and a list of them — a small fold's fixed bytes ~0.
+6. **Folds take closed epochs, seals close them**: a close sends ~35
+   writes back (a retry sees the old epoch until the close is visible),
+   so only seals pay it.
+
+Together, with writers and searches at once: a search 1,755–1,875 → 770–
+815 µs, 2.4× the searches served, for 7 % of the inserts' rate and 4 %
+more bytes.
+
+*Deletes and updates* in (C): the table is the truth —
+a search checks what it found against the row in its snapshot (gone, or
+its distance from the query no longer the one found: passed over;
+fewer than `k` left, `ef` doubled — pgvector 0.8's iterative scans); a
+delete or update writes a key (epoch, row, hash of the old vector) that
+a fold turns into the node's dead mark (passed over unread); once the
+dead are 2 % of the graph (or a compaction is due) a fold cuts them out —
+each list through a dead node rewritten from the dead node's own live
+edges by the heuristic (FreshDiskANN's delete consolidation, Singh et
+al. 2021, its algorithm 4), the entry point moved off.  SIFT-1M, the
+table kept beside the index (`table=1 churn=50000`): checking costs a
+search ~35 µs (220 against 185 at `ef` 40: ten point reads — the engine
+reads the rows anyway); 50,000 deletes and 50,000 updates by 10 writers
+at 4,587 a second, a search meanwhile 1,105 µs; 100,000 nodes marked dead,
+cut out in 4 consolidations; then recall 0.865 / 0.984 at `ef` 40 / 200
+(0.886 / 0.988 before, a tenth of the graph replaced), 237 µs; 16
+searches widened.
+
+Not taken: (A) and (B) (deleted after this record); cache-line alignment
+(no gain); a VACUUM after folds (no need with epochs); fixed fold sizes
+(the cost model's choice serves 2.4× the searches).  Open: a dead node's
+vector stays in its page until the graph is renumbered; the fold's
+patches grow faster with small folds (3 compactions in 100 k rows
+instead of 2: 2,774 bytes a row against 1,937), a cost the sizes do not
+weigh yet; the KV's ~35 retries a close.
+
+*Next — V4b, the index in the engine* (the winner built in, as planned
+above).  The engine has no index-method registry yet (every index a
+B-tree through `exec::index_key`; `CREATE INDEX` parses no `USING
+method`, operator class or `WITH`); in steps, each measured and
+committed:
+
+1. **An index-method registry** (principle 12, as `add_storage`): a
+   method validates its operator class and options, keeps its entries
+   on writes, builds over existing rows, checks itself and searches; the
+   B-tree stays the built-in default.  `CREATE INDEX … USING method (col
+   opclass) WITH (…)` parsed; the catalog's index records a method, its
+   operator classes and options (`TABLE_VERSION` 14, older still read).
+2. **HNSW as a registered method**: (C)'s storage under the index's
+   prefix — epochs, sealed epochs, the folded graph's content-hashed
+   pages, chunks and directory parts, dead marks; a write puts its row
+   into the delta (and a delete or update its dead key) in the
+   statement's transaction.  The upkeep runs where GIN's pending list is
+   cleaned (PostgreSQL's `fastupdate`): by the session whose commit
+   takes the sealed rows past the fold's size — workers for the fold, so
+   it keeps up — no background thread needed, embedded editions alike.
+3. **The planner**: an access path for `ORDER BY col <op> $q LIMIT k`
+   when an index's metric is the operator's, costed against the exact
+   top-k (small tables, narrow filters keep exact); results checked
+   against the rows read (snapshot visibility), `ef` doubled while
+   fewer than `k` pass (filters included); `EXPLAIN` shows it.
+4. **Settings and checks**: `hnsw.ef_search` (40) in the session,
+   `WITH (m = 16, ef_construction = 64)` on the index; the integrity
+   check walks the graph against the rows; tests (the graph's answers
+   against the exact search's, MVCC, rollbacks, crashes in a fold) and
+   the recall suite against `bench/ann`'s numbers and pgvector's.
+
+*Measured on the way* (2026-11-06): `docs/benchmarks.md`'s TPC-H table
+re-run on a quiet machine (`fseventsd`, at 99 % and 11 GB after 137 days,
+restarted) — 0.66× row, 0.24× column.  Its Q8 on column tables still
+read 113 ms against ~80 before: not the adaptive join but a near tie.
+The `part`–`lineitem` join's lookups (an index nested loop per `part`
+row, ~1,333 estimated) against hashing `lineitem`'s matches cross at
+~1,260–1,340 probes depending on `ANALYZE`'s sample, so about one load
+in four looks up — 100–140 ms where the hash join takes 87–91 — the
+base build (7ba43b3) as often (one in four loads) as this one.  Open: the
+column-table lookup is costed ~10 % too cheap at that point
+(`COLUMN_LOOKUP`), and a plan that flips on the sample's noise wants
+either a calibrated cost or the adaptive join's own remedy — look up
+when the probes turn out few, hash otherwise — in the other direction
+too (an index nested loop that turns to a hash join past the crossing).
 
 **Done when:** the law kit passes on `vector`; every capability above
 works through SQL, `ncp` and all six drivers; exact search matches a
@@ -5476,3 +5623,11 @@ style) across a thousand seeds without failure.
   left side an index could look up chooses the lookups as it runs when
   its right side has fewer rows than where the two cost the same
   (Oracle's adaptive plans, SQL Server's adaptive joins).
+- **2026-11-07** — §M14.12 V4: the HNSW index's storage decided by
+  measurement — a shared graph (pgvector's), segments (Lucene's) and the
+  combined model as prototypes on the real KV (`bench/ann/`, SIFT-1M and
+  GloVe, 10 and 1 threads): the combined one (one graph in content-hashed
+  pages, a delta in epochs folded in batches sized by measured costs, an
+  economic order quantity) searches 3–5× the others and pgvector's at
+  the same recall, inserts 3× pgvector's; deletes and updates checked
+  against the table and cut out by FreshDiskANN's consolidation.

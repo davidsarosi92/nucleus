@@ -117,51 +117,57 @@ python3 bench/tpch.py --nucleus target/release/nucleus --sf 1 \
 ```
 
 
-2026-11-06, SF 1, the machine above, nucleus after the adaptive join (§M14.12); each
-query's best of three runs; nucleus with every table in rows, and with all but
+2026-11-06, SF 1, the machine above (quiet: load average under 4), nucleus after
+the adaptive join (§M14.12); each query's best of three runs; nucleus with every table in rows, and with all but
 `region` and `nation` in columns; PostgreSQL 18.6 in the same run:
 
 | TPC-H SF 1 | nucleus (row) (ms) | nucleus (column) (ms) | postgresql (ms) | nucleus (row) / PostgreSQL | nucleus (column) / PostgreSQL | results |
 |---|---:|---:|---:|---:|---:|---|
-| Q1 | 393.0 | 159.3 | 1,000.1 | 0.39× | 0.16× | same |
-| Q2 | 28.0 | 23.5 | 222.2 | 0.13× | 0.11× | same |
-| Q3 | 429.3 | 73.5 | 317.6 | 1.35× | 0.23× | same |
-| Q4 | 203.0 | 68.3 | 157.1 | 1.29× | 0.43× | same |
-| Q5 | 721.1 | 74.6 | 501.8 | 1.44× | 0.15× | same |
-| Q6 | 331.4 | 71.9 | 201.8 | 1.64× | 0.36× | same |
-| Q7 | 459.2 | 83.6 | 3,051.4 | 0.15× | 0.03× | same |
-| Q8 | 201.8 | 132.2 | 193.3 | 1.04× | 0.68× | same |
-| Q9 | 607.2 | 259.4 | 1,576.4 | 0.39× | 0.16× | same |
-| Q10 | 489.1 | 134.8 | 339.4 | 1.44× | 0.40× | same |
-| Q11 | 181.4 | 24.7 | 48.8 | 3.72× | 0.51× | same |
-| Q12 | 341.1 | 65.0 | 326.2 | 1.05× | 0.20× | same |
-| Q13 | 144.4 | 62.6 | 427.4 | 0.34× | 0.15× | same |
-| Q14 | 271.8 | 56.0 | 205.6 | 1.32× | 0.27× | same |
-| Q15 | 289.1 | 62.2 | 216.4 | 1.34× | 0.29× | same |
-| Q16 | 146.2 | 98.2 | 144.8 | 1.01× | 0.68× | same |
-| Q17 | 17.8 | 29.1 | 497.2 | 0.04× | 0.06× | same |
-| Q18 | 459.7 | 165.4 | 1,771.5 | 0.26× | 0.09× | same |
-| Q19 | 39.2 | 37.4 | 19.7 | 1.99× | 1.90× | same |
-| Q20 | 192.9 | 161.7 | 299.0 | 0.65× | 0.54× | same |
-| Q21 | 513.5 | 408.3 | 1,742.8 | 0.29× | 0.23× | same |
-| Q22 | 70.3 | 14.7 | 39.0 | 1.80× | 0.38× | same |
-| geometric mean (22 queries) | 211.6 | 75.9 | 307.7 | 0.69× | 0.25× |  |
-| load (COPY, indexes, ANALYZE; s) | 24.4 | 21.5 | 46.7 |  |  |  |
+| Q1 | 344.3 | 139.4 | 999.8 | 0.34× | 0.14× | same |
+| Q2 | 23.1 | 22.7 | 177.1 | 0.13× | 0.13× | same |
+| Q3 | 381.5 | 66.0 | 298.3 | 1.28× | 0.22× | same |
+| Q4 | 186.0 | 62.3 | 153.1 | 1.21× | 0.41× | same |
+| Q5 | 660.9 | 66.1 | 462.0 | 1.43× | 0.14× | same |
+| Q6 | 277.7 | 63.1 | 195.9 | 1.42× | 0.32× | same |
+| Q7 | 411.7 | 77.6 | 2,906.4 | 0.14× | 0.03× | same |
+| Q8 | 174.6 | 113.1 | 188.4 | 0.93× | 0.60× | same |
+| Q9 | 491.4 | 232.0 | 1,404.7 | 0.35× | 0.17× | same |
+| Q10 | 452.6 | 122.8 | 335.3 | 1.35× | 0.37× | same |
+| Q11 | 180.6 | 24.4 | 37.1 | 4.87× | 0.66× | same |
+| Q12 | 305.9 | 56.7 | 309.9 | 0.99× | 0.18× | same |
+| Q13 | 117.9 | 58.4 | 340.1 | 0.35× | 0.17× | same |
+| Q14 | 255.2 | 49.6 | 204.6 | 1.25× | 0.24× | same |
+| Q15 | 258.2 | 56.3 | 211.0 | 1.22× | 0.27× | same |
+| Q16 | 139.2 | 91.3 | 140.9 | 0.99× | 0.65× | same |
+| Q17 | 16.6 | 27.4 | 470.9 | 0.04× | 0.06× | same |
+| Q18 | 383.7 | 148.5 | 1,673.7 | 0.23× | 0.09× | same |
+| Q19 | 36.8 | 33.8 | 21.1 | 1.74× | 1.60× | same |
+| Q20 | 181.3 | 153.8 | 280.5 | 0.65× | 0.55× | same |
+| Q21 | 477.8 | 399.7 | 1,625.5 | 0.29× | 0.25× | same |
+| Q22 | 52.3 | 13.8 | 32.7 | 1.60× | 0.42× | same |
+| geometric mean (22 queries) | 187.8 | 69.4 | 286.2 | 0.66× | 0.24× |  |
+| load (COPY, indexes, ANALYZE; s) | 22.4 | 19.9 | 28.6 |  |  |  |
 
-Every result agrees with PostgreSQL's.  Column tables 0.25× PostgreSQL's
+Every result agrees with PostgreSQL's.  Column tables 0.24× PostgreSQL's
 time in the geometric mean, faster on 21 of the 22 queries; row tables
-0.69×, faster on 9.  The loads — `COPY`, the indexes and `ANALYZE` —
-24.4 s (rows) and 21.5 s (columns) against 46.7 s.
+0.66×, faster on 12.  The loads — `COPY`, the indexes and `ANALYZE` —
+22.4 s (rows) and 19.9 s (columns) against 28.6 s.
 
 Where the time still goes:
 
-- **Q19** on column tables (1.90×, 37 ms against 20): its `OR` of three
+- **Q19** on column tables (1.60×, 34 ms against 21): its `OR` of three
   conjunctions over `part` and `lineitem`, ~14,000 `lineitem` rows each
   fetched by key from the column table, where PostgreSQL reads a heap
   tuple each.
-- **Row tables** (0.69×): Q11 3.7×, Q19 2.0×, Q22 1.8×, Q6 1.6×, Q5
-  and Q10 1.4× the highest — a row's columns decoded where a column table reads
-  only the wanted ones.
+- **Row tables** (0.66×): Q11 4.9×, Q19 1.7×, Q22 1.6×, Q5 and Q6
+  1.4×, Q10 1.35× the highest — a row's columns decoded where a column table
+  reads only the wanted ones.
+- **Q8** on column tables (113 ms here; 79–91 ms in most loads): the
+  `part`–`lineitem` join is a near tie between hashing `lineitem`'s
+  matches and looking them up per `part` row, decided by `ANALYZE`'s
+  sample — about one load in four looks them up, which takes 100–140 ms
+  where the hash join takes 88.  The lookups are costed ~10 % too cheap
+  there; the same before the adaptive join (PLAN.md §M14.12).
 
 The load phase by phase (`bench/phases.py load`, SF 1, row tables,
 PostgreSQL 18 beside it in the same session):
@@ -273,6 +279,36 @@ page cache (`--cache 1GB`) as pgvector has `shared_buffers = 1GB`;
 
 Loading the 100,000 vectors: nucleus 21 s (Python `load`, a list of
 numpy arrays), pgvector 42 s (`COPY` of text through `psql`).
+
+Approximate nearest neighbours — the HNSW index's storage, before the
+engine has it (PLAN.md §M14.12 V4: `bench/ann/`, the chosen model on the
+real KV, called in a process; `bench/ann/pgvector_ref.py`, pgvector 0.8
+in Docker with its clients inside the container): ann-benchmarks'
+SIFT-1M, `M` 16, `ef_construction` 64, 900,000 rows indexed at once, then
+100,000 inserted by 10 writers while one thread searches; 2,000
+queries, recall@10, µs a search on one thread, searches a second on 10;
+2026-11-07.
+
+| | nucleus (bench) | pgvector |
+|---|---:|---:|
+| indexed 900,000 rows (10 workers) | 54.9 s | 58.8 s |
+| recall ~0.93: µs a search, searches a second | 243 µs, 21,144 (`ef` 60, 0.933) | 894 µs, 5,564 (`ef` 40, 0.927) |
+| recall ~0.99 | 651 µs (`ef` 200, 0.989) | 2,818 µs (`ef` 200, 0.993) |
+| inserts by 10 writers | 5,374 rows/s | 2,141 rows/s |
+| a search meanwhile (`ef` 40) | 751 µs (recall 0.89) | 1,571 µs (0.93) |
+
+pgvector's times include SQL (parsing, planning, its protocol on a
+socket); nucleus's are calls in a process — the engine's numbers replace
+these when the index is built in (V4b).
+
+```
+target/ann-data/.venv/bin/python bench/ann/data.py      # the datasets
+cd bench/ann && CARGO_TARGET_DIR=../../target/ann cargo build --release
+ANN_EFS=10,20,40,60,80,120,200 target/ann/release/nucleus-ann-bench model \
+  data=target/ann-data/sift-128-euclidean db=/tmp/ann queries=2000 \
+  vacuum=0 auto=1 seal=10000 fold=10000
+target/ann-data/.venv/bin/python bench/ann/pgvector_ref.py target/ann-data/sift-128-euclidean
+```
 
 ## Statistics
 
@@ -453,11 +489,11 @@ this machine against PostgreSQL 18 in the same run:
 
 | target | now | met |
 |---|---|---|
-| TPC-H SF 1, column tables: geometric mean ≤ 0.8× PostgreSQL's time | 0.25× | yes |
+| TPC-H SF 1, column tables: geometric mean ≤ 0.8× PostgreSQL's time | 0.24× | yes |
 | ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.10× | yes |
-| column tables: no TPC-H or ClickBench query above 3× | the highest TPC-H Q19 1.93×, ClickBench Q23 1.36× | yes |
-| row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 0.69×, ClickBench 0.82× | yes |
-| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 1.0×; TPC-H 0.62× row, 0.55× column; ClickBench 0.92×, 0.74× | yes |
+| column tables: no TPC-H or ClickBench query above 3× | the highest TPC-H Q19 1.60×, ClickBench Q23 1.36× | yes |
+| row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 0.66×, ClickBench 0.82× | yes |
+| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 1.0×; TPC-H 0.78× row, 0.70× column; ClickBench 0.92×, 0.74× | yes |
 | updates and deletes ≤ 2× (`bench/run.py`) | update 0.7×, delete 1.5× | yes |
 | scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 0.5–1.1× (sort 0.5×, count(*) 1.1×, self-join 0.6×) | yes |
 | reads by key ≤ 1× (`bench/run.py`) | 0.5× | yes |
