@@ -128,6 +128,13 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
         }
         Plan::Limit { input, .. } => walk(input, wanted, out),
         Plan::Distinct { input } => walk(input, all(input), out),
+        Plan::Window { input, funcs } => {
+            wanted.resize(input.width(), false);
+            for e in funcs.iter().flat_map(crate::plan::WindowFunc::exprs) {
+                read(e, &mut wanted, 0);
+            }
+            walk(input, wanted, out);
+        }
         Plan::SetOp { left, right, .. } => {
             walk(left, all(left), out);
             walk(right, all(right), out);

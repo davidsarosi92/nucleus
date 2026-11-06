@@ -136,3 +136,11 @@ SELECT count(*) FROM m WHERE x > (SELECT avg(x) + stddev(x) FROM m)
 
 statement ok
 DROP TABLE m
+
+# The mean of doubles is their exact sum divided, rounded once: 1e16 + 9
+# is not a double (it rounds to 1e16 + 8), so the rounded sum divided
+# would be 3.333333333333336e+15 (PostgreSQL's).  The same in a window.
+query TT
+SELECT avg(x)::text, max(a)::text FROM (SELECT x, avg(x) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE NO OTHERS) a FROM (VALUES (1e16::float8), (1.0), (8.0)) v(x)) q
+----
+3.3333333333333365e+15 3.3333333333333365e+15

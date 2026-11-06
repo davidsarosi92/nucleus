@@ -219,6 +219,9 @@ fn build_node<'a>(
             }
         }
         Plan::Distinct { input } => Box::new(Distinct::new(build(input, ctx, outer)?, 0)),
+        Plan::Window { input, funcs } => {
+            crate::window::run(build(input, ctx, outer)?, input.width(), funcs, ctx, outer)?
+        }
         Plan::View { view } => Box::new(
             view.rows(&CallContext::new(ctx.txn, ctx.registry))?
                 .into_iter()

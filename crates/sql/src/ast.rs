@@ -648,6 +648,84 @@ pub struct Select {
     pub group_by: Vec<Expr>,
     /// `HAVING`.
     pub having: Option<Expr>,
+    /// `WINDOW name AS (…)`, in order.
+    pub windows: Vec<(String, WindowSpec)>,
+}
+
+/// A window: `OVER (…)`'s contents, or a `WINDOW` clause's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WindowSpec {
+    /// A named window it refines (`OVER (w ORDER BY …)`).
+    pub base: Option<String>,
+    /// `PARTITION BY`.
+    pub partition: Vec<Expr>,
+    /// `ORDER BY`.
+    pub order: Vec<OrderItem>,
+    /// The frame clause.
+    pub frame: Option<Frame>,
+}
+
+/// A window frame: `ROWS | RANGE | GROUPS BETWEEN start AND end
+/// [EXCLUDE …]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frame {
+    /// How the bounds count.
+    pub units: FrameUnits,
+    /// The first row's bound.
+    pub start: FrameBound,
+    /// The last row's bound (`CURRENT ROW` when only a start is given).
+    pub end: FrameBound,
+    /// `EXCLUDE`.
+    pub exclude: FrameExclude,
+}
+
+/// What a frame's offsets count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameUnits {
+    /// Rows.
+    Rows,
+    /// Values of the (one) ordering column.
+    Range,
+    /// Peer groups.
+    Groups,
+}
+
+/// A frame bound.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FrameBound {
+    /// `UNBOUNDED PRECEDING`.
+    UnboundedPreceding,
+    /// `offset PRECEDING`.
+    Preceding(Box<Expr>),
+    /// `CURRENT ROW`.
+    CurrentRow,
+    /// `offset FOLLOWING`.
+    Following(Box<Expr>),
+    /// `UNBOUNDED FOLLOWING`.
+    UnboundedFollowing,
+}
+
+/// `EXCLUDE`: rows of the frame left out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrameExclude {
+    /// `EXCLUDE NO OTHERS` (the default).
+    #[default]
+    NoOthers,
+    /// `EXCLUDE CURRENT ROW`.
+    CurrentRow,
+    /// `EXCLUDE GROUP`: the row and its peers.
+    Group,
+    /// `EXCLUDE TIES`: the row's peers, not the row.
+    Ties,
+}
+
+/// `OVER name` or `OVER (…)`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Over {
+    /// A `WINDOW` clause's window, by name.
+    Named(String),
+    /// A window written out.
+    Spec(WindowSpec),
 }
 
 /// An item of a select list.
@@ -1016,6 +1094,14 @@ pub enum Expr {
         right: Box<Expr>,
         /// `ALL` (else `ANY` / `SOME`).
         all: bool,
+    },
+    /// A window function call: `func(…) OVER …` (`func` a
+    /// [`Expr::Function`]).
+    Window {
+        /// The call.
+        func: Box<Expr>,
+        /// The window.
+        over: Over,
     },
     /// A function call; `count(*)` has `star`.
     Function {

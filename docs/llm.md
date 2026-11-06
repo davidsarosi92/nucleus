@@ -84,7 +84,13 @@ and decimals, as PostgreSQL's; `double precision` otherwise), `skewness`,
 `covar_pop`, `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2`,
 `regr_count`, `regr_avgx`, `regr_avgy`, `regr_sxx`, `regr_syy`,
 `regr_sxy` — over doubles the exact value rounded once, the same bits
-however the rows are split.
+however the rows are split.  Window functions as PostgreSQL's: `f(…) OVER
+(PARTITION BY … ORDER BY … ROWS | RANGE | GROUPS BETWEEN … AND …
+[EXCLUDE …])` and `WINDOW w AS (…)`, any aggregate above, `row_number
+rank dense_rank percent_rank cume_dist ntile lag lead first_value
+last_value nth_value` (top n per group: `SELECT … FROM (SELECT …,
+row_number() OVER (PARTITION BY g ORDER BY x DESC) AS rn FROM t) q WHERE
+rn <= 3`).
 
 **Memory:** `SET work_mem = '256MB'` gives each sort and materialised
 result more memory before it spills to disk (default 64MB).  Scans,
@@ -115,7 +121,6 @@ after an error in a block everything is `25P02` until `ROLLBACK`.
 | `SERIAL`, `GENERATED … AS IDENTITY`, sequences | `id uuid DEFAULT uuidv7() PRIMARY KEY` (increasing), or ids from the application |
 | `INSERT … ON CONFLICT` (upsert) | `UPDATE … WHERE key = …`, then `INSERT` if it changed 0 rows, in one transaction |
 | `CREATE VIEW` | a `WITH` query |
-| window functions (`OVER (…)`) | a self-join or a correlated subquery; `GROUP BY` |
 | `count(*) FILTER (WHERE …)` | `sum(CASE WHEN … THEN 1 ELSE 0 END)` |
 | `LATERAL` | a correlated subquery in the select list |
 | `unnest(…)` in the select list | `SELECT … FROM unnest(…) AS u(x)` |

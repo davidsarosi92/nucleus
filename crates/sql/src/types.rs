@@ -150,6 +150,18 @@ impl DataType {
         matches!(self, DataType::Text | DataType::Char)
     }
 
+    /// Whether this is a date, a time, a timestamp or an interval.
+    pub fn is_temporal(self) -> bool {
+        matches!(
+            self,
+            DataType::Date
+                | DataType::Time
+                | DataType::Timestamp
+                | DataType::TimestampTz
+                | DataType::Interval
+        )
+    }
+
     /// Whether this is `smallint`, `integer` or `bigint`.
     pub fn is_integer(self) -> bool {
         matches!(

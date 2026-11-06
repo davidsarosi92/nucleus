@@ -1443,7 +1443,8 @@ Queries: `WITH [RECURSIVE] name [(cols)] AS (…)`, `SELECT [DISTINCT]`,
 `FROM` with comma joins, `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`,
 subqueries and functions in `FROM` (`generate_series`, `unnest`, any
 scalar function; `WITH ORDINALITY`), alias column lists (`AS t (a, b)`),
-`WHERE`, `GROUP BY` (expressions, positions, aliases), `HAVING`, `UNION |
+`WHERE`, `GROUP BY` (expressions, positions, aliases), `HAVING`, `WINDOW
+name AS (…)`, `UNION |
 EXCEPT | INTERSECT [ALL]` (INTERSECT binding tighter), `VALUES`, `ORDER BY`
 (`ASC|DESC`, `NULLS FIRST|LAST`, positions, aliases, expressions), `LIMIT`,
 `OFFSET`.  Expressions: arithmetic, `||`, comparisons, `AND/OR/NOT`, `IS
@@ -1463,9 +1464,13 @@ array_length array_upper array_lower cardinality array_append
 array_to_string pg_typeof current_user current_database current_schema
 current_setting` (and the catalog functions of §8.11); aggregates `count
 sum avg min max string_agg array_agg bool_and bool_or every` (with
-`DISTINCT`, `count(*)`, `ORDER BY` inside the call).
+`DISTINCT`, `count(*)`, `ORDER BY` inside the call); window calls `f(…)
+OVER name | ([name] [PARTITION BY …] [ORDER BY …] [ROWS | RANGE | GROUPS
+{start | BETWEEN start AND end} [EXCLUDE CURRENT ROW | GROUP | TIES | NO
+OTHERS]])`, a bound `UNBOUNDED PRECEDING | n PRECEDING | CURRENT ROW | n
+FOLLOWING | UNBOUNDED FOLLOWING` (§8.5).
 
-Not yet: window functions, `COPY TO` and `COPY FROM 'file'`, `TIMETZ`, time zones other than
+Not yet: `COPY TO` and `COPY FROM 'file'`, `TIMETZ`, time zones other than
 UTC, multi-dimensional arrays, data-modifying CTEs, `LATERAL`, user
 functions.
 
@@ -1489,9 +1494,50 @@ Plan nodes: `Scan` (table, access path, filter), `Values`, `Filter`,
 `Cte` (computed once per execution, shared by its references),
 `Recursive` / `WorkTable` (`WITH RECURSIVE`: the step re-runs over the
 previous round until it yields nothing; `UNION` drops repeats, so cycles
-end), `Function` (functions in `FROM`), `Virtual` (catalog tables).  The executor runs them as iterators; a join
+end), `Function` (functions in `FROM`), `Virtual` (catalog tables),
+`Window` (below).  The executor runs them as iterators; a join
 stashes its right input, sorts and aggregates take their input — each
 within `work_mem`, below.
+
+**Window functions** (`window`, §M14.27 S4).  `f(…) OVER (PARTITION BY
+… ORDER BY … frame)`, a `WINDOW` clause's named windows (one refining
+another as PostgreSQL allows), every aggregate over its frame and
+`row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`,
+`ntile`, `lag`, `lead`, `first_value`, `last_value`, `nth_value`.  The
+binder puts the windows above the grouping and `HAVING`, below the
+projection, `DISTINCT` and `ORDER BY`: for each window (the calls with
+the same partition and order, in the order they first appear) a `Sort`
+by its partition's keys, then its order's — the one sort every `ORDER
+BY` uses, in parallel over a pipeline and past `work_mem` by runs — and
+a `Window` node, whose output is its input's columns followed by one per
+call.  The node takes a partition at a time — held in memory — and finds
+its peer groups once, comparing the keys in the rows (a key that is not
+a column computed into the row while it waits).  Frames are
+PostgreSQL's: `ROWS`, `RANGE` (an offset by the one ordering value:
+numbers, dates and times with an interval; its bounds found by binary
+search) and `GROUPS`, `EXCLUDE CURRENT ROW | GROUP | TIES`, offsets
+evaluated once, the default frame from the partition's start to the
+current row's last peer (the whole partition without `ORDER BY`).  An
+aggregate's frames are evaluated by the cheapest way that fits them
+(Leis et al., VLDB 2015): the whole partition — one state; frames from
+the partition's start — one state grown row by row and finished at each
+distinct frame end, in place where the aggregate's `finish` keeps its
+state (`GroupAccumulator::finish_keeps_state`: every built-in but
+`string_agg` and `array_agg`), else a copy (its partial combined into a
+fresh group); a frame of up to 64 rows — its rows added to a fresh
+group; larger frames — a segment tree of partial states over the
+partition's rows, built when first needed, a frame the in-order
+combination of O(log n) nodes, for every aggregate whose states combine
+(the same `partial` / `combine` parallel aggregation uses, so the exact
+sums stay exact, and `array_agg`'s order is kept); otherwise
+(`string_agg`, an extension's aggregate without partial states) each
+distinct frame's rows added to a fresh state.  Consecutive equal frames
+reuse the last result; frames' groups are taken from an accumulator
+renewed every 1024, so a long partition does not hold a state a row.
+Errors are PostgreSQL's (42P20 for a window where none is allowed, a
+nested call or a conflicting window; 42803 for a window inside an
+aggregate; 22013, 22014, 22016 for a negative frame offset, `ntile` or
+`nth_value` below one).
 
 **Columns** (`prune`, §M14.11).  Before a query runs, its plan is walked
 from the top with the output columns wanted, each node adding what its
@@ -1655,8 +1701,10 @@ integer additions, `add_product` adds x·y exactly — the significands'
 the result rounded once to nearest even from the integer;
 a worker's state passed as bytes — the chunks carried, all but the top
 in four bytes, without the zeros at either end — and added from them
-without building a state), so they do not depend on the order either.
-So do the moments (`moments`, §M14.27 S2): `var_samp` / `variance`,
+without building a state), so they do not depend on the order either;
+`avg` of doubles is the exact sum divided by the count and rounded once
+(`ExactSum::mean`), not the rounded sum divided (PostgreSQL's, which
+rounds twice).  So do the moments (`moments`, §M14.27 S2): `var_samp` / `variance`,
 `var_pop`, `stddev_samp` / `stddev`, `stddev_pop`, `skewness`,
 `kurtosis`, one `GroupAccumulator` for all, combinable, its state the
 row count and the power sums.  Over doubles Σx … Σx⁴ are `ExactSum`s,
@@ -2328,7 +2376,12 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   by row, with the same result.  With `combinable()`, `partial(group)` and
   `combine(group, partial)` too, its groups are aggregated in parallel:
   each worker's state as a value, combined in key order (`resize` may be
-  asked for more groups than are used: room for them).  `infallible()`
+  asked for more groups than are used: room for them); a window frame
+  over any rows of its partition then combines a segment tree's partial
+  states (§8.5, *Window functions*).  `finish_keeps_state()` (default
+  false): `finish(group)` leaves the state as it was, so a window frame
+  growing from its partition's start reads each row's result from one
+  state.  `infallible()`
   (default false): no input makes it fail, so the optimizer may compute
   it below a join, over rows the join would drop (eager aggregation,
   §8.6).  `order_free()` (default false): its result is the same in any
@@ -3427,6 +3480,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.27 S4, window functions:** `OVER`, `WINDOW`,
+  `ROWS` / `RANGE` / `GROUPS` frames with `EXCLUDE`, every aggregate as a
+  window aggregate (a running state, small frames fed directly, a
+  segment tree of partial states), the ranking and value functions
+  (§8.5, *Window functions*); a `Sort` per window, a final `ORDER BY` the
+  last window gives left out; `GroupAccumulator::finish_keeps_state`;
+  `avg` of doubles rounded once (`ExactSum::mean`).
 - **2026-11-06 — §M14.27 S3, two variables:** `corr`, `covar_pop`,
   `covar_samp` and the `regr_*` family (§8.5, *Parallelism*);
   `ExactSum::add_product` one exact step; `BigInt::div_big` Knuth's long

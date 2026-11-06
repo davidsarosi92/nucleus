@@ -229,6 +229,26 @@ impl ExactSum {
         x.is_finite().then_some(x)
     }
 
+    /// The sum divided by `n` (a count of values), correctly rounded —
+    /// the mean rounded once, not the rounded sum divided; `None` when it
+    /// is beyond a double.
+    pub fn mean(&self, n: u64) -> Option<f64> {
+        if let Some(s) = self.special {
+            return Some(s / n as f64);
+        }
+        let (v, exp) = self.exact()?;
+        if v.is_zero() || n == 0 {
+            return Some(0.0);
+        }
+        // Enough quotient bits to round on: 56 and more.
+        let t = (u64::from(64 - n.leading_zeros()) + 56).saturating_sub(v.bits());
+        let negative = v.is_negative();
+        let (q, r) = v.abs().shl(t).divmod_mag(u128::from(n));
+        let x = q.to_f64(exp - t as i64, r != 0);
+        let x = if negative { -x } else { x };
+        x.is_finite().then_some(x)
+    }
+
     /// The sum exactly, `v · 2^exp`; `None` when an infinity or `NaN` was
     /// added.
     pub fn exact(&self) -> Option<(BigInt, i64)> {
@@ -581,6 +601,45 @@ mod tests {
             xs[split..].iter().rev().for_each(|&x| b.add(x));
             b.merge(&a);
             assert_eq!(b.total(), got);
+        }
+    }
+
+    #[test]
+    fn means_are_rounded_once() {
+        let mean = |xs: &[f64]| {
+            let mut s = ExactSum::new();
+            xs.iter().for_each(|&x| s.add(x));
+            s.mean(xs.len() as u64)
+        };
+        // The rounded sum divided would round twice: 1e16 + 9 is not a
+        // double (it rounds to 1e16 + 8), and (1e16 + 8) / 3 rounds to
+        // 3333333333333336.0, (1e16 + 9) / 3 to 3333333333333336.5.
+        assert_eq!(mean(&[1e16, 1.0, 8.0]), Some(3333333333333336.5));
+        assert_eq!(mean(&[0.1, 0.2, 0.3]), Some(0.2));
+        assert_eq!(mean(&[f64::MAX, f64::MAX]), Some(f64::MAX));
+        assert_eq!(mean(&[-1.5, -2.5]), Some(-2.0));
+        assert_eq!(mean(&[1.0, f64::INFINITY]), Some(f64::INFINITY));
+        // Against the long division of the exact sum (another division,
+        // `moments::ratio`), over random sets of any magnitude.
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..3000 {
+            let n = 1 + next() % 40;
+            let mut s = ExactSum::new();
+            for _ in 0..n {
+                let m = (next() >> 12) as f64 * if next() % 2 == 0 { 1.0 } else { -1.0 };
+                let e = (next() % 200) as i32 - 100;
+                s.add(m * 2f64.powi(e));
+            }
+            let exact = s.exact().unwrap();
+            let want =
+                crate::moments::ratio(&exact, &(crate::bigint::BigInt::from_i128(n as i128), 0));
+            assert_eq!(s.mean(n), Some(want));
         }
     }
 

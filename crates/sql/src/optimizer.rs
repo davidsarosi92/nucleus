@@ -142,6 +142,12 @@ fn push(plan: Plan, st: &Stats) -> Plan {
         Plan::Distinct { input } => Plan::Distinct {
             input: Box::new(push(*input, st)),
         },
+        // (A filter above stays above: a window reads every row of its
+        // partition.)
+        Plan::Window { input, funcs } => Plan::Window {
+            input: Box::new(push(*input, st)),
+            funcs,
+        },
         Plan::SetOp {
             op,
             left,
@@ -642,6 +648,7 @@ pub(crate) fn origin(plan: &Plan, col: usize) -> Option<(&Table, usize)> {
         | Plan::Sort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::Distinct { input } => origin(input, col),
+        Plan::Window { input, .. } if col < input.width() => origin(input, col),
         Plan::Project { input, exprs } => match exprs.get(col)? {
             Expr::Column(i) => origin(input, *i),
             _ => None,
@@ -678,7 +685,9 @@ pub(crate) fn estimate(plan: &Plan, st: &Stats) -> f64 {
         Plan::View { .. } => 100.0,
         Plan::Filter { input, .. } => estimate(input, st) * 0.33,
         Plan::Secure { input, .. } => estimate(input, st) * 0.5,
-        Plan::Project { input, .. } | Plan::Sort { input, .. } => estimate(input, st),
+        Plan::Project { input, .. } | Plan::Sort { input, .. } | Plan::Window { input, .. } => {
+            estimate(input, st)
+        }
         Plan::Distinct { input } => {
             let rows = estimate(input, st);
             let all: Vec<Expr> = (0..input.width()).map(Expr::Column).collect();
@@ -1204,6 +1213,10 @@ pub(crate) fn map_children(plan: Plan, f: &dyn Fn(Plan) -> Plan) -> Plan {
             offset,
         },
         Plan::Distinct { input } => Plan::Distinct { input: b(input) },
+        Plan::Window { input, funcs } => Plan::Window {
+            input: b(input),
+            funcs,
+        },
         Plan::SetOp {
             op,
             left,

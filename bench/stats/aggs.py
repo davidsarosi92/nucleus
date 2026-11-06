@@ -39,6 +39,16 @@ QUERIES = {
     "corr": "SELECT corr(x, id) FROM t",
     "regression 1000 groups": "SELECT g, regr_slope(x, id), regr_intercept(x, id) "
                               "FROM t GROUP BY g ORDER BY g LIMIT 3",
+    # Window functions (S4), each folded to one row so the output is
+    # small: the sort and the frames are the cost.
+    "row_number by groups": "SELECT max(r) FROM (SELECT row_number() OVER "
+                            "(PARTITION BY g ORDER BY x) AS r FROM t) q",
+    "top 3 by groups": "SELECT count(*) FROM (SELECT rank() OVER "
+                       "(PARTITION BY g ORDER BY y DESC) AS r FROM t) q WHERE r <= 3",
+    "running sum": "SELECT max(s) FROM (SELECT sum(x) OVER (ORDER BY id) AS s FROM t) q",
+    "moving avg 10 rows": "SELECT sum(a) FROM (SELECT avg(x) OVER (PARTITION BY g ORDER BY id "
+                          "ROWS BETWEEN 9 PRECEDING AND CURRENT ROW) AS a FROM t) q",
+    "lag": "SELECT sum(d) FROM (SELECT x - lag(x) OVER (ORDER BY id) AS d FROM t) q",
 }
 
 # PostgreSQL has no skewness or kurtosis.

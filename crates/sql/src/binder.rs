@@ -9,7 +9,10 @@ use crate::catalog::{self, Table};
 use crate::error::{Error, Result};
 use crate::expr::{Expr, Func, SubKind, SubPlan};
 use crate::ext::{Arg, ArgInfo, FnRef, Registry, Returns};
-use crate::plan::{Access, Agg, JoinAlgo, JoinType, Plan, SortKey, TableFunc};
+use crate::plan::{
+    Access, Agg, JoinAlgo, JoinType, Plan, SortKey, TableFunc, WinBound, WinFrame, WinFunc,
+    WindowFunc,
+};
 use crate::types::{DataType, Value};
 
 /// A column visible to expressions.
@@ -68,6 +71,36 @@ pub struct Bound {
 }
 
 /// Aggregation state while binding a grouped `SELECT`.
+/// A select's window function calls, bound as they are met: each a
+/// column after the window's input, numbered from [`WINDOW_MARK`] until
+/// that input's width is known.
+struct Windowing {
+    /// The `WINDOW` clause.
+    defs: Vec<(String, ast::WindowSpec)>,
+    funcs: Vec<WindowFunc>,
+}
+
+/// Where a window function's column is numbered from while binding.
+const WINDOW_MARK: usize = usize::MAX / 4;
+
+/// The window-only functions, by name.
+fn window_only(name: &str) -> Option<WinFunc> {
+    Some(match name {
+        "row_number" => WinFunc::RowNumber,
+        "rank" => WinFunc::Rank,
+        "dense_rank" => WinFunc::DenseRank,
+        "percent_rank" => WinFunc::PercentRank,
+        "cume_dist" => WinFunc::CumeDist,
+        "ntile" => WinFunc::Ntile,
+        "lag" => WinFunc::Lag,
+        "lead" => WinFunc::Lead,
+        "first_value" => WinFunc::FirstValue,
+        "last_value" => WinFunc::LastValue,
+        "nth_value" => WinFunc::NthValue,
+        _ => return None,
+    })
+}
+
 struct Grouping {
     from: Scope,
     group: Vec<Expr>,
@@ -137,49 +170,80 @@ fn reads_work_table(plan: &Plan) -> bool {
 
 type Typed = (Expr, Option<DataType>);
 
-/// Whether `e` calls an aggregate of `r` (not looking into subqueries).
+/// Whether `e` calls an aggregate of `r` (not looking into subqueries; a
+/// window call's own function is not one, its arguments may hold one).
 fn contains_agg(r: &Registry, e: &ast::Expr) -> bool {
+    any_node(
+        e,
+        &|n| matches!(n, ast::Expr::Function { name, .. } if r.aggregate(name).is_some()),
+    )
+}
+
+/// Whether `e` holds a window function call (not looking into
+/// subqueries).
+fn contains_window(e: &ast::Expr) -> bool {
+    any_node(e, &|n| matches!(n, ast::Expr::Window { .. }))
+}
+
+/// Whether `f` holds for `e` or a node below it (not looking into
+/// subqueries; below a window call: its function's arguments and its
+/// window's expressions).
+fn any_node(e: &ast::Expr, f: &dyn Fn(&ast::Expr) -> bool) -> bool {
     use ast::Expr as A;
-    let contains_agg = |e: &ast::Expr| contains_agg(r, e);
+    if f(e) {
+        return true;
+    }
+    let any = |e: &ast::Expr| any_node(e, f);
     match e {
-        A::Function { name, args, .. } => {
-            r.aggregate(name).is_some() || args.iter().any(&contains_agg)
+        A::Function { args, .. } => args.iter().any(any),
+        A::Window { func, over } => {
+            let args = match &**func {
+                A::Function { args, .. } => args.iter().any(any),
+                other => any(other),
+            };
+            args || match over {
+                ast::Over::Named(_) => false,
+                ast::Over::Spec(w) => {
+                    w.partition.iter().any(any)
+                        || w.order.iter().any(|o| any(&o.expr))
+                        || w.frame.as_ref().is_some_and(|fr| {
+                            [&fr.start, &fr.end].into_iter().any(|b| match b {
+                                ast::FrameBound::Preceding(x) | ast::FrameBound::Following(x) => {
+                                    any(x)
+                                }
+                                _ => false,
+                            })
+                        })
+                }
+            }
         }
         A::Unary { expr, .. }
         | A::IsNull { expr, .. }
         | A::Cast { expr, .. }
-        | A::Collate { expr, .. } => contains_agg(expr),
-        A::Binary { left, right, .. } | A::Operator { left, right, .. } => {
-            contains_agg(left) || contains_agg(right)
-        }
+        | A::Collate { expr, .. } => any(expr),
+        A::Binary { left, right, .. } | A::Operator { left, right, .. } => any(left) || any(right),
         A::Between {
             expr, low, high, ..
-        } => contains_agg(expr) || contains_agg(low) || contains_agg(high),
-        A::InList { expr, list, .. } => contains_agg(expr) || list.iter().any(&contains_agg),
-        A::InSubquery { expr, .. } => contains_agg(expr),
-        A::Like { expr, pattern, .. } => contains_agg(expr) || contains_agg(pattern),
+        } => any(expr) || any(low) || any(high),
+        A::InList { expr, list, .. } => any(expr) || list.iter().any(any),
+        A::InSubquery { expr, .. } => any(expr),
+        A::Like { expr, pattern, .. } => any(expr) || any(pattern),
         A::Case {
             operand,
             whens,
             otherwise,
         } => {
-            operand.as_deref().is_some_and(contains_agg)
-                || whens
-                    .iter()
-                    .any(|(w, t)| contains_agg(w) || contains_agg(t))
-                || otherwise.as_deref().is_some_and(contains_agg)
+            operand.as_deref().is_some_and(any)
+                || whens.iter().any(|(w, t)| any(w) || any(t))
+                || otherwise.as_deref().is_some_and(any)
         }
-        A::Array(items) => items.iter().any(&contains_agg),
-        A::Subscript { expr, index } => contains_agg(expr) || contains_agg(index),
+        A::Array(items) => items.iter().any(any),
+        A::Subscript { expr, index } => any(expr) || any(index),
         A::Slice { expr, lower, upper } => {
-            contains_agg(expr)
-                || lower.as_deref().is_some_and(contains_agg)
-                || upper.as_deref().is_some_and(contains_agg)
+            any(expr) || lower.as_deref().is_some_and(any) || upper.as_deref().is_some_and(any)
         }
-        A::WithElement { expr, index, value } => {
-            contains_agg(expr) || contains_agg(index) || contains_agg(value)
-        }
-        A::AnyAll { left, right, .. } => contains_agg(left) || contains_agg(right),
+        A::WithElement { expr, index, value } => any(expr) || any(index) || any(value),
+        A::AnyAll { left, right, .. } => any(left) || any(right),
         A::Literal(_)
         | A::Column { .. }
         | A::Param(_)
@@ -1134,6 +1198,15 @@ impl<'a> Binder<'a> {
             }
             grouping = Some(g);
         }
+        let windowed = s
+            .items
+            .iter()
+            .any(|i| matches!(i, SelectItem::Expr { expr, .. } if contains_window(expr)))
+            || order_by.iter().any(|o| contains_window(&o.expr));
+        let mut windowing = Windowing {
+            defs: s.windows.clone(),
+            funcs: Vec::new(),
+        };
 
         // The select list.
         let mut exprs = Vec::new();
@@ -1178,6 +1251,9 @@ impl<'a> Binder<'a> {
                 }
                 SelectItem::Expr { expr, alias } => {
                     let (x, t) = match &mut grouping {
+                        _ if windowed => {
+                            self.windowed_expr(expr, &scope, &mut grouping, &mut windowing)?
+                        }
                         Some(g) => self.grouped_expr(expr, g)?,
                         None => self.expr(expr, &scope)?,
                     };
@@ -1237,6 +1313,9 @@ impl<'a> Binder<'a> {
             }
             let (x, t) = match (output, &mut grouping) {
                 (Some(i), _) => (exprs[i].clone(), cols[i].ty),
+                (None, _) if contains_window(key) => {
+                    self.windowed_expr(key, &scope, &mut grouping, &mut windowing)?
+                }
                 (None, Some(g)) => self.grouped_expr(key, g)?,
                 (None, None) => self.expr(key, &scope)?,
             };
@@ -1272,6 +1351,76 @@ impl<'a> Binder<'a> {
                     predicate: h,
                 };
             }
+        }
+        // The order the windows leave their rows in: the last sort's.
+        let mut ordered: Vec<SortKey> = Vec::new();
+        if !windowing.funcs.is_empty() {
+            // One window's functions at a time (in the order the windows
+            // first appear), each window over its rows sorted by its
+            // partition, then its order; the functions' columns follow
+            // their input's.
+            let funcs = windowing.funcs;
+            let mut stages: Vec<Vec<usize>> = Vec::new();
+            for (i, f) in funcs.iter().enumerate() {
+                match stages.iter_mut().find(|st| {
+                    let g = &funcs[st[0]];
+                    g.partition == f.partition && g.order == f.order
+                }) {
+                    Some(st) => st.push(i),
+                    None => stages.push(vec![i]),
+                }
+            }
+            let base = plan.width();
+            let mut column = vec![0; funcs.len()];
+            for (k, &f) in stages.iter().flatten().enumerate() {
+                column[f] = base + k;
+            }
+            for e in &mut exprs {
+                e.walk_mut(&mut |x| {
+                    if let Expr::Column(i) = x
+                        && *i >= WINDOW_MARK
+                    {
+                        *i = column[*i - WINDOW_MARK];
+                    }
+                });
+            }
+            let mut funcs: Vec<Option<WindowFunc>> = funcs.into_iter().map(Some).collect();
+            for st in stages {
+                let stage: Vec<WindowFunc> = st.iter().filter_map(|&f| funcs[f].take()).collect();
+                let mut keys: Vec<SortKey> = stage[0]
+                    .partition
+                    .iter()
+                    .map(|p| SortKey {
+                        expr: p.clone(),
+                        desc: false,
+                        nulls_first: false,
+                    })
+                    .collect();
+                keys.extend(stage[0].order.iter().cloned());
+                if !keys.is_empty() {
+                    ordered = keys.clone();
+                    plan = Plan::Sort {
+                        input: Box::new(plan),
+                        keys,
+                    };
+                }
+                plan = Plan::Window {
+                    input: Box::new(plan),
+                    funcs: stage,
+                };
+            }
+        }
+        // An ORDER BY the last window's sort already gives (PostgreSQL
+        // leaves it out too): no sort of its own.
+        if !s.distinct
+            && keys.len() <= ordered.len()
+            && keys.iter().zip(&ordered).all(|(k, o)| {
+                matches!(&k.expr, Expr::Column(i) if exprs.get(*i) == Some(&o.expr))
+                    && k.desc == o.desc
+                    && k.nulls_first == o.nulls_first
+            })
+        {
+            keys.clear();
         }
         plan = Plan::Project {
             input: Box::new(plan),
@@ -1351,6 +1500,9 @@ impl<'a> Binder<'a> {
     /// column reference is an error.
     fn grouped_expr(&mut self, e: &ast::Expr, g: &mut Grouping) -> Result<Typed> {
         use ast::Expr as A;
+        if let A::Window { .. } = e {
+            return Err(Error::windowing("window functions are not allowed here"));
+        }
         if let A::Function {
             name,
             args,
@@ -1458,6 +1610,371 @@ impl<'a> Binder<'a> {
         self.expr_with(e, &mut sub)
     }
 
+    /// An expression of a select list or `ORDER BY` that may call window
+    /// functions: each call becomes its column (numbered from
+    /// [`WINDOW_MARK`]), the rest bound over the grouped or plain input.
+    fn windowed_expr(
+        &mut self,
+        e: &ast::Expr,
+        scope: &Scope,
+        g: &mut Option<Grouping>,
+        w: &mut Windowing,
+    ) -> Result<Typed> {
+        match e {
+            ast::Expr::Window { func, over } => self.window_call(func, over, scope, g, w),
+            ast::Expr::Function { name, .. }
+                if contains_window(e) && self.registry.aggregate(name).is_some() =>
+            {
+                Err(Error::grouping(
+                    "aggregate function calls cannot contain window function calls",
+                ))
+            }
+            _ if contains_window(e) => {
+                let mut sub = |p: &ast::Expr, me: &mut Self| me.windowed_expr(p, scope, g, w);
+                self.expr_with(e, &mut sub)
+            }
+            _ => self.base_expr(e, scope, g),
+        }
+    }
+
+    /// An expression over a window's input: the grouping's output when
+    /// there is one, else the `FROM` rows.
+    fn base_expr(
+        &mut self,
+        e: &ast::Expr,
+        scope: &Scope,
+        g: &mut Option<Grouping>,
+    ) -> Result<Typed> {
+        if contains_window(e) {
+            return Err(Error::windowing("window function calls cannot be nested"));
+        }
+        match g {
+            Some(g) => self.grouped_expr(e, g),
+            None => self.expr(e, scope),
+        }
+    }
+
+    /// The window `over` names or writes out, its named bases resolved.
+    fn window_spec(&self, over: &ast::Over, w: &Windowing) -> Result<ast::WindowSpec> {
+        let named = |name: &str| -> Result<ast::WindowSpec> {
+            w.defs
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, d)| d.clone())
+                .ok_or_else(|| Error::undefined_object(format!("window \"{name}\" does not exist")))
+        };
+        let mut spec = match over {
+            ast::Over::Named(n) => named(n)?,
+            ast::Over::Spec(s) => s.clone(),
+        };
+        // `(base …)`: the base's partition, its order unless one is given;
+        // a base with a frame cannot be refined.
+        for _ in 0..w.defs.len() + 1 {
+            let Some(name) = spec.base.take() else {
+                return Ok(spec);
+            };
+            let base = named(&name)?;
+            if !spec.partition.is_empty() {
+                return Err(Error::windowing(format!(
+                    "cannot override PARTITION BY clause of window \"{name}\""
+                )));
+            }
+            if !spec.order.is_empty() && !base.order.is_empty() {
+                return Err(Error::windowing(format!(
+                    "cannot override ORDER BY clause of window \"{name}\""
+                )));
+            }
+            if base.frame.is_some() {
+                return Err(Error::windowing(format!(
+                    "cannot copy window \"{name}\" because it has a frame clause"
+                )));
+            }
+            spec.partition = base.partition;
+            if spec.order.is_empty() {
+                spec.order = base.order;
+            }
+            spec.base = base.base;
+        }
+        Err(Error::windowing("windows refer to each other in a cycle"))
+    }
+
+    /// A window function call: bound, added to `w`, its column returned.
+    fn window_call(
+        &mut self,
+        func: &ast::Expr,
+        over: &ast::Over,
+        scope: &Scope,
+        g: &mut Option<Grouping>,
+        w: &mut Windowing,
+    ) -> Result<Typed> {
+        let ast::Expr::Function {
+            name,
+            args,
+            distinct,
+            star,
+            order_by,
+        } = func
+        else {
+            return Err(Error::syntax("OVER follows a function call"));
+        };
+        if *distinct {
+            return Err(Error::feature(
+                "DISTINCT is not implemented for window functions",
+            ));
+        }
+        if !order_by.is_empty() {
+            return Err(Error::feature(
+                "aggregate ORDER BY is not implemented for window functions",
+            ));
+        }
+        let spec = self.window_spec(over, w)?;
+        let mut partition = Vec::new();
+        for p in &spec.partition {
+            let (x, t) = self.base_expr(p, scope, g)?;
+            require(t, &[Need::Equality, Need::Hashing], "PARTITION BY")?;
+            partition.push(x);
+        }
+        let mut order = Vec::new();
+        let mut order_types = Vec::new();
+        for o in &spec.order {
+            let (key, using) = match (&o.expr, &o.using) {
+                (ast::Expr::Collate { expr, collation }, None) => {
+                    (&**expr, Some(collation.as_str()))
+                }
+                (e, u) => (e, u.as_deref()),
+            };
+            let (x, t) = self.base_expr(key, scope, g)?;
+            let x = self.sort_key(x, t, using)?;
+            order_types.push(t);
+            order.push(SortKey {
+                expr: x,
+                desc: o.desc,
+                nulls_first: o.nulls_first.unwrap_or(o.desc),
+            });
+        }
+        let frame = self.window_frame(spec.frame.as_ref(), &order, &order_types, scope)?;
+        let mut bound = Vec::new();
+        for a in args {
+            bound.push(self.base_expr(a, scope, g)?);
+        }
+        let (func, args, ty) = if let Some(wf) = window_only(name) {
+            if *star {
+                return Err(Error::undefined_function(format!(
+                    "function {name}(*) does not exist"
+                )));
+            }
+            let arity = match wf {
+                WinFunc::Ntile => 1..=1,
+                WinFunc::Lag | WinFunc::Lead => 1..=3,
+                WinFunc::FirstValue | WinFunc::LastValue => 1..=1,
+                WinFunc::NthValue => 2..=2,
+                _ => 0..=0,
+            };
+            if !arity.contains(&bound.len()) {
+                return Err(Error::undefined_function(format!(
+                    "function {name} with {} arguments does not exist",
+                    bound.len()
+                )));
+            }
+            let int = |me: &mut Self, (x, t): Typed, what: &str| -> Result<Expr> {
+                if t.is_some_and(|t| !t.is_integer()) {
+                    return Err(Error::undefined_function(format!(
+                        "function {name}({what}) does not exist: its {what} must be an integer"
+                    )));
+                }
+                let (_, (x, t)) = me.coerce(Some(DataType::BigInt), x, t)?;
+                Ok(convert(x, t, Some(DataType::BigInt)))
+            };
+            match wf {
+                WinFunc::Ntile => {
+                    let n = int(self, bound.remove(0), "bucket count")?;
+                    (wf, vec![n], Some(DataType::BigInt))
+                }
+                WinFunc::NthValue => {
+                    let n = int(self, bound.remove(1), "position")?;
+                    let (x, t) = bound.remove(0);
+                    (wf, vec![x, n], t)
+                }
+                WinFunc::Lag | WinFunc::Lead => {
+                    let mut it = bound.into_iter();
+                    let value = it.next().expect("one argument");
+                    let offset = match it.next() {
+                        Some(o) => int(self, o, "offset")?,
+                        None => Expr::Literal(Value::Int(1)),
+                    };
+                    let default = it.next();
+                    let (x, d, t) = match default {
+                        Some(d) => {
+                            let mut items = vec![value, d];
+                            let t = self.unify_items(&mut items)?;
+                            let d = items.pop().expect("two").0;
+                            (items.pop().expect("one").0, d, t)
+                        }
+                        None => (value.0, Expr::Literal(Value::Null), value.1),
+                    };
+                    (wf, vec![x, offset, d], t)
+                }
+                WinFunc::FirstValue | WinFunc::LastValue => {
+                    let (x, t) = bound.remove(0);
+                    (wf, vec![x], t)
+                }
+                WinFunc::PercentRank | WinFunc::CumeDist => (wf, vec![], Some(DataType::Float)),
+                _ => (wf, vec![], Some(DataType::BigInt)),
+            }
+        } else if let Some(agg) = self.registry.aggregate(name).cloned() {
+            self.execute(name)?;
+            let shape_ok = if *star {
+                args.is_empty() && agg.accepts_star()
+            } else {
+                agg.arity().contains(&args.len())
+            };
+            if !shape_ok {
+                return Err(Error::undefined_function(format!(
+                    "function {name} with {} arguments does not exist",
+                    args.len()
+                )));
+            }
+            let agg = match bound.first().and_then(|b| b.1) {
+                Some(DataType::Ext(t)) => t
+                    .imp()
+                    .aggregate(name)
+                    .map(crate::ext::AggRef::new)
+                    .unwrap_or(agg),
+                _ => agg,
+            };
+            let sig = agg.resolve(&arg_info(&bound))?;
+            let (args, common) = self.apply_signature(name, sig.args, bound)?;
+            let ty = match sig.returns {
+                Returns::Type(t) => t,
+                Returns::Common => common,
+                Returns::Constant(_) => {
+                    return Err(Error::internal(format!(
+                        "aggregate {name} resolved to a constant"
+                    )));
+                }
+            };
+            (WinFunc::Agg(agg), args, ty)
+        } else {
+            return Err(Error::wrong_object_type(format!(
+                "OVER specified, but {name} is not a window function nor an aggregate function"
+            )));
+        };
+        w.funcs.push(WindowFunc {
+            func,
+            args,
+            partition,
+            order,
+            frame,
+        });
+        Ok((Expr::Column(WINDOW_MARK + w.funcs.len() - 1), ty))
+    }
+
+    /// A window's frame, checked as PostgreSQL checks it; without a frame
+    /// clause, from the partition's start to the row's last peer (all of
+    /// the partition when it is not ordered).
+    fn window_frame(
+        &mut self,
+        frame: Option<&ast::Frame>,
+        order: &[SortKey],
+        order_types: &[Option<DataType>],
+        scope: &Scope,
+    ) -> Result<WinFrame> {
+        use ast::{FrameBound as F, FrameUnits as U};
+        let Some(f) = frame else {
+            return Ok(WinFrame {
+                units: U::Range,
+                start: WinBound::UnboundedPreceding,
+                end: if order.is_empty() {
+                    WinBound::UnboundedFollowing
+                } else {
+                    WinBound::CurrentRow
+                },
+                exclude: ast::FrameExclude::NoOthers,
+            });
+        };
+        if matches!(f.start, F::UnboundedFollowing) {
+            return Err(Error::windowing(
+                "frame start cannot be UNBOUNDED FOLLOWING",
+            ));
+        }
+        if matches!(f.end, F::UnboundedPreceding) {
+            return Err(Error::windowing("frame end cannot be UNBOUNDED PRECEDING"));
+        }
+        match (&f.start, &f.end) {
+            (F::CurrentRow, F::Preceding(_)) => {
+                return Err(Error::windowing(
+                    "frame starting from current row cannot have preceding rows",
+                ));
+            }
+            (F::Following(_), F::Preceding(_) | F::CurrentRow) => {
+                return Err(Error::windowing(
+                    "frame starting from following row cannot have preceding rows",
+                ));
+            }
+            _ => {}
+        }
+        if f.units == U::Groups && order.is_empty() {
+            return Err(Error::windowing("GROUPS mode requires an ORDER BY clause"));
+        }
+        let offsets = matches!(f.start, F::Preceding(_) | F::Following(_))
+            || matches!(f.end, F::Preceding(_) | F::Following(_));
+        if f.units == U::Range && offsets {
+            if order.len() != 1 {
+                return Err(Error::windowing(
+                    "RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY column",
+                ));
+            }
+            let t = order_types[0];
+            if t.is_some_and(|t| !t.is_number() && !t.is_temporal()) {
+                return Err(Error::feature(format!(
+                    "RANGE with offset PRECEDING/FOLLOWING is not supported for column type {}",
+                    t.unwrap()
+                )));
+            }
+        }
+        let units_name = match f.units {
+            U::Rows => "ROWS",
+            U::Range => "RANGE",
+            U::Groups => "GROUPS",
+        };
+        let mut bound = |b: &F| -> Result<WinBound> {
+            let offset = |me: &mut Self, x: &ast::Expr| -> Result<Expr> {
+                let (x, t) = me.expr(x, scope)?;
+                if !x.columns().is_empty() {
+                    return Err(Error::invalid_column_reference(format!(
+                        "argument of {units_name} must not contain variables"
+                    )));
+                }
+                if f.units == U::Range {
+                    return Ok(x);
+                }
+                if t.is_some_and(|t| !t.is_integer()) {
+                    return Err(Error::type_mismatch(format!(
+                        "argument of {units_name} must be type bigint, not type {}",
+                        t.unwrap()
+                    )));
+                }
+                let (_, (x, t)) = me.coerce(Some(DataType::BigInt), x, t)?;
+                Ok(convert(x, t, Some(DataType::BigInt)))
+            };
+            Ok(match b {
+                F::UnboundedPreceding => WinBound::UnboundedPreceding,
+                F::Preceding(x) => WinBound::Preceding(offset(self, x)?),
+                F::CurrentRow => WinBound::CurrentRow,
+                F::Following(x) => WinBound::Following(offset(self, x)?),
+                F::UnboundedFollowing => WinBound::UnboundedFollowing,
+            })
+        };
+        let start = bound(&f.start)?;
+        let end = bound(&f.end)?;
+        Ok(WinFrame {
+            units: f.units,
+            start,
+            end,
+            exclude: f.exclude,
+        })
+    }
+
     // ----------------------------------------------------------- expressions
 
     /// Binds a boolean condition.
@@ -1486,6 +2003,9 @@ impl<'a> Binder<'a> {
             return Err(Error::grouping(format!(
                 "aggregate function {name} is not allowed here"
             )));
+        }
+        if let ast::Expr::Window { .. } = e {
+            return Err(Error::windowing("window functions are not allowed here"));
         }
         if let Some(r) = self.subquery_expr(e, scope)? {
             return Ok(r);
@@ -1658,7 +2178,8 @@ impl<'a> Binder<'a> {
             | A::Exists { .. }
             | A::Subquery(_)
             | A::InSubquery { .. }
-            | A::ArraySubquery(_) => sub(e, self)?,
+            | A::ArraySubquery(_)
+            | A::Window { .. } => sub(e, self)?,
             A::Array(items) => {
                 let mut bound = Vec::new();
                 for i in items {

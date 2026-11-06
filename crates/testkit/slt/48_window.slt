@@ -1,0 +1,454 @@
+# Window functions (PLAN.md §M14.27 S4): func(…) OVER (PARTITION BY …
+# ORDER BY … frame).  Expectations from PostgreSQL 18.
+
+statement ok
+CREATE TABLE emp (id INT, dept TEXT, salary INT, hired DATE)
+
+statement ok
+INSERT INTO emp VALUES (1, 'eng', 100, '2020-01-10'), (2, 'eng', 120, '2020-03-01'), (3, 'eng', 120, '2021-06-15'), (4, 'eng', 90, '2022-02-01'), (5, 'ops', 80, '2019-11-20'), (6, 'ops', 80, '2020-07-07'), (7, 'ops', NULL, '2023-01-01'), (8, 'sales', 70, '2021-01-01')
+
+# The ranking functions: peers (equal ordering values) share a rank.
+query ITIIIIRR
+SELECT id, dept, salary, row_number() OVER w, rank() OVER w, dense_rank() OVER w, percent_rank() OVER w, cume_dist() OVER w FROM emp WINDOW w AS (PARTITION BY dept ORDER BY salary DESC) ORDER BY dept, salary DESC NULLS FIRST, id
+----
+2 eng 120 1 1 1 0.000 0.500
+3 eng 120 2 1 1 0.000 0.500
+1 eng 100 3 3 2 0.667 0.750
+4 eng 90 4 4 3 1.000 1.000
+7 ops NULL 1 1 1 0.000 0.333
+5 ops 80 2 2 2 0.500 1.000
+6 ops 80 3 2 2 0.500 1.000
+8 sales 70 1 1 1 0.000 1.000
+
+# No PARTITION BY: one partition; no ORDER BY: every row a peer.
+query IIII
+SELECT id, rank() OVER (), count(*) OVER (), sum(salary) OVER () FROM emp ORDER BY id
+----
+1 1 8 660
+2 1 8 660
+3 1 8 660
+4 1 8 660
+5 1 8 660
+6 1 8 660
+7 1 8 660
+8 1 8 660
+
+# The default frame: from the partition's start to the current row's last
+# peer — a running total with ties summed together.
+query IIII
+SELECT id, salary, sum(salary) OVER (ORDER BY salary), count(*) OVER (ORDER BY salary) FROM emp ORDER BY salary NULLS LAST, id
+----
+8 70 70 1
+5 80 230 3
+6 80 230 3
+4 90 320 4
+1 100 420 5
+2 120 660 7
+3 120 660 7
+7 NULL 660 8
+
+query ITII
+SELECT id, dept, sum(salary) OVER (PARTITION BY dept ORDER BY id), avg(salary) OVER (PARTITION BY dept ORDER BY id)::numeric(10,2)::text::float8::int FROM emp ORDER BY id
+----
+1 eng 100 100
+2 eng 220 110
+3 eng 340 113
+4 eng 430 108
+5 ops 80 80
+6 ops 160 80
+7 ops 160 80
+8 sales 70 70
+
+# ROWS frames.
+query IIIII
+SELECT id, sum(id) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING), sum(id) OVER (ORDER BY id ROWS 2 PRECEDING), sum(id) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING), count(*) OVER (ORDER BY id ROWS BETWEEN 2 FOLLOWING AND 3 FOLLOWING) FROM emp ORDER BY id
+----
+1 3 1 36 2
+2 6 3 35 2
+3 9 6 33 2
+4 12 9 30 2
+5 15 12 26 2
+6 18 15 21 1
+7 21 18 15 0
+8 15 21 8 0
+
+query III
+SELECT id, sum(id) OVER (ORDER BY id ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING), max(id) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 10 FOLLOWING) FROM emp ORDER BY id
+----
+1 NULL 8
+2 1 8
+3 3 8
+4 6 8
+5 9 8
+6 12 8
+7 15 8
+8 18 NULL
+
+# GROUPS frames count peer groups.
+query IIII
+SELECT id, salary, sum(id) OVER (ORDER BY salary GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING), count(*) OVER (ORDER BY salary GROUPS BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM emp ORDER BY salary NULLS LAST, id
+----
+8 70 19 3
+5 80 23 3
+6 80 23 3
+4 90 16 2
+1 100 10 3
+2 120 13 3
+3 120 13 3
+7 NULL 12 1
+
+# RANGE frames with an offset: by the ordering value.
+query IIII
+SELECT id, salary, sum(id) OVER (ORDER BY salary RANGE BETWEEN 10 PRECEDING AND 10 FOLLOWING), count(*) OVER (ORDER BY salary DESC RANGE BETWEEN 20 PRECEDING AND CURRENT ROW) FROM emp ORDER BY salary NULLS LAST, id
+----
+8 70 19 4
+5 80 23 4
+6 80 23 4
+4 90 16 2
+1 100 5 3
+2 120 5 2
+3 120 5 2
+7 NULL 7 1
+
+query ITI
+SELECT id, hired, count(*) OVER (ORDER BY hired RANGE BETWEEN INTERVAL '1 year' PRECEDING AND CURRENT ROW) FROM emp ORDER BY hired
+----
+5 2019-11-20 1
+1 2020-01-10 2
+2 2020-03-01 3
+6 2020-07-07 4
+8 2021-01-01 4
+3 2021-06-15 3
+4 2022-02-01 2
+7 2023-01-01 2
+
+query IRI
+SELECT x, sum(x) OVER (ORDER BY x RANGE BETWEEN 0.5 PRECEDING AND 0.5 FOLLOWING), count(*) OVER (ORDER BY x DESC RANGE 1.5 PRECEDING) FROM (VALUES (1.0::float8), (1.4), (2.0), (3.5), (5.0)) v(x) ORDER BY x
+----
+1 2.400 3
+1.4 2.400 2
+2 2.000 2
+3.5 3.500 2
+5 5.000 1
+
+# EXCLUDE.
+query IIIII
+SELECT id, salary, sum(id) OVER (ORDER BY salary ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE CURRENT ROW), sum(id) OVER (ORDER BY salary RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE GROUP), sum(id) OVER (ORDER BY salary ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING EXCLUDE TIES) FROM emp ORDER BY salary NULLS LAST, id
+----
+8 70 28 28 19
+5 80 31 25 17
+6 80 30 25 19
+4 90 32 32 18
+1 100 35 35 16
+2 120 34 31 14
+3 120 33 31 11
+7 NULL 29 29 12
+
+# ntile: the first n % k buckets one row larger.
+query IIII
+SELECT id, ntile(3) OVER (ORDER BY id), ntile(5) OVER (ORDER BY id), ntile(20) OVER (ORDER BY id) FROM emp ORDER BY id
+----
+1 1 1 1
+2 1 1 2
+3 1 2 3
+4 2 2 4
+5 2 3 5
+6 2 3 6
+7 3 4 7
+8 3 5 8
+
+query II
+SELECT id, ntile(2) OVER (PARTITION BY dept ORDER BY id) FROM emp ORDER BY id
+----
+1 1
+2 1
+3 2
+4 2
+5 1
+6 1
+7 2
+8 1
+
+# lag and lead: offset, default.
+query IIIIII
+SELECT id, lag(id) OVER (ORDER BY id), lead(id) OVER (ORDER BY id), lag(id, 2) OVER (ORDER BY id), lead(id, 3, -1) OVER (ORDER BY id), lag(id, -1) OVER (ORDER BY id) FROM emp ORDER BY id
+----
+1 NULL 2 NULL 4 2
+2 1 3 NULL 5 3
+3 2 4 1 6 4
+4 3 5 2 7 5
+5 4 6 3 8 6
+6 5 7 4 -1 7
+7 6 8 5 -1 8
+8 7 NULL 6 -1 NULL
+
+query ITTT
+SELECT id, dept, lag(dept, 1, 'none') OVER (PARTITION BY dept ORDER BY id), lead(salary::text) OVER (PARTITION BY dept ORDER BY id) FROM emp ORDER BY id
+----
+1 eng none 120
+2 eng eng 120
+3 eng eng 90
+4 eng eng NULL
+5 ops none 80
+6 ops ops NULL
+7 ops ops NULL
+8 sales none NULL
+
+query II
+SELECT id, lag(id, NULL) OVER (ORDER BY id) FROM emp ORDER BY id
+----
+1 NULL
+2 NULL
+3 NULL
+4 NULL
+5 NULL
+6 NULL
+7 NULL
+8 NULL
+
+# Offsets at the ends of bigint: no row there.  (PostgreSQL's offsets
+# are integers — 42883 for a bigint —; nucleus takes a bigint.  Written
+# by hand, not from PostgreSQL.)
+query III
+SELECT id, lag(id, '-9223372036854775808'::bigint) OVER (ORDER BY id), lead(id, 9223372036854775807, 0) OVER (ORDER BY id) FROM emp ORDER BY id
+----
+1 NULL 0
+2 NULL 0
+3 NULL 0
+4 NULL 0
+5 NULL 0
+6 NULL 0
+7 NULL 0
+8 NULL 0
+
+# first_value, last_value and nth_value see the frame.
+query IIIII
+SELECT id, first_value(id) OVER (PARTITION BY dept ORDER BY id), last_value(id) OVER (PARTITION BY dept ORDER BY id), last_value(id) OVER (PARTITION BY dept ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING), nth_value(id, 2) OVER (PARTITION BY dept ORDER BY id) FROM emp ORDER BY id
+----
+1 1 1 4 NULL
+2 1 2 4 2
+3 1 3 4 2
+4 1 4 4 2
+5 5 5 7 NULL
+6 5 6 7 6
+7 5 7 7 6
+8 8 8 8 NULL
+
+query IIII
+SELECT id, nth_value(id, 3) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), first_value(id) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW), last_value(id) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING) FROM emp ORDER BY id
+----
+1 3 2 2
+2 3 1 3
+3 3 2 4
+4 3 3 5
+5 3 4 6
+6 3 5 7
+7 3 6 8
+8 3 7 NULL
+
+# Every aggregate is a window aggregate, NULLs left out as in GROUP BY.
+query IIIIIT
+SELECT id, count(salary) OVER w, min(salary) OVER w, max(salary) OVER w, sum(salary) OVER w, string_agg(id::text, ',') OVER w FROM emp WINDOW w AS (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) ORDER BY id
+----
+1 1 100 100 100 1
+2 2 100 120 220 1,2
+3 3 100 120 340 1,2,3
+4 3 90 120 330 2,3,4
+5 3 80 120 290 3,4,5
+6 3 80 90 250 4,5,6
+7 2 80 80 160 5,6,7
+8 2 70 80 150 6,7,8
+
+query ITT
+SELECT id, array_agg(id) OVER (PARTITION BY dept ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)::text, string_agg(dept, '/') OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM emp ORDER BY id
+----
+1 {1,2} eng/eng
+2 {1,2,3} eng/eng/eng
+3 {2,3,4} eng/eng/eng
+4 {3,4} eng/eng/ops
+5 {5,6} eng/ops/ops
+6 {5,6,7} ops/ops/ops
+7 {6,7} ops/ops/sales
+8 {8} ops/sales
+
+query IRR
+SELECT id, avg(salary) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING), stddev_samp(salary) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM emp ORDER BY id
+----
+1 110.000 NULL
+2 113.333 14.142
+3 110.000 11.547
+4 96.667 17.321
+5 83.333 20.817
+6 80.000 5.774
+7 75.000 0.000
+8 70.000 7.071
+
+query IBB
+SELECT id, bool_and(salary > 85) OVER (ORDER BY id ROWS 1 PRECEDING), bool_or(salary > 110) OVER (ORDER BY id ROWS 1 PRECEDING) FROM emp ORDER BY id
+----
+1 true false
+2 true true
+3 true true
+4 true true
+5 false false
+6 false false
+7 false false
+8 false false
+
+# A frame that never reaches a row: the aggregate of no rows.
+query III
+SELECT id, sum(id) OVER (ORDER BY id ROWS BETWEEN 5 FOLLOWING AND 6 FOLLOWING), count(*) OVER (ORDER BY id ROWS BETWEEN 5 FOLLOWING AND 6 FOLLOWING) FROM emp ORDER BY id
+----
+1 13 2
+2 15 2
+3 8 1
+4 NULL 0
+5 NULL 0
+6 NULL 0
+7 NULL 0
+8 NULL 0
+
+# A named window, refined by another; several windows in one query.
+query IIII
+SELECT id, sum(id) OVER (w ORDER BY id), sum(id) OVER w, rank() OVER (w ORDER BY salary) FROM emp WINDOW w AS (PARTITION BY dept) ORDER BY id
+----
+1 1 10 2
+2 3 10 3
+3 6 10 3
+4 10 10 1
+5 5 18 1
+6 11 18 1
+7 18 18 3
+8 8 8 1
+
+query III
+SELECT id, sum(id) OVER (w2 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW), row_number() OVER w2 FROM emp WINDOW w1 AS (PARTITION BY dept), w2 AS (w1 ORDER BY id DESC) ORDER BY id
+----
+1 3 4
+2 5 3
+3 7 2
+4 4 1
+5 11 3
+6 13 2
+7 7 1
+8 8 1
+
+# Over grouped rows: aggregates of the groups.
+query TIII
+SELECT dept, sum(salary), rank() OVER (ORDER BY sum(salary) DESC), sum(sum(salary)) OVER () FROM emp GROUP BY dept ORDER BY dept
+----
+eng 430 1 660
+ops 160 2 660
+sales 70 3 660
+
+query TII
+SELECT dept, count(*), row_number() OVER (ORDER BY count(*) DESC, dept) FROM emp GROUP BY dept HAVING count(*) > 1 ORDER BY dept
+----
+eng 4 1
+ops 3 2
+
+# In expressions, ORDER BY, and under a filter applied first.
+query IIT
+SELECT id, salary - avg(salary) OVER (PARTITION BY dept)::int, CASE WHEN row_number() OVER (ORDER BY id) % 2 = 0 THEN 'even' ELSE 'odd' END FROM emp WHERE id <> 3 ORDER BY id
+----
+1 -3 odd
+2 17 even
+4 -13 odd
+5 0 even
+6 0 odd
+7 NULL even
+8 0 odd
+
+query II
+SELECT id, row_number() OVER (ORDER BY id DESC) FROM emp ORDER BY row_number() OVER (ORDER BY id DESC) LIMIT 3
+----
+8 1
+7 2
+6 3
+
+query II
+SELECT id, rn FROM (SELECT id, row_number() OVER (PARTITION BY dept ORDER BY salary DESC NULLS LAST, id) AS rn FROM emp) t WHERE rn = 1 ORDER BY id
+----
+2 1
+5 1
+8 1
+
+query II
+SELECT DISTINCT dept_count, count(*) OVER () FROM (SELECT count(*) OVER (PARTITION BY dept) AS dept_count FROM emp) t ORDER BY dept_count
+----
+1 8
+3 8
+4 8
+
+# NULL ordering values: NULLS FIRST and LAST, and RANGE around them.
+query IIII
+SELECT id, salary, rank() OVER (ORDER BY salary NULLS FIRST), sum(id) OVER (ORDER BY salary NULLS FIRST RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM emp ORDER BY salary NULLS FIRST, id
+----
+7 NULL 1 7
+8 70 2 8
+5 80 3 19
+6 80 3 19
+4 90 5 15
+1 100 6 5
+2 120 7 5
+3 120 7 5
+
+# The empty input.
+query II
+SELECT id, row_number() OVER () FROM emp WHERE false
+----
+
+# Errors.
+statement error 42P20
+SELECT id FROM emp WHERE row_number() OVER () > 1
+
+statement error 42P20
+SELECT dept FROM emp GROUP BY dept HAVING rank() OVER () > 1
+
+statement error 42803
+SELECT sum(row_number() OVER ()) FROM emp
+
+statement error 42P20
+SELECT row_number() OVER (ORDER BY rank() OVER ()) FROM emp
+
+statement error 42809
+SELECT upper('a') OVER () FROM emp
+
+statement error 42704
+SELECT row_number() OVER nope FROM emp
+
+statement error 42P20
+SELECT row_number() OVER (w PARTITION BY id) FROM emp WINDOW w AS (PARTITION BY dept)
+
+statement error 42P20
+SELECT row_number() OVER (w ORDER BY id) FROM emp WINDOW w AS (ORDER BY dept)
+
+statement error 42P20
+SELECT sum(id) OVER (ORDER BY hired, id RANGE 1 PRECEDING) FROM emp
+
+statement error 42P20
+SELECT sum(id) OVER (GROUPS 1 PRECEDING) FROM emp
+
+statement error 42P20
+SELECT sum(id) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) FROM emp
+
+statement error 42P20
+SELECT sum(id) OVER (ORDER BY id ROWS UNBOUNDED FOLLOWING) FROM emp
+
+statement error 22013
+SELECT sum(id) OVER (ORDER BY id ROWS -1 PRECEDING) FROM emp
+
+statement error 22013
+SELECT sum(id) OVER (ORDER BY salary RANGE -1 PRECEDING) FROM emp
+
+statement error 22014
+SELECT ntile(0) OVER () FROM emp
+
+statement error 22016
+SELECT nth_value(id, 0) OVER () FROM emp
+
+statement error 0A000
+SELECT count(DISTINCT id) OVER () FROM emp
+
+statement error 42P10
+SELECT sum(id) OVER (ORDER BY id ROWS id PRECEDING) FROM emp

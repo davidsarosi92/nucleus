@@ -99,6 +99,15 @@ pub enum Plan {
         /// Input.
         input: Box<Plan>,
     },
+    /// Window functions: output = the input's columns, then one value per
+    /// function, each over its row's window (rows in the order of the last
+    /// window's sort).
+    Window {
+        /// Input.
+        input: Box<Plan>,
+        /// The functions.
+        funcs: Vec<WindowFunc>,
+    },
     /// A common table expression: its rows are computed once per
     /// execution and shared by every reference (all of which carry the same
     /// `id` and plan).
@@ -261,6 +270,193 @@ pub struct Agg {
     pub order: Vec<SortKey>,
 }
 
+/// A window function call ([`Plan::Window`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowFunc {
+    /// Which.
+    pub func: WinFunc,
+    /// Its arguments, over the input row.
+    pub args: Vec<Expr>,
+    /// `PARTITION BY`.
+    pub partition: Vec<Expr>,
+    /// `ORDER BY`.
+    pub order: Vec<SortKey>,
+    /// The frame (the default filled in).
+    pub frame: WinFrame,
+}
+
+/// A window function.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WinFunc {
+    /// An aggregate over the frame.
+    Agg(AggRef),
+    /// `row_number()`.
+    RowNumber,
+    /// `rank()`.
+    Rank,
+    /// `dense_rank()`.
+    DenseRank,
+    /// `percent_rank()`.
+    PercentRank,
+    /// `cume_dist()`.
+    CumeDist,
+    /// `ntile(n)`.
+    Ntile,
+    /// `lag(x [, offset [, default]])`.
+    Lag,
+    /// `lead(x [, offset [, default]])`.
+    Lead,
+    /// `first_value(x)`.
+    FirstValue,
+    /// `last_value(x)`.
+    LastValue,
+    /// `nth_value(x, n)`.
+    NthValue,
+}
+
+impl WinFunc {
+    /// Its name.
+    pub fn name(&self) -> &str {
+        match self {
+            WinFunc::Agg(a) => a.name(),
+            WinFunc::RowNumber => "row_number",
+            WinFunc::Rank => "rank",
+            WinFunc::DenseRank => "dense_rank",
+            WinFunc::PercentRank => "percent_rank",
+            WinFunc::CumeDist => "cume_dist",
+            WinFunc::Ntile => "ntile",
+            WinFunc::Lag => "lag",
+            WinFunc::Lead => "lead",
+            WinFunc::FirstValue => "first_value",
+            WinFunc::LastValue => "last_value",
+            WinFunc::NthValue => "nth_value",
+        }
+    }
+}
+
+/// A window frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WinFrame {
+    /// Rows, a range of the ordering value, or peer groups.
+    pub units: crate::ast::FrameUnits,
+    /// The first row's bound.
+    pub start: WinBound,
+    /// The last row's bound.
+    pub end: WinBound,
+    /// Rows of the frame left out.
+    pub exclude: crate::ast::FrameExclude,
+}
+
+/// A frame bound; an offset is evaluated once.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WinBound {
+    /// `UNBOUNDED PRECEDING`.
+    UnboundedPreceding,
+    /// `offset PRECEDING`.
+    Preceding(Expr),
+    /// `CURRENT ROW`.
+    CurrentRow,
+    /// `offset FOLLOWING`.
+    Following(Expr),
+    /// `UNBOUNDED FOLLOWING`.
+    UnboundedFollowing,
+}
+
+impl WinBound {
+    fn exprs(&self) -> Option<&Expr> {
+        match self {
+            WinBound::Preceding(e) | WinBound::Following(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    fn exprs_mut(&mut self) -> Option<&mut Expr> {
+        match self {
+            WinBound::Preceding(e) | WinBound::Following(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    fn show(&self) -> String {
+        match self {
+            WinBound::UnboundedPreceding => "UNBOUNDED PRECEDING".into(),
+            WinBound::Preceding(e) => format!("{} PRECEDING", show(e)),
+            WinBound::CurrentRow => "CURRENT ROW".into(),
+            WinBound::Following(e) => format!("{} FOLLOWING", show(e)),
+            WinBound::UnboundedFollowing => "UNBOUNDED FOLLOWING".into(),
+        }
+    }
+}
+
+impl WindowFunc {
+    /// Every expression it evaluates.
+    pub fn exprs(&self) -> impl Iterator<Item = &Expr> {
+        self.args
+            .iter()
+            .chain(&self.partition)
+            .chain(self.order.iter().map(|k| &k.expr))
+            .chain(self.frame.start.exprs())
+            .chain(self.frame.end.exprs())
+    }
+
+    /// The same, to change.
+    pub fn exprs_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
+        self.args
+            .iter_mut()
+            .chain(&mut self.partition)
+            .chain(self.order.iter_mut().map(|k| &mut k.expr))
+            .chain(self.frame.start.exprs_mut())
+            .chain(self.frame.end.exprs_mut())
+    }
+
+    /// As `EXPLAIN` shows it.
+    pub fn show(&self) -> String {
+        let mut w = Vec::new();
+        if !self.partition.is_empty() {
+            w.push(format!(
+                "PARTITION BY {}",
+                self.partition
+                    .iter()
+                    .map(show)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.order.is_empty() {
+            w.push(format!(
+                "ORDER BY {}",
+                self.order
+                    .iter()
+                    .map(|k| format!("{}{}", show(&k.expr), if k.desc { " DESC" } else { "" }))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let units = match self.frame.units {
+            crate::ast::FrameUnits::Rows => "ROWS",
+            crate::ast::FrameUnits::Range => "RANGE",
+            crate::ast::FrameUnits::Groups => "GROUPS",
+        };
+        w.push(format!(
+            "{units} BETWEEN {} AND {}",
+            self.frame.start.show(),
+            self.frame.end.show()
+        ));
+        match self.frame.exclude {
+            crate::ast::FrameExclude::NoOthers => {}
+            crate::ast::FrameExclude::CurrentRow => w.push("EXCLUDE CURRENT ROW".into()),
+            crate::ast::FrameExclude::Group => w.push("EXCLUDE GROUP".into()),
+            crate::ast::FrameExclude::Ties => w.push("EXCLUDE TIES".into()),
+        }
+        format!(
+            "{}({}) OVER ({})",
+            self.func.name(),
+            self.args.iter().map(show).collect::<Vec<_>>().join(", "),
+            w.join(" ")
+        )
+    }
+}
+
 /// A sort key.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SortKey {
@@ -286,6 +482,7 @@ impl Plan {
                 _ => left.width() + right.width(),
             },
             Plan::Aggregate { group, aggs, .. } => group.len() + aggs.len(),
+            Plan::Window { input, funcs } => input.width() + funcs.len(),
             Plan::Filter { input, .. }
             | Plan::Secure { input, .. }
             | Plan::Sort { input, .. }
@@ -459,6 +656,14 @@ impl Plan {
                     .map_or(String::new(), |o| format!(" offset {}", show(o)))
             ),
             Plan::Distinct { .. } => "Distinct".into(),
+            Plan::Window { funcs, .. } => format!(
+                "Window: {}",
+                funcs
+                    .iter()
+                    .map(WindowFunc::show)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Plan::Cte { name, .. } => format!("CTE {name}"),
             Plan::Recursive { all, .. } => {
                 format!("Recursive Union{}", if *all { " All" } else { "" })
@@ -548,7 +753,8 @@ impl Plan {
             | Plan::Aggregate { input, .. }
             | Plan::Sort { input, .. }
             | Plan::Limit { input, .. }
-            | Plan::Distinct { input } => vec![input],
+            | Plan::Distinct { input }
+            | Plan::Window { input, .. } => vec![input],
         }
     }
 
@@ -599,7 +805,8 @@ impl Plan {
             | Plan::Aggregate { input, .. }
             | Plan::Sort { input, .. }
             | Plan::Limit { input, .. }
-            | Plan::Distinct { input } => vec![input],
+            | Plan::Distinct { input }
+            | Plan::Window { input, .. } => vec![input],
         }
     }
 
@@ -651,6 +858,9 @@ impl Plan {
                 }
             }
             Plan::Sort { keys, .. } => keys.iter_mut().for_each(|k| f(&mut k.expr)),
+            Plan::Window { funcs, .. } => {
+                funcs.iter_mut().flat_map(WindowFunc::exprs_mut).for_each(f)
+            }
             Plan::Limit { limit, offset, .. } => {
                 limit.iter_mut().chain(offset).for_each(f);
             }
@@ -745,6 +955,7 @@ impl Plan {
                     .for_each(f);
             }
             Plan::Sort { keys, .. } => keys.iter().for_each(|k| f(&k.expr)),
+            Plan::Window { funcs, .. } => funcs.iter().flat_map(WindowFunc::exprs).for_each(f),
             Plan::Limit { limit, offset, .. } => {
                 limit.iter().chain(offset).for_each(f);
             }

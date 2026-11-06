@@ -86,6 +86,7 @@ const RESERVED: &[&str] = &[
     "order",
     "by",
     "having",
+    "window",
     "limit",
     "offset",
     "join",
@@ -2356,6 +2357,18 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let mut windows = Vec::new();
+        if self.eat_kw("window") {
+            loop {
+                let name = self.ident()?;
+                self.expect_kw("as")?;
+                self.expect_op("(")?;
+                windows.push((name, self.window_spec()?));
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+        }
         Ok(SetExpr::Select(Box::new(Select {
             distinct,
             items,
@@ -2363,7 +2376,88 @@ impl<'a> Parser<'a> {
             filter,
             group_by,
             having,
+            windows,
         })))
+    }
+
+    /// A window's contents, after its `(`, through its `)`.
+    fn window_spec(&mut self) -> Result<WindowSpec> {
+        let mut spec = WindowSpec::default();
+        let clause = ["partition", "order", "rows", "range", "groups"];
+        if let Some(Token::Word(w)) = self.peek()
+            && !clause.contains(&w.as_str())
+        {
+            spec.base = Some(self.ident()?);
+        }
+        if self.eat_kws(&["partition", "by"]) {
+            spec.partition.push(self.expr()?);
+            while self.eat_op(",") {
+                spec.partition.push(self.expr()?);
+            }
+        }
+        if self.eat_kws(&["order", "by"]) {
+            spec.order = self.order_items()?;
+        }
+        let units = if self.eat_kw("rows") {
+            Some(FrameUnits::Rows)
+        } else if self.eat_kw("range") {
+            Some(FrameUnits::Range)
+        } else if self.eat_kw("groups") {
+            Some(FrameUnits::Groups)
+        } else {
+            None
+        };
+        if let Some(units) = units {
+            let (start, end) = if self.eat_kw("between") {
+                let start = self.frame_bound()?;
+                self.expect_kw("and")?;
+                (start, self.frame_bound()?)
+            } else {
+                (self.frame_bound()?, FrameBound::CurrentRow)
+            };
+            let exclude = if self.eat_kw("exclude") {
+                if self.eat_kws(&["current", "row"]) {
+                    FrameExclude::CurrentRow
+                } else if self.eat_kw("group") {
+                    FrameExclude::Group
+                } else if self.eat_kw("ties") {
+                    FrameExclude::Ties
+                } else if self.eat_kws(&["no", "others"]) {
+                    FrameExclude::NoOthers
+                } else {
+                    return Err(self.error("expected CURRENT ROW, GROUP, TIES or NO OTHERS"));
+                }
+            } else {
+                FrameExclude::NoOthers
+            };
+            spec.frame = Some(Frame {
+                units,
+                start,
+                end,
+                exclude,
+            });
+        }
+        self.expect_op(")")?;
+        Ok(spec)
+    }
+
+    fn frame_bound(&mut self) -> Result<FrameBound> {
+        if self.eat_kw("unbounded") {
+            if self.eat_kw("preceding") {
+                return Ok(FrameBound::UnboundedPreceding);
+            }
+            self.expect_kw("following")?;
+            return Ok(FrameBound::UnboundedFollowing);
+        }
+        if self.eat_kws(&["current", "row"]) {
+            return Ok(FrameBound::CurrentRow);
+        }
+        let offset = Box::new(self.expr()?);
+        if self.eat_kw("preceding") {
+            return Ok(FrameBound::Preceding(offset));
+        }
+        self.expect_kw("following")?;
+        Ok(FrameBound::Following(offset))
     }
 
     fn select_items(&mut self) -> Result<Vec<SelectItem>> {
@@ -2941,13 +3035,25 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect_op(")")?;
-            return Ok(Expr::Function {
+            let call = Expr::Function {
                 name: first,
                 args,
                 distinct,
                 star,
                 order_by,
-            });
+            };
+            if self.eat_kw("over") {
+                let over = if self.eat_op("(") {
+                    Over::Spec(self.window_spec()?)
+                } else {
+                    Over::Named(self.ident()?)
+                };
+                return Ok(Expr::Window {
+                    func: Box::new(call),
+                    over,
+                });
+            }
+            return Ok(call);
         }
         if self.eat_op(".") {
             let name = self.ident()?;
@@ -3396,6 +3502,7 @@ mod tests {
                     filter: None,
                     group_by: vec![],
                     having: None,
+                    windows: vec![],
                 })),
                 order_by: vec![],
                 limit: None,

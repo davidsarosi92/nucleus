@@ -488,4 +488,8 @@ impl GroupAccumulator for Groups {
     fn finish(&mut self, group: usize) -> Result<Value> {
         self.states[group].finish(self.kind)
     }
+
+    fn finish_keeps_state(&self) -> bool {
+        true
+    }
 }

@@ -303,6 +303,27 @@ run to run and from the ninth digit: 0.0833333256…, 0.0833333257…),
 −3.056e−6 in two runs; numpy's two-pass −3.4589588653e−6).  numpy is an
 array in memory, not a table scan.
 
+Window functions over the same table (§M14.27 S4), each folded to one
+row so the result is small; best of five, the best of three rounds
+(2026-11-06, §M14.27 S4):
+
+| query | nucleus (ms) | PostgreSQL 18 (ms) |
+|---|---:|---:|
+| `row_number()` by 1000 partitions, ordered by `x` | 5,662 | 4,537 |
+| top 3 by 1000 partitions (`rank() … WHERE r <= 3`) | 5,234 | 3,883 |
+| running `sum(x)`, ordered by `id` | 8,370 | 2,585 |
+| `avg(x)` over 10 rows by partition | 8,102 | 7,936 |
+| `x - lag(x)`, ordered by `id` | 6,789 | 2,410 |
+
+Most of nucleus's time is the sort (10M rows by `id` alone: 3.8 s,
+PostgreSQL's 1.6 s), and PostgreSQL reads rows ordered by `id` from the
+primary key's index, sorting nothing — both left as next steps (PLAN.md
+§M14.27 S4).  The sums are exact: the running sum's largest value is
+1.0000000004999998e16, PostgreSQL's 1.0000000004503596e16 (its double
+accumulator loses the fractions past 10¹⁶), and of 200,000 ten-row
+moving averages PostgreSQL rounds 98,995 to another double than the
+exact average's (by up to 2 ulps; nucleus none).
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

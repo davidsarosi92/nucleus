@@ -423,6 +423,16 @@ pub trait GroupAccumulator {
 
     /// Group `group`'s result, after its last row.
     fn finish(&mut self, group: usize) -> Result<Value>;
+
+    /// Whether [`finish`](Self::finish) leaves the group's state as it
+    /// was, so the group can take more rows and be finished again — a
+    /// window frame growing from its partition's start reads its result at
+    /// each row from one state (PostgreSQL's read-only final functions).
+    /// By default no: the window then finishes a copy
+    /// ([`partial`](Self::partial) combined into a fresh group).
+    fn finish_keeps_state(&self) -> bool {
+        false
+    }
 }
 
 /// Rows `0..len`, without those whose first argument is `NULL` when

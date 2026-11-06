@@ -274,7 +274,7 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
-| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables) |
+| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -2797,7 +2797,7 @@ Every result the same, but for ties at a `LIMIT`.  Left as findings,
 not targets: the `LIMIT`-over-a-failing-join finding (W6), TPC-H Q19 on
 column tables (an `OR` of conjunctions across a join, 1.93×).
 
-### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S3 ✅)
+### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S4 ✅)
 
 **First a study, then the plan.**  Can nucleus give mathematical and
 statistical functions over large data — fast, exact where exactness is
@@ -3126,7 +3126,93 @@ before they are built**:
   18.8 ms, TPC-H (row) 234.0 / 226.1 → 228.8 / 227.4 ms; TPC-H Q15's
   307 → 344 ms, run alone three times alternating, was noise (best 288
   → 284).
-- **S4 — window functions**: item 5.
+- **S4 — window functions** ✅ (2026-11-06): item 5.
+  *Built:* `OVER (PARTITION BY … ORDER BY … frame)` and `WINDOW`
+  clauses (named windows refining one another, PostgreSQL's rules and
+  errors), every aggregate as a window aggregate, `row_number`, `rank`,
+  `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`, `lead`,
+  `first_value`, `last_value`, `nth_value`; frames `ROWS`, `RANGE` (with
+  offsets over numbers, dates and times) and `GROUPS`, `EXCLUDE`.  The
+  binder puts a `Sort` and a `Window` node per window (the calls sharing
+  a partition and order), so the sort is the one `ORDER BY` uses
+  (parallel over a pipeline, spilling past `work_mem`); an `ORDER BY`
+  the last window's sort already gives is left out.  The `Window` node
+  takes a partition at a time and evaluates each aggregate's frames by
+  the cheapest way that fits: one state for the whole partition; one
+  state grown row by row for frames from the partition's start, finished
+  in place where the aggregate allows it (`finish_keeps_state`, new,
+  true for every built-in but `string_agg` and `array_agg`), else a copy
+  of it; up to 64 rows added straight to a fresh group; a segment tree
+  of partial states for larger frames (`partial` / `combine`, so exact
+  sums stay exact); a fresh state per distinct frame for aggregates
+  whose states do not combine.  A partition is held in memory (spilling
+  one is left for later: no workload here has asked for it).
+  Tests: `48_window.slt` (every function, frame kind, exclusion, named
+  windows, windows over groups, the errors) with PostgreSQL 18's
+  expectations generated from it; every frame kind × eight bound pairs ×
+  four exclusions against a brute-force definition, with rows, batches
+  of 3, 8 workers and 64 kB of `work_mem` (the tree's query, the running
+  state, an `EXCLUDE TIES` cut and a `ROWS` bound mutated: each caught);
+  5000-row partitions past the scratch groups' renewal; the running
+  state against the cut-frame paths for nineteen aggregates (`min`'s
+  finish made destructive again: caught).
+  *Prior art:* Leis, Kundhikanti, Kemper, Neumann, "Efficient Processing
+  of Window Functions in Analytical SQL Queries" (VLDB 2015, HyPer) —
+  taken: the segment tree of partial aggregates for arbitrary frames,
+  the per-partition evaluation after one sort a window, and sharing that
+  sort between calls of one window; DuckDB's `WindowSegmentTree` (the
+  same paper) the same way, with its constant-aggregate and running
+  shortcuts.  Not taken: HyPer's partition-parallel sort (nucleus's
+  `Sort` already runs in parallel over a pipeline, and a partition's
+  evaluation stays on one thread for now).  PostgreSQL's
+  `nodeWindowAgg.c` — taken: its semantics, errors and default frames,
+  and its read-only final functions (`finalfunc_modify = READ_ONLY`) as
+  `finish_keeps_state`; not taken: its inverse transition functions
+  (moving-aggregate `msfunc`/`minvfunc`), which for floats accumulate
+  rounding — of 200,000 ten-row moving averages of the benchmark's `x`
+  it rounds 98,995 to another double than the exact average's (up to 2
+  ulps), and its running sum over 10M rows ends at 1.00000000045036e16
+  where the exact sum is 1.0000000004999998e16.  The exact accumulator's
+  subtraction would give an O(1) sliding sum without that error, and is
+  the step to take if a moving frame's cost asks for it; the segment
+  tree and direct feeding of small frames cover it now.  Found on the way: nucleus's own `avg` of doubles divided the
+  correctly rounded sum — two roundings, 79,983 of those 200,000
+  averages off by an ulp —, now `ExactSum::mean`: the exact sum divided
+  by the count in integers and rounded once (none off; `avg(x)` of
+  `[1e16, 1, 8]` is 3333333333333336.5, PostgreSQL's
+  3333333333333336).
+  *Measured* (`bench/stats/aggs.py`, its five window queries, best of
+  five): at 1M rows, the first version — its own row sort inside the
+  node, keys copied into every row, a fresh group per frame — took
+  row_number by groups 901 ms, top 3 884, running sum 1005, moving
+  average 1716, lag 695 (PostgreSQL 398, 312, 233, 875, 219).  The
+  `Sort` node below instead: 628 / 615 / 882 / 1417 / 590; keys read in
+  place, frames as fixed ranges, `RANGE` bounds by binary search (the
+  first version built an index vector per row: O(n²)): 531 / 484 / 754
+  / 1333 / 497; small frames fed directly and the running state
+  finished in place: 577 / 514 / 632 / 809 / 518 (the first two the same
+  within the noise).  At 10M rows, one round: 5662 / 5234 / 8484 / 8102 /
+  6901 ms, PostgreSQL 4537 / 3883 / 2585 / 7936 / 2411.  Where the time
+  goes: the sort — 10M rows by `id` alone 3.8 s, by `(g, x)` 5.1 s,
+  PostgreSQL's 1.6 and 1.9 s with 4 MB of `work_mem` — and PostgreSQL
+  reads `ORDER BY id` from the primary key's index (its plan has no
+  sort); then a partition of 10M rows held as rows (about 2 GB, walked
+  several times: the window's own cost per row grows from about 130 ns
+  at 1M rows to about 390 at 10M).  Against S3's build (`bench/stats/aggs.py`, 10M rows, two rounds
+  alternating): the ten aggregates the same within the noise (`avg` by
+  a million groups, now rounded once, 2130 / 2032 → 2113 / 2018 ms);
+  `bench/phases.py` two rounds: ClickBench (column) geometric mean
+  19.1 / 19.0 → 19.4 / 19.5 ms — Q32 437 → 458, run alone three times
+  alternating: best 422 / 424 / 437 → 416 / 418 / 424, noise —, TPC-H
+  (row) 227.3 / 228.0 → 224.6 / 218.9 ms.
+  *Next, recorded here:* (1) the sort itself, 2.3–2.7× PostgreSQL's on
+  the same rows (every `ORDER BY` gains); (2) orders the input already
+  has — a scan in its key's order, an index — so a `Sort` is left out
+  (the plan has no notion of a provided order yet; the final `ORDER BY`
+  matching the last window is the one case handled); (3) a partition
+  streamed rather than held, for the functions and frames that look a
+  bounded way ahead (`row_number`, ranks, `lag` / `lead`, running and
+  `ROWS` frames), as PostgreSQL's tuplestore does.
 - **S5 — ordered sets**: `WITHIN GROUP`, item 4's exact quantiles with
   spilling selection, `histogram`, `width_bucket`.
 - **S6 — sketches**: item 6, the sketch types included.
@@ -4755,3 +4841,10 @@ style) across a thousand seeds without failure.
 - **2026-11-06** — §M14.27 S3: two variables — `corr`, `covar_*`,
   `regr_*` as PostgreSQL's, from exact sums rounded once; exact products
   in one step, Knuth's long division.
+- **2026-11-06** — §M14.27 S4: window functions — `OVER`, `WINDOW`,
+  `ROWS` / `RANGE` / `GROUPS` frames with `EXCLUDE`, every aggregate
+  over its frame (a running state finished in place, small frames fed
+  directly, a segment tree of partial states), the ranking and value
+  functions, PostgreSQL's semantics and errors; a `Sort` per window,
+  the final `ORDER BY` left out when the last window gives it; `avg`
+  of doubles rounded once.

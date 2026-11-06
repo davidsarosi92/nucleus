@@ -712,6 +712,10 @@ impl GroupAccumulator for CountGroups {
     fn finish(&mut self, group: usize) -> Result<Value> {
         Ok(Value::Int(self.0[group]))
     }
+
+    fn finish_keeps_state(&self) -> bool {
+        true
+    }
 }
 
 /// A built-in aggregate's state.
@@ -851,11 +855,12 @@ impl Acc {
         Ok(())
     }
 
-    /// The running sum: the integers', the doubles' and the other values'.
-    fn total(&mut self) -> Result<Value> {
-        let mut value = std::mem::replace(&mut self.value, Value::Null);
+    /// The running sum: the integers', the doubles' and the other values'
+    /// (the state kept: a window's frame may grow).
+    fn total(&self) -> Result<Value> {
+        let mut value = self.value.clone();
         let alone = value.is_null() && self.float.is_none();
-        if let Some(int) = self.int.take() {
+        if let Some(int) = self.int {
             let int = match i64::try_from(int) {
                 Ok(i) if self.func == AggFunc::Sum => Value::Int(i),
                 Err(_) if self.func == AggFunc::Sum && alone => {
@@ -869,7 +874,7 @@ impl Acc {
                 crate::expr::binary(BinaryOp::Add, value, int)?
             };
         }
-        if let Some(f) = self.float.take() {
+        if let Some(f) = &self.float {
             let f = f.total().ok_or_else(crate::types::float_overflow)?;
             let f = if self.real && self.func == AggFunc::Sum {
                 let r = f as f32;
@@ -1229,6 +1234,10 @@ impl GroupAccumulator for Grouped {
         self.update(&rows, &vec![group; rows.len()], args)
     }
 
+    fn finish_keeps_state(&self) -> bool {
+        !matches!(self.func, AggFunc::StringAgg | AggFunc::ArrayAgg)
+    }
+
     fn combinable(&self) -> bool {
         // A string_agg's separator belongs to the row it follows, which a
         // partial state does not keep.
@@ -1329,7 +1338,7 @@ impl GroupAccumulator for Grouped {
         let func = self.func;
         match &mut self.states {
             States::Unset => Ok(Value::Null),
-            States::Values(v) => Ok(std::mem::replace(&mut v[group], Value::Null)),
+            States::Values(v) => Ok(v[group].clone()),
             States::Sums { rows, .. } if rows[group] == 0 => Ok(Value::Null),
             States::Sums { scale, sums, rows } => {
                 let sum = sums[group];
@@ -1444,18 +1453,25 @@ impl Accumulator for Acc {
         Ok(match self.func {
             AggFunc::Count => Value::Int(self.count),
             AggFunc::Sum => self.total()?,
-            AggFunc::Avg => match self.total()? {
-                _ if self.count == 0 => Value::Null,
-                Value::Numeric(d) => {
-                    Value::Numeric(d.checked_div(crate::decimal::Decimal::from_i64(self.count))?)
-                }
-                Value::Interval(i) => Value::Interval(i.checked_div(self.count as f64)?),
-                Value::Float(f) => Value::Float(f / self.count as f64),
-                _ => Value::Null,
+            // Doubles alone: their exact sum divided, rounded once.
+            AggFunc::Avg => match (&self.float, self.int, &self.value) {
+                (Some(f), None, Value::Null) if self.count > 0 => Value::Float(
+                    f.mean(self.count as u64)
+                        .ok_or_else(crate::types::float_overflow)?,
+                ),
+                _ => match self.total()? {
+                    _ if self.count == 0 => Value::Null,
+                    Value::Numeric(d) => Value::Numeric(
+                        d.checked_div(crate::decimal::Decimal::from_i64(self.count))?,
+                    ),
+                    Value::Interval(i) => Value::Interval(i.checked_div(self.count as f64)?),
+                    Value::Float(f) => Value::Float(f / self.count as f64),
+                    _ => Value::Null,
+                },
             },
             AggFunc::StringAgg => self.text.take().map_or(Value::Null, Value::Text),
             AggFunc::ArrayAgg => self.items.take().map_or(Value::Null, Value::Array),
-            _ => std::mem::replace(&mut self.value, Value::Null),
+            _ => self.value.clone(),
         })
     }
 }
