@@ -77,7 +77,11 @@ array_length array_append array_to_string cardinality gen_random_uuid
 uuidv7 encode decode sha256 md5 host network masklen current_user
 current_setting`; aggregates `count sum avg min max string_agg array_agg
 bool_and bool_or` (with `DISTINCT`, and `ORDER BY` inside the call:
-`string_agg(x, ',' ORDER BY x)`).
+`string_agg(x, ',' ORDER BY x)`); statistics `variance` / `var_samp`,
+`var_pop`, `stddev` / `stddev_samp`, `stddev_pop` (`numeric` for integers
+and decimals, as PostgreSQL's; `double precision` otherwise), `skewness`,
+`kurtosis` (sample-corrected, as DuckDB's and Excel's) — over doubles the
+exact value rounded once, the same bits however the rows are split.
 
 **Memory:** `SET work_mem = '256MB'` gives each sort and materialised
 result more memory before it spills to disk (default 64MB).  Scans,

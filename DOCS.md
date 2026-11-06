@@ -1652,8 +1652,29 @@ as an integer in units of 2⁻¹⁰⁷⁵, in 32-bit chunks held in 64-bit
 words, only the chunks touched kept; an addition or subtraction is three
 integer additions, `add_product` adds x·y exactly through a fused
 multiply-add; the result rounded once to nearest even from the integer;
-a worker's state passed as bytes), so they do not depend on the order
-either.  Not in parallel: an enclosing row (a correlated
+a worker's state passed as bytes — the chunks carried, all but the top
+in four bytes, without the zeros at either end — and added from them
+without building a state), so they do not depend on the order either.
+So do the moments (`moments`, §M14.27 S2): `var_samp` / `variance`,
+`var_pop`, `stddev_samp` / `stddev`, `stddev_pop`, `skewness`,
+`kurtosis`, one `GroupAccumulator` for all, combinable, its state the
+row count and the power sums.  Over doubles Σx … Σx⁴ are `ExactSum`s,
+each power added as its rounded value and its error (`add_product`'s
+fused multiply-add: x² = h + l exactly, then h·x, l·x, h², 2hl, l²), so
+the central sums are exact integers — C₂ = nΣx² − (Σx)², C₃, C₄ — formed
+in `bigint::BigInt` (sign and magnitude, base 2³², only at the end) and
+rounded once: the variance as C₂/(n(n−1)) rounded from the integer
+quotient and its remainder; the standard deviation the square root of
+that; skewness √(n(n−1))/(n−2) · C₃/C₂^1.5 and kurtosis
+(n−1)((n+1)C₄ − 3(n−1)C₂²)/((n−2)(n−3)C₂²) from the exact numerators,
+NULL below 3 (4) rows or with no spread, as DuckDB's.  Over integers and
+decimals the variance and standard deviation are PostgreSQL's
+`numeric_stddev_internal`: Σx and Σx² exact in `bigint::Wide<8>`
+(512-bit two's complement, no allocation a row), at the inputs' largest
+scale; the result at PostgreSQL's scale (`select_div_scale`: 16
+significant digits, at least twice the input's), half away from zero,
+the root an integer square root — the same digits, up to `numeric`'s 38
+(beyond: 22003, where PostgreSQL prints 39).  Not in parallel: an enclosing row (a correlated
 subquery's own plan), `EXPLAIN ANALYZE`, a volatile function or a
 subquery the workers cannot run in the pipeline (below), groups in key
 order past `work_mem` in a morsel, or merged on the statement's thread
@@ -3390,6 +3411,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.27 S2, moments:** `variance`, `var_pop`,
+  `stddev`, `stddev_pop` (and the `_samp` names), `skewness`, `kurtosis`
+  (§8.5, *Parallelism*), `bigint::BigInt` and `Wide`; `ExactSum`'s
+  state smaller and merged without copies (`avg` by a million groups
+  3.2 → 2.0 s).
 - **2026-11-06 — §M14.27 S1, the exact accumulator:** `fsum::ExactSum`
   is Neal's superaccumulator (§8.5, *Parallelism*): additions, exact
   subtraction and products, rounding from the integer; the split law

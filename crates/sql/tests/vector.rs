@@ -431,6 +431,70 @@ fn double_sums_are_exact_under_any_split() {
     }
 }
 
+/// Moments under any split (PLAN.md §M14.27 S2): variances, standard
+/// deviations, skewness and kurtosis of doubles, integers and decimals,
+/// the same bits at every worker count and batch size; a double variance
+/// the exact one rounded once.
+#[test]
+fn moments_are_the_same_under_any_split() {
+    use nucleus_sql::bigint::BigInt;
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(10)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE ms (id INT PRIMARY KEY, g INT, f FLOAT, i BIGINT, d NUMERIC(12, 3)); \
+         INSERT INTO ms SELECT i, i % 5, \
+           ((i::bigint * 7919) % 2001 - 1000)::float8 * power(2::float8, (i % 41) - 20), \
+           (i::bigint * 2654435761) % 1000003 - 500000, \
+           ((i::bigint * 40503) % 65537 - 32768) / 1000.0 \
+           FROM generate_series(1, 30000) i",
+    )
+    .unwrap();
+    let queries = [
+        "SELECT variance(f), var_pop(f), stddev(f), stddev_pop(f), skewness(f), kurtosis(f) FROM ms",
+        "SELECT variance(i), var_pop(i), stddev(i), stddev_pop(i), skewness(i), kurtosis(i) FROM ms",
+        "SELECT variance(d), var_pop(d), stddev(d), stddev_pop(d), skewness(d), kurtosis(d) FROM ms",
+        "SELECT g, variance(f), stddev(i), var_pop(d), skewness(f), kurtosis(i) FROM ms GROUP BY g ORDER BY g",
+        "SELECT g, stddev(f) FROM ms WHERE id % 7 = 3 GROUP BY g ORDER BY g",
+    ];
+    let mut want: Vec<Result<Vec<Vec<String>>, String>> = Vec::new();
+    for workers in [1, 2, 8, 32] {
+        for batch in [0, 3, 1024] {
+            let mut x = session(&db, batch);
+            x.execute(&format!("SET parallel_workers = {workers}"))
+                .unwrap();
+            for (k, q) in queries.iter().enumerate() {
+                let got = outcome(&mut x, q);
+                assert!(got.is_ok(), "{q}: {got:?}");
+                if want.len() <= k {
+                    want.push(got);
+                } else {
+                    assert_eq!(got, want[k], "{workers} workers, batch {batch}: {q}");
+                }
+            }
+        }
+    }
+    // The double variance: (n·Σx² − (Σx)²) / (n(n − 1)) exactly, in units
+    // of 2⁻⁴⁰ for x² (2⁻²⁰ for x), rounded once.
+    let n = 30000u128;
+    let (mut s1, mut s2) = (BigInt::zero(), BigInt::zero());
+    for i in 1..=30000i64 {
+        let k = i128::from((i * 7919) % 2001 - 1000);
+        let e = (i % 41) as u64; // x = k · 2^(e − 20)
+        s1 = s1.add(&BigInt::from_i128(k).shl(e));
+        s2 = s2.add(&BigInt::from_i128(k * k).shl(2 * e));
+    }
+    let num = BigInt::from_u128(n).mul(&s2).sub(&s1.mul(&s1));
+    let (q, r) = num.shl(64).divmod_mag(n * (n - 1));
+    let exact = q.to_f64(-40 - 64, r != 0);
+    let got: f64 = want[0].as_ref().unwrap()[0][0].parse().unwrap();
+    assert_eq!(got, exact);
+}
+
 #[test]
 fn parallel_aggregates_agree() {
     // Big enough to split into morsels; the simulation offers one CPU, so

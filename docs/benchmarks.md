@@ -851,7 +851,31 @@ five, builds alternating round by round, answers compared.  2026-11-06,
 | `sum(x)` by 1000 groups | 197 / 209 | 197 / 197 |
 | `avg(y)` by a million groups | 2,278 / 2,486 | 2,369 / 2,486 |
 
-The same answers to the bit; the scan, not the accumulator, is the cost.
+The same answers to the bit.  (Measured again under S2, against the
+builds before and after S1, the million groups had been slower — 2,368
+/ 2,678 → 3,199 ms — until S2's smaller state.)
+
+2026-11-06, §M14.27 S2 (moments; `ExactSum`'s state passed between
+workers smaller and merged without copies), two rounds against S1's
+build; PostgreSQL 18 (Docker, its parallel workers) and numpy (one core,
+the same data in an array) beside them:
+
+| query | S1 (ms) | S2 (ms) | PostgreSQL 18 (ms) | numpy (ms) |
+|---|---:|---:|---:|---:|
+| `sum(x)` | 207 / 237 | 197 / 197 | 149 | 2 |
+| `avg(y)` | 211 / 219 | 196 / 186 | 171 | |
+| `sum(x)` by 1000 groups | 203 / 225 | 199 / 192 | 329 | |
+| `avg(y)` by a million groups | 3,068 / 3,166 | 2,089 / 1,985 | 2,351 | |
+| `variance(x)` | — | 189 / 194 | 163 | 8 |
+| `stddev(x)` by 1000 groups | — | 225 / 225 | 350 | |
+| `variance(id)` (integers) | — | 174 / 162 | 243 | |
+| `skewness(x)`, `kurtosis(x)` | — | 307 / 314 | — | |
+
+nucleus gives the same bits every run: the variance of `x` (values near
+1e9) is the exact 0.08333332757266079; PostgreSQL's differs between runs
+(0.0833333256511713, 0.0833333257012356) and from the ninth digit, as
+its `sum(x)` does from the sixteenth.  numpy is an array in memory, not
+a table scan.
 
 ## Write amplification
 

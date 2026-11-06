@@ -11,8 +11,10 @@
 //! subtraction the same (a sliding window removes a row exactly).  Only
 //! the chunks a sum has touched are kept (a window, grown as values come),
 //! so a state of values of like magnitude is a few words, not Neal's 67.
-//! The result is rounded once, from the integer: its top 53 bits, the next
-//! bit and whether any below it is set.
+//! The result is rounded once, from the integer ([`BigInt::to_f64`]: its
+//! top 53 bits, the next bit and whether any below it is set).
+
+use crate::bigint::BigInt;
 
 /// Chunks of 32 bits: a chunk holds additions of up to 2³² each, so
 /// `CARRY_EVERY` of them cannot overflow its 64 bits.
@@ -129,18 +131,24 @@ impl ExactSum {
         }
     }
 
-    /// Each chunk brought into [−2³¹, 2³¹) by carrying into the next (the
-    /// top chunk keeps what is left: a double's sum never reaches past it).
+    /// Each chunk brought into [−2³¹, 2³¹) by carrying into the next; a
+    /// chunk is added above the top only when the top is out of that range
+    /// (at chunk 66 the top keeps what is left: a double's sum never
+    /// reaches past it).
     fn carry(&mut self) {
-        let n = self.chunks.len();
-        if n > 0 && self.lo + n < CHUNKS {
-            self.chunks.push(0);
-        }
         let n = self.chunks.len();
         for i in 0..n.saturating_sub(1) {
             let c = (self.chunks[i] + (1 << 31)) >> 32;
             self.chunks[i] -= c << 32;
             self.chunks[i + 1] += c;
+        }
+        while let Some(&top) = self.chunks.last() {
+            let c = (top + (1 << 31)) >> 32;
+            if c == 0 || self.lo + self.chunks.len() == CHUNKS {
+                break;
+            }
+            *self.chunks.last_mut().unwrap() -= c << 32;
+            self.chunks.push(c);
         }
         self.adds = 0;
     }
@@ -148,15 +156,21 @@ impl ExactSum {
     /// Adds everything `other` holds.
     pub fn merge(&mut self, other: &ExactSum) {
         if !other.chunks.is_empty() {
-            self.carry();
-            let mut o = other.clone();
-            o.carry();
-            self.cover(o.lo, o.lo + o.chunks.len());
-            let at = o.lo - self.lo;
-            for (i, c) in o.chunks.iter().enumerate() {
-                self.chunks[at + i] += c;
+            // A chunk holds up to (adds + 1) · 2³² in magnitude, so the
+            // two together are one more addition than both counts.
+            if self.adds + other.adds >= CARRY_EVERY - 1 {
+                self.carry();
             }
-            self.carry();
+            let o = other.lo + other.chunks.len();
+            self.cover(other.lo, o);
+            let at = other.lo - self.lo;
+            for (s, c) in self.chunks[at..].iter_mut().zip(&other.chunks) {
+                *s += c;
+            }
+            self.adds += other.adds + 1;
+            if self.adds >= CARRY_EVERY {
+                self.carry();
+            }
         }
         if let Some(s) = other.special {
             self.special = Some(self.special.map_or(s, |t| t + s));
@@ -169,99 +183,116 @@ impl ExactSum {
         if let Some(s) = self.special {
             return Some(s);
         }
-        let mut s = self.clone();
-        s.carry();
-        let mut d = s.chunks;
-        // The sign is the top nonzero chunk's (the ones below it, each in
-        // [−2³¹, 2³¹), add up to less than one of its units).
-        let Some(top) = d.iter().rposition(|&c| c != 0) else {
-            return Some(0.0);
-        };
-        let negative = d[top] < 0;
-        if negative {
-            d.iter_mut().for_each(|c| *c = -*c);
-        }
-        // Digits in [0, 2³²): borrows carried up (the top stays positive).
-        for i in 0..top {
-            if d[i] < 0 {
-                d[i] += 1 << 32;
-                d[i + 1] -= 1;
-            }
-        }
-        d.truncate(top + 1);
-        let top = d.iter().rposition(|&c| c != 0).expect("positive");
-        if d[top] >> 32 != 0 {
+        let (v, exp) = self.exact()?;
+        let x = v.to_f64(exp, false);
+        x.is_finite().then_some(x)
+    }
+
+    /// The sum exactly, `v · 2^exp`; `None` when an infinity or `NaN` was
+    /// added.
+    pub fn exact(&self) -> Option<(BigInt, i64)> {
+        if self.special.is_some() {
             return None;
         }
-        let lo = s.lo;
-        // Bit `i` of the magnitude, in units of 2⁻¹⁰⁷⁵.
-        let bit = |i: usize| -> u64 {
-            let (k, b) = (i / 32, i % 32);
-            if k < lo || k - lo >= d.len() {
-                0
-            } else {
-                (d[k - lo] as u64 >> b) & 1
-            }
-        };
-        let high = 32 * (lo + top) + 63 - (d[top] as u64).leading_zeros() as usize;
-        // The significand: 53 bits from the top, or fewer down to the
-        // subnormals' grid (2⁻¹⁰⁷⁴: units of 2, so at least one bit off).
-        let mut shift = high.saturating_sub(52).max(1);
-        let mut m = 0u64;
-        for i in (shift..=high).rev() {
-            m = (m << 1) | bit(i);
-        }
-        let round = bit(shift - 1) == 1;
-        let sticky = (lo * 32..shift - 1).any(|i| bit(i) == 1);
-        if round && (sticky || m & 1 == 1) {
-            m += 1;
-            if m == 1 << 53 {
-                m >>= 1;
-                shift += 1;
-            }
-        }
-        // A normal double's exponent field is `shift` itself: the value is
-        // m · 2^(shift − 1075), m in [2⁵², 2⁵³).
-        let bits = if m >> 52 == 0 {
-            m
-        } else if shift >= 0x7ff {
-            return None;
-        } else {
-            ((shift as u64) << 52) | (m & ((1 << 52) - 1))
-        };
-        Some(f64::from_bits(bits | (u64::from(negative) << 63)))
+        Some((
+            BigInt::from_signed_digits(&self.chunks),
+            32 * self.lo as i64 - 1075,
+        ))
     }
 
     /// The state as bytes, for [`ExactSum::from_bytes`] in another
-    /// thread's accumulator: the first chunk's place, the chunks, and the
-    /// special sum.
+    /// thread's accumulator: the first chunk's place, whether a special
+    /// sum follows (and it), then the chunks carried — each but the top in
+    /// 4 bytes, the top in 8 — without the zero chunks at either end.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut s = self.clone();
-        s.carry();
-        let mut out = Vec::with_capacity(10 + 8 * s.chunks.len());
-        out.push(s.lo as u8);
-        out.push(u8::from(s.special.is_some()));
-        out.extend_from_slice(&s.special.unwrap_or(0.0).to_le_bytes());
-        for c in &s.chunks {
-            out.extend_from_slice(&c.to_le_bytes());
+        let mut out = Vec::with_capacity(18 + 4 * self.chunks.len());
+        out.push(0);
+        match self.special {
+            Some(s) => {
+                out.push(1);
+                out.extend_from_slice(&s.to_le_bytes());
+            }
+            None => out.push(0),
         }
+        let head = out.len();
+        let mut lo = self.lo;
+        let mut carry = 0i64;
+        let n = self.chunks.len();
+        for (i, &c) in self.chunks.iter().enumerate() {
+            let v = c + carry;
+            if i + 1 == n {
+                // The top, and what a carry out of it leaves above.
+                let mut v = v;
+                while lo + (out.len() - head) / 4 + 1 < CHUNKS {
+                    let up = (v + (1 << 31)) >> 32;
+                    if up == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&((v - (up << 32)) as i32).to_le_bytes());
+                    v = up;
+                }
+                if v != 0 || out.len() > head {
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+                break;
+            }
+            carry = (v + (1 << 31)) >> 32;
+            let d = (v - (carry << 32)) as i32;
+            if d == 0 && out.len() == head {
+                lo += 1;
+            } else {
+                out.extend_from_slice(&d.to_le_bytes());
+            }
+        }
+        // Zero chunks below the top, now the top's 8 bytes are known.
+        out[0] = lo.min(CHUNKS) as u8;
         out
     }
 
     /// A state from [`ExactSum::to_bytes`]; `None` if malformed.
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
-        let (head, rest) = b.split_at_checked(10)?;
-        let (chunks, tail) = rest.as_chunks::<8>();
-        let lo = usize::from(head[0]);
-        if !tail.is_empty() || lo + chunks.len() > CHUNKS {
-            return None;
+        let mut s = ExactSum::new();
+        s.merge_bytes(b)?;
+        Some(s)
+    }
+
+    /// Adds a state [`ExactSum::to_bytes`] made, without building it;
+    /// `None` (and nothing added) if malformed.
+    pub fn merge_bytes(&mut self, b: &[u8]) -> Option<()> {
+        let (&lo, rest) = b.split_first()?;
+        let (&flag, rest) = rest.split_first()?;
+        let (special, rest) = match flag {
+            0 => (None, rest),
+            1 => {
+                let (s, rest) = rest.split_first_chunk::<8>()?;
+                (Some(f64::from_le_bytes(*s)), rest)
+            }
+            _ => return None,
+        };
+        let lo = usize::from(lo);
+        if !rest.is_empty() {
+            let (digits, top) = rest.split_at_checked(rest.len().checked_sub(8)?)?;
+            let (digits, tail) = digits.as_chunks::<4>();
+            let to = lo + digits.len() + 1;
+            if !tail.is_empty() || to > CHUNKS {
+                return None;
+            }
+            if self.adds >= CARRY_EVERY - 1 {
+                self.carry();
+            }
+            self.cover(lo, to);
+            let at = lo - self.lo;
+            let w = &mut self.chunks[at..at + digits.len() + 1];
+            for (s, d) in w.iter_mut().zip(digits) {
+                *s += i64::from(i32::from_le_bytes(*d));
+            }
+            w[digits.len()] += i64::from_le_bytes(top.try_into().ok()?);
+            self.adds += 1;
         }
-        Some(ExactSum {
-            chunks: chunks.iter().map(|c| i64::from_le_bytes(*c)).collect(),
-            lo,
-            adds: 0,
-            special: (head[1] == 1).then(|| f64::from_le_bytes(head[2..10].try_into().unwrap())),
-        })
+        if let Some(s) = special {
+            self.special = Some(self.special.map_or(s, |t| t + s));
+        }
+        Some(())
     }
 }
 
@@ -316,6 +347,44 @@ mod tests {
             let b = ExactSum::from_bytes(&a.to_bytes()).unwrap();
             assert_eq!(b.total(), sum(&xs));
         }
+    }
+
+    /// A state through its bytes, alone and into another, is the same sum:
+    /// negative, cancelled to zero, at the top of the range, special.
+    #[test]
+    fn states_survive_their_bytes() {
+        let cases: &[&[f64]] = &[
+            &[],
+            &[-1.5],
+            &[1.0, -1.0],
+            &[1e300, -1e-300, 3.0],
+            &[f64::MAX, f64::MAX, -f64::MAX],
+            &[-f64::MAX, -f64::MAX, 5e-324],
+            &[5e-324, -1e-320],
+            &[f64::NAN, 1.0],
+            &[-(2f64.powi(31)), 2f64.powi(-1000)],
+        ];
+        for xs in cases {
+            let mut a = ExactSum::new();
+            xs.iter().for_each(|&x| a.add(x));
+            let bytes = a.to_bytes();
+            let b = ExactSum::from_bytes(&bytes).unwrap();
+            let (want, got) = (a.total(), b.total());
+            assert!(want == got || want.unwrap().is_nan() && got.unwrap().is_nan());
+            let mut c = ExactSum::new();
+            c.add(0.25);
+            c.add(-1e200);
+            c.merge_bytes(&bytes).unwrap();
+            let mut d = ExactSum::new();
+            [0.25, -1e200]
+                .iter()
+                .chain(xs.iter())
+                .for_each(|&x| d.add(x));
+            let (want, got) = (d.total(), c.total());
+            assert!(want == got || want.unwrap().is_nan() && got.unwrap().is_nan());
+        }
+        assert!(ExactSum::from_bytes(&[0, 2]).is_none());
+        assert!(ExactSum::from_bytes(&[66, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]).is_none());
     }
 
     /// Against exact rational arithmetic: integers in units of 2⁻¹⁰⁷⁴ for

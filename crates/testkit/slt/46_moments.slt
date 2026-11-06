@@ -1,0 +1,138 @@
+# Moments (PLAN.md §M14.27 S2): variances and standard deviations as
+# PostgreSQL's — numeric for integers and decimals, at its scales, checked
+# against PostgreSQL 18 — and exact for doubles; skewness and kurtosis as
+# DuckDB's, from exact power sums.
+
+query TTTT
+SELECT variance(x)::text, var_pop(x)::text, stddev(x)::text, stddev_pop(x)::text FROM generate_series(1, 3) x
+----
+1.00000000000000000000 0.66666666666666666667 1.00000000000000000000 0.81649658092772603273
+
+query TTTT
+SELECT var_samp(x)::text, var_pop(x)::text, stddev_samp(x)::text, stddev_pop(x)::text FROM generate_series(1, 4) x
+----
+1.6666666666666667 1.2500000000000000 1.2909944487358056 1.1180339887498948
+
+query TTTT
+SELECT variance(x)::text, var_pop(x)::text, stddev(x)::text, stddev_pop(x)::text FROM (VALUES (1.5::numeric(10,2)), (2.25), (3)) v(x)
+----
+0.56250000000000000000 0.37500000000000000000 0.75000000000000000000 0.61237243569579452455
+
+# One row: no sample variance; a population's is zero.  No rows: NULL.
+query TTTT
+SELECT variance(x)::text, var_pop(x)::text, stddev(x)::text, stddev_pop(x)::text FROM (VALUES (7)) v(x)
+----
+NULL 0 NULL 0
+
+query TT
+SELECT variance(x)::text, var_pop(x)::text FROM (SELECT 1 x WHERE false) q
+----
+NULL NULL
+
+query TT
+SELECT stddev(x)::text, stddev_pop(x)::text FROM (VALUES (9223372036854775807::bigint), (-9223372036854775807), (5)) v(x)
+----
+9223372036854775807 7530851732716320751
+
+query T
+SELECT variance(x)::text FROM (VALUES (0.001::numeric), (0.002), (0.004)) v(x)
+----
+0.000002333333333333333333
+
+query TT
+SELECT variance(x)::text, stddev(x)::text FROM (VALUES (100), (200), (400)) v(x)
+----
+23333.333333333333 152.752523165195
+
+query TT
+SELECT var_pop(x)::text, stddev_pop(x)::text FROM (VALUES (2::smallint), (4), (4), (4), (5), (5), (7), (9)) v(x)
+----
+4.0000000000000000 2.0000000000000000
+
+# nucleus's numeric has 38 digits (PostgreSQL's here: 39).
+statement error 22003
+SELECT variance(x) FROM (VALUES (9223372036854775807::bigint), (-9223372036854775807)) v(x)
+
+# Doubles: the exact variance rounded once.
+query TTT
+SELECT variance(x)::text, stddev(x)::text, var_pop(x)::text FROM (VALUES (1.5::float8), (2.5), (4)) v(x)
+----
+1.5833333333333333 1.2583057392117916 1.0555555555555556
+
+query T
+SELECT variance(x::real)::text FROM (VALUES (1.5), (2.5), (4)) v(x)
+----
+1.5833333333333333
+
+# On a large offset (PostgreSQL's update gives 0.009999969005609916; the
+# exact value of these doubles is 0.00999999284744509…).
+query T
+SELECT variance(x)::text FROM (VALUES (1e9 + 0.1::float8), (1e9 + 0.2), (1e9 + 0.3)) v(x)
+----
+0.00999999284744509
+
+query TT
+SELECT variance(x)::text, stddev_pop(x)::text FROM (VALUES ('NaN'::float8), (1)) v(x)
+----
+NaN NaN
+
+query T
+SELECT variance(x)::text FROM (VALUES ('Infinity'::float8), (1)) v(x)
+----
+NaN
+
+statement error 22003
+SELECT variance(x) FROM (VALUES (1e200::float8), (2e200)) v(x)
+
+statement error 42883
+SELECT variance(x) FROM (VALUES ('a'::text)) v(x)
+
+# Skewness and kurtosis (DuckDB's sample-corrected definitions; DuckDB
+# 1.x agrees but on the offset data, where it loses digits).
+query TT
+SELECT skewness(x)::text, kurtosis(x)::text FROM (VALUES (1.0), (2.0), (3.0), (10.0)) v(x)
+----
+1.763632614803888 3.228
+
+query TT
+SELECT skewness(x)::text, kurtosis(x)::text FROM (VALUES (2), (4), (4), (4), (5), (5), (7), (9)) v(x)
+----
+0.8184875533567996 0.940625
+
+query TT
+SELECT skewness(x)::text, kurtosis(x)::text FROM (VALUES (1e9 + 0.1::float8), (1e9 + 0.2), (1e9 + 0.7), (1e9 + 0.3)) v(x)
+----
+1.4430592145217407 2.234868860787898
+
+# No spread, or too few rows: NULL.
+query TTTT
+SELECT skewness(x)::text, kurtosis(x)::text, skewness(y)::text, kurtosis(y)::text FROM (VALUES (1, 1), (1, 2), (1, 3)) v(x, y)
+----
+NULL NULL 0 NULL
+
+query TT
+SELECT skewness(x)::text, kurtosis(x)::text FROM (VALUES (1), (2)) v(x)
+----
+NULL NULL
+
+# By group, and as a filter's input.
+statement ok
+CREATE TABLE m (id INT PRIMARY KEY, g INT, x INT, f FLOAT)
+
+statement ok
+INSERT INTO m SELECT i, i % 3, i * i, i * 0.5 FROM generate_series(1, 30) i
+
+query ITTT
+SELECT g, variance(x)::text, stddev(f)::text, skewness(f)::text FROM m GROUP BY g ORDER BY g
+----
+0 94594.500000000000 4.541475531146237 0
+1 74134.500000000000 4.541475531146237 0
+2 84034.500000000000 4.541475531146237 0
+
+query I
+SELECT count(*) FROM m WHERE x > (SELECT avg(x) + stddev(x) FROM m)
+----
+6
+
+statement ok
+DROP TABLE m

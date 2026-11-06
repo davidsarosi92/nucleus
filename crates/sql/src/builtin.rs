@@ -128,6 +128,7 @@ impl Module for Builtin {
         }
         crate::uuid::register(r)?;
         crate::vectors::register(r)?;
+        crate::moments::register(r)?;
         crate::bytea::register(r)?;
         crate::inet::register(r)?;
         crate::statements::register(r)?;
@@ -806,10 +807,10 @@ impl Acc {
             self.int = Some(self.int.unwrap_or(0) + i);
         }
         if let Value::Bytea(f) = float {
-            let other = ExactSum::from_bytes(&f).ok_or_else(bad)?;
             self.float
                 .get_or_insert_with(Default::default)
-                .merge(&other);
+                .merge_bytes(&f)
+                .ok_or_else(bad)?;
             self.real &= real == Value::Bool(true);
         }
         if let Value::Array(more) = items {
