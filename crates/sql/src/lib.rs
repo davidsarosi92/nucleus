@@ -63,6 +63,7 @@ pub mod rules;
 pub mod segment;
 pub mod session;
 pub mod sessions;
+pub mod sorter;
 pub mod spill;
 pub mod statements;
 pub mod stats;

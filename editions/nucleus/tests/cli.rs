@@ -287,7 +287,7 @@ fn an_mcp_client_lists_describes_and_queries() {
         "{text}"
     );
     assert_eq!(content(8)["row_count"], 2);
-    let plan = content(9)["plan"][1].as_str().unwrap();
+    let plan = content(9)["plan"].to_string();
     assert!(
         plan.contains("Index Scan using primary key on customers"),
         "{plan}"

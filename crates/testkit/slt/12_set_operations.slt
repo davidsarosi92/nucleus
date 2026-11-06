@@ -107,7 +107,5 @@ query T
 EXPLAIN SELECT x FROM a EXCEPT ALL SELECT x FROM b
 ----
 Except All
-  Project: #0
-    Seq Scan on a
-  Project: #0
-    Seq Scan on b
+  Seq Scan on a
+  Seq Scan on b

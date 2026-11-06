@@ -274,7 +274,7 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
-| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions) |
+| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -2797,7 +2797,7 @@ Every result the same, but for ties at a `LIMIT`.  Left as findings,
 not targets: the `LIMIT`-over-a-failing-join finding (W6), TPC-H Q19 on
 column tables (an `OR` of conjunctions across a join, 1.93×).
 
-### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S4 ✅)
+### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S4, S4·sort ✅)
 
 **First a study, then the plan.**  Can nucleus give mathematical and
 statistical functions over large data — fast, exact where exactness is
@@ -3213,6 +3213,81 @@ before they are built**:
   streamed rather than held, for the functions and frames that look a
   bounded way ahead (`row_number`, ranks, `lag` / `lead`, running and
   `ROWS` frames), as PostgreSQL's tuplestore does.
+- **S4·sort — the sort, and orders a plan already has** ✅ (2026-11-06):
+  S4's next steps (1) and (2).
+  *Built:* one sorter (`sorter.rs`) for every full sort — `ORDER BY`,
+  a window's sort, the spilled sorts of `DISTINCT` and set operations —
+  in place of the keyed-row sort and its heap merge.  A row becomes one
+  record: a normalized key (per key a null byte placed by `NULLS
+  FIRST / LAST`, then the value's order-preserving encoding, the bytes
+  inverted for `DESC`), the key values, the row.  Keys of one type
+  whose encoding orders as the type does (booleans, integers, floats,
+  numerics, text, `char`, dates, times, timestamps, `bytea`) compare as
+  bytes, an 8-byte abbreviated prefix first; other or mixed keys
+  compare as values.  Each worker sorts chunks of `work_mem` / 2 a
+  worker stably; chunks stay in memory while the statement's budget
+  holds them and go to a scratch run past it, with an index entry every
+  128 records.  The merge splits the key space into ranges by
+  splitters sampled from the parts, finds each range's start in every
+  part by binary search (in memory, or through a run's index), and
+  merges the ranges on the workers into ordered slots read in turn,
+  a bounded number ahead; small inputs merge on one thread, and more
+  than 512 parts are merged a group at a time first.  Ties go to the
+  earlier part, so the sort is stable.
+  Orders a plan has: a `Sort` whose keys are an ascending prefix of the
+  primary key, over a scan of an unpartitioned table in key order
+  (through filters, projections, row security), is left out — a
+  table's scan returns rows in primary-key order in row and column
+  storage alike, within a transaction too.  An identity projection
+  left behind is dropped.  Two things that made a sort's absence
+  visible: an unfiltered chain ran on one thread (it now runs on the
+  workers unless a `LIMIT` of at most 65,536 rows stops it early), and
+  a `LIMIT`'s bound reached only its input (it now reaches the scan
+  through projections and filters, so `ORDER BY id LIMIT 3` reads
+  three rows).
+  Tests: the sorter against a stable sort by `spill::compare` — 36
+  rounds × four direction / null orders × five settings (memory only,
+  spilling, one to eight workers, one to many parts), keys of every
+  normalizable kind with NaN, ±0 and infinities, numerics, intervals,
+  mixed integers and floats (a flipped tie and a run's range start
+  mutated: both caught); 812 parts merged a group at a time; enum keys
+  and arrays through the scratch runs.  `sort.rs`: 30,000 rows in five
+  settings, stable against a reference; the `Sort` count of twelve
+  plans and their order in row and column storage, inside a
+  transaction with inserts, updates and deletes.
+  *Prior art:* normalized keys compared as bytes — System R's and
+  DuckDB's (`RowLayout`, its sort keys): taken, with values kept for
+  the kinds whose encoding does not order; PostgreSQL's abbreviated
+  keys: taken as the 8-byte prefix; PostgreSQL's external merge and
+  Gather Merge: their spill-past-`work_mem` and their single merge
+  thread not taken — the merge is split by key ranges as in Merge Path
+  (Odeh, Green, Mwassi, Shmueli, Birk, IPDPS 2012) and DuckDB's
+  parallel merge sort, here by sampled splitters rather than exact
+  co-ranks, which a scratch run's sparse index makes cheap.  Orders a
+  plan has: PostgreSQL's pathkeys and DuckDB's / Umbra's order
+  properties — taken only the case that pays now (a primary key's
+  scan); indexes, merge joins and group orders are left for when a
+  workload asks.
+  *Measured* (10M rows of `bench/stats/aggs.py`'s table, best of
+  three, against S4's build; PostgreSQL 18 with 4 MB `work_mem`):
+  `ORDER BY id` read whole 3830 → 867 ms (the sorter alone 1567;
+  PostgreSQL 1650, from its index); `ORDER BY g, x` 5140 → 1800
+  (PostgreSQL 1890); `ORDER BY x DESC` 1530; `ORDER BY id LIMIT 3` 195
+  → 0.1 ms, `… OFFSET 5000000` 212; an unfiltered scan read whole 2429
+  → 840.  S4's window queries, 10M rows, best of two rounds: 5662 /
+  5234 / 8484 / 8102 / 6901 → 2534 / 2207 / 3447 / 5242 / 2578 ms
+  (PostgreSQL 4507 / 3880 / 2570 / 7924 / 2407); the running sum and
+  `lag` are left behind PostgreSQL's by the 10M-row partition held in
+  memory (next).  `bench/run.py`, 1M rows: the sort 279 → 82 ms
+  (PostgreSQL 155).  `bench/phases.py` two rounds alternating:
+  ClickBench (column) geometric mean 19.3 / 18.9 → 17.4 / 17.7 ms (Q32
+  413 → 306, Q18 166 → 129, Q39 228 → 185; all three group by many
+  keys, the cause not isolated), TPC-H (row) 228.6 / 230.1 → 230.5 / 231.2, the same
+  within the noise.
+  *Next, recorded here:* S4's (3), a partition streamed rather than
+  held; a sort's records narrower than the row (only the columns read
+  above it); a sort's scratch runs shared by the workers rather than
+  one file a part.
 - **S5 — ordered sets**: `WITHIN GROUP`, item 4's exact quantiles with
   spilling selection, `histogram`, `width_bucket`.
 - **S6 — sketches**: item 6, the sketch types included.
@@ -4848,3 +4923,9 @@ style) across a thousand seeds without failure.
   functions, PostgreSQL's semantics and errors; a `Sort` per window,
   the final `ORDER BY` left out when the last window gives it; `avg`
   of doubles rounded once.
+- **2026-11-06** — §M14.27 S4·sort: one sorter for every full sort —
+  normalized keys with an abbreviated prefix, chunks in memory or in
+  indexed scratch runs, a merge split into key ranges on the workers
+  (`ORDER BY` 2–4× faster at 10M rows, past PostgreSQL's); a `Sort` a
+  primary key's scan gives left out; unfiltered chains on the workers,
+  a `LIMIT`'s bound down to the scan.

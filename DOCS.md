@@ -1687,7 +1687,10 @@ sum, 32 for a value, 8 for a count); a group's accumulators grow by half again, 
 a group at a time, and a single integer key is found and placed in one
 probe.  A pipeline whose output becomes rows
 runs in rounds of a morsel per worker, each round's rows given in morsel
-order.  So the result is a single pass's — groups in the order first
+order — one that only projects, too, unless a `LIMIT` stops it within
+65 536 rows (`vector::SERIAL_ROWS`: then it streams on the statement's
+thread, a round's morsels would read more; the limit marks the chain
+below it).  So the result is a single pass's — groups in the order first
 seen, rows in key order, the first error the one a single pass meets, a
 `LIMIT` stopping after the round it needs.  `UPDATE` and `DELETE` find
 their rows the same way (vectorized, in parallel when they can be) when
@@ -1773,9 +1776,10 @@ would stop, and none from rows a `LIMIT` stops short of.
 `work_mem` (`SET work_mem = '256MB'`, or the database's setting; default
 64 MiB): past it, the rest goes to scratch space — the KV contract's
 `scratch()` (§6.1), files in the data directory's `scratch/` — and is read
-back.  Sorts are external merge sorts (sorted runs of a `work_mem`'s
-worth, merged 64 at a time, in passes when there are more; ties keep the
-input's order) — under a `LIMIT` (a sort right below it), only the rows
+back.  Sorts sort records in chunks, each kept in memory while the
+sort's chunks fit in `work_mem` and written to scratch space past it,
+then merge them by key ranges (`sorter`, below; ties keep the input's
+order) — under a `LIMIT` (a sort right below it), only the rows
 it takes and skips, kept in a heap of that many once twice as many
 came (`spill::Top`, PostgreSQL's bounded sort) while it fits, a row turned away by one
 comparison, and the full sort past `work_mem`; materialised CTEs, recursive CTEs' rounds and results,
@@ -1860,18 +1864,40 @@ skips the segments whose least and greatest values miss the keys'
 range.  The filter is made in every executor alike (a row at a time,
 by batches, on workers, past work_mem), so their rows and errors agree;
 an error on a row only the key filter drops does not come.  `EXPLAIN
-ANALYZE` marks the scan `(join key filter)`.  A **sort** of a
-pipeline sorts its morsels on worker threads (keys a batch at a time) and
-merges them; a morsel, or a sort's buffer in memory, is ordered by
-normalized keys when its key columns each hold one kind whose index
-encoding orders as the comparison does (integers, text, `char(n)`,
-dates, times, timestamps, booleans): each row's keys one byte string
-(`encoding::encode_key_value` after a byte placing a `NULL` first or
-last, a descending key's bytes inverted), compared by `memcmp`, ties in
-the order they came (`spill::sort_keyed`); doubles, decimals and mixed
-kinds keep the comparison.  The morsels are then merged (`spill::merge_sorted`; ties to the earlier morsel, so the
-order is a stable sort's); under a `LIMIT` each morsel keeps its own
-heap of the rows taken, a row built only when its keys enter it.
+ANALYZE` marks the scan `(join key filter)`.  A **sort** (`sorter`,
+§M14.27 S4·sort) takes each row and its keys as one record of bytes:
+the keys *normalized* — each a byte placing a `NULL` first or last, then
+its index encoding (`encoding::encode_key_value`), a descending key's
+bytes inverted, so the records' bytewise order is the keys' —, then the
+keys' values and the row's (the scratch codec).  A record is a few dozen
+bytes where a row of values is hundreds, and two compare by their first
+eight bytes as an integer, then by `memcmp`.  Where a key column holds
+values whose encoding does not order as the comparison does (intervals,
+enums, registered types, arrays) or of two kinds (a `UNION`'s integers
+and doubles), records compare by their key values.  A sort of a
+pipeline runs a sorter a morsel on the workers (keys a batch at a time);
+a sorter fills a chunk of records (`work_mem` shared by twice the
+workers), sorts it stably and keeps it — in memory while the sort's
+chunks fit in `work_mem` (`sorter::Budget`), else in scratch space with
+every 128th record's key as an index.  The merge cuts the keys into
+ranges by splitters sampled from the chunks (their indexes, on disk),
+finds each chunk's share of a range by binary search (or through its
+index), and merges the ranges on worker threads, two a worker ahead of
+the reader, their rows given in order; ties go to the earlier chunk —
+the morsels' order —, so the order is a single pass's stable sort.
+Under 32 768 rows, or on one worker, one heap merge streams.  Under a
+`LIMIT` each morsel keeps its own heap of the rows taken, a row built
+only when its keys enter it, and the heaps are merged the same way.
+A sort is **not run** when its input is already in its order
+(`optimizer::sorted`): a table is read in primary-key order — a row
+table's tree, a column table's segments and delta merged, a parallel
+scan's morsels in key order —, through filters and projections, so an
+`ORDER BY` of a prefix of the key, ascending, is that order (the key is
+never `NULL`; ties, in a stable sort, keep the input's order — the
+key's — too; past the whole key, further keys change nothing), for keys
+of kinds whose encoding orders as `ORDER BY` does.  `ORDER BY id LIMIT
+10` then reads ten rows.  A projection left giving its input's rows as
+they are is dropped (`optimizer::same_rows`).
 An **index nested loop** (`JoinAlgo::Lookup`, `EXPLAIN`: `Index Nested
 Loop`) runs its right side — a table's scan by an index on the join keys,
 the left row's values as `Outer` references — once per left row (inner,
@@ -3480,6 +3506,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.27 S4·sort, the sort and provided orders:**
+  `sorter` — normalized-key records with an abbreviated prefix, chunks
+  sorted stably in memory or in scratch runs with a sparse index, a
+  merge split into key ranges on the workers — for every full sort
+  (§8.5, *Memory*); a `Sort` a primary key's scan already gives left
+  out, identity projections dropped; unfiltered chains on the workers
+  and a `LIMIT`'s bound through projections and filters to the scan.
 - **2026-11-06 — §M14.27 S4, window functions:** `OVER`, `WINDOW`,
   `ROWS` / `RANGE` / `GROUPS` frames with `EXCLUDE`, every aggregate as a
   window aggregate (a running state, small frames fed directly, a

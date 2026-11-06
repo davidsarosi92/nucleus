@@ -181,13 +181,12 @@ SELECT count(*) FROM so WHERE ok IN (SELECT DISTINCT ok FROM sl ORDER BY ok) AND
 query T
 EXPLAIN SELECT count(*) FROM so WHERE EXISTS (SELECT * FROM sl WHERE sl.ok = so.ok AND cd < rd)
 ----
-Project: #0
-  Aggregate: count(*)
-    Semi Hash Join (#0 = #0) on (#1 = #0)
-      Project: #0
-        Seq Scan on so
-      Project: #0
-        Seq Scan on sl filter: (#3 < #4)
+Aggregate: count(*)
+  Semi Hash Join (#0 = #0) on (#1 = #0)
+    Project: #0
+      Seq Scan on so
+    Project: #0
+      Seq Scan on sl filter: (#3 < #4)
 
 # A semi or anti join goes below the joins to the table its condition
 # reads (checked against PostgreSQL 18).
@@ -204,17 +203,16 @@ SELECT count(*) FROM so a, so b WHERE a.ck = b.ck AND b.ok IN (SELECT ok FROM sl
 query T
 EXPLAIN SELECT count(*) FROM so a, so b WHERE a.ck = b.ck AND b.ok IN (SELECT ok FROM sl WHERE s > 4)
 ----
-Project: #0
-  Aggregate: count(*)
-    Hash Join (#0 = #0) on (#0 = #1)
-      Project: #1
-        Seq Scan on so
-      Project: #1
-        Semi Hash Join (#0 = #0) on (#0 = #2)
-          Project: #0, #1
-            Seq Scan on so
-          Project: #0
-            Seq Scan on sl filter: (#2 > 4)
+Aggregate: count(*)
+  Hash Join (#0 = #0) on (#0 = #1)
+    Project: #1
+      Seq Scan on so
+    Project: #1
+      Semi Hash Join (#0 = #0) on (#0 = #2)
+        Project: #0, #1
+          Seq Scan on so
+        Project: #0
+          Seq Scan on sl filter: (#2 > 4)
 
 # A correlated subquery's result kept by the outer values it reads: rows
 # sharing them share it, rows differing in any do not (two levels, NULLs).

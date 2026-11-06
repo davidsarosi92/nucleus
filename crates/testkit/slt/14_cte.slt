@@ -126,11 +126,10 @@ WITH t AS (SELECT * FROM nosuch) SELECT 1
 query T
 EXPLAIN WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5) SELECT i FROM n
 ----
-Project: #0
-  CTE n
-    Recursive Union All
-      Project: 1
-        Values (1 rows)
-      Project: (#0 + 1)::integer
-        Filter: (#0 < 5)
-          WorkTable Scan on n
+CTE n
+  Recursive Union All
+    Project: 1
+      Values (1 rows)
+    Project: (#0 + 1)::integer
+      Filter: (#0 < 5)
+        WorkTable Scan on n

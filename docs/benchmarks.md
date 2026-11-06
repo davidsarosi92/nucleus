@@ -34,23 +34,23 @@ python3 bench/run.py --nucleus target/release/nucleus --no-pg   # nucleus alone
 Apple M2 Pro (macOS, 12 cores), nucleus release builds; PostgreSQL 18 in
 Docker (Linux VM, 10 CPUs) with its defaults, parallel workers included.
 
-**Latest** (2026-11-06, nucleus on `a2e7f6f`; PostgreSQL 18.6 in the same
-session, `postgres:18-alpine` with its defaults; one run each, each
+**Latest** (2026-11-06, nucleus on §M14.27 S4·sort; PostgreSQL 18.6 in the
+same session, `postgres:18-alpine` with its defaults; one run each, each
 step's best of its repeats):
 
 | 1,000,000 rows | nucleus (ms) | PostgreSQL (ms) | ratio |
 |---|---:|---:|---:|
-| load (INSERT … SELECT) | 970.2 | 883.0 | 1.1× |
-| count(*) | 18.1 | 12.7 | 1.4× |
-| filtered count | 21.0 | 16.5 | 1.3× |
-| sum | 17.3 | 15.0 | 1.2× |
-| group by (1000 groups) | 24.3 | 33.4 | 0.7× |
-| sort | 279.4 | 152.3 | 1.8× |
-| self-join | 82.4 | 129.6 | 0.6× |
-| point reads (1000 by key) | 58.7 | 149.2 | 0.4× |
-| update 25% | 639.4 | 685.2 | 0.9× |
-| delete 10% | 111.9 | 72.2 | 1.5× |
-| count after writes | 20.7 | 20.7 | 1.0× |
+| load (INSERT … SELECT) | 1,039.5 | 1,040.1 | 1.0× |
+| count(*) | 16.4 | 14.2 | 1.1× |
+| filtered count | 19.6 | 17.4 | 1.1× |
+| sum | 15.9 | 17.2 | 0.9× |
+| group by (1000 groups) | 22.2 | 34.5 | 0.6× |
+| sort | 82.0 | 155.3 | 0.5× |
+| self-join | 81.7 | 126.4 | 0.6× |
+| point reads (1000 by key) | 61.0 | 112.8 | 0.5× |
+| update 25% | 640.4 | 878.9 | 0.7× |
+| delete 10% | 117.8 | 76.7 | 1.5× |
+| count after writes | 22.6 | 21.8 | 1.0× |
 
 Every target met (Targets, below).
 
@@ -304,21 +304,23 @@ run to run and from the ninth digit: 0.0833333256…, 0.0833333257…),
 array in memory, not a table scan.
 
 Window functions over the same table (§M14.27 S4), each folded to one
-row so the result is small; best of five, the best of three rounds
-(2026-11-06, §M14.27 S4):
+row so the result is small; best of five, the best of two rounds
+(2026-11-06, §M14.27 S4·sort):
 
 | query | nucleus (ms) | PostgreSQL 18 (ms) |
 |---|---:|---:|
-| `row_number()` by 1000 partitions, ordered by `x` | 5,662 | 4,537 |
-| top 3 by 1000 partitions (`rank() … WHERE r <= 3`) | 5,234 | 3,883 |
-| running `sum(x)`, ordered by `id` | 8,370 | 2,585 |
-| `avg(x)` over 10 rows by partition | 8,102 | 7,936 |
-| `x - lag(x)`, ordered by `id` | 6,789 | 2,410 |
+| `row_number()` by 1000 partitions, ordered by `x` | 2,534 | 4,507 |
+| top 3 by 1000 partitions (`rank() … WHERE r <= 3`) | 2,207 | 3,880 |
+| running `sum(x)`, ordered by `id` | 3,447 | 2,570 |
+| `avg(x)` over 10 rows by partition | 5,242 | 7,924 |
+| `x - lag(x)`, ordered by `id` | 2,578 | 2,407 |
 
-Most of nucleus's time is the sort (10M rows by `id` alone: 3.8 s,
-PostgreSQL's 1.6 s), and PostgreSQL reads rows ordered by `id` from the
-primary key's index, sorting nothing — both left as next steps (PLAN.md
-§M14.27 S4).  The sums are exact: the running sum's largest value is
+Ordered by `id` nothing is sorted: a table's scan gives the primary
+key's order, as PostgreSQL's index does.  What remains is the one
+partition of 10M rows held in memory, where PostgreSQL streams it (PLAN.md
+§M14.27 S4·sort, next).  Sorts alone, read whole: 10M rows by `(g, x)`
+1.8 s (PostgreSQL 1.9 s), by `id` 0.9 s (PostgreSQL's index 1.65 s).
+The sums are exact: the running sum's largest value is
 1.0000000004999998e16, PostgreSQL's 1.0000000004503596e16 (its double
 accumulator loses the fractions past 10¹⁶), and of 200,000 ten-row
 moving averages PostgreSQL rounds 98,995 to another double than the
@@ -383,10 +385,10 @@ this machine against PostgreSQL 18 in the same run:
 | ClickBench 1M rows, column table: geometric mean ≤ 0.5× | 0.11× | yes |
 | column tables: no TPC-H or ClickBench query above 3× | the highest TPC-H Q19 1.93×, ClickBench Q23 1.36× | yes |
 | row tables: geometric mean ≤ 2× (TPC-H, ClickBench) | TPC-H 0.77×, ClickBench 0.89× | yes |
-| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 1.1×; TPC-H 0.62× row, 0.55× column; ClickBench 0.92×, 0.74× | yes |
-| updates and deletes ≤ 2× (`bench/run.py`) | update 0.9×, delete 1.5× | yes |
-| scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 0.6–1.8× (sort 1.8×, count(*) 1.4×, self-join 0.6×) | yes |
-| reads by key ≤ 1× (`bench/run.py`) | 0.4× | yes |
+| loads ≤ 2× (`bench/run.py`, TPC-H, ClickBench) | 1.0×; TPC-H 0.62× row, 0.55× column; ClickBench 0.92×, 0.74× | yes |
+| updates and deletes ≤ 2× (`bench/run.py`) | update 0.7×, delete 1.5× | yes |
+| scans, aggregates, sorts and joins ≤ 3× (`bench/run.py`) | 0.5–1.1× (sort 0.5×, count(*) 1.1×, self-join 0.6×) | yes |
+| reads by key ≤ 1× (`bench/run.py`) | 0.5× | yes |
 
 Ratios are best-of-three times on one machine in one run; the CI's
 shared runners are too noisy to fail on them yet, so a target is checked

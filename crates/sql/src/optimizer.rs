@@ -37,7 +37,103 @@ pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let plan = push(crate::unnest::unnest(plan), &stats);
     let plan = sink(reorder(plan, &stats), &stats);
     let plan = lookups(crate::eager::eager(plan, &stats), &stats);
-    crate::narrow::narrow(crate::distinct::two_level(plan))
+    let plan = crate::narrow::narrow(sorted(crate::distinct::two_level(plan)));
+    same_rows(plan)
+}
+
+/// Projections that give their input's rows as they are dropped (a sort's
+/// keys taken off above it, once the sort is gone and narrowing has run,
+/// leave one): each would copy every row.
+fn same_rows(plan: Plan) -> Plan {
+    match map_children(plan, &same_rows) {
+        Plan::Project { input, exprs }
+            if exprs.len() == input.width()
+                && exprs.iter().enumerate().all(|(i, e)| *e == Expr::Column(i)) =>
+        {
+            *input
+        }
+        p => p,
+    }
+}
+
+/// Sorts their inputs already satisfy dropped (**provided order**): a
+/// table is read in primary-key order — a row table's tree, a column
+/// table's segments and delta merged, a parallel scan's morsels in key
+/// order —, through filters and projections that keep it, so `ORDER BY`
+/// a prefix of the key, ascending (its columns are never `NULL`), is that
+/// order already; ties, in a stable sort in input order, are too.  Once
+/// the whole key is ordered on, the keys after it are (it is unique).
+/// (PostgreSQL's pathkeys, an index scan for an ordering; DuckDB's and
+/// Umbra's order properties.)
+fn sorted(plan: Plan) -> Plan {
+    match map_children(plan, &sorted) {
+        Plan::Sort { input, keys } if provides(&input, &keys) => *input,
+        p => p,
+    }
+}
+
+fn provides(input: &Plan, keys: &[crate::plan::SortKey]) -> bool {
+    let Some((order, unique)) = key_order(input) else {
+        return false;
+    };
+    for (i, k) in keys.iter().enumerate() {
+        if i == order.len() {
+            return unique;
+        }
+        if k.desc || k.expr != Expr::Column(order[i]) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The output columns `plan`'s rows are in the order of (each ascending,
+/// none `NULL`), and whether they are a key: `None` if none.
+fn key_order(plan: &Plan) -> Option<(Vec<usize>, bool)> {
+    use crate::types::DataType as T;
+    match plan {
+        Plan::Scan { table, access, .. } => {
+            let primary = matches!(access, Access::Full | Access::Key { index: None, .. });
+            // Kinds whose key bytes order as `ORDER BY` does.
+            let ordered = |c: &usize| {
+                matches!(
+                    table.columns[*c].ty,
+                    T::Bool
+                        | T::SmallInt
+                        | T::Integer
+                        | T::BigInt
+                        | T::Real
+                        | T::Float
+                        | T::Text
+                        | T::Bytea
+                        | T::Char
+                        | T::Numeric
+                        | T::Date
+                        | T::Time
+                        | T::Timestamp
+                        | T::TimestampTz
+                )
+            };
+            (primary
+                && table.partition_by.is_none()
+                && !table.primary_key.is_empty()
+                && table.primary_key.iter().all(ordered))
+            .then(|| (table.primary_key.clone(), true))
+        }
+        Plan::Filter { input, .. } | Plan::Secure { input, .. } => key_order(input),
+        Plan::Project { input, exprs } => {
+            let (order, unique) = key_order(input)?;
+            let mut out = Vec::new();
+            for c in &order {
+                match exprs.iter().position(|e| *e == Expr::Column(*c)) {
+                    Some(j) => out.push(j),
+                    None => return (!out.is_empty()).then_some((out, false)),
+                }
+            }
+            Some((out, unique))
+        }
+        _ => None,
+    }
 }
 
 /// A condition's conjuncts, the conjuncts every branch of an `OR` among

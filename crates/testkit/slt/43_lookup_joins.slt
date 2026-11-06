@@ -25,14 +25,13 @@ ANALYZE
 query T
 EXPLAIN SELECT ls.k, lb.v FROM ls JOIN lb ON lb.id = ls.ref
 ----
-Project: #0, #1
-  Project: #1, #0
-    Project: #3, #0
-      Index Nested Loop on (#2 = #1)
-        Project: #0, #1
-          Seq Scan on ls (rows=5)
-        Project: #0, #2
-          Index Scan using primary key on lb (id = outer1.#1) filter: (#0 = outer1.#1) (rows=1)
+Project: #1, #0
+  Project: #3, #0
+    Index Nested Loop on (#2 = #1)
+      Project: #0, #1
+        Seq Scan on ls (rows=5)
+      Project: #0, #2
+        Index Scan using primary key on lb (id = outer1.#1) filter: (#0 = outer1.#1) (rows=1)
 
 query II
 SELECT ls.k, lb.v FROM ls JOIN lb ON lb.id = ls.ref ORDER BY 1
@@ -100,14 +99,12 @@ SELECT count(*), sum(lb.v) FROM ls, lb WHERE (lb.id = ls.ref AND ls.w = 10 AND l
 query T
 EXPLAIN SELECT count(*) FROM ls, lb WHERE (lb.id = ls.ref AND ls.w = 10 AND lb.v > 0) OR (lb.id = ls.ref AND ls.w = 50 AND lb.v < 2000)
 ----
-Project: #0
-  Aggregate: count(*)
-    Project: #0
-      Project: #0
-        Index Nested Loop on ((#3 = #1) AND (((#2 = 10) AND (#4 > 0)) OR ((#2 = 50) AND (#4 < 2000))))
-          Seq Scan on ls filter: ((#2 = 10) OR (#2 = 50)) (rows=2)
-          Project: #0, #2
-            Index Scan using primary key on lb (id = outer1.#1) filter: (((#2 > 0) OR (#2 < 2000)) AND (#0 = outer1.#1)) (rows=1)
+Aggregate: count(*)
+  Project: #0
+    Index Nested Loop on ((#3 = #1) AND (((#2 = 10) AND (#4 > 0)) OR ((#2 = 50) AND (#4 < 2000))))
+      Seq Scan on ls filter: ((#2 = 10) OR (#2 = 50)) (rows=2)
+      Project: #0, #2
+        Index Scan using primary key on lb (id = outer1.#1) filter: (((#2 > 0) OR (#2 < 2000)) AND (#0 = outer1.#1)) (rows=1)
 
 # Semi and anti joins by lookup stop at a key's first match.
 query I

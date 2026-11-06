@@ -22,9 +22,8 @@ CREATE INDEX t_v ON t (v)
 query T
 EXPLAIN SELECT count(*) FROM t WHERE k = 1
 ----
-Project: #0
-  Aggregate: count(*)
-    Index Scan using t_k on t (k = 1) filter: (#1 = 1)
+Aggregate: count(*)
+  Index Scan using t_k on t (k = 1) filter: (#1 = 1)
 
 statement ok
 ANALYZE
@@ -33,31 +32,27 @@ ANALYZE
 query T
 EXPLAIN SELECT count(*) FROM t WHERE k = 1
 ----
-Project: #0
-  Aggregate: count(*)
-    Seq Scan on t filter: (#1 = 1) (rows=500)
+Aggregate: count(*)
+  Seq Scan on t filter: (#1 = 1) (rows=500)
 
 query T
 EXPLAIN SELECT count(*) FROM t WHERE v = 5
 ----
-Project: #0
-  Aggregate: count(*)
-    Index Scan using t_v on t (v = 5) filter: (#2 = 5) (rows=1)
+Aggregate: count(*)
+  Index Scan using t_v on t (v = 5) filter: (#2 = 5) (rows=1)
 
 # Ranges are estimated from the histogram.
 query T
 EXPLAIN SELECT count(*) FROM t WHERE v > 990
 ----
-Project: #0
-  Aggregate: count(*)
-    Index Scan using t_v on t (v > 990) filter: (#2 > 990) (rows=9)
+Aggregate: count(*)
+  Index Scan using t_v on t (v > 990) filter: (#2 > 990) (rows=9)
 
 query T
 EXPLAIN SELECT count(*) FROM t WHERE v > 10
 ----
-Project: #0
-  Aggregate: count(*)
-    Seq Scan on t filter: (#2 > 10) (rows=990)
+Aggregate: count(*)
+  Seq Scan on t filter: (#2 > 10) (rows=990)
 
 query III
 SELECT (SELECT count(*) FROM t WHERE k = 1), (SELECT count(*) FROM t WHERE v > 990), (SELECT count(*) FROM t WHERE v > 10)
@@ -89,16 +84,15 @@ ANALYZE
 query T
 EXPLAIN SELECT count(*) FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE small.name = 'n3'
 ----
-Project: #0
-  Aggregate: count(*)
-    Project: #0
-      Hash Join (#1 = #0) on (#1 = #2)
-        Seq Scan on big (rows=1000)
-        Project: #0
-          Hash Join (#1 = #0) on (#1 = #2)
-            Seq Scan on mid (rows=100)
-            Project: #0
-              Seq Scan on small filter: (#1 = 'n3') (rows=1)
+Aggregate: count(*)
+  Project: #0
+    Hash Join (#1 = #0) on (#1 = #2)
+      Seq Scan on big (rows=1000)
+      Project: #0
+        Hash Join (#1 = #0) on (#1 = #2)
+          Seq Scan on mid (rows=100)
+          Project: #0
+            Seq Scan on small filter: (#1 = 'n3') (rows=1)
 
 query I
 SELECT count(*) FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE small.name = 'n3'

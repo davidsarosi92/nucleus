@@ -15,7 +15,7 @@
 //! was written.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -23,12 +23,11 @@ use nucleus_kv::Scratch;
 
 use crate::encoding::{Reader, decode_value, encode_value};
 use crate::error::{Error, Result};
+use crate::sorter::{self, Sorter};
 use crate::types::{Row, Value};
 
 /// A run's buffer: bytes written (and read) at a time.
 const BLOCK: usize = 64 << 10;
-/// Runs merged at once; more are merged in passes.
-const FAN_IN: usize = 64;
 /// A value tag of this codec's own: an enum value, by its index in the
 /// run's table of them.
 const ENUM: u8 = 0xF0;
@@ -69,12 +68,12 @@ pub(crate) fn value_bytes(v: &Value) -> usize {
 /// Enum values seen by a run, by index (their labels are not in the row
 /// encoding).
 #[derive(Default)]
-struct Enums {
-    values: Vec<Value>,
+pub(crate) struct Enums {
+    pub(crate) values: Vec<Value>,
     index: HashMap<(std::sync::Arc<[u8]>, std::sync::Arc<str>), u32>,
 }
 
-fn encode(out: &mut Vec<u8>, v: &Value, enums: &mut Enums) {
+pub(crate) fn encode(out: &mut Vec<u8>, v: &Value, enums: &mut Enums) {
     match v {
         Value::Enum(e) => {
             let key = (e.key.clone(), e.label.clone());
@@ -97,7 +96,7 @@ fn encode(out: &mut Vec<u8>, v: &Value, enums: &mut Enums) {
     }
 }
 
-fn decode(r: &mut Reader, enums: &[Value]) -> Result<Value> {
+pub(crate) fn decode(r: &mut Reader, enums: &[Value]) -> Result<Value> {
     let bad = |_| Error::internal("malformed scratch row");
     match r.peek() {
         Some(ENUM) => {
@@ -485,91 +484,6 @@ impl Partitions {
     }
 }
 
-/// `pairs` sorted by their keys as [`compare`] orders them, ties in the
-/// order they came (a stable sort) — by normalized keys when it can: each
-/// row's keys as one byte string whose bytewise order is theirs (DuckDB's
-/// and the System R line's normalized keys; here the index keys'
-/// encoding, `encoding::encode_key_value`, each value after a byte that
-/// places a `NULL` first or last, a descending key's bytes inverted), so
-/// a comparison is one `memcmp`.  Only when every key column holds values
-/// of one kind whose encoding orders as `compare` does (integers, text,
-/// `char(n)`, dates, times, timestamps, booleans; `NULL`s anywhere) —
-/// not doubles (`NaN`, `-0`), decimals or mixed kinds.
-pub(crate) fn sort_keyed<R>(flags: &[(bool, bool)], pairs: &mut Vec<(Vec<Value>, R)>) {
-    const NORMALIZED_FROM: usize = 64;
-    if pairs.len() >= NORMALIZED_FROM
-        && let Some((bytes, ends)) = normalized(flags, pairs)
-    {
-        let key = |i: u32| {
-            let i = i as usize;
-            let start = if i == 0 { 0 } else { ends[i - 1] as usize };
-            &bytes[start..ends[i] as usize]
-        };
-        let mut order: Vec<u32> = (0..pairs.len() as u32).collect();
-        order.sort_by(|&a, &b| key(a).cmp(key(b)));
-        let mut taken: Vec<Option<(Vec<Value>, R)>> = pairs.drain(..).map(Some).collect();
-        pairs.extend(
-            order
-                .iter()
-                .map(|&i| taken[i as usize].take().expect("each once")),
-        );
-        return;
-    }
-    pairs.sort_by(|(a, _), (b, _)| compare(flags, a, b));
-}
-
-/// The normalized keys of `pairs` ([`sort_keyed`]): their bytes one after
-/// another and where each ends — `None` when a column's kinds do not
-/// allow it.
-fn normalized<R>(flags: &[(bool, bool)], pairs: &[(Vec<Value>, R)]) -> Option<(Vec<u8>, Vec<u32>)> {
-    fn kind(v: &Value) -> Option<u8> {
-        Some(match v {
-            Value::Int(_) => 1,
-            Value::Text(_) => 2,
-            Value::Char(_) => 3,
-            Value::Date(_) => 4,
-            Value::Timestamp(_) => 5,
-            Value::TimestampTz(_) => 6,
-            Value::Time(_) => 7,
-            Value::Bool(_) => 8,
-            _ => return None,
-        })
-    }
-    for j in 0..flags.len() {
-        let mut seen = None;
-        for (keys, _) in pairs {
-            let v = &keys[j];
-            if v.is_null() {
-                continue;
-            }
-            let k = kind(v)?;
-            match seen {
-                None => seen = Some(k),
-                Some(s) if s == k => {}
-                Some(_) => return None,
-            }
-        }
-    }
-    let mut bytes = Vec::with_capacity(pairs.len() * (flags.len() * 10));
-    let mut ends = Vec::with_capacity(pairs.len());
-    for (keys, _) in pairs {
-        for (v, &(desc, nulls_first)) in keys.iter().zip(flags) {
-            if v.is_null() {
-                bytes.push(if nulls_first { 0x00 } else { 0x02 });
-                continue;
-            }
-            bytes.push(0x01);
-            let at = bytes.len();
-            crate::encoding::encode_key_value(&mut bytes, v);
-            if desc {
-                bytes[at..].iter_mut().for_each(|b| *b = !*b);
-            }
-        }
-        ends.push(u32::try_from(bytes.len()).ok()?);
-    }
-    Some((bytes, ends))
-}
-
 /// The order of sort key values under `flags` (descending, NULLs first),
 /// one per key.
 pub fn compare(flags: &[(bool, bool)], a: &[Value], b: &[Value]) -> Ordering {
@@ -601,92 +515,6 @@ pub fn compare(flags: &[(bool, bool)], a: &[Value], b: &[Value]) -> Ordering {
         }
     }
     Ordering::Equal
-}
-
-/// A row read from one of the runs a merge reads: its sort keys first.
-struct Head {
-    /// Keys, then the row.
-    row: Row,
-    /// The run it came from: ties keep the runs' order.
-    from: usize,
-    flags: Rc<[(bool, bool)]>,
-}
-
-impl PartialEq for Head {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for Head {}
-
-impl PartialOrd for Head {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Head {
-    // Reversed: the heap's greatest is the merge's next.
-    fn cmp(&self, other: &Self) -> Ordering {
-        compare(&self.flags, &self.row, &other.row)
-            .then(self.from.cmp(&other.from))
-            .reverse()
-    }
-}
-
-/// Runs of (keys ++ row), each sorted, merged into one order.
-struct Merge {
-    runs: Vec<RunIter>,
-    heap: BinaryHeap<Head>,
-    flags: Rc<[(bool, bool)]>,
-    width: usize,
-}
-
-impl Merge {
-    fn new(runs: &[Arc<Sealed>], flags: Rc<[(bool, bool)]>, width: usize) -> Result<Self> {
-        let mut m = Merge {
-            runs: runs.iter().map(Sealed::iter).collect(),
-            heap: BinaryHeap::new(),
-            flags,
-            width,
-        };
-        for i in 0..m.runs.len() {
-            m.advance(i)?;
-        }
-        Ok(m)
-    }
-
-    fn advance(&mut self, i: usize) -> Result<()> {
-        if let Some(row) = self.runs[i].next_row()? {
-            self.heap.push(Head {
-                row,
-                from: i,
-                flags: Rc::clone(&self.flags),
-            });
-        }
-        Ok(())
-    }
-
-    /// The next (keys ++ row).
-    fn next_keyed(&mut self) -> Result<Option<Row>> {
-        let Some(head) = self.heap.pop() else {
-            return Ok(None);
-        };
-        self.advance(head.from)?;
-        Ok(Some(head.row))
-    }
-}
-
-impl Iterator for Merge {
-    type Item = Result<Row>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let keys = self.width;
-        self.next_keyed()
-            .map(|r| r.map(|mut row| row.split_off(keys)))
-            .transpose()
-    }
 }
 
 /// The least `k` (keys, row) pairs under `flags` of those given, ties in
@@ -826,231 +654,43 @@ pub fn sort(
     Ok(Box::new(top.into_sorted().into_iter().map(|(_, r)| Ok(r))))
 }
 
-/// [`sort`] without a bound.
+/// [`sort`] without a bound: [`crate::sorter`]'s.
 fn sort_all(
     rows: impl Iterator<Item = Result<(Vec<Value>, Row)>>,
     flags: Vec<(bool, bool)>,
 ) -> Result<Box<dyn Iterator<Item = Result<Row>>>> {
-    let limit = crate::budget::work_mem();
-    let flags: Rc<[(bool, bool)]> = flags.into();
-    let width = flags.len();
-    let mut buffer: Vec<(Vec<Value>, Row)> = Vec::new();
-    let mut bytes = 0;
-    let mut runs: Vec<Arc<Sealed>> = Vec::new();
-    let write = |buffer: &mut Vec<(Vec<Value>, Row)>| -> Result<Arc<Sealed>> {
-        sort_keyed(&flags, buffer);
-        let mut run = Run::new()?;
-        for (keys, row) in buffer.drain(..) {
-            let mut keyed = keys;
-            keyed.extend(row);
-            run.push(&keyed)?;
-        }
-        run.seal()
-    };
+    let flags: Arc<[(bool, bool)]> = flags.into();
+    let mut sorter = Sorter::new(Arc::clone(&flags), sorter::Budget::new(1));
     for r in rows {
         let (keys, row) = r?;
-        bytes += row_bytes(&keys) + row_bytes(&row);
-        buffer.push((keys, row));
-        if bytes > limit {
-            runs.push(write(&mut buffer)?);
-            bytes = 0;
-        }
+        sorter.push(&keys, &row)?;
     }
-    if runs.is_empty() {
-        sort_keyed(&flags, &mut buffer);
-        return Ok(Box::new(buffer.into_iter().map(|(_, r)| Ok(r))));
-    }
-    if !buffer.is_empty() {
-        runs.push(write(&mut buffer)?);
-    }
-    // Many runs: merged in passes, FAN_IN at a time, into longer runs.
-    while runs.len() > FAN_IN {
-        let mut merged = Vec::new();
-        for group in runs.chunks(FAN_IN) {
-            let mut m = Merge::new(group, Rc::clone(&flags), width)?;
-            let mut run = Run::new()?;
-            while let Some(keyed) = m.next_keyed()? {
-                run.push(&keyed)?;
-            }
-            merged.push(run.seal()?);
-        }
-        runs = merged;
-    }
-    Ok(Box::new(Merge::new(&runs, flags, width)?))
+    sorter::merge(sorter.finish()?, flags)
 }
 
-/// Rows already sorted in parts (a parallel sort's morsels, in scan order)
-/// merged into one order: in memory when they fit in work_mem, else each
-/// part a run, merged as [`sort`] merges its runs.  Ties go to the earlier
-/// part, so the order is a stable sort's of the parts one after another.
+/// Pairs already sorted in parts (a bounded parallel sort's morsels, in
+/// scan order) merged into one order — ties to the earlier part, the
+/// order of a stable sort of the parts one after another.
 pub fn merge_sorted(
     parts: Vec<Vec<(Vec<Value>, Row)>>,
     flags: Vec<(bool, bool)>,
 ) -> Result<Box<dyn Iterator<Item = Result<Row>>>> {
-    let bytes: usize = parts
-        .iter()
-        .flatten()
-        .map(|(k, r)| row_bytes(k) + row_bytes(r))
-        .sum();
-    let flags: Rc<[(bool, bool)]> = flags.into();
-    if bytes <= crate::budget::work_mem() {
-        let mut parts: Vec<std::vec::IntoIter<(Vec<Value>, Row)>> =
-            parts.into_iter().map(Vec::into_iter).collect();
-        let mut heap = std::collections::BinaryHeap::new();
-        let mut rows: Vec<Option<Row>> = vec![None; parts.len()];
-        for (i, p) in parts.iter_mut().enumerate() {
-            if let Some((keys, row)) = p.next() {
-                rows[i] = Some(row);
-                heap.push(PartHead {
-                    keys,
-                    part: i,
-                    flags: Rc::clone(&flags),
-                });
-            }
-        }
-        return Ok(Box::new(std::iter::from_fn(move || {
-            let head = heap.pop()?;
-            let row = rows[head.part].take().expect("a head's row");
-            if let Some((keys, next)) = parts[head.part].next() {
-                rows[head.part] = Some(next);
-                heap.push(PartHead {
-                    keys,
-                    part: head.part,
-                    flags: Rc::clone(&head.flags),
-                });
-            }
-            Some(Ok(row))
-        })));
-    }
-    let width = flags.len();
-    let mut runs = Vec::new();
+    let flags: Arc<[(bool, bool)]> = flags.into();
+    let budget = sorter::Budget::new(1);
+    let mut sorted = Vec::new();
     for part in parts {
-        let mut run = Run::new()?;
+        let mut s = Sorter::new(Arc::clone(&flags), Arc::clone(&budget));
         for (keys, row) in part {
-            let mut keyed = keys;
-            keyed.extend(row);
-            run.push(&keyed)?;
+            s.push(&keys, &row)?;
         }
-        runs.push(run.seal()?);
+        sorted.extend(s.finish()?);
     }
-    while runs.len() > FAN_IN {
-        let mut merged = Vec::new();
-        for group in runs.chunks(FAN_IN) {
-            let mut m = Merge::new(group, Rc::clone(&flags), width)?;
-            let mut run = Run::new()?;
-            while let Some(keyed) = m.next_keyed()? {
-                run.push(&keyed)?;
-            }
-            merged.push(run.seal()?);
-        }
-        runs = merged;
-    }
-    Ok(Box::new(Merge::new(&runs, flags, width)?))
-}
-
-/// A part's first row's keys, ordered for [`merge_sorted`]'s heap (the
-/// smallest, then the earliest part, on top).
-struct PartHead {
-    keys: Vec<Value>,
-    part: usize,
-    flags: Rc<[(bool, bool)]>,
-}
-
-impl PartialEq for PartHead {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for PartHead {}
-
-impl PartialOrd for PartHead {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for PartHead {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // A max-heap: reversed.
-        compare(&self.flags, &other.keys, &self.keys).then(other.part.cmp(&self.part))
-    }
+    sorter::merge(sorted, flags)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normalized_keys_sort_as_compare_does() {
-        // Random keys of every kind normalized keys take — texts that are
-        // prefixes of each other, with zero bytes, padded char(n), NULLs —
-        // under every direction and NULL placement, and kinds they do not
-        // take (falling back): the order of a stable sort by `compare`.
-        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
-        let mut next = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
-        };
-        let texts = ["", "a", "ab", "abc", "a\0", "a\0b", "b", "\0", "ab\0", "zz"];
-        for round in 0..40 {
-            let kinds = [round % 9, (round / 9) % 9];
-            let value = |k: u64, r: u64| -> Value {
-                if r.is_multiple_of(7) {
-                    return Value::Null;
-                }
-                match k {
-                    0 => Value::Int(
-                        (r % 11) as i64 - 5
-                            + if r.is_multiple_of(13) {
-                                i64::MIN / 2
-                            } else {
-                                0
-                            },
-                    ),
-                    1 => Value::Text(texts[(r % 10) as usize].to_string()),
-                    2 => Value::Char(format!("{:<4}", texts[(r % 6) as usize])),
-                    3 => Value::Date((r % 9) as i32 - 4),
-                    4 => Value::Timestamp((r % 9) as i64 * 1000 - 3000),
-                    5 => Value::Bool(r.is_multiple_of(2)),
-                    6 => Value::Time((r % 5) as i64),
-                    7 => Value::Float((r % 5) as f64 - 2.0),
-                    _ => {
-                        if r.is_multiple_of(2) {
-                            Value::Int((r % 5) as i64)
-                        } else {
-                            Value::Float((r % 9) as f64 / 2.0 - 1.0)
-                        }
-                    }
-                }
-            };
-            let pairs: Vec<(Vec<Value>, usize)> = (0..300)
-                .map(|i| {
-                    let keys = kinds.iter().map(|&k| value(k, next())).collect();
-                    (keys, i)
-                })
-                .collect();
-            for flags in [
-                [(false, false), (false, false)],
-                [(true, false), (false, true)],
-                [(false, true), (true, true)],
-                [(true, true), (true, false)],
-            ] {
-                let mut want = pairs.clone();
-                want.sort_by(|(a, _), (b, _)| compare(&flags, a, b));
-                let mut got = pairs.clone();
-                sort_keyed(&flags, &mut got);
-                let order = |v: &[(Vec<Value>, usize)]| v.iter().map(|p| p.1).collect::<Vec<_>>();
-                assert_eq!(
-                    order(&got),
-                    order(&want),
-                    "kinds {kinds:?}, flags {flags:?}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn a_run_reads_back_what_was_written() {

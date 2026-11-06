@@ -2240,7 +2240,8 @@ fn bounds_of(e: &Expr, ctx: &Ctx, out: &mut Vec<crate::storage::ColumnBound>) {
 impl<'a> Pipeline<'a> {
     /// A pipeline for `plan` — when it is a chain that can run so, and
     /// vectorized execution is on.  `rows`: whether its output becomes
-    /// rows (so a chain without a filter gains nothing).
+    /// rows (so a chain without a filter gains nothing — but a morsel of
+    /// a parallel run, `range`).
     fn new(
         plan: &'a Plan,
         top: &'a Plan,
@@ -2262,6 +2263,7 @@ impl<'a> Pipeline<'a> {
             steps.insert(0, (Step::Keys(keys), scan));
         }
         if rows
+            && range.is_none()
             && !steps
                 .iter()
                 .any(|(s, _)| matches!(s, Step::Filter(_) | Step::Keys(_) | Step::Probe(_)))
@@ -2436,13 +2438,20 @@ impl<'a> Pipeline<'a> {
     }
 }
 
-/// Whether the chain `plan` filters or joins (so running it on workers
-/// gains).
+/// Whether the chain `plan` gains from running on workers: it filters or
+/// joins, or many of its rows are read (no `LIMIT` stops it within
+/// [`SERIAL_ROWS`]: decoding them is the work).
 fn filters_or_probes(plan: &Plan, ctx: &Ctx) -> bool {
+    let bounded = ctx
+        .bounds
+        .borrow()
+        .get(&(plan as *const Plan as usize))
+        .is_some_and(|&k| k <= SERIAL_ROWS);
     chain(plan, Some(&ctx.join_tables.borrow())).is_some_and(|(_, steps)| {
-        steps
-            .iter()
-            .any(|(s, _)| matches!(s, Step::Filter(_) | Step::Probe(_)))
+        !bounded
+            || steps
+                .iter()
+                .any(|(s, _)| matches!(s, Step::Filter(_) | Step::Probe(_)))
     })
 }
 
@@ -4279,6 +4288,9 @@ impl<'a> Kept<'a> {
 /// Morsels per worker of a pipeline whose output becomes rows: small, as a
 /// round holds a morsel's rows per worker.
 const ROW_MORSELS_PER_WORKER: usize = 16;
+/// A chain without a filter a `LIMIT` stops within this many rows is read
+/// on one thread: a parallel run's first morsels would read more.
+const SERIAL_ROWS: usize = 1 << 16;
 
 /// A pipeline run in parallel, as rows: rounds of a morsel per worker,
 /// each round's rows given in morsel order — the order, rows and errors of
@@ -5669,29 +5681,37 @@ impl Iterator for ParallelJoin<'_> {
 
 /// A morsel's pairs being sorted: all of them, or (with a bound) the
 /// least.
-struct Sorting {
-    all: Vec<(Vec<Value>, Row)>,
-    top: Option<crate::spill::Top>,
+enum Sorting {
+    All(crate::sorter::Sorter),
+    Top(crate::spill::Top),
+}
+
+/// A morsel sorted: its parts, or its least pairs.
+enum Sorted {
+    All(Vec<std::sync::Arc<crate::sorter::Part>>),
+    Top(Vec<(Vec<Value>, Row)>),
 }
 
 impl Sorting {
     /// A pair, its row built only when kept.
-    fn take(&mut self, keys: Vec<Value>, row: impl FnOnce() -> Row) {
-        match &mut self.top {
-            Some(t) => {
+    fn take(&mut self, keys: Vec<Value>, row: impl FnOnce() -> Row) -> Result<()> {
+        match self {
+            Sorting::Top(t) => {
                 if t.admits(&keys) {
                     t.push(keys, row());
                 }
+                Ok(())
             }
-            None => self.all.push((keys, row())),
+            Sorting::All(s) => s.push(&keys, &row()),
         }
     }
 }
 
 /// `ORDER BY keys` over the pipeline `input`, in parallel: each morsel's
 /// rows sorted on a worker (their keys evaluated a batch at a time), the
-/// sorted morsels merged ([`crate::spill::merge_sorted`]) — the order of
-/// the single pass's stable sort, its first error the same.  With
+/// sorted morsels merged ([`crate::sorter::merge`]; with a bound,
+/// [`crate::spill::merge_sorted`]) — the order of the single pass's stable
+/// sort, its first error the same.  With
 /// `bound`, a morsel keeps only its first `bound` ([`crate::spill::Top`]),
 /// a row built only when its keys put it among them.
 pub(crate) fn sorted<'a>(
@@ -5709,6 +5729,8 @@ pub(crate) fn sorted<'a>(
         return Ok(None);
     };
     let flags: Vec<(bool, bool)> = keys.iter().map(|k| (k.desc, k.nulls_first)).collect();
+    let shared: std::sync::Arc<[(bool, bool)]> = flags.clone().into();
+    let budget = crate::sorter::Budget::new(crate::budget::workers());
     let results = work.run(0..work.ranges.len(), true, &|wctx, range| {
         let Some(mut pipe) = Pipeline::new(input, input, wctx, None, false, Some(range))? else {
             return Err(Error::internal("a morsel's pipeline"));
@@ -5717,9 +5739,12 @@ pub(crate) fn sorted<'a>(
             ctx: wctx,
             outer: None,
         };
-        let mut sink = Sorting {
-            all: Vec::new(),
-            top: bound.map(|k| crate::spill::Top::new(k, flags.clone().into())),
+        let mut sink = match bound {
+            Some(k) => Sorting::Top(crate::spill::Top::new(k, flags.clone().into())),
+            None => Sorting::All(crate::sorter::Sorter::new(
+                std::sync::Arc::clone(&shared),
+                std::sync::Arc::clone(&budget),
+            )),
         };
         let by_row = |row: Row, sink: &mut Sorting| -> Result<()> {
             let e = env(&row, wctx, None);
@@ -5727,8 +5752,7 @@ pub(crate) fn sorted<'a>(
                 .iter()
                 .map(|x| x.eval(&e))
                 .collect::<Result<Vec<_>>>()?;
-            sink.take(k, || row);
-            Ok(())
+            sink.take(k, || row)
         };
         while let Some(o) = pipe.next()? {
             match o {
@@ -5740,7 +5764,7 @@ pub(crate) fn sorted<'a>(
                     {
                         Ok(kv) => {
                             for i in b.sel.iter() {
-                                sink.take(kv.iter().map(|k| k.value(i)).collect(), || b.row(i));
+                                sink.take(kv.iter().map(|k| k.value(i)).collect(), || b.row(i))?;
                             }
                         }
                         // A row at a time decides.
@@ -5761,21 +5785,24 @@ pub(crate) fn sorted<'a>(
                 }
             }
         }
-        if let Some(t) = sink.top {
-            return Ok(t.into_sorted());
+        match sink {
+            Sorting::Top(t) => Ok(Sorted::Top(t.into_sorted())),
+            Sorting::All(s) => Ok(Sorted::All(s.finish()?)),
         }
-        let mut out = sink.all;
-        crate::spill::sort_keyed(&flags, &mut out);
-        Ok(out)
     });
-    let mut parts = Vec::with_capacity(results.len());
+    let mut tops = Vec::new();
+    let mut parts = Vec::new();
     for r in results {
         match r {
-            Some(Ok(p)) => parts.push(p),
+            Some(Ok(Sorted::Top(p))) => tops.push(p),
+            Some(Ok(Sorted::All(p))) => parts.extend(p),
             Some(Err(e)) => return Err(e),
             None => return Err(Error::internal("a morsel not sorted")),
         }
     }
     PARALLEL_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Ok(Some(crate::spill::merge_sorted(parts, flags)?))
+    if bound.is_some() {
+        return Ok(Some(crate::spill::merge_sorted(tops, flags)?));
+    }
+    Ok(Some(crate::sorter::merge(parts, shared)?))
 }

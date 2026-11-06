@@ -205,12 +205,22 @@ fn build_node<'a>(
                 count(limit, "LIMIT")?,
                 count(offset, "OFFSET")?.unwrap_or(0),
             );
-            if let (Plan::Sort { .. }, Some(n)) = (&**input, limit)
+            // The rows it takes, for its input: a sort keeps only those (a
+            // top-N), a scan reads on one thread (it stops early).
+            if let Some(n) = limit
                 && let Some(k) = n.checked_add(offset)
             {
-                ctx.bounds
-                    .borrow_mut()
-                    .insert(&**input as *const Plan as usize, k);
+                let mut bounds = ctx.bounds.borrow_mut();
+                bounds.insert(&**input as *const Plan as usize, k);
+                // Down a chain, each of its nodes is read row by row too.
+                let mut node = &**input;
+                while let Plan::Project { input, .. }
+                | Plan::Filter { input, .. }
+                | Plan::Secure { input, .. } = node
+                {
+                    node = input;
+                    bounds.insert(node as *const Plan as usize, k);
+                }
             }
             let rows = build(input, ctx, outer)?.skip(offset);
             match limit {

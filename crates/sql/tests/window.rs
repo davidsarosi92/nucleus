@@ -326,7 +326,7 @@ fn an_order_by_the_last_window_gives_is_not_sorted_again() {
             .count()
     };
     for (q, want) in [
-        ("SELECT id, sum(x) OVER (ORDER BY id) FROM o ORDER BY id", 1),
+        ("SELECT id, sum(x) OVER (ORDER BY x) FROM o ORDER BY x", 1),
         (
             "SELECT id, rank() OVER (PARTITION BY g ORDER BY x DESC) FROM o ORDER BY g, x DESC",
             1,
