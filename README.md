@@ -38,14 +38,14 @@ the dialect in brief (§M14.10).  Large data is in (§M14.11):
 results stream and come as columns (straight into numpy, Arrow, pandas,
 polars), `COPY` and `load` bring data in, transactions and operators
 past their memory spill to disk, and [`docs/benchmarks.md`](docs/benchmarks.md)
-measures it all against PostgreSQL.  Analytics is under way (§M14.20):
+measures it all against PostgreSQL.  Analytics is in (§M14.20):
 scans, filters and aggregates run a batch at a time through kernels
 compiled per CPU (AVX2, AVX-512, NEON) and on every core, with the
 results of a single row-at-a-time pass; a table can be stored as
 compressed column segments (`WITH (storage = column)`).  On TPC-H (SF 1)
-column tables take 0.47× PostgreSQL's time in the geometric mean (row
-tables 1.11×), on ClickBench (a million rows) 0.24×, every result the
-same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
+column tables take 0.25× PostgreSQL's time in the geometric mean (row
+tables 0.77×), on ClickBench (a million rows) 0.11× (row 0.89×), loads
+faster than PostgreSQL's, every result the same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
 operators, exact nearest-neighbour search through SIMD kernels whose
 results are the same on every CPU — the ten nearest of 100,000
 768-dimension vectors in 48 ms, faster than numpy's brute force and 3.5×

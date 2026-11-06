@@ -273,7 +273,7 @@ are marked ✅.
 | | M14.9 | SQL analyzer: `EXPLAIN ANALYZE`, statement statistics, linter, index advisor | ✅ DOCS §8.13 |
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
-| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W8 and W3b ✅; benchmark targets left (`docs/benchmarks.md`, Targets) |
+| | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 to agree |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
@@ -1308,7 +1308,7 @@ in the job summary; results, targets and how to reproduce in
 (`bench/tpch.py`, `bench/clickbench.py`, §M14.20); a pgbench-like mix and
 ANN recall (§M14.12) to follow).
 
-### §M14.20 — Analytics: vectorized execution and columnar storage ◐
+### §M14.20 — Analytics: vectorized execution and columnar storage ✅
 
 Runs after §M14.11 (its number only reflects when it was planned).  Why
 nucleus can compete with PostgreSQL on large data: PostgreSQL stores rows
@@ -1458,12 +1458,14 @@ attach / detach ✅; the age policy ✅); V10 results columnar end to end ✅ (a
 into the columnar result as columns, in parallel too — a million numeric
 rows into numpy 262 → 92 ms from a row table, 241 → 51 ms from a column
 table); TPC-H against PostgreSQL measured (`bench/tpch.py`, SF 1: every
-result agrees; first 6.5–7.9× PostgreSQL's time, now 0.47× on column
-tables and 1.11× on row tables in the geometric mean, 18 of the 22
+result agrees; first 6.5–7.9× PostgreSQL's time, then (2026-11-01) 0.47× on column
+tables and 1.11× on row tables in the geometric mean — 0.25× and 0.77×
+when §M14.20 closed —, 18 of the 22
 queries faster on column tables; `EXISTS` / `IN` unnested into semi and
 anti joins on the way) ✅; ClickBench (`bench/clickbench.py`, the first
 million rows: every result agrees, but for ties at a `LIMIT`; 0.24× of
-PostgreSQL's time on a column table, 2.13× on a row table) ✅; the
+PostgreSQL's time on a column table, 2.13× on a row table; 0.11× and
+0.89× when §M14.20 closed) ✅; the
 targets recorded ✅ (`docs/benchmarks.md`, Targets: column tables at most
 0.8× PostgreSQL's time on TPC-H and 0.5× on ClickBench in the geometric
 mean, no query above 3×; row tables within 2×; loads, updates and
@@ -2782,6 +2784,18 @@ recorded targets, transactional workloads stay within the recorded
 margin of it, every SIMD kernel matches its scalar reference under the
 law kit, and a table's columnar copy stays consistent with its rows under
 crash and concurrency tests.
+✅ (2026-11-06; agreed: "M14.20 is").  The full runs against PostgreSQL
+18.6 on one machine (`bench/tpch.py`, `bench/clickbench.py`,
+`bench/run.py`, nucleus on `a2e7f6f`; `docs/benchmarks.md`): TPC-H SF 1
+0.25× PostgreSQL's time on column tables and 0.77× on row tables in the
+geometric mean (it was 0.47× and 1.11×), no query above 1.93× (Q19);
+ClickBench's first million rows 0.11× and 0.89× (0.24× and 2.13×), no
+column query above 1.36×; the loads 0.55–0.92× (3.1–3.8× and 2.4–2.7×
+before V14); `bench/run.py` within every margin (load 1.1×, update
+0.9×, delete 1.5×, scans, sorts and joins 0.6–1.8×, reads by key 0.4×).
+Every result the same, but for ties at a `LIMIT`.  Left as findings,
+not targets: the `LIMIT`-over-a-failing-join finding (W6), TPC-H Q19 on
+column tables (an `OR` of conjunctions across a join, 1.93×).
 
 ### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; steps to agree)
 
@@ -4597,3 +4611,6 @@ style) across a thousand seeds without failure.
   `(n, d)` numpy and Arrow `fixed_size_list<float32>` in Python;
   pg-compat's `vector` (oid 13201, `to_regtype`, pgvector's binary),
   pgvector's psycopg client working.
+- **2026-11-06** — §M14.20 ✅: the full runs against PostgreSQL meet
+  every target — TPC-H 0.25× / 0.77×, ClickBench 0.11× / 0.89×, loads
+  0.55–1.1×, `bench/run.py` within its margins.
