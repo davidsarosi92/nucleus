@@ -85,6 +85,8 @@ codes! {
     invalid_schema => "3F000",
     invalid_regex => "2201B",
     invalid_width_bucket => "2201G",
+    invalid_tablesample => "2202H",
+    invalid_tablesample_repeat => "2202G",
     invalid_parameter => "22023",
     array_subscript => "2202E",
     object_in_use => "55006",

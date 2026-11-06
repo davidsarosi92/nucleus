@@ -869,6 +869,61 @@ impl<'a> Binder<'a> {
         })
     }
 
+    /// `plan` (a table's rows) under its `TABLESAMPLE` filter
+    /// ([`crate::sample`]): by the primary key's hash with `REPEATABLE`,
+    /// else by chance.
+    fn sampled(
+        &mut self,
+        plan: Plan,
+        table: &Table,
+        sample: Option<&ast::TableSample>,
+    ) -> Result<Plan> {
+        let Some(s) = sample else {
+            return Ok(plan);
+        };
+        if !matches!(s.method.as_str(), "bernoulli" | "system") {
+            return Err(Error::undefined_object(format!(
+                "tablesample method {} does not exist",
+                s.method
+            )));
+        }
+        if s.args.len() != 1 {
+            return Err(Error::invalid_tablesample(format!(
+                "tablesample method {} requires 1 argument, not {}",
+                s.method,
+                s.args.len()
+            )));
+        }
+        let none = Scope { cols: Vec::new() };
+        let mut args = vec![self.expr(&s.args[0], &none)?];
+        let name = match &s.seed {
+            Some(seed) => {
+                args.push(self.expr(seed, &none)?);
+                let keys: Vec<usize> = if table.primary_key.is_empty() {
+                    (0..table.columns.len()).collect()
+                } else {
+                    table.primary_key.clone()
+                };
+                args.extend(
+                    keys.into_iter()
+                        .map(|i| (Expr::Column(i), Some(table.columns[i].ty))),
+                );
+                "__tablesample_repeatable"
+            }
+            None => "__tablesample",
+        };
+        let f = self
+            .registry
+            .function(name)
+            .cloned()
+            .ok_or_else(|| Error::internal("the sampling functions are not registered"))?;
+        let (predicate, _) = self.call(f, args)?;
+        Ok(Plan::Filter {
+            input: Box::new(plan),
+            predicate,
+        })
+    }
+
     fn table_ref(&mut self, t: &TableRef) -> Result<Bound> {
         match t {
             TableRef::Function {
@@ -883,11 +938,20 @@ impl<'a> Binder<'a> {
                 name,
                 alias,
                 columns,
+                sample,
             } => {
                 let qual = alias.clone().unwrap_or_else(|| name.clone());
+                let not_a_table = || {
+                    Error::wrong_object_type(
+                        "TABLESAMPLE clause can only be applied to tables and materialized views",
+                    )
+                };
                 if schema.is_none()
                     && let Some(b) = self.cte_ref(name, &qual, columns)?
                 {
+                    if sample.is_some() {
+                        return Err(not_a_table());
+                    }
                     return Ok(b);
                 }
                 // Views of searched schemas (pg_catalog, with pg-compat)
@@ -900,6 +964,7 @@ impl<'a> Binder<'a> {
                 let table = match user {
                     Some(t) => t,
                     None => match self.registry.view(schema.as_deref(), name) {
+                        Some(_) if sample.is_some() => return Err(not_a_table()),
                         Some(view) => {
                             let mut scope = Scope {
                                 cols: view
@@ -1013,12 +1078,12 @@ impl<'a> Binder<'a> {
                             spec,
                         }
                     };
+                    let plan = self.sampled(plan, &table, sample.as_ref())?;
                     return Ok(Bound { plan, scope });
                 }
-                Ok(Bound {
-                    plan: secured(table),
-                    scope,
-                })
+                let plan = secured(table.clone());
+                let plan = self.sampled(plan, &table, sample.as_ref())?;
+                Ok(Bound { plan, scope })
             }
             TableRef::Subquery {
                 query,

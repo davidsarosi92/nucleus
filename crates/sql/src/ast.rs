@@ -744,6 +744,17 @@ pub enum SelectItem {
     },
 }
 
+/// `TABLESAMPLE method (args) [REPEATABLE (seed)]` after a table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableSample {
+    /// The method's name, lowercase (`bernoulli`, `system`).
+    pub method: String,
+    /// Its arguments (the percentage).
+    pub args: Vec<Expr>,
+    /// `REPEATABLE (seed)`.
+    pub seed: Option<Expr>,
+}
+
 /// A `FROM` item.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TableRef {
@@ -757,6 +768,8 @@ pub enum TableRef {
         alias: Option<String>,
         /// Column aliases: `AS alias (a, b)` renames the first columns.
         columns: Vec<String>,
+        /// `TABLESAMPLE method (args) [REPEATABLE (seed)]`.
+        sample: Option<TableSample>,
     },
     /// `(query) AS alias [(columns)]`.
     Subquery {

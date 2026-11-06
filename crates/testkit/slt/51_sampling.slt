@@ -1,0 +1,99 @@
+# Sampling and splits (PLAN.md §M14.27 S7): TABLESAMPLE (PostgreSQL's
+# grammar and errors; with REPEATABLE, a sample by the primary key's
+# stable hash, the same rows everywhere), hash_unit, reservoir_sample.
+
+statement ok
+CREATE TABLE sm (id INT PRIMARY KEY, g INT, w TEXT)
+
+statement ok
+INSERT INTO sm SELECT i, i % 4, 'w' || (i % 9) FROM generate_series(1, 2000) AS t(i)
+
+query II
+SELECT count(*), sum(id) FROM sm TABLESAMPLE BERNOULLI (10) REPEATABLE (42)
+----
+194 180676
+
+query II
+SELECT count(*), sum(id) FROM sm AS s TABLESAMPLE SYSTEM (10) REPEATABLE (42)
+----
+194 180676
+
+# A smaller sample is within a larger one.
+query I
+SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (2) REPEATABLE (42) WHERE id NOT IN (SELECT id FROM sm TABLESAMPLE BERNOULLI (10) REPEATABLE (42))
+----
+0
+
+query II
+SELECT (SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (0) REPEATABLE (1)), (SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (100))
+----
+0 2000
+
+# Without REPEATABLE: by chance, within reason.
+query T
+SELECT count(*) BETWEEN 300 AND 500 FROM sm TABLESAMPLE BERNOULLI (20)
+----
+t
+
+query IIT
+SELECT g, count(*), min(w) FROM sm TABLESAMPLE BERNOULLI (5) REPEATABLE (7) GROUP BY g ORDER BY g
+----
+0 24 w0
+1 23 w0
+2 33 w0
+3 28 w0
+
+# hash_unit: a stable split.
+query RRT
+SELECT hash_unit(42), hash_unit(42, 1), hash_unit(1.0) = hash_unit(1.00)
+----
+0.767 0.500 t
+
+query I
+SELECT count(*) FROM sm WHERE hash_unit(id) < 0.8
+----
+1594
+
+query T
+SELECT hash_unit(NULL::int) IS NULL
+----
+t
+
+# random(): PostgreSQL's, a new value each call.
+query T
+SELECT min(r) >= 0 AND max(r) < 1 AND count(DISTINCT r) > 1900 FROM (SELECT random() AS r FROM sm) q
+----
+t
+
+# reservoir_sample: n of the values, the same every run.
+query T
+SELECT reservoir_sample(id, 5, 1)::text FROM sm WHERE id <= 3
+----
+{1,2,3}
+
+query I
+SELECT array_length(reservoir_sample(w, 4), 1) FROM sm
+----
+4
+
+# Errors (PostgreSQL's codes).
+statement error 2202H
+SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (150)
+
+statement error 2202H
+SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (NULL)
+
+statement error 2202G
+SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (10) REPEATABLE (NULL)
+
+statement error 42704
+SELECT count(*) FROM sm TABLESAMPLE FOO (10)
+
+statement error 2202H
+SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (10, 2)
+
+statement error 42809
+WITH w AS (SELECT 1) SELECT * FROM w TABLESAMPLE BERNOULLI (10)
+
+statement error 22023
+SELECT reservoir_sample(id, 0) FROM sm

@@ -3292,10 +3292,11 @@ enum Part {
 }
 
 /// Whether `e` gives the same values on any thread: no subqueries (they
-/// would run once per worker), nothing volatile (whose values depend on
-/// the order of calls).
+/// would run once per worker), no function that is not
+/// [`parallel_safe`](crate::ext::ScalarFunction::parallel_safe) (a
+/// volatile one's values may depend on the order of calls).
 pub(crate) fn parallel_safe(e: &Expr) -> bool {
-    !e.has_subquery() && !volatile(e)
+    !e.has_subquery() && !parallel_unsafe_call(e)
 }
 
 /// [`parallel_safe`] for `e` run under `ctx`: its subqueries allowed where
@@ -3303,15 +3304,16 @@ pub(crate) fn parallel_safe(e: &Expr) -> bool {
 /// run once here first (their rows cached, which the workers are given),
 /// the correlated ones run by the workers for each row.
 pub(crate) fn parallel_safe_in(e: &Expr, ctx: &Ctx) -> bool {
-    !volatile(e) && (!e.has_subquery() || crate::expr::ready_subqueries(e, ctx))
+    !parallel_unsafe_call(e) && (!e.has_subquery() || crate::expr::ready_subqueries(e, ctx))
 }
 
-/// Whether `e` calls a volatile function (outside its subqueries).
-fn volatile(e: &Expr) -> bool {
+/// Whether `e` calls a function that is not parallel-safe (outside its
+/// subqueries).
+fn parallel_unsafe_call(e: &Expr) -> bool {
     let mut found = false;
     e.walk(&mut |x| {
         if let Expr::Call(f, _) = x
-            && f.volatility() == crate::ext::Volatility::Volatile
+            && !f.parallel_safe()
         {
             found = true;
         }

@@ -64,6 +64,7 @@ pub mod prune;
 pub mod regression;
 pub mod roles;
 pub mod rules;
+pub mod sample;
 pub mod segment;
 pub mod session;
 pub mod sessions;

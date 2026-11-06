@@ -363,6 +363,20 @@ approximate aggregates):
 executor and run.  `count(DISTINCT)` by groups is behind PostgreSQL's
 (PLAN.md §M14.27 S6, next).
 
+Sampling (§M14.27 S7), same table, best of five, the better of two
+rounds (2026-11-06); each query sums the sample (`count(*), sum(x)`):
+
+| query | nucleus (ms) | PostgreSQL 18 (ms) |
+|---|---:|---:|
+| `TABLESAMPLE BERNOULLI (10)` | 196 | 318 |
+| `TABLESAMPLE BERNOULLI (10) REPEATABLE (42)` | 248 | 263 |
+| `WHERE hash_unit(id) < 0.8` (8M rows) | 399 | — |
+| `reservoir_sample(x, 1000)` | 179 | — |
+| `ORDER BY random() LIMIT 1000` | 250 | 636 |
+
+nucleus's `REPEATABLE` sample is the same rows on every machine and in
+row and column storage; PostgreSQL's depends on the pages.
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

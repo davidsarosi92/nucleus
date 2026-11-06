@@ -134,6 +134,7 @@ impl Module for Builtin {
         crate::hll::register(r)?;
         crate::ddsketch::register(r)?;
         crate::topk::register(r)?;
+        crate::sample::register(r)?;
         crate::regression::register(r)?;
         crate::bytea::register(r)?;
         crate::inet::register(r)?;

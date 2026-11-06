@@ -274,7 +274,7 @@ are marked ✅.
 | | M14.10 | AI access: MCP server, schema comments, hints in errors | ✅ DOCS §6.5, §8.14, `docs/llm.md` |
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
-| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run) |
+| | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
@@ -2797,7 +2797,7 @@ Every result the same, but for ties at a `LIMIT`.  Left as findings,
 not targets: the `LIMIT`-over-a-failing-join finding (W6), TPC-H Q19 on
 column tables (an `OR` of conjunctions across a join, 1.93×).
 
-### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S6, S4·sort ✅)
+### §M14.27 — Statistics and numerical analysis on large data ◐ (study written; S1–S7, S4·sort ✅)
 
 **First a study, then the plan.**  Can nucleus give mathematical and
 statistical functions over large data — fast, exact where exactness is
@@ -3436,7 +3436,80 @@ before they are built**:
   `work_mem` as they are; the sparse form's entries as varint deltas;
   precision other than 14 (the format has its byte); the counts' error
   bounds as values (a record type).
-- **S7 — sampling and splits**: item 7.
+- **S7 — sampling and splits** ✅ (2026-11-06): item 7.
+  *Built:* `TABLESAMPLE BERNOULLI (p) | SYSTEM (p) [REPEATABLE (seed)]`
+  after a table in `FROM` — the binder puts a filter over the scan, so a
+  sample keeps everything a scan does (columns, predicates pushed down,
+  partitions, workers).  With `REPEATABLE`, `__tablesample_repeatable`:
+  a row is in when `stablehash` of its primary key's key encoding (all
+  its columns without a key), seeded by the seed's bits, falls below
+  `p / 100` of the hash space — the same rows in every executor, worker
+  count, run, version and machine, in row and column storage alike, and
+  a smaller `p`'s sample within a larger one's.  Without it,
+  `__tablesample`: a draw from a per-thread SplitMix64 seeded from the
+  database's random source.  `hash_unit(key [, seed])`, that hash as a
+  double in `[0, 1)` — a stable train/test split.  `random()`
+  (PostgreSQL's), from the same generator.  `reservoir_sample(x, n [,
+  seed])` — Algorithm L, the reservoir `ANALYZE` already drew with,
+  moved to `sample::Reservoir` and shared (one mechanism); per-worker
+  reservoirs merge by drawing, without replacement and by the rows each
+  saw, how many values each gives (Lemire's unbiased bounded draw), out
+  of their shuffled samples.  `ScalarFunction::parallel_safe` (default:
+  unless volatile): the two draws are volatile but their calls
+  independent, so a sampled scan runs on every CPU — it ran on one
+  before (1024 ms, now 196).  PostgreSQL's error codes (`2202H`,
+  `2202G`, `42704`, `42809`).
+  Tests: `sample.rs` — the same `REPEATABLE` rows in five settings and
+  both storages, `SYSTEM` = `BERNOULLI`, 1 % within 10 %, a keyless
+  table's duplicate rows in or out together, another seed another
+  sample; `hash_unit` splits alike everywhere and its halves add up;
+  `reservoir_sample` the same each run of a plan, NULLs left out, all
+  values when fewer than `n`.  Unit tests: every value equally likely
+  in a merged reservoir as in one fed whole (three splits, 20,000
+  seeds), Algorithm L uniform (moved with it), Lemire's draw unbiased,
+  the hash pinned.  `51_sampling.slt`.
+  *Prior art:* PostgreSQL's `TABLESAMPLE` (SQL:2003) — taken: the
+  grammar, `REPEATABLE`, the error codes; not taken: `SYSTEM` by pages
+  and both methods' per-block generator, whose sample changes with the
+  storage layout, `VACUUM` and a dump and restore — a primary-key hash
+  makes the sample a function of the rows, the property ML splits need
+  (the "Repeatable Splitting" pattern of Lakshmanan, Robinson and Munn's
+  *Machine Learning Design Patterns*, BigQuery's `FARM_FINGERPRINT(id)`
+  modulo 10, and Géron's split by `crc32(id)` — here built in as
+  `hash_unit`, over the key encoding so `1.0` and `1.00` split alike).
+  DuckDB's `USING SAMPLE` — a reservoir for a count of rows, `SYSTEM` by
+  vectors — not yet (below).  Reservoirs: Vitter's Algorithm R (1985, one draw a
+  row) against Li's Algorithm L (1994, `n · (1 + ln(N / n))` draws) —
+  L kept, as the study planned and `ANALYZE` used; a first version with
+  R, written for integer-only draws the same on every machine, was
+  replaced (two reservoirs for one job): L's gaps take `ln` and `exp`,
+  so a seed's sample is the same on one platform and almost always on
+  another, recorded.  Merging reservoirs by a hypergeometric draw:
+  the distributed-sampling literature (e.g. Tirthapura and Woodruff,
+  "Optimal random sampling from distributed streams revisited", DISC
+  2011) — taken in its simplest exact form.  `PARALLEL SAFE` as its own
+  property beside volatility: PostgreSQL's (where `random()` is
+  `PARALLEL RESTRICTED` because of `setseed`, which nucleus does not
+  have).
+  *Measured* (10M rows of `bench/stats/aggs.py`'s table, best of five,
+  the better of two rounds; `count(*), sum(x)` of the sample):
+  `TABLESAMPLE BERNOULLI (10)` 196 ms (PostgreSQL 318), with
+  `REPEATABLE (42)` 248 (263); `WHERE hash_unit(id) < 0.8` 399 (8M rows
+  summed); `reservoir_sample(x, 1000)` 179; `ORDER BY random() LIMIT
+  1000` 250 (636).  `bench/phases.py` two rounds alternating against
+  S6's build: ClickBench (column) geometric mean 17.9 / 17.5 → 18.0 /
+  17.7 ms, TPC-H (row) 235.7 / 230.4 → 237.3 / 230.3 — the same within
+  the noise.
+  *Next, recorded here:* `SYSTEM` that skips storage — whole column
+  segments or morsels by their hash, which needs a block identity that
+  survives compaction to stay repeatable; DuckDB's `USING SAMPLE n ROWS`
+  (a fixed count, by reservoir in the plan); aggregate `FILTER (WHERE
+  …)` is not parsed yet (the tests sum `CASE` instead) — a small
+  grammar step; `reservoir_sample` order-free (by the values' hashes,
+  a bottom-k sample, at the cost of a sample that depends on the values
+  rather than the draws); `setseed`; `ln` and `exp` of our own (as
+  DDSketch avoids them) would make Algorithm L's samples the same on
+  every machine.
 - **S8 — drift, tests and `SUMMARIZE`**: items 8 and 9, the MCP tool,
   `docs/llm.md`.
 - Vectors' statistics with §M14.12.

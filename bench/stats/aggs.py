@@ -66,11 +66,21 @@ QUERIES = {
     "count distinct 1000 groups": "SELECT g, count(DISTINCT id) FROM t GROUP BY g ORDER BY g LIMIT 3",
     "approx_percentile": "SELECT approx_percentile(y, ARRAY[0.5, 0.95, 0.99]) FROM t",
     "approx_top_k": "SELECT approx_top_k(id % 1000, 3) FROM t",
+    # Sampling (S7): a tenth of the table, a stable 80 % split, 1000 rows.
+    "tablesample": "SELECT count(*), sum(x) FROM t TABLESAMPLE BERNOULLI (10)",
+    "tablesample repeatable": "SELECT count(*), sum(x) FROM t TABLESAMPLE BERNOULLI (10) "
+                              "REPEATABLE (42)",
+    "hash_unit split": "SELECT count(*), sum(x) FROM t WHERE hash_unit(id) < 0.8",
+    "reservoir_sample": "SELECT array_length(reservoir_sample(x, 1000), 1) FROM t",
+    "order by random() limit": "SELECT count(*), sum(x) FROM (SELECT x FROM t "
+                               "ORDER BY random() LIMIT 1000) q",
 }
 
-# PostgreSQL has no skewness, kurtosis or histogram.
+# PostgreSQL has no skewness, kurtosis, histogram, sketches, hash_unit or
+# reservoir_sample.
 NOT_PG = {"skewness, kurtosis", "histogram", "approx_count_distinct",
-          "approx_count_distinct 1000 groups", "approx_percentile", "approx_top_k"}
+          "approx_count_distinct 1000 groups", "approx_percentile", "approx_top_k",
+          "hash_unit split", "reservoir_sample"}
 
 
 def start(binary, port):

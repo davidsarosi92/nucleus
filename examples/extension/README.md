@@ -31,7 +31,7 @@ What a module can register (`Registry::add_*`):
 | | Interface | Here |
 |-|-----------|------|
 | a type | `Type`: names, text input/output, and each ability it has — `Equality`, `Hashing`, `TotalOrder`, `KeyEncoding`, `Distance` — an encoding version and `upgrade`, `examples()` | `geopoint` |
-| a scalar function | `ScalarFunction`: arity, bind-time `resolve` (argument handling, result type), strictness, `volatility`, `call` | `geohash` |
+| a scalar function | `ScalarFunction`: arity, bind-time `resolve` (argument handling, result type), strictness, `volatility`, `parallel_safe`, `call` | `geohash` |
 | an aggregate | `Aggregate` + `Accumulator` | — |
 | a table function | `TableFunction` | — |
 | a schema and catalog views | `add_schema`, `CatalogView` | `geo.cities` |

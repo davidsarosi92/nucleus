@@ -231,6 +231,15 @@ pub trait ScalarFunction: Send + Sync {
         Volatility::Volatile
     }
 
+    /// Whether workers may call it, each on its own rows (PostgreSQL's
+    /// `PARALLEL SAFE`): by default, unless it is volatile.  A volatile
+    /// function whose calls do not depend on one another — a draw from a
+    /// per-thread generator — says so here, and its scans run on every
+    /// CPU.
+    fn parallel_safe(&self) -> bool {
+        self.volatility() != Volatility::Volatile
+    }
+
     /// For a function of two arguments that can be true only when its
     /// first lies in a range computed from its second (`inet <<= cidr`):
     /// two functions of the second giving that range's bounds, inclusive,

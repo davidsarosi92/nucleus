@@ -80,6 +80,7 @@ const EXPLAIN_OPTIONS: &[&str] = &[
 
 const RESERVED: &[&str] = &[
     "select",
+    "tablesample",
     "from",
     "where",
     "group",
@@ -2592,11 +2593,32 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
+        let sample = if self.eat_kw("tablesample") {
+            let method = self.ident()?.to_lowercase();
+            self.expect_op("(")?;
+            let mut args = vec![self.expr()?];
+            while self.eat_op(",") {
+                args.push(self.expr()?);
+            }
+            self.expect_op(")")?;
+            let seed = if self.eat_kw("repeatable") {
+                self.expect_op("(")?;
+                let seed = self.expr()?;
+                self.expect_op(")")?;
+                Some(seed)
+            } else {
+                None
+            };
+            Some(crate::ast::TableSample { method, args, seed })
+        } else {
+            None
+        };
         Ok(TableRef::Table {
             schema,
             name,
             alias,
             columns,
+            sample,
         })
     }
 

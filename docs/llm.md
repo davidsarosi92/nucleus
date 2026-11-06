@@ -109,6 +109,13 @@ counts).  Sketches to keep and merge later: `hll_agg(x)` →
 `hll_merge(h)` → `hll_count(h)`; `ddsketch_agg(x)` →
 `ddsketch_merge(s)` → `ddsketch_quantile(s, 0.99)` (e.g. one row per
 day, merged for a month).
+Samples: `FROM t TABLESAMPLE BERNOULLI (10) REPEATABLE (42)` — 10 % of
+the rows, the same rows on every run and machine (without `REPEATABLE`,
+new each time); a stable train/test split: `WHERE hash_unit(id) < 0.8`
+and `WHERE hash_unit(id) >= 0.8` (a second argument as the seed);
+`reservoir_sample(x, 100 [, seed])` — 100 values as an array, uniform,
+the same every run — unlike `ORDER BY random() LIMIT n` (also there),
+which differs each time.
 
 **Memory:** `SET work_mem = '256MB'` gives each sort and materialised
 result more memory before it spills to disk (default 64MB).  Scans,

@@ -1618,6 +1618,38 @@ count taken from all), each count low by at most `(n − Σ counts) / (C +
 otherwise the same in every run of a plan (its states merge in the
 morsels' order: it is not `order_free`).
 
+**Sampling** (`sample`, §M14.27 S7).  `FROM t TABLESAMPLE BERNOULLI (p)`
+or `SYSTEM (p)`, `p` a percentage, optionally `REPEATABLE (seed)` —
+PostgreSQL's grammar and error codes (`2202H` a percentage outside 0–100
+or NULL, `2202G` a NULL seed, `42704` another method, `42809` on a CTE
+or a view).  The binder puts a filter over the table's scan, so the
+sample composes with everything a scan does (columns, pushed-down
+predicates, partitions).  With `REPEATABLE`, a row is in the sample when
+`stablehash` of its primary key (all its columns without one), seeded
+by the seed's bits, falls below `p / 100` of the hash space: the same
+rows on every run, worker count, executor, version and machine, in row
+and column storage alike, and a smaller `p`'s sample within a larger
+one's.  Without it, each row is taken with probability `p / 100` from a
+per-thread SplitMix64 seeded from the database's random source — a new
+sample each statement.  `SYSTEM` samples rows as `BERNOULLI` does (no
+block of storage is skipped yet).  `hash_unit(key [, seed])` is the same
+hash as a `double precision` in `[0, 1)` — `WHERE hash_unit(id) < 0.8`
+a training set and `>= 0.8` its test set, stable everywhere.
+`random()` is PostgreSQL's, a double in `[0, 1)` from the same
+per-thread generator.  Both draws are volatile but parallel-safe
+(`ScalarFunction::parallel_safe`, PostgreSQL's `PARALLEL SAFE`; by
+default a function is unless it is volatile): their calls do not depend
+on one another, so a scan sampled without `REPEATABLE` runs on every
+CPU.
+`reservoir_sample(x, n [, seed])` returns `n` of the non-NULL values
+(all of them when fewer) as an array, every set of `n` equally likely:
+Li's Algorithm L, the reservoir `ANALYZE` samples with (`sample::Reservoir`),
+seeded by `seed` (0 by default); reservoirs from the workers merge by
+drawing without replacement how many values each gives (from the rows
+each saw), so the result is uniform and the same every run of a plan —
+not `order_free`, its gaps computed with `ln` and `exp`.  `n` is 1 to
+10⁶ (`22023` otherwise).
+
 **Columns** (`prune`, §M14.11).  Before a query runs, its plan is walked
 from the top with the output columns wanted, each node adding what its
 expressions read; a scan then decodes only the columns needed — the rest
@@ -2458,7 +2490,9 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   common type, or a `Constant`), `strict()` (default true: a `NULL`
   argument gives `NULL` without a call), `volatility()` (`Immutable`,
   `Stable`, `Volatile` — the default; only immutable functions may define
-  an ordering), `implied_range()` (for a function of two arguments true
+  an ordering), `parallel_safe()` (default: unless volatile; a volatile
+  function whose calls do not depend on one another, such as `random()`,
+  returns true so workers call it), `implied_range()` (for a function of two arguments true
   only when the first lies in a range computed from the second: two
   functions giving the bounds; the binder adds the comparisons beside the
   call, for index ranges — `inet <<= cidr` uses it), `call(&CallContext,
@@ -3588,6 +3622,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-06 — §M14.27 S7, sampling and splits:** `TABLESAMPLE
+  BERNOULLI | SYSTEM (p) [REPEATABLE (seed)]` (a filter by the primary
+  key's stable hash with `REPEATABLE`), `hash_unit`, `reservoir_sample`,
+  `random()`; `ScalarFunction::parallel_safe`; `ANALYZE`'s Algorithm L reservoir moved to `sample::Reservoir` and
+  shared (§8.5, *Sampling*).
 - **2026-11-06 — §M14.27 S6, sketches:** `stablehash` (xxHash64 of
   the key encoding); `approx_count_distinct`, `hll_agg`, `hll_merge`,
   `hll_count` and the type `hll` (HyperLogLog++, Ertl's estimator);
