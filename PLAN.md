@@ -275,7 +275,7 @@ are marked ✅.
 | | M14.11 | Large data foundations: streaming and columnar results (zero-copy into numpy / Arrow), bulk load, large transactions, spilling, the B+tree's read and write paths, benchmarks against PostgreSQL | ✅ DOCS §5.2, §8.5, §8.7, §10, `docs/benchmarks.md` |
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ◐ V1–V13 shipped; V14, the whole engine reviewed: W0–W8 and W3b ✅; benchmark targets left (`docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 to agree |
-| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ⬜ |
+| | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1 |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
@@ -2996,7 +2996,7 @@ chosen and their order, the methods and their error bounds, the
 benchmarks — and the steps it leads to are planned as this milestone's
 own, agreed before they are built.
 
-### §M14.28 — B+tree or LSM tree, chosen per table ⬜
+### §M14.28 — B+tree or LSM tree, chosen per table ◐ (study written; steps to agree)
 
 **First a study, then the plan.**  Today every table lives in the one
 copy-on-write B+tree (D2, D10); an LSM tree was left for later, "as a
@@ -3041,6 +3041,208 @@ The study answers, and records here:
   versioned and older ones read (D15, D18); measured against the B+tree on
   the §M14.11 suite and on write-heavy workloads before it is
   recommended for any.
+
+**The study** (2026-11-06; what it asked is kept in its answers).
+
+*Who needs it.*  Tables written far more than they are read per key:
+event and log ingestion, §M16.5's streams, time series, an AI
+application's logged prompts, outputs and scores, embeddings written in
+bulk (§M14.22), counters and sessions updated in place.  Their keys are
+either in order (a time, `uuidv7()`) or random to the table's clustered
+order (`uuid` v4, a hash, `(user, time)` across many users).  The second
+kind is where a B+tree pays: each row lands on a different leaf, and a
+leaf is written whole.
+
+*Measured: write amplification today* (`bench/wamp/wamp.py`; rows of 108
+bytes — a `bigint` key and 100 bytes of text; the bytes the server wrote
+to disk, all of a phase's pages durable before it counts as done:
+nucleus killed after the phase and restarted, its recovery replaying the
+WAL and checkpointing; PostgreSQL 18 in Docker with its defaults, a
+`CHECKPOINT`, the bytes its cgroup wrote.  APFS on an Apple M-series
+SSD; nucleus with its default 128 MiB page cache and a checkpoint every
+GiB of WAL; two runs each where they differ):
+
+| phase | nucleus | PostgreSQL 18 |
+|---|---:|---:|
+| bulk: 10M rows, 1M a transaction, keys in order | 4.1 | 5.2 – 7.8 |
+| bulk: 10M rows, 1M a transaction, random keys | 4.7 – 5.7 | 7.8 – 11.3 |
+| 100k rows, one a transaction, keys in order | 152 | 80 |
+| 100k rows, one a transaction, random keys among the 10M | 204 | 83 |
+| 100k rows, 100 a transaction, random keys | 27 | 6.6 |
+| 5M rows, 100 a transaction, random keys (steady state) | 29.4 | 29.6 |
+
+Where the bytes go:
+
+- **Bulk** loads are already cheap in nucleus's B+tree — cheaper than
+  PostgreSQL's heap and index, which writes each row to the WAL, the
+  heap and the index, and full pages after each checkpoint.  An LSM
+  tree would not beat 4–6 here (WAL, flush, then compactions); a sorted
+  bulk load written straight as a run (D16's fresh ranges) can reach ~1
+  on either engine.
+- **A row a transaction** costs nucleus ~16 KiB a commit (1541 MiB for
+  100k), PostgreSQL ~8 KiB (its WAL page).  It is the commit, not the
+  tree: the same for keys in order, and only 31 MiB was left for the
+  checkpoint.  nucleus appends to a WAL segment that grows, so each
+  `F_FULLFSYNC` writes the data block and the file's metadata;
+  PostgreSQL writes into preallocated, recycled segments.  An LSM tree
+  has the same WAL, so this is fixed beside it (step L0), not by it.
+- **Random keys into a large table** are the tree.  nucleus stores rows
+  in the leaves of the table's B+tree (a clustered table): 100k random
+  rows dirty tens of thousands of 8 KiB leaves, each written whole at
+  the checkpoint (539 MiB after the one-row phase, 248 MiB after the
+  100-row one).  PostgreSQL appends rows to its heap and only its narrow
+  index leaves are random.  What a leaf costs per row depends on how many
+  rows it collects between checkpoints — the steady-state row is the one
+  that decides: over 5M rows both engines write about 29 bytes per byte
+  of rows (nucleus 12.9 GiB during the phase — its checkpoints every GiB
+  of WAL and the evictions of a 128 MiB cache under a 3 GiB table — and
+  1.9 GiB at the end; PostgreSQL its index leaves and the full-page
+  images after each checkpoint).  The short phase's 27 against 6.6 was
+  the forced checkpoint, not the engines.  With the table twenty times
+  the cache, a leaf collects few rows between its writes in either
+  engine; this is the workload an LSM tree is for.  (nucleus took 857 s
+  with the test suite running beside it, PostgreSQL 269 s: times not
+  comparable in this run.)
+
+*The shape behind the KV contract* (principle 1).  An engine serves a
+key range — a table, an index, a partition — and the KV routes each
+range to its engine; SQL, documents and streams see one ordered,
+versioned map as now.
+
+- **One WAL.**  A commit's batch is one WAL record whatever engines it
+  touches, so a commit across both stays atomic without two-phase commit
+  (MySQL's cross-engine transactions need the binlog's 2PC — the cost
+  avoided).  The LSM's memtable is filled from the batch as the B+tree's
+  pages are; the WAL is cut at the oldest of the B+tree's checkpoint and
+  the oldest unflushed memtable; recovery replays into both (D10).
+- **MVCC unchanged**: versions are keys to either engine.  The vacuum's
+  deletions are tombstones, dropped by compaction at the last level;
+  `DROP` and `TRUNCATE` delete the runs wholly inside the range and leave
+  a range tombstone for the rest (RocksDB's `DeleteFilesInRange` and
+  range deletions).
+- **Files**: runs are immutable files of D6's checksummed blocks with a
+  block index and a prefix bloom filter, beside the B+tree's file; a
+  manifest names the live runs and is switched like the meta page at a
+  checkpoint; formats versioned and old ones read (D15, D18).
+- **Bulk loads** (D16's fresh ranges) write a sorted run straight into
+  the last level, no WAL (RocksDB's and Pebble's ingestion).
+- **Branches and time travel** (§M14.13, §M14.14): immutable runs are
+  shared between branches by reference, as the B+tree's copy-on-write
+  pages are.
+- **Compaction** runs on §M14.20 W1's workers with an I/O budget, so
+  foreground writes see bounded stalls (bLSM's "spring and gear"
+  scheduler; RocksDB's rate limiter); its memory is its own budget
+  beside the page cache (WiredTiger's lesson below).  The embedded
+  editions (§M14.23) default to a small memtable and one compaction
+  thread.
+- **The simulation** (principle 4) drives flushes and compactions
+  through the platform layer, with crashes inside them; every engine runs
+  the same KV and SQL test suites.
+
+*The compaction policy chosen, and why.*  One mechanism with parameters,
+not a menu of strategies ("one mechanism per job"): tiered and leveled
+compaction are the two ends of one scale — a fan-in `T`, and per level
+whether it holds several runs or one (Dostoevsky, Dayan and Idreos 2018;
+Cassandra 5's Unified Compaction Strategy is the same idea in
+production).  The default is **lazy leveling**: tiered upper levels
+(each byte rewritten about once per level) and one leveled last level
+(space amplification at most 1 + 1/`T`; a point lookup one run there and
+a bloom filter per run above), bloom filter bits spread over levels by
+Monkey's allocation (Dayan, Athanassoulis and Idreos 2017: more bits on
+the small levels).  For the random-key workload above that is about
+1 (WAL) + 1 (flush) + 1 per upper level + `T`/2 at the last: ~6–7 at
+`T` = 4 and four levels, against the 29 both engines measured — about
+four times less.  Time
+series need no policy of their own: a partition by time (§M14.20) is
+dropped or detached with its runs — what Cassandra's time-window and
+RocksDB's FIFO compaction give.
+
+*What stays with the B+tree*: read-mostly tables, tables that fit the
+cache, point lookups and range scans that must not merge runs, small
+tables, the catalog; and, until measured otherwise, everything by
+default.
+
+*Prior art, read for ideas.*
+
+- **O'Neil, Cheng, Gawlick and O'Neil, "The Log-Structured Merge-Tree"
+  (1996)**: the model; the rolling merge between components is what
+  leveled compaction became.
+- **LevelDB → RocksDB**: leveled compaction (each level `T` = 10 times
+  the last; up to about `T` rewrites of a byte per level),
+  universal (tiered: less writing, up to twice the space), FIFO;
+  **column families** — separate LSM trees sharing one WAL, atomic
+  across families — are an engine per table in all but name, and the
+  model for one WAL here.  Taken: the shared WAL, ingestion, range
+  deletions, the rate limiter.  Not taken: the number of strategies and
+  options (hundreds), which one parameterized policy replaces.
+- **WiredTiger** offered a B-tree or an LSM tree per table (`type=lsm`);
+  MongoDB, its main user, kept to the B-tree; the LSM tree's tests were
+  disabled (WT-8867) and it was deprecated.  No rationale was published
+  that we found; the tickets show LSM chunks and B-tree pages
+  competing for one cache and eviction (WT-2940).  Taken: the LSM's
+  memory is its own budget, and it runs every test the B+tree runs — a
+  second engine that is second-class in testing decays.
+- **MyRocks** (Matsunobu, Dong and Lee, VLDB 2020): RocksDB under MySQL,
+  chosen per table beside InnoDB; Facebook's user database moved to it
+  for about half the space or less, and less writing (compression of immutable
+  runs; no half-empty pages).  Taken: per-table choice; space
+  amplification as a measured goal, not only writes.
+- **CockroachDB's move to Pebble** (2020): an engine they control,
+  ingestion of runs for bulk loads and rebalancing, L0 sublevels against
+  write stalls.  Taken: ingestion, and owning the engine rather than
+  embedding one (principle 2).
+- **WiscKey** (Lu et al., FAST 2016; RocksDB's BlobDB): keys in the tree,
+  large values in a log.  Not now — 100-byte rows gain nothing — but an
+  embedding of 768 floats is 3 KiB: to measure with §M14.12's tables.
+- **bLSM** (Sears and Ramakrishnan, SIGMOD 2012): bounded write latency
+  by scheduling merges; bloom filters on every run.  Taken: the
+  scheduling idea.
+- **PebblesDB** (Raju et al., SOSP 2017): fragmented runs between
+  guards, less rewriting, more read cost.  Not taken: lazy leveling gets
+  most of the saving with simpler invariants.
+- **Cassandra** (size-tiered, leveled, time-window, then the Unified
+  Compaction Strategy) and **ScyllaDB** (incremental compaction, against
+  size-tiered's temporary doubling of space): the history that ends in
+  one parameterized policy.
+- **Buffered B-trees instead of a second engine**: Bε-trees (TokuDB's
+  fractal trees: buffers in the inner nodes) and InnoDB's change buffer
+  (secondary index changes held until their page is read; MySQL 8.4
+  turned it off by default).  They keep one structure but make every
+  page more complex and every read check the buffers; immutable runs are
+  simpler to verify, compress and share between branches.  Not taken,
+  recorded as the alternative if the engine boundary (L1) proves costly.
+- **The RUM conjecture** (Athanassoulis et al., EDBT 2016): read, update
+  and memory overheads cannot all be minimal — the reason the choice is
+  per table and not global.
+
+*Benchmarks to run* (each step against the one before, on macOS and on
+Linux ext4): `bench/wamp/wamp.py` at steady state, with updates and
+deletes added; space amplification after each; point-lookup and
+range-scan latency (p50, p99) while compaction runs; YCSB's A (50 %
+updates), B (5 %) and E (scans); the §M14.11 suite on an LSM table;
+recovery time after a crash mid-compaction.
+
+*Steps*, each its own commit, measured, in this order — **to be agreed
+before they are built**:
+
+- **L0 — the commit's bytes**: WAL segments preallocated and recycled
+  (left in W7), so a commit writes its block and no metadata; the bytes a
+  commit costs measured on APFS and ext4.  Both engines gain.
+- **L1 — the engine boundary**: the KV routes a key range to an engine
+  behind the store's interface (get, scan, apply a batch, checkpoint);
+  one WAL; a second, trivial engine (a sorted map flushed whole at a
+  checkpoint) in the tests proves routing, atomic commits across engines
+  and recovery.
+- **L2 — the LSM engine**: memtable, flushes to runs, the manifest,
+  merging reads, bloom filters, lazy-leveling compaction, range
+  tombstones; the simulation with crashes in flushes and compactions.
+- **L3 — in SQL**: `CREATE TABLE … WITH (engine = lsm)`, per partition,
+  indexes following their table; `ALTER TABLE … SET (engine = …)`
+  converting online (a copy into the new engine, switched at a commit).
+- **L4 — scheduling and ingestion**: compaction against foreground work
+  with an I/O budget; bulk loads as ingested runs.
+- **L5 — the verdict**: the benchmarks above; where the LSM is
+  recommended, recorded here with the numbers.
 
 **Done when:** the study is written here — the workloads and their
 measured amplifications, the design behind the KV contract, the
@@ -4233,6 +4435,13 @@ style) across a thousand seeds without failure.
   power sums the same bits always, 8.9 ns a value by a superaccumulator);
   the families chosen with their methods, bounds and prior art; steps
   S1–S8, to be agreed before they are built.
+- **2026-11-06** — §M14.28, the study: write amplification measured
+  against PostgreSQL 18 (`bench/wamp/wamp.py`): bulk loads cheaper in
+  nucleus (4–6 against 5–11); a commit 16 KiB against 8 (the WAL's
+  growing segments — step L0); random keys into a table twenty times the
+  cache about 29 in both; the design behind the KV contract (one WAL,
+  engines per key range), lazy leveling chosen, prior art; steps L0–L5,
+  to be agreed before they are built.
 - **2026-11-06** — §M14.12 V1: `vector(n)` as a registered type with
   every capability (equality, hashing, order, key encoding, distances
   `<-> <=> <#> <+>`, arithmetic, a modifier, casts, exact `sum` / `avg`);

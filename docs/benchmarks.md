@@ -691,6 +691,34 @@ vector now), the column table's within the variation but for Q23, 220 →
 146 ms (the cache of decoded columns no longer evicting what
 `SELECT *` comes back to — not measured apart).
 
+## Write amplification
+
+Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;
+`bench/wamp/wamp.py`): rows of a `bigint` key and 100 bytes of text; a
+phase counts once its pages are durable — nucleus killed and restarted
+(recovery replays the WAL and checkpoints), the server process's bytes
+(macOS `proc_pid_rusage`); PostgreSQL 18 in Docker with its defaults, a
+`CHECKPOINT`, its cgroup's bytes.  Apple M2 Pro, APFS; 2026-11-06, two
+runs where they differ.
+
+| phase | nucleus | PostgreSQL 18 |
+|---|---:|---:|
+| bulk: 10M rows, 1M a transaction, keys in order | 4.1 | 5.2 – 7.8 |
+| bulk: 10M rows, 1M a transaction, random keys | 4.7 – 5.7 | 6.7 – 11.3 |
+| 100k rows, one a transaction, keys in order | 152 | 80 |
+| 100k rows, one a transaction, random keys among the 10M | 204 | 83 |
+| 100k rows, 100 a transaction, random keys | 27 | 6.6 |
+| 5M rows, 100 a transaction, random keys (steady state) | 29.4 | 29.6 |
+
+A commit costs nucleus ~16 KiB (its WAL segment grows, so each sync
+writes metadata too), PostgreSQL ~8 KiB; the 100k-row phases end in a
+forced checkpoint, the steady state is the comparison that holds.
+
+```sh
+python3 -I bench/wamp/wamp.py nucleus target/release/nucleus /tmp/wamp-db 21006 [0,1,2,3,4,5]
+python3 -I bench/wamp/wamp.py pg [0,1,2,3,4,5]     # Docker, postgres:18-alpine
+```
+
 ## Targets
 
 PLAN.md §M14.11 asks for targets set from the first results, and
