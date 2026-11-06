@@ -233,7 +233,29 @@ pub enum JoinAlgo {
         /// smaller), the right rows marking the left rows they match; the
         /// left rows then given in order, those marked or not.
         build_left: bool,
+        /// The lookups chosen instead when the right side, made first,
+        /// turns out small ([`Adaptive`]).
+        adaptive: Option<Box<Adaptive>>,
     },
+}
+
+/// A hash join's other plan, chosen as it runs (an adaptive join: Oracle's
+/// adaptive plans, SQL Server's adaptive joins): when its right side —
+/// made first, as a hash join makes it — has at most `below` rows, each of
+/// them looks the left side's table up by an index instead (an index
+/// nested loop with the right rows outside), as the planner would have
+/// had it estimated them right.  Inner joins only: the rows are the same,
+/// in the right rows' order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Adaptive {
+    /// The left side as a scan by an index of a right row's key values
+    /// (the right row as `Outer` at depth 1).
+    pub lookup: Plan,
+    /// The join's condition over a right row followed by a left row.
+    pub on: Option<Expr>,
+    /// The most right rows the lookups are chosen for: where they cost
+    /// what the hash join does.
+    pub below: usize,
 }
 
 /// How a scan finds rows: an index (primary = `None`), equal values for a
@@ -601,15 +623,20 @@ impl Plan {
                         left_keys,
                         right_keys,
                         build_left,
+                        adaptive,
                     } => format!(
-                        "Hash Join{} ({})",
+                        "Hash Join{} ({}){}",
                         if *build_left { " (left hashed)" } else { "" },
                         left_keys
                             .iter()
                             .zip(right_keys)
                             .map(|(l, r)| format!("{} = {}", show(l), show(r)))
                             .collect::<Vec<_>>()
-                            .join(", ")
+                            .join(", "),
+                        match adaptive {
+                            Some(a) => format!(" or lookups up to {} rows", a.below),
+                            None => String::new(),
+                        }
                     ),
                 };
                 match on {

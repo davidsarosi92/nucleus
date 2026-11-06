@@ -2136,15 +2136,31 @@ them, so a join copies only what is used.
 **Index nested loops** (`lookups`): a hash join whose right side is an
 analyzed table's scan becomes an index nested loop when an index (the
 primary key or a secondary one) leads with the join keys and the lookups
-cost less than hashing the table — each lookup counted as 12 rows of a
-scan, each row a secondary index finds 20 more (its fetch), against the
-table's rows read once; a column table's lookups count four times as
-much and its rows scanned a quarter (its scans read batches of the
-columns wanted, its lookups segments' values); the rows a lookup reads are all of its key
-value's, whatever the filter keeps — a semi or anti join's stop at the
-first match.  An inner join may look up its left
-side instead (the columns put back in order above).  A lookup join's rows
-are estimated as the left side's times a lookup's.
+cost less than hashing the table — each lookup counted as 40 rows of a
+scan, each row a secondary index finds 60 more (its fetch; measured on
+TPC-H, §M14.12 V3), against the table's rows read once; a column table's
+lookups count 1.2 times as much and its rows scanned a quarter (its
+scans read batches of the columns wanted, its lookups segments' values);
+the rows a lookup reads are all of its key value's, whatever the filter
+keeps — a semi or anti join's stop at the first match.  An inner join
+may look up its left side instead (the columns put back in order above).
+A lookup join's rows are estimated as the left side's times a lookup's.
+
+**Adaptive joins** (`adaptive`, last, after narrowing): an inner hash
+join whose left side such an index could look up keeps that plan beside
+the hash join's (`plan::Adaptive`; `EXPLAIN`: `Hash Join (…) or lookups
+up to N rows`), N the right rows below which the lookups cost less.
+The join makes its right side first, as a hash join does (on the workers,
+gathered, or stashed); with at most N rows they look the left side's
+table up, each right row outside (an index nested loop, its rows put
+back left columns first), the left side never scanned; with more, the
+hash join runs.  A right side estimated larger than it is — TPC-H Q18's
+`HAVING sum(l_quantity) > 300`, a third of the orders by estimate, 57 in
+fact — then costs what the right estimate would have (Oracle 12c's
+adaptive plans, SQL Server 2017's adaptive joins).  The rows are the hash
+join's, in the right rows' order; the choice is the same in every
+executor (`vector::prepare` makes it for a pipeline, `exec`'s join
+otherwise).  Not where the left side reads an enclosing row.
 
 **Parallel aggregates in key order**: grouped by (at least) the leading
 column of the primary key a scan reads in order, the morsels' groups meet

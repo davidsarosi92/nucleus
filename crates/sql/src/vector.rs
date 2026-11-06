@@ -2181,6 +2181,7 @@ fn chain<'p>(
                     left_keys,
                     right_keys,
                     build_left: false,
+                    ..
                 },
         } if probing(*kind) => {
             let Some(Built::Table(table)) = tables?.get(&address(plan)) else {
@@ -3265,6 +3266,18 @@ static PARALLEL_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// (for tests and diagnostics).
 pub fn parallel_runs() -> u64 {
     PARALLEL_RUNS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static ADAPTIVE_LOOKUPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many adaptive joins this process has run as lookups
+/// ([`crate::plan::Adaptive`]; for tests and diagnostics).
+pub fn adaptive_lookups() -> u64 {
+    ADAPTIVE_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn note_adaptive_lookups() {
+    ADAPTIVE_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 static SPILLED_GROUPINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -4816,8 +4829,13 @@ impl JoinTable {
         Ok(Gathered::Table(Self::of(Held::Columns(held), values)))
     }
 
+    /// How many rows it holds.
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
     /// Its rows, in order, as rows.
-    fn rows_in_order(&self) -> Vec<Row> {
+    pub(crate) fn rows_in_order(&self) -> Vec<Row> {
         (0..self.rows.len())
             .map(|r| {
                 let mut row = Vec::new();
@@ -5361,6 +5379,7 @@ fn make<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, joins: &mut Vec<usize>) -> Result<
                     left_keys,
                     right_keys,
                     build_left: false,
+                    adaptive,
                 },
             ..
         } => {
@@ -5397,6 +5416,15 @@ fn make<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, joins: &mut Vec<usize>) -> Result<
                     }
                 },
             };
+            // An adaptive join's few right rows look the left side up
+            // instead: `crate::exec`'s join takes them.
+            if let Some(a) = adaptive
+                && table.len() <= a.below
+            {
+                let rows = crate::spill::Stored::Memory(table.rows_in_order());
+                ctx.join_tables.borrow_mut().insert(at, Built::Stored(rows));
+                return Ok(());
+            }
             crate::keyfilter::register(ctx, left, right, *kind, left_keys, &|j| table.key_ints(j));
             ctx.join_tables
                 .borrow_mut()

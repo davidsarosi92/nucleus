@@ -4158,12 +4158,51 @@ Against PostgreSQL 18.6 (`docs/benchmarks.md`): TPC-H 0.25× on column
 tables, 0.76× on row tables (0.77× before); ClickBench 0.10× and 0.83×
 (0.11×, 0.89×); every result the same, but for ties at a `LIMIT`.
 
-*Next, recorded:* **an adaptive join** — a lookup join that buffers its
-outer rows up to the point where the hash join becomes cheaper and
-switches at run time (Oracle's adaptive plans, 12c: a statistics
-collector at the inflection point; SQL Server's adaptive joins, 2017),
-so a misestimated outer side (Q18's `HAVING`) costs neither plan's
-worst case.
+*Done — the adaptive join* (2026-11-06; agreed after V3 as important).  An inner hash join whose left side an index
+could look up carries that plan too (`plan::Adaptive`, made last, after
+narrowing, so its lookups read the columns the join's left side has) and
+the inflection point: the right rows below which the lookups cost less
+than the hash join (`LookupCosts::below`, from the costs `lookups`
+compares).  Running, the join makes its right side as the hash join
+does — on the workers, gathered in columns, or stashed — and counts it:
+at most that many rows look the left table up (an index nested loop with
+the right rows outside, its rows put back left columns first, the left
+side never scanned), more run the hash join.  `vector::prepare` decides
+for a pipeline (the few rows handed to `exec`'s join, the pipeline above
+not run as one), `exec`'s join otherwise: one choice in every executor.
+Prior art: Oracle 12c's adaptive plans (a statistics collector buffers
+rows up to the inflection point the optimizer computed, then picks
+nested loops or hash), SQL Server 2017's adaptive joins (the build input
+counted against a threshold row count, batch mode).  Taken: the
+threshold from the cost model and the build side counted, not sampled.
+Differs: the decision costs nothing extra (the right side is made either
+way, and kept), and both plans are planned (`EXPLAIN`: `Hash Join (…) or
+lookups up to N rows`).  Not taken: the other direction (a lookup join
+whose outer side turns out large switching to hashing — the outer would
+have to be buffered past the threshold first); outer, semi and anti
+joins (an inner join's rows only change order).  Tests: `adaptive.rs` —
+few and many right rows, a condition beyond the keys, row and column
+tables, five settings (the row path, batches of 3, workers, `work_mem`
+64 kB): the hash join's rows, the same order in every executor within
+`work_mem`, the lookups counted where they ran; mutation caught (the
+columns not put back).  Not reached by them: `exec`'s choice over a
+table it made itself (a join no pipeline prepared).  Seen while
+testing, not from this step: `many_groups_past_work_mem_spill_on_the_
+workers`'s "few groups spilled" failed once with the whole suite running
+(a morsel's timing), passed alone four times.
+Found while measuring: the first build took Q8 on column tables from
+84 to 5050 ms — the lookups the adaptive plan carries were not walked by
+`prune::needed`, so they decoded every column of `lineitem` (its
+comments too) and pushed the column cache out; walked now (and a left
+side holding a subquery is not given the alternative), Q8 is back to
+330 ms on one worker and 91–95 ms on ten (base 324 / 90).  Measured
+(`bench/phases.py`, against 7ba43b3, alternating, two rounds; geometric
+means, base → new): TPC-H SF1 row tables 215.7 / 218.7 → 205.9 / 211.7
+ms (Q18 655 → 438: its `HAVING sum(…) > 300` kept 57 of the 1.5 M
+orders estimated as a third, so `lineitem` is looked up instead of
+hashed), column tables 71.8 / 75.8 → 74.5 / 71.4 (Q18 177 → 165, the
+rest within noise); ClickBench column 17.3 / 17.8 → 17.1 / 17.0, row
+148.7 / 132.1 → 145.8 / 133.9 (no joins: noise).
 
 *Left, as steps of their own:* **V4** the HNSW index (Malkov and Yashunin 2018; pgvector's
 and Lucene's builds read for ideas — graph pages in the KV, versions
@@ -5328,3 +5367,7 @@ style) across a thousand seeds without failure.
   (a distance bound, `LIKE`, functions of columns) counted on up to
   1,000 rows `ANALYZE` keeps; join orders without cross products while
   conditions connect the chain.
+- **2026-11-06** — §M14.12: adaptive joins — an inner hash join whose
+  left side an index could look up chooses the lookups as it runs when
+  its right side has fewer rows than where the two cost the same
+  (Oracle's adaptive plans, SQL Server's adaptive joins).

@@ -1052,6 +1052,62 @@ fn join<'a>(
         } => crate::vector::take_built(ctx, node),
         _ => None,
     };
+    // An adaptive join: its right side made as the hash join makes it,
+    // then looked at — few rows look the left side up instead.
+    let made = match algo {
+        JoinAlgo::Hash {
+            left_keys,
+            right_keys,
+            adaptive: Some(a),
+            ..
+        } => {
+            use crate::vector::{Built, Gathered, JoinTable};
+            let (built, fresh) = match made {
+                Some(b) => (b, false),
+                None => {
+                    let mut table = None;
+                    if crate::vector::probe_side(left) && crate::vector::probes(right) {
+                        table = JoinTable::parallel(right, right_keys, ctx, outer)?;
+                    }
+                    let built = match table {
+                        Some(t) => Built::Table(std::sync::Arc::new(t)),
+                        None if crate::vector::probe_side(left) => {
+                            match JoinTable::gather(
+                                build(right, ctx, outer)?,
+                                right.width(),
+                                right_keys,
+                                ctx,
+                                outer,
+                            )? {
+                                Gathered::Table(t) => Built::Table(std::sync::Arc::new(t)),
+                                Gathered::Stored(rows) => Built::Stored(rows),
+                            }
+                        }
+                        None => Built::Stored(stash(build(right, ctx, outer)?)?),
+                    };
+                    (built, true)
+                }
+            };
+            let built = match built {
+                Built::Table(t) if t.len() <= a.below => {
+                    return adaptive_lookups(t.rows_in_order(), a, spec);
+                }
+                Built::Stored(crate::spill::Stored::Memory(rows)) if rows.len() <= a.below => {
+                    return adaptive_lookups(rows, a, spec);
+                }
+                b => b,
+            };
+            if let Built::Table(table) = &built
+                && fresh
+            {
+                crate::keyfilter::register(ctx, left, right, kind, left_keys, &|j| {
+                    table.key_ints(j)
+                });
+            }
+            Some(built)
+        }
+        _ => made,
+    };
     let made = match made {
         Some(crate::vector::Built::Table(table)) => {
             let JoinAlgo::Hash {
@@ -1087,6 +1143,7 @@ fn join<'a>(
         left_keys,
         right_keys,
         build_left: true,
+        ..
     } = algo
         && matches!(kind, JoinType::Semi | JoinType::Anti)
         && crate::vector::probes(right)
@@ -1157,6 +1214,7 @@ fn join<'a>(
             left_keys,
             right_keys,
             build_left: false,
+            ..
         } if kind != JoinType::Full && crate::vector::probe_side(left) => {
             match crate::vector::JoinTable::gather(
                 build(right, ctx, outer)?,
@@ -1200,6 +1258,7 @@ fn join<'a>(
         left_keys,
         right_keys,
         build_left: false,
+        ..
     } = algo
     {
         let values = match &right_rows {
@@ -1308,6 +1367,35 @@ fn lookup_join<'a>(left: Rows<'a>, right: &'a Plan, spec: JoinSpec<'a>) -> Resul
     Ok(Box::new(left.flat_map(move |l| match l {
         Ok(l) => lookup_one(l, right, &spec),
         Err(e) => vec![Err(e)],
+    })))
+}
+
+/// An adaptive hash join's lookups ([`crate::plan::Adaptive`]): each of
+/// its right rows `rows` looks the left side's table up, the rows put
+/// back as the join gives them (its left columns first).
+fn adaptive_lookups<'a>(
+    rows: Vec<Row>,
+    a: &'a crate::plan::Adaptive,
+    spec: JoinSpec<'a>,
+) -> Result<Rows<'a>> {
+    static LOOKUP: JoinAlgo = JoinAlgo::Lookup;
+    crate::vector::note_adaptive_lookups();
+    let right_width = spec.right_width;
+    let swapped = JoinSpec {
+        kind: JoinType::Inner,
+        on: a.on.as_ref(),
+        algo: &LOOKUP,
+        left_width: right_width,
+        right_width: spec.left_width,
+        ctx: spec.ctx,
+        outer: spec.outer,
+    };
+    let joined = lookup_join(Box::new(rows.into_iter().map(Ok)), &a.lookup, swapped)?;
+    Ok(Box::new(joined.map(move |r| {
+        r.map(|mut row| {
+            row.rotate_left(right_width);
+            row
+        })
     })))
 }
 

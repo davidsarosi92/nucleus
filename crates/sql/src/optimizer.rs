@@ -39,7 +39,65 @@ pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let plan = sink(reorder(plan, &stats), &stats);
     let plan = lookups(crate::eager::eager(plan, &stats), &stats);
     let plan = crate::narrow::narrow(sorted(crate::distinct::two_level(plan)));
-    same_rows(plan)
+    adaptive(same_rows(plan), &stats)
+}
+
+/// Inner hash joins whose left side is a table an index of the keys could
+/// look up, given the lookups to choose instead as they run when the right
+/// side turns out to have fewer rows than where the two cost the same
+/// ([`crate::plan::Adaptive`]): a right side estimated larger than it is
+/// (a `HAVING`'s third, a filter's guess) then costs what the right
+/// estimate would have.  After narrowing, so the lookups read the columns
+/// the join's left side has.  Not where the left side reads an enclosing
+/// row (its lookups would read it a level further) or has a subquery (the
+/// plan's walks do not see the lookups; `prune` does).
+fn adaptive(plan: Plan, st: &Stats) -> Plan {
+    match map_children(plan, &|c| adaptive(c, st)) {
+        Plan::Join {
+            left,
+            right,
+            kind: JoinType::Inner,
+            on,
+            algo:
+                JoinAlgo::Hash {
+                    left_keys,
+                    right_keys,
+                    build_left: false,
+                    adaptive: None,
+                },
+        } => {
+            let mut subquery = false;
+            left.for_each_expr(&mut |e| subquery |= e.has_subquery());
+            let other = (left.outer_depth() == 0 && !subquery)
+                .then(|| lookup_plan(&left, &right_keys, &left_keys, false, st))
+                .flatten()
+                .and_then(|(lookup, costs)| {
+                    let below = costs.below();
+                    let (lw, rw) = (left.width(), right.width());
+                    let flip = |c: usize| Expr::Column(if c < lw { c + rw } else { c - lw });
+                    (below > 0).then(|| {
+                        Box::new(crate::plan::Adaptive {
+                            lookup,
+                            on: on.as_ref().map(|e| e.map_columns(&flip)),
+                            below,
+                        })
+                    })
+                });
+            Plan::Join {
+                left,
+                right,
+                kind: JoinType::Inner,
+                on,
+                algo: JoinAlgo::Hash {
+                    left_keys,
+                    right_keys,
+                    build_left: false,
+                    adaptive: other,
+                },
+            }
+        }
+        p => p,
+    }
 }
 
 /// Projections that give their input's rows as they are dropped (a sort's
@@ -606,6 +664,7 @@ fn hash_keys(onp: &[Expr], lw: usize) -> JoinAlgo {
             left_keys,
             right_keys,
             build_left: false,
+            adaptive: None,
         }
     }
 }
@@ -1118,6 +1177,7 @@ fn lookups(plan: Plan, st: &Stats) -> Plan {
                             left_keys,
                             right_keys,
                             build_left,
+                            adaptive: None,
                         },
                     }
                 }
@@ -1137,6 +1197,48 @@ fn lookup_side(
     existence: bool,
     st: &Stats,
 ) -> Option<Plan> {
+    let (plan, costs) = lookup_plan(right, left_keys, right_keys, existence, st)?;
+    let probes = estimate(left, st).max(1.0);
+    (costs.lookup(probes) < costs.hash(probes)).then_some(plan)
+}
+
+/// What looking a table up costs against hashing it, by the rows that look
+/// it up ([`lookup_plan`]).
+struct LookupCosts {
+    /// A lookup's cost.
+    each: f64,
+    /// Hashing the table, its rows read and kept.
+    table: f64,
+}
+
+impl LookupCosts {
+    fn lookup(&self, probes: f64) -> f64 {
+        self.each * probes
+    }
+
+    fn hash(&self, probes: f64) -> f64 {
+        self.table + 1.5 * probes
+    }
+
+    /// The most rows looking it up costs less for (none: 0).
+    fn below(&self) -> usize {
+        if self.each <= 1.5 {
+            return 0;
+        }
+        (self.table / (self.each - 1.5)).floor() as usize
+    }
+}
+
+/// `right` (a scan, under a projection of columns) as a scan by an index
+/// of `left_keys`' values (the left row `Outer` at depth 1), and what it
+/// costs against hashing it.
+fn lookup_plan(
+    right: &Plan,
+    left_keys: &[Expr],
+    right_keys: &[Expr],
+    existence: bool,
+    st: &Stats,
+) -> Option<(Plan, LookupCosts)> {
     // Its references to enclosing rows one level further: the left row is
     // the nearest now.
     let mut right = right.clone();
@@ -1196,7 +1298,6 @@ fn lookup_side(
     let matches = conjunction(preds.clone())
         .map_or(read, |p| rows * st.selectivity(&table, &p))
         .max(1.0);
-    let probes = estimate(left, st).max(1.0);
     // A semi or anti join's lookup stops at its first match.
     let read = if existence {
         (read / matches).clamp(1.0, read)
@@ -1210,25 +1311,26 @@ fn lookup_side(
     } else {
         (COLUMN_LOOKUP, COLUMN_SCAN)
     };
-    let lookup = look * probes * (LOOKUP_ROWS + read * if secondary { FETCH_ROWS } else { 1.0 });
+    let each = look * (LOOKUP_ROWS + read * if secondary { FETCH_ROWS } else { 1.0 });
     let filtered = local.map_or(rows, |p| rows * st.selectivity(&table, &p));
-    let hash = scan * (rows + filtered) + 1.5 * probes;
-    if lookup >= hash {
-        return None;
-    }
+    let costs = LookupCosts {
+        each,
+        table: scan * (rows + filtered),
+    };
     let scan = Plan::Scan {
         table,
         access,
         filter: conjunction(preds),
         estimate: Some(matches),
     };
-    Some(match cols {
+    let plan = match cols {
         Some(exprs) => Plan::Project {
             input: Box::new(scan),
             exprs,
         },
         None => scan,
-    })
+    };
+    Some((plan, costs))
 }
 
 fn analyzed(plan: &Plan, st: &Stats) -> bool {

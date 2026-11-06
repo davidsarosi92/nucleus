@@ -70,6 +70,7 @@ fn rewrite(input: &Plan, group: &[Expr], aggs: &[Agg], st: &Stats) -> Option<Pla
                 left_keys,
                 right_keys,
                 build_left: false,
+                ..
             },
     } = input
     else {
@@ -86,6 +87,7 @@ fn rewrite(input: &Plan, group: &[Expr], aggs: &[Agg], st: &Stats) -> Option<Pla
             left_keys: right_keys.clone(),
             right_keys: left_keys.clone(),
             build_left: false,
+            adaptive: None,
         },
     };
     let group: Vec<Expr> = group.iter().map(|g| g.map_columns(&flip)).collect();
@@ -122,6 +124,7 @@ fn rewrite_join(input: &Plan, group: &[Expr], aggs: &[Agg], st: &Stats) -> Optio
                 left_keys,
                 right_keys,
                 build_left: false,
+                ..
             },
     } = input
     else {
@@ -219,6 +222,7 @@ fn rewrite_join(input: &Plan, group: &[Expr], aggs: &[Agg], st: &Stats) -> Optio
             left_keys: left_keys.clone(),
             right_keys: (0..nk).map(Expr::Column).collect(),
             build_left: false,
+            adaptive: None,
         },
     };
     // The grouping's columns: the group's, then each aggregate's (a padded

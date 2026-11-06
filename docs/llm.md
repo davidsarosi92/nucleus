@@ -185,7 +185,8 @@ after an error in a block everything is `25P02` until `ROLLBACK`.
   shows each step's actual rows beside the estimate (run `ANALYZE` when they
   differ a lot).  `LIKE`, a distance bound or a function of a column is
   estimated on up to 1,000 rows `ANALYZE` keeps, so analyze again after
-  the data changes a lot.
+  the data changes a lot.  `Hash Join (…) or lookups up to N rows` decides
+  when it runs: N or fewer right rows look the left table up by its index.
 - `ANALYZE QUERY <query | UPDATE | DELETE>` lints a statement without
   running it: full scans an index would serve (with the `CREATE INDEX`),
   indexed columns hidden in functions, foreign keys without an index,

@@ -92,6 +92,7 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
             if let JoinAlgo::Hash {
                 left_keys,
                 right_keys,
+                adaptive,
                 ..
             } = algo
             {
@@ -100,6 +101,10 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
                 }
                 for k in right_keys {
                     read(k, &mut right_need, 0);
+                }
+                // An adaptive join's lookups give the left side's columns.
+                if let Some(a) = adaptive {
+                    walk(&a.lookup, left_need.clone(), out);
                 }
             }
             walk(left, left_need, out);

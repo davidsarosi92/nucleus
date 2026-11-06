@@ -244,14 +244,17 @@ fn join(
     let on =
         on.map(|e| e.map_columns(&|c| Expr::Column(joined(c).expect("read by the condition"))));
     let algo = match algo {
+        // (Narrowed before a join is made adaptive: none is yet.)
         JoinAlgo::Hash {
             left_keys,
             right_keys,
             build_left,
+            ..
         } => JoinAlgo::Hash {
             left_keys: left_keys.iter().map(|k| moved(k, &lmap)).collect(),
             right_keys: right_keys.iter().map(|k| moved(k, &rmap)).collect(),
             build_left,
+            adaptive: None,
         },
         a => a,
     };
