@@ -295,7 +295,7 @@ impl IndexMethod for Hnsw {
         o.index.check(r, &t.indexes[i].name, &want, problems)
     }
 
-    fn after_commit(&self, kv: &Arc<dyn Kv>) -> Result<()> {
+    fn after_statement(&self, kv: &Arc<dyn Kv>) -> Result<()> {
         upkeep(kv)
     }
 }
@@ -378,11 +378,20 @@ pub fn search(
     let ef_most = ef_most.max(k);
     let mut ef = ef.max(k).clamp(1, ef_most.max(1));
     let started = std::time::Instant::now();
+    let metric = o.index.shape.params.metric;
     let mut seen = std::collections::HashSet::new();
     let mut rows: Vec<(Vec<u8>, Row, f64)> = Vec::new();
     loop {
         let found = o.index.candidates(r, &qs, ef, &mut s)?;
-        for (_, pk) in found.near {
+        // Nearest first by the graph's distance (the SQL operator's
+        // order): the first `k` that pass are the answer, so the rest
+        // are not read.  A row whose vector is no longer the one found
+        // (its distance differs) is passed over: its vector now is in
+        // the index too, under its own distance.
+        for (d, pk) in found.near {
+            if rows.len() >= k {
+                break;
+            }
             if seen.contains(&pk) {
                 continue;
             }
@@ -391,12 +400,15 @@ pub fn search(
                 seen.insert(pk);
                 continue;
             };
-            if row[o.column].is_null() || !keep(&row)? {
-                seen.insert(pk);
+            let now = o.stored(&row[o.column])?;
+            if now.is_none_or(|v| metric.distance(&qs, &v).to_bits() != d.to_bits()) {
+                continue;
+            }
+            seen.insert(pk.clone());
+            if !keep(&row)? {
                 continue;
             }
             let d = o.sql.of(&row[o.column], q)?;
-            seen.insert(pk.clone());
             rows.push((pk, row, d));
         }
         if rows.len() >= k || found.all || ef >= ef_most {
@@ -630,11 +642,19 @@ fn state(id: Id) -> Arc<State> {
         .clone()
 }
 
-/// The indexes written since their upkeep last ran, with the keys written
-/// (about: rolled back writes count too; the upkeep reads the truth).
+/// What waits in an index for its upkeep: the keys written since its
+/// last seal (about: rolled back writes count too; the upkeep reads the
+/// truth), and the rows its sealed objects hold.
+#[derive(Clone, Copy, Default)]
+struct Waiting {
+    delta: u64,
+    sealed: u64,
+}
+
+/// The indexes with rows waiting.
 struct Pending {
     any: AtomicBool,
-    by: Mutex<HashMap<Id, u64>>,
+    by: Mutex<HashMap<Id, Waiting>>,
 }
 
 fn pending() -> &'static Pending {
@@ -646,51 +666,63 @@ fn pending() -> &'static Pending {
 }
 
 impl Pending {
-    /// Index `id`'s upkeep ran.
-    fn done(&self, id: Id) {
+    /// Index `id`'s upkeep ran on the `delta` keys seen before it: what
+    /// was written since waits, and `sealed` rows are left sealed.
+    fn done(&self, id: Id, delta: u64, sealed: u64) {
         let mut by = self.by.lock().unwrap_or_else(|e| e.into_inner());
-        by.remove(&id);
+        if let Some(w) = by.get_mut(&id) {
+            w.delta = w.delta.saturating_sub(delta);
+            w.sealed = sealed;
+            if w.delta == 0 && w.sealed == 0 {
+                by.remove(&id);
+            }
+        }
         self.any.store(!by.is_empty(), Relaxed);
     }
 
     fn note(&self, id: Id) {
-        *self
-            .by
+        self.by
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(id)
-            .or_default() += 1;
+            .or_default()
+            .delta += 1;
         self.any.store(true, Relaxed);
     }
 }
 
-/// After a commit: each index whose waiting rows passed its seal's size
-/// sealed — and folded once its sealed rows pass the fold's — by this
-/// session, unless another is at it.
+/// After a statement: each index whose delta passed its seal's size
+/// sealed, and folded once its sealed rows pass the fold's — by this
+/// session, unless another is at it.  The sizes fall as the writes stop
+/// (an economic order quantity of a rate going to nothing), so the rows
+/// left waiting are folded by the searches that follow.
 fn upkeep(kv: &Arc<dyn Kv>) -> Result<()> {
     let p = pending();
     if !p.any.load(Relaxed) {
         return Ok(());
     }
-    let due: Vec<(Id, u64)> = {
+    let due: Vec<(Id, Waiting)> = {
         let by = p.by.lock().unwrap_or_else(|e| e.into_inner());
         by.iter()
             .filter(|(k, _)| k.0 == kv.instance())
             .map(|(k, v)| (*k, *v))
             .collect()
     };
-    for (id, waiting) in due {
+    for (id, w) in due {
         let st = state(id);
         st.sample();
         let (seal, fold) = st.sizes();
-        if (waiting as usize) < seal {
+        let fold_due = w.sealed > 0 && w.sealed + w.delta >= fold as u64;
+        if (w.delta as usize) < seal && !fold_due {
             continue;
         }
         let Ok(_busy) = st.busy.try_lock() else {
             continue;
         };
-        maintain(kv, &st, id, fold)?;
-        p.done(id);
+        match maintain(kv, &st, id, fold)? {
+            Some(sealed) => p.done(id, w.delta, sealed),
+            None => p.done(id, u64::MAX, 0),
+        }
     }
     Ok(())
 }
@@ -699,25 +731,27 @@ fn upkeep(kv: &Arc<dyn Kv>) -> Result<()> {
 /// whatever the sizes (tests; `VACUUM`).
 pub fn upkeep_now(kv: &Arc<dyn Kv>) -> Result<()> {
     let p = pending();
-    let due: Vec<Id> =
+    let due: Vec<(Id, Waiting)> =
         p.by.lock()
             .unwrap_or_else(|e| e.into_inner())
-            .keys()
-            .filter(|k| k.0 == kv.instance())
-            .copied()
+            .iter()
+            .filter(|(k, _)| k.0 == kv.instance())
+            .map(|(k, v)| (*k, *v))
             .collect();
-    for id in due {
+    for (id, w) in due {
         let st = state(id);
         let _busy = st.busy.lock().unwrap_or_else(|e| e.into_inner());
-        maintain(kv, &st, id, 0)?;
-        p.done(id);
+        match maintain(kv, &st, id, 0)? {
+            Some(sealed) => p.done(id, w.delta, sealed),
+            None => p.done(id, u64::MAX, 0),
+        }
     }
     Ok(())
 }
 
-/// Seals index `id` and folds it once `fold` rows are sealed; whether the
-/// index was found.
-fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<bool> {
+/// Seals index `id` and folds it once `fold` rows are sealed; the rows
+/// left sealed, or `None` where the index is gone.
+fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<Option<u64>> {
     let (instance, table, index) = id;
     let find = |txn: &dyn KvTxn| -> Result<Option<(Table, usize)>> {
         Ok(crate::catalog::tables(txn)?.into_iter().find_map(|t| {
@@ -743,11 +777,11 @@ fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<bool> {
         Ok(true)
     })?;
     if !found {
-        return Ok(false);
+        return Ok(None);
     }
     st.sealed(started.elapsed().as_nanos() as f64);
-    if (sealed_rows as usize) < fold {
-        return Ok(true);
+    if sealed_rows == 0 || (sealed_rows as usize) < fold {
+        return Ok(Some(sealed_rows));
     }
     let started = std::time::Instant::now();
     let mut rows = 0;
@@ -769,7 +803,7 @@ fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<bool> {
     if rows > 0 {
         st.folded(rows, started.elapsed().as_nanos() as f64);
     }
-    Ok(true)
+    Ok(Some(0))
 }
 
 /// `f` in a transaction of its own, committed — run again while the

@@ -49,7 +49,7 @@
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
 | `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh` | §M6, §M12, §M14.8 |
 | `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
-| `docs/benchmarks.md`, `bench/` | — | the benchmark suite against PostgreSQL (`bench/run.py`, run in CI; `tpch.py`, `clickbench.py`; `phases.py`, one build against another step by step; `bench/ann/`, the HNSW storage models on the KV with hnswlib and pgvector as references), its latest results and targets | §M14.11, §M14.12 V4 |
+| `docs/benchmarks.md`, `bench/` | — | the benchmark suite against PostgreSQL (`bench/run.py`, run in CI; `tpch.py`, `clickbench.py`; `phases.py`, one build against another step by step; `bench/ann/`, the HNSW storage models on the KV with hnswlib and pgvector as references, and `sql.py`, the index through SQL), its latest results and targets | §M14.11, §M14.12 V4 |
 
 `crates/` is the core and the public API crates; `modules/` are modules,
 each a folder built to leave the repository (its own README, changelog,
@@ -3061,15 +3061,20 @@ inserted into the graph in batches on the machine's threads, the nodes
 of the rows updated or deleted marked dead (passed over by searches),
 and once the dead are 2 % of the graph, or a compaction is due, cut out
 (each list through a dead node rewritten from its live neighbours', the
-entry point moved off).  It runs after a commit, by the committing
-session (`index_method::after_commit`; PostgreSQL's GIN `fastupdate`
-cleans its pending list so), for each index of that database whose
-writes since passed the seal's size; the seal's and the fold's sizes are
-economic order quantities (Harris) of what the index measures as it
-runs — writes and searches a second, a fold's fixed cost (a decayed line
-fitted to folds' times against their rows), a seal's — at most 10,000
-rows, a fold's nudged a fifth either way in turn.  `hnsw::upkeep_now`
-runs it whatever the sizes (tests).
+entry point moved off).  It runs after each statement outside a
+transaction block and each block's commit, by that session
+(`index_method::after_statement`; PostgreSQL's GIN `fastupdate` cleans
+its pending list so), for each index of that database with rows waiting
+(the process notes the delta's keys written and the rows left sealed):
+a seal once the delta passes the seal's size, a fold once the sealed
+rows pass the fold's.  The sizes are economic order quantities (Harris)
+of what the index measures as it runs — writes and searches a second, a
+fold's fixed cost (a decayed line fitted to folds' times against their
+rows), a seal's — at most 10,000 rows, a fold's nudged a fifth either
+way in turn; as the writes stop their rate falls and so do the sizes,
+so the rows left waiting are folded after the searches that pay for
+them (reads run the upkeep too).  `hnsw::upkeep_now` runs it whatever
+the sizes (tests).
 
 `hnsw::search(txn, t, i, q, k, ef, ef_most, wanted, keep)`: the graph
 searched with `ef` (its dead nodes passed over) and the sealed rows
@@ -3079,7 +3084,12 @@ over, one found twice once, one `keep` refuses (a filter) left out, each
 ranked by its distance as the SQL operator takes it — and, with fewer
 than `k` left, asked again with `ef` doubled up to `ef_most` or until
 the index has no more (pgvector 0.8's iterative scans; a row looked at
-once is not read again); `hnsw::nearest` is it without a filter.
+once is not read again); `hnsw::nearest` is it without a filter.  The
+candidates are read nearest first by the graph's distance and the
+search stops at the `k`-th that passes, so it reads about `k` rows, not
+`ef`; a row whose vector is no longer the one found (its distance in the
+graph's terms differs, to the bit) is passed over — its vector now is in
+the index too, under its own distance.
 
 **Searches in SQL.**  `ORDER BY col <op> q LIMIT k [OFFSET o]` (the
 operator or its function — `l2_distance`, `cosine_distance`,
@@ -3113,7 +3123,13 @@ marks and consolidations and a table rewrite; a snapshot from before an
 upkeep; each operator class; the definitions refused; the upkeep after
 commits; `ORDER BY … LIMIT` through the planner — the plans chosen and
 not, recall against the exact search, `hnsw.ef_search`, a filter, an
-offset, the fallback to every row, an enclosing row's vector, writes.
+offset, the fallback to every row, an enclosing row's vector, writes;
+the rows left waiting folded by searches.  `crates/sql/tests/hnsw_crash.rs`:
+writes, rollbacks, seals and folds on the simulation, a crash at an I/O
+operation (dropped unsynced writes, torn ones), reopen — the rows a
+step's, the integrity check clean, a search at a wide `ef` the exact
+search's, the upkeep going on.  `bench/ann/sql.py`: SIFT-1M through SQL
+as `bench/ann/pgvector_ref.py` runs pgvector (`docs/benchmarks.md`).
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -3833,6 +3849,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-07 — §M14.12 V4b step 4, HNSW settled:** the upkeep after
+  every statement outside a block (`IndexMethod::after_statement`,
+  `index_method::after_statement`, renamed from `after_commit`), the rows
+  left sealed noted until folded; a search reads about `k` rows, nearest
+  first, passing over stale ones; `crates/sql/tests/hnsw_crash.rs`;
+  `bench/ann/sql.py` (§8.18).
 - **2026-11-07 — §M14.12 V4b step 3, nearest-neighbour searches in the
   planner:** `Access::Nearest` (`Access::secondary`), the optimizer's
   `nearest` pass, `exec::nearest`; `hnsw::search`, `nearest_rows`,

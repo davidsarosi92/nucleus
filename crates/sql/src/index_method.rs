@@ -55,9 +55,10 @@ pub trait IndexMethod: Send + Sync {
     /// Builds index `i` of `t` over the rows `t` has (its prefix empty).
     fn build(&self, txn: &mut dyn KvTxn, reg: &Registry, t: &Table, i: usize) -> Result<()>;
 
-    /// After a commit in `kv` (any session's): the method's upkeep, if it
-    /// keeps some for then.  By default nothing.
-    fn after_commit(&self, kv: &Arc<dyn nucleus_kv::Kv>) -> Result<()> {
+    /// After a statement in `kv` ended outside a transaction block, or a
+    /// block committed (any session's): the method's upkeep, if it keeps
+    /// some for then.  By default nothing.
+    fn after_statement(&self, kv: &Arc<dyn nucleus_kv::Kv>) -> Result<()> {
         let _ = kv;
         Ok(())
     }
@@ -141,9 +142,9 @@ pub fn of(ix: &Index) -> Result<Option<Arc<dyn IndexMethod>>> {
     }
 }
 
-/// After a commit in `kv`: every registered method's
-/// [`IndexMethod::after_commit`].
-pub fn after_commit(kv: &Arc<dyn nucleus_kv::Kv>) -> Result<()> {
+/// After a statement or a commit in `kv`: every registered method's
+/// [`IndexMethod::after_statement`].
+pub fn after_statement(kv: &Arc<dyn nucleus_kv::Kv>) -> Result<()> {
     let methods: Vec<Arc<dyn IndexMethod>> = registry()
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -151,7 +152,7 @@ pub fn after_commit(kv: &Arc<dyn nucleus_kv::Kv>) -> Result<()> {
         .cloned()
         .collect();
     for m in methods {
-        m.after_commit(kv)?;
+        m.after_statement(kv)?;
     }
     Ok(())
 }

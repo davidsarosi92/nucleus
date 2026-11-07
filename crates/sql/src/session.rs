@@ -776,7 +776,7 @@ impl Session {
                 }
                 if let Some(txn) = block.txn {
                     txn.commit()?;
-                    self.after_commit();
+                    self.after_statement();
                 }
                 Ok(Output::Command("COMMIT".into()))
             }
@@ -1043,15 +1043,17 @@ impl Session {
             execute(txn.as_mut(), &self.registry, stmt, params, sink)
         })?;
         txn.commit()?;
-        self.after_commit();
+        self.after_statement();
         Ok(Output::Command(deliver(stmt, out, sink)?))
     }
 
-    /// After a commit: the index methods' upkeep (an HNSW index's seal
-    /// and fold), which this session pays for.  Its failure is not the
-    /// committed statement's: the next commit tries again.
-    fn after_commit(&self) {
-        let _ = crate::index_method::after_commit(&self.kv);
+    /// After a statement outside a transaction block, or a block's
+    /// commit: the index methods' upkeep (an HNSW index's seal and fold),
+    /// which this session pays for — after reads too, so rows left
+    /// waiting when the writes stopped are folded for the searches.  Its
+    /// failure is not the statement's: the next one tries again.
+    fn after_statement(&self) {
+        let _ = crate::index_method::after_statement(&self.kv);
     }
 
     /// Whether a statement changes the catalog: always in the audit log.
@@ -1216,8 +1218,8 @@ impl Session {
                     {
                         self.audit_apart(record)?;
                     }
-                    if r.is_ok() && !opts.read_only {
-                        self.after_commit();
+                    if r.is_ok() {
+                        self.after_statement();
                     }
                     return r;
                 }

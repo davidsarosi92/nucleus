@@ -326,7 +326,7 @@ fn hnsw_definitions_are_checked() {
 }
 
 #[test]
-fn hnsw_upkeep_runs_after_commits() {
+fn hnsw_upkeep_runs_after_commits_and_searches() {
     let kv = db(14);
     let mut s = Session::new(kv.clone());
     // Table ids apart from the other tests' (the upkeep's notes are the
@@ -352,6 +352,28 @@ fn hnsw_upkeep_runs_after_commits() {
     let (nodes, dead, sealed, delta) = status(&kv, "pts_v");
     assert!(nodes >= 8000 && dead == 0, "{nodes} nodes, {dead} dead");
     assert_eq!(u64::from(nodes) + sealed + delta as u64, 12_000);
+    assert_eq!(problems(&kv, &s), Vec::<String>::new());
+    // Writes stopped, searches ask: the rows left waiting cost each
+    // search, and the sizes fall with the write rate — the searches'
+    // sessions fold them.
+    s.execute("INSERT INTO pts VALUES (99999, '[0,0,0,0]')")
+        .unwrap();
+    let mut folded = false;
+    for _ in 0..200 {
+        let near = rows(
+            &mut s,
+            "SELECT id FROM pts ORDER BY v <-> '[0,0,0,0]' LIMIT 5",
+        );
+        assert_eq!(near[0][0], "99999");
+        let (_, _, sealed, delta) = status(&kv, "pts_v");
+        if sealed == 0 && delta == 0 {
+            folded = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(folded, "still waiting: {:?}", status(&kv, "pts_v"));
+    assert_eq!(status(&kv, "pts_v").0, 12_001);
     assert_eq!(problems(&kv, &s), Vec::<String>::new());
 }
 

@@ -276,7 +276,7 @@ are marked ✅.
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
-| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C), 3.5× pgvector's searches at its recall, 3× its inserts) |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
@@ -4551,6 +4551,51 @@ alternating, 2 rounds): the load 22.40 / 22.43 s before, 23.10 / 21.79 s
 after; the queries' best 5,719 / 5,716 ms against 5,872 / 5,559 — no
 change past the noise (one more pass over the plan, which looks for a
 `Limit` over a `Sort`).
+
+*Done — step 4* (2026-11-07): `hnsw.ef_search` and the options came
+with steps 2–3; the integrity check with step 2.  New: a crash test
+(`crates/sql/tests/hnsw_crash.rs`: writes, rollbacks, seals and folds on
+the simulation, a crash at each of ~180 I/O operations spread over the
+run, dropped unsynced writes and torn ones; after reopening the rows are
+a step's, the check is clean, a search at a wide `ef` gives the exact
+search's answer and the upkeep goes on) and SIFT-1M through SQL
+(`bench/ann/sql.py`, run as `pgvector_ref.py` runs pgvector).  The
+first run found two faults, both fixed:
+
+- *Rows left waiting.*  After the inserts a search took ~4.3 ms: the
+  upkeep ran after commits only, and forgot an index once it had sealed
+  — the sealed rows waited for the next writes, scanned by every search
+  meanwhile.  Now the process notes the rows left sealed until a fold
+  takes them, and the upkeep runs after reads too
+  (`IndexMethod::after_statement`, renamed from `after_commit`): with
+  the writes stopped their rate falls, the sizes (economic order
+  quantities of it) fall with it, and the next search's session folds —
+  4.3 ms → 0.49 ms at `ef` 40.
+- *Every candidate read.*  A search read the row of each of its `ef`
+  candidates to check it.  Now it reads them nearest first by the
+  graph's distance and stops at the `k`-th that passes; a row whose
+  vector changed is told by its distance (the graph's, to the bit) and
+  passed over — its vector now is in the index under its own.  `ef` 60
+  632 → 440 µs, `ef` 200 1,416 → 946 µs.
+
+SIFT-1M through SQL against pgvector (`docs/benchmarks.md`): indexed in
+55.1 s (58.8); at recall ~0.93 440 µs a search (`ef` 60) against 894
+(`ef` 40) and 11,679 searches a second on 10 clients against 5,564; at
+0.99, 946 µs against 2,818; inserts by 10 writers 4,689 rows/s against
+2,141.  The SQL path costs ~200 µs over the bench's calls in a process
+(the driver's round trip alone ~60 µs; a profile of the server puts two
+thirds of a search in the distance kernel, as in the bench).  *Open:* a
+search while the writers run takes 3.1 ms — pgvector 1.6, the bench's
+(C) 0.9; the rows not yet in the graph are read one by one, and the
+engine's backlog (delta and sealed rows under its sizes) is larger than
+the bench's, its folds slower to catch up (inserts 4,689 rows/s against
+the bench's 6,795).  Next: measure the backlog as the writes run, and
+search the sealed objects faster than a scan (a small graph each, or
+the fold sooner).  Measured against 056f9a9 (`phases.py`, alternating, 2
+rounds): the load 23.29 / 22.33 s before, 23.78 / 21.91 s after; the
+queries' best 5,625 / 5,623 ms against 5,570 / 5,507 — no change past
+the noise (a read now asks the methods whether rows wait: one atomic
+load).
 
 *Measured on the way* (2026-11-06): `docs/benchmarks.md`'s TPC-H table
 re-run on a quiet machine (`fseventsd`, at 99 % and 11 GB after 137 days,

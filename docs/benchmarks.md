@@ -280,35 +280,39 @@ page cache (`--cache 1GB`) as pgvector has `shared_buffers = 1GB`;
 Loading the 100,000 vectors: nucleus 21 s (Python `load`, a list of
 numpy arrays), pgvector 42 s (`COPY` of text through `psql`).
 
-Approximate nearest neighbours — the HNSW index's storage, before the
-engine has it (PLAN.md §M14.12 V4: `bench/ann/`, the chosen model on the
-real KV, called in a process; `bench/ann/pgvector_ref.py`, pgvector 0.8
-in Docker with its clients inside the container): ann-benchmarks'
-SIFT-1M, `M` 16, `ef_construction` 64, 900,000 rows indexed at once, then
-100,000 inserted by 10 writers while one thread searches; 2,000
-queries, recall@10, µs a search on one thread, searches a second on 10;
-2026-11-07.
+Approximate nearest neighbours — the HNSW index (PLAN.md §M14.12 V4b:
+`bench/ann/sql.py`, the server on a fresh database, the Python driver's
+clients each in a process; `bench/ann/pgvector_ref.py`, pgvector 0.8 in
+Docker with its clients inside the container): ann-benchmarks' SIFT-1M,
+`m` 16, `ef_construction` 64, 900,000 rows indexed at once, then 100,000
+inserted by 10 writers (a row a transaction) while one client searches;
+2,000 queries, `SELECT id FROM t ORDER BY v <-> $1 LIMIT 10`, recall@10,
+µs a search on one client, searches a second on 10; 2026-11-07.
 
-| | nucleus (bench) | pgvector |
+| | nucleus | pgvector |
 |---|---:|---:|
-| indexed 900,000 rows (10 workers) | 54.9 s | 58.8 s |
-| recall ~0.93: µs a search, searches a second | 243 µs, 21,144 (`ef` 60, 0.933) | 894 µs, 5,564 (`ef` 40, 0.927) |
-| recall ~0.99 | 651 µs (`ef` 200, 0.989) | 2,818 µs (`ef` 200, 0.993) |
-| inserts by 10 writers | 5,374 rows/s | 2,141 rows/s |
-| a search meanwhile (`ef` 40) | 751 µs (recall 0.89) | 1,571 µs (0.93) |
+| indexed 900,000 rows | 55.1 s | 58.8 s |
+| recall ~0.93: µs a search, searches a second | 440 µs, 11,679 (`ef` 60, 0.933) | 894 µs, 5,564 (`ef` 40, 0.927) |
+| recall ~0.99 | 946 µs, 6,489 (`ef` 200, 0.989) | 2,818 µs (`ef` 200, 0.993) |
+| inserts by 10 writers | 4,689 rows/s | 2,141 rows/s |
+| a search meanwhile (`ef` 40) | 3,093 µs (recall 0.89) | 1,571 µs (0.93) |
 
-pgvector's times include SQL (parsing, planning, its protocol on a
-socket); nucleus's are calls in a process — the engine's numbers replace
-these when the index is built in (V4b).
+Both include SQL — parsing, planning, the protocol on a local socket;
+nucleus's round trip alone (`SELECT 1` from the Python driver) is ~60 µs.
+A search while the writers run reads the rows not yet in the graph one
+by one; the fold that takes them in runs in a committing session (or,
+once the writes stop, a searching one): after the inserts nucleus's
+search is back at 526 µs (`ef` 60, recall 0.931, 10,382 a second).
 
 ```
 target/ann-data/.venv/bin/python bench/ann/data.py      # the datasets
-cd bench/ann && CARGO_TARGET_DIR=../../target/ann cargo build --release
-ANN_EFS=10,20,40,60,80,120,200 target/ann/release/nucleus-ann-bench model \
-  data=target/ann-data/sift-128-euclidean db=/tmp/ann queries=2000 \
-  vacuum=0 auto=1 seal=10000 fold=10000
+target/ann-data/.venv/bin/python bench/ann/sql.py target/release/nucleus \
+  target/ann-data/sift-128-euclidean --efs 10,20,40,60,80,120,200
 target/ann-data/.venv/bin/python bench/ann/pgvector_ref.py target/ann-data/sift-128-euclidean
 ```
+
+The storage models behind the index (`bench/ann/`, calls in a process,
+PLAN.md §M14.12 V4) are recorded in the plan.
 
 ## Statistics
 
