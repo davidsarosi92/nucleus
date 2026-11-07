@@ -99,6 +99,8 @@ fn check_table(
 ) -> Result<Vec<Row>> {
     let keys = crate::dml::IndexKeys::new(txn, reg, t)?;
     let mut rows = Vec::new();
+    // Rows by primary key bytes, for the registered methods' indexes.
+    let mut keyed = Vec::new();
     let mut expected: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = vec![BTreeMap::new(); t.indexes.len()];
     for (key, row) in crate::storage::of(t)?.check(txn, t, problems)? {
         if !t.primary_key.is_empty() && row_key_of(t, &row, None) != key {
@@ -113,12 +115,11 @@ fn check_table(
             }
         }
         let pk = pk_suffix(t, &key);
-        for (i, (want, (k, _))) in expected
-            .iter_mut()
-            .zip(keys.entries(txn, t, &row, pk)?)
-            .enumerate()
-        {
-            if want.insert(k, pk.to_vec()).is_some() {
+        if keys.has_methods() {
+            keyed.push((pk.to_vec(), row.clone()));
+        }
+        for (i, k, _) in keys.entries(txn, t, &row, pk)? {
+            if expected[i].insert(k, pk.to_vec()).is_some() {
                 problems.push(format!(
                     "{}: row {row:?} duplicates another in unique index {}",
                     t.name, t.indexes[i].name
@@ -127,7 +128,13 @@ fn check_table(
         }
         rows.push(row);
     }
-    for (i, want) in expected.iter().enumerate() {
+    for (i, ix) in t.indexes.iter().enumerate() {
+        if let Some(m) = crate::index_method::of(ix)? {
+            m.check(txn, t, i, &keyed, problems)?;
+        }
+    }
+    for &i in keys.btrees() {
+        let want = &expected[i];
         let got: BTreeMap<Vec<u8>, Vec<u8>> = scan(txn, &t.index_prefix(t.indexes[i].id))?
             .into_iter()
             .collect();

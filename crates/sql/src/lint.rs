@@ -96,7 +96,7 @@ fn index_led_by(table: &Table, col: usize) -> Option<Option<usize>> {
     table
         .indexes
         .iter()
-        .position(|ix| !ix.mapped() && ix.columns.first() == Some(&col))
+        .position(|ix| ix.ordered() && ix.columns.first() == Some(&col))
         .map(Some)
 }
 
@@ -396,7 +396,7 @@ impl Linter<'_> {
                 || table
                     .indexes
                     .iter()
-                    .any(|ix| !ix.mapped() && leads(&ix.columns))
+                    .any(|ix| ix.ordered() && leads(&ix.columns))
             {
                 continue;
             }

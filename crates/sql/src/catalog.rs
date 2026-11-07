@@ -83,8 +83,9 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// precision`'s tag 3), `bytea` (tag 13), `time` (14) and `char(n)` (15;
 /// before, `text`'s 4, and still read as text), `inet` and `cidr` (16, 17);
 /// version 7 an owner, version 8 row-level security, version 9 comments
-/// on the table and its columns; older versions still read.
-const TABLE_VERSION: u8 = 13;
+/// on the table and its columns; version 14 an index's access method,
+/// operator classes and options; older versions still read.
+const TABLE_VERSION: u8 = 14;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -221,24 +222,43 @@ pub struct Index {
     /// in (`CREATE INDEX … (col USING ordering)`): its entries hold the
     /// column's mapping.  `None`: the value itself.
     pub orderings: Vec<Option<String>>,
+    /// Its access method (`CREATE INDEX … USING method`, one registered:
+    /// [`crate::index_method`]); `None`: the built-in B-tree.
+    pub method: Option<String>,
+    /// Per column, the operator class the method indexes it by (`None`:
+    /// the B-tree's, or the method's default before it is defined).
+    pub opclasses: Vec<Option<String>>,
+    /// The method's options (`WITH (name = value, …)`), as the method
+    /// defined them.
+    pub options: Vec<(String, String)>,
 }
 
 impl Index {
     /// A plain index (every column by its own value).
     pub fn plain(id: u32, name: String, columns: Vec<usize>, unique: bool) -> Self {
         let orderings = vec![None; columns.len()];
+        let opclasses = vec![None; columns.len()];
         Self {
             id,
             name,
             columns,
             unique,
             orderings,
+            method: None,
+            opclasses,
+            options: Vec::new(),
         }
     }
 
     /// Whether some column is indexed in a taught ordering.
     pub fn mapped(&self) -> bool {
         self.orderings.iter().any(Option::is_some)
+    }
+
+    /// Whether it is a B-tree of the columns' own values: an access path
+    /// for predicates on them (not a registered method's, not mapped).
+    pub fn ordered(&self) -> bool {
+        self.method.is_none() && !self.mapped()
     }
 }
 
@@ -397,6 +417,14 @@ impl Table {
             for o in &i.orderings {
                 w.opt_str(o.as_deref());
             }
+            w.opt_str(i.method.as_deref());
+            for o in &i.opclasses {
+                w.opt_str(o.as_deref());
+            }
+            w.u32(i.options.len() as u32);
+            for (k, v) in &i.options {
+                w.str(k).str(v);
+            }
         }
         w.u32(self.checks.len() as u32);
         for (name, expr) in &self.checks {
@@ -527,12 +555,25 @@ impl Table {
             } else {
                 vec![None; m]
             };
+            let (method, opclasses, options) = if version >= 14 {
+                let method = r.opt_str()?;
+                let opclasses = (0..m).map(|_| r.opt_str()).collect::<Result<_>>()?;
+                let options = (0..r.u32()?)
+                    .map(|_| Ok((r.str()?, r.str()?)))
+                    .collect::<Result<_>>()?;
+                (method, opclasses, options)
+            } else {
+                (None, vec![None; m], Vec::new())
+            };
             indexes.push(Index {
                 id,
                 name,
                 columns,
                 unique,
                 orderings,
+                method,
+                opclasses,
+                options,
             });
         }
         let n = r.u32()? as usize;
@@ -1329,15 +1370,30 @@ mod tests {
                 },
             ],
             primary_key: vec![0],
-            indexes: vec![Index {
-                id: 1,
-                name: "people_name".into(),
-                columns: vec![1],
-                unique: true,
-                orderings: vec![Some("ci".into())],
-            }],
+            indexes: vec![
+                Index {
+                    id: 1,
+                    name: "people_name".into(),
+                    columns: vec![1],
+                    unique: true,
+                    orderings: vec![Some("ci".into())],
+                    method: None,
+                    opclasses: vec![None],
+                    options: Vec::new(),
+                },
+                Index {
+                    id: 2,
+                    name: "people_price".into(),
+                    columns: vec![2],
+                    unique: false,
+                    orderings: vec![None],
+                    method: Some("someday".into()),
+                    opclasses: vec![Some("numeric_ops".into())],
+                    options: vec![("m".into(), "16".into())],
+                },
+            ],
             checks: vec![("id_positive".into(), "id > 0".into())],
-            next_index_id: 2,
+            next_index_id: 3,
             foreign_keys: vec![ForeignKey {
                 name: "people_boss_fkey".into(),
                 columns: vec![0],

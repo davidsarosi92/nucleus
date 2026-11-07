@@ -2436,7 +2436,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.partitions` | `table_name`, `partition`, `strategy` (`range`, `list`, `hash`), `key` (names), `bound` (`FOR VALUES …` or `DEFAULT`), `storage` (§8.16) |
 | `nc_catalog.segments` | `table_name`, `segment` (id, hex), `rows`, `deleted`, `bytes` (encoded) — each segment of each `column` table (§8.15) |
 | `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key` |
-| `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix`, `orderings` (per column, the taught ordering it is indexed in, or NULL) |
+| `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix`, `orderings` (per column, the taught ordering it is indexed in, or NULL), `method` (`btree` or a registered method's, §8.17), `opclasses` (per column, its operator class, or NULL), `options` (`name=value`) |
 | `nc_catalog.constraints` | `table_id`, `table_name`, `name`, `kind`, `definition` |
 | `nc_catalog.foreign_keys` | `table_id`, `table_name`, `name`, `columns`, `referenced_table`, `referenced_columns`, `on_delete`, `on_update` |
 | `nc_catalog.statistics` | `table_id`, `table_name`, `column_name`, `rows`, `nulls`, `distinct_values`, `histogram` |
@@ -2660,6 +2660,7 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   description, searched)` (a searched schema's views are found by
   unqualified names after the user's tables, as `pg_catalog`'s),
   `add_view(v)`, `add_type(t)`, `add_storage(s)` (a table storage, §8.15),
+  `add_index_method(m)` (an index access method, §8.17),
   `add_alias(name, ty)` (pg-compat's
   `oid`, `name`, `bpchar`, …), and the lookups `function`, `aggregate`,
   `table_function`, `view`, `type_named`, `schemas`, `views`, `types`,
@@ -2985,6 +2986,38 @@ and deletes on a partitioned table (of `row`, `column` and `row,column`
 partitions) and a plain one, compares queries and parameter-pruned ones,
 and runs the integrity check, and applies a storage policy at chosen
 times; `42_partitions.slt` covers the statements.
+
+### 8.17 Index access methods (`index_method`, §M14.12 V4b)
+
+An index is the built-in B-tree (an entry a row: the indexed values, then
+the primary key, holding the primary key) or an `IndexMethod` registered
+through `Registry::add_index_method` (process-wide, as storages):
+`CREATE INDEX [name] ON t [USING method] (col [opclass], …) [WITH (name =
+value, …)]` names it (`USING btree`, or none, the B-tree; an unknown
+method `42704`; the B-tree takes no operator class, `42704`, and no
+option, `22023`; a method's index is never `UNIQUE` nor in a taught
+ordering, `0A000`).  The index record (table record version 14) keeps
+the method, the operator classes and the options as the method's
+`define` left them — it checks the columns' types, refuses what it does
+not know and fills in defaults — and `ALTER … TYPE` of an indexed column
+asks it again.
+
+A method keeps everything under its index's prefix, so `DROP INDEX`,
+`DROP TABLE` and deleting the table's data need nothing of it.
+`dml::IndexKeys` tells it every change in the writing statement's
+transaction (`write(txn, t, i, old, new)`: the row as it was and as it
+is, primary key bytes and values; `None` for an insert's old and a
+delete's new) — after the storage took the row, so a refused row never
+reaches it; a rollback undoes its writes with the rest.  `build` makes
+it over the rows a table has (`CREATE INDEX`, and after a rewrite of the
+table's rows: `ALTER … TYPE`, a key encoding upgrade; `index_method::rows`
+reads them), and `check` checks it for the integrity check against the
+table's rows.  The optimizer's access paths take only plain B-trees
+(`Index::ordered`); a method's own search comes with HNSW (§M14.12
+V4b).  `crates/sql/tests/index_method.rs` registers a method that
+mirrors a column and runs writes, rollbacks, a rewrite, the integrity
+check (a stray entry found), the refusals and a drop through it;
+`06_indexes.slt` the syntax.
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -3704,6 +3737,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-07 — §M14.12 V4b step 1, index access methods:**
+  `index_method` (`IndexMethod`: `define`, `write`, `build`, `check`;
+  `Registry::add_index_method`); `CREATE INDEX … USING method (col
+  opclass) WITH (…)`; the index record's method, operator classes and
+  options (table record version 14); `nc_catalog.indexes.method`,
+  `opclasses`, `options`; pg-compat's `indexdef` with them (§8.17).
 - **2026-11-06 — §M14.27 S8b, `SUMMARIZE`:** the statement
   (`Statement::Summarize`, `summarize`), read-only and described; the
   MCP tool `summarize_table` (§8.5, *`SUMMARIZE`*; MCP in §6).

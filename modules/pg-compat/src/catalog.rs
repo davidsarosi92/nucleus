@@ -1065,19 +1065,41 @@ fn constraints(tables: &[Table]) -> Vec<Con> {
 }
 
 fn index_def(t: &Table, i: Option<usize>) -> String {
-    let (name, cols, unique) = match i {
-        None => (format!("{}_pkey", t.name), t.primary_key.clone(), true),
-        Some(i) => (
-            t.indexes[i].name.clone(),
-            t.indexes[i].columns.clone(),
-            t.indexes[i].unique,
-        ),
+    let Some(ix) = i.map(|i| &t.indexes[i]) else {
+        return format!(
+            "CREATE UNIQUE INDEX {}_pkey ON public.{} USING btree ({})",
+            t.name,
+            t.name,
+            quoted_list(t, &t.primary_key)
+        );
+    };
+    // A registered method's: its operator classes and options too.
+    let cols = ix
+        .columns
+        .iter()
+        .zip(&ix.opclasses)
+        .map(|(&c, o)| match o {
+            Some(o) => format!("{} {o}", t.columns[c].name),
+            None => t.columns[c].name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let with = if ix.options.is_empty() {
+        String::new()
+    } else {
+        let o: Vec<String> = ix
+            .options
+            .iter()
+            .map(|(k, v)| format!("{k}='{v}'"))
+            .collect();
+        format!(" WITH ({})", o.join(", "))
     };
     format!(
-        "CREATE {}INDEX {name} ON public.{} USING btree ({})",
-        if unique { "UNIQUE " } else { "" },
+        "CREATE {}INDEX {} ON public.{} USING {} ({cols}){with}",
+        if ix.unique { "UNIQUE " } else { "" },
+        ix.name,
         t.name,
-        quoted_list(t, &cols)
+        ix.method.as_deref().unwrap_or("btree"),
     )
 }
 

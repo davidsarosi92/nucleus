@@ -1804,9 +1804,41 @@ pub(crate) fn execute_statement(
             table,
             columns,
             orderings,
+            method,
+            opclasses,
+            options,
             unique,
             if_not_exists,
         } => {
+            let access = match method {
+                Some(m) => crate::index_method::named(m)?,
+                None => None,
+            };
+            if let Some(m) = &access {
+                if *unique {
+                    return Err(Error::feature(format!(
+                        "access method \"{}\" does not support unique indexes",
+                        m.name()
+                    )));
+                }
+                if orderings.iter().any(Option::is_some) {
+                    return Err(Error::feature(format!(
+                        "access method \"{}\" does not index in taught orderings",
+                        m.name()
+                    )));
+                }
+            } else {
+                if let Some(o) = opclasses.iter().flatten().next() {
+                    return Err(Error::undefined_object(format!(
+                        "operator class \"{o}\" does not exist for access method \"btree\""
+                    )));
+                }
+                if let Some((k, _)) = options.first() {
+                    return Err(Error::invalid_parameter(format!(
+                        "unrecognized parameter \"{k}\" for access method \"btree\""
+                    )));
+                }
+            }
             let name = &match name {
                 Some(n) => n.clone(),
                 None => {
@@ -1866,9 +1898,17 @@ pub(crate) fn execute_statement(
                     plain.push(c);
                 }
             }
-            require_keys(&t.columns, &plain, *unique, "an index")?;
             let mut ix = Index::plain(t.next_index_id, name.clone(), cols, *unique);
             ix.orderings = orderings.clone();
+            match &access {
+                None => require_keys(&t.columns, &plain, *unique, "an index")?,
+                Some(m) => {
+                    ix.method = Some(m.name().to_string());
+                    ix.opclasses = opclasses.clone();
+                    ix.options = options.clone();
+                    m.define(&t, &mut ix)?;
+                }
+            }
             t.indexes.push(ix);
             t.next_index_id += 1;
             let i = t.indexes.len() - 1;
@@ -3148,8 +3188,15 @@ fn alter_column_type(
     if new.primary_key.contains(&c) {
         require_keys(&new.columns, &[c], true, "a primary key")?;
     }
-    for ix in &new.indexes {
-        if ix.columns.contains(&c) && !ix.mapped() {
+    // A registered method's index defined again against the new type.
+    let shape = new.clone();
+    for ix in &mut new.indexes {
+        if !ix.columns.contains(&c) {
+            continue;
+        }
+        if let Some(m) = crate::index_method::of(ix)? {
+            m.define(&shape, ix)?;
+        } else if !ix.mapped() {
             require_keys(&new.columns, &[c], ix.unique, "an index")?;
         }
     }

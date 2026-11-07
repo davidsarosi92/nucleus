@@ -1122,10 +1122,17 @@ impl<'a> Parser<'a> {
             };
             self.expect_kw("on")?;
             let table = self.relation()?;
-            // (column [USING ordering], …)
+            // [USING method] (column [USING ordering | opclass], …)
+            // [WITH (option = value, …)]
+            let method = if self.eat_kw("using") {
+                Some(self.ident()?)
+            } else {
+                None
+            };
             self.expect_op("(")?;
             let mut columns = Vec::new();
             let mut orderings = Vec::new();
+            let mut opclasses = Vec::new();
             loop {
                 columns.push(self.ident()?);
                 orderings.push(if self.eat_kw("using") {
@@ -1133,16 +1140,25 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 });
+                opclasses.push(if self.peek_op(",") || self.peek_op(")") {
+                    None
+                } else {
+                    Some(self.ident()?)
+                });
                 if !self.eat_op(",") {
                     break;
                 }
             }
             self.expect_op(")")?;
+            let options = self.table_options()?;
             return Ok(Statement::CreateIndex {
                 name,
                 table,
                 columns,
                 orderings,
+                method,
+                opclasses,
+                options,
                 unique,
                 if_not_exists,
             });

@@ -137,3 +137,29 @@ b
 
 statement error 23505
 INSERT INTO events VALUES (2, 2, 'dup')
+
+# Access methods (PLAN.md §M14.12 V4b): the B-tree by name or by default;
+# a method no module registered, the B-tree's operator classes and
+# options, refused.
+statement ok
+CREATE INDEX events_what ON events USING btree (what)
+
+query T
+SELECT day FROM events WHERE what = 'd'
+----
+2
+
+query TTTT
+SELECT name, method, opclasses, options FROM nc_catalog.indexes WHERE table_name = 'events' ORDER BY name
+----
+events_pkey btree {NULL,NULL} {}
+events_what btree {NULL} {}
+
+statement error 42704
+CREATE INDEX ON events USING nothing (what)
+
+statement error 42704
+CREATE INDEX ON events (what text_pattern_ops)
+
+statement error 22023
+CREATE INDEX ON events USING btree (what) WITH (fillfactor = 70)

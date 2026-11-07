@@ -274,6 +274,9 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("is_primary", B),
             ("key_prefix", T),
             ("orderings", TA),
+            ("method", T),
+            ("opclasses", TA),
+            ("options", TA),
         ],
     ),
     (
@@ -787,6 +790,9 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         Value::Bool(true),
                         text(hex(&t.index_prefix(0))),
                         Value::Array(vec![Value::Null; t.primary_key.len()]),
+                        text(crate::index_method::BTREE),
+                        Value::Array(vec![Value::Null; t.primary_key.len()]),
+                        Value::Array(Vec::new()),
                     ]);
                 }
                 for ix in &t.indexes {
@@ -803,6 +809,19 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                             ix.orderings
                                 .iter()
                                 .map(|o| o.clone().map_or(Value::Null, text))
+                                .collect(),
+                        ),
+                        text(ix.method.as_deref().unwrap_or(crate::index_method::BTREE)),
+                        Value::Array(
+                            ix.opclasses
+                                .iter()
+                                .map(|o| o.clone().map_or(Value::Null, text))
+                                .collect(),
+                        ),
+                        Value::Array(
+                            ix.options
+                                .iter()
+                                .map(|(k, v)| text(format!("{k}={v}")))
                                 .collect(),
                         ),
                     ]);

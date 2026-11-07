@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::exec::{self, index_key, pk_suffix, row_key_of};
 use crate::expr::{Ctx, Env, Expr};
 use crate::ext::Registry;
+use crate::index_method::{IndexMethod, RowRef};
 use crate::optimizer::choose_access;
 use crate::parser::parse_expr;
 use crate::plan::{Access, Plan};
@@ -35,11 +36,16 @@ pub fn table_scope(table: &Table) -> Scope {
     }
 }
 
-/// How a table's index entries are made: per index, per column, the
-/// column's value or (a column indexed in a taught ordering) its mapping,
-/// bound once.
+/// How a table's index entries are made: per B-tree index, per column,
+/// the column's value or (a column indexed in a taught ordering) its
+/// mapping, bound once; an index of a registered method
+/// ([`crate::index_method`]) keeps itself, told each change ([`keep`](Self::keep)).
 pub struct IndexKeys {
     maps: Vec<Vec<Option<Expr>>>,
+    /// The B-tree indexes' positions.
+    btrees: Vec<usize>,
+    /// The other indexes' positions and methods.
+    methods: Vec<(usize, Arc<dyn IndexMethod>)>,
 }
 
 impl IndexKeys {
@@ -47,7 +53,12 @@ impl IndexKeys {
     pub fn new(txn: &dyn KvTxn, reg: &Registry, table: &Table) -> Result<Self> {
         let mut binder = Binder::new(txn, reg);
         let mut maps = Vec::with_capacity(table.indexes.len());
-        for ix in &table.indexes {
+        let (mut btrees, mut methods) = (Vec::new(), Vec::new());
+        for (i, ix) in table.indexes.iter().enumerate() {
+            match crate::index_method::of(ix)? {
+                Some(m) => methods.push((i, m)),
+                None => btrees.push(i),
+            }
             let mut per = Vec::with_capacity(ix.columns.len());
             for (&c, o) in ix.columns.iter().zip(&ix.orderings) {
                 per.push(match o {
@@ -62,18 +73,47 @@ impl IndexKeys {
             }
             maps.push(per);
         }
-        Ok(Self { maps })
+        Ok(Self {
+            maps,
+            btrees,
+            methods,
+        })
     }
 
-    /// Every index entry of `row` (primary key bytes `pk`): key and whether
-    /// it takes part in uniqueness, one per index.
+    /// The B-tree indexes' positions in the table's list.
+    pub fn btrees(&self) -> &[usize] {
+        &self.btrees
+    }
+
+    /// Whether some index is a registered method's.
+    pub fn has_methods(&self) -> bool {
+        !self.methods.is_empty()
+    }
+
+    /// Tells every registered method's index of a change to a row: `old`
+    /// as it was (`None`: inserted), `new` as it is (`None`: deleted).
+    pub fn keep(
+        &self,
+        txn: &mut dyn KvTxn,
+        t: &Table,
+        old: Option<RowRef>,
+        new: Option<RowRef>,
+    ) -> Result<()> {
+        for (i, m) in &self.methods {
+            m.write(txn, t, *i, old, new)?;
+        }
+        Ok(())
+    }
+
+    /// Every B-tree entry of `row` (primary key bytes `pk`): the index's
+    /// position, the key and whether it takes part in uniqueness.
     pub fn entries(
         &self,
         txn: &dyn KvTxn,
         t: &Table,
         row: &Row,
         pk: &[u8],
-    ) -> Result<Vec<(Vec<u8>, bool)>> {
+    ) -> Result<Vec<(usize, Vec<u8>, bool)>> {
         // Mappings are immutable: they need nothing of the session.
         static NONE: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
         let ctx = Ctx::new(txn, NONE.get_or_init(Registry::empty), &[]);
@@ -82,8 +122,12 @@ impl IndexKeys {
             outer: None,
             ctx: &ctx,
         };
-        (0..self.maps.len())
-            .map(|i| self.entry_in(&env, t, row, pk, i))
+        self.btrees
+            .iter()
+            .map(|&i| {
+                let (k, unique) = self.entry_in(&env, t, row, pk, i)?;
+                Ok((i, k, unique))
+            })
             .collect()
     }
 
@@ -1293,9 +1337,10 @@ fn store_batch(
     // which fails after the rows before it.
     let fk_keys = (fks && !t.foreign_keys.is_empty())
         .then(|| crate::fk::child_keys(t, rows.iter().map(|b| (None, &b.row))));
-    let indexed = !t.indexes.is_empty();
+    let indexed = !w.keys.btrees().is_empty();
+    let kept = w.keys.has_methods();
     let mut places = Vec::with_capacity(rows.len());
-    let mut entries: Vec<(Vec<u8>, Vec<(Vec<u8>, bool)>)> = Vec::new();
+    let mut entries: Vec<(Vec<u8>, Vec<(usize, Vec<u8>, bool)>)> = Vec::new();
     let mut batch = Vec::with_capacity(rows.len());
     let mut fail = None;
     for (i, b) in rows.into_iter().enumerate() {
@@ -1317,18 +1362,30 @@ fn store_batch(
             encoded: b.encoded,
         });
     }
+    // The rows, for the registered methods' indexes (handed over below).
+    let news: Vec<(Vec<u8>, Row)> = if kept {
+        batch
+            .iter()
+            .map(|r| (pk_suffix(t, &r.key).to_vec(), r.row.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let stored = batch.len();
     let dup = w
         .storage
         .insert_batch(txn, t, batch, first_id.is_some())
         .map_err(none)?;
     for (i, (pk, es)) in entries.into_iter().enumerate().take(dup.unwrap_or(stored)) {
-        for (j, (k, unique)) in es.into_iter().enumerate() {
+        for (j, k, unique) in es {
             if unique && txn.get(&k).map_err(|e| none(e.into()))?.is_some() {
                 return Err((Some(places[i]), duplicate(&t.indexes[j].name)));
             }
             txn.put(&k, &pk).map_err(|e| none(e.into()))?;
         }
+    }
+    for (pk, row) in news.iter().take(dup.unwrap_or(stored)) {
+        w.keys.keep(txn, t, None, Some((pk, row))).map_err(none)?;
     }
     if let Some(i) = dup {
         return Err(at_row(places[i])(duplicate(&format!("{}_pkey", t.name))));
@@ -1385,7 +1442,7 @@ pub fn update_rows(
         let (old_pk, new_pk) = (pk_suffix(t, key), pk_suffix(t, &new_key));
         let olds = w.keys.entries(&*txn, t, old, old_pk)?;
         let news = w.keys.entries(&*txn, t, new, new_pk)?;
-        for (i, ((ok, _), (nk, unique))) in olds.into_iter().zip(news).enumerate() {
+        for ((_, ok, _), (i, nk, unique)) in olds.into_iter().zip(news) {
             if ok == nk && old_pk == new_pk {
                 continue;
             }
@@ -1395,6 +1452,8 @@ pub fn update_rows(
             }
             txn.put(&nk, new_pk)?;
         }
+        w.keys
+            .keep(txn, t, Some((old_pk, old)), Some((new_pk, new)))?;
     }
     crate::storage::written(t);
     crate::fk::check_children(&*txn, t, changes.iter().map(|(_, o, n)| (Some(o), n)))?;
@@ -1425,9 +1484,10 @@ pub fn delete_rows(
             continue;
         }
         let pk = pk_suffix(t, key);
-        for (k, _) in keys.entries(&*txn, t, row, pk)? {
+        for (_, k, _) in keys.entries(&*txn, t, row, pk)? {
             txn.delete(&k)?;
         }
+        keys.keep(txn, t, Some((pk, row)), None)?;
     }
     crate::storage::written(t);
     if !t.referenced_by.is_empty() {
@@ -1569,13 +1629,16 @@ fn take_key(r: &mut Row, at: usize) -> Result<Vec<u8>> {
 /// within a round's entries and the sort's `work_mem`) — and its entries
 /// sorted and written in key order ([`IndexBuild`]).
 pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usize) -> Result<()> {
-    let keys = IndexKeys::new(&*txn, reg, table)?;
     // The new index's keys: none yet, and no other transaction sees the
     // index before this one commits.
     let prefix = table.index_prefix(table.indexes[i].id);
     if let Some(end) = nucleus_kv::prefix_end(&prefix) {
         txn.fresh(&prefix, &end);
     }
+    if let Some(m) = crate::index_method::of(&table.indexes[i])? {
+        return m.build(txn, reg, table, i);
+    }
+    let keys = IndexKeys::new(&*txn, reg, table)?;
     let storage = crate::storage::of(table)?;
     let mut wanted = vec![false; table.columns.len()];
     for &c in &table.indexes[i].columns {
@@ -1693,7 +1756,7 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
     }
     let rows = rows.seal()?;
     catalog::delete_range(txn, &prefix, Some(&end))?;
-    let mut build = IndexBuild::new((0..table.indexes.len()).collect());
+    let mut build = IndexBuild::new(keys.btrees().to_vec());
     for r in rows.into_iter() {
         let (old_key, row) = exec::unkeyed(r?)?;
         let key = if table.primary_key.is_empty() {
@@ -1706,6 +1769,20 @@ pub fn rewrite_keys(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Resul
     }
     build.write(txn, table, &duplicate)?;
     crate::storage::written(table);
+    build_methods(txn, reg, table, &keys)
+}
+
+/// Builds every registered method's index of `table` again, over its rows
+/// as now written (their prefixes emptied with the table's).
+fn build_methods(
+    txn: &mut dyn KvTxn,
+    reg: &Registry,
+    table: &Table,
+    keys: &IndexKeys,
+) -> Result<()> {
+    for (i, m) in &keys.methods {
+        m.build(txn, reg, table, *i)?;
+    }
     Ok(())
 }
 
@@ -1724,7 +1801,7 @@ pub fn replace_rows(
     catalog::delete_range(txn, &prefix, Some(&end))?;
     let keys = IndexKeys::new(&*txn, reg, table)?;
     let storage = crate::storage::of(table)?;
-    let mut build = IndexBuild::new((0..table.indexes.len()).collect());
+    let mut build = IndexBuild::new(keys.btrees().to_vec());
     for r in rows {
         let (old_key, row) = exec::unkeyed(r?)?;
         let key = if table.primary_key.is_empty() {
@@ -1740,7 +1817,7 @@ pub fn replace_rows(
     }
     build.write(txn, table, &duplicate)?;
     crate::storage::written(table);
-    Ok(())
+    build_methods(txn, reg, table, &keys)
 }
 
 /// Every row of a table rewritten (after `ADD COLUMN … DEFAULT`).

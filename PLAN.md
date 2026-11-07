@@ -4450,6 +4450,39 @@ committed:
    against the exact search's, MVCC, rollbacks, crashes in a fold) and
    the recall suite against `bench/ann`'s numbers and pgvector's.
 
+*Done — step 1* (2026-11-07): `index_method` — an `IndexMethod`
+(`define`: the columns' types, operator classes and options, defaults
+filled in; `write`: told each row's change in the writing transaction,
+old and new; `build`: over a table's rows; `check`: for the integrity
+check) registered by `Registry::add_index_method`, the B-tree the
+built-in default; `CREATE INDEX … USING method (col opclass) WITH (…)`;
+the index record's method, operator classes and options (table record
+version 14); `nc_catalog.indexes`' `method`, `opclasses`, `options`;
+pg-compat's `indexdef` with them.  Prior art: PostgreSQL's index access
+method API (`IndexAmRoutine`: `ambuild`, `aminsert`, `amvalidate`,
+`amoptions`) — its shape taken; not its delete path: PostgreSQL's
+`aminsert` only adds, and dead entries wait for VACUUM's
+`ambulkdelete` against the heap, where here a method is told the row as
+it was and as it is (no heap, no VACUUM: it sees a delete when it
+happens).  Measured against b4636a3 (`phases.py`, alternating, 2 rounds,
+SF 1, row tables): the load 23.18 / 22.46 s before, 22.50 / 22.37 s
+after (`COPY lineitem` 8.07 / 7.85 against 7.80 / 7.68 s); the 22
+queries' best 5,736 / 5,677 ms against 5,587 / 5,696 — no change past
+the noise (a write asks an empty list of methods).
+
+*Step 2, as it goes in* — one change from the bench: no epochs.  A
+writer there read the open epoch validated, so a seal's close sent its
+transaction back (~35 retries a close); in the engine that is a user's
+`INSERT` failing with `40001` — refused.  Instead every key a write puts
+is new (the delta's and the dead keys carry the row's primary key and a
+nonce), so no write ever touches a key another transaction writes; a
+seal *moves* the delta it sees into an immutable object (the root lists
+the sealed objects) and deletes those keys, in one transaction of its
+own — what an LSM's memtable flush does.  A search reads the sealed
+objects from memory and the rest of the delta from the KV, each row
+exactly once in any snapshot.  The price: a sealed row's vector is
+written twice (into the delta, then into the sealed object).
+
 *Measured on the way* (2026-11-06): `docs/benchmarks.md`'s TPC-H table
 re-run on a quiet machine (`fseventsd`, at 99 % and 11 GB after 137 days,
 restarted) — 0.66× row, 0.24× column.  Its Q8 on column tables still

@@ -714,8 +714,9 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
             .iter()
             .enumerate()
             // An index in a taught ordering holds mappings, not the
-            // columns' values: no access path for predicates on them.
-            .filter(|(_, ix)| !ix.mapped())
+            // columns' values, and a registered method's is searched its
+            // own way: no access path for predicates on them.
+            .filter(|(_, ix)| ix.ordered())
             .map(|(i, ix)| (Some(i), ix.columns.clone())),
     );
     let analyzed = st.filter(|s| s.of(table).is_some());

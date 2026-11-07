@@ -62,6 +62,7 @@ pub use crate::datetime::{
 pub use crate::decimal::Decimal;
 pub use crate::enums::Labels;
 pub use crate::error::{Error, Result};
+pub use crate::index_method::{IndexMethod, RowRef};
 pub use crate::inet::Net;
 pub use crate::parser::{parse, parse_with_text};
 pub use crate::session::{OutColumn, Output, Session, Sink, TxnStatus, command_tag, read_only};
@@ -741,6 +742,13 @@ impl Registry {
     /// process (tables of every database may use them).
     pub fn add_storage(&mut self, s: Arc<dyn crate::storage::TableStorage>) -> Result<()> {
         crate::storage::register(s)
+    }
+
+    /// Adds an index access method (PLAN.md §M14.12 V4b): indexes then
+    /// name it in `CREATE INDEX … USING name`.  Methods are kept for the
+    /// process, as storages.
+    pub fn add_index_method(&mut self, m: Arc<dyn crate::index_method::IndexMethod>) -> Result<()> {
+        crate::index_method::register(m)
     }
 
     /// The aggregate called `name`.

@@ -52,6 +52,12 @@ pub enum Statement {
         columns: Vec<String>,
         /// Per column, `USING ordering`: index it in that ordering.
         orderings: Vec<Option<String>>,
+        /// `USING method` (`None`: the B-tree).
+        method: Option<String>,
+        /// Per column, its operator class (`col opclass`).
+        opclasses: Vec<Option<String>>,
+        /// `WITH (name = value, …)`: the method's options.
+        options: Vec<(String, String)>,
         /// `UNIQUE`.
         unique: bool,
         /// `IF NOT EXISTS`.
