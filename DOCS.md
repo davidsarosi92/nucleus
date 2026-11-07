@@ -1090,6 +1090,7 @@ and batch paid).
 | arrays | `type[]` | one dimension, elements of the type or NULL |
 | uuid | `UUID` | 16 bytes, a registered type (§8.12) |
 | vector | `VECTOR`, `VECTOR(n)` | 1–16000 `float4` components, a registered type (§8.12) |
+| sparsevec | `SPARSEVEC`, `SPARSEVEC(n)` | up to 10⁹ dimensions, 16000 of them non-zero, a registered type (§8.12) |
 | enums | `CREATE TYPE name AS ENUM (…)` | a label of the database's enum |
 | registered types | their name (`geopoint`) | a module's type: its canonical bytes (§8.12) |
 
@@ -3059,8 +3060,9 @@ check (a stray entry found), the refusals and a drop through it;
 
 ### 8.18 HNSW indexes (`hnsw`, §M14.12 V4b, V5, V6)
 
-`CREATE INDEX [name] ON t USING hnsw (col [opclass]) [WITH (m = 16,
-ef_construction = 64)]` on a `vector(n)` column (one without dimensions
+`CREATE INDEX [name] ON t USING hnsw (col [opclass]) [PARTITION BY (c,
+…)] [WITH (m = 16, ef_construction = 64, quantize = 'none', rescore =
+n)]` (`PARTITION BY` and `quantize` below) on a `vector(n)` column (one without dimensions
 `22023`; another type, or more than one column, `0A000`): the operator
 classes are pgvector's — `vector_l2_ops` (the default, `<->`),
 `vector_cosine_ops` (`<=>`), `vector_ip_ops` (`<#>`), `vector_l1_ops`
@@ -3625,7 +3627,8 @@ and their arrays, `uuid` 2950 (binary: its 16 bytes), `vector` 13201
 up with `to_regtype('vector')` — text `[1,2,3]`, binary pgvector's: the
 dimension count and an unused `int16`, then big-endian `float4`s; psycopg
 with pgvector's `register_vector` works both ways); other registered
-types as `text`; text and binary formats for all of them (binary numeric
+types — `sparsevec` among them, text `{1:0.5}/10` as pgvector's (whose
+binary form, and its oid, are not given yet) — as `text`; text and binary formats for all of them (binary numeric
 and dates checked against PostgreSQL's `*_send`).
 
 Not supported: `COPY`, cancellation.  `psql`'s `\d` family works through
@@ -3882,7 +3885,8 @@ dates and timestamps as days and µs since 2000-01-01, `Time` as µs since
 midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
 `Uuid([u8; 16])`, `Vector(Vec<f32>)` (also from `Vec<f32>` and
 `&[f32]`), `Other { type_name, bytes }` for another registered
-type; `char(n)` and enum values as text, their columns typed `Char` and
+type (`sparsevec` among them, its canonical bytes — §8.1; every driver
+gets it so, a type of its own in the drivers is left to do); `char(n)` and enum values as text, their columns typed `Char` and
 `Enum(name)`) with `From` conversions for parameters.  Every driver
 speaks protocol version 7 — results read as they arrive, a batch at a
 time (Rust `Client::cursor`, Python `Connection.stream` and a lazy DB-API
@@ -4009,6 +4013,15 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-07 — §M14.12, vectors against pgvector; V7 planned:**
+  `bench/ann/pgvector_ref.py --quantize half|binary --rescore
+  --no-inserts` (cosine data too; pgvector's `halfvec` and
+  `binary_quantize` indexes) and `--server-efs` there and in
+  `bench/ann/sql.py` (the server's own time by `EXPLAIN ANALYZE`);
+  `docs/benchmarks.md`'s vectors summary; the types table, the HNSW
+  syntax, `sparsevec` on pg-compat and in the drivers (§8.1, §8.18, §9,
+  §10).  PLAN.md §M14.12 V7 recorded as the next step.
 
 - **2026-11-07 — §M14.12 V6b, sparse vectors:** `sparsevec` /
   `sparsevec(n)` (`sparse.rs`: `Sparse`, `View`, `sparse::distance`);

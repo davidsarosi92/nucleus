@@ -25,6 +25,7 @@ virtual environment).
 import argparse
 import multiprocessing as mp
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -108,6 +109,18 @@ def writer(args):
     return len(ids)
 
 
+def server_time(c, sql, queries, ef=40):
+    """The server's own time a search (EXPLAIN ANALYZE's execution) at
+    `ef`: what a client's round trip and its sending of the vector leave
+    out."""
+    c.execute(f"SET hnsw.ef_search = {ef}")
+    times = []
+    for q in queries:
+        out = "\n".join(r[0] for r in c.execute("EXPLAIN ANALYZE " + sql, (q,)).rows)
+        times.append(float(re.search(r"Execution: \d+ rows in ([\d.]+) ms", out).group(1)))
+    print(f"server-side (EXPLAIN ANALYZE, ef {ef}): {sum(times) / len(times) * 1000:.0f} µs a search", flush=True)
+
+
 def curve(pool, port, test, truth, k, threads, efs, sql):
     print("ef_search  recall@10  µs/search  QPS(%d)" % threads)
     for ef in efs:
@@ -138,6 +151,7 @@ def main():
     ap.add_argument("--quantize", default=None, help="the index's codes: half, int8 or binary (§M14.12 V6)")
     ap.add_argument("--rescore", type=int, default=None, help="rows read for each returned (a quantized index)")
     ap.add_argument("--no-inserts", action="store_true", help="the bulk rows only: no writers, one curve")
+    ap.add_argument("--server-efs", default="40", help="the ef_search values the server's own time is taken at")
     a = ap.parse_args()
     meta = dict(kv.split("=") for kv in open(os.path.join(a.dir, "meta.txt")).read().split())
     dim = int(meta["dim"])
@@ -185,6 +199,8 @@ def main():
         assert "nearest" in plan, plan
         truth = exact(train[:bulk], test, k)
         curve(pool, a.port, test, truth, k, a.threads, efs, sql)
+        for ef in a.server_efs.split(","):
+            server_time(c, sql, test[:200], int(ef))
         if a.no_inserts:
             c.close()
             return

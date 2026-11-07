@@ -276,7 +276,7 @@ are marked ✅.
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
-| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 21 ms on one thread, pgvector 17.9 on three) |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 21 ms on one thread, pgvector 17.9 on three); **next: V7** (the query vector from a subquery, large values read with their row, exact searches in parallel, `sparsevec` in the drivers) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
@@ -4208,7 +4208,9 @@ rest within noise); ClickBench column 17.3 / 17.8 → 17.1 / 17.0, row
 agreed so far and the measurement that decides it).  **V5** filtered search as specified above (ACORN's
 predicate-aware traversal, Patel et al. 2024, and Qdrant's filterable
 HNSW are the prior art to read).  **V6** half, int8 and binary
-quantization ✅ (V6a, below); sparse vectors ✅ (V6b).
+quantization ✅ (V6a, below); sparse vectors ✅ (V6b).  **V7** what is
+left of *Done when* and what the measurements found — the next step
+(below, after V6b).
 
 *V4, the HNSW index: where the graph lives* (planned 2026-11-06;
 measured 2026-11-06/07, below).  The approximate index (Malkov and Yashunin 2018)
@@ -4864,6 +4866,20 @@ Measured against 24c5627 (`bench/phases.py`, alternating, two rounds):
 TPC-H SF1 load 25.89 / 26.26 → 25.59 / 24.10 s, the queries' sums
 6,072 / 5,933 → 6,049 / 5,986 ms: noise.
 
+Against pgvector on the same embeddings (its documented ways: an
+expression index on `v::halfvec(1536)`; one on
+`binary_quantize(v)::bit(1536)`, the nearest 50 re-ranked in a
+subquery), the server's own time (`EXPLAIN ANALYZE`, 200 queries — the
+clients differ) at equal recall: ~0.95, `f32` 1,149 µs and `int8` 634
+against `vector`'s 1,571 (`halfvec` 1,229 at 0.947); ~0.99, 2,843 and
+1,149 against 4,919.  Built in 42.5 s (`int8` 11.8) against 136.7
+(`halfvec` 81.2, `bit` 22.7).  The bits are even (0.922 at 1,097 µs,
+pgvector's 0.916 at 1,099).  pgvector reaches a recall at a lower
+`ef_search` (0.949 at 40, here 0.951 at 60; SIFT the same) — its graph
+is the better per candidate, nucleus's the cheaper per candidate; why,
+is worth a look beside V7.  Found measuring: a query vector from a
+subquery is not taken by the index (V7, 1).
+
 The binary codes' searches are the rows they read: 50 rows of 6 KB at
 ~12 µs each (a vector of 1536 components is stored out of line,
 §M14.26: a point read and a chunk's) — on the server, a search reads its
@@ -4928,6 +4944,48 @@ model's instead of BM25's: built there, for both.
 Measured against b297042 (`bench/phases.py`, alternating, two rounds):
 TPC-H SF1 load 23.44 / 22.15 → 22.81 / 22.21 s, the queries' sums 5,501 /
 5,678 → 5,548 / 5,589 ms: noise.
+
+*Next — V7, closing §M14.12* (recorded 2026-11-07, not started).  What
+*Done when* still asks and what V4b–V6 measured as wanting, in this
+order (each measured as the steps before it, against the commit before,
+and against pgvector where it has the same):
+
+1. **The query vector from a subquery or a row** — `ORDER BY v <=>
+   (SELECT v FROM items WHERE id = $1) LIMIT k` ("more like this item",
+   the commonest search in an application after the client's own vector)
+   is planned today as a scan and a sort: the optimizer's `nearest` takes
+   a constant, a parameter or an enclosing row's value only.  An
+   uncorrelated scalar subquery is one value for the statement: evaluated
+   once before the search (as PostgreSQL's InitPlan, which pgvector's
+   index takes), it is a query vector like a parameter.  Then `LATERAL`
+   (each row's `k` nearest — a join's inner side searching per outer
+   row), the form recommendation and deduplication queries take.  Found
+   measuring V6 against pgvector, whose benchmark sends the query by an
+   id for that reason.
+2. **A row's large values read with it** — a vector of 1536 components
+   (6 KB) is past §M14.26's 2,000-byte threshold, so every row a search
+   reads is a point read and a chunk's scan (~12 µs on the server against
+   ~3.4 for a row inline): at `rescore` 5 that is most of a binary
+   search's time.  Options to measure: the threshold per type (a vector
+   is read whole with its row nearly always — pgvector's `vector` is
+   `STORAGE EXTERNAL`, TOASTed past 2 KB too, so the same cost is theirs),
+   or the chunks keyed beside the row so one range read takes both.
+3. **Exact searches in parallel** — a top-k per morsel, merged (the sort
+   above a scan is serial: §M14.20 V4's *Left*); sparse exact searches
+   then run on the workers (100,000 rows: 21 ms on one thread, pgvector
+   17.9 on three), dense exact searches and every `ORDER BY … LIMIT`
+   with them.
+4. **`sparsevec` in the protocols and the six drivers** — a type of its
+   own in each (today `Other { type_name, bytes }` / `nucleus.Ext`),
+   pgvector's binary form and a `pg_type` row on pg-compat, so psycopg
+   with pgvector's `SparseVector` works as it does for `vector`.
+
+Then *Done when* is checked whole, and §M14.21 follows: the inverted
+index there is sparse vectors' index too (term weights from a model in
+place of BM25's), so learned sparse retrieval and hybrid search come as
+one.  Not in V7: RaBitQ-style binary codes (asymmetric distances, a
+rotation) — kept for when binary recall at few rows read is what an
+application lacks.
 
 **Done when:** the law kit passes on `vector`; every capability above
 works through SQL, `ncp` and all six drivers; exact search matches a

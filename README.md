@@ -68,7 +68,9 @@ recall 1.0, pgvector's 14.5 ms at 0.987), and `PARTITION BY (tenant)`
 keeps a graph per tenant (a tenth of the rows: 0.46 ms against
 pgvector's 2.4), and quantized graphs keep `int8`, half or one-bit codes
 (`int8`: a quarter of the memory, SIFT-1M built in 29 s against 55 and
-searched faster at the same recall), and sparse vectors (`sparsevec`,
+searched faster at the same recall; on OpenAI's 1536-dimensional
+embeddings built in 11.8 s against pgvector's 137 and searched in 0.63
+ms against its 1.57 at recall 0.95), and sparse vectors (`sparsevec`,
 pgvector's) are searched exactly (`docs/benchmarks.md`); a hash join whose right side turns out
 smaller than estimated looks its left side up instead (an adaptive
 join).  Statistics have begun (§M14.27): sums of doubles kept exactly
@@ -88,8 +90,11 @@ stable train/test splits; `reservoir_sample`), and tests for drift
 named as scipy names them (`ks_test`, `auc`, `psi`, `js_divergence`,
 `chisq_test`), and `SUMMARIZE t` — every column's range, distinct
 count, mean, quartiles and NULLs in one scan (also an MCP tool).
-Next is the rest of the developer
-platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
+Next is closing vectors (§M14.12 V7: a query vector taken from a
+subquery — "more like this row" — through the index, a row's large
+vectors read with it, exact searches in parallel, `sparsevec` in every
+driver), then full-text and hybrid search (§M14.21) and the rest of the
+developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then
 the document model (§F2).  See

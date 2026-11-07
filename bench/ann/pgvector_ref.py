@@ -7,13 +7,21 @@ the curve again.
 
     bench/ann/pgvector_ref.py DIR [--rows N] [--bulk N] [--queries 2000]
         [--m 16] [--efc 64] [--threads 10] [--efs 10,40,200]
+        [--quantize half|binary] [--rescore 5] [--no-inserts]
 
 The clients run inside the container (psql and pgbench on its socket), so
 Docker's network on macOS does not add to pgvector's latency.  µs/search
 is one client asking the queries one after another; QPS is `--threads`
 clients at once; recall@10 as `ann recall` counts it.  Writers insert one
 row a transaction (autocommit) from a staging table, a sequence handing
-out the rows.  Needs numpy (bench/ann/data.py's virtual environment).
+out the rows.  A cosine dataset (stored normalized) is indexed with
+vector_cosine_ops and searched by `<=>`.  `--quantize` is pgvector's way
+to the codes nucleus's `WITH (quantize = …)` keeps (PLAN.md §M14.12 V6a),
+as its documentation gives it: `half` an expression index on
+`v::halfvec(n)`, searched and ordered by the halves' distance; `binary`
+one on `binary_quantize(v)::bit(n)` (`bit_hamming_ops`), the `k ·
+--rescore` nearest by the bits re-ranked by the vectors' distance in a
+subquery.  Needs numpy (bench/ann/data.py's virtual environment).
 """
 
 import argparse
@@ -79,11 +87,15 @@ def exact(train, queries, k):
     return out
 
 
+# The search, `{q}` the query vector's expression (main sets it).
+SEARCH = "SELECT t.id FROM t ORDER BY t.v <-> {q} LIMIT {k}"
+
+
 def curve(queries, truth, k, threads, efs, n):
     print("ef_search  recall@10  µs/search  QPS(%d)" % threads)
     for ef in efs:
         rows = psql(f"SET hnsw.ef_search = {ef};\n"
-                    f"SELECT q.id, array_to_string(array(SELECT t.id FROM t ORDER BY t.v <-> q.v LIMIT {k}), ',') "
+                    f"SELECT q.id, array_to_string(array({SEARCH.format(q='q.v', k=k)}), ',') "
                     f"FROM q ORDER BY q.id;\n").split()
         total = 0.0
         for line in rows:
@@ -95,6 +107,17 @@ def curve(queries, truth, k, threads, efs, n):
         many = pgbench("/data/search.sql", "-c", str(threads), "-j", str(threads), "-t", str(n // threads), ef=ef).stdout
         tps = float(re.search(r"tps = ([\d.]+)", many).group(1))
         print(f"{ef:>9}  {total / len(rows):>9.4f}  {lat:>9.1f}  {tps:>8.0f}", flush=True)
+
+
+def server_time(n, k, ef=40):
+    """The server's own time a search (EXPLAIN ANALYZE's execution time,
+    the plan's timing off) over the first `n` queries, at `ef`: what a
+    client's round trip and its sending of the vector leave out."""
+    script = f"SET hnsw.ef_search = {ef};\n" + "".join(
+        f"EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF) {SEARCH.format(q=f'(SELECT v FROM q WHERE id = {i})', k=k)};\n"
+        for i in range(n))
+    times = [float(m.group(1)) for m in re.finditer(r"Execution Time: ([\d.]+) ms", psql(script))]
+    print(f"server-side (EXPLAIN ANALYZE, ef {ef}): {sum(times) / len(times) * 1000:.0f} µs a search", flush=True)
 
 
 def main():
@@ -110,10 +133,29 @@ def main():
     ap.add_argument("--efs", default="10,40,200")
     ap.add_argument("--shared-buffers", default="3GB")
     ap.add_argument("--work", default=None, help="the directory for the COPY files (a new temporary one)")
+    ap.add_argument("--quantize", default=None, choices=["half", "binary"])
+    ap.add_argument("--rescore", type=int, default=5, help="binary: rows re-ranked for each returned")
+    ap.add_argument("--no-inserts", action="store_true", help="the bulk rows only: no writers, one curve")
+    ap.add_argument("--server-efs", default="40", help="the ef_search values the server's own time is taken at")
     a = ap.parse_args()
     meta = dict(kv.split("=") for kv in open(os.path.join(a.dir, "meta.txt")).read().split())
     dim, nq = int(meta["dim"]), int(meta["test"])
-    assert meta["metric"] == "l2", "l2 only"
+    # Angular datasets are stored normalized: the Euclidean order is the
+    # cosine one, so the ground truth is found the same way.
+    cosine = meta["metric"] == "cosine"
+    op, ops, half_ops = ("<=>", "vector_cosine_ops", "halfvec_cosine_ops") if cosine else \
+        ("<->", "vector_l2_ops", "halfvec_l2_ops")
+    global SEARCH
+    if a.quantize == "half":
+        index = f"(v::halfvec({dim})) {half_ops}"
+        SEARCH = f"SELECT t.id FROM t ORDER BY t.v::halfvec({dim}) {op} {{q}}::halfvec({dim}) LIMIT {{k}}"
+    elif a.quantize == "binary":
+        index = f"(binary_quantize(v)::bit({dim})) bit_hamming_ops"
+        SEARCH = (f"SELECT s.id FROM (SELECT t.id, t.v FROM t ORDER BY binary_quantize(t.v)::bit({dim}) <~> "
+                  f"binary_quantize({{q}}) LIMIT {{k}} * {a.rescore}) s ORDER BY s.v {op} {{q}} LIMIT {{k}}")
+    else:
+        index = f"v {ops}"
+        SEARCH = f"SELECT t.id FROM t ORDER BY t.v {op} {{q}} LIMIT {{k}}"
     train = np.fromfile(os.path.join(a.dir, "train.f32"), dtype="<f4").reshape(-1, dim)
     test = np.fromfile(os.path.join(a.dir, "test.f32"), dtype="<f4").reshape(-1, dim)[: a.queries]
     rows = min(a.rows or len(train), len(train))
@@ -127,7 +169,7 @@ def main():
     copy_binary(os.path.join(work, "queries.copy"), np.arange(len(test)), test)
     with open(os.path.join(work, "search.sql"), "w") as f:
         f.write(f"\\set qid random(0, {len(test) - 1})\n"
-                f"SELECT id FROM t ORDER BY v <-> (SELECT v FROM q WHERE id = :qid) LIMIT {k};\n")
+                + SEARCH.format(q="(SELECT v FROM q WHERE id = :qid)", k=k) + ";\n")
     with open(os.path.join(work, "insert.sql"), "w") as f:
         f.write("WITH n AS MATERIALIZED (SELECT nextval('staged_seq')::int AS id) "
                 "INSERT INTO t SELECT s.id, s.v FROM n JOIN s ON s.id = n.id;\n")
@@ -160,7 +202,7 @@ def main():
         psql("COPY t FROM '/data/bulk.copy' (FORMAT binary);\n")
         load = time.perf_counter() - t
         t = time.perf_counter()
-        psql(f"CREATE INDEX ON t USING hnsw (v vector_l2_ops) WITH (m = {a.m}, ef_construction = {a.efc});\n"
+        psql(f"CREATE INDEX t_v_idx ON t USING hnsw ({index}) WITH (m = {a.m}, ef_construction = {a.efc});\n"
              "VACUUM ANALYZE t;\n")
         build = time.perf_counter() - t
         size = psql("SELECT pg_relation_size('t_v_idx') / 1048576, pg_total_relation_size('t') / 1048576;\n").strip()
@@ -169,6 +211,10 @@ def main():
               f"{size.split('|')[1]} MB", flush=True)
         truth = exact(train[:bulk], test, k)
         curve(test, truth, k, a.threads, efs, len(test))
+        for ef in a.server_efs.split(","):
+            server_time(min(200, len(test)), k, int(ef))
+        if a.no_inserts:
+            return
 
         # Writers and a searcher at once.
         n = rows - bulk
