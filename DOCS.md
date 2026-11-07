@@ -3016,9 +3016,9 @@ reaches it; a rollback undoes its writes with the rest.  `build` makes
 it over the rows a table has (`CREATE INDEX`, and after a rewrite of the
 table's rows: `ALTER … TYPE`, a key encoding upgrade; `index_method::rows`
 reads them), and `check` checks it for the integrity check against the
-table's rows.  The optimizer's access paths take only plain B-trees
-(`Index::ordered`); a method's own search comes with HNSW (§M14.12
-V4b).  `crates/sql/tests/index_method.rs` registers a method that
+table's rows.  The optimizer's key ranges take only plain B-trees
+(`Index::ordered`); a method's own search is an access path of its own
+(`Access::Nearest`, HNSW's: §8.18).  `crates/sql/tests/index_method.rs` registers a method that
 mirrors a column and runs writes, rollbacks, a rewrite, the integrity
 check (a stray entry found), the refusals and a drop through it;
 `06_indexes.slt` the syntax.
@@ -3071,13 +3071,39 @@ fitted to folds' times against their rows), a seal's — at most 10,000
 rows, a fold's nudged a fifth either way in turn.  `hnsw::upkeep_now`
 runs it whatever the sizes (tests).
 
-`hnsw::nearest(txn, t, i, q, k, ef, ef_most)`: the graph searched with
-`ef` (its dead nodes passed over) and the sealed rows (from memory) and
-the delta (from the KV) scanned, the candidates checked against the
-table's rows in the snapshot — a row gone passed over, one found twice
-once, each ranked by its distance as the SQL operator takes it — and,
-with fewer than `k` left, asked again with `ef` doubled up to `ef_most`
-(pgvector 0.8's iterative scans).  `hnsw::status`: the nodes, dead
+`hnsw::search(txn, t, i, q, k, ef, ef_most, wanted, keep)`: the graph
+searched with `ef` (its dead nodes passed over) and the sealed rows
+(from memory) and the delta (from the KV) scanned, the candidates
+checked against the table's rows in the snapshot — a row gone passed
+over, one found twice once, one `keep` refuses (a filter) left out, each
+ranked by its distance as the SQL operator takes it — and, with fewer
+than `k` left, asked again with `ef` doubled up to `ef_most` or until
+the index has no more (pgvector 0.8's iterative scans; a row looked at
+once is not read again); `hnsw::nearest` is it without a filter.
+
+**Searches in SQL.**  `ORDER BY col <op> q LIMIT k [OFFSET o]` (the
+operator or its function — `l2_distance`, `cosine_distance`,
+`negative_inner_product`, `l1_distance` — either way round), over a
+table with an HNSW index on `col` whose operator class is that
+distance's, `q` the same for every row (a constant, a parameter, an
+enclosing row's value), becomes a scan through `Access::Nearest` (the
+optimizer's `nearest`, its last pass; `EXPLAIN`: `Index Scan using ix on
+t (k nearest col to q)`) where it costs less than the scan it had: about
+`ef · (3 + 2m / 10)` rows' reads, `ef` the session's `hnsw.ef_search`
+(default 40, 1–1000, `SET` / `RESET`) or what the filter's selectivity
+takes to leave `k + o` rows, against the rows the scan reads; and not
+where `ef` passes the rows over `2m`, where a search costs what reading
+every row does.  A table not analyzed has the rows the index holds
+(`hnsw::rows`), and keeps a key range its filter chose.  The executor
+(`exec::nearest`) gives the scan's filter and the hash joins' key
+filters to the search as `keep` and reads only the columns the plan
+needs (`hnsw::nearest_rows`); the sort and the limit above stay.  When
+fewer than `k + o` rows pass — the index holds fewer (a `NULL` vector
+is not in it, and sorts last), or the filter is narrower than the
+estimate and `ef` reached the rows over `2m` — the scan reads every row
+instead, so the answer is the exact one's.  A descending order, the
+distance not the first key, an expression of it, a query that reads the
+row, or no limit: read and sorted.  `hnsw::status`: the nodes, dead
 nodes, patches, sealed rows and delta keys.  The integrity check reads
 the root and every object it names, checks the edges' ends, and that
 every row with an indexed vector is in the graph (live), a sealed object
@@ -3085,7 +3111,9 @@ or the delta with that vector.  `crates/sql/tests/hnsw.rs`: recall
 against the exact search after the build, with a delta, after folds,
 marks and consolidations and a table rewrite; a snapshot from before an
 upkeep; each operator class; the definitions refused; the upkeep after
-commits.
+commits; `ORDER BY … LIMIT` through the planner — the plans chosen and
+not, recall against the exact search, `hnsw.ef_search`, a filter, an
+offset, the fallback to every row, an enclosing row's vector, writes.
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -3805,6 +3833,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-07 — §M14.12 V4b step 3, nearest-neighbour searches in the
+  planner:** `Access::Nearest` (`Access::secondary`), the optimizer's
+  `nearest` pass, `exec::nearest`; `hnsw::search`, `nearest_rows`,
+  `rows`, `serves`, the session setting `hnsw.ef_search`;
+  `vectors::Metric::of_function` (§8.18).
 - **2026-11-07 — §M14.12 V4b step 2, HNSW as an index method:** `hnsw`
   (`graph`, `store`, `cache`; `nearest`, `status`, `upkeep_now`),
   registered by the built-in module; `IndexMethod::after_commit` and

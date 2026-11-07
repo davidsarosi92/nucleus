@@ -245,6 +245,18 @@ impl Metric {
         }
     }
 
+    /// The distance a call of `f` computes, if it is one of the vector
+    /// distances: the type's (`<->`), its operators' and their functions'.
+    pub fn of_function(f: &crate::ext::FnRef) -> Option<Metric> {
+        Some(match f.name() {
+            "<->(vector)" | "l2_distance" => Metric::L2,
+            "cosine_distance" => Metric::Cosine,
+            "negative_inner_product" => Metric::NegInner,
+            "l1_distance" => Metric::L1,
+            _ => return None,
+        })
+    }
+
     /// Between two values, checked to be of one dimension.
     pub fn of(self, a: &Value, b: &Value) -> Result<f64> {
         same_dims(a, b)?;

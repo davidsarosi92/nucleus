@@ -277,6 +277,28 @@ pub enum Access {
         /// Upper bound on the next column.
         upper: Bound<Expr>,
     },
+    /// The rows nearest a value by the distance of an index method's
+    /// (`ORDER BY col <-> q LIMIT k`, PLAN.md §M14.12 V4b): at least
+    /// `count` of them that pass the scan's filter when the index can
+    /// find them, else every row — the sort and the limit above stay.
+    Nearest {
+        /// `table.indexes[index]`.
+        index: usize,
+        /// The value nearness is to (read once per scan).
+        query: Expr,
+        /// How many: the limit and the offset.
+        count: Expr,
+    },
+}
+
+impl Access {
+    /// The secondary index the path reads, if any.
+    pub fn secondary(&self) -> Option<usize> {
+        match self {
+            Access::Full | Access::Key { index: None, .. } => None,
+            Access::Key { index: Some(i), .. } | Access::Nearest { index: i, .. } => Some(*i),
+        }
+    }
 }
 
 /// An aggregate call.
@@ -588,6 +610,21 @@ impl Plan {
                             conds.join(" AND ")
                         )
                     }
+                    Access::Nearest {
+                        index,
+                        query,
+                        count,
+                    } => {
+                        let ix = &table.indexes[*index];
+                        format!(
+                            "Index Scan using {} on {} ({} nearest {} to {})",
+                            ix.name,
+                            table.name,
+                            show(count),
+                            table.columns[ix.columns[0]].name,
+                            show(query)
+                        )
+                    }
                 };
                 if let Some(f) = filter {
                     let _ = write!(s, " filter: {}", show(f));
@@ -870,6 +907,10 @@ impl Plan {
                         }
                     }
                 }
+                if let Access::Nearest { query, count, .. } = access {
+                    f(query);
+                    f(count);
+                }
                 if let Some(e) = filter {
                     f(e);
                 }
@@ -967,6 +1008,10 @@ impl Plan {
                             f(e);
                         }
                     }
+                }
+                if let Access::Nearest { query, count, .. } = access {
+                    f(query);
+                    f(count);
                 }
                 if let Some(e) = filter {
                     f(e);

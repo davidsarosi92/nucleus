@@ -67,9 +67,13 @@ fn build_node<'a>(
         } => {
             // Only the columns the plan reads (`prune`).
             let wanted = ctx.needed.get(&(plan as *const Plan as usize));
-            let rows = scan_some(table, access, ctx, outer, wanted.map(Vec::as_slice))?;
             // The hash joins' key filters first, as a pipeline has them.
             let keys = crate::keyfilter::of_scan(ctx, plan);
+            if let Some(rows) = nearest(table, access, filter.as_ref(), &keys, wanted, ctx, outer)?
+            {
+                return Ok(rows);
+            }
+            let rows = scan_some(table, access, ctx, outer, wanted.map(Vec::as_slice))?;
             let rows: Box<dyn Iterator<Item = Result<(Vec<u8>, Row)>>> = if keys.is_empty() {
                 Box::new(rows)
             } else {
@@ -715,6 +719,57 @@ pub(crate) fn key_range(
         Bound::Excluded(b) => bound_key(b)?.or(base_end),
     };
     Ok(Some((start, end, *index)))
+}
+
+/// The rows of a scan through [`Access::Nearest`] that pass its filter and
+/// key filters, as the index method finds them; `None` (the caller reads
+/// every row) for any other access path, or where the index cannot tell
+/// them: a query or a count it does not take, or fewer rows than asked
+/// for found.
+fn nearest<'a>(
+    table: &Table,
+    access: &Access,
+    filter: Option<&Expr>,
+    keys: &[(usize, std::sync::Arc<crate::keyfilter::KeyFilter>)],
+    wanted: Option<&Vec<bool>>,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Option<Rows<'a>>> {
+    let Access::Nearest {
+        index,
+        query,
+        count,
+    } = access
+    else {
+        return Ok(None);
+    };
+    let e = env(&[], ctx, outer);
+    let Value::Int(k) = count.eval(&e)? else {
+        return Ok(None);
+    };
+    let Ok(k) = usize::try_from(k) else {
+        return Ok(None);
+    };
+    if k == 0 {
+        return Ok(Some(Box::new(std::iter::empty())));
+    }
+    let q = query.eval(&e)?;
+    let mut keep = |row: &Row| -> Result<bool> {
+        if !crate::keyfilter::passes(keys, row) {
+            return Ok(false);
+        }
+        filter.map_or(Ok(true), |f| f.holds(&env(row, ctx, outer)))
+    };
+    let found = crate::hnsw::nearest_rows(
+        ctx.txn,
+        table,
+        *index,
+        &q,
+        k,
+        wanted.map(Vec::as_slice),
+        &mut keep,
+    )?;
+    Ok(found.map(|rows| -> Rows<'a> { Box::new(rows.into_iter().map(|(_, row)| Ok(row))) }))
 }
 
 /// A table's rows through an access path, with each row's primary key.
@@ -1503,6 +1558,8 @@ fn parallel_lookups<'a>(
                         };
                         prefix.iter().all(safe) && bound(lower) && bound(upper)
                     }
+                    // An index method's search is not cut into morsels.
+                    Access::Nearest { .. } => false,
                 }
         }
         _ => false,

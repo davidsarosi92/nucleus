@@ -53,10 +53,14 @@ pgvector's exact search (`docs/benchmarks.md`) —, a native float
 array in every driver (in Python an `(n, d)` numpy array or Arrow
 `fixed_size_list`), pgvector's own clients over the PostgreSQL
 protocol, and estimates for a distance bound — or any condition the
-statistics cannot estimate — counted on rows `ANALYZE` keeps; the HNSW
-index's storage chosen by measuring three models on the KV (`bench/ann/`:
-at pgvector's recall 3.5× its searches a second, 3× its inserts; built
-into the engine next); a hash join whose right side turns out
+statistics cannot estimate — counted on rows `ANALYZE` keeps; an HNSW
+index (`CREATE INDEX … USING hnsw (v vector_cosine_ops)`, pgvector's
+operator classes and options) whose storage was chosen by measuring
+three models on the KV (`bench/ann/`: at pgvector's recall 3.5× its
+searches a second, 3× its inserts), kept by every write without
+conflicts and searched by `ORDER BY v <=> $1 LIMIT k` where that costs
+less — filters included, the search widened until `k` rows pass, every
+row read where they cannot; a hash join whose right side turns out
 smaller than estimated looks its left side up instead (an adaptive
 join).  Statistics have begun (§M14.27): sums of doubles kept exactly
 and rounded once, so a parallel `sum` gives the same bits every run, and

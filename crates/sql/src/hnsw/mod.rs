@@ -134,11 +134,22 @@ impl Opened {
     /// The row of primary key `pk` (only the indexed column read), if the
     /// table has it.
     fn row(&self, txn: &dyn KvTxn, t: &Table, pk: &[u8]) -> Result<Option<Row>> {
-        let mut key = t.index_prefix(0);
-        key.extend_from_slice(pk);
         let mut wanted = vec![false; t.columns.len()];
         wanted[self.column] = true;
-        crate::storage::of(t)?.get(txn, t, &key, Some(&wanted), &mut Labels::default())
+        self.row_with(txn, t, pk, &wanted)
+    }
+
+    /// The row of primary key `pk`, the columns `wanted` marks read.
+    fn row_with(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        pk: &[u8],
+        wanted: &[bool],
+    ) -> Result<Option<Row>> {
+        let mut key = t.index_prefix(0);
+        key.extend_from_slice(pk);
+        crate::storage::of(t)?.get(txn, t, &key, Some(wanted), &mut Labels::default())
     }
 }
 
@@ -289,13 +300,13 @@ impl IndexMethod for Hnsw {
     }
 }
 
+/// `ef_search` when it is not set: pgvector's `hnsw.ef_search`.
+pub const EF_SEARCH: usize = 40;
+
 /// The rows of `t` nearest `q` by index `i`'s distance, as `txn` sees
 /// them: up to `k`, each the row's primary key bytes, the row (its
-/// indexed column read) and its distance from `q`, nearest first.  What
-/// the graph found is checked against the rows (a row gone, or no longer
-/// near, passed over; a row found twice, once); with fewer than `k` left
-/// the graph is asked again with `ef` doubled — pgvector 0.8's iterative
-/// scans — up to `ef_most` (`k` or more: what the index can give).
+/// indexed column read) and its distance from `q`, nearest first — those
+/// [`search`] finds with `ef`, at most `ef_most`, every row passing.
 pub fn nearest(
     txn: &dyn KvTxn,
     t: &Table,
@@ -305,9 +316,51 @@ pub fn nearest(
     ef: usize,
     ef_most: usize,
 ) -> Result<Vec<(Vec<u8>, Row, f64)>> {
+    let mut wanted = vec![false; t.columns.len()];
+    wanted[t.indexes[i].columns[0]] = true;
+    let mut found = search(txn, t, i, q, k, ef, ef_most, &wanted, &mut |_| Ok(true))?;
+    found.rows.truncate(k);
+    Ok(found.rows)
+}
+
+/// What [`search`] found.
+pub struct Found {
+    /// The rows that passed: each its primary key bytes, the row and its
+    /// distance from the query, nearest first.
+    pub rows: Vec<(Vec<u8>, Row, f64)>,
+    /// Whether the index was searched through: every row it holds was
+    /// looked at (`rows` are then every row that passed, of those the
+    /// index holds).
+    pub all: bool,
+}
+
+/// The rows of `t` nearest `q` by index `i`'s distance that `keep`
+/// passes, as `txn` sees them, the columns `wanted` marks read (the
+/// indexed one too).  What the graph found is checked against the rows (a
+/// row gone, or no longer near, passed over; a row found twice, once);
+/// with fewer than `k` passing the graph is asked again with `ef` doubled
+/// — pgvector 0.8's iterative scans — up to `ef_most` (raised to `k`) or
+/// until the index has no more.  More than `k` may come back; a query the
+/// index does not hold (`NULL`; for the cosine distance a zero vector)
+/// finds nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn search(
+    txn: &dyn KvTxn,
+    t: &Table,
+    i: usize,
+    q: &Value,
+    k: usize,
+    ef: usize,
+    ef_most: usize,
+    wanted: &[bool],
+    keep: &mut dyn FnMut(&Row) -> Result<bool>,
+) -> Result<Found> {
     let o = open(txn.instance(), t, i)?;
     let Some(qs) = o.stored(q)? else {
-        return Ok(Vec::new());
+        return Ok(Found {
+            rows: Vec::new(),
+            all: false,
+        });
     };
     if qs.len() != o.index.shape.width {
         return Err(Error::data_exception(format!(
@@ -319,34 +372,117 @@ pub fn nearest(
     let r = txn
         .shared()
         .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;
+    let mut wanted = wanted.to_vec();
+    wanted[o.column] = true;
     let mut s = Scratch::default();
-    let mut ef = ef.max(k).max(1);
+    let ef_most = ef_most.max(k);
+    let mut ef = ef.max(k).clamp(1, ef_most.max(1));
     let started = std::time::Instant::now();
+    let mut seen = std::collections::HashSet::new();
+    let mut rows: Vec<(Vec<u8>, Row, f64)> = Vec::new();
     loop {
         let found = o.index.candidates(r, &qs, ef, &mut s)?;
-        let mut seen = std::collections::HashSet::new();
-        let mut hits: Vec<(Vec<u8>, Row, f64)> = Vec::new();
-        for (_, pk) in &found {
-            if !seen.insert(pk.clone()) {
+        for (_, pk) in found.near {
+            if seen.contains(&pk) {
                 continue;
             }
-            let Some(row) = o.row(txn, t, pk)? else {
+            crate::budget::charge_scan()?;
+            let Some(row) = o.row_with(txn, t, &pk, &wanted)? else {
+                seen.insert(pk);
                 continue;
             };
-            if row[o.column].is_null() {
+            if row[o.column].is_null() || !keep(&row)? {
+                seen.insert(pk);
                 continue;
             }
             let d = o.sql.of(&row[o.column], q)?;
-            hits.push((pk.clone(), row, d));
+            seen.insert(pk.clone());
+            rows.push((pk, row, d));
         }
-        hits.sort_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
-        let complete = hits.len() >= k || found.len() < ef || ef >= ef_most;
-        if complete {
-            hits.truncate(k);
+        if rows.len() >= k || found.all || ef >= ef_most {
+            rows.sort_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
             o.state.searched(started.elapsed().as_nanos() as u64);
-            return Ok(hits);
+            return Ok(Found {
+                rows,
+                all: found.all,
+            });
         }
-        ef = (ef * 2).min(ef_most.max(k));
+        ef = (ef * 2).min(ef_most);
+    }
+}
+
+/// The index method `ix` is searched by, if it is an HNSW index: the
+/// SQL distance its operator class serves, and its `m`.
+pub fn serves(ix: &IndexDef) -> Option<(SqlMetric, usize)> {
+    if ix.method.as_deref() != Some(NAME) {
+        return None;
+    }
+    let class = ix.opclasses.first()?.as_deref()?;
+    let (_, sql, _) = OPCLASSES.iter().find(|o| o.0 == class)?;
+    Some((*sql, option(ix, "m").unwrap_or(16)))
+}
+
+/// The search behind `ORDER BY col <op> q LIMIT k` ([`Access::Nearest`]
+/// (crate::plan::Access::Nearest)): at least `k` rows passing `keep`,
+/// nearest first, or `None` where the index cannot tell them — it holds
+/// fewer, or finding them would take a search as costly as reading every
+/// row: about `ef · 2m` distances against the rows' (each node's
+/// neighbours at its bottom layer), so `ef` up to the rows over `2m`.
+/// `ef` is the session's `hnsw.ef_search`.
+pub fn nearest_rows(
+    txn: &dyn KvTxn,
+    t: &Table,
+    i: usize,
+    q: &Value,
+    k: usize,
+    wanted: Option<&[bool]>,
+    keep: &mut dyn FnMut(&Row) -> Result<bool>,
+) -> Result<Option<Vec<(Vec<u8>, Row)>>> {
+    let ef = ef_search();
+    let m = option(&t.indexes[i], "m").unwrap_or(16);
+    let ef_most = (rows(txn, t, i)? / (2 * m)).max(ef);
+    let all = vec![true; t.columns.len()];
+    let found = search(txn, t, i, q, k, ef, ef_most, wanted.unwrap_or(&all), keep)?;
+    if found.rows.len() < k {
+        return Ok(None);
+    }
+    Ok(Some(
+        found
+            .rows
+            .into_iter()
+            .map(|(pk, row, _)| (pk, row))
+            .collect(),
+    ))
+}
+
+/// The rows index `i` of `t` holds as `txn` sees it — its graph's and
+/// sealed objects' (not the delta's, at most a seal's size).
+pub fn rows(txn: &dyn KvTxn, t: &Table, i: usize) -> Result<usize> {
+    let o = open(txn.instance(), t, i)?;
+    let r = txn
+        .shared()
+        .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;
+    Ok(o.index.root(r)?.rows())
+}
+
+/// The session's `hnsw.ef_search` ([`EF_SEARCH`] when not set).
+pub fn ef_search() -> usize {
+    crate::expr::setting(EF_SEARCH_SETTING)
+        .and_then(|v| v.trim().trim_matches('\'').parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(EF_SEARCH)
+}
+
+/// The setting's name.
+pub const EF_SEARCH_SETTING: &str = "hnsw.ef_search";
+
+/// Checks a value for `hnsw.ef_search`: 1 to 1000, as pgvector's.
+pub fn check_ef_search(v: &str) -> Result<()> {
+    match v.trim().trim_matches('\'').parse::<usize>() {
+        Ok(n) if (1..=1000).contains(&n) => Ok(()),
+        _ => Err(Error::invalid_parameter(format!(
+            "invalid value for parameter \"{EF_SEARCH_SETTING}\": \"{v}\" (1 to 1000)"
+        ))),
     }
 }
 

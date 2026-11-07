@@ -876,6 +876,9 @@ impl Session {
                 if name == "parallel_workers" {
                     crate::dbsettings::workers(value)?;
                 }
+                if name == crate::hnsw::EF_SEARCH_SETTING {
+                    crate::hnsw::check_ef_search(value)?;
+                }
                 if name == "default_transaction_isolation" || name == "transaction_isolation" {
                     self.default_isolation = match value.to_ascii_lowercase().trim_matches('\'') {
                         "serializable" => IsolationLevel::Serializable,

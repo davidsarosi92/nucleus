@@ -309,9 +309,28 @@ impl Root {
     pub fn sealed_rows(&self) -> u64 {
         self.sealed.iter().map(|s| u64::from(s.1)).sum()
     }
+
+    /// The rows the graph and the sealed objects hold (the graph's dead
+    /// nodes too; not the delta's).
+    pub fn rows(&self) -> usize {
+        self.graph.nodes as usize + self.sealed_rows() as usize
+    }
 }
 
 // --------------------------------------------------------------- objects
+
+/// What [`Index::candidates`] found.
+pub struct Candidates {
+    /// Primary keys with the graph's distance from the query, nearest
+    /// first.
+    pub near: Vec<(f32, Vec<u8>)>,
+    /// Whether they are all the rows the index holds (fewer than asked
+    /// for were there).
+    pub all: bool,
+    /// The rows the index holds: the graph's nodes (dead ones too), the
+    /// sealed rows and the delta's.
+    pub held: usize,
+}
 
 /// A graph's dead nodes: sorted, and as bits.
 pub(super) struct Dead {
@@ -1504,13 +1523,16 @@ impl Index {
         q: &[u8],
         ef: usize,
         s: &mut Scratch,
-    ) -> Result<Vec<(f32, Vec<u8>)>> {
+    ) -> Result<Candidates> {
         let root = self.root_in(txn)?;
         let metric = self.shape.params.metric;
         let mut out: Vec<(f32, Vec<u8>)> = Vec::new();
+        let mut held = root.graph.nodes as usize;
+        let mut all = true;
         if root.graph.entry.is_some() {
             let view = View::open(self.shape, &self.keys, txn, &root)?;
             let found = graph::search(&view, q, ef, ef, s);
+            all = found.len() < ef;
             for Near { d, n } in found {
                 if view.is_dead(n) {
                     continue;
@@ -1524,7 +1546,9 @@ impl Index {
         // The sealed objects from memory, the delta from the KV: the
         // nearest `ef` of them.
         let mut near: std::collections::BinaryHeap<(OrdF32, Vec<u8>)> = Default::default();
+        let mut others = 0;
         let mut push = |d: f32, pk: &[u8]| {
+            others += 1;
             if near.len() < ef {
                 near.push((OrdF32(d), pk.to_vec()));
             } else if near.peek().is_some_and(|top| OrdF32(d) < top.0) {
@@ -1545,9 +1569,15 @@ impl Index {
                 push(metric.distance(q, &v), self.keys.delta_pk(&k));
             }
         }
+        all &= others <= ef;
+        held += others;
         out.extend(near.into_iter().map(|(d, pk)| (d.0, pk)));
         out.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-        Ok(out)
+        Ok(Candidates {
+            near: out,
+            all,
+            held,
+        })
     }
 
     /// What the index holds as `txn` sees it.

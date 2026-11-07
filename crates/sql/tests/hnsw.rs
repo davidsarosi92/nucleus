@@ -2,7 +2,7 @@
 //! rows, kept on inserts, updates and deletes (a delta, sealed and folded
 //! by the upkeep), searched — its answers held to the exact search's —
 //! through rollbacks, the upkeep's consolidation of deleted rows, and the
-//! integrity check.
+//! integrity check; and through the planner, `ORDER BY col <op> q LIMIT k`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -104,7 +104,9 @@ fn mean_recall(
     for q in queries {
         let exact = floats(
             s,
-            &format!("SELECT v {op} '{q}' FROM items WHERE v IS NOT NULL ORDER BY 1 LIMIT 10"),
+            &format!(
+                "SELECT (v {op} '{q}') + 0 FROM items WHERE v IS NOT NULL ORDER BY 1 LIMIT 10"
+            ),
         );
         let found = nearest(kv, index, q, 10, ef);
         assert!(
@@ -160,7 +162,9 @@ fn hnsw_answers_as_the_exact_search_through_writes_and_upkeep() {
     let origin = "[0,0,0,0,0,0,0,0]";
     let exact = floats(
         &mut s,
-        &format!("SELECT v <-> '{origin}' FROM items WHERE v IS NOT NULL ORDER BY 1 LIMIT 10"),
+        &format!(
+            "SELECT (v <-> '{origin}') + 0 FROM items WHERE v IS NOT NULL ORDER BY 1 LIMIT 10"
+        ),
     );
     assert_eq!(nearest(&kv, "items_v", origin, 10, 40).len(), 10);
     assert!(recall(&nearest(&kv, "items_v", origin, 10, 40), &exact) > 0.8);
@@ -258,7 +262,7 @@ fn hnsw_operator_classes_answer_their_distances() {
             let exact = floats(
                 &mut s,
                 &format!(
-                    "SELECT v {op} '{q}' FROM items WHERE v IS NOT NULL{exact_filter} ORDER BY 1 LIMIT 10"
+                    "SELECT (v {op} '{q}') + 0 FROM items WHERE v IS NOT NULL{exact_filter} ORDER BY 1 LIMIT 10"
                 ),
             );
             sum += recall(&nearest(&kv, &name, q, 10, 64), &exact);
@@ -348,5 +352,202 @@ fn hnsw_upkeep_runs_after_commits() {
     let (nodes, dead, sealed, delta) = status(&kv, "pts_v");
     assert!(nodes >= 8000 && dead == 0, "{nodes} nodes, {dead} dead");
     assert_eq!(u64::from(nodes) + sealed + delta as u64, 12_000);
+    assert_eq!(problems(&kv, &s), Vec::<String>::new());
+}
+
+fn rows(s: &mut Session, sql: &str) -> Vec<Vec<String>> {
+    match s
+        .execute(sql)
+        .unwrap_or_else(|e| panic!("{sql}: {e:?}"))
+        .pop()
+    {
+        Some(Output::Rows { rows, .. }) => rows
+            .iter()
+            .map(|r| r.iter().map(|v| v.render()).collect())
+            .collect(),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn plan(s: &mut Session, sql: &str) -> String {
+    rows(s, &format!("EXPLAIN {sql}"))
+        .into_iter()
+        .map(|r| r.join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn hnsw_serves_order_by_distance_limit() {
+    let kv = db(13);
+    let mut s = Session::new(kv.clone());
+    let mut g = Lcg(3);
+    let dims = 8;
+    s.execute(&format!(
+        "CREATE TABLE items (id INT PRIMARY KEY, v vector({dims}), tag TEXT)"
+    ))
+    .unwrap();
+    let r: Vec<String> = (0..3000)
+        .map(|i| format!("({i}, '{}', 't{}')", g.vector(dims), i % 7))
+        .collect();
+    s.execute(&format!("INSERT INTO items VALUES {}", r.join(", ")))
+        .unwrap();
+    s.execute("CREATE INDEX items_v ON items USING hnsw (v)")
+        .unwrap();
+    let queries: Vec<String> = (0..20).map(|_| g.vector(dims)).collect();
+    let q = &queries[0];
+    let searched = |s: &mut Session, sql: &str| plan(s, sql).contains("nearest v to");
+
+    // Without statistics: the rows the index holds.
+    let sql = format!("SELECT id FROM items ORDER BY v <-> '{q}' LIMIT 10");
+    assert!(
+        plan(&mut s, &sql).contains("Index Scan using items_v on items (10 nearest v to"),
+        "{}",
+        plan(&mut s, &sql)
+    );
+    // Another distance than the operator class's; the distance not the
+    // first key, or descending; an expression of it: read and sorted.
+    for sql in [
+        format!("SELECT id FROM items ORDER BY v <=> '{q}' LIMIT 10"),
+        format!("SELECT id FROM items ORDER BY tag, v <-> '{q}' LIMIT 10"),
+        format!("SELECT id FROM items ORDER BY v <-> '{q}' DESC LIMIT 10"),
+        format!("SELECT id FROM items ORDER BY (v <-> '{q}') + 0 LIMIT 10"),
+        "SELECT id FROM items ORDER BY v <-> v LIMIT 10".to_string(),
+        format!("SELECT id FROM items ORDER BY v <-> '{q}'"),
+    ] {
+        assert!(!searched(&mut s, &sql), "{sql}");
+    }
+    // Fewer rows pass than asked for: every row is read.
+    let sql = format!("SELECT id FROM items WHERE id % 1000 = 0 ORDER BY v <-> '{q}' LIMIT 5");
+    assert!(searched(&mut s, &sql), "{sql}");
+    let mut ids = rows(&mut s, &sql);
+    ids.sort();
+    assert_eq!(ids, [["0"], ["1000"], ["2000"]]);
+    // A key range the filter chose stays without statistics.
+    let sql = format!("SELECT id FROM items WHERE id < 20 ORDER BY v <-> '{q}' LIMIT 5");
+    assert!(!searched(&mut s, &sql), "{sql}");
+
+    // The answers: the exact search's, nearly; with ef_search at its
+    // most, the same distances.
+    let distances = |s: &mut Session, filter: &str, k: usize, exact: bool| -> Vec<Vec<f64>> {
+        let d = if exact {
+            "(v <-> '{q}') + 0"
+        } else {
+            "v <-> '{q}'"
+        };
+        queries
+            .iter()
+            .map(|q| {
+                let d = d.replace("{q}", q);
+                floats(
+                    s,
+                    &format!("SELECT {d} AS d FROM items {filter} ORDER BY d LIMIT {k}"),
+                )
+            })
+            .collect()
+    };
+    let mean = |found: &[Vec<f64>], exact: &[Vec<f64>]| {
+        found
+            .iter()
+            .zip(exact)
+            .map(|(f, e)| recall(f, e))
+            .sum::<f64>()
+            / found.len() as f64
+    };
+    let exact = distances(&mut s, "", 10, true);
+    let found = distances(&mut s, "", 10, false);
+    assert!(found.iter().all(|f| f.len() == 10));
+    assert!(
+        mean(&found, &exact) > 0.9,
+        "recall {}",
+        mean(&found, &exact)
+    );
+    s.execute("SET hnsw.ef_search = 1000").unwrap();
+    for (f, e) in distances(&mut s, "", 10, false).iter().zip(&exact) {
+        assert_eq!(f.len(), e.len());
+        assert!(
+            f.iter().zip(e).all(|(a, b)| (a - b).abs() < 1e-9),
+            "{f:?} {e:?}"
+        );
+    }
+    s.execute("RESET hnsw.ef_search").unwrap();
+    let e = s.execute("SET hnsw.ef_search = 0").unwrap_err();
+    assert_eq!(e.code, "22023");
+
+    // With statistics, a filter: the index searched until k rows pass.
+    s.execute("ANALYZE").unwrap();
+    let filter = "WHERE tag = 't3'";
+    let sql = format!("SELECT id FROM items {filter} ORDER BY v <-> '{q}' LIMIT 10");
+    assert!(searched(&mut s, &sql), "{}", plan(&mut s, &sql));
+    let exact = distances(&mut s, filter, 10, true);
+    let found = distances(&mut s, filter, 10, false);
+    assert!(found.iter().all(|f| f.len() == 10));
+    assert!(
+        mean(&found, &exact) > 0.9,
+        "filtered: recall {}",
+        mean(&found, &exact)
+    );
+    let tags = rows(
+        &mut s,
+        &format!("SELECT tag FROM items {filter} ORDER BY v <-> '{q}' LIMIT 10"),
+    );
+    assert!(tags.iter().all(|t| t[0] == "t3"), "{tags:?}");
+    // A narrow key range: read and sorted.
+    let sql = format!("SELECT id FROM items WHERE id < 20 ORDER BY v <-> '{q}' LIMIT 5");
+    assert!(!searched(&mut s, &sql), "{sql}");
+    // The offset counts: the rows past it are the first eight's last.
+    let sql = format!("SELECT id FROM items {filter} ORDER BY v <-> '{q}' LIMIT 5 OFFSET 3");
+    assert!(
+        plan(&mut s, &sql).contains("(5 + 3) nearest"),
+        "{}",
+        plan(&mut s, &sql)
+    );
+    let first = rows(
+        &mut s,
+        &format!("SELECT id FROM items {filter} ORDER BY v <-> '{q}' LIMIT 8"),
+    );
+    assert_eq!(rows(&mut s, &sql), first[3..]);
+    // An ef_search as costly as reading every row: read and sorted.
+    s.execute("SET hnsw.ef_search = 1000").unwrap();
+    assert!(!searched(&mut s, &sql), "{sql}");
+    s.execute("RESET hnsw.ef_search").unwrap();
+
+    // Fewer rows than asked for, one without a vector: it comes last.
+    s.execute("CREATE TABLE few (id INT PRIMARY KEY, v vector(2))")
+        .unwrap();
+    s.execute("CREATE INDEX few_v ON few USING hnsw (v)")
+        .unwrap();
+    s.execute("INSERT INTO few VALUES (1, '[0,0]'), (2, '[1,1]'), (3, NULL), (4, '[2,2]')")
+        .unwrap();
+    let ids = rows(&mut s, "SELECT id FROM few ORDER BY v <-> '[0,0]' LIMIT 10");
+    assert_eq!(ids, [["1"], ["2"], ["4"], ["3"]]);
+
+    // The enclosing row's value: each row's nearest is itself.
+    let sql = "SELECT a.id, (SELECT b.id FROM items b ORDER BY b.v <-> a.v LIMIT 1) \
+               FROM items a WHERE a.id < 30 ORDER BY a.id";
+    assert!(
+        plan(&mut s, sql).contains("1 nearest v to"),
+        "{}",
+        plan(&mut s, sql)
+    );
+    for r in rows(&mut s, sql) {
+        assert_eq!(r[0], r[1]);
+    }
+
+    // Writes: a deleted row is not found, a changed one where it is now.
+    s.execute(&format!("UPDATE items SET v = '{q}' WHERE id = 77"))
+        .unwrap();
+    s.execute("DELETE FROM items WHERE id % 7 = 3").unwrap();
+    let near = rows(
+        &mut s,
+        &format!("SELECT id, tag FROM items ORDER BY v <-> '{q}' LIMIT 10"),
+    );
+    assert_eq!(near[0][0], "77");
+    assert!(near.iter().all(|r| r[1] != "t3"), "{near:?}");
+    let ids = rows(
+        &mut s,
+        &format!("SELECT id FROM items {filter} ORDER BY v <-> '{q}' LIMIT 10"),
+    );
+    assert!(ids.is_empty(), "{ids:?}");
     assert_eq!(problems(&kv, &s), Vec::<String>::new());
 }

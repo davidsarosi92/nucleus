@@ -258,3 +258,48 @@ CREATE INDEX ON items USING hnsw (v vector_hamming_ops)
 
 statement ok
 DROP INDEX items_v_hnsw
+
+# ORDER BY a distance LIMIT k: the index's nearest rows, then sorted.
+statement ok
+CREATE TABLE pts (id INT PRIMARY KEY, v vector(2))
+
+statement ok
+INSERT INTO pts SELECT i, ('[' || (i % 37) || ',' || (i / 37) || ']')::vector FROM generate_series(1, 2000) AS g(i)
+
+statement ok
+CREATE INDEX pts_v ON pts USING hnsw (v)
+
+query T
+EXPLAIN SELECT id FROM pts ORDER BY v <-> '[3,4]' LIMIT 1
+----
+Project: #0
+  Limit: 1
+    Sort: #1
+      Project: #0, <->(vector)(#1, [3,4])
+        Index Scan using pts_v on pts (1 nearest v to [3,4]) (rows=1)
+
+query I
+SELECT id FROM pts ORDER BY v <-> '[3,4]' LIMIT 1
+----
+151
+
+query T
+EXPLAIN SELECT id FROM pts ORDER BY v <=> '[3,4]' LIMIT 1
+----
+Project: #0
+  Limit: 1
+    Sort: #1
+      Project: #0, cosine_distance(#1, [3,4])
+        Seq Scan on pts
+
+statement ok
+SET hnsw.ef_search = 100
+
+statement error 22023
+SET hnsw.ef_search = 1001
+
+statement ok
+RESET hnsw.ef_search
+
+statement ok
+DROP TABLE pts

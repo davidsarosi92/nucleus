@@ -172,8 +172,8 @@ fn uses(plan: &Plan, table: &str, id: u32) -> bool {
     let mut all = Vec::new();
     nodes(plan, &mut all);
     all.iter().any(|p| {
-        matches!(p, Plan::Scan { table: t, access: Access::Key { index: Some(i), .. }, .. }
-            if t.name == table && t.indexes[*i].id == id)
+        matches!(p, Plan::Scan { table: t, access, .. }
+            if t.name == table && access.secondary().is_some_and(|i| t.indexes[i].id == id))
     })
 }
 

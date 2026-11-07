@@ -39,7 +39,132 @@ pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let plan = sink(reorder(plan, &stats), &stats);
     let plan = lookups(crate::eager::eager(plan, &stats), &stats);
     let plan = crate::narrow::narrow(sorted(crate::distinct::two_level(plan)));
-    adaptive(same_rows(plan), &stats)
+    nearest(adaptive(same_rows(plan), &stats), &stats)
+}
+
+/// `ORDER BY col <op> q LIMIT k` over a table with an index method's
+/// index that ranks rows by `<op>` (an HNSW index whose operator class is
+/// that distance's) reads the index's nearest rows
+/// ([`Access::Nearest`]) where that costs less than the scan it has:
+/// about `ef · (3 + 2m / 10)` against the rows the scan reads — `ef` the
+/// session's `hnsw.ef_search`, or what the filter's selectivity takes to
+/// leave `k` rows, each found row read (3, as through an index) and its
+/// neighbours' distances computed (`2m`, each a tenth of a row's read).
+/// The sort and the limit stay: the scan gives at least `k` rows, or
+/// every row where the index cannot find them.  A table not analyzed has
+/// the rows its index holds.  `q` must be the same for
+/// every row (a constant, a parameter, an enclosing row's value).
+fn nearest(plan: Plan, st: &Stats) -> Plan {
+    let mut plan = map_children(plan, &|c| nearest(c, st));
+    let Plan::Limit {
+        input,
+        limit: Some(limit),
+        offset,
+    } = &mut plan
+    else {
+        return plan;
+    };
+    let Plan::Sort {
+        input: sorted,
+        keys,
+    } = &mut **input
+    else {
+        return plan;
+    };
+    let Some(key) = keys.first().filter(|k| !k.desc && !k.nulls_first) else {
+        return plan;
+    };
+    let (exprs, scan) = match &mut **sorted {
+        Plan::Project { input, exprs } => (Some(&*exprs), &mut **input),
+        other => (None, other),
+    };
+    let Plan::Scan {
+        table,
+        access,
+        filter,
+        estimate,
+    } = scan
+    else {
+        return plan;
+    };
+    let ranked = match (&key.expr, exprs) {
+        (Expr::Column(j), Some(exprs)) => exprs.get(*j),
+        (e, None) => Some(e),
+        _ => None,
+    };
+    let Some(Expr::Call(f, args)) = ranked else {
+        return plan;
+    };
+    let Some(metric) = crate::vectors::Metric::of_function(f) else {
+        return plan;
+    };
+    let fixed = |e: &Expr| {
+        let mut ok = !e.has_subquery();
+        e.walk(&mut |x| match x {
+            Expr::Column(_) => ok = false,
+            Expr::Call(f, _) if f.volatility() == crate::ext::Volatility::Volatile => ok = false,
+            _ => {}
+        });
+        ok
+    };
+    let (column, query) = match args.as_slice() {
+        [Expr::Column(c), q] | [q, Expr::Column(c)] if fixed(q) => (*c, q.clone()),
+        _ => return plan,
+    };
+    let Some((index, m)) = table.indexes.iter().enumerate().find_map(|(i, ix)| {
+        let (serves, m) = crate::hnsw::serves(ix)?;
+        (ix.columns == [column] && serves == metric).then_some((i, m))
+    }) else {
+        return plan;
+    };
+    // The costs, in rows read; a table not analyzed has the rows its
+    // index holds, and keeps a key range its filter chose (as
+    // `choose_access` prefers one without statistics).
+    let rows = match st.of(table) {
+        Some(_) => st.rows(table),
+        None if matches!(access, Access::Key { .. }) => return plan,
+        None => match crate::hnsw::rows(st.txn(), table, index) {
+            Ok(n) => n as f64,
+            Err(_) => return plan,
+        },
+    };
+    let sel = filter
+        .as_ref()
+        .map_or(1.0, |f| st.selectivity(table, f))
+        .max(1.0 / rows.max(1.0));
+    let k = match (&*limit, offset.as_ref()) {
+        (Expr::Literal(crate::Value::Int(n)), None) => *n as f64,
+        (Expr::Literal(crate::Value::Int(n)), Some(Expr::Literal(crate::Value::Int(o)))) => {
+            (*n + *o) as f64
+        }
+        _ => 10.0,
+    };
+    let ef = (crate::hnsw::ef_search() as f64).max(k / sel);
+    // Past the rows over 2m the search gives up and reads every row.
+    if ef > rows / (2 * m) as f64 {
+        return plan;
+    }
+    let searched = ef * (3.0 + 2.0 * m as f64 / 10.0);
+    let scanned = match access {
+        Access::Full => rows,
+        Access::Key { index: None, .. } => estimate.unwrap_or(rows),
+        Access::Key { .. } => 3.0 * estimate.unwrap_or(rows),
+        Access::Nearest { .. } => return plan,
+    };
+    if searched >= scanned {
+        return plan;
+    }
+    let count = match offset {
+        None => limit.clone(),
+        Some(o) => Expr::Binary(BinaryOp::Add, Box::new(limit.clone()), Box::new(o.clone())),
+    };
+    *access = Access::Nearest {
+        index,
+        query,
+        count,
+    };
+    *estimate = Some(estimate.unwrap_or(rows).min(k));
+    plan
 }
 
 /// Inner hash joins whose left side is a table an index of the keys could

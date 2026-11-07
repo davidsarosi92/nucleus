@@ -2201,7 +2201,7 @@ fn chain<'p>(
             Some((scan, steps))
         }
         Plan::Scan { access, filter, .. } => {
-            if matches!(access, Access::Key { index: Some(_), .. }) {
+            if access.secondary().is_some() {
                 return None;
             }
             let steps = filter.iter().map(|f| (Step::Filter(f), plan)).collect();
@@ -5319,7 +5319,7 @@ fn probing(kind: JoinType) -> bool {
 /// their left.
 fn shaped(plan: &Plan) -> bool {
     match plan {
-        Plan::Scan { access, .. } => !matches!(access, Access::Key { index: Some(_), .. }),
+        Plan::Scan { access, .. } => access.secondary().is_none(),
         Plan::Filter { input, .. } | Plan::Secure { input, .. } | Plan::Project { input, .. } => {
             shaped(input)
         }

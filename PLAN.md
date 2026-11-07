@@ -4511,6 +4511,47 @@ Measured against 5d77d7b (`phases.py`, alternating, 2 rounds): the load
 5,731 / 5,622 ms against 5,667 / 5,619 — no change (a commit asks the
 methods whether an index waits: one atomic load).
 
+*Done — step 3* (2026-11-07): `ORDER BY col <op> q LIMIT k [OFFSET o]`
+(the operator or its function, either way round; `q` the same for every
+row — a constant, a parameter, an enclosing row's value) over a table
+with an HNSW index on `col` whose operator class is that distance's is
+a scan through `Access::Nearest` — the optimizer's last pass, where it
+costs less than the scan the table had: about `ef · (3 + 2m / 10)`
+rows' reads (each candidate's row read as through an index, its
+neighbours' distances computed), `ef` the session's `hnsw.ef_search`
+(40, pgvector's default and bounds) or what the filter's selectivity
+takes to leave `k + o` rows, against the rows the scan reads; never
+where `ef` passes the rows over `2m` — a search with that `ef` computes
+about as many distances as reading every row does.  A table not
+analyzed has the rows its index holds, and keeps a key range its filter
+chose.  The executor gives the scan's filter (and the hash joins' key
+filters) to the search, which widens `ef` (doubling) until `k + o` rows
+pass or the index has no more; the sort and the limit above stay.  One
+change from pgvector: where fewer than `k + o` rows pass — the index
+holds fewer (a `NULL` vector is not in it and sorts last), or the filter
+was narrower than estimated and `ef` reached its most — the scan reads
+every row instead, so a query asking for `k` rows gets `k` when `k`
+match (this milestone's *done when*).  pgvector 0.8's iterative scans
+stop at `hnsw.max_scan_tuples` (20,000) and return fewer; its planner
+(`hnswcostestimate`) costs the index from the pages a search touches —
+taken: the iterative widening; not taken: returning fewer rows than
+exist.  Qdrant and Weaviate also turn to a full scan under a filter's
+cardinality (`full_scan_threshold`, `flatSearchCutoff`) — here that
+point is where the two costs meet rather than a fixed count, and it is
+decided twice: by the estimate when planning, by the rows found when
+running.  Tests: the plans chosen and not (another distance, the
+distance not the first key or descending, an expression of it, no
+limit, a narrow key range, an `ef_search` as costly as reading every
+row), recall against the exact search, `hnsw.ef_search` at 1,000 equal
+to it, a filter with statistics, an offset, the fallback to every row
+(and a `NULL` vector last), an enclosing row's vector (`LATERAL`-style
+subquery: each row's nearest is itself), deletes and updates;
+`45_vector.slt` the `EXPLAIN`.  Measured against b90a048 (`phases.py`,
+alternating, 2 rounds): the load 22.40 / 22.43 s before, 23.10 / 21.79 s
+after; the queries' best 5,719 / 5,716 ms against 5,872 / 5,559 — no
+change past the noise (one more pass over the plan, which looks for a
+`Limit` over a `Sort`).
+
 *Measured on the way* (2026-11-06): `docs/benchmarks.md`'s TPC-H table
 re-run on a quiet machine (`fseventsd`, at 99 % and 11 GB after 137 days,
 restarted) — 0.66× row, 0.24× column.  Its Q8 on column tables still
