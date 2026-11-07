@@ -55,6 +55,13 @@ pub trait IndexMethod: Send + Sync {
     /// Builds index `i` of `t` over the rows `t` has (its prefix empty).
     fn build(&self, txn: &mut dyn KvTxn, reg: &Registry, t: &Table, i: usize) -> Result<()>;
 
+    /// After a commit in `kv` (any session's): the method's upkeep, if it
+    /// keeps some for then.  By default nothing.
+    fn after_commit(&self, kv: &Arc<dyn nucleus_kv::Kv>) -> Result<()> {
+        let _ = kv;
+        Ok(())
+    }
+
     /// The integrity check: index `i` of `t` against `rows` (every row of
     /// the table, primary key bytes and values); what is wrong goes to
     /// `problems`.
@@ -132,6 +139,21 @@ pub fn of(ix: &Index) -> Result<Option<Arc<dyn IndexMethod>>> {
         None => Ok(None),
         Some(m) => named(m),
     }
+}
+
+/// After a commit in `kv`: every registered method's
+/// [`IndexMethod::after_commit`].
+pub fn after_commit(kv: &Arc<dyn nucleus_kv::Kv>) -> Result<()> {
+    let methods: Vec<Arc<dyn IndexMethod>> = registry()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .cloned()
+        .collect();
+    for m in methods {
+        m.after_commit(kv)?;
+    }
+    Ok(())
 }
 
 /// The registered methods' names and the B-tree's, sorted.

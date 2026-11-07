@@ -194,6 +194,14 @@ pub trait Kv: Send + Sync {
         1
     }
 
+    /// Which open database this is, unique in the process — what state a
+    /// layer above keeps in memory for one database is keyed by (an HNSW
+    /// index's upkeep, §M14.12 V4b); 0 (the default): not told apart.
+    /// A transaction's [`KvTxn::instance`] is its database's.
+    fn instance(&self) -> u64 {
+        0
+    }
+
     /// Scratch space for work too large for memory — a sort's runs, a hash
     /// join's partitions: a file of this process's alone, gone when
     /// dropped (and when the database next opens, after a crash).  The
@@ -451,6 +459,11 @@ pub trait KvTxn: Send {
         None
     }
 
+    /// Its database's [`Kv::instance`].
+    fn instance(&self) -> u64 {
+        0
+    }
+
     /// The first entry of the range `[start, end)` (bounds as [`scan`]'s),
     /// for a reader that wants just it: by default the scan's first; an
     /// implementation may skip the read-ahead a scan does, and may answer
@@ -614,6 +627,8 @@ pub struct Database {
     /// Where scratch files go (`<dir>/scratch`), and how many were made.
     scratch_dir: PathBuf,
     scratch_made: Arc<AtomicU64>,
+    /// [`Kv::instance`]: one per open (its clones share it).
+    instance: u64,
 }
 
 impl std::fmt::Debug for Database {
@@ -663,11 +678,13 @@ impl Database {
                 let _ = fs.remove_file(&scratch_dir.join(name));
             }
         }
+        static OPENED: AtomicU64 = AtomicU64::new(0);
         Ok(Self {
             engine,
             platform,
             scratch_dir,
             scratch_made: Arc::new(AtomicU64::new(0)),
+            instance: OPENED.fetch_add(1, Ordering::Relaxed) + 1,
         })
     }
 
@@ -705,7 +722,11 @@ impl Kv for Database {
             read_only: opts.read_only,
             at: opts.at,
         })?;
-        Ok(Box::new(LocalTxn(txn)))
+        Ok(Box::new(LocalTxn(txn, self.instance)))
+    }
+
+    fn instance(&self) -> u64 {
+        self.instance
     }
 
     fn wall_clock(&self) -> SystemTime {
@@ -781,7 +802,7 @@ impl Kv for Database {
     }
 }
 
-struct LocalTxn(nucleus_txn::Transaction);
+struct LocalTxn(nucleus_txn::Transaction, u64);
 
 /// The fewest leaves a part of a split range has: about 64 × 4 KiB, a few
 /// thousand small rows — less is not worth a thread.
@@ -874,6 +895,10 @@ impl KvTxn for LocalTxn {
 
     fn shared(&self) -> Option<&dyn KvRead> {
         Some(self)
+    }
+
+    fn instance(&self) -> u64 {
+        self.1
     }
 
     fn split_points(&self, start: &[u8], end: Option<&[u8]>, parts: usize) -> Result<Vec<Vec<u8>>> {

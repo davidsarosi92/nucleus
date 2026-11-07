@@ -776,6 +776,7 @@ impl Session {
                 }
                 if let Some(txn) = block.txn {
                     txn.commit()?;
+                    self.after_commit();
                 }
                 Ok(Output::Command("COMMIT".into()))
             }
@@ -1039,7 +1040,15 @@ impl Session {
             execute(txn.as_mut(), &self.registry, stmt, params, sink)
         })?;
         txn.commit()?;
+        self.after_commit();
         Ok(Output::Command(deliver(stmt, out, sink)?))
+    }
+
+    /// After a commit: the index methods' upkeep (an HNSW index's seal
+    /// and fold), which this session pays for.  Its failure is not the
+    /// committed statement's: the next commit tries again.
+    fn after_commit(&self) {
+        let _ = crate::index_method::after_commit(&self.kv);
     }
 
     /// Whether a statement changes the catalog: always in the audit log.
@@ -1203,6 +1212,9 @@ impl Session {
                         && !matches!(&r, Err(e) if e.code == "40001")
                     {
                         self.audit_apart(record)?;
+                    }
+                    if r.is_ok() && !opts.read_only {
+                        self.after_commit();
                     }
                     return r;
                 }

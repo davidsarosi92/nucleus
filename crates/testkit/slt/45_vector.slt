@@ -233,3 +233,28 @@ UPDATE items SET v[NULL] = 1 WHERE id = 1
 
 statement error 42804
 SELECT tag[1] FROM items
+
+# HNSW indexes (PLAN.md §M14.12 V4b): pgvector's operator classes and
+# options; kept on writes.
+statement ok
+CREATE INDEX items_v_hnsw ON items USING hnsw (v vector_cosine_ops) WITH (m = 8)
+
+query TTT
+SELECT method, opclasses, options FROM nc_catalog.indexes WHERE name = 'items_v_hnsw'
+----
+hnsw {vector_cosine_ops} {m=8,ef_construction=64}
+
+statement ok
+INSERT INTO items VALUES (7, '[2,4,6]', 'd')
+
+statement ok
+DELETE FROM items WHERE id = 7
+
+statement error 22023
+CREATE INDEX ON items USING hnsw (v) WITH (ef_construction = 8)
+
+statement error 42704
+CREATE INDEX ON items USING hnsw (v vector_hamming_ops)
+
+statement ok
+DROP INDEX items_v_hnsw

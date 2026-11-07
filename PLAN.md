@@ -4483,6 +4483,34 @@ objects from memory and the rest of the delta from the KV, each row
 exactly once in any snapshot.  The price: a sealed row's vector is
 written twice (into the delta, then into the sealed object).
 
+*Done — step 2* (2026-11-07): `hnsw` — `graph` (`bench/ann`'s core, the
+distances in the SQL operator's order: squared Euclidean, cosine over
+vectors stored normalized, negated inner product, taxicab), `store`
+(model (C) with primary keys for rows: a node's page holds its row's
+key; reads that fail inside the graph's walk are noted and returned
+after it), `cache` (decoded objects for the process, 1 GiB, the least
+recently used dropped).  pgvector's operator classes and options
+(bounds included); `NULL` and, for cosine, zero vectors not indexed.
+The upkeep after a commit (`IndexMethod::after_commit`), by the
+committing session, each step in a transaction of its own: a seal past
+the seal's size, a fold past the fold's, both sized by the bench's
+economic order quantities (at most 10,000 rows) — and keyed by
+database: the process's state for an index is by `Kv::instance` (new in
+the KV contract: which open database a transaction is in), its table
+and its id; keyed by the table and index alone, two databases' indexes
+shared it, which the tests caught (two databases in one process, as a
+server has).  `hnsw::nearest` — the graph, the sealed rows, the delta;
+checked against the rows, ranked by the operator's distance, `ef`
+doubled while fewer than `k` are left — is what the planner's access
+path will call (step 3).  Tests: recall against the exact search after
+the build, with a delta, after folds, marks below 2 % and a
+consolidation past it, after a table rewrite; a snapshot from before an
+upkeep; each operator class; refusals; the upkeep after commits.
+Measured against 5d77d7b (`phases.py`, alternating, 2 rounds): the load
+23.25 / 22.53 s before, 22.55 / 22.71 s after; the queries' best
+5,731 / 5,622 ms against 5,667 / 5,619 — no change (a commit asks the
+methods whether an index waits: one atomic load).
+
 *Measured on the way* (2026-11-06): `docs/benchmarks.md`'s TPC-H table
 re-run on a quiet machine (`fseventsd`, at 99 % and 11 GB after 137 days,
 restarted) — 0.66× row, 0.24× column.  Its Q8 on column tables still

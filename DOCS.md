@@ -837,6 +837,10 @@ distributed implementation will provide (§F3).
   `random_bytes(buf)` — unpredictable bytes from the platform;
   `parallelism()` — the threads a statement may split its work across
   (default 1; the local implementation's platform's);
+  `instance()` — which open database this is, unique in the process
+  (`KvTxn::instance()` is its transaction's): what a layer above keys
+  state it keeps in memory for one database by (an HNSW index's upkeep,
+  §8.18); 0 by default (not told apart), one per `Database::open`;
   `scratch()` — scratch space for work too large for memory (a
   `Scratch`: `write_at`, `read_at`), private, gone when dropped; by
   default in memory (`MemoryScratch`), for the local implementation files
@@ -3019,6 +3023,70 @@ mirrors a column and runs writes, rollbacks, a rewrite, the integrity
 check (a stray entry found), the refusals and a drop through it;
 `06_indexes.slt` the syntax.
 
+### 8.18 HNSW indexes (`hnsw`, §M14.12 V4b)
+
+`CREATE INDEX [name] ON t USING hnsw (col [opclass]) [WITH (m = 16,
+ef_construction = 64)]` on a `vector(n)` column (one without dimensions
+`22023`; another type, or more than one column, `0A000`): the operator
+classes are pgvector's — `vector_l2_ops` (the default, `<->`),
+`vector_cosine_ops` (`<=>`), `vector_ip_ops` (`<#>`), `vector_l1_ops`
+(`<+>`) — and so are the options' bounds (`m` 2–100, `ef_construction`
+4–1000 and at least `2 · m`); the record keeps both options.  A `NULL`
+vector is not indexed, nor, for `vector_cosine_ops`, one of zero length.
+The graph is `hnsw::graph` (`bench/ann`'s core: the paper's search and
+inserts with hnswlib's heuristic, ParlayANN's batch inserts with
+NN-descent's local join, FreshDiskANN's delete consolidation, a node's
+level from a hash of it); its distances keep the SQL operator's order
+(squared Euclidean; one minus the dot product over vectors stored
+normalized for the cosine).
+
+Storage (`hnsw::store`, PLAN.md §M14.12 V4's model (C)): under the
+index's prefix, `r` the root, `o` + id the objects, `d` + primary key +
+nonce a delta row (its vector), `x` + primary key + vector hash + nonce a
+dead row.  The graph is immutable objects keyed by a hash of their
+contents: vector pages and adjacency pages of 64 nodes (decoded into
+chunks of 4,096 in memory), patches of the lists a fold changed (until
+they pass a tenth of the graph's edges: then the pages they touch are
+rewritten), a directory of the pages in parts of 256, the dead nodes;
+decoded, they are shared by every snapshot (`hnsw::cache`: up to 1 GiB,
+the least recently used dropped past it).  A write puts the row's
+vector into the delta and, for a delete or an update of the vector, a
+dead key, in the statement's transaction (an update of other columns
+writes nothing): every key is new, so writers never conflict.  The
+upkeep — each step a transaction of its own, run again on a conflict
+(with another upkeep only) — *seals*: the delta and dead keys it sees
+moved into a sealed object the root lists (an LSM's memtable flush);
+and *folds*: every sealed object's rows the table still has as they are
+inserted into the graph in batches on the machine's threads, the nodes
+of the rows updated or deleted marked dead (passed over by searches),
+and once the dead are 2 % of the graph, or a compaction is due, cut out
+(each list through a dead node rewritten from its live neighbours', the
+entry point moved off).  It runs after a commit, by the committing
+session (`index_method::after_commit`; PostgreSQL's GIN `fastupdate`
+cleans its pending list so), for each index of that database whose
+writes since passed the seal's size; the seal's and the fold's sizes are
+economic order quantities (Harris) of what the index measures as it
+runs — writes and searches a second, a fold's fixed cost (a decayed line
+fitted to folds' times against their rows), a seal's — at most 10,000
+rows, a fold's nudged a fifth either way in turn.  `hnsw::upkeep_now`
+runs it whatever the sizes (tests).
+
+`hnsw::nearest(txn, t, i, q, k, ef, ef_most)`: the graph searched with
+`ef` (its dead nodes passed over) and the sealed rows (from memory) and
+the delta (from the KV) scanned, the candidates checked against the
+table's rows in the snapshot — a row gone passed over, one found twice
+once, each ranked by its distance as the SQL operator takes it — and,
+with fewer than `k` left, asked again with `ef` doubled up to `ef_most`
+(pgvector 0.8's iterative scans).  `hnsw::status`: the nodes, dead
+nodes, patches, sealed rows and delta keys.  The integrity check reads
+the root and every object it names, checks the edges' ends, and that
+every row with an indexed vector is in the graph (live), a sealed object
+or the delta with that vector.  `crates/sql/tests/hnsw.rs`: recall
+against the exact search after the build, with a delta, after folds,
+marks and consolidations and a table rewrite; a snapshot from before an
+upkeep; each operator class; the definitions refused; the upkeep after
+commits.
+
 ### 8.14 Errors and hints (`error`, `hint`)
 
 An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
@@ -3737,6 +3805,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-07 — §M14.12 V4b step 2, HNSW as an index method:** `hnsw`
+  (`graph`, `store`, `cache`; `nearest`, `status`, `upkeep_now`),
+  registered by the built-in module; `IndexMethod::after_commit` and
+  `index_method::after_commit`, called by the session after each commit;
+  `Kv::instance` / `KvTxn::instance` (§6.1, §8.18).
 - **2026-11-07 — §M14.12 V4b step 1, index access methods:**
   `index_method` (`IndexMethod`: `define`, `write`, `build`, `check`;
   `Registry::add_index_method`); `CREATE INDEX … USING method (col
