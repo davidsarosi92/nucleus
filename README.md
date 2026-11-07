@@ -68,7 +68,8 @@ recall 1.0, pgvector's 14.5 ms at 0.987), and `PARTITION BY (tenant)`
 keeps a graph per tenant (a tenth of the rows: 0.46 ms against
 pgvector's 2.4), and quantized graphs keep `int8`, half or one-bit codes
 (`int8`: a quarter of the memory, SIFT-1M built in 29 s against 55 and
-searched faster at the same recall; `docs/benchmarks.md`); a hash join whose right side turns out
+searched faster at the same recall), and sparse vectors (`sparsevec`,
+pgvector's) are searched exactly (`docs/benchmarks.md`); a hash join whose right side turns out
 smaller than estimated looks its left side up instead (an adaptive
 join).  Statistics have begun (§M14.27): sums of doubles kept exactly
 and rounded once, so a parallel `sum` gives the same bits every run, and

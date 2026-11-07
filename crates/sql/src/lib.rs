@@ -72,6 +72,7 @@ pub mod segment;
 pub mod session;
 pub mod sessions;
 pub mod sorter;
+pub mod sparse;
 pub mod spill;
 pub mod stablehash;
 pub mod statements;

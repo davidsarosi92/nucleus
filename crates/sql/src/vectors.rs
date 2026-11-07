@@ -136,7 +136,7 @@ pub fn parse(text: &str) -> Result<Vec<f32>> {
 
 /// A component's shortest text that reads back as it: plain or with an
 /// exponent, whichever is shorter (`1`, `2.5`, `1e-7`, `3.4028235e38`).
-fn component_text(c: f32) -> String {
+pub(crate) fn component_text(c: f32) -> String {
     let plain = format!("{c}");
     let exp = format!("{c:e}");
     if exp.len() < plain.len() { exp } else { plain }
@@ -424,6 +424,22 @@ enum F {
 
 struct VectorFn(F, &'static str);
 
+/// Metric `m`'s distance function under `name`, for vectors and sparse
+/// vectors alike (an operator of either type).
+pub(crate) fn distance_function(m: Metric, name: &'static str) -> Arc<dyn ScalarFunction> {
+    Arc::new(VectorFn(F::Distance(m), name))
+}
+
+/// Whether the arguments are sparse vectors (any typed one is).
+fn sparse_args(args: &[ArgInfo]) -> bool {
+    args.iter()
+        .any(|a| a.ty == Some(crate::sparse::data_type()))
+}
+
+fn is_sparse(v: &Value) -> bool {
+    matches!(v, Value::Ext(t, _) if *t == crate::sparse::sparse_type())
+}
+
 impl ScalarFunction for VectorFn {
     fn name(&self) -> &str {
         self.1
@@ -437,8 +453,15 @@ impl ScalarFunction for VectorFn {
         }
     }
 
-    fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
-        let v = data_type();
+    fn resolve(&self, args: &[ArgInfo]) -> Result<Signature> {
+        // The distances, the norm and normalizing take sparse vectors too.
+        let v = if sparse_args(args)
+            && matches!(self.0, F::Distance(_) | F::Inner | F::Norm | F::Normalize)
+        {
+            crate::sparse::data_type()
+        } else {
+            data_type()
+        };
         Ok(match self.0 {
             F::Distance(_) | F::Inner => Signature::new(
                 vec![Arg::Untyped(v), Arg::Untyped(v)],
@@ -466,6 +489,27 @@ impl ScalarFunction for VectorFn {
     }
 
     fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        if is_sparse(&args[0]) {
+            use crate::sparse::{Sparse, distance};
+            return Ok(match self.0 {
+                F::Distance(m) => Value::Float(distance(m, &args[0], &args[1])?),
+                F::Inner => Value::Float(-distance(Metric::NegInner, &args[0], &args[1])?),
+                F::Norm => Value::Float(Sparse::of(&args[0])?.norm()),
+                F::Normalize => {
+                    let mut s = Sparse::of(&args[0])?;
+                    let norm = s.norm();
+                    if norm > 0.0 {
+                        for v in &mut s.values {
+                            *v = (f64::from(*v) / norm) as f32;
+                        }
+                        let pairs = s.at.iter().map(|&a| u64::from(a)).zip(s.values).collect();
+                        s = Sparse::checked(u64::from(s.dims), pairs)?;
+                    }
+                    s.value()
+                }
+                F::Dims | F::Subvector => return Err(Error::internal("a vector function")),
+            });
+        }
         Ok(match self.0 {
             F::Distance(m) => Value::Float(m.of(&args[0], &args[1])?),
             F::Inner => Value::Float(-Metric::NegInner.of(&args[0], &args[1])?),

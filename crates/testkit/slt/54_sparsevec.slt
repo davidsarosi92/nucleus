@@ -1,0 +1,114 @@
+# sparsevec (PLAN.md §M14.12 V6b): text forms, dimensions, casts to and
+# from vector, equality, distances, functions, exact nearest neighbours.
+# Results follow pgvector's definitions; SQLSTATEs are nucleus's.
+
+query T
+SELECT '{1:1,3:2.5}/5'::sparsevec
+----
+{1:1,3:2.5}/5
+
+query T
+SELECT '{ 3:2.5, 1:1, 2:0 }/5'::sparsevec
+----
+{1:1,3:2.5}/5
+
+query T
+SELECT '{}/3'::sparsevec
+----
+{}/3
+
+statement error 22P02
+SELECT '{1:1}'::sparsevec
+
+statement error 22023
+SELECT '{}/0'::sparsevec
+
+statement error 22000
+SELECT '{4:1}/3'::sparsevec
+
+statement error 22000
+SELECT '{0:1}/3'::sparsevec
+
+statement error 22000
+SELECT '{1:1,1:2}/3'::sparsevec
+
+statement error 22003
+SELECT '{1:NaN}/3'::sparsevec
+
+statement error 22023
+CREATE TABLE bad (v sparsevec(0))
+
+statement ok
+CREATE TABLE docs (id INT PRIMARY KEY, v sparsevec(6))
+
+statement error 22000
+INSERT INTO docs VALUES (9, '{1:1}/5')
+
+statement ok
+INSERT INTO docs VALUES (1, '{1:1,2:2,3:3}/6'), (2, '{1:4,2:6,4:3}/6'), (3, '{5:1}/6'), (4, '{}/6'), (5, NULL)
+
+query RRRR
+SELECT v <-> '{1:1,2:2,3:3}/6', v <=> '{1:1,2:2,3:3}/6', v <#> '{1:1,2:2,3:3}/6', v <+> '{1:1,2:2,3:3}/6' FROM docs WHERE id = 2
+----
+6.557 0.452 -16.000 13.000
+
+query RRRRR
+SELECT l2_distance(v, '{1:1,2:2,3:3}/6'), cosine_distance(v, '{1:1,2:2,3:3}/6'), inner_product(v, '{1:1,2:2,3:3}/6'), negative_inner_product(v, '{1:1,2:2,3:3}/6'), l1_distance(v, '{1:1,2:2,3:3}/6') FROM docs WHERE id = 2
+----
+6.557 0.452 16.000 -16.000 13.000
+
+query R
+SELECT '{}/2'::sparsevec <=> '{1:1}/2'
+----
+NaN
+
+statement error 22000
+SELECT '{1:1}/2'::sparsevec <-> '{1:1}/3'
+
+query RT
+SELECT l2_norm(v), l2_normalize(v) FROM docs WHERE id = 3
+----
+1.000 {5:1}/6
+
+query T
+SELECT l2_normalize('{1:3,2:4}/2'::sparsevec)
+----
+{1:0.6,2:0.8}/2
+
+# Equality, grouping, casts.
+query B
+SELECT '{1:1,3:2}/3'::sparsevec = '{3:2,1:1,2:0}/3'
+----
+true
+
+query I
+SELECT count(DISTINCT v) FROM (VALUES ('{1:1}/2'::sparsevec), ('{1:1,2:0}/2'), ('{2:1}/2')) t(v)
+----
+2
+
+query T
+SELECT CAST('[0,1.5,0,-2]'::vector AS sparsevec)
+----
+{2:1.5,4:-2}/4
+
+query T
+SELECT CAST(v AS vector) FROM docs WHERE id = 2
+----
+[4,6,0,3,0,0]
+
+# The nearest, exactly: a scan and the top k.
+query I
+SELECT id FROM docs WHERE v IS NOT NULL AND id <> 4 ORDER BY v <#> '{1:1,2:2,3:3}/6', id LIMIT 3
+----
+2
+1
+3
+
+query I
+SELECT id FROM docs WHERE v IS NOT NULL ORDER BY v <-> '{5:2}/6', id LIMIT 2
+----
+3
+4
+
+statement error 0A000
+CREATE INDEX ON docs USING hnsw (v)

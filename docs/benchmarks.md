@@ -383,6 +383,22 @@ target/ann-data/.venv/bin/python bench/ann/sql.py target/release/nucleus \
   --efs 10,20,40,80,200 --quantize binary
 ```
 
+Sparse vectors searched exactly (PLAN.md §M14.12 V6b:
+`bench/ann/sparse.py`): 100,000 SPLADE-like rows — a vocabulary of
+30,522, ~120 terms a document and ~20 a query by a Zipf law, log-normal
+weights — as `sparsevec(30522)`; 200 queries, `SELECT id FROM t ORDER BY
+v <#> q LIMIT 10`, one client; 2026-11-07.
+
+| | recall | ms a search | how |
+|---|---:|---:|---|
+| nucleus | 1.0 | 21.0 | one thread: a scan and a top-k |
+| pgvector 0.8 | 1.0 | 17.9 | a parallel scan, two workers and the leader |
+
+```
+target/ann-data/.venv/bin/python bench/ann/sparse.py nucleus target/release/nucleus
+target/ann-data/.venv/bin/python bench/ann/sparse.py pgvector
+```
+
 The storage models behind the index (`bench/ann/`, calls in a process,
 PLAN.md §M14.12 V4) are recorded in the plan.
 

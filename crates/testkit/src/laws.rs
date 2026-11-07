@@ -268,6 +268,30 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
                 .collect();
             nucleus_sql::vectors::value(&c)
         }),
+        DataType::Ext(t) if t.name() == "sparsevec" => Box::new(move |g: &mut Gen| {
+            // Few dimensions and positions, so equal vectors (zeros and
+            // -0 dropped, positions in any order) meet often.
+            let dims = 1 + g.below(5);
+            let pairs: Vec<(u64, f32)> = (0..g.below(4))
+                .map(|_| {
+                    let at = g.below(dims);
+                    let v = match g.below(3) {
+                        0 => *g.pick(&[0.0, -0.0, 1.0, -1.5, f32::MAX, 1e-45]),
+                        1 => (g.below(8) as f32 - 4.0) / 2.0,
+                        _ => {
+                            let f = f32::from_bits(g.u64() as u32);
+                            if f.is_finite() { f } else { 0.5 }
+                        }
+                    };
+                    (at, v)
+                })
+                .collect();
+            let mut seen = std::collections::HashSet::new();
+            let pairs = pairs.into_iter().filter(|p| seen.insert(p.0)).collect();
+            nucleus_sql::sparse::Sparse::checked(dims, pairs)
+                .expect("a sparse vector")
+                .value()
+        }),
         DataType::Ext(t) if t.name() == "hll" => Box::new(move |g: &mut Gen| {
             // Few values, so equal sketches meet; now and then a dense one.
             let n = if g.one_in(8) { 5000 } else { g.below(6) };

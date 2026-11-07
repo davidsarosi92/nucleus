@@ -128,6 +128,7 @@ impl Module for Builtin {
         }
         crate::uuid::register(r)?;
         crate::vectors::register(r)?;
+        crate::sparse::register(r)?;
         crate::hnsw::register(r)?;
         crate::moments::register(r)?;
         crate::quantile::register(r)?;

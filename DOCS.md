@@ -1142,6 +1142,29 @@ and `avg` (centroids), each component summed exactly (`fsum::ExactSum`,
 §M14.27) and rounded once.  `crates/testkit/slt/45_vector.slt` follows
 pgvector's definitions.
 
+**`sparsevec`** (`sparse.rs`, §M14.12 V6b): a vector of many dimensions
+of which few are not zero — a learned sparse model's term weights
+(SPLADE), a bag of words — kept as its non-zero components.  Its
+canonical bytes are its dimensions and its non-zero count (little-endian
+`u32`s), their positions (0-based, ascending, `u32`s) and their values
+(`f32`s); text pgvector's `'{1:0.5,4:2}/10'` (positions from 1, in any
+order; zeros, `-0` too, dropped).  At most 1,000,000,000 dimensions and
+16,000 non-zero components; a position outside the dimensions or twice,
+NaN, infinities `22000` / `22003`.  `sparsevec(n)` checks the dimensions
+on every write.  Equality and hashing on the bytes (no order).  Distances
+over the positions merged, read in place from the stored bytes (`View`:
+nothing allocated): `<->` Euclidean (the type's), `<=>` cosine (NaN for a
+zero vector), `<#>` the negated inner product, `<+>` taxicab — the same
+operators and functions as `vector`'s (`l2_distance`, `cosine_distance`,
+`inner_product`, `negative_inner_product`, `l1_distance`, `l2_norm`,
+`l2_normalize` take either: `vectors::VectorFn` resolves by its
+arguments' type).  Casts to and from `vector`.  `ORDER BY v <#> q LIMIT
+k` is an exact search (a scan and a top-k: 100,000 SPLADE-like rows in
+`docs/benchmarks.md`); an HNSW index refuses the type (`0A000`) — sparse
+vectors' index is an inverted one, §M14.21's.
+`crates/testkit/slt/54_sparsevec.slt` follows pgvector's definitions; the
+law kit generates them.
+
 **Integers by width.**  An integer literal is `integer` if it fits, else
 `bigint` (PostgreSQL's rule).  Arithmetic on two integers has the wider
 operand's type (`smallint + smallint` is `smallint`, `smallint + integer`
@@ -2694,7 +2717,7 @@ engine's own comparisons and hashing (`Value`'s) agree with the type's.
 `Registry::add_type` checks them on the type's examples;
 `laws::check(ty, generator, cases)` on generated values (`laws::Gen`, a
 seeded generator; `laws::generator(ty)` for the built-in types, their
-arrays, `uuid` and `vector`).  `crates/sql/tests/laws.rs` runs the kit on every
+arrays, `uuid`, `vector` and `sparsevec`).  `crates/sql/tests/laws.rs` runs the kit on every
 built-in type and array, and shows a broken type caught and refused.
 
 `tests/extension.rs` is a module from outside the crate adding a
@@ -3986,6 +4009,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-07 — §M14.12 V6b, sparse vectors:** `sparsevec` /
+  `sparsevec(n)` (`sparse.rs`: `Sparse`, `View`, `sparse::distance`);
+  the vector distance functions take either type
+  (`vectors::distance_function`); the law kit's generator;
+  `crates/testkit/slt/54_sparsevec.slt`; `bench/ann/sparse.py` (§8.1).
 
 - **2026-11-07 — §M14.12 V6a, quantized HNSW graphs:** `WITH (quantize
   = 'half' | 'int8' | 'binary', rescore = n)` (`graph::Codec`,
