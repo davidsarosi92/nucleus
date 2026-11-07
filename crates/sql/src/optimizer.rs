@@ -210,20 +210,20 @@ fn nearest_scan(node: &mut Plan, want: &Want, st: &Stats) {
         })
     };
     // The index with the most of them fixed: the smallest graph.
-    let Some((index, m, partition)) = table
+    let Some((index, m, rescore, partition)) = table
         .indexes
         .iter()
         .enumerate()
         .filter_map(|(i, ix)| {
-            let (serves, m) = crate::hnsw::serves(ix)?;
+            let (serves, m, rescore) = crate::hnsw::serves(ix)?;
             if ix.columns[0] != column || serves != metric {
                 return None;
             }
             let partition: Option<Vec<(Expr, Expr)>> =
                 ix.columns[1..].iter().map(|&c| equal(c)).collect();
-            Some((i, m, partition?))
+            Some((i, m, rescore, partition?))
         })
-        .max_by_key(|(i, _, p)| (p.len(), std::cmp::Reverse(*i)))
+        .max_by_key(|(i, _, _, p)| (p.len(), std::cmp::Reverse(*i)))
     else {
         return;
     };
@@ -262,7 +262,8 @@ fn nearest_scan(node: &mut Plan, want: &Want, st: &Stats) {
     if within.is_none() {
         // `ef_search` counts the rows that pass: the graph is asked for
         // that many over the share passing.
-        let ef = (crate::hnsw::ef_search() as f64).max(k) / sel;
+        // A quantized index reads `rescore` rows for each returned.
+        let ef = (crate::hnsw::ef_search() as f64).max(k * rescore as f64) / sel;
         // Past the rows over 2m the search gives up and reads every row.
         if ef > rows / (2 * m) as f64 {
             return;

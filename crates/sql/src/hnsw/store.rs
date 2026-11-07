@@ -1038,7 +1038,7 @@ impl<'a> View<'a> {
 impl Graph for View<'_> {
     #[inline]
     fn distance(&self, q: &[u8], n: Node) -> f32 {
-        self.shape.params.metric.distance(q, self.at(n))
+        self.shape.params.space.distance(q, self.at(n))
     }
 
     fn vector(&self, n: Node, out: &mut Vec<u8>) {
@@ -1096,7 +1096,7 @@ impl Fold<'_, '_> {
 impl Graph for Fold<'_, '_> {
     #[inline]
     fn distance(&self, q: &[u8], n: Node) -> f32 {
-        self.view.shape.params.metric.distance(q, self.at(n))
+        self.view.shape.params.space.distance(q, self.at(n))
     }
 
     fn vector(&self, n: Node, out: &mut Vec<u8>) {
@@ -1808,7 +1808,7 @@ impl Index {
         s: &mut Scratch,
     ) -> Result<Candidates> {
         let root = self.root_in(txn)?;
-        let metric = self.shape.params.metric;
+        let metric = self.shape.params.space;
         let mut out: Vec<(f32, Vec<u8>)> = Vec::new();
         let mut held = root.graph.nodes as usize;
         let mut all = true;
@@ -1888,7 +1888,7 @@ impl Index {
         threads: usize,
     ) -> Result<Option<Candidates>> {
         let root = self.root_in(txn)?;
-        let metric = self.shape.params.metric;
+        let metric = self.shape.params.space;
         let hashes: Vec<u64> = pks.iter().map(pk_hash).collect();
         // Each found: its distance and its row's place in `pks`.
         let mut near: Vec<(f32, u32)> = Vec::new();
@@ -2235,7 +2235,7 @@ mod tests {
         let params = Params {
             m: 8,
             ef_construction: 32,
-            metric: Metric::L2,
+            space: graph::Space::plain(Metric::L2),
             slack: 1,
         };
         let ix = Index {
@@ -2302,7 +2302,7 @@ mod tests {
         let params = Params {
             m: 8,
             ef_construction: 32,
-            metric: Metric::L2,
+            space: graph::Space::plain(Metric::L2),
             slack: 1,
         };
         let ix = Index {

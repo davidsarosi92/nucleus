@@ -326,6 +326,114 @@ fn hnsw_definitions_are_checked() {
 }
 
 #[test]
+fn hnsw_quantized_indexes_answer_by_the_rows_distances() {
+    let kv = db(15);
+    let mut s = Session::new(kv.clone());
+    let mut g = Lcg(21);
+    let dims = 24;
+    s.execute(&format!(
+        "CREATE TABLE items (id INT PRIMARY KEY, v vector({dims}))"
+    ))
+    .unwrap();
+    let rows: Vec<String> = (0..1500)
+        .map(|i| format!("({i}, '{}')", g.vector(dims)))
+        .collect();
+    s.execute(&format!("INSERT INTO items VALUES {}", rows.join(", ")))
+        .unwrap();
+    let queries: Vec<String> = (0..20).map(|_| g.vector(dims)).collect();
+    // Bits say little of 24 components: a binary index reads many rows
+    // (it is meant for embeddings of hundreds and thousands).
+    for (codec, rescore, least) in [("half", 1, 0.95), ("int8", 2, 0.95), ("binary", 30, 0.8)] {
+        for (op, class) in [
+            ("<->", "vector_l2_ops"),
+            ("<=>", "vector_cosine_ops"),
+            ("<#>", "vector_ip_ops"),
+            ("<+>", "vector_l1_ops"),
+        ] {
+            let name = format!("items_{codec}_{}", &class[7..class.len() - 4]);
+            s.execute(&format!(
+                "CREATE INDEX {name} ON items USING hnsw (v {class}) \
+                 WITH (quantize = '{codec}', rescore = {rescore})"
+            ))
+            .unwrap();
+            // Rows after the build: in the delta, then folded.
+            let more: Vec<String> = (0..100)
+                .map(|i| format!("({}, '{}')", 10_000 + i, g.vector(dims)))
+                .collect();
+            s.execute(&format!("INSERT INTO items VALUES {}", more.join(", ")))
+                .unwrap();
+            let mut sum = 0.0;
+            for q in &queries {
+                let exact = floats(
+                    &mut s,
+                    &format!("SELECT (v {op} '{q}') + 0 FROM items ORDER BY 1 LIMIT 10"),
+                );
+                let found = nearest(&kv, &name, q, 10, 40);
+                // The distances are the rows' own, exactly: the codes only
+                // choose which rows are read.
+                for d in &found {
+                    assert!(
+                        exact.iter().any(|e| e == d)
+                            || floats(
+                                &mut s,
+                                &format!(
+                                    "SELECT count(*) FROM items WHERE (v {op} '{q}') + 0 = {d}"
+                                ),
+                            ) == [1.0],
+                        "{name}: {d} is no row's distance"
+                    );
+                }
+                sum += recall(&found, &exact);
+            }
+            let r = sum / queries.len() as f64;
+            assert!(r >= least, "{name}: recall {r}");
+            s.execute("DELETE FROM items WHERE id >= 10000").unwrap();
+            assert_eq!(problems(&kv, &s), Vec::<String>::new(), "{name}");
+            s.execute(&format!("DROP INDEX {name}")).unwrap();
+        }
+    }
+    // The options, normalized; the wrong ones refused.
+    s.execute("CREATE INDEX items_q ON items USING hnsw (v) WITH (quantize = 'INT8')")
+        .unwrap();
+    match s
+        .execute("SELECT options FROM nc_catalog.indexes WHERE name = 'items_q'")
+        .unwrap()
+        .pop()
+    {
+        Some(Output::Rows { rows, .. }) => assert_eq!(
+            rows[0][0].render(),
+            "{m=16,ef_construction=64,quantize=int8,rescore=2}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    for sql in [
+        "CREATE INDEX ON items USING hnsw (v) WITH (quantize = 'int4')",
+        "CREATE INDEX ON items USING hnsw (v) WITH (rescore = 2)",
+        "CREATE INDEX ON items USING hnsw (v) WITH (quantize = 'half', rescore = 0)",
+    ] {
+        assert_eq!(s.execute(sql).expect_err(sql).code, "22023", "{sql}");
+    }
+    // Through the planner: the answer ordered by the rows' distances.
+    let q = &queries[0];
+    let sql = format!("SELECT id FROM items ORDER BY v <-> '{q}' LIMIT 5");
+    assert!(
+        plan(&mut s, &sql).contains("nearest v to"),
+        "{}",
+        plan(&mut s, &sql)
+    );
+    let found = floats(
+        &mut s,
+        &format!("SELECT (v <-> '{q}') + 0 FROM ({sql}) f JOIN items USING (id) ORDER BY 1"),
+    );
+    let exact = floats(
+        &mut s,
+        &format!("SELECT (v <-> '{q}') + 0 FROM items ORDER BY 1 LIMIT 5"),
+    );
+    assert!(recall(&found, &exact) >= 0.8, "{found:?} {exact:?}");
+    assert_eq!(problems(&kv, &s), Vec::<String>::new());
+}
+
+#[test]
 fn hnsw_upkeep_runs_after_commits_and_searches() {
     let kv = db(14);
     let mut s = Session::new(kv.clone());

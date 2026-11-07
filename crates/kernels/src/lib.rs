@@ -839,6 +839,138 @@ kernel! {
     }
 }
 
+/// An IEEE half (binary16, finite) as an `f32`: its bits moved to an
+/// `f32`'s places, then scaled by 2¹¹² (the exponents' bias apart) — exact,
+/// subnormals too, and without a branch, so the loops over halves
+/// vectorize (Giesen's conversion).
+#[inline(always)]
+pub fn from_half(h: u16) -> f32 {
+    let h = u32::from(h);
+    let magnitude = f32::from_bits((h & 0x7fff) << 13) * f32::from_bits(0x7780_0000);
+    f32::from_bits(((h & 0x8000) << 16) | magnitude.to_bits())
+}
+
+/// `x` (finite) as the nearest IEEE half, ties to even: magnitudes under
+/// the least normal half (2⁻¹⁴) become zero, over the greatest (65504)
+/// the greatest.
+pub fn to_half(x: f32) -> u16 {
+    let sign = ((x.to_bits() >> 16) & 0x8000) as u16;
+    let a = x.abs();
+    if a < f32::from_bits(0x3880_0000) {
+        return sign;
+    }
+    if a >= 65504.0 {
+        return sign | 0x7bff;
+    }
+    let b = a.to_bits();
+    let rounded = (b + 0xfff + ((b >> 13) & 1)) >> 13;
+    sign | (rounded - (112 << 10)).min(0x7bff) as u16
+}
+
+/// [`lanes`] over vectors stored as little-endian IEEE halves.
+#[inline(always)]
+fn half_lanes(a: &[u8], b: &[u8], term: impl Fn(f32, f32) -> f32) -> f64 {
+    let n = a.len().min(b.len()) / 2;
+    let (a, b) = (&a[..2 * n], &b[..2 * n]);
+    let mut acc = [0f32; LANES];
+    let (ab, ra) = a.as_chunks::<{ 2 * LANES }>();
+    let (bb, rb) = b.as_chunks::<{ 2 * LANES }>();
+    for (x, y) in ab.iter().zip(bb) {
+        for l in 0..LANES {
+            let xi = from_half(u16::from_le_bytes([x[2 * l], x[2 * l + 1]]));
+            let yi = from_half(u16::from_le_bytes([y[2 * l], y[2 * l + 1]]));
+            acc[l] += term(xi, yi);
+        }
+    }
+    let (ra, rb) = (ra.as_chunks::<2>().0, rb.as_chunks::<2>().0);
+    for (l, (x, y)) in ra.iter().zip(rb).enumerate() {
+        acc[l] += term(
+            from_half(u16::from_le_bytes(*x)),
+            from_half(u16::from_le_bytes(*y)),
+        );
+    }
+    acc.iter().map(|&s| f64::from(s)).sum()
+}
+
+kernel! {
+    /// [`l2_squared`] of two vectors stored as little-endian halves.
+    fn l2_squared_half / l2_squared_half_at(a: &[u8], b: &[u8]) -> f64 {
+        half_lanes(a, b, |x, y| (x - y) * (x - y))
+    }
+}
+
+kernel! {
+    /// [`dot`] of two vectors stored as little-endian halves.
+    fn dot_half / dot_half_at(a: &[u8], b: &[u8]) -> f64 {
+        half_lanes(a, b, |x, y| x * y)
+    }
+}
+
+kernel! {
+    /// [`l1`] of two vectors stored as little-endian halves.
+    fn l1_half / l1_half_at(a: &[u8], b: &[u8]) -> f64 {
+        half_lanes(a, b, |x, y| (x - y).abs())
+    }
+}
+
+kernel! {
+    /// The sum of the products of two runs of bytes as unsigned integers
+    /// (as many as the shorter has; exact up to 66,000 of them).
+    fn dot_u8 / dot_u8_at(a: &[u8], b: &[u8]) -> u32 {
+        let n = a.len().min(b.len());
+        let (a, b) = (&a[..n], &b[..n]);
+        let mut acc = [0u32; 2 * LANES];
+        let (ab, ra) = a.as_chunks::<{ 2 * LANES }>();
+        let (bb, rb) = b.as_chunks::<{ 2 * LANES }>();
+        for (x, y) in ab.iter().zip(bb) {
+            for l in 0..2 * LANES {
+                acc[l] += u32::from(x[l]) * u32::from(y[l]);
+            }
+        }
+        let rest: u32 = ra.iter().zip(rb).map(|(x, y)| u32::from(*x) * u32::from(*y)).sum();
+        acc.iter().sum::<u32>() + rest
+    }
+}
+
+kernel! {
+    /// The taxicab distance of two vectors of bytes, each component `i`
+    /// standing for `m + s · byte` (`a`'s `ma`, `sa`; `b`'s `mb`, `sb`).
+    fn l1_u8 / l1_u8_at(a: &[u8], b: &[u8], ma: f32, sa: f32, mb: f32, sb: f32) -> f64 {
+        let n = a.len().min(b.len());
+        let (a, b) = (&a[..n], &b[..n]);
+        let m = ma - mb;
+        let mut acc = [0f32; LANES];
+        let (ab, ra) = a.as_chunks::<LANES>();
+        let (bb, rb) = b.as_chunks::<LANES>();
+        for (x, y) in ab.iter().zip(bb) {
+            for l in 0..LANES {
+                acc[l] += (m + sa * f32::from(x[l]) - sb * f32::from(y[l])).abs();
+            }
+        }
+        for (l, (x, y)) in ra.iter().zip(rb).enumerate() {
+            acc[l] += (m + sa * f32::from(*x) - sb * f32::from(*y)).abs();
+        }
+        acc.iter().map(|&s| f64::from(s)).sum()
+    }
+}
+
+kernel! {
+    /// The bits that differ between two runs of bytes (the Hamming
+    /// distance; as many bytes as the shorter has).
+    fn hamming / hamming_at(a: &[u8], b: &[u8]) -> u32 {
+        let n = a.len().min(b.len());
+        let (a, b) = (&a[..n], &b[..n]);
+        let (aw, ra) = a.as_chunks::<8>();
+        let (bw, rb) = b.as_chunks::<8>();
+        let words: u32 = aw
+            .iter()
+            .zip(bw)
+            .map(|(x, y)| (u64::from_le_bytes(*x) ^ u64::from_le_bytes(*y)).count_ones())
+            .sum();
+        words + ra.iter().zip(rb).map(|(x, y)| (x ^ y).count_ones()).sum::<u32>()
+    }
+}
+
 /// The kernels' definitions, a value at a time — what the tests hold the
 /// kernels to.
 pub mod reference {
@@ -881,6 +1013,56 @@ pub mod reference {
     /// [`super::l1`], a component at a time.
     pub fn l1(a: &[u8], b: &[u8]) -> f64 {
         lanes(floats(a).iter().zip(floats(b)).map(|(x, y)| (x - y).abs()))
+    }
+
+    fn halves(b: &[u8]) -> Vec<f32> {
+        b.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| super::from_half(u16::from_le_bytes(*c)))
+            .collect()
+    }
+
+    /// [`super::l2_squared_half`], a component at a time.
+    pub fn l2_squared_half(a: &[u8], b: &[u8]) -> f64 {
+        lanes(
+            halves(a)
+                .iter()
+                .zip(halves(b))
+                .map(|(x, y)| (x - y) * (x - y)),
+        )
+    }
+
+    /// [`super::dot_half`], a component at a time.
+    pub fn dot_half(a: &[u8], b: &[u8]) -> f64 {
+        lanes(halves(a).iter().zip(halves(b)).map(|(x, y)| x * y))
+    }
+
+    /// [`super::l1_half`], a component at a time.
+    pub fn l1_half(a: &[u8], b: &[u8]) -> f64 {
+        lanes(halves(a).iter().zip(halves(b)).map(|(x, y)| (x - y).abs()))
+    }
+
+    /// [`super::dot_u8`], a component at a time.
+    pub fn dot_u8(a: &[u8], b: &[u8]) -> u32 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| u32::from(*x) * u32::from(*y))
+            .sum()
+    }
+
+    /// [`super::l1_u8`], a component at a time.
+    pub fn l1_u8(a: &[u8], b: &[u8], ma: f32, sa: f32, mb: f32, sb: f32) -> f64 {
+        lanes(
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| (ma - mb + sa * f32::from(*x) - sb * f32::from(*y)).abs()),
+        )
+    }
+
+    /// [`super::hamming`], a byte at a time.
+    pub fn hamming(a: &[u8], b: &[u8]) -> u32 {
+        a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones()).sum()
     }
 
     /// [`super::dot_norms`], a component at a time.
@@ -1070,6 +1252,38 @@ mod tests {
                 let (k, r) = (dot_norms_at(level, &a, &b), reference::dot_norms(&a, &b));
                 assert!(same(k.0, r.0) && same(k.1, r.1) && same(k.2, r.2), "{n}");
             }
+            let half = |v: &[u8]| {
+                v.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|c| to_half(f32::from_le_bytes(*c)).to_le_bytes())
+                    .collect::<Vec<u8>>()
+            };
+            let (ha, hb) = (half(&a), half(&b));
+            for level in levels() {
+                let same = |x: f64, y: f64| x.to_bits() == y.to_bits();
+                assert!(
+                    same(
+                        l2_squared_half_at(level, &ha, &hb),
+                        reference::l2_squared_half(&ha, &hb)
+                    ),
+                    "{n}"
+                );
+                assert!(same(
+                    dot_half_at(level, &ha, &hb),
+                    reference::dot_half(&ha, &hb)
+                ));
+                assert!(same(
+                    l1_half_at(level, &ha, &hb),
+                    reference::l1_half(&ha, &hb)
+                ));
+                assert_eq!(dot_u8_at(level, &a, &b), reference::dot_u8(&a, &b), "{n}");
+                assert_eq!(hamming_at(level, &a, &b), reference::hamming(&a, &b), "{n}");
+                assert!(same(
+                    l1_u8_at(level, &a, &b, 0.5, 0.25, -1.0, 0.125),
+                    reference::l1_u8(&a, &b, 0.5, 0.25, -1.0, 0.125)
+                ));
+            }
             // Against plain arithmetic in doubles: within f32's rounding.
             let (fa, fb) = (reference_floats(&a), reference_floats(&b));
             let want: f64 = fa
@@ -1082,6 +1296,35 @@ mod tests {
                 "{n}"
             );
         }
+    }
+
+    #[test]
+    fn halves_round_to_nearest_even_and_back() {
+        for (x, h) in [
+            (0.0f32, 0x0000u16),
+            (-0.0, 0x8000),
+            (1.0, 0x3c00),
+            (-2.0, 0xc000),
+            (65504.0, 0x7bff),
+            (1e6, 0x7bff),
+            (-1e6, 0xfbff),
+            (6.103_515_6e-5, 0x0400),
+            (1e-6, 0x0000),
+            // 1 + 2⁻¹¹ is halfway between 1 and 1 + 2⁻¹⁰: to the even one.
+            (1.000_488_3, 0x3c00),
+            (1.001_464_8, 0x3c02),
+            (0.1, 0x2e66),
+        ] {
+            assert_eq!(to_half(x), h, "{x}");
+        }
+        // Every finite normal half comes back as itself.
+        for h in 0x0400u16..0x7c00 {
+            for s in [0, 0x8000] {
+                assert_eq!(to_half(from_half(h | s)), h | s);
+            }
+        }
+        assert_eq!(from_half(0x3555), 0.333_251_95);
+        assert_eq!(from_half(0x0001), f32::from_bits(0x3380_0000));
     }
 
     fn reference_floats(b: &[u8]) -> Vec<f32> {

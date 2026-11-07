@@ -352,6 +352,37 @@ target/ann-data/.venv/bin/python bench/ann/filtered.py nucleus target/release/nu
 target/ann-data/.venv/bin/python bench/ann/filtered.py pgvector target/ann-data/sift-128-euclidean
 ```
 
+Quantized graphs (PLAN.md §M14.12 V6a: `WITH (quantize = …)`, the rows
+read again for the exact distances; `bench/ann/sql.py --quantize`;
+2026-11-07):
+
+| SIFT-1M (as above) | a vector's bytes | built | `ef` 40: recall | µs | inserts a second | a search while they come |
+|---|---:|---:|---:|---:|---:|---:|
+| `f32` | 512 | 54.9 s | 0.891 | 363 | 4,862 | 899 µs |
+| `half` | 256 | 48.8 s | 0.891 | 405 | 5,033 | 712 µs |
+| `int8` | 144 | 29.0 s | 0.892 | 291 | 6,275 | 708 µs |
+
+| OpenAI `text-embedding-3-large`, 99,000 × 1536, cosine (`--no-inserts`) | a vector's bytes | built | `ef` 40: recall | µs |
+|---|---:|---:|---:|---:|
+| `f32` | 6,144 | 43.2 s | 0.926 | 1,414 |
+| `half` | 3,072 | 35.8 s | 0.926 | 1,356 |
+| `int8` (rescore 2) | 1,552 | 11.1 s | 0.929 | 1,033 |
+| `binary` (rescore 5) | 192 | 5.3 s | 0.922 | 1,588 |
+| `binary`, rescore 10 | 192 | 5.5 s | 0.964 | 2,580 |
+
+(The embeddings' µs include ~0.6 ms of the Python client sending a
+6 KB vector; the server's share is 0.80 / 0.48 / 0.96 ms for `f32` /
+`int8` / `binary`, mostly the rows read.)
+
+```
+target/ann-data/.venv/bin/python bench/ann/data.py dbpedia-openai3-1536-100k
+target/ann-data/.venv/bin/python bench/ann/sql.py target/release/nucleus \
+  target/ann-data/sift-128-euclidean --efs 10,20,40,60,80,120,200 --quantize int8
+target/ann-data/.venv/bin/python bench/ann/sql.py target/release/nucleus \
+  target/ann-data/dbpedia-openai3-1536-100k --no-inserts --bulk 99000 --queries 1000 \
+  --efs 10,20,40,80,200 --quantize binary
+```
+
 The storage models behind the index (`bench/ann/`, calls in a process,
 PLAN.md §M14.12 V4) are recorded in the plan.
 

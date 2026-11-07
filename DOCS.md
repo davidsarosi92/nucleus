@@ -3034,7 +3034,7 @@ mirrors a column and runs writes, rollbacks, a rewrite, the integrity
 check (a stray entry found), the refusals and a drop through it;
 `06_indexes.slt` the syntax.
 
-### 8.18 HNSW indexes (`hnsw`, §M14.12 V4b, V5)
+### 8.18 HNSW indexes (`hnsw`, §M14.12 V4b, V5, V6)
 
 `CREATE INDEX [name] ON t USING hnsw (col [opclass]) [WITH (m = 16,
 ef_construction = 64)]` on a `vector(n)` column (one without dimensions
@@ -3173,6 +3173,29 @@ makes one on each partition, a graph each; `ORDER BY col <op> q LIMIT k`
 over it searches each partition's index for `k` rows (each partition its
 own choice, as below) and the sort and the limit above take the nearest
 — partition pruning leaving the one a condition on the key fixes.
+
+**Quantized: `WITH (quantize = …, rescore = n)`** (PLAN.md §M14.12 V6):
+the graph holds codes instead of the vectors — in memory, in its pages
+and its delta — and takes its distances between them; the rows, which a
+search reads anyway, give the exact distances the answer is ordered by.
+`quantize` is `none` (the default), `half` (IEEE halves, the nearest;
+magnitudes past 65504 clamped, under 2⁻¹⁴ zero: half the bytes),
+`int8` (a byte a component, each `m + s · byte` with the vector's own
+least component `m` and step `s = range / 255`, after a header of `m`,
+`s`, the bytes' sum and the norm² they stand for — so a distance is one
+integer dot product and a few multiplications: `graph::Codec`, the
+kernels `dot_u8`, `l1_u8`; a quarter of the bytes and 16) or `binary` (a
+bit a component, set where it is above the vector's mean; distances the
+bits that differ, the kernel `hamming`; a thirty-second of the bytes).
+The codes of the cosine class are of the vectors normalized.  `rescore`
+(1–100; only with `quantize`) is the rows a search reads for each it
+returns — the graph asked for at least `k · rescore` candidates, the
+rows read until that many have passed (`hnsw::search`'s `reads`), their
+distances the rows' own; its default is the codec's (`half` 1, `int8` 2,
+`binary` 5: Qdrant's and Elasticsearch's oversampling, measured here),
+and the record keeps it.  The check compares a node's code with the
+row's vector coded.  Binary codes say little of a vector of few
+components: they are for embeddings of hundreds and thousands.
 
 **Searches in SQL.**  `ORDER BY col <op> q LIMIT k [OFFSET o]` (the
 operator or its function — `l2_distance`, `cosine_distance`,
@@ -3963,6 +3986,14 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-07 — §M14.12 V6a, quantized HNSW graphs:** `WITH (quantize
+  = 'half' | 'int8' | 'binary', rescore = n)` (`graph::Codec`,
+  `graph::Space` — `Params::metric` is now `space`; `hnsw::serves`
+  gives the `rescore` too); the kernels `to_half`, `from_half`,
+  `l2_squared_half`, `dot_half`, `l1_half`, `dot_u8`, `l1_u8`, `hamming`;
+  `bench/ann/sql.py --quantize --rescore --no-inserts` (cosine datasets
+  too), `bench/ann/data.py dbpedia-openai3-1536-100k` (§8.18).
 
 - **2026-11-07 — §M14.12 V5, filtered vector search:** `ef_search`
   counts the rows that pass (`hnsw::Ask`, its `share`; the graph asked

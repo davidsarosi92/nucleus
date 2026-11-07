@@ -37,7 +37,7 @@ use crate::index_method::{IndexMethod, RowRef};
 use crate::types::{Row, Value};
 use crate::vectors::Metric as SqlMetric;
 
-use graph::{Metric, Params, Scratch};
+use graph::{Codec, Metric, Params, Scratch, Space};
 pub use store::Pks;
 use store::{ByRow, Index, Keys, Shape};
 
@@ -69,6 +69,8 @@ struct Opened {
     column: usize,
     columns: Vec<usize>,
     sql: SqlMetric,
+    /// Rows read for each returned ([`rescore_default`]).
+    rescore: usize,
     state: Arc<State>,
 }
 
@@ -77,6 +79,26 @@ fn option(ix: &IndexDef, name: &str) -> Option<usize> {
         .iter()
         .find(|(k, _)| k == name)
         .and_then(|(_, v)| v.parse().ok())
+}
+
+/// How index `ix` holds its vectors (`quantize`).
+fn codec_of(ix: &IndexDef) -> Codec {
+    ix.options
+        .iter()
+        .find(|(k, _)| k == "quantize")
+        .and_then(|(_, v)| Codec::named(v))
+        .unwrap_or(Codec::F32)
+}
+
+/// The rows a search reads for each it returns, by default, over vectors
+/// held as `codec` holds them — their exact distances, from the rows,
+/// make up for the codes' (Qdrant's and Elasticsearch's oversampling).
+fn rescore_default(codec: Codec) -> usize {
+    match codec {
+        Codec::F32 | Codec::Half => 1,
+        Codec::Int8 => 2,
+        Codec::Binary => 5,
+    }
 }
 
 fn threads() -> usize {
@@ -143,20 +165,22 @@ fn open(instance: u64, t: &Table, i: usize, part: &[u8]) -> Result<Opened> {
         index: ix.id,
         part: part.to_vec(),
     };
+    let codec = codec_of(ix);
     let params = Params {
         m: option(ix, "m").unwrap_or(16),
         ef_construction: option(ix, "ef_construction").unwrap_or(64),
-        metric,
+        space: Space { metric, codec },
         slack: 1,
     };
     Ok(Opened {
         index: Index {
             keys: Keys::new([t.index_prefix(ix.id).as_slice(), part].concat()),
-            shape: Shape::new(params, dims as usize * 4, threads()),
+            shape: Shape::new(params, codec.width(dims as usize), threads()),
         },
         column,
         columns: ix.columns.clone(),
         sql,
+        rescore: option(ix, "rescore").unwrap_or(1).max(1),
         state: state(&id),
         id,
     })
@@ -176,8 +200,9 @@ impl Opened {
         let Value::Ext(_, b) = v else {
             return Err(Error::internal("not a vector"));
         };
+        let codec = self.index.shape.params.space.codec;
         if self.sql != SqlMetric::Cosine {
-            return Ok(Some(b.to_vec()));
+            return Ok(Some(codec.encode(b)));
         }
         let norm = nucleus_kernels::dot(b, b).sqrt();
         if norm == 0.0 || !norm.is_finite() {
@@ -188,7 +213,7 @@ impl Opened {
             let x = (f64::from(f32::from_le_bytes(*c)) / norm) as f32;
             out.extend_from_slice(&x.to_le_bytes());
         }
-        Ok(Some(out))
+        Ok(Some(codec.encode(&out)))
     }
 
     /// The row of primary key `pk` (only the index's columns read), if
@@ -280,11 +305,21 @@ impl IndexMethod for Hnsw {
             }
         }
         let mut options = Vec::new();
+        let mut codec = Codec::F32;
         for (k, v) in &ix.options {
             let (lo, hi) = match k.as_str() {
                 "m" => (2, 100),
                 "ef_construction" => (4, 1000),
+                "rescore" => (1, 100),
                 "partition_by" => continue,
+                "quantize" => {
+                    codec = Codec::named(&v.to_ascii_lowercase()).ok_or_else(|| {
+                        Error::invalid_parameter(format!(
+                            "invalid value \"{v}\" for option \"quantize\" (none, half, int8 or binary)"
+                        ))
+                    })?;
+                    continue;
+                }
                 _ => {
                     return Err(Error::invalid_parameter(format!(
                         "unrecognized parameter \"{k}\""
@@ -313,6 +348,15 @@ impl IndexMethod for Hnsw {
             ("m".into(), m.to_string()),
             ("ef_construction".into(), efc.to_string()),
         ];
+        if codec != Codec::F32 {
+            ix.options.push(("quantize".into(), codec.name().into()));
+            let rescore = get("rescore", rescore_default(codec));
+            ix.options.push(("rescore".into(), rescore.to_string()));
+        } else if options.iter().any(|o| o.0 == "rescore") {
+            return Err(Error::invalid_parameter(
+                "option \"rescore\" needs a quantized index (\"quantize\")",
+            ));
+        }
         if parts > 0 {
             ix.options.push(("partition_by".into(), parts.to_string()));
         }
@@ -531,19 +575,21 @@ pub fn search(
     keep: &mut dyn FnMut(&Row) -> Result<bool>,
 ) -> Result<Found> {
     let o = open(txn.instance(), t, i, ask.part)?;
+    let dims = t.columns[o.column].max_len.unwrap_or(0) as usize;
+    if let Value::Ext(_, b) = q
+        && b.len() != 4 * dims
+    {
+        return Err(Error::data_exception(format!(
+            "different vector dimensions {dims} and {}",
+            b.len() / 4
+        )));
+    }
     let Some(qs) = o.stored(q)? else {
         return Ok(Found {
             rows: Vec::new(),
             all: false,
         });
     };
-    if qs.len() != o.index.shape.width {
-        return Err(Error::data_exception(format!(
-            "different vector dimensions {} and {}",
-            o.index.shape.width / 4,
-            qs.len() / 4
-        )));
-    }
     let r = txn
         .shared()
         .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;
@@ -551,14 +597,16 @@ pub fn search(
     wanted[o.column] = true;
     let mut s = Scratch::default();
     let k = ask.k;
-    let wants = ask.ef.max(k).max(1);
-    let ef_most = ask.ef_most.max(k).max(1);
+    // Rows read (their exact distances) for the `k` returned, over codes.
+    let reads = k * o.rescore;
+    let wants = ask.ef.max(reads).max(1);
+    let ef_most = ask.ef_most.max(reads).max(1);
     let mut ef = match ask.among {
         Some(_) => wants,
         None => ((wants as f64 / ask.share.clamp(1e-9, 1.0)).ceil() as usize).clamp(1, ef_most),
     };
     let started = std::time::Instant::now();
-    let metric = o.index.shape.params.metric;
+    let metric = o.index.shape.params.space;
     let mut seen = std::collections::HashSet::new();
     // The rows that passed, each with its distance by the graph.
     let mut rows: Vec<(Vec<u8>, Row, f64, f32)> = Vec::new();
@@ -593,7 +641,7 @@ pub fn search(
         // (its distance differs) is passed over: its vector now is in
         // the index too, under its own distance.
         for (d, pk) in found.near {
-            if rows.iter().filter(|r| r.3 <= d).count() >= k {
+            if rows.iter().filter(|r| r.3 <= d).count() >= reads {
                 break;
             }
             if seen.contains(&pk) {
@@ -641,14 +689,19 @@ pub fn search(
 }
 
 /// The index method `ix` is searched by, if it is an HNSW index: the
-/// SQL distance its operator class serves, and its `m`.
-pub fn serves(ix: &IndexDef) -> Option<(SqlMetric, usize)> {
+/// SQL distance its operator class serves, its `m`, and the rows a search
+/// reads for each it returns (`rescore`).
+pub fn serves(ix: &IndexDef) -> Option<(SqlMetric, usize, usize)> {
     if ix.method.as_deref() != Some(NAME) {
         return None;
     }
     let class = ix.opclasses.first()?.as_deref()?;
     let (_, sql, _) = OPCLASSES.iter().find(|o| o.0 == class)?;
-    Some((*sql, option(ix, "m").unwrap_or(16)))
+    Some((
+        *sql,
+        option(ix, "m").unwrap_or(16),
+        option(ix, "rescore").unwrap_or(1).max(1),
+    ))
 }
 
 /// The search behind `ORDER BY col <op> q LIMIT k` ([`Access::Nearest`]

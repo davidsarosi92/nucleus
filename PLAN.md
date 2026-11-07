@@ -276,7 +276,7 @@ are marked ✅.
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
-| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4) |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
@@ -4208,7 +4208,7 @@ rest within noise); ClickBench column 17.3 / 17.8 → 17.1 / 17.0, row
 agreed so far and the measurement that decides it).  **V5** filtered search as specified above (ACORN's
 predicate-aware traversal, Patel et al. 2024, and Qdrant's filterable
 HNSW are the prior art to read).  **V6** half, int8 and binary
-quantization; sparse vectors.
+quantization ✅ (V6a, below); sparse vectors.
 
 *V4, the HNSW index: where the graph lives* (planned 2026-11-06;
 measured 2026-11-06/07, below).  The approximate index (Malkov and Yashunin 2018)
@@ -4809,6 +4809,83 @@ nothing outside vectors moved — TPC-H SF1 load 24.95 / 22.89 → 23.13 /
 26.90 s, the queries' sums 6,288 / 6,069 → 5,947 / 5,941 ms (noise);
 SIFT-1M unfiltered through SQL as before (`ef` 40: 0.891, 391 µs; while
 rows come in 827 µs).
+
+**V6a — quantized graphs** (2026-11-07).  `CREATE INDEX … USING hnsw (v)
+WITH (quantize = 'half' | 'int8' | 'binary' [, rescore = n])`: the graph
+holds codes — in memory, in its pages, in its delta — and takes its
+distances between them; the search reads `rescore` rows for each it
+returns (the graph asked for at least `k · rescore`), and the rows'
+exact distances order the answer, as they did before.  Codes, one form
+for the graph's inserts and the query alike (symmetric):
+
+- `half`: IEEE halves, round to nearest even (`to_half`; the kernels
+  decode a half by moving its bits and scaling by 2¹¹², Giesen's
+  branch-free conversion — the first cut, a branch for subnormals, kept
+  the compiler from vectorizing and built 2.5× slower than `f32`).
+- `int8`: a byte a component, `m + s · byte` with the vector's own least
+  component and step, after a 16-byte header (`m`, `s`, the bytes' sum,
+  the norm² they stand for) — a distance is one `u8 · u8` integer dot
+  product (`dot_u8`) and a few multiplications: Lucene's corrective
+  terms over a per-vector range rather than its quantiles over a
+  segment, so nothing is trained and a row coded once stays coded.
+- `binary`: a bit a component, above the vector's mean or not; the bits
+  that differ (`hamming`).  Above zero, pgvector's `binary_quantize`,
+  gave 0.06 recall on SIFT, whose components are all positive; above
+  the mean, 0.34 — bits are for embeddings of hundreds and thousands of
+  components.
+
+Measured (`bench/ann/sql.py --quantize`; 1,000 queries; ef 40; the
+row-reading cost included):
+
+| OpenAI `text-embedding-3-large`, 99,000 × 1536, cosine | a vector's bytes | built | recall | µs a search |
+|---|---|---|---|---|
+| `f32` | 6,144 | 43.2 s | 0.926 | 1,414 |
+| `half` | 3,072 | 35.8 s | 0.926 | 1,356 |
+| `int8` (rescore 2) | 1,552 | **11.1 s** | 0.929 | **1,033** |
+| `binary` (rescore 5) | 192 | **5.3 s** | 0.922 | 1,588 |
+| `binary`, rescore 10 | 192 | 5.5 s | 0.964 | 2,580 |
+
+| SIFT-1M (900,000 built, 100,000 by ten writers) | a vector's bytes | built | recall | µs a search | inserts a second | a search while they come |
+|---|---|---|---|---|---|---|
+| `f32` | 512 | 54.9 s | 0.891 | 363 | 4,862 | 899 µs |
+| `half` | 256 | 48.8 s | 0.891 | 405 | 5,033 | 712 µs |
+| `int8` (rescore 2) | 144 | **29.0 s** | 0.892 | **291** | **6,275** | 708 µs |
+
+(SIFT's components are integers up to 255: halves hold them exactly.
+Run to run ±~10 %.)  `int8` is the one that pays everywhere — a quarter
+of the memory, the build 1.9–3.9× faster, searches faster at the same
+recall (a distance a quarter of the bytes, an integer dot product);
+`half` halves the memory at no cost but gains no time; `binary` is a
+thirty-second of the memory and builds 8× faster, with recall at the
+`f32` graph's at `ef` 40 on embeddings, where its reads are cheap
+enough.
+
+Measured against 24c5627 (`bench/phases.py`, alternating, two rounds):
+TPC-H SF1 load 25.89 / 26.26 → 25.59 / 24.10 s, the queries' sums
+6,072 / 5,933 → 6,049 / 5,986 ms: noise.
+
+The binary codes' searches are the rows they read: 50 rows of 6 KB at
+~12 µs each (a vector of 1536 components is stored out of line,
+§M14.26: a point read and a chunk's) — on the server, a search reads its
+10 rows in 0.80 ms over `f32`, 20 in 0.48 over `int8`, 50 in 0.96 over
+bits.  Reading a row's large values with it is the remedy, a storage
+step of its own.
+
+What was taken, from where: quantized graphs with the full vectors read
+again for the answer are Qdrant's (scalar int8, binary; `oversampling`,
+`rescore`), Elasticsearch's (`int8_hnsw`, BBQ; `rescore_vector.oversample`)
+and Weaviate's (SQ, BQ, `rescoreLimit`); here the full vectors are the
+rows, which a search reads anyway, so rescoring is the reading of more of
+them.  Lucene's int8 corrective terms (the per-vector constants that make
+a distance one integer dot product), over a per-vector range; FAISS's and
+USearch's `f16`/`i8`/`b1` codecs.  Not taken: product quantization (FAISS
+IVF-PQ, DiskANN) — trained codebooks, retrained as data drifts; RaBitQ
+(Gao and Long 2024, Elasticsearch's BBQ) — a random rotation and a
+centroid, so trained state per graph, and asymmetric distances (the query
+kept in `f32`): measured against these bits later, where binary codes'
+recall at few rows read is what is wanting; Lucene's quantiles over a
+segment — the graph is never rewritten whole, so codes must not depend on
+what came later.
 
 **Done when:** the law kit passes on `vector`; every capability above
 works through SQL, `ncp` and all six drivers; exact search matches a

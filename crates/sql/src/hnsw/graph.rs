@@ -10,7 +10,9 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
 
-use nucleus_kernels::{dot, l1, l2_squared, mix};
+use nucleus_kernels::{
+    dot, dot_half, dot_u8, hamming, l1, l1_half, l1_u8, l2_squared, l2_squared_half, mix, to_half,
+};
 
 /// A node: a row's position in the index (dense, from 0).
 pub type Node = u32;
@@ -43,6 +45,183 @@ impl Metric {
     }
 }
 
+/// How the graph holds its vectors (`WITH (quantize = …)`): as they are,
+/// or quantized — smaller in memory and on disk, distances by their codes
+/// (the rows, read for the answer, give the exact ones).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Codec {
+    /// Little-endian `f32`s: the column's own.
+    F32,
+    /// IEEE halves (the nearest; subnormals flushed, the greatest
+    /// magnitude clamped): half the bytes.
+    Half,
+    /// A byte a component, each standing for `m + s · byte` with the
+    /// vector's own `m` (its least component) and `s` (its range over
+    /// 255) — after a header of `m`, `s`, the bytes' sum and the norm²
+    /// of what they stand for (`f32`s), so a distance is one integer dot
+    /// product (Lucene's corrective terms): a quarter of the bytes.
+    Int8,
+    /// A bit a component: whether it is above the vector's mean (above
+    /// zero, pgvector's `binary_quantize`, says little of vectors whose
+    /// components are all positive), in 64-bit words; distances are the
+    /// bits that differ: a thirty-second of the bytes.
+    Binary,
+}
+
+/// The bytes of an `Int8` code before its components.
+const INT8_HEAD: usize = 16;
+
+impl Codec {
+    /// By its `quantize` name.
+    pub fn named(name: &str) -> Option<Codec> {
+        Some(match name {
+            "none" => Codec::F32,
+            "half" => Codec::Half,
+            "int8" => Codec::Int8,
+            "binary" => Codec::Binary,
+            _ => return None,
+        })
+    }
+
+    /// Its `quantize` name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Codec::F32 => "none",
+            Codec::Half => "half",
+            Codec::Int8 => "int8",
+            Codec::Binary => "binary",
+        }
+    }
+
+    /// A code's bytes for `dims` components.
+    pub fn width(self, dims: usize) -> usize {
+        match self {
+            Codec::F32 => 4 * dims,
+            Codec::Half => 2 * dims,
+            Codec::Int8 => INT8_HEAD + dims,
+            Codec::Binary => dims.div_ceil(64) * 8,
+        }
+    }
+
+    /// The code of a vector stored as little-endian `f32`s (finite).
+    pub fn encode(self, v: &[u8]) -> Vec<u8> {
+        let xs = || v.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c));
+        match self {
+            Codec::F32 => v.to_vec(),
+            Codec::Half => xs().flat_map(|x| to_half(x).to_le_bytes()).collect(),
+            Codec::Int8 => {
+                let (lo, hi) = xs().fold((f32::INFINITY, f32::NEG_INFINITY), |(l, h), x| {
+                    (l.min(x), h.max(x))
+                });
+                let s = if hi > lo { (hi - lo) / 255.0 } else { 0.0 };
+                let mut out = vec![0u8; INT8_HEAD];
+                let (mut sum, mut norm) = (0u32, 0f64);
+                for x in xs() {
+                    let q = if s > 0.0 {
+                        ((x - lo) / s).round().clamp(0.0, 255.0) as u8
+                    } else {
+                        0
+                    };
+                    sum += u32::from(q);
+                    let r = f64::from(lo + s * f32::from(q));
+                    norm += r * r;
+                    out.push(q);
+                }
+                out[0..4].copy_from_slice(&lo.to_le_bytes());
+                out[4..8].copy_from_slice(&s.to_le_bytes());
+                out[8..12].copy_from_slice(&(sum as f32).to_le_bytes());
+                out[12..16].copy_from_slice(&(norm as f32).to_le_bytes());
+                out
+            }
+            Codec::Binary => {
+                let n = (v.len() / 4).max(1);
+                let mean = xs().map(f64::from).sum::<f64>() / n as f64;
+                let mut out = vec![0u8; self.width(v.len() / 4)];
+                for (i, x) in xs().enumerate() {
+                    if f64::from(x) > mean {
+                        out[i / 8] |= 1 << (i % 8);
+                    }
+                }
+                out
+            }
+        }
+    }
+}
+
+fn head(code: &[u8], at: usize) -> f32 {
+    f32::from_le_bytes([code[at], code[at + 1], code[at + 2], code[at + 3]])
+}
+
+/// The inner product of what two `Int8` codes stand for.
+#[inline]
+fn int8_dot(a: &[u8], b: &[u8]) -> f64 {
+    let (ma, sa, ta) = (head(a, 0), head(a, 4), head(a, 8));
+    let (mb, sb, tb) = (head(b, 0), head(b, 4), head(b, 8));
+    let d = (a.len() - INT8_HEAD) as f64;
+    let ab = f64::from(dot_u8(&a[INT8_HEAD..], &b[INT8_HEAD..]));
+    let (ma, sa, ta, mb, sb, tb) = (
+        f64::from(ma),
+        f64::from(sa),
+        f64::from(ta),
+        f64::from(mb),
+        f64::from(sb),
+        f64::from(tb),
+    );
+    d * ma * mb + ma * sb * tb + mb * sa * ta + sa * sb * ab
+}
+
+/// A metric over a codec: how the graph takes two codes' distance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Space {
+    /// The distance.
+    pub metric: Metric,
+    /// The vectors' codes.
+    pub codec: Codec,
+}
+
+impl Space {
+    /// Over vectors as they are.
+    pub fn plain(metric: Metric) -> Space {
+        Space {
+            metric,
+            codec: Codec::F32,
+        }
+    }
+
+    /// The distance of two codes (of one dimension): the metric's
+    /// ([`Metric::distance`]) between what they stand for — for `Binary`,
+    /// the bits that differ, whatever the metric.
+    #[inline]
+    pub fn distance(self, a: &[u8], b: &[u8]) -> f32 {
+        match self.codec {
+            Codec::F32 => self.metric.distance(a, b),
+            Codec::Half => match self.metric {
+                Metric::L2 => l2_squared_half(a, b) as f32,
+                Metric::Cosine => (1.0 - dot_half(a, b)) as f32,
+                Metric::Ip => -dot_half(a, b) as f32,
+                Metric::L1 => l1_half(a, b) as f32,
+            },
+            Codec::Int8 => match self.metric {
+                Metric::L2 => {
+                    let n = f64::from(head(a, 12)) + f64::from(head(b, 12));
+                    (n - 2.0 * int8_dot(a, b)).max(0.0) as f32
+                }
+                Metric::Cosine => (1.0 - int8_dot(a, b)) as f32,
+                Metric::Ip => -int8_dot(a, b) as f32,
+                Metric::L1 => l1_u8(
+                    &a[INT8_HEAD..],
+                    &b[INT8_HEAD..],
+                    head(a, 0),
+                    head(a, 4),
+                    head(b, 0),
+                    head(b, 4),
+                ) as f32,
+            },
+            Codec::Binary => hamming(a, b) as f32,
+        }
+    }
+}
+
 /// The graph's shape, as pgvector's `WITH (m, ef_construction)`.
 #[derive(Clone, Copy, Debug)]
 pub struct Params {
@@ -51,8 +230,8 @@ pub struct Params {
     pub m: usize,
     /// The candidates an insert looks at per layer.
     pub ef_construction: usize,
-    /// The distance.
-    pub metric: Metric,
+    /// The distance, over the vectors' codes.
+    pub space: Space,
     /// How far over its maximum a node's out-edges may grow by backlinks
     /// before they are pruned again (1: at once, hnswlib's; more: the
     /// storage rewrites a node's list less often).
@@ -530,7 +709,7 @@ pub fn insert_batch<G: GraphMut + Sync + ?Sized>(
                         continue;
                     }
                     let ly = p.level(y);
-                    let d = p.metric.distance(v, w);
+                    let d = p.space.distance(v, w);
                     s.distances += 1;
                     for c in cands.iter_mut().take(ly.min(level) + 1) {
                         c.push(Near { d, n: y });
@@ -585,10 +764,10 @@ pub fn insert_batch<G: GraphMut + Sync + ?Sized>(
 
 /// The `k` vectors of `data` (`width` bytes each) nearest `q`, nearest
 /// first: the exact answer the graph is held to.
-pub fn exact(metric: Metric, data: &[u8], width: usize, q: &[u8], k: usize) -> Vec<Near> {
+pub fn exact(space: Space, data: &[u8], width: usize, q: &[u8], k: usize) -> Vec<Near> {
     let mut found: BinaryHeap<Near> = BinaryHeap::with_capacity(k + 1);
     for (i, v) in data.chunks_exact(width).enumerate() {
-        let d = metric.distance(q, v);
+        let d = space.distance(q, v);
         if found.len() < k || found.peek().is_some_and(|f| d < f.d) {
             found.push(Near { d, n: i as Node });
             if found.len() > k {
