@@ -291,18 +291,18 @@ inserted by 10 writers (a row a transaction) while one client searches;
 
 | | nucleus | pgvector |
 |---|---:|---:|
-| indexed 900,000 rows | 55.1 s | 58.8 s |
-| recall ~0.93: µs a search, searches a second | 440 µs, 11,679 (`ef` 60, 0.933) | 894 µs, 5,564 (`ef` 40, 0.927) |
-| recall ~0.99 | 946 µs, 6,489 (`ef` 200, 0.989) | 2,818 µs (`ef` 200, 0.993) |
-| inserts by 10 writers | 4,689 rows/s | 2,141 rows/s |
-| a search meanwhile (`ef` 40) | 3,093 µs (recall 0.89) | 1,571 µs (0.93) |
+| indexed 900,000 rows | 53.8 s | 58.8 s |
+| recall ~0.93: µs a search, searches a second | 442 µs, 10,637 (`ef` 60, 0.933) | 894 µs, 5,564 (`ef` 40, 0.927) |
+| recall ~0.99 | 903 µs, 6,596 (`ef` 200, 0.989) | 2,818 µs (`ef` 200, 0.993) |
+| inserts by 10 writers | 4,806 rows/s | 2,141 rows/s |
+| a search meanwhile (`ef` 40) | 885 µs (recall 0.89) | 1,571 µs (0.93) |
 
 Both include SQL — parsing, planning, the protocol on a local socket;
 nucleus's round trip alone (`SELECT 1` from the Python driver) is ~60 µs.
-A search while the writers run reads the rows not yet in the graph one
-by one; the fold that takes them in runs in a committing session (or,
-once the writes stop, a searching one): after the inserts nucleus's
-search is back at 526 µs (`ef` 60, recall 0.931, 10,382 a second).
+While the writers run the upkeep is theirs — seals, folds, compactions
+apart from the folds — and a search scans only the few hundred rows not
+yet in the graph; after the inserts it is at 463 µs (`ef` 60, recall
+0.930).
 
 ```
 target/ann-data/.venv/bin/python bench/ann/data.py      # the datasets

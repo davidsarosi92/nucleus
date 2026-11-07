@@ -276,7 +276,7 @@ are marked ✅.
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
-| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts) |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
@@ -4596,6 +4596,60 @@ rounds): the load 23.29 / 22.33 s before, 23.78 / 21.91 s after; the
 queries' best 5,625 / 5,623 ms against 5,570 / 5,507 — no change past
 the noise (a read now asks the methods whether rows wait: one atomic
 load).
+
+*Done — searches while rows come in* (2026-11-07; step 4's open item).
+Measured first, by timing each search's parts on the server (the graph,
+the sealed rows, the delta, the rows read) and each upkeep step, on
+SIFT-1M through `bench/ann/sql.py` — five causes, each fixed and
+measured in turn (a search while 10 writers insert, `ef` 40, µs on the
+client; the server's mean in brackets; one run each, ±~15 % run to run):
+
+| step | a search meanwhile | what it was |
+|---|---:|---|
+| d01fab4 | 3,093–3,276 (6,433) | — |
+| the delta's range vacuumed after each seal | 1,972 (2,243) | the seals' deleted delta keys left tombstones every scan of the delta stepped over: 2 µs a row at the start, 21 by the end (a delta of ~200 rows, 0.3 → 20 ms); now ~1 µs, flat |
+| the patches' levels merged (logarithmic method) | 1,298 (1,050) | a list's lookup walked every patch since the last compaction (one a fold, ~100): the graph's part rose 250 → 290 µs between compactions |
+| compaction apart from the folds; the upkeep the writers' | 1,178 (912) | a fold that compacted rewrote the whole adjacency (~15,000 pages, 2.7 s) while the delta piled up to 13–23 k rows, searches 5–35 ms; and a searching session sometimes did a fold (20–70 ms) |
+| a compaction's pages put in 8 MiB transactions | 1,194 (932) | 128 MiB in one transaction took the KV's path for large ones: the others' commits stalled ~0.5 s |
+| seal and fold sizes from the measured row costs; the checkpoint's flush a page at a time | 1,228 (940) | the sizes assumed 470 / 160 ns a delta / sealed row — measured ~1,000 / ~100; a checkpoint's write-back held a buffer-pool shard's write lock through the shard's I/O: a search after the build's checkpoint waited 3.8 s (now 0.55) |
+
+The last row moves the trade-off (bigger folds, fewer delta rows) rather
+than the mean; the checkpoint's fix matters where a checkpoint falls
+inside the writes (1 GiB of WAL; none did in these runs).  Final run, the
+whole curve, quiet machine: a search meanwhile **885 µs** (3,093), 21,918
+searches in 20.8 s against 6,910; inserts 4,806 rows/s (4,689); after the
+inserts `ef` 60 463 µs (526); idle `ef` 60 442 µs (440).  pgvector: 1,571
+µs meanwhile (at recall 0.93; ours at `ef` 40 is 0.89 — the same recall,
+`ef` 60, not measured meanwhile yet).
+
+What was taken, from where: the range vacuum is RocksDB's queue pattern
+(a queue's deleted head makes every scan step over tombstones; RocksDB
+bounds the iterator past them or compacts the range — here the KV gets
+`Kv::vacuum_range`, the vacuum's own sweep bounded, not a second
+mechanism); the logarithmic method is Bentley and Saxe's (1980) for
+making a static structure dynamic — sizes as a binary counter's bits;
+the compaction beside the folds is an LSM's beside its flushes (and
+FreshDiskANN's background merge), its output read into memory as
+RocksDB's `prepopulate_block_cache` does; the upkeep by the writers is
+PostgreSQL's GIN pending list, cleaned by its inserters; the flush under
+a read lock is PostgreSQL's checkpointer (`SyncOneBuffer` writes a
+buffer under a share lock on it).  Looked at, not taken (yet): a small
+graph per sealed object (Milvus' interim index for growing segments,
+Lucene's per-segment graphs) — the sealed rows stay under ~3,000, where
+Milvus, Weaviate and Qdrant all still scan (their thresholds 5,000–
+20,000); int8 or RaBitQ codes for the sealed scan (Lucene's int8, FAISS's
+`IndexScalarQuantizer`) — the sealed rows are ~60 µs of a search now;
+early abandoning (partial distances against the `ef`-th, Bei and Gray
+1985) — not measured; a background thread for the compaction (the
+engine's checkpointer is one) — a writer's statement pays ~0.7 s once
+every ~50,000 rows instead, deterministic in the simulation.  Left: the
+rows a search reads cost ~17 µs each while the table is written (5.6
+idle) — the KV's, not the index's; the compaction rewrites every page
+the patches touch (with random inserts, all: 128 MiB at 1 M rows,
+~2.5 KB a row inserted).  Measured against d01fab4 (`phases.py`,
+alternating, 2 rounds): the load 21.83 / 21.19 s before, 21.78 / 21.69 s
+after; the queries' best 5,481 / 5,540 ms against 5,433 / 5,526 — no
+change.
 
 *Measured on the way* (2026-11-06): `docs/benchmarks.md`'s TPC-H table
 re-run on a quiet machine (`fseventsd`, at 99 % and 11 GB after 137 days,

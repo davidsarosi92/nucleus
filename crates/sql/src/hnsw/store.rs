@@ -126,6 +126,11 @@ impl Keys {
         k
     }
 
+    /// The ranges a seal empties: the delta's rows and its dead keys.
+    pub fn queues(&self) -> [(Vec<u8>, Vec<u8>); 2] {
+        [self.range(b'd'), self.range(b'x')]
+    }
+
     fn range(&self, tag: u8) -> (Vec<u8>, Vec<u8>) {
         let start = self.tagged(tag);
         let end = prefix_end(&start).expect("a tagged prefix");
@@ -330,6 +335,10 @@ pub struct Candidates {
     /// The rows the index holds: the graph's nodes (dead ones too), the
     /// sealed rows and the delta's.
     pub held: usize,
+    /// The sealed rows scanned, and the ns it took.
+    pub sealed: (usize, u64),
+    /// The delta's rows scanned, and the ns it took.
+    pub delta: (usize, u64),
 }
 
 /// A graph's dead nodes: sorted, and as bits.
@@ -562,15 +571,46 @@ impl Patch {
     }
 }
 
-/// Patches resolved in memory: the lists a patch changed as they are after
-/// it, over the patches before it; which nodes it has lists for.
+/// Patches resolved in memory: the lists some patches changed as they are
+/// after them, over the patches before; which nodes it has lists for; how
+/// many patches it holds.  A chain kept short by the logarithmic method
+/// (Bentley and Saxe 1980): a level takes in the one before it while that
+/// holds no more patches than it does — sizes as a binary counter's bits,
+/// so a lookup walks O(log patches) levels, not one a fold.
 struct Level {
     prev: Option<Arc<Level>>,
     lists: Lists,
     dirty: Vec<u64>,
+    patches: usize,
 }
 
 impl Level {
+    /// `self` with the levels before it merged in while they hold no more
+    /// patches than it (its lists win: they are newer).
+    fn merged(mut self) -> Self {
+        while let Some(p) = self.prev.clone() {
+            if p.patches > self.patches {
+                break;
+            }
+            for (k, v) in &p.lists {
+                self.lists.entry(*k).or_insert_with(|| v.clone());
+            }
+            if self.dirty.len() < p.dirty.len() {
+                self.dirty.resize(p.dirty.len(), 0);
+            }
+            for (a, b) in self.dirty.iter_mut().zip(&p.dirty) {
+                *a |= b;
+            }
+            self.patches += p.patches;
+            self.prev = p.prev.clone();
+        }
+        self
+    }
+
+    fn size(&self) -> usize {
+        self.lists.values().map(|l| 16 + 4 * l.len()).sum::<usize>() + 8 * self.dirty.len()
+    }
+
     #[inline]
     fn get(&self, n: Node, layer: usize) -> Option<&[Node]> {
         let (w, b) = (n as usize / 64, n as usize % 64);
@@ -873,16 +913,15 @@ impl<'a> View<'a> {
                     }
                     dirty[w] |= 1 << (n as usize % 64);
                 }
-                let bytes =
-                    lists.values().map(|l| 16 + 4 * l.len()).sum::<usize>() + 8 * dirty.len();
-                Ok((
-                    Level {
-                        prev: prev.clone(),
-                        lists,
-                        dirty,
-                    },
-                    bytes,
-                ))
+                let level = Level {
+                    prev: prev.clone(),
+                    lists,
+                    dirty,
+                    patches: 1,
+                }
+                .merged();
+                let bytes = level.size();
+                Ok((level, bytes))
             })?);
         }
         self.check()?;
@@ -969,6 +1008,17 @@ impl<'a> View<'a> {
 
     fn is_dead(&self, n: Node) -> bool {
         self.dead.as_ref().is_some_and(|d| d.has(n))
+    }
+
+    /// The pages the patches have lists for.
+    fn touched(&self) -> BTreeSet<usize> {
+        let mut out = BTreeSet::new();
+        let mut at = self.level.as_deref();
+        while let Some(l) = at {
+            out.extend(l.lists.keys().map(|k| (k >> 8) as usize / self.shape.page));
+            at = l.prev.as_deref();
+        }
+        out
     }
 }
 
@@ -1092,6 +1142,37 @@ impl GraphMut for Fold<'_, '_> {
     }
 }
 
+/// Adjacency pages `touched` of a graph of `nodes` nodes written whole,
+/// each node's lists as `list` gives them (in the shape's threads): each
+/// page and its bytes.
+fn adjacency_pages(
+    touched: &[usize],
+    nodes: u32,
+    shape: &Shape,
+    list: &(dyn Fn(Node, usize, &mut Vec<Node>) + Sync),
+) -> Vec<(usize, Vec<u8>)> {
+    let mut s = Scratch::default();
+    graph::par_map(touched, shape.batch.threads, &mut s, |&p, _| {
+        let lo = p * shape.page;
+        let hi = ((p + 1) * shape.page).min(nodes as usize);
+        let lists: Vec<Vec<Vec<Node>>> = (lo..hi)
+            .map(|n| {
+                let mut node = Vec::new();
+                for layer in 0..16 {
+                    let mut l = Vec::new();
+                    list(n as Node, layer, &mut l);
+                    node.push(l);
+                }
+                while node.last().is_some_and(Vec::is_empty) {
+                    node.pop();
+                }
+                node
+            })
+            .collect();
+        (p, AdjChunk::encode_page(&lists))
+    })
+}
+
 /// Inserts `rows` (primary key, stored vector) into `view`'s graph and
 /// sets its dead nodes to `dead` (`None`: as they were); the new graph
 /// root, its objects written to `w` (those it replaced dropped).
@@ -1130,10 +1211,8 @@ fn fold_into(
     // compaction is due anyway): each list through one rewritten, the
     // entry point moved off one; the graph then has none.
     let dead = dead.unwrap_or_else(|| view.dead.as_ref().map_or(Vec::new(), |d| d.nodes.clone()));
-    let adjacency = f64::from(nodes) * (shape.params.m * 2 * 4) as f64;
-    let due = compact || view.root.patch_bytes as f64 > shape.compact * adjacency;
     let consolidate =
-        !dead.is_empty() && (due || dead.len() as f64 > CONSOLIDATE * f64::from(nodes));
+        !dead.is_empty() && (compact || dead.len() as f64 > CONSOLIDATE * f64::from(nodes));
     let dead = if consolidate {
         let set = Dead::new(dead);
         let is = |x: Node| set.has(x);
@@ -1207,46 +1286,30 @@ fn fold_into(
     }
     view.check()?;
 
-    // A patch of the fold's changes, or — once the patches outgrow
-    // `compact` of the adjacency — the pages they touch rewritten.
+    // A patch of the fold's changes — or, building or consolidating, the
+    // pages they touch rewritten.  Otherwise the patches are rewritten
+    // into pages apart from the folds ([`Index::compaction`]).
     let patch = Patch::encode(&changed);
-    let bytes = view.root.patch_bytes + patch.len() as u64;
-    let (patches, patch_bytes) = if compact || bytes as f64 > shape.compact * adjacency {
+    let (patches, patch_bytes) = if compact {
         let mut touched: BTreeSet<usize> = changed
             .keys()
             .map(|k| (k >> 8) as usize / shape.page)
             .collect();
-        let mut at = view.level.as_deref();
-        while let Some(l) = at {
-            touched.extend(l.lists.keys().map(|k| (k >> 8) as usize / shape.page));
-            at = l.prev.as_deref();
-        }
-        for p in touched {
-            let lo = p * shape.page;
-            let hi = ((p + 1) * shape.page).min(nodes as usize);
-            let lists: Vec<Vec<Vec<Node>>> = (lo..hi)
-                .map(|n| {
-                    let mut node = Vec::new();
-                    for layer in 0..16 {
-                        let l = match changed.get(&slot(n as Node, layer)) {
-                            Some((l, _)) => l.clone(),
-                            None if (n as u32) < base => {
-                                let mut l = Vec::new();
-                                view.neighbors(n as Node, layer, &mut l);
-                                l
-                            }
-                            None => Vec::new(),
-                        };
-                        node.push(l);
-                    }
-                    while node.last().is_some_and(Vec::is_empty) {
-                        node.pop();
-                    }
-                    node
-                })
-                .collect();
+        touched.extend(view.touched());
+        let touched: Vec<usize> = touched.into_iter().collect();
+        let written = adjacency_pages(&touched, nodes, &shape, &|n, layer, out| match changed
+            .get(&slot(n, layer))
+        {
+            Some((l, _)) => {
+                out.clear();
+                out.extend_from_slice(l);
+            }
+            None if n < base => view.neighbors(n, layer, out),
+            None => out.clear(),
+        });
+        for (p, bytes) in written {
             let old = pages[p].1;
-            pages[p].1 = w.object(2, AdjChunk::encode_page(&lists));
+            pages[p].1 = w.object(2, bytes);
             if old != 0 && old != pages[p].1 {
                 w.dropped.insert(old);
             }
@@ -1257,8 +1320,8 @@ fn fold_into(
         (view.root.patches.clone(), view.root.patch_bytes)
     } else {
         let mut chain = view.root.patches.clone();
-        chain.push(w.object(3, patch));
-        (chain, bytes)
+        chain.push(w.object(3, patch.clone()));
+        (chain, view.root.patch_bytes + patch.len() as u64)
     };
     view.check()?;
     let dir = view.dir.write(&pages, w);
@@ -1291,6 +1354,43 @@ pub struct Index {
     pub keys: Keys,
     /// Its shape.
     pub shape: Shape,
+}
+
+impl Compaction {
+    /// Its pages in batches of about `budget` bytes, each put in a
+    /// transaction of its own — small, so none takes the KV's path for
+    /// large ones (holding the others up), and none conflicts: the keys
+    /// are new.
+    pub fn batches(&self, budget: usize) -> Vec<std::ops::Range<usize>> {
+        let mut out = Vec::new();
+        let (mut start, mut bytes) = (0, 0);
+        for (i, (_, b)) in self.objects.iter().enumerate() {
+            bytes += b.len();
+            if bytes >= budget {
+                out.push(start..i + 1);
+                (start, bytes) = (i + 1, 0);
+            }
+        }
+        if start < self.objects.len() {
+            out.push(start..self.objects.len());
+        }
+        out
+    }
+
+    /// Lets go of its pages' bytes (put).
+    pub fn put(&mut self) {
+        self.objects = Vec::new();
+    }
+}
+
+/// A compaction worked out ([`Index::compaction`]), for
+/// [`Index::install`]: the graph it was worked out from, and each page it
+/// rewrote with its adjacency object then and now.
+pub struct Compaction {
+    lineage: u64,
+    from: GraphRoot,
+    pages: Vec<(usize, u64, u64)>,
+    objects: Vec<(u64, Vec<u8>)>,
 }
 
 /// Each row's nodes in a graph, by a hash of the primary key: what a fold
@@ -1462,6 +1562,132 @@ impl Index {
         Ok(folded)
     }
 
+    /// Whether the graph's patches, as `txn` sees them, have outgrown
+    /// `compact` of its adjacency: a [`compaction`](Self::compaction) due.
+    pub fn compaction_due(&self, txn: &dyn KvRead) -> Result<bool> {
+        let g = self.root_in(txn)?.graph;
+        let adjacency = f64::from(g.nodes) * (self.shape.params.m * 2 * 4) as f64;
+        Ok(!g.patches.is_empty() && g.patch_bytes as f64 > self.shape.compact * adjacency)
+    }
+
+    /// The pages the graph's patches touch, rewritten with them as `r`
+    /// sees the graph — for [`put`](Self::put_compaction) (new objects
+    /// only, no key another transaction writes) and
+    /// [`install`](Self::install), which swaps them in for the patches.
+    /// The rewrite is the long part, so it is done from a snapshot apart
+    /// from the folds, which go on meanwhile: an LSM's compaction beside
+    /// its flushes.  `None`: no patches.
+    pub fn compaction(&self, r: &dyn KvRead) -> Result<Option<Compaction>> {
+        let root = self.root_in(r)?;
+        if root.graph.patches.is_empty() {
+            return Ok(None);
+        }
+        let view = View::open(self.shape, &self.keys, r, &root)?;
+        let touched: Vec<usize> = view.touched().into_iter().collect();
+        let written = adjacency_pages(&touched, root.graph.nodes, &self.shape, &|n, layer, out| {
+            view.neighbors(n, layer, out)
+        });
+        view.check()?;
+        let mut objects = Vec::with_capacity(written.len());
+        let pages = written
+            .into_iter()
+            .map(|(p, bytes)| {
+                let id = object_id(2, &bytes);
+                objects.push((id, bytes));
+                (p, view.dir.pages[p].1, id)
+            })
+            .collect();
+        Ok(Some(Compaction {
+            lineage: root.lineage,
+            from: root.graph,
+            pages,
+            objects,
+        }))
+    }
+
+    /// Puts compaction `c`'s pages in batch `b` of
+    /// [`Compaction::batches`] in `txn`.
+    pub fn put_compaction(
+        &self,
+        txn: &mut dyn KvTxn,
+        c: &Compaction,
+        b: std::ops::Range<usize>,
+    ) -> Result<()> {
+        for (id, bytes) in &c.objects[b] {
+            txn.put(&self.keys.obj(*id), bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Swaps compaction `c` in for the patches it took, in `txn`: true if
+    /// the graph changed since only by folds (their patches, after `c`'s,
+    /// stay); otherwise (a consolidation or another compaction rewrote
+    /// pages) false, and its pages deleted.
+    pub fn install(&self, txn: &mut dyn KvTxn, c: &Compaction) -> Result<bool> {
+        let mut w = Writes::new();
+        let root = {
+            let ro: &dyn KvTxn = &*txn;
+            let r = ro.shared().ok_or_else(|| Error::internal("shared reads"))?;
+            let mut root = self.root_in(r)?;
+            let objects = Objects {
+                keys: &self.keys,
+                txn: r,
+            };
+            let dir = Dir::load(&objects, root.graph.dir, self.shape.chunk / self.shape.page)?;
+            let ok = root.lineage == c.lineage
+                && root.graph.patches.starts_with(&c.from.patches)
+                && c.pages
+                    .iter()
+                    .all(|&(p, old, _)| dir.pages.get(p).is_some_and(|x| x.1 == old));
+            if !ok {
+                let live: BTreeSet<u64> = dir.pages.iter().map(|x| x.1).collect();
+                for &(_, _, new) in &c.pages {
+                    if !live.contains(&new) {
+                        w.dropped.insert(new);
+                    }
+                }
+                None
+            } else {
+                let mut pages = dir.pages.clone();
+                for &(p, old, new) in &c.pages {
+                    pages[p].1 = new;
+                    if old != 0 && old != new {
+                        w.dropped.insert(old);
+                    }
+                }
+                w.dropped.extend(c.from.patches.iter().copied());
+                let id = dir.write(&pages, &mut w);
+                if root.graph.dir != id {
+                    w.dropped.insert(root.graph.dir);
+                }
+                root.graph.dir = id;
+                root.graph.patches.drain(..c.from.patches.len());
+                root.graph.patch_bytes -= c.from.patch_bytes;
+                Some(root)
+            }
+        };
+        w.apply(txn, &self.keys)?;
+        match root {
+            Some(root) => {
+                txn.put(&self.keys.root(), &root.encode())?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Reads the graph's adjacency into memory as `txn` sees it — after a
+    /// compaction, so the searches do not (RocksDB's
+    /// `prepopulate_block_cache` for a compaction's output).
+    pub fn warm(&self, txn: &dyn KvRead) -> Result<()> {
+        let root = self.root_in(txn)?;
+        let view = View::open(self.shape, &self.keys, txn, &root)?;
+        for c in 0..view.dir.adjs.len() {
+            view.page_list((c * self.shape.chunk) as Node, 0);
+        }
+        view.check()
+    }
+
     /// `view`'s dead nodes with those of the rows `gone` (each row's node
     /// with the vector it had, unless the table has the row with that
     /// vector again), sorted.
@@ -1543,6 +1769,7 @@ impl Index {
             }
             view.check()?;
         }
+        let t1 = std::time::Instant::now();
         // The sealed objects from memory, the delta from the KV: the
         // nearest `ef` of them.
         let mut near: std::collections::BinaryHeap<(OrdF32, Vec<u8>)> = Default::default();
@@ -1556,12 +1783,15 @@ impl Index {
                 near.push((OrdF32(d), pk.to_vec()));
             }
         };
+        let mut sealed_n = 0;
         for &(id, _) in &root.sealed {
             let sealed = self.sealed(txn, id)?;
+            sealed_n += sealed.data.len() / self.shape.width;
             for (i, v) in sealed.data.chunks_exact(self.shape.width).enumerate() {
                 push(metric.distance(q, v), sealed.pks.get(i));
             }
         }
+        let t2 = std::time::Instant::now();
         let (start, end) = self.keys.range(b'd');
         for e in txn.scan(Bound::Included(&start), Bound::Excluded(&end))? {
             let (k, v) = e?;
@@ -1569,14 +1799,18 @@ impl Index {
                 push(metric.distance(q, &v), self.keys.delta_pk(&k));
             }
         }
+        let t3 = std::time::Instant::now();
         all &= others <= ef;
         held += others;
         out.extend(near.into_iter().map(|(d, pk)| (d.0, pk)));
         out.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let delta = others - sealed_n;
         Ok(Candidates {
             near: out,
             all,
             held,
+            sealed: (sealed_n, (t2 - t1).as_nanos() as u64),
+            delta: (delta, (t3 - t2).as_nanos() as u64),
         })
     }
 
@@ -1714,5 +1948,147 @@ impl PartialOrd for OrdF32 {
 impl Ord for OrdF32 {
     fn cmp(&self, o: &Self) -> std::cmp::Ordering {
         self.0.total_cmp(&o.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use nucleus_kv::{Database, Kv, Options, TxnOptions};
+    use nucleus_platform::sim::SimPlatform;
+
+    use super::*;
+    use crate::hnsw::graph::Metric;
+
+    fn vector(i: u32) -> Vec<u8> {
+        [i % 37, i % 11, i % 5, i / 37 % 13]
+            .iter()
+            .flat_map(|&x| (x as f32).to_le_bytes())
+            .collect()
+    }
+
+    fn pk(i: u32) -> Vec<u8> {
+        i.to_be_bytes().to_vec()
+    }
+
+    fn commit<T>(kv: &dyn Kv, f: impl FnOnce(&mut dyn KvTxn) -> T) -> T {
+        let mut t = kv.begin(TxnOptions::default()).unwrap();
+        let v = f(t.as_mut());
+        t.commit().unwrap();
+        v
+    }
+
+    /// Rows `range` written to the delta, sealed and folded.
+    fn fold_rows(
+        kv: &dyn Kv,
+        ix: &Index,
+        range: std::ops::Range<u32>,
+        rows: &mut HashMap<Vec<u8>, Vec<u8>>,
+        by_row: &mut ByRow,
+    ) {
+        commit(kv, |t| {
+            for i in range {
+                t.put(&ix.keys.delta(&pk(i), nonce()), &vector(i)).unwrap();
+                rows.insert(pk(i), vector(i));
+            }
+        });
+        commit(kv, |t| ix.seal(t).unwrap());
+        let rows = &*rows;
+        commit(kv, |t| {
+            ix.fold(t, by_row, &|_, pk| Ok(rows.get(pk).cloned()))
+                .unwrap()
+        });
+    }
+
+    fn root(kv: &dyn Kv, ix: &Index) -> Root {
+        let t = kv.begin(TxnOptions::read_only()).unwrap();
+        ix.root(t.shared().unwrap()).unwrap()
+    }
+
+    /// The index whole, and its ten nearest of a query the exact ones.
+    fn sound(kv: &dyn Kv, ix: &Index, rows: &HashMap<Vec<u8>, Vec<u8>>) {
+        let t = kv.begin(TxnOptions::read_only()).unwrap();
+        let r = t.shared().unwrap();
+        let all: Vec<(Vec<u8>, Vec<u8>)> =
+            rows.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut problems = Vec::new();
+        ix.check(r, "t", &all, &mut problems).unwrap();
+        assert_eq!(problems, Vec::<String>::new());
+        let q = vector(5);
+        let mut exact: Vec<f32> = rows.values().map(|v| Metric::L2.distance(&q, v)).collect();
+        exact.sort_by(f32::total_cmp);
+        let found = ix
+            .candidates(r, &q, rows.len(), &mut Scratch::default())
+            .unwrap();
+        let got: Vec<f32> = found.near.iter().take(10).map(|c| c.0).collect();
+        assert_eq!(got, exact[..10]);
+    }
+
+    #[test]
+    fn a_compaction_goes_in_between_folds() {
+        let p = Arc::new(SimPlatform::new(3));
+        let db = Database::open_on(p, Path::new("/db"), Options::default()).unwrap();
+        let kv: &dyn Kv = &db;
+        let params = Params {
+            m: 8,
+            ef_construction: 32,
+            metric: Metric::L2,
+            slack: 1,
+        };
+        let ix = Index {
+            keys: Keys::new(vec![0x7f, 1]),
+            shape: Shape::new(params, 16, 2),
+        };
+        let mut rows: HashMap<Vec<u8>, Vec<u8>> = (0..1000).map(|i| (pk(i), vector(i))).collect();
+        let mut sorted: Vec<(Vec<u8>, Vec<u8>)> =
+            rows.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        sorted.sort();
+        commit(kv, |t| ix.build(t, &sorted).unwrap());
+        let mut by_row = ByRow::default();
+
+        // A fold leaves a patch, past its share: a compaction is due.
+        fold_rows(kv, &ix, 1000..1100, &mut rows, &mut by_row);
+        assert_eq!(root(kv, &ix).graph.patches.len(), 1);
+        {
+            let t = kv.begin(TxnOptions::read_only()).unwrap();
+            assert!(ix.compaction_due(t.shared().unwrap()).unwrap());
+        }
+
+        // Worked out from a snapshot; a fold meanwhile; swapped in: the
+        // later fold's patch stays, on the rewritten pages.
+        let snapshot = kv.begin(TxnOptions::read_only()).unwrap();
+        let c = ix.compaction(snapshot.shared().unwrap()).unwrap().unwrap();
+        let c2 = ix.compaction(snapshot.shared().unwrap()).unwrap().unwrap();
+        drop(snapshot);
+        for b in c.batches(1000) {
+            commit(kv, |t| ix.put_compaction(t, &c, b).unwrap());
+        }
+        fold_rows(kv, &ix, 1100..1200, &mut rows, &mut by_row);
+        let before = root(kv, &ix).graph;
+        assert_eq!(before.patches.len(), 2);
+        assert!(commit(kv, |t| ix.install(t, &c).unwrap()));
+        let after = root(kv, &ix).graph;
+        assert_eq!(after.patches, before.patches[1..]);
+        assert_eq!(after.patch_bytes, before.patch_bytes - c.from.patch_bytes);
+        assert_eq!(after.nodes, 1200);
+        sound(kv, &ix, &rows);
+
+        // Another worked out from the same graph: refused, its pages gone.
+        for b in c2.batches(1000) {
+            commit(kv, |t| ix.put_compaction(t, &c2, b).unwrap());
+        }
+        assert!(!commit(kv, |t| ix.install(t, &c2).unwrap()));
+        {
+            let t = kv.begin(TxnOptions::read_only()).unwrap();
+            let live: BTreeSet<u64> = c.pages.iter().map(|x| x.2).collect();
+            for &(_, _, id) in &c2.pages {
+                let there = t.get(&ix.keys.obj(id)).unwrap().is_some();
+                assert_eq!(there, live.contains(&id), "page object {id:x}");
+            }
+        }
+        sound(kv, &ix, &rows);
+        let t = kv.begin(TxnOptions::read_only()).unwrap();
+        ix.warm(t.shared().unwrap()).unwrap();
     }
 }

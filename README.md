@@ -61,7 +61,8 @@ conflicts and searched by `ORDER BY v <=> $1 LIMIT k` where that costs
 less — filters included, the search widened until `k` rows pass, every
 row read where they cannot; on SIFT-1M through SQL, at pgvector's
 recall, half its time a search and 2× its searches a second, 2× its
-inserts (`docs/benchmarks.md`); a hash join whose right side turns out
+inserts, and a search while they come in 0.9 ms against its 1.6
+(`docs/benchmarks.md`); a hash join whose right side turns out
 smaller than estimated looks its left side up instead (an adaptive
 join).  Statistics have begun (§M14.27): sums of doubles kept exactly
 and rounded once, so a parallel `sum` gives the same bits every run, and

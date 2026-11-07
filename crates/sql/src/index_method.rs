@@ -56,10 +56,11 @@ pub trait IndexMethod: Send + Sync {
     fn build(&self, txn: &mut dyn KvTxn, reg: &Registry, t: &Table, i: usize) -> Result<()>;
 
     /// After a statement in `kv` ended outside a transaction block, or a
-    /// block committed (any session's): the method's upkeep, if it keeps
-    /// some for then.  By default nothing.
-    fn after_statement(&self, kv: &Arc<dyn nucleus_kv::Kv>) -> Result<()> {
-        let _ = kv;
+    /// block committed (any session's; `wrote`: one that may have
+    /// written): the method's upkeep, if it keeps some for then.  By
+    /// default nothing.
+    fn after_statement(&self, kv: &Arc<dyn nucleus_kv::Kv>, wrote: bool) -> Result<()> {
+        let _ = (kv, wrote);
         Ok(())
     }
 
@@ -142,9 +143,9 @@ pub fn of(ix: &Index) -> Result<Option<Arc<dyn IndexMethod>>> {
     }
 }
 
-/// After a statement or a commit in `kv`: every registered method's
-/// [`IndexMethod::after_statement`].
-pub fn after_statement(kv: &Arc<dyn nucleus_kv::Kv>) -> Result<()> {
+/// After a statement or a commit in `kv` (`wrote`: one that may have
+/// written): every registered method's [`IndexMethod::after_statement`].
+pub fn after_statement(kv: &Arc<dyn nucleus_kv::Kv>, wrote: bool) -> Result<()> {
     let methods: Vec<Arc<dyn IndexMethod>> = registry()
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -152,7 +153,7 @@ pub fn after_statement(kv: &Arc<dyn nucleus_kv::Kv>) -> Result<()> {
         .cloned()
         .collect();
     for m in methods {
-        m.after_statement(kv)?;
+        m.after_statement(kv, wrote)?;
     }
     Ok(())
 }

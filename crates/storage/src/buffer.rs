@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::error::{Error, Result};
 use crate::page::{Page, PageId, PageType};
@@ -137,6 +137,9 @@ pub struct BufferPool {
     misses: AtomicU64,
     evictions: AtomicU64,
     writebacks: AtomicU64,
+    /// Held by a flush: two at once could write a page's copies in the
+    /// wrong order (the shards' read locks keep only evictions out).
+    flushing: Mutex<()>,
 }
 
 impl std::fmt::Debug for BufferPool {
@@ -223,6 +226,7 @@ impl BufferPool {
             misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             writebacks: AtomicU64::new(0),
+            flushing: Mutex::new(()),
         }
     }
 
@@ -494,9 +498,9 @@ impl BufferPool {
 
     /// Writes every dirty page to the pager.  Pages stay cached.
     pub fn flush(&self) -> Result<()> {
+        let _one = self.flushing.lock().unwrap_or_else(|e| e.into_inner());
         for shard in &*self.shards {
-            let inner = shard.write().unwrap_or_else(|e| e.into_inner());
-            self.flush_shard(&inner, |_| true)?;
+            self.flush_shard(shard, |_| true)?;
         }
         Ok(())
     }
@@ -505,31 +509,44 @@ impl BufferPool {
     /// to the pager — while writers go on, copying them as they change
     /// them.  Pages stay cached.
     pub fn flush_frozen(&self) -> Result<()> {
+        let _one = self.flushing.lock().unwrap_or_else(|e| e.into_inner());
         for shard in &*self.shards {
-            let inner = shard.write().unwrap_or_else(|e| e.into_inner());
-            self.flush_shard(&inner, |id| self.pager.is_frozen(id))?;
+            self.flush_shard(shard, |id| self.pager.is_frozen(id))?;
         }
         Ok(())
     }
 
-    fn flush_shard(&self, inner: &Inner, wanted: impl Fn(PageId) -> bool) -> Result<()> {
-        for (i, id) in inner.ids.iter().enumerate() {
-            let (Some(id), f) = (id, self.frame(inner.start + i)) else {
+    /// Writes `shard`'s dirty pages that are `wanted` — a page at a time
+    /// under the shard's read lock (PostgreSQL's checkpointer writes a
+    /// buffer under a share lock on it the same way): hits, which read
+    /// the shard too, go on meanwhile; a load or an eviction, which write
+    /// it, wait for one page's write, not the shard's.  The read lock is
+    /// what keeps an eviction from writing the same page meanwhile, a
+    /// newer copy perhaps, which this older one would then overwrite.
+    fn flush_shard(&self, shard: &Shard, wanted: impl Fn(PageId) -> bool) -> Result<()> {
+        let (start, frames) = {
+            let inner = shard.read().unwrap_or_else(|e| e.into_inner());
+            (inner.start, inner.ids.len())
+        };
+        for i in 0..frames {
+            let inner = shard.read().unwrap_or_else(|e| e.into_inner());
+            let (Some(id), f) = (inner.ids[i], self.frame(start + i)) else {
                 continue;
             };
-            if !f.dirty.load(Ordering::Acquire) || !wanted(*id) {
+            if !f.dirty.load(Ordering::Acquire) || !wanted(id) {
                 continue;
             }
             // Clear the flag before copying: a write that starts after the
             // copy sets it again and is flushed next time.
             if f.dirty.swap(false, Ordering::AcqRel) {
                 let mut copy = f.page.read().unwrap_or_else(|e| e.into_inner()).clone();
-                if let Err(e) = self.pager.write_page(*id, &mut copy) {
+                if let Err(e) = self.pager.write_page(id, &mut copy) {
                     f.dirty.store(true, Ordering::Release);
                     return Err(e);
                 }
                 self.writebacks.fetch_add(1, Ordering::Relaxed);
             }
+            drop(inner);
         }
         Ok(())
     }

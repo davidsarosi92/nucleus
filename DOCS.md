@@ -325,7 +325,12 @@ copy-on-write fails at once.  `create(type)` allocates a page into a frame;
 `free(id)` drops it (must be unpinned; a dirty page of a commit in flight
 is written back first — the frozen state still holds it).
 `flush_frozen` writes back the dirty pages of the commit in flight while
-writers go on.  Eviction is the clock algorithm
+writers go on — and readers: a page at a time under its shard's read
+lock (PostgreSQL's checkpointer writes a buffer under a share lock the
+same way), so hits go on and a load or an eviction waits for one page's
+write, not the shard's (holding the shard's write lock through it, a
+checkpoint after a large build held searches up for seconds); one flush
+at a time.  Eviction is the clock algorithm
 over unpinned frames; dirty victims are written back first.  `flush`
 writes every dirty frame, `sync` = flush + pager commit.  The frames are
 split into up to 16 shards (at least 256 frames each; a page always in the
@@ -847,7 +852,13 @@ distributed implementation will provide (§F3).
   in `<dir>/scratch/` (left-overs removed on opening).
 - `Kv::vacuum()` / `Kv::vacuum_wanted()`: the store's maintenance and
   whether it has work (committed intents to make versions); by default
-  none.  `Kv::vacuum_background(go_on)`: the same in small batches (2 048
+  none.  `Kv::vacuum_range(start, end)`: the versions no snapshot sees
+  removed from those keys alone (keys with an intent left whole) — for a
+  range used as a queue, keys put then deleted and never written again,
+  whose tombstones a scan would otherwise step over until the whole
+  vacuum runs (RocksDB's queue pattern; an HNSW index's delta, §8.18);
+  `Engine::vacuum_range`, a chunk of the vacuum's sweep (`sweep_chunk`)
+  bounded by the range.  `Kv::vacuum_background(go_on)`: the same in small batches (2 048
   entries), `go_on` asked between them — `false` stops the sweep there,
   and the next call goes on from it (with the transactions it began
   with: their statuses go when a sweep has passed every key).
@@ -3045,9 +3056,11 @@ index's prefix, `r` the root, `o` + id the objects, `d` + primary key +
 nonce a delta row (its vector), `x` + primary key + vector hash + nonce a
 dead row.  The graph is immutable objects keyed by a hash of their
 contents: vector pages and adjacency pages of 64 nodes (decoded into
-chunks of 4,096 in memory), patches of the lists a fold changed (until
-they pass a tenth of the graph's edges: then the pages they touch are
-rewritten), a directory of the pages in parts of 256, the dead nodes;
+chunks of 4,096 in memory), patches of the lists a fold changed (in
+memory a chain of levels kept short by the logarithmic method, Bentley
+and Saxe: a level takes in the one before while that holds no more
+patches, so a lookup walks O(log patches) levels), a directory of the
+pages in parts of 256, the dead nodes;
 decoded, they are shared by every snapshot (`hnsw::cache`: up to 1 GiB,
 the least recently used dropped past it).  A write puts the row's
 vector into the delta and, for a delete or an update of the vector, a
@@ -3055,26 +3068,43 @@ dead key, in the statement's transaction (an update of other columns
 writes nothing): every key is new, so writers never conflict.  The
 upkeep — each step a transaction of its own, run again on a conflict
 (with another upkeep only) — *seals*: the delta and dead keys it sees
-moved into a sealed object the root lists (an LSM's memtable flush);
-and *folds*: every sealed object's rows the table still has as they are
-inserted into the graph in batches on the machine's threads, the nodes
-of the rows updated or deleted marked dead (passed over by searches),
-and once the dead are 2 % of the graph, or a compaction is due, cut out
-(each list through a dead node rewritten from its live neighbours', the
-entry point moved off).  It runs after each statement outside a
-transaction block and each block's commit, by that session
-(`index_method::after_statement`; PostgreSQL's GIN `fastupdate` cleans
-its pending list so), for each index of that database with rows waiting
-(the process notes the delta's keys written and the rows left sealed):
-a seal once the delta passes the seal's size, a fold once the sealed
-rows pass the fold's.  The sizes are economic order quantities (Harris)
-of what the index measures as it runs — writes and searches a second, a
-fold's fixed cost (a decayed line fitted to folds' times against their
-rows), a seal's — at most 10,000 rows, a fold's nudged a fifth either
-way in turn; as the writes stop their rate falls and so do the sizes,
-so the rows left waiting are folded after the searches that pay for
-them (reads run the upkeep too).  `hnsw::upkeep_now` runs it whatever
-the sizes (tests).
+moved into a sealed object the root lists (an LSM's memtable flush),
+then the delta's range vacuumed (`Kv::vacuum_range`: the moved keys'
+tombstones, which every search's scan of the delta would otherwise step
+over — 2 µs a row growing to 20 as the seals went on, before); *folds*:
+every sealed object's rows the table still has as they are inserted into
+the graph in batches on the machine's threads, the nodes of the rows
+updated or deleted marked dead (passed over by searches), and once the
+dead are 2 % of the graph cut out (each list through a dead node
+rewritten from its live neighbours', the entry point moved off); and
+*compacts* once a fold leaves the patches past a tenth of the graph's
+edges — apart from the folds, as an LSM compacts beside its flushes:
+the pages the patches touch rewritten from a snapshot on the machine's
+threads (`Index::compaction`), put in transactions of about 8 MiB of
+new objects each (no conflicts, none on the KV's path for large
+transactions), then swapped in between two folds in a short transaction
+(`Index::install`: the patches it took dropped, later folds' kept; a
+graph rewritten meanwhile by a consolidation refuses it, its pages
+deleted), and the new pages read into memory (`Index::warm`, RocksDB's
+`prepopulate_block_cache` for a compaction's output) — a fold no longer
+rewrites the whole adjacency (2.7 s at 1 M rows, the delta piling up
+meanwhile).  It runs after each statement outside a transaction block
+and each block's commit, by that session
+(`index_method::after_statement(kv, wrote)`; PostgreSQL's GIN
+`fastupdate` cleans its pending list so), for each index of that
+database with rows waiting (the process notes the delta's keys written
+and the rows left sealed): a seal once the delta passes the seal's size,
+a fold once the sealed rows pass the fold's — while rows come in (a row
+a second or more), only by a session whose statement may have written,
+so a search never waits on it.  The sizes are economic order quantities
+(Harris) of what the index measures as it runs — writes and searches a
+second, a fold's fixed cost (a decayed line fitted to folds' times
+against their rows), a seal's, and what a waiting row costs a search,
+sealed and in the delta (averaged from the searches' own scans) — at
+most 10,000 rows, a fold's nudged a fifth either way in turn; as the
+writes stop their rate falls and so do the sizes, so the rows left
+waiting are folded by the searches that follow.  `hnsw::upkeep_now`
+runs it whatever the sizes (tests).
 
 `hnsw::search(txn, t, i, q, k, ef, ef_most, wanted, keep)`: the graph
 searched with `ef` (its dead nodes passed over) and the sealed rows
@@ -3124,7 +3154,10 @@ upkeep; each operator class; the definitions refused; the upkeep after
 commits; `ORDER BY … LIMIT` through the planner — the plans chosen and
 not, recall against the exact search, `hnsw.ef_search`, a filter, an
 offset, the fallback to every row, an enclosing row's vector, writes;
-the rows left waiting folded by searches.  `crates/sql/tests/hnsw_crash.rs`:
+the rows left waiting folded by searches; and (a unit test in `store`)
+a compaction worked out, a fold meanwhile, swapped in — the later
+patch kept, the index whole and exact — and a second one from the same
+graph refused, its pages gone.  `crates/sql/tests/hnsw_crash.rs`:
 writes, rollbacks, seals and folds on the simulation, a crash at an I/O
 operation (dropped unsynced writes, torn ones), reopen — the rows a
 step's, the integrity check clean, a search at a wide `ef` the exact
@@ -3848,6 +3881,16 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-07 — §M14.12 V4b, HNSW searches while rows come in:**
+  `Kv::vacuum_range` (`Engine::vacuum_range`, the vacuum's sweep in
+  chunks, `sweep_chunk`) after each seal; a compaction apart from the
+  folds (`Index::compaction`, `put_compaction`, `install`, `warm`;
+  `Compaction`); the patches' levels merged by the logarithmic method;
+  the upkeep only by writing sessions while rows come in
+  (`IndexMethod::after_statement(kv, wrote)`); seal and fold sizes from
+  the row costs the searches measure; the buffer pool's flushes a page
+  at a time under the shard's read lock (§4.3, §6.1, §8.18).
 
 - **2026-11-07 — §M14.12 V4b step 4, HNSW settled:** the upkeep after
   every statement outside a block (`IndexMethod::after_statement`,

@@ -217,6 +217,17 @@ pub trait Kv: Send + Sync {
         Ok(0)
     }
 
+    /// [`vacuum`](Kv::vacuum) over the keys from `start` to `end`
+    /// (exclusive) alone, leaving keys a running large transaction holds:
+    /// for a range used as a queue (keys put, then deleted), whose scans
+    /// would otherwise step over the deleted keys until the whole vacuum
+    /// runs.  How many entries it removed.  The default: `0` (nothing to
+    /// remove).
+    fn vacuum_range(&self, start: &[u8], end: &[u8]) -> Result<u64> {
+        let _ = (start, end);
+        Ok(0)
+    }
+
     /// [`vacuum`](Kv::vacuum) as a background task: in small batches,
     /// `go_on` asked between them — `false` stops it there, and the next
     /// call goes on from it.  The default: `vacuum`.
@@ -747,6 +758,10 @@ impl Kv for Database {
 
     fn vacuum(&self) -> Result<u64> {
         Database::vacuum(self)
+    }
+
+    fn vacuum_range(&self, start: &[u8], end: &[u8]) -> Result<u64> {
+        Ok(self.engine.vacuum_range(start, end)?)
     }
 
     fn vacuum_background(&self, go_on: &mut dyn FnMut() -> bool) -> Result<u64> {

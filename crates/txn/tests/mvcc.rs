@@ -325,6 +325,34 @@ fn old_versions_are_collected() {
 }
 
 #[test]
+fn a_range_vacuum_takes_only_its_range() {
+    // A queue: keys put, then deleted; their tombstones stay until a
+    // vacuum — of the queue's range alone, here.
+    let (_p, e) = engine();
+    for i in 0..10 {
+        put(&e, &format!("q{i}"), "row");
+        put(&e, &format!("z{i}"), "row");
+    }
+    let old = e.begin();
+    let mut t = e.begin();
+    for i in 0..10 {
+        t.delete(format!("q{i}").as_bytes()).unwrap();
+        t.delete(format!("z{i}").as_bytes()).unwrap();
+    }
+    t.commit().unwrap();
+    // A snapshot from before the deletes keeps them.
+    assert_eq!(e.vacuum_range(b"q", b"r").unwrap(), 0);
+    assert_eq!(get(&old, "q3").as_deref(), Some("row"));
+    drop(old);
+    // Each deleted key's tombstone and the value under it; `z` untouched.
+    assert_eq!(e.vacuum_range(b"q", b"r").unwrap(), 20);
+    assert_eq!(e.version_count().unwrap(), 20);
+    assert_eq!(scan_all(&e.begin()), Vec::<(String, String)>::new());
+    assert_eq!(e.vacuum().unwrap(), 20);
+    assert_eq!(e.version_count().unwrap(), 0);
+}
+
+#[test]
 fn commits_collect_only_what_no_snapshot_sees() {
     // Keys over many leaves, written in batches of all sizes (hot keys
     // among them), snapshots of every age open meanwhile: each reads what

@@ -579,59 +579,8 @@ impl Engine {
         loop {
             // In chunks, releasing the commit lock between them.
             let commit = lock(&self.inner.commit);
-            let wm = self.inner.current_watermark();
-            let others = self.inner.others(None);
-            let mut ops = Vec::new();
-            let mut last_user: Option<Vec<u8>> = None;
-            let mut kept_one = false;
-            let mut next = None;
-            {
-                let tree = self.inner.store.read()?;
-                let mut pinned = false;
-                for entry in versions(&tree, Bound::Included(&from), Bound::Unbounded)?
-                    .into_iter()
-                    .flatten()
-                {
-                    let (k, v) = entry?;
-                    let (user, ts) =
-                        decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
-                    if last_user.as_deref() != Some(&user[..]) {
-                        if ops.len() >= chunk.max(1) {
-                            next = Some(first_version(&user));
-                            break;
-                        }
-                        last_user = Some(user.clone());
-                        kept_one = false;
-                        pinned = false;
-                    }
-                    if let Some(id) = intent_of(ts) {
-                        // A key with an intent keeps its versions this sweep.
-                        pinned = true;
-                        if let Some(&(_, cts)) = committed.iter().find(|&&(u, _)| u == id) {
-                            ops.push((encode_key(&user, cts), Some(v)));
-                            ops.push((k, None));
-                            removed += 1;
-                        } else if !others.contains(&id)
-                            && !read(&self.inner.unresolved).contains_key(&id)
-                        {
-                            ops.push((k, None)); // aborted
-                            removed += 1;
-                        }
-                        continue;
-                    }
-                    if ts > wm || pinned {
-                        continue; // still needed by someone
-                    }
-                    let tombstone = decode_value(&v)
-                        .ok_or(Error::Corrupt("bad version value"))?
-                        .is_none();
-                    if kept_one || tombstone {
-                        ops.push((k, None));
-                        removed += 1;
-                    }
-                    kept_one = true;
-                }
-            }
+            let (mut ops, next) =
+                self.sweep_chunk(&from, None, Some(&committed), chunk, &mut removed)?;
             if next.is_none() {
                 // The whole keyspace swept: these transactions' intents are
                 // all versions now.
@@ -662,6 +611,101 @@ impl Engine {
                 return Ok(removed);
             }
         }
+    }
+
+    /// [`vacuum`](Self::vacuum) over the user keys from `start` to `end`
+    /// (exclusive) alone: the versions there no snapshot can see removed;
+    /// keys with an intent left as they are (for the whole vacuum).  For a
+    /// range written as a queue — keys put, then deleted, never written
+    /// again — whose scans would otherwise step over the deleted keys'
+    /// tombstones until the whole vacuum runs.  What it removed.
+    pub fn vacuum_range(&self, start: &[u8], end: &[u8]) -> Result<u64> {
+        let mut from = first_version(start);
+        let to = first_version(end);
+        let mut removed = 0;
+        loop {
+            let commit = lock(&self.inner.commit);
+            let (ops, next) =
+                self.sweep_chunk(&from, Some(&to), None, VACUUM_CHUNK, &mut removed)?;
+            if !ops.is_empty() {
+                self.inner.store.write(&Batch { meta: *commit, ops })?;
+            }
+            drop(commit);
+            match next {
+                Some(n) => from = n,
+                None => return Ok(removed),
+            }
+        }
+    }
+
+    /// One chunk of a sweep (the commit lock held) from store key `from`
+    /// to `to` (exclusive; `None`: the end), about `chunk` entries: the
+    /// writes removing the versions no snapshot can see, and the store key
+    /// the next chunk starts at (`None`: the sweep is through).  With
+    /// `committed` (the transactions committed when a whole sweep began)
+    /// intents are resolved — those committed made versions, aborted ones
+    /// deleted; without, a key with an intent is left whole.
+    fn sweep_chunk(
+        &self,
+        from: &[u8],
+        to: Option<&[u8]>,
+        committed: Option<&[(u64, u64)]>,
+        chunk: usize,
+        removed: &mut u64,
+    ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)> {
+        let wm = self.inner.current_watermark();
+        let others = self.inner.others(None);
+        let mut ops = Vec::new();
+        let mut last_user: Option<Vec<u8>> = None;
+        let mut kept_one = false;
+        let mut next = None;
+        let tree = self.inner.store.read()?;
+        let mut pinned = false;
+        let to = to.map_or(Bound::Unbounded, Bound::Excluded);
+        for entry in versions(&tree, Bound::Included(from), to)?
+            .into_iter()
+            .flatten()
+        {
+            let (k, v) = entry?;
+            let (user, ts) = decode_key(&k).ok_or(Error::Corrupt("undecodable version key"))?;
+            if last_user.as_deref() != Some(&user[..]) {
+                if ops.len() >= chunk.max(1) {
+                    next = Some(first_version(&user));
+                    break;
+                }
+                last_user = Some(user.clone());
+                kept_one = false;
+                pinned = false;
+            }
+            if let Some(id) = intent_of(ts) {
+                // A key with an intent keeps its versions this sweep.
+                pinned = true;
+                let Some(committed) = committed else {
+                    continue;
+                };
+                if let Some(&(_, cts)) = committed.iter().find(|&&(u, _)| u == id) {
+                    ops.push((encode_key(&user, cts), Some(v)));
+                    ops.push((k, None));
+                    *removed += 1;
+                } else if !others.contains(&id) && !read(&self.inner.unresolved).contains_key(&id) {
+                    ops.push((k, None)); // aborted
+                    *removed += 1;
+                }
+                continue;
+            }
+            if ts > wm || pinned {
+                continue; // still needed by someone
+            }
+            let tombstone = decode_value(&v)
+                .ok_or(Error::Corrupt("bad version value"))?
+                .is_none();
+            if kept_one || tombstone {
+                ops.push((k, None));
+                *removed += 1;
+            }
+            kept_one = true;
+        }
+        Ok((ops, next))
     }
 
     /// Store entries (all versions) — for tests and statistics.

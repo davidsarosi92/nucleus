@@ -54,6 +54,8 @@ const OPCLASSES: [(&str, SqlMetric, Metric); 4] = [
 /// The most rows a seal and a fold take (the sizes chosen below them).
 const SEAL_MOST: f64 = 10_000.0;
 const FOLD_MOST: f64 = 10_000.0;
+/// A compaction's pages put in transactions of about this many bytes.
+const PUT_BYTES: usize = 8 << 20;
 
 /// The HNSW index method.
 pub struct Hnsw;
@@ -295,8 +297,8 @@ impl IndexMethod for Hnsw {
         o.index.check(r, &t.indexes[i].name, &want, problems)
     }
 
-    fn after_statement(&self, kv: &Arc<dyn Kv>) -> Result<()> {
-        upkeep(kv)
+    fn after_statement(&self, kv: &Arc<dyn Kv>, wrote: bool) -> Result<()> {
+        upkeep(kv, wrote)
     }
 }
 
@@ -383,6 +385,7 @@ pub fn search(
     let mut rows: Vec<(Vec<u8>, Row, f64)> = Vec::new();
     loop {
         let found = o.index.candidates(r, &qs, ef, &mut s)?;
+        o.state.scanned(found.sealed, found.delta);
         // Nearest first by the graph's distance (the SQL operator's
         // order): the first `k` that pass are the answer, so the rest
         // are not read.  A row whose vector is no longer the one found
@@ -521,6 +524,13 @@ struct State {
     /// Held by the session doing the upkeep.
     busy: Mutex<()>,
     by_row: Mutex<ByRow>,
+    /// Held by the session compacting (apart from `busy`: the folds go on).
+    compacting: Mutex<()>,
+    /// Whether the last fold left the patches past their share.
+    compact_due: AtomicBool,
+    /// What a waiting row costs a search, ns, measured by the searches:
+    /// sealed (from memory), in the delta (from the KV).
+    row_ns: Mutex<(f64, f64)>,
 }
 
 #[derive(Default)]
@@ -547,8 +557,35 @@ fn eoq(k: f64, rate: f64, h: f64) -> f64 {
 }
 
 impl State {
+    /// Whether rows are coming in (a row a second or more, lately): the
+    /// writers then keep the index up, the searches do not wait on it.
+    fn writing(&self) -> bool {
+        self.rates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .write_rate
+            >= 1.0
+    }
+
     fn wrote(&self, n: u64) {
         self.writes.fetch_add(n, Relaxed);
+    }
+
+    /// A search scanned `sealed` and `delta` rows (each how many, and the
+    /// ns it took): their costs a row, averaged.
+    fn scanned(&self, sealed: (usize, u64), delta: (usize, u64)) {
+        let mut c = self.row_ns.lock().unwrap_or_else(|e| e.into_inner());
+        let (a, b) = &mut *c;
+        for ((rows, ns), at) in [(sealed, a), (delta, b)] {
+            if rows >= 16 {
+                let x = ns as f64 / rows as f64;
+                *at = if *at == 0.0 {
+                    x
+                } else {
+                    *at + 0.05 * (x - *at)
+                };
+            }
+        }
     }
 
     fn searched(&self, ns: u64) {
@@ -598,11 +635,13 @@ impl State {
     }
 
     /// The seal's and the fold's sizes now: a waiting row costs each
-    /// search what reading it does (from the KV before a seal, from
-    /// memory after; ~470 and ~160 ns measured on `bench/ann`).
+    /// search what reading it does — from the KV before a seal, from
+    /// memory after — as the searches measure it (until they have: ~470
+    /// and ~160 ns, measured on `bench/ann`).
     fn sizes(&self) -> (usize, usize) {
-        const KV_NS: f64 = 470.0;
-        const MEM_NS: f64 = 160.0;
+        let (mem, kv) = *self.row_ns.lock().unwrap_or_else(|e| e.into_inner());
+        let mem_ns = if mem > 0.0 { mem } else { 160.0 };
+        let kv_ns = if kv > 0.0 { kv } else { 470.0 }.max(mem_ns);
         let mut r = self.rates.lock().unwrap_or_else(|e| e.into_inner());
         let [n, sx, sy, sxy, sxx] = r.fit;
         let var = n * sxx - sx * sx;
@@ -616,12 +655,12 @@ impl State {
         }
         .max(1e6);
         r.nudge = !r.nudge;
-        let fold = eoq(k, r.write_rate, r.search_rate * MEM_NS).clamp(64.0, FOLD_MOST);
+        let fold = eoq(k, r.write_rate, r.search_rate * mem_ns).clamp(64.0, FOLD_MOST);
         let fold = if r.nudge { fold * 1.2 } else { fold * 0.8 };
         let seal = eoq(
             r.seal_ns.max(1e5),
             r.write_rate,
-            r.search_rate * (KV_NS - MEM_NS),
+            r.search_rate * (kv_ns - mem_ns),
         )
         .clamp(16.0, SEAL_MOST.min(fold));
         (seal as usize, fold as usize)
@@ -692,11 +731,14 @@ impl Pending {
 }
 
 /// After a statement: each index whose delta passed its seal's size
-/// sealed, and folded once its sealed rows pass the fold's — by this
-/// session, unless another is at it.  The sizes fall as the writes stop
-/// (an economic order quantity of a rate going to nothing), so the rows
-/// left waiting are folded by the searches that follow.
-fn upkeep(kv: &Arc<dyn Kv>) -> Result<()> {
+/// sealed, folded once its sealed rows pass the fold's, and compacted once
+/// a fold leaves its patches past their share — by this session, unless
+/// another is at it, and while rows come in only by a session that wrote
+/// (PostgreSQL's GIN pending list is cleaned by its inserters): the
+/// searches then never wait on it.  The sizes fall as the writes stop (an
+/// economic order quantity of a rate going to nothing), so the rows left
+/// waiting are folded by the searches that follow.
+fn upkeep(kv: &Arc<dyn Kv>, wrote: bool) -> Result<()> {
     let p = pending();
     if !p.any.load(Relaxed) {
         return Ok(());
@@ -711,24 +753,36 @@ fn upkeep(kv: &Arc<dyn Kv>) -> Result<()> {
     for (id, w) in due {
         let st = state(id);
         st.sample();
-        let (seal, fold) = st.sizes();
-        let fold_due = w.sealed > 0 && w.sealed + w.delta >= fold as u64;
-        if (w.delta as usize) < seal && !fold_due {
+        if !wrote && st.writing() {
             continue;
         }
-        let Ok(_busy) = st.busy.try_lock() else {
+        let (seal, fold) = st.sizes();
+        let fold_due = w.sealed > 0 && w.sealed + w.delta >= fold as u64;
+        let compact_due = st.compact_due.load(Relaxed);
+        if (w.delta as usize) < seal && !fold_due && !compact_due {
             continue;
-        };
-        match maintain(kv, &st, id, fold)? {
-            Some(sealed) => p.done(id, w.delta, sealed),
-            None => p.done(id, u64::MAX, 0),
+        }
+        if (w.delta as usize) >= seal || fold_due {
+            let Ok(_busy) = st.busy.try_lock() else {
+                continue;
+            };
+            match maintain(kv, &st, id, fold)? {
+                Some(sealed) => p.done(id, w.delta, sealed),
+                None => {
+                    p.done(id, u64::MAX, 0);
+                    continue;
+                }
+            }
+        }
+        if st.compact_due.load(Relaxed) {
+            compact(kv, &st, id)?;
         }
     }
     Ok(())
 }
 
-/// Every index written since its upkeep last ran, sealed and folded now
-/// whatever the sizes (tests; `VACUUM`).
+/// Every index written since its upkeep last ran, sealed, folded and
+/// compacted now whatever the sizes (tests; `VACUUM`).
 pub fn upkeep_now(kv: &Arc<dyn Kv>) -> Result<()> {
     let p = pending();
     let due: Vec<(Id, Waiting)> =
@@ -740,44 +794,69 @@ pub fn upkeep_now(kv: &Arc<dyn Kv>) -> Result<()> {
             .collect();
     for (id, w) in due {
         let st = state(id);
-        let _busy = st.busy.lock().unwrap_or_else(|e| e.into_inner());
-        match maintain(kv, &st, id, 0)? {
+        let r = {
+            let _busy = st.busy.lock().unwrap_or_else(|e| e.into_inner());
+            maintain(kv, &st, id, 0)?
+        };
+        match r {
             Some(sealed) => p.done(id, w.delta, sealed),
-            None => p.done(id, u64::MAX, 0),
+            None => {
+                p.done(id, u64::MAX, 0);
+                continue;
+            }
+        }
+        if st.compact_due.load(Relaxed) {
+            compact(kv, &st, id)?;
         }
     }
     Ok(())
 }
 
+/// Index `id`'s table and its position there, as `txn` sees the catalog
+/// (`None`: gone).
+fn find(txn: &dyn KvTxn, id: Id) -> Result<Option<(Table, usize)>> {
+    let (_, table, index) = id;
+    Ok(crate::catalog::tables(txn)?.into_iter().find_map(|t| {
+        let i = t
+            .indexes
+            .iter()
+            .position(|ix| ix.id == index && ix.method.as_deref() == Some(NAME))?;
+        (t.id == table).then_some((t, i))
+    }))
+}
+
 /// Seals index `id` and folds it once `fold` rows are sealed; the rows
-/// left sealed, or `None` where the index is gone.
+/// left sealed, or `None` where the index is gone.  Notes whether a
+/// compaction is due.
 fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<Option<u64>> {
-    let (instance, table, index) = id;
-    let find = |txn: &dyn KvTxn| -> Result<Option<(Table, usize)>> {
-        Ok(crate::catalog::tables(txn)?.into_iter().find_map(|t| {
-            let i = t
-                .indexes
-                .iter()
-                .position(|ix| ix.id == index && ix.method.as_deref() == Some(NAME))?;
-            (t.id == table).then_some((t, i))
-        }))
-    };
+    let instance = id.0;
     let started = std::time::Instant::now();
     let mut sealed_rows = 0u64;
+    let mut moved = 0;
+    let mut queues = None;
     let found = retrying(kv, |txn| {
-        let Some((t, i)) = find(&*txn)? else {
+        let Some((t, i)) = find(&*txn, id)? else {
             return Ok(false);
         };
         let o = open(instance, &t, i)?;
-        o.index.seal(txn)?;
+        moved = o.index.seal(txn)?;
         let r = txn
             .shared()
             .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;
         sealed_rows = o.index.root(r)?.sealed_rows();
+        queues = Some(o.index.keys.queues());
         Ok(true)
     })?;
     if !found {
         return Ok(None);
+    }
+    // The keys a seal moved are deleted, never written again: their
+    // tombstones go now, or every search's scan of the delta steps over
+    // all the seals' so far (RocksDB's queue pattern).
+    if moved > 0 {
+        for (start, end) in queues.iter().flatten() {
+            kv.vacuum_range(start, end)?;
+        }
     }
     st.sealed(started.elapsed().as_nanos() as f64);
     if sealed_rows == 0 || (sealed_rows as usize) < fold {
@@ -785,8 +864,9 @@ fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<Option<
     }
     let started = std::time::Instant::now();
     let mut rows = 0;
+    let mut due = false;
     retrying(kv, |txn| {
-        let Some((t, i)) = find(&*txn)? else {
+        let Some((t, i)) = find(&*txn, id)? else {
             return Ok(());
         };
         let o = open(instance, &t, i)?;
@@ -798,12 +878,61 @@ fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<Option<
             }
         };
         rows = o.index.fold(txn, &mut by_row, &current)?;
+        let r = txn
+            .shared()
+            .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;
+        due = o.index.compaction_due(r)?;
         Ok(())
     })?;
+    st.compact_due.store(due, Relaxed);
     if rows > 0 {
         st.folded(rows, started.elapsed().as_nanos() as f64);
     }
     Ok(Some(0))
+}
+
+/// Compacts index `id` — its patches rewritten into pages from a snapshot
+/// while the folds go on, then swapped in, between two folds — unless
+/// another session is at it; the graph read into memory after.
+fn compact(kv: &Arc<dyn Kv>, st: &State, id: Id) -> Result<()> {
+    let Ok(_compacting) = st.compacting.try_lock() else {
+        return Ok(());
+    };
+    let instance = id.0;
+    let made = {
+        let txn = kv.begin(TxnOptions::read_only())?;
+        let Some((t, i)) = find(&*txn, id)? else {
+            return Ok(());
+        };
+        let o = open(instance, &t, i)?;
+        let r = txn
+            .shared()
+            .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;
+        o.index.compaction(r)?.map(|c| (c, o))
+    };
+    let Some((mut c, o)) = made else {
+        st.compact_due.store(false, Relaxed);
+        return Ok(());
+    };
+    for b in c.batches(PUT_BYTES) {
+        retrying(kv, |txn| o.index.put_compaction(txn, &c, b.clone()))?;
+    }
+    c.put();
+    let installed = {
+        let _busy = st.busy.lock().unwrap_or_else(|e| e.into_inner());
+        retrying(kv, |txn| match find(&*txn, id)? {
+            Some(_) => o.index.install(txn, &c),
+            None => Ok(false),
+        })?
+    };
+    if installed {
+        st.compact_due.store(false, Relaxed);
+        let txn = kv.begin(TxnOptions::read_only())?;
+        if let Some(r) = txn.shared() {
+            o.index.warm(r)?;
+        }
+    }
+    Ok(())
 }
 
 /// `f` in a transaction of its own, committed — run again while the
