@@ -29,7 +29,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use nucleus_kernels::{MixState, mix};
 use nucleus_kv::{KvRead, KvTxn, prefix_end};
@@ -83,8 +83,8 @@ impl Shape {
     }
 }
 
-/// The keys of one index.
-#[derive(Clone)]
+/// The keys of one index (a graph of it, partitioned).
+#[derive(Clone, PartialEq, Eq)]
 pub struct Keys(Vec<u8>);
 
 impl Keys {
@@ -381,13 +381,14 @@ impl Dead {
 
 /// Rows' primary keys, one buffer.
 #[derive(Default)]
-struct Pks {
+pub struct Pks {
     bytes: Vec<u8>,
     at: Vec<u32>,
 }
 
 impl Pks {
-    fn push(&mut self, pk: &[u8]) {
+    /// Adds `pk`.
+    pub fn push(&mut self, pk: &[u8]) {
         if self.at.is_empty() {
             self.at.push(0);
         }
@@ -395,12 +396,24 @@ impl Pks {
         self.at.push(self.bytes.len() as u32);
     }
 
-    fn len(&self) -> usize {
+    /// How many.
+    pub fn len(&self) -> usize {
         self.at.len().saturating_sub(1)
     }
 
-    fn get(&self, i: usize) -> &[u8] {
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The `i`th.
+    pub fn get(&self, i: usize) -> &[u8] {
         &self.bytes[self.at[i] as usize..self.at[i + 1] as usize]
+    }
+
+    /// Each, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        (0..self.len()).map(|i| self.get(i))
     }
 
     fn size(&self) -> usize {
@@ -1394,13 +1407,70 @@ pub struct Compaction {
 }
 
 /// Each row's nodes in a graph, by a hash of the primary key: what a fold
-/// marks dead.  Kept in memory per lineage, grown as nodes are added
-/// (a node's row never changes).
+/// marks dead, and what a search among given rows finds their vectors by.
+/// Kept in memory per lineage, grown as nodes are added (a node's row
+/// never changes, and nodes are never renumbered).
 #[derive(Default)]
 pub struct ByRow {
     lineage: u64,
     covered: u32,
-    sorted: Vec<(u64, Node)>,
+    /// A row's first node, by its hash; …
+    first: HashMap<u64, Node, MixState>,
+    /// … and the rest (a row whose vector changed has one per vector).
+    more: HashMap<u64, Vec<Node>, MixState>,
+}
+
+impl ByRow {
+    /// Grown to `view`'s nodes — anew for another lineage, or (`fresh`, a
+    /// fold's) where it covers more than the graph has.  `false` where it
+    /// cannot tell `view`'s nodes: it is another lineage's, and not
+    /// `fresh`.
+    fn cover(&mut self, view: &View, fresh: bool) -> Result<bool> {
+        if self.lineage != view.lineage || (fresh && self.covered > view.root.nodes) {
+            if !fresh && self.covered > 0 {
+                return Ok(false);
+            }
+            *self = ByRow {
+                lineage: view.lineage,
+                ..ByRow::default()
+            };
+        }
+        if self.covered < view.root.nodes {
+            self.first
+                .reserve((view.root.nodes - self.covered) as usize);
+            for n in self.covered..view.root.nodes {
+                let pk = view.pk(n).ok_or_else(|| corrupt("a node has no row"))?;
+                let h = pk_hash(pk);
+                match self.first.entry(h) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(n);
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        self.more.entry(h).or_default().push(n);
+                    }
+                }
+            }
+            view.check()?;
+            self.covered = view.root.nodes;
+        }
+        Ok(true)
+    }
+
+    /// Whether it covers `view`'s nodes.
+    fn covers(&self, view: &View) -> bool {
+        self.lineage == view.lineage && self.covered >= view.root.nodes
+    }
+
+    /// The nodes of rows with hash `h` (another row's too, where two
+    /// hashes meet).
+    fn nodes(&self, h: u64, f: &mut impl FnMut(Node)) {
+        if let Some(&n) = self.first.get(&h) {
+            f(n);
+            if let Some(more) = self.more.get(&h) {
+                more.iter().for_each(|&n| f(n));
+            }
+        }
+    }
 }
 
 fn pk_hash(pk: &[u8]) -> u64 {
@@ -1503,7 +1573,7 @@ impl Index {
     pub fn fold(
         &self,
         txn: &mut dyn KvTxn,
-        by_row: &mut ByRow,
+        by_row: &RwLock<ByRow>,
         current: &dyn Fn(&dyn KvTxn, &[u8]) -> Result<Option<Vec<u8>>>,
     ) -> Result<usize> {
         let mut w = Writes::new();
@@ -1695,34 +1765,21 @@ impl Index {
         &self,
         view: &View,
         ro: &dyn KvTxn,
-        by_row: &mut ByRow,
+        by_row: &RwLock<ByRow>,
         gone: &[(Vec<u8>, u64)],
         current: &dyn Fn(&dyn KvTxn, &[u8]) -> Result<Option<Vec<u8>>>,
     ) -> Result<Vec<Node>> {
-        if by_row.lineage != view.lineage || by_row.covered > view.root.nodes {
-            *by_row = ByRow {
-                lineage: view.lineage,
-                ..ByRow::default()
-            };
-        }
-        if by_row.covered < view.root.nodes {
-            for n in by_row.covered..view.root.nodes {
-                let pk = view.pk(n).ok_or_else(|| corrupt("a node has no row"))?;
-                by_row.sorted.push((pk_hash(pk), n));
-            }
-            view.check()?;
-            by_row.sorted.sort_unstable();
-            by_row.covered = view.root.nodes;
-        }
+        // The rows as they are now read first: the map is not held over
+        // reads (searches look rows up in it).
+        let now: Vec<Option<Vec<u8>>> = gone
+            .iter()
+            .map(|(pk, _)| current(ro, pk))
+            .collect::<Result<_>>()?;
+        let mut by_row = by_row.write().unwrap_or_else(|e| e.into_inner());
+        by_row.cover(view, true)?;
         let mut dead: Vec<Node> = view.dead.as_ref().map_or(Vec::new(), |d| d.nodes.clone());
-        for (pk, hash) in gone {
-            let h = pk_hash(pk);
-            let from = by_row.sorted.partition_point(|e| e.0 < h);
-            let now = current(ro, pk)?;
-            for &(eh, n) in &by_row.sorted[from..] {
-                if eh != h {
-                    break;
-                }
+        for ((pk, hash), now) in gone.iter().zip(now) {
+            by_row.nodes(pk_hash(pk), &mut |n| {
                 let v = view.at(n);
                 if view.pk(n) == Some(pk.as_slice())
                     && vector_hash(v) == *hash
@@ -1730,7 +1787,7 @@ impl Index {
                 {
                     dead.push(n);
                 }
-            }
+            });
         }
         view.check()?;
         dead.sort_unstable();
@@ -1812,6 +1869,151 @@ impl Index {
             sealed: (sealed_n, (t2 - t1).as_nanos() as u64),
             delta: (delta, (t3 - t2).as_nanos() as u64),
         })
+    }
+
+    /// The rows of `pks` (each once) nearest `q` as `txn` sees the index,
+    /// by exact distances — no graph walked: their nodes found through
+    /// `by_row` (grown to the graph first), their sealed and delta rows
+    /// in the scans [`Self::candidates`] makes; the nearest `ef`, nearest
+    /// first, unchecked as its are — the graph's part on `threads`
+    /// threads.  `None` where `by_row` holds another lineage's graph
+    /// (this snapshot's is older).
+    pub fn candidates_among(
+        &self,
+        txn: &dyn KvRead,
+        q: &[u8],
+        pks: &Pks,
+        ef: usize,
+        by_row: &RwLock<ByRow>,
+        threads: usize,
+    ) -> Result<Option<Candidates>> {
+        let root = self.root_in(txn)?;
+        let metric = self.shape.params.metric;
+        let hashes: Vec<u64> = pks.iter().map(pk_hash).collect();
+        // Each found: its distance and its row's place in `pks`.
+        let mut near: Vec<(f32, u32)> = Vec::new();
+        if root.graph.nodes > 0 {
+            let view = View::open(self.shape, &self.keys, txn, &root)?;
+            let covered = by_row
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .covers(&view);
+            if !covered
+                && !by_row
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .cover(&view, false)?
+            {
+                return Ok(None);
+            }
+            let by_row = by_row.read().unwrap_or_else(|e| e.into_inner());
+            if by_row.lineage != view.lineage {
+                return Ok(None);
+            }
+            let nodes = view.root.nodes;
+            // The rows' nodes first, then their vectors in the nodes'
+            // order: lookups that do not wait on each other, and vectors
+            // read along their chunks — on up to `threads` threads, each
+            // a part of the rows.  A node another row's (two hashes met)
+            // or of a vector the row no longer has is checked out as
+            // every candidate is, against the row.
+            let part = |from: usize, to: usize| -> Vec<(f32, u32)> {
+                let mut found: Vec<(Node, u32)> = Vec::with_capacity(to - from);
+                for (i, &h) in hashes.iter().enumerate().take(to).skip(from) {
+                    by_row.nodes(h, &mut |n| found.push((n, i as u32)));
+                }
+                found.sort_unstable();
+                found
+                    .into_iter()
+                    .filter(|&(n, _)| n < nodes && !view.is_dead(n))
+                    .map(|(n, i)| (metric.distance(q, view.at(n)), i))
+                    .collect()
+            };
+            let parts = threads.clamp(1, pks.len().max(1));
+            if parts == 1 {
+                near = part(0, pks.len());
+            } else {
+                let each = pks.len().div_ceil(parts);
+                let found: Vec<Vec<(f32, u32)>> = std::thread::scope(|sc| {
+                    let hs: Vec<_> = (0..parts)
+                        .map(|t| {
+                            let part = &part;
+                            sc.spawn(move || part(t * each, ((t + 1) * each).min(pks.len())))
+                        })
+                        .collect();
+                    hs.into_iter()
+                        .map(|h| h.join().unwrap_or_default())
+                        .collect()
+                });
+                near = found.concat();
+            }
+            drop(by_row);
+            view.check()?;
+        }
+        // The sealed objects and the delta: their rows of `pks`, by hash.
+        let mut sorted: Vec<(u64, u32)> = Vec::new();
+        let mut place = |pk: &[u8], near: &mut Vec<(f32, u32)>, d: &dyn Fn() -> f32| {
+            if sorted.is_empty() {
+                sorted = hashes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &h)| (h, i as u32))
+                    .collect();
+                sorted.sort_unstable();
+            }
+            let h = pk_hash(pk);
+            let from = sorted.partition_point(|e| e.0 < h);
+            for &(eh, i) in &sorted[from..] {
+                if eh != h {
+                    break;
+                }
+                if pks.get(i as usize) == pk {
+                    near.push((d(), i));
+                }
+            }
+        };
+        let t1 = std::time::Instant::now();
+        let mut sealed_n = 0;
+        for &(id, _) in &root.sealed {
+            let sealed = self.sealed(txn, id)?;
+            sealed_n += sealed.data.len() / self.shape.width;
+            for (i, v) in sealed.data.chunks_exact(self.shape.width).enumerate() {
+                place(sealed.pks.get(i), &mut near, &|| metric.distance(q, v));
+            }
+        }
+        let t2 = std::time::Instant::now();
+        let mut delta = 0;
+        let (start, end) = self.keys.range(b'd');
+        for e in txn.scan(Bound::Included(&start), Bound::Excluded(&end))? {
+            let (k, v) = e?;
+            if v.len() == self.shape.width {
+                delta += 1;
+                place(self.keys.delta_pk(&k), &mut near, &|| {
+                    metric.distance(q, &v)
+                });
+            }
+        }
+        let t3 = std::time::Instant::now();
+        let order = |a: &(f32, u32), b: &(f32, u32)| {
+            a.0.total_cmp(&b.0)
+                .then_with(|| pks.get(a.1 as usize).cmp(pks.get(b.1 as usize)))
+        };
+        let all = near.len() <= ef;
+        if !all {
+            near.select_nth_unstable_by(ef, order);
+            near.truncate(ef);
+        }
+        near.sort_unstable_by(order);
+        Ok(Some(Candidates {
+            near: near
+                .into_iter()
+                .map(|(d, i)| (d, pks.get(i as usize).to_vec()))
+                .collect(),
+            all,
+            held: root.graph.nodes as usize + sealed_n + delta,
+            sealed: (sealed_n, (t2 - t1).as_nanos() as u64),
+            delta: (delta, (t3 - t2).as_nanos() as u64),
+        }))
     }
 
     /// What the index holds as `txn` sees it.
@@ -1985,7 +2187,7 @@ mod tests {
         ix: &Index,
         range: std::ops::Range<u32>,
         rows: &mut HashMap<Vec<u8>, Vec<u8>>,
-        by_row: &mut ByRow,
+        by_row: &RwLock<ByRow>,
     ) {
         commit(kv, |t| {
             for i in range {
@@ -2045,10 +2247,10 @@ mod tests {
             rows.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         sorted.sort();
         commit(kv, |t| ix.build(t, &sorted).unwrap());
-        let mut by_row = ByRow::default();
+        let by_row = RwLock::new(ByRow::default());
 
         // A fold leaves a patch, past its share: a compaction is due.
-        fold_rows(kv, &ix, 1000..1100, &mut rows, &mut by_row);
+        fold_rows(kv, &ix, 1000..1100, &mut rows, &by_row);
         assert_eq!(root(kv, &ix).graph.patches.len(), 1);
         {
             let t = kv.begin(TxnOptions::read_only()).unwrap();
@@ -2064,7 +2266,7 @@ mod tests {
         for b in c.batches(1000) {
             commit(kv, |t| ix.put_compaction(t, &c, b).unwrap());
         }
-        fold_rows(kv, &ix, 1100..1200, &mut rows, &mut by_row);
+        fold_rows(kv, &ix, 1100..1200, &mut rows, &by_row);
         let before = root(kv, &ix).graph;
         assert_eq!(before.patches.len(), 2);
         assert!(commit(kv, |t| ix.install(t, &c).unwrap()));
@@ -2090,5 +2292,84 @@ mod tests {
         sound(kv, &ix, &rows);
         let t = kv.begin(TxnOptions::read_only()).unwrap();
         ix.warm(t.shared().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_search_among_rows_finds_them_wherever_they_are() {
+        let p = Arc::new(SimPlatform::new(4));
+        let db = Database::open_on(p, Path::new("/db"), Options::default()).unwrap();
+        let kv: &dyn Kv = &db;
+        let params = Params {
+            m: 8,
+            ef_construction: 32,
+            metric: Metric::L2,
+            slack: 1,
+        };
+        let ix = Index {
+            keys: Keys::new(vec![0x7f, 2]),
+            shape: Shape::new(params, 16, 2),
+        };
+        let mut rows: HashMap<Vec<u8>, Vec<u8>> = (0..600).map(|i| (pk(i), vector(i))).collect();
+        let mut sorted: Vec<(Vec<u8>, Vec<u8>)> =
+            rows.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        sorted.sort();
+        commit(kv, |t| ix.build(t, &sorted).unwrap());
+        let by_row = RwLock::new(ByRow::default());
+        // Folded into the graph; sealed; in the delta; one changed (its
+        // old node stays, stale, until a fold marks it).
+        fold_rows(kv, &ix, 600..700, &mut rows, &by_row);
+        commit(kv, |t| {
+            for i in 700..800 {
+                t.put(&ix.keys.delta(&pk(i), nonce()), &vector(i)).unwrap();
+                rows.insert(pk(i), vector(i));
+            }
+        });
+        commit(kv, |t| ix.seal(t).unwrap());
+        commit(kv, |t| {
+            for i in 800..850 {
+                t.put(&ix.keys.delta(&pk(i), nonce()), &vector(i)).unwrap();
+                rows.insert(pk(i), vector(i));
+            }
+            t.put(&ix.keys.delta(&pk(3), nonce()), &vector(9)).unwrap();
+        });
+        // Every third row, of each part.
+        let mut pks = Pks::default();
+        let wanted: Vec<u32> = (0..850).filter(|i| i % 3 == 0).collect();
+        for &i in &wanted {
+            pks.push(&pk(i));
+        }
+        let q = vector(5);
+        let t = kv.begin(TxnOptions::read_only()).unwrap();
+        let r = t.shared().unwrap();
+        for threads in [1, 4] {
+            let found = ix
+                .candidates_among(r, &q, &pks, 1000, &by_row, threads)
+                .unwrap()
+                .unwrap();
+            assert!(found.all);
+            // Each row with its vector (row 3: both of its own).
+            let mut got: Vec<(Vec<u8>, u32)> = found
+                .near
+                .iter()
+                .map(|(d, pk)| (pk.clone(), d.to_bits()))
+                .collect();
+            got.sort();
+            let mut expected: Vec<(Vec<u8>, u32)> = wanted
+                .iter()
+                .map(|&i| (pk(i), Metric::L2.distance(&q, &vector(i)).to_bits()))
+                .chain([(pk(3), Metric::L2.distance(&q, &vector(9)).to_bits())])
+                .collect();
+            expected.sort();
+            assert_eq!(got, expected);
+            assert!(found.near.windows(2).all(|w| w[0].0 <= w[1].0));
+            // The nearest `ef` of them.
+            let few = ix
+                .candidates_among(r, &q, &pks, 5, &by_row, threads)
+                .unwrap()
+                .unwrap();
+            assert!(!few.all);
+            assert_eq!(few.near, found.near[..5]);
+        }
+        let _ = rows;
     }
 }

@@ -276,7 +276,7 @@ are marked ✅.
 | | M14.20 | **Next:** Analytics: vectorized execution, SIMD kernels as a type capability, table partitioning, row / column / both storage chosen per table, column and partition (HTAP) | ✅ V1–V14; every benchmark target met (2026-11-06: TPC-H 0.25× column / 0.77× row, ClickBench 0.11× / 0.89×, loads 0.55–1.1×; `docs/benchmarks.md`, Targets) |
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
-| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6) |
+| | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ◐ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4) |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
@@ -4665,6 +4665,150 @@ column-table lookup is costed ~10 % too cheap at that point
 either a calibrated cost or the adaptive join's own remedy — look up
 when the probes turn out few, hash otherwise — in the other direction
 too (an index nested loop that turns to a hash join past the crossing).
+
+**V5 — filtered search** (2026-11-07).  Measured first
+(`bench/ann/filtered.py`: SIFT-1M, a column `a` 0–999 from a hash of the
+row's id — independent of its vector — and a B-tree on it; `ef` 40, 500
+queries, recall@10 against the exact answer among the rows that pass, µs
+a search on one client; pgvector 0.8 beside it in its three
+`hnsw.iterative_scan` modes).  Before (405cb4a): the filter was applied
+to the rows the graph found, `ef` doubled until `k` passed — 50 %:
+recall 0.833 (unfiltered 0.89: `ef` 40 candidates of which ~20 pass);
+10 %: 0.908, 1,178 µs; 1 %: 0.986, 8,733 µs (about a thousand rows read
+to find ten that pass); 0.1 %: through the B-tree and sorted, 1,864 µs.
+pgvector: without iterative scans 4.2 and 0.45 rows returned of 10 at
+10 % and 1 %; relaxed 0.935 / 2,312 µs and 0.987 / 12,537 µs; the B-tree
+at 0.1 %, 521 µs.
+
+Three changes:
+
+- **`ef_search` counts the rows that pass** — what a filtered HNSW
+  search's result list holds (hnswlib's filter functor, ACORN's
+  predicate-aware search): the graph is asked for `ef` over the share
+  the optimizer expects to pass, and again, sized by the share that
+  passed among the rows read near the query, where that falls under half
+  the expected (a filter that goes with the vectors).  Recall then holds
+  whatever the filter's share (`Ask`; the optimizer's `share`).
+- **Few rows: searched among exactly.**  A filter with a B-tree range
+  keeps it in the plan (`Access::Nearest`'s `within`; `EXPLAIN` `… among
+  ix: …`); the executor reads the range's entries (primary keys only, a
+  chunk at a time) and the index computes the distances of those rows'
+  vectors from memory — found by a hash map of primary keys to nodes
+  (the fold's, now a hash map behind a read-write lock), in two passes
+  (the lookups, then the vectors in node order) on up to
+  `parallel_workers` threads of 2,048 rows — then reads about `k` rows.
+  Recall 1.  Where it stops paying: reading `p` entries (~70 ns each,
+  ~35–115 ns to find each vector, ~0.17 µs in all) against the graph's
+  search at the share `p / n` — asked for `ef · n / p` candidates (~3.7
+  µs each) and reading ~`k · n / p` rows (~3.4 µs each) — equal at `p =
+  √(n · (22 · ef + 20 · k))`, 33,000 of a million for `k` 10 at `ef` 40
+  (`hnsw::among_most`); past it, or estimated past twice it (then the
+  range is not read), the graph.  Fewer than `k` found: the range read
+  and sorted, as before.  (The first cut, `√(20 · k · n)` without the
+  graph's own cost, sent a group's 10,000 rows of 100,000 to the graph:
+  4.7 ms against 1.4 searched among.)
+- **Row-level security is a filter like any other**: the policy and the
+  statement's filter above the barrier become the search's `checks`,
+  evaluated in that order on each row read, so the search goes on until
+  `k` rows the session may see pass and no predicate of the statement
+  sees a hidden row (before, `Plan::Secure` stopped the planner from
+  using the index at all).
+
+| filter | before (405cb4a): recall, µs | now | pgvector 0.8 (`relaxed_order`) | what changed |
+|---|---|---|---|---|
+| 50 % (`a < 500`) | 0.833, 428 | **0.926, 587** | 0.891, 1,021 | `ef` counts passing rows: 80 asked |
+| 10 % (`a < 100`) | 0.908, 1,178 | **0.982, 1,760** | 0.932, 2,533 | 400 asked (the range, ~100,000, not read) |
+| 1 % (`a < 10`) | 0.986, 8,733 | **1.0, 1,425** | 0.987, 14,477 | 10,000 searched among, exactly |
+| 0.1 % (`a = 7`) | 1.0, 1,864 | **1.0, 313** | 1.0, 604 (its B-tree) | 1,000 among, ~10 rows read instead of 1,000 |
+| 0.01 % (`a = 7 AND id % 10 = 3`) | 1.0, 1,887 | **1.0, 516** | 1.0, 471 (its B-tree) | among `a = 7`'s 1,000; ~100 rows read for the rest of the filter |
+
+(One run each, back to back, `bench/ann/filtered.py`; ±~10 % run to run
+on this machine.  pgvector without iterative scans returns 4.1 and 0.44
+rows of 10 at 10 % and 1 %; `strict_order` 0.851 and 0.944 there.)  The
+50 % and 10 % rows trade time for recall — `ef_search` 20 gives back the
+time; the recall now holds from 50 % to 0.01 %, as the step's *Done
+when* asks.  The last row is the one pgvector wins: a filter part the
+B-tree does not cover is checked on the rows, read one at a time (~3.4
+µs each — the KV's point read; pgvector's bitmap heap scan reads its
+1,000 in page order) — a batched, key-ordered read of the rows is the
+remedy, a KV step of its own.
+
+On the way (1 %, the search's parts timed on the server): the entries
+read one at a time, allocated each, 110 ns → through `scan_chunks` 70;
+the vectors found row by row (hash lookup, the node's row compared, the
+vector) 177 ns → two passes, the rows' nodes then their vectors in node
+order, 115 → on four threads, 35.
+
+What was taken, from where: the exact search over a filter's rows when
+they are few is Lucene's (its HNSW query builds the filter's bit set, and
+searches exactly when its cardinality is at most `k` or when the graph
+search visits more nodes than it holds) and Weaviate's
+(`flatSearchCutoff`, 40,000 by default: an allow list from its inverted
+index below it searched flat) — here the cutoff is derived from measured
+costs rather than set, and the vectors come from the index's memory, not
+the rows; `ef` counted among passing rows is hnswlib's (a filter functor
+keeps rejected nodes out of the result list) and ACORN's (Patel et al.
+2024); the second round sized by the share seen is pgvector 0.8's
+iterative scan, sized rather than doubled.  Not taken: ACORN's
+predicate-agnostic graph (γ·M neighbours a node, two-hop expansion over
+passing nodes) and Qdrant's filterable HNSW (extra edges by payload
+value) — both evaluate the filter per node during the walk, which needs
+the filter's columns in the index (an `INCLUDE` list, as Qdrant's payload
+or Milvus's scalar fields: later, measured against this); Milvus's and
+Lucene's bit set for every filter — building it reads every passing
+entry (100,000 at 10 %: ~7 ms), more than the search; software prefetch
+of the vectors (hnswlib, FAISS) — the workspace forbids `unsafe`; the
+two passes get the memory-level parallelism instead.
+
+- **`PARTITION BY`: a graph per value of a column** — for tenants each
+  too many rows for the exact search, a graph of their own size each:
+  `CREATE INDEX … USING hnsw (v) PARTITION BY (tenant_id)`.  The
+  columns follow the vector among the index's columns (so a column
+  dropped or retyped takes the index with it, as any other's), the
+  method's `partition_by` option their number; each graph's keys are
+  under the index's prefix, `p` and the values key-encoded, with its own
+  upkeep, delta, folds and map of rows.  A row whose values change moves
+  between graphs (a dead key in one, a delta row in the other).  The
+  optimizer uses it where the conditions — the filter's or a
+  row-level-security policy's, a tenant's `tenant_id =
+  current_setting(…)` — fix every partitioning column; not otherwise.
+  A partitioned *table*'s partitions already have an index each, so a
+  graph each: the search now goes into each partition for `k` rows
+  (under an `Append`, the sort and limit above merging), or the one
+  pruning leaves.
+
+| ten groups of 100,000 (`g = 3`) | recall | µs |
+|---|---|---|
+| one graph (`ef` 400 asked: 10 % pass) | 0.981 | 1,882 |
+| `PARTITION BY (g)`: the group's graph, `ef` 40 | 0.939 | 455 |
+| pgvector, one graph, `relaxed_order` | 0.938 | 2,352 |
+| a tenth of the group (`a BETWEEN 300 AND 309`), partitioned: among 10,000 | 1.0 | 1,405 |
+
+Indexed in 45 s against 67 (ten graphs of 100,000).  A filter that goes
+with the partition's value (here `a`'s range lies inside `g = 3`) is
+estimated as independent — 1 % of the group instead of 10 % — so the
+graph would be asked for ten times the candidates; the exact search
+among the range covers it here, and cross-column statistics are the
+optimizer's to add.
+
+What was taken, from where: a graph per value is Milvus's partition key
+(its collections hash a key column to partitions, each with its own
+index, a search's `expr` on the key choosing one) and Weaviate's
+multi-tenancy (a shard, and so an HNSW graph, per tenant), and Qdrant's
+`is_tenant` payload index (which instead keeps one graph and orders its
+storage by tenant, building extra intra-tenant edges); here the graphs
+are an index's own and the choice the optimizer's — from the statement's
+conditions or a policy's, so a tenant's row-level security picks its
+graph without the application naming it.  Not taken: Milvus's hashing
+of the key to a fixed number of partitions (many small tenants then
+share a graph and filter again); a graph per value grows with the
+values, and the many small ones are where the exact search pays.
+
+Measured against 405cb4a (`bench/phases.py`, alternating, two rounds):
+nothing outside vectors moved — TPC-H SF1 load 24.95 / 22.89 → 23.13 /
+26.90 s, the queries' sums 6,288 / 6,069 → 5,947 / 5,941 ms (noise);
+SIFT-1M unfiltered through SQL as before (`ef` 40: 0.891, 391 µs; while
+rows come in 827 µs).
 
 **Done when:** the law kit passes on `vector`; every capability above
 works through SQL, `ncp` and all six drivers; exact search matches a

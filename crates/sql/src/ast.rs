@@ -58,6 +58,9 @@ pub enum Statement {
         opclasses: Vec<Option<String>>,
         /// `WITH (name = value, …)`: the method's options.
         options: Vec<(String, String)>,
+        /// `PARTITION BY (column, …)`: an index method's index, one
+        /// structure per value of these columns.
+        partition_by: Vec<String>,
         /// `UNIQUE`.
         unique: bool,
         /// `IF NOT EXISTS`.

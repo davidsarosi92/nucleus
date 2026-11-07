@@ -58,11 +58,15 @@ index (`CREATE INDEX … USING hnsw (v vector_cosine_ops)`, pgvector's
 operator classes and options) whose storage was chosen by measuring
 three models on the KV (`bench/ann/`), kept by every write without
 conflicts and searched by `ORDER BY v <=> $1 LIMIT k` where that costs
-less — filters included, the search widened until `k` rows pass, every
-row read where they cannot; on SIFT-1M through SQL, at pgvector's
-recall, half its time a search and 2× its searches a second, 2× its
-inserts, and a search while they come in 0.9 ms against its 1.6
-(`docs/benchmarks.md`); a hash join whose right side turns out
+less; on SIFT-1M through SQL, at pgvector's recall, half its time a
+search and 2× its searches a second, 2× its inserts, and a search while
+they come in 0.9 ms against its 1.6 — and filtered: `ef_search` counted
+among the rows that pass, a filter's B-tree range searched exactly from
+the vectors in memory, row-level security a filter like any other, so
+recall holds from 50 % of the rows to 0.01 % (a 1 % filter 1.4 ms at
+recall 1.0, pgvector's 14.5 ms at 0.987), and `PARTITION BY (tenant)`
+keeps a graph per tenant (a tenth of the rows: 0.46 ms against
+pgvector's 2.4; `docs/benchmarks.md`); a hash join whose right side turns out
 smaller than estimated looks its left side up instead (an adaptive
 join).  Statistics have begun (§M14.27): sums of doubles kept exactly
 and rounded once, so a parallel `sum` gives the same bits every run, and

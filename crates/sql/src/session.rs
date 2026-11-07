@@ -1825,12 +1825,42 @@ pub(crate) fn execute_statement(
             method,
             opclasses,
             options,
+            partition_by,
             unique,
             if_not_exists,
         } => {
             let access = match method {
                 Some(m) => crate::index_method::named(m)?,
                 None => None,
+            };
+            // `PARTITION BY (c, …)`: the columns after the indexed ones,
+            // the method's `partition_by` option their number.
+            let (columns, orderings, opclasses, options) = &{
+                let (mut c, mut o, mut p, mut w) = (
+                    columns.clone(),
+                    orderings.clone(),
+                    opclasses.clone(),
+                    options.clone(),
+                );
+                if !partition_by.is_empty() {
+                    if access.is_none() {
+                        return Err(Error::feature(
+                            "PARTITION BY is for an index method's index (USING method)",
+                        ));
+                    }
+                    if w.iter().any(|(k, _)| k == "partition_by") {
+                        return Err(Error::invalid_parameter(
+                            "give the partitioning columns once: PARTITION BY or WITH (partition_by)",
+                        ));
+                    }
+                    for col in partition_by {
+                        c.push(col.clone());
+                        o.push(None);
+                        p.push(None);
+                    }
+                    w.push(("partition_by".into(), partition_by.len().to_string()));
+                }
+                (c, o, p, w)
             };
             if let Some(m) = &access {
                 if *unique {

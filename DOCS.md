@@ -3034,7 +3034,7 @@ mirrors a column and runs writes, rollbacks, a rewrite, the integrity
 check (a stray entry found), the refusals and a drop through it;
 `06_indexes.slt` the syntax.
 
-### 8.18 HNSW indexes (`hnsw`, §M14.12 V4b)
+### 8.18 HNSW indexes (`hnsw`, §M14.12 V4b, V5)
 
 `CREATE INDEX [name] ON t USING hnsw (col [opclass]) [WITH (m = 16,
 ef_construction = 64)]` on a `vector(n)` column (one without dimensions
@@ -3106,20 +3106,73 @@ writes stop their rate falls and so do the sizes, so the rows left
 waiting are folded by the searches that follow.  `hnsw::upkeep_now`
 runs it whatever the sizes (tests).
 
-`hnsw::search(txn, t, i, q, k, ef, ef_most, wanted, keep)`: the graph
-searched with `ef` (its dead nodes passed over) and the sealed rows
-(from memory) and the delta (from the KV) scanned, the candidates
+`hnsw::search(txn, t, i, q, ask, wanted, keep)` (`Ask`: `k`, `ef`,
+`ef_most`, the share of the rows expected to pass, the rows to search
+among): the graph searched (its dead nodes passed over) and the sealed
+rows (from memory) and the delta (from the KV) scanned, the candidates
 checked against the table's rows in the snapshot — a row gone passed
 over, one found twice once, one `keep` refuses (a filter) left out, each
-ranked by its distance as the SQL operator takes it — and, with fewer
-than `k` left, asked again with `ef` doubled up to `ef_most` or until
-the index has no more (pgvector 0.8's iterative scans; a row looked at
+ranked by its distance as the SQL operator takes it.  `ef` counts the
+candidates that *pass* (as a filtered HNSW search's result list holds
+only those — hnswlib's, ACORN's): the graph is asked for `ef` over the
+share expected to pass, and again — sized by the share that passed among
+the rows it read (a filter that goes with the vectors passes fewer near
+the query than overall) — where fewer than `k` passed or that share is
+under half the expected, up to `ef_most` or until the index has no more
+(pgvector 0.8's iterative scans, sized by what was seen; a row looked at
 once is not read again); `hnsw::nearest` is it without a filter.  The
 candidates are read nearest first by the graph's distance and the
-search stops at the `k`-th that passes, so it reads about `k` rows, not
-`ef`; a row whose vector is no longer the one found (its distance in the
-graph's terms differs, to the bit) is passed over — its vector now is in
-the index too, under its own distance.
+search stops once `k` rows that pass are nearer than the next, so it
+reads about `k` over the share passing, not `ef`; a row whose vector is
+no longer the one found (its distance in the graph's terms differs, to
+the bit) is passed over — its vector now is in the index too, under its
+own distance.
+
+**Among given rows** (PLAN.md §M14.12 V5): the search is exact over
+their vectors in the index, read from memory — no graph walked
+(`Index::candidates_among`).  A row's nodes are found by a hash of its
+primary key (`ByRow`, kept in memory per graph and grown as nodes are
+added — what a fold marks dead by, too — behind a read-write lock: the
+fold takes it only to mark), all the rows' nodes first and then their
+vectors in the nodes' order (lookups that do not wait on each other,
+vectors read along their chunks), on up to `parallel_workers` threads of
+2,048 rows each; the sealed and delta rows among them come from the
+scans the search makes anyway.  A node of another row (two hashes met)
+or of a vector the row no longer has is checked against the row as every
+candidate is.  A snapshot older than the map's graph (rebuilt since) is
+searched through the graph instead.
+
+**Partitioned: `PARTITION BY (c, …)`** (PLAN.md §M14.12 V5): `CREATE
+INDEX ix ON t USING hnsw (v) PARTITION BY (tenant_id) [WITH (…)]` keeps a
+graph per value of the columns — for many tenants each too large for the
+exact search above, a graph of its own size each.  The columns (each with
+a key encoding and equality, none the vector's) follow the vector among
+the index's columns, and the option `partition_by` holds their number —
+so `USING hnsw (v, tenant_id) WITH (partition_by = 1)` is the same index,
+as `pg_indexes.indexdef` shows it, and a column dropped or retyped takes
+the index with it as any other's.  A graph's keys are under the index's
+prefix, `p` and the values key-encoded (dropping the index drops them
+all); each has its own upkeep, delta, seals, folds and compactions, and
+its own map of rows to nodes.  A row with a `NULL` among the values is not
+indexed (no `col = value` finds it).  A write puts a row into its values'
+graph; a row whose values change gets a dead key in the old graph and a
+delta row in the new — the fold of the old graph finds the row no longer
+there (`current` reads its values too).  A search goes through one graph:
+the optimizer takes an index whose `PARTITION BY` columns the conditions
+— the filter's, or under row-level security the policy's (a tenant's
+`tenant_id = current_setting('app.tenant')::int`) — each hold equal to a
+value fixed for the scan (`Access::Nearest`'s `partition`; `EXPLAIN` `…
+in tenant_id = …`), the one with most such columns where several serve;
+its costs on the partition's rows (the table's times the equalities'
+selectivity; a table not analyzed is searched, the search finding out).
+Without such conditions a partitioned index is not used.  The integrity
+check checks each graph against the rows with its values.
+
+**A partitioned table** (§M14.20): `CREATE INDEX … USING hnsw` on it
+makes one on each partition, a graph each; `ORDER BY col <op> q LIMIT k`
+over it searches each partition's index for `k` rows (each partition its
+own choice, as below) and the sort and the limit above take the nearest
+— partition pruning leaving the one a condition on the key fixes.
 
 **Searches in SQL.**  `ORDER BY col <op> q LIMIT k [OFFSET o]` (the
 operator or its function — `l2_distance`, `cosine_distance`,
@@ -3130,18 +3183,34 @@ enclosing row's value), becomes a scan through `Access::Nearest` (the
 optimizer's `nearest`, its last pass; `EXPLAIN`: `Index Scan using ix on
 t (k nearest col to q)`) where it costs less than the scan it had: about
 `ef · (3 + 2m / 10)` rows' reads, `ef` the session's `hnsw.ef_search`
-(default 40, 1–1000, `SET` / `RESET`) or what the filter's selectivity
-takes to leave `k + o` rows, against the rows the scan reads; and not
+(default 40, 1–1000, `SET` / `RESET`) over the share of the rows the
+filter is estimated to pass, against the rows the scan reads; and not
 where `ef` passes the rows over `2m`, where a search costs what reading
-every row does.  A table not analyzed has the rows the index holds
-(`hnsw::rows`), and keeps a key range its filter chose.  The executor
-(`exec::nearest`) gives the scan's filter and the hash joins' key
-filters to the search as `keep` and reads only the columns the plan
-needs (`hnsw::nearest_rows`); the sort and the limit above stay.  When
-fewer than `k + o` rows pass — the index holds fewer (a `NULL` vector
-is not in it, and sorts last), or the filter is narrower than the
-estimate and `ef` reached the rows over `2m` — the scan reads every row
-instead, so the answer is the exact one's.  A descending order, the
+every row does.  A scan through a key range of a B-tree index the filter
+chose always becomes one, the range kept (`within`; `EXPLAIN`: `… among
+ix: col = …`): its rows are searched among exactly, reading the range's
+entries and about `k` rows where the range's scan reads every row in it
+— unless they are more than √(rows · (22 · ef + 20 · k))
+(`hnsw::among_most`: where reading their entries, ~70 ns each and
+~35–115 ns to find each one's vector, costs what the graph's search
+does — asked for `ef` over the share passing, ~3.7 µs a candidate, and
+reading ~`k` over it, ~3.4 µs a row; 33,000 of a million for `k` 10 at
+`ef` 40), or estimated to be twice that (the range not read): the graph
+then, as without one.  Under
+row-level security the policy and the statement's filter above its
+barrier become the search's `checks`, evaluated in that order on each
+row it reads — the search goes on until `k` rows the session may see
+pass, and no predicate of the statement is evaluated on a row the policy
+hides.  A table not analyzed has the rows the index holds
+(`hnsw::rows`), and keeps a primary-key range its filter chose.  The
+executor (`exec::nearest`) gives the scan's filter, the checks and the
+hash joins' key filters to the search as `keep` and reads only the
+columns the plan needs (`hnsw::nearest_rows`); the sort and the limit
+above stay.  When fewer than `k + o` rows pass — the index holds fewer
+(a `NULL` vector is not in it, and sorts last), or the filter is
+narrower than the estimate and `ef` reached the rows over `2m` — the
+scan reads the B-tree range's rows instead, or every row without one, so
+the answer is the exact one's.  A descending order, the
 distance not the first key, an expression of it, a query that reads the
 row, or no limit: read and sorted.  `hnsw::status`: the nodes, dead
 nodes, patches, sealed rows and delta keys.  The integrity check reads
@@ -3154,14 +3223,27 @@ upkeep; each operator class; the definitions refused; the upkeep after
 commits; `ORDER BY … LIMIT` through the planner — the plans chosen and
 not, recall against the exact search, `hnsw.ef_search`, a filter, an
 offset, the fallback to every row, an enclosing row's vector, writes;
-the rows left waiting folded by searches; and (a unit test in `store`)
-a compaction worked out, a fold meanwhile, swapped in — the later
-patch kept, the index whole and exact — and a second one from the same
-graph refused, its pages gone.  `crates/sql/tests/hnsw_crash.rs`:
+the rows left waiting folded by searches; searches among a B-tree's
+range exactly the exact search's — through rows not yet folded, changed
+vectors, deletes, the upkeep, a transaction's own writes — a range with
+fewer rows than asked for, and ranges too many to search among (expected
+so, or found so) through the graph at the recall unfiltered; a policy's
+rows only, a predicate that fails on hidden rows never evaluated on
+them; a partitioned index — the definition checked, each value's graph
+searched where the conditions or a policy fix it, through inserts, rows
+moved between values, changed vectors, deletes, the upkeep and the
+column's type changed; a partitioned table searched in each partition
+or the one its key fixes; and (unit tests in `store`) a compaction worked out, a fold
+meanwhile, swapped in — the later patch kept, the index whole and exact
+— and a second one from the same graph refused, its pages gone; a search
+among rows in the graph, sealed, in the delta and changed since, on one
+thread and on four.  `bench/ann/filtered.py`: filtered searches on
+SIFT-1M, nucleus against pgvector (`docs/benchmarks.md`).  `crates/sql/tests/hnsw_crash.rs`:
 writes, rollbacks, seals and folds on the simulation, a crash at an I/O
 operation (dropped unsynced writes, torn ones), reopen — the rows a
 step's, the integrity check clean, a search at a wide `ef` the exact
-search's, the upkeep going on.  `bench/ann/sql.py`: SIFT-1M through SQL
+search's (and each tag's graph of an index `PARTITION BY (tag)`, rows
+moving between them), the upkeep going on.  `bench/ann/sql.py`: SIFT-1M through SQL
 as `bench/ann/pgvector_ref.py` runs pgvector (`docs/benchmarks.md`).
 
 ### 8.14 Errors and hints (`error`, `hint`)
@@ -3881,6 +3963,20 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-07 — §M14.12 V5, filtered vector search:** `ef_search`
+  counts the rows that pass (`hnsw::Ask`, its `share`; the graph asked
+  again as the share passing near the query needs); searches among a
+  filter's B-tree range, exactly, from the vectors in memory
+  (`Access::Nearest`'s `within`, `exec::among`, `hnsw::among_most`,
+  `Index::candidates_among`, `ByRow` a hash map behind a read-write lock,
+  `Pks` public); row-level security as the search's `checks`
+  (`Access::Nearest`'s `checks`; `Access::for_each_expr`,
+  `for_each_expr_mut`); `PARTITION BY (c, …)` on an HNSW index, a graph
+  per value (`CreateIndex::partition_by`, the method's `partition_by`
+  option, `hnsw::Id`'s `part`, `Access::Nearest`'s `partition`); a
+  partitioned table's partitions searched each under the `Append`;
+  `bench/ann/filtered.py` (§8.18).
 
 - **2026-11-07 — §M14.12 V4b, HNSW searches while rows come in:**
   `Kv::vacuum_range` (`Engine::vacuum_range`, the vacuum's sweep in

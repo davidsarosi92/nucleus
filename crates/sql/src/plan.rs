@@ -288,6 +288,22 @@ pub enum Access {
         query: Expr,
         /// How many: the limit and the offset.
         count: Expr,
+        /// A key range of a B-tree index that holds every row the filter
+        /// passes ([`Access::Key`]), when the filter has one: few rows in
+        /// it are searched exactly, and it is the scan where the index
+        /// cannot tell the rows (PLAN.md §M14.12 V5).
+        within: Option<Box<Access>>,
+        /// The share of the rows the filter is estimated to pass (1
+        /// without one).
+        share: f64,
+        /// Conditions of the plan above the scan its rows must pass too,
+        /// each checked only on rows the ones before it passed: a
+        /// row-level security policy, then the statement's filter above
+        /// its barrier ([`Plan::Secure`]).
+        checks: Vec<Expr>,
+        /// For an index partitioned (`PARTITION BY`), the values of its
+        /// partitioning columns the conditions fix: the graph searched.
+        partition: Vec<Expr>,
     },
 }
 
@@ -299,6 +315,117 @@ impl Access {
             Access::Key { index: Some(i), .. } | Access::Nearest { index: i, .. } => Some(*i),
         }
     }
+
+    /// Calls `f` on each of the path's expressions.
+    pub fn for_each_expr<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
+        match self {
+            Access::Full => {}
+            Access::Key {
+                prefix,
+                lower,
+                upper,
+                ..
+            } => {
+                prefix.iter().for_each(&mut *f);
+                for b in [lower, upper] {
+                    if let Bound::Included(e) | Bound::Excluded(e) = b {
+                        f(e);
+                    }
+                }
+            }
+            Access::Nearest {
+                query,
+                count,
+                within,
+                checks,
+                partition,
+                ..
+            } => {
+                f(query);
+                f(count);
+                if let Some(w) = within {
+                    w.for_each_expr(f);
+                }
+                checks.iter().for_each(&mut *f);
+                partition.iter().for_each(f);
+            }
+        }
+    }
+
+    /// [`for_each_expr`](Access::for_each_expr), each expression to change.
+    pub fn for_each_expr_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
+        match self {
+            Access::Full => {}
+            Access::Key {
+                prefix,
+                lower,
+                upper,
+                ..
+            } => {
+                prefix.iter_mut().for_each(&mut *f);
+                for b in [lower, upper] {
+                    if let Bound::Included(e) | Bound::Excluded(e) = b {
+                        f(e);
+                    }
+                }
+            }
+            Access::Nearest {
+                query,
+                count,
+                within,
+                checks,
+                partition,
+                ..
+            } => {
+                f(query);
+                f(count);
+                if let Some(w) = within {
+                    w.for_each_expr_mut(f);
+                }
+                checks.iter_mut().for_each(&mut *f);
+                partition.iter_mut().for_each(f);
+            }
+        }
+    }
+}
+
+/// A key range's index name and conditions, as `EXPLAIN` shows them.
+fn key_conds(table: &Table, access: &Access) -> (String, String) {
+    let Access::Key {
+        index,
+        prefix,
+        lower,
+        upper,
+    } = access
+    else {
+        return (String::new(), String::new());
+    };
+    let (name, cols) = match index {
+        None => ("primary key".to_string(), table.primary_key.clone()),
+        Some(i) => (
+            table.indexes[*i].name.clone(),
+            table.indexes[*i].columns.clone(),
+        ),
+    };
+    let mut conds: Vec<String> = prefix
+        .iter()
+        .zip(&cols)
+        .map(|(e, c)| format!("{} = {}", table.columns[*c].name, show(e)))
+        .collect();
+    if let Some(c) = cols.get(prefix.len()) {
+        let col = &table.columns[*c].name;
+        match lower {
+            Bound::Included(e) => conds.push(format!("{col} >= {}", show(e))),
+            Bound::Excluded(e) => conds.push(format!("{col} > {}", show(e))),
+            Bound::Unbounded => {}
+        }
+        match upper {
+            Bound::Included(e) => conds.push(format!("{col} <= {}", show(e))),
+            Bound::Excluded(e) => conds.push(format!("{col} < {}", show(e))),
+            Bound::Unbounded => {}
+        }
+    }
+    (name, conds.join(" AND "))
 }
 
 /// An aggregate call.
@@ -573,51 +700,34 @@ impl Plan {
             } => {
                 let mut s = match access {
                     Access::Full => format!("Seq Scan on {}", table.name),
-                    Access::Key {
-                        index,
-                        prefix,
-                        lower,
-                        upper,
-                    } => {
-                        let (name, cols) = match index {
-                            None => ("primary key".to_string(), table.primary_key.clone()),
-                            Some(i) => (
-                                table.indexes[*i].name.clone(),
-                                table.indexes[*i].columns.clone(),
-                            ),
-                        };
-                        let mut conds: Vec<String> = prefix
-                            .iter()
-                            .zip(&cols)
-                            .map(|(e, c)| format!("{} = {}", table.columns[*c].name, show(e)))
-                            .collect();
-                        if let Some(c) = cols.get(prefix.len()) {
-                            let col = &table.columns[*c].name;
-                            match lower {
-                                Bound::Included(e) => conds.push(format!("{col} >= {}", show(e))),
-                                Bound::Excluded(e) => conds.push(format!("{col} > {}", show(e))),
-                                Bound::Unbounded => {}
-                            }
-                            match upper {
-                                Bound::Included(e) => conds.push(format!("{col} <= {}", show(e))),
-                                Bound::Excluded(e) => conds.push(format!("{col} < {}", show(e))),
-                                Bound::Unbounded => {}
-                            }
-                        }
-                        format!(
-                            "Index Scan using {name} on {} ({})",
-                            table.name,
-                            conds.join(" AND ")
-                        )
+                    Access::Key { .. } => {
+                        let (name, conds) = key_conds(table, access);
+                        format!("Index Scan using {name} on {} ({conds})", table.name)
                     }
                     Access::Nearest {
                         index,
                         query,
                         count,
+                        within,
+                        partition,
+                        ..
                     } => {
                         let ix = &table.indexes[*index];
+                        let mut among = String::new();
+                        if !partition.is_empty() {
+                            let p: Vec<String> = ix.columns[1..]
+                                .iter()
+                                .zip(partition)
+                                .map(|(&c, v)| format!("{} = {}", table.columns[c].name, show(v)))
+                                .collect();
+                            let _ = write!(among, " in {}", p.join(", "));
+                        }
+                        if let Some(w) = within.as_deref() {
+                            let (name, conds) = key_conds(table, w);
+                            let _ = write!(among, " among {name}: {conds}");
+                        }
                         format!(
-                            "Index Scan using {} on {} ({} nearest {} to {})",
+                            "Index Scan using {} on {} ({} nearest {} to {}{among})",
                             ix.name,
                             table.name,
                             show(count),
@@ -893,24 +1003,7 @@ impl Plan {
     pub fn for_each_expr_mut(&mut self, f: &mut dyn FnMut(&mut Expr)) {
         match self {
             Plan::Scan { access, filter, .. } => {
-                if let Access::Key {
-                    prefix,
-                    lower,
-                    upper,
-                    ..
-                } = access
-                {
-                    prefix.iter_mut().for_each(&mut *f);
-                    for b in [lower, upper] {
-                        if let Bound::Included(e) | Bound::Excluded(e) = b {
-                            f(e);
-                        }
-                    }
-                }
-                if let Access::Nearest { query, count, .. } = access {
-                    f(query);
-                    f(count);
-                }
+                access.for_each_expr_mut(f);
                 if let Some(e) = filter {
                     f(e);
                 }
@@ -995,24 +1088,7 @@ impl Plan {
     pub fn for_each_expr<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
         match self {
             Plan::Scan { access, filter, .. } => {
-                if let Access::Key {
-                    prefix,
-                    lower,
-                    upper,
-                    ..
-                } = access
-                {
-                    prefix.iter().for_each(&mut *f);
-                    for b in [lower, upper] {
-                        if let Bound::Included(e) | Bound::Excluded(e) = b {
-                            f(e);
-                        }
-                    }
-                }
-                if let Access::Nearest { query, count, .. } = access {
-                    f(query);
-                    f(count);
-                }
+                access.for_each_expr(f);
                 if let Some(e) = filter {
                     f(e);
                 }

@@ -409,7 +409,7 @@ fn hnsw_serves_order_by_distance_limit() {
         "CREATE TABLE items (id INT PRIMARY KEY, v vector({dims}), tag TEXT)"
     ))
     .unwrap();
-    let r: Vec<String> = (0..3000)
+    let r: Vec<String> = (0..12000)
         .map(|i| format!("({i}, '{}', 't{}')", g.vector(dims), i % 7))
         .collect();
     s.execute(&format!("INSERT INTO items VALUES {}", r.join(", ")))
@@ -440,11 +440,10 @@ fn hnsw_serves_order_by_distance_limit() {
         assert!(!searched(&mut s, &sql), "{sql}");
     }
     // Fewer rows pass than asked for: every row is read.
-    let sql = format!("SELECT id FROM items WHERE id % 1000 = 0 ORDER BY v <-> '{q}' LIMIT 5");
-    assert!(searched(&mut s, &sql), "{sql}");
+    let sql = format!("SELECT id FROM items WHERE id % 5000 = 0 ORDER BY v <-> '{q}' LIMIT 5");
     let mut ids = rows(&mut s, &sql);
     ids.sort();
-    assert_eq!(ids, [["0"], ["1000"], ["2000"]]);
+    assert_eq!(ids, [["0"], ["10000"], ["5000"]]);
     // A key range the filter chose stays without statistics.
     let sql = format!("SELECT id FROM items WHERE id < 20 ORDER BY v <-> '{q}' LIMIT 5");
     assert!(!searched(&mut s, &sql), "{sql}");
@@ -571,5 +570,418 @@ fn hnsw_serves_order_by_distance_limit() {
         &format!("SELECT id FROM items {filter} ORDER BY v <-> '{q}' LIMIT 10"),
     );
     assert!(ids.is_empty(), "{ids:?}");
+    assert_eq!(problems(&kv, &s), Vec::<String>::new());
+}
+
+/// A filter with a B-tree index (PLAN.md §M14.12 V5): few rows passing
+/// are searched among exactly — the same rows as the exact search, through
+/// writes not yet folded, changed vectors and deletes, before and after
+/// the upkeep; many, through the graph, `ef_search` counting the rows that
+/// pass; fewer than asked for, the range read and sorted.
+#[test]
+fn hnsw_searches_among_a_filters_rows() {
+    let kv = db(17);
+    let mut s = Session::new(kv.clone());
+    let mut g = Lcg(5);
+    let dims = 8;
+    s.execute(&format!(
+        "CREATE TABLE items (id INT PRIMARY KEY, v vector({dims}), cat INT, tag TEXT)"
+    ))
+    .unwrap();
+    let r: Vec<String> = (0..4000)
+        .map(|i| format!("({i}, '{}', {}, 't{}')", g.vector(dims), i * 7 % 200, i % 3))
+        .collect();
+    s.execute(&format!("INSERT INTO items VALUES {}", r.join(", ")))
+        .unwrap();
+    s.execute("CREATE INDEX items_v ON items USING hnsw (v)")
+        .unwrap();
+    s.execute("CREATE INDEX items_cat ON items (cat)").unwrap();
+    s.execute("ANALYZE").unwrap();
+    let queries: Vec<String> = (0..10).map(|_| g.vector(dims)).collect();
+    let q = &queries[0];
+    let exact = |s: &mut Session, filter: &str, q: &str| -> Vec<Vec<String>> {
+        rows(
+            s,
+            &format!(
+                "SELECT id, (v <-> '{q}') + 0 AS d FROM items WHERE {filter} \
+                 ORDER BY d, id LIMIT 10"
+            ),
+        )
+    };
+    let found = |s: &mut Session, filter: &str, q: &str| -> Vec<Vec<String>> {
+        rows(
+            s,
+            &format!(
+                "SELECT id, (v <-> '{q}') + 0 FROM items WHERE {filter} \
+                 ORDER BY v <-> '{q}' LIMIT 10"
+            ),
+        )
+    };
+    // Searched among the range's rows: exactly the exact search's.
+    let check = |s: &mut Session, ctx: &str| {
+        for filter in [
+            "cat = 7",
+            "cat < 3",
+            "cat = 7 AND tag = 't1'",
+            "cat BETWEEN 4 AND 5",
+        ] {
+            let sql = format!("SELECT id FROM items WHERE {filter} ORDER BY v <-> '{q}' LIMIT 10");
+            let p = plan(s, &sql);
+            assert!(
+                p.contains("nearest v to") && p.contains("among items_cat"),
+                "{p}"
+            );
+            for q in &queries {
+                let (f, e) = (found(s, filter, q), exact(s, filter, q));
+                let d = |r: &Vec<Vec<String>>| r.iter().map(|x| x[1].clone()).collect::<Vec<_>>();
+                assert_eq!(d(&f), d(&e), "{ctx}: {filter}");
+            }
+        }
+    };
+    check(&mut s, "built");
+    // Rows in the delta, vectors changed (the old nodes stale), deletes.
+    let r: Vec<String> = (4000..4100)
+        .map(|i| format!("({i}, '{}', 7, 't1')", g.vector(dims)))
+        .collect();
+    s.execute(&format!("INSERT INTO items VALUES {}", r.join(", ")))
+        .unwrap();
+    s.execute(&format!(
+        "UPDATE items SET v = '{q}' WHERE id IN (7 * 29, 2)"
+    ))
+    .unwrap();
+    s.execute("DELETE FROM items WHERE id % 5 = 1 AND cat < 10")
+        .unwrap();
+    check(&mut s, "written");
+    nucleus_sql::hnsw::upkeep_now(&kv).unwrap();
+    check(&mut s, "folded");
+    // Inside a transaction: its own writes.
+    s.execute("BEGIN").unwrap();
+    s.execute(&format!("INSERT INTO items VALUES (9000, '{q}', 7, 't1')"))
+        .unwrap();
+    assert_eq!(found(&mut s, "cat = 7", q)[0][0], "9000");
+    s.execute("ROLLBACK").unwrap();
+    assert_ne!(found(&mut s, "cat = 7", q)[0][0], "9000");
+
+    // Fewer rows than asked for, one without a vector: the range read and
+    // sorted, it last.
+    s.execute(
+        "INSERT INTO items VALUES (10001, '[0,0,0,0,0,0,0,1]', 500, 'x'), \
+               (10002, NULL, 500, 'x'), (10003, '[0,0,0,0,0,0,0,2]', 500, 'x')",
+    )
+    .unwrap();
+    let ids = rows(
+        &mut s,
+        "SELECT id FROM items WHERE cat = 500 ORDER BY v <-> '[0,0,0,0,0,0,0,0]' LIMIT 10",
+    );
+    assert_eq!(ids, [["10001"], ["10003"], ["10002"]]);
+    let ids = rows(
+        &mut s,
+        "SELECT id FROM items WHERE cat = 501 ORDER BY v <-> '[0,0,0,0,0,0,0,0]' LIMIT 10",
+    );
+    assert!(ids.is_empty());
+
+    // Many rows: through the graph, `ef_search` counted among the rows
+    // that pass, so the recall holds whatever the filter's share — too
+    // many expected (the range not read), or too many found (read, then
+    // left for the graph).
+    for filter in ["cat < 150", "cat < 60"] {
+        let sql = format!("SELECT id FROM items WHERE {filter} ORDER BY v <-> '{q}' LIMIT 10");
+        assert!(
+            plan(&mut s, &sql).contains("nearest v to"),
+            "{}",
+            plan(&mut s, &sql)
+        );
+        let mut hit = 0.0;
+        for q in &queries {
+            let (f, e) = (found(&mut s, filter, q), exact(&mut s, filter, q));
+            assert_eq!(f.len(), 10);
+            let e: std::collections::HashSet<_> = e.iter().map(|x| x[0].clone()).collect();
+            hit += f.iter().filter(|x| e.contains(&x[0])).count() as f64 / 10.0;
+        }
+        let recall = hit / queries.len() as f64;
+        assert!(recall > 0.9, "{filter}: recall {recall}");
+    }
+    assert_eq!(problems(&kv, &s), Vec::<String>::new());
+}
+
+/// Row-level security is a filter like any other (PLAN.md §M14.12 V5): a
+/// search returns `k` rows the role may see, the nearest of those, and
+/// evaluates no predicate of the statement on a row the policy hides.
+#[test]
+fn hnsw_searches_only_the_rows_a_policy_lets_through() {
+    let kv = db(19);
+    let mut s = Session::new(kv.clone());
+    let mut g = Lcg(9);
+    let dims = 8;
+    s.execute(&format!(
+        "CREATE TABLE docs (id INT PRIMARY KEY, owner TEXT, cat INT, v vector({dims})); \
+         CREATE USER alice; CREATE USER bob; \
+         GRANT SELECT ON docs TO alice; GRANT SELECT ON docs TO bob; \
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY; \
+         CREATE POLICY own ON docs USING (owner = current_user)"
+    ))
+    .unwrap();
+    // Alice has one row in four; bob's rows have a `cat` a statement's
+    // predicate fails on.
+    let r: Vec<String> = (0..20000)
+        .map(|i| {
+            let (owner, cat) = if i % 4 == 0 {
+                ("alice", 1 + i % 7)
+            } else {
+                ("bob", 0)
+            };
+            format!("({i}, '{owner}', {cat}, '{}')", g.vector(dims))
+        })
+        .collect();
+    s.execute(&format!("INSERT INTO docs VALUES {}", r.join(", ")))
+        .unwrap();
+    s.execute("CREATE INDEX docs_v ON docs USING hnsw (v)")
+        .unwrap();
+    let queries: Vec<String> = (0..10).map(|_| g.vector(dims)).collect();
+    let exact = |s: &mut Session, filter: &str, q: &str| {
+        rows(
+            s,
+            &format!("SELECT id FROM docs WHERE {filter} ORDER BY (v <-> '{q}') + 0, id LIMIT 10"),
+        )
+    };
+    for owner_index in [false, true] {
+        if owner_index {
+            s.execute("CREATE INDEX docs_owner ON docs (owner)")
+                .unwrap();
+        }
+        s.execute("ANALYZE").unwrap();
+        for (filter, user) in [("true", "alice"), ("1 / cat > 0", "alice"), ("true", "bob")] {
+            let truth: Vec<Vec<Vec<String>>> = queries
+                .iter()
+                .map(|q| exact(&mut s, &format!("owner = '{user}' AND {filter}"), q))
+                .collect();
+            s.execute(&format!("SET ROLE {user}")).unwrap();
+            let sql = format!(
+                "SELECT id FROM docs WHERE {filter} ORDER BY v <-> '{}' LIMIT 10",
+                queries[0]
+            );
+            let p = plan(&mut s, &sql);
+            assert!(p.contains("nearest v to"), "{p}");
+            let mut hit = 0;
+            for (q, t) in queries.iter().zip(&truth) {
+                let found = rows(
+                    &mut s,
+                    &format!("SELECT id FROM docs WHERE {filter} ORDER BY v <-> '{q}' LIMIT 10"),
+                );
+                assert_eq!(found.len(), t.len(), "{user}, {filter}");
+                hit += found.iter().filter(|f| t.contains(f)).count();
+            }
+            let recall = hit as f64 / (10 * queries.len()) as f64;
+            assert!(recall > 0.9, "{user}, {filter}: recall {recall}");
+            s.execute("RESET ROLE").unwrap();
+        }
+    }
+}
+
+/// `PARTITION BY` (PLAN.md §M14.12 V5): a graph per value of the columns,
+/// searched where the conditions fix them (a policy's too) — the rows of
+/// that value only, at the recall of a graph of its own — through
+/// inserts, changed vectors, rows moved between values, deletes and the
+/// upkeep; rows with a `NULL` value not indexed; the definition checked.
+#[test]
+fn hnsw_partitioned_by_a_column_searches_one_graph() {
+    let kv = db(23);
+    let mut s = Session::new(kv.clone());
+    let mut g = Lcg(11);
+    let dims = 8;
+    s.execute(&format!(
+        "CREATE TABLE docs (id INT PRIMARY KEY, tenant INT, v vector({dims}))"
+    ))
+    .unwrap();
+    let r: Vec<String> = (0..6000)
+        .map(|i| {
+            let tenant = if i % 100 == 99 {
+                "NULL".to_string()
+            } else {
+                (i % 3).to_string()
+            };
+            format!("({i}, {tenant}, '{}')", g.vector(dims))
+        })
+        .collect();
+    s.execute(&format!("INSERT INTO docs VALUES {}", r.join(", ")))
+        .unwrap();
+    // The definition: a method's index only; columns with keys.
+    for (sql, code) in [
+        ("CREATE INDEX x ON docs (v) PARTITION BY (tenant)", "0A000"),
+        (
+            "CREATE INDEX x ON docs USING hnsw (v) PARTITION BY (nope)",
+            "42703",
+        ),
+        (
+            "CREATE INDEX x ON docs USING hnsw (v) PARTITION BY (v)",
+            "0A000",
+        ),
+        ("CREATE INDEX x ON docs USING hnsw (v, tenant)", "0A000"),
+        (
+            "CREATE INDEX x ON docs USING hnsw (v) PARTITION BY (tenant) WITH (partition_by = 1)",
+            "22023",
+        ),
+    ] {
+        let e = s.execute(sql).map(|_| sql).unwrap_err();
+        assert_eq!(e.code, code, "{sql}: {}", e.message);
+    }
+    s.execute("CREATE INDEX docs_v ON docs USING hnsw (v) PARTITION BY (tenant)")
+        .unwrap();
+    let def = rows(
+        &mut s,
+        "SELECT options FROM nc_catalog.indexes WHERE name = 'docs_v'",
+    );
+    assert!(def[0][0].contains("partition_by=1"), "{def:?}");
+    s.execute("ANALYZE").unwrap();
+    let queries: Vec<String> = (0..10).map(|_| g.vector(dims)).collect();
+    let exact = |s: &mut Session, filter: &str, q: &str| {
+        rows(
+            s,
+            &format!("SELECT id FROM docs WHERE {filter} ORDER BY (v <-> '{q}') + 0, id LIMIT 10"),
+        )
+    };
+    let check = |s: &mut Session, ctx: &str| {
+        for tenant in 0..3 {
+            let filter = format!("tenant = {tenant}");
+            let sql = format!(
+                "SELECT id FROM docs WHERE {filter} ORDER BY v <-> '{}' LIMIT 10",
+                queries[0]
+            );
+            let p = plan(s, &sql);
+            assert!(p.contains(&format!("in tenant = {tenant}")), "{p}");
+            let mut hit = 0;
+            for q in &queries {
+                let found = rows(
+                    s,
+                    &format!("SELECT id FROM docs WHERE {filter} ORDER BY v <-> '{q}' LIMIT 10"),
+                );
+                let truth = exact(s, &filter, q);
+                assert_eq!(found.len(), 10, "{ctx}");
+                hit += found.iter().filter(|f| truth.contains(f)).count();
+            }
+            let recall = hit as f64 / 100.0;
+            assert!(recall > 0.9, "{ctx}: tenant {tenant}: recall {recall}");
+        }
+        // No value fixed: not through the index.
+        let sql = format!(
+            "SELECT id FROM docs ORDER BY v <-> '{}' LIMIT 10",
+            queries[0]
+        );
+        assert!(!plan(s, &sql).contains("nearest"), "{}", plan(s, &sql));
+        assert_eq!(problems(&kv, s), Vec::<String>::new(), "{ctx}");
+    };
+    check(&mut s, "built");
+    // A parameter fixes the value too.
+    let q = &queries[0];
+    let stmt = nucleus_sql::parser::parse(&format!(
+        "SELECT id FROM docs WHERE tenant = $1 ORDER BY v <-> '{q}' LIMIT 10"
+    ))
+    .unwrap()
+    .pop()
+    .unwrap();
+    match s.run(&stmt, &[nucleus_sql::Value::Int(1)]).unwrap() {
+        Output::Rows { rows, .. } => assert_eq!(rows.len(), 10),
+        other => panic!("{other:?}"),
+    }
+    // A tenant's new row nearest the query; rows moved to another
+    // tenant, changed, deleted.
+    s.execute(&format!("INSERT INTO docs VALUES (7000, 2, '{q}')"))
+        .unwrap();
+    s.execute("UPDATE docs SET tenant = 1 WHERE id % 3 = 0 AND id < 600")
+        .unwrap();
+    s.execute(&format!("UPDATE docs SET v = '{q}' WHERE id = 4"))
+        .unwrap();
+    s.execute("DELETE FROM docs WHERE id % 7 = 2").unwrap();
+    s.execute("UPDATE docs SET tenant = NULL WHERE id = 8")
+        .unwrap();
+    let near = |s: &mut Session, tenant: i32| {
+        rows(
+            s,
+            &format!("SELECT id FROM docs WHERE tenant = {tenant} ORDER BY v <-> '{q}' LIMIT 10"),
+        )
+    };
+    assert_eq!(near(&mut s, 2)[0][0], "7000");
+    assert_eq!(near(&mut s, 1)[0][0], "4");
+    assert!(near(&mut s, 0).iter().all(|r| r[0] != "4"));
+    check(&mut s, "written");
+    nucleus_sql::hnsw::upkeep_now(&kv).unwrap();
+    check(&mut s, "folded");
+    // Row-level security fixes the value: a tenant's session.
+    s.execute(
+        "CREATE USER app; GRANT SELECT ON docs TO app; \
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY; \
+         CREATE POLICY tenant ON docs USING (tenant = current_setting('app.tenant')::int)",
+    )
+    .unwrap();
+    s.execute("SET ROLE app").unwrap();
+    s.execute("SET app.tenant = '2'").unwrap();
+    let sql = format!("SELECT id FROM docs ORDER BY v <-> '{q}' LIMIT 10");
+    assert!(
+        plan(&mut s, &sql).contains("in tenant = "),
+        "{}",
+        plan(&mut s, &sql)
+    );
+    assert_eq!(rows(&mut s, &sql)[0][0], "7000");
+    s.execute("RESET ROLE").unwrap();
+    // The partitioning column's type changed: the index defined again,
+    // its graphs the same values'.
+    s.execute("ALTER TABLE docs ALTER COLUMN tenant TYPE bigint")
+        .unwrap();
+    assert_eq!(near(&mut s, 2)[0][0], "7000");
+    assert_eq!(problems(&kv, &s), Vec::<String>::new());
+}
+
+/// A partitioned table (§M14.20): an HNSW index on it is one on each
+/// partition, a graph each; `ORDER BY … LIMIT k` searches each for `k`
+/// rows and takes the nearest — the one partition its key fixes.
+#[test]
+fn hnsw_on_a_partitioned_table_searches_each_partition() {
+    let kv = db(29);
+    let mut s = Session::new(kv.clone());
+    let mut g = Lcg(13);
+    let dims = 8;
+    s.execute(&format!(
+        "CREATE TABLE pts (id INT, region INT, v vector({dims}), PRIMARY KEY (region, id)) \
+         PARTITION BY LIST (region); \
+         CREATE TABLE pts_0 PARTITION OF pts FOR VALUES IN (0); \
+         CREATE TABLE pts_1 PARTITION OF pts FOR VALUES IN (1); \
+         CREATE TABLE pts_2 PARTITION OF pts FOR VALUES IN (2)"
+    ))
+    .unwrap();
+    let r: Vec<String> = (0..9000)
+        .map(|i| format!("({i}, {}, '{}')", i % 3, g.vector(dims)))
+        .collect();
+    s.execute(&format!("INSERT INTO pts VALUES {}", r.join(", ")))
+        .unwrap();
+    s.execute("CREATE INDEX pts_v ON pts USING hnsw (v)")
+        .unwrap();
+    s.execute("ANALYZE").unwrap();
+    let queries: Vec<String> = (0..10).map(|_| g.vector(dims)).collect();
+    for filter in ["true", "region = 1"] {
+        let sql = format!(
+            "SELECT id FROM pts WHERE {filter} ORDER BY v <-> '{}' LIMIT 10",
+            queries[0]
+        );
+        let p = plan(&mut s, &sql);
+        let searches = p.matches("nearest v to").count();
+        assert_eq!(searches, if filter == "true" { 3 } else { 1 }, "{p}");
+        let mut hit = 0;
+        for q in &queries {
+            let found = rows(
+                &mut s,
+                &format!("SELECT id FROM pts WHERE {filter} ORDER BY v <-> '{q}' LIMIT 10"),
+            );
+            let truth = rows(
+                &mut s,
+                &format!(
+                    "SELECT id FROM pts WHERE {filter} ORDER BY (v <-> '{q}') + 0, id LIMIT 10"
+                ),
+            );
+            assert_eq!(found.len(), 10);
+            hit += found.iter().filter(|f| truth.contains(f)).count();
+        }
+        let recall = hit as f64 / 100.0;
+        assert!(recall > 0.9, "{filter}: recall {recall}");
+    }
     assert_eq!(problems(&kv, &s), Vec::<String>::new());
 }

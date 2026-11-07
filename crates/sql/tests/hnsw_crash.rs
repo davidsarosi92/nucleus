@@ -42,6 +42,9 @@ fn step(rng: &SplitMix64, i: u64) -> Option<String> {
         "INSERT INTO items SELECT g, ('[' || (g % 13) || ',' || (g % 7) || ',' || (g % 5) \
          || ',' || (g % 3) || ']')::vector, g % 4 FROM generate_series(1, 150) g",
         "CREATE INDEX items_v ON items USING hnsw (v) WITH (m = 4, ef_construction = 8)",
+        // A graph per tag: rows move between them as their tag changes.
+        "CREATE INDEX items_vt ON items USING hnsw (v) PARTITION BY (tag) \
+         WITH (m = 4, ef_construction = 8)",
     ];
     if let Some(s) = setup.get(i as usize) {
         return Some(s.to_string());
@@ -141,10 +144,38 @@ fn floats(s: &mut Session, sql: &str) -> Vec<f64> {
     }
 }
 
-/// The index's answer at a wide `ef` against the exact search's.
+/// The index's answer at a wide `ef` against the exact search's — and
+/// the partitioned index's, a tag's.
 fn searches_exactly(kv: &Arc<dyn Kv>, ctx: &str) {
     let mut s = Session::new(kv.clone());
     let q = "[20,3,2,1]";
+    s.execute("SET hnsw.ef_search = 1000").unwrap();
+    for tag in 0..4 {
+        let exact = floats(
+            &mut s,
+            &format!(
+                "SELECT (v <-> '{q}') + 0 FROM items WHERE tag = {tag} AND v IS NOT NULL \
+                 ORDER BY 1 LIMIT 10"
+            ),
+        );
+        let sql = format!(
+            "SELECT (v <-> '{q}') + 0 FROM items WHERE tag = {tag} ORDER BY v <-> '{q}' LIMIT 10"
+        );
+        let plan = match s.execute(&format!("EXPLAIN {sql}")).unwrap().pop() {
+            Some(Output::Rows { rows, .. }) => format!("{rows:?}"),
+            other => panic!("{other:?}"),
+        };
+        assert!(plan.contains("in tag = "), "{ctx}: {plan}");
+        let found = floats(&mut s, &sql);
+        let found = &found[..found.len().min(exact.len())];
+        for (f, e) in found.iter().zip(&exact) {
+            assert!(
+                (f - e).abs() < 1e-9,
+                "{ctx}: tag {tag}: {found:?} against {exact:?}"
+            );
+        }
+        assert_eq!(found.len(), exact.len(), "{ctx}: tag {tag}");
+    }
     let exact = floats(
         &mut s,
         &format!("SELECT (v <-> '{q}') + 0 FROM items WHERE v IS NOT NULL ORDER BY 1 LIMIT 10"),
@@ -200,8 +231,8 @@ fn hnsw_survives_a_crash_at_any_io_point() {
                 let ok = got == states[done] || (in_step && states.get(done + 1) == Some(&got));
                 assert!(ok, "{ctx}: recovered a state that no step left");
                 assert_eq!(problems(&kv), Vec::<String>::new(), "{ctx}");
-                if !got.contains("items") || done < 3 {
-                    continue; // the index not made yet
+                if !got.contains("items") || done < 4 {
+                    continue; // the indexes not made yet
                 }
                 searches_exactly(&kv, &ctx);
                 searched += 1;

@@ -38,6 +38,7 @@ use crate::types::{Row, Value};
 use crate::vectors::Metric as SqlMetric;
 
 use graph::{Metric, Params, Scratch};
+pub use store::Pks;
 use store::{ByRow, Index, Keys, Shape};
 
 /// The method's name.
@@ -60,10 +61,13 @@ const PUT_BYTES: usize = 8 << 20;
 /// The HNSW index method.
 pub struct Hnsw;
 
-/// An index of `t` as the method sees it.
+/// An index of `t` (a graph of it, partitioned) as the method sees it.
 struct Opened {
+    id: Id,
     index: Index,
+    /// The vector's column, and the index's (its `PARTITION BY` too).
     column: usize,
+    columns: Vec<usize>,
     sql: SqlMetric,
     state: Arc<State>,
 }
@@ -79,8 +83,50 @@ fn threads() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
-/// Index `i` of `t` in database `instance` ([`Kv::instance`]).
-fn open(instance: u64, t: &Table, i: usize) -> Result<Opened> {
+/// A graph of index `i` of `t`: empty for an index not partitioned; for
+/// one partitioned, `p` and its `PARTITION BY` columns' values (key
+/// encoded) — `None` where one is `NULL`: the row is not indexed (no
+/// search's `col = value` finds it).
+fn part(t: &Table, i: usize, row: &[Value]) -> Option<Vec<u8>> {
+    let cols = &t.indexes[i].columns[1..];
+    if cols.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut out = vec![b'p'];
+    for &c in cols {
+        if row[c].is_null() {
+            return None;
+        }
+        crate::encoding::encode_key_value(&mut out, &row[c]);
+    }
+    Some(out)
+}
+
+/// The graph of partition values `values` (each of its column's type), as
+/// [`part`] names it — `None` where one is `NULL`.
+pub fn part_of(values: &[Value]) -> Option<Vec<u8>> {
+    if values.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut out = vec![b'p'];
+    for v in values {
+        if v.is_null() {
+            return None;
+        }
+        crate::encoding::encode_key_value(&mut out, v);
+    }
+    Some(out)
+}
+
+/// Whether index `ix` has graphs by its `PARTITION BY` columns
+/// (`ix.columns[1..]`).
+pub fn partitioned(ix: &IndexDef) -> bool {
+    ix.columns.len() > 1
+}
+
+/// Graph `part` ([`part`]) of index `i` of `t` in database `instance`
+/// ([`Kv::instance`]).
+fn open(instance: u64, t: &Table, i: usize, part: &[u8]) -> Result<Opened> {
     let ix = &t.indexes[i];
     let column = ix.columns[0];
     let dims = t.columns[column]
@@ -91,6 +137,12 @@ fn open(instance: u64, t: &Table, i: usize) -> Result<Opened> {
         .find(|o| Some(o.0) == ix.opclasses[0].as_deref())
         .copied()
         .ok_or_else(|| Error::internal("an hnsw index without its operator class"))?;
+    let id = Id {
+        instance,
+        table: t.id,
+        index: ix.id,
+        part: part.to_vec(),
+    };
     let params = Params {
         m: option(ix, "m").unwrap_or(16),
         ef_construction: option(ix, "ef_construction").unwrap_or(64),
@@ -99,16 +151,22 @@ fn open(instance: u64, t: &Table, i: usize) -> Result<Opened> {
     };
     Ok(Opened {
         index: Index {
-            keys: Keys::new(t.index_prefix(ix.id)),
+            keys: Keys::new([t.index_prefix(ix.id).as_slice(), part].concat()),
             shape: Shape::new(params, dims as usize * 4, threads()),
         },
         column,
+        columns: ix.columns.clone(),
         sql,
-        state: state((instance, t.id, ix.id)),
+        state: state(&id),
+        id,
     })
 }
 
 impl Opened {
+    fn id(&self) -> Id {
+        self.id.clone()
+    }
+
     /// A value's form in the graph: its components (normalized for the
     /// cosine distance); `None` for what is not indexed.
     fn stored(&self, v: &Value) -> Result<Option<Vec<u8>>> {
@@ -133,11 +191,13 @@ impl Opened {
         Ok(Some(out))
     }
 
-    /// The row of primary key `pk` (only the indexed column read), if the
-    /// table has it.
+    /// The row of primary key `pk` (only the index's columns read), if
+    /// the table has it.
     fn row(&self, txn: &dyn KvTxn, t: &Table, pk: &[u8]) -> Result<Option<Row>> {
         let mut wanted = vec![false; t.columns.len()];
-        wanted[self.column] = true;
+        for &c in &self.columns {
+            wanted[c] = true;
+        }
         self.row_with(txn, t, pk, &wanted)
     }
 
@@ -161,8 +221,41 @@ impl IndexMethod for Hnsw {
     }
 
     fn define(&self, t: &Table, ix: &mut IndexDef) -> Result<()> {
-        if ix.columns.len() != 1 {
-            return Err(Error::feature("an hnsw index has one column"));
+        // `PARTITION BY (c, …)`: the columns after the vector, a graph per
+        // value of them.
+        let parts = match ix.options.iter().find(|(k, _)| k == "partition_by") {
+            Some((_, v)) => v.parse::<usize>().ok().filter(|&n| n >= 1).ok_or_else(|| {
+                Error::invalid_parameter(format!(
+                    "invalid value {v} for option \"partition_by\" (a number of columns)"
+                ))
+            })?,
+            None => 0,
+        };
+        if ix.columns.len() != 1 + parts {
+            return Err(Error::feature(
+                "an hnsw index has one column (and those of its PARTITION BY)",
+            ));
+        }
+        for (n, &c) in ix.columns.iter().enumerate().skip(1) {
+            if ix.columns[..n].contains(&c) {
+                return Err(Error::feature(format!(
+                    "an hnsw index is partitioned by other columns than its own: \"{}\" twice",
+                    t.columns[c].name
+                )));
+            }
+            crate::binder::require(
+                Some(t.columns[c].ty),
+                &[
+                    crate::binder::Need::KeyEncoding,
+                    crate::binder::Need::Equality,
+                ],
+                "an index's PARTITION BY",
+            )?;
+        }
+        if ix.opclasses[1..].iter().any(Option::is_some) {
+            return Err(Error::feature(
+                "a PARTITION BY column of an hnsw index has no operator class",
+            ));
         }
         let col = &t.columns[ix.columns[0]];
         if col.ty != crate::vectors::data_type() {
@@ -191,6 +284,7 @@ impl IndexMethod for Hnsw {
             let (lo, hi) = match k.as_str() {
                 "m" => (2, 100),
                 "ef_construction" => (4, 1000),
+                "partition_by" => continue,
                 _ => {
                     return Err(Error::invalid_parameter(format!(
                         "unrecognized parameter \"{k}\""
@@ -219,6 +313,9 @@ impl IndexMethod for Hnsw {
             ("m".into(), m.to_string()),
             ("ef_construction".into(), efc.to_string()),
         ];
+        if parts > 0 {
+            ix.options.push(("partition_by".into(), parts.to_string()));
+        }
         Ok(())
     }
 
@@ -230,50 +327,75 @@ impl IndexMethod for Hnsw {
         old: Option<RowRef>,
         new: Option<RowRef>,
     ) -> Result<()> {
-        let o = open(txn.instance(), t, i)?;
-        let old = match old {
-            Some((pk, row)) => o.stored(&row[o.column])?.map(|v| (pk, v)),
-            None => None,
+        // Each side's graph, the row's key and stored vector.
+        let instance = txn.instance();
+        let side = |r: Option<RowRef>| -> Result<Option<(Opened, Vec<u8>, Vec<u8>)>> {
+            let Some((pk, row)) = r else {
+                return Ok(None);
+            };
+            let Some(p) = part(t, i, row) else {
+                return Ok(None);
+            };
+            let o = open(instance, t, i, &p)?;
+            Ok(o.stored(&row[o.column])?.map(|v| (o, pk.to_vec(), v)))
         };
-        let new = match new {
-            Some((pk, row)) => o.stored(&row[o.column])?.map(|v| (pk, v)),
-            None => None,
-        };
-        if old.is_some() && old == new {
-            return Ok(()); // the vector and the row's key unchanged
+        let (old, new) = (side(old)?, side(new)?);
+        if let (Some((a, apk, av)), Some((b, bpk, bv))) = (&old, &new)
+            && a.index.keys == b.index.keys
+            && (apk, av) == (bpk, bv)
+        {
+            return Ok(()); // the vector, the row's key and its graph unchanged
         }
-        let mut n = 0;
-        if let Some((pk, v)) = &old {
+        if let Some((o, pk, v)) = &old {
             txn.put(
                 &o.index.keys.dead(pk, store::vector_hash(v), store::nonce()),
                 &[],
             )?;
-            n += 1;
+            o.state.wrote(1);
+            pending().note(o.id());
         }
-        if let Some((pk, v)) = &new {
+        if let Some((o, pk, v)) = &new {
             txn.put(&o.index.keys.delta(pk, store::nonce()), v)?;
-            n += 1;
-        }
-        if n > 0 {
-            o.state.wrote(n);
-            pending().note((txn.instance(), t.id, t.indexes[i].id));
+            o.state.wrote(1);
+            pending().note(o.id());
         }
         Ok(())
     }
 
     fn build(&self, txn: &mut dyn KvTxn, _: &Registry, t: &Table, i: usize) -> Result<()> {
-        let mut o = open(txn.instance(), t, i)?;
-        o.index.shape.batch.threads = crate::budget::workers().max(1);
         let mut wanted = vec![false; t.columns.len()];
-        wanted[o.column] = true;
-        let mut rows = Vec::new();
+        for &c in &t.indexes[i].columns {
+            wanted[c] = true;
+        }
+        // The rows by graph.
+        let mut parts: std::collections::BTreeMap<Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>> =
+            Default::default();
+        let mut opened: HashMap<Vec<u8>, Opened> = HashMap::new();
         for r in crate::index_method::rows(&*txn, t, Some(&wanted))? {
             let (pk, row) = r?;
+            let Some(p) = part(t, i, &row) else {
+                continue;
+            };
+            if !opened.contains_key(&p) {
+                opened.insert(p.clone(), open(txn.instance(), t, i, &p)?);
+            }
+            let o = &opened[&p];
             if let Some(v) = o.stored(&row[o.column])? {
-                rows.push((pk, v));
+                parts.entry(p).or_default().push((pk, v));
             }
         }
-        o.index.build(txn, &rows)
+        if parts.is_empty() && !partitioned(&t.indexes[i]) {
+            parts.insert(Vec::new(), Vec::new());
+            opened.insert(Vec::new(), open(txn.instance(), t, i, &[])?);
+        }
+        for (p, rows) in parts {
+            let o = opened
+                .get_mut(&p)
+                .ok_or_else(|| Error::internal("a graph not opened"))?;
+            o.index.shape.batch.threads = crate::budget::workers().max(1);
+            o.index.build(txn, &rows)?;
+        }
+        Ok(())
     }
 
     fn check(
@@ -284,17 +406,36 @@ impl IndexMethod for Hnsw {
         rows: &[(Vec<u8>, Row)],
         problems: &mut Vec<String>,
     ) -> Result<()> {
-        let o = open(txn.instance(), t, i)?;
-        let mut want = Vec::with_capacity(rows.len());
-        for (pk, row) in rows {
-            if let Some(v) = o.stored(&row[o.column])? {
-                want.push((pk.clone(), v));
-            }
-        }
         let r = txn
             .shared()
             .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;
-        o.index.check(r, &t.indexes[i].name, &want, problems)
+        // Each graph against the rows it should hold.
+        let mut parts: std::collections::BTreeMap<Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>> =
+            Default::default();
+        if !partitioned(&t.indexes[i]) {
+            parts.insert(Vec::new(), Vec::new());
+        }
+        let mut opened: HashMap<Vec<u8>, Opened> = HashMap::new();
+        for (pk, row) in rows {
+            let Some(p) = part(t, i, row) else {
+                continue;
+            };
+            if !opened.contains_key(&p) {
+                opened.insert(p.clone(), open(txn.instance(), t, i, &p)?);
+            }
+            let o = &opened[&p];
+            if let Some(v) = o.stored(&row[o.column])? {
+                parts.entry(p).or_default().push((pk.clone(), v));
+            }
+        }
+        for (p, want) in parts {
+            let o = match opened.remove(&p) {
+                Some(o) => o,
+                None => open(txn.instance(), t, i, &p)?,
+            };
+            o.index.check(r, &t.indexes[i].name, &want, problems)?;
+        }
+        Ok(())
     }
 
     fn after_statement(&self, kv: &Arc<dyn Kv>, wrote: bool) -> Result<()> {
@@ -320,9 +461,38 @@ pub fn nearest(
 ) -> Result<Vec<(Vec<u8>, Row, f64)>> {
     let mut wanted = vec![false; t.columns.len()];
     wanted[t.indexes[i].columns[0]] = true;
-    let mut found = search(txn, t, i, q, k, ef, ef_most, &wanted, &mut |_| Ok(true))?;
+    let ask = Ask {
+        k,
+        ef,
+        ef_most,
+        share: 1.0,
+        among: None,
+        part: &[],
+    };
+    let mut found = search(txn, t, i, q, &ask, &wanted, &mut |_| Ok(true))?;
     found.rows.truncate(k);
     Ok(found.rows)
+}
+
+/// What a [`search`] asks for.
+pub struct Ask<'a> {
+    /// The rows wanted (at least, where there are).
+    pub k: usize,
+    /// The candidates passing the filter the search keeps (`ef_search`:
+    /// pgvector's, counted among the rows that pass, as a filtered HNSW
+    /// search's result list holds only those — hnswlib's, ACORN's).
+    pub ef: usize,
+    /// The most candidates the graph is asked for.
+    pub ef_most: usize,
+    /// The share of the rows expected to pass the filter (the
+    /// optimizer's estimate; 1 without one).
+    pub share: f64,
+    /// Only these rows (primary keys, each once: what a B-tree's range of
+    /// the filter holds), searched exactly — or every row the index has.
+    pub among: Option<&'a Pks>,
+    /// The graph, for an index partitioned ([`part_of`]; empty for one
+    /// not).
+    pub part: &'a [u8],
 }
 
 /// What [`search`] found.
@@ -338,26 +508,29 @@ pub struct Found {
 
 /// The rows of `t` nearest `q` by index `i`'s distance that `keep`
 /// passes, as `txn` sees them, the columns `wanted` marks read (the
-/// indexed one too).  What the graph found is checked against the rows (a
-/// row gone, or no longer near, passed over; a row found twice, once);
-/// with fewer than `k` passing the graph is asked again with `ef` doubled
-/// — pgvector 0.8's iterative scans — up to `ef_most` (raised to `k`) or
-/// until the index has no more.  More than `k` may come back; a query the
+/// indexed one too).  What the index found is checked against the rows
+/// (a row gone, or no longer near, passed over; a row found twice, once).
+///
+/// The graph is asked for `ef` candidates over the share expected to
+/// pass, so about `ef` of them pass; where fewer than `k` pass, or the
+/// share passing near the query turns out under half the expected (a
+/// filter that goes with the vectors), it is asked again for as many as
+/// that share needs — pgvector 0.8's iterative scans, sized by what was
+/// seen — up to `ef_most` (raised to `k`) or until the index has no
+/// more.  Among given rows the search is exact: their vectors from the
+/// index, read from memory.  More than `k` may come back; a query the
 /// index does not hold (`NULL`; for the cosine distance a zero vector)
 /// finds nothing.
-#[allow(clippy::too_many_arguments)]
 pub fn search(
     txn: &dyn KvTxn,
     t: &Table,
     i: usize,
     q: &Value,
-    k: usize,
-    ef: usize,
-    ef_most: usize,
+    ask: &Ask,
     wanted: &[bool],
     keep: &mut dyn FnMut(&Row) -> Result<bool>,
 ) -> Result<Found> {
-    let o = open(txn.instance(), t, i)?;
+    let o = open(txn.instance(), t, i, ask.part)?;
     let Some(qs) = o.stored(q)? else {
         return Ok(Found {
             rows: Vec::new(),
@@ -377,14 +550,42 @@ pub fn search(
     let mut wanted = wanted.to_vec();
     wanted[o.column] = true;
     let mut s = Scratch::default();
-    let ef_most = ef_most.max(k);
-    let mut ef = ef.max(k).clamp(1, ef_most.max(1));
+    let k = ask.k;
+    let wants = ask.ef.max(k).max(1);
+    let ef_most = ask.ef_most.max(k).max(1);
+    let mut ef = match ask.among {
+        Some(_) => wants,
+        None => ((wants as f64 / ask.share.clamp(1e-9, 1.0)).ceil() as usize).clamp(1, ef_most),
+    };
     let started = std::time::Instant::now();
     let metric = o.index.shape.params.metric;
     let mut seen = std::collections::HashSet::new();
-    let mut rows: Vec<(Vec<u8>, Row, f64)> = Vec::new();
+    // The rows that passed, each with its distance by the graph.
+    let mut rows: Vec<(Vec<u8>, Row, f64, f32)> = Vec::new();
+    let (mut checked, mut passed) = (0usize, 0usize);
     loop {
-        let found = o.index.candidates(r, &qs, ef, &mut s)?;
+        let found = match ask.among {
+            None => o.index.candidates(r, &qs, ef, &mut s)?,
+            Some(pks) => match o.index.candidates_among(
+                r,
+                &qs,
+                pks,
+                ef,
+                &o.state.by_row,
+                crate::budget::workers().min(pks.len() / AMONG_PART),
+            )? {
+                Some(found) => found,
+                // The map of rows to nodes is another graph's: searched
+                // through the graph instead.
+                None => {
+                    let ask = Ask {
+                        among: None,
+                        ..*ask
+                    };
+                    return search(txn, t, i, q, &ask, &wanted, keep);
+                }
+            },
+        };
         o.state.scanned(found.sealed, found.delta);
         // Nearest first by the graph's distance (the SQL operator's
         // order): the first `k` that pass are the answer, so the rest
@@ -392,7 +593,7 @@ pub fn search(
         // (its distance differs) is passed over: its vector now is in
         // the index too, under its own distance.
         for (d, pk) in found.near {
-            if rows.len() >= k {
+            if rows.iter().filter(|r| r.3 <= d).count() >= k {
                 break;
             }
             if seen.contains(&pk) {
@@ -408,21 +609,34 @@ pub fn search(
                 continue;
             }
             seen.insert(pk.clone());
+            checked += 1;
             if !keep(&row)? {
                 continue;
             }
-            let d = o.sql.of(&row[o.column], q)?;
-            rows.push((pk, row, d));
+            passed += 1;
+            let sql = o.sql.of(&row[o.column], q)?;
+            rows.push((pk, row, sql, d));
         }
-        if rows.len() >= k || found.all || ef >= ef_most {
+        // The candidates the share passing here takes for `wants` of them
+        // to pass.
+        let needed = if passed == 0 {
+            ef_most
+        } else {
+            (wants as f64 * checked as f64 / passed as f64).ceil() as usize
+        };
+        let short = rows.len() < k || (ask.among.is_none() && needed > 2 * ef);
+        if !short || found.all || ef >= ef_most {
             rows.sort_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)));
             o.state.searched(started.elapsed().as_nanos() as u64);
             return Ok(Found {
-                rows,
+                rows: rows
+                    .into_iter()
+                    .map(|(pk, row, d, _)| (pk, row, d))
+                    .collect(),
                 all: found.all,
             });
         }
-        ef = (ef * 2).min(ef_most);
+        ef = needed.max(2 * ef).min(ef_most);
     }
 }
 
@@ -443,21 +657,34 @@ pub fn serves(ix: &IndexDef) -> Option<(SqlMetric, usize)> {
 /// fewer, or finding them would take a search as costly as reading every
 /// row: about `ef · 2m` distances against the rows' (each node's
 /// neighbours at its bottom layer), so `ef` up to the rows over `2m`.
-/// `ef` is the session's `hnsw.ef_search`.
+/// `ef` is the session's `hnsw.ef_search`; `share`, `among` and `part`
+/// as [`Ask`]'s.
+#[allow(clippy::too_many_arguments)]
 pub fn nearest_rows(
     txn: &dyn KvTxn,
     t: &Table,
     i: usize,
     q: &Value,
     k: usize,
+    share: f64,
+    among: Option<&Pks>,
+    part: &[u8],
     wanted: Option<&[bool]>,
     keep: &mut dyn FnMut(&Row) -> Result<bool>,
 ) -> Result<Option<Vec<(Vec<u8>, Row)>>> {
     let ef = ef_search();
     let m = option(&t.indexes[i], "m").unwrap_or(16);
-    let ef_most = (rows(txn, t, i)? / (2 * m)).max(ef);
+    let ef_most = (rows(txn, t, i, part)? / (2 * m)).max(ef);
     let all = vec![true; t.columns.len()];
-    let found = search(txn, t, i, q, k, ef, ef_most, wanted.unwrap_or(&all), keep)?;
+    let ask = Ask {
+        k,
+        ef,
+        ef_most,
+        share,
+        among,
+        part,
+    };
+    let found = search(txn, t, i, q, &ask, wanted.unwrap_or(&all), keep)?;
     if found.rows.len() < k {
         return Ok(None);
     }
@@ -470,10 +697,34 @@ pub fn nearest_rows(
     ))
 }
 
-/// The rows index `i` of `t` holds as `txn` sees it — its graph's and
-/// sealed objects' (not the delta's, at most a seal's size).
-pub fn rows(txn: &dyn KvTxn, t: &Table, i: usize) -> Result<usize> {
-    let o = open(txn.instance(), t, i)?;
+/// The fewest rows a thread of a search among given rows takes: what
+/// starting a thread costs (~10 µs) against finding a row's vector
+/// (~100 ns, a few cache misses).
+const AMONG_PART: usize = 2048;
+
+/// What reading a row costs, and what the graph's search costs for each
+/// candidate of its `ef`, against reading a B-tree entry and finding its
+/// row's vector in the index (~3.4 µs and ~3.7 µs against ~0.17):
+/// measured on SIFT-1M (`bench/ann/filtered.py`).
+const ROW_PER_ENTRY: f64 = 20.0;
+const EF_PER_ENTRY: f64 = 22.0;
+
+/// The most rows of a filter's B-tree range searched among, of `rows`
+/// the graph holds, for `k` at `ef`: where reading their entries (`p` of
+/// them) costs what the graph's search does — it is asked for `ef` over
+/// the share passing and reads about `k` over it, the share `p / rows` —
+/// so `p` up to √(rows · (ef · a candidate's cost + k · a row's) over an
+/// entry's).
+pub fn among_most(k: usize, ef: usize, rows: usize) -> usize {
+    (rows.max(1) as f64 * (EF_PER_ENTRY * ef.max(k) as f64 + ROW_PER_ENTRY * k.max(1) as f64))
+        .sqrt() as usize
+}
+
+/// The rows graph `part` ([`part_of`]) of index `i` of `t` holds as `txn`
+/// sees it — its graph's and sealed objects' (not the delta's, at most a
+/// seal's size).
+pub fn rows(txn: &dyn KvTxn, t: &Table, i: usize, part: &[u8]) -> Result<usize> {
+    let o = open(txn.instance(), t, i, part)?;
     let r = txn
         .shared()
         .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;
@@ -501,9 +752,9 @@ pub fn check_ef_search(v: &str) -> Result<()> {
     }
 }
 
-/// What index `i` of `t` holds as `txn` sees it.
+/// What index `i` of `t` (not partitioned) holds as `txn` sees it.
 pub fn status(txn: &dyn KvTxn, t: &Table, i: usize) -> Result<store::Status> {
-    let o = open(txn.instance(), t, i)?;
+    let o = open(txn.instance(), t, i, &[])?;
     let r = txn
         .shared()
         .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;
@@ -523,7 +774,9 @@ struct State {
     rates: Mutex<Rates>,
     /// Held by the session doing the upkeep.
     busy: Mutex<()>,
-    by_row: Mutex<ByRow>,
+    /// Each row's nodes in the graph (the folds' marks, searches among
+    /// given rows).
+    by_row: std::sync::RwLock<ByRow>,
     /// Held by the session compacting (apart from `busy`: the folds go on).
     compacting: Mutex<()>,
     /// Whether the last fold left the patches past their share.
@@ -667,18 +920,27 @@ impl State {
     }
 }
 
-/// An index: its database's [`Kv::instance`], its table's id, its id.
-type Id = (u64, u32, u32);
+/// A graph of an index: its database's [`Kv::instance`], its table's id,
+/// its id, and its partition ([`part`]; empty for an index not
+/// partitioned).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Id {
+    instance: u64,
+    table: u32,
+    index: u32,
+    part: Vec<u8>,
+}
 
-fn state(id: Id) -> Arc<State> {
+fn state(id: &Id) -> Arc<State> {
     static STATES: OnceLock<Mutex<HashMap<Id, Arc<State>>>> = OnceLock::new();
-    STATES
+    let mut states = STATES
         .get_or_init(Default::default)
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(id)
-        .or_default()
-        .clone()
+        .unwrap_or_else(|e| e.into_inner());
+    match states.get(id) {
+        Some(s) => s.clone(),
+        None => states.entry(id.clone()).or_default().clone(),
+    }
 }
 
 /// What waits in an index for its upkeep: the keys written since its
@@ -707,25 +969,33 @@ fn pending() -> &'static Pending {
 impl Pending {
     /// Index `id`'s upkeep ran on the `delta` keys seen before it: what
     /// was written since waits, and `sealed` rows are left sealed.
-    fn done(&self, id: Id, delta: u64, sealed: u64) {
+    fn done(&self, id: &Id, delta: u64, sealed: u64) {
         let mut by = self.by.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(w) = by.get_mut(&id) {
+        if let Some(w) = by.get_mut(id) {
             w.delta = w.delta.saturating_sub(delta);
             w.sealed = sealed;
             if w.delta == 0 && w.sealed == 0 {
-                by.remove(&id);
+                by.remove(id);
             }
         }
         self.any.store(!by.is_empty(), Relaxed);
     }
 
     fn note(&self, id: Id) {
-        self.by
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(id)
-            .or_default()
-            .delta += 1;
+        let mut by = self.by.lock().unwrap_or_else(|e| e.into_inner());
+        match by.get_mut(&id) {
+            Some(w) => w.delta += 1,
+            None => {
+                by.insert(
+                    id,
+                    Waiting {
+                        delta: 1,
+                        sealed: 0,
+                    },
+                );
+            }
+        }
+        drop(by);
         self.any.store(true, Relaxed);
     }
 }
@@ -746,12 +1016,12 @@ fn upkeep(kv: &Arc<dyn Kv>, wrote: bool) -> Result<()> {
     let due: Vec<(Id, Waiting)> = {
         let by = p.by.lock().unwrap_or_else(|e| e.into_inner());
         by.iter()
-            .filter(|(k, _)| k.0 == kv.instance())
-            .map(|(k, v)| (*k, *v))
+            .filter(|(k, _)| k.instance == kv.instance())
+            .map(|(k, v)| (k.clone(), *v))
             .collect()
     };
     for (id, w) in due {
-        let st = state(id);
+        let st = state(&id);
         st.sample();
         if !wrote && st.writing() {
             continue;
@@ -766,16 +1036,16 @@ fn upkeep(kv: &Arc<dyn Kv>, wrote: bool) -> Result<()> {
             let Ok(_busy) = st.busy.try_lock() else {
                 continue;
             };
-            match maintain(kv, &st, id, fold)? {
-                Some(sealed) => p.done(id, w.delta, sealed),
+            match maintain(kv, &st, &id, fold)? {
+                Some(sealed) => p.done(&id, w.delta, sealed),
                 None => {
-                    p.done(id, u64::MAX, 0);
+                    p.done(&id, u64::MAX, 0);
                     continue;
                 }
             }
         }
         if st.compact_due.load(Relaxed) {
-            compact(kv, &st, id)?;
+            compact(kv, &st, &id)?;
         }
     }
     Ok(())
@@ -789,24 +1059,24 @@ pub fn upkeep_now(kv: &Arc<dyn Kv>) -> Result<()> {
         p.by.lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .filter(|(k, _)| k.0 == kv.instance())
-            .map(|(k, v)| (*k, *v))
+            .filter(|(k, _)| k.instance == kv.instance())
+            .map(|(k, v)| (k.clone(), *v))
             .collect();
     for (id, w) in due {
-        let st = state(id);
+        let st = state(&id);
         let r = {
             let _busy = st.busy.lock().unwrap_or_else(|e| e.into_inner());
-            maintain(kv, &st, id, 0)?
+            maintain(kv, &st, &id, 0)?
         };
         match r {
-            Some(sealed) => p.done(id, w.delta, sealed),
+            Some(sealed) => p.done(&id, w.delta, sealed),
             None => {
-                p.done(id, u64::MAX, 0);
+                p.done(&id, u64::MAX, 0);
                 continue;
             }
         }
         if st.compact_due.load(Relaxed) {
-            compact(kv, &st, id)?;
+            compact(kv, &st, &id)?;
         }
     }
     Ok(())
@@ -814,22 +1084,21 @@ pub fn upkeep_now(kv: &Arc<dyn Kv>) -> Result<()> {
 
 /// Index `id`'s table and its position there, as `txn` sees the catalog
 /// (`None`: gone).
-fn find(txn: &dyn KvTxn, id: Id) -> Result<Option<(Table, usize)>> {
-    let (_, table, index) = id;
+fn find(txn: &dyn KvTxn, id: &Id) -> Result<Option<(Table, usize)>> {
     Ok(crate::catalog::tables(txn)?.into_iter().find_map(|t| {
         let i = t
             .indexes
             .iter()
-            .position(|ix| ix.id == index && ix.method.as_deref() == Some(NAME))?;
-        (t.id == table).then_some((t, i))
+            .position(|ix| ix.id == id.index && ix.method.as_deref() == Some(NAME))?;
+        (t.id == id.table).then_some((t, i))
     }))
 }
 
 /// Seals index `id` and folds it once `fold` rows are sealed; the rows
 /// left sealed, or `None` where the index is gone.  Notes whether a
 /// compaction is due.
-fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<Option<u64>> {
-    let instance = id.0;
+fn maintain(kv: &Arc<dyn Kv>, st: &State, id: &Id, fold: usize) -> Result<Option<u64>> {
+    let instance = id.instance;
     let started = std::time::Instant::now();
     let mut sealed_rows = 0u64;
     let mut moved = 0;
@@ -838,7 +1107,7 @@ fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<Option<
         let Some((t, i)) = find(&*txn, id)? else {
             return Ok(false);
         };
-        let o = open(instance, &t, i)?;
+        let o = open(instance, &t, i, &id.part)?;
         moved = o.index.seal(txn)?;
         let r = txn
             .shared()
@@ -869,15 +1138,18 @@ fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<Option<
         let Some((t, i)) = find(&*txn, id)? else {
             return Ok(());
         };
-        let o = open(instance, &t, i)?;
-        let mut by_row = st.by_row.lock().unwrap_or_else(|e| e.into_inner());
+        let o = open(instance, &t, i, &id.part)?;
+        // A row now in another graph (its partition's columns changed)
+        // has no vector in this one.
         let current = |ro: &dyn KvTxn, pk: &[u8]| -> Result<Option<Vec<u8>>> {
             match o.row(ro, &t, pk)? {
-                Some(row) => o.stored(&row[o.column]),
-                None => Ok(None),
+                Some(row) if part(&t, i, &row).as_deref() == Some(id.part.as_slice()) => {
+                    o.stored(&row[o.column])
+                }
+                _ => Ok(None),
             }
         };
-        rows = o.index.fold(txn, &mut by_row, &current)?;
+        rows = o.index.fold(txn, &st.by_row, &current)?;
         let r = txn
             .shared()
             .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;
@@ -894,17 +1166,17 @@ fn maintain(kv: &Arc<dyn Kv>, st: &State, id: Id, fold: usize) -> Result<Option<
 /// Compacts index `id` — its patches rewritten into pages from a snapshot
 /// while the folds go on, then swapped in, between two folds — unless
 /// another session is at it; the graph read into memory after.
-fn compact(kv: &Arc<dyn Kv>, st: &State, id: Id) -> Result<()> {
+fn compact(kv: &Arc<dyn Kv>, st: &State, id: &Id) -> Result<()> {
     let Ok(_compacting) = st.compacting.try_lock() else {
         return Ok(());
     };
-    let instance = id.0;
+    let instance = id.instance;
     let made = {
         let txn = kv.begin(TxnOptions::read_only())?;
         let Some((t, i)) = find(&*txn, id)? else {
             return Ok(());
         };
-        let o = open(instance, &t, i)?;
+        let o = open(instance, &t, i, &id.part)?;
         let r = txn
             .shared()
             .ok_or_else(|| Error::internal("hnsw needs a KV that shares a transaction's reads"))?;

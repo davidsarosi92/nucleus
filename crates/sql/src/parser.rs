@@ -1123,7 +1123,7 @@ impl<'a> Parser<'a> {
             self.expect_kw("on")?;
             let table = self.relation()?;
             // [USING method] (column [USING ordering | opclass], …)
-            // [WITH (option = value, …)]
+            // [PARTITION BY (column, …)] [WITH (option = value, …)]
             let method = if self.eat_kw("using") {
                 Some(self.ident()?)
             } else {
@@ -1150,6 +1150,17 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect_op(")")?;
+            let mut partition_by = Vec::new();
+            if self.eat_kws(&["partition", "by"]) {
+                self.expect_op("(")?;
+                loop {
+                    partition_by.push(self.ident()?);
+                    if !self.eat_op(",") {
+                        break;
+                    }
+                }
+                self.expect_op(")")?;
+            }
             let options = self.table_options()?;
             return Ok(Statement::CreateIndex {
                 name,
@@ -1159,6 +1170,7 @@ impl<'a> Parser<'a> {
                 method,
                 opclasses,
                 options,
+                partition_by,
                 unique,
                 if_not_exists,
             });

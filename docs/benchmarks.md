@@ -311,6 +311,47 @@ target/ann-data/.venv/bin/python bench/ann/sql.py target/release/nucleus \
 target/ann-data/.venv/bin/python bench/ann/pgvector_ref.py target/ann-data/sift-128-euclidean
 ```
 
+Filtered searches (PLAN.md §M14.12 V5: `bench/ann/filtered.py`): the
+same 1,000,000 rows indexed at once, a column `a` (0–999, from a hash of
+the row's id: independent of its vector) with a B-tree index, `ANALYZE`d;
+500 queries, `SELECT id FROM t WHERE … ORDER BY v <-> $1 LIMIT 10` at
+`ef_search` 40, recall@10 against the exact answer among the rows that
+pass, µs a search on one client; pgvector with `hnsw.iterative_scan =
+relaxed_order` (without it, 4.1 and 0.44 rows of 10 come back at 10 % and
+1 %); 2026-11-07.
+
+| filter (share of rows) | nucleus | | pgvector | |
+|---|---:|---:|---:|---:|
+| | recall | µs | recall | µs |
+| `a < 500` (50 %) | 0.926 | 587 | 0.891 | 1,021 |
+| `a < 100` (10 %) | 0.982 | 1,760 | 0.932 | 2,533 |
+| `a < 10` (1 %) | 1.0 | 1,425 | 0.987 | 14,477 |
+| `a = 7` (0.1 %) | 1.0 | 313 | 1.0 | 604 |
+| `a = 7 AND id % 10 = 3` (0.01 %) | 1.0 | 516 | 1.0 | 471 |
+
+nucleus counts `hnsw.ef_search` among the rows that pass (recall holds
+at every share) and searches a filter's B-tree range exactly, from the
+vectors in the index's memory, when it holds up to ~33,000 rows at `ef`
+40 (1 % and below here); pgvector searches the graph and filters (50–1
+%) or uses the B-tree and sorts (0.1 % and below).
+
+Groups (`--partition`): a column `g = a / 100`, ten groups of 100,000;
+nucleus with `CREATE INDEX … USING hnsw (v) PARTITION BY (g)` (a graph
+per group: indexed in 45 s against 67 s for one) against one graph, and
+pgvector's one graph:
+
+| filter | one graph | | `PARTITION BY (g)` | | pgvector | |
+|---|---:|---:|---:|---:|---:|---:|
+| | recall | µs | recall | µs | recall | µs |
+| `g = 3` (10 %) | 0.981 | 1,882 | 0.939 | 455 | 0.938 | 2,352 |
+| `g = 3 AND a BETWEEN 300 AND 309` (1 %) | 1.0 | 1,476 | 1.0 | 1,405 | 0.988 | 14,224 |
+
+```
+target/ann-data/.venv/bin/python bench/ann/filtered.py nucleus target/release/nucleus \
+  target/ann-data/sift-128-euclidean [--partition] [--filters g10,g1]
+target/ann-data/.venv/bin/python bench/ann/filtered.py pgvector target/ann-data/sift-128-euclidean
+```
+
 The storage models behind the index (`bench/ann/`, calls in a process,
 PLAN.md §M14.12 V4) are recorded in the plan.
 

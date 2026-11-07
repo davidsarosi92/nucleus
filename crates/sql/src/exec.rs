@@ -73,6 +73,14 @@ fn build_node<'a>(
             {
                 return Ok(rows);
             }
+            // Where the index could not tell the rows: the filter's
+            // B-tree range when it has one, else every row.
+            let access = match access {
+                Access::Nearest {
+                    within: Some(w), ..
+                } => &**w,
+                a => a,
+            };
             let rows = scan_some(table, access, ctx, outer, wanted.map(Vec::as_slice))?;
             let rows: Box<dyn Iterator<Item = Result<(Vec<u8>, Row)>>> = if keys.is_empty() {
                 Box::new(rows)
@@ -739,6 +747,10 @@ fn nearest<'a>(
         index,
         query,
         count,
+        within,
+        share,
+        checks,
+        partition,
     } = access
     else {
         return Ok(None);
@@ -754,11 +766,33 @@ fn nearest<'a>(
         return Ok(Some(Box::new(std::iter::empty())));
     }
     let q = query.eval(&e)?;
+    // A partitioned index's graph: its columns' values (`col = NULL`
+    // matches nothing; a value its column's key cannot hold, the scan).
+    let mut values = Vec::with_capacity(partition.len());
+    for (v, &c) in partition.iter().zip(&table.indexes[*index].columns[1..]) {
+        let Some(v) = key_bound(v.eval(&e)?, table.columns[c].ty) else {
+            return Ok(None);
+        };
+        values.push(v);
+    }
+    let Some(part) = crate::hnsw::part_of(&values) else {
+        return Ok(Some(Box::new(std::iter::empty())));
+    };
     let mut keep = |row: &Row| -> Result<bool> {
         if !crate::keyfilter::passes(keys, row) {
             return Ok(false);
         }
-        filter.map_or(Ok(true), |f| f.holds(&env(row, ctx, outer)))
+        let e = env(row, ctx, outer);
+        for c in filter.into_iter().chain(checks) {
+            if !c.holds(&e)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    let among = match within {
+        Some(w) => among(table, w, *index, &part, k, *share, ctx, outer)?,
+        None => None,
     };
     let found = crate::hnsw::nearest_rows(
         ctx.txn,
@@ -766,10 +800,51 @@ fn nearest<'a>(
         *index,
         &q,
         k,
+        *share,
+        among.as_ref(),
+        &part,
         wanted.map(Vec::as_slice),
         &mut keep,
     )?;
     Ok(found.map(|rows| -> Rows<'a> { Box::new(rows.into_iter().map(|(_, row)| Ok(row))) }))
+}
+
+/// The rows (primary keys) in the B-tree key range `w` of a filter, for
+/// a search among them by index `index` — `None` where they are more than
+/// [`crate::hnsw::among_most`] (the graph then searched instead), or
+/// expected to be (twice that, by the filter's estimated `share`: the
+/// range is not read).
+#[allow(clippy::too_many_arguments)]
+fn among(
+    table: &Table,
+    w: &Access,
+    index: usize,
+    part: &[u8],
+    k: usize,
+    share: f64,
+    ctx: &Ctx,
+    outer: Option<&Env>,
+) -> Result<Option<crate::hnsw::Pks>> {
+    let rows = crate::hnsw::rows(ctx.txn, table, index, part)?;
+    let most = crate::hnsw::among_most(k, crate::hnsw::ef_search(), rows);
+    if share * rows as f64 > 2.0 * most as f64 {
+        return Ok(None);
+    }
+    let Some((start, end, Some(_))) = key_range(table, w, &env(&[], ctx, outer))? else {
+        return Ok(Some(crate::hnsw::Pks::default()));
+    };
+    let end = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+    let mut entries = Entries::new(ctx, Bound::Included(&start), end)?;
+    let mut pks = crate::hnsw::Pks::default();
+    while let Some((_, pk)) = entries.next()? {
+        pks.push(pk);
+        if pks.len() > most {
+            crate::budget::charge_scans(pks.len() as u64)?;
+            return Ok(None);
+        }
+    }
+    crate::budget::charge_scans(pks.len() as u64)?;
+    Ok(Some(pks))
 }
 
 /// A table's rows through an access path, with each row's primary key.
