@@ -103,8 +103,12 @@ invest*'` in Lucene's query syntax (phrases, prefixes, fuzzy terms),
 4–9× PostgreSQL's speed without an index — and a text index (`CREATE
 INDEX … USING text (body) WITH (analyzer = 'english')`) exact in every
 snapshot, its counts and statistics those of the snapshot's rows,
-4–8× PostgreSQL's GIN on terms and 460× on phrases.  Next are BM25
-ranking and hybrid search
+7–14× PostgreSQL's GIN on terms and 550× on phrases — and BM25 ranking,
+`ORDER BY score(body @@ q) DESC LIMIT 10`, the first rows found by the
+index from its postings: Anserini's nDCG@10 on BEIR to within 0.006,
+ranked as well as ParadeDB's Tantivy-based BM25 or better, faster on
+FiQA and ArguAna (1.0 ms a FiQA query, theirs 1.6), slower on the
+smallest corpus.  Next is hybrid search
 (§M14.21) and the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree

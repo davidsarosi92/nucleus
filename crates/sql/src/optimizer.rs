@@ -39,7 +39,81 @@ pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let plan = sink(reorder(plan, &stats), &stats);
     let plan = lookups(crate::eager::eager(plan, &stats), &stats);
     let plan = crate::narrow::narrow(sorted(crate::distinct::two_level(plan)));
-    nearest(method_filters(adaptive(same_rows(plan), &stats)), &stats)
+    let plan = method_ranks(method_filters(adaptive(same_rows(plan), &stats)));
+    nearest(plan, &stats)
+}
+
+/// `ORDER BY f(col, …) [DESC] LIMIT k` over a scan whose rows an index
+/// method finds ([`method_filters`]), nothing else filtering them, where
+/// the index ranks by `f` ([`crate::index_method::IndexMethod::ranks`] —
+/// a text index by BM25's `score(col @@ q)`): the index gives only the
+/// first `k` rows (and those tied with the `k`-th) instead of every row
+/// it finds, and the sort and the limit stay above them.
+fn method_ranks(plan: Plan) -> Plan {
+    let mut plan = map_children(plan, &method_ranks);
+    let Plan::Limit {
+        input,
+        limit: Some(limit),
+        offset,
+    } = &mut plan
+    else {
+        return plan;
+    };
+    let Plan::Sort {
+        input: sorted,
+        keys,
+    } = &mut **input
+    else {
+        return plan;
+    };
+    let Some(key) = keys.first() else {
+        return plan;
+    };
+    let (exprs, below) = match &mut **sorted {
+        Plan::Project { input, exprs } => (Some(&*exprs), &mut **input),
+        other => (None, other),
+    };
+    let ranked = match (&key.expr, exprs) {
+        (Expr::Column(j), Some(exprs)) => exprs.get(*j),
+        (e, None) => Some(e),
+        _ => None,
+    };
+    let Some(Expr::Call(f, args)) = ranked else {
+        return plan;
+    };
+    let Some((Expr::Column(col), rest)) = args.split_first() else {
+        return plan;
+    };
+    let Plan::Scan {
+        table,
+        access: Access::Method { index, rank, .. },
+        filter: None,
+        ..
+    } = below
+    else {
+        return plan;
+    };
+    let ix = &table.indexes[*index];
+    if ix.columns.first() != Some(col)
+        || !rest.iter().all(fixed)
+        || !crate::index_method::of(ix)
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.ranks(ix, f.name(), key.desc))
+    {
+        return plan;
+    }
+    let count = match offset {
+        None => limit.clone(),
+        Some(o) => Expr::Binary(BinaryOp::Add, Box::new(limit.clone()), Box::new(o.clone())),
+    };
+    *rank = Some(crate::plan::MethodRank {
+        function: f.name().to_string(),
+        args: rest.to_vec(),
+        desc: key.desc,
+        count,
+    });
+    plan
 }
 
 /// A scan whose filter has a condition an index method finds the rows of
@@ -98,6 +172,7 @@ fn method_filters(plan: Plan) -> Plan {
             function: f.name().to_string(),
             args: args[1..].to_vec(),
             cond: cond.clone(),
+            rank: None,
         };
         *filter = conjunction(conds);
         return plan;

@@ -848,6 +848,7 @@ fn method_rows<'a>(
         index,
         function,
         args,
+        rank,
         ..
     } = access
     else {
@@ -858,10 +859,34 @@ fn method_rows<'a>(
         .iter()
         .map(|a| a.eval(&e))
         .collect::<Result<Vec<_>>>()?;
+    // The first rows by an order, where nothing else filters them (a
+    // join's key filters may).
+    let rank = match rank {
+        Some(r) if filter.is_none() && keys.is_empty() => {
+            let k = match r.count.eval(&e)? {
+                Value::Int(n) => usize::try_from(n).ok(),
+                _ => None,
+            };
+            match k {
+                Some(k) => Some(crate::index_method::Rank {
+                    function: r.function.clone(),
+                    args: r
+                        .args
+                        .iter()
+                        .map(|a| a.eval(&e))
+                        .collect::<Result<Vec<_>>>()?,
+                    desc: r.desc,
+                    k,
+                }),
+                None => None,
+            }
+        }
+        _ => None,
+    };
     let Some(m) = crate::index_method::of(&table.indexes[*index])? else {
         return Ok(None);
     };
-    let Some(pks) = m.rows_where(ctx.txn, table, *index, function, &values)? else {
+    let Some(pks) = m.rows_where(ctx.txn, table, *index, function, &values, rank.as_ref())? else {
         return Ok(None);
     };
     crate::budget::charge_scans(pks.len() as u64)?;

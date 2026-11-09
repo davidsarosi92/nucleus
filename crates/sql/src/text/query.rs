@@ -103,17 +103,33 @@ impl Query {
         let Some(root) = &self.root else {
             return false;
         };
+        self.find(a, text, hits);
+        eval(root, &hits.0)
+    }
+
+    /// Where each leaf occurs in `text`, analyzed by `a`, into `hits`; the
+    /// text's length in terms.
+    pub(crate) fn find(&self, a: &dyn Analyzer, text: &str, hits: &mut Hits) -> u32 {
         for h in &mut hits.0 {
             h.clear();
         }
+        let mut len = 0;
         a.analyze(text, &mut |t| {
+            len += 1;
             for (leaf, h) in self.leaves.iter().zip(hits.0.iter_mut()) {
                 if leaf.matches(&t.term) {
                     h.push(t.position);
                 }
             }
         });
-        eval(root, &hits.0)
+        len
+    }
+}
+
+impl Hits {
+    /// Each leaf's positions.
+    pub(crate) fn of(&self) -> &[Vec<u32>] {
+        &self.0
     }
 }
 

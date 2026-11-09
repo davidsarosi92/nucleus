@@ -8,6 +8,7 @@
 pub mod index;
 mod porter;
 pub(crate) mod query;
+pub(crate) mod score;
 mod snowball;
 mod stop_words;
 mod word_breaks;
@@ -404,6 +405,7 @@ pub fn register(r: &mut Registry) -> Result<()> {
     register_builtins();
     r.add_function(&["tokenize"], Arc::new(Tokenize))?;
     r.add_operator("@@", DataType::Text, DataType::Text, Arc::new(Matches))?;
+    r.add_function(&["score"], Arc::new(score::Score))?;
     index::register(r)
 }
 

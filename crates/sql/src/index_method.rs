@@ -29,6 +29,21 @@ pub const BTREE: &str = "btree";
 /// key's suffix past the table's primary index prefix) and its values.
 pub type RowRef<'a> = (&'a [u8], &'a Row);
 
+/// An order a scan's rows are wanted in, for its first `k` (an `ORDER BY
+/// … LIMIT k` over it): `function(column, args…)`, greatest first with
+/// `desc`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rank {
+    /// The function ranked by.
+    pub function: String,
+    /// Its arguments after the indexed column.
+    pub args: Vec<crate::types::Value>,
+    /// Greatest first.
+    pub desc: bool,
+    /// The rows wanted.
+    pub k: usize,
+}
+
 /// An index access method.
 pub trait IndexMethod: Send + Sync {
     /// Its name, as `CREATE INDEX … USING name` gives it.
@@ -73,6 +88,23 @@ pub trait IndexMethod: Send + Sync {
         None
     }
 
+    /// A function of a condition on the index's (first) column, bound as
+    /// the index computes it: an expression in place of `function(arg)`,
+    /// and its type — `score(body @@ q)`, BM25 over a text index's
+    /// statistics.  `arg` is the bound condition (an operator's call whose
+    /// first operand is the column); `t` is the index's table.  By default
+    /// none, and the function is bound as any other.
+    fn function(
+        &self,
+        t: &Table,
+        i: usize,
+        function: &str,
+        arg: &crate::expr::Expr,
+    ) -> Result<Option<(crate::expr::Expr, crate::types::DataType)>> {
+        let _ = (t, i, function, arg);
+        Ok(None)
+    }
+
     /// Whether the index finds, exactly, the rows for which `function` of
     /// its (first) column and values fixed for a scan holds — a filter's
     /// condition it then serves ([`IndexMethod::rows_where`]).  By default
@@ -82,9 +114,22 @@ pub trait IndexMethod: Send + Sync {
         false
     }
 
+    /// Whether the index can rank the rows it finds for a condition
+    /// ([`IndexMethod::rows_where`]) by `function` of its (first) column
+    /// and values fixed for the scan — greatest first with `desc`, least
+    /// first without: give only the first `k`.  By default it cannot.
+    fn ranks(&self, ix: &Index, function: &str, desc: bool) -> bool {
+        let _ = (ix, function, desc);
+        false
+    }
+
     /// The primary keys of the rows of `t`, as `txn` sees them, for which
     /// `function(column, args…)` holds, sorted — `None` where the index
-    /// cannot tell for these values (the rows are then read).
+    /// cannot tell for these values (the rows are then read).  With
+    /// `rank` (one it [`ranks`](IndexMethod::ranks) by), it may give only
+    /// the rows first by that order, at least `k` of them where there are
+    /// that many, and every row ranked as the `k`-th is: the order and the
+    /// limit above it are then exact over them.
     fn rows_where(
         &self,
         txn: &dyn KvTxn,
@@ -92,8 +137,9 @@ pub trait IndexMethod: Send + Sync {
         i: usize,
         function: &str,
         args: &[crate::types::Value],
+        rank: Option<&Rank>,
     ) -> Result<Option<Vec<Vec<u8>>>> {
-        let _ = (txn, t, i, function, args);
+        let _ = (txn, t, i, function, args, rank);
         Ok(None)
     }
 

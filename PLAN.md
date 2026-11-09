@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index done | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR) done | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -5401,6 +5401,80 @@ heap scan reads pages in order — the next step for the access path.
 Measured against eaf8bf1 (`bench/phases.py`, alternating, two rounds):
 TPC-H SF1 load 22.3 / 22.8 → 21.9 / 21.6 s, the queries' sums 5,874 /
 5,762 → 5,837 / 5,877 ms: noise.
+
+**T5 — BM25** (done 2026-11-09).  `score(body @@ q)` on a column with a
+text index; `k1`, `b` as the index's options.  Taken: Lucene's
+`BM25Similarity` (since 8.0: no `k1 + 1` factor, its never-negative IDF),
+its phrase score (a frequency, the terms' IDFs summed), its constant
+score for prefixes and fuzzy terms and its sums over a boolean query;
+Lucene's, Elasticsearch's and Tantivy's 1.2 and 0.75 as the defaults.
+Not taken: Lucene's one-byte lengths — exact ones cost nothing here
+(Kamphuis et al., ECIR 2020: the variants barely differ).  The
+statistics are the snapshot's (T4), read once a statement through an
+uncorrelated subquery the index's binding adds (`IndexMethod::function`,
+the third hook the shape needed); a statement ranking by the score has
+the index give only its first `k` rows and the ties of the `k`-th
+(`IndexMethod::ranks`, a `Rank` for `rows_where`, `MethodRank` on
+`Access::Method`), the sort and the limit staying above — exact under
+any later order key.  The index and a row score through one `Scorer`,
+so `tests/text_index.rs` holds their first seven rows of eleven queries
+equal to the last bit through writes, seals and merges.
+
+HNSW's ordering does not move onto this hook yet, against the plan's
+T3 note: the second ordering showed a different shape, not the same one.
+Text ranks the rows its condition finds, nothing else filtering them;
+HNSW ranks every row, checking the filter, policies and partitions while
+its search walks (V5).  One interface for both would carry HNSW's checks
+into every method or lose them; T7's sparse vectors — a method that,
+like HNSW, ranks every row — decide which shape the two share.
+
+Checked against Anserini's BM25 "flat" baselines (Lucene, title and text
+one field, `porter` = its English analyzer, k1 0.9, b 0.4, queries as
+bags of words, trec_eval's nDCG@10 over every judged query, ArguAna's
+query document left out as BEIR and Anserini do), `bench/text/beir.py`:
+
+| BEIR | nucleus | Anserini |
+|---|---:|---:|
+| SciFact | 0.6777 | 0.6789 |
+| NFCorpus | 0.3206 | 0.3218 |
+| ArguAna | 0.4029 | 0.3970 |
+| FiQA | 0.2354 | 0.2361 |
+
+Within 0.0012 but ArguAna, whose long documents feel Lucene's lossy
+lengths most (not verified).  Against ParadeDB's `pg_search` 0.26.6
+(Tantivy's BM25 in PostgreSQL 18, Docker; Snowball English, its stop
+words, 1.2 / 0.75 — `english` and the defaults here; its time `\timing`
+in `psql` in the container, ours the client's over TCP), nDCG@10 and the
+mean time of a query's first 11:
+
+| BEIR | nucleus | ms | ParadeDB | ms |
+|---|---:|---:|---:|---:|
+| SciFact | 0.6891 | 0.99 | 0.6839 | 0.91 |
+| NFCorpus | 0.3291 | 0.80 | 0.3225 | 0.45 |
+| ArguAna | 0.4964 | 3.11 | 0.4814 | 5.43 |
+| FiQA | 0.2534 | 1.00 | 0.2500 | 1.62 |
+
+Measured on the way (FiQA, 648 queries, mean): scoring each found row's
+text — the first way — took 177 ms a SciFact query (the analyzer, 25
+MB/s on one thread); scored from the postings, document at a time over
+each leaf's cursor, 2.4 ms a FiQA query; a bag of words term at a time
+into an array of the segment's documents (Lucene's and Tantivy's
+`TermScorer` sums the same way in its exhaustive mode), 0.97 ms.
+Counting a version by key and hash in a hash map for every match was
+half of a `count(*)` (3.2 → 1.4 ms once only the versions a tombstone in
+the delta names are counted), unions of many lists made pair by pair a
+quarter of the rest (a bitmap now).  Not yet: block maxima and
+block-max MaxScore (Ding and Suel, SIGIR 2011; Tantivy's block WAND) —
+term at a time is linear in the postings, which these corpora keep short
+(FiQA's longest query reads ~50,000); MS MARCO's 8.8 million passages
+are where skipping blocks pays, measured there before it is built.
+`CREATE INDEX` is 1.6–3.3× ParadeDB's (FiQA 3.1 against 0.95 s; theirs
+in parallel): the parallel build above.  T4's FiQA counts after the
+versions and unions above: `market` 1.2 → 0.6 ms, `stock market` 1.7 →
+0.8, `stock AND market` 0.5 → 0.3, `invest*` 1.9 → 1.0, `markte~1` 4.7 →
+4.0.  Measured against 898896c (`bench/phases.py`, alternating, two
+rounds): TPC-H SF1 load 23.0 / 22.1 → 22.3 / 22.2 s, the queries' sums
+5,922 / 5,703 → 5,945 / 5,737 ms: noise.
 
 ### §M14.22 — Embeddings in the database ⬜
 

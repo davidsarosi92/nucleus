@@ -3101,8 +3101,31 @@ becomes `Access::Method { index, function, args, cond }`
 when the statement reads no column and nothing else is checked: the
 method is exact), and where `rows_where` says `None` every row is read
 with `cond` checked.  `EXPLAIN`: `Index Scan using ix on t (col f arg)`.
-HNSW's ordering stays `Access::Nearest`; it moves onto a hook of this kind
-with text ranking (T5), when a second method orders rows.
+
+Two more let a method compute a function of such a condition and rank
+the rows it finds (§M14.21 T5, BM25's).  `function(t, i, name, arg)`:
+`name(arg)` with `arg` an operator's call whose left side is a column
+the index is on (`Binder::operator_origin`, `Binder::index_function`)
+bound as the method says — an expression and its type in place of the
+call (`score(body @@ q)`: §8.19); none, and the function is bound as
+any other.  `ranks(ix, function, desc)` and the `rank` of `rows_where`:
+`ORDER BY f(col, args…) [DESC] LIMIT k [OFFSET o]` over an
+`Access::Method` scan with nothing else in its filter, `f` one the index
+ranks by and its arguments fixed (`optimizer::method_ranks`), gives the
+scan `MethodRank { function, args, desc, count }` (`count` the limit
+plus the offset); `exec::method_rows` evaluates them, and — unless a
+join's key filters also check the rows — passes `Rank { function, args,
+desc, k }`: the method may then give only the rows first by that order,
+every row tied with the `k`-th among them, so the sort and the limit
+that stay above are exact.  `EXPLAIN` adds `first k by f(col) [DESC]`.
+
+HNSW's ordering stays `Access::Nearest` (§8.18): it ranks every row of
+the table, checking the filter's conditions while its search walks
+(policies, partitions, a key range searched among), where a ranked
+condition ranks only the rows the condition finds, nothing else
+filtering them; the two shapes are recorded in PLAN.md §M14.21 T5, and
+the next method that ranks every row (T7's sparse vectors) decides the
+interface they share.
 
 `crates/sql/tests/index_method.rs` registers a method that
 mirrors a column and runs writes, rollbacks, a rewrite, the integrity
@@ -3349,7 +3372,7 @@ search's (and each tag's graph of an index `PARTITION BY (tag)`, rows
 moving between them), the upkeep going on.  `bench/ann/sql.py`: SIFT-1M through SQL
 as `bench/ann/pgvector_ref.py` runs pgvector (`docs/benchmarks.md`).
 
-### 8.19 Text analysis, queries and indexes (`text`, §M14.21 T1–T4)
+### 8.19 Text analysis, queries, indexes and BM25 (`text`, §M14.21 T1–T5)
 
 An **analyzer** turns a text into **terms** — what a text index keeps and
 a text query looks for (§M14.21's later steps).  `text::Analyzer` has a
@@ -3401,8 +3424,10 @@ boundaries, positions in order.
 
 **Text indexes** (§M14.21 T4, `text/index/`): `CREATE INDEX … USING
 text (col) WITH (analyzer = 'english')` on one `text` column (another
-type `0A000`; an analyzer not registered `42704`; another option
-`22023`), `simple` by default; the options keep `analyzer`.  The index
+type `0A000`; an analyzer not registered `42704`; `k1` and `b`, BM25's
+parameters (T5: `k1` ≥ 0, `b` from 0 to 1; Lucene's 1.2 and 0.75 by
+default), else `22023` — as any other option), `simple` by default; the
+options keep `analyzer`, and `k1` and `b` where given.  The index
 decides what `col @@ q` means: its analyzer, given by the binder
 (`IndexMethod::operand`), on the rows as through the index; a filter's
 `col @@ q` with `q` fixed for the scan is found by it (`Access::Method`,
@@ -3451,8 +3476,9 @@ memory and shared by every snapshot (`object_cache`, the HNSW index's
 cache moved out of it: `Kind::TextSegment`, `TextDeleted`).  A search
 decodes each leaf's postings (a prefix's terms by a range of the
 dictionary, a fuzzy term's by a pass over it), evaluates the query's
-tree over sorted document lists (intersections, unions, differences;
-phrases checked on their candidates' positions) and the delta's rows by
+tree over sorted document lists (intersections, unions — of many lists
+through a bitmap of the segment's documents —, differences; phrases
+checked on their candidates' positions) and the delta's rows by
 their stored terms.
 
 *Tests:* `segment.rs` — bit packing at every width, a segment of several
@@ -3472,6 +3498,49 @@ transaction's snapshot keeping its answers and statistics while other
 sessions write, seal and merge; `58_text_index.slt` — the syntax, the
 catalog, `EXPLAIN`, the analyzer with and without the index, writes and
 a rollback.
+
+**BM25** (§M14.21 T5, `text/score.rs`): `score(col @@ q)`, on a column
+with a text index, is how well each row's text matches `q` — Lucene's
+`BM25Similarity` over the index's statistics as the statement's
+snapshot sees them: a term's `idf · tf / (tf + k1 · (1 − b + b · dl /
+avgdl))`, `idf = ln(1 + (N − n + ½) / (n + ½))`, with the text's exact
+length in terms (Lucene keeps a byte); a phrase's, of its frequency
+with its terms' IDFs summed; a prefix's or a fuzzy term's 1 where it
+matches (Lucene's constant score); a boolean query's, the sum of its
+required and matching optional parts' — a word twice in a query counts
+twice; 0 where the query does not match, a `NULL` text too.  Without a
+text index `score` is refused when bound (`0A000`), as is a query that
+varies by row.
+
+The text index binds it (`IndexMethod::function`, §8.17;
+`text::score::bind`) as `text_score(col, q, analyzer, k1, b, (SELECT
+text_stats(table, index, q)))`: the statistics — documents, their total
+length, each exact term's documents (`View::stats`) — in an
+uncorrelated subquery, read once a statement; `text_score` scores a
+row's text by them (`Scorer`, the query analyzed with the index's
+analyzer).  `ORDER BY score(col @@ q) DESC LIMIT k` over a scan the
+index finds the rows of (`WHERE col @@ q`, nothing else filtering) is
+ranked by the index (`IndexMethod::ranks`, `rows_where`'s `rank`):
+`View::top` scores every matching document from the postings — their
+frequencies, positions for phrases, the segment's lengths — through the
+same `Scorer`, so the numbers are a row's, and gives the `k` best with
+the ties of the `k`-th; the sort and the limit above order them (by
+`text_score` again, for those rows only).  A bag of words (one term, or
+optional terms only) is scored term at a time — each term's postings
+added into an array of the segment's documents, in the query's order,
+the same sum; any other query document at a time over cursors into each
+leaf's postings.  A version is counted only where a tombstone in the
+delta names it: a segment's document not marked deleted is otherwise
+live and the only copy of its row (`View::live_matches`).
+
+*Tests:* `score.rs` — the formula against a computation by hand, sums
+over the tree, phrases, prefixes; `59_text_score.slt` — scores against
+a computation outside, the refusals, `EXPLAIN`, the first rows with an
+offset, ties; `tests/text_index.rs` — at every step of its writes,
+seals and merges, eleven queries' first seven rows by score through the
+index against the same scored on the rows (scores to the last bit, ties
+broken alike).  `bench/text/beir.py` checks the rankings against
+Anserini's and ParadeDB's on BEIR (docs/benchmarks.md).
 
 **Text queries** (§M14.21 T2, `text/query.rs`): `text @@ query` is true
 when the text matches the query.  The syntax is Lucene's, the subset of
@@ -4241,6 +4310,17 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-09 — §M14.21 T5, BM25:** `score(col @@ q)` — Lucene's BM25
+  over the index's statistics read once a statement (`text_stats` in an
+  uncorrelated subquery, `text_score` a row), `k1` and `b` options;
+  `ORDER BY score(...) DESC LIMIT k` ranked by the index from its
+  postings (a bag of words term at a time), the same numbers as a row's;
+  `IndexMethod::function`, `ranks`, `rows_where`'s `Rank`,
+  `Access::Method`'s `rank`, `optimizer::method_ranks`; versions counted
+  only where a tombstone names them, unions of many lists by a bitmap
+  (`count(*)` of a FiQA query 3.2 → 1.4 ms); `59_text_score.slt`,
+  rankings in `tests/text_index.rs`, `bench/text/beir.py` (§8.17,
+  §8.19).
 - **2026-11-09 — §M14.21 T3–T4, the text index:** `USING text (col)
   WITH (analyzer = …)` — deltas and tombstones, segments of bit-packed
   128-blocks, deleted objects, seals and logarithmic merges, exact

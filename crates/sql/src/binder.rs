@@ -131,6 +131,10 @@ pub struct Binder<'a> {
     /// an operator on it may take an operand from its index
     /// ([`crate::index_method::IndexMethod::operand`]).
     last_origin: std::cell::RefCell<Option<(String, String)>>,
+    /// The table column the left operand of the last operator bound is,
+    /// if a column: a function of the operator's call may be bound by its
+    /// index ([`crate::index_method::IndexMethod::function`]).
+    operator_origin: std::cell::RefCell<Option<(String, String)>>,
 }
 
 /// A CTE visible to the query being bound.
@@ -329,6 +333,7 @@ impl<'a> Binder<'a> {
             values_targets: None,
             checker: None,
             last_origin: Default::default(),
+            operator_origin: Default::default(),
         }
     }
 
@@ -2579,13 +2584,14 @@ impl<'a> Binder<'a> {
                 let (mut e, ty) = self.operator(op, (l, lt), (r, rt))?;
                 // An index on the left column may say what the operator
                 // means there (a text index's analyzer for `@@`).
-                if let Some((table, column)) = origin
-                    && let Some(v) = self.index_operand(&table, &column, op)?
+                if let Some((table, column)) = &origin
+                    && let Some(v) = self.index_operand(table, column, op)?
                     && let Expr::Call(f, args) = &mut e
                     && f.arity().contains(&(args.len() + 1))
                 {
                     args.push(Expr::Literal(v));
                 }
+                self.operator_origin.replace(origin);
                 (e, ty)
             }
             A::Collate { expr, collation } => {
@@ -2802,9 +2808,19 @@ impl<'a> Binder<'a> {
                     ))
                     .with_hint(format!("{name}() takes {takes} arguments.")));
                 }
+                self.operator_origin.replace(None);
                 let mut bound = Vec::new();
                 for a in args {
                     bound.push(sub(a, self)?);
+                }
+                // A function of a condition on an indexed column, which the
+                // index may compute (`score(body @@ q)`).
+                if let [(arg @ Expr::Call(_, a), _)] = bound.as_slice()
+                    && let Some(Expr::Column(_)) = a.first()
+                    && let Some((table, column)) = self.operator_origin.take()
+                    && let Some(e) = self.index_function(&table, &column, name, arg)?
+                {
+                    return Ok((e.0, Some(e.1)));
                 }
                 self.call(f, bound)?
             }
@@ -2858,6 +2874,33 @@ impl<'a> Binder<'a> {
                 && let Some(v) = m.operand(ix, op)
             {
                 return Ok(Some(v));
+            }
+        }
+        Ok(None)
+    }
+
+    /// `function(arg)` as an index of `table` on `column` computes it
+    /// ([`crate::index_method::IndexMethod::function`]), the first index's
+    /// that does.
+    fn index_function(
+        &self,
+        table: &str,
+        column: &str,
+        function: &str,
+        arg: &Expr,
+    ) -> Result<Option<(Expr, DataType)>> {
+        let Some(t) = catalog::get_table(self.txn, table)? else {
+            return Ok(None);
+        };
+        let Some(c) = t.columns.iter().position(|c| c.name == column) else {
+            return Ok(None);
+        };
+        for (i, ix) in t.indexes.iter().enumerate() {
+            if ix.columns.first() == Some(&c)
+                && let Some(m) = crate::index_method::of(ix)?
+                && let Some(e) = m.function(&t, i, function, arg)?
+            {
+                return Ok(Some(e));
             }
         }
         Ok(None)

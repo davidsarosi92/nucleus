@@ -35,6 +35,7 @@ use super::segment::{self, Doc, Postings, Reader, Segment, bit, corrupt, varint}
 use crate::error::Result;
 use crate::object_cache::{self as cache, Kind};
 use crate::text::query::{Leaf, Node, Query, eval, within};
+use crate::text::score::{Matched, Scorer, Text};
 
 /// An object's parts are at most this long.
 const PART: usize = 1 << 20;
@@ -658,6 +659,45 @@ fn union(a: &[u32], b: &[u32]) -> Vec<u32> {
     out
 }
 
+/// The union of many sorted lists of a segment's `all` documents: through
+/// a bitmap of them where the lists hold more than a sixteenth as many,
+/// else sorted together — not pair by pair, a list copied each time.
+fn union_all(mut parts: Vec<Vec<u32>>, all: u32) -> Vec<u32> {
+    match parts.len() {
+        0 => Vec::new(),
+        1 => parts.pop().expect("one"),
+        2 => union(&parts[0], &parts[1]),
+        _ => {
+            let total: usize = parts.iter().map(Vec::len).sum();
+            if total as u64 * 16 > u64::from(all) {
+                let mut bits = vec![0u64; (all as usize).div_ceil(64)];
+                for p in &parts {
+                    for &d in p {
+                        bits[d as usize / 64] |= 1 << (d % 64);
+                    }
+                }
+                let mut out = Vec::with_capacity(total);
+                for (w, &b) in bits.iter().enumerate() {
+                    let mut b = b;
+                    while b != 0 {
+                        out.push(w as u32 * 64 + b.trailing_zeros());
+                        b &= b - 1;
+                    }
+                }
+                out
+            } else {
+                let mut out = Vec::with_capacity(total);
+                for p in &parts {
+                    out.extend_from_slice(p);
+                }
+                out.sort_unstable();
+                out.dedup();
+                out
+            }
+        }
+    }
+}
+
 fn minus(a: &[u32], b: &[u32]) -> Vec<u32> {
     let mut j = 0;
     a.iter()
@@ -719,6 +759,46 @@ fn leaf_postings(s: &Segment, leaf: &Leaf, positions: bool) -> Result<Postings> 
     }
 }
 
+/// Where a version is: a segment's document, or an insert of the delta.
+#[derive(Clone, Copy, Debug)]
+enum At {
+    Seg(u32, u32),
+    Delta(u32),
+}
+
+/// A segment's document as a score reads it: where each leaf's postings
+/// hold it, found by cursors moving forward as documents ascend.
+struct InSegment<'a> {
+    leaves: &'a [Postings],
+    at: Vec<usize>,
+    here: Vec<Option<usize>>,
+    len: f64,
+}
+
+impl InSegment<'_> {
+    /// To document `d` (past the last one), of length `len`.
+    fn go(&mut self, d: u32, len: u32) {
+        self.len = f64::from(len);
+        for (l, p) in self.leaves.iter().enumerate() {
+            let at = &mut self.at[l];
+            *at += p.docs[*at..].partition_point(|&x| x < d);
+            self.here[l] = (p.docs.get(*at) == Some(&d)).then_some(*at);
+        }
+    }
+}
+
+impl Text for InSegment<'_> {
+    fn len(&self) -> f64 {
+        self.len
+    }
+    fn freq(&self, l: usize) -> u32 {
+        self.here[l].map_or(0, |i| self.leaves[l].freqs[i])
+    }
+    fn positions(&self, l: usize) -> &[u32] {
+        self.here[l].map_or(&[], |i| self.leaves[l].positions(i))
+    }
+}
+
 /// Marks the leaves `n` reads positions of (its phrases').
 fn phrase_leaves(n: &Node, out: &mut [bool]) {
     match n {
@@ -763,10 +843,10 @@ fn eval_docs(n: &Node, leaves: &[Postings], all: u32) -> Vec<u32> {
                 let first = it.next().expect("one");
                 it.fold(first, |a, b| intersect(&a, &b))
             } else if !should.is_empty() {
-                should
-                    .iter()
-                    .map(|c| eval_docs(c, leaves, all))
-                    .fold(Vec::new(), |a, b| union(&a, &b))
+                union_all(
+                    should.iter().map(|c| eval_docs(c, leaves, all)).collect(),
+                    all,
+                )
             } else {
                 (0..all).collect()
             };
@@ -779,32 +859,94 @@ fn eval_docs(n: &Node, leaves: &[Postings], all: u32) -> Vec<u32> {
 }
 
 impl View {
-    /// The primary keys of the rows `q` matches, sorted.
-    pub(crate) fn matching(&self, q: &Query) -> Result<Vec<Vec<u8>>> {
+    /// The versions `q` matches that are live in the snapshot, each once,
+    /// with its score by `sc` (0 without).  A segment's document not marked deleted
+    /// is live unless a tombstone in the delta names it — a row has one
+    /// version at a time, so no other copy of it is live: only those named
+    /// are counted (inserts against tombstones), by primary key and hash.
+    fn live_matches(&self, q: &Query, sc: Option<&Scorer>) -> Result<Vec<(At, f64)>> {
         let Some(root) = &q.root else {
             return Ok(Vec::new());
         };
         let mut need = vec![false; q.leaves.len()];
         phrase_leaves(root, &mut need);
-        // Each row's versions found, by primary key and hash.
-        let mut found: HashMap<(&[u8], u64), u32, MixState> = HashMap::default();
-        for s in &self.segs {
+        let named: std::collections::HashSet<(&[u8], u64), MixState> = self
+            .delta
+            .gone
+            .iter()
+            .map(|g| (g.pk.as_slice(), g.hash))
+            .collect();
+        let mut out = Vec::new();
+        let mut counted: HashMap<(&[u8], u64), (i64, Option<(At, f64)>), MixState> =
+            HashMap::default();
+        let flat = sc.and_then(Scorer::flat);
+        for (n, s) in self.segs.iter().enumerate() {
             let leaves = q
                 .leaves
                 .iter()
                 .zip(&need)
                 .map(|(l, &p)| leaf_postings(&s.seg, l, p))
                 .collect::<Result<Vec<_>>>()?;
-            for d in eval_docs(root, &leaves, s.seg.docs()) {
-                if !s.dead(d) {
-                    *found
-                        .entry((s.seg.pk(d), s.seg.hashes[d as usize]))
-                        .or_default() += 1;
+            let mut found = |d: u32, score: f64| {
+                let at = At::Seg(n as u32, d);
+                let key = (s.seg.pk(d), s.seg.hashes[d as usize]);
+                if named.is_empty() || !named.contains(&key) {
+                    out.push((at, score));
+                } else {
+                    let e = counted.entry(key).or_insert((0, None));
+                    e.0 += 1;
+                    e.1 = Some((at, score));
                 }
+            };
+            if let (Some(sc), Some(flat)) = (sc, &flat) {
+                // A bag of words: each leaf's postings added to their
+                // documents' scores, leaf after leaf — the sum
+                // `Scorer::score` makes, in its order.
+                let docs = s.seg.docs() as usize;
+                let mut acc = vec![0f64; docs];
+                let mut hit = vec![0u64; docs.div_ceil(64)];
+                for &l in flat {
+                    let p = &leaves[l];
+                    for (&d, &f) in p.docs.iter().zip(&p.freqs) {
+                        let norm = sc.norm(f64::from(s.seg.lens[d as usize]));
+                        acc[d as usize] += sc.leaf(l, f, norm);
+                        hit[d as usize / 64] |= 1 << (d % 64);
+                    }
+                }
+                for (w, &b) in hit.iter().enumerate() {
+                    let mut b = b;
+                    while b != 0 {
+                        let d = w as u32 * 64 + b.trailing_zeros();
+                        b &= b - 1;
+                        if !s.dead(d) {
+                            found(d, acc[d as usize]);
+                        }
+                    }
+                }
+                continue;
+            }
+            let mut doc = InSegment {
+                leaves: &leaves,
+                at: vec![0; leaves.len()],
+                here: vec![None; leaves.len()],
+                len: 0.0,
+            };
+            for d in eval_docs(root, &leaves, s.seg.docs()) {
+                if s.dead(d) {
+                    continue;
+                }
+                let score = match sc {
+                    Some(sc) => {
+                        doc.go(d, s.seg.lens[d as usize]);
+                        sc.score(&doc)
+                    }
+                    None => 0.0,
+                };
+                found(d, score);
             }
         }
         let mut hits = vec![Vec::new(); q.leaves.len()];
-        for i in &self.delta.inserts {
+        for (n, i) in self.delta.inserts.iter().enumerate() {
             for h in &mut hits {
                 h.clear();
             }
@@ -818,20 +960,79 @@ impl View {
             for h in &mut hits {
                 h.sort_unstable();
             }
-            if eval(root, &hits) {
-                *found.entry((&i.pk, i.hash)).or_default() += 1;
+            if !eval(root, &hits) {
+                continue;
+            }
+            let m = Matched {
+                len: f64::from(i.doc.len),
+                hits: &hits,
+            };
+            let score = sc.map_or(0.0, |sc| sc.score(&m));
+            let at = At::Delta(n as u32);
+            let key = (i.pk.as_slice(), i.hash);
+            if named.is_empty() || !named.contains(&key) {
+                out.push((at, score));
+            } else {
+                let e = counted.entry(key).or_insert((0, None));
+                e.0 += 1;
+                e.1 = Some((at, score));
             }
         }
         for g in &self.delta.gone {
-            if let Some(n) = found.get_mut(&(g.pk.as_slice(), g.hash)) {
-                *n = n.saturating_sub(1);
+            if let Some(e) = counted.get_mut(&(g.pk.as_slice(), g.hash)) {
+                e.0 -= 1;
             }
         }
-        let mut out: Vec<Vec<u8>> = found
-            .into_iter()
-            .filter(|(_, n)| *n > 0)
-            .map(|((pk, _), _)| pk.to_vec())
-            .collect();
+        out.extend(
+            counted
+                .into_values()
+                .filter(|(n, _)| *n > 0)
+                .filter_map(|(_, v)| v),
+        );
+        Ok(out)
+    }
+
+    /// The primary key of the version at `at`.
+    fn pk(&self, at: At) -> &[u8] {
+        match at {
+            At::Seg(s, d) => self.segs[s as usize].seg.pk(d),
+            At::Delta(i) => &self.delta.inserts[i as usize].pk,
+        }
+    }
+
+    /// The primary keys of the rows `q` matches, sorted.
+    pub(crate) fn matching(&self, q: &Query) -> Result<Vec<Vec<u8>>> {
+        let found = self.live_matches(q, None)?;
+        let mut out: Vec<Vec<u8>> = found.iter().map(|(at, _)| self.pk(*at).to_vec()).collect();
+        out.sort_unstable();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// The primary keys of the rows `q` matches whose scores are among the
+    /// `k` greatest — every row scoring as the `k`-th does too, so an order
+    /// by the score and then by anything else is exact over them.  Scored
+    /// from the postings, as [`Scorer::score`] scores a row's text: the
+    /// same numbers.
+    pub(crate) fn top(&self, q: &Query, sc: &Scorer, k: usize) -> Result<Vec<Vec<u8>>> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let mut live = self.live_matches(q, Some(sc))?;
+        if live.len() > k {
+            live.select_nth_unstable_by(k - 1, |a, b| b.1.total_cmp(&a.1));
+            // The ties past the k-th, moved up behind it.
+            let kth = live[k - 1].1;
+            let mut end = k;
+            for j in k..live.len() {
+                if live[j].1 == kth {
+                    live.swap(end, j);
+                    end += 1;
+                }
+            }
+            live.truncate(end);
+        }
+        let mut out: Vec<Vec<u8>> = live.iter().map(|(at, _)| self.pk(*at).to_vec()).collect();
         out.sort_unstable();
         out.dedup();
         Ok(out)

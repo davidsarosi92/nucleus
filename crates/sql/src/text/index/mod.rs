@@ -27,7 +27,7 @@ use nucleus_kv::{Kv, KvTxn};
 use crate::catalog::{Index as IndexDef, Table};
 use crate::error::{Error, Result};
 use crate::ext::Registry;
-use crate::index_method::{IndexMethod, RowRef};
+use crate::index_method::{IndexMethod, Rank, RowRef};
 use crate::types::{DataType, Row, Value};
 
 use segment::Doc;
@@ -57,6 +57,20 @@ pub fn analyzer_of(ix: &IndexDef) -> Option<&str> {
             .find(|(k, _)| k == "analyzer")
             .map_or(crate::text::DEFAULT, |(_, v)| v.as_str()),
     )
+}
+
+/// Index `ix`'s BM25 parameters (`WITH (k1 = …, b = …)`; Lucene's
+/// 1.2 and 0.75 by default).
+pub(crate) fn params_of(ix: &IndexDef) -> crate::text::score::Params {
+    let mut p = crate::text::score::DEFAULT;
+    for (k, v) in &ix.options {
+        match (k.as_str(), v.parse::<f64>()) {
+            ("k1", Ok(x)) => p.k1 = x,
+            ("b", Ok(x)) => p.b = x,
+            _ => {}
+        }
+    }
+    p
 }
 
 fn store(t: &Table, i: usize) -> Store {
@@ -135,9 +149,30 @@ impl IndexMethod for TextIndex {
             )));
         }
         let mut analyzer = crate::text::DEFAULT.to_string();
+        let mut bm25 = Vec::new();
         for (k, v) in &ix.options {
             match k.as_str() {
                 "analyzer" => analyzer = v.clone(),
+                // BM25's: k1, how fast a term's weight saturates with its
+                // frequency, ≥ 0; b, how much a text's length counts, 0…1.
+                "k1" | "b" => {
+                    let x = v
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|x| x.is_finite() && *x >= 0.0 && (k == "k1" || *x <= 1.0));
+                    let Some(x) = x else {
+                        return Err(Error::invalid_parameter(format!(
+                            "{k} must be a number {}, not {v}",
+                            if k == "k1" {
+                                "of 0 or more"
+                            } else {
+                                "from 0 to 1"
+                            }
+                        )));
+                    };
+                    bm25.retain(|(n, _): &(String, String)| n != k);
+                    bm25.push((k.clone(), x.to_string()));
+                }
                 _ => {
                     return Err(Error::invalid_parameter(format!(
                         "unrecognized parameter \"{k}\""
@@ -147,6 +182,7 @@ impl IndexMethod for TextIndex {
         }
         crate::text::named(&analyzer)?;
         ix.options = vec![("analyzer".into(), analyzer)];
+        ix.options.extend(bm25);
         Ok(())
     }
 
@@ -283,8 +319,27 @@ impl IndexMethod for TextIndex {
         (op == "@@").then(|| Value::Text(analyzer_of(ix).unwrap_or(crate::text::DEFAULT).into()))
     }
 
+    fn function(
+        &self,
+        t: &Table,
+        i: usize,
+        function: &str,
+        arg: &crate::expr::Expr,
+    ) -> Result<Option<(crate::expr::Expr, DataType)>> {
+        if function != "score" {
+            return Ok(None);
+        }
+        crate::text::score::bind(t, i, arg, params_of(&t.indexes[i]))
+    }
+
     fn serves(&self, _: &IndexDef, function: &str) -> bool {
         function == "@@"
+    }
+
+    /// By BM25, greatest first: `score(col @@ q)` bound
+    /// ([`crate::text::score::bind`]).
+    fn ranks(&self, _: &IndexDef, function: &str, desc: bool) -> bool {
+        function == crate::text::score::TEXT_SCORE && desc
     }
 
     fn rows_where(
@@ -294,18 +349,35 @@ impl IndexMethod for TextIndex {
         i: usize,
         function: &str,
         args: &[Value],
+        rank: Option<&Rank>,
     ) -> Result<Option<Vec<Vec<u8>>>> {
         if function != "@@" {
             return Ok(None);
         }
-        let q = match args.first() {
+        let text = match args.first() {
             Some(Value::Text(q)) => q,
             Some(Value::Null) => return Ok(Some(Vec::new())),
             _ => return Ok(None),
         };
         let a = crate::text::named(analyzer_of(&t.indexes[i]).unwrap_or(crate::text::DEFAULT))?;
-        let q = crate::text::query::cached(q, &a)?;
-        Ok(Some(store(t, i).view(txn)?.matching(&q)?))
+        let q = crate::text::query::cached(text, &a)?;
+        let view = store(t, i).view(txn)?;
+        // The first `k` by the score of the same query, by the same
+        // analyzer.
+        if let Some(r) = rank
+            && r.function == crate::text::score::TEXT_SCORE
+            && let [Value::Text(rq), ra, Value::Float(k1), Value::Float(b), st] = r.args.as_slice()
+            && rq == text
+            && args.get(1) == Some(ra)
+        {
+            let st = crate::text::score::Stats::of(st)?;
+            if st.df.len() == q.leaves.len() {
+                let p = crate::text::score::Params { k1: *k1, b: *b };
+                let sc = crate::text::score::Scorer::new(&q, &st, p);
+                return Ok(Some(view.top(&q, &sc, r.k)?));
+            }
+        }
+        Ok(Some(view.matching(&q)?))
     }
 }
 

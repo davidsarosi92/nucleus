@@ -594,7 +594,7 @@ alone.
 
 ## Text analysis
 
-`bench/text/analyzers.py` (PLAN.md §M14.21 T1, T2, T4): BEIR FiQA's 57,638
+`bench/text/analyzers.py` (PLAN.md §M14.21 T1, T2, T4, T5): BEIR FiQA's 57,638
 documents (title and text, 44 MB) in a table, each analyzer's terms
 counted over every document through SQL — `sum(cardinality(tokenize(body,
 a)))` —, best of three; PostgreSQL 18 (container `ncpg`, the same
@@ -627,19 +627,60 @@ through the protocol), best of five:
 
 | | nucleus | PostgreSQL GIN |
 |---|---:|---:|
-| `CREATE INDEX` | 2,628 ms | 3,145 ms |
-| `count(*)` `market` | 1.2 ms | 6.7 ms |
-| `stock market` | 1.7 ms | 6.5 ms |
-| `stock AND market` | 0.5 ms | 4.1 ms |
-| `"stock market"` | 0.6 ms | 274.9 ms |
-| `invest*` | 1.9 ms | 7.5 ms |
-| `markte~1` | 4.7 ms | — |
-| `sum(length(body))` of `market`'s rows | 16.2 ms | 12.1 ms |
+| `CREATE INDEX` | 2,694 ms | 3,145 ms |
+| `count(*)` `market` | 0.6 ms | 6.7 ms |
+| `stock market` | 0.8 ms | 6.5 ms |
+| `stock AND market` | 0.3 ms | 4.1 ms |
+| `"stock market"` | 0.5 ms | 274.9 ms |
+| `invest*` | 1.0 ms | 7.5 ms |
+| `markte~1` | 4.0 ms | — |
+| `sum(length(body))` of `market`'s rows | 15.5 ms | 12.1 ms |
 
 ```sh
 python3 bench/text/data.py beir
 NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/analyzers.py nucleus target/release/nucleus
 python3 bench/text/analyzers.py postgres --container ncpg
+```
+
+### BM25 ranking
+
+`bench/text/beir.py` (PLAN.md §M14.21 T5): BEIR's SciFact, NFCorpus,
+ArguAna and FiQA (title and text), a text index, and each judged test
+query — its query-syntax characters taken out, a bag of words — as
+`SELECT id FROM docs WHERE body @@ q ORDER BY score(body @@ q) DESC, id
+LIMIT 11`; nDCG@10 as Anserini's trec_eval computes it (every judged
+query; ArguAna's query document left out).  The mean time of a query,
+the second of two rounds, through the protocol.
+
+Against Anserini's published BM25 "flat" baselines — `porter` (its
+English analyzer), k1 0.9, b 0.4:
+
+| BEIR | documents | queries | nucleus nDCG@10 | Anserini | `CREATE INDEX` | query |
+|---|---:|---:|---:|---:|---:|---:|
+| SciFact | 5,183 | 300 | 0.6777 | 0.6789 | 506 ms | 1.07 ms |
+| NFCorpus | 3,633 | 323 | 0.3206 | 0.3218 | 378 ms | 0.81 ms |
+| ArguAna | 8,674 | 1,406 | 0.4029 | 0.3970 | 604 ms | 3.76 ms |
+| FiQA | 57,638 | 648 | 0.2354 | 0.2361 | 3,198 ms | 1.55 ms |
+
+Against ParadeDB's `pg_search` 0.26.6 (Tantivy's BM25 in PostgreSQL 18,
+Docker on the same machine; `body ||| q ORDER BY pdb.score(id) DESC
+LIMIT 11`, timed by `\timing` in `psql` inside the container) — both
+with Snowball's English stemmer and stop words (`english` here), k1 1.2,
+b 0.75:
+
+| BEIR | nucleus nDCG@10 | ParadeDB | nucleus `CREATE INDEX` | ParadeDB | nucleus query | ParadeDB |
+|---|---:|---:|---:|---:|---:|---:|
+| SciFact | 0.6891 | 0.6839 | 506 ms | 312 ms | 0.99 ms | 0.91 ms |
+| NFCorpus | 0.3291 | 0.3225 | 396 ms | 221 ms | 0.80 ms | 0.45 ms |
+| ArguAna | 0.4964 | 0.4814 | 594 ms | 358 ms | 3.11 ms | 5.43 ms |
+| FiQA | 0.2534 | 0.2500 | 3,079 ms | 954 ms | 1.00 ms | 1.62 ms |
+
+```sh
+python3 bench/text/data.py beir
+NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus
+NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus --analyzer english --k1 1.2 --b 0.75
+docker run -d --name nucleus-paradedb -e POSTGRES_PASSWORD=x paradedb/paradedb
+python3 bench/text/beir.py paradedb
 ```
 
 ## Write amplification

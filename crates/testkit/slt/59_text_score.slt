@@ -1,0 +1,127 @@
+# BM25 (PLAN.md §M14.21 T5): `score(col @@ q)` on a column with a text
+# index — Lucene's formula over the index's statistics, as the statement's
+# snapshot sees them.
+
+statement ok
+CREATE TABLE docs (id INT PRIMARY KEY, body TEXT)
+
+statement ok
+INSERT INTO docs VALUES
+  (1, 'the quick brown fox'),
+  (2, 'fox fox fox'),
+  (3, 'a lazy dog'),
+  (4, 'the fox and the dog and the cat'),
+  (5, NULL)
+
+# Without a text index there are no statistics.
+statement error 0A000
+SELECT score(body @@ 'fox') FROM docs
+
+statement ok
+CREATE INDEX docs_body ON docs USING text (body)
+
+query IT
+SELECT id, round(score(body @@ 'fox')::numeric, 6)::text FROM docs ORDER BY id
+----
+1 0.169845
+2 0.274365
+3 0.000000
+4 0.122991
+5 0.000000
+
+query IT
+SELECT id, round(score(body @@ 'fox dog')::numeric, 6)::text AS s FROM docs WHERE body @@ 'fox dog' ORDER BY s DESC, id
+----
+3 0.364814
+4 0.362008
+2 0.274365
+1 0.169845
+
+# The first rows by score: the index ranks them from its postings, the
+# sort and the limit stay above.
+query T
+EXPLAIN SELECT id FROM docs WHERE body @@ 'fox dog' ORDER BY score(body @@ 'fox dog') DESC LIMIT 2
+----
+Project: #0
+  Limit: 2
+    Sort: #1 DESC
+      Project: #0, text_score(#1, 'fox dog', 'simple', 1.2, 0.75, (subquery))
+        Index Scan using docs_body on docs (body @@ 'fox dog') first 2 by text_score(body) DESC
+          Subquery:
+            Project: text_stats('docs', 'docs_body', 'fox dog')
+              Values (1 rows)
+        Subquery:
+          Project: text_stats('docs', 'docs_body', 'fox dog')
+            Values (1 rows)
+
+query I
+SELECT id FROM docs WHERE body @@ 'fox dog' ORDER BY score(body @@ 'fox dog') DESC LIMIT 2
+----
+3
+4
+
+query I
+SELECT id FROM docs WHERE body @@ 'fox dog' ORDER BY score(body @@ 'fox dog') DESC LIMIT 2 OFFSET 2
+----
+2
+1
+
+# Ties with the last row wanted are found too: the order after the score
+# decides among them.
+statement ok
+INSERT INTO docs VALUES (6, 'brown bear'), (7, 'brown bear'), (8, 'brown bear')
+
+query I
+SELECT id FROM docs WHERE body @@ 'bear' ORDER BY score(body @@ 'bear') DESC, id DESC LIMIT 2
+----
+8
+7
+
+# Another filter, and the index finds every row it matches.
+query T
+EXPLAIN SELECT id FROM docs WHERE body @@ 'bear' AND id > 6 ORDER BY score(body @@ 'bear') DESC LIMIT 1
+----
+Project: #0
+  Limit: 1
+    Sort: #1 DESC
+      Project: #0, text_score(#1, 'bear', 'simple', 1.2, 0.75, (subquery))
+        Index Scan using docs_body on docs (body @@ 'bear') filter: (#0 > 6)
+        Subquery:
+          Project: text_stats('docs', 'docs_body', 'bear')
+            Values (1 rows)
+
+statement ok
+DELETE FROM docs WHERE id > 5
+
+statement ok
+DROP INDEX docs_body
+
+statement ok
+CREATE INDEX docs_body ON docs USING text (body) WITH (k1 = 0.9, b = 0.4)
+
+query TT
+SELECT method, options FROM nc_catalog.indexes WHERE name = 'docs_body'
+----
+text {analyzer=simple,k1=0.9,b=0.4}
+
+query IT
+SELECT id, round(score(body @@ 'fox')::numeric, 6)::text FROM docs ORDER BY id
+----
+1 0.191761
+2 0.283075
+3 0.000000
+4 0.163612
+5 0.000000
+
+# The query is the statement's, not the row's.
+statement error 0A000
+SELECT score(body @@ body) FROM docs
+
+statement error 22023
+CREATE INDEX ON docs USING text (body) WITH (b = 2)
+
+statement error 22023
+CREATE INDEX ON docs USING text (body) WITH (k1 = '-1')
+
+statement ok
+DROP TABLE docs

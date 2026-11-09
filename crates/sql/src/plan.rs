@@ -320,7 +320,24 @@ pub enum Access {
         args: Vec<Expr>,
         /// The condition.
         cond: Expr,
+        /// The order the rows are wanted in for a limit over the scan, if
+        /// the index ranks by it ([`crate::index_method::IndexMethod::ranks`]).
+        rank: Option<MethodRank>,
     },
+}
+
+/// An order an [`Access::Method`] scan's index ranks its rows by, for the
+/// first `count`: `function(column, args…)`, greatest first with `desc`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MethodRank {
+    /// The function.
+    pub function: String,
+    /// Its arguments after the indexed column, each fixed for the scan.
+    pub args: Vec<Expr>,
+    /// Greatest first.
+    pub desc: bool,
+    /// The rows wanted: the limit and the offset above.
+    pub count: Expr,
 }
 
 impl Access {
@@ -367,8 +384,14 @@ impl Access {
                 checks.iter().for_each(&mut *f);
                 partition.iter().for_each(f);
             }
-            Access::Method { args, cond, .. } => {
+            Access::Method {
+                args, cond, rank, ..
+            } => {
                 args.iter().for_each(&mut *f);
+                if let Some(r) = rank {
+                    r.args.iter().for_each(&mut *f);
+                    f(&r.count);
+                }
                 f(cond);
             }
         }
@@ -407,8 +430,14 @@ impl Access {
                 checks.iter_mut().for_each(&mut *f);
                 partition.iter_mut().for_each(f);
             }
-            Access::Method { args, cond, .. } => {
+            Access::Method {
+                args, cond, rank, ..
+            } => {
                 args.iter_mut().for_each(&mut *f);
+                if let Some(r) = rank {
+                    r.args.iter_mut().for_each(&mut *f);
+                    f(&mut r.count);
+                }
                 f(cond);
             }
         }
@@ -777,15 +806,22 @@ impl Plan {
                         index,
                         function,
                         args,
+                        rank,
                         ..
                     } => {
                         let ix = &table.indexes[*index];
+                        let col = &table.columns[ix.columns[0]].name;
                         format!(
-                            "Index Scan using {} on {} ({} {function} {})",
+                            "Index Scan using {} on {} ({col} {function} {}){}",
                             ix.name,
                             table.name,
-                            table.columns[ix.columns[0]].name,
-                            args.first().map_or(String::new(), show)
+                            args.first().map_or(String::new(), show),
+                            rank.as_ref().map_or(String::new(), |r| format!(
+                                " first {} by {}({col}){}",
+                                show(&r.count),
+                                r.function,
+                                if r.desc { " DESC" } else { "" }
+                            ))
                         )
                     }
                 };

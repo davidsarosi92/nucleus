@@ -1,9 +1,9 @@
-//! The text index (PLAN.md §M14.21 T4): built over a table's rows, kept
-//! on inserts, updates and deletes (a delta, sealed into segments, merged),
-//! its answers to `body @@ q` held at every step to the same query
-//! evaluated on the rows, and its statistics — documents, their length,
-//! each term's documents — to the rows' (the integrity check), in every
-//! snapshot.
+//! The text index (PLAN.md §M14.21 T4, T5): built over a table's rows,
+//! kept on inserts, updates and deletes (a delta, sealed into segments,
+//! merged), its answers to `body @@ q` held at every step to the same query
+//! evaluated on the rows, its first rows by BM25 to the rows' scores, and
+//! its statistics — documents, their length, each term's documents — to
+//! the rows' (the integrity check), in every snapshot.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -104,6 +104,25 @@ fn same(s: &mut Session, step: &str) {
             &format!("SELECT id FROM docs WHERE (body || '') @@ '{q}' ORDER BY id"),
         );
         assert_eq!(by_index, by_rows, "{step}: {q}");
+        // The first rows by score: ranked by the index from its postings,
+        // and with another condition (then every row it finds is scored
+        // on its text), alike — scores, ties and all.
+        let first = |extra: &str| {
+            format!(
+                "SELECT id::text || ' ' || score(body @@ '{q}')::text FROM docs \
+                 WHERE body @@ '{q}'{extra} ORDER BY score(body @@ '{q}') DESC, id LIMIT 7"
+            )
+        };
+        assert!(
+            text(s, &format!("EXPLAIN {}", first("")))
+                .contains(" first 7 by text_score(body) DESC"),
+            "{step}: {q}"
+        );
+        assert_eq!(
+            text(s, &first("")),
+            text(s, &first(" AND n >= 0")),
+            "{step}: {q}"
+        );
     }
 }
 
@@ -280,7 +299,8 @@ fn the_index_decides_the_analyzer() {
         "CREATE INDEX x ON docs USING text (body) WITH (analyzer = 'klingon')",
         "CREATE INDEX x ON docs USING text (id)",
         "CREATE INDEX x ON docs USING text (body, id)",
-        "CREATE INDEX x ON docs USING text (body) WITH (k1 = 1)",
+        "CREATE INDEX x ON docs USING text (body) WITH (bm25 = 1)",
+        "CREATE INDEX x ON docs USING text (body) WITH (b = 1.5)",
     ] {
         assert!(s.execute(bad).is_err(), "{bad}");
     }
