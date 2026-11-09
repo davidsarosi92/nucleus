@@ -5,6 +5,7 @@
 //! for the process, as index methods are: an index names its analyzer
 //! when it is defined and finds it again by that name.
 
+pub mod index;
 mod porter;
 pub(crate) mod query;
 mod snowball;
@@ -402,7 +403,8 @@ impl ScalarFunction for Matches {
 pub fn register(r: &mut Registry) -> Result<()> {
     register_builtins();
     r.add_function(&["tokenize"], Arc::new(Tokenize))?;
-    r.add_operator("@@", DataType::Text, DataType::Text, Arc::new(Matches))
+    r.add_operator("@@", DataType::Text, DataType::Text, Arc::new(Matches))?;
+    index::register(r)
 }
 
 #[cfg(test)]

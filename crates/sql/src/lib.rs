@@ -45,6 +45,7 @@ pub mod index_method;
 pub mod inet;
 mod keyfilter;
 mod keytable;
+pub(crate) mod object_cache;
 pub mod text;
 pub use nucleus_kernels as kernels;
 pub mod large;

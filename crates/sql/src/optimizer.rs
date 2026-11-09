@@ -39,8 +39,75 @@ pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let plan = sink(reorder(plan, &stats), &stats);
     let plan = lookups(crate::eager::eager(plan, &stats), &stats);
     let plan = crate::narrow::narrow(sorted(crate::distinct::two_level(plan)));
-    nearest(adaptive(same_rows(plan), &stats), &stats)
+    nearest(method_filters(adaptive(same_rows(plan), &stats)), &stats)
 }
+
+/// A scan whose filter has a condition an index method finds the rows of
+/// exactly — `col @@ q` with a text index on `col`, `q` fixed for the
+/// scan, bound with the index's operand ([`crate::binder`]) — reads them
+/// through the index ([`Access::Method`]) instead of every row (or a key
+/// range of more than [`METHOD_OVER_RANGE`] rows): the condition costs an
+/// analysis of each row's text, the index a read of its postings and of
+/// the rows found.
+fn method_filters(plan: Plan) -> Plan {
+    let mut plan = map_children(plan, &method_filters);
+    let Plan::Scan {
+        table,
+        access,
+        filter,
+        estimate,
+    } = &mut plan
+    else {
+        return plan;
+    };
+    let Some(whole) = filter.as_ref() else {
+        return plan;
+    };
+    match access {
+        Access::Full => {}
+        Access::Key { .. } if estimate.is_none_or(|e| e > METHOD_OVER_RANGE) => {}
+        _ => return plan,
+    }
+    let mut conds = Vec::new();
+    conjuncts(whole.clone(), &mut conds);
+    for (n, c) in conds.iter().enumerate() {
+        let Expr::Call(f, args) = c else { continue };
+        let Some((Expr::Column(col), rest)) = args.split_first() else {
+            continue;
+        };
+        if !rest.iter().all(fixed) {
+            continue;
+        }
+        let found = table.indexes.iter().enumerate().find(|(_, ix)| {
+            ix.columns.first() == Some(col)
+                && crate::index_method::of(ix).ok().flatten().is_some_and(|m| {
+                    m.serves(ix, f.name())
+                        && match m.operand(ix, f.name()) {
+                            Some(v) => matches!(rest.last(), Some(Expr::Literal(x)) if *x == v),
+                            None => true,
+                        }
+                })
+        });
+        let Some((index, _)) = found else { continue };
+        let cond = conds.remove(n);
+        let Expr::Call(f, args) = &cond else {
+            unreachable!("a call")
+        };
+        *access = Access::Method {
+            index,
+            function: f.name().to_string(),
+            args: args[1..].to_vec(),
+            cond: cond.clone(),
+        };
+        *filter = conjunction(conds);
+        return plan;
+    }
+    plan
+}
+
+/// The rows of a key range past which a condition an index method serves
+/// is found by the method instead.
+const METHOD_OVER_RANGE: f64 = 1000.0;
 
 /// `ORDER BY col <op> q LIMIT k` over a table with an index method's
 /// index that ranks rows by `<op>` (an HNSW index whose operator class is
@@ -276,7 +343,7 @@ fn nearest_scan(node: &mut Plan, want: &Want, st: &Stats) {
         let scanned = match access {
             Access::Full => rows,
             Access::Key { .. } => estimate.unwrap_or(rows),
-            Access::Nearest { .. } => return,
+            Access::Nearest { .. } | Access::Method { .. } => return,
         };
         if searched >= scanned {
             return;

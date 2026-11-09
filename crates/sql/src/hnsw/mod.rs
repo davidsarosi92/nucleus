@@ -19,7 +19,6 @@
 //! A `NULL` vector is not indexed, nor (for `vector_cosine_ops`) one of
 //! zero length, which has no direction — as pgvector's.
 
-mod cache;
 pub mod graph;
 pub mod store;
 
@@ -1263,7 +1262,10 @@ fn compact(kv: &Arc<dyn Kv>, st: &State, id: &Id) -> Result<()> {
 /// `f` in a transaction of its own, committed — run again while the
 /// commit conflicts (with another upkeep: user transactions never write
 /// the keys it writes).
-fn retrying<T>(kv: &Arc<dyn Kv>, mut f: impl FnMut(&mut dyn KvTxn) -> Result<T>) -> Result<T> {
+pub(crate) fn retrying<T>(
+    kv: &Arc<dyn Kv>,
+    mut f: impl FnMut(&mut dyn KvTxn) -> Result<T>,
+) -> Result<T> {
     let mut attempt: u32 = 0;
     loop {
         let mut txn = kv.begin(TxnOptions::default())?;

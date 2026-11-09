@@ -34,9 +34,9 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use nucleus_kernels::{MixState, mix};
 use nucleus_kv::{KvRead, KvTxn, prefix_end};
 
-use super::cache::{self, Kind};
 use super::graph::{self, Graph, GraphMut, Near, Node, Params, Scratch};
 use crate::error::{Error, Result};
+use crate::object_cache::{self as cache, Kind, object_id};
 
 /// The share of a graph's nodes dead past which a fold cuts them out.
 const CONSOLIDATE: f64 = 0.02;
@@ -166,18 +166,6 @@ pub fn nonce() -> u64 {
 /// A vector's hash (a deleted row's, matched to its node).
 pub fn vector_hash(v: &[u8]) -> u64 {
     object_id(7, v)
-}
-
-/// An object's id: a hash of its kind and bytes (the column store's
-/// `segment_id`).
-fn object_id(kind: u64, b: &[u8]) -> u64 {
-    let mut h = mix(kind ^ 0x6e75_636c_6575_7321 ^ b.len() as u64);
-    for w in b.chunks(8) {
-        let mut x = [0u8; 8];
-        x[..w.len()].copy_from_slice(w);
-        h = mix(h ^ u64::from_le_bytes(x));
-    }
-    h | 1
 }
 
 fn corrupt(what: &str) -> Error {

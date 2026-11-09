@@ -594,7 +594,7 @@ alone.
 
 ## Text analysis
 
-`bench/text/analyzers.py` (PLAN.md §M14.21 T1, T2): BEIR FiQA's 57,638
+`bench/text/analyzers.py` (PLAN.md §M14.21 T1, T2, T4): BEIR FiQA's 57,638
 documents (title and text, 44 MB) in a table, each analyzer's terms
 counted over every document through SQL — `sum(cardinality(tokenize(body,
 a)))` —, best of three; PostgreSQL 18 (container `ncpg`, the same
@@ -620,6 +620,21 @@ PostgreSQL's `to_tsvector('simple', body) @@ q::tsquery`, same corpus:
 | `"stock market"` | 784 ms | 127 ms | 3,239 ms | 1,145 ms |
 | `invest*` | 778 ms | 119 ms | 3,231 ms | 1,139 ms |
 | `markte~1` (fuzzy) | 880 ms | 140 ms | — | — |
+
+With an index — `CREATE INDEX … USING text (body)` against PostgreSQL's
+GIN on `to_tsvector('simple', body)` (its server's execution time, ours
+through the protocol), best of five:
+
+| | nucleus | PostgreSQL GIN |
+|---|---:|---:|
+| `CREATE INDEX` | 2,628 ms | 3,145 ms |
+| `count(*)` `market` | 1.2 ms | 6.7 ms |
+| `stock market` | 1.7 ms | 6.5 ms |
+| `stock AND market` | 0.5 ms | 4.1 ms |
+| `"stock market"` | 0.6 ms | 274.9 ms |
+| `invest*` | 1.9 ms | 7.5 ms |
+| `markte~1` | 4.7 ms | — |
+| `sum(length(body))` of `market`'s rows | 16.2 ms | 12.1 ms |
 
 ```sh
 python3 bench/text/data.py beir

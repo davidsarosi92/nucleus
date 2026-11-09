@@ -73,13 +73,35 @@ fn build_node<'a>(
             {
                 return Ok(rows);
             }
+            if let Some(rows) = method_rows(
+                table,
+                access,
+                filter.as_ref(),
+                keys.clone(),
+                wanted,
+                ctx,
+                outer,
+            )? {
+                return Ok(rows);
+            }
             // Where the index could not tell the rows: the filter's
-            // B-tree range when it has one, else every row.
-            let access = match access {
+            // B-tree range when it has one, else every row (and the
+            // condition a method's index would have served).
+            let (access, served) = match access {
                 Access::Nearest {
                     within: Some(w), ..
-                } => &**w,
-                a => a,
+                } => (&**w, None),
+                Access::Method { cond, .. } => (&Access::Full, Some(cond)),
+                a => (a, None),
+            };
+            let filter = match (served, filter) {
+                (Some(c), Some(f)) => Some(Expr::Binary(
+                    crate::ast::BinaryOp::And,
+                    Box::new(c.clone()),
+                    Box::new(f.clone()),
+                )),
+                (Some(c), None) => Some(c.clone()),
+                (None, f) => f.clone(),
             };
             let rows = scan_some(table, access, ctx, outer, wanted.map(Vec::as_slice))?;
             let rows: Box<dyn Iterator<Item = Result<(Vec<u8>, Row)>>> = if keys.is_empty() {
@@ -807,6 +829,79 @@ fn nearest<'a>(
         &mut keep,
     )?;
     Ok(found.map(|rows| -> Rows<'a> { Box::new(rows.into_iter().map(|(_, row)| Ok(row))) }))
+}
+
+/// The rows of a scan through [`Access::Method`] — those its index finds
+/// for the condition it serves — that pass the rest of the filter and the
+/// key filters; `None` (the caller reads every row) for any other access
+/// path, or where the index cannot tell them for these values.
+fn method_rows<'a>(
+    table: &'a Table,
+    access: &Access,
+    filter: Option<&'a Expr>,
+    keys: Vec<(usize, std::sync::Arc<crate::keyfilter::KeyFilter>)>,
+    wanted: Option<&'a Vec<bool>>,
+    ctx: &'a Ctx<'a>,
+    outer: Option<&'a Env<'a>>,
+) -> Result<Option<Rows<'a>>> {
+    let Access::Method {
+        index,
+        function,
+        args,
+        ..
+    } = access
+    else {
+        return Ok(None);
+    };
+    let e = env(&[], ctx, outer);
+    let values = args
+        .iter()
+        .map(|a| a.eval(&e))
+        .collect::<Result<Vec<_>>>()?;
+    let Some(m) = crate::index_method::of(&table.indexes[*index])? else {
+        return Ok(None);
+    };
+    let Some(pks) = m.rows_where(ctx.txn, table, *index, function, &values)? else {
+        return Ok(None);
+    };
+    crate::budget::charge_scans(pks.len() as u64)?;
+    // No column read, nothing else to check (`count(*)`): the index is
+    // exact, so its rows need not be read.
+    if wanted.is_some_and(|w| !w.contains(&true)) && filter.is_none() && keys.is_empty() {
+        let width = table.columns.len();
+        return Ok(Some(Box::new(
+            pks.into_iter().map(move |_| Ok(vec![Value::Null; width])),
+        )));
+    }
+    let storage = crate::storage::of(table)?;
+    let prefix = table.index_prefix(0);
+    Ok(Some(Box::new(pks.into_iter().filter_map(move |pk| {
+        let mut key = prefix.clone();
+        key.extend_from_slice(&pk);
+        let row = match storage.get(
+            ctx.txn,
+            table,
+            &key,
+            wanted.map(Vec::as_slice),
+            &mut crate::enums::Labels::default(),
+        ) {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                return Some(Err(Error::internal(
+                    "an index method found a row its table does not have",
+                )));
+            }
+            Err(e) => return Some(Err(e)),
+        };
+        if !crate::keyfilter::passes(&keys, &row) {
+            return None;
+        }
+        match filter.map(|f| f.holds(&env(&row, ctx, outer))) {
+            None | Some(Ok(true)) => Some(Ok(row)),
+            Some(Ok(false)) => None,
+            Some(Err(e)) => Some(Err(e)),
+        }
+    }))))
 }
 
 /// The rows (primary keys) in the B-tree key range `w` of a filter, for

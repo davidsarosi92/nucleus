@@ -3081,7 +3081,30 @@ table's rows: `ALTER … TYPE`, a key encoding upgrade; `index_method::rows`
 reads them), and `check` checks it for the integrity check against the
 table's rows.  The optimizer's key ranges take only plain B-trees
 (`Index::ordered`); a method's own search is an access path of its own
-(`Access::Nearest`, HNSW's: §8.18).  `crates/sql/tests/index_method.rs` registers a method that
+(`Access::Nearest`, HNSW's: §8.18).
+
+Two hooks let a method serve a filter's condition and decide what an
+operator means on its column (§M14.21 T3, the text index's, §8.19).
+`operand(ix, op)`: a value the binder appends to operator `op`'s call
+when its left side is a table column the index is on (`ScopeCol::origin`,
+`Binder::index_operand`) — the text index's analyzer for `@@`, so the
+operator means the same through the index and on the rows; the first
+index that gives one wins.  `serves(ix, function)` and
+`rows_where(txn, t, i, function, args)`: a conjunct of a scan's filter
+`f(col, args…)` with `col` the index's first column and the arguments
+fixed for the scan (`optimizer::fixed`) — and the operand the index
+gives, so a statement bound before the index existed is not served —
+becomes `Access::Method { index, function, args, cond }`
+(`optimizer::method_filters`: a full scan, or a key range estimated past
+`METHOD_OVER_RANGE` rows, 1,000), the conjunct out of the filter;
+`exec::method_rows` asks for the primary keys and reads their rows (none
+when the statement reads no column and nothing else is checked: the
+method is exact), and where `rows_where` says `None` every row is read
+with `cond` checked.  `EXPLAIN`: `Index Scan using ix on t (col f arg)`.
+HNSW's ordering stays `Access::Nearest`; it moves onto a hook of this kind
+with text ranking (T5), when a second method orders rows.
+
+`crates/sql/tests/index_method.rs` registers a method that
 mirrors a column and runs writes, rollbacks, a rewrite, the integrity
 check (a stray entry found), the refusals and a drop through it;
 `06_indexes.slt` the syntax.
@@ -3114,7 +3137,7 @@ memory a chain of levels kept short by the logarithmic method, Bentley
 and Saxe: a level takes in the one before while that holds no more
 patches, so a lookup walks O(log patches) levels), a directory of the
 pages in parts of 256, the dead nodes;
-decoded, they are shared by every snapshot (`hnsw::cache`: up to 1 GiB,
+decoded, they are shared by every snapshot (`object_cache`, shared with the text index: up to 1 GiB,
 the least recently used dropped past it).  A write puts the row's
 vector into the delta and, for a delete or an update of the vector, a
 dead key, in the statement's transaction (an update of other columns
@@ -3326,7 +3349,7 @@ search's (and each tag's graph of an index `PARTITION BY (tag)`, rows
 moving between them), the upkeep going on.  `bench/ann/sql.py`: SIFT-1M through SQL
 as `bench/ann/pgvector_ref.py` runs pgvector (`docs/benchmarks.md`).
 
-### 8.19 Text analysis and queries (`text`, §M14.21 T1–T2)
+### 8.19 Text analysis, queries and indexes (`text`, §M14.21 T1–T4)
 
 An **analyzer** turns a text into **terms** — what a text index keeps and
 a text query looks for (§M14.21's later steps).  `text::Analyzer` has a
@@ -3376,6 +3399,80 @@ of each checked where `bench/text/data.py` fetched them into
 — every analyzer over any string (proptest): tokens at character
 boundaries, positions in order.
 
+**Text indexes** (§M14.21 T4, `text/index/`): `CREATE INDEX … USING
+text (col) WITH (analyzer = 'english')` on one `text` column (another
+type `0A000`; an analyzer not registered `42704`; another option
+`22023`), `simple` by default; the options keep `analyzer`.  The index
+decides what `col @@ q` means: its analyzer, given by the binder
+(`IndexMethod::operand`), on the rows as through the index; a filter's
+`col @@ q` with `q` fixed for the scan is found by it (`Access::Method`,
+§8.17).  A `NULL` is not indexed.
+
+*Storage* (`text/index/store.rs`), model (C) as HNSW's (§8.18) but exact
+in every snapshot.  Keys under the index's prefix: `r` the root (the
+segments, oldest first: object id, documents, deleted object, deleted
+count); `o` + id + part an object in parts of 1 MiB (ids are nonces,
+never reused: an object is written once); `d` + primary key + nonce a
+delta row (the text's hash, its terms with positions, its length); `x` +
+primary key + text hash + nonce a tombstone (the old text's length and
+distinct terms).  A write puts one or both in its statement's
+transaction (an update that leaves the text and key alone, none).  A
+row is in the index as many times as its (key, hash) was inserted less
+the times it was deleted, wherever each is — segment, delta or tombstone
+— so a search counts versions: `View::matching` finds the segments'
+documents not deleted and the delta's rows that match, and drops those
+a tombstone of the same version cancels.  `View::stats(terms)` —
+documents, total length, each term's documents — adds the segments'
+counts, takes off their deleted objects' (each keeps its documents' bits,
+count, total length and per-term counts), adds the delta's inserts and
+takes off its tombstones: the snapshot's rows' numbers, which BM25 (T5)
+reads.
+
+*Upkeep* (`text/index/mod.rs`): a write notes its index; after a
+statement, once `SEAL` (1,024) rows wait, the session seals — in a
+transaction of its own (`hnsw::retrying`), one index at a time
+(`Pending::busy`) — the delta into a segment: a tombstone of a row in
+the delta drops it, one of a row in a segment marks it in a new deleted
+object for that segment (`Segment::find_doc` by key and hash); a segment
+all deleted goes; the delta's keys are deleted and their range vacuumed.
+Then merges: `MERGE` (8) segments of a tier — live documents in powers
+of 8 — written as one, the deleted documents left out (Tantivy's
+logarithmic policy).  `upkeep_now` (tests, `VACUUM`), `merge_all`,
+`shape` and `stats` are public for tests.  `CREATE INDEX` builds
+segments of 100,000 rows and merges them.
+
+*Segments* (`text/index/segment.rs`): documents (primary key, text
+hash, length), terms sorted, each with its document count and its
+postings in blocks of 128 — the documents' deltas and the frequencies
+less one, each bit-packed at the block's width (Lucene's and Tantivy's
+layout, the bits a block needs, no SIMD yet) — and its positions apart
+(varint deltas), read only for phrases.  A segment is decoded once into
+memory and shared by every snapshot (`object_cache`, the HNSW index's
+cache moved out of it: `Kind::TextSegment`, `TextDeleted`).  A search
+decodes each leaf's postings (a prefix's terms by a range of the
+dictionary, a fuzzy term's by a pass over it), evaluates the query's
+tree over sorted document lists (intersections, unions, differences;
+phrases checked on their candidates' positions) and the delta's rows by
+their stored terms.
+
+*Tests:* `segment.rs` — bit packing at every width, a segment of several
+blocks round-tripped, a merge dropping deleted documents;
+`tests/text_index.rs` — through a build, a delta of updates, deletes,
+inserts, a rollback and a row changed back and forth, seals, twelve
+rounds of writes and merges, a merge of everything, the table emptied:
+at every step each of eleven queries through the index against the same
+on the rows, and the integrity check (the rows' versions, the documents,
+lengths and every term's document count); a snapshot keeps its
+statistics through writes and seals; the index decides the analyzer;
+a row deleted in a segment stays deleted; `tests/text_index_crash.rs` —
+a crash at any I/O point of a workload of writes, seals and merges
+(dropped and torn writes), then the rows of some step, the index exact
+and its answers the rows', and writes and an upkeep after; and a
+transaction's snapshot keeping its answers and statistics while other
+sessions write, seal and merge; `58_text_index.slt` — the syntax, the
+catalog, `EXPLAIN`, the analyzer with and without the index, writes and
+a rollback.
+
 **Text queries** (§M14.21 T2, `text/query.rs`): `text @@ query` is true
 when the text matches the query.  The syntax is Lucene's, the subset of
 it one column needs, so what people and models already write works:
@@ -3402,9 +3499,9 @@ fuzzy terms) and a tree of `Leaf`, `Phrase` and Lucene's `Bool { must,
 should, not }` over them; a text is analyzed, each term's positions
 noted for the leaves it matches, and the tree evaluated (a phrase by
 binary search in its terms' positions).  The analyzer is a third,
-optional argument of the operator's function, which the binder will
-give from the column's text index (T4) — one meaning with or without an
-index; without one it is `simple`.  The batch kernel parses a constant
+optional argument of the operator's function, which the binder gives
+from the column's text index — one meaning with or without an index;
+without one it is `simple`.  The batch kernel parses a constant
 query once a vector; a row at a time, a per-thread cache keeps the last
 query parsed.
 
@@ -4144,6 +4241,16 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-09 — §M14.21 T3–T4, the text index:** `USING text (col)
+  WITH (analyzer = …)` — deltas and tombstones, segments of bit-packed
+  128-blocks, deleted objects, seals and logarithmic merges, exact
+  matches and BM25 statistics in every snapshot (`text/index/`);
+  `IndexMethod::operand`, `serves`, `rows_where`, `Access::Method`,
+  `optimizer::method_filters`, `exec::method_rows`, the binder's
+  `index_operand`; `object_cache` (shared with HNSW, with `object_id`);
+  `tests/text_index.rs`, `tests/text_index_crash.rs`,
+  `58_text_index.slt`; indexed queries in `bench/text/analyzers.py`
+  (§8.17, §8.19).
 - **2026-11-09 — §M14.21 T2, text queries:** `text @@ query` on rows —
   Lucene's syntax (words, phrases, `*` prefixes, `~` fuzzy terms, `+`,
   `-`, `AND`, `OR`, `NOT`, parentheses), parsed once into leaves and a

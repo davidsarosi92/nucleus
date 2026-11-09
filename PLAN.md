@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers done (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index done | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -5343,6 +5343,64 @@ since ASCII is compared as bytes with its rows on the stack.  Measured
 against 7451ebe (`bench/phases.py`, alternating, two rounds): TPC-H SF1
 load 23.0 / 22.3 → 21.4 / 22.0 s, the queries' sums 6,148 / 5,733 →
 5,846 / 5,678 ms: noise.
+
+**T3 and T4 — index access for a filter, the text index** (done
+2026-11-09).  T3 as the second method's shape showed it: a method may
+give an operator an operand from the index on its column
+(`IndexMethod::operand`, appended by the binder — the analyzer, so `@@`
+means the same through the index and on the rows) and serve a filter's
+condition exactly (`serves`, `rows_where`; `Access::Method`, chosen for
+a full scan or a key range past 1,000 rows, the condition out of the
+filter, every row read with it where the index cannot tell).  HNSW's
+ordering stays `Access::Nearest` until text ranking orders rows (T5) —
+the second ordering's shape decides that interface, as this one's did.
+
+T4 as (1) said: deltas and tombstones under nonces (writers never
+conflict), sealed at 1,024 rows by the session whose statement finds it
+due, into segments of postings in 128-blocks (deltas and frequencies
+bit-packed, positions apart, exact lengths), deleted objects per segment
+(bits, counts, per-term counts), logarithmic merges by 8.  A row is
+there as many times as its (key, text hash) was inserted less the times
+it was deleted, so matches and statistics are counted per snapshot, not
+read from how far the upkeep got.  Taken: FTS5's tombstones in the
+newer data, Tantivy's delete bitsets written anew per change and its
+logarithmic merges, Lucene's and Tantivy's 128-blocks, GIN's upkeep by
+the writing sessions (as HNSW's).  Not yet: block maxima (T5 needs
+them), SIMD unpacking, the economic order quantity for the seal size
+(HNSW's meters; a fixed 1,024 first: a search reads a delta row in
+about a microsecond, a seal costs milliseconds), a parallel build, and
+reading many found rows by a merge with the table's scan rather than a
+lookup each (below).  Found while testing: object ids `nonce | 1` made
+two consecutive nonces one id — a seal's segment overwrote its deleted
+object, and two databases' segments met in the process-wide cache; ids
+are now nonces, never reused.  The crash test (any I/O point, dropped
+and torn writes) and the snapshot test (a reader's answers and
+statistics kept while others write, seal and merge) hold the index
+exact.
+
+FiQA (57,638 documents, 44 MB), `analyzer simple`, against PostgreSQL
+18's GIN on `to_tsvector('simple', body)` (its server's execution time;
+ours through the protocol), best of five:
+
+| | nucleus `USING text` | PostgreSQL GIN |
+|---|---:|---:|
+| `CREATE INDEX` | 2,628 ms (one thread) | 3,145 ms (`psql` included) |
+| `count(*)` `market` (7,337 rows) | 1.2 ms | 6.7 ms |
+| `stock market` (either, 10,324) | 1.7 | 6.5 |
+| `stock AND market` (2,379) | 0.5 | 4.1 |
+| `"stock market"` (1,025) | 0.6 | 274.9 |
+| `invest*` (9,784) | 1.9 | 7.5 |
+| `markte~1` (7,337) | 4.7 | — |
+| `sum(length(body))` of `market`'s rows | 16.2 | 12.1 |
+
+A count reads no row — the index is exact for the snapshot, where GIN's
+heap is visited for visibility; a phrase is checked on positions, where
+GIN (no positions) re-reads every candidate's text.  Rows read cost us
+more: a lookup by primary key each (≈2 µs), where PostgreSQL's bitmap
+heap scan reads pages in order — the next step for the access path.
+Measured against eaf8bf1 (`bench/phases.py`, alternating, two rounds):
+TPC-H SF1 load 22.3 / 22.8 → 21.9 / 21.6 s, the queries' sums 5,874 /
+5,762 → 5,837 / 5,877 ms: noise.
 
 ### §M14.22 — Embeddings in the database ⬜
 

@@ -100,8 +100,11 @@ and stop words for thirteen languages (Hungarian among them), trigrams
 — `tokenize(text, analyzer)` (FiQA's 44 MB in 0.3 s, PostgreSQL's
 `to_tsvector` 1.4 s), and `body @@ 'stock AND "market cap" -crypto
 invest*'` in Lucene's query syntax (phrases, prefixes, fuzzy terms),
-4–9× PostgreSQL's speed without an index.  Next are text indexes, BM25
-and hybrid search
+4–9× PostgreSQL's speed without an index — and a text index (`CREATE
+INDEX … USING text (body) WITH (analyzer = 'english')`) exact in every
+snapshot, its counts and statistics those of the snapshot's rows,
+4–8× PostgreSQL's GIN on terms and 460× on phrases.  Next are BM25
+ranking and hybrid search
 (§M14.21) and the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree

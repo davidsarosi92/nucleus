@@ -64,6 +64,39 @@ pub trait IndexMethod: Send + Sync {
         Ok(())
     }
 
+    /// The value an operator on the index's (first) column takes from the
+    /// index, as one more operand, when a statement is bound: what the
+    /// operator then means on that column, with or without the index (a
+    /// text index's analyzer for `@@`).  By default none.
+    fn operand(&self, ix: &Index, op: &str) -> Option<crate::types::Value> {
+        let _ = (ix, op);
+        None
+    }
+
+    /// Whether the index finds, exactly, the rows for which `function` of
+    /// its (first) column and values fixed for a scan holds — a filter's
+    /// condition it then serves ([`IndexMethod::rows_where`]).  By default
+    /// none.
+    fn serves(&self, ix: &Index, function: &str) -> bool {
+        let _ = (ix, function);
+        false
+    }
+
+    /// The primary keys of the rows of `t`, as `txn` sees them, for which
+    /// `function(column, args…)` holds, sorted — `None` where the index
+    /// cannot tell for these values (the rows are then read).
+    fn rows_where(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        i: usize,
+        function: &str,
+        args: &[crate::types::Value],
+    ) -> Result<Option<Vec<Vec<u8>>>> {
+        let _ = (txn, t, i, function, args);
+        Ok(None)
+    }
+
     /// The integrity check: index `i` of `t` against `rows` (every row of
     /// the table, primary key bytes and values); what is wrong goes to
     /// `problems`.

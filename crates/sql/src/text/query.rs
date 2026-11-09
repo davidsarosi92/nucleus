@@ -37,7 +37,7 @@ pub(crate) enum Leaf {
 }
 
 impl Leaf {
-    fn matches(&self, term: &str) -> bool {
+    pub(crate) fn matches(&self, term: &str) -> bool {
         match self {
             Leaf::Exact(t) => t == term,
             Leaf::Prefix(p) => term.starts_with(p.as_str()),
@@ -117,7 +117,8 @@ impl Query {
     }
 }
 
-fn eval(n: &Node, hits: &[Vec<u32>]) -> bool {
+/// Whether `n` holds where each leaf is at `hits[leaf]` (ascending).
+pub(crate) fn eval(n: &Node, hits: &[Vec<u32>]) -> bool {
     match n {
         Node::Leaf(i) => !hits[*i].is_empty(),
         Node::Phrase(terms) => {
@@ -144,7 +145,7 @@ fn eval(n: &Node, hits: &[Vec<u32>]) -> bool {
 /// (the optimal string alignment distance, as Lucene's automata count).
 /// ASCII is compared as bytes, and rows of short terms stay on the stack:
 /// a fuzzy term is checked against every term of every text.
-fn within(a: &str, b: &str, k: usize) -> bool {
+pub(crate) fn within(a: &str, b: &str, k: usize) -> bool {
     if a == b {
         return true;
     }

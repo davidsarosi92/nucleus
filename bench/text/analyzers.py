@@ -87,6 +87,27 @@ def nucleus_run(a, ids, bodies):
                     best = min(best, time.perf_counter() - t)
                 print(f"  @@ {q:18} workers {workers:7}: {best * 1000:7.0f} ms, {n:>6} documents",
                       flush=True)
+        c.execute("RESET parallel_workers")
+        t = time.perf_counter()
+        c.execute("CREATE INDEX docs_body ON docs USING text (body)")
+        print(f"  CREATE INDEX USING text: {(time.perf_counter() - t) * 1000:7.0f} ms", flush=True)
+        for q, _ in QUERIES:
+            sql = "SELECT count(*) FROM docs WHERE body @@ '" + q.replace("'", "''") + "'"
+            best, n = 1e9, None
+            for _ in range(5):
+                t = time.perf_counter()
+                n = c.execute(sql).rows[0][0]
+                best = min(best, time.perf_counter() - t)
+            print(f"  @@ {q:18} indexed        : {best * 1000:7.1f} ms, {n:>6} documents",
+                  flush=True)
+        # The rows read too.
+        sql = "SELECT sum(length(body)) FROM docs WHERE body @@ 'market'"
+        best = 1e9
+        for _ in range(5):
+            t = time.perf_counter()
+            n = c.execute(sql).rows[0][0]
+            best = min(best, time.perf_counter() - t)
+        print(f"  @@ market, rows read  indexed : {best * 1000:7.1f} ms, sum {n}", flush=True)
         c.close()
     finally:
         server.terminate()
@@ -131,6 +152,33 @@ def postgres_run(a, ids, bodies):
                 best = min(best, time.perf_counter() - t)
             print(f"  @@ {tsq:18} workers {workers:7}: {best * 1000:7.0f} ms, {n:>6} documents",
                   flush=True)
+    t = time.perf_counter()
+    psql("CREATE INDEX text_docs_gin ON text_docs USING gin (to_tsvector('simple', body))")
+    print(f"  CREATE INDEX USING gin: {(time.perf_counter() - t) * 1000:7.0f} ms "
+          "(psql round trip included)", flush=True)
+    psql("ANALYZE text_docs")
+    for q, tsq in QUERIES:
+        if tsq is None:
+            continue
+        sql = (f"SELECT count(*) FROM text_docs "
+               f"WHERE to_tsvector('simple', body) @@ '{tsq}'::tsquery")
+        n = psql(sql).strip()
+        # The server's own time: `docker exec` and `psql` cost ~50 ms a
+        # call, more than the search.
+        best = 1e9
+        for _ in range(5):
+            out = psql("EXPLAIN (ANALYZE, TIMING OFF) " + sql)
+            ms = float(out.split("Execution Time: ")[1].split(" ms")[0])
+            best = min(best, ms)
+        print(f"  @@ {tsq:18} indexed        : {best:7.1f} ms, {n:>6} documents "
+              "(the server's execution time)", flush=True)
+    sql = ("SELECT sum(length(body)) FROM text_docs "
+           "WHERE to_tsvector('simple', body) @@ 'market'::tsquery")
+    best = 1e9
+    for _ in range(5):
+        out = psql("EXPLAIN (ANALYZE, TIMING OFF) " + sql)
+        best = min(best, float(out.split("Execution Time: ")[1].split(" ms")[0]))
+    print(f"  @@ market, rows read  indexed : {best:7.1f} ms, sum {psql(sql).strip()}", flush=True)
     psql("DROP TABLE text_docs")
 
 

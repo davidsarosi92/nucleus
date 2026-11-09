@@ -127,6 +127,10 @@ pub struct Binder<'a> {
     /// The privilege checks of a user's statement (`None`: internal
     /// binding — constraints, defaults, mappings — which checks nothing).
     checker: Option<crate::privileges::Checker>,
+    /// The table column the last column read is ([`ScopeCol::origin`]):
+    /// an operator on it may take an operand from its index
+    /// ([`crate::index_method::IndexMethod::operand`]).
+    last_origin: std::cell::RefCell<Option<(String, String)>>,
 }
 
 /// A CTE visible to the query being bound.
@@ -324,6 +328,7 @@ impl<'a> Binder<'a> {
             ctes: Vec::new(),
             values_targets: None,
             checker: None,
+            last_origin: Default::default(),
         }
     }
 
@@ -348,6 +353,7 @@ impl<'a> Binder<'a> {
 
     /// `SELECT` on a column of a table, if this binding checks.
     fn read_column(&self, col: &ScopeCol) -> Result<()> {
+        self.last_origin.replace(col.origin.clone());
         if let (Some(c), Some((t, name))) = (&self.checker, &col.origin) {
             c.require(
                 self.txn,
@@ -2560,12 +2566,27 @@ impl<'a> Binder<'a> {
                 }
             }
             A::Operator { op, left, right } => {
+                self.last_origin.replace(None);
                 let (l, lt) = sub(left, self)?;
+                let origin = match l {
+                    Expr::Column(_) => self.last_origin.take(),
+                    _ => None,
+                };
                 let (r, rt) = sub(right, self)?;
                 // An untyped side takes the other side's type.
                 let (l, lt) = self.coerce(rt, l, lt)?.1;
                 let (r, rt) = self.coerce(lt, r, rt)?.1;
-                self.operator(op, (l, lt), (r, rt))?
+                let (mut e, ty) = self.operator(op, (l, lt), (r, rt))?;
+                // An index on the left column may say what the operator
+                // means there (a text index's analyzer for `@@`).
+                if let Some((table, column)) = origin
+                    && let Some(v) = self.index_operand(&table, &column, op)?
+                    && let Expr::Call(f, args) = &mut e
+                    && f.arity().contains(&(args.len() + 1))
+                {
+                    args.push(Expr::Literal(v));
+                }
+                (e, ty)
             }
             A::Collate { expr, collation } => {
                 // The value itself; its comparisons and sorts use the
@@ -2820,6 +2841,26 @@ impl<'a> Binder<'a> {
                 )))
             }
         }
+    }
+
+    /// The operand an index of `table` on `column` gives operator `op`
+    /// ([`crate::index_method::IndexMethod::operand`]), the first index's
+    /// that gives one.
+    fn index_operand(&self, table: &str, column: &str, op: &str) -> Result<Option<Value>> {
+        let Some(t) = catalog::get_table(self.txn, table)? else {
+            return Ok(None);
+        };
+        let Some(c) = t.columns.iter().position(|c| c.name == column) else {
+            return Ok(None);
+        };
+        for ix in t.indexes.iter().filter(|ix| ix.columns.first() == Some(&c)) {
+            if let Some(m) = crate::index_method::of(ix)?
+                && let Some(v) = m.operand(ix, op)
+            {
+                return Ok(Some(v));
+            }
+        }
+        Ok(None)
     }
 
     /// An operator outside the grammar's own: a type's distance, a

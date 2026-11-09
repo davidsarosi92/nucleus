@@ -305,6 +305,22 @@ pub enum Access {
         /// partitioning columns the conditions fix: the graph searched.
         partition: Vec<Expr>,
     },
+    /// The rows an index method finds, exactly, for a condition of the
+    /// scan's filter (`col @@ q` by a text index, PLAN.md §M14.21 T3):
+    /// the condition is out of the filter, and is checked on every row
+    /// where the index cannot tell them.
+    Method {
+        /// `table.indexes[index]`.
+        index: usize,
+        /// The condition's function
+        /// ([`crate::index_method::IndexMethod::serves`]).
+        function: String,
+        /// Its arguments after the indexed column, each fixed for the
+        /// scan.
+        args: Vec<Expr>,
+        /// The condition.
+        cond: Expr,
+    },
 }
 
 impl Access {
@@ -312,7 +328,9 @@ impl Access {
     pub fn secondary(&self) -> Option<usize> {
         match self {
             Access::Full | Access::Key { index: None, .. } => None,
-            Access::Key { index: Some(i), .. } | Access::Nearest { index: i, .. } => Some(*i),
+            Access::Key { index: Some(i), .. }
+            | Access::Nearest { index: i, .. }
+            | Access::Method { index: i, .. } => Some(*i),
         }
     }
 
@@ -349,6 +367,10 @@ impl Access {
                 checks.iter().for_each(&mut *f);
                 partition.iter().for_each(f);
             }
+            Access::Method { args, cond, .. } => {
+                args.iter().for_each(&mut *f);
+                f(cond);
+            }
         }
     }
 
@@ -384,6 +406,10 @@ impl Access {
                 }
                 checks.iter_mut().for_each(&mut *f);
                 partition.iter_mut().for_each(f);
+            }
+            Access::Method { args, cond, .. } => {
+                args.iter_mut().for_each(&mut *f);
+                f(cond);
             }
         }
     }
@@ -745,6 +771,21 @@ impl Plan {
                             show(count),
                             table.columns[ix.columns[0]].name,
                             show(query)
+                        )
+                    }
+                    Access::Method {
+                        index,
+                        function,
+                        args,
+                        ..
+                    } => {
+                        let ix = &table.indexes[*index];
+                        format!(
+                            "Index Scan using {} on {} ({} {function} {})",
+                            ix.name,
+                            table.name,
+                            table.columns[ix.columns[0]].name,
+                            args.first().map_or(String::new(), show)
                         )
                     }
                 };
