@@ -3326,7 +3326,7 @@ search's (and each tag's graph of an index `PARTITION BY (tag)`, rows
 moving between them), the upkeep going on.  `bench/ann/sql.py`: SIFT-1M through SQL
 as `bench/ann/pgvector_ref.py` runs pgvector (`docs/benchmarks.md`).
 
-### 8.19 Text analysis (`text`, §M14.21 T1)
+### 8.19 Text analysis and queries (`text`, §M14.21 T1–T2)
 
 An **analyzer** turns a text into **terms** — what a text index keeps and
 a text query looks for (§M14.21's later steps).  `text::Analyzer` has a
@@ -3372,7 +3372,47 @@ off) and the three departures; `snowball/` — each language's vocabulary;
 the vocabularies in the repository are every fortieth word, the whole
 of each checked where `bench/text/data.py` fetched them into
 `target/text-data` (Snowball's data at the commit of 3.0.1); `56_text_analyzers.slt`
-— `tokenize` with each kind of analyzer, the catalog view.
+— `tokenize` with each kind of analyzer, the catalog view; `tests/text.rs`
+— every analyzer over any string (proptest): tokens at character
+boundaries, positions in order.
+
+**Text queries** (§M14.21 T2, `text/query.rs`): `text @@ query` is true
+when the text matches the query.  The syntax is Lucene's, the subset of
+it one column needs, so what people and models already write works:
+
+| Query | Matches |
+|-------|---------|
+| `word` | the word, analyzed as the text is; a word the analyzer makes several terms of (`e-mail`, `P/E`, any word under `trigram`) is a phrase of them; a stop word is dropped |
+| `"some words"` | a phrase: the terms at consecutive positions (a dropped stop word keeps its place) |
+| `word*` | any term starting so — lower-cased, not stemmed (Lucene's normalization) |
+| `word~`, `word~1` | any term within 2 (1) edits — insertion, deletion, substitution, transposition of neighbours; lower-cased, not stemmed |
+| `a b` | either (Lucene's, Tantivy's, Elasticsearch's default: ranked search wants any of them) |
+| `+a b` | `a` required, `b` then only ranks |
+| `-a`, `NOT a` | without `a`; a query of exclusions only matches the texts without them |
+| `a AND b`, `a OR b`, `( … )` | `NOT` binds tightest, then `AND`, then `OR`, then words side by side |
+
+`AND`, `OR`, `NOT` are operators in upper case only; `+` and `-` only
+before a word (`C++`, `a - b` are words).  Other punctuation breaks words
+as the analyzer does, so a question typed or generated as plain text is
+a query.  A malformed query — an open quote or parenthesis, `a AND`,
+`~3` — is a `42601` error with the character it was found at.
+
+The query is parsed once into its distinct **leaves** (exact, prefix and
+fuzzy terms) and a tree of `Leaf`, `Phrase` and Lucene's `Bool { must,
+should, not }` over them; a text is analyzed, each term's positions
+noted for the leaves it matches, and the tree evaluated (a phrase by
+binary search in its terms' positions).  The analyzer is a third,
+optional argument of the operator's function, which the binder will
+give from the column's text index (T4) — one meaning with or without an
+index; without one it is `simple`.  The batch kernel parses a constant
+query once a vector; a row at a time, a per-thread cache keeps the last
+query parsed.
+
+*Tests:* `query.rs` — the operators, phrases across stop words, prefixes
+and fuzzy terms under a stemmer, plain text as a query, syntax errors,
+the edit distance, and any string as a query (proptest: an error or an
+answer, never a panic); `57_text_queries.slt` — `@@` on rows, `NULL`s,
+a query that varies row by row, the errors, in every executor mode.
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -4104,6 +4144,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-09 — §M14.21 T2, text queries:** `text @@ query` on rows —
+  Lucene's syntax (words, phrases, `*` prefixes, `~` fuzzy terms, `+`,
+  `-`, `AND`, `OR`, `NOT`, parentheses), parsed once into leaves and a
+  boolean tree, a batch kernel; `Analyzer::normalize`; queries in
+  `bench/text/analyzers.py` (§8.19).
 - **2026-11-09 — §M14.21 T1, text analyzers:** `text::Analyzer`,
   registered by name (`Registry::add_analyzer`, `nc_catalog.text_analyzers`);
   UAX #29 words from generated Unicode 16 tables, Porter's stemmer

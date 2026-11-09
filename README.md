@@ -97,8 +97,11 @@ count, mean, quartiles and NULLs in one scan (also an MCP tool).
 Full-text search has begun (§M14.21): text analyzers registered by name
 — Unicode words, Porter's stemmer as Lucene has it, Snowball's stemmers
 and stop words for thirteen languages (Hungarian among them), trigrams
-— and `tokenize(text, analyzer)` (FiQA's 44 MB in 0.3 s, PostgreSQL's
-`to_tsvector` 1.4 s).  Next are text indexes, BM25 and hybrid search
+— `tokenize(text, analyzer)` (FiQA's 44 MB in 0.3 s, PostgreSQL's
+`to_tsvector` 1.4 s), and `body @@ 'stock AND "market cap" -crypto
+invest*'` in Lucene's query syntax (phrases, prefixes, fuzzy terms),
+4–9× PostgreSQL's speed without an index.  Next are text indexes, BM25
+and hybrid search
 (§M14.21) and the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree

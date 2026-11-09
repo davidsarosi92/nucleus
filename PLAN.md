@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers done (UAX #29 words, Porter, Snowball × 13, trigrams) | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers done (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -5300,6 +5300,49 @@ Words are ~24 ns a byte, a stemmer doubles it.  Measured against
 8d0a5fe (`bench/phases.py`, alternating, two rounds): TPC-H SF1 load
 23.2 / 22.6 → 22.4 / 23.0 s, the queries' sums 5,874 / 5,927 → 5,839 /
 5,840 ms: noise.
+
+**T2 — the query language** (done 2026-11-09).  `text @@ query` on
+rows (`text/query.rs`).  Taken: Lucene's query syntax, the subset one
+column needs — words, `"phrases"`, `word*`, `word~N` (at most 2, a
+transposition one edit, as `FuzzyQuery`), `+`/`-`, `AND`/`OR`/`NOT`,
+parentheses — because people and models already write it; its boolean
+clauses (`must`, `should`, `not`: with a required clause the others only
+rank); its normalization of prefix and fuzzy words (lower case, no stem);
+Tantivy's rule that a word the analyzer splits is a phrase of its parts
+(`P/E`, `e-mail`, any word under `trigram`, which makes a trigram query
+FTS5's substring match).  Words side by side are OR'ed (Lucene,
+Tantivy, Elasticsearch; PostgreSQL's `websearch_to_tsquery` ANDs them):
+ranked retrieval (T5) wants any of them, and `AND` or `+` asks for all.
+Not taken: Lucene's error on a pure negation (`-spam` matches the texts
+without it, as a predicate reads), field names, boosts, slop and ranges
+(one column; T6 may add slop).  A malformed query is a `42601` error
+with its character, not silently reinterpreted; punctuation outside the
+syntax is a word break, so plain text is a query.  The operator's
+function takes the analyzer as an optional third argument the binder
+will give from the column's index (T4); a constant query is parsed once
+a vector by the batch kernel.
+
+FiQA (57,638 documents, 44 MB), `count(*) WHERE body @@ q` without an
+index, best of three, against PostgreSQL 18's `to_tsvector('simple',
+body) @@ q::tsquery` (same machine, its container; the counts differ a
+little, its parser breaking words its own way):
+
+| Query | nucleus, workers | nucleus, 1 | PostgreSQL, parallel | PostgreSQL, 1 |
+|---|---:|---:|---:|---:|
+| `market` | 122 ms | 779 | 1,139 | 3,252 |
+| `stock market` (OR) | 121 | 786 | 1,138 | 3,258 |
+| `stock AND market` | 128 | 791 | 1,140 | 3,249 |
+| `"stock market"` | 127 | 784 | 1,145 | 3,239 |
+| `invest*` | 119 | 778 | 1,139 | 3,231 |
+| `markte~1` | 140 | 880 | — | — |
+
+A query costs what analyzing the texts costs (a matched term is noted,
+not kept: less than `tokenize`'s 1,055 ms); a fuzzy term first cost
+2× — its edit distance allocated two vectors a term — and costs 1.13×
+since ASCII is compared as bytes with its rows on the stack.  Measured
+against 7451ebe (`bench/phases.py`, alternating, two rounds): TPC-H SF1
+load 23.0 / 22.3 → 21.4 / 22.0 s, the queries' sums 6,148 / 5,733 →
+5,846 / 5,678 ms: noise.
 
 ### §M14.22 — Embeddings in the database ⬜
 

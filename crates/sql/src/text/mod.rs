@@ -6,6 +6,7 @@
 //! when it is defined and finds it again by that name.
 
 mod porter;
+pub(crate) mod query;
 mod snowball;
 mod stop_words;
 mod word_breaks;
@@ -20,6 +21,7 @@ use crate::ext::{
     Arg, ArgInfo, CallContext, Registry, Returns, ScalarFunction, Signature, Volatility,
 };
 use crate::types::{DataType, Value};
+use crate::vector::{Sel, Vector};
 
 /// A term of a text: what it is, its position among the text's words
 /// (a dropped stop word leaves a gap, so a phrase does not match across
@@ -44,6 +46,13 @@ pub trait Analyzer: Send + Sync {
 
     /// `text`'s terms, in order, to `out`.
     fn analyze(&self, text: &str, out: &mut dyn FnMut(Token));
+
+    /// A query's prefix or fuzzy word as the terms are compared with it:
+    /// folded as a term is, not stemmed (a prefix of a word is no word).
+    /// The default lower-cases.
+    fn normalize(&self, word: &str) -> String {
+        word.to_lowercase()
+    }
 }
 
 /// `text`'s terms by `a`, collected.
@@ -300,10 +309,100 @@ impl ScalarFunction for Tokenize {
     }
 }
 
+/// `text @@ query`: whether a text matches a query ([`query`]), both
+/// analyzed by one analyzer — a third argument the binder gives (T4: the
+/// column's text index's), else [`DEFAULT`].  The same answer on a row
+/// as from an index: an index is a way to it, never another one.
+struct Matches;
+
+impl Matches {
+    fn analyzer(args: &[&Value]) -> Result<Arc<dyn Analyzer>> {
+        match args.get(2) {
+            Some(Value::Text(name)) => named(name),
+            Some(_) => Err(Error::internal("@@ by an analyzer's name")),
+            None => named(DEFAULT),
+        }
+    }
+}
+
+impl ScalarFunction for Matches {
+    fn name(&self) -> &str {
+        "@@"
+    }
+
+    fn arity(&self) -> RangeInclusive<usize> {
+        2..=3
+    }
+
+    fn resolve(&self, args: &[ArgInfo]) -> Result<Signature> {
+        Ok(Signature::new(
+            vec![Arg::Convert(DataType::Text); args.len()],
+            Returns::Type(Some(DataType::Bool)),
+        ))
+    }
+
+    fn volatility(&self) -> Volatility {
+        Volatility::Immutable
+    }
+
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        let (Value::Text(text), Value::Text(q)) = (&args[0], &args[1]) else {
+            return Err(Error::internal("@@ of texts"));
+        };
+        let a = Self::analyzer(&args.iter().collect::<Vec<_>>())?;
+        let q = query::cached(q, &a)?;
+        let mut hits = q.hits();
+        Ok(Value::Bool(q.matches(a.as_ref(), text, &mut hits)))
+    }
+
+    /// A text vector against one query: parsed once, its scratch reused.
+    fn call_batch(
+        &self,
+        _: &CallContext<'_>,
+        args: &[&Vector],
+        len: usize,
+        sel: &Sel,
+    ) -> Option<Result<Vector>> {
+        let (o, b, nulls, char) = crate::vector::text_view(args.first()?)?;
+        let consts: Vec<&Value> = args[1..]
+            .iter()
+            .map(|v| match v {
+                Vector::Const(c) => Some(c),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        if matches!(consts[0], Value::Null) {
+            return Some(Ok(Vector::Const(Value::Null)));
+        }
+        let Value::Text(q) = consts[0] else {
+            return None;
+        };
+        let run = || -> Result<Vector> {
+            let mut all = vec![&Value::Null, &Value::Null];
+            all.extend(&consts[1..]);
+            let a = Self::analyzer(&all)?;
+            let q = query::cached(q, &a)?;
+            let mut hits = q.hits();
+            let mut out = vec![false; len];
+            for i in sel.iter() {
+                if !nulls.as_ref().is_some_and(|n| n[i]) {
+                    let s = crate::vector::text_at(o, b, char, i);
+                    let s = std::str::from_utf8(s)
+                        .map_err(|_| Error::internal("a text vector of UTF-8"))?;
+                    out[i] = q.matches(a.as_ref(), s, &mut hits);
+                }
+            }
+            Ok(Vector::Bool(out, nulls.clone()))
+        };
+        Some(run())
+    }
+}
+
 /// Registers the built-in analyzers and the text functions.
 pub fn register(r: &mut Registry) -> Result<()> {
     register_builtins();
-    r.add_function(&["tokenize"], Arc::new(Tokenize))
+    r.add_function(&["tokenize"], Arc::new(Tokenize))?;
+    r.add_operator("@@", DataType::Text, DataType::Text, Arc::new(Matches))
 }
 
 #[cfg(test)]

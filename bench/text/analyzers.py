@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""How fast the text analyzers are (PLAN.md §M14.21 T1): a BEIR corpus
-(title and text) loaded into a table, then each analyzer's terms counted
-over every document through SQL — `sum(cardinality(tokenize(body, a)))`
-— best of three, on the server's workers as any scan.
+"""How fast the text analyzers and text queries without an index are
+(PLAN.md §M14.21 T1, T2): a BEIR corpus (title and text) loaded into a
+table, then each analyzer's terms counted over every document through
+SQL — `sum(cardinality(tokenize(body, a)))` — and the documents counted
+that match each of a few queries — `count(*) WHERE body @@ q` — best of
+three, on the server's workers as any scan.
 
     bench/text/analyzers.py nucleus BINARY [--data target/text-data/beir-fiqa/fiqa]
     bench/text/analyzers.py postgres [--container ncpg]
 
 `postgres` runs the same over `to_tsvector` (its Snowball stemmers, its
 default parser) in a PostgreSQL container: `length(to_tsvector(...))`
-counts distinct terms a document, a little less work than ours.
+counts distinct terms a document, a little less work than ours; the
+queries are `to_tsvector('simple', body) @@ q::tsquery`, without an index
+as ours are.
 """
 
 import argparse
@@ -23,6 +27,16 @@ import time
 
 ANALYZERS = ["simple", "porter", "english", "hungarian", "trigram"]
 PG = {"simple": "simple", "english": "english", "hungarian": "hungarian"}
+# A query in nucleus's syntax and in PostgreSQL's tsquery (no fuzzy terms
+# there).
+QUERIES = [
+    ("market", "market"),
+    ("stock market", "stock | market"),
+    ("stock AND market", "stock & market"),
+    ('"stock market"', "stock <-> market"),
+    ("invest*", "invest:*"),
+    ("markte~1", None),
+]
 
 
 def corpus(d):
@@ -64,6 +78,15 @@ def nucleus_run(a, ids, bodies):
                     best = min(best, time.perf_counter() - t)
                 print(f"  {an:10} workers {workers:7}: {best * 1000:7.0f} ms, {n:>9} terms, "
                       f"{mb / best:6.1f} MB/s", flush=True)
+            for q, _ in QUERIES:
+                sql = "SELECT count(*) FROM docs WHERE body @@ '" + q.replace("'", "''") + "'"
+                best, n = 1e9, None
+                for _ in range(3):
+                    t = time.perf_counter()
+                    n = c.execute(sql).rows[0][0]
+                    best = min(best, time.perf_counter() - t)
+                print(f"  @@ {q:18} workers {workers:7}: {best * 1000:7.0f} ms, {n:>6} documents",
+                      flush=True)
         c.close()
     finally:
         server.terminate()
@@ -95,6 +118,19 @@ def postgres_run(a, ids, bodies):
                 best = min(best, time.perf_counter() - t)
             print(f"  {an:10} workers {workers:7}: {best * 1000:7.0f} ms, {n:>9} terms, "
                   f"{mb / best:6.1f} MB/s (psql round trip included)", flush=True)
+        for q, tsq in QUERIES:
+            if tsq is None:
+                continue
+            setting = "" if workers == "default" else "SET max_parallel_workers_per_gather = 0;"
+            sql = (f"{setting} SELECT count(*) FROM text_docs "
+                   f"WHERE to_tsvector('simple', body) @@ '{tsq}'::tsquery")
+            best, n = 1e9, None
+            for _ in range(3):
+                t = time.perf_counter()
+                n = psql(sql).strip()
+                best = min(best, time.perf_counter() - t)
+            print(f"  @@ {tsq:18} workers {workers:7}: {best * 1000:7.0f} ms, {n:>6} documents",
+                  flush=True)
     psql("DROP TABLE text_docs")
 
 

@@ -594,7 +594,7 @@ alone.
 
 ## Text analysis
 
-`bench/text/analyzers.py` (PLAN.md §M14.21 T1): BEIR FiQA's 57,638
+`bench/text/analyzers.py` (PLAN.md §M14.21 T1, T2): BEIR FiQA's 57,638
 documents (title and text, 44 MB) in a table, each analyzer's terms
 counted over every document through SQL — `sum(cardinality(tokenize(body,
 a)))` —, best of three; PostgreSQL 18 (container `ncpg`, the same
@@ -608,6 +608,18 @@ distinct terms a document.
 | `english` (Snowball) | 2,105 ms | 309 ms | 3,915 ms | 1,383 ms |
 | `hungarian` (Snowball) | 2,059 ms | 310 ms | 4,319 ms | 1,521 ms |
 | `trigram` | 2,796 ms | 449 ms | — | — |
+
+Text queries without an index — `count(*) WHERE body @@ q` against
+PostgreSQL's `to_tsvector('simple', body) @@ q::tsquery`, same corpus:
+
+| Query | nucleus, 1 thread | nucleus, workers | PostgreSQL, 1 | PostgreSQL, parallel |
+|---|---:|---:|---:|---:|
+| `market` | 779 ms | 122 ms | 3,252 ms | 1,139 ms |
+| `stock market` (either) | 786 ms | 121 ms | 3,258 ms | 1,138 ms |
+| `stock AND market` | 791 ms | 128 ms | 3,249 ms | 1,140 ms |
+| `"stock market"` | 784 ms | 127 ms | 3,239 ms | 1,145 ms |
+| `invest*` | 778 ms | 119 ms | 3,231 ms | 1,139 ms |
+| `markte~1` (fuzzy) | 880 ms | 140 ms | — | — |
 
 ```sh
 python3 bench/text/data.py beir

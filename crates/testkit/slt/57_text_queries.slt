@@ -1,0 +1,129 @@
+# Text queries without an index (PLAN.md §M14.21 T2): `text @@ query`
+# evaluated on rows, by the default analyzer (`simple`).
+
+statement ok
+CREATE TABLE docs (id INT PRIMARY KEY, body TEXT)
+
+statement ok
+INSERT INTO docs VALUES
+  (1, 'The quick brown fox jumps over the lazy dog'),
+  (2, 'A database engine for AI models'),
+  (3, 'Databases and their engines, e-mail and P/E ratios'),
+  (4, 'The lazy cat sleeps'),
+  (5, NULL)
+
+query I
+SELECT id FROM docs WHERE body @@ 'lazy' ORDER BY id
+----
+1
+4
+
+# Words side by side: any of them.
+query I
+SELECT id FROM docs WHERE body @@ 'fox cat' ORDER BY id
+----
+1
+4
+
+query I
+SELECT id FROM docs WHERE body @@ 'lazy AND dog' ORDER BY id
+----
+1
+
+query I
+SELECT id FROM docs WHERE body @@ '+lazy -dog' ORDER BY id
+----
+4
+
+query I
+SELECT id FROM docs WHERE body @@ 'lazy NOT cat' ORDER BY id
+----
+1
+
+query I
+SELECT id FROM docs WHERE body @@ '(database OR engines) AND NOT ai' ORDER BY id
+----
+3
+
+query I
+SELECT id FROM docs WHERE body @@ '"lazy dog"' ORDER BY id
+----
+1
+
+query I
+SELECT id FROM docs WHERE body @@ '"dog lazy"' ORDER BY id
+----
+
+query I
+SELECT id FROM docs WHERE body @@ 'data*' ORDER BY id
+----
+2
+3
+
+query I
+SELECT id FROM docs WHERE body @@ 'databsae~1' ORDER BY id
+----
+2
+
+query I
+SELECT id FROM docs WHERE body @@ 'e-mail p/e' ORDER BY id
+----
+3
+
+# Only exclusions: the texts without them.
+query I
+SELECT id FROM docs WHERE body @@ '-lazy' ORDER BY id
+----
+2
+3
+
+query I
+SELECT id FROM docs WHERE NOT (body @@ 'lazy') ORDER BY id
+----
+2
+3
+
+query T
+SELECT body @@ 'x' FROM docs WHERE id = 5
+----
+NULL
+
+query T
+SELECT 'Hello, world!' @@ 'WORLD'
+----
+t
+
+query T
+SELECT 'Hello, world!' @@ NULL
+----
+NULL
+
+# Queries that vary row by row.
+statement ok
+CREATE TABLE queries (q TEXT)
+
+statement ok
+INSERT INTO queries VALUES ('fox'), ('"lazy cat"'), ('engine*')
+
+query TI
+SELECT q, id FROM queries, docs WHERE body @@ q ORDER BY q, id
+----
+"lazy cat" 4
+engine* 2
+engine* 3
+fox 1
+
+statement error 42601
+SELECT id FROM docs WHERE body @@ '"lazy'
+
+statement error 42601
+SELECT id FROM docs WHERE body @@ 'lazy AND'
+
+statement error 42601
+SELECT id FROM docs WHERE body @@ 'lazy~3'
+
+statement ok
+DROP TABLE queries
+
+statement ok
+DROP TABLE docs
