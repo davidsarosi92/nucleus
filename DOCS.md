@@ -47,9 +47,9 @@
 | `drivers` | — | drivers for C, C++, Python, JS/TS, Java (§11) | §M14.8 ✅ |
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
-| `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh` | §M6, §M12, §M14.8 |
+| `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.21 |
 | `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
-| `docs/benchmarks.md`, `bench/` | — | the benchmark suite against PostgreSQL (`bench/run.py`, run in CI; `tpch.py`, `clickbench.py`; `phases.py`, one build against another step by step; `bench/ann/`, the HNSW storage models on the KV with hnswlib and pgvector as references, and `sql.py`, the index through SQL), its latest results and targets | §M14.11, §M14.12 V4 |
+| `docs/benchmarks.md`, `bench/` | — | the benchmark suite against PostgreSQL (`bench/run.py`, run in CI; `tpch.py`, `clickbench.py`; `phases.py`, one build against another step by step; `bench/ann/`, the HNSW storage models on the KV with hnswlib and pgvector as references, and `sql.py`, the index through SQL; `bench/text/`, the full-text data), its latest results and targets | §M14.11, §M14.12 V4, §M14.21 |
 
 `crates/` is the core and the public API crates; `modules/` are modules,
 each a folder built to leave the repository (its own README, changelog,
@@ -2496,6 +2496,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.schemas` | `name`, `description` (the session registry's schemas) |
 | `nc_catalog.tables` | `table_id`, `name`, `columns`, `primary_key` (names), `has_row_id`, `indexes`, `checks`, `foreign_keys`, `referenced_by`, `key_prefix` (hex), `analyzed_rows`, `owner`, `row_security`, `force_row_security`, `comment`, `storage` (§8.15) |
 | `nc_catalog.storages` | `name` (the table storages registered, §8.15) |
+| `nc_catalog.text_analyzers` | `name` (the text analyzers registered, §8.19) |
 | `nc_catalog.partitions` | `table_name`, `partition`, `strategy` (`range`, `list`, `hash`), `key` (names), `bound` (`FOR VALUES …` or `DEFAULT`), `storage` (§8.16) |
 | `nc_catalog.segments` | `table_name`, `segment` (id, hex), `rows`, `deleted`, `bytes` (encoded) — each segment of each `column` table (§8.15) |
 | `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key` |
@@ -3325,6 +3326,54 @@ search's (and each tag's graph of an index `PARTITION BY (tag)`, rows
 moving between them), the upkeep going on.  `bench/ann/sql.py`: SIFT-1M through SQL
 as `bench/ann/pgvector_ref.py` runs pgvector (`docs/benchmarks.md`).
 
+### 8.19 Text analysis (`text`, §M14.21 T1)
+
+An **analyzer** turns a text into **terms** — what a text index keeps and
+a text query looks for (§M14.21's later steps).  `text::Analyzer` has a
+`name` and `analyze(text, out)`, which gives `Token { term, position,
+start, end }`: the term, its word's position among the text's words (a
+dropped stop word leaves a gap, so a phrase does not match across it)
+and its bytes in the text.  The same text gives the same terms, always.
+
+Analyzers are **registered** (principle 12) and kept for the process, as
+index methods are: `text::add`, a module's through
+`Registry::add_analyzer`; `text::named(name)` finds one (`42704`
+otherwise); `nc_catalog.text_analyzers` lists them.  The built-ins
+(`text::register_builtins`, once a process):
+
+| Name | Does |
+|------|------|
+| `simple` (the default, `text::DEFAULT`) | words, lower case |
+| `porter` | Lucene's `EnglishAnalyzer`, which Anserini's BM25 baselines use: words, English possessives (`'s`, `’s`) dropped, lower case, Lucene's 33 stop words, the Porter stemmer of 1980 with its reference implementation's departures (`text/porter.rs`) |
+| `danish`, `dutch`, `english`, `finnish`, `french`, `german`, `hungarian`, `italian`, `norwegian`, `portuguese`, `russian`, `spanish`, `swedish` | words, lower case, the language's Snowball stop words, its Snowball stemmer |
+| `trigram` | every three characters of the whole text, lower case (SQLite FTS5's `trigram`): words by their parts in any language |
+
+**Words** are UAX #29's (`text/words.rs`): the standard's rules WB1–WB999
+over the word-break property and Extended_Pictographic
+(`text/word_breaks.rs`, generated from the Unicode 16 database by
+`scripts/gen-word-breaks.py`); a segment with a letter or a digit is a
+word — `can't`, `3.14`, `e.g`, `a_b` whole, an ideograph alone, a
+katakana run together.  ASCII is classified without a table search.
+
+**Stemmers**: Porter's, written here; the others are Snowball's
+(`text/snowball/`): the runtime and the algorithms exactly as Snowball
+3.0.1's compiler generates them for Rust (only their `use` paths
+changed; `#[rustfmt::skip]` keeps them so), BSD licence in the module.
+Stop words: Snowball's lists (`text/stop_words.rs`, generated by
+`scripts/gen-stop-words.py`), sorted by bytes for a binary search.
+
+`tokenize(text [, analyzer])` returns the terms an analyzer makes of a
+text, as an array (`NULL` for `NULL`): what an index on it would keep.
+
+*Tests:* `words.rs` — every case of Unicode's `WordBreakTest.txt`
+(`crates/sql/tests/data/word_break_test.txt`, comments removed); `porter.rs`
+— Snowball's Porter vocabulary (the paper's algorithm, the departures
+off) and the three departures; `snowball/` — each language's vocabulary;
+the vocabularies in the repository are every fortieth word, the whole
+of each checked where `bench/text/data.py` fetched them into
+`target/text-data` (Snowball's data at the commit of 3.0.1); `56_text_analyzers.slt`
+— `tokenize` with each kind of analyzer, the catalog view.
+
 ### 8.14 Errors and hints (`error`, `hint`)
 
 An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
@@ -4055,6 +4104,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-09 — §M14.21 T1, text analyzers:** `text::Analyzer`,
+  registered by name (`Registry::add_analyzer`, `nc_catalog.text_analyzers`);
+  UAX #29 words from generated Unicode 16 tables, Porter's stemmer
+  (Lucene's), Snowball 3.0.1's stemmers for thirteen languages
+  (generated Rust, vendored) with Snowball's stop words, a trigram
+  analyzer; `tokenize(text [, analyzer])`; `bench/text/data.py` (§8.19).
 - **2026-11-09 — §M14.12 V7, closing vectors:** vectors and sparse
   vectors stay in their row however long (`Type::stored_with_row`,
   `large::out_of_line_value`; `crates/sql/tests/large.rs`

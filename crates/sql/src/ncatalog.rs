@@ -65,6 +65,7 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     ("storages", &[("name", T)]),
+    ("text_analyzers", &[("name", T)]),
     (
         "partitions",
         &[
@@ -518,6 +519,11 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
         }
         "storages" => {
             for name in crate::storage::names() {
+                out.push(vec![text(name)]);
+            }
+        }
+        "text_analyzers" => {
+            for name in crate::text::names() {
                 out.push(vec![text(name)]);
             }
         }

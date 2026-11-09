@@ -68,6 +68,7 @@ pub use crate::parser::{parse, parse_with_text};
 pub use crate::session::{OutColumn, Output, Session, Sink, TxnStatus, command_tag, read_only};
 pub use crate::stats::Sample;
 pub use crate::storage::{BatchSource, NewRow, RowIter, Scan as StorageScan, TableStorage};
+pub use crate::text::{Analyzer, Token};
 pub use crate::types::{DataType, Row, Value};
 /// The vectorized executor's columns, as batch capabilities see them.
 pub use crate::vector::{Batch, Sel, TimeKind, Vector};
@@ -756,6 +757,14 @@ impl Registry {
     /// process, as storages.
     pub fn add_index_method(&mut self, m: Arc<dyn crate::index_method::IndexMethod>) -> Result<()> {
         crate::index_method::register(m)
+    }
+
+    /// Adds a text analyzer (PLAN.md §M14.21): text indexes and search
+    /// functions then name it.  Analyzers are kept for the process, as
+    /// index methods are.
+    pub fn add_analyzer(&mut self, a: Arc<dyn crate::text::Analyzer>) -> Result<()> {
+        crate::text::add(a);
+        Ok(())
     }
 
     /// The aggregate called `name`.

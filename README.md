@@ -94,7 +94,12 @@ stable train/test splits; `reservoir_sample`), and tests for drift
 named as scipy names them (`ks_test`, `auc`, `psi`, `js_divergence`,
 `chisq_test`), and `SUMMARIZE t` — every column's range, distinct
 count, mean, quartiles and NULLs in one scan (also an MCP tool).
-Next is full-text and hybrid search (§M14.21) and the rest of the
+Full-text search has begun (§M14.21): text analyzers registered by name
+— Unicode words, Porter's stemmer as Lucene has it, Snowball's stemmers
+and stop words for thirteen languages (Hungarian among them), trigrams
+— and `tokenize(text, analyzer)` (FiQA's 44 MB in 0.3 s, PostgreSQL's
+`to_tsvector` 1.4 s).  Next are text indexes, BM25 and hybrid search
+(§M14.21) and the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then

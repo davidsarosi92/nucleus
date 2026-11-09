@@ -1,0 +1,64 @@
+# Text analyzers (PLAN.md §M14.21 T1): the terms each built-in makes of a
+# text, as `tokenize` shows them; the registered names.
+
+query T
+SELECT tokenize('The Quick (brown) fox''s jumps, 3.14 times!')
+----
+{the,quick,brown,fox's,jumps,3.14,times}
+
+query T
+SELECT tokenize('The Quick (brown) fox''s jumps, and generalizations', 'porter')
+----
+{quick,brown,fox,jump,gener}
+
+query T
+SELECT tokenize('Running runners ran', 'english')
+----
+{run,runner,ran}
+
+query T
+SELECT tokenize('A magyar nyelvben a szavak végződései változnak', 'hungarian')
+----
+{magyar,nyelv,szav,végződés,változ}
+
+query T
+SELECT tokenize('Die Häuser der Stadt', 'german')
+----
+{haus,stadt}
+
+query T
+SELECT tokenize('AbcD', 'trigram')
+----
+{abc,bcd}
+
+query T
+SELECT tokenize('日本語のテキスト')
+----
+{日,本,語,の,テキスト}
+
+query T
+SELECT tokenize('')
+----
+{}
+
+query T
+SELECT tokenize(NULL)
+----
+NULL
+
+statement error 42704
+SELECT tokenize('x', 'klingon')
+
+query T
+SELECT name FROM nc_catalog.text_analyzers WHERE name IN ('simple', 'porter', 'trigram', 'hungarian', 'english') ORDER BY name
+----
+english
+hungarian
+porter
+simple
+trigram
+
+query I
+SELECT count(*) FROM nc_catalog.text_analyzers
+----
+16

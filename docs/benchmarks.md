@@ -592,6 +592,29 @@ alone.
 `SUMMARIZE t` (§M14.27 S8b) of the same table, four columns, one scan:
 624 ms (`sum(x)` 183).
 
+## Text analysis
+
+`bench/text/analyzers.py` (PLAN.md §M14.21 T1): BEIR FiQA's 57,638
+documents (title and text, 44 MB) in a table, each analyzer's terms
+counted over every document through SQL — `sum(cardinality(tokenize(body,
+a)))` —, best of three; PostgreSQL 18 (container `ncpg`, the same
+machine, through `psql`) the same over `to_tsvector`, which counts
+distinct terms a document.
+
+| Analyzer | nucleus, 1 thread | nucleus, workers | PostgreSQL, 1 | PostgreSQL, parallel |
+|---|---:|---:|---:|---:|
+| `simple` (words, lower case) | 1,058 ms | 177 ms | 3,176 ms | 1,138 ms |
+| `porter` (Lucene's English) | 2,053 ms | 307 ms | — | — |
+| `english` (Snowball) | 2,105 ms | 309 ms | 3,915 ms | 1,383 ms |
+| `hungarian` (Snowball) | 2,059 ms | 310 ms | 4,319 ms | 1,521 ms |
+| `trigram` | 2,796 ms | 449 ms | — | — |
+
+```sh
+python3 bench/text/data.py beir
+NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/analyzers.py nucleus target/release/nucleus
+python3 bench/text/analyzers.py postgres --container ncpg
+```
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

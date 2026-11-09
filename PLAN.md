@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query | ⬜ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers done (UAX #29 words, Porter, Snowball × 13, trigrams) | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -5134,7 +5134,7 @@ latency on a public dataset; and filtered searches keep that recall at
 filter selectivities from 50 % down to 0.01 %, always returning `k` rows
 when `k` matching rows exist.
 
-### §M14.21 — Full-text and hybrid search ⬜
+### §M14.21 — Full-text and hybrid search ◐
 
 Retrieval for AI applications (RAG) needs words and meaning together:
 vectors alone miss exact names, codes and rare terms; keywords alone miss
@@ -5167,6 +5167,139 @@ paraphrases.  Both, with filters, in one query and one transaction:
 corpus; hybrid search beats text-only and vector-only on a public
 retrieval benchmark (e.g. BEIR) at a set latency; and text indexes stay
 consistent with their tables under crash and concurrency tests.
+
+**The design and its steps** (recorded 2026-11-09, begun the same day).
+What others do, read from their docs and sources:
+
+- *Storage.*  Lucene and Tantivy write immutable segments; a delete is a
+  live-docs bitset written anew per commit (Tantivy: `segid.opstamp.del`,
+  never modified); merges are tiered (Lucene: 10 a tier) or logarithmic
+  (Tantivy: 8 at once).  SQLite FTS5 — the nearest to an index inside a
+  transactional store — keeps segments as blobs in its own tables, one
+  new level-0 segment a transaction, a delete as a *tombstone entry* in
+  the newer segment, merged incrementally by the writers (automerge 4).
+  PostgreSQL GIN buffers writes in a pending list every search scans
+  (fastupdate) and stores no term frequencies or lengths: `ts_rank`
+  reads each matching row and has no IDF.  ParadeDB serializes Tantivy's
+  segments into Postgres pages and checks each document's visibility;
+  DuckDB's `fts` is tables rebuilt by hand or kept by triggers.
+- *Postings.*  Lucene and Tantivy both settled on blocks of 128 bitpacked
+  deltas (and 128 frequencies) with a VInt tail; SIMD-BP128 decodes ~2×
+  faster than PFOR or varint (Lemire & Boytsov 2015).  Each block's skip
+  entry keeps its best (frequency, length) pair — the impacts that
+  block-max pruning reads.
+- *Top k.*  Block-Max WAND (Ding & Suel 2011) made Lucene 8's term
+  queries 3–7× faster and disjunctions up to 15×; Lucene moved top-level
+  disjunctions to block-max MaxScore in 2022 (fewer per-hit costs, better
+  at many terms or large k; Grand, Muir, Ferenczi & Lin 2020).  The price
+  is an exact count of matches, which a top-k query does not need.
+- *BM25.*  Kamphuis, de Vries, Boytsov & Lin (2020) compared eight
+  variants: no significant differences, and exact lengths cost nothing
+  over Lucene's one-byte norms.  Lucene's IDF ln(1 + (N − n + ½)/(n + ½))
+  is never negative.  The reference with published four-decimal numbers
+  on BEIR is Anserini (Lucene: k1 0.9, b 0.4, UAX #29 words, possessives,
+  lower case, Lucene's English stop words, Porter): nDCG@10 SciFact
+  0.6789, NFCorpus 0.3218, ArguAna 0.3970, FiQA 0.2361.
+- *Hybrid.*  Reciprocal rank fusion (Cormack, Clarke & Büttcher 2009,
+  k 60) needs no scores; a convex combination of normalized scores beats
+  it in and out of domain with one weight to tune (Bruch, Gai & Ingber
+  2024).  Elasticsearch, OpenSearch, Weaviate and Vespa offer both;
+  pgvector's README fuses `ts_rank_cd` and vectors in the application.
+  Learned sparse retrieval (SPLADE) is served from an ordinary inverted
+  index with the model's weights as impacts and a dot product as the
+  score (Anserini `-impact`).
+
+What nucleus takes, and how it differs:
+
+1. **(C) again** — the model §M14.12 V4 chose: writes go to delta keys
+   in the statement's own transaction (nonces, so writers never
+   conflict), seals and merges run apart, sized by cost (V4's economic
+   order quantity), into immutable content-hashed segments.  But where
+   the graph is only *close* to the table (a search re-reads its rows),
+   a text index is *exact* in every snapshot: a segment is installed by
+   the transaction that removes the deltas it holds, a delete is a
+   tombstone (FTS5) that a seal turns into new alive-bitsets for the
+   older segments it hits (Tantivy) and into negative counts for the
+   statistics.  N, the total length and every term's document count are
+   then those of the snapshot's rows — BM25 a function of the data, not
+   of how far merging got (Lucene counts deleted documents until they
+   merge away).
+2. **Postings in blocks of 128** (bitpacked document deltas, frequencies,
+   positions apart), exact lengths, and each block's maximum score
+   contribution kept beside it; top k by **block-max MaxScore**.
+3. **Analyzers are registered** (principle 12), resolved by name when an
+   index is defined, chosen per index; built in: UAX #29 words (tables
+   generated from Unicode 16, checked by its `WordBreakTest.txt`), case
+   folding, stop-word lists, Snowball stemmers (BSD; generated Rust,
+   checked by Snowball's vocabularies — English, Porter, Hungarian,
+   German, French and the other common European languages) and an n-gram
+   analyzer.  No dependency in the core.
+4. **One meaning with or without the index**: `body @@ q` evaluated on a
+   row analyzes it as the index on that column would; the index is an
+   access path, never a different answer.
+
+The steps, each measured as §M14.12's were:
+
+- **T1 — analyzers**: the registry, the built-ins above, `tokenize(text,
+  analyzer)` to see what an analyzer does.
+- **T2 — the query language without an index**: `@@` with terms, AND,
+  OR, NOT, phrases, prefixes and fuzzy terms, evaluated on rows.
+- **T3 — index access for any method.**  The planner and executor call
+  `hnsw` by name (`hnsw::serves`, `Access::Nearest`); a second method
+  would copy them.  The index-method interface gains what a method
+  serves (an ordering, a predicate) and how it is searched, written when
+  the second method's shape is known (T4) — not before it; `hnsw` moves
+  onto it unchanged.
+- **T4 — the `text` index**: storage as in (1), `@@` in `WHERE` served
+  by it, crash and concurrency tests (as `hnsw_crash.rs`).
+- **T5 — BM25**: `score(body @@ q)` and top k by block-max MaxScore;
+  rankings checked against Anserini on BEIR.
+- **T6 — phrases, prefixes and fuzzy terms from positions; highlights
+  and snippets.**
+- **T7 — hybrid**: `rrf(...)` and a weighted combination in one plan
+  with filters; `sparsevec`'s index on the same structure (impacts, dot
+  product); BEIR against text-only and vector-only.
+- **T8 — compatibility and reach**: PostgreSQL's `tsvector`, `tsquery`,
+  `to_tsvector`, `ts_rank` over it in pg-compat; columnar and partitioned
+  tables; the drivers where a type reaches them.
+
+**T1 — analyzers** (done 2026-11-09).  `text::Analyzer` registered by
+name (`Registry::add_analyzer`, `nc_catalog.text_analyzers`); built in:
+`simple`, `porter` (Lucene's `EnglishAnalyzer`, for Anserini's
+baselines), thirteen Snowball languages (Hungarian among them) and
+`trigram`; `tokenize(text, analyzer)`.  Taken: UAX #29's rules over
+tables generated from Unicode 16 (Lucene's `StandardTokenizer`
+implements the same; the `unicode-segmentation` crate was not taken —
+the core takes no dependency), checked by every case of Unicode's
+`WordBreakTest.txt`; Snowball 3.0.1's stemmers as its compiler generates
+them for Rust (BSD), each checked by its whole vocabulary (21–42
+thousand words a language, at the data's commit of that release — the
+data's later commits test Danish apostrophes 3.0.1 does not know);
+Porter written here with the reference implementation's three
+departures from the paper, which Lucene shares (`bli`, `logi`, words of
+two letters) — and without them it gives Snowball's 42,603 words
+exactly; Snowball's stop lists, Lucene's 33 English stop words for
+`porter`; FTS5's trigram analyzer.  Lucene's possessive filter split a
+word at a byte inside a multi-byte letter (`ñs`): found by the FiQA
+corpus, fixed, and a property test now runs every analyzer over any
+string (character boundaries, positions in order).
+
+FiQA's 57,638 documents (44 MB) through SQL, `sum(cardinality(tokenize(body,
+a)))`, best of three (`bench/text/analyzers.py`), against PostgreSQL 18's
+`to_tsvector` (same machine, its container, `psql`; it counts distinct
+terms a document):
+
+| Analyzer | nucleus, 1 thread | nucleus, workers | PostgreSQL, 1 | PostgreSQL, parallel |
+|---|---:|---:|---:|---:|
+| `simple` | 1,058 ms | 177 ms | 3,176 | 1,138 |
+| `porter` / `english` | 2,053 / 2,105 | 307 / 309 | — / 3,915 | — / 1,383 |
+| `hungarian` | 2,059 | 310 | 4,319 | 1,521 |
+| `trigram` | 2,796 | 449 | — | — |
+
+Words are ~24 ns a byte, a stemmer doubles it.  Measured against
+8d0a5fe (`bench/phases.py`, alternating, two rounds): TPC-H SF1 load
+23.2 / 22.6 → 22.4 / 23.0 s, the queries' sums 5,874 / 5,927 → 5,839 /
+5,840 ms: noise.
 
 ### §M14.22 — Embeddings in the database ⬜
 
