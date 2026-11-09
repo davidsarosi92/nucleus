@@ -266,11 +266,11 @@ against 9.0 s.
 ## Vectors
 
 In short — each measured below, against pgvector 0.8 (PostgreSQL 18, in
-Docker) on the same machine, 2026-11-06/07:
+Docker) on the same machine, 2026-11-06/09:
 
 | | nucleus | pgvector | |
 |---|---:|---:|---:|
-| exact search, 100,000 × 768 | 48 ms | 167 ms | 3.5× |
+| exact search, 100,000 × 768 | 36 ms | 167 ms | 4.6× |
 | SIFT-1M at recall ~0.93, a search (through SQL) | 442 µs | 894 µs | 2.0× |
 | SIFT-1M, inserts by 10 writers | 4,806 rows/s | 2,141 rows/s | 2.2× |
 | SIFT-1M, a search while they come | 885 µs | 1,571 µs | 1.8× |
@@ -278,25 +278,27 @@ Docker) on the same machine, 2026-11-06/07:
 | OpenAI 1536-d at recall ~0.95, the server's time | 1,149 µs; `int8` 634 µs | 1,571 µs | 1.4×; 2.5× |
 | a 1 % filter, recall | 1.4 ms, 1.0 | 14.5 ms, 0.987 | 10× |
 | a tenant's tenth (`PARTITION BY`) | 0.46 ms, 0.939 | 2.4 ms, 0.938 | 5× |
-| sparse vectors, exact, 100,000 | 21.0 ms (one thread) | 17.9 ms (three) | 0.85× |
+| "more like this" by a row's id, OpenAI 1536-d | 1.10 ms, recall 0.965 | 1.48 ms, 0.975 | 1.3× |
+| each of 1,000 rows' ten nearest (`LATERAL`) | 154 ms, recall 0.982 | 1,442 ms, 0.987 | 9.4× |
+| sparse vectors, exact, 100,000 | 20.3 ms | 17.9 ms | 0.88× |
 
 Where pgvector is ahead: it reaches a recall at a lower `ef_search`
 (nucleus needs about 1.5× the `ef` for the same recall, still less time);
 a 0.01 % filter whose second condition no index covers (471 against 498
-µs); sparse exact searches, on three processes against one thread; and
-searching by a stored row's vector, which nucleus's index does not serve
-yet (PLAN.md §M14.12 V7).
+µs); and sparse exact searches, where its row reads cost less (both read
+every row on several workers; PLAN.md §M14.12 V7.3).
 
 Exact nearest neighbours (PLAN.md §M14.12; `bench/vectors/knn.py
 target/release/nucleus --pg`): 100,000 random vectors of 768 dimensions
 (293 MiB), the ten nearest of 20 queries, median; nucleus with a 1 GB
 page cache (`--cache 1GB`) as pgvector has `shared_buffers = 1GB`;
-2026-11-06, after §M14.12 V2.
+nucleus and numpy 2026-11-09 (§M14.12 V7: the vectors in their rows),
+pgvector 2026-11-06.
 
 | | ms | GiB/s read | answers differing from numpy's |
 |---|---:|---:|---:|
-| numpy brute force (one core) | 57 | 5.0 | — |
-| nucleus `ORDER BY v <-> $1 LIMIT 10` | 48 | 6.0 | 0 of 20 |
+| numpy brute force (one core) | 41 | 7.0 | — |
+| nucleus `ORDER BY v <-> $1 LIMIT 10` | 36 | 7.9 | 0 of 20 |
 | pgvector (PostgreSQL 18, no index) | 167 | 1.7 | 0 of 20 |
 
 Loading the 100,000 vectors: nucleus 21 s (Python `load`, a list of
@@ -408,18 +410,29 @@ recall at a lower `ef_search`, so the rows pair equal recall:
 | `f32` / `vector` | 6,144 | 42.5 s | 136.7 s | 0.926, 908 | 0.949, 1,571 |
 | `half` / `halfvec` | 3,072 | 35.2 s | 81.2 s | 0.926, 887 | 0.947, 1,229 |
 | `int8` (rescore 2) | 1,552 | **11.8 s** | — | 0.929, 556 | — |
-| `binary` (rescore 5) / `bit` + re-rank of 50 | 192 | **5.5 s** | 22.7 s | 0.922, 1,097 | 0.916, 1,099 |
+| `binary` (rescore 5) / `bit` + re-rank of 50 | 192 | **5.5 s** | 22.7 s | 0.922, 988 | 0.916, 1,099 |
 | `binary`, rescore 10 | 192 | 5.3 s | — | 0.964, 2,150 | — |
 
 pgvector's indexes on disk: 773 MB (`vector`), 386 (`halfvec`), 47
 (`bit`).  Through the clients (µs a search on one client, as the
 harnesses print them): nucleus `f32` 1,400 at `ef` 40, `int8` 1,176,
-`binary` 1,599; pgvector 1,522, 1,124 (`halfvec`), 925 (`bit`).  Of
-nucleus's binary search, most is the 50 rows read (a 6 KB vector is
-stored out of line, ~12 µs a row: PLAN.md §M14.12 V7).  Searching by a
-stored row's vector (`ORDER BY v <=> (SELECT v FROM q WHERE id = $1)`)
-does not use nucleus's index yet (V7) — hence the vector sent by the
-client here.
+`binary` 1,504; pgvector 1,522, 1,124 (`halfvec`), 925 (`bit`).  Of
+nucleus's binary search, most is the 50 rows it rescores, their vectors
+read with them (2026-11-09, PLAN.md §M14.12 V7.2: 1,080–1,107 µs on the
+server while a 6 KB vector was a second lookup).
+
+By a stored row's vector, both clients sending an id (`bench/ann/related.py`,
+the same 99,000 rows, `ef_search` 40; 2026-11-09, §M14.12 V7):
+
+| | nucleus | pgvector |
+|---|---:|---:|
+| "more like this": `ORDER BY v <=> (SELECT v FROM t WHERE id = $1) LIMIT 10`, the row left out — µs a search, the server's | 1,097, 884 | 1,478, 1,554 |
+| recall@10 | 0.965 | 0.975 |
+| each of 1,000 rows' ten nearest: `FROM t a, LATERAL (SELECT … ORDER BY b.v <=> a.v LIMIT 10)` | **154 ms** (865 on one thread) | 1,442 ms |
+| recall@10 | 0.982 | 0.987 |
+
+nucleus runs the lateral side's searches on its workers, a row each;
+PostgreSQL's nested loop runs its inner index scans on one process.
 
 ```
 target/ann-data/.venv/bin/python bench/ann/data.py dbpedia-openai3-1536-100k
@@ -431,17 +444,20 @@ target/ann-data/.venv/bin/python bench/ann/sql.py target/release/nucleus \
 target/ann-data/.venv/bin/python bench/ann/pgvector_ref.py target/ann-data/dbpedia-openai3-1536-100k \
   --no-inserts --bulk 99000 --queries 1000 --efs 10,20,40,60,80,200 \
   --server-efs 20,40,60,80,200 [--quantize half | --quantize binary --rescore 5]
+target/ann-data/.venv/bin/python bench/ann/related.py nucleus target/release/nucleus \
+  target/ann-data/dbpedia-openai3-1536-100k
+target/ann-data/.venv/bin/python bench/ann/related.py pgvector target/ann-data/dbpedia-openai3-1536-100k
 ```
 
 Sparse vectors searched exactly (PLAN.md §M14.12 V6b:
 `bench/ann/sparse.py`): 100,000 SPLADE-like rows — a vocabulary of
 30,522, ~120 terms a document and ~20 a query by a Zipf law, log-normal
 weights — as `sparsevec(30522)`; 200 queries, `SELECT id FROM t ORDER BY
-v <#> q LIMIT 10`, one client; 2026-11-07.
+v <#> q LIMIT 10`, one client; nucleus 2026-11-09, pgvector 2026-11-07.
 
 | | recall | ms a search | how |
 |---|---:|---:|---|
-| nucleus | 1.0 | 21.0 | one thread: a scan and a top-k |
+| nucleus | 1.0 | 20.3 | a scan and a top-k per morsel on the workers (67 ms on one) |
 | pgvector 0.8 | 1.0 | 17.9 | a parallel scan, two workers and the leader |
 
 ```

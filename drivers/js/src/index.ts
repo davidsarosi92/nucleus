@@ -21,8 +21,8 @@
 // as Decimal (exact), text, char(n) and enums as string, bytea as Buffer,
 // date / timestamp / timestamptz as Date (UTC; read with millisecond
 // precision), time as Time, interval as Interval, inet as Inet, cidr as
-// Cidr, uuid as its canonical string, vector as Float32Array, arrays as
-// arrays, NULL as null;
+// Cidr, uuid as its canonical string, vector as Float32Array, sparsevec
+// as SparseVector, arrays as arrays, NULL as null;
 // another registered type as Ext (its name and binary form).
 
 import { createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
@@ -280,6 +280,71 @@ export class Ext {
   }
 }
 
+/** A `sparsevec`: its dimensions and its non-zero components — positions
+ * from 0, ascending, each with its value (the text form counts from 1:
+ * `{1:0.5,4:2}/10`). */
+export class SparseVector {
+  readonly dims: number;
+  readonly indices: Uint32Array;
+  readonly values: Float32Array;
+
+  constructor(dims: number, indices: ArrayLike<number>, values: ArrayLike<number>) {
+    if (indices.length !== values.length) {
+      throw new NucleusError("a sparse vector's indices and values differ in number");
+    }
+    this.dims = dims;
+    this.indices = Uint32Array.from(indices);
+    this.values = Float32Array.from(values);
+  }
+
+  /** From a map of position (from 0) to value; zeros left out. */
+  static of(components: Map<number, number> | Record<number, number>, dims: number): SparseVector {
+    const pairs = (components instanceof Map ? [...components] : Object.entries(components).map(([k, v]) => [Number(k), v]))
+      .filter(([, v]) => v !== 0)
+      .sort((a, b) => a[0] - b[0]);
+    return new SparseVector(dims, pairs.map((p) => p[0]), pairs.map((p) => p[1]));
+  }
+
+  /** The dense components. */
+  toArray(): Float32Array {
+    const out = new Float32Array(this.dims);
+    this.indices.forEach((at, i) => (out[at] = this.values[i]));
+    return out;
+  }
+
+  toString(): string {
+    const body = Array.from(this.indices, (at, i) => `${at + 1}:${realOf(this.values[i])}`).join(",");
+    return `{${body}}/${this.dims}`;
+  }
+}
+
+/** A sparse vector's binary form: dimensions, count, positions, values. */
+function sparseBytes(v: SparseVector): Buffer {
+  const n = v.indices.length;
+  const b = Buffer.alloc(8 + 8 * n);
+  b.writeUInt32LE(v.dims, 0);
+  b.writeUInt32LE(n, 4);
+  for (let i = 0; i < n; i++) {
+    b.writeUInt32LE(v.indices[i], 8 + 4 * i);
+    b.writeFloatLE(v.values[i], 8 + 4 * n + 4 * i);
+  }
+  return b;
+}
+
+/** A sparse vector from its binary form (`null`: not one). */
+function sparseOf(b: Buffer): SparseVector | null {
+  if (b.length < 8) return null;
+  const n = b.readUInt32LE(4);
+  if (b.length !== 8 + 8 * n) return null;
+  const at = new Uint32Array(n);
+  const vs = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    at[i] = b.readUInt32LE(8 + 4 * i);
+    vs[i] = b.readFloatLE(8 + 4 * n + 4 * i);
+  }
+  return new SparseVector(b.readUInt32LE(0), at, vs);
+}
+
 /** A vector's binary form: its components as little-endian float32s. */
 function vectorBytes(v: Float32Array): Buffer {
   const b = Buffer.alloc(v.length * 4);
@@ -314,6 +379,7 @@ export type Value =
   | Buffer
   | Uint8Array
   | Float32Array
+  | SparseVector
   | Ext
   | Value[];
 
@@ -453,6 +519,12 @@ class Writer {
     if (v instanceof Float32Array) {
       const data = vectorBytes(v);
       this.u8(EXT).str("vector").u32(data.length);
+      this.parts.push(data);
+      return this;
+    }
+    if (v instanceof SparseVector) {
+      const data = sparseBytes(v);
+      this.u8(EXT).str("sparsevec").u32(data.length);
       this.parts.push(data);
       return this;
     }
@@ -615,6 +687,10 @@ class Reader {
         const data = Buffer.from(this.b.subarray(this.at, this.at + n));
         this.at += n;
         if (name === "vector") return vectorOf(data);
+        if (name === "sparsevec") {
+          const sv = sparseOf(data);
+          if (sv) return sv;
+        }
         return name === "uuid" && n === 16 ? uuidText(data) : new Ext(name, data);
       }
       default:
@@ -1665,6 +1741,7 @@ function varSlot(c: Column, v: Value): Buffer {
   if (tag === 15 || tag === EXT) {
     if (v instanceof Ext) return v.data;
     if (v instanceof Float32Array) return vectorBytes(v);
+    if (v instanceof SparseVector) return sparseBytes(v);
     if (v instanceof Uint8Array) return Buffer.from(v);
     throw new NucleusError(`${String(v)} cannot be sent as column "${c.name}" (${c.type})`);
   }

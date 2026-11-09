@@ -313,6 +313,11 @@ impl Type for VectorType {
     fn category(&self) -> &str {
         "vector"
     }
+    // A search reads the rows it finds for their vectors (PLAN.md §M14.12
+    // V7): in the row, one read.
+    fn stored_with_row(&self) -> bool {
+        true
+    }
     fn input(&self, text: &str) -> Result<Value> {
         checked(&parse(text)?)
     }

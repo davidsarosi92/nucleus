@@ -542,6 +542,7 @@ impl Load<'_> {
         workers: usize,
     ) -> Result<u64> {
         use std::sync::mpsc::{channel, sync_channel};
+        let instance = txn.instance();
         let locked = nucleus_kv::Locked::new(txn);
         let ambient = crate::parallel::Ambient::capture();
         let (to_parse, chunks) = sync_channel::<Option<Chunk>>(4);
@@ -553,7 +554,7 @@ impl Load<'_> {
             let parser = sc.spawn(move || {
                 ambient
                     .run(|| {
-                        let reads = crate::parallel::SharedTxn(locked);
+                        let reads = crate::parallel::SharedTxn(locked, instance);
                         let ctx = Ctx::new(&reads, reg, &[]);
                         let mut fields = Fields::new(self.options.clone());
                         let mut batch = Batch::default();

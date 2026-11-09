@@ -162,6 +162,20 @@ static int put_value(buf *w, const nc_value *v) {
         }
         return 0;
     }
+    if (v->type == NC_SPARSEVEC) {
+        put_u8(w, NC_EXT);
+        put_str(w, "sparsevec");
+        put_le(w, 8 + 8 * v->as.sparse.nnz, 4);
+        put_le(w, v->as.sparse.dims, 4);
+        put_le(w, v->as.sparse.nnz, 4);
+        for (i = 0; i < v->as.sparse.nnz; i++) put_le(w, v->as.sparse.indices[i], 4);
+        for (i = 0; i < v->as.sparse.nnz; i++) {
+            uint32_t bits;
+            memcpy(&bits, &v->as.sparse.values[i], 4);
+            put_le(w, bits, 4);
+        }
+        return 0;
+    }
     put_u8(w, (unsigned)v->type);
     switch (v->type) {
     case NC_NULL: break;
@@ -269,6 +283,10 @@ static void free_value(nc_value *v) {
         free((void *)v->as.ext.data);
     }
     if (v->type == NC_VECTOR) free((void *)v->as.vector.ptr);
+    if (v->type == NC_SPARSEVEC) {
+        free((void *)v->as.sparse.indices);
+        free((void *)v->as.sparse.values);
+    }
     if (v->type == NC_ARRAY) {
         for (i = 0; i < v->as.array.len; i++) free_value((nc_value *)&v->as.array.items[i]);
         free((void *)v->as.array.items);
@@ -375,6 +393,33 @@ static int get_value(reader *r, nc_value *v) {
             v->as.vector.ptr = f;
             v->as.vector.len = n / 4;
             break;
+        }
+        if (strcmp(name, "sparsevec") == 0 && n >= 8 && n % 4 == 0) {
+            size_t k, nnz = (size_t)p[4] | (size_t)p[5] << 8 | (size_t)p[6] << 16 | (size_t)p[7] << 24;
+            if (n == 8 + 8 * nnz) {
+                uint32_t *at = malloc(nnz ? 4 * nnz : 1);
+                float *f = malloc(nnz ? 4 * nnz : 1);
+                free(name);
+                if (!at || !f) {
+                    free(at);
+                    free(f);
+                    return -1;
+                }
+                for (k = 0; k < 2 * nnz; k++) {
+                    const unsigned char *q = p + 8 + 4 * k;
+                    uint32_t bits = (uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24;
+                    if (k < nnz)
+                        at[k] = bits;
+                    else
+                        memcpy(&f[k - nnz], &bits, 4);
+                }
+                v->type = NC_SPARSEVEC;
+                v->as.sparse.dims = (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+                v->as.sparse.indices = at;
+                v->as.sparse.values = f;
+                v->as.sparse.nnz = nnz;
+                break;
+            }
         }
         data = malloc(n ? n : 1);
         if (!data) {
@@ -1155,6 +1200,8 @@ static nc_result *read_columns(reader *r) {
                 res->columns[i].type = NC_UUID;
             if (res->columns[i].type_name && strcmp(res->columns[i].type_name, "vector") == 0)
                 res->columns[i].type = NC_VECTOR;
+            if (res->columns[i].type_name && strcmp(res->columns[i].type_name, "sparsevec") == 0)
+                res->columns[i].type = NC_SPARSEVEC;
         }
         res->ncolumns = i + 1;
     }
@@ -2005,6 +2052,16 @@ nc_value nc_vector(const float *components, size_t dims) {
     return v;
 }
 
+nc_value nc_sparsevec(uint32_t dims, const uint32_t *indices, const float *values, size_t nnz) {
+    nc_value v = nc_null();
+    v.type = NC_SPARSEVEC;
+    v.as.sparse.dims = dims;
+    v.as.sparse.indices = indices;
+    v.as.sparse.values = values;
+    v.as.sparse.nnz = nnz;
+    return v;
+}
+
 nc_value nc_ext(const char *type_name, const uint8_t *data, size_t len) {
     nc_value v = nc_null();
     v.type = NC_EXT;
@@ -2182,6 +2239,16 @@ size_t nc_format(const nc_value *v, char *buf, size_t size) {
             n += fmt_real4(n < size ? buf + n : NULL, n < size ? size - n : 0, v->as.vector.ptr[i]);
         }
         return n + (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, "]");
+    case NC_SPARSEVEC:
+        n = (size_t)snprintf(buf, size, "{");
+        for (i = 0; i < v->as.sparse.nnz; i++) {
+            if (i) n += (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, ",");
+            n += (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, "%llu:",
+                                  (unsigned long long)v->as.sparse.indices[i] + 1);
+            n += fmt_real4(n < size ? buf + n : NULL, n < size ? size - n : 0, v->as.sparse.values[i]);
+        }
+        return n + (size_t)snprintf(n < size ? buf + n : NULL, n < size ? size - n : 0, "}/%lu",
+                                    (unsigned long)v->as.sparse.dims);
     case NC_BYTEA:
         n = (size_t)snprintf(buf, size, "\\x");
         for (i = 0; i < v->as.bytes.len; i++)

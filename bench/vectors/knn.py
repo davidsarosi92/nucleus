@@ -19,6 +19,9 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# NUCLEUS_BENCH_HOST=::1 where IPv4 loopback's ports run out (bench/common.py).
+HOST = os.environ.get("NUCLEUS_BENCH_HOST", "127.0.0.1")
+LISTEN = f"[{HOST}]" if ":" in HOST else HOST
 sys.path.insert(0, os.path.join(HERE, "..", "..", "drivers", "python"))
 
 import numpy as np  # noqa: E402
@@ -44,14 +47,14 @@ def numpy_knn(x, q, k):
 
 def start_nucleus(binary, port, cache):
     dir = tempfile.mkdtemp(prefix="nucleus-knn-")
-    args = [binary, "server", os.path.join(dir, "db"), "--listen", f"127.0.0.1:{port}", "--no-auth"]
+    args = [binary, "server", os.path.join(dir, "db"), "--listen", f"{LISTEN}:{port}", "--no-auth"]
     if cache:
         args += ["--cache", cache]
     s = subprocess.Popen(args,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(600):
         try:
-            return s, dir, nucleus.connect("127.0.0.1", port, password=None)
+            return s, dir, nucleus.connect(HOST, port, password=None)
         except (OSError, nucleus.OperationalError):
             time.sleep(0.1)
     s.kill()
@@ -114,7 +117,7 @@ def main():
         shutil.rmtree(dir)
 
     if o.pg:
-        subprocess.run(["docker", "rm", "-f", "nucleus-knn-pg"], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", "nucleus-knn-pg"], capture_output=True)
         subprocess.run(["docker", "run", "-d", "--name", "nucleus-knn-pg", "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
                         "--shm-size=1g", "pgvector/pgvector:pg18", "-c", "shared_buffers=1GB",
                         "-c", "max_parallel_workers_per_gather=4"], check=True, capture_output=True)
@@ -150,7 +153,7 @@ def main():
             print(f"pgvector exact (no index)  {ms:8.1f} ms  {mib / ms * 1000 / 1024:5.2f} GiB/s"
                   f"  (median of {o.queries}; load {load_s:.1f} s; answers differing from numpy's: {wrong})")
         finally:
-            subprocess.run(["docker", "rm", "-f", "nucleus-knn-pg"], capture_output=True)
+            subprocess.run(["docker", "rm", "-f", "-v", "nucleus-knn-pg"], capture_output=True)
 
 
 if __name__ == "__main__":

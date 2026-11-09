@@ -34,7 +34,7 @@ pub struct Budget {
 /// The threads the current statement may use for one scan (1: no
 /// parallelism) — 1 too where vectorized execution is off.
 pub fn workers() -> usize {
-    if batch_size() == 0 {
+    if batch_size() == 0 || ON_WORKER.with(Cell::get) {
         return 1;
     }
     SPENT.with(|s| {
@@ -44,6 +44,20 @@ pub fn workers() -> usize {
             .unwrap_or(1)
             .max(1)
     })
+}
+
+thread_local! {
+    /// Whether this thread is one of a statement's workers: its work is
+    /// not shared out again.
+    static ON_WORKER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f` as a statement's worker ([`workers`] 1 within it).
+pub(crate) fn as_worker<T>(f: impl FnOnce() -> T) -> T {
+    let before = ON_WORKER.with(|w| w.replace(true));
+    let out = f();
+    ON_WORKER.with(|w| w.set(before));
+    out
 }
 
 /// The current statement's budget (to run its work on other threads

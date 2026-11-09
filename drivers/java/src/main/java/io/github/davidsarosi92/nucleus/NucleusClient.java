@@ -63,7 +63,7 @@ import java.util.function.Function;
  * byte[], date → LocalDate, time → LocalTime (24:00:00, which it cannot hold, as
  * LocalTime.MAX), timestamp → LocalDateTime, timestamptz → OffsetDateTime (UTC), interval →
  * {@link Interval}, inet → {@link Inet}, cidr → {@link Cidr}, uuid → UUID, vector → float[],
- * arrays → List, NULL → null; another registered type → {@link Ext} (its name and binary form).
+ * sparsevec → {@link SparseVector}, arrays → List, NULL → null; another registered type → {@link Ext} (its name and binary form).
  * Parameters take the same types (and Byte, InetAddress, Instant, Duration, object arrays and
  * Collections). One thread at a time per connection.
  */
@@ -1023,6 +1023,7 @@ public final class NucleusClient implements AutoCloseable {
             if (v instanceof byte[] b) return b;
             if (v instanceof Ext e) return e.data();
             if (v instanceof float[] f) return vectorBytes(f);
+            if (v instanceof SparseVector s) return s.bytes();
             throw cannotSend(c, v);
         }
         if (tag == 18 || tag == 19) {
@@ -1195,6 +1196,7 @@ public final class NucleusClient implements AutoCloseable {
             }
             if (v instanceof Ext x) return ext(x.typeName(), x.data());
             if (v instanceof float[] x) return ext("vector", vectorBytes(x));
+            if (v instanceof SparseVector x) return ext("sparsevec", x.bytes());
             if (v instanceof Collection<?> items) {
                 u8(10).i32(items.size());
                 for (Object item : items) value(item);
@@ -1315,6 +1317,10 @@ public final class NucleusClient implements AutoCloseable {
                         float[] f = new float[data.length / 4];
                         ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(f);
                         yield f;
+                    }
+                    if (name.equals("sparsevec")) {
+                        SparseVector sv = SparseVector.of(data);
+                        if (sv != null) yield sv;
                     }
                     yield new Ext(name, data);
                 }

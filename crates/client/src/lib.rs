@@ -207,6 +207,8 @@ pub enum Type {
     Uuid,
     /// `vector`: `f32` components.
     Vector,
+    /// `sparsevec`: dimensions and non-zero components.
+    SparseVector,
     /// Another registered type, by name.
     Other(String),
 }
@@ -223,6 +225,45 @@ fn vector_of(b: &[u8]) -> Vec<f32> {
         .iter()
         .map(|c| f32::from_le_bytes(*c))
         .collect()
+}
+
+/// A sparse vector's binary form: its dimensions and its non-zero
+/// components' count, their positions and their values, little-endian
+/// `u32`s and `f32`s.
+fn sparse_bytes(dims: u32, indices: &[u32], values: &[f32]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8 + 8 * indices.len());
+    b.extend_from_slice(&dims.to_le_bytes());
+    b.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+    indices
+        .iter()
+        .for_each(|i| b.extend_from_slice(&i.to_le_bytes()));
+    values
+        .iter()
+        .for_each(|v| b.extend_from_slice(&v.to_le_bytes()));
+    b
+}
+
+/// A sparse vector from its binary form (`None`: not one).
+fn sparse_of(b: &[u8]) -> Option<Value> {
+    let (words, rest) = b.as_chunks::<4>();
+    if !rest.is_empty() || words.len() < 2 {
+        return None;
+    }
+    let n = u32::from_le_bytes(words[1]) as usize;
+    if words.len() != 2 + 2 * n {
+        return None;
+    }
+    Some(Value::SparseVector {
+        dims: u32::from_le_bytes(words[0]),
+        indices: words[2..2 + n]
+            .iter()
+            .map(|w| u32::from_le_bytes(*w))
+            .collect(),
+        values: words[2 + n..]
+            .iter()
+            .map(|w| f32::from_le_bytes(*w))
+            .collect(),
+    })
 }
 
 fn type_of_tag(t: u8) -> Type {
@@ -313,6 +354,17 @@ pub enum Value {
     Uuid([u8; 16]),
     /// A `vector`: its components.
     Vector(Vec<f32>),
+    /// A `sparsevec`: its dimensions and its non-zero components —
+    /// positions from 0, ascending, each with its value (the text form
+    /// counts from 1: `{1:0.5,4:2}/10`).
+    SparseVector {
+        /// The dimensions.
+        dims: u32,
+        /// The non-zero components' positions.
+        indices: Vec<u32>,
+        /// Their values.
+        values: Vec<f32>,
+    },
     /// A value of another registered type: its name and binary form.
     Other {
         /// The type's name.
@@ -445,6 +497,11 @@ impl Value {
             }
             Value::Uuid(b) => put::ext(out, "uuid", b),
             Value::Vector(v) => put::ext(out, "vector", &vector_bytes(v)),
+            Value::SparseVector {
+                dims,
+                indices,
+                values,
+            } => put::ext(out, "sparsevec", &sparse_bytes(*dims, indices, values)),
             Value::Other { type_name, bytes } => put::ext(out, type_name, bytes),
         }
     }
@@ -484,6 +541,9 @@ impl Value {
                 match (type_name.as_str(), <[u8; 16]>::try_from(bytes.as_slice())) {
                     ("uuid", Ok(b)) => Value::Uuid(b),
                     ("vector", _) => Value::Vector(vector_of(&bytes)),
+                    ("sparsevec", _) if sparse_of(&bytes).is_some() => {
+                        sparse_of(&bytes).expect("checked")
+                    }
                     _ => Value::Other { type_name, bytes },
                 }
             }
@@ -634,6 +694,20 @@ impl fmt::Display for Value {
                 }
                 f.write_str("]")
             }
+            Value::SparseVector {
+                dims,
+                indices,
+                values,
+            } => {
+                f.write_str("{")?;
+                for (i, (at, v)) in indices.iter().zip(values).enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{}:{v}", u64::from(*at) + 1)?;
+                }
+                write!(f, "}}/{dims}")
+            }
             Value::Other { bytes, .. } => {
                 f.write_str("\\x")?;
                 bytes.iter().try_for_each(|b| write!(f, "{b:02x}"))
@@ -753,6 +827,7 @@ impl<'a> Input<'a> {
                 tag::EXT => match self.str()? {
                     n if n == "uuid" => Type::Uuid,
                     n if n == "vector" => Type::Vector,
+                    n if n == "sparsevec" => Type::SparseVector,
                     n => Type::Other(n),
                 },
                 tag::ENUM => Type::Enum(self.str()?),
@@ -1655,6 +1730,14 @@ fn encode_batch(types: &[Type], columns: &[Column], rows: &[Vec<Value>]) -> Resu
                     (Value::Bytes(x), Type::Bytea) => data.extend_from_slice(x),
                     (Value::Other { bytes, .. }, Type::Other(_)) => data.extend_from_slice(bytes),
                     (Value::Vector(v), Type::Vector) => data.extend_from_slice(&vector_bytes(v)),
+                    (
+                        Value::SparseVector {
+                            dims,
+                            indices,
+                            values,
+                        },
+                        Type::SparseVector,
+                    ) => data.extend_from_slice(&sparse_bytes(*dims, indices, values)),
                     (v @ (Value::Inet { .. } | Value::Cidr { .. }), Type::Inet | Type::Cidr) => {
                         let mut tagged = Vec::new();
                         v.encode(&mut tagged);
@@ -1790,7 +1873,7 @@ fn tag_of_type(t: &Type) -> u8 {
         Type::Cidr => tag::CIDR,
         Type::Char => tag::CHAR,
         Type::Array(_) => tag::ARRAY,
-        Type::Uuid | Type::Vector | Type::Other(_) => tag::EXT,
+        Type::Uuid | Type::Vector | Type::SparseVector | Type::Other(_) => tag::EXT,
         Type::Enum(_) => tag::ENUM,
         Type::Text | Type::Unknown => tag::TEXT,
     }
@@ -1942,6 +2025,10 @@ impl Batch {
                         bytes: b.to_vec(),
                     },
                     Type::Vector => Value::Vector(vector_of(b)),
+                    Type::SparseVector => sparse_of(b).unwrap_or_else(|| Value::Other {
+                        type_name: "sparsevec".into(),
+                        bytes: b.to_vec(),
+                    }),
                     Type::Inet | Type::Cidr => {
                         // The row format's payload, behind its tag.
                         let mut tagged = vec![if *t == Type::Inet { 18 } else { 19 }];

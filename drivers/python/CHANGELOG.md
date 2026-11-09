@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Sparse vectors (nucleus PLAN.md §M14.12 V7): a `sparsevec` value is a
+  `nucleus.SparseVector` (`dims`, 0-based `indices`, `values`;
+  `SparseVector.of(dict, dims)`), sent and read in rows and batches.
 - Vectors (nucleus PLAN.md §M14.12): a `vector` value is an
   `array('f')`; one or a one-dimensional float32 numpy array is sent as
   a vector, in parameters, `executemany` and `load`.

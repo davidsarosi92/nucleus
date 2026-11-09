@@ -749,6 +749,48 @@ fn parallel_joins_and_sorts_agree() {
 }
 
 #[test]
+fn exact_vector_searches_run_on_the_workers() {
+    // `ORDER BY distance LIMIT k` without an index: a top-k per morsel,
+    // merged (PLAN.md §M14.12 V7) — the rows and their order one
+    // thread's, dense and sparse alike.
+    let db = Database::open_on(
+        Arc::new(SimPlatform::new(12)),
+        Path::new("/db"),
+        Options::default(),
+    )
+    .unwrap();
+    let mut s = session(&db, 1024);
+    s.execute(
+        "CREATE TABLE e (id INT PRIMARY KEY, v vector(3), sv sparsevec(30000)); \
+         INSERT INTO e SELECT i, ('[' || (i % 13) || ',' || (i % 17) || ',1]')::vector, \
+           ('{' || (i % 1000 + 1) || ':' || (i % 7 + 1) || ',' || (i % 977 + 1001) \
+             || ':0.5}/30000')::sparsevec \
+         FROM generate_series(1, 40000) i",
+    )
+    .unwrap();
+    let queries = [
+        "SELECT id, v <-> '[3,4,1]' FROM e ORDER BY v <-> '[3,4,1]', id LIMIT 10",
+        "SELECT id FROM e ORDER BY v <=> '[1,1,1]', id LIMIT 5",
+        "SELECT id, sv <#> '{5:1,1010:2}/30000' FROM e \
+           ORDER BY sv <#> '{5:1,1010:2}/30000', id LIMIT 10",
+        "SELECT id FROM e WHERE id % 3 = 0 ORDER BY sv <-> '{5:7}/30000', id LIMIT 10",
+    ];
+    let mut one = session(&db, 1024);
+    one.execute("SET parallel_workers = 1").unwrap();
+    let mut many = session(&db, 1024);
+    many.execute("SET parallel_workers = 4").unwrap();
+    for q in queries {
+        let want = outcome(&mut one, q);
+        let before = nucleus_sql::vector::parallel_runs();
+        assert_eq!(outcome(&mut many, q), want, "{q}");
+        assert!(
+            nucleus_sql::vector::parallel_runs() > before,
+            "on the workers: {q}"
+        );
+    }
+}
+
+#[test]
 fn parallel_writes_agree() {
     // `UPDATE` and `DELETE` find their rows through the vectorized scan, in
     // parallel on a large table: what they change, what they return and

@@ -57,7 +57,7 @@ pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
 /// gives at least `k` rows, or every row where the index cannot find
 /// them.  A table not analyzed has the rows its index holds.  `q` must be
 /// the same for every row (a constant, a parameter, an enclosing row's
-/// value).
+/// value, a subquery that does not read the row: [`fixed`]).
 fn nearest(plan: Plan, st: &Stats) -> Plan {
     let mut plan = map_children(plan, &|c| nearest(c, st));
     let Plan::Limit {
@@ -128,13 +128,17 @@ fn nearest(plan: Plan, st: &Stats) -> Plan {
     plan
 }
 
-/// Whether `e` is the same for every row of a scan: no column, no
-/// subquery, nothing volatile.
+/// Whether `e` is the same for every row of a scan: no column, nothing
+/// volatile, no subquery that reads the scan's row (an uncorrelated one
+/// runs once a statement — `(SELECT v FROM items WHERE id = $1)`, the
+/// query vector of "more like this" —, a correlated one reading only
+/// enclosing rows once a scan).
 fn fixed(e: &Expr) -> bool {
-    let mut ok = !e.has_subquery();
+    let mut ok = true;
     e.walk(&mut |x| match x {
         Expr::Column(_) => ok = false,
         Expr::Call(f, _) if f.volatility() == crate::ext::Volatility::Volatile => ok = false,
+        Expr::Subquery(s) if !crate::expr::row_free(s) => ok = false,
         _ => {}
     });
     ok
@@ -777,7 +781,7 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
             right,
             kind,
             on,
-            ..
+            algo,
         } => {
             let lw = left.width();
             let (mut lp, mut rp, mut onp, mut above) =
@@ -831,7 +835,11 @@ fn push_into(plan: Plan, mut preds: Vec<Expr>, st: &Stats) -> Plan {
             }
             let left = push_into(*left, lp, st);
             let right = push_into(*right, rp, st);
-            let algo = hash_keys(&onp, lw);
+            // A lateral item's join runs it for each left row.
+            let algo = match algo {
+                JoinAlgo::Lookup => JoinAlgo::Lookup,
+                _ => hash_keys(&onp, lw),
+            };
             filtered(
                 Plan::Join {
                     left: Box::new(left),
@@ -1591,13 +1599,7 @@ fn analyzed(plan: &Plan, st: &Stats) -> bool {
 
 /// Reorders chains of inner joins (bottom-up through the plan).
 fn reorder(plan: Plan, st: &Stats) -> Plan {
-    if !matches!(
-        plan,
-        Plan::Join {
-            kind: JoinType::Inner,
-            ..
-        }
-    ) {
+    if !inner_chain(&plan) {
         return map_children(plan, &|c| reorder(c, st));
     }
     // The whole chain at once (top-down): reordering an inner part first
@@ -1699,6 +1701,19 @@ pub(crate) fn map_children(plan: Plan, f: &dyn Fn(Plan) -> Plan) -> Plan {
     }
 }
 
+/// Whether `plan` is an inner join a chain may reorder: not a lateral
+/// item's, whose right side reads the left row (it stays a leaf).
+fn inner_chain(plan: &Plan) -> bool {
+    matches!(
+        plan,
+        Plan::Join {
+            kind: JoinType::Inner,
+            algo: JoinAlgo::NestedLoop | JoinAlgo::Hash { .. },
+            ..
+        }
+    )
+}
+
 /// The inputs of a chain of inner joins (with their column offsets) and
 /// its conditions, in the chain's combined column numbering.
 fn collect(plan: Plan, offset: usize, leaves: &mut Vec<(Plan, usize)>, conds: &mut Vec<Expr>) {
@@ -1708,7 +1723,7 @@ fn collect(plan: Plan, offset: usize, leaves: &mut Vec<(Plan, usize)>, conds: &m
             right,
             kind: JoinType::Inner,
             on,
-            ..
+            algo: JoinAlgo::NestedLoop | JoinAlgo::Hash { .. },
         } => {
             let lw = left.width();
             collect(*left, offset, leaves, conds);

@@ -115,6 +115,9 @@ pub struct Binder<'a> {
     registry: &'a Registry,
     /// Enclosing queries' scopes, innermost last.
     outer: Vec<Scope>,
+    /// The `FROM` items before one being bound that is not lateral:
+    /// not visible to it, named in the hint of a reference to them.
+    unseen: Vec<Scope>,
     /// Inferred parameter types, by `$n - 1`.
     pub params: Vec<Option<DataType>>,
     /// The CTEs in scope, innermost last.
@@ -316,6 +319,7 @@ impl<'a> Binder<'a> {
             txn,
             registry,
             outer: Vec::new(),
+            unseen: Vec::new(),
             params: Vec::new(),
             ctes: Vec::new(),
             values_targets: None,
@@ -838,10 +842,16 @@ impl<'a> Binder<'a> {
     fn from(&mut self, items: &[TableRef]) -> Result<Bound> {
         let mut acc: Option<Bound> = None;
         for item in items {
-            let b = self.table_ref(item)?;
             acc = Some(match acc {
-                None => b,
-                Some(a) => self.join(a, b, JoinType::Inner, None)?,
+                None => self.table_ref(item)?,
+                Some(a) => {
+                    let (b, lateral) = self.item_after(item, &a.scope)?;
+                    let mut j = self.join(a, b, JoinType::Inner, None)?;
+                    if lateral {
+                        j.plan = lateral_join(j.plan);
+                    }
+                    j
+                }
             });
         }
         // No FROM: one empty row.
@@ -924,8 +934,34 @@ impl<'a> Binder<'a> {
         })
     }
 
+    /// A `FROM` item after (on the right of) items whose columns are
+    /// `left`, and whether it reads them: a lateral one — `LATERAL`, or
+    /// a function (as PostgreSQL's are) — bound with them visible as the
+    /// row it runs for (`Outer` at depth 1, the enclosing rows a level
+    /// further).
+    fn item_after(&mut self, t: &TableRef, left: &Scope) -> Result<(Bound, bool)> {
+        let inner = match t {
+            TableRef::Lateral(inner) => &**inner,
+            TableRef::Function { .. } => t,
+            _ => {
+                self.unseen.push(left.clone());
+                let b = self.table_ref(t);
+                self.unseen.pop();
+                return Ok((b?, false));
+            }
+        };
+        self.outer.push(left.clone());
+        let b = self.table_ref(inner);
+        self.outer.pop();
+        let b = b?;
+        // Reading no row around it, it is an item like any other.
+        let lateral = b.plan.outer_depth() > 0;
+        Ok((b, lateral))
+    }
+
     fn table_ref(&mut self, t: &TableRef) -> Result<Bound> {
         match t {
+            TableRef::Lateral(inner) => self.table_ref(inner),
             TableRef::Function {
                 name,
                 args,
@@ -1104,7 +1140,15 @@ impl<'a> Binder<'a> {
                 on,
                 using,
             } => {
-                let (l, r) = (self.table_ref(left)?, self.table_ref(right)?);
+                let l = self.table_ref(left)?;
+                let (r, lateral) = self.item_after(right, &l.scope)?;
+                // A lateral item runs for each left row: the left side is
+                // the one kept whole (PostgreSQL's rule).
+                if lateral && matches!(kind, JoinKind::Right | JoinKind::Full) {
+                    return Err(Error::invalid_column_reference(
+                        "the combining JOIN type must be INNER or LEFT for a LATERAL reference",
+                    ));
+                }
                 // RIGHT JOIN = LEFT JOIN with the sides swapped, then the
                 // columns put back in order.
                 let (l, r, swapped) = if *kind == JoinKind::Right {
@@ -1163,6 +1207,9 @@ impl<'a> Binder<'a> {
                     },
                     scope: combined,
                 };
+                if lateral {
+                    b.plan = lateral_join(b.plan);
+                }
                 if !merged.is_empty() {
                     // FULL JOIN … USING: the merged columns first, then
                     // every input column (the USING copies hidden).
@@ -2224,6 +2271,11 @@ impl<'a> Binder<'a> {
                 tables.dedup();
                 let e =
                     Error::undefined_table(format!("missing FROM-clause entry for table \"{t}\""));
+                if self.unseen.iter().any(|s| s.has_table(t)) {
+                    return Err(e.with_hint(format!(
+                        "\"{t}\" is a FROM item before this one: to read it, mark this subquery with LATERAL"
+                    )));
+                }
                 return Err(
                     match crate::hint::names("table or alias", t, &tables, None) {
                         Some(h) => e.with_hint(h),
@@ -3533,4 +3585,26 @@ fn arg_info(args: &[Typed]) -> Vec<ArgInfo> {
 
 fn is_text_literal(x: &Expr) -> bool {
     matches!(x, Expr::Literal(Value::Text(_)))
+}
+
+/// A join whose right side reads the left row (a lateral item): run for
+/// each left row, as an index nested loop's lookups are
+/// ([`JoinAlgo::Lookup`]; PLAN.md §M14.12 V7).
+fn lateral_join(plan: Plan) -> Plan {
+    match plan {
+        Plan::Join {
+            left,
+            right,
+            kind,
+            on,
+            ..
+        } => Plan::Join {
+            left,
+            right,
+            kind,
+            on,
+            algo: JoinAlgo::Lookup,
+        },
+        p => p,
+    }
 }

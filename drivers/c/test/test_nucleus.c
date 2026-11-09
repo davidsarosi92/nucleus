@@ -234,6 +234,50 @@ static void vectors(void) {
     nc_close(db);
 }
 
+/* sparsevec: a parameter and a result, the nearest by distance. */
+static void sparse_vectors(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    char t[64], sql[256];
+    static const uint32_t at1[] = {0, 99999}, at2[] = {5}, atq[] = {0, 99999}, past[] = {3};
+    static const float v1[] = {1, 2}, v2[] = {-3.5f}, vq[] = {1, 2.5f}, one[] = {1};
+    nc_value p[2];
+    nc_result *r;
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (id INT PRIMARY KEY, v sparsevec(100000))", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES ($1, $2)", t);
+    p[0] = nc_int(1);
+    p[1] = nc_sparsevec(100000, at1, v1, 2);
+    nc_result_free(must(db, sql, p, 2));
+    p[0] = nc_int(2);
+    p[1] = nc_sparsevec(100000, at2, v2, 1);
+    nc_result_free(must(db, sql, p, 2));
+    p[0] = nc_sparsevec(100000, atq, vq, 2);
+    snprintf(sql, sizeof sql, "SELECT id, v FROM %s ORDER BY v <-> $1 LIMIT 1", t);
+    r = must(db, sql, p, 1);
+    if (r) {
+        const nc_value *v = nc_value_at(r, 0, 1);
+        CHECK(nc_column_type(r, 1) == NC_SPARSEVEC);
+        CHECK(strcmp(nc_column_type_name(r, 1), "sparsevec") == 0);
+        CHECK(nc_value_at(r, 0, 0)->as.integer == 1);
+        CHECK(v->type == NC_SPARSEVEC && v->as.sparse.dims == 100000 && v->as.sparse.nnz == 2);
+        CHECK(memcmp(v->as.sparse.indices, at1, sizeof at1) == 0);
+        CHECK(memcmp(v->as.sparse.values, v1, sizeof v1) == 0);
+        CHECK(strcmp(text_of(r, 0, 1), "{1:1,100000:2}/100000") == 0);
+        nc_result_free(r);
+    }
+    /* A position past the dimensions: the server's check refuses it. */
+    p[0] = nc_sparsevec(3, past, one, 1);
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES (9, $1)", t);
+    r = nc_query(db, sql, p, 1, &err);
+    CHECK(r == NULL && strcmp(err.code, "22000") == 0);
+    nc_close(db);
+}
+
 static void core_types(void) {
     nc_error err;
     nc_config cfg = config();
@@ -643,6 +687,7 @@ int main(void) {
     errors_and_transactions();
     uuids();
     vectors();
+    sparse_vectors();
     core_types();
     authentication();
     tls();

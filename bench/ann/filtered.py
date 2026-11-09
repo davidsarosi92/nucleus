@@ -154,7 +154,7 @@ def run_pgvector(a, train, col, test, truth):
                     f"SELECT id FROM t WHERE {FILTERS[name][0]} "
                     f"ORDER BY v <-> (SELECT v FROM q WHERE id = :qid) LIMIT {K};\n")
     os.chmod(work, 0o755)
-    subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
     sh("docker", "run", "-d", "--name", NAME, "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "--shm-size=6g",
        "-v", f"{work}:/data", IMAGE, "-c", f"shared_buffers={a.cache}", "-c", "maintenance_work_mem=4GB",
        "-c", "max_parallel_maintenance_workers=9", "-c", "jit=off")
@@ -200,7 +200,7 @@ def run_pgvector(a, train, col, test, truth):
                 rec, ret = score(found, truth[name])
                 print(f"{name + '%':>6}  {rec:>9.4f}  {ret:>8.2f}  {lat:>9.1f}  {plan[:160]}", flush=True)
     finally:
-        subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
         shutil.rmtree(work)
 
 

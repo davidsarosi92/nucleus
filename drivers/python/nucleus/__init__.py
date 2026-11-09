@@ -28,7 +28,7 @@ Values map to Python types: boolean -> bool, smallint, integer and bigint
 as time.max), timestamp -> datetime.datetime (naive), timestamptz ->
 datetime.datetime (UTC), interval -> nucleus.Interval, inet ->
 ipaddress.ip_interface, cidr -> ipaddress.ip_network, uuid -> uuid.UUID,
-vector -> array.array('f'), arrays -> list, NULL -> None; another registered type -> nucleus.Ext (its
+vector -> array.array('f'), sparsevec -> nucleus.SparseVector, arrays -> list, NULL -> None; another registered type -> nucleus.Ext (its
 name and binary form).  Parameters take the same types (and
 datetime.timedelta for intervals, bytearray for bytea, an ipaddress
 address for an inet, a float32 numpy array for a vector).
@@ -55,7 +55,7 @@ from dataclasses import field as _field
 
 __all__ = [
     "connect", "Connection", "Cursor", "Stream", "Batches", "Batch", "ColumnBatch",
-    "Result", "Column", "Interval", "Ext",
+    "Result", "Column", "Interval", "Ext", "SparseVector",
     "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "ProgrammingError",
     "NotSupportedError", "DEFAULT_PORT", "DEFAULT_FETCH",
@@ -171,6 +171,59 @@ class Ext:
 
 
 @_dataclass(frozen=True)
+class SparseVector:
+    """A ``sparsevec``: its dimensions and its non-zero components —
+    positions from 0, ascending, each with its value (the text form counts
+    from 1: ``{1:0.5,4:2}/10``).  ``SparseVector.of({0: 0.5, 3: 2}, 10)``
+    from a dict, ``to_dict()``, ``to_list()`` the dense components."""
+
+    dims: int
+    indices: tuple
+    values: tuple
+
+    @classmethod
+    def of(cls, components, dims):
+        """From a dict of position (from 0) to value; zeros left out."""
+        pairs = sorted((int(i), float(v)) for i, v in components.items() if v != 0)
+        return cls(int(dims), tuple(i for i, _ in pairs), tuple(v for _, v in pairs))
+
+    def to_dict(self):
+        return dict(zip(self.indices, self.values))
+
+    def to_list(self):
+        out = [0.0] * self.dims
+        for i, v in zip(self.indices, self.values):
+            out[i] = v
+        return out
+
+    def __str__(self):
+        body = ",".join(f"{i + 1}:{_shortest(v)}" for i, v in zip(self.indices, self.values))
+        return "{" + body + "}/" + str(self.dims)
+
+
+def _shortest(v):
+    """A float32's shortest digits, as nucleus prints it."""
+    r = repr(_real(_struct.pack("<f", v)))
+    return r[:-2] if r.endswith(".0") else r
+
+
+def _sparse_bytes(v):
+    """A sparse vector's binary form: dimensions, count, positions, values."""
+    if len(v.indices) != len(v.values):
+        raise InterfaceError("a sparse vector's indices and values differ in number")
+    n = len(v.indices)
+    return _struct.pack(f"<II{n}I{n}f", v.dims, n, *v.indices, *v.values)
+
+
+def _sparse_of(data):
+    dims, n = _struct.unpack_from("<II", data)
+    if len(data) != 8 + 8 * n:
+        return None
+    return SparseVector(dims, _struct.unpack_from(f"<{n}I", data, 8),
+                        tuple(_real(data[8 + 4 * n + 4 * k:12 + 4 * n + 4 * k]) for k in range(n)))
+
+
+@_dataclass(frozen=True)
 class Column:
     """A result column: its name and type name."""
 
@@ -272,6 +325,8 @@ def _encode(out, v):
         _encode_ext(out, "uuid", v.bytes)
     elif _is_vector(v):
         _encode_ext(out, "vector", _vector_bytes(v))
+    elif isinstance(v, SparseVector):
+        _encode_ext(out, "sparsevec", _sparse_bytes(v))
     elif isinstance(v, Ext):
         _encode_ext(out, v.type_name, v.data)
     elif isinstance(v, (list, tuple)):
@@ -415,6 +470,10 @@ class _Reader:
                 return _uuid.UUID(bytes=data)
             if name == "vector":
                 return _vector_of(data)
+            if name == "sparsevec" and n >= 8:
+                sv = _sparse_of(data)
+                if sv is not None:
+                    return sv
             return Ext(name, data)
         raise InterfaceError(f"unknown value tag {tag}")
 
@@ -1581,6 +1640,8 @@ def _var_slot(c, v):
     if tag == _EXT:
         if _is_vector(v):
             return _vector_bytes(v)
+        if isinstance(v, SparseVector):
+            return _sparse_bytes(v)
         return v.data if isinstance(v, Ext) else bytes(v)
     if tag in (18, 19):
         out = bytearray()

@@ -8,7 +8,9 @@ hint),
 128-bit mantissa and scale, dates as days and timestamps as µs since
 2000-01-01, `uuid` as an `nc_uuid` of 16 bytes — `nc_uuid_value`,
 `nc_uuid_parse` —, `vector` as `NC_VECTOR` (a `float` pointer and the
-dimensions; `nc_vector`) and another registered type as `NC_EXT`, its name and
+dimensions; `nc_vector`), `sparsevec` as `NC_SPARSEVEC` (`as.sparse`: the
+dimensions, the 0-based positions and values, their count; `nc_sparsevec`)
+and another registered type as `NC_EXT`, its name and
 binary form; `nc_column_type_name` names a registered column type or an
 enum).  Protocol version 3: `NC_SMALLINT` and `NC_INTEGER` (`as.integer`),
 `NC_REAL` (`as.real4`), `NC_BYTEA` (a pointer and length), `NC_TIME` (µs

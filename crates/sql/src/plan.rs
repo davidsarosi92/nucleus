@@ -389,6 +389,18 @@ impl Access {
     }
 }
 
+/// Whether `plan` is a table's scan by a key range (under filters and
+/// projections): an index nested loop's right side.
+fn keyed(plan: &Plan) -> bool {
+    match plan {
+        Plan::Scan { access, .. } => matches!(access, Access::Key { .. }),
+        Plan::Filter { input, .. } | Plan::Project { input, .. } | Plan::Secure { input, .. } => {
+            keyed(input)
+        }
+        _ => false,
+    }
+}
+
 /// A key range's index name and conditions, as `EXPLAIN` shows them.
 fn key_conds(table: &Table, access: &Access) -> (String, String) {
     let Access::Key {
@@ -755,7 +767,13 @@ impl Plan {
                     exprs.iter().map(show).collect::<Vec<_>>().join(", ")
                 )
             }
-            Plan::Join { kind, on, algo, .. } => {
+            Plan::Join {
+                kind,
+                on,
+                algo,
+                right,
+                ..
+            } => {
                 let k = match kind {
                     JoinType::Inner => "",
                     JoinType::Left => "Left ",
@@ -765,6 +783,8 @@ impl Plan {
                 };
                 let a = match algo {
                     JoinAlgo::NestedLoop => "Nested Loop".to_string(),
+                    // A lateral item's: its plan run for each left row.
+                    JoinAlgo::Lookup if !keyed(right) => "Nested Loop (per row)".to_string(),
                     JoinAlgo::Lookup => "Index Nested Loop".to_string(),
                     JoinAlgo::Hash {
                         left_keys,

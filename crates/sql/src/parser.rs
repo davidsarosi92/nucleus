@@ -80,6 +80,7 @@ const EXPLAIN_OPTIONS: &[&str] = &[
 
 const RESERVED: &[&str] = &[
     "select",
+    "lateral",
     "tablesample",
     "from",
     "where",
@@ -2581,6 +2582,13 @@ impl<'a> Parser<'a> {
     }
 
     fn table_primary(&mut self) -> Result<TableRef> {
+        if self.eat_kw("lateral") {
+            let item = self.table_primary()?;
+            if !matches!(item, TableRef::Subquery { .. } | TableRef::Function { .. }) {
+                return Err(self.error("LATERAL must be followed by a subquery or a function"));
+            }
+            return Ok(TableRef::Lateral(Box::new(item)));
+        }
         if self.eat_op("(") {
             if self.at_query() {
                 let query = self.query()?;

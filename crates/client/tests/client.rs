@@ -1978,3 +1978,57 @@ fn vectors_both_ways() {
         other => panic!("{other:?}"),
     }
 }
+
+/// `sparsevec` (PLAN.md §M14.12 V7) both ways: as a parameter and a
+/// result, as rows and as columnar batches, and the nearest by distance.
+#[test]
+fn sparse_vectors_both_ways() {
+    let mut c = Client::connect(config(start(None))).unwrap();
+    c.execute(
+        "CREATE TABLE sp (id INT PRIMARY KEY, v sparsevec(100000))",
+        &[],
+    )
+    .unwrap();
+    let sparse = |at: &[u32], values: &[f32]| Value::SparseVector {
+        dims: 100_000,
+        indices: at.to_vec(),
+        values: values.to_vec(),
+    };
+    c.execute_many(
+        "INSERT INTO sp VALUES ($1, $2)",
+        &[
+            &[Value::Int(1), sparse(&[0, 99_999], &[1.0, 2.0])][..],
+            &[Value::Int(2), sparse(&[5], &[-3.5])][..],
+            &[Value::Int(3), sparse(&[], &[])][..],
+        ],
+    )
+    .unwrap();
+    let rows = c
+        .rows(
+            "SELECT id, v, v <-> $1 FROM sp ORDER BY v <-> $1 LIMIT 2",
+            &[sparse(&[0, 99_999], &[1.0, 2.5])],
+        )
+        .unwrap();
+    assert_eq!(rows[0][0], Value::Integer(1));
+    assert_eq!(rows[0][1], sparse(&[0, 99_999], &[1.0, 2.0]));
+    assert_eq!(rows[0][2], Value::Float(0.5));
+    assert_eq!(rows[1][0], Value::Integer(3));
+    assert_eq!(rows[0][1].to_string(), "{1:1,100000:2}/100000");
+    let mut batches = c.batches("SELECT v FROM sp ORDER BY id", &[], 0).unwrap();
+    assert_eq!(batches.columns()[0].ty, Type::SparseVector);
+    let b = batches.next().unwrap().unwrap();
+    assert_eq!(b.value(1, 0).unwrap(), sparse(&[5], &[-3.5]));
+    drop(batches);
+    // A position past the dimensions is refused by the server's check.
+    match c.execute(
+        "INSERT INTO sp VALUES (4, $1)",
+        &[Value::SparseVector {
+            dims: 3,
+            indices: vec![3],
+            values: vec![1.0],
+        }],
+    ) {
+        Err(Error::Server(e)) => assert_eq!(e.code, "22000"),
+        other => panic!("{other:?}"),
+    }
+}

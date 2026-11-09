@@ -857,6 +857,13 @@ fn outer_reads(plan: &Plan) -> Option<Vec<(usize, usize)>> {
     ok.then_some(out)
 }
 
+/// Whether a subquery gives the same rows for every row it runs for: it
+/// reads none of that row (only rows further out, or none) and nothing
+/// that changes from one run to the next.
+pub(crate) fn row_free(sub: &SubPlan) -> bool {
+    outer_reads(&sub.plan).is_some_and(|r| r.iter().all(|&(level, _)| level >= 2))
+}
+
 /// A correlated subquery's rows for `env`: kept by the outer values it
 /// reads where the execution allows ([`Ctx::memoize`]).
 fn correlated_rows(sub: &SubPlan, env: &Env) -> Result<std::rc::Rc<Vec<Row>>> {

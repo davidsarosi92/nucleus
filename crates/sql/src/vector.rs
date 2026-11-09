@@ -3562,6 +3562,7 @@ pub(crate) fn on_workers_kept<S, T: Send, U: Send>(
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
     let ambient = crate::parallel::Ambient::capture();
+    let instance = ctx.txn.instance();
     // The uncorrelated subqueries' rows run so far (`parallel_safe_in`),
     // and the hash joins' key filters.
     let cache = ctx.cache.borrow().clone();
@@ -3588,7 +3589,7 @@ pub(crate) fn on_workers_kept<S, T: Send, U: Send>(
                         if m >= n || (stop && m > failed.load(SeqCst)) {
                             break;
                         }
-                        let txn = crate::parallel::SharedTxn(shared);
+                        let txn = crate::parallel::SharedTxn(shared, instance);
                         let mut wctx = Ctx::new(&txn, registry, params);
                         wctx.needed = needed.clone();
                         wctx.validated = validated;

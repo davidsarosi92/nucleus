@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 
-import { Cidr, connect, Decimal, Inet, Interval, NucleusError, Time } from "../src/index.ts";
+import { Cidr, connect, Decimal, Inet, Interval, NucleusError, SparseVector, Time } from "../src/index.ts";
 import type { Value } from "../src/index.ts";
 
 const options = {
@@ -110,6 +110,32 @@ test("vector", async () => {
   assert.equal(await db.load(t, { id: [5, 6], v: [new Float32Array([0, 0, 1]), new Float32Array([0, 1, 0])] }), 2);
   assert.deepEqual((await db.query(`SELECT id FROM ${t} WHERE v <-> '[0,0,1]' < 1.5 ORDER BY id`)).rows, [[5], [6]]);
   await assert.rejects(db.query(`INSERT INTO ${t} VALUES (7, $1)`, [new Float32Array([1, 2])]), (e: NucleusError) => e.code === "22000");
+  await db.close();
+});
+
+test("sparsevec", async () => {
+  const db = await connect(options);
+  const t = table();
+  await db.query(`CREATE TABLE ${t} (id INT PRIMARY KEY, v sparsevec(100000))`);
+  const a = SparseVector.of({ 0: 1, 99999: 2 }, 100000);
+  const rows: Value[][] = [
+    [1, a],
+    [2, SparseVector.of(new Map([[5, -3.5]]), 100000)],
+    [3, null],
+  ];
+  assert.equal(await db.executeMany(`INSERT INTO ${t} VALUES ($1, $2)`, rows), 3);
+  const q = `SELECT id, v FROM ${t} WHERE v IS NOT NULL ORDER BY v <-> $1 LIMIT 1`;
+  const r = await db.query(q, [new SparseVector(100000, [0, 99999], [1, 2.5])]);
+  assert.equal(r.columns[1].type, "sparsevec");
+  assert.equal(r.rows[0][0], 1);
+  assert.deepEqual(r.rows[0][1], a);
+  assert.equal(String(r.rows[0][1]), "{1:1,100000:2}/100000");
+  for await (const b of await db.batches(`SELECT v FROM ${t} ORDER BY id`)) {
+    assert.deepEqual(b.column("v").get(1), new SparseVector(100000, [5], [-3.5]));
+    assert.ok(b.column("v").isNull(2));
+  }
+  // A position past the dimensions: the server's check refuses it.
+  await assert.rejects(db.query(`INSERT INTO ${t} VALUES (7, $1)`, [new SparseVector(3, [3], [1])]), (e: NucleusError) => e.code === "22000");
   await db.close();
 });
 

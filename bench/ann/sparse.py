@@ -28,6 +28,9 @@ import time
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# NUCLEUS_BENCH_HOST=::1 where IPv4 loopback's ports run out (bench/common.py).
+HOST = os.environ.get("NUCLEUS_BENCH_HOST", "127.0.0.1")
+LISTEN = f"[{HOST}]" if ":" in HOST else HOST
 sys.path.insert(0, os.path.join(HERE, "..", "..", "drivers", "python"))
 sys.path.insert(0, HERE)
 
@@ -82,12 +85,12 @@ def nucleus_run(a, rows, queries, truth):
     import nucleus
 
     work = tempfile.mkdtemp(prefix="nucleus-sparse-")
-    server = subprocess.Popen([a.binary, "server", os.path.join(work, "db"), "--listen", f"127.0.0.1:{a.port}",
+    server = subprocess.Popen([a.binary, "server", os.path.join(work, "db"), "--listen", f"{LISTEN}:{a.port}",
                                "--no-auth", "--cache", a.cache], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(600):
             try:
-                c = nucleus.connect("127.0.0.1", a.port, password=None)
+                c = nucleus.connect(HOST, a.port, password=None)
                 break
             except (OSError, nucleus.OperationalError):
                 time.sleep(0.1)
@@ -128,7 +131,7 @@ def pgvector_run(a, rows, queries, truth):
         f.write(f"\\set qid random(0, {len(queries) - 1})\n"
                 f"SELECT id FROM t ORDER BY v <#> (SELECT v FROM q WHERE id = :qid) LIMIT {K};\n")
     os.chmod(work, 0o755)
-    subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
     sh("docker", "run", "-d", "--name", NAME, "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "--shm-size=6g",
        "-v", f"{work}:/data", IMAGE, "-c", f"shared_buffers={a.cache}", "-c", "jit=off")
     try:
@@ -158,7 +161,7 @@ def pgvector_run(a, rows, queries, truth):
         lat = float(re.search(r"latency average = ([\d.]+) ms", res).group(1)) * 1000
         print(f"recall@10 {recall(found, truth):.4f}  {lat:.0f} µs/search  {plan}", flush=True)
     finally:
-        subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
         shutil.rmtree(work)
 
 

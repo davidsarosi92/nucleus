@@ -1596,13 +1596,16 @@ fn lookup_one(l: Row, right: &Plan, spec: &JoinSpec) -> Vec<Result<Row>> {
 const LOOKUP_BLOCK: usize = 256;
 const LOOKUP_BLOCK_MAX: usize = 16_384;
 
-/// Whether an index nested loop's lookups can run on worker threads, and
-/// over what: more than one worker, no enclosing row, no `EXPLAIN
-/// ANALYZE`, nothing that would differ by thread in the lookup or the
-/// condition (a scan, perhaps under a projection, of expressions
-/// [`crate::vector::parallel_safe_in`]), no rows a statement has written and
-/// a thread of its own keeps (a column table's insert buffer), and a
-/// transaction that shares its reads.
+/// Whether an index nested loop's lookups — or a lateral item's runs —
+/// can run on worker threads, and over what: more than one worker, no
+/// enclosing row, no `EXPLAIN ANALYZE`, nothing that would differ by
+/// thread in the right side or the condition (a scan — by a key range, or
+/// an index method's search — under filters, projections, a sort and a
+/// limit, of expressions [`crate::vector::parallel_safe_in`]), no rows a
+/// statement has written and a thread of its own keeps (a column table's
+/// insert buffer), and a transaction that shares its reads.  Each worker
+/// runs the right side whole for its left rows (it is not cut into
+/// morsels; the workers do not share it out again).
 fn parallel_lookups<'a>(
     right: &Plan,
     spec: &JoinSpec<'a>,
@@ -1616,34 +1619,19 @@ fn parallel_lookups<'a>(
         return None;
     }
     let safe = |e: &Expr| crate::vector::parallel_safe_in(e, spec.ctx);
-    let scan_safe = |p: &Plan| match p {
-        Plan::Scan { access, filter, .. } => {
-            filter.as_ref().is_none_or(safe)
-                && match access {
-                    Access::Full => true,
-                    Access::Key {
-                        prefix,
-                        lower,
-                        upper,
-                        ..
-                    } => {
-                        let bound = |b: &Bound<Expr>| match b {
-                            Bound::Included(e) | Bound::Excluded(e) => safe(e),
-                            Bound::Unbounded => true,
-                        };
-                        prefix.iter().all(safe) && bound(lower) && bound(upper)
-                    }
-                    // An index method's search is not cut into morsels.
-                    Access::Nearest { .. } => false,
-                }
+    fn runs(p: &Plan, safe: &dyn Fn(&Expr) -> bool) -> bool {
+        let mut ok = true;
+        p.for_each_expr(&mut |e| ok &= safe(e));
+        ok && match p {
+            Plan::Scan { .. } => true,
+            Plan::Project { input, .. }
+            | Plan::Filter { input, .. }
+            | Plan::Sort { input, .. }
+            | Plan::Limit { input, .. } => runs(input, safe),
+            _ => false,
         }
-        _ => false,
-    };
-    let right_safe = match right {
-        Plan::Project { input, exprs } => exprs.iter().all(safe) && scan_safe(input),
-        p => scan_safe(p),
-    };
-    if !right_safe || !spec.on.is_none_or(safe) {
+    }
+    if !runs(right, &safe) || !spec.on.is_none_or(safe) {
         return None;
     }
     Some((spec.ctx.txn.shared()?, workers))

@@ -1152,7 +1152,8 @@ canonical bytes are its dimensions and its non-zero count (little-endian
 order; zeros, `-0` too, dropped).  At most 1,000,000,000 dimensions and
 16,000 non-zero components; a position outside the dimensions or twice,
 NaN, infinities `22000` / `22003`.  `sparsevec(n)` checks the dimensions
-on every write.  Equality and hashing on the bytes (no order).  Distances
+on every write.  Bytes from a driver (`ncp` tag 11, pgvector's binary form
+on pg-compat) are checked as text is and kept canonical (§10).  Equality and hashing on the bytes (no order).  Distances
 over the positions merged, read in place from the stored bytes (`View`:
 nothing allocated): `<->` Euclidean (the type's), `<=>` cosine (NaN for a
 zero vector), `<#>` the negated inner product, `<+>` taxicab — the same
@@ -1160,8 +1161,9 @@ operators and functions as `vector`'s (`l2_distance`, `cosine_distance`,
 `inner_product`, `negative_inner_product`, `l1_distance`, `l2_norm`,
 `l2_normalize` take either: `vectors::VectorFn` resolves by its
 arguments' type).  Casts to and from `vector`.  `ORDER BY v <#> q LIMIT
-k` is an exact search (a scan and a top-k: 100,000 SPLADE-like rows in
-`docs/benchmarks.md`); an HNSW index refuses the type (`0A000`) — sparse
+k` is an exact search (a scan and a top-k per morsel on the workers,
+merged — `vector::sorted`, as every `ORDER BY … LIMIT` over a scan:
+100,000 SPLADE-like rows in `docs/benchmarks.md`); an HNSW index refuses the type (`0A000`) — sparse
 vectors' index is an inverted one, §M14.21's.
 `crates/testkit/slt/54_sparsevec.slt` follows pgvector's definitions; the
 law kit generates them.
@@ -1344,7 +1346,10 @@ next written (§M14.20 W7, D18).
 
 **Large values out of line** (`large`).  A value whose encoding is longer
 than 2 000 bytes (`large::THRESHOLD`) — a file in a `bytea`, a document
-in a `text`, any type — is stored in chunks of up to 32 KiB under the
+in a `text`, any type but one whose values are read with their row
+(`Type::stored_with_row`: `vector`, `sparsevec` — kept in the row, on
+the KV's overflow pages past 2,048 bytes, one read with its key;
+`large::out_of_line_value`, §M14.12 V7.2) — is stored in chunks of up to 32 KiB under the
 table's reserved index id `FFFFFFFF`, keyed by the row's primary key, the
 column and the chunk number; the row keeps tag 16 and the length, and
 reads (`large::read_row`) put the value back.  The chunks are written and
@@ -1482,7 +1487,9 @@ be qualified with `public.` (and, to read, `nc_catalog.`, `pg_catalog.`,
 Queries: `WITH [RECURSIVE] name [(cols)] AS (…)`, `SELECT [DISTINCT]`,
 `FROM` with comma joins, `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON | USING`,
 subqueries and functions in `FROM` (`generate_series`, `unnest`, any
-scalar function; `WITH ORDINALITY`), alias column lists (`AS t (a, b)`),
+scalar function; `WITH ORDINALITY`), `LATERAL` before a subquery or a
+function (functions are lateral without it, as PostgreSQL's), alias
+column lists (`AS t (a, b)`),
 `WHERE`, `GROUP BY` (expressions, positions, aliases), `HAVING`, `WINDOW
 name AS (…)`, `UNION |
 EXCEPT | INTERSECT [ALL]` (INTERSECT binding tighter), `VALUES`, `ORDER BY`
@@ -1511,8 +1518,7 @@ OTHERS]])`, a bound `UNBOUNDED PRECEDING | n PRECEDING | CURRENT ROW | n
 FOLLOWING | UNBOUNDED FOLLOWING` (§8.5).
 
 Not yet: `COPY TO` and `COPY FROM 'file'`, `TIMETZ`, time zones other than
-UTC, multi-dimensional arrays, data-modifying CTEs, `LATERAL`, user
-functions.
+UTC, multi-dimensional arrays, data-modifying CTEs, user functions.
 
 ### 8.4 Binder (`binder`)
 
@@ -1524,7 +1530,16 @@ arithmetic, never in `||`; a `$n` takes its context's type — including
 `INSERT`/`UPDATE` target columns, for `describe`), lifts aggregates into an
 `Aggregate` node (grouped expressions matched structurally; other column
 references are `42803`), and places `ORDER BY` keys (output name or
-position, else a hidden extra column, refused under `DISTINCT`).
+position, else a hidden extra column, refused under `DISTINCT`).  A
+lateral `FROM` item (`LATERAL (subquery)`, or a function) is bound with
+the items before it — a join's left side, or the comma-separated items
+before it — visible as the row it runs for (`Outer` at depth 1, the
+enclosing queries' rows a level further); reading them, its join runs it
+for each left row (`binder::lateral_join`: an index nested loop's
+`JoinAlgo::Lookup`, below), else it is an item like any other.  A lateral
+item cannot be the side a `RIGHT` or `FULL` join keeps whole (`42P10`,
+PostgreSQL's rule); a subquery not marked `LATERAL` that names an item
+before it is `42P01` with a hint to mark it.
 
 ### 8.5 Plans and the executor (`plan`, `exec`, `expr`)
 
@@ -2111,7 +2126,16 @@ they are is dropped (`optimizer::same_rows`).
 An **index nested loop** (`JoinAlgo::Lookup`, `EXPLAIN`: `Index Nested
 Loop`) runs its right side — a table's scan by an index on the join keys,
 the left row's values as `Outer` references — once per left row (inner,
-left, semi and anti joins).  It runs on worker threads when it can: the
+left, semi and anti joins).  A lateral item's join is one too (`EXPLAIN`:
+`Nested Loop (per row)`), its right side any plan; the optimizer's
+passes keep it whole (not reordered, no semi join moved into its right
+side) and the column pruning keeps the left columns it reads.  It runs on worker threads when it can — a
+lateral item's right side too, where it is a scan (by a key range or an
+index method's search, `Access::Nearest`) under filters, projections, a
+sort and a limit, each worker running it whole for its left rows (a
+worker's statement work is not shared out again: `budget::workers` is 1
+on a worker, whose transaction gives the index methods the shared reads
+and the database's instance, `parallel::SharedTxn`): the
 left rows read in blocks (256 at first, each next twice the last, up to
 16 384), a block cut into pieces the workers look up over the shared
 reads, the pieces' rows given in the left rows' order — a single pass's
@@ -2673,7 +2697,10 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   and on a cast (`FitFn`); casts — `cast_from(v)` from another type,
   `cast_to(v, t)` to one (`None`: not this type's cast, the built-in
   rules apply); `aggregate(name)` (its own `sum`, `avg`, … — chosen by
-  the first argument's type before the built-in one); `encoding_version()`; `examples()` (on which registration
+  the first argument's type before the built-in one); `stored_with_row()`
+  (a value read with its row nearly always — `vector`, `sparsevec` —
+  stays in the row however long instead of out of line, §8.1's large
+  values; by default false); `encoding_version()`; `examples()` (on which registration
   checks the laws: a type that breaks one is not registered).  A
   registered type's values are
   `Value::Ext(TypeRef, bytes)` — `Value::ext(t, bytes)`, `v.ext_bytes()`
@@ -3227,7 +3254,11 @@ operator or its function — `l2_distance`, `cosine_distance`,
 `negative_inner_product`, `l1_distance` — either way round), over a
 table with an HNSW index on `col` whose operator class is that
 distance's, `q` the same for every row (a constant, a parameter, an
-enclosing row's value), becomes a scan through `Access::Nearest` (the
+enclosing row's value — a lateral item's left row's, so `FROM items a,
+LATERAL (SELECT … ORDER BY b.v <=> a.v LIMIT k)` searches once per row
+—, or a subquery that does not read the row: `(SELECT v FROM items
+WHERE id = $1)`, "more like this", run once for the statement as
+PostgreSQL's InitPlan; `optimizer::fixed`), becomes a scan through `Access::Nearest` (the
 optimizer's `nearest`, its last pass; `EXPLAIN`: `Index Scan using ix on
 t (k nearest col to q)`) where it costs less than the scan it had: about
 `ef · (3 + 2m / 10)` rows' reads, `ef` the session's `hnsw.ef_search`
@@ -3626,9 +3657,11 @@ and their arrays, `uuid` 2950 (binary: its 16 bytes), `vector` 13201
 (`pg_type` lists it — pgvector's oid is per database, its clients look it
 up with `to_regtype('vector')` — text `[1,2,3]`, binary pgvector's: the
 dimension count and an unused `int16`, then big-endian `float4`s; psycopg
-with pgvector's `register_vector` works both ways); other registered
-types — `sparsevec` among them, text `{1:0.5}/10` as pgvector's (whose
-binary form, and its oid, are not given yet) — as `text`; text and binary formats for all of them (binary numeric
+with pgvector's `register_vector` works both ways), `sparsevec` 13203
+(listed likewise; text `{1:0.5}/10` as pgvector's, binary pgvector's:
+the dimensions, the non-zero count and an unused `int32`, then the
+0-based positions and the `float4` values, big-endian — positions out of
+order are put in order); other registered types as `text`; text and binary formats for all of them (binary numeric
 and dates checked against PostgreSQL's `*_send`).
 
 Not supported: `COPY`, cancellation.  `psql`'s `\d` family works through
@@ -3837,7 +3870,7 @@ smallint, 13 integer, 14 real, 15 bytea, 16 time, 17 `char(n)`, 18 inet,
 | 8 | timestamptz | `i64` µs since 2000-01-01 00:00 UTC |
 | 9 | interval | `i32` months, `i32` days, `i64` µs |
 | 10 | array | `u32` count, then each element as a value |
-| 11 | a registered type (version 2) | string type name, `u32` length, the value's binary (canonical) form — for `uuid` its 16 bytes, for `vector` its components as little-endian `f32`s |
+| 11 | a registered type (version 2) | string type name, `u32` length, the value's binary (canonical) form — for `uuid` its 16 bytes, for `vector` its components as little-endian `f32`s, for `sparsevec` its dimensions and non-zero count, positions and values (§8.1) |
 | 12 | smallint (version 3) | `i16` |
 | 13 | integer (version 3) | `i32` |
 | 14 | real (version 3) | `f32` (IEEE 754 bits) |
@@ -3855,7 +3888,10 @@ the protocol's encoding is its own (`native::wire_value`, `parameter`):
 the storage may store a value differently without the protocol
 changing.  A cidr parameter with host bits set is refused (`22P02`).  A registered type's carries its name instead
 of its id, so drivers need no table of ids.  A tag-11 parameter of a type
-the server does not know is refused (`42704`).  With result format 1 (text) every non-NULL value is
+the server does not know is refused (`42704`); one the type's check refuses is refused with
+the check's SQLSTATE (`22000` for a sparse vector's position past its dimensions), and one
+the check accepts is kept as it reads back — a sparse vector's positions in order, its zeros
+dropped — so equal values have equal bytes.  With result format 1 (text) every non-NULL value is
 sent as text (tag 4), rendered as `ncsql` prints it.  Parameters are
 converted to the type their place needs (a text parameter is parsed, as an
 untyped literal would be).
@@ -3884,9 +3920,9 @@ every nucleus type (`SmallInt(i16)`, `Integer(i32)`, `Int(i64)`,
 dates and timestamps as days and µs since 2000-01-01, `Time` as µs since
 midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
 `Uuid([u8; 16])`, `Vector(Vec<f32>)` (also from `Vec<f32>` and
-`&[f32]`), `Other { type_name, bytes }` for another registered
-type (`sparsevec` among them, its canonical bytes — §8.1; every driver
-gets it so, a type of its own in the drivers is left to do); `char(n)` and enum values as text, their columns typed `Char` and
+`&[f32]`), `SparseVector { dims, indices, values }` (positions from 0,
+ascending; every driver has a type of its own for it), `Other {
+type_name, bytes }` for another registered type; `char(n)` and enum values as text, their columns typed `Char` and
 `Enum(name)`) with `From` conversions for parameters.  Every driver
 speaks protocol version 7 — results read as they arrive, a batch at a
 time (Rust `Client::cursor`, Python `Connection.stream` and a lazy DB-API
@@ -3945,12 +3981,13 @@ Winsock).  `nc_connect(&cfg, &err)`, `nc_query(conn, sql, params, n, &err)`
 accessors (`nc_rows`, `nc_value_at`, `nc_column_type`, `nc_command`,
 `nc_count`), `nc_format` (text as `ncsql` prints it), value constructors
 (`nc_int`, `nc_text`, `nc_numeric`, `nc_date`, `nc_array`, `nc_uuid_value`,
-`nc_vector`, `nc_ext`, `nc_smallint`, `nc_integer`, `nc_real`, `nc_bytea`, `nc_time`,
+`nc_vector`, `nc_sparsevec`, `nc_ext`, `nc_smallint`, `nc_integer`, `nc_real`, `nc_bytea`, `nc_time`,
 `nc_inet`, `nc_cidr`, …), `nc_uuid_parse`, `nc_inet_parse`,
 `nc_result_free`, `nc_close`.  `uuid` is `NC_UUID` (an `nc_uuid` of 16
 bytes), `vector` `NC_VECTOR` (`as.vector`: a `float` pointer and the
-dimensions; in a batch the column's bytes are the floats), another
-registered type `NC_EXT` (name and bytes;
+dimensions; in a batch the column's bytes are the floats), `sparsevec`
+`NC_SPARSEVEC` (`as.sparse`: the dimensions, the positions from 0 and
+the values, their count), another registered type `NC_EXT` (name and bytes;
 `nc_column_type_name`); `NC_SMALLINT` / `NC_INTEGER` in `as.integer`,
 `NC_REAL` in `as.real4`, `NC_BYTEA` a pointer and length, `NC_TIME` µs
 since midnight, `NC_INET` / `NC_CIDR` a family, mask length and address;
@@ -3964,7 +4001,8 @@ since midnight, `NC_INET` / `NC_CIDR` a family, mask length and address;
 `Timestamp`, `TimestampTz`, `Interval`, `Array`, `Uuid`, `Ext`,
 `SmallInt`, `Integer`, `Real`, `Bytes`, `Time`, `Inet`, `Cidr` — the last
 seven wrappers, so an `int` literal stays a bigint parameter —, and
-`Vector`, a `std::vector<float>`).
+`Vector`, a `std::vector<float>`, and `SparseVector` — dimensions,
+positions from 0, values).
 
 **Python:** `drivers/python`, package `nucleus` (pure Python 3.8+).
 `nucleus.connect()`, `conn.execute(sql, params)` → `Result` (`rows`,
@@ -3974,8 +4012,9 @@ statements, `with conn.transaction():`, DB-API cursors; values as `bool`,
 `date`, `time` (24:00:00 as `time.max`), `datetime` (naive / UTC),
 `Interval`, `ipaddress` interfaces (inet) and networks (cidr),
 `uuid.UUID`, `list`, a vector as an `array('f')` (sent from one or from
-a one-dimensional float32 numpy array), `nucleus.Ext` (another registered
-type); errors are `nucleus.Error` subclasses by SQLSTATE class
+a one-dimensional float32 numpy array), `nucleus.SparseVector` (`dims`,
+`indices` from 0, `values`; `SparseVector.of(dict, dims)`), `nucleus.Ext`
+(another registered type); errors are `nucleus.Error` subclasses by SQLSTATE class
 (`IntegrityError` for 23, `ProgrammingError` for 42, …).
 
 **JavaScript / TypeScript:** `drivers/js`, package `nucleus-db` (Node;
@@ -3986,7 +4025,8 @@ and reals as `number` (`bigint` beyond 2^53; a real by its shortest
 digits), `Decimal` (exact, with `parse` / `toString`), `Buffer` (bytea),
 `Date` for dates and timestamps (UTC; millisecond precision when read),
 `Time`, `Interval`, `Inet` / `Cidr`, uuid as its canonical string, a
-vector as a `Float32Array`, `Ext`
+vector as a `Float32Array`, `SparseVector` (`dims`, `indices` from 0,
+`values`; `SparseVector.of(map, dims)`), `Ext`
 (another registered type), arrays, `null`; errors are `NucleusError` with `code`.
 
 **Java:** `drivers/java`, package `io.github.davidsarosi92.nucleus` (Java
@@ -3996,8 +4036,9 @@ vector as a `Float32Array`, `Ext`
 `Short`, `Integer`, `Long`, `Float`, `Double`, `BigDecimal`, `String`,
 `byte[]`, `LocalDate`, `LocalTime`, `LocalDateTime`, `OffsetDateTime`
 (UTC), `Interval`, `Inet` / `Cidr` (over `InetAddress`), `UUID`,
-`float[]` (a vector; a column of them in `load` as `float[][]`), `Ext`
-(another registered type), `List`.
+`float[]` (a vector; a column of them in `load` as `float[][]`),
+`SparseVector` (dimensions, positions from 0, values;
+`SparseVector.of(map, dims)`), `Ext` (another registered type), `List`.
 
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
@@ -4013,6 +4054,33 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-09 — §M14.12 V7, closing vectors:** vectors and sparse
+  vectors stay in their row however long (`Type::stored_with_row`,
+  `large::out_of_line_value`; `crates/sql/tests/large.rs`
+  `vectors_stay_in_their_row`); exact searches held to the workers
+  (`crates/sql/tests/vector.rs` `exact_vector_searches_run_on_the_workers`);
+  `sparsevec` in every driver (Rust `Value::SparseVector`, C
+  `NC_SPARSEVEC` / `nc_sparsevec`, C++ / Python / JavaScript / Java
+  `SparseVector`) and on pg-compat (oid 13203, pgvector's binary form);
+  a registered type's `ncp` parameter kept as its check reads it back
+  (canonical), refused with the check's SQLSTATE; `ext::sparse`
+  (§8.1, §8.12, §9, §10, §11).
+
+- **2026-11-09 — §M14.12 V7 step 1, query vectors from rows:** a
+  subquery that does not read the scanned row is a fixed query vector
+  (`optimizer::fixed`, `expr::row_free`); `LATERAL` (`TableRef::Lateral`,
+  `binder::item_after`, `binder::lateral_join`; functions in `FROM` read
+  the items before them), run as an index nested loop's right side,
+  also on worker threads (`exec::parallel_lookups` takes a sort and a
+  limit above a scan and an index method's search;
+  `parallel::SharedTxn` gives its transaction's shared reads and
+  instance; `budget::workers` is 1 on a worker); `EXPLAIN` `Nested Loop
+  (per row)`; `crates/testkit/slt/55_lateral.slt`;
+  `bench/ann/related.py`; `bench/common.py` and `bench/ann/related.py`
+  reach the server over `::1` with `NUCLEUS_BENCH_HOST` / `--host`, and
+  `ncsql -h [addr]:port` takes an IPv6 address; the bench scripts remove
+  their containers' volumes (§8.3, §8.4, §8.5, §8.18).
 
 - **2026-11-07 — §M14.12, vectors against pgvector; V7 planned:**
   `bench/ann/pgvector_ref.py --quantize half|binary --rescore

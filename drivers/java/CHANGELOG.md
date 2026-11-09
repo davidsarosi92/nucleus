@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Sparse vectors (nucleus PLAN.md §M14.12 V7): a `sparsevec` value is a
+  `SparseVector` (dimensions, 0-based positions and values;
+  `SparseVector.of(map, dims)`), sent and read in rows and batches.
 - Vectors (nucleus PLAN.md §M14.12): a `vector` value is a `float[]`,
   sent and read in rows, batches and `load` (a column of them as
   `float[][]`).

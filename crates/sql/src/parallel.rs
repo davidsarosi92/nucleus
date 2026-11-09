@@ -12,8 +12,11 @@ use crate::access::Who;
 use crate::budget::Budget;
 
 /// A transaction's shared reads as a transaction a worker evaluates with:
-/// reads as the transaction's, writes refused (a worker only reads).
-pub struct SharedTxn<'a>(pub &'a dyn KvRead);
+/// reads as the transaction's, writes refused (a worker only reads); its
+/// database's [`KvTxn::instance`] beside them, for the caches kept by
+/// database (an index method's graphs: a lateral item's searches run on
+/// the workers).
+pub struct SharedTxn<'a>(pub &'a dyn KvRead, pub u64);
 
 fn read_only() -> nucleus_kv::Error {
     nucleus_kv::Error::ReadOnly
@@ -85,6 +88,14 @@ impl KvTxn for SharedTxn<'_> {
     }
 
     fn rollback(self: Box<Self>) {}
+
+    fn shared(&self) -> Option<&dyn KvRead> {
+        Some(self.0)
+    }
+
+    fn instance(&self) -> u64 {
+        self.1
+    }
 }
 
 /// The statement's thread-local state, carried to a worker.
@@ -116,6 +127,7 @@ impl Ambient {
         let mut f = Some(f);
         let mut inner = || {
             let f = f.take().expect("run once");
+            let f = || crate::budget::as_worker(f);
             match &self.budget {
                 Some(b) => crate::budget::with_budget(b.clone(), || {
                     let out = f();

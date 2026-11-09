@@ -352,3 +352,41 @@ fn scans_read_values_out_of_line_in_row_order() {
     s.execute("COMMIT").unwrap();
     consistent(&*kv);
 }
+
+/// Vectors stay in their row however long (PLAN.md §M14.12 V7): a search
+/// reads the rows it finds for their vectors, so one read takes both; a
+/// long text beside them still goes out of line.
+#[test]
+fn vectors_stay_in_their_row() {
+    let (kv, _) = setup();
+    let mut s = Session::new(kv.clone());
+    s.execute(
+        "CREATE TABLE files (id INT PRIMARY KEY, v vector(1536), sv sparsevec(100000), note TEXT)",
+    )
+    .unwrap();
+    // 6 KB of vector, 2,400 non-zero components (19 KB), 3,000 characters.
+    let sparse: Vec<String> = (1..=2400).map(|i| format!("{}:{i}", i * 40)).collect();
+    let sparse = format!("{{{}}}/100000", sparse.join(","));
+    let dense = format!("[{}]", vec!["0.5"; 1536].join(","));
+    s.execute(&format!(
+        "INSERT INTO files VALUES (1, '{dense}', '{sparse}', repeat('n', 3000))"
+    ))
+    .unwrap();
+    assert_eq!(chunk_count(&*kv), 1);
+    let read = |s: &mut Session| {
+        rows(
+            s,
+            "SELECT vector_dims(v), v[1536], l2_norm(sv) > 0, length(note) FROM files WHERE id = 1",
+        )
+    };
+    assert_eq!(read(&mut s), [["1536", "0.5", "t", "3000"]]);
+    // An update of another column, of the vector, a long text made short.
+    s.execute("UPDATE files SET v[1] = 2, note = 'short' WHERE id = 1")
+        .unwrap();
+    assert_eq!(chunk_count(&*kv), 0);
+    assert_eq!(rows(&mut s, "SELECT v[1], v[2] FROM files"), [["2", "0.5"]]);
+    consistent(&*kv);
+    s.execute("DELETE FROM files").unwrap();
+    assert_eq!(chunk_count(&*kv), 0);
+    consistent(&*kv);
+}

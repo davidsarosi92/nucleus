@@ -17,7 +17,7 @@ Types: `Boolean`, `Short` (smallint), `Integer` (integer), `Long`
 24:00:00 as `LocalTime.MAX`), `LocalDateTime` (timestamp), `OffsetDateTime`
 (timestamptz, UTC), `Interval` (and `Duration` as a parameter), `Inet` and
 `Cidr` (an `InetAddress` and a mask length; an `InetAddress` as a
-parameter is a host), `UUID`, `float[]` (vector), `List`, `null`; another registered type is
+parameter is a host), `UUID`, `float[]` (vector), `SparseVector` (sparsevec: dimensions, 0-based positions and values), `List`, `null`; another registered type is
 `Ext` (its name and binary form).  Protocol version 4: the password is
 proved by SCRAM-SHA-256, never sent.  TLS: `new Config().tls(true)`
 (Java's CAs), `.tlsCa(Path.of("ca.pem"))`, `.tlsVerify(false)`

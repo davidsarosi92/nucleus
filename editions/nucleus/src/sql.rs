@@ -769,6 +769,17 @@ impl Target {
         match a {
             "-h" | "--host" => {
                 let h = value("a host")?;
+                // An IPv6 address in brackets, a port after them or not.
+                if let Some(rest) = h.strip_prefix('[')
+                    && let Some((host, after)) = rest.split_once(']')
+                {
+                    self.cfg.host = host.to_string();
+                    if let Some(port) = after.strip_prefix(':') {
+                        self.cfg.port = port.parse().map_err(|_| "bad port".to_string())?;
+                    }
+                    self.remote = true;
+                    return Ok(true);
+                }
                 match h.rsplit_once(':') {
                     Some((host, port)) if port.parse::<u16>().is_ok() && !host.contains(':') => {
                         self.cfg.host = host.to_string();

@@ -35,6 +35,9 @@ import time
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# NUCLEUS_BENCH_HOST=::1 where IPv4 loopback's ports run out (bench/common.py).
+HOST = os.environ.get("NUCLEUS_BENCH_HOST", "127.0.0.1")
+LISTEN = f"[{HOST}]" if ":" in HOST else HOST
 sys.path.insert(0, os.path.join(HERE, "..", "..", "drivers", "python"))
 sys.path.insert(0, HERE)
 
@@ -58,7 +61,7 @@ def du(path):
 def connect(port, ef=None):
     for _ in range(600):
         try:
-            c = nucleus.connect("127.0.0.1", port, password=None)
+            c = nucleus.connect(HOST, port, password=None)
             break
         except (OSError, nucleus.OperationalError):
             time.sleep(0.1)
@@ -168,7 +171,7 @@ def main():
     k = a.k
 
     work = tempfile.mkdtemp(prefix="nucleus-ann-sql-")
-    args = [a.binary, "server", os.path.join(work, "db"), "--listen", f"127.0.0.1:{a.port}", "--no-auth"]
+    args = [a.binary, "server", os.path.join(work, "db"), "--listen", f"{LISTEN}:{a.port}", "--no-auth"]
     if a.cache:
         args += ["--cache", a.cache]
     server = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

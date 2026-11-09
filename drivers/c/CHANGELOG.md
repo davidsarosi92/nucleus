@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Sparse vectors (nucleus PLAN.md §M14.12 V7): `NC_SPARSEVEC` values
+  (`as.sparse`: dimensions, 0-based positions and values, their count),
+  `nc_sparsevec(dims, indices, values, nnz)`.
 - Vectors (nucleus PLAN.md §M14.12): `NC_VECTOR` values (`as.vector`: a
   `float` pointer and the dimensions), `nc_vector(components, dims)`; a
   batch's vector column is its floats with offsets.

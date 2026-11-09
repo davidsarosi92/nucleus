@@ -63,6 +63,11 @@ fn the_common_codes_have_hints() {
         ),
         ("SELECT * FROM elsewhere", "42P01", "The tables: customers"),
         (
+            "SELECT * FROM customers c, (SELECT region FROM customers d WHERE d.id = c.id) x",
+            "42P01",
+            "mark this subquery with LATERAL",
+        ),
+        (
             "SELECT * FROM nc_catalog.tabels",
             "42P01",
             "\"nc_catalog.tables\"",

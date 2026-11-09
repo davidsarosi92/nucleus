@@ -139,6 +139,32 @@ public final class NucleusTest {
         }
     }
 
+    static void sparseVector() {
+        try (NucleusClient db = NucleusClient.connect(config())) {
+            String t = table();
+            db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, v sparsevec(100000))");
+            SparseVector a = SparseVector.of(Map.of(0, 1f, 99999, 2f), 100000);
+            List<Object[]> rows = List.of(
+                    new Object[] {1, a},
+                    new Object[] {2, new SparseVector(100000, new int[] {5}, new float[] {-3.5f})},
+                    new Object[] {3, null});
+            equal(db.executeMany("INSERT INTO " + t + " VALUES ($1, $2)", rows), 3L, "sparse vectors inserted");
+            Result r = db.query("SELECT id, v FROM " + t + " WHERE v IS NOT NULL ORDER BY v <-> $1 LIMIT 1",
+                    new SparseVector(100000, new int[] {0, 99999}, new float[] {1, 2.5f}));
+            equal(r.columns().get(1).type(), "sparsevec", "sparsevec column type");
+            equal(r.rows().get(0).get(0), 1, "the nearest");
+            equal(r.rows().get(0).get(1), a, "a sparse vector read");
+            equal(r.rows().get(0).get(1).toString(), "{1:1,100000:2}/100000", "its text");
+            try (NucleusClient.Batches bs = db.batches("SELECT v FROM " + t + " ORDER BY id")) {
+                NucleusClient.Batch b = bs.next();
+                equal(b.column("v").get(1), new SparseVector(100000, new int[] {5}, new float[] {-3.5f}), "a sparse vector in a batch");
+                check(b.column("v").isNull(2), "a NULL sparse vector");
+            }
+            equal(errorCode(() -> db.query("INSERT INTO " + t + " VALUES (7, $1)",
+                    new SparseVector(3, new int[] {3}, new float[] {1}))), "22000", "a position past the dimensions");
+        }
+    }
+
     static void coreTypes() {
         try (NucleusClient db = NucleusClient.connect(config())) {
             String t = table();
@@ -397,6 +423,7 @@ public final class NucleusTest {
         run("types both ways", NucleusTest::typesBothWays);
         run("uuid", NucleusTest::uuid);
         run("vector", NucleusTest::vector);
+        run("sparsevec", NucleusTest::sparseVector);
         run("core types", NucleusTest::coreTypes);
         run("errors", NucleusTest::errors);
         run("transactions", NucleusTest::transactions);
@@ -408,7 +435,7 @@ public final class NucleusTest {
         run("columnar", NucleusTest::columnar);
         run("copy and load", NucleusTest::copyAndLoad);
         run("pipelines", NucleusTest::pipelines);
-        check(passed == 14, "all tests ran");
+        check(passed == 15, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

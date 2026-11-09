@@ -144,7 +144,8 @@ pub(crate) fn place(
                     algo,
                 };
             }
-            if reads.iter().all(|&c| c >= ll) && fewer(&other) {
+            // (Not into a lateral item, which runs a level below.)
+            if reads.iter().all(|&c| c >= ll) && algo != JoinAlgo::Lookup && fewer(&other) {
                 let rw = other.width();
                 let on =
                     on.map_columns(&|c| Expr::Column(if c >= lw { c - lw + rw } else { c - ll }));

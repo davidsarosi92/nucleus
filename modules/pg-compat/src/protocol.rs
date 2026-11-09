@@ -96,6 +96,9 @@ fn type_of_oid(o: i32) -> Option<DataType> {
     Some(match o {
         2950 => DataType::Ext(TypeRef::named("uuid")?),
         o if i64::from(o) == crate::catalog::VECTOR => DataType::Ext(TypeRef::named("vector")?),
+        o if i64::from(o) == crate::catalog::SPARSEVEC => {
+            DataType::Ext(TypeRef::named("sparsevec")?)
+        }
         BOOL => DataType::Bool,
         INT2 => DataType::SmallInt,
         INT4 => DataType::Integer,
@@ -708,6 +711,25 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
             }
             out
         }
+        // pgvector's binary sparsevec: the dimension count, the non-zero
+        // count, an unused int32, the 0-based positions, then the values —
+        // all big-endian.
+        (Value::Ext(t, _), _) if t.name() == "sparsevec" => {
+            let Ok(s) = nucleus_sql::ext::sparse::Sparse::of(v) else {
+                return Vec::new();
+            };
+            let mut out = Vec::with_capacity(12 + 8 * s.at.len());
+            out.extend_from_slice(&s.dims.to_be_bytes());
+            out.extend_from_slice(&(s.at.len() as u32).to_be_bytes());
+            out.extend_from_slice(&[0; 4]);
+            for a in &s.at {
+                out.extend_from_slice(&a.to_be_bytes());
+            }
+            for x in &s.values {
+                out.extend_from_slice(&x.to_be_bytes());
+            }
+            out
+        }
         (Value::Bool(b), _) => vec![u8::from(*b)],
         // PostgreSQL's binary bytea is its bytes.
         (Value::Bytea(b), _) => b.to_vec(),
@@ -848,6 +870,25 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                 }
                 let cs: Vec<f32> = cs.iter().map(|c| f32::from_be_bytes(*c)).collect();
                 nucleus_sql::ext::vectors::checked(&cs)?
+            }
+            (Some(DataType::Ext(t)), _) if t.name() == "sparsevec" => {
+                let word = |i: usize| -> Result<u32, Error> {
+                    Ok(u32::from_be_bytes(
+                        bytes
+                            .get(4 * i..4 * i + 4)
+                            .ok_or_else(|| bad("sparsevec"))?
+                            .try_into()
+                            .unwrap(),
+                    ))
+                };
+                let (dims, n) = (word(0)?, word(1)? as usize);
+                if bytes.len() != 12 + 8 * n {
+                    return Err(bad("sparsevec"));
+                }
+                let pairs = (0..n)
+                    .map(|i| Ok((u64::from(word(3 + i)?), f32::from_bits(word(3 + n + i)?))))
+                    .collect::<Result<Vec<_>, Error>>()?;
+                nucleus_sql::ext::sparse::Sparse::checked(u64::from(dims), pairs)?.value()
             }
             (Some(DataType::Array(elem)), _) => {
                 let int = |at: usize| -> Result<i32, Error> {
@@ -1511,6 +1552,48 @@ mod tests {
             "000100007fc00000",
             "00000000",
             "0002",
+        ] {
+            let bytes: Vec<u8> = (0..bad.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&bad[i..i + 2], 16).unwrap())
+                .collect();
+            assert!(decode_param(&bytes, 1, ty).is_err(), "{bad}");
+        }
+    }
+
+    /// pgvector's binary sparsevec (its `sparsevec_send` /
+    /// `sparsevec_recv`): dimensions, non-zero count, an unused int32,
+    /// the 0-based positions, the values — big-endian.
+    #[test]
+    fn sparsevec_binary_matches_pgvector() {
+        let _ = nucleus_sql::ext::Registry::builtin();
+        let v = nucleus_sql::ext::sparse::Sparse::checked(5, vec![(0, 1.0), (2, -2.5)])
+            .unwrap()
+            .value();
+        let ty = type_of_oid(crate::catalog::SPARSEVEC as i32);
+        assert_eq!(ty, Some(nucleus_sql::ext::sparse::data_type()));
+        let b = binary_value(&v, ty.unwrap());
+        assert_eq!(
+            hex(&b),
+            "00000005000000020000000000000000000000023f800000c0200000"
+        );
+        assert_eq!(decode_param(&b, 1, ty).unwrap(), v);
+        // Positions out of order are put in order, as the text form does.
+        let swapped = "0000000500000002000000000000000200000000c02000003f800000";
+        let bytes: Vec<u8> = (0..swapped.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&swapped[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(decode_param(&bytes, 1, ty).unwrap(), v);
+        // A count the bytes disagree with, a position past the dimensions,
+        // a repeated one, a NaN, no dimensions, too short.
+        for bad in [
+            "00000005000000030000000000000000000000023f800000c0200000",
+            "00000005000000020000000000000000000000053f800000c0200000",
+            "00000005000000020000000000000002000000023f800000c0200000",
+            "000000050000000100000000000000007fc00000",
+            "000000000000000000000000",
+            "00000005",
         ] {
             let bytes: Vec<u8> = (0..bad.len())
                 .step_by(2)

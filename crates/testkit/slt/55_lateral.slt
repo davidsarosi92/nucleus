@@ -1,0 +1,106 @@
+# LATERAL (PLAN.md §M14.12 V7): a subquery or a function in FROM that
+# reads the items before it, run for each of their rows; functions are
+# lateral without the keyword.  Expected results produced by PostgreSQL 18.
+
+statement ok
+CREATE TABLE owners (id INT PRIMARY KEY, name TEXT, quota INT)
+
+statement ok
+CREATE TABLE pets (id INT PRIMARY KEY, owner INT, name TEXT, age INT)
+
+statement ok
+INSERT INTO owners VALUES (1, 'ann', 2), (2, 'bob', 1), (3, 'cy', 3), (4, 'dee', 0)
+
+statement ok
+INSERT INTO pets VALUES (10, 1, 'rex', 7), (11, 1, 'tom', 3), (12, 1, 'kit', 5), (13, 2, 'bo', 2), (14, 2, 'max', 9), (15, 3, 'ozzy', 1)
+
+# Each owner's two oldest pets: a top-k per row.
+query TT
+SELECT o.name, p.name FROM owners o, LATERAL (SELECT name FROM pets WHERE owner = o.id ORDER BY age DESC LIMIT 2) p ORDER BY o.name, p.name
+----
+ann kit
+ann rex
+bob bo
+bob max
+cy ozzy
+
+# The limit from the left row too.
+query TT
+SELECT o.name, p.name FROM owners o CROSS JOIN LATERAL (SELECT name FROM pets WHERE owner = o.id ORDER BY age DESC LIMIT o.quota) p ORDER BY o.name, p.name
+----
+ann kit
+ann rex
+bob max
+cy ozzy
+
+# LEFT JOIN LATERAL keeps the rows with none.
+query TTI
+SELECT o.name, p.name, p.n FROM owners o LEFT JOIN LATERAL (SELECT name, count(*) OVER () AS n FROM pets WHERE owner = o.id AND age > 4) p ON true ORDER BY o.name, p.name
+----
+ann kit 2
+ann rex 2
+bob max 1
+cy NULL NULL
+dee NULL NULL
+
+# An aggregate per row; a condition on the join.
+query TI
+SELECT o.name, s.total FROM owners o JOIN LATERAL (SELECT sum(age) AS total FROM pets WHERE owner = o.id) s ON s.total > 5 ORDER BY o.name
+----
+ann 15
+bob 11
+
+# Functions read the items before them, with LATERAL or without.
+query II
+SELECT o.id, g FROM owners o, generate_series(1, o.quota) g ORDER BY o.id, g
+----
+1 1
+1 2
+2 1
+3 1
+3 2
+3 3
+
+query II
+SELECT o.id, g FROM owners o, LATERAL generate_series(o.quota, 1, -1) g WHERE o.id < 3 ORDER BY o.id, g
+----
+1 1
+1 2
+2 1
+
+# A chain: each lateral item reads those before it.
+query TTI
+SELECT o.name, p.name, a.x FROM owners o, LATERAL (SELECT name, age FROM pets WHERE owner = o.id ORDER BY age LIMIT 1) p, LATERAL (SELECT p.age * o.quota AS x) a ORDER BY o.name
+----
+ann tom 6
+bob bo 2
+cy ozzy 3
+
+# Inside a correlated subquery: the enclosing row a level further.
+query TI
+SELECT o.name, (SELECT count(*) FROM pets p, LATERAL (SELECT 1 FROM pets q WHERE q.owner = o.id AND q.age < p.age) x WHERE p.owner = o.id) FROM owners o ORDER BY o.name
+----
+ann 3
+bob 1
+cy 0
+dee 0
+
+# Without a reference it is an item like any other.
+query I
+SELECT count(*) FROM owners o, LATERAL (SELECT id FROM pets) p
+----
+24
+
+# A lateral item cannot be the side a join keeps whole.
+statement error 42P10
+SELECT * FROM owners o RIGHT JOIN LATERAL (SELECT * FROM pets WHERE owner = o.id) p ON true
+
+statement error 42P10
+SELECT * FROM owners o FULL JOIN LATERAL (SELECT * FROM pets WHERE owner = o.id) p ON true
+
+# Not lateral: a subquery does not see the items before it.
+statement error 42P01
+SELECT * FROM owners o, (SELECT * FROM pets WHERE owner = o.id) p
+
+statement error 42601
+SELECT * FROM owners o, LATERAL pets

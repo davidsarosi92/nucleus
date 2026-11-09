@@ -48,7 +48,7 @@ tables 0.66×), on ClickBench (a million rows) 0.10× (row 0.82×), loads
 faster than PostgreSQL's, every result the same.  Vectors have begun (§M14.12): `vector(n)` with pgvector's
 operators, exact nearest-neighbour search through SIMD kernels whose
 results are the same on every CPU — the ten nearest of 100,000
-768-dimension vectors in 48 ms, faster than numpy's brute force and 3.5×
+768-dimension vectors in 36 ms, faster than numpy's brute force and 4.6×
 pgvector's exact search (`docs/benchmarks.md`) —, a native float
 array in every driver (in Python an `(n, d)` numpy array or Arrow
 `fixed_size_list`), pgvector's own clients over the PostgreSQL
@@ -71,7 +71,11 @@ pgvector's 2.4), and quantized graphs keep `int8`, half or one-bit codes
 searched faster at the same recall; on OpenAI's 1536-dimensional
 embeddings built in 11.8 s against pgvector's 137 and searched in 0.63
 ms against its 1.57 at recall 0.95), and sparse vectors (`sparsevec`,
-pgvector's) are searched exactly (`docs/benchmarks.md`); a hash join whose right side turns out
+pgvector's, a type of its own in every driver) are searched exactly; the
+query vector may be a row's (`ORDER BY v <=> (SELECT v FROM t WHERE id =
+$1)`, "more like this", 1.1 ms against pgvector's 1.5) and `LATERAL`
+searches per row on the workers (1,000 rows' ten nearest in 154 ms
+against pgvector's 1,442; `docs/benchmarks.md`); a hash join whose right side turns out
 smaller than estimated looks its left side up instead (an adaptive
 join).  Statistics have begun (§M14.27): sums of doubles kept exactly
 and rounded once, so a parallel `sum` gives the same bits every run, and
@@ -90,10 +94,7 @@ stable train/test splits; `reservoir_sample`), and tests for drift
 named as scipy names them (`ks_test`, `auc`, `psi`, `js_divergence`,
 `chisq_test`), and `SUMMARIZE t` — every column's range, distinct
 count, mean, quartiles and NULLs in one scan (also an MCP tool).
-Next is closing vectors (§M14.12 V7: a query vector taken from a
-subquery — "more like this row" — through the index, a row's large
-vectors read with it, exact searches in parallel, `sparsevec` in every
-driver), then full-text and hybrid search (§M14.21) and the rest of the
+Next is full-text and hybrid search (§M14.21) and the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then

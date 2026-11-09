@@ -66,7 +66,8 @@ typedef enum nc_type {
     NC_CIDR = 19,     /* as.net */
     NC_ENUM = 20,     /* a column only: an enum (nc_column_type_name); its values are NC_TEXT */
     NC_UUID = 100,  /* uuid (on the wire, NC_EXT named "uuid") */
-    NC_VECTOR = 101 /* vector: float components (on the wire, NC_EXT named "vector") */
+    NC_VECTOR = 101, /* vector: float components (on the wire, NC_EXT named "vector") */
+    NC_SPARSEVEC = 102 /* sparsevec: dimensions, non-zero components (on the wire, NC_EXT named "sparsevec") */
 } nc_type;
 
 /* A uuid: its 16 bytes. */
@@ -95,6 +96,9 @@ struct nc_value {
         struct { const nc_value *items; size_t len; } array;
         nc_uuid uuid;
         struct { const float *ptr; size_t len; } vector; /* len components */
+        /* dims dimensions; nnz non-zero components, positions from 0
+         * ascending (the text form counts from 1: {1:0.5,4:2}/10) */
+        struct { uint32_t dims; const uint32_t *indices; const float *values; size_t nnz; } sparse;
         struct { const char *type_name; const uint8_t *data; size_t len; } ext;
     } as;
 };
@@ -250,7 +254,7 @@ const char *nc_column_name(const nc_result *r, size_t col);
 nc_type nc_column_type(const nc_result *r, size_t col);
 nc_type nc_column_element(const nc_result *r, size_t col); /* for NC_ARRAY columns */
 /* A registered type's or an enum's name ("uuid", "vector", …) for NC_UUID,
- * NC_VECTOR, NC_EXT and NC_ENUM columns, else NULL. */
+ * NC_VECTOR, NC_SPARSEVEC, NC_EXT and NC_ENUM columns, else NULL. */
 const char *nc_column_type_name(const nc_result *r, size_t col);
 size_t nc_rows(const nc_result *r);
 const nc_value *nc_value_at(const nc_result *r, size_t row, size_t col);
@@ -284,6 +288,9 @@ nc_value nc_array(const nc_value *items, size_t len);
 nc_value nc_uuid_value(nc_uuid u);
 /* A vector of dims components (they must outlive the query). */
 nc_value nc_vector(const float *components, size_t dims);
+/* A sparse vector of dims dimensions: nnz non-zero components at indices
+ * (from 0, ascending) with values (both must outlive the query). */
+nc_value nc_sparsevec(uint32_t dims, const uint32_t *indices, const float *values, size_t nnz);
 /* A registered type's value from its name and binary form (both must
  * outlive the query). */
 nc_value nc_ext(const char *type_name, const uint8_t *data, size_t len);

@@ -663,6 +663,75 @@ fn hnsw_serves_order_by_distance_limit() {
         assert_eq!(r[0], r[1]);
     }
 
+    // The query vector from a subquery ("more like this row", PLAN.md
+    // §M14.12 V7): one run for the statement, searched; the row itself is
+    // the nearest.
+    let sql = "SELECT id FROM items ORDER BY v <-> (SELECT v FROM items WHERE id = 42) LIMIT 5";
+    assert!(
+        plan(&mut s, sql).contains("5 nearest v to"),
+        "{}",
+        plan(&mut s, sql)
+    );
+    assert_eq!(rows(&mut s, sql)[0][0], "42");
+    let like = |s: &mut Session, sql: &str| {
+        let mut r = rows(s, sql);
+        r.sort();
+        r
+    };
+    let exact =
+        "SELECT id FROM items ORDER BY (v <-> (SELECT v FROM items WHERE id = 42)) + 0 LIMIT 5";
+    assert_eq!(like(&mut s, sql), like(&mut s, exact));
+    // No row: no vector, every row read (NULL distances, by id).
+    let none =
+        "SELECT id FROM items ORDER BY v <-> (SELECT v FROM items WHERE id = -1), id LIMIT 2";
+    assert_eq!(rows(&mut s, none), [["0"], ["1"]]);
+    // A subquery that reads the scan's own row is not one query: read and
+    // sorted.
+    let sql =
+        "SELECT id FROM items i ORDER BY v <-> (SELECT b.v FROM items b WHERE b.id = i.id) LIMIT 5";
+    assert!(!searched(&mut s, sql), "{}", plan(&mut s, sql));
+
+    // LATERAL: each row's nearest through the index, a search per row.
+    let sql = "SELECT a.id, n.id FROM items a, LATERAL (SELECT b.id FROM items b \
+               WHERE b.id <> a.id ORDER BY b.v <-> a.v LIMIT 3) n WHERE a.id < 20 ORDER BY a.id";
+    let p = plan(&mut s, sql);
+    assert!(
+        p.contains("Nested Loop (per row)") && p.contains("3 nearest v to"),
+        "{p}"
+    );
+    let found = rows(&mut s, sql);
+    assert_eq!(found.len(), 60);
+    let exact = rows(
+        &mut s,
+        "SELECT a.id, n.id FROM items a, LATERAL (SELECT b.id FROM items b \
+         WHERE b.id <> a.id ORDER BY (b.v <-> a.v) + 0 LIMIT 3) n WHERE a.id < 20 ORDER BY a.id",
+    );
+    let hits = found.iter().filter(|r| exact.contains(r)).count();
+    assert!(hits >= 54, "{hits} of 60");
+    // On worker threads, the same searches: the same rows.
+    s.execute("SET parallel_workers = 4").unwrap();
+    s.execute("SET batch_size = 64").unwrap();
+    let before = nucleus_sql::vector::parallel_runs();
+    assert_eq!(rows(&mut s, sql), found);
+    assert!(nucleus_sql::vector::parallel_runs() > before);
+    s.execute("RESET parallel_workers").unwrap();
+    s.execute("RESET batch_size").unwrap();
+    // LEFT JOIN LATERAL: a row without a vector is ranked by nothing (its
+    // distances NULL), one with no other row keeps its row.
+    s.execute("CREATE TABLE line (id INT PRIMARY KEY, v vector(1))")
+        .unwrap();
+    s.execute("CREATE INDEX line_v ON line USING hnsw (v)")
+        .unwrap();
+    s.execute("INSERT INTO line VALUES (1, '[0]'), (2, '[1]'), (3, NULL), (4, '[3]')")
+        .unwrap();
+    let sql = "SELECT a.id, n.id FROM line a LEFT JOIN LATERAL (SELECT b.id FROM line b \
+               WHERE b.id <> a.id AND a.id < 4 ORDER BY b.v <-> a.v, b.id LIMIT 1) n ON true \
+               ORDER BY a.id";
+    assert_eq!(
+        rows(&mut s, sql),
+        [["1", "2"], ["2", "1"], ["3", "1"], ["4", "NULL"]]
+    );
+
     // Writes: a deleted row is not found, a changed one where it is now.
     s.execute(&format!("UPDATE items SET v = '{q}' WHERE id = 77"))
         .unwrap();

@@ -167,18 +167,31 @@ struct Ext {
     bool operator==(const Ext& o) const { return type_name == o.type_name && data == o.data; }
 };
 
+/// A `sparsevec`: its dimensions and its non-zero components — positions
+/// from 0, ascending, each with its value (the text form counts from 1:
+/// `{1:0.5,4:2}/10`).
+struct SparseVector {
+    uint32_t dims = 0;
+    std::vector<uint32_t> indices;
+    std::vector<float> values;
+    bool operator==(const SparseVector& o) const {
+        return dims == o.dims && indices == o.indices && values == o.values;
+    }
+};
+
 struct Value;
 using Array = std::vector<Value>;
 /// A `vector`: its components.
 using Vector = std::vector<float>;
 using Variant = std::variant<std::monostate, bool, int64_t, double, std::string, Numeric, Date, Timestamp,
                              TimestampTz, Interval, Array, Uuid, Ext, SmallInt, Integer, Real, Bytes, Time,
-                             Inet, Cidr, Vector>;
+                             Inet, Cidr, Vector, SparseVector>;
 
 /// A value: NULL (monostate), bool, int64 (bigint), double, text (also
 /// char(n) and enums), numeric, date, timestamp, timestamptz, interval, an
 /// array, a uuid, another registered type's value, smallint, integer,
-/// real, bytea, time, inet, cidr, a vector (std::vector<float>).
+/// real, bytea, time, inet, cidr, a vector (std::vector<float>), a sparse
+/// vector (SparseVector).
 struct Value : Variant {
     using Variant::Variant;
     Value() = default;
@@ -267,6 +280,10 @@ inline Value from_c(const nc_value& v) {
         return Value(u);
     }
     case NC_VECTOR: return Value(Vector(v.as.vector.ptr, v.as.vector.ptr + v.as.vector.len));
+    case NC_SPARSEVEC:
+        return Value(SparseVector{v.as.sparse.dims,
+                                  std::vector<uint32_t>(v.as.sparse.indices, v.as.sparse.indices + v.as.sparse.nnz),
+                                  std::vector<float>(v.as.sparse.values, v.as.sparse.values + v.as.sparse.nnz)});
     case NC_EXT:
         return Value(Ext{v.as.ext.type_name, std::vector<uint8_t>(v.as.ext.data, v.as.ext.data + v.as.ext.len)});
     default: return Value();
@@ -304,6 +321,11 @@ inline nc_value to_c(const Value& v, std::deque<std::vector<nc_value>>& store) {
             return nc_uuid_value(c);
         }
         nc_value operator()(const Vector& f) const { return nc_vector(f.data(), f.size()); }
+        nc_value operator()(const SparseVector& s) const {
+            if (s.indices.size() != s.values.size())
+                throw Error("a sparse vector's indices and values differ in number", "22000");
+            return nc_sparsevec(s.dims, s.indices.data(), s.values.data(), s.indices.size());
+        }
         nc_value operator()(const Ext& e) const { return nc_ext(e.type_name.c_str(), e.data.data(), e.data.size()); }
         nc_value operator()(const SmallInt& i) const { return nc_smallint(i.value); }
         nc_value operator()(const Integer& i) const { return nc_integer(i.value); }

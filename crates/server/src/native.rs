@@ -703,12 +703,15 @@ fn from_wire(v: WireValue) -> Result<Value, Error> {
                 message: format!("type \"{type_name}\" does not exist"),
                 hint: None,
             })?;
-            // The binary form is the canonical one; checked, as any input is.
+            // Checked as any input is, through the type's text form, and
+            // kept as that reads back: the canonical bytes (a sparsevec's
+            // positions in order, its zeros dropped).
             let v = Value::ext(t, bytes);
-            t.imp()
-                .input(&t.imp().output(&v))
-                .map_err(|_| protocol("malformed parameter"))?;
-            v
+            t.imp().input(&t.imp().output(&v)).map_err(|e| Error {
+                code: e.code,
+                message: format!("malformed parameter: {}", e.message),
+                hint: None,
+            })?
         }
     })
 }

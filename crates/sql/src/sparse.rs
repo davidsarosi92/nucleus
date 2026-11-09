@@ -121,6 +121,10 @@ impl Sparse {
             _ => return Err(Error::internal("not a sparsevec")),
         };
         let word = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        // Bytes from outside (a driver's parameter) are measured first.
+        if b.len() < 8 || b.len() != 8 + 8 * word(4) as usize {
+            return Err(Error::data_exception("malformed sparsevec"));
+        }
         let (dims, n) = (word(0), word(4) as usize);
         Ok(Sparse {
             dims,
@@ -321,6 +325,11 @@ impl Type for SparseType {
     }
     fn category(&self) -> &str {
         "vector"
+    }
+    // A search reads the rows it finds for their vectors (PLAN.md §M14.12
+    // V7): in the row, one read.
+    fn stored_with_row(&self) -> bool {
+        true
     }
     fn input(&self, text: &str) -> Result<Value> {
         Ok(parse(text)?.value())

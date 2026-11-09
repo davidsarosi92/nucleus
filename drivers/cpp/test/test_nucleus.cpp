@@ -118,6 +118,22 @@ int main() {
         CHECK(error_code(db, "INSERT INTO " + t + " VALUES (9, '[1,2]')") == "22000");
     }
     {
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, v sparsevec(100000))");
+        auto ins = "INSERT INTO " + t + " VALUES ($1, $2)";
+        SparseVector a{100000, {0, 99999}, {1, 2}};
+        db.query(ins, {1, a});
+        db.query(ins, {2, SparseVector{100000, {5}, {-3.5f}}});
+        auto r = db.query("SELECT id, v FROM " + t + " ORDER BY v <-> $1 LIMIT 1",
+                          {SparseVector{100000, {0, 99999}, {1, 2.5f}}});
+        CHECK(r.columns[1].type == NC_SPARSEVEC && r.columns[1].type_name == "sparsevec");
+        CHECK(r.rows[0][0].as<Integer>().value == 1);
+        CHECK(r.rows[0][1] == Value(a));
+        CHECK(r.rows[0][1].str() == "{1:1,100000:2}/100000");
+        CHECK(error_code(db, "INSERT INTO " + t + " VALUES (9, '{4:1}/3')") == "22000");
+    }
+    {
         // §M14.26's types, natively (protocol version 3).
         Connection db(config());
         auto t = table();

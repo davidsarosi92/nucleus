@@ -70,6 +70,28 @@ class Conformance(unittest.TestCase):
             self.assertEqual(r.rows[0][2].version, 4)
             self.assertEqual(c.execute(f"SELECT n FROM {t} WHERE id = $1", [str(u).upper()]).rows, [(1,)])
 
+    def test_sparse_vector(self):
+        t = table()
+        sv = nucleus.SparseVector
+        with connect() as c:
+            c.execute(f"CREATE TABLE {t} (id INT PRIMARY KEY, v sparsevec(100000))")
+            a = sv.of({0: 1, 99999: 2}, 100000)
+            c.execute_many(f"INSERT INTO {t} VALUES ($1, $2)", [
+                (1, a), (2, sv.of({5: -3.5}, 100000)), (3, sv.of({}, 100000))])
+            r = c.execute(f"SELECT id, v, v <-> $1 FROM {t} ORDER BY v <-> $1 LIMIT 2",
+                          [sv.of({99999: 2.5, 0: 1}, 100000)])
+            self.assertEqual(r.columns[1].type, "sparsevec")
+            self.assertEqual([row[0] for row in r.rows], [1, 3])
+            self.assertEqual(r.rows[0][1], a)
+            self.assertEqual(r.rows[0][2], 0.5)
+            self.assertEqual(str(r.rows[0][1]), "{1:1,100000:2}/100000")
+            self.assertEqual(r.rows[0][1].to_dict(), {0: 1.0, 99999: 2.0})
+            batch = next(iter(c.batches(f"SELECT v FROM {t} ORDER BY id")))
+            self.assertEqual(batch.column(0).to_list()[1], sv(100000, (5,), (-3.5,)))
+            # A position past the dimensions: the server's check refuses it.
+            with self.assertRaises(nucleus.DataError):
+                c.execute(f"INSERT INTO {t} VALUES (4, $1)", [sv(3, (3,), (1.0,))])
+
     def test_vector(self):
         import array
         t = table()

@@ -14,6 +14,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "drivers", "python"))
 
 
+# The servers' address: NUCLEUS_BENCH_HOST=::1 where IPv4 loopback's
+# ports run out (macOS past ~49 days up keeps closed connections).
+HOST = os.environ.get("NUCLEUS_BENCH_HOST", "127.0.0.1")
+
+
+def address(port):
+    return f"[{HOST}]:{port}" if ":" in HOST else f"{HOST}:{port}"
+
+
 def one_line(sql):
     return " ".join(sql.split())
 
@@ -61,14 +70,16 @@ class Nucleus:
     def __init__(self, binary, name, work):
         self.name = name
         self.db = os.path.join(work, f"db-{name.replace(' ', '-')}")
-        self.server = subprocess.Popen([binary, "server", self.db, "--listen", "127.0.0.1:0", "--no-auth"],
+        self.server = subprocess.Popen([binary, "server", self.db, "--listen", address(0), "--no-auth"],
                                        stderr=subprocess.PIPE, text=True)
         line = self.server.stderr.readline()
-        m = re.search(r"127\.0\.0\.1:(\d+)", line)
+        m = re.search(re.escape(address("")) + r"(\d+)", line)
         if not m:
             raise RuntimeError(f"nucleus server did not start: {line}")
         self.port = int(m.group(1))
-        self.client = [binary, "sql", "-h", f"127.0.0.1:{self.port}"]
+        # (`localhost` for IPv6: its addresses are tried in turn, and
+        # builds before 2026-11-09 do not take `-h [::1]:port`.)
+        self.client = [binary, "sql", "-h", f"localhost:{self.port}" if ":" in HOST else address(self.port)]
 
     def script(self, lines, timeout=None):
         return run(self.client, "\\timing\n" + "".join(one_line(s) + ";\n" for s in lines), timeout=timeout)
@@ -78,7 +89,7 @@ class Nucleus:
 
     def results(self, sql):
         import nucleus
-        with nucleus.connect(port=self.port, user="nucleus", password="nucleus") as c:
+        with nucleus.connect(HOST, self.port, user="nucleus", password="nucleus") as c:
             return [[normalize(v) for v in r] for r in c.query(sql, text=True)[0].rows]
 
     def close(self):

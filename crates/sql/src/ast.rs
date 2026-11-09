@@ -806,6 +806,10 @@ pub enum TableRef {
         /// Column aliases.
         columns: Vec<String>,
     },
+    /// `LATERAL` before a subquery or a function: it may read the `FROM`
+    /// items before it (a join's left side), and runs for each of their
+    /// rows.
+    Lateral(Box<TableRef>),
     /// A join.
     Join {
         /// Left side.

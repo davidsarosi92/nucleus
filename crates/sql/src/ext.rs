@@ -89,6 +89,13 @@ pub mod vectors {
     pub use crate::vectors::{MAX_DIMS, checked, components, data_type, dims, value};
 }
 
+/// The `sparsevec` type as modules see it ([`crate::sparse`]): its values
+/// from and to dimensions and non-zero components, checked as the type
+/// checks them.
+pub mod sparse {
+    pub use crate::sparse::{Sparse, data_type};
+}
+
 /// Who the current statement runs as ([`crate::access`]).
 pub use crate::access::{Context, Who, current as current_who};
 /// Records a login refused before a session could be had ([`crate::audit`]).
@@ -1050,6 +1057,16 @@ pub trait Type: std::any::Any + Send + Sync {
     fn aggregate(&self, name: &str) -> Option<Arc<dyn Aggregate>> {
         let _ = name;
         None
+    }
+
+    /// Whether its values stay in their row however long they are — read
+    /// with it, by the KV's own overflow pages — rather than out of line
+    /// past [`crate::large::THRESHOLD`] (PLAN.md §M14.26): for a type whose
+    /// values are read whole with their row nearly always (a vector's: a
+    /// search reads the rows it finds for their distance).  An update of
+    /// another column rewrites them with the row.
+    fn stored_with_row(&self) -> bool {
+        false
     }
 
     /// The version of its stored form (rows record it per value).

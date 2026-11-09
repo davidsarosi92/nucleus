@@ -46,7 +46,10 @@ def psql(sql, env=None):
     for k, v in (env or {}).items():
         cmd += ["-e", f"{k}={v}"]
     cmd += [NAME, "psql", "-q", "-At", "-U", "postgres", "-v", "ON_ERROR_STOP=1"]
-    return subprocess.run(cmd, input=sql, check=True, capture_output=True, text=True).stdout
+    r = subprocess.run(cmd, input=sql, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"psql failed ({r.returncode}): {r.stderr.strip()}")
+    return r.stdout
 
 
 def pgbench(script, *args, ef=None):
@@ -175,7 +178,7 @@ def main():
                 "INSERT INTO t SELECT s.id, s.v FROM n JOIN s ON s.id = n.id;\n")
     os.chmod(work, 0o755)
 
-    subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
     sh("docker", "run", "-d", "--name", NAME, "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
        "--shm-size=6g", "-v", f"{work}:/data", IMAGE,
        "-c", f"shared_buffers={a.shared_buffers}", "-c", "maintenance_work_mem=4GB",
@@ -245,7 +248,7 @@ def main():
         print("after the inserts:")
         curve(test, truth, k, a.threads, efs, len(test))
     finally:
-        subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", NAME], capture_output=True)
 
 
 if __name__ == "__main__":

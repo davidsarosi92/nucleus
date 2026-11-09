@@ -276,7 +276,7 @@ fn join(
 }
 
 /// The columns of the row `nesting` levels above `plan` that it reads.
-fn outer_refs(plan: &Plan, nesting: usize, out: &mut Vec<usize>) {
+pub(crate) fn outer_refs(plan: &Plan, nesting: usize, out: &mut Vec<usize>) {
     plan.for_each_expr(&mut |e| {
         e.walk(&mut |x| match x {
             Expr::Outer { depth, index } if *depth == nesting => out.push(*index),

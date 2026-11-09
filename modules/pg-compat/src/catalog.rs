@@ -54,6 +54,8 @@ pub const UUID: i64 = 2950;
 /// nucleus's `vector`: an oid of its own, as pgvector's is per database
 /// (its clients look it up with `to_regtype('vector')`).
 pub const VECTOR: i64 = 13_201;
+/// nucleus's `sparsevec`, likewise (pgvector's clients look it up too).
+pub const SPARSEVEC: i64 = 13_203;
 const ROLE: &str = "nucleus";
 const DATABASE_OID: i64 = 16_383;
 
@@ -690,6 +692,7 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Cidr => 650,
         DataType::Ext(t) if t.name() == "uuid" => UUID,
         DataType::Ext(t) if t.name() == "vector" => VECTOR,
+        DataType::Ext(t) if t.name() == "sparsevec" => SPARSEVEC,
         // Registered types PostgreSQL has no oid for are shown as text.
         // Enums too: PostgreSQL gives each its own oid, nucleus sends labels.
         DataType::Ext(_) | DataType::Enum(_) => 25,
@@ -745,6 +748,8 @@ const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
     (2951, "_uuid", -1, "A", 2950, 0, 0),
     (VECTOR, "vector", -1, "U", 0, VECTOR + 1, 0),
     (VECTOR + 1, "_vector", -1, "A", VECTOR, 0, 0),
+    (SPARSEVEC, "sparsevec", -1, "U", 0, SPARSEVEC + 1, 0),
+    (SPARSEVEC + 1, "_sparsevec", -1, "A", SPARSEVEC, 0, 0),
     // PostgreSQL's `bit`, which nucleus does not have: listed because
     // pgvector's clients look it up beside `vector` and require it.  A
     // value sent as `bit` is refused (no type has its oid).
@@ -817,6 +822,10 @@ pub fn format_type(oid: i64, typmod: Option<i64>) -> Option<String> {
         VECTOR => match typmod.filter(|n| *n > 0) {
             Some(n) => format!("vector({n})"),
             None => "vector".into(),
+        },
+        SPARSEVEC => match typmod.filter(|n| *n > 0) {
+            Some(n) => format!("sparsevec({n})"),
+            None => "sparsevec".into(),
         },
         1560 => "bit".into(),
         _ => {

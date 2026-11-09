@@ -107,6 +107,16 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
                     walk(&a.lookup, left_need.clone(), out);
                 }
             }
+            // The right side of a lookup reads the left row.
+            if *algo == JoinAlgo::Lookup {
+                let mut refs = Vec::new();
+                crate::narrow::outer_refs(right, 1, &mut refs);
+                for c in refs {
+                    if let Some(n) = left_need.get_mut(c) {
+                        *n = true;
+                    }
+                }
+            }
             walk(left, left_need, out);
             walk(right, right_need, out);
         }

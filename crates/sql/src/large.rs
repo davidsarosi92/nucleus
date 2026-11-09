@@ -2,7 +2,8 @@
 //! files and model artefacts without every write of its row rewriting
 //! them.
 //!
-//! A value whose row encoding is longer than [`THRESHOLD`] bytes is
+//! A value whose row encoding is longer than [`THRESHOLD`] bytes — of a
+//! type not [stored with its row](crate::ext::Type::stored_with_row) — is
 //! stored in chunks of up to [`CHUNK`] bytes under the table's reserved
 //! index id [`LARGE_INDEX`]: `index_prefix(LARGE_INDEX)`, the row's
 //! primary key suffix, the column (`u16` big-endian) and the chunk number
@@ -33,6 +34,11 @@ pub const THRESHOLD: usize = 2000;
 pub const CHUNK: usize = 32 * 1024;
 /// The index id the chunks are stored under.
 pub const LARGE_INDEX: u32 = u32::MAX;
+
+/// Whether `v`, its row encoding `len` bytes, is stored out of line.
+fn out_of_line_value(v: &Value, len: usize) -> bool {
+    len > THRESHOLD && !matches!(v, Value::Ext(t, _) if t.imp().stored_with_row())
+}
 
 /// The prefix of the chunks of row `pk`'s column `col`.
 fn chunks_prefix(t: &Table, pk: &[u8], col: usize) -> Vec<u8> {
@@ -79,7 +85,7 @@ pub fn encode_inline(row: &Row) -> Option<Vec<u8>> {
     let mut w = RowWriter::new(row.len());
     for v in row {
         let at = w.value(v);
-        if w.since(at).len() > THRESHOLD {
+        if out_of_line_value(v, w.since(at).len()) {
             return None;
         }
     }
@@ -107,7 +113,7 @@ fn encode(
         // Encoded in place; moved out when too long to stay.
         let at = w.value(v);
         let was = stored.iter().any(|&(sc, _)| sc == c);
-        if w.since(at).len() <= THRESHOLD {
+        if !out_of_line_value(v, w.since(at).len()) {
             if was {
                 remove_chunks(txn, t, pk, c)?;
             }
@@ -148,7 +154,7 @@ pub fn remove_row(txn: &mut dyn KvTxn, t: &Table, key: &[u8], row: &Row) -> Resu
     let short = row.iter().all(|v| {
         enc.clear();
         encode_row_value(&mut enc, v);
-        enc.len() <= THRESHOLD
+        !out_of_line_value(v, enc.len())
     });
     if short {
         txn.delete(key)?;
