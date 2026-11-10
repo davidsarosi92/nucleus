@@ -5730,9 +5730,16 @@ build.  Built:
    each term up once a segment — ArguAna's 200-word queries in three
    segments 9 % slower than in one — and one merge reads each document
    once where tiers read it once a tier.
-6. **`--index-cache <size>`** (the server; `object_cache`'s budget, 1 GB
-   by default): MS MARCO's index (1.09 GB of segments) past the budget
-   was decoded again on every search — 2.2–3.5 s a query.
+6. **`--index-cache <size>`** (the server; `object_cache`'s budget, a
+   fixed 1 GB before): MS MARCO's index (1.09 GB of segments) past the
+   budget was decoded again on every search — 2.2–3.5 s a query.  By
+   default it is now a quarter of the memory the process may use
+   (`nucleus_platform::real::physical_memory`: `hw.memsize` on macOS,
+   `MemTotal` on Linux or a container's cgroup limit below it; 1 GB
+   where the OS does not say) — PostgreSQL's advice for
+   `shared_buffers`, DuckDB's `memory_limit` sized by the machine (80 %
+   there, for all its memory; this is one cache, and a bound, not memory
+   taken).
 
 Not taken:
 - **The threshold from the `k`-th row that passed `keep`**, as planned
@@ -5768,7 +5775,8 @@ Measured against 6fa170f (`bench/text/beir.py`, the mean ms of a query,
 the second of two rounds; base the second of two alternating runs).
 MS MARCO passage — 8,841,823 passages, BEIR's dev split, its first
 1,000 queries, `english`, 1.2 / 0.75, the server's `--index-cache 4GB`
-(base's segments fit the default; the new, 1.09 GB, do not):
+(base's segments fit the 1 GB the cache had; the new, 1.09 GB, did not —
+the default is now a quarter of the machine's memory, 8 GB here):
 
 | MS MARCO | 6fa170f | T5b | ParadeDB |
 |---|---:|---:|---:|

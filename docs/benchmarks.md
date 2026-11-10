@@ -701,8 +701,9 @@ python3 bench/text/beir.py paradedb
 
 MS MARCO passage (PLAN.md §M14.21 T5b): 8,841,823 passages, BEIR's dev
 split, its first 1,000 queries, `english`, k1 1.2, b 0.75 — the same
-query, the same nDCG@10 measure; the server with `--index-cache 4GB`
-(the index's 1.09 GB of segments past the 1 GB default); ParadeDB as
+query, the same nDCG@10 measure; the server's index cache a quarter of
+the machine's memory by default (8 GB here; the index's segments are
+1.09 GB — `--index-cache` sets it); ParadeDB as
 above (`\timing` inside the container):
 
 | MS MARCO | nucleus | ParadeDB |
@@ -716,7 +717,7 @@ above (`\timing` inside the container):
 
 ```sh
 python3 bench/text/data.py msmarco
-python3 bench/text/beir.py nucleus target/release/nucleus --sets msmarco --split dev --queries 1000 --analyzer english --k1 1.2 --b 0.75 --filters 50,10,1 --index-cache 4GB
+python3 bench/text/beir.py nucleus target/release/nucleus --sets msmarco --split dev --queries 1000 --analyzer english --k1 1.2 --b 0.75 --filters 50,10,1
 python3 bench/text/beir.py paradedb --sets msmarco --split dev --queries 1000
 ```
 

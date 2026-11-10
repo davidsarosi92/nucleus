@@ -286,9 +286,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         })
         .collect::<Result<_, _>>()?;
     eprintln!(
-        "nucleus {} listening on {} (database {dir}; {}{})",
+        "nucleus {} listening on {} (database {dir}; index cache {} MB; {}{})",
         env!("CARGO_PKG_VERSION"),
         shown.join(" and "),
+        nucleus_sql::index_cache() >> 20,
         config.auth.describe(),
         match (&config.tls, &config.bearer) {
             (Some(_), Some(b)) => format!("; TLS offered; {}", b.describe()),

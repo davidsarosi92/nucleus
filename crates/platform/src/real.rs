@@ -9,8 +9,9 @@
 //!   `FlushFileBuffers` on Windows — under
 //!   [`SyncPolicy::Ordered`] (the default) on macOS
 //!   `fcntl(F_BARRIERFSYNC)` instead: ordered writes, the drive's cache not
-//!   flushed.  That one call is the crate's only unsafe code (`std` offers
-//!   no such sync), allowed where it is made.
+//!   flushed.  That call and [`physical_memory`]'s on macOS are the
+//!   crate's only unsafe code (`std` offers neither), allowed where they
+//!   are made.
 //! - **Positional I/O.**  `pread`/`pwrite` on POSIX; on Windows
 //!   `ReadFile`/`WriteFile` with the offset in an `OVERLAPPED`.
 //! - **Atomic replace.**  `rename` on POSIX; on Windows `std` uses
@@ -224,6 +225,62 @@ fn sync_file(file: &fs::File, policy: SyncPolicy) -> io::Result<()> {
     file.sync_data()
 }
 
+/// The memory this process may use, in bytes, where the operating system
+/// says: the machine's (`hw.memsize` on macOS, `MemTotal` on Linux), or a
+/// container's limit below it (cgroup v2's `memory.max`, v1's
+/// `memory.limit_in_bytes`) — what DuckDB sizes its `memory_limit` by.
+/// `None` elsewhere, or where it cannot be read.
+pub fn physical_memory() -> Option<u64> {
+    let machine = machine_memory()?;
+    Some(cgroup_limit().map_or(machine, |l| l.min(machine)))
+}
+
+#[cfg(target_vendor = "apple")]
+#[allow(unsafe_code)]
+fn machine_memory() -> Option<u64> {
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const std::ffi::c_char,
+            old: *mut std::ffi::c_void,
+            oldlen: *mut usize,
+            new: *mut std::ffi::c_void,
+            newlen: usize,
+        ) -> i32;
+    }
+    let mut bytes = 0u64;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: a NUL-terminated name; `old` points at `len` writable bytes
+    // that live through the call; nothing is set (`new` null, 0 long).
+    let r = unsafe {
+        sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut bytes).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (r == 0 && len == std::mem::size_of::<u64>() && bytes > 0).then_some(bytes)
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn machine_memory() -> Option<u64> {
+    let info = fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|l| l.starts_with("MemTotal:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024).filter(|&b| b > 0)
+}
+
+/// A container's memory limit (cgroup v2, then v1), if one is set.
+fn cgroup_limit() -> Option<u64> {
+    ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]
+        .iter()
+        .filter_map(|p| fs::read_to_string(p).ok())
+        // "max" (v2) or a page-rounded i64::MAX (v1): no limit.
+        .filter_map(|s| s.trim().parse::<u64>().ok())
+        .find(|&b| b > 0 && b < 1 << 60)
+}
+
 /// `fcntl(F_BARRIERFSYNC)`: the file's writes so far reach the drive before
 /// any later one, without flushing the drive's cache.  A file system that
 /// does not support it gets the full sync (as SQLite does).
@@ -299,5 +356,16 @@ impl Clock for RealClock {
     }
     fn sleep(&self, d: Duration) {
         std::thread::sleep(d);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    fn the_machine_has_memory() {
+        let m = super::physical_memory().expect("the OS says");
+        // More than 64 MB, less than a petabyte.
+        assert!(m > 64 << 20 && m < 1 << 50, "{m}");
     }
 }

@@ -19,8 +19,9 @@ scored on its text.  The first round checks both give the same rows.
 MS MARCO passage (`--sets msmarco`, bench/text/data.py msmarco; §M14.21
 T5b): 8.8 million passages, loaded in parts, with `--split dev` (BEIR's
 own split for it; `test` is TREC DL 2019's 43 queries) and `--queries N`
-(the first N, timed as the rest are), and `--index-cache 4GB`: its
-segments pass the server's 1GB default, decoded again on every search.
+(the first N, timed as the rest are).  Its index's segments, 1.09 GB,
+must fit the server's index cache (`--index-cache`; by default a quarter
+of the machine's memory), else they are decoded again on every search.
 
 `paradedb` runs the same in ParadeDB's pg_search (Tantivy's BM25 in
 PostgreSQL; `docker run -d --name nucleus-paradedb -e POSTGRES_PASSWORD=x
@@ -216,7 +217,7 @@ def main():
     ap.add_argument("--split", default="test")
     ap.add_argument("--queries", type=int, default=None)
     ap.add_argument("--index-cache", default=None,
-                    help="the server's --index-cache (MS MARCO's segments pass the 1GB default)")
+                    help="the server's --index-cache (its default: a quarter of the machine's memory)")
     a = ap.parse_args()
     if a.system == "paradedb":
         paradedb(a)

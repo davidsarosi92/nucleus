@@ -63,7 +63,8 @@ usage:
                                     --cache sets the page cache (default 128MB;
                                     PostgreSQL's shared_buffers); --index-cache
                                     the decoded index objects kept (HNSW graphs,
-                                    text segments; default 1GB)
+                                    text segments; default a quarter of the
+                                    machine's memory)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

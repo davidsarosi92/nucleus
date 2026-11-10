@@ -165,8 +165,11 @@ after it, without flushing the drive's cache, so files are never left
 inconsistent and a crash of the process or the OS loses nothing synced,
 while a power loss may lose the last syncs (as PostgreSQL's and SQLite's
 macOS defaults).  A file system without barriers gets the full sync.
-That `fcntl` is the crate's only unsafe code (std has no such call;
-`barrier_sync`).  The simulation's sync is the full one: a power loss
+That `fcntl` and macOS's `sysctlbyname("hw.memsize")` are the crate's
+only unsafe code (std has neither call; `barrier_sync`,
+`real::physical_memory` — the memory the process may use: the machine's,
+or a container's cgroup limit below it, read from `/proc` and
+`/sys/fs/cgroup` on Linux; `None` elsewhere).  The simulation's sync is the full one: a power loss
 under `Ordered` leaves the files as a crash before the last syncs would,
 which the simulation tests.  Positional I/O is
 `pread`/`pwrite`, on Windows `seek_read`/`seek_write` (std maps
@@ -3726,8 +3729,12 @@ nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
 `--cache` sizes the page cache (default `128MB`; units as `work_mem`'s:
 `kB`, `MB`, `GB`) — PostgreSQL's `shared_buffers`.  `--index-cache`
 sizes the decoded index objects kept across transactions
-(`object_cache`: HNSW graphs' parts, text segments; default `1GB`) — an
-index past it is decoded again each time it is read.  `--sync` sets how far commits and checkpoints sync (§3.2, D17):
+(`object_cache`: HNSW graphs' parts, text segments) — an index past it
+is decoded again each time it is read.  By default it is a quarter of
+the memory the process may use (`real::physical_memory`; 1 GB where the
+OS does not say) — PostgreSQL's advice for `shared_buffers`, DuckDB's
+`memory_limit` sized by the machine too; a bound, not memory taken.  The
+server's first line names it (`index cache 8192 MB`).  `--sync` sets how far commits and checkpoints sync (§3.2, D17):
 `ordered` (the default) or `full`, which also flushes the drive's cache
 (on macOS).  `--wal` (D16): `minimal` (the default) writes a new index's
 entries without the WAL and checkpoints at its commit; `full` logs every
@@ -4431,6 +4438,18 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-10 — the index cache sized by the machine:**
+  `nucleus_platform::real::physical_memory` (macOS `hw.memsize`; Linux
+  `MemTotal` and the cgroup v2 / v1 limit; `None` elsewhere);
+  `object_cache::budget` a quarter of it unless `--index-cache` sets it
+  (1 GB where unknown), `nucleus_sql::index_cache`; the server's first
+  line names it (§3.2, §9).
+- **2026-11-10 — the index cache sized by the machine:**
+  `nucleus_platform::real::physical_memory` (macOS `hw.memsize`; Linux
+  `MemTotal` and the cgroup v2 / v1 limit; `None` elsewhere);
+  `object_cache::budget` a quarter of it unless `--index-cache` sets it
+  (1 GB where unknown), `nucleus_sql::index_cache`; the server's first
+  line names it (§2, §9).
 - **2026-11-10 — §M14.21 T5b, block-max MaxScore and a parallel
   build:** segments version 2 (`segment.rs`: a skip list per term in
   more than one block — last document, bytes, the (frequency, length)
@@ -4444,7 +4463,8 @@ checks `psql` with and without TLS.
   on the statement's workers (`TextIndex::build`, `Store::append_segments`,
   `Store::merge_all` / `merge_due`, `segment::merge` in runs: one segment
   up to 3 GB); the server's
-  `--index-cache` (`object_cache`'s budget, 1 GB by default);
+  `--index-cache` (`object_cache`'s budget; by default a quarter of
+  the memory the process may use, `nucleus_platform::real::physical_memory`);
   `bench/text/beir.py` loads MS MARCO in parts (`--split`, `--queries`,
   `--index-cache`); `tests/text_index.rs` `pruned_as_scored_in_full`
   (§8.19, §9).

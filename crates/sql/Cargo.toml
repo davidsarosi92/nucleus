@@ -10,10 +10,11 @@ repository.workspace = true
 nucleus-kv.workspace = true
 nucleus-crypto.workspace = true
 nucleus-kernels.workspace = true
+# The machine's memory, which sizes the index cache (`object_cache`).
+nucleus-platform.workspace = true
 regex.workspace = true
 
 [dev-dependencies]
-nucleus-platform.workspace = true
 # Path only: the test kit depends on this crate, so a published copy
 # leaves the dev-dependency (and the tests that use it) out.
 nucleus-testkit = { path = "../testkit" }

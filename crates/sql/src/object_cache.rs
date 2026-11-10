@@ -24,19 +24,33 @@ pub(crate) fn object_id(kind: u64, b: &[u8]) -> u64 {
     h | 1
 }
 
-/// The bytes the cache holds at most: 1 GiB unless the server is told
-/// otherwise (`--index-cache`, [`set_budget`]).  Index objects past it are
-/// decoded again each time they are read — a text index's segments over
-/// it, every search.
-static BUDGET: AtomicUsize = AtomicUsize::new(1 << 30);
+/// The bytes the cache holds at most, once known (0: not yet).  Index
+/// objects past it are decoded again each time they are read — a text
+/// index's segments over it, every search.
+static BUDGET: AtomicUsize = AtomicUsize::new(0);
 
 /// Sets the bytes the cache holds at most (the server's `--index-cache`).
 pub fn set_budget(bytes: usize) {
     BUDGET.store(bytes.max(1 << 20), Relaxed);
 }
 
-fn budget() -> usize {
-    BUDGET.load(Relaxed)
+/// The budget: as set, else a quarter of the memory the process may use
+/// (`nucleus_platform::real::physical_memory`; PostgreSQL's advice for
+/// `shared_buffers`, DuckDB's `memory_limit` sized by the machine too) —
+/// a bound, not memory taken — else 1 GiB.
+pub fn budget() -> usize {
+    match BUDGET.load(Relaxed) {
+        0 => {
+            let b = nucleus_platform::real::physical_memory()
+                .and_then(|m| usize::try_from(m / 4).ok())
+                .unwrap_or(1 << 30)
+                .max(1 << 20);
+            // Another thread may have set it meanwhile: theirs stands.
+            let _ = BUDGET.compare_exchange(0, b, Relaxed, Relaxed);
+            BUDGET.load(Relaxed)
+        }
+        b => b,
+    }
 }
 
 /// What kind of decoded object (part of its key).
