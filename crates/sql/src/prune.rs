@@ -47,9 +47,31 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
         })
     });
     match plan {
-        Plan::Scan { filter, .. } => {
+        Plan::Scan {
+            table,
+            access,
+            filter,
+            ..
+        } => {
             if let Some(f) = filter {
                 read(f, &mut wanted, 0);
+            }
+            // The ranked value past the table's columns: the columns its
+            // call reads where the index cannot rank (its other operands
+            // are fixed for the scan, a subquery among them run once).
+            if let crate::plan::Access::Method {
+                rank: Some(crate::plan::MethodRank { value: Some(v), .. }),
+                ..
+            } = access
+            {
+                if wanted.get(table.columns.len()) == Some(&true) {
+                    for c in v.columns() {
+                        if let Some(w) = wanted.get_mut(c) {
+                            *w = true;
+                        }
+                    }
+                }
+                wanted.truncate(table.columns.len());
             }
             if wanted.iter().any(|w| !w) {
                 out.insert(plan as *const Plan as usize, wanted);

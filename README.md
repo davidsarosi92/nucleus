@@ -106,14 +106,15 @@ snapshot, its counts and statistics those of the snapshot's rows,
 7–14× PostgreSQL's GIN on terms and 550× on phrases — and BM25 ranking,
 `ORDER BY score(body @@ q) DESC LIMIT 10`, the first rows found by the
 index from its postings: Anserini's nDCG@10 on BEIR to within 0.006,
-ranked as well as ParadeDB's Tantivy-based BM25 or better, faster on
-FiQA and ArguAna (0.86 ms a FiQA query, theirs 1.6), slower on the
-smallest corpus; on MS MARCO's 8.8 million passages block-max MaxScore
-over per-block impacts ranks a query in 2.0 ms against ParadeDB's 5.5, at a higher nDCG@10 (0.2605, theirs 0.2578), the index built on every core in 42 s (theirs 68)
+ranked as well as ParadeDB's Tantivy-based BM25 or better and faster
+on every corpus (0.34 ms a FiQA query, theirs 1.6; 0.16 ms on SciFact,
+theirs 0.91 — `score()` reads the scores the ranking computed); on MS
+MARCO's 8.8 million passages block-max MaxScore over per-block impacts
+ranks a query in 1.8 ms against ParadeDB's 5.5, at a higher nDCG@10 (0.2605, theirs 0.2578), the index built on every core in 42 s (theirs 68)
 — and with other conditions, row-level security or
 HNSW's distance over the text's matches, one ranking for every index
-(a FiQA query with a filter passing a tenth of the rows 1.2 ms, 76× the
-read-everything path), and the rows a condition finds read by a merge
+(a FiQA query with a filter passing a tenth of the rows 0.70 ms, 134×
+the read-everything path), and the rows a condition finds read by a merge
 with the table's scan (a FiQA term's 8,743 rows 2.6× faster).  Next is hybrid search
 (§M14.21) and the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the

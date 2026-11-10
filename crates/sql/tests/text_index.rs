@@ -107,9 +107,9 @@ fn same(s: &mut Session, step: &str) {
         // The first rows by score: ranked by the index from its postings
         // — with other conditions passing all, half, a tenth and a
         // hundredth of the rows, read best first until 7 pass (§M14.21
-        // T5a) — and, ordered by an expression of the score the index
-        // does not rank by, every row it finds scored on its text: alike,
-        // scores, ties and all.
+        // T5a), their scores the index's (T5c) — and, ordered by an
+        // expression of the score the index does not rank by, every row
+        // it finds scored on its text: alike, scores, ties and all.
         let first = |extra: &str, by: &str| {
             format!(
                 "SELECT id::text || ' ' || score(body @@ '{q}')::text FROM docs \
@@ -125,7 +125,7 @@ fn same(s: &mut Session, step: &str) {
         ] {
             assert!(
                 text(s, &format!("EXPLAIN {}", first(extra, "")))
-                    .contains(" first 7 by text_score(body) DESC"),
+                    .contains(" first 7 by text_score(body) DESC with values"),
                 "{step}: {q}{extra}"
             );
             assert!(
@@ -138,6 +138,21 @@ fn same(s: &mut Session, step: &str) {
                 "{step}: {q}{extra}"
             );
         }
+        // Scored by another query than the condition's: the index cannot
+        // rank, and the scores are computed on the rows the condition
+        // finds (§M14.21 T5c).
+        let other = |by: &str| {
+            format!(
+                "SELECT id::text || ' ' || score(body @@ 'alpha OR beta')::text FROM docs \
+                 WHERE body @@ '{q}' ORDER BY score(body @@ 'alpha OR beta'){by} DESC, id \
+                 LIMIT 7"
+            )
+        };
+        assert!(
+            text(s, &format!("EXPLAIN {}", other(""))).contains(" with values"),
+            "{step}: {q}"
+        );
+        assert_eq!(text(s, &other("")), text(s, &other(" + 0")), "{step}: {q}");
     }
 }
 

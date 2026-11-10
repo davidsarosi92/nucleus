@@ -1024,9 +1024,10 @@ impl Cursor {
             Some(t) => s.blocks(t, |last, at, impacts| {
                 c.last.push(last);
                 c.at.push(at);
-                c.bound.push(bound(impacts.iter().fold(0f64, |m, &(f, len)| {
-                    m.max(sc.leaf_f64(l, f, sc.norm(f64::from(len))))
-                })));
+                c.bound
+                    .push(bound(impacts.iter().fold(0f64, |m, &(f, len)| {
+                        m.max(sc.leaf_f64(l, f, sc.norm(f64::from(len))))
+                    })));
             })?,
             None => false,
         };
@@ -1045,7 +1046,11 @@ impl Cursor {
             c.last.push(c.docs[n - 1]);
             c.at.push(at);
             let f = c.freqs[..n].iter().copied().max().expect("a posting");
-            let len = c.docs[..n].iter().map(|&d| s.lens[d as usize]).min().expect("a posting");
+            let len = c.docs[..n]
+                .iter()
+                .map(|&d| s.lens[d as usize])
+                .min()
+                .expect("a posting");
             c.bound.push(sc.leaf(l, f, sc.norm(f64::from(len))));
             c.max = c.bound[0];
             c.n = n;
@@ -1055,12 +1060,21 @@ impl Cursor {
             // bounds as a one-block term's.
             c.mem = leaf_postings(s, leaf, false)?;
             c.df = c.mem.docs.len();
-            for (j, (ds, fs)) in c.mem.docs.chunks(BLOCK).zip(c.mem.freqs.chunks(BLOCK)).enumerate()
+            for (j, (ds, fs)) in c
+                .mem
+                .docs
+                .chunks(BLOCK)
+                .zip(c.mem.freqs.chunks(BLOCK))
+                .enumerate()
             {
                 c.last.push(*ds.last().expect("a block"));
                 c.at.push(j * BLOCK);
                 let f = fs.iter().copied().max().expect("a block");
-                let len = ds.iter().map(|&d| s.lens[d as usize]).min().expect("a block");
+                let len = ds
+                    .iter()
+                    .map(|&d| s.lens[d as usize])
+                    .min()
+                    .expect("a block");
                 c.bound.push(sc.leaf(l, f, sc.norm(f64::from(len))));
             }
         }
@@ -1084,7 +1098,11 @@ impl Cursor {
         self.n = n;
         match self.term {
             Some(_) => {
-                let prev = if j == 0 { -1 } else { i64::from(self.last[j - 1]) };
+                let prev = if j == 0 {
+                    -1
+                } else {
+                    i64::from(self.last[j - 1])
+                };
                 s.block(self.at[j], prev, &mut self.docs[..n], &mut self.freqs[..n])?;
             }
             None => {
@@ -1097,7 +1115,11 @@ impl Cursor {
     }
 
     fn doc(&self) -> u32 {
-        if self.i < self.n { self.docs[self.i] } else { END }
+        if self.i < self.n {
+            self.docs[self.i]
+        } else {
+            END
+        }
     }
 
     fn freq(&self) -> u32 {
@@ -1503,7 +1525,8 @@ impl View {
         for (n, s) in self.segs.iter().enumerate() {
             let key = |d: u32| (s.seg.pk(d), s.seg.hashes[d as usize]);
             if let (Some(sc), Some(flat)) = (sc, &flat) {
-                let found = |d, score, top: &mut Top| found(At::Seg(n as u32, d), key(d), score, top);
+                let found =
+                    |d, score, top: &mut Top| found(At::Seg(n as u32, d), key(d), score, top);
                 if top.n == usize::MAX {
                     every_match(s, q, flat, sc, top, found)?;
                 } else {
@@ -1553,7 +1576,10 @@ impl View {
         if !complete {
             out.retain(|x| x.1 >= theta);
         }
-        Ok((out.into_iter().map(|(at, x)| (at, of_fixed(x))).collect(), complete))
+        Ok((
+            out.into_iter().map(|(at, x)| (at, of_fixed(x))).collect(),
+            complete,
+        ))
     }
 
     /// The primary key of the version at `at`.
@@ -1723,13 +1749,20 @@ mod tests {
         let docs: Vec<(Vec<u8>, u64, Doc)> = texts
             .iter()
             .enumerate()
-            .map(|(i, t)| ((i as u32).to_be_bytes().to_vec(), 0, Doc::analyze(a.as_ref(), t)))
+            .map(|(i, t)| {
+                (
+                    (i as u32).to_be_bytes().to_vec(),
+                    0,
+                    Doc::analyze(a.as_ref(), t),
+                )
+            })
             .collect();
         let dead = |i: usize| i < 20_000 && i % 9 == 4;
         let mut deleted = Deleted::default();
         for (i, d) in docs.iter().enumerate().take(20_000) {
             if dead(i) {
-                let terms: Vec<Vec<u8>> = d.2.terms.iter().map(|t| t.0.as_bytes().to_vec()).collect();
+                let terms: Vec<Vec<u8>> =
+                    d.2.terms.iter().map(|t| t.0.as_bytes().to_vec()).collect();
                 deleted.add(i as u32, d.2.len, &terms);
             }
         }

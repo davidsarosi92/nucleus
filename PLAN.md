@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before) done | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms) done | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -5259,6 +5259,9 @@ The steps, each measured as §M14.12's were:
   access path and one optimizer pass, adaptive while it runs.
 - **T5b — the found rows by a merge with the table's scan; block-max
   MaxScore and a parallel build**, measured on MS MARCO.
+- **T5c — the ranking's scores read by `score()`**: the rows a method
+  ranks come with their values, so the projection does not compute them
+  again.
 - **T6 — phrases, prefixes and fuzzy terms from positions; highlights
   and snippets.**
 - **T7 — hybrid**: `rrf(...)` and a weighted combination in one plan
@@ -5769,7 +5772,7 @@ through when the threshold is low; `Segment::postings` decoding a block
 at a time through `Segment::block` cost a full scoring 4 % more than one
 loop over the blocks (restored); two-thirds of a short BEIR query is
 `score()` analyzing the returned rows' texts again — the ranking could
-hand its scores to the projection (next).
+hand its scores to the projection (T5c).
 
 Measured against 6fa170f (`bench/text/beir.py`, the mean ms of a query,
 the second of two rounds; base the second of two alternating runs).
@@ -5815,6 +5818,73 @@ with phrases, scored document at a time over one segment, are 12 %
 faster.  Unchanged elsewhere: `bench/phases.py reads` TPC-H SF1,
 alternating, two rounds, sums of the best of three 5,537 / 5,500 →
 5,516 / 5,503 ms.
+
+**T5c — the ranking's scores read by `score()`** (done 2026-11-10).
+The text index ranked by the scores it summed from its postings, then
+dropped them: `score()` in the projection analyzed each returned row's
+text again — two-thirds of a short BEIR query (T5b's profile:
+`TextScore::call` → the analyzer).  Prior art: Lucene's collectors keep
+each hit's score in its `ScoreDoc` and Elasticsearch's `_score` is that
+number, never recomputed; ParadeDB's custom scan hands `pdb.score(id)`
+the score Tantivy computed, as an output column of the scan; DuckDB's
+`match_bm25` and PostgreSQL's `ts_rank` compute per row.  Taken: the
+score as a column of the scan — here one any method may give, by one
+hook.  Built:
+
+1. **`IndexMethod::values(ix, function)`**: whether its rank gives each
+   row's value of the function with it — the very number the function
+   computes of the row.  The text index's BM25 is (T5b's fixed-point
+   sums: a row's text and the postings give the same integer); by
+   default none.  `RankAsk::values` asks for it; the text index pushes
+   each row's score past its columns.
+2. **`MethodRank::value`**: the ranked call, its value one more column
+   past the table's (`Plan::width`, `Access::valued`).
+   `optimizer::ranked` sets it where the method gives values and a
+   projection under the sort computes the call, and rewrites the call,
+   wherever it is in the projection's expressions, to that column.
+   Where the index cannot rank after all (a `score` of another query
+   than the condition's), `exec` computes the call on each row the scan
+   reads, so the plan's shape is the same either way; `prune` reads the
+   call's columns for it.  `EXPLAIN`: `first k by f(col) DESC with
+   values`, the projection `#0, #2`.
+
+Not taken:
+
+- **A memo of scores by row for `text_score`** (the rank fills it, the
+  function looks a row up): the function sees a text, not a key — it
+  would have to be keyed by the text, or the rows carry a hidden key
+  anyway.  The column is the same information, explicit in the plan.
+- **HNSW's distances**: not checked to be the distance function's
+  number to the bit (its search computes them its own way), and a
+  vector's distance is cheap next to an analysis.  It keeps the
+  default.
+- **Partitioned tables** (`Append`): every partition's scan would have
+  to give the value, ranked or not; left out until a partitioned text
+  index is asked for.
+- **Not reading the text at all where only its score is wanted**: the
+  scan reads the column for where the index cannot rank; reading it
+  only then needs `prune` to keep two sets of columns for one scan.
+  Not measured apart: `k` texts read and decoded, not analyzed.
+
+Measured against e61d55f (`bench/text/beir.py`, `english`, 1.2 / 0.75,
+the mean ms of a query, the second of two rounds, base and new
+alternating; the first round within 0.05 ms):
+
+| BEIR | e61d55f | T5c | 50 % filter | 10 % filter | 1 % filter |
+|---|---:|---:|---:|---:|---:|
+| SciFact | 0.94 | 0.16 | 0.98 → 0.20 | 1.15 → 0.39 | 2.84 → 2.25 |
+| NFCorpus | 0.75 | 0.11 | 0.74 → 0.14 | 0.79 → 0.24 | 1.27 → 0.93 |
+| ArguAna | 2.85 | 2.13 | 2.90 → 2.15 | 3.16 → 2.40 | 5.14 → 4.37 |
+| FiQA | 0.86 | 0.34 | 0.97 → 0.47 | 1.21 → 0.70 | 3.65 → 3.07 |
+
+nDCG@10 the same to the last digit.  ArguAna's median 1.51 → 0.78 ms
+(T5b's 6–8 % loss on its long queries is gone under it); `porter`, 0.9
+/ 0.4: 0.17 / 0.12 / 2.65 / 0.46 ms.  Every corpus is now faster than
+ParadeDB's (0.91 / 0.45 / 5.43 / 1.62 ms; SciFact and NFCorpus were
+slower).  MS MARCO (1,000 dev queries, one run each): 2.05 / 1.45 →
+1.81 / 1.22 ms mean / p50, a 50 % filter 3.11 → 2.99, 10 % 4.43 →
+4.28; a 1 % filter 31.46 → 23.56 — its ~1,100 row lookups, which vary
+from run to run (16.27 in T5b), not this step.
 
 ### §M14.22 — Embeddings in the database ⬜
 

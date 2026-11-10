@@ -114,6 +114,9 @@ pub struct RankAsk<'a> {
     pub part: &'a [crate::types::Value],
     /// The rows to rank among, where the plan has them.
     pub among: Option<Among<'a>>,
+    /// Each row given with its value of the function past the table's
+    /// columns ([`IndexMethod::values`]).
+    pub values: bool,
 }
 
 /// What the optimizer asks [`IndexMethod::rank_cost`] about.
@@ -207,6 +210,16 @@ pub trait IndexMethod: Send + Sync {
     /// ([`IndexMethod::rank`]).  By default it cannot.
     fn ranks(&self, ix: &Index, function: &str, desc: bool, nulls_first: bool) -> bool {
         let _ = (ix, function, desc, nulls_first);
+        false
+    }
+
+    /// Whether its rank can give each row's value of `function` with it,
+    /// the very value the function computes of the row
+    /// ([`RankAsk::values`]): the plan then reads it there and does not
+    /// compute it again (a text index's BM25, PLAN.md §M14.21 T5c).  By
+    /// default it cannot.
+    fn values(&self, ix: &Index, function: &str) -> bool {
+        let _ = (ix, function);
         false
     }
 

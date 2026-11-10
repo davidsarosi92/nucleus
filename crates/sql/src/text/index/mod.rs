@@ -255,10 +255,7 @@ impl IndexMethod for TextIndex {
             }
         }
         let workers = crate::budget::workers();
-        let per = texts
-            .len()
-            .div_ceil(workers)
-            .clamp(BUILD_MIN, BUILD_BATCH);
+        let per = texts.len().div_ceil(workers).clamp(BUILD_MIN, BUILD_BATCH);
         let batches: Vec<&[(Vec<u8>, String)]> = texts.chunks(per).collect();
         let make = |batch: &[(Vec<u8>, String)]| {
             let docs: Vec<(Vec<u8>, u64, Doc)> = batch
@@ -285,7 +282,11 @@ impl IndexMethod for TextIndex {
                 }
             });
             out.into_iter()
-                .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()).expect("made"))
+                .map(|m| {
+                    m.into_inner()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .expect("made")
+                })
                 .collect()
         };
         drop(texts);
@@ -397,6 +398,12 @@ impl IndexMethod for TextIndex {
         function == crate::text::score::TEXT_SCORE && desc
     }
 
+    /// Its BM25: MaxScore's sums are the row's text's, to the unit
+    /// ([`crate::text::score::fixed`]).
+    fn values(&self, _: &IndexDef, function: &str) -> bool {
+        function == crate::text::score::TEXT_SCORE
+    }
+
     /// The rows the condition finds where it is the index's (`@@`): only
     /// as many as `k` over the share passing need be read, never more
     /// than it finds.
@@ -415,7 +422,9 @@ impl IndexMethod for TextIndex {
     /// over the share expected to pass `keep` first, then as many as the
     /// share passing so far needs (at least as many again), as HNSW's
     /// search grows its `ef`; once `k` passed, on through every row tied
-    /// with the `k`-th.  Past the last match it has read them all.
+    /// with the `k`-th.  Past the last match it has read them all.  Each
+    /// row with its score where asked ([`RankAsk::values`]), so that
+    /// `score()` does not analyze its text again (§M14.21 T5c).
     fn rank(
         &self,
         txn: &dyn KvTxn,
@@ -478,8 +487,18 @@ impl IndexMethod for TextIndex {
         // share of nothing), by the same rule; a third scores every match.
         // Never more than two passes and a full scoring.
         let matches = st.df.iter().sum::<f64>().min(st.docs);
-        let whole = |n: usize| if n as f64 * WHOLE >= matches { usize::MAX } else { n };
-        let mut n = whole(if keep.is_some() { slice.saturating_mul(4) } else { k });
+        let whole = |n: usize| {
+            if n as f64 * WHOLE >= matches {
+                usize::MAX
+            } else {
+                n
+            }
+        };
+        let mut n = whole(if keep.is_some() {
+            slice.saturating_mul(4)
+        } else {
+            k
+        });
         let mut ranked = view.ranked(&q, &sc, n)?;
         'read: loop {
             if ranked.left() == 0 {
@@ -503,7 +522,7 @@ impl IndexMethod for TextIndex {
                 if !seen.insert(pk.to_vec()) {
                     continue;
                 }
-                let row = if read {
+                let mut row = if read {
                     crate::budget::charge_scan()?;
                     key.truncate(base);
                     key.extend_from_slice(pk);
@@ -522,6 +541,9 @@ impl IndexMethod for TextIndex {
                     continue;
                 }
                 passed += 1;
+                if ask.values {
+                    row.push(Value::Float(s));
+                }
                 out.push((pk.to_vec(), row));
                 if passed == k {
                     kth = Some(s);

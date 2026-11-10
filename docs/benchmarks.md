@@ -644,7 +644,7 @@ python3 bench/text/analyzers.py postgres --container ncpg
 
 ### BM25 ranking
 
-`bench/text/beir.py` (PLAN.md §M14.21 T5, T5b): BEIR's SciFact, NFCorpus,
+`bench/text/beir.py` (PLAN.md §M14.21 T5, T5b, T5c): BEIR's SciFact, NFCorpus,
 ArguAna and FiQA (title and text), a text index, and each judged test
 query — its query-syntax characters taken out, a bag of words — as
 `SELECT id FROM docs WHERE body @@ q ORDER BY score(body @@ q) DESC, id
@@ -657,10 +657,10 @@ English analyzer), k1 0.9, b 0.4:
 
 | BEIR | documents | queries | nucleus nDCG@10 | Anserini | `CREATE INDEX` | query |
 |---|---:|---:|---:|---:|---:|---:|
-| SciFact | 5,183 | 300 | 0.6777 | 0.6789 | 375 ms | 0.96 ms |
-| NFCorpus | 3,633 | 323 | 0.3206 | 0.3218 | 334 ms | 0.77 ms |
-| ArguAna | 8,674 | 1,406 | 0.4029 | 0.3970 | 305 ms | 3.52 ms |
-| FiQA | 57,638 | 648 | 0.2354 | 0.2361 | 683 ms | 1.28 ms |
+| SciFact | 5,183 | 300 | 0.6777 | 0.6789 | 392 ms | 0.17 ms |
+| NFCorpus | 3,633 | 323 | 0.3206 | 0.3218 | 338 ms | 0.12 ms |
+| ArguAna | 8,674 | 1,406 | 0.4029 | 0.3970 | 316 ms | 2.65 ms |
+| FiQA | 57,638 | 648 | 0.2354 | 0.2361 | 742 ms | 0.46 ms |
 
 Against ParadeDB's `pg_search` 0.26.6 (Tantivy's BM25 in PostgreSQL 18,
 Docker on the same machine; `body ||| q ORDER BY pdb.score(id) DESC
@@ -670,10 +670,10 @@ b 0.75:
 
 | BEIR | nucleus nDCG@10 | ParadeDB | nucleus `CREATE INDEX` | ParadeDB | nucleus query | ParadeDB |
 |---|---:|---:|---:|---:|---:|---:|
-| SciFact | 0.6891 | 0.6839 | 380 ms | 312 ms | 0.96 ms | 0.91 ms |
-| NFCorpus | 0.3291 | 0.3225 | 339 ms | 221 ms | 0.77 ms | 0.45 ms |
-| ArguAna | 0.4964 | 0.4814 | 299 ms | 358 ms | 2.89 ms | 5.43 ms |
-| FiQA | 0.2534 | 0.2500 | 661 ms | 954 ms | 0.86 ms | 1.62 ms |
+| SciFact | 0.6891 | 0.6839 | 382 ms | 312 ms | 0.16 ms | 0.91 ms |
+| NFCorpus | 0.3291 | 0.3225 | 339 ms | 221 ms | 0.11 ms | 0.45 ms |
+| ArguAna | 0.4964 | 0.4814 | 297 ms | 358 ms | 2.13 ms | 5.43 ms |
+| FiQA | 0.2534 | 0.2500 | 645 ms | 954 ms | 0.34 ms | 1.62 ms |
 
 With a second condition (PLAN.md §M14.21 T5a, T5b: `AND n % 100 < p`,
 `n` a row's number), `english`, 1.2 / 0.75: the index reads its matches
@@ -685,10 +685,10 @@ rows:
 | BEIR | 50 % | | 10 % | | 1 % | |
 |---|---:|---:|---:|---:|---:|---:|
 | | ranked | every match | ranked | every match | ranked | every match |
-| SciFact | 1.00 | 83.6 | 1.17 | 18.3 | 2.87 | 4.3 |
-| NFCorpus | 0.75 | 17.5 | 0.81 | 4.6 | 1.18 | 1.3 |
-| ArguAna | 2.95 | 223.7 | 3.17 | 51.7 | 5.14 | 10.3 |
-| FiQA | 0.97 | 424.9 | 1.22 | 94.0 | 3.60 | 18.7 |
+| SciFact | 0.20 | 83.6 | 0.39 | 18.3 | 2.25 | 4.3 |
+| NFCorpus | 0.14 | 17.5 | 0.24 | 4.6 | 0.93 | 1.3 |
+| ArguAna | 2.15 | 223.7 | 2.40 | 51.7 | 4.37 | 10.3 |
+| FiQA | 0.47 | 424.9 | 0.70 | 94.0 | 3.07 | 18.7 |
 
 ```sh
 python3 bench/text/data.py beir
@@ -699,7 +699,7 @@ docker run -d --name nucleus-paradedb -e POSTGRES_PASSWORD=x paradedb/paradedb
 python3 bench/text/beir.py paradedb
 ```
 
-MS MARCO passage (PLAN.md §M14.21 T5b): 8,841,823 passages, BEIR's dev
+MS MARCO passage (PLAN.md §M14.21 T5b, T5c): 8,841,823 passages, BEIR's dev
 split, its first 1,000 queries, `english`, k1 1.2, b 0.75 — the same
 query, the same nDCG@10 measure; the server's index cache a quarter of
 the machine's memory by default (8 GB here; the index's segments are
@@ -709,11 +709,15 @@ above (`\timing` inside the container):
 | MS MARCO | nucleus | ParadeDB |
 |---|---:|---:|
 | nDCG@10 | 0.2605 | 0.2578 |
-| `CREATE INDEX` | 42.0 s | 67.7 s |
-| query, mean / p50 | 2.01 / 1.52 ms | 5.48 / 5.69 |
-| with a 50 % filter | 3.22 / 2.55 ms | |
-| with a 10 % filter | 4.54 / 3.51 ms | |
-| with a 1 % filter | 16.27 / 15.30 ms | |
+| `CREATE INDEX` | 44.8 s | 67.7 s |
+| query, mean / p50 | 1.81 / 1.22 ms | 5.48 / 5.69 |
+| with a 50 % filter | 2.99 / 2.37 ms | |
+| with a 10 % filter | 4.28 / 3.28 ms | |
+| with a 1 % filter | 23.56 / 23.24 ms | |
+
+A 1 % filter's time is its rows: about 1,100 found rows read a lookup
+each before 11 pass, and it varies from run to run (16 to 31 ms
+measured on the same binary's index).
 
 ```sh
 python3 bench/text/data.py msmarco

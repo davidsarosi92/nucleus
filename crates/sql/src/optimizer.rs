@@ -199,9 +199,10 @@ fn ranked(plan: Plan, st: &Stats) -> Plan {
         (e, None) => Some(e),
         _ => None,
     };
-    let Some(Expr::Call(f, args)) = ranked else {
+    let Some(call @ Expr::Call(f, args)) = ranked else {
         return plan;
     };
+    let call = call.clone();
     let (column, rest) = match args.as_slice() {
         [Expr::Column(c), rest @ ..] if rest.iter().all(fixed) => (*c, rest.to_vec()),
         [q, Expr::Column(c)] if fixed(q) => (*c, vec![q.clone()]),
@@ -218,6 +219,10 @@ fn ranked(plan: Plan, st: &Stats) -> Plan {
         }
         _ => 10.0,
     };
+    // The ranked function's value read from the index where it gives it
+    // (§M14.21 T5c): computed by a projection, of one table's scan (each
+    // partition's would have to give it).
+    let values = exprs.is_some() && !matches!(below, Plan::Append { .. });
     let want = Want {
         column,
         function: f.name().to_string(),
@@ -226,16 +231,32 @@ fn ranked(plan: Plan, st: &Stats) -> Plan {
         nulls_first: key.nulls_first,
         count,
         k,
+        call: values.then(|| call.clone()),
     };
     // A partitioned table: each partition's own index searched for `k`
     // rows, the sort and the limit above taking the first of them.
-    match below {
+    let valued = match below {
         Plan::Append { inputs, .. } => {
             for p in inputs {
                 rank_scan(p, &want, st);
             }
+            None
         }
         other => rank_scan(other, &want, st),
+    };
+    // The projection reads the value where the scan's rows carry it.
+    if let Some(at) = valued
+        && let Plan::Limit { input, .. } = &mut plan
+        && let Plan::Sort { input, .. } = &mut **input
+        && let Plan::Project { exprs, .. } = &mut **input
+    {
+        for e in exprs {
+            e.walk_mut(&mut |x| {
+                if *x == call {
+                    *x = Expr::Column(at);
+                }
+            });
+        }
     }
     plan
 }
@@ -266,12 +287,16 @@ struct Want {
     nulls_first: bool,
     count: Expr,
     k: f64,
+    /// The call ranked by, where the plan would read its value from the
+    /// scan's rows.
+    call: Option<Expr>,
 }
 
 /// A scan (under a row-level security barrier, perhaps) ranked by an
 /// index for `want`, where one ranks by its order and it costs less
-/// ([`ranked`]).
-fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
+/// ([`ranked`]): the column its rows carry the ranked value in, where
+/// they do.
+fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) -> Option<usize> {
     let mut scan = node;
     // Under row-level security: the policy, then the statement's filter
     // above its barrier — conditions the ranking checks its rows against
@@ -283,20 +308,20 @@ fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
         matches!(scan, Plan::Filter { input, .. } if matches!(**input, Plan::Secure { .. }));
     if above {
         let Plan::Filter { input, predicate } = scan else {
-            return;
+            return None;
         };
         checks.push(predicate.clone());
         scan = &mut **input;
     }
     if matches!(scan, Plan::Secure { .. }) {
         let Plan::Secure { input, policy } = scan else {
-            return;
+            return None;
         };
         checks.insert(0, policy.clone());
         scan = &mut **input;
     }
     if checks.iter().any(Expr::has_subquery) {
-        return;
+        return None;
     }
     let Plan::Scan {
         table,
@@ -305,7 +330,7 @@ fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
         estimate,
     } = scan
     else {
-        return;
+        return None;
     };
     // The index whose condition the scan reads: it ranks its own rows.
     let own = match access {
@@ -314,7 +339,7 @@ fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
             served: Some(s),
             rank: None,
         } => Some((*index, s.function.clone())),
-        Access::Method { .. } => return,
+        Access::Method { .. } => return None,
         _ => None,
     };
     // A statement's condition the index serves from above a barrier: its
@@ -356,7 +381,7 @@ fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
     };
     // The scan's own index where it ranks, else the one with the most
     // columns fixed: the smallest graph.
-    let Some((index, method, partition)) = table
+    let (index, method, partition) = table
         .indexes
         .iter()
         .enumerate()
@@ -378,10 +403,7 @@ fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
                 p.len(),
                 std::cmp::Reverse(*i),
             )
-        })
-    else {
-        return;
-    };
+        })?;
     let own = own.filter(|o| o.0 == index);
     // The share of the table's rows the index ranks.
     let part_sel = partition
@@ -394,11 +416,11 @@ fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
     // one without statistics).
     let rows = match st.of(table) {
         Some(_) => st.rows(table) * part_sel,
-        None if matches!(access, Access::Key { .. }) => return,
+        None if matches!(access, Access::Key { .. }) => return None,
         None if !partition.is_empty() => 1e12,
         None => match method.rows(st.txn(), table, index) {
             Ok(Some(n)) => n as f64,
-            _ => return,
+            _ => return None,
         },
     };
     let sel = (filter
@@ -434,7 +456,7 @@ fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
             },
         );
         if cost.is_none_or(|c| c > scanned) {
-            return;
+            return None;
         }
     }
     let rank = crate::plan::MethodRank {
@@ -446,7 +468,12 @@ fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
         share: sel.min(1.0),
         checks,
         partition: partition.into_iter().map(|(v, _)| v).collect(),
+        value: want
+            .call
+            .clone()
+            .filter(|_| method.values(&table.indexes[index], &want.function)),
     };
+    let at = rank.value.as_ref().map(|_| table.columns.len());
     match access {
         Access::Method { rank: r, .. } if own.is_some() => *r = Some(rank),
         _ => {
@@ -458,6 +485,7 @@ fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
         }
     }
     *estimate = Some(estimate.unwrap_or(rows).min(k));
+    at
 }
 
 /// Inner hash joins whose left side is a table an index of the keys could

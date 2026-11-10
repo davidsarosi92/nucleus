@@ -3158,11 +3158,19 @@ where `rank_cost` is at most the rows the scan reads (the table's, the
 range's or the condition's estimate), with `share` the filter's and the
 checks' selectivity.  The scan becomes `Access::Method` with `rank:
 MethodRank { function, args, desc, count, within, share, checks,
-partition }` (`count` the limit plus the offset); the sort and the limit
-stay above.
+partition, value }` (`count` the limit plus the offset); the sort and
+the limit stay above.  Where the method gives each row's value of `f`
+with it — `values(ix, f)`, the very number `f` computes of the row (the
+text index's BM25; by default none) — and a projection under the sort
+computes `f` (of one table's scan, not each partition's), `value` is
+the call: the scan's rows carry its value one more column past the
+table's (`Plan::width`), and the projection's call, wherever it is in
+its expressions, reads that column instead (PLAN.md §M14.21 T5c).
+Where the index cannot rank after all, the scan computes the call on
+each row it reads (`prune` reads the columns it takes).
 
 `exec::method_rows` evaluates them and calls `rank(txn, t, i, RankAsk {
-rank, served, share, part, among }, wanted, keep)`: `keep` the join's
+rank, served, share, part, among, values }, wanted, keep)`: `keep` the join's
 key filters, then `within`'s condition (unless the row came from
 `among`), the filter and the checks — `None` where nothing checks; and
 `among` (`exec::among`) a callback the method calls with the most rows
@@ -3172,7 +3180,7 @@ method's `rows_where`, `None` past that many.  The method gives at least
 `k`-th passing — or `None` where it cannot tell them; the scan then reads
 `within`'s rows (or every row) with the filter, the sort and the limit
 above taking the first.  `EXPLAIN`: `Index Scan using ix on t (col f
-arg) first k by f(col) [DESC]` for a condition ranked, `(k nearest col
+arg) first k by f(col) [DESC] [with values]` for a condition ranked, `(k nearest col
 to q [in c = …] [among ix: …])` for HNSW's — `among docs_body: body @@
 'fox'` where the text index's matches are what it ranks.
 
@@ -3425,7 +3433,7 @@ search's (and each tag's graph of an index `PARTITION BY (tag)`, rows
 moving between them), the upkeep going on.  `bench/ann/sql.py`: SIFT-1M through SQL
 as `bench/ann/pgvector_ref.py` runs pgvector (`docs/benchmarks.md`).
 
-### 8.19 Text analysis, queries, indexes and BM25 (`text`, §M14.21 T1–T5b)
+### 8.19 Text analysis, queries, indexes and BM25 (`text`, §M14.21 T1–T5c)
 
 An **analyzer** turns a text into **terms** — what a text index keeps and
 a text query looks for (§M14.21's later steps).  `text::Analyzer` has a
@@ -3604,7 +3612,11 @@ again — until `k` passed and every row tied with the `k`-th passing one
 has been read (a lookup each, in that order: it stops at the `k`-th
 exactly — a merge with the table's scan, as a served condition's rows
 are read, measured slower here; PLAN.md §M14.21 T5b); the sort and the
-limit above order them (by `text_score` again, for those rows only).
+limit above order them — by the scores the ranking gave with the rows
+(`RankAsk::values`, §8.17): `score()` does not analyze a returned row's
+text again (PLAN.md §M14.21 T5c); `text_score` scores the rows only
+where the index cannot rank them (a query of `score` not the
+condition's).
 `n` is `k` where no other condition is, else four times the rows the
 expected share takes; every match is scored where `n` is a 64th of the
 matches or more (about: no more than the documents or the leaves'
@@ -4438,18 +4450,22 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-10 — §M14.21 T5c, scores read from the ranking:**
+  `IndexMethod::values` (the text index's BM25) and `RankAsk::values`;
+  `MethodRank::value` — the ranked call, its value one more column past
+  the table's (`Plan::width`, `Access::valued`); `optimizer::ranked`
+  rewrites the projection's call to read it (one table's scan, not an
+  `Append`); `exec` appends the call's value where the index did not
+  rank (`method_rows` says whose rows they are); `prune` reads the call's
+  columns for it; the text index pushes each row's score; `EXPLAIN`
+  `… with values`; `tests/text_index.rs`, `59_text_score.slt` (§8.17,
+  §8.19).
 - **2026-11-10 — the index cache sized by the machine:**
   `nucleus_platform::real::physical_memory` (macOS `hw.memsize`; Linux
   `MemTotal` and the cgroup v2 / v1 limit; `None` elsewhere);
   `object_cache::budget` a quarter of it unless `--index-cache` sets it
   (1 GB where unknown), `nucleus_sql::index_cache`; the server's first
   line names it (§3.2, §9).
-- **2026-11-10 — the index cache sized by the machine:**
-  `nucleus_platform::real::physical_memory` (macOS `hw.memsize`; Linux
-  `MemTotal` and the cgroup v2 / v1 limit; `None` elsewhere);
-  `object_cache::budget` a quarter of it unless `--index-cache` sets it
-  (1 GB where unknown), `nucleus_sql::index_cache`; the server's first
-  line names it (§2, §9).
 - **2026-11-10 — §M14.21 T5b, block-max MaxScore and a parallel
   build:** segments version 2 (`segment.rs`: a skip list per term in
   more than one block — last document, bytes, the (frequency, length)

@@ -69,7 +69,25 @@ fn build_node<'a>(
             let wanted = ctx.needed.get(&(plan as *const Plan as usize));
             // The hash joins' key filters first, as a pipeline has them.
             let keys = crate::keyfilter::of_scan(ctx, plan);
-            if let Some(rows) = method_rows(
+            // The ranked value past the table's columns (§M14.21 T5c):
+            // the index's, or computed where it did not rank.
+            let value = match access {
+                Access::Method {
+                    rank: Some(crate::plan::MethodRank { value: Some(v), .. }),
+                    ..
+                } => Some(v),
+                _ => None,
+            };
+            let valued = move |rows: Rows<'a>| -> Rows<'a> {
+                let Some(v) = value else { return rows };
+                Box::new(rows.map(move |r| {
+                    let mut row = r?;
+                    let x = v.eval(&env(&row, ctx, outer))?;
+                    row.push(x);
+                    Ok(row)
+                }))
+            };
+            if let Some((rows, ranked)) = method_rows(
                 table,
                 access,
                 filter.as_ref(),
@@ -78,7 +96,7 @@ fn build_node<'a>(
                 ctx,
                 outer,
             )? {
-                return Ok(rows);
+                return Ok(if ranked { rows } else { valued(rows) });
             }
             // Where the index could not tell the rows: the filter's
             // B-tree range when it has one, else every row (and the
@@ -102,7 +120,7 @@ fn build_node<'a>(
                         .map_or(true, |(_, row)| crate::keyfilter::passes(&keys, row))
                 }))
             };
-            match filter {
+            valued(match filter {
                 None => Box::new(rows.map(|r| r.map(|(_, row)| row))),
                 Some(f) => Box::new(rows.filter_map(move |r| match r {
                     Err(e) => Some(Err(e)),
@@ -112,7 +130,7 @@ fn build_node<'a>(
                         Err(e) => Some(Err(e)),
                     },
                 })),
-            }
+            })
         }
         Plan::Values { rows, .. } => {
             let mut out = Vec::with_capacity(rows.len());
@@ -761,9 +779,10 @@ fn unserved(access: &Access) -> (&Access, Option<&Expr>) {
 
 /// The rows of a scan through [`Access::Method`] — those its index finds
 /// for the condition it serves, or first by its rank — that pass the rest
-/// of the filter and the key filters; `None` (the caller reads every row)
-/// for any other access path, or where the index cannot tell them for
-/// these values.
+/// of the filter and the key filters, and whether they are its rank's
+/// (each with the ranked value where the plan asks for it); `None` (the
+/// caller reads every row) for any other access path, or where the index
+/// cannot tell them for these values.
 fn method_rows<'a>(
     table: &'a Table,
     access: &Access,
@@ -772,7 +791,7 @@ fn method_rows<'a>(
     wanted: Option<&'a Vec<bool>>,
     ctx: &'a Ctx<'a>,
     outer: Option<&'a Env<'a>>,
-) -> Result<Option<Rows<'a>>> {
+) -> Result<Option<(Rows<'a>, bool)>> {
     let Access::Method {
         index,
         served,
@@ -809,7 +828,10 @@ fn method_rows<'a>(
             outer,
         )?;
         if let Some(rows) = ranked {
-            return Ok(Some(Box::new(rows.into_iter().map(|(_, row)| Ok(row)))));
+            return Ok(Some((
+                Box::new(rows.into_iter().map(|(_, row)| Ok(row))),
+                true,
+            )));
         }
         // Not ranked: the rows of the other method's condition it was
         // within, where that tells them.
@@ -833,8 +855,9 @@ fn method_rows<'a>(
     // exact, so its rows need not be read.
     if wanted.is_some_and(|w| !w.contains(&true)) && filter.is_none() && keys.is_empty() {
         let width = table.columns.len();
-        return Ok(Some(Box::new(
-            pks.into_iter().map(move |_| Ok(vec![Value::Null; width])),
+        return Ok(Some((
+            Box::new(pks.into_iter().map(move |_| Ok(vec![Value::Null; width]))),
+            false,
         )));
     }
     // The rows in key order, a block at a time: a merge with the table's
@@ -874,20 +897,23 @@ fn method_rows<'a>(
         Ok(rows) => rows.into_iter().map(Ok).collect::<Vec<_>>(),
         Err(e) => vec![Err(e)],
     });
-    Ok(Some(Box::new(rows.filter_map(move |row| {
-        let row = match row {
-            Ok(row) => row,
-            Err(e) => return Some(Err(e)),
-        };
-        if !crate::keyfilter::passes(&keys, &row) {
-            return None;
-        }
-        match filter.map(|f| f.holds(&env(&row, ctx, outer))) {
-            None | Some(Ok(true)) => Some(Ok(row)),
-            Some(Ok(false)) => None,
-            Some(Err(e)) => Some(Err(e)),
-        }
-    }))))
+    Ok(Some((
+        Box::new(rows.filter_map(move |row| {
+            let row = match row {
+                Ok(row) => row,
+                Err(e) => return Some(Err(e)),
+            };
+            if !crate::keyfilter::passes(&keys, &row) {
+                return None;
+            }
+            match filter.map(|f| f.holds(&env(&row, ctx, outer))) {
+                None | Some(Ok(true)) => Some(Ok(row)),
+                Some(Ok(false)) => None,
+                Some(Err(e)) => Some(Err(e)),
+            }
+        })),
+        false,
+    )))
 }
 
 /// The found rows a scan through an index method reads first; then each
@@ -970,6 +996,7 @@ fn ranked_rows(
         among: within
             .is_some()
             .then_some(&mut get as crate::index_method::Among),
+        values: r.value.is_some(),
     };
     m.rank(
         ctx.txn,

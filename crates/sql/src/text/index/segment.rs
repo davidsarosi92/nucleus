@@ -351,7 +351,12 @@ impl Terms {
         self.postings.extend_from_slice(&next.postings);
         self.positions.extend_from_slice(&next.positions);
         self.skips.extend_from_slice(&next.skips);
-        offset(self.postings.len().max(self.positions.len()).max(self.skips.len()))?;
+        offset(
+            self.postings
+                .len()
+                .max(self.positions.len())
+                .max(self.skips.len()),
+        )?;
         Ok(())
     }
 }
@@ -1065,8 +1070,11 @@ mod tests {
                 prev = i64::from(last);
                 // Every document's pair is beaten or met by an impact,
                 // and every impact is a document's.
-                let pairs: Vec<(u32, u32)> =
-                    ds.iter().zip(fs).map(|(&d, &f)| (f, s.lens[d as usize])).collect();
+                let pairs: Vec<(u32, u32)> = ds
+                    .iter()
+                    .zip(fs)
+                    .map(|(&d, &f)| (f, s.lens[d as usize]))
+                    .collect();
                 for &(f, len) in &pairs {
                     assert!(imp.iter().any(|&(g, l)| g >= f && l <= len));
                 }
@@ -1095,7 +1103,11 @@ mod tests {
                         terms.push(("seven", &[3]));
                     }
                     terms.sort();
-                    ((from + i as u32).to_be_bytes().to_vec(), u64::from(i as u32), doc(&terms))
+                    (
+                        (from + i as u32).to_be_bytes().to_vec(),
+                        u64::from(i as u32),
+                        doc(&terms),
+                    )
                 })
                 .collect();
             Segment::decode(&of_docs(&docs).unwrap()).unwrap()

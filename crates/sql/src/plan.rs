@@ -343,6 +343,11 @@ pub struct MethodRank {
     /// For an index of more columns (a partitioned HNSW's `PARTITION
     /// BY`), the values the conditions hold them equal to.
     pub partition: Vec<Expr>,
+    /// Where the index gives each row's value of the function
+    /// ([`crate::index_method::IndexMethod::values`]): the function's
+    /// call on the row, its value one more column past the table's —
+    /// the index's, or this computed where the index cannot rank.
+    pub value: Option<Expr>,
 }
 
 impl Access {
@@ -352,6 +357,12 @@ impl Access {
             Access::Full | Access::Key { index: None, .. } => None,
             Access::Key { index: Some(i), .. } | Access::Method { index: i, .. } => Some(*i),
         }
+    }
+
+    /// Whether its rows carry the ranked function's value past the
+    /// table's columns ([`MethodRank::value`]).
+    pub fn valued(&self) -> bool {
+        matches!(self, Access::Method { rank: Some(r), .. } if r.value.is_some())
     }
 
     /// Calls `f` on each of the path's expressions.
@@ -383,7 +394,8 @@ impl Access {
                         w.for_each_expr(f);
                     }
                     r.checks.iter().for_each(&mut *f);
-                    r.partition.iter().for_each(f);
+                    r.partition.iter().for_each(&mut *f);
+                    r.value.iter().for_each(f);
                 }
             }
         }
@@ -418,7 +430,8 @@ impl Access {
                         w.for_each_expr_mut(f);
                     }
                     r.checks.iter_mut().for_each(&mut *f);
-                    r.partition.iter_mut().for_each(f);
+                    r.partition.iter_mut().for_each(&mut *f);
+                    r.value.iter_mut().for_each(f);
                 }
             }
         }
@@ -708,7 +721,7 @@ impl Plan {
     /// Columns per output row.
     pub fn width(&self) -> usize {
         match self {
-            Plan::Scan { table, .. } => table.columns.len(),
+            Plan::Scan { table, access, .. } => table.columns.len() + access.valued() as usize,
             Plan::Values { width, .. } => *width,
             Plan::Project { exprs, .. } => exprs.len(),
             Plan::Join {
@@ -807,10 +820,15 @@ impl Plan {
                                     show(q)
                                 ),
                                 _ => format!(
-                                    "first {} by {}({col}){}{among}",
+                                    "first {} by {}({col}){}{}{among}",
                                     show(&r.count),
                                     r.function,
-                                    if r.desc { " DESC" } else { "" }
+                                    if r.desc { " DESC" } else { "" },
+                                    if r.value.is_some() {
+                                        " with values"
+                                    } else {
+                                        ""
+                                    }
                                 ),
                             });
                         }

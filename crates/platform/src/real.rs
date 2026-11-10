@@ -273,12 +273,15 @@ fn machine_memory() -> Option<u64> {
 
 /// A container's memory limit (cgroup v2, then v1), if one is set.
 fn cgroup_limit() -> Option<u64> {
-    ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]
-        .iter()
-        .filter_map(|p| fs::read_to_string(p).ok())
-        // "max" (v2) or a page-rounded i64::MAX (v1): no limit.
-        .filter_map(|s| s.trim().parse::<u64>().ok())
-        .find(|&b| b > 0 && b < 1 << 60)
+    [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ]
+    .iter()
+    .filter_map(|p| fs::read_to_string(p).ok())
+    // "max" (v2) or a page-rounded i64::MAX (v1): no limit.
+    .filter_map(|s| s.trim().parse::<u64>().ok())
+    .find(|&b| b > 0 && b < 1 << 60)
 }
 
 /// `fcntl(F_BARRIERFSYNC)`: the file's writes so far reach the drive before
