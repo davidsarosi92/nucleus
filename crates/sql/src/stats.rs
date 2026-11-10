@@ -549,7 +549,10 @@ impl<'a> Stats<'a> {
     /// pattern), evaluated as the executor would: `None` without a sample,
     /// or when `pred` cannot be evaluated here (a subquery, a volatile
     /// function, a parameter not yet bound, an error).  No match counts
-    /// as half of one.
+    /// as half of one.  An index method that knows the share at less cost
+    /// says it first ([`crate::index_method::selectivity`]: the text
+    /// index from its words' document counts, not a text analyzed a
+    /// sample row).
     fn sampled(&self, table: &Table, pred: &Expr) -> Option<f64> {
         if pred.has_subquery() || volatile(pred) {
             return None;
@@ -563,7 +566,9 @@ impl<'a> Stats<'a> {
         {
             return *s;
         }
-        let s = self.count_sampled(table, pred);
+        let s = crate::index_method::selectivity(self.txn, table, pred)
+            .map(|s| s.max(0.5 / self.rows(table).max(1.0)))
+            .or_else(|| self.count_sampled(table, pred));
         self.estimated
             .borrow_mut()
             .push((table.id, pred.clone(), s));

@@ -232,6 +232,23 @@ pub trait IndexMethod: Send + Sync {
         None
     }
 
+    /// The share of the rows of `t`, as `txn` sees them, for which
+    /// `function(column, args…)` holds, where index `i` tells it at less
+    /// cost than the statistics' kept sample (which evaluates the
+    /// condition on each of its rows — a text's analysis each).  By
+    /// default `None`: the sample, or a default, estimates it.
+    fn selectivity(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        i: usize,
+        function: &str,
+        args: &[crate::types::Value],
+    ) -> Option<f64> {
+        let _ = (txn, t, i, function, args);
+        None
+    }
+
     /// The rows index `i` of `t` holds as `txn` sees it, where it knows
     /// them cheaply (for a table not analyzed).  By default `None`.
     fn rows(&self, txn: &dyn KvTxn, t: &Table, i: usize) -> Result<Option<usize>> {
@@ -353,6 +370,37 @@ pub fn of(ix: &Index) -> Result<Option<Arc<dyn IndexMethod>>> {
         None => Ok(None),
         Some(m) => named(m),
     }
+}
+
+/// The share of `t`'s rows `pred` holds for, as an index method serving
+/// it says ([`IndexMethod::selectivity`]): `pred` a call of a column of
+/// `t` and literals, the column an index's first, the index's method
+/// serving the call (with its operand, where it has one).
+pub fn selectivity(txn: &dyn KvTxn, t: &Table, pred: &crate::expr::Expr) -> Option<f64> {
+    use crate::expr::Expr;
+    let Expr::Call(f, args) = pred else {
+        return None;
+    };
+    let (Expr::Column(col), rest) = args.split_first()? else {
+        return None;
+    };
+    let values: Vec<crate::types::Value> = rest
+        .iter()
+        .map(|e| match e {
+            Expr::Literal(v) => Some(v.clone()),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    t.indexes.iter().enumerate().find_map(|(i, ix)| {
+        if ix.columns.first() != Some(col) {
+            return None;
+        }
+        let m = of(ix).ok().flatten()?;
+        let operand = m.operand(ix, f.name());
+        (m.serves(ix, f.name()) && operand.is_none_or(|v| values.last() == Some(&v)))
+            .then(|| m.selectivity(txn, t, i, f.name(), &values))
+            .flatten()
+    })
 }
 
 /// After a statement or a commit in `kv` (`wrote`: one that may have

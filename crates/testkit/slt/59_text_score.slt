@@ -170,3 +170,47 @@ SELECT id FROM notes WHERE body @@ 'wolf' ORDER BY v <-> '[3,4]' LIMIT 1
 
 statement ok
 DROP TABLE notes
+
+# The share of rows `@@` finds, as the planner estimates it: each word's
+# documents by the index's counts, the words as independent (all: the
+# product; any: one less the product of the misses) — not each kept
+# sample row's text analyzed.  `fox`: 10 of 100, `dog`: 30 (all 10 of
+# the foxes among them: independence misses that, as PostgreSQL's).
+statement ok
+CREATE TABLE words (id INT PRIMARY KEY, body TEXT)
+
+statement ok
+INSERT INTO words SELECT i, CASE WHEN i % 10 = 0 THEN 'fox dog' WHEN i % 4 = 0 THEN 'dog' ELSE 'cat' END FROM generate_series(1, 100) AS g(i)
+
+statement ok
+CREATE INDEX words_body ON words USING text (body)
+
+statement ok
+ANALYZE words
+
+query T
+EXPLAIN SELECT id FROM words WHERE body @@ 'fox'
+----
+Project: #0
+  Index Scan using words_body on words (body @@ 'fox') (rows=10)
+
+query T
+EXPLAIN SELECT id FROM words WHERE body @@ 'fox dog'
+----
+Project: #0
+  Index Scan using words_body on words (body @@ 'fox dog') (rows=37)
+
+query T
+EXPLAIN SELECT id FROM words WHERE body @@ '+fox +dog'
+----
+Project: #0
+  Index Scan using words_body on words (body @@ '+fox +dog') (rows=3)
+
+query T
+EXPLAIN SELECT id FROM words WHERE body @@ 'dog -fox'
+----
+Project: #0
+  Index Scan using words_body on words (body @@ 'dog -fox') (rows=27)
+
+statement ok
+DROP TABLE words

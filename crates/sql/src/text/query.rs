@@ -156,6 +156,27 @@ pub(crate) fn eval(n: &Node, hits: &[Vec<u32>]) -> bool {
     }
 }
 
+/// The share of documents `n` holds for, given each leaf's (`leaf`), its
+/// words taken as independent — PostgreSQL's `tsquery_opr_selec`: all of
+/// them the product of their shares, any of them one less the product of
+/// their misses, a phrase as all of its words.
+pub(crate) fn share(n: &Node, leaf: &dyn Fn(usize) -> f64) -> f64 {
+    match n {
+        Node::Leaf(i) => leaf(*i),
+        Node::Phrase(terms) => terms.iter().map(|t| leaf(t.0)).product(),
+        Node::Bool { must, should, not } => {
+            let all: f64 = must.iter().map(|n| share(n, leaf)).product();
+            let none: f64 = not.iter().map(|n| 1.0 - share(n, leaf)).product();
+            let any = if must.is_empty() && !should.is_empty() {
+                1.0 - should.iter().map(|n| 1.0 - share(n, leaf)).product::<f64>()
+            } else {
+                1.0
+            };
+            all * none * any
+        }
+    }
+}
+
 /// Whether `a` and `b` are within `k` edits — insertions, deletions,
 /// substitutions and transpositions of neighbours, over characters
 /// (the optimal string alignment distance, as Lucene's automata count).

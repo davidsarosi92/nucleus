@@ -412,6 +412,43 @@ impl IndexMethod for TextIndex {
             .then(|| (c.k / c.share).min(c.rows))
     }
 
+    /// `@@`'s share: each word's documents over the index's
+    /// ([`crate::text::query::share`]) — PostgreSQL estimates them from a
+    /// sample's most common words, the index counts them.  A prefix or a
+    /// fuzzy word is left to the sample.
+    fn selectivity(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        i: usize,
+        function: &str,
+        args: &[Value],
+    ) -> Option<f64> {
+        let (Some(Value::Text(text)), "@@") = (args.first(), function) else {
+            return None;
+        };
+        let a =
+            crate::text::named(analyzer_of(&t.indexes[i]).unwrap_or(crate::text::DEFAULT)).ok()?;
+        let q = crate::text::query::cached(text, &a).ok()?;
+        let Some(root) = &q.root else {
+            return Some(0.0);
+        };
+        let terms: Vec<&str> = q
+            .leaves
+            .iter()
+            .map(|l| match l {
+                crate::text::query::Leaf::Exact(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        let st = store(t, i).view(txn).ok()?.stats(&terms);
+        if st.docs == 0 {
+            return Some(0.0);
+        }
+        let docs = st.docs as f64;
+        Some(crate::text::query::share(root, &|l| st.df[l] as f64 / docs))
+    }
+
     fn rows(&self, txn: &dyn KvTxn, t: &Table, i: usize) -> Result<Option<usize>> {
         Ok(Some(store(t, i).view(txn)?.stats(&[]).docs as usize))
     }

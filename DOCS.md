@@ -2403,7 +2403,10 @@ per planning and evaluated by the predicate itself (matches / rows, at
 least half a row); a predicate with a subquery or a volatile call, one
 that fails on a sampled row, or a table whose columns changed since
 falls back to the defaults (`LIKE` 0.1, `NOT LIKE` 0.9, other
-comparisons 0.33, the rest 0.5).  For analyzed tables the access path is the cheapest of a
+comparisons 0.33, the rest 0.5).  A condition an index method serves is
+asked of the method first (`index_method::selectivity`, §8.12): the text
+index tells `@@`'s share from its words' document counts (§8.19), where
+the sample would analyze each kept row's text at every planning.  For analyzed tables the access path is the cheapest of a
 full scan and every index (a secondary index pays a row fetch per row),
 `EXPLAIN` shows `rows=`, and chains of up to 8 inner joins are reordered by
 dynamic programming (no cross products unless nothing connects; the
@@ -3124,6 +3127,15 @@ lookup costs in entries read); past 256 keys a run each on the
 statement's workers over the transaction's shared reads.  Where
 `rows_where` says `None`
 every row is read with `cond` checked.  `EXPLAIN`: `Index Scan using ix on t (col f arg)`.
+`selectivity(txn, t, i, function, args)`: the share of the table's rows
+such a conjunct holds for, where the index tells it at less cost than
+the statistics' kept sample (§8.8), which it is asked before; by default
+`None`.  The text index's `@@`: each word's documents over the index's,
+the words as independent — all of them the product, any of them one
+less the product of their misses, a phrase as all of its words, an
+excluded one its miss (`query::share`, PostgreSQL's `tsquery_opr_selec`
+over exact counts where PostgreSQL has a sample's most common words); a
+prefix or a fuzzy word leaves it to the sample.
 
 Two more let a method compute a function of such a condition and rank
 the rows it finds (§M14.21 T5, BM25's).  `function(t, i, name, arg)`:
@@ -4450,6 +4462,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-10 — §M14.21, `@@` estimated by the text index:**
+  `IndexMethod::selectivity` and `index_method::selectivity`, asked by
+  `Stats::sampled` before the kept sample; the text index's from its
+  words' document counts (`query::share`).  An analyzed table's text
+  query no longer analyzes the sample's texts at each planning (SciFact
+  46 → 0.27 ms a query).  `59_text_score.slt` checks the estimates.
 - **2026-11-10 — §M14.21 T5c, scores read from the ranking:**
   `IndexMethod::values` (the text index's BM25) and `RankAsk::values`;
   `MethodRank::value` — the ranked call, its value one more column past

@@ -5886,6 +5886,26 @@ slower).  MS MARCO (1,000 dev queries, one run each): 2.05 / 1.45 →
 4.28; a 1 % filter 31.46 → 23.56 — its ~1,100 row lookups, which vary
 from run to run (16.27 in T5b), not this step.
 
+**`@@` estimated by the text index** (2026-11-10, found measuring T7).
+On an analyzed table a text query took 46 ms on SciFact, not 0.2: the
+planner estimated `body @@ q` on the sample `ANALYZE` keeps (§M14.12
+V3: up to 1,000 rows, 1 MiB of them) by evaluating it — every kept
+text analyzed, at every planning (`bench/text/beir.py` does not
+analyze, so its numbers never showed it).  Prior art: PostgreSQL's
+`tsmatchsel` estimates `@@` from the most common lexemes
+`ts_typanalyze` keeps from a sample, a query's lexemes as independent
+(`tsquery_opr_selec`: AND the product, OR s1 + s2 − s1·s2, NOT 1 − s),
+one not among them at a floor; Lucene has no planner to estimate for —
+its cost is the postings' lengths (`ScorerSupplier::cost`).  Taken:
+PostgreSQL's combination, over the index's exact document counts (the
+counts BM25 reads, T5) in place of a sample's most common:
+`IndexMethod::selectivity`, asked by the statistics before the sample,
+the text index's by `query::share`; a prefix or a fuzzy word (a sum
+over the dictionary's terms) is left to the sample.  SciFact, analyzed:
+46.3 → 0.27 ms a query (0.20 not analyzed; e61d55f analyzed 47.3).
+Not taken: remembering the sample's answers across plannings — each
+new query text would pay again.
+
 ### §M14.22 — Embeddings in the database ⬜
 
 The step every AI application repeats — text to vectors, kept in sync —
