@@ -69,10 +69,6 @@ fn build_node<'a>(
             let wanted = ctx.needed.get(&(plan as *const Plan as usize));
             // The hash joins' key filters first, as a pipeline has them.
             let keys = crate::keyfilter::of_scan(ctx, plan);
-            if let Some(rows) = nearest(table, access, filter.as_ref(), &keys, wanted, ctx, outer)?
-            {
-                return Ok(rows);
-            }
             if let Some(rows) = method_rows(
                 table,
                 access,
@@ -87,13 +83,7 @@ fn build_node<'a>(
             // Where the index could not tell the rows: the filter's
             // B-tree range when it has one, else every row (and the
             // condition a method's index would have served).
-            let (access, served) = match access {
-                Access::Nearest {
-                    within: Some(w), ..
-                } => (&**w, None),
-                Access::Method { cond, .. } => (&Access::Full, Some(cond)),
-                a => (a, None),
-            };
+            let (access, served) = unserved(access);
             let filter = match (served, filter) {
                 (Some(c), Some(f)) => Some(Expr::Binary(
                     crate::ast::BinaryOp::And,
@@ -751,90 +741,29 @@ pub(crate) fn key_range(
     Ok(Some((start, end, *index)))
 }
 
-/// The rows of a scan through [`Access::Nearest`] that pass its filter and
-/// key filters, as the index method finds them; `None` (the caller reads
-/// every row) for any other access path, or where the index cannot tell
-/// them: a query or a count it does not take, or fewer rows than asked
-/// for found.
-fn nearest<'a>(
-    table: &Table,
-    access: &Access,
-    filter: Option<&Expr>,
-    keys: &[(usize, std::sync::Arc<crate::keyfilter::KeyFilter>)],
-    wanted: Option<&Vec<bool>>,
-    ctx: &'a Ctx<'a>,
-    outer: Option<&'a Env<'a>>,
-) -> Result<Option<Rows<'a>>> {
-    let Access::Nearest {
-        index,
-        query,
-        count,
-        within,
-        share,
-        checks,
-        partition,
-    } = access
-    else {
-        return Ok(None);
-    };
-    let e = env(&[], ctx, outer);
-    let Value::Int(k) = count.eval(&e)? else {
-        return Ok(None);
-    };
-    let Ok(k) = usize::try_from(k) else {
-        return Ok(None);
-    };
-    if k == 0 {
-        return Ok(Some(Box::new(std::iter::empty())));
+/// The access path a scan through an index method reads where the index
+/// cannot tell its rows, and the condition it served, then checked on
+/// each: every row, or the B-tree range or the other method's condition
+/// a ranking was within.
+fn unserved(access: &Access) -> (&Access, Option<&Expr>) {
+    match access {
+        Access::Method {
+            served: Some(s), ..
+        } => (&Access::Full, (!s.above).then_some(&s.cond)),
+        Access::Method { rank: Some(r), .. } => match r.within.as_deref() {
+            Some(w) => unserved(w),
+            None => (&Access::Full, None),
+        },
+        Access::Method { .. } => (&Access::Full, None),
+        a => (a, None),
     }
-    let q = query.eval(&e)?;
-    // A partitioned index's graph: its columns' values (`col = NULL`
-    // matches nothing; a value its column's key cannot hold, the scan).
-    let mut values = Vec::with_capacity(partition.len());
-    for (v, &c) in partition.iter().zip(&table.indexes[*index].columns[1..]) {
-        let Some(v) = key_bound(v.eval(&e)?, table.columns[c].ty) else {
-            return Ok(None);
-        };
-        values.push(v);
-    }
-    let Some(part) = crate::hnsw::part_of(&values) else {
-        return Ok(Some(Box::new(std::iter::empty())));
-    };
-    let mut keep = |row: &Row| -> Result<bool> {
-        if !crate::keyfilter::passes(keys, row) {
-            return Ok(false);
-        }
-        let e = env(row, ctx, outer);
-        for c in filter.into_iter().chain(checks) {
-            if !c.holds(&e)? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    };
-    let among = match within {
-        Some(w) => among(table, w, *index, &part, k, *share, ctx, outer)?,
-        None => None,
-    };
-    let found = crate::hnsw::nearest_rows(
-        ctx.txn,
-        table,
-        *index,
-        &q,
-        k,
-        *share,
-        among.as_ref(),
-        &part,
-        wanted.map(Vec::as_slice),
-        &mut keep,
-    )?;
-    Ok(found.map(|rows| -> Rows<'a> { Box::new(rows.into_iter().map(|(_, row)| Ok(row))) }))
 }
 
 /// The rows of a scan through [`Access::Method`] — those its index finds
-/// for the condition it serves — that pass the rest of the filter and the
-/// key filters; `None` (the caller reads every row) for any other access
-/// path, or where the index cannot tell them for these values.
+/// for the condition it serves, or first by its rank — that pass the rest
+/// of the filter and the key filters; `None` (the caller reads every row)
+/// for any other access path, or where the index cannot tell them for
+/// these values.
 fn method_rows<'a>(
     table: &'a Table,
     access: &Access,
@@ -846,47 +775,57 @@ fn method_rows<'a>(
 ) -> Result<Option<Rows<'a>>> {
     let Access::Method {
         index,
-        function,
-        args,
+        served,
         rank,
-        ..
     } = access
     else {
         return Ok(None);
     };
-    let e = env(&[], ctx, outer);
-    let values = args
-        .iter()
-        .map(|a| a.eval(&e))
-        .collect::<Result<Vec<_>>>()?;
-    // The first rows by an order, where nothing else filters them (a
-    // join's key filters may).
-    let rank = match rank {
-        Some(r) if filter.is_none() && keys.is_empty() => {
-            let k = match r.count.eval(&e)? {
-                Value::Int(n) => usize::try_from(n).ok(),
-                _ => None,
-            };
-            match k {
-                Some(k) => Some(crate::index_method::Rank {
-                    function: r.function.clone(),
-                    args: r
-                        .args
-                        .iter()
-                        .map(|a| a.eval(&e))
-                        .collect::<Result<Vec<_>>>()?,
-                    desc: r.desc,
-                    k,
-                }),
-                None => None,
-            }
-        }
-        _ => None,
-    };
     let Some(m) = crate::index_method::of(&table.indexes[*index])? else {
         return Ok(None);
     };
-    let Some(pks) = m.rows_where(ctx.txn, table, *index, function, &values, rank.as_ref())? else {
+    let e = env(&[], ctx, outer);
+    let served = match served {
+        Some(s) => Some((
+            s.function.as_str(),
+            s.args
+                .iter()
+                .map(|a| a.eval(&e))
+                .collect::<Result<Vec<_>>>()?,
+        )),
+        None => None,
+    };
+    if let Some(r) = rank {
+        let ranked = ranked_rows(
+            table,
+            *index,
+            &*m,
+            served.as_ref().map(|(f, v)| (*f, v.as_slice())),
+            r,
+            filter,
+            &keys,
+            wanted,
+            ctx,
+            outer,
+        )?;
+        if let Some(rows) = ranked {
+            return Ok(Some(Box::new(rows.into_iter().map(|(_, row)| Ok(row)))));
+        }
+        // Not ranked: the rows of the other method's condition it was
+        // within, where that tells them.
+        if served.is_none() {
+            return match r.within.as_deref() {
+                Some(w @ Access::Method { .. }) => {
+                    method_rows(table, w, filter, keys, wanted, ctx, outer)
+                }
+                _ => Ok(None),
+            };
+        }
+    }
+    let Some((function, values)) = served else {
+        return Ok(None);
+    };
+    let Some(pks) = m.rows_where(ctx.txn, table, *index, function, &values)? else {
         return Ok(None);
     };
     crate::budget::charge_scans(pks.len() as u64)?;
@@ -929,33 +868,133 @@ fn method_rows<'a>(
     }))))
 }
 
-/// The rows (primary keys) in the B-tree key range `w` of a filter, for
-/// a search among them by index `index` — `None` where they are more than
-/// [`crate::hnsw::among_most`] (the graph then searched instead), or
-/// expected to be (twice that, by the filter's estimated `share`: the
-/// range is not read).
+/// The rows a method's rank gives ([`crate::index_method::IndexMethod::rank`]),
+/// each passing the key filters, the rank's `within` condition (unless
+/// the method ranked among its rows), the filter and the rank's checks,
+/// in that order; `None` where the index cannot tell them.
 #[allow(clippy::too_many_arguments)]
+fn ranked_rows(
+    table: &Table,
+    index: usize,
+    m: &dyn crate::index_method::IndexMethod,
+    served: Option<(&str, &[Value])>,
+    r: &crate::plan::MethodRank,
+    filter: Option<&Expr>,
+    keys: &[(usize, std::sync::Arc<crate::keyfilter::KeyFilter>)],
+    wanted: Option<&Vec<bool>>,
+    ctx: &Ctx,
+    outer: Option<&Env>,
+) -> Result<Option<Vec<(Vec<u8>, Row)>>> {
+    let e = env(&[], ctx, outer);
+    let Value::Int(k) = r.count.eval(&e)? else {
+        return Ok(None);
+    };
+    let Ok(k) = usize::try_from(k) else {
+        return Ok(None);
+    };
+    let rank = crate::index_method::Rank {
+        function: r.function.clone(),
+        args: r.args.iter().map(|a| a.eval(&e)).collect::<Result<_>>()?,
+        desc: r.desc,
+        k,
+    };
+    // An index of more columns: their values (`col = NULL` matches
+    // nothing — the method's to say; a value its column's key cannot
+    // hold, the scan).
+    let mut part = Vec::with_capacity(r.partition.len());
+    for (v, &c) in r.partition.iter().zip(&table.indexes[index].columns[1..]) {
+        let Some(v) = key_bound(v.eval(&e)?, table.columns[c].ty) else {
+            return Ok(None);
+        };
+        part.push(v);
+    }
+    let within = r.within.as_deref();
+    let chose = match within {
+        Some(Access::Method {
+            served: Some(s), ..
+        }) => Some(&s.cond),
+        _ => None,
+    };
+    let mut keep = |row: &Row, among: bool| -> Result<bool> {
+        if !crate::keyfilter::passes(keys, row) {
+            return Ok(false);
+        }
+        let e = env(row, ctx, outer);
+        let chose = chose.filter(|_| !among);
+        for c in chose.into_iter().chain(filter).chain(&r.checks) {
+            if !c.holds(&e)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    let free = keys.is_empty() && chose.is_none() && filter.is_none() && r.checks.is_empty();
+    let mut get = |most: usize| match within {
+        Some(w) => among(table, w, most, ctx, outer),
+        None => Ok(None),
+    };
+    let mut ask = crate::index_method::RankAsk {
+        rank: &rank,
+        served,
+        share: r.share,
+        part: &part,
+        among: within
+            .is_some()
+            .then_some(&mut get as crate::index_method::Among),
+    };
+    m.rank(
+        ctx.txn,
+        table,
+        index,
+        &mut ask,
+        wanted.map(Vec::as_slice),
+        (!free).then_some(&mut keep as crate::index_method::Keep),
+    )
+}
+
+/// The rows (primary keys) a ranking is within — a filter's B-tree key
+/// range, or another method's condition (`w`) —, for a search among them:
+/// `None` where they are more than `most`.
 fn among(
     table: &Table,
     w: &Access,
-    index: usize,
-    part: &[u8],
-    k: usize,
-    share: f64,
+    most: usize,
     ctx: &Ctx,
     outer: Option<&Env>,
-) -> Result<Option<crate::hnsw::Pks>> {
-    let rows = crate::hnsw::rows(ctx.txn, table, index, part)?;
-    let most = crate::hnsw::among_most(k, crate::hnsw::ef_search(), rows);
-    if share * rows as f64 > 2.0 * most as f64 {
-        return Ok(None);
+) -> Result<Option<crate::index_method::Pks>> {
+    let mut pks = crate::index_method::Pks::default();
+    if let Access::Method {
+        index,
+        served: Some(s),
+        ..
+    } = w
+    {
+        let Some(m) = crate::index_method::of(&table.indexes[*index])? else {
+            return Ok(None);
+        };
+        let e = env(&[], ctx, outer);
+        let values = s
+            .args
+            .iter()
+            .map(|a| a.eval(&e))
+            .collect::<Result<Vec<_>>>()?;
+        let Some(found) = m.rows_where(ctx.txn, table, *index, &s.function, &values)? else {
+            return Ok(None);
+        };
+        crate::budget::charge_scans(found.len() as u64)?;
+        if found.len() > most {
+            return Ok(None);
+        }
+        for pk in &found {
+            pks.push(pk);
+        }
+        return Ok(Some(pks));
     }
     let Some((start, end, Some(_))) = key_range(table, w, &env(&[], ctx, outer))? else {
-        return Ok(Some(crate::hnsw::Pks::default()));
+        return Ok(Some(pks));
     };
     let end = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
     let mut entries = Entries::new(ctx, Bound::Included(&start), end)?;
-    let mut pks = crate::hnsw::Pks::default();
     while let Some((_, pk)) = entries.next()? {
         pks.push(pk);
         if pks.len() > most {

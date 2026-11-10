@@ -277,67 +277,72 @@ pub enum Access {
         /// Upper bound on the next column.
         upper: Bound<Expr>,
     },
-    /// The rows nearest a value by the distance of an index method's
-    /// (`ORDER BY col <-> q LIMIT k`, PLAN.md §M14.12 V4b): at least
-    /// `count` of them that pass the scan's filter when the index can
-    /// find them, else every row — the sort and the limit above stay.
-    Nearest {
-        /// `table.indexes[index]`.
-        index: usize,
-        /// The value nearness is to (read once per scan).
-        query: Expr,
-        /// How many: the limit and the offset.
-        count: Expr,
-        /// A key range of a B-tree index that holds every row the filter
-        /// passes ([`Access::Key`]), when the filter has one: few rows in
-        /// it are searched exactly, and it is the scan where the index
-        /// cannot tell the rows (PLAN.md §M14.12 V5).
-        within: Option<Box<Access>>,
-        /// The share of the rows the filter is estimated to pass (1
-        /// without one).
-        share: f64,
-        /// Conditions of the plan above the scan its rows must pass too,
-        /// each checked only on rows the ones before it passed: a
-        /// row-level security policy, then the statement's filter above
-        /// its barrier ([`Plan::Secure`]).
-        checks: Vec<Expr>,
-        /// For an index partitioned (`PARTITION BY`), the values of its
-        /// partitioning columns the conditions fix: the graph searched.
-        partition: Vec<Expr>,
-    },
-    /// The rows an index method finds, exactly, for a condition of the
-    /// scan's filter (`col @@ q` by a text index, PLAN.md §M14.21 T3):
-    /// the condition is out of the filter, and is checked on every row
-    /// where the index cannot tell them.
+    /// The rows an index method finds: exactly, for a condition of the
+    /// scan's filter it serves (`col @@ q` by a text index, PLAN.md
+    /// §M14.21 T3), the condition out of the filter; first by an order,
+    /// for a limit over the scan (`ORDER BY col <-> q LIMIT k` by HNSW,
+    /// §M14.12 V4b; `score(col @@ q) DESC` by a text index, §M14.21 T5a);
+    /// or both.  Where the index cannot tell them, every row is read (or
+    /// those the rank's `within` has), the condition checked on each.
     Method {
         /// `table.indexes[index]`.
         index: usize,
-        /// The condition's function
-        /// ([`crate::index_method::IndexMethod::serves`]).
-        function: String,
-        /// Its arguments after the indexed column, each fixed for the
-        /// scan.
-        args: Vec<Expr>,
-        /// The condition.
-        cond: Expr,
-        /// The order the rows are wanted in for a limit over the scan, if
-        /// the index ranks by it ([`crate::index_method::IndexMethod::ranks`]).
+        /// The condition served, if one.
+        served: Option<Served>,
+        /// The order the rows are wanted in, if the index ranks by it
+        /// ([`crate::index_method::IndexMethod::ranks`]).
         rank: Option<MethodRank>,
     },
 }
 
+/// A condition of a scan's filter an index method finds the rows of
+/// exactly: `function(column, args…)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Served {
+    /// The condition's function
+    /// ([`crate::index_method::IndexMethod::serves`]).
+    pub function: String,
+    /// Its arguments after the indexed column, each fixed for the scan.
+    pub args: Vec<Expr>,
+    /// The condition.
+    pub cond: Expr,
+    /// Whether the condition is checked above the scan too — a
+    /// statement's over a row-level security barrier, never evaluated
+    /// below it: where the index cannot tell the rows, every row is read
+    /// without it.
+    pub above: bool,
+}
+
 /// An order an [`Access::Method`] scan's index ranks its rows by, for the
-/// first `count`: `function(column, args…)`, greatest first with `desc`.
+/// first `count` of them that pass the scan's filter: `function` of the
+/// indexed column and `args`, greatest first with `desc`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MethodRank {
     /// The function.
     pub function: String,
-    /// Its arguments after the indexed column, each fixed for the scan.
+    /// Its arguments but the indexed column, each fixed for the scan.
     pub args: Vec<Expr>,
     /// Greatest first.
     pub desc: bool,
     /// The rows wanted: the limit and the offset above.
     pub count: Expr,
+    /// Rows to rank among, where the filter has a cheaper way to them —
+    /// a B-tree's key range ([`Access::Key`], PLAN.md §M14.12 V5) or
+    /// another method's condition ([`Access::Method`], §M14.21 T5a):
+    /// few are ranked exactly, and it is the scan where the index cannot
+    /// tell the rows.
+    pub within: Option<Box<Access>>,
+    /// The share of the rows the conditions are estimated to pass (1
+    /// without them).
+    pub share: f64,
+    /// Conditions of the plan above the scan its rows must pass too,
+    /// each checked only on rows the ones before it passed: a row-level
+    /// security policy, then the statement's filter above its barrier
+    /// ([`Plan::Secure`]).
+    pub checks: Vec<Expr>,
+    /// For an index of more columns (a partitioned HNSW's `PARTITION
+    /// BY`), the values the conditions hold them equal to.
+    pub partition: Vec<Expr>,
 }
 
 impl Access {
@@ -345,9 +350,7 @@ impl Access {
     pub fn secondary(&self) -> Option<usize> {
         match self {
             Access::Full | Access::Key { index: None, .. } => None,
-            Access::Key { index: Some(i), .. }
-            | Access::Nearest { index: i, .. }
-            | Access::Method { index: i, .. } => Some(*i),
+            Access::Key { index: Some(i), .. } | Access::Method { index: i, .. } => Some(*i),
         }
     }
 
@@ -368,31 +371,20 @@ impl Access {
                     }
                 }
             }
-            Access::Nearest {
-                query,
-                count,
-                within,
-                checks,
-                partition,
-                ..
-            } => {
-                f(query);
-                f(count);
-                if let Some(w) = within {
-                    w.for_each_expr(f);
+            Access::Method { served, rank, .. } => {
+                if let Some(s) = served {
+                    s.args.iter().for_each(&mut *f);
+                    f(&s.cond);
                 }
-                checks.iter().for_each(&mut *f);
-                partition.iter().for_each(f);
-            }
-            Access::Method {
-                args, cond, rank, ..
-            } => {
-                args.iter().for_each(&mut *f);
                 if let Some(r) = rank {
                     r.args.iter().for_each(&mut *f);
                     f(&r.count);
+                    if let Some(w) = &r.within {
+                        w.for_each_expr(f);
+                    }
+                    r.checks.iter().for_each(&mut *f);
+                    r.partition.iter().for_each(f);
                 }
-                f(cond);
             }
         }
     }
@@ -414,31 +406,20 @@ impl Access {
                     }
                 }
             }
-            Access::Nearest {
-                query,
-                count,
-                within,
-                checks,
-                partition,
-                ..
-            } => {
-                f(query);
-                f(count);
-                if let Some(w) = within {
-                    w.for_each_expr_mut(f);
+            Access::Method { served, rank, .. } => {
+                if let Some(s) = served {
+                    s.args.iter_mut().for_each(&mut *f);
+                    f(&mut s.cond);
                 }
-                checks.iter_mut().for_each(&mut *f);
-                partition.iter_mut().for_each(f);
-            }
-            Access::Method {
-                args, cond, rank, ..
-            } => {
-                args.iter_mut().for_each(&mut *f);
                 if let Some(r) = rank {
                     r.args.iter_mut().for_each(&mut *f);
                     f(&mut r.count);
+                    if let Some(w) = &mut r.within {
+                        w.for_each_expr_mut(f);
+                    }
+                    r.checks.iter_mut().for_each(&mut *f);
+                    r.partition.iter_mut().for_each(f);
                 }
-                f(cond);
             }
         }
     }
@@ -458,6 +439,23 @@ fn keyed(plan: &Plan) -> bool {
 
 /// A key range's index name and conditions, as `EXPLAIN` shows them.
 fn key_conds(table: &Table, access: &Access) -> (String, String) {
+    if let Access::Method {
+        index,
+        served: Some(s),
+        ..
+    } = access
+    {
+        let ix = &table.indexes[*index];
+        return (
+            ix.name.clone(),
+            format!(
+                "{} {} {}",
+                table.columns[ix.columns[0]].name,
+                s.function,
+                s.args.first().map_or(String::new(), show)
+            ),
+        );
+    }
     let Access::Key {
         index,
         prefix,
@@ -771,58 +769,58 @@ impl Plan {
                         let (name, conds) = key_conds(table, access);
                         format!("Index Scan using {name} on {} ({conds})", table.name)
                     }
-                    Access::Nearest {
-                        index,
-                        query,
-                        count,
-                        within,
-                        partition,
-                        ..
-                    } => {
-                        let ix = &table.indexes[*index];
-                        let mut among = String::new();
-                        if !partition.is_empty() {
-                            let p: Vec<String> = ix.columns[1..]
-                                .iter()
-                                .zip(partition)
-                                .map(|(&c, v)| format!("{} = {}", table.columns[c].name, show(v)))
-                                .collect();
-                            let _ = write!(among, " in {}", p.join(", "));
-                        }
-                        if let Some(w) = within.as_deref() {
-                            let (name, conds) = key_conds(table, w);
-                            let _ = write!(among, " among {name}: {conds}");
-                        }
-                        format!(
-                            "Index Scan using {} on {} ({} nearest {} to {}{among})",
-                            ix.name,
-                            table.name,
-                            show(count),
-                            table.columns[ix.columns[0]].name,
-                            show(query)
-                        )
-                    }
                     Access::Method {
                         index,
-                        function,
-                        args,
+                        served,
                         rank,
-                        ..
                     } => {
                         let ix = &table.indexes[*index];
                         let col = &table.columns[ix.columns[0]].name;
-                        format!(
-                            "Index Scan using {} on {} ({col} {function} {}){}",
-                            ix.name,
-                            table.name,
-                            args.first().map_or(String::new(), show),
-                            rank.as_ref().map_or(String::new(), |r| format!(
-                                " first {} by {}({col}){}",
-                                show(&r.count),
-                                r.function,
-                                if r.desc { " DESC" } else { "" }
-                            ))
-                        )
+                        let mut what = Vec::new();
+                        if let Some(s) = served {
+                            what.push(format!(
+                                "{col} {} {}",
+                                s.function,
+                                s.args.first().map_or(String::new(), show)
+                            ));
+                        }
+                        if let Some(r) = rank {
+                            let mut among = String::new();
+                            if !r.partition.is_empty() {
+                                let p: Vec<String> = ix.columns[1..]
+                                    .iter()
+                                    .zip(&r.partition)
+                                    .map(|(&c, v)| {
+                                        format!("{} = {}", table.columns[c].name, show(v))
+                                    })
+                                    .collect();
+                                let _ = write!(among, " in {}", p.join(", "));
+                            }
+                            if let Some(w) = r.within.as_deref() {
+                                let (name, conds) = key_conds(table, w);
+                                let _ = write!(among, " among {name}: {conds}");
+                            }
+                            what.push(match (served, r.args.as_slice(), r.desc) {
+                                (None, [q], false) => format!(
+                                    "{} nearest {col} to {}{among}",
+                                    show(&r.count),
+                                    show(q)
+                                ),
+                                _ => format!(
+                                    "first {} by {}({col}){}{among}",
+                                    show(&r.count),
+                                    r.function,
+                                    if r.desc { " DESC" } else { "" }
+                                ),
+                            });
+                        }
+                        // A ranking of the rows a condition finds follows it.
+                        let what = match what.as_slice() {
+                            [one] => format!("({one})"),
+                            [cond, rank] => format!("({cond}) {rank}"),
+                            _ => String::new(),
+                        };
+                        format!("Index Scan using {} on {} {what}", ix.name, table.name)
                     }
                 };
                 if let Some(f) = filter {

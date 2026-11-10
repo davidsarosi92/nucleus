@@ -272,7 +272,7 @@ impl Linter<'_> {
         let used = match access {
             Access::Full => None,
             Access::Key { index, .. } => Some(*index),
-            Access::Nearest { index, .. } | Access::Method { index, .. } => Some(Some(*index)),
+            Access::Method { index, .. } => Some(Some(*index)),
         };
         // index_defeated
         for p in &preds {

@@ -759,6 +759,40 @@ fn leaf_postings(s: &Segment, leaf: &Leaf, positions: bool) -> Result<Postings> 
     }
 }
 
+/// A query's matches with their scores, read greatest first in slices
+/// ([`View::ranked`]): each slice found by a selection over the rest and
+/// sorted, so reading `n` of `m` matches costs about `m` per slice and
+/// `n log n` — not a sort of them all.
+pub(crate) struct Ranked<'v> {
+    view: &'v View,
+    scored: Vec<(At, f64)>,
+    done: usize,
+}
+
+impl Ranked<'_> {
+    /// The matches not read yet.
+    pub(crate) fn left(&self) -> usize {
+        self.scored.len() - self.done
+    }
+
+    /// The next `n` greatest matches not read (fewer at the end), greatest
+    /// first: each its primary key and score.
+    pub(crate) fn next(&mut self, n: usize) -> impl Iterator<Item = (&[u8], f64)> {
+        let start = self.done;
+        let rest = &mut self.scored[start..];
+        let n = n.min(rest.len());
+        if n > 0 && n < rest.len() {
+            rest.select_nth_unstable_by(n - 1, |a, b| b.1.total_cmp(&a.1));
+        }
+        rest[..n].sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        self.done += n;
+        let view = self.view;
+        self.scored[start..start + n]
+            .iter()
+            .map(move |(at, s)| (view.pk(*at), *s))
+    }
+}
+
 /// Where a version is: a segment's document, or an insert of the delta.
 #[derive(Clone, Copy, Debug)]
 enum At {
@@ -1009,33 +1043,15 @@ impl View {
         Ok(out)
     }
 
-    /// The primary keys of the rows `q` matches whose scores are among the
-    /// `k` greatest — every row scoring as the `k`-th does too, so an order
-    /// by the score and then by anything else is exact over them.  Scored
-    /// from the postings, as [`Scorer::score`] scores a row's text: the
-    /// same numbers.
-    pub(crate) fn top(&self, q: &Query, sc: &Scorer, k: usize) -> Result<Vec<Vec<u8>>> {
-        if k == 0 {
-            return Ok(Vec::new());
-        }
-        let mut live = self.live_matches(q, Some(sc))?;
-        if live.len() > k {
-            live.select_nth_unstable_by(k - 1, |a, b| b.1.total_cmp(&a.1));
-            // The ties past the k-th, moved up behind it.
-            let kth = live[k - 1].1;
-            let mut end = k;
-            for j in k..live.len() {
-                if live[j].1 == kth {
-                    live.swap(end, j);
-                    end += 1;
-                }
-            }
-            live.truncate(end);
-        }
-        let mut out: Vec<Vec<u8>> = live.iter().map(|(at, _)| self.pk(*at).to_vec()).collect();
-        out.sort_unstable();
-        out.dedup();
-        Ok(out)
+    /// The rows `q` matches, scored by `sc`, to be read greatest first —
+    /// scored from the postings, as [`Scorer::score`] scores a row's text:
+    /// the same numbers.
+    pub(crate) fn ranked(&self, q: &Query, sc: &Scorer) -> Result<Ranked<'_>> {
+        Ok(Ranked {
+            view: self,
+            scored: self.live_matches(q, Some(sc))?,
+            done: 0,
+        })
     }
 
     /// The statistics of `terms`, for the snapshot's rows.

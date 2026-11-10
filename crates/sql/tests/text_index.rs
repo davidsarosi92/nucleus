@@ -104,25 +104,40 @@ fn same(s: &mut Session, step: &str) {
             &format!("SELECT id FROM docs WHERE (body || '') @@ '{q}' ORDER BY id"),
         );
         assert_eq!(by_index, by_rows, "{step}: {q}");
-        // The first rows by score: ranked by the index from its postings,
-        // and with another condition (then every row it finds is scored
-        // on its text), alike — scores, ties and all.
-        let first = |extra: &str| {
+        // The first rows by score: ranked by the index from its postings
+        // — with other conditions passing all, half, a tenth and a
+        // hundredth of the rows, read best first until 7 pass (§M14.21
+        // T5a) — and, ordered by an expression of the score the index
+        // does not rank by, every row it finds scored on its text: alike,
+        // scores, ties and all.
+        let first = |extra: &str, by: &str| {
             format!(
                 "SELECT id::text || ' ' || score(body @@ '{q}')::text FROM docs \
-                 WHERE body @@ '{q}'{extra} ORDER BY score(body @@ '{q}') DESC, id LIMIT 7"
+                 WHERE body @@ '{q}'{extra} ORDER BY score(body @@ '{q}'){by} DESC, id LIMIT 7"
             )
         };
-        assert!(
-            text(s, &format!("EXPLAIN {}", first("")))
-                .contains(" first 7 by text_score(body) DESC"),
-            "{step}: {q}"
-        );
-        assert_eq!(
-            text(s, &first("")),
-            text(s, &first(" AND n >= 0")),
-            "{step}: {q}"
-        );
+        for extra in [
+            "",
+            " AND n >= 0",
+            " AND id % 2 = 0",
+            " AND id % 10 = 3",
+            " AND id % 100 = 7",
+        ] {
+            assert!(
+                text(s, &format!("EXPLAIN {}", first(extra, "")))
+                    .contains(" first 7 by text_score(body) DESC"),
+                "{step}: {q}{extra}"
+            );
+            assert!(
+                !text(s, &format!("EXPLAIN {}", first(extra, " + 0"))).contains(" first 7 by"),
+                "{step}: {q}{extra}"
+            );
+            assert_eq!(
+                text(s, &first(extra, "")),
+                text(s, &first(extra, " + 0")),
+                "{step}: {q}{extra}"
+            );
+        }
     }
 }
 
@@ -335,4 +350,52 @@ fn a_deleted_row_in_a_segment_stays_deleted() {
         [2, 3]
     );
     assert_eq!(problems(&kv, &s), Vec::<String>::new());
+}
+
+/// Under row-level security the index ranks the rows the policy lets
+/// through, the policy checked first (§M14.21 T5a): a tenant's first rows,
+/// as every row of theirs scored on its text gives them.
+#[test]
+fn ranked_under_row_level_security() {
+    let kv = db(3);
+    let mut s = Session::new(kv.clone());
+    let mut r = Lcg(11);
+    s.execute("CREATE TABLE docs (id INT PRIMARY KEY, tenant TEXT, body TEXT)")
+        .unwrap();
+    for id in 0..2000 {
+        let tenant = if id % 10 == 0 { "a" } else { "b" };
+        let body = r.text().replace('\'', "''");
+        s.execute(&format!(
+            "INSERT INTO docs VALUES ({id}, '{tenant}', '{body}')"
+        ))
+        .unwrap();
+    }
+    for sql in [
+        "CREATE INDEX docs_body ON docs USING text (body)",
+        "CREATE USER app",
+        "GRANT SELECT ON docs TO app",
+        "ALTER TABLE docs ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY own ON docs USING (tenant = current_setting('nucleus.tenant'))",
+        "SET nucleus.tenant = 'a'",
+        "SET ROLE app",
+    ] {
+        s.execute(sql).unwrap();
+    }
+    for q in QUERIES {
+        let q = q.replace('\'', "''");
+        let first = |by: &str| {
+            format!(
+                "SELECT id::text || ' ' || score(body @@ '{q}')::text FROM docs \
+                 WHERE body @@ '{q}' ORDER BY score(body @@ '{q}'){by} DESC, id LIMIT 7"
+            )
+        };
+        let plan = text(&mut s, &format!("EXPLAIN {}", first("")));
+        assert!(plan.contains(" first 7 by"), "{q}\n{plan}");
+        let ranked = text(&mut s, &first(""));
+        assert_eq!(ranked, text(&mut s, &first(" + 0")), "{q}");
+        for line in ranked.lines() {
+            let id: i64 = line.split(' ').next().unwrap().parse().unwrap();
+            assert_eq!(id % 10, 0, "{q}: {line}");
+        }
+    }
 }

@@ -2131,7 +2131,7 @@ left, semi and anti joins).  A lateral item's join is one too (`EXPLAIN`:
 passes keep it whole (not reordered, no semi join moved into its right
 side) and the column pruning keeps the left columns it reads.  It runs on worker threads when it can — a
 lateral item's right side too, where it is a scan (by a key range or an
-index method's search, `Access::Nearest`) under filters, projections, a
+index method's ranking, `Access::Method`) under filters, projections, a
 sort and a limit, each worker running it whole for its left rows (a
 worker's statement work is not shared out again: `budget::workers` is 1
 on a worker, whose transaction gives the index methods the shared reads
@@ -3081,7 +3081,8 @@ table's rows: `ALTER … TYPE`, a key encoding upgrade; `index_method::rows`
 reads them), and `check` checks it for the integrity check against the
 table's rows.  The optimizer's key ranges take only plain B-trees
 (`Index::ordered`); a method's own search is an access path of its own
-(`Access::Nearest`, HNSW's: §8.18).
+(`Access::Method`: the condition it serves, the order it ranks by, or
+both).
 
 Two hooks let a method serve a filter's condition and decide what an
 operator means on its column (§M14.21 T3, the text index's, §8.19).
@@ -3094,9 +3095,13 @@ index that gives one wins.  `serves(ix, function)` and
 `f(col, args…)` with `col` the index's first column and the arguments
 fixed for the scan (`optimizer::fixed`) — and the operand the index
 gives, so a statement bound before the index existed is not served —
-becomes `Access::Method { index, function, args, cond }`
+becomes `Access::Method` with `served: Served { function, args, cond }`
 (`optimizer::method_filters`: a full scan, or a key range estimated past
-`METHOD_OVER_RANGE` rows, 1,000), the conjunct out of the filter;
+`METHOD_OVER_RANGE` rows, 1,000), the conjunct out of the filter —
+under row-level security a statement's conjunct above the barrier too,
+as it may narrow a key range, staying there (`Served::above`: where the
+index cannot tell the rows they are read without it, so it is never
+evaluated below the policy);
 `exec::method_rows` asks for the primary keys and reads their rows (none
 when the statement reads no column and nothing else is checked: the
 method is exact), and where `rows_where` says `None` every row is read
@@ -3108,24 +3113,50 @@ the rows it finds (§M14.21 T5, BM25's).  `function(t, i, name, arg)`:
 the index is on (`Binder::operator_origin`, `Binder::index_function`)
 bound as the method says — an expression and its type in place of the
 call (`score(body @@ q)`: §8.19); none, and the function is bound as
-any other.  `ranks(ix, function, desc)` and the `rank` of `rows_where`:
-`ORDER BY f(col, args…) [DESC] LIMIT k [OFFSET o]` over an
-`Access::Method` scan with nothing else in its filter, `f` one the index
-ranks by and its arguments fixed (`optimizer::method_ranks`), gives the
-scan `MethodRank { function, args, desc, count }` (`count` the limit
-plus the offset); `exec::method_rows` evaluates them, and — unless a
-join's key filters also check the rows — passes `Rank { function, args,
-desc, k }`: the method may then give only the rows first by that order,
-every row tied with the `k`-th among them, so the sort and the limit
-that stay above are exact.  `EXPLAIN` adds `first k by f(col) [DESC]`.
+any other.
 
-HNSW's ordering stays `Access::Nearest` (§8.18): it ranks every row of
-the table, checking the filter's conditions while its search walks
-(policies, partitions, a key range searched among), where a ranked
-condition ranks only the rows the condition finds, nothing else
-filtering them; the two shapes are recorded in PLAN.md §M14.21 T5, and
-the next method that ranks every row (T7's sparse vectors) decides the
-interface they share.
+One more ranks a table's rows for `ORDER BY f(col, args…) LIMIT k
+[OFFSET o]` — HNSW's nearest rows (§8.18) and the text index's first by
+BM25 (§8.19) through one hook, one access path and one optimizer pass
+(PLAN.md §M14.21 T5a).  `ranks(ix, function, desc, nulls_first)`: the
+orders it ranks by; `rank_cost(ix, RankCost { function, served, rows,
+k, share })`: what ranking costs in rows read (HNSW's `ef · (3 + 2m /
+10)`; the text index's `k` over the share passing, never more than the
+rows its condition finds), `None` where it cannot; `rows(txn, t, i)`:
+the rows it holds, for a table not analyzed.  The optimizer's `ranked`
+(its last pass) finds `f` the first sort key of a `Limit` over a `Sort`
+(through a projection), the column `f`'s first argument (or either of a
+distance's two) and the rest fixed; under the sort, a scan — of each
+partition under an `Append`, each choosing for itself — under row-level
+security perhaps, whose policy and statement filter above its barrier
+become the rank's `checks`, in that order.  The index is the scan's own
+where its condition is served by one that ranks (the text index), else
+one on the column that ranks by `f`, the one with the most of its other
+columns held equal by the conditions (a partitioned HNSW's `partition`).
+A scan through a B-tree's range of the filter or another method's
+condition keeps it as the rank's `within` and always ranks: its rows are
+ranked among, or checked where they turn out many.  Otherwise it ranks
+where `rank_cost` is at most the rows the scan reads (the table's, the
+range's or the condition's estimate), with `share` the filter's and the
+checks' selectivity.  The scan becomes `Access::Method` with `rank:
+MethodRank { function, args, desc, count, within, share, checks,
+partition }` (`count` the limit plus the offset); the sort and the limit
+stay above.
+
+`exec::method_rows` evaluates them and calls `rank(txn, t, i, RankAsk {
+rank, served, share, part, among }, wanted, keep)`: `keep` the join's
+key filters, then `within`'s condition (unless the row came from
+`among`), the filter and the checks — `None` where nothing checks; and
+`among` (`exec::among`) a callback the method calls with the most rows
+it takes, which reads the B-tree range's primary keys or asks the other
+method's `rows_where`, `None` past that many.  The method gives at least
+`k` rows that pass, in any order — an exact one every row tied with the
+`k`-th passing — or `None` where it cannot tell them; the scan then reads
+`within`'s rows (or every row) with the filter, the sort and the limit
+above taking the first.  `EXPLAIN`: `Index Scan using ix on t (col f
+arg) first k by f(col) [DESC]` for a condition ranked, `(k nearest col
+to q [in c = …] [among ix: …])` for HNSW's — `among docs_body: body @@
+'fox'` where the text index's matches are what it ranks.
 
 `crates/sql/tests/index_method.rs` registers a method that
 mirrors a column and runs writes, rollbacks, a rewrite, the integrity
@@ -3260,7 +3291,7 @@ there (`current` reads its values too).  A search goes through one graph:
 the optimizer takes an index whose `PARTITION BY` columns the conditions
 — the filter's, or under row-level security the policy's (a tenant's
 `tenant_id = current_setting('app.tenant')::int`) — each hold equal to a
-value fixed for the scan (`Access::Nearest`'s `partition`; `EXPLAIN` `…
+value fixed for the scan (`MethodRank`'s `partition`; `EXPLAIN` `…
 in tenant_id = …`), the one with most such columns where several serve;
 its costs on the partition's rows (the table's times the equalities'
 selectivity; a table not analyzed is searched, the search finding out).
@@ -3305,16 +3336,20 @@ enclosing row's value — a lateral item's left row's, so `FROM items a,
 LATERAL (SELECT … ORDER BY b.v <=> a.v LIMIT k)` searches once per row
 —, or a subquery that does not read the row: `(SELECT v FROM items
 WHERE id = $1)`, "more like this", run once for the statement as
-PostgreSQL's InitPlan; `optimizer::fixed`), becomes a scan through `Access::Nearest` (the
-optimizer's `nearest`, its last pass; `EXPLAIN`: `Index Scan using ix on
-t (k nearest col to q)`) where it costs less than the scan it had: about
+PostgreSQL's InitPlan; `optimizer::fixed`), becomes a scan through the
+index's ranking (`Access::Method`'s `rank`, the optimizer's `ranked`,
+§8.17; `EXPLAIN`: `Index Scan using ix on t (k nearest col to q)`) where
+it costs less than the scan it had: about
 `ef · (3 + 2m / 10)` rows' reads, `ef` the session's `hnsw.ef_search`
 (default 40, 1–1000, `SET` / `RESET`) over the share of the rows the
 filter is estimated to pass, against the rows the scan reads; and not
 where `ef` passes the rows over `2m`, where a search costs what reading
 every row does.  A scan through a key range of a B-tree index the filter
 chose always becomes one, the range kept (`within`; `EXPLAIN`: `… among
-ix: col = …`): its rows are searched among exactly, reading the range's
+ix: col = …`) — so does a scan through a text index's condition
+(`WHERE body @@ q ORDER BY emb <-> v LIMIT k`; `among ix: body @@ …`,
+its matches from the index's `rows_where`, `@@` checked on the rows the
+graph finds where they are many): its rows are searched among exactly, reading the range's
 entries and about `k` rows where the range's scan reads every row in it
 — unless they are more than √(rows · (22 · ef + 20 · k))
 (`hnsw::among_most`: where reading their entries, ~70 ns each and
@@ -3329,9 +3364,9 @@ row it reads — the search goes on until `k` rows the session may see
 pass, and no predicate of the statement is evaluated on a row the policy
 hides.  A table not analyzed has the rows the index holds
 (`hnsw::rows`), and keeps a primary-key range its filter chose.  The
-executor (`exec::nearest`) gives the scan's filter, the checks and the
-hash joins' key filters to the search as `keep` and reads only the
-columns the plan needs (`hnsw::nearest_rows`); the sort and the limit
+executor (`exec::method_rows`) gives the scan's filter, the checks and
+the hash joins' key filters to the search as `keep` and reads only the
+columns the plan needs (the method's `rank`); the sort and the limit
 above stay.  When fewer than `k + o` rows pass — the index holds fewer
 (a `NULL` vector is not in it, and sorts last), or the filter is
 narrower than the estimate and `ef` reached the rows over `2m` — the
@@ -3519,13 +3554,18 @@ length, each exact term's documents (`View::stats`) — in an
 uncorrelated subquery, read once a statement; `text_score` scores a
 row's text by them (`Scorer`, the query analyzed with the index's
 analyzer).  `ORDER BY score(col @@ q) DESC LIMIT k` over a scan the
-index finds the rows of (`WHERE col @@ q`, nothing else filtering) is
-ranked by the index (`IndexMethod::ranks`, `rows_where`'s `rank`):
-`View::top` scores every matching document from the postings — their
-frequencies, positions for phrases, the segment's lengths — through the
-same `Scorer`, so the numbers are a row's, and gives the `k` best with
-the ties of the `k`-th; the sort and the limit above order them (by
-`text_score` again, for those rows only).  A bag of words (one term, or
+index finds the rows of (`WHERE col @@ q`, with other conditions, a
+join's key filters or row-level security or not) is ranked by the index
+(`IndexMethod::rank`, §8.17): `View::ranked` scores every matching
+document from the postings — their frequencies, positions for phrases,
+the segment's lengths — through the same `Scorer`, so the numbers are a
+row's, and the rows are read greatest first in slices (`Ranked::next`: a
+selection over the rest, then a sort of the slice) — `k` over the share
+the optimizer expects to pass the other conditions first, then as many
+as the share passing so far needs, at least as many again — until `k`
+passed and every row tied with the `k`-th passing one has been read;
+the sort and the limit above order them (by `text_score` again, for
+those rows only).  A bag of words (one term, or
 optional terms only) is scored term at a time — each term's postings
 added into an array of the segment's documents, in the query's order,
 the same sum; any other query document at a time over cursors into each
@@ -4310,6 +4350,21 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-10 — §M14.21 T5a, one ranking for every method:**
+  `IndexMethod::ranks` (with `nulls_first`), `rank_cost`, `rows`,
+  `rank` (`RankAsk`, `RankCost`, `Keep`, `Among`; `Pks` moved to
+  `index_method`), `rows_where` without its rank; `Access::Nearest`
+  gone, `Access::Method { index, served, rank }` with `plan::Served`
+  (`above`: a statement's condition over a row-level security barrier)
+  and `MethodRank`'s `within`, `share`, `checks`, `partition`;
+  `optimizer::ranked` in place of `nearest` and `method_ranks`,
+  `method_filters` under a barrier; `exec::method_rows`, `ranked_rows`,
+  `among`, `unserved`; HNSW's cost, `among_most` and partitions behind
+  its `rank`; the text index ranks with filters, key filters and
+  policies (`View::ranked`, `Ranked`), and its matches are what HNSW
+  ranks among (`among ix: body @@ …`); `tests/text_index.rs` (filters
+  and row-level security against the unranked order),
+  `59_text_score.slt`, `bench/text/beir.py --filters` (§8.17–§8.19).
 - **2026-11-09 — §M14.21 T5, BM25:** `score(col @@ q)` — Lucene's BM25
   over the index's statistics read once a statement (`text_stats` in an
   uncorrelated subquery, `text_score` a row), `k1` and `b` options;

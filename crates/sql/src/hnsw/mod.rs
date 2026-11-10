@@ -32,7 +32,7 @@ use crate::catalog::{Index as IndexDef, Table};
 use crate::enums::Labels;
 use crate::error::{Error, Result};
 use crate::ext::Registry;
-use crate::index_method::{IndexMethod, RowRef};
+use crate::index_method::{IndexMethod, Keep, RankAsk, RankCost, RowRef};
 use crate::types::{Row, Value};
 use crate::vectors::Metric as SqlMetric;
 
@@ -484,6 +484,111 @@ impl IndexMethod for Hnsw {
     fn after_statement(&self, kv: &Arc<dyn Kv>, wrote: bool) -> Result<()> {
         upkeep(kv, wrote)
     }
+
+    /// By the distance its operator class serves, nearest first: the rows
+    /// it does not hold (a `NULL` vector's) last.
+    fn ranks(&self, ix: &IndexDef, function: &str, desc: bool, nulls_first: bool) -> bool {
+        !desc
+            && !nulls_first
+            && serves(ix).is_some_and(|(m, _, _)| SqlMetric::of_name(function) == Some(m))
+    }
+
+    /// About `ef · (3 + 2m / 10)` — `ef` the session's `hnsw.ef_search`
+    /// (at least the rows a quantized index rescores for `k`) over the
+    /// share passing, as it counts the rows that pass; each found row read
+    /// (3, as through an index) and its neighbours' distances computed
+    /// (`2m`, each a tenth of a row's read).  Past the rows over `2m` the
+    /// search gives up and reads every row: `None`.
+    fn rank_cost(&self, ix: &IndexDef, c: &RankCost) -> Option<f64> {
+        let (_, m, rescore) = serves(ix)?;
+        let ef = (ef_search() as f64).max(c.k * rescore as f64) / c.share;
+        if ef > c.rows / (2 * m) as f64 {
+            return None;
+        }
+        Some(ef * (3.0 + 2.0 * m as f64 / 10.0))
+    }
+
+    /// Its graph's and sealed objects' rows ([`rows`]).
+    fn rows(&self, txn: &dyn KvTxn, t: &Table, i: usize) -> Result<Option<usize>> {
+        if partitioned(&t.indexes[i]) {
+            return Ok(None);
+        }
+        rows(txn, t, i, &[]).map(Some)
+    }
+
+    /// The search behind `ORDER BY col <op> q LIMIT k`: at least `k` rows
+    /// passing `keep`, nearest first ([`search`]), or `None` where the
+    /// index cannot tell them — it holds fewer, or finding them would
+    /// take a search as costly as reading every row: about `ef · 2m`
+    /// distances against the rows' (each node's neighbours at its bottom
+    /// layer), so `ef` up to the rows over `2m`.  `ef` is the session's
+    /// `hnsw.ef_search`.  The rows the plan gives to search among are
+    /// asked for up to [`among_most`] — not where the share expected to
+    /// pass says they are over twice that (they are not read).
+    fn rank(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        i: usize,
+        ask: &mut RankAsk,
+        wanted: Option<&[bool]>,
+        keep: Option<Keep>,
+    ) -> Result<Option<Vec<(Vec<u8>, Row)>>> {
+        let ([q], None) = (ask.rank.args.as_slice(), ask.served) else {
+            return Ok(None);
+        };
+        let k = ask.rank.k;
+        if k == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        // A partitioned index's graph (`col = NULL` matches nothing).
+        let Some(part) = part_of(ask.part) else {
+            return Ok(Some(Vec::new()));
+        };
+        let ef = ef_search();
+        let held = rows(txn, t, i, &part)?;
+        let among = match ask.among.as_mut() {
+            Some(get) => {
+                let most = among_most(k, ef, held);
+                if ask.share * held as f64 > 2.0 * most as f64 {
+                    None
+                } else {
+                    get(most)?
+                }
+            }
+            None => None,
+        };
+        let m = option(&t.indexes[i], "m").unwrap_or(16);
+        let ef_most = (held / (2 * m)).max(ef);
+        let all = vec![true; t.columns.len()];
+        let mut pass = |_: &Row, _: bool| Ok(true);
+        let found = search(
+            txn,
+            t,
+            i,
+            q,
+            &Ask {
+                k,
+                ef,
+                ef_most,
+                share: ask.share,
+                among: among.as_ref(),
+                part: &part,
+            },
+            wanted.unwrap_or(&all),
+            keep.unwrap_or(&mut pass),
+        )?;
+        if found.rows.len() < k {
+            return Ok(None);
+        }
+        Ok(Some(
+            found
+                .rows
+                .into_iter()
+                .map(|(pk, row, _)| (pk, row))
+                .collect(),
+        ))
+    }
 }
 
 /// `ef_search` when it is not set: pgvector's `hnsw.ef_search`.
@@ -512,7 +617,7 @@ pub fn nearest(
         among: None,
         part: &[],
     };
-    let mut found = search(txn, t, i, q, &ask, &wanted, &mut |_| Ok(true))?;
+    let mut found = search(txn, t, i, q, &ask, &wanted, &mut |_, _| Ok(true))?;
     found.rows.truncate(k);
     Ok(found.rows)
 }
@@ -550,7 +655,7 @@ pub struct Found {
 }
 
 /// The rows of `t` nearest `q` by index `i`'s distance that `keep`
-/// passes, as `txn` sees them, the columns `wanted` marks read (the
+/// passes (told whether the row is one of `ask.among`), as `txn` sees them, the columns `wanted` marks read (the
 /// indexed one too).  What the index found is checked against the rows
 /// (a row gone, or no longer near, passed over; a row found twice, once).
 ///
@@ -571,7 +676,7 @@ pub fn search(
     q: &Value,
     ask: &Ask,
     wanted: &[bool],
-    keep: &mut dyn FnMut(&Row) -> Result<bool>,
+    keep: Keep,
 ) -> Result<Found> {
     let o = open(txn.instance(), t, i, ask.part)?;
     let dims = t.columns[o.column].max_len.unwrap_or(0) as usize;
@@ -657,7 +762,7 @@ pub fn search(
             }
             seen.insert(pk.clone());
             checked += 1;
-            if !keep(&row)? {
+            if !keep(&row, ask.among.is_some())? {
                 continue;
             }
             passed += 1;
@@ -690,7 +795,7 @@ pub fn search(
 /// The index method `ix` is searched by, if it is an HNSW index: the
 /// SQL distance its operator class serves, its `m`, and the rows a search
 /// reads for each it returns (`rescore`).
-pub fn serves(ix: &IndexDef) -> Option<(SqlMetric, usize, usize)> {
+fn serves(ix: &IndexDef) -> Option<(SqlMetric, usize, usize)> {
     if ix.method.as_deref() != Some(NAME) {
         return None;
     }
@@ -700,52 +805,6 @@ pub fn serves(ix: &IndexDef) -> Option<(SqlMetric, usize, usize)> {
         *sql,
         option(ix, "m").unwrap_or(16),
         option(ix, "rescore").unwrap_or(1).max(1),
-    ))
-}
-
-/// The search behind `ORDER BY col <op> q LIMIT k` ([`Access::Nearest`]
-/// (crate::plan::Access::Nearest)): at least `k` rows passing `keep`,
-/// nearest first, or `None` where the index cannot tell them — it holds
-/// fewer, or finding them would take a search as costly as reading every
-/// row: about `ef · 2m` distances against the rows' (each node's
-/// neighbours at its bottom layer), so `ef` up to the rows over `2m`.
-/// `ef` is the session's `hnsw.ef_search`; `share`, `among` and `part`
-/// as [`Ask`]'s.
-#[allow(clippy::too_many_arguments)]
-pub fn nearest_rows(
-    txn: &dyn KvTxn,
-    t: &Table,
-    i: usize,
-    q: &Value,
-    k: usize,
-    share: f64,
-    among: Option<&Pks>,
-    part: &[u8],
-    wanted: Option<&[bool]>,
-    keep: &mut dyn FnMut(&Row) -> Result<bool>,
-) -> Result<Option<Vec<(Vec<u8>, Row)>>> {
-    let ef = ef_search();
-    let m = option(&t.indexes[i], "m").unwrap_or(16);
-    let ef_most = (rows(txn, t, i, part)? / (2 * m)).max(ef);
-    let all = vec![true; t.columns.len()];
-    let ask = Ask {
-        k,
-        ef,
-        ef_most,
-        share,
-        among,
-        part,
-    };
-    let found = search(txn, t, i, q, &ask, wanted.unwrap_or(&all), keep)?;
-    if found.rows.len() < k {
-        return Ok(None);
-    }
-    Ok(Some(
-        found
-            .rows
-            .into_iter()
-            .map(|(pk, row, _)| (pk, row))
-            .collect(),
     ))
 }
 
@@ -767,7 +826,7 @@ const EF_PER_ENTRY: f64 = 22.0;
 /// the share passing and reads about `k` over it, the share `p / rows` —
 /// so `p` up to √(rows · (ef · a candidate's cost + k · a row's) over an
 /// entry's).
-pub fn among_most(k: usize, ef: usize, rows: usize) -> usize {
+fn among_most(k: usize, ef: usize, rows: usize) -> usize {
     (rows.max(1) as f64 * (EF_PER_ENTRY * ef.max(k) as f64 + ROW_PER_ENTRY * k.max(1) as f64))
         .sqrt() as usize
 }

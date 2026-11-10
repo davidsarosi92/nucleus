@@ -10,6 +10,12 @@ a bag of its words.
                                       [--k1 0.9] [--b 0.4] [--analyzer porter]
     bench/text/beir.py paradedb [--container nucleus-paradedb]
 
+`--filters 1,10,50` times the same queries with a second condition
+passing that percentage of the rows (`n % 100 < p`, `n` a row's number),
+ranked by the index (§M14.21 T5a) and, with `--unranked`, ordered by
+`score(…) + 0`, which the index does not rank by: every match read and
+scored on its text.  The first round checks both give the same rows.
+
 `paradedb` runs the same in ParadeDB's pg_search (Tantivy's BM25 in
 PostgreSQL; `docker run -d --name nucleus-paradedb -e POSTGRES_PASSWORD=x
 paradedb/paradedb`): its English tokenizer (Snowball's stemmer, its stop
@@ -127,6 +133,38 @@ def paradedb(a):
         psql("DROP TABLE docs")
 
 
+def filtered(c, name, qrels, queries, p, unranked):
+    """The queries with `n % 100 < p` too: mean and median ms, ranked by
+    the index and (`unranked`) by `score + 0`, checked alike."""
+    def sql(q, by):
+        return (f"SELECT id FROM docs WHERE body @@ {lit(q)} AND n % 100 < {p} "
+                f"ORDER BY score(body @@ {lit(q)}){by} DESC, id LIMIT 11")
+
+    def run(by, check=None):
+        times = []
+        for rnd in range(2):
+            times = []
+            for n, qid in enumerate(qrels):
+                q = SYNTAX.sub(" ", queries[qid]).lower()
+                t = time.perf_counter()
+                rows = c.execute(sql(q, by)).rows
+                times.append((time.perf_counter() - t) * 1000)
+                if rnd == 0 and check is not None:
+                    assert [r[0] for r in rows] == check[n], (name, p, qid)
+                if rnd == 0 and check is None and unranked:
+                    got.append([r[0] for r in rows])
+        times.sort()
+        return sum(times) / len(times), times[len(times) // 2]
+
+    got = []
+    mean, p50 = run("")
+    line = f"{name:10} filter {p:3}%  ranked {mean:8.2f} mean {p50:8.2f} p50"
+    if unranked:
+        mean, p50 = run(" + 0", check=got)
+        line += f"   unranked {mean:8.2f} mean {p50:8.2f} p50"
+    print(line, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("system", choices=["nucleus", "paradedb"])
@@ -139,6 +177,8 @@ def main():
     ap.add_argument("--analyzer", default="porter")
     ap.add_argument("--port", type=int, default=21017)
     ap.add_argument("--host", default=os.environ.get("NUCLEUS_BENCH_HOST", "127.0.0.1"))
+    ap.add_argument("--filters", default="")
+    ap.add_argument("--unranked", action="store_true")
     a = ap.parse_args()
     if a.system == "paradedb":
         paradedb(a)
@@ -162,8 +202,9 @@ def main():
         for name in a.sets.split(","):
             docs, queries, qrels = load(os.path.join(a.data, f"beir-{name}", name))
             c.execute("DROP TABLE IF EXISTS docs")
-            c.execute("CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT)")
-            c.load("docs", {"id": [d for d, _ in docs], "body": [b for _, b in docs]})
+            c.execute("CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT, n INT)")
+            c.load("docs", {"id": [d for d, _ in docs], "body": [b for _, b in docs],
+                            "n": list(range(len(docs)))})
             t = time.perf_counter()
             c.execute(f"CREATE INDEX docs_body ON docs USING text (body) WITH "
                       f"(analyzer = '{a.analyzer}', k1 = {a.k1}, b = {a.b})")
@@ -181,6 +222,8 @@ def main():
                     ranked = [r[0] for r in rows if r[0] != qid][:10]
                     scores.append(ndcg10(ranked, rels))
             report(name, len(docs), scores, index_ms, times)
+            for p in [int(x) for x in a.filters.split(",") if x]:
+                filtered(c, name, qrels, queries, p, a.unranked)
         c.close()
     finally:
         server.terminate()

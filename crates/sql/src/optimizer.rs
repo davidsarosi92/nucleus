@@ -39,18 +39,139 @@ pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let plan = sink(reorder(plan, &stats), &stats);
     let plan = lookups(crate::eager::eager(plan, &stats), &stats);
     let plan = crate::narrow::narrow(sorted(crate::distinct::two_level(plan)));
-    let plan = method_ranks(method_filters(adaptive(same_rows(plan), &stats)));
-    nearest(plan, &stats)
+    ranked(method_filters(adaptive(same_rows(plan), &stats)), &stats)
 }
 
-/// `ORDER BY f(col, …) [DESC] LIMIT k` over a scan whose rows an index
-/// method finds ([`method_filters`]), nothing else filtering them, where
-/// the index ranks by `f` ([`crate::index_method::IndexMethod::ranks`] —
-/// a text index by BM25's `score(col @@ q)`): the index gives only the
-/// first `k` rows (and those tied with the `k`-th) instead of every row
-/// it finds, and the sort and the limit stay above them.
-fn method_ranks(plan: Plan) -> Plan {
-    let mut plan = map_children(plan, &method_ranks);
+/// A scan whose filter has a condition an index method finds the rows of
+/// exactly — `col @@ q` with a text index on `col`, `q` fixed for the
+/// scan, bound with the index's operand ([`crate::binder`]) — reads them
+/// through the index ([`Access::Method`]) instead of every row (or a key
+/// range of more than [`METHOD_OVER_RANGE`] rows): the condition costs an
+/// analysis of each row's text, the index a read of its postings and of
+/// the rows found.  Under a row-level security barrier the statement's
+/// condition may choose the rows so too, as it may narrow a key range
+/// (evaluated once, on no row), and stays above the barrier: where the
+/// index cannot tell the rows it is not checked below it.
+fn method_filters(plan: Plan) -> Plan {
+    let mut plan = map_children(plan, &method_filters);
+    match &mut plan {
+        Plan::Scan {
+            table,
+            access,
+            filter,
+            estimate,
+        } => {
+            let Some(whole) = filter.as_ref() else {
+                return plan;
+            };
+            let mut conds = Vec::new();
+            conjuncts(whole.clone(), &mut conds);
+            if let Some((n, served)) = served(table, access, *estimate, &conds, false) {
+                conds.remove(n);
+                *access = served;
+                *filter = conjunction(conds);
+            }
+        }
+        Plan::Filter { input, predicate } => {
+            let Plan::Secure { input: scan, .. } = &mut **input else {
+                return plan;
+            };
+            let Plan::Scan {
+                table,
+                access,
+                estimate,
+                ..
+            } = &mut **scan
+            else {
+                return plan;
+            };
+            let mut conds = Vec::new();
+            conjuncts(predicate.clone(), &mut conds);
+            if let Some((_, served)) = served(table, access, *estimate, &conds, true) {
+                *access = served;
+            }
+        }
+        _ => {}
+    }
+    plan
+}
+
+/// The first of `conds` an index method of `table` serves where the scan
+/// reads every row (or a key range past [`METHOD_OVER_RANGE`]): its
+/// position, and the access path through the index (`above`: the
+/// condition stays above the scan, too).
+fn served(
+    table: &Table,
+    access: &Access,
+    estimate: Option<f64>,
+    conds: &[Expr],
+    above: bool,
+) -> Option<(usize, Access)> {
+    match access {
+        Access::Full => {}
+        Access::Key { .. } if estimate.is_none_or(|e| e > METHOD_OVER_RANGE) => {}
+        _ => return None,
+    }
+    for (n, c) in conds.iter().enumerate() {
+        let Expr::Call(f, args) = c else { continue };
+        let Some((Expr::Column(col), rest)) = args.split_first() else {
+            continue;
+        };
+        if !rest.iter().all(fixed) {
+            continue;
+        }
+        let found = table.indexes.iter().position(|ix| {
+            ix.columns.first() == Some(col)
+                && crate::index_method::of(ix).ok().flatten().is_some_and(|m| {
+                    m.serves(ix, f.name())
+                        && match m.operand(ix, f.name()) {
+                            Some(v) => matches!(rest.last(), Some(Expr::Literal(x)) if *x == v),
+                            None => true,
+                        }
+                })
+        });
+        let Some(index) = found else { continue };
+        let served = crate::plan::Served {
+            function: f.name().to_string(),
+            args: rest.to_vec(),
+            cond: c.clone(),
+            above,
+        };
+        return Some((
+            n,
+            Access::Method {
+                index,
+                served: Some(served),
+                rank: None,
+            },
+        ));
+    }
+    None
+}
+
+/// The rows of a key range past which a condition an index method serves
+/// is found by the method instead.
+const METHOD_OVER_RANGE: f64 = 1000.0;
+
+/// `ORDER BY f(col, …) LIMIT k` (and an offset's rows) over a scan of a
+/// table with an index method that ranks its rows by `f`
+/// ([`crate::index_method::IndexMethod::ranks`] — HNSW by its operator
+/// class's distance, nearest first; a text index by BM25's `score(col @@
+/// q)`, greatest first): the index gives the first `k` rows that pass the
+/// scan's conditions ([`Access::Method`] with a [`crate::plan::MethodRank`]) where
+/// that costs less than the scan it has, by the method's cost
+/// ([`crate::index_method::IndexMethod::rank_cost`], in rows read) against
+/// the rows the scan reads.  A scan through a B-tree's range of the
+/// filter, or through another method's condition, always does: its rows
+/// are ranked among (PLAN.md §M14.12 V5, §M14.21 T5a), or checked where
+/// they turn out many.  The sort and the limit stay: the scan gives at
+/// least `k` rows, or every row where the index cannot find them.  A
+/// table not analyzed has the rows its index holds.  `f`'s other values
+/// must be the same for every row ([`fixed`]); a function of two (a
+/// distance) may have the column on either side.  One pass for every
+/// method (§M14.21 T5a).
+fn ranked(plan: Plan, st: &Stats) -> Plan {
+    let mut plan = map_children(plan, &|c| ranked(c, st));
     let Plan::Limit {
         input,
         limit: Some(limit),
@@ -81,162 +202,9 @@ fn method_ranks(plan: Plan) -> Plan {
     let Some(Expr::Call(f, args)) = ranked else {
         return plan;
     };
-    let Some((Expr::Column(col), rest)) = args.split_first() else {
-        return plan;
-    };
-    let Plan::Scan {
-        table,
-        access: Access::Method { index, rank, .. },
-        filter: None,
-        ..
-    } = below
-    else {
-        return plan;
-    };
-    let ix = &table.indexes[*index];
-    if ix.columns.first() != Some(col)
-        || !rest.iter().all(fixed)
-        || !crate::index_method::of(ix)
-            .ok()
-            .flatten()
-            .is_some_and(|m| m.ranks(ix, f.name(), key.desc))
-    {
-        return plan;
-    }
-    let count = match offset {
-        None => limit.clone(),
-        Some(o) => Expr::Binary(BinaryOp::Add, Box::new(limit.clone()), Box::new(o.clone())),
-    };
-    *rank = Some(crate::plan::MethodRank {
-        function: f.name().to_string(),
-        args: rest.to_vec(),
-        desc: key.desc,
-        count,
-    });
-    plan
-}
-
-/// A scan whose filter has a condition an index method finds the rows of
-/// exactly — `col @@ q` with a text index on `col`, `q` fixed for the
-/// scan, bound with the index's operand ([`crate::binder`]) — reads them
-/// through the index ([`Access::Method`]) instead of every row (or a key
-/// range of more than [`METHOD_OVER_RANGE`] rows): the condition costs an
-/// analysis of each row's text, the index a read of its postings and of
-/// the rows found.
-fn method_filters(plan: Plan) -> Plan {
-    let mut plan = map_children(plan, &method_filters);
-    let Plan::Scan {
-        table,
-        access,
-        filter,
-        estimate,
-    } = &mut plan
-    else {
-        return plan;
-    };
-    let Some(whole) = filter.as_ref() else {
-        return plan;
-    };
-    match access {
-        Access::Full => {}
-        Access::Key { .. } if estimate.is_none_or(|e| e > METHOD_OVER_RANGE) => {}
-        _ => return plan,
-    }
-    let mut conds = Vec::new();
-    conjuncts(whole.clone(), &mut conds);
-    for (n, c) in conds.iter().enumerate() {
-        let Expr::Call(f, args) = c else { continue };
-        let Some((Expr::Column(col), rest)) = args.split_first() else {
-            continue;
-        };
-        if !rest.iter().all(fixed) {
-            continue;
-        }
-        let found = table.indexes.iter().enumerate().find(|(_, ix)| {
-            ix.columns.first() == Some(col)
-                && crate::index_method::of(ix).ok().flatten().is_some_and(|m| {
-                    m.serves(ix, f.name())
-                        && match m.operand(ix, f.name()) {
-                            Some(v) => matches!(rest.last(), Some(Expr::Literal(x)) if *x == v),
-                            None => true,
-                        }
-                })
-        });
-        let Some((index, _)) = found else { continue };
-        let cond = conds.remove(n);
-        let Expr::Call(f, args) = &cond else {
-            unreachable!("a call")
-        };
-        *access = Access::Method {
-            index,
-            function: f.name().to_string(),
-            args: args[1..].to_vec(),
-            cond: cond.clone(),
-            rank: None,
-        };
-        *filter = conjunction(conds);
-        return plan;
-    }
-    plan
-}
-
-/// The rows of a key range past which a condition an index method serves
-/// is found by the method instead.
-const METHOD_OVER_RANGE: f64 = 1000.0;
-
-/// `ORDER BY col <op> q LIMIT k` over a table with an index method's
-/// index that ranks rows by `<op>` (an HNSW index whose operator class is
-/// that distance's) reads the index's nearest rows
-/// ([`Access::Nearest`]) where that costs less than the scan it has.
-/// A scan through a B-tree's range of the filter always does: the
-/// range's rows are searched among (PLAN.md §M14.12 V5), reading its
-/// entries and `k` rows where the range's scan reads every row in it.
-/// Otherwise about `ef · (3 + 2m / 10)` against the rows the scan reads —
-/// `ef` the session's `hnsw.ef_search` over the share of the rows the
-/// filter passes (it counts the rows that pass), each found row read (3,
-/// as through an index) and its neighbours' distances computed (`2m`,
-/// each a tenth of a row's read).  The sort and the limit stay: the scan
-/// gives at least `k` rows, or every row where the index cannot find
-/// them.  A table not analyzed has the rows its index holds.  `q` must be
-/// the same for every row (a constant, a parameter, an enclosing row's
-/// value, a subquery that does not read the row: [`fixed`]).
-fn nearest(plan: Plan, st: &Stats) -> Plan {
-    let mut plan = map_children(plan, &|c| nearest(c, st));
-    let Plan::Limit {
-        input,
-        limit: Some(limit),
-        offset,
-    } = &mut plan
-    else {
-        return plan;
-    };
-    let Plan::Sort {
-        input: sorted,
-        keys,
-    } = &mut **input
-    else {
-        return plan;
-    };
-    let Some(key) = keys.first().filter(|k| !k.desc && !k.nulls_first) else {
-        return plan;
-    };
-    let (exprs, below) = match &mut **sorted {
-        Plan::Project { input, exprs } => (Some(&*exprs), &mut **input),
-        other => (None, other),
-    };
-    let ranked = match (&key.expr, exprs) {
-        (Expr::Column(j), Some(exprs)) => exprs.get(*j),
-        (e, None) => Some(e),
-        _ => None,
-    };
-    let Some(Expr::Call(f, args)) = ranked else {
-        return plan;
-    };
-    let Some(metric) = crate::vectors::Metric::of_function(f) else {
-        return plan;
-    };
-    let (column, query) = match args.as_slice() {
-        [Expr::Column(c), q] | [q, Expr::Column(c)] if fixed(q) => (*c, q.clone()),
+    let (column, rest) = match args.as_slice() {
+        [Expr::Column(c), rest @ ..] if rest.iter().all(fixed) => (*c, rest.to_vec()),
+        [q, Expr::Column(c)] if fixed(q) => (*c, vec![q.clone()]),
         _ => return plan,
     };
     let count = match offset {
@@ -252,20 +220,22 @@ fn nearest(plan: Plan, st: &Stats) -> Plan {
     };
     let want = Want {
         column,
-        metric,
-        query,
+        function: f.name().to_string(),
+        args: rest,
+        desc: key.desc,
+        nulls_first: key.nulls_first,
         count,
         k,
     };
     // A partitioned table: each partition's own index searched for `k`
-    // rows, the sort and the limit above taking the nearest of them.
+    // rows, the sort and the limit above taking the first of them.
     match below {
         Plan::Append { inputs, .. } => {
             for p in inputs {
-                nearest_scan(p, &want, st);
+                rank_scan(p, &want, st);
             }
         }
-        other => nearest_scan(other, &want, st),
+        other => rank_scan(other, &want, st),
     }
     plan
 }
@@ -286,23 +256,25 @@ fn fixed(e: &Expr) -> bool {
     ok
 }
 
-/// What a search for the nearest rows asks: their distance from `query`
-/// by `metric` on `column`, `count` of them (`k`, as far as known).
+/// What a ranking asks: `count` rows (`k`, as far as known) first by
+/// `function` of `column` and `args`.
 struct Want {
     column: usize,
-    metric: crate::vectors::Metric,
-    query: Expr,
+    function: String,
+    args: Vec<Expr>,
+    desc: bool,
+    nulls_first: bool,
     count: Expr,
     k: f64,
 }
 
-/// A scan (under a row-level security barrier, perhaps) made a search
-/// for `want`'s nearest rows, where an index serves it and it costs less
-/// ([`nearest`]).
-fn nearest_scan(node: &mut Plan, want: &Want, st: &Stats) {
+/// A scan (under a row-level security barrier, perhaps) ranked by an
+/// index for `want`, where one ranks by its order and it costs less
+/// ([`ranked`]).
+fn rank_scan(node: &mut Plan, want: &Want, st: &Stats) {
     let mut scan = node;
     // Under row-level security: the policy, then the statement's filter
-    // above its barrier — conditions the search checks its rows against
+    // above its barrier — conditions the ranking checks its rows against
     // in that order, so it keeps going until `k` rows the session may see
     // pass, and evaluates no predicate of the statement on a row the
     // policy hides.
@@ -335,10 +307,37 @@ fn nearest_scan(node: &mut Plan, want: &Want, st: &Stats) {
     else {
         return;
     };
-    let (column, metric) = (want.column, want.metric);
-    // The conditions the rows must pass, as conjuncts: a partitioned
-    // index serves a search whose conditions hold each of its `PARTITION
-    // BY` columns equal to a value fixed for the scan (a policy's, too —
+    // The index whose condition the scan reads: it ranks its own rows.
+    let own = match access {
+        Access::Method {
+            index,
+            served: Some(s),
+            rank: None,
+        } => Some((*index, s.function.clone())),
+        Access::Method { .. } => return,
+        _ => None,
+    };
+    // A statement's condition the index serves from above a barrier: its
+    // rows all pass it, so it is not checked on each again.
+    if let Access::Method {
+        served: Some(s), ..
+    } = &*access
+        && s.above
+        && let Some(last) = checks.last_mut()
+    {
+        let mut conds = Vec::new();
+        conjuncts(last.clone(), &mut conds);
+        conds.retain(|c| *c != s.cond);
+        match conjunction(conds) {
+            Some(c) => *last = c,
+            None => {
+                checks.pop();
+            }
+        }
+    }
+    // The conditions the rows must pass, as conjuncts: an index of more
+    // columns (a partitioned HNSW's) ranks where they hold each of its
+    // other columns equal to a value fixed for the scan (a policy's, too —
     // a tenant's).
     let mut conds = Vec::new();
     for f in filter.iter().chain(&checks) {
@@ -355,25 +354,36 @@ fn nearest_scan(node: &mut Plan, want: &Want, st: &Stats) {
             _ => None,
         })
     };
-    // The index with the most of them fixed: the smallest graph.
-    let Some((index, m, rescore, partition)) = table
+    // The scan's own index where it ranks, else the one with the most
+    // columns fixed: the smallest graph.
+    let Some((index, method, partition)) = table
         .indexes
         .iter()
         .enumerate()
         .filter_map(|(i, ix)| {
-            let (serves, m, rescore) = crate::hnsw::serves(ix)?;
-            if ix.columns[0] != column || serves != metric {
+            if ix.columns.first() != Some(&want.column) {
+                return None;
+            }
+            let m = crate::index_method::of(ix).ok().flatten()?;
+            if !m.ranks(ix, &want.function, want.desc, want.nulls_first) {
                 return None;
             }
             let partition: Option<Vec<(Expr, Expr)>> =
                 ix.columns[1..].iter().map(|&c| equal(c)).collect();
-            Some((i, m, rescore, partition?))
+            Some((i, m, partition?))
         })
-        .max_by_key(|(i, _, _, p)| (p.len(), std::cmp::Reverse(*i)))
+        .max_by_key(|(i, _, p)| {
+            (
+                own.as_ref().is_some_and(|o| o.0 == *i),
+                p.len(),
+                std::cmp::Reverse(*i),
+            )
+        })
     else {
         return;
     };
-    // The share of the table's rows in the graph searched.
+    let own = own.filter(|o| o.0 == index);
+    // The share of the table's rows the index ranks.
     let part_sel = partition
         .iter()
         .map(|(_, p)| st.selectivity(table, p))
@@ -386,9 +396,9 @@ fn nearest_scan(node: &mut Plan, want: &Want, st: &Stats) {
         Some(_) => st.rows(table) * part_sel,
         None if matches!(access, Access::Key { .. }) => return,
         None if !partition.is_empty() => 1e12,
-        None => match crate::hnsw::rows(st.txn(), table, index, &[]) {
-            Ok(n) => n as f64,
-            Err(_) => return,
+        None => match method.rows(st.txn(), table, index) {
+            Ok(Some(n)) => n as f64,
+            _ => return,
         },
     };
     let sel = (filter
@@ -400,39 +410,53 @@ fn nearest_scan(node: &mut Plan, want: &Want, st: &Stats) {
     .min(1.0)
     .max(1.0 / rows.max(1.0));
     let k = want.k;
-    // A B-tree's range of the filter: its rows searched exactly (their
-    // entries read, `k` rows), or the graph where they turn out many —
-    // never more than the range's scan reads.
-    let within =
-        matches!(access, Access::Key { index: Some(_), .. }).then(|| Box::new(access.clone()));
+    // A B-tree's range of the filter, another method's condition: its
+    // rows ranked among (their entries read, `k` rows), or checked where
+    // they turn out many — never more than its scan reads.
+    let within = match access {
+        Access::Key { index: Some(_), .. } => Some(Box::new(access.clone())),
+        Access::Method { .. } if own.is_none() => Some(Box::new(access.clone())),
+        _ => None,
+    };
     if within.is_none() {
-        // `ef_search` counts the rows that pass: the graph is asked for
-        // that many over the share passing.
-        // A quantized index reads `rescore` rows for each returned.
-        let ef = (crate::hnsw::ef_search() as f64).max(k * rescore as f64) / sel;
-        // Past the rows over 2m the search gives up and reads every row.
-        if ef > rows / (2 * m) as f64 {
-            return;
-        }
-        let searched = ef * (3.0 + 2.0 * m as f64 / 10.0);
         let scanned = match access {
             Access::Full => rows,
-            Access::Key { .. } => estimate.unwrap_or(rows),
-            Access::Nearest { .. } | Access::Method { .. } => return,
+            Access::Key { .. } | Access::Method { .. } => estimate.unwrap_or(rows),
         };
-        if searched >= scanned {
+        let cost = method.rank_cost(
+            &table.indexes[index],
+            &crate::index_method::RankCost {
+                function: &want.function,
+                served: own.as_ref().map(|o| o.1.as_str()),
+                rows: if own.is_some() { scanned } else { rows },
+                k,
+                share: sel,
+            },
+        );
+        if cost.is_none_or(|c| c > scanned) {
             return;
         }
     }
-    *access = Access::Nearest {
-        index,
-        query: want.query.clone(),
+    let rank = crate::plan::MethodRank {
+        function: want.function.clone(),
+        args: want.args.clone(),
+        desc: want.desc,
         count: want.count.clone(),
         within,
         share: sel.min(1.0),
         checks,
         partition: partition.into_iter().map(|(v, _)| v).collect(),
     };
+    match access {
+        Access::Method { rank: r, .. } if own.is_some() => *r = Some(rank),
+        _ => {
+            *access = Access::Method {
+                index,
+                served: None,
+                rank: Some(rank),
+            }
+        }
+    }
     *estimate = Some(estimate.unwrap_or(rows).min(k));
 }
 

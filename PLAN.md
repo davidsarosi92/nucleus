@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR) done | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW) done | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -5254,6 +5254,11 @@ The steps, each measured as §M14.12's were:
   by it, crash and concurrency tests (as `hnsw_crash.rs`).
 - **T5 — BM25**: `score(body @@ q)` and top k by block-max MaxScore;
   rankings checked against Anserini on BEIR.
+- **T5a — one ranking for every method**: HNSW's nearest rows and the
+  text index's first rows by score through one `IndexMethod` hook, one
+  access path and one optimizer pass, adaptive while it runs.
+- **T5b — block-max MaxScore and a parallel build**, measured on MS
+  MARCO.
 - **T6 — phrases, prefixes and fuzzy terms from positions; highlights
   and snippets.**
 - **T7 — hybrid**: `rrf(...)` and a weighted combination in one plan
@@ -5420,13 +5425,13 @@ any later order key.  The index and a row score through one `Scorer`,
 so `tests/text_index.rs` holds their first seven rows of eleven queries
 equal to the last bit through writes, seals and merges.
 
-HNSW's ordering does not move onto this hook yet, against the plan's
-T3 note: the second ordering showed a different shape, not the same one.
-Text ranks the rows its condition finds, nothing else filtering them;
-HNSW ranks every row, checking the filter, policies and partitions while
-its search walks (V5).  One interface for both would carry HNSW's checks
-into every method or lose them; T7's sparse vectors — a method that,
-like HNSW, ranks every row — decide which shape the two share.
+HNSW's ordering did not move onto this hook in T5, against the plan's
+T3 note: text ranked the rows its condition finds, nothing else
+filtering them; HNSW ranks every row, checking the filter, policies and
+partitions while its search walks (V5).  Reconsidered the next day
+(T5a): the difference is what text lacks, not a second shape — a text
+ranking dropped by any other filter reads every match and sorts them,
+and the core still calls `hnsw` by name.  One mechanism a job.
 
 Checked against Anserini's BM25 "flat" baselines (Lucene, title and text
 one field, `porter` = its English analyzer, k1 0.9, b 0.4, queries as
@@ -5475,6 +5480,103 @@ versions and unions above: `market` 1.2 → 0.6 ms, `stock market` 1.7 →
 4.0.  Measured against 898896c (`bench/phases.py`, alternating, two
 rounds): TPC-H SF1 load 23.0 / 22.1 → 22.3 / 22.2 s, the queries' sums
 5,922 / 5,703 → 5,945 / 5,737 ms: noise.
+
+**T5a — one ranking for every method** (done 2026-11-10).  Two
+mechanisms give an `ORDER BY … LIMIT k` its first rows from an index:
+`Access::Nearest` (HNSW; the `nearest` pass, by cost; the core calling
+`hnsw::serves`, `hnsw::rows`, `hnsw::nearest_rows`, `hnsw::among_most`
+by name — principle 12 broken) and `Access::Method` with a `MethodRank`
+(text; `method_ranks`, by rule, only where nothing else filters the
+rows).  They become one:
+
+1. **The hook.**  `IndexMethod::rank` — HNSW's `search` generalized: the
+   rows first by the order (`Rank`), only those of the condition the
+   index serves where it has one, among given rows where the plan has
+   them, in the partition its other columns' values fix, each passing
+   `keep` (the key filters, a row-level security policy, then the
+   statement's filter); at least `k`, or `None` where the index cannot
+   tell.  `IndexMethod::rank_cost`, the method's own cost (HNSW's `ef ·
+   (3 + 2m / 10)`, moved into it).  The rows to search among come from
+   the plan through a callback the method calls with the most it takes
+   (HNSW's square-root rule, moved into it).
+2. **One access path, one pass.**  `Access::Nearest` goes; `Access::Method`
+   carries the condition served (optional — HNSW serves none), the rank,
+   the rows within, the share passing, the checks and the partition.  One
+   pass replaces `nearest` and `method_ranks`, by the method's cost,
+   partitioned tables and row-level security for both.  `EXPLAIN` keeps
+   its words.
+3. **Adaptive while it runs, no switch** (as the join's `Adaptive`): the
+   text index reads its scored matches greatest first in growing slices
+   (`k` over the share expected, then by the share measured, as HNSW's
+   iterative search grows `ef`), every row tied with the `k`-th passing
+   one included, so the sort and the limit above stay exact; past the
+   matches it has read them all — the old path, no worse.
+4. **Combined.**  `within` may be another method's condition, not only a
+   B-tree's range: `WHERE body @@ q ORDER BY emb <-> v LIMIT k` searches
+   HNSW exactly among the text index's matches where they are few, the
+   graph with `@@` as a check where they are many — T7's hybrid search
+   built on it.
+
+Kept apart: exact (text: the ties of the `k`-th) against approximate
+(HNSW), HNSW's partitions as the method's own.
+
+Built as planned.  `IndexMethod::ranks(ix, f, desc, nulls_first)`,
+`rank_cost`, `rows` and `rank(txn, t, i, RankAsk, wanted, keep)` —
+`keep` told whether a row came from `among`, so the condition that chose
+those rows is not checked on them again; `Pks` moved to `index_method`;
+`rows_where` lost its `rank`.  `Access::Method { index, served, rank }`
+with `MethodRank { …, within, share, checks, partition }`;
+`optimizer::ranked` replaces `nearest` and `method_ranks`;
+`exec::method_rows` serves both, `exec::among` reads a key range's or
+another method's rows.  The text index's `View::ranked` keeps the scored
+matches and gives them greatest first in slices (a selection over the
+rest, a sort of the slice).  Found on the way: under row-level security
+a statement's `@@` stays above the barrier, so the text index never
+served it (T3's gap, not the ranking's); it now chooses the scan's rows
+as a key range's bound may (`Served::above`), staying above the barrier
+and never evaluated below it where the index cannot tell the rows.  Left
+in the core by name: the `hnsw.ef_search` setting's check (a module's
+settings have no hook yet) and the text index's use of HNSW's `nonce`
+and `retrying`.  `EXPLAIN` of a ranked text scan now shows `(rows=k)` as
+HNSW's did, and ranks with a filter.
+
+Measured.  BEIR, `english`, 1.2 / 0.75, a second condition `n % 100 <
+p`, the mean ms of a query (second round), ranked against the old path —
+every match read and scored on its text; the first round checks both
+give the same rows (they did, all 2,677 queries):
+
+| BEIR | 50 % | | 10 % | | 1 % | |
+|---|---:|---:|---:|---:|---:|---:|
+| | ranked | old | ranked | old | ranked | old |
+| SciFact | 1.01 | 85.8 | 1.18 | 20.5 | 2.90 | 6.4 |
+| NFCorpus | 0.76 | 17.8 | 0.83 | 4.8 | 1.21 | 1.5 |
+| ArguAna | 3.09 | 233.9 | 4.31 | 74.6 | 5.30 | 18.0 |
+| FiQA | 0.96 | 430.7 | 1.21 | 110.9 | 3.36 | 36.5 |
+
+Without the condition as before (FiQA 0.97 ms, SciFact 0.98).  At 1 %
+the rows read dominate — about a hundred for each that passes, a
+primary-key lookup each: the merge with the table's scan (T4's note)
+is what helps there, not MaxScore.  HNSW unchanged
+(`bench/ann/filtered.py`, SIFT-1M, `ef` 40, against f5ea072, alternating,
+two rounds): the same plans word for word, the same recall, µs within 1
+% (50 % 559 / 545 → 551 / 538, 10 % 1,678 / 1,641 → 1,682 / 1,648, 1 %
+1,377 / 1,411 → 1,392 / 1,416, 0.1 % 310 / 302 → 303 / 299, 0.01 % 460 /
+460 → 458 / 460).  `bench/phases.py` against f5ea072 (alternating, two
+rounds): TPC-H SF1 queries' sums, best of three, 5,597 / 5,483 → 5,442 /
+5,439 ms: noise.
+
+**T5b — block-max MaxScore and a parallel build** (planned 2026-11-10,
+after T5a).  Per 128-block impacts in the segments — Lucene's Pareto
+frontier of (frequency, length) pairs, not scores: IDF and the average
+length change with the snapshot, so a block's bound is computed at
+query time.  The term-at-a-time accumulator grows into Lucene 10's
+windowed MaxScore (windows of documents, essential clauses summed into a
+buffer, the others skipped by their bound) — degrading to today's full
+scoring with a low threshold, one path.  Only blocks bounded strictly
+below the threshold are skipped, so the ties of the `k`-th stay; the
+threshold is the `k`-th row that passed `keep` (T5a's).  `CREATE
+INDEX` built in parallel (ParadeDB's is 1.6–3.3× faster).  Measured on
+MS MARCO passage (8.8 million) against the exhaustive path and ParadeDB.
 
 ### §M14.22 — Embeddings in the database ⬜
 

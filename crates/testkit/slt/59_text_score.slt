@@ -46,7 +46,7 @@ Project: #0
   Limit: 2
     Sort: #1 DESC
       Project: #0, text_score(#1, 'fox dog', 'simple', 1.2, 0.75, (subquery))
-        Index Scan using docs_body on docs (body @@ 'fox dog') first 2 by text_score(body) DESC
+        Index Scan using docs_body on docs (body @@ 'fox dog') first 2 by text_score(body) DESC (rows=2)
           Subquery:
             Project: text_stats('docs', 'docs_body', 'fox dog')
               Values (1 rows)
@@ -77,7 +77,8 @@ SELECT id FROM docs WHERE body @@ 'bear' ORDER BY score(body @@ 'bear') DESC, id
 8
 7
 
-# Another filter, and the index finds every row it matches.
+# Another filter: the index reads its matches best first until one
+# passes, and every row tied with it (§M14.21 T5a).
 query T
 EXPLAIN SELECT id FROM docs WHERE body @@ 'bear' AND id > 6 ORDER BY score(body @@ 'bear') DESC LIMIT 1
 ----
@@ -85,7 +86,10 @@ Project: #0
   Limit: 1
     Sort: #1 DESC
       Project: #0, text_score(#1, 'bear', 'simple', 1.2, 0.75, (subquery))
-        Index Scan using docs_body on docs (body @@ 'bear') filter: (#0 > 6)
+        Index Scan using docs_body on docs (body @@ 'bear') first 1 by text_score(body) DESC filter: (#0 > 6) (rows=1)
+          Subquery:
+            Project: text_stats('docs', 'docs_body', 'bear')
+              Values (1 rows)
         Subquery:
           Project: text_stats('docs', 'docs_body', 'bear')
             Values (1 rows)
@@ -125,3 +129,42 @@ CREATE INDEX ON docs USING text (body) WITH (k1 = '-1')
 
 statement ok
 DROP TABLE docs
+
+# A text index's matches ranked by HNSW's distance (§M14.21 T5a): few,
+# the graph is searched exactly among them; many, it is searched with
+# `@@` checked on each row it finds.
+statement ok
+CREATE TABLE notes (id INT PRIMARY KEY, body TEXT, v vector(2))
+
+statement ok
+INSERT INTO notes SELECT i, CASE WHEN i % 50 = 0 THEN 'red fox' ELSE 'grey wolf' END, ('[' || (i % 37) || ',' || (i / 37) || ']')::vector FROM generate_series(1, 2000) AS g(i)
+
+statement ok
+CREATE INDEX notes_body ON notes USING text (body)
+
+statement ok
+CREATE INDEX notes_v ON notes USING hnsw (v)
+
+query T
+EXPLAIN SELECT id FROM notes WHERE body @@ 'fox' ORDER BY v <-> '[3,4]' LIMIT 3
+----
+Project: #0
+  Limit: 3
+    Sort: #1
+      Project: #0, <->(vector)(#2, [3,4])
+        Index Scan using notes_v on notes (3 nearest v to [3,4] among notes_body: body @@ 'fox') (rows=3)
+
+query I
+SELECT id FROM notes WHERE body @@ 'fox' ORDER BY v <-> '[3,4]' LIMIT 3
+----
+150
+300
+450
+
+query I
+SELECT id FROM notes WHERE body @@ 'wolf' ORDER BY v <-> '[3,4]' LIMIT 1
+----
+151
+
+statement ok
+DROP TABLE notes

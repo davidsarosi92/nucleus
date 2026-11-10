@@ -248,7 +248,12 @@ impl Metric {
     /// The distance a call of `f` computes, if it is one of the vector
     /// distances: the type's (`<->`), its operators' and their functions'.
     pub fn of_function(f: &crate::ext::FnRef) -> Option<Metric> {
-        Some(match f.name() {
+        Self::of_name(f.name())
+    }
+
+    /// The distance function `name` is, if one.
+    pub fn of_name(name: &str) -> Option<Metric> {
+        Some(match name {
             "<->(vector)" | "l2_distance" => Metric::L2,
             "cosine_distance" => Metric::Cosine,
             "negative_inner_product" => Metric::NegInner,

@@ -30,18 +30,105 @@ pub const BTREE: &str = "btree";
 pub type RowRef<'a> = (&'a [u8], &'a Row);
 
 /// An order a scan's rows are wanted in, for its first `k` (an `ORDER BY
-/// … LIMIT k` over it): `function(column, args…)`, greatest first with
-/// `desc`.
+/// … LIMIT k` over it): `function` of the indexed column and `args`,
+/// greatest first with `desc`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rank {
     /// The function ranked by.
     pub function: String,
-    /// Its arguments after the indexed column.
+    /// Its arguments but the indexed column (after it; for a function of
+    /// two, a distance, either side of it).
     pub args: Vec<crate::types::Value>,
     /// Greatest first.
     pub desc: bool,
     /// The rows wanted.
     pub k: usize,
+}
+
+/// Rows' primary keys, one buffer.
+#[derive(Default)]
+pub struct Pks {
+    bytes: Vec<u8>,
+    at: Vec<u32>,
+}
+
+impl Pks {
+    /// Adds `pk`.
+    pub fn push(&mut self, pk: &[u8]) {
+        if self.at.is_empty() {
+            self.at.push(0);
+        }
+        self.bytes.extend_from_slice(pk);
+        self.at.push(self.bytes.len() as u32);
+    }
+
+    /// How many.
+    pub fn len(&self) -> usize {
+        self.at.len().saturating_sub(1)
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The `i`th.
+    pub fn get(&self, i: usize) -> &[u8] {
+        &self.bytes[self.at[i] as usize..self.at[i + 1] as usize]
+    }
+
+    /// Each, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        (0..self.len()).map(|i| self.get(i))
+    }
+
+    /// The bytes it holds.
+    pub fn size(&self) -> usize {
+        self.bytes.len() + 4 * self.at.len()
+    }
+}
+
+/// The rows a ranking is searched among, as the plan gives them (a
+/// B-tree's range of the filter, another index's condition): asked with
+/// the most the method takes, `None` where there are more — they are then
+/// checked on each row ranked instead.
+pub type Among<'a> = &'a mut dyn FnMut(usize) -> Result<Option<Pks>>;
+
+/// Whether a row ranked passes the scan's other conditions: told whether
+/// it is one of those [`RankAsk::among`] gave.
+pub type Keep<'a> = &'a mut dyn FnMut(&Row, bool) -> Result<bool>;
+
+/// What [`IndexMethod::rank`] is asked.
+pub struct RankAsk<'a> {
+    /// The order and the rows wanted.
+    pub rank: &'a Rank,
+    /// The condition the index finds the rows of on this scan
+    /// ([`IndexMethod::serves`]): its function and its arguments after
+    /// the column — only its rows are ranked.  `None`: every row.
+    pub served: Option<(&'a str, &'a [crate::types::Value])>,
+    /// The share of the rows expected to pass `keep` (the optimizer's
+    /// estimate; 1 without one).
+    pub share: f64,
+    /// The values of the index's columns after its first the scan's
+    /// conditions hold equal (a partitioned index's).
+    pub part: &'a [crate::types::Value],
+    /// The rows to rank among, where the plan has them.
+    pub among: Option<Among<'a>>,
+}
+
+/// What the optimizer asks [`IndexMethod::rank_cost`] about.
+pub struct RankCost<'a> {
+    /// The function ranked by.
+    pub function: &'a str,
+    /// The condition the index serves on the scan, if one.
+    pub served: Option<&'a str>,
+    /// The rows ranked (those of the index's partition the conditions
+    /// fix).
+    pub rows: f64,
+    /// The rows wanted, as far as known.
+    pub k: f64,
+    /// The share of them expected to pass the conditions checked.
+    pub share: f64,
 }
 
 /// An index access method.
@@ -114,22 +201,56 @@ pub trait IndexMethod: Send + Sync {
         false
     }
 
-    /// Whether the index can rank the rows it finds for a condition
-    /// ([`IndexMethod::rows_where`]) by `function` of its (first) column
-    /// and values fixed for the scan — greatest first with `desc`, least
-    /// first without: give only the first `k`.  By default it cannot.
-    fn ranks(&self, ix: &Index, function: &str, desc: bool) -> bool {
-        let _ = (ix, function, desc);
+    /// Whether the index can rank its rows by `function` of its (first)
+    /// column and values fixed for the scan — greatest first with `desc`,
+    /// `NULL`s first with `nulls_first` — giving the first `k`
+    /// ([`IndexMethod::rank`]).  By default it cannot.
+    fn ranks(&self, ix: &Index, function: &str, desc: bool, nulls_first: bool) -> bool {
+        let _ = (ix, function, desc, nulls_first);
         false
+    }
+
+    /// What ranking costs, in rows read (a row's read as through an
+    /// index), for the optimizer to weigh against the scan's: `None` where
+    /// the index cannot rank them, or would read as many as the scan.  By
+    /// default `None`.
+    fn rank_cost(&self, ix: &Index, c: &RankCost) -> Option<f64> {
+        let _ = (ix, c);
+        None
+    }
+
+    /// The rows index `i` of `t` holds as `txn` sees it, where it knows
+    /// them cheaply (for a table not analyzed).  By default `None`.
+    fn rows(&self, txn: &dyn KvTxn, t: &Table, i: usize) -> Result<Option<usize>> {
+        let _ = (txn, t, i);
+        Ok(None)
+    }
+
+    /// The rows of `t` first by `ask`'s order ([`ranks`](IndexMethod::ranks))
+    /// that `keep` passes, as `txn` sees them, the columns `wanted` marks
+    /// read (`None`: all): at least `k` of them where there are, in any
+    /// order — an exact method every row ranked as the `k`-th passing
+    /// too, so the order and the limit above are exact over them.  `None`
+    /// where the index cannot tell them (the rows are then read).  `keep`
+    /// is asked about each row once, in the order ranked, told whether
+    /// the row is one of those `ask.among` gave (the condition that chose
+    /// them is then not checked again); `None`: every row passes.
+    fn rank(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        i: usize,
+        ask: &mut RankAsk,
+        wanted: Option<&[bool]>,
+        keep: Option<Keep>,
+    ) -> Result<Option<Vec<(Vec<u8>, Row)>>> {
+        let _ = (txn, t, i, ask, wanted, keep);
+        Ok(None)
     }
 
     /// The primary keys of the rows of `t`, as `txn` sees them, for which
     /// `function(column, args…)` holds, sorted — `None` where the index
-    /// cannot tell for these values (the rows are then read).  With
-    /// `rank` (one it [`ranks`](IndexMethod::ranks) by), it may give only
-    /// the rows first by that order, at least `k` of them where there are
-    /// that many, and every row ranked as the `k`-th is: the order and the
-    /// limit above it are then exact over them.
+    /// cannot tell for these values (the rows are then read).
     fn rows_where(
         &self,
         txn: &dyn KvTxn,
@@ -137,9 +258,8 @@ pub trait IndexMethod: Send + Sync {
         i: usize,
         function: &str,
         args: &[crate::types::Value],
-        rank: Option<&Rank>,
     ) -> Result<Option<Vec<Vec<u8>>>> {
-        let _ = (txn, t, i, function, args, rank);
+        let _ = (txn, t, i, function, args);
         Ok(None)
     }
 

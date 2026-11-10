@@ -27,7 +27,7 @@ use nucleus_kv::{Kv, KvTxn};
 use crate::catalog::{Index as IndexDef, Table};
 use crate::error::{Error, Result};
 use crate::ext::Registry;
-use crate::index_method::{IndexMethod, Rank, RowRef};
+use crate::index_method::{IndexMethod, Keep, RankAsk, RankCost, RowRef};
 use crate::types::{DataType, Row, Value};
 
 use segment::Doc;
@@ -337,9 +337,119 @@ impl IndexMethod for TextIndex {
     }
 
     /// By BM25, greatest first: `score(col @@ q)` bound
-    /// ([`crate::text::score::bind`]).
-    fn ranks(&self, _: &IndexDef, function: &str, desc: bool) -> bool {
+    /// ([`crate::text::score::bind`]) — never `NULL` on a row it finds.
+    fn ranks(&self, _: &IndexDef, function: &str, desc: bool, _: bool) -> bool {
         function == crate::text::score::TEXT_SCORE && desc
+    }
+
+    /// The rows the condition finds where it is the index's (`@@`): only
+    /// as many as `k` over the share passing need be read, never more
+    /// than it finds.
+    fn rank_cost(&self, _: &IndexDef, c: &RankCost) -> Option<f64> {
+        (c.function == crate::text::score::TEXT_SCORE && c.served == Some("@@"))
+            .then(|| (c.k / c.share).min(c.rows))
+    }
+
+    fn rows(&self, txn: &dyn KvTxn, t: &Table, i: usize) -> Result<Option<usize>> {
+        Ok(Some(store(t, i).view(txn)?.stats(&[]).docs as usize))
+    }
+
+    /// The rows the condition finds, by BM25 of the same query by the same
+    /// analyzer, greatest first — read in slices ([`store::Ranked`]): `k`
+    /// over the share expected to pass `keep` first, then as many as the
+    /// share passing so far needs (at least as many again), as HNSW's
+    /// search grows its `ef`; once `k` passed, on through every row tied
+    /// with the `k`-th.  Past the last match it has read them all.
+    fn rank(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        i: usize,
+        ask: &mut RankAsk,
+        wanted: Option<&[bool]>,
+        mut keep: Option<Keep>,
+    ) -> Result<Option<Vec<(Vec<u8>, Row)>>> {
+        let Some(("@@", args)) = ask.served else {
+            return Ok(None);
+        };
+        let text = match args.first() {
+            Some(Value::Text(q)) => q,
+            Some(Value::Null) => return Ok(Some(Vec::new())),
+            _ => return Ok(None),
+        };
+        let r = ask.rank;
+        let [Value::Text(rq), ra, Value::Float(k1), Value::Float(b), st] = r.args.as_slice() else {
+            return Ok(None);
+        };
+        if r.function != crate::text::score::TEXT_SCORE || rq != text || args.get(1) != Some(ra) {
+            return Ok(None);
+        }
+        let a = crate::text::named(analyzer_of(&t.indexes[i]).unwrap_or(crate::text::DEFAULT))?;
+        let q = crate::text::query::cached(text, &a)?;
+        let st = crate::text::score::Stats::of(st)?;
+        if st.df.len() != q.leaves.len() {
+            return Ok(None);
+        }
+        let k = r.k;
+        if k == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let p = crate::text::score::Params { k1: *k1, b: *b };
+        let sc = crate::text::score::Scorer::new(&q, &st, p);
+        let view = store(t, i).view(txn)?;
+        let mut ranked = view.ranked(&q, &sc)?;
+        // No column read, nothing to check (`count(*)`): the rows need not
+        // be read.
+        let read = keep.is_some() || wanted.is_none_or(|w| w.contains(&true));
+        let storage = crate::storage::of(t)?;
+        let mut key = t.index_prefix(0);
+        let base = key.len();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let (mut checked, mut passed) = (0usize, 0usize);
+        let mut kth: Option<f64> = None;
+        let mut slice = ((k as f64 / ask.share.clamp(1e-9, 1.0)).ceil() as usize).max(k);
+        'read: while ranked.left() > 0 {
+            for (pk, s) in ranked.next(slice) {
+                if kth.is_some_and(|x| s < x) {
+                    break 'read;
+                }
+                if !seen.insert(pk.to_vec()) {
+                    continue;
+                }
+                let row = if read {
+                    crate::budget::charge_scan()?;
+                    key.truncate(base);
+                    key.extend_from_slice(pk);
+                    storage
+                        .get(txn, t, &key, wanted, &mut crate::enums::Labels::default())?
+                        .ok_or_else(|| {
+                            Error::internal("an index method found a row its table does not have")
+                        })?
+                } else {
+                    vec![Value::Null; t.columns.len()]
+                };
+                checked += 1;
+                if let Some(keep) = keep.as_mut()
+                    && !keep(&row, false)?
+                {
+                    continue;
+                }
+                passed += 1;
+                out.push((pk.to_vec(), row));
+                if passed == k {
+                    kth = Some(s);
+                }
+            }
+            // The rows the share passing so far takes for the rest to pass.
+            let needed = match (kth, passed) {
+                (Some(_), _) => k,
+                (None, 0) => 2 * checked,
+                (None, _) => ((k - passed) as f64 * checked as f64 / passed as f64).ceil() as usize,
+            };
+            slice = needed.max(slice);
+        }
+        Ok(Some(out))
     }
 
     fn rows_where(
@@ -349,7 +459,6 @@ impl IndexMethod for TextIndex {
         i: usize,
         function: &str,
         args: &[Value],
-        rank: Option<&Rank>,
     ) -> Result<Option<Vec<Vec<u8>>>> {
         if function != "@@" {
             return Ok(None);
@@ -361,23 +470,7 @@ impl IndexMethod for TextIndex {
         };
         let a = crate::text::named(analyzer_of(&t.indexes[i]).unwrap_or(crate::text::DEFAULT))?;
         let q = crate::text::query::cached(text, &a)?;
-        let view = store(t, i).view(txn)?;
-        // The first `k` by the score of the same query, by the same
-        // analyzer.
-        if let Some(r) = rank
-            && r.function == crate::text::score::TEXT_SCORE
-            && let [Value::Text(rq), ra, Value::Float(k1), Value::Float(b), st] = r.args.as_slice()
-            && rq == text
-            && args.get(1) == Some(ra)
-        {
-            let st = crate::text::score::Stats::of(st)?;
-            if st.df.len() == q.leaves.len() {
-                let p = crate::text::score::Params { k1: *k1, b: *b };
-                let sc = crate::text::score::Scorer::new(&q, &st, p);
-                return Ok(Some(view.top(&q, &sc, r.k)?));
-            }
-        }
-        Ok(Some(view.matching(&q)?))
+        Ok(Some(store(t, i).view(txn)?.matching(&q)?))
     }
 }
 

@@ -367,47 +367,7 @@ impl Dead {
     }
 }
 
-/// Rows' primary keys, one buffer.
-#[derive(Default)]
-pub struct Pks {
-    bytes: Vec<u8>,
-    at: Vec<u32>,
-}
-
-impl Pks {
-    /// Adds `pk`.
-    pub fn push(&mut self, pk: &[u8]) {
-        if self.at.is_empty() {
-            self.at.push(0);
-        }
-        self.bytes.extend_from_slice(pk);
-        self.at.push(self.bytes.len() as u32);
-    }
-
-    /// How many.
-    pub fn len(&self) -> usize {
-        self.at.len().saturating_sub(1)
-    }
-
-    /// Whether there are none.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// The `i`th.
-    pub fn get(&self, i: usize) -> &[u8] {
-        &self.bytes[self.at[i] as usize..self.at[i + 1] as usize]
-    }
-
-    /// Each, in order.
-    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
-        (0..self.len()).map(|i| self.get(i))
-    }
-
-    fn size(&self) -> usize {
-        self.bytes.len() + 4 * self.at.len()
-    }
-}
+pub use crate::index_method::Pks;
 
 /// A chunk's nodes' rows and vectors (the vectors on a cache line).
 struct VecChunk {
