@@ -5,6 +5,7 @@
 //! for the process, as index methods are: an index names its analyzer
 //! when it is defined and finds it again by that name.
 
+pub(crate) mod highlight;
 pub mod index;
 mod porter;
 pub(crate) mod query;
@@ -406,6 +407,8 @@ pub fn register(r: &mut Registry) -> Result<()> {
     r.add_function(&["tokenize"], Arc::new(Tokenize))?;
     r.add_operator("@@", DataType::Text, DataType::Text, Arc::new(Matches))?;
     r.add_function(&["score"], Arc::new(score::Score))?;
+    r.add_function(&["highlight"], Arc::new(highlight::OfCondition::HIGHLIGHT))?;
+    r.add_function(&["snippet"], Arc::new(highlight::OfCondition::SNIPPET))?;
     index::register(r)
 }
 

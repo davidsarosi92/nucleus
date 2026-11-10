@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms) done | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed) done | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -5905,6 +5905,67 @@ over the dictionary's terms) is left to the sample.  SciFact, analyzed:
 46.3 → 0.27 ms a query (0.20 not analyzed; e61d55f analyzed 47.3).
 Not taken: remembering the sample's answers across plannings — each
 new query text would pay again.
+
+**T6 — phrases within a slop; highlights and snippets** (done
+2026-11-10).  Prior art: Lucene's `"a b"~N` (`SloppyPhraseMatcher`:
+each term's position less its offset in the phrase, the least moved on,
+an occurrence where the span is at most the slop, weighing 1 / (1 +
+span) in the frequency BM25 sees — `sloppyWeight`); PostgreSQL's
+`<N>` is an exact distance, not a bound (T8).  Highlights: PostgreSQL's
+`ts_headline` (`StartSel`/`StopSel` `<b>`/`</b>`, `MaxWords` 35, the
+best fragment by the query's cover); SQLite FTS5's `highlight()` and
+`snippet(…, ellipsis, ntokens)` (a phrase's whole occurrence one mark;
+the window with the most distinct phrases, then the most hits, the
+earliest of equals); Elasticsearch's unified highlighter (passages
+scored by BM25); ParadeDB's `pdb.snippet` (Tantivy's
+`SnippetGenerator`: fragments up to so many characters, scored by their
+terms' idf).  Taken:
+
+1. **Slop**: `"…"~N` (0–1,000) in the query syntax; one function,
+   `query::phrase`, gives a phrase's occurrences and weights wherever
+   positions are read — a row's text, a segment's postings, BM25's
+   frequency, a highlight — exact by binary search, within a slop by
+   Lucene's matcher.  The index and the rows agree on every row and
+   score (`tests/text_index.rs` runs two slopped phrases among its
+   queries; `60_text_highlight.slt` checks scores worked by hand).
+2. **`highlight(col @@ q [, start, stop])` and `snippet(col @@ q [,
+   start, stop, ellipsis, words])`**, functions of the condition as
+   `score` is: a new `ScalarFunction` pair, `of_condition()` (the
+   operator it takes) and `bind_condition()` (bound from the operator's
+   typed operands), so the text is analyzed by the column's index's
+   analyzer (`simple` without one) and the query means what `@@` means.
+   FTS5's marks and window order, PostgreSQL's defaults (`<b>`, `</b>`,
+   35 words), `...` at either side where the text goes on, the window
+   moved to centre its marks.
+
+Not taken: scoring passages by BM25 (Elasticsearch's) — the window with
+the most distinct words found answers "why this row" as well on short
+texts, and needs no statistics; several fragments a text (`ts_headline`'s
+`MaxFragments`) and character limits (Tantivy's) — later if asked;
+escaping HTML (neither `ts_headline` nor FTS5 does: the caller knows the
+markup); Lucene's rule for a term twice in one phrase (its repeats may
+share a position here).
+
+Measured (`bench/text/beir.py --snippets`, `english`, 1.2 / 0.75, the
+mean ms of a query, the second of two rounds; against 63e0d41
+alternating, the CPU otherwise idle): the query alone unchanged —
+0.17 / 0.12 / 2.19 / 0.35 → 0.18 / 0.12 / 2.26 / 0.42 ms (the first
+pair 0.18 / 0.14 / 2.45 / 0.39 → 0.24 / 0.15 / 2.46 / 0.36: noise), the
+same nDCG@10; with each of the 11 rows' snippet — its text analyzed
+again, about 0.08 ms a row — against ParadeDB's `pdb.snippet(body)`
+(Tantivy's 150 characters, ours 35 words):
+
+| BEIR | query | with snippets | ParadeDB with snippets |
+|---|---:|---:|---:|
+| SciFact | 0.18 | 1.13 | 1.49 |
+| NFCorpus | 0.12 | 0.91 | 0.93 |
+| ArguAna | 2.26 | 3.27 | 7.26 |
+| FiQA | 0.42 | 0.97 | 2.23 |
+
+Not measured apart: a snippet from the positions the index holds (the
+text is analyzed again; the index has the positions but not the
+offsets — Lucene's postings-with-offsets highlighter) — later, if
+snippets dominate a query.
 
 ### §M14.22 — Embeddings in the database ⬜
 

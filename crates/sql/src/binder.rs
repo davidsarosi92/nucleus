@@ -2822,6 +2822,31 @@ impl<'a> Binder<'a> {
                 {
                     return Ok((e.0, Some(e.1)));
                 }
+                // A function of an operator's condition, bound as a call
+                // of its operands (`highlight(body @@ q)`).
+                if let Some(want) = f.of_condition()
+                    && let Some((Expr::Call(op, operands), _)) = bound.first()
+                    && op.name() == want
+                {
+                    let info = vec![
+                        crate::ext::ArgInfo {
+                            ty: None,
+                            text_literal: false,
+                        };
+                        operands.len()
+                    ];
+                    let sig = op.resolve(&info)?;
+                    let typed: Vec<Typed> = operands
+                        .iter()
+                        .zip(&sig.args)
+                        .map(|(e, a)| match a {
+                            Arg::Convert(t) | Arg::Untyped(t) => (e.clone(), Some(*t)),
+                            _ => (e.clone(), None),
+                        })
+                        .collect();
+                    let (g, args) = f.bind_condition(&typed, &bound[1..])?;
+                    return self.call(FnRef::new(g), args);
+                }
                 self.call(f, bound)?
             }
         })

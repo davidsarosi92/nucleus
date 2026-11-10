@@ -77,11 +77,13 @@ fn problems(kv: &Arc<dyn Kv>, s: &Session) -> Vec<String> {
     nucleus_sql::check::check(&*txn, s.registry()).unwrap()
 }
 
-const QUERIES: [&str; 11] = [
+const QUERIES: [&str; 13] = [
     "alpha",
     "alpha beta",
     "alpha AND beta",
     "\"alpha beta\"",
+    "\"alpha beta\"~2",
+    "\"gamma alpha delta\"~4 OR iota",
     "gam*",
     "delte~1",
     "-alpha",

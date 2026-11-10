@@ -8,7 +8,8 @@
 //!   makes several terms of (`e-mail`, any word under `trigram`) is a
 //!   phrase of them, a stop word is dropped.
 //! - `"several words"` — a phrase: the terms at consecutive positions
-//!   (a dropped stop word keeps its place).
+//!   (a dropped stop word keeps its place); `"several words"~N` — within
+//!   `N` moves of one another (Lucene's slop: a transposition is two).
 //! - `word*` — any term starting so; `word~`, `word~1` — any term within
 //!   two (one) edits, a transposition one edit (Lucene's `FuzzyQuery`).
 //!   Neither is stemmed, only lower-cased, as Lucene normalizes them.
@@ -51,8 +52,9 @@ impl Leaf {
 pub(crate) enum Node {
     /// A leaf anywhere.
     Leaf(usize),
-    /// Leaves at these positions relative to one another.
-    Phrase(Vec<(usize, u32)>),
+    /// Leaves at these positions relative to one another, each within
+    /// the slop (the second: 0, exactly there) of it.
+    Phrase(Vec<(usize, u32)>, u32),
     /// All of `must`, none of `not`, and one of `should` unless `must`
     /// holds something (then `should` only ranks).
     Bool {
@@ -137,14 +139,13 @@ impl Hits {
 pub(crate) fn eval(n: &Node, hits: &[Vec<u32>]) -> bool {
     match n {
         Node::Leaf(i) => !hits[*i].is_empty(),
-        Node::Phrase(terms) => {
-            let (first, base) = terms[0];
-            hits[first].iter().any(|&p| {
-                terms[1..].iter().all(|&(i, off)| {
-                    let want = p as u64 + off as u64 - base as u64;
-                    hits[i].binary_search(&(want as u32)).is_ok()
-                })
-            })
+        Node::Phrase(terms, slop) => {
+            let mut any = false;
+            phrase(terms, *slop, &|l| &hits[l], &mut |_, _| {
+                any = true;
+                false
+            });
+            any
         }
         Node::Bool { must, should, not } => {
             must.iter().all(|n| eval(n, hits))
@@ -163,7 +164,7 @@ pub(crate) fn eval(n: &Node, hits: &[Vec<u32>]) -> bool {
 pub(crate) fn share(n: &Node, leaf: &dyn Fn(usize) -> f64) -> f64 {
     match n {
         Node::Leaf(i) => leaf(*i),
-        Node::Phrase(terms) => terms.iter().map(|t| leaf(t.0)).product(),
+        Node::Phrase(terms, _) => terms.iter().map(|t| leaf(t.0)).product(),
         Node::Bool { must, should, not } => {
             let all: f64 = must.iter().map(|n| share(n, leaf)).product();
             let none: f64 = not.iter().map(|n| 1.0 - share(n, leaf)).product();
@@ -174,6 +175,86 @@ pub(crate) fn share(n: &Node, leaf: &dyn Fn(usize) -> f64) -> f64 {
             };
             all * none * any
         }
+    }
+}
+
+/// Each occurrence of a phrase whose leaves are where `at` says
+/// (ascending positions): its weight and each term's position, in the
+/// phrase's order, to `each` — which says whether to go on.  Exactly
+/// (`slop` 0): every position of the first term the others follow at
+/// their offsets, each weighing 1.  Within a slop, Lucene's
+/// `SloppyPhraseMatcher`: each term's position less its offset, the
+/// least one moved on each time — through the positions that keep it
+/// least, so the tightest occurrence from there counts — and an
+/// occurrence counted where the greatest less the least is at most the
+/// slop, weighing 1 / (1 + that).  (A term twice in a phrase may then
+/// share a position, as Lucene's does without its repeats' rule.)
+pub(crate) fn phrase<'a>(
+    terms: &[(usize, u32)],
+    slop: u32,
+    at: &dyn Fn(usize) -> &'a [u32],
+    each: &mut dyn FnMut(f64, &[u32]) -> bool,
+) {
+    let mut pos = vec![0u32; terms.len()];
+    if slop == 0 {
+        let (first, base) = terms[0];
+        for &p in at(first) {
+            let ok = terms.iter().zip(pos.iter_mut()).all(|(&(l, off), out)| {
+                let want = u64::from(p) + u64::from(off) - u64::from(base);
+                match u32::try_from(want) {
+                    Ok(w) if at(l).binary_search(&w).is_ok() => {
+                        *out = w;
+                        true
+                    }
+                    _ => false,
+                }
+            });
+            if ok && !each(1.0, &pos) {
+                return;
+            }
+        }
+        return;
+    }
+    let lists: Vec<&[u32]> = terms.iter().map(|&(l, _)| at(l)).collect();
+    if lists.iter().any(|l| l.is_empty()) {
+        return;
+    }
+    let off: Vec<i64> = terms.iter().map(|&(_, o)| i64::from(o)).collect();
+    let mut i = vec![0usize; terms.len()];
+    let adj = |t: usize, i: &[usize]| i64::from(lists[t][i[t]]) - off[t];
+    let mut end = (0..terms.len()).map(|t| adj(t, &i)).max().expect("a term");
+    loop {
+        // The least, and the next least after it.
+        let mut min = 0;
+        for t in 1..terms.len() {
+            if adj(t, &i) < adj(min, &i) {
+                min = t;
+            }
+        }
+        let next = (0..terms.len())
+            .filter(|&t| t != min)
+            .map(|t| adj(t, &i))
+            .min()
+            .unwrap_or(i64::MAX);
+        while i[min] + 1 < lists[min].len() && i64::from(lists[min][i[min] + 1]) - off[min] <= next
+        {
+            i[min] += 1;
+        }
+        let start = adj(min, &i);
+        let len = end - start;
+        if len <= i64::from(slop) {
+            for (t, p) in pos.iter_mut().enumerate() {
+                *p = lists[t][i[t]];
+            }
+            if !each(1.0 / (1.0 + len as f64), &pos) {
+                return;
+            }
+        }
+        i[min] += 1;
+        if i[min] == lists[min].len() {
+            return;
+        }
+        end = end.max(adj(min, &i));
     }
 }
 
@@ -255,6 +336,9 @@ struct Parser<'a> {
     leaves: Vec<Leaf>,
     depth: usize,
 }
+
+/// The greatest slop a phrase takes.
+const MAX_SLOP: u32 = 1000;
 
 /// Characters that end a word.
 fn special(c: char) -> bool {
@@ -436,7 +520,21 @@ impl Parser<'_> {
                     return Err(self.error("unterminated phrase"));
                 };
                 self.at = start + 1 + len + 1;
-                Ok(self.analyzed(&self.src[start + 1..start + 1 + len]))
+                let mut n = self.analyzed(&self.src[start + 1..start + 1 + len]);
+                // `"…"~N`: the phrase's slop.
+                if let Some(rest) = self.src[self.at..].strip_prefix('~') {
+                    let digits = rest.find(special).unwrap_or(rest.len());
+                    self.at += 1;
+                    let slop = match rest[..digits].parse::<u32>() {
+                        Ok(k) if k <= MAX_SLOP => k,
+                        _ => return Err(self.error("a phrase's slop takes ~0 to ~1000")),
+                    };
+                    self.at += digits;
+                    if let Some(Node::Phrase(_, s)) = &mut n {
+                        *s = slop;
+                    }
+                }
+                Ok(n)
             }
             Some(_) => {
                 let rest = &self.src[self.at..];
@@ -480,6 +578,7 @@ impl Parser<'_> {
                         .into_iter()
                         .map(|t| (self.leaf(Leaf::Exact(t.term)), t.position - base))
                         .collect(),
+                    0,
                 ))
             }
         }
@@ -590,6 +689,48 @@ mod tests {
         // Trigrams: a word is found as a substring.
         assert!(m("trigram", "atab", "the database"));
         assert!(!m("trigram", "atbb", "the database"));
+    }
+
+    #[test]
+    fn phrases_within_a_slop() {
+        let t = "The quick brown fox jumps over the lazy dog";
+        assert!(!m("simple", "\"quick fox\"", t));
+        assert!(!m("simple", "\"quick fox\"~0", t));
+        assert!(m("simple", "\"quick fox\"~1", t));
+        // Out of order: a transposition is two moves (Lucene's).
+        assert!(!m("simple", "\"brown quick\"~1", t));
+        assert!(m("simple", "\"brown quick\"~2", t));
+        assert!(!m("simple", "\"fox quick\"~2", t));
+        assert!(m("simple", "\"fox quick\"~3", t));
+        assert!(m("simple", "\"quick jumps dog\"~5", t));
+        assert!(!m("simple", "\"quick jumps dog\"~4", t));
+        assert!(m("simple", "\"quick fox\"~1 AND lazy", t));
+        assert!(!m("simple", "-\"quick fox\"~1", t));
+        // Each occurrence weighed 1 / (1 + its distance), counted once
+        // from each least position.
+        let a = super::super::named("simple").unwrap();
+        let w = |q: &str, text: &str| {
+            let q = Query::parse(q, a.as_ref()).unwrap();
+            let mut h = q.hits();
+            q.find(a.as_ref(), text, &mut h);
+            let Some(Node::Phrase(ts, slop)) = &q.root else {
+                panic!("a phrase")
+            };
+            let mut ws = Vec::new();
+            phrase(ts, *slop, &|l| &h.of()[l], &mut |w, _| {
+                ws.push(w);
+                true
+            });
+            ws
+        };
+        assert_eq!(w("\"a b\"~2", "a b x a x b"), vec![1.0, 0.5]);
+        assert_eq!(w("\"a b\"~2", "a x x b"), vec![1.0 / 3.0]);
+        assert_eq!(w("\"a b\"", "a b x a b"), vec![1.0, 1.0]);
+        assert_eq!(w("\"a b\"~1", "b a"), Vec::<f64>::new());
+        assert_eq!(w("\"a b\"~2", "b a"), vec![1.0 / 3.0]);
+        for bad in ["\"a b\"~x", "\"a b\"~1001", "\"a b\"~-1"] {
+            assert!(Query::parse(bad, a.as_ref()).is_err(), "{bad}");
+        }
     }
 
     #[test]

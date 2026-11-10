@@ -5,7 +5,8 @@
 //!
 //! A query's score is its tree's (Lucene's `BooleanQuery`): a term's
 //! BM25; a phrase's BM25 of its frequency with its terms' IDFs summed
-//! (`PhraseQuery`); a prefix or fuzzy term's 1 where it matches (Lucene's
+//! (`PhraseQuery`; within a slop, each occurrence weighed 1 / (1 + its
+//! distance), as `SloppyPhraseMatcher`); a prefix or fuzzy term's 1 where it matches (Lucene's
 //! constant-score rewrite); a boolean node's, the sum of its required and
 //! matching optional children's — exclusions add nothing.  A text the
 //! query does not match scores 0.
@@ -196,24 +197,19 @@ impl<'q> Scorer<'q> {
                 }
                 Some(self.leaf(*i, f, norm))
             }
-            Node::Phrase(ts) => {
-                let (first, base) = ts[0];
-                let freq = t
-                    .positions(first)
-                    .iter()
-                    .filter(|&&p| {
-                        ts[1..].iter().all(|&(l, off)| {
-                            let want = u64::from(p) + u64::from(off) - u64::from(base);
-                            u32::try_from(want)
-                                .is_ok_and(|w| t.positions(l).binary_search(&w).is_ok())
-                        })
-                    })
-                    .count();
-                if freq == 0 {
+            Node::Phrase(ts, slop) => {
+                // Its frequency: occurrences counted, within a slop each
+                // weighed (Lucene's sloppy frequency).
+                let mut freq = 0.0;
+                query::phrase(ts, *slop, &|l| t.positions(l), &mut |w, _| {
+                    freq += w;
+                    true
+                });
+                if freq == 0.0 {
                     return None;
                 }
                 let idf: f64 = ts.iter().map(|&(l, _)| self.idf[l]).sum();
-                Some(fixed(bm25(idf, freq as f64)))
+                Some(fixed(bm25(idf, freq)))
             }
             Node::Bool { must, should, not } => {
                 if not.iter().any(|c| self.node(c, t, norm).is_some()) {

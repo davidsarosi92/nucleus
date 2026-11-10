@@ -10,6 +10,9 @@ a bag of its words.
                                       [--k1 0.9] [--b 0.4] [--analyzer porter]
     bench/text/beir.py paradedb [--container nucleus-paradedb]
 
+`--snippets` times the same queries with each row's `snippet(body @@ q)`
+(§M14.21 T6; ParadeDB: `pdb.snippet(body)` in its own query).
+
 `--filters 1,10,50` times the same queries with a second condition
 passing that percentage of the rows (`n % 100 < p`, `n` a row's number),
 ranked by the index (§M14.21 T5a) and, with `--unranked`, ordered by
@@ -152,7 +155,8 @@ def paradedb(a):
         for qid in order:
             q = SYNTAX.sub(" ", queries[qid]).lower()
             script.append(f"\\echo @@ {qid}")
-            script.append(f"SELECT id FROM docs WHERE body ||| {lit(q)} "
+            snippet = r", replace(pdb.snippet(body), E'\n', ' ')" if a.snippets else ""
+            script.append(f"SELECT id{snippet} FROM docs WHERE body ||| {lit(q)} "
                           f"ORDER BY pdb.score(id) DESC LIMIT 11;")
         # Twice: the first round warms what the second measures.
         out = psql(stdin="\n".join(script + script[1:]) + "\n")
@@ -162,10 +166,27 @@ def paradedb(a):
         for qid, run in zip(order, runs):
             lines = run.strip().split("\n")[1:]
             times.append(float(lines[-1].split("Time: ")[1].split(" ms")[0]))
-            ranked = [x for x in lines[:-1] if x != qid][:10]
+            ranked = [x.split("|")[0] for x in lines[:-1]]
+            ranked = [x for x in ranked if x != qid][:10]
             scores.append(ndcg10(ranked, qrels[qid]))
         report(name, ndocs, scores, index_ms, times)
         psql("DROP TABLE docs")
+
+
+def snippets(c, name, qrels, queries):
+    """The queries with each row's snippet (§M14.21 T6): mean and median
+    ms, the second of two rounds."""
+    for _ in range(2):
+        times = []
+        for qid in qrels:
+            q = lit(SYNTAX.sub(" ", queries[qid]).lower())
+            t = time.perf_counter()
+            c.execute(f"SELECT id, snippet(body @@ {q}) FROM docs WHERE body @@ {q} "
+                      f"ORDER BY score(body @@ {q}) DESC, id LIMIT 11")
+            times.append((time.perf_counter() - t) * 1000)
+    times.sort()
+    print(f"{name:10} snippets        {sum(times) / len(times):8.2f} mean "
+          f"{times[len(times) // 2]:8.2f} p50", flush=True)
 
 
 def filtered(c, name, qrels, queries, p, unranked):
@@ -214,6 +235,7 @@ def main():
     ap.add_argument("--host", default=os.environ.get("NUCLEUS_BENCH_HOST", "127.0.0.1"))
     ap.add_argument("--filters", default="")
     ap.add_argument("--unranked", action="store_true")
+    ap.add_argument("--snippets", action="store_true")
     ap.add_argument("--split", default="test")
     ap.add_argument("--queries", type=int, default=None)
     ap.add_argument("--index-cache", default=None,
@@ -267,6 +289,8 @@ def main():
                     ranked = [r[0] for r in rows if r[0] != qid][:10]
                     scores.append(ndcg10(ranked, rels))
             report(name, ndocs, scores, index_ms, times)
+            if a.snippets:
+                snippets(c, name, qrels, queries)
             for p in [int(x) for x in a.filters.split(",") if x]:
                 filtered(c, name, qrels, queries, p, a.unranked)
         c.close()

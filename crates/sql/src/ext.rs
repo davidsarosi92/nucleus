@@ -265,6 +265,32 @@ pub trait ScalarFunction: Send + Sync {
         None
     }
 
+    /// For a function of an operator's condition (`highlight(body @@ q)`,
+    /// PLAN.md §M14.21 T6): the operator.  Where its first argument is
+    /// that operator's call, the binder binds the call
+    /// [`bind_condition`](Self::bind_condition) gives in its place.  By
+    /// default none.
+    fn of_condition(&self) -> Option<&str> {
+        None
+    }
+
+    /// The call in place of this one of an operator's condition
+    /// ([`of_condition`](Self::of_condition)): given the operator's
+    /// operands — typed as its signature converted them — and this call's
+    /// other arguments, the function to call and its arguments.
+    #[allow(clippy::type_complexity)]
+    fn bind_condition(
+        &self,
+        operands: &[(crate::expr::Expr, Option<DataType>)],
+        rest: &[(crate::expr::Expr, Option<DataType>)],
+    ) -> Result<(
+        Arc<dyn ScalarFunction>,
+        Vec<(crate::expr::Expr, Option<DataType>)>,
+    )> {
+        let _ = (operands, rest);
+        Err(Error::internal("a function of no condition"))
+    }
+
     /// Computes the value.
     fn call(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Value>;
 

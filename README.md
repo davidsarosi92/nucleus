@@ -108,7 +108,10 @@ snapshot, its counts and statistics those of the snapshot's rows,
 index from its postings: Anserini's nDCG@10 on BEIR to within 0.006,
 ranked as well as ParadeDB's Tantivy-based BM25 or better and faster
 on every corpus (0.34 ms a FiQA query, theirs 1.6; 0.16 ms on SciFact,
-theirs 0.91 — `score()` reads the scores the ranking computed); on MS
+theirs 0.91 — `score()` reads the scores the ranking computed), with
+phrases within a slop (`"a b"~3`) and `highlight(body @@ q)` /
+`snippet(body @@ q)` (a FiQA query with its rows' snippets 0.97 ms,
+ParadeDB's 2.2); on MS
 MARCO's 8.8 million passages block-max MaxScore over per-block impacts
 ranks a query in 1.8 ms against ParadeDB's 5.5, at a higher nDCG@10 (0.2605, theirs 0.2578), the index built on every core in 42 s (theirs 68)
 — and with other conditions, row-level security or

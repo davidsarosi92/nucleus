@@ -1,0 +1,85 @@
+# Highlights, snippets and phrases within a slop (PLAN.md §M14.21 T6):
+# functions of the condition, analyzed as `@@` analyzes it — by the
+# column's text index's analyzer, else the default.
+
+statement ok
+CREATE TABLE docs (id INT PRIMARY KEY, body TEXT)
+
+statement ok
+INSERT INTO docs VALUES
+  (1, 'The quick brown fox jumps over the lazy dog.'),
+  (2, 'Foxes are jumping; a dog jumped.'),
+  (3, NULL)
+
+# Without an index: the default analyzer (`simple`, no stemming).
+query IT
+SELECT id, highlight(body @@ 'fox OR jumps') FROM docs ORDER BY id
+----
+1 The quick brown <b>fox</b> <b>jumps</b> over the lazy dog.
+2 Foxes are jumping; a dog jumped.
+3 NULL
+
+# A phrase is one mark; within a slop, from its first word to its last.
+query T
+SELECT highlight(body @@ '"quick brown" OR "fox dog"~5', '[', ']') FROM docs WHERE id = 1
+----
+The [quick brown] [fox jumps over the lazy dog].
+
+query I
+SELECT id FROM docs WHERE body @@ '"quick fox"~1' ORDER BY id
+----
+1
+
+query I
+SELECT count(*) FROM docs WHERE body @@ '"quick fox"'
+----
+0
+
+statement error 42601
+SELECT id FROM docs WHERE body @@ '"quick fox"~x'
+
+# A snippet: the window holding the most of the query's terms, the marks
+# in its middle, an ellipsis where the text goes on.
+query T
+SELECT snippet(body @@ 'lazy', '*', '*', '…', 4) FROM docs WHERE id = 1
+----
+…over the *lazy* dog.
+
+query T
+SELECT snippet(body @@ 'cat', '*', '*', '…', 3) FROM docs WHERE id = 1
+----
+The quick brown…
+
+statement error 22023
+SELECT snippet(body @@ 'cat', '*', '*', '…', 0) FROM docs WHERE id = 1
+
+# Of anything but a text condition, refused.
+statement error 0A000
+SELECT highlight(body = 'x') FROM docs
+
+# With a text index: its analyzer, stemming included.
+statement ok
+CREATE INDEX docs_body ON docs USING text (body) WITH (analyzer = 'english')
+
+query IT
+SELECT id, highlight(body @@ 'jump') FROM docs WHERE body @@ 'jump' ORDER BY id
+----
+1 The quick brown fox <b>jumps</b> over the lazy dog.
+2 Foxes are <b>jumping</b>; a dog <b>jumped</b>.
+
+query IT
+SELECT id, snippet(body @@ 'fox dog') FROM docs WHERE body @@ 'fox dog' ORDER BY score(body @@ 'fox dog') DESC, id LIMIT 2
+----
+2 <b>Foxes</b> are jumping; a <b>dog</b> jumped.
+1 The quick brown <b>fox</b> jumps over the lazy <b>dog</b>.
+
+# Ranked by the index, a phrase within a slop: its frequency each
+# occurrence weighed 1 / (1 + its distance) — 1/4 in row 2 (`foxes … dog`,
+# three apart), 1/5 in row 1; with `english`'s stop words the lengths are
+# 4 and 6, N 2, both terms in both rows: idf ln 1.2 each, so row 2
+# 2 ln 1.2 · 0.25 / (0.25 + 1.2 · (0.25 + 0.75 · 4/5)) = 0.071780.
+query IT
+SELECT id, round(score(body @@ '"fox dog"~6')::numeric, 6)::text FROM docs WHERE body @@ '"fox dog"~6' ORDER BY score(body @@ '"fox dog"~6') DESC LIMIT 5
+----
+2 0.071780
+1 0.046157

@@ -1386,7 +1386,7 @@ fn every_match(
 fn phrase_leaves(n: &Node, out: &mut [bool]) {
     match n {
         Node::Leaf(_) => {}
-        Node::Phrase(ts) => ts.iter().for_each(|&(l, _)| out[l] = true),
+        Node::Phrase(ts, _) => ts.iter().for_each(|&(l, _)| out[l] = true),
         Node::Bool { must, should, not } => {
             must.iter()
                 .chain(should)
@@ -1400,7 +1400,7 @@ fn phrase_leaves(n: &Node, out: &mut [bool]) {
 fn eval_docs(n: &Node, leaves: &[Postings], all: u32) -> Vec<u32> {
     match n {
         Node::Leaf(l) => leaves[*l].docs.clone(),
-        Node::Phrase(ts) => {
+        Node::Phrase(ts, slop) => {
             let mut cand = leaves[ts[0].0].docs.clone();
             for &(l, _) in &ts[1..] {
                 cand = intersect(&cand, &leaves[l].docs);
@@ -1410,13 +1410,12 @@ fn eval_docs(n: &Node, leaves: &[Postings], all: u32) -> Vec<u32> {
                     let p = &leaves[l];
                     p.positions(p.docs.binary_search(&d).expect("intersected"))
                 };
-                let (first, base) = ts[0];
-                at(first).iter().any(|&p| {
-                    ts[1..].iter().all(|&(l, off)| {
-                        let want = u64::from(p) + u64::from(off) - u64::from(base);
-                        u32::try_from(want).is_ok_and(|w| at(l).binary_search(&w).is_ok())
-                    })
-                })
+                let mut any = false;
+                crate::text::query::phrase(ts, *slop, &at, &mut |_, _| {
+                    any = true;
+                    false
+                });
+                any
             });
             cand
         }

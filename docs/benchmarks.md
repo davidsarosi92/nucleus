@@ -644,7 +644,7 @@ python3 bench/text/analyzers.py postgres --container ncpg
 
 ### BM25 ranking
 
-`bench/text/beir.py` (PLAN.md §M14.21 T5, T5b, T5c): BEIR's SciFact, NFCorpus,
+`bench/text/beir.py` (PLAN.md §M14.21 T5, T5b, T5c, T6): BEIR's SciFact, NFCorpus,
 ArguAna and FiQA (title and text), a text index, and each judged test
 query — its query-syntax characters taken out, a bag of words — as
 `SELECT id FROM docs WHERE body @@ q ORDER BY score(body @@ q) DESC, id
@@ -690,13 +690,25 @@ rows:
 | ArguAna | 2.15 | 223.7 | 2.40 | 51.7 | 4.37 | 10.3 |
 | FiQA | 0.47 | 424.9 | 0.70 | 94.0 | 3.07 | 18.7 |
 
+With each row's snippet (PLAN.md §M14.21 T6: `SELECT id, snippet(body @@
+q) … LIMIT 11`, 35 words; ParadeDB `pdb.snippet(body)`, Tantivy's 150
+characters), `english`, 1.2 / 0.75, the mean ms of a query:
+
+| BEIR | nucleus | with snippets | ParadeDB with snippets |
+|---|---:|---:|---:|
+| SciFact | 0.18 | 1.13 | 1.49 |
+| NFCorpus | 0.12 | 0.91 | 0.93 |
+| ArguAna | 2.26 | 3.27 | 7.26 |
+| FiQA | 0.42 | 0.97 | 2.23 |
+
 ```sh
 python3 bench/text/data.py beir
 NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus
 NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus --analyzer english --k1 1.2 --b 0.75 --filters 50,10,1 --unranked
-NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus --analyzer english --k1 1.2 --b 0.75
+NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus --analyzer english --k1 1.2 --b 0.75 --snippets
 docker run -d --name nucleus-paradedb -e POSTGRES_PASSWORD=x paradedb/paradedb
 python3 bench/text/beir.py paradedb
+python3 bench/text/beir.py paradedb --snippets
 ```
 
 MS MARCO passage (PLAN.md §M14.21 T5b, T5c): 8,841,823 passages, BEIR's dev

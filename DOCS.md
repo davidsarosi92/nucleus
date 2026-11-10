@@ -2647,7 +2647,11 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   `Stable`, `Volatile` — the default; only immutable functions may define
   an ordering), `parallel_safe()` (default: unless volatile; a volatile
   function whose calls do not depend on one another, such as `random()`,
-  returns true so workers call it), `implied_range()` (for a function of two arguments true
+  returns true so workers call it), `of_condition()` and
+  `bind_condition(operands, rest)` (a function of an operator's
+  condition, `highlight(body @@ q)`: the operator, and the call bound in
+  its place from the operator's operands — typed as its signature
+  converted them — and the other arguments), `implied_range()` (for a function of two arguments true
   only when the first lies in a range computed from the second: two
   functions giving the bounds; the binder adds the comparisons beside the
   call, for index ranges — `inet <<= cidr` uses it), `call(&CallContext,
@@ -3445,7 +3449,7 @@ search's (and each tag's graph of an index `PARTITION BY (tag)`, rows
 moving between them), the upkeep going on.  `bench/ann/sql.py`: SIFT-1M through SQL
 as `bench/ann/pgvector_ref.py` runs pgvector (`docs/benchmarks.md`).
 
-### 8.19 Text analysis, queries, indexes and BM25 (`text`, §M14.21 T1–T5c)
+### 8.19 Text analysis, queries, indexes and BM25 (`text`, §M14.21 T1–T6)
 
 An **analyzer** turns a text into **terms** — what a text index keeps and
 a text query looks for (§M14.21's later steps).  `text::Analyzer` has a
@@ -3694,6 +3698,7 @@ it one column needs, so what people and models already write works:
 |-------|---------|
 | `word` | the word, analyzed as the text is; a word the analyzer makes several terms of (`e-mail`, `P/E`, any word under `trigram`) is a phrase of them; a stop word is dropped |
 | `"some words"` | a phrase: the terms at consecutive positions (a dropped stop word keeps its place) |
+| `"some words"~N` | the phrase within `N` moves (Lucene's slop: a word between is one, a transposition two; `N` up to 1,000) |
 | `word*` | any term starting so — lower-cased, not stemmed (Lucene's normalization) |
 | `word~`, `word~1` | any term within 2 (1) edits — insertion, deletion, substitution, transposition of neighbours; lower-cased, not stemmed |
 | `a b` | either (Lucene's, Tantivy's, Elasticsearch's default: ranked search wants any of them) |
@@ -3710,19 +3715,55 @@ a query.  A malformed query — an open quote or parenthesis, `a AND`,
 The query is parsed once into its distinct **leaves** (exact, prefix and
 fuzzy terms) and a tree of `Leaf`, `Phrase` and Lucene's `Bool { must,
 should, not }` over them; a text is analyzed, each term's positions
-noted for the leaves it matches, and the tree evaluated (a phrase by
-binary search in its terms' positions).  The analyzer is a third,
+noted for the leaves it matches, and the tree evaluated.  A phrase's
+occurrences come from one function (`query::phrase`) wherever positions
+are read — a row's text, a segment's postings, BM25, a highlight:
+exactly, each position of its first term the others follow at their
+offsets (binary search); within a slop, Lucene's `SloppyPhraseMatcher`
+— each term's position less its offset, the least moved on (through the
+positions that keep it least, so the tightest occurrence from there
+counts), an occurrence where the greatest less the least is at most the
+slop, weighing 1 / (1 + that) in BM25's frequency (§M14.21 T6; a term
+twice in one phrase may share a position, as Lucene's would without its
+repeats' rule).  The analyzer is a third,
 optional argument of the operator's function, which the binder gives
 from the column's text index — one meaning with or without an index;
 without one it is `simple`.  The batch kernel parses a constant
 query once a vector; a row at a time, a per-thread cache keeps the last
 query parsed.
 
-*Tests:* `query.rs` — the operators, phrases across stop words, prefixes
+**Highlights and snippets** (§M14.21 T6, `text/highlight.rs`):
+`highlight(col @@ q [, start, stop])` — the text with what the query
+found marked, `<b>` and `</b>` by default — and `snippet(col @@ q [,
+start, stop, ellipsis, words])` — its best window of `words` terms
+(PostgreSQL's `MaxWords`, 35; 1 to 1,000), marked, `...` where the text
+goes on.  Functions of the condition, as `score` is: the binder binds
+them (`ScalarFunction::of_condition` / `bind_condition`, §8.12) as
+`text_highlight(text, q, analyzer, …)` and `text_snippet(…)` of the
+`@@` call's operands — its analyzer the column's text index's, `simple`
+without one — so a text is analyzed as `@@` analyzes it; of anything
+but `@@`, refused (`0A000`).  Marked: each word an exact, prefix or
+fuzzy term finds, each occurrence of a phrase (within its slop) from its
+first word to its last as one mark (SQLite FTS5's `highlight`), nothing
+only an exclusion names; overlapping marks are one; the text between is
+kept as it is, not escaped (`ts_headline` neither).  The snippet's
+window holds the most distinct leaves, then the most marked terms, the
+earliest of equals (FTS5's order), and is moved to put its marks in the
+middle where they leave room; a text with nothing found gives its first
+`words` terms, an empty one nothing.
+
+*Tests:* `query.rs` — the operators, phrases across stop words, phrases
+within a slop and their weights, prefixes
 and fuzzy terms under a stemmer, plain text as a query, syntax errors,
 the edit distance, and any string as a query (proptest: an error or an
-answer, never a panic); `57_text_queries.slt` — `@@` on rows, `NULL`s,
-a query that varies row by row, the errors, in every executor mode.
+answer, never a panic); `highlight.rs` — marks, phrases as one, slops,
+prefixes, stems, overlaps, snippets' windows; `57_text_queries.slt` —
+`@@` on rows, `NULL`s, a query that varies row by row, the errors, in
+every executor mode; `60_text_highlight.slt` — highlights and snippets
+with and without an index, slops ranked by the index against a score
+computed by hand; `tests/text_index.rs` — two phrases within a slop
+among its queries, the index's rows and scores the rows' at every
+step.
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -4462,6 +4503,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-10 — §M14.21 T6, slop, highlights and snippets:**
+  `"a b"~N` (`Node::Phrase`'s slop, `query::phrase` — Lucene's sloppy
+  matcher and weight — for rows, segments, BM25 and highlights);
+  `highlight(col @@ q [, start, stop])` and `snippet(col @@ q [, start,
+  stop, ellipsis, words])` (`text/highlight.rs`, `text_highlight`,
+  `text_snippet`) through `ScalarFunction::of_condition` /
+  `bind_condition`; `bench/text/beir.py --snippets`.
 - **2026-11-10 — §M14.21, `@@` estimated by the text index:**
   `IndexMethod::selectivity` and `index_method::selectivity`, asked by
   `Stats::sampled` before the kept sample; the text index's from its
