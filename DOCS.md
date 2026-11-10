@@ -3422,7 +3422,7 @@ search's (and each tag's graph of an index `PARTITION BY (tag)`, rows
 moving between them), the upkeep going on.  `bench/ann/sql.py`: SIFT-1M through SQL
 as `bench/ann/pgvector_ref.py` runs pgvector (`docs/benchmarks.md`).
 
-### 8.19 Text analysis, queries, indexes and BM25 (`text`, §M14.21 T1–T5)
+### 8.19 Text analysis, queries, indexes and BM25 (`text`, §M14.21 T1–T5b)
 
 An **analyzer** turns a text into **terms** — what a text index keeps and
 a text query looks for (§M14.21's later steps).  `text::Analyzer` has a
@@ -3513,15 +3513,31 @@ all deleted goes; the delta's keys are deleted and their range vacuumed.
 Then merges: `MERGE` (8) segments of a tier — live documents in powers
 of 8 — written as one, the deleted documents left out (Tantivy's
 logarithmic policy).  `upkeep_now` (tests, `VACUUM`), `merge_all`,
-`shape` and `stats` are public for tests.  `CREATE INDEX` builds
-segments of 100,000 rows and merges them.
+`shape` and `stats` are public for tests.  `CREATE INDEX` reads the
+rows' texts, then analyzes them and makes segments on the statement's
+workers (`parallel_workers`) — a batch each, the rows over the workers,
+4,096 to 100,000 a segment (Lucene's and Tantivy's indexing threads, a
+segment each) — and runs the merges due a round at a time, a round's
+groups at once and each group's terms in runs on its share of the
+workers (`segment::merge`: cut at terms of the part with the most,
+joined in order; the same bytes as one run).  Where the batches'
+segments hold 3 GB or less together they are merged into one at once
+(`merge_all` on the workers; Lucene's `forceMerge(1)` for an index done
+with) — a search looks each term up once a segment, and one merge reads
+each document once — else the merges due run.
 
 *Segments* (`text/index/segment.rs`): documents (primary key, text
 hash, length), terms sorted, each with its document count and its
 postings in blocks of 128 — the documents' deltas and the frequencies
 less one, each bit-packed at the block's width (Lucene's and Tantivy's
 layout, the bits a block needs, no SIMD yet) — and its positions apart
-(varint deltas), read only for phrases.  A segment is decoded once into
+(varint deltas), read only for phrases.  Version 2: a term in more than
+one block has a skip list — per block its last document, its bytes and
+its *impacts*, the (frequency, length) pairs of its documents no other
+there beats (Lucene's competitive impacts, a Pareto frontier) — so a
+search reaches a block without decoding those before and bounds its
+scores without decoding it (`Segment::blocks`, `block`); version 1 is
+read, its skip lists made as it is decoded.  A segment is decoded once into
 memory and shared by every snapshot (`object_cache`, the HNSW index's
 cache moved out of it: `Kind::TextSegment`, `TextDeleted`).  A search
 decodes each leaf's postings (a prefix's terms by a range of the
@@ -3532,7 +3548,9 @@ checked on their candidates' positions) and the delta's rows by
 their stored terms.
 
 *Tests:* `segment.rs` — bit packing at every width, a segment of several
-blocks round-tripped, a merge dropping deleted documents;
+blocks round-tripped, a merge dropping deleted documents, every block of
+a skip list reached and bounded by its impacts (version 1's made alike),
+a merge in runs the same bytes as one;
 `tests/text_index.rs` — through a build, a delta of updates, deletes,
 inserts, a rollback and a row changed back and forth, seals, twelve
 rounds of writes and merges, a merge of everything, the table emptied:
@@ -3571,32 +3589,74 @@ row's text by them (`Scorer`, the query analyzed with the index's
 analyzer).  `ORDER BY score(col @@ q) DESC LIMIT k` over a scan the
 index finds the rows of (`WHERE col @@ q`, with other conditions, a
 join's key filters or row-level security or not) is ranked by the index
-(`IndexMethod::rank`, §8.17): `View::ranked` scores every matching
-document from the postings — their frequencies, positions for phrases,
-the segment's lengths — through the same `Scorer`, so the numbers are a
-row's, and the rows are read greatest first in slices (`Ranked::next`: a
-selection over the rest, then a sort of the slice) — `k` over the share
-the optimizer expects to pass the other conditions first, then as many
-as the share passing so far needs, at least as many again — until `k`
-passed and every row tied with the `k`-th passing one has been read
-(a lookup each, in that order: it stops at the `k`-th exactly — a merge
-with the table's scan, as a served condition's rows are read, measured
-slower here; PLAN.md §M14.21 T5b); the sort and the limit above order them (by `text_score` again, for
-those rows only).  A bag of words (one term, or
-optional terms only) is scored term at a time — each term's postings
-added into an array of the segment's documents, in the query's order,
-the same sum; any other query document at a time over cursors into each
-leaf's postings.  A version is counted only where a tombstone in the
-delta names it: a segment's document not marked deleted is otherwise
-live and the only copy of its row (`View::live_matches`).
+(`IndexMethod::rank`, §8.17): `View::ranked(q, sc, n)` scores from the
+postings — their frequencies, positions for phrases, the segment's
+lengths — through the same `Scorer`, so the numbers are a row's, the
+`n` best matches and every one tied with the `n`-th (all of them where
+`Ranked::complete`), and the rows are read greatest first in slices
+(`Ranked::next`: a selection over the rest, then a sort of the slice) —
+`k` over the share the optimizer expects to pass the other conditions
+first, then as many as the share passing so far needs, at least as many
+again — until `k` passed and every row tied with the `k`-th passing one
+has been read (a lookup each, in that order: it stops at the `k`-th
+exactly — a merge with the table's scan, as a served condition's rows
+are read, measured slower here; PLAN.md §M14.21 T5b); the sort and the
+limit above order them (by `text_score` again, for those rows only).
+`n` is `k` where no other condition is, else four times the rows the
+expected share takes; every match is scored where `n` is a 64th of the
+matches or more (about: no more than the documents or the leaves'
+documents together), and where the first `n` run out before `k` pass,
+a second pass takes four times the rows the share seen so far needs (by
+the same rule), a third every match — never more than two passes and a
+full scoring.
+
+A bag of words (one term, or optional terms only) is scored by
+**block-max MaxScore** (Turtle and Flood's; Lucene's
+`MaxScoreBulkScorer`, `View::live_matches` → `max_score`): the threshold
+is the `n`-th best score of the versions found so far (`Top`); documents
+in windows of 4,096 (the first a leaf the threshold leaves essential
+over the segment holds); in each, the leaves sorted by their bounds
+there — their blocks' impacts' best score, by the snapshot's statistics,
+a unit more — and those whose bounds together stay below the threshold
+*non-essential*: a document only they hold cannot reach it, a window
+none is essential in is skipped.  The essential leaves' postings are
+summed term at a time into the window's buffer; the documents found that
+may still reach the threshold are the candidates; each non-essential
+leaf, best bound first, is matched against them — its postings read
+through where they hold four times the candidates or fewer, else each
+candidate looked up (`Cursor::advance`: blocks skipped by their last
+documents, undecoded) — and candidates that can no longer reach it
+dropped.  A term in one block is decoded into its cursor once, its
+bound the score of its greatest frequency in its shortest text; with no
+threshold (every match wanted) the leaves' postings are summed term at
+a time over the segment, no windows (`every_match`).  Scores are summed
+in fixed point, units of 2⁻³²
+(`score::fixed`), in the index and on rows alike: integer sums, the same
+whatever order the terms are added in, so MaxScore adds them in its own
+and the numbers are still a row's (as PISA's and JASS's quantized
+scores, far finer: 2.3 × 10⁻¹⁰).  A block's bound is its best impact's
+score rounded as a part is, plus a unit, so only documents that cannot
+reach the threshold are skipped: the ties of the `n`-th stay.  Any other
+query is scored document at a time over cursors into each leaf's
+postings.  A version is counted only where a tombstone in the delta
+names it: a segment's document not marked deleted is otherwise live and
+the only copy of its row (`View::live_matches`) — the copies of a named
+row are of one text and score alike, so a threshold another reaches
+leaves none of them out; only versions not named raise it.
 
 *Tests:* `score.rs` — the formula against a computation by hand, sums
-over the tree, phrases, prefixes; `59_text_score.slt` — scores against
+over the tree, phrases, prefixes; `store.rs` — MaxScore's matches over
+segments of many windows (windows skipped, documents skipped to, deleted
+documents) against every document scored on its text, at `n` from 1 to
+all: the best, their ties, the same scores; `59_text_score.slt` — scores against
 a computation outside, the refusals, `EXPLAIN`, the first rows with an
 offset, ties; `tests/text_index.rs` — at every step of its writes,
 seals and merges, eleven queries' first seven rows by score through the
 index against the same scored on the rows (scores to the last bit, ties
-broken alike).  `bench/text/beir.py` checks the rankings against
+broken alike); `pruned_as_scored_in_full` — a Zipf vocabulary, texts of
+very different lengths, an index built on four workers, deletes in
+segments and the delta: seven queries at five `k` with three filters,
+through the index and on the rows, alike.  `bench/text/beir.py` checks the rankings against
 Anserini's and ParadeDB's on BEIR (docs/benchmarks.md).
 
 **Text queries** (§M14.21 T2, `text/query.rs`): `text @@ query` is true
@@ -3660,10 +3720,14 @@ nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
+                     [--index-cache <size>]
 ```
 
 `--cache` sizes the page cache (default `128MB`; units as `work_mem`'s:
-`kB`, `MB`, `GB`) — PostgreSQL's `shared_buffers`.  `--sync` sets how far commits and checkpoints sync (§3.2, D17):
+`kB`, `MB`, `GB`) — PostgreSQL's `shared_buffers`.  `--index-cache`
+sizes the decoded index objects kept across transactions
+(`object_cache`: HNSW graphs' parts, text segments; default `1GB`) — an
+index past it is decoded again each time it is read.  `--sync` sets how far commits and checkpoints sync (§3.2, D17):
 `ordered` (the default) or `full`, which also flushes the drive's cache
 (on macOS).  `--wal` (D16): `minimal` (the default) writes a new index's
 entries without the WAL and checkpoints at its commit; `full` logs every
@@ -4367,6 +4431,23 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-10 — §M14.21 T5b, block-max MaxScore and a parallel
+  build:** segments version 2 (`segment.rs`: a skip list per term in
+  more than one block — last document, bytes, the (frequency, length)
+  impacts no other pair beats; `Segment::blocks`, `Segment::block`;
+  version 1 read); scores in fixed point (`score::fixed`, units of
+  2⁻³², the same sum in any order); windowed MaxScore over the impacts
+  (`store.rs`: `max_score`, `Cursor`, `Top`), `View::ranked(q, sc, n)`
+  and `Ranked::complete`, `n` sized by the expected share and every
+  match scored where it is a 64th of them, a second pass sized by the
+  share seen, `every_match` term at a time; `CREATE INDEX … USING text`
+  on the statement's workers (`TextIndex::build`, `Store::append_segments`,
+  `Store::merge_all` / `merge_due`, `segment::merge` in runs: one segment
+  up to 3 GB); the server's
+  `--index-cache` (`object_cache`'s budget, 1 GB by default);
+  `bench/text/beir.py` loads MS MARCO in parts (`--split`, `--queries`,
+  `--index-cache`); `tests/text_index.rs` `pruned_as_scored_in_full`
+  (§8.19, §9).
 - **2026-11-10 — §M14.21 T5b, found rows by a merge with the table's
   scan:** `KvChunks::seek` and `next_chunk_where` (keys a predicate
   takes, the rest passed by their keys, their values not read), the

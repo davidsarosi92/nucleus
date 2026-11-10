@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan done | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before) done | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -5657,18 +5657,156 @@ and the rows are consumed a row at a time on the statement's thread
 while the workers read — feeding the runs to the morsel pipeline
 (§M14.20) would overlap them.
 
-**T5b — block-max MaxScore and a parallel build** (planned 2026-11-10,
-after T5a).  Per 128-block impacts in the segments — Lucene's Pareto
+**T5b — block-max MaxScore and a parallel build** (done 2026-11-10).
+T5 scored every match of a bag of words term at a time and read the
+best; fine on BEIR's small corpora, not at MS MARCO's 8.8 million
+passages, and the segment format was the time to change.  `CREATE INDEX`
+analyzed on one thread (ParadeDB built FiQA 3.1× faster).  Taken:
+Turtle and Flood's MaxScore (1995) as Lucene 10's `MaxScoreBulkScorer`
+runs it — windows of documents, the leaves whose bounds together stay
+below the threshold non-essential, the essential ones summed term at a
+time into the window's buffer, the candidates then matched a leaf at a
+time (Lucene's recent term-at-a-time rewrite of the window, PR #14701,
+and Adrien Grand's note on vectorized disjunctions) — with Lucene's
+per-block impacts (Ding and Suel's block-max bounds, from the Pareto
 frontier of (frequency, length) pairs, not scores: IDF and the average
-length change with the snapshot, so a block's bound is computed at
-query time.  The term-at-a-time accumulator grows into Lucene 10's
-windowed MaxScore (windows of documents, essential clauses summed into a
-buffer, the others skipped by their bound) — degrading to today's full
-scoring with a low threshold, one path.  Only blocks bounded strictly
-below the threshold are skipped, so the ties of the `k`-th stay; the
-threshold is the `k`-th row that passed `keep` (T5a's).  `CREATE
-INDEX` built in parallel (ParadeDB's is 1.6–3.3× faster).  Measured on
-MS MARCO passage (8.8 million) against the exhaustive path and ParadeDB.
+length are the snapshot's); PISA's and JASS's quantized scores for the
+sums; Tantivy's and Lucene's indexing threads (a segment each) for the
+build.  Built:
+
+1. **Segments, version 2** (`segment.rs`): a term in more than one block
+   has a skip list — per block its last document, its bytes, its
+   impacts (`impacts`: the pairs no other beats).  `Segment::blocks`
+   walks it undecoded, `Segment::block` decodes one block anywhere;
+   version 1 is read, its skip lists made as it is decoded.
+2. **Scores in fixed point** (`score::fixed`, units of 2⁻³²): a text's
+   parts summed as integers, in the index and on rows, so any order of
+   adding gives the same number — the contract that the index's scores
+   are a row's to the last bit (T5) held while MaxScore adds in its own.
+   A first version kept floating point and re-added a document's leaves
+   in the query's order wherever a non-essential one held it (a counting
+   sort of the window's postings): exact, and on FiQA twice a full
+   scoring's cost at `n` 100.
+3. **Windowed MaxScore** (`store.rs`, `max_score`, `Cursor`): the
+   threshold the `n`-th best of the versions not named by the delta
+   (`Top`); a window of 4,096 documents from the first one a leaf
+   essential over the segment holds; per window the leaves' bounds there
+   (blocks overlapping it, their impacts' best score plus a unit, so a
+   floating-point score cannot pass its bound), the non-essential prefix,
+   the essential postings summed, the candidates (live, and able to reach
+   it), each non-essential leaf best bound first matched against them —
+   read through where it holds four times the candidates or fewer, else
+   each looked up (`Cursor::advance`, blocks skipped by their last
+   documents) — and the candidates that can no longer reach it dropped.
+   A version below the threshold is left out only where it cannot be
+   among the `n` best: the ties of the `n`-th stay.  A term in one block
+   (most of a small corpus's) is decoded into its cursor once, its bound
+   the score of its greatest frequency in its shortest text; a window
+   whose leaves are all essential hands its sums on as they are.  Every
+   match wanted (`n` unbounded) is scored term at a time, as T5 did
+   (`every_match`): the windows' bookkeeping with no threshold to skip by
+   cost a long query a seventh more (ArguAna, measured).
+4. **The ranking asks for `n`** (`View::ranked(q, sc, n)`,
+   `Ranked::complete`): `k` without other conditions, four times the rows
+   the expected share takes with them; every match scored where `n` is a
+   64th of the matches or more (about: Σ df, at most the documents); the
+   first `n` run out before `k` passed → a second pass of four times
+   the rows the share seen so far needs (one more passing and read, so
+   that none passing is not a share of nothing), by the same rule; a
+   third scores every match.  On MS MARCO a second pass of every match
+   was 13 ms of a 1 % filter's 21.
+5. **The build on the statement's workers** (`TextIndex::build`): the
+   rows' texts read, batches of 4,096 to 100,000 analyzed and made
+   segments a worker each, the merges due run a round at a time
+   (`Store::merge_due`: a round's groups at once, each group's terms in
+   runs on its share of the workers, `segment::merge` cut at terms of
+   the part with the most and joined in order — the same bytes as one
+   run); `Doc::analyze` and `of_docs` sort and hash where they kept
+   trees (a fifth of a build was a `BTreeMap`'s string comparisons).
+   The batches' segments are then merged into one (`Store::merge_all`
+   on the workers) where they hold 3 GB or less together, else by tiers
+   (`merge_due`): an index just built is read before it is written
+   (Lucene's `forceMerge(1)` for an index done with), a search looks
+   each term up once a segment — ArguAna's 200-word queries in three
+   segments 9 % slower than in one — and one merge reads each document
+   once where tiers read it once a tier.
+6. **`--index-cache <size>`** (the server; `object_cache`'s budget, 1 GB
+   by default): MS MARCO's index (1.09 GB of segments) past the budget
+   was decoded again on every search — 2.2–3.5 s a query.
+
+Not taken:
+- **The threshold from the `k`-th row that passed `keep`**, as planned
+  (scoring and the filter interleaved): every document that rises above
+  it on the way must have its row read and checked — about `k / share ·
+  ln(N · share / k)` reads where reading in score order takes `k /
+  share` (FiQA at 1 %: four times the rows).  Instead `n` is sized by the
+  expected share, and a wrong guess costs one full pass at most.
+- **Growing `n` and scoring again**, as HNSW grows `ef`: the share
+  optimizers guess (a third for `n % 100 < 1`) took up to seven passes;
+  measured slower than one full pass on every BEIR corpus.
+- **MaxScore for queries with phrases** (a word the analyzer splits is a
+  phrase, many of ArguAna's queries): they are scored document at a
+  time, every match, as before.
+- **A first pass padded more, or full scoring sooner with a filter**
+  (`n` 16× or 64× the expected rows; full scoring where `n` is a 256th
+  or a 1,024th of the matches): FiQA's 1 % filter gains up to 6 % (the
+  first pass the optimizer's guess — a third — sizes runs out, and
+  every match is scored after it), its 10 % and 50 % lose 3–6 %; no
+  setting wins on every corpus, so 4× and a 64th stay.
+
+Found on the way: a bound of floating-point sums in another order than a
+score's needed a margin (gone with fixed point); a window's frequency
+matrix cleared per document cost ArguAna (long queries, 200 leaves) 2×;
+probing non-essential leaves a document at a time lost to reading them
+through when the threshold is low; `Segment::postings` decoding a block
+at a time through `Segment::block` cost a full scoring 4 % more than one
+loop over the blocks (restored); two-thirds of a short BEIR query is
+`score()` analyzing the returned rows' texts again — the ranking could
+hand its scores to the projection (next).
+
+Measured against 6fa170f (`bench/text/beir.py`, the mean ms of a query,
+the second of two rounds; base the second of two alternating runs).
+MS MARCO passage — 8,841,823 passages, BEIR's dev split, its first
+1,000 queries, `english`, 1.2 / 0.75, the server's `--index-cache 4GB`
+(base's segments fit the default; the new, 1.09 GB, do not):
+
+| MS MARCO | 6fa170f | T5b | ParadeDB |
+|---|---:|---:|---:|
+| nDCG@10 | 0.2605 | 0.2605 | 0.2578 |
+| `CREATE INDEX` | 231.2 s | 42.0 s | 67.7 s |
+| query, mean / p50 | 14.02 / 13.76 | 2.01 / 1.52 | 5.48 / 5.69 |
+| with a 50 % filter | | 3.22 / 2.55 | |
+| with a 10 % filter | 14.65 / 14.48 | 4.54 / 3.51 | |
+| with a 1 % filter | 21.47 / 20.97 | 16.27 / 15.30 | |
+
+ParadeDB's `pg_search` 0.26.6 (Docker on the same machine, timed by
+`\timing` in `psql` inside the container, its English stemmer and stop
+words, 1.2 / 0.75): our query 2.7× faster at the mean, 3.7× at the
+median, the index built 1.6× faster.  A 1 % filter's time is now its rows: about 1,100 found rows read a
+lookup each before 11 pass (8.8 million rows; the merge with the scan
+was measured slower for ranked rows in T5b's first part).
+
+BEIR, the same nDCG@10 to the last digit on every corpus and setting:
+
+| BEIR | `CREATE INDEX` (`porter`) | | query (`porter`) | | query (`english`) | |
+|---|---:|---:|---:|---:|---:|---:|
+| | 6fa170f | T5b | 6fa170f | T5b | 6fa170f | T5b |
+| SciFact | 480 ms | 375 ms | 0.97 | 0.96 | 0.96 | 0.96 |
+| NFCorpus | 363 ms | 334 ms | 0.76 | 0.77 | 0.76 | 0.77 |
+| ArguAna | 592 ms | 305 ms | 3.65 | 3.52 | 3.03 | 2.89 |
+| FiQA | 3,086 ms | 683 ms | 1.55 | 1.28 | 0.98 | 0.86 |
+
+With a filter (`english`, ranked; 50 / 10 / 1 %): SciFact 0.98 / 1.15 /
+2.85 → 1.00 / 1.17 / 2.87, NFCorpus 0.75 / 0.80 / 1.18 → 0.75 / 0.81 /
+1.18, ArguAna 3.08 / 3.32 / 5.29 → 2.95 / 3.17 / 5.14, FiQA 0.96 / 1.20 /
+3.42 → 0.97 / 1.22 / 3.60 (the first pass lost, above).  ArguAna's
+median rises (1.41 → 1.52 ms, `english`): its long bags of words, 1–2
+ms, are 6–8 % slower — 200 leaves' cursors, bounds and windows on a
+corpus of 8,674 documents, where little is skipped — while its queries
+with phrases, scored document at a time over one segment, are 12 %
+faster.  Unchanged elsewhere: `bench/phases.py reads` TPC-H SF1,
+alternating, two rounds, sums of the best of three 5,537 / 5,500 →
+5,516 / 5,503 ms.
 
 ### §M14.22 — Embeddings in the database ⬜
 

@@ -9,6 +9,12 @@
 //! constant-score rewrite); a boolean node's, the sum of its required and
 //! matching optional children's — exclusions add nothing.  A text the
 //! query does not match scores 0.
+//!
+//! Scores are added in fixed point, in units of 2⁻³² ([`fixed`]): integer
+//! sums, the same whatever order the parts are added in — the index's
+//! MaxScore adds a text's terms in its own (§M14.21 T5b) and still gives
+//! the number a row's text gives (as PISA's and JASS's quantized scores,
+//! here far finer than a ranking needs: 2.3 × 10⁻¹⁰).
 
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -29,6 +35,20 @@ pub(crate) struct Stats {
     pub docs: f64,
     pub len: f64,
     pub df: Vec<f64>,
+}
+
+/// A score's units a 1 holds.
+const UNIT: f64 = 4_294_967_296.0;
+
+/// `x` in a score's units: rounded, so every way of computing a part
+/// gives the same integer.
+pub(crate) fn fixed(x: f64) -> i64 {
+    (x * UNIT).round() as i64
+}
+
+/// A score in units as a number.
+pub(crate) fn of_fixed(x: i64) -> f64 {
+    x as f64 / UNIT
 }
 
 /// BM25's parameters.
@@ -123,7 +143,7 @@ impl<'q> Scorer<'q> {
     /// The score of a text (0 where the query does not match it).
     pub(crate) fn score(&self, t: &dyn Text) -> f64 {
         let Some(root) = &self.q.root else { return 0.0 };
-        self.node(root, t, self.norm(t.len())).unwrap_or(0.0)
+        of_fixed(self.node(root, t, self.norm(t.len())).unwrap_or(0))
     }
 
     /// BM25's length normalization of a text of `len` terms.
@@ -132,8 +152,14 @@ impl<'q> Scorer<'q> {
     }
 
     /// Leaf `l`'s score in a text where it occurs `f` times (`f` > 0),
-    /// normalized by `norm`.
-    pub(crate) fn leaf(&self, l: usize, f: u32, norm: f64) -> f64 {
+    /// normalized by `norm`, in a score's units.
+    pub(crate) fn leaf(&self, l: usize, f: u32, norm: f64) -> i64 {
+        fixed(self.leaf_f64(l, f, norm))
+    }
+
+    /// [`Scorer::leaf`] before it is rounded to units: what bounds of it
+    /// are computed from.
+    pub(crate) fn leaf_f64(&self, l: usize, f: u32, norm: f64) -> f64 {
         match self.q.leaves[l] {
             Leaf::Exact(_) => {
                 let f = f64::from(f);
@@ -160,7 +186,7 @@ impl<'q> Scorer<'q> {
         }
     }
 
-    fn node(&self, n: &Node, t: &dyn Text, norm: f64) -> Option<f64> {
+    fn node(&self, n: &Node, t: &dyn Text, norm: f64) -> Option<i64> {
         let bm25 = |idf: f64, f: f64| idf * f / (f + norm);
         match n {
             Node::Leaf(i) => {
@@ -187,13 +213,13 @@ impl<'q> Scorer<'q> {
                     return None;
                 }
                 let idf: f64 = ts.iter().map(|&(l, _)| self.idf[l]).sum();
-                Some(bm25(idf, freq as f64))
+                Some(fixed(bm25(idf, freq as f64)))
             }
             Node::Bool { must, should, not } => {
                 if not.iter().any(|c| self.node(c, t, norm).is_some()) {
                     return None;
                 }
-                let mut sum = 0.0;
+                let mut sum = 0i64;
                 for c in must {
                     sum += self.node(c, t, norm)?;
                 }
@@ -452,7 +478,7 @@ mod tests {
         );
         let idf = (1.0f64 + 8.5 / 2.5).ln();
         let want = idf * 2.0 / (2.0 + 1.2 * (1.0 - 0.75 + 0.75 * 0.5));
-        assert!((s - want).abs() < 1e-12, "{s} {want}");
+        assert!((s - want).abs() < 1e-9, "{s} {want}");
         // No match, nothing; an exclusion matched, nothing.
         let none = vec![vec![]];
         assert_eq!(
@@ -481,17 +507,17 @@ mod tests {
         let a1 = one("a", &[vec![0]]);
         let b1 = one("a b", &[vec![], vec![1]]);
         assert!(b1 > 0.0 && b1 < a1, "the rarer term weighs more");
-        assert!((one("a b", &[vec![0], vec![1]]) - (a1 + b1)).abs() < 1e-12);
-        assert!((one("a b", &[vec![0], vec![]]) - a1).abs() < 1e-12);
-        assert!((one("+a b", &[vec![0], vec![1]]) - (a1 + b1)).abs() < 1e-12);
+        assert!((one("a b", &[vec![0], vec![1]]) - (a1 + b1)).abs() < 1e-9);
+        assert!((one("a b", &[vec![0], vec![]]) - a1).abs() < 1e-9);
+        assert!((one("+a b", &[vec![0], vec![1]]) - (a1 + b1)).abs() < 1e-9);
         assert_eq!(one("+a b", &[vec![], vec![1]]), 0.0);
         assert_eq!(one("a -b", &[vec![0], vec![1]]), 0.0);
-        assert!((one("a -b", &[vec![0], vec![]]) - a1).abs() < 1e-12);
+        assert!((one("a -b", &[vec![0], vec![]]) - a1).abs() < 1e-9);
         // A phrase: its frequency, its terms' IDFs summed.
         let p = one("\"a b\"", &[vec![0, 5], vec![1, 9]]);
         let idf = |n: f64| (1.0 + (100.0 - n + 0.5) / (n + 0.5)).ln();
         let norm = 1.2 * (1.0 - 0.75 + 0.75 * 1.0);
-        assert!((p - (idf(10.0) + idf(20.0)) / (1.0 + norm)).abs() < 1e-12);
+        assert!((p - (idf(10.0) + idf(20.0)) / (1.0 + norm)).abs() < 1e-9);
         assert_eq!(one("\"a b\"", &[vec![0], vec![2]]), 0.0);
         // A prefix: 1 where it matches.
         assert_eq!(one("x*", &[vec![3]]), 1.0);

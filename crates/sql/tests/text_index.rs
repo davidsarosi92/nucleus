@@ -441,3 +441,103 @@ fn ties_at_every_limit() {
         }
     }
 }
+
+/// Block-max MaxScore (§M14.21 T5b), over an index built in parallel:
+/// over a vocabulary as skewed as a
+/// language's (Zipf's), texts of very different lengths, terms in many
+/// blocks, deleted rows in segments and in the delta, the first rows the
+/// index ranks — leaving out what its bounds rule out — are those every
+/// row scored on its text gives: scores, ties and all, at every `k`,
+/// with filters passing all, half and a fiftieth of the rows.
+#[test]
+fn pruned_as_scored_in_full() {
+    let kv = db(9);
+    let mut s = Session::new(kv.clone());
+    s.execute("CREATE TABLE docs (id INT PRIMARY KEY, body TEXT)")
+        .unwrap();
+    let mut r = Lcg(23);
+    // Word i drawn with a weight of 1 / (i + 1).
+    let weights: Vec<f64> = (0..40).map(|i| 1.0 / f64::from(i + 1)).collect();
+    let total: f64 = weights.iter().sum();
+    let body = |r: &mut Lcg| {
+        let long = r.below(4) == 0;
+        let n = 1 + r.below(if long { 80 } else { 12 });
+        (0..n)
+            .map(|_| {
+                let mut x = r.below(1 << 30) as f64 / f64::from(1 << 30) * total;
+                let mut w = 0;
+                while w < 39 && x >= weights[w] {
+                    x -= weights[w];
+                    w += 1;
+                }
+                format!("w{w}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let insert = |s: &mut Session, r: &mut Lcg, ids: std::ops::Range<i32>| {
+        for chunk in ids.collect::<Vec<_>>().chunks(500) {
+            let values: Vec<String> = chunk
+                .iter()
+                .map(|id| format!("({id}, '{}')", body(r)))
+                .collect();
+            s.execute(&format!("INSERT INTO docs VALUES {}", values.join(", ")))
+                .unwrap();
+        }
+    };
+    insert(&mut s, &mut r, 0..6000);
+    // Built on four workers: segments made apart (a batch each), then
+    // merged into one.
+    s.execute("SET parallel_workers = 4").unwrap();
+    s.execute("CREATE INDEX docs_body ON docs USING text (body)")
+        .unwrap();
+    s.execute("SET parallel_workers = 1").unwrap();
+    assert_eq!(shape(&kv), (1, 0));
+    assert_eq!(problems(&kv, &s), Vec::<String>::new());
+    // A second segment: rows sealed by the upkeep.
+    insert(&mut s, &mut r, 6000..7200);
+    nucleus_sql::text::index::upkeep_now(&kv).unwrap();
+    assert_eq!(shape(&kv), (2, 0));
+    let check = |s: &mut Session, step: &str| {
+        for q in [
+            "w0",
+            "w0 w1 w2",
+            "w3 w17",
+            "w25 w2 w0 w39",
+            "w1 w1 w30",
+            "w1* w5 w12",
+            "w0 w1 w2 w3 w4 w5 w6 w7 w8 w9",
+        ] {
+            for extra in ["", " AND id % 2 = 0", " AND id % 50 = 7"] {
+                for k in [1, 3, 10, 40, 200] {
+                    let first = |by: &str| {
+                        format!(
+                            "SELECT id::text || ' ' || score(body @@ '{q}')::text FROM docs \
+                             WHERE body @@ '{q}'{extra} \
+                             ORDER BY score(body @@ '{q}'){by} DESC, id LIMIT {k}"
+                        )
+                    };
+                    assert_eq!(
+                        text(s, &first("")),
+                        text(s, &first(" + 0")),
+                        "{step}: {q}{extra} {k}"
+                    );
+                }
+            }
+        }
+    };
+    check(&mut s, "built");
+    // Deleted rows marked in the segment, more in the delta.
+    s.execute("DELETE FROM docs WHERE id % 7 = 2").unwrap();
+    insert(&mut s, &mut r, 8000..8600);
+    nucleus_sql::text::index::upkeep_now(&kv).unwrap();
+    // Under the seal's 1,024 rows: a delta stays.
+    s.execute("DELETE FROM docs WHERE id % 23 = 5").unwrap();
+    s.execute("UPDATE docs SET body = 'w0 w0 w0 w1' WHERE id % 31 = 4")
+        .unwrap();
+    insert(&mut s, &mut r, 9000..9200);
+    let (segments, waiting) = shape(&kv);
+    assert!(segments > 1 && waiting > 0, "{segments} {waiting}");
+    check(&mut s, "with a delta");
+    assert_eq!(problems(&kv, &s), Vec::<String>::new());
+}

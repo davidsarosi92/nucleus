@@ -7,7 +7,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use nucleus_kernels::{MixState, mix};
@@ -24,8 +24,20 @@ pub(crate) fn object_id(kind: u64, b: &[u8]) -> u64 {
     h | 1
 }
 
-/// The bytes the cache holds at most.
-const BUDGET: usize = 1 << 30;
+/// The bytes the cache holds at most: 1 GiB unless the server is told
+/// otherwise (`--index-cache`, [`set_budget`]).  Index objects past it are
+/// decoded again each time they are read — a text index's segments over
+/// it, every search.
+static BUDGET: AtomicUsize = AtomicUsize::new(1 << 30);
+
+/// Sets the bytes the cache holds at most (the server's `--index-cache`).
+pub fn set_budget(bytes: usize) {
+    BUDGET.store(bytes.max(1 << 20), Relaxed);
+}
+
+fn budget() -> usize {
+    BUDGET.load(Relaxed)
+}
 
 /// What kind of decoded object (part of its key).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -93,7 +105,7 @@ pub(crate) fn get<T: Send + Sync + 'static>(
         c.bytes -= old.bytes;
     }
     c.bytes += bytes;
-    if c.bytes > BUDGET {
+    if c.bytes > budget() {
         evict(&mut c);
     }
     Ok(value)
@@ -109,7 +121,7 @@ fn evict(c: &mut Cache) {
         .collect();
     by_use.sort_unstable_by_key(|e| e.0);
     for (_, k, bytes) in by_use {
-        if c.bytes <= BUDGET / 4 * 3 {
+        if c.bytes <= budget() / 4 * 3 {
             break;
         }
         c.map.remove(&k);

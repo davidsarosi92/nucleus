@@ -67,6 +67,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 let v = rest.next().ok_or("--cache needs a size")?;
                 cache_bytes = Some(nucleus_sql::dbsettings::memory(v).map_err(|e| e.message)?);
             }
+            "--index-cache" => {
+                let v = rest.next().ok_or("--index-cache needs a size")?;
+                nucleus_sql::set_index_cache(
+                    nucleus_sql::dbsettings::memory(v).map_err(|e| e.message)?,
+                );
+            }
             "--log-queries" => log_queries = true,
             "--insecure" => insecure = true,
             "--tls-cert" => tls_cert = Some(rest.next().ok_or("--tls-cert needs a file")?.clone()),

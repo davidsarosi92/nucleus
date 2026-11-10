@@ -46,6 +46,8 @@ pub mod inet;
 mod keyfilter;
 mod keytable;
 pub(crate) mod object_cache;
+/// Sizes the decoded index objects kept across transactions (`--index-cache`).
+pub use object_cache::set_budget as set_index_cache;
 pub mod text;
 pub use nucleus_kernels as kernels;
 pub mod large;

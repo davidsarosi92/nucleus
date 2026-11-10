@@ -42,6 +42,14 @@ pub const NAME: &str = "text";
 pub const SEAL: u64 = 1024;
 /// Documents a build puts in a segment at most (merges then join them).
 const BUILD_BATCH: usize = 100_000;
+/// …and at least, where its workers share fewer rows (each a segment).
+const BUILD_MIN: usize = 4096;
+/// The share of the matches a ranking's first `n` may be at most for
+/// MaxScore to skip by their threshold; past it, every match is scored.
+const WHOLE: f64 = 64.0;
+/// The bytes a build's segments may hold together for it to merge them
+/// into one (a segment's offsets are 32 bits; merged, they shrink).
+const ONE_SEGMENT: usize = 3 << 30;
 
 /// The text index method.
 pub struct TextIndex;
@@ -227,26 +235,73 @@ impl IndexMethod for TextIndex {
         Ok(())
     }
 
+    /// The rows' texts read, then analyzed and made segments in batches
+    /// on the statement's workers (Tantivy's and Lucene's indexing
+    /// threads, each its own segments), the merges due then run a round
+    /// at a time, a round's on the workers too.
     fn build(&self, txn: &mut dyn KvTxn, _: &Registry, t: &Table, i: usize) -> Result<()> {
+        let col = t.indexes[i].columns[0];
         let mut wanted = vec![false; t.columns.len()];
-        wanted[t.indexes[i].columns[0]] = true;
+        wanted[col] = true;
         let a = crate::text::named(analyzer_of(&t.indexes[i]).unwrap_or(crate::text::DEFAULT))?;
         let s = store(t, i);
-        let mut batch = Vec::new();
-        let rows: Vec<(Vec<u8>, Row)> =
-            crate::index_method::rows(&*txn, t, Some(&wanted))?.collect::<Result<_>>()?;
-        s.append(txn, &[])?;
-        for (pk, row) in rows {
-            if let Some(text) = text_of(t, i, &row)? {
-                batch.push((pk, text_hash(text), Doc::analyze(a.as_ref(), text)));
-            }
-            if batch.len() == BUILD_BATCH {
-                s.append(txn, &std::mem::take(&mut batch))?;
+        let mut texts: Vec<(Vec<u8>, String)> = Vec::new();
+        for r in crate::index_method::rows(&*txn, t, Some(&wanted))? {
+            let (pk, mut row) = r?;
+            match std::mem::replace(&mut row[col], Value::Null) {
+                Value::Null => {}
+                Value::Text(text) => texts.push((pk, text)),
+                _ => return Err(Error::internal("a text index of a column not text")),
             }
         }
-        s.append(txn, &batch)?;
-        while s.merge(txn)? {}
-        Ok(())
+        let workers = crate::budget::workers();
+        let per = texts
+            .len()
+            .div_ceil(workers)
+            .clamp(BUILD_MIN, BUILD_BATCH);
+        let batches: Vec<&[(Vec<u8>, String)]> = texts.chunks(per).collect();
+        let make = |batch: &[(Vec<u8>, String)]| {
+            let docs: Vec<(Vec<u8>, u64, Doc)> = batch
+                .iter()
+                .map(|(pk, text)| (pk.clone(), text_hash(text), Doc::analyze(a.as_ref(), text)))
+                .collect();
+            segment::of_docs(&docs).map(|b| (b, docs.len() as u32))
+        };
+        let made: Vec<Result<(Vec<u8>, u32)>> = if workers <= 1 || batches.len() <= 1 {
+            batches.iter().map(|b| make(b)).collect()
+        } else {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let out: Vec<Mutex<Option<Result<(Vec<u8>, u32)>>>> =
+                batches.iter().map(|_| Mutex::new(None)).collect();
+            std::thread::scope(|sc| {
+                for _ in 0..workers.min(batches.len()) {
+                    sc.spawn(|| {
+                        loop {
+                            let b = next.fetch_add(1, Relaxed);
+                            let Some(batch) = batches.get(b) else { break };
+                            *out[b].lock().unwrap_or_else(|e| e.into_inner()) = Some(make(batch));
+                        }
+                    });
+                }
+            });
+            out.into_iter()
+                .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()).expect("made"))
+                .collect()
+        };
+        drop(texts);
+        let made = made.into_iter().collect::<Result<Vec<_>>>()?;
+        let bytes: usize = made.iter().map(|(b, _)| b.len()).sum();
+        s.append_segments(txn, made)?;
+        // One segment where it fits — a search looks each term up once per
+        // segment (a long query's hundreds of terms), and an index just
+        // built is read before it is written (Lucene's `forceMerge(1)` for
+        // an index done with); one merge of them all reads each document
+        // once, where merges by tiers read it once a tier.
+        if bytes <= ONE_SEGMENT {
+            s.merge_all(txn, workers)
+        } else {
+            s.merge_due(txn, workers)
+        }
     }
 
     fn check(
@@ -355,7 +410,8 @@ impl IndexMethod for TextIndex {
     }
 
     /// The rows the condition finds, by BM25 of the same query by the same
-    /// analyzer, greatest first — read in slices ([`store::Ranked`]): `k`
+    /// analyzer, greatest first — the best scored by MaxScore
+    /// ([`store::View::ranked`]), read in slices ([`store::Ranked`]): `k`
     /// over the share expected to pass `keep` first, then as many as the
     /// share passing so far needs (at least as many again), as HNSW's
     /// search grows its `ef`; once `k` passed, on through every row tied
@@ -397,7 +453,6 @@ impl IndexMethod for TextIndex {
         let p = crate::text::score::Params { k1: *k1, b: *b };
         let sc = crate::text::score::Scorer::new(&q, &st, p);
         let view = store(t, i).view(txn)?;
-        let mut ranked = view.ranked(&q, &sc)?;
         // No column read, nothing to check (`count(*)`): the rows need not
         // be read.
         let read = keep.is_some() || wanted.is_none_or(|w| w.contains(&true));
@@ -408,8 +463,39 @@ impl IndexMethod for TextIndex {
         let mut seen = std::collections::HashSet::new();
         let (mut checked, mut passed) = (0usize, 0usize);
         let mut kth: Option<f64> = None;
+        let mut passes = 1;
         let mut slice = ((k as f64 / ask.share.clamp(1e-9, 1.0)).ceil() as usize).max(k);
-        'read: while ranked.left() > 0 {
+        // The best `n` scored (MaxScore), the rest left below their
+        // threshold: `k` where every row passes, else four times the rows
+        // the share expected to pass takes (so that a second pass is
+        // seldom due).  Every match scored where `n` is a 64th of them or
+        // more — about: no more than the documents or the leaves'
+        // documents together — as a threshold that low skips less than
+        // its bookkeeping costs (measured on BEIR).  Where the first `n`
+        // run out before `k` passed, the share expected was wrong: the
+        // second pass takes four times the rows the share seen so far
+        // needs (one more passing and read, so that none passing is not a
+        // share of nothing), by the same rule; a third scores every match.
+        // Never more than two passes and a full scoring.
+        let matches = st.df.iter().sum::<f64>().min(st.docs);
+        let whole = |n: usize| if n as f64 * WHOLE >= matches { usize::MAX } else { n };
+        let mut n = whole(if keep.is_some() { slice.saturating_mul(4) } else { k });
+        let mut ranked = view.ranked(&q, &sc, n)?;
+        'read: loop {
+            if ranked.left() == 0 {
+                if ranked.complete() || kth.is_some() {
+                    break;
+                }
+                n = if n == usize::MAX || passes == 2 {
+                    usize::MAX
+                } else {
+                    let rest = (k - passed) as f64 * (checked + 1) as f64 / (passed + 1) as f64;
+                    whole(checked.saturating_add((4.0 * rest).ceil() as usize))
+                };
+                passes += 1;
+                ranked = view.ranked(&q, &sc, n)?;
+                continue;
+            }
             for (pk, s) in ranked.next(slice) {
                 if kth.is_some_and(|x| s < x) {
                     break 'read;
@@ -565,7 +651,7 @@ pub fn upkeep_now(kv: &Arc<dyn Kv>) -> Result<()> {
 /// Index `i` of `t` merged into one segment, its deleted rows dropped
 /// (tests).
 pub fn merge_all(kv: &Arc<dyn Kv>, t: &Table, i: usize) -> Result<()> {
-    crate::hnsw::retrying(kv, |txn| store(t, i).merge_all(txn))
+    crate::hnsw::retrying(kv, |txn| store(t, i).merge_all(txn, 1))
 }
 
 /// Segments of index `i` of `t` and rows waiting in its delta, as `txn`

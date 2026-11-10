@@ -11,8 +11,19 @@
 //! start; the postings; the positions.  A block: the bits of its deltas,
 //! the bits of its frequencies less one, then each packed.  Positions: a
 //! document's as varint deltas, documents in posting order.
+//!
+//! Version 2 adds, for each term in more than one block, a *skip list*
+//! (per term its start, after the positions'): per block, varints of its
+//! last document (less the block before's), its bytes, and its *impacts*
+//! — the (frequency, length) pairs of its documents no other pair there
+//! beats (a frequency as high in a text no longer; Lucene's competitive
+//! impacts, frequency ascending, both as deltas).  Not scores: a block's
+//! bound is BM25 of its impacts, by the snapshot's statistics, at query
+//! time — so a search skips a block (MaxScore, [`super::store`]) without
+//! decoding it, and reaches one without decoding the blocks before.
+//! Version 1 (no skip lists) is read, its skip lists made as it is.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use nucleus_kernels::MixState;
@@ -22,7 +33,7 @@ use crate::text::{Analyzer, Token};
 
 /// Documents a block holds.
 pub(crate) const BLOCK: usize = 128;
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 pub(crate) fn corrupt(what: &str) -> Error {
     Error::internal(format!("a text index is damaged: {what}"))
@@ -39,16 +50,19 @@ pub(crate) struct Doc {
 impl Doc {
     /// `text` analyzed by `a`.
     pub(crate) fn analyze(a: &dyn Analyzer, text: &str) -> Doc {
-        let mut by: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-        let mut len = 0u32;
-        a.analyze(text, &mut |t: Token| {
-            len += 1;
-            by.entry(t.term).or_default().push(t.position);
-        });
-        Doc {
-            len,
-            terms: by.into_iter().collect(),
+        let mut all: Vec<(String, u32)> = Vec::new();
+        a.analyze(text, &mut |t: Token| all.push((t.term, t.position)));
+        let len = all.len() as u32;
+        // By term, each term's positions in order (a stable sort).
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut terms: Vec<(String, Vec<u32>)> = Vec::new();
+        for (t, p) in all {
+            match terms.last_mut() {
+                Some((last, ps)) if *last == t => ps.push(p),
+                _ => terms.push((t, vec![p])),
+            }
         }
+        Doc { len, terms }
     }
 
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
@@ -231,11 +245,115 @@ pub(crate) struct Builder {
     hashes: Vec<u64>,
     lens: Vec<u32>,
     total: u64,
+    t: Terms,
+}
+
+/// A segment's terms as written, with their postings, positions and skip
+/// lists — some of them, in order: a run of a merge's ([`merge`]),
+/// joined to the runs before.
+#[derive(Default)]
+struct Terms {
     term_at: Vec<u32>,
     terms: Vec<u8>,
-    info: Vec<[u32; 3]>,
+    info: Vec<[u32; 4]>,
     postings: Vec<u8>,
     positions: Vec<u8>,
+    skips: Vec<u8>,
+}
+
+fn too_big() -> Error {
+    Error::internal("a segment past 4 GB")
+}
+
+fn offset(n: usize) -> Result<u32> {
+    u32::try_from(n).map_err(|_| too_big())
+}
+
+impl Terms {
+    /// Adds `term` (after every term added before) and its postings, with
+    /// positions; `lens` the documents' lengths.
+    fn add(&mut self, term: &[u8], p: &Postings, lens: &[u32]) -> Result<()> {
+        if p.docs.is_empty() {
+            return Ok(());
+        }
+        if self.term_at.is_empty() {
+            self.term_at.push(0);
+        }
+        self.info.push([
+            p.docs.len() as u32,
+            offset(self.postings.len())?,
+            offset(self.positions.len())?,
+            offset(self.skips.len())?,
+        ]);
+        self.terms.extend_from_slice(term);
+        self.term_at.push(offset(self.terms.len())?);
+        let mut prev: i64 = -1;
+        let mut deltas = [0u32; BLOCK];
+        let mut freqs = [0u32; BLOCK];
+        let mut sizes = Vec::with_capacity(p.docs.len().div_ceil(BLOCK));
+        for (docs, fs) in p.docs.chunks(BLOCK).zip(p.freqs.chunks(BLOCK)) {
+            let at = self.postings.len();
+            for (i, &d) in docs.iter().enumerate() {
+                deltas[i] = (i64::from(d) - prev - 1) as u32;
+                prev = i64::from(d);
+                freqs[i] = fs[i] - 1;
+            }
+            let n = docs.len();
+            let (db, fb) = (
+                bits(deltas[..n].iter().copied().max().unwrap_or(0)),
+                bits(freqs[..n].iter().copied().max().unwrap_or(0)),
+            );
+            self.postings.push(db);
+            self.postings.push(fb);
+            pack(&deltas[..n], db, &mut self.postings);
+            pack(&freqs[..n], fb, &mut self.postings);
+            sizes.push((self.postings.len() - at) as u32);
+        }
+        if p.docs.len() > BLOCK {
+            skip_list(&p.docs, &p.freqs, lens, &sizes, &mut self.skips);
+        }
+        for i in 0..p.docs.len() {
+            let mut last = 0;
+            for &q in p.positions(i) {
+                varint(&mut self.positions, u64::from(q - last));
+                last = q;
+            }
+        }
+        Ok(())
+    }
+
+    /// `next`'s terms (all after these) added after these.
+    fn join(&mut self, next: Terms) -> Result<()> {
+        if next.info.is_empty() {
+            return Ok(());
+        }
+        if self.term_at.is_empty() {
+            self.term_at.push(0);
+        }
+        let base = [
+            0,
+            offset(self.postings.len())?,
+            offset(self.positions.len())?,
+            offset(self.skips.len())?,
+        ];
+        let at = offset(self.terms.len())?;
+        for x in &next.term_at[1..] {
+            self.term_at.push(at.checked_add(*x).ok_or_else(too_big)?);
+        }
+        for i in &next.info {
+            let mut j = *i;
+            for k in 1..4 {
+                j[k] = base[k].checked_add(i[k]).ok_or_else(too_big)?;
+            }
+            self.info.push(j);
+        }
+        self.terms.extend_from_slice(&next.terms);
+        self.postings.extend_from_slice(&next.postings);
+        self.positions.extend_from_slice(&next.positions);
+        self.skips.extend_from_slice(&next.skips);
+        offset(self.postings.len().max(self.positions.len()).max(self.skips.len()))?;
+        Ok(())
+    }
 }
 
 impl Builder {
@@ -254,48 +372,7 @@ impl Builder {
     /// Adds `term` (after every term added before) and its postings, with
     /// positions.
     pub(crate) fn term(&mut self, term: &[u8], p: &Postings) -> Result<()> {
-        if p.docs.is_empty() {
-            return Ok(());
-        }
-        if self.term_at.is_empty() {
-            self.term_at.push(0);
-        }
-        let offset =
-            |n: usize| u32::try_from(n).map_err(|_| Error::internal("a segment past 4 GB"));
-        self.info.push([
-            p.docs.len() as u32,
-            offset(self.postings.len())?,
-            offset(self.positions.len())?,
-        ]);
-        self.terms.extend_from_slice(term);
-        self.term_at.push(offset(self.terms.len())?);
-        let mut prev: i64 = -1;
-        let mut deltas = [0u32; BLOCK];
-        let mut freqs = [0u32; BLOCK];
-        for (docs, fs) in p.docs.chunks(BLOCK).zip(p.freqs.chunks(BLOCK)) {
-            for (i, &d) in docs.iter().enumerate() {
-                deltas[i] = (i64::from(d) - prev - 1) as u32;
-                prev = i64::from(d);
-                freqs[i] = fs[i] - 1;
-            }
-            let n = docs.len();
-            let (db, fb) = (
-                bits(deltas[..n].iter().copied().max().unwrap_or(0)),
-                bits(freqs[..n].iter().copied().max().unwrap_or(0)),
-            );
-            self.postings.push(db);
-            self.postings.push(fb);
-            pack(&deltas[..n], db, &mut self.postings);
-            pack(&freqs[..n], fb, &mut self.postings);
-        }
-        for i in 0..p.docs.len() {
-            let mut last = 0;
-            for &q in p.positions(i) {
-                varint(&mut self.positions, u64::from(q - last));
-                last = q;
-            }
-        }
-        Ok(())
+        self.t.add(term, p, &self.lens)
     }
 
     /// Documents added so far.
@@ -307,15 +384,16 @@ impl Builder {
         let mut out = Vec::with_capacity(
             64 + self.pks.len()
                 + self.hashes.len() * 16
-                + self.terms.len()
-                + self.info.len() * 16
-                + self.postings.len()
-                + self.positions.len(),
+                + self.t.terms.len()
+                + self.t.info.len() * 16
+                + self.t.postings.len()
+                + self.t.positions.len()
+                + self.t.skips.len(),
         );
         out.push(VERSION);
         let docs = self.hashes.len() as u32;
         out.extend_from_slice(&docs.to_le_bytes());
-        out.extend_from_slice(&(self.info.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(self.t.info.len() as u32).to_le_bytes());
         out.extend_from_slice(&self.total.to_le_bytes());
         let at = |v: &[u32], n: u32| if n == 0 { vec![0] } else { v.to_vec() };
         for x in at(&self.pk_at, docs) {
@@ -328,33 +406,77 @@ impl Builder {
         for l in &self.lens {
             out.extend_from_slice(&l.to_le_bytes());
         }
-        for x in at(&self.term_at, self.info.len() as u32) {
+        for x in at(&self.t.term_at, self.t.info.len() as u32) {
             out.extend_from_slice(&x.to_le_bytes());
         }
-        out.extend_from_slice(&self.terms);
-        for i in &self.info {
+        out.extend_from_slice(&self.t.terms);
+        for i in &self.t.info {
             for x in i {
                 out.extend_from_slice(&x.to_le_bytes());
             }
         }
-        out.extend_from_slice(&(self.postings.len() as u32).to_le_bytes());
-        out.extend_from_slice(&self.postings);
-        out.extend_from_slice(&(self.positions.len() as u32).to_le_bytes());
-        out.extend_from_slice(&self.positions);
+        out.extend_from_slice(&(self.t.postings.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.t.postings);
+        out.extend_from_slice(&(self.t.positions.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.t.positions);
+        out.extend_from_slice(&(self.t.skips.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.t.skips);
         out
+    }
+}
+
+/// The (frequency, length) pairs of `pairs` no other beats — none with a
+/// frequency as high in a text no longer — frequency ascending (lengths
+/// then ascending too).
+pub(crate) fn impacts(pairs: &mut Vec<(u32, u32)>) {
+    pairs.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut shortest = u32::MAX;
+    pairs.retain(|&(_, len)| {
+        let keep = len < shortest;
+        shortest = shortest.min(len);
+        keep
+    });
+    pairs.reverse();
+}
+
+/// A term's skip list: per block (of `sizes[i]` bytes) of `docs` and
+/// `freqs`, its last document, its bytes and its impacts (`lens` each
+/// document's length).
+fn skip_list(docs: &[u32], freqs: &[u32], lens: &[u32], sizes: &[u32], out: &mut Vec<u8>) {
+    let mut last = 0u32;
+    let mut pairs = Vec::with_capacity(BLOCK);
+    for ((ds, fs), &size) in docs.chunks(BLOCK).zip(freqs.chunks(BLOCK)).zip(sizes) {
+        let l = *ds.last().expect("a block");
+        varint(out, u64::from(l - last));
+        last = l;
+        varint(out, u64::from(size));
+        pairs.clear();
+        pairs.extend(ds.iter().zip(fs).map(|(&d, &f)| (f, lens[d as usize])));
+        impacts(&mut pairs);
+        varint(out, pairs.len() as u64);
+        let (mut pf, mut pl) = (0, 0);
+        for &(f, len) in &pairs {
+            varint(out, u64::from(f - pf));
+            varint(out, u64::from(len - pl));
+            (pf, pl) = (f, len);
+        }
     }
 }
 
 /// `docs` (primary key, hash, terms) as a segment, numbered in order.
 pub(crate) fn of_docs(docs: &[(Vec<u8>, u64, Doc)]) -> Result<Vec<u8>> {
     let mut b = Builder::default();
-    let mut by: BTreeMap<&str, Postings> = BTreeMap::new();
+    // Hashed, then sorted once: a tree's string comparisons were a
+    // fifth of a build (§M14.21 T5b).
+    let mut by: HashMap<&str, Postings, MixState> = HashMap::default();
     for (n, (pk, hash, doc)) in docs.iter().enumerate() {
         b.doc(pk, *hash, doc.len);
         for (t, ps) in &doc.terms {
             by.entry(t.as_str()).or_default().push(n as u32, ps);
         }
     }
+    let mut by: Vec<(&str, Postings)> = by.into_iter().collect();
+    by.sort_unstable_by(|a, b| a.0.cmp(b.0));
     for (t, p) in &by {
         b.term(t.as_bytes(), p)?;
     }
@@ -370,10 +492,12 @@ pub(crate) struct Segment {
     pub(crate) total: u64,
     term_at: Vec<u32>,
     terms: Vec<u8>,
-    /// Per term: documents, where its postings start, its positions.
-    info: Vec<[u32; 3]>,
+    /// Per term: documents, where its postings, positions and skip list
+    /// start.
+    info: Vec<[u32; 4]>,
     postings: Vec<u8>,
     positions: Vec<u8>,
+    skips: Vec<u8>,
     /// Documents by primary key and hash ([`Segment::find_doc`]).
     by_pk: OnceLock<HashMap<u64, Vec<u32>, MixState>>,
 }
@@ -385,7 +509,8 @@ fn pk_key(pk: &[u8], hash: u64) -> u64 {
 impl Segment {
     pub(crate) fn decode(b: &[u8]) -> Result<Segment> {
         let mut r = Reader(b);
-        if r.u8()? != VERSION {
+        let version = r.u8()?;
+        if !(1..=VERSION).contains(&version) {
             return Err(corrupt("a segment of another version"));
         }
         let docs = r.u32()? as usize;
@@ -403,16 +528,25 @@ impl Segment {
         let lens = r.u32s(docs)?;
         let term_at = r.u32s(nterms + 1)?;
         let terms = r.take(*term_at.last().expect("one") as usize)?.to_vec();
-        let flat = r.u32s(nterms * 3)?;
-        let info = flat.as_chunks::<3>().0.to_vec();
+        let width = if version == 1 { 3 } else { 4 };
+        let flat = r.u32s(nterms * width)?;
+        let info: Vec<[u32; 4]> = flat
+            .chunks_exact(width)
+            .map(|c| [c[0], c[1], c[2], c.get(3).copied().unwrap_or(0)])
+            .collect();
         let n = r.u32()? as usize;
         let postings = r.take(n)?.to_vec();
         let n = r.u32()? as usize;
         let positions = r.take(n)?.to_vec();
+        let mut skips = Vec::new();
+        if version > 1 {
+            let n = r.u32()? as usize;
+            skips = r.take(n)?.to_vec();
+        }
         if !r.0.is_empty() {
             return Err(corrupt("a segment with bytes after it"));
         }
-        Ok(Segment {
+        let mut s = Segment {
             pk_at,
             pks,
             hashes,
@@ -423,8 +557,38 @@ impl Segment {
             info,
             postings,
             positions,
+            skips,
             by_pk: OnceLock::new(),
-        })
+        };
+        if version == 1 {
+            // Its skip lists, as version 2 writes them.
+            let mut starts = Vec::with_capacity(s.terms());
+            for t in 0..s.terms() {
+                let df = s.info[t][0] as usize;
+                starts.push(s.skips.len() as u32);
+                if df <= BLOCK {
+                    continue;
+                }
+                let p = s.postings(t, false)?;
+                let (mut at, mut prev) = (s.info[t][1] as usize, -1i64);
+                let mut sizes = Vec::with_capacity(df.div_ceil(BLOCK));
+                let (mut docs, mut freqs) = ([0u32; BLOCK], [0u32; BLOCK]);
+                for chunk in p.docs.chunks(BLOCK) {
+                    let n = chunk.len();
+                    let used = s.block(at, prev, &mut docs[..n], &mut freqs[..n])?;
+                    sizes.push(used as u32);
+                    at += used;
+                    prev = i64::from(docs[n - 1]);
+                }
+                let mut out = std::mem::take(&mut s.skips);
+                skip_list(&p.docs, &p.freqs, &s.lens, &sizes, &mut out);
+                s.skips = out;
+            }
+            for (i, at) in s.info.iter_mut().zip(starts) {
+                i[3] = at;
+            }
+        }
+        Ok(s)
     }
 
     /// The bytes it holds in memory, about.
@@ -436,6 +600,7 @@ impl Segment {
             + self.info.len() * 16
             + self.postings.len()
             + self.positions.len()
+            + self.skips.len()
     }
 
     pub(crate) fn docs(&self) -> u32 {
@@ -473,6 +638,20 @@ impl Segment {
         None
     }
 
+    /// The number of the first term at or after `term`.
+    pub(crate) fn first_from(&self, term: &[u8]) -> usize {
+        let (mut lo, mut hi) = (0, self.terms());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.term(mid) < term {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
     /// The terms starting with `prefix`: a range of numbers.
     pub(crate) fn with_prefix(&self, prefix: &[u8]) -> std::ops::Range<usize> {
         let lower = |f: &dyn Fn(&[u8]) -> bool| {
@@ -494,7 +673,7 @@ impl Segment {
 
     /// Term `t`'s postings, its positions too when `positions`.
     pub(crate) fn postings(&self, t: usize, positions: bool) -> Result<Postings> {
-        let [df, start, pos] = self.info[t];
+        let [df, start, pos, _] = self.info[t];
         let df = df as usize;
         let mut p = Postings {
             docs: Vec::with_capacity(df),
@@ -550,6 +729,91 @@ impl Segment {
         Ok(p)
     }
 
+    /// Where term `t`'s one block starts in the postings, if it has one
+    /// (no skip list).
+    pub(crate) fn one_block(&self, t: usize) -> Option<usize> {
+        let [df, start, _, _] = self.info[t];
+        (df as usize <= BLOCK).then_some(start as usize)
+    }
+
+    /// Term `t`'s blocks without decoding them, each its last document,
+    /// where it starts in the postings and its impacts ([`impacts`]) —
+    /// `false` for a term in one block (no skip list: decode it).
+    pub(crate) fn blocks(
+        &self,
+        t: usize,
+        mut f: impl FnMut(u32, usize, &[(u32, u32)]),
+    ) -> Result<bool> {
+        let [df, start, _, skip] = self.info[t];
+        if df as usize <= BLOCK {
+            return Ok(false);
+        }
+        let mut r = Reader(
+            self.skips
+                .get(skip as usize..)
+                .ok_or_else(|| corrupt("a skip list past the end"))?,
+        );
+        let (mut last, mut at) = (0u32, start as usize);
+        let mut pairs = Vec::with_capacity(16);
+        for _ in 0..(df as usize).div_ceil(BLOCK) {
+            last = last
+                .checked_add(r.varint32()?)
+                .filter(|&l| l < self.docs())
+                .ok_or_else(|| corrupt("a skip list's document"))?;
+            let size = r.varint32()? as usize;
+            let n = r.varint32()? as usize;
+            if n > BLOCK {
+                return Err(corrupt("a block's impacts"));
+            }
+            pairs.clear();
+            let (mut pf, mut pl) = (0u32, 0u32);
+            for _ in 0..n {
+                pf = pf.saturating_add(r.varint32()?);
+                pl = pl.saturating_add(r.varint32()?);
+                pairs.push((pf, pl));
+            }
+            f(last, at, &pairs);
+            at += size;
+        }
+        Ok(true)
+    }
+
+    /// The block at `at` in the postings, after document `prev` (−1: a
+    /// term's first): its documents and their frequencies, as many as
+    /// `docs` holds; the bytes it took.
+    pub(crate) fn block(
+        &self,
+        at: usize,
+        prev: i64,
+        docs: &mut [u32],
+        freqs: &mut [u32],
+    ) -> Result<usize> {
+        let n = docs.len();
+        let src = self
+            .postings
+            .get(at..)
+            .ok_or_else(|| corrupt("postings past the end"))?;
+        let [db, fb] = src
+            .get(..2)
+            .ok_or_else(|| corrupt("a block cut short"))?
+            .try_into()
+            .expect("2");
+        let used = unpack(&src[2..], db, docs)?;
+        let mut d = prev;
+        for x in docs.iter_mut() {
+            d += i64::from(*x) + 1;
+            *x = d as u32;
+        }
+        if d >= i64::from(self.docs()) {
+            return Err(corrupt("a posting past the documents"));
+        }
+        let used2 = unpack(&src[2 + used..], fb, &mut freqs[..n])?;
+        for f in freqs.iter_mut() {
+            *f += 1;
+        }
+        Ok(2 + used + used2)
+    }
+
     /// The first document with this primary key and hash that `skip`
     /// does not pass over.
     pub(crate) fn find_doc(&self, pk: &[u8], hash: u64, skip: impl Fn(u32) -> bool) -> Option<u32> {
@@ -570,8 +834,10 @@ impl Segment {
 }
 
 /// Segments `parts` (each with the documents to keep, by bit) as one:
-/// documents in order, the dropped ones left out.
-pub(crate) fn merge(parts: &[(&Segment, Option<&[u64]>)]) -> Result<Vec<u8>> {
+/// documents in order, the dropped ones left out — the terms merged in
+/// runs on up to `workers` threads (split at terms of the part with the
+/// most), the runs joined in order.
+pub(crate) fn merge(parts: &[(&Segment, Option<&[u64]>)], workers: usize) -> Result<Vec<u8>> {
     let mut b = Builder::default();
     // Each part's documents' new numbers.
     let mut maps: Vec<Vec<Option<u32>>> = Vec::with_capacity(parts.len());
@@ -587,34 +853,68 @@ pub(crate) fn merge(parts: &[(&Segment, Option<&[u64]>)]) -> Result<Vec<u8>> {
         }
         maps.push(map);
     }
-    // The terms of every part, merged in order.
-    let mut at = vec![0usize; parts.len()];
-    loop {
-        let next = parts
+    let most = parts.iter().map(|p| p.0).max_by_key(|s| s.terms());
+    let n = most.map_or(0, Segment::terms);
+    let runs = workers.min(n / MERGE_RUN).max(1);
+    let cut = |r: usize| (r > 0 && r < runs).then(|| most.expect("a part").term(r * n / runs));
+    let lens = &b.lens;
+    let run = |r: usize| -> Result<Terms> {
+        let (from, to) = (cut(r), cut(r + 1));
+        let mut t = Terms::default();
+        let mut at: Vec<usize> = parts
             .iter()
-            .zip(&at)
-            .filter(|((s, _), i)| **i < s.terms())
-            .map(|((s, _), i)| s.term(*i))
-            .min();
-        let Some(term) = next.map(<[u8]>::to_vec) else {
-            break;
-        };
-        let mut out = Postings::default();
-        for (k, (s, _)) in parts.iter().enumerate() {
-            if at[k] < s.terms() && s.term(at[k]) == term.as_slice() {
-                let p = s.postings(at[k], true)?;
-                for (i, &d) in p.docs.iter().enumerate() {
-                    if let Some(n) = maps[k][d as usize] {
-                        out.push(n, p.positions(i));
+            .map(|(s, _)| from.map_or(0, |x| s.first_from(x)))
+            .collect();
+        let end: Vec<usize> = parts
+            .iter()
+            .map(|(s, _)| to.map_or(s.terms(), |x| s.first_from(x)))
+            .collect();
+        loop {
+            let next = parts
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| at[*k] < end[*k])
+                .map(|(k, (s, _))| s.term(at[k]))
+                .min();
+            let Some(term) = next.map(<[u8]>::to_vec) else {
+                break;
+            };
+            let mut out = Postings::default();
+            for (k, (s, _)) in parts.iter().enumerate() {
+                if at[k] < end[k] && s.term(at[k]) == term.as_slice() {
+                    let p = s.postings(at[k], true)?;
+                    for (i, &d) in p.docs.iter().enumerate() {
+                        if let Some(n) = maps[k][d as usize] {
+                            out.push(n, p.positions(i));
+                        }
                     }
+                    at[k] += 1;
                 }
-                at[k] += 1;
             }
+            t.add(&term, &out, lens)?;
         }
-        b.term(&term, &out)?;
+        Ok(t)
+    };
+    let done: Vec<Result<Terms>> = if runs == 1 {
+        vec![run(0)]
+    } else {
+        std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..runs).map(|r| sc.spawn(move || run(r))).collect();
+            hs.into_iter()
+                .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                .collect()
+        })
+    };
+    let mut t = Terms::default();
+    for d in done {
+        t.join(d?)?;
     }
+    b.t = t;
     Ok(b.encode())
 }
+
+/// Terms a run of a merge takes at least.
+const MERGE_RUN: usize = 4096;
 
 pub(crate) fn bit(bits: &[u64], d: u32) -> bool {
     bits.get(d as usize / 64)
@@ -685,11 +985,135 @@ mod tests {
 
         // Merged with itself, every other document dropped from the first.
         let dead: Vec<u64> = vec![0x5555_5555_5555_5555; 16];
-        let m = Segment::decode(&merge(&[(&s, Some(&dead)), (&s, None)]).unwrap()).unwrap();
+        let m = Segment::decode(&merge(&[(&s, Some(&dead)), (&s, None)], 1).unwrap()).unwrap();
         assert_eq!(m.docs(), 1500);
         let p = m.postings(m.find(b"rare").unwrap(), true).unwrap();
         assert_eq!(p.docs, [3, 499, 500 + 7, 500 + 999]);
         assert_eq!(m.pk(0), 1u32.to_be_bytes());
+    }
+
+    /// `s` as version 1 wrote it: no skip lists.
+    fn version_1(s: &Segment) -> Vec<u8> {
+        let mut out = vec![1u8];
+        out.extend_from_slice(&s.docs().to_le_bytes());
+        out.extend_from_slice(&(s.terms() as u32).to_le_bytes());
+        out.extend_from_slice(&s.total.to_le_bytes());
+        for x in &s.pk_at {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+        out.extend_from_slice(&s.pks);
+        for h in &s.hashes {
+            out.extend_from_slice(&h.to_le_bytes());
+        }
+        for l in &s.lens {
+            out.extend_from_slice(&l.to_le_bytes());
+        }
+        for x in &s.term_at {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+        out.extend_from_slice(&s.terms);
+        for i in &s.info {
+            for x in &i[..3] {
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+        for b in [&s.postings, &s.positions] {
+            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            out.extend_from_slice(b);
+        }
+        out
+    }
+
+    #[test]
+    fn skip_lists_reach_and_bound_every_block() {
+        // Lengths and frequencies that vary, over many blocks.
+        let mut docs = Vec::new();
+        for i in 0..2000u32 {
+            let pad: Vec<u32> = (10..11 + i * 7 % 23).collect();
+            let many: Vec<u32> = (1..2 + i * 13 % 5).collect();
+            let mut terms: Vec<(&str, &[u32])> = vec![("all", &many), ("pad", &pad)];
+            if i % 3 == 0 {
+                terms.push(("three", &[0]));
+            }
+            terms.sort();
+            docs.push((i.to_be_bytes().to_vec(), u64::from(i), doc(&terms)));
+        }
+        let s = Segment::decode(&of_docs(&docs).unwrap()).unwrap();
+        let old = Segment::decode(&version_1(&s)).unwrap();
+        for term in ["all", "three", "pad"] {
+            let t = s.find(term.as_bytes()).unwrap();
+            let p = s.postings(t, false).unwrap();
+            let mut seen = Vec::new();
+            assert!(
+                s.blocks(t, |last, at, imp| seen.push((last, at, imp.to_vec())))
+                    .unwrap()
+            );
+            let mut again = Vec::new();
+            assert!(
+                old.blocks(t, |last, at, imp| again.push((last, at, imp.to_vec())))
+                    .unwrap()
+            );
+            assert_eq!(seen, again, "{term}: version 1's skip list");
+            let chunks: Vec<_> = p.docs.chunks(BLOCK).zip(p.freqs.chunks(BLOCK)).collect();
+            assert_eq!(seen.len(), chunks.len());
+            let mut prev = -1i64;
+            for ((last, at, imp), (ds, fs)) in seen.into_iter().zip(chunks) {
+                assert_eq!(last, *ds.last().unwrap());
+                let (mut d, mut f) = (vec![0; ds.len()], vec![0; ds.len()]);
+                s.block(at, prev, &mut d, &mut f).unwrap();
+                assert_eq!((d.as_slice(), f.as_slice()), (ds, fs));
+                prev = i64::from(last);
+                // Every document's pair is beaten or met by an impact,
+                // and every impact is a document's.
+                let pairs: Vec<(u32, u32)> =
+                    ds.iter().zip(fs).map(|(&d, &f)| (f, s.lens[d as usize])).collect();
+                for &(f, len) in &pairs {
+                    assert!(imp.iter().any(|&(g, l)| g >= f && l <= len));
+                }
+                assert!(imp.iter().all(|x| pairs.contains(x)));
+                assert!(imp.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 < w[1].1));
+            }
+        }
+        // A term in one block has none.
+        let mut one = vec![(b"k".to_vec(), 1, doc(&[("x", &[0])]))];
+        one[0].2.len = 1;
+        let s = Segment::decode(&of_docs(&one).unwrap()).unwrap();
+        assert!(!s.blocks(0, |_, _, _| unreachable!()).unwrap());
+    }
+
+    #[test]
+    fn a_merge_in_runs_is_a_merge() {
+        // Terms enough for runs: each document's own, and shared ones.
+        let mk = |from: u32| {
+            let own: Vec<String> = (from..from + 6000).map(|i| format!("t{i:06}")).collect();
+            let docs: Vec<(Vec<u8>, u64, Doc)> = own
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let mut terms: Vec<(&str, &[u32])> = vec![(t.as_str(), &[0]), ("all", &[1, 2])];
+                    if i % 7 == 0 {
+                        terms.push(("seven", &[3]));
+                    }
+                    terms.sort();
+                    ((from + i as u32).to_be_bytes().to_vec(), u64::from(i as u32), doc(&terms))
+                })
+                .collect();
+            Segment::decode(&of_docs(&docs).unwrap()).unwrap()
+        };
+        let (a, b, c) = (mk(0), mk(3000), mk(20_000));
+        let dead: Vec<u64> = vec![0x0101_0101_0101_0101; 100];
+        let parts = [(&a, Some(dead.as_slice())), (&b, None), (&c, None)];
+        let one = merge(&parts, 1).unwrap();
+        for w in [2, 3, 4, 8] {
+            assert!(one == merge(&parts, w).unwrap(), "{w} runs");
+        }
+        let m = Segment::decode(&one).unwrap();
+        // 15,000 terms of their own, less the 375 only dead documents
+        // held (every eighth of the first's 3,000), and two shared.
+        assert_eq!(m.terms(), 15_000 - 375 + 2);
+        assert!(m.find(b"t000008").is_none());
+        let p = m.postings(m.find(b"t004001").unwrap(), true).unwrap();
+        assert_eq!(p.docs.len(), 2);
     }
 
     #[test]

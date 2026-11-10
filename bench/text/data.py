@@ -15,6 +15,9 @@ what (default: all of them):
     stop        Snowball's stop-word lists (scripts/gen-stop-words.py)
     beir        BEIR's SciFact, NFCorpus, ArguAna and FiQA (corpus,
                 queries, relevance judgements), as BEIR publishes them
+    msmarco     BEIR's MS MARCO passage (8.8 million passages, 1 GB
+                zipped; not fetched by default): its test judgements are
+                TREC DL 2019's (§M14.21 T5b)
 
 Files go through curl (this machine's Python lacks certificates).
 """
@@ -44,7 +47,8 @@ def fetch(url, path):
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     subprocess.run(
-        ["curl", "-sS", "-f", "-L", "--max-time", "600", "-o", path + ".part", url],
+        # Resumed where a cut-short fetch stopped (MS MARCO's 1 GB).
+        ["curl", "-sS", "-f", "-L", "-C", "-", "--max-time", "3600", "-o", path + ".part", url],
         check=True,
     )
     os.replace(path + ".part", path)
@@ -69,14 +73,14 @@ def main():
         for lang in LANGUAGES:
             if lang != "porter":
                 fetch(STOP + f"{lang}/stop.txt", os.path.join(out, "snowball-stop", lang + ".txt"))
-    if "beir" in a.what:
-        for d in DATASETS:
-            z = os.path.join(out, "zips", d + ".zip")
-            fetch(BEIR + d + ".zip", z)
-            dest = os.path.join(out, "beir-" + d)
-            if not os.path.exists(os.path.join(dest, d, "corpus.jsonl")):
-                with zipfile.ZipFile(z) as f:
-                    f.extractall(dest)
+    sets = (DATASETS if "beir" in a.what else []) + (["msmarco"] if "msmarco" in a.what else [])
+    for d in sets:
+        z = os.path.join(out, "zips", d + ".zip")
+        fetch(BEIR + d + ".zip", z)
+        dest = os.path.join(out, "beir-" + d)
+        if not os.path.exists(os.path.join(dest, d, "corpus.jsonl")):
+            with zipfile.ZipFile(z) as f:
+                f.extractall(dest)
 
 
 if __name__ == "__main__":

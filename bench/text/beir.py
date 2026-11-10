@@ -16,6 +16,12 @@ ranked by the index (§M14.21 T5a) and, with `--unranked`, ordered by
 `score(…) + 0`, which the index does not rank by: every match read and
 scored on its text.  The first round checks both give the same rows.
 
+MS MARCO passage (`--sets msmarco`, bench/text/data.py msmarco; §M14.21
+T5b): 8.8 million passages, loaded in parts, with `--split dev` (BEIR's
+own split for it; `test` is TREC DL 2019's 43 queries) and `--queries N`
+(the first N, timed as the rest are), and `--index-cache 4GB`: its
+segments pass the server's 1GB default, decoded again on every search.
+
 `paradedb` runs the same in ParadeDB's pg_search (Tantivy's BM25 in
 PostgreSQL; `docker run -d --name nucleus-paradedb -e POSTGRES_PASSWORD=x
 paradedb/paradedb`): its English tokenizer (Snowball's stemmer, its stop
@@ -49,22 +55,40 @@ ANSERINI = {"scifact": 0.6789, "nfcorpus": 0.3218, "arguana": 0.3970, "fiqa": 0.
 SYNTAX = re.compile(r'[+\-&|!(){}\[\]^"~*?:\\/]')
 
 
-def load(d):
-    docs = []
+def corpus(d):
+    """A set's documents, (id, title and text), in order."""
     for line in open(os.path.join(d, "corpus.jsonl"), encoding="utf-8"):
         doc = json.loads(line)
-        docs.append((doc["_id"], (doc.get("title") or "") + "\n" + (doc.get("text") or "")))
+        yield doc["_id"], (doc.get("title") or "") + "\n" + (doc.get("text") or "")
+
+
+def parts(d, size=200_000):
+    """A set's documents in lists of `size`."""
+    part = []
+    for doc in corpus(d):
+        part.append(doc)
+        if len(part) == size:
+            yield part
+            part = []
+    if part:
+        yield part
+
+
+def load(d, split="test", limit=None):
+    """A set's queries and judgements (the first `limit` judged)."""
     queries = {}
     for line in open(os.path.join(d, "queries.jsonl"), encoding="utf-8"):
         q = json.loads(line)
         queries[q["_id"]] = q["text"]
     qrels = {}
-    with open(os.path.join(d, "qrels", "test.tsv"), encoding="utf-8") as f:
+    with open(os.path.join(d, "qrels", f"{split}.tsv"), encoding="utf-8") as f:
         next(f)
         for line in f:
             qid, did, rel = line.rstrip("\n").split("\t")
+            if limit is not None and qid not in qrels and len(qrels) == limit:
+                continue
             qrels.setdefault(qid, {})[did] = int(rel)
-    return docs, queries, qrels
+    return queries, qrels
 
 
 def ndcg10(ranked, rels):
@@ -101,13 +125,23 @@ def paradedb(a):
     print("ParadeDB pg_search, English tokenizer, k1 1.2, b 0.75")
     print(HEADER)
     for name in a.sets.split(","):
-        docs, queries, qrels = load(os.path.join(a.data, f"beir-{name}", name))
+        d = os.path.join(a.data, f"beir-{name}", name)
+        queries, qrels = load(d, a.split, a.queries)
         psql("DROP TABLE IF EXISTS docs")
         psql("CREATE TABLE docs (id text PRIMARY KEY, body text)")
-        rows = "".join(d.replace("\\", "\\\\").replace("\t", " ") + "\t" +
-                       b.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
-                       .replace("\r", "\\r") + "\n" for d, b in docs)
-        psql("COPY docs FROM STDIN", stdin=rows)
+        # Through a file in the container: MS MARCO's 3.5 GB too.
+        ndocs = 0
+        with tempfile.NamedTemporaryFile("w", suffix=".tsv", encoding="utf-8") as f:
+            for i, b in corpus(d):
+                f.write(i.replace("\\", "\\\\").replace("\t", " ") + "\t" +
+                        b.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+                        .replace("\r", "\\r") + "\n")
+                ndocs += 1
+            f.flush()
+            os.chmod(f.name, 0o644)  # the server reads it: not the temporary file's 600
+            subprocess.run(["docker", "cp", f.name, f"{a.container}:/tmp/docs.tsv"], check=True)
+        psql("COPY docs FROM '/tmp/docs.tsv'")
+        subprocess.run(["docker", "exec", a.container, "rm", "/tmp/docs.tsv"], check=True)
         out = psql(stdin="\\timing on\n"
                    "CREATE INDEX docs_bm25 ON docs USING bm25 (id, (body::pdb.simple("
                    "'stemmer=english', 'stopwords_language=english')));\n")
@@ -129,7 +163,7 @@ def paradedb(a):
             times.append(float(lines[-1].split("Time: ")[1].split(" ms")[0]))
             ranked = [x for x in lines[:-1] if x != qid][:10]
             scores.append(ndcg10(ranked, qrels[qid]))
-        report(name, len(docs), scores, index_ms, times)
+        report(name, ndocs, scores, index_ms, times)
         psql("DROP TABLE docs")
 
 
@@ -179,6 +213,10 @@ def main():
     ap.add_argument("--host", default=os.environ.get("NUCLEUS_BENCH_HOST", "127.0.0.1"))
     ap.add_argument("--filters", default="")
     ap.add_argument("--unranked", action="store_true")
+    ap.add_argument("--split", default="test")
+    ap.add_argument("--queries", type=int, default=None)
+    ap.add_argument("--index-cache", default=None,
+                    help="the server's --index-cache (MS MARCO's segments pass the 1GB default)")
     a = ap.parse_args()
     if a.system == "paradedb":
         paradedb(a)
@@ -188,8 +226,10 @@ def main():
 
     work = tempfile.mkdtemp(prefix="nucleus-beir-")
     listen = f"[{a.host}]:{a.port}" if ":" in a.host else f"{a.host}:{a.port}"
+    extra = ["--index-cache", a.index_cache] if a.index_cache else []
     server = subprocess.Popen([a.binary, "server", os.path.join(work, "db"), "--listen", listen,
-                               "--no-auth"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                               "--no-auth", *extra], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
     try:
         for _ in range(600):
             try:
@@ -200,11 +240,15 @@ def main():
         print(f"nucleus, BM25 k1 {a.k1}, b {a.b}, analyzer {a.analyzer}")
         print(HEADER)
         for name in a.sets.split(","):
-            docs, queries, qrels = load(os.path.join(a.data, f"beir-{name}", name))
+            d = os.path.join(a.data, f"beir-{name}", name)
+            queries, qrels = load(d, a.split, a.queries)
             c.execute("DROP TABLE IF EXISTS docs")
             c.execute("CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT, n INT)")
-            c.load("docs", {"id": [d for d, _ in docs], "body": [b for _, b in docs],
-                            "n": list(range(len(docs)))})
+            ndocs = 0
+            for part in parts(d):
+                c.load("docs", {"id": [i for i, _ in part], "body": [b for _, b in part],
+                                "n": list(range(ndocs, ndocs + len(part)))})
+                ndocs += len(part)
             t = time.perf_counter()
             c.execute(f"CREATE INDEX docs_body ON docs USING text (body) WITH "
                       f"(analyzer = '{a.analyzer}', k1 = {a.k1}, b = {a.b})")
@@ -221,7 +265,7 @@ def main():
                     times.append((time.perf_counter() - t) * 1000)
                     ranked = [r[0] for r in rows if r[0] != qid][:10]
                     scores.append(ndcg10(ranked, rels))
-            report(name, len(docs), scores, index_ms, times)
+            report(name, ndocs, scores, index_ms, times)
             for p in [int(x) for x in a.filters.split(",") if x]:
                 filtered(c, name, qrels, queries, p, a.unranked)
         c.close()

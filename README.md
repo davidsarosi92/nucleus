@@ -107,8 +107,10 @@ snapshot, its counts and statistics those of the snapshot's rows,
 `ORDER BY score(body @@ q) DESC LIMIT 10`, the first rows found by the
 index from its postings: Anserini's nDCG@10 on BEIR to within 0.006,
 ranked as well as ParadeDB's Tantivy-based BM25 or better, faster on
-FiQA and ArguAna (1.0 ms a FiQA query, theirs 1.6), slower on the
-smallest corpus — and with other conditions, row-level security or
+FiQA and ArguAna (0.86 ms a FiQA query, theirs 1.6), slower on the
+smallest corpus; on MS MARCO's 8.8 million passages block-max MaxScore
+over per-block impacts ranks a query in 2.0 ms against ParadeDB's 5.5, at a higher nDCG@10 (0.2605, theirs 0.2578), the index built on every core in 42 s (theirs 68)
+— and with other conditions, row-level security or
 HNSW's distance over the text's matches, one ranking for every index
 (a FiQA query with a filter passing a tenth of the rows 1.2 ms, 76× the
 read-everything path), and the rows a condition finds read by a merge

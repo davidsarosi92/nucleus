@@ -644,7 +644,7 @@ python3 bench/text/analyzers.py postgres --container ncpg
 
 ### BM25 ranking
 
-`bench/text/beir.py` (PLAN.md §M14.21 T5): BEIR's SciFact, NFCorpus,
+`bench/text/beir.py` (PLAN.md §M14.21 T5, T5b): BEIR's SciFact, NFCorpus,
 ArguAna and FiQA (title and text), a text index, and each judged test
 query — its query-syntax characters taken out, a bag of words — as
 `SELECT id FROM docs WHERE body @@ q ORDER BY score(body @@ q) DESC, id
@@ -657,10 +657,10 @@ English analyzer), k1 0.9, b 0.4:
 
 | BEIR | documents | queries | nucleus nDCG@10 | Anserini | `CREATE INDEX` | query |
 |---|---:|---:|---:|---:|---:|---:|
-| SciFact | 5,183 | 300 | 0.6777 | 0.6789 | 506 ms | 1.07 ms |
-| NFCorpus | 3,633 | 323 | 0.3206 | 0.3218 | 378 ms | 0.81 ms |
-| ArguAna | 8,674 | 1,406 | 0.4029 | 0.3970 | 604 ms | 3.76 ms |
-| FiQA | 57,638 | 648 | 0.2354 | 0.2361 | 3,198 ms | 1.55 ms |
+| SciFact | 5,183 | 300 | 0.6777 | 0.6789 | 375 ms | 0.96 ms |
+| NFCorpus | 3,633 | 323 | 0.3206 | 0.3218 | 334 ms | 0.77 ms |
+| ArguAna | 8,674 | 1,406 | 0.4029 | 0.3970 | 305 ms | 3.52 ms |
+| FiQA | 57,638 | 648 | 0.2354 | 0.2361 | 683 ms | 1.28 ms |
 
 Against ParadeDB's `pg_search` 0.26.6 (Tantivy's BM25 in PostgreSQL 18,
 Docker on the same machine; `body ||| q ORDER BY pdb.score(id) DESC
@@ -670,10 +670,10 @@ b 0.75:
 
 | BEIR | nucleus nDCG@10 | ParadeDB | nucleus `CREATE INDEX` | ParadeDB | nucleus query | ParadeDB |
 |---|---:|---:|---:|---:|---:|---:|
-| SciFact | 0.6891 | 0.6839 | 506 ms | 312 ms | 0.99 ms | 0.91 ms |
-| NFCorpus | 0.3291 | 0.3225 | 396 ms | 221 ms | 0.80 ms | 0.45 ms |
-| ArguAna | 0.4964 | 0.4814 | 594 ms | 358 ms | 3.11 ms | 5.43 ms |
-| FiQA | 0.2534 | 0.2500 | 3,079 ms | 954 ms | 1.00 ms | 1.62 ms |
+| SciFact | 0.6891 | 0.6839 | 380 ms | 312 ms | 0.96 ms | 0.91 ms |
+| NFCorpus | 0.3291 | 0.3225 | 339 ms | 221 ms | 0.77 ms | 0.45 ms |
+| ArguAna | 0.4964 | 0.4814 | 299 ms | 358 ms | 2.89 ms | 5.43 ms |
+| FiQA | 0.2534 | 0.2500 | 661 ms | 954 ms | 0.86 ms | 1.62 ms |
 
 With a second condition (PLAN.md §M14.21 T5a, T5b: `AND n % 100 < p`,
 `n` a row's number), `english`, 1.2 / 0.75: the index reads its matches
@@ -685,10 +685,10 @@ rows:
 | BEIR | 50 % | | 10 % | | 1 % | |
 |---|---:|---:|---:|---:|---:|---:|
 | | ranked | every match | ranked | every match | ranked | every match |
-| SciFact | 0.98 | 82.2 | 1.16 | 18.0 | 2.86 | 4.3 |
-| NFCorpus | 0.75 | 17.4 | 0.80 | 4.6 | 1.20 | 1.3 |
-| ArguAna | 3.09 | 217.1 | 3.35 | 50.1 | 5.25 | 10.1 |
-| FiQA | 0.97 | 417.3 | 1.21 | 92.4 | 3.37 | 18.3 |
+| SciFact | 1.00 | 83.6 | 1.17 | 18.3 | 2.87 | 4.3 |
+| NFCorpus | 0.75 | 17.5 | 0.81 | 4.6 | 1.18 | 1.3 |
+| ArguAna | 2.95 | 223.7 | 3.17 | 51.7 | 5.14 | 10.3 |
+| FiQA | 0.97 | 424.9 | 1.22 | 94.0 | 3.60 | 18.7 |
 
 ```sh
 python3 bench/text/data.py beir
@@ -697,6 +697,27 @@ NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucle
 NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus --analyzer english --k1 1.2 --b 0.75
 docker run -d --name nucleus-paradedb -e POSTGRES_PASSWORD=x paradedb/paradedb
 python3 bench/text/beir.py paradedb
+```
+
+MS MARCO passage (PLAN.md §M14.21 T5b): 8,841,823 passages, BEIR's dev
+split, its first 1,000 queries, `english`, k1 1.2, b 0.75 — the same
+query, the same nDCG@10 measure; the server with `--index-cache 4GB`
+(the index's 1.09 GB of segments past the 1 GB default); ParadeDB as
+above (`\timing` inside the container):
+
+| MS MARCO | nucleus | ParadeDB |
+|---|---:|---:|
+| nDCG@10 | 0.2605 | 0.2578 |
+| `CREATE INDEX` | 42.0 s | 67.7 s |
+| query, mean / p50 | 2.01 / 1.52 ms | 5.48 / 5.69 |
+| with a 50 % filter | 3.22 / 2.55 ms | |
+| with a 10 % filter | 4.54 / 3.51 ms | |
+| with a 1 % filter | 16.27 / 15.30 ms | |
+
+```sh
+python3 bench/text/data.py msmarco
+python3 bench/text/beir.py nucleus target/release/nucleus --sets msmarco --split dev --queries 1000 --analyzer english --k1 1.2 --b 0.75 --filters 50,10,1 --index-cache 4GB
+python3 bench/text/beir.py paradedb --sets msmarco --split dev --queries 1000
 ```
 
 ## Write amplification
