@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW) done | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan done | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -5257,8 +5257,8 @@ The steps, each measured as §M14.12's were:
 - **T5a — one ranking for every method**: HNSW's nearest rows and the
   text index's first rows by score through one `IndexMethod` hook, one
   access path and one optimizer pass, adaptive while it runs.
-- **T5b — block-max MaxScore and a parallel build**, measured on MS
-  MARCO.
+- **T5b — the found rows by a merge with the table's scan; block-max
+  MaxScore and a parallel build**, measured on MS MARCO.
 - **T6 — phrases, prefixes and fuzzy terms from positions; highlights
   and snippets.**
 - **T7 — hybrid**: `rrf(...)` and a weighted combination in one plan
@@ -5564,6 +5564,98 @@ two rounds): the same plans word for word, the same recall, µs within 1
 460 → 458 / 460).  `bench/phases.py` against f5ea072 (alternating, two
 rounds): TPC-H SF1 queries' sums, best of three, 5,597 / 5,483 → 5,442 /
 5,439 ms: noise.
+
+**T5b — the found rows by a merge with the table's scan** (done
+2026-11-10).  A served condition's rows (`WHERE body @@ q`, and every
+other method's) were read a primary-key lookup each, in the index's
+order — a descent of the B+tree and a value decompressed a row, however
+close the rows lay; T4's note and T5a's measurements (at 1 % the rows
+read dominate) asked for a merge.  Taken: PostgreSQL's bitmap heap scan
+(the found keys sorted, the table read in their order, a page read once
+for all its rows) and its parallel form (the keys cut into runs, a
+worker each), Lucene's `advance` (a cursor sought forward to the next
+wanted document, or stepped through those between, whichever is
+nearer).  Built:
+
+1. **The KV reads by key first.**  The B+tree's `Range::next_key_into`
+   and `value_into` (the value read and decompressed only when asked);
+   the engine's `Scan::seek` forward and `next_chunk_where` — a chunk of
+   only the keys a `want` predicate takes, the others passed by their
+   keys, at most `most` of them; `KvChunks::seek` and `next_chunk_where`
+   in the KV contract (a scan that cannot seek says so and reads on).
+2. **`exec::entries_at`**: the keys sorted, each looked up where they
+   lie far apart, the scan read on through the entries between where
+   they lie close — by the share of the entries passed that are wanted,
+   measured as it goes (a probe of 16 entries where it is not known and
+   every 1,024th lookup, each chunk read on) and kept by the caller
+   across its blocks: reading on pays above one in `SEEK_ENTRIES` (16,
+   what a lookup costs in entries passed, measured).  The scan ends at
+   the last key and is opened only where it reads.
+3. **`TableStorage::rows_at`** (rows to a callback; a lookup each by
+   default, the row storage's through `entries_at`) and
+   **`exec::rows_at`** — past 256 keys a run each on the statement's
+   workers over the transaction's shared reads.  `exec::method_rows`
+   reads the found rows through it a block at a time — 8, twice the last
+   up to 256, four times past it, up to 16,384 — so a limit above stops
+   it having read at most twice its rows while they are few.
+
+Not taken: the text index's ranking read the same way.  Its rows come
+best first, a sample of the table's (the order by score is not the
+keys'), until the `k`-th passes; read a block at a time by the merge,
+the blocks overshot the `k`-th (an estimate of the share passing that
+the optimizer guesses — `n % 100 < 1` as a third — corrected only as
+rows pass), and where they were dense enough to read on (a few hundred
+of SciFact's 5,183 rows) the merge still lost to stopping at the
+`k`-th exactly: 1 % filters 5–9 % slower on every corpus, 10 % even.
+It stays a lookup each.  Found on the way, each caught by a measurement
+before it was kept: a scan that read on past the last key wanted (a
+limit's first block passing thousands of entries); a probe that counted
+the key it started at, so a sparse run looked dense; reading on bounded
+by a chunk's entries rather than the keys left; a block's rows read
+before the `k`-th's ties in the next slice were (`ties_at_every_limit`
+now checks every limit, both orders among ties, with and without a
+filter).
+
+Measured.  FiQA (57,638 rows, the text index on `body`), a query's
+best of 50 ms in two alternating rounds against bf946b4:
+
+| query | rows found | before | merged |
+|---|---:|---:|---:|
+| `sum(n) … @@ 'market'` | 8,743 | 9.52 / 9.54 | 3.64 / 3.77 |
+| `sum(length(body)) … @@ 'market'` | 8,743 | 17.13 / 17.20 | 9.04 / 9.25 |
+| `sum(n) … @@ 'stock market'` | 12,404 | 13.31 / 13.28 | 4.32 / 4.20 |
+| `sum(n) … @@ 'invest*'` | 9,784 | 10.77 / 10.76 | 3.93 / 3.79 |
+| `sum(n) … @@ 'retirement'` | 2,166 | 2.53 / 2.55 | 2.05 / 1.99 |
+| `sum(n) … @@ 'nvidia'` | 8 | 0.08 / 0.08 | 0.09 / 0.09 |
+| `… @@ 'market' LIMIT 5` / `50` / `500` | | 0.34 / 0.45 / 1.45 | 0.36 / 0.46 / 1.37 |
+| `sum(n)`, every row | | 2.69 / 2.74 | 2.73 / 2.71 |
+
+BEIR with another condition (`bench/text/beir.py --filters 50,10,1
+--unranked`, the mean ms of a query, second round; the same rows):
+ranked as before (FiQA 0.97 / 1.21 / 3.37 against 0.97 / 1.21 / 3.48,
+ArguAna 1 % 5.25 against 5.26), and the read-everything path — every
+match read and scored on its text — faster where the rows read dominate:
+
+| BEIR | 50 % | | 10 % | | 1 % | |
+|---|---:|---:|---:|---:|---:|---:|
+| | before | merged | before | merged | before | merged |
+| SciFact | 84.7 | 82.2 | 20.2 | 18.0 | 6.25 | 4.34 |
+| NFCorpus | 17.7 | 17.4 | 4.77 | 4.55 | 1.47 | 1.26 |
+| ArguAna | 230.6 | 217.1 | 59.0 | 50.1 | 17.9 | 10.1 |
+| FiQA | 439.6 | 417.3 | 111.2 | 92.4 | 36.4 | 18.3 |
+
+Scans without keys to pass read as before (a plain scan's key and value
+at once): `bench/phases.py` TPC-H SF1 against bf946b4, alternating, two
+rounds, every query's best of three, sums 5,404 / 5,351 → 5,392 / 5,577
+ms (the second round of both slower throughout); Q1, Q6, Q14 again,
+best of seven: 327 / 327 → 328 / 328, 250 / 251 → 254 / 253, 231 / 231
+→ 233 / 233 — within 1.2 %.
+
+Next for found rows: the key-only pass is `mvcc::decode_key_onto`, a
+byte at a time (about 38 ns an entry; SWAR or `memchr` would cut it),
+and the rows are consumed a row at a time on the statement's thread
+while the workers read — feeding the runs to the morsel pipeline
+(§M14.20) would overlap them.
 
 **T5b — block-max MaxScore and a parallel build** (planned 2026-11-10,
 after T5a).  Per 128-block impacts in the segments — Lucene's Pareto

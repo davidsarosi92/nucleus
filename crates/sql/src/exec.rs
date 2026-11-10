@@ -837,24 +837,46 @@ fn method_rows<'a>(
             pks.into_iter().map(move |_| Ok(vec![Value::Null; width])),
         )));
     }
-    let storage = crate::storage::of(table)?;
+    // The rows in key order, a block at a time: a merge with the table's
+    // scan ([`rows_at`]).
     let prefix = table.index_prefix(0);
-    Ok(Some(Box::new(pks.into_iter().filter_map(move |pk| {
-        let mut key = prefix.clone();
-        key.extend_from_slice(&pk);
-        let row = match storage.get(
-            ctx.txn,
-            table,
-            &key,
-            wanted.map(Vec::as_slice),
-            &mut crate::enums::Labels::default(),
-        ) {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                return Some(Err(Error::internal(
-                    "an index method found a row its table does not have",
-                )));
-            }
+    let (mut at, mut block, mut density) = (0usize, FOUND_BLOCK, None);
+    let blocks = std::iter::from_fn(move || -> Option<Result<Vec<Row>>> {
+        if at >= pks.len() {
+            return None;
+        }
+        let end = (at + block).min(pks.len());
+        let found: Vec<Vec<u8>> = pks[at..end]
+            .iter()
+            .map(|pk| [prefix.as_slice(), pk].concat())
+            .collect();
+        at = end;
+        block = (block * if block < FOUND_PART { 2 } else { 4 }).min(FOUND_BLOCK_MOST);
+        Some(
+            rows_at(
+                ctx.txn,
+                table,
+                &found,
+                wanted.map(Vec::as_slice),
+                &mut density,
+            )
+            .and_then(|rows| {
+                if rows.len() < found.len() {
+                    return Err(Error::internal(
+                        "an index method found a row its table does not have",
+                    ));
+                }
+                Ok(rows.into_iter().map(|(_, row)| row).collect())
+            }),
+        )
+    });
+    let rows = blocks.flat_map(|b| match b {
+        Ok(rows) => rows.into_iter().map(Ok).collect::<Vec<_>>(),
+        Err(e) => vec![Err(e)],
+    });
+    Ok(Some(Box::new(rows.filter_map(move |row| {
+        let row = match row {
+            Ok(row) => row,
             Err(e) => return Some(Err(e)),
         };
         if !crate::keyfilter::passes(&keys, &row) {
@@ -867,6 +889,13 @@ fn method_rows<'a>(
         }
     }))))
 }
+
+/// The found rows a scan through an index method reads first; then each
+/// block twice the last while one worker reads it ([`FOUND_PART`]), four
+/// times past that, up to [`FOUND_BLOCK_MOST`] — a limit above stops it
+/// early, having read at most twice its rows while they are few.
+const FOUND_BLOCK: usize = 8;
+const FOUND_BLOCK_MOST: usize = 16_384;
 
 /// The rows a method's rank gives ([`crate::index_method::IndexMethod::rank`]),
 /// each passing the key filters, the rank's `within` condition (unless
@@ -1122,6 +1151,238 @@ impl<'a> Entries<'a> {
         Ok(Some((self.chunk.key(i), self.chunk.value(i))))
     }
 }
+
+/// The entries under `keys` (sorted, each once) of `txn`, below `end`,
+/// read by a merge with the store's scan (PLAN.md §M14.21 T5b): `f` gets
+/// each key's position, the key and its value (keys with no entry are
+/// left out).  Where the keys lie far apart each is looked up — a
+/// descent; where they lie close the scan reads on through the entries
+/// between, a chunk at a time, as a scan does, passing the unwanted by
+/// their keys — PostgreSQL's bitmap heap scan, Lucene's `advance`.  Which
+/// is cheaper depends on the share of the entries passed that are
+/// wanted: a lookup costs about what reading [`SEEK_ENTRIES`] entries
+/// does, so reading on pays above one in that many.  The share is
+/// measured as it goes — each chunk read on, a probe of [`PROBE`] entries
+/// where it is not yet known and every [`PROBE_EVERY`]th lookup — and
+/// kept in `density` for the caller's next keys (a statement's blocks of
+/// found rows share it), so where it is known to be low no scan is
+/// opened.
+pub fn entries_at(
+    txn: &dyn nucleus_kv::KvTxn,
+    validated: bool,
+    keys: &[Vec<u8>],
+    end: Bound<&[u8]>,
+    density: &mut Option<f64>,
+    f: &mut dyn FnMut(usize, &[u8], &[u8]) -> Result<()>,
+) -> Result<()> {
+    let Some(last) = keys.last() else {
+        return Ok(());
+    };
+    // The scan ends at the last key: past it, reading on would pass
+    // entries none wanted.
+    let end = match end {
+        Bound::Excluded(e) if e <= last.as_slice() => end,
+        Bound::Included(e) if e < last.as_slice() => end,
+        _ => Bound::Included(last.as_slice()),
+    };
+    let dense_at = |d: f64| d * SEEK_ENTRIES as f64 > 1.0;
+    let mut chunks: Option<Box<dyn nucleus_kv::KvChunks + '_>> = None;
+    let mut chunk = nucleus_kv::Chunk::new();
+    let mut i = 0;
+    // The keys wanted from the next one on: the scan passes over the
+    // others by their keys, their values not read.
+    let next = std::cell::Cell::new(0usize);
+    let want = |k: &[u8]| {
+        let mut j = next.get();
+        while j < keys.len() && keys[j].as_slice() < k {
+            j += 1;
+        }
+        next.set(j);
+        j < keys.len() && keys[j] == k
+    };
+    // Reading on, or looking each key up, a probe where the share is not
+    // known and every [`PROBE_EVERY`]th lookup; the scan, opened at the
+    // first key that reads it, is behind after lookups and sought on (one
+    // that cannot seek reads on).
+    let mut dense = density.is_some_and(dense_at);
+    let (mut probe_due, mut lookups, mut behind, mut can_seek) =
+        (density.is_none(), 0usize, false, true);
+    while i < keys.len() {
+        if !dense && !probe_due {
+            let k = keys[i].as_slice();
+            let v = if validated {
+                txn.get_validated(k)?
+            } else {
+                txn.get(k)?
+            };
+            if let Some(v) = v {
+                f(i, k, &v)?;
+            }
+            i += 1;
+            lookups += 1;
+            probe_due = lookups % PROBE_EVERY == 0;
+            behind = true;
+            continue;
+        }
+        let fresh = chunks.is_none();
+        let c = match chunks.as_mut() {
+            Some(c) => c,
+            None => {
+                let from = Bound::Included(keys[i].as_slice());
+                behind = false;
+                chunks.insert(if validated {
+                    txn.scan_chunks_validated(from, end)?
+                } else {
+                    txn.scan_chunks(from, end)?
+                })
+            }
+        };
+        let behind_was = behind || fresh;
+        if behind {
+            behind = false;
+            can_seek = c.seek(&keys[i])?;
+            dense |= !can_seek;
+        }
+        // Reading on, and a probe, pass over at most what the lookups of
+        // the keys they may find would cost (a scan that cannot seek,
+        // anything).
+        let n = if dense {
+            nucleus_kv::CHUNK_ENTRIES
+        } else {
+            PROBE
+        }
+        .min(keys.len() - i);
+        let most = if !can_seek {
+            usize::MAX
+        } else if dense {
+            n * SEEK_ENTRIES
+        } else {
+            2 * SEEK_ENTRIES
+        };
+        // The scan is at a key wanted (opened or sought to it), or reads
+        // on: the entry it starts at is not a sample of the share.
+        let at_key = !dense || behind_was;
+        probe_due = false;
+        next.set(i);
+        let mut skipped = 0;
+        if !c.next_chunk_where(&mut chunk, n, Some(&want), &mut skipped, most)? {
+            return Ok(());
+        }
+        // The keys this chunk holds, each found by a binary search over
+        // the rest of it (a scan that cannot pass over others gives them
+        // too).
+        let mut pos = 0;
+        let len = chunk.len();
+        while len > 0 && i < keys.len() && keys[i].as_slice() <= chunk.key(len - 1) {
+            let k = keys[i].as_slice();
+            let (mut lo, mut hi) = (pos, len);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if chunk.key(mid) < k {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            pos = lo;
+            if pos < len && chunk.key(pos) == k {
+                f(i, k, chunk.value(pos))?;
+                pos += 1;
+            }
+            i += 1;
+        }
+        let first = usize::from(at_key && len > 0);
+        if can_seek && len + skipped > first {
+            // The share wanted of the entries passed: reading on pays
+            // above one in what a lookup costs.
+            let d = (len - first) as f64 / (len + skipped - first) as f64;
+            *density = Some(d);
+            dense = dense_at(d);
+        }
+    }
+    Ok(())
+}
+
+/// The rows of `t` under `keys` (sorted, each once), as `txn` sees them,
+/// the columns `wanted` marks decoded, each with its key's position —
+/// those there are ([`crate::storage::TableStorage::rows_at`]: a merge
+/// with the table's scan).  Many are read on the statement's workers, the
+/// keys cut into as many runs, each merged with a scan of its own over
+/// the transaction's shared reads — PostgreSQL's parallel bitmap heap
+/// scan; the rows come back in key order.
+pub fn rows_at(
+    txn: &dyn nucleus_kv::KvTxn,
+    t: &Table,
+    keys: &[Vec<u8>],
+    wanted: Option<&[bool]>,
+    density: &mut Option<f64>,
+) -> Result<Vec<(usize, Row)>> {
+    let storage = crate::storage::of(t)?;
+    let workers = crate::budget::workers().min(keys.len() / FOUND_PART);
+    let shared = match txn.shared() {
+        Some(s) if workers > 1 => s,
+        _ => {
+            let mut out = Vec::with_capacity(keys.len());
+            storage.rows_at(txn, t, keys, wanted, density, &mut |i, row| {
+                out.push((i, row));
+                Ok(())
+            })?;
+            return Ok(out);
+        }
+    };
+    let part = keys.len().div_ceil(workers);
+    // Each worker from the share known so far, measuring its own.
+    let start = *density;
+    let ambient = crate::parallel::Ambient::capture();
+    let instance = txn.instance();
+    let parts: Vec<Result<Vec<(usize, Row)>>> = std::thread::scope(|sc| {
+        let handles: Vec<_> = keys
+            .chunks(part)
+            .enumerate()
+            .map(|(m, run)| {
+                let (storage, ambient) = (&storage, &ambient);
+                sc.spawn(move || {
+                    let (rows, scanned) = ambient.run(|| {
+                        let txn = crate::parallel::SharedTxn(shared, instance);
+                        let mut rows = Vec::with_capacity(run.len());
+                        let mut density = start;
+                        storage.rows_at(&txn, t, run, wanted, &mut density, &mut |i, row| {
+                            rows.push((i + m * part, row));
+                            Ok(())
+                        })?;
+                        Ok(rows)
+                    });
+                    crate::budget::add_scanned(scanned);
+                    rows
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(Error::internal("a worker panicked")))
+            })
+            .collect()
+    });
+    let mut out = Vec::with_capacity(keys.len());
+    for p in parts {
+        out.extend(p?);
+    }
+    Ok(out)
+}
+
+/// The fewest found rows a worker reads ([`rows_at`]): a thread costs
+/// tens of µs to start, a row about one to read.
+const FOUND_PART: usize = 256;
+
+/// What a lookup costs, in entries read on past (measured: PLAN.md
+/// §M14.21 T5b).
+const SEEK_ENTRIES: usize = 16;
+/// The entries a probe takes at most.
+const PROBE: usize = 16;
+/// Lookups between probes.
+const PROBE_EVERY: usize = 1024;
 
 /// Rows (with keys) of `table` matching `filter`, as they are read.
 pub fn matching<'a>(

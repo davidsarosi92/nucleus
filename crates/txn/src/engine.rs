@@ -2375,6 +2375,21 @@ impl Scan<'_> {
     /// committed transactions not yet moved into versions — in one read of
     /// the tree.
     fn refill(&mut self, max: usize, bytes: usize) -> Result<()> {
+        self.refill_where(max, bytes, None, &mut 0, usize::MAX)
+    }
+
+    /// [`refill`](Self::refill), passing over the user keys `want` refuses
+    /// — by their keys, their values not read — and counting them in
+    /// `skipped`, the batch ending once that reaches `most` (where no side
+    /// area is merged; there every key is read).
+    fn refill_where(
+        &mut self,
+        max: usize,
+        bytes: usize,
+        want: Option<&dyn Fn(&[u8]) -> bool>,
+        skipped: &mut usize,
+        most: usize,
+    ) -> Result<()> {
         let Some(from) = self.from.take() else {
             return Ok(());
         };
@@ -2417,7 +2432,15 @@ impl Scan<'_> {
             let buf = &mut self.buffer;
             let mut passed = 0;
             'ranges: for mut range in versions(&tree, Bound::Included(&seek), end)? {
-                while range.next_into(k, v)? {
+                // With keys to pass over, each version's key first: its
+                // value read only for the version the batch takes; else
+                // both at once, as a plain scan reads.
+                let keyed = want.is_some();
+                while if keyed {
+                    range.next_key_into(k)?
+                } else {
+                    range.next_into(k, v)?
+                } {
                     let at = buf.data.len();
                     let ts = decode_key_onto(k, &mut buf.data)
                         .ok_or(Error::Corrupt("undecodable version key"))?;
@@ -2426,6 +2449,28 @@ impl Scan<'_> {
                         .ents
                         .last()
                         .is_some_and(|&(kk, vv)| buf.data[kk..vv] == *user);
+                    if !seen && buf.ents.len() >= max {
+                        // The batch is full: it ends at the next key.
+                        upper = Some(user.to_vec());
+                        buf.data.truncate(at);
+                        break 'ranges;
+                    }
+                    if !seen
+                        && let Some(w) = want
+                        && !w(user)
+                    {
+                        // Not wanted: passed over by its key — as many as
+                        // a batch passes before the tree's lock is let go.
+                        *skipped += 1;
+                        passed += 1;
+                        if passed >= PASS_LIMIT || *skipped >= most {
+                            upper = Some(user.to_vec());
+                            buf.data.truncate(at);
+                            break 'ranges;
+                        }
+                        buf.data.truncate(at);
+                        continue;
+                    }
                     if !seen && ts > txn.start {
                         // Too new (another's intent, a later commit): passed
                         // over — many of them, and the batch ends here, the
@@ -2446,6 +2491,9 @@ impl Scan<'_> {
                         upper = Some(user.to_vec());
                         buf.data.truncate(at);
                         break 'ranges;
+                    }
+                    if keyed {
+                        range.value_into(v)?;
                     }
                     let value = decode_value(v).ok_or(Error::Corrupt("bad version value"))?;
                     buf.ents.push((at, buf.data.len()));
@@ -2542,6 +2590,43 @@ impl Scan<'_> {
         Ok(())
     }
 
+    /// Moves forward to the first entry at or after `key` (nowhere where
+    /// the scan is past it already): within what was read ahead where the
+    /// key is there, else the store read again from `key` at its next
+    /// refill — a descent of the tree, as a lookup's, not the entries in
+    /// between.  The transaction's own writes before `key` are passed
+    /// over.  What a merge of sorted keys with the store asks: rows found
+    /// by an index read in key order (PLAN.md §M14.21 T5b).
+    pub fn seek(&mut self, key: &[u8]) {
+        while self.writes.peek().is_some_and(|(k, _)| k.as_slice() < key) {
+            self.writes.next();
+        }
+        let len = self.buffer.len();
+        if self.pos < len && *self.buffer.key(len - 1) >= *key {
+            let (mut lo, mut hi) = (self.pos, len);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if *self.buffer.key(mid) < *key {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            self.pos = lo;
+            return;
+        }
+        self.pos = len;
+        if let Some(from) = &self.from {
+            let ahead = match from {
+                Bound::Included(u) | Bound::Excluded(u) => u.as_slice() >= key,
+                Bound::Unbounded => false,
+            };
+            if !ahead {
+                self.from = Some(Bound::Included(key.to_vec()));
+            }
+        }
+    }
+
     /// Moves to the next visible entry.
     fn advance(&mut self) -> Result<Option<Next<'_>>> {
         loop {
@@ -2582,12 +2667,32 @@ impl Scan<'_> {
     /// them, and no more once they take `bytes` — through buffers reused
     /// from chunk to chunk; false at the end.
     pub fn next_chunk(&mut self, out: &mut Chunk, entries: usize, bytes: usize) -> Result<bool> {
+        self.next_chunk_where(out, entries, bytes, None, &mut 0, usize::MAX)
+    }
+
+    /// [`next_chunk`](Self::next_chunk) of the entries whose keys `want`
+    /// takes — the others passed over by their keys where the store is read
+    /// without side areas (their values not read), counted in `skipped`;
+    /// elsewhere they may come too.  Once `most` are passed over the chunk
+    /// ends, empty perhaps, with more to come.
+    pub fn next_chunk_where(
+        &mut self,
+        out: &mut Chunk,
+        entries: usize,
+        bytes: usize,
+        want: Option<&dyn Fn(&[u8]) -> bool>,
+        skipped: &mut usize,
+        most: usize,
+    ) -> Result<bool> {
         out.clear();
         // None of the transaction's own writes left to merge, the read-ahead
         // used up: the store's next entries are the chunk — read into the
         // buffer, which becomes `out` as it is.
         while self.writes.peek().is_none() && self.pos == self.buffer.len() && self.from.is_some() {
-            self.refill(entries.max(1), bytes)?;
+            if *skipped >= most {
+                return Ok(true);
+            }
+            self.refill_where(entries.max(1), bytes, want, skipped, most)?;
             if !self.live.iter().all(|&l| l) {
                 break; // deletions to skip: entry by entry below
             }

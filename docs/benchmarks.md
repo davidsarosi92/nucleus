@@ -675,19 +675,20 @@ b 0.75:
 | ArguAna | 0.4964 | 0.4814 | 594 ms | 358 ms | 3.11 ms | 5.43 ms |
 | FiQA | 0.2534 | 0.2500 | 3,079 ms | 954 ms | 1.00 ms | 1.62 ms |
 
-With a second condition (PLAN.md §M14.21 T5a: `AND n % 100 < p`, `n`
-a row's number), `english`, 1.2 / 0.75: the index reads its matches best
-first until 10 pass; the mean ms of a query, against the same order by
-`score(…) + 0`, which the index does not rank by (every match read and
-scored on its text) — the same rows:
+With a second condition (PLAN.md §M14.21 T5a, T5b: `AND n % 100 < p`,
+`n` a row's number), `english`, 1.2 / 0.75: the index reads its matches
+best first until 10 pass; the mean ms of a query, against the same order
+by `score(…) + 0`, which the index does not rank by (every match read —
+by a merge with the table's scan — and scored on its text) — the same
+rows:
 
 | BEIR | 50 % | | 10 % | | 1 % | |
 |---|---:|---:|---:|---:|---:|---:|
 | | ranked | every match | ranked | every match | ranked | every match |
-| SciFact | 1.01 | 85.8 | 1.18 | 20.5 | 2.90 | 6.4 |
-| NFCorpus | 0.76 | 17.8 | 0.83 | 4.8 | 1.21 | 1.5 |
-| ArguAna | 3.09 | 233.9 | 4.31 | 74.6 | 5.30 | 18.0 |
-| FiQA | 0.96 | 430.7 | 1.21 | 110.9 | 3.36 | 36.5 |
+| SciFact | 0.98 | 82.2 | 1.16 | 18.0 | 2.86 | 4.3 |
+| NFCorpus | 0.75 | 17.4 | 0.80 | 4.6 | 1.20 | 1.3 |
+| ArguAna | 3.09 | 217.1 | 3.35 | 50.1 | 5.25 | 10.1 |
+| FiQA | 0.97 | 417.3 | 1.21 | 92.4 | 3.37 | 18.3 |
 
 ```sh
 python3 bench/text/data.py beir

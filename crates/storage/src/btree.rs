@@ -426,6 +426,7 @@ impl BTree {
             end: end.map(<[u8]>::to_vec),
             reverse: false,
             done: false,
+            stash: Vec::new(),
         })
     }
 
@@ -442,6 +443,7 @@ impl BTree {
             end: start.map(<[u8]>::to_vec),
             reverse: true,
             done: false,
+            stash: Vec::new(),
         })
     }
 
@@ -1421,13 +1423,34 @@ impl<'t> Cursor<'t> {
         val: &mut Vec<u8>,
         keep: &dyn Fn(&[u8]) -> bool,
     ) -> Result<bool> {
+        if !self.next_key_within(key, keep)? {
+            return Ok(false);
+        }
+        self.value_into(self.pos - 1, val)?;
+        Ok(true)
+    }
+
+    /// The value of the entry [`next_key_within`](Self::next_key_within)
+    /// gave last, into `val`: decompressed, its overflow chain read.
+    pub fn last_value_into(&self, val: &mut Vec<u8>) -> Result<()> {
+        self.value_into(self.pos - 1, val)
+    }
+
+    /// [`next_within`](Self::next_within) without the value: the next
+    /// entry's key — its value, compressed or in overflow pages, not read
+    /// until [`last_value_into`](Self::last_value_into) asks.
+    #[inline]
+    pub fn next_key_within(
+        &mut self,
+        key: &mut Vec<u8>,
+        keep: &dyn Fn(&[u8]) -> bool,
+    ) -> Result<bool> {
         loop {
             if self.pos < self.leaf_len {
                 self.key_into(self.pos, key)?;
                 if !keep(key) {
                     return Ok(false);
                 }
-                self.value_into(self.pos, val)?;
                 self.pos += 1;
                 return Ok(true);
             }
@@ -1504,6 +1527,8 @@ pub struct Range<'t> {
     end: Bound<Vec<u8>>,
     reverse: bool,
     done: bool,
+    /// Descending: the value of the entry `next_key_into` gave last.
+    stash: Vec<u8>,
 }
 
 impl std::fmt::Debug for Range<'_> {
@@ -1556,6 +1581,50 @@ impl Range<'_> {
             self.done = true;
             Ok(false)
         }
+    }
+
+    /// The next entry's key into `key`, its value not read: then
+    /// [`value_into`](Self::value_into) reads it where it is wanted —
+    /// skipping an entry costs its key, not its value's decompression.
+    /// False at the end.
+    pub fn next_key_into(&mut self, key: &mut Vec<u8>) -> Result<bool> {
+        if self.reverse {
+            let mut val = std::mem::take(&mut self.stash);
+            let more = self.next_into(key, &mut val)?;
+            self.stash = val;
+            return Ok(more);
+        }
+        if self.done {
+            return Ok(false);
+        }
+        let end = &self.end;
+        let more = self.cursor.next_key_within(key, &|k| match end {
+            Bound::Unbounded => true,
+            Bound::Included(e) => k <= &e[..],
+            Bound::Excluded(e) => k < &e[..],
+        });
+        match more {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                self.done = true;
+                Ok(false)
+            }
+            Err(e) => {
+                self.done = true;
+                Err(e)
+            }
+        }
+    }
+
+    /// The value of the entry [`next_key_into`](Self::next_key_into) gave
+    /// last, into `val`.
+    pub fn value_into(&mut self, val: &mut Vec<u8>) -> Result<()> {
+        if self.reverse {
+            val.clear();
+            val.extend_from_slice(&self.stash);
+            return Ok(());
+        }
+        self.cursor.last_value_into(val)
     }
 
     fn inside(&self, k: &[u8]) -> bool {

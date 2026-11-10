@@ -110,8 +110,9 @@ ranked as well as ParadeDB's Tantivy-based BM25 or better, faster on
 FiQA and ArguAna (1.0 ms a FiQA query, theirs 1.6), slower on the
 smallest corpus — and with other conditions, row-level security or
 HNSW's distance over the text's matches, one ranking for every index
-(a FiQA query with a filter passing a tenth of the rows 1.2 ms, 92× the
-read-everything path).  Next is hybrid search
+(a FiQA query with a filter passing a tenth of the rows 1.2 ms, 76× the
+read-everything path), and the rows a condition finds read by a merge
+with the table's scan (a FiQA term's 8,743 rows 2.6× faster).  Next is hybrid search
 (§M14.21) and the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree

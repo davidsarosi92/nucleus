@@ -399,3 +399,45 @@ fn ranked_under_row_level_security() {
         }
     }
 }
+
+/// Ties at every limit: rows of few distinct texts, so most scores are
+/// shared, ranked by the index at every `LIMIT` and both orders among
+/// ties, with and without another condition — the rows tied with the
+/// `k`-th are read wherever the slices cut them (§M14.21 T5a, T5b).
+#[test]
+fn ties_at_every_limit() {
+    let kv = db(5);
+    let mut s = Session::new(kv.clone());
+    s.execute("CREATE TABLE docs (id INT PRIMARY KEY, body TEXT)")
+        .unwrap();
+    const BODIES: [&str; 4] = ["fox fox fox", "fox fox", "fox", "fox and a brown dog"];
+    let mut r = Lcg(17);
+    for id in 0..120 {
+        let body = BODIES[r.below(BODIES.len() as u64) as usize];
+        s.execute(&format!("INSERT INTO docs VALUES ({id}, '{body}')"))
+            .unwrap();
+    }
+    s.execute("CREATE INDEX docs_body ON docs USING text (body)")
+        .unwrap();
+    for extra in ["", " AND id % 3 = 1"] {
+        for tie in ["id", "id DESC"] {
+            for k in 1..=60 {
+                let first = |by: &str| {
+                    format!(
+                        "SELECT id FROM docs WHERE body @@ 'fox'{extra} \
+                         ORDER BY score(body @@ 'fox'){by} DESC, {tie} LIMIT {k}"
+                    )
+                };
+                assert!(
+                    text(&mut s, &format!("EXPLAIN {}", first(""))).contains(" by text_score"),
+                    "{extra} {tie} {k}"
+                );
+                assert_eq!(
+                    ids(&mut s, &first("")),
+                    ids(&mut s, &first(" + 0")),
+                    "{extra} {tie} {k}"
+                );
+            }
+        }
+    }
+}

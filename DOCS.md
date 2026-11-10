@@ -877,8 +877,11 @@ distributed implementation will provide (§F3).
   `CHUNK_ENTRIES` keys and values packed into one buffer the caller
   reuses, so a large read allocates nothing per entry; provided over
   `scan`, the local implementation fills chunks straight from the
-  engine), `shared()` (the transaction's reads as a `KvRead` — the same
-  read methods, `Sync` — for worker threads to share while it is borrowed,
+  engine; a chunk scan may also `seek` forward to a key — `false` where
+  it cannot — and fill a chunk with only the keys a `want` predicate
+  takes, passing the others by their keys, their values not read, up to
+  `most` of them: `next_chunk_where`), `shared()` (the transaction's
+  reads as a `KvRead` — the same read methods, `Sync` — for worker threads to share while it is borrowed,
   `first` among them without the empty ranges remembered, which the
   workers would contend for; default `None`), `split_points(start, end, parts)` (up to `parts - 1`
   keys cutting a range into parts of about equal size, from the B+tree's
@@ -3104,8 +3107,20 @@ index cannot tell the rows they are read without it, so it is never
 evaluated below the policy);
 `exec::method_rows` asks for the primary keys and reads their rows (none
 when the statement reads no column and nothing else is checked: the
-method is exact), and where `rows_where` says `None` every row is read
-with `cond` checked.  `EXPLAIN`: `Index Scan using ix on t (col f arg)`.
+method is exact) — in key order, a block at a time (8, then twice the
+last up to 256, four times past it, up to 16,384: a limit above stops it
+early), by a merge with the table's scan (`exec::rows_at`,
+`TableStorage::rows_at`; the row storage's `exec::entries_at`, PLAN.md
+§M14.21 T5b): where the keys lie far apart each is looked up, where they
+lie close the scan reads on through the entries between, passing the
+unwanted by their keys — chosen by the share wanted of the entries
+passed, measured as it goes (a probe of 16 entries where it is not yet
+known and every 1,024th lookup, each chunk read on) and kept across the
+statement's blocks, reading on above one in `SEEK_ENTRIES` (16, what a
+lookup costs in entries read); past 256 keys a run each on the
+statement's workers over the transaction's shared reads.  Where
+`rows_where` says `None`
+every row is read with `cond` checked.  `EXPLAIN`: `Index Scan using ix on t (col f arg)`.
 
 Two more let a method compute a function of such a condition and rank
 the rows it finds (§M14.21 T5, BM25's).  `function(t, i, name, arg)`:
@@ -3563,8 +3578,10 @@ row's, and the rows are read greatest first in slices (`Ranked::next`: a
 selection over the rest, then a sort of the slice) — `k` over the share
 the optimizer expects to pass the other conditions first, then as many
 as the share passing so far needs, at least as many again — until `k`
-passed and every row tied with the `k`-th passing one has been read;
-the sort and the limit above order them (by `text_score` again, for
+passed and every row tied with the `k`-th passing one has been read
+(a lookup each, in that order: it stops at the `k`-th exactly — a merge
+with the table's scan, as a served condition's rows are read, measured
+slower here; PLAN.md §M14.21 T5b); the sort and the limit above order them (by `text_score` again, for
 those rows only).  A bag of words (one term, or
 optional terms only) is scored term at a time — each term's postings
 added into an array of the segment's documents, in the query's order,
@@ -4350,6 +4367,17 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-10 — §M14.21 T5b, found rows by a merge with the table's
+  scan:** `KvChunks::seek` and `next_chunk_where` (keys a predicate
+  takes, the rest passed by their keys, their values not read), the
+  engine's `Scan::seek`, the B+tree's `Range::next_key_into` /
+  `value_into`; `TableStorage::rows_at` (rows to a callback, the share
+  measured kept by the caller), `exec::entries_at` (a lookup each or
+  reading on, by the share wanted, measured as it goes; the scan opened
+  only where it reads), `exec::rows_at` (runs on the workers);
+  `exec::method_rows` reads the found rows a block at a time through it;
+  the text index's rank still a lookup each (measured);
+  `tests/text_index.rs` ties at every limit (§6, §8.17, §8.19).
 - **2026-11-10 — §M14.21 T5a, one ranking for every method:**
   `IndexMethod::ranks` (with `nulls_first`), `rank_cost`, `rows`,
   `rank` (`RankAsk`, `RankCost`, `Keep`, `Among`; `Pks` moved to

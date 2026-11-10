@@ -196,6 +196,31 @@ pub trait TableStorage: Send + Sync {
         labels: &mut Labels,
     ) -> Result<Option<Row>>;
 
+    /// The rows under `keys` (sorted, each once), the columns `wanted`
+    /// marks decoded, given to `f` in key order with their key's position
+    /// — those there are: the rows an index found.  By default a lookup
+    /// each; a storage may merge them with its scan
+    /// ([`crate::exec::entries_at`], `density` the share of its entries
+    /// wanted as last measured, kept across a statement's calls).
+    fn rows_at(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        keys: &[Vec<u8>],
+        wanted: Option<&[bool]>,
+        density: &mut Option<f64>,
+        f: &mut dyn FnMut(usize, Row) -> Result<()>,
+    ) -> Result<()> {
+        let _ = density;
+        let mut labels = Labels::default();
+        for (i, k) in keys.iter().enumerate() {
+            if let Some(row) = self.get(txn, t, k, wanted, &mut labels)? {
+                f(i, row)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The rows of a range, ascending by key.
     fn rows<'a>(&self, scan: Scan<'a>) -> Result<RowIter<'a>>;
 
@@ -519,6 +544,28 @@ impl TableStorage for RowStorage {
                 txn, t, key, &v, labels, wanted,
             )?)),
         }
+    }
+
+    /// By a merge with the table's scan: seeks where the keys lie far
+    /// apart, reading on where they lie close.
+    fn rows_at(
+        &self,
+        txn: &dyn KvTxn,
+        t: &Table,
+        keys: &[Vec<u8>],
+        wanted: Option<&[bool]>,
+        density: &mut Option<f64>,
+        f: &mut dyn FnMut(usize, Row) -> Result<()>,
+    ) -> Result<()> {
+        let end = nucleus_kv::prefix_end(&t.index_prefix(0));
+        let end = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+        let mut labels = Labels::default();
+        crate::exec::entries_at(txn, false, keys, end, density, &mut |i, k, v| {
+            f(
+                i,
+                crate::large::read_some(txn, t, k, v, &mut labels, wanted)?,
+            )
+        })
     }
 
     fn rows<'a>(&self, scan: Scan<'a>) -> Result<RowIter<'a>> {

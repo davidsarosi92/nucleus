@@ -130,6 +130,32 @@ pub trait KvChunks {
     /// [`CHUNK_ENTRIES`], fewer once they take [`CHUNK_BYTES`]; false at
     /// the end.
     fn next_chunk(&mut self, out: &mut Chunk) -> Result<bool>;
+
+    /// [`next_chunk`](Self::next_chunk) of at most `entries` entries whose
+    /// keys `want` takes (`None`: any), the others passed over by their keys
+    /// where the scan can — their values not read — and counted in
+    /// `skipped`; once `most` are passed over the chunk ends, empty
+    /// perhaps, with more to come (true).  By default the usual chunk,
+    /// every entry in it.
+    fn next_chunk_where(
+        &mut self,
+        out: &mut Chunk,
+        entries: usize,
+        want: Option<&dyn Fn(&[u8]) -> bool>,
+        skipped: &mut usize,
+        most: usize,
+    ) -> Result<bool> {
+        let _ = (entries, want, skipped, most);
+        self.next_chunk(out)
+    }
+
+    /// Moves forward to the first entry at or after `key` — the entries
+    /// before it not read, where the scan can seek (`false`: it cannot,
+    /// and reads on).  The chunk asked for next starts there.
+    fn seek(&mut self, key: &[u8]) -> Result<bool> {
+        let _ = key;
+        Ok(false)
+    }
 }
 
 /// Entries a chunk holds at most.
@@ -159,6 +185,29 @@ struct ScanChunks<'a>(nucleus_txn::Scan<'a>);
 impl KvChunks for ScanChunks<'_> {
     fn next_chunk(&mut self, out: &mut Chunk) -> Result<bool> {
         Ok(self.0.next_chunk(out, CHUNK_ENTRIES, CHUNK_BYTES)?)
+    }
+
+    fn next_chunk_where(
+        &mut self,
+        out: &mut Chunk,
+        entries: usize,
+        want: Option<&dyn Fn(&[u8]) -> bool>,
+        skipped: &mut usize,
+        most: usize,
+    ) -> Result<bool> {
+        Ok(self.0.next_chunk_where(
+            out,
+            entries.clamp(1, CHUNK_ENTRIES),
+            CHUNK_BYTES,
+            want,
+            skipped,
+            most,
+        )?)
+    }
+
+    fn seek(&mut self, key: &[u8]) -> Result<bool> {
+        self.0.seek(key);
+        Ok(true)
     }
 }
 
