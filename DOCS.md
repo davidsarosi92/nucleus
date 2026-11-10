@@ -3765,6 +3765,54 @@ computed by hand; `tests/text_index.rs` — two phrases within a slop
 among its queries, the index's rows and scores the rows' at every
 step.
 
+### 8.20 Hybrid search (`hybrid`, §M14.21 T7)
+
+Rankings fused in one query: `ORDER BY rrf(r1, r2, …) DESC LIMIT k`
+(2 to 8 rankings) and `ORDER BY convex(r1, r2, α) DESC LIMIT k`, over
+one table's scan (with its filter and row-level security):
+
+```sql
+SELECT id, snippet(body @@ $2) FROM docs WHERE tenant = $1
+ORDER BY rrf(score(body @@ $2), emb <=> $3) DESC LIMIT 10;
+```
+
+A ranking is greatest first, a distance (`<->`, `<=>`, `<#>`, `<+>`,
+`…_distance`, `negative_inner_product`) nearest first; a function whose
+rows are a condition's (`ScalarFunction::found`: `score(body @@ q)`'s
+are `body @@ q`'s) ranks only those.  Each ranking gives its **list**:
+its first `window` rows — 100, or the limit and the offset where more —
+of the rows the query keeps, ties by the primary key (Elasticsearch's,
+OpenSearch's and Weaviate's `rank_window_size`).  `rrf`: Σ 1 / (60 +
+rank) over the lists a row is in (`rank()`, ties share one; Cormack,
+Clarke and Büttcher's).  `convex`: α·n1 + (1 − α)·n2, each ranking
+min-max normalized over its own list — (x − min) / (max − min), a
+distance (max − x) / (max − min), 1 where all are equal — and 0 for a
+row not in that list or `NULL` there (OpenSearch's `min_max` with an
+arithmetic mean, Elasticsearch's linear retriever, Weaviate's
+`relativeScoreFusion`).  Elsewhere — no limit, a join, a fusion not the
+first sort key — the call is refused (`0A000`).
+
+`hybrid::fused`, an optimizer pass after `narrow`, rewrites `Limit` →
+`Sort` (first key the call) → `Project` over a scan: each list a `Limit`
+over a `Sort` of a projection of the scan (the condition of a `found`
+ranking added to its filter) — which `ranked` (§8.17) then serves from
+the index on its column: the text index's first rows by BM25 with their
+scores (`with values`), HNSW's nearest — then a window over the list
+(`rank()`, or `min` and `max` over all of it) and a projection to the
+candidate's columns and the fusion's slots (its rank, or its value and
+its list's bounds; the other lists' `NULL`); the lists `UNION ALL`, one
+row a candidate by an aggregate grouped by the primary key and the
+columns read above (`max` of each slot), and the call replaced by the
+fusion of the slots.  No ranking is computed again over the candidates:
+a list's values come from its index where it has one.  Without an index
+the same plan reads every row.
+
+*Tests:* `tests/hybrid.rs` — `rrf` and `convex(…, 0.3)` against the
+fusion computed in Rust from every row's score, match and distance, for
+`k` 1, 10 and 50, with a filter and without, with HNSW and without; the
+columns read above the fusion; the plans (the text index's first 100
+with values, HNSW's 100 nearest on 12,000 rows); the refusals.
+
 ### 8.14 Errors and hints (`error`, `hint`)
 
 An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
@@ -4503,6 +4551,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-10 — §M14.21 T7a, hybrid search:** `rrf(r1, r2, …)` and
+  `convex(r1, r2, α)` (`hybrid.rs`; the optimizer pass `hybrid::fused`:
+  each ranking's first 100 rows by its index, `UNION ALL`, grouped by the
+  primary key, ranked or normalized over each list);
+  `ScalarFunction::found` (`text_score`'s rows are `@@`'s);
+  `bench/text/embed.py` (fastembed: bge-small-en-v1.5, SPLADE++) and
+  `bench/text/hybrid.py` (BEIR: text, vector, `rrf`, `convex`).
 - **2026-11-10 — §M14.21 T6, slop, highlights and snippets:**
   `"a b"~N` (`Node::Phrase`'s slop, `query::phrase` — Lucene's sloppy
   matcher and weight — for rows, segments, BM25 and highlights);

@@ -316,7 +316,7 @@ impl ScalarFunction for Tokenize {
 /// analyzed by one analyzer — a third argument the binder gives (T4: the
 /// column's text index's), else [`DEFAULT`].  The same answer on a row
 /// as from an index: an index is a way to it, never another one.
-struct Matches;
+pub(crate) struct Matches;
 
 impl Matches {
     fn analyzer(args: &[&Value]) -> Result<Arc<dyn Analyzer>> {

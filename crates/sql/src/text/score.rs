@@ -413,6 +413,18 @@ impl ScalarFunction for TextScore {
         Volatility::Immutable
     }
 
+    /// The rows BM25 ranks: those `text @@ query` (by the analyzer) holds
+    /// for.
+    fn found(&self, args: &[Expr]) -> Option<Expr> {
+        let [text, q, analyzer, ..] = args else {
+            return None;
+        };
+        Some(Expr::Call(
+            FnRef::new(Arc::new(super::Matches)),
+            vec![text.clone(), q.clone(), analyzer.clone()],
+        ))
+    }
+
     fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
         let text = match &args[0] {
             Value::Text(t) => t,

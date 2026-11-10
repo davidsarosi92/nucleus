@@ -118,8 +118,12 @@ ranks a query in 1.8 ms against ParadeDB's 5.5, at a higher nDCG@10 (0.2605, the
 HNSW's distance over the text's matches, one ranking for every index
 (a FiQA query with a filter passing a tenth of the rows 0.70 ms, 134×
 the read-everything path), and the rows a condition finds read by a merge
-with the table's scan (a FiQA term's 8,743 rows 2.6× faster).  Next is hybrid search
-(§M14.21) and the rest of the
+with the table's scan (a FiQA term's 8,743 rows 2.6× faster) — and
+hybrid search in one query, `ORDER BY rrf(score(body @@ q), emb <=> $1)
+DESC LIMIT 10` or `convex(…, α)`, each ranking's first rows from its
+index (BEIR: fused above text and vectors alone, 1.3–2.1 ms a SciFact,
+NFCorpus or FiQA query, 1.8–5.0× ParadeDB's RRF).  Next is the rest of
+§M14.21 and the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then

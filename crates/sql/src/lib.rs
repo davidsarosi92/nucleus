@@ -41,6 +41,7 @@ pub mod fsum;
 pub mod hint;
 pub mod hll;
 pub mod hnsw;
+pub mod hybrid;
 pub mod index_method;
 pub mod inet;
 mod keyfilter;

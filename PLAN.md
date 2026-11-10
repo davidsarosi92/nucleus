@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed) done | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF) done | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -5966,6 +5966,77 @@ Not measured apart: a snippet from the positions the index holds (the
 text is analyzed again; the index has the positions but not the
 offsets — Lucene's postings-with-offsets highlighter) — later, if
 snippets dominate a query.
+
+**T7a — hybrid: `rrf` and `convex` in one plan** (done 2026-11-10).
+Prior art: reciprocal rank fusion (Cormack, Clarke and Büttcher, SIGIR
+2009: Σ 1 / (60 + rank), k = 60 everyone's default); a convex
+combination of normalized scores (Bruch, Gai and Ingber, "An Analysis
+of Fusion Functions for Hybrid Retrieval", TOIS 2024 — it beats RRF
+when tuned, and min-max normalization is as good as any); every engine
+fuses each ranking's first `rank_window_size` rows (Elasticsearch's
+`rrf` and `linear` retrievers, OpenSearch's hybrid query with its
+`min_max` normalization, Weaviate's `rankedFusion` and
+`relativeScoreFusion`, Vespa's `reciprocal_rank_fusion` over its
+first-phase hits), a row missing from a list 0 in it; ParadeDB and
+pgvector users write RRF in SQL — a CTE a ranking, `RANK()`, a `FULL
+OUTER JOIN` (ParadeDB's documentation).  Taken: the same meaning, as
+two functions the optimizer plans — no CTEs to write, one table's
+filter and row-level security on every list:
+
+1. **`rrf(r1, r2, …)`** (2–8 rankings) and **`convex(r1, r2, α)`**,
+   only as the first key of `ORDER BY … DESC LIMIT k` over one table
+   (elsewhere `0A000`).  A ranking is greatest first, a distance nearest
+   first; `ScalarFunction::found` names the rows a function ranks
+   (`score(body @@ q)`'s are `@@`'s), so the text's list holds matches
+   only.
+2. **`hybrid::fused`**, an optimizer pass: each ranking's list a
+   `Limit` (100, or `k` + offset) over a `Sort` of the scan — which
+   T5a's `ranked` serves from the index on its column, the text index's
+   with its scores (T5c), HNSW's nearest — a window over it (`rank()`,
+   or `min`/`max`), the lists `UNION ALL`, one row a candidate by an
+   aggregate over the primary key and the columns read above, fused.
+
+The first version took every ranking of every candidate again and
+ranked them among the candidates (the scores of rows outside a list are
+known then): 15.6 ms a SciFact query on a busy machine, 13 of them
+`text_score` analyzing the 188 candidates' texts again.  Each list now
+carries its own values, as the engines above do: 3.2 ms on the same
+busy machine, 1.49 idle.  Not taken: weights per ranking
+in `rrf` (Elasticsearch has none either; `convex` is the weighted one),
+more than two rankings in `convex`, `rank_constant` other than 60 — each
+an argument away when asked.
+
+Measured (`bench/text/hybrid.py`: BEIR's four corpora with
+BAAI/bge-small-en-v1.5's vectors by `bench/text/embed.py`, 384
+dimensions, cosine, an HNSW index with pgvector's defaults; the text
+index `english`, 1.2 / 0.75; α 0.5; the mean ms of a query, the second
+of two rounds, the CPU otherwise idle) against ParadeDB 0.26.6 with
+pgvector 0.8.6 — the same vectors, HNSW's defaults, `hnsw.ef_search`
+100 for its RRF (else its HNSW gives 40 rows at most), RRF as its
+documentation writes it:
+
+| nDCG@10 | text | vector | `rrf` | `convex` | ParadeDB text | vector | RRF |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| SciFact | 0.6891 | 0.7126 | 0.7329 | 0.7445 | 0.6839 | 0.7161 | 0.7327 |
+| NFCorpus | 0.3291 | 0.3163 | 0.3602 | 0.3633 | 0.3225 | 0.3339 | 0.3636 |
+| ArguAna | 0.4964 | 0.5973 | 0.5981 | 0.6169 | 0.4814 | 0.5950 | 0.5890 |
+| FiQA | 0.2534 | 0.3669 | 0.3570 | 0.3826 | 0.2500 | 0.3730 | 0.3598 |
+
+| ms a query | text | vector | `rrf` | `convex` | ParadeDB text | vector | RRF |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| SciFact | 0.27 | 0.38 | 1.49 | 1.72 | 0.88 | 0.42 | 7.41 |
+| NFCorpus | 0.16 | 0.31 | 1.29 | 1.47 | 0.43 | 0.38 | 4.99 |
+| ArguAna | 2.33 | 0.37 | 3.67 | 3.96 | 5.98 | 0.36 | 6.74 |
+| FiQA | 0.39 | 0.48 | 2.12 | 2.31 | 1.62 | 0.70 | 3.86 |
+
+Fusion beats either ranking alone on every corpus but FiQA's RRF (its
+BM25 is far weaker than its vectors; `convex` still gains), as Bruch et
+al. found; `rrf` is 1.8–5.0× faster than ParadeDB's, about the sum of
+its two lists' times.  Found on the way: our HNSW finds less than
+pgvector's at the same `m`, `ef_construction` and `ef_search` 40 —
+NFCorpus 0.3163 against 0.3339 (exact 0.3375; ours at `ef_search` 100,
+0.3355), FiQA 0.3669 against 0.3730, SciFact 0.7126 against 0.7161
+(exact 0.7203) — §M14.12's to look into, not this step's.
 
 ### §M14.22 — Embeddings in the database ⬜
 

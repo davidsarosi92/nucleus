@@ -39,6 +39,7 @@ pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let plan = sink(reorder(plan, &stats), &stats);
     let plan = lookups(crate::eager::eager(plan, &stats), &stats);
     let plan = crate::narrow::narrow(sorted(crate::distinct::two_level(plan)));
+    let plan = crate::hybrid::fused(plan);
     ranked(method_filters(adaptive(same_rows(plan), &stats)), &stats)
 }
 

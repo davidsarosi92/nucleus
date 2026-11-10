@@ -265,6 +265,15 @@ pub trait ScalarFunction: Send + Sync {
         None
     }
 
+    /// For a function whose value means something only on the rows of a
+    /// condition (`text_score`: BM25, of the rows `body @@ q` holds for):
+    /// that condition over its arguments `args`.  A hybrid ranking takes
+    /// its rows from there (PLAN.md §M14.21 T7).  By default none.
+    fn found(&self, args: &[crate::expr::Expr]) -> Option<crate::expr::Expr> {
+        let _ = args;
+        None
+    }
+
     /// For a function of an operator's condition (`highlight(body @@ q)`,
     /// PLAN.md §M14.21 T6): the operator.  Where its first argument is
     /// that operator's call, the binder binds the call
