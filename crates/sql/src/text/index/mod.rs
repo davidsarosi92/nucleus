@@ -623,9 +623,39 @@ impl IndexMethod for TextIndex {
 
 /// The statistics BM25 reads, of index `i` of `t`, for `terms`, as `txn`
 /// sees its rows: documents, their total length, each term's documents.
+/// A partitioned table's are its partitions' together — each one's index
+/// of the same definition (§8.16: made with the table's) —, so a row
+/// scores as it would in one table, whichever partition holds it.
 pub fn stats(txn: &dyn KvTxn, t: &Table, i: usize, terms: &[&str]) -> Result<(u64, u64, Vec<u64>)> {
-    let st = store(t, i).view(txn)?.stats(terms);
-    Ok((st.docs, st.len, st.df))
+    if t.partition_by.is_none() {
+        let st = store(t, i).view(txn)?.stats(terms);
+        return Ok((st.docs, st.len, st.df));
+    }
+    let ix = &t.indexes[i];
+    let alike = |px: &crate::catalog::Index| {
+        px.method == ix.method
+            && px.columns == ix.columns
+            && px.opclasses == ix.opclasses
+            && px.options == ix.options
+    };
+    let (mut docs, mut len, mut df) = (0, 0, vec![0; terms.len()]);
+    for p in crate::partition::partitions(txn, t)? {
+        // At the table's place, unless the partition has indexes of its own
+        // before it.
+        let j = match p.indexes.get(i) {
+            Some(px) if alike(px) => i,
+            _ => p.indexes.iter().position(alike).ok_or_else(|| {
+                Error::internal(format!("partition {} without index {}", p.name, ix.name))
+            })?,
+        };
+        let (d, l, f) = stats(txn, &p, j, terms)?;
+        docs += d;
+        len += l;
+        for (a, b) in df.iter_mut().zip(f) {
+            *a += b;
+        }
+    }
+    Ok((docs, len, df))
 }
 
 /// Index `id`'s table and its position there, as `txn` sees the catalog.

@@ -13,6 +13,10 @@ a bag of its words.
 `--snippets` times the same queries with each row's `snippet(body @@ q)`
 (§M14.21 T6; ParadeDB: `pdb.snippet(body)` in its own query).
 
+`--layout column` keeps the documents in a `column` table, `--layout
+partitioned` in a table partitioned by hash of `id` into 4 partitions,
+the index on each (§M14.21 T8): the same scores, so the same nDCG@10.
+
 `--filters 1,10,50` times the same queries with a second condition
 passing that percentage of the rows (`n % 100 < p`, `n` a row's number),
 ranked by the index (§M14.21 T5a) and, with `--unranked`, ordered by
@@ -238,6 +242,7 @@ def main():
     ap.add_argument("--snippets", action="store_true")
     ap.add_argument("--split", default="test")
     ap.add_argument("--queries", type=int, default=None)
+    ap.add_argument("--layout", choices=["row", "column", "partitioned"], default="row")
     ap.add_argument("--index-cache", default=None,
                     help="the server's --index-cache (its default: a quarter of the machine's memory)")
     a = ap.parse_args()
@@ -260,13 +265,21 @@ def main():
                 break
             except (OSError, nucleus.OperationalError):
                 time.sleep(0.1)
-        print(f"nucleus, BM25 k1 {a.k1}, b {a.b}, analyzer {a.analyzer}")
+        print(f"nucleus, BM25 k1 {a.k1}, b {a.b}, analyzer {a.analyzer}, {a.layout} table")
         print(HEADER)
         for name in a.sets.split(","):
             d = os.path.join(a.data, f"beir-{name}", name)
             queries, qrels = load(d, a.split, a.queries)
             c.execute("DROP TABLE IF EXISTS docs")
-            c.execute("CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT, n INT)")
+            if a.layout == "partitioned":
+                c.execute("CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT, n INT) "
+                          "PARTITION BY HASH (id)")
+                for r in range(4):
+                    c.execute(f"CREATE TABLE docs_{r} PARTITION OF docs "
+                              f"FOR VALUES WITH (MODULUS 4, REMAINDER {r})")
+            else:
+                c.execute("CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT, n INT)"
+                          + (" WITH (storage = column)" if a.layout == "column" else ""))
             ndocs = 0
             for part in parts(d):
                 c.load("docs", {"id": [i for i, _ in part], "body": [b for _, b in part],

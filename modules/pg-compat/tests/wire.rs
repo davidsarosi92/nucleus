@@ -462,6 +462,172 @@ fn vector_over_the_wire() {
     assert_eq!(rows, ["[4,5,6]", "[0.5,-1.25,3]"]);
 }
 
+/// `tsvector` and `tsquery` as PostgreSQL drivers see them (PLAN.md §M14.21
+/// T8): their oids (3614, 3615), their binary forms both ways — the bytes
+/// PostgreSQL 18's `tsvectorsend` / `tsquerysend` give —, a malformed one
+/// refused, and their text forms.
+#[test]
+fn text_search_types_through_a_real_driver() {
+    use postgres::types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
+    use postgres::{Client as Pg, NoTls, error::SqlState};
+
+    #[derive(Debug, PartialEq)]
+    struct Raw(Vec<u8>);
+
+    impl<'a> FromSql<'a> for Raw {
+        fn from_sql(
+            _: &Type,
+            raw: &'a [u8],
+        ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+            Ok(Raw(raw.to_vec()))
+        }
+        fn accepts(ty: &Type) -> bool {
+            *ty == Type::TS_VECTOR || *ty == Type::TSQUERY
+        }
+    }
+
+    impl ToSql for Raw {
+        fn to_sql(
+            &self,
+            _: &Type,
+            out: &mut postgres::types::private::BytesMut,
+        ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+            out.extend_from_slice(&self.0);
+            Ok(IsNull::No)
+        }
+        fn accepts(ty: &Type) -> bool {
+            *ty == Type::TS_VECTOR || *ty == Type::TSQUERY
+        }
+        to_sql_checked!();
+    }
+
+    fn hex(s: &str) -> Raw {
+        Raw((0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect())
+    }
+
+    let addr = start(Config::trust());
+    let url = format!(
+        "host={} port={} user=test dbname=nucleus",
+        addr.ip(),
+        addr.port()
+    );
+    let mut pg = Pg::connect(&url, NoTls).unwrap();
+    pg.batch_execute("CREATE TABLE d (id INT PRIMARY KEY, tv tsvector, q tsquery)")
+        .unwrap();
+    // PostgreSQL 18's `tsvectorsend('a:1A,3 b:2')`, `tsquerysend('a & !b')`.
+    let (v, q) = (
+        hex("0000000261000002c0010003620000010002"),
+        hex("000000040202020101000062000100006100"),
+    );
+    pg.execute("INSERT INTO d VALUES (1, $1, $2)", &[&v, &q])
+        .unwrap();
+    let row = pg.query_one("SELECT tv, q FROM d", &[]).unwrap();
+    assert_eq!(row.columns()[0].type_(), &Type::TS_VECTOR);
+    assert_eq!(row.columns()[1].type_(), &Type::TSQUERY);
+    assert_eq!((row.get::<_, Raw>(0), row.get::<_, Raw>(1)), (v, q));
+    let text = pg
+        .simple_query("SELECT tv, q, format_type(3614, NULL), to_regtype('tsquery') FROM d")
+        .unwrap();
+    let postgres::SimpleQueryMessage::Row(r) = &text[1] else {
+        panic!("{text:?}")
+    };
+    assert_eq!(
+        (0..4).map(|i| r.get(i).unwrap()).collect::<Vec<_>>(),
+        ["'a':1A,3 'b':2", "'a' & !'b'", "tsvector", "3615"]
+    );
+    // PostgreSQL's `a & (b & c)` (its `tsquerysend`), whose text form is
+    // `'a' & 'b' & 'c'`: kept as that text gives it, PostgreSQL's
+    // `a & b & c` (DOCS.md §8.22).
+    let right = hex("0000000502020202010000630001000062000100006100");
+    pg.execute("INSERT INTO d VALUES (2, NULL, $1)", &[&right])
+        .unwrap();
+    let row = pg
+        .query_one("SELECT q, q::text FROM d WHERE id = 2", &[])
+        .unwrap();
+    assert_eq!(
+        row.get::<_, Raw>(0),
+        hex("0000000502020100006300020201000062000100006100")
+    );
+    assert_eq!(row.get::<_, String>(1), "'a' & 'b' & 'c'");
+    // A malformed binary form: an operator without its operands.
+    let e = pg
+        .execute(
+            "INSERT INTO d VALUES (3, NULL, $1)",
+            &[&hex("000000010202")],
+        )
+        .unwrap_err();
+    assert_eq!(e.code(), Some(&SqlState::INVALID_BINARY_REPRESENTATION));
+}
+
+/// The same values through nucleus's own protocol, whose sessions do not
+/// have this module: a registered type the driver does not know, its
+/// name and its binary form — for `tsvector` and `tsquery` their text —,
+/// and a text parameter where one is stored.
+#[test]
+fn text_search_types_through_nucleus_protocol() {
+    use nucleus_client::{Client, Config as Ncp, Value};
+    use postgres::{Client as Pg, NoTls};
+
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(1)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let (pg_at, ncp_at) = (
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+    );
+    let (pg_addr, ncp_addr) = (pg_at.local_addr().unwrap(), ncp_at.local_addr().unwrap());
+    let other = db.clone();
+    std::thread::spawn(move || serve_front_end(Arc::new(Pg), pg_at, other, Config::trust()));
+    std::thread::spawn(move || {
+        serve_front_end(Arc::new(nucleus_server::Ncp), ncp_at, db, Config::trust())
+    });
+    let url = format!(
+        "host={} port={} user=test dbname=nucleus",
+        pg_addr.ip(),
+        pg_addr.port()
+    );
+    let mut pg = Pg::connect(&url, NoTls).unwrap();
+    pg.batch_execute(
+        "CREATE TABLE d (id INT PRIMARY KEY, tv tsvector, q tsquery);
+         INSERT INTO d VALUES (1, to_tsvector('english', 'The cats sat'), 'cat & !dog')",
+    )
+    .unwrap();
+    let mut nc = Client::connect(Ncp {
+        host: "127.0.0.1".into(),
+        port: ncp_addr.port(),
+        ..Ncp::default()
+    })
+    .unwrap();
+    nc.rows(
+        "INSERT INTO d VALUES (2, $1, NULL)",
+        &[Value::Text("a:1 b:2".into())],
+    )
+    .unwrap();
+    let rows = nc.rows("SELECT tv, q FROM d ORDER BY id", &[]).unwrap();
+    let other = |name: &str, text: &str| Value::Other {
+        type_name: name.into(),
+        bytes: text.as_bytes().to_vec(),
+    };
+    assert_eq!(
+        rows,
+        [
+            vec![
+                other("tsvector", "'cat':2 'sat':3"),
+                other("tsquery", "'cat' & !'dog'")
+            ],
+            vec![other("tsvector", "'a':1 'b':2"), Value::Null],
+        ]
+    );
+}
+
 /// `COPY … FROM STDIN` through a real PostgreSQL driver (PLAN.md §M14.11
 /// L5): text and CSV, an error that stores nothing, and the connection
 /// going on after it.

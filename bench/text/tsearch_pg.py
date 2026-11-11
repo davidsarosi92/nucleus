@@ -12,6 +12,12 @@ nucleus to:
     rank <tab> vector <tab> query <tab> normalization <tab> weights <tab> ts_rank <tab>
          ts_rank_cd <tab> both normalized <tab> both weighted (6 reals)
     headline <tab> document <tab> query's text <tab> options <tab> ts_headline
+    send <tab> vector <tab> query <tab> tsvectorsend <tab> tsquerysend
+
+The binary forms (`send`) are of random values and of the edges: positions
+past 16,383 and more than 256 of a term (PostgreSQL keeps neither),
+quoted terms, the longest phrase distance; a query's of the value its text
+form gives.
 
 The headlines' documents are plain English — words, numbers, commas and
 full stops — which PostgreSQL's parser and nucleus's words split alike.
@@ -128,6 +134,16 @@ def words(r):
     return " ".join(r.choice(WORDS) for _ in range(r.randint(1, 5)))
 
 
+SEND_VECTORS = [
+    "",
+    "a:16383,16384,20000B",
+    "x:" + ",".join(str(p) for p in range(1, 301)),
+    "y:" + ",".join(f"{p}{'ABCD'[p % 4]}" for p in range(16000, 16400, 3)),
+    "'it''s':1 'a\\\\b':2A 'á' 'ő':3C,4B",
+]
+SEND_QUERIES = ["", "a <16384> b", "!!a", "'it''s':*AB & ( 'x' | !y )", "a <0> b <-> c:D"]
+
+
 def dollar(s):
     return "$q$" + s + "$q$"
 
@@ -146,7 +162,10 @@ def main():
     for i in range(400):
         m = ["to_tsquery", "websearch_to_tsquery", "plainto_tsquery", "phraseto_tsquery"][i % 4]
         makes.append((m, standard(r, 3) if m == "to_tsquery" else web(r) if m.startswith("web") else words(r)))
+    makes += [("to_tsquery", "cat <16384> the <-> dog"), ("to_tsquery", "a <16384> b")]
     heads = [(document(r), hquery(r, 2), r.choice(OPTIONS)) for _ in range(1200)]
+    sends = [(vector(r), query(r, 3)) for _ in range(300)]
+    sends += [(v, q) for v, q in zip(SEND_VECTORS, SEND_QUERIES)]
     sql = ["SET client_min_messages = warning;"]
     for v, q in matches:
         sql.append(
@@ -164,13 +183,20 @@ def main():
         sql.append(f"SELECT 'headline', to_tsquery('english', {dollar(q)})::text, "
                    f"ts_headline('english', {dollar(d)}, to_tsquery('english', {dollar(q)}), "
                    f"{dollar(o)});")
+    for v, q in sends:
+        # A query as its text form gives it: PostgreSQL's prints `a & (b & c)`
+        # without the parentheses, and nucleus keeps values as their text gives
+        # them (DOCS.md §8.22).
+        sql.append(f"SELECT 'send', tsvectorsend({dollar(v)}::tsvector), "
+                   f"tsquerysend({dollar(q)}::tsquery::text::tsquery);")
     out = subprocess.run(
         ["docker", "exec", "-i", a.container, "psql", "-U", "postgres", "-d", "postgres",
          "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1"],
         input="\n".join(sql), capture_output=True, text=True, check=True,
     ).stdout.splitlines()
-    rows = [l.split("\t") for l in out if l.startswith(("match\t", "make\t", "rank\t", "headline\t"))]
-    assert len(rows) == len(matches) + len(makes) + len(ranks) + len(heads), len(rows)
+    kinds = ("match\t", "make\t", "rank\t", "headline\t", "send\t")
+    rows = [l.split("\t") for l in out if l.startswith(kinds)]
+    assert len(rows) == len(matches) + len(makes) + len(ranks) + len(heads) + len(sends), len(rows)
     with open(a.out, "w") as f:
         for (v, q), row in zip(matches, rows):
             f.write("\t".join(["match", v, q, row[1], row[2], row[3]]) + "\n")
@@ -180,6 +206,9 @@ def main():
             f.write("\t".join(["rank", v, q, str(n), w] + row[1:]) + "\n")
         for (d, q, o), row in zip(heads, rows[len(matches) + len(makes) + len(ranks):]):
             f.write("\t".join(["headline", d, row[1], o, row[2] if len(row) > 2 else ""]) + "\n")
+        at = len(matches) + len(makes) + len(ranks) + len(heads)
+        for (v, q), row in zip(sends, rows[at:]):
+            f.write("\t".join(["send", v, q, row[1], row[2]]) + "\n")
     print(f"{len(rows)} cases to {a.out}")
 
 

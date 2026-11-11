@@ -18,7 +18,9 @@ statements in one round trip (`pipeline` in each), and run one statement
 for many rows of parameters all or none, one commit for all
 (`execute_many`; JavaScript and Java `executeMany`, Python's DB-API
 `executemany` too) — errors carry a hint (what to do about them),
-the password is proved by SCRAM-SHA-256 and never sent, registered types arrive in their binary form, and `smallint`,
+the password is proved by SCRAM-SHA-256 and never sent, registered types arrive in their binary form (one a driver does not know
+by its name and bytes — pg-compat's `tsvector` and `tsquery` their text,
+DOCS.md §8.22), and `smallint`,
 `integer`, `real`, `bytea`, `time`, `inet` and `cidr` as each language's
 native (or closest) type.  Each can use TLS — the server's certificate
 checked against the system's CAs or one's own, or unverified — and show

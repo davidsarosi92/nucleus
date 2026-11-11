@@ -3712,6 +3712,32 @@ segments and the delta: seven queries at five `k` with three filters,
 through the index and on the rows, alike.  `bench/text/beir.py` checks the rankings against
 Anserini's and ParadeDB's on BEIR (docs/benchmarks.md).
 
+**On every kind of table** (§M14.21 T8c): a text or sparse index is a
+table's whatever its storage — it is told each row written and builds
+over the rows the storage gives (§8.15), `row`, `column` and
+`row,column` alike — and `CREATE INDEX` on a partitioned table makes one
+on each partition (§8.16).  A partitioned table's query is its
+partitions' scans, each served by its own index: `@@`'s rows, and the
+first `k` by BM25 or by `<#>` from each, the sort above keeping the first
+`k` of them — their scores read from the indexes (`with values`) where
+every partition's gives them, else computed again on the rows kept —;
+`rrf` and `convex` likewise (§8.20).  BM25's
+statistics are the partitioned table's — documents, their length and
+each term's documents summed over its partitions' indexes
+(`text::index::stats`: each partition's index of the same definition,
+looked for past the table's place where the partition has indexes of its
+own) —, so a row scores as in one table, whichever partition holds it.
+*Tests:* `tests/text_tables.rs` — a `row`, a `column`, a `row,column`
+table and one partitioned into partitions of each storage, the same rows
+written to each: built over a load, then inserts, updates, deletes, rows
+moved between partitions, and sealed; at each step eight queries' rows,
+their first seven by score with three filters, highlights and snippets,
+the first by `<#>` and `rrf` and `convex` of both alike to the `row`
+table's (scores to the bit), served by the indexes (the scores read from
+them), and the integrity check.  On BEIR (`bench/text/beir.py --layout`,
+docs/benchmarks.md) a `column` table ranks as fast as a `row` one, one
+partitioned four ways in about twice the time, the same nDCG@10.
+
 **Text queries** (§M14.21 T2, `text/query.rs`): `text @@ query` is true
 when the text matches the query.  The syntax is Lucene's, the subset of
 it one column needs, so what people and models already write works:
@@ -3791,7 +3817,8 @@ step.
 
 Rankings fused in one query: `ORDER BY rrf(r1, r2, …) DESC LIMIT k`
 (2 to 8 rankings) and `ORDER BY convex(r1, r2, α) DESC LIMIT k`, over
-one table's scan (with its filter and row-level security):
+one table's scan (with its filter and row-level security; a partitioned
+table's, its partitions' scans):
 
 ```sql
 SELECT id, snippet(body @@ $2) FROM docs WHERE tenant = $1
@@ -3815,9 +3842,10 @@ arithmetic mean, Elasticsearch's linear retriever, Weaviate's
 first sort key — the call is refused (`0A000`).
 
 `hybrid::fused`, an optimizer pass after `narrow`, rewrites `Limit` →
-`Sort` (first key the call) → `Project` over a scan: each list a `Limit`
-over a `Sort` of a projection of the scan (the condition of a `found`
-ranking added to its filter) — which `ranked` (§8.17) then serves from
+`Sort` (first key the call) → `Project` over a scan, or an `Append` of a
+partitioned table's: each list a `Limit` over a `Sort` of a projection of
+the scan (the condition of a `found` ranking added to its filter, each
+partition's) — which `ranked` (§8.17) then serves from
 the index on its column: the text index's first rows by BM25 with their
 scores (`with values`), HNSW's nearest — then a window over the list
 (`rank()`, or `min` and `max` over all of it) and a projection to the
@@ -3888,7 +3916,9 @@ configuration is nucleus's analyzer of the name (`english`, `hungarian`,
 terms at their positions plus one.  Queries are built as PostgreSQL
 builds them — each operand analyzed, its terms a phrase by their
 positions, stop words cleaned out with the phrase distances across them
-kept (`cat <-> the <-> mat` is `'cat' <2> 'mat'`) — and evaluated as its
+kept (`cat <-> the <-> mat` is `'cat' <2> 'mat'`; `<N>` up to 16,384,
+and the distance after the clean-up added unchecked, as PostgreSQL's:
+`cat <16384> the <-> dog` is `<16385>`) — and evaluated as its
 `TS_execute`: a phrase's parts' positions merged per operator, `&` under
 a phrase where both match, a `NOT` under one where its operand does not,
 weights filtering positions, a term without positions a "maybe" (no
@@ -3907,8 +3937,7 @@ gives them joined the positions PostgreSQL's chain has.  Otherwise —
 weights, other distances, a phrase over operators, a query of stop words
 only, a parameter, different configurations — `@@` is computed on the
 values.  Departures: nucleus's analyzers, not PostgreSQL's parser and
-dictionaries; positions not capped at 16,383 nor 256 a term; the values
-sent as `text` (oid 25).
+dictionaries; positions not capped at 16,383 nor 256 a term.
 
 **Ranking and headlines** (`tsrank`, `tsheadline`, §M14.21 T8b):
 `ts_rank` and `ts_rank_cd` (`[weights,] vector, query
@@ -3932,17 +3961,55 @@ PostgreSQL's: `MinWords must be less than MaxWords`, `unrecognized
 headline parameter`, …).  Departures: UAX #29's words (PostgreSQL's
 parser splits `don't` and hyphenated words), HTML tags kept as text.
 
-*Tests:* the module's `tests/tsearch.rs` — 5,100 cases PostgreSQL 18
+**On the wire** (§M14.21 T8c): PostgreSQL's front end sends them as
+PostgreSQL's types — `tsvector` oid 3614, `tsquery` 3615, in `pg_type`
+with their arrays (3643, 3645), named by `format_type` and
+`to_regtype`, so a column's type is theirs in `pg_attribute` and
+`\d` —: in text format their text forms, in binary format as
+`tsvectorsend` and `tsquerysend` give them (the term count, each term's
+bytes and a zero, its position count, each position with its weight in
+the top two bits; the item count, the items in prefix order — an
+operator before its right operand, then its left —, an operand's
+weights as bits, whether a prefix, its bytes and a zero, an operator's
+code and a phrase's distance); and it takes them as parameters either
+way, a binary one checked as `tsvectorrecv` and `tsqueryrecv` check
+it (`22P03`; a query nested deeper than 10,000 refused too, its tree read
+without recursion).  `tsvectorsend(v)` and `tsquerysend(q)` give the
+binary forms in SQL, as in PostgreSQL.  Positions past 16,383, or past
+256 of a term, which nucleus's values keep, are sent as PostgreSQL would
+have kept them (capped, each once with the greater weight, the first
+256).  A `tsquery` is what its text form reads back as: PostgreSQL's
+prints `a & (b & c)` as `'a' & 'b' & 'c'`, which reads back as
+`(a & b) & c`, and a nucleus value — whose text form must read back as
+it (§M14.19's laws) — of either is that one: an `&` of `&`s, an `|` of
+`|`s, grouped from the left, which matches, ranks and headlines alike;
+its binary form is `'a' & 'b' & 'c'`'s, and the two are equal
+(PostgreSQL's are not).  nucleus's own protocol, whose sessions do not
+have the module, sends a value as any registered type's (`ncp` tag 11,
+§10: the name and the binary form, here its text form's UTF-8): the
+drivers give a value of a type they do not know (Rust `Value::Other`,
+Python and JavaScript `Ext`, Java `Ext`, C `NC_EXT`), and a text
+parameter is taken where a column holds one.
+
+*Tests:* the module's `tests/tsearch.rs` — 5,407 cases PostgreSQL 18
 answered (`tests/tsearch_pg.tsv`, by `bench/text/tsearch_pg.py`: random
 vectors and queries, phrases at distances 0–3 over every operator,
 prefixes, weights, terms without positions, and the makers' queries,
-text forms included; `ts_rank` and `ts_rank_cd` six ways a case, to
-the bit; headlines of random English with 11 sets of options, to the
-byte) alike; 400 random queries of the four makers by the
-rewrite and over stored `tsvector`s alike, without the index and
-through it; the plans served and not.  `tests/slt/03_text_search.slt`
+text forms included, the longest distances; `ts_rank` and `ts_rank_cd`
+six ways a case, to the bit; headlines of random English with 11 sets of
+options, to the byte; 305 values' binary forms, to the byte, the edges
+among them) alike; 400 random queries of the four makers by the rewrite
+and over stored `tsvector`s alike, without the index and through it, on
+a `row` table, a `column` one and one partitioned into partitions of
+each storage; the plans served and not.  `tests/wire.rs` — the types
+through rust-postgres (their oids, PostgreSQL 18's binary forms as
+parameters and results, `a & (b & c)` read as `(a & b) & c`, a malformed
+one refused) and through nucleus's protocol (the Rust driver's
+`Value::Other`, a text parameter).  `tests/slt/03_text_search.slt`
 (PostgreSQL 18's results); unit tests of the printer, the clean-up, the
-evaluation and the rewrite's text queries.
+evaluation, the rewrite's text queries, and the binary forms (round
+trips, the capped positions, what `tsvectorrecv` and `tsqueryrecv`
+refuse, the depth).
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -4682,6 +4749,19 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-11 — §M14.21 T8c, every kind of table and the wire:** the
+  text and sparse indexes on `column`, `row,column` and partitioned
+  tables — BM25's statistics a partitioned table's partitions' together
+  (`text::index::stats`), a ranking's values read from each partition's
+  index (`optimizer::ranked`), `rrf` and `convex` over a partitioned
+  table's `Append` (`hybrid::fused`); `tests/text_tables.rs`.  pg-compat's
+  `tsvector` and `tsquery` as PostgreSQL's types on its wire (oids 3614,
+  3615, `pg_type`, `format_type`), their binary forms both ways
+  (`tsearch::vector_send` / `vector_recv` / `query_send` /
+  `query_recv`), `tsvectorsend` and `tsquerysend`; `<N>` up to 16,384
+  and the clean-up's distance unchecked, as PostgreSQL's;
+  `tests/wire.rs`'s `text_search_types_through_a_real_driver` and
+  `…_through_nucleus_protocol`; `bench/text/beir.py --layout`.
 - **2026-11-11 — CI fixes:** `ext::text` and `ext::Expr` (pg-compat's
   text search named `nucleus_sql::text` and `::expr`, past the module
   boundary); `tests/vector.rs`'s few-groups spill runs until two workers

@@ -15,6 +15,7 @@ nucleus-sql = { version = "0.1.0", path = "../../crates/sql" }
 nucleus-server = { version = "0.1.0", path = "../../crates/server" }
 
 [dev-dependencies]
+nucleus-client = { version = "0.1.0", path = "../../crates/client" }
 nucleus-platform = { version = "0.1.0", path = "../../crates/platform" }
 nucleus-testkit = { version = "0.1.0", path = "../../crates/testkit" }
 postgres = "0.19.14"

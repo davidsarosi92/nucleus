@@ -701,9 +701,22 @@ characters), `english`, 1.2 / 0.75, the mean ms of a query:
 | ArguAna | 2.26 | 3.27 | 7.26 |
 | FiQA | 0.42 | 0.97 | 2.23 |
 
+On every kind of table (PLAN.md §M14.21 T8c, `--layout`): the same
+documents in a `column` table and in a table partitioned by hash of `id`
+into 4 partitions, each with its index — the same nDCG@10 (a
+partitioned table's statistics its partitions' together); `porter`, 0.9
+/ 0.4, the mean ms of a query:
+
+| BEIR | `row` | `column` | partitioned | `CREATE INDEX`, `row` / partitioned |
+|---|---:|---:|---:|---:|
+| SciFact | 0.21 | 0.19 | 0.43 | 406 / 449 ms |
+| NFCorpus | 0.13 | 0.12 | 0.32 | 336 / 334 ms |
+| FiQA | 0.49 | 0.50 | 0.81 | 770 / 1,178 ms |
+
 ```sh
 python3 bench/text/data.py beir
 NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus
+target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus --sets scifact,nfcorpus,fiqa --layout partitioned
 NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus --analyzer english --k1 1.2 --b 0.75 --filters 50,10,1 --unranked
 NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/beir.py nucleus target/release/nucleus --analyzer english --k1 1.2 --b 0.75 --snippets
 docker run -d --name nucleus-paradedb -e POSTGRES_PASSWORD=x paradedb/paradedb

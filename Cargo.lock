@@ -532,6 +532,7 @@ dependencies = [
 name = "nucleus-pg-compat"
 version = "0.1.0"
 dependencies = [
+ "nucleus-client",
  "nucleus-kv",
  "nucleus-platform",
  "nucleus-server",

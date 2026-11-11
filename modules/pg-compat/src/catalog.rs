@@ -56,6 +56,10 @@ pub const UUID: i64 = 2950;
 pub const VECTOR: i64 = 13_201;
 /// nucleus's `sparsevec`, likewise (pgvector's clients look it up too).
 pub const SPARSEVEC: i64 = 13_203;
+/// PostgreSQL's `tsvector` (this module's, §M14.21 T8).
+pub const TSVECTOR: i64 = 3614;
+/// PostgreSQL's `tsquery` (this module's).
+pub const TSQUERY: i64 = 3615;
 const ROLE: &str = "nucleus";
 const DATABASE_OID: i64 = 16_383;
 
@@ -693,6 +697,8 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Ext(t) if t.name() == "uuid" => UUID,
         DataType::Ext(t) if t.name() == "vector" => VECTOR,
         DataType::Ext(t) if t.name() == "sparsevec" => SPARSEVEC,
+        DataType::Ext(t) if t.name() == "tsvector" => TSVECTOR,
+        DataType::Ext(t) if t.name() == "tsquery" => TSQUERY,
         // Registered types PostgreSQL has no oid for are shown as text.
         // Enums too: PostgreSQL gives each its own oid, nucleus sends labels.
         DataType::Ext(_) | DataType::Enum(_) => 25,
@@ -750,6 +756,10 @@ const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
     (VECTOR + 1, "_vector", -1, "A", VECTOR, 0, 0),
     (SPARSEVEC, "sparsevec", -1, "U", 0, SPARSEVEC + 1, 0),
     (SPARSEVEC + 1, "_sparsevec", -1, "A", SPARSEVEC, 0, 0),
+    (TSVECTOR, "tsvector", -1, "U", 0, 3643, 0),
+    (3643, "_tsvector", -1, "A", TSVECTOR, 0, 0),
+    (TSQUERY, "tsquery", -1, "U", 0, 3645, 0),
+    (3645, "_tsquery", -1, "A", TSQUERY, 0, 0),
     // PostgreSQL's `bit`, which nucleus does not have: listed because
     // pgvector's clients look it up beside `vector` and require it.  A
     // value sent as `bit` is refused (no type has its oid).
@@ -828,6 +838,8 @@ pub fn format_type(oid: i64, typmod: Option<i64>) -> Option<String> {
             None => "sparsevec".into(),
         },
         1560 => "bit".into(),
+        TSVECTOR => "tsvector".into(),
+        TSQUERY => "tsquery".into(),
         _ => {
             let (_, _, _, _, elem, _, _) = TYPES.iter().find(|t| t.0 == oid)?;
             return format_type(*elem, typmod).map(|e| format!("{e}[]"));

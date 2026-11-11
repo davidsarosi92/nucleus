@@ -281,8 +281,8 @@ fn priority(q: &Q) -> i32 {
     }
 }
 
-/// The greatest distance PostgreSQL's `<N>` takes.
-const MAX_DISTANCE: u32 = 16_383;
+/// The greatest distance PostgreSQL's `<N>` takes (`MAXENTRYPOS`).
+const MAX_DISTANCE: u32 = 16_384;
 
 fn infix(q: &Q, parent: i32, right_phrase: bool, out: &mut String) {
     match q {
@@ -691,7 +691,9 @@ fn clean(q: Q) -> (Option<Q>, u32, u32) {
             let (l, r) = (Box::new(l), Box::new(r));
             match (phrase, d) {
                 (_, Some(d)) => (
-                    Some(Q::Phrase(l, r, (d + lradd + rladd).min(MAX_DISTANCE))),
+                    // PostgreSQL's clean-up adds to the distance unchecked
+                    // (`cat <16384> the <-> dog` is `<16385>`), in an int16.
+                    Some(Q::Phrase(l, r, (d + lradd + rladd).min(i16::MAX as u32))),
                     lladd,
                     rradd,
                 ),
@@ -1190,6 +1192,294 @@ pub(crate) fn query_of(v: &Value) -> Result<Option<Q>> {
     query_input(text_of(v)?)
 }
 
+// ---------------------------------------------------------------------------
+// Binary forms: PostgreSQL's `tsvectorsend` / `tsvectorrecv` and
+// `tsquerysend` / `tsqueryrecv` (its wire protocol's binary format).
+
+/// The greatest position PostgreSQL's form holds (`MAXENTRYPOS - 1`), the
+/// most positions a term (`MAXNUMPOS`), the longest term (`MAXSTRLEN`).
+const MAX_POSITION: u32 = 16_383;
+const MAX_POSITIONS: usize = 256;
+const MAX_TERM: usize = 2047;
+/// The deepest query a binary form may give (the value is a tree the
+/// server walks).
+const MAX_DEPTH: usize = 10_000;
+
+fn bad_binary(what: impl Into<String>) -> Error {
+    Error {
+        code: "22P03",
+        message: what.into(),
+        hint: None,
+    }
+}
+
+/// A cursor over a binary form.
+struct Bytes<'a>(&'a [u8]);
+
+impl<'a> Bytes<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let (a, b) = self
+            .0
+            .split_at_checked(n)
+            .ok_or_else(|| bad_binary("insufficient data left in message"))?;
+        self.0 = b;
+        Ok(a)
+    }
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()))
+    }
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    /// A string ended by a zero byte.
+    fn cstring(&mut self) -> Result<String> {
+        let n = self
+            .0
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| bad_binary("invalid string in message"))?;
+        let s = std::str::from_utf8(&self.0[..n])
+            .map_err(|_| bad_binary("invalid string in message"))?
+            .to_string();
+        self.0 = &self.0[n + 1..];
+        Ok(s)
+    }
+}
+
+/// A `tsvector`'s binary form: the term count, then each term — its bytes
+/// and a zero, its position count, each position with its weight in the
+/// top two bits.  PostgreSQL's values hold positions up to 16,383 and 256
+/// a term; nucleus's hold any (DOCS.md §8.22): past those, a value is sent
+/// as PostgreSQL would have kept it — positions capped, each once (the
+/// greater weight), the first 256.
+pub(crate) fn vector_send(v: &Value) -> Result<Vec<u8>> {
+    Ok(vector_bytes(&vector_of(v)?))
+}
+
+fn vector_bytes(tv: &TsVector) -> Vec<u8> {
+    let mut out = (tv.0.len() as u32).to_be_bytes().to_vec();
+    for (t, ps) in &tv.0 {
+        out.extend_from_slice(t.as_bytes());
+        out.push(0);
+        let mut kept: Vec<(u32, Weight)> = Vec::with_capacity(ps.len().min(MAX_POSITIONS));
+        for &(p, w) in ps {
+            let p = p.min(MAX_POSITION);
+            let full = kept.len() == MAX_POSITIONS;
+            match kept.last_mut() {
+                Some(last) if last.0 == p => last.1 = last.1.max(w),
+                _ if full => break,
+                _ => kept.push((p, w)),
+            }
+        }
+        out.extend_from_slice(&(kept.len() as u16).to_be_bytes());
+        for (p, w) in kept {
+            out.extend_from_slice(&((u16::from(w) << 14) | p as u16).to_be_bytes());
+        }
+    }
+    out
+}
+
+/// A `tsvector` from its binary form, checked as PostgreSQL checks it; its
+/// terms sorted and merged.
+pub(crate) fn vector_recv(b: &[u8]) -> Result<Value> {
+    Ok(vector_value(&vector_from(b)?))
+}
+
+fn vector_from(b: &[u8]) -> Result<TsVector> {
+    let mut r = Bytes(b);
+    let n = r.u32()?;
+    if n > (1 << 20) - 1 {
+        return Err(bad_binary("invalid size of tsvector"));
+    }
+    let mut items = Vec::with_capacity((n as usize).min(1024));
+    for _ in 0..n {
+        let term = r.cstring()?;
+        if term.is_empty() {
+            return Err(bad_binary("invalid tsvector: empty lexeme"));
+        }
+        if term.len() > MAX_TERM {
+            return Err(bad_binary("invalid tsvector: lexeme too long"));
+        }
+        let np = r.u16()?;
+        if usize::from(np) > MAX_POSITIONS {
+            return Err(bad_binary("unexpected number of tsvector positions"));
+        }
+        let mut ps: Vec<(u32, Weight)> = Vec::with_capacity(usize::from(np));
+        for _ in 0..np {
+            let x = r.u16()?;
+            let p = u32::from(x & 0x3fff);
+            if ps.last().is_some_and(|l| p <= l.0) {
+                return Err(bad_binary("position information is misordered"));
+            }
+            // nucleus's positions start at 1, as its text form's do.
+            if p == 0 {
+                return Err(bad_binary("invalid tsvector: position 0"));
+            }
+            ps.push((p, (x >> 14) as u8));
+        }
+        items.push((term, ps));
+    }
+    if !r.0.is_empty() {
+        return Err(bad_binary("incorrect binary data format"));
+    }
+    Ok(TsVector::of(items))
+}
+
+/// A `tsquery`'s binary form: the item count, then the items in prefix
+/// order — an operator before its right operand, then its left —, an
+/// operand `1`, its weights (a bit each: A 8, B 4, C 2, D 1), whether a
+/// prefix, its bytes and a zero; an operator `2`, `!` 1, `&` 2, `|` 3,
+/// `<N>` 4 and its distance.
+pub(crate) fn query_send(v: &Value) -> Result<Vec<u8>> {
+    Ok(query_bytes(query_of(v)?.as_ref()))
+}
+
+fn query_bytes(q: Option<&Q>) -> Vec<u8> {
+    fn items(q: &Q, n: &mut u32, out: &mut Vec<u8>) {
+        *n += 1;
+        match q {
+            Q::Lex {
+                word,
+                prefix,
+                weights,
+            } => {
+                out.extend_from_slice(&[1, *weights, u8::from(*prefix)]);
+                out.extend_from_slice(word.as_bytes());
+                out.push(0);
+            }
+            // Never in a value: the clean-up takes it out.
+            Q::Stop => *n -= 1,
+            Q::Not(x) => {
+                out.extend_from_slice(&[2, 1]);
+                items(x, n, out);
+            }
+            Q::And(l, r) | Q::Or(l, r) | Q::Phrase(l, r, _) => {
+                match q {
+                    Q::And(..) => out.extend_from_slice(&[2, 2]),
+                    Q::Or(..) => out.extend_from_slice(&[2, 3]),
+                    Q::Phrase(_, _, d) => {
+                        out.extend_from_slice(&[2, 4]);
+                        out.extend_from_slice(&(*d as u16).to_be_bytes());
+                    }
+                    _ => unreachable!(),
+                }
+                items(r, n, out);
+                items(l, n, out);
+            }
+        }
+    }
+    let (mut n, mut body) = (0, Vec::new());
+    if let Some(q) = q {
+        items(q, &mut n, &mut body);
+    }
+    let mut out = n.to_be_bytes().to_vec();
+    out.extend_from_slice(&body);
+    out
+}
+
+/// A `tsquery` from its binary form, checked as PostgreSQL checks it.
+pub(crate) fn query_recv(b: &[u8]) -> Result<Value> {
+    Ok(query_value(query_from(b)?.as_ref()))
+}
+
+fn query_from(b: &[u8]) -> Result<Option<Q>> {
+    enum Item {
+        Operand(String, u8, bool),
+        Operator(u8, u32),
+    }
+    let mut r = Bytes(b);
+    let size = r.u32()? as usize;
+    let mut items = Vec::with_capacity(size.min(1024));
+    for i in 0..size {
+        items.push(match r.u8()? {
+            1 => {
+                let (weights, prefix, word) = (r.u8()?, r.u8()?, r.cstring()?);
+                if weights > 0xF {
+                    return Err(bad_binary("invalid tsquery: invalid weight bitmap"));
+                }
+                if word.is_empty() {
+                    return Err(bad_binary("invalid tsquery: empty operand"));
+                }
+                if word.len() > MAX_TERM {
+                    return Err(bad_binary("invalid tsquery: operand too long"));
+                }
+                Item::Operand(word, weights, prefix != 0)
+            }
+            2 => {
+                let op = r.u8()?;
+                if !(1..=4).contains(&op) {
+                    return Err(bad_binary(format!(
+                        "invalid tsquery: unrecognized operator type {op}"
+                    )));
+                }
+                if i == size - 1 {
+                    return Err(bad_binary("invalid pointer to right operand"));
+                }
+                let d = if op == 4 { u32::from(r.u16()?) } else { 0 };
+                if d > MAX_DISTANCE {
+                    return Err(bad_binary(format!(
+                        "invalid tsquery: invalid phrase distance {d}"
+                    )));
+                }
+                Item::Operator(op, d)
+            }
+            t => {
+                return Err(bad_binary(format!("unrecognized tsquery node type: {t}")));
+            }
+        });
+    }
+    if !r.0.is_empty() {
+        return Err(bad_binary("incorrect binary data format"));
+    }
+    // Prefix order read backwards: each operand's tree on a stack, each
+    // operator taking its right operand, then its left, off it — no
+    // recursion however deep the query.
+    let mut stack: Vec<(Q, usize)> = Vec::new();
+    let pop = |stack: &mut Vec<(Q, usize)>| {
+        stack
+            .pop()
+            .ok_or_else(|| bad_binary("malformed tsquery: operand not found"))
+    };
+    for item in items.into_iter().rev() {
+        let node = match item {
+            Item::Operand(word, weights, prefix) => (
+                Q::Lex {
+                    word,
+                    prefix,
+                    weights,
+                },
+                1,
+            ),
+            Item::Operator(1, _) => {
+                let (x, d) = pop(&mut stack)?;
+                (Q::Not(Box::new(x)), d + 1)
+            }
+            Item::Operator(op, dist) => {
+                let (r, dr) = pop(&mut stack)?;
+                let (l, dl) = pop(&mut stack)?;
+                let (l, r) = (Box::new(l), Box::new(r));
+                let q = match op {
+                    2 => Q::And(l, r),
+                    3 => Q::Or(l, r),
+                    _ => Q::Phrase(l, r, dist),
+                };
+                (q, dl.max(dr) + 1)
+            }
+        };
+        if node.1 > MAX_DEPTH {
+            return Err(bad_binary("invalid tsquery: nested too deeply"));
+        }
+        stack.push(node);
+    }
+    if stack.len() > 1 {
+        return Err(bad_binary("malformed tsquery: extra nodes"));
+    }
+    Ok(stack.pop().map(|(q, _)| q))
+}
+
 /// `tsvector`.
 struct TsVectorType;
 
@@ -1283,6 +1573,47 @@ impl ScalarFunction for ToTsvector {
             config(cfg)?.as_ref(),
             text,
         )))
+    }
+}
+
+/// `tsvectorsend(tsvector)`, `tsquerysend(tsquery)`: a value's binary
+/// form, as PostgreSQL's wire protocol carries it.
+struct SendFn {
+    query: bool,
+}
+
+impl ScalarFunction for SendFn {
+    fn name(&self) -> &str {
+        if self.query {
+            "tsquerysend"
+        } else {
+            "tsvectorsend"
+        }
+    }
+    fn arity(&self) -> RangeInclusive<usize> {
+        1..=1
+    }
+    fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
+        let ty = if self.query {
+            tsquery_type()
+        } else {
+            tsvector_type()
+        };
+        Ok(Signature::new(
+            vec![Arg::Convert(DataType::Ext(ty))],
+            Returns::Type(Some(DataType::Bytea)),
+        ))
+    }
+    fn volatility(&self) -> Volatility {
+        Volatility::Immutable
+    }
+    fn call(&self, _: &CallContext<'_>, args: &[Value]) -> Result<Value> {
+        let b = if self.query {
+            query_send(&args[0])?
+        } else {
+            vector_send(&args[0])?
+        };
+        Ok(Value::Bytea(b.into()))
     }
 }
 
@@ -1452,6 +1783,8 @@ pub(crate) fn register(r: &mut Registry) -> Result<()> {
     r.add_type(Arc::new(TsQueryType))?;
     r.add_alias("regconfig", DataType::Text)?;
     r.add_function(&["to_tsvector"], Arc::new(ToTsvector))?;
+    r.add_function(&["tsvectorsend"], Arc::new(SendFn { query: false }))?;
+    r.add_function(&["tsquerysend"], Arc::new(SendFn { query: true }))?;
     for m in [
         Maker::ToTsquery,
         Maker::Plain,
@@ -1526,6 +1859,68 @@ mod tests {
         for bad in ["a b", "a &", "(a", "a)", "& a", ":a"] {
             assert!(query_input(bad).is_err(), "{bad}");
         }
+    }
+
+    /// PostgreSQL's binary forms both ways: what a value sends reads back
+    /// as it; what `tsvectorrecv` / `tsqueryrecv` refuse is refused.
+    #[test]
+    fn binary_forms() {
+        for t in ["", "a", "'a b':1,3A 'it''s' z:2B,7C", "x:1,2,3 y:16383D"] {
+            let v = TsVector::input(t).unwrap();
+            assert_eq!(vector_from(&vector_bytes(&v)).unwrap(), v, "{t}");
+        }
+        // Past PostgreSQL's limits: capped as it would have kept them.
+        let v = TsVector::input("a:16383,16384,20000B").unwrap();
+        assert_eq!(
+            vector_from(&vector_bytes(&v)).unwrap(),
+            TsVector::input("a:16383B").unwrap()
+        );
+        for t in [
+            "",
+            "a",
+            "'a' & !( 'b' | 'c':*AB )",
+            "( 'a' <-> 'b' ) <2> 'c' & 'd' <-> ( 'e' <-> 'f' )",
+            "a <16384> b",
+            "!!a",
+        ] {
+            let q = query_input(t).unwrap();
+            assert_eq!(query_from(&query_bytes(q.as_ref())).unwrap(), q, "{t}");
+        }
+        let hex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        for bad in [
+            "00000001",                   // a term missing
+            "000000010000",               // an empty term
+            "00000001610000020002000100", // positions misordered
+            "0000000161000001000000",     // position 0
+            "0000000161000001000100",     // trailing bytes
+        ] {
+            assert!(vector_from(&hex(bad)).is_err(), "{bad}");
+        }
+        for bad in [
+            "000000010202",                         // an operator, no operands
+            "000000010110006100",                   // weights past 0xF
+            "0000000201000061000100006200",         // two operands, no operator
+            "00000001020500",                       // no such operator
+            "000000030204400101000061000100006200", // distance 16385
+        ] {
+            assert!(query_from(&hex(bad)).is_err(), "{bad}");
+        }
+        // As deep as the server walks, and no deeper.
+        let deep = |n: usize| {
+            let mut b = (n as u32 + 1).to_be_bytes().to_vec();
+            for _ in 0..n {
+                b.extend_from_slice(&[2, 1]);
+            }
+            b.extend_from_slice(&[1, 0, 0, b'a', 0]);
+            b
+        };
+        assert!(query_from(&deep(MAX_DEPTH - 1)).is_ok());
+        assert!(query_from(&deep(MAX_DEPTH)).is_err());
     }
 
     #[test]

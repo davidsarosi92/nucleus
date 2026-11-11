@@ -379,9 +379,9 @@ fn ranked(plan: Plan, st: &Stats) -> Plan {
         _ => 10.0,
     };
     // The ranked function's value read from the index where it gives it
-    // (§M14.21 T5c): computed by a projection, of one table's scan (each
-    // partition's would have to give it).
-    let values = exprs.is_some() && !matches!(below, Plan::Append { .. });
+    // (§M14.21 T5c): computed by a projection — of a partitioned table's
+    // scans where each partition's gives it.
+    let values = exprs.is_some();
     let want = Want {
         column,
         function: f.name().to_string(),
@@ -396,10 +396,23 @@ fn ranked(plan: Plan, st: &Stats) -> Plan {
     // rows, the sort and the limit above taking the first of them.
     let valued = match below {
         Plan::Append { inputs, .. } => {
-            for p in inputs {
-                rank_scan(p, &want, st);
+            let before = want.call.is_some().then(|| inputs.clone());
+            let at: Vec<Option<usize>> =
+                inputs.iter_mut().map(|p| rank_scan(p, &want, st)).collect();
+            match (at.first().copied().flatten(), before) {
+                (Some(a), _) if at.iter().all(|x| *x == Some(a)) => Some(a),
+                // Not every partition gives the value (its rows would be
+                // of another width): none does.
+                (_, Some(before)) => {
+                    *inputs = before;
+                    let want = Want { call: None, ..want };
+                    for p in inputs {
+                        rank_scan(p, &want, st);
+                    }
+                    None
+                }
+                _ => None,
             }
-            None
         }
         other => rank_scan(other, &want, st),
     };

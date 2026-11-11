@@ -99,6 +99,12 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         o if i64::from(o) == crate::catalog::SPARSEVEC => {
             DataType::Ext(TypeRef::named("sparsevec")?)
         }
+        o if i64::from(o) == crate::catalog::TSVECTOR => {
+            DataType::Ext(crate::tsearch::tsvector_type())
+        }
+        o if i64::from(o) == crate::catalog::TSQUERY => {
+            DataType::Ext(crate::tsearch::tsquery_type())
+        }
         BOOL => DataType::Bool,
         INT2 => DataType::SmallInt,
         INT4 => DataType::Integer,
@@ -730,6 +736,14 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
             }
             out
         }
+        // PostgreSQL's binary tsvector and tsquery (`tsvectorsend`,
+        // `tsquerysend`).
+        (Value::Ext(t, _), _) if t.name() == "tsvector" => {
+            crate::tsearch::vector_send(v).unwrap_or_default()
+        }
+        (Value::Ext(t, _), _) if t.name() == "tsquery" => {
+            crate::tsearch::query_send(v).unwrap_or_default()
+        }
         (Value::Bool(b), _) => vec![u8::from(*b)],
         // PostgreSQL's binary bytea is its bytes.
         (Value::Bytea(b), _) => b.to_vec(),
@@ -889,6 +903,12 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                     .map(|i| Ok((u64::from(word(3 + i)?), f32::from_bits(word(3 + n + i)?))))
                     .collect::<Result<Vec<_>, Error>>()?;
                 nucleus_sql::ext::sparse::Sparse::checked(u64::from(dims), pairs)?.value()
+            }
+            (Some(DataType::Ext(t)), _) if t.name() == "tsvector" => {
+                crate::tsearch::vector_recv(bytes)?
+            }
+            (Some(DataType::Ext(t)), _) if t.name() == "tsquery" => {
+                crate::tsearch::query_recv(bytes)?
             }
             (Some(DataType::Array(elem)), _) => {
                 let int = |at: usize| -> Result<i32, Error> {

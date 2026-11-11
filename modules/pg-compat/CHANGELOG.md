@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `tsvector` and `tsquery` on the wire as PostgreSQL's types (oids 3614,
+  3615; `pg_type` rows with their arrays, `format_type`), in binary
+  format as `tsvectorsend` / `tsquerysend` give them and taken as
+  `tsvectorrecv` / `tsqueryrecv` take them (checked against 305 of
+  PostgreSQL 18's); `tsvectorsend()` and `tsquerysend()` in SQL.  They
+  were sent as `text` (oid 25).
+- `<N>` takes distances up to 16,384, and the clean-up's distance across
+  stop words is not capped, as PostgreSQL's (`cat <16384> the <-> dog`
+  is `<16385>`; 16,383 before).
+- The rewrite to a text index on a `column` table and a partitioned one.
 - `ts_rank` and `ts_rank_cd` (`[weights,] vector, query
   [, normalization]`) as PostgreSQL computes them, to the bit;
   `ts_headline([cfg,] document, query [, options])` as its default

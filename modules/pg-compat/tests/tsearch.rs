@@ -133,9 +133,31 @@ fn same(s: &mut Session, step: &str) -> (usize, usize, usize) {
 
 #[test]
 fn the_rewrite_finds_what_the_values_do() {
+    rewritten_on(&["CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, tv tsvector)"]);
+}
+
+/// The same on a `column` table, and on a table partitioned into `row`,
+/// `column` and `row,column` partitions (each partition's index serves).
+#[test]
+fn on_every_kind_of_table() {
+    rewritten_on(&[
+        "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, tv tsvector) WITH (storage = column)",
+    ]);
+    rewritten_on(&[
+        "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, tv tsvector) PARTITION BY RANGE (id)",
+        "CREATE TABLE docs_a PARTITION OF docs FOR VALUES FROM (MINVALUE) TO (100)",
+        "CREATE TABLE docs_b PARTITION OF docs FOR VALUES FROM (100) TO (250) \
+         WITH (storage = column)",
+        "CREATE TABLE docs_c PARTITION OF docs FOR VALUES FROM (250) TO (MAXVALUE) \
+         WITH (storage = 'row,column')",
+    ]);
+}
+
+fn rewritten_on(ddl: &[&str]) {
     let mut s = session();
-    s.execute("CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, tv tsvector)")
-        .unwrap();
+    for sql in ddl {
+        s.execute(sql).unwrap();
+    }
     let mut r = Lcg(3);
     let insert = |s: &mut Session, r: &mut Lcg, ids: std::ops::Range<i64>| {
         let values: Vec<String> = ids
@@ -201,14 +223,15 @@ fn the_rewrite_finds_what_the_values_do() {
 /// against random queries — phrases at distances 0 to 3 over operators,
 /// negations, prefixes, weights — and the makers' queries, their text
 /// forms too; `ts_rank` and `ts_rank_cd`, normalized and weighted, to
-/// the bit; `ts_headline`'s headlines, its options too.
+/// the bit; `ts_headline`'s headlines, its options too; the binary forms
+/// PostgreSQL's wire protocol carries (`tsvectorsend`, `tsquerysend`).
 #[test]
 fn as_postgresql_answers() {
     let mut s = session();
     let lit = |x: &str| format!("'{}'", sql_text(x));
     let one = |s: &mut Session, sql: &str| rows(s, sql).join(" | ");
     let mut wrong = Vec::new();
-    let (mut ranked, mut covered, mut headlined) = (0, 0, 0);
+    let (mut ranked, mut covered, mut headlined, mut sent) = (0, 0, 0, 0);
     let fixture = include_str!("tsearch_pg.tsv");
     for line in fixture.lines() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -287,6 +310,24 @@ fn as_postgresql_answers() {
                     ));
                 }
             }
+            "send" => {
+                let got = one(
+                    &mut s,
+                    &format!(
+                        "SELECT tsvectorsend({}::tsvector), tsquerysend({}::tsquery)",
+                        lit(f[1]),
+                        lit(f[2])
+                    ),
+                );
+                let want = format!("{} {}", f[3], f[4]);
+                sent += 1;
+                if got != want {
+                    wrong.push(format!(
+                        "sent {:?}, {:?}: {got}, PostgreSQL {want}",
+                        f[1], f[2]
+                    ));
+                }
+            }
             other => panic!("{other}"),
         }
     }
@@ -295,7 +336,8 @@ fn as_postgresql_answers() {
         "{ranked}, {covered} ranked above 0"
     );
     assert!(headlined > 300, "{headlined} headlines mark a word");
-    assert!(fixture.lines().count() >= 5100);
+    assert!(sent > 300, "{sent} binary forms");
+    assert!(fixture.lines().count() >= 5400);
     assert!(
         wrong.is_empty(),
         "{} of {}:\n{}",

@@ -125,6 +125,21 @@ fn scan_of(p: &mut Plan) -> Option<&mut Plan> {
     }
 }
 
+/// The scans of `p`: its one, or a partitioned table's — each partition's
+/// (§8.16) — where every input of its `Append` is one.
+fn scans_of(p: &mut Plan) -> Option<Vec<&mut Plan>> {
+    if !matches!(p, Plan::Append { .. }) {
+        return scan_of(p).map(|s| vec![s]);
+    }
+    let Plan::Append { inputs, .. } = p else {
+        unreachable!()
+    };
+    if inputs.is_empty() {
+        return None;
+    }
+    inputs.iter_mut().map(scan_of).collect()
+}
+
 /// The literal rows a limit and an offset take, where known.
 fn rows_taken(limit: &Expr, offset: Option<&Expr>) -> Option<i64> {
     let n = |e: &Expr| match e {
@@ -170,8 +185,9 @@ fn window(func: WinFunc, args: Vec<Expr>, by: Expr, desc: bool) -> WindowFunc {
     }
 }
 
-/// `ORDER BY rrf(…) | convex(…) LIMIT k` over one table's scan, as the
-/// plan of its candidates ([module docs](self)); any other plan as it is.
+/// `ORDER BY rrf(…) | convex(…) LIMIT k` over one table's scan — a
+/// partitioned table's, its partitions' —, as the plan of its candidates
+/// ([module docs](self)); any other plan as it is.
 pub fn fused(plan: Plan) -> Plan {
     let mut plan = crate::optimizer::map_children(plan, &fused);
     let Plan::Limit {
@@ -216,7 +232,9 @@ pub fn fused(plan: Plan) -> Plan {
     };
     let alpha = (kind == Kind::Convex).then(|| args[2].clone());
     let mut base = (**below).clone();
-    let Some(Plan::Scan { table, .. }) = scan_of(&mut base) else {
+    // A partitioned table's partitions have its columns and key.
+    let Some(Plan::Scan { table, .. }) = scans_of(&mut base).and_then(|s| s.into_iter().next())
+    else {
         return plan;
     };
     let pk = table.primary_key.clone();
@@ -280,14 +298,17 @@ pub fn fused(plan: Plan) -> Plan {
         let mut scan = base.clone();
         if let Expr::Call(g, a) = r
             && let Some(cond) = g.found(a)
-            && let Some(Plan::Scan { filter, .. }) = scan_of(&mut scan)
         {
-            let mut conds = Vec::new();
-            if let Some(f) = filter.take() {
-                crate::binder::conjuncts(f, &mut conds);
+            for s in scans_of(&mut scan).into_iter().flatten() {
+                if let Plan::Scan { filter, .. } = s {
+                    let mut conds = Vec::new();
+                    if let Some(f) = filter.take() {
+                        crate::binder::conjuncts(f, &mut conds);
+                    }
+                    conds.push(cond.clone());
+                    *filter = crate::binder::conjunction(conds);
+                }
             }
-            conds.push(cond);
-            *filter = crate::binder::conjunction(conds);
         }
         let mut with = cols(n);
         with.push(r.clone());

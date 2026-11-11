@@ -277,8 +277,8 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT` done | ◐ |
-| | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
+| | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
+| | M14.22 | **Next:** Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
@@ -5134,7 +5134,7 @@ latency on a public dataset; and filtered searches keep that recall at
 filter selectivities from 50 % down to 0.01 %, always returning `k` rows
 when `k` matching rows exist.
 
-### §M14.21 — Full-text and hybrid search ◐
+### §M14.21 — Full-text and hybrid search ✅
 
 Retrieval for AI applications (RAG) needs words and meaning together:
 vectors alone miss exact names, codes and rare terms; keywords alone miss
@@ -6251,6 +6251,100 @@ forward index, or `score()` by the rewrite, PostgreSQL's ranking
 dropped); the other `tsvector` functions (`length`, `setweight`,
 `strip`, `ts_rewrite`, `ts_stat`, `ts_debug`); FiQA ranked (its any
 queries match 16,000 rows each: minutes a round).
+
+**T8c — every kind of table; the types on the wire** (done 2026-11-11).
+Prior art: PostgreSQL's partitioned indexes (`CREATE INDEX` on the
+parent made on each partition; an ordered `LIMIT` over a `Merge Append`
+of each partition's index scan); Elasticsearch's shards, which score by
+their own statistics unless asked for `dfs_query_then_fetch` — the
+term statistics gathered from every shard first, so a document scores
+as in one index; PostgreSQL's `tsvectorsend` / `tsvectorrecv` and
+`tsquerysend` / `tsqueryrecv` (`tsvector.c`, `tsquery.c`: a term's
+bytes and a zero, `WordEntryPos`'s weight in the top two bits; the
+items in prefix order, right operand first, `findoprnd`'s checks) and
+rust-postgres's `TS_VECTOR` / `TSQUERY`.  Found: a text and a sparse
+index on a `column` or `row,column` table already worked (an index is
+told every row written, whatever the storage), and on a partitioned
+table each partition's index served `@@` and ranked its first `k` —
+but BM25's statistics were read from the partitioned table's own index,
+which holds no rows (scores 0.22 for 0.56), and `rrf` / `convex` over a
+partitioned table were left to the rows (the fusion's rewrite took one
+table's scan).  Taken:
+
+1. **BM25's statistics a partitioned table's**: documents, length and
+   each term's documents summed over its partitions' indexes
+   (`text::index::stats`; each partition's index of the same definition
+   — method, columns, operator classes, options —, looked for past the
+   table's place when the partition has indexes of its own before it):
+   Elasticsearch's DFS always, at no cost — the statistics are each
+   index's, read in the statement's snapshot, no round of its own.  A
+   row scores as it would in one table, whichever partition holds it.
+2. **The scores read from each partition's index**: the ranking of a
+   partitioned table asks each partition's index for its values (`with
+   values`, T5c) and reads them where every partition's gives them (the
+   rows of an `Append` are of one width), else none does.  Before,
+   each partition's first `k` rows' scores were computed again on their
+   texts: SciFact 3.37 ms a query, NFCorpus 2.46, FiQA 4.19; after, 0.43,
+   0.32 and 0.81.
+3. **`rrf` and `convex` over a partitioned table**: `hybrid::fused`
+   takes an `Append` of scans as it takes one scan — each list the
+   partitions' first rows by their indexes, the condition of a `found`
+   ranking on each.
+4. **`tsvector` and `tsquery` as PostgreSQL's types on its wire**: oids
+   3614 and 3615 (and `pg_type`'s rows, their arrays', `format_type`'s
+   names — `\d` showed `text`), binary format both ways as
+   PostgreSQL's send and receive functions, checked as they check
+   (`22P03`), and `tsvectorsend()` / `tsquerysend()` in SQL.  A query's
+   tree is read from its prefix order backwards with a stack — no
+   recursion, a depth bound (10,000) because the server walks the tree.
+   Found by the fixture: `<N>` takes 16,384 (`MAXENTRYPOS`), not 16,383,
+   and PostgreSQL's clean-up adds the distance across stop words
+   unchecked (`cat <16384> the <-> dog` is `<16385>`): both as it.
+5. **nucleus's own protocol**: its sessions do not have the module, and
+   a value is sent as any registered type's (tag 11: its name and its
+   binary form, the text form for these two): the drivers give it as a
+   type they do not know (`Value::Other`, `Ext`), and a text parameter
+   is taken where a column holds one.  Typing `tsvector` in nucleus's
+   drivers was not taken: a module's type, PostgreSQL's (principle 11),
+   which nucleus's own text search (`body @@ q` on `text`) does not
+   need.
+
+Departure, documented: a `tsquery` is what its text form reads back as.
+PostgreSQL prints `a & (b & c)` as `'a' & 'b' & 'c'`, which reads back
+as `(a & b) & c`, a value PostgreSQL holds unequal to the first; a
+nucleus type's text form must read back as its value (§M14.19's laws), so
+nucleus's `tsquery` of either is the second — the same matches, ranks
+and headlines (`&` and `|` are associative; ranking sorts the operands),
+its binary form that of `'a' & 'b' & 'c'`.  Tested:
+`tests/text_tables.rs` (a `row`, a `column`, a `row,column` table and
+one partitioned into partitions of each storage, the same writes —
+loads, inserts, updates, deletes, rows moved between partitions, a seal
+— and at each step eight queries' rows, first seven by score under three
+filters, highlights and snippets, the first by `<#>`, `rrf` and `convex`
+alike to the bit, each served by the indexes; without the statistics'
+sum the partitioned table's scores differ from the first query on);
+pg-compat's rewrite test on a `column` and a partitioned table; 305 of
+PostgreSQL 18's binary forms (`tsearch_pg.tsv`: random values and the
+edges — positions past 16,383 and 256, quoted terms, the longest
+distance) alike to the byte; rust-postgres sending and reading them
+binary; the Rust driver over `ncp`.
+
+Measured (`bench/text/beir.py --layout`, `porter`, k1 0.9, b 0.4, the
+mean ms of a query through the protocol; the nDCG@10 the same in each):
+
+| | `row` | `column` | partitioned (hash, 4) | `CREATE INDEX`, `row` / partitioned |
+|---|---:|---:|---:|---:|
+| SciFact | 0.21 | 0.19 | 0.43 | 406 / 449 ms |
+| NFCorpus | 0.13 | 0.12 | 0.32 | 336 / 334 ms |
+| FiQA | 0.49 | 0.50 | 0.81 | 770 / 1,178 ms |
+
+A partitioned table's query is four searches, each with its own fixed
+cost, and the statistics read by each partition's scan (eight reads of
+four indexes' statistics a query, an uncorrelated subquery each).  Not
+taken yet: one read of the statistics a statement; a `Merge Append` of
+the partitions' first rows (the sort above has `P · k` of them, few);
+the partitions' indexes built at once (FiQA's four one after another,
+each on every core: 1.18 s against 0.77).
 
 ### §M14.22 — Embeddings in the database ⬜
 
