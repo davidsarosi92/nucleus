@@ -3479,7 +3479,11 @@ and its bytes in the text.  The same text gives the same terms, always.
 Analyzers are **registered** (principle 12) and kept for the process, as
 index methods are: `text::add`, a module's through
 `Registry::add_analyzer`; `text::named(name)` finds one (`42704`
-otherwise); `nc_catalog.text_analyzers` lists them.  The built-ins
+otherwise); `nc_catalog.text_analyzers` lists them.  A module reaches
+them through `ext::text` (`named`, `tokens`, `Analyzer`, `Token`,
+`register_builtins`), and the bound expressions `ScalarFunction::rewrite`
+and `found` read and give as `ext::Expr` — `nucleus_sql::ext` is all of
+the SQL layer a module names (§M14.19).  The built-ins
 (`text::register_builtins`, once a process):
 
 | Name | Does |
@@ -4678,6 +4682,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-11 — CI fixes:** `ext::text` and `ext::Expr` (pg-compat's
+  text search named `nucleus_sql::text` and `::expr`, past the module
+  boundary); `tests/vector.rs`'s few-groups spill runs until two workers
+  take morsels (a single worker's groups fit: on a runner of few cores
+  one may take them all).
 - **2026-11-11 — §M14.21 T8b, PostgreSQL's ranking and headlines in
   pg-compat:** `ts_rank`, `ts_rank_cd` (`tsrank.rs`, with a port of
   PostgreSQL's `qsort`) and `ts_headline` (`tsheadline.rs`) as

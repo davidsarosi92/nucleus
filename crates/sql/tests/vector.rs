@@ -230,22 +230,26 @@ fn many_groups_past_work_mem_spill_on_the_workers() {
             "{storage}: an overflow"
         );
         // Few groups, each met by every morsel (in an order turning by one
-        // each round): a morsel done past half of work_mem writes its
+        // each round): a worker done past half of work_mem writes its
         // groups to scratch, and the rows fit in memory — so they come in
-        // the order a single pass first sees them.
+        // the order a single pass first sees them.  A worker's groups fit
+        // in that half, two workers' do not: the groups spill when two
+        // workers take morsels, which the scheduler decides (on a machine
+        // of few cores one may take them all) — so run until they do.
         let mut mid = session(&db, 1024);
         mid.execute("SET parallel_workers = 4; SET work_mem = '256kB'")
             .unwrap();
         let few = "SELECT (id % 1999 + id / 1999) % 1999, count(*) FROM g GROUP BY 1";
+        let want = outcome(&mut one, few);
         let at = nucleus_sql::vector::spilled_groupings();
-        assert_eq!(
-            outcome(&mut mid, few),
-            outcome(&mut one, few),
-            "{storage}: {few}"
-        );
+        let mut runs = 0;
+        while nucleus_sql::vector::spilled_groupings() == at && runs < 50 {
+            assert_eq!(outcome(&mut mid, few), want, "{storage}: {few}");
+            runs += 1;
+        }
         assert!(
             nucleus_sql::vector::spilled_groupings() > at,
-            "{storage}: few groups spilled"
+            "{storage}: few groups spilled in {runs} runs"
         );
         assert!(
             nucleus_sql::vector::spilled_groupings() - before >= queries.len() as u64,

@@ -26,12 +26,11 @@
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
-use nucleus_sql::expr::Expr;
+use nucleus_sql::ext::text::{self as nt, Analyzer};
 use nucleus_sql::ext::{
-    Arg, ArgInfo, CallContext, CanonicalBytes, DataType, Equality, Error, FnRef, Hashing, Registry,
-    Result, Returns, ScalarFunction, Signature, Type, TypeRef, Value, Volatility,
+    Arg, ArgInfo, CallContext, CanonicalBytes, DataType, Equality, Error, Expr, FnRef, Hashing,
+    Registry, Result, Returns, ScalarFunction, Signature, Type, TypeRef, Value, Volatility,
 };
-use nucleus_sql::text::{self as nt, Analyzer};
 
 /// The configuration of `to_tsvector(text)` and `text @@ tsquery`.
 pub(crate) const DEFAULT_CONFIG: &str = "simple";

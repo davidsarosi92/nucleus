@@ -17,11 +17,11 @@
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
+use nucleus_sql::ext::text as nt;
 use nucleus_sql::ext::{
     Arg, ArgInfo, CallContext, DataType, Error, Registry, Result, Returns, ScalarFunction,
     Signature, Value, Volatility,
 };
-use nucleus_sql::text as nt;
 
 use crate::tsearch::{
     DEFAULT_CONFIG, Phr, Q, Source, Tri, config, execute, output_positions, phrase, query_of,

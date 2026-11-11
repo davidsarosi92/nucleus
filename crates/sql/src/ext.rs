@@ -97,6 +97,16 @@ pub mod sparse {
     pub use crate::sparse::{Sparse, data_type};
 }
 
+/// Text analysis as modules see it ([`crate::text`]): an analyzer by
+/// name, the terms it gives a text at their positions and bytes.
+pub mod text {
+    pub use crate::text::{Analyzer, Token, named, register_builtins, tokens};
+}
+
+/// A bound expression ([`crate::expr`]), as [`ScalarFunction::rewrite`]
+/// and [`ScalarFunction::found`] read and give them.
+pub use crate::expr::Expr;
+
 /// Who the current statement runs as ([`crate::access`]).
 pub use crate::access::{Context, Who, current as current_who};
 /// Records a login refused before a session could be had ([`crate::audit`]).
