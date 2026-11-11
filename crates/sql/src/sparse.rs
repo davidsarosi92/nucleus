@@ -11,8 +11,9 @@
 //! distance functions, over the positions both have, merged; casts to and
 //! from `vector`.  `sparsevec(n)` checks the dimensions on every write.
 //!
-//! Searched exactly (`ORDER BY v <#> q LIMIT k`, a scan and a top-k); an
-//! index for them is an inverted one, §M14.21's.
+//! Searched exactly (`ORDER BY v <#> q LIMIT k`, a scan and a top-k), or
+//! by the inverted index `USING sparse` ([`crate::text::index::sparse`],
+//! §M14.21 T7b), which ranks `<#>` exactly too.
 
 use std::cmp::Ordering;
 use std::sync::Arc;

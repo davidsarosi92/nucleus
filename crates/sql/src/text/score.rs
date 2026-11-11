@@ -47,6 +47,11 @@ pub(crate) fn fixed(x: f64) -> i64 {
     (x * UNIT).round() as i64
 }
 
+/// A product past this, in a [`Scorer::dot`], could make a sum of a
+/// sparse vector's 16,000 leave what units hold (2^63 of them: 2^31) —
+/// the index does not rank by them.
+const LIMIT: f64 = 65_536.0;
+
 /// A score in units as a number.
 pub(crate) fn of_fixed(x: i64) -> f64 {
     x as f64 / UNIT
@@ -102,10 +107,12 @@ pub(crate) trait Text {
     fn positions(&self, l: usize) -> &[u32];
 }
 
-/// A text analyzed: its length, and each leaf's positions.
+/// A text analyzed: its length, and each leaf's positions — and a
+/// weighted document's frequencies, its weights ([`Scorer::dot`]).
 pub(crate) struct Matched<'a> {
     pub(crate) len: f64,
     pub(crate) hits: &'a [Vec<u32>],
+    pub(crate) freqs: Option<&'a [u32]>,
 }
 
 impl Text for Matched<'_> {
@@ -113,7 +120,10 @@ impl Text for Matched<'_> {
         self.len
     }
     fn freq(&self, l: usize) -> u32 {
-        self.hits[l].len() as u32
+        match self.freqs {
+            Some(f) => f[l],
+            None => self.hits[l].len() as u32,
+        }
     }
     fn positions(&self, l: usize) -> &[u32] {
         &self.hits[l]
@@ -128,6 +138,12 @@ pub(crate) struct Scorer<'q> {
     idf: Vec<f64>,
     avgdl: f64,
     p: Params,
+    /// A sparse vector's inner product instead (§M14.21 T7b): each leaf's
+    /// weight in the query, a document's its frequency
+    /// ([`super::index::segment::weight_bits`]).
+    dot: Option<Vec<f64>>,
+    /// Whether a product fell outside what units hold (`dot` only).
+    pub(crate) overflow: std::sync::atomic::AtomicBool,
 }
 
 impl<'q> Scorer<'q> {
@@ -138,6 +154,23 @@ impl<'q> Scorer<'q> {
             idf: st.df.iter().map(|&df| st.idf(df)).collect(),
             avgdl: avgdl.max(f64::MIN_POSITIVE),
             p,
+            dot: None,
+            overflow: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// The inner product of a query of leaves weighing `weights` with a
+    /// weighted document's: each leaf's weight times the document's, in
+    /// units (each product rounded once; an index's sum of them within
+    /// half a unit a leaf of the exact one).
+    pub(crate) fn dot(q: &'q Query, weights: Vec<f64>) -> Self {
+        Scorer {
+            q,
+            idf: vec![0.0; q.leaves.len()],
+            avgdl: 1.0,
+            p: DEFAULT,
+            dot: Some(weights),
+            overflow: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -161,6 +194,14 @@ impl<'q> Scorer<'q> {
     /// [`Scorer::leaf`] before it is rounded to units: what bounds of it
     /// are computed from.
     pub(crate) fn leaf_f64(&self, l: usize, f: u32, norm: f64) -> f64 {
+        if let Some(w) = &self.dot {
+            let x = w[l] * f64::from(super::index::segment::of_weight_bits(f));
+            if x.abs() >= LIMIT {
+                self.overflow
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            return x;
+        }
         match self.q.leaves[l] {
             Leaf::Exact(_) => {
                 let f = f64::from(f);
@@ -450,6 +491,7 @@ impl ScalarFunction for TextScore {
         let m = Matched {
             len: f64::from(n),
             hits: hits.of(),
+            freqs: None,
         };
         let s = Scorer::new(&q, &stats, Params { k1: *k1, b: *b });
         Ok(Value::Float(s.score(&m)))
@@ -480,6 +522,7 @@ mod tests {
             &Matched {
                 len: 5.0,
                 hits: &hits,
+                freqs: None,
             },
             &st(10.0, 100.0, &[2.0]),
             Params { k1: 1.2, b: 0.75 },
@@ -494,7 +537,8 @@ mod tests {
                 &q,
                 &Matched {
                     len: 5.0,
-                    hits: &none
+                    hits: &none,
+                    freqs: None,
                 },
                 &st(10.0, 100.0, &[2.0]),
                 DEFAULT
@@ -510,7 +554,16 @@ mod tests {
         let stats = st(100.0, 1000.0, &[10.0, 20.0, 0.0]);
         let one = |q: &str, hits: &[Vec<u32>]| {
             let q = Query::parse(q, a.as_ref()).unwrap();
-            score(&q, &Matched { len: 10.0, hits }, &stats, DEFAULT)
+            score(
+                &q,
+                &Matched {
+                    len: 10.0,
+                    hits,
+                    freqs: None,
+                },
+                &stats,
+                DEFAULT,
+            )
         };
         let a1 = one("a", &[vec![0]]);
         let b1 = one("a b", &[vec![], vec![1]]);

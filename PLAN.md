@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF) done | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW) done | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -6037,6 +6037,65 @@ pgvector's at the same `m`, `ef_construction` and `ef_search` 40 —
 NFCorpus 0.3163 against 0.3339 (exact 0.3375; ours at `ef_search` 100,
 0.3355), FiQA 0.3669 against 0.3730, SciFact 0.7126 against 0.7161
 (exact 0.7203) — §M14.12's to look into, not this step's.
+
+**T7b — the sparse vector index** (done 2026-11-10).  Prior art:
+learned sparse retrieval (SPLADE: Formal et al. 2021, SPLADE++ 2022) is
+an inverted index's — Elasticsearch's `sparse_vector` and OpenSearch's
+neural sparse search store a token's weight as a Lucene term frequency
+(`FeatureField`, its value in a float's high bits) and rank by block-max
+WAND over impacts; Vespa's `wand`, Milvus's `SPARSE_INVERTED_INDEX` /
+`SPARSE_WAND`, Seismic (Bruch et al., SIGIR 2024) prune further,
+approximately; pgvector indexes `sparsevec` with HNSW (at most 1,000
+non-zero, approximate).  Taken: Elasticsearch's idea on T4–T5b's
+storage, kept exact:
+
+1. **`USING sparse (sv)`** on a `sparsevec` column: the text index's
+   store with *weighted* documents — a dimension a term (eight hex
+   digits), a weight the term's frequency as the `f32`'s bits in the
+   numbers' order (`segment::weight_bits`: exact, not quantized, so a
+   block's impacts give its greatest weight), no positions.  The delta
+   marks a weighted term by 0 positions (a text's term has one at
+   least: old deltas read as they did); merges copy weights.
+2. **`Scorer::dot`**: each leaf's query weight times a posting's, in
+   T5b's units; the same block-max MaxScore ranks it.
+3. **Exact `<#>`**: the index's sum and the function's `f64` differ by
+   at most 1,025 units a leaf (products under 2^16), so the index gives
+   every row within that of the `k`-th passing and the sort above keeps
+   the first `k` by `<#>` itself.  Where a row the index does not find
+   could be among them — a query weight not positive, fewer than `k`
+   rows sharing a dimension (the rest tie at 0), a product past 2^16 —
+   the rows are read.
+
+Not taken: quantized weights (Lucene's `FeatureField` keeps 9 bits of
+mantissa; a bound from them would need a wider margin and more rows
+read — the postings are 4 bytes a weight here);
+approximate pruning (Seismic's, or WAND with a raised threshold) —
+exactness first, an option later; `inner_product(sv, q) DESC` (the
+same ranking, another name) and cosine (`<=>`, which needs norms).
+
+Measured (`bench/text/hybrid.py --sparse`: SPLADE++
+(`prithivida/Splade_PP_en_v1`, fastembed) for documents and queries in a
+`sparsevec(30522)` column beside T7a's; `ORDER BY sv <#> $1, id LIMIT
+11`, and `rrf` of BM25, the dense vectors and the sparse ones; ParadeDB
+0.26.6 with pgvector 0.8.6's HNSW on `sparsevec_ip_ops`, `ef_search`
+40; nDCG@10, the mean ms of a query):
+
+| BEIR | SPLADE, nucleus | ms | pgvector | ms | `rrf` of three | ms | index built |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| SciFact | 0.7093 | 1.12 | 0.7025 | 0.80 | 0.7373 | 2.97 | 141 ms |
+| NFCorpus | 0.3426 | 0.37 | 0.3208 | 0.66 | 0.3587 | 2.04 | 100 ms |
+| ArguAna | 0.4742 | 3.96 | 0.4726 | 1.36 | 0.5844 | 8.46 | 246 ms |
+
+Exact ranks above pgvector's approximate graph on every corpus
+(NFCorpus by 0.022: its graph misses relevant rows); faster on
+NFCorpus's short queries, slower on SciFact's and on ArguAna's — whole
+arguments as queries, each a few hundred dimensions, every one a leaf
+of the MaxScore, where the graph's cost does not grow with the query.
+The fusion of three ranks above `rrf` of two on SciFact only (0.7373
+against 0.7329; NFCorpus 0.3587 against 0.3602, ArguAna 0.5844 against
+0.5981): SPLADE adds little beside BM25 and dense vectors.  Not taken yet, from this:
+the approximate pruning above for long queries (Seismic's per-query
+cut of the smallest weights).
 
 ### §M14.22 — Embeddings in the database ⬜
 

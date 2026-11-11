@@ -1170,7 +1170,8 @@ arguments' type).  Casts to and from `vector`.  `ORDER BY v <#> q LIMIT
 k` is an exact search (a scan and a top-k per morsel on the workers,
 merged — `vector::sorted`, as every `ORDER BY … LIMIT` over a scan:
 100,000 SPLADE-like rows in `docs/benchmarks.md`); an HNSW index refuses the type (`0A000`) — sparse
-vectors' index is an inverted one, §M14.21's.
+vectors' index is an inverted one, `USING sparse` (§8.21), which ranks
+`<#>` exactly.
 `crates/testkit/slt/54_sparsevec.slt` follows pgvector's definitions; the
 law kit generates them.
 
@@ -3813,6 +3814,46 @@ fusion computed in Rust from every row's score, match and distance, for
 columns read above the fusion; the plans (the text index's first 100
 with values, HNSW's 100 nearest on 12,000 rows); the refusals.
 
+### 8.21 Sparse vector index (`text::index::sparse`, §M14.21 T7b)
+
+`CREATE INDEX … USING sparse (sv [sparsevec_ip_ops])` on a `sparsevec`
+column ranks `ORDER BY sv <#> q LIMIT k` — the inner product, greatest
+first — exactly, from an inverted index: the text index's storage
+(§8.19: delta, tombstones, seals, merges, snapshots, the integrity check)
+with *weighted* documents.  A dimension is a term (its number in eight
+hexadecimal digits, so the dictionary's order is the dimensions'); a
+component's weight is the term's frequency in the postings,
+`segment::weight_bits` — the `f32`'s bits in the numbers' order (a
+negative's flipped, a positive's sign bit set), so a block's impacts give
+its greatest weight; no positions (`Doc::weights`; the delta's encoding
+marks a weighted term by 0 positions, which a text's never has, so old
+deltas read as before; `segment::merge(…, weighted)` copies weights, not
+positions).  A query is the bag of its dimensions, each leaf weighing
+its component (`Scorer::dot`): block-max MaxScore over the same cursors
+as BM25's, a block's bound its greatest weight times the query's.
+
+Exact: the index sums the products in units (2^-32, each rounded once),
+`<#>` in `f64` in dimension order — within `MARGIN` (1,025) units a leaf
+of each other while each product is under 2^16 (`Scorer::dot` notes one
+past it).  `rank` gives every row it scores within that of the `k`-th
+passing (filters and row-level security through `keep`, as the text
+index's), the projection computes `<#>` of each and the sort keeps the
+first `k`: a scan's rows.  It gives up — the rows are read — for a query
+weight not positive, fewer than `k` rows sharing a dimension with the
+query or a `k`-th product not above the margin (the rest tie at 0), a
+product too large, and another condition's rows to rank among.  `NULL`s
+are not indexed.  `EXPLAIN`: `Index Scan using ix on t (k nearest sv to
+q)`.
+
+*Tests:* `tests/sparse_index.rs` — four queries ranked by the index
+against the same order on every row (`(sv <#> q) + 0`), `k` 1, 5 and 20,
+with filters passing all, half and a tenth, a tenth of the weights
+negative, ties, `NULL`s, built, after inserts, updates and deletes in
+the delta, sealed and merged, the integrity check at each step; a
+negative query weight and dimensions no row has read the rows; the
+refusals.  `segment.rs` — `weight_bits`' order and round trip, a
+weighted document's encoding.
+
 ### 8.14 Errors and hints (`error`, `hint`)
 
 An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
@@ -4551,6 +4592,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-10 — §M14.21 T7b, the sparse vector index:** `USING sparse`
+  (`text/index/sparse.rs`) on the text index's storage with weighted
+  documents (`Doc::weights`, `segment::weight_bits`,
+  `Postings::push_weighted`, `Store::weighted`, `segment::merge`'s
+  `weighted`), `Scorer::dot`; `<#>` ranked exactly within a margin;
+  `bench/text/hybrid.py --sparse` (SPLADE, pgvector's sparse HNSW).
 - **2026-11-10 — §M14.21 T7a, hybrid search:** `rrf(r1, r2, …)` and
   `convex(r1, r2, α)` (`hybrid.rs`; the optimizer pass `hybrid::fused`:
   each ranking's first 100 rows by its index, `UNION ALL`, grouped by the

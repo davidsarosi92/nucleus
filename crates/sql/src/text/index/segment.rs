@@ -40,11 +40,31 @@ pub(crate) fn corrupt(what: &str) -> Error {
 }
 
 /// A document's terms, as an index keeps them: its length (terms counted
-/// with repeats), and each distinct term with its positions, terms sorted.
+/// with repeats), and each distinct term with its positions, terms sorted
+/// — or, a *weighted* document's (a sparse vector's, §M14.21 T7b), each
+/// term's weight in `weights` and no positions.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Doc {
     pub(crate) len: u32,
     pub(crate) terms: Vec<(String, Vec<u32>)>,
+    /// Each term's weight where the document is weighted (its frequency
+    /// in the postings, [`weight_bits`]); empty: a term's frequency is its
+    /// positions' count.
+    pub(crate) weights: Vec<u32>,
+}
+
+/// A weight as a frequency: `x`'s bits in an order that is the numbers'
+/// (a negative's flipped, a positive's sign bit set — the radix sort's
+/// trick), so the greatest frequency is the greatest weight; never 0 for
+/// a value a sparse vector holds (no zeros, no NaN).
+pub(crate) fn weight_bits(x: f32) -> u32 {
+    let b = x.to_bits();
+    if b >> 31 == 1 { !b } else { b | 1 << 31 }
+}
+
+/// [`weight_bits`]' weight back.
+pub(crate) fn of_weight_bits(b: u32) -> f32 {
+    f32::from_bits(if b >> 31 == 1 { b & !(1 << 31) } else { !b })
 }
 
 impl Doc {
@@ -62,15 +82,26 @@ impl Doc {
                 _ => terms.push((t, vec![p])),
             }
         }
-        Doc { len, terms }
+        Doc {
+            len,
+            terms,
+            weights: Vec::new(),
+        }
     }
 
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         varint(out, u64::from(self.len));
         varint(out, self.terms.len() as u64);
-        for (t, ps) in &self.terms {
+        for (k, (t, ps)) in self.terms.iter().enumerate() {
             varint(out, t.len() as u64);
             out.extend_from_slice(t.as_bytes());
+            // A weighted term: no positions (a text's term has one at
+            // least, so 0 tells it), then its weight.
+            if let Some(&w) = self.weights.get(k) {
+                varint(out, 0);
+                varint(out, u64::from(w));
+                continue;
+            }
             varint(out, ps.len() as u64);
             let mut prev = 0;
             for &p in ps {
@@ -84,12 +115,18 @@ impl Doc {
         let len = r.varint32()?;
         let n = r.varint32()? as usize;
         let mut terms = Vec::with_capacity(n.min(1 << 16));
+        let mut weights = Vec::new();
         for _ in 0..n {
             let tl = r.varint32()? as usize;
             let t = std::str::from_utf8(r.take(tl)?)
                 .map_err(|_| corrupt("a term not UTF-8"))?
                 .to_string();
             let f = r.varint32()? as usize;
+            if f == 0 {
+                weights.push(r.varint32()?);
+                terms.push((t, Vec::new()));
+                continue;
+            }
             let mut ps = Vec::with_capacity(f.min(1 << 16));
             let mut p = 0u32;
             for _ in 0..f {
@@ -100,7 +137,14 @@ impl Doc {
             }
             terms.push((t, ps));
         }
-        Ok(Doc { len, terms })
+        if !weights.is_empty() && weights.len() != terms.len() {
+            return Err(corrupt("a document weighted in part"));
+        }
+        Ok(Doc {
+            len,
+            terms,
+            weights,
+        })
     }
 }
 
@@ -222,7 +266,17 @@ pub(crate) struct Postings {
 
 impl Postings {
     pub(crate) fn positions(&self, i: usize) -> &[u32] {
+        if self.at.is_empty() {
+            return &[]; // weighted, or not read
+        }
         &self.pos[self.at[i] as usize..self.at[i + 1] as usize]
+    }
+
+    /// A weighted document's posting: its weight as its frequency, no
+    /// positions.
+    fn push_weighted(&mut self, doc: u32, weight: u32) {
+        self.docs.push(doc);
+        self.freqs.push(weight);
     }
 
     fn push(&mut self, doc: u32, positions: &[u32]) {
@@ -476,8 +530,12 @@ pub(crate) fn of_docs(docs: &[(Vec<u8>, u64, Doc)]) -> Result<Vec<u8>> {
     let mut by: HashMap<&str, Postings, MixState> = HashMap::default();
     for (n, (pk, hash, doc)) in docs.iter().enumerate() {
         b.doc(pk, *hash, doc.len);
-        for (t, ps) in &doc.terms {
-            by.entry(t.as_str()).or_default().push(n as u32, ps);
+        for (k, (t, ps)) in doc.terms.iter().enumerate() {
+            let p = by.entry(t.as_str()).or_default();
+            match doc.weights.get(k) {
+                Some(&w) => p.push_weighted(n as u32, w),
+                None => p.push(n as u32, ps),
+            }
         }
     }
     let mut by: Vec<(&str, Postings)> = by.into_iter().collect();
@@ -841,8 +899,13 @@ impl Segment {
 /// Segments `parts` (each with the documents to keep, by bit) as one:
 /// documents in order, the dropped ones left out — the terms merged in
 /// runs on up to `workers` threads (split at terms of the part with the
-/// most), the runs joined in order.
-pub(crate) fn merge(parts: &[(&Segment, Option<&[u64]>)], workers: usize) -> Result<Vec<u8>> {
+/// most), the runs joined in order.  `weighted`: the segments' documents
+/// are (their frequencies weights, no positions).
+pub(crate) fn merge(
+    parts: &[(&Segment, Option<&[u64]>)],
+    workers: usize,
+    weighted: bool,
+) -> Result<Vec<u8>> {
     let mut b = Builder::default();
     // Each part's documents' new numbers.
     let mut maps: Vec<Vec<Option<u32>>> = Vec::with_capacity(parts.len());
@@ -887,10 +950,14 @@ pub(crate) fn merge(parts: &[(&Segment, Option<&[u64]>)], workers: usize) -> Res
             let mut out = Postings::default();
             for (k, (s, _)) in parts.iter().enumerate() {
                 if at[k] < end[k] && s.term(at[k]) == term.as_slice() {
-                    let p = s.postings(at[k], true)?;
+                    let p = s.postings(at[k], !weighted)?;
                     for (i, &d) in p.docs.iter().enumerate() {
                         if let Some(n) = maps[k][d as usize] {
-                            out.push(n, p.positions(i));
+                            if weighted {
+                                out.push_weighted(n, p.freqs[i]);
+                            } else {
+                                out.push(n, p.positions(i));
+                            }
                         }
                     }
                     at[k] += 1;
@@ -937,6 +1004,34 @@ mod tests {
                 .iter()
                 .map(|(t, p)| (t.to_string(), p.to_vec()))
                 .collect(),
+            weights: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn weights_as_frequencies() {
+        let xs = [-3e38f32, -2.5, -1e-30, 1e-30, 0.5, 1.0, 2.5, 3e38];
+        for w in xs.windows(2) {
+            assert!(weight_bits(w[0]) < weight_bits(w[1]), "{w:?}");
+        }
+        for &x in &xs {
+            assert!(weight_bits(x) > 0);
+            assert_eq!(of_weight_bits(weight_bits(x)).to_bits(), x.to_bits());
+        }
+        // A weighted document through the delta's encoding, and a text's
+        // alike as before.
+        let d = Doc {
+            len: 2,
+            terms: vec![
+                ("0000002a".into(), Vec::new()),
+                ("000000ff".into(), Vec::new()),
+            ],
+            weights: vec![weight_bits(0.25), weight_bits(-4.0)],
+        };
+        for d in [d, doc(&[("a", &[0, 3]), ("b", &[1])])] {
+            let mut b = Vec::new();
+            d.encode(&mut b);
+            assert_eq!(Doc::decode(&mut Reader(&b)).unwrap(), d);
         }
     }
 
@@ -990,7 +1085,8 @@ mod tests {
 
         // Merged with itself, every other document dropped from the first.
         let dead: Vec<u64> = vec![0x5555_5555_5555_5555; 16];
-        let m = Segment::decode(&merge(&[(&s, Some(&dead)), (&s, None)], 1).unwrap()).unwrap();
+        let m =
+            Segment::decode(&merge(&[(&s, Some(&dead)), (&s, None)], 1, false).unwrap()).unwrap();
         assert_eq!(m.docs(), 1500);
         let p = m.postings(m.find(b"rare").unwrap(), true).unwrap();
         assert_eq!(p.docs, [3, 499, 500 + 7, 500 + 999]);
@@ -1115,9 +1211,9 @@ mod tests {
         let (a, b, c) = (mk(0), mk(3000), mk(20_000));
         let dead: Vec<u64> = vec![0x0101_0101_0101_0101; 100];
         let parts = [(&a, Some(dead.as_slice())), (&b, None), (&c, None)];
-        let one = merge(&parts, 1).unwrap();
+        let one = merge(&parts, 1, false).unwrap();
         for w in [2, 3, 4, 8] {
-            assert!(one == merge(&parts, w).unwrap(), "{w} runs");
+            assert!(one == merge(&parts, w, false).unwrap(), "{w} runs");
         }
         let m = Segment::decode(&one).unwrap();
         // 15,000 terms of their own, less the 375 only dead documents

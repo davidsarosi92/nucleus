@@ -16,6 +16,7 @@
 //! its own.  A `NULL` is not indexed.
 
 pub(crate) mod segment;
+pub mod sparse;
 pub(crate) mod store;
 
 use std::collections::HashMap;
@@ -84,6 +85,7 @@ pub(crate) fn params_of(ix: &IndexDef) -> crate::text::score::Params {
 fn store(t: &Table, i: usize) -> Store {
     Store {
         keys: Keys::new(t.index_prefix(t.indexes[i].id)),
+        weighted: t.indexes[i].method.as_deref() == Some(sparse::NAME),
     }
 }
 
@@ -629,10 +631,9 @@ pub fn stats(txn: &dyn KvTxn, t: &Table, i: usize, terms: &[&str]) -> Result<(u6
 /// Index `id`'s table and its position there, as `txn` sees the catalog.
 fn find(txn: &dyn KvTxn, id: &Id) -> Result<Option<(Table, usize)>> {
     Ok(crate::catalog::tables(txn)?.into_iter().find_map(|t| {
-        let i = t
-            .indexes
-            .iter()
-            .position(|ix| ix.id == id.index && ix.method.as_deref() == Some(NAME))?;
+        let i = t.indexes.iter().position(|ix| {
+            ix.id == id.index && matches!(ix.method.as_deref(), Some(NAME | sparse::NAME))
+        })?;
         (t.id == id.table).then_some((t, i))
     }))
 }
@@ -720,7 +721,9 @@ pub fn shape(txn: &dyn KvTxn, t: &Table, i: usize) -> Result<(usize, usize)> {
     Ok((v.segs.len(), v.waiting()))
 }
 
-/// Registers the method (the built-in module does).
+/// Registers the method, and the sparse vector index on the same storage
+/// ([`sparse`]; the built-in module does).
 pub fn register(r: &mut Registry) -> Result<()> {
-    r.add_index_method(Arc::new(TextIndex))
+    r.add_index_method(Arc::new(TextIndex))?;
+    sparse::register(r)
 }

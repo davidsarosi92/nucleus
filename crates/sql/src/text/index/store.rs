@@ -314,9 +314,11 @@ pub(crate) struct Delta {
     keys: Vec<Vec<u8>>,
 }
 
-/// One index: its keys.
+/// One index: its keys, and whether its documents are weighted (a
+/// sparse vector's terms, [`Doc::weights`]: no positions).
 pub(crate) struct Store {
     pub(crate) keys: Keys,
+    pub(crate) weighted: bool,
 }
 
 /// A segment and its deleted documents, as a snapshot sees them.
@@ -603,7 +605,7 @@ impl Store {
                 .iter()
                 .map(|(s, d)| (s.as_ref(), d.as_ref().map(|d| d.bits.as_slice())))
                 .collect();
-            segment::merge(&parts, each)
+            segment::merge(&parts, each, self.weighted)
         };
         let merged: Vec<Result<Vec<u8>>> = if workers <= 1 || loaded.len() == 1 {
             loaded.iter().map(merge).collect()
@@ -1496,14 +1498,27 @@ impl View {
         });
         // The delta first: its few rows raise the threshold early.
         let mut hits = vec![Vec::new(); q.leaves.len()];
+        let mut freqs: Vec<u32> = Vec::new();
         for (n, i) in self.delta.inserts.iter().enumerate() {
             for h in &mut hits {
                 h.clear();
             }
-            for (t, ps) in &i.doc.terms {
-                for (leaf, h) in q.leaves.iter().zip(hits.iter_mut()) {
+            // A weighted document's term: there (a position for `eval`),
+            // its frequency its weight.
+            let weighted = !i.doc.weights.is_empty();
+            if weighted {
+                freqs.clear();
+                freqs.resize(q.leaves.len(), 0);
+            }
+            for (k, (t, ps)) in i.doc.terms.iter().enumerate() {
+                for (l, (leaf, h)) in q.leaves.iter().zip(hits.iter_mut()).enumerate() {
                     if leaf.matches(t) {
-                        h.extend_from_slice(ps);
+                        if weighted {
+                            h.push(0);
+                            freqs[l] = i.doc.weights[k];
+                        } else {
+                            h.extend_from_slice(ps);
+                        }
                     }
                 }
             }
@@ -1516,6 +1531,7 @@ impl View {
             let m = Matched {
                 len: f64::from(i.doc.len),
                 hits: &hits,
+                freqs: weighted.then_some(freqs.as_slice()),
             };
             let score = sc.map_or(0, |sc| fixed(sc.score(&m)));
             found(At::Delta(n as u32), (i.pk.as_slice(), i.hash), score, top);
@@ -1845,6 +1861,7 @@ mod tests {
                     let m = Matched {
                         len: f64::from(doc.len),
                         hits: &hits,
+                        freqs: None,
                     };
                     all.push((pk.clone(), sc.score(&m)));
                 }

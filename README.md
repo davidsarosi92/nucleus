@@ -71,7 +71,9 @@ pgvector's 2.4), and quantized graphs keep `int8`, half or one-bit codes
 searched faster at the same recall; on OpenAI's 1536-dimensional
 embeddings built in 11.8 s against pgvector's 137 and searched in 0.63
 ms against its 1.57 at recall 0.95), and sparse vectors (`sparsevec`,
-pgvector's, a type of its own in every driver) are searched exactly; the
+pgvector's, a type of its own in every driver) are searched exactly —
+through an inverted index, `USING sparse` (SPLADE on BEIR: nDCG@10 at
+or above pgvector's approximate graph, NFCorpus 0.343 against 0.321); the
 query vector may be a row's (`ORDER BY v <=> (SELECT v FROM t WHERE id =
 $1)`, "more like this", 1.1 ms against pgvector's 1.5) and `LATERAL`
 searches per row on the workers (1,000 rows' ten nearest in 154 ms

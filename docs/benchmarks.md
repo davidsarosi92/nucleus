@@ -711,36 +711,6 @@ python3 bench/text/beir.py paradedb
 python3 bench/text/beir.py paradedb --snippets
 ```
 
-### Hybrid search
-
-`bench/text/hybrid.py` (PLAN.md §M14.21 T7a): the same corpora and
-queries with BAAI/bge-small-en-v1.5's vectors (`bench/text/embed.py`,
-fastembed, 384 dimensions) in a `vector(384)` column with an HNSW index
-(cosine, pgvector's defaults) beside the text index (`english`, 1.2 /
-0.75): BM25 alone, the vectors alone, `ORDER BY rrf(score(body @@ q),
-emb <=> $1) DESC, id LIMIT 11` and `convex(…, 0.5)`; ParadeDB 0.26.6
-with pgvector 0.8.6 the same, its RRF as its documentation writes it (a
-CTE a ranking's first 100, `RANK()`, a `FULL OUTER JOIN`; `hnsw.ef_search`
-100).  nDCG@10, and the mean ms of a query:
-
-| BEIR | text | vector | `rrf` | `convex` | ParadeDB text | vector | RRF |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| SciFact | 0.6891 | 0.7126 | 0.7329 | 0.7445 | 0.6839 | 0.7161 | 0.7327 |
-| NFCorpus | 0.3291 | 0.3163 | 0.3602 | 0.3633 | 0.3225 | 0.3339 | 0.3636 |
-| ArguAna | 0.4964 | 0.5973 | 0.5981 | 0.6169 | 0.4814 | 0.5950 | 0.5890 |
-| FiQA | 0.2534 | 0.3669 | 0.3570 | 0.3826 | 0.2500 | 0.3730 | 0.3598 |
-| SciFact ms | 0.27 | 0.38 | 1.49 | 1.72 | 0.88 | 0.42 | 7.41 |
-| NFCorpus ms | 0.16 | 0.31 | 1.29 | 1.47 | 0.43 | 0.38 | 4.99 |
-| ArguAna ms | 2.33 | 0.37 | 3.67 | 3.96 | 5.98 | 0.36 | 6.74 |
-| FiQA ms | 0.39 | 0.48 | 2.12 | 2.31 | 1.62 | 0.70 | 3.86 |
-
-```sh
-target/ann-data/.venv/bin/pip install fastembed
-KINDS=dense bash target/bench-tools/embed-all.sh   # or bench/text/embed.py --sets scifact --kinds dense, a set a process
-NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/hybrid.py nucleus target/release/nucleus
-target/ann-data/.venv/bin/python bench/text/hybrid.py paradedb
-```
-
 MS MARCO passage (PLAN.md §M14.21 T5b, T5c): 8,841,823 passages, BEIR's dev
 split, its first 1,000 queries, `english`, k1 1.2, b 0.75 — the same
 query, the same nDCG@10 measure; the server's index cache a quarter of
@@ -765,6 +735,51 @@ measured on the same binary's index).
 python3 bench/text/data.py msmarco
 python3 bench/text/beir.py nucleus target/release/nucleus --sets msmarco --split dev --queries 1000 --analyzer english --k1 1.2 --b 0.75 --filters 50,10,1
 python3 bench/text/beir.py paradedb --sets msmarco --split dev --queries 1000
+```
+
+### Hybrid search
+
+`bench/text/hybrid.py` (PLAN.md §M14.21 T7a): the same corpora and
+queries with BAAI/bge-small-en-v1.5's vectors (`bench/text/embed.py`,
+fastembed, 384 dimensions) in a `vector(384)` column with an HNSW index
+(cosine, pgvector's defaults) beside the text index (`english`, 1.2 /
+0.75): BM25 alone, the vectors alone, `ORDER BY rrf(score(body @@ q),
+emb <=> $1) DESC, id LIMIT 11` and `convex(…, 0.5)`; ParadeDB 0.26.6
+with pgvector 0.8.6 the same, its RRF as its documentation writes it (a
+CTE a ranking's first 100, `RANK()`, a `FULL OUTER JOIN`; `hnsw.ef_search`
+100).  nDCG@10, and the mean ms of a query:
+
+| BEIR | text | vector | `rrf` | `convex` | ParadeDB text | vector | RRF |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| SciFact | 0.6891 | 0.7126 | 0.7329 | 0.7445 | 0.6839 | 0.7161 | 0.7327 |
+| NFCorpus | 0.3291 | 0.3163 | 0.3602 | 0.3633 | 0.3225 | 0.3339 | 0.3636 |
+| ArguAna | 0.4964 | 0.5973 | 0.5981 | 0.6169 | 0.4814 | 0.5950 | 0.5890 |
+| FiQA | 0.2534 | 0.3669 | 0.3570 | 0.3826 | 0.2500 | 0.3730 | 0.3598 |
+| SciFact ms | 0.27 | 0.38 | 1.49 | 1.72 | 0.88 | 0.42 | 7.41 |
+| NFCorpus ms | 0.16 | 0.31 | 1.29 | 1.47 | 0.43 | 0.38 | 4.99 |
+| ArguAna ms | 2.33 | 0.37 | 3.67 | 3.96 | 5.98 | 0.36 | 6.74 |
+| FiQA ms | 0.39 | 0.48 | 2.12 | 2.31 | 1.62 | 0.70 | 3.86 |
+
+With learned sparse vectors (`--sparse`, PLAN.md §M14.21 T7b): SPLADE++
+(`prithivida/Splade_PP_en_v1`) in a `sparsevec(30522)` column, nucleus's
+`USING sparse` index (exact) against pgvector's HNSW on
+`sparsevec_ip_ops` (`ef_search` 40); `ORDER BY sv <#> $1, id LIMIT 11`,
+and nucleus's `rrf` of all three rankings:
+
+| BEIR | SPLADE | ms | pgvector | ms | `rrf` of three | ms | index built |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| SciFact | 0.7093 | 1.12 | 0.7025 | 0.80 | 0.7373 | 2.97 | 141 ms |
+| NFCorpus | 0.3426 | 0.37 | 0.3208 | 0.66 | 0.3587 | 2.04 | 100 ms |
+| ArguAna | 0.4742 | 3.96 | 0.4726 | 1.36 | 0.5844 | 8.46 | 246 ms |
+
+```sh
+target/ann-data/.venv/bin/pip install fastembed
+KINDS=dense bash target/bench-tools/embed-all.sh   # or bench/text/embed.py --sets scifact --kinds dense, a set a process
+NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/hybrid.py nucleus target/release/nucleus
+target/ann-data/.venv/bin/python bench/text/hybrid.py paradedb
+KINDS=sparse SETS="scifact nfcorpus arguana" bash target/bench-tools/embed-all.sh
+NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/hybrid.py nucleus target/release/nucleus --sets scifact,nfcorpus,arguana --sparse
+target/ann-data/.venv/bin/python bench/text/hybrid.py paradedb --sets scifact,nfcorpus,arguana --sparse
 ```
 
 ## Write amplification
