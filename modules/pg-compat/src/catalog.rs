@@ -601,7 +601,7 @@ impl Module for PgCompat {
                 }),
             )?;
         }
-        Ok(())
+        crate::tsearch::register(r)
     }
 }
 

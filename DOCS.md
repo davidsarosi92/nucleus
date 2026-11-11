@@ -2561,7 +2561,9 @@ One role, `nucleus`.  This is what makes `psql`'s `\d`, `\d table`,
 `\d+`, `\dt`, `\di`, `\dv`, `\dn`, `\du`, `\l` work; `\df` and others
 that need functions, sequences or permissions do not.  `pg_typeof(x)` and
 `to_regtype(name)` (a type's oid by its `pg_type` or SQL name, NULL when
-there is none) are among its functions too.
+there is none) are among its functions too.  PostgreSQL's text search —
+`tsvector`, `tsquery`, `to_tsvector`, `to_tsquery`, `@@` — is the
+module's too, served by the text index where it can be (§8.22).
 
 **Teaching a type an ordering** (§M14.19): `ALTER TYPE t ADD ORDERING
 name BY mapping` — `mapping` is SQL over `value` (a `t`), into a type with
@@ -2648,7 +2650,12 @@ API alone, embedded and as a custom server build (`geo-demo serve`).
   `Stable`, `Volatile` — the default; only immutable functions may define
   an ordering), `parallel_safe()` (default: unless volatile; a volatile
   function whose calls do not depend on one another, such as `random()`,
-  returns true so workers call it), `of_condition()` and
+  returns true so workers call it), `found(args)` (the condition whose
+  rows a ranking function ranks: `text_score`'s are `@@`'s; §8.20),
+  `rewrite(args)` (a call giving the same value on every row, bound in
+  this one's place — pg-compat's `to_tsvector(cfg, col) @@
+  to_tsquery(cfg, q)` as the text index's `col @@ q'`, §8.22),
+  `of_condition()` and
   `bind_condition(operands, rest)` (a function of an operator's
   condition, `highlight(body @@ q)`: the operator, and the call bound in
   its place from the operator's operands — typed as its signature
@@ -3854,6 +3861,51 @@ negative query weight and dimensions no row has read the rows; the
 refusals.  `segment.rs` — `weight_bits`' order and round trip, a
 weighted document's encoding.
 
+### 8.22 PostgreSQL's text search (`modules/pg-compat` `tsearch`, §M14.21 T8)
+
+pg-compat brings PostgreSQL's `tsvector` and `tsquery` — its text forms
+both ways (`'cat':2 'mat':6A`, `'cat' & !( 'dog' | 'mice' )`, `<N>`,
+`:*`, weights), `regconfig` a name for `text` — the makers
+`to_tsvector`, `to_tsquery`, `plainto_tsquery`, `phraseto_tsquery`,
+`websearch_to_tsquery` (`[cfg,] text`), and `@@` between a `tsvector` and
+a `tsquery` (either way round; `text @@ tsquery` by `simple`).  A
+configuration is nucleus's analyzer of the name (`english`, `hungarian`,
+…, `pg_catalog.` dropped; none named: `simple`): a `tsvector` is its
+terms at their positions plus one.  Queries are built as PostgreSQL
+builds them — each operand analyzed, its terms a phrase by their
+positions, stop words cleaned out with the phrase distances across them
+kept (`cat <-> the <-> mat` is `'cat' <2> 'mat'`) — and evaluated as its
+`TS_execute`: a phrase's parts' positions merged per operator, `&` under
+a phrase where both match, a `NOT` under one where its operand does not,
+weights filtering positions, a term without positions a "maybe" (no
+phrase matches it); the empty query matches nothing, `!x` the empty
+vector.
+
+**The rewrite** (`ScalarFunction::rewrite`, §8.12): `to_tsvector(cfg,
+e) @@ maker(cfg, 'literal')` — what a PostgreSQL client writes for a GIN
+index on `to_tsvector(cfg, e)` — binds as nucleus's `e @@ q` by the
+analyzer `cfg` (§8.19), which a text index on `e` analyzing so serves,
+when `q` can say the query exactly: each operand a quoted phrase of its
+words, kept only where the analyzer finds the same terms in it; a prefix
+as its stem and `*`; `&`, `|`, `!` as `AND`, `OR`, `NOT`; a phrase of
+words a step apart as one quoted phrase, kept only where the analyzer
+gives them joined the positions PostgreSQL's chain has.  Otherwise —
+weights, other distances, a phrase over operators, a query of stop words
+only, a parameter, different configurations — `@@` is computed on the
+values.  Departures: nucleus's analyzers, not PostgreSQL's parser and
+dictionaries; positions not capped at 16,383 nor 256 a term; the values
+sent as `text` (oid 25).
+
+*Tests:* the module's `tests/tsearch.rs` — 2,400 cases PostgreSQL 18
+answered (`tests/tsearch_pg.tsv`, by `bench/text/tsearch_pg.py`: random
+vectors and queries, phrases at distances 0–3 over every operator,
+prefixes, weights, terms without positions, and the makers' queries,
+text forms included) alike; 400 random queries of the four makers by the
+rewrite and over stored `tsvector`s alike, without the index and
+through it; the plans served and not.  `tests/slt/03_text_search.slt`
+(PostgreSQL 18's results); unit tests of the printer, the clean-up, the
+evaluation and the rewrite's text queries.
+
 ### 8.14 Errors and hints (`error`, `hint`)
 
 An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
@@ -4592,6 +4644,14 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-11 — §M14.21 T8a, PostgreSQL's text search in pg-compat:**
+  `tsvector`, `tsquery`, the makers and `@@` (`modules/pg-compat`
+  `tsearch.rs`), evaluated as PostgreSQL's `TS_execute`;
+  `ScalarFunction::rewrite` (the binder binds the call it gives), by
+  which `to_tsvector(cfg, col) @@ maker(cfg, 'q')` becomes the text
+  index's `col @@ q'`; `tests/tsearch.rs` with PostgreSQL 18's answers
+  (`bench/text/tsearch_pg.py`), `tests/slt/03_text_search.slt`;
+  `bench/text/tsearch.py` (against PostgreSQL's GIN).
 - **2026-11-10 — §M14.21 T7b, the sparse vector index:** `USING sparse`
   (`text/index/sparse.rs`) on the text index's storage with weighted
   documents (`Doc::weights`, `segment::weight_bits`,

@@ -124,8 +124,12 @@ with the table's scan (a FiQA term's 8,743 rows 2.6× faster) — and
 hybrid search in one query, `ORDER BY rrf(score(body @@ q), emb <=> $1)
 DESC LIMIT 10` or `convex(…, α)`, each ranking's first rows from its
 index (BEIR: fused above text and vectors alone, 1.3–2.1 ms a SciFact,
-NFCorpus or FiQA query, 1.8–5.0× ParadeDB's RRF).  Next is the rest of
-§M14.21 and the rest of the
+NFCorpus or FiQA query, 1.8–5.0× ParadeDB's RRF).  With `--pg-compat`,
+PostgreSQL's own text search works as written —
+`to_tsvector('english', body) @@ to_tsquery('english', 'cat & !dog')`,
+evaluated as PostgreSQL does (2,400 of its answers checked) and served
+by the text index (BEIR: as fast as PostgreSQL's GIN index for all
+words, faster for any).  Next is the rest of §M14.21 and the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then

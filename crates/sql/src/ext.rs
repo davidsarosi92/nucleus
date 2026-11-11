@@ -274,6 +274,18 @@ pub trait ScalarFunction: Send + Sync {
         None
     }
 
+    /// The call computing the same value as this one of `args` (bound and
+    /// converted as its signature says) more cheaply — on every row, the
+    /// same value, `NULL` where this one gives `NULL`.  pg-compat's
+    /// `to_tsvector(cfg, col) @@ to_tsquery(cfg, q)` is `col @@ q'` by the
+    /// analyzer `cfg`, which a text index serves (PLAN.md §M14.21 T8).
+    /// The binder binds the call it gives in this one's place.  By default
+    /// none.
+    fn rewrite(&self, args: &[crate::expr::Expr]) -> Option<crate::expr::Expr> {
+        let _ = args;
+        None
+    }
+
     /// For a function of an operator's condition (`highlight(body @@ q)`,
     /// PLAN.md §M14.21 T6): the operator.  Where its first argument is
     /// that operator's call, the binder binds the call

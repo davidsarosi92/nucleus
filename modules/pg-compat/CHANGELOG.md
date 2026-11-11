@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- PostgreSQL's text search: `tsvector` and `tsquery` (PostgreSQL's text
+  forms), `to_tsvector`, `to_tsquery`, `plainto_tsquery`,
+  `phraseto_tsquery`, `websearch_to_tsquery`, `@@` — evaluated as
+  PostgreSQL's `TS_execute` (checked against 2,400 of PostgreSQL 18's
+  answers); `to_tsvector(cfg, col) @@ maker(cfg, 'q')` rewritten to
+  nucleus's `col @@ q` by the analyzer `cfg`, which a text index serves.
 - `pg_statistic_ext` lists each `CREATE STATISTICS`;
   `pg_get_statisticsobjdef_columns` gives its columns (psql's `\d`).
 - `COPY … FROM STDIN` (CopyInResponse, CopyData, CopyDone, CopyFail),

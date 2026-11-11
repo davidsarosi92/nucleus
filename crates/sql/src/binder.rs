@@ -3088,6 +3088,9 @@ impl<'a> Binder<'a> {
             Returns::Common => ty,
             Returns::Constant(_) => unreachable!("returned above"),
         };
+        if let Some(e) = f.rewrite(&args) {
+            return Ok((e, ty));
+        }
         // A range the call implies on its first argument: as comparisons
         // beside it, for the optimizer's index ranges.
         if let (Some((low, high)), [a, b]) = (f.implied_range(), &args[..]) {

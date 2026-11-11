@@ -3,7 +3,8 @@
 //!
 //! - [`PgCompat`] — the SQL side: the `pg_catalog` and `information_schema`
 //!   views and the `pg_*` functions PostgreSQL clients use, registered in
-//!   a session's [`Registry`](nucleus_sql::ext::Registry).
+//!   a session's [`Registry`](nucleus_sql::ext::Registry) — and PostgreSQL's
+//!   text search, `tsvector` and `tsquery` (`tsearch`).
 //! - [`Pg`] — the front end: PostgreSQL's protocol, whose sessions have
 //!   [`PgCompat`] ([`registry`]).
 //!
@@ -15,6 +16,7 @@
 
 mod catalog;
 mod protocol;
+mod tsearch;
 
 pub use catalog::{PgCompat, type_oid};
 pub use protocol::{Pg, handle, registry};

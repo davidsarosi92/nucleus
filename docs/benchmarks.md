@@ -782,6 +782,33 @@ NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/hybrid.py nuc
 target/ann-data/.venv/bin/python bench/text/hybrid.py paradedb --sets scifact,nfcorpus,arguana --sparse
 ```
 
+### PostgreSQL's text search through pg-compat
+
+`bench/text/tsearch.py` (PLAN.md §M14.21 T8a): what PostgreSQL clients
+write for a GIN index, `SELECT count(*) FROM docs WHERE
+to_tsvector('english', body) @@ plainto_tsquery('english', q)` (all the
+query's words) or `websearch_to_tsquery('english', 'w1 or w2 …')` (any),
+a BEIR query a statement.  nucleus through PostgreSQL's protocol
+(psycopg, the time at the client), the call rewritten to the text
+index's `@@` (`english`); PostgreSQL 18 with `CREATE INDEX … USING gin
+(to_tsvector('english', body))` (the server's `\timing`).  The mean ms of
+a query (median):
+
+| BEIR | all, nucleus | all, GIN | any, nucleus | any, GIN | built | GIN built |
+|---|---:|---:|---:|---:|---:|---:|
+| SciFact | 0.16 | 0.17 | 0.42 (0.42) | 47.75 (0.89) | 398 ms | 906 ms |
+| NFCorpus | 0.12 | 0.14 | 0.19 (0.17) | 0.26 (0.20) | 367 ms | 691 ms |
+| FiQA | 0.25 | 0.32 | 1.56 (1.49) | 9.07 (5.76) | 682 ms | 1,877 ms |
+
+Over a stored `tsvector` column instead (no index, the values computed
+as PostgreSQL computes them): 17.7 ms a SciFact query, 13.6 NFCorpus.
+
+```sh
+target/ann-data/.venv/bin/pip install "psycopg[binary]"
+NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/tsearch.py nucleus target/release/nucleus --values
+target/ann-data/.venv/bin/python bench/text/tsearch.py postgres
+```
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

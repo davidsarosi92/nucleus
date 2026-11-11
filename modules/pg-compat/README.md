@@ -19,8 +19,13 @@ nucleus database.  nucleus's own interface — the `ncp` protocol,
   `pg_type`, `pg_namespace`, …) and `information_schema` as views of the
   nucleus catalog, the `pg_*` functions their queries call
   (`format_type`, `pg_get_constraintdef`, `pg_typeof`, …) and the
-  `::regclass` family.  Enough for `psql`'s `\d` commands.  The `Pg` front
-  end's sessions have it (`registry()`); other sessions do not.
+  `::regclass` family.  Enough for `psql`'s `\d` commands.  And
+  PostgreSQL's text search: `tsvector`, `tsquery`, `to_tsvector`,
+  `to_tsquery`, `plainto_` / `phraseto_` / `websearch_to_tsquery` and
+  `@@`, evaluated as PostgreSQL evaluates them, the configurations
+  nucleus's analyzers by name; `to_tsvector(cfg, col) @@ to_tsquery(cfg,
+  'q')` is served by a text index on `col` analyzing as `cfg`.  The `Pg`
+  front end's sessions have it (`registry()`); other sessions do not.
 
 It is frozen: kept working, not extended for the catalog queries
 particular tools send.
@@ -48,6 +53,10 @@ test (`cargo package`, which builds it from its packaged form alone).
   module's (`tests/slt/`) over the PostgreSQL protocol, authentication,
   and the extended protocol through the `postgres` driver.
 - `tests/catalog.rs` — this module's scripts in a local session.
+- `tests/tsearch.rs` — text search against 2,400 of PostgreSQL 18's
+  answers (`tests/tsearch_pg.tsv`, made by nucleus's
+  `bench/text/tsearch_pg.py`), and the rewrite to the text index finding
+  what the values do.
 
 ## Licence
 

@@ -1,0 +1,77 @@
+# PostgreSQL's text search (nucleus PLAN.md §M14.21 T8): tsvector and
+# tsquery, the query makers, @@ — and the text index serving
+# to_tsvector(cfg, col) @@ maker(cfg, q) when it analyzes as cfg.
+# Expected results produced by PostgreSQL 18 (tests/tsearch.rs holds 2,400
+# more to PostgreSQL's answers: bench/text/tsearch_pg.py).
+
+query T
+SELECT to_tsvector('english', 'The cats sat on the mat')
+----
+'cat':2 'mat':6 'sat':3
+
+query TT
+SELECT to_tsquery('english', 'cats & !(dogs | mice)'), to_tsquery('english', 'cat <-> the <-> mat')
+----
+'cat' & !( 'dog' | 'mice' ) 'cat' <2> 'mat'
+
+query TT
+SELECT plainto_tsquery('english', 'The fat cats'), phraseto_tsquery('english', 'the cat sat on the mat')
+----
+'fat' & 'cat' 'cat' <-> 'sat' <3> 'mat'
+
+query T
+SELECT websearch_to_tsquery('english', '"fat cat" -dog or mouse')
+----
+'fat' <-> 'cat' & !'dog' | 'mous'
+
+query TT
+SELECT to_tsvector('english', 'The cats sat on the mat') @@ to_tsquery('english', 'cat <4> mat'), to_tsvector('english', 'The cats sat on the mat') @@ to_tsquery('english', 'cat <-> mat')
+----
+t f
+
+query TTT
+SELECT 'a:1 b:2'::tsvector @@ 'a <-> !c'::tsquery, ''::tsvector @@ '!a'::tsquery, 'a:1A b:2'::tsvector @@ 'a:B'::tsquery
+----
+t t f
+
+query TT
+SELECT 'b:3 a:2B,1 a:2A'::tsvector, 'x & (y | z:*AB)'::tsquery
+----
+'a':1,2A 'b':3 'x' & ( 'y' | 'z':*AB )
+
+query TT
+SELECT to_tsquery('english', 'run:*'), to_tsvector('simple', 'Running fast') @@ to_tsquery('simple', 'run:*')
+----
+'run':* t
+
+statement ok
+CREATE TABLE notes (id integer PRIMARY KEY, body text)
+
+statement ok
+INSERT INTO notes VALUES (1, 'The cats sat on the mat'), (2, 'A dog ran'), (3, 'Cats and dogs'), (4, NULL)
+
+statement ok
+CREATE INDEX notes_body ON notes USING text (body) WITH (analyzer = 'english')
+
+query I
+SELECT id FROM notes WHERE to_tsvector('english', body) @@ to_tsquery('english', 'cat & !dog') ORDER BY id
+----
+1
+
+query I
+SELECT id FROM notes WHERE to_tsvector('english', body) @@ websearch_to_tsquery('english', 'dogs or "cat sat"') ORDER BY id
+----
+1
+2
+3
+
+query I
+SELECT count(*) FROM notes WHERE to_tsvector('english', body) @@ to_tsquery('english', 'the')
+----
+0
+
+statement error text search configuration "klingon" does not exist
+SELECT to_tsvector('klingon', 'x')
+
+statement error syntax error in tsquery
+SELECT to_tsquery('english', 'a b')
