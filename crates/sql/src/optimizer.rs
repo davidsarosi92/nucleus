@@ -40,7 +40,165 @@ pub fn optimize(plan: Plan, txn: &dyn KvTxn) -> Plan {
     let plan = lookups(crate::eager::eager(plan, &stats), &stats);
     let plan = crate::narrow::narrow(sorted(crate::distinct::two_level(plan)));
     let plan = crate::hybrid::fused(plan);
-    ranked(method_filters(adaptive(same_rows(plan), &stats)), &stats)
+    postponed(ranked(
+        method_filters(adaptive(same_rows(plan), &stats)),
+        &stats,
+    ))
+}
+
+/// The values only the output needs computed after the limit, on the
+/// rows it keeps: under `LIMIT`, a projection's expressions the sort does
+/// not order by — `ts_headline(body, q)` beside `ORDER BY ts_rank(…)
+/// LIMIT 10` — move above it, the sort carrying the columns they read
+/// (PostgreSQL's `make_sort_input_target`; PLAN.md §M14.21 T8b).  A
+/// projection right above takes them in.
+fn postponed(plan: Plan) -> Plan {
+    let plan = map_children(plan, &postponed);
+    match plan {
+        Plan::Limit {
+            input,
+            limit: Some(limit),
+            offset,
+        } => match postpone(*input) {
+            Ok((sort, above)) => Plan::Project {
+                input: Box::new(Plan::Limit {
+                    input: Box::new(sort),
+                    limit: Some(limit),
+                    offset,
+                }),
+                exprs: above,
+            },
+            Err(sort) => Plan::Limit {
+                input: sort,
+                limit: Some(limit),
+                offset,
+            },
+        },
+        // The projection the limit's output had, over the one it has now.
+        Plan::Project { input, exprs } => match *input {
+            Plan::Project {
+                input: limit,
+                exprs: above,
+            } if matches!(*limit, Plan::Limit { .. }) => {
+                let mut uses = vec![0usize; above.len()];
+                for e in &exprs {
+                    for c in e.columns() {
+                        uses[c] += 1;
+                    }
+                }
+                if uses
+                    .iter()
+                    .zip(&above)
+                    .any(|(&n, e)| n > 1 && !matches!(e, Expr::Column(_)))
+                {
+                    return Plan::Project {
+                        input: Box::new(Plan::Project {
+                            input: limit,
+                            exprs: above,
+                        }),
+                        exprs,
+                    };
+                }
+                Plan::Project {
+                    input: limit,
+                    exprs: exprs
+                        .iter()
+                        .map(|e| e.map_columns(&|c| above[c].clone()))
+                        .collect(),
+                }
+            }
+            other => Plan::Project {
+                input: Box::new(other),
+                exprs,
+            },
+        },
+        other => other,
+    }
+}
+
+/// A sort of a projection with the expressions it does not order by
+/// taken out: the sort, and the expressions over its rows that give the
+/// projection's columns (`Err`: the sort as it was).
+fn postpone(sort: Plan) -> std::result::Result<(Plan, Vec<Expr>), Box<Plan>> {
+    let Plan::Sort { input, keys } = sort else {
+        return Err(Box::new(sort));
+    };
+    let Plan::Project {
+        input: below,
+        exprs,
+    } = *input
+    else {
+        return Err(Box::new(Plan::Sort { input, keys }));
+    };
+    let mut ordered = vec![false; exprs.len()];
+    for k in &keys {
+        for c in k.expr.columns() {
+            ordered[c] = true;
+        }
+    }
+    let later: Vec<bool> = exprs
+        .iter()
+        .zip(&ordered)
+        .map(|(e, &o)| !o && !matches!(e, Expr::Column(_) | Expr::Literal(_)) && !e.has_subquery())
+        .collect();
+    if !later.contains(&true) {
+        return Err(Box::new(Plan::Sort {
+            input: Box::new(Plan::Project {
+                input: below,
+                exprs,
+            }),
+            keys,
+        }));
+    }
+    let mut inner: Vec<Expr> = Vec::new();
+    let mut at = vec![0usize; exprs.len()];
+    for (i, e) in exprs.iter().enumerate() {
+        if !later[i] {
+            at[i] = inner.len();
+            inner.push(e.clone());
+        }
+    }
+    let mut read = std::collections::HashMap::new();
+    for (i, e) in exprs.iter().enumerate() {
+        if later[i] {
+            for c in e.columns() {
+                let col = Expr::Column(c);
+                let n = inner.iter().position(|x| *x == col).unwrap_or_else(|| {
+                    inner.push(col);
+                    inner.len() - 1
+                });
+                read.insert(c, n);
+            }
+        }
+    }
+    let above = exprs
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            if later[i] {
+                e.map_columns(&|c| Expr::Column(read[&c]))
+            } else {
+                Expr::Column(at[i])
+            }
+        })
+        .collect();
+    let keys = keys
+        .into_iter()
+        .map(|k| crate::plan::SortKey {
+            expr: k.expr.map_columns(&|c| Expr::Column(at[c])),
+            ..k
+        })
+        .collect();
+    Ok((
+        Plan::Sort {
+            input: Box::new(Plan::Project {
+                input: below,
+                exprs: inner,
+            }),
+            keys,
+        },
+        above,
+    ))
 }
 
 /// A scan whose filter has a condition an index method finds the rows of

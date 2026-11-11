@@ -182,3 +182,63 @@ fn a_sort_the_primary_key_gives_is_not_run() {
         s.execute("ROLLBACK").unwrap();
     }
 }
+
+/// Under `LIMIT`, the values only the output needs — not ordered by —
+/// are computed on the rows the limit keeps (PLAN.md §M14.21 T8b): above
+/// the limit in the plan, and an error the other rows would raise not
+/// raised.
+#[test]
+fn the_output_is_computed_on_the_rows_kept() {
+    let mut s = session(33);
+    for storage in ["row", "column"] {
+        s.execute(&format!(
+            "DROP TABLE IF EXISTS t;
+             CREATE TABLE t (id INT PRIMARY KEY, x INT, b TEXT) WITH (storage = {storage});
+             INSERT INTO t SELECT i, (i * 37) % 101, 'w' || i FROM generate_series(1, 2000) AS s(i)"
+        ))
+        .unwrap();
+        for setting in SETTINGS {
+            s.execute(setting).unwrap();
+            // x is 0 on the rows 101, 202, …: their 1 / x not computed.
+            let q = "SELECT id, 1000 / x, upper(b) FROM t WHERE x > 0 OR id % 3 = 0 \
+                     ORDER BY x DESC, id LIMIT 5 OFFSET 2";
+            let got = rows(&mut s, q);
+            let all = rows(
+                &mut s,
+                "SELECT id, x, upper(b) FROM t WHERE x > 0 ORDER BY x DESC, id",
+            );
+            let want: Vec<Vec<String>> = all[2..7]
+                .iter()
+                .map(|r| {
+                    let x: i64 = r[1].parse().unwrap();
+                    vec![r[0].clone(), (1000 / x).to_string(), r[2].clone()]
+                })
+                .collect();
+            assert_eq!(got, want, "{storage} {setting}");
+            let plan: Vec<String> = rows(&mut s, &format!("EXPLAIN {q}"))
+                .into_iter()
+                .map(|r| r[0].clone())
+                .collect();
+            let limit = plan.iter().position(|l| l.contains("Limit:")).unwrap();
+            assert!(
+                plan[..limit].iter().any(|l| l.contains("upper(")),
+                "{storage} {setting}:\n{}",
+                plan.join("\n")
+            );
+            assert!(
+                !plan[limit..]
+                    .iter()
+                    .any(|l| l.contains("upper(") || l.contains("1000")),
+                "{storage} {setting}:\n{}",
+                plan.join("\n")
+            );
+            // Ordered by the value: computed below the sort, as before.
+            let plan = rows(
+                &mut s,
+                "EXPLAIN SELECT id, upper(b) FROM t ORDER BY 2 LIMIT 3",
+            );
+            let limit = plan.iter().position(|r| r[0].contains("Limit:")).unwrap();
+            assert!(plan[limit..].iter().any(|r| r[0].contains("upper(")));
+        }
+    }
+}

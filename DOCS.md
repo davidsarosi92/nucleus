@@ -2203,6 +2203,16 @@ narrow it; without statistics, as deep as it goes).
 are cut from its inputs by projections, every reference above moved with
 them, so a join copies only what is used.
 
+**The output after the limit** (`postponed`, last; §M14.21 T8b): under
+`LIMIT`, a projection below the sort has its expressions the sort does
+not order by — not columns or constants — computed above the limit
+instead, the sort carrying the columns they read (PostgreSQL's
+`make_sort_input_target`, which does it for expensive or volatile ones
+only): `SELECT id, ts_headline(…) … ORDER BY ts_rank(…) DESC LIMIT 10`
+computes ten headlines, not one a match, and a value of a row the limit
+drops is never computed (nor its error raised).  A projection right
+above the limit takes the expressions in.
+
 **Index nested loops** (`lookups`): a hash join whose right side is an
 analyzed table's scan becomes an index nested loop when an index (the
 primary key or a secondary one) leads with the join keys and the lookups
@@ -3896,11 +3906,35 @@ values.  Departures: nucleus's analyzers, not PostgreSQL's parser and
 dictionaries; positions not capped at 16,383 nor 256 a term; the values
 sent as `text` (oid 25).
 
-*Tests:* the module's `tests/tsearch.rs` — 2,400 cases PostgreSQL 18
+**Ranking and headlines** (`tsrank`, `tsheadline`, §M14.21 T8b):
+`ts_rank` and `ts_rank_cd` (`[weights,] vector, query
+[, normalization]`; weights `{D, C, B, A}`, default `{0.1, 0.2, 0.4,
+1.0}`; normalization flags 1, 2, 4, 8, 16, 32) computed as `tsrank.c`
+computes them — `ts_rank` in `real` with C's promotions, `ts_rank_cd` in
+`double precision` — and the query's operands sorted by PostgreSQL's own
+`qsort` (unstable past six items: which of `a` and `a:*` counts follows
+it), so the values are PostgreSQL's to the bit.  `ts_headline([cfg,]
+document, query [, options])` as the default parser's `prsd_headline`
+and `generateHeadline`: the text a list of tokens — `simple`'s words,
+the text between two words one token, a number never a headline's end —
+each word the operands its terms match (a word matching two repeated);
+the query's covers (`hlCover`, by `TS_execute_locations`, each checked
+on its words); the best stretched to `MinWords`–`MaxWords` words
+(`mark_hl_words`), or the best `MaxFragments` fragments
+(`mark_hl_fragments`) joined by `FragmentDelimiter`; the matches between
+`StartSel` and `StopSel`; `HighlightAll` the whole text.  Options are
+`deserialize_deflist`'s `key = value` list (quoted values; errors as
+PostgreSQL's: `MinWords must be less than MaxWords`, `unrecognized
+headline parameter`, …).  Departures: UAX #29's words (PostgreSQL's
+parser splits `don't` and hyphenated words), HTML tags kept as text.
+
+*Tests:* the module's `tests/tsearch.rs` — 5,100 cases PostgreSQL 18
 answered (`tests/tsearch_pg.tsv`, by `bench/text/tsearch_pg.py`: random
 vectors and queries, phrases at distances 0–3 over every operator,
 prefixes, weights, terms without positions, and the makers' queries,
-text forms included) alike; 400 random queries of the four makers by the
+text forms included; `ts_rank` and `ts_rank_cd` six ways a case, to
+the bit; headlines of random English with 11 sets of options, to the
+byte) alike; 400 random queries of the four makers by the
 rewrite and over stored `tsvector`s alike, without the index and
 through it; the plans served and not.  `tests/slt/03_text_search.slt`
 (PostgreSQL 18's results); unit tests of the printer, the clean-up, the
@@ -4644,6 +4678,14 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-11 — §M14.21 T8b, PostgreSQL's ranking and headlines in
+  pg-compat:** `ts_rank`, `ts_rank_cd` (`tsrank.rs`, with a port of
+  PostgreSQL's `qsort`) and `ts_headline` (`tsheadline.rs`) as
+  PostgreSQL computes them; the optimizer pass `postponed` (output
+  expressions computed above `LIMIT`); `tests/tsearch.rs` with 2,700 more
+  of PostgreSQL 18's answers, `tests/sort.rs`'s
+  `the_output_is_computed_on_the_rows_kept`; `bench/text/tsearch.py
+  --rank`.
 - **2026-11-11 — §M14.21 T8a, PostgreSQL's text search in pg-compat:**
   `tsvector`, `tsquery`, the makers and `@@` (`modules/pg-compat`
   `tsearch.rs`), evaluated as PostgreSQL's `TS_execute`;

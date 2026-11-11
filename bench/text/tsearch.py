@@ -3,8 +3,8 @@
 PostgreSQL clients write for a GIN index, on BEIR's corpora, against
 PostgreSQL with that GIN index.
 
-    bench/text/tsearch.py nucleus BINARY [--sets scifact,nfcorpus,fiqa] [--values]
-    bench/text/tsearch.py postgres [--container nucleus-paradedb] [--sets …]
+    bench/text/tsearch.py nucleus BINARY [--sets scifact,nfcorpus,fiqa] [--values] [--rank]
+    bench/text/tsearch.py postgres [--container nucleus-paradedb] [--sets …] [--rank]
 
 Each BEIR query (its words, lower case) counts the documents it matches,
 all its words (`plainto_tsquery`) or any (`websearch_to_tsquery` of the
@@ -20,6 +20,14 @@ values computed as PostgreSQL computes them.  PostgreSQL: `CREATE INDEX
 (the server's time).  The mean and median ms of a query, the second of
 two rounds, and the documents matched over all queries (the two systems'
 English analyses differ a little: PostgreSQL's parser is its own).
+
+`--rank` (T8b) adds what a PostgreSQL search page asks: the ten best
+matches by `ts_rank` (`rank`), and with each one's `ts_headline`
+(`headline`), their nDCG@10 in place of the count:
+
+    SELECT id[, length(ts_headline('english', body, q))] FROM docs
+    WHERE to_tsvector('english', body) @@ q
+    ORDER BY ts_rank(to_tsvector('english', body), q) DESC, id LIMIT 10
 """
 
 import argparse
@@ -41,6 +49,14 @@ SHAPES = {
 }
 
 
+RANKED = {
+    "rank": "SELECT id FROM docs WHERE {tv} @@ {m} ORDER BY ts_rank({tv}, {m}) DESC, id LIMIT 10",
+    "headline": "SELECT id, length(ts_headline('english', body, {m})) FROM docs WHERE {tv} @@ {m} "
+                "ORDER BY ts_rank({tv}, {m}) DESC, id LIMIT 10",
+}
+TV = "to_tsvector('english', body)"
+
+
 def words(q):
     return beir.SYNTAX.sub(" ", q).lower().split()
 
@@ -52,8 +68,14 @@ def query_text(shape, q):
 
 def report(name, mode, times, found):
     times.sort()
+    found = f"{found:10.4f}" if isinstance(found, float) else f"{found:10}"
     print(f"{name:10} {mode:12} {sum(times) / len(times):9.2f} {times[len(times) // 2]:9.2f} "
-          f"{found:10}", flush=True)
+          f"{found}", flush=True)
+
+
+def ranked_modes(a):
+    return [(f"{shape} {mode}", shape, sql) for shape in SHAPES for mode, sql in RANKED.items()
+            if a.rank]
 
 
 def postgres(a):
@@ -102,6 +124,22 @@ def postgres(a):
                 found += int(lines[0])
                 times.append(float(lines[-1].split("Time: ")[1].split(" ms")[0]))
             report(name, shape, times, found)
+        for label, shape, sql in ranked_modes(a):
+            script = ["SET client_min_messages = warning;", "\\timing on"]
+            for qid in qrels:
+                m = SHAPES[shape].format(q=query_text(shape, queries[qid]))
+                script.append("\\echo @@")
+                script.append(sql.format(tv=TV, m=m) + ";")
+            body = script[2:]
+            out = psql(stdin="\n".join(script + body) + "\n")
+            runs = out.split("@@\n")[1:][len(qrels):]
+            times, scores = [], []
+            for qid, run in zip(qrels, runs):
+                lines = run.strip().split("\n")
+                ids = [l.split("|")[0] for l in lines[:-1]]
+                scores.append(beir.ndcg10(ids, qrels[qid]))
+                times.append(float(lines[-1].split("Time: ")[1].split(" ms")[0]))
+            report(name, label, times, sum(scores) / len(scores))
         psql("DROP TABLE docs")
 
 
@@ -157,6 +195,17 @@ def nucleus_side(a):
                             found += pg.execute(sql).fetchone()[0]
                             times.append((time.perf_counter() - t) * 1000)
                     report(name, f"{shape} {mode}", times, found)
+            for label, shape, sql in ranked_modes(a):
+                for _ in range(2):
+                    times, scores = [], []
+                    for qid in qrels:
+                        m = SHAPES[shape].format(q=query_text(shape, queries[qid]))
+                        q = sql.format(tv=TV, m=m)
+                        t = time.perf_counter()
+                        ids = [r[0] for r in pg.execute(q).fetchall()]
+                        times.append((time.perf_counter() - t) * 1000)
+                        scores.append(beir.ndcg10(ids, qrels[qid]))
+                report(name, label, times, sum(scores) / len(scores))
         pg.close()
         c.close()
     finally:
@@ -173,6 +222,7 @@ def main():
     ap.add_argument("--sets", default="scifact,nfcorpus,fiqa")
     ap.add_argument("--data", default="target/text-data")
     ap.add_argument("--values", action="store_true")
+    ap.add_argument("--rank", action="store_true")
     ap.add_argument("--port", type=int, default=21028)
     ap.add_argument("--host", default=os.environ.get("NUCLEUS_BENCH_HOST", "127.0.0.1"))
     a = ap.parse_args()

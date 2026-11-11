@@ -17,6 +17,8 @@
 mod catalog;
 mod protocol;
 mod tsearch;
+mod tsheadline;
+mod tsrank;
 
 pub use catalog::{PgCompat, type_oid};
 pub use protocol::{Pg, handle, registry};

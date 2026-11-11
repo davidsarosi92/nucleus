@@ -75,3 +75,50 @@ SELECT to_tsvector('klingon', 'x')
 
 statement error syntax error in tsquery
 SELECT to_tsquery('english', 'a b')
+
+query T
+SELECT ts_headline('english', 'The cats sat on the mat', to_tsquery('english', 'cat'))
+----
+The <b>cats</b> sat on the mat
+
+query T
+SELECT ts_headline('english', body, to_tsquery('english', 'cat'), 'MaxWords=3, MinWords=1') FROM (VALUES ('The cats sat on the mat, and cats ran')) v(body)
+----
+<b>cats</b>
+
+statement error MinWords must be less than MaxWords
+SELECT ts_headline('english', 'x', to_tsquery('english', 'x'), 'MinWords=5, MaxWords=5')
+
+statement error unrecognized headline parameter: "Foo"
+SELECT ts_headline('english', 'x', to_tsquery('english', 'x'), 'Foo=1')
+
+statement error invalid parameter list format: "MaxWords"
+SELECT ts_headline('english', 'x', to_tsquery('english', 'x'), 'MaxWords')
+
+statement error invalid input syntax for type integer: "abc"
+SELECT ts_headline('english', 'x', to_tsquery('english', 'x'), 'MaxWords=abc')
+
+query T
+SELECT ts_headline('simple', 'The cats sat on the mat', 'mat'::tsquery, 'StartSel=*, StopSel=*')
+----
+The cats sat on the *mat*
+
+query T
+SELECT ts_headline('english', 'The cats sat on the mat, and cats ran', to_tsquery('english', 'cat <-> sat'), 'HighlightAll=true')
+----
+The <b>cats</b> <b>sat</b> on the mat, and <b>cats</b> ran
+
+query T
+SELECT ts_headline('The cat sat', to_tsquery('cat'), 'StartSel=[, StopSel=]')
+----
+The [cat] sat
+
+query T
+SELECT ts_headline('english', NULL, to_tsquery('english', 'x')) IS NULL
+----
+t
+
+query T
+SELECT ts_rank(NULL::tsvector, 'x'::tsquery) IS NULL
+----
+t

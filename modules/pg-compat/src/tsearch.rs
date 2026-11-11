@@ -37,7 +37,7 @@ use nucleus_sql::text::{self as nt, Analyzer};
 pub(crate) const DEFAULT_CONFIG: &str = "simple";
 
 /// The analyzer a configuration names.
-fn config(name: &str) -> Result<Arc<dyn Analyzer>> {
+pub(crate) fn config(name: &str) -> Result<Arc<dyn Analyzer>> {
     let n = name.trim();
     let n = n.strip_prefix("pg_catalog.").unwrap_or(n);
     nt::named(&n.to_lowercase()).map_err(|_| {
@@ -51,13 +51,13 @@ fn config(name: &str) -> Result<Arc<dyn Analyzer>> {
 // tsvector
 
 /// A position's weight: A 3, B 2, C 1, D 0 (PostgreSQL's numbering).
-type Weight = u8;
+pub(crate) type Weight = u8;
 
 /// A `tsvector`: terms in byte order, each with its positions (from 1,
 /// ascending, each once) and their weights; a term from a literal may have
 /// none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TsVector(Vec<(String, Vec<(u32, Weight)>)>);
+pub(crate) struct TsVector(pub(crate) Vec<(String, Vec<(u32, Weight)>)>);
 
 impl TsVector {
     /// Terms gathered: sorted, merged, positions sorted and unique (the
@@ -144,7 +144,11 @@ impl TsVector {
     }
 
     /// The entries `word` names: it alone, or every term it is a prefix of.
-    fn entries<'a>(&'a self, word: &str, prefix: bool) -> &'a [(String, Vec<(u32, Weight)>)] {
+    pub(crate) fn entries<'a>(
+        &'a self,
+        word: &str,
+        prefix: bool,
+    ) -> &'a [(String, Vec<(u32, Weight)>)] {
         let from = self.0.partition_point(|(t, _)| t.as_str() < word);
         let to = if prefix {
             from + self.0[from..].partition_point(|(t, _)| t.starts_with(word))
@@ -252,7 +256,7 @@ impl<'a> Scan<'a> {
 /// text's operand until it is analyzed (and `Stop` stands for one that
 /// gave no term, until PostgreSQL's clean-up takes it out).
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Q {
+pub(crate) enum Q {
     Lex {
         word: String,
         prefix: bool,
@@ -764,7 +768,7 @@ fn query_input(text: &str) -> Result<Option<Q>> {
 // Evaluation: PostgreSQL's TS_execute.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tri {
+pub(crate) enum Tri {
     No,
     Yes,
     Maybe,
@@ -773,10 +777,10 @@ enum Tri {
 /// Positions a phrase's part matches at (`negate`: where it does not),
 /// and the match's width less one.
 #[derive(Default)]
-struct Phr {
-    pos: Vec<u32>,
-    negate: bool,
-    width: u32,
+pub(crate) struct Phr {
+    pub(crate) pos: Vec<u32>,
+    pub(crate) negate: bool,
+    pub(crate) width: u32,
 }
 
 const L_ONLY: u8 = 1;
@@ -785,7 +789,14 @@ const BOTH: u8 = 4;
 
 /// PostgreSQL's `TS_phrase_output`: the two position lists merged as
 /// `emit` says, each moved by its offset.
-fn output_positions(l: &Phr, r: &Phr, emit: u8, lo: u32, ro: u32, out: Option<&mut Phr>) -> Tri {
+pub(crate) fn output_positions(
+    l: &Phr,
+    r: &Phr,
+    emit: u8,
+    lo: u32,
+    ro: u32,
+    out: Option<&mut Phr>,
+) -> Tri {
     let (mut i, mut j) = (0, 0);
     let mut got = Vec::new();
     while i < l.pos.len() || j < r.pos.len() {
@@ -868,14 +879,31 @@ fn check(v: &TsVector, word: &str, prefix: bool, weights: u8, data: Option<&mut 
     }
 }
 
+/// Where a query's operands are looked up: a vector, or the part of a
+/// text in view (a ranking's cover, a headline's).
+pub(crate) trait Source {
+    /// PostgreSQL's `TSExecuteCallback`: whether the operand `op` (a
+    /// [`Q::Lex`] of the query) is there — with `data`, at which positions.
+    fn check(&self, op: &Q, data: Option<&mut Phr>) -> Tri;
+}
+
+impl Source for TsVector {
+    fn check(&self, op: &Q, data: Option<&mut Phr>) -> Tri {
+        match op {
+            Q::Lex {
+                word,
+                prefix,
+                weights,
+            } => check(self, word, *prefix, *weights, data),
+            _ => Tri::No,
+        }
+    }
+}
+
 /// PostgreSQL's `TS_phrase_execute`.
-fn phrase(q: &Q, v: &TsVector, mut data: Option<&mut Phr>) -> Tri {
+pub(crate) fn phrase(q: &Q, v: &dyn Source, mut data: Option<&mut Phr>) -> Tri {
     match q {
-        Q::Lex {
-            word,
-            prefix,
-            weights,
-        } => check(v, word, *prefix, *weights, data),
+        Q::Lex { .. } => v.check(q, data),
         Q::Stop => Tri::No,
         Q::Not(x) => {
             let d = data.expect("a NOT under a phrase has its data");
@@ -981,13 +1009,9 @@ fn phrase(q: &Q, v: &TsVector, mut data: Option<&mut Phr>) -> Tri {
 }
 
 /// PostgreSQL's `TS_execute_recurse`.
-fn execute(q: &Q, v: &TsVector) -> Tri {
+pub(crate) fn execute(q: &Q, v: &dyn Source) -> Tri {
     match q {
-        Q::Lex {
-            word,
-            prefix,
-            weights,
-        } => check(v, word, *prefix, *weights, None),
+        Q::Lex { .. } => v.check(q, None),
         Q::Stop => Tri::No,
         Q::Not(x) => match execute(x, v) {
             Tri::No => Tri::Yes,
@@ -1137,11 +1161,11 @@ fn words(ws: &[&str], a: &dyn Analyzer) -> Option<String> {
 // ---------------------------------------------------------------------------
 // Types
 
-fn tsvector_type() -> TypeRef {
+pub(crate) fn tsvector_type() -> TypeRef {
     TypeRef::named("tsvector").expect("pg-compat registered tsvector")
 }
 
-fn tsquery_type() -> TypeRef {
+pub(crate) fn tsquery_type() -> TypeRef {
     TypeRef::named("tsquery").expect("pg-compat registered tsquery")
 }
 
@@ -1159,11 +1183,11 @@ fn text_of(v: &Value) -> Result<&str> {
         .ok_or_else(|| Error::internal("a text search value's bytes"))
 }
 
-fn vector_of(v: &Value) -> Result<TsVector> {
+pub(crate) fn vector_of(v: &Value) -> Result<TsVector> {
     TsVector::input(text_of(v)?)
 }
 
-fn query_of(v: &Value) -> Result<Option<Q>> {
+pub(crate) fn query_of(v: &Value) -> Result<Option<Q>> {
     query_input(text_of(v)?)
 }
 
@@ -1437,6 +1461,8 @@ pub(crate) fn register(r: &mut Registry) -> Result<()> {
     ] {
         r.add_function(&[m.name()], Arc::new(MakeQuery(m)))?;
     }
+    crate::tsrank::register(r)?;
+    crate::tsheadline::register(r)?;
     let text = r.operator("@@", DataType::Text, DataType::Text).cloned();
     let (v, q) = (
         DataType::Ext(tsvector_type()),

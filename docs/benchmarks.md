@@ -803,10 +803,32 @@ a query (median):
 Over a stored `tsvector` column instead (no index, the values computed
 as PostgreSQL computes them): 17.7 ms a SciFact query, 13.6 NFCorpus.
 
+A search page's query (`--rank`, PLAN.md §M14.21 T8b): the ten best
+matches by `ts_rank(to_tsvector('english', body), q)`, `id` breaking
+ties, and with each one's `ts_headline('english', body, q)`; nDCG@10,
+the mean ms of a query (median):
+
+| BEIR | | nucleus | GIN | nDCG@10, nucleus | GIN |
+|---|---|---:|---:|---:|---:|
+| SciFact | all, ranked | 0.17 (0.16) | 0.19 (0.18) | 0.0749 | 0.0749 |
+| | with headlines | 0.20 (0.17) | 0.23 (0.20) | | |
+| | any, ranked | 262.0 (270.2) | 376.4 (351.4) | 0.5720 | 0.5693 |
+| | with headlines | 263.3 (273.5) | 377.7 (347.2) | | |
+| NFCorpus | all, ranked | 1.17 (0.30) | 1.42 (0.36) | 0.2075 | 0.2045 |
+| | with headlines | 1.47 (0.44) | 1.84 (0.50) | | |
+| | any, ranked | 53.1 (22.7) | 70.6 (30.3) | 0.3039 | 0.3004 |
+| | with headlines | 53.9 (23.6) | 72.0 (32.4) | | |
+
+Both analyze every matching row's text again for `ts_rank`; nucleus's
+own ranking of the same corpora, `ORDER BY score(body @@ q)` (BM25
+ranking, above), takes 0.16 ms a SciFact query at nDCG@10 0.6891.
+
 ```sh
 target/ann-data/.venv/bin/pip install "psycopg[binary]"
 NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/tsearch.py nucleus target/release/nucleus --values
+NUCLEUS_BENCH_HOST=::1 target/ann-data/.venv/bin/python bench/text/tsearch.py nucleus target/release/nucleus --sets scifact,nfcorpus --rank
 target/ann-data/.venv/bin/python bench/text/tsearch.py postgres
+target/ann-data/.venv/bin/python bench/text/tsearch.py postgres --sets scifact,nfcorpus --rank
 ```
 
 ## Write amplification

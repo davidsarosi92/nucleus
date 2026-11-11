@@ -200,13 +200,15 @@ fn the_rewrite_finds_what_the_values_do() {
 /// PostgreSQL's own answers (`bench/text/tsearch_pg.py`): random vectors
 /// against random queries — phrases at distances 0 to 3 over operators,
 /// negations, prefixes, weights — and the makers' queries, their text
-/// forms too.
+/// forms too; `ts_rank` and `ts_rank_cd`, normalized and weighted, to
+/// the bit; `ts_headline`'s headlines, its options too.
 #[test]
 fn as_postgresql_answers() {
     let mut s = session();
     let lit = |x: &str| format!("'{}'", sql_text(x));
     let one = |s: &mut Session, sql: &str| rows(s, sql).join(" | ");
     let mut wrong = Vec::new();
+    let (mut ranked, mut covered, mut headlined) = (0, 0, 0);
     let fixture = include_str!("tsearch_pg.tsv");
     for line in fixture.lines() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -237,10 +239,63 @@ fn as_postgresql_answers() {
                     ));
                 }
             }
+            "rank" => {
+                let (v, q, n, w) = (
+                    format!("{}::tsvector", lit(f[1])),
+                    format!("{}::tsquery", lit(f[2])),
+                    f[3],
+                    format!("{}::real[]", lit(f[4])),
+                );
+                let got = rows(
+                    &mut s,
+                    &format!(
+                        "SELECT ts_rank({v}, {q}), ts_rank_cd({v}, {q}), ts_rank({v}, {q}, {n}), \
+                         ts_rank_cd({v}, {q}, {n}), ts_rank({w}, {v}, {q}), ts_rank_cd({w}, {v}, {q})"
+                    ),
+                );
+                let got: Vec<f32> = got[0].split(' ').map(|x| x.parse().unwrap()).collect();
+                let want: Vec<f32> = f[5..11].iter().map(|x| x.parse().unwrap()).collect();
+                ranked += usize::from(want[0] > 0.0);
+                covered += usize::from(want[1] > 0.0);
+                if got
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .ne(want.iter().map(|x| x.to_bits()))
+                {
+                    wrong.push(format!(
+                        "ranks of {} by {} ({n}, {}): {got:?}, PostgreSQL {want:?}",
+                        f[1], f[2], f[4]
+                    ));
+                }
+            }
+            "headline" => {
+                let got = one(
+                    &mut s,
+                    &format!(
+                        "SELECT ts_headline('english', {}, {}::tsquery, {})",
+                        lit(f[1]),
+                        lit(f[2]),
+                        lit(f[3])
+                    ),
+                );
+                let want = f.get(4).copied().unwrap_or("");
+                headlined += usize::from(want.contains(['<', '[', '|']));
+                if got != want {
+                    wrong.push(format!(
+                        "ts_headline({:?}, {}, {:?}):\n  {got:?}\n  PostgreSQL {want:?}",
+                        f[1], f[2], f[3]
+                    ));
+                }
+            }
             other => panic!("{other}"),
         }
     }
-    assert!(fixture.lines().count() >= 2400);
+    assert!(
+        ranked > 300 && covered > 300,
+        "{ranked}, {covered} ranked above 0"
+    );
+    assert!(headlined > 300, "{headlined} headlines mark a word");
+    assert!(fixture.lines().count() >= 5100);
     assert!(
         wrong.is_empty(),
         "{} of {}:\n{}",

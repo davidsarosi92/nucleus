@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `ts_rank` and `ts_rank_cd` (`[weights,] vector, query
+  [, normalization]`) as PostgreSQL computes them, to the bit;
+  `ts_headline([cfg,] document, query [, options])` as its default
+  parser's headline, every option (checked against 2,700 more of
+  PostgreSQL 18's answers).
 - PostgreSQL's text search: `tsvector` and `tsquery` (PostgreSQL's text
   forms), `to_tsvector`, `to_tsquery`, `plainto_tsquery`,
   `phraseto_tsquery`, `websearch_to_tsquery`, `@@` — evaluated as

@@ -23,7 +23,8 @@ nucleus database.  nucleus's own interface — the `ncp` protocol,
   PostgreSQL's text search: `tsvector`, `tsquery`, `to_tsvector`,
   `to_tsquery`, `plainto_` / `phraseto_` / `websearch_to_tsquery` and
   `@@`, evaluated as PostgreSQL evaluates them, the configurations
-  nucleus's analyzers by name; `to_tsvector(cfg, col) @@ to_tsquery(cfg,
+  nucleus's analyzers by name; `ts_rank`, `ts_rank_cd` and `ts_headline`
+  as PostgreSQL computes them; `to_tsvector(cfg, col) @@ to_tsquery(cfg,
   'q')` is served by a text index on `col` analyzing as `cfg`.  The `Pg`
   front end's sessions have it (`registry()`); other sessions do not.
 
@@ -53,10 +54,11 @@ test (`cargo package`, which builds it from its packaged form alone).
   module's (`tests/slt/`) over the PostgreSQL protocol, authentication,
   and the extended protocol through the `postgres` driver.
 - `tests/catalog.rs` — this module's scripts in a local session.
-- `tests/tsearch.rs` — text search against 2,400 of PostgreSQL 18's
+- `tests/tsearch.rs` — text search against 5,100 of PostgreSQL 18's
   answers (`tests/tsearch_pg.tsv`, made by nucleus's
-  `bench/text/tsearch_pg.py`), and the rewrite to the text index finding
-  what the values do.
+  `bench/text/tsearch_pg.py`: matches, queries made, ranks to the bit,
+  headlines to the byte), and the rewrite to the text index finding what
+  the values do.
 
 ## Licence
 

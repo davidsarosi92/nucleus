@@ -277,7 +277,7 @@ are marked ✅.
 | | M14.27 | Statistics and numerical analysis on large data, for AI models and AI developers: a study first (moments, deviations, correlation, quantiles, sketches, drift), then the plan | ◐ study written (2026-11-05): exact power sums by one superaccumulator, window functions, exact quantiles by selection, order-free sketches; steps S1–S8 agreed (2026-11-06); S1 ✅ (one exact accumulator), S2 ✅ (moments), S3 ✅ (two variables), S4 ✅ (window functions, then the sort: `ORDER BY` 2–4× faster, a primary key's order left unsorted), S5 ✅ (ordered sets: exact quantiles by selection, 3–4× PostgreSQL's), S6 ✅ (sketches: HyperLogLog++, DDSketch, top-k, the same bytes every run), S7 ✅ (sampling: `TABLESAMPLE … REPEATABLE` by the key's hash, `hash_unit`, `reservoir_sample`, `random()`), S8a ✅ (drift and tests: `ks_test`, `auc`, `psi`, `js_divergence`, `chisq_test`, scipy's answers), S8b ✅ (`SUMMARIZE`, the MCP tool) |
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
-| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×) done | ◐ |
+| | M14.21 | **Next:** Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT` done | ◐ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
@@ -6170,6 +6170,87 @@ row's text form is parsed again: the 17.7 ms); a parameter's query
 it needs the translation at execution, where it may fail; `CREATE INDEX
 … USING gin (to_tsvector(cfg, col))` as a text index; `ts_rank`,
 `ts_rank_cd`, `ts_headline` (T8b).
+
+**T8b — PostgreSQL's ranking and headlines in pg-compat** (done
+2026-11-11).  Prior art: PostgreSQL's `tsrank.c` (`ts_rank`:
+`calc_rank_and` — each pair of the query's terms by its nearest
+positions, `word_distance`'s inverse, the weights' table —,
+`calc_rank_or`, the normalizations by length, unique words, log length,
+the rank plus one; `ts_rank_cd`: `Cover`'s covers, each the inverse of
+its width weighted, `get_docrep`'s positions of the query's terms),
+`SortAndUniqItems` over `sort_template.h`'s `qsort`; `wparser_def.c`'s
+`prsd_headline` (`hlCover`: the covers of the query by the AND'ed
+locations `TS_execute_locations` gives, each checked by `TS_execute` on
+the words inside; `mark_hl_words`: the best cover stretched to
+`MinWords`–`MaxWords` words, not ending on a short word or a number;
+`mark_hl_fragments`: covers cut to `MaxWords`, the ones with the most
+query words, then the fewest words, each grown both ways by half the
+rest; `get_next_fragment`), `ts_parse.c`'s `hlparsetext`, `hlfinditem`
+(a word matching two operands repeated, once each) and
+`generateHeadline`; the planner's `make_sort_input_target` (an expensive
+output expression computed above the sort and the limit).  Taken:
+
+1. **`ts_rank`, `ts_rank_cd`** (`[weights,] vector, query
+   [, normalization]`) as PostgreSQL computes them, to the bit:
+   `ts_rank` in `float4` with C's promotions (a `sqrt`, `1.0 - x` in
+   `double`), `ts_rank_cd` in `double`.  Which of two operands of the
+   same word (`a`, `a:*`) counts depends on PostgreSQL's `qsort`, which
+   is not stable past six items: ported (insertion sort below 7, the
+   presorted check, median of three or nine, Bentley–McIlroy's
+   partition) — with a stable sort, 7 of 1,500 cases differed.
+2. **`ts_headline([cfg,] document, query [, options])`**: the options as
+   `deserialize_deflist` reads them (`key = value`, quoted values,
+   PostgreSQL's errors) and `prsd_headline` checks them (`MaxWords` 35,
+   `MinWords` 15, `ShortWord` 3, `MaxFragments` 0, `HighlightAll`,
+   `StartSel`, `StopSel`, `FragmentDelimiter`); the text a list of words
+   — `simple`'s, the text between two words one token, a number never a
+   headline's end — with the configuration's terms at their positions;
+   the selection and output ported as they are.
+3. **The output after the limit** (the optimizer's `postponed`): under
+   `LIMIT`, a projection's expressions the sort does not order by are
+   computed above the limit, the sort carrying the columns they read —
+   `ts_headline` on the ten rows kept, not on every match.  PostgreSQL
+   postpones only expensive or volatile ones (more than ten operators'
+   cost); nucleus every one that is not a column or a constant: the sort
+   keeps `k` rows, so carrying a column costs no more than computing on
+   it, and an error a row not kept would raise is not raised.
+
+Departures: the words are UAX #29's (PostgreSQL's parser splits `don't`
+and hyphenated words, keeps `3.5` and URLs whole), HTML tags are text
+(PostgreSQL's parser replaces a tag with a space).  Tested: PostgreSQL
+18's answers (`tests/tsearch_pg.tsv`, 5,100 cases) — 1,500 random
+vectors and queries ranked six ways each (`ts_rank`, `ts_rank_cd`,
+normalized by a random mask, weighted by random weights; 1,273 with a
+`ts_rank` above 0, 441 a `ts_rank_cd`) alike to the bit, and 1,200
+headlines of random English (words, numbers, commas, stops) for random
+queries over prefixes, phrases and every operator, with 11 sets of
+options, alike to the byte; the options' errors in
+`slt/03_text_search.slt`; `tests/sort.rs` for the postponement (the plan,
+and `1000 / x` not computed on a row with `x` 0 the limit drops).
+
+Measured (`bench/text/tsearch.py --rank`: the ten best matches by
+`ts_rank(to_tsvector('english', body), q)`, and with each one's
+`ts_headline`; as T8a, a query's mean ms, median in parentheses):
+
+| | any, nucleus | any, GIN | with headlines, nucleus | GIN | nDCG@10, nucleus | GIN |
+|---|---:|---:|---:|---:|---:|---:|
+| SciFact | 262.0 (270.2) | 376.4 (351.4) | 263.3 (273.5) | 377.7 (347.2) | 0.5720 | 0.5693 |
+| NFCorpus | 53.1 (22.7) | 70.6 (30.3) | 53.9 (23.6) | 72.0 (32.4) | 0.3039 | 0.3004 |
+
+(all the words: 0.17 ms against 0.19 on SciFact, 1.17 against 1.42 on
+NFCorpus, nDCG@10 0.0749 and 0.2075 against 0.0749 and 0.2045.)  Before
+the postponement the headlines doubled nucleus's time (517 ms SciFact,
+103 NFCorpus): each match's was computed.  A profile of the SciFact
+query: 206 of its 254 ms is `to_tsvector` — every match's text analyzed
+again, as in PostgreSQL —, `ts_rank` the rest; nucleus's own BM25
+(`score(body @@ q)`, T5c) ranks the same queries in 0.16 ms at nDCG@10
+0.6891.  Not taken yet: `ts_rank` over a text index's positions (the
+`to_tsvector` would not be computed: the index has each row's terms
+and positions, but a row's are spread over its postings — a
+forward index, or `score()` by the rewrite, PostgreSQL's ranking
+dropped); the other `tsvector` functions (`length`, `setweight`,
+`strip`, `ts_rewrite`, `ts_stat`, `ts_debug`); FiQA ranked (its any
+queries match 16,000 rows each: minutes a round).
 
 ### §M14.22 — Embeddings in the database ⬜
 
