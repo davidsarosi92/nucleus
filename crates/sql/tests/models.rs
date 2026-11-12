@@ -319,5 +319,8 @@ fn a_batch_of_rows_in_few_calls() {
     assert_eq!(r, vec![vec![Value::Int(2000)]]);
     assert_eq!(p.texts.load(Ordering::SeqCst), 2000);
     let calls = p.calls.load(Ordering::SeqCst);
-    assert!(calls <= 30, "{calls} calls for 2,000 texts (24 when measured)");
+    assert!(
+        calls <= 30,
+        "{calls} calls for 2,000 texts (24 when measured)"
+    );
 }

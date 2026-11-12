@@ -278,7 +278,7 @@ are marked ✅.
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
-| | M14.22 | **Next:** Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ◐ E1 ✅ (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory), E2b ✅ (`CREATE MODEL`, `embed()`, providers: `hashing` built in, OpenAI-compatible, Cohere, Voyage as a module) |
+| | M14.22 | **Next:** Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ◐ E1 ✅ (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory), E2b ✅ (`CREATE MODEL`, `embed()`, providers: `hashing` built in, OpenAI-compatible, Cohere, Voyage as a module), E3a ✅ (tokenizers: WordPiece and Unigram from `tokenizer.json`, the same ids as Hugging Face on 2.5 M texts) |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
@@ -6512,9 +6512,10 @@ The steps:
   document embeddings.
 - **E3 — the local model**: the tokenizers (checked against Hugging
   Face's `tokenizers` on every text of a corpus), the encoder on
-  nucleus's kernels, weights in the database; checked against
-  sentence-transformers (cosine ≥ 0.9999 a vector, the same nDCG@10 on
-  BEIR) and measured against fastembed on one core and on all.
+  nucleus's kernels, weights in the database; checked against the
+  publishers' own f32 ONNX exports run by ONNX Runtime (cosine ≥ 0.9999
+  a vector, the same nDCG@10 on BEIR) and measured against fastembed on
+  one core and on all.
 - **E4 — columns kept current**: `GENERATED ALWAYS AS … STORED`, then
   `GENERATED BY EMBEDDING`, the queue, the workers, retries, pending
   rows; crash, outage and concurrency tests in the simulator.
@@ -6581,6 +6582,40 @@ a batch's texts together (2,000 rows of a column table: 24 calls at a
 batch of 100 — 20 full, the rest the ends of the executor's batches).  Not yet: connection reuse (one TLS handshake
 a call — batches carry it; E8), the one-argument `embed($q)` taking a
 column's model (E4, when columns have one).
+
+E3 is done in three: **E3a** the tokenizers — WordPiece behind
+BERT's normalizer (bge, MiniLM, GTE) and SentencePiece's Unigram behind
+its precompiled normalizer (XLM-R: multilingual-e5), read from
+`tokenizer.json`; **E3b** the encoder — an f32 matrix product in
+`nucleus-kernels`, BERT's layers, CLS and mean pooling, weights from
+safetensors; **E3c** the weights in the database, `CREATE MODEL …
+USING local`, and the measurements.
+
+**E3a — the tokenizers** (done 2026-11-12).  `nucleus-local-models`
+reads `tokenizer.json`: WordPiece behind BERT's normalizer and
+pre-tokenizer, Unigram behind SentencePiece's precompiled map, runs of
+spaces squeezed and Metaspace; special tokens in a text matched as
+`tokenizers` matches them; anything else refused by name.  Found by
+comparing code point by code point: `tokenizers` classifies for BERT
+by Unicode **8** (the `unicode_categories` crate's tables) — with
+Unicode 16, 560 code points differ (punctuation and nonspacing marks
+added since, U+166D moved from Po to So), with 8 none — so
+`scripts/gen-tokenizer-tables.py` generates BERT's classes and
+decompositions from 8 and the grapheme clusters (UAX #29, its 1,093
+test cases passing) from 16.  Taken from SentencePiece / `tokenizers`:
+the precompiled map is a darts-clone double array read as is, applied
+by grapheme cluster with the *shortest* matching key (what `tokenizers`
+does, not SentencePiece's longest); Viterbi over bytes with unknowns at
+the lowest score less ten, fused.  Checked by `bench/embed/tokens.py`
+against `tokenizers` 0.23.3 on bge-small-en-v1.5 and
+multilingual-e5-small: 103,821 texts of BEIR and twelve languages' word
+lists, 2,224,128 code-point probes and 200,000 random mixtures (letters,
+marks, emoji, controls, special tokens) — all the same ids (the first
+run found one difference: a text that normalizes to a leading space
+gets no second `▁`).  Speed on one core, those corpora (73 MB): 1.9 s
+WordPiece; Unigram 27.7 s by binary search in the sorted pieces, 7.6 s
+over a byte trie (`tokenizers`, one thread from Python: 17.9 s and
+19.6 s).
 
 ### §M14.23 — Embedded editions ⬜
 

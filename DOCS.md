@@ -43,6 +43,7 @@
 | `modules/ldap` | `nucleus-ldap` | LDAP: passwords checked by a directory | §M14.25 ✅ |
 | `modules/http` | `nucleus-http` | just enough HTTP/1.1 over TLS for the modules that call out (oidc, embeddings) | §M14.22 |
 | `modules/embeddings` | `nucleus-embeddings` | embedding model providers: OpenAI-compatible endpoints, Cohere, Voyage (§8.23) | §M14.22 |
+| `modules/local-models` | `nucleus-local-models` | models run inside nucleus: so far the tokenizers — WordPiece (BERT's) and Unigram (SentencePiece's), from `tokenizer.json` (§8.23) | §M14.22 |
 | `modules/mcp` | `nucleus-mcp` | a Model Context Protocol server: AI models list, describe and query a database (§6.5) | §M14.10 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
@@ -4066,6 +4067,17 @@ loopback answering as OpenAI, Cohere and Voyage: the requests, the key,
 answers out of order, a 429 tried again, a 401 without the key in the
 error, a server down).
 
+Local models (`modules/local-models`, §M14.22 E3; not yet a provider):
+its tokenizers read a Hugging Face `tokenizer.json` — WordPiece behind
+BERT's normalizer and pre-tokenizer, Unigram behind SentencePiece's
+precompiled character map (by grapheme cluster, UAX #29) and Metaspace —
+and give the ids `tokenizers` gives: special tokens in a text are those
+tokens, a text is cut with its closing token kept, and anything else a
+file may hold is refused by name.  BERT's character classes are Unicode
+8's, as `tokenizers`' are (`scripts/gen-tokenizer-tables.py`).
+Checked by `bench/embed/tokens.py` (corpora, every code point, random
+mixtures: all the same) and `modules/local-models/tests/`.
+
 ### 8.14 Errors and hints (`error`, `hint`)
 
 An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
@@ -4834,6 +4846,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-12 — §M14.22 E3a, the tokenizers:** new module
+  `nucleus-local-models` with WordPiece and Unigram tokenizers read from
+  `tokenizer.json`, the same ids as Hugging Face's `tokenizers` on
+  2.5 million texts; `scripts/gen-tokenizer-tables.py` (Unicode 8
+  classes for BERT, Unicode 16 grapheme clusters);
+  `bench/embed/models.py`, `bench/embed/tokens.py`.
 - **2026-11-12 — §M14.22 E2b, models and `embed()`:** `CREATE | DROP
   MODEL … USING provider WITH (…)`, providers registered
   (`Registry::add_model_provider`), `hashing` built in; `embed(text, m [,
