@@ -264,6 +264,18 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
     ),
     ("model_providers", &[("name", T), ("remote", B)]),
     (
+        "chunk_tables",
+        &[
+            ("table_name", T),
+            ("source", T),
+            ("column_name", T),
+            ("by", T),
+            ("size", I),
+            ("overlap", I),
+            ("model", T),
+        ],
+    ),
+    (
         "embedding_jobs",
         &[
             ("table_name", T),
@@ -770,6 +782,26 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     t.budget
                         .rate
                         .map_or(Value::Null, |n| Value::Int(i64::from(n))),
+                ]);
+            }
+        }
+        "chunk_tables" => {
+            for t in &tables {
+                let Some(spec) = &t.chunks else { continue };
+                let Some(fk) = t.foreign_keys.iter().find(|f| f.name == spec.fk) else {
+                    continue;
+                };
+                let column = catalog::get_table(txn, &fk.table)?
+                    .and_then(|s| s.columns.get(spec.column).map(|c| c.name.clone()))
+                    .unwrap_or_default();
+                out.push(vec![
+                    text(t.name.clone()),
+                    text(fk.table.clone()),
+                    text(column),
+                    text(spec.by.clone()),
+                    Value::Int(i64::from(spec.size)),
+                    Value::Int(i64::from(spec.overlap)),
+                    spec.model.clone().map_or(Value::Null, text),
                 ]);
             }
         }

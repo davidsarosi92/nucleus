@@ -85,7 +85,7 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// version 7 an owner, version 8 row-level security, version 9 comments
 /// on the table and its columns; version 14 an index's access method,
 /// operator classes and options; older versions still read.
-const TABLE_VERSION: u8 = 15;
+const TABLE_VERSION: u8 = 16;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -342,6 +342,26 @@ pub struct Table {
     pub storage_policy: Option<(String, crate::datetime::Interval)>,
     /// `CREATE STATISTICS` on it.
     pub statistics: Vec<Statistic>,
+    /// A chunk table: what it holds the chunks of ([`crate::chunk_tables`]).
+    pub chunks: Option<ChunkSpec>,
+}
+
+/// What a chunk table holds (PLAN.md §M14.22 E7): the chunks of the texts
+/// of a column of the table its foreign key `fk` references.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChunkSpec {
+    /// Its foreign key to the documents' table (by name).
+    pub fk: String,
+    /// The documents' text column, by position.
+    pub column: usize,
+    /// `sentences`, `tokens` or `markdown`.
+    pub by: String,
+    /// The most a chunk holds.
+    pub size: u32,
+    /// What a chunk repeats of the one before.
+    pub overlap: u32,
+    /// The model whose tokens sizes are counted in (else words).
+    pub model: Option<String>,
 }
 
 impl Table {
@@ -514,6 +534,20 @@ impl Table {
                         .u32(*version)
                         .opt_str(next.as_deref());
                 }
+            }
+        }
+        match &self.chunks {
+            None => {
+                w.u8(0);
+            }
+            Some(c) => {
+                w.u8(1)
+                    .str(&c.fk)
+                    .u32(c.column as u32)
+                    .str(&c.by)
+                    .u32(c.size)
+                    .u32(c.overlap)
+                    .opt_str(c.model.as_deref());
             }
         }
         w.0
@@ -693,6 +727,18 @@ impl Table {
                 };
             }
         }
+        let chunks = if version >= 16 && r.u8()? == 1 {
+            Some(ChunkSpec {
+                fk: r.str()?,
+                column: r.u32()? as usize,
+                by: r.str()?,
+                size: r.u32()?,
+                overlap: r.u32()?,
+                model: r.opt_str()?,
+            })
+        } else {
+            None
+        };
         Ok(Self {
             id,
             name,
@@ -714,6 +760,7 @@ impl Table {
             partition_of,
             storage_policy,
             statistics,
+            chunks,
         })
     }
 }
@@ -1477,6 +1524,14 @@ mod tests {
                 name: "people_dep".into(),
                 columns: vec![0, 1],
             }],
+            chunks: Some(ChunkSpec {
+                fk: "people_doc_fkey".into(),
+                column: 1,
+                by: "markdown".into(),
+                size: 200,
+                overlap: 20,
+                model: Some("e5".into()),
+            }),
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);
         assert!(t.index_prefix(0) < t.index_prefix(1));

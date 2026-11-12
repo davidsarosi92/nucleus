@@ -101,6 +101,27 @@ pub enum Statement {
         /// The columns a column copy holds (`None`: all).
         columns: Option<Vec<String>>,
     },
+    /// `CREATE TABLE c CHUNKS OF t (column) BY how SIZE n [OVERLAP n]
+    /// [USING model]`: a table of `t`'s texts' chunks, kept current with
+    /// it (PLAN.md §M14.22 E7).
+    CreateChunkTable {
+        /// The chunk table.
+        name: String,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+        /// The documents' table.
+        source: String,
+        /// Its text column.
+        column: String,
+        /// `sentences`, `tokens` or `markdown`.
+        by: String,
+        /// The most a chunk holds.
+        size: u32,
+        /// What a chunk repeats of the one before.
+        overlap: u32,
+        /// The model whose tokens sizes are counted in (else words).
+        model: Option<String>,
+    },
     /// `ALTER TABLE t ALTER [COLUMN] v SET MODEL m`: an embedding column's
     /// vectors made again by another model, online (PLAN.md §M14.22 E5).
     SetColumnModel {

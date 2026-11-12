@@ -2552,6 +2552,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by`, `max_rows`, `max_scan`, `timeout`, `rate_per_minute` (the tokens the current role may manage; never a secret) |
 | `nc_catalog.models` | `name`, `owner`, `provider`, `dimensions`, `max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`, `files`, `bytes`, `created`, `calls`, `texts`, `cached`, `errors`, `total_ms` (the models the current role may call; the calls since the process started, §8.23) |
 | `nc_catalog.model_providers` | `name`, `remote` (whether its calls reach the network) |
+| `nc_catalog.chunk_tables` | `table_name`, `source`, `column_name`, `by`, `size`, `overlap`, `model` (the chunk tables and what they chunk, §8.26) |
 | `nc_catalog.embedding_jobs` | `table_name`, `column_name`, `model`, `kind` (`current`, `next`), `key`, `state` (`pending`, `retrying`, `failed`), `attempts`, `enqueued`, `next_attempt`, `error` (the embedding columns' queue, §8.24; the tables the current role may read) |
 | `nc_catalog.secrets` | `name`, `owner`, `source` (`value`, `env`), `env`, `created`, `changed` (the secrets the current role may use; never a value) |
 | `nc_catalog.grants` | `kind`, `object`, `column`, `grantee`, `privilege`, `grantable` (the ACLs written out) |
@@ -4134,7 +4135,7 @@ are not generated.  The expression may not read a generated column, call
 a volatile function (`42P17`) or hold a subquery (`0A000`), nor be in
 the partitioning; `DEFAULT` with it is `42601`; `VIRTUAL` and identity
 columns are refused (`0A000`).  `ALTER TABLE … ADD COLUMN … GENERATED`
-computes it for every row.  The table record (version 15) keeps a
+computes it for every row.  The table record (version 15 on) keeps a
 column's generation after its statistics: `0`, `1 <expr>` or `2 <expr>
 <model> <version u32> <next model?>`.  `nc_catalog.columns` shows
 `generated` (`stored`, `embedding`), `generation_expr`, `model`,
@@ -4260,6 +4261,43 @@ provider counts by its tokenizer, without the prefix and the special
 tokens), checking `USAGE`; a chunk is counted again whole and given
 fewer units while it is over.  Tests: `chunks.rs`'s own,
 `slt/62_chunks.slt`, local-models `tests/provider.rs`.
+
+### 8.26 Chunk tables (`chunk_tables`, §M14.22 E7)
+
+`CREATE TABLE c CHUNKS OF docs (body) BY sentences | tokens | markdown
+SIZE n [OVERLAP n] [USING model]`: a table of the chunks `chunks()`
+(§8.25) cuts from `docs.body`, kept current with `docs`.  Its columns:
+`docs`' primary key columns (names and types), `position`, `chunk`,
+`start`, `length`, `headings`, `size`, all `NOT NULL`; its primary key
+the documents' key and `position`; its lineage a foreign key
+`c_document_fkey` to `docs` `ON DELETE CASCADE ON UPDATE CASCADE`.  The
+table record (version 16) keeps a chunk table's `ChunkSpec` (the foreign
+key's name, the text column's position, by, size, overlap, model) after
+its columns' generations.  Made by SQL the module writes and
+`session::create_table`, then filled from every document.  Needs: a
+primary key on `docs`, a `text` column (`42804`), a table neither
+partitioned nor a chunk table (`0A000`); `CREATE` on the schema,
+`SELECT` on the column and `REFERENCES` on the key.
+
+Kept current in the writer's transaction (chunking is local; no call
+leaves the process): `Writer::new` of a table finds its chunk tables
+among the foreign keys referencing it (`chunk_tables::of`); after an
+insert (`store_batch`) the new documents' chunks are inserted in one
+batch; after an update (`update_rows`, past the foreign keys' actions)
+each document whose text changed is chunked again (`rechunk`): its
+chunks read by the foreign key, matched with the new ones by text (the
+same position first); unmatched old ones deleted, matched ones whose
+position moved updated through negative positions (so no two meet on the
+primary key), their other derived values set, unmatched new ones
+inserted.  A matched chunk keeps its row, so an embedding column over
+`chunk` keeps its vector and gets no job.  A key change is the foreign
+key's cascade; a delete, its cascade.  `INSERT`, `DELETE`, `COPY` into a
+chunk table and `UPDATE` of a derived or key column are refused
+(`42809`); columns added to it are the user's.  Its foreign key is not
+dropped (`2BP01`); the text column's and the derived columns' types are
+not changed (`0A000`); `DROP TABLE docs` is `2BP01` while it has chunk
+tables, `… CASCADE` drops them with it.  Tests: `tests/chunk_tables.rs`,
+and the crash workload of `tests/embedding_columns.rs` keeps one.
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -5028,6 +5066,12 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-12 — §M14.22 E7, chunk tables:** `CREATE TABLE … CHUNKS OF
+  t (c) BY … SIZE … [OVERLAP …] [USING m]` (`chunk_tables`), table
+  record version 16 (`ChunkSpec`), `nc_catalog.chunk_tables`; writes to a
+  table rechunk its chunk tables in the same transaction; `DROP TABLE …
+  CASCADE` drops a table's chunk tables.
 
 - **2026-11-12 — §M14.22 E6, chunks:** `chunks(text, by, size [,
   overlap [, model]])` (`chunks`), UAX #29 sentences (`text::sentences`,

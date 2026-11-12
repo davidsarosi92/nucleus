@@ -919,6 +919,21 @@ pub fn authorize_ddl(
                 }
             }
         }
+        Statement::CreateChunkTable { source, column, .. } => {
+            // A table of the source's texts, and a foreign key to it.
+            c.require(txn, Kind::Schema, "public", CREATE, None)?;
+            c.require(txn, Kind::Table, source, SELECT, Some(column))?;
+            let parent = crate::catalog::table(txn, source)?;
+            for &k in &parent.primary_key {
+                c.require(
+                    txn,
+                    Kind::Table,
+                    source,
+                    REFERENCES,
+                    Some(&parent.columns[k].name),
+                )?;
+            }
+        }
         Statement::CreateEnum { .. } => c.require(txn, Kind::Schema, "public", CREATE, None)?,
         Statement::CreateSecret { .. } | Statement::CreateModel { .. } => {
             c.require(txn, Kind::Database, DATABASE, CREATE, None)?

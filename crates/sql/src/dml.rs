@@ -515,6 +515,10 @@ pub struct Writer {
     generated: Vec<(usize, Expr)>,
     /// The embedding columns and the columns their texts are made of.
     embeddings: Vec<(usize, Vec<usize>)>,
+    /// Its chunk tables, kept current with its texts (§M14.22 E7), and
+    /// the registry their writes need.
+    chunked: Vec<crate::chunk_tables::Chunked>,
+    registry: Option<Box<Registry>>,
     /// Its index entries.
     pub keys: IndexKeys,
     /// How its rows are stored.
@@ -568,6 +572,12 @@ impl Writer {
         let keys = IndexKeys::new(txn, reg, &table)?;
         let storage = crate::storage::of(&table)?;
         catalog::validate_table(txn, &table.name)?;
+        let chunked = if table.referenced_by.is_empty() {
+            Vec::new()
+        } else {
+            crate::chunk_tables::of(txn, reg, &table)?
+        };
+        let registry = (!chunked.is_empty()).then(|| Box::new(reg.clone()));
         let partitions = match &table.partition_by {
             None => None,
             Some(spec) => Some((
@@ -600,6 +610,8 @@ impl Writer {
             defaults,
             generated,
             embeddings,
+            chunked,
+            registry,
             keys,
             storage,
             partitions,
@@ -1074,6 +1086,7 @@ pub fn insert(
     params: &[Value],
 ) -> Result<Written> {
     let t = catalog::table(&*txn, table)?;
+    crate::chunk_tables::refuse(&t, "insert into")?;
     let targets = target_columns(&t, columns)?;
     let (rows, writer, ret) = {
         let ro: &dyn KvTxn = &*txn;
@@ -1168,6 +1181,13 @@ pub fn update(
     params: &[Value],
 ) -> Result<Written> {
     let t = catalog::table(&*txn, table)?;
+    for (name, _) in assignments {
+        if let Some(c) = t.column(name)
+            && crate::chunk_tables::derives(&t, c)
+        {
+            crate::chunk_tables::refuse(&t, &format!("update column \"{name}\" of"))?;
+        }
+    }
     let (changes, writer, ret) = {
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro, reg).checked();
@@ -1401,6 +1421,8 @@ fn store_batch(
     let indexed = !w.keys.btrees().is_empty();
     let kept = w.keys.has_methods();
     let mut embedded: Vec<Vec<u8>> = Vec::new();
+    // The rows whose texts the chunk tables chunk.
+    let mut chunked: Vec<Row> = Vec::new();
     let mut places = Vec::with_capacity(rows.len());
     let mut entries: Vec<(Vec<u8>, Vec<(usize, Vec<u8>, bool)>)> = Vec::new();
     let mut batch = Vec::with_capacity(rows.len());
@@ -1419,6 +1441,9 @@ fn store_batch(
         }
         if !w.embeddings.is_empty() {
             embedded.push(pk_suffix(t, &key).to_vec());
+        }
+        if !w.chunked.is_empty() {
+            chunked.push(b.row.clone());
         }
         places.push(b.place);
         batch.push(crate::storage::NewRow {
@@ -1465,6 +1490,10 @@ fn store_batch(
         return Err(f);
     }
     crate::storage::written(t);
+    if let Some(reg) = &w.registry {
+        crate::chunk_tables::written(txn, reg, &w.chunked, chunked.iter().map(|r| (None, r)))
+            .map_err(none)?;
+    }
     if let Some(keys) = fk_keys {
         crate::fk::check_keys(&*txn, t, &keys).map_err(none)?;
     }
@@ -1544,6 +1573,15 @@ pub fn update_rows(
             .collect();
         crate::fk::parent_changed(txn, reg, t, &changed)?;
     }
+    // Changed texts chunked again (a changed key moved the chunks above).
+    if !w.chunked.is_empty() {
+        crate::chunk_tables::written(
+            txn,
+            reg,
+            &w.chunked,
+            changes.iter().map(|(_, o, n)| (Some(o), n)),
+        )?;
+    }
     Ok(())
 }
 
@@ -1592,6 +1630,7 @@ pub fn delete(
     params: &[Value],
 ) -> Result<Written> {
     let t = catalog::table(&*txn, table)?;
+    crate::chunk_tables::refuse(&t, "delete from")?;
     let rows = {
         let ro: &dyn KvTxn = &*txn;
         let mut binder = Binder::new(ro, reg).checked();

@@ -1769,6 +1769,39 @@ pub(crate) fn execute_statement(
             crate::privileges::on_create_table(txn, name, &owner)?;
             Output::Command("CREATE TABLE".into())
         }
+        Statement::CreateChunkTable {
+            name,
+            if_not_exists,
+            source,
+            column,
+            by,
+            size,
+            overlap,
+            model,
+        } => {
+            if catalog::get_table(&*txn, name)?.is_some() {
+                if *if_not_exists {
+                    return Ok(Output::Command("CREATE TABLE".into()));
+                }
+                return Err(Error::duplicate_table(format!(
+                    "relation \"{name}\" already exists"
+                )));
+            }
+            crate::chunk_tables::create(
+                txn,
+                reg,
+                name,
+                source,
+                column,
+                by,
+                *size,
+                *overlap,
+                model.as_deref(),
+            )?;
+            let owner = crate::access::current().user.clone();
+            crate::privileges::on_create_table(txn, name, &owner)?;
+            Output::Command("CREATE TABLE".into())
+        }
         Statement::CreatePartition {
             name,
             parent,
@@ -1806,6 +1839,25 @@ pub(crate) fn execute_statement(
                     }
                 }
                 all.push(name.clone());
+            }
+            // With CASCADE, a table's chunk tables go first, with it.
+            if *cascade {
+                let mut with_chunks = Vec::new();
+                for name in &all {
+                    if let Some(t) = catalog::get_table(&*txn, name)? {
+                        for (child, fk) in &t.referenced_by {
+                            let ct = catalog::table(&*txn, child)?;
+                            if ct.chunks.as_ref().is_some_and(|s| s.fk == *fk)
+                                && !all.contains(child)
+                                && !with_chunks.contains(child)
+                            {
+                                with_chunks.push(child.clone());
+                            }
+                        }
+                    }
+                    with_chunks.push(name.clone());
+                }
+                all = with_chunks;
             }
             let names = &all;
             for name in names {
@@ -2375,6 +2427,13 @@ pub(crate) fn execute_statement(
             if_exists,
         } => {
             refuse_partitioned(&*txn, table, "DROP CONSTRAINT")?;
+            if let Some(t) = catalog::get_table(&*txn, table)?
+                && t.chunks.as_ref().is_some_and(|s| s.fk == *name)
+            {
+                return Err(Error::dependent_objects(format!(
+                    "constraint \"{name}\" is chunk table \"{table}\"'s lineage: drop the table instead"
+                )));
+            }
             drop_constraint(txn, table, name, *if_exists)?;
             Output::Command("ALTER TABLE".into())
         }
@@ -2843,7 +2902,7 @@ fn create_partition(
     Ok(())
 }
 
-fn create_table(
+pub(crate) fn create_table(
     txn: &mut dyn KvTxn,
     reg: &Registry,
     name: &str,
@@ -2948,6 +3007,7 @@ fn create_table(
         partition_of: None,
         storage_policy: None,
         statistics: Vec::new(),
+        chunks: None,
     };
     if let Some((kind, names)) = partition_by {
         table.partition_by = Some(partition_spec(&table, &uniques, kind, names)?);
@@ -3287,6 +3347,20 @@ fn alter_column_type(
     if in_fk {
         return Err(Error::feature(format!(
             "changing the type of column \"{column}\", which a foreign key uses, is not supported yet"
+        )));
+    }
+    // A chunk table's columns are its documents'; a chunked text stays
+    // text.
+    let chunked = old.referenced_by.iter().any(|(child, name)| {
+        catalog::table(&*txn, child).is_ok_and(|ct| {
+            ct.chunks
+                .as_ref()
+                .is_some_and(|s| s.fk == *name && s.column == c)
+        })
+    });
+    if chunked || crate::chunk_tables::derives(&old, c) {
+        return Err(Error::feature(format!(
+            "changing the type of column \"{column}\", which a chunk table derives or chunks, is not supported"
         )));
     }
     if old.columns[c].generated.is_some() {

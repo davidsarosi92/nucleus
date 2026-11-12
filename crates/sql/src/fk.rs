@@ -169,7 +169,7 @@ pub fn check_keys(txn: &dyn KvTxn, child: &Table, keys: &[Vec<Vec<Value>>]) -> R
 }
 
 /// The rows of `child` whose `fk.columns` equal `vals` (a validated scan).
-fn referencing_rows(
+pub(crate) fn referencing_rows(
     txn: &dyn KvTxn,
     reg: &Registry,
     child: &Table,

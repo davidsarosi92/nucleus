@@ -146,8 +146,11 @@ background through a queue in the database that retries an outage,
 with queries choosing to include, skip or wait for rows whose vectors
 are pending, and moved to another model online (`ALTER COLUMN v SET
 MODEL e5`: the new vectors made beside, taken in one transaction).  `chunks(body, 'markdown', 200, 20, 'bge')` cuts documents by
-sentences, tokens or Markdown sections, sized in the model's own tokens.
-Next are chunk tables kept current (the rest of §M14.22) and the rest of the
+sentences, tokens or Markdown sections, sized in the model's own tokens,
+and `CREATE TABLE parts CHUNKS OF docs (body) BY markdown SIZE 200 USING
+bge` keeps a table of them current with the documents (an edited
+paragraph re-embeds only its chunk).  Next are batching, rate limits and
+costs (the rest of §M14.22) and the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then

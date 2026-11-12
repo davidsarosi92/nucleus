@@ -261,6 +261,10 @@ fn pack(
             kept += units[next - 1].size;
             next -= 1;
         }
+        // Not from the punctuation after a word.
+        while next < b && units[next].size == 0 {
+            next += 1;
+        }
         a = next;
     }
     Ok(())
@@ -446,9 +450,32 @@ fn markdown(text: &str) -> Vec<Section> {
 // ------------------------------------------------------- the function
 
 /// A model's tokens, counted by its provider.
-struct ModelTokens<'a> {
-    txn: &'a dyn nucleus_kv::KvTxn,
-    model: &'a str,
+pub(crate) struct ModelTokens<'a> {
+    pub(crate) txn: &'a dyn nucleus_kv::KvTxn,
+    pub(crate) model: &'a str,
+}
+
+/// `chunks()`'s columns for `chunks` of `text`: position (from 1),
+/// chunk, start and length (characters, from 1), headings, size.
+pub(crate) fn rows(text: &str, chunks: Vec<Chunk>) -> Vec<[crate::types::Value; 6]> {
+    use crate::types::Value;
+    // Character offsets, counted once along the text.
+    let (mut byte, mut ch) = (0usize, 0usize);
+    let mut out = Vec::with_capacity(chunks.len());
+    for (i, c) in chunks.into_iter().enumerate() {
+        ch += text[byte..c.start].chars().count();
+        byte = c.start;
+        let piece = &text[c.start..c.end];
+        out.push([
+            Value::Int(i as i64 + 1),
+            Value::Text(piece.to_string()),
+            Value::Int(ch as i64 + 1),
+            Value::Int(piece.chars().count() as i64),
+            Value::Array(c.headings.into_iter().map(Value::Text).collect()),
+            Value::Int(c.size as i64),
+        ]);
+    }
+    out
 }
 
 impl Measure for ModelTokens<'_> {
@@ -543,23 +570,7 @@ impl crate::ext::TableFunction for Chunks {
             }
             Some(other) => return Err(Error::internal(format!("chunks() model {other:?}"))),
         };
-        // Character offsets, counted once along the text.
-        let (mut byte, mut ch) = (0usize, 0usize);
-        let mut out = Vec::with_capacity(chunks.len());
-        for (i, c) in chunks.into_iter().enumerate() {
-            ch += text[byte..c.start].chars().count();
-            byte = c.start;
-            let piece = &text[c.start..c.end];
-            out.push(vec![
-                Value::Int(i as i64 + 1),
-                Value::Text(piece.to_string()),
-                Value::Int(ch as i64 + 1),
-                Value::Int(piece.chars().count() as i64),
-                Value::Array(c.headings.into_iter().map(Value::Text).collect()),
-                Value::Int(c.size as i64),
-            ]);
-        }
-        Ok(out)
+        Ok(rows(text, chunks).into_iter().map(Vec::from).collect())
     }
 }
 

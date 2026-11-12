@@ -1328,6 +1328,44 @@ impl<'a> Parser<'a> {
         self.expect_kw("table")?;
         let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
         let name = self.relation()?;
+        if self.eat_kws(&["chunks", "of"]) {
+            let source = self.relation()?;
+            self.expect_op("(")?;
+            let column = self.ident()?;
+            self.expect_op(")")?;
+            self.expect_kw("by")?;
+            let by = self.ident()?;
+            let number = |p: &mut Self| -> Result<u32> {
+                match p.next() {
+                    Some(Token::Number(n)) => {
+                        n.parse().map_err(|_| p.error("expected a whole number"))
+                    }
+                    _ => Err(p.error("expected a whole number")),
+                }
+            };
+            self.expect_kw("size")?;
+            let size = number(self)?;
+            let overlap = if self.eat_kw("overlap") {
+                number(self)?
+            } else {
+                0
+            };
+            let model = if self.eat_kw("using") {
+                Some(self.ident()?)
+            } else {
+                None
+            };
+            return Ok(Statement::CreateChunkTable {
+                name,
+                if_not_exists,
+                source,
+                column,
+                by,
+                size,
+                overlap,
+                model,
+            });
+        }
         if self.eat_kws(&["partition", "of"]) {
             let parent = self.relation()?;
             let bound = self.partition_bound()?;

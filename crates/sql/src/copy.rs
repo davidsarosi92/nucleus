@@ -331,6 +331,7 @@ pub fn copy_from(
     sink: &mut dyn Sink,
 ) -> Result<u64> {
     let t = catalog::table(&*txn, table)?;
+    crate::chunk_tables::refuse(&t, "copy into")?;
     let targets = crate::dml::target_columns(&t, columns)?;
     let builder = {
         let ro: &dyn KvTxn = &*txn;
