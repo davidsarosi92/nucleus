@@ -12,6 +12,7 @@
 //!   front ends negotiate it ([`transport`]).
 
 mod columnar;
+pub mod keyfile;
 mod native;
 pub mod throttle;
 pub mod transport;

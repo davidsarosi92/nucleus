@@ -1410,6 +1410,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 0D <role> 00 <kind>` | a role's default privileges for objects it makes |
 | `00 0E <table> 00 <policy>` | a row-level security policy |
 | `00 0F <login>` | a token: its role, ceiling, expiry and secret's verifier (§9) |
+| `00 14 <name>` | a secret: its owner and its sealed value, or the environment variable it names (§9) |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -2542,6 +2543,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
 | `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by`, `max_rows`, `max_scan`, `timeout`, `rate_per_minute` (the tokens the current role may manage; never a secret) |
+| `nc_catalog.secrets` | `name`, `owner`, `source` (`value`, `env`), `env`, `created`, `changed` (the secrets the current role may use; never a value) |
 | `nc_catalog.grants` | `kind`, `object`, `column`, `grantee`, `privilege`, `grantable` (the ACLs written out) |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
 
@@ -4147,6 +4149,35 @@ refusal).  Role names starting `nct_` are reserved.  Row, time and cost
 budgets come with §M14.25's protection step (T6); schema and branch
 scopes when there are schemas and branches.
 
+**Secrets** (`secrets.rs`, §M14.22 E2a; catalog `00 14 <name>`):
+credentials the database uses on its own behalf (an embedding
+provider's API key).  `CREATE SECRET [IF NOT EXISTS] name VALUE '…'`
+seals the value with ChaCha20-Poly1305 (`nucleus_crypto::aead`, RFC
+8439) under the *keyring's* key — a random nonce, the secret's name
+authenticated beside it, the key's id (8 bytes of a hash of it) kept so
+another key is refused by name, not by garbage; `… FROM ENV 'VAR'`
+names an environment variable of the server's process, read when the
+secret is used — only an administrator makes one.  `ALTER SECRET name
+VALUE '…' | FROM ENV '…'` replaces it; `DROP SECRET [IF EXISTS] name`
+drops it with its grants.  Making one needs `CREATE` on the database;
+its maker owns it (changes and drops it; a role that owns one is not
+dropped, a renamed one keeps it); `GRANT USAGE ON SECRET name TO role`
+lets a role use it — name it in a model (E2b) — and see it in
+`nc_catalog.secrets` (`name`, `owner`, `source` `value` or `env`, `env`,
+`created`, `changed`; never a value).  The keyring (`secrets::Keyring`,
+set for the process by `secrets::set_keyring`) is the server's
+`--secrets-key FILE` (`nucleus_server::keyfile::KeyFile`: 64 hex
+digits, made with mode 0600 when the first secret with a value is;
+default `<dir>.secrets-key` beside the data directory), so a copy of
+the directory or a backup holds no secret in the clear — the key file
+must be kept and backed up apart.  Without a keyring a secret with a
+value is refused (`55000`); a damaged record does not open (`22000`).
+Values are `secrets::Revealed`, which prints as `***`; a statement that
+names a secret or a password is kept in the audit log and the server's
+query log with its strings as `'***'` (`statements::redacted`), and a
+mistyped `CREATE SECRET k 'v'` is a syntax error that does not echo the
+string.
+
 **Access rules** (`rules.rs`): `CREATE ACCESS RULE name [FOR role, … |
 FOR ALL] [FROM 'cidr', …] [VIA ncp | pg, …] [AUTH password | token |
 certificate | oidc | ldap | trust, …] [WITH TLS | WITHOUT TLS] {ALLOW
@@ -4223,7 +4254,8 @@ database's settings ask (`audit_statements = all`, `audit_roles = 'a,b'`
 touch these tables, by the privilege checks' lookups).  A record holds
 when, who (session and current user), the connection (address, front end,
 method, TLS, rule), what (the statement's text) and whether it went
-through (the SQLSTATE if not).  It is written in the transaction of what
+through (the SQLSTATE if not); a statement naming a secret or a
+password with its strings as `'***'`.  It is written in the transaction of what
 it records — a statement rolled back leaves none, a committed one always
 has one — and a refusal, a read or a login in one of its own.  Each
 record's hash is SHA-256 over its fields and the previous record's hash;
@@ -4749,6 +4781,14 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-12 — §M14.22 E2a, secrets:** `CREATE | ALTER | DROP SECRET`,
+  sealed by ChaCha20-Poly1305 (`nucleus_crypto::aead`, RFC 8439's
+  vectors) under a keyring's key outside the data directory (`nucleus
+  server --secrets-key`, `KeyFile`), or `FROM ENV`; `GRANT USAGE ON
+  SECRET`; `nc_catalog.secrets`; `tests/secrets.rs`.  The audit log and
+  the query log mask the strings of a statement naming a secret or a
+  password (`statements::redacted`) — a password was kept as written
+  before.  `SECURITY.md`.
 - **2026-11-11 — §M14.21 T8c, every kind of table and the wire:** the
   text and sparse indexes on `column`, `row,column` and partitioned
   tables — BM25's statistics a partitioned table's partitions' together

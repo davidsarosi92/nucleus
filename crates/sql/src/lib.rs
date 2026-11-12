@@ -74,6 +74,7 @@ pub mod regression;
 pub mod roles;
 pub mod rules;
 pub mod sample;
+pub mod secrets;
 pub mod segment;
 pub mod session;
 pub mod sessions;

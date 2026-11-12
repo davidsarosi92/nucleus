@@ -250,7 +250,10 @@ fn split_tag(tag: &str) -> (String, u64) {
 pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> io::Result<()> {
     let log = |what: &str, text: &str| {
         if config.log_queries {
-            eprintln!("nucleus-server: [{id}] {what}: {}", text.trim());
+            eprintln!(
+                "nucleus-server: [{id}] {what}: {}",
+                nucleus_sql::statements::redacted(text.trim())
+            );
         }
     };
     // Behind a trusted proxy, the address its header names.

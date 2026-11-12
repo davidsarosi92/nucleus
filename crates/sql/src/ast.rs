@@ -171,6 +171,30 @@ pub enum Statement {
         /// Its value (`None`: back to its default).
         value: Option<String>,
     },
+    /// `CREATE SECRET [IF NOT EXISTS] name VALUE '…' | FROM ENV 'VAR'`
+    /// ([`crate::secrets`]).
+    CreateSecret {
+        /// Its name.
+        name: String,
+        /// Its value, or where it comes from.
+        given: crate::secrets::Given,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+    },
+    /// `ALTER SECRET name VALUE '…' | FROM ENV 'VAR'`.
+    AlterSecret {
+        /// Its name.
+        name: String,
+        /// Its new value, or where it comes from.
+        given: crate::secrets::Given,
+    },
+    /// `DROP SECRET [IF EXISTS] name`.
+    DropSecret {
+        /// Its name.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
     /// `DROP TOKEN [IF EXISTS] name`.
     DropToken {
         /// The token.

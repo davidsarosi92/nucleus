@@ -41,7 +41,7 @@ usage:
                       [--ldap-starttls] [--ldap-ca <pem file>]]
                      [--trusted-proxy <cidr> …] [--max-connections <n>] [--insecure]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
-                     [--index-cache <size>]
+                     [--index-cache <size>] [--secrets-key <file>]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
@@ -64,7 +64,10 @@ usage:
                                     PostgreSQL's shared_buffers); --index-cache
                                     the decoded index objects kept (HNSW graphs,
                                     text segments; default a quarter of the
-                                    machine's memory)
+                                    machine's memory); --secrets-key the file
+                                    whose key seals secrets (CREATE SECRET;
+                                    default <dir>.secrets-key, made when the
+                                    first secret is)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

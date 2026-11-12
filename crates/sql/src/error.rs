@@ -90,6 +90,7 @@ codes! {
     invalid_parameter => "22023",
     array_subscript => "2202E",
     object_in_use => "55006",
+    prerequisite => "55000",
     query_canceled => "57014",
     program_limit => "54000",
     configuration_limit => "53400",

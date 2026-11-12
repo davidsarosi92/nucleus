@@ -1,8 +1,11 @@
 //! nucleus's cryptographic primitives, without dependencies: SHA-256
 //! (FIPS 180-4), HMAC-SHA-256 (RFC 2104), PBKDF2-HMAC-SHA-256 (RFC 8018),
 //! MD5 (RFC 1321, for `md5()` only — not for security), base64 (RFC
-//! 4648), a constant-time comparison, and SCRAM-SHA-256 verifiers (RFC
-//! 5802, RFC 7677) in PostgreSQL's text form.
+//! 4648), a constant-time comparison, SCRAM-SHA-256 verifiers (RFC
+//! 5802, RFC 7677) in PostgreSQL's text form, and ChaCha20-Poly1305 (RFC
+//! 8439, [`aead`]).
+
+pub mod aead;
 
 /// SHA-256 (FIPS 180-4).
 pub fn sha256(data: &[u8]) -> [u8; 32] {

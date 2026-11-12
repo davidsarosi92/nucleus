@@ -80,6 +80,37 @@ fn database(kv: &Arc<dyn Kv>) -> usize {
     Arc::as_ptr(kv) as *const () as usize
 }
 
+/// `text` as a log may keep it: a statement that names a secret or a
+/// password (`CREATE SECRET … VALUE '…'`, `ALTER ROLE … PASSWORD '…'`)
+/// with every string constant replaced by `'***'`; any other as it is.
+/// Text that does not lex, but has either word, is not kept at all.
+pub fn redacted(text: &str) -> std::borrow::Cow<'_, str> {
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains("secret") && !lower.contains("password") {
+        return text.into();
+    }
+    let Ok(tokens) = tokenize_spans(text) else {
+        return "(a statement that does not lex, naming a secret or a password)".into();
+    };
+    if !tokens
+        .iter()
+        .any(|(t, _)| matches!(t, Token::Word(w) if w == "secret" || w == "password"))
+    {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    for (t, span) in &tokens {
+        if matches!(t, Token::Str(_)) {
+            out.push_str(&text[from..span.start]);
+            out.push_str("'***'");
+            from = span.end;
+        }
+    }
+    out.push_str(&text[from..]);
+    out.into()
+}
+
 /// `text` normalized: the key two runs share when they differ only in
 /// constants, case and spacing, and the text shown — the constants
 /// replaced by `$n` (numbered after the statement's own parameters),
@@ -246,6 +277,26 @@ pub fn register(r: &mut Registry) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn credentials_are_masked() {
+        use super::redacted;
+        assert_eq!(
+            redacted("CREATE SECRET k VALUE 'sk-123'"),
+            "CREATE SECRET k VALUE '***'"
+        );
+        assert_eq!(
+            redacted("alter role a with password 'pw''x' valid until '2030-01-01'"),
+            "alter role a with password '***' valid until '***'"
+        );
+        assert_eq!(
+            redacted("create secret k from env E'X\\'Y'"),
+            "create secret k from env '***'"
+        );
+        assert_eq!(redacted("SELECT 'a secret'"), "SELECT 'a secret'");
+        assert_eq!(redacted("SELECT 1"), "SELECT 1");
+        assert!(!redacted("create secret k value 'unterminated").contains("unterminated"));
+    }
+
     use super::*;
 
     #[test]

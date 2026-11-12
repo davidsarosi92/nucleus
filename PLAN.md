@@ -278,7 +278,7 @@ are marked ✅.
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
-| | M14.22 | **Next:** Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ◐ E1 ✅ (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels) |
+| | M14.22 | **Next:** Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ◐ E1 ✅ (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory) |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
@@ -287,6 +287,7 @@ are marked ✅.
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
+| | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -300,6 +301,7 @@ are marked ✅.
 | | M21 | Distributed transactions (HLC) | ⬜ |
 | | M22 | Distributed query execution | ⬜ |
 | | M23 | Rebalancing, fault tolerance, Jepsen-style tests | ⬜ |
+| | M23.5 | Jepsen's own analysis of the distributed guarantees, published | ⬜ |
 | **F4 — Above** | M24 | Federation / connectors | ⬜ |
 | | M25 | Multi-region (changefeeds moved to M16.5) | ⏸ |
 
@@ -6523,6 +6525,34 @@ The steps:
 - **E8 — batching, rate limits, costs in the analyzer**; the *Done
   when* checked whole on BEIR, documents to ranked chunks.
 
+E2 is done in two: **E2a** the secrets, **E2b** the models, the
+providers and `embed()`.
+
+**E2a — secrets** (done 2026-11-12).  `CREATE [IF NOT EXISTS] | ALTER |
+DROP SECRET`, `VALUE '…'` sealed or `FROM ENV 'VAR'` (administrators
+only: the process's environment is theirs), `GRANT USAGE ON SECRET`,
+`nc_catalog.secrets` (never a value), catalog `00 14`.  Taken: RFC
+8439's ChaCha20-Poly1305, written in `nucleus-crypto` from the RFC
+(poly1305-donna's 26-bit limbs, the tag compared in constant time) and
+checked by its four vectors, which Python's `cryptography` reproduces;
+a random nonce a value (96 bits: no reuse in any realistic number of
+secrets), the secret's name as associated data (a record moved to
+another name does not open), the key's id beside it (another key is
+refused by name).  The key lives outside the data directory — a
+`Keyring` set for the process (principle 12: a KMS or Vault later is
+another one), the server's `--secrets-key` file by default
+`<dir>.secrets-key`, made with mode 0600 when the first secret is —
+as PostgreSQL's TDE proposals and Supabase Vault (pgsodium's root key
+outside the database) keep theirs.  Not taken: Vault's
+decrypted view (a value is never readable through SQL — only a
+provider's call uses it).  Found on the way: the audit log kept a
+`CREATE | ALTER ROLE … PASSWORD '…'` as written; a statement naming a
+secret or a password is now recorded, and logged by `--log-queries`,
+with its strings as `'***'` (`statements::redacted`).  Tests:
+`tests/secrets.rs` (nothing in the clear anywhere in the KV, the audit
+masked, privileges, owners through role renames and drops, `FROM ENV`,
+rotation, a damaged record, another key, no key).
+
 ### §M14.23 — Embedded editions ⬜
 
 The quickest start there is — no server, no setup, `open` and query — is
@@ -6731,6 +6761,51 @@ reach a Prometheus and an OpenTelemetry collector in tests; readiness
 waits for recovery; and every shipped alert rule fires in a test that
 provokes it.
 
+### §M14.29 — Security and assurance from outside ◐
+
+nucleus's own tests (the simulator, crash tests, the laws, the fixtures
+of other systems' answers) show what its authors thought to check; a
+database that holds other people's data is also checked by people and
+machines that did not write it.  Not one block at the end: each step
+comes when it costs least and protects most (decided 2026-11-12) —
+reporting from the day the repository is public, fuzzing while formats
+and parsers are still cheap to change, an audit before anyone is asked
+to run nucleus in production; the distributed layer's analysis is
+§M23.5.
+
+- **S1 — `SECURITY.md`** ✅ (2026-11-12): how to report a vulnerability
+  privately (GitHub's private vulnerability reporting), what is answered
+  and how fast, which versions get fixes, and how a fix is disclosed (a
+  GitHub security advisory, a CVE where one applies, the release notes).
+- **S2 — fuzzing in the repository, before §M14.23** (an embedded
+  library opens files and takes queries from the application it runs
+  in): fuzz targets (`cargo fuzz`, run in CI for a few minutes a change)
+  for every input that crosses a trust boundary — the SQL lexer and
+  parser, `ncp` and PostgreSQL's wire messages, the authentication
+  exchanges (SCRAM, tokens, OIDC's JWTs), the text-search and `tsquery`
+  parsers, `COPY`'s formats — and for what the engine reads back from
+  disk: pages, WAL records, catalog and index records (a damaged file
+  must fail with an error, never a panic or wrong data).
+- **S3 — OSS-Fuzz**: the same targets submitted to Google's OSS-Fuzz,
+  which runs them continuously and files what it finds privately.
+- **S4 — an independent security audit through OSTIF** (the Open Source
+  Technology Improvement Fund, which arranges and funds audits of open
+  source projects), before the first release meant for production: the
+  network front ends, authentication, privileges and row-level
+  security, secrets (§M14.22), `nucleus-crypto`'s own primitives, and
+  the modules that reach out (OIDC, LDAP, embedding providers); its
+  report and the fixes published.
+- **S5 — Elle on one node**: the transaction guarantees as documented
+  (serializable, snapshot isolation, read committed; DOCS §5.2) checked
+  by Jepsen's history checker, Elle, over nucleus's own workloads in CI —
+  cheap now, and the ground §M23.5 stands on.
+
+**Done when:** `SECURITY.md` is in the repository and GitHub's private
+reporting is on; every listed input has a fuzz target that runs in CI
+and nucleus is in OSS-Fuzz; an audit's report and its fixes are
+published; and Elle finds no anomaly the documented isolation level
+forbids in nucleus's own histories.
+
 ---
 
 ## §F2 — NoSQL layer
@@ -6914,6 +6989,17 @@ style) across a thousand seeds without failure.
 
 - Rebalancing, node failure handling, slow nodes.
 - Jepsen-style tests on a real network.
+
+### §M23.5 — Jepsen's analysis ⬜
+
+- The distributed guarantees — replication (§M17.5), distributed
+  transactions (§M21), rebalancing and failures (§M23) — analysed by
+  Jepsen itself on a real network with partitions, clock skew and
+  crashes, from the one-node checks of §M14.29 S5; the report and the
+  fixes published.
+
+**Done when:** Jepsen's report is published and every anomaly it finds
+is fixed or documented as the guarantee it is.
 
 ---
 

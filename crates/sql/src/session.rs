@@ -1093,7 +1093,7 @@ impl Session {
             "statement"
         };
         let detail = match (text, r) {
-            (Some(t), _) => t.to_string(),
+            (Some(t), _) => crate::statements::redacted(t).into_owned(),
             (None, Ok(Output::Command(tag))) => tag.clone(),
             (None, _) => "(a statement)".to_string(),
         };
@@ -2073,6 +2073,22 @@ pub(crate) fn execute_statement(
         Statement::DropToken { name, if_exists } => {
             crate::tokens::drop(txn, name, *if_exists)?;
             Output::Command("DROP TOKEN".into())
+        }
+        Statement::CreateSecret {
+            name,
+            given,
+            if_not_exists,
+        } => {
+            crate::secrets::create(txn, name, given, *if_not_exists)?;
+            Output::Command("CREATE SECRET".into())
+        }
+        Statement::AlterSecret { name, given } => {
+            crate::secrets::alter(txn, name, given)?;
+            Output::Command("ALTER SECRET".into())
+        }
+        Statement::DropSecret { name, if_exists } => {
+            crate::secrets::drop(txn, name, *if_exists)?;
+            Output::Command("DROP SECRET".into())
         }
         Statement::SetRole(_) | Statement::Reset(_) => unreachable!("handled by the session"),
         Statement::SetRowSecurity {

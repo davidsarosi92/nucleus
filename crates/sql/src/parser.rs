@@ -412,6 +412,12 @@ impl<'a> Parser<'a> {
                 Kind::Type
             } else if self.eat_kw("database") {
                 Kind::Database
+            } else if self.peek_kw("secret")
+                // `ON secret TO …`: a table called `secret`.
+                && matches!(self.peek_at(1), Some(Token::Word(w) | Token::Quoted(w)) if w != "to" && w != "from")
+            {
+                self.pos += 1;
+                Kind::Secret
             } else {
                 self.eat_kw("table");
                 Kind::Table
@@ -1225,6 +1231,16 @@ impl<'a> Parser<'a> {
         if self.eat_kws(&["access", "rule"]) {
             return self.create_access_rule();
         }
+        if self.eat_kw("secret") {
+            let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
+            let name = self.ident()?;
+            let given = self.secret_given()?;
+            return Ok(Statement::CreateSecret {
+                name,
+                given,
+                if_not_exists,
+            });
+        }
         if self.eat_kw("token") {
             let name = self.ident()?;
             let (mut role, mut read_only, mut tables, mut valid_until) = (None, false, None, None);
@@ -1696,6 +1712,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// A secret's `VALUE '…'` or `FROM ENV 'VAR'`.
+    fn secret_given(&mut self) -> Result<crate::secrets::Given> {
+        if self.eat_kw("value") {
+            return Ok(crate::secrets::Given::Value(self.string()?));
+        }
+        if self.eat_kws(&["from", "env"]) {
+            return Ok(crate::secrets::Given::Env(self.string()?));
+        }
+        if matches!(self.peek(), Some(Token::Str(_))) {
+            // Not echoed: the string may be the secret itself.
+            return Err(Error::syntax(
+                "syntax error: expected VALUE or FROM ENV before the string",
+            ));
+        }
+        Err(self.error("expected VALUE or FROM ENV"))
+    }
+
     fn drop(&mut self) -> Result<Statement> {
         self.expect_kw("drop")?;
         if self.eat_kw("index") {
@@ -1732,6 +1765,11 @@ impl<'a> Parser<'a> {
             let if_exists = self.eat_kws(&["if", "exists"]);
             let name = self.ident()?;
             return Ok(Statement::DropToken { name, if_exists });
+        }
+        if self.eat_kw("secret") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let name = self.ident()?;
+            return Ok(Statement::DropSecret { name, if_exists });
         }
         if self.eat_kw("role") || self.eat_kw("user") {
             let if_exists = self.eat_kws(&["if", "exists"]);
@@ -1918,6 +1956,11 @@ impl<'a> Parser<'a> {
         self.expect_kw("alter")?;
         if self.eat_kw("type") {
             return self.alter_type();
+        }
+        if self.eat_kw("secret") {
+            let name = self.ident()?;
+            let given = self.secret_given()?;
+            return Ok(Statement::AlterSecret { name, given });
         }
         if self.eat_kw("database") {
             let database = self.ident()?;

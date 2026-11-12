@@ -46,6 +46,8 @@ pub enum Kind {
     Type,
     /// The database.
     Database,
+    /// A secret (§M14.22).
+    Secret,
 }
 
 impl Kind {
@@ -56,6 +58,7 @@ impl Kind {
             Kind::Function => 3,
             Kind::Type => 4,
             Kind::Database => 5,
+            Kind::Secret => 6,
         }
     }
 
@@ -67,6 +70,7 @@ impl Kind {
             Kind::Function => "function",
             Kind::Type => "type",
             Kind::Database => "database",
+            Kind::Secret => "secret",
         }
     }
 
@@ -78,6 +82,7 @@ impl Kind {
             Kind::Function => EXECUTE,
             Kind::Type => USAGE,
             Kind::Database => CONNECT | CREATE | TEMPORARY,
+            Kind::Secret => USAGE,
         }
     }
 
@@ -224,15 +229,16 @@ fn decode(b: &[u8]) -> Result<Acl> {
     Ok(acl)
 }
 
-/// The owner of an object: a table's maker; the rest belong to the
-/// administrators (`None`).
+/// The owner of an object: a table's, a type's or a secret's maker; the
+/// rest belong to the administrators (`None`).
 pub fn owner(txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<Option<String>> {
-    if !matches!(kind, Kind::Table | Kind::Type) {
+    if !matches!(kind, Kind::Table | Kind::Type | Kind::Secret) {
         return Ok(None);
     }
     crate::catalog_cache::memo(txn, crate::catalog_cache::Part::Owner(kind), name, || {
         Ok(match kind {
             Kind::Table => crate::catalog::get_table(txn, name)?.and_then(|t| t.owner),
+            Kind::Secret => crate::secrets::get(txn, name)?.map(|s| s.owner),
             _ => crate::enums::get(txn, name)?.and_then(|e| e.owner),
         })
     })
@@ -307,6 +313,7 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<(Kind, String, Acl)>> {
             Some(3) => Kind::Function,
             Some(4) => Kind::Type,
             Some(5) => Kind::Database,
+            Some(6) => Kind::Secret,
             _ => continue,
         };
         out.push((
@@ -785,6 +792,7 @@ fn exists(txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<()> {
         Kind::Table => crate::catalog::get_table(txn, name)?.is_some(),
         Kind::Schema => name == "public",
         Kind::Database => name == DATABASE,
+        Kind::Secret => crate::secrets::get(txn, name)?.is_some(),
         Kind::Function | Kind::Type => true, // checked by the session against its registry
     };
     if found {
@@ -795,6 +803,7 @@ fn exists(txn: &dyn KvTxn, kind: Kind, name: &str) -> Result<()> {
             Kind::Database => {
                 Error::undefined_database(format!("database \"{name}\" does not exist"))
             }
+            Kind::Secret => Error::undefined_object(format!("secret \"{name}\" does not exist")),
             _ => Error::invalid_schema(format!("schema \"{name}\" does not exist")),
         })
     }
@@ -903,6 +912,12 @@ pub fn authorize_ddl(
             }
         }
         Statement::CreateEnum { .. } => c.require(txn, Kind::Schema, "public", CREATE, None)?,
+        Statement::CreateSecret { .. } => c.require(txn, Kind::Database, DATABASE, CREATE, None)?,
+        Statement::AlterSecret { name, .. } | Statement::DropSecret { name, .. } => {
+            if crate::secrets::get(txn, name)?.is_some() {
+                c.require_owner(txn, Kind::Secret, name)?;
+            }
+        }
         Statement::CreateIndex { table, .. }
         | Statement::CreateStatistics { table, .. }
         | Statement::AlterColumnType { table, .. }

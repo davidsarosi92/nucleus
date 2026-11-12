@@ -1186,9 +1186,9 @@ fn the_audit_log_records_and_shows_tampering() {
         .collect();
     let want = [
         "login | true |  | nucleus | 127.0.0.1 | admitted",
-        "ddl | true |  | nucleus | 127.0.0.1 | CREATE USER root SUPERUSER PASSWORD 'root-pw'",
+        "ddl | true |  | nucleus | 127.0.0.1 | CREATE USER root SUPERUSER PASSWORD '***'",
         "login | true |  | root | 127.0.0.1 | admitted",
-        "ddl | true |  | root | 127.0.0.1 | CREATE USER app PASSWORD 'app-pw'",
+        "ddl | true |  | root | 127.0.0.1 | CREATE USER app PASSWORD '***'",
         "ddl | true |  | root | 127.0.0.1 | CREATE TABLE pay (x int)",
         "ddl | true |  | root | 127.0.0.1 | GRANT SELECT, INSERT ON pay TO app",
         "ddl | true |  | root | 127.0.0.1 | ALTER DATABASE nucleus SET audit_tables = 'pay'",
@@ -1230,7 +1230,7 @@ fn the_audit_log_records_and_shows_tampering() {
     };
     let mut txn = db.begin(nucleus_kv::TxnOptions::default()).unwrap();
     let mut rec = txn.get(&key(4)).unwrap().unwrap();
-    let at = rec.windows(6).position(|w| w == b"app-pw").unwrap();
+    let at = rec.windows(8).position(|w| w == b"USER app").unwrap();
     rec[at] = b'X';
     txn.put(&key(4), &rec).unwrap();
     txn.commit().unwrap();
@@ -1245,7 +1245,7 @@ fn the_audit_log_records_and_shows_tampering() {
     );
     // Put back exactly, it holds again; a record taken out is a gap.
     let mut txn = db.begin(nucleus_kv::TxnOptions::default()).unwrap();
-    rec[at] = b'a';
+    rec[at] = b'U';
     txn.put(&key(4), &rec).unwrap();
     let six = txn.get(&key(6)).unwrap().unwrap();
     txn.delete(&key(6)).unwrap();

@@ -66,6 +66,7 @@ pub use crate::index_method::{IndexMethod, RowRef};
 pub use crate::inet::Net;
 pub use crate::parser::{parse, parse_with_text};
 pub use crate::session::{OutColumn, Output, Session, Sink, TxnStatus, command_tag, read_only};
+pub use crate::statements::redacted;
 pub use crate::stats::Sample;
 pub use crate::storage::{BatchSource, NewRow, RowIter, Scan as StorageScan, TableStorage};
 pub use crate::text::{Analyzer, Token};

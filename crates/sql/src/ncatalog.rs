@@ -230,6 +230,17 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "secrets",
+        &[
+            ("name", T),
+            ("owner", T),
+            ("source", T),
+            ("env", T),
+            ("created", DataType::TimestampTz),
+            ("changed", DataType::TimestampTz),
+        ],
+    ),
+    (
         "role_members",
         &[
             ("role", T),
@@ -716,6 +727,33 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     t.budget
                         .rate
                         .map_or(Value::Null, |n| Value::Int(i64::from(n))),
+                ]);
+            }
+        }
+        "secrets" => {
+            // The secrets the current role may use; never a value.
+            let checker = crate::privileges::Checker::new();
+            for s in crate::secrets::all(txn)? {
+                if !checker.has(
+                    txn,
+                    crate::privileges::Kind::Secret,
+                    &s.name,
+                    crate::privileges::USAGE,
+                    None,
+                )? {
+                    continue;
+                }
+                let env = match &s.source {
+                    crate::secrets::Source::Env(v) => text(v.clone()),
+                    crate::secrets::Source::Sealed { .. } => Value::Null,
+                };
+                out.push(vec![
+                    text(s.name.clone()),
+                    text(s.owner.clone()),
+                    text(s.kind().to_string()),
+                    env,
+                    Value::TimestampTz(s.created),
+                    Value::TimestampTz(s.changed),
                 ]);
             }
         }

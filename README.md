@@ -192,6 +192,10 @@ The toolchain is pinned in `rust-toolchain.toml`; rustup installs it on
 first use.  nucleus builds for Linux, macOS, Windows and
 [d-os](https://github.com/davidsarosi92/d-os) (PLAN.md, "Build targets").
 
+## Security
+
+Report vulnerabilities privately — see [SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

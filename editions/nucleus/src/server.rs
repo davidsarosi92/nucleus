@@ -32,6 +32,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut sync = nucleus_kv::SyncPolicy::default();
     let mut wal_minimal = true;
     let mut cache_bytes = None;
+    let mut secrets_key = None::<String>;
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -74,6 +75,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 );
             }
             "--log-queries" => log_queries = true,
+            "--secrets-key" => {
+                secrets_key = Some(rest.next().ok_or("--secrets-key needs a file")?.clone())
+            }
             "--insecure" => insecure = true,
             "--tls-cert" => tls_cert = Some(rest.next().ok_or("--tls-cert needs a file")?.clone()),
             "--tls-key" => tls_key = Some(rest.next().ok_or("--tls-key needs a file")?.clone()),
@@ -228,6 +232,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
     let db = Database::open(dir, opts).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);
+    let key_path =
+        secrets_key.map_or_else(|| nucleus_server::keyfile::KeyFile::beside(dir), Into::into);
+    nucleus_sql::secrets::set_keyring(Some(Arc::new(nucleus_server::keyfile::KeyFile::new(
+        key_path,
+        Arc::clone(&kv),
+    ))));
     let mut plan = vec![("ncp".to_string(), listen)];
     plan.extend(extra);
     let mut listeners = Vec::new();

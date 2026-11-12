@@ -549,6 +549,7 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
                 }
             }
             crate::enums::rename_owner(txn, name, to)?;
+            crate::secrets::rename_owner(txn, name, to)?;
             crate::privileges::rename_grantee(txn, name, to)?;
             crate::tokens::rename_role(txn, name, to)?;
             crate::rules::rename_role(txn, name, to)?;
@@ -579,6 +580,12 @@ pub fn run(txn: &mut dyn KvTxn, stmt: &Statement) -> Result<String> {
                         .into_iter()
                         .filter(|e| e.owner.as_deref() == Some(name.as_str()))
                         .map(|e| format!("type {}", e.name)),
+                );
+                owned.extend(
+                    crate::secrets::all(&*txn)?
+                        .into_iter()
+                        .filter(|s| s.owner == *name)
+                        .map(|s| format!("secret {}", s.name)),
                 );
                 owned.extend(crate::privileges::held_by(&*txn, name)?);
                 if !owned.is_empty() {

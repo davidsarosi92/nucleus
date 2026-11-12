@@ -1111,7 +1111,10 @@ impl Conn {
 
     fn log(&self, what: &str, text: &str) {
         if let Some(id) = self.log {
-            eprintln!("nucleus-server: [{id}] {what}: {}", text.trim());
+            eprintln!(
+                "nucleus-server: [{id}] {what}: {}",
+                nucleus_sql::ext::redacted(text.trim())
+            );
         }
     }
 
