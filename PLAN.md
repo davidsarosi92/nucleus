@@ -278,7 +278,7 @@ are marked ✅.
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
-| | M14.22 | **Next:** Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ⬜ |
+| | M14.22 | **Next:** Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ◐ E1 ✅ (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels) |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
@@ -6346,7 +6346,7 @@ the partitions' first rows (the sort above has `P · k` of them, few);
 the partitions' indexes built at once (FiQA's four one after another,
 each on every core: 1.18 s against 0.77).
 
-### §M14.22 — Embeddings in the database ⬜
+### §M14.22 — Embeddings in the database ◐
 
 The step every AI application repeats — text to vectors, kept in sync —
 done by the database:
@@ -6374,6 +6374,154 @@ done by the database:
 **Done when:** a document table with an embedding column stays in sync
 through inserts, updates, deletes, provider outages and crashes; a model
 change re-embeds online; and a local model embeds without any network.
+
+**The design and its steps** (recorded 2026-11-12).  What others do, read
+from their docs:
+
+- *The pipeline beside the database.*  Timescale's pgai Vectorizer
+  (`ai.create_vectorizer(source, chunking, formatting, embedding,
+  destination)`): triggers write a queue table, a worker *outside*
+  PostgreSQL (Python) polls it, chunks, calls the provider in batches and
+  writes a destination table or column; schema changes, drops and worker
+  restarts must be coordinated with that process.  pgEdge Vectorizer does
+  the same with background workers inside PostgreSQL: a poll interval
+  (1 s), at most 3 attempts with exponential backoff, HTTP 429 deferred
+  rather than counted as a failure, errors that cannot succeed moved to a
+  failed state at once, `queue_status` and `failed_items` views.
+  Supabase's automatic embeddings: a trigger puts a job on `pgmq` (a
+  transactional queue), `pg_cron` drains it every few seconds in batches
+  through `pg_net` to an Edge Function that calls the provider and writes
+  the vector back; failed jobs reappear when their visibility timeout
+  passes.  In all three the vector is stale or absent between the commit
+  and the worker's write, and nothing in a query says which rows are.
+- *The model inside the database.*  Oracle 23ai imports an ONNX model
+  into the database (`DBMS_VECTOR.LOAD_ONNX_MODEL`, a BLOB of at most
+  2 GB, the tokenizer and pooling folded into the ONNX graph) and computes
+  `VECTOR_EMBEDDING(model USING text AS data)` in the statement, with
+  `UTL_TO_CHUNKS` and `UTL_TO_EMBEDDINGS` for chunks; the model travels
+  with the database and its backups.  PostgresML runs Hugging Face models
+  in a Python interpreter inside the server (`pgml.embed`).
+- *The search engines.*  Elasticsearch's `semantic_text` field: the
+  inference endpoint (local or a provider's) is named in the mapping, the
+  field chunks and embeds at ingest, chunking `sentence` by default
+  (`max_chunk_size` 250 words, `sentence_overlap` 0 or 1; `word` and
+  `none` the others); changed chunking applies only after a reindex.
+  Weaviate's vectorizer modules embed at import, synchronously, in
+  batches.  LanceDB's embedding functions are named in the schema and run
+  in the client.
+- *Inference.*  fastembed runs ONNX Runtime (MLAS kernels) with quantized
+  BERT-family models; Hugging Face's text-embeddings-inference batches
+  by a *token budget*, not a row count, and packs sequences without
+  padding (variable-length attention); candle and llama.cpp (ggml) run
+  BERT encoders from safetensors / GGUF.  For small encoders the time is
+  in matrix products (BLIS's micro-kernel method, Goto & van de Geijn
+  2008) and, past a few hundred tokens, in attention.
+- *Chunking.*  LangChain's recursive splitter (paragraphs, then lines,
+  then words; 1,000 characters, 200 overlap by default), LlamaIndex's
+  `SentenceSplitter` (1,024 tokens, 200 overlap), Unstructured's
+  `by_title`, pgai's recursive splitter; sentences by UAX #29.
+
+What nucleus takes, and how it differs:
+
+1. **Models are catalog objects; providers are modules** (principle
+   12).  `CREATE MODEL m USING provider (options)` — `local` (weights in
+   the database), `openai` (any OpenAI-compatible endpoint: OpenAI,
+   Mistral, vLLM, Ollama, LM Studio, text-embeddings-inference),
+   `cohere`, `voyage`; a provider is a `Registry::add_model_provider`
+   implementation, its options checked when the model is created.  A
+   model knows its dimensions, its maximum input, its batch and rate
+   limits, and how a *query* differs from a *document* (e5's `query:` /
+   `passage:` prefixes, bge's instruction, Cohere's and Voyage's
+   `input_type`) — a quality loss nobody sees when it is left to each
+   caller.  `embed(text, m)` embeds a document, `embed(text, m, 'query')`
+   a query; `v <=> embed($q)` with no model takes `v`'s model and embeds
+   a query.
+2. **Secrets** are catalog objects (`CREATE SECRET k VALUE '…'` or
+   `FROM ENV 'NAME'`), used by name in a model's options, `USAGE` granted
+   like any privilege (§M14.25); their values never reach `nc_catalog`,
+   statement statistics, the audit log or an error, and are kept
+   encrypted (ChaCha20-Poly1305, RFC 8439, in `nucleus-crypto` without
+   dependencies) under a key outside the data directory, so a copied
+   directory or a backup does not reveal them.
+3. **Local models run in nucleus, on its own kernels** (decided
+   2026-11-12 over ONNX Runtime and candle: no C++ library in the
+   module, the same code in WASM and on phones (§M14.23), and the
+   arithmetic is nucleus's to make fast and reproducible).  The BERT
+   family first — BERT and XLM-RoBERTa encoders, WordPiece and
+   SentencePiece-Unigram tokenizers, mean / CLS pooling — which covers
+   bge, e5 (multilingual-e5 reads Hungarian), MiniLM and GTE; weights
+   read from safetensors and `tokenizer.json` and stored in the database
+   as large values, so a model is backed up and replicated with the data
+   and `embed()` never needs a network.  Packed batches by token budget,
+   no padding.  One build gives the same vector on any number of
+   threads (a fixed reduction order), and a vector is computed once and
+   then stored as data, never recomputed by a replica.
+4. **Embedding columns are exact about what they are not.**  `v
+   vector(384) GENERATED BY EMBEDDING (title || ' ' || body) USING m`:
+   a write that changes the source enqueues the row under a queue key in
+   the same transaction (one entry a row, so five updates while pending
+   are one job, the newest text wins); workers take entries in batches,
+   read the row, call the provider, and write the vector in a
+   transaction that checks the source's fingerprint is still the one
+   embedded — a row changed meanwhile keeps its newer entry.  Retries
+   with exponential backoff and full jitter, a provider's `Retry-After`
+   obeyed, a circuit opened per provider while it is down, errors that
+   cannot succeed (a bad key, an input too long) recorded at once;
+   `nc_catalog.embedding_jobs` shows the queue.  Each row knows whether
+   its vector is current, so a query chooses: `embedding.pending =
+   include` (vectors as they are, the default), `skip` (rows with a
+   pending vector left out), `wait` (the statement waits for the jobs
+   committed before its snapshot).  The workers are the engine's, not
+   the server's (principle 7: the embedded library keeps its columns
+   current too), and run on the platform's clock, so the simulator
+   drives crashes and outages (principle 4).  Beside it, standard
+   `GENERATED ALWAYS AS (expr) STORED` columns — where a local model is
+   fast enough to embed inside the statement, the vector is never
+   pending.
+5. **Model versions as an encoding upgrade** (§M14.19).  Each vector
+   records the model and version that made it; `ALTER … SET MODEL m2`
+   fills a shadow column in the background (its index built as it
+   fills), queries read the old one until the new one is complete, and
+   one transaction swaps them — dimensions may change.
+6. **Chunks are table functions, and a chunk table can be kept.**
+   `chunks(text, by => 'sentences' | 'tokens' | 'markdown', size,
+   overlap [, model])` returns position, offsets, heading path and text;
+   sizes in the model's own tokens, so a chunk fits its input.  Sentences
+   by UAX #29 (tables generated from Unicode 16, checked by its
+   `SentenceBreakTest.txt`, as words were in §M14.21 T1); Markdown by
+   CommonMark's headings, then paragraphs, then sentences.  A chunk
+   table declared from a document table is re-chunked through the same
+   queue when a document changes and emptied with it (the lineage
+   §M14.24's `FORGET` follows); a chunk whose text is unchanged keeps its
+   vector (a content-addressed cache by model and text hash), so an edit
+   to one paragraph embeds one chunk, not the document.
+7. **Costs visible.**  Batches sized by each provider's limits (inputs
+   and tokens a request), requests and tokens a minute by token bucket,
+   calls in parallel to a set limit; calls, tokens, cache hits, latency
+   and errors in `EXPLAIN ANALYZE` and the statement statistics (§M14.9).
+
+The steps:
+
+- **E1 — this study.**
+- **E2 — models, secrets, `embed()` over HTTP**: the provider registry,
+  `CREATE MODEL` / `CREATE SECRET`, the OpenAI-compatible, Cohere and
+  Voyage providers on one HTTP client (the oidc module's, moved to
+  where both reach it), a scripted provider for tests; query and
+  document embeddings.
+- **E3 — the local model**: the tokenizers (checked against Hugging
+  Face's `tokenizers` on every text of a corpus), the encoder on
+  nucleus's kernels, weights in the database; checked against
+  sentence-transformers (cosine ≥ 0.9999 a vector, the same nDCG@10 on
+  BEIR) and measured against fastembed on one core and on all.
+- **E4 — columns kept current**: `GENERATED ALWAYS AS … STORED`, then
+  `GENERATED BY EMBEDDING`, the queue, the workers, retries, pending
+  rows; crash, outage and concurrency tests in the simulator.
+- **E5 — model versions**: re-embedding online.
+- **E6 — chunking functions**: sentences, tokens, Markdown.
+- **E7 — chunk tables kept current**, lineage, the content-addressed
+  cache.
+- **E8 — batching, rate limits, costs in the analyzer**; the *Done
+  when* checked whole on BEIR, documents to ranked chunks.
 
 ### §M14.23 — Embedded editions ⬜
 
