@@ -429,6 +429,7 @@ name = "nucleus-cli"
 version = "0.1.0"
 dependencies = [
  "nucleus-client",
+ "nucleus-embeddings",
  "nucleus-kv",
  "nucleus-ldap",
  "nucleus-mcp",
@@ -466,6 +467,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-embeddings"
+version = "0.1.0"
+dependencies = [
+ "nucleus-http",
+ "nucleus-kv",
+ "nucleus-platform",
+ "nucleus-sql",
+ "serde_json",
+]
+
+[[package]]
 name = "nucleus-example"
 version = "0.1.0"
 dependencies = [
@@ -481,6 +493,14 @@ dependencies = [
  "nucleus-server",
  "nucleus-sql",
  "nucleus-testkit",
+]
+
+[[package]]
+name = "nucleus-http"
+version = "0.1.0"
+dependencies = [
+ "rustls",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -520,12 +540,11 @@ name = "nucleus-oidc"
 version = "0.1.0"
 dependencies = [
  "nucleus-client",
+ "nucleus-http",
  "nucleus-kv",
  "nucleus-server",
  "ring",
- "rustls",
  "serde_json",
- "webpki-roots",
 ]
 
 [[package]]

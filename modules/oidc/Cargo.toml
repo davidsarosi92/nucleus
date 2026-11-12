@@ -17,8 +17,7 @@ ring = "0.17"
 # The tokens, the keys and the issuer's metadata are JSON.
 serde_json = "1"
 # The issuer's metadata and keys over HTTPS (discovery).
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "1"
+nucleus-http = { version = "0.1.0", path = "../http" }
 
 [dev-dependencies]
 nucleus-client = { version = "0.1.0", path = "../../crates/client" }

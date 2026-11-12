@@ -38,10 +38,13 @@ for m in "${modules[@]}"; do
     dir="$work/$m"
     mkdir -p "$dir/.cargo"
     tar -xzf "$crate" -C "$dir" --strip-components=1
-    # The core crates as packaged, standing in for the published ones.
+    # The core crates and the other modules as packaged, standing in for
+    # the published ones (a module may use another: embeddings and oidc
+    # use http).
     {
         echo "[patch.crates-io]"
-        for p in "${core[@]}"; do
+        for p in "${core[@]}" "${modules[@]}"; do
+            [ "$p" = "$m" ] && continue
             echo "$p = { path = \"$(ls -d "$pkg"/package/"$p"-*/ | head -1)\" }"
         done
     } > "$dir/.cargo/config.toml"

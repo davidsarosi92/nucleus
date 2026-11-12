@@ -29,8 +29,8 @@ use crate::error::Result;
 const WATCHED: [(&[u8], &[u8]); 3] = [
     (&[0x00, 0x00], &[0x00, 0x02]),
     (&[0x00, 0x04], &[0x00, 0x12]),
-    // Secrets (`00 14`).
-    (&[0x00, 0x14], &[0x00, 0x15]),
+    // Secrets (`00 14`), models (`00 15`).
+    (&[0x00, 0x14], &[0x00, 0x16]),
 ];
 
 /// Asks `kv` to watch the catalog.
@@ -45,6 +45,8 @@ pub(crate) fn watch(kv: &dyn Kv) {
 pub(crate) enum Part {
     /// A table's definition (`Option<Table>`).
     Table,
+    /// A model's definition (`Option<Model>`).
+    Model,
     /// A database setting's value.
     Setting,
     /// An object's ACL (of a kind of object).

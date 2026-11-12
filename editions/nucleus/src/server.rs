@@ -149,7 +149,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             None => Arc::new(Trust),
         },
         log_queries,
-        registry: nucleus_sql::ext::Registry::shared_builtin(),
+        registry: crate::sql::registry(),
         tls: match (tls_cert, tls_key) {
             (Some(cert), Some(key)) => {
                 let tls = nucleus_tls::ServerTls::from_pem_files(cert.as_ref(), key.as_ref())

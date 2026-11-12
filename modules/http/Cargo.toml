@@ -1,0 +1,20 @@
+[package]
+name = "nucleus-http"
+description = "Just enough HTTP/1.1 for nucleus's modules that call out: requests over TLS (rustls), plain HTTP only to a loopback address"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+
+[dependencies]
+# TLS for every address but loopback.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

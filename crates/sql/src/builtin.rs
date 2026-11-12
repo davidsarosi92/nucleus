@@ -131,6 +131,7 @@ impl Module for Builtin {
         crate::sparse::register(r)?;
         crate::hnsw::register(r)?;
         crate::text::register(r)?;
+        crate::models::register_functions(r)?;
         crate::hybrid::register(r)?;
         crate::moments::register(r)?;
         crate::quantile::register(r)?;

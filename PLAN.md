@@ -278,7 +278,7 @@ are marked ✅.
 | | M14.28 | B+tree or LSM tree, chosen per table (`WITH (engine = …)`) beside the row / column layout: a study first, then the plan | ◐ study written; L0 ✅; L1–L5 next |
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
-| | M14.22 | **Next:** Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ◐ E1 ✅ (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory) |
+| | M14.22 | **Next:** Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ◐ E1 ✅ (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory), E2b ✅ (`CREATE MODEL`, `embed()`, providers: `hashing` built in, OpenAI-compatible, Cohere, Voyage as a module) |
 | | M14.23 | Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
@@ -6552,6 +6552,35 @@ with its strings as `'***'` (`statements::redacted`).  Tests:
 `tests/secrets.rs` (nothing in the clear anywhere in the KV, the audit
 masked, privileges, owners through role renames and drops, `FROM ENV`,
 rotation, a damaged record, another key, no key).
+
+**E2b — models and `embed()`** (done 2026-11-12).  `CREATE | DROP MODEL m
+USING provider WITH (…)` (catalog `00 15`), `GRANT USAGE ON MODEL`,
+`embed(text, m [, 'query' | 'document'])`, `nc_catalog.models` (with
+the process's calls, texts, cache hits, errors and time) and
+`model_providers`.  Providers are registered (`ModelProvider`: `define`
+checks the options and gives dimensions and batch without a network,
+`embed` takes a batch of one kind); the core keeps `secret` (`USAGE` on
+it needed to name it — a model's URL is its maker's choice, so a secret
+they may not use must not travel there), `query_prefix` and
+`document_prefix` (e5, bge).  Built in, `hashing`: Weinberger et al.'s
+feature hashing *without* its random signs — the signs keep inner
+products unbiased, but two words of a short text cancelled into a zero
+vector, which has no cosine (found by the first run of the CLI).
+Modules: `nucleus-http` (the oidc module's client, now shared and
+general) and `nucleus-embeddings` — `openai` (the de facto protocol:
+OpenAI, Ollama, vLLM, LM Studio, text-embeddings-inference), `cohere`
+(v2, `input_type`), `voyage` (`input_type`); their batches by each API's
+limit; one retry after `Retry-After`; `58030` for what may succeed later
+(E4's queue will retry those), `55000` for what will not.  Taken from
+LangChain's `CacheBackedEmbeddings` and E2's design item 6: a cache by
+SHA-256 of (the model's definition, the kind, the text), bounded, which
+makes `embed()` stable — a ranking's query vector is computed once
+(checked: one provider call for `ORDER BY v <-> embed(…)` over 40 rows,
+none the second time) — and the vectorized executor's `call_batch` sends
+a batch's texts together (2,000 rows of a column table: 24 calls at a
+batch of 100 — 20 full, the rest the ends of the executor's batches).  Not yet: connection reuse (one TLS handshake
+a call — batches carry it; E8), the one-argument `embed($q)` taking a
+column's model (E4, when columns have one).
 
 ### §M14.23 — Embedded editions ⬜
 

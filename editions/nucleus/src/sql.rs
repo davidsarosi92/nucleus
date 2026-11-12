@@ -852,8 +852,16 @@ impl Target {
         Ok(match self.dir {
             Some(dir) => {
                 let db = Database::open(&dir, Options::default()).map_err(|e| e.to_string())?;
+                let kv: Arc<dyn nucleus_kv::Kv> = Arc::new(db.clone());
+                // Secrets sealed as the server seals them: its key file.
+                nucleus_sql::secrets::set_keyring(Some(Arc::new(
+                    nucleus_server::keyfile::KeyFile::new(
+                        nucleus_server::keyfile::KeyFile::beside(&dir),
+                        kv.clone(),
+                    ),
+                )));
                 Backend::Local {
-                    session: Session::new(Arc::new(db.clone())),
+                    session: Session::with_registry(kv, registry()),
                     db,
                     dir,
                 }
@@ -907,4 +915,20 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     let closed = shell.backend.close();
     result.and(closed)
+}
+
+/// The edition's registry: the built-in module and the embedding
+/// providers (`embeddings`).  Built once; building it registers the
+/// providers for the process, so local sessions (`nucleus sql <dir>`)
+/// have them too.
+pub(crate) fn registry() -> std::sync::Arc<nucleus_sql::ext::Registry> {
+    static R: std::sync::OnceLock<std::sync::Arc<nucleus_sql::ext::Registry>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(|| {
+        let mut r = nucleus_sql::ext::Registry::builtin();
+        r.add(&nucleus_embeddings::Embeddings)
+            .expect("the embeddings module registers");
+        std::sync::Arc::new(r)
+    })
+    .clone()
 }

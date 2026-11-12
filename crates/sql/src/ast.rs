@@ -188,6 +188,25 @@ pub enum Statement {
         /// Its new value, or where it comes from.
         given: crate::secrets::Given,
     },
+    /// `CREATE MODEL [IF NOT EXISTS] name USING provider [WITH (…)]`
+    /// ([`crate::models`]).
+    CreateModel {
+        /// Its name.
+        name: String,
+        /// Its provider.
+        provider: String,
+        /// `WITH (option = value, …)`.
+        options: Vec<(String, String)>,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+    },
+    /// `DROP MODEL [IF EXISTS] name`.
+    DropModel {
+        /// Its name.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
     /// `DROP SECRET [IF EXISTS] name`.
     DropSecret {
         /// Its name.

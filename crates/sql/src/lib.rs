@@ -56,6 +56,7 @@ pub mod large;
 pub mod laws;
 pub mod lexer;
 pub mod lint;
+pub mod models;
 pub mod moments;
 pub mod narrow;
 pub mod ncatalog;

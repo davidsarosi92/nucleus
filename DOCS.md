@@ -41,6 +41,8 @@
 | `modules/tls` | `nucleus-tls` | TLS over rustls, for the front ends and the Rust client | §M14.25 ✅ |
 | `modules/oidc` | `nucleus-oidc` | OpenID Connect: logins by identity tokens | §M14.25 ✅ |
 | `modules/ldap` | `nucleus-ldap` | LDAP: passwords checked by a directory | §M14.25 ✅ |
+| `modules/http` | `nucleus-http` | just enough HTTP/1.1 over TLS for the modules that call out (oidc, embeddings) | §M14.22 |
+| `modules/embeddings` | `nucleus-embeddings` | embedding model providers: OpenAI-compatible endpoints, Cohere, Voyage (§8.23) | §M14.22 |
 | `modules/mcp` | `nucleus-mcp` | a Model Context Protocol server: AI models list, describe and query a database (§6.5) | §M14.10 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
@@ -1411,6 +1413,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 0E <table> 00 <policy>` | a row-level security policy |
 | `00 0F <login>` | a token: its role, ceiling, expiry and secret's verifier (§9) |
 | `00 14 <name>` | a secret: its owner and its sealed value, or the environment variable it names (§9) |
+| `00 15 <name>` | a model: its provider, options, secret, prefixes, dimensions and batch (§8.23) |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -2543,6 +2546,8 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
 | `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by`, `max_rows`, `max_scan`, `timeout`, `rate_per_minute` (the tokens the current role may manage; never a secret) |
+| `nc_catalog.models` | `name`, `owner`, `provider`, `dimensions`, `max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`, `created`, `calls`, `texts`, `cached`, `errors`, `total_ms` (the models the current role may call; the calls since the process started, §8.23) |
+| `nc_catalog.model_providers` | `name`, `remote` (whether its calls reach the network) |
 | `nc_catalog.secrets` | `name`, `owner`, `source` (`value`, `env`), `env`, `created`, `changed` (the secrets the current role may use; never a value) |
 | `nc_catalog.grants` | `kind`, `object`, `column`, `grantee`, `privilege`, `grantable` (the ACLs written out) |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
@@ -4013,6 +4018,54 @@ evaluation, the rewrite's text queries, and the binary forms (round
 trips, the capped positions, what `tsvectorrecv` and `tsqueryrecv`
 refuse, the depth).
 
+### 8.23 Embedding models (`models`, `modules/embeddings`, §M14.22 E2b)
+
+`CREATE MODEL [IF NOT EXISTS] m USING provider [WITH (option = value,
+…)]` defines a model (catalog `00 15 <name>`); `DROP MODEL [IF EXISTS]
+m`.  The *provider* is registered for the process
+(`models::ModelProvider`, `Registry::add_model_provider`; modules reach
+it as `ext::models`): it checks its options — refusing any it does not
+know, `22023` — and says the model's dimensions (1 to 16,000) and batch;
+it never reaches the network then.  Built in: `hashing` (options
+`dimensions`, default 256, and `analyzer`, default `simple`): an
+analyzer's terms hashed into buckets (feature hashing without signs, so
+words never cancel), counted and scaled to length 1 — no model, no
+network.  The `embeddings` module (in the `nucleus` tool) adds `openai`
+(any OpenAI-compatible endpoint), `cohere` and `voyage` (its README).
+Three options are the core's: `secret` (a secret, §9, whose value the
+provider gets when it calls; naming one needs `USAGE` on it, and a
+secret is not dropped while a model names it, `2BP01`), `query_prefix`
+and `document_prefix`.
+
+`embed(text, m [, 'query' | 'document'])` returns the text's `vector`
+(dimensions unconstrained; a `vector(n)` column checks them, `22000`);
+a document by default.  The model's prefix for the kind is put before
+the text, and a provider whose API takes the kind itself (Cohere,
+Voyage) is told.  Calling one needs `USAGE` on the model (`GRANT USAGE
+ON MODEL m TO r`; its maker owns it; making one needs `CREATE` on the
+database).  `embed` is stable: in a ranking (`ORDER BY v <=> embed($1,
+m, 'query')`) the query's vector is computed once.  Vectors are kept in
+a cache for the process — by SHA-256 of the model's definition, the kind
+and the text; 32 MB, the older half dropped when full — so a text is not
+sent twice while kept, nor twice in one call; the vectorized executor
+sends a batch's texts in calls of the model's batch (`call_batch`).  A
+provider's answer is checked: as many vectors as texts, each of the
+model's dimensions, finite.  Failures: `58030` where trying again may
+help (no connection, 429, 5xx — tried once more first), `55000` where it
+will not (a refused key, an unknown model).
+
+`nc_catalog.models` (`name`, `owner`, `provider`, `dimensions`,
+`max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`,
+`created`, and the process's `calls`, `texts`, `cached`, `errors`,
+`total_ms`; the models the current role may call) and
+`nc_catalog.model_providers` (`name`, `remote`).  Tests:
+`tests/models.rs` (`hashing` end to end, privileges, prefixes, the
+secret given, one call for a ranking, the cache, a column table's 2,000
+rows in batches), `modules/embeddings/tests/providers.rs` (servers on
+loopback answering as OpenAI, Cohere and Voyage: the requests, the key,
+answers out of order, a 429 tried again, a 401 without the key in the
+error, a server down).
+
 ### 8.14 Errors and hints (`error`, `hint`)
 
 An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
@@ -4781,6 +4834,16 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-12 — §M14.22 E2b, models and `embed()`:** `CREATE | DROP
+  MODEL … USING provider WITH (…)`, providers registered
+  (`Registry::add_model_provider`), `hashing` built in; `embed(text, m [,
+  'query' | 'document'])` with the model's prefixes, `USAGE` on models,
+  a content-addressed cache, batches through `call_batch`;
+  `nc_catalog.models`, `nc_catalog.model_providers`.  New modules:
+  `nucleus-http` (the oidc module's client, now shared: any method,
+  headers, status, `Retry-After`) and `nucleus-embeddings` (`openai`,
+  `cohere`, `voyage`), in the `nucleus` tool; `nucleus sql <dir>` seals
+  secrets with the server's key file too.
 - **2026-11-12 — §M14.22 E2a, secrets:** `CREATE | ALTER | DROP SECRET`,
   sealed by ChaCha20-Poly1305 (`nucleus_crypto::aead`, RFC 8439's
   vectors) under a keyring's key outside the data directory (`nucleus

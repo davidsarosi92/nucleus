@@ -74,6 +74,7 @@ Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    sql::registry();
     let result = match args.first().map(String::as_str) {
         Some("--version" | "-V") => {
             println!("nucleus {}", env!("CARGO_PKG_VERSION"));

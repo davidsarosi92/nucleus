@@ -332,6 +332,13 @@ pub fn drop(txn: &mut dyn KvTxn, name: &str, if_exists: bool) -> Result<()> {
             "secret \"{name}\" does not exist"
         )));
     }
+    let users = crate::models::using_secret(&*txn, name)?;
+    if !users.is_empty() {
+        return Err(Error::dependent_objects(format!(
+            "secret \"{name}\" is used by model {}",
+            users.join(", ")
+        )));
+    }
     txn.delete(&key_of(name))?;
     crate::privileges::forget(txn, crate::privileges::Kind::Secret, name)
 }

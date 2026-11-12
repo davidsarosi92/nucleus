@@ -65,6 +65,7 @@ pub use crate::error::{Error, Result};
 pub use crate::index_method::{IndexMethod, RowRef};
 pub use crate::inet::Net;
 pub use crate::parser::{parse, parse_with_text};
+pub use crate::secrets::Revealed;
 pub use crate::session::{OutColumn, Output, Session, Sink, TxnStatus, command_tag, read_only};
 pub use crate::statements::redacted;
 pub use crate::stats::Sample;
@@ -96,6 +97,18 @@ pub mod vectors {
 /// checks them.
 pub mod sparse {
     pub use crate::sparse::{Sparse, data_type};
+}
+
+/// Secrets as modules see them ([`crate::secrets`]): a keyring for the
+/// process, and a value revealed to a provider.
+pub mod secrets {
+    pub use crate::secrets::{Keyring, Revealed, StaticKey, set_keyring};
+}
+
+/// Embedding models as modules see them ([`crate::models`]): a provider
+/// and what it is given and gives.
+pub mod models {
+    pub use crate::models::{Input, MAX_DIMENSIONS, ModelProvider, Options, Request, Spec};
 }
 
 /// Text analysis as modules see it ([`crate::text`]): an analyzer by
@@ -823,6 +836,13 @@ impl Registry {
     pub fn add_analyzer(&mut self, a: Arc<dyn crate::text::Analyzer>) -> Result<()> {
         crate::text::add(a);
         Ok(())
+    }
+
+    /// Adds an embedding model provider (PLAN.md §M14.22): models then
+    /// name it in `CREATE MODEL … USING name`.  Providers are kept for
+    /// the process, as analyzers are.
+    pub fn add_model_provider(&mut self, p: Arc<dyn crate::models::ModelProvider>) -> Result<()> {
+        crate::models::register(p)
     }
 
     /// The aggregate called `name`.

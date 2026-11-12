@@ -2090,6 +2090,19 @@ pub(crate) fn execute_statement(
             crate::secrets::drop(txn, name, *if_exists)?;
             Output::Command("DROP SECRET".into())
         }
+        Statement::CreateModel {
+            name,
+            provider,
+            options,
+            if_not_exists,
+        } => {
+            crate::models::create(txn, name, provider, options, *if_not_exists)?;
+            Output::Command("CREATE MODEL".into())
+        }
+        Statement::DropModel { name, if_exists } => {
+            crate::models::drop(txn, name, *if_exists)?;
+            Output::Command("DROP MODEL".into())
+        }
         Statement::SetRole(_) | Statement::Reset(_) => unreachable!("handled by the session"),
         Statement::SetRowSecurity {
             table,

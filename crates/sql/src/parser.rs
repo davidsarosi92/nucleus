@@ -418,6 +418,11 @@ impl<'a> Parser<'a> {
             {
                 self.pos += 1;
                 Kind::Secret
+            } else if self.peek_kw("model")
+                && matches!(self.peek_at(1), Some(Token::Word(w) | Token::Quoted(w)) if w != "to" && w != "from")
+            {
+                self.pos += 1;
+                Kind::Model
             } else {
                 self.eat_kw("table");
                 Kind::Table
@@ -1231,6 +1236,19 @@ impl<'a> Parser<'a> {
         if self.eat_kws(&["access", "rule"]) {
             return self.create_access_rule();
         }
+        if self.eat_kw("model") {
+            let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
+            let name = self.ident()?;
+            self.expect_kw("using")?;
+            let provider = self.ident()?;
+            let options = self.table_options()?;
+            return Ok(Statement::CreateModel {
+                name,
+                provider,
+                options,
+                if_not_exists,
+            });
+        }
         if self.eat_kw("secret") {
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
             let name = self.ident()?;
@@ -1770,6 +1788,11 @@ impl<'a> Parser<'a> {
             let if_exists = self.eat_kws(&["if", "exists"]);
             let name = self.ident()?;
             return Ok(Statement::DropSecret { name, if_exists });
+        }
+        if self.eat_kw("model") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let name = self.ident()?;
+            return Ok(Statement::DropModel { name, if_exists });
         }
         if self.eat_kw("role") || self.eat_kw("user") {
             let if_exists = self.eat_kws(&["if", "exists"]);

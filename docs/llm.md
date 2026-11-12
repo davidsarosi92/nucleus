@@ -44,6 +44,18 @@ arrays' elements: `embedding[1]` (a `real`), `embedding[1:256]` (a
 vector), `UPDATE docs SET embedding[3] = 0.5`.  Over the PostgreSQL
 protocol pgvector's clients work (`register_vector` with psycopg).
 
+**Embeddings by the database:** `embed(text, model [, 'query' |
+'document'])` returns a `vector` — `UPDATE docs SET embedding =
+embed(body, 'small')`, `ORDER BY embedding <=> embed($1, 'small',
+'query') LIMIT 10` (the query's vector computed once).  Models are made
+with `CREATE MODEL small USING openai WITH (model =
+'text-embedding-3-small', secret = openai_key)` (`openai` — any
+OpenAI-compatible server, Ollama included —, `cohere`, `voyage`, and
+`hashing`, a lexical vector without a network) and listed in
+`nc_catalog.models`; keys are secrets (`CREATE SECRET openai_key VALUE
+'…'`), never shown.  Use the model's own name, and `'query'` for what is
+searched for.
+
 **Tables:** `CREATE TABLE [IF NOT EXISTS] t (id bigint PRIMARY KEY, name
 text NOT NULL DEFAULT '', email text UNIQUE, score int CHECK (score >= 0),
 owner_id bigint REFERENCES owners (id) ON DELETE CASCADE)`; table

@@ -25,6 +25,7 @@ nucleus-tls.workspace = true
 nucleus-oidc.workspace = true
 nucleus-ldap.workspace = true
 nucleus-mcp.workspace = true
+nucleus-embeddings.workspace = true
 
 [dev-dependencies]
 # The MCP test reads the server's JSON-RPC answers.

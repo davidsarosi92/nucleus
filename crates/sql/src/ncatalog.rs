@@ -241,6 +241,27 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "models",
+        &[
+            ("name", T),
+            ("owner", T),
+            ("provider", T),
+            ("dimensions", I),
+            ("max_batch", I),
+            ("secret", T),
+            ("query_prefix", T),
+            ("document_prefix", T),
+            ("options", TA),
+            ("created", DataType::TimestampTz),
+            ("calls", I),
+            ("texts", I),
+            ("cached", I),
+            ("errors", I),
+            ("total_ms", F),
+        ],
+    ),
+    ("model_providers", &[("name", T), ("remote", B)]),
+    (
         "role_members",
         &[
             ("role", T),
@@ -728,6 +749,52 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         .rate
                         .map_or(Value::Null, |n| Value::Int(i64::from(n))),
                 ]);
+            }
+        }
+        "models" => {
+            // The models the current role may call.
+            let checker = crate::privileges::Checker::new();
+            for m in crate::models::all(txn)? {
+                if !checker.has(
+                    txn,
+                    crate::privileges::Kind::Model,
+                    &m.name,
+                    crate::privileges::USAGE,
+                    None,
+                )? {
+                    continue;
+                }
+                let c = crate::models::calls_of(&m.name);
+                let opt = |o: Option<String>| o.map_or(Value::Null, text);
+                out.push(vec![
+                    text(m.name),
+                    text(m.owner),
+                    text(m.provider),
+                    Value::Int(i64::from(m.dimensions)),
+                    Value::Int(i64::from(m.max_batch)),
+                    opt(m.secret),
+                    opt(m.query_prefix),
+                    opt(m.document_prefix),
+                    Value::Array(
+                        m.options
+                            .0
+                            .into_iter()
+                            .map(|(k, v)| text(format!("{k}={v}")))
+                            .collect(),
+                    ),
+                    Value::TimestampTz(m.created),
+                    Value::Int(c.calls as i64),
+                    Value::Int(c.texts as i64),
+                    Value::Int(c.cached as i64),
+                    Value::Int(c.errors as i64),
+                    Value::Float(c.micros as f64 / 1000.0),
+                ]);
+            }
+        }
+        "model_providers" => {
+            for name in crate::models::provider_names() {
+                let remote = crate::models::provider(&name)?.remote();
+                out.push(vec![text(name), Value::Bool(remote)]);
             }
         }
         "secrets" => {
