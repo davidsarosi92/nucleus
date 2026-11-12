@@ -319,6 +319,15 @@ pub trait ModelProvider: Send + Sync {
     fn remote(&self) -> bool {
         true
     }
+
+    /// The model's tokens in each of `request.texts` — its tokenizer's,
+    /// without the prefix and the special tokens — for chunks sized in
+    /// them (§M14.22 E6), or `None`: it cannot count them (a remote
+    /// model's tokenizer is its server's).  Must not reach the network.
+    fn count_tokens(&self, request: &Request<'_>) -> Result<Option<Vec<usize>>> {
+        let _ = request;
+        Ok(None)
+    }
 }
 
 fn providers() -> &'static RwLock<HashMap<String, Arc<dyn ModelProvider>>> {
@@ -775,6 +784,45 @@ pub fn retry_after(e: &Error) -> Option<std::time::Duration> {
     let h = e.hint.as_deref()?.strip_prefix("try again in ")?;
     let ms = h.split(' ').next()?.parse().ok()?;
     Some(std::time::Duration::from_millis(ms))
+}
+
+/// The tokens of `texts` by model `name` (`USAGE` on it checked), as
+/// its provider counts them ([`ModelProvider::count_tokens`]).
+pub fn count_tokens(txn: &dyn KvTxn, name: &str, texts: &[&str]) -> Result<Vec<usize>> {
+    let m = existing(txn, name)?;
+    crate::privileges::Checker::new().require(
+        txn,
+        crate::privileges::Kind::Model,
+        name,
+        crate::privileges::USAGE,
+        None,
+    )?;
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let p = provider(&m.provider)?;
+    let files = Files::stored(m.files.clone(), txn);
+    let batch: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+    let counted = p.count_tokens(&Request {
+        options: &m.options,
+        dimensions: m.dimensions,
+        secret: None,
+        input: Input::Document,
+        texts: &batch,
+        files: &files,
+    })?;
+    match counted {
+        Some(n) if n.len() == texts.len() => Ok(n),
+        Some(n) => Err(Error::data_exception(format!(
+            "model \"{name}\" counted {} texts of {}",
+            n.len(),
+            texts.len()
+        ))),
+        None => Err(Error::feature(format!(
+            "model \"{name}\" (provider {}) cannot count its tokens here; give chunks() no model to count words",
+            m.provider
+        ))),
+    }
 }
 
 /// [`embed`] without the privilege check: for the embedding columns'

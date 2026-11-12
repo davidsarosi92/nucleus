@@ -90,6 +90,12 @@ impl LocalModel {
             .encode(text, self.encoder.config().max_tokens())
     }
 
+    /// The tokens of `text`, not cut and without the special tokens the
+    /// model wraps it in (what a chunk's size is counted in).
+    pub fn count(&self, text: &str) -> usize {
+        self.tokenizer.count(text)
+    }
+
     /// The vectors of `texts`, of length 1, on up to `threads` threads.
     pub fn embed(&self, texts: &[&str], threads: usize) -> Result<Vec<Vec<f32>>, String> {
         let ids: Vec<Vec<u32>> = texts.iter().map(|t| self.tokens(t)).collect();

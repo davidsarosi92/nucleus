@@ -298,4 +298,9 @@ impl ModelProvider for Local {
     fn remote(&self) -> bool {
         false
     }
+
+    fn count_tokens(&self, r: &Request<'_>) -> Result<Option<Vec<usize>>> {
+        let m = loaded(r.files, pooling(r.options)?)?;
+        Ok(Some(r.texts.iter().map(|t| m.count(t)).collect()))
+    }
 }

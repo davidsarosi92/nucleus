@@ -573,7 +573,9 @@ impl<'a> Binder<'a> {
         columns: &[String],
     ) -> Result<Bound> {
         let empty = Scope::default();
-        let (func, bound, ty) = match self.registry.table_function(name).cloned() {
+        // The columns: one named after the function (or its alias), or
+        // those the function names.
+        let (func, bound, outs) = match self.registry.table_function(name).cloned() {
             Some(f) => {
                 if !f.arity().contains(&args.len()) {
                     return Err(Error::undefined_function(format!(
@@ -586,15 +588,12 @@ impl<'a> Binder<'a> {
                     typed.push(self.expr(a, &empty)?);
                 }
                 let sig = f.resolve(&arg_info(&typed))?;
-                let [(_, ty)] = sig.columns.as_slice() else {
-                    return Err(Error::feature(format!(
-                        "table function {name} returns {} columns; one is supported",
-                        sig.columns.len()
-                    )));
+                let outs: Vec<(Option<String>, Option<DataType>)> = match sig.columns.as_slice() {
+                    [(_, ty)] => vec![(None, *ty)],
+                    many => many.iter().map(|(n, t)| (Some(n.clone()), *t)).collect(),
                 };
-                let ty = *ty;
                 let (bound, _) = self.apply_signature(name, sig.args, typed)?;
-                (TableFunc::Call(f), bound, ty)
+                (TableFunc::Call(f), bound, outs)
             }
             None => {
                 // A scalar function: one row.
@@ -607,17 +606,20 @@ impl<'a> Binder<'a> {
                     within_group: false,
                 };
                 let (x, t) = self.expr(&call, &empty)?;
-                (TableFunc::Scalar, vec![x], t)
+                (TableFunc::Scalar, vec![x], vec![(None, t)])
             }
         };
         let qual = alias.unwrap_or(name).to_string();
-        let mut cols = vec![ScopeCol {
-            table: Some(qual.clone()),
-            name: qual.clone(),
-            ty,
-            hidden: false,
-            origin: None,
-        }];
+        let mut cols: Vec<ScopeCol> = outs
+            .into_iter()
+            .map(|(n, ty)| ScopeCol {
+                table: Some(qual.clone()),
+                name: n.unwrap_or_else(|| qual.clone()),
+                ty,
+                hidden: false,
+                origin: None,
+            })
+            .collect();
         if ordinality {
             cols.push(ScopeCol {
                 table: Some(qual.clone()),

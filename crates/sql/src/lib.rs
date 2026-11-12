@@ -17,6 +17,7 @@ pub mod bytea;
 pub mod catalog;
 pub mod catalog_cache;
 pub mod check;
+pub mod chunks;
 pub mod column_store;
 mod columns;
 pub mod convert;

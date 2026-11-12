@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Token counts for chunks (nucleus PLAN.md §M14.22 E6): `LocalModel::count`,
+  `Tokenizer::count`, and the provider's `count_tokens`, so
+  `chunks(…, 'tokens', n, 0, 'model')` sizes chunks in the model's tokens.
 - The `local` model provider (nucleus PLAN.md §M14.22 E3c): `CREATE MODEL
   … USING local WITH (huggingface = 'org/name' | path = '/dir')`, the
   files fetched once (redirects followed, the hub's SHA-256 checked) and

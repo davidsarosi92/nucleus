@@ -10,6 +10,8 @@ pub mod index;
 mod porter;
 pub(crate) mod query;
 pub(crate) mod score;
+mod sentence_breaks;
+pub(crate) mod sentences;
 mod snowball;
 mod stop_words;
 mod word_breaks;

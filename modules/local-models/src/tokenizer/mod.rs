@@ -297,6 +297,13 @@ impl Tokenizer {
         })
     }
 
+    /// The number of `text`'s ids, unwrapped and uncut.
+    pub fn count(&self, text: &str) -> usize {
+        self.encode(text, usize::MAX)
+            .len()
+            .saturating_sub(self.before.len() + self.after.len())
+    }
+
     /// The ids of `text`, wrapped as the model expects and cut to at
     /// most `max` (the wrapping kept, the text's end dropped).
     pub fn encode(&self, text: &str, max: usize) -> Vec<u32> {

@@ -22,11 +22,11 @@ const VOCAB: [&str; 12] = [
     "[PAD]", "[UNK]", "[CLS]", "[SEP]", "hello", "world", "a", "b", "##s", "data", "##base", "x",
 ];
 
-/// A deterministic number in [-0.5, 0.5).
 /// A step up a path, put together so the boundary check (no paths out of
 /// a module's folder) does not take the refusals tested for one.
 const UP: &str = concat!("..", "/");
 
+/// A deterministic number in [-0.5, 0.5).
 fn noise(i: &mut u64) -> f32 {
     *i = i
         .wrapping_mul(6364136223846793005)
@@ -252,6 +252,19 @@ fn from_a_directory() {
         .unwrap();
     let n = rows(&mut s, "SELECT count(embed(body, 'tiny')) FROM d");
     assert_eq!(n, vec![vec![Value::Int(3)]]);
+    // Chunks sized in the model's tokens: "databases" is three
+    // (data ##base ##s), each chunk counted again whole.
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT chunk, size FROM chunks('databases databases hello world', 'tokens', 4, 0, 'tiny')"
+        ),
+        vec![
+            vec![Value::Text("databases".into()), Value::Int(3)],
+            vec![Value::Text("databases hello".into()), Value::Int(4)],
+            vec![Value::Text("world".into()), Value::Int(1)],
+        ]
+    );
     // Dropped: the files go with the last model that kept them.
     s.execute("DROP MODEL tiny").unwrap();
     assert_eq!(file_keys(&kv), 0);

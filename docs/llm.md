@@ -76,6 +76,12 @@ To change the model: `ALTER TABLE t ALTER COLUMN v SET MODEL e5` — the
 new vectors are made in the background while queries read the old, then
 the column switches at once (its dimensions may change).
 
+**Chunks:** `SELECT d.id, c.position, c.chunk, c.headings FROM docs d,
+chunks(d.body, 'markdown', 200, 20, 'e5') c` cuts each document into
+pieces of at most 200 of the model's tokens (`'sentences'`, `'tokens'`
+or `'markdown'`; overlap 20; without a model, sizes are words);
+`substr(d.body, c.start, c.length) = c.chunk`.
+
 **Tables:** `CREATE TABLE [IF NOT EXISTS] t (id bigint PRIMARY KEY, name
 text NOT NULL DEFAULT '', email text UNIQUE, score int CHECK (score >= 0),
 owner_id bigint REFERENCES owners (id) ON DELETE CASCADE)`; table
