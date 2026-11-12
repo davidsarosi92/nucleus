@@ -936,6 +936,7 @@ pub fn authorize_ddl(
         Statement::CreateIndex { table, .. }
         | Statement::CreateStatistics { table, .. }
         | Statement::AlterColumnType { table, .. }
+        | Statement::SetColumnModel { table, .. }
         | Statement::SetStorage { table, .. }
         | Statement::SetStoragePolicy { table, .. }
         | Statement::AttachPartition { table, .. }

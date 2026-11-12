@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Generated columns as PostgreSQL's catalogs show them:
+  `pg_attribute.attgenerated = 's'` (and `atthasdef`), the expression in
+  `pg_attrdef`, `information_schema.columns.is_generated = 'ALWAYS'` and
+  its `generation_expression` (new) — stored and embedding columns
+  alike (§M14.22 E4).
 - `tsvector` and `tsquery` on the wire as PostgreSQL's types (oids 3614,
   3615; `pg_type` rows with their arrays, `format_type`), in binary
   format as `tsvectorsend` / `tsquerysend` give them and taken as

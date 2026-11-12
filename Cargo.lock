@@ -432,6 +432,7 @@ dependencies = [
  "nucleus-embeddings",
  "nucleus-kv",
  "nucleus-ldap",
+ "nucleus-local-models",
  "nucleus-mcp",
  "nucleus-oidc",
  "nucleus-pg-compat",
@@ -532,6 +533,7 @@ dependencies = [
 name = "nucleus-local-models"
 version = "0.1.0"
 dependencies = [
+ "nucleus-http",
  "nucleus-kv",
  "nucleus-platform",
  "nucleus-sql",

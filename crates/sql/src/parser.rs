@@ -1701,6 +1701,7 @@ impl<'a> Parser<'a> {
             default: None,
             check: None,
             references: None,
+            generated: None,
         };
         let mut constraint_name = None;
         loop {
@@ -1724,10 +1725,64 @@ impl<'a> Parser<'a> {
                 constraint_name = Some(self.ident()?);
             } else if self.eat_kw("references") {
                 c.references = Some((constraint_name.take(), self.references()?));
+            } else if self.eat_kw("generated") {
+                if c.generated.is_some() {
+                    return Err(Error::syntax(format!(
+                        "multiple generation clauses specified for column \"{}\"",
+                        c.name
+                    )));
+                }
+                c.generated = Some(self.generated()?);
             } else {
+                if c.generated.is_some() && c.default.is_some() {
+                    return Err(Error::syntax(format!(
+                        "both default and generation expression specified for column \"{}\"",
+                        c.name
+                    )));
+                }
                 return Ok(c);
             }
         }
+    }
+
+    /// After `GENERATED`: `ALWAYS AS (expr) STORED` or `BY EMBEDDING
+    /// (expr) USING model`.
+    fn generated(&mut self) -> Result<crate::ast::Generated> {
+        if self.eat_kws(&["by", "embedding"]) {
+            self.expect_op("(")?;
+            let (_, source) = self.text_of(|p| p.expr())?;
+            self.expect_op(")")?;
+            self.expect_kw("using")?;
+            let model = self.ident()?;
+            return Ok(crate::ast::Generated::Embedding {
+                source,
+                model,
+                version: 0,
+                next: None,
+            });
+        }
+        if self.eat_kws(&["by", "default"]) || self.peek_kws(&["always", "as", "identity"]) {
+            return Err(Error::feature(
+                "identity columns are not supported: use a sequence's nextval() as the default",
+            ));
+        }
+        self.expect_kw("always")?;
+        self.expect_kw("as")?;
+        if self.peek_kws(&["identity"]) {
+            return Err(Error::feature(
+                "identity columns are not supported: use a sequence's nextval() as the default",
+            ));
+        }
+        self.expect_op("(")?;
+        let (_, text) = self.text_of(|p| p.expr())?;
+        self.expect_op(")")?;
+        if self.eat_kw("virtual") {
+            return Err(Error::feature(
+                "virtual generated columns are not supported: a generated column is STORED",
+            ));
+        }
+        self.expect_kw("stored")?;
+        Ok(crate::ast::Generated::Stored(text))
     }
 
     /// A secret's `VALUE '…'` or `FROM ENV 'VAR'`.
@@ -2168,6 +2223,15 @@ impl<'a> Parser<'a> {
             // ALTER [COLUMN] c [SET DATA] TYPE t [USING expr]
             self.eat_kw("column");
             let column = self.ident()?;
+            // ALTER [COLUMN] v SET MODEL m: an embedding column's model.
+            if self.eat_kws(&["set", "model"]) {
+                let model = self.ident()?;
+                return Ok(Statement::SetColumnModel {
+                    table,
+                    column,
+                    model,
+                });
+            }
             let _ = self.eat_kws(&["set", "data"]);
             self.expect_kw("type")?;
             let (ty, typmod) = self.data_type()?;

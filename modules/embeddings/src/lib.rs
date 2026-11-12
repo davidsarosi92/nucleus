@@ -21,13 +21,13 @@
 //! call throttled (429) or failed by the server (5xx) or the network is
 //! tried once more after `Retry-After` (at most 10 s) or half a second;
 //! then it fails with `58030` (try again later: §M14.22 E4's queue
-//! retries those), while a refused key or a bad request fails with
+//! retries those, after the `Retry-After` it carries in its hint), while a refused key or a bad request fails with
 //! `55000` (it will not succeed as defined).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use nucleus_sql::ext::models::{Input, ModelProvider, Options, Request, Spec};
+use nucleus_sql::ext::models::{Files, Input, ModelProvider, Options, Request, Spec};
 use nucleus_sql::ext::{Error, Module, Registry, Result};
 use serde_json::{Value as Json, json};
 
@@ -98,7 +98,11 @@ fn post(provider: &str, url: &str, key: Option<&str>, body: &Json) -> Result<Jso
             Err(e) => return Err(Error::prerequisite(format!("{provider}: {e}"))),
         };
         if attempt >= 2 {
-            return Err(error);
+            // The embedding columns' queue waits as long as asked.
+            return Err(match wait {
+                Some(w) => error.with_hint(nucleus_sql::ext::models::retry_hint(w)),
+                None => error,
+            });
         }
         std::thread::sleep(wait.unwrap_or(Duration::from_millis(500)).min(MAX_WAIT));
     }
@@ -179,7 +183,7 @@ impl ModelProvider for OpenAi {
         "openai"
     }
 
-    fn define(&self, o: &Options) -> Result<Spec> {
+    fn define(&self, o: &Options, _files: &Files<'_>) -> Result<Spec> {
         o.only("openai", &["model", "url", "dimensions", "batch"])?;
         let dimensions = dimensions("openai", o, &OPENAI_KNOWN)?;
         let batch = o.number("batch", 1..=2048)?.unwrap_or(512) as usize;
@@ -223,7 +227,7 @@ impl ModelProvider for Cohere {
         "cohere"
     }
 
-    fn define(&self, o: &Options) -> Result<Spec> {
+    fn define(&self, o: &Options, _files: &Files<'_>) -> Result<Spec> {
         o.only("cohere", &["model", "url", "dimensions", "batch"])?;
         let dimensions = dimensions("cohere", o, &COHERE_KNOWN)?;
         let batch = o.number("batch", 1..=96)?.unwrap_or(96) as usize;
@@ -281,7 +285,7 @@ impl ModelProvider for Voyage {
         "voyage"
     }
 
-    fn define(&self, o: &Options) -> Result<Spec> {
+    fn define(&self, o: &Options, _files: &Files<'_>) -> Result<Spec> {
         o.only("voyage", &["model", "url", "dimensions", "batch"])?;
         let dimensions = dimensions("voyage", o, &VOYAGE_KNOWN)?;
         let batch = o.number("batch", 1..=1000)?.unwrap_or(128) as usize;

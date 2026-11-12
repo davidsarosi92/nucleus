@@ -11,6 +11,8 @@ readme = "README.md"
 # path is for building inside the repository; a published copy drops it).
 [dependencies]
 nucleus-sql = { version = "0.1.0", path = "../../crates/sql" }
+# A model's files from Hugging Face's hub, over HTTPS.
+nucleus-http = { version = "0.1.0", path = "../http" }
 # tokenizer.json and config.json.
 serde_json = "1"
 

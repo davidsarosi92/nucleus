@@ -4,12 +4,31 @@
 //! transformers' pooling configuration and safetensors.
 
 pub mod encoder;
+pub mod provider;
 pub mod safetensors;
 pub mod tokenizer;
+
+use std::sync::Arc;
+
+use nucleus_sql::ext::{Module, Registry};
 
 use encoder::{Config, Encoder, Pooling};
 use safetensors::SafeTensors;
 use tokenizer::Tokenizer;
+
+/// The module: registers the `local` model provider
+/// ([`provider::Local`]).
+pub struct LocalModels;
+
+impl Module for LocalModels {
+    fn name(&self) -> &str {
+        "local-models"
+    }
+
+    fn register(&self, r: &mut Registry) -> nucleus_sql::ext::Result<()> {
+        r.add_model_provider(Arc::new(provider::Local))
+    }
+}
 
 /// A model: its tokenizer and its encoder.
 pub struct LocalModel {

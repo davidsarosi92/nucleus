@@ -879,6 +879,9 @@ impl Session {
                 if name == crate::hnsw::EF_SEARCH_SETTING {
                     crate::hnsw::check_ef_search(value)?;
                 }
+                if name == crate::embedding::PENDING_SETTING {
+                    crate::embedding::PendingRows::parse(value)?;
+                }
                 if name == "default_transaction_isolation" || name == "transaction_isolation" {
                     self.default_isolation = match value.to_ascii_lowercase().trim_matches('\'') {
                         "serializable" => IsolationLevel::Serializable,
@@ -963,11 +966,37 @@ impl Session {
                 let who = Arc::new(who);
                 self.charge_rate(&who)?;
                 let budget = self.budget(&who)?;
+                self.wait_for_embeddings(stmt, &budget)?;
                 crate::access::with_who(&who, || {
                     crate::budget::with_budget(budget, || self.run_in_txn(stmt, params, sink))
                 })
             }
         }
+    }
+
+    /// `embedding.pending = wait`: before a query takes its snapshot, the
+    /// embedding columns' jobs done (§M14.22 E4b).
+    fn wait_for_embeddings(
+        &mut self,
+        stmt: &Statement,
+        budget: &crate::budget::Budget,
+    ) -> Result<()> {
+        let wait = self
+            .settings
+            .get(crate::embedding::PENDING_SETTING)
+            .is_some_and(|v| {
+                crate::embedding::PendingRows::parse(v).ok()
+                    == Some(crate::embedding::PendingRows::Wait)
+            });
+        if !wait || !matches!(stmt, Statement::Query(_)) {
+            return Ok(());
+        }
+        if self.block.as_ref().is_some_and(|b| b.txn.is_some()) {
+            return Err(Error::active_txn(
+                "embedding.pending = wait needs a query that begins its transaction (its snapshot would not see the vectors)",
+            ));
+        }
+        crate::embedding::drain(&self.kv, &self.registry, budget.deadline)
     }
 
     /// Runs a statement in a transaction, its rows into `sink`; its
@@ -1055,6 +1084,9 @@ impl Session {
     /// Its failure is not the statement's: the next one tries again.
     fn after_statement(&self, wrote: bool) {
         let _ = crate::index_method::after_statement(&self.kv, wrote);
+        // The embedding columns' jobs, unless a background worker runs
+        // them (§M14.22 E4b).
+        let _ = crate::embedding::after_statement(&self.kv, &self.registry);
     }
 
     /// Whether a statement changes the catalog: always in the audit log.
@@ -1982,6 +2014,15 @@ pub(crate) fn execute_statement(
             catalog::update_table(txn, &t)?;
             Output::Command("CREATE INDEX".into())
         }
+        Statement::SetColumnModel {
+            table,
+            column,
+            model,
+        } => {
+            refuse_partitioned(&*txn, table, "ALTER COLUMN … SET MODEL")?;
+            crate::embedding::set_model(txn, reg, table, column, model)?;
+            Output::Command("ALTER TABLE".into())
+        }
         Statement::AlterColumnType {
             table,
             column,
@@ -2416,12 +2457,31 @@ fn add_column(
         max_len: column.max_len,
         numeric: column.numeric,
         comment: None,
+        generated: column.generated.clone(),
     });
     if let Some(check) = &column.check {
         t.checks
             .push((format!("{table}_{}_check", column.name), check.clone()));
     }
     catalog::note_stored_types(txn, &t.columns)?;
+    crate::embedding::settle(&*txn, &mut t)?;
+    dml::check_generated(&*txn, reg, &t)?;
+    if let Some(g) = &column.generated {
+        if column.references.is_some() {
+            return Err(Error::feature(
+                "ADD COLUMN … GENERATED with REFERENCES is not supported yet",
+            ));
+        }
+        match g {
+            crate::ast::Generated::Stored(_) => dml::generate_rows(txn, reg, &t)?,
+            // Every row's vector, made by the workers.
+            crate::ast::Generated::Embedding { .. } => {
+                crate::embedding::enqueue_all(txn, reg, &t, t.columns.len() - 1)?
+            }
+        }
+        catalog::update_table(txn, &t)?;
+        return Ok(());
+    }
     let w = dml::Writer::new(&*txn, reg, t.clone())?;
     let fill = {
         let ctx = Ctx::new(&*txn, reg, &[]);
@@ -2540,14 +2600,16 @@ fn attach_partition(
         )));
     }
     let same = t.columns.len() == parent.columns.len()
-        && t.columns
-            .iter()
-            .zip(&parent.columns)
-            .all(|(a, b)| a.name == b.name && a.ty == b.ty && a.nullable == b.nullable)
+        && t.columns.iter().zip(&parent.columns).all(|(a, b)| {
+            a.name == b.name
+                && a.ty == b.ty
+                && a.nullable == b.nullable
+                && a.generated == b.generated
+        })
         && t.primary_key == parent.primary_key;
     if !same {
         return Err(Error::invalid_parameter(format!(
-            "table \"{name}\" does not have the columns and primary key of \"{parent_name}\""
+            "table \"{name}\" does not have the columns (their generation too) and primary key of \"{parent_name}\""
         )));
     }
     let bound = new_bound(txn, reg, &parent, name, bound)?;
@@ -2809,6 +2871,7 @@ fn create_table(
             max_len: s.max_len,
             numeric: s.numeric,
             comment: None,
+            generated: s.generated.clone(),
         });
         if s.primary_key {
             if !pk.is_empty() {
@@ -2911,6 +2974,8 @@ fn create_table(
     for (_, text) in &table.checks {
         let _ = Binder::new(&*txn, reg).condition(&parse_expr(text)?, &dml::table_scope(&table))?;
     }
+    crate::embedding::settle(&*txn, &mut table)?;
+    dml::check_generated(&*txn, reg, &table)?;
     let _ = Scope::default();
     // Foreign keys: from columns, then table constraints.
     let mut fks = Vec::new();
@@ -3224,6 +3289,11 @@ fn alter_column_type(
             "changing the type of column \"{column}\", which a foreign key uses, is not supported yet"
         )));
     }
+    if old.columns[c].generated.is_some() {
+        return Err(Error::feature(format!(
+            "changing the type of generated column \"{column}\" is not supported: drop and add it"
+        )));
+    }
     let from = old.columns[c].ty;
     let to = crate::binder::column_type(&*txn, reg, ty)?;
     let conversion = {
@@ -3292,7 +3362,7 @@ fn alter_column_type(
                 ctx: &ctx,
             })?;
             row[c] = dml::assign(ctx.txn, v, &new, c)?;
-            w.validate(&row, &ctx)?;
+            w.complete(&mut row, &ctx)?;
             rows.push(exec::keyed(key, row))?;
         }
         rows.seal()?
@@ -3304,6 +3374,19 @@ fn alter_column_type(
         }
     }
     dml::replace_rows(txn, reg, &new, rows)?;
+    // Embedding columns: their texts and keys may have changed with the
+    // type — every row's vector made again (a text unchanged is the
+    // models' cache's).
+    let embedded: Vec<usize> = crate::embedding::columns_of(&new).collect();
+    if !embedded.is_empty() {
+        crate::embedding::forget_table(txn, new.id)?;
+        for e in embedded {
+            crate::embedding::enqueue_all(txn, reg, &new, e)?;
+            if crate::embedding::moving(&new, e) {
+                crate::embedding::enqueue_all(txn, reg, &new, e | crate::embedding::NEXT)?;
+            }
+        }
+    }
     txn.delete(&catalog::stats_key(&new))?; // the old type's statistics
     catalog::delete_stats_sample(txn, &new)?;
     catalog::note_stored_types(txn, &new.columns)?;

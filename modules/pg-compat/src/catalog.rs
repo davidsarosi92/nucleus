@@ -491,6 +491,7 @@ const DEFS: &[Def] = &[
             ("udt_name", T),
             ("is_identity", T),
             ("is_generated", T),
+            ("generation_expression", T),
         ],
     },
     Def {
@@ -550,6 +551,7 @@ fn def_table(k: usize) -> Table {
                 max_len: None,
                 numeric: None,
                 comment: None,
+                generated: None,
             })
             .collect(),
         primary_key: Vec::new(),
@@ -900,7 +902,7 @@ struct Rel {
     kind: &'static str,
     am: i64,
     /// Columns: name, type oid, typmod, not null, has default, collation.
-    cols: Vec<(String, i64, i64, bool, bool, i64)>,
+    cols: Vec<(String, i64, i64, bool, bool, i64, &'static str)>,
     checks: i64,
     has_index: bool,
     has_triggers: bool,
@@ -908,7 +910,7 @@ struct Rel {
     table: Option<(Table, Option<Option<usize>>)>,
 }
 
-fn column_attrs(t: &Table, c: usize) -> (String, i64, i64, bool, bool, i64) {
+fn column_attrs(t: &Table, c: usize) -> (String, i64, i64, bool, bool, i64, &'static str) {
     let col = &t.columns[c];
     let (oid, typmod) = type_of(col);
     (
@@ -916,8 +918,10 @@ fn column_attrs(t: &Table, c: usize) -> (String, i64, i64, bool, bool, i64) {
         oid,
         typmod,
         !col.nullable || t.primary_key.contains(&c),
-        col.default.is_some(),
+        col.default.is_some() || col.generated.is_some(),
         if col.ty == DataType::Text { 100 } else { 0 },
+        // PostgreSQL's mark of a stored generated column.
+        if col.generated.is_some() { "s" } else { "" },
     )
 }
 
@@ -976,6 +980,7 @@ fn relations(tables: &[Table], registry: &Registry) -> Vec<Rel> {
                         false,
                         false,
                         if *ty == T { 100 } else { 0 },
+                        "",
                     )
                 })
                 .collect(),
@@ -999,7 +1004,7 @@ fn relations(tables: &[Table], registry: &Registry) -> Vec<Rel> {
             cols: v
                 .columns()
                 .into_iter()
-                .map(|(n, ty)| (n, type_oid(ty), -1, false, false, 0))
+                .map(|(n, ty)| (n, type_oid(ty), -1, false, false, 0, ""))
                 .collect(),
             checks: 0,
             has_index: false,
@@ -1232,7 +1237,7 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
         }
         "pg_attribute" => {
             for rel in relations(&tables, registry) {
-                for (i, (name, typ, typmod, notnull, hasdef, coll)) in
+                for (i, (name, typ, typmod, notnull, hasdef, coll, generated)) in
                     rel.cols.into_iter().enumerate()
                 {
                     let len = TYPES.iter().find(|t| t.0 == typ).map_or(-1, |t| t.2);
@@ -1253,7 +1258,7 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         ("atthasdef", Value::Bool(hasdef)),
                         ("atthasmissing", Value::Bool(false)),
                         ("attidentity", text("")),
-                        ("attgenerated", text("")),
+                        ("attgenerated", text(generated)),
                         ("attisdropped", Value::Bool(false)),
                         ("attislocal", Value::Bool(true)),
                         ("attinhcount", int(0)),
@@ -1266,12 +1271,18 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
         "pg_attrdef" => {
             for t in &tables {
                 for (c, col) in t.columns.iter().enumerate() {
-                    if let Some(d) = &col.default {
+                    // A generated column's expression is its "default"
+                    // there, as in PostgreSQL.
+                    let d = col
+                        .default
+                        .as_deref()
+                        .or(col.generated.as_ref().map(|g| g.expr()));
+                    if let Some(d) = d {
                         out.push(r(&[
                             ("oid", int(rel_oid(t) + 300 + c as i64)),
                             ("adrelid", int(rel_oid(t))),
                             ("adnum", int(c as i64 + 1)),
-                            ("adbin", text(d.clone())),
+                            ("adbin", text(d.to_string())),
                         ]));
                     }
                 }
@@ -1619,7 +1630,20 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         ),
                         ("udt_name", text(udt)),
                         ("is_identity", text("NO")),
-                        ("is_generated", text("NEVER")),
+                        (
+                            "is_generated",
+                            text(if col.generated.is_some() {
+                                "ALWAYS"
+                            } else {
+                                "NEVER"
+                            }),
+                        ),
+                        (
+                            "generation_expression",
+                            col.generated
+                                .as_ref()
+                                .map_or(Value::Null, |g| text(g.expr().to_string())),
+                        ),
                     ]));
                 }
             }

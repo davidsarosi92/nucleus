@@ -85,7 +85,7 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// version 7 an owner, version 8 row-level security, version 9 comments
 /// on the table and its columns; version 14 an index's access method,
 /// operator classes and options; older versions still read.
-const TABLE_VERSION: u8 = 14;
+const TABLE_VERSION: u8 = 15;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -205,6 +205,8 @@ pub struct Column {
     pub numeric: Option<(u32, u32)>,
     /// `COMMENT ON COLUMN`.
     pub comment: Option<String>,
+    /// A generated column: how its value is made.
+    pub generated: Option<crate::ast::Generated>,
 }
 
 /// An index.
@@ -492,6 +494,28 @@ impl Table {
                 w.u32(c as u32);
             }
         }
+        for c in &self.columns {
+            match &c.generated {
+                None => {
+                    w.u8(0);
+                }
+                Some(crate::ast::Generated::Stored(e)) => {
+                    w.u8(1).str(e);
+                }
+                Some(crate::ast::Generated::Embedding {
+                    source,
+                    model,
+                    version,
+                    next,
+                }) => {
+                    w.u8(2)
+                        .str(source)
+                        .str(model)
+                        .u32(*version)
+                        .opt_str(next.as_deref());
+                }
+            }
+        }
         w.0
     }
 
@@ -534,6 +558,7 @@ impl Table {
                 max_len,
                 numeric,
                 comment: None,
+                generated: None,
             });
         }
         let n = r.u32()? as usize;
@@ -651,6 +676,21 @@ impl Table {
                     .map(|_| r.u32().map(|c| c as usize))
                     .collect::<Result<_>>()?;
                 statistics.push(Statistic { name, columns });
+            }
+        }
+        if version >= 15 {
+            for c in &mut columns {
+                c.generated = match r.u8()? {
+                    0 => None,
+                    1 => Some(crate::ast::Generated::Stored(r.str()?)),
+                    2 => Some(crate::ast::Generated::Embedding {
+                        source: r.str()?,
+                        model: r.str()?,
+                        version: r.u32()?,
+                        next: r.opt_str()?,
+                    }),
+                    _ => return Err(Error::internal("unknown kind of generated column")),
+                };
             }
         }
         Ok(Self {
@@ -916,6 +956,7 @@ pub fn drop_table(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
     txn.delete(&table_key(&table.name))?;
     txn.delete(&id_key(ROWID, table.id))?;
     txn.delete(&id_key(STATS, table.id))?;
+    crate::embedding::forget_table(txn, table.id)?;
     delete_stats_sample(txn, table)
 }
 
@@ -1349,6 +1390,7 @@ mod tests {
                     max_len: None,
                     numeric: None,
                     comment: None,
+                    generated: None,
                 },
                 Column {
                     name: "name".into(),
@@ -1358,6 +1400,7 @@ mod tests {
                     max_len: Some(20),
                     numeric: None,
                     comment: Some("who".into()),
+                    generated: None,
                 },
                 Column {
                     name: "price".into(),
@@ -1367,6 +1410,7 @@ mod tests {
                     max_len: None,
                     numeric: Some((10, 2)),
                     comment: None,
+                    generated: Some(crate::ast::Generated::Stored("1".into())),
                 },
             ],
             primary_key: vec![0],

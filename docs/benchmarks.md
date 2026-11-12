@@ -844,6 +844,30 @@ target/ann-data/.venv/bin/python bench/text/tsearch.py postgres
 target/ann-data/.venv/bin/python bench/text/tsearch.py postgres --sets scifact,nfcorpus --rank
 ```
 
+## Embedding models
+
+nucleus's local models (§M14.22 E3: the encoder on its own kernels)
+against fastembed 0.9.1 (ONNX Runtime 1.31.1, batches of 32), the same
+2,000 texts (BEIR corpora and queries, twelve languages' word lists),
+an M2 Pro (6 performance + 4 efficiency cores), tokens counted by the
+models' tokenizers, cut to 512.  fastembed runs the publisher's own f32
+ONNX export — and, for bge, its default (Qdrant's optimized export).
+
+| model | threads | nucleus | fastembed, publisher's f32 | fastembed, Qdrant's |
+|---|---:|---:|---:|---:|
+| bge-small-en-v1.5 | 1 | 1,600 tokens/s (9.7 texts/s) | 497 | 502 |
+| bge-small-en-v1.5 | 10 | 9,929 (60.3 texts/s) | 2,286 | 2,265 |
+| multilingual-e5-small | 1 | 1,557 (9.3 texts/s) | 488 | — |
+| multilingual-e5-small | 10 | 7,714 (45.9 texts/s) | 1,772 | — |
+
+The vectors agree with ONNX Runtime's at cosine ≥ 0.9999998 a text
+(`bench/embed/encoder.py`).
+
+```sh
+target/ann-data/.venv/bin/python bench/embed/models.py     # the models' files into target/models
+bash target/bench-tools/memcap.sh 7000 target/ann-data/.venv/bin/python -I bench/embed/speed.py
+```
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

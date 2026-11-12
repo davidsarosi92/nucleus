@@ -74,6 +74,8 @@ pub use crate::text::{Analyzer, Token};
 pub use crate::types::{DataType, Row, Value};
 /// The vectorized executor's columns, as batch capabilities see them.
 pub use crate::vector::{Batch, Sel, TimeKind, Vector};
+/// SHA-256 (`nucleus-crypto`'s), for a module to check what it fetched.
+pub use nucleus_crypto::sha256;
 
 /// The catalog, read-only, as modules see it: table definitions and their
 /// constraints.
@@ -105,10 +107,13 @@ pub mod secrets {
     pub use crate::secrets::{Keyring, Revealed, StaticKey, set_keyring};
 }
 
-/// Embedding models as modules see them ([`crate::models`]): a provider
-/// and what it is given and gives.
+/// Embedding models as modules see them ([`crate::models`]): a provider,
+/// what it is given and gives, the files a model keeps.
 pub mod models {
-    pub use crate::models::{Input, MAX_DIMENSIONS, ModelProvider, Options, Request, Spec};
+    pub use crate::models::{
+        FileRef, Files, Input, MAX_DIMENSIONS, ModelProvider, Options, Request, Spec, retry_after,
+        retry_hint,
+    };
 }
 
 /// The kernels of a neural network's forward pass (`nucleus-kernels`,

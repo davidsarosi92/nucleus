@@ -102,6 +102,7 @@ codes! {
     snapshot_too_old => "72000",
     internal => "XX000",
     io => "58030",
+    generated_always => "428C9",
 }
 
 impl fmt::Display for Error {

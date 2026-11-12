@@ -511,6 +511,10 @@ pub struct Writer {
     pub table: Table,
     checks: Vec<(String, Expr)>,
     defaults: Vec<Option<Expr>>,
+    /// The stored generated columns and their expressions, in order.
+    generated: Vec<(usize, Expr)>,
+    /// The embedding columns and the columns their texts are made of.
+    embeddings: Vec<(usize, Vec<usize>)>,
     /// Its index entries.
     pub keys: IndexKeys,
     /// How its rows are stored.
@@ -543,6 +547,23 @@ impl Writer {
                 None => None,
                 Some(text) => Some(binder.expr(&parse_expr(text)?, &empty)?.0),
             });
+        }
+        let mut generated = Vec::new();
+        let mut embeddings = Vec::new();
+        for (c, col) in table.columns.iter().enumerate() {
+            match &col.generated {
+                Some(ast::Generated::Stored(text)) => {
+                    generated.push((c, binder.expr(&parse_expr(text)?, &scope)?.0));
+                }
+                Some(ast::Generated::Embedding { source, .. }) => {
+                    let e = binder.expr(&parse_expr(source)?, &scope)?.0;
+                    let mut reads = e.columns();
+                    reads.sort_unstable();
+                    reads.dedup();
+                    embeddings.push((c, reads));
+                }
+                None => {}
+            }
         }
         let keys = IndexKeys::new(txn, reg, &table)?;
         let storage = crate::storage::of(&table)?;
@@ -577,11 +598,28 @@ impl Writer {
             table,
             checks,
             defaults,
+            generated,
+            embeddings,
             keys,
             storage,
             partitions,
             bound,
         })
+    }
+
+    /// A new or changed row made whole: its stored generated columns
+    /// computed (from the row's other columns), then
+    /// [`validate`](Self::validate)d.
+    pub fn complete(&self, row: &mut Row, ctx: &Ctx) -> Result<()> {
+        for (c, e) in &self.generated {
+            let v = e.eval(&Env {
+                row,
+                outer: None,
+                ctx,
+            })?;
+            row[*c] = assign(ctx.txn, v, &self.table, *c)?;
+        }
+        self.validate(row, ctx)
     }
 
     /// The default value of column `c`.
@@ -683,7 +721,10 @@ impl Writer {
 /// or a `COPY`'s.
 pub fn target_columns(t: &Table, columns: &Option<Vec<String>>) -> Result<Vec<usize>> {
     let Some(names) = columns else {
-        return Ok((0..t.columns.len()).collect());
+        // Generated columns are made, not given.
+        return Ok((0..t.columns.len())
+            .filter(|&c| t.columns[c].generated.is_none())
+            .collect());
     };
     let mut seen = HashSet::new();
     names
@@ -700,9 +741,23 @@ pub fn target_columns(t: &Table, columns: &Option<Vec<String>>) -> Result<Vec<us
                     "column \"{n}\" specified more than once"
                 )));
             }
+            if t.columns[i].generated.is_some() {
+                return Err(generated_given(t, i));
+            }
             Ok(i)
         })
         .collect()
+}
+
+/// `428C9`: a value given for generated column `c` of `t`.
+pub fn generated_given(t: &Table, c: usize) -> Error {
+    let col = &t.columns[c];
+    Error::generated_always(format!(
+        "column \"{}\" of relation \"{}\" is a generated column: its value is made from {}, not given",
+        col.name,
+        t.name,
+        col.generated.as_ref().map_or("", |g| g.expr())
+    ))
 }
 
 /// New rows of a table from the values a statement gives for some of its
@@ -753,6 +808,9 @@ impl RowBuilder {
             .iter()
             .flatten()
             .all(crate::vector::parallel_safe)
+            && w.generated
+                .iter()
+                .all(|(_, e)| crate::vector::parallel_safe(e))
             && w.checks
                 .iter()
                 .all(|(_, e)| crate::vector::parallel_safe(e))
@@ -800,7 +858,7 @@ impl RowBuilder {
         for &c in self.rest.iter().chain(&self.targets[given..]) {
             row[c] = self.writer.default_of(c, ctx)?;
         }
-        self.writer.validate(&row, ctx)?;
+        self.writer.complete(&mut row, ctx)?;
         admit(&self.check, &self.writer.table, &row, ctx)?;
         Ok(row)
     }
@@ -1127,6 +1185,9 @@ pub fn update(
                     "multiple assignments to same column \"{col}\""
                 )));
             }
+            if t.columns[c].generated.is_some() {
+                return Err(generated_given(&t, c));
+            }
             // UPDATE on each column set (or the table).
             if let Some(ch) = binder.checker() {
                 ch.require(ro, Kind::Table, &t.name, UPDATE, Some(col))?;
@@ -1156,7 +1217,7 @@ pub fn update(
                 for (c, e) in &sets {
                     new[*c] = assign(ctx.txn, e.eval(&env)?, &t, *c)?;
                 }
-                writer.validate(&new, &ctx)?;
+                writer.complete(&mut new, &ctx)?;
                 admit(&check, &t, &new, &ctx)?;
                 let mut change = vec![Value::Int(ti as i64)];
                 change.extend(exec::keyed(key, old));
@@ -1339,6 +1400,7 @@ fn store_batch(
         .then(|| crate::fk::child_keys(t, rows.iter().map(|b| (None, &b.row))));
     let indexed = !w.keys.btrees().is_empty();
     let kept = w.keys.has_methods();
+    let mut embedded: Vec<Vec<u8>> = Vec::new();
     let mut places = Vec::with_capacity(rows.len());
     let mut entries: Vec<(Vec<u8>, Vec<(usize, Vec<u8>, bool)>)> = Vec::new();
     let mut batch = Vec::with_capacity(rows.len());
@@ -1354,6 +1416,9 @@ fn store_batch(
                     break;
                 }
             }
+        }
+        if !w.embeddings.is_empty() {
+            embedded.push(pk_suffix(t, &key).to_vec());
         }
         places.push(b.place);
         batch.push(crate::storage::NewRow {
@@ -1386,6 +1451,12 @@ fn store_batch(
     }
     for (pk, row) in news.iter().take(dup.unwrap_or(stored)) {
         w.keys.keep(txn, t, None, Some((pk, row))).map_err(none)?;
+    }
+    // A job for each new row's vectors (its text made by the workers).
+    for pk in embedded.iter().take(dup.unwrap_or(stored)) {
+        for &(c, _) in &w.embeddings {
+            crate::embedding::enqueue_row(txn, t, c, pk).map_err(none)?;
+        }
     }
     if let Some(i) = dup {
         return Err(at_row(places[i])(duplicate(&format!("{}_pkey", t.name))));
@@ -1454,6 +1525,15 @@ pub fn update_rows(
         }
         w.keys
             .keep(txn, t, Some((old_pk, old)), Some((new_pk, new)))?;
+        // A changed text is a job; a moved row takes its job along.
+        for (c, reads) in &w.embeddings {
+            if old_pk != new_pk {
+                crate::embedding::moved(txn, t, *c, old_pk, new_pk)?;
+            }
+            if reads.iter().any(|&r| old[r] != new[r]) {
+                crate::embedding::enqueue_row(txn, t, *c, new_pk)?;
+            }
+        }
     }
     crate::storage::written(t);
     crate::fk::check_children(&*txn, t, changes.iter().map(|(_, o, n)| (Some(o), n)))?;
@@ -1478,8 +1558,12 @@ pub fn delete_rows(
     let keys = IndexKeys::new(&*txn, reg, t)?;
     let storage = crate::storage::of(t)?;
     catalog::validate_table(&*txn, &t.name)?;
+    let embedded: Vec<usize> = crate::embedding::columns_of(t).collect();
     for (key, row) in rows {
         storage.remove_row(txn, t, key, row)?;
+        for &c in &embedded {
+            crate::embedding::dequeue(txn, t, c, pk_suffix(t, key))?;
+        }
         if t.indexes.is_empty() {
             continue;
         }
@@ -1840,6 +1924,84 @@ pub fn rewrite_rows(
         storage.write(txn, table, &key, &filled, Some(&row))?;
     }
     crate::storage::written(table);
+    Ok(())
+}
+
+/// Every row of a table rewritten with its last column — a stored
+/// generated column, just added — computed (and the row checked).
+pub fn generate_rows(txn: &mut dyn KvTxn, reg: &Registry, table: &Table) -> Result<()> {
+    let w = Writer::new(&*txn, reg, table.clone())?;
+    let last = table.columns.len() - 1;
+    let rows = {
+        let ctx = Ctx::new(&*txn, reg, &[]);
+        let mut rows = crate::spill::Stash::new();
+        for r in exec::matching(table, &Access::Full, None, &ctx)? {
+            let (key, mut row) = r?;
+            w.complete(&mut row, &ctx)?;
+            rows.push(exec::keyed(key, row))?;
+        }
+        rows.seal()?
+    };
+    for r in rows.into_iter() {
+        let (key, row) = exec::unkeyed(r?)?;
+        let mut old = row.clone();
+        old[last] = Value::Null;
+        w.storage.write(txn, table, &key, &row, Some(&old))?;
+    }
+    crate::storage::written(table);
+    Ok(())
+}
+
+/// Refuses what a table's generated columns may not be: an expression
+/// reading a generated column, calling a volatile function or holding a
+/// subquery; a generated column in the partitioning.
+pub fn check_generated(txn: &dyn KvTxn, reg: &Registry, t: &Table) -> Result<()> {
+    let scope = table_scope(t);
+    for (c, col) in t.columns.iter().enumerate() {
+        let Some(g) = &col.generated else {
+            continue;
+        };
+        let e = Binder::new(txn, reg)
+            .expr(&parse_expr(g.expr())?, &scope)?
+            .0;
+        if e.has_subquery() {
+            return Err(Error::feature(format!(
+                "column \"{}\": a generation expression cannot use a subquery",
+                col.name
+            )));
+        }
+        let mut volatile = false;
+        e.walk(&mut |x| {
+            if let Expr::Call(f, _) = x {
+                volatile |= f.volatility() == crate::ext::Volatility::Volatile;
+            }
+        });
+        if volatile {
+            return Err(Error::invalid_object_definition(format!(
+                "column \"{}\": a generation expression cannot call a volatile function: its value would not follow from the row",
+                col.name
+            )));
+        }
+        if let Some(r) = e
+            .columns()
+            .into_iter()
+            .find(|&r| t.columns[r].generated.is_some())
+        {
+            return Err(Error::invalid_object_definition(format!(
+                "column \"{}\": a generation expression cannot read generated column \"{}\"",
+                col.name, t.columns[r].name
+            )));
+        }
+        if t.partition_by
+            .as_ref()
+            .is_some_and(|p| p.columns.contains(&c))
+        {
+            return Err(Error::feature(format!(
+                "generated column \"{}\" cannot be in the partitioning",
+                col.name
+            )));
+        }
+    }
     Ok(())
 }
 

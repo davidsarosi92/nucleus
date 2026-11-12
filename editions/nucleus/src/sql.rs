@@ -918,9 +918,9 @@ pub fn run(args: &[String]) -> Result<()> {
 }
 
 /// The edition's registry: the built-in module and the embedding
-/// providers (`embeddings`).  Built once; building it registers the
-/// providers for the process, so local sessions (`nucleus sql <dir>`)
-/// have them too.
+/// providers (`embeddings`: remote APIs; `local-models`: models run in
+/// the process).  Built once; building it registers the providers for
+/// the process, so local sessions (`nucleus sql <dir>`) have them too.
 pub(crate) fn registry() -> std::sync::Arc<nucleus_sql::ext::Registry> {
     static R: std::sync::OnceLock<std::sync::Arc<nucleus_sql::ext::Registry>> =
         std::sync::OnceLock::new();
@@ -928,6 +928,8 @@ pub(crate) fn registry() -> std::sync::Arc<nucleus_sql::ext::Registry> {
         let mut r = nucleus_sql::ext::Registry::builtin();
         r.add(&nucleus_embeddings::Embeddings)
             .expect("the embeddings module registers");
+        r.add(&nucleus_local_models::LocalModels)
+            .expect("the local-models module registers");
         std::sync::Arc::new(r)
     })
     .clone()

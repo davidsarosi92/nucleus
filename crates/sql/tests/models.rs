@@ -61,7 +61,7 @@ impl ModelProvider for Counting {
         self.name
     }
 
-    fn define(&self, o: &models::Options) -> Result<Spec> {
+    fn define(&self, o: &models::Options, _files: &models::Files<'_>) -> Result<Spec> {
         o.only(self.name, &["batch"])?;
         Ok(Spec {
             dimensions: 2,
@@ -322,5 +322,15 @@ fn a_batch_of_rows_in_few_calls() {
     assert!(
         calls <= 30,
         "{calls} calls for 2,000 texts (24 when measured)"
+    ); // The same text more than once in a batch: sent once, each row its
+    // vector (the first run of the embedding columns found it panicking).
+    let before = p.texts.load(Ordering::SeqCst);
+    let r = rows(
+        &mut s,
+        "SELECT embed(t, 'm')::text FROM (VALUES ('again'), ('again'), ('new'), ('again')) v(t)",
     );
+    assert_eq!(r.len(), 4);
+    assert_eq!(r[0], r[1]);
+    assert_eq!(r[0], r[3]);
+    assert_eq!(p.texts.load(Ordering::SeqCst) - before, 2);
 }

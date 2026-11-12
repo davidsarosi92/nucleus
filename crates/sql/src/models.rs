@@ -26,6 +26,15 @@
 //! vector in `ORDER BY v <=> embed($1, m)` is computed once, not a row at a
 //! time, and the same text is never sent twice while it is kept.
 //!
+//! A provider may *fetch* files when a model is made — a local model's
+//! tokenizer and weights, from a directory or a repository — the only
+//! time it reads files or the network outside a call.  They are kept in
+//! the database with the model, by content: `00 16 <SHA-256> <chunk>`, in
+//! chunks of 32 KiB, so a backup or a replica has them, two models made
+//! from the same file store it once, and a call never needs the network
+//! again.  A call reads them through [`Files`] (a provider keeps what it
+//! built from them by [`Files::id`]).
+//!
 //! Records are in the catalog, `00 15 <name>`.
 
 use std::collections::HashMap;
@@ -43,7 +52,11 @@ use crate::types::{DataType, Value};
 use crate::vector::{Sel, Vector};
 
 const MODELS: [u8; 2] = [0x00, 0x15];
-const VERSION: u8 = 1;
+const FILES: [u8; 2] = [0x00, 0x16];
+/// 2: with the model's files.
+const VERSION: u8 = 2;
+/// A stored file's chunk.
+const FILE_CHUNK: usize = 32 * 1024;
 
 /// The most components a model's vectors may have (pgvector's limit for
 /// `vector`).
@@ -140,6 +153,142 @@ pub struct Request<'a> {
     pub input: Input,
     /// The texts, at most the model's batch.
     pub texts: &'a [String],
+    /// The files the model was made from (none for most providers).
+    pub files: &'a Files<'a>,
+}
+
+/// A file a model keeps: its name, the SHA-256 of its bytes, their
+/// number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileRef {
+    /// Its name (`tokenizer.json`, `model.safetensors`, …).
+    pub name: String,
+    /// The SHA-256 of its bytes: where it is stored.
+    pub digest: [u8; 32],
+    /// Its length.
+    pub len: u64,
+}
+
+enum Source<'a> {
+    Memory(&'a [(String, Vec<u8>)]),
+    Kv(&'a dyn KvTxn),
+}
+
+/// A model's files, by name: their bytes in hand while it is made, read
+/// from the database when a call needs them.
+pub struct Files<'a> {
+    list: Vec<FileRef>,
+    source: Source<'a>,
+}
+
+impl<'a> Files<'a> {
+    /// No files.
+    pub fn none() -> Files<'static> {
+        Files {
+            list: Vec::new(),
+            source: Source::Memory(&[]),
+        }
+    }
+
+    /// Files in hand (as a provider fetched them).
+    pub fn in_memory(files: &'a [(String, Vec<u8>)]) -> Files<'a> {
+        Files {
+            list: files
+                .iter()
+                .map(|(name, bytes)| FileRef {
+                    name: name.clone(),
+                    digest: nucleus_crypto::sha256(bytes),
+                    len: bytes.len() as u64,
+                })
+                .collect(),
+            source: Source::Memory(files),
+        }
+    }
+
+    fn stored(list: Vec<FileRef>, txn: &'a dyn KvTxn) -> Files<'a> {
+        Files {
+            list,
+            source: Source::Kv(txn),
+        }
+    }
+
+    /// The files, in the order they were fetched.
+    pub fn list(&self) -> &[FileRef] {
+        &self.list
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// What identifies these files together: the SHA-256 of their names
+    /// and digests (what a provider keeps a loaded model by).
+    pub fn id(&self) -> [u8; 32] {
+        let mut b = Vec::new();
+        for f in &self.list {
+            b.extend_from_slice(&(f.name.len() as u32).to_le_bytes());
+            b.extend_from_slice(f.name.as_bytes());
+            b.extend_from_slice(&f.digest);
+        }
+        nucleus_crypto::sha256(&b)
+    }
+
+    /// The bytes of file `name`, if the model has it; read from the
+    /// database, and their digest checked, unless they are in hand.
+    pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let Some(f) = self.list.iter().find(|f| f.name == name) else {
+            return Ok(None);
+        };
+        match self.source {
+            Source::Memory(m) => Ok(m.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone())),
+            Source::Kv(txn) => {
+                let (start, end) = file_range(&f.digest);
+                let mut out = Vec::with_capacity(f.len as usize);
+                for e in txn.scan(
+                    std::ops::Bound::Included(&start[..]),
+                    std::ops::Bound::Excluded(&end[..]),
+                )? {
+                    out.extend_from_slice(&e?.1);
+                }
+                if out.len() as u64 != f.len || nucleus_crypto::sha256(&out) != f.digest {
+                    return Err(Error::internal(format!(
+                        "a model's file {name} is damaged in the database"
+                    )));
+                }
+                Ok(Some(out))
+            }
+        }
+    }
+}
+
+fn file_key(digest: &[u8; 32], chunk: u32) -> Vec<u8> {
+    let mut k = FILES.to_vec();
+    k.extend_from_slice(digest);
+    k.extend_from_slice(&chunk.to_be_bytes());
+    k
+}
+
+/// The keys of a stored file's chunks.
+fn file_range(digest: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
+    let mut p = FILES.to_vec();
+    p.extend_from_slice(digest);
+    let end = nucleus_kv::prefix_end(&p).expect("file prefix");
+    (p, end)
+}
+
+/// Stores `bytes` under its digest, unless a model stored it already.
+fn store_file(txn: &mut dyn KvTxn, digest: &[u8; 32], bytes: &[u8]) -> Result<()> {
+    if txn.get(&file_key(digest, 0))?.is_some() {
+        return Ok(());
+    }
+    if bytes.is_empty() {
+        txn.put(&file_key(digest, 0), &[])?;
+    }
+    for (i, c) in bytes.chunks(FILE_CHUNK).enumerate() {
+        txn.put(&file_key(digest, i as u32), c)?;
+    }
+    Ok(())
 }
 
 /// A model provider (principle 12).
@@ -147,10 +296,19 @@ pub trait ModelProvider: Send + Sync {
     /// The name `CREATE MODEL … USING` names.
     fn name(&self) -> &str;
 
+    /// The files a model is made from and keeps (a local model's
+    /// tokenizer and weights), fetched when it is made — the only time a
+    /// provider may read files or the network outside a call.  None by
+    /// default.
+    fn fetch(&self, options: &Options) -> Result<Vec<(String, Vec<u8>)>> {
+        let _ = options;
+        Ok(Vec::new())
+    }
+
     /// Checks a model's options — every one it does not know refused —
-    /// and says what the model makes.  Called when a model is made; must
-    /// not reach the network.
-    fn define(&self, options: &Options) -> Result<Spec>;
+    /// and its fetched files, and says what the model makes.  Called when
+    /// a model is made; must not reach the network.
+    fn define(&self, options: &Options, files: &Files<'_>) -> Result<Spec>;
 
     /// The vectors of `request.texts`, in order, each of
     /// `request.dimensions` components.
@@ -231,6 +389,8 @@ pub struct Model {
     pub max_batch: u32,
     /// When it was made (µs since 2000-01-01 UTC).
     pub created: i64,
+    /// The files it was made from, stored by content.
+    pub files: Vec<FileRef>,
 }
 
 fn key_of(name: &str) -> Vec<u8> {
@@ -255,13 +415,20 @@ impl Model {
             .opt_str(self.document_prefix.as_deref())
             .u32(self.dimensions)
             .u32(self.max_batch)
-            .u64(self.created as u64);
+            .u64(self.created as u64)
+            .u32(self.files.len() as u32);
+        for f in &self.files {
+            w.str(&f.name);
+            w.0.extend_from_slice(&f.digest);
+            w.u64(f.len);
+        }
         w.0
     }
 
     fn decode(b: &[u8]) -> Result<Self> {
         let mut r = Reader::new(b);
-        if r.u8()? != VERSION {
+        let version = r.u8()?;
+        if version != 1 && version != VERSION {
             return Err(Error::internal("unknown model record version"));
         }
         let name = r.str()?;
@@ -272,7 +439,7 @@ impl Model {
         for _ in 0..n {
             options.push((r.str()?, r.str()?));
         }
-        Ok(Model {
+        let mut m = Model {
             name,
             owner,
             provider,
@@ -283,7 +450,21 @@ impl Model {
             dimensions: r.u32()?,
             max_batch: r.u32()?,
             created: r.u64()? as i64,
-        })
+            files: Vec::new(),
+        };
+        if version >= 2 {
+            let n = r.u32()? as usize;
+            for _ in 0..n {
+                let name = r.str()?;
+                let digest: [u8; 32] = r.take(32)?.try_into().expect("32 bytes");
+                m.files.push(FileRef {
+                    name,
+                    digest,
+                    len: r.u64()?,
+                });
+            }
+        }
+        Ok(m)
     }
 
     fn prefix(&self, input: Input) -> Option<&str> {
@@ -377,7 +558,9 @@ pub fn create(
         )?;
     }
     let options = Options(rest);
-    let spec = p.define(&options)?;
+    let fetched = p.fetch(&options)?;
+    let files = Files::in_memory(&fetched);
+    let spec = p.define(&options, &files)?;
     if spec.dimensions == 0 || spec.dimensions > MAX_DIMENSIONS {
         return Err(Error::invalid_parameter(format!(
             "a model's vectors have 1 to {MAX_DIMENSIONS} components, not {}",
@@ -395,7 +578,11 @@ pub fn create(
         dimensions: spec.dimensions,
         max_batch: spec.max_batch.clamp(1, u32::MAX as usize) as u32,
         created: crate::datetime::now()?,
+        files: files.list().to_vec(),
     };
+    for (f, (_, bytes)) in m.files.iter().zip(&fetched) {
+        store_file(txn, &f.digest, bytes)?;
+    }
     put(txn, &m)
 }
 
@@ -409,7 +596,26 @@ pub fn drop(txn: &mut dyn KvTxn, name: &str, if_exists: bool) -> Result<()> {
             "model \"{name}\" does not exist"
         )));
     }
+    let users = crate::embedding::using_model(&*txn, name)?;
+    if !users.is_empty() {
+        return Err(Error::dependent_objects(format!(
+            "cannot drop model \"{name}\": embedding columns of {} use it",
+            users.join(", ")
+        )));
+    }
+    let gone = get(&*txn, name)?.map(|m| m.files).unwrap_or_default();
     txn.delete(&key_of(name))?;
+    // Its files, unless another model keeps them too.
+    let kept: Vec<[u8; 32]> = all(&*txn)?
+        .into_iter()
+        .flat_map(|m| m.files.into_iter().map(|f| f.digest))
+        .collect();
+    for f in gone {
+        if !kept.contains(&f.digest) {
+            let (start, end) = file_range(&f.digest);
+            crate::catalog::delete_range(txn, &start, Some(&end))?;
+        }
+    }
     crate::privileges::forget(txn, crate::privileges::Kind::Model, name)
 }
 
@@ -544,7 +750,7 @@ fn count(name: &str, f: impl FnOnce(&mut Calls)) {
 /// The vectors of `texts` by model `name`, in order: `USAGE` on it
 /// checked, the cache read first, the rest sent in batches.
 pub fn embed(txn: &dyn KvTxn, name: &str, texts: &[&str], input: Input) -> Result<Vec<Arc<[f32]>>> {
-    let m = existing(txn, name)?;
+    existing(txn, name)?;
     crate::privileges::Checker::new().require(
         txn,
         crate::privileges::Kind::Model,
@@ -552,6 +758,34 @@ pub fn embed(txn: &dyn KvTxn, name: &str, texts: &[&str], input: Input) -> Resul
         crate::privileges::USAGE,
         None,
     )?;
+    embed_unchecked(txn, name, texts, input)
+}
+
+/// The hint of an error a provider's `Retry-After` came with: when to
+/// call again (what the embedding queue obeys, §[`crate::embedding`]).
+pub fn retry_hint(after: std::time::Duration) -> String {
+    format!(
+        "try again in {} ms (the provider's Retry-After)",
+        after.as_millis()
+    )
+}
+
+/// The wait an error's [`retry_hint`] asks for.
+pub fn retry_after(e: &Error) -> Option<std::time::Duration> {
+    let h = e.hint.as_deref()?.strip_prefix("try again in ")?;
+    let ms = h.split(' ').next()?.parse().ok()?;
+    Some(std::time::Duration::from_millis(ms))
+}
+
+/// [`embed`] without the privilege check: for the embedding columns'
+/// workers, whose columns' makers were checked when they made them.
+pub(crate) fn embed_unchecked(
+    txn: &dyn KvTxn,
+    name: &str,
+    texts: &[&str],
+    input: Input,
+) -> Result<Vec<Arc<[f32]>>> {
+    let m = existing(txn, name)?;
     let record = m.encode();
     let prefix = m.prefix(input).unwrap_or("");
     let keys: Vec<[u8; 32]> = texts.iter().map(|t| cache_key(&record, input, t)).collect();
@@ -570,10 +804,13 @@ pub fn embed(txn: &dyn KvTxn, name: &str, texts: &[&str], input: Input) -> Resul
         .map(|s| crate::secrets::reveal(txn, s))
         .transpose()?;
     // The same text twice in one call is sent once.
+    let files = Files::stored(m.files.clone(), txn);
     let mut first: HashMap<&[u8; 32], usize> = HashMap::new();
     let mut send: Vec<usize> = Vec::new();
     for &i in &missing {
-        if first.insert(&keys[i], i).is_none() {
+        // The first of the same text is the one sent (and kept here).
+        if let std::collections::hash_map::Entry::Vacant(e) = first.entry(&keys[i]) {
+            e.insert(i);
             send.push(i);
         }
     }
@@ -589,6 +826,7 @@ pub fn embed(txn: &dyn KvTxn, name: &str, texts: &[&str], input: Input) -> Resul
             secret: secret.as_ref(),
             input,
             texts: &batch,
+            files: &files,
         });
         let micros = started.elapsed().as_micros() as u64;
         let vectors = match r {
@@ -771,7 +1009,7 @@ impl ModelProvider for Hashing {
         "hashing"
     }
 
-    fn define(&self, options: &Options) -> Result<Spec> {
+    fn define(&self, options: &Options, _files: &Files<'_>) -> Result<Spec> {
         options.only("hashing", &["dimensions", "analyzer"])?;
         let dimensions = options
             .number("dimensions", 1..=u64::from(MAX_DIMENSIONS))?
@@ -836,6 +1074,11 @@ mod tests {
             dimensions: 1536,
             max_batch: 2048,
             created: 9,
+            files: vec![FileRef {
+                name: "model.safetensors".into(),
+                digest: [7; 32],
+                len: 1 << 33,
+            }],
         };
         assert_eq!(Model::decode(&m.encode()).unwrap(), m);
     }
@@ -844,7 +1087,7 @@ mod tests {
     fn hashing_overlaps_by_words() {
         crate::text::register_builtins();
         let o = Options(vec![("dimensions".into(), "64".into())]);
-        let spec = Hashing.define(&o).unwrap();
+        let spec = Hashing.define(&o, &Files::none()).unwrap();
         let texts = [
             "red apple pie".to_string(),
             "Apple pie, red!".to_string(),
@@ -857,6 +1100,7 @@ mod tests {
                 secret: None,
                 input: Input::Document,
                 texts: &texts,
+                files: &Files::none(),
             })
             .unwrap();
         let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
@@ -864,7 +1108,7 @@ mod tests {
         assert!(dot(&v[0], &v[2]).abs() < 0.9);
         assert!(
             Hashing
-                .define(&Options(vec![("size".into(), "1".into())]))
+                .define(&Options(vec![("size".into(), "1".into())]), &Files::none())
                 .is_err()
         );
         // Words never cancel: no zero vector but for a text without terms.
@@ -879,6 +1123,7 @@ mod tests {
                 secret: None,
                 input: Input::Document,
                 texts: &few,
+                files: &Files::none(),
             })
             .unwrap();
         assert!(v[0].iter().any(|x| *x != 0.0) && v[1].iter().any(|x| *x != 0.0));

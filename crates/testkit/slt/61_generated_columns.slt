@@ -1,0 +1,153 @@
+# Stored generated columns: GENERATED ALWAYS AS (expr) STORED, computed
+# on every write of the row (PLAN.md §M14.22 E4a).  Expected results as
+# PostgreSQL 18 gives them, records marked nucleus-only excepted.
+
+statement ok
+CREATE TABLE items (id INT PRIMARY KEY, price NUMERIC(8, 2), qty INT NOT NULL, total NUMERIC(10, 2) GENERATED ALWAYS AS (price * qty) STORED, label TEXT GENERATED ALWAYS AS ('item ' || id) STORED)
+
+statement ok
+INSERT INTO items (id, price, qty) VALUES (1, 2.50, 4), (2, NULL, 1)
+
+query ITITT
+SELECT id, price, qty, total, label FROM items ORDER BY id
+----
+1 2.50 4 10.00 item 1
+2 NULL 1 NULL item 2
+
+# nucleus-only: without a column list, the values are the columns that
+# are not generated (PostgreSQL wants DEFAULT in their places).
+statement ok
+INSERT INTO items VALUES (3, 1.25, 3)
+
+query T
+SELECT total FROM items WHERE id = 3
+----
+3.75
+
+# A value for a generated column is refused.
+statement error 428C9
+INSERT INTO items (id, price, qty, total) VALUES (4, 1, 1, 1)
+
+statement error 428C9
+UPDATE items SET total = 0 WHERE id = 1
+
+# An update recomputes.
+statement ok
+UPDATE items SET qty = qty + 1, price = 3 WHERE id = 1
+
+query TT
+SELECT total, label FROM items WHERE id = 1
+----
+15.00 item 1
+
+# A key change recomputes what reads it.
+statement ok
+UPDATE items SET id = 10 WHERE id = 1
+
+query T
+SELECT label FROM items WHERE id = 10
+----
+item 10
+
+# Indexed and searched like any column.
+statement ok
+CREATE INDEX items_total ON items (total)
+
+query I
+SELECT id FROM items WHERE total = 3.75
+----
+3
+
+statement ok
+UPDATE items SET qty = 10 WHERE id = 3
+
+query I
+SELECT id FROM items WHERE total = 12.50
+----
+3
+
+query I
+SELECT count(*) FROM items WHERE total = 3.75
+----
+0
+
+# Constraints hold on the computed value.
+statement ok
+CREATE TABLE pos (a INT, b INT, s INT NOT NULL GENERATED ALWAYS AS (a + b) STORED CHECK (s >= 0))
+
+statement error 23502
+INSERT INTO pos (a, b) VALUES (1, NULL)
+
+statement error 23514
+INSERT INTO pos (a, b) VALUES (1, -2)
+
+statement ok
+INSERT INTO pos (a, b) VALUES (1, 2)
+
+query III
+SELECT a, b, s FROM pos
+----
+1 2 3
+
+# What a generation expression may not be.
+statement error 42P17
+CREATE TABLE bad (a INT, b INT GENERATED ALWAYS AS (a) STORED, c INT GENERATED ALWAYS AS (b + 1) STORED)
+
+statement error 42P17
+CREATE TABLE bad (a INT, b INT GENERATED ALWAYS AS (b + 1) STORED)
+
+statement error 42P17
+CREATE TABLE bad (a INT, b DOUBLE PRECISION GENERATED ALWAYS AS (random()) STORED)
+
+statement error 0A000
+CREATE TABLE bad (a INT, b BIGINT GENERATED ALWAYS AS ((SELECT 1)) STORED)
+
+statement error 42803
+CREATE TABLE bad (a INT, b BIGINT GENERATED ALWAYS AS (count(a)) STORED)
+
+statement error 42703
+CREATE TABLE bad (a INT, b INT GENERATED ALWAYS AS (nope + 1) STORED)
+
+statement error 42601
+CREATE TABLE bad (a INT, b INT DEFAULT 1 GENERATED ALWAYS AS (a) STORED)
+
+statement error 0A000
+CREATE TABLE bad (a INT, b INT GENERATED ALWAYS AS (a) VIRTUAL)
+
+statement error 0A000
+CREATE TABLE bad (a INT GENERATED ALWAYS AS IDENTITY)
+
+# Added to a table with rows: computed for each.
+statement ok
+ALTER TABLE pos ADD COLUMN d INT GENERATED ALWAYS AS (a * 10) STORED
+
+query II
+SELECT a, d FROM pos
+----
+1 10
+
+statement ok
+INSERT INTO pos (a, b) VALUES (5, 5)
+
+query II
+SELECT a, d FROM pos ORDER BY a
+----
+1 10
+5 50
+
+# A column a generation reads, changed in type: recomputed.
+statement ok
+ALTER TABLE pos ALTER COLUMN a TYPE BIGINT
+
+query II
+SELECT a, s FROM pos ORDER BY a
+----
+1 3
+5 10
+
+# In the catalog.
+query TTT
+SELECT name, generated, generation_expr FROM nc_catalog.columns WHERE table_name = 'items' AND generated IS NOT NULL ORDER BY position
+----
+total stored price * qty
+label stored 'item ' || id

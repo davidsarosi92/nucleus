@@ -29,6 +29,7 @@ mod distinct;
 pub mod dml;
 pub mod drift;
 mod eager;
+pub mod embedding;
 pub mod encoding;
 pub mod enums;
 pub mod error;

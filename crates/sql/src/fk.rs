@@ -266,7 +266,7 @@ pub fn parent_changed(
                                     _ => w.default_of(c, &ctx)?,
                                 };
                             }
-                            w.validate(&row, &ctx)?;
+                            w.complete(&mut row, &ctx)?;
                             changes.push((key, old_child, row));
                         }
                     }

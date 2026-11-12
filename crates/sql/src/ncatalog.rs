@@ -252,6 +252,8 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("query_prefix", T),
             ("document_prefix", T),
             ("options", TA),
+            ("files", TA),
+            ("bytes", I),
             ("created", DataType::TimestampTz),
             ("calls", I),
             ("texts", I),
@@ -261,6 +263,21 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     ("model_providers", &[("name", T), ("remote", B)]),
+    (
+        "embedding_jobs",
+        &[
+            ("table_name", T),
+            ("column_name", T),
+            ("model", T),
+            ("kind", T),
+            ("key", T),
+            ("state", T),
+            ("attempts", I),
+            ("enqueued", DataType::TimestampTz),
+            ("next_attempt", DataType::TimestampTz),
+            ("error", T),
+        ],
+    ),
     (
         "role_members",
         &[
@@ -293,6 +310,11 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("default_expr", T),
             ("in_primary_key", B),
             ("comment", T),
+            ("generated", T),
+            ("generation_expr", T),
+            ("model", T),
+            ("model_version", I),
+            ("next_model", T),
         ],
     ),
     (
@@ -751,6 +773,30 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                 ]);
             }
         }
+        "embedding_jobs" => {
+            // The jobs of the tables the current role may read (a job
+            // names its row's key).
+            let checker = crate::privileges::Checker::new();
+            let visible = |t: &Table| {
+                checker
+                    .has_any_column(txn, &t.name, crate::privileges::SELECT)
+                    .unwrap_or(false)
+            };
+            for j in crate::embedding::jobs(txn, &visible)? {
+                out.push(vec![
+                    text(j.table),
+                    text(j.column),
+                    text(j.model),
+                    text(if j.next { "next" } else { "current" }),
+                    text(j.key),
+                    text(j.state),
+                    Value::Int(i64::from(j.attempts)),
+                    Value::TimestampTz(j.enqueued),
+                    j.next_attempt.map_or(Value::Null, Value::TimestampTz),
+                    j.error.map_or(Value::Null, text),
+                ]);
+            }
+        }
         "models" => {
             // The models the current role may call.
             let checker = crate::privileges::Checker::new();
@@ -782,6 +828,8 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                             .map(|(k, v)| text(format!("{k}={v}")))
                             .collect(),
                     ),
+                    Value::Array(m.files.iter().map(|f| text(f.name.clone())).collect()),
+                    Value::Int(m.files.iter().map(|f| f.len as i64).sum()),
                     Value::TimestampTz(m.created),
                     Value::Int(c.calls as i64),
                     Value::Int(c.texts as i64),
@@ -884,6 +932,26 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         col.default.clone().map_or(Value::Null, text),
                         Value::Bool(in_pk),
                         col.comment.clone().map_or(Value::Null, text),
+                        col.generated
+                            .as_ref()
+                            .map_or(Value::Null, |g| text(g.kind())),
+                        col.generated
+                            .as_ref()
+                            .map_or(Value::Null, |g| text(g.expr().to_string())),
+                        col.generated
+                            .as_ref()
+                            .and_then(|g| g.model())
+                            .map_or(Value::Null, |m| text(m.to_string())),
+                        match &col.generated {
+                            Some(crate::ast::Generated::Embedding { version, .. }) => {
+                                Value::Int(i64::from(*version))
+                            }
+                            _ => Value::Null,
+                        },
+                        col.generated
+                            .as_ref()
+                            .and_then(|g| g.next_model())
+                            .map_or(Value::Null, |m| text(m.to_string())),
                     ]);
                 }
             }

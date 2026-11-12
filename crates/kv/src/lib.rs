@@ -233,6 +233,12 @@ pub trait Kv: Send + Sync {
     /// a simulation does not wait in real time.
     fn back_off(&self, attempt: u32);
 
+    /// Waits `d`: on the platform's clock, so a simulation passes the time
+    /// without waiting for it (by default, the host's sleep).
+    fn sleep(&self, d: Duration) {
+        std::thread::sleep(d);
+    }
+
     /// Fills `buf` with unpredictable bytes (`gen_random_uuid()`): the
     /// platform's (the operating system's generator; a simulation's seed).
     fn random_bytes(&self, buf: &mut [u8]);
@@ -795,6 +801,10 @@ impl Kv for Database {
 
     fn elapsed(&self) -> Duration {
         self.platform.clock().now()
+    }
+
+    fn sleep(&self, d: Duration) {
+        self.platform.clock().sleep(d);
     }
 
     fn random_bytes(&self, buf: &mut [u8]) {

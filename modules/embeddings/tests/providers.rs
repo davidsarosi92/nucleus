@@ -207,6 +207,20 @@ fn a_refusal_names_no_key() {
         "{}",
         e.message
     );
+    // Throttled twice: worth trying again — after the wait it asked for,
+    // which the error carries (the embedding columns' queue obeys it).
+    let (busy, _) = serve(|_, _| (429, "Retry-After: 0\r\n".into(), json!({"error": "busy"})));
+    s.execute(&format!(
+        "CREATE MODEL busy USING openai WITH (url = '{busy}/v1', model = 'x', dimensions = 2)"
+    ))
+    .unwrap();
+    let e = s.execute("SELECT embed('x', 'busy')").unwrap_err();
+    assert_eq!(e.code, "58030");
+    assert_eq!(
+        nucleus_sql::ext::models::retry_after(&e),
+        Some(std::time::Duration::ZERO),
+        "{e:?}"
+    );
     // A server down: worth trying again later.
     let dead = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = dead.local_addr().unwrap().port();

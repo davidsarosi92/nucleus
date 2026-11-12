@@ -43,7 +43,7 @@
 | `modules/ldap` | `nucleus-ldap` | LDAP: passwords checked by a directory | §M14.25 ✅ |
 | `modules/http` | `nucleus-http` | just enough HTTP/1.1 over TLS for the modules that call out (oidc, embeddings) | §M14.22 |
 | `modules/embeddings` | `nucleus-embeddings` | embedding model providers: OpenAI-compatible endpoints, Cohere, Voyage (§8.23) | §M14.22 |
-| `modules/local-models` | `nucleus-local-models` | models run inside nucleus: WordPiece and Unigram tokenizers from `tokenizer.json`, BERT and XLM-RoBERTa encoders from safetensors, on `ext::kernels` (§8.23) | §M14.22 |
+| `modules/local-models` | `nucleus-local-models` | the `local` model provider: models run inside nucleus — WordPiece and Unigram tokenizers, BERT and XLM-RoBERTa encoders on `ext::kernels`, files from Hugging Face or a directory kept in the database (§8.23) | §M14.22 |
 | `modules/mcp` | `nucleus-mcp` | a Model Context Protocol server: AI models list, describe and query a database (§6.5) | §M14.10 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
@@ -1414,7 +1414,10 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 0E <table> 00 <policy>` | a row-level security policy |
 | `00 0F <login>` | a token: its role, ceiling, expiry and secret's verifier (§9) |
 | `00 14 <name>` | a secret: its owner and its sealed value, or the environment variable it names (§9) |
-| `00 15 <name>` | a model: its provider, options, secret, prefixes, dimensions and batch (§8.23) |
+| `00 15 <name>` | a model: its provider, options, secret, prefixes, dimensions, batch and files (§8.23) |
+| `00 16 <SHA-256> <chunk>` | a model's file, by content: 32 KiB chunks, shared by the models made from it (§8.23) |
+| `00 17 <table id> <column u16> <pk>` | an embedding column's job: the row's vector to make; column bit `0x8000`: its next model's (§8.24) |
+| `00 18 <table id> <column u16> <pk>` | a moving embedding column's next model's vector, until the swap (§8.24) |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -2524,7 +2527,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.text_analyzers` | `name` (the text analyzers registered, §8.19) |
 | `nc_catalog.partitions` | `table_name`, `partition`, `strategy` (`range`, `list`, `hash`), `key` (names), `bound` (`FOR VALUES …` or `DEFAULT`), `storage` (§8.16) |
 | `nc_catalog.segments` | `table_name`, `segment` (id, hex), `rows`, `deleted`, `bytes` (encoded) — each segment of each `column` table (§8.15) |
-| `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key` |
+| `nc_catalog.columns` | `table_id`, `table_name`, `position`, `name`, `type`, `nullable`, `default_expr`, `in_primary_key`, `comment`, `generated` (`stored`, `embedding`, or NULL), `generation_expr`, `model`, `model_version`, `next_model` (§8.24) |
 | `nc_catalog.indexes` | `table_id`, `table_name`, `index_id` (0 = primary), `name`, `columns`, `is_unique`, `is_primary`, `key_prefix`, `orderings` (per column, the taught ordering it is indexed in, or NULL), `method` (`btree` or a registered method's, §8.17), `opclasses` (per column, its operator class, or NULL), `options` (`name=value`) |
 | `nc_catalog.constraints` | `table_id`, `table_name`, `name`, `kind`, `definition` |
 | `nc_catalog.foreign_keys` | `table_id`, `table_name`, `name`, `columns`, `referenced_table`, `referenced_columns`, `on_delete`, `on_update` |
@@ -2547,8 +2550,9 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
 | `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by`, `max_rows`, `max_scan`, `timeout`, `rate_per_minute` (the tokens the current role may manage; never a secret) |
-| `nc_catalog.models` | `name`, `owner`, `provider`, `dimensions`, `max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`, `created`, `calls`, `texts`, `cached`, `errors`, `total_ms` (the models the current role may call; the calls since the process started, §8.23) |
+| `nc_catalog.models` | `name`, `owner`, `provider`, `dimensions`, `max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`, `files`, `bytes`, `created`, `calls`, `texts`, `cached`, `errors`, `total_ms` (the models the current role may call; the calls since the process started, §8.23) |
 | `nc_catalog.model_providers` | `name`, `remote` (whether its calls reach the network) |
+| `nc_catalog.embedding_jobs` | `table_name`, `column_name`, `model`, `kind` (`current`, `next`), `key`, `state` (`pending`, `retrying`, `failed`), `attempts`, `enqueued`, `next_attempt`, `error` (the embedding columns' queue, §8.24; the tables the current role may read) |
 | `nc_catalog.secrets` | `name`, `owner`, `source` (`value`, `env`), `env`, `created`, `changed` (the secrets the current role may use; never a value) |
 | `nc_catalog.grants` | `kind`, `object`, `column`, `grantee`, `privilege`, `grantable` (the ACLs written out) |
 | `nc_catalog.types` | `name`, `aliases`, `category`, `module` (which registered it), `equality`, `hashing`, `ordering`, `key_encoding`, `distance` (its operator), `encoding_version` |
@@ -4056,7 +4060,7 @@ help (no connection, 429, 5xx — tried once more first), `55000` where it
 will not (a refused key, an unknown model).
 
 `nc_catalog.models` (`name`, `owner`, `provider`, `dimensions`,
-`max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`,
+`max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`, `files`, `bytes`,
 `created`, and the process's `calls`, `texts`, `cached`, `errors`,
 `total_ms`; the models the current role may call) and
 `nc_catalog.model_providers` (`name`, `remote`).  Tests:
@@ -4067,8 +4071,29 @@ loopback answering as OpenAI, Cohere and Voyage: the requests, the key,
 answers out of order, a 429 tried again, a 401 without the key in the
 error, a server down).
 
-Local models (`modules/local-models`, §M14.22 E3; not yet a provider):
-its tokenizers read a Hugging Face `tokenizer.json` — WordPiece behind
+Local models (`modules/local-models`, §M14.22 E3, in the `nucleus`
+tool): `CREATE MODEL m USING local WITH (huggingface = 'org/name' [,
+revision = 'main'] | path = '/dir' [, pooling = 'cls' | 'mean'] [,
+threads = n] [, batch = n])`.  The provider *fetches* the model's files
+when it is made (`ModelProvider::fetch`, the only time a provider reads
+files or the network outside a call): `tokenizer.json`, `config.json`,
+`model.safetensors` and `1_Pooling/config.json` where there is one —
+from Hugging Face (`https://huggingface.co/<repo>/resolve/<revision>/…`,
+redirects followed to `https://`, a large file checked against the
+SHA-256 the hub announces in `X-Linked-Etag`; another `endpoint`, and a
+`path` on the server, only for administrators, `42501`).  The core keeps
+the files with the model by content — `00 16 <SHA-256> <chunk u32>`, 32
+KiB chunks; the record lists their names, digests and lengths — so a
+backup or a replica has them, two models from the same files store them
+once, and `DROP MODEL` removes them with the last model that keeps
+them.  `define` loads the model (a model that cannot run is refused when
+made, `55000`) and gives its dimensions; a call reads the files through
+`models::Files` (their digest checked) only when the process has not
+loaded them (four models kept, by `Files::id`), and runs them on
+`threads` (the machine's cores by default).  `nc_catalog.models` shows
+`files` and `bytes`; `model_providers` shows `local` as not remote.
+
+Its tokenizers read a Hugging Face `tokenizer.json` — WordPiece behind
 BERT's normalizer and pre-tokenizer, Unigram behind SentencePiece's
 precompiled character map (by grapheme cluster, UAX #29) and Metaspace —
 and give the ids `tokenizers` gives: special tokens in a text are those
@@ -4094,6 +4119,110 @@ its test), `gelu` (exact, by a rational `erf`), `softmax_rows`,
 `layer_norm`, `add_assign`.  The x86 `Avx2` level now needs FMA too.
 Checked by `bench/embed/encoder.py` against ONNX Runtime on the
 publishers' f32 exports.
+
+### 8.24 Generated columns and embedding columns (`dml`, `embedding`, §M14.22 E4)
+
+`c type GENERATED ALWAYS AS (expr) STORED`: the expression, over the
+row's other columns, is computed on every write of the row — `INSERT`,
+`COPY`, `UPDATE` (of any column), a foreign key's cascade, `ALTER
+COLUMN … TYPE` of a column it reads — by `Writer::complete` before the
+row's constraints are checked, and stored like any value (indexed,
+searched, checked).  A value is never given: naming the column in an
+`INSERT`'s or `COPY`'s list or an `UPDATE`'s `SET` is `428C9`; without a
+list, an `INSERT`'s values and a `COPY`'s fields are the columns that
+are not generated.  The expression may not read a generated column, call
+a volatile function (`42P17`) or hold a subquery (`0A000`), nor be in
+the partitioning; `DEFAULT` with it is `42601`; `VIRTUAL` and identity
+columns are refused (`0A000`).  `ALTER TABLE … ADD COLUMN … GENERATED`
+computes it for every row.  The table record (version 15) keeps a
+column's generation after its statistics: `0`, `1 <expr>` or `2 <expr>
+<model> <version u32> <next model?>`.  `nc_catalog.columns` shows
+`generated` (`stored`, `embedding`), `generation_expr`, `model`,
+`model_version` and `next_model`; pg-compat shows
+`attgenerated = 's'`, the expression in `pg_attrdef`, and
+`information_schema.columns.is_generated` / `generation_expression`.
+
+`v vector GENERATED BY EMBEDDING (expr) USING m`: the vector of the text
+`expr` gives, made by model `m` in the background.  When made: the model
+exists and the maker has `USAGE` on it; the type is `vector` of the
+model's dimensions (`vector` alone takes them, `42804` otherwise); the
+column may be NULL, is not in the key, and the table has a primary key
+(`42P17`).  A model used by a column is not dropped (`2BP01`); dropping
+the table drops its jobs.  `embed(q)` without a model, an operator's
+operand beside such a column (`ORDER BY v <=> embed($1)`), is the
+binder's `embed(q, 'm', 'query')`: the query embedded by the column's
+own model.
+
+The queue (`embedding`): `00 17 <table id u32> <column u16> <primary
+key>` → version, enqueued (µs), attempts, not-before (µs), failed, the
+last error.  An insert puts a job for each new row; an update puts one
+when a column the expression reads changed (compared as values), and
+moves a row's job with its key; a delete removes them — all in the
+writer's transaction, a job a row and column, so a row written five
+times while pending is one job.  A **round** (`embedding::work`) takes up
+to 256 due jobs (not-before passed, the model's circuit closed), reads
+their texts at one snapshot, calls the models (`embed_unchecked`: the
+maker's `USAGE` was checked when the column was made; the models' cache
+first; a batch refused as a whole by an error that will not pass is
+tried a text at a time), then writes in one transaction a group: for
+each job still as read, the row's vector if its text is still the one
+embedded (else the job is left for the next round), the job removed; a
+NULL text or a row gone just removes it.  A commit that conflicts leaves
+the group's jobs for the next round.  Failures that may pass (`58030`,
+`40001`, `57014`, `53300`, `53400`): attempts + 1, not before now + the
+provider's `Retry-After` (`models::retry_hint` in the error's hint,
+`models::retry_after` reads it) or a full-jitter backoff (a draw in 0 …
+min(5 min, 1 s × 2ⁿ⁻¹), from the database's random source).  Others:
+failed at once, tried again in an hour or when the row's text changes.
+Five failures in a row that may pass open the model's circuit (per
+database, in memory): no calls for 30 s, doubling to 5 min while it
+reopens.  Rounds run after a session's statements
+(`embedding::after_statement`, when a job may be due: a flag set by a
+put, or the earliest not-before reached; one round at a time a database)
+unless a background worker serves the database (`embedding::serve`,
+started by the `nucleus` server: rounds while jobs are due, else asleep
+until a job is put or comes due).
+
+Pending rows, by the session's `embedding.pending`: `include` (the
+default: each row's vector as it is — NULL before its first, the old one
+while a new one is made), `skip` (the binder puts `NOT
+embedding_pending(t)(pk…)` over each scan of a table with embedding
+columns: rows with a job, failed ones too, left out), `wait` (before a
+query takes its snapshot, rounds until only jobs failed for good are
+left, sleeping on the database's clock until a retried job is due; past
+the statement's time — `statement_timeout`, else a minute — `57014`; in
+a transaction whose snapshot is taken, `25001`).  `Kv::sleep` waits on
+the platform's clock, so the simulation passes the time.
+`nc_catalog.embedding_jobs` (`table_name`, `column_name`, `model`,
+`key`, `state` — `pending`, `retrying`, `failed` —, `attempts`,
+`enqueued`, `next_attempt`, `error`; the tables the current role may
+read).  Tests: `crates/testkit/slt/61_generated_columns.slt`,
+`tests/embedding_columns.rs` (kept current, outages, backoff, the
+circuit, Retry-After, the three modes, a refused text, a writer racing a
+round, a crash at any I/O point of a workload of writes and rounds).
+
+**A column moved to another model** (§M14.22 E5): `ALTER TABLE t ALTER
+COLUMN v SET MODEL m2` (the table's owner; `USAGE` on `m2`; not on a
+partitioned table) records `m2` as the column's next model and puts a
+job a row under the column's slot with bit `0x8000` set.  Rounds take
+the columns' own jobs first and fill the rest of their 256 texts with
+next-model jobs, whose vectors go beside the table: `00 18 <table id>
+<column u16> <pk>` → the components as f32 little endian (empty: a NULL
+text).  While the column moves, a write that changes the text puts both
+jobs; a key change moves both and the vector beside; a delete removes
+them.  Each round, for a moving column whose next-model jobs are all
+done (none left, or this round took the last), `swap` runs one
+transaction: no next-model job may be left; every row rewritten
+(`dml::replace_rows`) with its vector from beside (NULL if none); the
+column's dimensions the new model's, its index methods defined again and
+built; its model the next, its version + 1; the store beside and the old
+model's jobs removed.  A conflict leaves it for the next round.  `SET
+MODEL` to the column's current model gives a move up (its jobs and store
+removed); to another, starts over.  A model that is a column's next one
+is not dropped (`2BP01`).  `wait` does not wait for next-model jobs; a
+job failed for good holds the move until it is mended or given up.
+`nc_catalog.embedding_jobs.kind` is `current` or `next` (`model` then
+the next one).
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -4862,6 +4991,26 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-12 — §M14.22 E5, a column moved to another model:** `ALTER
+  TABLE … ALTER COLUMN … SET MODEL`; next-model jobs (column bit
+  `0x8000`), their vectors at `00 18`, the swap transaction; table record
+  keeps the model's version and next model; `nc_catalog.columns`
+  `model_version`, `next_model`; `nc_catalog.embedding_jobs.kind`.
+- **2026-11-12 — §M14.22 E4b, embedding columns:** `GENERATED BY
+  EMBEDDING (expr) USING m`; the queue at `00 17`, `embedding::work`,
+  `after_statement`, `serve` (started by the server), `drain`,
+  `rounds_by_caller`; backoff with full jitter, `Retry-After`
+  (`models::retry_hint`, `retry_after`), a circuit a model;
+  `embedding.pending`; `embed(q)` by a column's model;
+  `nc_catalog.embedding_jobs`; `Kv::sleep`.
+- **2026-11-12 — §M14.22 E4a, stored generated columns:** `GENERATED
+  ALWAYS AS (expr) STORED`, `428C9`; table record version 15; pg-compat's
+  `attgenerated`, `pg_attrdef`, `information_schema` generation columns.
+- **2026-11-12 — §M14.22 E3c, local models in the database:** the
+  `local` provider (`huggingface`, `path`, `endpoint`, `pooling`,
+  `threads`, `batch`); model files kept by content at `00 16`;
+  `bench/embed/speed.py` against fastembed.
 
 - **2026-11-12 — §M14.22 E3b, the encoder:** `nucleus-kernels` gains an
   f32 matrix product (`PackedB`, `matmul`), `gelu`, `softmax_rows`,
