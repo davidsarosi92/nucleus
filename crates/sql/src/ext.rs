@@ -111,6 +111,17 @@ pub mod models {
     pub use crate::models::{Input, MAX_DIMENSIONS, ModelProvider, Options, Request, Spec};
 }
 
+/// The kernels of a neural network's forward pass (`nucleus-kernels`,
+/// PLAN.md §M14.22 E3b): an f32 matrix product whose every output is one
+/// chain of fused multiply-adds (the same bits on any number of threads
+/// and at every CPU level), GELU, softmax, layer normalization.
+pub mod kernels {
+    pub use nucleus_kernels::{
+        MR, NR, PackedB, add_assign, erf, exp, gelu, layer_norm, level, level_name, matmul,
+        softmax_rows,
+    };
+}
+
 /// Text analysis as modules see it ([`crate::text`]): an analyzer by
 /// name, the terms it gives a text at their positions and bytes.
 pub mod text {

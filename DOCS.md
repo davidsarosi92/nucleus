@@ -31,7 +31,7 @@
 | `crates/storage` | `nucleus-storage` | page format, pager, buffer pool, B+tree, WAL, store | §M1–§M4 ✅ |
 | `crates/txn` | `nucleus-txn` | MVCC, snapshot isolation, GC | §M5 ✅ |
 | `crates/kv` | `nucleus-kv` | the KV contract and the local `Database` | §M6 ✅ |
-| `crates/kernels` | `nucleus-kernels` | the vectorized executor's batch kernels, compiled per CPU level and chosen at run time | §M14.20 |
+| `crates/kernels` | `nucleus-kernels` | the vectorized executor's batch kernels, compiled per CPU level and chosen at run time; a neural network's forward pass (f32 matrix product, GELU, softmax, layer normalization) | §M14.20, §M14.22 |
 | `crates/sql` | `nucleus-sql` | types, encodings, catalog (`nc_catalog`), parser, binder, optimizer, executor, sessions; the extension API (`ext`) | §M7–§M14.5, §M14.19 |
 | `crates/wire` | `nucleus-wire` | the nucleus protocol's wire format, for both ends: versions, message kinds, value tags, frames, values, the columnar layout (§10) | §M14.20 W8 |
 | `crates/server` | `nucleus-server` | front ends (the nucleus protocol), authentication | §M12, §M14.7, §M14.19 |
@@ -43,7 +43,7 @@
 | `modules/ldap` | `nucleus-ldap` | LDAP: passwords checked by a directory | §M14.25 ✅ |
 | `modules/http` | `nucleus-http` | just enough HTTP/1.1 over TLS for the modules that call out (oidc, embeddings) | §M14.22 |
 | `modules/embeddings` | `nucleus-embeddings` | embedding model providers: OpenAI-compatible endpoints, Cohere, Voyage (§8.23) | §M14.22 |
-| `modules/local-models` | `nucleus-local-models` | models run inside nucleus: so far the tokenizers — WordPiece (BERT's) and Unigram (SentencePiece's), from `tokenizer.json` (§8.23) | §M14.22 |
+| `modules/local-models` | `nucleus-local-models` | models run inside nucleus: WordPiece and Unigram tokenizers from `tokenizer.json`, BERT and XLM-RoBERTa encoders from safetensors, on `ext::kernels` (§8.23) | §M14.22 |
 | `modules/mcp` | `nucleus-mcp` | a Model Context Protocol server: AI models list, describe and query a database (§6.5) | §M14.10 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
@@ -4078,6 +4078,23 @@ file may hold is refused by name.  BERT's character classes are Unicode
 Checked by `bench/embed/tokens.py` (corpora, every code point, random
 mixtures: all the same) and `modules/local-models/tests/`.
 
+Its encoder reads `config.json` (BERT, RoBERTa, XLM-RoBERTa; GELU,
+absolute positions, a RoBERTa's starting after its padding token's) and
+the safetensors weights (F32, F16, BF16; the linear layers packed once
+for the matrix product), pools by sentence-transformers' `1_Pooling`
+(the first token or the mean) and scales to length 1.  A batch's texts
+are one matrix of their tokens, end to end (no padding, no mask), cut to
+the model's 512 positions; threads take whole texts, about equal work
+each, so a text's vector is the same bits alone, in any batch and on any
+number of threads.  The kernels (`ext::kernels`, from `nucleus-kernels`):
+`matmul` over a `PackedB` (BLIS's structure: 8 × 12 register tiles on
+NEON, 6 × 16 on x86; every output one chain of fused multiply-adds in
+order, so the same bits at every CPU level, held to the naive chain by
+its test), `gelu` (exact, by a rational `erf`), `softmax_rows`,
+`layer_norm`, `add_assign`.  The x86 `Avx2` level now needs FMA too.
+Checked by `bench/embed/encoder.py` against ONNX Runtime on the
+publishers' f32 exports.
+
 ### 8.14 Errors and hints (`error`, `hint`)
 
 An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
@@ -4846,6 +4863,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-12 — §M14.22 E3b, the encoder:** `nucleus-kernels` gains an
+  f32 matrix product (`PackedB`, `matmul`), `gelu`, `softmax_rows`,
+  `layer_norm`, `add_assign`, `erf`, `exp`, reached by modules as
+  `ext::kernels`; its `Avx2` level requires FMA.  `nucleus-local-models`
+  runs BERT and XLM-RoBERTa encoders from safetensors (`LocalModel`,
+  `Encoder`), packed batches without padding, the same vector on any
+  threads; `bench/embed/encoder.py` compares with ONNX Runtime.
 - **2026-11-12 — §M14.22 E3a, the tokenizers:** new module
   `nucleus-local-models` with WordPiece and Unigram tokenizers read from
   `tokenizer.json`, the same ids as Hugging Face's `tokenizers` on

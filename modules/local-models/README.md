@@ -6,9 +6,9 @@ C++ library and no network.  BERT-family encoders, read from the files
 their publishers give on Hugging Face — `tokenizer.json`, `config.json`
 and `model.safetensors`.
 
-Built so far (E3a): **the tokenizers**, each exactly as Hugging Face's
+Built so far: **the tokenizers** (E3a), each exactly as Hugging Face's
 `tokenizers` runs it, so a model sees the ids it was trained and
-published with.
+published with, and **the encoder** (E3b).
 
 | family | models | pipeline |
 |---|---|---|
@@ -37,3 +37,27 @@ not approximated.
 `tests/tokenizers.rs` runs on the models' files when
 `bench/embed/models.py` has fetched them into `target/models` (or
 `$NUCLEUS_MODELS` names a folder), and says it skipped otherwise.
+
+## The encoder
+
+BERT, RoBERTa and XLM-RoBERTa encoders (`config.json`: GELU, absolute
+positions) from `model.safetensors` (F32, F16 or BF16), pooled as
+sentence-transformers' `1_Pooling/config.json` says (the first token, or
+the mean) and scaled to length 1:
+
+```rust
+let model = LocalModel::new(&Files { tokenizer, config, pooling, weights }, None)?;
+let vectors = model.embed(&["query: how old is the Danube?"], threads)?;
+```
+
+- On nucleus's kernels (`ext::kernels`): an f32 matrix product in
+  BLIS's structure whose every output is one chain of fused
+  multiply-adds, GELU, softmax, layer normalization — no ONNX Runtime,
+  no BLAS.
+- A batch's texts are packed end to end, not padded; threads take whole
+  texts.  A text's vector is the same bits alone, in any batch and on
+  any number of threads.
+- Against the publishers' own f32 ONNX exports in ONNX Runtime
+  (`bench/embed/encoder.py`): cosine ≥ 0.9999998 on bge-small-en-v1.5
+  and multilingual-e5-small.  One M2 Pro core: about 1,550 tokens a
+  second; 8 threads about 9,000.

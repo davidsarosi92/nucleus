@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 pub enum Level {
     /// Whatever the target's baseline has (NEON on AArch64).
     Base,
-    /// x86-64 with AVX2.
+    /// x86-64 with AVX2 and FMA.
     Avx2,
     /// x86-64 with AVX-512 (F, BW, DQ, VL).
     Avx512,
@@ -40,7 +40,10 @@ pub fn levels() -> Vec<Level> {
     let mut out = vec![Level::Base];
     #[cfg(target_arch = "x86_64")]
     {
-        if std::arch::is_x86_feature_detected!("avx2") {
+        // Every CPU with AVX2 has FMA too (Haswell, Excavator on); the
+        // neural kernels' fused multiply-adds need it.
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
             out.push(Level::Avx2);
         }
         if std::arch::is_x86_feature_detected!("avx512f")
@@ -69,21 +72,26 @@ pub fn level_name(l: Level) -> &'static str {
 macro_rules! kernel {
     ($(#[$doc:meta])* fn $name:ident / $at:ident ($($arg:ident: $ty:ty),*) $(-> $ret:ty)? $body:block) => {
         $(#[$doc])*
+        // BLAS-like kernels take a matrix's shape and strides one by one.
+        #[allow(clippy::too_many_arguments)]
         pub fn $name($($arg: $ty),*) $(-> $ret)? {
             $at(level(), $($arg),*)
         }
 
         #[doc = concat!("[`", stringify!($name), "`] at `level` (one this CPU has).")]
-        #[allow(unused_variables)]
+        #[allow(unused_variables, clippy::too_many_arguments)]
         pub fn $at(level: Level, $($arg: $ty),*) $(-> $ret)? {
             #[inline(always)]
+            #[allow(clippy::too_many_arguments)]
             fn imp($($arg: $ty),*) $(-> $ret)? $body
             #[cfg(target_arch = "x86_64")]
             #[allow(unsafe_code)]
             {
-                #[target_feature(enable = "avx2")]
+                #[target_feature(enable = "avx2,fma")]
+                #[allow(clippy::too_many_arguments)]
                 fn avx2($($arg: $ty),*) $(-> $ret)? { imp($($arg),*) }
                 #[target_feature(enable = "avx512f,avx512bw,avx512dq,avx512vl")]
+                #[allow(clippy::too_many_arguments)]
                 fn avx512($($arg: $ty),*) $(-> $ret)? { imp($($arg),*) }
                 match level {
                     // SAFETY: the level was detected on this CPU.
@@ -96,6 +104,12 @@ macro_rules! kernel {
         }
     };
 }
+
+mod neural;
+pub use neural::{
+    MR, NR, PackedB, add_assign, add_assign_at, erf, exp, gelu, gelu_at, layer_norm, layer_norm_at,
+    matmul, matmul_at, softmax_rows, softmax_rows_at,
+};
 
 // ---------------------------------------------------------------- CRC-32C
 
