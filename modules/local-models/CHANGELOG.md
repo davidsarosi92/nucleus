@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The tokens a call ran are reported for the statement's costs
+  (`LocalModel::embed_counted`, `Request::report_tokens`, nucleus
+  PLAN.md §M14.22 E8a).
+
 - Token counts for chunks (nucleus PLAN.md §M14.22 E6): `LocalModel::count`,
   `Tokenizer::count`, and the provider's `count_tokens`, so
   `chunks(…, 'tokens', n, 0, 'model')` sizes chunks in the model's tokens.

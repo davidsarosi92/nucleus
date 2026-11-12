@@ -180,6 +180,12 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("max_ms", F),
             ("rows_read", I),
             ("rows_returned", I),
+            ("model_calls", I),
+            ("model_texts", I),
+            ("model_cached", I),
+            ("model_tokens", I),
+            ("model_errors", I),
+            ("model_ms", F),
             ("last_call", DataType::TimestampTz),
         ],
     ),
@@ -260,6 +266,12 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("cached", I),
             ("errors", I),
             ("total_ms", F),
+            ("tokens", I),
+            ("throttled_ms", F),
+            ("batch_tokens", I),
+            ("requests_per_minute", I),
+            ("tokens_per_minute", I),
+            ("parallel", I),
         ],
     ),
     ("model_providers", &[("name", T), ("remote", B)]),
@@ -711,6 +723,12 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     ms(s.max),
                     Value::Int(s.rows_read as i64),
                     Value::Int(s.rows_returned as i64),
+                    Value::Int(s.models.calls as i64),
+                    Value::Int(s.models.texts as i64),
+                    Value::Int(s.models.cached as i64),
+                    Value::Int(s.models.tokens as i64),
+                    Value::Int(s.models.errors as i64),
+                    Value::Float(s.models.micros as f64 / 1000.0),
                     Value::TimestampTz(s.last),
                 ]);
             }
@@ -843,6 +861,13 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     continue;
                 }
                 let c = crate::models::calls_of(&m.name);
+                let limit = |n: u32| {
+                    if n == 0 {
+                        Value::Null
+                    } else {
+                        Value::Int(i64::from(n))
+                    }
+                };
                 let opt = |o: Option<String>| o.map_or(Value::Null, text);
                 out.push(vec![
                     text(m.name),
@@ -868,6 +893,12 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     Value::Int(c.cached as i64),
                     Value::Int(c.errors as i64),
                     Value::Float(c.micros as f64 / 1000.0),
+                    Value::Int(c.tokens as i64),
+                    Value::Float(c.throttled as f64 / 1000.0),
+                    limit(m.limits.batch_tokens),
+                    limit(m.limits.requests_per_minute),
+                    limit(m.limits.tokens_per_minute),
+                    limit(m.limits.parallel),
                 ]);
             }
         }

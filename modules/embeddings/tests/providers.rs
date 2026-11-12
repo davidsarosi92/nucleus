@@ -253,7 +253,13 @@ fn cohere_and_voyage_say_query_or_document() {
                 .iter()
                 .map(|t| fake_vector(t.as_str().unwrap()))
                 .collect();
-            (200, String::new(), json!({"embeddings": {"float": rows}}))
+            // The tokens billed: 10 a text.
+            let billed = json!({"billed_units": {"input_tokens": 10 * rows.len()}});
+            (
+                200,
+                String::new(),
+                json!({"embeddings": {"float": rows}, "meta": billed}),
+            )
         } else {
             let input = g.body["input"].as_array().unwrap();
             let data: Vec<Json> = input
@@ -261,7 +267,8 @@ fn cohere_and_voyage_say_query_or_document() {
                 .enumerate()
                 .map(|(i, t)| json!({"index": i, "embedding": fake_vector(t.as_str().unwrap())}))
                 .collect();
-            (200, String::new(), json!({"data": data}))
+            let usage = json!({"total_tokens": 20 * data.len()});
+            (200, String::new(), json!({"data": data, "usage": usage}))
         }
     });
     let mut s = session();
@@ -297,4 +304,65 @@ fn cohere_and_voyage_say_query_or_document() {
         ]
     );
     assert_eq!(got[0].body["output_dimension"], json!(3));
+    // The tokens each answer reported.
+    assert_eq!(
+        one(
+            &mut s,
+            "SELECT string_agg(name || '=' || tokens, ' ' ORDER BY name) FROM nc_catalog.models"
+        ),
+        Value::Text("c=20 v=40".into())
+    );
+}
+
+#[test]
+fn calls_at_once_and_their_usage() {
+    let (url, got) = serve(|g, _| {
+        let input = g.body["input"].as_array().unwrap();
+        let data: Vec<Json> = input
+            .iter()
+            .enumerate()
+            .map(|(i, t)| json!({"index": i, "embedding": fake_vector(t.as_str().unwrap())}))
+            .collect();
+        let usage = json!({"prompt_tokens": 3, "total_tokens": 3 * data.len()});
+        (200, String::new(), json!({"data": data, "usage": usage}))
+    });
+    let mut s = session();
+    // Named apart: a model's statistics are the process's, by name.
+    s.execute(&format!(
+        "CREATE MODEL par USING openai WITH (url = '{url}/v1', model = 'x', dimensions = 3, \
+         batch = 2, parallel = 3, tokens_per_minute = 100000)"
+    ))
+    .unwrap();
+    s.execute("CREATE TABLE d (id int PRIMARY KEY, body text) WITH (storage = column)")
+        .unwrap();
+    s.execute("INSERT INTO d SELECT i, 'text ' || i FROM generate_series(1, 9) i")
+        .unwrap();
+    s.execute("SET parallel_workers = 1").unwrap();
+    assert_eq!(
+        one(&mut s, "SELECT count(embed(body, 'par')) FROM d"),
+        Value::Int(9)
+    );
+    // Five calls (two texts each, one left over), made three at a time,
+    // each answer in its place.
+    let got = got.lock().unwrap().clone();
+    assert_eq!(got.len(), 5);
+    let mut sent: Vec<String> = got
+        .iter()
+        .flat_map(|g| g.body["input"].as_array().unwrap().clone())
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
+    sent.sort();
+    assert_eq!(sent.len(), 9);
+    assert_eq!(
+        one(&mut s, "SELECT embed('text 7', 'par')::text"),
+        Value::Text("[6,116,1]".into())
+    );
+    assert_eq!(
+        one(
+            &mut s,
+            "SELECT calls || ' ' || tokens || ' ' || tokens_per_minute || ' ' || parallel \
+             FROM nc_catalog.models WHERE name = 'par'"
+        ),
+        Value::Text("5 27 100000 3".into())
+    );
 }

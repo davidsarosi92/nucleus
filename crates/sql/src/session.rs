@@ -1013,7 +1013,11 @@ impl Session {
             // nor in the statement statistics.
             return self.run_unaudited(stmt, params, sink);
         }
-        let (start, read) = (self.kv.elapsed(), crate::budget::scanned());
+        let (start, read, models) = (
+            self.kv.elapsed(),
+            crate::budget::scanned(),
+            crate::budget::model_cost(),
+        );
         crate::audit::begin_statement();
         let mut counted = Counted {
             sink,
@@ -1047,6 +1051,7 @@ impl Session {
                     std::time::Duration::from_micros(crate::budget::waited() as u64),
                 ),
                 rows_read: crate::budget::scanned().saturating_sub(read),
+                models: crate::budget::model_cost().since(&models),
                 rows_returned: match &r {
                     Ok(_) if counted.started => counted.rows,
                     Ok(out) => crate::statements::rows_of(out),
@@ -1686,14 +1691,16 @@ pub(crate) fn execute_statement(
             ctx.needed = crate::prune::needed(&plan);
             ctx.memoize = true;
             let start = clock.as_ref().map(|k| k.elapsed());
+            let models = crate::budget::model_cost();
             let rows = exec::collect(&plan, &ctx, None)?.len();
+            let models = crate::budget::model_cost().since(&models);
             let total = clock.zip(start).map(|(k, s)| k.elapsed().saturating_sub(s));
             Output::Rows {
                 columns: vec![OutColumn {
                     name: "QUERY PLAN".into(),
                     ty: DataType::Text,
                 }],
-                rows: crate::profile::explain(ro, &plan, &profile, rows, total)
+                rows: crate::profile::explain(ro, &plan, &profile, rows, total, &models)
                     .into_iter()
                     .map(|l| vec![Value::Text(l)])
                     .collect(),

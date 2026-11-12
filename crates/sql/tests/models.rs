@@ -334,3 +334,202 @@ fn a_batch_of_rows_in_few_calls() {
     assert_eq!(r[0], r[3]);
     assert_eq!(p.texts.load(Ordering::SeqCst) - before, 2);
 }
+
+/// Takes 20 ms a call, counts how many run at once, and reports 7 tokens
+/// a text.
+struct Metered {
+    calls: AtomicUsize,
+    running: AtomicUsize,
+    most: AtomicUsize,
+}
+
+impl ModelProvider for Metered {
+    fn name(&self) -> &str {
+        "metered"
+    }
+
+    fn define(&self, o: &models::Options, _files: &models::Files<'_>) -> Result<Spec> {
+        o.only("metered", &["batch"])?;
+        Ok(Spec {
+            dimensions: 2,
+            max_batch: o.number("batch", 1..=1000)?.unwrap_or(1000) as usize,
+        })
+    }
+
+    fn embed(&self, r: &Request<'_>) -> Result<Vec<Vec<f32>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        self.running.fetch_sub(1, Ordering::SeqCst);
+        r.report_tokens(7 * r.texts.len() as u64);
+        Ok(r.texts.iter().map(|t| vec![t.len() as f32, 1.0]).collect())
+    }
+}
+
+/// A new column table of `texts` (column `t`), which reads them in a
+/// batch: its name.
+fn values(s: &mut Session, texts: &[&str]) -> String {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let name = format!("texts{}", N.fetch_add(1, Ordering::SeqCst));
+    s.execute(&format!(
+        "CREATE TABLE {name} (id int PRIMARY KEY, t text) WITH (storage = column)"
+    ))
+    .unwrap();
+    let v: Vec<String> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("({i}, '{t}')"))
+        .collect();
+    s.execute(&format!("INSERT INTO {name} VALUES {}", v.join(", ")))
+        .unwrap();
+    name
+}
+
+#[test]
+fn limits_batches_and_costs() {
+    let metered = Arc::new(Metered {
+        calls: AtomicUsize::new(0),
+        running: AtomicUsize::new(0),
+        most: AtomicUsize::new(0),
+    });
+    let _ = models::register(metered.clone());
+    let (_kv, mut s) = setup(&Counting::new("counting_l"));
+    let calls = |m: &Metered| m.calls.load(Ordering::SeqCst);
+
+    // Calls at once: eight texts, two a call, four calls in parallel.
+    s.execute("CREATE MODEL wide USING metered WITH (batch = 2, parallel = 4)")
+        .unwrap();
+    let eight = ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8"];
+    let table = values(&mut s, &eight);
+    let r = rows(
+        &mut s,
+        &format!("SELECT count(embed(t, 'wide')) FROM {table}"),
+    );
+    assert_eq!(r, vec![vec![Value::Int(8)]]);
+    assert_eq!(calls(&metered), 4);
+    assert!(metered.most.load(Ordering::SeqCst) > 1, "calls at once");
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT calls, texts, tokens, parallel, batch_tokens FROM nc_catalog.models WHERE name = 'wide'"
+        ),
+        vec![vec![
+            Value::Int(4),
+            Value::Int(8),
+            Value::Int(56),
+            Value::Int(4),
+            Value::Null
+        ]]
+    );
+
+    // The costs of a statement: in EXPLAIN ANALYZE …
+    let explain = |s: &mut Session, sql: &str| -> Vec<String> {
+        rows(s, &format!("EXPLAIN (ANALYZE, TIMING OFF) {sql}"))
+            .into_iter()
+            .map(|r| match &r[0] {
+                Value::Text(t) => t.to_string(),
+                other => panic!("{other:?}"),
+            })
+            .filter(|l| l.starts_with("Models:"))
+            .collect()
+    };
+    let table = values(&mut s, &["b1", "b2", "b3", "a1"]);
+    let q = format!("SELECT count(embed(t, 'wide')) FROM {table}");
+    s.execute("SET parallel_workers = 1").unwrap();
+    assert_eq!(
+        explain(&mut s, &q),
+        ["Models: 2 calls, 3 texts sent, 1 cached, 21 tokens, 0 errors"]
+    );
+    assert_eq!(
+        explain(&mut s, &q),
+        ["Models: 0 calls, 0 texts sent, 4 cached, 0 tokens, 0 errors"]
+    );
+    assert!(explain(&mut s, "SELECT 1").is_empty());
+    // A scan shared out: its workers' calls are the statement's too.
+    s.execute("SET parallel_workers = 4").unwrap();
+    let many: Vec<String> = (0..400).map(|i| format!("w{i}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let table = values(&mut s, &many);
+    let line = explain(
+        &mut s,
+        &format!("SELECT count(embed(t, 'wide')) FROM {table}"),
+    );
+    assert!(
+        line[0].contains(" 400 texts sent, 0 cached, 2800 tokens, 0 errors"),
+        "{line:?}"
+    );
+    s.execute("RESET parallel_workers").unwrap();
+    // … and in the statement statistics.
+    let table = values(&mut s, &["c1", "c2", "c3"]);
+    s.execute(&format!(
+        "SELECT count(embed(t, 'wide')) AS embqz FROM {table}"
+    ))
+    .unwrap();
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT model_calls, model_texts, model_cached, model_tokens, model_errors FROM nc_catalog.statements \
+             WHERE query LIKE '%embqz%' AND query NOT LIKE '%nc_catalog%'"
+        ),
+        vec![vec![
+            Value::Int(2),
+            Value::Int(3),
+            Value::Int(0),
+            Value::Int(21),
+            Value::Int(0)
+        ]]
+    );
+
+    // Batches by tokens: 12 bytes are about 4 tokens, 10 a call.
+    s.execute("CREATE MODEL tight USING metered WITH (batch_tokens = 10)")
+        .unwrap();
+    let twelve = [
+        "aaaaaaaaaaa1",
+        "aaaaaaaaaaa2",
+        "aaaaaaaaaaa3",
+        "aaaaaaaaaaa4",
+        "aaaaaaaaaaa5",
+    ];
+    let table = values(&mut s, &twelve);
+    let before = calls(&metered);
+    rows(
+        &mut s,
+        &format!("SELECT count(embed(t, 'tight')) FROM {table}"),
+    );
+    assert_eq!(calls(&metered) - before, 3, "2 + 2 + 1 texts");
+    // A text over the budget goes alone, as the provider takes it.
+    let long = "x".repeat(100);
+    rows(&mut s, &format!("SELECT embed('{long}', 'tight')"));
+    assert_eq!(calls(&metered) - before, 4);
+
+    // A rate limit: two calls a minute.  The third waits within the
+    // statement's time — here none, so it waits the 30 s (the simulated
+    // clock's) — or is refused at once, with the wait, past its deadline.
+    s.execute("CREATE MODEL slow USING metered WITH (requests_per_minute = 2)")
+        .unwrap();
+    rows(&mut s, "SELECT embed('d1', 'slow')");
+    rows(&mut s, "SELECT embed('d2', 'slow')");
+    rows(&mut s, "SELECT embed('d3', 'slow')");
+    let throttled = rows(
+        &mut s,
+        "SELECT throttled_ms >= 29000, requests_per_minute FROM nc_catalog.models WHERE name = 'slow'",
+    );
+    assert_eq!(throttled, vec![vec![Value::Bool(true), Value::Int(2)]]);
+    s.execute("SET statement_timeout = '1s'").unwrap();
+    let e = s.execute("SELECT embed('d4', 'slow')").unwrap_err();
+    assert_eq!(e.code, "53400", "{e:?}");
+    let wait = models::retry_after(&e).expect("the wait");
+    assert!(wait.as_secs() >= 29 && wait.as_secs() <= 30, "{wait:?}");
+    assert!(models::throttled(&e));
+    s.execute("RESET statement_timeout").unwrap();
+
+    // The options are numbers, given once.
+    for bad in [
+        "CREATE MODEL b USING metered WITH (parallel = 0)",
+        "CREATE MODEL b USING metered WITH (batch_tokens = 'many')",
+        "CREATE MODEL b USING metered WITH (parallel = 2, parallel = 3)",
+    ] {
+        assert_eq!(code(&mut s, bad), "22023", "{bad}");
+    }
+}

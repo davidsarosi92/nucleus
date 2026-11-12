@@ -1,8 +1,8 @@
 //! Statement statistics (PLAN.md §M14.9), for `nc_catalog.statements`:
 //! per role and normalized statement — its constants replaced by `$n`,
 //! so `WHERE id = 1` and `WHERE id = 2` count as one — how often it ran,
-//! how long it took, the rows it read and returned, and how often it
-//! failed.  `nc_statements_reset()` starts over.
+//! how long it took, the rows it read and returned, its calls to
+//! embedding models (§M14.22 E8), and how often it failed.  `nc_statements_reset()` starts over.
 //!
 //! The statistics live in the process, by database, like the session list
 //! ([`crate::sessions`]): a restart starts them over.  At most [`MAX`]
@@ -46,6 +46,8 @@ pub struct Stat {
     pub rows_read: u64,
     /// Rows returned or changed, over all runs.
     pub rows_returned: u64,
+    /// Its calls to embedding models, over all runs (§M14.22 E8).
+    pub models: crate::budget::ModelCost,
     /// When it last ran (µs since 2000-01-01 UTC).
     pub last: i64,
     /// The text of its last run, for the index advisor; never shown.
@@ -66,6 +68,8 @@ pub struct Run<'a> {
     pub rows_read: u64,
     /// Rows it returned or changed.
     pub rows_returned: u64,
+    /// Its calls to embedding models.
+    pub models: crate::budget::ModelCost,
     /// It went through.
     pub ok: bool,
     /// When (µs since 2000-01-01 UTC).
@@ -189,6 +193,7 @@ pub fn record(kv: &Arc<dyn Kv>, run: Run) {
         max: Duration::ZERO,
         rows_read: 0,
         rows_returned: 0,
+        models: Default::default(),
         last: run.at,
         sample: String::new(),
     });
@@ -199,6 +204,7 @@ pub fn record(kv: &Arc<dyn Kv>, run: Run) {
     s.max = s.max.max(run.elapsed);
     s.rows_read += run.rows_read;
     s.rows_returned += run.rows_returned;
+    s.models.add(&run.models);
     s.last = run.at;
     if run.ok && s.sample != run.text {
         s.sample = run.text.to_string();

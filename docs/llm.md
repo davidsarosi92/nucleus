@@ -87,6 +87,16 @@ EMBEDDING (chunk) USING e5` — every write to `docs` updates `parts` in
 the same transaction (unchanged chunks keep their vectors); search
 `SELECT id, chunk FROM parts ORDER BY v <=> embed($1) LIMIT 10`.
 
+**Model limits and costs:** give a remote model your account's limits —
+`CREATE MODEL oa USING openai WITH (model = 'text-embedding-3-small',
+secret = k, requests_per_minute = 3000, tokens_per_minute = 1000000,
+batch_tokens = 8000, parallel = 4)`; calls are paced by them (a query
+waits within its `statement_timeout`, else `53400`; background
+embedding retries later).  `EXPLAIN ANALYZE` shows a `Models:` line
+(calls, texts, cached, tokens, errors); `nc_catalog.statements` has
+`model_calls`, `model_tokens`, `model_ms`; `nc_catalog.models` the
+totals.
+
 **Tables:** `CREATE TABLE [IF NOT EXISTS] t (id bigint PRIMARY KEY, name
 text NOT NULL DEFAULT '', email text UNIQUE, score int CHECK (score >= 0),
 owner_id bigint REFERENCES owners (id) ON DELETE CASCADE)`; table

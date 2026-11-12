@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The tokens each answer reports (OpenAI's and Voyage's
+  `usage.total_tokens`, Cohere's `meta.billed_units.input_tokens`) go to
+  the statement's costs (`Request::report_tokens`, §M14.22 E8a).
+
 - A call that failed twice for a `Retry-After` carries it
   (`models::retry_hint`), so the embedding columns' queue waits as long
   as the provider asked (§M14.22 E4b).

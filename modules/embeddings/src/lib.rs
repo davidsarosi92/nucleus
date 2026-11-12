@@ -22,7 +22,8 @@
 //! tried once more after `Retry-After` (at most 10 s) or half a second;
 //! then it fails with `58030` (try again later: §M14.22 E4's queue
 //! retries those, after the `Retry-After` it carries in its hint), while a refused key or a bad request fails with
-//! `55000` (it will not succeed as defined).
+//! `55000` (it will not succeed as defined).  The tokens each call used,
+//! as the answer reports them, go to the statement's costs (§M14.22 E8).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -148,6 +149,15 @@ fn url(o: &Options, default: &str) -> String {
         .to_string()
 }
 
+/// The tokens an answer says the call used (OpenAI's and Voyage's
+/// `usage.total_tokens`, Cohere's `meta.billed_units.input_tokens`), for
+/// the statement's costs.
+fn usage(r: &Request<'_>, tokens: &Json) {
+    if let Some(n) = tokens.as_u64() {
+        r.report_tokens(n);
+    }
+}
+
 /// Answers in `data[]`, each with its `index` (OpenAI's and Voyage's
 /// form), in the order of the texts.
 fn by_index(provider: &str, answer: &Json, n: usize) -> Result<Vec<Vec<f32>>> {
@@ -207,6 +217,7 @@ impl ModelProvider for OpenAi {
         }
         let u = format!("{}/embeddings", url(r.options, "https://api.openai.com/v1"));
         let answer = post("openai", &u, r.secret.map(|s| s.expose()), &body)?;
+        usage(r, &answer["usage"]["total_tokens"]);
         by_index("openai", &answer, r.texts.len())
     }
 }
@@ -253,6 +264,7 @@ impl ModelProvider for Cohere {
         }
         let u = format!("{}/v2/embed", url(r.options, "https://api.cohere.com"));
         let answer = post("cohere", &u, r.secret.map(|s| s.expose()), &body)?;
+        usage(r, &answer["meta"]["billed_units"]["input_tokens"]);
         let rows = answer["embeddings"]["float"]
             .as_array()
             .ok_or_else(|| Error::data_exception("cohere: an answer without embeddings.float"))?;
@@ -310,6 +322,7 @@ impl ModelProvider for Voyage {
             url(r.options, "https://api.voyageai.com")
         );
         let answer = post("voyage", &u, r.secret.map(|s| s.expose()), &body)?;
+        usage(r, &answer["usage"]["total_tokens"]);
         by_index("voyage", &answer, r.texts.len())
     }
 }

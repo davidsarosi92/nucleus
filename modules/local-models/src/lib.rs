@@ -98,7 +98,18 @@ impl LocalModel {
 
     /// The vectors of `texts`, of length 1, on up to `threads` threads.
     pub fn embed(&self, texts: &[&str], threads: usize) -> Result<Vec<Vec<f32>>, String> {
+        self.embed_counted(texts, threads).map(|(v, _)| v)
+    }
+
+    /// [`embed`](Self::embed), and the tokens the encoder ran (special
+    /// tokens too, after any cut to the model's length).
+    pub fn embed_counted(
+        &self,
+        texts: &[&str],
+        threads: usize,
+    ) -> Result<(Vec<Vec<f32>>, usize), String> {
         let ids: Vec<Vec<u32>> = texts.iter().map(|t| self.tokens(t)).collect();
-        self.encoder.encode(&ids, true, threads)
+        let n = ids.iter().map(Vec::len).sum();
+        Ok((self.encoder.encode(&ids, true, threads)?, n))
     }
 }

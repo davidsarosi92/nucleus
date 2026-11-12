@@ -291,8 +291,12 @@ impl ModelProvider for Local {
     fn embed(&self, r: &Request<'_>) -> Result<Vec<Vec<f32>>> {
         let m = loaded(r.files, pooling(r.options)?)?;
         let texts: Vec<&str> = r.texts.iter().map(String::as_str).collect();
-        m.embed(&texts, threads(r.options)?)
-            .map_err(|e| Error::data_exception(format!("local: {e}")))
+        let (v, tokens) = m
+            .embed_counted(&texts, threads(r.options)?)
+            .map_err(|e| Error::data_exception(format!("local: {e}")))?;
+        // The tokens it ran, for the statement's costs.
+        r.report_tokens(tokens as u64);
+        Ok(v)
     }
 
     fn remote(&self) -> bool {

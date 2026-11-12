@@ -2545,12 +2545,12 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.audit` | `seq`, `at`, `kind` (`login`, `ddl`, `statement`), `ok`, `code`, `session_user_name`, `user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `detail`, `hash` (an administrator's; empty for others) |
 | `nc_catalog.audit_chain` | `records`, `intact`, `broken_at`, `problem` (the chain walked) |
 | `nc_catalog.database_settings` | `name`, `value`, `is_set`, `default`, `description` (`ALTER DATABASE nucleus SET …`) |
-| `nc_catalog.statements` | `user_name`, `query` (constants as `$n`), `calls`, `errors`, `total_ms`, `mean_ms`, `min_ms`, `max_ms`, `rows_read`, `rows_returned`, `last_call` (statement statistics, §8.13; an administrator sees all, others their own) |
+| `nc_catalog.statements` | `user_name`, `query` (constants as `$n`), `calls`, `errors`, `total_ms`, `mean_ms`, `min_ms`, `max_ms`, `rows_read`, `rows_returned`, `model_calls`, `model_texts`, `model_cached`, `model_tokens`, `model_errors`, `model_ms`, `last_call` (statement statistics, §8.13; an administrator sees all, others their own; the model columns §8.27) |
 | `nc_catalog.index_advice` | `table_name`, `columns`, `create_statement`, `statements`, `calls`, `rows_read`, `rows_read_with_index`, `example_query`, `plan` (the index advisor, §8.13) |
 | `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
 | `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by`, `max_rows`, `max_scan`, `timeout`, `rate_per_minute` (the tokens the current role may manage; never a secret) |
-| `nc_catalog.models` | `name`, `owner`, `provider`, `dimensions`, `max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`, `files`, `bytes`, `created`, `calls`, `texts`, `cached`, `errors`, `total_ms` (the models the current role may call; the calls since the process started, §8.23) |
+| `nc_catalog.models` | `name`, `owner`, `provider`, `dimensions`, `max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`, `files`, `bytes`, `created`, `calls`, `texts`, `cached`, `errors`, `total_ms`, `tokens`, `throttled_ms`, `batch_tokens`, `requests_per_minute`, `tokens_per_minute`, `parallel` (the models the current role may call; the calls since the process started, §8.23, §8.27) |
 | `nc_catalog.model_providers` | `name`, `remote` (whether its calls reach the network) |
 | `nc_catalog.chunk_tables` | `table_name`, `source`, `column_name`, `by`, `size`, `overlap`, `model` (the chunk tables and what they chunk, §8.26) |
 | `nc_catalog.embedding_jobs` | `table_name`, `column_name`, `model`, `kind` (`current`, `next`), `key`, `state` (`pending`, `retrying`, `failed`), `attempts`, `enqueued`, `next_attempt`, `error` (the embedding columns' queue, §8.24; the tables the current role may read) |
@@ -2814,7 +2814,9 @@ the node did: `(rows=40) (actual rows=38 loops=1 time=0.120 ms)` — rows
 over all its starts, the starts (a nested loop's inner side, a correlated
 subquery: once per outer row), and the time spent in it, its inputs
 included; a scan a hash join's key filter narrowed adds `(join key
-filter)` (§8.5).  A node the run never reached says `(never executed)`; the last
+filter)` (§8.5).  A node the run never reached says `(never executed)`; a
+query that called embedding models has a line `Models: n calls, n texts
+sent, n cached, n tokens, n errors, t ms` (§8.27); the last
 line is `Execution: n rows in t ms`.  `TIMING OFF` leaves the times out
 (repeatable output, for tests).  Time is the database's monotonic clock
 (`Kv::elapsed`).  The query runs with the session's privileges, budget and
@@ -2830,7 +2832,8 @@ front end (or `Session::execute`) gave the text of, per role
 space; case and spacing do not split a statement, and the text shown is
 the first run's.  Per statement: calls, failures, total, mean, shortest
 and longest time (ms), rows read (scanned) and rows returned or changed,
-the last call.  An administrator sees every role's, anyone else their
+its calls to embedding models (calls, texts sent, cache hits, tokens,
+errors, time: §8.27), the last call.  An administrator sees every role's, anyone else their
 own; `nc_statements_reset()` forgets every role's (an administrator) or
 the caller's own.  They live in the process, by database (a restart
 starts over), at most 5000 statements (the least called makes room);
@@ -4063,7 +4066,8 @@ will not (a refused key, an unknown model).
 `nc_catalog.models` (`name`, `owner`, `provider`, `dimensions`,
 `max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`, `files`, `bytes`,
 `created`, and the process's `calls`, `texts`, `cached`, `errors`,
-`total_ms`; the models the current role may call) and
+`total_ms`, `tokens`, `throttled_ms`, and the limits of §8.27; the
+models the current role may call) and
 `nc_catalog.model_providers` (`name`, `remote`).  Tests:
 `tests/models.rs` (`hashing` end to end, privileges, prefixes, the
 secret given, one call for a ranking, the cache, a column table's 2,000
@@ -4298,6 +4302,44 @@ dropped (`2BP01`); the text column's and the derived columns' types are
 not changed (`0A000`); `DROP TABLE docs` is `2BP01` while it has chunk
 tables, `… CASCADE` drops them with it.  Tests: `tests/chunk_tables.rs`,
 and the crash workload of `tests/embedding_columns.rs` keeps one.
+
+### 8.27 What model calls cost (`models`, `budget`, §M14.22 E8)
+
+Four more core options of `CREATE MODEL`, for any provider (positive
+integers, `22023` otherwise; kept in the model record, version 3):
+`batch_tokens` (the most tokens a call sends), `requests_per_minute`,
+`tokens_per_minute`, `parallel` (calls at once).  A call's texts — those
+the cache did not answer, each once — are packed in order into batches
+of at most the provider's batch and `batch_tokens` (a text over it goes
+alone; the provider says whether it takes it).  A text's tokens are
+estimated as its UTF-8 bytes / 3, rounded up, or counted by the provider
+(`count_tokens`) for a model with files when a token limit is set.
+
+The rate limits are two token buckets per database and model in the
+process, each holding up to a minute's limit and refilled steadily (a
+redefined model's start full); a batch takes a call and its tokens (at
+most a bucket's size).  Time is the database's clock, so the simulation
+passes it.  A statement's call waits for the buckets (`Kv::sleep`)
+unless the wait would pass its deadline — then `53400`, its hint `try
+again in n ms (the model's rate limit)`.  An embedding column's round
+(§8.24) never waits: the jobs get the same `53400`, come back after the
+hint's wait, and do not count toward the model's circuit (`models::throttled`).
+With `parallel` > 1, a model without files (a remote one) sends its
+batches on that many threads, answers kept in order; a local model uses
+its `threads`.
+
+Tokens used are the provider's where it reports them
+(`Request::report_tokens`: OpenAI's and Voyage's `usage.total_tokens`,
+Cohere's `meta.billed_units.input_tokens`, the local model's own token
+count), else the estimate.  Each statement is charged as it calls
+(`budget::ModelCost`: calls, texts sent, cache hits, tokens, errors, µs
+in calls and waiting for limits), its parallel workers too (they share
+the statement's counter through `parallel::Ambient`): `EXPLAIN ANALYZE`
+prints a `Models:` line, `nc_catalog.statements` sums `model_*` columns,
+`nc_catalog.models` the process's `tokens` and `throttled_ms`.  Tests:
+`tests/models.rs` (`limits_batches_and_costs`), `tests/embedding_columns.rs`
+(`a_rate_limit_spaces_the_rounds`), `modules/embeddings/tests/providers.rs`
+(usage reported, calls at once).
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -5066,6 +5108,15 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-13 — §M14.22 E8, what model calls cost:** model options
+  `batch_tokens`, `requests_per_minute`, `tokens_per_minute`, `parallel`
+  (model record version 3); token buckets per database and model;
+  `Request::report_tokens`; `budget::ModelCost` charged per statement
+  and its workers; `EXPLAIN ANALYZE`'s `Models:` line;
+  `nc_catalog.statements` `model_*` columns; `nc_catalog.models`
+  `tokens`, `throttled_ms` and the limits; `embed_unchecked` takes
+  whether to wait.
 
 - **2026-11-12 — §M14.22 E7, chunk tables:** `CREATE TABLE … CHUNKS OF
   t (c) BY … SIZE … [OVERLAP …] [USING m]` (`chunk_tables`), table

@@ -35,10 +35,26 @@
 //! again.  A call reads them through [`Files`] (a provider keeps what it
 //! built from them by [`Files::id`]).
 //!
+//! What calls cost is bounded and seen (§M14.22 E8).  Four more core
+//! options, for any provider: `batch_tokens` (the most tokens a call
+//! sends — texts are packed by both it and the provider's batch),
+//! `requests_per_minute` and `tokens_per_minute` (a token bucket for the
+//! process, per model, as full as the minute's limit and refilled
+//! steadily: a statement waits for it, within its deadline, while the
+//! embedding columns' workers are told when to come back — `53400`, its
+//! hint the wait), and `parallel` (calls a request may make at once, for
+//! a remote model: a local one uses the threads it is given).  Tokens are
+//! the provider's count where it reports one (the local model's own
+//! tokenizer, OpenAI's and Voyage's `usage`, Cohere's billed units),
+//! else estimated as a UTF-8 byte in three.  Each statement is charged
+//! for its calls — calls, texts, cache hits, tokens, errors, time — in
+//! `EXPLAIN ANALYZE` and the statement statistics.
+//!
 //! Records are in the catalog, `00 15 <name>`.
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use nucleus_kv::KvTxn;
@@ -54,7 +70,7 @@ use crate::vector::{Sel, Vector};
 const MODELS: [u8; 2] = [0x00, 0x15];
 const FILES: [u8; 2] = [0x00, 0x16];
 /// 2: with the model's files.
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 /// A stored file's chunk.
 const FILE_CHUNK: usize = 32 * 1024;
 
@@ -155,6 +171,17 @@ pub struct Request<'a> {
     pub texts: &'a [String],
     /// The files the model was made from (none for most providers).
     pub files: &'a Files<'a>,
+    /// The tokens the provider reported ([`Request::report_tokens`]).
+    tokens: AtomicU64,
+}
+
+impl Request<'_> {
+    /// The tokens the call used, as the provider counts or bills them: in
+    /// the statement's costs and the model's statistics, in place of the
+    /// core's estimate.
+    pub fn report_tokens(&self, n: u64) {
+        self.tokens.fetch_add(n, Ordering::Relaxed);
+    }
 }
 
 /// A file a model keeps: its name, the SHA-256 of its bytes, their
@@ -400,6 +427,52 @@ pub struct Model {
     pub created: i64,
     /// The files it was made from, stored by content.
     pub files: Vec<FileRef>,
+    /// What its calls may spend.
+    pub limits: Limits,
+}
+
+/// What a model's calls may spend: the core's options `batch_tokens`,
+/// `requests_per_minute`, `tokens_per_minute` and `parallel` (0: no limit;
+/// 1 call at a time).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Limits {
+    /// The most tokens a call sends.
+    pub batch_tokens: u32,
+    /// The most calls a minute.
+    pub requests_per_minute: u32,
+    /// The most tokens a minute.
+    pub tokens_per_minute: u32,
+    /// The most calls at once (a remote model's).
+    pub parallel: u32,
+}
+
+/// The core's limit options, by name.
+const LIMITS: [&str; 4] = [
+    "batch_tokens",
+    "requests_per_minute",
+    "tokens_per_minute",
+    "parallel",
+];
+
+impl Limits {
+    fn set(&mut self, name: &str, v: u32) {
+        match name {
+            "batch_tokens" => self.batch_tokens = v,
+            "requests_per_minute" => self.requests_per_minute = v,
+            "tokens_per_minute" => self.tokens_per_minute = v,
+            _ => self.parallel = v,
+        }
+    }
+
+    /// Each limit set, by name (`nc_catalog.models`).
+    pub fn get(&self, name: &str) -> u32 {
+        match name {
+            "batch_tokens" => self.batch_tokens,
+            "requests_per_minute" => self.requests_per_minute,
+            "tokens_per_minute" => self.tokens_per_minute,
+            _ => self.parallel,
+        }
+    }
 }
 
 fn key_of(name: &str) -> Vec<u8> {
@@ -431,13 +504,16 @@ impl Model {
             w.0.extend_from_slice(&f.digest);
             w.u64(f.len);
         }
+        for l in LIMITS {
+            w.u32(self.limits.get(l));
+        }
         w.0
     }
 
     fn decode(b: &[u8]) -> Result<Self> {
         let mut r = Reader::new(b);
         let version = r.u8()?;
-        if version != 1 && version != VERSION {
+        if !(1..=VERSION).contains(&version) {
             return Err(Error::internal("unknown model record version"));
         }
         let name = r.str()?;
@@ -460,6 +536,7 @@ impl Model {
             max_batch: r.u32()?,
             created: r.u64()? as i64,
             files: Vec::new(),
+            limits: Limits::default(),
         };
         if version >= 2 {
             let n = r.u32()? as usize;
@@ -471,6 +548,12 @@ impl Model {
                     digest,
                     len: r.u64()?,
                 });
+            }
+        }
+        if version >= 3 {
+            for l in LIMITS {
+                let v = r.u32()?;
+                m.limits.set(l, v);
             }
         }
         Ok(m)
@@ -535,7 +618,20 @@ pub fn create(
     let p = provider(provider_name)?;
     let mut rest = Vec::new();
     let (mut secret, mut query_prefix, mut document_prefix) = (None, None, None);
+    let mut limits = Limits::default();
+    let mut seen_limits = Vec::new();
     for (k, v) in options {
+        if LIMITS.contains(&k.as_str()) {
+            if seen_limits.contains(k) {
+                return Err(Error::invalid_parameter(format!("option {k} given twice")));
+            }
+            seen_limits.push(k.clone());
+            let n = Options(vec![(k.clone(), v.clone())])
+                .number(k, 1..=u64::from(u32::MAX))?
+                .expect("given");
+            limits.set(k, n as u32);
+            continue;
+        }
         let slot = match k.as_str() {
             "secret" => &mut secret,
             "query_prefix" => &mut query_prefix,
@@ -588,6 +684,7 @@ pub fn create(
         max_batch: spec.max_batch.clamp(1, u32::MAX as usize) as u32,
         created: crate::datetime::now()?,
         files: files.list().to_vec(),
+        limits,
     };
     for (f, (_, bytes)) in m.files.iter().zip(&fetched) {
         store_file(txn, &f.digest, bytes)?;
@@ -731,6 +828,10 @@ pub struct Calls {
     pub errors: u64,
     /// Time in the provider's calls (µs).
     pub micros: u64,
+    /// Tokens sent ([`Request::report_tokens`], else estimated).
+    pub tokens: u64,
+    /// Time waited for the model's rate limits (µs).
+    pub throttled: u64,
 }
 
 fn calls() -> &'static Mutex<HashMap<String, Calls>> {
@@ -767,7 +868,7 @@ pub fn embed(txn: &dyn KvTxn, name: &str, texts: &[&str], input: Input) -> Resul
         crate::privileges::USAGE,
         None,
     )?;
-    embed_unchecked(txn, name, texts, input)
+    embed_unchecked(txn, name, texts, input, true)
 }
 
 /// The hint of an error a provider's `Retry-After` came with: when to
@@ -784,6 +885,15 @@ pub fn retry_after(e: &Error) -> Option<std::time::Duration> {
     let h = e.hint.as_deref()?.strip_prefix("try again in ")?;
     let ms = h.split(' ').next()?.parse().ok()?;
     Some(std::time::Duration::from_millis(ms))
+}
+
+/// Whether `e` is a model's own rate limit refusing a worker's call (not
+/// its provider failing).
+pub fn throttled(e: &Error) -> bool {
+    e.code == "53400"
+        && e.hint
+            .as_deref()
+            .is_some_and(|h| h.ends_with("(the model's rate limit)"))
 }
 
 /// The tokens of `texts` by model `name` (`USAGE` on it checked), as
@@ -810,6 +920,7 @@ pub fn count_tokens(txn: &dyn KvTxn, name: &str, texts: &[&str]) -> Result<Vec<u
         input: Input::Document,
         texts: &batch,
         files: &files,
+        tokens: AtomicU64::new(0),
     })?;
     match counted {
         Some(n) if n.len() == texts.len() => Ok(n),
@@ -826,12 +937,16 @@ pub fn count_tokens(txn: &dyn KvTxn, name: &str, texts: &[&str]) -> Result<Vec<u
 }
 
 /// [`embed`] without the privilege check: for the embedding columns'
-/// workers, whose columns' makers were checked when they made them.
+/// workers, whose columns' makers were checked when they made them.  A
+/// call over the model's rate limits waits (`wait`: a statement's, up to
+/// its deadline) or fails at once with `53400`, its hint the wait (a
+/// worker's: the queue comes back then).
 pub(crate) fn embed_unchecked(
     txn: &dyn KvTxn,
     name: &str,
     texts: &[&str],
     input: Input,
+    wait: bool,
 ) -> Result<Vec<Arc<[f32]>>> {
     let m = existing(txn, name)?;
     let record = m.encode();
@@ -839,94 +954,370 @@ pub(crate) fn embed_unchecked(
     let keys: Vec<[u8; 32]> = texts.iter().map(|t| cache_key(&record, input, t)).collect();
     let mut out: Vec<Option<Arc<[f32]>>> = keys.iter().map(cached).collect();
     let missing: Vec<usize> = (0..texts.len()).filter(|&i| out[i].is_none()).collect();
-    count(&m.name, |c| {
-        c.cached += (texts.len() - missing.len()) as u64
-    });
-    if missing.is_empty() {
-        return Ok(out.into_iter().map(|v| v.expect("cached")).collect());
-    }
-    let p = provider(&m.provider)?;
-    let secret = m
-        .secret
-        .as_deref()
-        .map(|s| crate::secrets::reveal(txn, s))
-        .transpose()?;
-    // The same text twice in one call is sent once.
-    let files = Files::stored(m.files.clone(), txn);
-    let mut first: HashMap<&[u8; 32], usize> = HashMap::new();
-    let mut send: Vec<usize> = Vec::new();
-    for &i in &missing {
-        // The first of the same text is the one sent (and kept here).
-        if let std::collections::hash_map::Entry::Vacant(e) = first.entry(&keys[i]) {
-            e.insert(i);
-            send.push(i);
+    let hits = (texts.len() - missing.len()) as u64;
+    count(&m.name, |c| c.cached += hits);
+    let mut cost = crate::budget::ModelCost {
+        cached: hits,
+        ..Default::default()
+    };
+    let r = (|| {
+        if missing.is_empty() {
+            return Ok(());
         }
-    }
-    for chunk in send.chunks(m.max_batch.max(1) as usize) {
-        let batch: Vec<String> = chunk
+        let p = provider(&m.provider)?;
+        let secret = m
+            .secret
+            .as_deref()
+            .map(|s| crate::secrets::reveal(txn, s))
+            .transpose()?;
+        let files = Files::stored(m.files.clone(), txn);
+        // The same text twice in one call is sent once: the first of it.
+        let mut first: HashMap<&[u8; 32], usize> = HashMap::new();
+        let mut send: Vec<usize> = Vec::new();
+        for &i in &missing {
+            if let std::collections::hash_map::Entry::Vacant(e) = first.entry(&keys[i]) {
+                e.insert(i);
+                send.push(i);
+            }
+        }
+        let sent: Vec<String> = send
             .iter()
             .map(|&i| format!("{prefix}{}", texts[i]))
             .collect();
-        let started = std::time::Instant::now();
-        let r = p.embed(&Request {
-            options: &m.options,
-            dimensions: m.dimensions,
-            secret: secret.as_ref(),
-            input,
-            texts: &batch,
-            files: &files,
-        });
-        let micros = started.elapsed().as_micros() as u64;
-        let vectors = match r {
-            Ok(v) => v,
-            Err(e) => {
-                count(&m.name, |c| {
-                    c.calls += 1;
-                    c.errors += 1;
-                    c.micros += micros;
-                });
-                return Err(e);
-            }
+        let tokens = estimate(&*p, &m, &sent, &files)?;
+        let batches = pack(&tokens, m.max_batch.max(1) as usize, m.limits.batch_tokens);
+        let throttle = Throttle {
+            clock: crate::datetime::current_kv(),
+            deadline: if wait {
+                Some(crate::budget::deadline())
+            } else {
+                None
+            },
         };
-        count(&m.name, |c| {
-            c.calls += 1;
-            c.texts += batch.len() as u64;
-            c.micros += micros;
-        });
-        if vectors.len() != chunk.len() {
-            return Err(Error::data_exception(format!(
-                "model \"{}\" answered {} vectors for {} texts",
-                m.name,
-                vectors.len(),
-                chunk.len()
-            )));
-        }
-        for (&i, v) in chunk.iter().zip(vectors) {
-            if v.len() != m.dimensions as usize {
-                return Err(Error::data_exception(format!(
-                    "model \"{}\" answered a vector of {} components, not {}",
+        let call = |b: &std::ops::Range<usize>, files: &Files<'_>| {
+            let est: u64 = tokens[b.clone()].iter().sum();
+            let mut cost = crate::budget::ModelCost::default();
+            let r = (|| {
+                cost.micros += throttle.acquire(&m, est)?;
+                let request = Request {
+                    options: &m.options,
+                    dimensions: m.dimensions,
+                    secret: secret.as_ref(),
+                    input,
+                    texts: &sent[b.clone()],
+                    files,
+                    tokens: AtomicU64::new(0),
+                };
+                let started = std::time::Instant::now();
+                let r = p.embed(&request);
+                let micros = started.elapsed().as_micros() as u64;
+                cost.calls += 1;
+                cost.micros += micros;
+                match &r {
+                    Ok(_) => {
+                        cost.texts += b.len() as u64;
+                        cost.tokens += match request.tokens.load(Ordering::Relaxed) {
+                            0 => est,
+                            n => n,
+                        };
+                    }
+                    Err(_) => cost.errors += 1,
+                }
+                r
+            })();
+            (r, cost)
+        };
+        let parallel = (m.limits.parallel as usize).min(batches.len());
+        let answers: Vec<(Result<Vec<Vec<f32>>>, crate::budget::ModelCost)> =
+            if parallel > 1 && m.files.is_empty() {
+                // A remote model's calls at once: each thread takes the
+                // next batch; the answers kept in order.
+                let next = AtomicUsize::new(0);
+                let slots: Vec<Mutex<Option<_>>> =
+                    (0..batches.len()).map(|_| Mutex::new(None)).collect();
+                std::thread::scope(|sc| {
+                    for _ in 0..parallel {
+                        sc.spawn(|| {
+                            let files = Files::none();
+                            loop {
+                                let i = next.fetch_add(1, Ordering::Relaxed);
+                                let Some(b) = batches.get(i) else { break };
+                                let a = call(b, &files);
+                                *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(a);
+                            }
+                        });
+                    }
+                });
+                slots
+                    .into_iter()
+                    .map(|s| {
+                        s.into_inner()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .expect("every batch called")
+                    })
+                    .collect()
+            } else {
+                let mut answers = Vec::with_capacity(batches.len());
+                for b in &batches {
+                    let a = call(b, &files);
+                    let failed = a.0.is_err();
+                    answers.push(a);
+                    if failed {
+                        break;
+                    }
+                }
+                answers
+            };
+        let mut failure = None;
+        for (b, (r, c)) in batches.iter().zip(answers) {
+            cost.add(&c);
+            count(&m.name, |k| {
+                k.calls += c.calls;
+                k.texts += c.texts;
+                k.errors += c.errors;
+                k.micros += c.micros;
+                k.tokens += c.tokens;
+            });
+            let vectors = match r {
+                Ok(v) => v,
+                Err(e) => {
+                    failure.get_or_insert(e);
+                    continue;
+                }
+            };
+            if failure.is_some() {
+                continue;
+            }
+            if vectors.len() != b.len() {
+                failure = Some(Error::data_exception(format!(
+                    "model \"{}\" answered {} vectors for {} texts",
                     m.name,
-                    v.len(),
-                    m.dimensions
+                    vectors.len(),
+                    b.len()
                 )));
+                continue;
             }
-            if v.iter().any(|x| !x.is_finite()) {
-                return Err(Error::data_exception(format!(
-                    "model \"{}\" answered a component that is not a finite number",
-                    m.name
-                )));
+            for (&i, v) in send[b.clone()].iter().zip(vectors) {
+                if v.len() != m.dimensions as usize {
+                    return Err(Error::data_exception(format!(
+                        "model \"{}\" answered a vector of {} components, not {}",
+                        m.name,
+                        v.len(),
+                        m.dimensions
+                    )));
+                }
+                if v.iter().any(|x| !x.is_finite()) {
+                    return Err(Error::data_exception(format!(
+                        "model \"{}\" answered a component that is not a finite number",
+                        m.name
+                    )));
+                }
+                let v: Arc<[f32]> = v.into();
+                keep(keys[i], v.clone());
+                out[i] = Some(v);
             }
-            let v: Arc<[f32]> = v.into();
-            keep(keys[i], v.clone());
-            out[i] = Some(v);
         }
-    }
-    for &i in &missing {
-        if out[i].is_none() {
-            out[i] = out[first[&keys[i]]].clone();
+        if let Some(e) = failure {
+            return Err(e);
         }
-    }
+        for &i in &missing {
+            if out[i].is_none() {
+                out[i] = out[first[&keys[i]]].clone();
+            }
+        }
+        Ok(())
+    })();
+    crate::budget::charge_model(&cost);
+    r?;
     Ok(out.into_iter().map(|v| v.expect("embedded")).collect())
+}
+
+/// The tokens of each of `texts` (prefixed, as sent): the provider's
+/// count where the limits need one and it counts here (a local model),
+/// else a UTF-8 byte in three — about what BPE vocabularies make of
+/// English, and more than they make of most text, so a limit holds.
+fn estimate(
+    p: &dyn ModelProvider,
+    m: &Model,
+    texts: &[String],
+    files: &Files<'_>,
+) -> Result<Vec<u64>> {
+    let rough = || texts.iter().map(|t| t.len().div_ceil(3) as u64).collect();
+    let l = &m.limits;
+    if (l.batch_tokens == 0 && l.tokens_per_minute == 0) || m.files.is_empty() {
+        return Ok(rough());
+    }
+    let counted = p.count_tokens(&Request {
+        options: &m.options,
+        dimensions: m.dimensions,
+        secret: None,
+        input: Input::Document,
+        texts,
+        files,
+        tokens: AtomicU64::new(0),
+    })?;
+    Ok(match counted {
+        Some(n) if n.len() == texts.len() => n.into_iter().map(|n| n as u64).collect(),
+        _ => rough(),
+    })
+}
+
+/// `tokens` (a text's each) in batches, in order: at most `max_texts`
+/// texts and `max_tokens` tokens a batch (0: any), a text over that
+/// alone (the provider says whether it takes it).
+fn pack(tokens: &[u64], max_texts: usize, max_tokens: u32) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let (mut start, mut sum) = (0, 0u64);
+    for (i, &n) in tokens.iter().enumerate() {
+        let full = i - start >= max_texts
+            || (max_tokens > 0 && i > start && sum + n > u64::from(max_tokens));
+        if full {
+            out.push(start..i);
+            (start, sum) = (i, 0);
+        }
+        sum += n;
+    }
+    if start < tokens.len() {
+        out.push(start..tokens.len());
+    }
+    out
+}
+
+// ------------------------------------------------------------ rate limits
+
+/// A model's rate limits, for a database in the process (each has its
+/// clock): two token buckets (calls and tokens), each holding up to a
+/// minute's limit and refilled at it.
+#[derive(Default)]
+struct Bucket {
+    calls: f64,
+    tokens: f64,
+    /// When they were last filled (µs, by the database's clock).
+    at: i64,
+    /// The model's definition they were filled for.
+    limits: Limits,
+}
+
+type Buckets = HashMap<(usize, String), Bucket>;
+
+fn buckets() -> &'static Mutex<Buckets> {
+    static B: OnceLock<Mutex<Buckets>> = OnceLock::new();
+    B.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// How a call waits for a model's rate limits.
+struct Throttle {
+    /// The database's clock (the host's outside a statement).
+    clock: Option<Arc<dyn nucleus_kv::Kv>>,
+    /// `Some`: a statement's call, which waits until its deadline (if it
+    /// has one); `None`: a worker's, which is told when to come back.
+    deadline: Option<Option<i64>>,
+}
+
+impl Throttle {
+    fn now(&self) -> i64 {
+        match &self.clock {
+            Some(kv) => crate::datetime::from_system(kv.wall_clock()),
+            None => crate::datetime::from_system(std::time::SystemTime::now()),
+        }
+    }
+
+    fn sleep(&self, micros: i64) {
+        let d = std::time::Duration::from_micros(micros.max(0) as u64);
+        match &self.clock {
+            Some(kv) => kv.sleep(d),
+            None => std::thread::sleep(d),
+        }
+    }
+
+    /// Takes a call of `tokens` tokens from `m`'s buckets, waiting for
+    /// them as the caller may; the µs waited.
+    fn acquire(&self, m: &Model, tokens: u64) -> Result<u64> {
+        let l = m.limits;
+        if l.requests_per_minute == 0 && l.tokens_per_minute == 0 {
+            return Ok(0);
+        }
+        let mut waited = 0i64;
+        loop {
+            let now = self.now();
+            let wait = {
+                let mut all = buckets().lock().unwrap_or_else(|e| e.into_inner());
+                let database = self
+                    .clock
+                    .as_ref()
+                    .map_or(0, |kv| Arc::as_ptr(kv) as *const () as usize);
+                let b = all.entry((database, m.name.clone())).or_default();
+                let (rpm, tpm) = (
+                    f64::from(l.requests_per_minute),
+                    f64::from(l.tokens_per_minute),
+                );
+                if b.limits != l {
+                    // New, or redefined: full.
+                    *b = Bucket {
+                        calls: rpm,
+                        tokens: tpm,
+                        at: now,
+                        limits: l,
+                    };
+                }
+                let elapsed = (now - b.at).max(0) as f64 / 60e6;
+                b.calls = (b.calls + elapsed * rpm).min(rpm);
+                b.tokens = (b.tokens + elapsed * tpm).min(tpm);
+                b.at = now.max(b.at);
+                // A call bigger than a minute's tokens waits for a full
+                // bucket, not for ever.
+                let need = (tokens as f64).min(tpm);
+                let short = |have: f64, want: f64, per_minute: f64| {
+                    if per_minute == 0.0 || have >= want {
+                        0.0
+                    } else {
+                        (want - have) / per_minute * 60e6
+                    }
+                };
+                let wait = short(b.calls, 1.0, rpm).max(short(b.tokens, need, tpm));
+                if wait == 0.0 {
+                    if rpm > 0.0 {
+                        b.calls -= 1.0;
+                    }
+                    if tpm > 0.0 {
+                        b.tokens -= need;
+                    }
+                    None
+                } else {
+                    Some(wait.ceil() as i64)
+                }
+            };
+            let Some(wait) = wait else {
+                if waited > 0 {
+                    count(&m.name, |c| c.throttled += waited as u64);
+                }
+                return Ok(waited as u64);
+            };
+            let refused = match self.deadline {
+                None => true,
+                Some(Some(d)) => now + wait > d,
+                Some(None) => false,
+            };
+            if refused {
+                return Err(Error::configuration_limit(format!(
+                    "model \"{}\" is at its rate limit ({} calls, {} tokens a minute)",
+                    m.name,
+                    fmt_limit(l.requests_per_minute),
+                    fmt_limit(l.tokens_per_minute)
+                ))
+                .with_hint(format!(
+                    "try again in {} ms (the model's rate limit)",
+                    (wait as u64).div_ceil(1000)
+                )));
+            }
+            self.sleep(wait);
+            waited += wait;
+        }
+    }
+}
+
+fn fmt_limit(n: u32) -> String {
+    if n == 0 { "any".into() } else { n.to_string() }
 }
 
 // --------------------------------------------------------------- embed()
@@ -1127,6 +1518,12 @@ mod tests {
                 digest: [7; 32],
                 len: 1 << 33,
             }],
+            limits: Limits {
+                batch_tokens: 8192,
+                requests_per_minute: 3000,
+                tokens_per_minute: 0,
+                parallel: 4,
+            },
         };
         assert_eq!(Model::decode(&m.encode()).unwrap(), m);
     }
@@ -1149,6 +1546,7 @@ mod tests {
                 input: Input::Document,
                 texts: &texts,
                 files: &Files::none(),
+                tokens: AtomicU64::new(0),
             })
             .unwrap();
         let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
@@ -1172,6 +1570,7 @@ mod tests {
                 input: Input::Document,
                 texts: &few,
                 files: &Files::none(),
+                tokens: AtomicU64::new(0),
             })
             .unwrap();
         assert!(v[0].iter().any(|x| *x != 0.0) && v[1].iter().any(|x| *x != 0.0));

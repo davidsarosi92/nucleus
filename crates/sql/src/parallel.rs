@@ -104,6 +104,7 @@ pub struct Ambient {
     who: Option<Arc<Who>>,
     now: Option<(i64, Arc<dyn nucleus_kv::Kv>)>,
     budget: Option<Budget>,
+    models: Option<Arc<std::sync::Mutex<crate::budget::ModelCost>>>,
 }
 
 impl Ambient {
@@ -113,12 +114,14 @@ impl Ambient {
             who: crate::access::current_who(),
             now: crate::datetime::current(),
             budget: crate::budget::current(),
+            models: crate::budget::models_shared(),
         }
     }
 
     /// Runs `f` with it in place on this thread; returns what `f` returned
     /// and the rows it read (to be counted by the statement's thread,
-    /// [`crate::budget::add_scanned`]).
+    /// [`crate::budget::add_scanned`]).  Its calls to models are charged
+    /// to the statement as they happen.
     pub fn run<T>(&self, f: impl FnOnce() -> T) -> (T, u64) {
         let with_now = |f: &mut dyn FnMut() -> (T, u64)| match &self.now {
             Some((ts, kv)) => crate::datetime::with_now(*ts, kv, f),
@@ -129,10 +132,12 @@ impl Ambient {
             let f = f.take().expect("run once");
             let f = || crate::budget::as_worker(f);
             match &self.budget {
-                Some(b) => crate::budget::with_budget(b.clone(), || {
-                    let out = f();
-                    (out, crate::budget::scanned())
-                }),
+                Some(b) => {
+                    crate::budget::with_budget_sharing(b.clone(), self.models.clone(), || {
+                        let out = f();
+                        (out, crate::budget::scanned())
+                    })
+                }
                 None => (f(), 0),
             }
         };

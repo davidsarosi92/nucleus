@@ -6,6 +6,7 @@
 //! reads, not after.
 
 use std::cell::{Cell, RefCell};
+use std::sync::{Arc, Mutex};
 
 use crate::error::{Error, Result};
 
@@ -109,6 +110,79 @@ struct Spent {
     scanned: Cell<u64>,
     /// µs spent waiting for the client ([`paused`]).
     waited: Cell<i64>,
+    /// Its calls to models: shared with its workers, which call too.
+    models: Arc<Mutex<ModelCost>>,
+}
+
+/// What a statement's calls to embedding models cost (PLAN.md §M14.22
+/// E8): `EXPLAIN ANALYZE`'s `Models:` line and the statement statistics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModelCost {
+    /// Calls to providers.
+    pub calls: u64,
+    /// Texts sent.
+    pub texts: u64,
+    /// Texts answered from the cache.
+    pub cached: u64,
+    /// Tokens, as the providers report them (estimated where they do
+    /// not).
+    pub tokens: u64,
+    /// Calls that failed.
+    pub errors: u64,
+    /// Time in the calls, and waiting for a model's rate limit (µs).
+    pub micros: u64,
+}
+
+impl ModelCost {
+    /// `self` with `other` added.
+    pub fn add(&mut self, other: &ModelCost) {
+        self.calls += other.calls;
+        self.texts += other.texts;
+        self.cached += other.cached;
+        self.tokens += other.tokens;
+        self.errors += other.errors;
+        self.micros += other.micros;
+    }
+
+    /// What was spent from `before` to `self`.
+    pub fn since(&self, before: &ModelCost) -> ModelCost {
+        ModelCost {
+            calls: self.calls.saturating_sub(before.calls),
+            texts: self.texts.saturating_sub(before.texts),
+            cached: self.cached.saturating_sub(before.cached),
+            tokens: self.tokens.saturating_sub(before.tokens),
+            errors: self.errors.saturating_sub(before.errors),
+            micros: self.micros.saturating_sub(before.micros),
+        }
+    }
+
+    /// Nothing called and nothing cached.
+    pub fn is_empty(&self) -> bool {
+        self.calls == 0 && self.cached == 0
+    }
+}
+
+/// Charges the current statement (when there is one) for calls to models.
+pub fn charge_model(c: &ModelCost) {
+    SPENT.with(|s| {
+        if let Some(s) = s.borrow().as_ref() {
+            s.models.lock().unwrap_or_else(|e| e.into_inner()).add(c);
+        }
+    });
+}
+
+/// What the current statement's calls to models have cost so far.
+pub fn model_cost() -> ModelCost {
+    SPENT.with(|s| {
+        s.borrow().as_ref().map_or(ModelCost::default(), |s| {
+            *s.models.lock().unwrap_or_else(|e| e.into_inner())
+        })
+    })
+}
+
+/// The current statement's model costs, to share with its workers.
+pub(crate) fn models_shared() -> Option<Arc<Mutex<ModelCost>>> {
+    SPENT.with(|s| s.borrow().as_ref().map(|s| s.models.clone()))
 }
 
 thread_local! {
@@ -117,11 +191,22 @@ thread_local! {
 
 /// Runs `f` within `budget`.
 pub fn with_budget<T>(budget: Budget, f: impl FnOnce() -> T) -> T {
+    with_budget_sharing(budget, None, f)
+}
+
+/// Runs `f` within `budget`, charging its calls to models to `models`
+/// (a statement's, on its worker) or to its own.
+pub(crate) fn with_budget_sharing<T>(
+    budget: Budget,
+    models: Option<Arc<Mutex<ModelCost>>>,
+    f: impl FnOnce() -> T,
+) -> T {
     let before = SPENT.with(|s| {
         s.replace(Some(Spent {
             budget,
             scanned: Cell::new(0),
             waited: Cell::new(0),
+            models: models.unwrap_or_default(),
         }))
     });
     let out = f();
@@ -197,6 +282,12 @@ pub fn paused<T>(f: impl FnOnce() -> T) -> T {
         });
     }
     out
+}
+
+/// The current statement's deadline (µs since 2000-01-01 UTC, by the
+/// database's clock), if it has one.
+pub fn deadline() -> Option<i64> {
+    SPENT.with(|s| s.borrow().as_ref().and_then(|s| s.budget.deadline))
 }
 
 /// The µs the current statement has spent waiting for the client.

@@ -136,13 +136,16 @@ fn ms(d: Duration) -> String {
 }
 
 /// The `EXPLAIN ANALYZE` text of `plan` after a run measured by `profile`
-/// that returned `rows` rows in `total` (timed: `Some`).
+/// that returned `rows` rows in `total` (timed: `Some`), its calls to
+/// embedding models costing `models` (a line of their own when it made
+/// any: §M14.22 E8).
 pub fn explain(
     txn: &dyn KvTxn,
     plan: &Plan,
     profile: &Profile,
     rows: usize,
     total: Option<Duration>,
+    models: &crate::budget::ModelCost,
 ) -> Vec<String> {
     let st = Stats::new(txn);
     let timed = profile.clock.is_some();
@@ -166,6 +169,16 @@ pub fn explain(
         }
         s
     });
+    if !models.is_empty() {
+        let mut m = format!(
+            "Models: {} calls, {} texts sent, {} cached, {} tokens, {} errors",
+            models.calls, models.texts, models.cached, models.tokens, models.errors
+        );
+        if timed {
+            let _ = write!(m, ", {}", ms(Duration::from_micros(models.micros)));
+        }
+        out.push(m);
+    }
     let mut last = format!("Execution: {rows} rows");
     if let Some(t) = total {
         let _ = write!(last, " in {}", ms(t));

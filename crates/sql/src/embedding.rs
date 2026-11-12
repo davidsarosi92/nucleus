@@ -784,10 +784,12 @@ fn round(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<Round> {
             texts
         };
         let asked: Vec<&str> = texts.iter().flatten().map(String::as_str).collect();
-        let results = call(&*ro, &model, &asked);
+        // On the database's clock: a model's rate limits read it.
+        let results = crate::datetime::with_now(now, kv, || call(&*ro, &model, &asked));
         let (ok, failed) = results.iter().fold((false, false), |(o, f), r| match r {
             Ok(_) => (true, f),
-            Err(e) => (o, f || transient(e)),
+            // The model's own rate limit is not the provider down.
+            Err(e) => (o, f || (transient(e) && !crate::models::throttled(e))),
         });
         with_driver(instance, |d| {
             let c = d.circuits.entry(model.clone()).or_default();
@@ -917,7 +919,7 @@ fn call(txn: &dyn KvTxn, model: &str, texts: &[&str]) -> Vec<Result<Arc<[f32]>>>
     if texts.is_empty() {
         return Vec::new();
     }
-    match crate::models::embed_unchecked(txn, model, texts, crate::models::Input::Document) {
+    match crate::models::embed_unchecked(txn, model, texts, crate::models::Input::Document, false) {
         Ok(v) => v.into_iter().map(Ok).collect(),
         Err(e) if transient(&e) || texts.len() == 1 => {
             texts.iter().map(|_| Err(e.clone())).collect()
@@ -925,8 +927,14 @@ fn call(txn: &dyn KvTxn, model: &str, texts: &[&str]) -> Vec<Result<Arc<[f32]>>>
         Err(_) => texts
             .iter()
             .map(|t| {
-                crate::models::embed_unchecked(txn, model, &[t], crate::models::Input::Document)
-                    .map(|mut v| v.remove(0))
+                crate::models::embed_unchecked(
+                    txn,
+                    model,
+                    &[t],
+                    crate::models::Input::Document,
+                    false,
+                )
+                .map(|mut v| v.remove(0))
             })
             .collect(),
     }

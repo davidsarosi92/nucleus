@@ -20,7 +20,11 @@ SELECT id FROM docs ORDER BY v <=> embed('how do I reset a password', 'small', '
 
 Every provider also takes nucleus's own options: `secret` (the key,
 sent as `Authorization: Bearer …`; naming one needs `USAGE` on it),
-`query_prefix` and `document_prefix`.
+`query_prefix` and `document_prefix`, and the limits your account has:
+`batch_tokens`, `requests_per_minute`, `tokens_per_minute` and
+`parallel` (calls at once) — nucleus packs batches and paces calls by
+them, and charges each statement the tokens the API reports (`usage`,
+Cohere's billed units) in `EXPLAIN ANALYZE` and `nc_catalog.statements`.
 
 - A throttled call (429) or a server's failure (5xx), or a network
   error, is tried once more — after `Retry-After` (at most 10 s) or half
