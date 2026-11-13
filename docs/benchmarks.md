@@ -868,6 +868,26 @@ target/ann-data/.venv/bin/python bench/embed/models.py     # the models' files i
 bash target/bench-tools/memcap.sh 7000 target/ann-data/.venv/bin/python -I bench/embed/speed.py
 ```
 
+End to end in a server (§M14.22 E8b, `bench/embed/beir.py`): BEIR's
+corpora loaded into a table with an embedding column and a chunk table
+(`BY sentences SIZE 200 USING bge`) with its own, HNSW on both, made
+empty first; bge-small-en-v1.5 by `USING local`, the server's background
+worker, the server killed once halfway.  nDCG@10 of documents ranked
+directly and by their best chunk, beside exact search over the same
+vectors and over fastembed's:
+
+| set | documents | chunks | vectors | vectors/s | tokens/s | nDCG@10 docs (HNSW) | exact | fastembed exact | chunks |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| SciFact | 5,183 | 11,884 | 17,067 | 48 | 9,557 | 0.7200 | 0.7200 | 0.7203 | 0.7087 |
+| NFCorpus | 3,633 | 8,748 | 12,381 | 49 | 9,934 | 0.3375 | 0.3375 | 0.3376 | 0.3401 |
+| ArguAna | 8,674 | 13,215 | 21,889 | 64 | 10,058 | 0.5975 | 0.5975 | 0.5973 | 0.5772 |
+
+Loading and chunking takes 0.7–1.0 s a set; the vectors are the time.
+
+```sh
+bash target/bench-tools/memcap.sh 6000 target/ann-data/.venv/bin/python bench/embed/beir.py target/release/nucleus
+```
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

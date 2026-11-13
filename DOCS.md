@@ -5109,6 +5109,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-13 — §M14.22 E8b, the end-to-end check:**
+  `bench/embed/beir.py` (BEIR documents to ranked chunks by a local
+  model in a server killed twice; the results in
+  `docs/benchmarks.md`).  §M14.22 is done.
+
 - **2026-11-13 — §M14.22 E8, what model calls cost:** model options
   `batch_tokens`, `requests_per_minute`, `tokens_per_minute`, `parallel`
   (model record version 3); token buckets per database and model;

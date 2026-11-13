@@ -135,7 +135,7 @@ by the text index (BEIR: as fast as PostgreSQL's GIN index for all
 words, faster for any), with `ts_rank`, `ts_rank_cd` and `ts_headline`
 giving PostgreSQL's values (a search page, ten best by `ts_rank` with
 their headlines, 1.3–1.4× GIN's speed).  Embeddings are made by the
-database (§M14.22, under way): `embed(body, 'm')` with a model of
+database (§M14.22): `embed(body, 'm')` with a model of
 OpenAI-compatible servers, Cohere, Voyage — or run inside nucleus on its
 own kernels, `CREATE MODEL bge USING local WITH (huggingface =
 'BAAI/bge-small-en-v1.5')`, its files kept in the database (the same
@@ -153,7 +153,9 @@ paragraph re-embeds only its chunk).  A model's limits
 (`requests_per_minute`, `tokens_per_minute`, `batch_tokens`, `parallel`)
 pace its calls, and what each statement spent on models — calls, tokens,
 cache hits, time — is in `EXPLAIN ANALYZE` and the statement statistics.
-Next are the end-to-end check on BEIR (the rest of §M14.22) and the rest of the
+On BEIR, documents loaded into a server rank as
+fastembed's vectors of the same model do, and stay in sync — bit for bit
+— through edits, deletes and a killed server (§M14.22).  Next is the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then
