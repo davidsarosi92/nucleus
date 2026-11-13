@@ -36,53 +36,100 @@ pub struct Found {
 /// chance.
 pub const MIN_NEEDLE: usize = 4;
 
-/// Needles by their first four bytes, with a filter on the first two.
+/// Needles by an anchor — four of their bytes, behind a filter: a bitmap
+/// of the anchors' hashes (2^20 bits, 128 KiB, in cache), which lets a
+/// place through to the map only when its four bytes are an anchor's,
+/// or rarely by a collision (a filter on two bytes let a quarter of a
+/// database's bytes through: text and hex share their pairs).  The anchor is the window the fewest other needles share
+/// (what values of one table have in common — a text's fixed words, a
+/// vector's exponent bytes — the table's every row has too), then the
+/// least like what files are full of (zeros, runs): so the filter lets
+/// few places through, and each to few needles.
 struct Needles<'a> {
     all: &'a [Vec<u8>],
-    pairs: Vec<u64>,
-    by_head: HashMap<[u8; 4], Vec<usize>>,
+    filter: Vec<u64>,
+    /// Anchor → (needle, the anchor's offset in it).
+    by_anchor: HashMap<[u8; 4], Vec<(usize, usize)>>,
     longest: usize,
+    /// The greatest anchor offset.
+    reach: usize,
 }
+
+/// How common a window's bytes are in files, roughly: zeros and 0xff
+/// count most, then bytes repeated within it.
+fn commonness(w: &[u8]) -> usize {
+    let plain = w.iter().filter(|&&b| b == 0 || b == 0xff).count();
+    let mut seen = [false; 256];
+    let repeated = w
+        .iter()
+        .filter(|&&b| std::mem::replace(&mut seen[b as usize], true))
+        .count();
+    plain * 4 + repeated
+}
+
+/// The filter's bit for four bytes.
+fn slot(w: u32) -> usize {
+    (w.wrapping_mul(0x9e37_79b1) >> (32 - FILTER_BITS)) as usize
+}
+
+const FILTER_BITS: u32 = 20;
 
 impl<'a> Needles<'a> {
     fn new(all: &'a [Vec<u8>]) -> Self {
-        let mut pairs = vec![0u64; 1 << 10];
-        let mut by_head: HashMap<[u8; 4], Vec<usize>> = HashMap::new();
-        let mut longest = 0;
+        let mut filter = vec![0u64; 1 << (FILTER_BITS - 6)];
+        let mut by_anchor: HashMap<[u8; 4], Vec<(usize, usize)>> = HashMap::new();
+        let (mut longest, mut reach) = (0, 0);
+        let window = |n: &[u8], k: usize| -> [u8; 4] { [n[k], n[k + 1], n[k + 2], n[k + 3]] };
+        let mut shared: HashMap<[u8; 4], usize> = HashMap::new();
+        for n in all.iter().filter(|n| n.len() >= MIN_NEEDLE) {
+            let mut own = std::collections::HashSet::new();
+            for k in 0..=n.len() - MIN_NEEDLE {
+                if own.insert(window(n, k)) {
+                    *shared.entry(window(n, k)).or_default() += 1;
+                }
+            }
+        }
         for (i, n) in all.iter().enumerate() {
             if n.len() < MIN_NEEDLE {
                 continue;
             }
-            let pair = u16::from_le_bytes([n[0], n[1]]) as usize;
-            pairs[pair / 64] |= 1 << (pair % 64);
-            by_head.entry([n[0], n[1], n[2], n[3]]).or_default().push(i);
+            let k = (0..=n.len() - MIN_NEEDLE)
+                .min_by_key(|&k| (shared[&window(n, k)], commonness(&n[k..k + MIN_NEEDLE])))
+                .unwrap_or(0);
+            let bit = slot(u32::from_le_bytes(window(n, k)));
+            filter[bit / 64] |= 1 << (bit % 64);
+            by_anchor.entry(window(n, k)).or_default().push((i, k));
             longest = longest.max(n.len());
+            reach = reach.max(k);
         }
         Self {
             all,
-            pairs,
-            by_head,
+            filter,
+            by_anchor,
             longest,
+            reach,
         }
     }
 
     /// Calls `hit(at, needle)` for each needle in `hay` starting before
     /// `limit`.
     fn search(&self, hay: &[u8], limit: usize, mut hit: impl FnMut(usize, usize)) {
-        if self.by_head.is_empty() || hay.len() < MIN_NEEDLE {
+        if self.by_anchor.is_empty() || hay.len() < MIN_NEEDLE {
             return;
         }
-        let end = limit.min(hay.len() - MIN_NEEDLE + 1);
-        for at in 0..end {
-            let pair = u16::from_le_bytes([hay[at], hay[at + 1]]) as usize;
-            if self.pairs[pair / 64] & (1 << (pair % 64)) == 0 {
+        let end = limit
+            .saturating_add(self.reach)
+            .min(hay.len() - MIN_NEEDLE + 1);
+        for (at, w) in hay[..end + MIN_NEEDLE - 1].windows(MIN_NEEDLE).enumerate() {
+            let anchor: [u8; 4] = w.try_into().expect("four bytes");
+            let bit = slot(u32::from_le_bytes(anchor));
+            if self.filter[bit / 64] & (1 << (bit % 64)) == 0 {
                 continue;
             }
-            let head = [hay[at], hay[at + 1], hay[at + 2], hay[at + 3]];
-            if let Some(ids) = self.by_head.get(&head) {
-                for &i in ids {
-                    if hay[at..].starts_with(&self.all[i]) {
-                        hit(at, i);
+            if let Some(ids) = self.by_anchor.get(&anchor) {
+                for &(i, k) in ids {
+                    if at >= k && at - k < limit && hay[at - k..].starts_with(&self.all[i]) {
+                        hit(at - k, i);
                     }
                 }
             }
@@ -235,4 +282,44 @@ fn search_pages(file: &dyn File, n: &Needles, mut hit: impl FnMut(u64, usize)) -
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hits(needles: &[Vec<u8>], hay: &[u8], limit: usize) -> Vec<(usize, usize)> {
+        let n = Needles::new(needles);
+        let mut out = Vec::new();
+        n.search(hay, limit, |at, i| out.push((at, i)));
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn needles_are_found_where_they_start_whatever_their_anchor() {
+        // Shared words (anchored past them), a float's zero low bytes first,
+        // one needle inside another.
+        let needles = vec![
+            b"message 1 from ann about 9f3c".to_vec(),
+            b"message 2 from ann about 77ab".to_vec(),
+            vec![0, 0, 0xa0, 0x40, 0, 0, 0x30, 0x41],
+            b"from ann about 77".to_vec(),
+        ];
+        let mut hay = vec![0u8; 100];
+        hay.extend_from_slice(b"message 2 from ann about 77ab|");
+        hay.extend_from_slice(&[0, 0, 0xa0, 0x40, 0, 0, 0x30, 0x41]);
+        hay.extend_from_slice(b"message 1 from ann about 9f3");
+        assert_eq!(
+            hits(&needles, &hay, usize::MAX),
+            [(100, 1), (110, 3), (130, 2)]
+        );
+        // Only those starting before the limit (a chunk's own; the rest
+        // are the next chunk's), though their anchors lie past it.
+        assert_eq!(hits(&needles, &hay, 110), [(100, 1)]);
+        assert_eq!(hits(&needles, &hay, 111), [(100, 1), (110, 3)]);
+        // Too short to look for, or nothing to look for.
+        assert_eq!(hits(&[b"abc".to_vec()], b"abcabc", usize::MAX), []);
+        assert_eq!(hits(&[], &hay, usize::MAX), []);
+    }
 }

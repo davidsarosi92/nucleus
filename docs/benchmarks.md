@@ -925,6 +925,36 @@ mkdir -p target/memory-data && curl -L -o target/memory-data/longmemeval_s_clean
 bash target/bench-tools/memcap.sh 8000 target/ann-data/.venv/bin/python bench/memory/longmemeval.py target/release/nucleus
 ```
 
+## Erasure
+
+PLAN.md §M14.24 R2 (`crates/sql/tests/erasure_bench.rs`): a table of
+100,000 rows of 1,000 subjects — a subject column, a text with a text
+index, a 4-dimensional vector with an HNSW index — on real files
+(96 MiB), an M2 Pro, release.  A subject's 100 texts are planted and
+every file searched for them (`Kv::find_bytes`: the files raw and the
+data file's leaves decoded).
+
+| | places holding a planted text |
+|---|---:|
+| before the delete | 100 |
+| after `DELETE` | 100 |
+| after the indexes' upkeep and a vacuum | 100 |
+| after `FORGET SUBJECT` of the same subject | **0** |
+
+| | time |
+|---|---:|
+| `DELETE` of a subject's 100 rows | 5.5 ms |
+| `FORGET SUBJECT` of another's 100 rows, the scrub and the search | 405 ms |
+| — the search alone (100 texts, 96 MiB) | 79 ms |
+
+`FORGET` returned `found = 0` each time; the files went from 96 to
+68 MiB.
+
+```sh
+ERASURE_DIR=target/erasure-bench cargo test --release -p nucleus-sql \
+    --test erasure_bench -- --ignored --nocapture
+```
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

@@ -616,8 +616,10 @@ proof: every file but `LOCK` searched raw (a mebibyte at a time), and the
 data file's leaves — reachable or free — decoded: keys put together from
 their shared prefix, packed values decompressed, overflow chains read;
 results once per file offset (per page for the data file).  Needles
-under 4 bytes are not looked for; a needle set is indexed by its first
-two bytes (a bitmap) and four (a map).
+under 4 bytes are not looked for; each is anchored at the four-byte
+window the fewest other needles share (then the least like zeros and
+runs), and a place reaches the map of anchors only through a bitmap of
+their hashes (2^20 bits) — ~80 ms for 100 needles over 96 MiB.
 
 ### 4.7 Tests
 
@@ -5651,7 +5653,9 @@ checks `psql` with and without TLS.
   the audit records blanked; audit records of version 2 hash their
   detail's digest so an erasure blanks the details holding the subject
   with the chain intact (`nc_catalog.audit.erasure`); the drivers'
-  helpers return all four.
+  helpers return all four.  R2c: the search anchored by rarity and
+  filtered by a hashed bitmap (a `FORGET` on 96 MiB 1.05 → 0.41 s);
+  `tests/erasure_bench.rs`, the planted-corpus measurement.
 - **2026-11-13 — §M14.24 R2a, `FORGET SUBJECT`:** subject columns
   (`ALTER TABLE … SET / DROP SUBJECT`; a memory store's `subject`
   marked), table record version 18; `FORGET SUBJECT value` deletes the
