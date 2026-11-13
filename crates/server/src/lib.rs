@@ -489,14 +489,19 @@ pub fn serve_front_end(
         };
         let (kv, config, front) = (Arc::clone(&kv), Arc::clone(&config), Arc::clone(&front));
         let id = ids.fetch_add(1, Ordering::Relaxed);
-        std::thread::spawn(move || {
-            let _ = stream.set_nodelay(true);
-            if let Err(e) = front.handle(stream, kv, &config, id)
-                && e.kind() != io::ErrorKind::UnexpectedEof
-            {
-                eprintln!("nucleus-server: {} connection {id}: {e}", front.name());
-            }
-        });
+        let session =
+            nucleus_platform::session_thread(format!("nucleus session {id}")).spawn(move || {
+                let _ = stream.set_nodelay(true);
+                if let Err(e) = front.handle(stream, kv, &config, id)
+                    && e.kind() != io::ErrorKind::UnexpectedEof
+                {
+                    eprintln!("nucleus-server: {} connection {id}: {e}", front.name());
+                }
+            });
+        if let Err(e) = session {
+            // The connection is dropped with the closure: the client sees it close.
+            eprintln!("nucleus-server: connection {id}: no thread for it: {e}");
+        }
     }
     Ok(())
 }

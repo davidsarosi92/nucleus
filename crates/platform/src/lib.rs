@@ -35,6 +35,25 @@ pub mod slots;
 
 pub use rng::SplitMix64;
 
+/// The stack of a thread that runs statements — a session's, a parallel
+/// query's workers': enough for the deepest statement the SQL parser lets
+/// through (`nucleus_sql::parser::MAX_NESTING`; measured at about 6 MB in a
+/// release build, under 16 MB in a debug one).  Only what is used is
+/// committed.  (WebAssembly runs statements on its one thread, its stack
+/// set where it is linked: `drivers/js/wasm/build.sh`.)
+pub const SESSION_STACK: usize = if cfg!(target_pointer_width = "64") {
+    16 << 20
+} else {
+    8 << 20
+};
+
+/// A thread with [`SESSION_STACK`], named `name`.
+pub fn session_thread(name: impl Into<String>) -> std::thread::Builder {
+    std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(SESSION_STACK)
+}
+
 /// The system's directory for temporary files — `/tmp` on WASI, which has
 /// none of its own (its runner maps one, `scripts/wasi-run.mjs`).
 pub fn temp_dir() -> std::path::PathBuf {

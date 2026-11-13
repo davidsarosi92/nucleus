@@ -1541,6 +1541,17 @@ of unknown tables or indexes).
 
 ### 8.3 Parser (`lexer`, `parser`, `ast`)
 
+How deep a statement may nest is bounded (`parser::MAX_NESTING`, 1000;
+500 in WebAssembly, where the host's stack bounds it too): every stage
+after the parser walks the statement by recursion, so its tree's height
+bounds the stack they take.  A level of an expression counts 1 —
+parentheses, operators chained (`a OR b OR …`), casts, subscripts,
+joins —, a subquery 8 and a set operation 3, as they take that much more
+stack; past it the statement fails with `54001`.  Threads that run
+statements (sessions, parallel workers) have
+`nucleus_platform::SESSION_STACK`, 16 MB (8 MB on 32-bit), which the
+deepest statement allowed fits in (about 6 MB measured).
+
 Statements: `CREATE TABLE [IF NOT EXISTS]` (column constraints `PRIMARY
 KEY`, `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`, `REFERENCES`; table
 constraints `PRIMARY KEY (…)`, `UNIQUE (…)`, `CHECK (…)`, `FOREIGN KEY (…)
@@ -5310,6 +5321,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-13 — two bugs CI's fuzzing found:** a statement nested a
+  thousand levels deep (or twenty thousand `OR`s) overflowed its
+  session's stack, which aborts the process — any client could stop the
+  server.  Now a statement's nesting is bounded (§8.3: `MAX_NESTING`,
+  `54001`) and sessions' threads have 16 MB of stack.  A time zone split
+  inside a two-byte character panicked (`'2007-1ɚ0'::time`); now `22007`.
 - **2026-11-13 — §M14.23 step 2, the browser (WASM):** the engine on
   `wasm32-wasip1` (CI's `wasm` job: platform conformance, storage,
   transactions, SQL and slt under Node's WASI, `scripts/wasi-run.mjs`);

@@ -852,9 +852,11 @@ impl Parallel {
             .map(|_| {
                 let shared = Arc::clone(&shared);
                 let ambient = ambient.clone();
-                std::thread::spawn(move || {
-                    ambient.run(|| shared.work());
-                })
+                nucleus_platform::session_thread("nucleus worker")
+                    .spawn(move || {
+                        ambient.run(|| shared.work());
+                    })
+                    .expect("a worker thread")
             })
             .collect();
         Parallel {

@@ -337,8 +337,7 @@ impl Database {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let config = self.inner.config.clone();
         let server = ServerEnd(Arc::clone(&pipes));
-        let thread = std::thread::Builder::new()
-            .name(format!("nucleus session {id}"))
+        let thread = nucleus_platform::session_thread(format!("nucleus session {id}"))
             .spawn(move || {
                 let _ = nucleus_server::handle_native_stream(Box::new(server), kv, &config, id);
             })

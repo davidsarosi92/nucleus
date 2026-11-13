@@ -323,7 +323,7 @@ fn parse_zone(z: &str) -> Option<i64> {
     };
     let (h, m) = if let Some((h, m)) = rest.split_once(':') {
         (h, m)
-    } else if rest.len() == 4 {
+    } else if rest.len() == 4 && rest.is_ascii() {
         rest.split_at(2)
     } else {
         (rest, "0")
@@ -1254,6 +1254,15 @@ pub fn date_trunc(unit: &str, ts: i64) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_zone_with_a_wide_character_is_invalid() {
+        // Four bytes, one character of two: not split inside it (found by
+        // the values fuzz target).
+        assert!(parse_time_of_day("2007-1\u{25a}0").is_err());
+        assert!(parse_timestamp("2024-01-01 10:00-1\u{25a}0", true).is_err());
+        assert_eq!(parse_zone("+0130"), Some(5400));
+    }
 
     #[test]
     fn calendar_round_trips() {

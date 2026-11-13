@@ -93,6 +93,7 @@ codes! {
     prerequisite => "55000",
     query_canceled => "57014",
     program_limit => "54000",
+    statement_too_complex => "54001",
     configuration_limit => "53400",
     too_many_connections => "53300",
     cant_change => "55P02",

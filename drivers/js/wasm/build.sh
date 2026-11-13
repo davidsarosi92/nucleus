@@ -13,9 +13,14 @@ cd "$root"
 # Whole-program optimization (LTO, one codegen unit): 16% smaller at the
 # same speed.  opt-level s or z would save 0.15-0.2 MB more after brotli
 # but run 20-50% slower (PLAN.md §M14.23 step 2).
+# The stack in the module's memory (the default is 1 MB): statements run
+# on its one thread, as deep as the parser lets through (MAX_NESTING, 500
+# here; a native session's thread has 16 MB for 1000), and a WebAssembly
+# stack has no guard page to stop an overflow.
 cargo build --release --locked --target wasm32-wasip1 --target-dir target/wasm \
   -p nucleus-embedded --no-default-features \
-  --config profile.release.lto=true --config profile.release.codegen-units=1
+  --config profile.release.lto=true --config profile.release.codegen-units=1 \
+  --config 'target.wasm32-wasip1.rustflags=["-C", "link-arg=-zstack-size=8388608"]'
 out="$here/nucleus.wasm"
 if command -v wasm-opt >/dev/null 2>&1; then
   wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \

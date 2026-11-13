@@ -287,7 +287,7 @@ are marked ✅.
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
-| | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, six bugs fixed) |
+| | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, eight bugs fixed) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -7479,6 +7479,41 @@ to run nucleus in production; the distributed layer's analysis is
     (U+0331), so the field boundary fell inside it — a panic slicing the
     string (CI's first full run of `copy`).  Now each field must start
     and end on a character, `22P02` otherwise.
+  - A time zone of four bytes was split as `HHMM` at its second byte,
+    inside a character of two (`'2007-1ɚ0'::time`): a panic, the
+    session lost (`values`).  Now only an ASCII zone is split.
+  - **A statement nested deep overflowed its session's stack, and a
+    stack overflow aborts the process: any client that could log in
+    could stop the server** — a thousand parentheses, or twenty
+    thousand `OR`s (`sql_parse`; the `OR` chain found reproducing it).
+    The parser, and every stage after it (binding, planning, running,
+    even dropping the tree), walk the statement by recursion.  Prior
+    art: PostgreSQL bounds the stack itself (`max_stack_depth`, 54001
+    "stack depth limit exceeded", the stack pointer checked in each
+    recursive routine); SQLite (`SQLITE_MAX_EXPR_DEPTH`) and DuckDB
+    (`max_expression_depth`) bound the expression tree's height at
+    1000 as it is built.  Taken: the height bound, as it bounds every
+    later stage too (and dropping a tree, which nothing could check),
+    and needs no unsafe stack probing.  `parser::MAX_NESTING` = 1000:
+    each frame (an expression, a query, a FROM item) counts its height
+    — the nodes it chained (operators, casts and subscripts, joins, set
+    operations) over the highest frame inside it — and its depth as it
+    is entered, so the parser stops before its own stack grows; past it
+    `54001`.  Measured (release, the stack a whole statement takes per
+    level): an operator 3.7 KB, a parenthesis 4.4 KB, a set operation
+    11 KB, a subquery 27 KB — so a subquery counts 8 and a set
+    operation 3, and every shape at the limit takes under 6 MB (under
+    16 MB in a debug build).  Threads that run statements — sessions
+    (server, embedded), parallel workers, `COPY`'s parser — now get
+    `nucleus_platform::SESSION_STACK`, 16 MB (8 MB on 32-bit), only what
+    is used committed; Rust's default was 2 MB.  WebAssembly: the
+    module's stack is 8 MB, and the host's own stack bounds it too — a
+    browser's (V8's) is about 1 MB, which 850 levels of `CASE`
+    exhausted once the engine's code was optimized (`RangeError`, the
+    instance lost) — so there the limit is 500 (measured: every shape
+    at it runs after warm-up).  `nesting.rs` checks every shape fails
+    past the limit and runs just under it; the drivers' suite checks a
+    deep statement fails and the session goes on.
   Not a bug, recorded: HMAC pads a key shorter than its block with
   zeros, so a password and itself with NULs after are one in SCRAM (as
   everywhere; SASLprep forbids NUL).  The two §M14.22 review items

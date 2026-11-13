@@ -59,6 +59,12 @@ pub fn parse_expr(sql: &str) -> Result<Expr> {
     Ok(e)
 }
 
+fn too_deep() -> Error {
+    Error::statement_too_complex(format!(
+        "the statement nests too deeply (more than {MAX_NESTING} levels of parentheses, subqueries or chained operators)"
+    ))
+}
+
 /// Words that cannot be a bare alias or column name.
 /// Words that open `EXPLAIN`'s option list (`EXPLAIN (` then one of
 /// these; else a parenthesised query).  Only `ANALYZE` and `TIMING` are
@@ -131,10 +137,51 @@ const RESERVED: &[&str] = &[
     "collate",
 ];
 
+/// How deep a statement may nest: parentheses, subqueries, operators
+/// chained (`a OR b OR …`), joins, set operations.  The parser, and every
+/// stage after it, walks a statement's tree by recursion: a bound on its
+/// height bounds the stack they take (SQLite's `SQLITE_MAX_EXPR_DEPTH`
+/// and DuckDB's `max_expression_depth` are 1000; PostgreSQL's
+/// `max_stack_depth` bounds the stack itself).  A level of an expression
+/// counts 1; a subquery [`QUERY_WEIGHT`] and a set operation
+/// [`SET_OP_WEIGHT`], as they take that much more stack.  Past it a
+/// statement fails with 54001.  A session's thread has
+/// [`nucleus_platform::SESSION_STACK`] of stack for it.  In WebAssembly
+/// the host's own stack bounds it too (a browser's is about 1 MB, which
+/// the deepest statements of 850 levels exhausted once its code was
+/// optimized): there it is 500.
+pub const MAX_NESTING: usize = if cfg!(target_family = "wasm") {
+    500
+} else {
+    1000
+};
+
+/// What a (sub)query counts toward [`MAX_NESTING`]: the stack a level of
+/// them takes, against an expression's (measured: about 27 KB to 4.4 KB).
+pub const QUERY_WEIGHT: usize = 8;
+
+/// What a set operation (`UNION` …) counts toward [`MAX_NESTING`] (about
+/// 11 KB of stack to an operator's 3.7 KB).
+pub const SET_OP_WEIGHT: usize = 3;
+
 struct Parser<'a> {
     sql: &'a str,
     toks: Vec<(Token, usize)>,
     pos: usize,
+    /// The frames (expressions, queries, FROM items) being parsed.
+    depth: usize,
+    /// The nodes the current frame has chained (operators, postfix
+    /// casts and subscripts, joins, set operations).
+    links: usize,
+    /// The greatest height of the frames finished inside the current one.
+    inner: usize,
+}
+
+/// What a frame saves of the one around it.
+struct Nesting {
+    weight: usize,
+    links: usize,
+    inner: usize,
 }
 
 /// The fields of an interval literal's qualifier.
@@ -191,7 +238,48 @@ impl<'a> Parser<'a> {
             sql,
             toks: tokenize(sql)?,
             pos: 0,
+            depth: 0,
+            links: 0,
+            inner: 0,
         })
+    }
+
+    /// Enters a frame (an expression, a query, a FROM item): fails past
+    /// [`MAX_NESTING`] before the stack grows deeper.
+    fn enter(&mut self, weight: usize) -> Result<Nesting> {
+        self.depth += weight;
+        if self.depth > MAX_NESTING {
+            self.depth -= weight;
+            return Err(too_deep());
+        }
+        Ok(Nesting {
+            weight,
+            links: std::mem::take(&mut self.links),
+            inner: std::mem::take(&mut self.inner),
+        })
+    }
+
+    /// Leaves a frame: the height of what it built — its chained nodes
+    /// over the highest frame inside it — must be within [`MAX_NESTING`].
+    fn leave<T>(&mut self, outer: Nesting, r: Result<T>) -> Result<T> {
+        self.depth -= outer.weight;
+        let height = self.inner + self.links + outer.weight;
+        self.links = outer.links;
+        self.inner = outer.inner.max(height);
+        let v = r?;
+        if height > MAX_NESTING {
+            return Err(too_deep());
+        }
+        Ok(v)
+    }
+
+    /// One more node chained in the current frame, of `weight`.
+    fn link(&mut self, weight: usize) -> Result<()> {
+        self.links += weight;
+        if self.inner + self.links >= MAX_NESTING {
+            return Err(too_deep());
+        }
+        Ok(())
     }
 
     fn at_end(&self) -> bool {
@@ -2450,6 +2538,12 @@ impl<'a> Parser<'a> {
     }
 
     fn query(&mut self) -> Result<Query> {
+        let frame = self.enter(QUERY_WEIGHT)?;
+        let r = self.query_body();
+        self.leave(frame, r)
+    }
+
+    fn query_body(&mut self) -> Result<Query> {
         let with = self.with_clause()?;
         // INTERSECT binds tighter than UNION and EXCEPT (as in PostgreSQL).
         let mut body = self.intersect_term()?;
@@ -2463,6 +2557,7 @@ impl<'a> Parser<'a> {
             };
             let all = self.set_quantifier();
             let right = self.intersect_term()?;
+            self.link(SET_OP_WEIGHT)?;
             body = SetExpr::SetOp {
                 op,
                 left: Box::new(body),
@@ -2502,6 +2597,7 @@ impl<'a> Parser<'a> {
         while self.eat_kw("intersect") {
             let all = self.set_quantifier();
             let right = self.set_term()?;
+            self.link(SET_OP_WEIGHT)?;
             body = SetExpr::SetOp {
                 op: SetOp::Intersect,
                 left: Box::new(body),
@@ -2718,6 +2814,7 @@ impl<'a> Parser<'a> {
                 JoinKind::Right
             } else if self.eat_kws(&["cross", "join"]) {
                 let right = self.table_primary()?;
+                self.link(1)?;
                 left = TableRef::Join {
                     left: Box::new(left),
                     right: Box::new(right),
@@ -2739,6 +2836,7 @@ impl<'a> Parser<'a> {
             } else {
                 return Err(self.error("expected ON or USING"));
             };
+            self.link(1)?;
             left = TableRef::Join {
                 left: Box::new(left),
                 right: Box::new(right),
@@ -2750,6 +2848,12 @@ impl<'a> Parser<'a> {
     }
 
     fn table_primary(&mut self) -> Result<TableRef> {
+        let frame = self.enter(1)?;
+        let r = self.table_item();
+        self.leave(frame, r)
+    }
+
+    fn table_item(&mut self) -> Result<TableRef> {
         if self.eat_kw("lateral") {
             let item = self.table_primary()?;
             if !matches!(item, TableRef::Subquery { .. } | TableRef::Function { .. }) {
@@ -2856,6 +2960,13 @@ impl<'a> Parser<'a> {
     }
 
     fn expr_prec(&mut self, min: u8) -> Result<Expr> {
+        let frame = self.enter(1)?;
+        let r = self.operators(min);
+        self.leave(frame, r)
+    }
+
+    /// An operand and the operators of precedence `min` or more after it.
+    fn operators(&mut self, min: u8) -> Result<Expr> {
         let mut left = self.prefix()?;
         loop {
             let Some((prec, kind)) = self.infix() else {
@@ -2864,6 +2975,7 @@ impl<'a> Parser<'a> {
             if prec < min {
                 return Ok(left);
             }
+            self.link(1)?;
             left = self.apply_infix(left, prec, kind)?;
         }
     }
@@ -2899,6 +3011,9 @@ impl<'a> Parser<'a> {
 
     fn postfix(&mut self, mut e: Expr) -> Result<Expr> {
         loop {
+            if self.peek_op("::") || self.peek_op("[") || self.peek_kw("collate") {
+                self.link(1)?;
+            }
             if self.eat_op("::") {
                 e = self.cast_to(e)?;
             } else if self.eat_op("[") {

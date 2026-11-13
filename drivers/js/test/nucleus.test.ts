@@ -173,6 +173,19 @@ test("errors", async () => {
   await db.close();
 });
 
+test("statements nested too deep", async () => {
+  const db = await connect(options);
+  // Fails with 54001, the session (and the server) going on.
+  const deep = 50_000;
+  await assert.rejects(db.query(`SELECT ${"(".repeat(deep)}1${")".repeat(deep)}`), (e: NucleusError) => e.code === "54001");
+  const or = "SELECT 1 WHERE " + Array(deep).fill("1=0").join(" OR ");
+  await assert.rejects(db.query(or), (e: NucleusError) => e.code === "54001");
+  // 400 levels run everywhere (WebAssembly's limit is 500, a server's 1000).
+  assert.deepEqual((await db.query(`SELECT ${"(".repeat(400)}7${")".repeat(400)}`)).rows, [[7]]);
+  assert.deepEqual((await db.query(`SELECT ${"CASE WHEN true THEN ".repeat(400)}1${" END".repeat(400)}`)).rows, [[1]]);
+  await db.close();
+});
+
 test("transactions", async () => {
   const db = await connect(options);
   const t = table();

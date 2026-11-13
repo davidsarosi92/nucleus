@@ -1368,20 +1368,29 @@ pub fn rows_at(
             .enumerate()
             .map(|(m, run)| {
                 let (storage, ambient) = (&storage, &ambient);
-                sc.spawn(move || {
-                    let (rows, scanned) = ambient.run(|| {
-                        let txn = crate::parallel::SharedTxn(shared, instance);
-                        let mut rows = Vec::with_capacity(run.len());
-                        let mut density = start;
-                        storage.rows_at(&txn, t, run, wanted, &mut density, &mut |i, row| {
-                            rows.push((i + m * part, row));
-                            Ok(())
-                        })?;
-                        Ok(rows)
-                    });
-                    crate::budget::add_scanned(scanned);
-                    rows
-                })
+                nucleus_platform::session_thread("nucleus worker")
+                    .spawn_scoped(sc, move || {
+                        let (rows, scanned) = ambient.run(|| {
+                            let txn = crate::parallel::SharedTxn(shared, instance);
+                            let mut rows = Vec::with_capacity(run.len());
+                            let mut density = start;
+                            storage.rows_at(
+                                &txn,
+                                t,
+                                run,
+                                wanted,
+                                &mut density,
+                                &mut |i, row| {
+                                    rows.push((i + m * part, row));
+                                    Ok(())
+                                },
+                            )?;
+                            Ok(rows)
+                        });
+                        crate::budget::add_scanned(scanned);
+                        rows
+                    })
+                    .expect("a worker thread")
             })
             .collect();
         handles

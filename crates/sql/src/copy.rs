@@ -561,39 +561,42 @@ impl Load<'_> {
         let (to_store, parsed) = channel::<(Vec<Parsed>, Result<()>, bool)>();
         std::thread::scope(|sc| {
             let (locked, ambient) = (&locked, &ambient);
-            let parser = sc.spawn(move || {
-                ambient
-                    .run(|| {
-                        let reads = crate::parallel::SharedTxn(locked, instance);
-                        let ctx = Ctx::new(&reads, reg, &[]);
-                        let mut fields = Fields::new(self.options.clone());
-                        let mut batch = Batch::default();
-                        // Until the data ends, a record fails, or the
-                        // statement stops listening.
-                        while let Ok(chunk) = chunks.recv() {
-                            let last = chunk.is_none();
-                            let mut out = Vec::new();
-                            let fed = self.feed(
-                                &ctx,
-                                Some(locked),
-                                workers,
-                                &mut fields,
-                                &mut batch,
-                                chunk,
-                                &mut out,
-                            );
-                            let stop = last || fed.is_err();
-                            if (!out.is_empty() || stop) && to_store.send((out, fed, last)).is_err()
-                            {
-                                return;
+            let parser = nucleus_platform::session_thread("nucleus copy")
+                .spawn_scoped(sc, move || {
+                    ambient
+                        .run(|| {
+                            let reads = crate::parallel::SharedTxn(locked, instance);
+                            let ctx = Ctx::new(&reads, reg, &[]);
+                            let mut fields = Fields::new(self.options.clone());
+                            let mut batch = Batch::default();
+                            // Until the data ends, a record fails, or the
+                            // statement stops listening.
+                            while let Ok(chunk) = chunks.recv() {
+                                let last = chunk.is_none();
+                                let mut out = Vec::new();
+                                let fed = self.feed(
+                                    &ctx,
+                                    Some(locked),
+                                    workers,
+                                    &mut fields,
+                                    &mut batch,
+                                    chunk,
+                                    &mut out,
+                                );
+                                let stop = last || fed.is_err();
+                                if (!out.is_empty() || stop)
+                                    && to_store.send((out, fed, last)).is_err()
+                                {
+                                    return;
+                                }
+                                if stop {
+                                    return;
+                                }
                             }
-                            if stop {
-                                return;
-                            }
-                        }
-                    })
-                    .1
-            });
+                        })
+                        .1
+                })
+                .expect("a COPY's parser thread");
             // What the parser hands over, stored: whether it was the end.
             let mut count = 0u64;
             let mut store = |(rows, fed, last): (Vec<Parsed>, Result<()>, bool)| -> Result<bool> {
