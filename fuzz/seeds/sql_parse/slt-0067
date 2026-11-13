@@ -1,0 +1,20 @@
+INSERT INTO m SELECT DATE '2026-09-01' + i % 61, i % 7, i FROM generate_series(1, 400) i;
+SELECT count(*) FROM m;
+SELECT count(*) FROM m_10;
+INSERT INTO m VALUES ('2026-12-01', 1, 1);
+INSERT INTO m_09 VALUES ('2026-10-05', 1, 1);
+INSERT INTO m VALUES ('2026-09-02', 1, 0);
+EXPLAIN SELECT v FROM m WHERE at = DATE '2026-10-07' AND dev = 3;
+SELECT dev, sum(v) FROM m WHERE at >= DATE '2026-10-30' GROUP BY dev ORDER BY dev;
+CREATE TABLE m_rest PARTITION OF m DEFAULT;
+INSERT INTO m VALUES ('2026-12-01', 9, 1), ('2025-01-01', 2, 2);
+CREATE TABLE m_11 PARTITION OF m FOR VALUES FROM ('2026-11-01') TO ('2026-12-15');
+SELECT dev FROM m_rest ORDER BY dev;
+UPDATE m SET at = DATE '2026-09-15' WHERE at = DATE '2026-12-01';
+SELECT (SELECT count(*) FROM m_rest), (SELECT count(*) FROM m_09 WHERE at = DATE '2026-09-15' AND dev = 9);
+DELETE FROM m WHERE v % 10 = 0;
+SELECT count(*) FROM m;
+SELECT partition, strategy, key, bound, storage FROM nc_catalog.partitions WHERE table_name = 'm' ORDER BY partition;
+CREATE TABLE m_bad PARTITION OF m FOR VALUES FROM ('2026-09-15') TO ('2026-09-20');
+CREATE TABLE p_bad (id INT PRIMARY KEY, g INT) PARTITION BY LIST (g);
+CREATE TABLE ev (id INT, kind TEXT, PRIMARY KEY (id, kind)) PARTITION BY LIST (kind)

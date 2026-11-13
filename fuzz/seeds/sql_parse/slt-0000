@@ -1,0 +1,20 @@
+CREATE TABLE people (id INT PRIMARY KEY, name TEXT NOT NULL, age INT, city TEXT);
+INSERT INTO people VALUES (1, 'Anna', 34, 'Budapest'), (2, 'Béla', 27, 'Szeged'), (3, 'Csilla', NULL, 'Budapest');
+INSERT INTO people (id, name, city) VALUES (4, 'Dénes', 'Pécs');
+SELECT id, name, age, city FROM people ORDER BY id;
+SELECT name FROM people WHERE city = 'Budapest';
+SELECT id, name FROM people WHERE age > 30 OR age IS NULL ORDER BY id DESC;
+SELECT name FROM people ORDER BY age DESC, name;
+SELECT name FROM people ORDER BY age NULLS FIRST, id;
+SELECT id FROM people ORDER BY id LIMIT 2 OFFSET 1;
+SELECT p.id AS n, upper(p.name) AS loud FROM people AS p WHERE p.id IN (2, 4) ORDER BY n;
+SELECT DISTINCT city FROM people ORDER BY city;
+SELECT count(*) FROM people;
+INSERT INTO people VALUES (1, 'Again', 1, 'X');
+INSERT INTO people (id) VALUES (9);
+SELECT * FROM nobody;
+SELECT nope FROM people;
+SELEC 1;
+CREATE TABLE IF NOT EXISTS people (x INT);
+CREATE TABLE people (x INT);
+CREATE TABLE log (msg TEXT)

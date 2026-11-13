@@ -1,0 +1,20 @@
+INSERT INTO vk VALUES ('[1,2]', 6);
+SELECT v FROM vk ORDER BY v;
+SELECT n FROM vk WHERE v = '[1,-2]';
+SELECT n FROM vk WHERE v > '[1,2]' ORDER BY n;
+CREATE INDEX items_v ON items (v);
+SELECT id FROM items WHERE v = '[0,0,0]';
+SELECT v, count(*) FROM (VALUES ('[1,2]'::vector), ('[1,2]'), ('[3,4]')) t(v) GROUP BY v ORDER BY v;
+SELECT count(DISTINCT v) FROM (VALUES ('[1,2]'::vector), ('[-0,2]'), ('[0,2]')) t(v);
+SELECT tag, avg(v), sum(v) FROM items GROUP BY tag ORDER BY tag;
+SELECT ('[1,2.5,3]'::vector)[2], ('[1,2.5,3]'::vector)[0], ('[1,2.5,3]'::vector)[4], ('[1,2,3]'::vector)[NULL];
+SELECT ('[1,2,3,4]'::vector)[2:3], ('[1,2,3,4]'::vector)[:2], ('[1,2,3,4]'::vector)[3:], ('[1,2,3,4]'::vector)[-5:9];
+SELECT ('[1,2,3]'::vector)[3:2];
+SELECT v[3] FROM items WHERE id = 5;
+UPDATE items SET v[2] = 9.5 WHERE id = 1;
+SELECT v FROM items WHERE id = 1;
+UPDATE items SET v[4] = 1 WHERE id = 1;
+UPDATE items SET v[1] = NULL WHERE id = 1;
+UPDATE items SET v[NULL] = 1 WHERE id = 1;
+SELECT tag[1] FROM items;
+CREATE INDEX items_v_hnsw ON items USING hnsw (v vector_cosine_ops) WITH (m = 8)

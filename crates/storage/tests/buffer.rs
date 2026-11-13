@@ -226,3 +226,14 @@ fn read_ahead_caches_a_run_and_keeps_what_is_cached() {
         assert_eq!(tag(&c, *id), id.0);
     }
 }
+
+/// A large pool costs only the pages it holds — a flush too, which went
+/// through every frame and made each one (found fuzzing, PLAN.md
+/// §M14.29 S2: the first checkpoint allocated the whole cache).
+#[test]
+fn a_flush_makes_no_frames() {
+    let (_p, pool) = pool(16_384);
+    make_pages(&pool, 3);
+    pool.flush().unwrap();
+    assert_eq!(pool.frames_made(), 3);
+}

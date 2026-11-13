@@ -1,0 +1,20 @@
+DROP TABLE r;
+SELECT '\xDEADbeef'::bytea, '\x de ad'::bytea, 'abc'::bytea, 'a\\b'::bytea, 'a\001b'::bytea, ''::bytea;
+SELECT 'é'::bytea, '\x41'::bytea::text;
+SELECT '\xabc'::bytea;
+SELECT '\xzz'::bytea;
+SELECT 'a\9'::bytea;
+SELECT '\x01'::bytea < '\x0100'::bytea, '\x02'::bytea > '\x0100'::bytea, '\x00'::bytea = '\x'::bytea;
+SELECT '\x01'::bytea || '\x02'::bytea, '\x01'::bytea || '\x';
+SELECT substring('\x01020304'::bytea from 2 for 2), substr('\x01020304'::bytea, 3), position('\x03'::bytea in '\x010203'::bytea);
+SELECT length('\x0102'::bytea), octet_length('\x0102'::bytea), octet_length('é');
+SELECT get_byte('\x0102'::bytea, 1), length(set_byte('\x0102'::bytea, 0, 255));
+SELECT set_byte('\x0102'::bytea, 0, 255);
+SELECT get_byte('\x01'::bytea, 5);
+SELECT encode('\x00ff5c41'::bytea, 'escape'), encode('\xdead'::bytea, 'hex');
+SELECT length(encode(x, 'base64')), strpos(encode(x, 'base64'), 'IGJh'), decode(encode(x, 'base64'), 'base64') = x FROM (SELECT 'hello world, this is a long string to wrap base64 output lines at seventy six chars'::bytea) t (x);
+SELECT substring(encode(x, 'base64') FROM 78) FROM (SELECT 'hello world, this is a long string to wrap base64 output lines at seventy six chars'::bytea) t (x);
+SELECT decode('aGVs bG8=', 'base64'), decode('DEAD', 'hex'), decode('a\\b\001', 'escape');
+SELECT decode('abc', 'hex');
+SELECT decode('a', 'base64');
+SELECT decode('a%', 'base64')

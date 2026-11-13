@@ -1,0 +1,20 @@
+SELECT percentile_cont(0.3) WITHIN GROUP (ORDER BY x DESC)::text, percentile_cont(0.3) WITHIN GROUP (ORDER BY x)::text, percentile_disc(0.3) WITHIN GROUP (ORDER BY x DESC)::text, percentile_disc(0.3) WITHIN GROUP (ORDER BY x)::text FROM m;
+SELECT percentile_cont(ARRAY[0, 0.25, 0.5, 0.75, 1]) WITHIN GROUP (ORDER BY x)::text, percentile_disc(ARRAY[0.5, NULL, 0.1]) WITHIN GROUP (ORDER BY t)::text, percentile_cont(ARRAY[0.5]) WITHIN GROUP (ORDER BY iv)::text FROM m;
+SELECT percentile_cont(0.4) WITHIN GROUP (ORDER BY iv)::text, percentile_disc(0.4) WITHIN GROUP (ORDER BY ts)::text, percentile_disc(0.4) WITHIN GROUP (ORDER BY c)::text, percentile_disc(0.4) WITHIN GROUP (ORDER BY t), percentile_disc(0.6) WITHIN GROUP (ORDER BY d DESC)::text FROM m;
+SELECT mode() WITHIN GROUP (ORDER BY t), mode() WITHIN GROUP (ORDER BY t DESC), mode() WITHIN GROUP (ORDER BY n), mode() WITHIN GROUP (ORDER BY n DESC)::text FROM m;
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x)::text, percentile_disc(ARRAY[0.1]) WITHIN GROUP (ORDER BY x)::text, mode() WITHIN GROUP (ORDER BY x)::text FROM m WHERE id > 100;
+SELECT percentile_disc(7) WITHIN GROUP (ORDER BY x) FROM m WHERE id > 100;
+SELECT percentile_cont(NULL) WITHIN GROUP (ORDER BY x)::text FROM m;
+SELECT g, count(*), sum(x), percentile_cont(0.5) WITHIN GROUP (ORDER BY x) FROM m GROUP BY g HAVING percentile_cont(0.5) WITHIN GROUP (ORDER BY x) > 0 ORDER BY percentile_disc(0.5) WITHIN GROUP (ORDER BY x) DESC;
+SELECT g, percentile_cont(CASE WHEN g = 'a' THEN 0 ELSE 1 END) WITHIN GROUP (ORDER BY x) FROM m GROUP BY g ORDER BY g;
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY v)::text, percentile_cont(0.9) WITHIN GROUP (ORDER BY v)::text, percentile_disc(0.99) WITHIN GROUP (ORDER BY v)::text, percentile_disc(0) WITHIN GROUP (ORDER BY v)::text FROM (VALUES ('-Infinity'::float8), ('NaN'), ('1'), ('-0'), ('Infinity'), ('2.5')) t(v);
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY v)::text, percentile_cont(0.25) WITHIN GROUP (ORDER BY v)::text FROM (VALUES ('Infinity'::float8), ('Infinity'), ('-Infinity')) t(v);
+SELECT percentile_cont(1.5) WITHIN GROUP (ORDER BY x) FROM m;
+SELECT percentile_disc(ARRAY[0.5, -0.1]) WITHIN GROUP (ORDER BY x) FROM m;
+SELECT percentile_cont('NaN'::float8) WITHIN GROUP (ORDER BY x) FROM m;
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) OVER () FROM m;
+SELECT width_bucket(5.35, 0.024, 10.06, 5), width_bucket(5.35::float8, 0.024, 10.06, 5), width_bucket(-1, 0, 10, 5), width_bucket(10, 0, 10, 5), width_bucket(9.99, 0, 10, 5), width_bucket(3, 10, 0, 4), width_bucket(10, 10, 0, 4), width_bucket(0, 10, 0, 4);
+SELECT width_bucket(0.3, 0, 0.9, 3), width_bucket(0.3::float8, 0, 0.9, 3), width_bucket(1e300::float8, -1e308, 1e308, 10), width_bucket('Infinity'::float8, 0, 1, 4);
+SELECT width_bucket(7, ARRAY[1, 3, 5, 10]), width_bucket(0, ARRAY[1, 3]), width_bucket(3, ARRAY[1, 3]), width_bucket('c', ARRAY['a', 'b', 'd']), width_bucket(DATE '2024-02-01', ARRAY[DATE '2024-01-01', DATE '2024-03-01']);
+SELECT g, width_bucket(n, 0, 50, 5) FROM m WHERE n IS NOT NULL ORDER BY id;
+SELECT width_bucket(NULL::float8, 0, 1, 2)

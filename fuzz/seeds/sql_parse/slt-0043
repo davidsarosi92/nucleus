@@ -1,0 +1,20 @@
+SELECT date '1998-12-01' - interval '90' day;
+SELECT interval '1' day to;
+SELECT 'a'::char(3) || '|', length('a'::char(3)), 'a'::char(3)::text || '|';
+SELECT 'abcdef'::char(3), 'abc   '::char(3), 'abc'::char;
+SELECT 'a'::char(3) = 'a  '::char(5), 'a'::char(3) = 'a', 'a'::char(3) = 'a '::text, 'a'::char(3) < 'a!'::char(3);
+SELECT 'a'::char(3) || 'b', upper('a'::char(3)) || '|', octet_length('a'::char(3));
+SELECT 'a'::char(3) LIKE 'a', 'a'::char(3) LIKE 'a%';
+CREATE TABLE codes (code char(3) PRIMARY KEY, name character(5), v varchar(5));
+INSERT INTO codes VALUES ('ab', 'x', 'y'), ('a', 'longe', 'z');
+INSERT INTO codes VALUES ('b', 'longer', 'z');
+INSERT INTO codes VALUES ('abcd', 'x', 'y');
+INSERT INTO codes VALUES ('abc   ', 'x    ', 'w');
+INSERT INTO codes VALUES ('ab ', 'dup', 'd');
+SELECT code || '|', length(code), octet_length(code), name || '|' FROM codes ORDER BY code;
+SELECT code || '|' FROM codes WHERE code = 'ab';
+SELECT code || '|' FROM codes WHERE code > 'a' AND code < 'abc' ORDER BY code;
+SELECT max(code) || '|', min(name) || '|' FROM codes;
+DROP TABLE codes;
+SELECT 'ab'::char(4) IN ('ab', 'cd'), 'ab '::text IN ('ab'::char(3)), 'ab'::char(3) IN ('ab ', 'x'), 'ab'::char(4) NOT IN ('ab  ');
+SELECT substr('ab'::char(4), 1, 3) || '|', substring('é b'::char(5) from 2 for 3) || '|', substr('abc'::char(5), 3) || '|'

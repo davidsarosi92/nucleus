@@ -1,0 +1,20 @@
+SELECT percentile_cont(0.5 ORDER BY x) WITHIN GROUP (ORDER BY x) FROM m;
+CREATE TABLE s (id INT, g TEXT, x DOUBLE PRECISION, n INT, w TEXT);
+INSERT INTO s SELECT i, CASE WHEN i % 3 = 0 THEN 'a' ELSE 'b' END, i / 4.0, i % 10, 'w' || (i % 7) FROM generate_series(1, 1000) AS t(i);
+INSERT INTO s VALUES (1001, 'c', NULL, NULL, NULL);
+SELECT approx_count_distinct(id), approx_count_distinct(x), approx_count_distinct(n), approx_count_distinct(w), approx_count_distinct(g) FROM s;
+SELECT approx_count_distinct(v), count(DISTINCT v) FROM (VALUES (1.0), (1.00), (1), (2.5), (2.50)) t(v);
+SELECT g, approx_count_distinct(id), approx_count_distinct(x) FROM s GROUP BY g ORDER BY g;
+SELECT approx_count_distinct(id) FROM s WHERE id < 0;
+CREATE TABLE days (g TEXT, h hll, d ddsketch);
+INSERT INTO days SELECT g, hll_agg(id), ddsketch_agg(x) FROM s GROUP BY g;
+SELECT hll_count(hll_merge(h)), hll_cardinality(hll_merge(h)), ddsketch_count(ddsketch_merge(d)) FROM days;
+SELECT (SELECT hll_merge(h) FROM days) = (SELECT hll_agg(id) FROM s);
+SELECT g, hll_count(h) FROM days ORDER BY g;
+SELECT hll_agg(n)::text FROM s WHERE n < 2;
+SELECT hll_count('\x010e00'::hll);
+SELECT approx_percentile(x, 0.5), approx_percentile(x, ARRAY[0, 0.25, 0.75, 1])::text, approx_quantile(n, 0.9) FROM s;
+SELECT g, approx_percentile(x, 0.5) FROM s GROUP BY g ORDER BY g;
+SELECT (SELECT ddsketch_merge(d) FROM days) = (SELECT ddsketch_agg(x) FROM s), (SELECT ddsketch_quantile(ddsketch_merge(d), 0.5) FROM days), (SELECT ddsketch_quantile(ddsketch_agg(x, 0.05), 0.5) FROM s);
+SELECT approx_percentile(v, 0)::text, approx_percentile(v, 0.5)::text, approx_percentile(v, 0.8)::text, approx_percentile(v, 1)::text FROM (VALUES ('-Infinity'::float8), ('0'), ('-0'), ('1e-320'), ('Infinity'), ('NaN')) t(v);
+SELECT approx_percentile(x, 0.5) FROM s WHERE id < 0

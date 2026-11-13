@@ -1,0 +1,20 @@
+SELECT what FROM events ORDER BY id;
+CREATE TABLE people (id INT PRIMARY KEY, name TEXT);
+INSERT INTO people VALUES (1, 'bob'), (2, 'Alice'), (3, 'carol'), (4, 'Bob');
+SELECT name FROM people ORDER BY name COLLATE "C", id;
+SELECT name FROM people ORDER BY name COLLATE nosuch;
+ALTER TYPE text ADD ORDERING ci BY lower(value);
+SELECT name FROM people ORDER BY name COLLATE ci, id;
+SELECT name FROM people ORDER BY name USING ci DESC, id;
+SELECT 'ABC' COLLATE ci = 'abc', 'ABC' = 'abc', 'b' COLLATE ci > 'A';
+SELECT count(*) FROM people WHERE name COLLATE ci = 'BOB';
+SELECT name COLLATE ci FROM people WHERE id = 2;
+CREATE INDEX people_name_ci ON people (name USING ci);
+INSERT INTO people VALUES (5, 'ALICE');
+SELECT type, name, mapping FROM nc_catalog.orderings;
+ALTER TYPE text DROP ORDERING ci;
+DROP INDEX people_name_ci;
+ALTER TYPE text DROP ORDERING ci;
+SELECT name FROM people ORDER BY name USING ci;
+ALTER TYPE text ADD ORDERING c BY lower(value);
+ALTER TYPE text ADD ORDERING noisy BY value || clock_timestamp()::text

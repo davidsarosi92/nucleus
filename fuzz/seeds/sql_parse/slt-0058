@@ -1,0 +1,20 @@
+SELECT condition FROM nc_catalog.role_members WHERE role = 'slt_ar_ops';
+SELECT current_setting('nucleus.tls');
+SET nucleus.auth_method = 'certificate';
+SELECT count(*) FROM nc_catalog.sessions WHERE session_user_name = 'slt_ar_alice';
+DROP ROLE slt_ar_ops;
+SELECT name FROM nc_catalog.access_rules ORDER BY position;
+DROP ACCESS RULE slt_first;
+DROP ACCESS RULE slt_first;
+DROP ACCESS RULE IF EXISTS slt_first;
+DROP ROLE slt_ar_alice;
+SELECT count(*) FROM nc_catalog.access_rules;
+SELECT name, value, is_set FROM nc_catalog.database_settings ORDER BY name;
+work_mem 64MB false;
+ALTER DATABASE nucleus SET password_min_length = 8;
+CREATE USER slt_pr_short PASSWORD 'short';
+CREATE USER slt_pr_longname PASSWORD 'SLT_PR_LONGNAME';
+CREATE USER slt_pr_ok PASSWORD 'long enough';
+ALTER ROLE slt_pr_ok PASSWORD 'SCRAM-SHA-256$4096:c2FsdHNhbHRzYWx0c2FsdA==$7A9Qw3Jv8m2m3qq3w0wqv1Wb8f3K3O6Y3s8o6l3c5yU=:c2VydmVya2V5c2VydmVya2V5c2VydmVya2V5c2VydmU=';
+ALTER DATABASE nucleus SET password_lifetime = '30 days';
+ALTER ROLE slt_pr_ok PASSWORD 'another long one'

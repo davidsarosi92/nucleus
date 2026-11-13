@@ -1,0 +1,20 @@
+EXPLAIN SELECT * FROM a WHERE id BETWEEN 2 AND 5;
+EXPLAIN SELECT * FROM a WHERE x IN (SELECT a_id FROM b WHERE b.id = a.id);
+EXPLAIN SELECT (SELECT a_id FROM b WHERE b.id = a.id) FROM a;
+INSERT INTO a VALUES (1, 1), (2, 7), (3, 30);
+INSERT INTO b VALUES (1, 1, 'q'), (2, 2, 'q'), (3, 9, 'r');
+SELECT a.x, b.y FROM a JOIN b ON a.id = b.a_id WHERE a.x > 5 AND b.y = 'q';
+SELECT id FROM a WHERE x IN (SELECT a_id FROM b WHERE b.id = a.id);
+CREATE TABLE digits (d INT PRIMARY KEY);
+INSERT INTO digits VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9);
+CREATE TABLE t (id INT PRIMARY KEY, k INT, v INT);
+INSERT INTO t SELECT a.d * 100 + b.d * 10 + c.d, (a.d * 100 + b.d * 10 + c.d) % 2, a.d * 100 + b.d * 10 + c.d FROM digits a, digits b, digits c;
+CREATE INDEX t_k ON t (k);
+CREATE INDEX t_v ON t (v);
+EXPLAIN SELECT count(*) FROM t WHERE k = 1;
+ANALYZE;
+EXPLAIN SELECT count(*) FROM t WHERE k = 1;
+EXPLAIN SELECT count(*) FROM t WHERE v = 5;
+EXPLAIN SELECT count(*) FROM t WHERE v > 990;
+EXPLAIN SELECT count(*) FROM t WHERE v > 10;
+SELECT (SELECT count(*) FROM t WHERE k = 1), (SELECT count(*) FROM t WHERE v > 990), (SELECT count(*) FROM t WHERE v > 10)

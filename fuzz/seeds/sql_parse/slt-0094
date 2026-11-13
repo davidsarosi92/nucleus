@@ -1,0 +1,23 @@
+EXPLAIN SELECT id FROM notes WHERE body @@ 'fox' ORDER BY v <-> '[3,4]' LIMIT 3;
+SELECT id FROM notes WHERE body @@ 'fox' ORDER BY v <-> '[3,4]' LIMIT 3;
+SELECT id FROM notes WHERE body @@ 'wolf' ORDER BY v <-> '[3,4]' LIMIT 1;
+DROP TABLE notes;
+CREATE TABLE words (id INT PRIMARY KEY, body TEXT);
+INSERT INTO words SELECT i, CASE WHEN i % 10 = 0 THEN 'fox dog' WHEN i % 4 = 0 THEN 'dog' ELSE 'cat' END FROM generate_series(1, 100) AS g(i);
+CREATE INDEX words_body ON words USING text (body);
+ANALYZE words;
+EXPLAIN SELECT id FROM words WHERE body @@ 'fox';
+EXPLAIN SELECT id FROM words WHERE body @@ 'fox dog';
+EXPLAIN SELECT id FROM words WHERE body @@ '+fox +dog';
+EXPLAIN SELECT id FROM words WHERE body @@ 'dog -fox';
+DROP TABLE words;
+CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);
+INSERT INTO docs VALUES
+  (1, 'The quick brown fox jumps over the lazy dog.'),
+  (2, 'Foxes are jumping; a dog jumped.'),
+  (3, NULL);
+SELECT id, highlight(body @@ 'fox OR jumps') FROM docs ORDER BY id;
+SELECT highlight(body @@ '"quick brown" OR "fox dog"~5', '[', ']') FROM docs WHERE id = 1;
+SELECT id FROM docs WHERE body @@ '"quick fox"~1' ORDER BY id;
+SELECT count(*) FROM docs WHERE body @@ '"quick fox"';
+SELECT id FROM docs WHERE body @@ '"quick fox"~x'

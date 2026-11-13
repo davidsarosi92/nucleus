@@ -1,0 +1,20 @@
+INSERT INTO k VALUES (50), (99);
+ALTER TABLE k ALTER COLUMN a TYPE INT USING a * 2;
+SELECT 32767::smallint, -2147483648, 9223372036854775807;
+SELECT '  42 '::smallint, '-7'::integer, '+12'::bigint;
+SELECT '0x1F'::integer, '0o17'::smallint, '1_000_000'::bigint;
+SELECT '32768'::smallint;
+SELECT '-2147483649'::integer;
+SELECT '9223372036854775808'::bigint;
+SELECT '12a'::integer;
+SELECT '1__0'::integer;
+SELECT ''::smallint;
+SELECT 32767::smallint + 1::smallint;
+SELECT 2147483647 + 1;
+SELECT -(-2147483648);
+SELECT -x FROM (SELECT -2147483648) t(x);
+SELECT (-2147483648) / -1;
+SELECT 9223372036854775807 + 1;
+SELECT 32767::smallint + 1;
+SELECT 2147483647 + 1::bigint;
+SELECT 7 / 2, -7 / 2, 7 % -3, -7 % 3

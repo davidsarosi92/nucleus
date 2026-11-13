@@ -1,0 +1,20 @@
+INSERT INTO things VALUES ('00000000000000000000000000000001', 'dup', NULL);
+SELECT id, name FROM things ORDER BY id;
+SELECT name FROM things WHERE id = '00000000-0000-0000-0000-000000000002';
+SELECT name FROM things WHERE id > '00000000-0000-0000-0000-000000000001' ORDER BY name;
+SELECT min(id), max(id) FROM things;
+CREATE INDEX things_parent ON things (parent);
+SELECT name FROM things WHERE parent = '00000000-0000-0000-0000-000000000001';
+SELECT count(*), parent FROM things GROUP BY parent ORDER BY parent NULLS FIRST;
+SELECT count(DISTINCT parent) FROM things;
+SELECT a.name, count(b.id) FROM things a LEFT JOIN things b ON b.parent = a.id GROUP BY a.name ORDER BY a.name;
+SELECT uuid_extract_version('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'), uuid_extract_version('017f22e2-79b0-7cc3-98c4-dc0c0c07398f');
+SELECT uuid_extract_timestamp('017f22e2-79b0-7cc3-98c4-dc0c0c07398f');
+SELECT uuid_extract_timestamp('c232ab00-9414-11ec-b3c8-9f6bdeced846');
+SELECT uuid_extract_timestamp('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11');
+SELECT uuid_extract_version(gen_random_uuid()), uuid_extract_version(uuidv7());
+SELECT gen_random_uuid() <> gen_random_uuid();
+SELECT uuidv7() < uuidv7();
+SELECT uuid_extract_timestamp(uuidv7()) BETWEEN now() - interval '1 minute' AND clock_timestamp() + interval '1 minute';
+CREATE TABLE events (id uuid PRIMARY KEY DEFAULT uuidv7(), what TEXT);
+INSERT INTO events (what) VALUES ('first'), ('second'), ('third')

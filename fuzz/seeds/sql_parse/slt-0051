@@ -1,0 +1,20 @@
+GRANT SELECT ON slt_pay TO slt_u1;
+GRANT DELETE ON slt_pay TO slt_u1;
+RESET ROLE;
+SET ROLE slt_u1;
+SELECT sum(salary) FROM slt_pay;
+RESET ROLE;
+REVOKE SELECT ON slt_pay FROM slt_u1;
+REVOKE SELECT (id, name) ON slt_pay FROM slt_u1;
+GRANT SELECT ON slt_pay TO PUBLIC;
+SET ROLE slt_u1;
+SELECT count(*) FROM slt_pay;
+RESET ROLE;
+REVOKE SELECT ON slt_pay FROM PUBLIC;
+REVOKE GRANT OPTION FOR UPDATE ON slt_pay FROM slt_hr;
+SELECT object, grantee, privilege, grantable FROM nc_catalog.grants WHERE object = 'slt_pay' AND grantee LIKE 'slt_%' ORDER BY grantee, privilege;
+REVOKE EXECUTE ON FUNCTION md5(text) FROM PUBLIC;
+SET ROLE slt_u1;
+SELECT md5('x');
+SELECT upper('x');
+RESET ROLE

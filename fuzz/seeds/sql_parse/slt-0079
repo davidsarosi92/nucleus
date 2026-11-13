@@ -1,0 +1,20 @@
+DROP TABLE r;
+CREATE TABLE emp (id INT, dept TEXT, salary INT, hired DATE);
+INSERT INTO emp VALUES (1, 'eng', 100, '2020-01-10'), (2, 'eng', 120, '2020-03-01'), (3, 'eng', 120, '2021-06-15'), (4, 'eng', 90, '2022-02-01'), (5, 'ops', 80, '2019-11-20'), (6, 'ops', 80, '2020-07-07'), (7, 'ops', NULL, '2023-01-01'), (8, 'sales', 70, '2021-01-01');
+SELECT id, dept, salary, row_number() OVER w, rank() OVER w, dense_rank() OVER w, percent_rank() OVER w, cume_dist() OVER w FROM emp WINDOW w AS (PARTITION BY dept ORDER BY salary DESC) ORDER BY dept, salary DESC NULLS FIRST, id;
+SELECT id, rank() OVER (), count(*) OVER (), sum(salary) OVER () FROM emp ORDER BY id;
+SELECT id, salary, sum(salary) OVER (ORDER BY salary), count(*) OVER (ORDER BY salary) FROM emp ORDER BY salary NULLS LAST, id;
+SELECT id, dept, sum(salary) OVER (PARTITION BY dept ORDER BY id), avg(salary) OVER (PARTITION BY dept ORDER BY id)::numeric(10,2)::text::float8::int FROM emp ORDER BY id;
+SELECT id, sum(id) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING), sum(id) OVER (ORDER BY id ROWS 2 PRECEDING), sum(id) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING), count(*) OVER (ORDER BY id ROWS BETWEEN 2 FOLLOWING AND 3 FOLLOWING) FROM emp ORDER BY id;
+SELECT id, sum(id) OVER (ORDER BY id ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING), max(id) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 10 FOLLOWING) FROM emp ORDER BY id;
+SELECT id, salary, sum(id) OVER (ORDER BY salary GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING), count(*) OVER (ORDER BY salary GROUPS BETWEEN CURRENT ROW AND 1 FOLLOWING) FROM emp ORDER BY salary NULLS LAST, id;
+SELECT id, salary, sum(id) OVER (ORDER BY salary RANGE BETWEEN 10 PRECEDING AND 10 FOLLOWING), count(*) OVER (ORDER BY salary DESC RANGE BETWEEN 20 PRECEDING AND CURRENT ROW) FROM emp ORDER BY salary NULLS LAST, id;
+SELECT id, hired, count(*) OVER (ORDER BY hired RANGE BETWEEN INTERVAL '1 year' PRECEDING AND CURRENT ROW) FROM emp ORDER BY hired;
+SELECT x, sum(x) OVER (ORDER BY x RANGE BETWEEN 0.5 PRECEDING AND 0.5 FOLLOWING), count(*) OVER (ORDER BY x DESC RANGE 1.5 PRECEDING) FROM (VALUES (1.0::float8), (1.4), (2.0), (3.5), (5.0)) v(x) ORDER BY x;
+SELECT id, salary, sum(id) OVER (ORDER BY salary ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE CURRENT ROW), sum(id) OVER (ORDER BY salary RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE GROUP), sum(id) OVER (ORDER BY salary ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING EXCLUDE TIES) FROM emp ORDER BY salary NULLS LAST, id;
+SELECT id, ntile(3) OVER (ORDER BY id), ntile(5) OVER (ORDER BY id), ntile(20) OVER (ORDER BY id) FROM emp ORDER BY id;
+SELECT id, ntile(2) OVER (PARTITION BY dept ORDER BY id) FROM emp ORDER BY id;
+SELECT id, lag(id) OVER (ORDER BY id), lead(id) OVER (ORDER BY id), lag(id, 2) OVER (ORDER BY id), lead(id, 3, -1) OVER (ORDER BY id), lag(id, -1) OVER (ORDER BY id) FROM emp ORDER BY id;
+SELECT id, dept, lag(dept, 1, 'none') OVER (PARTITION BY dept ORDER BY id), lead(salary::text) OVER (PARTITION BY dept ORDER BY id) FROM emp ORDER BY id;
+SELECT id, lag(id, NULL) OVER (ORDER BY id) FROM emp ORDER BY id;
+SELECT id, lag(id, '-9223372036854775808'::bigint) OVER (ORDER BY id), lead(id, 9223372036854775807, 0) OVER (ORDER BY id) FROM emp ORDER BY id

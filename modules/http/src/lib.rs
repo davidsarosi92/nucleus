@@ -6,7 +6,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A request.
 #[derive(Clone, Debug)]
@@ -22,6 +22,10 @@ pub struct Request<'a> {
     pub body: Option<&'a [u8]>,
     /// How long connecting, and each read, may take.
     pub timeout: Duration,
+    /// How long the whole exchange may take, from connecting to the
+    /// response's last byte (`None`: each read's `timeout` alone) — so a
+    /// server that sends a byte now and then cannot hold a call.
+    pub total: Option<Duration>,
     /// The most bytes a response may have.
     pub limit: usize,
     /// The `User-Agent`.
@@ -36,6 +40,7 @@ impl Default for Request<'_> {
             headers: &[],
             body: None,
             timeout: Duration::from_secs(30),
+            total: Some(Duration::from_secs(300)),
             limit: 16 << 20,
             agent: "nucleus",
         }
@@ -121,6 +126,7 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
 
 /// Sends `r` and reads its response.
 pub fn send(r: &Request<'_>) -> Result<Response, Error> {
+    let deadline = r.total.map(|t| Instant::now() + t);
     let url = r.url;
     // Spaces and control characters would go into the request line as
     // they are: another header, or another request.
@@ -176,7 +182,7 @@ pub fn send(r: &Request<'_>) -> Result<Response, Error> {
     let mut last = None;
     let mut tcp = None;
     for a in &addrs {
-        match TcpStream::connect_timeout(a, r.timeout) {
+        match TcpStream::connect_timeout(a, within(r.timeout, deadline)) {
             Ok(s) => {
                 tcp = Some(s);
                 break;
@@ -190,9 +196,16 @@ pub fn send(r: &Request<'_>) -> Result<Response, Error> {
             true,
         )
     })?;
-    tcp.set_read_timeout(Some(r.timeout))
-        .and_then(|()| tcp.set_write_timeout(Some(r.timeout)))
+    tcp.set_read_timeout(Some(within(r.timeout, deadline)))
+        .and_then(|()| tcp.set_write_timeout(Some(within(r.timeout, deadline))))
         .map_err(|e| fail(&e, true))?;
+    // The same socket, to shorten each read's wait as the deadline nears.
+    let ctl = tcp.try_clone().map_err(|e| fail(&e, true))?;
+    let read = |s: &mut dyn Read, raw: &mut Vec<u8>| {
+        read_all(s, raw, r.limit, deadline, || {
+            ctl.set_read_timeout(Some(within(r.timeout, deadline)))
+        })
+    };
     let _ = tcp.set_nodelay(true);
     let mut head = format!(
         "{} {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: {}\r\nConnection: close\r\n",
@@ -217,18 +230,40 @@ pub fn send(r: &Request<'_>) -> Result<Response, Error> {
             rustls::ClientConnection::new(tls_config(), name).map_err(|e| fail(&e, false))?;
         let mut s = rustls::StreamOwned::new(conn, tcp);
         s.write_all(&request).map_err(|e| fail(&e, true))?;
-        read_all(&mut s, &mut raw, r.limit).map_err(|e| fail(&e, true))?;
+        read(&mut s, &mut raw).map_err(|e| fail(&e, true))?;
     } else {
         let mut s = tcp;
         s.write_all(&request).map_err(|e| fail(&e, true))?;
-        read_all(&mut s, &mut raw, r.limit).map_err(|e| fail(&e, true))?;
+        read(&mut s, &mut raw).map_err(|e| fail(&e, true))?;
     }
     parse(&raw).map_err(|e| fail(&e, true))
 }
 
-fn read_all(r: &mut impl Read, out: &mut Vec<u8>, limit: usize) -> std::io::Result<()> {
+/// `timeout`, or less when `deadline` is nearer (never zero: a zero
+/// timeout is no timeout to a socket).
+fn within(timeout: Duration, deadline: Option<Instant>) -> Duration {
+    let left = deadline.map_or(timeout, |d| d.saturating_duration_since(Instant::now()));
+    timeout.min(left).max(Duration::from_millis(1))
+}
+
+fn read_all(
+    r: &mut dyn Read,
+    out: &mut Vec<u8>,
+    limit: usize,
+    deadline: Option<Instant>,
+    shorten: impl Fn() -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let mut buf = [0u8; 16384];
     loop {
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the response took longer than the call may",
+                ));
+            }
+            shorten()?;
+        }
         match r.read(&mut buf) {
             Ok(0) => return Ok(()),
             Ok(n) => {
@@ -240,6 +275,20 @@ fn read_all(r: &mut impl Read, out: &mut Vec<u8>, limit: usize) -> std::io::Resu
             // A TLS peer that closes without close_notify: what was read is
             // checked by its length or chunks.
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            // A read's timeout (`EAGAIN` on Unix), at the deadline or not.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                let why = if deadline.is_some_and(|d| Instant::now() >= d) {
+                    "the response took longer than the call may"
+                } else {
+                    "the server stopped answering"
+                };
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, why));
+            }
             Err(e) => return Err(e),
         }
     }
@@ -395,5 +444,41 @@ mod tests {
         let sent = server.join().unwrap();
         assert!(sent.starts_with("POST /v1/x HTTP/1.1\r\n"), "{sent}");
         assert!(sent.contains("Content-Length: 4\r\n"));
+    }
+
+    /// A server that sends a byte now and then, each well within a read's
+    /// timeout, is cut off at the whole call's.
+    #[test]
+    fn a_dripping_server_is_cut_off() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            for b in b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"
+                .iter()
+                .cycle()
+                .take(400)
+            {
+                if s.write_all(&[*b]).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let url = format!("http://{addr}/");
+        let t = Instant::now();
+        let e = send(&Request {
+            url: &url,
+            timeout: Duration::from_secs(5),
+            total: Some(Duration::from_millis(600)),
+            ..Default::default()
+        })
+        .unwrap_err();
+        let took = t.elapsed();
+        assert!(e.transient && e.message.contains("longer"), "{}", e.message);
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        drop(server);
     }
 }

@@ -21,7 +21,8 @@ assert_eq!(r.status, 200);
   a credential never crosses a network in the clear.
 - One request a connection (`Connection: close`); a response read to its
   length or its last chunk, refused past a size limit (`limit`, 16 MB by
-  default); connect and read time out (`timeout`, 30 s by default).
+  default); connect and read time out (`timeout`, 30 s by default), and the whole
+  exchange (`total`, five minutes by default).
 - Any status is returned — the caller decides; `Error::transient` says
   whether trying again may help (no connection, a time-out, a cut
   response), `Response::retry_after` reads a `Retry-After` in seconds.

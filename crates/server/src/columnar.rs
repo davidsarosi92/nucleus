@@ -323,6 +323,11 @@ pub fn rows(body: &[u8], types: &[DataType]) -> Result<Vec<Row>, Error> {
     let align = |at: &mut usize| *at = columnar::align(*at);
     let mut at = 0;
     let n = u32::from_le_bytes(body[take(&mut at, 4)?].try_into().unwrap()) as usize;
+    // Each row takes at least a bit of the batch: a count past that is
+    // malformed, refused before rows are made for it.
+    if n > body.len().saturating_mul(8) {
+        return Err(bad());
+    }
     let mut rows: Vec<Row> = (0..n).map(|_| Vec::with_capacity(types.len())).collect();
     for &t in types {
         let nulls = body[take(&mut at, 1)?][0] != 0;
@@ -344,7 +349,7 @@ pub fn rows(body: &[u8], types: &[DataType]) -> Result<Vec<Row>, Error> {
         };
         match layout(t) {
             Layout::Fixed(w) => {
-                let data = take(&mut at, n * w)?;
+                let data = take(&mut at, n.checked_mul(w).ok_or_else(bad)?)?;
                 for (i, row) in rows.iter_mut().enumerate() {
                     if is_null(i) {
                         row.push(Value::Null);
@@ -364,7 +369,7 @@ pub fn rows(body: &[u8], types: &[DataType]) -> Result<Vec<Row>, Error> {
                 }
             }
             Layout::Var => {
-                let offs = take(&mut at, (n + 1) * 4)?;
+                let offs = take(&mut at, (n + 1).checked_mul(4).ok_or_else(bad)?)?;
                 let off = |i: usize| {
                     u32::from_le_bytes(
                         body[offs.start + 4 * i..offs.start + 4 * i + 4]
@@ -539,5 +544,16 @@ mod tests {
         ];
         let b = batch(&rows, &types, 7).unwrap();
         assert_eq!(super::rows(&b[5..], &types).unwrap(), rows);
+    }
+
+    /// Found by fuzzing (PLAN.md §M14.29 S2): a count of rows the batch
+    /// cannot hold made that many rows before reading one.
+    #[test]
+    fn a_count_past_the_batch_is_refused() {
+        let types = [DataType::Integer];
+        let mut b = u32::MAX.to_le_bytes().to_vec();
+        b.extend_from_slice(&[0; 16]);
+        assert_eq!(super::rows(&b, &types).unwrap_err().code, "08P01");
+        assert_eq!(super::rows(&b, &[]).unwrap_err().code, "08P01");
     }
 }

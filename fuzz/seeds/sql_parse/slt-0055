@@ -1,0 +1,20 @@
+DROP POLICY slt_public_read ON slt_docs;
+DROP POLICY slt_public_read ON slt_docs;
+DROP POLICY IF EXISTS slt_public_read ON slt_docs;
+ALTER TABLE slt_docs DISABLE ROW LEVEL SECURITY;
+SET ROLE slt_app;
+SELECT count(*) FROM slt_docs;
+RESET ROLE;
+DROP TABLE slt_own;
+DROP TABLE slt_docs;
+DROP ROLE slt_app, slt_owner;
+RESET nucleus.tenant;
+CREATE TABLE slt_notes (id int PRIMARY KEY, body text);
+CREATE TABLE slt_other (x int);
+CREATE ROLE slt_agent;
+CREATE USER slt_dev;
+CREATE TOKEN slt_reader FOR slt_agent READ ONLY ON TABLE slt_notes VALID UNTIL '2099-01-01 00:00:00+00';
+SELECT name, role, read_only, tables, valid_until FROM nc_catalog.tokens WHERE name LIKE 'slt_%';
+SELECT login LIKE 'nct\_%' AND length(login) = 20 FROM nc_catalog.tokens WHERE name = 'slt_reader';
+CREATE TOKEN slt_reader FOR slt_agent;
+CREATE TOKEN slt_ghost FOR slt_nobody

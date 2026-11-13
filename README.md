@@ -209,7 +209,8 @@ cargo test --workspace
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`; rustup installs it on
-first use.  nucleus builds for Linux, macOS, Windows and
+first use.  Fuzz targets for every input that crosses a trust boundary
+are in `fuzz/` (a nightly toolchain and `cargo-fuzz`; `fuzz/README.md`).  nucleus builds for Linux, macOS, Windows and
 [d-os](https://github.com/davidsarosi92/d-os) (PLAN.md, "Build targets").
 
 ## Security

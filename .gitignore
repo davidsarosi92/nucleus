@@ -12,3 +12,9 @@ __pycache__/
 # Local helper: an interactive SQL prompt (Python driver)
 /nucleus_prompt.py
 .claude/scheduled_tasks.lock
+
+# Fuzzing (fuzz/README.md): build output, the corpus it grows, what it finds
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage

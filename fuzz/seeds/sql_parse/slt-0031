@@ -1,0 +1,20 @@
+CREATE TABLE log (msg TEXT);
+SELECT table_id, name, columns, primary_key, has_row_id, indexes, checks, foreign_keys, referenced_by, key_prefix FROM nc_catalog.tables ORDER BY table_id;
+SELECT table_name, position, name, type, nullable, default_expr, in_primary_key FROM nc_catalog.columns WHERE table_id < 3 ORDER BY table_id, position;
+SELECT table_name, index_id, name, columns, is_unique, is_primary, key_prefix FROM nc_catalog.indexes ORDER BY table_name, index_id;
+SELECT table_name, name, kind, definition FROM nc_catalog.constraints;
+SELECT table_name, name, columns, referenced_table, referenced_columns, on_delete, on_update FROM nc_catalog.foreign_keys;
+INSERT INTO p VALUES (1, 'a', 1.5), (2, 'b', NULL), (3, 'b', 7);
+ANALYZE p;
+SELECT column_name, rows, nulls, distinct_values FROM nc_catalog.statistics WHERE table_name = 'p' ORDER BY column_name;
+SELECT analyzed_rows FROM nc_catalog.tables WHERE name = 'p';
+SELECT name FROM nc_catalog.schemas WHERE name IN ('nc_catalog', 'public') ORDER BY name;
+INSERT INTO nc_catalog.tables VALUES (9);
+SELECT * FROM nc_catalog.nosuch;
+SELECT 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid;
+SELECT '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}'::uuid, 'a0eebc999c0b4ef8bb6d6bb9bd380a11'::uuid, 'a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11'::uuid;
+SELECT 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a1'::uuid;
+SELECT 'a0eeb-c999c0b4ef8bb6d6bb9bd380a11'::uuid;
+SELECT uuid 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::text;
+CREATE TABLE things (id uuid PRIMARY KEY, name TEXT, parent uuid);
+INSERT INTO things VALUES ('00000000-0000-0000-0000-000000000002', 'b', NULL), ('00000000-0000-0000-0000-000000000001', 'a', NULL), ('ffffffff-0000-0000-0000-000000000000', 'z', '00000000-0000-0000-0000-000000000001')

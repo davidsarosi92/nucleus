@@ -1,0 +1,20 @@
+ALTER ROLE slt_nobody NOLOGIN;
+GRANT slt_readers TO slt_alice;
+GRANT CREATE ON SCHEMA public TO slt_alice;
+GRANT slt_alice TO slt_bob;
+GRANT slt_bob TO slt_readers;
+SELECT name, login, inherit, superuser, connection_limit FROM nc_catalog.roles WHERE name LIKE 'slt_%' ORDER BY name;
+SELECT role, member, admin_option FROM nc_catalog.role_members WHERE role LIKE 'slt_%' ORDER BY role, member;
+SELECT has_password FROM nc_catalog.roles WHERE name = 'slt_alice';
+SET ROLE slt_alice;
+SELECT current_user, session_user = current_user;
+CREATE ROLE slt_carol;
+ALTER ROLE slt_bob LOGIN;
+ALTER ROLE slt_alice PASSWORD 'secret-b';
+CREATE TABLE slt_alices (x int);
+RESET ROLE;
+SELECT owner FROM nc_catalog.tables WHERE name = 'slt_alices';
+DROP ROLE slt_alice;
+DROP TABLE slt_alices;
+CREATE ROLE slt_admin CREATEROLE;
+SET ROLE slt_admin

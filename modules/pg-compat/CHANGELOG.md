@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `handle_stream`: a client served over any byte stream (no TLS, no
+  address), for connections made in the process and for fuzzing; found
+  by fuzzing (nucleus PLAN.md §M14.29 S2): `websearch_to_tsquery` panicked
+  on a text where a word was followed by a character of more than one
+  byte.
+
 - Generated columns as PostgreSQL's catalogs show them:
   `pg_attribute.attgenerated = 's'` (and `atthasdef`), the expression in
   `pg_attrdef`, `information_schema.columns.is_generated = 'ALWAYS'` and

@@ -1,0 +1,20 @@
+CREATE TOKEN slt_ghost FOR slt_agent ON TABLE slt_nope;
+CREATE ROLE nct_0123456789abcdef;
+SET ROLE slt_dev;
+CREATE TOKEN slt_mine;
+CREATE TOKEN slt_theirs FOR slt_agent;
+DROP TOKEN slt_reader;
+SELECT name, role FROM nc_catalog.tokens WHERE name LIKE 'slt_%' ORDER BY name;
+RESET ROLE;
+DROP TABLE slt_notes;
+SELECT name, tables FROM nc_catalog.tokens WHERE name LIKE 'slt_%' ORDER BY name;
+DROP TOKEN slt_reader;
+DROP TOKEN slt_reader;
+DROP TOKEN IF EXISTS slt_reader;
+DROP ROLE slt_dev;
+SELECT count(*) FROM nc_catalog.tokens WHERE name LIKE 'slt_%';
+DROP TABLE slt_other;
+DROP ROLE slt_agent;
+CREATE ROLE slt_ar_ops;
+CREATE USER slt_ar_alice;
+CREATE ACCESS RULE slt_desk FOR slt_ar_alice FROM '10.2.3.1/32', '10.2.3.9/32' ALLOW

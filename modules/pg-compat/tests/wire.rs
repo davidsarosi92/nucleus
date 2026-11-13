@@ -666,3 +666,64 @@ fn copy_from_stdin_with_a_real_driver() {
         vec![(1, Some("one".into())), (2, None), (3, Some("a, b".into()))]
     );
 }
+
+/// A client's bytes, and what the server wrote back.
+struct Bytes {
+    input: std::io::Cursor<Vec<u8>>,
+    output: Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl Read for Bytes {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.input.read(buf)
+    }
+}
+
+impl Write for Bytes {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.output.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Found by fuzzing (PLAN.md §M14.29 S2): a Bind whose count of formats
+/// or parameters is negative was taken as a vast one (a panic); now it
+/// is a protocol error, and the connection goes on.  Served over a byte
+/// stream (`handle_stream`), no socket.
+#[test]
+fn a_negative_count_is_a_protocol_error() {
+    let db: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::new(SimPlatform::new(1)),
+            Path::new("/db"),
+            Options::default(),
+        )
+        .unwrap(),
+    );
+    let mut startup = 196_608i32.to_be_bytes().to_vec();
+    startup.extend_from_slice(b"user\0nucleus\0\0");
+    let mut input = ((startup.len() + 4) as i32).to_be_bytes().to_vec();
+    input.extend_from_slice(&startup);
+    input.extend(message(b'P', b"\0SELECT $1::int\0\0\0"));
+    for counts in [[0xFF, 0xFF, 0, 0], [0, 0, 0x80, 0]] {
+        let mut bind = b"\0\0".to_vec();
+        bind.extend_from_slice(&counts);
+        input.extend(message(b'B', &bind));
+        input.extend(message(b'S', b""));
+    }
+    input.extend(message(b'Q', b"SELECT 42\0"));
+    input.extend(message(b'X', b""));
+    let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let client = Bytes {
+        input: std::io::Cursor::new(input),
+        output: output.clone(),
+    };
+    nucleus_pg_compat::handle_stream(Box::new(client), db, &Config::trust(), 1).unwrap();
+    let out = output.lock().unwrap().clone();
+    let text = String::from_utf8_lossy(&out);
+    assert_eq!(text.matches("08P01").count(), 2, "{text}");
+    assert!(text.contains("42"), "{text}");
+}

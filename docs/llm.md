@@ -92,7 +92,8 @@ the same transaction (unchanged chunks keep their vectors); search
 secret = k, requests_per_minute = 3000, tokens_per_minute = 1000000,
 batch_tokens = 8000, parallel = 4)`; calls are paced by them (a query
 waits within its `statement_timeout`, else `53400`; background
-embedding retries later).  `EXPLAIN ANALYZE` shows a `Models:` line
+embedding retries later); a remote call itself ends within the
+statement's `statement_timeout` too (at most five minutes).  `EXPLAIN ANALYZE` shows a `Models:` line
 (calls, texts, cached, tokens, errors); `nc_catalog.statements` has
 `model_calls`, `model_tokens`, `model_ms`; `nc_catalog.models` the
 totals.

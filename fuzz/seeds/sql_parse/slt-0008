@@ -1,0 +1,20 @@
+UPDATE items SET sku = 'b2' WHERE id = 1;
+UPDATE items SET sku = 'zz' WHERE id = 1;
+SELECT id FROM items WHERE sku = 'zz';
+DELETE FROM items WHERE price > 20;
+SELECT id FROM items WHERE price IS NOT NULL OR price IS NULL;
+SELECT id FROM items WHERE cat = 'x' OR cat = 'y';
+DROP INDEX items_price;
+SELECT count(*) FROM items WHERE price < 100;
+DROP INDEX items_price;
+CREATE UNIQUE INDEX items_cat ON items (cat);
+CREATE TABLE events (day INT, seq INT, what TEXT, PRIMARY KEY (day, seq));
+INSERT INTO events VALUES (1, 1, 'a'), (1, 2, 'b'), (2, 1, 'c'), (2, 2, 'd'), (3, 1, 'e');
+SELECT what FROM events WHERE day = 2 ORDER BY seq;
+SELECT what FROM events WHERE day = 1 AND seq >= 2;
+INSERT INTO events VALUES (2, 2, 'dup');
+CREATE INDEX events_what ON events USING btree (what);
+SELECT day FROM events WHERE what = 'd';
+SELECT name, method, opclasses, options FROM nc_catalog.indexes WHERE table_name = 'events' ORDER BY name;
+CREATE INDEX ON events USING nothing (what);
+CREATE INDEX ON events (what text_pattern_ops)

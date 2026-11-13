@@ -250,6 +250,11 @@ impl BufferPool {
         self.frames.len()
     }
 
+    /// The frames made so far: each is made when a page first takes it.
+    pub fn frames_made(&self) -> usize {
+        self.frames.iter().filter(|f| f.get().is_some()).count()
+    }
+
     /// The counters so far.
     pub fn stats(&self) -> PoolStats {
         PoolStats {
@@ -530,9 +535,13 @@ impl BufferPool {
         };
         for i in 0..frames {
             let inner = shard.read().unwrap_or_else(|e| e.into_inner());
-            let (Some(id), f) = (inner.ids[i], self.frame(start + i)) else {
+            // A slot without a page has no frame to look at — and
+            // `frame` would make one: the whole cache, at the first
+            // checkpoint (found fuzzing, PLAN.md §M14.29 S2).
+            let Some(id) = inner.ids[i] else {
                 continue;
             };
+            let f = self.frame(start + i);
             if !f.dirty.load(Ordering::Acquire) || !wanted(id) {
                 continue;
             }

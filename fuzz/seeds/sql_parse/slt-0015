@@ -1,0 +1,20 @@
+VACUUM;
+VACUUM (VERBOSE, ANALYZE) big;
+BEGIN;
+VACUUM;
+ROLLBACK;
+CREATE TABLE doctors (name TEXT PRIMARY KEY, on_call BOOLEAN);
+INSERT INTO doctors VALUES ('alice', true), ('bob', true);
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM doctors WHERE on_call;
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM doctors WHERE on_call;
+UPDATE doctors SET on_call = false WHERE name = 'bob';
+UPDATE doctors SET on_call = false WHERE name = 'alice';
+COMMIT;
+COMMIT;
+SELECT count(*) FROM doctors WHERE on_call;
+UPDATE doctors SET on_call = true;
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SHOW transaction_isolation;
+SELECT count(*) FROM doctors WHERE on_call

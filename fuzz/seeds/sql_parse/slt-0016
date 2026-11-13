@@ -1,0 +1,20 @@
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT count(*) FROM doctors WHERE on_call;
+UPDATE doctors SET on_call = false WHERE name = 'bob';
+UPDATE doctors SET on_call = false WHERE name = 'alice';
+COMMIT;
+COMMIT;
+SELECT count(*) FROM doctors WHERE on_call;
+CREATE TABLE bookings (room INT, slot INT, PRIMARY KEY (room, slot));
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT count(*) FROM bookings WHERE room = 1;
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT count(*) FROM bookings WHERE room = 1;
+INSERT INTO bookings VALUES (1, 10);
+COMMIT;
+INSERT INTO bookings VALUES (1, 11);
+COMMIT;
+SET default_transaction_isolation = 'serializable';
+BEGIN;
+SHOW transaction_isolation;
+COMMIT

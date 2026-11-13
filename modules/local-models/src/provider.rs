@@ -25,7 +25,7 @@
 //! files' identity — two models made from the same files share it.
 
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nucleus_sql::ext::models::{Files as ModelFiles, ModelProvider, Options, Request, Spec};
 use nucleus_sql::ext::{Error, Result, current_who};
@@ -75,16 +75,30 @@ fn safe(s: &str, slashes: usize) -> bool {
         && !s.starts_with(['/', '.'])
 }
 
-/// GETs `url`, following up to five redirects (to `https://` only): the
-/// body, and the SHA-256 Hugging Face announces for a large file.
-fn download(url: &str) -> Result<(u16, Vec<u8>, Option<String>)> {
+/// The longest a model's download may take, all its files.
+const MAX_DOWNLOAD: Duration = Duration::from_secs(3600);
+
+/// The largest file a model may have: a quarter of the machine's memory,
+/// at most 8 GB.  It is held in memory as it arrives, and its weights
+/// are, as numbers, when the model runs — one that does not fit could
+/// never run.
+fn max_file() -> usize {
+    let quarter = nucleus_platform::real::physical_memory().map_or(u64::MAX, |m| m / 4);
+    quarter.min(8 << 30).try_into().unwrap_or(usize::MAX)
+}
+
+/// GETs `url`, following up to five redirects (to `https://` only), by
+/// `deadline`: the body, and the SHA-256 Hugging Face announces for a
+/// large file.
+fn download(url: &str, deadline: Instant) -> Result<(u16, Vec<u8>, Option<String>)> {
     let mut url = url.to_string();
     let mut announced = None;
     for _ in 0..6 {
         let r = nucleus_http::send(&nucleus_http::Request {
             url: &url,
             timeout: Duration::from_secs(60),
-            limit: 8 << 30,
+            total: Some(deadline.saturating_duration_since(Instant::now())),
+            limit: max_file(),
             agent: "nucleus-local-models",
             ..Default::default()
         })
@@ -144,10 +158,13 @@ fn fetch_hub(o: &Options, repo: &str) -> Result<Vec<(String, Vec<u8>)>> {
         }
         None => "https://huggingface.co",
     };
+    // The statement's time, if it has less.
+    let deadline = Instant::now()
+        + nucleus_sql::ext::time_left().map_or(MAX_DOWNLOAD, |t| t.min(MAX_DOWNLOAD));
     let mut out = Vec::new();
     for name in REQUIRED.iter().chain([&POOLING]) {
         let url = format!("{endpoint}/{repo}/resolve/{revision}/{name}");
-        let (status, body, announced) = download(&url)?;
+        let (status, body, announced) = download(&url, deadline)?;
         match status {
             200 => {}
             404 if *name == POOLING => continue,

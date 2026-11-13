@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A file may be at most a quarter of the machine's memory (and 8 GB);
+  a model's download ends within the statement's time, and an hour
+  (nucleus PLAN.md §M14.29 S2).
+
 - Files a repository chooses are bounded: `config.json`'s numbers,
   tensor sizes checked against overflow, Unigram pieces at most 1 KiB;
   redirects followed only to `https://`.

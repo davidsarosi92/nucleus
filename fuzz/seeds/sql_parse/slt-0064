@@ -1,0 +1,20 @@
+SELECT note FROM ad WHERE region = 'r4' AND score = 2;
+SELECT * FROM ad WHERE score > 1;
+SELECT * FROM ad WHERE id = 5;
+SELECT * FROM adsmall WHERE region = 'r3';
+SELECT table_name, columns, create_statement, statements, calls, rows_read, rows_read_with_index, example_query FROM nc_catalog.index_advice;
+SELECT position('Index Scan using ad_region_score_idx on ad' in plan) > 0 FROM nc_catalog.index_advice;
+CREATE USER slt_ad_other;
+GRANT SELECT ON ad TO slt_ad_other;
+SET ROLE slt_ad_other;
+SELECT count(*) FROM nc_catalog.index_advice;
+SELECT * FROM ad WHERE note = 'n7';
+SELECT table_name, create_statement FROM nc_catalog.index_advice;
+RESET ROLE;
+CREATE INDEX ON ad (region, score);
+SELECT create_statement FROM nc_catalog.index_advice;
+REVOKE SELECT ON ad FROM slt_ad_other;
+DROP USER slt_ad_other;
+DROP TABLE ad, adsmall;
+CREATE TABLE cm (id INT PRIMARY KEY, email TEXT, region TEXT);
+COMMENT ON TABLE cm IS 'People who buy; one row per account.'

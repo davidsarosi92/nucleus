@@ -1,0 +1,20 @@
+CREATE TABLE st_a (id INT PRIMARY KEY, v TEXT) WITH (storage = row);
+CREATE TABLE st_b (id INT PRIMARY KEY, a INT REFERENCES st_a (id), v TEXT) WITH (storage = 'row');
+INSERT INTO st_a VALUES (1, 'one'), (2, 'two');
+INSERT INTO st_b VALUES (10, 1, 'x'), (20, 2, 'y');
+SELECT b.id, a.v FROM st_b b JOIN st_a a ON a.id = b.a ORDER BY b.id;
+SELECT name, storage FROM nc_catalog.tables WHERE name LIKE 'st_%' ORDER BY name;
+SELECT name FROM nc_catalog.storages WHERE name = 'row';
+CREATE TABLE st_c (id INT PRIMARY KEY) WITH (storage = nowhere);
+CREATE TABLE st_c (id INT PRIMARY KEY) WITH (fillfactor = 70);
+CREATE TABLE st_col (id INT PRIMARY KEY, g INT, name TEXT) WITH (storage = column);
+INSERT INTO st_col SELECT i, i % 3, 'n' || i FROM generate_series(1, 5000) i;
+UPDATE st_col SET name = 'changed' WHERE id % 1000 = 0;
+DELETE FROM st_col WHERE id > 4990;
+SELECT count(*), sum(g), max(name) FROM st_col;
+SELECT id, name FROM st_col WHERE id IN (1000, 2000, 4990) ORDER BY id;
+SELECT count(*), sum(rows) >= 4990 FROM nc_catalog.segments WHERE table_name = 'st_col';
+INSERT INTO st_col VALUES (5, 0, 'again');
+CREATE TABLE m (at DATE NOT NULL, dev INT, v INT, PRIMARY KEY (at, dev)) PARTITION BY RANGE (at);
+CREATE TABLE m_09 PARTITION OF m FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+CREATE TABLE m_10 PARTITION OF m FOR VALUES FROM ('2026-10-01') TO ('2026-11-01')

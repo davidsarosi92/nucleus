@@ -1,0 +1,20 @@
+CREATE TABLE stqz (id INT PRIMARY KEY, x INT);
+INSERT INTO stqz SELECT i, i % 4 FROM generate_series(1, 40) i;
+SELECT nc_statements_reset();
+SELECT * FROM stqz WHERE id = 1;
+SELECT * FROM stqz WHERE id = 22;
+select *   from stqz   where id = 37;
+SELECT count(*) FROM stqz WHERE x = 2;
+SELECT nope FROM stqz;
+UPDATE stqz SET x = 9 WHERE id <= 5;
+SELECT query, calls, errors, rows_read, rows_returned FROM nc_catalog.statements WHERE query LIKE '%stqz%' AND query NOT LIKE '%nc_catalog%' ORDER BY query;
+SELECT bool_and(total_ms >= max_ms AND max_ms >= mean_ms AND mean_ms >= min_ms AND min_ms >= 0) FROM nc_catalog.statements;
+CREATE USER slt_st_other;
+GRANT SELECT ON stqz TO slt_st_other;
+SET ROLE slt_st_other;
+SELECT x FROM stqz WHERE id = 3;
+SELECT user_name, query, calls FROM nc_catalog.statements WHERE query LIKE '%stqz%' ORDER BY query;
+SELECT nc_statements_reset();
+RESET ROLE;
+SELECT user_name = current_user, count(*) FROM nc_catalog.statements WHERE query LIKE '%stqz%' AND query NOT LIKE '%nc_catalog%' GROUP BY user_name ORDER BY user_name;
+SELECT nc_statements_reset()

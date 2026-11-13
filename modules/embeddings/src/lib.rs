@@ -52,9 +52,19 @@ impl Module for Embeddings {
 /// The longest one wait for `Retry-After`.
 const MAX_WAIT: Duration = Duration::from_secs(10);
 
-/// POSTs `body` as JSON, once more when throttled or failed in passing;
-/// the answer's JSON.
-fn post(provider: &str, url: &str, key: Option<&str>, body: &Json) -> Result<Json> {
+/// The longest a call may take, answer included.
+const MAX_CALL: Duration = Duration::from_secs(300);
+
+/// POSTs `body` as JSON, once more when throttled or failed in passing,
+/// all within the time the statement has `left`; the answer's JSON.
+fn post(
+    provider: &str,
+    url: &str,
+    key: Option<&str>,
+    body: &Json,
+    left: Option<Duration>,
+) -> Result<Json> {
+    let deadline = std::time::Instant::now() + left.map_or(MAX_CALL, |l| l.min(MAX_CALL));
     let bytes = serde_json::to_vec(body).map_err(|e| Error::internal(e.to_string()))?;
     let auth = key.map(|k| format!("Bearer {k}"));
     let mut headers = vec![
@@ -73,6 +83,7 @@ fn post(provider: &str, url: &str, key: Option<&str>, body: &Json) -> Result<Jso
             headers: &headers,
             body: Some(&bytes),
             timeout: Duration::from_secs(60),
+            total: Some(deadline.saturating_duration_since(std::time::Instant::now())),
             limit: 256 << 20,
             agent: "nucleus-embeddings",
         });
@@ -100,14 +111,15 @@ fn post(provider: &str, url: &str, key: Option<&str>, body: &Json) -> Result<Jso
             Err(e) if e.transient => (None, Error::io(format!("{provider}: {e}"))),
             Err(e) => return Err(Error::prerequisite(format!("{provider}: {e}"))),
         };
-        if attempt >= 2 {
+        let pause = wait.unwrap_or(Duration::from_millis(500)).min(MAX_WAIT);
+        if attempt >= 2 || std::time::Instant::now() + pause >= deadline {
             // The embedding columns' queue waits as long as asked.
             return Err(match wait {
                 Some(w) => error.with_hint(nucleus_sql::ext::models::retry_hint(w)),
                 None => error,
             });
         }
-        std::thread::sleep(wait.unwrap_or(Duration::from_millis(500)).min(MAX_WAIT));
+        std::thread::sleep(pause);
     }
 }
 
@@ -222,7 +234,13 @@ impl ModelProvider for OpenAi {
             body["dimensions"] = json!(r.dimensions);
         }
         let u = format!("{}/embeddings", url(r.options, "https://api.openai.com/v1"));
-        let answer = post("openai", &u, r.secret.map(|s| s.expose()), &body)?;
+        let answer = post(
+            "openai",
+            &u,
+            r.secret.map(|s| s.expose()),
+            &body,
+            r.time_left(),
+        )?;
         usage(r, &answer["usage"]["total_tokens"]);
         by_index("openai", &answer, r.texts.len())
     }
@@ -273,7 +291,13 @@ impl ModelProvider for Cohere {
             body["output_dimension"] = json!(r.dimensions);
         }
         let u = format!("{}/v2/embed", url(r.options, "https://api.cohere.com"));
-        let answer = post("cohere", &u, r.secret.map(|s| s.expose()), &body)?;
+        let answer = post(
+            "cohere",
+            &u,
+            r.secret.map(|s| s.expose()),
+            &body,
+            r.time_left(),
+        )?;
         usage(r, &answer["meta"]["billed_units"]["input_tokens"]);
         let rows = answer["embeddings"]["float"]
             .as_array()
@@ -335,7 +359,13 @@ impl ModelProvider for Voyage {
             "{}/v1/embeddings",
             url(r.options, "https://api.voyageai.com")
         );
-        let answer = post("voyage", &u, r.secret.map(|s| s.expose()), &body)?;
+        let answer = post(
+            "voyage",
+            &u,
+            r.secret.map(|s| s.expose()),
+            &body,
+            r.time_left(),
+        )?;
         usage(r, &answer["usage"]["total_tokens"]);
         by_index("voyage", &answer, r.texts.len())
     }

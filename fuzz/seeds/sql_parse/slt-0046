@@ -1,0 +1,20 @@
+SELECT 'ok'::mood, 'ok'::mood < 'happy'::mood;
+SELECT max(feels) FROM people;
+SELECT 'angry'::mood;
+ALTER TYPE mood ADD VALUE 'meh' BEFORE 'ok';
+ALTER TYPE mood ADD VALUE 'ecstatic' AFTER 'happy';
+ALTER TYPE mood ADD VALUE 'awful' BEFORE 'sad';
+ALTER TYPE mood ADD VALUE 'glad' AFTER 'ok';
+ALTER TYPE mood ADD VALUE IF NOT EXISTS 'ok';
+ALTER TYPE mood ADD VALUE 'ok';
+ALTER TYPE mood ADD VALUE 'x' BEFORE 'nope';
+ALTER TYPE mood RENAME VALUE 'sad' TO 'blue';
+ALTER TYPE mood RENAME VALUE 'nope' TO 'x';
+ALTER TYPE mood RENAME VALUE 'blue' TO 'ok';
+INSERT INTO people VALUES ('ed', 'meh'), ('fay', 'ecstatic'), ('gus', 'awful'), ('hal', 'glad');
+SELECT name, feels FROM people ORDER BY feels, name;
+SELECT name FROM people WHERE feels BETWEEN 'meh' AND 'glad' ORDER BY name;
+SELECT feels::text FROM people WHERE name = 'bob';
+CREATE INDEX people_feels ON people (feels);
+SELECT name FROM people WHERE feels = 'ok';
+CREATE TABLE moods (m mood PRIMARY KEY, note text)

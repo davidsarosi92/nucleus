@@ -1,0 +1,20 @@
+INSERT INTO moods VALUES ('happy', 'h'), ('awful', 'a'), ('ok', 'o');
+INSERT INTO moods VALUES ('ok', 'again');
+SELECT m, note FROM moods ORDER BY m;
+CREATE TYPE color AS ENUM ('red', 'green');
+SELECT 'red'::color = 'ok'::mood;
+DROP TYPE mood;
+DROP TYPE color;
+DROP TYPE color;
+DROP TYPE IF EXISTS color;
+DROP TABLE people;
+DROP TABLE moods;
+DROP TYPE mood;
+CREATE TYPE size AS ENUM ('s', 'l');
+ALTER TYPE size ADD VALUE 'm' AFTER 's';
+SELECT type, label, position, sort_key FROM nc_catalog.enums WHERE type = 'size' ORDER BY position;
+DROP TYPE size;
+CREATE ROLE slt_readers;
+CREATE USER slt_alice PASSWORD 'secret-a';
+CREATE ROLE slt_bob WITH LOGIN NOINHERIT CONNECTION LIMIT 3;
+CREATE ROLE slt_alice

@@ -1,0 +1,20 @@
+SELECT min(r) >= 0 AND max(r) < 1 AND count(DISTINCT r) > 1900 FROM (SELECT random() AS r FROM sm) q;
+SELECT reservoir_sample(id, 5, 1)::text FROM sm WHERE id <= 3;
+SELECT array_length(reservoir_sample(w, 4), 1) FROM sm;
+SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (150);
+SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (NULL);
+SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (10) REPEATABLE (NULL);
+SELECT count(*) FROM sm TABLESAMPLE FOO (10);
+SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (10, 2);
+WITH w AS (SELECT 1) SELECT * FROM w TABLESAMPLE BERNOULLI (10);
+SELECT reservoir_sample(id, 0) FROM sm;
+CREATE TABLE dr (i INT PRIMARY KEY, x INT, s BOOLEAN, y INT);
+INSERT INTO dr SELECT i, (i * 37) % 101, i % 3 = 0, i % 2 FROM generate_series(1, 100) AS t(i);
+SELECT ks_test(x, s)::text FROM dr;
+SELECT ks_test(x, i % 2 = 0)::text FROM (SELECT i, x FROM dr UNION ALL SELECT i + 1, x FROM dr) q WHERE false;
+SELECT auc(x % 10, s OR (y = 0 AND i < 40)) FROM dr;
+SELECT chisq_test(y, s OR (y = 0 AND i < 40))::text FROM dr;
+SELECT js_divergence(y, s) FROM dr;
+SELECT psi(x, s, 4) >= 0 FROM dr;
+SELECT ks_test(x, s) IS NULL AND auc(x, s) IS NULL AND chisq_test(y, s) IS NULL FROM dr WHERE s;
+SELECT psi(x, s, 0) FROM dr

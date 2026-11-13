@@ -7,6 +7,8 @@ pub(crate) fn get_json(url: &str) -> Result<serde_json::Value, String> {
         url,
         headers: &[("Accept", "application/json")],
         timeout: std::time::Duration::from_secs(10),
+        // A login waits for it.
+        total: Some(std::time::Duration::from_secs(20)),
         limit: 1 << 20,
         agent: "nucleus-oidc",
         ..Default::default()

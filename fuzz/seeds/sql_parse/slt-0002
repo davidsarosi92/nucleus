@@ -1,0 +1,20 @@
+SELECT 5 BETWEEN 1 AND 10, 5 NOT BETWEEN 1 AND 4;
+SELECT 1 IN (1, 2), 3 IN (1, NULL), CAST(3 NOT IN (1, 2) AS TEXT);
+SELECT lower('ÁRVÍZ'), length('tükör'), substr('nucleus', 2, 3);
+SELECT coalesce(NULL, NULL, 3), nullif('a', 'a'), concat('a', NULL, 'b'), strpos('database', 'base');
+SELECT round(2.567, 2), abs(-1.5), greatest(1, 5, 3), least(4, 2, 8);
+SELECT replace(trim('  a-b-c  '), '-', '+');
+SELECT NULL IS DISTINCT FROM NULL, 1 IS DISTINCT FROM NULL;
+SELECT (NULL = NULL) IS TRUE, (1 = 1) IS NOT FALSE;
+SELECT 1 + 'a';
+SELECT nosuchfunction(1);
+SELECT * FROM (VALUES (1)) v WHERE 1;
+SELECT 'it''s';
+SELECT 10 % 3;
+CREATE TABLE dept (id INT PRIMARY KEY, name TEXT);
+CREATE TABLE emp (id INT PRIMARY KEY, name TEXT, dept_id INT, salary INT);
+INSERT INTO dept VALUES (1, 'eng'), (2, 'ops'), (3, 'empty');
+INSERT INTO emp VALUES (10, 'ann', 1, 100), (11, 'bob', 1, 80), (12, 'cat', 2, 90), (13, 'dan', NULL, 70);
+SELECT e.name, d.name FROM emp e JOIN dept d ON e.dept_id = d.id;
+SELECT e.name, d.name FROM emp e LEFT JOIN dept d ON e.dept_id = d.id;
+SELECT e.name, d.name FROM emp e RIGHT JOIN dept d ON e.dept_id = d.id

@@ -173,6 +173,8 @@ pub struct Request<'a> {
     pub files: &'a Files<'a>,
     /// The tokens the provider reported ([`Request::report_tokens`]).
     tokens: AtomicU64,
+    /// When the statement that makes the call must end, if it must.
+    deadline: Option<std::time::Instant>,
 }
 
 impl Request<'_> {
@@ -181,6 +183,15 @@ impl Request<'_> {
     /// core's estimate.
     pub fn report_tokens(&self, n: u64) {
         self.tokens.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// The time the statement making the call has left (`None`: it has
+    /// no time limit — a background worker's call, or a statement
+    /// without `statement_timeout`): a remote call should give up by
+    /// then, as the statement will.
+    pub fn time_left(&self) -> Option<std::time::Duration> {
+        self.deadline
+            .map(|d| d.saturating_duration_since(std::time::Instant::now()))
     }
 }
 
@@ -1007,6 +1018,7 @@ pub(crate) fn count_tokens_unchecked(
         texts: &batch,
         files: &files,
         tokens: AtomicU64::new(0),
+        deadline: None,
     })?;
     match counted {
         Some(n) if n.len() == texts.len() => Ok(n),
@@ -1088,6 +1100,9 @@ pub(crate) fn embed_unchecked(
                 None
             },
         };
+        // The statement's time, read here: the calls may run on threads of
+        // their own, outside it.
+        let deadline = crate::budget::time_left().map(|t| std::time::Instant::now() + t);
         let call = |b: &std::ops::Range<usize>, files: &Files<'_>| {
             let est: u64 = tokens[b.clone()].iter().sum();
             let mut cost = crate::budget::ModelCost::default();
@@ -1101,6 +1116,7 @@ pub(crate) fn embed_unchecked(
                     texts: &sent[b.clone()],
                     files,
                     tokens: AtomicU64::new(0),
+                    deadline,
                 };
                 let started = std::time::Instant::now();
                 let r = p.embed(&request);
@@ -1252,6 +1268,7 @@ fn estimate(
         texts,
         files,
         tokens: AtomicU64::new(0),
+        deadline: None,
     })?;
     Ok(match counted {
         Some(n) if n.len() == texts.len() => n.into_iter().map(|n| n as u64).collect(),
@@ -1644,6 +1661,7 @@ mod tests {
                 texts: &texts,
                 files: &Files::none(),
                 tokens: AtomicU64::new(0),
+                deadline: None,
             })
             .unwrap();
         let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
@@ -1668,6 +1686,7 @@ mod tests {
                 texts: &few,
                 files: &Files::none(),
                 tokens: AtomicU64::new(0),
+                deadline: None,
             })
             .unwrap();
         assert!(v[0].iter().any(|x| *x != 0.0) && v[1].iter().any(|x| *x != 0.0));

@@ -454,3 +454,40 @@ fn a_model_reaches_only_the_urls_allowed() {
         "22023"
     );
 }
+
+/// A server that answers a byte now and then holds a call no longer than
+/// the statement may run (PLAN.md §M14.29 S2).
+#[test]
+fn a_dripping_server_holds_a_call_only_within_the_statement() {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let mut s = s.unwrap();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                let _ = s.read(&mut buf);
+                for b in b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n"
+                    .iter()
+                    .cycle()
+                {
+                    if s.write_all(&[*b]).is_err() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            });
+        }
+    });
+    let mut s = session();
+    s.execute(&format!(
+        "CREATE MODEL drip USING openai WITH (url = 'http://{addr}/v1', model = 'x', dimensions = 2)"
+    ))
+    .unwrap();
+    s.execute("SET statement_timeout = '400ms'").unwrap();
+    let t = std::time::Instant::now();
+    let e = s.execute("SELECT embed('x', 'drip')").unwrap_err();
+    let took = t.elapsed();
+    assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+    assert!(e.message.contains("longer"), "{e:?}");
+}

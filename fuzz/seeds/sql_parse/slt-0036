@@ -1,0 +1,20 @@
+SELECT 1 / 0;
+SELECT 1::smallint % 0::smallint;
+SELECT 40000::smallint;
+SELECT 3000000000::integer;
+SELECT 2.5::integer, 3.5::integer, (-2.5)::smallint;
+SELECT 2.5::float8::integer, 3.5::float8::integer, (-2.5)::float8::bigint;
+SELECT 32767.5::smallint;
+SELECT 1e10::float8::integer;
+SELECT 1::integer::text, true::integer;
+CREATE TABLE nums (id integer PRIMARY KEY, s smallint, b bigint);
+INSERT INTO nums VALUES (1, 32767, 9223372036854775807), (2, -32768, -9223372036854775808), (3, 0, 0);
+INSERT INTO nums VALUES (4, 32768, 0);
+INSERT INTO nums VALUES (2147483648, 0, 0);
+UPDATE nums SET s = s + 1 WHERE id = 1;
+INSERT INTO nums VALUES (4, '-1', '12');
+SELECT id, s, b FROM nums ORDER BY s;
+SELECT id FROM nums WHERE s = 0::bigint AND b = 0::smallint;
+SELECT id FROM nums WHERE id = 4::bigint;
+SELECT s + 1 FROM nums WHERE id = 4;
+SELECT sum(s), min(s), max(s) FROM nums

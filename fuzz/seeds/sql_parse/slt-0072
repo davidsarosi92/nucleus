@@ -1,0 +1,20 @@
+CREATE STATISTICS addr_one ON zip FROM addr;
+CREATE STATISTICS addr_twice ON zip, zip FROM addr;
+CREATE STATISTICS addr_none ON zip, nope FROM addr;
+CREATE STATISTICS addr_kind (shapes) ON zip, city FROM addr;
+ANALYZE addr;
+EXPLAIN SELECT id FROM addr WHERE zip = 31 AND city = 3;
+EXPLAIN SELECT id FROM addr WHERE zip = 31 AND city = 3 AND region = 0;
+SELECT count(*) FROM addr WHERE zip = 31 AND city = 3 AND region = 0;
+SELECT count(*) FROM (SELECT zip, city FROM addr GROUP BY zip, city) g;
+SELECT count(*) FROM addr a JOIN addr b ON a.zip = b.zip AND a.city = b.city WHERE a.id < 10;
+SELECT count(*) FROM (SELECT DISTINCT city, region FROM addr) d;
+DROP STATISTICS addr_zip_city;
+DROP STATISTICS addr_zip_city;
+DROP STATISTICS IF EXISTS addr_zip_city;
+ANALYZE addr;
+EXPLAIN SELECT id FROM addr WHERE zip = 31 AND city = 3;
+CREATE TABLE pair (a INT, b INT, v INT, PRIMARY KEY (a, b));
+INSERT INTO pair SELECT x.d, y.d, x.d * 10 + y.d FROM digits x, digits y;
+ANALYZE pair;
+SELECT v FROM pair WHERE a = 3 AND b = 4

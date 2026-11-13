@@ -1,0 +1,20 @@
+SELECT id, round(score(body @@ 'fox dog')::numeric, 6)::text AS s FROM docs WHERE body @@ 'fox dog' ORDER BY s DESC, id;
+EXPLAIN SELECT id FROM docs WHERE body @@ 'fox dog' ORDER BY score(body @@ 'fox dog') DESC LIMIT 2;
+SELECT id FROM docs WHERE body @@ 'fox dog' ORDER BY score(body @@ 'fox dog') DESC LIMIT 2;
+SELECT id FROM docs WHERE body @@ 'fox dog' ORDER BY score(body @@ 'fox dog') DESC LIMIT 2 OFFSET 2;
+INSERT INTO docs VALUES (6, 'brown bear'), (7, 'brown bear'), (8, 'brown bear');
+SELECT id FROM docs WHERE body @@ 'bear' ORDER BY score(body @@ 'bear') DESC, id DESC LIMIT 2;
+EXPLAIN SELECT id FROM docs WHERE body @@ 'bear' AND id > 6 ORDER BY score(body @@ 'bear') DESC LIMIT 1;
+DELETE FROM docs WHERE id > 5;
+DROP INDEX docs_body;
+CREATE INDEX docs_body ON docs USING text (body) WITH (k1 = 0.9, b = 0.4);
+SELECT method, options FROM nc_catalog.indexes WHERE name = 'docs_body';
+SELECT id, round(score(body @@ 'fox')::numeric, 6)::text FROM docs ORDER BY id;
+SELECT score(body @@ body) FROM docs;
+CREATE INDEX ON docs USING text (body) WITH (b = 2);
+CREATE INDEX ON docs USING text (body) WITH (k1 = '-1');
+DROP TABLE docs;
+CREATE TABLE notes (id INT PRIMARY KEY, body TEXT, v vector(2));
+INSERT INTO notes SELECT i, CASE WHEN i % 50 = 0 THEN 'red fox' ELSE 'grey wolf' END, ('[' || (i % 37) || ',' || (i / 37) || ']')::vector FROM generate_series(1, 2000) AS g(i);
+CREATE INDEX notes_body ON notes USING text (body);
+CREATE INDEX notes_v ON notes USING hnsw (v)

@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use nucleus_kv::Kv;
 
 pub use native::handle as handle_native;
+pub use native::handle_stream as handle_native_stream;
 /// SCRAM-SHA-256 (RFC 5802 / 7677), for front ends and their clients.
 pub use nucleus_crypto::{ScramClient, ScramError, ScramServer};
 

@@ -1,0 +1,20 @@
+DROP TABLE slt_pay;
+DROP ROLE slt_hr, slt_u1, slt_u2;
+CREATE TABLE slt_docs (id int PRIMARY KEY, tenant text, secret int, body text);
+CREATE INDEX slt_docs_tenant ON slt_docs (tenant);
+INSERT INTO slt_docs VALUES (1, 'acme', 5, 'a1'), (2, 'acme', 7, 'a2'), (3, 'globex', 0, 'g1'), (4, 'globex', 9, 'g2');
+CREATE USER slt_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON slt_docs TO slt_app;
+ALTER TABLE slt_docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY slt_tenant ON slt_docs USING (tenant = current_setting('nucleus.tenant')) WITH CHECK (tenant = current_setting('nucleus.tenant'));
+CREATE POLICY slt_tenant ON slt_docs USING (true);
+CREATE POLICY slt_other ON slt_docs TO slt_nobody USING (true);
+SELECT count(*) FROM slt_docs;
+SET nucleus.tenant = 'acme';
+SET ROLE slt_app;
+SELECT id, body FROM slt_docs ORDER BY id;
+SELECT count(*) FROM slt_docs WHERE tenant = 'globex';
+SELECT id FROM slt_docs WHERE id = 3;
+SELECT id FROM slt_docs WHERE 10 / secret > 0 ORDER BY id;
+SELECT count(*) FROM slt_docs a JOIN slt_docs b ON a.id = b.id + 1;
+SELECT (SELECT max(secret) FROM slt_docs)

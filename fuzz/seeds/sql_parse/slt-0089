@@ -1,0 +1,20 @@
+SELECT o.name, s.total FROM owners o JOIN LATERAL (SELECT sum(age) AS total FROM pets WHERE owner = o.id) s ON s.total > 5 ORDER BY o.name;
+SELECT o.id, g FROM owners o, generate_series(1, o.quota) g ORDER BY o.id, g;
+SELECT o.id, g FROM owners o, LATERAL generate_series(o.quota, 1, -1) g WHERE o.id < 3 ORDER BY o.id, g;
+SELECT o.name, p.name, a.x FROM owners o, LATERAL (SELECT name, age FROM pets WHERE owner = o.id ORDER BY age LIMIT 1) p, LATERAL (SELECT p.age * o.quota AS x) a ORDER BY o.name;
+SELECT o.name, (SELECT count(*) FROM pets p, LATERAL (SELECT 1 FROM pets q WHERE q.owner = o.id AND q.age < p.age) x WHERE p.owner = o.id) FROM owners o ORDER BY o.name;
+SELECT count(*) FROM owners o, LATERAL (SELECT id FROM pets) p;
+SELECT * FROM owners o RIGHT JOIN LATERAL (SELECT * FROM pets WHERE owner = o.id) p ON true;
+SELECT * FROM owners o FULL JOIN LATERAL (SELECT * FROM pets WHERE owner = o.id) p ON true;
+SELECT * FROM owners o, (SELECT * FROM pets WHERE owner = o.id) p;
+SELECT * FROM owners o, LATERAL pets;
+SELECT tokenize('The Quick (brown) fox''s jumps, 3.14 times!');
+SELECT tokenize('The Quick (brown) fox''s jumps, and generalizations', 'porter');
+SELECT tokenize('Running runners ran', 'english');
+SELECT tokenize('A magyar nyelvben a szavak végződései változnak', 'hungarian');
+SELECT tokenize('Die Häuser der Stadt', 'german');
+SELECT tokenize('AbcD', 'trigram');
+SELECT tokenize('日本語のテキスト');
+SELECT tokenize('');
+SELECT tokenize(NULL);
+SELECT tokenize('x', 'klingon')

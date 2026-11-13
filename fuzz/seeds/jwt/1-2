@@ -1,0 +1,1 @@
+{"alg": "EdDSA"}ÿ{"iss": "https://issuer.example", "aud": "nucleus", "sub": "nobody", "exp": 4102444800, "nbf": 1700000000, "iat": 1700000000, "roles": "reader", "tenant": "acme", "nested": {"a": [1, 2]}}

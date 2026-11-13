@@ -1,0 +1,20 @@
+SELECT balance FROM acct WHERE balance > 0.1 ORDER BY 1;
+SELECT balance FROM acct WHERE balance = 100.01;
+SELECT id, balance * 2 FROM acct WHERE balance BETWEEN -50 AND 0.1 ORDER BY id;
+SELECT round(2.5), round(-2.5), round(1.235, 2), round(1234.5, -2), round(1.2, 3);
+SELECT trunc(-1.79), trunc(1.789, 2), floor(-1.2), ceil(1.2);
+SELECT abs(-1.50), sign(-3.2), mod(7.5, 2);
+SELECT 123.456::numeric(5, 2), '1.5'::numeric, CAST(2 AS decimal), 7::numeric / 2;
+SELECT 2.7::int, 2.5::float8, 0.1::float8::numeric;
+SELECT 999.995::numeric(5, 2);
+SELECT 1.0 / 0;
+SELECT 'abc'::numeric;
+SELECT DISTINCT x FROM (VALUES (1.0), (1.00), (1)) v (x);
+SELECT x, count(*) FROM (VALUES (2.50), (2.5), (3)) v (x) GROUP BY x ORDER BY x;
+CREATE TABLE prices (p NUMERIC PRIMARY KEY);
+INSERT INTO prices VALUES (1.5), (-2), (0), (10.25), (-0.5);
+INSERT INTO prices VALUES (1.50);
+SELECT p FROM prices ORDER BY p;
+SELECT p FROM prices WHERE p >= 0 AND p < 10 ORDER BY p DESC;
+CREATE INDEX acct_bal ON acct (balance);
+SELECT id FROM acct WHERE balance = 100.01

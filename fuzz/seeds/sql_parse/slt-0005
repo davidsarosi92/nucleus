@@ -1,0 +1,20 @@
+SELECT grp FROM t UNION ALL SELECT grp FROM t WHERE grp > 1 ORDER BY 1;
+VALUES (2, 'b'), (1, 'a') ORDER BY 1;
+SELECT * FROM (VALUES (1, 'x'), (2, 'y')) AS v WHERE column1 > 1;
+CREATE TABLE ca (x INT PRIMARY KEY, y INT);
+CREATE TABLE cb (k INT PRIMARY KEY, z INT);
+INSERT INTO ca VALUES (1, 10), (2, 20), (3, 30);
+INSERT INTO cb VALUES (1, 1), (2, 2), (3, 3);
+SELECT count(*) FROM ca, cb WHERE cb.k = ca.x AND ca.y < (SELECT 2 * avg(a2.y) FROM ca a2 WHERE a2.x = cb.k);
+SELECT count(*) FROM cb, ca WHERE cb.k = ca.x AND cb.z < (SELECT max(a2.y) FROM ca a2 WHERE a2.x = ca.x + 1);
+SELECT cb.k, (SELECT a2.y FROM ca a2 WHERE a2.x = cb.k) FROM ca, cb WHERE ca.x = cb.k AND (SELECT a3.y FROM ca a3 WHERE a3.x = cb.z) > 15 ORDER BY 1;
+SELECT count(*) FROM ca WHERE EXISTS (SELECT 1 FROM cb WHERE cb.k = ca.x AND cb.z <> (SELECT min(z) FROM cb c2 WHERE c2.k >= ca.x));
+ANALYZE;
+SELECT count(*) FROM ca, cb, ca a3 WHERE cb.k = ca.x AND a3.x = cb.z AND ca.y < (SELECT 2 * avg(a2.y) FROM ca a2 WHERE a2.x = cb.k AND a2.y = a3.y);
+CREATE TABLE so (ok INT PRIMARY KEY, ck INT, d DATE);
+CREATE TABLE sl (ok INT, ln INT, s INT, cd DATE, rd DATE, PRIMARY KEY (ok, ln));
+INSERT INTO so SELECT i, i % 10, date '2020-01-01' + i FROM generate_series(1, 100) i;
+INSERT INTO sl SELECT i % 50 + 1, i, i % 7, date '2020-01-01' + i % 9, date '2020-01-01' + i % 5 FROM generate_series(1, 300) i;
+INSERT INTO so VALUES (1000, NULL, NULL);
+SELECT count(*) FROM so WHERE d > date '1990-01-01' AND EXISTS (SELECT * FROM sl WHERE sl.ok = so.ok AND cd < rd);
+SELECT count(*) FROM sl l1 WHERE NOT EXISTS (SELECT * FROM sl l3 WHERE l3.ok = l1.ok AND l3.s <> l1.s AND l3.rd > l3.cd)

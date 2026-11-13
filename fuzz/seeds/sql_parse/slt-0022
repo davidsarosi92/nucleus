@@ -1,0 +1,20 @@
+SELECT avg(x), avg(y) FROM (VALUES (1, 1.5), (2, 2.25)) v (x, y);
+SELECT 12345678901234567890 + 1, -9223372036854775808;
+SELECT coalesce(NULL, 1, 2.5);
+SELECT CASE WHEN true THEN 1 ELSE 2.50 END;
+SELECT DATE '2024-02-29', TIMESTAMP '2024-03-10 14:05:06.5', TIMESTAMPTZ '2024-03-10T14:05:06+02:00', INTERVAL '1 year 2 months 3 days 04:05:06';
+SELECT '2024-01-01'::date, '2024-01-01 10:30'::timestamp, CAST('2024-06-01 00:00:00Z' AS timestamp with time zone);
+SELECT '1 day'::interval, '-1 day'::interval, '90 minutes'::interval, '1.5 days'::interval;
+SELECT '2 weeks'::interval, '@ 3 days ago'::interval, 'P1Y2M3DT4H5M6S'::interval;
+SELECT '1 day -01:00:00'::interval, '36:00:00'::interval;
+SELECT '2023-02-29'::date;
+SELECT 'yesterdayish'::date;
+SELECT '1 fortnight'::interval;
+SELECT DATE '2024-01-31' + 1, DATE '2024-03-01' - DATE '2024-02-01', DATE '2024-01-31' + INTERVAL '1 month', DATE '2024-03-01' - 1;
+SELECT TIMESTAMP '2024-01-31 10:00' + INTERVAL '1 month 1 day 2 hours', TIMESTAMP '2024-03-02 01:00' - TIMESTAMP '2024-03-01 00:00', TIMESTAMP '2024-01-01' + '1 day';
+SELECT TIMESTAMP '2024-01-03' - '2024-01-01', TIMESTAMPTZ '2024-01-01 00:00+00' - INTERVAL '30 minutes', TIMESTAMP '2024-01-01' - TIMESTAMP '2024-03-05 06:00';
+SELECT INTERVAL '1 day' * 2.5, INTERVAL '1 day' / 3, 3 * INTERVAL '1 hour', - INTERVAL '1 day', INTERVAL '1 day' + INTERVAL '2 hours';
+SELECT INTERVAL '1 mon 1 day' * 1.5;
+SELECT DATE '2024-01-01' < TIMESTAMP '2024-01-01 00:00:01', DATE '2024-01-01' = TIMESTAMP '2024-01-01', INTERVAL '1 mon' = INTERVAL '30 days', INTERVAL '1 day' > INTERVAL '23:59:59';
+SELECT TIMESTAMPTZ '2024-01-01 12:00+02' = TIMESTAMP '2024-01-01 10:00';
+SELECT extract(year FROM t), extract(month FROM t), extract(day FROM t), extract(hour FROM t), extract(minute FROM t), extract(second FROM t) FROM (SELECT TIMESTAMP '2024-12-30 13:14:15.25' AS t) s

@@ -1,0 +1,20 @@
+CREATE TABLE codes2 (code char(3) PRIMARY KEY, name character(5));
+INSERT INTO codes2 VALUES ('ab', 'x'), ('a', 'longe'), ('abc', 'x');
+SELECT code || '|' FROM codes2 WHERE code IN ('ab', 'abc ') ORDER BY code;
+SELECT code || '|' FROM codes2 WHERE code NOT IN ('ab') ORDER BY code;
+SELECT substr(code, 1, 1) || '|', count(*) FROM codes2 GROUP BY 1 ORDER BY 1;
+SELECT code || '|' FROM codes2 WHERE substring(code from 2 for 2) IN ('b', 'bc') ORDER BY code;
+SELECT code || '|' FROM codes2 WHERE code = name OR name = 'x' ORDER BY code;
+DROP TABLE codes2;
+SELECT '192.168.1.5/24'::inet, '192.168.1.5'::inet, '::1'::inet, '2001:DB8::/32'::inet;
+SELECT '::ffff:1.2.3.4'::inet, '0:0:0:1:0:0:0:1'::inet, '1:0:0:2::'::inet, '64:ff9b::1.2.3.4'::inet;
+SELECT '10'::cidr, '10.1'::cidr, '192.168.1'::cidr, '224'::cidr, '1.2.3.4'::cidr;
+SELECT '192.168.1.5/24'::cidr;
+SELECT '1.2.3.4/33'::inet;
+SELECT '10'::inet;
+SELECT '256.1.1.1'::inet;
+SELECT host('10.1.2.3/8'::inet), network('10.1.2.3/8'::inet), masklen('10.1.2.3/8'::inet), broadcast('10.1.2.3/8'::inet), netmask('10.1.2.3/8'::inet), hostmask('10.1.2.3/8'::inet);
+SELECT family('::1'::inet), abbrev('10.1.0.0/16'::cidr), abbrev('10.1.2.3/24'::inet), set_masklen('10.1.2.3/8'::inet, 16);
+SELECT broadcast('::1/64'::inet), network('2001:db8::1/32'::inet), netmask('::1/64'::inet);
+SELECT set_masklen('10.1.2.3/8'::inet, 40);
+SELECT '10.1.2.3'::inet << '10.0.0.0/8', '10.0.0.0/8'::inet << '10.0.0.0/8', '10.0.0.0/8'::inet <<= '10.0.0.0/8', '10.0.0.0/8'::cidr >> '10.1.2.3', '10/8'::cidr >>= '10/8'::cidr, '10/8'::cidr && '10.1/16'::cidr, '10/8'::cidr && '11/8'::cidr, '::1'::inet << '10/8'::cidr

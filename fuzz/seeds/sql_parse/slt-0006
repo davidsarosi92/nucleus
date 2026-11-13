@@ -1,0 +1,20 @@
+SELECT count(*) FROM so WHERE ok IN (SELECT ok FROM sl WHERE s > 3);
+SELECT count(*) FROM so WHERE NOT EXISTS (SELECT 1 FROM sl WHERE sl.s = so.ck);
+SELECT count(*) FROM so WHERE ck IN (SELECT s FROM sl WHERE sl.ok = so.ok);
+SELECT count(*) FROM so WHERE ok IN (SELECT DISTINCT ok FROM sl ORDER BY ok) AND NOT EXISTS (SELECT 1 FROM sl WHERE sl.ok = so.ok AND sl.s = 6);
+EXPLAIN SELECT count(*) FROM so WHERE EXISTS (SELECT * FROM sl WHERE sl.ok = so.ok AND cd < rd);
+SELECT count(*), sum(sl.s) FROM so, sl WHERE so.ok = sl.ok AND so.ok IN (SELECT ok FROM sl WHERE s = 6) AND NOT EXISTS (SELECT 1 FROM sl s2 WHERE s2.ok = sl.ok AND s2.ln = sl.ln + 1);
+SELECT count(*) FROM so a, so b WHERE a.ck = b.ck AND b.ok IN (SELECT ok FROM sl WHERE s > 4) AND EXISTS (SELECT 1 FROM sl WHERE sl.ok = a.ok AND sl.s = 0);
+EXPLAIN SELECT count(*) FROM so a, so b WHERE a.ck = b.ck AND b.ok IN (SELECT ok FROM sl WHERE s > 4);
+CREATE TABLE memo_o (id INT PRIMARY KEY, g INT, h INT);
+INSERT INTO memo_o VALUES (1, 1, 10), (2, 1, 10), (3, 1, 20), (4, 2, 10), (5, NULL, 10), (6, NULL, 10);
+CREATE TABLE memo_i (g INT, h INT, v INT);
+INSERT INTO memo_i VALUES (1, 10, 1), (1, 10, 2), (1, 20, 4), (2, 10, 8), (2, 20, 16);
+SELECT id, (SELECT sum(v) FROM memo_i i WHERE i.g = o.g AND i.h = o.h), (SELECT count(*) FROM memo_i i WHERE i.g IS NOT DISTINCT FROM o.g) FROM memo_o o;
+SELECT o.id, (SELECT max(x.s) FROM (SELECT (SELECT sum(v) FROM memo_i i WHERE i.g = o.g AND i.h = j.h) AS s FROM memo_i j) x) FROM memo_o o WHERE o.g IS NOT NULL;
+CREATE TABLE few (id INT PRIMARY KEY, k INT, lim INT);
+INSERT INTO few VALUES (1, 5, 100), (2, 7, 0), (3, NULL, 100), (4, 999999, 100), (5, 5, 0);
+CREATE TABLE many (id INT PRIMARY KEY, k INT, v INT);
+INSERT INTO many SELECT n, n % 50, n % 7 FROM generate_series(1, 20000) AS g(n);
+ANALYZE;
+EXPLAIN SELECT id FROM few WHERE EXISTS (SELECT 1 FROM many WHERE many.k = few.k AND many.v < few.lim)

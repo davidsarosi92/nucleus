@@ -1,0 +1,20 @@
+CREATE TABLE small (id INT PRIMARY KEY, name TEXT);
+INSERT INTO small SELECT d, 'n' || d FROM digits;
+CREATE TABLE mid (id INT PRIMARY KEY, small_id INT);
+INSERT INTO mid SELECT a.d * 10 + b.d, b.d FROM digits a, digits b;
+CREATE TABLE big (id INT PRIMARY KEY, mid_id INT);
+INSERT INTO big SELECT id, id % 100 FROM t;
+ANALYZE;
+EXPLAIN SELECT count(*) FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE small.name = 'n3';
+SELECT count(*) FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE small.name = 'n3';
+SELECT small.name, big.id FROM big, small, mid WHERE big.mid_id = mid.id AND mid.small_id = small.id AND big.id = 7;
+SELECT small.name, count(*) FROM big JOIN mid ON big.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE big.id < 30 GROUP BY small.name;
+CREATE TABLE big2 (id INT PRIMARY KEY, mid_id INT);
+INSERT INTO big2 SELECT * FROM big;
+SELECT count(*) FROM big2 JOIN mid ON big2.mid_id = mid.id JOIN small ON mid.small_id = small.id WHERE small.name = 'n3';
+SELECT count(*) FROM t WHERE k = 1 AND v BETWEEN 100 AND 199;
+CREATE TABLE star (id INT PRIMARY KEY, a INT, b INT);
+INSERT INTO star SELECT id, id % 10, id / 100 FROM t;
+ANALYZE star;
+EXPLAIN SELECT count(*) FROM star JOIN small s1 ON star.a = s1.id JOIN small s2 ON star.b = s2.id;
+SELECT count(*) FROM star JOIN small s1 ON star.a = s1.id JOIN small s2 ON star.b = s2.id

@@ -1,0 +1,20 @@
+SELECT '13:00 PM'::time;
+SELECT 'x'::time;
+SELECT time '10:00' + interval '3 hours', time '22:00' + interval '3 hours', time '01:00' - interval '2 hours', time '10:00' - time '08:30';
+SELECT date '2024-01-02' + time '03:04', time '03:04' + date '2024-01-02', time '10:00' + '1 hour';
+SELECT time '10:00' - interval '1 day 1 hour', time '10:00' + interval '1 month', time '24:00' + interval '1 min';
+SELECT time '23:59' - time '24:00', time '24:00' = time '00:00';
+SELECT time '10:00' + 1;
+SELECT extract(hour from time '13:14:15.5'), extract(second from time '13:14:15.5'), extract(epoch from time '01:00'), extract(microseconds from time '00:00:01.5'), date_part('minute', time '13:14');
+SELECT extract(day from time '13:00');
+SELECT '2024-01-02 03:04:05.6'::timestamp::time, '1 day 25:30'::interval::time, time '03:04'::interval, make_time(8, 15, 23.5);
+SELECT make_time(1, 2, 60);
+SELECT make_time(25, 0, 0);
+CREATE TABLE shifts (starts time PRIMARY KEY, ends time WITHOUT TIME ZONE);
+INSERT INTO shifts VALUES ('22:00', '06:00'), ('06:00', '14:00'), ('14:00', '22:00'), ('00:00', '24:00');
+INSERT INTO shifts VALUES ('06:00:00', '07:00');
+SELECT starts, ends, ends - starts FROM shifts ORDER BY starts;
+SELECT starts FROM shifts WHERE starts > '05:00' AND starts < '20:00' ORDER BY starts;
+SELECT min(ends), max(ends) FROM shifts;
+DROP TABLE shifts;
+SELECT interval '90' day, interval '3' month, interval '1' year, interval '5' day to hour, interval '1 day 2 hours 3 minutes' day, interval '1 day 2 hours 3 minutes' hour, interval '1.5' hour, interval '-2' day

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A call ends within the time its statement has left
+  (`Request::time_left`), at most five minutes, its retry's pause
+  included (nucleus PLAN.md §M14.29 S2).
+
 - The providers name their `url` (`ModelProvider::urls`), so nucleus
   holds a model not made by an administrator to the database's
   `model_urls`.

@@ -1,0 +1,20 @@
+SELECT avg(s) FROM nums;
+SELECT abs(-5::smallint), abs(-2147483647), mod(7, 3), mod(-7::smallint, 3::smallint);
+SELECT abs((-32768)::smallint);
+SELECT abs(-2147483648);
+SELECT (ARRAY[10, 20, 30])[2::smallint];
+SELECT ARRAY[1::smallint, 2::smallint];
+SELECT 3 FROM nums LIMIT 1::smallint;
+SELECT date '2024-01-01' + 1::smallint;
+DROP TABLE nums;
+CREATE TABLE parent (id bigint PRIMARY KEY);
+CREATE TABLE child (id integer PRIMARY KEY, p smallint REFERENCES parent (id) ON UPDATE CASCADE);
+INSERT INTO parent VALUES (1), (2);
+INSERT INTO child VALUES (10, 1);
+INSERT INTO child VALUES (11, 3);
+UPDATE parent SET id = 5 WHERE id = 1;
+SELECT id, p FROM child;
+UPDATE parent SET id = 40000 WHERE id = 5;
+SELECT id FROM parent ORDER BY id;
+DROP TABLE child;
+DROP TABLE parent

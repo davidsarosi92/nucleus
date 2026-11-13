@@ -1,0 +1,20 @@
+UPDATE items SET v = '[1,2,3,4]' WHERE id = 1;
+SELECT type FROM nc_catalog.columns WHERE table_name = 'items' AND name = 'v';
+SELECT '[1,2.5]'::vector::real[], ARRAY[1, 2.5]::vector;
+SELECT ARRAY[1, NULL]::vector;
+SELECT '[1,2]'::vector(2);
+SELECT '[1,2,3]'::vector(2);
+SELECT id, v <-> '[1,2,3]' FROM items WHERE v IS NOT NULL ORDER BY v <-> '[1,2,3]', id;
+SELECT v <-> '[1,2,3]', v <=> '[1,2,3]', v <#> '[1,2,3]', v <+> '[1,2,3]' FROM items WHERE id = 2;
+SELECT l2_distance(v, '[1,2,3]'), cosine_distance(v, '[1,2,3]'), inner_product(v, '[1,2,3]'), negative_inner_product(v, '[1,2,3]'), l1_distance(v, '[1,2,3]') FROM items WHERE id = 2;
+SELECT id FROM items WHERE id <> 4 AND v IS NOT NULL ORDER BY v <=> '[1,2,3]' LIMIT 3;
+SELECT id FROM items WHERE v IS NOT NULL ORDER BY v <#> '[1,2,3]', id;
+SELECT (v <-> NULL) IS NULL FROM items WHERE id = 1;
+SELECT '[1,2]'::vector <-> '[1,2,3]';
+SELECT '[0,0]'::vector <=> '[1,1]';
+SELECT vector_dims('[1,2,3]'), vector_norm('[3,4]'), l2_normalize('[3,4]'), subvector('[1,2,3,4]', 2, 2), normalize('[0,0]');
+SELECT dims(v), norm(v) FROM items WHERE id = 3;
+SELECT '[1,2]'::vector + '[3,4]', '[1,2]'::vector - '[3,4]', '[1,2]'::vector * '[3,4]', '[1,2]'::vector || '[3]'::vector;
+SELECT '[1,2]'::vector + '[3]';
+CREATE TABLE vk (v vector PRIMARY KEY, n INT);
+INSERT INTO vk VALUES ('[1,2]', 1), ('[1]', 2), ('[-3,9]', 3), ('[1,-2]', 4), ('[1,2,0.5]', 5)

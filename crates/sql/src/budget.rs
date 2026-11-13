@@ -290,6 +290,17 @@ pub fn deadline() -> Option<i64> {
     SPENT.with(|s| s.borrow().as_ref().and_then(|s| s.budget.deadline))
 }
 
+/// The time the current statement has left before its deadline (zero
+/// once past it), if it has one — for work the database cannot watch
+/// row by row, such as a call over the network.
+pub fn time_left() -> Option<std::time::Duration> {
+    let d = deadline()?;
+    let now = crate::datetime::clock().ok()?;
+    Some(std::time::Duration::from_micros(
+        d.saturating_sub(now).max(0) as u64,
+    ))
+}
+
 /// The µs the current statement has spent waiting for the client.
 pub fn waited() -> i64 {
     SPENT.with(|s| s.borrow().as_ref().map_or(0, |s| s.waited.get()))

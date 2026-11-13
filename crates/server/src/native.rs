@@ -246,16 +246,20 @@ fn split_tag(tag: &str) -> (String, u64) {
     }
 }
 
-/// Serves one client until it says Bye or goes away.
-pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> io::Result<()> {
-    let log = |what: &str, text: &str| {
+fn logger(config: &Config, id: u32) -> impl Fn(&str, &str) + '_ {
+    move |what: &str, text: &str| {
         if config.log_queries {
             eprintln!(
                 "nucleus-server: [{id}] {what}: {}",
                 nucleus_sql::statements::redacted(text.trim())
             );
         }
-    };
+    }
+}
+
+/// Serves one client until it says Bye or goes away.
+pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> io::Result<()> {
+    let log = logger(config, id);
     // Behind a trusted proxy, the address its header names.
     let peer = crate::transport::client_address(&mut stream, &config.trusted_proxies)?;
     // A client that starts with a TLS handshake asks for TLS (§10).
@@ -279,6 +283,30 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
     } else {
         Box::new(stream)
     };
+    serve(stream, kv, config, id, peer, tls_info)
+}
+
+/// Serves one client over any byte stream until it says Bye or goes
+/// away — a connection made in the process, or a fuzzer's bytes: no TLS
+/// and no client address.
+pub fn handle_stream(
+    stream: Box<dyn crate::Stream>,
+    kv: Arc<dyn Kv>,
+    config: &Config,
+    id: u32,
+) -> io::Result<()> {
+    serve(stream, kv, config, id, None, None)
+}
+
+fn serve(
+    stream: Box<dyn crate::Stream>,
+    kv: Arc<dyn Kv>,
+    config: &Config,
+    id: u32,
+    peer: Option<std::net::IpAddr>,
+    tls_info: Option<crate::TlsInfo>,
+) -> io::Result<()> {
+    let log = logger(config, id);
     let (r, w) = crate::transport::split(stream);
     let mut input = BufReader::with_capacity(WIRE_BUFFER, r);
     let mut out = BufWriter::with_capacity(WIRE_BUFFER, w);

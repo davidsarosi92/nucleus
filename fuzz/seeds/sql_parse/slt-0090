@@ -1,0 +1,25 @@
+SELECT name FROM nc_catalog.text_analyzers WHERE name IN ('simple', 'porter', 'trigram', 'hungarian', 'english') ORDER BY name;
+SELECT count(*) FROM nc_catalog.text_analyzers;
+CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);
+INSERT INTO docs VALUES
+  (1, 'The quick brown fox jumps over the lazy dog'),
+  (2, 'A database engine for AI models'),
+  (3, 'Databases and their engines, e-mail and P/E ratios'),
+  (4, 'The lazy cat sleeps'),
+  (5, NULL);
+SELECT id FROM docs WHERE body @@ 'lazy' ORDER BY id;
+SELECT id FROM docs WHERE body @@ 'fox cat' ORDER BY id;
+SELECT id FROM docs WHERE body @@ 'lazy AND dog' ORDER BY id;
+SELECT id FROM docs WHERE body @@ '+lazy -dog' ORDER BY id;
+SELECT id FROM docs WHERE body @@ 'lazy NOT cat' ORDER BY id;
+SELECT id FROM docs WHERE body @@ '(database OR engines) AND NOT ai' ORDER BY id;
+SELECT id FROM docs WHERE body @@ '"lazy dog"' ORDER BY id;
+SELECT id FROM docs WHERE body @@ '"dog lazy"' ORDER BY id;
+SELECT id FROM docs WHERE body @@ 'data*' ORDER BY id;
+SELECT id FROM docs WHERE body @@ 'databsae~1' ORDER BY id;
+SELECT id FROM docs WHERE body @@ 'e-mail p/e' ORDER BY id;
+SELECT id FROM docs WHERE body @@ '-lazy' ORDER BY id;
+SELECT id FROM docs WHERE NOT (body @@ 'lazy') ORDER BY id;
+SELECT body @@ 'x' FROM docs WHERE id = 5;
+SELECT 'Hello, world!' @@ 'WORLD';
+SELECT 'Hello, world!' @@ NULL

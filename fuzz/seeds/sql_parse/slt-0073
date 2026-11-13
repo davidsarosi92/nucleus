@@ -1,0 +1,20 @@
+CREATE STATISTICS pair_ab ON a, v FROM pair;
+CREATE STATISTICS pair_ab ON zip, city FROM addr;
+DROP TABLE pair;
+CREATE STATISTICS pair_ab ON zip, city FROM addr;
+SELECT name, array_to_string(columns, ',') FROM nc_catalog.statistics_objects WHERE table_name = 'addr';
+ANALYZE addr;
+SELECT array_to_string(columns, ','), distinct_values FROM nc_catalog.column_groups WHERE table_name = 'addr';
+SELECT from_column, to_column, degree FROM nc_catalog.dependencies WHERE table_name = 'addr';
+SELECT '[1, 2.5, -3]'::vector;
+SELECT '[1e-7,-0,3.4028235e38]'::vector;
+SELECT '[1,,2]'::vector;
+SELECT '1,2'::vector;
+SELECT '[]'::vector;
+SELECT '[NaN]'::vector;
+SELECT '[1e39]'::vector;
+CREATE TABLE bad (v vector(0));
+CREATE TABLE bad (v uuid(3));
+CREATE TABLE items (id INT PRIMARY KEY, v vector(3), tag TEXT);
+INSERT INTO items VALUES (9, '[1,2]', 'x');
+INSERT INTO items VALUES (1, '[1,2,3]', 'a'), (2, '[4,6,3]', 'a'), (3, '[-1,0,1]', 'b'), (4, '[0,0,0]', 'b'), (5, '[1,2,3.5]', 'a'), (6, NULL, 'c')

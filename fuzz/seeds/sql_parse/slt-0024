@@ -1,0 +1,20 @@
+INSERT INTO ev VALUES (5, 'not a date', NULL, NULL, NULL);
+INSERT INTO ev VALUES (5, 20240101, NULL, NULL, NULL);
+UPDATE ev SET day = day + 1, dur = dur * 2 WHERE id = 1;
+SELECT day, dur FROM ev WHERE id = 1;
+CREATE TABLE ticks (t TIMESTAMPTZ);
+BEGIN;
+INSERT INTO ticks VALUES (now());
+INSERT INTO ticks VALUES (current_timestamp);
+COMMIT;
+SELECT count(DISTINCT t), min(t) > TIMESTAMPTZ '2020-01-01 00:00+00' FROM ticks;
+SELECT now() = now(), current_date = now()::date;
+SELECT localtimestamp = now()::timestamp, clock_timestamp() >= now();
+SELECT DATE '0044-03-15 BC', TIMESTAMP 'epoch';
+CREATE TABLE dept (id INT PRIMARY KEY, name TEXT UNIQUE);
+CREATE TABLE emp (id INT PRIMARY KEY, dept_id INT REFERENCES dept, dept_name TEXT REFERENCES dept (name) ON UPDATE CASCADE);
+INSERT INTO dept VALUES (1, 'eng'), (2, 'ops'), (3, 'empty');
+INSERT INTO emp VALUES (10, 1, 'eng'), (11, 1, NULL), (12, NULL, NULL), (13, 2, 'ops');
+INSERT INTO emp VALUES (14, 9, NULL);
+INSERT INTO emp VALUES (14, NULL, 'nope');
+UPDATE emp SET dept_id = 7 WHERE id = 10

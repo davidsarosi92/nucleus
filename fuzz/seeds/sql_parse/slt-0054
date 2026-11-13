@@ -1,0 +1,20 @@
+UPDATE slt_docs SET body = body || '!' WHERE 10 / secret > 0;
+DELETE FROM slt_docs WHERE id = 3;
+INSERT INTO slt_docs VALUES (5, 'globex', 1, 'sneak');
+UPDATE slt_docs SET tenant = 'globex' WHERE id = 1;
+INSERT INTO slt_docs VALUES (6, 'acme', 2, 'a6');
+RESET ROLE;
+SELECT id, body FROM slt_docs ORDER BY id;
+CREATE POLICY slt_public_read ON slt_docs FOR SELECT USING (body LIKE 'g%');
+CREATE POLICY slt_no_big ON slt_docs AS RESTRICTIVE FOR SELECT USING (id < 6);
+SET ROLE slt_app;
+SELECT id FROM slt_docs ORDER BY id;
+RESET ROLE;
+CREATE USER slt_owner;
+CREATE TABLE slt_own (x int);
+INSERT INTO slt_own VALUES (1), (2);
+GRANT ALL ON slt_own TO slt_owner;
+ALTER TABLE slt_own ENABLE ROW LEVEL SECURITY;
+SET ROLE slt_owner;
+SELECT count(*) FROM slt_own;
+RESET ROLE

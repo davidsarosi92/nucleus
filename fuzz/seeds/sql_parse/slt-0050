@@ -1,0 +1,20 @@
+GRANT EXECUTE ON TABLE slt_pay TO slt_u1;
+GRANT SELECT (nope) ON slt_pay TO slt_u1;
+GRANT SELECT ON slt_pay TO slt_nobody;
+SET ROLE slt_u1;
+SELECT id, name FROM slt_pay ORDER BY id;
+SELECT salary FROM slt_pay;
+SELECT * FROM slt_pay;
+SELECT id FROM slt_pay WHERE salary > 150;
+SELECT max(salary) FROM slt_pay;
+EXPLAIN SELECT salary FROM slt_pay;
+INSERT INTO slt_pay VALUES (3, 'cy', 1);
+UPDATE slt_pay SET name = 'x' WHERE id = 1;
+DELETE FROM slt_pay;
+DROP TABLE slt_pay;
+GRANT SELECT (id) ON slt_pay TO slt_u2;
+RESET ROLE;
+SET ROLE slt_u2;
+UPDATE slt_pay SET salary = salary + 1 WHERE id = 2;
+UPDATE slt_pay SET name = 'x';
+SELECT salary FROM slt_pay WHERE id = 2

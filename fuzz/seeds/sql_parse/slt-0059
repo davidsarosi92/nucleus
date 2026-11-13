@@ -1,0 +1,20 @@
+SELECT valid_until > now() + interval '29 days' AND valid_until < now() + interval '31 days' FROM nc_catalog.roles WHERE name = 'slt_pr_ok';
+ALTER ROLE slt_pr_ok PASSWORD 'yet another one' VALID UNTIL 'infinity';
+SELECT valid_until IS NULL FROM nc_catalog.roles WHERE name = 'slt_pr_ok';
+ALTER DATABASE nucleus SET no_such_setting = 1;
+ALTER DATABASE nucleus SET password_min_length = 'many';
+ALTER DATABASE nucleus SET login_lock_failures = 0;
+ALTER DATABASE nucleus SET statement_timeout = 'soon';
+ALTER DATABASE elsewhere SET password_min_length = 8;
+SET ROLE slt_pr_ok;
+ALTER DATABASE nucleus SET password_min_length = 1;
+RESET ROLE;
+ALTER DATABASE nucleus SET statement_timeout = '5s';
+SELECT value, is_set FROM nc_catalog.database_settings WHERE name = 'statement_timeout';
+ALTER DATABASE nucleus RESET statement_timeout;
+ALTER DATABASE nucleus RESET password_min_length;
+ALTER DATABASE nucleus RESET password_lifetime;
+SELECT count(*) FROM nc_catalog.database_settings WHERE is_set;
+DROP ROLE slt_pr_ok;
+CREATE TABLE ea (id INT PRIMARY KEY, x INT);
+CREATE TABLE eb (id INT PRIMARY KEY, a_id INT, y TEXT)

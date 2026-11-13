@@ -1,0 +1,24 @@
+CREATE TABLE queries (q TEXT);
+INSERT INTO queries VALUES ('fox'), ('"lazy cat"'), ('engine*');
+SELECT q, id FROM queries, docs WHERE body @@ q ORDER BY q, id;
+SELECT id FROM docs WHERE body @@ '"lazy';
+SELECT id FROM docs WHERE body @@ 'lazy AND';
+SELECT id FROM docs WHERE body @@ 'lazy~3';
+DROP TABLE queries;
+DROP TABLE docs;
+CREATE TABLE notes (id INT PRIMARY KEY, author TEXT, body TEXT);
+INSERT INTO notes VALUES
+  (1, 'ann', 'Running databases for AI models'),
+  (2, 'bob', 'A database runs queries'),
+  (3, 'ann', 'Engines and their runners'),
+  (4, 'cy', NULL);
+SELECT id FROM notes WHERE body @@ 'run' ORDER BY id;
+CREATE INDEX notes_body ON notes USING text (body) WITH (analyzer = 'english');
+SELECT method, opclasses, options FROM nc_catalog.indexes WHERE name = 'notes_body';
+SELECT id FROM notes WHERE body @@ 'run' ORDER BY id;
+EXPLAIN SELECT id FROM notes WHERE body @@ 'database AND run' AND author = 'ann';
+SELECT id FROM notes WHERE body @@ 'database AND run' AND author = 'ann';
+SELECT count(*) FROM notes WHERE body @@ '-database';
+SELECT id FROM notes WHERE body @@ '"databases for ai"' ORDER BY id;
+UPDATE notes SET body = 'Nothing runs here' WHERE id = 1;
+DELETE FROM notes WHERE id = 2

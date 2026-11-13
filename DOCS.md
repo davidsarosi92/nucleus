@@ -117,6 +117,28 @@ NUCLEUS_SEED=0xf4a13e02e1757317 cargo test crash_keeps   # rerun one failing see
 NUCLEUS_SIM_CASES=10000 cargo test -p nucleus-platform   # search more seeds
 ```
 
+**Fuzzing** (PLAN.md §M14.29 S2; `fuzz/README.md`): `fuzz/` is a crate of
+its own (its own workspace, built only by `cargo fuzz` on a nightly
+toolchain with AddressSanitizer) with a target for every input that
+crosses a trust boundary — `sql_parse`, `values` (every type's text
+input), `text_search`, `copy`, `ncp`, `pg_wire`, `scram`, `jwt`, `disk`
+(a real database's pages and WAL patched, checksums sealed again or not,
+then opened, checked and read) and `model_files`.  An error is an answer;
+a panic, a hang, a memory error or an allocation past the limit is a
+finding.  The front ends serve any byte stream
+(`nucleus_server::handle_native_stream`, `nucleus_pg_compat::handle_stream`:
+no TLS, no client address), so the protocol targets need no socket;
+their database is in memory under the machine's clock with
+`statement_timeout` at 250 ms.  Seeds are kept in `fuzz/seeds/`
+(`fuzz/seeds.py` makes them: the sqllogictest statements, recorded
+driver and psycopg sessions, a computed SCRAM exchange, tiny model
+files); CI's `fuzz` job runs each target three minutes a change, its
+corpus kept between runs:
+
+```sh
+cd fuzz && cargo +nightly fuzz run -O ncp corpus/ncp seeds/ncp -- -max_total_time=300 -rss_limit_mb=2048 -timeout=10
+```
+
 ## 3. Platform layer (`nucleus-platform`)
 
 The only way any nucleus code reaches files, time or randomness (PLAN.md
@@ -4079,7 +4101,12 @@ sends a batch's texts in calls of the model's batch (`call_batch`).  A
 provider's answer is checked: as many vectors as texts, each of the
 model's dimensions, finite.  Failures: `58030` where trying again may
 help (no connection, 429, 5xx — tried once more first), `55000` where it
-will not (a refused key, an unknown model).
+will not (a refused key, an unknown model).  A remote call ends within
+the time its statement has left (`models::Request::time_left`, from
+`statement_timeout`; `ext::time_left` on the statement's own thread),
+at most five minutes, the retry's pause included — `nucleus-http`'s
+`Request::total` bounds a whole exchange, so a server dripping a byte
+within each read's timeout cannot hold a call.
 
 `nc_catalog.models` (`name`, `owner`, `provider`, `dimensions`,
 `max_batch`, `secret`, `query_prefix`, `document_prefix`, `options`, `files`, `bytes`,
@@ -4092,7 +4119,8 @@ secret given, one call for a ranking, the cache, a column table's 2,000
 rows in batches), `modules/embeddings/tests/providers.rs` (servers on
 loopback answering as OpenAI, Cohere and Voyage: the requests, the key,
 answers out of order, a 429 tried again, a 401 without the key in the
-error, a server down).
+error, a server down, a dripping server cut off at the statement's
+`statement_timeout`).
 
 Local models (`modules/local-models`, §M14.22 E3, in the `nucleus`
 tool): `CREATE MODEL m USING local WITH (huggingface = 'org/name' [,
@@ -4104,7 +4132,10 @@ files or the network outside a call): `tokenizer.json`, `config.json`,
 from Hugging Face (`https://huggingface.co/<repo>/resolve/<revision>/…`,
 redirects followed to `https://`, a large file checked against the
 SHA-256 the hub announces in `X-Linked-Etag`; another `endpoint`, and a
-`path` on the server, only for administrators, `42501`).  The core keeps
+`path` on the server, only for administrators, `42501`).  A file may be
+at most a quarter of the machine's memory, and 8 GB (it arrives in
+memory, and its weights run there); the download, all its files, ends
+within the statement's time, and an hour.  The core keeps
 the files with the model by content — `00 16 <SHA-256> <chunk u32>`, 32
 KiB chunks; the record lists their names, digests and lengths — so a
 backup or a replica has them, two models from the same files store them
@@ -5142,6 +5173,22 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-13 — §M14.29 S2, fuzzing:** `fuzz/` — ten `cargo fuzz`
+  targets (§2), seeds (`fuzz/seeds.py`), CI's `fuzz` job and the fuzz
+  crate in the lint job.  The front ends serve any byte stream
+  (`nucleus_server::handle_native_stream`,
+  `nucleus_pg_compat::handle_stream`).  Fixed: `websearch_to_tsquery`
+  on a multi-byte character after a word (a panic); Bind's negative
+  counts (a panic, now `08P01`); a columnar load's row count past its
+  batch (an allocation, now `08P01`); the buffer pool's flush made every
+  frame (the first checkpoint allocated the whole cache;
+  `BufferPool::frames_made`); a B-tree node with keys out of order
+  (`Node::decode` and sibling merges refuse it, `Corrupt`, instead of a
+  panic).  `nucleus-http`'s `Request::total` bounds a whole exchange;
+  `models::Request::time_left` and `ext::time_left` give a call the
+  statement's remaining time (embedding providers stop by it); a local
+  model's file is at most a quarter of the machine's memory.
 
 - **2026-11-13 — model URLs on a list:** database setting `model_urls`,
   `ModelProvider::urls`, `models::split_url` / `url_under`; checked at

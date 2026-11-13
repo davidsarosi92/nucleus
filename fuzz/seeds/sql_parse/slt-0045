@@ -1,0 +1,20 @@
+SELECT x FROM (VALUES ('10.0.0.0/7'::inet), ('10.0.0.0/8'), ('10.5.0.0/16'), ('10.0.0.5'), ('9.255.0.0/16'), ('11.0.0.1'), ('::1'), ('0.0.0.0/0'), ('10.0.0.5/8')) v (x) ORDER BY x;
+SELECT '10.1.2.3'::inet = '10.1.2.3/32'::cidr, '1.2.3.4'::inet > '::1'::inet, '10.1.2.3/8'::inet::cidr, '10/8'::cidr::inet, '10.1.2.3/8'::inet::text;
+CREATE TABLE hits (id INT PRIMARY KEY, addr inet, net cidr);
+CREATE INDEX hits_addr ON hits (addr);
+INSERT INTO hits VALUES (1, '10.0.0.1', '10.0.0.0/8'), (2, '10.200.3.4', '10.200.0.0/16'), (3, '11.0.0.1', '11.0.0.0/8'), (4, '9.255.255.255', '9.0.0.0/8'), (5, '10.0.0.0/8', '10.0.0.0/24'), (6, '::ffff:10.0.0.1', '::/0'), (7, '10.255.255.255', '10.255.0.0/16');
+SELECT id FROM hits WHERE addr << '10.0.0.0/8' ORDER BY id;
+SELECT id FROM hits WHERE addr <<= '10.0.0.0/8' ORDER BY id;
+SELECT id FROM hits WHERE net >>= addr ORDER BY id;
+SELECT id FROM hits WHERE net && '10.200.3.0/24' ORDER BY id;
+SELECT min(addr), max(addr) FROM hits;
+EXPLAIN SELECT id FROM hits WHERE addr <<= '10.0.0.0/8';
+DROP TABLE hits;
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+CREATE TYPE mood AS ENUM ('x');
+CREATE TYPE twice AS ENUM ('a', 'a');
+CREATE TABLE people (name text PRIMARY KEY, feels mood);
+INSERT INTO people VALUES ('ann', 'happy'), ('bob', 'sad'), ('cy', 'ok'), ('di', NULL);
+INSERT INTO people VALUES ('ed', 'angry');
+SELECT name, feels FROM people ORDER BY feels, name;
+SELECT name FROM people WHERE feels > 'sad' ORDER BY name

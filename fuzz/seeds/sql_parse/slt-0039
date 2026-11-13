@@ -1,0 +1,20 @@
+SELECT 'inf'::real * 2::real, 'inf'::float8 - 1;
+SELECT 0.1::real = 0.1::float8, 0.5::real = 0.5::float8;
+SELECT 2.5::real::integer, 3.5::real::smallint, 0.1::real::numeric;
+SELECT (1::real / 3::real)::numeric, 123456.7::real::numeric;
+SELECT round(2.5::float8), round(-2.5::float8);
+SELECT round(2.5::real), trunc(2.7::real), abs(-1.5::real);
+CREATE TABLE r (x real PRIMARY KEY, d double precision);
+INSERT INTO r VALUES (1.5, 1.5), (0.1, 0.1), ('-inf', 0), ('NaN', 'NaN'), (-0.5, -0.5);
+INSERT INTO r VALUES (1.5, 2);
+INSERT INTO r VALUES (1e39, 0);
+SELECT x, d FROM r ORDER BY x;
+SELECT x FROM r WHERE x = 1.5;
+SELECT x FROM r WHERE x = 0.1;
+SELECT x FROM r WHERE x = 0.1::real;
+SELECT x FROM r WHERE x > 0 AND x < 2 ORDER BY x;
+SELECT sum(x), avg(x) FROM r WHERE x > -1 AND x < 2;
+SELECT sum(x) FROM (VALUES (3e38::real), (3e38::real)) v (x);
+SELECT min(x), max(x) FROM r WHERE x < 'NaN';
+SELECT ARRAY[1.5::real, 0.1::real];
+SELECT CASE WHEN true THEN 1::real ELSE 2 END

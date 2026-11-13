@@ -1,0 +1,20 @@
+SELECT id FROM few WHERE EXISTS (SELECT 1 FROM many WHERE many.k = few.k AND many.v < few.lim);
+SELECT id FROM few WHERE NOT EXISTS (SELECT 1 FROM many WHERE many.k = few.k AND many.v < few.lim);
+SELECT id FROM few WHERE k IN (SELECT k FROM many);
+CREATE TABLE items (id INT PRIMARY KEY, sku TEXT, price INT, cat TEXT);
+INSERT INTO items VALUES (1, 'a1', 10, 'x'), (2, 'b2', 20, 'y'), (3, 'c3', 30, 'x'), (4, 'd4', NULL, 'y');
+CREATE INDEX items_price ON items (price);
+CREATE UNIQUE INDEX items_sku ON items (sku);
+CREATE INDEX items_cat_price ON items (cat, price);
+SELECT id FROM items WHERE price >= 20;
+SELECT id FROM items WHERE price > 10 AND price < 30;
+SELECT id FROM items WHERE sku = 'c3';
+SELECT id FROM items WHERE cat = 'y';
+SELECT id FROM items WHERE cat = 'x' AND price > 15;
+EXPLAIN SELECT id FROM items WHERE sku = 'c3';
+EXPLAIN SELECT id FROM items WHERE id = 2;
+INSERT INTO items VALUES (5, 'a1', 5, 'z');
+INSERT INTO items VALUES (6, NULL, 1, 'z'), (7, NULL, 2, 'z');
+UPDATE items SET price = 25 WHERE id = 1;
+SELECT id FROM items WHERE price >= 20;
+SELECT id FROM items WHERE price = 10

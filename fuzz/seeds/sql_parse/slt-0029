@@ -1,0 +1,21 @@
+SELECT 1 = ANY (ARRAY[2, NULL]), 1 = ANY (ARRAY[1, NULL]);
+SELECT ARRAY[1, 2] || ARRAY[3], ARRAY[1] || 2;
+CREATE TABLE tags (id INT PRIMARY KEY, names TEXT[], score INT);
+INSERT INTO tags VALUES (1, '{red,green}', 5), (2, ARRAY['blue'], 7), (3, '{}', 9), (4, NULL, 1);
+SELECT id, names FROM tags ORDER BY id;
+SELECT id FROM tags WHERE 'red' = ANY (names) ORDER BY id;
+SELECT id, names[1] FROM tags ORDER BY id;
+SELECT array_agg(id ORDER BY id) FROM tags;
+SELECT string_agg(names[1], '; '), array_agg(score) FROM (SELECT * FROM tags ORDER BY id) t;
+SELECT id FROM tags WHERE id = ANY (SELECT score - 4 FROM tags) ORDER BY id;
+SELECT ARRAY(SELECT id * 10 FROM tags WHERE id < 3 ORDER BY id);
+SELECT string_agg(id::text, ',' ORDER BY id DESC), array_agg(DISTINCT score ORDER BY score) FROM tags;
+SELECT bool_and(score > 0), bool_or(score > 8) FROM tags;
+SELECT 'nucleus' ~ '^nuc', 'nucleus' ~ 'X', 'Nucleus' ~* '^nuc', 'abc' !~ 'b';
+SELECT regexp_replace('a1b22c333', '[0-9]+', '#', 'g');
+SELECT regexp_replace('John Smith', '(\w+) (\w+)', '\2, \1');
+SELECT 'x' ~ '(';
+SELECT E'tab\there' || E'\nnewline' = 'tab	here
+newline';
+SELECT * FROM generate_series(1, 5, 2);
+SELECT s, s * s FROM generate_series(3, 1, -1) AS s

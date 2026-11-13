@@ -1,0 +1,20 @@
+SELECT sum(amount) FROM sales WHERE id > 100;
+SELECT count(*) FROM sales WHERE id > 100;
+SELECT count(*) FROM sales GROUP BY region HAVING count(*) > 5;
+SELECT region, amount FROM sales GROUP BY region;
+SELECT * FROM sales WHERE sum(amount) > 1;
+SELECT region, max(amount) - min(amount) FROM sales GROUP BY region ORDER BY region;
+SELECT count(*), region FROM sales GROUP BY region ORDER BY count(*), region LIMIT 1;
+CREATE TABLE t (id INT PRIMARY KEY, grp INT, v INT);
+INSERT INTO t VALUES (1, 1, 10), (2, 1, 20), (3, 2, 5), (4, 3, NULL);
+SELECT (SELECT max(v) FROM t);
+SELECT id FROM t WHERE v > (SELECT avg(v) FROM t);
+SELECT id FROM t a WHERE v > (SELECT avg(v) FROM t b WHERE b.grp = a.grp) ORDER BY id;
+SELECT id FROM t a WHERE EXISTS (SELECT 1 FROM t b WHERE b.grp = a.grp AND b.id <> a.id);
+SELECT id FROM t WHERE grp IN (SELECT grp FROM t WHERE v >= 20);
+SELECT id FROM t WHERE grp NOT IN (SELECT grp FROM t WHERE v IS NOT NULL);
+SELECT count(*) FROM t WHERE 99 NOT IN (SELECT v FROM t);
+SELECT g, n FROM (SELECT grp AS g, count(*) AS n FROM t GROUP BY grp) s WHERE n > 1;
+SELECT (SELECT v FROM t);
+SELECT (SELECT v FROM t WHERE id = 99);
+SELECT id FROM t UNION SELECT grp FROM t ORDER BY 1

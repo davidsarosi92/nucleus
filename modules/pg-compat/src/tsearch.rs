@@ -527,7 +527,11 @@ impl Parser<'_> {
     fn web_or_operator(&mut self) -> bool {
         self.web_skip();
         let rest = &self.s.s[self.s.at..];
-        if rest.len() < 2 || !rest[..2].eq_ignore_ascii_case("or") {
+        if !rest
+            .as_bytes()
+            .get(..2)
+            .is_some_and(|b| b.eq_ignore_ascii_case(b"or"))
+        {
             return false;
         }
         let after = &rest[2..];
@@ -1996,6 +2000,21 @@ mod tests {
             query_input("!x").unwrap().as_ref()
         ));
         assert!(!matches(&doc, None));
+    }
+
+    /// Found by fuzzing (PLAN.md §M14.29 S2): `or` was looked for by
+    /// slicing two bytes, inside a character that starts with more.
+    #[test]
+    fn websearch_takes_any_text_after_a_word() {
+        for text in [
+            "\u{6771}\n\u{4eac}\u{306f}\u{65e5}f",
+            "a 京",
+            "a oré b",
+            "a or 京",
+            "or",
+        ] {
+            let _ = Parser::parse(text, Syntax::Websearch).unwrap();
+        }
     }
 
     #[test]

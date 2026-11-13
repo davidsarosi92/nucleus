@@ -957,12 +957,29 @@ impl BTree {
                 i - 1
             };
             let b = a + 1;
+            // Each node's keys are in order (`Node::decode` checks); at
+            // the seam they must be too, or the parent's separator lied.
+            let disorder = || Error::Corrupt {
+                page: node.children[b],
+                reason: "keys out of order across siblings",
+            };
             let combined = match (self.load(node.children[a])?, self.load(node.children[b])?) {
                 (Node::Leaf(mut x), Node::Leaf(y)) => {
+                    if let (Some(l), Some(f)) = (x.entries.last(), y.entries.first())
+                        && l.0 >= f.0
+                    {
+                        return Err(disorder());
+                    }
                     x.entries.extend(y.entries);
                     Node::Leaf(x)
                 }
                 (Node::Internal(mut x), Node::Internal(y)) => {
+                    let sep = &node.keys[a];
+                    if x.keys.last().is_some_and(|l| l >= sep)
+                        || y.keys.first().is_some_and(|f| f <= sep)
+                    {
+                        return Err(disorder());
+                    }
                     x.keys.push(node.keys[a].clone());
                     x.keys.extend(y.keys);
                     x.children.extend(y.children);

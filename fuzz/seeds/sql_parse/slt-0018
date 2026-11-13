@@ -1,0 +1,20 @@
+SELECT x FROM a WHERE x IN (SELECT x FROM a EXCEPT SELECT 1) ORDER BY 1;
+SELECT x FROM b EXCEPT SELECT x FROM a WHERE false ORDER BY 1;
+SELECT x FROM b INTERSECT SELECT x FROM a WHERE false;
+EXPLAIN SELECT x FROM a EXCEPT ALL SELECT x FROM b;
+CREATE TABLE l (id INT, a TEXT);
+CREATE TABLE r (id INT, b TEXT);
+INSERT INTO l VALUES (1, 'l1'), (2, 'l2'), (2, 'l2b'), (NULL, 'lnull');
+INSERT INTO r VALUES (2, 'r2'), (3, 'r3'), (NULL, 'rnull');
+SELECT l.a, r.b FROM l FULL JOIN r ON l.id = r.id ORDER BY 1, 2;
+SELECT l.a, r.b FROM l FULL OUTER JOIN r ON l.id = r.id AND r.b = 'r3' ORDER BY 1, 2;
+SELECT * FROM l FULL JOIN r USING (id) ORDER BY 1, 2, 3;
+SELECT id, a, b FROM l FULL JOIN r USING (id) WHERE id IS NOT NULL ORDER BY 1, 2;
+SELECT l.id, r.id, id FROM l FULL JOIN r USING (id) ORDER BY 1, 2, 3;
+SELECT l.a, r.b FROM l FULL JOIN r ON l.id = r.id WHERE l.a IS NULL ORDER BY 2;
+SELECT l.a, r.b FROM l FULL JOIN r ON true WHERE r.b = 'r3' ORDER BY 1;
+SELECT count(*) FROM l FULL JOIN r ON false;
+SELECT l.a, r.b FROM l FULL JOIN (SELECT * FROM r WHERE false) r ON l.id = r.id ORDER BY 1;
+SELECT x.a, x.b, t.v FROM (SELECT * FROM l FULL JOIN r USING (id)) x FULL JOIN (VALUES (3, 'v3'), (9, 'v9')) t(id, v) ON x.id = t.id ORDER BY 1, 2, 3;
+SELECT coalesce(l.a, '-'), coalesce(r.b, '-') FROM l FULL JOIN r ON l.id < r.id ORDER BY 1, 2;
+EXPLAIN SELECT l.a, r.b FROM l FULL JOIN r ON l.id = r.id WHERE l.a = 'l1'

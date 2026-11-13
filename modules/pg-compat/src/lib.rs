@@ -21,4 +21,4 @@ mod tsheadline;
 mod tsrank;
 
 pub use catalog::{PgCompat, type_oid};
-pub use protocol::{Pg, handle, registry};
+pub use protocol::{Pg, handle, handle_stream, registry};

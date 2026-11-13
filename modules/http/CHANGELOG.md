@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `Request::total`: how long a whole exchange may take (five minutes by
+  default), so a server sending a byte within each read's timeout cannot
+  hold a call; a read's timeout is an error that says so, not the OS's
+  code (nucleus PLAN.md §M14.29 S2).
+
 - A URL with spaces or control characters is refused (they would go
   into the request line); a chunk size near `usize::MAX` is refused, not
   wrapped.

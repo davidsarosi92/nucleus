@@ -1,0 +1,20 @@
+INSERT INTO log VALUES ('first'), ('second'), ('first');
+SELECT msg FROM log;
+SELECT * FROM log WHERE msg = 'first';
+DROP TABLE log;
+SELECT * FROM log;
+DROP TABLE IF EXISTS log;
+SELECT 1 + 2, 7 / 2.0, 'a' || 'b';
+SELECT 7 / 2;
+SELECT 1 < 2;
+SELECT NULL AND false, NULL OR true, NOT (NULL = 1) IS NULL;
+SELECT CASE WHEN 1 > 2 THEN 'a' WHEN 2 > 1 THEN 'b' ELSE 'c' END;
+SELECT CASE 3 WHEN 1 THEN 'one' WHEN 3 THEN 'three' END;
+SELECT CASE WHEN false THEN 'x' END;
+SELECT CAST('42' AS INT), 42::text, '2.5'::double precision;
+SELECT '7'::int + 1;
+SELECT 'abc'::int;
+SELECT 1 / 0;
+SELECT 9223372036854775807 + 1;
+SELECT -9223372036854775808;
+SELECT 'hello' LIKE 'h%', 'hello' LIKE 'H%', 'hello' ILIKE 'H%', 'hello' NOT LIKE '_ello'

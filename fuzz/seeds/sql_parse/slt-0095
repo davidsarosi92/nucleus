@@ -1,0 +1,20 @@
+SELECT snippet(body @@ 'lazy', '*', '*', '…', 4) FROM docs WHERE id = 1;
+SELECT snippet(body @@ 'cat', '*', '*', '…', 3) FROM docs WHERE id = 1;
+SELECT snippet(body @@ 'cat', '*', '*', '…', 0) FROM docs WHERE id = 1;
+SELECT highlight(body = 'x') FROM docs;
+CREATE INDEX docs_body ON docs USING text (body) WITH (analyzer = 'english');
+SELECT id, highlight(body @@ 'jump') FROM docs WHERE body @@ 'jump' ORDER BY id;
+SELECT id, snippet(body @@ 'fox dog') FROM docs WHERE body @@ 'fox dog' ORDER BY score(body @@ 'fox dog') DESC, id LIMIT 2;
+SELECT id, round(score(body @@ '"fox dog"~6')::numeric, 6)::text FROM docs WHERE body @@ '"fox dog"~6' ORDER BY score(body @@ '"fox dog"~6') DESC LIMIT 5;
+CREATE TABLE items (id INT PRIMARY KEY, price NUMERIC(8, 2), qty INT NOT NULL, total NUMERIC(10, 2) GENERATED ALWAYS AS (price * qty) STORED, label TEXT GENERATED ALWAYS AS ('item ' || id) STORED);
+INSERT INTO items (id, price, qty) VALUES (1, 2.50, 4), (2, NULL, 1);
+SELECT id, price, qty, total, label FROM items ORDER BY id;
+INSERT INTO items VALUES (3, 1.25, 3);
+SELECT total FROM items WHERE id = 3;
+INSERT INTO items (id, price, qty, total) VALUES (4, 1, 1, 1);
+UPDATE items SET total = 0 WHERE id = 1;
+UPDATE items SET qty = qty + 1, price = 3 WHERE id = 1;
+SELECT total, label FROM items WHERE id = 1;
+UPDATE items SET id = 10 WHERE id = 1;
+SELECT label FROM items WHERE id = 10;
+CREATE INDEX items_total ON items (total)

@@ -1,0 +1,20 @@
+CREATE TABLE log (at DATE, n INT, PRIMARY KEY (at, n)) PARTITION BY RANGE (at);
+CREATE TABLE log_old PARTITION OF log FOR VALUES FROM ('2020-01-01') TO ('2021-01-01');
+CREATE TABLE log_new PARTITION OF log FOR VALUES FROM ('2021-01-01') TO (MAXVALUE);
+INSERT INTO log VALUES ('2020-06-01', 1), ('2020-07-01', 2), ('2099-01-01', 3);
+ALTER TABLE pm SET STORAGE POLICY (column AFTER interval '30 days');
+ALTER TABLE log SET STORAGE POLICY (column AFTER interval '30 days');
+SELECT name, storage FROM nc_catalog.tables WHERE name LIKE 'log%' ORDER BY name;
+SELECT at, n FROM log ORDER BY at;
+ALTER TABLE log SET STORAGE POLICY NONE;
+BEGIN;
+ALTER TABLE log SET STORAGE POLICY (column AFTER interval '1 day');
+ROLLBACK;
+CREATE TABLE lb (id INT PRIMARY KEY, g INT, v INT);
+CREATE TABLE ls (k INT PRIMARY KEY, ref INT, w INT);
+INSERT INTO lb SELECT i, i % 97, i * 7 % 1000 FROM generate_series(1, 20000) i;
+INSERT INTO ls VALUES (1, 5, 10), (2, 17, 20), (3, 20001, 30), (4, NULL, 40), (5, 19999, 50);
+CREATE INDEX lb_g ON lb (g);
+ANALYZE;
+EXPLAIN SELECT ls.k, lb.v FROM ls JOIN lb ON lb.id = ls.ref;
+SELECT ls.k, lb.v FROM ls JOIN lb ON lb.id = ls.ref ORDER BY 1

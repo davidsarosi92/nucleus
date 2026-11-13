@@ -1,0 +1,20 @@
+INSERT INTO ea SELECT i, i % 10 FROM generate_series(1, 100) i;
+INSERT INTO eb SELECT i, i % 50, 'y' || i FROM generate_series(1, 200) i;
+SELECT count(*) FROM ea JOIN eb ON ea.id = eb.a_id WHERE ea.x > 5;
+EXPLAIN (ANALYZE, TIMING OFF) SELECT ea.x, eb.y FROM ea JOIN eb ON ea.id = eb.a_id WHERE ea.x > 5;
+ANALYZE;
+EXPLAIN (ANALYZE, TIMING OFF) SELECT ea.x, eb.y FROM ea JOIN eb ON ea.id = eb.a_id WHERE ea.x > 5;
+EXPLAIN (ANALYZE, TIMING OFF) SELECT x, count(*) FROM ea GROUP BY x ORDER BY x LIMIT 3;
+SELECT id, (SELECT count(*) FROM eb WHERE eb.a_id = ea.id) FROM ea WHERE id <= 3;
+EXPLAIN (ANALYZE, TIMING OFF) SELECT id, (SELECT count(*) FROM eb WHERE eb.a_id = ea.id) FROM ea WHERE id <= 3;
+EXPLAIN (ANALYZE, TIMING OFF) SELECT * FROM ea WHERE x > 100 AND id = (SELECT max(a_id) FROM eb);
+EXPLAIN (ANALYZE, TIMING OFF) WITH c AS (SELECT * FROM ea WHERE x = 1) SELECT count(*) FROM c c1 JOIN c c2 ON c1.id = c2.id;
+EXPLAIN (ANALYZE false) SELECT id FROM ea WHERE id = 7;
+EXPLAIN (FORMAT JSON) SELECT 1;
+EXPLAIN ANALYZE DELETE FROM ea;
+CREATE USER slt_ea_reader;
+SET ROLE slt_ea_reader;
+EXPLAIN ANALYZE SELECT * FROM ea;
+RESET ROLE;
+DROP USER slt_ea_reader;
+DROP TABLE ea, eb

@@ -1,0 +1,20 @@
+CREATE ROLE slt_carol;
+CREATE ROLE slt_root SUPERUSER;
+DROP ROLE slt_carol;
+RESET ROLE;
+ALTER ROLE slt_readers RENAME TO slt_viewers;
+SELECT role FROM nc_catalog.role_members WHERE member = 'slt_alice';
+REVOKE slt_viewers FROM slt_alice;
+REVOKE CREATE ON SCHEMA public FROM slt_alice;
+DROP ROLE slt_viewers, slt_bob, slt_alice, slt_admin;
+DROP ROLE slt_alice;
+DROP ROLE IF EXISTS slt_alice;
+CREATE TABLE slt_pay (id int PRIMARY KEY, name text, salary int);
+INSERT INTO slt_pay VALUES (1, 'ann', 100), (2, 'bob', 200);
+CREATE USER slt_u1;
+CREATE USER slt_u2;
+CREATE ROLE slt_hr;
+GRANT slt_hr TO slt_u2;
+GRANT SELECT (id, name) ON slt_pay TO slt_u1;
+GRANT SELECT, UPDATE (salary) ON TABLE slt_pay TO slt_hr WITH GRANT OPTION;
+GRANT FLY ON slt_pay TO slt_u1

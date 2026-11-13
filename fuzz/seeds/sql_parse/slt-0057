@@ -1,0 +1,20 @@
+CREATE ACCESS RULE slt_kiosk FOR slt_ar_alice FROM '10.2.3.2/32' VIA ncp AUTH password, certificate WITH TLS ALLOW READ ONLY AS ROLE slt_ar_ops;
+CREATE ACCESS RULE slt_first FOR ALL WITHOUT TLS REJECT BEFORE slt_desk;
+CREATE ACCESS RULE slt_middle FOR slt_ar_alice ALLOW AFTER slt_desk;
+SELECT position, name, roles, addresses, front_ends, auth_methods, tls, action, read_only, as_role FROM nc_catalog.access_rules ORDER BY position;
+CREATE ACCESS RULE slt_desk ALLOW;
+CREATE ACCESS RULE slt_x FOR slt_nobody ALLOW;
+CREATE ACCESS RULE slt_x ALLOW AS ROLE slt_nobody;
+CREATE ACCESS RULE slt_x ALLOW BEFORE slt_nothing;
+CREATE ACCESS RULE slt_x AUTH kerberos ALLOW;
+CREATE ACCESS RULE slt_x FROM '10.2.3.300/32' ALLOW;
+CREATE ACCESS RULE slt_x FOR ALL;
+SET ROLE slt_ar_alice;
+CREATE ACCESS RULE slt_mine ALLOW;
+DROP ACCESS RULE slt_desk;
+RESET ROLE;
+GRANT slt_ar_ops TO slt_ar_alice WHEN (source <<= '10.2.0.0/16' AND auth IN ('certificate', 'oidc') AND tls);
+SELECT role, member, admin_option, condition FROM nc_catalog.role_members WHERE role = 'slt_ar_ops';
+GRANT slt_ar_ops TO slt_ar_alice WHEN (hostname = 'x');
+GRANT slt_ar_ops TO slt_ar_alice WHEN (front_end);
+GRANT slt_ar_ops TO slt_ar_alice

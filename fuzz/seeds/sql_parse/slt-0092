@@ -1,0 +1,25 @@
+INSERT INTO notes VALUES (5, 'dee', 'She ran; he is running');
+SELECT id FROM notes WHERE body @@ 'run' ORDER BY id;
+BEGIN;
+DELETE FROM notes WHERE id = 5;
+SELECT id FROM notes WHERE body @@ 'run' ORDER BY id;
+ROLLBACK;
+SELECT id FROM notes WHERE body @@ 'run' ORDER BY id;
+SELECT id FROM notes WHERE body @@ NULL;
+SELECT id FROM notes WHERE body @@ '(run';
+CREATE INDEX ON notes USING text (body) WITH (analyzer = 'klingon');
+CREATE INDEX ON notes USING text (id);
+CREATE INDEX ON notes USING text (body) WITH (bm25 = 1);
+DROP INDEX notes_body;
+SELECT id FROM notes WHERE body @@ 'run' ORDER BY id;
+DROP TABLE notes;
+CREATE TABLE docs (id INT PRIMARY KEY, body TEXT);
+INSERT INTO docs VALUES
+  (1, 'the quick brown fox'),
+  (2, 'fox fox fox'),
+  (3, 'a lazy dog'),
+  (4, 'the fox and the dog and the cat'),
+  (5, NULL);
+SELECT score(body @@ 'fox') FROM docs;
+CREATE INDEX docs_body ON docs USING text (body);
+SELECT id, round(score(body @@ 'fox')::numeric, 6)::text FROM docs ORDER BY id

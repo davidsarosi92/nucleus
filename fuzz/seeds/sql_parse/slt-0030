@@ -1,0 +1,20 @@
+SELECT * FROM generate_series(TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-03', INTERVAL '1 day');
+SELECT x, n FROM unnest(ARRAY['a', 'b', 'c']) WITH ORDINALITY AS t (x, n);
+SELECT count(*) FROM generate_series(1, 100) g WHERE g % 7 = 0;
+SELECT upper FROM upper('abc');
+SELECT count(*) FROM public.tags;
+INSERT INTO public.tags VALUES (5, NULL, 0);
+SELECT 'b' < 'c' COLLATE pg_catalog.default, 'B' COLLATE "C" < 'a';
+SELECT pg_catalog.lower('ABC');
+SELECT (ARRAY[1,2,3,4])[2:3], (ARRAY[1,2,3,4])[:2], (ARRAY[1,2,3,4])[3:], (ARRAY[1,2,3])[3:2];
+CREATE TABLE elems (id INT PRIMARY KEY, a INT[]);
+INSERT INTO elems VALUES (1, '{1,2,3}'), (2, NULL);
+UPDATE elems SET a[2] = 20;
+SELECT id, a FROM elems ORDER BY id;
+UPDATE elems SET a[5] = 5 WHERE id = 1;
+SELECT a FROM elems WHERE id = 1;
+UPDATE elems SET a[0] = 1;
+DROP TABLE elems;
+CREATE TABLE p (id BIGINT PRIMARY KEY, name TEXT NOT NULL DEFAULT 'x', score DOUBLE PRECISION CHECK (score >= 0));
+CREATE TABLE c (id BIGINT PRIMARY KEY, pid BIGINT REFERENCES p (id) ON DELETE CASCADE, note VARCHAR(20) UNIQUE, amount NUMERIC(10, 2));
+CREATE INDEX c_pid ON c (pid)

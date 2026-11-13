@@ -1,0 +1,20 @@
+SELECT row_number() OVER (ORDER BY rank() OVER ()) FROM emp;
+SELECT upper('a') OVER () FROM emp;
+SELECT row_number() OVER nope FROM emp;
+SELECT row_number() OVER (w PARTITION BY id) FROM emp WINDOW w AS (PARTITION BY dept);
+SELECT row_number() OVER (w ORDER BY id) FROM emp WINDOW w AS (ORDER BY dept);
+SELECT sum(id) OVER (ORDER BY hired, id RANGE 1 PRECEDING) FROM emp;
+SELECT sum(id) OVER (GROUPS 1 PRECEDING) FROM emp;
+SELECT sum(id) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) FROM emp;
+SELECT sum(id) OVER (ORDER BY id ROWS UNBOUNDED FOLLOWING) FROM emp;
+SELECT sum(id) OVER (ORDER BY id ROWS -1 PRECEDING) FROM emp;
+SELECT sum(id) OVER (ORDER BY salary RANGE -1 PRECEDING) FROM emp;
+SELECT ntile(0) OVER () FROM emp;
+SELECT nth_value(id, 0) OVER () FROM emp;
+SELECT count(DISTINCT id) OVER () FROM emp;
+SELECT sum(id) OVER (ORDER BY id ROWS id PRECEDING) FROM emp;
+CREATE TABLE m (id INT, g TEXT, x DOUBLE PRECISION, n INT, d DATE, ts TIMESTAMP, iv INTERVAL, c NUMERIC, t TEXT);
+INSERT INTO m VALUES (1, 'a', 1.5, 10, '2024-01-03', '2024-01-01 10:00', '1 hour', 1.25, 'pear'), (2, 'a', 4, 20, '2024-01-01', '2024-01-02 11:00', '3 hours', 2.5, 'apple'), (3, 'a', -2, 20, '2024-01-02', '2024-01-01 09:30', '2 days', 0.125, 'fig'), (4, 'b', 10, 30, '2023-12-31', '2024-02-01 00:00', '30 minutes', 7, 'apple'), (5, 'b', NULL, NULL, NULL, NULL, NULL, NULL, NULL), (6, 'b', 3, 30, '2024-03-01', '2024-01-05 12:00', '1 day 2 hours', -1.5, 'kiwi'), (7, 'c', NULL, NULL, NULL, NULL, NULL, NULL, NULL), (8, 'd', 0.25, 40, '2024-05-05', '2024-05-05 05:05', '5 seconds', 3.75, 'fig');
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x), percentile_cont(0.5) WITHIN GROUP (ORDER BY n), percentile_disc(0.5) WITHIN GROUP (ORDER BY x)::text, percentile_disc(0.5) WITHIN GROUP (ORDER BY n)::text FROM m;
+SELECT percentile_cont(0) WITHIN GROUP (ORDER BY x), percentile_cont(1) WITHIN GROUP (ORDER BY x), percentile_cont(0.1) WITHIN GROUP (ORDER BY x), percentile_cont(0.9) WITHIN GROUP (ORDER BY n), percentile_disc(0) WITHIN GROUP (ORDER BY x), percentile_disc(1) WITHIN GROUP (ORDER BY n) FROM m;
+SELECT g, percentile_cont(0.25) WITHIN GROUP (ORDER BY x), percentile_cont(0.75) WITHIN GROUP (ORDER BY n), percentile_disc(0.5) WITHIN GROUP (ORDER BY d)::text, mode() WITHIN GROUP (ORDER BY t) FROM m GROUP BY g ORDER BY g

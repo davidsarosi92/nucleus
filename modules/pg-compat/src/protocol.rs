@@ -358,6 +358,10 @@ impl<'a> Body<'a> {
     fn i16(&mut self) -> io::Result<i16> {
         Ok(i16::from_be_bytes(self.take(2)?.try_into().unwrap()))
     }
+    /// A count (an `Int16` that may not be negative).
+    fn count(&mut self) -> io::Result<usize> {
+        usize::try_from(self.i16()?).map_err(|_| bad("a negative count"))
+    }
     fn i32(&mut self) -> io::Result<i32> {
         Ok(i32::from_be_bytes(self.take(4)?.try_into().unwrap()))
     }
@@ -401,20 +405,65 @@ struct Conn {
     portals: HashMap<String, Portal>,
 }
 
+/// What a connection arrives over: TCP, which TLS can be started on, or
+/// any other byte stream (in the process, or a fuzzer's), which it cannot.
+enum Transport {
+    Tcp(TcpStream),
+    Other(Box<dyn nucleus_server::Stream>),
+}
+
+impl Transport {
+    fn stream(&mut self) -> &mut dyn nucleus_server::Stream {
+        match self {
+            Transport::Tcp(t) => t,
+            Transport::Other(s) => s.as_mut(),
+        }
+    }
+
+    fn boxed(self) -> Box<dyn nucleus_server::Stream> {
+        match self {
+            Transport::Tcp(t) => Box::new(t),
+            Transport::Other(s) => s,
+        }
+    }
+}
+
 /// Serves one client connection until it terminates.
 pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) -> io::Result<()> {
+    let peer = nucleus_server::transport::client_address(&mut stream, &config.trusted_proxies)?;
+    serve(Transport::Tcp(stream), kv, config, id, peer)
+}
+
+/// Serves one client over any byte stream until it terminates — a
+/// connection made in the process, or a fuzzer's bytes: no TLS (an
+/// `SSLRequest` is declined) and no client address.
+pub fn handle_stream(
+    stream: Box<dyn nucleus_server::Stream>,
+    kv: Arc<dyn Kv>,
+    config: &Config,
+    id: u32,
+) -> io::Result<()> {
+    serve(Transport::Other(stream), kv, config, id, None)
+}
+
+fn serve(
+    mut transport: Transport,
+    kv: Arc<dyn Kv>,
+    config: &Config,
+    id: u32,
+    peer: Option<std::net::IpAddr>,
+) -> io::Result<()> {
     // Startup, possibly after SSL (accepted when the server has TLS) and
     // GSSAPI (declined) requests.  Read unbuffered: nothing a client sends
     // before the TLS handshake may be taken as sent inside it.
-    let peer = nucleus_server::transport::client_address(&mut stream, &config.trusted_proxies)?;
-    let mut tcp = stream;
     let mut secured: Option<Box<dyn nucleus_server::Stream>> = None;
     let mut tls_info = None;
     let params = loop {
         let plain = secured.is_none();
+        let tcp = matches!(transport, Transport::Tcp(_));
         let s: &mut dyn nucleus_server::Stream = match &mut secured {
             Some(s) => s.as_mut(),
-            None => &mut tcp,
+            None => transport.stream(),
         };
         let len = read_i32(s)?;
         if !(8..=10_000).contains(&len) {
@@ -424,7 +473,10 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
         s.read_exact(&mut body)?;
         let code = i32::from_be_bytes(body[0..4].try_into().unwrap());
         match code {
-            SSL_REQUEST if plain && config.tls.is_some() => {
+            SSL_REQUEST if plain && tcp && config.tls.is_some() => {
+                let Transport::Tcp(tcp) = &mut transport else {
+                    unreachable!("checked")
+                };
                 tcp.write_all(b"S")?;
                 tcp.flush()?;
                 let tls = config.tls.as_ref().expect("checked");
@@ -468,7 +520,7 @@ pub fn handle(mut stream: TcpStream, kv: Arc<dyn Kv>, config: &Config, id: u32) 
             }
         }
     };
-    let stream = secured.unwrap_or_else(|| Box::new(tcp));
+    let stream = secured.unwrap_or_else(|| transport.boxed());
     let (r, w) = nucleus_server::transport::split(stream);
     let mut input = BufReader::with_capacity(WIRE_BUFFER, r);
     let mut out = BufWriter::with_capacity(WIRE_BUFFER, w);
@@ -1227,12 +1279,12 @@ impl Conn {
                 });
             }
         }
-        let nf = b.i16().map_err(proto)? as usize;
+        let nf = b.count().map_err(proto)?;
         let mut formats = Vec::with_capacity(nf);
         for _ in 0..nf {
             formats.push(b.i16().map_err(proto)?);
         }
-        let np = b.i16().map_err(proto)? as usize;
+        let np = b.count().map_err(proto)?;
         let mut params = Vec::with_capacity(np);
         for i in 0..np {
             let len = b.i32().map_err(proto)?;
@@ -1247,7 +1299,7 @@ impl Conn {
                 p.params.get(i).copied().flatten(),
             )?);
         }
-        let nr = b.i16().map_err(proto)? as usize;
+        let nr = b.count().map_err(proto)?;
         let mut result_formats = Vec::with_capacity(nr);
         for _ in 0..nr {
             result_formats.push(b.i16().map_err(proto)?);

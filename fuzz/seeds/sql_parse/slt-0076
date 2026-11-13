@@ -1,0 +1,20 @@
+SELECT method, opclasses, options FROM nc_catalog.indexes WHERE name = 'items_v_hnsw';
+INSERT INTO items VALUES (7, '[2,4,6]', 'd');
+DELETE FROM items WHERE id = 7;
+CREATE INDEX ON items USING hnsw (v) WITH (ef_construction = 8);
+CREATE INDEX ON items USING hnsw (v vector_hamming_ops);
+DROP INDEX items_v_hnsw;
+CREATE TABLE pts (id INT PRIMARY KEY, v vector(2));
+INSERT INTO pts SELECT i, ('[' || (i % 37) || ',' || (i / 37) || ']')::vector FROM generate_series(1, 2000) AS g(i);
+CREATE INDEX pts_v ON pts USING hnsw (v);
+EXPLAIN SELECT id FROM pts ORDER BY v <-> '[3,4]' LIMIT 1;
+SELECT id FROM pts ORDER BY v <-> '[3,4]' LIMIT 1;
+EXPLAIN SELECT id FROM pts ORDER BY v <=> '[3,4]' LIMIT 1;
+SET hnsw.ef_search = 100;
+SET hnsw.ef_search = 1001;
+RESET hnsw.ef_search;
+DROP TABLE pts;
+SELECT variance(x)::text, var_pop(x)::text, stddev(x)::text, stddev_pop(x)::text FROM generate_series(1, 3) x;
+SELECT var_samp(x)::text, var_pop(x)::text, stddev_samp(x)::text, stddev_pop(x)::text FROM generate_series(1, 4) x;
+SELECT variance(x)::text, var_pop(x)::text, stddev(x)::text, stddev_pop(x)::text FROM (VALUES (1.5::numeric(10,2)), (2.25), (3)) v(x);
+SELECT variance(x)::text, var_pop(x)::text, stddev(x)::text, stddev_pop(x)::text FROM (VALUES (7)) v(x)

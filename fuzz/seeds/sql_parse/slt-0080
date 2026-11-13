@@ -1,0 +1,20 @@
+SELECT id, first_value(id) OVER (PARTITION BY dept ORDER BY id), last_value(id) OVER (PARTITION BY dept ORDER BY id), last_value(id) OVER (PARTITION BY dept ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING), nth_value(id, 2) OVER (PARTITION BY dept ORDER BY id) FROM emp ORDER BY id;
+SELECT id, nth_value(id, 3) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING), first_value(id) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW), last_value(id) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING) FROM emp ORDER BY id;
+SELECT id, count(salary) OVER w, min(salary) OVER w, max(salary) OVER w, sum(salary) OVER w, string_agg(id::text, ',') OVER w FROM emp WINDOW w AS (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) ORDER BY id;
+SELECT id, array_agg(id) OVER (PARTITION BY dept ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)::text, string_agg(dept, '/') OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM emp ORDER BY id;
+SELECT id, avg(salary) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING), stddev_samp(salary) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM emp ORDER BY id;
+SELECT id, bool_and(salary > 85) OVER (ORDER BY id ROWS 1 PRECEDING), bool_or(salary > 110) OVER (ORDER BY id ROWS 1 PRECEDING) FROM emp ORDER BY id;
+SELECT id, sum(id) OVER (ORDER BY id ROWS BETWEEN 5 FOLLOWING AND 6 FOLLOWING), count(*) OVER (ORDER BY id ROWS BETWEEN 5 FOLLOWING AND 6 FOLLOWING) FROM emp ORDER BY id;
+SELECT id, sum(id) OVER (w ORDER BY id), sum(id) OVER w, rank() OVER (w ORDER BY salary) FROM emp WINDOW w AS (PARTITION BY dept) ORDER BY id;
+SELECT id, sum(id) OVER (w2 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW), row_number() OVER w2 FROM emp WINDOW w1 AS (PARTITION BY dept), w2 AS (w1 ORDER BY id DESC) ORDER BY id;
+SELECT dept, sum(salary), rank() OVER (ORDER BY sum(salary) DESC), sum(sum(salary)) OVER () FROM emp GROUP BY dept ORDER BY dept;
+SELECT dept, count(*), row_number() OVER (ORDER BY count(*) DESC, dept) FROM emp GROUP BY dept HAVING count(*) > 1 ORDER BY dept;
+SELECT id, salary - avg(salary) OVER (PARTITION BY dept)::int, CASE WHEN row_number() OVER (ORDER BY id) % 2 = 0 THEN 'even' ELSE 'odd' END FROM emp WHERE id <> 3 ORDER BY id;
+SELECT id, row_number() OVER (ORDER BY id DESC) FROM emp ORDER BY row_number() OVER (ORDER BY id DESC) LIMIT 3;
+SELECT id, rn FROM (SELECT id, row_number() OVER (PARTITION BY dept ORDER BY salary DESC NULLS LAST, id) AS rn FROM emp) t WHERE rn = 1 ORDER BY id;
+SELECT DISTINCT dept_count, count(*) OVER () FROM (SELECT count(*) OVER (PARTITION BY dept) AS dept_count FROM emp) t ORDER BY dept_count;
+SELECT id, salary, rank() OVER (ORDER BY salary NULLS FIRST), sum(id) OVER (ORDER BY salary NULLS FIRST RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM emp ORDER BY salary NULLS FIRST, id;
+SELECT id, row_number() OVER () FROM emp WHERE false;
+SELECT id FROM emp WHERE row_number() OVER () > 1;
+SELECT dept FROM emp GROUP BY dept HAVING rank() OVER () > 1;
+SELECT sum(row_number() OVER ()) FROM emp

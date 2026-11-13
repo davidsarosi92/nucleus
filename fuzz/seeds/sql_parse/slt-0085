@@ -1,0 +1,20 @@
+SELECT approx_top_k(w, 3)::text, approx_top_k_counts(w, 3)::text FROM s;
+SELECT g, approx_top_k(n, 2)::text FROM s GROUP BY g ORDER BY g;
+SELECT approx_percentile(x, 1.5) FROM s;
+SELECT approx_top_k(w, 0) FROM s;
+SELECT approx_percentile(w, 0.5) FROM s;
+SELECT hll_count(x) FROM s;
+SELECT '\x0102'::hll;
+SELECT '\x020e00'::hll;
+SELECT ddsketch_agg(x, 2) FROM s;
+CREATE TABLE sm (id INT PRIMARY KEY, g INT, w TEXT);
+INSERT INTO sm SELECT i, i % 4, 'w' || (i % 9) FROM generate_series(1, 2000) AS t(i);
+SELECT count(*), sum(id) FROM sm TABLESAMPLE BERNOULLI (10) REPEATABLE (42);
+SELECT count(*), sum(id) FROM sm AS s TABLESAMPLE SYSTEM (10) REPEATABLE (42);
+SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (2) REPEATABLE (42) WHERE id NOT IN (SELECT id FROM sm TABLESAMPLE BERNOULLI (10) REPEATABLE (42));
+SELECT (SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (0) REPEATABLE (1)), (SELECT count(*) FROM sm TABLESAMPLE BERNOULLI (100));
+SELECT count(*) BETWEEN 300 AND 500 FROM sm TABLESAMPLE BERNOULLI (20);
+SELECT g, count(*), min(w) FROM sm TABLESAMPLE BERNOULLI (5) REPEATABLE (7) GROUP BY g ORDER BY g;
+SELECT hash_unit(42), hash_unit(42, 1), hash_unit(1.0) = hash_unit(1.00);
+SELECT count(*) FROM sm WHERE hash_unit(id) < 0.8;
+SELECT hash_unit(NULL::int) IS NULL

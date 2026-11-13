@@ -434,6 +434,13 @@ impl Node {
                     };
                     entries.push((key, val));
                 }
+                // Out of order, a leaf's keys would be searched wrongly and
+                // cut wrongly when written again (their shared prefix is
+                // the first's and the last's): damage a checksum cannot
+                // see, refused (found fuzzing, PLAN.md §M14.29 S2).
+                if entries.windows(2).any(|w| w[0].0 >= w[1].0) {
+                    return Err("leaf keys out of order");
+                }
                 Ok(Node::Leaf(Leaf { entries }))
             }
             (2, INTERNAL) => {
@@ -451,6 +458,9 @@ impl Node {
                     }
                     children.push(PageId(read_u64(c, 2)));
                     keys.push(c[10..10 + klen].to_vec());
+                }
+                if keys.windows(2).any(|w| w[0] >= w[1]) {
+                    return Err("internal keys out of order");
                 }
                 Ok(Node::Internal(Internal { keys, children }))
             }
@@ -702,16 +712,8 @@ mod tests {
         roundtrip(&Node::Leaf(Leaf::default()));
         roundtrip(&Node::Leaf(Leaf {
             entries: vec![
-                (b"a".to_vec(), Val::Inline(b"1".to_vec())),
                 (b"".to_vec(), Val::Inline(vec![])),
-                (
-                    vec![0xFF; 1024],
-                    Val::Overflow {
-                        first: PageId(9),
-                        len: 100_000,
-                        raw: None,
-                    },
-                ),
+                (b"a".to_vec(), Val::Inline(b"1".to_vec())),
                 (
                     b"c".to_vec(),
                     Val::Overflow {
@@ -725,6 +727,14 @@ mod tests {
                     Val::Packed {
                         raw: 300,
                         block: vec![1, 2, 3],
+                    },
+                ),
+                (
+                    vec![0xFF; 1024],
+                    Val::Overflow {
+                        first: PageId(9),
+                        len: 100_000,
+                        raw: None,
                     },
                 ),
             ],
@@ -749,6 +759,34 @@ mod tests {
             assert!(dirty == fresh);
             assert_eq!(Node::decode(&dirty).unwrap(), small);
         }
+    }
+
+    /// Keys out of order — damage a checksum cannot see — are refused
+    /// when read, not cut wrongly when written again (found fuzzing,
+    /// PLAN.md §M14.29 S2).
+    #[test]
+    fn keys_out_of_order_are_corrupt() {
+        let leaf = Node::Leaf(Leaf {
+            entries: vec![
+                (b"key-1".to_vec(), Val::Inline(vec![1])),
+                (b"key-2".to_vec(), Val::Inline(vec![2])),
+            ],
+        });
+        let mut page = Page::new(PageType::UNUSED);
+        leaf.encode(&mut page);
+        // The second key's last byte (after the shared prefix `key-`)
+        // made smaller than the first's.
+        let p = page.payload_mut();
+        let at = p.windows(1).rposition(|w| w == b"2").unwrap();
+        p[at] = b'0';
+        assert_eq!(Node::decode(&page), Err("leaf keys out of order"));
+        let internal = Node::Internal(Internal {
+            keys: vec![b"t".to_vec(), b"m".to_vec()],
+            children: vec![PageId(3), PageId(4), PageId(5)],
+        });
+        let mut page = Page::new(PageType::UNUSED);
+        internal.encode(&mut page);
+        assert_eq!(Node::decode(&page), Err("internal keys out of order"));
     }
 
     #[test]

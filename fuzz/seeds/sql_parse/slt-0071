@@ -1,0 +1,20 @@
+SELECT ls.k, lb.v FROM ls LEFT JOIN lb ON lb.id = ls.ref ORDER BY 1;
+SELECT count(*) FROM ls WHERE EXISTS (SELECT 1 FROM lb WHERE lb.id = ls.ref AND lb.v > 100);
+SELECT count(*) FROM ls WHERE NOT EXISTS (SELECT 1 FROM lb WHERE lb.id = ls.ref);
+SELECT ls.k, count(*), sum(lb.v) FROM ls JOIN lb ON lb.g = ls.k GROUP BY ls.k ORDER BY 1;
+SELECT ls.k, (SELECT sum(lb.v) FROM ls s2 JOIN lb ON lb.id = s2.ref WHERE s2.w <= ls.w AND lb.v > ls.w) FROM ls ORDER BY 1;
+SELECT a.k, b.w, (SELECT sum(lb.v) FROM ls s2 JOIN lb ON lb.id = s2.ref AND lb.v > a.w WHERE s2.w <= b.w) FROM ls a JOIN ls b ON b.k = a.k ORDER BY 1;
+SELECT count(*), sum(lb.v) FROM ls, lb WHERE (lb.id = ls.ref AND ls.w = 10 AND lb.v > 0) OR (lb.id = ls.ref AND ls.w = 50 AND lb.v < 2000);
+EXPLAIN SELECT count(*) FROM ls, lb WHERE (lb.id = ls.ref AND ls.w = 10 AND lb.v > 0) OR (lb.id = ls.ref AND ls.w = 50 AND lb.v < 2000);
+SELECT count(*) FROM lb WHERE lb.g < 3 AND NOT EXISTS (SELECT 1 FROM ls WHERE ls.ref = lb.id);
+SELECT count(*) FROM ls WHERE EXISTS (SELECT 1 FROM lb WHERE lb.g = ls.k AND lb.v > 990);
+CREATE TABLE digits (d INT PRIMARY KEY);
+INSERT INTO digits VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9);
+CREATE TABLE addr (id INT PRIMARY KEY, zip INT, city INT, region INT);
+INSERT INTO addr SELECT n, n % 100, n % 100 / 10, n % 100 / 50 FROM (SELECT a.d * 100 + b.d * 10 + c.d AS n FROM digits a, digits b, digits c) s;
+ANALYZE addr;
+EXPLAIN SELECT id FROM addr WHERE zip = 31 AND city = 3;
+CREATE STATISTICS addr_zip_city ON zip, city FROM addr;
+CREATE STATISTICS addr_zip_city ON zip, city FROM addr;
+CREATE STATISTICS IF NOT EXISTS addr_zip_city ON zip, city FROM addr;
+CREATE STATISTICS addr_city_region (dependencies) ON city, region FROM addr

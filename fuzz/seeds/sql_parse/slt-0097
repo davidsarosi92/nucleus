@@ -1,0 +1,20 @@
+INSERT INTO pos (a, b) VALUES (5, 5);
+SELECT a, d FROM pos ORDER BY a;
+ALTER TABLE pos ALTER COLUMN a TYPE BIGINT;
+SELECT a, s FROM pos ORDER BY a;
+SELECT name, generated, generation_expr FROM nc_catalog.columns WHERE table_name = 'items' AND generated IS NOT NULL ORDER BY position;
+SELECT position, chunk, start, length, size FROM chunks('One two three. Four five. Six seven eight nine. Ten.', 'sentences', 5);
+SELECT chunk FROM chunks('One two three. Four five. Six seven eight nine. Ten.', 'sentences', 6, 2) ORDER BY position;
+SELECT chunk FROM chunks('a b c d e f g', 'tokens', 3, 1);
+CREATE TABLE docs (id int PRIMARY KEY, body text);
+INSERT INTO docs VALUES (1, E'Intro.\n\n# Guide\n\nInstall it first.\n\n## Usage\n\nRun it.  Stop it.\n\n```\n# a comment, not a heading\n```\n'), (2, 'Árvíztűrő tükörfúrógép. Második mondat!'), (3, NULL);
+SELECT d.id, replace(c.chunk, E'\n', '|'), array_to_string(c.headings, ' > ') FROM docs d, chunks(d.body, 'markdown', 50) c ORDER BY d.id, c.position;
+SELECT count(*) FROM docs d, chunks(d.body, 'sentences', 3) c WHERE substr(d.body, c.start, c.length) <> c.chunk;
+SELECT c.start, c.chunk FROM docs d, chunks(d.body, 'sentences', 2) c WHERE d.id = 2;
+SELECT * FROM chunks('a b', 'paragraphs', 3);
+SELECT * FROM chunks('a b', 'tokens', 3, 3);
+SELECT * FROM chunks('a b', 'tokens', 0);
+SELECT * FROM chunks('a b', 'tokens', -1);
+SELECT * FROM chunks('a b', 'tokens', 3, 0, 'no_such_model');
+CREATE MODEL h USING hashing WITH (dimensions = 8);
+SELECT * FROM chunks('a b', 'tokens', 3, 0, 'h')

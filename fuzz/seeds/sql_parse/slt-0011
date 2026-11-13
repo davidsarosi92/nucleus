@@ -1,0 +1,20 @@
+SELECT 1;
+COMMIT;
+SELECT count(*) FROM kv;
+INSERT INTO kv VALUES ('x', 0);
+BEGIN;
+SELECT v FROM kv WHERE k = 'x';
+UPDATE kv SET v = 1 WHERE k = 'x';
+SELECT v FROM kv WHERE k = 'x';
+UPDATE kv SET v = 2 WHERE k = 'x';
+ROLLBACK;
+SELECT v FROM kv WHERE k = 'x';
+BEGIN;
+INSERT INTO kv VALUES ('y', 5);
+SELECT count(*) FROM kv;
+COMMIT;
+SELECT count(*) FROM kv;
+BEGIN;
+INSERT INTO kv VALUES ('z', 1);
+BEGIN;
+INSERT INTO kv VALUES ('z', 2)

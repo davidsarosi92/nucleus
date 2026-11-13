@@ -1,0 +1,20 @@
+CREATE INDEX ON events USING btree (what) WITH (fillfactor = 70);
+CREATE TABLE acct (id INT PRIMARY KEY, owner VARCHAR(5) NOT NULL, balance INT DEFAULT 0 CHECK (balance >= 0), kind TEXT DEFAULT 'std', UNIQUE (owner, kind));
+INSERT INTO acct (id, owner) VALUES (1, 'anna');
+SELECT * FROM acct;
+INSERT INTO acct VALUES (2, 'bob', -5, 'std');
+INSERT INTO acct VALUES (3, 'charlie', 1, 'std');
+INSERT INTO acct (id, balance) VALUES (4, 1);
+INSERT INTO acct (id, owner) VALUES (5, 'anna');
+INSERT INTO acct (id, owner, kind) VALUES (5, 'anna', 'gold');
+UPDATE acct SET balance = balance - 1 WHERE id = 1;
+UPDATE acct SET balance = balance + 10 RETURNING id;
+UPDATE acct SET balance = balance * 2 WHERE id = 5 RETURNING id, balance;
+INSERT INTO acct (id, owner) VALUES (6, 'cat') RETURNING id, kind;
+DELETE FROM acct WHERE owner = 'cat' RETURNING id;
+CREATE TABLE named (a INT, b INT, CONSTRAINT b_bigger CHECK (b > a));
+INSERT INTO named VALUES (2, 1);
+INSERT INTO named VALUES (1, 2);
+INSERT INTO named VALUES (NULL, 1);
+ALTER TABLE named ADD COLUMN c TEXT DEFAULT 'new';
+SELECT * FROM named
