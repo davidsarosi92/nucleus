@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The providers name their `url` (`ModelProvider::urls`), so nucleus
+  holds a model not made by an administrator to the database's
+  `model_urls`.
+
 - The tokens each answer reports (OpenAI's and Voyage's
   `usage.total_tokens`, Cohere's `meta.billed_units.input_tokens`) go to
   the statement's costs (`Request::report_tokens`, §M14.22 E8a).

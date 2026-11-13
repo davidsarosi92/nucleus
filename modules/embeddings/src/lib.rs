@@ -22,7 +22,9 @@
 //! tried once more after `Retry-After` (at most 10 s) or half a second;
 //! then it fails with `58030` (try again later: §M14.22 E4's queue
 //! retries those, after the `Retry-After` it carries in its hint), while a refused key or a bad request fails with
-//! `55000` (it will not succeed as defined).  The tokens each call used,
+//! `55000` (it will not succeed as defined).  A `url` of a model made by
+//! a role other than an administrator must be in the database's
+//! `model_urls` (nucleus checks it when the model is made).  The tokens each call used,
 //! as the answer reports them, go to the statement's costs (§M14.22 E8).
 
 use std::sync::Arc;
@@ -193,6 +195,10 @@ impl ModelProvider for OpenAi {
         "openai"
     }
 
+    fn urls(&self, o: &Options) -> Vec<String> {
+        o.get("url").map(str::to_string).into_iter().collect()
+    }
+
     fn define(&self, o: &Options, _files: &Files<'_>) -> Result<Spec> {
         o.only("openai", &["model", "url", "dimensions", "batch"])?;
         let dimensions = dimensions("openai", o, &OPENAI_KNOWN)?;
@@ -236,6 +242,10 @@ const COHERE_KNOWN: [(&str, u32); 5] = [
 impl ModelProvider for Cohere {
     fn name(&self) -> &str {
         "cohere"
+    }
+
+    fn urls(&self, o: &Options) -> Vec<String> {
+        o.get("url").map(str::to_string).into_iter().collect()
     }
 
     fn define(&self, o: &Options, _files: &Files<'_>) -> Result<Spec> {
@@ -295,6 +305,10 @@ const VOYAGE_KNOWN: [(&str, u32); 7] = [
 impl ModelProvider for Voyage {
     fn name(&self) -> &str {
         "voyage"
+    }
+
+    fn urls(&self, o: &Options) -> Vec<String> {
+        o.get("url").map(str::to_string).into_iter().collect()
     }
 
     fn define(&self, o: &Options, _files: &Files<'_>) -> Result<Spec> {

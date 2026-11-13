@@ -81,17 +81,24 @@ fn fake_vector(t: &str) -> Json {
 }
 
 fn session() -> Session {
-    nucleus_sql::ext::secrets::set_keyring(Some(Arc::new(nucleus_sql::ext::secrets::StaticKey(
-        [5; 32],
-    ))));
-    let kv: Arc<dyn Kv> = Arc::new(
+    session_on(db())
+}
+
+fn db() -> Arc<dyn Kv> {
+    Arc::new(
         Database::open_on(
             Arc::new(SimPlatform::new(3)),
             Path::new("/db"),
             Options::default(),
         )
         .unwrap(),
-    );
+    )
+}
+
+fn session_on(kv: Arc<dyn Kv>) -> Session {
+    nucleus_sql::ext::secrets::set_keyring(Some(Arc::new(nucleus_sql::ext::secrets::StaticKey(
+        [5; 32],
+    ))));
     let mut r = Registry::builtin();
     r.add(&nucleus_embeddings::Embeddings).unwrap();
     Session::with_registry(kv, Arc::new(r))
@@ -364,5 +371,86 @@ fn calls_at_once_and_their_usage() {
              FROM nc_catalog.models WHERE name = 'par'"
         ),
         Value::Text("5 27 100000 3".into())
+    );
+}
+
+#[test]
+fn a_model_reaches_only_the_urls_allowed() {
+    let (url, _) = serve(|_, _| {
+        (
+            200,
+            String::new(),
+            json!({"data": [{"index": 0, "embedding": [1.0, 2.0]}]}),
+        )
+    });
+    let kv = db();
+    let mut admin = session_on(kv.clone());
+    admin
+        .execute("CREATE USER maker PASSWORD 'p'; GRANT CREATE ON DATABASE nucleus TO maker")
+        .unwrap();
+    let mut maker = session_on(kv.clone());
+    maker.login("maker").unwrap();
+    let make = |name: &str, u: &str| {
+        format!("CREATE MODEL {name} USING openai WITH (url = '{u}', model = 'x', dimensions = 2)")
+    };
+    // Its own address on the server's network: refused, until an
+    // administrator allows it.
+    let e = maker
+        .execute(&make("near", &format!("{url}/v1")))
+        .unwrap_err();
+    assert_eq!(e.code, "42501");
+    assert!(
+        e.hint.as_deref().unwrap_or("").contains("model_urls"),
+        "{e:?}"
+    );
+    admin
+        .execute(&format!(
+            "ALTER DATABASE nucleus SET model_urls = 'https://api.example.com/v1, {url}/v1'"
+        ))
+        .unwrap();
+    maker.execute(&make("near", &format!("{url}/v1"))).unwrap();
+    assert_eq!(
+        one(&mut maker, "SELECT embed('a', 'near')::text"),
+        Value::Text("[1,2]".into())
+    );
+    // A prefix admits what is under it, nothing beside it.
+    for bad in [
+        format!("{url}/v10"),
+        url.to_string(),
+        "https://api.example.com.evil.net/v1".to_string(),
+        "http://api.example.com/v1".to_string(),
+    ] {
+        assert_eq!(
+            maker.execute(&make("bad", &bad)).unwrap_err().code,
+            "42501",
+            "{bad}"
+        );
+    }
+    maker
+        .execute(&make("far", "https://API.example.com/v1/embed"))
+        .unwrap();
+    // The provider's own address needs no listing; an administrator's
+    // models may call anywhere.
+    maker
+        .execute("CREATE MODEL own USING openai WITH (model = 'text-embedding-3-small')")
+        .unwrap();
+    admin
+        .execute(&make("theirs", "http://127.0.0.1:1/v1"))
+        .unwrap();
+    // Taken off the list: its models no longer call it.
+    admin
+        .execute("ALTER DATABASE nucleus SET model_urls = 'https://api.example.com/v1'")
+        .unwrap();
+    assert_eq!(
+        maker.execute("SELECT embed('b', 'near')").unwrap_err().code,
+        "42501"
+    );
+    // The setting is checked when set.
+    assert_eq!(
+        admin
+            .execute("ALTER DATABASE nucleus SET model_urls = 'ftp://x'")
+            .unwrap_err()
+            .code,
+        "22023"
     );
 }

@@ -33,6 +33,10 @@ Cohere's billed units) in `EXPLAIN ANALYZE` and `nc_catalog.statements`.
   carries the key.
 - Plain `http://` only to a loopback address (a local Ollama), so a key
   never crosses a network in the clear.
+- A `url` of a model made by a role other than an administrator must be
+  under the database's `model_urls` (`ALTER DATABASE nucleus SET
+  model_urls = 'http://localhost:11434/v1'`), checked when it is made and
+  at every call; a provider's own address needs no listing.
 - One connection a call (no reuse yet): batches carry the cost.
 
 The protocols are checked against servers on loopback that answer as

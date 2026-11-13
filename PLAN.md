@@ -7010,9 +7010,15 @@ and for correctness, and these were fixed (tests beside each):
 - Batches answered beside a failed one are kept (they were paid for);
   `ATTACH PARTITION` refuses a table with chunk tables.
 
-Open, for the security milestone (§M14.29) or a decision: a model
-maker's `url` may name loopback or internal HTTPS hosts (SSRF — limit
-non-default URLs to administrators, or to an allow-list?); a fetched
+A model maker's `url` could name loopback or internal hosts (SSRF):
+decided (2026-11-13) — administrators' models may call anywhere, anyone
+else's only URLs under the database's `model_urls`, an administrator's
+list (scheme, host and port the same, the path under the prefix's at a
+`/`), checked when the model is made and at every call, so a URL taken
+off the list stops being called; a provider's own address needs no
+listing.
+
+Open, for the security milestone (§M14.29) or a decision: a fetched
 model may be up to 8 GB a file, read whole into memory; an endpoint
 dripping a byte a minute holds a call (the timeout is per read, and the
 statement's deadline is not applied to it); `USAGE` on a secret is, in

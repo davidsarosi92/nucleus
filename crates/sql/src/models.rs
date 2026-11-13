@@ -341,6 +341,15 @@ pub trait ModelProvider: Send + Sync {
     /// `request.dimensions` components.
     fn embed(&self, request: &Request<'_>) -> Result<Vec<Vec<f32>>>;
 
+    /// The addresses `options` point a model at, beside the provider's
+    /// own (an OpenAI-compatible server's `url`): a model made by a role
+    /// other than an administrator may name only those in the database's
+    /// `model_urls`, so it cannot reach the server's own network.
+    fn urls(&self, options: &Options) -> Vec<String> {
+        let _ = options;
+        Vec::new()
+    }
+
     /// Whether its calls reach the network (§M14.22 E4: such calls never
     /// run inside a writing transaction).
     fn remote(&self) -> bool {
@@ -663,6 +672,7 @@ pub fn create(
         )?;
     }
     let options = Options(rest);
+    allowed_urls(&*txn, &*p, &options, access::current().superuser)?;
     let fetched = p.fetch(&options)?;
     let files = Files::in_memory(&fetched);
     let spec = p.define(&options, &files)?;
@@ -690,6 +700,70 @@ pub fn create(
         store_file(txn, &f.digest, bytes)?;
     }
     put(txn, &m)
+}
+
+/// A URL's scheme, host (with its port; both in lower case) and path —
+/// `None` for one that is not `http://` or `https://`.
+pub fn split_url(url: &str) -> Option<(String, String, String)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let (host, path) = match rest.find(['/', '?', '#']) {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    Some((scheme, host.to_ascii_lowercase(), path.to_string()))
+}
+
+/// Whether `url` is under one of `prefixes`: the same scheme and host,
+/// and a path that starts with the prefix's at a `/` (so
+/// `https://api.example.com` does not admit `https://api.example.com.evil`,
+/// nor `…/v1` admit `…/v10`).
+pub fn url_under(url: &str, prefixes: &str) -> bool {
+    let Some((scheme, host, path)) = split_url(url) else {
+        return false;
+    };
+    prefixes
+        .split(',')
+        .map(str::trim)
+        .filter_map(split_url)
+        .any(|(s, h, p)| {
+            let p = p.trim_end_matches('/');
+            s == scheme
+                && h == host
+                && path.starts_with(p)
+                && matches!(
+                    path.as_bytes().get(p.len()),
+                    None | Some(b'/' | b'?' | b'#')
+                )
+        })
+}
+
+/// The addresses a model's options name ([`ModelProvider::urls`]): an
+/// administrator's may be any (`admin`: whoever makes it, or owns it
+/// when it is called); anyone else's must be in the database's
+/// `model_urls` (`42501`) — when it is made, and at every call, so a
+/// URL taken off the list is not called again.
+fn allowed_urls(
+    txn: &dyn KvTxn,
+    p: &dyn ModelProvider,
+    options: &Options,
+    admin: bool,
+) -> Result<()> {
+    let urls = p.urls(options);
+    if urls.is_empty() || admin {
+        return Ok(());
+    }
+    let allowed = crate::dbsettings::get(txn, "model_urls")?;
+    match urls.iter().find(|u| !url_under(u, &allowed)) {
+        None => Ok(()),
+        Some(u) => Err(Error::insufficient_privilege(format!(
+            "a model may call {u} only if it is in the database's model_urls"
+        ))
+        .with_hint("an administrator adds it: ALTER DATABASE nucleus SET model_urls = '<url>, …'")),
+    }
 }
 
 /// `DROP MODEL [IF EXISTS] name`; its grants go with it.
@@ -977,6 +1051,14 @@ pub(crate) fn embed_unchecked(
             return Ok(());
         }
         let p = provider(&m.provider)?;
+        // An owner without a role record is the unclaimed database's
+        // administrator (a role that owns a model is not dropped).
+        let admin = || -> Result<bool> {
+            Ok(crate::roles::get(txn, &m.owner)?.is_none_or(|r| r.superuser))
+        };
+        if !p.urls(&m.options).is_empty() {
+            allowed_urls(txn, &*p, &m.options, admin()?)?;
+        }
         let secret = m
             .secret
             .as_deref()

@@ -76,6 +76,23 @@ fn list(v: &str) -> Result<String> {
         .join(","))
 }
 
+/// URL prefixes, comma-separated, each `http://` or `https://` and a
+/// host.
+fn url_list(v: &str) -> Result<String> {
+    let v = list(v.trim().trim_matches('\''))?;
+    for u in v.split(',').filter(|u| !u.is_empty()) {
+        match crate::models::split_url(u) {
+            Some((_, host, _)) if !host.is_empty() => {}
+            _ => {
+                return Err(Error::invalid_parameter(format!(
+                    "{u} is not an http:// or https:// URL with a host"
+                )));
+            }
+        }
+    }
+    Ok(v)
+}
+
 fn memory_text(v: &str) -> Result<String> {
     memory(v)?;
     Ok(v.trim().trim_matches('\'').to_string())
@@ -178,6 +195,12 @@ pub const KNOWN: &[Known] = &[
         default: "",
         description: "the statements that touch these tables are recorded, a comma-separated list",
         check: list,
+    },
+    Known {
+        name: "model_urls",
+        default: "",
+        description: "the URLs (prefixes, comma-separated) a model made by a role other than an administrator may call beside its provider's own",
+        check: url_list,
     },
     Known {
         name: "login_lock_failures",

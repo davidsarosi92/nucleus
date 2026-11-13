@@ -4046,6 +4046,24 @@ provider gets when it calls; naming one needs `USAGE` on it, and a
 secret is not dropped while a model names it, `2BP01`), `query_prefix`
 and `document_prefix`.
 
+**Where a model may call.**  A provider names the addresses a model's
+options point it at beside its own (`ModelProvider::urls`: the
+`embeddings` module's `url`).  A model made by an administrator may call
+any; anyone else's only those under the database's `model_urls`
+(`ALTER DATABASE nucleus SET model_urls = 'https://api.mistral.ai/v1,
+http://localhost:11434/v1'`, an administrator's): the same scheme and
+host (with port), and a path under the prefix's at a `/`
+(`models::url_under`; `…/v1` does not admit `…/v10`, nor
+`api.example.com` `api.example.com.evil.net`).  Checked when the model
+is made and at every call by its owner's standing (an owner without a
+role record is the unclaimed database's administrator), so a URL taken
+off the list is not called again (`42501`, a hint naming the setting).
+A provider's own address (OpenAI's, Cohere's, Voyage's) needs no
+listing; plain HTTP still only to loopback (`nucleus-http`).  So a role
+that may make models cannot point one at the server's network — an
+internal service, a cloud's metadata — unless an administrator lists
+it.
+
 `embed(text, m [, 'query' | 'document'])` returns the text's `vector`
 (dimensions unconstrained; a `vector(n)` column checks them, `22000`);
 a document by default.  The model's prefix for the kind is put before
@@ -4563,7 +4581,8 @@ name = value | RESET name` (an administrator's; `dbsettings.rs`, catalog
 `statement_timeout` (default `0`, none), `login_lock_failures` (10),
 `login_lock_time` (`15 minutes`), `work_mem` (`64MB`, §8.5), `batch_size`
 (`1024`, 0 – 65536, §8.5), `parallel_workers` (`0`, automatic; up to 256,
-§8.5); a duration
+§8.5), `model_urls` (empty; URL prefixes a model not an
+administrator's may call, §8.23); a duration
 is milliseconds, `5s`, `100ms`, `2min`, `1h`, `1d` or an interval; a
 memory size kB, or with `B`, `kB`, `MB`, `GB`, `TB` (at least 64 kB).  *Passwords*: at least
 `password_min_length` characters and not the role's name (`22023`; a
@@ -5123,6 +5142,11 @@ them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-13 — model URLs on a list:** database setting `model_urls`,
+  `ModelProvider::urls`, `models::split_url` / `url_under`; checked at
+  `CREATE MODEL` (not for administrators) and at every call by the
+  owner's standing.
 
 - **2026-11-13 — §M14.22, a review's fixes:** an embedding column's
   expression may not call `embed` (`0A000`); a row whose text fails
