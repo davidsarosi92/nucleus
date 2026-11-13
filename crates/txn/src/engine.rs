@@ -579,8 +579,9 @@ impl Engine {
         loop {
             // In chunks, releasing the commit lock between them.
             let commit = lock(&self.inner.commit);
+            let wm = self.inner.current_watermark();
             let (mut ops, next) =
-                self.sweep_chunk(&from, None, Some(&committed), chunk, &mut removed)?;
+                self.sweep_chunk(&from, None, Some(&committed), chunk, wm, &mut removed)?;
             if next.is_none() {
                 // The whole keyspace swept: these transactions' intents are
                 // all versions now.
@@ -620,13 +621,49 @@ impl Engine {
     /// again — whose scans would otherwise step over the deleted keys'
     /// tombstones until the whole vacuum runs.  What it removed.
     pub fn vacuum_range(&self, start: &[u8], end: &[u8]) -> Result<u64> {
+        self.sweep_range(start, end, false)
+    }
+
+    /// The oldest snapshot any transaction reads at (or the visible one,
+    /// with none running): versions older than what it sees are garbage
+    /// but for the history kept.
+    pub fn oldest_snapshot(&self) -> Timestamp {
+        let active = lock(&self.inner.active);
+        let visible = self.inner.visible.load(Ordering::Acquire);
+        Timestamp(
+            active
+                .keys()
+                .next()
+                .copied()
+                .unwrap_or(visible)
+                .min(visible),
+        )
+    }
+
+    /// [`vacuum_range`](Self::vacuum_range) past the history kept
+    /// ([`EngineOptions::history`]): every version no running snapshot can
+    /// see goes, however recent — what erasure overrides history for
+    /// (PLAN.md §M14.24 R2).  A version a running snapshot sees stays: the
+    /// caller waits for [`oldest_snapshot`](Self::oldest_snapshot) to pass
+    /// what it erased.  Keys with an intent are left; a whole
+    /// [`vacuum`](Self::vacuum) first resolves them.  What it removed.
+    pub fn purge_range(&self, start: &[u8], end: &[u8]) -> Result<u64> {
+        self.sweep_range(start, end, true)
+    }
+
+    fn sweep_range(&self, start: &[u8], end: &[u8], past_history: bool) -> Result<u64> {
         let mut from = first_version(start);
         let to = first_version(end);
         let mut removed = 0;
         loop {
             let commit = lock(&self.inner.commit);
+            let wm = if past_history {
+                self.oldest_snapshot().0
+            } else {
+                self.inner.current_watermark()
+            };
             let (ops, next) =
-                self.sweep_chunk(&from, Some(&to), None, VACUUM_CHUNK, &mut removed)?;
+                self.sweep_chunk(&from, Some(&to), None, VACUUM_CHUNK, wm, &mut removed)?;
             if !ops.is_empty() {
                 self.inner.store.write(&Batch { meta: *commit, ops })?;
             }
@@ -651,9 +688,9 @@ impl Engine {
         to: Option<&[u8]>,
         committed: Option<&[(u64, u64)]>,
         chunk: usize,
+        wm: u64,
         removed: &mut u64,
     ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)> {
-        let wm = self.inner.current_watermark();
         let others = self.inner.others(None);
         let mut ops = Vec::new();
         let mut last_user: Option<Vec<u8>> = None;

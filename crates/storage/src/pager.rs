@@ -457,6 +457,27 @@ impl Pager {
         Ok(())
     }
 
+    /// Writes a zeroed page (of type `UNUSED`) over every free page and
+    /// syncs: what a page held before it was freed — a leaf a later
+    /// version replaced, a value's overflow chain — is gone from the file
+    /// (SQLite's `secure_delete`, done at once rather than at each free;
+    /// PLAN.md §M14.24 R2).  Pages freed since the last commit are not
+    /// free yet and keep theirs.  Under the state lock, so no page is
+    /// allocated meanwhile.  The pages zeroed.
+    pub fn zero_free(&self) -> Result<u64> {
+        let s = self.begin()?;
+        let mut zeroed = 0;
+        // (Past the file's known length a page was never written.)
+        for &id in s.free.range(..s.known_len) {
+            let mut page = Page::new(PageType::UNUSED);
+            write_raw(self.file.as_ref(), PageId(id), &mut page)?;
+            zeroed += 1;
+        }
+        drop(s);
+        self.file.sync()?;
+        Ok(zeroed)
+    }
+
     /// Meta slot `slot` as it will be committed.
     pub fn meta(&self, slot: usize) -> u64 {
         self.lock().hdr.meta[slot]

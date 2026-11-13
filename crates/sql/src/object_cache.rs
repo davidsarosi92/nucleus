@@ -125,6 +125,15 @@ pub(crate) fn get<T: Send + Sync + 'static>(
     Ok(value)
 }
 
+/// Drops every object: an erasure's (PLAN.md §M14.24 R2b) — objects are
+/// known by their contents' hash, not by the rows they came from, so which
+/// held a deleted row's values cannot be told.  Readers decode again.
+pub(crate) fn clear() {
+    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    c.map.clear();
+    c.bytes = 0;
+}
+
 /// Drops the least recently used objects until a quarter of the budget is
 /// free.
 fn evict(c: &mut Cache) {

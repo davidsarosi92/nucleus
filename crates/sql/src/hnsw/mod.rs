@@ -488,6 +488,10 @@ impl IndexMethod for Hnsw {
         upkeep(kv, wrote)
     }
 
+    fn scrub(&self, kv: &Arc<dyn Kv>, _reg: &Registry, t: &Table, i: usize) -> Result<()> {
+        scrub(kv, t, i).map(|_| ())
+    }
+
     /// By the distance its operator class serves, nearest first: the rows
     /// it does not hold (a `NULL` vector's) last.
     fn ranks(&self, ix: &IndexDef, function: &str, desc: bool, nulls_first: bool) -> bool {
@@ -1194,6 +1198,74 @@ pub fn upkeep_now(kv: &Arc<dyn Kv>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Erasure (PLAN.md §M14.24 R2b): every graph of index `i` of `t` —
+/// its delta sealed and folded, its dead nodes cut out, then the vectors
+/// and keys of the nodes cut out whose rows are gone zeroed
+/// ([`store::Index::scrub`]) — each step a transaction of its own.  The
+/// nodes it zeroed.
+pub fn scrub(kv: &Arc<dyn Kv>, t: &Table, i: usize) -> Result<usize> {
+    let ix = &t.indexes[i];
+    // The graphs: one, or one per partition value — found by seeking past
+    // each (a key is the index's prefix, the graph's part, a tag).
+    let mut parts = Vec::new();
+    if partitioned(ix) {
+        let prefix = t.index_prefix(ix.id);
+        let end = nucleus_kv::prefix_end(&prefix).expect("an index prefix");
+        let txn = kv.begin(TxnOptions::read_only())?;
+        let mut from = prefix.clone();
+        while let Some((k, _)) = txn.first(
+            std::ops::Bound::Included(&from[..]),
+            std::ops::Bound::Excluded(&end[..]),
+        )? {
+            let rest = &k[prefix.len()..];
+            if rest.first() != Some(&b'p') {
+                break;
+            }
+            let (_, n) = crate::encoding::decode_key(&rest[1..], ix.columns.len() - 1)?;
+            let part = rest[..1 + n].to_vec();
+            from = nucleus_kv::prefix_end(&[prefix.as_slice(), &part].concat())
+                .expect("a part's prefix");
+            parts.push(part);
+        }
+    } else {
+        parts.push(Vec::new());
+    }
+    let mut zeroed = 0;
+    for graph in parts {
+        let id = Id {
+            instance: kv.instance(),
+            table: t.id,
+            index: ix.id,
+            part: graph,
+        };
+        let st = state(&id);
+        let _busy = st.busy.lock().unwrap_or_else(|e| e.into_inner());
+        maintain(kv, &st, &id, 0)?;
+        retrying(kv, |txn| {
+            let Some((t, i)) = find(&*txn, &id)? else {
+                return Ok(false);
+            };
+            open(id.instance, &t, i, &id.part)?.index.consolidate(txn)
+        })?;
+        zeroed += retrying(kv, |txn| {
+            let Some((t, i)) = find(&*txn, &id)? else {
+                return Ok(0);
+            };
+            let o = open(id.instance, &t, i, &id.part)?;
+            let current = |ro: &dyn KvTxn, pk: &[u8]| -> Result<Option<Vec<u8>>> {
+                match o.row(ro, &t, pk)? {
+                    Some(row) if part(&t, i, &row).as_deref() == Some(id.part.as_slice()) => {
+                        o.stored(&row[o.column])
+                    }
+                    _ => Ok(None),
+                }
+            };
+            o.index.scrub(txn, &current)
+        })?;
+    }
+    Ok(zeroed)
 }
 
 /// Index `id`'s table and its position there, as `txn` sees the catalog

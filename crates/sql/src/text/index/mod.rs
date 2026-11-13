@@ -373,6 +373,10 @@ impl IndexMethod for TextIndex {
         upkeep(kv, false)
     }
 
+    fn scrub(&self, kv: &Arc<dyn Kv>, _: &Registry, t: &Table, i: usize) -> Result<()> {
+        scrub(kv, t, i)
+    }
+
     fn operand(&self, ix: &IndexDef, op: &str) -> Option<Value> {
         (op == "@@").then(|| Value::Text(analyzer_of(ix).unwrap_or(crate::text::DEFAULT).into()))
     }
@@ -736,6 +740,15 @@ fn upkeep(kv: &Arc<dyn Kv>, all: bool) -> Result<()> {
 /// now whatever the sizes (tests; `VACUUM`).
 pub fn upkeep_now(kv: &Arc<dyn Kv>) -> Result<()> {
     upkeep(kv, true)
+}
+
+/// Erasure (PLAN.md §M14.24 R2b): index `i` of `t` (a text or a sparse
+/// vector index) sealed and its segments with deleted rows rewritten
+/// without them, in a transaction of its own.
+pub fn scrub(kv: &Arc<dyn Kv>, t: &Table, i: usize) -> Result<()> {
+    let _busy = pending().busy.lock().unwrap_or_else(|e| e.into_inner());
+    crate::hnsw::retrying(kv, |txn| store(t, i).scrub(txn))?;
+    Ok(())
 }
 
 /// Index `i` of `t` merged into one segment, its deleted rows dropped

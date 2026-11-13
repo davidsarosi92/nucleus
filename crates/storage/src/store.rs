@@ -65,6 +65,15 @@ impl Default for StoreOptions {
     }
 }
 
+/// What [`Store::scrub`] overwrote.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scrubbed {
+    /// Free pages zeroed.
+    pub pages: u64,
+    /// Bytes of dropped WAL segments and spares zeroed.
+    pub wal_bytes: u64,
+}
+
 /// An atomic set of writes, with a caller-defined `meta` value carried
 /// through the WAL (the transaction layer stores its commit timestamp
 /// there).
@@ -156,6 +165,10 @@ pub struct Store {
     checkpointing: Mutex<()>,
     checkpoint_lsn: AtomicU64,
     poisoned: AtomicBool,
+    /// A [`Store::scrub`] runs: checkpoints overwrite the WAL segments
+    /// they drop; the bytes they zeroed.
+    scrubbing: AtomicBool,
+    wal_zeroed: AtomicU64,
     /// The exclusive lock on the directory (`LOCK`).
     _lock: Box<dyn nucleus_platform::Lock>,
 }
@@ -272,6 +285,8 @@ impl Store {
             checkpointing: Mutex::new(()),
             checkpoint_lsn: AtomicU64::new(checkpoint),
             poisoned: AtomicBool::new(false),
+            scrubbing: AtomicBool::new(false),
+            wal_zeroed: AtomicU64::new(0),
             _lock: lock,
         };
         if replayed > 0 || root == 0 {
@@ -393,6 +408,33 @@ impl Store {
         self.checkpoint_begin()?.finish()
     }
 
+    /// Removes from the files what the tree no longer holds (PLAN.md
+    /// §M14.24 R2): a checkpoint writes the tree as it is, the WAL moves to
+    /// a new segment, a second checkpoint frees the pages the first
+    /// replaced and drops every segment before it — overwritten with zeros
+    /// first, and the spares too —, then every free page is overwritten
+    /// with zeros.  Writes go on meanwhile; a checkpoint that runs between
+    /// (the engine's) zeroes what it drops as well.  The deleted entries'
+    /// bytes then remain only in the process's memory and, on a file
+    /// system that copies on write or a disk that remaps, in blocks the
+    /// files no longer name.
+    pub fn scrub(&self) -> Result<Scrubbed> {
+        self.check()?;
+        self.scrubbing.store(true, Ordering::Release);
+        let before = self.wal_zeroed.load(Ordering::Acquire);
+        let r = (|| {
+            self.checkpoint()?;
+            self.wal.roll()?;
+            self.checkpoint()?;
+            self.pool.pager().zero_free()
+        })();
+        self.scrubbing.store(false, Ordering::Release);
+        Ok(Scrubbed {
+            pages: r?,
+            wal_bytes: self.wal_zeroed.load(Ordering::Acquire) - before,
+        })
+    }
+
     /// The first, short half of a checkpoint (§M14.20 W4): under the
     /// writer lock, the tree as it is now — its root, the LSN applied, the
     /// last batch's meta — frozen as the next committed state
@@ -485,7 +527,13 @@ impl Checkpoint<'_> {
             s.pool.flush_frozen()?;
             s.pool.pager().commit_frozen(self.frozen)?;
             s.checkpoint_lsn.store(lsn, Ordering::Release);
-            s.wal.truncate_before(lsn)
+            if s.scrubbing.load(Ordering::Acquire) {
+                let n = s.wal.truncate_before_zeroed(lsn)?;
+                s.wal_zeroed.fetch_add(n, Ordering::AcqRel);
+                Ok(())
+            } else {
+                s.wal.truncate_before(lsn)
+            }
         })();
         result.inspect_err(|_| s.poisoned.store(true, Ordering::Release))
     }

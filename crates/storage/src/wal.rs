@@ -401,9 +401,55 @@ impl Wal {
         Ok(())
     }
 
+    /// Starts a new segment at the end of the log, if the one being
+    /// written holds any record, so a checkpoint after it can drop every
+    /// record before (PostgreSQL's `pg_switch_wal`): what erasure needs
+    /// (PLAN.md §M14.24 R2).  The old segment is synced first, as when the
+    /// log moves on by itself.
+    pub fn roll(&self) -> Result<()> {
+        let mut s = self.lock();
+        if s.poisoned {
+            return Err(Error::Poisoned);
+        }
+        let current = s.segments.last().expect("the log always has a segment");
+        if s.end == current.start {
+            return Ok(());
+        }
+        let file = Arc::clone(&current.file);
+        let dir_dirty = s.dir_dirty;
+        let synced = file.sync_order().and_then(|()| {
+            if dir_dirty {
+                self.platform.fs().sync_dir(&self.dir)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(e) = synced {
+            s.poisoned = true;
+            return Err(e.into());
+        }
+        s.dir_dirty = false;
+        let start = s.end;
+        self.new_segment(&mut s, start)
+    }
+
     /// Deletes the segments that hold only records before `lsn`.  The
     /// segment being written is always kept.
     pub fn truncate_before(&self, lsn: Lsn) -> Result<()> {
+        self.truncate(lsn, false).map(|_| ())
+    }
+
+    /// [`truncate_before`](Self::truncate_before), the dropped segments —
+    /// and every spare — overwritten with zeros and synced before they
+    /// are deleted or kept as spares, so none of their records stays in a
+    /// file of the log (PLAN.md §M14.24 R2).  On a file system that writes
+    /// in place; on one that copies on write (APFS) the old blocks are the
+    /// file system's.  The bytes zeroed.
+    pub fn truncate_before_zeroed(&self, lsn: Lsn) -> Result<u64> {
+        self.truncate(lsn, true)
+    }
+
+    fn truncate(&self, lsn: Lsn, zeroed: bool) -> Result<u64> {
         let fs = self.platform.fs();
         // The segment holding `lsn` may be new, its directory entry not yet
         // durable: it must be before any older one leaves, or a crash could
@@ -417,8 +463,24 @@ impl Wal {
         while s.segments.len() > 1 && s.segments[1].start <= lsn {
             doomed.push(s.segments.remove(0));
         }
+        let mut wiped = 0;
+        if zeroed {
+            for seg in &doomed {
+                let len = seg.file.size()?;
+                zero(seg.file.as_ref(), 0, len)?;
+                seg.file.sync()?;
+                wiped += len;
+            }
+            for spare in &s.spares {
+                let file = fs.open(spare, OpenMode::ReadWrite)?;
+                let len = file.size()?;
+                zero(file.as_ref(), 0, len)?;
+                file.sync()?;
+                wiped += len;
+            }
+        }
         if doomed.is_empty() {
-            return Ok(());
+            return Ok(wiped);
         }
         // All, then one directory sync: a crash may keep any of them (an
         // unsynced directory's changes survive in any combination), and
@@ -443,7 +505,7 @@ impl Wal {
         }
         drop(s);
         fs.sync_dir(&self.dir)?;
-        Ok(())
+        Ok(wiped)
     }
 
     /// Bytes in the log (all segments).

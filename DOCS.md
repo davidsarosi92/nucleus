@@ -526,7 +526,12 @@ in the log.  Record: `len u32, crc u32 (CRC-32C of LSN ‖ payload), lsn u64,
 payload`.  `append` → LSN past the record; `sync_to(lsn)` is group commit
 (one `fsync` for everything appended; waiters for earlier LSNs return at
 once); `replay(from, f)`; `truncate_before(lsn)`; `size`, `start`, `end`,
-`durable`.
+`durable`.  For erasure (§M14.24 R2b): `roll()` starts a new segment if
+the current one holds a record (PostgreSQL's `pg_switch_wal`), so a
+checkpoint after it can drop every older record; `truncate_before_zeroed`
+overwrites the dropped segments and every spare with zeros, synced,
+before they are deleted or kept as spares (in place; on APFS the old
+blocks are the file system's).
 
 **Preallocated and recycled segments** (where `writes_in_place`; PLAN.md
 §M14.28 L0).  A segment is grown ahead of its records by zeros, a
@@ -598,6 +603,22 @@ does not line up with (ahead of its end, or its start after it) is
 corruption.  Options: `cache_pages` (default 1024), `wal_segment_size`
 (default 16 MiB).
 
+**Scrub** (§M14.24 R2b).  `scrub()` → `Scrubbed { pages, wal_bytes }`
+removes from the files what the tree no longer holds: a checkpoint, the
+WAL rolled, a second checkpoint (it frees the pages the first replaced;
+every checkpoint while a scrub runs truncates with zeroing), then
+`Pager::zero_free` writes a zeroed `UNUSED` page over every free page
+under the state lock and syncs (SQLite's `secure_delete`, at once rather
+than at each free).  Writes go on meanwhile.  What then remains is in the
+process's memory and, on a copy-on-write file system or a remapping
+disk, in blocks no file names.  **`scan::find(fs, dir, needles)`** is the
+proof: every file but `LOCK` searched raw (a mebibyte at a time), and the
+data file's leaves — reachable or free — decoded: keys put together from
+their shared prefix, packed values decompressed, overflow chains read;
+results once per file offset (per page for the data file).  Needles
+under 4 bytes are not looked for; a needle set is indexed by its first
+two bytes (a bitmap) and four (a map).
+
 ### 4.7 Tests
 
 - `pager.rs` — round trips (simulated and real), the immutability rule,
@@ -663,7 +684,9 @@ merges the transaction's own writes), `commit() -> Timestamp`,
 crate (principle 3): compared, printed and parsed (`Display`, `FromStr`),
 never computed with.  `Engine`: `visible`, `checkpoint`,
 `vacuum`, `intents_pending`, `version_count`, `intent_count`,
-`side_count`, `store`.
+`side_count`, `store`, `oldest_snapshot` (the oldest running
+transaction's start, else the visible timestamp), `purge_range(start,
+end)` (a range's versions below that, history or not — erasure's).
 
 **Snapshot isolation.**  A transaction reads at its start timestamp — the
 engine's *visible* timestamp, which advances only once a commit is durable,
@@ -931,7 +954,16 @@ distributed implementation will provide (§F3).
   whose tombstones a scan would otherwise step over until the whole
   vacuum runs (RocksDB's queue pattern; an HNSW index's delta, §8.18);
   `Engine::vacuum_range`, a chunk of the vacuum's sweep (`sweep_chunk`)
-  bounded by the range.  `Kv::vacuum_background(go_on)`: the same in small batches (2 048
+  bounded by the range.  `Kv::scrub(ranges, wait)` → `Option<Scrub {
+  complete, versions, pages, wal_bytes }>` (erasure, §8.29): the full
+  vacuum if intents are pending, then — once no snapshot older than the
+  call runs (polled every 2 ms up to `wait`; else `complete: false`) —
+  every version of those ranges no snapshot sees removed past any
+  history kept (`Engine::purge_range`: the watermark is the oldest
+  snapshot, `Engine::oldest_snapshot`), then the store's scrub (§4.6).
+  `Kv::find_bytes(needles)` → the places in the files holding one
+  (`nucleus_storage::scan::find`, re-exported as `nucleus_kv::scan`).
+  Both `None` by default (an implementation with no files of its own).  `Kv::vacuum_background(go_on)`: the same in small batches (2 048
   entries), `go_on` asked between them — `false` stops the sweep there,
   and the next call goes on from it (with the transactions it began
   with: their statuses go when a sweep has passed every key).
@@ -2627,9 +2659,9 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.roles` | `name`, `superuser`, `login`, `inherit`, `createrole`, `connection_limit`, `has_password`, `valid_until` |
 | `nc_catalog.role_members` | `role`, `member`, `admin_option`, `condition` (a `WHEN` condition, or NULL) |
 | `nc_catalog.access_rules` | `position`, `name`, `roles`, `addresses`, `front_ends`, `auth_methods`, `tls`, `action`, `read_only`, `as_role` (in order) |
-| `nc_catalog.audit` | `seq`, `at`, `kind` (`login`, `ddl`, `statement`), `ok`, `code`, `session_user_name`, `user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `detail`, `hash` (an administrator's; empty for others) |
+| `nc_catalog.audit` | `seq`, `at`, `kind` (`login`, `ddl`, `statement`), `ok`, `code`, `session_user_name`, `user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `detail` (NULL once an erasure blanked it), `hash`, `erasure` (the one that blanked it) (an administrator's; empty for others) |
 | `nc_catalog.audit_chain` | `records`, `intact`, `broken_at`, `problem` (the chain walked) |
-| `nc_catalog.erasures` | `erasure`, `at`, `session_user_name`, `user_name`, `tables` (text[], `'name: rows'`), `rows` — each `FORGET SUBJECT` (an administrator's all, a role's own; §8.29) |
+| `nc_catalog.erasures` | `erasure`, `at`, `session_user_name`, `user_name`, `tables` (text[], `'name: rows'`), `rows`, `scrubbed`, `found`, `audit_erased` — each `FORGET SUBJECT` (an administrator's all, a role's own; §8.29) |
 | `nc_catalog.database_settings` | `name`, `value`, `is_set`, `default`, `description` (`ALTER DATABASE nucleus SET …`) |
 | `nc_catalog.statements` | `user_name`, `query` (constants as `$n`), `calls`, `errors`, `total_ms`, `mean_ms`, `min_ms`, `max_ms`, `rows_read`, `rows_returned`, `model_calls`, `model_texts`, `model_cached`, `model_tokens`, `model_errors`, `model_ms`, `last_call` (statement statistics, §8.13; an administrator sees all, others their own; the model columns §8.27) |
 | `nc_catalog.index_advice` | `table_name`, `columns`, `create_statement`, `statements`, `calls`, `rows_read`, `rows_read_with_index`, `example_query`, `plan` (the index advisor, §8.13) |
@@ -4595,16 +4627,79 @@ undone — mark that table, or make its key cascade).  **All or
 nothing**: after each delete the rows of the subject left are counted
 as the system; any — row security hid them from the caller — refuses
 the statement (`42501`) and nothing is deleted.  It returns one row,
-`erasure` (the record's number) and `rows` (deleted, not counting what
-the foreign keys' actions deleted).
+`erasure` (the record's number), `rows` (deleted, not counting what
+the foreign keys' actions deleted), `scrubbed` and `found` (below).
+
+**The scrub** (§M14.24 R2b; `forget::finish`, after the commit, before
+the row is sent).  A delete leaves a row's bytes in many places: MVCC
+versions and tombstones (an index key holds the indexed values), free
+pages (copy-on-write leaves the old page as it was), log segments, an
+HNSW graph's vector pages (a dead node keeps its vector and key until a
+consolidation; a consolidated one, until its page is written again), a
+text index's segments (a deleted document's terms), column segments
+(a delete only marks a row), `ANALYZE` samples, the embedding queue,
+and memory: decoded index objects, column segments, a model's cached
+vectors.  For every table the delete may have reached — the subject
+tables, those referencing them through keys, transitively, and their
+partitions — the scrub, as the system:
+
+1. rewrites each index method's structures without the rows gone
+   (`IndexMethod::scrub`): an HNSW graph's waiting rows sealed and
+   folded, its dead nodes consolidated, then `hnsw::store::Index::scrub`
+   zeroes the vector and empties the key of every node cut from the
+   graph whose row is not current, rewriting their vector pages; a text
+   or sparse index's waiting rows sealed and each segment with deleted
+   documents merged alone (`text::index::store::Store::scrub`);
+2. rewrites a `column` or `row, column` table's segments: the delta
+   taken in, each segment with rows marked deleted written again
+   without them (`column_store::scrub`; a dropped segment leaves the
+   decoded-column cache whenever it is dropped);
+3. takes the statistics' sample again where the table has one;
+4. empties the caches keyed by a hash of contents, which cannot be told
+   by row: decoded index objects (`object_cache::clear`) and models'
+   vectors (`models::clear_cache`);
+5. runs the KV store's scrub (`Kv::scrub`, §6.1) over each table's data,
+   its sample (`00 04 id`) and its embedding queue (`00 17 id`,
+   `00 18 id`), and the audit log's records when it blanked any:
+   versions purged past history, free pages and the log's dropped
+   segments zeroed — after the snapshots older than the erasure end
+   (waited for up to 60 s; else `scrubbed` is false and the bytes stay
+   until a later scrub or vacuum);
+6. **searches every file** of the database for the deleted rows' values
+   (`Kv::find_bytes`, `nucleus_storage::scan`, §4.6): texts and `bytea`
+   from 8 bytes (whole up to 64 bytes, else 32-byte windows every 128
+   bytes), vectors as stored and normalized, other extension types'
+   bytes, arrays' items — less what the table's kept rows hold too (the
+   same text or vector found where it rightly is), and bytes of fewer
+   than 8 distinct values (zeros, padding, a sparse vector: found by
+   chance).  `found` is the number of places still holding one — 0 is
+   the proof the erasure asks for; `NULL` when the scrub did not run
+   through.
+
+What is not scrubbed: the server's own logs (their texts are masked,
+below), files outside the database's directory (backups, exports,
+replicas — each is erased where it is kept), a value encoded past
+recognition (bit-packed numbers: a layer's own encoding must drop a
+deleted row by construction, which the steps above do), and short
+values (under 8 bytes) the search does not look for — they are scrubbed
+all the same.
+
+**The audit log.**  Its records of version 2 (§9) hash a detail's
+SHA-256, not the detail: the erasure blanks, in its own transaction,
+the detail of each record holding the subject as a literal (`'alice'`)
+or the head of one of its rows' texts (8 bytes or more, as a literal
+writes it), and the chain still holds; `nc_catalog.audit` shows the
+detail as NULL and the `erasure` that blanked it.  A record of version 1
+(written before) is hashed over its detail and is left as it is.
 
 **The erasure record** (`00 19 <seq>`, the last number at `00 1A`;
 `forget::all`): when, who (session and current user), the tables with
 the rows deleted from each, the rows in all — never a value of the
 subject; written in the erasure's transaction.
 `nc_catalog.erasures` (`erasure`, `at`, `session_user_name`,
-`user_name`, `tables` text[] — `'notes: 2'` —, `rows`) shows an
-administrator every record and other roles their own.  `FORGET` is
+`user_name`, `tables` text[] — `'notes: 2'` —, `rows`, `scrubbed`,
+`found`, `audit_erased`; the record's version 2 adds the last three)
+shows an administrator every record and other roles their own.  `FORGET` is
 always in the audit log (as a statement that changes what the database
 holds, kind `ddl`), and every log keeps its text with its constants
 masked — strings as `'***'`, numbers as `***` (`statements::redacted`,
@@ -4860,8 +4955,14 @@ password with its strings as `'***'`.  It is written in the transaction of what
 it records — a statement rolled back leaves none, a committed one always
 has one — and a refusal, a read or a login in one of its own.  Each
 record's hash is SHA-256 over its fields and the previous record's hash;
+a record of version 2 (eight `ff` bytes, then its fields' length) hashes
+its detail's SHA-256 in the detail's place and keeps the detail apart,
+so an erasure can blank it (§8.29: the detail NULL, `erasure` its
+number) and the chain still holds; version 1 records (the fields, then
+the hash) read as written.
 `nc_catalog.audit_chain` walks the chain: a changed record, a gap, or
-records cut off the end (the head names more) show, with where.  A local
+records cut off the end (the head names more) show, with where — and a
+version 2 detail that is neither its digest's nor blanked.  A local
 session's DDL is recorded too.  Records are not pruned yet; a stream of
 them comes with §M16.5.
 
@@ -5536,6 +5637,21 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-13 — §M14.24 R2b, the scrub:** after a `FORGET`'s commit
+  the reached tables' structures are rewritten without the rows (an HNSW
+  graph's cut nodes zeroed — `IndexMethod::scrub` —, text and sparse
+  segments with deleted documents merged, column segments with deleted
+  rows rewritten — `column_store::scrub` —, samples taken again), the
+  in-memory caches by content emptied, then the KV store's scrub
+  (`Kv::scrub`: `Engine::purge_range`, `Store::scrub` — WAL rolled and
+  its dropped segments and spares zeroed, free pages zeroed by
+  `Pager::zero_free`) and a search of every file for the rows' values
+  (`Kv::find_bytes`, `nucleus_storage::scan`); `FORGET` returns
+  `scrubbed` and `found`, the erasure record (version 2) keeps them and
+  the audit records blanked; audit records of version 2 hash their
+  detail's digest so an erasure blanks the details holding the subject
+  with the chain intact (`nc_catalog.audit.erasure`); the drivers'
+  helpers return all four.
 - **2026-11-13 — §M14.24 R2a, `FORGET SUBJECT`:** subject columns
   (`ALTER TABLE … SET / DROP SUBJECT`; a memory store's `subject`
   marked), table record version 18; `FORGET SUBJECT value` deletes the

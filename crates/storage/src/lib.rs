@@ -12,6 +12,7 @@ pub mod lz;
 pub mod node;
 pub mod page;
 pub mod pager;
+pub mod scan;
 pub mod store;
 pub mod wal;
 
@@ -20,5 +21,5 @@ pub use buffer::{BufferPool, PageRef};
 pub use error::{Error, Result};
 pub use page::{PAGE_SIZE, PAYLOAD_SIZE, Page, PageId, PageType};
 pub use pager::Pager;
-pub use store::{Batch, Checkpoint, Recovery, Store, StoreOptions};
+pub use store::{Batch, Checkpoint, Recovery, Scrubbed, Store, StoreOptions};
 pub use wal::{Lsn, Wal};

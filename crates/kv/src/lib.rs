@@ -24,6 +24,9 @@ use nucleus_platform::real::RealPlatform;
 use nucleus_storage::StoreOptions;
 
 pub use nucleus_platform::SyncPolicy;
+/// Finding bytes in a database's files ([`Kv::find_bytes`]'s search, for tools
+/// and tests that want where).
+pub use nucleus_storage::scan;
 pub use nucleus_txn::{Chunk, Isolation, Timestamp};
 
 /// Errors of the KV contract.
@@ -317,6 +320,41 @@ pub trait Kv: Send + Sync {
     fn watch(&self, start: &[u8], end: &[u8]) {
         let _ = (start, end);
     }
+
+    /// Erasure (PLAN.md §M14.24 R2): once no snapshot older than now
+    /// runs (waiting up to `wait`), every version of the keys in `ranges`
+    /// (each `[start, end)`) no snapshot can see removed, past any history
+    /// kept, and what the files then hold no longer — free pages, the
+    /// log's dropped segments — overwritten with zeros.  `None` from an
+    /// implementation with no files of its own (the default: nothing kept
+    /// that it could remove).
+    fn scrub(&self, ranges: &[(Vec<u8>, Vec<u8>)], wait: Duration) -> Result<Option<Scrub>> {
+        let _ = (ranges, wait);
+        Ok(None)
+    }
+
+    /// Where in its files any of `needles` (four bytes or more) is: one
+    /// place per file offset, or per page of the data file, its leaves
+    /// decoded ([`nucleus_storage::scan`]).  `None` from an
+    /// implementation with no files of its own (the default).
+    fn find_bytes(&self, needles: &[Vec<u8>]) -> Result<Option<u64>> {
+        let _ = needles;
+        Ok(None)
+    }
+}
+
+/// What [`Kv::scrub`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scrub {
+    /// Whether it ran: `false` when a snapshot older than the call was
+    /// still running after the wait (nothing was removed).
+    pub complete: bool,
+    /// Versions removed.
+    pub versions: u64,
+    /// Free pages zeroed.
+    pub pages: u64,
+    /// Bytes of the log's dropped segments zeroed.
+    pub wal_bytes: u64,
 }
 
 /// Scratch space ([`Kv::scratch`]): bytes written and read back by offset.
@@ -690,6 +728,8 @@ impl Default for Options {
 pub struct Database {
     engine: nucleus_txn::Engine,
     platform: Arc<dyn Platform>,
+    /// Its directory.
+    dir: PathBuf,
     /// Where scratch files go (`<dir>/scratch`), and how many were made.
     scratch_dir: PathBuf,
     scratch_made: Arc<AtomicU64>,
@@ -748,6 +788,7 @@ impl Database {
         Ok(Self {
             engine,
             platform,
+            dir: path.to_path_buf(),
             scratch_dir,
             scratch_made: Arc::new(AtomicU64::new(0)),
             instance: OPENED.fetch_add(1, Ordering::Relaxed) + 1,
@@ -843,6 +884,43 @@ impl Kv for Database {
 
     fn watch(&self, start: &[u8], end: &[u8]) {
         self.engine.watch(start, end);
+    }
+
+    fn scrub(&self, ranges: &[(Vec<u8>, Vec<u8>)], wait: Duration) -> Result<Option<Scrub>> {
+        // Intents made versions, so none of the keys is left whole.
+        if self.engine.intents_pending() {
+            self.engine.vacuum()?;
+        }
+        let target = self.engine.visible();
+        let clock = self.platform.clock();
+        let started = clock.now();
+        while self.engine.oldest_snapshot() < target {
+            if clock.now().saturating_sub(started) >= wait {
+                return Ok(Some(Scrub::default()));
+            }
+            clock.sleep(Duration::from_millis(2));
+        }
+        let mut versions = 0;
+        for (start, end) in ranges {
+            versions += self.engine.purge_range(start, end)?;
+        }
+        let done = self
+            .engine
+            .store()
+            .scrub()
+            .map_err(|e| Error::Storage(Box::new(e)))?;
+        Ok(Some(Scrub {
+            complete: true,
+            versions,
+            pages: done.pages,
+            wal_bytes: done.wal_bytes,
+        }))
+    }
+
+    fn find_bytes(&self, needles: &[Vec<u8>]) -> Result<Option<u64>> {
+        let found = nucleus_storage::scan::find(self.platform.fs(), &self.dir, needles)
+            .map_err(|e| Error::Storage(Box::new(e)))?;
+        Ok(Some(found.len() as u64))
     }
 
     fn scratch(&self) -> Result<Box<dyn Scratch>> {

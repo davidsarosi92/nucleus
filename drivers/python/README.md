@@ -59,8 +59,9 @@ expires=timedelta(days=30))` → `(id, "inserted" | "merged" |
 "replaced")` (`replaces=old_id` keeps the old one as history),
 `conn.recall("notes", "ann", "how to answer", k=5)` → the subject's
 current memories as dicts, best first, `conn.forget("notes", id)`;
-`conn.forget_subject("ann")` → `(erasure, rows)` erases her rows from
-every table with subject columns (`FORGET SUBJECT`).  Tests:
+`conn.forget_subject("ann")` → `(erasure, rows, scrubbed, found)` erases
+her rows from every table with subject columns (`FORGET SUBJECT`), scrubs
+the files and searches them (`found == 0`: none of their values is left).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.
 
 ## In this process (the embedded edition)

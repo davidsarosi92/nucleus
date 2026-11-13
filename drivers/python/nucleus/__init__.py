@@ -1009,11 +1009,14 @@ class Connection:
         """Erases every row of ``subject`` from every table with subject
         columns (``FORGET SUBJECT``; a memory store's ``subject`` is one,
         ``ALTER TABLE … SET SUBJECT (column)`` marks others) — all of them
-        or, if any is out of reach, none.  Returns ``(erasure, rows)``: the
-        erasure record's number (``nc_catalog.erasures``) and the rows
-        deleted."""
+        or, if any is out of reach, none — then scrubs the files of what
+        held them.  Returns ``(erasure, rows, scrubbed, found)``: the
+        erasure record's number (``nc_catalog.erasures``), the rows
+        deleted, whether the scrub ran through and the places the search
+        after it still found one of their values in (0 is the proof;
+        ``None``: not searched)."""
         row = self.execute("FORGET SUBJECT CAST($1 AS text)", (str(subject),)).rows[0]
-        return row[0], row[1]
+        return row[0], row[1], row[2], row[3]
 
     def cursor(self):
         return Cursor(self)

@@ -94,7 +94,10 @@ fn current(t: &Table) -> Target {
 }
 
 /// Runs `f` in a transaction, again while it conflicts.
-fn attempt<T>(kv: &Arc<dyn Kv>, mut f: impl FnMut(&mut dyn KvTxn) -> Result<T>) -> Result<T> {
+pub(crate) fn attempt<T>(
+    kv: &Arc<dyn Kv>,
+    mut f: impl FnMut(&mut dyn KvTxn) -> Result<T>,
+) -> Result<T> {
     let mut tries = 0;
     loop {
         let mut txn = kv.begin(TxnOptions::default())?;

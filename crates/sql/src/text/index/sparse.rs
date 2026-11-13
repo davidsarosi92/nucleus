@@ -84,6 +84,16 @@ impl IndexMethod for SparseIndex {
         NAME
     }
 
+    fn scrub(
+        &self,
+        kv: &std::sync::Arc<dyn nucleus_kv::Kv>,
+        _: &Registry,
+        t: &Table,
+        i: usize,
+    ) -> Result<()> {
+        super::scrub(kv, t, i)
+    }
+
     fn define(&self, t: &Table, ix: &mut IndexDef) -> Result<()> {
         if ix.columns.len() != 1 {
             return Err(Error::feature("a sparse index has one column"));

@@ -671,6 +671,27 @@ impl Store {
         Ok(txn.put(&self.keys.root(), &out.encode())?)
     }
 
+    /// Erasure (PLAN.md §M14.24 R2b): the delta sealed, then each
+    /// segment that has deleted documents written again alone, without
+    /// them — their keys, terms, positions and lengths gone from every
+    /// object the index keeps (the old ones deleted, for the KV store's
+    /// scrub).  The segments rewritten.
+    pub(crate) fn scrub(&self, txn: &mut dyn KvTxn) -> Result<usize> {
+        self.seal(txn)?;
+        let root = self.root(&*txn)?;
+        let groups: Vec<Vec<usize>> = root
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.dead > 0)
+            .map(|(i, _)| vec![i])
+            .collect();
+        if !groups.is_empty() {
+            self.merge_groups(txn, &root, &groups, 1)?;
+        }
+        Ok(groups.len())
+    }
+
     /// Every segment merged into one (tests; `VACUUM`).
     pub(crate) fn merge_all(&self, txn: &mut dyn KvTxn, workers: usize) -> Result<()> {
         let root = self.root(&*txn)?;

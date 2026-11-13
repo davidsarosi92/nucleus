@@ -68,7 +68,7 @@ fn forget_erases_a_subject_from_every_table() {
     let mut s = Session::new(db());
     schema(&mut s);
     // `accounts` is keyed by number: 'alice' is none of its rows.
-    assert_eq!(texts(&mut s, "FORGET SUBJECT 'alice'"), ["1 4"]);
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 'alice'"), ["1 4 t 0"]);
     assert_eq!(
         texts(&mut s, "SELECT subject, content FROM notes"),
         ["bob plays chess"]
@@ -83,11 +83,11 @@ fn forget_erases_a_subject_from_every_table() {
     // A number is a subject of the text columns and the numeric ones.
     s.execute("INSERT INTO messages VALUES (4, '7', 'bob', 'from seven')")
         .unwrap();
-    assert_eq!(texts(&mut s, "FORGET SUBJECT 7"), ["2 2"]);
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 7"), ["2 2 t 0"]);
     assert_eq!(texts(&mut s, "SELECT id FROM accounts"), ["8"]);
     assert_eq!(texts(&mut s, "SELECT id FROM messages"), ["3"]);
     // Nobody: an erasure of nothing, recorded all the same.
-    assert_eq!(texts(&mut s, "FORGET SUBJECT 'zed'"), ["3 0"]);
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 'zed'"), ["3 0 t 0"]);
     // The record: who, when, where, how many — and no value of the subject.
     assert_eq!(
         texts(
@@ -132,9 +132,9 @@ fn subject_columns_are_checked_and_dropped() {
     s.execute("ALTER TABLE messages SET SUBJECT (recipient)")
         .unwrap();
     // Only as a recipient now.
-    assert_eq!(texts(&mut s, "FORGET SUBJECT 'carol'"), ["1 1"]);
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 'carol'"), ["1 1 t 0"]);
     s.execute("ALTER TABLE messages DROP SUBJECT").unwrap();
-    assert_eq!(texts(&mut s, "FORGET SUBJECT 'bob'"), ["2 1"]);
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 'bob'"), ["2 1 t 0"]);
     assert_eq!(texts(&mut s, "SELECT count(*) FROM messages"), ["2"]);
 }
 
@@ -158,7 +158,7 @@ fn foreign_keys_between_tables() {
          ALTER TABLE replies SET SUBJECT (author)",
     )
     .unwrap();
-    assert_eq!(texts(&mut s, "FORGET SUBJECT 'alice'"), ["1 5"]);
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 'alice'"), ["1 5 t 0"]);
     assert_eq!(texts(&mut s, "SELECT count(*) FROM replies"), ["0"]);
 }
 
@@ -190,7 +190,7 @@ fn all_of_a_subject_or_nothing() {
     assert_eq!(texts(&mut s, "SELECT count(*) FROM messages"), ["3"]);
     // Bob's are all visible to it.
     s.execute("SET ROLE app").unwrap();
-    assert_eq!(texts(&mut s, "FORGET SUBJECT 'bob'"), ["1 4"]);
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 'bob'"), ["1 4 t 0"]);
     // Its own erasures, not others'.
     assert_eq!(
         texts(&mut s, "SELECT erasure, user_name FROM nc_catalog.erasures"),
@@ -201,4 +201,148 @@ fn all_of_a_subject_or_nothing() {
         texts(&mut s, "SELECT count(*) FROM nc_catalog.erasures"),
         ["1"]
     );
+}
+
+/// What a value is searched for as: its bytes.
+fn needle(s: &str) -> Vec<Vec<u8>> {
+    vec![s.as_bytes().to_vec()]
+}
+
+#[test]
+fn the_scrub_leaves_none_of_the_values_in_any_file() {
+    let kv = db();
+    let mut s = Session::new(kv.clone());
+    s.execute(
+        "CREATE MODEL h USING hashing WITH (dimensions = 16); \
+         CREATE MEMORY STORE notes USING h; \
+         SET embedding.pending = wait; \
+         CREATE TABLE messages (id int PRIMARY KEY, sender text, body text); \
+         ALTER TABLE messages SET SUBJECT (sender); \
+         CREATE INDEX ON messages USING text (body); \
+         CREATE TABLE ledger (id int PRIMARY KEY, owner text, line text) \
+             WITH (storage = column); \
+         ALTER TABLE ledger SET SUBJECT (owner); \
+         INSERT INTO ledger SELECT g, CASE WHEN g % 100 = 0 THEN 'alice' ELSE 'bob' END, \
+             CASE WHEN g % 100 = 0 THEN 'alice' ELSE 'bob' END || ' paid kestrel-' || g \
+             FROM generate_series(1, 5000) g",
+    )
+    .unwrap();
+    for i in 0..60 {
+        let who = if i % 3 == 0 { "alice" } else { "bob" };
+        s.execute(&format!(
+            "REMEMBER '{who} remembers quokka-{i:03} at the harbour' FOR '{who}' IN notes; \
+             INSERT INTO messages VALUES ({i}, '{who}', '{who} wrote zephyr-{i:03} to everyone')"
+        ))
+        .unwrap();
+    }
+    // The vectors and terms folded into graphs and segments first.
+    nucleus_sql::hnsw::upkeep_now(&kv).unwrap();
+    nucleus_sql::text::index::upkeep_now(&kv).unwrap();
+    let hers = "alice remembers quokka-003 at the harbour";
+    let his = "bob remembers quokka-004 at the harbour";
+    assert!(kv.find_bytes(&needle(hers)).unwrap().unwrap() > 0);
+    // Similar memories merged (9 of her 20 kept): what a merge replaced
+    // is an old version only, and goes all the same.
+    assert_eq!(
+        texts(&mut s, "SELECT count(*) FROM notes WHERE subject = 'alice'"),
+        ["9"]
+    );
+    // Her ledger lines are in column segments (one statement wrote enough).
+    assert!(
+        kv.find_bytes(&needle("alice paid kestrel-2500"))
+            .unwrap()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 'alice'"), ["1 79 t 0"]);
+    // None of hers anywhere — the rows, their old versions, the index
+    // entries, the logs.
+    for i in (0..60).step_by(3) {
+        for v in [
+            format!("alice remembers quokka-{i:03} at the harbour"),
+            format!("alice wrote zephyr-{i:03} to everyone"),
+        ] {
+            assert_eq!(kv.find_bytes(&needle(&v)).unwrap(), Some(0), "{v}");
+        }
+    }
+    for g in (100..=5000).step_by(100) {
+        let v = format!("alice paid kestrel-{g}");
+        assert_eq!(kv.find_bytes(&needle(&v)).unwrap(), Some(0), "{v}");
+    }
+    // His are still found (the search is not blind), and still searchable.
+    assert!(kv.find_bytes(&needle(his)).unwrap().unwrap() > 0);
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT id FROM messages WHERE body @@ 'everyone' ORDER BY id LIMIT 2"
+        ),
+        ["1", "2"]
+    );
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT erasure, rows, scrubbed, found FROM nc_catalog.erasures"
+        ),
+        ["1 79 t 0"]
+    );
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT count(*), min(line) FROM ledger WHERE id >= 4998"
+        ),
+        ["2 bob paid kestrel-4998"]
+    );
+}
+
+#[test]
+fn the_audit_log_keeps_no_statement_of_hers() {
+    let mut s = Session::new(db());
+    s.execute("ALTER DATABASE nucleus SET audit_statements = 'all'")
+        .unwrap();
+    schema(&mut s);
+    s.execute("UPDATE messages SET body = 'it''s a secret, bob' WHERE id = 1")
+        .unwrap();
+    // (Built so that its own text, audited too, does not name her.)
+    let audit = |s: &mut Session| {
+        texts(
+            s,
+            "SELECT count(*) FROM nc_catalog.audit \
+             WHERE detail LIKE '%''ali' || 'ce''%'",
+        )
+    };
+    assert_ne!(audit(&mut s), ["0"]);
+    let before = texts(&mut s, "SELECT count(*) FROM nc_catalog.audit");
+    assert_eq!(texts(&mut s, "FORGET SUBJECT 'alice'"), ["1 4 t 0"]);
+    // Her statements are blanked — the one that named her, the one with
+    // her row's text — the records kept, the chain whole.
+    assert_eq!(audit(&mut s), ["0"]);
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT count(*) FROM nc_catalog.audit WHERE detail LIKE '%' || 'sec' || 'ret,%'"
+        ),
+        ["0"]
+    );
+    let erased = texts(
+        &mut s,
+        "SELECT count(*) FROM nc_catalog.audit WHERE erasure = 1 AND detail IS NULL",
+    );
+    assert_eq!(
+        texts(&mut s, "SELECT audit_erased FROM nc_catalog.erasures"),
+        erased
+    );
+    assert_eq!(
+        texts(&mut s, "SELECT intact, problem FROM nc_catalog.audit_chain"),
+        ["t NULL"]
+    );
+    // Bob's are kept.
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT count(*) > 0 FROM nc_catalog.audit WHERE detail LIKE '%''plays chess''%'"
+        ),
+        ["t"]
+    );
+    let after = texts(&mut s, "SELECT count(*) FROM nc_catalog.audit");
+    assert!(after[0].parse::<u64>().unwrap() > before[0].parse::<u64>().unwrap());
 }

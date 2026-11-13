@@ -310,7 +310,7 @@ fn works_on_the_real_file_system() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Batches with an occasional checkpoint.  Returns the models after each
+/// Batches with an occasional checkpoint (one a scrub).  Returns the models after each
 /// batch attempted (index 0 = empty) and how many batches were acknowledged.
 fn workload(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Model>, usize) {
     let rng = SplitMix64::new(seed);
@@ -332,7 +332,13 @@ fn workload(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Model>, usize) {
                 acked = i as usize;
             }
             if i % 6 == 0 {
-                store.checkpoint()?;
+                // One of them a scrub: its checkpoints, the log moved on,
+                // segments and free pages zeroed.
+                if i == 12 {
+                    store.scrub()?;
+                } else {
+                    store.checkpoint()?;
+                }
                 acked = i as usize; // a checkpoint makes everything durable
             }
         }
@@ -558,4 +564,131 @@ fn checkpoints_while_writing_on_real_files() {
     store.read().unwrap().check().unwrap();
     drop(store);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// What [`Store::scrub`] is for (PLAN.md §M14.24 R2): entries deleted —
+/// inline values, compressed ones, overflow chains, keys — leave bytes in
+/// free pages and the WAL after an ordinary checkpoint; after a scrub no
+/// file holds them, and the store reopens with everything else.
+#[test]
+fn a_scrub_leaves_no_deleted_bytes_in_any_file() {
+    for in_place in [true, false] {
+        let p = sim(3);
+        p.sim_fs().set_writes_in_place(in_place);
+        let (store, _) = open(&p).unwrap();
+        let secret = |i: u32| format!("SECRET-{i:04}-erase-me").into_bytes();
+        let mut model = Model::new();
+        let mut meta = 0;
+        let mut put = |store: &Store, model: &mut Model, k: Vec<u8>, v: Vec<u8>| {
+            meta += 1;
+            let b = Batch {
+                meta,
+                ops: vec![(k.clone(), Some(v.clone()))],
+            };
+            store.commit(&b).unwrap();
+            model.insert(k, v);
+        };
+        for i in 0..40u32 {
+            // Inline; compressed (1 KiB and more, repetitive); in an
+            // overflow chain (past a page); and in a key.
+            let s = secret(i);
+            put(
+                &store,
+                &mut model,
+                format!("a{i:03}").into_bytes(),
+                s.clone(),
+            );
+            put(
+                &store,
+                &mut model,
+                format!("b{i:03}").into_bytes(),
+                s.repeat(60),
+            );
+            let mut big = s.clone();
+            big.extend((0..9000u32).map(|x| (x.wrapping_mul(2654435761) >> 13) as u8));
+            put(&store, &mut model, format!("c{i:03}").into_bytes(), big);
+            let mut key = b"d".to_vec();
+            key.extend_from_slice(&s);
+            put(&store, &mut model, key, b"v".to_vec());
+            // Kept: neighbours sharing their pages.
+            put(
+                &store,
+                &mut model,
+                format!("e{i:03}").into_bytes(),
+                b"kept".repeat(20),
+            );
+        }
+        store.checkpoint().unwrap();
+        let doomed: Vec<Vec<u8>> = model
+            .keys()
+            .filter(|k| !k.starts_with(b"e"))
+            .cloned()
+            .collect();
+        meta += 1;
+        let b = Batch {
+            meta,
+            ops: doomed.iter().map(|k| (k.clone(), None)).collect(),
+        };
+        store.commit(&b).unwrap();
+        for k in &doomed {
+            model.remove(k);
+        }
+        store.checkpoint().unwrap();
+        let needles: Vec<Vec<u8>> = (0..40).map(secret).collect();
+        let found = |p: &SimPlatform| {
+            nucleus_storage::scan::find(p.fs(), Path::new(DIR), &needles)
+                .unwrap()
+                .len()
+        };
+        assert!(found(&p) > 40, "the deleted bytes, before");
+        let done = store.scrub().unwrap();
+        assert!(done.pages > 0);
+        assert_eq!(found(&p), 0, "in place: {in_place}");
+        // Everything else is there, and stays after reopening.
+        assert_eq!(contents(&store), model);
+        drop(store);
+        let (store, _) = open(&p).unwrap();
+        assert_eq!(contents(&store), model);
+        assert_eq!(found(&p), 0);
+    }
+}
+
+/// The search reads the data file as the tree wrote it: a value whose
+/// bytes compression split, or a key whose leaf keeps its prefix apart,
+/// is still found — though a plain search of the file does not find it.
+#[test]
+fn the_search_decodes_leaves() {
+    let p = sim(4);
+    let (store, _) = open(&p).unwrap();
+    // Repetitive, so compression keeps it as a literal and a match.
+    let packed_needle = b"zyxw".repeat(6);
+    let mut packed = packed_needle.clone();
+    packed.extend((0..2048u32).map(|x| b"abcdefgh"[(x % 8) as usize]));
+    // Keys sharing a prefix (a leaf stores it once, the rests apart).
+    let key_needle = b"KEYNEEDLE-1".to_vec();
+    let ops = vec![
+        (b"KEYNEEDLE-1".to_vec(), Some(b"one".to_vec())),
+        (b"KEYNEEDLE-2".to_vec(), Some(b"two".to_vec())),
+        (b"KEYNEEDLE-3".to_vec(), Some(packed)),
+    ];
+    store.commit(&Batch { meta: 1, ops }).unwrap();
+    store.checkpoint().unwrap();
+    let data = Path::new(DIR).join("data");
+    let mut raw = Vec::new();
+    let f = p.fs().open(&data, OpenMode::ReadOnly).unwrap();
+    raw.resize(f.size().unwrap() as usize, 0);
+    f.read_exact_at(&mut raw, 0).unwrap();
+    for needle in [packed_needle, key_needle] {
+        assert!(
+            !raw.windows(needle.len()).any(|w| w == needle),
+            "not in the file as it is: {}",
+            String::from_utf8_lossy(&needle)
+        );
+        let found = nucleus_storage::scan::find(p.fs(), Path::new(DIR), &[needle])
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.file == data)
+            .count();
+        assert_eq!(found, 1, "found in the data file's leaf");
+    }
 }

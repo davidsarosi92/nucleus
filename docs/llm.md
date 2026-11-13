@@ -117,8 +117,11 @@ mark the columns that say whose a row is, `ALTER TABLE messages SET
 SUBJECT (sender, recipient)` (a memory store's `subject` is marked), then
 `FORGET SUBJECT 'ann'` (not in a transaction block) deletes her rows from
 every such table — foreign keys followed, all or nothing (`42501` if row
-security hides any from you) — and returns `erasure, rows`;
-`nc_catalog.erasures` lists erasures without the subject's value.
+security hides any from you) — then scrubs the files (old versions,
+index pages, free pages, the log, audit details) and searches them for
+the rows' values: it returns `erasure, rows, scrubbed, found` (`found =
+0` is the proof none is left); `nc_catalog.erasures` lists erasures
+without the subject's value.
 
 **Model limits and costs:** give a remote model your account's limits —
 `CREATE MODEL oa USING openai WITH (model = 'text-embedding-3-small',

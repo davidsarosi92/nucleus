@@ -1348,12 +1348,22 @@ export class Client {
    * Erases every row of `subject` from every table with subject columns
    * (`FORGET SUBJECT`; a memory store's `subject` is one, `ALTER TABLE …
    * SET SUBJECT (column)` marks others) — all of them or, if any is out of
-   * reach, none.  The erasure record's number (`nc_catalog.erasures`) and
-   * the rows deleted.
+   * reach, none — then scrubs the files of what held them.  The erasure
+   * record's number (`nc_catalog.erasures`), the rows deleted, whether the
+   * scrub ran through and the places the search after it still found one
+   * of their values in (0 is the proof; `null`: not searched).
    */
-  async forgetSubject(subject: string | number | bigint): Promise<{ erasure: number; rows: number }> {
+  async forgetSubject(
+    subject: string | number | bigint,
+  ): Promise<{ erasure: number; rows: number; scrubbed: boolean; found: number | null }> {
     const r = await this.query("FORGET SUBJECT CAST($1 AS text)", [String(subject)]);
-    return { erasure: Number(r.rows[0][0]), rows: Number(r.rows[0][1]) };
+    const [erasure, rows, scrubbed, found] = r.rows[0];
+    return {
+      erasure: Number(erasure),
+      rows: Number(rows),
+      scrubbed: scrubbed === true,
+      found: found == null ? null : Number(found),
+    };
   }
 
   /** BEGIN, `fn`, then COMMIT — or ROLLBACK if it throws. */

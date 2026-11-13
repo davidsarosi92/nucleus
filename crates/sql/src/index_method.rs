@@ -169,6 +169,23 @@ pub trait IndexMethod: Send + Sync {
         Ok(())
     }
 
+    /// Erasure (PLAN.md §M14.24 R2b): index `i` of `t` rewritten so no
+    /// object of it holds anything of a row the table no longer has — a
+    /// deleted row's vector, terms, key — once the rows are deleted and
+    /// committed; the replaced objects are then garbage the KV store's
+    /// scrub removes.  Each step in transactions of its own.  By default
+    /// nothing: a method keeping nothing past a row's delete.
+    fn scrub(
+        &self,
+        kv: &Arc<dyn nucleus_kv::Kv>,
+        reg: &Registry,
+        t: &Table,
+        i: usize,
+    ) -> Result<()> {
+        let _ = (kv, reg, t, i);
+        Ok(())
+    }
+
     /// The value an operator on the index's (first) column takes from the
     /// index, as one more operand, when a statement is bound: what the
     /// operator then means on that column, with or without the index (a

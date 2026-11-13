@@ -1224,6 +1224,8 @@ fn drop_segment(txn: &mut dyn KvTxn, t: &Table, seg: &Segment) -> Result<()> {
         txn.delete(&chunk_key(t, seg.id, c))?;
     }
     txn.delete(&dir_key(t, &seg.last))?;
+    // Its values leave memory with it (a reader still on it decodes again).
+    uncache(seg);
     Ok(())
 }
 
@@ -2343,6 +2345,62 @@ pub fn take_changes(txn: &mut dyn KvTxn, t: &Table, validated: bool) -> Result<(
 /// as [`take_changes`]).
 pub fn flush_delta(txn: &mut dyn KvTxn, t: &Table, validated: bool) -> Result<()> {
     merge_with(txn, t, take_buffer(t), Delta::Own, validated)
+}
+
+/// Rewrites what keeps a deleted row's values (PLAN.md §M14.24 R2b): the
+/// delta taken into segments, and each segment with rows marked deleted
+/// written again without them (its old chunks deleted, its decoded columns
+/// dropped from the cache — as [`drop_segment`] does for every segment).  The number of segments rewritten.  Nothing
+/// while a storage conversion moves the table's rows.
+pub fn scrub(txn: &mut dyn KvTxn, t: &Table) -> Result<usize> {
+    if t.copy != CopyState::Ready || !matches!(t.storage.as_str(), COLUMN | ROW_COLUMN) {
+        return Ok(0);
+    }
+    match delta_of(t) {
+        Delta::Own => flush_delta(txn, t, false)?,
+        _ => take_changes(txn, t, false)?,
+    }
+    let start = t.index_prefix(0);
+    let end = prefix_end(&start);
+    let cols = copy_columns(t);
+    let mut rewritten = 0;
+    for seg in segments(&*txn, t, &start, end.as_deref())? {
+        let gone = deleted(&*txn, t, &seg, false)?;
+        if gone.is_empty() {
+            continue;
+        }
+        let keys = keys_of(&*txn, t, &seg)?;
+        let vectors = (0..t.columns.len())
+            .map(|c| stored_column(&*txn, t, &seg, c))
+            .collect::<Result<Vec<_>>>()?;
+        drop_segment(txn, t, &seg)?;
+        let mut out = SegmentWriter {
+            t,
+            cols: cols.clone(),
+            rows: Vec::new(),
+            bytes: 0,
+        };
+        for i in (0..seg.rows).filter(|i| !gone.contains(&(*i as u32))) {
+            let mut key = start.clone();
+            key.extend_from_slice(keys.get(i));
+            let row = vectors.iter().map(|v| v.value(i)).collect();
+            out.push(txn, key, row)?;
+        }
+        out.flush(txn)?;
+        rewritten += 1;
+    }
+    Ok(rewritten)
+}
+
+/// Drops a segment's decoded columns, keys and entry from the cache.
+fn uncache(seg: &Segment) {
+    for col in seg.cols.iter().copied().chain([KEYS, ENTRY]) {
+        let key = (seg.id, col);
+        cache(&key)
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+    }
 }
 
 /// The key of a `column` table's delta row for row key `key`.

@@ -17,6 +17,15 @@
 //! and with `audit_statements = all`, `audit_roles` (the statements of
 //! these roles' members) or `audit_tables` (those that touch these
 //! tables), `statement`.
+//!
+//! **Erasure** (PLAN.md §M14.24 R2b).  A record of version 2 — marked by
+//! eight `ff` bytes before its fields, which a version 1 record (its
+//! number first, little-endian) never starts with — is hashed over its
+//! detail's SHA-256, not the detail itself, and keeps the detail apart: an
+//! erasure ([`erase`]) blanks a detail that holds a subject's values and
+//! the chain still holds, the digest showing what was there was not
+//! changed, only removed.  A version 1 record's detail cannot be blanked
+//! without breaking the chain; it is left as it is.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -28,6 +37,8 @@ use crate::error::{Error, Result};
 
 const RECORDS: [u8; 2] = [0x00, 0x12];
 const HEAD: [u8; 2] = [0x00, 0x13];
+/// What a version 2 record starts with.
+const V2: [u8; 8] = [0xff; 8];
 
 /// A record.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,8 +61,13 @@ pub struct Record {
     pub context: crate::access::Context,
     /// The access rule that admitted the session.
     pub rule: Option<String>,
-    /// The statement's text, or what happened.
+    /// The statement's text, or what happened (empty once erased).
     pub detail: String,
+    /// The detail's SHA-256 as written (a version 2 record's; empty for
+    /// version 1, whose hash covers the detail itself).
+    pub digest: Vec<u8>,
+    /// The erasure that blanked the detail.
+    pub erased: Option<u64>,
     /// The previous record's hash.
     pub prev: Vec<u8>,
     /// Its hash.
@@ -95,23 +111,68 @@ impl Record {
             .str(&self.context.front_end)
             .str(&self.context.auth_method)
             .u8(u8::from(self.context.tls))
-            .opt_str(self.rule.as_deref())
-            .str(&self.detail)
-            .str(&hex(&self.prev));
+            .opt_str(self.rule.as_deref());
+        if self.digest.is_empty() {
+            w.str(&self.detail);
+        } else {
+            w.str(&hex(&self.digest));
+        }
+        w.str(&hex(&self.prev));
         w.0
     }
 
+    /// Version 1: the fields, the hash.  Version 2: the marker, the
+    /// fields' length and the fields, the detail and its erasure, the hash.
     fn encode(&self) -> Vec<u8> {
-        let mut b = self.fields();
+        let fields = self.fields();
+        let mut b = Vec::with_capacity(fields.len() + self.detail.len() + 64);
+        if self.digest.is_empty() {
+            b.extend_from_slice(&fields);
+        } else {
+            b.extend_from_slice(&V2);
+            b.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+            b.extend_from_slice(&fields);
+            let mut w = Writer::default();
+            w.str(&self.detail).u64(self.erased.unwrap_or(0));
+            b.extend_from_slice(&w.0);
+        }
         b.extend_from_slice(&self.hash);
         b
     }
 
     fn decode(b: &[u8]) -> Result<Record> {
+        if b.starts_with(&V2) {
+            return Self::decode_v2(&b[V2.len()..]);
+        }
         if b.len() < 32 {
             return Err(Error::internal("a malformed audit record"));
         }
         let (fields, hash) = b.split_at(b.len() - 32);
+        Self::decode_fields(fields, hash, None)
+    }
+
+    fn decode_v2(b: &[u8]) -> Result<Record> {
+        let bad = || Error::internal("a malformed audit record");
+        let n = u32::from_le_bytes(b.get(..4).ok_or_else(bad)?.try_into().expect("4")) as usize;
+        let fields = b.get(4..4 + n).ok_or_else(bad)?;
+        let rest = &b[4 + n..];
+        if rest.len() < 32 {
+            return Err(bad());
+        }
+        let (apart, hash) = rest.split_at(rest.len() - 32);
+        let mut r = Reader::new(apart);
+        let detail = r.str()?;
+        let erased = Some(r.u64()?).filter(|&e| e != 0);
+        Self::decode_fields(fields, hash, Some((detail, erased)))
+    }
+
+    /// The fields as hashed; `apart`, a version 2 record's detail and
+    /// erasure.
+    fn decode_fields(
+        fields: &[u8],
+        hash: &[u8],
+        apart: Option<(String, Option<u64>)>,
+    ) -> Result<Record> {
         let mut r = Reader::new(fields);
         let seq = r.u64()?;
         let at = r.u64()? as i64;
@@ -125,7 +186,11 @@ impl Record {
         let auth_method = r.str()?;
         let tls = r.u8()? == 1;
         let rule = r.opt_str()?;
-        let detail = r.str()?;
+        let hashed = r.str()?;
+        let (detail, digest, erased) = match apart {
+            None => (hashed, Vec::new(), None),
+            Some((detail, erased)) => (detail, unhex(&hashed), erased),
+        };
         let prev = unhex(&r.str()?);
         Ok(Record {
             seq,
@@ -143,6 +208,8 @@ impl Record {
             },
             rule,
             detail,
+            digest,
+            erased,
             prev,
             hash: hash.to_vec(),
         })
@@ -160,6 +227,8 @@ pub fn append(txn: &mut dyn KvTxn, mut r: Record) -> Result<()> {
     };
     r.seq = seq;
     r.prev = prev;
+    r.digest = nucleus_crypto::sha256(r.detail.as_bytes()).to_vec();
+    r.erased = None;
     r.hash = nucleus_crypto::sha256(&r.fields()).to_vec();
     txn.put(&record_key(seq), &r.encode())?;
     let mut head = seq.to_be_bytes().to_vec();
@@ -203,6 +272,37 @@ pub fn all(txn: &dyn KvTxn) -> Result<Vec<Record>> {
     Ok(out)
 }
 
+/// Blanks, as erasure `erasure`, the details of version 2 records that
+/// hold one of `values` (each record's digest and hash stay: the chain
+/// holds).  The number of records blanked.
+pub fn erase(txn: &mut dyn KvTxn, erasure: u64, values: &[String]) -> Result<u64> {
+    if values.is_empty() {
+        return Ok(0);
+    }
+    let mut n = 0;
+    for mut r in all(&*txn)? {
+        if r.digest.is_empty()
+            || r.erased.is_some()
+            || !values.iter().any(|v| r.detail.contains(v.as_str()))
+        {
+            continue;
+        }
+        r.detail.clear();
+        r.erased = Some(erasure);
+        txn.put(&record_key(r.seq), &r.encode())?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// The key range of the records (an erasure's scrub).
+pub fn records_range() -> (Vec<u8>, Vec<u8>) {
+    (
+        RECORDS.to_vec(),
+        nucleus_kv::prefix_end(&RECORDS).expect("audit prefix"),
+    )
+}
+
 /// What [`check`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chain {
@@ -235,6 +335,15 @@ pub fn check(txn: &dyn KvTxn) -> Result<Chain> {
             return Ok(broken(r.seq, "it does not follow the record before it"));
         }
         if nucleus_crypto::sha256(&r.fields()).to_vec() != r.hash {
+            return Ok(broken(r.seq, "it was changed"));
+        }
+        // A detail kept must be the one hashed; an erased one is empty.
+        if !r.digest.is_empty()
+            && match r.erased {
+                None => nucleus_crypto::sha256(r.detail.as_bytes())[..] != r.digest[..],
+                Some(_) => !r.detail.is_empty(),
+            }
+        {
             return Ok(broken(r.seq, "it was changed"));
         }
         prev = r.hash.clone();
@@ -316,4 +425,50 @@ pub fn wanted(
         }
     }
     Ok(list("audit_tables")?.iter().any(|t| tables.contains(t)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(detail: &str) -> Record {
+        Record {
+            seq: 255,
+            at: 7,
+            kind: "statement".into(),
+            ok: true,
+            session_user: "u".into(),
+            user: "u".into(),
+            detail: detail.into(),
+            prev: vec![1; 32],
+            ..Record::default()
+        }
+    }
+
+    #[test]
+    fn version_1_records_read_as_written() {
+        // A version 1 record: its fields (the detail among them), its hash.
+        let mut r = record("INSERT INTO t VALUES ('x')");
+        r.hash = nucleus_crypto::sha256(&r.fields()).to_vec();
+        let mut b = r.fields();
+        b.extend_from_slice(&r.hash);
+        assert_eq!(r.encode(), b);
+        assert_eq!(Record::decode(&b).unwrap(), r);
+    }
+
+    #[test]
+    fn version_2_records_hash_the_detail_s_digest() {
+        let mut r = record("INSERT INTO t VALUES ('x')");
+        r.digest = nucleus_crypto::sha256(r.detail.as_bytes()).to_vec();
+        r.hash = nucleus_crypto::sha256(&r.fields()).to_vec();
+        let b = r.encode();
+        assert!(b.starts_with(&V2));
+        assert_eq!(Record::decode(&b).unwrap(), r);
+        // Blanked, the hashed fields are the same.
+        let mut e = r.clone();
+        e.detail.clear();
+        e.erased = Some(3);
+        assert_eq!(e.fields(), r.fields());
+        assert_eq!(Record::decode(&e.encode()).unwrap(), e);
+    }
 }

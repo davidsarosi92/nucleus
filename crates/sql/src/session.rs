@@ -1080,8 +1080,18 @@ impl Session {
             execute(txn.as_mut(), &self.registry, stmt, params, sink)
         })?;
         txn.commit()?;
+        let out = self.after_commit(stmt, out)?;
         self.after_statement(!opts.read_only);
         Ok(Output::Command(deliver(stmt, out, sink)?))
+    }
+
+    /// What a statement does once its transaction committed, before its
+    /// rows go out: a `FORGET`'s scrub (§M14.24 R2b).
+    fn after_commit(&self, stmt: &Statement, out: Output) -> Result<Output> {
+        match stmt {
+            Statement::Forget { .. } => crate::forget::finish(&self.kv, &self.registry, out),
+            _ => Ok(out),
+        }
     }
 
     /// After a statement outside a transaction block, or a block's
@@ -1246,6 +1256,7 @@ impl Session {
             // once it has committed, so a retried one sends them once.
             let r = decided.and(r).and_then(|out| {
                 txn.commit()?;
+                let out = self.after_commit(stmt, out)?;
                 deliver(stmt, out, sink).map(Output::Command)
             });
             match r {
@@ -1361,7 +1372,7 @@ impl Session {
                 };
                 binder.query(&q)?;
                 Some(columns_of(
-                    crate::forget::RESULT.map(|c| (c.to_string(), Some(DataType::BigInt))),
+                    crate::forget::RESULT.map(|(name, ty)| (name.to_string(), Some(ty))),
                 ))
             }
             Statement::Show(name) => Some(vec![OutColumn {
@@ -1897,12 +1908,19 @@ pub(crate) fn execute_statement(
             Output::Rows {
                 columns: crate::forget::RESULT
                     .iter()
-                    .map(|c| OutColumn {
-                        name: c.to_string(),
-                        ty: DataType::BigInt,
+                    .map(|&(name, ty)| OutColumn {
+                        name: name.to_string(),
+                        ty,
                     })
                     .collect(),
-                rows: vec![vec![Value::Int(e.seq as i64), Value::Int(e.rows as i64)]],
+                // Whether it was scrubbed is known after the commit
+                // (`forget::finish`).
+                rows: vec![vec![
+                    Value::Int(e.seq as i64),
+                    Value::Int(e.rows as i64),
+                    Value::Bool(false),
+                    Value::Null,
+                ]],
             }
         }
         Statement::CreatePartition {

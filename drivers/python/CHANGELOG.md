@@ -6,8 +6,8 @@
   subject, content, kind=, confidence=, expires=, source=, replaces=)` →
   `(id, action)`, `recall(store, subject, query, k=10)` → dicts best
   first, `forget(store, id)` → whether there was one;
-  `forget_subject(subject)` → `(erasure, rows)` (`FORGET SUBJECT`, §M14.24
-  R2).
+  `forget_subject(subject)` → `(erasure, rows, scrubbed, found)`
+  (`FORGET SUBJECT` and its scrub, §M14.24 R2).
 
 - The embedded edition (nucleus PLAN.md §M14.23): `connect("file:app.db")`,
   `connect(":memory:")`, `nucleus.open(path, options)` and

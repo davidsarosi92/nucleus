@@ -891,7 +891,9 @@ fn keep(key: [u8; 32], v: Arc<[f32]>) {
     }
 }
 
-/// Forgets every kept vector (tests).
+/// Forgets every kept vector (tests; an erasure, PLAN.md §M14.24 R2b: the
+/// cache is keyed by a hash of each text, so a deleted row's cannot be
+/// picked out).
 pub fn clear_cache() {
     let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
     c.map.clear();

@@ -129,6 +129,7 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("access_rule", T),
             ("detail", T),
             ("hash", T),
+            ("erasure", I),
         ],
     ),
     (
@@ -149,6 +150,9 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("user_name", T),
             ("tables", TA),
             ("rows", I),
+            ("scrubbed", B),
+            ("found", I),
+            ("audit_erased", I),
         ],
     ),
     (
@@ -669,8 +673,13 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     text(r.context.auth_method),
                     Value::Bool(r.context.tls),
                     r.rule.map_or(Value::Null, text),
-                    text(r.detail),
+                    if r.erased.is_some() {
+                        Value::Null
+                    } else {
+                        text(r.detail)
+                    },
                     text(crate::audit::hex(&r.hash)),
+                    r.erased.map_or(Value::Null, |e| Value::Int(e as i64)),
                 ]);
             }
         }
@@ -703,6 +712,9 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                             .collect(),
                     ),
                     Value::Int(e.rows as i64),
+                    Value::Bool(e.scrubbed),
+                    e.found.map_or(Value::Null, |n| Value::Int(n as i64)),
+                    Value::Int(e.audit as i64),
                 ]);
             }
         }

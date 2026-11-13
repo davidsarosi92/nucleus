@@ -1581,6 +1581,104 @@ impl Index {
         Ok(folded)
     }
 
+    /// The graph's dead nodes cut out now, however few (each list through
+    /// one rewritten, the touched pages with them): erasure's first step
+    /// (PLAN.md §M14.24 R2b), so no search steps through a node whose
+    /// vector [`scrub`](Self::scrub) then zeroes.  Only with nothing
+    /// sealed (fold first); whether there were any.
+    pub fn consolidate(&self, txn: &mut dyn KvTxn) -> Result<bool> {
+        let mut w = Writes::new();
+        let root = {
+            let ro: &dyn KvTxn = &*txn;
+            let r = ro.shared().ok_or_else(|| Error::internal("shared reads"))?;
+            let root = self.root_in(r)?;
+            if !root.sealed.is_empty() || root.graph.dead == 0 {
+                return Ok(false);
+            }
+            let view = View::open(self.shape, &self.keys, r, &root)?;
+            let graph = fold_into(&view, &[], true, None, &mut w)?;
+            let mut root = root;
+            root.graph = graph;
+            root
+        };
+        w.apply(txn, &self.keys)?;
+        txn.put(&self.keys.root(), &root.encode())?;
+        Ok(true)
+    }
+
+    /// Erasure (PLAN.md §M14.24 R2b): every node cut out of the graph —
+    /// no neighbour at layer 0 — whose row the table no longer has as
+    /// `current` gives it gets its vector zeroed and its primary key
+    /// emptied, in vector pages written anew (the old ones dropped, so
+    /// the KV store's scrub can remove them).  A consolidation cuts a node
+    /// out, but its page keeps its vector and key until then.  Nodes
+    /// zeroed before (an empty key) are passed over.  How many it zeroed.
+    pub fn scrub(
+        &self,
+        txn: &mut dyn KvTxn,
+        current: &dyn Fn(&dyn KvTxn, &[u8]) -> Result<Option<Vec<u8>>>,
+    ) -> Result<usize> {
+        let mut w = Writes::new();
+        let (root, zeroed) = {
+            let ro: &dyn KvTxn = &*txn;
+            let r = ro.shared().ok_or_else(|| Error::internal("shared reads"))?;
+            let root = self.root_in(r)?;
+            let view = View::open(self.shape, &self.keys, r, &root)?;
+            let nodes = root.graph.nodes;
+            let mut orphans = BTreeSet::new();
+            let mut list = Vec::new();
+            for n in 0..nodes {
+                let Some(pk) = view.pk(n) else { continue };
+                if pk.is_empty() || view.is_dead(n) {
+                    continue;
+                }
+                view.neighbors(n, 0, &mut list);
+                if list.is_empty() && current(ro, pk)?.as_deref() != Some(view.at(n)) {
+                    orphans.insert(n);
+                }
+            }
+            view.check()?;
+            if orphans.is_empty() {
+                return Ok(0);
+            }
+            let (page, width) = (self.shape.page, self.shape.width);
+            let zeros = vec![0u8; width];
+            let mut pages = view.dir.pages.clone();
+            let touched: BTreeSet<usize> = orphans.iter().map(|&n| n as usize / page).collect();
+            for p in touched {
+                let hi = ((p + 1) * page).min(nodes as usize);
+                let mut pks: Vec<&[u8]> = Vec::with_capacity(page);
+                let mut data = Vec::with_capacity(page * width);
+                for n in p * page..hi {
+                    let n = n as Node;
+                    if orphans.contains(&n) {
+                        pks.push(&[]);
+                        data.extend_from_slice(&zeros);
+                    } else {
+                        pks.push(view.pk(n).ok_or_else(|| corrupt("a node has no row"))?);
+                        data.extend_from_slice(view.at(n));
+                    }
+                }
+                let old = pages[p].0;
+                pages[p].0 = w.object(1, VecChunk::encode_page(&pks, &data));
+                if old != 0 && old != pages[p].0 {
+                    w.dropped.insert(old);
+                }
+            }
+            view.check()?;
+            let dir = view.dir.write(&pages, &mut w);
+            if root.graph.dir != 0 && root.graph.dir != dir {
+                w.dropped.insert(root.graph.dir);
+            }
+            let mut root = root;
+            root.graph.dir = dir;
+            (root, orphans.len())
+        };
+        w.apply(txn, &self.keys)?;
+        txn.put(&self.keys.root(), &root.encode())?;
+        Ok(zeroed)
+    }
+
     /// Whether the graph's patches, as `txn` sees them, have outgrown
     /// `compact` of its adjacency: a [`compaction`](Self::compaction) due.
     pub fn compaction_due(&self, txn: &dyn KvRead) -> Result<bool> {
