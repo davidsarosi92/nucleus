@@ -7710,7 +7710,10 @@ built.
     values (a sparse vector's window) was found by chance; a value the
     kept rows of the same table also hold (identical vectors from the
     hashing model) was "found" where it rightly is — both now left out
-    of the search.  Not scrubbed: the server's logs (masked texts),
+    of the search.  Statement statistics' samples (each statement's last
+    text, constants and all, kept in memory for the index advisor; study
+    point 8) holding the subject are blanked too (`statements::erase`).
+    Not scrubbed: the server's logs (masked texts),
     files outside the directory (backups are R6's), session plan caches
     (a session's, gone with it), values under 8 bytes not searched for.
   - **R2c — the verification scan**: every file of the directory

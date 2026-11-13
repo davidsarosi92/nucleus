@@ -173,6 +173,27 @@ pub fn normalize(text: &str) -> (String, String) {
     (key, shown)
 }
 
+/// Blanks the kept last texts (the index advisor's samples) of `kv`'s
+/// statements that hold one of `values` — an erasure's (PLAN.md §M14.24
+/// R2): the normalized texts shown hold no constant.  The samples blanked;
+/// such a statement is planned again by the advisor once it runs again.
+pub fn erase(kv: &Arc<dyn Kv>, values: &[String]) -> usize {
+    let Ok(mut all) = STATS.lock() else {
+        return 0;
+    };
+    let Some(table) = all.get_mut(&database(kv)) else {
+        return 0;
+    };
+    let mut n = 0;
+    for s in table.values_mut() {
+        if values.iter().any(|v| s.sample.contains(v.as_str())) {
+            s.sample.clear();
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Records one run in `kv`'s statistics.
 pub fn record(kv: &Arc<dyn Kv>, run: Run) {
     let (key, shown) = run.normalized;
@@ -291,6 +312,44 @@ pub fn register(r: &mut Registry) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_erasure_blanks_the_samples_holding_its_values() {
+        use super::*;
+        let kv: Arc<dyn Kv> = Arc::new(
+            nucleus_kv::Database::open_on(
+                Arc::new(nucleus_platform::sim::SimPlatform::new(1)),
+                std::path::Path::new("/db"),
+                nucleus_kv::Options::default(),
+            )
+            .unwrap(),
+        );
+        for text in [
+            "SELECT * FROM notes WHERE subject = 'alice'",
+            "SELECT * FROM notes WHERE subject = 'bob'",
+        ] {
+            record(
+                &kv,
+                Run {
+                    text,
+                    normalized: &normalize(text),
+                    user: "u",
+                    elapsed: Duration::from_millis(1),
+                    rows_read: 1,
+                    rows_returned: 1,
+                    models: Default::default(),
+                    ok: true,
+                    at: 0,
+                },
+            );
+        }
+        // One normalized statement, its last run's text kept: bob's.
+        assert_eq!(erase(&kv, &["'alice'".into()]), 0);
+        assert_eq!(erase(&kv, &["'bob'".into()]), 1);
+        let all = STATS.lock().unwrap();
+        let t = &all[&database(&kv)];
+        assert!(t.values().all(|s| s.sample.is_empty() && s.calls == 2));
+    }
+
     #[test]
     fn credentials_are_masked() {
         use super::redacted;

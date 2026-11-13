@@ -4659,7 +4659,10 @@ partitions — the scrub, as the system:
 3. takes the statistics' sample again where the table has one;
 4. empties the caches keyed by a hash of contents, which cannot be told
    by row: decoded index objects (`object_cache::clear`) and models'
-   vectors (`models::clear_cache`);
+   vectors (`models::clear_cache`); and blanks the statement
+   statistics' kept last texts (the index advisor's samples, memory
+   only) holding the subject (`statements::erase`, matched as the audit
+   log's details are, below);
 5. runs the KV store's scrub (`Kv::scrub`, §6.1) over each table's data,
    its sample (`00 04 id`) and its embedding queue (`00 17 id`,
    `00 18 id`), and the audit log's records when it blanked any:

@@ -359,6 +359,7 @@ pub(crate) fn forget(
         Some(h) if h.len() == 8 => u64::from_be_bytes(h[..8].try_into().expect("8")) + 1,
         _ => 1,
     };
+    let said: Vec<String> = said.into_iter().collect();
     let mut e = Erasure {
         seq,
         at: crate::datetime::clock().unwrap_or_default(),
@@ -370,7 +371,7 @@ pub(crate) fn forget(
         found: None,
         audit: 0,
     };
-    e.audit = crate::audit::erase(txn, seq, &said.into_iter().collect::<Vec<_>>())?;
+    e.audit = crate::audit::erase(txn, seq, &said)?;
     txn.put(&record_key(seq), &e.encode())?;
     txn.put(&HEAD, &seq.to_be_bytes())?;
     // The scrub, after the commit: every table a delete may have reached
@@ -402,6 +403,7 @@ pub(crate) fn forget(
             tables: reached,
             needles,
             audit: e.audit > 0,
+            said,
         })
     });
     Ok(e)
@@ -424,6 +426,8 @@ struct Pending {
     needles: Vec<Vec<u8>>,
     /// Whether audit records were blanked (their old versions purged too).
     audit: bool,
+    /// What a statement's text holds of the subject.
+    said: Vec<String>,
 }
 
 thread_local! {
@@ -552,6 +556,9 @@ pub(crate) fn finish(
     // model's vectors of texts — cannot be told by row: all of it goes.
     crate::object_cache::clear();
     crate::models::clear_cache();
+    // Statement statistics keep each statement's last text for the index
+    // advisor (memory only; shown normalized, without constants).
+    crate::statements::erase(kv, &p.said);
     let mut ranges = Vec::new();
     for t in &p.tables {
         let id = t.id.to_be_bytes();
