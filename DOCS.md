@@ -2575,8 +2575,9 @@ ends it) puts every following statement and block of the session there.
 The expression is evaluated when the transaction begins, in a
 transaction of its own (`now() - interval '1 hour'` works; a parameter
 does not); a time in the future, NULL or a commit not positive is
-`22023`; one before the retention by time (§5.2), or with none set,
-`72000` (snapshot too old).  The statement binds against the catalog as
+`22023`; one before the retention by time (§5.2; the server's `--history`,
+§9; how far back: `nc_catalog.history`), or with none set, `72000`
+(snapshot too old).  The statement binds against the catalog as
 it was then — the session's catalog cache serves only snapshots that
 read the catalog as it was filled (`watched_as_at`) — so a table since
 altered reads in its old shape and a dropped one is there; index
@@ -2757,6 +2758,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.database_settings` | `name`, `value`, `is_set`, `default`, `description` (`ALTER DATABASE nucleus SET …`) |
 | `nc_catalog.statements` | `user_name`, `query` (constants as `$n`), `calls`, `errors`, `total_ms`, `mean_ms`, `min_ms`, `max_ms`, `rows_read`, `rows_returned`, `model_calls`, `model_texts`, `model_cached`, `model_tokens`, `model_errors`, `model_ms`, `last_call` (statement statistics, §8.13; an administrator sees all, others their own; the model columns §8.27) |
 | `nc_catalog.index_advice` | `table_name`, `columns`, `create_statement`, `statements`, `calls`, `rows_read`, `rows_read_with_index`, `example_query`, `plan` (the index advisor, §8.13) |
+| `nc_catalog.history` | `retention` (the retention by time; NULL without one), `oldest_time`, `oldest_commit` (how far back `AS OF` reaches: the oldest snapshot whose commit time is recorded), `newest_commit` — one row (§8.7, §M14.14) |
 | `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
 | `nc_catalog.tokens` | `name`, `login`, `role`, `read_only`, `tables`, `valid_until`, `created`, `created_by`, `max_rows`, `max_scan`, `timeout`, `rate_per_minute` (the tokens the current role may manage; never a secret) |
@@ -4857,8 +4859,15 @@ nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
-                     [--index-cache <size>]
+                     [--index-cache <size>] [--history <duration>]
 ```
+
+`--history` keeps every snapshot of that long ago readable — `7d`,
+`12h`, `90min`, `'30 minutes'` (the units of `statement_timeout`) — for
+`AS OF TIMESTAMP` (§8.7): each commit records its time, and the vacuum
+keeps old versions that long (`nucleus_kv::Options::history_time`).
+None by default; `nc_catalog.history` shows how far back it reaches
+(times since the server ran with it).
 
 `--cache` sizes the page cache (default `128MB`; units as `work_mem`'s:
 `kB`, `MB`, `GB`) — PostgreSQL's `shared_buffers`.  `--index-cache`
@@ -5785,14 +5794,15 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
-- **2026-11-13 — §M14.14 TT1–TT3, time travel:** with a retention by
+- **2026-11-13 — §M14.14 TT1–TT4, time travel:** with a retention by
   time (`EngineOptions::history_time`, `nucleus_kv::Options::
   history_time`) each commit records its time (`00 05 | ts → µs`,
   monotonic); `Kv::snapshot_at`, `commit_time`, `reach`.  `BEGIN … AS OF
   TIMESTAMP | SYSTEM TIME | COMMIT expr`, `SET TRANSACTION AS OF …`, the
   session's `read_as_of`; `FROM t AS OF … | FOR SYSTEM_TIME AS OF …`
   (`Plan::Past`); `CREATE TABLE … AS query [WITH [NO] DATA]`; `WITH`
-  reserved.
+  reserved; `nucleus server --history <duration>`, `nc_catalog.history`
+  (`Kv::history_time`, `Kv::newest`).
 
 - **2026-11-13 — §M14.29 S2, a fuzzing find:** a SCRAM client (the
   Rust crate, the Python, JavaScript, Java and C drivers) refuses a

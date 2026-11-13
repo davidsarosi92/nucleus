@@ -1,6 +1,7 @@
-//! Time travel in SQL (PLAN.md §M14.14 TT2): a read-only transaction,
-//! or every statement of a session, at a past time or commit — the
-//! catalog as it was then too.
+//! Time travel in SQL (PLAN.md §M14.14 TT2–TT4): a read-only
+//! transaction, every statement of a session, or one table, at a past
+//! time or commit — the catalog as it was then too; how far back it
+//! reaches (`nc_catalog.history`).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -171,12 +172,46 @@ fn a_time_out_of_reach_is_refused() {
         .unwrap();
     assert_eq!(texts(&mut s, "SELECT count(*) FROM t"), ["4"]);
     s.execute("COMMIT").unwrap();
+    // How far back: the retention, and the oldest time and commit
+    // readable — at or before a minute ago, and readable.
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT retention, oldest_time <= now() - interval '60 seconds', \
+             oldest_commit < newest_commit FROM nc_catalog.history"
+        ),
+        ["00:01:00 t t"]
+    );
+    s.execute("BEGIN AS OF TIMESTAMP (SELECT oldest_time FROM nc_catalog.history)")
+        .unwrap();
+    let oldest = texts(&mut s, "SELECT count(*) FROM t");
+    s.execute("COMMIT").unwrap();
+    s.execute("BEGIN AS OF COMMIT (SELECT oldest_commit FROM nc_catalog.history)")
+        .unwrap();
+    assert_eq!(texts(&mut s, "SELECT count(*) FROM t"), oldest);
+    s.execute("COMMIT").unwrap();
+    // A second before it: gone.
+    s.execute(
+        "BEGIN AS OF TIMESTAMP (SELECT oldest_time - interval '1 second' FROM nc_catalog.history)",
+    )
+    .unwrap();
+    assert_eq!(code(&mut s, "SELECT * FROM t"), "72000");
+    s.execute("ROLLBACK").unwrap();
     // Without a retention by time, no time is known.
     let q = Arc::new(SimPlatform::new(3));
     let mut s = Session::new(db(&q, Duration::ZERO));
     s.execute("CREATE TABLE t (id int)").unwrap();
     s.execute("BEGIN AS OF TIMESTAMP now()").unwrap();
     assert_eq!(code(&mut s, "SELECT * FROM t"), "72000");
+    s.execute("ROLLBACK").unwrap();
+    assert_eq!(
+        texts(
+            &mut s,
+            "SELECT retention IS NULL, oldest_time IS NULL, oldest_commit IS NULL, \
+             newest_commit > 0 FROM nc_catalog.history"
+        ),
+        ["t t t t"]
+    );
 }
 
 #[test]

@@ -7964,6 +7964,15 @@ SELECT … FROM t AS OF …`, a dropped table included).
 - **TT4 — retention and reach in SQL**: the server's `--history`,
   `nc_catalog.history` (the oldest time and commit reachable),
   `nucleus_kv` `Options::history_time`.
+  **TT4 ✅ (2026-11-13).**  `nucleus server --history 7d` (durations as
+  `statement_timeout` takes them); `nc_catalog.history` — `retention`,
+  `oldest_time`, `oldest_commit`, `newest_commit` — from `Kv::reach`,
+  `Kv::history_time`, `Kv::newest`.  The oldest time read back through
+  `AS OF TIMESTAMP (SELECT oldest_time …)` and `AS OF COMMIT`, a second
+  before it `72000` (`tests/time_travel.rs`).  Prior art: CockroachDB's
+  `gc.ttlseconds` per zone and `crdb_internal` for what is reachable,
+  Oracle's `UNDO_RETENTION` and `V$UNDOSTAT`; one retention for the
+  database here — a table's own is for when a tenant asks.
 - **TT5 — the check**: a workload logged with its commit times, queries
   at random past times against the log's model, through every index
   kind (HNSW's and the text index's caches at a past snapshot); the

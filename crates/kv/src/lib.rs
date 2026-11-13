@@ -309,6 +309,18 @@ pub trait Kv: Send + Sync {
         Ok(None)
     }
 
+    /// The retention by time ([`Options::history_time`]).  The default:
+    /// none (zero).
+    fn history_time(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    /// The newest snapshot: that of the last commit.  The default: none
+    /// known.
+    fn newest(&self) -> Option<Timestamp> {
+        None
+    }
+
     /// [`vacuum`](Kv::vacuum) as a background task: in small batches,
     /// `go_on` asked between them — `false` stops it there, and the next
     /// call goes on from it.  The default: `vacuum`.
@@ -909,6 +921,14 @@ impl Kv for Database {
             .engine
             .reach()?
             .map(|(ts, us)| (ts, SystemTime::UNIX_EPOCH + Duration::from_micros(us))))
+    }
+
+    fn history_time(&self) -> Duration {
+        Duration::from_micros(self.engine.history_time())
+    }
+
+    fn newest(&self) -> Option<Timestamp> {
+        Some(self.engine.visible())
     }
 
     fn vacuum_background(&self, go_on: &mut dyn FnMut() -> bool) -> Result<u64> {

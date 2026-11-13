@@ -32,6 +32,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut sync = nucleus_kv::SyncPolicy::default();
     let mut wal_minimal = true;
     let mut cache_bytes = None;
+    let mut history_time = std::time::Duration::ZERO;
     let mut secrets_key = None::<String>;
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
@@ -67,6 +68,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--cache" => {
                 let v = rest.next().ok_or("--cache needs a size")?;
                 cache_bytes = Some(nucleus_sql::dbsettings::memory(v).map_err(|e| e.message)?);
+            }
+            "--history" => {
+                let v = rest.next().ok_or("--history needs a duration")?;
+                let us = nucleus_sql::dbsettings::duration(v).map_err(|e| e.message)?;
+                history_time = std::time::Duration::from_micros(us as u64);
             }
             "--index-cache" => {
                 let v = rest.next().ok_or("--index-cache needs a size")?;
@@ -228,6 +234,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         sync,
         wal_minimal,
         cache_bytes: cache_bytes.unwrap_or(defaults.cache_bytes),
+        history_time,
         ..defaults
     };
     let db = Database::open(dir, opts).map_err(|e| e.to_string())?;

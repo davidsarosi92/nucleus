@@ -42,7 +42,7 @@ usage:
                       [--ldap-starttls] [--ldap-ca <pem file>]]
                      [--trusted-proxy <cidr> …] [--max-connections <n>] [--insecure]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
-                     [--index-cache <size>] [--secrets-key <file>]
+                     [--index-cache <size>] [--secrets-key <file>] [--history <duration>]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
@@ -68,7 +68,10 @@ usage:
                                     machine's memory); --secrets-key the file
                                     whose key seals secrets (CREATE SECRET;
                                     default <dir>.secrets-key, made when the
-                                    first secret is)
+                                    first secret is); --history keeps every
+                                    snapshot of that long ago readable (7d,
+                                    12h, '30 minutes'; AS OF TIMESTAMP;
+                                    default none)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";

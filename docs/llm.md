@@ -249,6 +249,15 @@ COMMIT | ROLLBACK`.  Snapshot isolation (`SERIALIZABLE` on request).  On
 `40001` (a conflict with another transaction) run the transaction again;
 after an error in a block everything is `25P02` until `ROLLBACK`.
 
+**The past:** when the server keeps history (`nucleus server --history
+7d`; `SELECT * FROM nc_catalog.history` shows how far back), read a
+time: `BEGIN READ ONLY AS OF TIMESTAMP now() - interval '1 hour'` (the
+whole block, the catalog as it was too), or one table beside the
+present: `SELECT … FROM t AS OF TIMESTAMP '2026-11-13 10:00+00' AS old
+JOIN t ON …`.  Undo a mistake: `INSERT INTO t SELECT * FROM t AS OF
+TIMESTAMP … WHERE …`, or `CREATE TABLE t_restored AS SELECT * FROM t AS
+OF TIMESTAMP …`.  `72000` means past the history kept.
+
 ## Not available — use instead
 
 | Not there | Instead |
@@ -257,7 +266,6 @@ after an error in a block everything is `25P02` until `ROLLBACK`.
 | `INSERT … ON CONFLICT` (upsert) | `UPDATE … WHERE key = …`, then `INSERT` if it changed 0 rows, in one transaction |
 | `CREATE VIEW` | a `WITH` query |
 | `count(*) FILTER (WHERE …)` | `sum(CASE WHEN … THEN 1 ELSE 0 END)` |
-| `LATERAL` | a correlated subquery in the select list |
 | `unnest(…)` in the select list | `SELECT … FROM unnest(…) AS u(x)` |
 | `json` / `jsonb` | text columns, parsed by the application |
 | `TRUNCATE` | `DELETE FROM t` |

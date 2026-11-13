@@ -166,6 +166,15 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "history",
+        &[
+            ("retention", DataType::Interval),
+            ("oldest_time", DataType::TimestampTz),
+            ("oldest_commit", I),
+            ("newest_commit", I),
+        ],
+    ),
+    (
         "sessions",
         &[
             ("id", I),
@@ -726,6 +735,35 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     Value::Bool(set),
                     text(k.default.to_string()),
                     text(k.description.to_string()),
+                ]);
+            }
+        }
+        "history" => {
+            // How far back a time reaches (PLAN.md §M14.14): one row.
+            if let Some(kv) = crate::datetime::current_kv() {
+                let commit = |ts: nucleus_kv::Timestamp| {
+                    ts.to_string()
+                        .parse::<i64>()
+                        .map_or(Value::Null, Value::Int)
+                };
+                let keep = kv.history_time();
+                let reach = kv.reach()?;
+                out.push(vec![
+                    if keep.is_zero() {
+                        Value::Null
+                    } else {
+                        let us = i64::try_from(keep.as_micros()).unwrap_or(i64::MAX);
+                        Value::Interval(crate::datetime::Interval {
+                            months: 0,
+                            days: (us / 86_400_000_000) as i32,
+                            micros: us % 86_400_000_000,
+                        })
+                    },
+                    reach.map_or(Value::Null, |(_, t)| {
+                        Value::TimestampTz(crate::datetime::from_system(t))
+                    }),
+                    reach.map_or(Value::Null, |(ts, _)| commit(ts)),
+                    kv.newest().map_or(Value::Null, commit),
                 ]);
             }
         }

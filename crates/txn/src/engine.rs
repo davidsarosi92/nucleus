@@ -556,6 +556,11 @@ impl Engine {
             .map(|(_, time)| time))
     }
 
+    /// The retention by time, in µs ([`EngineOptions::history_time`]).
+    pub fn history_time(&self) -> u64 {
+        self.inner.opts.history_time
+    }
+
     /// How far back a time reaches: the oldest snapshot readable whose
     /// commit time is recorded, and that time (µs since the Unix epoch);
     /// `None` without a retention by time or a commit recorded.
