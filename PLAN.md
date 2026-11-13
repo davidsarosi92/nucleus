@@ -7542,7 +7542,10 @@ built.
     the store's model at cosine ≥ `merge` (0.95 by default) — among the
     rows the caller sees: a test keeps a hidden memory with the same
     text, which the application's `REMEMBER` does not touch (it adds its
-    own).  `REPLACING id` closes the old memory's validity (only a
+    own).  A memory whose vector the queue has not made yet is a
+    candidate too, its text embedded here (the model's cache has it) —
+    CI's embedded-edition run found the merge depending on the queue's
+    pace.  `REPLACING id` closes the old memory's validity (only a
     current one of the same subject: `42704`).  `forget` is `DELETE`
     (the drivers' and the MCP tool); `FORGET SUBJECT` is R2's.
   - **Row expiry is general**: `ALTER TABLE t SET EXPIRY (column)` on

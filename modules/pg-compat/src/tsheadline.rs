@@ -154,10 +154,22 @@ impl Source for HlCheck<'_, '_, '_> {
     }
 }
 
+/// The most location sets, and positions in them, a query's match may
+/// make (an `OR` makes one of each pair of its sides': nested `OR`s of
+/// `AND`s multiply — PostgreSQL's own grows so, without a bound).
+const MAX_LOCATIONS: usize = 4096;
+const MAX_POSITIONS: usize = 1 << 20;
+
 /// `TS_execute_locations_recurse`: whether the query matches, and where
-/// each of its AND'ed terms and phrases does.
-fn locations(q: &Q, src: &dyn Source) -> (bool, Vec<Phr>) {
-    match q {
+/// each of its AND'ed terms and phrases does.  Past [`MAX_LOCATIONS`]
+/// sets or [`MAX_POSITIONS`] positions, `54000`.
+fn locations(q: &Q, src: &dyn Source) -> Result<(bool, Vec<Phr>)> {
+    let too_many = || {
+        Error::program_limit(
+            "text search query too complex to highlight (its OR's combinations of matches)",
+        )
+    };
+    Ok(match q {
         Q::Lex { .. } => {
             let mut d = Phr::default();
             if src.check(q, Some(&mut d)) == Tri::Yes {
@@ -167,34 +179,45 @@ fn locations(q: &Q, src: &dyn Source) -> (bool, Vec<Phr>) {
             }
         }
         Q::Stop => (false, vec![]),
-        Q::Not(x) => (!locations(x, src).0, vec![]),
+        Q::Not(x) => (!locations(x, src)?.0, vec![]),
         Q::And(l, r) => {
-            let (lm, mut ll) = locations(l, src);
+            let (lm, mut ll) = locations(l, src)?;
             if !lm {
-                return (false, vec![]);
+                return Ok((false, vec![]));
             }
-            let (rm, rl) = locations(r, src);
+            let (rm, rl) = locations(r, src)?;
             if !rm {
-                return (false, vec![]);
+                return Ok((false, vec![]));
             }
             ll.extend(rl);
+            if ll.len() > MAX_LOCATIONS {
+                return Err(too_many());
+            }
             (true, ll)
         }
         Q::Or(l, r) => {
-            let (lm, ll) = locations(l, src);
-            let (rm, rl) = locations(r, src);
+            let (lm, ll) = locations(l, src)?;
+            let (rm, rl) = locations(r, src)?;
             if !(lm || rm) {
-                return (false, vec![]);
+                return Ok((false, vec![]));
             }
             if ll.is_empty() {
-                return (true, rl);
+                return Ok((true, rl));
             }
             if rl.is_empty() {
-                return (true, ll);
+                return Ok((true, ll));
+            }
+            if ll.len().saturating_mul(rl.len()) > MAX_LOCATIONS {
+                return Err(too_many());
             }
             let mut out = Vec::new();
+            let mut positions = 0usize;
             for a in &ll {
                 for b in &rl {
+                    positions += a.pos.len() + b.pos.len();
+                    if positions > MAX_POSITIONS {
+                        return Err(too_many());
+                    }
                     let mut d = Phr::default();
                     output_positions(a, b, 7, 0, 0, Some(&mut d));
                     d.width = a.width.max(b.width);
@@ -211,7 +234,7 @@ fn locations(q: &Q, src: &dyn Source) -> (bool, Vec<Phr>) {
                 (false, vec![])
             }
         }
-    }
+    })
 }
 
 /// The headline's choices (`prsd_headline`'s options).
@@ -815,7 +838,7 @@ fn headline(cfg: &str, doc: &str, q: Option<&Q>, opts: Option<&str>) -> Result<S
     let mut w = words(doc, a.as_ref(), &ops)?;
     let o = Options::of(opts)?;
     let locs = match q {
-        Some(q) => locations(q, &HlCheck(&w)).1,
+        Some(q) => locations(q, &HlCheck(&w))?.1,
         None => Vec::new(),
     };
     let mut hl = Hl {

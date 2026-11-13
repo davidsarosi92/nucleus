@@ -346,3 +346,33 @@ fn as_postgresql_answers() {
         wrong[..wrong.len().min(30)].join("\n")
     );
 }
+
+/// A headline's matches of `(a & b) | (c & d) | …` are every combination
+/// of one match from each side of each `|` — 2ⁿ for n `|`s of `&`s, as
+/// PostgreSQL makes them.  Past a bound, `54000` instead of the memory
+/// and time it would take (a fuzzing find); below it, the headline.
+#[test]
+fn a_headline_bounds_its_or_combinations() {
+    let mut s = session();
+    let doc = "the quick brown fox jumps over the lazy dog";
+    let query = |n: usize| {
+        (0..n)
+            .map(|i| ["quick fox", "brown dog", "lazy jumps"][i % 3])
+            .collect::<Vec<_>>()
+            .join(" or ")
+    };
+    let sql = |n: usize| {
+        format!(
+            "SELECT ts_headline('english', '{doc}', websearch_to_tsquery('english', '{}'))",
+            query(n)
+        )
+    };
+    assert_eq!(
+        rows(&mut s, &sql(3)),
+        ["the <b>quick</b> <b>brown</b> <b>fox</b> <b>jumps</b> over the <b>lazy</b> <b>dog</b>"]
+    );
+    let start = std::time::Instant::now();
+    let e = s.execute(&sql(40)).unwrap_err();
+    assert_eq!(e.code, "54000", "{e:?}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+}

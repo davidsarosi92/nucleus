@@ -4062,7 +4062,11 @@ on its words); the best stretched to `MinWords`–`MaxWords` words
 `StartSel` and `StopSel`; `HighlightAll` the whole text.  Options are
 `deserialize_deflist`'s `key = value` list (quoted values; errors as
 PostgreSQL's: `MinWords must be less than MaxWords`, `unrecognized
-headline parameter`, …).  Departures: UAX #29's words (PostgreSQL's
+headline parameter`, …).  Departures: a query whose `OR`s combine more
+than 4,096 sets of matches (or 2²⁰ positions) — `TS_execute_locations`
+makes one of each pair of an `OR`'s sides', so `(a & b) | (c & d) | …`
+doubles with each `|` — is `54000`, not the memory and minutes it would
+take (a fuzzing find; PostgreSQL has no bound); UAX #29's words (PostgreSQL's
 parser splits `don't` and hyphenated words), HTML tags kept as text.
 
 **On the wire** (§M14.21 T8c): PostgreSQL's front end sends them as
@@ -4503,7 +4507,11 @@ a parameter) returns one row, `id` and `action`:
   another is the model's judgement: the caller says which it replaces.
 - Else a current memory (`valid_to IS NULL`, not expired) of the subject
   with the same text, or else the nearest by the store's model whose
-  cosine similarity is at least `merge`, is merged: `seen + 1`,
+  cosine similarity is at least `merge` — through the HNSW index, and
+  among the subject's memories whose vectors the queue has not made yet,
+  their texts embedded here (the model's cache has them: their
+  `REMEMBER` embedded them), so a merge does not depend on the queue's
+  pace — is merged: `seen + 1`,
   `last_seen = now()`, the greater confidence (none given keeps it) —
   `merged`.
 - Else a memory is added — `inserted`.
@@ -5489,6 +5497,10 @@ checks `psql` with and without TLS.
   the Python and JavaScript drivers' `remember`, `recall`, `forget`.
   Without statistics, a key range that is an equality on its index's
   whole key is no longer replaced by an index method's condition (§8.17).
+  `REMEMBER`'s merge also finds memories whose vectors the queue has not
+  made yet (it embeds their texts; the model's cache has them).
+  `ts_headline` bounds its `OR`s' combinations of matches (`54000`; a
+  fuzzing find, §8.22).
 
 - **2026-11-13 — §M14.23 step 3, iOS and Android:** the Swift driver
   (`drivers/swift`: `Nucleus`, and `NucleusEmbedded` over

@@ -419,8 +419,17 @@ impl Clock for RealClock {
     fn wall(&self) -> SystemTime {
         SystemTime::now()
     }
+    /// At least `d` by [`Clock::now`]: a wait that ends early (WASI under
+    /// Node rounds its timeout) waits again for what is left.
     fn sleep(&self, d: Duration) {
-        std::thread::sleep(d);
+        let until = self.now() + d;
+        loop {
+            let now = self.now();
+            if now >= until {
+                return;
+            }
+            std::thread::sleep(until - now);
+        }
     }
 }
 

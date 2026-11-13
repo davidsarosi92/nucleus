@@ -173,6 +173,11 @@ struct Plans {
     /// `$1` subject, `$2` vector: the nearest current memory, its
     /// distance.
     nearest: Statement,
+    /// `$1` subject, `$2` vector: the subject's current memories whose
+    /// vectors the queue has not made yet, each one's distance — its
+    /// text embedded here (the model's cache has it: `REMEMBER` embedded
+    /// it), so a merge does not depend on the queue's pace.
+    pending: Statement,
     /// `$1` id, `$2` confidence: a merge.
     merge: Statement,
     /// `$1` id, `$2` subject: the replaced memory closed.
@@ -181,11 +186,12 @@ struct Plans {
     add: Statement,
 }
 
-fn plans(name: &str) -> Result<Arc<Plans>> {
-    static KEPT: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Arc<Plans>>>> =
-        OnceLock::new();
+fn plans(name: &str, model: &str) -> Result<Arc<Plans>> {
+    type Kept = std::collections::HashMap<(String, String), Arc<Plans>>;
+    static KEPT: OnceLock<std::sync::Mutex<Kept>> = OnceLock::new();
     let kept = KEPT.get_or_init(Default::default);
-    if let Some(p) = kept.lock().unwrap().get(name) {
+    let key = (name.to_string(), model.to_string());
+    if let Some(p) = kept.lock().unwrap().get(&key) {
         return Ok(Arc::clone(p));
     }
     let t = quote(name);
@@ -197,6 +203,11 @@ fn plans(name: &str) -> Result<Arc<Plans>> {
         nearest: one(format!(
             "SELECT id, embedding <=> $2 FROM {t} WHERE subject = $1 AND {CURRENT} \
              ORDER BY embedding <=> $2 LIMIT 1"
+        ))?,
+        pending: one(format!(
+            "SELECT id, embed(content, {}, 'document') <=> $2 FROM {t} \
+             WHERE subject = $1 AND embedding IS NULL AND {CURRENT}",
+            literal(model)
         ))?,
         merge: one(format!(
             "UPDATE {t} SET seen = seen + 1, last_seen = now(), \
@@ -217,7 +228,7 @@ fn plans(name: &str) -> Result<Arc<Plans>> {
     if kept.len() > 256 {
         kept.clear();
     }
-    kept.insert(name.to_string(), Arc::clone(&p));
+    kept.insert(key, Arc::clone(&p));
     Ok(p)
 }
 
@@ -317,7 +328,7 @@ pub(crate) fn remember(
             "REMEMBER needs a text and a subject, not NULL",
         ));
     }
-    let p = plans(&r.store)?;
+    let p = plans(&r.store, &spec.model)?;
     if replacing != Value::Null {
         if rows(txn, reg, &p.close, &[replacing.clone(), subject.clone()])?.is_empty() {
             return Err(Error::undefined_object(format!(
@@ -342,13 +353,23 @@ pub(crate) fn remember(
             .pop()
             .and_then(|mut r| r.pop())
             .unwrap_or(Value::Null);
-        if vector != Value::Null
-            && let Some(row) = rows(txn, reg, &p.nearest, &[subject.clone(), vector])?.pop()
-            && let Value::Float(d) = row[1]
-            && 1.0 - d >= spec.merge
-        {
-            rows(txn, reg, &p.merge, &[row[0].clone(), confidence.clone()])?;
-            return Ok((row[0].clone(), "merged", id_type));
+        if vector != Value::Null {
+            let args = [subject.clone(), vector];
+            let mut found = rows(txn, reg, &p.nearest, &args)?;
+            found.extend(rows(txn, reg, &p.pending, &args)?);
+            let best = found
+                .into_iter()
+                .filter_map(|r| match r[1] {
+                    Value::Float(d) => Some((d, r[0].clone())),
+                    _ => None,
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((d, id)) = best
+                && 1.0 - d >= spec.merge
+            {
+                rows(txn, reg, &p.merge, &[id.clone(), confidence.clone()])?;
+                return Ok((id, "merged", id_type));
+            }
         }
     }
     let id = rows(

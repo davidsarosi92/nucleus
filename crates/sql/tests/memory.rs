@@ -249,3 +249,29 @@ fn expired_rows_are_deleted() {
     let problems = nucleus_sql::check::check(&*txn, &reg).unwrap();
     assert_eq!(problems, Vec::<String>::new());
 }
+
+/// A near-duplicate is merged whether or not the queue has made the
+/// first memory's vector yet: in a block, the queue cannot see the rows
+/// it wrote, so their vectors are pending.
+#[test]
+fn a_merge_does_not_wait_for_the_queue() {
+    let kv = db();
+    let mut s = Session::new(kv.clone());
+    s.execute(
+        "CREATE MODEL h USING hashing WITH (dimensions = 64); \
+         CREATE MEMORY STORE notes USING h WITH (merge = 0.99)",
+    )
+    .unwrap();
+    s.execute("BEGIN").unwrap();
+    let (a, did) = remember(&mut s, "REMEMBER 'likes tea' FOR 'u1' IN notes");
+    assert_eq!(did, "inserted");
+    assert_eq!(
+        texts(&mut s, "SELECT count(*) FROM notes WHERE embedding IS NULL"),
+        ["1"]
+    );
+    let (b, did) = remember(&mut s, "REMEMBER 'Likes tea!' FOR 'u1' IN notes");
+    assert_eq!((b, did.as_str()), (a, "merged"));
+    let (_, did) = remember(&mut s, "REMEMBER 'Likes tea!' FOR 'u2' IN notes");
+    assert_eq!(did, "inserted");
+    s.execute("COMMIT").unwrap();
+}
