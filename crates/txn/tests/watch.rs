@@ -71,6 +71,7 @@ fn spilled_writes_into_a_watched_range_count() {
         },
         checkpoint_wal_bytes: 1 << 20,
         history: 0,
+        history_time: 0,
         txn_memory: 2048,
         wal_minimal: true,
     });

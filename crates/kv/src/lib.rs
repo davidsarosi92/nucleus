@@ -286,6 +286,29 @@ pub trait Kv: Send + Sync {
         Ok(0)
     }
 
+    /// The snapshot of `time`: that of the last commit at or before it
+    /// (PLAN.md §M14.14), to begin a transaction at
+    /// ([`TxnOptions::at`]) — the newest for a time past the last commit.
+    /// [`Error::SnapshotTooOld`] when no commit at or before it is known
+    /// (no retention by time, or past it).  The default: none known.
+    fn snapshot_at(&self, time: SystemTime) -> Result<Timestamp> {
+        let _ = time;
+        Err(Error::SnapshotTooOld)
+    }
+
+    /// The time commit `ts` was made, if it is known (a retention by time
+    /// set, and not past it).  The default: none known.
+    fn commit_time(&self, ts: Timestamp) -> Result<Option<SystemTime>> {
+        let _ = ts;
+        Ok(None)
+    }
+
+    /// How far back a time reaches: the oldest snapshot readable whose
+    /// time is known, and that time.  The default: none.
+    fn reach(&self) -> Result<Option<(Timestamp, SystemTime)>> {
+        Ok(None)
+    }
+
     /// [`vacuum`](Kv::vacuum) as a background task: in small batches,
     /// `go_on` asked between them — `false` stops it there, and the next
     /// call goes on from it.  The default: `vacuum`.
@@ -684,6 +707,10 @@ pub struct Options {
     pub wal_segment_bytes: u64,
     /// Old versions kept, in commits, beyond what running transactions need.
     pub history: u64,
+    /// Old versions kept for this long, so the snapshot of any time that
+    /// far back stays readable ([`Kv::snapshot_at`]; each commit's time is
+    /// recorded while it is set; PLAN.md §M14.14).  Zero: not by time.
+    pub history_time: Duration,
     /// A transaction's writes kept in memory, in bytes; past it they spill
     /// into the store, so a transaction of any size runs in bounded memory.
     pub txn_memory_bytes: usize,
@@ -715,6 +742,7 @@ impl Default for Options {
             },
             wal_segment_bytes: 16 << 20,
             history: 0,
+            history_time: Duration::ZERO,
             txn_memory_bytes: 64 << 20,
             sync: SyncPolicy::default(),
             wal_minimal: true,
@@ -766,6 +794,7 @@ impl Database {
                 },
                 checkpoint_wal_bytes: opts.checkpoint_wal_bytes,
                 history: opts.history,
+                history_time: u64::try_from(opts.history_time.as_micros()).unwrap_or(u64::MAX),
                 txn_memory: opts.txn_memory_bytes,
                 wal_minimal: opts.wal_minimal,
             },
@@ -862,6 +891,24 @@ impl Kv for Database {
 
     fn vacuum_range(&self, start: &[u8], end: &[u8]) -> Result<u64> {
         Ok(self.engine.vacuum_range(start, end)?)
+    }
+
+    fn snapshot_at(&self, time: SystemTime) -> Result<Timestamp> {
+        Ok(self.engine.snapshot_at(time)?)
+    }
+
+    fn commit_time(&self, ts: Timestamp) -> Result<Option<SystemTime>> {
+        Ok(self
+            .engine
+            .commit_time(ts)?
+            .map(|us| SystemTime::UNIX_EPOCH + Duration::from_micros(us)))
+    }
+
+    fn reach(&self) -> Result<Option<(Timestamp, SystemTime)>> {
+        Ok(self
+            .engine
+            .reach()?
+            .map(|(ts, us)| (ts, SystemTime::UNIX_EPOCH + Duration::from_micros(us))))
     }
 
     fn vacuum_background(&self, go_on: &mut dyn FnMut() -> bool) -> Result<u64> {

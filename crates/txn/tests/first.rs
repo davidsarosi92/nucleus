@@ -21,6 +21,7 @@ fn engine() -> Engine {
         },
         checkpoint_wal_bytes: 1 << 20,
         history: 0,
+        history_time: 0,
         // Small: the writes spill now and then, their intents entering
         // the store.
         txn_memory: 4096,

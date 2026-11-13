@@ -677,7 +677,8 @@ versions.
 committed), the next transaction id `00 03 → id` (written before a
 transaction's first intents, so no later one is given an id an intent
 has), the *marks* of fresh ranges a running transaction writes without
-the WAL `00 04 ‖ start → end` (§5.2), and an older engine's *side area*
+the WAL `00 04 ‖ start → end` (§5.2), *commit times* `00 05 ‖ ts (u64
+BE) → µs (u64 BE)` while a retention by time is set (§5.2), and an older engine's *side area*
 `00 01 ‖ id (u64 BE) ‖ user key → tag ‖ value`, moved into versions when
 such a database opens.  Every walk over versions skips them.
 
@@ -861,6 +862,28 @@ Snapshots register under the same lock the watermark is read under, so GC
 never removes a version a snapshot can see.  `begin_with(at)` reads an older
 snapshot within the history window (read-only), else `SnapshotTooOld`.
 
+**Time travel's engine** (§M14.14 TT1).  `EngineOptions::history_time`
+(µs; 0 by default: off) keeps old versions for a time as `history` does
+for a number of commits — the watermark is the lower of the two.  While
+it is set, each commit records its time in its own batch (`00 05 ‖ ts →
+µs`; the platform's wall clock, never before the last time recorded, so
+the times are monotonic in the timestamps — a clock stepping back, a
+restart on a slower clock, takes the last), exactly, as PostgreSQL's
+`track_commit_timestamp` does rather than Oracle's sampled SCN↔time map:
+a time then names its commit exactly.  `Engine::snapshot_at(time)` is
+the last commit at or before `time` (a binary search over the records by
+seeks; the newest snapshot past the last commit; `SnapshotTooOld` before
+the first known), `commit_time(ts)` a commit's recorded time, `reach()`
+the oldest snapshot readable with its time.  The retention's floor — the
+last commit at or before now − retention — is found again at most once a
+second (`refresh_time_floor`, from a commit, a past `begin_with`, a
+reach; never under a lock: it reads the store), and an older floor only
+keeps more.  A whole vacuum then deletes the time records below the
+watermark (the one at it maps the times since).  Tests:
+`crates/txn/tests/time.rs` (a time reads the last commit at or before it
+against a logged workload, the retention kept and no more, nothing
+recorded without it, the times through a crash at every I/O point).
+
 **Scans** read the store in batches — 8 visible keys at first, twice as
 many each time up to 128, and no more than 4096 entries passed over
 (intents nobody sees, versions too new) — re-seeking each time, so no
@@ -963,7 +986,11 @@ distributed implementation will provide (§F3).
   in `<dir>/scratch/` (left-overs removed on opening).
 - `Kv::vacuum()` / `Kv::vacuum_wanted()`: the store's maintenance and
   whether it has work (committed intents to make versions); by default
-  none.  `Kv::vacuum_range(start, end)`: the versions no snapshot sees
+  none.  `Kv::snapshot_at(time)` → the `Timestamp` to begin at for a
+  time, `Kv::commit_time(ts)`, `Kv::reach()` → the oldest snapshot a time
+  reaches and its time (§5.2's time travel; by default none known), with
+  `Options::history_time` (a `Duration`; zero by default).
+  `Kv::vacuum_range(start, end)`: the versions no snapshot sees
   removed from those keys alone (keys with an intent left whole) — for a
   range used as a queue, keys put then deleted and never written again,
   whose tombstones a scan would otherwise step over until the whole

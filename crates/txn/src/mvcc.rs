@@ -26,7 +26,8 @@
 //! `00 FF` belong to the engine: a large transaction's status once
 //! committed (`00 02 | id -> commit ts`), the next transaction id
 //! (`00 03 -> id`), the marks of fresh ranges written without the WAL
-//! (`00 04 | start -> end`, [`unlogged_key`]), and the side area of
+//! (`00 04 | start -> end`, [`unlogged_key`]), commit times while a
+//! retention by time is set (`00 05 | ts -> µs`, [`time_key`]), and the side area of
 //! earlier versions of the engine, which spilled writes apart (`00 01 | id
 //! | user key -> tag | value`), moved into versions when an older database
 //! opens.
@@ -141,8 +142,30 @@ pub const STATUS: [u8; 2] = [0, 2];
 /// deleted.  (Running transactions' ranges never overlap: the start names
 /// one.)
 pub const UNLOGGED: [u8; 2] = [0, 4];
+/// Commit times, while a retention by time is set (PLAN.md §M14.14):
+/// `00 05 | ts (u64 big-endian) -> µs since the Unix epoch (u64
+/// big-endian)`, written with the commit, monotonic in `ts`.
+pub const COMMIT_TIMES: [u8; 2] = [0, 5];
 /// The first store key past the reserved ones.
 pub const RESERVED_END: [u8; 2] = [0, 0xFF];
+
+/// The commit time record of commit `ts`.
+pub fn time_key(ts: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(10);
+    out.extend_from_slice(&COMMIT_TIMES);
+    out.extend_from_slice(&ts.to_be_bytes());
+    out
+}
+
+/// A commit time record's commit timestamp and time (µs), if `key` and
+/// `value` are one.
+pub fn decode_time(key: &[u8], value: &[u8]) -> Option<(u64, u64)> {
+    let ts = key.strip_prefix(&COMMIT_TIMES[..])?;
+    Some((
+        u64::from_be_bytes(ts.try_into().ok()?),
+        u64::from_be_bytes(value.try_into().ok()?),
+    ))
+}
 
 /// Whether `store_key` is reserved (not a version).
 pub fn is_reserved(store_key: &[u8]) -> bool {

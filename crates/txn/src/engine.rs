@@ -11,9 +11,9 @@ use nucleus_storage::{BTree, Batch, Store, StoreOptions};
 
 use crate::error::{Error, Result};
 use crate::mvcc::{
-    self, NEXT_ID, RESERVED_END, SIDE, STATUS, UNLOGGED, after_versions, decode_key,
-    decode_key_onto, decode_value, encode_key, encode_value, first_version, intent_of, intent_ts,
-    side_prefix, status_key, unlogged_key,
+    self, COMMIT_TIMES, NEXT_ID, RESERVED_END, SIDE, STATUS, UNLOGGED, after_versions, decode_key,
+    decode_key_onto, decode_time, decode_value, encode_key, encode_value, first_version, intent_of,
+    intent_ts, side_prefix, status_key, time_key, unlogged_key,
 };
 use crate::recent::Recent;
 use crate::writes::WriteSet;
@@ -73,6 +73,11 @@ pub struct EngineOptions {
     /// Keep old versions for this many commits beyond what running
     /// transactions need, so snapshots that far back stay readable.
     pub history: u64,
+    /// Keep old versions for this long (µs; 0: not by time), so the
+    /// snapshot of any time that far back stays readable: each commit's
+    /// time is recorded while it is set ([`Engine::snapshot_at`],
+    /// PLAN.md §M14.14).  Both kept when both are set.
+    pub history_time: u64,
     /// A transaction keeps its writes in memory up to about this many
     /// bytes; past it they spill into the store (the side area, §5.3), so
     /// a transaction of any size runs in bounded memory.
@@ -98,11 +103,17 @@ impl Default for EngineOptions {
                 64 << 20
             },
             history: 0,
+            history_time: 0,
             txn_memory: 64 << 20,
             wal_minimal: true,
         }
     }
 }
+
+/// How often the oldest snapshot a retention by time keeps is found
+/// again (µs): in between, the one found last stands — older than the
+/// true one, so it keeps more, never less.
+const TIME_FLOOR_EVERY: u64 = 1_000_000;
 
 struct Inner {
     store: Arc<Store>,
@@ -157,6 +168,16 @@ struct Inner {
     /// at which a range began to be watched) — raised under the commit
     /// lock before the commit is visible.
     watched_at: AtomicU64,
+    /// The platform (its clock gives commits their times).
+    platform: Arc<dyn Platform>,
+    /// The last commit time recorded (µs since the Unix epoch): the next
+    /// is never earlier.  Changed under the commit lock.
+    last_time: AtomicU64,
+    /// With a retention by time, the oldest snapshot it keeps readable —
+    /// the last commit at or before now − retention — as last found, and
+    /// when (the platform's monotonic µs; `u64::MAX`: never).
+    time_floor: AtomicU64,
+    time_floor_found: AtomicU64,
 }
 
 /// The thread that checkpoints when the WAL since the last checkpoint
@@ -430,7 +451,7 @@ impl Engine {
     /// Opens (or creates) the database in `dir` and recovers it.
     pub fn open(platform: Arc<dyn Platform>, dir: &Path, opts: EngineOptions) -> Result<Self> {
         let threads = platform.parallelism();
-        let (store, recovery) = Store::open(platform, dir, &opts.store)?;
+        let (store, recovery) = Store::open(Arc::clone(&platform), dir, &opts.store)?;
         let store = Arc::new(store);
         // (The simulation's single thread checkpoints where it falls due,
         // so its runs stay deterministic.)
@@ -460,9 +481,17 @@ impl Engine {
                 unlogged: Mutex::new(Vec::new()),
                 watched: RwLock::new(Vec::new()),
                 watched_at: AtomicU64::new(recovery.meta),
+                platform,
+                last_time: AtomicU64::new(0),
+                time_floor: AtomicU64::new(0),
+                time_floor_found: AtomicU64::new(u64::MAX),
             }),
         };
         engine.inner.recover_side()?;
+        if let Some((_, time)) = engine.inner.last_commit_time()? {
+            engine.inner.last_time.store(time, Ordering::Release);
+        }
+        engine.inner.refresh_time_floor()?;
         Ok(engine)
     }
 
@@ -502,6 +531,44 @@ impl Engine {
         Timestamp(self.inner.visible.load(Ordering::Acquire))
     }
 
+    /// The snapshot of time `time` — that of the last commit at or before
+    /// it, with a retention by time ([`EngineOptions::history_time`]); the
+    /// newest one for a time past the last commit.  `SnapshotTooOld` when
+    /// no commit at or before it is recorded, or its versions are
+    /// collected ([`begin_with`](Self::begin_with) checks the latter).
+    pub fn snapshot_at(&self, time: std::time::SystemTime) -> Result<Timestamp> {
+        let micros = time
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
+        let visible = self.inner.visible.load(Ordering::Acquire);
+        match self.inner.commit_at_or_before(micros)? {
+            Some((ts, _)) => Ok(Timestamp(ts.min(visible))),
+            None => Err(Error::SnapshotTooOld),
+        }
+    }
+
+    /// The time commit `ts` was recorded at (µs since the Unix epoch), if
+    /// it was — with a retention by time, and not yet past it.
+    pub fn commit_time(&self, ts: Timestamp) -> Result<Option<u64>> {
+        let tree = self.inner.store.read()?;
+        Ok(Inner::time_from(&tree, ts.0)?
+            .filter(|&(at, _)| at == ts.0)
+            .map(|(_, time)| time))
+    }
+
+    /// How far back a time reaches: the oldest snapshot readable whose
+    /// commit time is recorded, and that time (µs since the Unix epoch);
+    /// `None` without a retention by time or a commit recorded.
+    pub fn reach(&self) -> Result<Option<(Timestamp, u64)>> {
+        if self.inner.opts.history_time == 0 {
+            return Ok(None);
+        }
+        self.inner.refresh_time_floor()?;
+        let wm = self.inner.current_watermark();
+        let tree = self.inner.store.read()?;
+        Ok(Inner::time_from(&tree, wm)?.map(|(ts, time)| (Timestamp(ts), time)))
+    }
+
     /// Starts a snapshot-isolation read-write transaction.
     pub fn begin(&self) -> Transaction {
         self.begin_with(TxnOptions::default())
@@ -510,6 +577,9 @@ impl Engine {
 
     /// Starts a transaction.
     pub fn begin_with(&self, opts: TxnOptions) -> Result<Transaction> {
+        if opts.at.is_some() {
+            self.inner.refresh_time_floor()?;
+        }
         let start = {
             // Registered under the same lock the GC watermark is computed
             // under, so no version this snapshot needs can be collected.
@@ -596,6 +666,7 @@ impl Engine {
                     .write_covering(&Batch { meta: *commit, ops }, &covered)?;
                 drop(commit);
                 if next.is_none() {
+                    self.trim_times()?;
                     // Durable — and with it every batch before (the log is
                     // in order) — before the statuses are forgotten: an
                     // intent never outlives its status.
@@ -625,6 +696,28 @@ impl Engine {
     /// tombstones until the whole vacuum runs.  What it removed.
     pub fn vacuum_range(&self, start: &[u8], end: &[u8]) -> Result<u64> {
         self.sweep_range(start, end, false)
+    }
+
+    /// Deletes the commit time records older than the oldest snapshot
+    /// kept (the one at it stays: it maps the times since it), in chunks.
+    fn trim_times(&self) -> Result<()> {
+        loop {
+            let commit = lock(&self.inner.commit);
+            let wm = self.inner.current_watermark();
+            let start = time_key(0);
+            let end = time_key(wm);
+            let ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = {
+                let tree = self.inner.store.read()?;
+                tree.range(Bound::Included(&start[..]), Bound::Excluded(&end[..]))?
+                    .take(VACUUM_CHUNK)
+                    .map(|e| e.map(|(k, _)| (k, None)))
+                    .collect::<std::result::Result<_, _>>()?
+            };
+            if ops.is_empty() {
+                return Ok(());
+            }
+            self.inner.store.write(&Batch { meta: *commit, ops })?;
+        }
     }
 
     /// The oldest snapshot any transaction reads at (or the visible one,
@@ -822,7 +915,108 @@ impl Inner {
             .copied()
             .unwrap_or(visible)
             .min(visible);
-        oldest.saturating_sub(self.opts.history)
+        let by_count = oldest.saturating_sub(self.opts.history);
+        if self.opts.history_time == 0 {
+            return by_count;
+        }
+        by_count.min(self.time_floor.load(Ordering::Acquire))
+    }
+
+    /// The platform's wall clock, in µs since the Unix epoch.
+    fn wall_micros(&self) -> u64 {
+        self.platform
+            .clock()
+            .wall()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+    }
+
+    /// The last commit time recorded: its commit and time.
+    fn last_commit_time(&self) -> Result<Option<(u64, u64)>> {
+        let tree = self.store.read()?;
+        let end = mvcc::time_key(u64::MAX);
+        let mut r = tree.range_rev(
+            Bound::Included(&COMMIT_TIMES[..]),
+            Bound::Included(&end[..]),
+        )?;
+        match r.next() {
+            Some(e) => {
+                let (k, v) = e?;
+                Ok(decode_time(&k, &v))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The first commit time record at or after commit `ts`.
+    fn time_from(tree: &BTree, ts: u64) -> Result<Option<(u64, u64)>> {
+        let start = time_key(ts);
+        let end = mvcc::time_key(u64::MAX);
+        let mut r = tree.range(Bound::Included(&start[..]), Bound::Included(&end[..]))?;
+        match r.next() {
+            Some(e) => {
+                let (k, v) = e?;
+                Ok(decode_time(&k, &v))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The last commit recorded at or before `time` (µs): its timestamp
+    /// and time — by binary search over the records, which are monotonic
+    /// in both.
+    fn commit_at_or_before(&self, time: u64) -> Result<Option<(u64, u64)>> {
+        let tree = self.store.read()?;
+        let (mut lo, mut hi) = (0u64, mvcc::INTENT_FLOOR - 1);
+        let mut found = None;
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            match Self::time_from(&tree, mid)? {
+                Some((ts, t)) if ts <= hi && t <= time => {
+                    found = Some((ts, t));
+                    lo = ts + 1;
+                }
+                // None at or after `mid` within the bounds, or one later
+                // than `time` (and so every one after it).
+                _ => {
+                    if mid == 0 {
+                        break;
+                    }
+                    hi = mid - 1;
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Finds again, if it was found more than [`TIME_FLOOR_EVERY`] ago,
+    /// the oldest snapshot the retention by time keeps.  Called with no
+    /// lock held (it reads the store).
+    fn refresh_time_floor(&self) -> Result<()> {
+        if self.opts.history_time == 0 {
+            return Ok(());
+        }
+        let now = u64::try_from(self.platform.clock().now().as_micros()).unwrap_or(u64::MAX);
+        let found = self.time_floor_found.load(Ordering::Acquire);
+        if found != u64::MAX && now.saturating_sub(found) < TIME_FLOOR_EVERY {
+            return Ok(());
+        }
+        let cutoff = self.wall_micros().saturating_sub(self.opts.history_time);
+        let floor = match self.commit_at_or_before(cutoff)? {
+            Some((ts, _)) => ts,
+            // Every commit recorded is within the retention: the first
+            // recorded is the oldest a time reaches (none recorded: none).
+            None => {
+                let tree = self.store.read()?;
+                match Self::time_from(&tree, 0)? {
+                    Some((ts, _)) => ts,
+                    None => self.visible.load(Ordering::Acquire),
+                }
+            }
+        };
+        self.time_floor.fetch_max(floor, Ordering::AcqRel);
+        self.time_floor_found.store(now, Ordering::Release);
+        Ok(())
     }
 
     fn current_watermark(&self) -> u64 {
@@ -2131,6 +2325,7 @@ impl Transaction {
             engine.store.checkpoint()?;
         }
         let spilled = self.spilled;
+        engine.refresh_time_floor()?;
         let (ts, lsn) = {
             let mut last = lock(&engine.commit);
             let wm = engine.current_watermark();
@@ -2168,6 +2363,14 @@ impl Transaction {
             for f in self.fresh.iter().filter(|f| f.mode == FreshMode::Unlogged) {
                 ops.push((unlogged_key(&f.start), None));
             }
+            // Its time, with a retention by time (never before the last).
+            let time = (engine.opts.history_time > 0).then(|| {
+                let time = engine
+                    .wall_micros()
+                    .max(engine.last_time.load(Ordering::Acquire));
+                ops.push((time_key(ts), Some(time.to_be_bytes().to_vec())));
+                time
+            });
             for (key, value) in self.writes.iter() {
                 if let Some(id) = spilled
                     && self
@@ -2188,6 +2391,9 @@ impl Transaction {
                 .store
                 .write_filtered(&Batch { meta: ts, ops }, &Collect { wm })?;
             *last = ts;
+            if let Some(time) = time {
+                engine.last_time.store(time, Ordering::Release);
+            }
             if unlogged {
                 let mut ranges = lock(&engine.unlogged);
                 for f in self

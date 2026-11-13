@@ -7877,6 +7877,74 @@ MVCC already keeps old versions for `history`; make them queryable:
 **Done when:** queries at past timestamps return exactly what was visible
 then (checked against a log of the workload), within the retention.
 
+**Study (2026-11-13).**  What exists: every commit has a timestamp — a
+counter, not a time —, a transaction can read an older snapshot
+(`TxnOptions::at`, read-only, `SnapshotTooOld` once its versions are
+collected), and `history` keeps versions for that many commits; nothing
+maps a time to a commit, and nothing in SQL reaches it.  A session's
+catalog cache already serves only snapshots that read the catalog as it
+was filled (`watched_as_at`), so a statement at a past snapshot binds
+against the past catalog — a table dropped since included.
+
+*Prior art.*  Oracle's flashback query (`AS OF TIMESTAMP` / `AS OF
+SCN`, per table reference; the SCN↔time map `SMON_SCN_TIME` sampled
+every few seconds, so a time is only as exact as its sample;
+`UNDO_RETENTION`; `FLASHBACK TABLE … TO BEFORE DROP`).  SQL:2011
+system-versioned tables (`FOR SYSTEM_TIME AS OF`, SQL Server, MariaDB):
+history rows in a table of their own, per table, opted into.
+CockroachDB's `AS OF SYSTEM TIME` — a whole statement or read-only
+transaction, its timestamps (HLC) being times already; retention
+`gc.ttlseconds`.  Snowflake's `AT (TIMESTAMP => …)` per table, `UNDROP`,
+`DATA_RETENTION_TIME_IN_DAYS`.  Datomic's `as-of` database value.
+PostgreSQL had time travel until 6.2 and keeps only
+`track_commit_timestamp` (a commit time per transaction id).
+
+*Choices.*  A commit's time is recorded exactly, with the commit (a
+store entry `00 05 | ts → µs` in its batch — PostgreSQL's commit
+timestamps, not Oracle's samples: "exactly what was visible then" needs
+the exact boundary), times made monotonic (a clock stepping back takes
+the last time), only while a retention by time is set (no cost
+otherwise).  A time `t` reads the snapshot of the last commit at or
+before `t`.  The retention is a time (`EngineOptions::history_time`;
+the server's `--history`, a database setting later): the watermark is
+the last commit at or before now − retention, found from the recorded
+times (a few seeks, cached a second — older is safe: it keeps more).
+SQL: a whole statement or a read-only transaction at a time (CockroachDB's
+model — one snapshot, the past catalog) and a table reference at a time
+(Oracle's and Snowflake's — a second snapshot for that scan, the table's
+past definition), the latter what restores need (`CREATE TABLE … AS
+SELECT … FROM t AS OF …`, a dropped table included).
+
+*Steps.*
+- **TT1 — the engine** ✅: commit times recorded, retention by time, a time
+  to a snapshot (`Engine::snapshot_at`), how far back (`Engine::reach`);
+  the KV API; crash and model tests.
+  **TT1 ✅ (2026-11-13).**  `EngineOptions::history_time` /
+  `nucleus_kv::Options::history_time`; the records `00 05 ‖ ts → µs` in
+  each commit's batch (monotonic: the last time if the clock stepped
+  back); `snapshot_at` a binary search by seeks; the floor found again
+  at most once a second, outside every lock (an older floor keeps more);
+  a whole vacuum trims the records below the watermark.
+  `tests/time.rs`: 300 random times a seed against a logged workload of
+  120 commits (several within one microsecond: a time reads the last of
+  them), the retention (a minute) kept and the rest collected, the
+  records surviving a crash at every I/O point, none written without a
+  retention.
+- **TT2 — SQL at a time, whole**: `BEGIN READ ONLY AS OF TIMESTAMP …`,
+  `SET TRANSACTION AS OF …`, `SET read_as_of`; errors past the retention
+  (`SnapshotTooOld` → its SQLSTATE) and in the future.
+- **TT3 — a table at a time**: `FROM t AS OF TIMESTAMP x` (and `AS OF
+  COMMIT n`): its own snapshot, its past definition; writes in the same
+  statement read the present — restores by `CREATE TABLE … AS` and
+  `INSERT … SELECT`.
+- **TT4 — retention and reach in SQL**: the server's `--history`,
+  `nc_catalog.history` (the oldest time and commit reachable),
+  `nucleus_kv` `Options::history_time`.
+- **TT5 — the check**: a workload logged with its commit times, queries
+  at random past times against the log's model, through every index
+  kind (HNSW's and the text index's caches at a past snapshot); the
+  benchmark of a commit's added cost.
+
 ### §M14.15 — JSON ⬜
 
 - A `JSON` type (validated, stored in a compact binary form), operators
