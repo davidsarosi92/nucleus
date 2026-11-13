@@ -5226,13 +5226,13 @@ last `close` closes it); another process's is refused by its lock.
 background threads (`Stop`, `embedding::stop`), checkpoints and frees
 the directory.  The registry is the engine's plus the `embeddings` and
 `local-models` modules (features of the same names, on by default).
-The C API (`include/nucleus_embedded.h`): `nc_open(path, options,
-&error)`, `nc_connect(db, &error)`, `nc_send(c, buf, len)`,
-`nc_recv(c, buf, cap, timeout_ms)` (bytes; 0 at the end; -1 when the
-time ran out), `nc_end(c)` (ends the session without freeing it — the
+The C API (`include/nucleus_embedded.h`): `nce_open(path, options,
+&error)`, `nce_connect(db, &error)`, `nce_send(c, buf, len)`,
+`nce_recv(c, buf, cap, timeout_ms)` (bytes; 0 at the end; -1 when the
+time ran out), `nce_end(c)` (ends the session without freeing it — the
 one call another thread may make on a connection while one reads),
-`nc_disconnect(c)`, `nc_close(db, &error)`, `nc_free_error`,
-`nc_version`.  Rust programs use `Database` directly, or
+`nce_disconnect(c)`, `nce_close(db, &error)`, `nce_free_error`,
+`nce_version`.  Rust programs use `Database` directly, or
 `nucleus_client::Client::over(Box::new(db.connect()?), config)`.
 
 Python: `nucleus.connect("file:app.db")` (options as parameters,
@@ -5264,8 +5264,8 @@ edition builds for `wasm32-wasip1` without the model modules
 no threads there: a statement's workers are 1 (`budget::workers`), the
 engine starts no background thread, and sessions are *stepped* —
 `nucleus_server::Exchange`, the nucleus protocol's server driven by the
-bytes given to it (`Database::exchange`; C `nc_exchange`, `nc_feed`,
-`nc_exchange_ended`, `nc_exchange_free`): each `feed` runs the whole
+bytes given to it (`Database::exchange`; C `nce_exchange`, `nce_feed`,
+`nce_exchange_ended`, `nce_exchange_free`): each `feed` runs the whole
 messages it has and returns the reply.  Nothing can wait mid-statement,
 so in a stepped session a `COPY`'s data comes with the `COPY` (one
 without fails, `57014`; data after it is dropped), a fetch's batches
@@ -5316,8 +5316,8 @@ checks `psql` with and without TLS.
   `nucleus_platform::{temp_dir, process_id}`; `nucleus_platform::slots`
   (`Slots`, `SlotFs`, `SlotPlatform`, `MemorySlots`);
   `nucleus_server::Exchange`; `Database::exchange` and the C API's
-  `nc_exchange`, `nc_feed`, `nc_exchange_ended`, `nc_exchange_free`,
-  `nc_alloc`, `nc_dealloc`, `nc_pool_free`; JavaScript split into
+  `nce_exchange`, `nce_feed`, `nce_exchange_ended`, `nce_exchange_free`,
+  `nce_alloc`, `nce_dealloc`, `nce_pool_free`; JavaScript split into
   `core.ts`, `index.ts` (Node) and `browser.ts` (with `wasm.ts`,
   `worker.ts`, `opfs.ts`, `node-slots.ts`, `bytes.ts`), SCRAM on
   WebCrypto; `examples/browser/`; `driver-tests.sh js-wasm` with

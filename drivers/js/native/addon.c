@@ -4,7 +4,7 @@
  * with the engine into one file, nucleus.node.
  *
  * A connection's bytes arrive on a thread of its own (it waits in
- * nc_recv) and reach JavaScript through a thread-safe function, as a
+ * nce_recv) and reach JavaScript through a thread-safe function, as a
  * socket's 'data' would: the event loop never waits for the engine.
  *
  *   open(path, options)  -> database      (throws)
@@ -40,13 +40,13 @@ typedef pthread_t thread_t;
   } while (0)
 
 typedef struct {
-  nc_database *db;
+  nce_database *db;
 } database;
 
 /* Held by JavaScript (its external) and by the reading thread; the last
  * to let go disconnects and frees it. */
 typedef struct {
-  nc_connection *c;
+  nce_connection *c;
   napi_threadsafe_function on_data;
   atomic_int refs;
 } connection;
@@ -58,14 +58,14 @@ typedef struct {
 
 static void release(connection *c) {
   if (atomic_fetch_sub(&c->refs, 1) == 1) {
-    nc_disconnect(c->c);
+    nce_disconnect(c->c);
     free(c);
   }
 }
 
 static napi_value throw_owned(napi_env env, char *message) {
   napi_throw_error(env, NULL, message ? message : "nucleus: failed");
-  nc_free_error(message);
+  nce_free_error(message);
   return NULL;
 }
 
@@ -84,7 +84,7 @@ static void database_finalize(napi_env env, void *data, void *hint) {
   (void)env;
   (void)hint;
   database *d = data;
-  if (d->db) nc_close(d->db, NULL);
+  if (d->db) nce_close(d->db, NULL);
   free(d);
 }
 
@@ -92,14 +92,14 @@ static void connection_finalize(napi_env env, void *data, void *hint) {
   (void)env;
   (void)hint;
   connection *c = data;
-  nc_end(c->c);
+  nce_end(c->c);
   release(c);
 }
 
 static napi_value js_version(napi_env env, napi_callback_info info) {
   (void)info;
   napi_value out;
-  CHECK(napi_create_string_utf8(env, nc_version(), NAPI_AUTO_LENGTH, &out));
+  CHECK(napi_create_string_utf8(env, nce_version(), NAPI_AUTO_LENGTH, &out));
   return out;
 }
 
@@ -120,7 +120,7 @@ static napi_value js_open(napi_env env, napi_callback_info info) {
     return NULL;
   }
   char *error = NULL;
-  nc_database *db = nc_open(path, options, &error);
+  nce_database *db = nce_open(path, options, &error);
   free(path);
   free(options);
   if (!db) return throw_owned(env, error);
@@ -149,9 +149,9 @@ static napi_value js_close(napi_env env, napi_callback_info info) {
   database *d = p;
   if (!d->db) return NULL;
   char *error = NULL;
-  nc_database *db = d->db;
+  nce_database *db = d->db;
   d->db = NULL;
-  if (nc_close(db, &error) != 0) return throw_owned(env, error);
+  if (nce_close(db, &error) != 0) return throw_owned(env, error);
   return NULL;
 }
 
@@ -182,7 +182,7 @@ static void *reader(void *arg)
   connection *c = arg;
   unsigned char *buf = malloc(CHUNK);
   for (;;) {
-    int64_t n = buf ? nc_recv(c->c, buf, CHUNK, -1) : 0;
+    int64_t n = buf ? nce_recv(c->c, buf, CHUNK, -1) : 0;
     if (n <= 0) break;
     chunk *ch = malloc(sizeof *ch + (size_t)n);
     if (!ch) break;
@@ -194,7 +194,7 @@ static void *reader(void *arg)
     }
   }
   free(buf);
-  nc_end(c->c);
+  nce_end(c->c);
   napi_call_threadsafe_function(c->on_data, NULL, napi_tsfn_blocking);
   napi_release_threadsafe_function(c->on_data, napi_tsfn_release);
   release(c);
@@ -216,7 +216,7 @@ static napi_value js_connect(napi_env env, napi_callback_info info) {
   database *d = database_arg(env, argv[0]);
   if (!d) return NULL;
   char *error = NULL;
-  nc_connection *nc = nc_connect(d->db, &error);
+  nce_connection *nc = nce_connect(d->db, &error);
   if (!nc) return throw_owned(env, error);
   connection *c = malloc(sizeof *c);
   c->c = nc;
@@ -227,7 +227,7 @@ static napi_value js_connect(napi_env env, napi_callback_info info) {
    * pipe fills and the session waits — a socket's backpressure. */
   if (napi_create_threadsafe_function(env, argv[1], NULL, name, 16, 1, NULL, NULL, NULL,
                                       call_on_data, &c->on_data) != napi_ok) {
-    nc_disconnect(nc);
+    nce_disconnect(nc);
     free(c);
     napi_throw_error(env, NULL, "nucleus: cannot make the session's callback");
     return NULL;
@@ -243,7 +243,7 @@ static napi_value js_connect(napi_env env, napi_callback_info info) {
 #endif
   if (!started) {
     napi_release_threadsafe_function(c->on_data, napi_tsfn_abort);
-    nc_disconnect(nc);
+    nce_disconnect(nc);
     free(c);
     napi_throw_error(env, NULL, "nucleus: cannot start the session's reader");
     return NULL;
@@ -276,7 +276,7 @@ static napi_value js_send(napi_env env, napi_callback_info info) {
   size_t len;
   CHECK(napi_get_buffer_info(env, argv[1], &data, &len));
   napi_value out;
-  CHECK(napi_get_boolean(env, nc_send(c->c, data, len) == 0, &out));
+  CHECK(napi_get_boolean(env, nce_send(c->c, data, len) == 0, &out));
   return out;
 }
 
@@ -285,7 +285,7 @@ static napi_value js_end(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   CHECK(napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   connection *c = argc < 1 ? NULL : connection_arg(env, argv[0]);
-  if (c) nc_end(c->c);
+  if (c) nce_end(c->c);
   return NULL;
 }
 

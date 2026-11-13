@@ -12,12 +12,12 @@ program moves between them by its connection string (`file:app.db`,
 #include "nucleus_embedded.h"
 
 char *error = NULL;
-nc_database *db = nc_open("app.db", "cache=64MB", &error);   /* or ":memory:" */
-nc_connection *c = nc_connect(db, &error);
-nc_send(c, hello, hello_len);                /* the nucleus protocol's bytes */
-int64_t n = nc_recv(c, buf, sizeof buf, -1);  /* bytes; 0 at the end */
-nc_disconnect(c);
-nc_close(db, &error);
+nce_database *db = nce_open("app.db", "cache=64MB", &error);   /* or ":memory:" */
+nce_connection *c = nce_connect(db, &error);
+nce_send(c, hello, hello_len);                /* the nucleus protocol's bytes */
+int64_t n = nce_recv(c, buf, sizeof buf, -1);  /* bytes; 0 at the end */
+nce_disconnect(c);
+nce_close(db, &error);
 ```
 
 From Rust, `nucleus_embedded::Database::open(path, options)?` and
@@ -37,11 +37,11 @@ From Rust, `nucleus_embedded::Database::open(path, options)?` and
 
 - **In WebAssembly** (the browser's edition, `wasm32-wasip1`,
   `drivers/js/wasm/build.sh`): no threads, so sessions are stepped —
-  `nc_exchange` / `nc_feed` run the whole messages given and return the
+  `nce_exchange` / `nce_feed` run the whole messages given and return the
   reply (`Database::exchange` in Rust); a COPY's data goes with the COPY.
   A directory lives in a pool of files the host opened ahead (the
   browser's OPFS), imported as `nucleus_slots`
-  (`nucleus_platform::slots`); `nc_pool_free` says when to add more.
+  (`nucleus_platform::slots`); `nce_pool_free` says when to add more.
 
 DOCS.md §11 (*In the process*, *In the browser*) has the details;
 `tests/embedded.rs` runs the slt suite through a session's pipe and

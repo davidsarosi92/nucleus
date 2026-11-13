@@ -43,34 +43,34 @@ def lib():
     # holds up no other thread.
     l = _ct.CDLL(path)
     vp, sz, err = _ct.c_void_p, _ct.c_size_t, _ct.POINTER(_ct.c_void_p)
-    l.nc_version.restype = _ct.c_char_p
-    l.nc_version.argtypes = []
-    l.nc_open.restype = vp
-    l.nc_open.argtypes = [_ct.c_char_p, _ct.c_char_p, err]
-    l.nc_connect.restype = vp
-    l.nc_connect.argtypes = [vp, err]
-    l.nc_send.restype = _ct.c_int
-    l.nc_send.argtypes = [vp, _ct.c_char_p, sz]
-    l.nc_recv.restype = _ct.c_int64
-    l.nc_recv.argtypes = [vp, _ct.c_void_p, sz, _ct.c_int64]
-    l.nc_disconnect.restype = None
-    l.nc_disconnect.argtypes = [vp]
-    l.nc_close.restype = _ct.c_int
-    l.nc_close.argtypes = [vp, err]
-    l.nc_free_error.restype = None
-    l.nc_free_error.argtypes = [vp]
+    l.nce_version.restype = _ct.c_char_p
+    l.nce_version.argtypes = []
+    l.nce_open.restype = vp
+    l.nce_open.argtypes = [_ct.c_char_p, _ct.c_char_p, err]
+    l.nce_connect.restype = vp
+    l.nce_connect.argtypes = [vp, err]
+    l.nce_send.restype = _ct.c_int
+    l.nce_send.argtypes = [vp, _ct.c_char_p, sz]
+    l.nce_recv.restype = _ct.c_int64
+    l.nce_recv.argtypes = [vp, _ct.c_void_p, sz, _ct.c_int64]
+    l.nce_disconnect.restype = None
+    l.nce_disconnect.argtypes = [vp]
+    l.nce_close.restype = _ct.c_int
+    l.nce_close.argtypes = [vp, err]
+    l.nce_free_error.restype = None
+    l.nce_free_error.argtypes = [vp]
     _lib = l
     return l
 
 
 def version():
     """The engine's version."""
-    return lib().nc_version().decode()
+    return lib().nce_version().decode()
 
 
 def _message(l, e):
     text = _ct.cast(e, _ct.c_char_p).value.decode("utf-8", "replace")
-    l.nc_free_error(e)
+    l.nce_free_error(e)
     return text
 
 
@@ -78,7 +78,7 @@ def open_database(path, options):
     """A database handle (an int), or OSError with the engine's message."""
     l = lib()
     e = _ct.c_void_p()
-    db = l.nc_open(path.encode(), options.encode(), _ct.byref(e))
+    db = l.nce_open(path.encode(), options.encode(), _ct.byref(e))
     if not db:
         raise OSError(_message(l, e))
     return db
@@ -87,7 +87,7 @@ def open_database(path, options):
 def close_database(db):
     l = lib()
     e = _ct.c_void_p()
-    if l.nc_close(db, _ct.byref(e)) != 0:
+    if l.nce_close(db, _ct.byref(e)) != 0:
         raise OSError(_message(l, e))
 
 
@@ -100,7 +100,7 @@ class Pipe:
     def __init__(self, db):
         l = lib()
         e = _ct.c_void_p()
-        c = l.nc_connect(db, _ct.byref(e))
+        c = l.nce_connect(db, _ct.byref(e))
         if not c:
             raise OSError(_message(l, e))
         self._lib, self._c = l, c
@@ -111,13 +111,13 @@ class Pipe:
             raise OSError("the connection is closed")
         if not isinstance(data, bytes):
             data = bytes(data)
-        if self._lib.nc_send(self._c, data, len(data)) != 0:
+        if self._lib.nce_send(self._c, data, len(data)) != 0:
             raise OSError("the session has ended")
 
     def recv(self, n):
         if self._c is None:
             return b""
-        k = self._lib.nc_recv(self._c, self._buf, min(n, self._CAP), -1)
+        k = self._lib.nce_recv(self._c, self._buf, min(n, self._CAP), -1)
         return _ct.string_at(self._buf, k) if k > 0 else b""
 
     def settimeout(self, _timeout):
@@ -125,5 +125,5 @@ class Pipe:
 
     def close(self):
         if self._c is not None:
-            self._lib.nc_disconnect(self._c)
+            self._lib.nce_disconnect(self._c)
             self._c = None

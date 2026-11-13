@@ -149,35 +149,35 @@ fn the_c_api_opens_connects_and_carries_bytes() {
         let mut err: *mut c_char = ptr::null_mut();
         let bad = CString::new("colour=blue").unwrap();
         let path = CString::new(MEMORY).unwrap();
-        assert!(ffi::nc_open(path.as_ptr(), bad.as_ptr(), &mut err).is_null());
+        assert!(ffi::nce_open(path.as_ptr(), bad.as_ptr(), &mut err).is_null());
         assert!(CStr::from_ptr(err).to_str().unwrap().contains("colour"));
-        ffi::nc_free_error(err);
+        ffi::nce_free_error(err);
 
-        let db = ffi::nc_open(path.as_ptr(), ptr::null(), ptr::null_mut());
+        let db = ffi::nce_open(path.as_ptr(), ptr::null(), ptr::null_mut());
         assert!(!db.is_null());
-        let c = ffi::nc_connect(db, ptr::null_mut());
+        let c = ffi::nce_connect(db, ptr::null_mut());
         assert!(!c.is_null());
         // Nothing sent yet: the wait runs out.
         let mut buf = [0u8; 4096];
-        assert_eq!(ffi::nc_recv(c, buf.as_mut_ptr(), buf.len(), 20), -1);
+        assert_eq!(ffi::nce_recv(c, buf.as_mut_ptr(), buf.len(), 20), -1);
         // Hello: the version, user, database, password (none), client.
         let mut hello = nucleus_client::PROTOCOL_VERSION.to_le_bytes().to_vec();
         for s in ["nucleus", "nucleus", "", "test"] {
             put_str(&mut hello, s);
         }
         let h = frame(b'H', &hello);
-        assert_eq!(ffi::nc_send(c, h.as_ptr(), h.len()), 0);
-        let n = ffi::nc_recv(c, buf.as_mut_ptr(), buf.len(), -1);
+        assert_eq!(ffi::nce_send(c, h.as_ptr(), h.len()), 0);
+        let n = ffi::nce_recv(c, buf.as_mut_ptr(), buf.len(), -1);
         assert!(n > 0);
         // Welcome first: no login in the process.
         assert_eq!(buf[0], b'W');
         // Bye; the session ends, and so does what it sends.
         let bye = frame(b'X', &[]);
-        assert_eq!(ffi::nc_send(c, bye.as_ptr(), bye.len()), 0);
-        while ffi::nc_recv(c, buf.as_mut_ptr(), buf.len(), -1) > 0 {}
-        ffi::nc_disconnect(c);
-        assert_eq!(ffi::nc_close(db, ptr::null_mut()), 0);
-        assert!(!CStr::from_ptr(ffi::nc_version()).to_bytes().is_empty());
+        assert_eq!(ffi::nce_send(c, bye.as_ptr(), bye.len()), 0);
+        while ffi::nce_recv(c, buf.as_mut_ptr(), buf.len(), -1) > 0 {}
+        ffi::nce_disconnect(c);
+        assert_eq!(ffi::nce_close(db, ptr::null_mut()), 0);
+        assert!(!CStr::from_ptr(ffi::nce_version()).to_bytes().is_empty());
     }
 }
 

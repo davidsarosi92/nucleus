@@ -1,7 +1,7 @@
 // The engine in WebAssembly (PLAN.md section M14.23): the embedded
 // edition built for wasm32-wasip1 (`wasm/build.sh`), its C API called
 // directly — no threads, so each session is stepped by the bytes given
-// to it (`nc_feed`).  It runs wherever WebAssembly does: a browser's
+// to it (`nce_feed`).  It runs wherever WebAssembly does: a browser's
 // worker (browser.ts), Node, Bun, Deno.
 //
 // It imports two things: a minimal WASI (clocks, randomness, the console;
@@ -78,17 +78,17 @@ export class MemorySlots implements SlotStore {
 
 interface Exports {
   memory: WebAssembly.Memory;
-  nc_version(): number;
-  nc_alloc(len: number): number;
-  nc_dealloc(p: number, len: number): void;
-  nc_open(path: number, options: number, error: number): number;
-  nc_close(db: number, error: number): number;
-  nc_exchange(db: number, error: number): number;
-  nc_feed(x: number, buf: number, len: number, replyLen: number): number;
-  nc_exchange_ended(x: number): number;
-  nc_exchange_free(x: number): void;
-  nc_free_error(e: number): void;
-  nc_pool_free(): bigint;
+  nce_version(): number;
+  nce_alloc(len: number): number;
+  nce_dealloc(p: number, len: number): void;
+  nce_open(path: number, options: number, error: number): number;
+  nce_close(db: number, error: number): number;
+  nce_exchange(db: number, error: number): number;
+  nce_feed(x: number, buf: number, len: number, replyLen: number): number;
+  nce_exchange_ended(x: number): number;
+  nce_exchange_free(x: number): void;
+  nce_free_error(e: number): void;
+  nce_pool_free(): bigint;
 }
 
 const ERRNO = { SUCCESS: 0, BADF: 8, INVAL: 28, NOENT: 44, NOSYS: 52 };
@@ -244,7 +244,7 @@ export class Engine {
   /** A C string in the engine's memory (free with `dealloc`). */
   private cString(s: string): [number, number] {
     const b = this.encoder.encode(s);
-    const p = this.x.nc_alloc(b.length + 1);
+    const p = this.x.nce_alloc(b.length + 1);
     this.mem().set(b, p);
     this.mem()[p + b.length] = 0;
     return [p, b.length + 1];
@@ -259,24 +259,24 @@ export class Engine {
 
   /** Calls `f` with a `char **` for an error; throws what it holds. */
   private withError<T>(what: string, f: (error: number) => T, failed: (v: T) => boolean): T {
-    const slot = this.x.nc_alloc(4);
+    const slot = this.x.nce_alloc(4);
     new DataView(this.x.memory.buffer).setUint32(slot, 0, true);
     try {
       const v = f(slot);
       if (failed(v)) {
         const e = new DataView(this.x.memory.buffer).getUint32(slot, true);
         const message = e === 0 ? "failed" : this.readC(e);
-        if (e !== 0) this.x.nc_free_error(e);
+        if (e !== 0) this.x.nce_free_error(e);
         throw new NucleusError(`${what}: ${message}`);
       }
       return v;
     } finally {
-      this.x.nc_dealloc(slot, 4);
+      this.x.nce_dealloc(slot, 4);
     }
   }
 
   version(): string {
-    return this.readC(this.x.nc_version());
+    return this.readC(this.x.nce_version());
   }
 
   /** Opens a database (`":memory:"`, or a directory in the slots). */
@@ -284,50 +284,50 @@ export class Engine {
     const [p, pl] = this.cString(path);
     const [o, ol] = this.cString(options);
     try {
-      return this.withError(`cannot open ${path}`, (e) => this.x.nc_open(p, o, e), (db) => db === 0);
+      return this.withError(`cannot open ${path}`, (e) => this.x.nce_open(p, o, e), (db) => db === 0);
     } finally {
-      this.x.nc_dealloc(p, pl);
-      this.x.nc_dealloc(o, ol);
+      this.x.nce_dealloc(p, pl);
+      this.x.nce_dealloc(o, ol);
     }
   }
 
   /** Closes a database: it checkpoints. */
   close(db: number): void {
-    this.withError("cannot close", (e) => this.x.nc_close(db, e), (r) => r !== 0);
+    this.withError("cannot close", (e) => this.x.nce_close(db, e), (r) => r !== 0);
   }
 
   /** A new session on `db`. */
   session(db: number): number {
-    return this.withError("cannot start a session", (e) => this.x.nc_exchange(db, e), (x) => x === 0);
+    return this.withError("cannot start a session", (e) => this.x.nce_exchange(db, e), (x) => x === 0);
   }
 
   /** Gives session `x` the client's bytes; its reply (a copy). */
   feed(x: number, bytes: Uint8Array): Uint8Array {
-    const p = this.x.nc_alloc(bytes.length);
-    const lenAt = this.x.nc_alloc(4);
+    const p = this.x.nce_alloc(bytes.length);
+    const lenAt = this.x.nce_alloc(4);
     try {
       this.mem().set(bytes, p);
-      const r = this.x.nc_feed(x, p, bytes.length, lenAt);
+      const r = this.x.nce_feed(x, p, bytes.length, lenAt);
       const n = new DataView(this.x.memory.buffer).getUint32(lenAt, true);
       return this.mem().slice(r, r + n);
     } finally {
-      this.x.nc_dealloc(p, bytes.length);
-      this.x.nc_dealloc(lenAt, 4);
+      this.x.nce_dealloc(p, bytes.length);
+      this.x.nce_dealloc(lenAt, 4);
     }
   }
 
   /** Whether session `x` has ended. */
   ended(x: number): boolean {
-    return this.x.nc_exchange_ended(x) !== 0;
+    return this.x.nce_exchange_ended(x) !== 0;
   }
 
   /** Frees session `x`. */
   end(x: number): void {
-    this.x.nc_exchange_free(x);
+    this.x.nce_exchange_free(x);
   }
 
   /** The slots of the pool not yet taken (-1: none opened). */
   freeSlots(): number {
-    return Number(this.x.nc_pool_free());
+    return Number(this.x.nce_pool_free());
   }
 }

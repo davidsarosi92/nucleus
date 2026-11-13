@@ -6,7 +6,7 @@
 //! Every function takes pointers from C; each says what they must be.  A
 //! connection's functions are not to be called on it from two threads at
 //! once (a driver's connection is one thread's at a time) — except
-//! [`nc_end`], which stops another thread's [`nc_recv`]; different
+//! [`nce_end`], which stops another thread's [`nce_recv`]; different
 //! connections, and the database, from any threads.
 
 #![allow(unsafe_code)]
@@ -18,14 +18,14 @@ use std::time::Duration;
 
 use crate::{Connection, Database};
 
-/// A database (`nc_database *`).
+/// A database (`nce_database *`).
 pub struct NcDatabase(Database);
 
-/// A connection (`nc_connection *`).
+/// A connection (`nce_connection *`).
 pub struct NcConnection(Connection);
 
 /// Writes `message` where `error` points (when not null), for
-/// [`nc_free_error`].
+/// [`nce_free_error`].
 unsafe fn set_error(error: *mut *mut c_char, message: &str) {
     if !error.is_null() {
         let c = CString::new(message.replace('\0', " ")).unwrap_or_default();
@@ -57,20 +57,20 @@ fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
 
 /// This library's version (a static string).
 #[unsafe(no_mangle)]
-pub extern "C" fn nc_version() -> *const c_char {
+pub extern "C" fn nce_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
 }
 
 /// Opens the database in directory `path` (made if missing), or a new one
 /// in memory for `":memory:"`; `options` (null for none) as
 /// `"cache=64MB; sync=full"`.  Null on failure, with `*error` set (when
-/// `error` is not null) for [`nc_free_error`].
+/// `error` is not null) for [`nce_free_error`].
 ///
 /// # Safety
 /// `path` and `options` are NUL-terminated strings or null; `error` is
 /// null or points to a writable `char *`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_open(
+pub unsafe extern "C" fn nce_open(
     path: *const c_char,
     options: *const c_char,
     error: *mut *mut c_char,
@@ -92,13 +92,13 @@ pub unsafe extern "C" fn nc_open(
 }
 
 /// A new session on `db`.  Null on failure (`*error` set as by
-/// [`nc_open`]).
+/// [`nce_open`]).
 ///
 /// # Safety
-/// `db` came from [`nc_open`] and is not closed; `error` as for
-/// [`nc_open`].
+/// `db` came from [`nce_open`] and is not closed; `error` as for
+/// [`nce_open`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_connect(
+pub unsafe extern "C" fn nce_connect(
     db: *mut NcDatabase,
     error: *mut *mut c_char,
 ) -> *mut NcConnection {
@@ -107,7 +107,7 @@ pub unsafe extern "C" fn nc_connect(
         unsafe { set_error(error, "no database") };
         return ptr::null_mut();
     }
-    // SAFETY: a live database from `nc_open`.
+    // SAFETY: a live database from `nce_open`.
     let db = unsafe { &*db };
     match guarded(|| db.0.connect()) {
         Ok(c) => Box::into_raw(Box::new(NcConnection(c))),
@@ -122,10 +122,10 @@ pub unsafe extern "C" fn nc_connect(
 /// Sends `len` bytes to the session: 0, or -1 once it has ended.
 ///
 /// # Safety
-/// `c` came from [`nc_connect`] and is not disconnected; `buf` holds `len`
+/// `c` came from [`nce_connect`] and is not disconnected; `buf` holds `len`
 /// readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_send(c: *mut NcConnection, buf: *const u8, len: usize) -> i32 {
+pub unsafe extern "C" fn nce_send(c: *mut NcConnection, buf: *const u8, len: usize) -> i32 {
     if c.is_null() || (buf.is_null() && len > 0) {
         return -1;
     }
@@ -151,10 +151,10 @@ pub unsafe extern "C" fn nc_send(c: *mut NcConnection, buf: *const u8, len: usiz
 /// received; 0 once the session has ended; -1 when the time ran out.
 ///
 /// # Safety
-/// `c` came from [`nc_connect`] and is not disconnected; `buf` holds `cap`
+/// `c` came from [`nce_connect`] and is not disconnected; `buf` holds `cap`
 /// writable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_recv(
+pub unsafe extern "C" fn nce_recv(
     c: *mut NcConnection,
     buf: *mut u8,
     cap: usize,
@@ -173,14 +173,14 @@ pub unsafe extern "C" fn nc_recv(
     }
 }
 
-/// Ends the session without freeing `c`: a thread waiting in [`nc_recv`]
+/// Ends the session without freeing `c`: a thread waiting in [`nce_recv`]
 /// on it returns (what is left, then 0) — so one thread can stop
-/// another's reading before [`nc_disconnect`].
+/// another's reading before [`nce_disconnect`].
 ///
 /// # Safety
-/// `c` came from [`nc_connect`] and is not disconnected.
+/// `c` came from [`nce_connect`] and is not disconnected.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_end(c: *mut NcConnection) {
+pub unsafe extern "C" fn nce_end(c: *mut NcConnection) {
     if !c.is_null() {
         // SAFETY: as the caller promises.
         unsafe { &*c }.0.close();
@@ -190,9 +190,9 @@ pub unsafe extern "C" fn nc_end(c: *mut NcConnection) {
 /// Ends the session and frees `c`.
 ///
 /// # Safety
-/// `c` came from [`nc_connect`] (or is null) and is not used again.
+/// `c` came from [`nce_connect`] (or is null) and is not used again.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_disconnect(c: *mut NcConnection) {
+pub unsafe extern "C" fn nce_disconnect(c: *mut NcConnection) {
     if !c.is_null() {
         // SAFETY: as the caller promises.
         drop(unsafe { Box::from_raw(c) });
@@ -205,10 +205,10 @@ pub unsafe extern "C" fn nc_disconnect(c: *mut NcConnection) {
 /// set.
 ///
 /// # Safety
-/// `db` came from [`nc_open`] (or is null) and is not used again; `error`
-/// as for [`nc_open`].
+/// `db` came from [`nce_open`] (or is null) and is not used again; `error`
+/// as for [`nce_open`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_close(db: *mut NcDatabase, error: *mut *mut c_char) -> i32 {
+pub unsafe extern "C" fn nce_close(db: *mut NcDatabase, error: *mut *mut c_char) -> i32 {
     if db.is_null() {
         return 0;
     }
@@ -229,7 +229,7 @@ pub unsafe extern "C" fn nc_close(db: *mut NcDatabase, error: *mut *mut c_char) 
 /// # Safety
 /// `error` came from this library (or is null) and is not used again.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_free_error(error: *mut c_char) {
+pub unsafe extern "C" fn nce_free_error(error: *mut c_char) {
     if !error.is_null() {
         // SAFETY: made by `CString::into_raw` in `set_error`.
         drop(unsafe { CString::from_raw(error) });
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn nc_free_error(error: *mut c_char) {
 
 // ------------------------------------------------- sessions without threads
 
-/// A session driven by its bytes (`nc_stepped *`): its server's state
+/// A session driven by its bytes (`nce_stepped *`): its server's state
 /// and its last reply.
 pub struct NcExchange {
     exchange: nucleus_server::Exchange,
@@ -246,13 +246,13 @@ pub struct NcExchange {
 }
 
 /// A new session on `db` run on the caller's thread, for a platform
-/// without threads (WebAssembly): [`nc_feed`] gives it bytes and returns
-/// its reply.  Null on failure (`*error` set as by [`nc_open`]).
+/// without threads (WebAssembly): [`nce_feed`] gives it bytes and returns
+/// its reply.  Null on failure (`*error` set as by [`nce_open`]).
 ///
 /// # Safety
-/// As for [`nc_connect`].
+/// As for [`nce_connect`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_exchange(
+pub unsafe extern "C" fn nce_exchange(
     db: *mut NcDatabase,
     error: *mut *mut c_char,
 ) -> *mut NcExchange {
@@ -261,7 +261,7 @@ pub unsafe extern "C" fn nc_exchange(
         unsafe { set_error(error, "no database") };
         return ptr::null_mut();
     }
-    // SAFETY: a live database from `nc_open`.
+    // SAFETY: a live database from `nce_open`.
     let db = unsafe { &*db };
     match guarded(|| db.0.exchange()) {
         Ok(exchange) => Box::into_raw(Box::new(NcExchange {
@@ -283,10 +283,10 @@ pub unsafe extern "C" fn nc_exchange(
 /// results whole.
 ///
 /// # Safety
-/// `x` came from [`nc_exchange`] and is not freed; `buf` holds `len`
+/// `x` came from [`nce_exchange`] and is not freed; `buf` holds `len`
 /// readable bytes; `reply_len` points to a writable `size_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_feed(
+pub unsafe extern "C" fn nce_feed(
     x: *mut NcExchange,
     buf: *const u8,
     len: usize,
@@ -316,9 +316,9 @@ pub unsafe extern "C" fn nc_feed(
 /// error), else 0.
 ///
 /// # Safety
-/// `x` came from [`nc_exchange`] and is not freed.
+/// `x` came from [`nce_exchange`] and is not freed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_exchange_ended(x: *mut NcExchange) -> i32 {
+pub unsafe extern "C" fn nce_exchange_ended(x: *mut NcExchange) -> i32 {
     // SAFETY: as the caller promises.
     i32::from(x.is_null() || unsafe { &*x }.exchange.ended())
 }
@@ -326,9 +326,9 @@ pub unsafe extern "C" fn nc_exchange_ended(x: *mut NcExchange) -> i32 {
 /// Frees the session `x`.
 ///
 /// # Safety
-/// `x` came from [`nc_exchange`] (or is null) and is not used again.
+/// `x` came from [`nce_exchange`] (or is null) and is not used again.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_exchange_free(x: *mut NcExchange) {
+pub unsafe extern "C" fn nce_exchange_free(x: *mut NcExchange) {
     if !x.is_null() {
         // SAFETY: as the caller promises.
         drop(unsafe { Box::from_raw(x) });
@@ -338,7 +338,7 @@ pub unsafe extern "C" fn nc_exchange_free(x: *mut NcExchange) {
 /// `len` bytes of this library's memory, for a host that must write into
 /// it (WebAssembly's): null when there is not that much.
 #[unsafe(no_mangle)]
-pub extern "C" fn nc_alloc(len: usize) -> *mut u8 {
+pub extern "C" fn nce_alloc(len: usize) -> *mut u8 {
     let mut v = Vec::<u8>::new();
     if v.try_reserve_exact(len.max(1)).is_err() {
         return ptr::null_mut();
@@ -348,14 +348,14 @@ pub extern "C" fn nc_alloc(len: usize) -> *mut u8 {
     p
 }
 
-/// Frees what [`nc_alloc`] gave.
+/// Frees what [`nce_alloc`] gave.
 ///
 /// # Safety
-/// `p` came from `nc_alloc(len)` (or is null) and is not used again.
+/// `p` came from `nce_alloc(len)` (or is null) and is not used again.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nc_dealloc(p: *mut u8, len: usize) {
+pub unsafe extern "C" fn nce_dealloc(p: *mut u8, len: usize) {
     if !p.is_null() {
-        // SAFETY: made by `nc_alloc` with this capacity.
+        // SAFETY: made by `nce_alloc` with this capacity.
         drop(unsafe { Vec::from_raw_parts(p, 0, len.max(1)) });
     }
 }
@@ -364,6 +364,6 @@ pub unsafe extern "C" fn nc_dealloc(p: *mut u8, len: usize) {
 /// they run low), or -1 where there is no pool (not WebAssembly, or none
 /// opened yet).
 #[unsafe(no_mangle)]
-pub extern "C" fn nc_pool_free() -> i64 {
+pub extern "C" fn nce_pool_free() -> i64 {
     crate::pool_free().map_or(-1, |n| n as i64)
 }
