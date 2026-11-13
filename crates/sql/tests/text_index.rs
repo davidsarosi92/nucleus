@@ -236,7 +236,7 @@ fn kept_exact_through_writes_seals_and_merges() {
     let (t, i) = nucleus_sql::catalog::find_index(&*old, "docs_body")
         .unwrap()
         .unwrap();
-    let before = nucleus_sql::text::index::stats(&*old, &t, i, &["alpha", "gamma"]).unwrap();
+    let before = nucleus_sql::text::index::stats(&*old, &t, i, &["alpha", "gamma"], None).unwrap();
 
     // Rounds of writes, each sealed: segments of a tier merged.
     for round in 0..12 {
@@ -256,7 +256,7 @@ fn kept_exact_through_writes_seals_and_merges() {
     assert!(segments < 12, "merged: {segments} segments");
     assert_eq!(problems(&kv, &s), Vec::<String>::new());
     assert_eq!(
-        nucleus_sql::text::index::stats(&*old, &t, i, &["alpha", "gamma"]).unwrap(),
+        nucleus_sql::text::index::stats(&*old, &t, i, &["alpha", "gamma"], None).unwrap(),
         before
     );
     drop(old);

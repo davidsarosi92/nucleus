@@ -3060,15 +3060,63 @@ impl<'a> Binder<'a> {
         let Some(c) = t.columns.iter().position(|c| c.name == column) else {
             return Ok(None);
         };
+        let mut parts = None;
         for (i, ix) in t.indexes.iter().enumerate() {
             if ix.columns.first() == Some(&c)
                 && let Some(m) = crate::index_method::of(ix)?
-                && let Some(e) = m.function(&t, i, function, arg)?
             {
-                return Ok(Some(e));
+                if parts.is_none() {
+                    parts = Some(self.readable_parts(&t)?);
+                }
+                if let Some(e) = m.function(
+                    &t,
+                    i,
+                    function,
+                    arg,
+                    parts.as_ref().and_then(|p| p.as_ref()),
+                )? {
+                    return Ok(Some(e));
+                }
             }
         }
         Ok(None)
+    }
+
+    /// Of a partitioned table under row-level security for this binding,
+    /// the partitions its policies let a statement read: a `text[]` of
+    /// their names, each `NULL` where the policies' condition rules the
+    /// partition out by its bound (`partition::guard`, evaluated when the
+    /// statement runs: `current_setting` and the like).  `None` otherwise.
+    fn readable_parts(&self, t: &Table) -> Result<Option<Expr>> {
+        let Some(spec) = &t.partition_by else {
+            return Ok(None);
+        };
+        if self.checker.is_none() {
+            return Ok(None);
+        }
+        let Some(applied) =
+            crate::policies::applied(self.txn, t, crate::policies::Command::Select)?
+        else {
+            return Ok(None);
+        };
+        let mut preds = Vec::new();
+        conjuncts(self.policy_condition(t, &applied.using)?, &mut preds);
+        let mut names = Vec::new();
+        for p in crate::partition::partitions(self.txn, t)? {
+            let Some((_, bound)) = &p.partition_of else {
+                continue;
+            };
+            let name = Expr::Literal(Value::Text(p.name.clone()));
+            names.push(match crate::partition::guard(spec, bound, &preds) {
+                None => name,
+                Some(g) => Expr::Case {
+                    operand: None,
+                    whens: vec![(g, name)],
+                    otherwise: None,
+                },
+            });
+        }
+        Ok(Some(Expr::Array(names)))
     }
 
     /// An operator outside the grammar's own: a type's distance, a

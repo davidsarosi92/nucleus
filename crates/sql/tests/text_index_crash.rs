@@ -295,7 +295,7 @@ fn a_snapshot_keeps_its_answers_through_others_writes_and_upkeep() {
         .unwrap()
         .unwrap();
     let terms = ["run", "alpha", "zeta"];
-    let stats = nucleus_sql::text::index::stats(&*snapshot, &t, ix, &terms).unwrap();
+    let stats = nucleus_sql::text::index::stats(&*snapshot, &t, ix, &terms, None).unwrap();
     // A writer in a transaction of its own, open across the upkeep.
     let mut other = Session::new(kv.clone());
     other.execute("BEGIN").unwrap();
@@ -319,7 +319,7 @@ fn a_snapshot_keeps_its_answers_through_others_writes_and_upkeep() {
                 assert_eq!(&got, want, "step {i}: {q}");
             }
             assert_eq!(
-                nucleus_sql::text::index::stats(&*snapshot, &t, ix, &terms).unwrap(),
+                nucleus_sql::text::index::stats(&*snapshot, &t, ix, &terms, None).unwrap(),
                 stats,
                 "step {i}"
             );

@@ -201,14 +201,21 @@ pub trait IndexMethod: Send + Sync {
     /// statistics.  `arg` is the bound condition (an operator's call whose
     /// first operand is the column); `t` is the index's table.  By default
     /// none, and the function is bound as any other.
+    ///
+    /// `parts`, for a partitioned table under row-level security: the
+    /// partitions the statement may read — a `text[]` expression of their
+    /// names, `NULL` where the policies rule one out when it runs — so
+    /// what the function reads of the index as a whole (BM25's statistics)
+    /// is theirs alone (PLAN.md §M14.24 R3).
     fn function(
         &self,
         t: &Table,
         i: usize,
         function: &str,
         arg: &crate::expr::Expr,
+        parts: Option<&crate::expr::Expr>,
     ) -> Result<Option<(crate::expr::Expr, crate::types::DataType)>> {
-        let _ = (t, i, function, arg);
+        let _ = (t, i, function, arg, parts);
         Ok(None)
     }
 

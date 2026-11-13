@@ -3300,12 +3300,15 @@ over exact counts where PostgreSQL has a sample's most common words); a
 prefix or a fuzzy word leaves it to the sample.
 
 Two more let a method compute a function of such a condition and rank
-the rows it finds (§M14.21 T5, BM25's).  `function(t, i, name, arg)`:
+the rows it finds (§M14.21 T5, BM25's).  `function(t, i, name, arg, parts)`:
 `name(arg)` with `arg` an operator's call whose left side is a column
 the index is on (`Binder::operator_origin`, `Binder::index_function`)
 bound as the method says — an expression and its type in place of the
 call (`score(body @@ q)`: §8.19); none, and the function is bound as
-any other.
+any other.  `parts`, for a partitioned table under row-level security,
+is the partitions the statement may read (a `text[]`, `NULL` where the
+policies rule one out), for what the function reads of the index as a
+whole (BM25's statistics; §9, "Retrieval under it").
 
 One more ranks a table's rows for `ORDER BY f(col, args…) LIMIT k
 [OFFSET o]` — HNSW's nearest rows (§8.18) and the text index's first by
@@ -3866,7 +3869,10 @@ statistics are the partitioned table's — documents, their length and
 each term's documents summed over its partitions' indexes
 (`text::index::stats`: each partition's index of the same definition,
 looked for past the table's place where the partition has indexes of its
-own) —, so a row scores as in one table, whichever partition holds it.
+own) —, so a row scores as in one table, whichever partition holds it;
+under row-level security, those of the partitions the policies let the
+statement read (`text_stats`'s fourth argument; §9, "Retrieval under
+it").
 *Tests:* `tests/text_tables.rs` — a `row`, a `column`, a `row,column`
 table and one partitioned into partitions of each storage, the same rows
 written to each: built over a load, then inserts, updates, deletes, rows
@@ -4826,6 +4832,25 @@ a count, a join, a subquery or a side effect reveals nothing of a hidden
 row (`crates/testkit/slt/32_row_security.slt`, the leak cases among
 them, agrees with PostgreSQL 18 run in one session).
 
+*Retrieval under it* (§M14.24 R3, `tests/permissioned_retrieval.rs`):
+nearest vectors through HNSW, BM25 ranked by the text index, `@@`
+counted, `rrf` and `convex` — on a table and on one partitioned by
+tenant — give a role, for random queries, exactly the rows and order an
+administrator gets with the policy written out as a filter; `recall()`
+returns a subject's memories alone, and `REMEMBER` never merges into
+another subject's or a hidden one.  BM25's statistics are a statistical
+side channel: counted over rows a policy hides, a term's document
+frequency and the average length move visible rows' scores.  On a table
+partitioned by the tenant they are the readable partitions' alone: the
+binder (`Binder::readable_parts`) gives the text index's `score()` a
+`text[]` of the partitions, each behind its `partition::guard` under the
+policies' condition (evaluated when the statement runs, so
+`current_setting('app.tenant')` picks one), and `text_stats` sums those
+— a tenant's scores are those of its rows in a table of their own,
+whatever the other tenants hold.  On a table not partitioned by it, the
+statistics still count hidden rows: partition by the tenant where
+scores must not depend on other tenants' rows.
+
 **Tokens** (`tokens.rs`): API keys for programs and AI agents.  `CREATE
 TOKEN name [FOR role] [READ ONLY] [ON [TABLE] t, …] [VALID UNTIL 't']`
 returns one row — `name`, `login` (`nct_` and 16 hex digits) and
@@ -5642,6 +5667,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-13 — §M14.24 R3, permissioned retrieval checked:**
+  `tests/permissioned_retrieval.rs` — HNSW, BM25, `@@`, `rrf`, `convex`
+  under a tenant policy on a table and a partitioned one equal to the
+  policy written out; `recall()` and `REMEMBER` within a subject.  BM25's
+  statistics on a partitioned table under row-level security are the
+  readable partitions' (`Binder::readable_parts`, `IndexMethod::function`'s
+  `parts`, `text_stats`'s fourth argument, `text::index::stats`'s `only`).
 - **2026-11-13 — §M14.24 R2b, the scrub:** after a `FORGET`'s commit
   the reached tables' structures are rewritten without the rows (an HNSW
   graph's cut nodes zeroed — `IndexMethod::scrub` —, text and sparse

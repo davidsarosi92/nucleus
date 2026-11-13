@@ -387,11 +387,12 @@ impl IndexMethod for TextIndex {
         i: usize,
         function: &str,
         arg: &crate::expr::Expr,
+        parts: Option<&crate::expr::Expr>,
     ) -> Result<Option<(crate::expr::Expr, DataType)>> {
         if function != "score" {
             return Ok(None);
         }
-        crate::text::score::bind(t, i, arg, params_of(&t.indexes[i]))
+        crate::text::score::bind(t, i, arg, params_of(&t.indexes[i]), parts)
     }
 
     fn serves(&self, _: &IndexDef, function: &str) -> bool {
@@ -629,8 +630,16 @@ impl IndexMethod for TextIndex {
 /// sees its rows: documents, their total length, each term's documents.
 /// A partitioned table's are its partitions' together — each one's index
 /// of the same definition (§8.16: made with the table's) —, so a row
-/// scores as it would in one table, whichever partition holds it.
-pub fn stats(txn: &dyn KvTxn, t: &Table, i: usize, terms: &[&str]) -> Result<(u64, u64, Vec<u64>)> {
+/// scores as it would in one table, whichever partition holds it; `only`,
+/// those of the partitions named (the ones row security lets a statement
+/// read: a tenant's scores do not depend on other tenants' rows).
+pub fn stats(
+    txn: &dyn KvTxn,
+    t: &Table,
+    i: usize,
+    terms: &[&str],
+    only: Option<&[String]>,
+) -> Result<(u64, u64, Vec<u64>)> {
     if t.partition_by.is_none() {
         let st = store(t, i).view(txn)?.stats(terms);
         return Ok((st.docs, st.len, st.df));
@@ -644,6 +653,9 @@ pub fn stats(txn: &dyn KvTxn, t: &Table, i: usize, terms: &[&str]) -> Result<(u6
     };
     let (mut docs, mut len, mut df) = (0, 0, vec![0; terms.len()]);
     for p in crate::partition::partitions(txn, t)? {
+        if only.is_some_and(|o| !o.contains(&p.name)) {
+            continue;
+        }
         // At the table's place, unless the partition has indexes of its own
         // before it.
         let j = match p.indexes.get(i) {
@@ -652,7 +664,7 @@ pub fn stats(txn: &dyn KvTxn, t: &Table, i: usize, terms: &[&str]) -> Result<(u6
                 Error::internal(format!("partition {} without index {}", p.name, ix.name))
             })?,
         };
-        let (d, l, f) = stats(txn, &p, j, terms)?;
+        let (d, l, f) = stats(txn, &p, j, terms, None)?;
         docs += d;
         len += l;
         for (a, b) in df.iter_mut().zip(f) {

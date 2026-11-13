@@ -312,6 +312,7 @@ pub(crate) fn bind(
     i: usize,
     arg: &Expr,
     p: Params,
+    parts: Option<&Expr>,
 ) -> Result<Option<(Expr, DataType)>> {
     let Expr::Call(f, args) = arg else {
         return Ok(None);
@@ -337,7 +338,10 @@ pub(crate) fn bind(
             }),
             exprs: vec![Expr::Call(
                 FnRef::new(Arc::new(TextStats)),
-                vec![text(&t.name), text(&t.indexes[i].name), q.clone()],
+                [text(&t.name), text(&t.indexes[i].name), q.clone()]
+                    .into_iter()
+                    .chain(parts.cloned())
+                    .collect(),
             )],
         },
         correlated: false,
@@ -356,9 +360,11 @@ pub(crate) fn bind(
     Ok(Some((score, DataType::Float)))
 }
 
-/// `text_stats(table, index, query)`: what BM25 reads of a text index, as
-/// the statement's transaction sees it — `[documents, their total length,
-/// each leaf's documents…]` (0 for a prefix's or a fuzzy term's).
+/// `text_stats(table, index, query [, partitions])`: what BM25 reads of a
+/// text index, as the statement's transaction sees it — `[documents,
+/// their total length, each leaf's documents…]` (0 for a prefix's or a
+/// fuzzy term's); of a partitioned table, of the `partitions` named alone
+/// (`text[]`, its `NULL`s skipped) when given.
 struct TextStats;
 
 impl ScalarFunction for TextStats {
@@ -367,12 +373,16 @@ impl ScalarFunction for TextStats {
     }
 
     fn arity(&self) -> RangeInclusive<usize> {
-        3..=3
+        3..=4
     }
 
-    fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
+    fn resolve(&self, args: &[ArgInfo]) -> Result<Signature> {
+        let mut a = vec![Arg::Convert(DataType::Text); 3];
+        if args.len() == 4 {
+            a.push(Arg::Convert(DataType::Array(&DataType::Text)));
+        }
         Ok(Signature::new(
-            vec![Arg::Convert(DataType::Text); 3],
+            a,
             Returns::Type(Some(DataType::Array(&DataType::Float))),
         ))
     }
@@ -382,8 +392,27 @@ impl ScalarFunction for TextStats {
     }
 
     fn call(&self, cx: &CallContext<'_>, args: &[Value]) -> Result<Value> {
-        let [Value::Text(table), Value::Text(index), Value::Text(q)] = args else {
-            return Err(Error::internal("text_stats of texts"));
+        let (table, index, q, only) = match args {
+            [Value::Text(table), Value::Text(index), Value::Text(q)] => (table, index, q, None),
+            [
+                Value::Text(table),
+                Value::Text(index),
+                Value::Text(q),
+                parts,
+            ] => {
+                let names: Vec<String> = match parts {
+                    Value::Array(v) => v
+                        .iter()
+                        .filter_map(|p| match p {
+                            Value::Text(s) => Some(s.to_string()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                (table, index, q, Some(names))
+            }
+            _ => return Err(Error::internal("text_stats of texts")),
         };
         let t = crate::catalog::get_table(cx.txn(), table)?.ok_or_else(|| {
             Error::undefined_table(format!("relation \"{table}\" does not exist"))
@@ -403,7 +432,7 @@ impl ScalarFunction for TextStats {
                 Leaf::Prefix(_) | Leaf::Fuzzy(..) => "",
             })
             .collect();
-        let (docs, len, df) = super::index::stats(cx.txn(), &t, i, &terms)?;
+        let (docs, len, df) = super::index::stats(cx.txn(), &t, i, &terms, only.as_deref())?;
         let mut out = vec![Value::Float(docs as f64), Value::Float(len as f64)];
         out.extend(
             terms

@@ -121,7 +121,12 @@ security hides any from you) — then scrubs the files (old versions,
 index pages, free pages, the log, audit details) and searches them for
 the rows' values: it returns `erasure, rows, scrubbed, found` (`found =
 0` is the proof none is left); `nc_catalog.erasures` lists erasures
-without the subject's value.
+without the subject's value.  Many tenants in one table: a policy
+(`CREATE POLICY t ON docs USING (tenant = current_setting('app.tenant'))`)
+keeps every search — vectors, `@@`, `score()`, `rrf` — to the tenant's
+rows; partition the table by the tenant (`PARTITION BY LIST (tenant)`)
+and BM25's scores are the tenant's own too, not moved by other tenants'
+rows.
 
 **Model limits and costs:** give a remote model your account's limits —
 `CREATE MODEL oa USING openai WITH (model = 'text-embedding-3-small',
