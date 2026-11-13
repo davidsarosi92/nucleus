@@ -18,6 +18,10 @@ what to use instead.  For people the full reference is DOCS.md §8.
   them a batch at a time; for analysis read columns, not rows — Python
   `conn.pandas(sql)`, `conn.polars(sql)`, `conn.arrow(sql)`,
   `conn.numpy(sql)`; `batches` in every driver.
+- **Without a server** (Python, JavaScript): `nucleus.connect("file:app.db")`
+  or `connect(":memory:")` opens a database inside the program with the same
+  API; `connect("nucleus://user:password@host:20035/db")` reaches a server —
+  only the string changes.  No login in the process.
 
 ## Dialect
 

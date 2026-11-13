@@ -27,8 +27,10 @@
 
 import { createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import net from "node:net";
+import { Duplex } from "node:stream";
 import tls from "node:tls";
 
 // 2: registered types (uuid, modules' types) arrive in their binary form;
@@ -436,6 +438,10 @@ export interface ConnectOptions {
   /** An OpenID Connect identity token to log in with instead of the
    *  password: it names the user. */
   token?: string;
+  /** A database in this process (`connect("file:...")`): how it opens —
+   *  `"cache=64MB; sync=full"` (`cache`; `sync` `ordered` or `full`;
+   *  `wal` `minimal` or `full`). */
+  options?: string;
 }
 
 // ------------------------------------------------------------------ values
@@ -798,9 +804,11 @@ function frame(kind: string, body: Buffer): Buffer {
 type Message = { kind: string; body: Buffer };
 type Status = "idle" | "transaction" | "failed";
 
-/** A connection to a nucleus server. */
+/** A connection to a nucleus server, or to a database in this process. */
 export class Client {
-  socket: net.Socket;
+  socket: Duplex;
+  /** A database this connection closes with it (`connect("file:...")`). */
+  owned: Database | null = null;
   /** Bytes received and not yet delivered: chunks, joined only once a
    *  whole frame is in (joining at every chunk would copy a large frame
    *  over and over — quadratic in its size). */
@@ -818,7 +826,7 @@ export class Client {
   /** A stream the server is still sending. */
   active: Stream<unknown> | null = null;
 
-  constructor(socket: net.Socket) {
+  constructor(socket: Duplex) {
     this.socket = socket;
     socket.on("data", (chunk: Buffer) => {
       this.chunks.push(chunk);
@@ -898,6 +906,12 @@ export class Client {
       });
       s.once("error", (e) => reject(new NucleusError(`cannot connect to ${host}:${port}: ${e.message}`)));
     });
+    return Client.hello(socket, options);
+  }
+
+  /** Says Hello over `socket`, a connection already made (a server's, or
+   *  a session's in this process), and logs in. */
+  static async hello(socket: Duplex, options: ConnectOptions): Promise<Client> {
     const c = new Client(socket);
     const hello = new Writer()
       .u16(PROTOCOL_VERSION)
@@ -1246,10 +1260,13 @@ export class Client {
     }
   }
 
-  /** Says Bye and closes. */
+  /** Says Bye and closes (and the database it opened, if it did). */
   async close(): Promise<void> {
     await this.queue;
     await new Promise<void>((resolve) => this.socket.end(frame("X", Buffer.alloc(0)), () => resolve()));
+    const db = this.owned;
+    this.owned = null;
+    db?.close();
   }
 }
 
@@ -1819,7 +1836,183 @@ function encodeBatch(columns: Column[], cols: LoadColumn[], start: number, end: 
   return Buffer.concat(parts, len);
 }
 
-/** Opens a connection (the defaults reach a local server as it starts). */
-export function connect(options: ConnectOptions = {}): Promise<Client> {
-  return Client.connect(options);
+// ----------------------------------------------------- in this process
+
+/** The embedded edition's addon (native/addon.c, PLAN.md §M14.23). */
+interface Addon {
+  version(): string;
+  open(path: string, options: string): object;
+  close(db: object): void;
+  connect(db: object, onData: (chunk: Buffer | null) => void): object;
+  send(conn: object, data: Buffer): boolean;
+  end(conn: object): void;
+}
+
+let addon: Addon | null = null;
+
+/** The addon: `NUCLEUS_EMBEDDED_ADDON` (a path), the package made for
+ *  this platform (`nucleus-db-<platform>-<arch>`), or one built here
+ *  (`native/build.sh`). */
+function loadAddon(): Addon {
+  if (addon) return addon;
+  const require = createRequire(import.meta.url);
+  const platform = `${process.platform}-${process.arch}`;
+  const given = process.env.NUCLEUS_EMBEDDED_ADDON;
+  const here = new URL(`../native/${platform}/nucleus.node`, import.meta.url);
+  const tried: string[] = [];
+  for (const candidate of [given, `nucleus-db-${platform}`, here.pathname]) {
+    if (!candidate) continue;
+    tried.push(candidate);
+    if (candidate.startsWith("/") && !existsSync(candidate)) continue;
+    try {
+      addon = require(candidate) as Addon;
+      return addon;
+    } catch (e) {
+      if (candidate === given) throw e;
+    }
+  }
+  throw new NucleusError(
+    `the embedded edition is not installed (tried ${tried.join(", ")}): install nucleus-db-${platform}, ` +
+      "build it (native/build.sh), or set NUCLEUS_EMBEDDED_ADDON",
+  );
+}
+
+/** A session's bytes in this process, as a socket carries them. */
+class Session extends Duplex {
+  conn: object;
+  native: Addon;
+
+  constructor(native: Addon, db: object) {
+    super();
+    this.native = native;
+    this.conn = native.connect(db, (chunk) => {
+      if (chunk === null) {
+        this.push(null);
+        this.destroy();
+      } else this.push(chunk);
+    });
+  }
+
+  override _read(): void {}
+
+  override _write(chunk: Buffer, _encoding: BufferEncoding, done: (e?: Error | null) => void): void {
+    done(this.native.send(this.conn, chunk) ? null : new NucleusError("the session has ended"));
+  }
+
+  override _final(done: (e?: Error | null) => void): void {
+    this.native.end(this.conn);
+    done();
+  }
+
+  override _destroy(e: Error | null, done: (e?: Error | null) => void): void {
+    this.native.end(this.conn);
+    done(e);
+  }
+}
+
+/**
+ * A database in this process — the embedded edition (no server): in
+ * directory `path` (made if missing) or, for `":memory:"`, in memory,
+ * gone when closed.  Each `connect()` is a session on it with the API a
+ * server's connection has.  A directory this process has open already is
+ * shared; another process's is refused.  There is no login: the
+ * directory's file permissions guard it.
+ */
+export class Database {
+  readonly path: string;
+  private db: object | null;
+  private native: Addon;
+
+  private constructor(native: Addon, path: string, db: object) {
+    this.native = native;
+    this.path = path;
+    this.db = db;
+  }
+
+  /** Opens it; `options` as `"cache=64MB; sync=full"`. */
+  static open(path = ":memory:", options = ""): Database {
+    const native = loadAddon();
+    try {
+      return new Database(native, path, native.open(path, options));
+    } catch (e) {
+      throw new NucleusError(`cannot open ${path}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** A new session, as `user` (who it runs as: there is no login). */
+  connect(options: { user?: string; database?: string; clientName?: string } = {}): Promise<Client> {
+    if (this.db === null) return Promise.reject(new NucleusError("the database is closed"));
+    return Client.hello(new Session(this.native, this.db), options);
+  }
+
+  /** Closes it: its sessions end (each after its statement), and a
+   *  directory is checkpointed and free for others again. */
+  close(): void {
+    const db = this.db;
+    this.db = null;
+    if (db !== null) this.native.close(db);
+  }
+}
+
+/** A connection string's parts (see `connect`). */
+function parseTarget(s: string): { file: string; options: string } | ConnectOptions {
+  if (s === ":memory:") return { file: s, options: "" };
+  if (s.startsWith("file:")) {
+    let [path, query] = [s.slice(5), ""];
+    const q = path.indexOf("?");
+    if (q >= 0) [path, query] = [path.slice(0, q), path.slice(q + 1)];
+    if (path.startsWith("//")) path = path.slice(2);
+    const options = [...new URLSearchParams(query)].map(([k, v]) => `${k}=${v}`).join("; ");
+    return { file: decodeURIComponent(path), options };
+  }
+  if (!s.startsWith("nucleus://")) throw new NucleusError(`not a connection string: ${s}`);
+  const u = new URL(s);
+  const o: ConnectOptions = {};
+  if (u.hostname) o.host = u.hostname.replace(/^\[|\]$/g, "");
+  if (u.port) o.port = Number(u.port);
+  if (u.username) o.user = decodeURIComponent(u.username);
+  if (u.password) o.password = decodeURIComponent(u.password);
+  const db = decodeURIComponent(u.pathname.replace(/^\/+|\/+$/g, ""));
+  if (db) o.database = db;
+  const flag = (v: string) => ["1", "true", "yes", "on"].includes(v.toLowerCase());
+  for (const [k, v] of u.searchParams) {
+    if (k === "tls") o.tls = flag(v);
+    else if (k === "tls_verify") o.tlsVerify = flag(v);
+    else if (k === "tls_ca") o.tlsCa = v;
+    else if (k === "tls_cert") o.tlsCert = v;
+    else if (k === "tls_key") o.tlsKey = v;
+    else if (k === "token") o.token = v;
+    else if (k === "timeout") o.timeoutMs = Number(v) * 1000;
+    else throw new NucleusError(`unknown connection option ${k}`);
+  }
+  return o;
+}
+
+/**
+ * Opens a connection (the defaults reach a local server as it starts).
+ *
+ * A connection string instead moves a program between a server and a
+ * database in its own process by changing only that string:
+ * `"nucleus://user:password@host:port/database?tls=true"` (a server;
+ * `tls`, `tls_ca`, `tls_verify`, `tls_cert`, `tls_key`, `token` and
+ * `timeout` as parameters), `"file:app.db"` (a database in directory
+ * `app.db` in this process, made if missing: the embedded edition; its
+ * options as parameters, `file:app.db?cache=64MB`) or `":memory:"`.
+ * `options` override what the string says.
+ */
+export async function connect(target: string | ConnectOptions = {}, options: ConnectOptions = {}): Promise<Client> {
+  if (typeof target !== "string") return Client.connect(target);
+  const t = parseTarget(target);
+  if ("file" in t) {
+    const db = Database.open(t.file, options.options ?? t.options);
+    try {
+      const c = await db.connect(options);
+      c.owned = db;
+      return c;
+    } catch (e) {
+      db.close();
+      throw e;
+    }
+  }
+  return Client.connect({ ...t, ...options });
 }

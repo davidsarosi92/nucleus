@@ -54,7 +54,7 @@ from dataclasses import dataclass as _dataclass
 from dataclasses import field as _field
 
 __all__ = [
-    "connect", "Connection", "Cursor", "Stream", "Batches", "Batch", "ColumnBatch",
+    "connect", "open", "Database", "Connection", "Cursor", "Stream", "Batches", "Batch", "ColumnBatch",
     "Result", "Column", "Interval", "Ext", "SparseVector",
     "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "ProgrammingError",
@@ -557,26 +557,33 @@ class _Scram:
 
 
 class Connection:
-    """A connection to a nucleus server (see ``connect``)."""
+    """A connection to a nucleus server, or to a database in this process
+    (see ``connect``)."""
 
     def __init__(self, host="127.0.0.1", port=DEFAULT_PORT, user="nucleus",
                  password="nucleus", database="nucleus", timeout=10.0,
                  client_name="nucleus-python", tls=False, tls_ca=None,
-                 tls_verify=True, tls_cert=None, tls_key=None, token=None):
-        try:
-            self._sock = _socket.create_connection((host, port), timeout=timeout)
-            self._sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
-            if tls or tls_ca is not None:
-                # The handshake starts at once; the server sees it (DOCS §10).
-                ctx = _ssl.create_default_context(cafile=tls_ca)
-                if not tls_verify:
-                    ctx.check_hostname = False
-                    ctx.verify_mode = _ssl.CERT_NONE
-                if tls_cert is not None:
-                    ctx.load_cert_chain(tls_cert, tls_key)
-                self._sock = ctx.wrap_socket(self._sock, server_hostname=host)
-        except OSError as e:
-            raise OperationalError(f"cannot connect to {host}:{port}: {e}") from e
+                 tls_verify=True, tls_cert=None, tls_key=None, token=None,
+                 _stream=None):
+        # A Database this connection closes with it (``open``).
+        self._owned = None
+        if _stream is not None:
+            self._sock = _stream
+        else:
+            try:
+                self._sock = _socket.create_connection((host, port), timeout=timeout)
+                self._sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+                if tls or tls_ca is not None:
+                    # The handshake starts at once; the server sees it (DOCS §10).
+                    ctx = _ssl.create_default_context(cafile=tls_ca)
+                    if not tls_verify:
+                        ctx.check_hostname = False
+                        ctx.verify_mode = _ssl.CERT_NONE
+                    if tls_cert is not None:
+                        ctx.load_cert_chain(tls_cert, tls_key)
+                    self._sock = ctx.wrap_socket(self._sock, server_hostname=host)
+            except OSError as e:
+                raise OperationalError(f"cannot connect to {host}:{port}: {e}") from e
         self._sock.settimeout(None)
         self._buf = bytearray()
         self._version = PROTOCOL_VERSION
@@ -979,6 +986,9 @@ class Connection:
                 pass
             self._sock.close()
             self._sock = None
+        if self._owned is not None:
+            self._owned, db = None, self._owned
+            db.close()
 
     def __enter__(self):
         return self
@@ -1771,10 +1781,129 @@ class Cursor:
             self._stream = None
 
 
-def connect(host="127.0.0.1", port=DEFAULT_PORT, user="nucleus", password="nucleus",
-            database="nucleus", timeout=10.0, tls=False, tls_ca=None, tls_verify=True,
-            tls_cert=None, tls_key=None, token=None):
+class Database:
+    """A database in this process — the embedded edition (no server):
+    in directory ``path`` (made if missing) or, for ``":memory:"``, in
+    memory, gone when closed.  ``options``: ``"cache=64MB; sync=full"``
+    (``cache``; ``sync`` ``ordered`` or ``full``; ``wal`` ``minimal`` or
+    ``full``).  Each ``connect()`` is a session on it, with the API a
+    server's connection has.  A directory this process has open already
+    is shared; another process's is refused.  There is no login: the
+    directory's file permissions guard it."""
+
+    def __init__(self, path=":memory:", options=""):
+        from . import _embedded
+        self.path = path
+        try:
+            self._db = _embedded.open_database(_os.fspath(path), options or "")
+        except OSError as e:
+            raise OperationalError(f"cannot open {path}: {e}") from e
+
+    def connect(self, user="nucleus", database="nucleus", client_name="nucleus-python"):
+        """A new session, as the user ``user`` (the database has no login:
+        the user is who the session runs as)."""
+        from . import _embedded
+        if self._db is None:
+            raise InterfaceError("the database is closed")
+        try:
+            pipe = _embedded.Pipe(self._db)
+        except OSError as e:
+            raise OperationalError(str(e)) from e
+        c = Connection(user=user, database=database, client_name=client_name, _stream=pipe)
+        # Kept while a connection lives: closing the Database is explicit.
+        c._database = self
+        return c
+
+    def close(self):
+        """Closes it: its sessions end (each after its statement), and a
+        directory is checkpointed and free for others again."""
+        from . import _embedded
+        if self._db is not None:
+            db, self._db = self._db, None
+            try:
+                _embedded.close_database(db)
+            except OSError as e:
+                raise OperationalError(str(e)) from e
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def open(path=":memory:", options="", user="nucleus", database="nucleus"):
+    """A connection to a database in this process (``Database``): its
+    directory ``path``, or ``":memory:"``; closing the connection closes
+    the database.  ``connect("file:" + path)`` is the same."""
+    db = Database(path, options)
+    c = db.connect(user=user, database=database)
+    c._owned = db
+    return c
+
+
+_UNSET = object()
+
+
+def _target(s):
+    """A connection string's parts: ("file", path, options) or ("net",
+    settings), or None for a host name."""
+    from urllib.parse import parse_qsl, unquote, urlsplit
+    if s == ":memory:":
+        return ("file", s, "")
+    if s.startswith("file:"):
+        rest = s[5:]
+        path, _, query = rest.partition("?")
+        if path.startswith("//"):
+            path = path[2:]
+        options = "; ".join(f"{k}={v}" for k, v in parse_qsl(query))
+        return ("file", unquote(path), options)
+    if s.startswith("nucleus://"):
+        u = urlsplit(s)
+        out = {}
+        if u.hostname:
+            out["host"] = u.hostname
+        if u.port:
+            out["port"] = u.port
+        if u.username is not None:
+            out["user"] = unquote(u.username)
+        if u.password is not None:
+            out["password"] = unquote(u.password)
+        if u.path.strip("/"):
+            out["database"] = unquote(u.path.strip("/"))
+        for k, v in parse_qsl(u.query):
+            if k in ("tls", "tls_verify"):
+                out[k] = v.lower() in ("1", "true", "yes", "on")
+            elif k in ("tls_ca", "tls_cert", "tls_key", "token"):
+                out[k] = v
+            elif k == "timeout":
+                out[k] = float(v)
+            else:
+                raise InterfaceError(f"unknown connection option {k!r}")
+        return ("net", out)
+    return None
+
+
+def connect(host="127.0.0.1", port=None, user=None, password=_UNSET,
+            database=None, timeout=None, tls=None, tls_ca=None, tls_verify=None,
+            tls_cert=None, tls_key=None, token=None, options=""):
     """Opens a connection (the defaults reach a local server as it starts).
+
+    ``host`` may instead be a connection string, so a program moves
+    between a server and a database in its own process by changing only
+    that: ``"nucleus://user:password@host:port/database?tls=true"`` (a
+    server; ``tls``, ``tls_ca``, ``tls_verify``, ``tls_cert``, ``tls_key``,
+    ``token`` and ``timeout`` as parameters), ``"file:app.db"`` (a
+    database in directory ``app.db`` in this process, made if missing:
+    the embedded edition; its options as parameters, ``file:app.db?cache=
+    64MB``, or ``options``) or ``":memory:"`` (one in memory).  Keyword
+    arguments override what the string says.
 
     ``tls=True`` encrypts it, the server's certificate checked against the
     system's CA certificates — or against ``tls_ca`` (a PEM file; giving it
@@ -1784,6 +1913,25 @@ def connect(host="127.0.0.1", port=DEFAULT_PORT, user="nucleus", password="nucle
     it in without a password, if the server accepts its CA.  ``token`` (an
     OpenID Connect identity token) logs in instead of the password: it
     names the user."""
-    return Connection(host, port, user, password, database, timeout,
-                      tls=tls, tls_ca=tls_ca, tls_verify=tls_verify,
-                      tls_cert=tls_cert, tls_key=tls_key, token=token)
+    given = {k: v for k, v in (("port", port), ("user", user), ("password", password),
+                               ("database", database), ("timeout", timeout), ("tls", tls),
+                               ("tls_ca", tls_ca), ("tls_verify", tls_verify),
+                               ("tls_cert", tls_cert), ("tls_key", tls_key), ("token", token))
+             if v is not None and v is not _UNSET}
+    target = _target(host) if isinstance(host, str) else None
+    if target is not None and target[0] == "file":
+        return open(target[1], options or target[2], user=given.get("user", "nucleus"),
+                    database=given.get("database", "nucleus"))
+    s = {"host": host, "port": DEFAULT_PORT, "user": "nucleus", "password": "nucleus",
+         "database": "nucleus", "timeout": 10.0, "tls": False, "tls_ca": None,
+         "tls_verify": True, "tls_cert": None, "tls_key": None, "token": None}
+    if target is not None:
+        s["host"] = "127.0.0.1"
+        s.update(target[1])
+    s.update(given)
+    if password is None:
+        s["password"] = None
+    return Connection(s["host"], s["port"], s["user"], s["password"], s["database"],
+                      s["timeout"], tls=s["tls"], tls_ca=s["tls_ca"],
+                      tls_verify=s["tls_verify"], tls_cert=s["tls_cert"],
+                      tls_key=s["tls_key"], token=s["token"])

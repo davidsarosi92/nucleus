@@ -46,8 +46,9 @@
 | `modules/local-models` | `nucleus-local-models` | the `local` model provider: models run inside nucleus — WordPiece and Unigram tokenizers, BERT and XLM-RoBERTa encoders on `ext::kernels`, files from Hugging Face or a directory kept in the database (§8.23) | §M14.22 |
 | `modules/mcp` | `nucleus-mcp` | a Model Context Protocol server: AI models list, describe and query a database (§6.5) | §M14.10 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
+| `editions/embedded` | `nucleus-embedded` (a `cdylib`, `staticlib` and `rlib`) | the embedded edition: a database in memory or in a directory inside the application, its sessions over the nucleus protocol through a pipe in the process, behind a C API (`include/nucleus_embedded.h`) that Python and Node load (§11, *In the process*) | §M14.23 |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
-| `drivers` | — | drivers for C, C++, Python, JS/TS, Java (§11) | §M14.8 ✅ |
+| `drivers` | — | drivers for C, C++, Python, JS/TS, Java (§11); Python's platform wheel (`build_wheel.py`) and JavaScript's Node-API addon (`native/`) for the embedded edition | §M14.8 ✅, §M14.23 |
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
 | `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.21 |
@@ -246,13 +247,27 @@ prints the seed and the command to rerun it; `NUCLEUS_SEED` runs one seed,
 ### 3.5 Tests
 
 - `tests/conformance.rs` — the same assertions against the real OS (temp
-  dir) and the simulation: I/O semantics, open modes, rename, directories,
+  dir), the simulation and the file system in memory: I/O semantics, open modes, rename, directories,
   clock, RNG.  Runs on every CI target.
 - `tests/sim.rs` — durability, directory sync, rename atomicity, fsyncgate,
   injected faults, scheduled crashes, determinism, torn sectors, and a
   proptest property: after a torn crash every byte is either its last-synced
   value or one a later write put there.  Checked against mutations of the
   crash logic (keeping unsynced writes whole, or in part): each fails a test.
+
+### 3.6 In memory (`memory::MemoryPlatform`)
+
+A database in memory as a product (§M14.23: `:memory:` in the embedded
+edition): `MemoryFs` keeps each file as one byte vector, shared by the
+file's open handles (a removed or renamed file stays readable through a
+handle opened before, as on POSIX) — no durable second image and no
+faults, as the simulation has, so a database in memory costs what its
+files hold (`MemoryFs::bytes`).  `sync` and `sync_dir` do nothing (the
+files go with the process); locks are exclusive per path while held;
+`writes_in_place` is true.  Time and randomness come from another
+platform — `MemoryPlatform::new()` the machine's (`RealPlatform`),
+`MemoryPlatform::with(p)` any.  `tests/conformance.rs` runs its
+assertions against it too.
 
 ## 4. Storage layer (`nucleus-storage`)
 
@@ -5159,6 +5174,60 @@ vector as a `Float32Array`, `SparseVector` (`dims`, `indices` from 0,
 `SparseVector` (dimensions, positions from 0, values;
 `SparseVector.of(map, dims)`), `Ext` (another registered type), `List`.
 
+**In the process (the embedded edition, §M14.23).**  `editions/embedded`
+(`nucleus-embedded`) is the engine as a library: `Database::open(path,
+options)` opens a database in directory `path` (made if missing) or, for
+`":memory:"`, a new one on `MemoryPlatform` (§3.6); `options` is
+`"cache=64MB; sync=full; wal=minimal"` (`cache`, `sync` `ordered` /
+`full`, `wal` `minimal` / `full`; in memory the page cache keeps the
+file's default, 128 MiB, and checkpoints come after 16 MiB of WAL).  It
+runs what `nucleus server` runs beside the sessions — the maintenance
+thread (`nucleus_server::maintain_until`) and the embedding columns'
+worker — and `connect()` starts a session: the nucleus protocol's own
+server (`handle_native_stream`, with `Trust`: no login, the session is
+the user its Hello names; the directory's permissions guard the data)
+on a thread of its own, its bytes through two pipes in the process
+(each holds 4 MiB before its writer waits; a reader spins 50 µs before
+it sleeps).  So every driver's protocol code runs unchanged over it:
+one API for a server and for a database in the process.  A directory
+this process has open already is shared (`open` again returns it; the
+last `close` closes it); another process's is refused by its lock.
+`close` ends the sessions (each after its statement), stops the
+background threads (`Stop`, `embedding::stop`), checkpoints and frees
+the directory.  The registry is the engine's plus the `embeddings` and
+`local-models` modules (features of the same names, on by default).
+The C API (`include/nucleus_embedded.h`): `nc_open(path, options,
+&error)`, `nc_connect(db, &error)`, `nc_send(c, buf, len)`,
+`nc_recv(c, buf, cap, timeout_ms)` (bytes; 0 at the end; -1 when the
+time ran out), `nc_end(c)` (ends the session without freeing it — the
+one call another thread may make on a connection while one reads),
+`nc_disconnect(c)`, `nc_close(db, &error)`, `nc_free_error`,
+`nc_version`.  Rust programs use `Database` directly, or
+`nucleus_client::Client::over(Box::new(db.connect()?), config)`.
+
+Python: `nucleus.connect("file:app.db")` (options as parameters,
+`file:app.db?cache=64MB`, or `options=`), `nucleus.connect(":memory:")`
+or `nucleus.open(path, options)` — a `Connection` that closes its
+database with it — and `nucleus.Database(path, options)` with
+`connect(user=…)` for several sessions on one (a `:memory:` database is
+one per `Database`).  The library is loaded with `ctypes` (each call
+releases the GIL) from `NUCLEUS_EMBEDDED_LIB` or beside the package;
+`drivers/python/build_wheel.py <library>` makes the wheel for this
+platform, `py3-none-<platform>`, one for every Python 3.  JavaScript:
+`await connect("file:app.db")`, `connect(":memory:")`, or
+`Database.open(path, options)` with `connect({ user })` and `close()`;
+the session is a `Duplex` over the Node-API addon `native/addon.c`
+(linked with the engine into one `nucleus.node` by `native/build.sh`),
+which reads each session on a thread of its own and hands its bytes to
+the event loop through a thread-safe function (16 chunks queued at
+most: then the session waits, a socket's backpressure).  The addon is
+looked for in `NUCLEUS_EMBEDDED_ADDON`, the package
+`nucleus-db-<platform>-<arch>`, then `native/<platform>-<arch>/`.  Bun
+and Deno load Node-API addons too (CI runs the example under both).  Both drivers also take
+`"nucleus://user:password@host:port/database?tls=true&tls_ca=…"` for a
+server, so a program moves between the two by its connection string
+alone (`examples/python/anywhere.py`, `examples/js/anywhere.ts`).
+
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
 SQLSTATE, transactions, a wrong password, TLS verified, unverified and
@@ -5169,10 +5238,26 @@ once the token was made — and by a directory's password,
 quickstart in each.  `scripts/driver-tests.sh <nucleus binary>
 [languages]` starts a server on a free port — with TLS, from a CA and a
 certificate it makes with `openssl`, when that is installed — and runs
-them all; the CI job `drivers` does so on Linux.  `scripts/psql-smoke.sh`
+them all; the CI job `drivers` does so on Linux.  `python-embedded`
+and `js-embedded` run the Python and JavaScript suites again on a
+database in their own process (`NUCLEUS_URL=file:…`; the login tests
+skipped) and the `anywhere` examples in a directory, in memory and
+against the server; `editions/embedded/tests` runs the slt suite there
+(each script on a new `:memory:` database through `Client::over`).  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-13 — §M14.23 step 1, the embedded edition in Python and
+  JavaScript:** `editions/embedded` (`nucleus-embedded`: `Database`,
+  `Connection`, the C API `nucleus_embedded.h`); `nucleus_platform::
+  memory` (`MemoryFs`, `MemoryPlatform`); `nucleus_server::Stop` and
+  `maintain_until`; `nucleus_sql::embedding::stop`;
+  `nucleus_client::Client::over`; Python `nucleus.open`, `Database`,
+  connection strings in `connect`, `build_wheel.py`; JavaScript
+  `Database`, `connect(string, options)`, `native/addon.c` and
+  `build.sh`; `driver-tests.sh` `python-embedded` and `js-embedded`;
+  `examples/*/anywhere`.  D15 (versioning) decided.
 
 - **2026-11-13 — §M14.29 S2, fuzzing:** `fuzz/` — ten `cargo fuzz`
   targets (§2), seeds (`fuzz/seeds.py`), CI's `fuzz` job and the fuzz

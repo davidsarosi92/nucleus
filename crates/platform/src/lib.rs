@@ -1,9 +1,11 @@
 //! The platform layer: every way nucleus touches the outside world.
 //!
 //! File I/O, time and randomness are reachable **only** through the traits in
-//! this crate (PLAN.md, principle 4).  Two implementations exist:
+//! this crate (PLAN.md, principle 4).  Three implementations exist:
 //!
 //! - [`real::RealPlatform`] — the operating system (POSIX and Windows).
+//! - [`memory::MemoryPlatform`] — files in memory, the machine's clock: a
+//!   database in memory (`:memory:` in the embedded editions, §M14.23).
 //! - [`sim::SimPlatform`] — an in-memory simulation that is deterministic from
 //!   a seed and injects faults: I/O errors, lost `fsync`s, and crashes that
 //!   drop or tear everything not yet made durable.
@@ -25,6 +27,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 pub mod harness;
+pub mod memory;
 pub mod real;
 mod rng;
 pub mod sim;

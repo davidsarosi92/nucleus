@@ -1,17 +1,28 @@
 // The JS/TS driver against a running nucleus server (NUCLEUS_HOST,
-// NUCLEUS_PORT; scripts/driver-tests.sh starts one).
+// NUCLEUS_PORT; scripts/driver-tests.sh starts one) — or, given
+// NUCLEUS_URL, whatever that connection string names: "file:<dir>" runs
+// the same tests on a database in this process (the embedded edition).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 
-import { Cidr, connect, Decimal, Inet, Interval, NucleusError, SparseVector, Time } from "../src/index.ts";
-import type { Value } from "../src/index.ts";
+import { Cidr, connect as connectTo, Decimal, Inet, Interval, NucleusError, SparseVector, Time } from "../src/index.ts";
+import type { ConnectOptions, Value } from "../src/index.ts";
 
 const options = {
   host: process.env.NUCLEUS_HOST ?? "127.0.0.1",
   port: Number(process.env.NUCLEUS_PORT ?? 20035),
 };
+const url = process.env.NUCLEUS_URL;
+const embedded = url !== undefined && !url.startsWith("nucleus://");
+const connect = (o: ConnectOptions) => {
+  if (url === undefined) return connectTo(o);
+  const { host: _host, port: _port, ...rest } = o;
+  return connectTo(url, rest);
+};
+// Logins: a database in the process has none.
+const loginSkip = embedded && "a database in the process has no login";
 const table = () => `js_${randomBytes(4).toString("hex")}`;
 
 test("types both ways", async () => {
@@ -288,11 +299,11 @@ test("copy and load", async () => {
   await db.close();
 });
 
-test("authentication", async () => {
+test("authentication", { skip: loginSkip }, async () => {
   await assert.rejects(connect({ ...options, password: "wrong" }), (e: NucleusError) => e.code === "28P01");
 });
 
-test("directory", { skip: process.env.NUCLEUS_LDAP_USER === undefined && "the server has no directory" }, async () => {
+test("directory", { skip: loginSkip || (process.env.NUCLEUS_LDAP_USER === undefined && "the server has no directory") }, async () => {
   const user = process.env.NUCLEUS_LDAP_USER as string;
   const password = process.env.NUCLEUS_LDAP_PASSWORD as string;
   const tlsCa = process.env.NUCLEUS_TLS_CA as string;
@@ -303,7 +314,7 @@ test("directory", { skip: process.env.NUCLEUS_LDAP_USER === undefined && "the se
   await assert.rejects(connect({ ...options, user, password }));
 });
 
-test("token", { skip: process.env.NUCLEUS_TOKEN === undefined && "the server has no issuer" }, async () => {
+test("token", { skip: loginSkip || (process.env.NUCLEUS_TOKEN === undefined && "the server has no issuer") }, async () => {
   const db = await connect({ ...options, user: "", token: process.env.NUCLEUS_TOKEN });
   const r = await db.query("SELECT current_user, current_setting('nucleus.claims.tenant')");
   assert.deepEqual(r.rows[0], ["drivers_oidc", "acme"]);
@@ -311,7 +322,7 @@ test("token", { skip: process.env.NUCLEUS_TOKEN === undefined && "the server has
   await assert.rejects(connect({ ...options, token: "not.a.token" }), (e: NucleusError) => e.code === "28000");
 });
 
-test("tls", { skip: process.env.NUCLEUS_TLS_CA === undefined && "the server has no TLS" }, async () => {
+test("tls", { skip: loginSkip || (process.env.NUCLEUS_TLS_CA === undefined && "the server has no TLS") }, async () => {
   const ca = process.env.NUCLEUS_TLS_CA as string;
   const db = await connect({ ...options, tlsCa: ca });
   assert.equal((await db.query("SELECT 'over tls'")).rows[0][0], "over tls");

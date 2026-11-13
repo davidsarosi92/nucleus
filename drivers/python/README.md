@@ -1,6 +1,7 @@
 # nucleus — the Python driver
 
-Pure Python (3.8+), no dependencies, DB-API 2.0 style.
+Pure Python (3.8+), no dependencies, DB-API 2.0 style — for a server,
+or for a database inside this process (the embedded edition).
 
 ```python
 import nucleus
@@ -53,3 +54,29 @@ one's `Result`, or its `Error` in its place); one statement for many
 rows, all or none, one commit for all: `conn.execute_many(sql, rows)`
 (and the DB-API `cursor.executemany`).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.
+
+## In this process (the embedded edition)
+
+The same API on a database in a directory, or in memory, inside this
+process — no server.  A connection string chooses, so a program moves
+between the two by changing only that:
+
+```python
+conn = nucleus.connect("file:app.db")            # directory app.db, made if missing
+conn = nucleus.connect("file:app.db?cache=64MB") # with options (cache, sync, wal)
+conn = nucleus.connect(":memory:")               # gone when closed
+conn = nucleus.connect("nucleus://nucleus:nucleus@127.0.0.1:20035/nucleus?tls=true")
+
+with nucleus.Database(":memory:") as db:         # several sessions on one
+    a, b = db.connect(), db.connect(user="app")
+```
+
+There is no login in the process: the session is the user it names, and
+the directory's file permissions guard the data.  A directory this
+process has open already is shared; another process's is refused.  It
+needs the engine's library: the `nucleus-db` wheel for your platform
+carries it (`build_wheel.py` makes one from a build: `cargo build
+--release -p nucleus-embedded`, then `python3 build_wheel.py
+target/release/libnucleus_embedded.dylib`), or `NUCLEUS_EMBEDDED_LIB`
+names it.  The pure-Python wheel speaks to servers only.
+

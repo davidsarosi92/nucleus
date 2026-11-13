@@ -579,6 +579,8 @@ struct Driver {
     /// When a job will be due.
     next: Option<i64>,
     circuits: HashMap<String, Circuit>,
+    /// The background worker is to end ([`stop`]).
+    stop: bool,
 }
 
 impl Default for Driver {
@@ -590,6 +592,7 @@ impl Default for Driver {
             busy: false,
             next: None,
             circuits: HashMap::new(),
+            stop: false,
         }
     }
 }
@@ -1168,6 +1171,14 @@ pub fn serve(kv: Arc<dyn Kv>, reg: Arc<Registry>) -> std::thread::JoinHandle<()>
     rounds_by_caller(kv.as_ref());
     std::thread::spawn(move || {
         loop {
+            if with_driver(instance, |d| d.stop) {
+                drivers()
+                    .0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&instance);
+                return;
+            }
             match work(&kv, &reg) {
                 Ok(r) if r.due > 0 || r.worked() => continue,
                 Ok(_) => {}
@@ -1177,7 +1188,7 @@ pub fn serve(kv: Arc<dyn Kv>, reg: Arc<Registry>) -> std::thread::JoinHandle<()>
             let mut d = lock.lock().unwrap_or_else(|e| e.into_inner());
             let now = crate::datetime::from_system(kv.wall_clock());
             let dr = d.entry(instance).or_default();
-            if dr.maybe {
+            if dr.maybe || dr.stop {
                 dr.maybe = false;
                 continue;
             }
@@ -1188,6 +1199,13 @@ pub fn serve(kv: Arc<dyn Kv>, reg: Arc<Registry>) -> std::thread::JoinHandle<()>
             d.entry(instance).or_default().maybe = false;
         }
     })
+}
+
+/// Ends database `kv`'s background worker ([`serve`]) after its round: it
+/// lets go of the database (an embedded one closing, PLAN.md §M14.23).
+pub fn stop(kv: &dyn Kv) {
+    with_driver(kv.instance(), |d| d.stop = true);
+    drivers().1.notify_all();
 }
 
 /// `embedding.pending = wait`: rounds until no job is left but those

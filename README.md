@@ -155,8 +155,14 @@ pace its calls, and what each statement spent on models — calls, tokens,
 cache hits, time — is in `EXPLAIN ANALYZE` and the statement statistics.
 On BEIR, documents loaded into a server rank as
 fastembed's vectors of the same model do, and stay in sync — bit for bit
-— through edits, deletes and a killed server (§M14.22).  Next is the rest of the
-developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for Python, JavaScript, the
+— through edits, deletes and a killed server (§M14.22).  And it runs
+inside a program, no server (§M14.23): `nucleus.connect("file:app.db")`
+in Python or JavaScript opens a database in a directory (or
+`":memory:"`) in the process, with the API a server's connection has —
+the drivers speak the same protocol to it through a pipe in the process,
+so a program moves to a server by changing its connection string alone
+(`SELECT 1` in 10.5 µs from Python, 30 over loopback TCP).  Next is the rest of the
+developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then
 the document model (§F2).  See
@@ -194,8 +200,24 @@ nucleus describes itself in its own catalog, `nc_catalog`
 (`SELECT * FROM nc_catalog.tables`); `pg_catalog` exists for PostgreSQL
 clients (DOCS.md §8.11).
 
+Inside a program, without a server (the embedded edition,
+[`editions/embedded`](editions/embedded)) — the same code runs against a
+server when the string names one:
+
+```python
+import nucleus                                   # the nucleus-db wheel for this platform
+db = nucleus.connect("file:app.db")              # or ":memory:", or "nucleus://user:pw@host:20035/nucleus"
+db.execute("CREATE TABLE notes (id INT PRIMARY KEY, body TEXT, v vector(3))")
+```
+
+```ts
+import { connect } from "nucleus-db";            // with the addon (drivers/js/native)
+const db = await connect("file:app.db");
+```
+
 As a Rust library: `nucleus_kv::Database::open(dir, Options::default())`,
-then `begin` / `get` / `scan` / `put` / `commit` (see DOCS.md §6).
+then `begin` / `get` / `scan` / `put` / `commit` (see DOCS.md §6); SQL
+sessions through `nucleus_embedded::Database` (DOCS.md §11).
 
 The repository: `crates/` is the core, `modules/` the modules (each built
 to leave the repository as its own package — PostgreSQL compatibility is

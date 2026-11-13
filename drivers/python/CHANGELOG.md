@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The embedded edition (nucleus PLAN.md §M14.23): `connect("file:app.db")`,
+  `connect(":memory:")`, `nucleus.open(path, options)` and
+  `nucleus.Database(path, options).connect(user=…)` run the same API on a
+  database in this process, through the engine's library (`ctypes`;
+  `NUCLEUS_EMBEDDED_LIB` or beside the package); `build_wheel.py` makes the
+  platform wheel.  `connect` takes connection strings:
+  `nucleus://user:password@host:port/database?tls=true&tls_ca=…&token=…`.
+
 - Sparse vectors (nucleus PLAN.md §M14.12 V7): a `sparsevec` value is a
   `nucleus.SparseVector` (`dims`, 0-based `indices`, `values`;
   `SparseVector.of(dict, dims)`), sent and read in rows and batches.

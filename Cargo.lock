@@ -468,6 +468,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-embedded"
+version = "0.1.0"
+dependencies = [
+ "nucleus-client",
+ "nucleus-embeddings",
+ "nucleus-kv",
+ "nucleus-local-models",
+ "nucleus-platform",
+ "nucleus-server",
+ "nucleus-sql",
+ "nucleus-testkit",
+]
+
+[[package]]
 name = "nucleus-embeddings"
 version = "0.1.0"
 dependencies = [

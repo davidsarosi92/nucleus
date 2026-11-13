@@ -180,8 +180,9 @@ fn prefixes_secrets_and_the_cache() {
     let p = Counting::new("counting_a");
     let (_kv, mut s) = setup(&p);
     s.execute("CREATE SECRET key VALUE 'the-key'").unwrap();
+    // A name no other test uses: the call statistics are the process's.
     s.execute(
-        "CREATE MODEL m USING counting_a WITH (secret = key, query_prefix = 'query: ', \
+        "CREATE MODEL pre USING counting_a WITH (secret = key, query_prefix = 'query: ', \
          document_prefix = 'passage: ', batch = 3)",
     )
     .unwrap();
@@ -192,7 +193,7 @@ fn prefixes_secrets_and_the_cache() {
         .collect();
     s.execute(&format!("INSERT INTO d VALUES {}", values.join(", ")))
         .unwrap();
-    s.execute("UPDATE d SET v = embed(body, 'm')").unwrap();
+    s.execute("UPDATE d SET v = embed(body, 'pre')").unwrap();
     // Ten distinct texts, each sent once.
     assert_eq!(p.texts.load(Ordering::SeqCst), 10);
     {
@@ -206,7 +207,7 @@ fn prefixes_secrets_and_the_cache() {
     let before = p.calls.load(Ordering::SeqCst);
     let r = rows(
         &mut s,
-        "SELECT id FROM d ORDER BY v <-> embed('xy', 'm', 'query'), id LIMIT 1",
+        "SELECT id FROM d ORDER BY v <-> embed('xy', 'pre', 'query'), id LIMIT 1",
     );
     assert_eq!(r.len(), 1);
     assert_eq!(p.calls.load(Ordering::SeqCst), before + 1);
@@ -218,12 +219,12 @@ fn prefixes_secrets_and_the_cache() {
     // Again: from the cache.
     rows(
         &mut s,
-        "SELECT id FROM d ORDER BY v <-> embed('xy', 'm', 'query'), id LIMIT 1",
+        "SELECT id FROM d ORDER BY v <-> embed('xy', 'pre', 'query'), id LIMIT 1",
     );
     assert_eq!(p.calls.load(Ordering::SeqCst), before + 1);
     let stats = rows(
         &mut s,
-        "SELECT calls >= 4, texts, cached > 0, errors FROM nc_catalog.models WHERE name = 'm'",
+        "SELECT calls >= 4, texts, cached > 0, errors FROM nc_catalog.models WHERE name = 'pre'",
     );
     assert_eq!(
         stats,
@@ -236,7 +237,7 @@ fn prefixes_secrets_and_the_cache() {
     );
     // A secret a model uses is not dropped under it.
     assert_eq!(code(&mut s, "DROP SECRET key"), "2BP01");
-    s.execute("DROP MODEL m").unwrap();
+    s.execute("DROP MODEL pre").unwrap();
     s.execute("DROP SECRET key").unwrap();
 }
 

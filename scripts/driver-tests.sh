@@ -2,9 +2,14 @@
 # Starts `nucleus server` (default credentials) on a free port and runs the
 # drivers' test suites and the examples against it (PLAN.md §M14.8).
 #
-#   scripts/driver-tests.sh <path-to-nucleus-binary> [rust|python|js|java|c|cpp ...]
+#   scripts/driver-tests.sh <path-to-nucleus-binary> [rust|python|js|java|c|cpp|python-embedded|js-embedded ...]
 #
 # Without a list it runs every language whose toolchain is installed.
+# python-embedded and js-embedded (PLAN.md §M14.23) run the Python and
+# JavaScript suites again on a database in their own process (the
+# embedded edition, built from this checkout), and the `anywhere`
+# examples both there and against the server, changing only the
+# connection string.
 set -euo pipefail
 bin=$(cd "$(dirname "${1:?usage: scripts/driver-tests.sh <nucleus binary> [langs]}")" && pwd)/$(basename "$1")
 shift
@@ -108,6 +113,21 @@ for lang in "${langs[@]}"; do
           -o "$exe" "$src" "$work/cpp/nucleus.o" ${clibs[@]+"${clibs[@]}"}
         "$exe"
       done ;;
+    python-embedded)
+      cargo build -q --release --manifest-path "$root/Cargo.toml" -p nucleus-embedded
+      for lib in "$root"/target/release/{libnucleus_embedded.dylib,libnucleus_embedded.so,nucleus_embedded.dll}; do
+        [ -f "$lib" ] && export NUCLEUS_EMBEDDED_LIB=$lib && break
+      done
+      NUCLEUS_URL="file:$work/py-embedded" python3 "$root/drivers/python/tests/test_nucleus.py" -v 2>&1 | tail -3
+      python3 "$root/examples/python/anywhere.py" "file:$work/py-anywhere"
+      python3 "$root/examples/python/anywhere.py" ":memory:"
+      python3 "$root/examples/python/anywhere.py" "nucleus://nucleus:nucleus@127.0.0.1:$port/nucleus" ;;
+    js-embedded)
+      "$root/drivers/js/native/build.sh"
+      NUCLEUS_URL="file:$work/js-embedded" node --test "$root/drivers/js/test/nucleus.test.ts"
+      node "$root/examples/js/anywhere.ts" "file:$work/js-anywhere"
+      node "$root/examples/js/anywhere.ts" ":memory:"
+      node "$root/examples/js/anywhere.ts" "nucleus://nucleus:nucleus@127.0.0.1:$port/nucleus" ;;
     *) echo "unknown language $lang"; exit 1 ;;
   esac
 done

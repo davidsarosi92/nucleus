@@ -66,16 +66,26 @@ jobs:
         with:
           python-version: "3.13"
       - run: python3 -m pip install numpy pyarrow pandas polars
-      - run: cargo build --release --locked -p nucleus-cli -p nucleus-example
+      - run: cargo build --release --locked -p nucleus-cli -p nucleus-example -p nucleus-embedded
       - name: Driver tests
         # On failure the log's end is also an annotation (job logs need admin).
         run: |
           set -o pipefail
-          if ! scripts/driver-tests.sh target/release/nucleus rust python js java c cpp 2>&1 | tee drivers.log; then
+          if ! scripts/driver-tests.sh target/release/nucleus rust python js java c cpp python-embedded js-embedded 2>&1 | tee drivers.log; then
             tail -c 20000 drivers.log > failures.txt
             echo "::error title=driver tests failed::$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' failures.txt)"
             exit 1
           fi
+      # The embedded edition's addon (built by the driver tests) under Bun
+      # and Deno, which load Node-API addons too (PLAN.md §M14.23).
+      - uses: oven-sh/setup-bun@v2
+      - run: bun examples/js/anywhere.ts :memory:
+        continue-on-error: true
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno run -A examples/js/anywhere.ts :memory:
+        continue-on-error: true
 
   # The benchmark suite against PostgreSQL (PLAN.md §M14.11 L8, docs/
   # benchmarks.md): the table in the job summary, the numbers as an
@@ -142,10 +152,16 @@ jobs:
           restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: Fuzz for three minutes
         working-directory: fuzz
+        # On failure the log's end is also an annotation (job logs need admin).
         run: |
+          set -o pipefail
           mkdir -p corpus/${{ matrix.target }}
-          cargo +nightly fuzz run -O ${{ matrix.target }} corpus/${{ matrix.target }} seeds/${{ matrix.target }} -- \
-            -max_total_time=180 -rss_limit_mb=2048 -timeout=10 -print_final_stats=1
+          if ! cargo +nightly fuzz run -O ${{ matrix.target }} corpus/${{ matrix.target }} seeds/${{ matrix.target }} -- \
+            -max_total_time=180 -rss_limit_mb=2048 -timeout=10 -print_final_stats=1 2>&1 | tee fuzz.log; then
+            grep -v '^\s*Compiling' fuzz.log | tail -c 20000 > failures.txt
+            echo "::error title=fuzz ${{ matrix.target }} failed::$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' failures.txt)"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

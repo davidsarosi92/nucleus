@@ -524,13 +524,21 @@ pub const VACUUM_FORCE_AFTER: std::time::Duration = std::time::Duration::from_se
 /// after [`VACUUM_FORCE_AFTER`] without one, paced instead (each batch
 /// followed by a pause four times as long).
 pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
+    maintain_until(kv, Stop::new())
+}
+
+/// [`maintain`] until `stop` is stopped (an embedded database closing,
+/// PLAN.md §M14.23); the thread then lets go of `kv`.
+pub fn maintain_until(kv: Arc<dyn Kv>, stop: Stop) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let policies_every = (MAINTENANCE_EVERY.as_secs() / VACUUM_CHECK_EVERY.as_secs()).max(1);
         let mut tick = 0u64;
         let mut seen = kv.activity();
         let mut waiting: Option<std::time::Instant> = None;
         loop {
-            std::thread::sleep(VACUUM_CHECK_EVERY);
+            if stop.wait(VACUUM_CHECK_EVERY) {
+                return;
+            }
             tick += 1;
             if kv.vacuum_wanted() {
                 let since = *waiting.get_or_insert_with(std::time::Instant::now);
@@ -540,6 +548,9 @@ pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
                     let started = kv.activity();
                     let mut batch = std::time::Instant::now();
                     let mut go_on = || {
+                        if stop.stopped() {
+                            return false;
+                        }
                         if !forced {
                             return kv.activity() == started && kv.running() == 0;
                         }
@@ -567,6 +578,40 @@ pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
             seen = kv.activity();
         }
     })
+}
+
+/// A signal to stop a background thread ([`maintain_until`]), which
+/// wakes it at once.
+#[derive(Clone, Default)]
+pub struct Stop(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+impl Stop {
+    /// One not yet stopped.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Stops it.
+    pub fn stop(&self) {
+        *self.0.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.0.1.notify_all();
+    }
+
+    /// Whether it was stopped.
+    pub fn stopped(&self) -> bool {
+        *self.0.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Waits up to `d`; whether it was stopped.
+    pub fn wait(&self, d: std::time::Duration) -> bool {
+        let g = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        let (g, _) = self
+            .0
+            .1
+            .wait_timeout_while(g, d, |stopped| !*stopped)
+            .unwrap_or_else(|e| e.into_inner());
+        *g
+    }
 }
 
 /// Serves the nucleus protocol on `listener` forever, one thread per

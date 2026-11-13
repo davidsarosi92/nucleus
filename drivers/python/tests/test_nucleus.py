@@ -1,5 +1,7 @@
 """The Python driver against a running nucleus server (NUCLEUS_HOST,
-NUCLEUS_PORT; scripts/driver-tests.sh starts one)."""
+NUCLEUS_PORT; scripts/driver-tests.sh starts one) — or, given
+NUCLEUS_URL, whatever that connection string names: "file:<dir>" runs
+the same tests on a database in this process (the embedded edition)."""
 
 import datetime as dt
 import decimal
@@ -15,8 +17,18 @@ HOST = os.environ.get("NUCLEUS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NUCLEUS_PORT", str(nucleus.DEFAULT_PORT)))
 
 
+URL = os.environ.get("NUCLEUS_URL")
+EMBEDDED = bool(URL) and not URL.startswith("nucleus://")
+
+
 def connect(**kw):
+    if URL:
+        return nucleus.connect(URL, **kw)
     return nucleus.connect(HOST, PORT, **kw)
+
+
+# Logins: a database in the process has none.
+server_only = unittest.skipIf(EMBEDDED, "a database in the process has no login")
 
 
 def _has(module):
@@ -493,12 +505,14 @@ class Conformance(unittest.TestCase):
                 self.assertEqual(c.load(t2, pa.table({"id": pa.array([7, None], pa.int32()), "v": [1.5, 2.5]})), 2)
                 self.assertEqual(c.execute(f"SELECT count(*), count(id) FROM {t2} WHERE v > 1").rows, [(5, 4)])
 
+    @server_only
     def test_authentication(self):
         with self.assertRaises(nucleus.OperationalError) as e:
             connect(password="wrong")
         self.assertEqual(e.exception.code, "28P01")
 
     @unittest.skipUnless(os.environ.get("NUCLEUS_LDAP_USER"), "the server has no directory")
+    @server_only
     def test_directory(self):
         user, pw = os.environ["NUCLEUS_LDAP_USER"], os.environ["NUCLEUS_LDAP_PASSWORD"]
         ca = os.environ["NUCLEUS_TLS_CA"]
@@ -511,6 +525,7 @@ class Conformance(unittest.TestCase):
             connect(user=user, password=pw)
 
     @unittest.skipUnless(os.environ.get("NUCLEUS_TOKEN"), "the server has no issuer")
+    @server_only
     def test_token(self):
         with connect(user="", password=None, token=os.environ["NUCLEUS_TOKEN"]) as c:
             got = c.execute("SELECT current_user, current_setting('nucleus.claims.tenant')").rows
@@ -520,6 +535,7 @@ class Conformance(unittest.TestCase):
         self.assertEqual(e.exception.code, "28000")
 
     @unittest.skipUnless(os.environ.get("NUCLEUS_TLS_CA"), "the server has no TLS")
+    @server_only
     def test_tls(self):
         ca = os.environ["NUCLEUS_TLS_CA"]
         with connect(tls_ca=ca) as c:

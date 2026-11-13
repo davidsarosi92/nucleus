@@ -1,11 +1,12 @@
-//! Platform conformance: the same assertions against the real OS and the
-//! simulation.  Every build target runs these (PLAN.md, "Build targets").
+//! Platform conformance: the same assertions against the real OS, the
+//! simulation and the file system in memory.  Every build target runs these (PLAN.md, "Build targets").
 
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use nucleus_platform::memory::MemoryPlatform;
 use nucleus_platform::real::RealPlatform;
 use nucleus_platform::sim::SimPlatform;
 use nucleus_platform::{OpenMode, Platform};
@@ -32,13 +33,17 @@ impl Drop for TempDir {
     }
 }
 
-/// Runs `check` against the real OS (in a temp dir) and the simulation.
+/// Runs `check` against the real OS (in a temp dir), the simulation and
+/// the file system in memory.
 fn both(check: impl Fn(&dyn Platform, &Path)) {
     let tmp = TempDir::new();
     check(&RealPlatform::new().unwrap(), &tmp.0);
     let sim = SimPlatform::new(1);
     sim.fs().create_dir_all(Path::new("/db")).unwrap();
     check(&sim, Path::new("/db"));
+    let memory = MemoryPlatform::new().unwrap();
+    memory.fs().create_dir_all(Path::new("/db")).unwrap();
+    check(&memory, Path::new("/db"));
 }
 
 #[test]

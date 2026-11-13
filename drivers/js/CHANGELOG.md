@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The embedded edition (nucleus PLAN.md §M14.23): `connect("file:app.db")`,
+  `connect(":memory:")` and `Database.open(path, options)` with
+  `connect({ user })` run the same API on a database in this process,
+  through a Node-API addon (`native/addon.c`, built by `native/build.sh`;
+  Node, Bun and Deno).  `connect` takes connection strings:
+  `nucleus://user:password@host:port/database?tls=true&tls_ca=…&token=…`,
+  with options overriding them.
+
 - Sparse vectors (nucleus PLAN.md §M14.12 V7): a `sparsevec` value is a
   `SparseVector` (`dims`, 0-based `indices`, `values`;
   `SparseVector.of(map, dims)`), sent and read in rows and batches.

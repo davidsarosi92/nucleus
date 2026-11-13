@@ -236,7 +236,7 @@ are marked ✅.
 | D12 | Serializable isolation (§M14) | ✅ **Read-set validation** (FoundationDB style): a commit fails if a key or range it read was written after its snapshot | Cahill SSI (fewer aborts, much more state); FDB's approach also distributes in F3 |
 | D13 | System catalog naming (§M14.5) | ✅ **nucleus's own `nc_catalog`** (2026-10-17), in nucleus's terms (table ids, key prefixes, statistics); `pg_catalog` / `information_schema` only as a compatibility layer on top, because PostgreSQL clients hard-code those names — nucleus is PostgreSQL-compatible, not PostgreSQL | expose only `pg_catalog` (simpler, but makes PostgreSQL's names nucleus's identity) |
 | D14 | Client protocol (§M14.7) | ✅ **nucleus's own protocol, `ncp`** (2026-10-17): little-endian frames, nucleus's typed value encoding on the wire, port 20035; nucleus's own drivers (Rust, C, C++, Python, JS/TS, Java).  The PostgreSQL protocol becomes an optional module (`--pg-compat`, off by default), frozen: kept working for psql and existing tools, not extended for tool-specific catalog queries | the PostgreSQL protocol as the only client protocol (every PostgreSQL tool works, but nucleus stays a PostgreSQL look-alike); dropping it entirely (no psql, no PostgreSQL tools) |
-| D15 | Versioning (open) | Proposed: one semantic version for the server, CLI and Rust crates (`Cargo.toml`); each **format** versioned on its own and checked on open — the on-disk store (pager header), the catalog records (table definitions, already versioned), the row encoding, the WAL, and the client protocol (`ncp`'s Hello version, negotiated); drivers versioned per language but tied to the protocol version they speak; upgrades read older formats and refuse newer ones, and a release note lists format changes | to decide before the first tagged release, before publishing drivers, before a module leaves this repo (§M14.19) and before an embedded edition ships a file format to devices (§M14.23) |
+| D15 | Versioning | ✅ **Each format versioned on its own, one release version** (2026-11-13, before the first embedded release, §M14.23): the server, CLI, Rust crates and the embedded library share one semantic version (`Cargo.toml`; `nc_version()`); each **format** carries its own version, checked on open — the store's pager header (`FORMAT_VERSION`, oldest read `OLDEST_FORMAT_VERSION`; the WAL is the store's and opens under it), each catalog record kind (its `VERSION` byte), the row encoding (inside the store's version) and the client protocol (`ncp`'s Hello version, negotiated); a build reads every older format and refuses a newer one with a message naming both; drivers are versioned per language and name the protocol version they speak; a release note lists every format change.  Publishing (crates.io, PyPI, npm, Maven Central) follows the first tagged release | a single version for everything, formats included (a format change would force a release of every driver) |
 | D16 | Bulk loads without the WAL (§M14.20 W4) | ✅ **Yes, switchable** (2026-11-02): writes into a range a transaction declared *fresh* (a new table's or index's keys, which no one else sees before it commits) skip the WAL, and its commit makes them durable by a checkpoint before the commit record; they are written as final versions, not intents a vacuum rewrites (PostgreSQL's `wal_level = minimal` and `COPY FREEZE`, CockroachDB's `AddSSTable`).  A setting turns it off; it is off by force when anything needs the whole WAL — replicas (§M17.5), point-in-time restore (§M14.18), §F3 | every write logged (the safe, slower default of a replicated system) |
 | D17 | Sync policy (§M14.20 W1) | ✅ **`sync = ordered` by default, `full` as a setting** (2026-11-02): `ordered` asks the OS for ordered writes — on macOS `F_BARRIERFSYNC` — so the database is never corrupt and a crash of the process or the OS loses nothing, but a power loss may lose the last commits; `full` flushes the drive's cache at each commit (`F_FULLFSYNC`), so a commit survives power loss.  Where the OS has no cheaper ordering (Linux's `fdatasync`), both are the same.  PostgreSQL's and SQLite's defaults on macOS are the weaker of the two | `full` always (today's behaviour: every commit and checkpoint pays a drive-cache flush) |
 | D18 | Format changes for speed (§M14.20 W7) | ✅ **Now** (2026-11-02), each with its version bumped and the older format still read (principle 6): column offsets in the row format, column chunks as extents, a batch's WAL record laid out as the tree applies it | later, behind a migration |
@@ -279,7 +279,7 @@ are marked ✅.
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ◐ E1 ✅ (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory), E2b ✅ (`CREATE MODEL`, `embed()`, providers: `hashing` built in, OpenAI-compatible, Cohere, Voyage as a module), E3a ✅ (tokenizers: WordPiece and Unigram from `tokenizer.json`, the same ids as Hugging Face on 2.5 M texts), E3b ✅ (the encoder on nucleus's kernels: cosine ≥ 0.9999998 against ONNX Runtime, the same bits on any threads), E3c ✅ (`CREATE MODEL … USING local`, files kept in the database; 3.2× fastembed's speed on one core, 4.3× on ten), E4a ✅ (`GENERATED ALWAYS AS … STORED`), E4b ✅ (`GENERATED BY EMBEDDING`: the queue, rounds, retries, the circuit, pending rows), E5 ✅ (`ALTER COLUMN … SET MODEL`: the next model's vectors made beside the column, taken in one transaction), E6 ✅ (`chunks()`: UAX #29 sentences, word windows, Markdown sections; sizes in a model's tokens), E7 ✅ (`CREATE TABLE … CHUNKS OF`: chunks kept current in the writer's transaction, unchanged chunks keep their vectors), E8a ✅ (batches by tokens, rate limits by token bucket, parallel calls, each statement's model costs in `EXPLAIN ANALYZE` and its statistics), E8b ✅ (the *Done when* on BEIR: documents to ranked chunks by a local model in a server killed twice; nDCG@10 that of fastembed's vectors, the chunks and vectors the same bit for bit after edits put back) done | ✅ |
-| | M14.23 | **Next:** Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ⬜ |
+| | M14.23 | **Next:** Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ◐ step 1 ✅ Python and JavaScript (2026-11-13); next: the browser (WASM) |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ⬜ |
@@ -642,7 +642,7 @@ quickstart in every language.
 
 **Done when:** every driver passes the same conformance cases (types,
 parameters, errors, transactions) against `nucleus server` in CI. ✅
-(Publishing them to crates.io, PyPI, npm and Maven Central waits for D15.)
+(Publishing them to crates.io, PyPI, npm and Maven Central follows the first tagged release, D15.)
 
 ### Developer platform (§M14.9–§M14.26)
 
@@ -7032,7 +7032,7 @@ models and columns already made; the server's key file's permissions
 are not checked.  The rate limit's wait is not cancellable without a
 statement deadline.
 
-### §M14.23 — Embedded editions ⬜
+### §M14.23 — Embedded editions ◐
 
 The quickest start there is — no server, no setup, `open` and query — is
 how a developer, or an AI agent choosing a tool, meets a database first
@@ -7075,6 +7075,71 @@ file, query it, then run unchanged against `nucleus server` by changing
 only the connection string; the browser edition persists across reloads;
 and the iOS and Android libraries run the examples on a simulator within
 the size budget.
+
+**Step 1 ✅ (2026-11-13): Python and JavaScript, in memory and on a
+file.**  D15 settled first (each format versioned on its own and
+checked on open, one release version).
+
+- **How a database gets into the process.**  `editions/embedded`
+  (`nucleus-embedded`, a `cdylib`, `staticlib` and `rlib`) opens the
+  engine as `nucleus server` does — the maintenance thread, the
+  embedding columns' worker, the same registry — and serves each
+  session with the nucleus protocol's own server over two pipes in the
+  process instead of a socket, behind a C API of nine functions
+  (`nucleus_embedded.h`).  The drivers' protocol code then runs
+  unchanged over it, so the embedded edition *is* the network driver's
+  API, not a second one to keep level with it: the whole Python and
+  JavaScript conformance suites pass on it (logins skipped: there are
+  none in the process) and the slt suite passes through it.  Prior art
+  weighed: SQLite and DuckDB expose a call-level API per language (fast,
+  but a second API in every language, which nucleus's drivers would
+  have to mirror); PGlite runs PostgreSQL in WASM behind its wire
+  protocol in memory — the shape taken here, for the same reason, one
+  protocol and so one API.  The price is a pipe instead of a call: one
+  copy each way and a thread hand-off.
+- **In memory** is `nucleus_platform::memory::MemoryPlatform` — the
+  platform layer's memory file system made a product (one byte vector
+  per file, no durable image and no faults, unlike the simulation),
+  under the machine's clock; it runs the platform conformance tests.
+- **Closing.**  `Database::close` ends the sessions, stops the
+  background threads (`nucleus_server::Stop`, `maintain_until`;
+  `embedding::stop`), checkpoints and frees the directory, so a
+  process can open and close databases at will; opening a directory the
+  process has open already shares it.
+- **Python** (`ctypes`, so one wheel per platform for every Python 3:
+  `py3-none-<platform>`, 5.3 MB on macOS arm64; `build_wheel.py`, the
+  standard library only) and **JavaScript** (a Node-API addon in C,
+  `native/addon.c`, linked with the engine into one `nucleus.node`; a
+  reader thread per session hands bytes to the event loop through a
+  thread-safe function, at most 16 chunks queued, so a slow consumer
+  holds the session back as a socket would).  Both drivers take
+  connection strings — `file:app.db`, `:memory:`,
+  `nucleus://user:password@host:port/db?tls=true` — so
+  `examples/{python,js}/anywhere` run in a directory, in memory and
+  against a server with only the string changed (`driver-tests.sh
+  python-embedded js-embedded`, in CI).  Bun and Deno load Node-API
+  addons; CI runs the example under both.
+- **Measured** (M-series Mac, Python, 10 000 round trips after a
+  warm-up): `SELECT 1` 30 µs over TCP loopback to `nucleus server`,
+  18 µs over the pipe with a condition variable, **10.5 µs** once a
+  reader spins 50 µs before it sleeps (adaptive spinning, as glibc's
+  adaptive mutexes and the LMAX Disruptor's wait strategies do: a reply
+  usually comes within microseconds, and parking and waking a thread
+  costs more than that).  A million rows of two columns into numpy:
+  29–37 ms in the process, 31–36 ms over TCP — the engine and decoding
+  bound it, not the transport.  An in-memory database first had a
+  32 MiB page cache; a million-row scan through it took twice as long
+  (74 ms against 36 ms), so it keeps the file's 128 MiB default (pages
+  are allocated as first cached).  Sizes: the shared library 13.7 MB
+  (macOS arm64, release, both model modules in).
+- **Not yet:** the platform packages are built by `build_wheel.py` and
+  `native/build.sh` on each machine; CI builds and tests them on Linux,
+  and publishing (PyPI, npm with one package per platform) follows the
+  first tagged release (D15).  Windows' addon needs node-gyp's import
+  library (the Python wheel builds there as is).  An in-memory database
+  cannot yet be saved to a file (planned: `nucleus backup` into a
+  directory, §M14.18).  An embedded database has no keyring for
+  `CREATE SECRET … VALUE` yet (secrets `FROM ENV` work).
 
 ### §M14.24 — Memory for AI models ⬜
 

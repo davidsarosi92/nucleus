@@ -44,3 +44,29 @@ round trip: `await db.pipeline([[sql, params], …])` (each one's `Result`,
 or its `NucleusError` in its place); one statement for many rows, all or
 none, one commit for all: `await db.executeMany(sql, rows)`.
 Tests: `npm test`; example: `examples/js/quickstart.ts`.
+
+## In this process (the embedded edition)
+
+The same API on a database in a directory, or in memory, inside this
+process — no server.  A connection string chooses, so a program moves
+between the two by changing only that:
+
+```ts
+const db = await connect("file:app.db");             // directory app.db, made if missing
+const mem = await connect(":memory:", { options: "cache=64MB" });
+const srv = await connect("nucleus://nucleus:nucleus@127.0.0.1:20035/nucleus?tls=true");
+
+const shared = Database.open(":memory:");            // several sessions on one
+const a = await shared.connect(), b = await shared.connect({ user: "app" });
+shared.close();
+```
+
+There is no login in the process: the session is the user it names, and
+the directory's file permissions guard the data.  It needs the engine as a
+Node-API addon, which Node, Bun and Deno load: `native/build.sh` builds
+`native/<platform>-<arch>/nucleus.node` from this checkout (cargo, a C
+compiler and Node's headers), the package `nucleus-db-<platform>-<arch>`
+will carry it, or `NUCLEUS_EMBEDDED_ADDON` names one.  Each session is read
+on a thread of its own and its bytes reach the event loop as a socket's
+would: queries never block it.
+

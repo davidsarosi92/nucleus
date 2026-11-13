@@ -938,6 +938,21 @@ impl Client {
             }
             None => (Box::new(stream), None),
         };
+        Self::hello(stream, binding, config)
+    }
+
+    /// Says Hello over `stream`, a connection already made — to a
+    /// database in this process (`nucleus-embedded`'s, PLAN.md §M14.23),
+    /// say; `config`'s address and TLS are not used.
+    pub fn over(stream: Box<dyn Stream>, config: Config) -> Result<Self, Error> {
+        Self::hello(stream, None, config)
+    }
+
+    fn hello(
+        stream: Box<dyn Stream>,
+        binding: Option<Vec<u8>>,
+        config: Config,
+    ) -> Result<Self, Error> {
         let mut c = Client {
             conn: BufReader::with_capacity(64 << 10, stream),
             status: TxnStatus::Idle,

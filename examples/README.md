@@ -24,6 +24,19 @@ target/release/nucleus server ./mydb
 `NUCLEUS_PORT` points them at another port.  CI runs all of them
 (`scripts/driver-tests.sh`).
 
+**Without a server:** `anywhere` (Python and JavaScript) runs one program
+on a database inside the process — in a directory or in memory — or on a
+server, the connection string its only difference (PLAN.md §M14.23):
+
+```sh
+cargo build --release -p nucleus-embedded && drivers/js/native/build.sh
+NUCLEUS_EMBEDDED_LIB=target/release/libnucleus_embedded.dylib python3 examples/python/anywhere.py file:notes.db
+python3 examples/python/anywhere.py nucleus://nucleus:nucleus@127.0.0.1:20035/nucleus
+node examples/js/anywhere.ts :memory:
+```
+
+(`.so` on Linux; the platform wheel and addon package carry the library.)
+
 **A module:** [`extension/`](extension) is a sample nucleus module — a
 type, a function and a catalog view added through the extension API — and
 the guide for writing one (`cargo run -p nucleus-example-extension --bin

@@ -18,3 +18,5 @@ __pycache__/
 /fuzz/corpus
 /fuzz/artifacts
 /fuzz/coverage
+# The embedded edition's addon, built per platform (drivers/js/native/build.sh).
+/drivers/js/native/*/
