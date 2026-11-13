@@ -6,6 +6,9 @@
 //!     --test erasure_bench -- --ignored --nocapture
 //! ```
 //!
+//! Without `ERASURE_DIR` (the CI's run of ignored tests) it runs as a
+//! test: 10 000 rows in a temporary directory, removed after.
+//!
 //! A table of `ROWS` (100 000) rows — a subject column, a text with a
 //! text index, a vector with an HNSW index — of 1 000 subjects.  A
 //! subject's texts are planted and searched for in every file: before
@@ -42,8 +45,12 @@ fn size(p: &Path) -> u64 {
 #[test]
 #[ignore]
 fn erasure() {
-    let dir = std::env::var("ERASURE_DIR").expect("ERASURE_DIR: a directory to make");
-    let dir = Path::new(&dir);
+    let given = std::env::var("ERASURE_DIR").ok();
+    let dir = match &given {
+        Some(d) => std::path::PathBuf::from(d),
+        None => std::env::temp_dir().join(format!("nucleus-erasure-{}", std::process::id())),
+    };
+    let dir = dir.as_path();
     assert!(
         !dir.exists(),
         "{} exists: name a new directory",
@@ -54,7 +61,7 @@ fn erasure() {
     let n: usize = std::env::var("ROWS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(100_000);
+        .unwrap_or(if given.is_some() { 100_000 } else { 10_000 });
     s.execute(
         "CREATE TABLE m (id int PRIMARY KEY, who text, body text, v vector(4)); \
          ALTER TABLE m SET SUBJECT (who); \
@@ -89,7 +96,9 @@ fn erasure() {
         found(&kv)
     );
     s.execute("DELETE FROM m WHERE who = 'user-900'").unwrap();
-    println!("after DELETE: {}", found(&kv));
+    let planted_found = found(&kv);
+    println!("after DELETE: {planted_found}");
+    assert!(planted_found >= planted.len() as u64);
     nucleus_sql::hnsw::upkeep_now(&kv).unwrap();
     nucleus_sql::text::index::upkeep_now(&kv).unwrap();
     kv.vacuum().unwrap();
@@ -112,11 +121,15 @@ fn erasure() {
             "DELETE {delete:?}, FORGET {forget:?} (erasure {}, rows {}, scrubbed {}, found {})",
             r[0], r[1], r[2], r[3]
         );
+        assert_eq!(r[2..], ["t", "0"]);
     }
     s.execute("FORGET SUBJECT 'user-900'").unwrap();
-    println!(
-        "user-900 forgotten too: {}; {} MiB",
-        found(&kv),
-        size(dir) >> 20
-    );
+    let left = found(&kv);
+    println!("user-900 forgotten too: {left}; {} MiB", size(dir) >> 20);
+    assert_eq!(left, 0);
+    drop(s);
+    drop(kv);
+    if given.is_none() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
