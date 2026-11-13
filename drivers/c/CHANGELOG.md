@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A server's SCRAM first message asking for more than 1 000 000 PBKDF2
+  iterations is refused as malformed (a server could otherwise hold the
+  client in the key derivation for minutes; nucleus PLAN.md §M14.29 S2).
+
 - A transport of the caller's (nucleus PLAN.md §M14.23 step 3):
   `nc_connect_io(cfg, io, err)` logs in over `nc_io` (`send`, `recv`,
   `close` and their context) instead of a socket — the embedded

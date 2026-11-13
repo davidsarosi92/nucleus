@@ -682,7 +682,11 @@ static int scram_respond(scram_state *st, const char *password, const char *serv
         return -1;
     if (strncmp(nonce, st->bare + 5, strlen(st->bare + 5)) != 0 || strlen(nonce) == strlen(st->bare + 5)) return -1;
     slen = b64_decode(salt64, strlen(salt64), salt, sizeof salt);
-    if (slen < 0 || atoi(iter) <= 0) return -1;
+    /* More iterations than a second's work: a server holding the client in
+       the key derivation (the engine's SCRAM_MAX_ITERATIONS). */
+    if (slen < 0 || strspn(iter, "0123456789") != strlen(iter) || strlen(iter) > 7 || atoi(iter) <= 0 ||
+        atoi(iter) > 1000000)
+        return -1;
     pbkdf2_sha256(password, salt, (size_t)slen, (unsigned)atoi(iter), salted);
     hmac_sha256(salted, 32, "Client Key", 10, client_key);
     sha256(client_key, 32, stored);

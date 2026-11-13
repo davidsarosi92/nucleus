@@ -538,7 +538,13 @@ class _Scram:
     def respond(self, server_first):
         attrs = dict(p.split("=", 1) for p in server_first.split(","))
         nonce, salt, iterations = attrs["r"], _b64.b64decode(attrs["s"]), int(attrs["i"])
-        if not nonce.startswith(self.bare[5:]) or len(nonce) == len(self.bare) - 5:
+        # More iterations than a second's work: a server holding the
+        # client in the key derivation (the engine's SCRAM_MAX_ITERATIONS).
+        if (
+            not nonce.startswith(self.bare[5:])
+            or len(nonce) == len(self.bare) - 5
+            or not 0 < iterations <= 1_000_000
+        ):
             raise InterfaceError("malformed SCRAM message")
         salted = _hashlib.pbkdf2_hmac("sha256", self.password, salt, iterations)
         client_key = _hmac.new(salted, b"Client Key", "sha256").digest()

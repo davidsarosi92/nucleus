@@ -74,6 +74,11 @@ final class Scram {
         try {
             byte[] salt = Base64.getDecoder().decode(attrs.get("s"));
             int iterations = Integer.parseInt(attrs.get("i"));
+            // More iterations than a second's work: a server holding the
+            // client in the key derivation (the engine's SCRAM_MAX_ITERATIONS).
+            if (iterations < 1 || iterations > 1_000_000) {
+                throw new NucleusException("malformed SCRAM message", (String) null);
+            }
             byte[] salted = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
                     .generateSecret(new PBEKeySpec(password.toCharArray(), salt, iterations, 256))
                     .getEncoded();

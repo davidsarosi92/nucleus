@@ -5201,7 +5201,10 @@ without the other.
 is **little-endian**.  A *string* is a `u32` byte length and that many
 bytes of UTF-8.  From version 4 the password never travels: the client
 proves it with SCRAM-SHA-256 (RFC 5802 / 7677); before 4 it is sent in
-Hello in clear text.  **TLS:** a client that wants it starts a TLS
+Hello in clear text.  A client refuses a server's first message asking
+for more than 1 000 000 PBKDF2 iterations (`SCRAM_MAX_ITERATIONS`, about
+a second's work; the server's verifiers use 4 096) — else a server
+could hold it in the key derivation for minutes.  **TLS:** a client that wants it starts a TLS
 handshake as soon as it is connected, before Hello; the server sees the
 handshake's first byte (`0x16`, never a frame kind) and, if it has TLS,
 answers it — every frame then travels inside TLS; a server without TLS
@@ -5716,6 +5719,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-13 — §M14.29 S2, a fuzzing find:** a SCRAM client (the
+  Rust crate, the Python, JavaScript, Java and C drivers) refuses a
+  server's iteration count above 1 000 000 (`SCRAM_MAX_ITERATIONS`).
 - **2026-11-13 — §M14.24 R4, fast retrieval:** `recall` batched through
   `LATERAL` (BM25's statistics subquery correlated when its query reads
   an enclosing row); a projection evaluates calls that read no row once

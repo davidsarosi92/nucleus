@@ -780,11 +780,15 @@ class Scram {
     const attrs = new Map(serverFirst.split(",").map((p) => [p[0], p.slice(2)] as [string, string]));
     const nonce = attrs.get("r") ?? "";
     const own = this.bare.slice(5);
-    if (!nonce.startsWith(own) || nonce.length === own.length) throw new NucleusError("malformed SCRAM message");
+    // More iterations than a second's work: a server holding the client in
+    // the key derivation (the engine's SCRAM_MAX_ITERATIONS).
+    const iterations = Number(attrs.get("i"));
+    if (!nonce.startsWith(own) || nonce.length === own.length || !Number.isInteger(iterations) || iterations < 1 || iterations > 1_000_000)
+      throw new NucleusError("malformed SCRAM message");
     const key = await subtle().importKey("raw", source(this.password), "PBKDF2", false, ["deriveBits"]);
     const salt = source(Buffer.from(attrs.get("s") ?? "", "base64"));
     const salted = Buffer.from(
-      await subtle().deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: Number(attrs.get("i")) }, key, 256),
+      await subtle().deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, key, 256),
     );
     const clientKey = await hmac(salted, "Client Key");
     const stored = Buffer.from(await subtle().digest("SHA-256", source(clientKey)));

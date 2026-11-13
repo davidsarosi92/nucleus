@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A server's SCRAM first message asking for more than 1 000 000 PBKDF2
+  iterations is refused as malformed (a server could otherwise hold the
+  client in the key derivation for minutes; nucleus PLAN.md §M14.29 S2).
+
 - Android (nucleus PLAN.md §M14.23 step 3): the driver uses no API newer
   than Android 8 (API 26) has, and `NucleusClient.connect(in, out,
   transport, config)` logs in over streams of the caller's — the

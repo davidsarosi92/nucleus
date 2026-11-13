@@ -207,6 +207,12 @@ pub struct ScramVerifier {
 /// The iteration count new verifiers get (PostgreSQL's default).
 pub const SCRAM_ITERATIONS: u32 = 4096;
 
+/// The most PBKDF2 iterations a client accepts from a server (about a
+/// second's work): a server that asks for more — 4 billion is a `u32` —
+/// would hold the client in the key derivation for minutes (a fuzzing
+/// find, PLAN.md §M14.29 S2).
+pub const SCRAM_MAX_ITERATIONS: u32 = 1_000_000;
+
 impl ScramVerifier {
     /// The verifier of `password` with `salt`.
     pub fn new(password: &str, salt: &[u8], iterations: u32) -> Self {
@@ -475,7 +481,7 @@ impl ScramClient {
             .ok_or(ScramError::Malformed)?;
         let iterations: u32 = attr(server_first, 'i')
             .and_then(|i| i.parse().ok())
-            .filter(|&i| i > 0)
+            .filter(|&i| i > 0 && i <= SCRAM_MAX_ITERATIONS)
             .ok_or(ScramError::Malformed)?;
         let salted = pbkdf2_sha256(self.password.as_bytes(), &salt, iterations);
         let client_key = hmac_sha256(&salted, b"Client Key");
@@ -640,6 +646,25 @@ mod tests {
         assert_eq!(server.first("y,,n=,r=cli"), Err(ScramError::Rejected));
         let mut server = ScramServer::new(Some(v), &[0; 16], "srv").with_channel_binding(vec![1]);
         assert!(server.first("n,,n=,r=cli").is_ok() && !server.channel_bound());
+    }
+
+    /// A server asking for more iterations than a client will do is
+    /// refused at once (the fuzzer's timeout: `i=4094096…`).
+    #[test]
+    fn scram_client_refuses_too_many_iterations() {
+        let mut c = ScramClient::new("pw", "cli");
+        let first = |i: u64| format!("r=cliserver,s={},i={i}", base64_encode(b"salt"));
+        let t = std::time::Instant::now();
+        for i in [
+            0,
+            u64::from(SCRAM_MAX_ITERATIONS) + 1,
+            4_094_096_255,
+            u64::from(u32::MAX),
+        ] {
+            assert_eq!(c.respond(&first(i)), Err(ScramError::Malformed), "i={i}");
+        }
+        assert!(t.elapsed() < std::time::Duration::from_millis(100));
+        assert!(c.respond(&first(4096)).is_ok());
     }
 
     /// The client's side of channel binding against the server's.

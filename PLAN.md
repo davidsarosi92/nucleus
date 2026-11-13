@@ -287,7 +287,7 @@ are marked ✅.
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
-| | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, eight bugs fixed) |
+| | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -8076,6 +8076,15 @@ to run nucleus in production; the distributed layer's analysis is
     at it runs after warm-up).  `nesting.rs` checks every shape fails
     past the limit and runs just under it; the drivers' suite checks a
     deep statement fails and the session goes on.
+  - A SCRAM client did as many PBKDF2 iterations as the server's first
+    message asked — `i=4094096…` held the fuzzer past its timeout, and
+    any server (or one in the middle, before TLS) could hold a client
+    in the key derivation for minutes (`scram`, CI's later run).  Now
+    a client refuses more than `SCRAM_MAX_ITERATIONS`, 1 000 000 (about
+    a second; the server's own default is 4 096), as malformed — the
+    Rust crate and the Python, JavaScript, Java and C drivers alike.
+    Prior art: MongoDB's drivers refuse fewer than 4 096 (the floor);
+    libpq takes any count — the ceiling is ours.
   Not a bug, recorded: HMAC pads a key shorter than its block with
   zeros, so a password and itself with NULs after are one in SCRAM (as
   everywhere; SASLprep forbids NUL).  The two §M14.22 review items

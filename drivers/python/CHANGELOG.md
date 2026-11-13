@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A server's SCRAM first message asking for more than 1 000 000 PBKDF2
+  iterations is refused as malformed (a server could otherwise hold the
+  client in the key derivation for minutes; nucleus PLAN.md §M14.29 S2).
+
 - Memory stores (nucleus PLAN.md §M14.24): `Connection.remember(store,
   subject, content, kind=, confidence=, expires=, source=, replaces=)` →
   `(id, action)`, `recall(store, subject, query, k=10)` → dicts best
