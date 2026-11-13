@@ -44,6 +44,7 @@ typedef int nc_socket;
 
 struct nc_conn {
     nc_socket sock;
+    nc_io io; /* io.send set: the bytes go through it, not a socket */
 #ifdef NC_WITH_OPENSSL
     SSL *ssl; /* NULL: plain TCP */
     SSL_CTX *ssl_ctx;
@@ -747,6 +748,7 @@ static int memmem_word(const unsigned char *list, size_t n, const char *word) {
 /* ---------------------------------------------------------------- network */
 
 static int send_all(nc_conn *c, const unsigned char *p, size_t n) {
+    if (c->io.send) return c->io.send(c->io.context, p, n) == 0 ? 0 : -1;
     while (n > 0) {
 #ifdef NC_WITH_OPENSSL
         if (c->ssl) {
@@ -771,6 +773,10 @@ static int send_all(nc_conn *c, const unsigned char *p, size_t n) {
 
 /* Receives what the socket has, up to n bytes, into p: the count, or -1. */
 static long recv_some(nc_conn *c, unsigned char *p, size_t n) {
+    if (c->io.recv) {
+        long k = c->io.recv(c->io.context, p, n);
+        return k <= 0 ? -1 : k;
+    }
 #ifdef NC_WITH_OPENSSL
     if (c->ssl) {
         int k = SSL_read(c->ssl, p, n > INT_MAX ? INT_MAX : (int)n);
@@ -867,6 +873,7 @@ static void drop_conn(nc_conn *c) {
     if (c->ssl_ctx) SSL_CTX_free(c->ssl_ctx);
 #endif
     if (c->sock != NC_BAD_SOCKET) nc_closesocket(c->sock);
+    if (c->io.close) c->io.close(c->io.context);
     free(c);
 }
 
@@ -988,14 +995,14 @@ static void server_error(nc_error *err, const unsigned char *body, size_t len) {
     free(hint);
 }
 
+static nc_conn *login(nc_conn *c, const nc_config *cfg, nc_error *err);
+
 nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
     nc_config d = nc_default_config();
     struct addrinfo hints, *res = NULL, *ai;
     char port[16];
     nc_conn *c;
-    buf hello = {0};
-    int one = 1, rc, scram_started = 0;
-    scram_state scram;
+    int one = 1, rc;
     if (!cfg) cfg = &d;
 #ifdef _WIN32
     {
@@ -1040,6 +1047,34 @@ nc_conn *nc_connect(const nc_config *cfg, nc_error *err) {
         drop_conn(c);
         return NULL;
     }
+    return login(c, cfg, err);
+}
+
+nc_conn *nc_connect_io(const nc_config *cfg, const nc_io *io, nc_error *err) {
+    nc_config d = nc_default_config();
+    nc_conn *c;
+    if (!io || !io->send || !io->recv) {
+        set_error(err, "", "nc_connect_io needs send and recv");
+        if (io && io->close) io->close(io->context);
+        return NULL;
+    }
+    c = calloc(1, sizeof *c);
+    if (!c) {
+        set_error(err, "", "out of memory");
+        if (io->close) io->close(io->context);
+        return NULL;
+    }
+    c->sock = NC_BAD_SOCKET;
+    c->io = *io;
+    return login(c, cfg ? cfg : &d, err);
+}
+
+/* Says hello and logs in on c's transport: c, or NULL (c freed). */
+static nc_conn *login(nc_conn *c, const nc_config *cfg, nc_error *err) {
+    nc_config d = nc_default_config();
+    buf hello = {0};
+    int rc, scram_started = 0;
+    scram_state scram;
     put_le(&hello, NC_PROTOCOL_VERSION, 2);
     put_str(&hello, cfg->user ? cfg->user : d.user);
     put_str(&hello, cfg->database ? cfg->database : d.database);

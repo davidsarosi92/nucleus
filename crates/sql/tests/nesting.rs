@@ -84,10 +84,12 @@ fn too_deep_fails_with_54001() {
 }
 
 #[test]
-#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
-// A 32-bit session's stack is half a 64-bit one's: only the 64-bit one is
-// measured up to the limit.
-#[cfg_attr(target_pointer_width = "32", ignore = "measured on 64-bit")]
+// WASI has no threads; and a 32-bit session's stack is half a 64-bit
+// one's: only the 64-bit one is measured up to the limit.
+#[cfg_attr(
+    any(target_os = "wasi", target_pointer_width = "32"),
+    ignore = "no threads (WASI), or 32-bit: measured on 64-bit"
+)]
 fn up_to_the_limit_runs() {
     // Just under the limit, each shape (the query around it counts too).
     let under = |name: &str| match name {

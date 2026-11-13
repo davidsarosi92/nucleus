@@ -17,6 +17,6 @@ public record Result(List<Column> columns, List<List<Object>> rows, String comma
                     for (int i = 0; i < columns.size(); i++) m.put(columns.get(i).name(), r.get(i));
                     return m;
                 })
-                .toList();
+                .collect(java.util.stream.Collectors.collectingAndThen(java.util.stream.Collectors.toList(), java.util.Collections::unmodifiableList));
     }
 }

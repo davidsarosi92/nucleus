@@ -173,12 +173,25 @@ fn ensure_dir(fs: &dyn FileSystem, dir: &Path) -> Result<()> {
     if fs.exists(dir)? {
         return Ok(());
     }
+    // The levels missing, innermost first.  Only their parents are synced
+    // (a new entry is durable once its directory is): not every ancestor,
+    // which may not be ours to open — an Android app may not read
+    // `/data/user`.
+    let mut missing = Vec::new();
+    let mut level = dir;
+    while !fs.exists(level)? {
+        missing.push(level);
+        match level.parent() {
+            Some(p) if !p.as_os_str().is_empty() => level = p,
+            _ => break,
+        }
+    }
     fs.create_dir_all(dir)?;
-    // Sync each new level's parent, outermost first.
-    let mut levels: Vec<&Path> = dir.ancestors().skip(1).collect();
-    levels.reverse();
-    for parent in levels {
-        if !parent.as_os_str().is_empty() && fs.exists(parent)? {
+    // Outermost first: each new level's entry, then the levels in it.
+    for new in missing.into_iter().rev() {
+        if let Some(parent) = new.parent()
+            && !parent.as_os_str().is_empty()
+        {
             fs.sync_dir(parent)?;
         }
     }
@@ -525,5 +538,72 @@ mod tests {
         };
         assert_eq!(Batch::decode(&b.encode()).unwrap(), b);
         assert!(Batch::decode(&b.encode()[..10]).is_err());
+    }
+
+    /// A file system whose directories above `/apps/me` may not be
+    /// opened (as an Android app may not open `/data/user`), recording
+    /// the directories synced.
+    struct Confined {
+        inner: nucleus_platform::memory::MemoryFs,
+        synced: Mutex<Vec<PathBuf>>,
+    }
+
+    impl FileSystem for Confined {
+        fn open(
+            &self,
+            path: &Path,
+            mode: nucleus_platform::OpenMode,
+        ) -> std::io::Result<Box<dyn nucleus_platform::File>> {
+            self.inner.open(path, mode)
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn list_dir(&self, path: &Path) -> std::io::Result<Vec<std::ffi::OsString>> {
+            self.inner.list_dir(path)
+        }
+        fn exists(&self, path: &Path) -> std::io::Result<bool> {
+            self.inner.exists(path)
+        }
+        fn sync_dir(&self, path: &Path) -> std::io::Result<()> {
+            if !path.starts_with("/apps/me") {
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            self.synced.lock().unwrap().push(path.to_path_buf());
+            self.inner.sync_dir(path)
+        }
+        fn lock(&self, path: &Path) -> std::io::Result<Box<dyn nucleus_platform::Lock>> {
+            self.inner.lock(path)
+        }
+    }
+
+    /// Making a directory syncs the parents of the levels it made, and no
+    /// directory above them (PLAN.md §M14.23 step 3).
+    #[test]
+    fn ensure_dir_syncs_only_the_new_levels_parents() {
+        let fs = Confined {
+            inner: nucleus_platform::memory::MemoryFs::new(),
+            synced: Mutex::new(Vec::new()),
+        };
+        fs.inner.create_dir_all(Path::new("/apps/me")).unwrap();
+        ensure_dir(&fs, Path::new("/apps/me/files/nucleus/notes")).unwrap();
+        assert!(
+            fs.exists(Path::new("/apps/me/files/nucleus/notes"))
+                .unwrap()
+        );
+        let synced = fs.synced.lock().unwrap().clone();
+        assert_eq!(
+            synced,
+            ["/apps/me", "/apps/me/files", "/apps/me/files/nucleus"].map(PathBuf::from)
+        );
+        // One that exists already: nothing to make, nothing synced.
+        ensure_dir(&fs, Path::new("/apps/me/files")).unwrap();
+        assert_eq!(fs.synced.lock().unwrap().len(), 3);
     }
 }

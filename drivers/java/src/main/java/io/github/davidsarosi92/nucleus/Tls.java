@@ -72,7 +72,7 @@ final class Tls {
         try (InputStream pem = Files.newInputStream(config.tlsCert)) {
             chain = CertificateFactory.getInstance("X.509").generateCertificates(pem).toArray(new Certificate[0]);
         }
-        String text = Files.readString(config.tlsKey);
+        String text = new String(Files.readAllBytes(config.tlsKey), java.nio.charset.StandardCharsets.UTF_8);
         int begin = text.indexOf("-----BEGIN PRIVATE KEY-----");
         int end = text.indexOf("-----END PRIVATE KEY-----");
         if (chain.length == 0 || begin < 0 || end < begin) {

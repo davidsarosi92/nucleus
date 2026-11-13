@@ -4,6 +4,7 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -38,6 +39,7 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * The Java driver for nucleus: the nucleus protocol (ncp, DOCS.md section 10). No dependencies.
@@ -99,7 +101,10 @@ public final class NucleusClient implements AutoCloseable {
     /** The transaction status after the last query. */
     public enum Status { IDLE, IN_TRANSACTION, FAILED }
 
-    private final Socket socket;
+    /** What carries the bytes, closed with the client. */
+    private final Closeable transport;
+    /** The TLS session's socket, or null. */
+    private final javax.net.ssl.SSLSocket tls;
     private final DataInputStream in;
     private final OutputStream out;
     private Status status = Status.IDLE;
@@ -110,10 +115,11 @@ public final class NucleusClient implements AutoCloseable {
     /** A cursor the server is still sending. */
     private Cursor active;
 
-    private NucleusClient(Socket socket) throws IOException {
-        this.socket = socket;
-        this.in = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
-        this.out = new BufferedOutputStream(socket.getOutputStream());
+    private NucleusClient(Closeable transport, InputStream in, OutputStream out, javax.net.ssl.SSLSocket tls) {
+        this.transport = transport;
+        this.tls = tls;
+        this.in = new DataInputStream(new BufferedInputStream(in));
+        this.out = new BufferedOutputStream(out);
     }
 
     /** Connects and logs in. */
@@ -126,7 +132,38 @@ public final class NucleusClient implements AutoCloseable {
                 // The handshake starts at once; the server sees it (DOCS §10).
                 s = Tls.wrap(s, config);
             }
-            NucleusClient c = new NucleusClient(s);
+            NucleusClient c = new NucleusClient(s, s.getInputStream(), s.getOutputStream(),
+                    s instanceof javax.net.ssl.SSLSocket ssl ? ssl : null);
+            return c.login(config);
+        } catch (IOException e) {
+            throw new NucleusException("cannot connect to " + config.host + ":" + config.port + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Logs in over a transport of the caller's — a database in the process
+     * (the embedded edition's session: nucleus-android), a pipe — whose bytes
+     * {@code in} and {@code out} carry; {@code transport} is closed with the
+     * client (and if the login fails).  {@code config}'s user, database,
+     * password and client name are used; host, port and TLS are not.
+     */
+    public static NucleusClient connect(InputStream in, OutputStream out, Closeable transport, Config config) {
+        NucleusClient c = new NucleusClient(transport, in, out, null);
+        try {
+            return c.login(config);
+        } catch (IOException e) {
+            c.closeTransport();
+            throw new NucleusException("the login failed: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
+            c.closeTransport();
+            throw e;
+        }
+    }
+
+    /** Says hello and logs in: this client, or the server's error thrown (the transport closed). */
+    private NucleusClient login(Config config) throws IOException {
+        NucleusClient c = this;
+        {
             Writer hello = new Writer().u16(PROTOCOL_VERSION).str(config.user).str(config.database)
                     .str("").str(config.clientName);
             c.send('H', hello.bytes());
@@ -150,7 +187,7 @@ public final class NucleusClient implements AutoCloseable {
                         if (scram == null && mechanisms.contains("PLAIN") && !mechanisms.contains("SCRAM-SHA-256")) {
                             // A directory checks this role's password: the password itself (RFC 4616),
                             // never without TLS.
-                            if (!(s instanceof javax.net.ssl.SSLSocket)) {
+                            if (c.tls == null) {
                                 throw new NucleusException("the server asks for the password itself, which needs TLS",
                                         (String) null);
                             }
@@ -164,8 +201,8 @@ public final class NucleusClient implements AutoCloseable {
                                 throw new NucleusException("unsupported authentication " + msg, (String) null);
                             }
                             byte[] binding = null;
-                            if (s instanceof javax.net.ssl.SSLSocket ssl) {
-                                binding = Scram.serverEndPoint(ssl.getSession().getPeerCertificates()[0]);
+                            if (c.tls != null) {
+                                binding = Scram.serverEndPoint(c.tls.getSession().getPeerCertificates()[0]);
                             }
                             scram = new Scram(config.password == null ? "" : config.password, binding,
                                     offered.contains("SCRAM-SHA-256-PLUS"));
@@ -189,14 +226,25 @@ public final class NucleusClient implements AutoCloseable {
                     }
                     case 'E' -> {
                         NucleusException e = r.serverError();
-                        s.close();
+                        c.closeTransport();
                         throw e;
                     }
                     default -> throw new NucleusException("unexpected message " + m.kind, (String) null);
                 }
             }
-        } catch (IOException e) {
-            throw new NucleusException("cannot connect to " + config.host + ":" + config.port + ": " + e.getMessage(), e);
+        }
+    }
+
+    /** All of {@code b} (ByteArrayOutputStream.writeBytes is Java 11's, in Android's from 33). */
+    private static void putAll(ByteArrayOutputStream out, byte[] b) {
+        out.write(b, 0, b.length);
+    }
+
+    private void closeTransport() {
+        try {
+            transport.close();
+        } catch (IOException ignored) {
+            // closed
         }
     }
 
@@ -710,7 +758,11 @@ public final class NucleusClient implements AutoCloseable {
 
         /** The data, read in place (little-endian). */
         public ByteBuffer bytes() {
-            return body.duplicate().position(data).limit(data + length).slice().order(ByteOrder.LITTLE_ENDIAN);
+            // Buffer's setters, not ByteBuffer's (Java 9+, not in Android's).
+            ByteBuffer b = body.duplicate();
+            b.position(data);
+            b.limit(data + length);
+            return b.slice().order(ByteOrder.LITTLE_ENDIAN);
         }
 
         public ShortBuffer shorts() { return bytes().asShortBuffer(); }
@@ -731,7 +783,9 @@ public final class NucleusClient implements AutoCloseable {
             int start = w > 0 ? data + i * w : data + offset(i);
             int n = w > 0 ? w : offset(i + 1) - offset(i);
             byte[] slot = new byte[n];
-            body.get(start, slot);
+            ByteBuffer at = body.duplicate();
+            at.position(start);
+            at.get(slot);
             int tag = column.tag();
             Writer t = new Writer();
             if (w > 0 && tag != EXT) {
@@ -820,7 +874,7 @@ public final class NucleusClient implements AutoCloseable {
     }
 
     private long loadColumns(String table, List<String> names, List<Object> cols, int rows) {
-        String target = names == null ? "" : " (" + String.join(", ", names.stream().map(n -> ident(n, false)).toList()) + ")";
+        String target = names == null ? "" : " (" + String.join(", ", names.stream().map(n -> ident(n, false)).collect(Collectors.toList())) + ")";
         return copyWith("COPY " + ident(table, true) + target + " FROM STDIN", announced -> {
             if (announced.size() != cols.size()) {
                 throw new NucleusException(cols.size() + " columns of data for " + announced.size() + " columns", (String) null);
@@ -885,7 +939,7 @@ public final class NucleusClient implements AutoCloseable {
     /** A name as SQL takes it: quoted unless a plain lower-case identifier. */
     private static String ident(String name, boolean dotted) {
         if (dotted && name.contains(".") && !name.contains("\"")) {
-            return String.join(".", Arrays.stream(name.split("\\.")).map(p -> ident(p, false)).toList());
+            return String.join(".", Arrays.stream(name.split("\\.")).map(p -> ident(p, false)).collect(Collectors.toList()));
         }
         return name.matches("[a-z_][a-z0-9_]*") ? name : "\"" + name.replace("\"", "\"\"") + "\"";
     }
@@ -957,7 +1011,7 @@ public final class NucleusClient implements AutoCloseable {
         Runnable pad = () -> {
             while (out.size() % 8 != 0) out.write(0);
         };
-        out.writeBytes(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(n).array());
+        putAll(out, ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(n).array());
         for (int ci = 0; ci < columns.size(); ci++) {
             Column c = columns.get(ci);
             Object col = cols.get(ci);
@@ -969,7 +1023,7 @@ public final class NucleusClient implements AutoCloseable {
                 pad.run();
                 byte[] bits = new byte[(n + 7) / 8];
                 for (int i = 0; i < n; i++) if (at(col, start + i) != null) bits[i / 8] |= (byte) (1 << (i % 8));
-                out.writeBytes(bits);
+                putAll(out, bits);
             }
             pad.run();
             int w = width(c);
@@ -987,22 +1041,24 @@ public final class NucleusClient implements AutoCloseable {
                         Object v = at(col, start + i);
                         if (v == null) continue;
                         byte[] tagged = new Writer().value(fit(c, v)).bytes();
-                        bb.put(i * w, tagged, tagged.length - w, w);
+                        ByteBuffer at = bb.duplicate();
+                        at.position(i * w);
+                        at.put(tagged, tagged.length - w, w);
                     }
                 }
-                out.writeBytes(bb.array());
+                putAll(out, bb.array());
             } else {
                 ByteBuffer offs = ByteBuffer.allocate((n + 1) * 4).order(ByteOrder.LITTLE_ENDIAN);
                 ByteArrayOutputStream data = new ByteArrayOutputStream();
                 offs.putInt(0);
                 for (int i = 0; i < n; i++) {
                     Object v = at(col, start + i);
-                    if (v != null) data.writeBytes(varSlot(c, v));
+                    if (v != null) putAll(data, varSlot(c, v));
                     offs.putInt(data.size());
                 }
-                out.writeBytes(offs.array());
+                putAll(out, offs.array());
                 pad.run();
-                out.writeBytes(data.toByteArray());
+                putAll(out, data.toByteArray());
             }
             pad.run();
         }
@@ -1065,11 +1121,7 @@ public final class NucleusClient implements AutoCloseable {
         } catch (IOException ignored) {
             // closing anyway
         }
-        try {
-            socket.close();
-        } catch (IOException ignored) {
-            // closed
-        }
+        closeTransport();
     }
 
     // ------------------------------------------------------------ framing
@@ -1120,14 +1172,14 @@ public final class NucleusClient implements AutoCloseable {
         Writer f64(double v) { return raw(ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putDouble(v)); }
 
         Writer raw(ByteBuffer bb) {
-            b.writeBytes(bb.array());
+            putAll(b, bb.array());
             return this;
         }
 
         Writer str(String s) {
             byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
             i32(bytes.length);
-            b.writeBytes(bytes);
+            putAll(b, bytes);
             return this;
         }
 
@@ -1136,13 +1188,13 @@ public final class NucleusClient implements AutoCloseable {
         Writer net(int tag, InetAddress a, int bits) {
             byte[] addr = a.getAddress();
             u8(tag).u8(addr.length == 4 ? 4 : 6).u8(bits);
-            b.writeBytes(addr);
+            putAll(b, addr);
             return this;
         }
 
         Writer ext(String name, byte[] data) {
             u8(EXT).str(name).i32(data.length);
-            b.writeBytes(data);
+            putAll(b, data);
             return this;
         }
 
@@ -1157,7 +1209,7 @@ public final class NucleusClient implements AutoCloseable {
             if (v instanceof Double x) return u8(3).f64(x);
             if (v instanceof byte[] x) {
                 u8(15).i32(x.length);
-                b.writeBytes(x);
+                putAll(b, x);
                 return this;
             }
             if (v instanceof LocalTime x) return u8(16).i64(x.toNanoOfDay() / 1000);
@@ -1175,7 +1227,7 @@ public final class NucleusClient implements AutoCloseable {
                 Arrays.fill(le, fill);
                 for (int i = 0; i < be.length; i++) le[i] = be[be.length - 1 - i];
                 u8(5);
-                b.writeBytes(le);
+                putAll(b, le);
                 return u8(d.scale());
             }
             if (v instanceof LocalDate x) return u8(6).i32((int) ChronoUnit.DAYS.between(EPOCH_DATE, x));

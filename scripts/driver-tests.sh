@@ -74,6 +74,7 @@ if [ ${#langs[@]} -eq 0 ]; then
   have javac && langs+=(java)
   have cc && langs+=(c)
   have c++ && langs+=(cpp)
+  have swift && langs+=(swift)
 fi
 
 # The C driver with TLS when OpenSSL is at hand.
@@ -115,6 +116,11 @@ for lang in "${langs[@]}"; do
           -o "$exe" "$src" "$work/cpp/nucleus.o" ${clibs[@]+"${clibs[@]}"}
         "$exe"
       done ;;
+    swift)
+      # The driver over the C driver; NucleusEmbedded too when its
+      # XCFramework is built (drivers/swift/build-xcframework.sh).
+      swift test --package-path "$root/drivers/swift" --scratch-path "$work/swift" 2>&1 | grep -E "^Test Suite 'All tests'|Executed|error" | tail -3
+      swift run --package-path "$root/examples/swift-cli" --scratch-path "$work/swift-example" quickstart ;;
     python-embedded)
       cargo build -q --release --manifest-path "$root/Cargo.toml" -p nucleus-embedded
       for lib in "$root"/target/release/{libnucleus_embedded.dylib,libnucleus_embedded.so,nucleus_embedded.dll}; do

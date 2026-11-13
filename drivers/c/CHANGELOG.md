@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A transport of the caller's (nucleus PLAN.md §M14.23 step 3):
+  `nc_connect_io(cfg, io, err)` logs in over `nc_io` (`send`, `recv`,
+  `close` and their context) instead of a socket — the embedded
+  edition's session in the Swift package.
+
 - Sparse vectors (nucleus PLAN.md §M14.12 V7): `NC_SPARSEVEC` values
   (`as.sparse`: dimensions, 0-based positions and values, their count),
   `nc_sparsevec(dims, indices, values, nnz)`.

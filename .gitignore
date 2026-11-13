@@ -21,3 +21,17 @@ __pycache__/
 # The embedded edition's addon, built per platform (drivers/js/native/build.sh).
 /drivers/js/native/*/
 /drivers/js/wasm/*.wasm
+# The mobile editions' builds (PLAN.md §M14.23 step 3).
+/drivers/swift/NucleusEmbedded.xcframework/
+/drivers/swift/.build/
+/drivers/swift/.swiftpm/
+/examples/swift-cli/.build/
+/examples/swift-cli/.swiftpm/
+/examples/ios/Notes.swiftpm/.build/
+/examples/ios/Notes.swiftpm/.swiftpm/
+/drivers/android/.gradle/
+/drivers/android/.kotlin/
+/drivers/android/build/
+/drivers/android/nucleus/build/
+/drivers/android/local.properties
+/examples/android/notes/build/

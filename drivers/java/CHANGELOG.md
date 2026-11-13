@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Android (nucleus PLAN.md §M14.23 step 3): the driver uses no API newer
+  than Android 8 (API 26) has, and `NucleusClient.connect(in, out,
+  transport, config)` logs in over streams of the caller's — the
+  embedded edition's session in the Android library (`drivers/android`).
+
 - Sparse vectors (nucleus PLAN.md §M14.12 V7): a `sparsevec` value is a
   `SparseVector` (dimensions, 0-based positions and values;
   `SparseVector.of(map, dims)`), sent and read in rows and batches.

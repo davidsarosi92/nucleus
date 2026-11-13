@@ -150,6 +150,24 @@ int nc_tls_supported(void);
 /* Connects and logs in; NULL (and err filled) on failure. */
 nc_conn *nc_connect(const nc_config *cfg, nc_error *err);
 
+/* A transport of the caller's for a connection: the protocol's bytes over
+ * something other than a socket — a database in the process (the embedded
+ * edition's nce_send and nce_recv), a pipe.  send sends all n bytes (0,
+ * or -1); recv receives at least one, up to n (the count; 0 or -1 once it
+ * has ended); close, if set, is called once when the connection is freed.
+ * No TLS: the transport is the caller's. */
+typedef struct nc_io {
+    void *context;
+    int (*send)(void *context, const void *p, size_t n);
+    long (*recv)(void *context, void *p, size_t n);
+    void (*close)(void *context);
+} nc_io;
+
+/* Logs in over io (cfg's user, database and client name; host, port and
+ * TLS are not used).  NULL (and err filled) on failure; io's close has
+ * been called then. */
+nc_conn *nc_connect_io(const nc_config *cfg, const nc_io *io, nc_error *err);
+
 /* Runs sql (one statement with parameters, or several without) and
  * returns the last statement's result; NULL (and err filled) when a
  * statement fails or the connection is lost. */

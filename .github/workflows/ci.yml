@@ -44,7 +44,7 @@ jobs:
 
   # The drivers (PLAN.md §M14.8) and the examples, against a real server.
   drivers:
-    name: drivers (Rust, C, C++, Python, JS/TS, Java)
+    name: drivers (Rust, C, C++, Python, JS/TS, Java, Swift)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -72,7 +72,7 @@ jobs:
         # On failure the log's end is also an annotation (job logs need admin).
         run: |
           set -o pipefail
-          if ! scripts/driver-tests.sh target/release/nucleus rust python js java c cpp python-embedded js-embedded js-wasm 2>&1 | tee drivers.log; then
+          if ! scripts/driver-tests.sh target/release/nucleus rust python js java c cpp swift python-embedded js-embedded js-wasm 2>&1 | tee drivers.log; then
             tail -c 20000 drivers.log > failures.txt
             echo "::error title=driver tests failed::$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' failures.txt)"
             exit 1
@@ -85,6 +85,87 @@ jobs:
         with:
           deno-version: v2.x
       - run: deno run -A examples/js/anywhere.ts ":memory:"
+
+  # The embedded edition on iOS (PLAN.md §M14.23 step 3): the XCFramework
+  # (within its size budget), the Swift package's tests on macOS and on
+  # the iOS simulator, and the example app run there.
+  ios:
+    name: iOS (Swift package, XCFramework, the simulator)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal --target aarch64-apple-ios --target aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios
+      - name: Build, test, run the example
+        # On failure the log's end is also an annotation (job logs need admin).
+        run: |
+          set -o pipefail
+          run() {
+            if ! "$@" 2>&1 | tee step.log; then
+              tail -c 3800 step.log > failures.txt
+              echo "::error title=ios: $1 failed::$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' failures.txt)"
+              exit 1
+            fi
+          }
+          run env ARCHS=arm64 drivers/swift/build-xcframework.sh
+          run swift test --package-path drivers/swift
+          device=$(xcrun simctl list devices available | sed -n 's/^ *iPhone[^(]*(\([0-9A-F-]*\)).*/\1/p' | head -1)
+          cd drivers/swift
+          run xcodebuild test -quiet -scheme Nucleus-Package -destination "platform=iOS Simulator,id=$device,arch=arm64" -derivedDataPath ../../target/xcode
+          cd ../..
+          run examples/ios/run.sh "$device"
+          # The engine's suites (platform conformance, storage, transactions,
+          # SQL with slt) on the simulator.
+          export CARGO_TARGET_AARCH64_APPLE_IOS_SIM_RUNNER="xcrun simctl spawn $device"
+          run cargo test --locked --target aarch64-apple-ios-sim -p nucleus-platform -p nucleus-storage \
+            -p nucleus-txn -p nucleus-kv -p nucleus-sql
+
+  # The embedded edition on Android (PLAN.md §M14.23 step 3): the native
+  # libraries (arm64-v8a within its size budget), the library's tests —
+  # the Java driver's cases among them — on an emulator, and the example
+  # app run there.
+  android:
+    name: Android (AAR, the emulator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal --target aarch64-linux-android --target x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Native libraries
+        run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" drivers/android/build-native.sh
+      - name: The engine's suites for the emulator (built, run below)
+        run: |
+          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_RUNNER=$PWD/scripts/adb-run.sh" >> "$GITHUB_ENV"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang"
+          cargo test --locked --no-run --target x86_64-linux-android -p nucleus-platform -p nucleus-storage \
+            -p nucleus-txn -p nucleus-kv -p nucleus-sql
+      - name: KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Tests and the example on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            cd drivers/android && ./gradlew --no-daemon :nucleus:connectedDebugAndroidTest
+            examples/android/run.sh
+            cargo test --locked --target x86_64-linux-android -p nucleus-platform -p nucleus-storage -p nucleus-txn -p nucleus-kv -p nucleus-sql
 
   # The benchmark suite against PostgreSQL (PLAN.md §M14.11 L8, docs/
   # benchmarks.md): the table in the job summary, the numbers as an

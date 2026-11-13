@@ -38,7 +38,14 @@ user and a password to each of them: its `login` and its `secret`.
 | C++ | [`cpp/`](cpp) — `nucleus.hpp` (C++17, over the C driver) | `std::variant` |
 | Python | [`python/`](python) — package `nucleus` (3.8+) | `int`, `Decimal`, `datetime`, … |
 | JavaScript / TypeScript | [`js/`](js) — `nucleus-db` (Node 18+) | `number`/`bigint`, `Decimal`, `Date`, … |
-| Java | [`java/`](java) — `io.github.davidsarosi92.nucleus` (Java 17+) | `Long`, `BigDecimal`, `java.time`, … |
+| Java | [`java/`](java) — `io.github.davidsarosi92.nucleus` (Java 17+; Android 8+) | `Long`, `BigDecimal`, `java.time`, … |
+| Swift | [`swift/`](swift) — package `Nucleus` (iOS 15+, macOS 12+, Linux; over the C driver) | `Value` enum: `Int64`, `Numeric`, `Date`, `UUID`, … |
+
+A database inside the program, no server (PLAN.md §M14.23): Python and
+JavaScript (`connect("file:app.db")`, also in a browser), iOS
+([`swift/`](swift), product `NucleusEmbedded`) and Android
+([`android/`](android), a Kotlin library over the Java driver) — the
+same API as against a server.
 
 Examples for each are in [`../examples`](../examples).
 

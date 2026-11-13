@@ -7,6 +7,12 @@
 
 #include "nucleus.h"
 
+#ifndef _WIN32
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 static int failures;
 
 #define CHECK(cond)                                                       \
@@ -682,6 +688,68 @@ static void pipelines(void) {
     nc_close(db);
 }
 
+#ifndef _WIN32
+/* A transport of the test's own: a socket it connected, read and written
+ * through nc_io (as the embedded edition's session is). */
+static int io_closed;
+
+static int io_send(void *context, const void *p, size_t n) {
+    int fd = *(int *)context;
+    while (n > 0) {
+        ssize_t k = send(fd, p, n, 0);
+        if (k <= 0) return -1;
+        p = (const char *)p + k;
+        n -= (size_t)k;
+    }
+    return 0;
+}
+
+static long io_recv(void *context, void *p, size_t n) { return (long)recv(*(int *)context, p, n, 0); }
+
+static void io_close(void *context) {
+    close(*(int *)context);
+    io_closed++;
+}
+
+static void custom_transport(void) {
+    nc_config cfg = config();
+    nc_error err;
+    struct addrinfo hints, *res = NULL;
+    char port[16];
+    int fd = -1;
+    nc_io io;
+    nc_conn *db;
+    nc_result *r;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(port, sizeof port, "%u", (unsigned)cfg.port);
+    CHECK(getaddrinfo(cfg.host, port, &hints, &res) == 0);
+    if (!res) return;
+    fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    CHECK(fd >= 0 && connect(fd, res->ai_addr, res->ai_addrlen) == 0);
+    freeaddrinfo(res);
+    io.context = &fd;
+    io.send = io_send;
+    io.recv = io_recv;
+    io.close = io_close;
+    db = nc_connect_io(&cfg, &io, &err);
+    CHECK(db != NULL);
+    if (!db) return;
+    r = must(db, "SELECT 40 + $1", (nc_value[]){nc_int(2)}, 1);
+    CHECK(r && strcmp(text_of(r, 0, 0), "42") == 0);
+    nc_result_free(r);
+    nc_close(db);
+    CHECK(io_closed == 1);
+    /* No recv: refused, and what was given is closed. */
+    io.recv = NULL;
+    fd = -1;
+    CHECK(nc_connect_io(&cfg, &io, &err) == NULL && io_closed == 2);
+}
+#else
+static void custom_transport(void) {}
+#endif
+
 int main(void) {
     types_both_ways();
     errors_and_transactions();
@@ -697,6 +765,7 @@ int main(void) {
     columnar();
     copy_in();
     pipelines();
+    custom_transport();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

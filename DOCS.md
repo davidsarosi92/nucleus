@@ -48,7 +48,7 @@
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `editions/embedded` | `nucleus-embedded` (a `cdylib`, `staticlib` and `rlib`) | the embedded edition: a database in memory or in a directory inside the application, its sessions over the nucleus protocol through a pipe in the process, behind a C API (`include/nucleus_embedded.h`) that Python and Node load (§11, *In the process*); for `wasm32-wasip1` the browser's, its sessions stepped (§11, *In the browser*) | §M14.23 |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
-| `drivers` | — | drivers for C, C++, Python, JS/TS, Java (§11); Python's platform wheel (`build_wheel.py`) and JavaScript's Node-API addon (`native/`) for the embedded edition; JavaScript's browser entry (`src/browser.ts`, the engine in WebAssembly, `wasm/build.sh`) | §M14.8 ✅, §M14.23 |
+| `drivers` | — | drivers for C, C++, Python, JS/TS, Java, Swift (§11); Python's platform wheel (`build_wheel.py`) and JavaScript's Node-API addon (`native/`) for the embedded edition; JavaScript's browser entry (`src/browser.ts`, the engine in WebAssembly, `wasm/build.sh`); iOS — the Swift package's `NucleusEmbedded` over `NucleusEmbedded.xcframework` (`swift/build-xcframework.sh`) — and Android, a Kotlin library (`android/`, an AAR) | §M14.8 ✅, §M14.23 |
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
 | `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.21 |
@@ -5158,7 +5158,9 @@ accessors (`nc_rows`, `nc_value_at`, `nc_column_type`, `nc_command`,
 (`nc_int`, `nc_text`, `nc_numeric`, `nc_date`, `nc_array`, `nc_uuid_value`,
 `nc_vector`, `nc_sparsevec`, `nc_ext`, `nc_smallint`, `nc_integer`, `nc_real`, `nc_bytea`, `nc_time`,
 `nc_inet`, `nc_cidr`, …), `nc_uuid_parse`, `nc_inet_parse`,
-`nc_result_free`, `nc_close`.  `uuid` is `NC_UUID` (an `nc_uuid` of 16
+`nc_result_free`, `nc_close`; `nc_connect_io(&cfg, &io, &err)` logs in
+over a transport of the caller's (`nc_io`: `send`, `recv`, `close` and
+their context) — the embedded edition's session on iOS.  `uuid` is `NC_UUID` (an `nc_uuid` of 16
 bytes), `vector` `NC_VECTOR` (`as.vector`: a `float` pointer and the
 dimensions; in a batch the column's bytes are the floats), `sparsevec`
 `NC_SPARSEVEC` (`as.sparse`: the dimensions, the positions from 0 and
@@ -5214,6 +5216,27 @@ vector as a `Float32Array`, `SparseVector` (`dims`, `indices` from 0,
 `float[]` (a vector; a column of them in `load` as `float[][]`),
 `SparseVector` (dimensions, positions from 0, values;
 `SparseVector.of(map, dims)`), `Ext` (another registered type), `List`.
+`NucleusClient.connect(in, out, transport, config)` logs in over a pair
+of streams of the caller's (the embedded edition's session on Android).
+The driver uses no API newer than Android 8 (API 26) has.
+
+**Swift:** `drivers/swift`, a Swift package (iOS 15+, macOS 12+; Linux)
+over the C driver, compiled as it is (`CNucleus`).  Product `Nucleus`:
+`Connection.connect(host:port:user:password:database:clientName:token:)`,
+`query(sql, params)` → `QueryResult` (`columns`, `rows` — a `Row` by
+position or by name —, `command`, `count`), `execute`, `executeMany`,
+`pipeline([Statement])` (each a `Result<QueryResult, NucleusError>`),
+`cursor(sql, params, fetch:)` (`next()`, `all()`, `close()`),
+`copy(sql, data:)` / `copy(sql, text:)`, `transaction { … }`, `status`,
+`serverVersion`, `close()`; `NucleusError` with `code`, `message`,
+`hint`.  `Value` is an enum (with literals): `null`, `bool`, `int`
+(Int64), `int32`, `int16`, `double`, `float`, `text`, `numeric`
+(`Numeric`, its exact text), `bytes` (`Data`), `date(year:month:day:)`,
+`time` (µs), `timestamp` / `timestamptz` (`Date`), `interval(months:days:micros:)`,
+`uuid` (`UUID`), `inet`, `cidr`, `array`, `vector` (`[Float]`),
+`sparsevec(dimensions:indices:values:)`, `ext(type:data:)`.  No TLS in
+this build of the C driver.  Product `NucleusEmbedded` (when
+`NucleusEmbedded.xcframework` is there): see *On phones* below.
 
 **In the process (the embedded edition, §M14.23).**  `editions/embedded`
 (`nucleus-embedded`) is the engine as a library: `Database::open(path,
@@ -5301,6 +5324,36 @@ batch.  The driver's protocol code has no Node imports (`core.ts`;
 part of its interface the driver uses; SCRAM is WebCrypto's), so
 `index.ts` (Node's sockets, the addon) and `browser.ts` share it.
 
+**On phones (iOS and Android, §M14.23).**  The embedded edition without
+the model modules, linked into the app (whole-program optimization, one
+codegen unit), its sessions over the C API's `nce_send` / `nce_recv` on a
+thread each, as in Python and Node.  *iOS:*
+`drivers/swift/build-xcframework.sh` (`ARCHS`, default `arm64 x86_64`)
+builds the static library for `aarch64-apple-ios`, the simulator and
+macOS into `NucleusEmbedded.xcframework` (headers as module
+`NucleusEmbeddedC`, which links `iconv`), and the Swift package then has
+product `NucleusEmbedded`: `Database.open(path, options:)` (a directory,
+or `":memory:"`), `Database.open(named:)` (directory
+`Application Support/nucleus/<name>` — kept and backed up, unlike
+`Caches`), `connect(user:database:clientName:)` → the same `Connection`
+(the C driver's `nc_connect_io` over the session), `close()`,
+`Database.engineVersion`.  Syncs flush the drive's cache
+(`F_FULLFSYNC`, §3).  *Android:* `drivers/android/build-native.sh`
+(`ABIS`, default `arm64-v8a x86_64`; the NDK's clang, API 26) links the
+static library with the JNI glue (`nucleus/src/main/cpp/nucleus_android.c`,
+which throws `IOException` on a failure) into
+`libnucleus_android.so`, exporting only the `Java_*` functions (the
+linker drops what they do not reach) and aligned for 16 KB pages; the
+Gradle project `drivers/android` builds the library `:nucleus` (an AAR:
+the Java driver's sources and Kotlin's `Database`) from them.
+`Database.open(path, options)`, `Database.open(context, name)`
+(directory `files/nucleus/<name>` of the app's), `connect(user,
+database)` → the Java driver's `NucleusClient` over the session's
+streams, `close()` (`AutoCloseable`), `Database.engineVersion`.  Each
+build checks the size budget (8 MiB for arm64, what the engine adds to
+an app: on iOS a program using the C API linked as an app is and
+stripped; on Android the `.so`).
+
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
 SQLSTATE, transactions, a wrong password, TLS verified, unverified and
@@ -5316,10 +5369,33 @@ and `js-embedded` run the Python and JavaScript suites again on a
 database in their own process (`NUCLEUS_URL=file:…`; the login tests
 skipped) and the `anywhere` examples in a directory, in memory and
 against the server; `editions/embedded/tests` runs the slt suite there
-(each script on a new `:memory:` database through `Client::over`).  `scripts/psql-smoke.sh`
+(each script on a new `:memory:` database through `Client::over`).
+`swift` runs the Swift package's suite and its quickstart.  CI's `ios`
+job builds the XCFramework, runs the Swift suite on macOS and on the iOS
+simulator (the conformance cases on a database in the process, in
+memory and in a directory) and `examples/ios/run.sh` (the Notes app
+launched twice: the second finds the first one's notes); its `android`
+job builds the native libraries and on an emulator runs the library's
+tests (the Java driver's conformance cases on a database in the app) and
+`examples/android/run.sh` likewise.  The engine's own suites run on the
+phones' targets too, with a runner: `xcrun simctl spawn <device>` for
+`aarch64-apple-ios-sim`, `scripts/adb-run.sh` for Android.  `scripts/psql-smoke.sh`
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-13 — §M14.23 step 3, iOS and Android:** the Swift driver
+  (`drivers/swift`: `Nucleus`, and `NucleusEmbedded` over
+  `NucleusEmbedded.xcframework`, `build-xcframework.sh`); the Android
+  library (`drivers/android`: `build-native.sh`, the JNI glue, Kotlin's
+  `Database`, the Java driver inside); the C driver's `nc_connect_io`
+  (`nc_io`), the Java driver's `NucleusClient.connect(in, out, transport,
+  config)` and its use of APIs Android 8 has; `examples/swift-cli`,
+  `examples/ios/Notes.swiftpm` and `run.sh`, `examples/android/notes` and
+  `run.sh`; `scripts/adb-run.sh`; CI's `ios` and `android` jobs and
+  `swift` in `driver-tests.sh`.  Opening a directory syncs only the
+  parents of the levels it made (it synced every ancestor, and Android
+  lets an app open none above its own).
 
 - **2026-11-13 — two bugs CI's fuzzing found:** a statement nested a
   thousand levels deep (or twenty thousand `OR`s) overflowed its

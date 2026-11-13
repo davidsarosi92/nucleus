@@ -945,8 +945,15 @@ PLAN.md §M14.23; an M-series Mac.
 | — a `GROUP BY` over them | 44 ms |
 | — a point query, one round trip | 26 µs |
 
-The browser's engine is 7.1 MB, 1.65 MB with brotli
-(`drivers/js/wasm/build.sh`: LTO, one codegen unit, no model modules).
+Sizes (LTO, one codegen unit, no model modules; the budget for phones
+is 8 MiB on arm64, checked by both build scripts):
+
+| Edition | Size |
+|---------|------|
+| Browser (`drivers/js/wasm/build.sh`) | 7.1 MB; 1.65 MB brotli |
+| iOS arm64: what the engine adds to an app, linked and stripped (`drivers/swift/build-xcframework.sh`) | 7.0 MiB (7,359,552 B); 2.4 MB xz |
+| Android arm64-v8a: `libnucleus_android.so` (`drivers/android/build-native.sh`) | 7.45 MiB (7,813,912 B); 3.8 MB gzip, 2.6 MB xz |
+| Android x86_64 (emulators) | 9.3 MB |
 
 ## Targets
 

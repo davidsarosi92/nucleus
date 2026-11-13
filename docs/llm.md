@@ -11,7 +11,7 @@ what to use instead.  For people the full reference is DOCS.md §8.
   `$1`… in `params`), `explain`, `lint`; `execute` with `--allow-writes`.
 - **Shell:** `ncsql <dir>` or `ncsql -h 127.0.0.1:20035` (user and password
   `nucleus` by default); `-c "<sql>"` runs one command.
-- **Drivers:** Rust, Python, JavaScript, Java, C, C++ over nucleus's protocol
+- **Drivers:** Rust, Python, JavaScript, Java, C, C++, Swift over nucleus's protocol
   `ncp` (port 20035); PostgreSQL clients through the pg-compat front end
   (`nucleus server --pg-compat`, port 5432).  Large results: a cursor
   (`conn.stream(sql)` in Python and JavaScript, `cursor` elsewhere) reads
@@ -25,7 +25,10 @@ what to use instead.  For people the full reference is DOCS.md §8.
   same `connect("file:app.db")` (package `nucleus-db`, its browser entry)
   runs the engine in WebAssembly, kept in OPFS across reloads; there a
   statement runs through (a stream's result is produced whole, at most
-  256 MB) and there is no server to reach.
+  256 MB) and there is no server to reach.  On iOS the Swift package's
+  `NucleusEmbedded` (`Database.open(named: "app").connect()`), on Android
+  the Kotlin library (`Database.open(context, "app").connect()`, the Java
+  driver's `NucleusClient`): the same API in an app.
 
 ## Dialect
 

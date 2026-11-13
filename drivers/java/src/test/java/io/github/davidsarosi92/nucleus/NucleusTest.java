@@ -19,6 +19,13 @@ import java.util.UUID;
 public final class NucleusTest {
     private static int passed;
 
+    /** How a test connects (the Android tests: to a database in the process). */
+    public static java.util.function.Supplier<NucleusClient> connector = () -> NucleusClient.connect(config());
+
+    private static NucleusClient db() {
+        return connector.get();
+    }
+
     private static Config config() {
         return new Config()
                 .host(Objects.requireNonNullElse(System.getenv("NUCLEUS_HOST"), "127.0.0.1"))
@@ -51,7 +58,7 @@ public final class NucleusTest {
     }
 
     static void typesBothWays() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             String t = table();
             db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, b BOOLEAN, f FLOAT, s TEXT, n NUMERIC(10, 2),"
                     + " d DATE, ts TIMESTAMP, tz TIMESTAMPTZ, iv INTERVAL, tags TEXT[])");
@@ -71,7 +78,7 @@ public final class NucleusTest {
     }
 
     static void pipelines() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             String t = table();
             db.query("CREATE TABLE " + t + " (k BIGINT PRIMARY KEY, v TEXT)");
             String ins = "INSERT INTO " + t + " VALUES ($1, $2)";
@@ -99,7 +106,7 @@ public final class NucleusTest {
     }
 
     static void uuid() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             String t = table();
             UUID u = UUID.fromString("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11");
             db.query("CREATE TABLE " + t + " (id UUID PRIMARY KEY, n INT)");
@@ -114,7 +121,7 @@ public final class NucleusTest {
     }
 
     static void vector() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             String t = table();
             db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, v vector(3))");
             List<Object[]> rows = List.of(
@@ -140,7 +147,7 @@ public final class NucleusTest {
     }
 
     static void sparseVector() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             String t = table();
             db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, v sparsevec(100000))");
             SparseVector a = SparseVector.of(Map.of(0, 1f, 99999, 2f), 100000);
@@ -166,7 +173,7 @@ public final class NucleusTest {
     }
 
     static void coreTypes() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             String t = table();
             String mood = t + "_mood";
             db.query("CREATE TYPE " + mood + " AS ENUM ('sad', 'happy')");
@@ -196,7 +203,7 @@ public final class NucleusTest {
     }
 
     static void errors() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             equal(errorCode(() -> db.query("SELECT * FROM nosuch")), "42P01", "undefined table");
             equal(errorCode(() -> db.query("SELECT 1 / 0")), "22012", "division by zero");
             String t = table();
@@ -211,7 +218,7 @@ public final class NucleusTest {
     }
 
     static void transactions() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             String t = table();
             db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY)");
             db.transaction(c -> c.query("INSERT INTO " + t + " VALUES (1)"));
@@ -292,7 +299,7 @@ public final class NucleusTest {
     }
 
     static void cursors() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             String big = "SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b";
             // Ten billion rows: only what is read is produced.
             NucleusClient.Cursor c = db.cursor(500, big);
@@ -326,7 +333,7 @@ public final class NucleusTest {
     }
 
     static void columnar() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             String t = table();
             db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, b BOOLEAN, s SMALLINT, big BIGINT, r REAL, f FLOAT, "
                     + "n NUMERIC(10, 2), tx TEXT, ch CHAR(3), bt BYTEA, d DATE, tm TIME, ts TIMESTAMP, tz TIMESTAMPTZ, "
@@ -378,7 +385,7 @@ public final class NucleusTest {
     }
 
     static void copyAndLoad() {
-        try (NucleusClient db = NucleusClient.connect(config())) {
+        try (NucleusClient db = db()) {
             String t = table();
             db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, name TEXT DEFAULT 'none', x FLOAT, big BIGINT, "
                     + "at TIMESTAMPTZ, n NUMERIC(8, 2), ok BOOLEAN, u UUID, tags TEXT[])");
@@ -419,7 +426,23 @@ public final class NucleusTest {
         System.out.println("ok " + name);
     }
 
-    public static void main(String[] args) {
+    /** A login over a transport of the test's own: a socket's streams. */
+    static void ownTransport() {
+        Config c = config();
+        try {
+            java.net.Socket s = new java.net.Socket(c.host, c.port);
+            try (NucleusClient db = NucleusClient.connect(s.getInputStream(), s.getOutputStream(), s, c)) {
+                equal(db.query("SELECT 40 + $1", 2).rows().get(0).get(0), 42, "over the streams");
+            }
+            check(s.isClosed(), "the transport closed with the client");
+        } catch (java.io.IOException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    /** The cases that need no login (any connection runs them): their count. */
+    public static int runCases() {
+        passed = 0;
         run("types both ways", NucleusTest::typesBothWays);
         run("uuid", NucleusTest::uuid);
         run("vector", NucleusTest::vector);
@@ -427,15 +450,21 @@ public final class NucleusTest {
         run("core types", NucleusTest::coreTypes);
         run("errors", NucleusTest::errors);
         run("transactions", NucleusTest::transactions);
-        run("authentication", NucleusTest::authentication);
-        run("tls", NucleusTest::tls);
-        run("token", NucleusTest::token);
-        run("directory", NucleusTest::directory);
         run("cursors", NucleusTest::cursors);
         run("columnar", NucleusTest::columnar);
         run("copy and load", NucleusTest::copyAndLoad);
         run("pipelines", NucleusTest::pipelines);
-        check(passed == 15, "all tests ran");
+        return passed;
+    }
+
+    public static void main(String[] args) {
+        int cases = runCases();
+        run("authentication", NucleusTest::authentication);
+        run("tls", NucleusTest::tls);
+        run("token", NucleusTest::token);
+        run("directory", NucleusTest::directory);
+        run("own transport", NucleusTest::ownTransport);
+        check(cases == 11 && passed == 16, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

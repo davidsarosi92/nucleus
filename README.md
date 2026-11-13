@@ -15,7 +15,7 @@ values stored out of line —, date, time and timestamps, intervals,
 (`nc_catalog`), and a server that speaks nucleus's own protocol (`ncp`;
 results stream, read a batch at a time through a cursor, or columnar —
 straight into numpy, Arrow, pandas and polars) —
-with drivers for Rust, C, C++, Python, JavaScript/TypeScript and Java, and
+with drivers for Rust, C, C++, Python, JavaScript/TypeScript, Java and Swift, and
 the `ncsql` shell — and, optionally, PostgreSQL's.  It is modular
 (§M14.19): every list is a registry, types are modules with abilities the
 engine asks before relying on them (`uuid` the first), orderings,
@@ -164,9 +164,10 @@ so a program moves to a server by changing its connection string alone
 (`SELECT 1` in 10.5 µs from Python, 30 over loopback TCP) — and in a
 browser page, the engine in WebAssembly with its files in OPFS
 (`connect("file:app.db")` again; a first answer about 100 ms after the
-page starts, the engine 1.65 MB to download).  Next is the rest of the
-developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for the
-browser and phones, memory for AI models, branches, time travel, a B+tree
+page starts, the engine 1.65 MB to download), and in iOS and Android apps
+(a Swift package and a Kotlin library; the engine adds 7.0 MiB to an iOS
+app, 7.45 MiB to an Android one on arm64).  Next is the rest of the
+developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then
 the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
