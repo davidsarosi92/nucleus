@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Files a repository chooses are bounded: `config.json`'s numbers,
+  tensor sizes checked against overflow, Unigram pieces at most 1 KiB;
+  redirects followed only to `https://`.
+
 - The tokens a call ran are reported for the statement's costs
   (`LocalModel::embed_counted`, `Request::report_tokens`, nucleus
   PLAN.md §M14.22 E8a).

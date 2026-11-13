@@ -99,13 +99,18 @@ impl<'a> SafeTensors<'a> {
             ));
         }
         let bytes = &self.data[e.start..e.end];
-        let n: usize = shape.iter().product();
         let size = match e.dtype {
             Dtype::F32 => 4,
             Dtype::F16 | Dtype::Bf16 => 2,
             Dtype::Other => return Err(format!("tensor {name} is not F32, F16 or BF16")),
         };
-        if bytes.len() != n * size {
+        // Checked: a shape whose product wraps would match an empty
+        // tensor.
+        let n = shape
+            .iter()
+            .try_fold(1usize, |a, &d| a.checked_mul(d))
+            .and_then(|n| n.checked_mul(size));
+        if n != Some(bytes.len()) {
             return Err(format!("tensor {name}'s bytes do not match its shape"));
         }
         Ok(match e.dtype {
@@ -172,5 +177,8 @@ mod tests {
         assert!(t.f32("a", &[3]).unwrap_err().contains("configuration"));
         assert!(t.f32("z", &[1]).is_err());
         assert!(SafeTensors::new(&file[..20]).is_err());
+        // A shape whose product wraps to the bytes there are: refused.
+        let wraps = 1usize << (usize::BITS - 1);
+        assert!(t.f32("a", &[2, wraps]).is_err());
     }
 }

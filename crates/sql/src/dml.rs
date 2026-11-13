@@ -2010,11 +2010,23 @@ pub fn check_generated(txn: &dyn KvTxn, reg: &Registry, t: &Table) -> Result<()>
             )));
         }
         let mut volatile = false;
+        let mut models = false;
         e.walk(&mut |x| {
             if let Expr::Call(f, _) = x {
                 volatile |= f.volatility() == crate::ext::Volatility::Volatile;
+                models |= f.name() == "embed";
             }
         });
+        // An embedding column's text is computed by the database's
+        // worker, not as the role that wrote the row: a model called in it
+        // would be called without that role's USAGE (§M14.22).  The
+        // column's model is its USING.
+        if models && matches!(g, crate::ast::Generated::Embedding { .. }) {
+            return Err(Error::feature(format!(
+                "column \"{}\": an embedding column's text cannot call a model (its model is USING)",
+                col.name
+            )));
+        }
         if volatile {
             return Err(Error::invalid_object_definition(format!(
                 "column \"{}\": a generation expression cannot call a volatile function: its value would not follow from the row",

@@ -265,6 +265,24 @@ fn from_a_directory() {
             vec![Value::Text("world".into()), Value::Int(1)],
         ]
     );
+    // A chunk table sized in the model's tokens, written by a role not
+    // granted the model (its maker was); the model kept while it is used.
+    s.execute("CREATE TABLE parts CHUNKS OF d (body) BY tokens SIZE 4 USING tiny")
+        .unwrap();
+    s.execute("CREATE USER writer PASSWORD 'w'; GRANT SELECT, INSERT, UPDATE ON d TO writer")
+        .unwrap();
+    let mut writer = session(&kv);
+    writer.login("writer").unwrap();
+    writer
+        .execute("INSERT INTO d VALUES (5, 'databases hello')")
+        .unwrap();
+    assert_eq!(
+        rows(&mut s, "SELECT chunk, size FROM parts WHERE id = 5"),
+        vec![vec![Value::Text("databases hello".into()), Value::Int(4)]]
+    );
+    assert_eq!(code(&mut writer, "SELECT embed('x', 'tiny')"), "42501");
+    assert_eq!(code(&mut s, "DROP MODEL tiny"), "2BP01");
+    s.execute("DROP TABLE parts").unwrap();
     // Dropped: the files go with the last model that kept them.
     s.execute("DROP MODEL tiny").unwrap();
     assert_eq!(file_keys(&kv), 0);

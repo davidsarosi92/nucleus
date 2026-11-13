@@ -2665,6 +2665,13 @@ fn attach_partition(
             "\"{name}\" is already a partition or partitioned"
         )));
     }
+    // A chunk table follows its documents' table by its key; a partition
+    // would lose a row's chunks as the row moved to another (§M14.22 E7).
+    if t.chunks.is_some() || !crate::chunk_tables::of(&*txn, reg, &t)?.is_empty() {
+        return Err(Error::feature(format!(
+            "\"{name}\" is a chunk table or has one: it cannot be a partition"
+        )));
+    }
     let same = t.columns.len() == parent.columns.len()
         && t.columns.iter().zip(&parent.columns).all(|(a, b)| {
             a.name == b.name

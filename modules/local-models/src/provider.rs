@@ -110,8 +110,13 @@ fn download(url: &str) -> Result<(u16, Vec<u8>, Option<String>)> {
                         .and_then(|i| url[i + 3..].find('/').map(|j| i + 3 + j))
                         .unwrap_or(url.len());
                     format!("{}{next}", &url[..host_end])
-                } else {
+                } else if next.starts_with("https://") {
                     next.to_string()
+                } else {
+                    // Never down to plain HTTP (which reaches loopback).
+                    return Err(Error::prerequisite(format!(
+                        "local: a redirect to {next}, not https"
+                    )));
                 };
             }
             status => return Ok((status, r.body, announced)),

@@ -129,6 +129,10 @@ pub(crate) fn metaspace(s: &str, replacement: char, prepend: bool) -> Vec<String
     words
 }
 
+/// The longest piece a Unigram vocabulary may have (SentencePiece's
+/// default is 16 characters; 1 KiB is far past any published model's).
+const MAX_PIECE: usize = 1024;
+
 /// A byte trie over the pieces: each node its piece's id, if it ends
 /// one, and its children's edges, sorted by byte, in one array.
 struct Trie {
@@ -219,6 +223,15 @@ pub(crate) struct Unigram {
 
 impl Unigram {
     pub(crate) fn new(pieces: Vec<(String, f64)>, unk: u32) -> Result<Unigram, String> {
+        // The trie is built a level a byte (recursively): a piece longer
+        // than any real vocabulary's is a file to refuse, not to overflow
+        // the stack on.
+        if let Some(p) = pieces.iter().find(|p| p.0.len() > MAX_PIECE) {
+            return Err(format!(
+                "tokenizer.json: a Unigram piece of {} bytes (at most {MAX_PIECE})",
+                p.0.len()
+            ));
+        }
         if unk as usize >= pieces.len() {
             return Err("a Unigram model whose unknown token is not in it".into());
         }
@@ -301,6 +314,13 @@ mod tests {
         out.clear();
         u.word("▁xyc", &mut out);
         assert_eq!(out, [1, 0, 5], "unknowns in a row are one");
+        // A piece no vocabulary has (the trie would recurse a level a
+        // byte): refused, not a stack overflow.
+        let long = vec![("<unk>".to_string(), 0.0), ("x".repeat(200_000), -1.0)];
+        let Err(e) = Unigram::new(long, 0) else {
+            panic!("a 200,000-byte piece taken");
+        };
+        assert!(e.contains("200000 bytes"), "{e}");
     }
 
     #[test]

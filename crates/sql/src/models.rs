@@ -705,7 +705,7 @@ pub fn drop(txn: &mut dyn KvTxn, name: &str, if_exists: bool) -> Result<()> {
     let users = crate::embedding::using_model(&*txn, name)?;
     if !users.is_empty() {
         return Err(Error::dependent_objects(format!(
-            "cannot drop model \"{name}\": embedding columns of {} use it",
+            "cannot drop model \"{name}\": embedding columns or chunk tables of {} use it",
             users.join(", ")
         )));
     }
@@ -899,7 +899,7 @@ pub fn throttled(e: &Error) -> bool {
 /// The tokens of `texts` by model `name` (`USAGE` on it checked), as
 /// its provider counts them ([`ModelProvider::count_tokens`]).
 pub fn count_tokens(txn: &dyn KvTxn, name: &str, texts: &[&str]) -> Result<Vec<usize>> {
-    let m = existing(txn, name)?;
+    existing(txn, name)?;
     crate::privileges::Checker::new().require(
         txn,
         crate::privileges::Kind::Model,
@@ -907,6 +907,18 @@ pub fn count_tokens(txn: &dyn KvTxn, name: &str, texts: &[&str]) -> Result<Vec<u
         crate::privileges::USAGE,
         None,
     )?;
+    count_tokens_unchecked(txn, name, texts)
+}
+
+/// [`count_tokens`] without the privilege check: for a chunk table's
+/// writes, whose maker was checked when they made it (its writers need
+/// not be granted the model).
+pub(crate) fn count_tokens_unchecked(
+    txn: &dyn KvTxn,
+    name: &str,
+    texts: &[&str],
+) -> Result<Vec<usize>> {
+    let m = existing(txn, name)?;
     if texts.is_empty() {
         return Ok(Vec::new());
     }
@@ -1078,43 +1090,46 @@ pub(crate) fn embed_unchecked(
                 k.micros += c.micros;
                 k.tokens += c.tokens;
             });
-            let vectors = match r {
-                Ok(v) => v,
+            // Every batch answered is kept, whatever another's fate: the
+            // call is paid for, and a retry finds it in the cache.
+            let checked = r.and_then(|vectors| {
+                if vectors.len() != b.len() {
+                    return Err(Error::data_exception(format!(
+                        "model \"{}\" answered {} vectors for {} texts",
+                        m.name,
+                        vectors.len(),
+                        b.len()
+                    )));
+                }
+                for v in &vectors {
+                    if v.len() != m.dimensions as usize {
+                        return Err(Error::data_exception(format!(
+                            "model \"{}\" answered a vector of {} components, not {}",
+                            m.name,
+                            v.len(),
+                            m.dimensions
+                        )));
+                    }
+                    if v.iter().any(|x| !x.is_finite()) {
+                        return Err(Error::data_exception(format!(
+                            "model \"{}\" answered a component that is not a finite number",
+                            m.name
+                        )));
+                    }
+                }
+                Ok(vectors)
+            });
+            match checked {
+                Ok(vectors) => {
+                    for (&i, v) in send[b.clone()].iter().zip(vectors) {
+                        let v: Arc<[f32]> = v.into();
+                        keep(keys[i], v.clone());
+                        out[i] = Some(v);
+                    }
+                }
                 Err(e) => {
                     failure.get_or_insert(e);
-                    continue;
                 }
-            };
-            if failure.is_some() {
-                continue;
-            }
-            if vectors.len() != b.len() {
-                failure = Some(Error::data_exception(format!(
-                    "model \"{}\" answered {} vectors for {} texts",
-                    m.name,
-                    vectors.len(),
-                    b.len()
-                )));
-                continue;
-            }
-            for (&i, v) in send[b.clone()].iter().zip(vectors) {
-                if v.len() != m.dimensions as usize {
-                    return Err(Error::data_exception(format!(
-                        "model \"{}\" answered a vector of {} components, not {}",
-                        m.name,
-                        v.len(),
-                        m.dimensions
-                    )));
-                }
-                if v.iter().any(|x| !x.is_finite()) {
-                    return Err(Error::data_exception(format!(
-                        "model \"{}\" answered a component that is not a finite number",
-                        m.name
-                    )));
-                }
-                let v: Arc<[f32]> = v.into();
-                keep(keys[i], v.clone());
-                out[i] = Some(v);
             }
         }
         if let Some(e) = failure {

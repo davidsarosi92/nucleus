@@ -122,6 +122,14 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
 /// Sends `r` and reads its response.
 pub fn send(r: &Request<'_>) -> Result<Response, Error> {
     let url = r.url;
+    // Spaces and control characters would go into the request line as
+    // they are: another header, or another request.
+    if url.chars().any(|c| c <= ' ' || c == '\x7f') {
+        return Err(Error {
+            message: format!("{}: a URL with spaces or control characters", r.method),
+            transient: false,
+        });
+    }
     let fail = |e: &dyn std::fmt::Display, transient: bool| Error {
         message: format!("{} {url}: {e}", r.method),
         transient,
@@ -279,7 +287,8 @@ fn parse(raw: &[u8]) -> Result<Response, String> {
             if size == 0 {
                 break out;
             }
-            if rest.len() < size + 2 {
+            // Compared without adding to `size`, which the server chose.
+            if rest.len() < 2 || rest.len() - 2 < size {
                 return Err("a truncated chunk".into());
             }
             out.extend_from_slice(&rest[..size]);
@@ -308,6 +317,11 @@ mod tests {
         let r = parse(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}extra").unwrap();
         assert_eq!((r.status, r.body.as_slice()), (200, &b"{}"[..]));
         let r = parse(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{\"\r\n3;x\r\na\":\r\n2\r\n1}\r\n0\r\n\r\n").unwrap();
+        // A chunk size near usize::MAX: refused, not wrapped.
+        assert!(
+            parse(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nab\r\n0\r\n\r\n")
+                .is_err()
+        );
         assert_eq!(r.body, b"{\"a\":1}");
         let r =
             parse(b"HTTP/1.1 429 Too Many Requests\r\nretry-after: 7\r\nContent-Length: 0\r\n\r\n")
@@ -338,7 +352,15 @@ mod tests {
             ..Default::default()
         })
         .unwrap_err();
-        assert!(!e.transient);
+        assert!(!e.transient); // Nor in the URL, which goes into the request line.
+        for url in ["http://127.0.0.1:1/a b", "http://127.0.0.1:1/a\r\nX: 1"] {
+            let e = send(&Request {
+                url,
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(!e.transient && e.message.contains("control"), "{url}");
+        }
     }
 
     #[test]

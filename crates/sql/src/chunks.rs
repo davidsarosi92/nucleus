@@ -453,6 +453,9 @@ fn markdown(text: &str) -> Vec<Section> {
 pub(crate) struct ModelTokens<'a> {
     pub(crate) txn: &'a dyn nucleus_kv::KvTxn,
     pub(crate) model: &'a str,
+    /// `USAGE` on the model checked (a caller's `chunks()`), or not (a
+    /// chunk table's writes, checked when it was made).
+    pub(crate) checked: bool,
 }
 
 /// `chunks()`'s columns for `chunks` of `text`: position (from 1),
@@ -480,7 +483,11 @@ pub(crate) fn rows(text: &str, chunks: Vec<Chunk>) -> Vec<[crate::types::Value; 
 
 impl Measure for ModelTokens<'_> {
     fn sizes(&mut self, pieces: &[&str]) -> Result<Vec<usize>> {
-        crate::models::count_tokens(self.txn, self.model, pieces)
+        if self.checked {
+            crate::models::count_tokens(self.txn, self.model, pieces)
+        } else {
+            crate::models::count_tokens_unchecked(self.txn, self.model, pieces)
+        }
     }
 
     fn additive(&self) -> bool {
@@ -565,6 +572,7 @@ impl crate::ext::TableFunction for Chunks {
                 let mut measure = ModelTokens {
                     txn: cx.txn(),
                     model: m,
+                    checked: true,
                 };
                 chunk(text, by, size, overlap, &mut measure)?
             }

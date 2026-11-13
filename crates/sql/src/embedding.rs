@@ -267,7 +267,11 @@ pub(crate) fn enqueue_all(
     column: usize,
 ) -> Result<()> {
     let keys: Vec<Vec<u8>> = {
-        let ctx = Ctx::new(&*txn, reg, &[]);
+        // Validated: a row a writer commits after this snapshot (and
+        // before this transaction) makes it conflict and run again, not
+        // go without a job.
+        let mut ctx = Ctx::new(&*txn, reg, &[]);
+        ctx.validated = true;
         crate::exec::matching(t, &crate::plan::Access::Full, None, &ctx)?
             .map(|r| r.map(|(k, _)| k[INDEX_PREFIX_LEN..].to_vec()))
             .collect::<Result<_>>()?
@@ -404,7 +408,10 @@ pub(crate) fn using_model(txn: &dyn KvTxn, name: &str) -> Result<Vec<String>> {
                 c.generated
                     .as_ref()
                     .is_some_and(|g| g.model() == Some(name) || g.next_model() == Some(name))
-            })
+            }) || t
+                .chunks
+                .as_ref()
+                .is_some_and(|c| c.model.as_deref() == Some(name))
         })
         .map(|t| t.name)
         .collect())
@@ -601,6 +608,15 @@ fn with_driver<R>(instance: u64, f: impl FnOnce(&mut Driver) -> R) -> R {
 fn note(instance: u64) {
     with_driver(instance, |d| d.maybe = true);
     drivers().1.notify_all();
+    PUT.with(|p| p.set(true));
+}
+
+thread_local! {
+    /// Whether this thread put a job since its session's last statement:
+    /// the job is seen once the writer commits, so the background worker
+    /// is woken again then ([`after_statement`]) — woken only when it was
+    /// put, it may look before the commit and sleep past it.
+    static PUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Whether an error may pass when tried again.
@@ -617,6 +633,17 @@ fn backoff(kv: &dyn Kv, attempts: u32) -> i64 {
     let mut b = [0u8; 8];
     kv.random_bytes(&mut b);
     (u64::from_le_bytes(b) % (cap as u64 + 1)) as i64 * 1_000
+}
+
+/// A row's text for a job, or why its expression could not give one.
+type Text = std::result::Result<Option<String>, Error>;
+
+/// [`text_of`] by a source that may not have bound.
+fn evaluate(source: &Result<Expr>, row: &Row, ctx: &Ctx) -> Text {
+    match source {
+        Ok(s) => text_of(s, row, ctx),
+        Err(e) => Err(e.clone()),
+    }
 }
 
 /// The text column `column`'s expression gives for `row`.
@@ -661,7 +688,19 @@ pub fn work(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<Round> {
             ..Round::default()
         });
     }
-    let r = round(kv, reg);
+    // A panic (a provider's, say) is the round's error: the driver is
+    // left free for the next, and the server's worker lives on.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| round(kv, reg)))
+        .unwrap_or_else(|p| {
+            let what = p
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            Err(Error::internal(format!(
+                "a round of the embedding columns panicked: {what}"
+            )))
+        });
     with_driver(instance, |d| {
         d.busy = false;
         if let Ok(r) = &r {
@@ -767,9 +806,10 @@ fn round(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<Round> {
         }
         .expect("an embedding column's model")
         .to_string();
-        // The texts, at the round's snapshot.
-        let texts: Vec<Option<String>> = {
-            let source = bind_source(&*ro, reg, t, column)?;
+        // The texts, at the round's snapshot: an expression that fails
+        // for a row fails that row's job, not the round.
+        let texts: Vec<Text> = {
+            let source = bind_source(&*ro, reg, t, column);
             let storage = crate::storage::of(t)?;
             let ctx = Ctx::new(&*ro, reg, &[]);
             let mut labels = crate::enums::Labels::default();
@@ -777,13 +817,16 @@ fn round(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<Round> {
             for j in jobs {
                 let row = storage.get(&*ro, t, &row_key(t, &j.pk), None, &mut labels)?;
                 texts.push(match row {
-                    Some(r) => text_of(&source, &r, &ctx)?,
-                    None => None,
+                    Some(r) => evaluate(&source, &r, &ctx),
+                    None => Ok(None),
                 });
             }
             texts
         };
-        let asked: Vec<&str> = texts.iter().flatten().map(String::as_str).collect();
+        let asked: Vec<&str> = texts
+            .iter()
+            .filter_map(|t| t.as_ref().ok().and_then(|t| t.as_deref()))
+            .collect();
         // On the database's clock: a model's rate limits read it.
         let results = crate::datetime::with_now(now, kv, || call(&*ro, &model, &asked));
         let (ok, failed) = results.iter().fold((false, false), |(o, f), r| match r {
@@ -825,11 +868,12 @@ fn round(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<Round> {
     Ok(round)
 }
 
-/// Whether a key starts with `prefix`.
+/// Whether a key starts with `prefix` (validated: one put meanwhile
+/// makes the transaction conflict).
 fn any_under(txn: &dyn KvTxn, prefix: &[u8]) -> Result<bool> {
     let end = nucleus_kv::prefix_end(prefix).expect("a prefix");
     Ok(txn
-        .scan(Bound::Included(prefix), Bound::Excluded(&end[..]))?
+        .scan_validated(Bound::Included(prefix), Bound::Excluded(&end[..]))?
         .next()
         .transpose()?
         .is_some())
@@ -878,13 +922,19 @@ fn swap(kv: &Arc<dyn Kv>, reg: &Registry, table_id: u32, column: usize) -> Resul
             m.define(&shape, ix)?;
         }
     }
+    // Rows without a next vector (written while the move began, or
+    // since): their vectors made again, by the new model.
+    let mut missing = Vec::new();
     let rows = {
-        let ctx = Ctx::new(&*txn, reg, &[]);
+        // Validated, as `enqueue_all` is: a row written meanwhile makes
+        // the swap conflict and wait for the next round.
+        let mut ctx = Ctx::new(&*txn, reg, &[]);
+        ctx.validated = true;
         let mut rows = crate::spill::Stash::new();
         for r in crate::exec::matching(&old, &crate::plan::Access::Full, None, &ctx)? {
             let (key, mut row) = r?;
             let pk = &key[INDEX_PREFIX_LEN..];
-            row[column] = match ctx.txn.get(&shadow_key(table_id, column, pk))? {
+            row[column] = match ctx.txn.get_validated(&shadow_key(table_id, column, pk))? {
                 Some(b) if !b.is_empty() => {
                     let v: Vec<f32> = b
                         .as_chunks::<4>()
@@ -894,7 +944,12 @@ fn swap(kv: &Arc<dyn Kv>, reg: &Registry, table_id: u32, column: usize) -> Resul
                         .collect();
                     crate::dml::assign(ctx.txn, crate::vectors::checked(&v)?, &new, column)?
                 }
-                _ => Value::Null,
+                // A NULL text's.
+                Some(_) => Value::Null,
+                None => {
+                    missing.push(pk.to_vec());
+                    Value::Null
+                }
             };
             rows.push(crate::exec::keyed(key, row))?;
         }
@@ -904,6 +959,9 @@ fn swap(kv: &Arc<dyn Kv>, reg: &Registry, table_id: u32, column: usize) -> Resul
     // The old model's jobs are moot: a changed text's vector is made.
     delete_prefix(txn.as_mut(), &slot_prefix(table_id, column))?;
     delete_prefix(txn.as_mut(), &shadow_prefix(table_id, column))?;
+    for pk in &missing {
+        enqueue(txn.as_mut(), table_id, column, pk)?;
+    }
     catalog::update_table(txn.as_mut(), &new)?;
     match txn.commit() {
         Ok(_) => Ok(true),
@@ -950,7 +1008,7 @@ fn write_back(
     t: &Table,
     slot: usize,
     jobs: &[Job],
-    texts: &[Option<String>],
+    texts: &[Text],
     results: Vec<Result<Arc<[f32]>>>,
     now: i64,
     round: &mut Round,
@@ -962,14 +1020,16 @@ fn write_back(
     let mut deletes = Vec::new();
     let mut puts = Vec::new();
     {
-        let source = bind_source(&*txn, reg, t, column)?;
+        let source = bind_source(&*txn, reg, t, column);
         let ctx = Ctx::new(&*txn, reg, &[]);
         let mut labels = crate::enums::Labels::default();
         let mut results = results.into_iter();
         for (j, text) in jobs.iter().zip(texts) {
-            let result = text
-                .as_ref()
-                .map(|_| results.next().expect("a result a text"));
+            let result = match text {
+                Ok(Some(_)) => Some(results.next().expect("a result a text")),
+                Ok(None) => None,
+                Err(e) => Some(Err(e.clone())),
+            };
             if txn.get(&j.key)?.as_deref() != Some(&j.entry[..]) {
                 continue;
             }
@@ -979,7 +1039,12 @@ fn write_back(
                 round.cleared += 1;
                 continue;
             };
-            if text_of(&source, &row, &ctx)? != *text {
+            let same = match (evaluate(&source, &row, &ctx), text) {
+                (Ok(now), Ok(then)) => now == *then,
+                (Err(_), Err(_)) => true,
+                _ => false,
+            };
+            if !same {
                 continue;
             }
             let failure = match result {
@@ -1070,6 +1135,10 @@ fn write_back(
 /// library, without a thread of its own, keeps its columns current with
 /// the work of its statements.
 pub fn after_statement(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<()> {
+    if PUT.with(|p| p.replace(false)) {
+        note(kv.instance());
+        PUT.with(|p| p.set(false));
+    }
     let now = crate::datetime::from_system(kv.wall_clock());
     let go = with_driver(kv.instance(), |d| {
         let go = !d.background && !d.busy && (d.maybe || d.next.is_some_and(|n| n <= now));

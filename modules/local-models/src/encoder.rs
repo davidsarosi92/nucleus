@@ -121,11 +121,23 @@ impl Config {
             types: n("type_vocab_size").unwrap_or(1).max(1),
             eps: v["layer_norm_eps"].as_f64().unwrap_or(1e-12) as f32,
         };
-        if c.heads == 0
-            || !c.hidden.is_multiple_of(c.heads)
-            || c.positions <= offset
-            || c.layers == 0
-        {
+        // Each within what a sentence encoder could be (the largest
+        // published are a few times smaller), so a hostile file cannot ask
+        // for an allocation the weights do not back.
+        for (what, value, most) in [
+            ("hidden_size", c.hidden, 1 << 14),
+            ("num_hidden_layers", c.layers, 256),
+            ("num_attention_heads", c.heads, 256),
+            ("intermediate_size", c.intermediate, 1 << 16),
+            ("vocab_size", c.vocab, 1 << 22),
+            ("max_position_embeddings", c.positions, 1 << 16),
+            ("type_vocab_size", c.types, 1 << 10),
+        ] {
+            if value == 0 || value > most {
+                return Err(format!("config.json: {what} {value} (1 to {most})"));
+            }
+        }
+        if !c.hidden.is_multiple_of(c.heads) || c.positions <= offset {
             return Err("config.json: dimensions that do not fit together".into());
         }
         Ok(c)
@@ -199,12 +211,14 @@ impl Encoder {
                 t(&format!("{name}.bias"), &[out])?,
             ))
         };
-        let mut layers = Vec::with_capacity(config.layers);
+        // Grown as the weights are read, never sized by the configuration
+        // alone.
+        let mut layers = Vec::new();
         for l in 0..config.layers {
             let p = format!("encoder.layer.{l}.");
             // Query, key and value as one product of three times the width.
-            let mut w = Vec::with_capacity(3 * h * h);
-            let mut b = Vec::with_capacity(3 * h);
+            let mut w = Vec::new();
+            let mut b = Vec::new();
             for part in ["query", "key", "value"] {
                 w.extend(t(&format!("{p}attention.self.{part}.weight"), &[h, h])?);
                 b.extend(t(&format!("{p}attention.self.{part}.bias"), &[h])?);
@@ -463,6 +477,27 @@ impl Scratch {
         ] {
             b.clear();
             b.resize(len, 0.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A configuration's numbers are bounded before anything is sized by
+    /// them.
+    #[test]
+    fn configurations_out_of_bounds() {
+        let config = |layers: &str, hidden: &str| {
+            format!(
+                r#"{{"model_type":"bert","hidden_act":"gelu","hidden_size":{hidden},"num_hidden_layers":{layers},"num_attention_heads":4,"intermediate_size":64,"vocab_size":100,"max_position_embeddings":512}}"#
+            )
+        };
+        assert!(Config::from_json(config("2", "32").as_bytes()).is_ok());
+        for (layers, hidden) in [("1000000000000000", "32"), ("2", "0"), ("2", "1048576")] {
+            let e = Config::from_json(config(layers, hidden).as_bytes()).unwrap_err();
+            assert!(e.contains("(1 to "), "{e}");
         }
     }
 }

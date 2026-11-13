@@ -116,7 +116,11 @@ fn derive(txn: &dyn KvTxn, spec: &ChunkSpec, text: Option<&str>) -> Result<Vec<[
             by,
             size,
             overlap,
-            &mut chunks::ModelTokens { txn, model: m },
+            &mut chunks::ModelTokens {
+                txn,
+                model: m,
+                checked: false,
+            },
         )?,
     };
     Ok(chunks::rows(text, cs))
@@ -419,7 +423,10 @@ pub(crate) fn create(
     let src = catalog::table(&*txn, source)?;
     let chunked = of(&*txn, reg, &src)?;
     let docs: Vec<Row> = {
-        let ctx = crate::expr::Ctx::new(&*txn, reg, &[]);
+        // Validated: a document a writer commits meanwhile makes this
+        // conflict and run again, not go without its chunks.
+        let mut ctx = crate::expr::Ctx::new(&*txn, reg, &[]);
+        ctx.validated = true;
         crate::exec::matching(&src, &crate::plan::Access::Full, None, &ctx)?
             .map(|r| r.map(|(_, row)| row))
             .collect::<Result<_>>()?
