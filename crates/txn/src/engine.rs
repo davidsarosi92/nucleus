@@ -580,7 +580,7 @@ impl Engine {
             // In chunks, releasing the commit lock between them.
             let commit = lock(&self.inner.commit);
             let wm = self.inner.current_watermark();
-            let (mut ops, next) =
+            let (mut ops, covered, next) =
                 self.sweep_chunk(&from, None, Some(&committed), chunk, wm, &mut removed)?;
             if next.is_none() {
                 // The whole keyspace swept: these transactions' intents are
@@ -590,7 +590,10 @@ impl Engine {
                 }
             }
             if !ops.is_empty() {
-                let lsn = self.inner.store.write(&Batch { meta: *commit, ops })?;
+                let lsn = self
+                    .inner
+                    .store
+                    .write_covering(&Batch { meta: *commit, ops }, &covered)?;
                 drop(commit);
                 if next.is_none() {
                     // Durable — and with it every batch before (the log is
@@ -662,10 +665,12 @@ impl Engine {
             } else {
                 self.inner.current_watermark()
             };
-            let (ops, next) =
+            let (ops, covered, next) =
                 self.sweep_chunk(&from, Some(&to), None, VACUUM_CHUNK, wm, &mut removed)?;
             if !ops.is_empty() {
-                self.inner.store.write(&Batch { meta: *commit, ops })?;
+                self.inner
+                    .store
+                    .write_covering(&Batch { meta: *commit, ops }, &covered)?;
             }
             drop(commit);
             match next {
@@ -677,8 +682,14 @@ impl Engine {
 
     /// One chunk of a sweep (the commit lock held) from store key `from`
     /// to `to` (exclusive; `None`: the end), about `chunk` entries: the
-    /// writes removing the versions no snapshot can see, and the store key
-    /// the next chunk starts at (`None`: the sweep is through).  With
+    /// writes removing the versions no snapshot can see, the ranges they
+    /// cover, and the store key the next chunk starts at (`None`: the
+    /// sweep is through).  A key's versions removed are all those from the
+    /// first removed on — the older ones a commit's [`Collect`] dropped
+    /// without logging too, which replay brings back: the range from the
+    /// first removed to the key's last version goes as one on replay
+    /// ([`Store::write_covering`]), or a crash would find a version under
+    /// a tombstone the sweep removed (a deleted row back).  With
     /// `committed` (the transactions committed when a whole sweep began)
     /// intents are resolved — those committed made versions, aborted ones
     /// deleted; without, a key with an intent is left whole.
@@ -690,14 +701,17 @@ impl Engine {
         chunk: usize,
         wm: u64,
         removed: &mut u64,
-    ) -> Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, Option<Vec<u8>>)> {
+    ) -> Result<(Ops, Vec<(Vec<u8>, Vec<u8>)>, Option<Vec<u8>>)> {
         let others = self.inner.others(None);
         let mut ops = Vec::new();
+        let mut covered = Vec::new();
         let mut last_user: Option<Vec<u8>> = None;
         let mut kept_one = false;
         let mut next = None;
         let tree = self.inner.store.read()?;
         let mut pinned = false;
+        // This key's removed versions' range recorded.
+        let mut covering = false;
         let to = to.map_or(Bound::Unbounded, Bound::Excluded);
         for entry in versions(&tree, Bound::Included(from), to)?
             .into_iter()
@@ -713,6 +727,7 @@ impl Engine {
                 last_user = Some(user.clone());
                 kept_one = false;
                 pinned = false;
+                covering = false;
             }
             if let Some(id) = intent_of(ts) {
                 // A key with an intent keeps its versions this sweep.
@@ -737,12 +752,16 @@ impl Engine {
                 .ok_or(Error::Corrupt("bad version value"))?
                 .is_none();
             if kept_one || tombstone {
+                if !covering {
+                    covering = true;
+                    covered.push((k.clone(), after_versions(&user)));
+                }
                 ops.push((k, None));
                 *removed += 1;
             }
             kept_one = true;
         }
-        Ok((ops, next))
+        Ok((ops, covered, next))
     }
 
     /// Store entries (all versions) — for tests and statistics.
@@ -1351,6 +1370,9 @@ impl Inner {
 ///
 /// Not logged: after a crash, replay brings what it dropped back — unseen
 /// by any snapshot still, and vacuum's to sweep.
+/// A batch's writes.
+type Ops = Vec<(Vec<u8>, Option<Vec<u8>>)>;
+
 struct Collect {
     wm: u64,
 }

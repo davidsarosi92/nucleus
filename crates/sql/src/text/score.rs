@@ -329,6 +329,13 @@ pub(crate) fn bind(
         ));
     }
     let text = |s: &str| Expr::Literal(Value::Text(s.into()));
+    // The query inside the statistics' subquery: a level down.  One that
+    // reads an enclosing row — a `LATERAL` query per row, `recall()` of
+    // each of a batch's questions (PLAN.md §M14.24 R4) — makes the
+    // subquery correlated: the statistics read again for each.
+    let q_in = q.lifted(1);
+    let parts_in = parts.map(|p| p.lifted(1));
+    let correlated = q_in != *q || parts_in.as_ref() != parts;
     let stats = Expr::Subquery(Box::new(SubPlan {
         kind: SubKind::Scalar,
         plan: Plan::Project {
@@ -338,13 +345,13 @@ pub(crate) fn bind(
             }),
             exprs: vec![Expr::Call(
                 FnRef::new(Arc::new(TextStats)),
-                [text(&t.name), text(&t.indexes[i].name), q.clone()]
+                [text(&t.name), text(&t.indexes[i].name), q_in]
                     .into_iter()
-                    .chain(parts.cloned())
+                    .chain(parts_in)
                     .collect(),
             )],
         },
-        correlated: false,
+        correlated,
     }));
     let score = Expr::Call(
         FnRef::new(Arc::new(TextScore)),

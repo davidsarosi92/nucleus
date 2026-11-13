@@ -173,13 +173,15 @@ valid, when it expires, its source — `REMEMBER 'prefers short answers'
 FOR 'ann' IN notes` merges a near-duplicate or adds it (`REPLACING id`
 keeps the old one as history), `SELECT * FROM recall('notes', 'ann',
 'how to answer')` ranks a subject's current memories by text and vector
-together, all under the caller's privileges and row-level security;
+together — under a millisecond among 100 000 memories in the process,
+many questions in one statement through `LATERAL` —, all under the
+caller's privileges and row-level security;
 rows expire by a column (`ALTER TABLE t SET EXPIRY (expires_at)`),
 `FORGET SUBJECT 'ann'` erases a subject's rows from every table whose
 columns are marked as saying whose a row is — all of them or none —,
 scrubs every file of their bytes (old versions, index pages, free pages,
 the log) and searches the files to prove none is left, recording the
-erasure without her data, and `nucleus mcp --memory` gives an
+erasure without the subject's data, and `nucleus mcp --memory` gives an
 agent remember, recall and forget.
 Next is the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, branches, time travel, a B+tree

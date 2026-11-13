@@ -692,3 +692,65 @@ fn the_search_decodes_leaves() {
         assert_eq!(found, 1, "found in the data file's leaf");
     }
 }
+
+/// Drops every entry of the leaves a batch rewrites whose key starts
+/// with `x` — without logging it.
+struct DropX;
+
+impl nucleus_storage::btree::LeafFilter for DropX {
+    fn drops(&self, entries: &[nucleus_storage::btree::LeafEntry], drop: &mut [bool]) {
+        for (e, d) in entries.iter().zip(drop.iter_mut()) {
+            *d = e.key.starts_with(b"x");
+        }
+    }
+}
+
+#[test]
+fn replay_deletes_a_covered_range_whole() {
+    // A filter drops entries without logging them; a later delete of what
+    // was left there, covering the range, takes them on replay too.
+    let p = sim(1);
+    let (store, _) = open(&p).unwrap();
+    let put = |k: &[u8]| (k.to_vec(), Some(b"v".to_vec()));
+    store
+        .commit(&Batch {
+            meta: 1,
+            ops: vec![put(b"x1"), put(b"x2"), put(b"x3")],
+        })
+        .unwrap();
+    // A write into the same leaf, filtered: x1 and x2 go, unlogged — the
+    // batch's own x3 too, as it lands in the rewritten leaf.
+    let lsn = store
+        .write_filtered(
+            &Batch {
+                meta: 2,
+                ops: vec![put(b"y")],
+            },
+            &DropX,
+        )
+        .unwrap();
+    store.wait_durable(lsn).unwrap();
+    assert_eq!(contents(&store).keys().collect::<Vec<_>>(), [b"y"]);
+    // Nothing of x is left to delete; the range is covered.
+    store
+        .write_covering(
+            &Batch {
+                meta: 3,
+                ops: vec![(b"y".to_vec(), None)],
+            },
+            &[(b"x".to_vec(), b"y".to_vec())],
+        )
+        .unwrap();
+    store
+        .commit(&Batch {
+            meta: 4,
+            ops: vec![put(b"z")],
+        })
+        .unwrap();
+    drop(store);
+    p.sim_fs().crash();
+    let (store, rec) = open(&p).unwrap();
+    assert_eq!(rec.meta, 4);
+    // Replay put x1–x3 back, unfiltered, and the covering delete took them.
+    assert_eq!(contents(&store).keys().collect::<Vec<_>>(), [b"z"]);
+}

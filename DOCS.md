@@ -579,7 +579,12 @@ WAL and applies it under the tree's write lock (visible at once);
 `wait_durable(lsn)`; `commit` = both.  `write_filtered(&Batch, filter)`
 applies it through a `LeafFilter` (§4.4) — not logged: replay applies the
 batch without it, so what a filter drops must be garbage its layer can
-find again after a crash.  A batch whose keys are all
+find again after a crash.  `write_covering(&Batch, covered)` logs a
+batch of deletes with key ranges it *covers* — ranges whose entries, in
+the tree as it is, are all among its deletes: replay deletes everything
+left in them, what a filtered write dropped there and replay brought
+back too (WAL batch version 2: version 1's layout, then the ranges;
+version 1 is still written and read for a batch without).  A batch whose keys are all
 distinct (every batch the engine writes) is applied in one sorted pass
 (`apply_sorted`); otherwise op by op, in order.  `write_unlogged(&Batch)`
 applies a batch without logging it (D16): durable only once a checkpoint
@@ -843,7 +848,15 @@ or write of its own: a leaf may hold only part of a key's versions, which
 is enough (newer ones in an earlier leaf only make one more garbage), but a
 tombstone a leaf ends with stays (older versions of its key may go on in
 the next leaf).  What it drops is not logged; after a crash, replay brings
-it back, invisible still.  `vacuum()` sweeps all keys, in chunks.
+it back, invisible still — under a newer version replay brings back as
+well.  `vacuum()` sweeps all keys, in chunks; a sweep's deletes of a key
+are its versions from the first it removes to the last, so it logs them
+covering that range (`Store::write_covering`, §4.5): replay deletes the
+older versions a commit dropped there too.  Without it a tombstone the
+sweep removed — the commit having dropped the value under it, and so
+the sweep finding the tombstone alone — let replay's value under it
+back: a deleted row back after a crash (the embedding queue's crash test
+found it, its range vacuumed after each round, §8.24).
 Snapshots register under the same lock the watermark is read under, so GC
 never removes a version a snapshot can see.  `begin_with(at)` reads an older
 snapshot within the history window (read-only), else `SnapshotTooOld`.
@@ -1686,7 +1699,18 @@ previous round until it yields nothing; `UNION` drops repeats, so cycles
 end), `Function` (functions in `FROM`), `Virtual` (catalog tables),
 `Window` (below).  The executor runs them as iterators; a join
 stashes its right input, sorts and aggregates take their input — each
-within `work_mem`, below.
+within `work_mem`, below.  A `Project` run by the session's thread
+evaluates, on its first row, each call that reads no row — not
+volatile, its arguments constants, parameters or the enclosing rows'
+values (fixed for the plan's run: it is built again for each) — and
+uses the value for every row (`exec::row_free_evaluated`; PostgreSQL
+folds stable functions of constants at execution start the same way): a
+stable function is the same within a statement, so `embed(q, m)` beside
+each row's vector in a ranking is one model-cache lookup, not one a row
+(§M14.24 R4).  A call that fails then is left to fail on its row; an
+expression holding a subquery is left whole (a copy's plan is not the
+one the statement's maps know by address: columns needed,
+measurements, cached rows).
 
 **Window functions** (`window`, §M14.27 S4).  `f(…) OVER (PARTITION BY
 … ORDER BY … frame)`, a `WINDOW` clause's named windows (one refining
@@ -4356,7 +4380,12 @@ put, or the earliest not-before reached; one round at a time a database)
 unless a background worker serves the database (`embedding::serve`,
 started by the `nucleus` server: rounds while jobs are due, else asleep
 until a job is put or comes due — woken again once the writer that put
-it has committed, since a job put is seen only then).
+it has committed, since a job put is seen only then).  A round that
+embedded or cleared jobs vacuums the queue's range after its commit
+(`Kv::vacuum_range`, RocksDB's queue pattern as an HNSW index's delta,
+§8.18): else every statement that waits for the queue steps over the
+done jobs' tombstones until the whole vacuum runs — 12 ms a statement
+after 100 000 rows were embedded, 1 ms with it (§M14.24 R4).
 
 Pending rows, by the session's `embedding.pending`: `include` (the
 default: each row's vector as it is — NULL before its first, the old one
@@ -4590,6 +4619,26 @@ index's rows; not analyzed, the subject's rows are read by its index
 (§8.17) and the words checked on them.  It is a query: the
 caller's privileges, row-level security and plan apply.  Deleting a
 memory is `DELETE`; the drivers' `forget` and the MCP tool are that.
+
+**Batched recall and its latency** (§M14.24 R4).  A model's several
+questions are one statement — one parse, one snapshot:
+
+```sql
+SELECT n, r.id, r.content, r.score
+FROM unnest($2::text[]) WITH ORDINALITY AS b(q, n),
+     LATERAL recall('notes', $1, q, 10) r
+ORDER BY n, r.score DESC
+```
+
+— each question's rows those of its own `recall` (BM25's statistics
+subquery reads the enclosing row's question: `text::score::bind` lifts
+the query into it and marks it correlated when it reads one).  In the
+process (release, real files, the hashing model, 100 000 memories of
+1 000 subjects; `tests/recall_bench.rs`, docs/benchmarks.md "Memory
+stores"): `recall(…, 10)` 0.81 ms at the median a question, a statement
+parsed once and run with parameters; 0.63 ms a question in batches of
+16.  `embedding.pending = wait` costs nothing extra once the queue is
+empty: a round vacuums the queue's range (§8.24).
 
 **Row expiry.**  `ALTER TABLE t SET EXPIRY (column)` — a `timestamptz`,
 `timestamp` or `date` column (`42804`; unknown, `42703`; the owner's;
@@ -5667,6 +5716,15 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-13 — §M14.24 R4, fast retrieval:** `recall` batched through
+  `LATERAL` (BM25's statistics subquery correlated when its query reads
+  an enclosing row); a projection evaluates calls that read no row once
+  (`exec::row_free_evaluated`); an embedding round vacuums the queue's
+  range; `tests/recall_bench.rs`.  A vacuum's sweep logs the ranges its
+  deletes cover (`Store::write_covering`, WAL batch version 2) and
+  replay deletes what is left in them — a commit's leaf filter had
+  dropped, unlogged, a value under a tombstone the sweep then removed,
+  and a crash brought the deleted row back.
 - **2026-11-13 — §M14.24 R3, permissioned retrieval checked:**
   `tests/permissioned_retrieval.rs` — HNSW, BM25, `@@`, `rrf`, `convex`
   under a tenant policy on a table and a partitioned one equal to the

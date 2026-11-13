@@ -646,3 +646,86 @@ fn crash_at_every_io_point() {
         });
     }
 }
+
+#[test]
+fn a_queue_s_range_vacuum_survives_a_crash_at_every_io_point() {
+    // Keys put, deleted, now and then put again (a queue's jobs: the
+    // embedding queue's pattern), the range vacuumed after each commit,
+    // a whole vacuum now and then: a crash anywhere leaves a commit's
+    // state — no deleted key back.  (A commit's leaf filter drops a
+    // version under a tombstone without logging; the vacuum that then
+    // removes the tombstone must take what replay brings back too.)
+    for mode in [CrashMode::DropUnsynced, CrashMode::Torn] {
+        harness::run("txn_queue_vacuum_crash", 3, |seed| {
+            type Model = BTreeMap<Vec<u8>, Vec<u8>>;
+            let run = |p: &Arc<SimPlatform>| -> (Vec<Model>, usize) {
+                let rng = SplitMix64::new(seed);
+                let mut states = vec![Model::new()];
+                let mut acked = 0;
+                let _ = (|| -> Result<(), Error> {
+                    let e = engine_on(p, opts())?;
+                    let mut model = Model::new();
+                    for i in 1..=24 {
+                        let mut t = e.begin();
+                        // Every commit writes (a timestamp of its own).
+                        t.put(b"m", &[i as u8])?;
+                        model.insert(b"m".to_vec(), vec![i as u8]);
+                        for _ in 0..8 + rng.below(24) {
+                            let k = format!("q{:03}{}", rng.below(120), rng.below(2)).into_bytes();
+                            if model.contains_key(&k) && rng.below(4) != 0 {
+                                t.delete(&k)?;
+                                model.remove(&k);
+                            } else {
+                                let v = vec![i as u8; 60 + rng.below(60) as usize];
+                                t.put(&k, &v)?;
+                                model.insert(k, v);
+                            }
+                        }
+                        states.push(model.clone());
+                        t.commit()?;
+                        acked = i;
+                        // Now and then, as the queue's rounds do (commits
+                        // between thin the leaves they rewrite first).
+                        if rng.below(4) == 0 {
+                            e.vacuum_range(b"q", b"r")?;
+                        }
+                        if i % 9 == 0 {
+                            e.vacuum()?;
+                        }
+                    }
+                    Ok(())
+                })();
+                (states, acked)
+            };
+            let dry = Arc::new(SimPlatform::new(seed));
+            let (states, _) = run(&dry);
+            let total = dry.sim_fs().op_count();
+            for n in 1..=total {
+                let p = Arc::new(SimPlatform::new(seed));
+                p.sim_fs().set_faults(Faults {
+                    crash_mode: mode,
+                    ..Faults::default()
+                });
+                p.sim_fs().crash_after_ops(n);
+                let (_, acked) = run(&p);
+                let e =
+                    engine_on(&p, opts()).unwrap_or_else(|err| panic!("{mode:?} op {n}: {err}"));
+                let k: usize = e.visible().to_string().parse().unwrap();
+                assert!(
+                    k >= acked && k < states.len(),
+                    "{mode:?} op {n}: at {k}, acked {acked}"
+                );
+                let got: Model = e
+                    .begin()
+                    .scan(Bound::Unbounded, Bound::Unbounded)
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect();
+                assert!(
+                    got == states[k],
+                    "{mode:?} op {n}: state is not that of commit {k}"
+                );
+            }
+        });
+    }
+}

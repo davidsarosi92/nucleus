@@ -925,6 +925,22 @@ mkdir -p target/memory-data && curl -L -o target/memory-data/longmemeval_s_clean
 bash target/bench-tools/memcap.sh 8000 target/ann-data/.venv/bin/python bench/memory/longmemeval.py target/release/nucleus
 ```
 
+In the process (PLAN.md §M14.24 R4, `tests/recall_bench.rs`): a store of
+100 000 memories of 1 000 subjects (8 made-up words each), real files,
+the hashing model (64 dimensions — the database's time, not a model's),
+analyzed, `embedding.pending = wait`; 1 000 questions of 3 words, a
+statement parsed once and run with parameters; an M2 Pro.  The target:
+`recall(…, 10)` under 1 ms at the median.
+
+| | median | p95 |
+|---|---:|---:|
+| `recall(…, 10)`, one question a statement | 0.81 ms | 0.91 ms |
+| `recall(…, 10)`, 16 questions a statement (`LATERAL`), a question | 0.63 ms | 0.65 ms |
+
+```sh
+RECALL_BENCH=1 cargo test --release -p nucleus-sql --test recall_bench -- --ignored --nocapture
+```
+
 ## Erasure
 
 PLAN.md §M14.24 R2 (`crates/sql/tests/erasure_bench.rs`): a table of

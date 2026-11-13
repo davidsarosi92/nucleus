@@ -110,12 +110,15 @@ same text, else `inserted`; when a fact changed, `REPLACING old_id`
 closes the old one (`valid_to` set, kept) — `replaced`.  Recall:
 `SELECT id, content, score FROM recall('notes', 'ann', 'how should I
 answer', 5)` (the store a text literal; current, unexpired memories,
-BM25 and vectors fused).  Forget one: `DELETE FROM notes WHERE id = $1`.  Any
+BM25 and vectors fused; under a millisecond on 100 000 memories in the
+process).  Several questions at once, one statement: `SELECT n, r.id,
+r.content FROM unnest($2::text[]) WITH ORDINALITY AS b(q, n), LATERAL
+recall('notes', $1, q, 5) r ORDER BY n, r.score DESC`.  Forget one: `DELETE FROM notes WHERE id = $1`.  Any
 table's rows can expire: `ALTER TABLE t SET EXPIRY (expires_at)` (a
 timestamp or date column; deleted in the background).  Erase a person:
 mark the columns that say whose a row is, `ALTER TABLE messages SET
 SUBJECT (sender, recipient)` (a memory store's `subject` is marked), then
-`FORGET SUBJECT 'ann'` (not in a transaction block) deletes her rows from
+`FORGET SUBJECT 'ann'` (not in a transaction block) deletes the subject's rows from
 every such table — foreign keys followed, all or nothing (`42501` if row
 security hides any from you) — then scrubs the files (old versions,
 index pages, free pages, the log, audit details) and searches them for

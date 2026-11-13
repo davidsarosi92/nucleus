@@ -275,3 +275,70 @@ fn a_merge_does_not_wait_for_the_queue() {
     assert_eq!(did, "inserted");
     s.execute("COMMIT").unwrap();
 }
+
+/// Many questions in one statement (PLAN.md §M14.24 R4): `recall()` laterally
+/// of each — a parameter's array of them — gives each one's own recall,
+/// its statistics and ranking read for it.
+#[test]
+fn a_batch_of_questions_is_each_question_s_recall() {
+    let mut s = Session::new(db());
+    store(&mut s);
+    let words = [
+        "tea", "coffee", "chess", "piano", "Szeged", "Budapest", "cats", "dogs", "rain", "snow",
+    ];
+    for (i, a) in words.iter().enumerate() {
+        for b in &words[i + 1..] {
+            s.execute(&format!(
+                "REMEMBER 'likes {a} more than {b}' FOR '{}' IN notes",
+                if (i + b.len()) % 3 == 0 { "u2" } else { "u1" }
+            ))
+            .unwrap();
+        }
+    }
+    let questions = [
+        "tea",
+        "chess piano",
+        "Szeged rain",
+        "snow",
+        "nothing like it",
+    ];
+    let one = |s: &mut Session, q: &str| {
+        texts(
+            s,
+            &format!(
+                "SELECT '{q}', content, round(score::numeric, 6) FROM recall('notes', 'u1', '{q}', 4)"
+            ),
+        )
+    };
+    let each: Vec<String> = questions.iter().flat_map(|q| one(&mut s, q)).collect();
+    assert!(each.len() > 8);
+    let list = questions.map(|q| format!("'{q}'")).join(", ");
+    for sql in [
+        format!(
+            "SELECT q, r.content, round(r.score::numeric, 6) \
+             FROM unnest(ARRAY[{list}]) WITH ORDINALITY AS b(q, n), \
+                  LATERAL recall('notes', 'u1', q, 4) r ORDER BY n"
+        ),
+        "SELECT q, r.content, round(r.score::numeric, 6) \
+         FROM unnest($1::text[]) WITH ORDINALITY AS b(q, n), \
+              LATERAL recall('notes', 'u1', q, 4) r ORDER BY n"
+            .to_string(),
+    ] {
+        let params = if sql.contains("$1") {
+            vec![Value::Array(
+                questions.iter().map(|q| Value::Text((*q).into())).collect(),
+            )]
+        } else {
+            Vec::new()
+        };
+        let stmt = nucleus_sql::parser::parse(&sql).unwrap().remove(0);
+        let got: Vec<String> = match s.run(&stmt, &params).unwrap() {
+            Output::Rows { rows, .. } => rows
+                .into_iter()
+                .map(|r| r.iter().map(Value::render).collect::<Vec<_>>().join(" "))
+                .collect(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(got, each, "{sql}");
+    }
+}

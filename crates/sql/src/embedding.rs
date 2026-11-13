@@ -868,6 +868,15 @@ fn round(kv: &Arc<dyn Kv>, reg: &Registry) -> Result<Round> {
             }
         }
     }
+    // The jobs done are deleted: their tombstones go now, or every
+    // statement that waits for the queue (`embedding.pending = wait`)
+    // steps over all of them until the whole vacuum runs — 12 ms a
+    // statement after 100 000 rows were embedded (RocksDB's queue
+    // pattern, as an HNSW index's delta).
+    if round.embedded + round.cleared > 0 {
+        let end = nucleus_kv::prefix_end(&QUEUE).expect("queue prefix");
+        kv.vacuum_range(&QUEUE, &end)?;
+    }
     Ok(round)
 }
 

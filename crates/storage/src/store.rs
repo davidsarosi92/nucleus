@@ -46,6 +46,9 @@ const META_ROOT: usize = 0;
 const META_CHECKPOINT_LSN: usize = 1;
 const META_USER: usize = 2;
 const BATCH_VERSION: u8 = 1;
+/// A batch with covered ranges ([`Store::write_covering`]): version 1's
+/// layout, then the ranges.
+const BATCH_VERSION_COVERING: u8 = 2;
 
 /// Tuning for a [`Store`].
 #[derive(Clone, Debug)]
@@ -87,8 +90,16 @@ pub struct Batch {
 
 impl Batch {
     fn encode(&self) -> Vec<u8> {
+        self.encode_covering(&[])
+    }
+
+    fn encode_covering(&self, covered: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(BATCH_VERSION);
+        out.push(if covered.is_empty() {
+            BATCH_VERSION
+        } else {
+            BATCH_VERSION_COVERING
+        });
         out.extend_from_slice(&self.meta.to_le_bytes());
         out.extend_from_slice(&(self.ops.len() as u32).to_le_bytes());
         for (k, v) in &self.ops {
@@ -100,10 +111,25 @@ impl Batch {
                 out.extend_from_slice(v);
             }
         }
+        if !covered.is_empty() {
+            out.extend_from_slice(&(covered.len() as u32).to_le_bytes());
+            for (start, end) in covered {
+                for k in [start, end] {
+                    out.extend_from_slice(&(k.len() as u32).to_le_bytes());
+                    out.extend_from_slice(k);
+                }
+            }
+        }
         out
     }
 
-    fn decode(mut b: &[u8]) -> Result<Self> {
+    #[cfg(test)]
+    fn decode(b: &[u8]) -> Result<Self> {
+        Ok(Self::decode_covering(b)?.0)
+    }
+
+    /// A batch and its covered ranges (none, for version 1).
+    fn decode_covering(mut b: &[u8]) -> Result<(Self, Vec<(Vec<u8>, Vec<u8>)>)> {
         fn take<'a>(b: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
             if b.len() < n {
                 return Err(Error::Corrupt {
@@ -116,7 +142,8 @@ impl Batch {
             Ok(head)
         }
         let u32_of = |s: &[u8]| u32::from_le_bytes(s.try_into().unwrap()) as usize;
-        if take(&mut b, 1)?[0] != BATCH_VERSION {
+        let version = take(&mut b, 1)?[0];
+        if version != BATCH_VERSION && version != BATCH_VERSION_COVERING {
             return Err(Error::Corrupt {
                 page: PageId(0),
                 reason: "unknown WAL batch version",
@@ -137,7 +164,20 @@ impl Batch {
             };
             ops.push((key, val));
         }
-        Ok(Self { meta, ops })
+        let mut covered = Vec::new();
+        if version == BATCH_VERSION_COVERING {
+            let n = u32_of(take(&mut b, 4)?);
+            for _ in 0..n {
+                let mut key = || -> Result<Vec<u8>> {
+                    let n = u32_of(take(&mut b, 4)?);
+                    Ok(take(&mut b, n)?.to_vec())
+                };
+                let start = key()?;
+                let end = key()?;
+                covered.push((start, end));
+            }
+        }
+        Ok((Self { meta, ops }, covered))
     }
 }
 
@@ -268,8 +308,9 @@ impl Store {
             });
         }
         wal.replay(applied, |lsn, payload| {
-            let batch = Batch::decode(payload)?;
+            let (batch, covered) = Batch::decode_covering(payload)?;
             apply(&mut tree, &batch, None)?;
+            remove_covered(&mut tree, &covered)?;
             meta = batch.meta;
             replayed += 1;
             applied = lsn + 16 + payload.len() as u64;
@@ -322,14 +363,35 @@ impl Store {
         self.write_with(batch, Some(filter))
     }
 
+    /// [`write`](Store::write) of a batch of deletes that also *covers*
+    /// key ranges `[start, end)`: ranges whose entries, in the tree as it
+    /// is, are all among the batch's deletes.  Replay deletes everything
+    /// in them — what a [`write_filtered`](Store::write_filtered) dropped
+    /// there without logging comes back on replay and goes again — so a
+    /// delete of what is left of something a filter thinned out stays
+    /// whole after a crash (the transaction layer's vacuum of a key's
+    /// last versions, below a filtered commit's drops).
+    pub fn write_covering(&self, batch: &Batch, covered: &[(Vec<u8>, Vec<u8>)]) -> Result<Lsn> {
+        self.write_encoded(batch, &batch.encode_covering(covered), None)
+    }
+
     fn write_with(&self, batch: &Batch, filter: Option<&dyn LeafFilter>) -> Result<Lsn> {
+        self.write_encoded(batch, &batch.encode(), filter)
+    }
+
+    fn write_encoded(
+        &self,
+        batch: &Batch,
+        encoded: &[u8],
+        filter: Option<&dyn LeafFilter>,
+    ) -> Result<Lsn> {
         if let Some((k, _)) = batch.ops.iter().find(|(k, _)| k.len() > MAX_KEY) {
             return Err(Error::KeyTooLarge(k.len()));
         }
         self.check()?;
         let mut w = self.writer();
         self.check()?;
-        let result = self.wal.append(&batch.encode()).and_then(|lsn| {
+        let result = self.wal.append(encoded).and_then(|lsn| {
             self.writers_waiting.fetch_add(1, Ordering::AcqRel);
             let mut tree = self.tree.write().unwrap_or_else(|e| e.into_inner());
             self.writers_waiting.fetch_sub(1, Ordering::AcqRel);
@@ -539,6 +601,24 @@ impl Checkpoint<'_> {
     }
 }
 
+/// Replay's half of [`Store::write_covering`]: every entry left in the
+/// covered ranges deleted.
+fn remove_covered(tree: &mut BTree, covered: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+    for (start, end) in covered {
+        let keys = tree
+            .range(
+                std::ops::Bound::Included(start),
+                std::ops::Bound::Excluded(end),
+            )?
+            .map(|e| e.map(|(k, _)| k))
+            .collect::<Result<Vec<_>>>()?;
+        for k in keys {
+            tree.remove(&k)?;
+        }
+    }
+    Ok(())
+}
+
 fn apply(tree: &mut BTree, batch: &Batch, filter: Option<&dyn LeafFilter>) -> Result<()> {
     let sorted = |tree: &mut BTree, ops: &[(Vec<u8>, Option<Vec<u8>>)]| match filter {
         Some(f) => tree.apply_sorted_filtered(ops, f),
@@ -586,6 +666,13 @@ mod tests {
         };
         assert_eq!(Batch::decode(&b.encode()).unwrap(), b);
         assert!(Batch::decode(&b.encode()[..10]).is_err());
+        // With covered ranges: version 2, read back whole.
+        let covered = vec![(b"a".to_vec(), b"c".to_vec()), (vec![], vec![0])];
+        let e = b.encode_covering(&covered);
+        assert_eq!(e[0], BATCH_VERSION_COVERING);
+        assert_eq!(Batch::decode_covering(&e).unwrap(), (b.clone(), covered));
+        assert!(Batch::decode_covering(&e[..e.len() - 1]).is_err());
+        assert_eq!(b.encode_covering(&[]), b.encode());
     }
 
     /// A file system whose directories above `/apps/me` may not be

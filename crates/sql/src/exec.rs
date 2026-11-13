@@ -31,6 +31,45 @@ pub fn env<'a>(row: &'a [Value], ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -
     Env { row, outer, ctx }
 }
 
+/// `e` with each call that reads no row — of constants, parameters and
+/// the enclosing rows (fixed while this plan runs: it is built again for
+/// each), not volatile — evaluated now, once for a plan's run rather than
+/// once a row: a stable function is the same within a statement (an
+/// `embed('…', m)` beside each row's vector in a ranking's projection was
+/// a model-cache lookup a row, a third of `recall()`'s time; PLAN.md
+/// §M14.24 R4).  A call that fails now is left to fail on its row.
+/// `None` when there is none to evaluate, or when `e` holds a subquery:
+/// a copy's plan is not the plan the statement's maps know by address
+/// (its columns needed, its measurements, its cached rows).
+fn row_free_evaluated(e: &Expr, ctx: &Ctx, outer: Option<&Env>) -> Option<Expr> {
+    let fixed = |x: &Expr| {
+        matches!(x, Expr::Call(f, args)
+            if f.volatility() != crate::ext::Volatility::Volatile
+                && !args.is_empty()
+                && args
+                    .iter()
+                    .all(|a| matches!(a, Expr::Literal(_) | Expr::Param(_) | Expr::Outer { .. })))
+    };
+    let (mut any, mut sub) = (false, false);
+    e.walk(&mut |x| {
+        any |= fixed(x);
+        sub |= matches!(x, Expr::Subquery(_));
+    });
+    if !any || sub {
+        return None;
+    }
+    let mut e = e.clone();
+    let none = env(&[], ctx, outer);
+    e.walk_mut(&mut |x| {
+        if fixed(x)
+            && let Ok(v) = x.eval(&none)
+        {
+            *x = Expr::Literal(v);
+        }
+    });
+    Some(e)
+}
+
 /// Builds the iterator for `plan` (measured under `EXPLAIN ANALYZE`).
 pub fn build<'a>(plan: &'a Plan, ctx: &'a Ctx<'a>, outer: Option<&'a Env<'a>>) -> Result<Rows<'a>> {
     match ctx.profile {
@@ -186,10 +225,23 @@ fn build_node<'a>(
                     Box::new(each),
                 )));
             }
+            // Calls that read no row, once — on the first row, so a
+            // projection of none calls nothing.
+            let once = std::cell::OnceCell::new();
             Box::new(rows.map(move |r| {
                 let row = r?;
+                let folded: &Vec<Option<Expr>> = once.get_or_init(|| {
+                    exprs
+                        .iter()
+                        .map(|x| row_free_evaluated(x, ctx, outer))
+                        .collect()
+                });
                 let e = env(&row, ctx, outer);
-                exprs.iter().map(|x| x.eval(&e)).collect()
+                exprs
+                    .iter()
+                    .zip(folded)
+                    .map(|(x, f)| f.as_ref().unwrap_or(x).eval(&e))
+                    .collect()
             }))
         }
         Plan::Join {
