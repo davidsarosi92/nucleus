@@ -1103,6 +1103,7 @@ impl Session {
                 | Statement::Update { .. }
                 | Statement::Delete { .. }
                 | Statement::Copy { .. }
+                | Statement::Remember(_)
                 | Statement::Explain(..)
                 | Statement::Lint(_)
                 | Statement::Summarize(_)
@@ -1322,6 +1323,20 @@ impl Session {
             Statement::CreateToken { .. } => Some(columns_of(
                 ["name", "login", "secret"].map(|c| (c.to_string(), Some(DataType::Text))),
             )),
+            Statement::Remember(r) => {
+                binder.query(&crate::memory::clauses(r))?;
+                let (t, _) = crate::memory::store(txn, &r.store)?;
+                Some(vec![
+                    OutColumn {
+                        name: crate::memory::RESULT[0].into(),
+                        ty: t.columns[0].ty,
+                    },
+                    OutColumn {
+                        name: crate::memory::RESULT[1].into(),
+                        ty: DataType::Text,
+                    },
+                ])
+            }
             Statement::Show(name) => Some(vec![OutColumn {
                 name: name.clone(),
                 ty: DataType::Text,
@@ -1808,6 +1823,43 @@ pub(crate) fn execute_statement(
             let owner = crate::access::current().user.clone();
             crate::privileges::on_create_table(txn, name, &owner)?;
             Output::Command("CREATE TABLE".into())
+        }
+        Statement::CreateMemoryStore {
+            name,
+            if_not_exists,
+            model,
+            options,
+        } => {
+            if catalog::get_table(&*txn, name)?.is_some() {
+                if *if_not_exists {
+                    return Ok(Output::Command("CREATE MEMORY STORE".into()));
+                }
+                return Err(Error::duplicate_table(format!(
+                    "relation \"{name}\" already exists"
+                )));
+            }
+            crate::memory::create(txn, reg, name, model, options)?;
+            Output::Command("CREATE MEMORY STORE".into())
+        }
+        Statement::Remember(r) => {
+            let (id, action, ty) = crate::memory::remember(txn, reg, r, params)?;
+            Output::Rows {
+                columns: vec![
+                    OutColumn {
+                        name: crate::memory::RESULT[0].into(),
+                        ty,
+                    },
+                    OutColumn {
+                        name: crate::memory::RESULT[1].into(),
+                        ty: DataType::Text,
+                    },
+                ],
+                rows: vec![vec![id, Value::Text(action.into())]],
+            }
+        }
+        Statement::SetExpiry { table, column } => {
+            crate::expiry::set(txn, table, column.as_deref())?;
+            Output::Command("ALTER TABLE".into())
         }
         Statement::CreatePartition {
             name,
@@ -3022,6 +3074,8 @@ pub(crate) fn create_table(
         storage_policy: None,
         statistics: Vec::new(),
         chunks: None,
+        expiry: None,
+        memory: None,
     };
     if let Some((kind, names)) = partition_by {
         table.partition_by = Some(partition_spec(&table, &uniques, kind, names)?);

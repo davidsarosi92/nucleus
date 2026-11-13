@@ -958,6 +958,53 @@ class Connection:
         results = self.query(sql, params)
         return results[-1] if results else Result([], [], "", 0)
 
+    # -------------------------------------------------------------- memory
+
+    def remember(self, store, subject, content, *, kind=None, confidence=None,
+                 expires=None, source=None, replaces=None):
+        """Keeps a memory in a memory store (``CREATE MEMORY STORE``) for
+        ``subject`` — ``REMEMBER``: merged into a current memory of the
+        subject with the same or nearly the same text, else added.
+        ``expires``: a ``datetime``, or an interval from now (a
+        ``timedelta``, an ``Interval`` or a text such as ``"7 days"``).
+        ``replaces``: the id of the memory this one contradicts, which is
+        closed (kept as history).  Returns ``(id, action)``, the action
+        being ``"inserted"``, ``"merged"`` or ``"replaced"``."""
+        params = [content, subject]
+        sql = f"REMEMBER $1 FOR $2 IN {_ident(store)}"
+        def param(value, cast=None):
+            params.append(value)
+            return f"CAST(${len(params)} AS {cast})" if cast else f"${len(params)}"
+        if kind is not None:
+            sql += f" AS {param(kind)}"
+        if confidence is not None:
+            sql += f" CONFIDENCE {param(float(confidence))}"
+        if isinstance(expires, _dt.datetime):
+            sql += f" EXPIRES {param(expires)}"
+        elif expires is not None:
+            sql += f" EXPIRES now() + {param(expires, 'interval')}"
+        if source is not None:
+            sql += f" SOURCE {param(source)}"
+        if replaces is not None:
+            sql += f" REPLACING {param(str(replaces), 'text')}"
+        row = self.execute(sql, params).rows[0]
+        return row[0], row[1]
+
+    def recall(self, store, subject, query, k=10):
+        """The subject's current memories most relevant to ``query`` —
+        full-text and semantic search fused — best first, as dicts: id,
+        kind, content, confidence, seen, valid_from, source, created,
+        last_seen, score."""
+        return self.execute(
+            f"SELECT * FROM recall({_literal(store)}, $1, $2, $3)",
+            (subject, query, int(k)),
+        ).records()
+
+    def forget(self, store, id):
+        """Deletes the memory ``id``; whether there was one."""
+        r = self.execute(f"DELETE FROM {_ident(store)} WHERE id = CAST(CAST($1 AS text) AS uuid)", (str(id),))
+        return r.count > 0
+
     def cursor(self):
         return Cursor(self)
 
@@ -1473,6 +1520,11 @@ def _ident(name, dotted=False):
             and all(ch.islower() or ch.isdigit() or ch == "_" for ch in name):
         return name
     return '"' + name.replace('"', '""') + '"'
+
+
+def _literal(text):
+    """A text as an SQL literal."""
+    return "'" + text.replace("'", "''") + "'"
 
 
 def _np():

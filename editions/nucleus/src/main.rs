@@ -24,11 +24,12 @@ usage:
                                     SQL shell (also `ncsql`): a local database or a
                                     server; a script on stdin, or one command
   nucleus mcp [<dir>] [connection options of nucleus sql] [--allow-writes]
-              [--max-rows <n>] [--timeout <ms>]
+              [--memory] [--max-rows <n>] [--timeout <ms>]
                                     a Model Context Protocol server on stdin and
                                     stdout, for AI assistants: list, describe,
                                     sample and query (read-only unless
-                                    --allow-writes)
+                                    --allow-writes); --memory: remember, recall,
+                                    forget
   nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]

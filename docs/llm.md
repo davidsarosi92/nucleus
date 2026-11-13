@@ -8,7 +8,8 @@ what to use instead.  For people the full reference is DOCS.md §8.
 - **MCP:** `nucleus mcp <dir>` (or `nucleus mcp -h host:port -U user`) —
   tools `list_tables`, `describe_table`, `sample_rows`, `summarize_table`
   (each column's min, max, distinct count, mean, quartiles, NULLs), `query` (read-only,
-  `$1`… in `params`), `explain`, `lint`; `execute` with `--allow-writes`.
+  `$1`… in `params`), `explain`, `lint`; `execute` with `--allow-writes`;
+  `remember`, `recall`, `forget` (memory stores) with `--memory`.
 - **Shell:** `ncsql <dir>` or `ncsql -h 127.0.0.1:20035` (user and password
   `nucleus` by default); `-c "<sql>"` runs one command.
 - **Drivers:** Rust, Python, JavaScript, Java, C, C++, Swift over nucleus's protocol
@@ -97,6 +98,21 @@ or `'markdown'`; overlap 20; without a model, sizes are words);
 EMBEDDING (chunk) USING e5` — every write to `docs` updates `parts` in
 the same transaction (unchanged chunks keep their vectors); search
 `SELECT id, chunk FROM parts ORDER BY v <=> embed($1) LIMIT 10`.
+
+**Memory for a model:** `CREATE MEMORY STORE notes USING e5` makes a
+table `notes` (`id uuid`, `subject`, `kind`, `content`, `embedding`,
+`confidence`, `seen`, `valid_from`, `valid_to`, `expires_at`, `source`,
+`replaces`, `created`, `last_seen`).  `REMEMBER 'Ann prefers short
+answers' FOR 'ann' IN notes [AS 'preference'] [CONFIDENCE 0.8] [EXPIRES
+now() + interval '30 days'] [SOURCE 'chat 12']` returns `id, action`:
+`merged` into the subject's current memory with the same or nearly the
+same text, else `inserted`; when a fact changed, `REPLACING old_id`
+closes the old one (`valid_to` set, kept) — `replaced`.  Recall:
+`SELECT id, content, score FROM recall('notes', 'ann', 'how should I
+answer', 5)` (the store a text literal; current, unexpired memories,
+BM25 and vectors fused).  Forget: `DELETE FROM notes WHERE id = $1`.  Any
+table's rows can expire: `ALTER TABLE t SET EXPIRY (expires_at)` (a
+timestamp or date column; deleted in the background).
 
 **Model limits and costs:** give a remote model your account's limits —
 `CREATE MODEL oa USING openai WITH (model = 'text-embedding-3-small',

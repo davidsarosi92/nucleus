@@ -66,6 +66,9 @@ class Server:
                                    f"127.0.0.1:{self.port}", "--no-auth"],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(1200):
+            # Its own server, not another one on the port.
+            if self.p.poll() is not None:
+                raise RuntimeError(f"the server exited ({self.p.returncode})")
             try:
                 return nucleus.connect("127.0.0.1", self.port, password=None)
             except (OSError, nucleus.OperationalError):

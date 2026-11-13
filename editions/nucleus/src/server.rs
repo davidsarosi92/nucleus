@@ -311,7 +311,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .as_ref()
             .map_or(String::new(), |d| format!("; {}", d.describe()))
     );
-    nucleus_server::maintain(Arc::clone(&kv));
+    nucleus_server::maintain_with(
+        Arc::clone(&kv),
+        nucleus_server::Stop::new(),
+        Arc::clone(&config.registry),
+    );
     // The embedding columns' jobs (§M14.22 E4b), off the sessions.
     nucleus_sql::embedding::serve(Arc::clone(&kv), Arc::clone(&config.registry));
     let mut listeners = listeners.into_iter();

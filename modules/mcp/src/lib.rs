@@ -58,6 +58,10 @@ pub trait Database {
 pub struct Options {
     /// The `execute` tool (writes) is offered.
     pub allow_writes: bool,
+    /// The memory tools — `remember`, `recall`, `forget` — are offered
+    /// (memory stores, PLAN.md §M14.24): an agent keeps memories without
+    /// being given every write.
+    pub memory: bool,
     /// The most rows a tool returns (the rest are counted, not sent).
     pub max_rows: usize,
     /// Each statement's time limit, in milliseconds (0: none).
@@ -68,6 +72,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             allow_writes: false,
+            memory: false,
             max_rows: 100,
             timeout_ms: 5000,
         }
@@ -349,6 +354,60 @@ impl<'a> Server<'a> {
                 "annotations": read_only,
             }),
         ];
+        if self.options.memory {
+            let store = json!({ "type": "string", "description": "The memory store (CREATE MEMORY STORE)." });
+            let subject = json!({ "type": "string", "description": "Whose memory: a user, an agent, a project." });
+            tools.push(json!({
+                "name": "remember",
+                "title": "Remember",
+                "description": "Keeps a memory: merged into a current memory of the same subject with the same or nearly the same text (seen once more), else added. When it contradicts a memory, pass that memory's id as replaces: the old one is closed (kept as history), not deleted. Returns the memory's id and what was done (inserted, merged, replaced).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "store": store,
+                        "subject": subject,
+                        "content": { "type": "string", "description": "The memory, one fact in a sentence." },
+                        "kind": { "type": "string", "description": "fact (default), preference, episode … any word." },
+                        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                        "expires_in": { "type": "string", "description": "An interval after which it is forgotten: '7 days', '2 hours'." },
+                        "source": { "type": "string", "description": "Where it came from." },
+                        "replaces": { "type": "string", "description": "The id of the memory this one replaces." },
+                    },
+                    "required": ["store", "subject", "content"],
+                },
+                "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
+            }));
+            tools.push(json!({
+                "name": "recall",
+                "title": "Recall",
+                "description": "The subject's current memories most relevant to a question or topic (full-text and semantic search fused), best first: id, kind, content, confidence, how often seen, since when valid, source, score.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "store": store,
+                        "subject": subject,
+                        "query": { "type": "string", "description": "A question or a topic, in plain words." },
+                        "k": { "type": "integer", "minimum": 1, "description": "How many (default 10)." },
+                    },
+                    "required": ["store", "subject", "query"],
+                },
+                "annotations": read_only,
+            }));
+            tools.push(json!({
+                "name": "forget",
+                "title": "Forget",
+                "description": "Deletes a memory by its id (to correct one, remember the new fact with replaces instead: the old one stays as history).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "store": store,
+                        "id": { "type": "string" },
+                    },
+                    "required": ["store", "id"],
+                },
+                "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false },
+            }));
+        }
         if self.options.allow_writes {
             tools.push(json!({
                 "name": "execute",
@@ -423,8 +482,16 @@ impl<'a> Server<'a> {
 
     /// One query's rows as objects (column → value).
     fn objects(&mut self, sql: &str) -> Result<Vec<serde_json::Map<String, Json>>, Failure> {
+        let answers = self.read_only(sql)?;
+        Ok(objects(answers))
+    }
+}
+
+/// Answers' rows as objects (column → value).
+fn objects(answers: Vec<Answer>) -> Vec<serde_json::Map<String, Json>> {
+    {
         let mut out = Vec::new();
-        for a in self.read_only(sql)? {
+        for a in answers {
             if let Answer::Rows {
                 columns,
                 types,
@@ -436,9 +503,11 @@ impl<'a> Server<'a> {
                 }
             }
         }
-        Ok(out)
+        out
     }
+}
 
+impl Server<'_> {
     fn call(&mut self, name: &str, args: &Json) -> ToolResult {
         let text = |key: &str| -> Result<String, ToolError> {
             args.get(key)
@@ -541,10 +610,65 @@ impl<'a> Server<'a> {
                     "findings": self.objects(&format!("ANALYZE QUERY {}", sql.trim().trim_end_matches(';')))?,
                 }))
             }
-            "execute" => {
+            "execute" if self.options.allow_writes => {
                 let sql = text("sql")?;
                 let answers = self.run(&sql)?;
                 Ok(self.rows(answers))
+            }
+            "remember" if self.options.memory => {
+                let mut sql = format!(
+                    "REMEMBER {} FOR {} IN {}",
+                    literal(&text("content")?),
+                    literal(&text("subject")?),
+                    ident(&text("store")?)
+                );
+                let opt = |key: &str| args.get(key).and_then(Json::as_str).map(literal);
+                if let Some(k) = opt("kind") {
+                    sql += &format!(" AS {k}");
+                }
+                if let Some(c) = args.get("confidence").and_then(Json::as_f64) {
+                    sql += &format!(" CONFIDENCE {c}");
+                }
+                if let Some(e) = opt("expires_in") {
+                    sql += &format!(" EXPIRES now() + CAST({e} AS interval)");
+                }
+                if let Some(s) = opt("source") {
+                    sql += &format!(" SOURCE {s}");
+                }
+                if let Some(r) = opt("replaces") {
+                    sql += &format!(" REPLACING {r}");
+                }
+                let mut done = objects(self.run(&sql)?);
+                Ok(done.pop().map(Json::Object).unwrap_or(Json::Null))
+            }
+            "recall" if self.options.memory => {
+                let k = args.get("k").and_then(Json::as_u64).unwrap_or(10);
+                let k = k.clamp(1, self.options.max_rows as u64);
+                Ok(json!({
+                    "memories": self.objects(&format!(
+                        "SELECT id, kind, content, confidence, seen, valid_from, source, score \
+                         FROM recall({}, {}, {}, {k})",
+                        literal(&text("store")?),
+                        literal(&text("subject")?),
+                        literal(&text("query")?),
+                    ))?,
+                }))
+            }
+            "forget" if self.options.memory => {
+                let answers = self.run(&format!(
+                    "DELETE FROM {} WHERE id = {}",
+                    ident(&text("store")?),
+                    literal(&text("id")?)
+                ))?;
+                let forgotten = match answers.first() {
+                    Some(Answer::Command(tag)) => tag
+                        .rsplit(' ')
+                        .next()
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .unwrap_or(0),
+                    _ => 0,
+                };
+                Ok(json!({ "forgotten": forgotten }))
             }
             other => Err(ToolError::Call(format!("unknown tool: {other}"))),
         }

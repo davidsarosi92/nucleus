@@ -84,8 +84,9 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// before, `text`'s 4, and still read as text), `inet` and `cidr` (16, 17);
 /// version 7 an owner, version 8 row-level security, version 9 comments
 /// on the table and its columns; version 14 an index's access method,
-/// operator classes and options; older versions still read.
-const TABLE_VERSION: u8 = 16;
+/// operator classes and options; version 17 a row expiry and a memory
+/// store's definition; older versions still read.
+const TABLE_VERSION: u8 = 17;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -344,6 +345,21 @@ pub struct Table {
     pub statistics: Vec<Statistic>,
     /// A chunk table: what it holds the chunks of ([`crate::chunk_tables`]).
     pub chunks: Option<ChunkSpec>,
+    /// `SET EXPIRY (column)`: rows whose value there has passed are
+    /// deleted by the maintenance thread ([`crate::expiry`]).
+    pub expiry: Option<usize>,
+    /// A memory store ([`crate::memory`]).
+    pub memory: Option<MemorySpec>,
+}
+
+/// What makes a table a memory store (PLAN.md §M14.24 R1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemorySpec {
+    /// The model its embedding column uses.
+    pub model: String,
+    /// `REMEMBER` merges a memory into one of the same subject whose
+    /// cosine similarity is at least this.
+    pub merge: f64,
 }
 
 /// What a chunk table holds (PLAN.md §M14.22 E7): the chunks of the texts
@@ -550,6 +566,18 @@ impl Table {
                     .opt_str(c.model.as_deref());
             }
         }
+        match self.expiry {
+            None => w.u8(0),
+            Some(c) => w.u8(1).u32(c as u32),
+        };
+        match &self.memory {
+            None => {
+                w.u8(0);
+            }
+            Some(m) => {
+                w.u8(1).str(&m.model).u64(m.merge.to_bits());
+            }
+        }
         w.0
     }
 
@@ -739,6 +767,19 @@ impl Table {
         } else {
             None
         };
+        let expiry = if version >= 17 && r.u8()? == 1 {
+            Some(r.u32()? as usize)
+        } else {
+            None
+        };
+        let memory = if version >= 17 && r.u8()? == 1 {
+            Some(MemorySpec {
+                model: r.str()?,
+                merge: f64::from_bits(r.u64()?),
+            })
+        } else {
+            None
+        };
         Ok(Self {
             id,
             name,
@@ -761,6 +802,8 @@ impl Table {
             storage_policy,
             statistics,
             chunks,
+            expiry,
+            memory,
         })
     }
 }
@@ -1531,6 +1574,11 @@ mod tests {
                 size: 200,
                 overlap: 20,
                 model: Some("e5".into()),
+            }),
+            expiry: Some(2),
+            memory: Some(MemorySpec {
+                model: "e5".into(),
+                merge: 0.95,
             }),
         };
         assert_eq!(Table::decode(&t.encode()).unwrap(), t);

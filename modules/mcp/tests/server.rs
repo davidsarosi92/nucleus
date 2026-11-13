@@ -183,3 +183,86 @@ fn writes_when_allowed() {
     }
     assert_eq!(db.log, [("INSERT INTO t VALUES (1)".to_string(), false)]);
 }
+
+#[test]
+fn memory_tools_when_asked() {
+    let mut db = Fake::default();
+    let options = Options {
+        memory: true,
+        timeout_ms: 0,
+        max_rows: 20,
+        ..Options::default()
+    };
+    {
+        let mut s = Server::new(&mut db, options);
+        let tools = call(&mut s, 1, "tools/list", json!({}));
+        let names: Vec<&str> = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.ends_with(&["remember", "recall", "forget"]),
+            "{names:?}"
+        );
+        // No general write with it.
+        assert!(!names.contains(&"execute"));
+        let r = call(
+            &mut s,
+            2,
+            "tools/call",
+            json!({ "name": "execute", "arguments": { "sql": "DELETE FROM t" } }),
+        );
+        assert!(
+            r.get("error").is_some() || r["result"]["isError"] == true,
+            "{r}"
+        );
+        call(
+            &mut s,
+            3,
+            "tools/call",
+            json!({ "name": "remember", "arguments": {
+                "store": "notes", "subject": "u'1", "content": "likes tea",
+                "kind": "preference", "confidence": 0.5, "expires_in": "7 days",
+                "source": "chat", "replaces": "0190" } }),
+        );
+        let r = call(
+            &mut s,
+            4,
+            "tools/call",
+            json!({ "name": "recall", "arguments": {
+                "store": "notes", "subject": "u1", "query": "tea?", "k": 500 } }),
+        );
+        assert_eq!(
+            r["result"]["structuredContent"]["memories"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        let r = call(
+            &mut s,
+            5,
+            "tools/call",
+            json!({ "name": "forget", "arguments": { "store": "notes", "id": "0190" } }),
+        );
+        assert_eq!(r["result"]["structuredContent"], json!({ "forgotten": 0 }));
+    }
+    let sent: Vec<&str> = db
+        .log
+        .iter()
+        .map(|(s, _)| s.as_str())
+        .filter(|s| !s.starts_with("BEGIN") && !s.starts_with("ROLLBACK") && !s.starts_with("SET"))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            "REMEMBER 'likes tea' FOR 'u''1' IN \"notes\" AS 'preference' CONFIDENCE 0.5 \
+             EXPIRES now() + CAST('7 days' AS interval) SOURCE 'chat' REPLACING '0190'",
+            "SELECT id, kind, content, confidence, seen, valid_from, source, score \
+             FROM recall('notes', 'u1', 'tea?', 20)",
+            "DELETE FROM \"notes\" WHERE id = '0190'",
+        ]
+    );
+}

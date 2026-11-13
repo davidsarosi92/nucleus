@@ -52,7 +52,13 @@ Python object per value) — and `conn.copy("COPY t FROM STDIN WITH
 statements in one round trip: `conn.pipeline([(sql, params), …])` (each
 one's `Result`, or its `Error` in its place); one statement for many
 rows, all or none, one commit for all: `conn.execute_many(sql, rows)`
-(and the DB-API `cursor.executemany`).  Tests:
+(and the DB-API `cursor.executemany`).  Memory for a model, in a memory
+store (`CREATE MEMORY STORE notes USING m`): `conn.remember("notes",
+"ann", "prefers short answers", kind="preference",
+expires=timedelta(days=30))` → `(id, "inserted" | "merged" |
+"replaced")` (`replaces=old_id` keeps the old one as history),
+`conn.recall("notes", "ann", "how to answer", k=5)` → the subject's
+current memories as dicts, best first, `conn.forget("notes", id)`.  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.
 
 ## In this process (the embedded edition)

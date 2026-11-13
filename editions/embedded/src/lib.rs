@@ -276,7 +276,11 @@ impl Database {
         // columns' jobs, checkpoints at commits.
         let background = if THREADS {
             vec![
-                nucleus_server::maintain_until(Arc::clone(&kv), stop.clone()),
+                nucleus_server::maintain_with(
+                    Arc::clone(&kv),
+                    stop.clone(),
+                    Arc::clone(&config.registry),
+                ),
                 // The embedding columns' jobs (§M14.22 E4b), off the sessions.
                 nucleus_sql::embedding::serve(Arc::clone(&kv), Arc::clone(&config.registry)),
             ]

@@ -135,6 +135,10 @@ pub struct Binder<'a> {
     /// if a column: a function of the operator's call may be bound by its
     /// index ([`crate::index_method::IndexMethod::function`]).
     operator_origin: std::cell::RefCell<Option<(String, String)>>,
+    /// The arguments of the query a `FROM` function is bound as
+    /// (`recall`, [`crate::memory::recall_query`]), innermost last: its
+    /// `$n` are they, bound where the call is.
+    expansions: Vec<Vec<ast::Expr>>,
 }
 
 /// A CTE visible to the query being bound.
@@ -334,6 +338,7 @@ impl<'a> Binder<'a> {
             checker: None,
             last_origin: Default::default(),
             operator_origin: Default::default(),
+            expansions: Vec::new(),
         }
     }
 
@@ -572,6 +577,9 @@ impl<'a> Binder<'a> {
         alias: Option<&str>,
         columns: &[String],
     ) -> Result<Bound> {
+        if name == "recall" && self.registry.table_function(name).is_none() {
+            return self.recall_ref(args, alias, columns);
+        }
         let empty = Scope::default();
         // The columns: one named after the function (or its alias), or
         // those the function names.
@@ -970,6 +978,44 @@ impl<'a> Binder<'a> {
         // Reading no row around it, it is an item like any other.
         let lateral = b.plan.outer_depth() > 0;
         Ok((b, lateral))
+    }
+
+    /// `recall('store', subject, query [, k])` (PLAN.md §M14.24 R1): the
+    /// store's query ([`crate::memory::recall_query`]) bound as a
+    /// subquery, its parameters the call's arguments.
+    fn recall_ref(
+        &mut self,
+        args: &[ast::Expr],
+        alias: Option<&str>,
+        columns: &[String],
+    ) -> Result<Bound> {
+        if !(3..=4).contains(&args.len()) {
+            return Err(Error::undefined_function(format!(
+                "function recall with {} arguments does not exist: recall(store, subject, query [, k])",
+                args.len()
+            )));
+        }
+        let ast::Expr::Literal(Value::Text(store)) = &args[0] else {
+            return Err(Error::type_mismatch(
+                "recall's first argument names a memory store, as a text literal",
+            ));
+        };
+        let q = crate::memory::recall_query(self.txn, store)?;
+        let k = args
+            .get(3)
+            .cloned()
+            .unwrap_or(ast::Expr::Literal(Value::Int(10)));
+        self.expansions
+            .push(vec![args[1].clone(), args[2].clone(), k]);
+        let b = self.query(&q);
+        self.expansions.pop();
+        let mut b = b?;
+        let alias = alias.unwrap_or("recall").to_string();
+        for c in &mut b.scope.cols {
+            c.table = Some(alias.clone());
+        }
+        rename_columns(&mut b.scope, &alias, columns)?;
+        Ok(b)
     }
 
     fn table_ref(&mut self, t: &TableRef) -> Result<Bound> {
@@ -2236,6 +2282,20 @@ impl<'a> Binder<'a> {
 
     /// Binds an expression against `scope` (and the enclosing scopes).
     pub fn expr(&mut self, e: &ast::Expr, scope: &Scope) -> Result<Typed> {
+        // A parameter of an expanded function's query: its argument,
+        // bound where the call is (seeing only what the call sees).
+        if let ast::Expr::Param(n) = e
+            && let Some(args) = self.expansions.last()
+        {
+            let arg = args
+                .get(n - 1)
+                .cloned()
+                .ok_or_else(|| Error::internal("a parameter beyond an expansion's arguments"))?;
+            let these = self.expansions.pop();
+            let r = self.expr(&arg, &Scope::default());
+            self.expansions.extend(these);
+            return r;
+        }
         // `v <=> embed($q)`: the query embedded by `v`'s model.
         if let ast::Expr::Operator { op, left, right } = e {
             let l = self.embed_by_column(left, right, scope)?;

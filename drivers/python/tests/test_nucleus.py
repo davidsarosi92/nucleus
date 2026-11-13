@@ -104,6 +104,33 @@ class Conformance(unittest.TestCase):
             with self.assertRaises(nucleus.DataError):
                 c.execute(f"INSERT INTO {t} VALUES (4, $1)", [sv(3, (3,), (1.0,))])
 
+    def test_memory(self):
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE MODEL {t}_h USING hashing WITH (dimensions = 64)")
+            c.execute(f"CREATE MEMORY STORE {t} USING {t}_h WITH (merge = 0.99)")
+            c.execute("SET embedding.pending = wait")
+            a, did = c.remember(t, "u1", "likes green tea", kind="preference", confidence=0.6)
+            self.assertEqual(did, "inserted")
+            self.assertEqual(c.remember(t, "u1", "likes green tea"), (a, "merged"))
+            c.remember(t, "u1", "lives in Budapest", source="chat")
+            c.remember(t, "u1", "a one-off code", expires=dt.timedelta(minutes=-1))
+            c.remember(t, "u1", "meeting on Friday", expires="1 day")
+            b, did = c.remember(t, "u1", "lives in Szeged",
+                                replaces=c.recall(t, "u1", "Budapest", 1)[0]["id"])
+            self.assertEqual(did, "replaced")
+            found = c.recall(t, "u1", "where does the user live")
+            self.assertEqual(sorted(m["content"] for m in found),
+                             ["likes green tea", "lives in Szeged", "meeting on Friday"])
+            tea = [m for m in found if m["content"] == "likes green tea"][0]
+            self.assertEqual((tea["id"], tea["kind"], tea["seen"]), (a, "preference", 2))
+            self.assertEqual(c.recall(t, "u2", "tea"), [])
+            self.assertTrue(c.forget(t, a))
+            self.assertFalse(c.forget(t, a))
+            self.assertEqual(len(c.recall(t, "u1", "tea", k=1)), 1)
+            c.execute(f"DROP TABLE {t}")
+            c.execute(f"DROP MODEL {t}_h")
+
     def test_vector(self):
         import array
         t = table()

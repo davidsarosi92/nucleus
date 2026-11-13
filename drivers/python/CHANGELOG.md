@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Memory stores (nucleus PLAN.md §M14.24): `Connection.remember(store,
+  subject, content, kind=, confidence=, expires=, source=, replaces=)` →
+  `(id, action)`, `recall(store, subject, query, k=10)` → dicts best
+  first, `forget(store, id)` → whether there was one.
+
 - The embedded edition (nucleus PLAN.md §M14.23): `connect("file:app.db")`,
   `connect(":memory:")`, `nucleus.open(path, options)` and
   `nucleus.Database(path, options).connect(user=…)` run the same API on a

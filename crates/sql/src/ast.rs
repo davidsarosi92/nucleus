@@ -84,6 +84,30 @@ pub enum Statement {
         /// `DROP`: the partition dropped too.
         drop: bool,
     },
+    /// `ALTER TABLE t SET EXPIRY (column) | DROP EXPIRY`: rows whose
+    /// `column` has passed are deleted in the background.
+    SetExpiry {
+        /// Table.
+        table: String,
+        /// The column (a `timestamptz`), or none to drop it.
+        column: Option<String>,
+    },
+    /// `CREATE MEMORY STORE [IF NOT EXISTS] name USING model [WITH
+    /// (option = value, …)]`: a table of memories (PLAN.md §M14.24 R1).
+    CreateMemoryStore {
+        /// The store.
+        name: String,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+        /// The model of its embedding column.
+        model: String,
+        /// `merge`, `analyzer`.
+        options: Vec<(String, String)>,
+    },
+    /// `REMEMBER content FOR subject IN store [AS kind] [CONFIDENCE c]
+    /// [VALID FROM t] [EXPIRES t] [SOURCE s] [REPLACING id]`: a memory
+    /// kept — merged into a near-identical one, or added.
+    Remember(Box<Remember>),
     /// `ALTER TABLE t SET STORAGE POLICY (kinds AFTER interval) | NONE`.
     SetStoragePolicy {
         /// The partitioned table.
@@ -1417,4 +1441,27 @@ pub enum PartitionBoundSpec {
     },
     /// `DEFAULT`.
     Default,
+}
+
+/// A `REMEMBER` statement's clauses (PLAN.md §M14.24 R1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Remember {
+    /// The memory store.
+    pub store: String,
+    /// What is remembered.
+    pub content: Expr,
+    /// Whose memory it is.
+    pub subject: Expr,
+    /// `AS kind` (`fact` by default).
+    pub kind: Option<Expr>,
+    /// `CONFIDENCE c` (1 by default).
+    pub confidence: Option<Expr>,
+    /// `VALID FROM t` (now by default).
+    pub valid_from: Option<Expr>,
+    /// `EXPIRES t`.
+    pub expires: Option<Expr>,
+    /// `SOURCE s`: where it came from.
+    pub source: Option<Expr>,
+    /// `REPLACING id`: the memory it replaces (closed, kept as history).
+    pub replacing: Option<Expr>,
 }

@@ -934,7 +934,9 @@ pub fn authorize_ddl(
                 )?;
             }
         }
-        Statement::CreateEnum { .. } => c.require(txn, Kind::Schema, "public", CREATE, None)?,
+        Statement::CreateEnum { .. } | Statement::CreateMemoryStore { .. } => {
+            c.require(txn, Kind::Schema, "public", CREATE, None)?
+        }
         Statement::CreateSecret { .. } | Statement::CreateModel { .. } => {
             c.require(txn, Kind::Database, DATABASE, CREATE, None)?
         }
@@ -954,6 +956,7 @@ pub fn authorize_ddl(
         | Statement::SetColumnModel { table, .. }
         | Statement::SetStorage { table, .. }
         | Statement::SetStoragePolicy { table, .. }
+        | Statement::SetExpiry { table, .. }
         | Statement::AttachPartition { table, .. }
         | Statement::DetachPartition { table, .. }
         | Statement::DropConstraint { table, .. }

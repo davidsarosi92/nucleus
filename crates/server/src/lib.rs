@@ -528,7 +528,9 @@ pub const VACUUM_FORCE_AFTER: std::time::Duration = std::time::Duration::from_se
 /// making them versions — when no transaction began since the last check
 /// and none is running, stopping as soon as one begins (the next idle check goes on from there);
 /// after [`VACUUM_FORCE_AFTER`] without one, paced instead (each batch
-/// followed by a pause four times as long).
+/// followed by a pause four times as long).  Every [`MAINTENANCE_EVERY`]
+/// too it deletes the rows that expired (`SET EXPIRY`,
+/// [`nucleus_sql::expiry`]).
 pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
     maintain_until(kv, Stop::new())
 }
@@ -536,6 +538,16 @@ pub fn maintain(kv: Arc<dyn Kv>) -> std::thread::JoinHandle<()> {
 /// [`maintain`] until `stop` is stopped (an embedded database closing,
 /// PLAN.md §M14.23); the thread then lets go of `kv`.
 pub fn maintain_until(kv: Arc<dyn Kv>, stop: Stop) -> std::thread::JoinHandle<()> {
+    maintain_with(kv, stop, nucleus_sql::ext::Registry::shared_builtin())
+}
+
+/// [`maintain_until`] with the registry the database's sessions use (its
+/// modules' types, models and index methods), for the rows it deletes.
+pub fn maintain_with(
+    kv: Arc<dyn Kv>,
+    stop: Stop,
+    registry: Arc<nucleus_sql::ext::Registry>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let policies_every = (MAINTENANCE_EVERY.as_secs() / VACUUM_CHECK_EVERY.as_secs()).max(1);
         let mut tick = 0u64;
@@ -579,6 +591,9 @@ pub fn maintain_until(kv: Arc<dyn Kv>, stop: Stop) -> std::thread::JoinHandle<()
                 let now = nucleus_sql::datetime::from_system(kv.wall_clock());
                 if let Err(e) = nucleus_sql::partition::apply_policies(&kv, None, now) {
                     eprintln!("nucleus-server: storage policies: {}", e.message);
+                }
+                if let Err(e) = nucleus_sql::expiry::expire(&kv, &registry, None, now) {
+                    eprintln!("nucleus-server: expiry: {}", e.message);
                 }
             }
             seen = kv.activity();

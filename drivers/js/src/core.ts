@@ -1296,6 +1296,54 @@ export class Client {
     return all[all.length - 1] ?? new Result([], [], "", 0);
   }
 
+  /**
+   * Keeps a memory in a memory store (`CREATE MEMORY STORE`) for
+   * `subject` — `REMEMBER`: merged into a current memory of the subject
+   * with the same or nearly the same text, else added.  `expires`: a
+   * `Date`, or an interval from now (an `Interval` or a text such as
+   * `"7 days"`).  `replaces`: the id of the memory this one contradicts,
+   * which is closed (kept as history).  The memory's id, and what was
+   * done: `"inserted"`, `"merged"` or `"replaced"`.
+   */
+  async remember(
+    store: string,
+    subject: string,
+    content: string,
+    options: { kind?: string; confidence?: number; expires?: Date | Interval | string; source?: string; replaces?: string } = {},
+  ): Promise<{ id: string; action: string }> {
+    const params: Value[] = [content, subject];
+    const param = (v: Value, cast?: string): string => {
+      params.push(v);
+      return cast ? `CAST($${params.length} AS ${cast})` : `$${params.length}`;
+    };
+    let sql = `REMEMBER $1 FOR $2 IN ${ident(store)}`;
+    if (options.kind != null) sql += ` AS ${param(options.kind)}`;
+    if (options.confidence != null) sql += ` CONFIDENCE ${param(options.confidence, "real")}`;
+    const e = options.expires;
+    if (e instanceof Date) sql += ` EXPIRES ${param(e)}`;
+    else if (e != null) sql += ` EXPIRES now() + ${param(e, "interval")}`;
+    if (options.source != null) sql += ` SOURCE ${param(options.source)}`;
+    if (options.replaces != null) sql += ` REPLACING ${param(String(options.replaces), "text")}`;
+    const [id, action] = (await this.query(sql, params)).rows[0];
+    return { id: id as string, action: action as string };
+  }
+
+  /**
+   * The subject's current memories most relevant to `query` — full-text
+   * and semantic search fused — best first: id, kind, content,
+   * confidence, seen, valid_from, source, created, last_seen, score.
+   */
+  async recall(store: string, subject: string, query: string, k = 10): Promise<Record<string, Value>[]> {
+    const r = await this.query(`SELECT * FROM recall('${store.replace(/'/g, "''")}', $1, $2, $3)`, [subject, query, k]);
+    return r.records();
+  }
+
+  /** Deletes the memory `id`; whether there was one. */
+  async forget(store: string, id: string): Promise<boolean> {
+    const r = await this.query(`DELETE FROM ${ident(store)} WHERE id = CAST(CAST($1 AS text) AS uuid)`, [String(id)]);
+    return r.count > 0;
+  }
+
   /** BEGIN, `fn`, then COMMIT — or ROLLBACK if it throws. */
   async transaction<T>(fn: (client: Client) => Promise<T>): Promise<T> {
     await this.query("BEGIN");

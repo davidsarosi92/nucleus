@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Memory tools (nucleus PLAN.md §M14.24 R1): `remember`, `recall` and
+  `forget` over memory stores, with `Options::memory` — independent of
+  `allow_writes`.  A tool not offered is refused as unknown.
+
 - `summarize_table` (nucleus PLAN.md §M14.27 S8b): `SUMMARIZE` of a
   table, one row a column.
 - First version (nucleus PLAN.md §M14.10): `Server` over a `Database` —

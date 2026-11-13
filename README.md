@@ -166,7 +166,17 @@ browser page, the engine in WebAssembly with its files in OPFS
 (`connect("file:app.db")` again; a first answer about 100 ms after the
 page starts, the engine 1.65 MB to download), and in iOS and Android apps
 (a Swift package and a Kotlin library; the engine adds 7.0 MiB to an iOS
-app, 7.45 MiB to an Android one on arm64).  Next is the rest of the
+app, 7.45 MiB to an Android one on arm64).  Models keep memories in it
+(§M14.24): `CREATE MEMORY STORE notes USING bge` makes a table of
+memories — whose, what kind, the text and its vector, confidence, when
+valid, when it expires, its source — `REMEMBER 'prefers short answers'
+FOR 'ann' IN notes` merges a near-duplicate or adds it (`REPLACING id`
+keeps the old one as history), `SELECT * FROM recall('notes', 'ann',
+'how to answer')` ranks a subject's current memories by text and vector
+together, all under the caller's privileges and row-level security;
+rows expire by a column (`ALTER TABLE t SET EXPIRY (expires_at)`), and
+`nucleus mcp --memory` gives an agent remember, recall and forget.
+Next is the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then
 the document model (§F2).  See

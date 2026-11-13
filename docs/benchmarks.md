@@ -888,6 +888,43 @@ Loading and chunking takes 0.7–1.0 s a set; the vectors are the time.
 bash target/bench-tools/memcap.sh 6000 target/ann-data/.venv/bin/python bench/embed/beir.py target/release/nucleus
 ```
 
+## Memory stores
+
+PLAN.md §M14.24 R1 (`bench/memory/longmemeval.py`): LongMemEval_S
+(cleaned; Wu et al., ICLR 2025) — 470 questions, each a subject of a
+memory store whose memories are its history's user turns (114,902;
+bge-small-en-v1.5 by `USING local`, made by the server's queue at
+10,335 tokens/s), the abstention questions left out and 51 without
+evidence on the user side skipped, as the paper's code does; its
+metrics (`recall_all@k`, `ndcg_any@k`), turns and sessions (the first
+`k` distinct sessions of the ranked turns).  "paper BM25" is its
+`flat-bm25` (rank_bm25's Okapi over tokens split on spaces, an index per
+question), re-implemented in the script.
+
+| ranking | turn R@5 | R@10 | R@50 | NDCG@10 | session R@5 | R@10 | NDCG@10 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `recall()`: BM25 and vectors fused | **0.680** | **0.819** | **0.959** | **0.728** | 0.897 | 0.962 | **0.923** |
+| BM25 (the text index, `simple`) | 0.632 | 0.737 | 0.864 | 0.692 | 0.828 | 0.897 | 0.874 |
+| vectors (HNSW = exact) | 0.613 | 0.780 | 0.955 | 0.677 | **0.912** | **0.969** | 0.917 |
+| paper BM25 | 0.489 | 0.592 | 0.768 | 0.561 | 0.685 | 0.785 | 0.733 |
+
+Times, client to server over loopback TCP, ~244 memories of a subject
+among 114,902, an M2 Pro:
+
+| | median | p95 |
+|---|---:|---:|
+| `recall(…, 10)`, analyzed, the query's vector made | 4.4 ms | 5.5 ms |
+| `recall(…, 200)`, analyzed, the query's vector made | 6.1 ms | 7.5 ms |
+| `recall(…, 200)`, not analyzed, the query embedded in it | 23.5 ms | 29.3 ms |
+| — the query embedded in it, analyzed | 18.8 ms | 25.6 ms |
+| `REMEMBER`, one at a time, each text embedded | 28.3 ms | 60.7 ms |
+
+```sh
+mkdir -p target/memory-data && curl -L -o target/memory-data/longmemeval_s_cleaned.json \
+  https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
+bash target/bench-tools/memcap.sh 8000 target/ann-data/.venv/bin/python bench/memory/longmemeval.py target/release/nucleus
+```
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

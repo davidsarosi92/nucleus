@@ -268,6 +268,20 @@ fn served(
 ) -> Option<(usize, Access)> {
     match access {
         Access::Full => {}
+        // Without statistics, an equality on every column of an index's
+        // key stays (as `choose_access` prefers it then): a method's
+        // condition with a parameter has no estimate either, and ranking
+        // or checking every row it matches across the table — a memory
+        // store's every subject — costs what the key's few rows do not.
+        Access::Key { index, prefix, .. }
+            if estimate.is_none()
+                && !prefix.is_empty()
+                && prefix.len()
+                    == index
+                        .map_or(table.primary_key.len(), |i| table.indexes[i].columns.len()) =>
+        {
+            return None;
+        }
         Access::Key { .. } if estimate.is_none_or(|e| e > METHOD_OVER_RANGE) => {}
         _ => return None,
     }

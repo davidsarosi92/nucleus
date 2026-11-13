@@ -22,6 +22,9 @@ edition gives it a local directory or a server: `nucleus mcp`.
 | `explain` | the plan; with `analyze`, run (read-only) with actual rows and times |
 | `lint` | what in a statement is likely slow or wrong, with the fix (`ANALYZE QUERY`) |
 | `execute` | SQL that writes — only with `Options::allow_writes` |
+| `remember` | keeps a memory in a memory store (`REMEMBER`): merged into a near-identical one of the subject or added; `replaces` closes an old one — only with `Options::memory` |
+| `recall` | a subject's current memories most relevant to a query, text and vector search fused (read-only) — only with `Options::memory` |
+| `forget` | deletes a memory by id — only with `Options::memory` |
 
 Reads are safe: their SQL goes to the database marked read-only — the
 `Database` refuses anything but reads before it runs (`nucleus mcp` checks

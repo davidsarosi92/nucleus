@@ -1,0 +1,186 @@
+# Memory stores (PLAN.md §M14.24 R1): CREATE MEMORY STORE, REMEMBER,
+# recall() and row expiry.  nucleus-only.
+
+statement ok
+CREATE MODEL slt_mem_h USING hashing WITH (dimensions = 64)
+
+statement ok
+CREATE MEMORY STORE slt_notes USING slt_mem_h WITH (analyzer = 'english', merge = 0.99)
+
+statement error 42P07
+CREATE MEMORY STORE slt_notes USING slt_mem_h
+
+statement ok
+CREATE MEMORY STORE IF NOT EXISTS slt_notes USING slt_mem_h
+
+statement error 22023
+CREATE MEMORY STORE slt_bad USING slt_mem_h WITH (merge = 2)
+
+statement error 22023
+CREATE MEMORY STORE slt_bad USING slt_mem_h WITH (colour = 'blue')
+
+statement error 42704
+CREATE MEMORY STORE slt_bad USING slt_no_such_model
+
+# Its columns, as any table's.
+query TT
+SELECT name, type FROM nc_catalog.columns WHERE table_name = 'slt_notes' ORDER BY position
+----
+id uuid
+subject text
+kind text
+content text
+embedding vector(64)
+confidence real
+seen integer
+valid_from timestamptz
+valid_to timestamptz
+expires_at timestamptz
+source text
+replaces uuid
+created timestamptz
+last_seen timestamptz
+
+statement ok
+SET embedding.pending = wait
+
+statement ok
+REMEMBER 'The user likes green tea' FOR 'u1' IN slt_notes AS 'preference' CONFIDENCE 0.6
+
+# The same text again: merged — seen twice, the greater confidence (none
+# given keeps it).
+statement ok
+REMEMBER 'The user likes green tea' FOR 'u1' IN slt_notes CONFIDENCE 0.9
+
+# Near-identical (the same words, so the same vector here): merged too.
+statement ok
+REMEMBER 'The user likes green tea.' FOR 'u1' IN slt_notes
+
+statement ok
+REMEMBER 'The user lives in Budapest' FOR 'u1' IN slt_notes SOURCE 'chat 2026-11-13'
+
+# Another subject's memory is never merged into u1's.
+statement ok
+REMEMBER 'The user likes green tea' FOR 'u2' IN slt_notes
+
+query TTIRT
+SELECT subject, kind, seen, confidence, content FROM slt_notes ORDER BY subject, content
+----
+u1 preference 3 0.900 The user likes green tea
+u1 fact 1 1.000 The user lives in Budapest
+u2 fact 1 1.000 The user likes green tea
+
+query T
+SELECT content FROM recall('slt_notes', 'u1', 'what tea does the user drink', 1)
+----
+The user likes green tea
+
+query T rowsort
+SELECT content FROM recall('slt_notes', 'u1', 'tea or city')
+----
+The user likes green tea
+The user lives in Budapest
+
+query I
+SELECT count(*) FROM recall('slt_notes', 'u3', 'tea')
+----
+0
+
+# Not analyzed, a subject's memories are read through its index, the
+# words checked on them — not every memory of every subject the words
+# match, ranked first and filtered after.
+query T
+EXPLAIN SELECT id FROM slt_notes WHERE subject = 'u1' AND content @@ 'tea'
+----
+Project: #0
+  Index Scan using slt_notes_subject on slt_notes (subject = 'u1') filter: ((#1 = 'u1') AND @@(#3, 'tea', 'english'))
+
+# A contradiction is the caller's call: the new memory replaces the old,
+# which is closed, not deleted.
+statement ok
+REMEMBER 'The user lives in Szeged' FOR 'u1' IN slt_notes REPLACING (SELECT id FROM slt_notes WHERE content = 'The user lives in Budapest')
+
+query T rowsort
+SELECT content FROM recall('slt_notes', 'u1', 'where does the user live')
+----
+The user likes green tea
+The user lives in Szeged
+
+query TB
+SELECT content, valid_to IS NULL FROM slt_notes WHERE subject = 'u1' AND content LIKE '%lives%' ORDER BY created
+----
+The user lives in Budapest false
+The user lives in Szeged true
+
+query B
+SELECT replaces = (SELECT id FROM slt_notes WHERE content = 'The user lives in Budapest') FROM slt_notes WHERE content = 'The user lives in Szeged'
+----
+true
+
+# Only a current memory of the same subject is replaced.
+statement error 42704
+REMEMBER 'x' FOR 'u2' IN slt_notes REPLACING (SELECT id FROM slt_notes WHERE content = 'The user lives in Szeged')
+
+statement error 42704
+REMEMBER 'x' FOR 'u1' IN slt_notes REPLACING (SELECT id FROM slt_notes WHERE content = 'The user lives in Budapest')
+
+# An expired memory is not recalled (and the maintenance thread deletes it).
+statement ok
+REMEMBER 'A one-off code: 1234' FOR 'u1' IN slt_notes EXPIRES now() - interval '1 minute'
+
+statement ok
+REMEMBER 'The meeting is on Friday' FOR 'u1' IN slt_notes EXPIRES now() + interval '1 day'
+
+query T rowsort
+SELECT content FROM recall('slt_notes', 'u1', 'code meeting', 10)
+----
+The meeting is on Friday
+The user likes green tea
+The user lives in Szeged
+
+# Refusals.
+statement error 23502
+REMEMBER NULL FOR 'u1' IN slt_notes
+
+statement error 23502
+REMEMBER 'x' FOR NULL IN slt_notes
+
+statement error 42601
+REMEMBER 'x' FOR 'u1' IN slt_notes AS 'a' AS 'b'
+
+statement ok
+CREATE TABLE slt_plain (id int PRIMARY KEY, at timestamptz, n int)
+
+statement error 42809
+REMEMBER 'x' FOR 'u1' IN slt_plain
+
+statement error 42809
+SELECT * FROM recall('slt_plain', 'u1', 'x')
+
+statement error 42883
+SELECT * FROM recall('slt_notes', 'u1')
+
+statement error 42804
+SELECT * FROM recall(slt_notes, 'u1', 'x')
+
+# Row expiry on any table.
+statement ok
+ALTER TABLE slt_plain SET EXPIRY (at)
+
+statement error 42804
+ALTER TABLE slt_plain SET EXPIRY (n)
+
+statement error 42703
+ALTER TABLE slt_plain SET EXPIRY (nope)
+
+statement ok
+ALTER TABLE slt_plain DROP EXPIRY
+
+statement ok
+DROP TABLE slt_plain
+
+statement ok
+DROP TABLE slt_notes
+
+statement ok
+DROP MODEL slt_mem_h

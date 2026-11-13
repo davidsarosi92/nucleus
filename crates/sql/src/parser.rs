@@ -962,6 +962,7 @@ impl<'a> Parser<'a> {
                 };
                 Ok(Statement::Summarize(source))
             }
+            "remember" => self.remember(),
             "create" => self.create(),
             "drop" => self.drop(),
             "alter" => self.alter(),
@@ -1413,6 +1414,19 @@ impl<'a> Parser<'a> {
             self.expect_op(")")?;
             return Ok(Statement::CreateEnum { name, labels });
         }
+        if self.eat_kws(&["memory", "store"]) {
+            let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
+            let name = self.relation()?;
+            self.expect_kw("using")?;
+            let model = self.ident()?;
+            let options = self.table_options()?;
+            return Ok(Statement::CreateMemoryStore {
+                name,
+                if_not_exists,
+                model,
+                options,
+            });
+        }
         self.expect_kw("table")?;
         let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
         let name = self.relation()?;
@@ -1506,6 +1520,51 @@ impl<'a> Parser<'a> {
     }
 
     /// `[WITH (name = value, …)]`.
+    /// `REMEMBER content FOR subject IN store [clauses]` (PLAN.md §M14.24
+    /// R1); the clauses in any order, each once.
+    fn remember(&mut self) -> Result<Statement> {
+        self.expect_kw("remember")?;
+        let content = self.expr()?;
+        self.expect_kw("for")?;
+        // Above `IN` (or a comparison): `FOR 'u1' IN notes` names the store.
+        let subject = self.expr_prec(PREC_CONCAT)?;
+        self.expect_kw("in")?;
+        let store = self.relation()?;
+        let mut r = crate::ast::Remember {
+            store,
+            content,
+            subject,
+            kind: None,
+            confidence: None,
+            valid_from: None,
+            expires: None,
+            source: None,
+            replacing: None,
+        };
+        loop {
+            let slot = if self.eat_kw("as") {
+                &mut r.kind
+            } else if self.eat_kw("confidence") {
+                &mut r.confidence
+            } else if self.eat_kws(&["valid", "from"]) {
+                &mut r.valid_from
+            } else if self.eat_kw("expires") {
+                &mut r.expires
+            } else if self.eat_kw("source") {
+                &mut r.source
+            } else if self.eat_kw("replacing") {
+                &mut r.replacing
+            } else {
+                break;
+            };
+            if slot.is_some() {
+                return Err(self.error("a REMEMBER clause given twice"));
+            }
+            *slot = Some(self.expr()?);
+        }
+        Ok(Statement::Remember(Box::new(r)))
+    }
+
     fn table_options(&mut self) -> Result<Vec<(String, String)>> {
         let mut options = Vec::new();
         if self.eat_kw("with") {
@@ -2296,6 +2355,21 @@ impl<'a> Parser<'a> {
                     drop,
                 });
             }
+        }
+        if self.eat_kws(&["set", "expiry"]) {
+            self.expect_op("(")?;
+            let column = self.ident()?;
+            self.expect_op(")")?;
+            return Ok(Statement::SetExpiry {
+                table,
+                column: Some(column),
+            });
+        }
+        if self.eat_kws(&["drop", "expiry"]) {
+            return Ok(Statement::SetExpiry {
+                table,
+                column: None,
+            });
         }
         if self.eat_kws(&["set", "storage", "policy"]) {
             if self.eat_kw("none") {

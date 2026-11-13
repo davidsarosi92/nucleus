@@ -129,6 +129,33 @@ test("vector", async () => {
   await db.close();
 });
 
+test("memory", async () => {
+  const db = await connect(options);
+  const t = table();
+  await db.query(`CREATE MODEL ${t}_h USING hashing WITH (dimensions = 64)`);
+  await db.query(`CREATE MEMORY STORE ${t} USING ${t}_h WITH (merge = 0.99)`);
+  await db.query("SET embedding.pending = wait");
+  const a = await db.remember(t, "u1", "likes green tea", { kind: "preference", confidence: 0.6 });
+  assert.equal(a.action, "inserted");
+  assert.deepEqual(await db.remember(t, "u1", "likes green tea"), { id: a.id, action: "merged" });
+  await db.remember(t, "u1", "lives in Budapest", { source: "chat" });
+  await db.remember(t, "u1", "a one-off code", { expires: new Date(Date.now() - 60_000) });
+  await db.remember(t, "u1", "meeting on Friday", { expires: "1 day" });
+  const old = (await db.recall(t, "u1", "Budapest", 1))[0].id as string;
+  assert.equal((await db.remember(t, "u1", "lives in Szeged", { replaces: old })).action, "replaced");
+  const found = await db.recall(t, "u1", "where does the user live");
+  assert.deepEqual(found.map((m) => m.content).sort(), ["likes green tea", "lives in Szeged", "meeting on Friday"]);
+  const tea = found.find((m) => m.content === "likes green tea")!;
+  assert.deepEqual([tea.id, tea.kind, tea.seen], [a.id, "preference", 2]);
+  assert.deepEqual(await db.recall(t, "u2", "tea"), []);
+  assert.equal(await db.forget(t, a.id), true);
+  assert.equal(await db.forget(t, a.id), false);
+  assert.equal((await db.recall(t, "u1", "tea", 1)).length, 1);
+  await db.query(`DROP TABLE ${t}`);
+  await db.query(`DROP MODEL ${t}_h`);
+  await db.close();
+});
+
 test("sparsevec", async () => {
   const db = await connect(options);
   const t = table();
