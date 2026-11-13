@@ -328,6 +328,35 @@ fn serve(
             return out.flush();
         }
     };
+    welcome(&mut out, version, id, &session)?;
+    out.flush()?;
+
+    loop {
+        let (kind, body) = read_message(&mut input)?;
+        match message(
+            &mut session,
+            version,
+            kind,
+            &body,
+            &mut input,
+            &mut out,
+            &log,
+        )? {
+            Next::Go => {
+                // A client that sent the next message already (pipelined)
+                // gets the replies together: written when it waits.
+                if !message_waiting(input.buffer()) {
+                    out.flush()?;
+                }
+            }
+            Next::End => return out.flush(),
+        }
+    }
+}
+
+/// Welcome (the version agreed, the server, the session's id) and the
+/// first Ready.
+fn welcome(out: &mut impl Write, version: u16, id: u32, session: &Session) -> io::Result<()> {
     out.write_all(
         &Msg::new(b'W')
             .u16(version)
@@ -335,71 +364,179 @@ fn serve(
             .u32(id)
             .finish(),
     )?;
-    out.write_all(&ready_msg(session.status()))?;
-    out.flush()?;
+    out.write_all(&ready_msg(session.status()))
+}
 
-    loop {
-        let (kind, body) = read_message(&mut input)?;
-        match kind {
-            b'Q' => {
-                let parsed = (|| -> Result<(String, u8, u32, Vec<Value>), Error> {
-                    let mut b = Body::new(&body);
-                    let sql = b.str()?;
-                    let format = b.u8()?;
-                    let fetch = if version >= 6 { b.u32()? } else { 0 };
-                    let n = b.u16()? as usize;
-                    let mut r = b.r;
-                    let mut params = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        params.push(parameter(&mut r)?);
-                    }
-                    Ok((sql, format, fetch, params))
-                })();
-                match parsed {
-                    Ok((sql, format, fetch, params)) => {
-                        log("query", &sql);
-                        let query = Query {
-                            sql: &sql,
-                            format: match format {
-                                1 => Format::Text,
-                                2 if version >= 7 => Format::Columnar,
-                                _ => Format::Typed,
-                            },
-                            fetch,
-                            params: &params,
-                        };
-                        match run(&mut session, &query, version, &mut input, &mut out)? {
-                            Ran::Done => {}
-                            Ran::Failed(e) => {
-                                log("error", &format!("{} {}", e.code, e.message));
+/// What the session does after a message.
+enum Next {
+    /// Reads the next.
+    Go,
+    /// Ends (Bye, or an error that closes it).
+    End,
+}
+
+/// Answers one client message (after the login); `input` holds what a
+/// statement reads beyond it (`COPY` data, a stream's fetches).
+fn message<R: Read, W: Write>(
+    session: &mut Session,
+    version: u16,
+    kind: u8,
+    body: &[u8],
+    input: &mut BufReader<R>,
+    out: &mut W,
+    log: &dyn Fn(&str, &str),
+) -> io::Result<Next> {
+    match kind {
+        b'Q' => {
+            let parsed = (|| -> Result<(String, u8, u32, Vec<Value>), Error> {
+                let mut b = Body::new(body);
+                let sql = b.str()?;
+                let format = b.u8()?;
+                let fetch = if version >= 6 { b.u32()? } else { 0 };
+                let n = b.u16()? as usize;
+                let mut r = b.r;
+                let mut params = Vec::with_capacity(n);
+                for _ in 0..n {
+                    params.push(parameter(&mut r)?);
+                }
+                Ok((sql, format, fetch, params))
+            })();
+            match parsed {
+                Ok((sql, format, fetch, params)) => {
+                    log("query", &sql);
+                    let query = Query {
+                        sql: &sql,
+                        format: match format {
+                            1 => Format::Text,
+                            2 if version >= 7 => Format::Columnar,
+                            _ => Format::Typed,
+                        },
+                        fetch,
+                        params: &params,
+                    };
+                    match run(session, &query, version, input, out)? {
+                        Ran::Done => {}
+                        Ran::Failed(e) => {
+                            log("error", &format!("{} {}", e.code, e.message));
+                            out.write_all(&error_msg(&e, version))?;
+                        }
+                        Ran::Close(e) => {
+                            if let Some(e) = e {
                                 out.write_all(&error_msg(&e, version))?;
                             }
-                            Ran::Close(e) => {
-                                if let Some(e) = e {
-                                    out.write_all(&error_msg(&e, version))?;
-                                }
-                                return out.flush();
-                            }
+                            return Ok(Next::End);
                         }
                     }
-                    Err(e) => out.write_all(&error_msg(&e, version))?,
                 }
-                out.write_all(&ready_msg(session.status()))?;
-                // A client that sent the next message already (pipelined)
-                // gets the replies together: written when it waits.
-                if !message_waiting(input.buffer()) {
-                    out.flush()?;
-                }
+                Err(e) => out.write_all(&error_msg(&e, version))?,
             }
-            b'X' => return out.flush(),
-            other => {
-                out.write_all(&error_msg(
-                    &protocol(format!("unexpected message {:?}", other as char)),
-                    version,
-                ))?;
-                return out.flush();
-            }
+            out.write_all(&ready_msg(session.status()))?;
+            Ok(Next::Go)
         }
+        b'X' => Ok(Next::End),
+        // Copy data after a COPY that failed before it took any: a client
+        // that sends it with the statement (the embedded edition in
+        // WebAssembly does) has nothing to wait for — dropped, as
+        // PostgreSQL drops it.
+        b'd' | b'e' | b'f' => Ok(Next::Go),
+        other => {
+            out.write_all(&error_msg(
+                &protocol(format!("unexpected message {:?}", other as char)),
+                version,
+            ))?;
+            Ok(Next::End)
+        }
+    }
+}
+
+/// One session's server driven by the bytes it is given rather than by a
+/// thread waiting for them (sans-IO): each [`feed`](Self::feed) runs the
+/// whole messages among what it has and returns the replies.  For a
+/// platform without threads — the embedded edition in WebAssembly
+/// (PLAN.md §M14.23) — where nothing can wait in the middle of a
+/// statement, so a client sends what a statement reads with it: `COPY`
+/// data with the `COPY` (a statement that would wait for more ends the
+/// session, `08P01`), and results fetched whole (`fetch` 0).
+pub struct Exchange {
+    kv: Arc<dyn Kv>,
+    config: Config,
+    id: u32,
+    /// The protocol version and session, once logged in.
+    session: Option<(u16, Session)>,
+    /// What came in and is not yet a whole message.
+    input: Vec<u8>,
+    ended: bool,
+}
+
+impl Exchange {
+    /// A session not yet greeted (Hello is the first message).
+    pub fn new(kv: Arc<dyn Kv>, config: Config, id: u32) -> Self {
+        Self {
+            kv,
+            config,
+            id,
+            session: None,
+            input: Vec::new(),
+            ended: false,
+        }
+    }
+
+    /// Whether the session has ended (Bye, a failed login, a protocol
+    /// error); it then takes nothing more.
+    pub fn ended(&self) -> bool {
+        self.ended
+    }
+
+    /// Takes the client's bytes and runs each whole message among them
+    /// (with what follows it, if its statement reads more); returns what
+    /// the server sends back.
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.ended {
+            return out;
+        }
+        self.input.extend_from_slice(bytes);
+        while !self.ended && message_waiting(&self.input) {
+            let input = std::mem::take(&mut self.input);
+            let mut reader = BufReader::new(&input[..]);
+            match self.step(&mut reader, &mut out) {
+                Ok(Next::Go) => {}
+                Ok(Next::End) => self.ended = true,
+                Err(e) => {
+                    // A statement that read past what was sent (or bytes
+                    // that are no message): nothing can wait here.
+                    let e = protocol(format!(
+                        "a statement read past what was sent ({e}): send COPY data \
+                         with its COPY, fetch results whole"
+                    ));
+                    let version = self.session.as_ref().map_or(0, |(v, _)| *v);
+                    out.extend_from_slice(&error_msg(&e, version));
+                    self.ended = true;
+                }
+            }
+            let rest = reader.buffer().len() + reader.get_ref().len();
+            self.input = input[input.len() - rest..].to_vec();
+        }
+        out
+    }
+
+    fn step(&mut self, input: &mut BufReader<&[u8]>, out: &mut Vec<u8>) -> io::Result<Next> {
+        let log = logger(&self.config, self.id);
+        let Some((version, session)) = self.session.as_mut() else {
+            match login(input, out, &self.kv, &self.config, None, None, &log)? {
+                Ok((version, session)) => {
+                    welcome(out, version, self.id, &session)?;
+                    self.session = Some((version, session));
+                    return Ok(Next::Go);
+                }
+                Err(e) => {
+                    out.write_all(&error_msg(&e, 0))?;
+                    return Ok(Next::End);
+                }
+            }
+        };
+        let (kind, body) = read_message(input)?;
+        message(session, *version, kind, &body, input, out, &log)
     }
 }
 

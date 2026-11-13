@@ -78,7 +78,8 @@ fn create_write_reopen() {
 
 #[test]
 fn works_on_the_real_file_system() {
-    let dir = std::env::temp_dir().join(format!("nucleus-pager-{}", std::process::id()));
+    let dir = nucleus_platform::temp_dir()
+        .join(format!("nucleus-pager-{}", nucleus_platform::process_id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("data");
     let real = nucleus_platform::real::RealPlatform::new().unwrap();

@@ -993,9 +993,9 @@ fn access_rules_see_the_real_address() {
 fn start_real(config: nucleus_server::Config) -> SocketAddr {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    let dir = nucleus_platform::temp_dir().join(format!(
         "nucleus-client-test-{}-{}",
-        std::process::id(),
+        nucleus_platform::process_id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_dir_all(&dir);

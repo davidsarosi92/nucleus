@@ -388,6 +388,7 @@ fn values(s: &mut Session, texts: &[&str]) -> String {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn limits_batches_and_costs() {
     let metered = Arc::new(Metered {
         calls: AtomicUsize::new(0),

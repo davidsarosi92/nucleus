@@ -88,6 +88,30 @@ jobs:
   # The benchmark suite against PostgreSQL (PLAN.md §M14.11 L8, docs/
   # benchmarks.md): the table in the job summary, the numbers as an
   # artifact.  It fails only when a run fails.
+  wasm:
+    name: wasm32-wasip1 (the browser edition's engine, under Node's WASI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal --target wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Test (platform conformance, storage, transactions, SQL with slt)
+        run: |
+          set -o pipefail
+          export CARGO_TARGET_WASM32_WASIP1_RUNNER="node $PWD/scripts/wasi-run.mjs"
+          if ! cargo test --locked --target wasm32-wasip1 -p nucleus-platform -p nucleus-storage \
+              -p nucleus-txn -p nucleus-kv -p nucleus-sql 2>&1 | tee test.log; then
+            grep -E -A6 "panicked at|^failures:|FAILED|error(\[|:)" test.log | head -c 3800 > failures.txt || true
+            echo "::error title=wasm tests failed::$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' failures.txt)"
+            exit 1
+          fi
+
   bench:
     name: benchmarks against PostgreSQL
     runs-on: ubuntu-latest

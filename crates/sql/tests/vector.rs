@@ -169,6 +169,7 @@ fn groups_past_work_mem_agree() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn many_groups_past_work_mem_spill_on_the_workers() {
     // Many groups in no order of their keys, past work_mem: the morsels
     // write their groups to scratch and the parts read them back on the
@@ -588,6 +589,7 @@ fn regressions_are_the_same_under_any_split() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn parallel_aggregates_agree() {
     // Big enough to split into morsels; the simulation offers one CPU, so
     // the workers are asked for.
@@ -638,6 +640,7 @@ fn parallel_aggregates_agree() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn parallel_groups_in_key_order_past_work_mem_agree() {
     // Grouped by a prefix of the primary key, the morsels' groups meet only
     // at their edges: merged without a table of every group, so past
@@ -679,6 +682,7 @@ fn parallel_groups_in_key_order_past_work_mem_agree() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn parallel_joins_and_sorts_agree() {
     // Hash joins probed by morsels of the larger side, sorts of morsels
     // merged: the rows, their order and errors those of one thread and of
@@ -753,6 +757,7 @@ fn parallel_joins_and_sorts_agree() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn exact_vector_searches_run_on_the_workers() {
     // `ORDER BY distance LIMIT k` without an index: a top-k per morsel,
     // merged (PLAN.md §M14.12 V7) — the rows and their order one
@@ -795,6 +800,7 @@ fn exact_vector_searches_run_on_the_workers() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn parallel_writes_agree() {
     // `UPDATE` and `DELETE` find their rows through the vectorized scan, in
     // parallel on a large table: what they change, what they return and
@@ -940,6 +946,7 @@ fn char_text_in_lists_and_substr_agree() {
 /// order, and its errors: inner, left, semi and anti joins, by the primary
 /// key and by a secondary index, on row and column tables.
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn parallel_lookups_agree() {
     // (A column table's lookups cost more: fewer left rows look up.)
     for (storage, few) in [("row", 1500), ("column", 120)] {
@@ -1003,6 +1010,7 @@ fn parallel_lookups_agree() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn columnar_join_tables_agree() {
     // A hash join's table made by workers holds its rows a column at a
     // time: every kind of value, NULLs, a column of only NULLs and
@@ -1229,6 +1237,7 @@ fn key_filters_agree() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn eager_aggregates_and_parallel_merges_agree() {
     // A grouping by a join's left key aggregated on the right side first
     // (eager aggregation), and many groups merged on the workers — in key
@@ -1735,6 +1744,7 @@ fn typed_aggregate_states_agree() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn distinct_aggregates_as_groupings_agree() {
     // `count(DISTINCT x)` and the aggregates beside it planned as two
     // groupings (§M14.20 W6): the rows and errors of the same call with an
@@ -1863,6 +1873,7 @@ fn distinct_aggregates_as_groupings_agree() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn column_lookups_on_workers_agree() {
     // TPC-H Q19's shape: an outer table split into morsels, each row
     // looking up a column table's rows by a secondary index — each row
@@ -1920,6 +1931,7 @@ fn column_lookups_on_workers_agree() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn correlated_subqueries_on_workers_agree() {
     // TPC-H Q20's shape (§M14.20 W6): a filter, or a projection, whose
     // subquery runs for each row — over a join's rows, or a pipeline's —
@@ -2004,6 +2016,7 @@ fn correlated_subqueries_on_workers_agree() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn joins_in_pipelines_agree() {
     // Hash joins probed as steps of the pipeline below them (§M14.20 W6):
     // joins over joins, the groupings and sorts above them, on workers —

@@ -272,6 +272,7 @@ fn serializable_reads_validate_against_a_large_commit() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn readers_see_a_large_commit_all_at_once() {
     let p = Arc::new(SimPlatform::new(5));
     let e = engine_on(&p, opts()).unwrap();

@@ -10,7 +10,8 @@ repository.workspace = true
 getrandom = "0.4.3"
 
 [dev-dependencies]
-proptest = "1.12.0"
+# Without fork and timeout (subprocesses): the tests run on WebAssembly too.
+proptest = { version = "1.12.0", default-features = false, features = ["std", "bit-set"] }
 
 # The workspace forbids unsafe code; this crate only denies it, so that the
 # two calls `std` cannot make on macOS — the ordered sync,

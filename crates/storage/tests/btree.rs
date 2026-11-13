@@ -442,11 +442,13 @@ fn sorted_batches_agree_with_the_model() {
 /// removals that empty leaves, and commits between (so some pages are
 /// rewritten in place, some copied).
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn batches_on_workers_make_the_same_tree() {
     same_tree_on_workers(false, 4096);
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn batches_on_workers_through_a_small_pool_make_the_same_tree() {
     // Workers pinning the leaves they read while the walk takes and frees
     // pages, through a pool that evicts all the time.
@@ -466,6 +468,7 @@ impl LeafFilter for DropFifths {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn filtered_batches_on_workers_make_the_same_tree() {
     same_tree_on_workers(true, 4096);
 }

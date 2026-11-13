@@ -107,6 +107,45 @@ struct RealLock {
 
 impl crate::Lock for RealLock {}
 
+/// A lock held in this process alone, where the system has none.
+struct ProcessLock {
+    path: std::path::PathBuf,
+    _file: fs::File,
+}
+
+fn process_locks() -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    static L: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>> =
+        std::sync::OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+impl ProcessLock {
+    fn take(path: &Path, file: fs::File) -> io::Result<Box<dyn crate::Lock>> {
+        let mut held = process_locks().lock().unwrap_or_else(|e| e.into_inner());
+        if !held.insert(path.to_path_buf()) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("{} is locked", path.display()),
+            ));
+        }
+        Ok(Box::new(ProcessLock {
+            path: path.to_path_buf(),
+            _file: file,
+        }))
+    }
+}
+
+impl crate::Lock for ProcessLock {}
+
+impl Drop for ProcessLock {
+    fn drop(&mut self) {
+        process_locks()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.path);
+    }
+}
+
 impl FileSystem for RealFs {
     fn lock(&self, path: &Path) -> io::Result<Box<dyn crate::Lock>> {
         let file = fs::OpenOptions::new()
@@ -121,6 +160,11 @@ impl FileSystem for RealFs {
                 io::ErrorKind::WouldBlock,
                 format!("{} is locked by another process", path.display()),
             )),
+            // No file locks (WASI): a lock within the process, which is the
+            // only one there (PLAN.md §M14.23).
+            Err(fs::TryLockError::Error(e)) if e.kind() == io::ErrorKind::Unsupported => {
+                ProcessLock::take(path, file)
+            }
             Err(fs::TryLockError::Error(e)) => Err(e),
         }
     }

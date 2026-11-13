@@ -266,6 +266,7 @@ fn oversized_keys_are_refused_before_logging() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn concurrent_writers_and_readers() {
     let p = sim(1);
     let (store, _) = open(&p).unwrap();
@@ -291,7 +292,8 @@ fn concurrent_writers_and_readers() {
 
 #[test]
 fn works_on_the_real_file_system() {
-    let dir = std::env::temp_dir().join(format!("nucleus-store-{}", std::process::id()));
+    let dir = nucleus_platform::temp_dir()
+        .join(format!("nucleus-store-{}", nucleus_platform::process_id()));
     let real: Arc<dyn Platform> = Arc::new(RealPlatform::new().unwrap());
     let (store, _) = Store::open(Arc::clone(&real), &dir, &opts()).unwrap();
     store
@@ -496,8 +498,10 @@ fn crash_at_every_io_point_of_overlapping_checkpoints() {
 /// free them and grow the file.  Then the store, reopened, holds every
 /// write.
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn checkpoints_while_writing_on_real_files() {
-    let dir = std::env::temp_dir().join(format!("nucleus-ckpt-{}", std::process::id()));
+    let dir = nucleus_platform::temp_dir()
+        .join(format!("nucleus-ckpt-{}", nucleus_platform::process_id()));
     let real: Arc<dyn Platform> = Arc::new(RealPlatform::new().unwrap());
     let o = StoreOptions {
         cache_pages: 16,

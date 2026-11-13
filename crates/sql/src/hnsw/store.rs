@@ -77,7 +77,8 @@ impl Shape {
                 ratio: 0.02,
                 cap: 1000,
                 join: true,
-                threads,
+                // WASI has no threads (PLAN.md §M14.23).
+                threads: if cfg!(target_os = "wasi") { 1 } else { threads },
             },
         }
     }
@@ -158,7 +159,7 @@ pub fn nonce() -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_nanos() as u64);
-        AtomicU64::new(mix(now ^ u64::from(std::process::id())))
+        AtomicU64::new(mix(now ^ u64::from(nucleus_platform::process_id())))
     })
     .fetch_add(1, Relaxed)
 }
@@ -1877,6 +1878,7 @@ impl Index {
                     .map(|(n, i)| (metric.distance(q, view.at(n)), i))
                     .collect()
             };
+            let threads = if cfg!(target_os = "wasi") { 1 } else { threads };
             let parts = threads.clamp(1, pks.len().max(1));
             if parts == 1 {
                 near = part(0, pks.len());

@@ -101,6 +101,9 @@ fn rescore_default(codec: Codec) -> usize {
 }
 
 fn threads() -> usize {
+    if cfg!(target_os = "wasi") {
+        return 1;
+    }
     std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 

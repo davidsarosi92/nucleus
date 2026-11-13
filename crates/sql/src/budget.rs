@@ -35,7 +35,8 @@ pub struct Budget {
 /// The threads the current statement may use for one scan (1: no
 /// parallelism) — 1 too where vectorized execution is off.
 pub fn workers() -> usize {
-    if batch_size() == 0 || ON_WORKER.with(Cell::get) {
+    // WASI has no threads (the browser edition, PLAN.md §M14.23).
+    if cfg!(target_os = "wasi") || batch_size() == 0 || ON_WORKER.with(Cell::get) {
         return 1;
     }
     SPENT.with(|s| {

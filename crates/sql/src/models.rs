@@ -1139,7 +1139,7 @@ pub(crate) fn embed_unchecked(
         };
         let parallel = (m.limits.parallel as usize).min(batches.len());
         let answers: Vec<(Result<Vec<Vec<f32>>>, crate::budget::ModelCost)> =
-            if parallel > 1 && m.files.is_empty() {
+            if parallel > 1 && m.files.is_empty() && !cfg!(target_os = "wasi") {
                 // A remote model's calls at once: each thread takes the
                 // next batch; the answers kept in order.
                 let next = AtomicUsize::new(0);

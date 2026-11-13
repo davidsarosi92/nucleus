@@ -120,6 +120,10 @@ pub fn options(text: &str, memory: bool) -> Result<Options, String> {
     Ok(o)
 }
 
+/// Whether the platform has threads (WASI has none: no background
+/// threads, sessions by [`Database::exchange`] only).
+pub const THREADS: bool = !cfg!(target_os = "wasi");
+
 // ------------------------------------------------------------------ database
 
 struct Inner {
@@ -209,11 +213,17 @@ impl Database {
             ..Config::default()
         };
         let stop = Stop::new();
-        let background = vec![
-            nucleus_server::maintain_until(Arc::clone(&kv), stop.clone()),
-            // The embedding columns' jobs (§M14.22 E4b), off the sessions.
-            nucleus_sql::embedding::serve(Arc::clone(&kv), Arc::clone(&config.registry)),
-        ];
+        // Without threads (WASI) the sessions do it all: the embedding
+        // columns' jobs, checkpoints at commits.
+        let background = if THREADS {
+            vec![
+                nucleus_server::maintain_until(Arc::clone(&kv), stop.clone()),
+                // The embedding columns' jobs (§M14.22 E4b), off the sessions.
+                nucleus_sql::embedding::serve(Arc::clone(&kv), Arc::clone(&config.registry)),
+            ]
+        } else {
+            Vec::new()
+        };
         Self {
             inner: Arc::new(Inner {
                 name,
@@ -238,6 +248,22 @@ impl Database {
     /// The engine (for Rust programs that use it directly).
     pub fn kv(&self) -> Option<Arc<dyn Kv>> {
         lock(&self.inner.kv).clone().map(|db| db as Arc<dyn Kv>)
+    }
+
+    /// A new session driven by the bytes given to it, on the caller's
+    /// thread ([`nucleus_server::Exchange`]): for a platform without
+    /// threads, the browser's WebAssembly.  Nothing waits mid-statement,
+    /// so a client sends `COPY` data with its `COPY` and fetches results
+    /// whole.  It keeps the engine until dropped (a [`close`](Self::close)
+    /// leaves it be).
+    pub fn exchange(&self) -> Result<nucleus_server::Exchange, String> {
+        let kv = self.kv().ok_or("the database is closed")?;
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        Ok(nucleus_server::Exchange::new(
+            kv,
+            self.inner.config.clone(),
+            id,
+        ))
     }
 
     /// A new session, served on a thread of its own until the connection

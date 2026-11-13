@@ -152,7 +152,8 @@ fn local_database_on_the_simulation() {
 
 #[test]
 fn local_database_on_the_real_file_system() {
-    let dir = std::env::temp_dir().join(format!("nucleus-kv-{}", std::process::id()));
+    let dir =
+        nucleus_platform::temp_dir().join(format!("nucleus-kv-{}", nucleus_platform::process_id()));
     let db = Database::open(
         &dir,
         Options {
@@ -173,6 +174,7 @@ fn local_database_on_the_real_file_system() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn many_threads_through_the_trait() {
     let p = Arc::new(SimPlatform::new(2));
     let db: Arc<dyn Kv> =
@@ -200,7 +202,10 @@ fn many_threads_through_the_trait() {
 
 #[test]
 fn one_process_at_a_time_per_directory() {
-    let dir = std::env::temp_dir().join(format!("nucleus-kv-lock-{}", std::process::id()));
+    let dir = nucleus_platform::temp_dir().join(format!(
+        "nucleus-kv-lock-{}",
+        nucleus_platform::process_id()
+    ));
     let db = Database::open(&dir, Options::default()).unwrap();
     let err = match Database::open(&dir, Options::default()) {
         Ok(_) => panic!("a second open succeeded"),

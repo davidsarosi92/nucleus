@@ -603,6 +603,14 @@ pub fn par_map<T: Sync, R: Send>(
     f: impl Fn(&T, &mut Scratch) -> R + Sync,
 ) -> Vec<R> {
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    if threads <= 1 {
+        // On this thread (where there are no others: WASI), as one worker.
+        let mut own = Scratch::default();
+        let out = items.iter().map(|it| f(it, &mut own)).collect();
+        s.hops += own.hops;
+        s.distances += own.distances;
+        return out;
+    }
     let next = AtomicUsize::new(0);
     // Each thread's results (by position) and its counts.
     type Part<R> = (Vec<(usize, R)>, u64, u64);

@@ -17,9 +17,9 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
         static N: AtomicU32 = AtomicU32::new(0);
-        let p = std::env::temp_dir().join(format!(
+        let p = nucleus_platform::temp_dir().join(format!(
             "nucleus-conformance-{}-{}",
-            std::process::id(),
+            nucleus_platform::process_id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&p).unwrap();

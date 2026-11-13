@@ -314,11 +314,15 @@ impl Entries {
         let chunk = self.items.len().div_ceil(threads).max(SORT_CHUNK);
         let bytes = &self.bytes;
         let items = &mut self.items;
-        std::thread::scope(|sc| {
-            for part in items.chunks_mut(chunk) {
-                sc.spawn(|| part.sort_unstable_by(|a, b| cmp_in(bytes, a, b)));
-            }
-        });
+        if items.len() <= chunk {
+            items.sort_unstable_by(|a, b| cmp_in(bytes, a, b));
+        } else {
+            std::thread::scope(|sc| {
+                for part in items.chunks_mut(chunk) {
+                    sc.spawn(|| part.sort_unstable_by(|a, b| cmp_in(bytes, a, b)));
+                }
+            });
+        }
         if items.len() > chunk {
             let parts: Vec<&[Item]> = items.chunks(chunk).collect();
             let at: Vec<std::cell::Cell<usize>> =

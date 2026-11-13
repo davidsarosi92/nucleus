@@ -34,6 +34,26 @@ pub mod sim;
 
 pub use rng::SplitMix64;
 
+/// The system's directory for temporary files — `/tmp` on WASI, which has
+/// none of its own (its runner maps one, `scripts/wasi-run.mjs`).
+pub fn temp_dir() -> std::path::PathBuf {
+    if cfg!(target_os = "wasi") {
+        std::path::PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+/// This process's id — 0 on WASI, which has none (a run there has a
+/// temporary directory of its own).
+pub fn process_id() -> u32 {
+    if cfg!(target_os = "wasi") {
+        0
+    } else {
+        std::process::id()
+    }
+}
+
 /// How far a real file system's [`File::sync`] goes (PLAN.md D17).
 ///
 /// - `Ordered` (the default): the writes before a sync reach the drive

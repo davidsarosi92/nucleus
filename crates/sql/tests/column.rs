@@ -55,6 +55,7 @@ fn compare(s: &mut Session) {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn column_tables_agree_with_row_tables() {
     let db: Arc<dyn Kv> = Arc::new(
         Database::open_on(

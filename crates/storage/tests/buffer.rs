@@ -171,6 +171,7 @@ fn stress_with(
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn concurrent_stress_sharded() {
     // 1024 frames: four shards, each its own clock; 8 × 1500 pages.
     let p = SimPlatform::new(2);
@@ -179,6 +180,7 @@ fn concurrent_stress_sharded() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn concurrent_stress_simulated() {
     let p = SimPlatform::new(1);
     p.fs().create_dir_all(Path::new("/db")).unwrap();
@@ -186,8 +188,10 @@ fn concurrent_stress_simulated() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn concurrent_stress_real() {
-    let dir = std::env::temp_dir().join(format!("nucleus-pool-{}", std::process::id()));
+    let dir = nucleus_platform::temp_dir()
+        .join(format!("nucleus-pool-{}", nucleus_platform::process_id()));
     std::fs::create_dir_all(&dir).unwrap();
     stress(&RealPlatform::new().unwrap(), &dir.join("data"));
     std::fs::remove_dir_all(&dir).unwrap();

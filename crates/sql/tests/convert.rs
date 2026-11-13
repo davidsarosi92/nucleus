@@ -137,6 +137,7 @@ fn conversions_keep_the_rows() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn writes_go_on_during_a_conversion() {
     let kv: Arc<dyn Kv> = Arc::new(
         Database::open_on(

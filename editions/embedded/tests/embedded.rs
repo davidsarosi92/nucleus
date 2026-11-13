@@ -4,7 +4,9 @@
 // The C API is called as C would: through raw pointers.
 #![allow(unsafe_code)]
 
+use std::collections::VecDeque;
 use std::ffi::{CStr, CString, c_char};
+use std::io::{Read, Write};
 use std::ptr;
 
 use nucleus_client::{Client, Config, Format, Value};
@@ -24,8 +26,10 @@ struct TempDir(std::path::PathBuf);
 
 impl TempDir {
     fn new(name: &str) -> Self {
-        let p =
-            std::env::temp_dir().join(format!("nucleus-embedded-{name}-{}", std::process::id()));
+        let p = nucleus_platform::temp_dir().join(format!(
+            "nucleus-embedded-{name}-{}",
+            nucleus_platform::process_id()
+        ));
         let _ = std::fs::remove_dir_all(&p);
         Self(p)
     }
@@ -224,4 +228,79 @@ fn sql_scripts_in_the_process() {
         failures.len(),
         failures.join("\n\n")
     );
+}
+
+/// A session stepped by its bytes ([`Database::exchange`], as the browser
+/// drives it): what the client wrote is fed when it reads.
+struct Stepped {
+    exchange: nucleus_server::Exchange,
+    sent: Vec<u8>,
+    back: VecDeque<u8>,
+}
+
+impl Write for Stepped {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.sent.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Read for Stepped {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.back.is_empty() && !self.sent.is_empty() {
+            let sent = std::mem::take(&mut self.sent);
+            self.back.extend(self.exchange.feed(&sent));
+        }
+        let n = buf.len().min(self.back.len());
+        for (b, v) in buf.iter_mut().zip(self.back.drain(..n)) {
+            *b = v;
+        }
+        Ok(n)
+    }
+}
+
+fn stepped(db: &Database) -> Client {
+    let s = Stepped {
+        exchange: db.exchange().unwrap(),
+        sent: Vec::new(),
+        back: VecDeque::new(),
+    };
+    Client::over(Box::new(s), Config::default()).unwrap()
+}
+
+#[test]
+fn sql_scripts_through_a_stepped_session() {
+    let mut failures = Vec::new();
+    let scripts = nucleus_testkit::core_scripts();
+    for (name, script) in scripts.iter().filter(|(n, _)| nucleus_testkit::picked(n)) {
+        let db = Database::open(MEMORY, "").unwrap();
+        let mut connect = || -> Box<dyn Connection> { Box::new(Ncp(stepped(&db))) };
+        failures.extend(run_script(script, name, &mut connect));
+    }
+    assert!(scripts.len() >= 19);
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+#[test]
+fn a_stepped_session_ends_where_a_statement_would_wait() {
+    let db = Database::open(MEMORY, "").unwrap();
+    let mut c = stepped(&db);
+    c.query("CREATE TABLE t (a int)", &[], Format::Text)
+        .unwrap();
+    // The data comes after the COPY asked for it: too late (the session
+    // says so, 08P01, and ends).
+    assert!(c.copy_in("COPY t FROM STDIN", &mut &b"1\n2\n"[..]).is_err());
+    assert!(c.query("SELECT 1", &[], Format::Text).is_err());
+    // Another session sees the database as it was.
+    let mut d = stepped(&db);
+    assert_eq!(one(&mut d, "SELECT count(*) FROM t"), Value::Int(0));
 }

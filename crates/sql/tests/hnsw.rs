@@ -713,7 +713,8 @@ fn hnsw_serves_order_by_distance_limit() {
     s.execute("SET batch_size = 64").unwrap();
     let before = nucleus_sql::vector::parallel_runs();
     assert_eq!(rows(&mut s, sql), found);
-    assert!(nucleus_sql::vector::parallel_runs() > before);
+    // (WASI runs it on one thread.)
+    assert!(cfg!(target_os = "wasi") || nucleus_sql::vector::parallel_runs() > before);
     s.execute("RESET parallel_workers").unwrap();
     s.execute("RESET batch_size").unwrap();
     // LEFT JOIN LATERAL: a row without a vector is ranked by nothing (its

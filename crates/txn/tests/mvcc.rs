@@ -202,6 +202,7 @@ fn write_skew_is_possible_under_snapshot_isolation() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn lost_updates_cannot_happen() {
     let (_p, e) = engine();
     put(&e, "counter", "0");
@@ -236,6 +237,7 @@ fn lost_updates_cannot_happen() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn transfers_keep_the_total() {
     let (_p, e) = engine();
     let accounts = 8u64;

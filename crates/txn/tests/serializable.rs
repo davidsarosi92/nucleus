@@ -139,6 +139,7 @@ fn only_the_part_of_a_scan_that_was_read_counts() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 fn serializable_counters_under_contention() {
     // The total of two counters may be increased only while it is < 100:
     // under snapshot isolation concurrent increments of different counters
