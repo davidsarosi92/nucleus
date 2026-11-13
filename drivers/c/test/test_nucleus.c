@@ -1,5 +1,9 @@
 /* libnucleus against a running nucleus server (NUCLEUS_HOST, NUCLEUS_PORT;
  * scripts/driver-tests.sh starts one). */
+#ifndef _WIN32
+/* getaddrinfo is POSIX: under -std=c99 glibc declares it only when asked. */
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
