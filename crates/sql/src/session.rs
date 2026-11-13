@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use nucleus_kv::{Isolation, Kv, KvTxn, TxnOptions};
 
-use crate::ast::{IsolationLevel, Statement, TableConstraint, TxnMode};
+use crate::ast::{AsOf, IsolationLevel, Statement, TableConstraint, TxnMode};
 use crate::binder::{Binder, Scope};
 use crate::catalog::{self, Column, Index, Table};
 use crate::dml;
@@ -239,6 +239,10 @@ struct Block {
     mode: TxnMode,
     failed: bool,
 }
+
+/// The session setting whose time (or `commit n`) every statement and
+/// transaction reads at (PLAN.md §M14.14).
+pub const READ_AS_OF: &str = "read_as_of";
 
 /// A session over a database.
 pub struct Session {
@@ -562,6 +566,26 @@ impl Session {
         Ok(())
     }
 
+    /// The session's `read_as_of`, when set: its statements and
+    /// transactions read the snapshot of that time (or commit) — PLAN.md
+    /// §M14.14.
+    fn read_as_of(&self) -> Option<AsOf> {
+        let v = self.settings.get(READ_AS_OF)?.trim().trim_matches('\'');
+        if v.is_empty() {
+            return None;
+        }
+        let text = |s: &str| crate::ast::Expr::Literal(Value::Text(s.into()));
+        Some(match v.strip_prefix("commit ") {
+            Some(n) => AsOf::Commit(text(n.trim())),
+            None => AsOf::Time(text(v)),
+        })
+    }
+
+    /// The snapshot `as_of` names ([`crate::time_travel::snapshot`]).
+    fn snapshot_of(&self, as_of: &AsOf) -> Result<nucleus_kv::Timestamp> {
+        crate::time_travel::snapshot(&self.kv, &self.registry, as_of)
+    }
+
     /// The next statement's budget: the session's `statement_timeout` (or
     /// the database's), and the ceiling's — the tighter of each.
     fn budget(&self, who: &crate::access::Who) -> Result<crate::budget::Budget> {
@@ -761,7 +785,7 @@ impl Session {
                     self.block = Some(Block {
                         txn: None,
                         now: 0,
-                        mode: *mode,
+                        mode: mode.clone(),
                         failed: false,
                     });
                 }
@@ -854,6 +878,9 @@ impl Session {
                     Some(b) => {
                         b.mode.isolation = mode.isolation.or(b.mode.isolation);
                         b.mode.read_only = mode.read_only.or(b.mode.read_only);
+                        if mode.as_of.is_some() {
+                            b.mode.as_of.clone_from(&mode.as_of);
+                        }
                     }
                     None => {}
                 }
@@ -1164,6 +1191,17 @@ impl Session {
     ) -> Result<Output> {
         let ddl = Self::is_ddl(stmt);
         let default = self.default_isolation;
+        // A block about to begin its transaction at a past snapshot: the
+        // block's `AS OF`, else the session's `read_as_of`.
+        let past = match &self.block {
+            Some(b) if b.txn.is_none() && !b.failed => b
+                .mode
+                .as_of
+                .clone()
+                .or_else(|| self.read_as_of())
+                .map(|a| self.snapshot_of(&a)),
+            _ => None,
+        };
         if let Some(block) = &mut self.block {
             if block.failed {
                 return Err(Error::in_failed_txn(
@@ -1173,6 +1211,14 @@ impl Session {
             if block.txn.is_none() {
                 let mut opts = options(&block.mode, default, false);
                 opts.read_only |= self.who.ceiling.read_only;
+                match past {
+                    Some(Ok(at)) => opts.at = Some(at),
+                    Some(Err(e)) => {
+                        block.failed = true;
+                        return Err(e);
+                    }
+                    None => {}
+                }
                 block.txn = Some(self.kv.begin(opts)?);
                 block.now = crate::datetime::from_system(self.kv.wall_clock());
             }
@@ -1224,6 +1270,9 @@ impl Session {
         // Autocommit, retried on conflicts.
         let mut opts = options(&TxnMode::default(), default, read_only(stmt));
         opts.read_only |= self.who.ceiling.read_only;
+        if let Some(as_of) = self.read_as_of() {
+            opts.at = Some(self.snapshot_of(&as_of)?);
+        }
         let mut attempt = 0;
         loop {
             let mut txn = self.kv.begin(opts)?;
@@ -1802,20 +1851,7 @@ pub(crate) fn execute_statement(
                     "relation \"{name}\" already exists"
                 )));
             }
-            let mut storage = crate::storage::ROW.to_string();
-            for (key, value) in options {
-                match key.as_str() {
-                    "storage" => {
-                        crate::storage::named(value)?;
-                        storage = value.clone();
-                    }
-                    _ => {
-                        return Err(Error::invalid_parameter(format!(
-                            "unrecognized parameter \"{key}\""
-                        )));
-                    }
-                }
-            }
+            let storage = storage_option(options)?;
             create_table(
                 txn,
                 reg,
@@ -1828,6 +1864,58 @@ pub(crate) fn execute_statement(
             let owner = crate::access::current().user.clone();
             crate::privileges::on_create_table(txn, name, &owner)?;
             Output::Command("CREATE TABLE".into())
+        }
+        Statement::CreateTableAs {
+            name,
+            columns,
+            query,
+            if_not_exists,
+            options,
+            with_data,
+        } => {
+            if catalog::get_table(&*txn, name)?.is_some() {
+                if *if_not_exists {
+                    return Ok(Output::Command("CREATE TABLE AS".into()));
+                }
+                return Err(Error::duplicate_table(format!(
+                    "relation \"{name}\" already exists"
+                )));
+            }
+            let storage = storage_option(options)?;
+            // The query's columns: their names (or those given) and types.
+            let cols = {
+                let ro: &dyn KvTxn = &*txn;
+                Binder::new(ro, reg).checked().query(query)?.scope.cols
+            };
+            if columns.len() > cols.len() {
+                return Err(Error::syntax("too many column names were specified"));
+            }
+            let specs: Vec<_> = cols
+                .into_iter()
+                .enumerate()
+                .map(|(i, c)| crate::ast::ColumnSpec {
+                    name: columns.get(i).cloned().unwrap_or(c.name),
+                    ty: crate::ast::SqlType::builtin(c.ty.unwrap_or(DataType::Text)),
+                    max_len: None,
+                    numeric: None,
+                    not_null: false,
+                    primary_key: false,
+                    unique: false,
+                    default: None,
+                    check: None,
+                    references: None,
+                    generated: None,
+                })
+                .collect();
+            create_table(txn, reg, name, &specs, &[], &storage, None)?;
+            let owner = crate::access::current().user.clone();
+            crate::privileges::on_create_table(txn, name, &owner)?;
+            let n = if *with_data {
+                dml::insert(txn, reg, name, &None, query, &[], params)?.count
+            } else {
+                0
+            };
+            Output::Command(format!("SELECT {n}"))
         }
         Statement::CreateChunkTable {
             name,
@@ -3028,6 +3116,25 @@ fn create_partition(
         crate::fk::attach(txn, &mut child, fk)?;
     }
     Ok(())
+}
+
+/// A new table's storage, from its `WITH (storage = …)`.
+fn storage_option(options: &[(String, String)]) -> Result<String> {
+    let mut storage = crate::storage::ROW.to_string();
+    for (key, value) in options {
+        match key.as_str() {
+            "storage" => {
+                crate::storage::named(value)?;
+                storage = value.clone();
+            }
+            _ => {
+                return Err(Error::invalid_parameter(format!(
+                    "unrecognized parameter \"{key}\""
+                )));
+            }
+        }
+    }
+    Ok(storage)
 }
 
 pub(crate) fn create_table(

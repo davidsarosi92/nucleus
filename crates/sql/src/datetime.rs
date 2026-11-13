@@ -165,6 +165,9 @@ pub fn current() -> Option<(i64, Arc<dyn Kv>)> {
     NOW.with(|n| n.borrow().clone())
 }
 
+/// Microseconds from the Unix epoch to 2000-01-01, PostgreSQL's.
+pub const UNIX_TO_PG_MICROS: i64 = UNIX_TO_PG_DAYS * USECS_PER_DAY;
+
 /// A wall-clock time as a timestamp (µs since 2000-01-01).
 pub fn from_system(t: SystemTime) -> i64 {
     let since = t.duration_since(UNIX_EPOCH).unwrap_or_default();

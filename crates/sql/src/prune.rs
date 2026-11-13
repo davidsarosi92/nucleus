@@ -181,7 +181,9 @@ fn walk(plan: &Plan, mut wanted: Vec<bool>, out: &mut HashMap<usize, Vec<bool>>)
                 walk(p, wanted.clone(), out);
             }
         }
-        Plan::Cte { plan: inner, .. } => walk(inner, all(inner), out),
+        Plan::Cte { plan: inner, .. } | Plan::Past { plan: inner, .. } => {
+            walk(inner, all(inner), out)
+        }
         Plan::Recursive { base, step, .. } => {
             walk(base, all(base), out);
             walk(step, all(step), out);

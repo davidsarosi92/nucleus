@@ -20,6 +20,22 @@ pub enum Statement {
         /// `PARTITION BY RANGE | LIST | HASH (columns)`.
         partition_by: Option<(String, Vec<String>)>,
     },
+    /// `CREATE TABLE name [(column, …)] AS query [WITH [NO] DATA]`: a
+    /// table of the query's columns, filled with its rows.
+    CreateTableAs {
+        /// Table name.
+        name: String,
+        /// The columns' names, if given (else the query's).
+        columns: Vec<String>,
+        /// The query.
+        query: Box<Query>,
+        /// `IF NOT EXISTS`.
+        if_not_exists: bool,
+        /// `WITH (name = value, …)`.
+        options: Vec<(String, String)>,
+        /// Not `WITH NO DATA`.
+        with_data: bool,
+    },
     /// `CREATE TABLE name PARTITION OF parent FOR VALUES … | DEFAULT`.
     CreatePartition {
         /// The partition's name.
@@ -575,12 +591,25 @@ impl Default for ExplainOptions {
 }
 
 /// Transaction characteristics.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TxnMode {
     /// `ISOLATION LEVEL …`, if given.
     pub isolation: Option<IsolationLevel>,
     /// `READ ONLY` (`Some(true)`) / `READ WRITE` (`Some(false)`).
     pub read_only: Option<bool>,
+    /// `AS OF …`: a read-only transaction at a past snapshot (PLAN.md
+    /// §M14.14).
+    pub as_of: Option<AsOf>,
+}
+
+/// A past snapshot, as named (PLAN.md §M14.14).
+#[derive(Clone, Debug, PartialEq)]
+pub enum AsOf {
+    /// `AS OF TIMESTAMP expr` (or `AS OF SYSTEM TIME expr`): the last
+    /// commit at or before a time.
+    Time(Expr),
+    /// `AS OF COMMIT expr`: a commit's timestamp.
+    Commit(Expr),
 }
 
 /// An isolation level as written.
@@ -952,6 +981,9 @@ pub enum TableRef {
         columns: Vec<String>,
         /// `TABLESAMPLE method (args) [REPEATABLE (seed)]`.
         sample: Option<TableSample>,
+        /// `AS OF TIMESTAMP | COMMIT expr` (or SQL:2011's `FOR SYSTEM_TIME
+        /// AS OF expr`): the table as it was then (PLAN.md §M14.14).
+        as_of: Option<Box<AsOf>>,
     },
     /// `(query) AS alias [(columns)]`.
     Subquery {

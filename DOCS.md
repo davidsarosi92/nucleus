@@ -1636,14 +1636,18 @@ deepest statement allowed fits in (about 6 MB measured).
 Statements: `CREATE TABLE [IF NOT EXISTS]` (column constraints `PRIMARY
 KEY`, `NOT NULL`, `UNIQUE`, `DEFAULT`, `CHECK`, `REFERENCES`; table
 constraints `PRIMARY KEY (…)`, `UNIQUE (…)`, `CHECK (…)`, `FOREIGN KEY (…)
-REFERENCES …`, each with an optional `CONSTRAINT name`), `DROP TABLE [IF
+REFERENCES …`, each with an optional `CONSTRAINT name`), `CREATE TABLE
+[IF NOT EXISTS] t [(names)] [WITH (…)] AS query [WITH [NO] DATA]` (the
+query's columns, names given replacing theirs from the left, with their
+types — without a length or a numeric's precision — and no constraints;
+filled by the query unless `WITH NO DATA`; tagged `SELECT n`), `DROP TABLE [IF
 EXISTS] … [CASCADE]`, `CREATE [UNIQUE] INDEX [IF NOT EXISTS]`, `DROP INDEX
 [IF EXISTS]`, `ALTER TABLE … ADD [COLUMN] …`, `ALTER TABLE … ADD
 [CONSTRAINT n] FOREIGN KEY | CHECK | UNIQUE …`, `ALTER TABLE … DROP
 CONSTRAINT [IF EXISTS] n`, `INSERT … VALUES | SELECT | DEFAULT VALUES
 [RETURNING]`, `UPDATE … SET … [WHERE] [RETURNING]`, `DELETE … [WHERE]
 [RETURNING]`, queries, `BEGIN`/`START TRANSACTION` (`ISOLATION LEVEL …`,
-`READ ONLY|WRITE`), `COMMIT`/`END`, `ROLLBACK`, `SET TRANSACTION …`, `SET
+`READ ONLY|WRITE`, `AS OF TIMESTAMP|COMMIT …`), `COMMIT`/`END`, `ROLLBACK`, `SET TRANSACTION …`, `SET
 name = value`, `SHOW name`, `EXPLAIN`, `ANALYZE [table]`, `CREATE
 STATISTICS [IF NOT EXISTS] name [(ndistinct, dependencies, mcv)] ON a, b
 [, …] FROM t` (2–8 columns counted together by `ANALYZE`; the kinds are
@@ -2560,6 +2564,41 @@ back).  `REPEATABLE READ`, `READ COMMITTED` and `READ UNCOMMITTED` all run
 as snapshot isolation; `SERIALIZABLE` as §5.2.  `SET
 default_transaction_isolation`; `SHOW transaction_isolation |
 server_version | …`.
+
+**At a past time** (§M14.14 TT2).  `BEGIN [READ ONLY] AS OF TIMESTAMP
+expr` (also `AS OF SYSTEM TIME`, CockroachDB's words), `AS OF COMMIT n`,
+or `SET TRANSACTION AS OF …` before the block's first statement: the
+block's transaction reads the snapshot of the last commit at or before
+that time (`Kv::snapshot_at`, §5.2) — read-only (`25006` on a write).
+`SET read_as_of = '2026-11-13 10:00:00+00'` (or `'commit n'`; `RESET`
+ends it) puts every following statement and block of the session there.
+The expression is evaluated when the transaction begins, in a
+transaction of its own (`now() - interval '1 hour'` works; a parameter
+does not); a time in the future, NULL or a commit not positive is
+`22023`; one before the retention by time (§5.2), or with none set,
+`72000` (snapshot too old).  The statement binds against the catalog as
+it was then — the session's catalog cache serves only snapshots that
+read the catalog as it was filled (`watched_as_at`) — so a table since
+altered reads in its old shape and a dropped one is there; index
+methods answer from their stored state at that snapshot (the text index
+and HNSW, `tests/time_travel.rs`).
+
+**A table at a past time** (§M14.14 TT3).  `FROM t AS OF TIMESTAMP expr`
+(or `AS OF SYSTEM TIME`, `AS OF COMMIT n`, SQL:2011's `FOR SYSTEM_TIME
+AS OF expr`; before the alias) reads one table at its own snapshot,
+beside the present in the same statement: `SELECT … FROM t AS OF … JOIN
+t …` compares, `INSERT INTO t SELECT … FROM t AS OF …` or `CREATE TABLE
+t2 AS SELECT * FROM t AS OF …` restores.  The binder evaluates the
+expression (`time_travel::snapshot`, as for a block), begins a read-only
+transaction there, and binds the table against that snapshot's catalog
+— its past shape, a table dropped since included — in a sub-binder of
+its own (checked as the outer one is); the plan is `Plan::Past { at,
+plan }`, which the executor runs in a transaction of its own at `at`
+and materializes, as a CTE's rows (`EXPLAIN` shows `As Of commit n`).
+Privileges are the present's: a table that still exists needs `SELECT`
+now; one dropped since is readable only to whom the past catalog's
+grants allowed.  A CTE's name with `AS OF` is `0A000`.  `WITH` is a
+reserved word (as in PostgreSQL), so it ends a table's alias.
 
 ### 8.8 Statistics and costs (`stats`)
 
@@ -5745,6 +5784,15 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-13 — §M14.14 TT1–TT3, time travel:** with a retention by
+  time (`EngineOptions::history_time`, `nucleus_kv::Options::
+  history_time`) each commit records its time (`00 05 | ts → µs`,
+  monotonic); `Kv::snapshot_at`, `commit_time`, `reach`.  `BEGIN … AS OF
+  TIMESTAMP | SYSTEM TIME | COMMIT expr`, `SET TRANSACTION AS OF …`, the
+  session's `read_as_of`; `FROM t AS OF … | FOR SYSTEM_TIME AS OF …`
+  (`Plan::Past`); `CREATE TABLE … AS query [WITH [NO] DATA]`; `WITH`
+  reserved.
 
 - **2026-11-13 — §M14.29 S2, a fuzzing find:** a SCRAM client (the
   Rust crate, the Python, JavaScript, Java and C drivers) refuses a

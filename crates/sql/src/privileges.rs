@@ -919,6 +919,10 @@ pub fn authorize_ddl(
                 }
             }
         }
+        Statement::CreateTableAs { .. } => {
+            // (The query's reads are checked as it binds.)
+            c.require(txn, Kind::Schema, "public", CREATE, None)?;
+        }
         Statement::CreateChunkTable { source, column, .. } => {
             // A table of the source's texts, and a foreign key to it.
             c.require(txn, Kind::Schema, "public", CREATE, None)?;

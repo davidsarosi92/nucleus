@@ -951,7 +951,7 @@ pub(crate) fn uncorrelated_rows(sub: &SubPlan, env: &Env) -> Result<std::sync::A
 fn reads_context(plan: &Plan) -> bool {
     let mut found = matches!(
         plan,
-        Plan::Cte { .. } | Plan::WorkTable { .. } | Plan::View { .. }
+        Plan::Cte { .. } | Plan::WorkTable { .. } | Plan::View { .. } | Plan::Past { .. }
     );
     plan.for_each_expr(&mut |e| {
         e.walk(&mut |x| {

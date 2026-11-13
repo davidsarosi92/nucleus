@@ -948,6 +948,7 @@ fn push(plan: Plan, st: &Stats) -> Plan {
         },
         p @ (Plan::Values { .. }
         | Plan::Cte { .. }
+        | Plan::Past { .. }
         | Plan::Recursive { .. }
         | Plan::WorkTable { .. }
         | Plan::Function { .. }
@@ -1471,7 +1472,7 @@ pub(crate) fn estimate(plan: &Plan, st: &Stats) -> f64 {
         }),
         Plan::Values { rows, .. } => rows.len() as f64,
         Plan::Append { inputs, .. } => inputs.iter().map(|p| estimate(p, st)).sum(),
-        Plan::Cte { plan, .. } => estimate(plan, st),
+        Plan::Cte { plan, .. } | Plan::Past { plan, .. } => estimate(plan, st),
         Plan::Recursive { base, .. } => estimate(base, st) * 10.0,
         Plan::WorkTable { .. } => 10.0,
         Plan::Function { .. } => 100.0,
@@ -2074,6 +2075,7 @@ pub(crate) fn map_children(plan: Plan, f: &dyn Fn(Plan) -> Plan) -> Plan {
         p @ (Plan::Scan { .. }
         | Plan::Values { .. }
         | Plan::Cte { .. }
+        | Plan::Past { .. }
         | Plan::Recursive { .. }
         | Plan::WorkTable { .. }
         | Plan::Function { .. }

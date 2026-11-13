@@ -1018,6 +1018,73 @@ impl<'a> Binder<'a> {
         Ok(b)
     }
 
+    /// `t AS OF …` (PLAN.md §M14.14): the table bound against the catalog
+    /// of the snapshot named — its definition, privileges and policies of
+    /// then — and read in a transaction at it ([`Plan::Past`]).  A table
+    /// still there needs the privilege to read it now as well.  Its
+    /// columns name no table column of the present (no column privilege
+    /// is checked against today's table, no index operand taken from it).
+    fn past_table(&mut self, t: &TableRef, as_of: &ast::AsOf) -> Result<Bound> {
+        let TableRef::Table {
+            schema,
+            name,
+            alias,
+            columns,
+            sample,
+            ..
+        } = t
+        else {
+            unreachable!("a table reference")
+        };
+        let qual = alias.clone().unwrap_or_else(|| name.clone());
+        if schema.is_none() && self.ctes.iter().any(|c| c.name == *name) {
+            return Err(Error::feature(
+                "AS OF applies to a table, not to a WITH query",
+            ));
+        }
+        let (_, kv) = crate::datetime::current()
+            .ok_or_else(|| Error::internal("AS OF outside a statement"))?;
+        let at = crate::time_travel::snapshot(&kv, self.registry, as_of)?;
+        let past = kv.begin(nucleus_kv::TxnOptions {
+            at: Some(at),
+            ..nucleus_kv::TxnOptions::read_only()
+        })?;
+        if let Some(c) = &self.checker
+            && schema.as_deref().is_none_or(|s| s == "public")
+            && catalog::get_table(self.txn, name)?.is_some()
+            && !c.has_any_column(self.txn, name, crate::privileges::SELECT)?
+        {
+            return Err(crate::privileges::denied(
+                crate::privileges::Kind::Table,
+                name,
+                crate::privileges::SELECT,
+                None,
+            ));
+        }
+        let mut then = Binder::new(&*past, self.registry);
+        if self.checker.is_some() {
+            then = then.checked();
+        }
+        let mut b = then.table_ref(&TableRef::Table {
+            schema: schema.clone(),
+            name: name.clone(),
+            alias: Some(qual),
+            columns: columns.clone(),
+            sample: sample.clone(),
+            as_of: None,
+        })?;
+        for c in &mut b.scope.cols {
+            c.origin = None;
+        }
+        Ok(Bound {
+            plan: Plan::Past {
+                at,
+                plan: Box::new(b.plan),
+            },
+            scope: b.scope,
+        })
+    }
+
     fn table_ref(&mut self, t: &TableRef) -> Result<Bound> {
         match t {
             TableRef::Lateral(inner) => self.table_ref(inner),
@@ -1029,11 +1096,15 @@ impl<'a> Binder<'a> {
                 columns,
             } => self.function_ref(name, args, *ordinality, alias.as_deref(), columns),
             TableRef::Table {
+                as_of: Some(as_of), ..
+            } => self.past_table(t, as_of),
+            TableRef::Table {
                 schema,
                 name,
                 alias,
                 columns,
                 sample,
+                as_of: None,
             } => {
                 let qual = alias.clone().unwrap_or_else(|| name.clone());
                 let not_a_table = || {

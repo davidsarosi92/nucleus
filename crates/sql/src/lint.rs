@@ -157,7 +157,7 @@ fn nullable(plan: &Plan, col: usize) -> bool {
         | Plan::Sort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::Distinct { input } => nullable(input, col),
-        Plan::Cte { plan, .. } => nullable(plan, col),
+        Plan::Cte { plan, .. } | Plan::Past { plan, .. } => nullable(plan, col),
         Plan::Window { input, .. } if col < input.width() => nullable(input, col),
         Plan::Project { input, exprs } => match &exprs[col] {
             Expr::Column(i) => nullable(input, *i),

@@ -56,6 +56,7 @@ pub(crate) mod object_cache;
 /// (`--index-cache`; by default a quarter of the machine's memory).
 pub use object_cache::{budget as index_cache, set_budget as set_index_cache};
 pub mod text;
+pub mod time_travel;
 pub use nucleus_kernels as kernels;
 pub mod large;
 pub mod laws;

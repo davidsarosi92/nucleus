@@ -1,0 +1,68 @@
+# CREATE TABLE … AS query: a table of the query's columns, filled with its
+# rows (PLAN.md §M14.14 TT3, restoring a table from its past).  Expected
+# results as PostgreSQL 18 gives them.
+
+statement ok
+CREATE TABLE src (id INT PRIMARY KEY, name TEXT, score DOUBLE PRECISION)
+
+statement ok
+INSERT INTO src VALUES (1, 'a', 0.5), (2, 'b', 1.5), (3, NULL, 2.5)
+
+statement ok
+CREATE TABLE copy AS SELECT * FROM src WHERE id > 1
+
+query ITR
+SELECT id, name, score FROM copy ORDER BY id
+----
+2 b 1.500
+3 NULL 2.500
+
+# The columns take the query's types: an int column refuses text.
+statement error 22P02
+INSERT INTO copy VALUES ('x', 'y', 1)
+
+# Names given replace the query's, from the left.
+statement ok
+CREATE TABLE named (k, label) AS SELECT id, upper(name), score * 2 AS score FROM src
+
+query ITR
+SELECT k, label, score FROM named ORDER BY k
+----
+1 A 1.000
+2 B 3.000
+3 NULL 5.000
+
+statement error 42601
+CREATE TABLE toomany (a, b, c, d) AS SELECT id FROM src
+
+# WITH NO DATA: the columns only.
+statement ok
+CREATE TABLE empty AS SELECT id, name FROM src WITH NO DATA
+
+query I
+SELECT count(*) FROM empty
+----
+0
+
+statement ok
+INSERT INTO empty VALUES (9, 'z')
+
+statement error 42P07
+CREATE TABLE copy AS SELECT 1
+
+statement ok
+CREATE TABLE IF NOT EXISTS copy AS SELECT 1
+
+query I
+SELECT count(*) FROM copy
+----
+2
+
+# Expressions name their columns as a SELECT does.
+statement ok
+CREATE TABLE sums AS SELECT count(*) AS n, sum(score) FROM src
+
+query IR
+SELECT n, sum FROM sums
+----
+3 4.500

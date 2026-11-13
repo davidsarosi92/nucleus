@@ -374,6 +374,19 @@ fn build_node<'a>(
             };
             rows.iter()
         }
+        Plan::Past { at, plan } => {
+            // In a read-only transaction at the snapshot, materialized (in
+            // memory, or past work_mem in scratch space) before it ends.
+            let (_, kv) = crate::datetime::current()
+                .ok_or_else(|| Error::internal("AS OF outside a statement"))?;
+            let txn = kv.begin(nucleus_kv::TxnOptions {
+                at: Some(*at),
+                ..nucleus_kv::TxnOptions::read_only()
+            })?;
+            let past = Ctx::new(&*txn, ctx.registry, ctx.params);
+            let rows = Rc::new(stash(build(plan, &past, outer)?)?);
+            rows.iter()
+        }
         Plan::WorkTable { id, .. } => match ctx.work.borrow().get(id).cloned() {
             Some(rows) => rows.iter(),
             None => Box::new(std::iter::empty()),

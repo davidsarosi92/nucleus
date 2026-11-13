@@ -7930,13 +7930,37 @@ SELECT … FROM t AS OF …`, a dropped table included).
   them), the retention (a minute) kept and the rest collected, the
   records surviving a crash at every I/O point, none written without a
   retention.
-- **TT2 — SQL at a time, whole**: `BEGIN READ ONLY AS OF TIMESTAMP …`,
+- **TT2 — SQL at a time, whole** ✅: `BEGIN READ ONLY AS OF TIMESTAMP …`,
   `SET TRANSACTION AS OF …`, `SET read_as_of`; errors past the retention
   (`SnapshotTooOld` → its SQLSTATE) and in the future.
+  **TT2 ✅ (2026-11-13).**  `TxnMode::as_of` (`AS OF TIMESTAMP | SYSTEM
+  TIME | COMMIT expr`), the session's `read_as_of`; the expression
+  evaluated as a one-row query in a transaction of its own when the
+  block's transaction begins; `22023` for the future or NULL, `72000`
+  past the retention.  Nothing else was needed: the catalog cache
+  already refuses a snapshot that reads the catalog otherwise, so a
+  past statement binds against the past catalog — a column added since
+  absent, a dropped table there (`tests/time_travel.rs`); the text index
+  and HNSW answered for their past in the small case — TT5 checks them
+  at scale.
 - **TT3 — a table at a time**: `FROM t AS OF TIMESTAMP x` (and `AS OF
   COMMIT n`): its own snapshot, its past definition; writes in the same
   statement read the present — restores by `CREATE TABLE … AS` and
   `INSERT … SELECT`.
+  **TT3 ✅ (2026-11-13).**  `FROM t AS OF TIMESTAMP | SYSTEM TIME |
+  COMMIT expr` and SQL:2011's `FOR SYSTEM_TIME AS OF expr` (SQL Server,
+  MariaDB, CockroachDB's `AS OF SYSTEM TIME` per statement; Oracle's
+  `AS OF TIMESTAMP` per table — taken: per table, so a statement
+  compares and restores).  The binder binds the table against the past
+  snapshot's catalog in a sub-binder; `Plan::Past { at, plan }` runs in
+  a read-only transaction of its own at `at` and is materialized like a
+  CTE — one past read per table, the present's plan untouched.  Needed
+  for the restore: `CREATE TABLE … AS query [WITH [NO] DATA]` (it was
+  missing), and `WITH` reserved, as PostgreSQL has it, since an alias
+  had swallowed `WITH NO DATA`.  Privileges are the present's (a table
+  that still exists needs `SELECT` now).  `tests/time_travel.rs`
+  (a table's past beside its present, a dropped table restored),
+  `slt/64_create_table_as.slt`.
 - **TT4 — retention and reach in SQL**: the server's `--history`,
   `nc_catalog.history` (the oldest time and commit reachable),
   `nucleus_kv` `Options::history_time`.

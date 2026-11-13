@@ -135,6 +135,7 @@ const RESERVED: &[&str] = &[
     "except",
     "intersect",
     "collate",
+    "with",
 ];
 
 /// How deep a statement may nest: parentheses, subqueries, operators
@@ -1143,6 +1144,18 @@ impl<'a> Parser<'a> {
         Ok(o)
     }
 
+    /// After `AS OF`: `TIMESTAMP expr`, `SYSTEM TIME expr` or `COMMIT
+    /// expr`.
+    fn as_of(&mut self) -> Result<AsOf> {
+        if self.eat_kw("timestamp") || self.eat_kws(&["system", "time"]) {
+            Ok(AsOf::Time(self.expr()?))
+        } else if self.eat_kw("commit") {
+            Ok(AsOf::Commit(self.expr()?))
+        } else {
+            Err(self.error("expected TIMESTAMP, SYSTEM TIME or COMMIT after AS OF"))
+        }
+    }
+
     fn txn_mode(&mut self) -> Result<TxnMode> {
         let mut mode = TxnMode::default();
         loop {
@@ -1162,6 +1175,8 @@ impl<'a> Parser<'a> {
                 mode.read_only = Some(true);
             } else if self.eat_kws(&["read", "write"]) {
                 mode.read_only = Some(false);
+            } else if self.eat_kws(&["as", "of"]) {
+                mode.as_of = Some(self.as_of()?);
             } else {
                 return Ok(mode);
             }
@@ -1487,6 +1502,38 @@ impl<'a> Parser<'a> {
                 if_not_exists,
             });
         }
+        // `CREATE TABLE name [(column, …)] [WITH (…)] AS query [WITH [NO] DATA]`.
+        let save = self.pos;
+        let names = if self.eat_op("(") {
+            match self.name_list() {
+                Ok(n) if self.eat_op(")") => Some(n),
+                _ => None,
+            }
+        } else {
+            Some(Vec::new())
+        };
+        if let Some(names) = names {
+            let options = self.table_options()?;
+            if self.eat_kw("as") {
+                let query = self.query()?;
+                let with_data = if self.eat_kw("with") {
+                    let no = self.eat_kw("no");
+                    self.expect_kw("data")?;
+                    !no
+                } else {
+                    true
+                };
+                return Ok(Statement::CreateTableAs {
+                    name,
+                    columns: names,
+                    query: Box::new(query),
+                    if_not_exists,
+                    options,
+                    with_data,
+                });
+            }
+        }
+        self.pos = save;
         self.expect_op("(")?;
         let mut columns = Vec::new();
         let mut constraints = Vec::new();
@@ -3005,6 +3052,20 @@ impl<'a> Parser<'a> {
                 columns,
             });
         }
+        // `t AS OF …` / `t FOR SYSTEM_TIME AS OF …` before an alias.
+        let as_of = if self.peek_kw("as")
+            && self.peek_at(1).is_some_and(|t| t.is("of"))
+            && self
+                .peek_at(2)
+                .is_some_and(|t| t.is("timestamp") || t.is("system") || t.is("commit"))
+        {
+            self.pos += 2;
+            Some(Box::new(self.as_of()?))
+        } else if self.eat_kws(&["for", "system_time", "as", "of"]) {
+            Some(Box::new(AsOf::Time(self.expr()?)))
+        } else {
+            None
+        };
         let alias = self.alias()?;
         let columns = if alias.is_some() {
             self.column_aliases()?
@@ -3037,6 +3098,7 @@ impl<'a> Parser<'a> {
             alias,
             columns,
             sample,
+            as_of,
         })
     }
 

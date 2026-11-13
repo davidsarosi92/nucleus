@@ -119,6 +119,16 @@ pub enum Plan {
         /// The CTE's query.
         plan: Box<Plan>,
     },
+    /// A table as it was at a past snapshot (`FROM t AS OF …`, PLAN.md
+    /// §M14.14): `plan` — the table's read as bound against its past
+    /// definition — run in a read-only transaction at `at`, its rows
+    /// materialized once (as a CTE's).
+    Past {
+        /// The snapshot.
+        at: nucleus_kv::Timestamp,
+        /// The table's read.
+        plan: Box<Plan>,
+    },
     /// `WITH RECURSIVE`: `base`, then `step` run again and again over the
     /// rows the previous round produced (the work table `id`) until a round
     /// produces none.
@@ -739,7 +749,7 @@ impl Plan {
             | Plan::Distinct { input } => input.width(),
             Plan::SetOp { left, .. } => left.width(),
             Plan::Append { inputs, .. } => inputs.first().map_or(0, Plan::width),
-            Plan::Cte { plan, .. } => plan.width(),
+            Plan::Cte { plan, .. } | Plan::Past { plan, .. } => plan.width(),
             Plan::Recursive { base, .. } => base.width(),
             Plan::WorkTable { width, .. } | Plan::Function { width, .. } => *width,
             Plan::View { view } => view.columns().len(),
@@ -967,6 +977,7 @@ impl Plan {
                     .join(", ")
             ),
             Plan::Cte { name, .. } => format!("CTE {name}"),
+            Plan::Past { at, .. } => format!("As Of commit {at}"),
             Plan::Recursive { all, .. } => {
                 format!("Recursive Union{}", if *all { " All" } else { "" })
             }
@@ -1048,7 +1059,7 @@ impl Plan {
             Plan::Join { left, right, .. } | Plan::SetOp { left, right, .. } => vec![left, right],
             Plan::Append { inputs, .. } => inputs.iter().collect(),
             Plan::Recursive { base, step, .. } => vec![base, step],
-            Plan::Cte { plan, .. } => vec![plan],
+            Plan::Cte { plan, .. } | Plan::Past { plan, .. } => vec![plan],
             Plan::Filter { input, .. }
             | Plan::Secure { input, .. }
             | Plan::Project { input, .. }
@@ -1100,7 +1111,7 @@ impl Plan {
             Plan::Join { left, right, .. } | Plan::SetOp { left, right, .. } => vec![left, right],
             Plan::Append { inputs, .. } => inputs.iter_mut().collect(),
             Plan::Recursive { base, step, .. } => vec![base, step],
-            Plan::Cte { plan, .. } => vec![plan],
+            Plan::Cte { plan, .. } | Plan::Past { plan, .. } => vec![plan],
             Plan::Filter { input, .. }
             | Plan::Secure { input, .. }
             | Plan::Project { input, .. }
@@ -1157,6 +1168,7 @@ impl Plan {
             Plan::Distinct { .. }
             | Plan::SetOp { .. }
             | Plan::Cte { .. }
+            | Plan::Past { .. }
             | Plan::Recursive { .. }
             | Plan::WorkTable { .. }
             | Plan::View { .. } => {}
@@ -1239,6 +1251,7 @@ impl Plan {
             Plan::Distinct { .. }
             | Plan::SetOp { .. }
             | Plan::Cte { .. }
+            | Plan::Past { .. }
             | Plan::Recursive { .. }
             | Plan::WorkTable { .. }
             | Plan::View { .. } => {}
