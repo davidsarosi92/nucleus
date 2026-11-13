@@ -931,6 +931,23 @@ python3 -I bench/wamp/wamp.py nucleus-docker VOLUME /t/nucleus 21500 [2,4]   # a
 python3 -I bench/wamp/wamp.py pg [0,1,2,3,4,5]     # Docker, postgres:18-alpine
 ```
 
+## Embedded editions
+
+PLAN.md §M14.23; an M-series Mac.
+
+| What | Time |
+|------|------|
+| `SELECT 1` from Python, a database in the process (the pipe) | 10.5 µs |
+| `SELECT 1` from Python over loopback TCP to `nucleus server` | 30 µs |
+| A million rows of two columns into numpy, in the process | 29–37 ms |
+| Browser (Chrome 157): the first answer after the page starts — engine fetched and compiled, database opened from OPFS, three statements | 95–140 ms (52–106 cached) |
+| WebAssembly in Node 24, in memory: `INSERT … SELECT` of 200,000 rows | 229 ms |
+| — a `GROUP BY` over them | 44 ms |
+| — a point query, one round trip | 26 µs |
+
+The browser's engine is 7.1 MB, 1.65 MB with brotli
+(`drivers/js/wasm/build.sh`: LTO, one codegen unit, no model modules).
+
 ## Targets
 
 PLAN.md §M14.11 asks for targets set from the first results, and

@@ -74,6 +74,42 @@ int nc_close(nc_database *db, char **error);
 /* Frees an error message this library set. */
 void nc_free_error(char *error);
 
+/*
+ * Sessions without threads (WebAssembly, where nothing may wait): a
+ * session run on the caller's thread, stepped by the bytes given to it.
+ */
+typedef struct NcExchange nc_stepped;
+
+/* A new stepped session on `db` (NULL on failure, `*error` set). */
+nc_stepped *nc_exchange(nc_database *db, char **error);
+
+/*
+ * Gives the session `len` bytes and runs the whole messages among what it
+ * has; returns its reply, `*reply_len` bytes, valid until the next call on
+ * `x`.  A COPY's data goes with the COPY (one without fails, 57014); a
+ * fetch's batches follow one another without being asked for; one
+ * statement's reply holds at most 256 MB (54000 past it).
+ */
+const uint8_t *nc_feed(nc_stepped *x, const uint8_t *buf, size_t len, size_t *reply_len);
+
+/* 1 once the session has ended (a Bye, a failed login), else 0. */
+int nc_exchange_ended(nc_stepped *x);
+
+/* Frees the session. */
+void nc_exchange_free(nc_stepped *x);
+
+/* Memory of this library's, for a host that writes into it (WebAssembly's). */
+uint8_t *nc_alloc(size_t len);
+void nc_dealloc(uint8_t *p, size_t len);
+
+/*
+ * WebAssembly: the free slots of the storage pool the host provides
+ * (imports `nucleus_slots`: count, read, write, size, truncate, flush),
+ * which it tops up between calls; -1 elsewhere or before a directory is
+ * opened.
+ */
+int64_t nc_pool_free(void);
+
 #ifdef __cplusplus
 }
 #endif

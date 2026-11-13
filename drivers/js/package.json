@@ -1,7 +1,7 @@
 {
   "name": "nucleus-db",
   "version": "0.1.0",
-  "description": "JavaScript/TypeScript driver for the nucleus database (the nucleus protocol, ncp)",
+  "description": "JavaScript/TypeScript driver for the nucleus database (the nucleus protocol, ncp); in a browser, the database itself in WebAssembly",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
@@ -9,11 +9,22 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "browser": "./dist/browser.js",
       "default": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "default": "./dist/browser.js"
     }
   },
-  "files": ["dist", "src"],
-  "engines": { "node": ">=18" },
+  "files": [
+    "dist",
+    "src",
+    "wasm/nucleus.wasm"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc",
     "test": "node --test test/nucleus.test.ts"

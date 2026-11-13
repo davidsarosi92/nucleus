@@ -35,5 +35,14 @@ From Rust, `nucleus_embedded::Database::open(path, options)?` and
 - **Features:** `embeddings` (models of OpenAI-compatible servers, Cohere,
   Voyage) and `local-models` (models run in the process), both on.
 
-DOCS.md §11 (*In the process*) has the details; `tests/embedded.rs` runs
-the slt suite through it.
+- **In WebAssembly** (the browser's edition, `wasm32-wasip1`,
+  `drivers/js/wasm/build.sh`): no threads, so sessions are stepped —
+  `nc_exchange` / `nc_feed` run the whole messages given and return the
+  reply (`Database::exchange` in Rust); a COPY's data goes with the COPY.
+  A directory lives in a pool of files the host opened ahead (the
+  browser's OPFS), imported as `nucleus_slots`
+  (`nucleus_platform::slots`); `nc_pool_free` says when to add more.
+
+DOCS.md §11 (*In the process*, *In the browser*) has the details;
+`tests/embedded.rs` runs the slt suite through a session's pipe and
+through a stepped session.

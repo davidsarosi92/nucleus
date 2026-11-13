@@ -291,16 +291,24 @@ fn sql_scripts_through_a_stepped_session() {
 }
 
 #[test]
-fn a_stepped_session_ends_where_a_statement_would_wait() {
+fn a_stepped_session_takes_copy_data_only_with_the_copy() {
     let db = Database::open(MEMORY, "").unwrap();
     let mut c = stepped(&db);
     c.query("CREATE TABLE t (a int)", &[], Format::Text)
         .unwrap();
-    // The data comes after the COPY asked for it: too late (the session
-    // says so, 08P01, and ends).
-    assert!(c.copy_in("COPY t FROM STDIN", &mut &b"1\n2\n"[..]).is_err());
-    assert!(c.query("SELECT 1", &[], Format::Text).is_err());
-    // Another session sees the database as it was.
-    let mut d = stepped(&db);
-    assert_eq!(one(&mut d, "SELECT count(*) FROM t"), Value::Int(0));
+    // The data comes after the COPY asked for it: too late — the COPY
+    // fails (57014), the data that follows is dropped, the session goes on.
+    let e = c
+        .copy_in("COPY t FROM STDIN", &mut &b"1\n2\n"[..])
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no data came with it"), "{e}");
+    assert_eq!(one(&mut c, "SELECT count(*) FROM t"), Value::Int(0));
+    // A result fetched in batches comes whole, no batch waiting to be
+    // asked for.
+    let cur = c
+        .cursor("SELECT i FROM generate_series(1, 2500) i", &[], 100)
+        .unwrap();
+    assert_eq!(cur.map(Result::unwrap).count(), 2500);
+    assert_eq!(one(&mut c, "SELECT 7"), Value::Integer(7));
 }

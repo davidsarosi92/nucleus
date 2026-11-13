@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nucleus in the browser</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 40rem; padding: 0 1rem; }
+  pre { background: #f4f4f4; padding: 1rem; border-radius: 6px; }
+</style>
+<h1>nucleus in the browser</h1>
+<p>A database in this page (PLAN.md §M14.23): the engine in WebAssembly, in
+a worker, its files in the Origin Private File System — reload, and the
+visits are still there.  The same <code>connect</code> and queries as on a
+server; only the connection string says where.</p>
+<pre id="out">opening…</pre>
+<script type="module">
+  // Served from the repository's root (`node drivers/js/test/browser.mjs
+  // --serve`); a package's user imports "nucleus-db".
+  import { connect } from "../../drivers/js/dist/browser.js";
+
+  const out = document.getElementById("out");
+  const keep = new URLSearchParams(location.search).has("keep");
+  window.done = (async () => {
+    const db = await connect("file:visits");
+    await db.query("CREATE TABLE IF NOT EXISTS visits (n INT PRIMARY KEY, at TIMESTAMPTZ NOT NULL)");
+    const { rows } = await db.query(
+      "INSERT INTO visits SELECT coalesce(max(n), 0) + 1, now() FROM visits RETURNING n");
+    const n = rows[0][0];
+    const recent = await db.query("SELECT n, at FROM visits ORDER BY n DESC LIMIT 5");
+    // From the page's start to here: the engine fetched, compiled and
+    // started, the database opened, three statements run.
+    window.ms = Math.round(performance.now());
+    out.textContent = `visit ${n} (${window.ms} ms)\n\n` + recent.rows.map(([k, at]) => `#${k}  ${at.toISOString()}`).join("\n");
+    // ?keep: left open, as a closed tab leaves it (what was committed stays).
+    if (!keep) await db.close();
+    return n;
+  })().catch((e) => {
+    out.textContent = `failed: ${e.message}`;
+    throw e;
+  });
+</script>

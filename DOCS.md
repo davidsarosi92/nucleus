@@ -46,9 +46,9 @@
 | `modules/local-models` | `nucleus-local-models` | the `local` model provider: models run inside nucleus — WordPiece and Unigram tokenizers, BERT and XLM-RoBERTa encoders on `ext::kernels`, files from Hugging Face or a directory kept in the database (§8.23) | §M14.22 |
 | `modules/mcp` | `nucleus-mcp` | a Model Context Protocol server: AI models list, describe and query a database (§6.5) | §M14.10 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
-| `editions/embedded` | `nucleus-embedded` (a `cdylib`, `staticlib` and `rlib`) | the embedded edition: a database in memory or in a directory inside the application, its sessions over the nucleus protocol through a pipe in the process, behind a C API (`include/nucleus_embedded.h`) that Python and Node load (§11, *In the process*) | §M14.23 |
+| `editions/embedded` | `nucleus-embedded` (a `cdylib`, `staticlib` and `rlib`) | the embedded edition: a database in memory or in a directory inside the application, its sessions over the nucleus protocol through a pipe in the process, behind a C API (`include/nucleus_embedded.h`) that Python and Node load (§11, *In the process*); for `wasm32-wasip1` the browser's, its sessions stepped (§11, *In the browser*) | §M14.23 |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
-| `drivers` | — | drivers for C, C++, Python, JS/TS, Java (§11); Python's platform wheel (`build_wheel.py`) and JavaScript's Node-API addon (`native/`) for the embedded edition | §M14.8 ✅, §M14.23 |
+| `drivers` | — | drivers for C, C++, Python, JS/TS, Java (§11); Python's platform wheel (`build_wheel.py`) and JavaScript's Node-API addon (`native/`) for the embedded edition; JavaScript's browser entry (`src/browser.ts`, the engine in WebAssembly, `wasm/build.sh`) | §M14.8 ✅, §M14.23 |
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
 | `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.21 |
@@ -268,6 +268,36 @@ files go with the process); locks are exclusive per path while held;
 platform — `MemoryPlatform::new()` the machine's (`RealPlatform`),
 `MemoryPlatform::with(p)` any.  `tests/conformance.rs` runs its
 assertions against it too.
+
+### 3.7 A pool of slots (`slots::SlotPlatform`)
+
+The browser edition's files (§M14.23): a browser opens an OPFS file for
+synchronous access only in a worker and only by an asynchronous call,
+which the synchronous engine cannot wait for mid-statement — so the host
+opens a pool of files ahead (the `Slots` trait: `count`, `read`, `write`,
+`size`, `truncate`, `flush`, by slot number; slots may be added between
+calls) and `SlotFs` keeps the database's files in them, SQLite's
+`opfs-sahpool` idea.  Each slot is one file: a 4 KiB header, then its
+bytes.  The header is two 2 KiB copies, each `NCSLOT01`, a generation,
+the path's length and bytes, and an FNV-1a checksum; a write goes to the
+copy not holding the latest, with a generation above every other in the
+pool, and is flushed at once.  So a torn header write leaves the other
+copy (the slot as it was), and a rename — the moved file's header
+rewritten with the new path, then the replaced file's slot freed — that
+a crash cuts between leaves two slots naming the path, of which the
+newer wins when the pool is next read (the stale one freed).  Opening,
+creating, renaming and removing are header writes on handles already
+open; directories are not stored (one exists where it was made in this
+run or where a file lies under it); `sync_dir` does nothing (headers are
+flushed as written).  A removed or replaced file stays readable through
+handles opened before: its slot is reused only when they are dropped.
+With every slot taken a new file fails with `StorageFull`;
+`free_slots()` tells the host when to add more (it keeps eight free,
+adding sixteen).  Locks are per path within the pool, which one page
+holds at a time (OPFS's handles are exclusive).  `MemorySlots` is a pool
+in memory for tests; `tests/conformance.rs` runs against a pool of
+sixteen, and `nucleus-kv`'s contract test opens a database on one, then
+again on the same slots.
 
 ## 4. Storage layer (`nucleus-storage`)
 
@@ -5228,6 +5258,38 @@ and Deno load Node-API addons too (CI runs the example under both).  Both driver
 server, so a program moves between the two by its connection string
 alone (`examples/python/anywhere.py`, `examples/js/anywhere.ts`).
 
+**In the browser (the edition in WebAssembly, §M14.23).**  The embedded
+edition builds for `wasm32-wasip1` without the model modules
+(`drivers/js/wasm/build.sh` → `drivers/js/wasm/nucleus.wasm`).  There are
+no threads there: a statement's workers are 1 (`budget::workers`), the
+engine starts no background thread, and sessions are *stepped* —
+`nucleus_server::Exchange`, the nucleus protocol's server driven by the
+bytes given to it (`Database::exchange`; C `nc_exchange`, `nc_feed`,
+`nc_exchange_ended`, `nc_exchange_free`): each `feed` runs the whole
+messages it has and returns the reply.  Nothing can wait mid-statement,
+so in a stepped session a `COPY`'s data comes with the `COPY` (one
+without fails, `57014`; data after it is dropped), a fetch's batches
+follow one another without an `S` to answer, and one statement's reply
+holds at most 256 MB (`54000`).  A directory is kept in a pool of slots
+(§3.7) that the host provides as imports (`nucleus_slots`), one pool per
+instance; besides those the module imports fifteen WASI functions
+(clocks, randomness, the console; no files).  The JavaScript driver's
+browser entry, `drivers/js/src/browser.ts` (the package's `browser`
+export), has the same `connect` and `Client`: `connect("file:app.db")`
+keeps the database in OPFS (directory `.nucleus` of the origin's,
+`OpfsSlots`), `connect(":memory:")` in memory; `nucleus://` is refused.
+In a page the engine runs in a module worker (`worker.js`), reached by
+messages; in a worker, and in Node, Bun and Deno, on the calling thread
+(`LocalBackend`; in Node the pool is a directory of files, `NUCLEUS_POOL`
+or `.nucleus`).  Its socket (`Session`) sends what the client wrote in
+one turn of the event loop as one `feed`, and the client is *eager*
+there: `copy` and `load` send the data with the `COPY` (`load` learns
+the columns' types from a `LIMIT 0` query first), and no `F` answers a
+batch.  The driver's protocol code has no Node imports (`core.ts`;
+`bytes.ts` is Node's `Buffer` or, without one, a `Uint8Array` with the
+part of its interface the driver uses; SCRAM is WebCrypto's), so
+`index.ts` (Node's sockets, the addon) and `browser.ts` share it.
+
 **Tests and examples.**  Every driver has the same conformance cases
 (each type both ways, NULL and arrays, text parameters, errors and their
 SQLSTATE, transactions, a wrong password, TLS verified, unverified and
@@ -5247,6 +5309,20 @@ against the server; `editions/embedded/tests` runs the slt suite there
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-13 — §M14.23 step 2, the browser (WASM):** the engine on
+  `wasm32-wasip1` (CI's `wasm` job: platform conformance, storage,
+  transactions, SQL and slt under Node's WASI, `scripts/wasi-run.mjs`);
+  `nucleus_platform::{temp_dir, process_id}`; `nucleus_platform::slots`
+  (`Slots`, `SlotFs`, `SlotPlatform`, `MemorySlots`);
+  `nucleus_server::Exchange`; `Database::exchange` and the C API's
+  `nc_exchange`, `nc_feed`, `nc_exchange_ended`, `nc_exchange_free`,
+  `nc_alloc`, `nc_dealloc`, `nc_pool_free`; JavaScript split into
+  `core.ts`, `index.ts` (Node) and `browser.ts` (with `wasm.ts`,
+  `worker.ts`, `opfs.ts`, `node-slots.ts`, `bytes.ts`), SCRAM on
+  WebCrypto; `examples/browser/`; `driver-tests.sh js-wasm` with
+  `drivers/js/test/browser.mjs` (headless Chrome).  `COPY`'s text format
+  checks each field as UTF-8 (a fuzz finding).
 
 - **2026-11-13 — §M14.23 step 1, the embedded edition in Python and
   JavaScript:** `editions/embedded` (`nucleus-embedded`: `Database`,

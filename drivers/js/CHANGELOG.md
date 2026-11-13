@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- In the browser (nucleus PLAN.md §M14.23 step 2): the package's
+  `browser` export (`dist/browser.js`) runs the database itself, the
+  engine in WebAssembly (`wasm/nucleus.wasm`, `wasm/build.sh`), with the
+  same `connect` and `Client`: `connect("file:app.db")` kept in OPFS,
+  `connect(":memory:")`; the engine in a worker in a page, on the calling
+  thread elsewhere.  The protocol code no longer imports Node's modules
+  (`core.ts`; SCRAM on WebCrypto), so Node 20 or later.
+
 - The embedded edition (nucleus PLAN.md §M14.23): `connect("file:app.db")`,
   `connect(":memory:")` and `Database.open(path, options)` with
   `connect({ user })` run the same API on a database in this process,

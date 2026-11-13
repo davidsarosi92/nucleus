@@ -161,7 +161,10 @@ in Python or JavaScript opens a database in a directory (or
 `":memory:"`) in the process, with the API a server's connection has —
 the drivers speak the same protocol to it through a pipe in the process,
 so a program moves to a server by changing its connection string alone
-(`SELECT 1` in 10.5 µs from Python, 30 over loopback TCP).  Next is the rest of the
+(`SELECT 1` in 10.5 µs from Python, 30 over loopback TCP) — and in a
+browser page, the engine in WebAssembly with its files in OPFS
+(`connect("file:app.db")` again; a first answer about 100 ms after the
+page starts, the engine 1.65 MB to download).  Next is the rest of the
 developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, embedded editions for the
 browser and phones, memory for AI models, branches, time travel, a B+tree
 or an LSM tree chosen per table, …), then
@@ -211,8 +214,8 @@ db.execute("CREATE TABLE notes (id INT PRIMARY KEY, body TEXT, v vector(3))")
 ```
 
 ```ts
-import { connect } from "nucleus-db";            // with the addon (drivers/js/native)
-const db = await connect("file:app.db");
+import { connect } from "nucleus-db";            // Node: with the addon (drivers/js/native);
+const db = await connect("file:app.db");         // a browser: the engine in WebAssembly, kept in OPFS
 ```
 
 As a Rust library: `nucleus_kv::Database::open(dir, Options::default())`,

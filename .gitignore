@@ -20,3 +20,4 @@ __pycache__/
 /fuzz/coverage
 # The embedded edition's addon, built per platform (drivers/js/native/build.sh).
 /drivers/js/native/*/
+/drivers/js/wasm/*.wasm

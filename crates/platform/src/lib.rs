@@ -31,6 +31,7 @@ pub mod memory;
 pub mod real;
 mod rng;
 pub mod sim;
+pub mod slots;
 
 pub use rng::SplitMix64;
 

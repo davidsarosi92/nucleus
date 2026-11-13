@@ -150,6 +150,28 @@ fn local_database_on_the_simulation() {
     contract(&db);
 }
 
+/// The browser's slot pool (PLAN.md §M14.23): the contract, then the
+/// database opened again on the same slots as a reloaded page would.
+#[test]
+fn local_database_on_a_slot_pool() {
+    use nucleus_platform::slots::{MemorySlots, SlotPlatform};
+    let slots = Arc::new(MemorySlots::new(32));
+    let open = || {
+        let p = Arc::new(SlotPlatform::new(slots.clone()).unwrap());
+        Database::open_on(p, Path::new("/app"), Options::default()).unwrap()
+    };
+    let db = open();
+    contract(&db);
+    put(&db, "kept", "yes");
+    db.checkpoint().unwrap();
+    put(&db, "logged", "too");
+    drop(db);
+    let db = open();
+    let t = db.begin(TxnOptions::default()).unwrap();
+    assert_eq!(get(t.as_ref(), "kept").as_deref(), Some("yes"));
+    assert_eq!(get(t.as_ref(), "logged").as_deref(), Some("too"));
+}
+
 #[test]
 fn local_database_on_the_real_file_system() {
     let dir =

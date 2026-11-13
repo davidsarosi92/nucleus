@@ -235,3 +235,135 @@ pub unsafe extern "C" fn nc_free_error(error: *mut c_char) {
         drop(unsafe { CString::from_raw(error) });
     }
 }
+
+// ------------------------------------------------- sessions without threads
+
+/// A session driven by its bytes (`nc_stepped *`): its server's state
+/// and its last reply.
+pub struct NcExchange {
+    exchange: nucleus_server::Exchange,
+    reply: Vec<u8>,
+}
+
+/// A new session on `db` run on the caller's thread, for a platform
+/// without threads (WebAssembly): [`nc_feed`] gives it bytes and returns
+/// its reply.  Null on failure (`*error` set as by [`nc_open`]).
+///
+/// # Safety
+/// As for [`nc_connect`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nc_exchange(
+    db: *mut NcDatabase,
+    error: *mut *mut c_char,
+) -> *mut NcExchange {
+    if db.is_null() {
+        // SAFETY: as the caller promises.
+        unsafe { set_error(error, "no database") };
+        return ptr::null_mut();
+    }
+    // SAFETY: a live database from `nc_open`.
+    let db = unsafe { &*db };
+    match guarded(|| db.0.exchange()) {
+        Ok(exchange) => Box::into_raw(Box::new(NcExchange {
+            exchange,
+            reply: Vec::new(),
+        })),
+        Err(e) => {
+            // SAFETY: as the caller promises.
+            unsafe { set_error(error, &e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Gives the session `len` bytes and runs the whole messages among what
+/// it has; returns its reply, `*reply_len` bytes, valid until the next
+/// call on `x`.  A statement that would read past what was given ends
+/// the session (`08P01`): send `COPY` data with its `COPY`, and fetch
+/// results whole.
+///
+/// # Safety
+/// `x` came from [`nc_exchange`] and is not freed; `buf` holds `len`
+/// readable bytes; `reply_len` points to a writable `size_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nc_feed(
+    x: *mut NcExchange,
+    buf: *const u8,
+    len: usize,
+    reply_len: *mut usize,
+) -> *const u8 {
+    if x.is_null() || reply_len.is_null() || (buf.is_null() && len > 0) {
+        return ptr::null();
+    }
+    // SAFETY: as the caller promises.
+    let (x, bytes) = unsafe {
+        (
+            &mut *x,
+            if len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(buf, len)
+            },
+        )
+    };
+    x.reply = guarded(|| Ok(x.exchange.feed(bytes))).unwrap_or_default();
+    // SAFETY: as the caller promises.
+    unsafe { *reply_len = x.reply.len() };
+    x.reply.as_ptr()
+}
+
+/// 1 once the session has ended (a Bye, a failed login, a protocol
+/// error), else 0.
+///
+/// # Safety
+/// `x` came from [`nc_exchange`] and is not freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nc_exchange_ended(x: *mut NcExchange) -> i32 {
+    // SAFETY: as the caller promises.
+    i32::from(x.is_null() || unsafe { &*x }.exchange.ended())
+}
+
+/// Frees the session `x`.
+///
+/// # Safety
+/// `x` came from [`nc_exchange`] (or is null) and is not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nc_exchange_free(x: *mut NcExchange) {
+    if !x.is_null() {
+        // SAFETY: as the caller promises.
+        drop(unsafe { Box::from_raw(x) });
+    }
+}
+
+/// `len` bytes of this library's memory, for a host that must write into
+/// it (WebAssembly's): null when there is not that much.
+#[unsafe(no_mangle)]
+pub extern "C" fn nc_alloc(len: usize) -> *mut u8 {
+    let mut v = Vec::<u8>::new();
+    if v.try_reserve_exact(len.max(1)).is_err() {
+        return ptr::null_mut();
+    }
+    let p = v.as_mut_ptr();
+    std::mem::forget(v);
+    p
+}
+
+/// Frees what [`nc_alloc`] gave.
+///
+/// # Safety
+/// `p` came from `nc_alloc(len)` (or is null) and is not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nc_dealloc(p: *mut u8, len: usize) {
+    if !p.is_null() {
+        // SAFETY: made by `nc_alloc` with this capacity.
+        drop(unsafe { Vec::from_raw_parts(p, 0, len.max(1)) });
+    }
+}
+
+/// The slots of the browser's pool not yet taken (the host adds more when
+/// they run low), or -1 where there is no pool (not WebAssembly, or none
+/// opened yet).
+#[unsafe(no_mangle)]
+pub extern "C" fn nc_pool_free() -> i64 {
+    crate::pool_free().map_or(-1, |n| n as i64)
+}

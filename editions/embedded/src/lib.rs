@@ -30,6 +30,8 @@ use nucleus_server::{Config, Stop, Trust};
 use nucleus_sql::ext::Registry;
 
 pub mod ffi;
+#[cfg(target_os = "wasi")]
+mod host;
 
 /// What `open` takes for a database in memory.
 pub const MEMORY: &str = ":memory:";
@@ -120,6 +122,54 @@ pub fn options(text: &str, memory: bool) -> Result<Options, String> {
     Ok(o)
 }
 
+/// The browser's pool of storage ([`host`]'s slots), opened once.
+#[cfg(target_os = "wasi")]
+fn slot_pool() -> Result<&'static nucleus_platform::slots::SlotPlatform, String> {
+    use nucleus_platform::slots::SlotPlatform;
+    static POOL: OnceLock<SlotPlatform> = OnceLock::new();
+    if let Some(p) = POOL.get() {
+        return Ok(p);
+    }
+    let p = SlotPlatform::new(Arc::new(host::HostSlots))
+        .map_err(|e| format!("the browser's storage: {e}"))?;
+    Ok(POOL.get_or_init(|| p))
+}
+
+/// What a directory is opened on: the browser's pool on WASI; `None`
+/// elsewhere, where a directory is the OS's.
+fn pool() -> Result<Option<Arc<dyn nucleus_platform::Platform>>, String> {
+    #[cfg(target_os = "wasi")]
+    {
+        /// The pool, as the engine takes a platform.
+        struct Pool(&'static nucleus_platform::slots::SlotPlatform);
+        impl nucleus_platform::Platform for Pool {
+            fn fs(&self) -> &dyn nucleus_platform::FileSystem {
+                self.0.fs()
+            }
+            fn clock(&self) -> &dyn nucleus_platform::Clock {
+                self.0.clock()
+            }
+            fn rng(&self) -> &dyn nucleus_platform::Rng {
+                self.0.rng()
+            }
+            fn parallelism(&self) -> usize {
+                1
+            }
+        }
+        Ok(Some(Arc::new(Pool(slot_pool()?))))
+    }
+    #[cfg(not(target_os = "wasi"))]
+    Ok(None)
+}
+
+/// The pool's slots not yet taken (`None`: no pool).
+pub(crate) fn pool_free() -> Option<usize> {
+    #[cfg(target_os = "wasi")]
+    return slot_pool().ok().map(|p| p.slot_fs().free_slots());
+    #[cfg(not(target_os = "wasi"))]
+    None
+}
+
 /// Whether the platform has threads (WASI has none: no background
 /// threads, sessions by [`Database::exchange`] only).
 pub const THREADS: bool = !cfg!(target_os = "wasi");
@@ -186,8 +236,13 @@ impl Database {
         if path.is_empty() {
             return Err("give a directory, or :memory:".into());
         }
-        std::fs::create_dir_all(path).map_err(|e| format!("{path}: {e}"))?;
-        let key = std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
+        let key = if THREADS {
+            std::fs::create_dir_all(path).map_err(|e| format!("{path}: {e}"))?;
+            std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?
+        } else {
+            // In the browser's pool, by its name.
+            Path::new("/").join(path.trim_start_matches('/'))
+        };
         let mut open = lock(opened());
         if let Some(inner) = open.get(&key).and_then(Weak::upgrade)
             && lock(&inner.kv).is_some()
@@ -198,7 +253,11 @@ impl Database {
                 closed: false,
             });
         }
-        let db = nucleus_kv::Database::open(&key, opts).map_err(|e| format!("{path}: {e}"))?;
+        let db = match pool()? {
+            Some(pool) => nucleus_kv::Database::open_on(pool, &key, opts),
+            None => nucleus_kv::Database::open(&key, opts),
+        }
+        .map_err(|e| format!("{path}: {e}"))?;
         let d = Self::start(path.to_string(), db, Some(key.clone()));
         open.insert(key, Arc::downgrade(&d.inner));
         Ok(d)

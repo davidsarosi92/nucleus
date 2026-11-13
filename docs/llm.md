@@ -21,7 +21,11 @@ what to use instead.  For people the full reference is DOCS.md §8.
 - **Without a server** (Python, JavaScript): `nucleus.connect("file:app.db")`
   or `connect(":memory:")` opens a database inside the program with the same
   API; `connect("nucleus://user:password@host:20035/db")` reaches a server —
-  only the string changes.  No login in the process.
+  only the string changes.  No login in the process.  In a browser the
+  same `connect("file:app.db")` (package `nucleus-db`, its browser entry)
+  runs the engine in WebAssembly, kept in OPFS across reloads; there a
+  statement runs through (a stream's result is produced whole, at most
+  256 MB) and there is no server to reach.
 
 ## Dialect
 

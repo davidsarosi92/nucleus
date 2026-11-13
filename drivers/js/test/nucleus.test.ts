@@ -1,20 +1,25 @@
 // The JS/TS driver against a running nucleus server (NUCLEUS_HOST,
 // NUCLEUS_PORT; scripts/driver-tests.sh starts one) — or, given
 // NUCLEUS_URL, whatever that connection string names: "file:<dir>" runs
-// the same tests on a database in this process (the embedded edition).
+// the same tests on a database in this process (the embedded edition);
+// "wasm:file:<name>" or "wasm::memory:" on the edition in WebAssembly,
+// through the browser's entry (its storage in NUCLEUS_POOL).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 
-import { Cidr, connect as connectTo, Decimal, Inet, Interval, NucleusError, SparseVector, Time } from "../src/index.ts";
+import { Cidr, connect as connectNode, Decimal, Inet, Interval, NucleusError, SparseVector, Time } from "../src/index.ts";
 import type { ConnectOptions, Value } from "../src/index.ts";
 
 const options = {
   host: process.env.NUCLEUS_HOST ?? "127.0.0.1",
   port: Number(process.env.NUCLEUS_PORT ?? 20035),
 };
-const url = process.env.NUCLEUS_URL;
+const given = process.env.NUCLEUS_URL;
+const wasm = given?.startsWith("wasm:") === true;
+const url = wasm ? given!.slice(5) : given;
+const connectTo = (wasm ? (await import("../src/browser.ts")).connect : connectNode) as typeof connectNode;
 const embedded = url !== undefined && !url.startsWith("nucleus://");
 const connect = (o: ConnectOptions) => {
   if (url === undefined) return connectTo(o);
@@ -188,14 +193,17 @@ test("transactions", async () => {
 test("streams", async () => {
   const db = await connect(options);
   const big = "SELECT a, b FROM generate_series(1, 100000) a, generate_series(1, 100000) b";
-  // Ten billion rows: only what is read is produced.
-  const s = await db.stream(big, [], { fetch: 500 });
-  assert.deepEqual(s.columns.map((c) => c.name), ["a", "b"]);
-  let i = 0;
-  for await (const _row of s) {
-    if (++i === 1201) break;
+  // Ten billion rows: only what is read is produced (not in WebAssembly:
+  // a session there runs its statement through, its result bounded).
+  if (!wasm) {
+    const s = await db.stream(big, [], { fetch: 500 });
+    assert.deepEqual(s.columns.map((c) => c.name), ["a", "b"]);
+    let i = 0;
+    for await (const _row of s) {
+      if (++i === 1201) break;
+    }
+    assert.equal(s.count, 1500);
   }
-  assert.equal(s.count, 1500);
   assert.deepEqual((await db.query("SELECT 1")).rows, [[1]]);
   const all = await db.stream("SELECT i FROM generate_series(1, 2500) i", [], { fetch: 100 });
   let n = 0;
@@ -215,7 +223,7 @@ test("streams", async () => {
   );
   assert.equal(got.length, 299);
   // A stream left unread is closed by the next statement.
-  await db.stream(big);
+  await db.stream(wasm ? "SELECT i FROM generate_series(1, 100000) i" : big);
   assert.deepEqual((await db.query("SELECT 2")).rows, [[2]]);
   await assert.rejects(db.stream("SELECT 1; SELECT 2"), (e: NucleusError) => e.code === "42601");
   assert.equal(db.status, "idle");

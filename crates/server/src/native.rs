@@ -341,6 +341,7 @@ fn serve(
             &mut input,
             &mut out,
             &log,
+            false,
         )? {
             Next::Go => {
                 // A client that sent the next message already (pipelined)
@@ -376,7 +377,11 @@ enum Next {
 }
 
 /// Answers one client message (after the login); `input` holds what a
-/// statement reads beyond it (`COPY` data, a stream's fetches).
+/// statement reads beyond it (`COPY` data, a stream's fetches); `stepped`:
+/// for an [`Exchange`], where nothing more can come while it runs.
+// The session's parts, each its own (a struct of them would be built for
+// this one call).
+#[allow(clippy::too_many_arguments)]
 fn message<R: Read, W: Write>(
     session: &mut Session,
     version: u16,
@@ -385,6 +390,7 @@ fn message<R: Read, W: Write>(
     input: &mut BufReader<R>,
     out: &mut W,
     log: &dyn Fn(&str, &str),
+    stepped: bool,
 ) -> io::Result<Next> {
     match kind {
         b'Q' => {
@@ -413,6 +419,7 @@ fn message<R: Read, W: Write>(
                         },
                         fetch,
                         params: &params,
+                        stepped,
                     };
                     match run(session, &query, version, input, out)? {
                         Ran::Done => {}
@@ -536,7 +543,7 @@ impl Exchange {
             }
         };
         let (kind, body) = read_message(input)?;
-        message(session, *version, kind, &body, input, out, &log)
+        message(session, *version, kind, &body, input, out, &log, true)
     }
 }
 
@@ -902,6 +909,9 @@ struct Query<'a> {
     /// Rows per batch (0: the whole result at once).
     fetch: u32,
     params: &'a [Value],
+    /// Driven by the bytes given ([`Exchange`]): nothing more comes while
+    /// it runs.
+    stepped: bool,
 }
 
 /// How a `Q` went.
@@ -951,10 +961,33 @@ struct Wire<'a, R: Read, W: Write> {
     broken: Option<io::Error>,
     /// How the connection ends instead of going on.
     close: Option<Option<Error>>,
+    /// Driven by the bytes given ([`Exchange`]): a batch of a fetch is
+    /// followed by the next without an `S` (no answer can come), a `COPY`
+    /// without its data fails, and the reply is bounded
+    /// ([`STEPPED_REPLY`]).
+    stepped: bool,
+    /// The bytes sent (stepped: what the reply holds).
+    replied: usize,
 }
+
+/// The most a stepped session's reply to one statement holds: it is in
+/// memory whole, in a 32-bit address space.
+const STEPPED_REPLY: usize = 256 << 20;
 
 impl<R: Read, W: Write> Wire<'_, R, W> {
     fn send(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.replied += bytes.len();
+        if self.stepped && self.replied > STEPPED_REPLY {
+            return Err(Error {
+                code: "54000",
+                message: format!(
+                    "the result is past {} MB, more than a session without threads \
+                     sends at once",
+                    STEPPED_REPLY >> 20
+                ),
+                hint: Some("fetch it in parts (LIMIT and a key to go on from)".into()),
+            });
+        }
         self.out.write_all(bytes).map_err(|e| self.broke(e))
     }
 
@@ -1001,6 +1034,11 @@ impl<R: Read, W: Write> Wire<'_, R, W> {
     /// Sends `S` after a batch: what is produced until the client answers
     /// waits.
     fn pause(&mut self) -> Result<(), Error> {
+        if self.stepped {
+            // No answer can come: the next batch, as if asked for.
+            self.left = (self.fetch > 0).then_some(self.fetch);
+            return Ok(());
+        }
         self.send(&Msg::new(b'S').finish())?;
         self.out.flush().map_err(|e| self.broke(e))?;
         self.waiting = true;
@@ -1099,13 +1137,18 @@ impl<R: Read, W: Write> Wire<'_, R, W> {
     /// data, read and dropped up to its end.
     fn skip_copy(&mut self) -> io::Result<()> {
         while self.copying.is_some() {
-            match read_message(self.input)? {
-                (b'e' | b'f', _) => self.copying = None,
-                (b'X', _) => {
+            match read_message(self.input) {
+                Ok((b'e' | b'f', _)) => self.copying = None,
+                Ok((b'X', _)) => {
                     self.copying = None;
                     self.close = Some(None);
                 }
-                _ => {}
+                Ok(_) => {}
+                // Stepped: the data sent with the COPY ran out.
+                Err(e) if self.stepped && e.kind() == io::ErrorKind::UnexpectedEof => {
+                    self.copying = None;
+                }
+                Err(e) => return Err(e),
             }
         }
         Ok(())
@@ -1161,6 +1204,13 @@ impl<R: Read, W: Write> Sink for Wire<'_, R, W> {
                 ));
                 self.close = Some(Some(e.clone()));
                 Err(e)
+            }
+            Err(e) if self.stepped && e.kind() == io::ErrorKind::UnexpectedEof => {
+                self.copying = None;
+                Err(Error::query_canceled(
+                    "COPY from stdin failed: no data came with it (a session \
+                     without threads takes a COPY's data sent with the COPY)",
+                ))
             }
             Err(e) => Err(self.broke(e)),
         }
@@ -1332,6 +1382,8 @@ fn run<R: Read, W: Write>(
             copying: None,
             broken: None,
             close: None,
+            stepped: query.stepped,
+            replied: 0,
         };
         let mut r = session.run_into(stmt, params, &mut wire);
         if wire.broken.is_none() {

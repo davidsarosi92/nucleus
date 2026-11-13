@@ -2,14 +2,16 @@
 # Starts `nucleus server` (default credentials) on a free port and runs the
 # drivers' test suites and the examples against it (PLAN.md §M14.8).
 #
-#   scripts/driver-tests.sh <path-to-nucleus-binary> [rust|python|js|java|c|cpp|python-embedded|js-embedded ...]
+#   scripts/driver-tests.sh <path-to-nucleus-binary> [rust|python|js|java|c|cpp|python-embedded|js-embedded|js-wasm ...]
 #
 # Without a list it runs every language whose toolchain is installed.
 # python-embedded and js-embedded (PLAN.md §M14.23) run the Python and
 # JavaScript suites again on a database in their own process (the
 # embedded edition, built from this checkout), and the `anywhere`
 # examples both there and against the server, changing only the
-# connection string.
+# connection string.  js-wasm runs the JavaScript suite on the edition in
+# WebAssembly (the browser's), in Node, on files and in memory, then the
+# browser example in headless Chrome (when there is one) across reloads.
 set -euo pipefail
 bin=$(cd "$(dirname "${1:?usage: scripts/driver-tests.sh <nucleus binary> [langs]}")" && pwd)/$(basename "$1")
 shift
@@ -128,6 +130,16 @@ for lang in "${langs[@]}"; do
       node "$root/examples/js/anywhere.ts" "file:$work/js-anywhere"
       node "$root/examples/js/anywhere.ts" ":memory:"
       node "$root/examples/js/anywhere.ts" "nucleus://nucleus:nucleus@127.0.0.1:$port/nucleus" ;;
+    js-wasm)
+      "$root/drivers/js/wasm/build.sh"
+      (cd "$root/drivers/js" && npm install --no-package-lock --no-audit --no-fund --silent && npx tsc)
+      NUCLEUS_POOL="$work/js-wasm-pool" NUCLEUS_URL="wasm:file:suite" node --test "$root/drivers/js/test/nucleus.test.ts"
+      NUCLEUS_URL="wasm::memory:" node --test "$root/drivers/js/test/nucleus.test.ts"
+      if [ -n "${CHROME:-}" ] || [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ] || command -v google-chrome >/dev/null; then
+        node "$root/drivers/js/test/browser.mjs"
+      else
+        echo "no Chrome: the browser test is skipped"
+      fi ;;
     *) echo "unknown language $lang"; exit 1 ;;
   esac
 done

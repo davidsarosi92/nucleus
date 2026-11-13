@@ -178,7 +178,7 @@ to be able to produce them.
 | macOS | `aarch64-apple-darwin`, `x86_64-apple-darwin` | `fsync` does not flush the drive cache on macOS — durability needs `fcntl(F_FULLFSYNC)` |
 | Windows | `x86_64-pc-windows-msvc` | no POSIX file API — its own platform implementation (`FlushFileBuffers` for durability, `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` for atomic rename, offset reads/writes via `OVERLAPPED`) |
 | d-os | `x86_64`, `aarch64`, `i686` `-unknown-linux-musl`, static | runs through the d-os Linux ABI; the only 32-bit target, so it is the one that catches `usize` assumptions |
-| Browser (from §M14.23) | `wasm32-unknown-unknown` | the embedded edition only: no threads or blocking file API by default — storage through OPFS (or in memory), its own platform implementation |
+| Browser (from §M14.23) | `wasm32-wasip1` | the embedded edition only: no threads (sessions stepped, `nucleus_server::Exchange`) — storage in a pool of OPFS files opened ahead (`nucleus_platform::slots`) or in memory; the standard library through WASI, which the driver provides in the page (fifteen functions: clocks, randomness, the console) |
 | iOS, Android (from §M14.23) | `aarch64-apple-ios`, `aarch64-apple-ios-sim`, `aarch64-linux-android`, `x86_64-linux-android` | the embedded edition only; durability per platform (`F_FULLFSYNC` on iOS) |
 
 Every target runs the same platform conformance tests, including the
@@ -279,7 +279,7 @@ are marked ✅.
 | | M14.12 | Vectors: `VECTOR(n)` with every capability, similarity search, an ANN index, filtered vector search | ✅ V1, V2 (exact search 48 ms / 100k × 768, numpy 57), V2b (components by position, numpy / Arrow, pgvector's clients), V3 (estimates on rows `ANALYZE` keeps), V4 (the HNSW index's storage measured: (C)), V4b (the index in the engine: `USING hnsw`, `ORDER BY … LIMIT` through it; SIFT-1M through SQL at pgvector's recall half its time a search, 2× its inserts, a search while they come in 0.9 ms against 1.6), V5 (filtered search: `ef_search` counts passing rows, a B-tree range searched exactly, row-level security as a filter, `PARTITION BY` a graph per tenant — recall 0.93–1.0 from 50 % to 0.01 %, a 1 % filter 1.4 ms against pgvector's 14.5, a tenth's tenant 0.46 ms against 2.4), V6a (quantized graphs: `half`, `int8`, `binary` codes, the rows rescoring — `int8` a quarter of the memory, SIFT-1M built in 29 s against 55 and searched in 0.29 ms against 0.36 at the same recall), V6b (`sparsevec`: pgvector's type, distances, exact search — 100,000 SPLADE-like rows in 20 ms on the workers, pgvector 17.9 on three), V7 (the query vector from a subquery or a row and `LATERAL` — "more like this" 1.1 ms against pgvector's 1.5, 1,000 rows' neighbours 154 ms against 1,442; vectors read with their row; `sparsevec` in the six drivers and on pg-compat); *Done when* checked whole |
 | | M14.21 | Full-text and hybrid search: BM25, analyzers as modules, text + vector + filters in one query — T1 analyzers (UAX #29 words, Porter, Snowball × 13, trigrams), T2 `@@` queries on rows, T3–T4 the exact text index, T5 BM25 (`score`, ranked by the index; Anserini's nDCG@10 on BEIR), T5a one ranking for every method (HNSW and text, filters, row-level security, text matches ranked by HNSW), T5b's found rows read by a merge with the table's scan, block-max MaxScore over impacts and the build on every core (MS MARCO: 2.0 ms a query, ParadeDB 5.5; built in 42 s, 231 before), T5c `score()` reading the ranking's scores (BEIR 2.5–6.8× faster, every corpus faster than ParadeDB; MS MARCO 1.8 ms), T6 phrases within a slop, `highlight` and `snippet` (with snippets 1.0–2.3× ParadeDB's speed), T7a `rrf` and `convex` in one plan (BEIR: fused above either ranking, 1.8–5.0× ParadeDB's RRF), T7b a sparse vector index, `<#>` exact (SPLADE on BEIR: nDCG@10 at or above pgvector's approximate HNSW), T8a PostgreSQL's `tsvector` / `tsquery` in pg-compat, the GIN pattern rewritten to the text index's `@@` (BEIR: 1.1–1.3× GIN's speed for all words, for any medians 1.2–3.9×), T8b `ts_rank`, `ts_rank_cd` and `ts_headline` as PostgreSQL computes them (5,100 of its answers alike; a search page 1.3–1.4× GIN's speed), the output computed after `LIMIT`, T8c the indexes on `column` and partitioned tables (a partitioned table's BM25 its partitions' together, the same nDCG@10), `tsvector` / `tsquery` as PostgreSQL's types on its wire, binary both ways (305 of its forms alike) done | ✅ |
 | | M14.22 | Embeddings in the database: `embed()`, embedding columns kept current in the background, chunking | ◐ E1 ✅ (the study and steps E2–E8, 2026-11-12; local models on nucleus's own kernels), E2a ✅ (secrets: sealed by ChaCha20-Poly1305 under a key outside the data directory), E2b ✅ (`CREATE MODEL`, `embed()`, providers: `hashing` built in, OpenAI-compatible, Cohere, Voyage as a module), E3a ✅ (tokenizers: WordPiece and Unigram from `tokenizer.json`, the same ids as Hugging Face on 2.5 M texts), E3b ✅ (the encoder on nucleus's kernels: cosine ≥ 0.9999998 against ONNX Runtime, the same bits on any threads), E3c ✅ (`CREATE MODEL … USING local`, files kept in the database; 3.2× fastembed's speed on one core, 4.3× on ten), E4a ✅ (`GENERATED ALWAYS AS … STORED`), E4b ✅ (`GENERATED BY EMBEDDING`: the queue, rounds, retries, the circuit, pending rows), E5 ✅ (`ALTER COLUMN … SET MODEL`: the next model's vectors made beside the column, taken in one transaction), E6 ✅ (`chunks()`: UAX #29 sentences, word windows, Markdown sections; sizes in a model's tokens), E7 ✅ (`CREATE TABLE … CHUNKS OF`: chunks kept current in the writer's transaction, unchanged chunks keep their vectors), E8a ✅ (batches by tokens, rate limits by token bucket, parallel calls, each statement's model costs in `EXPLAIN ANALYZE` and its statistics), E8b ✅ (the *Done when* on BEIR: documents to ranked chunks by a local model in a server killed twice; nDCG@10 that of fastembed's vectors, the chunks and vectors the same bit for bit after edits put back) done | ✅ |
-| | M14.23 | **Next:** Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ◐ step 1 ✅ Python and JavaScript (2026-11-13); step 2 ◐ the browser (WASM): the engine on wasm32-wasip1, sessions without a thread |
+| | M14.23 | **Next:** Embedded editions: in memory or on a file inside Python and JavaScript, the browser (WASM), iOS and Android | ◐ step 1 ✅ Python and JavaScript, step 2 ✅ the browser (WASM, OPFS) (2026-11-13); next: iOS and Android |
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ⬜ |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ⬜ |
@@ -7141,34 +7141,99 @@ checked on open, one release version).
   directory, §M14.18).  An embedded database has no keyring for
   `CREATE SECRET … VALUE` yet (secrets `FROM ENV` work).
 
-**Step 2 ◐: the browser (WASM).**  Done so far:
+**Step 2 ✅ (2026-11-13): the browser (WASM).**  A page opens
+`connect("file:app.db")` — the same driver API — and gets a database in
+the page, kept in the origin's OPFS across reloads and browser restarts.
 
-- **The engine on `wasm32-wasip1`**, tested under Node's WASI
-  (`scripts/wasi-run.mjs` as cargo's runner; CI's `wasm` job): platform
-  conformance, storage, transactions and SQL with the whole slt suite.
-  WASI has no threads, so a statement's workers are 1 there
-  (`budget::workers`), and the places that started a thread even for
-  one part — a sort's parts, HNSW's `par_map` and its searches among
-  rows, a remote model's parallel calls — run on the caller's thread;
-  the engine took the process id for a seed (no pids on WASI: now
-  `nucleus_platform::process_id`, 0 there).  Tests that exercise
-  threads themselves are skipped there (`cfg_attr(target_os = "wasi",
-  ignore)`), none of the rest.  WASI has no file locks either:
+- **The target: `wasm32-wasip1`, not `wasm32-unknown-unknown`.**  The
+  engine uses the standard library's clocks, randomness and console, and
+  WASI gives them through fifteen imported functions, which the driver
+  provides in the page (`wasm.ts`, about 100 lines; no files — the engine
+  has none of its own there).  On `unknown-unknown` each would need a
+  stub inside the engine.  Tested under Node's WASI (`scripts/wasi-run.mjs`
+  as cargo's runner; CI's `wasm` job): platform conformance, storage,
+  transactions and SQL with the whole slt suite.  WASI has no threads, so
+  a statement's workers are 1 there (`budget::workers`), and the places
+  that started a thread even for one part — a sort's parts, HNSW's
+  `par_map` and its searches among rows, a remote model's parallel calls —
+  run on the caller's thread; the engine took the process id for a seed
+  (no pids on WASI: now `nucleus_platform::process_id`, 0 there).  Tests
+  that exercise threads themselves are skipped there (`cfg_attr(target_os
+  = "wasi", ignore)`), none of the rest.  WASI has no file locks either:
   `RealPlatform` falls back to a lock within the process.
-- **Sessions without a thread.**  The engine reads from its client in
-  the middle of a statement (`COPY` data, the next batch of a fetch), so
-  a session needs something that can wait — a thread, which a browser's
-  WebAssembly lacks without cross-origin isolation.  Rewriting the
-  engine as async was weighed and not taken (every executor path would
-  change for one platform); instead `nucleus_server::Exchange` is the
-  same server driven by the bytes given to it (sans-IO, as `rustls` and
-  `quinn-proto` are driven): each `feed` runs the whole messages it has,
-  and a statement that would read past them ends the session with
-  `08P01`.  So a client in the browser sends what a statement reads with
-  it — `COPY` data with its `COPY`, results fetched whole — as PGlite's
-  clients do (its PostgreSQL runs single-user in WASM, a whole message
-  at a time).  `Database::exchange` gives one; the slt suite passes
-  through it.
+- **Sessions without a thread.**  The engine reads from its client in the
+  middle of a statement (`COPY` data, a fetch's next batch), so a session
+  needs something that can wait — a thread, which a browser's
+  WebAssembly has only with cross-origin isolation (COOP / COEP headers a
+  page cannot always set).  Rewriting the engine as async was weighed and
+  not taken (every executor path would change for one platform); instead
+  `nucleus_server::Exchange` is the same server driven by the bytes given
+  to it (sans-IO, as `rustls` and `quinn-proto` are driven): each `feed`
+  runs the whole messages it has.  Where a statement would read more,
+  a stepped session does what can be done without waiting: a `COPY`'s
+  data must come with the `COPY` (one without fails, `57014`; data after
+  it is dropped, as PostgreSQL drops it); a fetch's batches follow one
+  another without an `S` to answer; one statement's reply holds at most
+  256 MB (`54000` past it — the wasm32 address space is 4 GB).  PGlite
+  takes the same shape (its PostgreSQL single-user in WASM, a whole
+  message at a time).  The client is *eager* there: `copy` and `load`
+  gather the data and send it with the `COPY` (`load` learns the
+  columns' types by a `LIMIT 0` query first).  `Database::exchange`
+  gives one in Rust; the slt suite passes through it.
+- **Storage: a pool of OPFS files opened ahead.**  A browser opens an
+  OPFS file for synchronous access only in a worker and only by an
+  asynchronous call — which the engine, synchronous, cannot make
+  mid-statement.  Prior art: SQLite's `opfs` VFS proxies each call to a
+  second worker and blocks on `Atomics.wait` (needs `SharedArrayBuffer`,
+  so cross-origin isolation again); its `opfs-sahpool` VFS (and
+  wa-sqlite's access-handle pool) opens a pool of files ahead and keeps a
+  file's path in each one's header — no isolation needed, one tab at a
+  time.  Taken: the pool, written in Rust over a `Slots` trait
+  (`nucleus_platform::slots`, DOCS §3.7) so that it runs the platform
+  conformance tests and the KV contract natively; made crash-safe beyond
+  sahpool's single header — two header copies with a generation and a
+  checksum, so a torn header write and a rename cut short both resolve to
+  a whole state.  The host tops the pool up between calls (eight free,
+  sixteen added).  A database uses few files (its data file, WAL
+  segments, the lock), so sixteen slots go far.
+- **The JavaScript driver, one API.**  Its protocol code had Node's
+  modules in it (sockets, `Buffer`, `crypto`); it is now `core.ts`, with
+  none: `bytes.ts` is Node's `Buffer` or, without one, a `Uint8Array`
+  with the methods the driver uses, and SCRAM runs on WebCrypto (Node 20
+  has it; the Node suites pass on it, TLS channel binding included).
+  `index.ts` (Node: sockets, the addon) and `browser.ts` (the package's
+  `browser` export) share it.  In a page the engine runs in a module
+  worker (`worker.ts`); in a worker, Node, Bun and Deno on the calling
+  thread, so the same module is tested outside a browser: the whole
+  JavaScript suite passes on it in Node, on a pool of files
+  (`node-slots.ts`) and in memory (`driver-tests.sh js-wasm`).
+- **In a real browser** (`drivers/js/test/browser.mjs`: headless Chrome
+  over the DevTools protocol, no dependencies; in CI):
+  `examples/browser/index.html` counts its visits in OPFS — a new
+  profile's first, after a reload, left open (no close: the tab's end as
+  a crash), after a reload of that, and after Chrome restarted on the same
+  profile: 1, 2, 3, 4, 5.
+- **Measured** (M-series Mac, Chrome 157 / Node 24).  The first answer
+  (engine fetched, compiled and started, the database opened from OPFS,
+  three statements) 95–140 ms after the page starts, 52–106 ms once
+  cached.  In Node on the same module, in memory: a 200,000-row
+  `INSERT … SELECT` 229 ms, a `GROUP BY` over it 44 ms, a point query
+  26 µs a round trip.  Size: 7.1 MB, 1.65 MB with brotli (2.3 MB gzip),
+  the model modules left out (no provider's key belongs in a page, and no
+  local model runs there).  How it was chosen: the default release build
+  8.5 MB / 1.74 MB; with LTO and one codegen unit 7.1 MB / 1.65 MB at the
+  same speed — taken (`wasm/build.sh`); `opt-level = "s"` 1.50 MB but
+  inserts and sorts 20 % slower, `"z"` 1.44 MB and 50 % slower — not
+  taken: 0.2 MB of transfer is worth less than the speed.  `wasm-opt`
+  (Binaryen) is used when installed.
+- **Found on the way:** the engine read the process id for the HNSW
+  seed — a panic on any platform without one.
+- **Not yet:** a statement in the browser cannot be read lazily (a
+  stream's result is produced whole, bounded as above); one tab holds an
+  origin's storage at a time (a second gets an error, not a shared
+  database — sharing it across tabs, e.g. through a `SharedWorker` or the
+  Web Locks API, is a later step); the npm package with `wasm/` is
+  published with the others (D15); no `wasm-opt` in CI yet.
 
 ### §M14.24 — Memory for AI models ⬜
 

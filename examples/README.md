@@ -37,6 +37,15 @@ node examples/js/anywhere.ts :memory:
 
 (`.so` on Linux; the platform wheel and addon package carry the library.)
 
+**In a browser:** [`browser/index.html`](browser/index.html) is a page with
+a database in it — the engine in WebAssembly, its files in OPFS — that
+counts its visits across reloads:
+
+```sh
+drivers/js/wasm/build.sh && (cd drivers/js && npm install && npx tsc)
+node drivers/js/test/browser.mjs --serve   # prints the page's address
+```
+
 **A module:** [`extension/`](extension) is a sample nucleus module — a
 type, a function and a catalog view added through the extension API — and
 the guide for writing one (`cargo run -p nucleus-example-extension --bin

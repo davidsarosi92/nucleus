@@ -1,5 +1,6 @@
 //! Platform conformance: the same assertions against the real OS, the
-//! simulation and the file system in memory.  Every build target runs these (PLAN.md, "Build targets").
+//! simulation, the file system in memory and the slot pool (the
+//! browser's).  Every build target runs these (PLAN.md, "Build targets").
 
 use std::ffi::OsString;
 use std::io::ErrorKind;
@@ -9,6 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use nucleus_platform::memory::MemoryPlatform;
 use nucleus_platform::real::RealPlatform;
 use nucleus_platform::sim::SimPlatform;
+use nucleus_platform::slots::{MemorySlots, SlotPlatform};
 use nucleus_platform::{OpenMode, Platform};
 
 /// A fresh directory under the OS temp dir, removed on drop.
@@ -33,8 +35,8 @@ impl Drop for TempDir {
     }
 }
 
-/// Runs `check` against the real OS (in a temp dir), the simulation and
-/// the file system in memory.
+/// Runs `check` against the real OS (in a temp dir), the simulation, the
+/// file system in memory and the slot pool.
 fn both(check: impl Fn(&dyn Platform, &Path)) {
     let tmp = TempDir::new();
     check(&RealPlatform::new().unwrap(), &tmp.0);
@@ -44,6 +46,9 @@ fn both(check: impl Fn(&dyn Platform, &Path)) {
     let memory = MemoryPlatform::new().unwrap();
     memory.fs().create_dir_all(Path::new("/db")).unwrap();
     check(&memory, Path::new("/db"));
+    let pool = SlotPlatform::new(std::sync::Arc::new(MemorySlots::new(16))).unwrap();
+    pool.fs().create_dir_all(Path::new("/db")).unwrap();
+    check(&pool, Path::new("/db"));
 }
 
 #[test]

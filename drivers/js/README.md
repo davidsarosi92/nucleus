@@ -70,3 +70,31 @@ will carry it, or `NUCLEUS_EMBEDDED_ADDON` names one.  Each session is read
 on a thread of its own and its bytes reach the event loop as a socket's
 would: queries never block it.
 
+## In the browser (the edition in WebAssembly)
+
+In a browser the package's entry is `dist/browser.js` (the `browser`
+export, or `nucleus-db/browser`): the database itself, the engine in
+WebAssembly, with the same `connect` and `Client`.
+
+```ts
+import { connect } from "nucleus-db";
+const db = await connect("file:app.db");   // kept in the origin's OPFS: survives reloads
+const mem = await connect(":memory:");     // gone with the page
+await db.query("CREATE TABLE IF NOT EXISTS notes (id INT PRIMARY KEY, body TEXT)");
+```
+
+In a page the engine runs in a module worker of its own (OPFS's
+synchronous files are only there); in a worker, Node, Bun and Deno, on
+the calling thread (in Node the storage is a directory of files,
+`NUCLEUS_POOL` or `.nucleus`).  One tab holds an origin's storage at a
+time.  The engine is `wasm/nucleus.wasm` (7.1 MB, 1.65 MB with brotli),
+built by `wasm/build.sh` (`rustup target add wasm32-wasip1`); `connect`'s
+options `wasm`, `pool` and `worker` say where they are if not beside
+the package.  What differs: no server (`nucleus://` is refused there), no
+login, no embedding models; a `COPY`'s data goes with the `COPY` (the
+client does this: `copy` and `load` work as elsewhere, the data held in
+memory first), and a statement runs through — a stream reads a result
+the engine has produced whole, at most 256 MB of it.
+`examples/browser/index.html` is a page that keeps its visits;
+`test/browser.mjs` runs it in headless Chrome across reloads.
+
