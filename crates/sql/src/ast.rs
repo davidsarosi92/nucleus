@@ -92,6 +92,20 @@ pub enum Statement {
         /// The column (a `timestamptz`), or none to drop it.
         column: Option<String>,
     },
+    /// `ALTER TABLE t SET SUBJECT (column, …) | DROP SUBJECT`: the
+    /// columns that say whose a row is, for `FORGET SUBJECT`.
+    SetSubject {
+        /// Table.
+        table: String,
+        /// The columns; none drops them.
+        columns: Vec<String>,
+    },
+    /// `FORGET SUBJECT value`: every row of the subject erased from every
+    /// table with subject columns (PLAN.md §M14.24 R2).
+    Forget {
+        /// Whose rows.
+        subject: Expr,
+    },
     /// `CREATE MEMORY STORE [IF NOT EXISTS] name USING model [WITH
     /// (option = value, …)]`: a table of memories (PLAN.md §M14.24 R1).
     CreateMemoryStore {

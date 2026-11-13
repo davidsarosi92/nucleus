@@ -41,6 +41,7 @@ pub mod expr;
 pub mod ext;
 pub mod fasthash;
 pub mod fk;
+pub mod forget;
 pub mod fsum;
 pub mod hint;
 pub mod hll;

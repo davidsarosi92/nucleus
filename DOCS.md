@@ -1491,6 +1491,7 @@ or `UNIQUE`): keys and indexes.  The built-in types have every ability
 | `00 16 <SHA-256> <chunk>` | a model's file, by content: 32 KiB chunks, shared by the models made from it (§8.23) |
 | `00 17 <table id> <column u16> <pk>` | an embedding column's job: the row's vector to make; column bit `0x8000`: its next model's (§8.24) |
 | `00 18 <table id> <column u16> <pk>` | a moving embedding column's next model's vector, until the swap (§8.24) |
+| `00 19 <seq>` | an erasure record (§8.29); `00 1A` the last number |
 | `01 <table id> 00000000 <pk>` | the row |
 | `01 <table id> <index id> <index values> [<pk>]` | index entry → encoded pk |
 | `01 <table id> FFFFFFFF <pk> <column u16> <chunk u32>` | a chunk of a value stored out of line |
@@ -2628,6 +2629,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.access_rules` | `position`, `name`, `roles`, `addresses`, `front_ends`, `auth_methods`, `tls`, `action`, `read_only`, `as_role` (in order) |
 | `nc_catalog.audit` | `seq`, `at`, `kind` (`login`, `ddl`, `statement`), `ok`, `code`, `session_user_name`, `user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `detail`, `hash` (an administrator's; empty for others) |
 | `nc_catalog.audit_chain` | `records`, `intact`, `broken_at`, `problem` (the chain walked) |
+| `nc_catalog.erasures` | `erasure`, `at`, `session_user_name`, `user_name`, `tables` (text[], `'name: rows'`), `rows` — each `FORGET SUBJECT` (an administrator's all, a role's own; §8.29) |
 | `nc_catalog.database_settings` | `name`, `value`, `is_set`, `default`, `description` (`ALTER DATABASE nucleus SET …`) |
 | `nc_catalog.statements` | `user_name`, `query` (constants as `$n`), `calls`, `errors`, `total_ms`, `mean_ms`, `min_ms`, `max_ms`, `rows_read`, `rows_returned`, `model_calls`, `model_texts`, `model_cached`, `model_tokens`, `model_errors`, `model_ms`, `last_call` (statement statistics, §8.13; an administrator sees all, others their own; the model columns §8.27) |
 | `nc_catalog.index_advice` | `table_name`, `columns`, `create_statement`, `statements`, `calls`, `rows_read`, `rows_read_with_index`, `example_query`, `plan` (the index advisor, §8.13) |
@@ -4487,7 +4489,8 @@ timestamptz` (now), `valid_to timestamptz`, `expires_at timestamptz`,
 `source text`, `replaces uuid`, `created` and `last_seen timestamptz` —
 with indexes `notes_subject`, `notes_embedding` (HNSW, cosine) and
 `notes_content` (text, the analyzer given), its expiry set to
-`expires_at`.  The table record (version 17) keeps a store's
+`expires_at` and its subject columns to `subject` (§8.29).  The table
+record (version 17) keeps a store's
 `MemorySpec` (model, merge) and any table's expiry column after the
 chunk spec.  `merge` is a cosine similarity from 0 to 1 (`22023`
 otherwise, as for an unknown option); `CREATE` on the schema is needed,
@@ -4563,6 +4566,52 @@ edition's registry — so a module's types and models are known;
 `maintain_until` uses the built-in one).  A row expired but not yet
 deleted is still seen by queries; `recall` leaves it out itself.  Tests:
 `tests/memory.rs`, `slt/63_memory.slt`.
+
+### 8.29 Erasure (`forget`, §M14.24 R2)
+
+**Subject columns.**  `ALTER TABLE t SET SUBJECT (column, …)` marks the
+columns that say whose a row is — a user, a customer, an agent: any type
+— and `DROP SUBJECT` unmarks them (the owner's; an unknown column
+`42703`, one named twice `42701`; on a partitioned table, not a
+partition, `0A000`).  A memory store's `subject` is marked when it is
+made.  The table record (version 18) keeps them as column positions
+after the memory spec; a memory store of version 17 reads as marked.
+
+**`FORGET SUBJECT value`** (an expression or a parameter; NULL `23502`;
+not in a transaction block, `25001`, as the scrubbing that will follow
+its commit is not transactional) deletes, in one transaction, every row
+any subject column of any table names: for each table (partitions
+through their parent) and each of its subject columns into whose type
+the value casts — `'alice'` is none of a `bigint` column's rows, `7` is
+both a `bigint`'s and a `text`'s `'7'` — `DELETE FROM t WHERE c1 = $1 OR
+c2 = $1 …`, run as the caller: its `DELETE` (and `SELECT`) privileges
+and its row-level security policies apply, the foreign keys' actions
+and derived rows (chunks, embedding jobs, indexes) follow as for any
+delete.  Tables are deleted from referencing ones first (among the
+subject tables; a cycle in no particular order), so a `RESTRICT` key
+between two of them does not stop it; a key from a table without
+subject columns acts as declared (`RESTRICT`: `23503`, the erasure
+undone — mark that table, or make its key cascade).  **All or
+nothing**: after each delete the rows of the subject left are counted
+as the system; any — row security hid them from the caller — refuses
+the statement (`42501`) and nothing is deleted.  It returns one row,
+`erasure` (the record's number) and `rows` (deleted, not counting what
+the foreign keys' actions deleted).
+
+**The erasure record** (`00 19 <seq>`, the last number at `00 1A`;
+`forget::all`): when, who (session and current user), the tables with
+the rows deleted from each, the rows in all — never a value of the
+subject; written in the erasure's transaction.
+`nc_catalog.erasures` (`erasure`, `at`, `session_user_name`,
+`user_name`, `tables` text[] — `'notes: 2'` —, `rows`) shows an
+administrator every record and other roles their own.  `FORGET` is
+always in the audit log (as a statement that changes what the database
+holds, kind `ddl`), and every log keeps its text with its constants
+masked — strings as `'***'`, numbers as `***` (`statements::redacted`,
+which the audit log, the server's query log and the PostgreSQL front
+end use; statement statistics keep normalized texts, constants as
+`$n`).  The drivers' `forget_subject` / `forgetSubject` run it.  Tests:
+`tests/forget.rs`.
 
 ### 8.14 Errors and hints (`error`, `hint`)
 
@@ -5487,6 +5536,14 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-13 — §M14.24 R2a, `FORGET SUBJECT`:** subject columns
+  (`ALTER TABLE … SET / DROP SUBJECT`; a memory store's `subject`
+  marked), table record version 18; `FORGET SUBJECT value` deletes the
+  subject's rows from every table with subject columns as the caller,
+  referencing tables first, all or nothing under row-level security; the
+  erasure record and `nc_catalog.erasures`; `statements::redacted` masks
+  a `FORGET`'s constants; the Python and JavaScript drivers'
+  `forget_subject` / `forgetSubject`.
 - **2026-11-13 — §M14.24 R1, memory stores:** `CREATE MEMORY STORE`,
   `REMEMBER` (merge, `REPLACING`), `recall()` in `FROM` (bound as a hybrid
   query; `Binder::expansions`), `ALTER TABLE … SET / DROP EXPIRY` and

@@ -963,6 +963,13 @@ impl<'a> Parser<'a> {
                 Ok(Statement::Summarize(source))
             }
             "remember" => self.remember(),
+            "forget" => {
+                self.pos += 1;
+                self.expect_kw("subject")?;
+                Ok(Statement::Forget {
+                    subject: self.expr()?,
+                })
+            }
             "create" => self.create(),
             "drop" => self.drop(),
             "alter" => self.alter(),
@@ -2355,6 +2362,21 @@ impl<'a> Parser<'a> {
                     drop,
                 });
             }
+        }
+        if self.eat_kws(&["set", "subject"]) {
+            self.expect_op("(")?;
+            let mut columns = vec![self.ident()?];
+            while self.eat_op(",") {
+                columns.push(self.ident()?);
+            }
+            self.expect_op(")")?;
+            return Ok(Statement::SetSubject { table, columns });
+        }
+        if self.eat_kws(&["drop", "subject"]) {
+            return Ok(Statement::SetSubject {
+                table,
+                columns: Vec::new(),
+            });
         }
         if self.eat_kws(&["set", "expiry"]) {
             self.expect_op("(")?;

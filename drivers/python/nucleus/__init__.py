@@ -1005,6 +1005,16 @@ class Connection:
         r = self.execute(f"DELETE FROM {_ident(store)} WHERE id = CAST(CAST($1 AS text) AS uuid)", (str(id),))
         return r.count > 0
 
+    def forget_subject(self, subject):
+        """Erases every row of ``subject`` from every table with subject
+        columns (``FORGET SUBJECT``; a memory store's ``subject`` is one,
+        ``ALTER TABLE … SET SUBJECT (column)`` marks others) — all of them
+        or, if any is out of reach, none.  Returns ``(erasure, rows)``: the
+        erasure record's number (``nc_catalog.erasures``) and the rows
+        deleted."""
+        row = self.execute("FORGET SUBJECT CAST($1 AS text)", (str(subject),)).rows[0]
+        return row[0], row[1]
+
     def cursor(self):
         return Cursor(self)
 

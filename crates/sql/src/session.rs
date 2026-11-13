@@ -810,6 +810,9 @@ impl Session {
                 })?;
                 Ok(Output::Command("ALTER TABLE".into()))
             }
+            Statement::Forget { .. } if self.block.is_some() => Err(Error::active_txn(
+                "FORGET SUBJECT cannot run inside a transaction block",
+            )),
             Statement::Vacuum => {
                 if self.block.is_some() {
                     return Err(Error::active_txn(
@@ -1337,6 +1340,30 @@ impl Session {
                     },
                 ])
             }
+            Statement::Forget { subject } => {
+                let q = crate::ast::Query {
+                    with: None,
+                    body: crate::ast::SetExpr::Select(Box::new(crate::ast::Select {
+                        distinct: false,
+                        items: vec![crate::ast::SelectItem::Expr {
+                            expr: subject.clone(),
+                            alias: None,
+                        }],
+                        from: vec![],
+                        filter: None,
+                        group_by: vec![],
+                        having: None,
+                        windows: vec![],
+                    })),
+                    order_by: vec![],
+                    limit: None,
+                    offset: None,
+                };
+                binder.query(&q)?;
+                Some(columns_of(
+                    crate::forget::RESULT.map(|c| (c.to_string(), Some(DataType::BigInt))),
+                ))
+            }
             Statement::Show(name) => Some(vec![OutColumn {
                 name: name.clone(),
                 ty: DataType::Text,
@@ -1860,6 +1887,23 @@ pub(crate) fn execute_statement(
         Statement::SetExpiry { table, column } => {
             crate::expiry::set(txn, table, column.as_deref())?;
             Output::Command("ALTER TABLE".into())
+        }
+        Statement::SetSubject { table, columns } => {
+            crate::forget::set(txn, table, columns)?;
+            Output::Command("ALTER TABLE".into())
+        }
+        Statement::Forget { subject } => {
+            let e = crate::forget::forget(txn, reg, subject, params)?;
+            Output::Rows {
+                columns: crate::forget::RESULT
+                    .iter()
+                    .map(|c| OutColumn {
+                        name: c.to_string(),
+                        ty: DataType::BigInt,
+                    })
+                    .collect(),
+                rows: vec![vec![Value::Int(e.seq as i64), Value::Int(e.rows as i64)]],
+            }
         }
         Statement::CreatePartition {
             name,
@@ -3075,6 +3119,7 @@ pub(crate) fn create_table(
         statistics: Vec::new(),
         chunks: None,
         expiry: None,
+        subject: Vec::new(),
         memory: None,
     };
     if let Some((kind, names)) = partition_by {

@@ -151,6 +151,12 @@ test("memory", async () => {
   assert.equal(await db.forget(t, a.id), true);
   assert.equal(await db.forget(t, a.id), false);
   assert.equal((await db.recall(t, "u1", "tea", 1)).length, 1);
+  await db.remember(t, `${t}-s`, "a secret of hers");
+  await db.remember(t, `${t}-s`, "another one");
+  const e = await db.forgetSubject(`${t}-s`);
+  assert.equal(e.rows, 2);
+  const r = await db.query("SELECT rows FROM nc_catalog.erasures WHERE erasure = $1", [e.erasure]);
+  assert.equal(Number(r.rows[0][0]), 2);
   await db.query(`DROP TABLE ${t}`);
   await db.query(`DROP MODEL ${t}_h`);
   await db.close();

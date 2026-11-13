@@ -128,6 +128,7 @@ pub(crate) fn create(
     }
     let mut table = catalog::table(&*txn, name)?;
     table.expiry = table.column("expires_at");
+    table.subject = table.column("subject").into_iter().collect();
     table.memory = Some(MemorySpec {
         model: model.to_string(),
         merge,

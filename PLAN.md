@@ -7603,6 +7603,66 @@ built.
   caches, statement statistics, the audit log (details by hash); the
   verification scan; the erasure record.  Measured: the bytes found by
   the scan before and after, on a planted corpus.
+  *Where a deleted row's bytes stay* (surveyed 2026-11-13): its versions
+  and their tombstones — the keys of its index entries hold its indexed
+  values — until a commit's collection or a vacuum passes the watermark,
+  which history (§M14.14) holds back; the B+tree's freed pages (copy on
+  write: every rewritten leaf leaves its old page in the free list,
+  bytes intact) and overflow chains — values of 1 KiB and more are
+  LZ-compressed, so a plain byte search misses them; the WAL's segments
+  up to the checkpoint — dropped ones deleted (the blocks keep them) or
+  renamed to spares; the HNSW's vector pages (a dead node keeps its
+  vector until a consolidation rewrites the page), sealed objects and
+  the decoded object cache; the text index's segments (a deleted
+  document's terms, positions and key stay in the dictionary and the
+  postings until a merge drops it) and its tombstones (the old text's
+  terms); column segments until a merge; `ANALYZE`'s kept sample rows
+  and most common values (`00 04`); an embedding column's queue
+  (`00 17`); the model's embedding cache; the session caches by text
+  (plans, parses); the audit log's statement texts.  Leaves are encoded
+  whole with their free space zeroed, so a live page keeps no removed
+  cell.  Statement statistics keep normalized texts (constants as
+  `$n`).  In three parts:
+  - **R2a — `FORGET SUBJECT`**: subject columns (`ALTER TABLE t SET
+    SUBJECT (c, …)`; a memory store's `subject` marked when made); the
+    statement deletes the subject's rows from every such table as the
+    caller (privileges and policies — and all of the subject or nothing:
+    a row left that row security hid refuses it), their foreign keys'
+    actions and derived rows following; the erasure record
+    (`nc_catalog.erasures`: when, who, the tables and rows — no value of
+    the subject); its own audit record and logs with its constants
+    masked.
+    **R2a ✅ (2026-11-13).**  As built (DOCS §8.29): subject columns of
+    any type, the value cast into each (a column it cannot be a value of
+    holds none of the subject's rows); the tables deleted from
+    referencing ones first, so `RESTRICT` between subject tables does not
+    stop it, while a key from an unmarked table acts as declared; all or
+    nothing checked by counting as the system what is left after each
+    delete; `FORGET` refused in a transaction block (the scrubbing after
+    its commit is not transactional, as `VACUUM`).  Prior art: GDPR
+    article 17 tooling sits outside databases — Snowflake's and
+    BigQuery's tags on columns marking personal data drive policies, not
+    deletes; MongoDB's and Cassandra's TTLs expire, they do not erase by
+    subject; event-sourced systems (Verraes) erase by key.  A subject
+    column is the column-tag model taken into the engine, where the
+    delete, its cascade and the proof can be one statement.  The record
+    keeps no hash of the subject: a hash of an e-mail address is guessed
+    back by hashing candidates, so the record numbers the erasure and the
+    requester keeps the number.  Not yet: an MCP tool (R7's).
+  - **R2b — scrubbing**: the affected tables' versions purged past
+    history, once no older snapshot runs; the index methods' structures
+    rewritten without the deleted rows (HNSW vector pages, text
+    segments, column segments) and their caches dropped; statistics'
+    samples remade; the embedding cache's entries and the session caches
+    dropped; audit details by hash (the chain hashes a detail's hash, so
+    a detail can be blanked and the chain still checks); then the store:
+    a checkpoint, the WAL moved to a new segment and checkpointed again,
+    dropped segments and spares overwritten before they go, the free
+    pages zeroed.
+  - **R2c — the verification scan**: every file of the directory
+    searched for the forgotten values (strings' bytes, vectors'),
+    the data file's compressed values decompressed; its result in the
+    erasure record; the planted-corpus measurement.
 - **R3 — permissioned retrieval, checked**: leak tests over every
   recall path — HNSW, text, hybrid, the merge in `remember` (never
   across subjects or past a policy) — and BM25's statistics per

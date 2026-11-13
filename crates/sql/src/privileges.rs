@@ -957,6 +957,7 @@ pub fn authorize_ddl(
         | Statement::SetStorage { table, .. }
         | Statement::SetStoragePolicy { table, .. }
         | Statement::SetExpiry { table, .. }
+        | Statement::SetSubject { table, .. }
         | Statement::AttachPartition { table, .. }
         | Statement::DetachPartition { table, .. }
         | Statement::DropConstraint { table, .. }

@@ -110,9 +110,15 @@ same text, else `inserted`; when a fact changed, `REPLACING old_id`
 closes the old one (`valid_to` set, kept) — `replaced`.  Recall:
 `SELECT id, content, score FROM recall('notes', 'ann', 'how should I
 answer', 5)` (the store a text literal; current, unexpired memories,
-BM25 and vectors fused).  Forget: `DELETE FROM notes WHERE id = $1`.  Any
+BM25 and vectors fused).  Forget one: `DELETE FROM notes WHERE id = $1`.  Any
 table's rows can expire: `ALTER TABLE t SET EXPIRY (expires_at)` (a
-timestamp or date column; deleted in the background).
+timestamp or date column; deleted in the background).  Erase a person:
+mark the columns that say whose a row is, `ALTER TABLE messages SET
+SUBJECT (sender, recipient)` (a memory store's `subject` is marked), then
+`FORGET SUBJECT 'ann'` (not in a transaction block) deletes her rows from
+every such table — foreign keys followed, all or nothing (`42501` if row
+security hides any from you) — and returns `erasure, rows`;
+`nc_catalog.erasures` lists erasures without the subject's value.
 
 **Model limits and costs:** give a remote model your account's limits —
 `CREATE MODEL oa USING openai WITH (model = 'text-embedding-3-small',

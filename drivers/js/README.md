@@ -48,7 +48,9 @@ db.remember("notes", "ann", "prefers short answers", { kind:
 "preference", expires: "30 days" })` → `{ id, action }` (`"inserted"`,
 `"merged"`, `"replaced"` — `replaces: oldId` keeps the old one as
 history), `await db.recall("notes", "ann", "how to answer", 5)` → the
-subject's current memories, best first, `await db.forget("notes", id)`.
+subject's current memories, best first, `await db.forget("notes", id)`;
+`await db.forgetSubject("ann")` → `{ erasure, rows }` erases her rows from
+every table with subject columns (`FORGET SUBJECT`).
 Tests: `npm test`; example: `examples/js/quickstart.ts`.
 
 ## In this process (the embedded edition)

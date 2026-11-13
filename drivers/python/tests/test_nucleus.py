@@ -128,6 +128,12 @@ class Conformance(unittest.TestCase):
             self.assertTrue(c.forget(t, a))
             self.assertFalse(c.forget(t, a))
             self.assertEqual(len(c.recall(t, "u1", "tea", k=1)), 1)
+            c.remember(t, f"{t}-s", "a secret of hers")
+            c.remember(t, f"{t}-s", "another one")
+            erasure, rows = c.forget_subject(f"{t}-s")
+            self.assertEqual(rows, 2)
+            self.assertEqual(c.execute("SELECT rows FROM nc_catalog.erasures WHERE erasure = $1",
+                                       (erasure,)).rows, [(2,)])
             c.execute(f"DROP TABLE {t}")
             c.execute(f"DROP MODEL {t}_h")
 

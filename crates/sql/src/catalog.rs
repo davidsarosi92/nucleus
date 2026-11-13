@@ -85,8 +85,9 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// version 7 an owner, version 8 row-level security, version 9 comments
 /// on the table and its columns; version 14 an index's access method,
 /// operator classes and options; version 17 a row expiry and a memory
-/// store's definition; older versions still read.
-const TABLE_VERSION: u8 = 17;
+/// store's definition; version 18 the subject columns (a memory store's
+/// `subject` before it); older versions still read.
+const TABLE_VERSION: u8 = 18;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -350,6 +351,10 @@ pub struct Table {
     pub expiry: Option<usize>,
     /// A memory store ([`crate::memory`]).
     pub memory: Option<MemorySpec>,
+    /// `SET SUBJECT (column, …)`: the columns that say whose a row is —
+    /// `FORGET SUBJECT` erases the rows any of them names
+    /// ([`crate::forget`]).
+    pub subject: Vec<usize>,
 }
 
 /// What makes a table a memory store (PLAN.md §M14.24 R1).
@@ -578,6 +583,10 @@ impl Table {
                 w.u8(1).str(&m.model).u64(m.merge.to_bits());
             }
         }
+        w.u32(self.subject.len() as u32);
+        for &c in &self.subject {
+            w.u32(c as u32);
+        }
         w.0
     }
 
@@ -780,6 +789,21 @@ impl Table {
         } else {
             None
         };
+        let subject = if version >= 18 {
+            let n = r.u32()? as usize;
+            (0..n)
+                .map(|_| Ok(r.u32()? as usize))
+                .collect::<Result<Vec<_>>>()?
+        } else if memory.is_some() {
+            // A memory store made before subjects were marked.
+            columns
+                .iter()
+                .position(|c| c.name == "subject")
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             id,
             name,
@@ -804,6 +828,7 @@ impl Table {
             chunks,
             expiry,
             memory,
+            subject,
         })
     }
 }
@@ -1576,6 +1601,7 @@ mod tests {
                 model: Some("e5".into()),
             }),
             expiry: Some(2),
+            subject: vec![0, 2],
             memory: Some(MemorySpec {
                 model: "e5".into(),
                 merge: 0.95,

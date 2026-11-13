@@ -1344,6 +1344,18 @@ export class Client {
     return r.count > 0;
   }
 
+  /**
+   * Erases every row of `subject` from every table with subject columns
+   * (`FORGET SUBJECT`; a memory store's `subject` is one, `ALTER TABLE …
+   * SET SUBJECT (column)` marks others) — all of them or, if any is out of
+   * reach, none.  The erasure record's number (`nc_catalog.erasures`) and
+   * the rows deleted.
+   */
+  async forgetSubject(subject: string | number | bigint): Promise<{ erasure: number; rows: number }> {
+    const r = await this.query("FORGET SUBJECT CAST($1 AS text)", [String(subject)]);
+    return { erasure: Number(r.rows[0][0]), rows: Number(r.rows[0][1]) };
+  }
+
   /** BEGIN, `fn`, then COMMIT — or ROLLBACK if it throws. */
   async transaction<T>(fn: (client: Client) => Promise<T>): Promise<T> {
     await this.query("BEGIN");

@@ -58,7 +58,9 @@ store (`CREATE MEMORY STORE notes USING m`): `conn.remember("notes",
 expires=timedelta(days=30))` → `(id, "inserted" | "merged" |
 "replaced")` (`replaces=old_id` keeps the old one as history),
 `conn.recall("notes", "ann", "how to answer", k=5)` → the subject's
-current memories as dicts, best first, `conn.forget("notes", id)`.  Tests:
+current memories as dicts, best first, `conn.forget("notes", id)`;
+`conn.forget_subject("ann")` → `(erasure, rows)` erases her rows from
+every table with subject columns (`FORGET SUBJECT`).  Tests:
 `tests/test_nucleus.py`; example: `examples/python/quickstart.py`.
 
 ## In this process (the embedded edition)

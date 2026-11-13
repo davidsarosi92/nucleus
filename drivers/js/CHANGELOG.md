@@ -5,7 +5,9 @@
 - Memory stores (nucleus PLAN.md §M14.24): `client.remember(store,
   subject, content, { kind, confidence, expires, source, replaces })` →
   `{ id, action }`, `recall(store, subject, query, k = 10)` → records best
-  first, `forget(store, id)` → whether there was one.
+  first, `forget(store, id)` → whether there was one;
+  `forgetSubject(subject)` → `{ erasure, rows }` (`FORGET SUBJECT`,
+  §M14.24 R2).
 
 - In the browser (nucleus PLAN.md §M14.23 step 2): the package's
   `browser` export (`dist/browser.js`) runs the database itself, the

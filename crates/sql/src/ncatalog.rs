@@ -141,6 +141,17 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "erasures",
+        &[
+            ("erasure", I),
+            ("at", DataType::TimestampTz),
+            ("session_user_name", T),
+            ("user_name", T),
+            ("tables", TA),
+            ("rows", I),
+        ],
+    ),
+    (
         "database_settings",
         &[
             ("name", T),
@@ -673,6 +684,28 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
             ]);
         }
         "audit" | "audit_chain" => {}
+        // An administrator's, and each role's own.
+        "erasures" => {
+            let who = crate::access::current();
+            for e in crate::forget::all(txn)? {
+                if !who.superuser && e.user != who.user {
+                    continue;
+                }
+                out.push(vec![
+                    Value::Int(e.seq as i64),
+                    Value::TimestampTz(e.at),
+                    text(e.session_user),
+                    text(e.user),
+                    Value::Array(
+                        e.tables
+                            .into_iter()
+                            .map(|(t, n)| text(format!("{t}: {n}")))
+                            .collect(),
+                    ),
+                    Value::Int(e.rows as i64),
+                ]);
+            }
+        }
         "database_settings" => {
             for (k, value, set) in crate::dbsettings::all(txn)? {
                 out.push(vec![
