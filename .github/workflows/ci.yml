@@ -79,12 +79,12 @@ jobs:
       # The embedded edition's addon (built by the driver tests) under Bun
       # and Deno, which load Node-API addons too (PLAN.md §M14.23).
       - uses: oven-sh/setup-bun@v2
-      - run: bun examples/js/anywhere.ts :memory:
+      - run: bun examples/js/anywhere.ts ":memory:"
         continue-on-error: true
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
-      - run: deno run -A examples/js/anywhere.ts :memory:
+      - run: deno run -A examples/js/anywhere.ts ":memory:"
         continue-on-error: true
 
   # The benchmark suite against PostgreSQL (PLAN.md §M14.11 L8, docs/

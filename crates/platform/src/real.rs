@@ -317,6 +317,24 @@ impl File for RealFile {
         std::os::windows::fs::FileExt::seek_read(&self.file, buf, offset)
     }
 
+    /// WASI (the embedded edition in WebAssembly, PLAN.md §M14.23): a
+    /// seek and a read — one thread, so nothing comes between them.
+    #[cfg(target_os = "wasi")]
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = &self.file;
+        f.seek(SeekFrom::Start(offset))?;
+        f.read(buf)
+    }
+
+    #[cfg(target_os = "wasi")]
+    fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = &self.file;
+        f.seek(SeekFrom::Start(offset))?;
+        f.write(buf)
+    }
+
     #[cfg(unix)]
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
         std::os::unix::fs::FileExt::write_at(&self.file, buf, offset)
