@@ -170,12 +170,21 @@ impl Parser {
         } else {
             text_fields(o, raw, &mut self.buf, &mut self.spans);
         }
-        let text = std::str::from_utf8(&self.buf).map_err(|_| {
+        let invalid = || {
             at_line(
                 Error::invalid_text("invalid byte sequence for encoding \"UTF8\""),
                 line,
             )
-        })?;
+        };
+        let text = std::str::from_utf8(&self.buf).map_err(|_| invalid())?;
+        // The fields one after another can be UTF-8 where each is not (a
+        // character's bytes across a delimiter): each field is checked.
+        let whole = |&(a, b): &(u32, u32)| {
+            text.is_char_boundary(a as usize) && text.is_char_boundary(b as usize)
+        };
+        if !self.spans.iter().flatten().all(whole) {
+            return Err(invalid());
+        }
         Ok(Record {
             text,
             spans: &self.spans,
@@ -674,6 +683,19 @@ mod tests {
                 vec![s("3"), s("AA\\")],
             ]
         );
+    }
+
+    #[test]
+    fn a_character_split_by_a_delimiter_is_invalid() {
+        // 0xcc 0xb1 is U+0331 — but in two fields, neither UTF-8 (found by
+        // the copy fuzz target).
+        let o = CopyOptions::default();
+        let mut f = Fields::new(o.clone());
+        let mut batch = Batch::default();
+        f.split(b"\x01\xcc\t\xb1\n", true, &mut batch);
+        let (raw, line) = batch.raw(0);
+        let e = Parser::default().parse(&o, raw, line).err().unwrap();
+        assert!(e.to_string().contains("invalid byte sequence"), "{e}");
     }
 
     #[test]

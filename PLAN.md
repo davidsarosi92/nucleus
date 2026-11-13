@@ -287,7 +287,7 @@ are marked ✅.
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
-| | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, five bugs fixed) |
+| | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, six bugs fixed) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
 | | M16 | Document queries (shared executor) + document server | ⬜ |
 | | M16.5 | Streams: a transactional broker, changefeeds (CDC) | ⬜ |
@@ -7380,6 +7380,11 @@ to run nucleus in production; the distributed layer's analysis is
     merge of siblings checks the seam — a `Corrupt` error.  The check
     is a comparison of neighbours on the write path's decode, which
     copies every key anyway.
+  - `COPY`'s text format checked a record's fields as UTF-8 together,
+    not each: `\xcc` and `\xb1` split by a tab are a character together
+    (U+0331), so the field boundary fell inside it — a panic slicing the
+    string (CI's first full run of `copy`).  Now each field must start
+    and end on a character, `22P02` otherwise.
   Not a bug, recorded: HMAC pads a key shorter than its block with
   zeros, so a password and itself with NULs after are one in SCRAM (as
   everywhere; SASLprep forbids NUL).  The two §M14.22 review items

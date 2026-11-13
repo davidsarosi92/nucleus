@@ -158,7 +158,8 @@ jobs:
           # would default to its own (no sanitizer with a static libc).
           if ! cargo +nightly fuzz run -O --target x86_64-unknown-linux-gnu ${{ matrix.target }} corpus/${{ matrix.target }} seeds/${{ matrix.target }} -- \
             -max_total_time=180 -rss_limit_mb=2048 -timeout=10 -print_final_stats=1 2>&1 | tee fuzz.log; then
-            grep -v '^\s*Compiling' fuzz.log | tail -c 20000 > failures.txt
+            # An annotation keeps 4 KiB: the crash, not libFuzzer's progress.
+            grep -vE '^\s*Compiling|^#[0-9]+\s' fuzz.log | tail -c 3800 > failures.txt
             echo "::error title=fuzz ${{ matrix.target }} failed::$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' failures.txt)"
             exit 1
           fi
