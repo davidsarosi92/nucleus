@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLock
 use nucleus_platform::Platform;
 use nucleus_storage::btree::{LeafEntry, LeafFilter};
 use nucleus_storage::node::MAX_KEY;
-use nucleus_storage::{BTree, Batch, Store, StoreOptions};
+use nucleus_storage::{BTree, Batch, Deferred, Store, StoreOptions};
 
 use crate::error::{Error, Result};
 use crate::mvcc::{
@@ -551,7 +551,8 @@ impl Engine {
     /// it was — with a retention by time, and not yet past it.
     pub fn commit_time(&self, ts: Timestamp) -> Result<Option<u64>> {
         let tree = self.inner.store.read()?;
-        Ok(Inner::time_from(&tree, ts.0)?
+        let d = self.inner.store.deferred();
+        Ok(Inner::time_from(&tree, &d, ts.0)?
             .filter(|&(at, _)| at == ts.0)
             .map(|(_, time)| time))
     }
@@ -571,7 +572,8 @@ impl Engine {
         self.inner.refresh_time_floor()?;
         let wm = self.inner.current_watermark();
         let tree = self.inner.store.read()?;
-        Ok(Inner::time_from(&tree, wm)?.map(|(ts, time)| (Timestamp(ts), time)))
+        let d = self.inner.store.deferred();
+        Ok(Inner::time_from(&tree, &d, wm)?.map(|(ts, time)| (Timestamp(ts), time)))
     }
 
     /// Starts a snapshot-isolation read-write transaction.
@@ -712,11 +714,22 @@ impl Engine {
             let start = time_key(0);
             let end = time_key(wm);
             let ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = {
+                // In the tree and deferred (a batch's delete takes both).
                 let tree = self.inner.store.read()?;
-                tree.range(Bound::Included(&start[..]), Bound::Excluded(&end[..]))?
+                let d = self.inner.store.deferred();
+                let mut keys: Vec<Vec<u8>> = tree
+                    .range(Bound::Included(&start[..]), Bound::Excluded(&end[..]))?
                     .take(VACUUM_CHUNK)
-                    .map(|e| e.map(|(k, _)| (k, None)))
-                    .collect::<std::result::Result<_, _>>()?
+                    .map(|e| e.map(|(k, _)| k))
+                    .collect::<std::result::Result<_, _>>()?;
+                keys.extend(
+                    d.range::<[u8], _>((Bound::Included(&start[..]), Bound::Excluded(&end[..])))
+                        .take(VACUUM_CHUNK)
+                        .map(|(k, _)| k.clone()),
+                );
+                keys.sort();
+                keys.dedup();
+                keys.into_iter().map(|k| (k, None)).collect()
             };
             if ops.is_empty() {
                 return Ok(());
@@ -936,35 +949,59 @@ impl Inner {
             .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
     }
 
-    /// The last commit time recorded: its commit and time.
+    /// The last commit time recorded: its commit and time.  (Commit
+    /// times are deferred puts — logged with their commits, in the tree
+    /// in bulk —, so the tree and the store's deferred entries both.)
     fn last_commit_time(&self) -> Result<Option<(u64, u64)>> {
         let tree = self.store.read()?;
+        let d = self.store.deferred();
         let end = mvcc::time_key(u64::MAX);
-        let mut r = tree.range_rev(
-            Bound::Included(&COMMIT_TIMES[..]),
-            Bound::Included(&end[..]),
-        )?;
-        match r.next() {
+        let in_tree = match tree
+            .range_rev(
+                Bound::Included(&COMMIT_TIMES[..]),
+                Bound::Included(&end[..]),
+            )?
+            .next()
+        {
             Some(e) => {
                 let (k, v) = e?;
-                Ok(decode_time(&k, &v))
+                decode_time(&k, &v)
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+        let deferred = d
+            .range::<[u8], _>((
+                Bound::Included(&COMMIT_TIMES[..]),
+                Bound::Included(&end[..]),
+            ))
+            .next_back()
+            .and_then(|(k, v)| decode_time(k, v));
+        Ok(in_tree.max(deferred))
     }
 
-    /// The first commit time record at or after commit `ts`.
-    fn time_from(tree: &BTree, ts: u64) -> Result<Option<(u64, u64)>> {
+    /// The first commit time record at or after commit `ts`, in the tree
+    /// or deferred.
+    fn time_from(tree: &BTree, d: &Deferred, ts: u64) -> Result<Option<(u64, u64)>> {
         let start = time_key(ts);
         let end = mvcc::time_key(u64::MAX);
-        let mut r = tree.range(Bound::Included(&start[..]), Bound::Included(&end[..]))?;
-        match r.next() {
+        let in_tree = match tree
+            .range(Bound::Included(&start[..]), Bound::Included(&end[..]))?
+            .next()
+        {
             Some(e) => {
                 let (k, v) = e?;
-                Ok(decode_time(&k, &v))
+                decode_time(&k, &v)
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+        let deferred = d
+            .range::<[u8], _>((Bound::Included(&start[..]), Bound::Included(&end[..])))
+            .next()
+            .and_then(|(k, v)| decode_time(k, v));
+        Ok(match (in_tree, deferred) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        })
     }
 
     /// The last commit recorded at or before `time` (µs): its timestamp
@@ -972,11 +1009,13 @@ impl Inner {
     /// in both.
     fn commit_at_or_before(&self, time: u64) -> Result<Option<(u64, u64)>> {
         let tree = self.store.read()?;
-        let (mut lo, mut hi) = (0u64, mvcc::INTENT_FLOOR - 1);
+        let d = self.store.deferred();
+        // (No commit past the visible one is read.)
+        let (mut lo, mut hi) = (0u64, self.visible.load(Ordering::Acquire));
         let mut found = None;
         while lo <= hi {
             let mid = lo + (hi - lo) / 2;
-            match Self::time_from(&tree, mid)? {
+            match Self::time_from(&tree, &d, mid)? {
                 Some((ts, t)) if ts <= hi && t <= time => {
                     found = Some((ts, t));
                     lo = ts + 1;
@@ -1013,7 +1052,8 @@ impl Inner {
             // recorded is the oldest a time reaches (none recorded: none).
             None => {
                 let tree = self.store.read()?;
-                match Self::time_from(&tree, 0)? {
+                let d = self.store.deferred();
+                match Self::time_from(&tree, &d, 0)? {
                     Some((ts, _)) => ts,
                     None => self.visible.load(Ordering::Acquire),
                 }
@@ -2368,12 +2408,16 @@ impl Transaction {
             for f in self.fresh.iter().filter(|f| f.mode == FreshMode::Unlogged) {
                 ops.push((unlogged_key(&f.start), None));
             }
-            // Its time, with a retention by time (never before the last).
+            // Its time, with a retention by time (never before the last):
+            // a deferred put — logged with the commit, into the tree with
+            // thousands of others —, so a commit rewrites no leaf of times
+            // (measured: 8 threads' one-row commits 28% slower with one).
+            let mut deferred = Vec::new();
             let time = (engine.opts.history_time > 0).then(|| {
                 let time = engine
                     .wall_micros()
                     .max(engine.last_time.load(Ordering::Acquire));
-                ops.push((time_key(ts), Some(time.to_be_bytes().to_vec())));
+                deferred.push((time_key(ts), time.to_be_bytes().to_vec()));
                 time
             });
             for (key, value) in self.writes.iter() {
@@ -2392,9 +2436,15 @@ impl Transaction {
             if !ops.is_sorted_by(|a, b| a.0 < b.0) {
                 ops.sort_by(|a, b| a.0.cmp(&b.0));
             }
-            let lsn = engine
-                .store
-                .write_filtered(&Batch { meta: ts, ops }, &Collect { wm })?;
+            let lsn = if deferred.is_empty() {
+                engine
+                    .store
+                    .write_filtered(&Batch { meta: ts, ops }, &Collect { wm })?
+            } else {
+                engine
+                    .store
+                    .write_deferring(&Batch { meta: ts, ops }, deferred, &Collect { wm })?
+            };
             *last = ts;
             if let Some(time) = time {
                 engine.last_time.store(time, Ordering::Release);

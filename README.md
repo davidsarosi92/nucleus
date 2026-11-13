@@ -182,9 +182,15 @@ columns are marked as saying whose a row is — all of them or none —,
 scrubs every file of their bytes (old versions, index pages, free pages,
 the log) and searches the files to prove none is left, recording the
 erasure without the subject's data, and `nucleus mcp --memory` gives an
-agent remember, recall and forget.
+agent remember, recall and forget.  It reads the past (§M14.14): with
+`nucleus server --history 7d` every commit's time is kept, `BEGIN READ
+ONLY AS OF TIMESTAMP now() - interval '1 hour'` reads the whole
+database as it was then — its tables' shapes too —, `SELECT … FROM t
+AS OF TIMESTAMP '…'` one table beside the present, and `CREATE TABLE
+t2 AS SELECT * FROM t AS OF …` restores; checked against a logged
+workload through every index kind, at no cost to commits measurable.
 Next is the rest of the
-developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, branches, time travel, a B+tree
+developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, branches, a B+tree
 or an LSM tree chosen per table, …), then
 the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists

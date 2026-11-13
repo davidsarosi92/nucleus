@@ -3,7 +3,9 @@
 //!     cargo run --release -p nucleus-kv --example bench [<dir>]
 //!
 //! Single-row commits (each waits for an fsync), batched commits, group
-//! commit from several threads, point reads, and a full scan.
+//! commit from several threads, point reads, and a full scan.  With
+//! `NUCLEUS_HISTORY=<seconds>` set, a retention by time (each commit
+//! records its time, PLAN.md §M14.14) and `snapshot_at` timed too.
 
 use std::ops::Bound;
 use std::time::Instant;
@@ -27,14 +29,19 @@ fn main() {
             std::env::temp_dir().join(format!("nucleus-bench-{}", std::process::id()))
         });
     let _ = std::fs::remove_dir_all(&dir);
+    let history = std::env::var("NUCLEUS_HISTORY")
+        .ok()
+        .map(|s| std::time::Duration::from_secs(s.parse().expect("NUCLEUS_HISTORY: seconds")));
     let db = Database::open(
         &dir,
         Options {
             cache_bytes: 64 << 20,
+            history_time: history.unwrap_or_default(),
             ..Options::default()
         },
     )
     .unwrap();
+    let started = std::time::SystemTime::now();
     let value = vec![b'v'; 100];
 
     let n = 1_000;
@@ -89,6 +96,18 @@ fn main() {
         .count() as u64;
     println!("full scan               {}", rate(rows, t));
     drop(txn);
+
+    if history.is_some() {
+        // Times spread over the run: a binary search by seeks each.
+        let span = started.elapsed().unwrap_or_default().as_micros() as u64;
+        let lookups = 100_000u64;
+        let t = Instant::now();
+        for i in 0..lookups {
+            let at = started + std::time::Duration::from_micros(i * 7919 % span.max(1));
+            let _ = db.snapshot_at(at);
+        }
+        println!("snapshot_at             {}", rate(lookups, t));
+    }
     db.close().unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }

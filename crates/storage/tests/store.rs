@@ -326,7 +326,19 @@ fn workload(p: &Arc<SimPlatform>, seed: u64) -> (Vec<Model>, usize) {
             // Like group commit: some batches are only written, and a later
             // wait makes all of them durable at once.  So unsynced batches
             // pile up across segment boundaries and into checkpoints.
-            let lsn = store.write(&b)?;
+            // Now and then its last put deferred (a key of its own).
+            let lsn = match b.ops.split_last() {
+                Some(((k, Some(v)), rest))
+                    if rng.below(2) == 0 && rest.iter().all(|(r, _)| r != k) =>
+                {
+                    let head = Batch {
+                        meta: b.meta,
+                        ops: rest.to_vec(),
+                    };
+                    store.write_deferring(&head, vec![(k.clone(), v.clone())], &Keep)?
+                }
+                _ => store.write(&b)?,
+            };
             if rng.below(3) == 0 {
                 store.wait_durable(lsn)?;
                 acked = i as usize;
@@ -753,4 +765,103 @@ fn replay_deletes_a_covered_range_whole() {
     assert_eq!(rec.meta, 4);
     // Replay put x1–x3 back, unfiltered, and the covering delete took them.
     assert_eq!(contents(&store).keys().collect::<Vec<_>>(), [b"z"]);
+}
+
+/// A filter that drops nothing.
+struct Keep;
+
+impl nucleus_storage::btree::LeafFilter for Keep {
+    fn drops(&self, _: &[nucleus_storage::btree::LeafEntry], _: &mut [bool]) {}
+}
+
+/// The tree with the deferred puts over it.
+fn contents_deferred(store: &Store) -> Model {
+    let tree = store.read().unwrap();
+    let mut m: Model = tree
+        .range(Bound::Unbounded, Bound::Unbounded)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    m.extend(store.deferred().iter().map(|(k, v)| (k.clone(), v.clone())));
+    m
+}
+
+#[test]
+fn deferred_puts_wait_in_memory_then_reach_the_tree() {
+    let p = sim(2);
+    let (store, _) = open(&p).unwrap();
+    let put = |k: &[u8]| (k.to_vec(), Some(b"v".to_vec()));
+    let lsn = store
+        .write_deferring(
+            &Batch {
+                meta: 1,
+                ops: vec![put(b"a")],
+            },
+            vec![
+                (b"t1".to_vec(), b"1".to_vec()),
+                (b"t2".to_vec(), b"2".to_vec()),
+            ],
+            &Keep,
+        )
+        .unwrap();
+    store.wait_durable(lsn).unwrap();
+    // Not in the tree: beside it.
+    assert_eq!(contents(&store).keys().collect::<Vec<_>>(), [b"a"]);
+    assert_eq!(store.deferred().len(), 2);
+    // A later batch's delete of one replaces it.
+    store
+        .commit(&Batch {
+            meta: 2,
+            ops: vec![(b"t1".to_vec(), None)],
+        })
+        .unwrap();
+    assert_eq!(
+        contents_deferred(&store).keys().collect::<Vec<_>>(),
+        [&b"a"[..], b"t2"]
+    );
+    // A crash: replay puts them back — the delete after them too.
+    drop(store);
+    p.sim_fs().crash();
+    let (store, rec) = open(&p).unwrap();
+    assert_eq!(rec.meta, 2);
+    // (Open checkpoints after a replay: into the tree.)
+    assert!(store.deferred().is_empty());
+    assert_eq!(
+        contents(&store).keys().collect::<Vec<_>>(),
+        [&b"a"[..], b"t2"]
+    );
+    // A checkpoint takes them into the tree.
+    store
+        .write_deferring(
+            &Batch {
+                meta: 3,
+                ops: vec![],
+            },
+            vec![(b"t3".to_vec(), b"3".to_vec())],
+            &Keep,
+        )
+        .unwrap();
+    assert_eq!(store.deferred().len(), 1);
+    store.checkpoint().unwrap();
+    assert!(store.deferred().is_empty());
+    assert_eq!(contents(&store).len(), 3);
+    // Past DEFERRED_MAX they go into the tree with the batch.
+    let mut model = contents(&store);
+    for i in 0..nucleus_storage::DEFERRED_MAX as u64 + 10 {
+        let k = format!("u{i:06}").into_bytes();
+        store
+            .write_deferring(
+                &Batch {
+                    meta: 4 + i,
+                    ops: vec![],
+                },
+                vec![(k.clone(), b"x".to_vec())],
+                &Keep,
+            )
+            .unwrap();
+        model.insert(k, b"x".to_vec());
+        assert!(store.deferred().len() <= nucleus_storage::DEFERRED_MAX);
+    }
+    assert_eq!(contents_deferred(&store), model);
+    store.read().unwrap().check().unwrap();
 }

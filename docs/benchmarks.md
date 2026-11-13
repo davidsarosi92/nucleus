@@ -1014,6 +1014,27 @@ python3 -I bench/wamp/wamp.py nucleus-docker VOLUME /t/nucleus 21500 [2,4]   # a
 python3 -I bench/wamp/wamp.py pg [0,1,2,3,4,5]     # Docker, postgres:18-alpine
 ```
 
+## Time travel
+
+The cost of recording each commit's time (§M14.14;
+`crates/kv/examples/bench.rs`, `NUCLEUS_HISTORY=3600` against none;
+Apple M2 Pro, APFS, 2026-11-13, five alternating runs, their means):
+
+| | with times | without |
+|---|---:|---:|
+| one-row commits, one thread (each an fsync) | 5,430 /s | 5,110 /s |
+| one-row commits, 8 threads (group commit) | 15,200 /s | 15,900 /s |
+| SQL `INSERT`s of a row, 8 sessions (three runs) | 11,700 /s | 11,300 /s |
+| `snapshot_at` (a time to its commit, ~3,000 recorded) | 5.5 µs | — |
+
+Within the runs' spread: the times are deferred puts, in the tree in
+bulk (DOCS.md §4.5).
+
+```sh
+NUCLEUS_HISTORY=3600 cargo run --release -p nucleus-kv --example bench
+cargo run --release -p nucleus-kv --example bench
+```
+
 ## Embedded editions
 
 PLAN.md §M14.23; an M-series Mac.

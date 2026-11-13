@@ -21,5 +21,7 @@ pub use buffer::{BufferPool, PageRef};
 pub use error::{Error, Result};
 pub use page::{PAGE_SIZE, PAYLOAD_SIZE, Page, PageId, PageType};
 pub use pager::Pager;
-pub use store::{Batch, Checkpoint, Recovery, Scrubbed, Store, StoreOptions};
+pub use store::{
+    Batch, Checkpoint, DEFERRED_MAX, Deferred, Recovery, Scrubbed, Store, StoreOptions,
+};
 pub use wal::{Lsn, Wal};

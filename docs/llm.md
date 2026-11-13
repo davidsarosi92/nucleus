@@ -254,7 +254,8 @@ after an error in a block everything is `25P02` until `ROLLBACK`.
 time: `BEGIN READ ONLY AS OF TIMESTAMP now() - interval '1 hour'` (the
 whole block, the catalog as it was too), or one table beside the
 present: `SELECT … FROM t AS OF TIMESTAMP '2026-11-13 10:00+00' AS old
-JOIN t ON …`.  Undo a mistake: `INSERT INTO t SELECT * FROM t AS OF
+JOIN t ON …` (it reads the whole table then; for a lookup by an index at
+that time use the block form).  Undo a mistake: `INSERT INTO t SELECT * FROM t AS OF
 TIMESTAMP … WHERE …`, or `CREATE TABLE t_restored AS SELECT * FROM t AS
 OF TIMESTAMP …`.  `72000` means past the history kept.
 

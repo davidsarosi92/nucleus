@@ -25,9 +25,21 @@
 //! last durable batch — never a batch in part, never one that was not
 //! durable.
 //!
+//! # Deferred entries
+//!
+//! [`Store::write_deferring`] logs some puts with a batch but leaves them
+//! out of the tree: they wait in memory ([`Store::deferred`]) and go into
+//! the tree together — at the next checkpoint, or once
+//! [`DEFERRED_MAX`] wait — so a stream of small batches that each add
+//! one entry to the same far-off leaf (the transaction layer's commit
+//! times) rewrites that leaf once for thousands of them.  Replay puts them
+//! back in memory.  A later batch's put or delete of the same key
+//! replaces them.  A memtable for one key range: RocksDB's, LevelDB's.
+//!
 //! A write or checkpoint that fails part-way **poisons** the store: memory
 //! and disk may disagree, so every later call fails until it is reopened.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
@@ -49,6 +61,15 @@ const BATCH_VERSION: u8 = 1;
 /// A batch with covered ranges ([`Store::write_covering`]): version 1's
 /// layout, then the ranges.
 const BATCH_VERSION_COVERING: u8 = 2;
+/// A batch with deferred puts ([`Store::write_deferring`]): version 2's
+/// layout (its ranges maybe none), then the deferred puts.
+const BATCH_VERSION_DEFERRING: u8 = 3;
+/// Deferred entries kept in memory at most: past it they go into the tree
+/// with the batch that brought them there.
+pub const DEFERRED_MAX: usize = 4096;
+
+/// Puts logged but not yet in the tree, by key.
+pub type Deferred = BTreeMap<Vec<u8>, Vec<u8>>;
 
 /// Tuning for a [`Store`].
 #[derive(Clone, Debug)]
@@ -94,8 +115,18 @@ impl Batch {
     }
 
     fn encode_covering(&self, covered: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+        self.encode_full(covered, &[])
+    }
+
+    fn encode_full(
+        &self,
+        covered: &[(Vec<u8>, Vec<u8>)],
+        deferred: &[(Vec<u8>, Vec<u8>)],
+    ) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(if covered.is_empty() {
+        out.push(if !deferred.is_empty() {
+            BATCH_VERSION_DEFERRING
+        } else if covered.is_empty() {
             BATCH_VERSION
         } else {
             BATCH_VERSION_COVERING
@@ -111,7 +142,7 @@ impl Batch {
                 out.extend_from_slice(v);
             }
         }
-        if !covered.is_empty() {
+        if !covered.is_empty() || !deferred.is_empty() {
             out.extend_from_slice(&(covered.len() as u32).to_le_bytes());
             for (start, end) in covered {
                 for k in [start, end] {
@@ -120,16 +151,35 @@ impl Batch {
                 }
             }
         }
+        if !deferred.is_empty() {
+            out.extend_from_slice(&(deferred.len() as u32).to_le_bytes());
+            for (k, v) in deferred {
+                for b in [k, v] {
+                    out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                    out.extend_from_slice(b);
+                }
+            }
+        }
         out
     }
 
     #[cfg(test)]
     fn decode(b: &[u8]) -> Result<Self> {
-        Ok(Self::decode_covering(b)?.0)
+        Ok(Self::decode_full(b)?.0)
     }
 
-    /// A batch and its covered ranges (none, for version 1).
-    fn decode_covering(mut b: &[u8]) -> Result<(Self, Vec<(Vec<u8>, Vec<u8>)>)> {
+    #[cfg(test)]
+    fn decode_covering(b: &[u8]) -> Result<(Self, Vec<(Vec<u8>, Vec<u8>)>)> {
+        let (batch, covered, _) = Self::decode_full(b)?;
+        Ok((batch, covered))
+    }
+
+    /// A batch, its covered ranges (none before version 2) and its
+    /// deferred puts (none before version 3).
+    #[allow(clippy::type_complexity)]
+    fn decode_full(
+        mut b: &[u8],
+    ) -> Result<(Self, Vec<(Vec<u8>, Vec<u8>)>, Vec<(Vec<u8>, Vec<u8>)>)> {
         fn take<'a>(b: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
             if b.len() < n {
                 return Err(Error::Corrupt {
@@ -143,7 +193,10 @@ impl Batch {
         }
         let u32_of = |s: &[u8]| u32::from_le_bytes(s.try_into().unwrap()) as usize;
         let version = take(&mut b, 1)?[0];
-        if version != BATCH_VERSION && version != BATCH_VERSION_COVERING {
+        if !matches!(
+            version,
+            BATCH_VERSION | BATCH_VERSION_COVERING | BATCH_VERSION_DEFERRING
+        ) {
             return Err(Error::Corrupt {
                 page: PageId(0),
                 reason: "unknown WAL batch version",
@@ -164,20 +217,29 @@ impl Batch {
             };
             ops.push((key, val));
         }
+        let bytes = |b: &mut &[u8]| -> Result<Vec<u8>> {
+            let n = u32_of(take(b, 4)?);
+            Ok(take(b, n)?.to_vec())
+        };
         let mut covered = Vec::new();
-        if version == BATCH_VERSION_COVERING {
+        if version >= BATCH_VERSION_COVERING {
             let n = u32_of(take(&mut b, 4)?);
             for _ in 0..n {
-                let mut key = || -> Result<Vec<u8>> {
-                    let n = u32_of(take(&mut b, 4)?);
-                    Ok(take(&mut b, n)?.to_vec())
-                };
-                let start = key()?;
-                let end = key()?;
+                let start = bytes(&mut b)?;
+                let end = bytes(&mut b)?;
                 covered.push((start, end));
             }
         }
-        Ok((Self { meta, ops }, covered))
+        let mut deferred = Vec::new();
+        if version == BATCH_VERSION_DEFERRING {
+            let n = u32_of(take(&mut b, 4)?);
+            for _ in 0..n.min(1 << 20) {
+                let k = bytes(&mut b)?;
+                let v = bytes(&mut b)?;
+                deferred.push((k, v));
+            }
+        }
+        Ok((Self { meta, ops }, covered, deferred))
     }
 }
 
@@ -198,6 +260,10 @@ pub struct Store {
     /// while), so a stream of scans does not keep a writer out.
     writers_waiting: std::sync::atomic::AtomicUsize,
     wal: Wal,
+    /// Deferred puts ([`Store::write_deferring`]): changed only with the
+    /// tree locked for writing, so a reader holding [`Store::read`]'s
+    /// guard sees the two agree.
+    deferred: Mutex<Deferred>,
     /// Serialises writers (and a checkpoint's freeze); holds the applied
     /// LSN and meta.
     writer: Mutex<(Lsn, u64)>,
@@ -307,10 +373,12 @@ impl Store {
                 reason: "the WAL does not line up with the checkpoint",
             });
         }
+        let mut deferred = Deferred::new();
         wal.replay(applied, |lsn, payload| {
-            let (batch, covered) = Batch::decode_covering(payload)?;
+            let (batch, covered, put) = Batch::decode_full(payload)?;
             apply(&mut tree, &batch, None)?;
             remove_covered(&mut tree, &covered)?;
+            overlay(&mut deferred, &batch, put);
             meta = batch.meta;
             replayed += 1;
             applied = lsn + 16 + payload.len() as u64;
@@ -322,6 +390,7 @@ impl Store {
             tree: RwLock::new(tree),
             writers_waiting: std::sync::atomic::AtomicUsize::new(0),
             wal,
+            deferred: Mutex::new(deferred),
             writer: Mutex::new((applied, meta)),
             checkpointing: Mutex::new(()),
             checkpoint_lsn: AtomicU64::new(checkpoint),
@@ -372,11 +441,26 @@ impl Store {
     /// whole after a crash (the transaction layer's vacuum of a key's
     /// last versions, below a filtered commit's drops).
     pub fn write_covering(&self, batch: &Batch, covered: &[(Vec<u8>, Vec<u8>)]) -> Result<Lsn> {
-        self.write_encoded(batch, &batch.encode_covering(covered), None)
+        self.write_encoded(batch, &batch.encode_covering(covered), None, Vec::new())
+    }
+
+    /// [`write_filtered`](Store::write_filtered), with puts `deferred`:
+    /// logged with the batch, kept out of the tree until the next
+    /// checkpoint or until [`DEFERRED_MAX`] wait ([`Store::deferred`]
+    /// holds them meanwhile).  For entries read seldom, by whoever reads
+    /// them through both.
+    pub fn write_deferring(
+        &self,
+        batch: &Batch,
+        deferred: Vec<(Vec<u8>, Vec<u8>)>,
+        filter: &dyn LeafFilter,
+    ) -> Result<Lsn> {
+        let encoded = batch.encode_full(&[], &deferred);
+        self.write_encoded(batch, &encoded, Some(filter), deferred)
     }
 
     fn write_with(&self, batch: &Batch, filter: Option<&dyn LeafFilter>) -> Result<Lsn> {
-        self.write_encoded(batch, &batch.encode(), filter)
+        self.write_encoded(batch, &batch.encode(), filter, Vec::new())
     }
 
     fn write_encoded(
@@ -384,8 +468,15 @@ impl Store {
         batch: &Batch,
         encoded: &[u8],
         filter: Option<&dyn LeafFilter>,
+        deferred: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<Lsn> {
-        if let Some((k, _)) = batch.ops.iter().find(|(k, _)| k.len() > MAX_KEY) {
+        if let Some(k) = batch
+            .ops
+            .iter()
+            .map(|(k, _)| k)
+            .chain(deferred.iter().map(|(k, _)| k))
+            .find(|k| k.len() > MAX_KEY)
+        {
             return Err(Error::KeyTooLarge(k.len()));
         }
         self.check()?;
@@ -396,6 +487,11 @@ impl Store {
             let mut tree = self.tree.write().unwrap_or_else(|e| e.into_inner());
             self.writers_waiting.fetch_sub(1, Ordering::AcqRel);
             apply(&mut tree, batch, filter)?;
+            let mut d = self.deferred.lock().unwrap_or_else(|e| e.into_inner());
+            overlay(&mut d, batch, deferred);
+            if d.len() > DEFERRED_MAX {
+                settle(&mut tree, &mut d)?;
+            }
             Ok(lsn)
         });
         match result {
@@ -425,7 +521,21 @@ impl Store {
         self.writers_waiting.fetch_add(1, Ordering::AcqRel);
         let mut tree = self.tree.write().unwrap_or_else(|e| e.into_inner());
         self.writers_waiting.fetch_sub(1, Ordering::AcqRel);
-        apply(&mut tree, batch, None).inspect_err(|_| self.poisoned.store(true, Ordering::Release))
+        apply(&mut tree, batch, None)
+            .inspect_err(|_| self.poisoned.store(true, Ordering::Release))?;
+        overlay(
+            &mut self.deferred.lock().unwrap_or_else(|e| e.into_inner()),
+            batch,
+            Vec::new(),
+        );
+        Ok(())
+    }
+
+    /// The deferred puts ([`Store::write_deferring`]), not yet in the
+    /// tree.  Taken while [`Store::read`]'s guard is held, the two agree:
+    /// an entry is in one or the other.  Hold it briefly.
+    pub fn deferred(&self) -> MutexGuard<'_, Deferred> {
+        self.deferred.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Returns once every write up to `lsn` is durable.
@@ -526,7 +636,15 @@ impl Store {
         let w = self.writer();
         self.check()?;
         let (lsn, meta) = *w;
-        let root = self.tree.read().unwrap_or_else(|e| e.into_inner()).root();
+        let root = {
+            // The deferred puts into the tree: the WAL before the
+            // checkpoint, which logged them, goes.
+            let mut tree = self.tree.write().unwrap_or_else(|e| e.into_inner());
+            let mut d = self.deferred.lock().unwrap_or_else(|e| e.into_inner());
+            settle(&mut tree, &mut d)
+                .inspect_err(|_| self.poisoned.store(true, Ordering::Release))?;
+            tree.root()
+        };
         let frozen = self
             .pool
             .pager()
@@ -601,6 +719,33 @@ impl Checkpoint<'_> {
     }
 }
 
+/// A batch's effect on the deferred puts: its own keys' deferred entries
+/// replaced (by its put or delete, applied to the tree), then its
+/// deferred puts added.
+fn overlay(d: &mut Deferred, batch: &Batch, put: Vec<(Vec<u8>, Vec<u8>)>) {
+    if let (Some((first, _)), Some((last, _))) = (d.first_key_value(), d.last_key_value()) {
+        let (first, last) = (first.clone(), last.clone());
+        for (k, _) in &batch.ops {
+            if *k >= first && *k <= last {
+                d.remove(k);
+            }
+        }
+    }
+    d.extend(put);
+}
+
+/// The deferred puts into the tree.
+fn settle(tree: &mut BTree, d: &mut Deferred) -> Result<()> {
+    if d.is_empty() {
+        return Ok(());
+    }
+    let ops: Vec<(Vec<u8>, Option<Vec<u8>>)> = std::mem::take(d)
+        .into_iter()
+        .map(|(k, v)| (k, Some(v)))
+        .collect();
+    tree.apply_sorted(&ops)
+}
+
 /// Replay's half of [`Store::write_covering`]: every entry left in the
 /// covered ranges deleted.
 fn remove_covered(tree: &mut BTree, covered: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
@@ -670,9 +815,23 @@ mod tests {
         let covered = vec![(b"a".to_vec(), b"c".to_vec()), (vec![], vec![0])];
         let e = b.encode_covering(&covered);
         assert_eq!(e[0], BATCH_VERSION_COVERING);
-        assert_eq!(Batch::decode_covering(&e).unwrap(), (b.clone(), covered));
+        assert_eq!(
+            Batch::decode_covering(&e).unwrap(),
+            (b.clone(), covered.clone())
+        );
         assert!(Batch::decode_covering(&e[..e.len() - 1]).is_err());
         assert_eq!(b.encode_covering(&[]), b.encode());
+        // With deferred puts: version 3, its ranges maybe none.
+        let deferred = vec![(b"t".to_vec(), b"9".to_vec())];
+        for covered in [vec![], covered] {
+            let e = b.encode_full(&covered, &deferred);
+            assert_eq!(e[0], BATCH_VERSION_DEFERRING);
+            assert_eq!(
+                Batch::decode_full(&e).unwrap(),
+                (b.clone(), covered.clone(), deferred.clone())
+            );
+            assert!(Batch::decode_full(&e[..e.len() - 1]).is_err());
+        }
     }
 
     /// A file system whose directories above `/apps/me` may not be

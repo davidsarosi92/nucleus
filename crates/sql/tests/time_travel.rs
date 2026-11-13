@@ -367,3 +367,213 @@ fn reading_the_past_needs_the_privilege_now() {
         "42501"
     );
 }
+
+/// A row of the logged workload: `k`, the text, the vector.
+type Row4 = (i64, String, [f64; 4]);
+
+fn vector(v: &[f64; 4]) -> String {
+    format!("[{},{},{},{}]", v[0], v[1], v[2], v[3])
+}
+
+fn ids(rows: Vec<String>) -> Vec<i64> {
+    rows.iter().map(|r| r.parse().unwrap()).collect()
+}
+
+#[test]
+fn a_logged_workload_reads_back_at_random_times_through_every_index() {
+    // Rounds of inserts, updates and deletes, the clock moving between
+    // them, each round's state logged with its time; then queries at
+    // random times — a whole block's and a table's — through a B-tree
+    // index (made halfway: the past before it has none), the text index,
+    // HNSW and a column-stored table, against the log.  Upkeep, vacuums
+    // and a reopen along the way.
+    use nucleus_platform::{Rng, SplitMix64, harness};
+    use std::collections::BTreeMap;
+    harness::run("sql_time_travel_workload", 2, |seed| {
+        let p = Arc::new(SimPlatform::new(seed));
+        let rng = SplitMix64::new(seed);
+        let mut kv = db(&p, Duration::from_secs(3600));
+        let mut s = Session::new(kv.clone());
+        s.execute(
+            "CREATE TABLE d (id int PRIMARY KEY, k int, body text, v vector(4)); \
+             CREATE INDEX ON d USING text (body); \
+             CREATE INDEX ON d USING hnsw (v); \
+             CREATE TABLE c (id int PRIMARY KEY, k int) WITH (storage = column)",
+        )
+        .unwrap();
+        let mut model: BTreeMap<i64, Row4> = BTreeMap::new();
+        let mut log: Vec<(String, BTreeMap<i64, Row4>)> = Vec::new();
+        let mut gaps = Vec::new(); // the sleep after each round, in µs
+        let mut next_id = 0i64;
+        let word = |rng: &SplitMix64| format!("w{}", rng.below(10));
+        let f = |rng: &SplitMix64| (rng.below(201) as f64 - 100.0) / 100.0;
+        for round in 0..80 {
+            let mut sql = Vec::new();
+            for _ in 0..1 + rng.below(6) {
+                let pick = (!model.is_empty()).then(|| {
+                    *model
+                        .keys()
+                        .nth(rng.below(model.len() as u64) as usize)
+                        .unwrap()
+                });
+                let k = rng.below(10) as i64;
+                let body = format!("{} {} {}", word(&rng), word(&rng), word(&rng));
+                let v = [f(&rng), f(&rng), f(&rng), f(&rng)];
+                match (rng.below(5), pick) {
+                    (0, Some(id)) => {
+                        sql.push(format!("DELETE FROM d WHERE id = {id}"));
+                        sql.push(format!("DELETE FROM c WHERE id = {id}"));
+                        model.remove(&id);
+                    }
+                    (1, Some(id)) => {
+                        sql.push(format!(
+                            "UPDATE d SET k = {k}, body = '{body}', v = '{}' WHERE id = {id}",
+                            vector(&v)
+                        ));
+                        sql.push(format!("UPDATE c SET k = {k} WHERE id = {id}"));
+                        model.insert(id, (k, body, v));
+                    }
+                    _ => {
+                        next_id += 1;
+                        let id = next_id;
+                        sql.push(format!(
+                            "INSERT INTO d VALUES ({id}, {k}, '{body}', '{}')",
+                            vector(&v)
+                        ));
+                        sql.push(format!("INSERT INTO c VALUES ({id}, {k})"));
+                        model.insert(id, (k, body, v));
+                    }
+                }
+            }
+            // One transaction a round.
+            s.execute(&format!("BEGIN; {}; COMMIT", sql.join("; ")))
+                .unwrap();
+            log.push((now(&mut s), model.clone()));
+            if round == 40 {
+                s.execute("CREATE INDEX d_k ON d (k)").unwrap();
+                log.push((now(&mut s), model.clone()));
+                gaps.push(1);
+            }
+            if round % 10 == 9 {
+                nucleus_sql::hnsw::upkeep_now(&kv).unwrap();
+                nucleus_sql::text::index::upkeep_now(&kv).unwrap();
+            }
+            if round % 15 == 14 {
+                s.execute("VACUUM").unwrap();
+            }
+            if round == 55 {
+                // Closed and opened again: the times and indexes survive.
+                drop(s);
+                drop(kv);
+                kv = db(&p, Duration::from_secs(3600));
+                s = Session::new(kv.clone());
+            }
+            let gap = 1 + rng.below(30_000_000);
+            p.clock().sleep(Duration::from_micros(gap));
+            gaps.push(gap);
+        }
+        let mut found = 0usize;
+        let mut wanted = 0usize;
+        for q in 0..150 {
+            let i = rng.below(log.len() as u64) as usize;
+            let off = rng.below(gaps[i]);
+            let (t, m) = &log[i];
+            let at = format!("'{t}'::timestamptz + interval '{off} microseconds'");
+            let whole = q % 2 == 0;
+            let from = |table: &str| {
+                if whole {
+                    table.to_string()
+                } else {
+                    format!("{table} AS OF TIMESTAMP {at}")
+                }
+            };
+            if whole {
+                s.execute(&format!("BEGIN READ ONLY AS OF TIMESTAMP {at}"))
+                    .unwrap();
+            }
+            let what = format!("query {q} at round {i} + {off} µs, whole {whole}");
+            // The B-tree index (when it existed), the text index, counts.
+            let k = rng.below(10) as i64;
+            assert_eq!(
+                ids(texts(
+                    &mut s,
+                    &format!("SELECT id FROM {} WHERE k = {k} ORDER BY id", from("d"))
+                )),
+                m.iter()
+                    .filter(|(_, r)| r.0 == k)
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>(),
+                "{what}: k = {k}"
+            );
+            let w = format!("w{}", rng.below(10));
+            assert_eq!(
+                ids(texts(
+                    &mut s,
+                    &format!(
+                        "SELECT id FROM {} WHERE body @@ '{w}' ORDER BY id",
+                        from("d")
+                    )
+                )),
+                m.iter()
+                    .filter(|(_, r)| r.1.split(' ').any(|x| x == w))
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>(),
+                "{what}: {w}"
+            );
+            let mut by_k: BTreeMap<i64, usize> = BTreeMap::new();
+            for r in m.values() {
+                *by_k.entry(r.0).or_default() += 1;
+            }
+            assert_eq!(
+                texts(
+                    &mut s,
+                    &format!(
+                        "SELECT k, count(*) FROM {} GROUP BY k ORDER BY k",
+                        from("c")
+                    )
+                ),
+                by_k.iter()
+                    .map(|(k, n)| format!("{k} {n}"))
+                    .collect::<Vec<_>>(),
+                "{what}: the column table"
+            );
+            // HNSW: only rows of then, as many as asked, the nearest.
+            let target = [f(&rng), f(&rng), f(&rng), f(&rng)];
+            let got = ids(texts(
+                &mut s,
+                &format!(
+                    "SELECT id FROM {} ORDER BY v <-> '{}' LIMIT 5",
+                    from("d"),
+                    vector(&target)
+                ),
+            ));
+            let mut exact: Vec<(f64, i64)> = m
+                .iter()
+                .map(|(id, r)| {
+                    let d: f64 =
+                        r.2.iter()
+                            .zip(&target)
+                            .map(|(a, b)| (a - b) * (a - b))
+                            .sum();
+                    (d, *id)
+                })
+                .collect();
+            exact.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let exact: Vec<i64> = exact.iter().take(5).map(|(_, id)| *id).collect();
+            assert_eq!(got.len(), exact.len(), "{what}: {got:?} {exact:?}");
+            assert!(
+                got.iter().all(|id| m.contains_key(id)),
+                "{what}: {got:?} not all of then"
+            );
+            found += got.iter().filter(|id| exact.contains(id)).count();
+            wanted += exact.len();
+            if whole {
+                s.execute("COMMIT").unwrap();
+            }
+        }
+        assert!(
+            found * 100 >= wanted * 95,
+            "HNSW at past times: {found} of {wanted}"
+        );
+    });
+}

@@ -584,7 +584,18 @@ batch of deletes with key ranges it *covers* — ranges whose entries, in
 the tree as it is, are all among its deletes: replay deletes everything
 left in them, what a filtered write dropped there and replay brought
 back too (WAL batch version 2: version 1's layout, then the ranges;
-version 1 is still written and read for a batch without).  A batch whose keys are all
+version 1 is still written and read for a batch without).
+`write_deferring(&Batch, deferred, filter)` logs puts with a batch but
+keeps them out of the tree (WAL batch version 3: version 2's layout,
+its ranges maybe none, then the puts): they wait in memory
+(`Store::deferred()`, a `BTreeMap`; taken while `read()`'s guard is
+held, the two agree — an entry is in one or the other) and go into the
+tree together at the next checkpoint's freeze, or with the batch that
+brings more than `DEFERRED_MAX` (4096); replay puts them back in memory
+(and `open` checkpoints after a replay); a later batch's put or delete
+of the key replaces the deferred entry.  A memtable for entries read
+seldom — the commit times (§5.2), each of which would otherwise rewrite
+a leaf of its own per commit.  A batch whose keys are all
 distinct (every batch the engine writes) is applied in one sorted pass
 (`apply_sorted`); otherwise op by op, in order.  `write_unlogged(&Batch)`
 applies a batch without logging it (D16): durable only once a checkpoint
@@ -865,14 +876,18 @@ snapshot within the history window (read-only), else `SnapshotTooOld`.
 **Time travel's engine** (§M14.14 TT1).  `EngineOptions::history_time`
 (µs; 0 by default: off) keeps old versions for a time as `history` does
 for a number of commits — the watermark is the lower of the two.  While
-it is set, each commit records its time in its own batch (`00 05 ‖ ts →
-µs`; the platform's wall clock, never before the last time recorded, so
+it is set, each commit records its time with its own batch (`00 05 ‖ ts
+→ µs`, a deferred put — `Store::write_deferring`, §4.5: logged with the
+commit, into the tree four thousand at a time or at a checkpoint, so a
+commit rewrites no leaf of times; the readers look at both; the
+platform's wall clock, never before the last time recorded, so
 the times are monotonic in the timestamps — a clock stepping back, a
 restart on a slower clock, takes the last), exactly, as PostgreSQL's
 `track_commit_timestamp` does rather than Oracle's sampled SCN↔time map:
 a time then names its commit exactly.  `Engine::snapshot_at(time)` is
 the last commit at or before `time` (a binary search over the records by
-seeks; the newest snapshot past the last commit; `SnapshotTooOld` before
+seeks, up to the visible commit — 5.5 µs measured; the newest snapshot
+past the last commit; `SnapshotTooOld` before
 the first known), `commit_time(ts)` a commit's recorded time, `reach()`
 the oldest snapshot readable with its time.  The retention's floor — the
 last commit at or before now − retention — is found again at most once a
@@ -882,7 +897,15 @@ keeps more.  A whole vacuum then deletes the time records below the
 watermark (the one at it maps the times since).  Tests:
 `crates/txn/tests/time.rs` (a time reads the last commit at or before it
 against a logged workload, the retention kept and no more, nothing
-recorded without it, the times through a crash at every I/O point).
+recorded without it, the times through a crash at every I/O point);
+`crates/sql/tests/time_travel.rs`
+`a_logged_workload_reads_back_at_random_times_through_every_index`
+(TT5: 80 rounds of writes, upkeep, vacuums and a reopen, then 150
+queries at random times — a block's and a table's — through a B-tree
+index made halfway, the text index, HNSW and a column table, against
+the log).  The cost (`crates/kv/examples/bench.rs`, `NUCLEUS_HISTORY`):
+none measurable — one-row commits from 8 threads 15.2k/s with times,
+15.9k/s without, within the runs' spread.
 
 **Scans** read the store in batches — 8 visible keys at first, twice as
 many each time up to 128, and no more than 4096 entries passed over
@@ -2595,7 +2618,9 @@ transaction there, and binds the table against that snapshot's catalog
 — its past shape, a table dropped since included — in a sub-binder of
 its own (checked as the outer one is); the plan is `Plan::Past { at,
 plan }`, which the executor runs in a transaction of its own at `at`
-and materializes, as a CTE's rows (`EXPLAIN` shows `As Of commit n`).
+and materializes, as a CTE's rows (`EXPLAIN` shows `As Of commit n`) —
+the whole table: the statement's filters and its indexes do not reach
+into it yet, so an indexed lookup at a past time is a block's `AS OF`.
 Privileges are the present's: a table that still exists needs `SELECT`
 now; one dropped since is readable only to whom the past catalog's
 grants allowed.  A CTE's name with `AS OF` is `0A000`.  `WITH` is a
@@ -5794,6 +5819,14 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-13 — §M14.14 TT5, time travel checked and free:** a logged
+  workload read back at random times through every index kind
+  (`tests/time_travel.rs`); commit times as deferred puts
+  (`Store::write_deferring`, `Store::deferred`, `DEFERRED_MAX`, WAL batch
+  version 3) — 8 threads' one-row commits were 28% slower with a time
+  record rewriting a leaf each, now within the spread; `snapshot_at`
+  searches up to the visible commit (20 → 5.5 µs);
+  `crates/kv/examples/bench.rs` takes `NUCLEUS_HISTORY`.
 - **2026-11-13 — §M14.14 TT1–TT4, time travel:** with a retention by
   time (`EngineOptions::history_time`, `nucleus_kv::Options::
   history_time`) each commit records its time (`00 05 | ts → µs`,
