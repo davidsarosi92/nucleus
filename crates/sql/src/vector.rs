@@ -532,7 +532,10 @@ fn eval(e: &Expr, b: &Batch, sel: &Sel, cx: Cx) -> Result<Rc<Vector>> {
         return Ok(Rc::new(Vector::Const(Value::Null)));
     }
     Ok(match e {
-        Expr::Literal(v) => Rc::new(Vector::Const(v.clone())),
+        // The plan's value is every worker's: its count bumped by all of
+        // them a row at a time made each bump a cache miss (a containment
+        // scan spent half its time there).  Copied once a batch instead.
+        Expr::Literal(v) => Rc::new(Vector::Const(private(v))),
         Expr::Param(_) | Expr::Outer { .. } => Rc::new(Vector::Const(e.eval(&cx.env(&[]))?)),
         // An uncorrelated subquery runs once per statement (its rows
         // cached): its value is the same for every row — evaluated here,
@@ -812,6 +815,15 @@ fn like_shape(p: &str) -> Option<LikeShape<'_>> {
 }
 
 /// A vector of `f(i)` over the rows `sel` (typed when it can be).
+/// `v`, its shared bytes copied: a value of this thread's own.
+fn private(v: &Value) -> Value {
+    match v {
+        Value::Ext(t, b) => Value::Ext(*t, std::sync::Arc::from(&b[..])),
+        Value::Bytea(b) => Value::Bytea(std::sync::Arc::from(&b[..])),
+        v => v.clone(),
+    }
+}
+
 fn each(len: usize, sel: &Sel, mut f: impl FnMut(usize) -> Result<Value>) -> Result<Rc<Vector>> {
     let mut out = vec![Value::Null; len];
     for i in sel.iter() {

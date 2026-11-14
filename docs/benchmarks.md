@@ -1066,15 +1066,14 @@ inside the container; nucleus a server, timed by the client over TCP:
 
 | condition | rows | scan | index | PostgreSQL scan | PostgreSQL index |
 |---|---:|---:|---:|---:|---:|
-| `doc->>'id' = '123457'` (B-tree on the expression) | 1 | 9 | 0.07 | 12 | 1.00 |
-| `(doc->>'score')::int BETWEEN 10 AND 12` (B-tree) | 600 | 16 | 1.28 | 16 | 1.88 |
-| `doc @> '{"user": {"name": "u42"}}'` (`USING json`; GIN `jsonb_path_ops`) | 40 | 33 | 0.14 | 13 | 1.09 |
-| `doc @> '{"kind": "k3", "tags": ["t3"]}'` | 2,000 | 27 | 3.14 | 10 | 4.26 |
-| `doc ? 'rare'` (`jsonb_path_ops` cannot serve it) | 200 | 7 | 0.34 | 8 | 8.99 |
+| `doc->>'id' = '123457'` (B-tree on the expression) | 1 | 10 | 0.11 | 13 | 0.96 |
+| `(doc->>'score')::int BETWEEN 10 AND 12` (B-tree) | 600 | 17 | 1.20 | 16 | 1.88 |
+| `doc @> '{"user": {"name": "u42"}}'` (`USING json`; GIN `jsonb_path_ops`) | 40 | 10 | 0.14 | 14 | 1.36 |
+| `doc @> '{"kind": "k3", "tags": ["t3"]}'` | 2,000 | 8 | 2.94 | 12 | 5.04 |
+| `doc ? 'rare'` (`jsonb_path_ops` cannot serve it) | 200 | 7 | 0.35 | 9 | 9.57 |
 
-Builds (seconds): the expression indexes 0.16 and 0.09 (PostgreSQL 0.17
-and 0.10), the containment index 0.88 (GIN 1.05).  A full scan's `@>`
-is 2.5–2.7× PostgreSQL's (the cause not yet found).  2026-11-14.
+Builds (seconds): the expression indexes 0.13 and 0.09 (PostgreSQL 0.17
+and 0.10), the containment index 0.86 (GIN 1.05).  2026-11-14.
 
 ```sh
 python3 bench/json/index.py --nucleus target/release/nucleus [--no-pg]
