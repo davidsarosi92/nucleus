@@ -9442,3 +9442,14 @@ is fixed or documented as the guarantee it is.
   operations with §M14.29 S5 (Elle) beside it and S3's files (OSS-Fuzz)
   made ready; §M14.28's LSM when a write-heavy load asks for it.  S3's
   submission and S4's audit are the owner's to request.
+- **2026-11-14** — Found while measuring §M14.15 J1, fixed: a table
+  dropped after a bulk `CREATE TABLE AS` came back, empty, once later
+  commits rewrote its catalog leaf.  A commit's leaf filter (`Collect`)
+  dropped a key's newest tombstone at or below the watermark as hiding
+  nothing; but a large transaction's committed intent of the key, not
+  yet made a version by vacuum, sorts before the versions and had
+  committed before the tombstone — dropped, the intent showed again.
+  DOCS.md's claim that a commit's collection need not mind intents was
+  wrong.  Now, while committed intents are pending, a run's tombstone
+  stays when the run has an intent or begins the leaf (its intent may
+  be in the leaf before) — vacuum's rule for keys with intents.

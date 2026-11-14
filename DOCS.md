@@ -760,8 +760,11 @@ ones; once a whole sweep is done (durable), the statuses of the
 transactions committed before it began are dropped.  Meanwhile reads pay
 a little for them (a read of a key with intents walks them before its
 versions; a scan merges them in one streaming pass), and vacuum leaves
-alone the keys that have one (a commit's collection need not: an intent
-ranks above every version).  Only the reads its intents can reach pay
+alone the keys that have one.  So does a commit's collection for a
+key's newest tombstone while committed intents are pending: an intent
+sorts before the versions but may have committed before the tombstone,
+which alone hides it — a key's first in a leaf may have its intent in
+the leaf before, so there too.  Only the reads its intents can reach pay
 (§M14.20 W5): a spilled transaction keeps the ranges of its intents' keys
 — up to eight, disjoint; a key past them starts one of its own, and
 beyond eight the two neighbours whose facing keys share the longest
@@ -5951,6 +5954,15 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — Fix: a deleted key back over a large commit's intent.**
+  A commit's leaf filter dropped a key's newest tombstone at or below the
+  watermark as hiding nothing, though a large transaction's committed
+  intent of the key, not yet a version, sorted before it: the intent
+  showed again.  Seen as a table dropped after a bulk `CREATE TABLE AS`
+  back (empty) once later commits rewrote its catalog leaf; now such a
+  tombstone stays while intents are pending (`txn` tests
+  `a_delete_over_an_unmade_intent_stays`,
+  `collect_keeps_a_tombstone_over_an_unmade_intent`).
 - **2026-11-14 — §M14.24 R7, examples and the guide:** `docs/memory.md`
   (a knowledge base with citations, a memory per user, read records,
   erasure, backups — SQL, Python, JavaScript, MCP);

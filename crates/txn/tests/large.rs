@@ -521,6 +521,38 @@ fn committed_intents_rank_with_versions_through_vacuum() {
     assert_eq!(latest.len(), 500);
 }
 
+/// A key a large commit wrote, deleted by a small one, stays deleted when
+/// later commits rewrite its leaf before vacuum makes the intent a
+/// version (found as a dropped table back after a bulk load: the
+/// tombstone collected as nothing under it, the intent showing again).
+#[test]
+fn a_delete_over_an_unmade_intent_stays() {
+    let p = Arc::new(SimPlatform::new(11));
+    let e = engine_on(&p, opts()).unwrap();
+    let mut big = e.begin();
+    for i in 0..500 {
+        big.put(&key(i), b"big").unwrap();
+    }
+    assert!(e.intent_count().unwrap() > 400);
+    big.commit().unwrap();
+    let mut del = e.begin();
+    del.delete(&key(1)).unwrap();
+    del.commit().unwrap();
+    // Commits around it, rewriting its leaf with the tombstone below the
+    // watermark.
+    for round in 0..3 {
+        let mut t = e.begin();
+        t.put(&key(0), format!("r{round}").as_bytes()).unwrap();
+        t.put(&key(2), format!("r{round}").as_bytes()).unwrap();
+        t.commit().unwrap();
+        assert_eq!(e.begin().get(&key(1)).unwrap(), None, "round {round}");
+    }
+    e.vacuum().unwrap();
+    assert_eq!(e.intent_count().unwrap(), 0);
+    assert_eq!(e.begin().get(&key(1)).unwrap(), None);
+    assert_eq!(all(&e).len(), 499);
+}
+
 #[test]
 fn an_older_engines_side_area_is_moved_into_versions() {
     use nucleus_txn::mvcc::{encode_value, side_key, status_key};

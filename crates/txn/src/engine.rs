@@ -1614,6 +1614,10 @@ type Ops = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
 struct Collect {
     wm: u64,
+    /// Whether committed transactions have intents vacuum has not made
+    /// versions yet: a key's newest tombstone may then be all that hides
+    /// one committed before it — in this leaf, or the one before.
+    intents: bool,
 }
 
 impl LeafFilter for Collect {
@@ -1637,12 +1641,23 @@ impl LeafFilter for Collect {
                 end += 1;
             }
             let mut kept = false;
+            // A tombstone the newest here may go only when nothing it
+            // hides can come back: no committed intent of the key unmade
+            // (one sorts before its versions — maybe in the leaf before,
+            // for the leaf's first key).
+            let hidden = self.intents
+                && (i == 0
+                    || entries[i..end].iter().any(|e| {
+                        let at =
+                            u64::from_be_bytes(e.key[run.len()..].try_into().expect("8 bytes"));
+                        mvcc::intent_of(u64::MAX - at).is_some()
+                    }));
             for (j, e) in entries[..end].iter().enumerate().skip(i) {
                 let at = u64::from_be_bytes(e.key[run.len()..].try_into().expect("8 bytes"));
                 // An intent's timestamp is above any watermark.
                 if u64::MAX - at <= self.wm {
                     let tombstone = e.inline == Some(&[0][..]);
-                    if kept || (tombstone && end < entries.len()) {
+                    if kept || (tombstone && end < entries.len() && !hidden) {
                         drop[j] = true;
                     }
                     kept = true;
@@ -2436,14 +2451,17 @@ impl Transaction {
             if !ops.is_sorted_by(|a, b| a.0 < b.0) {
                 ops.sort_by(|a, b| a.0.cmp(&b.0));
             }
+            let intents = !read(&engine.unresolved).is_empty();
             let lsn = if deferred.is_empty() {
                 engine
                     .store
-                    .write_filtered(&Batch { meta: ts, ops }, &Collect { wm })?
+                    .write_filtered(&Batch { meta: ts, ops }, &Collect { wm, intents })?
             } else {
-                engine
-                    .store
-                    .write_deferring(&Batch { meta: ts, ops }, deferred, &Collect { wm })?
+                engine.store.write_deferring(
+                    &Batch { meta: ts, ops },
+                    deferred,
+                    &Collect { wm, intents },
+                )?
             };
             *last = ts;
             if let Some(time) = time {
@@ -3132,6 +3150,10 @@ mod tests {
 
     /// Which of `leaf` (keys and stored values) [`Collect`] drops.
     fn dropped(wm: u64, leaf: &[(Vec<u8>, Vec<u8>)]) -> Vec<bool> {
+        dropped_with(wm, false, leaf)
+    }
+
+    fn dropped_with(wm: u64, intents: bool, leaf: &[(Vec<u8>, Vec<u8>)]) -> Vec<bool> {
         let entries: Vec<_> = leaf
             .iter()
             .map(|(k, v)| LeafEntry {
@@ -3140,7 +3162,7 @@ mod tests {
             })
             .collect();
         let mut drop = vec![false; leaf.len()];
-        Collect { wm }.drops(&entries, &mut drop);
+        Collect { wm, intents }.drops(&entries, &mut drop);
         drop
     }
 
@@ -3184,6 +3206,44 @@ mod tests {
             version(b"b", 1, Some(b"b1")),
         ];
         assert_eq!(dropped(9, &leaf), [false, true, true, false]);
+    }
+
+    #[test]
+    fn collect_keeps_a_tombstone_over_an_unmade_intent() {
+        // `a` written by a large commit (its intent, committed at 2, not
+        // yet a version), then deleted at 4: the tombstone hides it.
+        let leaf = [
+            version(b"0", 1, Some(b"x")),
+            version(b"a", intent_ts(7), Some(b"big")),
+            version(b"a", 4, None),
+            version(b"a", 1, Some(b"a1")),
+            version(b"b", 3, None),
+            version(b"b", 1, Some(b"b1")),
+            version(b"c", 1, Some(b"c1")),
+        ];
+        assert_eq!(
+            dropped_with(9, true, &leaf),
+            [false, false, false, true, true, true, false]
+        );
+        // `b` has no intent: its tombstone goes.  A leaf's first key may
+        // have one in the leaf before: its tombstone stays.
+        let first = [
+            version(b"a", 4, None),
+            version(b"a", 1, Some(b"a1")),
+            version(b"b", 3, None),
+            version(b"b", 1, Some(b"b1")),
+            version(b"c", 1, Some(b"c1")),
+        ];
+        assert_eq!(
+            dropped_with(9, true, &first),
+            [false, true, true, true, false]
+        );
+        // With no intent pending, as before.
+        assert_eq!(dropped(9, &first), [true, true, true, true, false]);
+        assert_eq!(
+            dropped(9, &leaf),
+            [false, false, true, true, true, true, false]
+        );
     }
 
     #[test]
