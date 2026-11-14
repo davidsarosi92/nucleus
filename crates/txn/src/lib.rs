@@ -31,3 +31,4 @@ pub use engine::{
     TxnOptions,
 };
 pub use error::{Error, Result};
+pub use nucleus_storage::{BranchInfo, MAIN_NAME};

@@ -240,3 +240,59 @@ fn one_process_at_a_time_per_directory() {
     drop(db);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Branches through the trait (PLAN.md §M14.13 B2): each a database of
+/// its own — its own instance, the same for every handle to it.
+#[test]
+fn branches_through_the_trait() {
+    let p = Arc::new(SimPlatform::new(3));
+    let db: Arc<dyn Kv> =
+        Arc::new(Database::open_on(p, Path::new("/db"), Options::default()).unwrap());
+    let put = |kv: &dyn Kv, k: &[u8], v: &[u8]| {
+        transact(kv, TxnOptions::default(), |t| t.put(k, v)).unwrap();
+    };
+    let get = |kv: &dyn Kv, k: &[u8]| kv.begin(TxnOptions::read_only()).unwrap().get(k).unwrap();
+    put(db.as_ref(), b"k", b"main");
+    let dev = db.create_branch("dev").unwrap();
+    let pr = dev.create_branch("pr-1").unwrap();
+    put(dev.as_ref(), b"k", b"dev");
+    put(pr.as_ref(), b"k", b"pr");
+    assert_eq!(get(db.as_ref(), b"k").as_deref(), Some(&b"main"[..]));
+    assert_eq!(get(dev.as_ref(), b"k").as_deref(), Some(&b"dev"[..]));
+    assert_eq!(get(pr.as_ref(), b"k").as_deref(), Some(&b"pr"[..]));
+    assert_eq!(dev.branch_name(), "dev");
+    assert_eq!(
+        db.branches().unwrap(),
+        [
+            nucleus_kv::Branch {
+                name: nucleus_kv::MAIN_BRANCH.into(),
+                parent: None
+            },
+            nucleus_kv::Branch {
+                name: "dev".into(),
+                parent: Some(nucleus_kv::MAIN_BRANCH.into())
+            },
+            nucleus_kv::Branch {
+                name: "pr-1".into(),
+                parent: Some("dev".into())
+            },
+        ]
+    );
+    let instances = [db.instance(), dev.instance(), pr.instance()];
+    assert!(instances[0] != instances[1] && instances[1] != instances[2]);
+    assert_eq!(db.branch("dev").unwrap().instance(), instances[1]);
+    assert_eq!(
+        pr.branch(nucleus_kv::MAIN_BRANCH).unwrap().instance(),
+        instances[0]
+    );
+    assert!(db.drop_branch("dev").is_err()); // it has a branch
+    db.drop_branch("pr-1").unwrap();
+    assert!(
+        pr.begin(TxnOptions::default())
+            .and_then(|t| t.get(b"k"))
+            .is_err()
+    );
+    let dev2 = db.reset_branch("dev").unwrap();
+    assert_eq!(get(dev2.as_ref(), b"k").as_deref(), Some(&b"main"[..]));
+    assert_ne!(dev2.instance(), instances[1]);
+}

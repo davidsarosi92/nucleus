@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLock
 use nucleus_platform::Platform;
 use nucleus_storage::btree::{LeafEntry, LeafFilter};
 use nucleus_storage::node::MAX_KEY;
-use nucleus_storage::{BTree, Batch, Deferred, Store, StoreOptions};
+use nucleus_storage::{BTree, Batch, BranchInfo, Deferred, Recovery, Store, StoreOptions};
 
 use crate::error::{Error, Result};
 use crate::mvcc::{
@@ -115,9 +115,15 @@ impl Default for EngineOptions {
 /// true one, so it keeps more, never less.
 const TIME_FLOOR_EVERY: u64 = 1_000_000;
 
+/// The engines of a database's branches, by branch id: one engine per
+/// branch, whoever asks (two would hand out the same timestamps).
+type Registry = Arc<Mutex<BTreeMap<u32, std::sync::Weak<Inner>>>>;
+
 struct Inner {
     store: Arc<Store>,
     opts: EngineOptions,
+    /// Every branch's engine (PLAN.md §M14.13), shared by them all.
+    branches: Registry,
     /// The background checkpointer, where the platform has threads to
     /// spare (§M14.20 W4); without one, checkpoints run where they fall
     /// due.
@@ -450,8 +456,20 @@ fn write<T>(m: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 impl Engine {
     /// Opens (or creates) the database in `dir` and recovers it.
     pub fn open(platform: Arc<dyn Platform>, dir: &Path, opts: EngineOptions) -> Result<Self> {
-        let threads = platform.parallelism();
         let (store, recovery) = Store::open(Arc::clone(&platform), dir, &opts.store)?;
+        Self::on_store(platform, store, recovery, opts, Registry::default())
+    }
+
+    /// The engine of `store`'s branch, registered in `branches`.
+    fn on_store(
+        platform: Arc<dyn Platform>,
+        store: Store,
+        recovery: Recovery,
+        opts: EngineOptions,
+        branches: Registry,
+    ) -> Result<Self> {
+        let threads = platform.parallelism();
+        let id = store.info().id;
         let store = Arc::new(store);
         // (The simulation's single thread checkpoints where it falls due,
         // so its runs stay deterministic.)
@@ -468,6 +486,7 @@ impl Engine {
                 store,
                 checkpointer,
                 opts,
+                branches,
                 commit: Mutex::new(recovery.meta),
                 visible: AtomicU64::new(recovery.meta),
                 active: Mutex::new(BTreeMap::new()),
@@ -492,7 +511,74 @@ impl Engine {
             engine.inner.last_time.store(time, Ordering::Release);
         }
         engine.inner.refresh_time_floor()?;
+        let mut all = lock(&engine.inner.branches);
+        all.retain(|_, e| e.strong_count() > 0);
+        all.insert(id, Arc::downgrade(&engine.inner));
+        drop(all);
         Ok(engine)
+    }
+
+    /// This engine's branch (PLAN.md §M14.13).
+    pub fn branch_info(&self) -> &BranchInfo {
+        self.inner.store.info()
+    }
+
+    /// Every branch of the database, the main one first.
+    pub fn branches(&self) -> Vec<BranchInfo> {
+        self.inner.store.branches()
+    }
+
+    /// The engine of branch `name` (`nucleus_storage::MAIN_NAME` the
+    /// main one): the one already running, else one started — its clock
+    /// where the branch's last commit left it, its transactions' leftovers
+    /// cleaned as after a crash.
+    pub fn branch(&self, name: &str) -> Result<Engine> {
+        let store = self.inner.store.branch(name)?;
+        self.engine_of(store)
+    }
+
+    fn engine_of(&self, store: Store) -> Result<Engine> {
+        let id = store.info().id;
+        if let Some(inner) = lock(&self.inner.branches)
+            .get(&id)
+            .and_then(|w| w.upgrade())
+        {
+            return Ok(Engine { inner });
+        }
+        let recovery = store.recovery();
+        Self::on_store(
+            Arc::clone(&self.inner.platform),
+            store,
+            recovery,
+            self.inner.opts.clone(),
+            Arc::clone(&self.inner.branches),
+        )
+    }
+
+    /// Makes branch `name` of this one as it is now — every commit
+    /// applied so far (a checkpoint makes them durable first); constant
+    /// time and space — and starts its engine: its clock starts at this
+    /// one's last commit, its first commit is the next timestamp on
+    /// both, and from then on neither sees the other's.  Transactions
+    /// running here are not in it (their unlogged writes and intents are
+    /// cleaned as after a crash).
+    pub fn create_branch(&self, name: &str) -> Result<Engine> {
+        let store = self.inner.store.create_branch(name)?;
+        self.engine_of(store)
+    }
+
+    /// Drops branch `name` (not the main one, nor one with branches of its
+    /// own): its engine's transactions fail from then on.
+    pub fn drop_branch(&self, name: &str) -> Result<()> {
+        self.inner.store.drop_branch(name)?;
+        Ok(())
+    }
+
+    /// Makes branch `name` (one without branches of its own) its parent as
+    /// it is now; the new engine (the old one's transactions fail).
+    pub fn reset_branch(&self, name: &str) -> Result<Engine> {
+        let store = self.inner.store.reset_branch(name)?;
+        self.engine_of(store)
     }
 
     /// Whether committed transactions have intents vacuum has not made

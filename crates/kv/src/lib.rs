@@ -94,6 +94,22 @@ impl From<nucleus_txn::Error> for Error {
 /// The result type of the KV contract.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The main branch's name (PLAN.md §M14.13).
+pub const MAIN_BRANCH: &str = nucleus_txn::MAIN_NAME;
+
+/// A branch of a database ([`Kv::branches`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Branch {
+    /// Its name.
+    pub name: String,
+    /// The branch it was made from (`None`: the main one).
+    pub parent: Option<String>,
+}
+
+fn no_branches(name: &str) -> Error {
+    Error::Storage(format!("no branch \"{name}\": this database has no branches").into())
+}
+
 /// How to start a transaction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TxnOptions {
@@ -339,6 +355,46 @@ pub trait Kv: Send + Sync {
     /// How many transactions are running.  The default: 0.
     fn running(&self) -> usize {
         0
+    }
+
+    /// This handle's branch of the database (PLAN.md §M14.13): its name
+    /// ([`MAIN_BRANCH`] the main one).  The default: the main one.
+    fn branch_name(&self) -> String {
+        MAIN_BRANCH.to_owned()
+    }
+
+    /// Every branch: name and the parent's name, the main one first.  The
+    /// default: the main one alone.
+    fn branches(&self) -> Result<Vec<Branch>> {
+        Ok(vec![Branch {
+            name: MAIN_BRANCH.to_owned(),
+            parent: None,
+        }])
+    }
+
+    /// The database's branch `name`, to read and write as a database of
+    /// its own.  The default: none but the main one.
+    fn branch(&self, name: &str) -> Result<Arc<dyn Kv>> {
+        Err(no_branches(name))
+    }
+
+    /// Makes branch `name` of this one as it is now: a copy in constant
+    /// time and space, writes on either side invisible to the other.
+    /// The default: not supported.
+    fn create_branch(&self, name: &str) -> Result<Arc<dyn Kv>> {
+        Err(no_branches(name))
+    }
+
+    /// Drops branch `name` (not the main one, nor one with branches of its
+    /// own); its handles fail from then on.  The default: not supported.
+    fn drop_branch(&self, name: &str) -> Result<()> {
+        Err(no_branches(name))
+    }
+
+    /// Makes branch `name` (one without branches) its parent as it is
+    /// now; its old handles fail.  The default: not supported.
+    fn reset_branch(&self, name: &str) -> Result<Arc<dyn Kv>> {
+        Err(no_branches(name))
     }
 
     /// Whether [`vacuum`](Kv::vacuum) has intents to make versions (reads
@@ -780,9 +836,14 @@ pub struct Database {
     /// Where scratch files go (`<dir>/scratch`), and how many were made.
     scratch_dir: PathBuf,
     scratch_made: Arc<AtomicU64>,
-    /// [`Kv::instance`]: one per open (its clones share it).
+    /// [`Kv::instance`]: one per open and branch (its clones share it).
     instance: u64,
+    /// The instances of the branches' handles, by branch id: the same
+    /// branch is the same instance, whoever opens it.
+    instances: Arc<std::sync::Mutex<std::collections::BTreeMap<u32, u64>>>,
 }
+
+static OPENED: AtomicU64 = AtomicU64::new(0);
 
 impl std::fmt::Debug for Database {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -832,15 +893,34 @@ impl Database {
                 let _ = fs.remove_file(&scratch_dir.join(name));
             }
         }
-        static OPENED: AtomicU64 = AtomicU64::new(0);
+        let instance = OPENED.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(Self {
             engine,
             platform,
             dir: path.to_path_buf(),
             scratch_dir,
             scratch_made: Arc::new(AtomicU64::new(0)),
-            instance: OPENED.fetch_add(1, Ordering::Relaxed) + 1,
+            instance,
+            instances: Arc::new(std::sync::Mutex::new(
+                [(nucleus_storage::MAIN, instance)].into(),
+            )),
         })
+    }
+
+    /// A handle to `engine`'s branch, sharing this one's files.
+    fn on_branch(&self, engine: nucleus_txn::Engine) -> Self {
+        let id = engine.branch_info().id;
+        let instance = *self
+            .instances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(id)
+            .or_insert_with(|| OPENED.fetch_add(1, Ordering::Relaxed) + 1);
+        Self {
+            engine,
+            instance,
+            ..self.clone()
+        }
     }
 
     /// How many scratch files this handle (and its clones) made — for
@@ -871,6 +951,38 @@ impl Database {
 }
 
 impl Kv for Database {
+    fn branch_name(&self) -> String {
+        self.engine.branch_info().name.clone()
+    }
+
+    fn branches(&self) -> Result<Vec<Branch>> {
+        let all = self.engine.branches();
+        let name = |id: u32| all.iter().find(|b| b.id == id).map(|b| b.name.clone());
+        Ok(all
+            .iter()
+            .map(|b| Branch {
+                name: b.name.clone(),
+                parent: b.parent.and_then(name),
+            })
+            .collect())
+    }
+
+    fn branch(&self, name: &str) -> Result<Arc<dyn Kv>> {
+        Ok(Arc::new(self.on_branch(self.engine.branch(name)?)))
+    }
+
+    fn create_branch(&self, name: &str) -> Result<Arc<dyn Kv>> {
+        Ok(Arc::new(self.on_branch(self.engine.create_branch(name)?)))
+    }
+
+    fn drop_branch(&self, name: &str) -> Result<()> {
+        Ok(self.engine.drop_branch(name)?)
+    }
+
+    fn reset_branch(&self, name: &str) -> Result<Arc<dyn Kv>> {
+        Ok(Arc::new(self.on_branch(self.engine.reset_branch(name)?)))
+    }
+
     fn begin(&self, opts: TxnOptions) -> Result<Box<dyn KvTxn>> {
         let txn = self.engine.begin_with(nucleus_txn::TxnOptions {
             isolation: opts.isolation,

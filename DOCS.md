@@ -777,6 +777,22 @@ never computed with.  `Engine`: `visible`, `checkpoint`,
 transaction's start, else the visible timestamp), `purge_range(start,
 end)` (a range's versions below that, history or not — erasure's).
 
+**Branches** (§M14.13 B2).  An engine per branch of the store (§4.6):
+`create_branch(name)` makes one of this engine's branch — every commit
+applied so far, made durable by the branch's checkpoint — and starts
+its engine, its clock at this one's last commit (each side's next
+commit takes the next timestamp, and from then on neither sees the
+other's); `branch(name)` gives the engine running for a branch, or
+starts one (a registry the engines share, of weak references, keeps
+one per branch: two would hand out the same timestamps);
+`drop_branch`, `reset_branch`, `branches`, `branch_info`.  A new
+engine reads its store as after a crash (`recover_side`): what
+transactions running in the parent at the branch point wrote — spilled
+intents, unlogged fresh ranges — is no one's there (an unlogged range
+deleted at once, intents vacuumed as aborted ones).  Each branch's
+engine has its own checkpointer thread, waking at its own WAL's size
+(a checkpoint commits them all).
+
 **Snapshot isolation.**  A transaction reads at its start timestamp — the
 engine's *visible* timestamp, which advances only once a commit is durable,
 so nobody reads what a crash could undo.  Writes are buffered — the
@@ -1055,6 +1071,11 @@ the highest key not raised by logged writes, overlapping ranges both
 registered, `put_new` looking at the tree before the pending batch is in
 it.
 
+`tests/branch.rs` (§M14.13): a branch from its parent's commits, its
+own way after, the engine one per branch, both through a crash;
+transactions running at the branch point (spilled, unlogged) not in
+it; drop and reset failing the old handles.
+
 ## 6. KV contract (`nucleus-kv`) and the CLI
 
 ### 6.1 The contract
@@ -1075,7 +1096,15 @@ distributed implementation will provide (§F3).
   `instance()` — which open database this is, unique in the process
   (`KvTxn::instance()` is its transaction's): what a layer above keys
   state it keeps in memory for one database by (an HNSW index's upkeep,
-  §8.18); 0 by default (not told apart), one per `Database::open`;
+  §8.18); 0 by default (not told apart), one per `Database::open` and
+  branch;
+  `branch_name()`, `branches()` (`Branch { name, parent }`, the main
+  one — `MAIN_BRANCH`, `main` — first), `branch(name)`,
+  `create_branch(name)` (of this handle's branch, as it is now),
+  `drop_branch(name)`, `reset_branch(name)` — a database's branches
+  (§M14.13; `branch`, `create_branch` and `reset_branch` give an
+  `Arc<dyn Kv>` that is a database of its own: its own instance, the
+  same for every handle to the branch; by default only the main one);
   `scratch()` — scratch space for work too large for memory (a
   `Scratch`: `write_at`, `read_at`), private, gone when dropped; by
   default in memory (`MemoryScratch`), for the local implementation files
