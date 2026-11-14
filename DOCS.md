@@ -1213,7 +1213,10 @@ nucleus sql [<dir>] [-h <host[:port]>] [-p <port>] [-U <user>] [-d <db>] [--pass
 ncsql …                       # the same shell under its own name
 nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]   # §9
 nucleus restore <backup> <dir> [--subject-keys <file>]   # §8.30
+nucleus branch <dir> create <name> [--from <branch>] | list | drop <name> | reset <name>   # §8.32
 ```
+
+`nucleus sql <dir> -d <branch>` opens a local database's branch.
 
 Keys and values are text; any byte can be written as `\xNN` (`\\` for a
 backslash), and output escapes non-printable bytes the same way.  Outside
@@ -5466,6 +5469,35 @@ a wider type, `22012` NULLIF, `21000` LIMIT 1, `42P07` IF NOT EXISTS,
 `42804` and argument types — a cast.  On the wire: `ncp` 5's `E`
 (§10), pg-compat's `H` field (psql's `HINT:`).
 
+### 8.32 Branches (`branches`, §M14.13 B3)
+
+A branch is a copy of the database made in constant time and space,
+written on its own (the storage: §4.6; the engines: §5.2).  **`CREATE
+BRANCH name [FROM parent]`** makes one of the session's database (or of
+`parent`) as it is now; **`DROP BRANCH [IF EXISTS] name`**; **`ALTER
+BRANCH name RESET`** makes it its parent as it is now.  An
+administrator's, not in a transaction block (`25001`); `42501` for
+others.  Names: 1–63 ASCII letters, digits, `-`, `_`, `.` (quote one with
+`-` or `.`: `"pr-1"`), not `main` or `nucleus` (`42602`); one that exists
+`42P04`, none `3D000`; the main branch cannot be dropped (`0A000`), nor
+one with branches of its own (`2BP01`), nor the session's own (`55006`).
+**`nc_catalog.branches`** (`name`, `parent`, `current` — the session's).
+A client names a branch as its database: the nucleus protocol's Hello
+(`nucleus` — a driver's default —, `main` or nothing: the main one;
+another unknown: `3D000`, after the login), PostgreSQL's `database`
+parameter (a name that is not a branch: the main one, as a PostgreSQL
+client's default is the user's name), `nucleus sql <dir> -d`.  The login
+is the main database's (passwords, throttling, the audit of refusals);
+the role then must exist in the branch, whose privileges apply — a
+branch made before a role is the main one's has no such role.  Each
+branch has its own `Kv::instance`, so the state kept in memory per
+database (HNSW upkeep) is never mixed.  `nucleus branch <dir> create |
+list | drop | reset` does the same on a local directory (not one a server
+has open).  `tests/branches.rs`: tables, rows, indexes and schema
+changes on each side invisible to the other, a branch of a branch, drop
+and reset, every refusal's code; `crates/client/tests/client.rs`
+connects to a branch by name.
+
 ## 9. Server (`nucleus-server`)
 
 ```
@@ -5912,7 +5944,7 @@ header bytes not included; at most 1 GiB), then the body.
 
 | Kind | Direction | Body |
 |------|-----------|------|
-| `H` Hello | client → server, first | `u16` version (7; 1–6 still accepted), string user, string database, string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
+| `H` Hello | client → server, first | `u16` version (7; 1–6 still accepted), string user, string database (a branch's name, §8.32; `nucleus` the main one), string password (version 4: empty — it is proved, not sent; before 4: the password, empty for none), string client name |
 | `A` Authentication | server → client | string: the mechanisms, space-separated (`SCRAM-SHA-256`; over TLS with a channel binding `SCRAM-SHA-256-PLUS SCRAM-SHA-256`), then SCRAM's server-first and server-final messages |
 | `a` Authentication response | client → server | string: SCRAM's client-first, then client-final message — or OAUTHBEARER's initial response, or PLAIN's |
 | `W` Welcome | server → client | `u16` version (the lower of the client's and the server's), string server (`nucleus 0.1.0`), `u32` session id |

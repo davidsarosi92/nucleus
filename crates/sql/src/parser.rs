@@ -1241,6 +1241,15 @@ impl<'a> Parser<'a> {
 
     fn create(&mut self) -> Result<Statement> {
         self.expect_kw("create")?;
+        if self.eat_kw("branch") {
+            let name = self.ident()?;
+            let from = if self.eat_kw("from") {
+                Some(self.ident()?)
+            } else {
+                None
+            };
+            return Ok(Statement::CreateBranch { name, from });
+        }
         let unique = self.eat_kw("unique");
         if self.eat_kw("index") {
             let if_not_exists = self.eat_kws(&["if", "not", "exists"]);
@@ -2069,6 +2078,13 @@ impl<'a> Parser<'a> {
 
     fn drop(&mut self) -> Result<Statement> {
         self.expect_kw("drop")?;
+        if self.eat_kw("branch") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            return Ok(Statement::DropBranch {
+                name: self.ident()?,
+                if_exists,
+            });
+        }
         if self.eat_kw("index") {
             let if_exists = self.eat_kws(&["if", "exists"]);
             return Ok(Statement::DropIndex {
@@ -2297,6 +2313,11 @@ impl<'a> Parser<'a> {
 
     fn alter(&mut self) -> Result<Statement> {
         self.expect_kw("alter")?;
+        if self.eat_kw("branch") {
+            let name = self.ident()?;
+            self.expect_kw("reset")?;
+            return Ok(Statement::ResetBranch { name });
+        }
         if self.eat_kw("type") {
             return self.alter_type();
         }

@@ -3,7 +3,9 @@
 Clients for nucleus's own protocol, `ncp` (DOCS.md §10).  Each is a small
 library without dependencies; all of them connect to a local server as it
 starts (`127.0.0.1:20035`, user and password `nucleus`) unless told
-otherwise, and all of them pass the same conformance cases (every type both
+otherwise — the database they name is `nucleus` (the main one) unless
+told another, a branch's name (`CREATE BRANCH`, DOCS.md §8.32) for a
+branch —, and all of them pass the same conformance cases (every type both
 ways — `uuid` as each language's native uuid, or a string in JavaScript —,
 parameters, errors with their SQLSTATE, transactions, passwords).  They
 speak protocol version 7: large results stream, read a batch at a time

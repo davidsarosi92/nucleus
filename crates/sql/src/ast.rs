@@ -526,6 +526,26 @@ pub enum Statement {
     },
     /// `ANALYZE QUERY <statement>`: the linter's findings.
     Lint(Box<Statement>),
+    /// `CREATE BRANCH name [FROM parent]` (PLAN.md §M14.13): a branch of
+    /// the database — of the session's branch, or `parent` — as it is now.
+    CreateBranch {
+        /// Its name.
+        name: String,
+        /// The branch it is made from (`None`: the session's).
+        from: Option<String>,
+    },
+    /// `DROP BRANCH [IF EXISTS] name`.
+    DropBranch {
+        /// Its name.
+        name: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
+    /// `ALTER BRANCH name RESET`: its parent as it is now.
+    ResetBranch {
+        /// Its name.
+        name: String,
+    },
     /// `SUMMARIZE t` or `SUMMARIZE <query>` (DuckDB's): one row a column
     /// of the source, the query's text (`SELECT * FROM t` for a table).
     Summarize(String),

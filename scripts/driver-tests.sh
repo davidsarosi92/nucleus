@@ -94,7 +94,8 @@ for lang in "${langs[@]}"; do
       python3 "$root/drivers/python/tests/test_nucleus.py" -v 2>&1 | tail -3
       python3 "$root/examples/python/quickstart.py"
       python3 "$root/examples/python/memory.py"
-      python3 "$root/examples/python/structured.py" ;;
+      python3 "$root/examples/python/structured.py"
+      python3 "$root/examples/python/branches.py" ;;
     js)
       node --test "$root/drivers/js/test/nucleus.test.ts"
       node "$root/examples/js/quickstart.ts"
@@ -134,6 +135,7 @@ for lang in "${langs[@]}"; do
       python3 "$root/examples/python/anywhere.py" ":memory:"
       python3 "$root/examples/python/memory.py" ":memory:"
       python3 "$root/examples/python/structured.py" ":memory:"
+      python3 "$root/examples/python/branches.py" "file:$work/py-branches"
       python3 "$root/examples/python/anywhere.py" "nucleus://nucleus:nucleus@127.0.0.1:$port/nucleus" ;;
     js-embedded)
       "$root/drivers/js/native/build.sh"

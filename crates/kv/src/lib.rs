@@ -97,6 +97,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// The main branch's name (PLAN.md §M14.13).
 pub const MAIN_BRANCH: &str = nucleus_txn::MAIN_NAME;
 
+pub use nucleus_storage::valid_branch_name;
+
 /// A branch of a database ([`Kv::branches`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Branch {

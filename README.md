@@ -197,8 +197,14 @@ database as it was then — its tables' shapes too —, `SELECT … FROM t
 AS OF TIMESTAMP '…'` one table beside the present, and `CREATE TABLE
 t2 AS SELECT * FROM t AS OF …` restores; checked against a logged
 workload through every index kind, at no cost to commits measurable.
+It branches (§M14.13): `CREATE BRANCH experiment` copies the database in
+constant time and space — pages are shared until one side changes them
+(births and dead lists, as ZFS's clones) —, a client names the branch
+as its database to work in it, writes on either side stay invisible to
+the other, and `DROP BRANCH` gives back what the branch changed
+([`examples/python/branches.py`](examples/python/branches.py)).
 Next is the rest of the
-developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, branches, a B+tree
+developer platform (§M14.12–§M14.28: columnar storage and partitions, vectors, full-text and hybrid search, embeddings, memory for AI models, a B+tree
 or an LSM tree chosen per table, …), then
 the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists

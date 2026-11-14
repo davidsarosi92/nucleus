@@ -101,6 +101,8 @@ codes! {
     invalid_grant => "0LP01",
     invalid_authorization => "28000",
     undefined_database => "3D000",
+    duplicate_database => "42P04",
+    invalid_name => "42602",
     snapshot_too_old => "72000",
     internal => "XX000",
     io => "58030",

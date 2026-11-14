@@ -310,6 +310,20 @@ that time use the block form).  Undo a mistake: `INSERT INTO t SELECT * FROM t A
 TIMESTAMP … WHERE …`, or `CREATE TABLE t_restored AS SELECT * FROM t AS
 OF TIMESTAMP …`.  `72000` means past the history kept.
 
+**Branches — try things on a copy:** `CREATE BRANCH experiment` (an
+administrator, not in a block) makes a copy of the database in constant
+time, whatever its size; connect to it by naming it as the database
+(`nucleus://user:pw@host:20035/experiment`, `connect(url,
+database="experiment")`, `ncsql -d experiment`, PostgreSQL's `dbname`),
+change anything there — the database it came from does not see it, and
+it does not see the database's later writes — then `DROP BRANCH
+experiment`, or `ALTER BRANCH experiment RESET` to start over from the
+database as it is now.  `CREATE BRANCH b FROM a` branches a branch;
+`SELECT * FROM nc_catalog.branches` lists them (`current`: yours).
+Names: letters, digits, `-`, `_`, `.` (quote `"pr-1"`); `main` and
+`nucleus` are the main database.  No merge: carry a change back by
+running it on the main database.
+
 **Citing memories:** `recall` rows carry `as_of`; cite a memory as its
 `id` and `as_of` — `SELECT content FROM notes AS OF COMMIT <as_of> WHERE
 id = '<id>'` shows exactly what you read.  `SET request_id = 'gen-42'`
@@ -367,4 +381,5 @@ mismatch · `22P02` bad input for a type · `22003` out of range · `22012`
 division by zero · `23502` NULL in NOT NULL · `23505` duplicate key ·
 `23503` foreign key · `23514` CHECK · `42501` no privilege · `25P02` failed
 transaction (ROLLBACK) · `25006` read-only · `40001` conflict (retry) ·
-`57014` statement timeout · `0A000` not supported.
+`57014` statement timeout · `0A000` not supported · `3D000` no such
+database (branch) · `42P04` the branch exists.

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The startup message's `database` names a branch (nucleus PLAN.md
+  §M14.13 B3): a client connecting with `dbname=dev` works in branch
+  `dev`; any other name (a PostgreSQL client's default is the user's)
+  the main database, as before.
+
 - `jsonpath` on the wire as PostgreSQL's type (oid 4072; `pg_type` rows
   with its array, `format_type`), in binary format as `jsonpath_send`
   gives it (a version byte, then the text) and taken as `jsonpath_recv`

@@ -563,7 +563,7 @@ fn login(
     log: &dyn Fn(&str, &str),
 ) -> io::Result<Result<(u16, Session), Error>> {
     let (kind, body) = read_message(input)?;
-    let parsed = (|| -> Result<(u16, String, String), Error> {
+    let parsed = (|| -> Result<(u16, String, String, String), Error> {
         if kind != b'H' {
             return Err(protocol("expected Hello"));
         }
@@ -576,13 +576,13 @@ fn login(
             )));
         }
         let user = b.str()?;
-        let _database = b.str()?;
+        let database = b.str()?;
         let password = b.str()?;
         let client = b.str()?;
         log("hello", &format!("user {user}, client {client}"));
-        Ok((version.min(VERSION), user, password))
+        Ok((version.min(VERSION), user, database, password))
     })();
-    let (version, user, password) = match parsed {
+    let (version, user, database, password) = match parsed {
         Ok(p) => p,
         Err(e) => return Ok(Err(e)),
     };
@@ -652,7 +652,14 @@ fn login(
             return Ok(Err(refused(method)));
         }
     }
-    let mut session = Session::with_registry(kv.clone(), config.registry.clone());
+    // The branch it names (PLAN.md §M14.13) — told only to who logged
+    // in: the login is the main database's, the data and the privileges
+    // the branch's.
+    let data = match crate::branch_of(kv, &database) {
+        Ok(data) => data,
+        Err(e) => return Ok(Err(e)),
+    };
+    let mut session = Session::with_registry(data, config.registry.clone());
     let logged_in = match &identity {
         Some(id) => session.login_as(id),
         None => session.login(&user),

@@ -10,6 +10,7 @@ pub mod audit;
 pub mod backup;
 pub mod bigint;
 pub mod binder;
+pub mod branches;
 pub mod buckets;
 pub mod budget;
 pub mod builtin;

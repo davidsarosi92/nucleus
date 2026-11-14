@@ -894,6 +894,34 @@ impl Session {
                     rows: vec![b.row()],
                 })
             }
+            Statement::CreateBranch { .. }
+            | Statement::DropBranch { .. }
+            | Statement::ResetBranch { .. } => {
+                let (verb, tag) = match stmt {
+                    Statement::CreateBranch { .. } => ("CREATE BRANCH", "CREATE BRANCH"),
+                    Statement::DropBranch { .. } => ("DROP BRANCH", "DROP BRANCH"),
+                    _ => ("ALTER BRANCH … RESET", "ALTER BRANCH"),
+                };
+                if self.block.is_some() {
+                    return Err(Error::active_txn(format!(
+                        "{verb} cannot run inside a transaction block"
+                    )));
+                }
+                if !self.who.superuser {
+                    return Err(crate::access::denied(&format!("{verb} needs a superuser")));
+                }
+                match stmt {
+                    Statement::CreateBranch { name, from } => {
+                        crate::branches::create(&self.kv, name, from.as_deref())?
+                    }
+                    Statement::DropBranch { name, if_exists } => {
+                        crate::branches::drop(&self.kv, name, *if_exists)?;
+                    }
+                    Statement::ResetBranch { name } => crate::branches::reset(&self.kv, name)?,
+                    _ => unreachable!(),
+                }
+                Ok(Output::Command(tag.into()))
+            }
             Statement::Vacuum => {
                 if self.block.is_some() {
                     return Err(Error::active_txn(
@@ -1714,6 +1742,13 @@ pub(crate) fn execute_statement(
         Statement::Backup { .. } => {
             return Err(Error::active_txn(
                 "BACKUP cannot run inside a transaction block",
+            ));
+        }
+        Statement::CreateBranch { .. }
+        | Statement::DropBranch { .. }
+        | Statement::ResetBranch { .. } => {
+            return Err(Error::active_txn(
+                "a branch is made, dropped or reset outside a transaction block",
             ));
         }
         Statement::AttachPartition {

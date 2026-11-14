@@ -188,6 +188,7 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
             ("newest_commit", I),
         ],
     ),
+    ("branches", &[("name", T), ("parent", T), ("current", B)]),
     (
         "sessions",
         &[
@@ -822,6 +823,18 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     reach.map_or(Value::Null, |(ts, _)| commit(ts)),
                     kv.newest().map_or(Value::Null, commit),
                 ]);
+            }
+        }
+        "branches" => {
+            // The database's branches (PLAN.md §M14.13).
+            if let Some(kv) = crate::datetime::current_kv() {
+                for (name, parent, current) in crate::branches::rows(&*kv)? {
+                    out.push(vec![
+                        text(name),
+                        parent.map_or(Value::Null, text),
+                        Value::Bool(current),
+                    ]);
+                }
             }
         }
         "sessions" => {

@@ -615,7 +615,14 @@ fn serve(
     } else {
         nucleus_server::password_method(config, &*kv, &user)
     };
-    let mut session = Session::with_registry(Arc::clone(&kv), registry(&config.registry));
+    // A branch, if the database it names is one (PLAN.md §M14.13); any
+    // other name — a PostgreSQL client's default is the user's, or
+    // `postgres` — the main database, as before branches.
+    let data = params
+        .get("database")
+        .and_then(|name| nucleus_server::branch_of(&kv, name).ok())
+        .unwrap_or_else(|| Arc::clone(&kv));
+    let mut session = Session::with_registry(data, registry(&config.registry));
     let admitted = session
         .login(&user)
         .and_then(|()| nucleus_server::room_for(config, &kv, &session))

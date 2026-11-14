@@ -21,7 +21,7 @@ usage: ncsql [<dir>] [options]          (also: nucleus sql …)
   -h, --host <host[:port]>  connect to a nucleus server (default 127.0.0.1:20035)
   -p, --port <port>
   -U, --user <name>         (default nucleus)
-  -d, --database <name>     (default nucleus)
+  -d, --database <name>     (default nucleus; a branch's name for a branch)
       --password <pw>       or NCPASSWORD (default nucleus)
       --tls                 TLS, the server's certificate checked (Mozilla's roots)
       --tls-ca <pem file>   TLS, the certificate checked against this CA
@@ -868,8 +868,11 @@ impl Target {
                         kv.clone(),
                     ),
                 )));
+                // -d: a branch of it (PLAN.md §M14.13).
+                let data = nucleus_server::branch_of(&kv, &cfg.database)
+                    .map_err(|e| format!("{dir}: {}", e.message))?;
                 Backend::Local {
-                    session: Session::with_registry(kv, registry()),
+                    session: Session::with_registry(data, registry()),
                     db,
                     dir,
                 }

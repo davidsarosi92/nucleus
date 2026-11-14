@@ -2032,3 +2032,51 @@ fn sparse_vectors_both_ways() {
         other => panic!("{other:?}"),
     }
 }
+
+/// The database a client names is a branch of the server's (PLAN.md
+/// §M14.13 B3): `nucleus` (the default) or `main` the main one, another
+/// a branch made by `CREATE BRANCH`; one that does not exist is `3D000`,
+/// told only after the login.
+#[test]
+fn the_database_named_is_a_branch() {
+    let addr = start(None);
+    let mut main = Client::connect(config(addr)).unwrap();
+    main.execute("CREATE TABLE t (id int)", &[]).unwrap();
+    main.execute("INSERT INTO t VALUES (1)", &[]).unwrap();
+    main.execute("CREATE BRANCH dev", &[]).unwrap();
+    let mut dev = Client::connect(Config {
+        database: "dev".into(),
+        ..config(addr)
+    })
+    .unwrap();
+    dev.execute("INSERT INTO t VALUES (2)", &[]).unwrap();
+    let count =
+        |c: &mut Client| c.execute("SELECT count(*) FROM t", &[]).unwrap().rows[0][0].to_string();
+    assert_eq!(count(&mut main), "1");
+    assert_eq!(count(&mut dev), "2");
+    let current = dev
+        .execute("SELECT name FROM nc_catalog.branches WHERE current", &[])
+        .unwrap();
+    assert_eq!(current.rows[0][0].to_string(), "dev");
+    let mut again = Client::connect(Config {
+        database: "main".into(),
+        ..config(addr)
+    })
+    .unwrap();
+    assert_eq!(count(&mut again), "1");
+    match Client::connect(Config {
+        database: "nope".into(),
+        ..config(addr)
+    }) {
+        Err(Error::Server(e)) => assert_eq!(e.code, "3D000"),
+        other => panic!("{other:?}"),
+    }
+    match Client::connect(Config {
+        database: "nope".into(),
+        password: Some("wrong".into()),
+        ..config(addr)
+    }) {
+        Err(Error::Server(e)) => assert_eq!(e.code, "28P01"),
+        other => panic!("{other:?}"),
+    }
+}

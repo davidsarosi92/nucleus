@@ -1,5 +1,6 @@
 //! The `nucleus` command-line tool.
 
+mod branch;
 mod init;
 mod kv;
 mod mcp;
@@ -77,6 +78,12 @@ usage:
                                     snapshot of that long ago readable (7d,
                                     12h, '30 minutes'; AS OF TIMESTAMP;
                                     default none)
+  nucleus branch <dir> create <name> [--from <branch>] | list | drop <name> | reset <name>
+                                    a local database's branches: a copy made in
+                                    constant time and space, writable on its
+                                    own (nucleus sql <dir> -d <name>; a
+                                    server's: CREATE BRANCH, and clients name
+                                    the branch as their database)
   nucleus restore <backup> <dir> [--subject-keys <file>]
                                     a new database in <dir> from a backup
                                     (BACKUP TO '<backup>'): its indexes and
@@ -102,6 +109,7 @@ fn main() -> ExitCode {
         Some("mcp") => mcp::run(&args[1..]),
         Some("server") => server::run(&args[1..]),
         Some("restore") => restore::run(&args[1..]),
+        Some("branch") => branch::run(&args[1..]),
         Some("help" | "--help" | "-h") => {
             print!("{USAGE}");
             Ok(())

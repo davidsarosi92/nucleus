@@ -134,6 +134,22 @@ pub fn password_method(config: &Config, kv: &dyn Kv, user: &str) -> &'static str
     }
 }
 
+/// The name a client gives for the database: `nucleus` (or `main`, or
+/// none) the main one, another a branch of it (PLAN.md §M14.13) —
+/// `3D000` when there is none.
+pub const DATABASE_NAME: &str = "nucleus";
+
+/// The database a client names ([`DATABASE_NAME`]): `kv` itself, or its
+/// branch.
+pub fn branch_of(kv: &Arc<dyn Kv>, name: &str) -> nucleus_sql::Result<Arc<dyn Kv>> {
+    if name.is_empty() || name == DATABASE_NAME || name == nucleus_kv::MAIN_BRANCH {
+        return Ok(Arc::clone(kv));
+    }
+    kv.branch(name).map_err(|_| {
+        nucleus_sql::Error::undefined_database(format!("database \"{name}\" does not exist"))
+    })
+}
+
 /// Whether the server takes one more session for `session`'s user: not
 /// past `max_connections` (administrators aside) — `53300` otherwise.
 pub fn room_for(
