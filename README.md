@@ -188,7 +188,9 @@ erasure without the subject's data — and reaches its backups too:
 restore` rebuilds them) seals each row of a subject under that subject's
 own key, kept apart (`<dir>.subject-keys`), which `FORGET` destroys, so
 a restore of an older backup leaves the subject out —, and `nucleus mcp
---memory` gives an agent remember, recall and forget.  It reads the past (§M14.14): with
+--memory` gives an agent remember, recall, forget and cite
+([`docs/memory.md`](docs/memory.md) walks through an assistant built on
+all of it).  It reads the past (§M14.14): with
 `nucleus server --history 7d` every commit's time is kept, `BEGIN READ
 ONLY AS OF TIMESTAMP now() - interval '1 hour'` reads the whole
 database as it was then — its tables' shapes too —, `SELECT … FROM t

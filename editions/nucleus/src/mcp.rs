@@ -63,12 +63,13 @@ impl nucleus_mcp::Database for Backend {
 
 const USAGE: &str = "\
 usage: nucleus mcp [<dir>] [connection options of nucleus sql] [--allow-writes]
-                   [--memory] [--max-rows <n>] [--timeout <ms>]
+                   [--memory] [--allow-erasure] [--max-rows <n>] [--timeout <ms>]
 A Model Context Protocol server on standard input and output: an MCP client
 (an AI assistant, an IDE) lists, describes, samples and queries the database.
 Reads run in read-only transactions; --allow-writes adds a tool that writes;
---memory adds remember, recall and forget over memory stores (CREATE MEMORY
-STORE), without the general write tool.
+--memory adds remember, recall, forget and cite over memory stores (CREATE
+MEMORY STORE), without the general write tool; --allow-erasure adds
+forget_subject (FORGET SUBJECT: a person's rows erased on request).
 --max-rows: the most rows a tool returns (default 100); --timeout: each
 statement's limit in milliseconds (default 5000, 0: none).
 ";
@@ -85,6 +86,7 @@ pub fn run(args: &[String]) -> Result<()> {
         match a.as_str() {
             "--allow-writes" => options.allow_writes = true,
             "--memory" => options.memory = true,
+            "--allow-erasure" => options.erasure = true,
             "--max-rows" => {
                 options.max_rows = value("a number")?
                     .parse()

@@ -53,6 +53,7 @@
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
 | `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.21 |
 | `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
+| `docs/memory.md` | — | the guide to memory for AI applications: a knowledge base with citations, a memory per user, read records, erasure, backups — in SQL, Python, JavaScript and over MCP | §M14.24 ✅ |
 | `docs/benchmarks.md`, `bench/` | — | the benchmark suite against PostgreSQL (`bench/run.py`, run in CI; `tpch.py`, `clickbench.py`; `phases.py`, one build against another step by step; `bench/ann/`, the HNSW storage models on the KV with hnswlib and pgvector as references, and `sql.py`, the index through SQL; `bench/text/`, the full-text data), its latest results and targets | §M14.11, §M14.12 V4, §M14.21 |
 
 `crates/` is the core and the public API crates; `modules/` are modules,
@@ -1182,7 +1183,7 @@ are bounded by decoding whole nodes per level (§4.4).
 ### 6.5 `nucleus mcp` (`modules/mcp`)
 
 `nucleus mcp [<dir>] [nucleus sql's connection options] [--allow-writes]
-[--memory] [--max-rows <n>] [--timeout <ms>]` serves the Model Context Protocol on
+[--memory] [--allow-erasure] [--max-rows <n>] [--timeout <ms>]` serves the Model Context Protocol on
 standard input and output (JSON-RPC 2.0, one message per line; protocol
 versions 2025-06-18, 2025-03-26, 2024-11-05), for a local database
 directory or a server.  An MCP client — an AI assistant, an IDE — starts
@@ -1196,8 +1197,12 @@ primary key, indexes, foreign keys, referencing tables), `sample_rows`,
 `remember` (store, subject, content; kind, confidence, `expires_in` an
 interval, source, `replaces` — a `REMEMBER`, its id and action back),
 `recall` (store, subject, query, `k` up to `--max-rows`; read-only, as
-the other reads) and `forget` (store, id: a `DELETE`, how many back) — an
-agent keeps memories without being given every write.  A tool not
+the other reads), `forget` (store, id: a `DELETE`, how many back) and
+`cite` (store, ids, `as_of`: the memories `AS OF COMMIT as_of` — id, kind,
+content, confidence, `valid_from`, `valid_to`, source; read-only) — an
+agent keeps memories without being given every write.  With
+`--allow-erasure` (`Options::erasure`), on its own: `forget_subject`
+(subject: `FORGET SUBJECT`, §8.29, its row back).  A tool not
 offered is unknown (`-32602`).  The initialize answer's instructions
 tell the model where to start.
 
@@ -5945,6 +5950,16 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-14 — §M14.24 R7, examples and the guide:** `docs/memory.md`
+  (a knowledge base with citations, a memory per user, read records,
+  erasure, backups — SQL, Python, JavaScript, MCP);
+  `examples/python/memory.py` and `examples/js/memory.ts`, run by
+  `scripts/driver-tests.sh` against the server (now `--history 1h`) and
+  in the process; the MCP tools `cite` and `forget_subject`
+  (`--allow-erasure`).  Fixed on the way: a statement reading a table
+  `AS OF` failed when prepared (the extended protocol's Describe binds
+  it without a clock: `Session::describe` now runs under one).
 
 - **2026-11-14 — §M14.24 R6, backups and subjects' keys:** `BACKUP TO
   'dir'` (online, one snapshot, without index pages or samples) and

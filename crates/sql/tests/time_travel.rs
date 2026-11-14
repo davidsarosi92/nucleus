@@ -321,6 +321,19 @@ fn a_table_reads_its_past_beside_the_present() {
         texts(&mut s, "SELECT count(*) FROM t AS OF COMMIT 2 AS x"),
         ["3"]
     );
+    // Prepared, as drivers send it: described (bound) and run with
+    // parameters.
+    let stmt = nucleus_sql::parser::parse(&format!(
+        "SELECT v FROM t AS OF TIMESTAMP '{then}' WHERE id = $1"
+    ))
+    .unwrap()
+    .remove(0);
+    let (_, columns) = s.describe(&stmt, None).unwrap();
+    assert_eq!(columns.unwrap().len(), 1);
+    let Output::Rows { rows, .. } = s.run(&stmt, &[Value::Int(2)]).unwrap() else {
+        panic!()
+    };
+    assert_eq!(rows, [[Value::Text("b".into())]]);
     // Not a WITH query.
     assert_eq!(
         code(

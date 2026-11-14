@@ -58,10 +58,14 @@ pub trait Database {
 pub struct Options {
     /// The `execute` tool (writes) is offered.
     pub allow_writes: bool,
-    /// The memory tools — `remember`, `recall`, `forget` — are offered
+    /// The memory tools — `remember`, `recall`, `forget`, `cite` — are offered
     /// (memory stores, PLAN.md §M14.24): an agent keeps memories without
     /// being given every write.
     pub memory: bool,
+    /// The `forget_subject` tool is offered: `FORGET SUBJECT` (PLAN.md
+    /// §M14.24 R2), an erasure an agent carries out on a person's request
+    /// — irreversible, so asked for on its own.
+    pub erasure: bool,
     /// The most rows a tool returns (the rest are counted, not sent).
     pub max_rows: usize,
     /// Each statement's time limit, in milliseconds (0: none).
@@ -73,6 +77,7 @@ impl Default for Options {
         Self {
             allow_writes: false,
             memory: false,
+            erasure: false,
             max_rows: 100,
             timeout_ms: 5000,
         }
@@ -407,6 +412,36 @@ impl<'a> Server<'a> {
                 },
                 "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false },
             }));
+            tools.push(json!({
+                "name": "cite",
+                "title": "Read cited memories again",
+                "description": "The memories with these ids as they were at the commit a citation names (recall's as_of): what was cited, however they changed or were closed since — content, kind, confidence, since when and until when valid, source. The history must reach that far back (the server's --history); otherwise the commit is too old (72000).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "store": store,
+                        "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                        "as_of": { "type": "integer", "minimum": 1, "description": "The commit recall returned as as_of." },
+                    },
+                    "required": ["store", "ids", "as_of"],
+                },
+                "annotations": read_only,
+            }));
+        }
+        if self.options.erasure {
+            tools.push(json!({
+                "name": "forget_subject",
+                "title": "Erase a person's data",
+                "description": "Erases every row of a subject — a user, a customer — from every table whose columns say whose a row is (memory stores, and tables marked by ALTER TABLE … SET SUBJECT): all of them or none, then scrubs the files and searches them. Irreversible: only for a request to be forgotten. Returns the erasure record's number (nc_catalog.erasures), the rows deleted, whether the scrub ran through, and the places the search still found a value in (0 is the proof).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "subject": { "type": "string", "description": "Whose data: the value the subject columns hold." },
+                    },
+                    "required": ["subject"],
+                },
+                "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false },
+            }));
         }
         if self.options.allow_writes {
             tools.push(json!({
@@ -669,6 +704,37 @@ impl Server<'_> {
                     _ => 0,
                 };
                 Ok(json!({ "forgotten": forgotten }))
+            }
+            "cite" if self.options.memory => {
+                let ids: Vec<String> = args
+                    .get("ids")
+                    .and_then(Json::as_array)
+                    .map(|a| a.iter().filter_map(Json::as_str).map(literal).collect())
+                    .unwrap_or_default();
+                if ids.is_empty() || ids.len() > self.options.max_rows {
+                    return Err(ToolError::Call(format!(
+                        "ids: 1 to {} memory ids",
+                        self.options.max_rows
+                    )));
+                }
+                let as_of = args
+                    .get("as_of")
+                    .and_then(Json::as_u64)
+                    .filter(|&n| n > 0)
+                    .ok_or_else(|| ToolError::Call("as_of: the commit recall returned".into()))?;
+                Ok(json!({
+                    "memories": self.objects(&format!(
+                        "SELECT id, kind, content, confidence, valid_from, valid_to, source \
+                         FROM {} AS OF COMMIT {as_of} WHERE CAST(id AS text) IN ({}) ORDER BY id",
+                        ident(&text("store")?),
+                        ids.join(", "),
+                    ))?,
+                }))
+            }
+            "forget_subject" if self.options.erasure => {
+                let mut done =
+                    objects(self.run(&format!("FORGET SUBJECT {}", literal(&text("subject")?)))?);
+                Ok(done.pop().map(Json::Object).unwrap_or(Json::Null))
             }
             other => Err(ToolError::Call(format!("unknown tool: {other}"))),
         }

@@ -9,7 +9,8 @@ what to use instead.  For people the full reference is DOCS.md §8.
   tools `list_tables`, `describe_table`, `sample_rows`, `summarize_table`
   (each column's min, max, distinct count, mean, quartiles, NULLs), `query` (read-only,
   `$1`… in `params`), `explain`, `lint`; `execute` with `--allow-writes`;
-  `remember`, `recall`, `forget` (memory stores) with `--memory`.
+  `remember`, `recall`, `forget`, `cite` (memory stores) with `--memory`;
+  `forget_subject` with `--allow-erasure`.  A walk-through: `docs/memory.md`.
 - **Shell:** `ncsql <dir>` or `ncsql -h 127.0.0.1:20035` (user and password
   `nucleus` by default); `-c "<sql>"` runs one command.
 - **Drivers:** Rust, Python, JavaScript, Java, C, C++, Swift over nucleus's protocol

@@ -25,6 +25,8 @@ edition gives it a local directory or a server: `nucleus mcp`.
 | `remember` | keeps a memory in a memory store (`REMEMBER`): merged into a near-identical one of the subject or added; `replaces` closes an old one — only with `Options::memory` |
 | `recall` | a subject's current memories most relevant to a query, text and vector search fused, each with `as_of` (the commit read: a citation is an id and its `as_of`) (read-only) — only with `Options::memory` |
 | `forget` | deletes a memory by id — only with `Options::memory` |
+| `cite` | memories by id as they were at the commit a citation names (`AS OF COMMIT as_of`; read-only) — only with `Options::memory` |
+| `forget_subject` | erases a subject's rows from every table with subject columns (`FORGET SUBJECT`): its erasure, rows, whether scrubbed, what the search found — only with `Options::erasure` |
 
 Reads are safe: their SQL goes to the database marked read-only — the
 `Database` refuses anything but reads before it runs (`nucleus mcp` checks

@@ -25,6 +25,19 @@ target/release/nucleus server ./mydb
 `NUCLEUS_PORT` points them at another port.  CI runs all of them
 (`scripts/driver-tests.sh`).
 
+**Memory for an AI application:** `memory` (Python and JavaScript) is an
+assistant's data end to end — a knowledge base it cites (a citation read
+back `AS OF COMMIT` after the document changed), a memory per user,
+what each reply read (`SET request_id`), and a user erased on request
+(`FORGET SUBJECT`); [`docs/memory.md`](../docs/memory.md) explains it.
+Against the server (started with `--history 1h` for the citation) or in
+the process:
+
+```sh
+python3 examples/python/memory.py
+node examples/js/memory.ts :memory:
+```
+
 **Without a server:** `anywhere` (Python and JavaScript) runs one program
 on a database inside the process — in a directory or in memory — or on a
 server, the connection string its only difference (PLAN.md §M14.23):

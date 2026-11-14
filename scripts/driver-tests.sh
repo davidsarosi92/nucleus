@@ -48,7 +48,7 @@ fi
 # The test issuer (scripts/fixtures/oidc): its token logs drivers_oidc in.
 oidc=(--oidc-issuer https://issuer.nucleus.test --oidc-audience nucleus-driver-tests
   --oidc-jwks "$root/scripts/fixtures/oidc/jwks.json")
-"$bin" server "$work/db" --listen 127.0.0.1:0 ${tls[@]+"${tls[@]}"} ${ldap[@]+"${ldap[@]}"} \
+"$bin" server "$work/db" --listen 127.0.0.1:0 --history 1h ${tls[@]+"${tls[@]}"} ${ldap[@]+"${ldap[@]}"} \
   "${oidc[@]}" 2>"$work/server.log" &
 pid=$!
 trap 'kill $pid ${ldap_pid:-} 2>/dev/null; wait $pid ${ldap_pid:-} 2>/dev/null || true; rm -rf "$work"' EXIT
@@ -92,10 +92,12 @@ for lang in "${langs[@]}"; do
       cargo run -q --manifest-path "$root/Cargo.toml" -p nucleus-example ;;
     python)
       python3 "$root/drivers/python/tests/test_nucleus.py" -v 2>&1 | tail -3
-      python3 "$root/examples/python/quickstart.py" ;;
+      python3 "$root/examples/python/quickstart.py"
+      python3 "$root/examples/python/memory.py" ;;
     js)
       node --test "$root/drivers/js/test/nucleus.test.ts"
-      node "$root/examples/js/quickstart.ts" ;;
+      node "$root/examples/js/quickstart.ts"
+      node "$root/examples/js/memory.ts" ;;
     java)
       out="$work/java"
       javac -Xlint:all -Werror -d "$out" $(find "$root/drivers/java/src" "$root/examples/java" -name '*.java')
@@ -129,12 +131,14 @@ for lang in "${langs[@]}"; do
       NUCLEUS_URL="file:$work/py-embedded" python3 "$root/drivers/python/tests/test_nucleus.py" -v 2>&1 | tail -3
       python3 "$root/examples/python/anywhere.py" "file:$work/py-anywhere"
       python3 "$root/examples/python/anywhere.py" ":memory:"
+      python3 "$root/examples/python/memory.py" ":memory:"
       python3 "$root/examples/python/anywhere.py" "nucleus://nucleus:nucleus@127.0.0.1:$port/nucleus" ;;
     js-embedded)
       "$root/drivers/js/native/build.sh"
       NUCLEUS_URL="file:$work/js-embedded" node --test "$root/drivers/js/test/nucleus.test.ts"
       node "$root/examples/js/anywhere.ts" "file:$work/js-anywhere"
       node "$root/examples/js/anywhere.ts" ":memory:"
+      node "$root/examples/js/memory.ts" ":memory:"
       node "$root/examples/js/anywhere.ts" "nucleus://nucleus:nucleus@127.0.0.1:$port/nucleus" ;;
     js-wasm)
       "$root/drivers/js/wasm/build.sh"

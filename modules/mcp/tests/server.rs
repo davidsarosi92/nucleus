@@ -203,9 +203,11 @@ fn memory_tools_when_asked() {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert!(
-            names.ends_with(&["remember", "recall", "forget"]),
+            names.ends_with(&["remember", "recall", "forget", "cite"]),
             "{names:?}"
         );
+        // Erasure is asked for on its own.
+        assert!(!names.contains(&"forget_subject"));
         // No general write with it.
         assert!(!names.contains(&"execute"));
         let r = call(
@@ -248,6 +250,23 @@ fn memory_tools_when_asked() {
             json!({ "name": "forget", "arguments": { "store": "notes", "id": "0190" } }),
         );
         assert_eq!(r["result"]["structuredContent"], json!({ "forgotten": 0 }));
+        call(
+            &mut s,
+            6,
+            "tools/call",
+            json!({ "name": "cite", "arguments": {
+                "store": "notes", "ids": ["0190", "x'y"], "as_of": 42 } }),
+        );
+        let r = call(
+            &mut s,
+            7,
+            "tools/call",
+            json!({ "name": "cite", "arguments": { "store": "notes", "ids": [], "as_of": 42 } }),
+        );
+        assert!(
+            r.get("error").is_some() || r["result"]["isError"] == true,
+            "{r}"
+        );
     }
     let sent: Vec<&str> = db
         .log
@@ -263,6 +282,43 @@ fn memory_tools_when_asked() {
             "SELECT id, kind, content, confidence, seen, valid_from, source, score, as_of \
              FROM recall('notes', 'u1', 'tea?', 20)",
             "DELETE FROM \"notes\" WHERE id = '0190'",
+            "SELECT id, kind, content, confidence, valid_from, valid_to, source \
+             FROM \"notes\" AS OF COMMIT 42 WHERE CAST(id AS text) IN ('0190', 'x''y') ORDER BY id",
         ]
+    );
+}
+
+#[test]
+fn erasure_when_asked() {
+    let mut db = Fake::default();
+    let options = Options {
+        erasure: true,
+        timeout_ms: 0,
+        ..Options::default()
+    };
+    {
+        let mut s = Server::new(&mut db, options);
+        let tools = call(&mut s, 1, "tools/list", json!({}));
+        let names: Vec<&str> = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"forget_subject"), "{names:?}");
+        assert!(!names.contains(&"remember") && !names.contains(&"execute"));
+        call(
+            &mut s,
+            2,
+            "tools/call",
+            json!({ "name": "forget_subject", "arguments": { "subject": "o'brien" } }),
+        );
+    }
+    assert!(
+        db.log
+            .iter()
+            .any(|(s, read_only)| s == "FORGET SUBJECT 'o''brien'" && !read_only),
+        "{:?}",
+        db.log
     );
 }

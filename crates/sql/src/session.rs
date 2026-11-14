@@ -1441,7 +1441,11 @@ impl Session {
         stmt: &Statement,
         text: Option<&str>,
     ) -> Result<(Vec<Option<DataType>>, Option<Vec<OutColumn>>)> {
-        self.with_catalog(|s| s.describe_here(stmt, text))
+        // Under a clock: binding a table read `AS OF` names its snapshot
+        // (a time evaluated now).
+        let now = crate::datetime::from_system(self.kv.wall_clock());
+        let kv = Arc::clone(&self.kv);
+        self.with_catalog(|s| crate::datetime::with_now(now, &kv, || s.describe_here(stmt, text)))
     }
 
     fn describe_here(

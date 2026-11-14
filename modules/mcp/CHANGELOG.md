@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `cite` with `Options::memory` (nucleus PLAN.md §M14.24 R7): memories by
+  id as they were at a citation's commit (`AS OF COMMIT`); and
+  `forget_subject` with `Options::erasure` — `FORGET SUBJECT`, asked for
+  on its own.
+
 - `recall` answers carry `as_of`, the commit read (nucleus PLAN.md §M14.24
   R5): an agent cites a memory by its id and `as_of`.
 
