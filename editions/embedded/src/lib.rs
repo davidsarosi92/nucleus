@@ -71,20 +71,10 @@ pub fn registry() -> Arc<Registry> {
 /// (`cache=64MB; sync=full`).  Keys: `cache` (the page cache), `sync`
 /// (`ordered` or `full`, PLAN.md D17), `wal` (`minimal` or `full`).
 pub fn options(text: &str, memory: bool) -> Result<Options, String> {
-    let defaults = Options::default();
     let mut o = if memory {
-        // Files in memory: the WAL is memory too, so checkpoints come
-        // sooner and segments are smaller.  The page cache stays as large
-        // as a file's: a page it misses is copied from the memory files
-        // and decoded again (a 32 MiB cache made a million-row scan twice
-        // as slow).
-        Options {
-            checkpoint_wal_bytes: 16 << 20,
-            wal_segment_bytes: 1 << 20,
-            ..defaults
-        }
+        Options::in_memory()
     } else {
-        defaults
+        Options::default()
     };
     for pair in text
         .split([';', ','])
@@ -227,10 +217,7 @@ impl Database {
         let memory = path == MEMORY;
         let opts = options(options_text, memory)?;
         if memory {
-            let platform = nucleus_platform::memory::MemoryPlatform::new()
-                .map_err(|e| format!("the machine's clock: {e}"))?;
-            let db = nucleus_kv::Database::open_on(Arc::new(platform), Path::new("/db"), opts)
-                .map_err(|e| e.to_string())?;
+            let db = nucleus_kv::Database::open_in_memory(opts).map_err(|e| e.to_string())?;
             return Ok(Self::start(path.to_string(), db, None));
         }
         if path.is_empty() {

@@ -4,7 +4,7 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::ops::Bound;
 
-use nucleus_kv::{Database, Kv, KvTxn, Options, TxnOptions, prefix_end, transact};
+use nucleus_kv::{Database, Kv, KvTxn, TxnOptions, prefix_end, transact};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -56,7 +56,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let Some(dir) = args.first() else {
         return Err("kv: missing <dir>".into());
     };
-    let db = Database::open(dir, Options::default()).map_err(err)?;
+    let db = crate::sql::open_local(dir)?;
     let result = match args.get(1) {
         None => shell(&db),
         Some(_) => {

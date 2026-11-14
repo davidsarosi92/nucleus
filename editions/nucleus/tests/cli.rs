@@ -94,6 +94,66 @@ fn sql_shell_and_command() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `:memory:` (PLAN.md §M14.17 E2): a database in the process, no
+/// directory made; gone when it ends.
+#[test]
+fn a_database_in_memory() {
+    let cwd = temp_dir("memory");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let run = |args: &[&str], stdin: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_nucleus"))
+            .args(args)
+            .current_dir(&cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                c.stdin.take().unwrap().write_all(stdin.as_bytes())?;
+                c.wait_with_output()
+            })
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    };
+    let out = run(
+        &["sql", ":memory:"],
+        "CREATE TABLE t (x INT);\nINSERT INTO t VALUES (1), (2);\nSELECT sum(x) AS s FROM t;\n",
+    );
+    assert!(out.contains(" s \n---\n 3 \n(1 row)"), "{out}");
+    // Gone: a new process starts empty.
+    let out = run(&["sql", ":memory:", "-c", "SELECT * FROM t"], "");
+    assert!(out.contains("42P01"), "{out}");
+    let out = run(&["kv", ":memory:"], "put a 1\nget a\n");
+    assert!(out.contains('1'), "{out}");
+    assert_eq!(
+        std::fs::read_dir(&cwd).unwrap().count(),
+        0,
+        "a file was made"
+    );
+    std::fs::remove_dir_all(&cwd).unwrap();
+}
+
+/// `nucleus init` with no password given makes one, shown once, which
+/// then logs in (§M14.17 E2).
+#[test]
+fn init_makes_a_password() {
+    let dir = temp_dir("init");
+    let d = dir.to_str().unwrap();
+    let (ok, out) = nucleus(&["init", d], "\n");
+    assert!(ok, "{out}");
+    let password = out
+        .lines()
+        .find_map(|l| l.strip_prefix("its password, shown this once: "))
+        .unwrap_or_else(|| panic!("{out}"))
+        .to_string();
+    assert_eq!(password.len(), 20);
+    assert!(password.chars().all(|c| c.is_ascii_alphanumeric()));
+    assert!(out.contains(&format!("nucleus server {d}")), "{out}");
+    let (ok, out) = nucleus(&["init", d], "\n");
+    assert!(!ok && out.contains("already has an administrator"), "{out}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 fn ncsql(args: &[&str], stdin: &str) -> (bool, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ncsql"))
         .args(args)

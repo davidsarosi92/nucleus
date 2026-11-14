@@ -1,7 +1,8 @@
 //! `nucleus init <dir> [--user <name>]`: claims a database — creates its
 //! first administrator, with a password from `NUCLEUS_PASSWORD` or read
-//! from standard input (PLAN.md §M14.25).  From then on the catalog's
-//! roles decide who logs in, not the server's `--user` / `--password`.
+//! from standard input (PLAN.md §M14.25), or, given none, one made and
+//! shown once (§M14.17 E2).  From then on the catalog's roles decide who
+//! logs in, not the server's `--user` / `--password`.
 
 use std::io::BufRead;
 use std::path::Path;
@@ -25,7 +26,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let password = match std::env::var("NUCLEUS_PASSWORD") {
         Ok(p) => p,
         Err(_) => {
-            eprint!("password for {user}: ");
+            eprint!("password for {user} (empty: one made for you): ");
             let mut line = String::new();
             std::io::stdin()
                 .lock()
@@ -34,11 +35,30 @@ pub fn run(args: &[String]) -> Result<(), String> {
             line.trim_end_matches(['\r', '\n']).to_string()
         }
     };
-    if password.is_empty() {
-        return Err("the password must not be empty".into());
-    }
     let db = Database::open(Path::new(dir), Options::default()).map_err(|e| e.to_string())?;
     let kv: Arc<dyn Kv> = Arc::new(db);
+    // None given: 20 letters and digits from the system's randomness
+    // (116 bits).
+    let made = password.is_empty();
+    let password = if made {
+        const ALPHABET: &[u8] = b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        let mut out = String::new();
+        while out.len() < 20 {
+            let mut b = [0u8; 32];
+            kv.random_bytes(&mut b);
+            // Rejection sampling: no letter more likely than another.
+            let limit = 256 - 256 % ALPHABET.len();
+            out.extend(
+                b.iter()
+                    .filter(|&&x| (x as usize) < limit)
+                    .map(|&x| ALPHABET[x as usize % ALPHABET.len()] as char),
+            );
+        }
+        out.truncate(20);
+        out
+    } else {
+        password
+    };
     {
         let txn = kv
             .begin(TxnOptions::read_only())
@@ -58,5 +78,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
     ))
     .map_err(|e| e.to_string())?;
     println!("created the administrator {user}");
+    if made {
+        println!("its password, shown this once: {password}");
+    }
+    println!("start the server:  nucleus server {dir}");
+    println!("then connect:      nucleus sql -U {user} --password <its password>");
     Ok(())
 }

@@ -294,8 +294,9 @@ jobs:
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  test: true }
           # musl: a C compiler for ring's code (the tls module) — musl-gcc,
           # or for i686 the multilib gcc (cc adds -m32).
-          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  test: true, apt: musl-tools, cc: musl-gcc }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, test: true, apt: musl-tools, cc: musl-gcc }
+          # rpm and file: the .rpm (rpmbuild) beside the .deb.
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  test: true, apt: musl-tools rpm file, cc: musl-gcc }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, test: true, apt: musl-tools rpm file, cc: musl-gcc }
           - { os: ubuntu-latest,    target: i686-unknown-linux-musl,    test: true, apt: gcc-multilib, cc: gcc }
           - { os: macos-latest,     target: aarch64-apple-darwin,       test: true }
           - { os: macos-latest,     target: x86_64-apple-darwin,        test: false }
@@ -359,3 +360,34 @@ jobs:
             "unpacked/$top/bin/nucleus" --version
             "unpacked/$top/bin/ncsql" --help | grep -q '^usage: ncsql'
           done
+      # §M14.17 E1: installed from the packages as a user would — the
+      # install scripts against the sums, the .deb, the .rpm, the image.
+      - name: Install from the packages
+        if: matrix.test && (contains(matrix.target, 'x86_64-unknown-linux-musl') || contains(matrix.target, 'aarch64-unknown-linux-musl') || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc')
+        run: |
+          (cd dist && if command -v sha256sum >/dev/null; then sha256sum *; else shasum -a 256 *; fi > SHA256SUMS && cat SHA256SUMS)
+          first="SELECT 'installed' AS x"
+          case "${{ matrix.target }}" in
+            *-windows-*)
+              NUCLEUS_DOWNLOAD_URL="$(cygpath -w "$PWD/dist")" NUCLEUS_INSTALL="$(cygpath -w "$RUNNER_TEMP/nucleus")" \
+                powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
+              "$RUNNER_TEMP/nucleus/bin/nucleus.exe" sql :memory: -c "$first" | grep -q installed ;;
+            *)
+              NUCLEUS_DOWNLOAD_URL="$PWD/dist" NUCLEUS_INSTALL="$RUNNER_TEMP/nucleus" sh scripts/install.sh
+              "$RUNNER_TEMP/nucleus/bin/nucleus" sql :memory: -c "$first" | grep -q installed ;;
+          esac
+          case "${{ matrix.target }}" in
+            *-linux-musl)
+              sudo dpkg -i dist/nucleus_*.deb
+              /usr/bin/nucleus sql :memory: -c "$first" | grep -q installed
+              sudo dpkg -r nucleus
+              docker run --rm -v "$PWD/dist:/dist:ro" fedora:latest \
+                sh -c "dnf install -y -q /dist/nucleus-*.rpm && nucleus sql :memory: -c \"$first\"" | grep -q installed
+              scripts/image-context.sh dist ctx
+              docker build -f packaging/Dockerfile -t nucleus:ci ctx
+              docker run --rm nucleus:ci sql :memory: -c "$first" | grep -q installed
+              docker run -d --name nucleus-ci -e NUCLEUS_PASSWORD=ci -p 127.0.0.1:20035:20035 nucleus:ci
+              for i in $(seq 50); do docker logs nucleus-ci 2>&1 | grep -q '^connect' && break; sleep 0.2; done
+              "$RUNNER_TEMP/nucleus/bin/nucleus" sql --password ci -c "$first" | grep -q installed
+              docker rm -f nucleus-ci ;;
+          esac

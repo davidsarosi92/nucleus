@@ -22,9 +22,10 @@ usage:
   nucleus kv <dir> scan [<prefix>]
   nucleus kv <dir> checkpoint | vacuum
   nucleus kv <dir>                  interactive shell (type `help`)
-  nucleus sql [<dir>] [-h <host[:port]>] [-U <user>] [-d <db>] [-c <sql>]
-                                    SQL shell (also `ncsql`): a local database or a
-                                    server; a script on stdin, or one command
+  nucleus sql [<dir> | :memory:] [-h <host[:port]>] [-U <user>] [-d <db>] [-c <sql>]
+                                    SQL shell (also `ncsql`): a local database (or
+                                    one in memory, gone at the end) or a server;
+                                    a script on stdin, or one command
   nucleus mcp [<dir>] [connection options of nucleus sql] [--allow-writes]
               [--memory] [--max-rows <n>] [--timeout <ms>]
                                     a Model Context Protocol server on stdin and
@@ -34,7 +35,7 @@ usage:
                                     forget
   nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
-                     [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
+                     [--user <name>] [--password <pw> (or NUCLEUS_PASSWORD)] [--no-auth] [--log-queries]
                      [--tls-cert <pem file> --tls-key <pem file> [--tls-client-ca <pem file>]]
                      [--oidc-issuer <url> --oidc-audience <name> [--oidc-jwks <file>]
                       [--oidc-user-claim <claim>] [--oidc-role-claim <claim>]]

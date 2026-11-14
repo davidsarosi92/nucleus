@@ -51,7 +51,8 @@
 | `drivers` | — | drivers for C, C++, Python, JS/TS, Java, Swift (§11); Python's platform wheel (`build_wheel.py`) and JavaScript's Node-API addon (`native/`) for the embedded edition; JavaScript's browser entry (`src/browser.ts`, the engine in WebAssembly, `wasm/build.sh`); iOS — the Swift package's `NucleusEmbedded` over `NucleusEmbedded.xcframework` (`swift/build-xcframework.sh`) — and Android, a Kotlin library (`android/`, an AAR) | §M14.8 ✅, §M14.23 |
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
-| `scripts` | — | `package.sh`, `psql-smoke.sh`, `driver-tests.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.21 |
+| `scripts` | — | `package.sh` (archives, `.deb`, `.rpm`), `install.sh` / `install.ps1` (a release installed, its sums checked), `manifests.sh` (the Homebrew formula, the winget manifests), `image-context.sh` (the image's build context), `psql-smoke.sh`, `driver-tests.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.17, §M14.21 |
+| `packaging` | — | the container image's `Dockerfile` (§6.3) | §M14.17 |
 | `docs/llm.md` | — | the dialect for AI models: what there is, what is missing and what to use instead, the catalog, hints, the analyzer | §M14.10 ✅ |
 | `docs/memory.md` | — | the guide to memory for AI applications: a knowledge base with citations, a memory per user, read records, erasure, backups — in SQL, Python, JavaScript and over MCP | §M14.24 ✅ |
 | `docs/benchmarks.md`, `bench/` | — | the benchmark suite against PostgreSQL (`bench/run.py`, run in CI; `tpch.py`, `clickbench.py`; `phases.py`, one build against another step by step; `bench/ann/`, the HNSW storage models on the KV with hnswlib and pgvector as references, and `sql.py`, the index through SQL; `bench/text/`, the full-text data), its latest results and targets | §M14.11, §M14.12 V4, §M14.21 |
@@ -1225,7 +1226,7 @@ nucleus --version
 nucleus kv <dir> get <key> | put <key> <value> | delete <key> | scan [<prefix>]
 nucleus kv <dir> checkpoint | vacuum
 nucleus kv <dir>              # shell: the same commands, plus begin/commit/rollback
-nucleus sql [<dir>] [-h <host[:port]>] [-p <port>] [-U <user>] [-d <db>] [--password <pw>] [-c <sql>]
+nucleus sql [<dir> | :memory:] [-h <host[:port]>] [-p <port>] [-U <user>] [-d <db>] [--password <pw>] [-c <sql>]
 ncsql …                       # the same shell under its own name
 nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]   # §9
 nucleus restore <backup> <dir> [--subject-keys <file>]   # §8.30
@@ -1233,6 +1234,11 @@ nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <dur
 ```
 
 `nucleus sql <dir> -d <branch>` opens a local database's branch.
+`:memory:` in place of a directory (`nucleus sql`, `nucleus kv`) is a
+database in the process, gone when it ends — the embedded editions'
+name (`Database::open_in_memory`, `Options::in_memory`: the memory
+platform's files, smaller WAL segments, sooner checkpoints; no key
+files for secrets beside it).
 
 Keys and values are text; any byte can be written as `\xNN` (`\\` for a
 backslash), and output escapes non-printable bytes the same way.  Outside
@@ -1278,6 +1284,35 @@ tested target, unpacks it and runs `nucleus --version` and `ncsql --help`.  `.gi
 release.yml` does the same for every target on a `v<version>` tag (the tag
 must match `Cargo.toml`) and attaches the archives to a GitHub release.  No
 release has been tagged yet.
+
+**Installing (§M14.17 E1).**  Where `dpkg-deb` / `rpmbuild` are
+installed, the musl targets also give `nucleus_<v>_<amd64|arm64|i386>.deb`
+and `nucleus-<v>-1.<arch>.rpm`: the static binaries in `/usr/bin`, any
+distribution's (`sudo apt install ./….deb`, `sudo dnf install ./….rpm` —
+unsigned yet: rpm 6 refuses `rpm -i` without `--nosignature`, dnf takes
+a local file with a warning).  The release adds `SHA256SUMS`, the
+Homebrew formula `nucleus.rb` and the winget manifests
+(`scripts/manifests.sh <dist>`: macOS's archives and Linux's static ones
+for brew; the zip's two programs as portable commands for winget —
+published to a tap and to `winget-pkgs` by the maintainer), and pushes
+the container image `ghcr.io/<owner>/nucleus:<v>` / `:latest`, amd64
+and arm64 (`packaging/Dockerfile` on `scripts/image-context.sh`'s
+context: the static `nucleus` on distroless's static base — a `/tmp`,
+CA certificates, the user 65532 owning `/data`, 33 MB; `ENTRYPOINT
+nucleus`, `CMD server /data --listen 0.0.0.0:20035`, so it refuses to
+start without `NUCLEUS_PASSWORD` or a claimed database, and `docker run
+--rm -it <image> sql :memory:` is a shell).  `scripts/install.sh`
+(Linux, macOS; `sh`, `curl` or `wget`, `sha256sum` or `shasum`) and
+`scripts/install.ps1` (Windows) take the release's `SHA256SUMS`, pick
+the platform's archive — Linux's static one, macOS's native one under
+Rosetta too —, check its SHA-256 and put the binaries in
+`~/.nucleus/bin` (`%LOCALAPPDATA%\nucleus\bin`, added to the user's
+PATH; `install.sh` tells the PATH, edits nothing): `NUCLEUS_VERSION`,
+`NUCLEUS_INSTALL` and `NUCLEUS_DOWNLOAD_URL` (a mirror or a directory)
+change where from and to.  CI runs them on every push against the
+packages it just built (Linux musl, macOS, Windows), installs the
+`.deb` and, in a Fedora container, the `.rpm`, and builds and runs the
+image: a query in memory, then the server reached from the host.
 
 **d-os:** the archives are built and checked in CI (layout, manifest), but
 installing and running them on d-os needs the d-os harness and has not been
@@ -5794,9 +5829,14 @@ them comes with §M16.5.
 **Bootstrap.**  A database whose catalog has no administrator that can
 log in with a password is *unclaimed*: the server's `--user` /
 `--password` (default `nucleus` / `nucleus`) log in as an administrator,
-so a fresh server and client work together unconfigured.  `nucleus init
+so a fresh server and client work together unconfigured;
+`NUCLEUS_PASSWORD` in the server's environment is `--password`'s
+default (a container's settings).  When listening, the server says how
+to connect (`connect: nucleus sql -h … or psql -h … -p … -U …`).  `nucleus init
 <dir> [--user <name>]` claims it — creates the first administrator, the
-password from `NUCLEUS_PASSWORD` or standard input — or one is made with
+password from `NUCLEUS_PASSWORD` or standard input (none given: 20
+letters and digits from the system's randomness, shown once), then says
+how to start the server and connect — or one is made with
 `CREATE USER … SUPERUSER PASSWORD …`; from then on only the catalog's
 roles log in (a wrong user or password, a role without `LOGIN` or an
 expired password: `28P01`, not told apart).  `--no-auth` accepts any

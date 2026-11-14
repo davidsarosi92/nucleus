@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 defaults:
   run:
@@ -24,9 +25,11 @@ jobs:
         include:
           - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
-          - { os: ubuntu-latest,    target: i686-unknown-linux-musl, apt: gcc-multilib }
+          # musl: a C compiler for ring's code (the tls module), as in CI;
+          # rpm and file for the .rpm (rpmbuild), dpkg-deb is there.
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-musl,  apt: musl-tools rpm file, cc: musl-gcc }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, apt: musl-tools rpm file, cc: musl-gcc }
+          - { os: ubuntu-latest,    target: i686-unknown-linux-musl,    apt: gcc-multilib rpm file, cc: gcc }
           - { os: macos-latest,     target: aarch64-apple-darwin }
           - { os: macos-latest,     target: x86_64-apple-darwin }
           - { os: windows-latest,   target: x86_64-pc-windows-msvc }
@@ -37,6 +40,9 @@ jobs:
       - name: Install system packages
         if: matrix.apt
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      - name: C compiler for the target
+        if: matrix.cc
+        run: echo "CC_$(echo '${{ matrix.target }}' | tr '-' '_')=${{ matrix.cc }}" >> "$GITHUB_ENV"
       - name: Version matches the tag
         run: |
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -51,11 +57,46 @@ jobs:
     needs: package
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # The sums scripts/install.sh and install.ps1 check, then the
+      # Homebrew formula and winget manifests made from them (§M14.17 E1).
+      - name: Sums and manifests
+        run: |
+          (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          scripts/manifests.sh dist
+          for f in dist/winget/*; do mv "$f" "dist/winget-$(basename "$f")"; done
+          rmdir dist/winget
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "nucleus $GITHUB_REF_NAME" --generate-notes
+
+  # The container image, amd64 and arm64, from the static binaries
+  # (packaging/Dockerfile): ghcr.io/<owner>/nucleus:<version> and :latest.
+  image:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: scripts/image-context.sh dist ctx
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/nucleus"
+          docker buildx build --platform linux/amd64,linux/arm64 -f packaging/Dockerfile \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.version="${GITHUB_REF_NAME#v}" \
+            -t "$image:${GITHUB_REF_NAME#v}" -t "$image:latest" --push ctx

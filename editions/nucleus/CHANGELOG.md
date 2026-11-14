@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `:memory:` for `nucleus sql` and `nucleus kv`: a database in the process.
+- `nucleus init`: given no password, makes one and shows it once; says how
+  to start the server and connect.
+- `nucleus server`: `NUCLEUS_PASSWORD` is `--password`'s default; says how
+  to connect once listening.
+- Packages: `.deb`, `.rpm`, a container image, `scripts/install.sh` and
+  `install.ps1`, a Homebrew formula and winget manifests per release.
+- `nucleus branch <dir> create|list|drop|reset`, `--at <time> --history
+  <duration>`.
+
 - `nucleus server` runs a maintenance thread that applies the tables'
   storage policies (`ALTER TABLE … SET STORAGE POLICY`) every minute.
 

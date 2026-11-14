@@ -285,7 +285,7 @@ are marked ✅.
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
 | | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
 | | M14.16 | Migrations and code generation | ⬜ |
-| | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
+| | M14.17 | Easy start: packages, Docker, web console, browser playground | ◐ E1–E2 ✅ (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; next E3 the web console |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
@@ -8806,6 +8806,67 @@ code compiles and passes its tests in each language.
 
 **Done when:** a new user goes from nothing to a running query in one
 command per platform, and the playground runs the tutorial.
+
+Steps (planned 2026-11-14):
+
+- **E1 — packages**: the release's archives with a `SHA256SUMS`; `.deb`
+  and `.rpm` for Linux; a container image (`FROM scratch`, the static
+  musl binary, amd64 and arm64) published to the GitHub registry with
+  each release; a Homebrew formula and winget manifests generated from
+  the release's sums (published to a tap and to `winget-pkgs` by the
+  maintainer); `scripts/install.sh` (Linux, macOS: `curl … | sh`) and
+  `scripts/install.ps1` (Windows: `irm … | iex`) — the platform's
+  archive, its sum checked, the binaries in a directory of the user's.
+  CI builds the packages and the image on every push and installs from
+  them, so a release is known to install before it is tagged.  Prior
+  art: rustup's and Deno's install scripts, DuckDB's `install.duckdb.org`.
+  ✅ 2026-11-14.  *Built:* `package.sh` adds the `.deb` (`dpkg-deb`) and
+  `.rpm` (`rpmbuild`, prebuilt files) of the static binaries — one
+  package for every distribution, as the musl archive already is;
+  `packaging/Dockerfile` on distroless's static base (a `/tmp`, CA
+  certificates and a user that is not root, which `FROM scratch` lacks;
+  33 MB, `ncsql` left out as `nucleus sql`), the server refusing to
+  start exposed without `NUCLEUS_PASSWORD` (new: `--password`'s
+  default) as on any host; `install.sh` / `install.ps1` pick the archive
+  from the release's `SHA256SUMS` (one download names version and sum,
+  and GitHub's `releases/latest/download/` needs no API call, so no
+  rate limit); the release job adds the sums, the formula, the winget
+  manifests and the image (amd64, arm64; buildx from the archives'
+  binaries, no compiling under emulation).  Checked here: the arm64
+  musl build packaged in Docker, `install.sh` in Alpine (busybox, wget)
+  including a tampered archive refused, the `.deb` in Debian, the `.rpm`
+  in Fedora, the image's shell and server from the host, its data kept
+  across a restart.  *Found:* `release.yml` lacked CI's C compiler for
+  musl (ring), so a tag would have failed its musl jobs — fixed; rpm 6
+  (Fedora 43) refuses unsigned packages with `rpm -i` — `dnf install
+  ./…rpm` warns and installs; signing the packages (and the archives,
+  e.g. minisign or Sigstore) needs a key the maintainer keeps: not done.
+  *Not taken:* `cargo-deb` / `cargo-generate-rpm` (two tools to install
+  for a dozen lines of control file and spec); Homebrew-core and
+  winget-pkgs themselves (publishing is the maintainer's; the files are
+  generated per release).
+- ✅ **E2 (2026-11-14)**: `nucleus sql :memory:` and `nucleus kv :memory:`
+  (`Database::open_in_memory`, `Options::in_memory` — the embedded
+  editions' code, moved into `nucleus-kv` and shared); `nucleus init`
+  making a password (20 of 57 letters and digits, rejection-sampled: 116
+  bits) when given an empty one, shown once, then the commands to start
+  and connect; the server printing `connect: nucleus sql -h … or psql …`
+  when listening.  From nothing to a query: the install command, then
+  `nucleus sql :memory: -c "SELECT …"` — or `docker run --rm -it
+  ghcr.io/davidsarosi92/nucleus sql :memory:`, one command.
+- **E3 — the web console** (`--console [addr:port]`, a module): a page
+  served by the server — the tables and their columns, SQL run, plans
+  drawn from `EXPLAIN (FORMAT JSON)`, `EXPLAIN ANALYZE`, the analyzer's
+  findings — over a small HTTP/1.1 server of the standard library, the
+  login the server's, loopback only unless TLS.  Prior art: DuckDB's UI,
+  pgAdmin's and Supabase's SQL editors, explain.dalibo.com's plan view.
+- **E4 — the playground**: the console's page on the browser edition
+  (§M14.23) instead of a server — the database in the page, nothing to
+  install.  Prior art: shell.duckdb.org, PGlite's REPL, SQLite's fiddle.
+- **E5 — the tutorial**: DOCS's guided tour (a table, rows, queries,
+  indexes and plans, JSON, vectors and text search, time travel and
+  branches) as SQL files a test runs, so it stays true; the console and
+  the playground step through it.
 
 ### §M14.18 — Operations ⬜
 

@@ -810,6 +810,21 @@ pub struct Options {
     pub wal_minimal: bool,
 }
 
+impl Options {
+    /// The defaults for a database in memory ([`Database::open_in_memory`]):
+    /// its WAL is memory too, so checkpoints come sooner and segments are
+    /// smaller.  The page cache stays as large as a file's: a page it
+    /// misses is copied from the memory files and decoded again (a 32 MiB
+    /// cache made a million-row scan twice as slow).
+    pub fn in_memory() -> Self {
+        Self {
+            checkpoint_wal_bytes: 16 << 20,
+            wal_segment_bytes: 1 << 20,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -870,6 +885,15 @@ impl Database {
         let platform =
             RealPlatform::with_sync(opts.sync).map_err(|e| Error::Storage(Box::new(e)))?;
         Self::open_on(Arc::new(platform), path.as_ref(), opts)
+    }
+
+    /// A new database in memory, gone with its last handle — the
+    /// embedded editions' and the CLI's `:memory:` (`opts` usually
+    /// [`Options::in_memory`]).
+    pub fn open_in_memory(opts: Options) -> Result<Self> {
+        let platform = nucleus_platform::memory::MemoryPlatform::new()
+            .map_err(|e| Error::Storage(Box::new(e)))?;
+        Self::open_on(Arc::new(platform), Path::new("/db"), opts)
     }
 
     /// Opens (or creates) the database in `path` on `platform` (the

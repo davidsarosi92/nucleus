@@ -10,14 +10,29 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nucleus_client::{Client, Config, Format, TxnStatus as RemoteStatus, Value};
-use nucleus_kv::{Database, Options};
+use nucleus_kv::Database;
 use nucleus_sql::{Output, Session, TxnStatus};
 
 type Result<T> = std::result::Result<T, String>;
 
+/// A local database: its directory, or `:memory:` — one in this
+/// process, gone when it ends (as the embedded editions take the name).
+pub fn open_local(dir: &str) -> Result<Database> {
+    if dir == MEMORY {
+        Database::open_in_memory(nucleus_kv::Options::in_memory())
+    } else {
+        Database::open(dir, nucleus_kv::Options::default())
+    }
+    .map_err(|e| format!("{dir}: {e}"))
+}
+
+/// The name of a database in memory.
+pub const MEMORY: &str = ":memory:";
+
 const USAGE: &str = "\
 usage: ncsql [<dir>] [options]          (also: nucleus sql …)
   <dir>                     open a local database directory
+  :memory:                  a database in memory, gone when the shell ends
   -h, --host <host[:port]>  connect to a nucleus server (default 127.0.0.1:20035)
   -p, --port <port>
   -U, --user <name>         (default nucleus)
@@ -852,22 +867,25 @@ impl Target {
         }
         Ok(match self.dir {
             Some(dir) => {
-                let db = Database::open(&dir, Options::default()).map_err(|e| e.to_string())?;
+                let db = open_local(&dir)?;
                 let kv: Arc<dyn nucleus_kv::Kv> = Arc::new(db.clone());
-                // Secrets sealed as the server seals them: its key file.
-                nucleus_sql::secrets::set_keyring(Some(Arc::new(
-                    nucleus_server::keyfile::KeyFile::new(
-                        nucleus_server::keyfile::KeyFile::beside(&dir),
-                        kv.clone(),
-                    ),
-                )));
-                // Subjects' keys too (BACKUP TO, FORGET SUBJECT).
-                nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(
-                    nucleus_server::subject_keyfile::SubjectKeyFile::new(
-                        nucleus_server::subject_keyfile::SubjectKeyFile::beside(&dir),
-                        kv.clone(),
-                    ),
-                )));
+                // Secrets sealed as the server seals them: its key file
+                // (none for a database in memory: no secrets kept).
+                if dir != MEMORY {
+                    nucleus_sql::secrets::set_keyring(Some(Arc::new(
+                        nucleus_server::keyfile::KeyFile::new(
+                            nucleus_server::keyfile::KeyFile::beside(&dir),
+                            kv.clone(),
+                        ),
+                    )));
+                    // Subjects' keys too (BACKUP TO, FORGET SUBJECT).
+                    nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(
+                        nucleus_server::subject_keyfile::SubjectKeyFile::new(
+                            nucleus_server::subject_keyfile::SubjectKeyFile::beside(&dir),
+                            kv.clone(),
+                        ),
+                    )));
+                }
                 // -d: a branch of it (PLAN.md §M14.13).
                 let data = nucleus_server::branch_of(&kv, &cfg.database)
                     .map_err(|e| format!("{dir}: {}", e.message))?;

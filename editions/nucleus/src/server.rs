@@ -20,7 +20,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // (front end, address): ncp always, on `--listen`'s address.
     let mut listen: Option<String> = None;
     let mut extra: Vec<(String, Option<String>)> = Vec::new();
-    let (mut user, mut password) = (DEFAULT_USER.to_string(), Some(DEFAULT_PASSWORD.to_string()));
+    // NUCLEUS_PASSWORD: --password's default (a container's settings come
+    // as its environment).
+    let mut password = Some(
+        std::env::var("NUCLEUS_PASSWORD")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| DEFAULT_PASSWORD.to_string()),
+    );
+    let mut user = DEFAULT_USER.to_string();
     let mut log_queries = false;
     let mut insecure = false;
     let (mut tls_cert, mut tls_key, mut tls_client_ca) = (None, None, None::<String>);
@@ -153,6 +161,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     let weak_password = password.as_deref() == Some(DEFAULT_PASSWORD);
     let no_auth = password.is_none();
+    let shown_user = user.clone();
     let config = Config {
         auth: match password {
             Some(password) => Arc::new(Password { user, password }),
@@ -329,6 +338,31 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .as_ref()
             .map_or(String::new(), |d| format!("; {}", d.describe()))
     );
+    // How to connect, for whoever started it.
+    let local = |a: std::net::SocketAddr| {
+        if a.ip().is_unspecified() {
+            std::net::SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), a.port())
+        } else {
+            a
+        }
+    };
+    let hints: Vec<String> = listeners
+        .iter()
+        .filter_map(|(f, l)| Some((f.name(), local(l.local_addr().ok()?))))
+        .filter_map(|(name, a)| match name {
+            "ncp" if a.to_string() == "127.0.0.1:20035" => Some("nucleus sql".to_string()),
+            "ncp" => Some(format!("nucleus sql -h {a}")),
+            "pg" => Some(format!(
+                "psql -h {} -p {} -U {shown_user}",
+                a.ip(),
+                a.port()
+            )),
+            _ => None,
+        })
+        .collect();
+    if !hints.is_empty() {
+        eprintln!("connect: {}", hints.join("  or  "));
+    }
     nucleus_server::maintain_with(
         Arc::clone(&kv),
         nucleus_server::Stop::new(),

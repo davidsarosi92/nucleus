@@ -212,6 +212,24 @@ the document model (§F2).  See
 [PLAN.md](PLAN.md) for the roadmap and [DOCS.md](DOCS.md) for what exists
 today.
 
+## Install
+
+From a release (none is tagged yet: until then, `cargo build --release
+-p nucleus-cli` gives `target/release/nucleus`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/davidsarosi92/nucleus/main/scripts/install.sh | sh   # Linux, macOS
+irm https://raw.githubusercontent.com/davidsarosi92/nucleus/main/scripts/install.ps1 | iex        # Windows
+docker run --rm -it ghcr.io/davidsarosi92/nucleus sql :memory:                                     # a container
+sudo apt install ./nucleus_<version>_amd64.deb      # or: sudo dnf install ./nucleus-<version>-1.x86_64.rpm
+```
+
+A first query, in a database in memory:
+
+```sh
+nucleus sql :memory: -c "SELECT 'hello, nucleus'"
+```
+
 ## Using it
 
 ```sh
