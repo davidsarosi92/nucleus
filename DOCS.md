@@ -321,7 +321,7 @@ offset `n × 8192`.  Every page starts with a 24-byte header (little-endian):
 | 0  | 4 | CRC-32C of bytes `4..8192` |
 | 4  | 1 | page type |
 | 5  | 3 | reserved, zero |
-| 8  | 8 | LSN (reserved; unused by the logical WAL) |
+| 8  | 8 | birth: the commit (pager `seq`) that made the page durable (§M14.13; 0 in files from before) |
 | 16 | 8 | the page's own id |
 
 Payload: 8168 bytes (`PAYLOAD_SIZE`).  Types below 16 belong to the pager
@@ -396,6 +396,20 @@ construction; a single-threaded simulation cannot interleave them).  One
 commit in flight at a time.  `create` builds the file as
 `<path>.creating`, syncs it, renames it into place and syncs the directory.
 
+**Births and dead lists** (§M14.13, ZFS's).  `write_page` stamps a page
+with its *birth*, the commit that makes it durable — the next one for a
+page allocated now, the one in flight for a frozen page, the one after
+it for a page allocated while one is in flight — in the header's LSN
+field; fixed at allocation, so a page copied on write is never older
+than its children.  `set_space(branch, Space { origin, points })` tells
+the pager what a free in a branch means (none: a plain free, as for the
+main branch without branches and `NO_BRANCH`): `release(id, branch,
+birth)` keeps a page born at or before the branch's origin (an
+ancestor's), puts one of its own born at or before its latest branch
+point on that point's *dead list* (`take_dead`, `dead`), and frees the
+rest as `free` does; `keeps` says which, beforehand.  `next_seq` is the
+commit the next freeze makes.
+
 ### 4.3 Buffer pool (`buffer::BufferPool`)
 
 `fetch(id) -> PageRef` pins a page (dropping the `PageRef` unpins);
@@ -404,6 +418,11 @@ commit in flight at a time.  `create` builds the file as
 copy-on-write fails at once.  `create(type)` allocates a page into a frame;
 `free(id)` drops it (must be unpinned; a dirty page of a commit in flight
 is written back first — the frozen state still holds it).
+`free_in(id, branch)` is a branch's free (§M14.13): with the page's
+`birth(id)` (the pager's for a page not durable yet, else the header's)
+it asks `Pager::keeps` and leaves a page another branch still reads
+cached, then `Pager::release`s it.  A write-back stamps the birth into
+the cached page too, so the header in memory says what the file does.
 `flush_frozen` writes back the dirty pages of the commit in flight while
 writers go on — and readers: a page at a time under its shard's read
 lock (PostgreSQL's checkpointer writes a buffer under a share lock the
@@ -624,7 +643,43 @@ over `MAX_KEY` are refused before logging.  Any failure poisons the store.
 Recovery checkpoints once if it replayed anything; a checkpoint the WAL
 does not line up with (ahead of its end, or its start after it) is
 corruption.  Options: `cache_pages` (default 1024), `wal_segment_size`
-(default 16 MiB).
+(default 16 MiB).  Meta slots: 0 the main tree's root, 1 its checkpoint
+LSN, 2 its last `meta`, 3 the branch directory's root.
+
+**Branches** (§M14.13 B1).  A `Store` is one branch of the database in
+`dir`; `open` gives the main one (`MAIN`, named `MAIN_NAME` = `main`) and
+opens and recovers every other.  `create_branch(name)` makes a branch of
+this one in a checkpoint: its tree starts as this one's root at the
+freeze (constant time and space), its origin the commit the freeze
+makes; `branch(name)`, `branches()` (`BranchInfo { id, name, parent,
+origin }`), `info()`, `recovery()` (a new branch's meta its parent's).
+Each branch has its own tree, writer lock and WAL (`wal/` the main
+branch's, `branches/<id>/wal/` another's); all share the pager and the
+buffer pool, and a checkpoint takes every writer lock in id order,
+settles every tree's deferred puts and freezes them all in one commit.
+The *branch directory*, a tree of its own (meta slot 3, frees plain):
+`b`+id → parent, origin, root, checkpoint LSN, meta, name (rewritten only
+when changed); `n`+name → id; `i` → the next id (ids are never reused);
+`d`+branch+point+page → birth, the dead lists, drained from the pager at
+every checkpoint.  A free in a branch follows the pager's rules above:
+a page an ancestor still has stays, one a branch of it may read waits on
+the dead list of the branch's latest branch point.
+`drop_branch(name)` (not the main one, not one with branches: `Error::Branch`)
+in a checkpoint: the branch's pages born after its origin freed
+(`BTree::release_younger`, a walk that skips a subtree whose root is
+older — it costs what the branch changed), its records gone, its
+parent's dead list for its point either moved to the parent's previous
+point (the pages born by it, still read through it) or freed — unless
+another branch shares the point —, its WAL files deleted after the
+commit (and, by `open`, those of branches the directory does not
+know); its handles fail with `Error::Branch` from then on.
+`reset_branch(name)` drops and makes it again from its parent in one
+checkpoint (a new id, the old handles fail).  A branch costs what it
+changed plus what its parent freed since that it still reads.
+`check_pages()` checks every tree and that every page is in exactly one
+place — in use (a tree, the directory, a dead list, allocated) or free
+(free, pending, holding the free list).  Branch names: 1–63 ASCII
+letters, digits, `-`, `_`, `.` (`valid_branch_name`).
 
 **Scrub** (§M14.24 R2b).  `scrub()` → `Scrubbed { pages, wal_bytes }`
 removes from the files what the tree no longer holds: a checkpoint, the
@@ -664,6 +719,14 @@ their hashes (2^20 bits) — ~80 ms for 100 needles over 96 MiB.
   piling up across segments and checkpoints; the same with batches written
   between a checkpoint's halves (W4), and writers with a checkpointer
   thread on real files.
+- `branch.rs` (§M14.13) — a branch as a copy in constant space, writes
+  on each side invisible to the other, names, a drop giving back what
+  the branch changed, dead lists over several branch points dropped in
+  either order, branches of branches, reset, real files, writers on two
+  branches while a thread makes, writes, checkpoints and drops branches,
+  and a crash at every I/O point (both modes) of writes, makes, a drop
+  and a reset — the steps done or the one in flight, every page in one
+  place.
 
 Mutations each caught by these tests: writing committed pages in place,
 reusing freed committed pages before a commit, header before data, skipped

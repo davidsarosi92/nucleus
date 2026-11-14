@@ -47,6 +47,9 @@ pub const COMPRESS_MIN: usize = 1024;
 pub struct BTree {
     pool: Arc<BufferPool>,
     root: PageId,
+    /// The branch it is (PLAN.md §M14.13): its frees mean what the
+    /// branch's space says ([`Pager::release`](crate::Pager::release)).
+    branch: u32,
     /// Threads a sorted batch's leaves may be prepared on
     /// ([`BTree::set_workers`]).
     workers: usize,
@@ -103,6 +106,7 @@ impl BTree {
         Ok(Self {
             pool,
             root,
+            branch: 0,
             workers: 1,
         })
     }
@@ -112,8 +116,20 @@ impl BTree {
         Self {
             pool,
             root,
+            branch: 0,
             workers: 1,
         }
+    }
+
+    /// Makes it branch `branch`'s tree (PLAN.md §M14.13; 0, the default:
+    /// the main branch's).
+    pub fn set_branch(&mut self, branch: u32) {
+        self.branch = branch;
+    }
+
+    /// The branch it is.
+    pub fn branch(&self) -> u32 {
+        self.branch
     }
 
     /// Lets a large sorted batch ([`apply_sorted`](Self::apply_sorted))
@@ -129,6 +145,7 @@ impl BTree {
         BTree {
             pool: Arc::clone(&self.pool),
             root: self.root,
+            branch: self.branch,
             workers: 1,
         }
     }
@@ -158,7 +175,7 @@ impl BTree {
             return Ok(id);
         }
         let new = self.store_new(node)?;
-        self.pool.free(id)?;
+        self.pool.free_in(id, self.branch)?;
         Ok(new)
     }
 
@@ -287,7 +304,7 @@ impl BTree {
     fn free_val(&self, val: &Val) -> Result<()> {
         if let Val::Overflow { first, len, .. } = val {
             for (id, _) in self.overflow_pages(*first, *len)? {
-                self.pool.free(id)?;
+                self.pool.free_in(id, self.branch)?;
             }
         }
         Ok(())
@@ -476,7 +493,7 @@ impl BTree {
                 Node::Internal(n) if n.keys.is_empty() => {
                     let old = self.root;
                     self.root = n.children[0];
-                    self.pool.free(old)?;
+                    self.pool.free_in(old, self.branch)?;
                 }
                 _ => return Ok(()),
             }
@@ -618,7 +635,7 @@ impl BTree {
                 Node::Internal(n) if n.keys.is_empty() => {
                     let old = self.root;
                     self.root = n.children[0];
-                    self.pool.free(old)?;
+                    self.pool.free_in(old, self.branch)?;
                 }
                 _ => return Ok(()),
             }
@@ -716,7 +733,7 @@ impl BTree {
         let (mut merged, mut freed) = self.merge_cells(id, &v, &arena, &ends, entries)?;
         self.filter_cells(&mut merged, &mut freed, filter)?;
         for page in freed {
-            self.pool.free(page)?;
+            self.pool.free_in(page, self.branch)?;
         }
         let mut out = Vec::new();
         for (p, range) in pack_cells(&merged).into_iter().enumerate() {
@@ -837,7 +854,7 @@ impl BTree {
         let r = self.pool.create(LEAF)?;
         write(&mut *r.write()?);
         if p == 0 {
-            self.pool.free(id)?;
+            self.pool.free_in(id, self.branch)?;
         }
         Ok(r.id())
     }
@@ -888,7 +905,7 @@ impl BTree {
     /// the same pages freed and taken, in the same order.
     fn install_leaf(&self, id: PageId, p: Prepared) -> Result<Vec<(Vec<u8>, PageId, usize)>> {
         for page in p.freed {
-            self.pool.free(page)?;
+            self.pool.free_in(page, self.branch)?;
         }
         let mut out = Vec::with_capacity(p.pieces.len());
         for (i, (sep, mut page, size)) in p.pieces.into_iter().enumerate() {
@@ -1003,7 +1020,7 @@ impl BTree {
             let size = combined.size();
             if size <= PAYLOAD_SIZE {
                 node.children[a] = self.store(node.children[a], &combined)?;
-                self.pool.free(node.children[b])?;
+                self.pool.free_in(node.children[b], self.branch)?;
                 node.keys.remove(a);
                 node.children.remove(b);
                 small.remove(b);
@@ -1093,7 +1110,7 @@ impl BTree {
         };
         if combined.size() <= PAYLOAD_SIZE {
             node.children[a] = self.store(node.children[a], &combined)?;
-            self.pool.free(node.children[b])?;
+            self.pool.free_in(node.children[b], self.branch)?;
             node.keys.remove(a);
             node.children.remove(b);
         } else {
@@ -1142,8 +1159,22 @@ impl BTree {
 
     /// Frees every page of the tree (it must not be used afterwards).
     pub fn destroy(self) -> Result<()> {
+        self.release_younger(None)
+    }
+
+    /// Frees every page of the tree born after commit `origin` (all of
+    /// them with `None`); it must not be used afterwards.  A subtree whose
+    /// root was born then or before is skipped whole — a copy-on-write
+    /// tree never points to a younger page — so dropping a branch costs
+    /// what the branch changed (PLAN.md §M14.13).
+    pub fn release_younger(&self, origin: Option<u64>) -> Result<()> {
         let mut stack = vec![self.root];
         while let Some(id) = stack.pop() {
+            if let Some(o) = origin
+                && self.pool.birth(id)? <= o
+            {
+                continue;
+            }
             match self.load(id)? {
                 Node::Internal(n) => stack.extend(n.children),
                 Node::Leaf(leaf) => {
@@ -1152,7 +1183,7 @@ impl BTree {
                     }
                 }
             }
-            self.pool.free(id)?;
+            self.pool.free_in(id, self.branch)?;
         }
         Ok(())
     }

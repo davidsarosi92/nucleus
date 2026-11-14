@@ -260,7 +260,10 @@ impl Query {
         // The one item — an integer read where it lies in the document
         // (an integer type's commonest case, no copy), else copied out.
         let fast = matches!(t.fit, Fit::None)
-            && matches!(t.ty, DataType::BigInt | DataType::Integer | DataType::SmallInt);
+            && matches!(
+                t.ty,
+                DataType::BigInt | DataType::Integer | DataType::SmallInt
+            );
         let one = Self::with_items(a, |found| match found {
             [] => Ok(None),
             [eval::Item::J(b)] => {

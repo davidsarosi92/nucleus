@@ -37,6 +37,9 @@ pub enum Error {
     /// Another process (or another `Store` in this one) has the database
     /// open.
     Locked(String),
+    /// A branch (PLAN.md §M14.13) that does not exist, already exists, was
+    /// dropped, or cannot be dropped (it has branches of its own).
+    Branch(String),
 }
 
 /// The result type of the storage layer.
@@ -58,6 +61,7 @@ impl fmt::Display for Error {
                 f,
                 "the database {dir} is in use by another process (only one may open it)"
             ),
+            Error::Branch(why) => f.write_str(why),
         }
     }
 }

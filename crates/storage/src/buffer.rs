@@ -438,6 +438,38 @@ impl BufferPool {
     /// Frees page `id` (see [`Pager::free`]) and drops it from the cache.
     /// The page must not be pinned.
     pub fn free(&self, id: PageId) -> Result<()> {
+        self.uncache(id)?;
+        self.pager.free(id)
+    }
+
+    /// Frees page `id` for `branch` ([`Pager::release`]: a page shared with
+    /// other branches stays, and stays cached) and drops it from the
+    /// cache.  The page must not be pinned (unless it stays).
+    pub fn free_in(&self, id: PageId, branch: u32) -> Result<()> {
+        if !self.pager.needs_birth(branch) {
+            return self.free(id);
+        }
+        let birth = self.birth(id)?;
+        if !self.pager.keeps(id, branch, birth) {
+            self.uncache(id)?;
+        }
+        self.pager.release(id, branch, birth)
+    }
+
+    /// The commit page `id` was (or will be) born in: the pager knows a
+    /// page not durable yet; a durable one's header says.
+    pub fn birth(&self, id: PageId) -> Result<u64> {
+        if let Some(b) = self.pager.birth(id) {
+            return Ok(b);
+        }
+        let r = self.fetch(id)?;
+        let b = r.read().lsn();
+        Ok(b)
+    }
+
+    /// Drops page `id` from the cache (written back first if a commit in
+    /// flight still needs it).
+    fn uncache(&self, id: PageId) -> Result<()> {
         let mut inner = self.lock(id);
         if let Some(&frame) = inner.table.get(&id) {
             let f = self.frame(frame);
@@ -457,7 +489,7 @@ impl BufferPool {
             self.frame(frame).dirty.store(false, Ordering::Release);
             inner.free_frames.push(frame);
         }
-        self.pager.free(id)
+        Ok(())
     }
 
     /// Whether `id` may be written in place (see [`Pager::is_writable`]).
@@ -553,6 +585,13 @@ impl BufferPool {
                     f.dirty.store(true, Ordering::Release);
                     return Err(e);
                 }
+                // The birth the pager stamped (§M14.13), in the cached
+                // page too: it is fixed when the page is allocated, so a
+                // write since cannot have made it another.
+                f.page
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .set_lsn(copy.lsn());
                 self.writebacks.fetch_add(1, Ordering::Relaxed);
             }
             drop(inner);

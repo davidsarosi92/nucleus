@@ -177,7 +177,51 @@ struct State {
     known_len: u64,
     /// A sync failed; refuse everything.
     poisoned: bool,
+    /// The branches whose frees need their pages' births (§M14.13): a
+    /// branch of another, or one with branches of its own.
+    spaces: std::collections::HashMap<u32, Space>,
+    /// Pages put on dead lists since [`Pager::take_dead`] last took them.
+    dead: Vec<Dead>,
 }
+
+/// What a branch's free of a durable page means (PLAN.md §M14.13): the
+/// commit it was branched at, if it is a branch of another — a page born
+/// then or before is an ancestor's and stays —, and the commits its own
+/// branches were made at — a page of its own born at or before the latest
+/// may still be theirs, and goes to that point's dead list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Space {
+    /// The commit the branch starts from (`None`: the main branch).
+    pub origin: Option<u64>,
+    /// The commits its branches start from, ascending.
+    pub points: Vec<u64>,
+}
+
+/// A page on a dead list: freed by `branch` while its branch made at
+/// `point` may still read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dead {
+    /// The branch that freed it.
+    pub branch: u32,
+    /// The branch point whose list it is on.
+    pub point: u64,
+    /// The page.
+    pub page: u64,
+    /// The commit it was born in.
+    pub birth: u64,
+}
+
+/// What a branch's free of a page does ([`Pager::release`]).
+enum Fate {
+    Free,
+    Keep,
+    Dead(u64),
+}
+
+/// The branch whose frees are always plain ([`Pager::free`]): the
+/// branch directory's own tree, the pages a dropped branch's dead lists
+/// give back.
+pub const NO_BRANCH: u32 = u32::MAX;
 
 /// The pages of a commit in flight.
 #[derive(Debug)]
@@ -317,6 +361,8 @@ impl Pager {
                 frozen: None,
                 known_len,
                 poisoned: false,
+                spaces: std::collections::HashMap::new(),
+                dead: Vec::new(),
             }),
         }
     }
@@ -396,6 +442,10 @@ impl Pager {
             if !Self::may_write(&s, id.0) {
                 return Err(Error::Immutable(id));
             }
+            // Its birth: the commit that makes it durable (§M14.13).
+            if let Some(b) = Self::birth_in(&s, id.0) {
+                page.set_lsn(b);
+            }
         }
         if page.page_type() < PageType::FIRST_USER {
             return Err(Error::InvalidPage(id));
@@ -403,8 +453,115 @@ impl Pager {
         self.write_at(id, page)
     }
 
-    /// Whether `id` was allocated since the last sync (or freeze), so may
-    /// be changed in place rather than copied.
+    /// The commit that will make page `id` durable, if it is not yet:
+    /// the one in flight for a frozen page, the next for one allocated
+    /// since.
+    fn birth_in(s: &State, id: u64) -> Option<u64> {
+        let in_flight = s.frozen.as_ref();
+        if in_flight.is_some_and(|f| f.pages.contains(&id)) {
+            Some(s.durable.seq + 1)
+        } else if s.allocated.contains(&id) {
+            Some(s.durable.seq + 1 + u64::from(in_flight.is_some()))
+        } else {
+            None
+        }
+    }
+
+    /// [`birth_in`](Self::birth_in), for the buffer pool: `None` for a
+    /// durable page, whose birth its header holds.
+    pub fn birth(&self, id: PageId) -> Option<u64> {
+        Self::birth_in(&self.lock(), id.0)
+    }
+
+    /// Whether a free in `branch` needs its page's birth
+    /// ([`release`](Self::release)).
+    pub fn needs_birth(&self, branch: u32) -> bool {
+        self.lock().spaces.contains_key(&branch)
+    }
+
+    /// Sets (or, with `None`, removes) what a free in `branch` means.
+    pub fn set_space(&self, branch: u32, space: Option<Space>) {
+        let mut s = self.lock();
+        match space {
+            Some(sp) if sp.origin.is_some() || !sp.points.is_empty() => {
+                s.spaces.insert(branch, sp);
+            }
+            _ => {
+                s.spaces.remove(&branch);
+            }
+        }
+    }
+
+    /// What a free in `branch` means.
+    pub fn space(&self, branch: u32) -> Space {
+        self.lock().spaces.get(&branch).cloned().unwrap_or_default()
+    }
+
+    /// Whether a free of page `id`, born in commit `birth`, by `branch`
+    /// leaves it in use ([`release`](Self::release)): an ancestor's, or on
+    /// a dead list — so the cache keeps it.
+    pub fn keeps(&self, id: PageId, branch: u32, birth: u64) -> bool {
+        !matches!(Self::fate(&self.lock(), id, branch, birth), Fate::Free)
+    }
+
+    fn fate(s: &State, id: PageId, branch: u32, birth: u64) -> Fate {
+        if s.allocated.contains(&id.0) {
+            return Fate::Free;
+        }
+        let Some(sp) = s.spaces.get(&branch) else {
+            return Fate::Free;
+        };
+        if sp.origin.is_some_and(|o| birth <= o) {
+            return Fate::Keep;
+        }
+        match sp.points.last() {
+            Some(&point) if birth <= point => Fate::Dead(point),
+            _ => Fate::Free,
+        }
+    }
+
+    /// Frees page `id`, born in commit `birth`, for `branch` (PLAN.md
+    /// §M14.13): a page allocated since the last commit is free at once;
+    /// one an ancestor's (born at or before the branch's origin) stays;
+    /// one of the branch's own that a branch of it may read goes to the
+    /// latest branch point's dead list ([`take_dead`](Self::take_dead));
+    /// else it is free after the next commit.
+    pub fn release(&self, id: PageId, branch: u32, birth: u64) -> Result<()> {
+        let mut s = self.begin()?;
+        Self::check_data_page(&s, id)?;
+        match Self::fate(&s, id, branch, birth) {
+            Fate::Keep => Ok(()),
+            Fate::Dead(point) => {
+                s.dead.push(Dead {
+                    branch,
+                    point,
+                    page: id.0,
+                    birth,
+                });
+                Ok(())
+            }
+            Fate::Free => Self::free_locked(&mut s, id),
+        }
+    }
+
+    /// The commit the next freeze makes durable: a branch made in it
+    /// starts from it.
+    pub fn next_seq(&self) -> u64 {
+        self.lock().durable.seq + 1
+    }
+
+    /// The pages on dead lists not yet taken ([`take_dead`](Self::take_dead)).
+    pub fn dead(&self) -> Vec<Dead> {
+        self.lock().dead.clone()
+    }
+
+    /// The pages put on dead lists since the last call.
+    pub fn take_dead(&self) -> Vec<Dead> {
+        std::mem::take(&mut self.lock().dead)
+    }
+
+    /// Whether `id` may be changed in place rather than copied: allocated
+    /// since the last sync (or freeze).
     pub fn is_writable(&self, id: PageId) -> bool {
         self.lock().allocated.contains(&id.0)
     }
@@ -441,6 +598,10 @@ impl Pager {
     pub fn free(&self, id: PageId) -> Result<()> {
         let mut s = self.begin()?;
         Self::check_data_page(&s, id)?;
+        Self::free_locked(&mut s, id)
+    }
+
+    fn free_locked(s: &mut State, id: PageId) -> Result<()> {
         if s.allocated.remove(&id.0) {
             s.free.insert(id.0);
         } else if s.free.contains(&id.0)

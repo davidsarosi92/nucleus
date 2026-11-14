@@ -22,6 +22,7 @@ pub use error::{Error, Result};
 pub use page::{PAGE_SIZE, PAYLOAD_SIZE, Page, PageId, PageType};
 pub use pager::Pager;
 pub use store::{
-    Batch, Checkpoint, DEFERRED_MAX, Deferred, Recovery, Scrubbed, Store, StoreOptions,
+    Batch, BranchInfo, Checkpoint, DEFERRED_MAX, Deferred, MAIN, MAIN_NAME, Recovery, Scrubbed,
+    Store, StoreOptions, valid_branch_name,
 };
 pub use wal::{Lsn, Wal};
