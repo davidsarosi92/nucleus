@@ -1000,32 +1000,38 @@ nucleus restore /abs/backups/mon restored --subject-keys db.subject-keys
 
 ## JSON
 
-PLAN.md §M14.15 J1: the `json` type, release, an M2 Pro.  The usual
-corpora (`canada.json`: numbers; `citm_catalog.json`: objects;
-`twitter.json`: strings and Unicode), fetched by `bench/json/run.sh`.
+PLAN.md §M14.15 J1–J2: the `json` type and its operators, release, an
+M2 Pro.  The usual corpora (`canada.json`: numbers; `citm_catalog.json`:
+objects; `twitter.json`: strings and Unicode), fetched by
+`bench/json/run.sh`.
 
 In the process (`bench/json`, the median of 15), against `serde_json`'s
 `Value`; MB/s of the text:
 
 | | parse | serde | output | serde | one field | serde (parse) |
 |---|---:|---:|---:|---:|---:|---:|
-| canada (2,198 KB) | 484 | 499 | 448 | 1,004 | 0.024 µs | 4,578 µs |
-| citm_catalog (1,687 KB) | 1,011 | 660 | 1,606 | 4,235 | 0.036 µs | 2,642 µs |
-| twitter (617 KB) | 716 | 480 | 1,178 | 2,092 | 0.025 µs | 1,352 µs |
+| canada (2,198 KB) | 479 | 494 | 436 | 1,010 | 0.024 µs | 4,556 µs |
+| citm_catalog (1,687 KB) | 1,026 | 671 | 1,614 | 4,265 | 0.035 µs | 2,636 µs |
+| twitter (617 KB) | 847 | 483 | 1,157 | 2,079 | 0.025 µs | 1,318 µs |
 
-Canada's parse varies 484–568 MB/s between runs.  serde prints compact
+Canada's parse varies 479–568 MB/s between runs.  serde prints compact
 text from doubles it already holds; nucleus prints PostgreSQL's layout
 from exact decimals.  A field is read from the stored form in place.
 
 Against PostgreSQL 18's `jsonb` (`bench/json/pg.py`: postgres:18-alpine
 in Docker on the same machine, its defaults; nucleus a server; seconds
-for one statement, the median of five):
+for one statement, the median of five; the field sums asserted equal):
 
-| documents | rows | text | parse (`doc::json IS NOT NULL`) | PostgreSQL | output (`sum(length(doc::text))`) | PostgreSQL |
-|---|---:|---:|---:|---:|---:|---:|
-| tweets | 50,000 | 246 MB | 0.428 | 1.634 | 0.145 | 1.124 |
-| citm performances | 50,000 | 103 MB | 0.091 | 1.001 | 0.048 | 0.438 |
-| canada features ×4 | 4 | 8.8 MB | 0.026 | 0.072 | 0.029 | 0.044 |
+| documents | rows | text | parse | PostgreSQL | output | PostgreSQL | a field | PostgreSQL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| tweets | 50,000 | 246 MB | 0.397 | 1.642 | 0.145 | 1.113 | 0.082 | 0.361 |
+| citm performances | 50,000 | 103 MB | 0.095 | 0.983 | 0.054 | 0.438 | 0.010 | 0.038 |
+| canada features ×4 | 4 | 8.8 MB | 0.027 | 0.071 | 0.030 | 0.042 | 0.004 | 0.012 |
+
+Parse: `count(*) … WHERE doc::json IS NOT NULL` over a text column;
+output: `sum(length(doc::text))`; a field: `sum(length(doc -> 'user' ->>
+'screen_name'))` (tweets), `doc ->> 'start'` (performances), `doc ->
+'properties' ->> 'name'` (features).
 
 A whole file as one value:
 

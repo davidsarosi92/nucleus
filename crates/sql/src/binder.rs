@@ -581,8 +581,10 @@ impl<'a> Binder<'a> {
             return self.recall_ref(args, alias, columns);
         }
         let empty = Scope::default();
-        // The columns: one named after the function (or its alias), or
-        // those the function names.
+        // The columns: one named after the function (or its alias) — unless
+        // the function names it otherwise (`json_array_elements`'s
+        // `value`, as PostgreSQL's out parameter) —, or those the
+        // function names.
         let (func, bound, outs) = match self.registry.table_function(name).cloned() {
             Some(f) => {
                 if !f.arity().contains(&args.len()) {
@@ -597,7 +599,7 @@ impl<'a> Binder<'a> {
                 }
                 let sig = f.resolve(&arg_info(&typed))?;
                 let outs: Vec<(Option<String>, Option<DataType>)> = match sig.columns.as_slice() {
-                    [(_, ty)] => vec![(None, *ty)],
+                    [(n, ty)] if n == name || n == f.name() => vec![(None, *ty)],
                     many => many.iter().map(|(n, t)| (Some(n.clone()), *t)).collect(),
                 };
                 let (bound, _) = self.apply_signature(name, sig.args, typed)?;
@@ -2789,9 +2791,27 @@ impl<'a> Binder<'a> {
                     _ => None,
                 };
                 let (r, rt) = sub(right, self)?;
-                // An untyped side takes the other side's type.
-                let (l, lt) = self.coerce(rt, l, lt)?.1;
-                let (r, rt) = self.coerce(lt, r, rt)?.1;
+                // An untyped right side takes the type of the operator's
+                // right operand when the left's type has it only for other
+                // types (`doc -> 'k'`: text), as PostgreSQL's `unknown`
+                // prefers text; else an untyped side takes the other
+                // side's type.
+                let untyped =
+                    matches!(r, Expr::Param(_) | Expr::Literal(Value::Null)) || is_text_literal(&r);
+                let (l, lt, r, rt) = match lt
+                    .filter(|_| untyped)
+                    .and_then(|a| self.registry.operand_for(op, a))
+                {
+                    Some(want) => {
+                        let (r, rt) = self.coerce(Some(want), r, rt)?.1;
+                        (l, lt, r, rt)
+                    }
+                    None => {
+                        let (l, lt) = self.coerce(rt, l, lt)?.1;
+                        let (r, rt) = self.coerce(lt, r, rt)?.1;
+                        (l, lt, r, rt)
+                    }
+                };
                 let (mut e, ty) = self.operator(op, (l, lt), (r, rt))?;
                 // An index on the left column may say what the operator
                 // means there (a text index's analyzer for `@@`).
@@ -3532,6 +3552,17 @@ impl<'a> Binder<'a> {
         } else {
             (l, lt, r, rt)
         };
+        // A registered type's operator whose right side is of another type
+        // (`json - text`, `json - 2`): that type, an untyped side taking it.
+        if let Some(t @ DataType::Ext(e)) = lt
+            && let Some(a) = e.imp().arithmetic()
+            && let Some(o) = a.operators().iter().find(|o| **o == op.symbol()).copied()
+            && let Some(want) = a.other_operand(o, if untyped(&r) { None } else { rt })
+        {
+            let (r, _) = self.coerce(Some(want), r, rt)?;
+            let f = crate::ext::ArithmeticFn::mixed(t, o, want);
+            return Ok((Expr::Call(f, vec![l, r]), Some(t)));
+        }
         // A registered type's own arithmetic (a vector's `+`, `||`).
         let own = |t: Option<DataType>| match t {
             Some(t @ DataType::Ext(e)) => e

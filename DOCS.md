@@ -96,6 +96,12 @@ scripts/check-boundaries.py                      # core ↛ modules; modules →
 scripts/detach-test.sh [<module package> …]      # cargo package, then test each unpacked copy
 ```
 
+A test-kit script whose results claim PostgreSQL's is checked against a
+real one (Docker's `postgres:18-alpine`, or `--psql`): `scripts/slt-pg.py
+check crates/testkit/slt/65_json.slt`; `fill` writes PostgreSQL's results
+in.  Records after `# nucleus-only:` are nucleus's on purpose, and left
+out.
+
 The detachability test packages the core crates and the modules
 (`cargo package`, which also builds each from its package against the
 others'; in a target directory of its own, fresh each run, since cargo
@@ -5021,7 +5027,11 @@ the end of each element (1, 2 or 4 bytes, the fewest that hold them)
 and the elements — `a[i]` at once; an object its count, the end of each
 key and of each value, the keys sorted by their bytes, then the values
 in the keys' order — a key found by binary search, its value read
-without the others.  A value inside another is its bytes.  Bytes from
+without the others.  Keys sort shorter first, then by their bytes —
+`jsonb`'s order, so a value's text and its place in an order come out as
+PostgreSQL's (§M14.15 J2 changed it from bytes alone: a value stored
+before reads, but compares as unequal to the same document written
+since).  A value inside another is its bytes.  Bytes from
 outside (a key, a corrupted page) are checked before they are a value
 (`form::check`: read, written again, compared); a reader refuses a
 number that could not have been parsed.
@@ -5032,8 +5042,9 @@ characters only, numbers in plain notation (`0.0000001`).
 
 **Order** (`json::key`) is PostgreSQL's: null < string < number <
 boolean (false < true) < array < object; arrays by length, then element
-by element; objects by key count, then key and value by key; strings by
-their bytes, numbers by value.  An order-preserving key encoding makes
+by element; objects by key count, then key and value by key in the
+keys' order (a key by its length, then its bytes); strings by their
+bytes, numbers by value.  An order-preserving key encoding makes
 `json` a primary key or an indexed column, range scans included.
 
 **Casts**: from `text` (the input) and to `text` (the output); to
@@ -5042,15 +5053,58 @@ a json value of that kind (`'42'::json::int`; another kind is `22023`,
 `cannot cast json string to type integer`; a number past `numeric`'s 38
 digits is `22003`).
 
+**Operators** (`json::ops`, `json::funcs`; PostgreSQL's `jsonb` ones,
+checked against PostgreSQL 18 by `slt/65_json.slt`):
+
+| | |
+|---|---|
+| `j -> 'k'`, `j -> 2` | a field, an element (negative: from the end); `NULL` when missing or not of that kind |
+| `j ->> 'k'`, `j ->> 2` | the same as `text`: a string's own text, `NULL` for `null` |
+| `j #> '{a,0}'`, `j #>> '{a,0}'` | at a path of keys and positions |
+| `a @> b`, `b <@ a` | containment: every key of an object with a containing value, each element of an array in some element; a top-level array contains its scalar elements |
+| `j ? 'k'`, `?\|`, `?&` | a key, or a string element, exists — any, all of a `text[]` |
+| `a \|\| b` | objects merged (the right's keys win), arrays concatenated, a value appended or prepended to an array, two others an array of both |
+| `j - 'k'`, `j - '{k,l}'::text[]`, `j - 2` | without the keys (strings, for an array), without the element |
+| `j #- '{a,0}'` | without the value at a path |
+
+An untyped right side (`doc -> 'name'`, `doc -> $1`) is `text` where
+the operator has a `text` form (as PostgreSQL's `unknown`), else the
+type its only form takes (`#> '{a,b}'`: `text[]`) — the binder's rule
+for any registered operator (`Registry::operand_for`); `-`, the
+grammar's own operator, takes a right side of another type through the
+type's arithmetic (`Arithmetic::other_operand`).
+
+**Functions**, each also under its `jsonb_` name: `json_typeof`,
+`json_array_length`, `json_pretty` (empty containers on two lines, as
+`jsonb_pretty`), `json_strip_nulls(j [, in_arrays])`, `to_json` (numbers
+as numbers — a float's non-finite values as strings —, times in ISO
+8601, arrays as arrays, anything else its text as a string),
+`json_build_object(k, v, …)`, `json_build_array(…)`, `json_object(text[]
+[, text[]])`, `json_set(j, path, new [, create])` and `json_insert(j,
+path, new [, after])` (a position out of range adds at that end),
+`json_extract_path(j, k, …)` and `_text`; in `FROM`, `json_each`,
+`json_each_text`, `json_array_elements`, `json_array_elements_text`
+(their columns `key`, `value`) and `json_object_keys`; aggregates
+`json_agg(x)` (`NULL`s as `null`) and `json_object_agg(k, v)`.  Errors
+are PostgreSQL's (`22023 cannot delete from scalar`, `22P02 path
+element at position 1 is not an integer: "x"`, `22004` a `NULL` path
+step or key, `2202E` uneven arrays).  Not there yet: the SQL/JSON path
+language and the standard's functions (J3), arrays of `json` (no
+`json[]`), `row_to_json` (no row values: `json_build_object`), set-returning functions in the select list (PostgreSQL's
+`SELECT json_each(j)`: in `FROM`), and `jsonb`'s raw-scalar quirk
+(`'1'::jsonb -> 0` is `1` there, `NULL` here).
+
 **On the wire** (`ncp` tag 11 named `json`) a value travels as its text
 (`Type::wire_output` / `wire_input`), in rows and in columnar batches;
 the drivers hand out the language's own values (§11).  pg-compat shows
 it as `jsonb` (§9).  Tests: `json::tests` (round trips, canonical bytes,
 malformed text and bytes, the order, wide containers), `tests/json.rs`
 (stored and read back, a key and an index, `DISTINCT` and `GROUP BY`,
-casts and errors), the law kit's generator (equal documents written
-differently), the `json` fuzz target (§2), pg-compat's
-`json_through_a_real_driver`.  Measurements: PLAN.md §M14.15 J1 and
+casts and errors), `slt/65_json.slt` (the operators and functions, 108
+records as PostgreSQL 18 gives them: `scripts/slt-pg.py check`), the law
+kit's generator (equal documents written differently), the `json` fuzz
+target (§2; the operators' laws too), pg-compat's
+`json_through_a_real_driver`.  Measurements: PLAN.md §M14.15 J1–J2 and
 `docs/benchmarks.md`.
 
 ### 8.14 Errors and hints (`error`, `hint`)
@@ -6025,6 +6079,18 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — §M14.15 J2, JSON's operators and functions:**
+  PostgreSQL's `jsonb` operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`,
+  `?`, `?|`, `?&`, `||`, `-`, `#-`), functions under `json_` and
+  `jsonb_` names, `json_each` / `json_array_elements` / `json_object_keys`
+  in `FROM`, `json_agg` and `json_object_agg`; 108 records checked
+  against PostgreSQL 18 (`slt/65_json.slt`, `scripts/slt-pg.py`).  Keys
+  now sort shorter first, as `jsonb`'s; `json_pretty` prints empty
+  containers as `jsonb_pretty`.  The binder types an untyped right
+  operand by the operator's forms (`Registry::operand_for`), and a
+  type's arithmetic may take a right side of another type
+  (`Arithmetic::other_operand`); a table function may name its single
+  column.
 - **2026-11-14 — Fix: a deleted key back over a large commit's intent.**
   A commit's leaf filter dropped a key's newest tombstone at or below the
   watermark as hiding nothing, though a large transaction's committed

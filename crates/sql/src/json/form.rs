@@ -17,8 +17,9 @@
 //!   two, 2: four); its count (LEB128); the end of each element, relative
 //!   to where they start; then the elements.  `a[i]` is found at once.
 //! - an object: the same width and count; the end of each key, then the
-//!   end of each value; the keys (UTF-8, sorted by their bytes, each once —
-//!   the last of duplicates kept), then the values in the keys' order.  A
+//!   end of each value; the keys (UTF-8, sorted shorter first, then by
+//!   their bytes — `jsonb`'s order —, each once, the last of duplicates
+//!   kept), then the values in the keys' order.  A
 //!   key is found by binary search, its value without reading the others.
 //!
 //! The widths are the smallest that hold a container's offsets, so equal
@@ -412,7 +413,7 @@ impl<'a> Object<'a> {
             let mid = lo + (hi - lo) / 2;
             let (s, e) = span(self.key_ends, self.width, mid);
             let k = self.keys.get(s..e).ok_or_else(malformed)?;
-            match k.cmp(key.as_bytes()) {
+            match key_order(k, key.as_bytes()) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
                 std::cmp::Ordering::Equal => return Ok(Some(mid)),
@@ -625,6 +626,12 @@ pub(crate) fn too_large() -> Error {
     Error::program_limit("a json value is limited to 4 GB")
 }
 
+/// The order of an object's keys: shorter first, then by bytes (as
+/// `jsonb` keeps them, so text and order come out as PostgreSQL's).
+pub fn key_order(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+}
+
 /// An object of `pairs` — each a key and the range of its value's bytes
 /// in `values` — sorted by key, the last of equal keys kept.
 pub(crate) fn put_object<K: AsRef<str>>(
@@ -633,7 +640,7 @@ pub(crate) fn put_object<K: AsRef<str>>(
     values: &[u8],
 ) -> Result<()> {
     // A stable sort keeps duplicates in their order: the last one wins.
-    pairs.sort_by(|a, b| a.0.as_ref().as_bytes().cmp(b.0.as_ref().as_bytes()));
+    pairs.sort_by(|a, b| key_order(a.0.as_ref().as_bytes(), b.0.as_ref().as_bytes()));
     let mut w = 0;
     for r in 0..pairs.len() {
         if r + 1 < pairs.len() && pairs[r + 1].0.as_ref() == pairs[r].0.as_ref() {

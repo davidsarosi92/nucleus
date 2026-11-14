@@ -10,7 +10,9 @@
 //! parses JSON — and they hand out their own values (a `dict`, an object).
 
 pub mod form;
+mod funcs;
 pub mod key;
+pub mod ops;
 pub mod parse;
 pub mod text;
 
@@ -215,6 +217,9 @@ impl Type for Json {
     fn cast_to(&self, v: &Value, to: DataType) -> Option<Result<Value>> {
         cast_to(v, to)
     }
+    fn arithmetic(&self) -> Option<&dyn crate::ext::Arithmetic> {
+        Some(&funcs::Arith)
+    }
     fn wire_output(&self, v: &Value) -> Option<Vec<u8>> {
         Some(self.output(v).into_bytes())
     }
@@ -257,7 +262,8 @@ impl Type for Json {
 
 /// Registers the type and its functions.
 pub fn register(r: &mut Registry) -> Result<()> {
-    r.add_type(Arc::new(Json))
+    r.add_type(Arc::new(Json))?;
+    funcs::register(r)
 }
 
 #[cfg(test)]

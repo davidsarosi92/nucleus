@@ -50,7 +50,8 @@ fn text_round_trips() {
         ("{\"a\": 1, \"a\": 2}", "{\"a\": 2}"),
         (
             "{\"aa\": 1, \"b\": 2, \"a\": 3}",
-            "{\"a\": 3, \"aa\": 1, \"b\": 2}",
+            // Shorter keys first, as `jsonb` keeps them.
+            "{\"a\": 3, \"b\": 2, \"aa\": 1}",
         ),
         (
             "{\"x\": {\"z\": [1, {\"q\": null}], \"y\": \"\"}, \"w\": false}",
@@ -269,7 +270,8 @@ fn pretty_as_postgresql() {
     let b = parse::parse("{\"a\": 1, \"b\": [1, {}, []], \"c\": {\"d\": null}}").expect("parses");
     assert_eq!(
         to_pretty(&b).expect("pretty"),
-        "{\n    \"a\": 1,\n    \"b\": [\n        1,\n        {},\n        []\n    ],\n    \"c\": {\n        \"d\": null\n    }\n}"
+        // Empty containers too, as PostgreSQL 18 prints them.
+        "{\n    \"a\": 1,\n    \"b\": [\n        1,\n        {\n        },\n        [\n        ]\n    ],\n    \"c\": {\n        \"d\": null\n    }\n}"
     );
 }
 

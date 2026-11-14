@@ -92,6 +92,17 @@ fn pretty_bytes(n: Node<'_>, out: &mut Vec<u8>, level: usize) -> Result<()> {
             indent(out, level);
             out.push(b'}');
         }
+        // Empty, as `jsonb_pretty` prints one: its brackets on two lines.
+        Node::Array(_) => {
+            out.push(b'[');
+            indent(out, level);
+            out.push(b']');
+        }
+        Node::Object(_) => {
+            out.push(b'{');
+            indent(out, level);
+            out.push(b'}');
+        }
         other => write_bytes(other, out)?,
     }
     Ok(())

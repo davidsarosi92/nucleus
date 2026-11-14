@@ -283,7 +283,7 @@ are marked ✅.
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ✅ (2026-11-14) study written (2026-11-13); R1 ✅ memory stores, `REMEMBER`, `recall()`, row expiry, MCP tools, driver helpers (LongMemEval_S turn R@10 0.819 against the paper's BM25 0.592); R2 ✅ `FORGET SUBJECT`, the scrub and the search (a planted subject's texts: 100 places after `DELETE` and a vacuum, 0 after `FORGET`); R3 ✅ leak tests over every recall path, BM25's statistics a tenant's own on a table partitioned by tenant; R4 ✅ `recall` under 1 ms in the process (100 000 memories), batched through `LATERAL`, a vacuum's crash flaw fixed; §M14.14 ✅ between; R5 ✅ citations (`as_of`), read records by request id (`nc_catalog.reads`), erasure through history and the log; R6 ✅ `BACKUP TO` / `nucleus restore` without index pages, each subject's rows sealed under its own key, which `FORGET` destroys (60 MiB backed up in 0.46 s, restored in 0.80 s); R7 ✅ `docs/memory.md`, the Python and JavaScript `memory` examples (run in CI), MCP `cite` and `forget_subject` |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
-| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller) |
+| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
@@ -8130,7 +8130,7 @@ SELECT … FROM t AS OF …`, a dropped table included).
   costs nothing now.  `snapshot_at`'s search bounded by the visible
   commit, not the timestamp space: 20 µs → 5.5 µs.
 
-### §M14.15 — JSON ◐ (study written, J1 ✅, 2026-11-14)
+### §M14.15 — JSON ◐ (study written, J1–J2 ✅, 2026-11-14)
 
 - A `JSON` type (validated, stored in a compact binary form), operators
   `->`, `->>`, `#>`, `@>`, `?`, functions to build, extract, test and
@@ -8324,8 +8324,9 @@ put it but `text`, which it can neither query nor index.
   0.029 s against 1.12 / 0.44 / 0.044; a whole file stored 1667 / 407 /
   431 KB against `jsonb`'s 2599 / 739 / 497 (text 2198 / 1687 / 617).
   *Differences from PostgreSQL, recorded:* `1.50` reads back `1.5`
-  (the value, not the scale); keys sort by bytes, not length first; the
-  top-level `[] < null` quirk of `jsonb` is not kept.  *Fuzzing*
+  (the value, not the scale); keys sorted by bytes, not length first
+  (J2 changed this: below); the top-level `[] < null` quirk of `jsonb`
+  is not kept.  *Fuzzing*
   (`fuzz/fuzz_targets/json.rs`: text laws, and malformed bytes read
   safely) found two before the merge: a corrupt decimal with a huge
   exponent printing billions of zeros (now bounded at read) and an
@@ -8339,6 +8340,52 @@ put it but `text`, which it can neither query nor index.
   `||`, `-`, `#-`, `json_strip_nulls`), reading (`json_typeof`,
   `json_array_length`, `json_each`, `json_array_elements`,
   `json_object_keys`); an slt checked against PostgreSQL 18.
+
+  **J2 ✅ (2026-11-14).**  `json::ops` (on the binary form: a node's
+  bytes are a value's, so a change re-encodes only the containers it
+  passes through) and `json::funcs`.  *Operators:* `->`, `->>`, `#>`,
+  `#>>`, `@>`, `<@`, `?`, `?|`, `?&` as registered operators; `||` and
+  `-` — the grammar's own — through the type's arithmetic, which may
+  now take a right side of another type (`Arithmetic::other_operand`:
+  `json - text`, `- int`, `- text[]`); `#-`.  An untyped right operand
+  (`doc -> 'k'`, `doc -> $1`) takes `text` where the operator has a
+  `text` form, else its only form's type (`Registry::operand_for` —
+  PostgreSQL's preference of `unknown` for the string category, for
+  any registered operator).  *Functions* under `json_` and `jsonb_`
+  names: `json_typeof`, `json_array_length`, `json_pretty`,
+  `json_strip_nulls`, `to_json`, `json_build_object`,
+  `json_build_array`, `json_object`, `json_set`, `json_insert`,
+  `json_extract_path[_text]`; in `FROM` `json_each[_text]`,
+  `json_array_elements[_text]` (a table function may now name its
+  single column: `value`, as PostgreSQL's out parameter), and
+  `json_object_keys`; aggregates `json_agg`, `json_object_agg`.
+  *Checked against PostgreSQL 18:* `slt/65_json.slt`, 108 records,
+  with a new tool, `scripts/slt-pg.py` (`check` runs a script's records
+  against a real PostgreSQL in Docker and reports what differs; `fill`
+  writes its results in; records after `# nucleus-only:` are left out)
+  — the claim "checked against PostgreSQL" the test kit's scripts make
+  is now a command.  Its first runs showed every object's text in
+  another key order: `jsonb` sorts keys shorter first, then by bytes.
+  *Changed:* the form now sorts keys so (`form::key_order`, and the key
+  encoding a key's length first), so text, `ORDER BY` and the scripts
+  agree with PostgreSQL's; and `json_pretty` prints an empty container
+  on two lines, as `jsonb_pretty`.  A value stored by J1 (the same
+  day) still reads, but is not canonical in the new order.  *Kept
+  different, recorded* (`# nucleus-only:` records): the scale (`2.50`
+  is `2.5`), and `jsonb`'s raw-scalar quirk (`'1'::jsonb -> 0` is `1`
+  there, `NULL` here).  *Not there:* arrays of `json` (`json[]`: a
+  registered type has no array type yet), `row_to_json` and `to_json`
+  of a row (nucleus has no row values yet: `json_build_object` names
+  the columns), set-returning functions in the select list (in `FROM`,
+  as everywhere in nucleus), SQL/JSON paths (J3).  *Fuzzing:* the `json` target checks the operators' laws too —
+  every result canonical, a value contains itself and itself less a
+  key, a key deleted is gone and set is there (1.4 M runs clean).
+  *Measured* against PostgreSQL 18 (`bench/json/pg.py`, the field sums
+  asserted equal): a nested field over 50 000 tweets, `doc -> 'user'
+  ->> 'screen_name'`, 0.082 s against 0.361; a performance's `->>
+  'start'` 0.010 against 0.038; a feature's name 0.004 against 0.012 —
+  read in place, where `jsonb` finds a key by binary search too but
+  detoasts the value first.
 - **J3 — SQL/JSON**: the path language (`lax` / `strict`, filters,
   methods), `json_path_query` and kin, `@?` / `@@`, `JSON_VALUE`,
   `JSON_QUERY`, `JSON_EXISTS`, `JSON_TABLE`, `IS JSON`, the standard

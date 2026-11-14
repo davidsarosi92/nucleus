@@ -10,6 +10,9 @@ timed (the median of five runs, the client's clock):
 
 - parse: `count(*) … WHERE doc::json IS NOT NULL` over the text column;
 - output: `sum(length(doc::text))` over a json column;
+- field: `sum(length(<a field>))` over it — a nested field by `->` and
+  `->>` (a tweet's user's screen name, a performance's start, a
+  feature's name);
 - size: each whole file as one value, `pg_column_size` against nucleus's
   binary form (from `bench/json`'s binary: the `form KB` column).
 
@@ -94,7 +97,12 @@ def main():
             except Exception:
                 time.sleep(0.5)
         print(f"{'documents':<14} {'rows':>7} {'MB':>6} | {'parse s':>8} {'pg':>8} | "
-              f"{'output s':>8} {'pg':>8}")
+              f"{'output s':>8} {'pg':>8} | {'field s':>8} {'pg':>8}")
+        fields = {
+            "tweets": "doc -> 'user' ->> 'screen_name'",
+            "performances": "doc ->> 'start'",
+            "features": "doc -> 'properties' ->> 'name'",
+        }
         for name, texts in docs.items():
             rows = [texts[i % len(texts)] for i in range(args.rows)] if name != "features" else texts * 4
             mb = sum(len(t.encode()) for t in rows) / 1e6
@@ -107,6 +115,7 @@ def main():
                  "VACUUM ANALYZE src; VACUUM ANALYZE j;")
             pg_parse = pg_time("SELECT count(*) FROM src WHERE doc::jsonb IS NOT NULL;")
             pg_out = pg_time("SELECT sum(length(doc::text)) FROM j;")
+            pg_field = pg_time(f"SELECT sum(length({fields[name]})) FROM j;")
             # nucleus: the same rows.
             db.execute("DROP TABLE IF EXISTS src")
             db.execute("DROP TABLE IF EXISTS j")
@@ -117,8 +126,11 @@ def main():
             db.execute("CREATE TABLE j AS SELECT id, doc::json AS doc FROM src")
             n_parse = median(lambda: db.execute("SELECT count(*) FROM src WHERE doc::json IS NOT NULL"))
             n_out = median(lambda: db.execute("SELECT sum(length(doc::text)) FROM j"))
+            field = f"SELECT sum(length({fields[name]})) FROM j"
+            assert str(db.execute(field).rows[0][0]) == psql(field + ";"), "the same field sums"
+            n_field = median(lambda: db.execute(field))
             print(f"{name:<14} {len(rows):>7} {mb:>6.1f} | {n_parse:>8.3f} {pg_parse:>8.3f} | "
-                  f"{n_out:>8.3f} {pg_out:>8.3f}")
+                  f"{n_out:>8.3f} {pg_out:>8.3f} | {n_field:>8.3f} {pg_field:>8.3f}")
         print()
         print(f"{'file':<20} {'text KB':>8} {'jsonb KB':>9}")
         for f in ("canada.json", "citm_catalog.json", "twitter.json"):

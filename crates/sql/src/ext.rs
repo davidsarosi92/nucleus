@@ -1010,6 +1010,26 @@ impl Registry {
         self.operators.get(&(symbol.to_string(), left, right))
     }
 
+    /// The type an untyped right operand of `symbol` takes after a `left`
+    /// one, when `left`'s operators of that symbol all take another type
+    /// on their right: `text` if one does, else the only one.  `None`
+    /// when one takes `left` itself, or none is registered.
+    pub fn operand_for(&self, symbol: &str, left: DataType) -> Option<DataType> {
+        let rights: Vec<DataType> = self
+            .operators
+            .keys()
+            .filter(|(s, l, _)| s == symbol && *l == left)
+            .map(|(_, _, r)| *r)
+            .collect();
+        if rights.is_empty() || rights.contains(&left) {
+            return None;
+        }
+        if rights.contains(&DataType::Text) {
+            return Some(DataType::Text);
+        }
+        (rights.len() == 1).then(|| rights[0])
+    }
+
     /// Every registered operator: symbol, operand types, function.
     pub fn operators(&self) -> Vec<(&str, DataType, DataType, &FnRef)> {
         let mut v: Vec<_> = self
@@ -1254,7 +1274,17 @@ pub trait Arithmetic: Send + Sync {
     /// The operators it has, of `+`, `-`, `*` and `||`.
     fn operators(&self) -> &[&str];
 
-    /// `a op b`, two non-`NULL` values of the type.
+    /// For `a op b` whose right side is not of the type (`json - text`):
+    /// the type it is taken as, given what it is (`None`: untyped — a
+    /// string literal, a parameter, `NULL`); `None` when the type has no
+    /// such operator.  The default: none (both sides of the type).
+    fn other_operand(&self, op: &str, b: Option<DataType>) -> Option<DataType> {
+        let _ = (op, b);
+        None
+    }
+
+    /// `a op b`, two non-`NULL` values of the type (or the right one of
+    /// the type [`other_operand`](Self::other_operand) chose).
     fn apply(&self, op: &str, a: &Value, b: &Value) -> Result<Value>;
 }
 
@@ -1526,6 +1556,8 @@ impl ScalarFunction for FitFn {
 pub struct ArithmeticFn {
     ty: DataType,
     op: &'static str,
+    /// The right side's type, when not `ty` ([`Arithmetic::other_operand`]).
+    other: Option<DataType>,
     name: String,
 }
 
@@ -1536,7 +1568,23 @@ impl ArithmeticFn {
         FnRef::new(Arc::new(ArithmeticFn {
             ty,
             op,
+            other: None,
             name: format!("{op}({})", t.name()),
+        }))
+    }
+
+    /// `op` of `ty` with a right side of type `other`.
+    pub fn mixed(ty: DataType, op: &'static str, other: DataType) -> FnRef {
+        let t = crate::builtin::type_of(ty);
+        FnRef::new(Arc::new(ArithmeticFn {
+            ty,
+            op,
+            other: Some(other),
+            name: format!(
+                "{op}({},{})",
+                t.name(),
+                crate::builtin::type_of(other).name()
+            ),
         }))
     }
 }
@@ -1550,7 +1598,10 @@ impl ScalarFunction for ArithmeticFn {
     }
     fn resolve(&self, _: &[ArgInfo]) -> Result<Signature> {
         Ok(Signature::new(
-            vec![Arg::Untyped(self.ty); 2],
+            vec![
+                Arg::Untyped(self.ty),
+                Arg::Untyped(self.other.unwrap_or(self.ty)),
+            ],
             Returns::Type(Some(self.ty)),
         ))
     }

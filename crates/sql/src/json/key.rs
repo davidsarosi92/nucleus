@@ -12,8 +12,8 @@
 //!   when negative, so a larger magnitude sorts lower;
 //! - false `04`, true `05`;
 //! - an array `06`, its length (4 bytes, big-endian), its elements;
-//! - an object `07`, its key count, then each key (as a string's bytes)
-//!   and value, in the keys' order.
+//! - an object `07`, its key count, then each key (its length, 4 bytes
+//!   big-endian, and its bytes) and value, in the keys' order.
 
 use std::cmp::Ordering;
 
@@ -66,7 +66,9 @@ pub fn encode(n: Node<'_>, out: &mut Vec<u8>) -> Result<()> {
             out.push(0x07);
             out.extend_from_slice(&(o.len() as u32).to_be_bytes());
             for i in 0..o.len() {
-                escape(o.key_bytes(i)?, out);
+                let k = o.key_bytes(i)?;
+                out.extend_from_slice(&(k.len() as u32).to_be_bytes());
+                out.extend_from_slice(k);
                 encode(o.value(i)?, out)?;
             }
         }
@@ -200,7 +202,7 @@ fn decode_into(b: &[u8], at: &mut usize, out: &mut Vec<u8>, depth: usize) -> Res
             let mut data = Vec::new();
             let mut pairs = Vec::new();
             for _ in 0..n {
-                let k = unescape(b, at)?;
+                let k = key(b, at)?;
                 let start = data.len();
                 decode_into(b, at, &mut data, depth + 1)?;
                 pairs.push((k, start..data.len()));
@@ -214,6 +216,17 @@ fn decode_into(b: &[u8], at: &mut usize, out: &mut Vec<u8>, depth: usize) -> Res
         _ => return Err(bad()),
     }
     Ok(())
+}
+
+/// An object's key: its length and bytes (UTF-8, no NUL).
+fn key(b: &[u8], at: &mut usize) -> Result<String> {
+    let n = len(b, at)?;
+    let k = b.get(*at..*at + n).ok_or_else(bad)?;
+    *at += n;
+    if k.contains(&0) {
+        return Err(bad());
+    }
+    String::from_utf8(k.to_vec()).map_err(|_| bad())
 }
 
 fn len(b: &[u8], at: &mut usize) -> Result<usize> {

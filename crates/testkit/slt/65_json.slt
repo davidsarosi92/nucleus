@@ -1,0 +1,574 @@
+# JSON's operators and functions (PLAN.md §M14.15 J2): access, containment
+# and existence, concatenation and deletion, building, changing, reading,
+# set-returning functions and aggregates.  Expected results produced by
+# PostgreSQL 18's jsonb (scripts/slt-pg.py check), records marked
+# nucleus-only excepted.
+
+statement ok
+CREATE TABLE docs (id int PRIMARY KEY, doc jsonb)
+
+statement ok
+INSERT INTO docs VALUES
+  (1, '{"name": "Ann", "age": 41, "tags": ["a", "b"], "address": {"city": "Pécs", "zip": "7621"}}'),
+  (2, '{"name": "Bob", "age": null, "tags": [], "scores": [10, 20.5, -3]}'),
+  (3, '[1, "two", {"three": 3}, [4], null, true]'),
+  (4, '"just a string"'),
+  (5, '42'),
+  (6, NULL)
+
+# -> and ->> with keys and positions
+
+query IT
+SELECT id, doc -> 'name' FROM docs ORDER BY id
+----
+1 "Ann"
+2 "Bob"
+3 NULL
+4 NULL
+5 NULL
+6 NULL
+
+query IT
+SELECT id, doc ->> 'name' FROM docs ORDER BY id
+----
+1 Ann
+2 Bob
+3 NULL
+4 NULL
+5 NULL
+6 NULL
+
+query T
+SELECT doc -> 'address' -> 'city' FROM docs WHERE id = 1
+----
+"Pécs"
+
+query T
+SELECT doc -> 'address' ->> 'city' FROM docs WHERE id = 1
+----
+Pécs
+
+query TTTT
+SELECT doc -> 0, doc -> 2, doc -> -1, doc -> 9 FROM docs WHERE id = 3
+----
+1 {"three": 3} true NULL
+
+query TTTT
+SELECT doc ->> 0, doc ->> 1, doc ->> 2, doc ->> 4 FROM docs WHERE id = 3
+----
+1 two {"three": 3} NULL
+
+query TT
+SELECT doc -> 'tags' -> 1, doc -> 'tags' ->> -2 FROM docs WHERE id = 1
+----
+"b" a
+
+query TTT
+SELECT doc -> 'x', doc -> 0, doc ->> 'age' FROM docs WHERE id = 2
+----
+NULL NULL NULL
+
+query I
+SELECT count(*) FROM docs WHERE doc ->> 'name' = 'Ann'
+----
+1
+
+query IT
+SELECT id, doc ->> 'age' FROM docs WHERE (doc -> 'age') IS NOT NULL ORDER BY id
+----
+1 41
+2 NULL
+
+# #> and #>>
+
+query TTTT
+SELECT doc #> '{address,city}', doc #>> '{address,zip}', doc #> '{tags,0}', doc #> '{tags,-1}' FROM docs WHERE id = 1
+----
+"Pécs" 7621 "a" "b"
+
+query TTTT
+SELECT doc #> '{}', doc #> '{tags,x}', doc #> '{nope,1}', doc #>> '{tags}' FROM docs WHERE id = 1
+----
+{"age": 41, "name": "Ann", "tags": ["a", "b"], "address": {"zip": "7621", "city": "Pécs"}} NULL NULL ["a", "b"]
+
+query TT
+SELECT doc #> '{2,three}', doc #>> '{3,0}' FROM docs WHERE id = 3
+----
+3 4
+
+query T
+SELECT '"x"'::jsonb #>> '{}'
+----
+x
+
+query T
+SELECT '{"a":1}'::jsonb #> array['a', null]
+----
+NULL
+
+# containment
+
+query BBBB
+SELECT '{"a":{"b":1,"c":2}}'::jsonb @> '{"a":{"b":1}}', '[1,[2,3]]'::jsonb @> '[[3]]', '{"a":[1,2]}'::jsonb @> '{"a":1}', '[{"a":1,"b":2}]'::jsonb @> '[{"a":1}]'
+----
+true true false true
+
+query BBBB
+SELECT '1'::jsonb @> '[1]', '[]'::jsonb @> '[]', '{}'::jsonb @> '{}', '[1]'::jsonb <@ '[1,2]'
+----
+false true true true
+
+query BBBB
+SELECT '[1,2]'::jsonb @> '1', '[[1,2]]'::jsonb @> '[1]', '[[1,2]]'::jsonb @> '[[1]]', '[1,1]'::jsonb @> '[1,1,1]'
+----
+true false true true
+
+query BBB
+SELECT '[{"a":[1]}]'::jsonb @> '[{"a":[]}]', '{"a":1}'::jsonb @> '1', '{"a":1}'::jsonb @> '{"a":1.0}'
+----
+true false true
+
+query BB
+SELECT '[1,2,3,4,5,6,7,8]'::jsonb @> '[8,7,6,5,1]', '[1,2,3,4,5,6,7,8]'::jsonb @> '[8,7,6,5,9]'
+----
+true false
+
+query I rowsort
+SELECT id FROM docs WHERE doc @> '{"tags": ["b"]}'
+----
+1
+
+query I rowsort
+SELECT id FROM docs WHERE '{"age": 41, "name": "Ann", "extra": 1}' <@ doc
+----
+
+# existence
+
+query BBBB
+SELECT '{"a":1}'::jsonb ? 'a', '["a",["b"]]'::jsonb ? 'b', '"foo"'::jsonb ? 'foo', '1'::jsonb ? '1'
+----
+true false true false
+
+query BBBB
+SELECT '{"a":1}'::jsonb ?| array['b','a'], '{"a":1}'::jsonb ?& array['a','b'], '["a"]'::jsonb ?& array['a', null], '{"a":1}'::jsonb ?| array[null]
+----
+true false true false
+
+query I rowsort
+SELECT id FROM docs WHERE doc ? 'scores'
+----
+2
+
+query I rowsort
+SELECT id FROM docs WHERE doc ?| '{name,nothing}'
+----
+1
+2
+
+# || and -
+
+query TTTT
+SELECT '{"a":1}'::jsonb || '{"a":2,"b":3}', '[1]'::jsonb || '[2]', '{"a":1}'::jsonb || '[2]', '"a"'::jsonb || '{"b":1}'
+----
+{"a": 2, "b": 3} [1, 2] [{"a": 1}, 2] ["a", {"b": 1}]
+
+query TTT
+SELECT '{"a":1}'::jsonb || '1', '1'::jsonb || '2', '[1]'::jsonb || '{"a":1}'
+----
+[{"a": 1}, 1] [1, 2] [1, {"a": 1}]
+
+query TTTT
+SELECT '[1,"a",{"a":1}]'::jsonb - 'a', '{"a":1,"b":2}'::jsonb - '{a,c}'::text[], '[1,2,3]'::jsonb - -1, '[1,2,3]'::jsonb - 5
+----
+[1, {"a": 1}] {"b": 2} [1, 2] [1, 2, 3]
+
+query TTT
+SELECT '[]'::jsonb - 0, '[1]'::jsonb - 'x', '{"a":1,"b":2}'::jsonb - 'b'
+----
+[] [1] {"a": 1}
+
+query TT
+SELECT '[1,"a"]'::jsonb - array['a'], '[1,"a"]'::jsonb - array[null]
+----
+[1] [1, "a"]
+
+statement error 22023
+SELECT '{"a":1}'::jsonb - 0
+
+statement error 22023
+SELECT '1'::jsonb - 'a'
+
+statement error 22023
+SELECT '"a"'::jsonb - 'a'
+
+# #-
+
+query TTTTT
+SELECT '[1,2]'::jsonb #- '{-1}', '{"a":{"b":1}}'::jsonb #- '{a,b}', '[1,2]'::jsonb #- '{}', '[1,2]'::jsonb #- '{5}', '{"a":1}'::jsonb #- '{b,c}'
+----
+[1] {"a": {}} [1, 2] [1, 2] {"a": 1}
+
+query T
+SELECT '{"a":1}'::jsonb #- '{a,x}'
+----
+{"a": 1}
+
+statement error 22P02
+SELECT '[1,2]'::jsonb #- '{x}'
+
+statement error 22023
+SELECT '1'::jsonb #- '{}'
+
+statement error 22004
+SELECT '{"a":1}'::jsonb #- array['a', null]
+
+# building
+
+query T
+SELECT jsonb_build_object('a', 1, 'b', 'two', 'c', null, 'd', true, 'e', 2.5)
+----
+{"a": 1, "b": "two", "c": null, "d": true, "e": 2.5}
+
+query T
+SELECT jsonb_build_object(1, 2, true, null, 'k', array[1,2], 'j', '{"x":1}'::jsonb)
+----
+{"1": 2, "j": {"x": 1}, "k": [1, 2], "true": null}
+
+query TT
+SELECT jsonb_build_object('a', 1, 'a', 2), jsonb_build_object()
+----
+{"a": 2} {}
+
+statement error 22023
+SELECT jsonb_build_object('a')
+
+statement error 22023
+SELECT jsonb_build_object(null, 1)
+
+statement error 22023
+SELECT jsonb_build_object(array[1], 2)
+
+query TT
+SELECT jsonb_build_array(1, 'a', null, '{"b":2}'::jsonb), jsonb_build_array()
+----
+[1, "a", null, {"b": 2}] []
+
+query TTT
+SELECT to_jsonb(1), to_jsonb('a"b'::text), to_jsonb(true)
+----
+1 "a\"b" true
+
+query TTTT
+SELECT to_jsonb(3.5::numeric), to_jsonb(array[1,null]), to_jsonb(array['a','b']), to_jsonb(null::int)
+----
+3.5 [1, null] ["a", "b"] NULL
+
+query TTTT
+SELECT to_jsonb('NaN'::float8), to_jsonb(1.5e-20::float8), to_jsonb(123456789012345678::float8), to_jsonb('-Infinity'::float8)
+----
+"NaN" 0.000000000000000000015 123456789012345680 "-Infinity"
+
+query TTT
+SELECT to_jsonb(12.5::real), to_jsonb(1e10::real), to_jsonb(0.1::real)
+----
+12.5 10000000000 0.1
+
+query TTTT
+SELECT to_jsonb('2024-01-01'::date), to_jsonb('2024-01-01 10:00:00'::timestamp), to_jsonb('10:00:01.5'::time), to_jsonb(true)
+----
+"2024-01-01" "2024-01-01T10:00:00" "10:00:01.5" true
+
+query TT
+SELECT jsonb_object('{a,1,b,2}'), jsonb_object('{a,b}', '{1,null}')
+----
+{"a": "1", "b": "2"} {"a": "1", "b": null}
+
+query T
+SELECT jsonb_object('{}'::text[])
+----
+{}
+
+statement error 2202E
+SELECT jsonb_object('{a}'::text[])
+
+statement error 2202E
+SELECT jsonb_object('{a,b}', '{1}')
+
+statement error 22004
+SELECT jsonb_object(array['a', null], array['1','2'])
+
+# changing
+
+query TTTT
+SELECT jsonb_set('{"a":1}', '{b}', '2'), jsonb_set('[1,2]', '{5}', '3'), jsonb_set('[1,2]', '{-5}', '3'), jsonb_set('[1,2]', '{-1}', '3')
+----
+{"a": 1, "b": 2} [1, 2, 3] [3, 1, 2] [1, 3]
+
+query TTT
+SELECT jsonb_set('{"a":1}', '{b}', '2', false), jsonb_set('{"a":1}', '{b,c}', '2'), jsonb_set('{"a":[1]}', '{a,0,b}', '2')
+----
+{"a": 1} {"a": 1} {"a": [1]}
+
+query TT
+SELECT jsonb_set('[]', '{0}', '1'), jsonb_set('{}', '{}', '1')
+----
+[1] {}
+
+query T
+SELECT jsonb_set('{"a":{"b":[1,2]}}', '{a,b,1}', '{"c":true}')
+----
+{"a": {"b": [1, {"c": true}]}}
+
+query T
+SELECT jsonb_set('{"a":1}', '{a}', null)
+----
+NULL
+
+statement error 22023
+SELECT jsonb_set('1', '{a}', '2')
+
+statement error 22P02
+SELECT jsonb_set('[1]', '{x}', '2')
+
+query TTTT
+SELECT jsonb_insert('[1,2]','{1}','9'), jsonb_insert('[1,2]','{1}','9',true), jsonb_insert('[1,2]','{-1}','9'), jsonb_insert('{"a":1}','{b}','9')
+----
+[1, 9, 2] [1, 2, 9] [1, 9, 2] {"a": 1, "b": 9}
+
+query TTT
+SELECT jsonb_insert('[]', '{0}', '1'), jsonb_insert('[1]', '{5}', '2'), jsonb_insert('[1]', '{-5}', '2')
+----
+[1] [1, 2] [2, 1]
+
+statement error 22023
+SELECT jsonb_insert('{"a":1}','{a}','9')
+
+statement error 22023
+SELECT jsonb_insert('1','{0}','9')
+
+query TTT
+SELECT jsonb_strip_nulls('[null,{"a":null,"b":[null]}]'), jsonb_strip_nulls('null'), jsonb_strip_nulls('{"a":{"b":null,"c":[null]}}')
+----
+[null, {"b": [null]}] null {"a": {"c": [null]}}
+
+query T
+SELECT jsonb_strip_nulls('[null,{"a":null}]', true)
+----
+[{}]
+
+statement ok
+UPDATE docs SET doc = jsonb_set(doc, '{age}', to_jsonb((doc ->> 'age')::int + 1)) WHERE id = 1
+
+statement ok
+UPDATE docs SET doc = doc || '{"active": true}' WHERE id IN (1, 2)
+
+statement ok
+UPDATE docs SET doc = doc - 'tags' WHERE id = 2
+
+query IT
+SELECT id, doc FROM docs WHERE id IN (1, 2) ORDER BY id
+----
+1 {"age": 42, "name": "Ann", "tags": ["a", "b"], "active": true, "address": {"zip": "7621", "city": "Pécs"}}
+2 {"age": null, "name": "Bob", "active": true, "scores": [10, 20.5, -3]}
+
+# reading
+
+query TTTTTT
+SELECT jsonb_typeof('1.5'), jsonb_typeof('{}'), jsonb_typeof('[]'), jsonb_typeof('"s"'), jsonb_typeof('true'), jsonb_typeof('null')
+----
+number object array string boolean null
+
+query IT
+SELECT id, jsonb_typeof(doc) FROM docs ORDER BY id
+----
+1 object
+2 object
+3 array
+4 string
+5 number
+6 NULL
+
+query III
+SELECT jsonb_array_length('[]'), jsonb_array_length('[1,[2,3]]'), jsonb_array_length(doc -> 'scores') FROM docs WHERE id = 2
+----
+0 2 3
+
+statement error 22023
+SELECT jsonb_array_length('{}')
+
+statement error 22023
+SELECT jsonb_array_length('1')
+
+query TTT
+SELECT jsonb_extract_path('{"a":{"b":[5]}}', 'a', 'b', '0'), jsonb_extract_path_text('{"a":"x"}', 'a'), jsonb_extract_path('{"a":[1,2]}', 'a', '-1')
+----
+5 x 2
+
+query T
+SELECT jsonb_extract_path('{"a":[1,2]}', 'a', 'x')
+----
+NULL
+
+query T
+SELECT replace(jsonb_pretty('{"a":[1,{"b":null}],"c":{}}'), E'\n', '/')
+----
+{/    "a": [/        1,/        {/            "b": null/        }/    ],/    "c": {/    }/}
+
+query TTT
+SELECT replace(jsonb_pretty('{}'), E'\n', '/'), replace(jsonb_pretty('[[]]'), E'\n', '/'), jsonb_pretty('1')
+----
+{/} [/    [/    ]/] 1
+
+# set-returning functions
+
+query TT
+SELECT * FROM jsonb_each('{"b":1,"a":"x","c":null}')
+----
+a "x"
+b 1
+c null
+
+query TT
+SELECT * FROM jsonb_each_text('{"b":1,"a":"x","c":null}')
+----
+a x
+b 1
+c NULL
+
+query T
+SELECT * FROM jsonb_array_elements('[1,"x",null,{"a":1},[2]]')
+----
+1
+"x"
+null
+{"a": 1}
+[2]
+
+query T
+SELECT * FROM jsonb_array_elements_text('[1,"x",null,{"a":1}]')
+----
+1
+x
+NULL
+{"a": 1}
+
+query T
+SELECT * FROM jsonb_object_keys('{"b":1,"a":2,"c":{"d":3}}')
+----
+a
+b
+c
+
+query T
+SELECT k FROM jsonb_object_keys('{"b":1,"a":2}') AS k
+----
+a
+b
+
+query I
+SELECT count(*) FROM jsonb_each('{}')
+----
+0
+
+statement error 22023
+SELECT * FROM jsonb_each('[1]')
+
+statement error 22023
+SELECT * FROM jsonb_array_elements('{}')
+
+statement error 22023
+SELECT * FROM jsonb_array_elements('1')
+
+statement error 22023
+SELECT * FROM jsonb_object_keys('[1]')
+
+statement error 22023
+SELECT * FROM jsonb_object_keys('1')
+
+query ITT
+SELECT d.id, e.key, e.value FROM docs d, LATERAL jsonb_each(d.doc -> 'address') e ORDER BY 1, 2
+----
+1 city "Pécs"
+1 zip "7621"
+
+query IT
+SELECT d.id, t.value FROM docs d, LATERAL jsonb_array_elements_text(d.doc -> 'tags') t ORDER BY 1, 2
+----
+1 a
+1 b
+
+# aggregates
+
+query T
+SELECT jsonb_agg(x) FROM (VALUES (1), (NULL), (3)) v(x)
+----
+[1, null, 3]
+
+query T
+SELECT jsonb_agg(x) FROM (VALUES (1)) v(x) WHERE false
+----
+NULL
+
+query T
+SELECT jsonb_agg(x ORDER BY x DESC) FROM (VALUES ('{"a":1}'::jsonb), ('[2]')) v(x)
+----
+[{"a": 1}, [2]]
+
+query T
+SELECT jsonb_agg(doc -> 'name' ORDER BY id) FROM docs WHERE id < 3
+----
+["Ann", "Bob"]
+
+query T
+SELECT jsonb_object_agg(k, v) FROM (VALUES ('b', 1), ('a', NULL), ('b', 3)) t(k, v)
+----
+{"a": null, "b": 3}
+
+query T
+SELECT jsonb_object_agg(id, doc ->> 'name') FROM docs WHERE id < 3
+----
+{"1": "Ann", "2": "Bob"}
+
+statement error 22023
+SELECT jsonb_object_agg(NULL::text, 1)
+
+# What nucleus does otherwise, on purpose (PLAN.md §M14.15): a number is
+# kept as its value, not its scale; a scalar is not an array to -> 0.
+
+# nucleus-only: 2.50 is 2.5 (jsonb keeps the scale: 2.50).
+query TT
+SELECT jsonb_build_object('e', 2.50), to_jsonb(3.10::numeric)
+----
+{"e": 2.5} 3.1
+
+# nucleus-only: PostgreSQL gives the scalar for -> 0 and -> -1.
+query TT
+SELECT '1'::jsonb -> 0, '"x"'::jsonb ->> -1
+----
+NULL NULL
+
+# nucleus-only: the json_ names are the same functions.
+query TTTT
+SELECT json_typeof('{}'), json_build_object('a', 1), json_set('{"a":1}', '{a}', '2'), k FROM json_object_keys('{"k": 1}') k
+----
+object {"a": 1} {"a": 2} k
+
+# grouping on a field
+
+query TI
+SELECT doc ->> 'name', count(*) FROM docs WHERE doc ? 'name' GROUP BY 1 ORDER BY 1
+----
+Ann 1
+Bob 1
+
+# parameters' and literals' types
+
+query T
+SELECT '{"a": {"b": 2}}'::jsonb -> 'a' -> 'b'
+----
+2
+
+query B
+SELECT '{"a": 1}'::jsonb ->> 'a' = '1'
+----
+true

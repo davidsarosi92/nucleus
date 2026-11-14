@@ -42,10 +42,21 @@ Parameters `$1`, `$2` … .  Statements end with `;`.
 `double precision` (`float`), `numeric(p, s)` (exact, ≤ 38 digits), `text`,
 `varchar(n)`, `char(n)`, `bytea`, `date`, `time`, `timestamp`,
 `timestamptz`, `interval`, `uuid`, `inet`, `cidr`, `json` (`jsonb` too:
-one binary type, keys sorted, `1.50` read back as `1.5`), `vector(n)`, arrays
+one binary type, keys sorted as `jsonb` sorts them, `1.50` read back as
+`1.5`), `vector(n)`, arrays
 `type[]` (one dimension), enums (`CREATE TYPE mood AS ENUM ('sad', 'ok')`).
 An integer literal is `integer` if it fits, `1.5` is `numeric`.  Sessions
 are in UTC.
+
+**JSON** (as PostgreSQL's `jsonb`): `doc -> 'k'` (json), `doc ->> 'k'`
+(text), `doc -> 0`, `doc #> '{a,0}'`, `doc #>> '{a,b}'`, `doc @> '{"k":
+1}'`, `doc ? 'k'`, `?|` / `?&` with `text[]`, `a || b`, `doc - 'k'`,
+`doc #- '{a,b}'`; `json_build_object('k', v, …)`, `json_build_array`,
+`to_json(x)`, `json_set(doc, '{a,b}', '2')`, `json_insert`,
+`json_strip_nulls`, `json_typeof`, `json_array_length`, `json_pretty`,
+aggregates `json_agg(x)` and `json_object_agg(k, v)`, and in `FROM`
+`json_each(doc)` (`key`, `value`), `json_array_elements(doc)`,
+`json_object_keys(doc)` (`_text` forms too).  Every `jsonb_` name works.
 
 **Vectors** (embeddings, as pgvector): `embedding vector(768)`, literals
 `'[0.1, 0.2, …]'` (or a driver's float array as a parameter); distances
@@ -282,7 +293,8 @@ before a generation's queries records what each returned
 | `CREATE VIEW` | a `WITH` query |
 | `count(*) FILTER (WHERE …)` | `sum(CASE WHEN … THEN 1 ELSE 0 END)` |
 | `unnest(…)` in the select list | `SELECT … FROM unnest(…) AS u(x)` |
-| `->`, `->>`, `@>` and the `json` functions (coming, §M14.15) | `doc::text`, parsed by the application; `=`, `ORDER BY`, keys and indexes on `json` work |
+| SQL/JSON paths (`@?`, `@@`, `jsonb_path_query`, `JSON_TABLE`, `JSON_VALUE`; coming, §M14.15) | `->`, `->>`, `#>`, `@>`, `?`, `json_each(…)` in `FROM` |
+| `json[]`, `json_each(…)` in the select list | `json_agg` / `json_build_array`; `SELECT … FROM t, json_each(t.doc) e` |
 | `TRUNCATE` | `DELETE FROM t` |
 | `ALTER TABLE … DROP COLUMN`, `RENAME`, `ALTER COLUMN … SET DEFAULT` | a new table and `INSERT … SELECT` |
 | `SELECT … FOR UPDATE` | a `SERIALIZABLE` transaction |
