@@ -95,6 +95,9 @@ fn oid(t: DataType) -> i32 {
 fn type_of_oid(o: i32) -> Option<DataType> {
     Some(match o {
         2950 => DataType::Ext(TypeRef::named("uuid")?),
+        o if i64::from(o) == crate::catalog::JSONB || i64::from(o) == crate::catalog::JSON => {
+            DataType::Ext(TypeRef::named("json")?)
+        }
         o if i64::from(o) == crate::catalog::VECTOR => DataType::Ext(TypeRef::named("vector")?),
         o if i64::from(o) == crate::catalog::SPARSEVEC => {
             DataType::Ext(TypeRef::named("sparsevec")?)
@@ -758,6 +761,12 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
     match (v, ty) {
         // PostgreSQL's binary uuid is its 16 bytes, as nucleus's canonical form.
         (Value::Ext(t, bytes), _) if t.name() == "uuid" => bytes.to_vec(),
+        // `jsonb_send`: a version byte (1), then the text.
+        (Value::Ext(t, _), _) if t.name() == "json" => {
+            let mut out = vec![1u8];
+            out.extend_from_slice(v.render().as_bytes());
+            out
+        }
         // pgvector's binary vector: the dimension count and an unused
         // int16, then the components as big-endian float4s.
         (Value::Ext(t, bytes), _) if t.name() == "vector" => {
@@ -927,6 +936,16 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                 Value::TimestampTz(i64::from_be_bytes(bytes.try_into().unwrap()))
             }
             (Some(DataType::Ext(t)), 16) if t.name() == "uuid" => Value::ext(t, bytes.to_vec()),
+            // `jsonb_recv`: a version byte (1), then the text; `json`'s
+            // binary form is the text alone (which never starts with 1).
+            (Some(DataType::Ext(t)), _) if t.name() == "json" => {
+                let text = match bytes.split_first() {
+                    Some((1, text)) => text,
+                    _ => bytes,
+                };
+                let text = std::str::from_utf8(text).map_err(|_| bad("jsonb"))?;
+                nucleus_sql::json::from_text(text)?
+            }
             (Some(DataType::Ext(t)), _) if t.name() == "vector" => {
                 let (head, body) = bytes.split_at_checked(4).ok_or_else(|| bad("vector"))?;
                 let dims = i16::from_be_bytes([head[0], head[1]]);

@@ -152,6 +152,10 @@ static int put_value(buf *w, const nc_value *v) {
         put_ext(w, v->as.ext.type_name, v->as.ext.data, v->as.ext.len);
         return 0;
     }
+    if (v->type == NC_JSON) {
+        put_ext(w, "json", (const uint8_t *)v->as.text.ptr, v->as.text.len);
+        return 0;
+    }
     if (v->type == NC_VECTOR) {
         put_u8(w, NC_EXT);
         put_str(w, "vector");
@@ -277,7 +281,7 @@ static char *get_str(reader *r) {
 
 static void free_value(nc_value *v) {
     size_t i;
-    if (v->type == NC_TEXT) free((void *)v->as.text.ptr);
+    if (v->type == NC_TEXT || v->type == NC_JSON) free((void *)v->as.text.ptr);
     if (v->type == NC_BYTEA) free((void *)v->as.bytes.ptr);
     if (v->type == NC_EXT) {
         free((void *)v->as.ext.type_name);
@@ -378,6 +382,17 @@ static int get_value(reader *r, nc_value *v) {
             free(name);
             v->type = NC_UUID;
             memcpy(v->as.uuid.bytes, p, 16);
+            break;
+        }
+        if (strcmp(name, "json") == 0) {
+            char *s = malloc(n + 1);
+            free(name);
+            if (!s) return -1;
+            memcpy(s, p, n);
+            s[n] = 0;
+            v->type = NC_JSON;
+            v->as.text.ptr = s;
+            v->as.text.len = n;
             break;
         }
         if (strcmp(name, "vector") == 0 && n % 4 == 0) {
@@ -1241,6 +1256,8 @@ static nc_result *read_columns(reader *r) {
                 res->columns[i].type = NC_VECTOR;
             if (res->columns[i].type_name && strcmp(res->columns[i].type_name, "sparsevec") == 0)
                 res->columns[i].type = NC_SPARSEVEC;
+            if (res->columns[i].type_name && strcmp(res->columns[i].type_name, "json") == 0)
+                res->columns[i].type = NC_JSON;
         }
         res->ncolumns = i + 1;
     }
@@ -2057,6 +2074,11 @@ nc_value nc_text(const char *s) {
     v.as.text.len = strlen(s);
     return v;
 }
+nc_value nc_json(const char *text) {
+    nc_value v = nc_text(text);
+    if (text) v.type = NC_JSON;
+    return v;
+}
 nc_value nc_date(int32_t days) { nc_value v = nc_null(); v.type = NC_DATE; v.as.date = days; return v; }
 nc_value nc_timestamp(int64_t us) { nc_value v = nc_null(); v.type = NC_TIMESTAMP; v.as.timestamp = us; return v; }
 nc_value nc_timestamptz(int64_t us) { nc_value v = nc_null(); v.type = NC_TIMESTAMPTZ; v.as.timestamp = us; return v; }
@@ -2336,7 +2358,8 @@ size_t nc_format(const nc_value *v, char *buf, size_t size) {
         if (v->type == NC_INET && v->as.net.bits == full) return (size_t)snprintf(buf, size, "%s", tmp);
         return (size_t)snprintf(buf, size, "%s/%u", tmp, v->as.net.bits);
     }
-    case NC_TEXT: return (size_t)snprintf(buf, size, "%s", v->as.text.ptr);
+    case NC_TEXT:
+    case NC_JSON: return (size_t)snprintf(buf, size, "%s", v->as.text.ptr);
     case NC_NUMERIC: {
         uint64_t lo = v->as.numeric.lo, hi = (uint64_t)v->as.numeric.hi;
         int neg = v->as.numeric.hi < 0, len = 0, scale = v->as.numeric.scale, k;

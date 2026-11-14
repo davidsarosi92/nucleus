@@ -107,7 +107,8 @@ fn seed_of(name: &str) -> u64 {
 
 // ---------------------------------------------------------- generators
 
-/// The kit's generator for a built-in type, an array of one, `uuid` or `vector`.
+/// The kit's generator for a built-in type, an array of one, `uuid`,
+/// `json` or `vector`.
 pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
     Some(match ty {
         DataType::Bool => Box::new(|g: &mut Gen| Value::Bool(g.one_in(2))),
@@ -251,6 +252,71 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
                 b.iter_mut().skip(1).for_each(|x| *x = 0);
             }
             Value::ext(t, b)
+        }),
+        DataType::Ext(t) if t.name() == "json" => Box::new(move |g: &mut Gen| {
+            // Few keys, strings and numbers, written several ways (spacing,
+            // key order, duplicates, `1.0` for `1`), so equal documents in
+            // different texts meet often.
+            fn doc(g: &mut Gen, depth: u32, out: &mut String) {
+                match if depth > 2 { g.below(6) } else { g.below(9) } {
+                    0 => out.push_str("null"),
+                    1 => out.push_str(g.pick(&["true", "false"])),
+                    2 => out.push_str(g.pick(&[
+                        "0",
+                        "-0",
+                        "1",
+                        "1.0",
+                        "1e0",
+                        "-1",
+                        "2.50",
+                        "2.5",
+                        "1e20",
+                        "100000000000000000000",
+                        "-9223372036854775808",
+                        "9223372036854775808",
+                        "0.001",
+                        "1e-3",
+                        "123456789.987654321",
+                    ])),
+                    3 | 4 => out.push_str(g.pick(&[
+                        "\"\"",
+                        "\"a\"",
+                        "\"b\"",
+                        "\"ab\"",
+                        "\"\\u0061\"",
+                        "\"é\"",
+                        "\"\\n\"",
+                    ])),
+                    5 => out.push_str(&(g.below(200) as i64 - 100).to_string()),
+                    6 | 7 => {
+                        out.push('[');
+                        for i in 0..g.below(4) {
+                            if i > 0 {
+                                out.push_str(", ");
+                            }
+                            doc(g, depth + 1, out);
+                        }
+                        out.push(']');
+                    }
+                    _ => {
+                        out.push('{');
+                        for i in 0..g.below(4) {
+                            if i > 0 {
+                                out.push(',');
+                            }
+                            out.push_str(g.pick(&["\"a\"", "\"b\"", "\"ab\"", "\"\""]));
+                            out.push(':');
+                            doc(g, depth + 1, out);
+                        }
+                        out.push('}');
+                    }
+                }
+            }
+            let mut text = String::new();
+            doc(g, 0, &mut text);
+            let v = nucleus_sql::json::from_text(&text).expect("a json text");
+            debug_assert_eq!(v.data_type(), Some(DataType::Ext(t)));
+            v
         }),
         DataType::Ext(t) if t.name() == "vector" => Box::new(move |g: &mut Gen| {
             // Few distinct components and lengths, so equal prefixes,

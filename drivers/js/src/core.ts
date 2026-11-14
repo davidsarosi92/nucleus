@@ -25,7 +25,9 @@
 // date / timestamp / timestamptz as Date (UTC; read with millisecond
 // precision), time as Time, interval as Interval, inet as Inet, cidr as
 // Cidr, uuid as its canonical string, vector as Float32Array, sparsevec
-// as SparseVector, arrays as arrays, NULL as null;
+// as SparseVector, json as what JSON.parse makes (a plain object as a
+// parameter is json; Json(x) sends any value as json), arrays as arrays,
+// NULL as null;
 // another registered type as Ext (its name and binary form).
 
 import { Buffer } from "./bytes.ts";
@@ -279,6 +281,33 @@ export class Ext {
   }
 }
 
+/** A JSON value, as `JSON.parse` makes it. */
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+/** A value to send as `json`: a plain object goes as json by itself; an
+ * array goes as an array and a string as text unless wrapped —
+ * `new Json([1, 2])`, `new Json("a")`. */
+export class Json {
+  readonly value: unknown;
+
+  constructor(value: unknown) {
+    this.value = value;
+  }
+}
+
+/** Whether `v` is a plain object (`{…}`, `Object.create(null)`): json. */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  if (typeof v !== "object" || v === null) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+function jsonBytes(v: unknown): Buffer {
+  const text = JSON.stringify(v);
+  if (text === undefined) throw new NucleusError(`cannot send ${typeof v} as json`);
+  return Buffer.from(text, "utf8");
+}
+
 /** A `sparsevec`: its dimensions and its non-zero components — positions
  * from 0, ascending, each with its value (the text form counts from 1:
  * `{1:0.5,4:2}/10`). */
@@ -380,6 +409,8 @@ export type Value =
   | Float32Array
   | SparseVector
   | Ext
+  | Json
+  | { [key: string]: JsonValue }
   | Value[];
 
 export interface Column {
@@ -542,6 +573,12 @@ class Writer {
       this.parts.push(v.data);
       return this;
     }
+    if (v instanceof Json || isPlainObject(v)) {
+      const data = jsonBytes(v instanceof Json ? v.value : v);
+      this.u8(EXT).str("json").u32(data.length);
+      this.parts.push(data);
+      return this;
+    }
     if (Array.isArray(v)) {
       this.u8(10).u32(v.length);
       for (const item of v) this.value(item);
@@ -690,6 +727,7 @@ class Reader {
         const data = Buffer.from(this.b.subarray(this.at, this.at + n));
         this.at += n;
         if (name === "vector") return vectorOf(data);
+        if (name === "json") return JSON.parse(data.toString("utf8")) as Value;
         if (name === "sparsevec") {
           const sv = sparseOf(data);
           if (sv) return sv;
@@ -1881,6 +1919,7 @@ function fixedSlot(c: Column, v: Value): Buffer {
 function varSlot(c: Column, v: Value): Buffer {
   const tag = c.tag ?? 0;
   if (tag === 15 || tag === EXT) {
+    if (tag === EXT && c.type === "json") return jsonBytes(v instanceof Json ? v.value : v);
     if (v instanceof Ext) return v.data;
     if (v instanceof Float32Array) return vectorBytes(v);
     if (v instanceof SparseVector) return sparseBytes(v);

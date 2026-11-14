@@ -1281,6 +1281,7 @@ and batch paid).
 | uuid | `UUID` | 16 bytes, a registered type (§8.12) |
 | vector | `VECTOR`, `VECTOR(n)` | 1–16000 `float4` components, a registered type (§8.12) |
 | sparsevec | `SPARSEVEC`, `SPARSEVEC(n)` | up to 10⁹ dimensions, 16000 of them non-zero, a registered type (§8.12) |
+| json | `JSON`, `JSONB` | a JSON value in a binary form read in place, a registered type (§8.31) |
 | enums | `CREATE TYPE name AS ENUM (…)` | a label of the database's enum |
 | registered types | their name (`geopoint`) | a module's type: its canonical bytes (§8.12) |
 
@@ -3040,7 +3041,7 @@ engine's own comparisons and hashing (`Value`'s) agree with the type's.
 `Registry::add_type` checks them on the type's examples;
 `laws::check(ty, generator, cases)` on generated values (`laws::Gen`, a
 seeded generator; `laws::generator(ty)` for the built-in types, their
-arrays, `uuid`, `vector` and `sparsevec`).  `crates/sql/tests/laws.rs` runs the kit on every
+arrays, `uuid`, `json`, `vector` and `sparsevec`).  `crates/sql/tests/laws.rs` runs the kit on every
 built-in type and array, and shows a broken type caught and refused.
 
 `tests/extension.rs` is a module from outside the crate adding a
@@ -4991,6 +4992,67 @@ indexes used; a backup holds no subject's value in the clear; a restore
 after `FORGET` leaves the subject out, the audit chain intact, a later
 backup's new rows of the subject restored).
 
+### 8.31 JSON (`json`, §M14.15)
+
+**One type, `json`** (`jsonb` another name for it): JSON values,
+checked when written and kept in a binary form read in place.  There is
+no second type keeping the text as written — a `text` column does that.
+
+**Input** (`json::parse`) is strict RFC 8259: no comments, trailing
+commas, single quotes, `NaN` or leading zeros; whitespace is space, tab,
+line feed and return; `\uXXXX` escapes with surrogate pairs joined, lone
+surrogates refused (`22P02`) and `\u0000` refused (`22P05`: `text` holds
+no NUL, so a value's strings must not); depth at most 1000 (256 in a
+browser; `54001`).  Duplicate keys: the last one wins (PostgreSQL's
+`jsonb`).  Numbers are exact at any size within `numeric`'s bounds in
+PostgreSQL (131 072 digits before the point, 16 383 after; `22003`
+beyond), but kept as their value, not as written: `1.50` reads back
+`1.5`, `1e2` `100`, `-0` `0` (`jsonb` keeps the scale: `1.50`).
+
+**The binary form** (`json::form`) is canonical — equal documents, equal
+bytes, so `=`, hashing, `DISTINCT`, `GROUP BY` and unique keys compare
+bytes.  A node is a header byte (its kind in the high four bits) and
+its payload: null, false and true the header alone; an integer that
+fits 64 bits in the fewest little-endian bytes (0–8); any other number a
+sign, the exponent (zig-zag LEB128), the digit count and the digits two
+to a byte (`digits × 10^exp`, no leading or trailing zeros); a string
+its length (in the header under 15) and UTF-8 bytes; an array its count,
+the end of each element (1, 2 or 4 bytes, the fewest that hold them)
+and the elements — `a[i]` at once; an object its count, the end of each
+key and of each value, the keys sorted by their bytes, then the values
+in the keys' order — a key found by binary search, its value read
+without the others.  A value inside another is its bytes.  Bytes from
+outside (a key, a corrupted page) are checked before they are a value
+(`form::check`: read, written again, compared); a reader refuses a
+number that could not have been parsed.
+
+**Output** is PostgreSQL's `jsonb` layout — `{"a": 1, "b": [1, 2]}`,
+keys in their stored order, strings escaping `"`, `\` and control
+characters only, numbers in plain notation (`0.0000001`).
+
+**Order** (`json::key`) is PostgreSQL's: null < string < number <
+boolean (false < true) < array < object; arrays by length, then element
+by element; objects by key count, then key and value by key; strings by
+their bytes, numbers by value.  An order-preserving key encoding makes
+`json` a primary key or an indexed column, range scans included.
+
+**Casts**: from `text` (the input) and to `text` (the output); to
+`boolean`, the integers, `numeric`, `real` and `double precision` from
+a json value of that kind (`'42'::json::int`; another kind is `22023`,
+`cannot cast json string to type integer`; a number past `numeric`'s 38
+digits is `22003`).
+
+**On the wire** (`ncp` tag 11 named `json`) a value travels as its text
+(`Type::wire_output` / `wire_input`), in rows and in columnar batches;
+the drivers hand out the language's own values (§11).  pg-compat shows
+it as `jsonb` (§9).  Tests: `json::tests` (round trips, canonical bytes,
+malformed text and bytes, the order, wide containers), `tests/json.rs`
+(stored and read back, a key and an index, `DISTINCT` and `GROUP BY`,
+casts and errors), the law kit's generator (equal documents written
+differently), the `json` fuzz target (§2), pg-compat's
+`json_through_a_real_driver`.  Measurements: PLAN.md §M14.15 J1 and
+`docs/benchmarks.md`.
+
 ### 8.14 Errors and hints (`error`, `hint`)
 
 An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
@@ -5395,7 +5457,9 @@ Flush; after an error, messages are skipped until Sync.  Types on the wire:
 `bool` 16, `int8` 20 (`int2`/`int4` accepted), `float8` 701 (`float4`
 accepted), `text` 25 (`varchar`, `bpchar`, `name` accepted), `numeric`
 1700, `date` 1082, `timestamp` 1114, `timestamptz` 1184, `interval` 1186,
-and their arrays, `uuid` 2950 (binary: its 16 bytes), `vector` 13201
+and their arrays, `uuid` 2950 (binary: its 16 bytes), `jsonb` 3802 —
+nucleus's `json` (text: its text; binary: `jsonb`'s, a version byte 1 and
+the text; a parameter typed `json`, 114, read as json too) —, `vector` 13201
 (`pg_type` lists it — pgvector's oid is per database, its clients look it
 up with `to_regtype('vector')` — text `[1,2,3]`, binary pgvector's: the
 dimension count and an unused `int16`, then big-endian `float4`s; psycopg
@@ -5615,7 +5679,7 @@ smallint, 13 integer, 14 real, 15 bytea, 16 time, 17 `char(n)`, 18 inet,
 | 8 | timestamptz | `i64` µs since 2000-01-01 00:00 UTC |
 | 9 | interval | `i32` months, `i32` days, `i64` µs |
 | 10 | array | `u32` count, then each element as a value |
-| 11 | a registered type (version 2) | string type name, `u32` length, the value's binary (canonical) form — for `uuid` its 16 bytes, for `vector` its components as little-endian `f32`s, for `sparsevec` its dimensions and non-zero count, positions and values (§8.1) |
+| 11 | a registered type (version 2) | string type name, `u32` length, the value's binary (canonical) form — or the form the type sends instead (`Type::wire_output`): `json`'s text, which every language parses — for `uuid` its 16 bytes, for `vector` its components as little-endian `f32`s, for `sparsevec` its dimensions and non-zero count, positions and values (§8.1) |
 | 12 | smallint (version 3) | `i16` |
 | 13 | integer (version 3) | `i32` |
 | 14 | real (version 3) | `f32` (IEEE 754 bits) |
@@ -5666,7 +5730,8 @@ dates and timestamps as days and µs since 2000-01-01, `Time` as µs since
 midnight, intervals, `Inet` / `Cidr { addr: IpAddr, bits }`, arrays,
 `Uuid([u8; 16])`, `Vector(Vec<f32>)` (also from `Vec<f32>` and
 `&[f32]`), `SparseVector { dims, indices, values }` (positions from 0,
-ascending; every driver has a type of its own for it), `Other {
+ascending; every driver has a type of its own for it), `Json(String)`
+(its text; columns `Type::Json`), `Other {
 type_name, bytes }` for another registered type; `char(n)` and enum values as text, their columns typed `Char` and
 `Enum(name)`) with `From` conversions for parameters.  Every driver
 speaks protocol version 7 — results read as they arrive, a batch at a
@@ -5734,7 +5799,8 @@ their context) — the embedded edition's session on iOS.  `uuid` is `NC_UUID` (
 bytes), `vector` `NC_VECTOR` (`as.vector`: a `float` pointer and the
 dimensions; in a batch the column's bytes are the floats), `sparsevec`
 `NC_SPARSEVEC` (`as.sparse`: the dimensions, the positions from 0 and
-the values, their count), another registered type `NC_EXT` (name and bytes;
+the values, their count), `json` `NC_JSON` (its text in `as.text`;
+`nc_json(text)` sends one), another registered type `NC_EXT` (name and bytes;
 `nc_column_type_name`); `NC_SMALLINT` / `NC_INTEGER` in `as.integer`,
 `NC_REAL` in `as.real4`, `NC_BYTEA` a pointer and length, `NC_TIME` µs
 since midnight, `NC_INET` / `NC_CIDR` a family, mask length and address;
@@ -5748,8 +5814,8 @@ since midnight, `NC_INET` / `NC_CIDR` a family, mask length and address;
 `Timestamp`, `TimestampTz`, `Interval`, `Array`, `Uuid`, `Ext`,
 `SmallInt`, `Integer`, `Real`, `Bytes`, `Time`, `Inet`, `Cidr` — the last
 seven wrappers, so an `int` literal stays a bigint parameter —, and
-`Vector`, a `std::vector<float>`, and `SparseVector` — dimensions,
-positions from 0, values).
+`Vector`, a `std::vector<float>`, `SparseVector` — dimensions,
+positions from 0, values — and `Json`, its text).
 
 **Python:** `drivers/python`, package `nucleus` (pure Python 3.8+).
 `nucleus.connect()`, `conn.execute(sql, params)` → `Result` (`rows`,
@@ -5760,7 +5826,9 @@ statements, `with conn.transaction():`, DB-API cursors; values as `bool`,
 `Interval`, `ipaddress` interfaces (inet) and networks (cidr),
 `uuid.UUID`, `list`, a vector as an `array('f')` (sent from one or from
 a one-dimensional float32 numpy array), `nucleus.SparseVector` (`dims`,
-`indices` from 0, `values`; `SparseVector.of(dict, dims)`), `nucleus.Ext`
+`indices` from 0, `values`; `SparseVector.of(dict, dims)`), json as
+what `json.loads` makes (a `dict` parameter is json; `nucleus.Json(x)`
+sends a list or a string as json; Arrow: `string`), `nucleus.Ext`
 (another registered type); errors are `nucleus.Error` subclasses by SQLSTATE class
 (`IntegrityError` for 23, `ProgrammingError` for 42, …).
 
@@ -5773,8 +5841,9 @@ digits), `Decimal` (exact, with `parse` / `toString`), `Buffer` (bytea),
 `Date` for dates and timestamps (UTC; millisecond precision when read),
 `Time`, `Interval`, `Inet` / `Cidr`, uuid as its canonical string, a
 vector as a `Float32Array`, `SparseVector` (`dims`, `indices` from 0,
-`values`; `SparseVector.of(map, dims)`), `Ext`
-(another registered type), arrays, `null`; errors are `NucleusError` with `code`.
+`values`; `SparseVector.of(map, dims)`), json as what `JSON.parse`
+makes (a plain object parameter is json; `new Json(x)` sends an array or
+a string as json), `Ext` (another registered type), arrays, `null`; errors are `NucleusError` with `code`.
 
 **Java:** `drivers/java`, package `io.github.davidsarosi92.nucleus` (Java
 17+, `javac` or Maven).  `NucleusClient.connect(new Config())`,
@@ -5785,7 +5854,8 @@ vector as a `Float32Array`, `SparseVector` (`dims`, `indices` from 0,
 (UTC), `Interval`, `Inet` / `Cidr` (over `InetAddress`), `UUID`,
 `float[]` (a vector; a column of them in `load` as `float[][]`),
 `SparseVector` (dimensions, positions from 0, values;
-`SparseVector.of(map, dims)`), `Ext` (another registered type), `List`.
+`SparseVector.of(map, dims)`), `Json` (its text: the driver brings no
+JSON library), `Ext` (another registered type), `List`.
 `NucleusClient.connect(in, out, transport, config)` logs in over a pair
 of streams of the caller's (the embedded edition's session on Android).
 The driver uses no API newer than Android 8 (API 26) has.
@@ -5804,7 +5874,8 @@ position or by name —, `command`, `count`), `execute`, `executeMany`,
 (`Numeric`, its exact text), `bytes` (`Data`), `date(year:month:day:)`,
 `time` (µs), `timestamp` / `timestamptz` (`Date`), `interval(months:days:micros:)`,
 `uuid` (`UUID`), `inet`, `cidr`, `array`, `vector` (`[Float]`),
-`sparsevec(dimensions:indices:values:)`, `ext(type:data:)`.  No TLS in
+`sparsevec(dimensions:indices:values:)`, `json` (its text, for
+`JSONDecoder`), `ext(type:data:)`.  No TLS in
 this build of the C driver.  Product `NucleusEmbedded` (when
 `NucleusEmbedded.xcframework` is there): see *On phones* below.
 
@@ -5963,6 +6034,17 @@ checks `psql` with and without TLS.
   tombstone stays while intents are pending (`txn` tests
   `a_delete_over_an_unmade_intent_stays`,
   `collect_keeps_a_tombstone_over_an_unmade_intent`).
+- **2026-11-14 — §M14.15 J1, the `json` type:** one type (`jsonb` another
+  name), strict RFC 8259 input, a canonical binary form read in place
+  (keys sorted and found by binary search, `a[i]` at once, numbers exact
+  as their value), PostgreSQL's output and order, a key encoding (a
+  primary key, an index, range scans), casts to the scalar types (§8.31);
+  `Type::wire_output` / `wire_input`, so it travels as its text; every
+  driver's own values (Rust `Value::Json`, Python `dict` / `nucleus.Json`,
+  JavaScript objects / `Json`, Java `Json`, C `NC_JSON` / `nc_json`, C++
+  `Json`, Swift `.json`); pg-compat's `jsonb` (3802) and `json` (114),
+  text and binary; error code `22P05`; the `json` fuzz target and the law
+  kit's generator; `bench/json`.
 - **2026-11-14 — §M14.24 R7, examples and the guide:** `docs/memory.md`
   (a knowledge base with citations, a memory per user, read records,
   erasure, backups — SQL, Python, JavaScript, MCP);

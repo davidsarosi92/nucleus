@@ -65,7 +65,7 @@ import java.util.stream.Collectors;
  * byte[], date → LocalDate, time → LocalTime (24:00:00, which it cannot hold, as
  * LocalTime.MAX), timestamp → LocalDateTime, timestamptz → OffsetDateTime (UTC), interval →
  * {@link Interval}, inet → {@link Inet}, cidr → {@link Cidr}, uuid → UUID, vector → float[],
- * sparsevec → {@link SparseVector}, arrays → List, NULL → null; another registered type → {@link Ext} (its name and binary form).
+ * sparsevec → {@link SparseVector}, json → {@link Json} (its text), arrays → List, NULL → null; another registered type → {@link Ext} (its name and binary form).
  * Parameters take the same types (and Byte, InetAddress, Instant, Duration, object arrays and
  * Collections). One thread at a time per connection.
  */
@@ -1078,6 +1078,7 @@ public final class NucleusClient implements AutoCloseable {
         if (tag == 15 || tag == EXT) {
             if (v instanceof byte[] b) return b;
             if (v instanceof Ext e) return e.data();
+            if (v instanceof Json j) return j.text().getBytes(StandardCharsets.UTF_8);
             if (v instanceof float[] f) return vectorBytes(f);
             if (v instanceof SparseVector s) return s.bytes();
             throw cannotSend(c, v);
@@ -1247,6 +1248,7 @@ public final class NucleusClient implements AutoCloseable {
                 return ext("uuid", bb.array());
             }
             if (v instanceof Ext x) return ext(x.typeName(), x.data());
+            if (v instanceof Json x) return ext("json", x.text().getBytes(StandardCharsets.UTF_8));
             if (v instanceof float[] x) return ext("vector", vectorBytes(x));
             if (v instanceof SparseVector x) return ext("sparsevec", x.bytes());
             if (v instanceof Collection<?> items) {
@@ -1370,6 +1372,7 @@ public final class NucleusClient implements AutoCloseable {
                         ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(f);
                         yield f;
                     }
+                    if (name.equals("json")) yield new Json(new String(data, StandardCharsets.UTF_8));
                     if (name.equals("sparsevec")) {
                         SparseVector sv = SparseVector.of(data);
                         if (sv != null) yield sv;

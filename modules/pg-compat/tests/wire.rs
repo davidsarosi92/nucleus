@@ -357,6 +357,81 @@ fn a_prepared_statement_whose_result_changed_is_refused() {
     assert_eq!(a.query(&all, &[&1i64]).unwrap()[0].len(), 3);
 }
 
+/// json as PostgreSQL drivers see it: type `jsonb` (oid 3802), a version
+/// byte and the text in binary format, the text in text format; a `json`
+/// parameter (oid 114, the text alone) read as json too.
+#[test]
+fn json_through_a_real_driver() {
+    use postgres::types::{FromSql, IsNull, ToSql, Type, to_sql_checked};
+    use postgres::{Client as Pg, NoTls};
+
+    #[derive(Debug, PartialEq)]
+    struct Jsonb(String);
+
+    impl<'a> FromSql<'a> for Jsonb {
+        fn from_sql(
+            _: &Type,
+            raw: &'a [u8],
+        ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+            let (v, text) = raw.split_first().ok_or("empty")?;
+            assert_eq!(*v, 1);
+            Ok(Jsonb(String::from_utf8(text.to_vec())?))
+        }
+        fn accepts(ty: &Type) -> bool {
+            *ty == Type::JSONB
+        }
+    }
+
+    impl ToSql for Jsonb {
+        fn to_sql(
+            &self,
+            ty: &Type,
+            out: &mut postgres::types::private::BytesMut,
+        ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+            if *ty == Type::JSONB {
+                out.extend_from_slice(&[1]);
+            }
+            out.extend_from_slice(self.0.as_bytes());
+            Ok(IsNull::No)
+        }
+        fn accepts(ty: &Type) -> bool {
+            *ty == Type::JSONB || *ty == Type::JSON
+        }
+        to_sql_checked!();
+    }
+
+    let addr = start(Config::trust());
+    let url = format!(
+        "host={} port={} user=test dbname=nucleus",
+        addr.ip(),
+        addr.port()
+    );
+    let mut pg = Pg::connect(&url, NoTls).unwrap();
+    pg.batch_execute("CREATE TABLE j (id INT PRIMARY KEY, doc JSONB)")
+        .unwrap();
+    pg.execute(
+        "INSERT INTO j VALUES (1, $1)",
+        &[&Jsonb("{\"b\": [1, 2.50], \"a\": null}".into())],
+    )
+    .unwrap();
+    let json = pg
+        .prepare_typed("INSERT INTO j VALUES (2, $1)", &[Type::JSON])
+        .unwrap();
+    pg.execute(&json, &[&Jsonb("[true]".into())]).unwrap();
+    let rows = pg.query("SELECT doc FROM j ORDER BY id", &[]).unwrap();
+    assert_eq!(rows[0].columns()[0].type_(), &Type::JSONB);
+    assert_eq!(
+        rows[0].get::<_, Jsonb>(0),
+        Jsonb("{\"a\": null, \"b\": [1, 2.5]}".into())
+    );
+    assert_eq!(rows[1].get::<_, Jsonb>(0), Jsonb("[true]".into()));
+    let text = pg.simple_query("SELECT doc FROM j WHERE id = 1").unwrap();
+    let postgres::SimpleQueryMessage::Row(r) = &text[1] else {
+        panic!("{text:?}")
+    };
+    assert_eq!(r.get(0), Some("{\"a\": null, \"b\": [1, 2.5]}"));
+}
+
 /// A uuid as PostgreSQL drivers see it: type `uuid` (oid 2950), its 16
 /// bytes in binary format, its canonical text in text format.
 #[test]

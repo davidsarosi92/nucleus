@@ -1,0 +1,22 @@
+# The JSON measurements (PLAN.md §M14.15): nucleus's parser, binary form
+# and output against serde_json, on the JSON benchmarks' corpora
+# (canada, citm_catalog, twitter — `bench/json/run.sh` fetches them).
+# Its own workspace, not a member of the repository's, so CI does not
+# build it; build it with `CARGO_TARGET_DIR=target/json cargo build
+# --release` from here.
+[package]
+name = "nucleus-json-bench"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "JSON parsing and access measured for nucleus (a measurement, not a product)"
+
+[workspace]
+
+[dependencies]
+nucleus-sql = { path = "../../crates/sql" }
+serde_json = "1"
+
+[profile.release]
+debug = false

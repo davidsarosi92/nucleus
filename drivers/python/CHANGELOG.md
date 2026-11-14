@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- json (nucleus PLAN.md §M14.15): a `json` value arrives as what
+  `json.loads` makes; a `dict` parameter goes as json, `nucleus.Json(x)`
+  sends a list or a string as json; in batches too (Arrow: `string`).
 - `recall` returns `as_of` too, the commit it read (nucleus PLAN.md
   §M14.24 R5): a citation is a memory's `id` and `as_of`.
 

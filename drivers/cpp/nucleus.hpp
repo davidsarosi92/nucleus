@@ -167,6 +167,13 @@ struct Ext {
     bool operator==(const Ext& o) const { return type_name == o.type_name && data == o.data; }
 };
 
+/// A `json` value: its text (the server's as a result; any JSON text as a
+/// parameter, which the server checks).
+struct Json {
+    std::string text;
+    bool operator==(const Json& o) const { return text == o.text; }
+};
+
 /// A `sparsevec`: its dimensions and its non-zero components — positions
 /// from 0, ascending, each with its value (the text form counts from 1:
 /// `{1:0.5,4:2}/10`).
@@ -185,13 +192,13 @@ using Array = std::vector<Value>;
 using Vector = std::vector<float>;
 using Variant = std::variant<std::monostate, bool, int64_t, double, std::string, Numeric, Date, Timestamp,
                              TimestampTz, Interval, Array, Uuid, Ext, SmallInt, Integer, Real, Bytes, Time,
-                             Inet, Cidr, Vector, SparseVector>;
+                             Inet, Cidr, Vector, SparseVector, Json>;
 
 /// A value: NULL (monostate), bool, int64 (bigint), double, text (also
 /// char(n) and enums), numeric, date, timestamp, timestamptz, interval, an
 /// array, a uuid, another registered type's value, smallint, integer,
 /// real, bytea, time, inet, cidr, a vector (std::vector<float>), a sparse
-/// vector (SparseVector).
+/// vector (SparseVector), json (Json: its text).
 struct Value : Variant {
     using Variant::Variant;
     Value() = default;
@@ -284,6 +291,7 @@ inline Value from_c(const nc_value& v) {
         return Value(SparseVector{v.as.sparse.dims,
                                   std::vector<uint32_t>(v.as.sparse.indices, v.as.sparse.indices + v.as.sparse.nnz),
                                   std::vector<float>(v.as.sparse.values, v.as.sparse.values + v.as.sparse.nnz)});
+    case NC_JSON: return Value(Json{std::string(v.as.text.ptr, v.as.text.len)});
     case NC_EXT:
         return Value(Ext{v.as.ext.type_name, std::vector<uint8_t>(v.as.ext.data, v.as.ext.data + v.as.ext.len)});
     default: return Value();
@@ -325,6 +333,11 @@ inline nc_value to_c(const Value& v, std::deque<std::vector<nc_value>>& store) {
             if (s.indices.size() != s.values.size())
                 throw Error("a sparse vector's indices and values differ in number", "22000");
             return nc_sparsevec(s.dims, s.indices.data(), s.values.data(), s.indices.size());
+        }
+        nc_value operator()(const Json& j) const {
+            nc_value r = nc_json(j.text.c_str());
+            r.as.text.len = j.text.size();
+            return r;
         }
         nc_value operator()(const Ext& e) const { return nc_ext(e.type_name.c_str(), e.data.data(), e.data.size()); }
         nc_value operator()(const SmallInt& i) const { return nc_smallint(i.value); }

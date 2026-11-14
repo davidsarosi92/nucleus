@@ -67,7 +67,8 @@ typedef enum nc_type {
     NC_ENUM = 20,     /* a column only: an enum (nc_column_type_name); its values are NC_TEXT */
     NC_UUID = 100,  /* uuid (on the wire, NC_EXT named "uuid") */
     NC_VECTOR = 101, /* vector: float components (on the wire, NC_EXT named "vector") */
-    NC_SPARSEVEC = 102 /* sparsevec: dimensions, non-zero components (on the wire, NC_EXT named "sparsevec") */
+    NC_SPARSEVEC = 102, /* sparsevec: dimensions, non-zero components (on the wire, NC_EXT named "sparsevec") */
+    NC_JSON = 103   /* json: its text, as.text (on the wire, NC_EXT named "json") */
 } nc_type;
 
 /* A uuid: its 16 bytes. */
@@ -88,7 +89,7 @@ struct nc_value {
         struct { const uint8_t *ptr; size_t len; } bytes;      /* bytea */
         int64_t time;           /* µs since midnight (24:00:00 included) */
         struct { uint8_t family, bits; uint8_t addr[16]; } net; /* family 4 (addr[0..4]) or 6 */
-        struct { const char *ptr; size_t len; } text;          /* NUL-terminated */
+        struct { const char *ptr; size_t len; } text;          /* NUL-terminated (text, json) */
         struct { uint64_t lo; int64_t hi; uint8_t scale; } numeric; /* (hi·2^64 + lo) × 10^-scale */
         int32_t date;           /* days since 2000-01-01 */
         int64_t timestamp;      /* µs since 2000-01-01 00:00 (UTC for timestamptz) */
@@ -298,6 +299,8 @@ nc_value nc_cidr(int family, const uint8_t *addr, int bits);
  * and an IPv4 tail) into an inet; 0 on success. */
 int nc_inet_parse(const char *text, nc_value *out);
 nc_value nc_text(const char *s);
+/* A json value from its text (the server checks it; not copied). */
+nc_value nc_json(const char *text);
 nc_value nc_date(int32_t days);
 nc_value nc_timestamp(int64_t micros);
 nc_value nc_timestamptz(int64_t micros);

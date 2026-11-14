@@ -165,7 +165,10 @@ pub(crate) fn wire_value(buf: &mut Vec<u8>, v: &Value, ty: Option<DataType>, ver
                 wire_value(buf, item, elem, version);
             }
         }
-        Value::Ext(t, bytes) if version >= 2 => put::ext(buf, t.name(), bytes),
+        Value::Ext(t, bytes) if version >= 2 => match t.imp().wire_output(v) {
+            Some(form) => put::ext(buf, t.name(), &form),
+            None => put::ext(buf, t.name(), bytes),
+        },
         // Registered types travel as text to version-1 clients.
         Value::Ext(..) => put::text(buf, &v.render()),
     }
@@ -881,8 +884,14 @@ fn from_wire(v: WireValue) -> Result<Value, Error> {
             // Checked as any input is, through the type's text form, and
             // kept as that reads back: the canonical bytes (a sparsevec's
             // positions in order, its zeros dropped).
-            let v = Value::ext(t, bytes);
-            t.imp().input(&t.imp().output(&v)).map_err(|e| Error {
+            let checked = match t.imp().wire_input(&bytes) {
+                Some(v) => v,
+                None => {
+                    let v = Value::ext(t, bytes);
+                    t.imp().input(&t.imp().output(&v))
+                }
+            };
+            checked.map_err(|e| Error {
                 code: e.code,
                 message: format!("malformed parameter: {}", e.message),
                 hint: None,

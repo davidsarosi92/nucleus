@@ -998,6 +998,47 @@ nucleus sql db -c "BACKUP TO '/abs/backups/mon'"
 nucleus restore /abs/backups/mon restored --subject-keys db.subject-keys
 ```
 
+## JSON
+
+PLAN.md §M14.15 J1: the `json` type, release, an M2 Pro.  The usual
+corpora (`canada.json`: numbers; `citm_catalog.json`: objects;
+`twitter.json`: strings and Unicode), fetched by `bench/json/run.sh`.
+
+In the process (`bench/json`, the median of 15), against `serde_json`'s
+`Value`; MB/s of the text:
+
+| | parse | serde | output | serde | one field | serde (parse) |
+|---|---:|---:|---:|---:|---:|---:|
+| canada (2,198 KB) | 484 | 499 | 448 | 1,004 | 0.024 µs | 4,578 µs |
+| citm_catalog (1,687 KB) | 1,011 | 660 | 1,606 | 4,235 | 0.036 µs | 2,642 µs |
+| twitter (617 KB) | 716 | 480 | 1,178 | 2,092 | 0.025 µs | 1,352 µs |
+
+Canada's parse varies 484–568 MB/s between runs.  serde prints compact
+text from doubles it already holds; nucleus prints PostgreSQL's layout
+from exact decimals.  A field is read from the stored form in place.
+
+Against PostgreSQL 18's `jsonb` (`bench/json/pg.py`: postgres:18-alpine
+in Docker on the same machine, its defaults; nucleus a server; seconds
+for one statement, the median of five):
+
+| documents | rows | text | parse (`doc::json IS NOT NULL`) | PostgreSQL | output (`sum(length(doc::text))`) | PostgreSQL |
+|---|---:|---:|---:|---:|---:|---:|
+| tweets | 50,000 | 246 MB | 0.428 | 1.634 | 0.145 | 1.124 |
+| citm performances | 50,000 | 103 MB | 0.091 | 1.001 | 0.048 | 0.438 |
+| canada features ×4 | 4 | 8.8 MB | 0.026 | 0.072 | 0.029 | 0.044 |
+
+A whole file as one value:
+
+| file | text | nucleus | `jsonb` (`pg_column_size`) |
+|---|---:|---:|---:|
+| canada.json | 2,198 KB | 1,667 KB | 2,599 KB |
+| citm_catalog.json | 1,687 KB | 407 KB | 739 KB |
+| twitter.json | 617 KB | 431 KB | 497 KB |
+
+```sh
+bash bench/json/run.sh target/release/nucleus   # fetches the files, runs both
+```
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

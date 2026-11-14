@@ -46,6 +46,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "json"
+path = "fuzz_targets/json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "text_search"
 path = "fuzz_targets/text_search.rs"
 test = false

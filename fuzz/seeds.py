@@ -7,6 +7,7 @@ A seed is a well-formed input the fuzzer starts from and mutates, so it
 reaches deep without guessing a protocol's framing first:
 
 - sql_parse: the statements of the sqllogictest files (crates/testkit/slt).
+- json: JSON texts, and a few values' binary forms.
 - values, text_search, copy: each statement or type the target picks by
   its first byte, with inputs that the statement or type accepts.
 - scram: a whole exchange, its proof computed here (RFC 5802).
@@ -152,6 +153,27 @@ def values():
     for i, t in enumerate(types):
         for k, v in enumerate(VALUES.get(t, ["1"])):
             write(d, f"{i:02}-{k}", bytes([i]) + v.encode())
+
+
+# --- json --------------------------------------------------------------------
+
+JSON_TEXTS = [
+    '{"name": "Ann", "tags": ["a", "b"], "age": 41, "pi": 3.14159, "ok": true, "x": null}',
+    '[1, -0, 1.50, 1e2, -1E-7, 123456789012345678901234567890, 9223372036854775808]',
+    '{"b": 1, "a": 2, "b": 3}', '"\\u00e9\\ud83d\\ude00\\n\\t\\"\\\\"', '[[[[[]]]]]', '{}', '[]',
+    '{"tool": "search", "arguments": {"query": "refund policy", "k": 5}, "result": [{"id": 1}]}',
+]
+# Binary forms (mode 1): null, the integer 5, the string "abc", [true], {"a": 1}.
+JSON_FORMS = [b"\x00", b"\x31\x05", b"\x53abc", b"\x60\x01\x01\x20",
+              b"\x70\x01\x01\x02a\x31\x01"]
+
+
+def json_seeds():
+    d = out_dir("json")
+    for k, t in enumerate(JSON_TEXTS):
+        write(d, f"text-{k}", b"\x00" + t.encode())
+    for k, b in enumerate(JSON_FORMS):
+        write(d, f"form-{k}", b"\x01" + b)
 
 
 # --- text_search -------------------------------------------------------------
@@ -564,6 +586,7 @@ def main():
     a = p.parse_args()
     stmts = sql_parse()
     values()
+    json_seeds()
     text_search()
     copy()
     scram()

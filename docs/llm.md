@@ -41,7 +41,8 @@ Parameters `$1`, `$2` … .  Statements end with `;`.
 **Types:** `boolean`, `smallint`, `integer` (`int`), `bigint`, `real`,
 `double precision` (`float`), `numeric(p, s)` (exact, ≤ 38 digits), `text`,
 `varchar(n)`, `char(n)`, `bytea`, `date`, `time`, `timestamp`,
-`timestamptz`, `interval`, `uuid`, `inet`, `cidr`, `vector(n)`, arrays
+`timestamptz`, `interval`, `uuid`, `inet`, `cidr`, `json` (`jsonb` too:
+one binary type, keys sorted, `1.50` read back as `1.5`), `vector(n)`, arrays
 `type[]` (one dimension), enums (`CREATE TYPE mood AS ENUM ('sad', 'ok')`).
 An integer literal is `integer` if it fits, `1.5` is `numeric`.  Sessions
 are in UTC.
@@ -281,7 +282,7 @@ before a generation's queries records what each returned
 | `CREATE VIEW` | a `WITH` query |
 | `count(*) FILTER (WHERE …)` | `sum(CASE WHEN … THEN 1 ELSE 0 END)` |
 | `unnest(…)` in the select list | `SELECT … FROM unnest(…) AS u(x)` |
-| `json` / `jsonb` | text columns, parsed by the application |
+| `->`, `->>`, `@>` and the `json` functions (coming, §M14.15) | `doc::text`, parsed by the application; `=`, `ORDER BY`, keys and indexes on `json` work |
 | `TRUNCATE` | `DELETE FROM t` |
 | `ALTER TABLE … DROP COLUMN`, `RENAME`, `ALTER COLUMN … SET DEFAULT` | a new table and `INSERT … SELECT` |
 | `SELECT … FOR UPDATE` | a `SERIALIZABLE` transaction |

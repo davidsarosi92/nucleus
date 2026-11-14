@@ -120,6 +120,18 @@ public final class NucleusTest {
         }
     }
 
+    static void json() {
+        try (NucleusClient db = db()) {
+            String t = table();
+            db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, doc JSON)");
+            db.query("INSERT INTO " + t + " VALUES (1, $1)", new Json("{\"b\": [1, 2.50], \"a\": null}"));
+            Result r = db.query("SELECT doc FROM " + t);
+            equal(r.columns().get(0).type(), "json", "json column type");
+            equal(r.rows().get(0).get(0), new Json("{\"a\": null, \"b\": [1, 2.5]}"), "json value");
+            equal(errorCode(() -> db.query("SELECT '{bad'::json")), "22P02", "malformed json");
+        }
+    }
+
     static void vector() {
         try (NucleusClient db = db()) {
             String t = table();
@@ -446,6 +458,7 @@ public final class NucleusTest {
         run("types both ways", NucleusTest::typesBothWays);
         run("uuid", NucleusTest::uuid);
         run("vector", NucleusTest::vector);
+        run("json", NucleusTest::json);
         run("sparsevec", NucleusTest::sparseVector);
         run("core types", NucleusTest::coreTypes);
         run("errors", NucleusTest::errors);
@@ -464,7 +477,7 @@ public final class NucleusTest {
         run("token", NucleusTest::token);
         run("directory", NucleusTest::directory);
         run("own transport", NucleusTest::ownTransport);
-        check(cases == 11 && passed == 16, "all tests ran");
+        check(cases == 12 && passed == 17, "all tests ran");
         System.out.println(passed + " tests passed");
     }
 }

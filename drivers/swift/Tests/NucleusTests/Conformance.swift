@@ -110,6 +110,16 @@ enum Conformance {
         assertFails("22000") { try db.query("INSERT INTO \(t) VALUES (7, $1)", [.vector([1, 2])]) }
     }
 
+    static func json(_ db: Connection) throws {
+        let t = table()
+        try db.query("CREATE TABLE \(t) (id INT PRIMARY KEY, doc JSON)")
+        try db.query("INSERT INTO \(t) VALUES (1, $1)", [.json("{\"b\": [1, 2.50], \"a\": null}")])
+        let r = try db.query("SELECT doc FROM \(t)")
+        XCTAssertEqual(r.columns[0].type, "json")
+        XCTAssertEqual(r.rows[0][0], .json("{\"a\": null, \"b\": [1, 2.5]}"))
+        assertFails("22P02") { try db.query("SELECT '{bad'::json") }
+    }
+
     static func errors(_ db: Connection) throws {
         assertFails("42P01") { try db.query("SELECT * FROM nosuch") }
         assertFails("22012") { try db.query("SELECT 1 / 0") }
@@ -186,7 +196,7 @@ enum Conformance {
     }
 
     static func all(_ connect: () throws -> Connection) throws {
-        for test in [typesBothWays, coreTypes, uuid, vectors, errors, transactions, cursors, copyAndPipelines] {
+        for test in [typesBothWays, coreTypes, uuid, vectors, json, errors, transactions, cursors, copyAndPipelines] {
             let db = try connect()
             try test(db)
             db.close()

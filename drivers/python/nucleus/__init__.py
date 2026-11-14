@@ -28,10 +28,12 @@ Values map to Python types: boolean -> bool, smallint, integer and bigint
 as time.max), timestamp -> datetime.datetime (naive), timestamptz ->
 datetime.datetime (UTC), interval -> nucleus.Interval, inet ->
 ipaddress.ip_interface, cidr -> ipaddress.ip_network, uuid -> uuid.UUID,
+json -> what json.loads makes (dict, list, str, int, float, bool, None),
 vector -> array.array('f'), sparsevec -> nucleus.SparseVector, arrays -> list, NULL -> None; another registered type -> nucleus.Ext (its
 name and binary form).  Parameters take the same types (and
 datetime.timedelta for intervals, bytearray for bytea, an ipaddress
-address for an inet, a float32 numpy array for a vector).
+address for an inet, a float32 numpy array for a vector, a dict for json —
+or nucleus.Json(x) to send any value as json, a list or a string too).
 
 The connection runs each statement in its own transaction unless a
 transaction block is open (``BEGIN`` or ``with conn.transaction()``).
@@ -45,6 +47,7 @@ import decimal as _decimal
 import hashlib as _hashlib
 import hmac as _hmac
 import ipaddress as _ip
+import json as _json
 import os as _os
 import socket as _socket
 import ssl as _ssl
@@ -55,7 +58,7 @@ from dataclasses import field as _field
 
 __all__ = [
     "connect", "open", "Database", "Connection", "Cursor", "Stream", "Batches", "Batch", "ColumnBatch",
-    "Result", "Column", "Interval", "Ext", "SparseVector",
+    "Result", "Column", "Interval", "Ext", "Json", "SparseVector",
     "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "ProgrammingError",
     "NotSupportedError", "DEFAULT_PORT", "DEFAULT_FETCH",
@@ -168,6 +171,28 @@ class Ext:
 
     type_name: str
     data: bytes
+
+
+class Json:
+    """A value to send as ``json``: a ``dict`` goes as json by itself; a
+    list goes as an array, a string as text, unless wrapped —
+    ``Json([1, 2])``, ``Json("a")``."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, Json) and self.value == other.value
+
+    def __repr__(self):
+        return f"Json({self.value!r})"
+
+
+def _json_bytes(v):
+    """A value's json text, as UTF-8."""
+    return _json.dumps(v, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
 
 
 @_dataclass(frozen=True)
@@ -329,6 +354,10 @@ def _encode(out, v):
         _encode_ext(out, "sparsevec", _sparse_bytes(v))
     elif isinstance(v, Ext):
         _encode_ext(out, v.type_name, v.data)
+    elif isinstance(v, Json):
+        _encode_ext(out, "json", _json_bytes(v.value))
+    elif isinstance(v, dict):
+        _encode_ext(out, "json", _json_bytes(v))
     elif isinstance(v, (list, tuple)):
         out.append(10)
         out += _struct.pack("<I", len(v))
@@ -470,6 +499,8 @@ class _Reader:
                 return _uuid.UUID(bytes=data)
             if name == "vector":
                 return _vector_of(data)
+            if name == "json":
+                return _json.loads(data)
             if name == "sparsevec" and n >= 8:
                 sv = _sparse_of(data)
                 if sv is not None:
@@ -1423,7 +1454,7 @@ class ColumnBatch:
             return pa.Array.from_buffers(t, n, [valid, buf.slice(*self._data)])
         if c.tag in (4, 17, _ENUM, 0, 15) or (c.tag == _EXT and _width(c) == 0):
             if c.tag == _EXT:
-                t = pa.binary()
+                t = pa.string() if c.type == "json" else pa.binary()
             return pa.Array.from_buffers(t, n, [valid, buf.slice(*self._offsets), buf.slice(*self._data)])
         mask = ~self._valid_numpy() if self.nulls else None
         if c.tag in (1, 6, 7, 8):
@@ -1720,6 +1751,8 @@ def _var_slot(c, v):
     if tag == 15:
         return bytes(v)
     if tag == _EXT:
+        if c.type == "json":
+            return _json_bytes(v.value if isinstance(v, Json) else v)
         if _is_vector(v):
             return _vector_bytes(v)
         if isinstance(v, SparseVector):

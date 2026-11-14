@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- json (nucleus PLAN.md §M14.15): `NC_JSON` (its text in `as.text`),
+  `nc_json(text)`.
 - A server's SCRAM first message asking for more than 1 000 000 PBKDF2
   iterations is refused as malformed (a server could otherwise hold the
   client in the key derivation for minutes; nucleus PLAN.md §M14.29 S2).

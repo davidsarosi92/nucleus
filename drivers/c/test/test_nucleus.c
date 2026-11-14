@@ -187,6 +187,37 @@ static void uuids(void) {
     nc_close(db);
 }
 
+static void json(void) {
+    nc_error err;
+    nc_config cfg = config();
+    nc_conn *db = nc_connect(&cfg, &err);
+    char t[64], sql[256];
+    nc_value p[1];
+    nc_result *r;
+    CHECK(db != NULL);
+    if (!db) return;
+    table(t, sizeof t);
+    snprintf(sql, sizeof sql, "CREATE TABLE %s (doc json)", t);
+    nc_result_free(must(db, sql, NULL, 0));
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES ($1)", t);
+    p[0] = nc_json("{\"b\": [1, 2.50], \"a\": \"x\"}");
+    nc_result_free(must(db, sql, p, 1));
+    snprintf(sql, sizeof sql, "SELECT doc FROM %s", t);
+    r = must(db, sql, NULL, 0);
+    if (r) {
+        CHECK(nc_column_type(r, 0) == NC_JSON);
+        CHECK(strcmp(nc_column_type_name(r, 0), "json") == 0);
+        CHECK(nc_value_at(r, 0, 0)->type == NC_JSON);
+        CHECK(strcmp(nc_value_at(r, 0, 0)->as.text.ptr, "{\"a\": \"x\", \"b\": [1, 2.5]}") == 0);
+        CHECK(strcmp(text_of(r, 0, 0), "{\"a\": \"x\", \"b\": [1, 2.5]}") == 0);
+        nc_result_free(r);
+    }
+    p[0] = nc_json("{bad");
+    snprintf(sql, sizeof sql, "INSERT INTO %s VALUES ($1)", t);
+    CHECK(nc_query(db, sql, p, 1, &err) == NULL && strcmp(err.code, "22P02") == 0);
+    nc_close(db);
+}
+
 static void vectors(void) {
     nc_error err;
     nc_config cfg = config();
@@ -759,6 +790,7 @@ int main(void) {
     errors_and_transactions();
     uuids();
     vectors();
+    json();
     sparse_vectors();
     core_types();
     authentication();

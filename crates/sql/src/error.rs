@@ -60,6 +60,7 @@ codes! {
     type_mismatch => "42804",
     wrong_object_type => "42809",
     invalid_text => "22P02",
+    untranslatable => "22P05",
     datetime_format => "22007",
     datetime_overflow => "22008",
     out_of_range => "22003",

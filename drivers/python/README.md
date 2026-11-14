@@ -22,7 +22,8 @@ parameter), `ipaddress.ip_interface` (inet; an address as a parameter),
 `ipaddress.ip_network` (cidr), `uuid.UUID`, `array('f')` (vector; a
 float32 numpy array too as a parameter), `nucleus.SparseVector`
 (sparsevec: `dims`, 0-based `indices`, `values`; `SparseVector.of(dict,
-dims)`), `list`, `None`; another
+dims)`), json as what `json.loads` makes (a `dict` parameter is json;
+`nucleus.Json(x)` sends a list or a string as json), `list`, `None`; another
 registered type is `nucleus.Ext` (its name and binary form).  Protocol
 version 4: the password is proved by SCRAM-SHA-256, never sent.  TLS:
 `connect(tls=True)` (the system's CAs), `tls_ca="ca.pem"`,

@@ -82,6 +82,30 @@ class Conformance(unittest.TestCase):
             self.assertEqual(r.rows[0][2].version, 4)
             self.assertEqual(c.execute(f"SELECT n FROM {t} WHERE id = $1", [str(u).upper()]).rows, [(1,)])
 
+    def test_json(self):
+        t = table()
+        with connect() as c:
+            c.execute(f"CREATE TABLE {t} (id INT PRIMARY KEY, doc JSON)")
+            c.execute_many(f"INSERT INTO {t} VALUES ($1, $2)", [
+                (1, {"name": "Ann", "tags": ["a", "b"], "n": 2.5}),
+                (2, nucleus.Json([1, "two", None])),
+                (3, nucleus.Json("just text")),
+                (4, None)])
+            r = c.execute(f"SELECT doc, doc::text FROM {t} ORDER BY id")
+            self.assertEqual(r.columns[0].type, "json")
+            self.assertEqual([row[0] for row in r.rows],
+                             [{"name": "Ann", "tags": ["a", "b"], "n": 2.5}, [1, "two", None], "just text", None])
+            self.assertEqual(r.rows[0][1], '{"n": 2.5, "name": "Ann", "tags": ["a", "b"]}')
+            # A dict is json; a list stays an array.
+            self.assertEqual(c.execute("SELECT $1::text", [{"b": 1, "a": {}}]).rows, [('{"a": {}, "b": 1}',)])
+            with self.assertRaises(nucleus.DataError) as e:
+                c.execute("SELECT '{bad'::json")
+            self.assertEqual(e.exception.code, "22P02")
+            # In batches, and back in by a columnar load.
+            for b in c.batches(f"SELECT doc FROM {t} ORDER BY id"):
+                self.assertEqual(b.column(0).to_list()[:2], [{"name": "Ann", "tags": ["a", "b"], "n": 2.5},
+                                                          [1, "two", None]])
+
     def test_sparse_vector(self):
         t = table()
         sv = nucleus.SparseVector

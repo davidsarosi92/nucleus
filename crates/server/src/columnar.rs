@@ -83,13 +83,18 @@ fn fixed(buf: &mut Vec<u8>, v: &Value, t: DataType) -> Result<(), Error> {
 }
 
 /// A variable-width value's bytes: text as UTF-8 (`char(n)` and enums
-/// too), `bytea` and registered types as their bytes, `inet` /
+/// too), `bytea` and registered types as their bytes (or their wire form:
+/// `json`'s text), `inet` /
 /// `cidr` as family, mask length and address, anything else (arrays) as
 /// the value in the row format's encoding.
 fn var(buf: &mut Vec<u8>, v: &Value, t: DataType, version: u16) {
     match v {
         Value::Text(s) => buf.extend_from_slice(s.as_bytes()),
-        Value::Bytea(b) | Value::Ext(_, b) => buf.extend_from_slice(b),
+        Value::Ext(e, b) => match e.imp().wire_output(v) {
+            Some(form) => buf.extend_from_slice(&form),
+            None => buf.extend_from_slice(b),
+        },
+        Value::Bytea(b) => buf.extend_from_slice(b),
         Value::Inet(n) | Value::Cidr(n) => buf.extend(n.to_bytes()),
         Value::Array(_) => crate::native::wire_value(buf, v, Some(t), version),
         v => buf.extend_from_slice(v.render().as_bytes()),

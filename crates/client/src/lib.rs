@@ -209,6 +209,8 @@ pub enum Type {
     Vector,
     /// `sparsevec`: dimensions and non-zero components.
     SparseVector,
+    /// `json`: its values as their text.
+    Json,
     /// Another registered type, by name.
     Other(String),
 }
@@ -365,6 +367,9 @@ pub enum Value {
         /// Their values.
         values: Vec<f32>,
     },
+    /// A `json` value: its text (the server's: `{"a": 1, "b": [1, 2]}`;
+    /// as a parameter, any JSON text).
+    Json(String),
     /// A value of another registered type: its name and binary form.
     Other {
         /// The type's name.
@@ -502,6 +507,7 @@ impl Value {
                 indices,
                 values,
             } => put::ext(out, "sparsevec", &sparse_bytes(*dims, indices, values)),
+            Value::Json(text) => put::ext(out, "json", text.as_bytes()),
             Value::Other { type_name, bytes } => put::ext(out, type_name, bytes),
         }
     }
@@ -541,6 +547,13 @@ impl Value {
                 match (type_name.as_str(), <[u8; 16]>::try_from(bytes.as_slice())) {
                     ("uuid", Ok(b)) => Value::Uuid(b),
                     ("vector", _) => Value::Vector(vector_of(&bytes)),
+                    ("json", _) => match String::from_utf8(bytes) {
+                        Ok(text) => Value::Json(text),
+                        Err(e) => Value::Other {
+                            type_name,
+                            bytes: e.into_bytes(),
+                        },
+                    },
                     ("sparsevec", _) if sparse_of(&bytes).is_some() => {
                         sparse_of(&bytes).expect("checked")
                     }
@@ -634,7 +647,7 @@ impl fmt::Display for Value {
             Value::Int(i) => write!(f, "{i}"),
             Value::Real(x) => write!(f, "{x}"),
             Value::Float(x) => write!(f, "{x}"),
-            Value::Text(s) => f.write_str(s),
+            Value::Text(s) | Value::Json(s) => f.write_str(s),
             Value::Bytes(b) => {
                 f.write_str("\\x")?;
                 b.iter().try_for_each(|b| write!(f, "{b:02x}"))
@@ -828,6 +841,7 @@ impl<'a> Input<'a> {
                     n if n == "uuid" => Type::Uuid,
                     n if n == "vector" => Type::Vector,
                     n if n == "sparsevec" => Type::SparseVector,
+                    n if n == "json" => Type::Json,
                     n => Type::Other(n),
                 },
                 tag::ENUM => Type::Enum(self.str()?),
@@ -1744,6 +1758,7 @@ fn encode_batch(types: &[Type], columns: &[Column], rows: &[Vec<Value>]) -> Resu
                     (Value::Null, _) => {}
                     (Value::Bytes(x), Type::Bytea) => data.extend_from_slice(x),
                     (Value::Other { bytes, .. }, Type::Other(_)) => data.extend_from_slice(bytes),
+                    (Value::Json(text), Type::Json) => data.extend_from_slice(text.as_bytes()),
                     (Value::Vector(v), Type::Vector) => data.extend_from_slice(&vector_bytes(v)),
                     (
                         Value::SparseVector {
@@ -1888,7 +1903,7 @@ fn tag_of_type(t: &Type) -> u8 {
         Type::Cidr => tag::CIDR,
         Type::Char => tag::CHAR,
         Type::Array(_) => tag::ARRAY,
-        Type::Uuid | Type::Vector | Type::SparseVector | Type::Other(_) => tag::EXT,
+        Type::Uuid | Type::Vector | Type::SparseVector | Type::Json | Type::Other(_) => tag::EXT,
         Type::Enum(_) => tag::ENUM,
         Type::Text | Type::Unknown => tag::TEXT,
     }
@@ -2040,6 +2055,10 @@ impl Batch {
                         bytes: b.to_vec(),
                     },
                     Type::Vector => Value::Vector(vector_of(b)),
+                    Type::Json => Value::Json(
+                        String::from_utf8(b.to_vec())
+                            .map_err(|_| Error::Protocol("json is not UTF-8".into()))?,
+                    ),
                     Type::SparseVector => sparse_of(b).unwrap_or_else(|| Value::Other {
                         type_name: "sparsevec".into(),
                         bytes: b.to_vec(),

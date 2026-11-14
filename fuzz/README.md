@@ -9,6 +9,7 @@ allocation past the limit is a finding.
 |---|---|
 | `sql_parse` | SQL text: the lexer and the parser (and what parsed parses again the same) |
 | `values` | a value as text, into each type (`'…'::type`), and back out |
+| `json` | JSON text into the binary form and back (text, indented, key), and bytes read as the form |
 | `text_search` | text-search queries (nucleus's `@@`, PostgreSQL's `tsquery`/`tsvector`), highlighting, the chunkers |
 | `copy` | `COPY … FROM STDIN`'s data, text format and CSV with options, into a table with keys, checks and indexes |
 | `ncp` | a client's bytes to the nucleus protocol: login (none, or SCRAM / OAUTHBEARER), queries, parameters, `COPY`, columnar loads |

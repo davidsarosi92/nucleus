@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- json (nucleus PLAN.md §M14.15): `nucleus::Json`, a `json` value's
+  text, both ways.
 - Sparse vectors (nucleus PLAN.md §M14.12 V7): `nucleus::SparseVector`
   (dimensions, 0-based positions and values) in `Value`.
 - Vectors (nucleus PLAN.md §M14.12): `nucleus::Vector`, a

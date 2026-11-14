@@ -47,6 +47,9 @@ public enum Value: Equatable, Hashable, Sendable {
     /// sparsevec: dimensions, and the non-zero components' positions (from
     /// 0, ascending) and values.
     case sparsevec(dimensions: Int, indices: [Int], values: [Float])
+    /// json: its text (the server's as a result; any JSON text as a
+    /// parameter, which the server checks) — decode it with `JSONDecoder`.
+    case json(String)
     /// Another registered type: its name and binary form.
     case ext(type: String, data: Data)
 
@@ -176,6 +179,7 @@ func value(_ p: UnsafePointer<nc_value>) -> Value {
     case NC_FLOAT: return .double(v.as.real)
     case NC_REAL: return .float(v.as.real4)
     case NC_TEXT: return .text(string(v.as.text.ptr, v.as.text.len))
+    case NC_JSON: return .json(string(v.as.text.ptr, v.as.text.len))
     case NC_NUMERIC: return .numeric(Numeric(exact: format(p)))
     case NC_BYTEA:
         guard let b = v.as.bytes.ptr else { return .bytes(Data()) }
@@ -276,6 +280,7 @@ final class Arena {
                 throw NucleusError(message: "a sparsevec's indices and values differ in number")
             }
             return nc_sparsevec(UInt32(dims), buffer(indices.map { UInt32($0) }), buffer(values), values.count)
+        case let .json(text): return nc_json(cString(text))
         case let .ext(type, data): return nc_ext(cString(type), bytes(data), data.count)
         }
     }

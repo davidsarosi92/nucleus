@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- json (nucleus PLAN.md §M14.15): a `json` value arrives as what
+  `JSON.parse` makes; a plain object parameter goes as json, `new
+  Json(x)` sends an array or a string as json; in batches too.
 - `recall` returns `as_of` too, the commit it read (nucleus PLAN.md
   §M14.24 R5): a citation is a memory's `id` and `as_of`.
 

@@ -22,6 +22,7 @@ final class NucleusEmbeddedTests: XCTestCase {
     func testCoreTypes() throws { try Conformance.coreTypes(connect()) }
     func testUuid() throws { try Conformance.uuid(connect()) }
     func testVectors() throws { try Conformance.vectors(connect()) }
+    func testJson() throws { try Conformance.json(connect()) }
     func testErrors() throws { try Conformance.errors(connect()) }
     func testTransactions() throws { try Conformance.transactions(connect()) }
     func testCursors() throws { try Conformance.cursors(connect()) }

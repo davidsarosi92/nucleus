@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 
-import { Cidr, connect as connectNode, Decimal, Inet, Interval, NucleusError, SparseVector, Time } from "../src/index.ts";
+import { Cidr, connect as connectNode, Decimal, Inet, Interval, Json, NucleusError, SparseVector, Time } from "../src/index.ts";
 import type { ConnectOptions, Value } from "../src/index.ts";
 
 const options = {
@@ -96,6 +96,30 @@ test("uuid", async () => {
   assert.equal(r.rows[0][0], u);
   assert.match(r.rows[0][1] as string, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.deepEqual((await db.query(`SELECT n FROM ${t} WHERE id = $1`, [u])).rows, [[1]]);
+  await db.close();
+});
+
+test("json", async () => {
+  const db = await connect(options);
+  const t = table();
+  await db.query(`CREATE TABLE ${t} (id INT PRIMARY KEY, doc JSON)`);
+  await db.executeMany(`INSERT INTO ${t} VALUES ($1, $2)`, [
+    [1, { name: "Ann", tags: ["a", "b"], n: 2.5 }],
+    [2, new Json([1, "two", null])],
+    [3, new Json("just text")],
+    [4, null],
+  ]);
+  const r = await db.query(`SELECT doc, doc::text FROM ${t} ORDER BY id`);
+  assert.equal(r.columns[0].type, "json");
+  assert.deepEqual(
+    r.rows.map((x) => x[0]),
+    [{ name: "Ann", tags: ["a", "b"], n: 2.5 }, [1, "two", null], "just text", null],
+  );
+  assert.equal(r.rows[0][1], '{"n": 2.5, "name": "Ann", "tags": ["a", "b"]}');
+  await assert.rejects(db.query("SELECT '{bad'::json"), (e: NucleusError) => e.code === "22P02");
+  for await (const b of await db.batches(`SELECT doc FROM ${t} ORDER BY id`)) {
+    assert.deepEqual(b.column("doc").get(1), [1, "two", null]);
+  }
   await db.close();
 });
 

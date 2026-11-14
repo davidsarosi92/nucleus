@@ -1162,6 +1162,21 @@ pub trait Type: std::any::Any + Send + Sync {
         None
     }
 
+    /// Its values' form on the nucleus protocol, when that is not their
+    /// canonical bytes (`None`, the default): `json` travels as its text,
+    /// which every language parses, where its binary form none does.
+    fn wire_output(&self, v: &Value) -> Option<Vec<u8>> {
+        let _ = v;
+        None
+    }
+
+    /// A value from the form [`Type::wire_output`] gives, when that is not
+    /// the canonical bytes (`None`, the default).
+    fn wire_input(&self, bytes: &[u8]) -> Option<Result<Value>> {
+        let _ = bytes;
+        None
+    }
+
     /// Whether its values stay in their row however long they are — read
     /// with it, by the KV's own overflow pages — rather than out of line
     /// past [`crate::large::THRESHOLD`] (PLAN.md §M14.26): for a type whose

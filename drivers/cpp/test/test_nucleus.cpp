@@ -134,6 +134,17 @@ int main() {
         CHECK(error_code(db, "INSERT INTO " + t + " VALUES (9, '{4:1}/3')") == "22000");
     }
     {
+        Connection db(config());
+        auto t = table();
+        db.query("CREATE TABLE " + t + " (id INT PRIMARY KEY, doc JSON)");
+        db.query("INSERT INTO " + t + " VALUES (1, $1)", {Json{"{\"b\": [1, 2.50], \"a\": null}"}});
+        auto r = db.query("SELECT doc FROM " + t);
+        CHECK(r.columns[0].type == NC_JSON && r.columns[0].type_name == "json");
+        CHECK(r.rows[0][0] == Value(Json{"{\"a\": null, \"b\": [1, 2.5]}"}));
+        CHECK(r.rows[0][0].str() == "{\"a\": null, \"b\": [1, 2.5]}");
+        CHECK(error_code(db, "SELECT '{bad'::json") == "22P02");
+    }
+    {
         // §M14.26's types, natively (protocol version 3).
         Connection db(config());
         auto t = table();

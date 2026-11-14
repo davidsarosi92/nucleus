@@ -236,7 +236,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [sql_parse, values, text_search, copy, ncp, pg_wire, scram, jwt, disk, model_files]
+        target: [sql_parse, values, json, text_search, copy, ncp, pg_wire, scram, jwt, disk, model_files]
     env:
       # The sanitizer's build: warnings are lint's business.
       RUSTFLAGS: ""

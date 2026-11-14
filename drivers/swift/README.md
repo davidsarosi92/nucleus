@@ -34,7 +34,7 @@ exact text), `bytes` (`Data`), `date(year:month:day:)`, `time` (µs since
 midnight), `timestamp` and `timestamptz` (`Date`),
 `interval(months:days:micros:)`, `uuid` (`UUID`), `inet`, `cidr`,
 `array`, `vector` (`[Float]`), `sparsevec(dimensions:indices:values:)`,
-`ext(type:data:)` (another registered type).  `query` returns a
+`json` (its text, for `JSONDecoder`), `ext(type:data:)` (another registered type).  `query` returns a
 `QueryResult` (`columns`, `rows`, `command`, `count`; a `Row` by
 position or column name); also `execute`, `executeMany`, `pipeline`,
 `cursor(sql, params, fetch:)` (`next()`, `all()`), `copy(sql, text:)` /

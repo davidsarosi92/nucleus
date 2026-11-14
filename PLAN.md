@@ -283,7 +283,7 @@ are marked ✅.
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ✅ (2026-11-14) study written (2026-11-13); R1 ✅ memory stores, `REMEMBER`, `recall()`, row expiry, MCP tools, driver helpers (LongMemEval_S turn R@10 0.819 against the paper's BM25 0.592); R2 ✅ `FORGET SUBJECT`, the scrub and the search (a planted subject's texts: 100 places after `DELETE` and a vacuum, 0 after `FORGET`); R3 ✅ leak tests over every recall path, BM25's statistics a tenant's own on a table partitioned by tenant; R4 ✅ `recall` under 1 ms in the process (100 000 memories), batched through `LATERAL`, a vacuum's crash flaw fixed; §M14.14 ✅ between; R5 ✅ citations (`as_of`), read records by request id (`nc_catalog.reads`), erasure through history and the log; R6 ✅ `BACKUP TO` / `nucleus restore` without index pages, each subject's rows sealed under its own key, which `FORGET` destroys (60 MiB backed up in 0.46 s, restored in 0.80 s); R7 ✅ `docs/memory.md`, the Python and JavaScript `memory` examples (run in CI), MCP `cite` and `forget_subject` |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
-| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; steps J1–J5 to be agreed |
+| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller) |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
@@ -8130,7 +8130,7 @@ SELECT … FROM t AS OF …`, a dropped table included).
   costs nothing now.  `snapshot_at`'s search bounded by the visible
   commit, not the timestamp space: 20 µs → 5.5 µs.
 
-### §M14.15 — JSON ◐ (study written, 2026-11-14)
+### §M14.15 — JSON ◐ (study written, J1 ✅, 2026-11-14)
 
 - A `JSON` type (validated, stored in a compact binary form), operators
   `->`, `->>`, `#>`, `@>`, `?`, functions to build, extract, test and
@@ -8278,7 +8278,7 @@ put it but `text`, which it can neither query nor index.
    `json` type; in-place partial updates (MySQL's: rows are rewritten
    whole here anyway).
 
-*Steps — to be agreed before they are built:*
+*Steps (agreed 2026-11-14):*
 
 - **J1 — the type**: the parser, the binary form, output (compact, and
   `json_pretty`), casts to and from `text` and the scalar types, equality,
@@ -8287,6 +8287,52 @@ put it but `text`, which it can neither query nor index.
   wire type and the drivers' native values; a fuzz target (text → form
   → text, a round trip as the law).  Measured: parse and output
   throughput against `serde_json` and PostgreSQL, size against `jsonb`.
+
+  **J1 ✅ (2026-11-14).**  Built as studied (`crates/sql/src/json/`:
+  `form`, `parse`, `text`, `key`); the form, byte by byte, in DOCS.md
+  §8.31.  *Taken:* a header byte per node and offset tables whose width
+  is chosen per container (Variant's and MySQL's) — end offsets, so an
+  element's span is two reads; integers in the fewest bytes, other
+  numbers as packed decimal digits and an exponent, made canonical
+  (JCS's idea, exact like `numeric`, `numeric`'s bounds); strings
+  scanned eight bytes at a time for `"`, `\` and controls (simdjson's
+  idea in a word, without SIMD or its two passes), in the parser and
+  the output; PostgreSQL's order for the key encoding (null < string <
+  number < boolean < array < object, containers by count first).  *Not
+  taken:* SIMD (the core has none yet; the word scan was enough to pass
+  `serde_json`), a key dictionary (Variant's: a value stands alone).
+  The wire carries the text (a `wire_output` / `wire_input` hook on
+  registered types: drivers parse JSON natively), pg-compat `jsonb`
+  (oid 3802, binary version 1) and `json` (114).
+  *Measured* (M2 Pro; `bench/json`, the median of 15): parse, output
+  and one field of the top object against `serde_json`'s `Value` —
+  `canada.json` (numbers) 484–568 MB/s against 491–499 across runs,
+  `citm_catalog.json` 1011 against 660, `twitter.json` 716 against
+  480; output 448 / 1606 / 1178 MB/s against serde's 1004 / 4235 / 2092
+  (serde prints compact text from values it holds as doubles; nucleus
+  `jsonb`'s layout, with spaces, from exact decimals); a field 0.024 µs
+  in place against a parse's 1.3–4.6 ms.  Two changes made the numbers:
+  output as bytes with strings as byte slices and digits unpacked by
+  pairs (2–3.5× serde's time before, about 2× now), and numbers packed
+  straight from the text's digits (canada's parse 334 → ~520 MB/s; an
+  attempt through a 64-bit mantissa was slower).  Against PostgreSQL 18
+  (`bench/json/pg.py`, its `jsonb` in Docker on the same machine, its
+  defaults; nucleus a server; both timed as one statement): parsing
+  50 000 tweets (246 MB of text) 0.43 s against 1.63, 50 000
+  `citm_catalog` performances (103 MB) 0.09 against 1.00, canada's
+  features ×4 (8.8 MB) 0.026 against 0.072; output 0.145 / 0.048 /
+  0.029 s against 1.12 / 0.44 / 0.044; a whole file stored 1667 / 407 /
+  431 KB against `jsonb`'s 2599 / 739 / 497 (text 2198 / 1687 / 617).
+  *Differences from PostgreSQL, recorded:* `1.50` reads back `1.5`
+  (the value, not the scale); keys sort by bytes, not length first; the
+  top-level `[] < null` quirk of `jsonb` is not kept.  *Fuzzing*
+  (`fuzz/fuzz_targets/json.rs`: text laws, and malformed bytes read
+  safely) found two before the merge: a corrupt decimal with a huge
+  exponent printing billions of zeros (now bounded at read) and an
+  exponent overflow in the writer (checked).  *Found and fixed on the
+  way:* a table dropped after a bulk `CREATE TABLE AS` came back empty
+  — a commit's leaf filter dropped a tombstone over a large commit's
+  unmade intent (53a0c36, the Changelog's entry).
 - **J2 — operators and functions**: the access and containment
   operators, building (`json_build_object`, `to_json`, `row_to_json`,
   `json_agg`, `json_object_agg`), changing (`json_set`, `json_insert`,

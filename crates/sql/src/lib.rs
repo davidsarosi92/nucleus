@@ -50,6 +50,7 @@ pub mod hnsw;
 pub mod hybrid;
 pub mod index_method;
 pub mod inet;
+pub mod json;
 mod keyfilter;
 mod keytable;
 pub(crate) mod object_cache;
