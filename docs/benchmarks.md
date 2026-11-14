@@ -1025,9 +1025,9 @@ value sums asserted equal):
 
 | documents | rows | text | parse | PostgreSQL | output | PostgreSQL | a field | PostgreSQL | a path | PostgreSQL | a value | PostgreSQL | a table | PostgreSQL |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| tweets | 50,000 | 246 MB | 0.401 | 1.618 | 0.143 | 1.106 | 0.071 | 0.360 | 0.070 | 0.357 | 0.079 | 0.351 | 0.107 | 0.379 |
-| citm performances | 50,000 | 103 MB | 0.088 | 0.977 | 0.048 | 0.432 | 0.009 | 0.038 | 0.017 | 0.052 | 0.012 | 0.038 | 1.093 | 0.325 |
-| canada features ×4 | 4 | 8.8 MB | 0.026 | 0.073 | 0.030 | 0.042 | 0.004 | 0.012 | 0.005 | 0.012 | 0.004 | 0.012 | 0.343 | 0.133 |
+| tweets | 50,000 | 246 MB | 0.396 | 1.630 | 0.144 | 1.105 | 0.068 | 0.369 | 0.075 | 0.363 | 0.073 | 0.368 | 0.119 | 0.379 |
+| citm performances | 50,000 | 103 MB | 0.089 | 0.986 | 0.051 | 0.433 | 0.009 | 0.038 | 0.016 | 0.052 | 0.008 | 0.039 | 0.842 | 0.333 |
+| canada features ×4 | 4 | 8.8 MB | 0.025 | 0.071 | 0.029 | 0.042 | 0.004 | 0.012 | 0.005 | 0.012 | 0.004 | 0.012 | 0.323 | 0.132 |
 
 Parse: `count(*) … WHERE doc::json IS NOT NULL` over a text column;
 output: `sum(length(doc::text))`; a field: `sum(length(doc -> 'user' ->>

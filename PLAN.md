@@ -8590,7 +8590,9 @@ put it but `text`, which it can neither query nor index.
   through the integer's text and back, each item was copied twice (into
   a `Vec`, then into the value's `Arc`), and the `json` type was looked
   up by name per value — fixed (an integer read where it lies, one copy,
-  the type interned once): 1.08 s → 0.84 s.  What is left is the lateral
+  the type interned once): 1.08 s → 0.84 s in the process; against
+  PostgreSQL 0.842 / 0.333 s for performances, 0.323 / 0.132 s for
+  features (2.4–2.5×).  What is left is the lateral
   nested loop's per-row cost spread over allocations, row building and
   expression calls: `json_path_query` laterally, with no column at all,
   takes 0.42 s.  *Next:* a cheaper lateral loop (the right side's plan
