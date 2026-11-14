@@ -1,0 +1,155 @@
+# The containment index (PLAN.md §M14.15 J4b): `CREATE INDEX … USING
+# json (doc)` serves a filter's `@>`, `?`, `?|` and `?&`, the condition
+# checked again on the rows it finds.  Results checked against
+# PostgreSQL 18 (scripts/slt-pg.py check), which runs them without the
+# index; records marked nucleus-only excepted.
+
+statement ok
+CREATE TABLE docs (id int PRIMARY KEY, doc jsonb)
+
+statement ok
+INSERT INTO docs VALUES (1, '{"kind": "a", "n": 1, "tags": ["x", "y"]}'), (2, '{"kind": "b", "n": 2, "tags": ["y"]}'), (3, '{"kind": "a", "n": 3, "sub": {"k": {}}}'), (4, '{"a": [{"b": 1}, {"c": 2}]}'), (5, '["kind", "z"]'), (6, '"kind"'), (7, NULL), (8, '{"kind": "a", "n": 1.0}')
+
+# nucleus-only: the index (PostgreSQL's would be GIN's).
+statement ok
+CREATE INDEX docs_c ON docs USING json (doc)
+
+query I rowsort
+SELECT id FROM docs WHERE doc @> '{"kind": "a"}'
+----
+1
+3
+8
+
+query I rowsort
+SELECT id FROM docs WHERE doc @> '{"kind": "a", "n": 1}'
+----
+1
+8
+
+query I rowsort
+SELECT id FROM docs WHERE doc @> '{"tags": ["y"]}'
+----
+1
+2
+
+query I
+SELECT id FROM docs WHERE doc @> '{"sub": {"k": {}}}'
+----
+3
+
+# Every term found, but in two elements: the recheck says no.
+query I
+SELECT id FROM docs WHERE doc @> '{"a": [{"b": 1, "c": 2}]}'
+----
+
+query I
+SELECT id FROM docs WHERE doc @> '{"a": [{"c": 2}]}'
+----
+4
+
+query I rowsort
+SELECT id FROM docs WHERE doc @> '"kind"'
+----
+5
+6
+
+# Nothing to look for: every row is read.
+query I rowsort
+SELECT id FROM docs WHERE doc @> '{}'
+----
+1
+2
+3
+4
+8
+
+query I
+SELECT count(*) FROM docs WHERE doc @> NULL
+----
+0
+
+query I rowsort
+SELECT id FROM docs WHERE doc ? 'kind'
+----
+1
+2
+3
+5
+6
+8
+
+query I rowsort
+SELECT id FROM docs WHERE doc ? 'sub'
+----
+3
+
+query I
+SELECT id FROM docs WHERE doc ? 'k'
+----
+
+query I rowsort
+SELECT id FROM docs WHERE doc ?| array['sub', 'z']
+----
+3
+5
+
+query I rowsort
+SELECT id FROM docs WHERE doc ?& array['kind', 'tags']
+----
+1
+2
+
+# nucleus-only: the plans — the condition stays, checked on the rows found.
+query T
+EXPLAIN SELECT id FROM docs WHERE doc @> '{"kind": "a"}'
+----
+Project: #0
+  Index Scan using docs_c on docs (doc @> {"kind": "a"}) filter: @>(json,json)(#1, {"kind": "a"})
+
+# Kept on writes.
+statement ok
+UPDATE docs SET doc = '{"kind": "c"}' WHERE id = 1
+
+statement ok
+DELETE FROM docs WHERE id = 3
+
+query I rowsort
+SELECT id FROM docs WHERE doc @> '{"kind": "a"}'
+----
+8
+
+query I
+SELECT id FROM docs WHERE doc @> '{"kind": "c"}'
+----
+1
+
+# More rows than a delta holds: sealed into segments.
+statement ok
+INSERT INTO docs SELECT g, jsonb_build_object('kind', 'k' || (g % 5), 'n', g, 'tags', jsonb_build_array('t' || (g % 7))) FROM generate_series(100, 2599) g
+
+query I
+SELECT count(*) FROM docs WHERE doc @> '{"kind": "k3"}'
+----
+500
+
+query I
+SELECT count(*) FROM docs WHERE doc @> '{"kind": "k3", "tags": ["t2"]}'
+----
+71
+
+query I
+SELECT count(*) FROM docs WHERE doc ? 'tags'
+----
+2501
+
+statement ok
+DELETE FROM docs WHERE id BETWEEN 1000 AND 1999
+
+query I
+SELECT count(*) FROM docs WHERE doc @> '{"kind": "k3"}'
+----
+300
+
+statement ok
+DROP TABLE docs

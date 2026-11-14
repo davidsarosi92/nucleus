@@ -15,6 +15,7 @@
 //! commit, by the session whose commit finds it due, in transactions of
 //! its own.  A `NULL` is not indexed.
 
+pub mod json;
 pub(crate) mod segment;
 pub mod sparse;
 pub(crate) mod store;
@@ -85,7 +86,10 @@ pub(crate) fn params_of(ix: &IndexDef) -> crate::text::score::Params {
 fn store(t: &Table, i: usize) -> Store {
     Store {
         keys: Keys::new(t.index_prefix(t.indexes[i].id)),
-        weighted: t.indexes[i].method.as_deref() == Some(sparse::NAME),
+        weighted: matches!(
+            t.indexes[i].method.as_deref(),
+            Some(sparse::NAME | json::NAME)
+        ),
     }
 }
 
@@ -678,7 +682,8 @@ pub fn stats(
 fn find(txn: &dyn KvTxn, id: &Id) -> Result<Option<(Table, usize)>> {
     Ok(crate::catalog::tables(txn)?.into_iter().find_map(|t| {
         let i = t.indexes.iter().position(|ix| {
-            ix.id == id.index && matches!(ix.method.as_deref(), Some(NAME | sparse::NAME))
+            ix.id == id.index
+                && matches!(ix.method.as_deref(), Some(NAME | sparse::NAME | json::NAME))
         })?;
         (t.id == id.table).then_some((t, i))
     }))
@@ -776,9 +781,11 @@ pub fn shape(txn: &dyn KvTxn, t: &Table, i: usize) -> Result<(usize, usize)> {
     Ok((v.segs.len(), v.waiting()))
 }
 
-/// Registers the method, and the sparse vector index on the same storage
-/// ([`sparse`]; the built-in module does).
+/// Registers the method, and the sparse vector index and the JSON
+/// containment index on the same storage ([`sparse`], [`json`]; the
+/// built-in module does).
 pub fn register(r: &mut Registry) -> Result<()> {
     r.add_index_method(Arc::new(TextIndex))?;
-    sparse::register(r)
+    sparse::register(r)?;
+    json::register(r)
 }

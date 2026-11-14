@@ -283,7 +283,7 @@ are marked ✅.
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ✅ (2026-11-14) study written (2026-11-13); R1 ✅ memory stores, `REMEMBER`, `recall()`, row expiry, MCP tools, driver helpers (LongMemEval_S turn R@10 0.819 against the paper's BM25 0.592); R2 ✅ `FORGET SUBJECT`, the scrub and the search (a planted subject's texts: 100 places after `DELETE` and a vacuum, 0 after `FORGET`); R3 ✅ leak tests over every recall path, BM25's statistics a tenant's own on a table partitioned by tenant; R4 ✅ `recall` under 1 ms in the process (100 000 memories), batched through `LATERAL`, a vacuum's crash flaw fixed; §M14.14 ✅ between; R5 ✅ citations (`as_of`), read records by request id (`nc_catalog.reads`), erasure through history and the log; R6 ✅ `BACKUP TO` / `nucleus restore` without index pages, each subject's rows sealed under its own key, which `FORGET` destroys (60 MiB backed up in 0.46 s, restored in 0.80 s); R7 ✅ `docs/memory.md`, the Python and JavaScript `memory` examples (run in CI), MCP `cite` and `forget_subject` |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
-| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18 |
+| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c (against PostgreSQL's GIN) waits for Docker |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
@@ -8138,7 +8138,7 @@ SELECT … FROM t AS OF …`, a dropped table included).
   costs nothing now.  `snapshot_at`'s search bounded by the visible
   commit, not the timestamp space: 20 µs → 5.5 µs.
 
-### §M14.15 — JSON ◐ (study written, J1–J3 ✅, 2026-11-14)
+### §M14.15 — JSON ◐ (study written, J1–J3, J4a–b ✅, 2026-11-14)
 
 - A `JSON` type (validated, stored in a compact binary form), operators
   `->`, `->>`, `#>`, `@>`, `?`, functions to build, extract, test and
@@ -8547,9 +8547,30 @@ put it but `text`, which it can neither query nor index.
     `Index::key_columns`, `None` for it.  The selectivity of a
     condition on it comes from the statistics' sample, which evaluates
     it.  `slt/69_expression_indexes.slt`.  Measured with J4b in J4c.
-  - **J4b — the containment index** `USING json` (as planned in the
-    study, point 7), with a recheck flag on an index method's served
-    condition (the hash of a path and a value may collide).
+  - **J4b — the containment index** ✅ (2026-11-14): `USING json`, as
+    the study planned (point 7), for `@>`, `?`, `?|`, `?&`.  *Prior
+    art:* PostgreSQL's GIN has two operator classes — `jsonb_ops`, a
+    key or a value an entry (serves `?`, larger, a common key's
+    postings long), and `jsonb_path_ops`, a 32-bit hash of a leaf's
+    path and value an entry (smaller, faster `@>`, no `?`), both lossy
+    and rechecked.  Taken: `jsonb_path_ops`' leaf terms, with 64-bit
+    hashes (fewer collisions to recheck), and a key path's term from
+    `jsonb_ops`' idea so `?` is served — but a query looks a key path
+    up only above an empty object or array, since a leaf below a key
+    implies it: measured on 200,000 events, `@> '{"user": {"name":
+    "u42"}}'` (40 rows) 1.96 ms with the key paths ANDed, 0.12 ms
+    without.  The postings are the text index's storage (§M14.21 T4),
+    so writes are transactional and crash-safe with nothing new;
+    documents weighted, each term 1, so no positions are kept.  The
+    recheck: `IndexMethod::exact`, false, keeps the condition in the
+    scan's filter.  *Measured* (nucleus alone — PostgreSQL waits for
+    the Docker VM —, `bench/json/index.py --no-pg`, 200,000 rows, the
+    median of five, a full scan against the index): `doc->>'id' =`
+    (B-tree expression) 8 ms → 0.07 ms; `(doc->>'score')::int BETWEEN`
+    (600 rows) 16 → 0.90 ms; `@>` a user (40 rows) 33 → 0.12 ms; `@>`
+    a kind and a tag (2,000 rows) 32 → 2.3 ms; `? 'rare'` (200 rows) 6
+    → 0.28 ms.  Builds: 0.11 s, 0.09 s, the containment index 0.84 s.
+    `slt/70_json_index.slt`.
   - **J4c — measured** against PostgreSQL's GIN (`jsonb_path_ops`) and
     B-tree expression indexes on the same documents.
 - **J5 — for models**: `json_matches_schema`, MCP's JSON results, an

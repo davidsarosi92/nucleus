@@ -1,0 +1,18 @@
+SELECT count(*) FROM docs WHERE doc @> NULL;
+SELECT id FROM docs WHERE doc ? 'kind';
+SELECT id FROM docs WHERE doc ? 'sub';
+SELECT id FROM docs WHERE doc ? 'k';
+SELECT id FROM docs WHERE doc ?| array['sub', 'z'];
+SELECT id FROM docs WHERE doc ?& array['kind', 'tags'];
+EXPLAIN SELECT id FROM docs WHERE doc @> '{"kind": "a"}';
+UPDATE docs SET doc = '{"kind": "c"}' WHERE id = 1;
+DELETE FROM docs WHERE id = 3;
+SELECT id FROM docs WHERE doc @> '{"kind": "a"}';
+SELECT id FROM docs WHERE doc @> '{"kind": "c"}';
+INSERT INTO docs SELECT g, jsonb_build_object('kind', 'k' || (g % 5), 'n', g, 'tags', jsonb_build_array('t' || (g % 7))) FROM generate_series(100, 2599) g;
+SELECT count(*) FROM docs WHERE doc @> '{"kind": "k3"}';
+SELECT count(*) FROM docs WHERE doc @> '{"kind": "k3", "tags": ["t2"]}';
+SELECT count(*) FROM docs WHERE doc ? 'tags';
+DELETE FROM docs WHERE id BETWEEN 1000 AND 1999;
+SELECT count(*) FROM docs WHERE doc @> '{"kind": "k3"}';
+DROP TABLE docs

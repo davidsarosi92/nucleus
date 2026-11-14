@@ -187,7 +187,8 @@ owner_id bigint REFERENCES owners (id) ON DELETE CASCADE)`; table
 constraints `PRIMARY KEY (a, b)`, `UNIQUE (…)`, `CHECK (…)`, `FOREIGN KEY
 (…) REFERENCES t (…)`.  `CREATE [UNIQUE] INDEX [name] ON t (a, b)` — a
 key part may be an expression, `((doc->>'kind'))` or `lower(email)`, used
-for conditions on that very expression —, `DROP
+for conditions on that very expression —; `CREATE INDEX ON t USING json
+(doc)` serves `doc @> '{…}'`, `doc ? 'key'`, `?|`, `?&`, `DROP
 INDEX`, `DROP TABLE [IF EXISTS] t [CASCADE]`.  `ALTER TABLE t ADD [COLUMN]
 …`, `ADD CONSTRAINT …`, `DROP CONSTRAINT …`, `ALTER COLUMN c TYPE …`.
 `COMMENT ON TABLE t IS '…'`, `COMMENT ON COLUMN t.c IS '…'` — read them

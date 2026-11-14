@@ -6,4 +6,15 @@ SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING int) = 50;
 SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING text) = '50';
 EXPLAIN SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING int) = 50;
 EXPLAIN SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING text) = '50';
-DROP TABLE users
+DROP TABLE users;
+CREATE TABLE docs (id int PRIMARY KEY, doc jsonb);
+INSERT INTO docs VALUES (1, '{"kind": "a", "n": 1, "tags": ["x", "y"]}'), (2, '{"kind": "b", "n": 2, "tags": ["y"]}'), (3, '{"kind": "a", "n": 3, "sub": {"k": {}}}'), (4, '{"a": [{"b": 1}, {"c": 2}]}'), (5, '["kind", "z"]'), (6, '"kind"'), (7, NULL), (8, '{"kind": "a", "n": 1.0}');
+CREATE INDEX docs_c ON docs USING json (doc);
+SELECT id FROM docs WHERE doc @> '{"kind": "a"}';
+SELECT id FROM docs WHERE doc @> '{"kind": "a", "n": 1}';
+SELECT id FROM docs WHERE doc @> '{"tags": ["y"]}';
+SELECT id FROM docs WHERE doc @> '{"sub": {"k": {}}}';
+SELECT id FROM docs WHERE doc @> '{"a": [{"b": 1, "c": 2}]}';
+SELECT id FROM docs WHERE doc @> '{"a": [{"c": 2}]}';
+SELECT id FROM docs WHERE doc @> '"kind"';
+SELECT id FROM docs WHERE doc @> '{}'

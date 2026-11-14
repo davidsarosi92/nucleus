@@ -226,7 +226,17 @@ fn method_filters(plan: Plan) -> Plan {
             let mut conds = Vec::new();
             conjuncts(whole.clone(), &mut conds);
             if let Some((n, served)) = served(table, access, *estimate, &conds, false) {
-                conds.remove(n);
+                // A lossy index's condition stays, checked on its rows.
+                let exact = match &served {
+                    Access::Method { index, .. } => crate::index_method::of(&table.indexes[*index])
+                        .ok()
+                        .flatten()
+                        .is_none_or(|m| m.exact(&table.indexes[*index], served_name(&served))),
+                    _ => true,
+                };
+                if exact {
+                    conds.remove(n);
+                }
                 *access = served;
                 *filter = conjunction(conds);
             }
@@ -253,6 +263,16 @@ fn method_filters(plan: Plan) -> Plan {
         _ => {}
     }
     plan
+}
+
+/// The function an [`Access::Method`] serves, if any.
+fn served_name(a: &Access) -> &str {
+    match a {
+        Access::Method {
+            served: Some(s), ..
+        } => &s.function,
+        _ => "",
+    }
 }
 
 /// The first of `conds` an index method of `table` serves where the scan

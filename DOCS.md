@@ -3439,7 +3439,10 @@ index cannot tell the rows they are read without it, so it is never
 evaluated below the policy);
 `exec::method_rows` asks for the primary keys and reads their rows (none
 when the statement reads no column and nothing else is checked: the
-method is exact) — in key order, a block at a time (8, then twice the
+method is exact; a lossy one says it is not — `exact(ix, function)`
+false, the JSON containment index's hashes, §8.31 — and the conjunct
+then stays in the filter, checked on each row found, PostgreSQL's
+recheck) — in key order, a block at a time (8, then twice the
 last up to 256, four times past it, up to 16,384: a limit above stops it
 early), by a merge with the table's scan (`exec::rows_at`,
 `TableStorage::rows_at`; the row storage's `exec::entries_at`, PLAN.md
@@ -5260,6 +5263,30 @@ value — `CREATE INDEX ON t ((doc->>'kind'))`, `(((doc->>'age')::int))`,
 `((JSON_VALUE(doc, '$.id' RETURNING int)))` — serves equalities and
 ranges on that very expression (§8.7's expression indexes).
 
+**The containment index** (§M14.15 J4b, `text::index::json`): `CREATE
+INDEX [name] ON t USING json (doc [json_ops])` serves a filter's `doc @>
+q`, `doc ? k`, `doc ?| ks` and `doc ?& ks`, the right side fixed for the
+scan.  It is the text index's storage (§8.19: delta, tombstones, seals,
+merges, snapshots, the integrity check, erasure's scrub) with weighted
+documents (each term 1, no positions), whose terms are hashes
+(`object_cache::object_id`, kinds 15–17, 16 hex digits): a *leaf's* of
+its path — the object keys from the root, an array's elements on their
+array's path — and its canonical value bytes (PostgreSQL's
+`jsonb_path_ops`), and a *key path's*, of the path through an object's
+key.  `doc @> q` looks for `q`'s leaves, and its key paths only above an
+empty object or array (a leaf below a key implies the key, and a key
+path's postings are long); `doc ? k` for the top-level key `k` or `k` as
+a string at the top (an element of a top-level array, or the document);
+`?|` any, `?&` all of those.  The index is lossy — two values may hash
+alike, and terms tell paths, not which element of an array holds what
+(`{"a": [{"b": 1}, {"c": 2}]}` has every term of `{"a": [{"b": 1, "c":
+2}]}`) — so it says it is not exact (`IndexMethod::exact`, §8.17) and
+the condition stays in the scan's filter, checked on each row found.  A
+`q` with nothing to look for (`{}`, `[]`) or a `NULL` is not served
+(every row is read; `NULL` matches none).  Unlike `jsonb_path_ops` it
+serves `?`, and `@>` of an empty container under a key.  `EXPLAIN`:
+`Index Scan using ix on t (doc @> {…}) filter: …`.
+
 **On the wire** (`ncp` tag 11 named `json`) a value travels as its text
 (`Type::wire_output` / `wire_input`), in rows and in columnar batches;
 the drivers hand out the language's own values (§11).  pg-compat shows
@@ -5273,7 +5300,10 @@ records as PostgreSQL 18 gives them: `scripts/slt-pg.py check`),
 `slt/67_json_sql.slt` (SQL/JSON's functions, 207 records as PostgreSQL
 18 gives them), `slt/68_json_table.slt` (`JSON_TABLE`, 67 records),
 `slt/69_expression_indexes.slt` (expression indexes, on JSON paths
-among others),
+among others), `slt/70_json_index.slt` (the containment index: its
+conditions' results as PostgreSQL 18 gives them, a recheck's false
+match, writes, sealed segments), `text::index::json::tests` (no
+contained document missed, paths and values told apart),
 the law kit's generator (equal documents written differently), the
 `json` fuzz target (§2; the operators' laws too, and paths: normalized
 text reads back as itself, items are canonical), pg-compat's
@@ -6252,6 +6282,11 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — §M14.15 J4b, the containment index:** `CREATE INDEX …
+  USING json (doc)` for `@>`, `?`, `?|`, `?&` — the text index's
+  storage, terms a leaf's path and value hashed and a key path's;
+  lossy, so `IndexMethod::exact` keeps the condition in the filter.
+  `slt/70_json_index.slt`, `bench/json/index.py`.
 - **2026-11-14 — §M14.15 J4a, expression indexes:** `CREATE [UNIQUE]
   INDEX … ((expr), lower(c), …)` for every type — immutable, kept on
   every write, matched structurally by the optimizer (`Stats::key_parts`,

@@ -228,6 +228,16 @@ pub trait IndexMethod: Send + Sync {
         false
     }
 
+    /// Whether the rows [`IndexMethod::rows_where`] gives for `function`
+    /// are exactly those the condition holds for.  `false`: a superset
+    /// (a lossy index — the JSON containment index's hashes), and the
+    /// condition stays in the scan's filter, checked on each row found
+    /// (PostgreSQL's recheck).  By default `true`.
+    fn exact(&self, ix: &Index, function: &str) -> bool {
+        let _ = (ix, function);
+        true
+    }
+
     /// Whether the index can rank its rows by `function` of its (first)
     /// column and values fixed for the scan — greatest first with `desc`,
     /// `NULL`s first with `nulls_first` — giving the first `k`

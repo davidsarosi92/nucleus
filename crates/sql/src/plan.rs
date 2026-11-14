@@ -474,7 +474,7 @@ fn key_conds(table: &Table, access: &Access) -> (String, String) {
             format!(
                 "{} {} {}",
                 table.columns[ix.columns[0]].name,
-                s.function,
+                symbol(&s.function),
                 s.args.first().map_or(String::new(), show)
             ),
         );
@@ -525,6 +525,17 @@ fn key_conds(table: &Table, access: &Access) -> (String, String) {
         }
     }
     (name, conds.join(" AND "))
+}
+
+/// A served condition's function as written: an operator's symbol (its
+/// function is named `@>(json,json)`), a function's name.
+fn symbol(function: &str) -> &str {
+    match function.find('(') {
+        Some(at) if at > 0 && !function.starts_with(|c: char| c.is_alphanumeric() || c == '_') => {
+            &function[..at]
+        }
+        _ => function,
+    }
 }
 
 /// An aggregate call.
@@ -814,7 +825,7 @@ impl Plan {
                         if let Some(s) = served {
                             what.push(format!(
                                 "{col} {} {}",
-                                s.function,
+                                symbol(&s.function),
                                 s.args.first().map_or(String::new(), show)
                             ));
                         }

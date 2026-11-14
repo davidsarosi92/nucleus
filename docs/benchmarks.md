@@ -1000,7 +1000,7 @@ nucleus restore /abs/backups/mon restored --subject-keys db.subject-keys
 
 ## JSON
 
-PLAN.md §M14.15 J1–J3a: the `json` type, its operators and SQL/JSON paths, release, an
+PLAN.md §M14.15 J1–J4: the `json` type, its operators, SQL/JSON paths and indexes, release, an
 M2 Pro.  The usual corpora (`canada.json`: numbers; `citm_catalog.json`:
 objects; `twitter.json`: strings and Unicode), fetched by
 `bench/json/run.sh`.
@@ -1050,6 +1050,28 @@ A whole file as one value:
 
 ```sh
 bash bench/json/run.sh target/release/nucleus   # fetches the files, runs both
+```
+
+Indexes on JSON (PLAN.md §M14.15 J4, `bench/json/index.py`): 200,000
+made-up events (`{"id", "user": {"name", "tier"}, "kind", "tags": […],
+"score"[, "rare"]}`), `count(*)` of each condition, a full scan against
+the index (milliseconds, the median of five; each count asserted equal
+with and without it).  PostgreSQL's columns wait for the Docker VM
+(`--no-pg` today):
+
+| condition | rows | scan | index | PostgreSQL scan | PostgreSQL index |
+|---|---:|---:|---:|---:|---:|
+| `doc->>'id' = '123457'` (B-tree on the expression) | 1 | 8 | 0.07 | – | – |
+| `(doc->>'score')::int BETWEEN 10 AND 12` (B-tree) | 600 | 16 | 0.90 | – | – |
+| `doc @> '{"user": {"name": "u42"}}'` (`USING json`; GIN `jsonb_path_ops`) | 40 | 33 | 0.12 | – | – |
+| `doc @> '{"kind": "k3", "tags": ["t3"]}'` | 2,000 | 32 | 2.3 | – | – |
+| `doc ? 'rare'` (`jsonb_path_ops` cannot serve it) | 200 | 6 | 0.28 | – | – |
+
+Builds: the expression indexes 0.11 s and 0.09 s, the containment index
+0.84 s.  2026-11-14.
+
+```sh
+python3 bench/json/index.py --nucleus target/release/nucleus [--no-pg]
 ```
 
 ## Write amplification
