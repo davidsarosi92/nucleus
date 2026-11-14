@@ -86,13 +86,24 @@ if pkg-config --exists openssl 2>/dev/null; then
   read -r -a clibs <<<"$(pkg-config --libs openssl)"
 fi
 
+# A unittest run: its last lines, or, when a test fails, every failure's
+# report (CI's log is all there is to go by).
+unittest() {
+  if "$@" >"$work/unittest.log" 2>&1; then
+    tail -3 "$work/unittest.log"
+  else
+    sed -n '/^======/,$p' "$work/unittest.log"
+    return 1
+  fi
+}
+
 for lang in "${langs[@]}"; do
   echo "== $lang"
   case $lang in
     rust)
       cargo run -q --manifest-path "$root/Cargo.toml" -p nucleus-example ;;
     python)
-      python3 "$root/drivers/python/tests/test_nucleus.py" -v 2>&1 | tail -3
+      unittest python3 "$root/drivers/python/tests/test_nucleus.py" -v
       python3 "$root/examples/python/quickstart.py"
       python3 "$root/examples/python/memory.py"
       python3 "$root/examples/python/structured.py"
@@ -131,7 +142,7 @@ for lang in "${langs[@]}"; do
       for lib in "$root"/target/release/{libnucleus_embedded.dylib,libnucleus_embedded.so,nucleus_embedded.dll}; do
         [ -f "$lib" ] && export NUCLEUS_EMBEDDED_LIB=$lib && break
       done
-      NUCLEUS_URL="file:$work/py-embedded" python3 "$root/drivers/python/tests/test_nucleus.py" -v 2>&1 | tail -3
+      NUCLEUS_URL="file:$work/py-embedded" unittest python3 "$root/drivers/python/tests/test_nucleus.py" -v
       python3 "$root/examples/python/anywhere.py" "file:$work/py-anywhere"
       python3 "$root/examples/python/anywhere.py" ":memory:"
       python3 "$root/examples/python/memory.py" ":memory:"
