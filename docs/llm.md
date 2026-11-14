@@ -318,7 +318,9 @@ database="experiment")`, `ncsql -d experiment`, PostgreSQL's `dbname`),
 change anything there — the database it came from does not see it, and
 it does not see the database's later writes — then `DROP BRANCH
 experiment`, or `ALTER BRANCH experiment RESET` to start over from the
-database as it is now.  `CREATE BRANCH b FROM a` branches a branch;
+database as it is now.  `CREATE BRANCH b FROM a` branches a branch; `CREATE BRANCH before_bug
+AS OF TIMESTAMP now() - interval '1 hour'` (needs the server's
+`--history`) is the database as it was then — to inspect or rescue from;
 `SELECT * FROM nc_catalog.branches` lists them (`current`: yours).
 Names: letters, digits, `-`, `_`, `.` (quote `"pr-1"`); `main` and
 `nucleus` are the main database.  No merge: carry a change back by

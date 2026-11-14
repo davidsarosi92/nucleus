@@ -136,3 +136,46 @@ fn what_cannot_be_done() {
     assert_eq!(code(&mut s, "CREATE BRANCH c"), "42501");
     assert_eq!(code(&mut s, "DROP BRANCH a"), "42501");
 }
+
+/// `CREATE BRANCH … AS OF` (B4): the database as it was at a past
+/// commit, from the history kept.
+#[test]
+fn a_branch_of_the_past() {
+    let p = Arc::new(SimPlatform::new(3));
+    let kv: Arc<dyn Kv> = Arc::new(
+        Database::open_on(
+            Arc::clone(&p) as Arc<dyn Platform>,
+            Path::new("/db"),
+            Options {
+                history_time: std::time::Duration::from_secs(3600),
+                ..Options::default()
+            },
+        )
+        .unwrap(),
+    );
+    let mut s = Session::new(Arc::clone(&kv));
+    run(&mut s, "CREATE TABLE t (id int PRIMARY KEY, v text)");
+    run(&mut s, "INSERT INTO t VALUES (1, 'one'), (2, 'two')");
+    let then = texts(&mut s, "SELECT newest_commit FROM nc_catalog.history")[0].clone();
+    run(&mut s, "DELETE FROM t WHERE id = 1");
+    run(&mut s, "UPDATE t SET v = 'TWO'");
+    run(&mut s, "CREATE TABLE later (x int)");
+    run(&mut s, &format!("CREATE BRANCH past AS OF COMMIT {then}"));
+    let mut past = Session::new(kv.branch("past").unwrap());
+    assert_eq!(
+        texts(&mut past, "SELECT id, v FROM t ORDER BY id"),
+        ["1 one", "2 two"]
+    );
+    assert_eq!(code(&mut past, "SELECT * FROM later"), "42P01");
+    assert_eq!(texts(&mut s, "SELECT id, v FROM t"), ["2 TWO"]);
+    run(&mut past, "INSERT INTO t VALUES (3, 'three')");
+    assert_eq!(texts(&mut past, "SELECT count(*) FROM t"), ["3"]);
+    // Too far back for the history kept.
+    assert_eq!(
+        code(
+            &mut s,
+            "CREATE BRANCH older AS OF TIMESTAMP now() - interval '2 hours'"
+        ),
+        "72000"
+    );
+}

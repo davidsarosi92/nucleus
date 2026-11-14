@@ -169,3 +169,92 @@ fn dropped_and_reset_branches() {
     );
     main.store().check_pages().unwrap();
 }
+
+fn open_with_history(p: &Arc<SimPlatform>, history: u64) -> Engine {
+    Engine::open(
+        Arc::clone(p) as Arc<dyn Platform>,
+        Path::new("/db"),
+        EngineOptions { history, ..opts() },
+    )
+    .unwrap()
+}
+
+/// A branch at a past snapshot (B4): the parent as it was then — later
+/// versions, deletes and spilled transactions taken out —, the parent
+/// unchanged.
+#[test]
+fn a_branch_at_a_past_snapshot() {
+    let p = Arc::new(SimPlatform::new(4));
+    let main = open_with_history(&p, 1000);
+    put(&main, "a", "1");
+    put(&main, "b", "1");
+    let at = main.visible();
+    put(&main, "a", "2");
+    let mut t = main.begin();
+    t.delete(b"b").unwrap();
+    t.commit().unwrap();
+    put(&main, "c", "3");
+    // A transaction after it, large enough to spill: intents and a status.
+    let mut big = main.begin();
+    for i in 0..400 {
+        big.put(format!("big{i:04}").as_bytes(), &[7; 64]).unwrap();
+    }
+    big.commit().unwrap();
+    assert!(main.intent_count().unwrap() > 0);
+    let now = all(&main);
+
+    let past = main.create_branch_at("past", at).unwrap();
+    assert_eq!(all(&past), model(&[("a", "1"), ("b", "1")]));
+    assert_eq!(past.intent_count().unwrap(), 0);
+    assert_eq!(all(&main), now);
+    // Its own way from there; its clock past the parent's.
+    put(&past, "a", "past");
+    assert!(past.visible() > main.visible());
+    assert_eq!(all(&past), model(&[("a", "past"), ("b", "1")]));
+    drop((main, past));
+    p.sim_fs().crash();
+    let main = open_with_history(&p, 1000);
+    assert_eq!(all(&main), now);
+    assert_eq!(
+        all(&main.branch("past").unwrap()),
+        model(&[("a", "past"), ("b", "1")])
+    );
+    main.store().check_pages().unwrap();
+}
+
+#[test]
+fn a_snapshot_not_kept_cannot_be_branched() {
+    let p = Arc::new(SimPlatform::new(5));
+    let main = open(&p); // no history
+    put(&main, "a", "1");
+    let at = main.visible();
+    put(&main, "a", "2");
+    main.vacuum().unwrap();
+    assert!(matches!(
+        main.create_branch_at("past", at),
+        Err(Error::SnapshotTooOld)
+    ));
+    assert_eq!(main.branches().len(), 1);
+}
+
+/// A crash after the branch is made, before it is rolled back: the next
+/// start rolls it back, as its tag says.
+#[test]
+fn rolling_back_is_finished_after_a_crash() {
+    let p = Arc::new(SimPlatform::new(6));
+    let main = open_with_history(&p, 1000);
+    put(&main, "a", "1");
+    let at = main.visible();
+    put(&main, "a", "2");
+    put(&main, "b", "2");
+    // Made, tagged, not rolled back (what the engine does first).
+    let tag = at.to_string().parse::<u64>().unwrap() + 1;
+    main.store().create_branch_tagged("past", tag).unwrap();
+    drop(main);
+    p.sim_fs().crash();
+    let main = open_with_history(&p, 1000);
+    let past = main.branch("past").unwrap();
+    assert_eq!(all(&past), model(&[("a", "1")]));
+    assert_eq!(past.store().tag(), 0);
+    assert_eq!(all(&main), model(&[("a", "2"), ("b", "2")]));
+}

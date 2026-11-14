@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use nucleus_kv::{Branch, Kv, MAIN_BRANCH};
+use nucleus_kv::{Branch, Kv, MAIN_BRANCH, Timestamp};
 
 use crate::error::{Error, Result};
 
@@ -18,8 +18,15 @@ fn find(all: &[Branch], name: &str) -> Result<Branch> {
         .ok_or_else(|| Error::undefined_database(format!("branch \"{name}\" does not exist")))
 }
 
-/// `CREATE BRANCH name [FROM from]`, from the session's database `kv`.
-pub fn create(kv: &Arc<dyn Kv>, name: &str, from: Option<&str>) -> Result<()> {
+/// `CREATE BRANCH name [FROM from] [AS OF …]`, from the session's
+/// database `kv`; `at` names the snapshot of the branch it is made from
+/// (`None`: now).
+pub fn create(
+    kv: &Arc<dyn Kv>,
+    name: &str,
+    from: Option<&str>,
+    at: &dyn Fn(&Arc<dyn Kv>) -> Result<Option<Timestamp>>,
+) -> Result<()> {
     // `nucleus` names the main database to a client, as `main` does.
     if !nucleus_kv::valid_branch_name(name) || name == "nucleus" {
         return Err(Error::invalid_name(format!(
@@ -40,7 +47,10 @@ pub fn create(kv: &Arc<dyn Kv>, name: &str, from: Option<&str>) -> Result<()> {
         }
         _ => Arc::clone(kv),
     };
-    base.create_branch(name)?;
+    match at(&base)? {
+        Some(ts) => base.create_branch_at(name, ts)?,
+        None => base.create_branch(name)?,
+    };
     Ok(())
 }
 

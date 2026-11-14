@@ -387,6 +387,15 @@ pub trait Kv: Send + Sync {
         Err(no_branches(name))
     }
 
+    /// [`create_branch`](Kv::create_branch) as this one was at snapshot
+    /// `at` (one the history kept still reaches: else
+    /// [`Error::SnapshotTooOld`]); costs a pass over its entries.  The
+    /// default: not supported.
+    fn create_branch_at(&self, name: &str, at: Timestamp) -> Result<Arc<dyn Kv>> {
+        let _ = at;
+        Err(no_branches(name))
+    }
+
     /// Drops branch `name` (not the main one, nor one with branches of its
     /// own); its handles fail from then on.  The default: not supported.
     fn drop_branch(&self, name: &str) -> Result<()> {
@@ -975,6 +984,12 @@ impl Kv for Database {
 
     fn create_branch(&self, name: &str) -> Result<Arc<dyn Kv>> {
         Ok(Arc::new(self.on_branch(self.engine.create_branch(name)?)))
+    }
+
+    fn create_branch_at(&self, name: &str, at: Timestamp) -> Result<Arc<dyn Kv>> {
+        Ok(Arc::new(
+            self.on_branch(self.engine.create_branch_at(name, at)?),
+        ))
     }
 
     fn drop_branch(&self, name: &str) -> Result<()> {

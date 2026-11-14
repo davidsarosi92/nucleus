@@ -533,6 +533,8 @@ pub enum Statement {
         name: String,
         /// The branch it is made from (`None`: the session's).
         from: Option<String>,
+        /// `AS OF …`: as that branch was then (B4).
+        as_of: Option<AsOf>,
     },
     /// `DROP BRANCH [IF EXISTS] name`.
     DropBranch {

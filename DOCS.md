@@ -679,7 +679,11 @@ changed plus what its parent freed since that it still reads.
 `check_pages()` checks every tree and that every page is in exactly one
 place — in use (a tree, the directory, a dead list, allocated) or free
 (free, pending, holding the free list).  Branch names: 1–63 ASCII
-letters, digits, `-`, `_`, `.` (`valid_branch_name`).
+letters, digits, `-`, `_`, `.` (`valid_branch_name`).  A branch's *tag*
+(`create_branch_tagged(name, tag)`, `tag()`, `set_tag(t)`) is a number
+the layer above keeps in its record — committed with the branch, a
+change with the next checkpoint — for work a crash must not leave half
+done (B4's roll-back).
 
 **Scrub** (§M14.24 R2b).  `scrub()` → `Scrubbed { pages, wal_bytes }`
 removes from the files what the tree no longer holds: a checkpoint, the
@@ -791,7 +795,18 @@ transactions running in the parent at the branch point wrote — spilled
 intents, unlogged fresh ranges — is no one's there (an unlogged range
 deleted at once, intents vacuumed as aborted ones).  Each branch's
 engine has its own checkpointer thread, waking at its own WAL's size
-(a checkpoint commits them all).
+(a checkpoint commits them all).  `create_branch_at(name, at)` (B4)
+makes a branch as this one was at snapshot `at` — refused with
+`SnapshotTooOld` unless the history kept reaches it, and a read-only
+transaction at `at` held meanwhile so vacuum keeps it —: the branch is
+made of the present, tagged `at + 1`, and its engine, before anything
+else, takes out every commit after `at` (`roll_back_to`: versions
+newer than `at`, the intents and status records of transactions
+committed after it, the commit times after it), logged under the
+store's last meta so the clock stays, then checkpoints with the tag
+cleared.  A crash midway leaves the tag: the next start does it again
+(idempotent).  A pass over the branch's entries — the commits after
+`at` are not listed anywhere.
 
 **Snapshot isolation.**  A transaction reads at its start timestamp — the
 engine's *visible* timestamp, which advances only once a commit is durable,
@@ -1101,6 +1116,7 @@ distributed implementation will provide (§F3).
   `branch_name()`, `branches()` (`Branch { name, parent }`, the main
   one — `MAIN_BRANCH`, `main` — first), `branch(name)`,
   `create_branch(name)` (of this handle's branch, as it is now),
+  `create_branch_at(name, at)` (as this one was at snapshot `at`),
   `drop_branch(name)`, `reset_branch(name)` — a database's branches
   (§M14.13; `branch`, `create_branch` and `reset_branch` give an
   `Arc<dyn Kv>` that is a database of its own: its own instance, the
@@ -1213,7 +1229,7 @@ nucleus sql [<dir>] [-h <host[:port]>] [-p <port>] [-U <user>] [-d <db>] [--pass
 ncsql …                       # the same shell under its own name
 nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]   # §9
 nucleus restore <backup> <dir> [--subject-keys <file>]   # §8.30
-nucleus branch <dir> create <name> [--from <branch>] | list | drop <name> | reset <name>   # §8.32
+nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <duration>] | list | drop <name> | reset <name>   # §8.32
 ```
 
 `nucleus sql <dir> -d <branch>` opens a local database's branch.
@@ -5473,8 +5489,10 @@ a wider type, `22012` NULLIF, `21000` LIMIT 1, `42P07` IF NOT EXISTS,
 
 A branch is a copy of the database made in constant time and space,
 written on its own (the storage: §4.6; the engines: §5.2).  **`CREATE
-BRANCH name [FROM parent]`** makes one of the session's database (or of
-`parent`) as it is now; **`DROP BRANCH [IF EXISTS] name`**; **`ALTER
+BRANCH name [FROM parent] [AS OF TIMESTAMP t | AS OF COMMIT n]`** makes
+one of the session's database (or of `parent`) as it is now — or as it
+was then, within the history kept (`nucleus server --history`; else
+`72000`), at the cost of a pass over its entries (§5.2); **`DROP BRANCH [IF EXISTS] name`**; **`ALTER
 BRANCH name RESET`** makes it its parent as it is now.  An
 administrator's, not in a transaction block (`25001`); `42501` for
 others.  Names: 1–63 ASCII letters, digits, `-`, `_`, `.` (quote one with
@@ -5493,7 +5511,9 @@ branch made before a role is the main one's has no such role.  Each
 branch has its own `Kv::instance`, so the state kept in memory per
 database (HNSW upkeep) is never mixed.  `nucleus branch <dir> create |
 list | drop | reset` does the same on a local directory (not one a server
-has open).  `tests/branches.rs`: tables, rows, indexes and schema
+has open; `--at <time>` needs `--history <duration>`, the server's,
+since the retention is not stored with the database — a longer one
+could take a time whose versions vacuum removed).  `tests/branches.rs`: tables, rows, indexes and schema
 changes on each side invisible to the other, a branch of a branch, drop
 and reset, every refusal's code; `crates/client/tests/client.rs`
 connects to a branch by name.

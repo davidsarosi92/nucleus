@@ -78,12 +78,15 @@ usage:
                                     snapshot of that long ago readable (7d,
                                     12h, '30 minutes'; AS OF TIMESTAMP;
                                     default none)
-  nucleus branch <dir> create <name> [--from <branch>] | list | drop <name> | reset <name>
+  nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <duration>]
+                 | list | drop <name> | reset <name>
                                     a local database's branches: a copy made in
                                     constant time and space, writable on its
                                     own (nucleus sql <dir> -d <name>; a
                                     server's: CREATE BRANCH, and clients name
-                                    the branch as their database)
+                                    the branch as their database); --at: as it
+                                    was then, within the history the server
+                                    keeps (its --history, given again)
   nucleus restore <backup> <dir> [--subject-keys <file>]
                                     a new database in <dir> from a backup
                                     (BACKUP TO '<backup>'): its indexes and

@@ -250,6 +250,84 @@ impl Drop for Checkpointer {
     }
 }
 
+/// Takes every commit after `at` out of `store` (a branch's, before its
+/// engine starts): versions newer than `at`, the intents of transactions
+/// committed after it and their status records, the commit times after
+/// it.  What is left is snapshot `at` with its history — idempotent, so a
+/// crash midway is finished by doing it again.  The writes are logged
+/// under the store's last meta, so the clock stays where it was.
+fn roll_back_to(store: &Store, at: u64) -> Result<()> {
+    const CHUNK: usize = 4096;
+    let meta = store.recovery().meta;
+    let mut late = BTreeSet::new();
+    {
+        let tree = store.read()?;
+        for e in tree.range(Bound::Included(&STATUS[..]), Bound::Excluded(&[0, 3][..]))? {
+            let (k, v) = e?;
+            let (Ok(id), Ok(ts)) = (
+                <[u8; 8]>::try_from(&k[2..]).map(u64::from_be_bytes),
+                <[u8; 8]>::try_from(&v[..]).map(u64::from_be_bytes),
+            ) else {
+                return Err(Error::Corrupt("bad status record"));
+            };
+            if ts > at {
+                late.insert(id);
+            }
+        }
+    }
+    // Over a range of the store, deleting what `gone` says, a chunk at a
+    // time (the tree not held while writing).
+    let sweep =
+        |start: &[u8], end: Option<&[u8]>, gone: &dyn Fn(&[u8], &[u8]) -> bool| -> Result<()> {
+            let mut from = start.to_vec();
+            let mut first = true;
+            loop {
+                let mut ops = Vec::new();
+                let mut last = None;
+                {
+                    let tree = store.read()?;
+                    let lo = if first {
+                        Bound::Included(&from[..])
+                    } else {
+                        Bound::Excluded(&from[..])
+                    };
+                    let hi = end.map_or(Bound::Unbounded, Bound::Excluded);
+                    for e in tree.range(lo, hi)?.take(CHUNK) {
+                        let (k, v) = e?;
+                        if gone(&k, &v) {
+                            ops.push((k.clone(), None));
+                        }
+                        last = Some(k);
+                    }
+                }
+                let Some(last) = last else { return Ok(()) };
+                if !ops.is_empty() {
+                    store.write(&Batch { meta, ops })?;
+                }
+                from = last;
+                first = false;
+            }
+        };
+    let version_gone = |k: &[u8], _: &[u8]| match decode_key(k) {
+        Some((_, ts)) => match intent_of(ts) {
+            Some(id) => late.contains(&id),
+            None => ts > at,
+        },
+        None => false,
+    };
+    // Versions and intents: an empty user key's, then every other's.
+    sweep(&[0, 0], Some(&[0, 1]), &version_gone)?;
+    sweep(&RESERVED_END, None, &version_gone)?;
+    // The late transactions' status, the late commits' times.
+    sweep(&STATUS, Some(&[0, 3]), &|k, _| {
+        <[u8; 8]>::try_from(&k[2..]).is_ok_and(|id| late.contains(&u64::from_be_bytes(id)))
+    })?;
+    sweep(&COMMIT_TIMES, Some(&[0, 6]), &|k, v| {
+        decode_time(k, v).is_some_and(|(ts, _)| ts > at)
+    })?;
+    Ok(())
+}
+
 impl Inner {
     /// The one checkpoint trigger (§M14.20 W4), after every write to the
     /// store: past `checkpoint_wal_bytes` of WAL since the last checkpoint,
@@ -470,6 +548,13 @@ impl Engine {
     ) -> Result<Self> {
         let threads = platform.parallelism();
         let id = store.info().id;
+        // A branch made at a past snapshot, not yet rolled back to it (or
+        // a crash interrupted that): first of all, as its tag says.
+        if store.tag() != 0 {
+            roll_back_to(&store, store.tag() - 1)?;
+            store.set_tag(0);
+            store.checkpoint()?;
+        }
         let store = Arc::new(store);
         // (The simulation's single thread checkpoints where it falls due,
         // so its runs stay deterministic.)
@@ -564,6 +649,27 @@ impl Engine {
     /// cleaned as after a crash).
     pub fn create_branch(&self, name: &str) -> Result<Engine> {
         let store = self.inner.store.create_branch(name)?;
+        self.engine_of(store)
+    }
+
+    /// [`create_branch`](Self::create_branch) at a past snapshot `at`
+    /// (PLAN.md §M14.13 B4), one the versions kept still hold
+    /// ([`EngineOptions::history`], `history_time`; else
+    /// [`Error::SnapshotTooOld`]): the branch is this one as it is now,
+    /// then every commit after `at` taken out of it — its versions, its
+    /// spilled intents and status, its time — as if never made.  That
+    /// costs a pass over the branch's entries (the commits after `at`
+    /// are not listed anywhere), and is redone after a crash until it is
+    /// done (the branch's tag says so).
+    pub fn create_branch_at(&self, name: &str, at: Timestamp) -> Result<Engine> {
+        // The snapshot readable now, and kept while the branch is made.
+        let guard = self.begin_with(TxnOptions {
+            at: Some(at),
+            read_only: true,
+            ..TxnOptions::default()
+        })?;
+        let store = self.inner.store.create_branch_tagged(name, at.0 + 1)?;
+        drop(guard);
         self.engine_of(store)
     }
 

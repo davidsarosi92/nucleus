@@ -281,14 +281,15 @@ struct Record {
     root: u64,
     lsn: Lsn,
     meta: u64,
+    tag: u64,
 }
 
 impl Record {
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(36 + self.info.name.len());
+        let mut out = Vec::with_capacity(44 + self.info.name.len());
         out.extend_from_slice(&self.info.parent.unwrap_or(MAIN).to_le_bytes());
         out.extend_from_slice(&self.info.origin.unwrap_or(0).to_le_bytes());
-        for v in [self.root, self.lsn, self.meta] {
+        for v in [self.root, self.lsn, self.meta, self.tag] {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out.extend_from_slice(self.info.name.as_bytes());
@@ -300,20 +301,21 @@ impl Record {
             page: PageId(0),
             reason: "bad branch record",
         };
-        if key.len() != 5 || b.len() < 36 {
+        if key.len() != 5 || b.len() < 44 {
             return Err(corrupt());
         }
         let u64_at = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
         Ok(Self {
             info: BranchInfo {
                 id: u32::from_be_bytes(key[1..5].try_into().unwrap()),
-                name: String::from_utf8(b[36..].to_vec()).map_err(|_| corrupt())?,
+                name: String::from_utf8(b[44..].to_vec()).map_err(|_| corrupt())?,
                 parent: Some(u32::from_le_bytes(b[..4].try_into().unwrap())),
                 origin: Some(u64_at(4)),
             },
             root: u64_at(12),
             lsn: u64_at(20),
             meta: u64_at(28),
+            tag: u64_at(36),
         })
     }
 }
@@ -426,6 +428,9 @@ struct Branch {
     recovery: Recovery,
     /// Dropped ([`Store::drop_branch`]): its pages may be another's now.
     dropped: AtomicBool,
+    /// The layer above's note on the branch ([`Store::tag`]), recorded at
+    /// each checkpoint.
+    tag: AtomicU64,
 }
 
 impl Branch {
@@ -549,9 +554,17 @@ fn spaces(records: &[Record]) -> BTreeMap<u32, Space> {
 /// A checkpoint's change to the branches.
 enum Op<'n> {
     Nothing,
-    Create { parent: u32, name: &'n str },
-    Drop { id: u32 },
-    Reset { id: u32 },
+    Create {
+        parent: u32,
+        name: &'n str,
+        tag: u64,
+    },
+    Drop {
+        id: u32,
+    },
+    Reset {
+        id: u32,
+    },
 }
 
 /// A branch's state as a checkpoint freezes it: root, LSN, meta.
@@ -618,6 +631,7 @@ fn open_branch(
         checkpoint_lsn: AtomicU64::new(checkpoint),
         recovery: Recovery { meta, replayed },
         dropped: AtomicBool::new(false),
+        tag: AtomicU64::new(0),
     })
 }
 
@@ -696,6 +710,7 @@ impl Store {
                 r.lsn,
                 r.meta,
             )?;
+            b.tag.store(r.tag, Ordering::Release);
             replayed += b.recovery.replayed;
             branches.insert(id, Arc::new(b));
         }
@@ -762,6 +777,21 @@ impl Store {
         &self.b.info
     }
 
+    /// A number the layer above keeps with the branch (0 unless set):
+    /// [`set_tag`](Self::set_tag)'s, as of the last checkpoint after a
+    /// reopen.  The main branch's is always 0.
+    pub fn tag(&self) -> u64 {
+        self.b.tag.load(Ordering::Acquire)
+    }
+
+    /// Sets [`tag`](Self::tag): durable with the next checkpoint (with
+    /// every write before it).  Ignored for the main branch.
+    pub fn set_tag(&self, tag: u64) {
+        if self.b.info.id != MAIN {
+            self.b.tag.store(tag, Ordering::Release);
+        }
+    }
+
     /// What opening the store recovered of this branch (nothing, for one
     /// made since: its meta its parent's then).
     pub fn recovery(&self) -> Recovery {
@@ -791,6 +821,13 @@ impl Store {
     /// constant time and space, whatever the size.  Writes on either side
     /// stay invisible to the other.
     pub fn create_branch(&self, name: &str) -> Result<Store> {
+        self.create_branch_tagged(name, 0)
+    }
+
+    /// [`create_branch`](Self::create_branch), its [`tag`](Self::tag)
+    /// `tag` from the start — committed with the branch, so a layer above
+    /// that has work to finish on a new branch finds it after a crash.
+    pub fn create_branch_tagged(&self, name: &str, tag: u64) -> Result<Store> {
         if !valid_branch_name(name) {
             return Err(Error::Branch(format!(
                 "\"{name}\" cannot name a branch: 1–63 letters, digits, '-', '_' or '.', not \"{MAIN_NAME}\""
@@ -803,6 +840,7 @@ impl Store {
             Op::Create {
                 parent: self.b.info.id,
                 name,
+                tag,
             },
         )?;
         cp.finish()?;
@@ -1168,8 +1206,10 @@ impl Store {
         let mut dropped = Vec::new();
         match op {
             Op::Nothing => {}
-            Op::Create { parent, name } => {
-                made = Some(self.create_in(&mut sys, &mut states, parent, name.to_owned())?);
+            Op::Create { parent, name, tag } => {
+                let b = self.create_in(&mut sys, &mut states, parent, name.to_owned())?;
+                b.tag.store(tag, Ordering::Release);
+                made = Some(b);
             }
             Op::Drop { id } => dropped.push(self.drop_in(&mut sys, &mut states, id)?),
             Op::Reset { id } => {
@@ -1190,6 +1230,7 @@ impl Store {
                 root: *root,
                 lsn: *lsn,
                 meta: *meta,
+                tag: b.tag.load(Ordering::Acquire),
             }
             .encode();
             let key = branch_key(b.info.id);

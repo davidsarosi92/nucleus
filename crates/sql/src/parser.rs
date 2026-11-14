@@ -1248,7 +1248,12 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            return Ok(Statement::CreateBranch { name, from });
+            let as_of = if self.eat_kws(&["as", "of"]) {
+                Some(self.as_of()?)
+            } else {
+                None
+            };
+            return Ok(Statement::CreateBranch { name, from, as_of });
         }
         let unique = self.eat_kw("unique");
         if self.eat_kw("index") {

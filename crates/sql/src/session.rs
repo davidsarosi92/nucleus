@@ -911,8 +911,14 @@ impl Session {
                     return Err(crate::access::denied(&format!("{verb} needs a superuser")));
                 }
                 match stmt {
-                    Statement::CreateBranch { name, from } => {
-                        crate::branches::create(&self.kv, name, from.as_deref())?
+                    Statement::CreateBranch { name, from, as_of } => {
+                        let registry = Arc::clone(&self.registry);
+                        crate::branches::create(&self.kv, name, from.as_deref(), &|base| {
+                            as_of
+                                .as_ref()
+                                .map(|a| crate::time_travel::snapshot(base, &registry, a))
+                                .transpose()
+                        })?
                     }
                     Statement::DropBranch { name, if_exists } => {
                         crate::branches::drop(&self.kv, name, *if_exists)?;

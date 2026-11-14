@@ -482,3 +482,30 @@ fn branches_made_and_dropped_while_others_write() {
     assert_eq!(main.branches().len(), 2);
     main.check_pages().unwrap();
 }
+
+/// A branch's tag is committed with it, and a change with the next
+/// checkpoint.
+#[test]
+fn tags_are_kept_with_the_branch() {
+    let p = sim(8);
+    let main = open(&p).unwrap();
+    let a = main.create_branch_tagged("a", 7).unwrap();
+    assert_eq!(a.tag(), 7);
+    drop((main, a));
+    p.sim_fs().crash();
+    let main = open(&p).unwrap();
+    let a = main.branch("a").unwrap();
+    assert_eq!(a.tag(), 7);
+    a.set_tag(0);
+    main.set_tag(5); // the main branch has none
+    drop((main, a));
+    p.sim_fs().crash(); // not checkpointed: still 7
+    let main = open(&p).unwrap();
+    let a = main.branch("a").unwrap();
+    assert_eq!((a.tag(), main.tag()), (7, 0));
+    a.set_tag(0);
+    a.checkpoint().unwrap();
+    drop((main, a));
+    p.sim_fs().crash();
+    assert_eq!(open(&p).unwrap().branch("a").unwrap().tag(), 0);
+}
