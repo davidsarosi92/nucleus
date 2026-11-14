@@ -1,0 +1,20 @@
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a' WITH CONDITIONAL WRAPPER);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b' WITH UNCONDITIONAL WRAPPER);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' WITH WRAPPER);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b' WITHOUT WRAPPER);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' OMIT QUOTES);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' KEEP QUOTES);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' RETURNING text OMIT QUOTES);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' RETURNING text KEEP QUOTES ON SCALAR STRING);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' RETURNING text);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.c' RETURNING text);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z');
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' EMPTY ARRAY ON EMPTY);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' EMPTY OBJECT ON EMPTY);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' EMPTY ON EMPTY);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' ERROR ON EMPTY);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' DEFAULT '[0]' ON EMPTY);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*]' EMPTY OBJECT ON ERROR);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' NULL ON ERROR);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*] ? (@ > $m)' PASSING 1 AS m WITH WRAPPER);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b' RETURNING json)

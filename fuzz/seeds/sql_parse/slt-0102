@@ -1,0 +1,20 @@
+SELECT '[1,2,3,4,5,6,7,8]'::jsonb @> '[8,7,6,5,1]', '[1,2,3,4,5,6,7,8]'::jsonb @> '[8,7,6,5,9]';
+SELECT id FROM docs WHERE doc @> '{"tags": ["b"]}';
+SELECT id FROM docs WHERE '{"age": 41, "name": "Ann", "extra": 1}' <@ doc;
+SELECT '{"a":1}'::jsonb ? 'a', '["a",["b"]]'::jsonb ? 'b', '"foo"'::jsonb ? 'foo', '1'::jsonb ? '1';
+SELECT '{"a":1}'::jsonb ?| array['b','a'], '{"a":1}'::jsonb ?& array['a','b'], '["a"]'::jsonb ?& array['a', null], '{"a":1}'::jsonb ?| array[null];
+SELECT id FROM docs WHERE doc ? 'scores';
+SELECT id FROM docs WHERE doc ?| '{name,nothing}';
+SELECT '{"a":1}'::jsonb || '{"a":2,"b":3}', '[1]'::jsonb || '[2]', '{"a":1}'::jsonb || '[2]', '"a"'::jsonb || '{"b":1}';
+SELECT '{"a":1}'::jsonb || '1', '1'::jsonb || '2', '[1]'::jsonb || '{"a":1}';
+SELECT '[1,"a",{"a":1}]'::jsonb - 'a', '{"a":1,"b":2}'::jsonb - '{a,c}'::text[], '[1,2,3]'::jsonb - -1, '[1,2,3]'::jsonb - 5;
+SELECT '[]'::jsonb - 0, '[1]'::jsonb - 'x', '{"a":1,"b":2}'::jsonb - 'b';
+SELECT '[1,"a"]'::jsonb - array['a'], '[1,"a"]'::jsonb - array[null];
+SELECT '{"a":1}'::jsonb - 0;
+SELECT '1'::jsonb - 'a';
+SELECT '"a"'::jsonb - 'a';
+SELECT '[1,2]'::jsonb #- '{-1}', '{"a":{"b":1}}'::jsonb #- '{a,b}', '[1,2]'::jsonb #- '{}', '[1,2]'::jsonb #- '{5}', '{"a":1}'::jsonb #- '{b,c}';
+SELECT '{"a":1}'::jsonb #- '{a,x}';
+SELECT '[1,2]'::jsonb #- '{x}';
+SELECT '1'::jsonb #- '{}';
+SELECT '{"a":1}'::jsonb #- array['a', null]

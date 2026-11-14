@@ -1,0 +1,20 @@
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (hz boolean EXISTS PATH '$.z', hy int EXISTS PATH '$.y', hx text EXISTS PATH '$.x'));
+SELECT x FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (x int PATH '$.x' DEFAULT -1 ON ERROR));
+SELECT x FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (x int PATH '$.x' ERROR ON ERROR));
+SELECT x FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (x int PATH '$.x') ERROR ON ERROR);
+SELECT y FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (y text PATH '$.y' DEFAULT 'none' ON EMPTY));
+SELECT y FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (y text PATH '$.y' ERROR ON EMPTY));
+SELECT y FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', 'strict $.a[*]' COLUMNS (y text PATH 'strict $.y'));
+SELECT y FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', 'strict $.a[*]' COLUMNS (y text PATH 'strict $.y') ERROR ON ERROR);
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', 'strict $.b[*]' COLUMNS (y text));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', 'strict $.b[*]' COLUMNS (y text) ERROR ON ERROR);
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', 'strict $.b[*]' COLUMNS (y text) EMPTY ON ERROR);
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', 'strict $.b[*]' COLUMNS (y text) EMPTY ARRAY ON ERROR);
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*] ? (@.x > $m)' PASSING 1 AS m COLUMNS (x int));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' AS rows PASSING 1 AS m COLUMNS (x int PATH '$.x ? (@ > $m)'));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (z text PATH '$.z[*]'));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (z jsonb PATH '$.z[*]' WITH WRAPPER));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (z jsonb PATH '$.z[*]' WITH CONDITIONAL WRAPPER));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (y jsonb PATH '$.y'));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (y text PATH '$.y' OMIT QUOTES));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (y text FORMAT JSON PATH '$.y' KEEP QUOTES))

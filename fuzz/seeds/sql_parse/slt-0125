@@ -1,0 +1,20 @@
+SELECT JSON_SERIALIZE(jsonb '[1]' RETURNING text);
+SELECT JSON_SERIALIZE(jsonb '"x"' RETURNING bytea);
+SELECT JSON_OBJECTAGG(id VALUE t)::jsonb FROM sj WHERE id < 3;
+SELECT JSON_OBJECTAGG(id: doc)::jsonb FROM sj;
+SELECT JSON_OBJECTAGG(id: doc ABSENT ON NULL)::jsonb FROM sj;
+SELECT JSON_OBJECTAGG(k: v WITH UNIQUE KEYS) FROM (VALUES ('a', 1), ('a', 2)) x(k, v);
+SELECT JSON_OBJECTAGG(k: v)::jsonb FROM (VALUES ('a', 1), ('a', 2)) x(k, v);
+SELECT JSON_OBJECTAGG(k: v RETURNING text) FROM (VALUES ('a', 1), ('b', 2)) x(k, v);
+SELECT JSON_OBJECTAGG(k: v)::jsonb FROM (VALUES ('a', 1)) x(k, v) WHERE false;
+SELECT JSON_ARRAYAGG(id)::jsonb FROM sj;
+SELECT JSON_ARRAYAGG(id ORDER BY id DESC)::jsonb FROM sj;
+SELECT JSON_ARRAYAGG(doc)::jsonb FROM sj;
+SELECT JSON_ARRAYAGG(doc NULL ON NULL)::jsonb FROM sj;
+SELECT JSON_ARRAYAGG(t FORMAT JSON ORDER BY id)::jsonb FROM sj WHERE id < 3;
+SELECT JSON_ARRAYAGG(id RETURNING text) FROM sj;
+SELECT JSON_ARRAYAGG(id)::jsonb FROM sj WHERE false;
+SELECT id % 2, JSON_ARRAYAGG(id ORDER BY id)::jsonb FROM sj GROUP BY id % 2 ORDER BY 1;
+SELECT JSON_VALUE(jsonb '{"a": true}', '$.a');
+SELECT JSON_VALUE(jsonb '{"a": true}', '$.a' RETURNING jsonb);
+SELECT JSON_VALUE(jsonb '{"a": 1e2}', '$.a')

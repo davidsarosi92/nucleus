@@ -101,6 +101,9 @@ def sql_parse():
     stmts = slt_statements()
     for k in range(0, len(stmts), 20):
         write(d, f"slt-{k // 20:04}", ";\n".join(stmts[k:k + 20]))
+    # Deep nesting and long chains (the server once overflowed its stack).
+    write(d, "deep-parens", "SELECT " + "(" * 3000 + "1" + ")" * 3000)
+    write(d, "long-or", "SELECT 1 WHERE " + " OR ".join(["1=0"] * 3000))
     return stmts
 
 

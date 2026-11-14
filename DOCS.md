@@ -5088,8 +5088,7 @@ path, new [, after])` (a position out of range adds at that end),
 `json_agg(x)` (`NULL`s as `null`) and `json_object_agg(k, v)`.  Errors
 are PostgreSQL's (`22023 cannot delete from scalar`, `22P02 path
 element at position 1 is not an integer: "x"`, `22004` a `NULL` path
-step or key, `2202E` uneven arrays).  Not there yet: the standard's
-`JSON_TABLE` (J3c), arrays of `json` (no
+step or key, `2202E` uneven arrays).  Not there yet: arrays of `json` (no
 `json[]`), `row_to_json` (no row values: `json_build_object`), set-returning functions in the select list (PostgreSQL's
 `SELECT json_each(j)`: in `FROM`), and `jsonb`'s raw-scalar quirk
 (`'1'::jsonb -> 0` is `1` there, `NULL` here).
@@ -5208,6 +5207,27 @@ own layout (`{"a" : 1}`); `JSON_SERIALIZE` of a `json` value gives its
 text (PostgreSQL 18 gives `jsonb`'s binary form read as text); a
 `PASSING` date is its ISO string (PostgreSQL passes a datetime item).
 
+**`JSON_TABLE`** (§M14.15 J3c), in `FROM`: `JSON_TABLE(ctx, path [AS
+name] [PASSING …] COLUMNS (name FOR ORDINALITY | name type [FORMAT
+JSON] [PATH 'p'] [wrapper] [quotes] [… ON EMPTY] [… ON ERROR] | name
+type EXISTS [PATH 'p'] [… ON ERROR] | NESTED [PATH] 'p' [AS name]
+COLUMNS (…), …) [ERROR | EMPTY [ARRAY] ON ERROR]) [AS alias [(names)]]`.
+The parser desugars it (`parser.rs`, `json_table`) into a lateral
+subquery: the row path's items come from `__json_table_rows(ctx, path,
+vars, error)` (`item`, `ord` from 1; a failing row path gives no rows,
+or its error with `ERROR ON ERROR`); a column is `JSON_VALUE` of the
+item — `JSON_QUERY` when it is `FORMAT JSON`, has a wrapper or quotes,
+or is of type `json` —, `JSON_EXISTS` cast to its type, or the item's
+position; a column without `PATH` reads `$."name"`.  A column's `ON
+ERROR` is its own (`NULL` by default, whatever the table's).  `NESTED
+PATH` is PostgreSQL's default plan: a lateral `LEFT JOIN` of the nested
+rows (a parent without them keeps a row of `NULL`s), sibling `NESTED`s'
+rows `UNION ALL`ed, each with the others' columns `NULL`; the rows come
+in the document's order.  Column names are unique (`42712`).  One
+difference, recorded in `slt/68_json_table.slt` (67 records as
+PostgreSQL 18 gives them): a `DEFAULT` may read the row's columns
+(PostgreSQL refuses column references there).
+
 **On the wire** (`ncp` tag 11 named `json`) a value travels as its text
 (`Type::wire_output` / `wire_input`), in rows and in columnar batches;
 the drivers hand out the language's own values (§11).  pg-compat shows
@@ -5219,11 +5239,11 @@ records as PostgreSQL 18 gives them: `scripts/slt-pg.py check`),
 `json::path::tests` (texts and errors as PostgreSQL's, evaluation),
 `slt/66_json_path.slt` (paths, 221 records as PostgreSQL 18 gives them),
 `slt/67_json_sql.slt` (SQL/JSON's functions, 207 records as PostgreSQL
-18 gives them),
+18 gives them), `slt/68_json_table.slt` (`JSON_TABLE`, 67 records),
 the law kit's generator (equal documents written differently), the
 `json` fuzz target (§2; the operators' laws too, and paths: normalized
 text reads back as itself, items are canonical), pg-compat's
-`json_through_a_real_driver`.  Measurements: PLAN.md §M14.15 J1–J3b and
+`json_through_a_real_driver`.  Measurements: PLAN.md §M14.15 J1–J3c and
 `docs/benchmarks.md`.
 
 ### 8.14 Errors and hints (`error`, `hint`)
@@ -6198,6 +6218,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — §M14.15 J3c, `JSON_TABLE`:** in `FROM`, desugared into
+  a lateral subquery over `__json_table_rows` (a table function of the
+  row path's items and positions) whose columns are `JSON_VALUE`,
+  `JSON_QUERY` and `JSON_EXISTS` calls; `NESTED PATH` a lateral left
+  join, siblings unioned.  `slt/68_json_table.slt`, 67 records as
+  PostgreSQL 18 gives them.
 - **2026-11-14 — §M14.15 J3b, SQL/JSON's functions:** `JSON_EXISTS`,
   `JSON_VALUE`, `JSON_QUERY` (PASSING, RETURNING, wrappers, quotes, ON
   EMPTY / ON ERROR), `IS JSON`, `JSON_OBJECT`, `JSON_ARRAY` (of values

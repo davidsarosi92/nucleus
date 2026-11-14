@@ -26,9 +26,9 @@ use crate::error::{Error, Result};
 use crate::expr::Expr;
 use crate::ext::{
     Accumulator, Aggregate, Arg, ArgInfo, CallContext, FnRef, Registry, Returns, ScalarFunction,
-    Signature, Volatility,
+    Signature, TableFunction, TableSignature, Volatility,
 };
-use crate::types::{DataType, Value};
+use crate::types::{DataType, Row, Value};
 
 // The ON EMPTY / ON ERROR behaviors, as the parser writes them.
 // 0 is NULL, the default.
@@ -675,6 +675,52 @@ impl Accumulator for ObjectAggState {
     }
 }
 
+// ---------------------------------------------------------- JSON_TABLE
+
+/// `JSON_TABLE`'s rows (J3c): `__json_table_rows(ctx, path, vars, error)`,
+/// the items the path finds and their positions from 1 (`item`, `ord`).
+/// A failure of the path gives no rows, or the error when `error` (`ERROR
+/// ON ERROR`); a missing variable is an error always.
+struct TableRows;
+
+impl TableFunction for TableRows {
+    fn name(&self) -> &str {
+        "__json_table_rows"
+    }
+    fn arity(&self) -> RangeInclusive<usize> {
+        4..=4
+    }
+    fn resolve(&self, _: &[ArgInfo]) -> Result<TableSignature> {
+        Ok(TableSignature {
+            args: vec![
+                Arg::Convert(json()),
+                Arg::Convert(super::path::data_type()),
+                Arg::Keep,
+                Arg::Keep,
+            ],
+            columns: vec![
+                ("item".into(), Some(json())),
+                ("ord".into(), Some(DataType::BigInt)),
+            ],
+        })
+    }
+    fn rows(&self, _: &CallContext<'_>, a: &[Value]) -> Result<Vec<Row>> {
+        if matches!(a[0], Value::Null) || matches!(a[1], Value::Null) {
+            return Ok(Vec::new());
+        }
+        match Query::items(a) {
+            Ok(items) => Ok(items
+                .into_iter()
+                .zip(1..)
+                .map(|(b, i)| vec![super::value(b), Value::Int(i)])
+                .collect()),
+            Err(Fail::Hard(e)) => Err(e),
+            Err(Fail::Soft(e)) if flag(&a[3]) => Err(e),
+            Err(Fail::Soft(_)) => Ok(Vec::new()),
+        }
+    }
+}
+
 /// Registers the functions and aggregates the parser's SQL/JSON forms
 /// call.
 pub(crate) fn register(r: &mut Registry) -> Result<()> {
@@ -691,5 +737,6 @@ pub(crate) fn register(r: &mut Registry) -> Result<()> {
     r.add_function(&["__json_array"], Arc::new(Array))?;
     r.add_aggregate(&["__json_arrayagg"], Arc::new(ArrayAgg))?;
     r.add_aggregate(&["__json_objectagg"], Arc::new(ObjectAgg))?;
+    r.add_table_function(Arc::new(TableRows))?;
     Ok(())
 }

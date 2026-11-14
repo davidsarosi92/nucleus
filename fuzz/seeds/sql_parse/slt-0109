@@ -1,0 +1,20 @@
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a[-1]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a["x"]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.e');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.e.x');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.e.x');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ > 1)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a ? (@ > 1)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a ? (@ > 1)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@.b == 3)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ == "1")');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ != null)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ == null)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.e ? (@ == null)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.e ? (@ != 1)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ < 2 || @.b > 2)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (!(@ > 1))');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? ((@ > 1) is unknown)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$ ? (exists (@.c.d))');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$ ? (exists (@.c.z))');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c ? (@.d starts with "x")')

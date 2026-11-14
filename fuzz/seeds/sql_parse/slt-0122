@@ -1,0 +1,20 @@
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a' RETURNING int);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' WITH WRAPPER OMIT QUOTES);
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.dt.datetime()');
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[0 to 1]' WITH WRAPPER);
+SELECT id, JSON_QUERY(doc, '$.b') FROM sj ORDER BY id;
+SELECT '{"a": 1}' IS JSON, '{"a": 1}' IS JSON VALUE, '{"a": 1}' IS JSON OBJECT, '{"a": 1}' IS JSON ARRAY, '{"a": 1}' IS JSON SCALAR, '{"a": 1}' IS JSON WITH UNIQUE KEYS, '{"a": 1}' IS NOT JSON, '{"a": 1}' IS JSON OBJECT WITHOUT UNIQUE KEYS;
+SELECT '[1]' IS JSON, '[1]' IS JSON VALUE, '[1]' IS JSON OBJECT, '[1]' IS JSON ARRAY, '[1]' IS JSON SCALAR, '[1]' IS JSON WITH UNIQUE KEYS, '[1]' IS NOT JSON, '[1]' IS JSON OBJECT WITHOUT UNIQUE KEYS;
+SELECT '1' IS JSON, '1' IS JSON VALUE, '1' IS JSON OBJECT, '1' IS JSON ARRAY, '1' IS JSON SCALAR, '1' IS JSON WITH UNIQUE KEYS, '1' IS NOT JSON, '1' IS JSON OBJECT WITHOUT UNIQUE KEYS;
+SELECT '"s"' IS JSON, '"s"' IS JSON VALUE, '"s"' IS JSON OBJECT, '"s"' IS JSON ARRAY, '"s"' IS JSON SCALAR, '"s"' IS JSON WITH UNIQUE KEYS, '"s"' IS NOT JSON, '"s"' IS JSON OBJECT WITHOUT UNIQUE KEYS;
+SELECT 'null' IS JSON, 'null' IS JSON VALUE, 'null' IS JSON OBJECT, 'null' IS JSON ARRAY, 'null' IS JSON SCALAR, 'null' IS JSON WITH UNIQUE KEYS, 'null' IS NOT JSON, 'null' IS JSON OBJECT WITHOUT UNIQUE KEYS;
+SELECT 'nope' IS JSON, 'nope' IS JSON VALUE, 'nope' IS JSON OBJECT, 'nope' IS JSON ARRAY, 'nope' IS JSON SCALAR, 'nope' IS JSON WITH UNIQUE KEYS, 'nope' IS NOT JSON, 'nope' IS JSON OBJECT WITHOUT UNIQUE KEYS;
+SELECT '' IS JSON, '' IS JSON VALUE, '' IS JSON OBJECT, '' IS JSON ARRAY, '' IS JSON SCALAR, '' IS JSON WITH UNIQUE KEYS, '' IS NOT JSON, '' IS JSON OBJECT WITHOUT UNIQUE KEYS;
+SELECT '{"a": 1, "a": 2}' IS JSON, '{"a": 1, "a": 2}' IS JSON VALUE, '{"a": 1, "a": 2}' IS JSON OBJECT, '{"a": 1, "a": 2}' IS JSON ARRAY, '{"a": 1, "a": 2}' IS JSON SCALAR, '{"a": 1, "a": 2}' IS JSON WITH UNIQUE KEYS, '{"a": 1, "a": 2}' IS NOT JSON, '{"a": 1, "a": 2}' IS JSON OBJECT WITHOUT UNIQUE KEYS;
+SELECT NULL::text IS JSON, NULL::text IS JSON VALUE, NULL::text IS JSON OBJECT, NULL::text IS JSON ARRAY, NULL::text IS JSON SCALAR, NULL::text IS JSON WITH UNIQUE KEYS, NULL::text IS NOT JSON, NULL::text IS JSON OBJECT WITHOUT UNIQUE KEYS;
+SELECT '{"a": {"b": 1, "b": 2}}' IS JSON, '{"a": {"b": 1, "b": 2}}' IS JSON VALUE, '{"a": {"b": 1, "b": 2}}' IS JSON OBJECT, '{"a": {"b": 1, "b": 2}}' IS JSON ARRAY, '{"a": {"b": 1, "b": 2}}' IS JSON SCALAR, '{"a": {"b": 1, "b": 2}}' IS JSON WITH UNIQUE KEYS, '{"a": {"b": 1, "b": 2}}' IS NOT JSON, '{"a": {"b": 1, "b": 2}}' IS JSON OBJECT WITHOUT UNIQUE KEYS;
+SELECT id, t IS JSON, t IS JSON WITH UNIQUE, doc IS JSON OBJECT FROM sj ORDER BY id;
+SELECT jsonb '{"a": 1}' IS JSON SCALAR;
+SELECT 1 IS JSON;
+SELECT id FROM sj WHERE t IS JSON ARRAY ORDER BY id;
+SELECT JSON_OBJECT()::jsonb

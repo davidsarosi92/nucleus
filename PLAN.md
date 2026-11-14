@@ -283,7 +283,7 @@ are marked ✅.
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ✅ (2026-11-14) study written (2026-11-13); R1 ✅ memory stores, `REMEMBER`, `recall()`, row expiry, MCP tools, driver helpers (LongMemEval_S turn R@10 0.819 against the paper's BM25 0.592); R2 ✅ `FORGET SUBJECT`, the scrub and the search (a planted subject's texts: 100 places after `DELETE` and a vacuum, 0 after `FORGET`); R3 ✅ leak tests over every recall path, BM25's statistics a tenant's own on a table partitioned by tenant; R4 ✅ `recall` under 1 ms in the process (100 000 memories), batched through `LATERAL`, a vacuum's crash flaw fixed; §M14.14 ✅ between; R5 ✅ citations (`as_of`), read records by request id (`nc_catalog.reads`), erasure through history and the log; R6 ✅ `BACKUP TO` / `nucleus restore` without index pages, each subject's rows sealed under its own key, which `FORGET` destroys (60 MiB backed up in 0.46 s, restored in 0.80 s); R7 ✅ `docs/memory.md`, the Python and JavaScript `memory` examples (run in CI), MCP `cite` and `forget_subject` |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
-| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster |
+| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18 |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
@@ -8130,7 +8130,7 @@ SELECT … FROM t AS OF …`, a dropped table included).
   costs nothing now.  `snapshot_at`'s search bounded by the visible
   commit, not the timestamp space: 20 µs → 5.5 µs.
 
-### §M14.15 — JSON ◐ (study written, J1–J3b ✅, 2026-11-14)
+### §M14.15 — JSON ◐ (study written, J1–J3 ✅, 2026-11-14)
 
 - A `JSON` type (validated, stored in a compact binary form), operators
   `->`, `->>`, `#>`, `@>`, `?`, functions to build, extract, test and
@@ -8490,6 +8490,29 @@ put it but `text`, which it can neither query nor index.
   (3.3×); a feature's number of rings 0.004 against 0.014 (3.5×) — the
   scalar read in place and converted from its text once, the path
   parsed once per thread.
+
+  **J3c ✅ (2026-11-14).**  `JSON_TABLE` in `FROM`: PASSING, `FOR
+  ORDINALITY`, a typed column (as `JSON_VALUE` reads it, or `JSON_QUERY`
+  when `FORMAT JSON`, wrapped, quoted or `json`-typed), `EXISTS`
+  columns, each column's `ON EMPTY` / `ON ERROR`, the table's `ERROR |
+  EMPTY ON ERROR`, `NESTED PATH` to any depth.  *How:* as J3b, the parser
+  alone — `JSON_TABLE` is desugared into a lateral subquery: the row
+  path's items from a table function `__json_table_rows` (`item`, `ord`),
+  each column a call of J3b's functions on the item, a `NESTED PATH` a
+  lateral `LEFT JOIN` of its own level, sibling nests `UNION ALL`ed with
+  the others' columns `NULL` — PostgreSQL's default plan (`parent OUTER
+  child`, `sibling UNION sibling`; its executor walks a plan tree of
+  `JsonTablePlan` nodes in `nodeTableFuncscan.c`, where here the join and
+  union operators the engine already has do it).  No new operator, and
+  the optimizer sees an ordinary lateral join.  *Checked against
+  PostgreSQL 18:* `slt/68_json_table.slt`, 67 records filled by
+  `scripts/slt-pg.py` (the rows' order too, where a query has no `ORDER
+  BY`), and one difference recorded: a `DEFAULT` may read the row's
+  columns (PostgreSQL refuses column references there).  *Not there:*
+  the standard's `PLAN` clause (PostgreSQL 17 and 18 have none either).
+  *Measurement pending:* `bench/json/pg.py` has the `table` column
+  (count and sum asserted equal to PostgreSQL 18's); the run waits for
+  the Docker VM, which stalled when the disk filled.
 - **J4 — indexes**: expression indexes for every type, the containment
   index, the planner choosing them (with statistics: a path's
   selectivity); measured against PostgreSQL's GIN (`jsonb_path_ops`)

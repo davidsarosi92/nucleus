@@ -1,0 +1,2 @@
+SELECT sum(qty) FROM (SELECT j.qty FROM jt, JSON_TABLE(jt.doc, '$.items[*]' COLUMNS (qty int PATH '$.qty' DEFAULT 0 ON ERROR)) j) s;
+SELECT j.k, j.v FROM JSON_TABLE(jsonb '{"b": 2, "a": 1}', '$.keyvalue()' COLUMNS (k text PATH '$.key', v int PATH '$.value')) j ORDER BY 1

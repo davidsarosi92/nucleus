@@ -1,0 +1,20 @@
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' ERROR ON ERROR);
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' TRUE ON ERROR);
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' UNKNOWN ON ERROR);
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' FALSE ON ERROR);
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*] ? (@ > $x)' PASSING 2 AS x);
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*] ? (@ > $x)' PASSING 5 AS x);
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s ? (@ == $v)' PASSING 'text' AS v);
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$ ? ($y == 1)');
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a.abs()');
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.s.abs()');
+SELECT id, JSON_EXISTS(doc, '$.c.d') FROM sj ORDER BY id;
+SELECT JSON_EXISTS('{"a": 1}', '$.a');
+SELECT JSON_EXISTS('not json', '$.a');
+SELECT JSON_EXISTS(NULL::jsonb, '$.a');
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a');
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s');
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.f');
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.n');
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z');
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b')

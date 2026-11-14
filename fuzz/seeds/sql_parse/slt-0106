@@ -1,0 +1,25 @@
+SELECT jsonb_agg(doc -> 'name' ORDER BY id) FROM docs WHERE id < 3;
+SELECT jsonb_object_agg(k, v) FROM (VALUES ('b', 1), ('a', NULL), ('b', 3)) t(k, v);
+SELECT jsonb_object_agg(id, doc ->> 'name') FROM docs WHERE id < 3;
+SELECT jsonb_object_agg(NULL::text, 1);
+SELECT jsonb_build_object('e', 2.50), to_jsonb(3.10::numeric);
+SELECT '1'::jsonb -> 0, '"x"'::jsonb ->> -1;
+SELECT json_typeof('{}'), json_build_object('a', 1), json_set('{"a":1}', '{a}', '2'), k FROM json_object_keys('{"k": 1}') k;
+SELECT doc ->> 'name', count(*) FROM docs WHERE doc ? 'name' GROUP BY 1 ORDER BY 1;
+SELECT '{"a": {"b": 2}}'::jsonb -> 'a' -> 'b';
+SELECT '{"a": 1}'::jsonb ->> 'a' = '1';
+CREATE TABLE pdocs (id int PRIMARY KEY, doc jsonb);
+INSERT INTO pdocs VALUES
+  (1, '{"name": "Ann", "age": 41, "tags": ["a", "b"], "items": [{"sku": "x1", "qty": 2, "price": 9.5}, {"sku": "y2", "qty": 1, "price": 20}], "born": "1984-03-05"}'),
+  (2, '{"name": "Bob", "age": null, "tags": [], "items": [{"sku": "x1", "qty": 5, "price": 9.5}], "born": "1990-12-31"}'),
+  (3, '{"name": "Cid", "tags": ["b", "c"], "items": [], "born": "not a date"}'),
+  (4, '[1, 2, 3]'),
+  (5, '"text"');
+SELECT '$.a'::jsonpath;
+SELECT 'strict $.a[*] ? (@ > 1)'::jsonpath;
+SELECT '$.a ? (@.b == "x" && @.c < 2 || !(@.d >= 3))'::jsonpath;
+SELECT '$.**{1 to last}.x'::jsonpath;
+SELECT '$.a[1, 2 to last]'::jsonpath;
+SELECT '($.a + 1) * -$.b'::jsonpath;
+SELECT '$ ? (@ like_regex "^a.c" flag "si")'::jsonpath;
+SELECT '$ ? (@ starts with $prefix)'::jsonpath

@@ -1,0 +1,20 @@
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[5]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a[5]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c[0]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.c[0]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c[*]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.c[*]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a.*');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a.*');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c.*');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.*');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.**');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.**{2}');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.**{1 to 2}');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.**{last}');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[1.9]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[$.a[0]]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[last - 1]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[2 to 1]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a[2 to 1]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[-1]')

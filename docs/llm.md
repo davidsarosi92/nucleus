@@ -73,6 +73,10 @@ JSON OBJECT WITH UNIQUE KEYS`; constructors `JSON_OBJECT('id': id,
 'name': name ABSENT ON NULL)`, `JSON_ARRAY(1, 'x')`, `JSON_ARRAY(SELECT
 id FROM t)`, `JSON_OBJECTAGG(k: v)`, `JSON_ARRAYAGG(x ORDER BY x)`,
 `JSON(text WITH UNIQUE KEYS)`, `JSON_SCALAR(x)`, `JSON_SERIALIZE(doc)`.
+Rows from documents: `SELECT o.id, i.* FROM orders o, JSON_TABLE(o.doc,
+'$.items[*]' COLUMNS (n FOR ORDINALITY, sku text, qty int PATH '$.qty'
+DEFAULT 0 ON ERROR, tags jsonb PATH '$.tags', NESTED PATH '$.parts[*]'
+COLUMNS (part text PATH '$.name'))) i`.
 
 **Vectors** (embeddings, as pgvector): `embedding vector(768)`, literals
 `'[0.1, 0.2, …]'` (or a driver's float array as a parameter); distances
@@ -309,7 +313,6 @@ before a generation's queries records what each returned
 | `CREATE VIEW` | a `WITH` query |
 | `count(*) FILTER (WHERE …)` | `sum(CASE WHEN … THEN 1 ELSE 0 END)` |
 | `unnest(…)` in the select list | `SELECT … FROM unnest(…) AS u(x)` |
-| `JSON_TABLE` (coming, §M14.15) | `json_path_query(doc, path)` in `FROM`, `JSON_VALUE` per column |
 | `json[]`, `json_each(…)` in the select list | `json_agg` / `json_build_array`; `SELECT … FROM t, json_each(t.doc) e` |
 | `TRUNCATE` | `DELETE FROM t` |
 | `ALTER TABLE … DROP COLUMN`, `RENAME`, `ALTER COLUMN … SET DEFAULT` | a new table and `INSERT … SELECT` |

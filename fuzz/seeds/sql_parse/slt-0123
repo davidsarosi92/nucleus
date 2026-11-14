@@ -1,0 +1,20 @@
+SELECT JSON_OBJECT('a' VALUE 1)::jsonb;
+SELECT JSON_OBJECT('a': 1, 'b': 'x')::jsonb;
+SELECT JSON_OBJECT('a' VALUE NULL)::jsonb;
+SELECT JSON_OBJECT('a' VALUE NULL ABSENT ON NULL)::jsonb;
+SELECT JSON_OBJECT('a' VALUE NULL NULL ON NULL)::jsonb;
+SELECT JSON_OBJECT('a': 1, 'a': 2)::jsonb;
+SELECT JSON_OBJECT('a': 1, 'a': 2 WITH UNIQUE KEYS);
+SELECT JSON_OBJECT('a': 1, 'a': 2 WITHOUT UNIQUE)::jsonb;
+SELECT JSON_OBJECT(NULL: 1);
+SELECT JSON_OBJECT('a': '{"b": 1}')::jsonb;
+SELECT JSON_OBJECT('a': '{"b": 1}' FORMAT JSON)::jsonb;
+SELECT JSON_OBJECT('a': jsonb '[1]')::jsonb;
+SELECT JSON_OBJECT('a': 1 RETURNING text);
+SELECT JSON_OBJECT('a': 1 RETURNING jsonb)::jsonb;
+SELECT JSON_OBJECT(1: true)::jsonb;
+SELECT JSON_OBJECT('d': date '2020-01-02', 'n': 1.50)::jsonb;
+SELECT json_object('{a,1,b,2}');
+SELECT JSON_ARRAY()::jsonb;
+SELECT JSON_ARRAY(1, 'x', NULL, true)::jsonb;
+SELECT JSON_ARRAY(1, NULL NULL ON NULL)::jsonb

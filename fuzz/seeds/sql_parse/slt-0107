@@ -1,0 +1,20 @@
+SELECT '$.datetime("YYYY-MM-DD HH24:MI").type()'::jsonpath;
+SELECT '$.decimal(6, 2).string()'::jsonpath;
+SELECT '1.5e3'::jsonpath;
+SELECT '$."key with space"'::jsonpath;
+SELECT '$.a.b.c.size()'::jsonpath;
+SELECT '$ ? (@ == TRUE)'::jsonpath;
+SELECT '@.a'::jsonpath;
+SELECT 'last'::jsonpath;
+SELECT '$.a ? (@ like_regex "(")'::jsonpath;
+SELECT '$ ? (@ like_regex "a" flag "x")'::jsonpath;
+SELECT '$ ? (@.a)'::jsonpath;
+SELECT '$.a +'::jsonpath;
+SELECT '1 > 2 > 3'::jsonpath;
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a.b');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a.b');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.z');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.z');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[1 to last]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[last]')

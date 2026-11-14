@@ -1,0 +1,20 @@
+CREATE MODEL slt_mem_h USING hashing WITH (dimensions = 64);
+CREATE MEMORY STORE slt_notes USING slt_mem_h WITH (analyzer = 'english', merge = 0.99);
+CREATE MEMORY STORE slt_notes USING slt_mem_h;
+CREATE MEMORY STORE IF NOT EXISTS slt_notes USING slt_mem_h;
+CREATE MEMORY STORE slt_bad USING slt_mem_h WITH (merge = 2);
+CREATE MEMORY STORE slt_bad USING slt_mem_h WITH (colour = 'blue');
+CREATE MEMORY STORE slt_bad USING slt_no_such_model;
+SELECT name, type FROM nc_catalog.columns WHERE table_name = 'slt_notes' ORDER BY position;
+SET embedding.pending = wait;
+REMEMBER 'The user likes green tea' FOR 'u1' IN slt_notes AS 'preference' CONFIDENCE 0.6;
+REMEMBER 'The user likes green tea' FOR 'u1' IN slt_notes CONFIDENCE 0.9;
+REMEMBER 'The user likes green tea.' FOR 'u1' IN slt_notes;
+REMEMBER 'The user lives in Budapest' FOR 'u1' IN slt_notes SOURCE 'chat 2026-11-13';
+REMEMBER 'The user likes green tea' FOR 'u2' IN slt_notes;
+SELECT subject, kind, seen, confidence, content FROM slt_notes ORDER BY subject, content;
+SELECT content FROM recall('slt_notes', 'u1', 'what tea does the user drink', 1);
+SELECT content FROM recall('slt_notes', 'u1', 'tea or city');
+SELECT count(*) FROM recall('slt_notes', 'u3', 'tea');
+EXPLAIN SELECT id FROM slt_notes WHERE subject = 'u1' AND content @@ 'tea';
+REMEMBER 'The user lives in Szeged' FOR 'u1' IN slt_notes REPLACING (SELECT id FROM slt_notes WHERE content = 'The user lives in Budapest')

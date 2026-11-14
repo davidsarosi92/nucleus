@@ -1,0 +1,20 @@
+SELECT * FROM JSON_TABLE(jsonb '{"a": []}', '$' COLUMNS (k text PATH '$.k', NESTED PATH '$.a[*]' COLUMNS (a int PATH '$')));
+SELECT * FROM JSON_TABLE(jsonb '{"a": 1}', '$' COLUMNS (NESTED PATH 'strict $.b[*]' COLUMNS (b int PATH '$')));
+SELECT * FROM JSON_TABLE(jsonb '{"a": 1}', '$' COLUMNS (NESTED PATH 'strict $.b[*]' COLUMNS (b int PATH '$')) ERROR ON ERROR);
+SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int, a text));
+SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int EXISTS PATH '$' DEFAULT 1 ON ERROR));
+SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int PATH '$') NULL ON ERROR);
+SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS ());
+SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a int PATH '$' EMPTY ARRAY ON ERROR));
+SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (a jsonb PATH '$.z' EMPTY OBJECT ON EMPTY));
+SELECT * FROM JSON_TABLE(jsonb '{"a": 1}', '$' COLUMNS (a int PATH '$.a', b int PATH '$.a' * 2));
+SELECT a, pg_typeof_text FROM (SELECT a, 1 AS pg_typeof_text FROM JSON_TABLE(jsonb '{"a": 1}', '$' COLUMNS (a numeric(3,1) PATH '$.a'))) s;
+SELECT * FROM JSON_TABLE(jsonb '{"a": 1}', '$' COLUMNS (a bigint PATH '$.a')) WHERE a = 1;
+SELECT * FROM JSON_TABLE(jsonb '{"a": 1}', '$' COLUMNS (a int PATH '$.a')) AS t(b);
+SELECT t.a FROM JSON_TABLE(jsonb '{"a": 1}', '$' COLUMNS (a int PATH '$.a')) t;
+SELECT a FROM JSON_TABLE(jsonb '{"a": 1}', '$' COLUMNS (a int PATH '$.a')) AS json_table;
+SELECT a FROM (VALUES (jsonb '[1, 2]'), (jsonb '[3]')) v(d), JSON_TABLE(v.d, '$[*]' COLUMNS (a text PATH '$')) j;
+SELECT * FROM JSON_TABLE(jsonb '{"a": [3, 1, 2], "b": ["y", "x"]}', '$' COLUMNS (NESTED PATH '$.a[*]' COLUMNS (a int PATH '$'), NESTED PATH '$.b[*]' COLUMNS (b text PATH '$', bn FOR ORDINALITY)));
+SELECT n, sku, tag FROM jt, JSON_TABLE(jt.doc, '$.items[*]' COLUMNS (n FOR ORDINALITY, sku text, NESTED PATH '$.tags[*]' COLUMNS (tag text PATH '$'))) j WHERE jt.id = 1;
+SELECT jt.id, j.q FROM jt, JSON_TABLE(jt.doc, '$.items[*]' COLUMNS (q int PATH '$.qty' DEFAULT jt.id * 100 ON ERROR)) j ORDER BY 1, 2;
+WITH items AS (SELECT jt.id, j.sku, j.qty FROM jt, JSON_TABLE(jt.doc, '$.items[*]' COLUMNS (sku text, qty int PATH '$.qty' DEFAULT 0 ON ERROR)) j) SELECT * FROM items ORDER BY 1, 2

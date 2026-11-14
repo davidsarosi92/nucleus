@@ -1,0 +1,20 @@
+SELECT JSON_VALUE(jsonb '"abc"', '$' RETURNING char(2));
+SELECT JSON_VALUE(jsonb '"ab "', '$' RETURNING varchar(2));
+SELECT JSON_VALUE(jsonb '"ab"', '$' RETURNING char(4)) || '|';
+SELECT JSON_VALUE(jsonb '1.555', '$' RETURNING numeric(3,1));
+SELECT JSON_VALUE(jsonb '1234.5', '$' RETURNING numeric(3,1));
+SELECT JSON_VALUE(jsonb '1234.5', '$' RETURNING numeric(3,1) ERROR ON ERROR);
+SELECT JSON_QUERY(jsonb '"abc"', '$' RETURNING varchar(2));
+SELECT JSON_QUERY(jsonb '["abc"]', '$[*]' RETURNING text OMIT QUOTES);
+SELECT JSON_VALUE(jsonb 'null', '$' RETURNING int ERROR ON ERROR);
+SELECT JSON_QUERY(jsonb '"x"', '$' RETURNING bytea);
+SELECT JSON_QUERY(jsonb '[]', '$[*]' WITH WRAPPER);
+SELECT JSON_QUERY(jsonb '[]', '$[*]' WITH WRAPPER ERROR ON EMPTY);
+SELECT JSON_QUERY(jsonb 'true', '$' RETURNING boolean);
+SELECT JSON_QUERY(jsonb '[1, 2]', '$[*]' WITH CONDITIONAL WRAPPER);
+SELECT JSON_QUERY(jsonb '1', '$d' PASSING jsonb '{"x": 1}' AS d);
+SELECT JSON_QUERY(jsonb '1', '$d' PASSING '{"x":1}' AS d);
+SELECT JSON_VALUE(jsonb '"x"', 'lax $.a' ERROR ON EMPTY DEFAULT 'q' ON ERROR);
+SELECT JSON_VALUE(jsonb '1', '$' RETURNING int DEFAULT 'x' ON ERROR);
+SELECT JSON_VALUE(jsonb '{"a": 1}', '$.a' DEFAULT 1 ON EMPTY ON ERROR);
+SELECT JSON_EXISTS(jsonb '{"a": 1}', '$.a' NULL ON ERROR)

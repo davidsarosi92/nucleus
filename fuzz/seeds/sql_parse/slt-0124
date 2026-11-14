@@ -1,0 +1,20 @@
+SELECT JSON_ARRAY(1, NULL ABSENT ON NULL)::jsonb;
+SELECT JSON_ARRAY('[1]' FORMAT JSON, '[1]')::jsonb;
+SELECT JSON_ARRAY(1 RETURNING text);
+SELECT JSON_ARRAY(jsonb '{"a": 1}', 2.5)::jsonb;
+SELECT JSON('{"a": 1, "b": [1, 2]}')::jsonb;
+SELECT JSON('{"a": 1, "a": 2}')::jsonb;
+SELECT JSON('{"a": 1, "a": 2}' WITH UNIQUE KEYS);
+SELECT JSON('nope');
+SELECT JSON('[1]' FORMAT JSON)::jsonb;
+SELECT JSON(NULL)::jsonb;
+SELECT JSON_SCALAR(1)::jsonb;
+SELECT JSON_SCALAR(1.50)::jsonb;
+SELECT JSON_SCALAR('x')::jsonb;
+SELECT JSON_SCALAR(true)::jsonb;
+SELECT JSON_SCALAR(NULL)::jsonb;
+SELECT JSON_SCALAR(date '2020-01-02')::jsonb;
+SELECT JSON_SCALAR(timestamp '2020-01-02 03:04:05')::jsonb;
+SELECT JSON_SCALAR('{"a": 1}')::jsonb;
+SELECT JSON_SERIALIZE(jsonb '{"a": [1, 2]}');
+SELECT JSON_SERIALIZE('{"a":1}' FORMAT JSON)

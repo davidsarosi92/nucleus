@@ -1,0 +1,25 @@
+SELECT '"\u0061"' IS JSON SCALAR;
+SELECT '{"a": 1, "\u0061": 2}' IS JSON WITH UNIQUE KEYS;
+SELECT '  {"a": 1}  ' IS JSON OBJECT;
+SELECT 'nope' IS NOT JSON OBJECT;
+SELECT JSON_SERIALIZE(JSON_OBJECT('a': 1)::jsonb);
+SELECT count(*) FROM sj WHERE JSON_EXISTS(doc, '$.b[*] ? (@ > 1)');
+SELECT sum(JSON_VALUE(doc, '$.a' RETURNING int)) FROM sj;
+SELECT JSON_VALUE(jsonb '1', '$d.type()' PASSING date '2020-01-01' AS d);
+SELECT JSON_VALUE(jsonb '1', '$d.datetime().type()' PASSING date '2020-01-01' AS d);
+SELECT id FROM sj WHERE JSON_VALUE(doc, '$.a' RETURNING int) = 2;
+SELECT id FROM sj WHERE t IS JSON OBJECT WITH UNIQUE KEYS ORDER BY id;
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+SELECT JSON_VALUE(jsonb '{"m": "happy"}', '$.m' RETURNING mood), JSON_VALUE(jsonb '{"m": "angry"}', '$.m' RETURNING mood);
+SELECT JSON_VALUE(jsonb '{"m": "angry"}', '$.m' RETURNING mood ERROR ON ERROR);
+CREATE TABLE jt (id int PRIMARY KEY, doc jsonb);
+INSERT INTO jt VALUES
+  (1, '{"name": "Ann", "items": [{"sku": "a1", "qty": 2, "tags": ["x", "y"]}, {"sku": "b2", "qty": "many", "tags": []}], "addr": {"city": "Pécs"}}'),
+  (2, '{"name": "Bob", "items": [], "addr": null}'),
+  (3, '{"name": "Cy", "items": [{"sku": "c3", "qty": 5, "tags": ["z"], "parts": [{"p": 1}, {"p": 2}]}]}'),
+  (4, NULL),
+  (5, '[1, 2]');
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (x int PATH '$.x', y text PATH '$.y'));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (n FOR ORDINALITY, x int, y text));
+SELECT x, z FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (x int, z jsonb PATH '$.z'));
+SELECT z, zt FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (z text FORMAT JSON PATH '$.z', zt text PATH '$.z'))

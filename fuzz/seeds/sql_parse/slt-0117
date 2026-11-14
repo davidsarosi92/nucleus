@@ -1,0 +1,25 @@
+SELECT id FROM pdocs WHERE doc @? '$.items[*] ? (@.qty > 1)' ORDER BY id;
+SELECT id FROM pdocs WHERE doc @@ '$.age > 40' ORDER BY id;
+SELECT id FROM pdocs WHERE doc @@ '$.items.size() == 0' ORDER BY id;
+SELECT id, jsonb_path_query_array(doc, '$.items[*].sku') FROM pdocs ORDER BY id;
+SELECT id, jsonb_path_query_first(doc, '$.items[*] ? (@.price > 10).sku') FROM pdocs ORDER BY id;
+SELECT id, jsonb_path_exists(doc, '$.born ? (@.datetime() < "1985-01-01".datetime())') FROM pdocs ORDER BY id;
+SELECT id, jsonb_path_match(doc, 'exists($.tags[*] ? (@ == "b"))') FROM pdocs ORDER BY id;
+SELECT d.id, p.* FROM pdocs d, jsonb_path_query(d.doc, '$.items[*].qty') p ORDER BY d.id;
+SELECT id, jsonb_path_query_first(doc, '$.items.price.sum()') FROM pdocs ORDER BY id;
+SELECT doc @? '$.a' FROM pdocs WHERE id = 5;
+SELECT '[1,2]'::jsonb @? 'strict $[5]';
+SELECT '[1,2]'::jsonb @@ 'strict $[5] == 1';
+SELECT '[1,2]'::jsonb @@ '$[*]';
+SELECT json_path_query_array('{"a": [1, 2]}', '$.a[*] ? (@ > 1)');
+SELECT '$ ? ((@.a + 1).abs() > 0)'::jsonpath;
+CREATE TABLE sj (id int PRIMARY KEY, doc jsonb, t text);
+INSERT INTO sj VALUES
+  (1, '{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}', '{"a": 1}'),
+  (2, '{"a": 2, "b": [], "c": {}}', '[1, 2]'),
+  (3, NULL, 'not json'),
+  (4, '[1, "two", null]', '{"a": 1, "a": 2}'),
+  (5, '"scalar"', '42');
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a');
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z');
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z')

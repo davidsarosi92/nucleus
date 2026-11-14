@@ -1,0 +1,20 @@
+SELECT jsonb_extract_path('{"a":[1,2]}', 'a', 'x');
+SELECT replace(jsonb_pretty('{"a":[1,{"b":null}],"c":{}}'), E'\n', '/');
+SELECT replace(jsonb_pretty('{}'), E'\n', '/'), replace(jsonb_pretty('[[]]'), E'\n', '/'), jsonb_pretty('1');
+SELECT * FROM jsonb_each('{"b":1,"a":"x","c":null}');
+SELECT * FROM jsonb_each_text('{"b":1,"a":"x","c":null}');
+SELECT * FROM jsonb_array_elements('[1,"x",null,{"a":1},[2]]');
+SELECT * FROM jsonb_array_elements_text('[1,"x",null,{"a":1}]');
+SELECT * FROM jsonb_object_keys('{"b":1,"a":2,"c":{"d":3}}');
+SELECT k FROM jsonb_object_keys('{"b":1,"a":2}') AS k;
+SELECT count(*) FROM jsonb_each('{}');
+SELECT * FROM jsonb_each('[1]');
+SELECT * FROM jsonb_array_elements('{}');
+SELECT * FROM jsonb_array_elements('1');
+SELECT * FROM jsonb_object_keys('[1]');
+SELECT * FROM jsonb_object_keys('1');
+SELECT d.id, e.key, e.value FROM docs d, LATERAL jsonb_each(d.doc -> 'address') e ORDER BY 1, 2;
+SELECT d.id, t.value FROM docs d, LATERAL jsonb_array_elements_text(d.doc -> 'tags') t ORDER BY 1, 2;
+SELECT jsonb_agg(x) FROM (VALUES (1), (NULL), (3)) v(x);
+SELECT jsonb_agg(x) FROM (VALUES (1)) v(x) WHERE false;
+SELECT jsonb_agg(x ORDER BY x DESC) FROM (VALUES ('{"a":1}'::jsonb), ('[2]')) v(x)

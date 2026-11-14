@@ -1,0 +1,26 @@
+INSERT INTO docs VALUES
+  (1, '{"name": "Ann", "age": 41, "tags": ["a", "b"], "address": {"city": "Pécs", "zip": "7621"}}'),
+  (2, '{"name": "Bob", "age": null, "tags": [], "scores": [10, 20.5, -3]}'),
+  (3, '[1, "two", {"three": 3}, [4], null, true]'),
+  (4, '"just a string"'),
+  (5, '42'),
+  (6, NULL);
+SELECT id, doc -> 'name' FROM docs ORDER BY id;
+SELECT id, doc ->> 'name' FROM docs ORDER BY id;
+SELECT doc -> 'address' -> 'city' FROM docs WHERE id = 1;
+SELECT doc -> 'address' ->> 'city' FROM docs WHERE id = 1;
+SELECT doc -> 0, doc -> 2, doc -> -1, doc -> 9 FROM docs WHERE id = 3;
+SELECT doc ->> 0, doc ->> 1, doc ->> 2, doc ->> 4 FROM docs WHERE id = 3;
+SELECT doc -> 'tags' -> 1, doc -> 'tags' ->> -2 FROM docs WHERE id = 1;
+SELECT doc -> 'x', doc -> 0, doc ->> 'age' FROM docs WHERE id = 2;
+SELECT count(*) FROM docs WHERE doc ->> 'name' = 'Ann';
+SELECT id, doc ->> 'age' FROM docs WHERE (doc -> 'age') IS NOT NULL ORDER BY id;
+SELECT doc #> '{address,city}', doc #>> '{address,zip}', doc #> '{tags,0}', doc #> '{tags,-1}' FROM docs WHERE id = 1;
+SELECT doc #> '{}', doc #> '{tags,x}', doc #> '{nope,1}', doc #>> '{tags}' FROM docs WHERE id = 1;
+SELECT doc #> '{2,three}', doc #>> '{3,0}' FROM docs WHERE id = 3;
+SELECT '"x"'::jsonb #>> '{}';
+SELECT '{"a":1}'::jsonb #> array['a', null];
+SELECT '{"a":{"b":1,"c":2}}'::jsonb @> '{"a":{"b":1}}', '[1,[2,3]]'::jsonb @> '[[3]]', '{"a":[1,2]}'::jsonb @> '{"a":1}', '[{"a":1,"b":2}]'::jsonb @> '[{"a":1}]';
+SELECT '1'::jsonb @> '[1]', '[]'::jsonb @> '[]', '{}'::jsonb @> '{}', '[1]'::jsonb <@ '[1,2]';
+SELECT '[1,2]'::jsonb @> '1', '[[1,2]]'::jsonb @> '[1]', '[[1,2]]'::jsonb @> '[[1]]', '[1,1]'::jsonb @> '[1,1,1]';
+SELECT '[{"a":[1]}]'::jsonb @> '[{"a":[]}]', '{"a":1}'::jsonb @> '1', '{"a":1}'::jsonb @> '{"a":1.0}'

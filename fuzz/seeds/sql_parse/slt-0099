@@ -1,0 +1,20 @@
+SELECT content FROM recall('slt_notes', 'u1', 'where does the user live');
+SELECT content, valid_to IS NULL FROM slt_notes WHERE subject = 'u1' AND content LIKE '%lives%' ORDER BY created;
+SELECT replaces = (SELECT id FROM slt_notes WHERE content = 'The user lives in Budapest') FROM slt_notes WHERE content = 'The user lives in Szeged';
+REMEMBER 'x' FOR 'u2' IN slt_notes REPLACING (SELECT id FROM slt_notes WHERE content = 'The user lives in Szeged');
+REMEMBER 'x' FOR 'u1' IN slt_notes REPLACING (SELECT id FROM slt_notes WHERE content = 'The user lives in Budapest');
+REMEMBER 'A one-off code: 1234' FOR 'u1' IN slt_notes EXPIRES now() - interval '1 minute';
+REMEMBER 'The meeting is on Friday' FOR 'u1' IN slt_notes EXPIRES now() + interval '1 day';
+SELECT content FROM recall('slt_notes', 'u1', 'code meeting', 10);
+REMEMBER NULL FOR 'u1' IN slt_notes;
+REMEMBER 'x' FOR NULL IN slt_notes;
+REMEMBER 'x' FOR 'u1' IN slt_notes AS 'a' AS 'b';
+CREATE TABLE slt_plain (id int PRIMARY KEY, at timestamptz, n int);
+REMEMBER 'x' FOR 'u1' IN slt_plain;
+SELECT * FROM recall('slt_plain', 'u1', 'x');
+SELECT * FROM recall('slt_notes', 'u1');
+SELECT * FROM recall(slt_notes, 'u1', 'x');
+ALTER TABLE slt_plain SET EXPIRY (at);
+ALTER TABLE slt_plain SET EXPIRY (n);
+ALTER TABLE slt_plain SET EXPIRY (nope);
+ALTER TABLE slt_plain DROP EXPIRY

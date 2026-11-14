@@ -1,0 +1,20 @@
+SELECT * FROM jsonb_path_query('"2020-01-01T10:00:00Z"', '$.datetime()');
+SELECT * FROM jsonb_path_query('"10:00:00.25-1"', '$.datetime()');
+SELECT * FROM jsonb_path_query('"10:00:00"', '$.datetime().type()');
+SELECT * FROM jsonb_path_query('"2020-13-01"', '$.datetime()');
+SELECT * FROM jsonb_path_query('"x"', '$.datetime()');
+SELECT * FROM jsonb_path_query('1', '$.datetime()');
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00"', '$.date()');
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.timestamp()');
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00.123456"', '$.timestamp(2)');
+SELECT * FROM jsonb_path_query('"10:00:00"', '$.date()');
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03"', '$.date()');
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03"', '$.time_tz()');
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00"', '$.time()');
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00"', '$.timestamp_tz()');
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03"', '$.timestamp_tz().string()');
+SELECT * FROM jsonb_path_query('"12/31/2020 5pm"', '$.datetime("MM/DD/YYYY HH12am")');
+SELECT * FROM jsonb_path_query('"2020"', '$.datetime("YYYY")');
+SELECT * FROM jsonb_path_query('"x"', '$.datetime("YYYY")');
+SELECT * FROM jsonb_path_query('"10:30"', '$.datetime("HH24:MI")');
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime("DD/MM")')

@@ -1,0 +1,20 @@
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (y varchar(2) PATH '$.y'));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (y varchar(2) PATH '$.y' ERROR ON ERROR));
+SELECT * FROM JSON_TABLE(jsonb '{"a": [{"x": 1, "y": "one"}, {"x": 2, "y": "two", "z": [1, 2]}, {"x": "bad"}]}', '$.a[*]' COLUMNS (y date PATH '$.y'));
+SELECT * FROM JSON_TABLE(jsonb '{"a": {"x": 1}}', '$.a' COLUMNS (x int, "X" int, "x" text));
+SELECT * FROM JSON_TABLE(jsonb '[1, [2, 3], {"x": 4}, null]', '$[*]' COLUMNS (v text PATH '$', j jsonb PATH '$', t text PATH '$.type()'));
+SELECT * FROM JSON_TABLE('[1, 2]', '$[*]' COLUMNS (v int PATH '$'));
+SELECT * FROM JSON_TABLE('[1, 2]' FORMAT JSON, '$[*]' COLUMNS (v int PATH '$'));
+SELECT * FROM JSON_TABLE(NULL::jsonb, '$[*]' COLUMNS (v int PATH '$'));
+SELECT * FROM JSON_TABLE(jsonb '1', '$' COLUMNS (v int PATH '$'));
+SELECT * FROM JSON_TABLE(jsonb '[]', '$[*]' COLUMNS (v int PATH '$'));
+SELECT jt.id, j.* FROM jt, JSON_TABLE(jt.doc, '$.items[*]' COLUMNS (sku text, n FOR ORDINALITY, qty int)) AS j ORDER BY jt.id, j.n;
+SELECT id, name FROM jt, JSON_TABLE(doc, '$' COLUMNS (name text PATH '$.name', city text PATH '$.addr.city')) j ORDER BY id;
+SELECT id, name, city FROM jt CROSS JOIN JSON_TABLE(doc, '$' COLUMNS (name text PATH '$.name', city text PATH '$.addr.city')) AS j ORDER BY id;
+SELECT jt.id, j.sku, j.qty FROM jt LEFT JOIN JSON_TABLE(jt.doc, '$.items[*]' COLUMNS (sku text, qty int)) AS j ON true ORDER BY 1, 2;
+SELECT count(*) FROM jt, JSON_TABLE(jt.doc, '$.items[*].tags[*]' COLUMNS (t text PATH '$')) j;
+SELECT j.t, count(*) FROM jt, JSON_TABLE(jt.doc, '$.items[*].tags[*]' COLUMNS (t text PATH '$')) j GROUP BY j.t ORDER BY 1;
+SELECT j.* FROM jt, JSON_TABLE(jt.doc, '$' COLUMNS (id FOR ORDINALITY, name text, NESTED PATH '$.items[*]' COLUMNS (sku text, n FOR ORDINALITY))) j ORDER BY jt.id, j.n NULLS FIRST;
+SELECT name, sku, tag FROM jt, JSON_TABLE(jt.doc, '$' COLUMNS (name text, NESTED PATH '$.items[*]' COLUMNS (sku text, NESTED PATH '$.tags[*]' COLUMNS (tag text PATH '$')))) j WHERE jt.id <= 3;
+SELECT name, sku, tag, p FROM jt, JSON_TABLE(jt.doc, '$' COLUMNS (name text, NESTED PATH '$.items[*]' COLUMNS (sku text, NESTED PATH '$.tags[*]' COLUMNS (tag text PATH '$'), NESTED PATH '$.parts[*]' COLUMNS (p int)))) j WHERE jt.id <= 3;
+SELECT * FROM JSON_TABLE(jsonb '{"a": [1, 2], "b": ["x"]}', '$' COLUMNS (NESTED PATH '$.a[*]' COLUMNS (a int PATH '$'), NESTED '$.b[*]' AS bs COLUMNS (b text PATH '$', bn FOR ORDINALITY)))

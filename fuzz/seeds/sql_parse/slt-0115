@@ -1,0 +1,20 @@
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03:30"', '$.datetime("YYYY-MM-DD HH24:MI:SSTZH:TZM")');
+SELECT * FROM jsonb_path_query('"05 Mar 2021"', '$.datetime("DD Mon YYYY")');
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime() < "2020-01-02 00:00:00".datetime()');
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime() < "10:00:00".datetime()');
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime() < "2020-01-02 00:00:00+00".datetime()');
+SELECT * FROM jsonb_path_query('"10:00:00+03"', '$.datetime() == "07:00:00+00".datetime()');
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03"', '$.datetime() == "2020-01-01 07:00:00+00".datetime()');
+SELECT * FROM jsonb_path_query('["2020-01-01", "2021-06-01", "x"]', '$[*] ? (@.datetime() > "2020-06-01".datetime())');
+SELECT * FROM jsonb_path_query('["2020-01-01", "2021-06-01"]', 'strict $[*] ? (@.datetime() > "2020-06-01".datetime())');
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime() == "2020-01-01"');
+SELECT * FROM jsonb_path_query_tz('"2020-01-01"', '$.datetime() < "2020-01-02 00:00:00+00".datetime()');
+SELECT * FROM jsonb_path_query_tz('"2020-01-01 10:00:00"', '$.timestamp_tz()');
+SELECT jsonb_path_exists_tz('"2020-01-01"', '$.datetime() < "2020-01-02 00:00:00+00".datetime()');
+SELECT * FROM jsonb_path_query('[1, 5, 10]', '$[*] ? (@ >= $min && @ <= $max)', '{"min": 2, "max": 10}');
+SELECT * FROM jsonb_path_query('["apple", "banana"]', '$[*] ? (@ starts with $p)', '{"p": "ba"}');
+SELECT * FROM jsonb_path_query('{"a": 1}', '$.a + $x', '{"x": 2}');
+SELECT * FROM jsonb_path_query('{"a": 1}', '$x.keyvalue()', '{"x": {"k": 2}}');
+SELECT * FROM jsonb_path_query('{"a": 1}', '$.a + $x', '{}');
+SELECT * FROM jsonb_path_query('{"a": 1}', '$.a', '[1]');
+SELECT * FROM jsonb_path_query('{"a": 1}', '$.a', NULL)

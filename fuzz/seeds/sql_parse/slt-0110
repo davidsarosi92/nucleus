@@ -1,0 +1,20 @@
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c ? (@.d like_regex "X" flag "i")');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c ? (@.d like_regex "X")');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ > $.a[0])');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a ? (@[*] > 2)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a ? (@[*] > 2)');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@.type() == "number")');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[0] > 0');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c > 0');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a > 0');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a > 0');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.x.y == 1');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.e == null');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c.d == "x"');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ == 1 || @ == "x")');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '"abc" < "abd"');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '"b" > "abc"');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'true > false');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '[1] == [1]');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[0] + 1');
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[0] - $.a[1] * 3')

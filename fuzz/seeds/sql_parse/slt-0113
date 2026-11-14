@@ -1,0 +1,20 @@
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"o".boolean()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.i.boolean()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '0.boolean()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.n.boolean()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.o.boolean()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.s.number()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"abc".number()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"Infinity".number()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.t.number()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.s.decimal(4,1)');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.s.decimal(2,1)');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.i.decimal(3)');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '1234.5678.decimal(6,-2)');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.i.string()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.t.string()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.o.string()');
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.s.string().type()');
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime()');
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime().type()');
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03"', '$.datetime()')

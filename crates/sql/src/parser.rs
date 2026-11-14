@@ -3034,6 +3034,16 @@ impl<'a> Parser<'a> {
             schema = Some(name);
             name = self.ident()?;
         }
+        if schema.is_none() && name == "json_table" && self.eat_op("(") {
+            let query = self.json_table()?;
+            let alias = self.alias()?.unwrap_or_else(|| "json_table".into());
+            let columns = self.column_aliases()?;
+            return Ok(TableRef::Lateral(Box::new(TableRef::Subquery {
+                query: Box::new(query),
+                alias,
+                columns,
+            })));
+        }
         if self.eat_op("(") {
             let mut args = Vec::new();
             if !self.peek_op(")") {
@@ -3726,58 +3736,18 @@ impl<'a> Parser<'a> {
         let context = self.json_input()?;
         self.expect_op(",")?;
         let path = self.expr()?;
-        let vars = if self.eat_kw("passing") {
-            let mut pairs = Vec::new();
-            loop {
-                let v = self.json_input()?;
-                self.expect_kw("as")?;
-                pairs.push(Expr::Literal(Value::Text(self.ident()?)));
-                pairs.push(v);
-                if !self.eat_op(",") {
-                    break;
-                }
-            }
-            json_call("json_build_object", pairs)
-        } else {
-            Expr::Literal(Value::Null)
-        };
+        let vars = self.json_passing()?;
         let returning = if name == "json_exists" {
             None
         } else {
             self.json_returning()?
         };
-        let (mut wrapper, mut omit_quotes) = (0, false);
-        if name == "json_query" {
-            if self.eat_kw("without") {
-                self.eat_kw("array");
-                self.expect_kw("wrapper")?;
-            } else if self.peek_kw("with") {
-                self.pos += 1;
-                wrapper = if self.eat_kw("conditional") {
-                    2
-                } else {
-                    self.eat_kw("unconditional");
-                    1
-                };
-                self.eat_kw("array");
-                self.expect_kw("wrapper")?;
-            }
-            let quotes = self.peek_kw("keep") || self.peek_kw("omit");
-            if quotes {
-                omit_quotes = self.eat_kw("omit");
-                self.eat_kw("keep");
-                self.expect_kw("quotes")?;
-                if self.eat_kw("on") {
-                    self.expect_kw("scalar")?;
-                    self.expect_kw("string")?;
-                }
-                if wrapper != 0 && omit_quotes {
-                    return Err(Error::syntax(
-                        "SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used",
-                    ));
-                }
-            }
-        }
+        let (wrapper, omit_quotes) = if name == "json_query" {
+            let (w, q, _) = self.json_wrapper_quotes()?;
+            (w, q)
+        } else {
+            (0, false)
+        };
         let (on_empty, on_error) = self.json_behaviors(name)?;
         self.expect_op(")")?;
         let null = || Expr::Literal(Value::Null);
@@ -3806,6 +3776,191 @@ impl<'a> Parser<'a> {
         }
         args.extend([int(ek), ed, int(rk), rd]);
         Ok(json_call(&format!("__{name}"), args))
+    }
+
+    /// `PASSING v AS name, …`: the path's variables, as one object (`NULL`
+    /// without them).
+    fn json_passing(&mut self) -> Result<Expr> {
+        if !self.eat_kw("passing") {
+            return Ok(Expr::Literal(Value::Null));
+        }
+        let mut pairs = Vec::new();
+        loop {
+            let v = self.json_input()?;
+            self.expect_kw("as")?;
+            pairs.push(Expr::Literal(Value::Text(self.ident()?)));
+            pairs.push(v);
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        Ok(json_call("json_build_object", pairs))
+    }
+
+    /// `[WITH [CONDITIONAL | UNCONDITIONAL] [ARRAY] WRAPPER | WITHOUT
+    /// [ARRAY] WRAPPER] [KEEP | OMIT QUOTES [ON SCALAR STRING]]`: the
+    /// wrapper (0 none, 1 unconditional, 2 conditional), whether quotes
+    /// are omitted, and whether either was written.
+    fn json_wrapper_quotes(&mut self) -> Result<(i64, bool, bool)> {
+        let (mut wrapper, mut omit_quotes, mut written) = (0, false, false);
+        if self.eat_kw("without") {
+            self.eat_kw("array");
+            self.expect_kw("wrapper")?;
+            written = true;
+        } else if self.peek_kw("with") && !self.peek_at(1).is_some_and(|t| t.is("unique")) {
+            self.pos += 1;
+            wrapper = if self.eat_kw("conditional") {
+                2
+            } else {
+                self.eat_kw("unconditional");
+                1
+            };
+            self.eat_kw("array");
+            self.expect_kw("wrapper")?;
+            written = true;
+        }
+        if self.peek_kw("keep") || self.peek_kw("omit") {
+            omit_quotes = self.eat_kw("omit");
+            self.eat_kw("keep");
+            self.expect_kw("quotes")?;
+            if self.eat_kw("on") {
+                self.expect_kw("scalar")?;
+                self.expect_kw("string")?;
+            }
+            if wrapper != 0 && omit_quotes {
+                return Err(Error::syntax(
+                    "SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used",
+                ));
+            }
+            written = true;
+        }
+        Ok((wrapper, omit_quotes, written))
+    }
+
+    /// `JSON_TABLE(…)` after the `(` (PLAN.md §M14.15 J3c): a lateral
+    /// subquery.  The row path's items come from `__json_table_rows`
+    /// (`item`, `ord`); a column is `JSON_VALUE`, `JSON_QUERY` or
+    /// `JSON_EXISTS` of the item, by the call the functions above make; a
+    /// `NESTED PATH` is a lateral left join of its rows, siblings' rows
+    /// unioned (PostgreSQL's default plan: parent `OUTER` child, siblings
+    /// `UNION`).
+    fn json_table(&mut self) -> Result<Query> {
+        let context = self.json_input()?;
+        self.expect_op(",")?;
+        let path = self.expr()?;
+        if self.eat_kw("as") {
+            self.ident()?;
+        }
+        let vars = self.json_passing()?;
+        let columns = self.json_table_columns()?;
+        let error = if self.eat_kw("error") {
+            self.expect_kw("on")?;
+            self.expect_kw("error")?;
+            true
+        } else if self.eat_kw("empty") {
+            self.eat_kw("array");
+            self.expect_kw("on")?;
+            self.expect_kw("error")?;
+            false
+        } else if self.peek_at(1).is_some_and(|t| t.is("on")) {
+            return Err(Error::syntax(
+                "invalid ON ERROR behavior for JSON_TABLE(): only ERROR or EMPTY [ARRAY]",
+            ));
+        } else {
+            false
+        };
+        self.expect_op(")")?;
+        let mut names = Vec::new();
+        jt_names(&columns, &mut names)?;
+        let mut n = 0;
+        let (from, items) = jt_level(context, path, &vars, error, &columns, &mut n);
+        Ok(select_query(items, from))
+    }
+
+    /// `COLUMNS (…)`.
+    fn json_table_columns(&mut self) -> Result<Vec<JtColumn>> {
+        self.expect_kw("columns")?;
+        self.expect_op("(")?;
+        let mut columns = Vec::new();
+        loop {
+            columns.push(self.json_table_column()?);
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        Ok(columns)
+    }
+
+    fn json_table_column(&mut self) -> Result<JtColumn> {
+        let nested = self.peek_kw("nested")
+            && self
+                .peek_at(1)
+                .is_some_and(|t| t.is("path") || matches!(t, Token::Str(_)));
+        if nested {
+            self.pos += 1;
+            self.eat_kw("path");
+            let path = self.string_literal()?;
+            if self.eat_kw("as") {
+                self.ident()?;
+            }
+            let columns = self.json_table_columns()?;
+            return Ok(JtColumn::Nested { path, columns });
+        }
+        let name = self.ident()?;
+        if self.eat_kws(&["for", "ordinality"]) {
+            return Ok(JtColumn::Ordinality(name));
+        }
+        let (ty, typmod) = self.data_type()?;
+        if self.eat_kw("exists") {
+            let path = self.json_table_path()?;
+            let (_, on_error) = self.json_behaviors("json_exists")?;
+            return Ok(JtColumn::Exists {
+                name,
+                ty,
+                typmod,
+                path,
+                on_error,
+            });
+        }
+        let format_json = self.json_format();
+        let path = self.json_table_path()?;
+        let (wrapper, omit_quotes, written) = self.json_wrapper_quotes()?;
+        let json_typed =
+            matches!(&ty, SqlType::Named { name, .. } if name == "json" || name == "jsonb");
+        let query = format_json || written || json_typed;
+        let (on_empty, on_error) =
+            self.json_behaviors(if query { "json_query" } else { "json_value" })?;
+        Ok(JtColumn::Path {
+            name,
+            ty,
+            typmod,
+            query,
+            path,
+            wrapper,
+            omit_quotes,
+            on_empty,
+            on_error,
+        })
+    }
+
+    /// `PATH 'path'`, a string constant.
+    fn json_table_path(&mut self) -> Result<Option<String>> {
+        if !self.eat_kw("path") {
+            return Ok(None);
+        }
+        self.string_literal().map(Some)
+    }
+
+    fn string_literal(&mut self) -> Result<String> {
+        match self.peek() {
+            Some(Token::Str(s)) => {
+                let s = s.clone();
+                self.pos += 1;
+                Ok(s)
+            }
+            _ => Err(self.error("expected a string constant")),
+        }
     }
 
     /// `… ON EMPTY` and `… ON ERROR`, in that order, as the function
@@ -4380,6 +4535,247 @@ fn returning_cast(x: Expr, returning: Option<(SqlType, TypeMod)>) -> Expr {
             typmod,
         },
         None => x,
+    }
+}
+
+/// A `JSON_TABLE` column, as written.
+enum JtColumn {
+    /// `name FOR ORDINALITY`.
+    Ordinality(String),
+    /// `name type [FORMAT JSON] [PATH p] [wrapper] [quotes] [ON EMPTY]
+    /// [ON ERROR]`: `JSON_QUERY`'s when `query`, else `JSON_VALUE`'s.
+    Path {
+        name: String,
+        ty: SqlType,
+        typmod: TypeMod,
+        query: bool,
+        path: Option<String>,
+        wrapper: i64,
+        omit_quotes: bool,
+        on_empty: Option<(i64, Expr)>,
+        on_error: Option<(i64, Expr)>,
+    },
+    /// `name type EXISTS [PATH p] [ON ERROR]`.
+    Exists {
+        name: String,
+        ty: SqlType,
+        typmod: TypeMod,
+        path: Option<String>,
+        on_error: Option<(i64, Expr)>,
+    },
+    /// `NESTED [PATH] p [AS name] COLUMNS (…)`.
+    Nested {
+        path: String,
+        columns: Vec<JtColumn>,
+    },
+}
+
+/// The column names, each once (`42712`, as PostgreSQL's).
+fn jt_names(columns: &[JtColumn], names: &mut Vec<String>) -> Result<()> {
+    for c in columns {
+        let name = match c {
+            JtColumn::Ordinality(n)
+            | JtColumn::Path { name: n, .. }
+            | JtColumn::Exists { name: n, .. } => n,
+            JtColumn::Nested { columns, .. } => {
+                jt_names(columns, names)?;
+                continue;
+            }
+        };
+        if names.contains(name) {
+            return Err(Error::duplicate_alias(format!(
+                "duplicate JSON_TABLE column or path name: {name}"
+            )));
+        }
+        names.push(name.clone());
+    }
+    Ok(())
+}
+
+/// A select list item: its expression, name and type (for the `NULL`s of
+/// a sibling's rows).
+type JtItem = (Expr, String, SqlType, TypeMod);
+
+/// One level of a `JSON_TABLE`: the rows of `path` over `source`, its
+/// columns, its nested levels joined.
+fn jt_level(
+    source: Expr,
+    path: Expr,
+    vars: &Expr,
+    error: bool,
+    columns: &[JtColumn],
+    n: &mut usize,
+) -> (TableRef, Vec<JtItem>) {
+    let k = *n;
+    *n += 1;
+    let rows_alias = format!("__json_table_{k}");
+    let nested_alias = format!("__json_table_nested_{k}");
+    let column = |table: &str, name: &str| Expr::Column {
+        table: Some(table.into()),
+        name: name.into(),
+    };
+    let item = || column(&rows_alias, "item");
+    let rows = TableRef::Function {
+        name: "__json_table_rows".into(),
+        args: vec![source, path, vars.clone(), boolean(error)],
+        ordinality: false,
+        alias: Some(rows_alias.clone()),
+        columns: vec!["item".into(), "ord".into()],
+    };
+    let default_path =
+        |name: &str| format!("$.\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""));
+    let null = || Expr::Literal(Value::Null);
+    let mut items = Vec::new();
+    let mut children = Vec::new();
+    for c in columns {
+        match c {
+            JtColumn::Ordinality(name) => items.push((
+                column(&rows_alias, "ord"),
+                name.clone(),
+                SqlType::builtin(DataType::BigInt),
+                TypeMod::default(),
+            )),
+            JtColumn::Path {
+                name,
+                ty,
+                typmod,
+                query,
+                path,
+                wrapper,
+                omit_quotes,
+                on_empty,
+                on_error,
+            } => {
+                let p = path.clone().unwrap_or_else(|| default_path(name));
+                let witness = Expr::Cast {
+                    expr: Box::new(null()),
+                    ty: ty.clone(),
+                    typmod: *typmod,
+                };
+                let mut args = vec![item(), Expr::Literal(Value::Text(p)), vars.clone(), witness];
+                if *query {
+                    args.push(int(*wrapper));
+                    args.push(boolean(*omit_quotes));
+                }
+                let (ek, ed) = on_empty.clone().unwrap_or((JSON_NULL, null()));
+                let (rk, rd) = on_error.clone().unwrap_or((JSON_NULL, null()));
+                args.extend([int(ek), ed, int(rk), rd]);
+                let f = if *query {
+                    "__json_query"
+                } else {
+                    "__json_value"
+                };
+                items.push((json_call(f, args), name.clone(), ty.clone(), *typmod));
+            }
+            JtColumn::Exists {
+                name,
+                ty,
+                typmod,
+                path,
+                on_error,
+            } => {
+                let p = path.clone().unwrap_or_else(|| default_path(name));
+                let rk = on_error.as_ref().map_or(JSON_FALSE, |b| b.0);
+                let e = json_call(
+                    "__json_exists",
+                    vec![item(), Expr::Literal(Value::Text(p)), vars.clone(), int(rk)],
+                );
+                let e = returning_cast(e, Some((ty.clone(), *typmod)));
+                items.push((e, name.clone(), ty.clone(), *typmod));
+            }
+            JtColumn::Nested { path, columns } => {
+                let p = Expr::Literal(Value::Text(path.clone()));
+                let (from, sub) = jt_level(item(), p, vars, error, columns, n);
+                for (_, name, ty, typmod) in &sub {
+                    items.push((
+                        column(&nested_alias, name),
+                        name.clone(),
+                        ty.clone(),
+                        *typmod,
+                    ));
+                }
+                children.push((from, sub));
+            }
+        }
+    }
+    if children.is_empty() {
+        return (rows, items);
+    }
+    // The children's rows, unioned: each child's columns, the others' NULL.
+    let mut branches = Vec::new();
+    for (i, (from, _)) in children.iter().enumerate() {
+        let mut select = Vec::new();
+        for (j, (_, sub)) in children.iter().enumerate() {
+            for (e, name, ty, typmod) in sub {
+                let e = if i == j {
+                    e.clone()
+                } else {
+                    Expr::Cast {
+                        expr: Box::new(null()),
+                        ty: ty.clone(),
+                        typmod: *typmod,
+                    }
+                };
+                select.push((e, name.clone(), ty.clone(), *typmod));
+            }
+        }
+        branches.push(select_body(select, from.clone()));
+    }
+    let mut body = branches.remove(0);
+    for b in branches {
+        body = SetExpr::SetOp {
+            op: SetOp::Union,
+            left: Box::new(body),
+            right: Box::new(b),
+            all: true,
+        };
+    }
+    let nested = TableRef::Lateral(Box::new(TableRef::Subquery {
+        query: Box::new(Query {
+            with: None,
+            body,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+        }),
+        alias: nested_alias,
+        columns: vec![],
+    }));
+    let from = TableRef::Join {
+        left: Box::new(rows),
+        right: Box::new(nested),
+        kind: JoinKind::Left,
+        on: Some(boolean(true)),
+        using: vec![],
+    };
+    (from, items)
+}
+
+fn select_body(items: Vec<JtItem>, from: TableRef) -> SetExpr {
+    SetExpr::Select(Box::new(Select {
+        distinct: false,
+        items: items
+            .into_iter()
+            .map(|(expr, name, _, _)| SelectItem::Expr {
+                expr,
+                alias: Some(name),
+            })
+            .collect(),
+        from: vec![from],
+        filter: None,
+        group_by: vec![],
+        having: None,
+        windows: vec![],
+    }))
+}
+
+fn select_query(items: Vec<JtItem>, from: TableRef) -> Query {
+    Query {
+        with: None,
+        body: select_body(items, from),
+        order_by: vec![],
+        limit: None,
+        offset: None,
     }
 }
 
