@@ -542,7 +542,9 @@ pub fn backup(kv: &Arc<dyn Kv>, to: &str) -> Result<Backup> {
         .files()
         .ok_or_else(|| Error::feature("this database has no files to back up beside"))?;
     let dir = PathBuf::from(to);
-    if !dir.is_absolute() {
+    // From the root: on Windows a path without a drive (`\backups`) is
+    // the current drive's.
+    if !dir.has_root() {
         return Err(Error::invalid_parameter(format!(
             "BACKUP TO needs an absolute path, not '{to}'"
         )));
