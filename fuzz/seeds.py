@@ -45,12 +45,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 
+# The seeds written, by directory: each directory's `.generated` lists
+# them, so the next run removes those alone — not the findings kept there
+# by hand (a crash's input, committed as a regression seed).
+WRITTEN = {}
+MANIFEST = ".generated"
+
+
 def out_dir(target):
     d = os.path.join(HERE, "seeds", target)
-    if os.path.isdir(d):
-        for f in os.listdir(d):
-            os.remove(os.path.join(d, f))
+    manifest = os.path.join(d, MANIFEST)
+    if os.path.isfile(manifest):
+        for name in open(manifest).read().split():
+            path = os.path.join(d, name)
+            if os.path.isfile(path):
+                os.remove(path)
     os.makedirs(d, exist_ok=True)
+    WRITTEN.setdefault(d, set())
     return d
 
 
@@ -59,6 +70,13 @@ def write(d, name, data):
         data = data.encode()
     with open(os.path.join(d, name), "wb") as f:
         f.write(data)
+    WRITTEN.setdefault(d, set()).add(name)
+
+
+def write_manifests():
+    for d, names in WRITTEN.items():
+        with open(os.path.join(d, MANIFEST), "w") as f:
+            f.write("".join(n + "\n" for n in sorted(names)))
 
 
 def rust_list(target, name):
@@ -614,6 +632,7 @@ def main():
     model_files(a.models)
     if a.server:
         wire(a.server)
+    write_manifests()
     print(f"sql_parse: {len(stmts)} statements", file=sys.stderr)
 
 

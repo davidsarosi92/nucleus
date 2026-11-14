@@ -102,17 +102,16 @@ fn reads(plan: &Plan, st: &Stats) -> f64 {
                     },
                 ..
             } => {
-                let cols = match index {
-                    None => &table.primary_key,
-                    Some(i) => &table.indexes[*i].columns,
+                let Some(keys) = st.key_parts(table, *index) else {
+                    return st.rows(table);
                 };
-                let at = |c: usize| Box::new(Expr::Column(c));
+                let at = |k: &Expr| Box::new(k.clone());
                 let mut conds: Vec<Expr> = prefix
                     .iter()
-                    .zip(cols)
-                    .map(|(e, &c)| Expr::Binary(BinaryOp::Eq, at(c), Box::new(e.clone())))
+                    .zip(&keys)
+                    .map(|(e, k)| Expr::Binary(BinaryOp::Eq, at(k), Box::new(e.clone())))
                     .collect();
-                if let Some(&next) = cols.get(prefix.len()) {
+                if let Some(next) = keys.get(prefix.len()) {
                     use std::ops::Bound::*;
                     if let Included(e) | Excluded(e) = lower {
                         conds.push(Expr::Binary(BinaryOp::GtEq, at(next), Box::new(e.clone())));

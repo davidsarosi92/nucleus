@@ -36,6 +36,48 @@ pub fn table_scope(table: &Table) -> Scope {
     }
 }
 
+/// An index's expression part (`CREATE INDEX … ((expr))`) bound over
+/// `table`'s row: the expression and its type.  It must be immutable — no
+/// subquery, parameter, outer reference, function that may vary, or
+/// conversion that depends on the session (a time zone's) — and read a
+/// column.
+pub fn bind_index_expr(
+    binder: &mut Binder,
+    table: &Table,
+    sql: &str,
+) -> Result<(Expr, Option<DataType>)> {
+    let (x, ty) = binder.expr(&parse_expr(sql)?, &table_scope(table))?;
+    let mut problem = None;
+    x.walk(&mut |e| match e {
+        Expr::Subquery(_) | Expr::Param(_) | Expr::Outer { .. } => {
+            problem = Some("a subquery, a parameter or an outer reference".to_string());
+        }
+        Expr::Call(f, _) if f.volatility() != crate::ext::Volatility::Immutable => {
+            problem = Some(format!("{}(), which is not immutable", f.name()));
+        }
+        Expr::Cast(_, DataType::TimestampTz) => {
+            problem = Some("a conversion to timestamptz, which depends on the time zone".into());
+        }
+        Expr::Cast(inner, _)
+            if matches!(&**inner, Expr::Column(c) if table.columns[*c].ty == DataType::TimestampTz) =>
+        {
+            problem = Some("a conversion of a timestamptz, which depends on the time zone".into());
+        }
+        _ => {}
+    });
+    if let Some(p) = problem {
+        return Err(Error::invalid_object_definition(format!(
+            "an index expression must be immutable; {sql} uses {p}"
+        )));
+    }
+    if x.columns().is_empty() {
+        return Err(Error::invalid_object_definition(format!(
+            "an index expression must read a column; {sql} reads none"
+        )));
+    }
+    Ok((x, ty))
+}
+
 /// How a table's index entries are made: per B-tree index, per column,
 /// the column's value or (a column indexed in a taught ordering) its
 /// mapping, bound once; an index of a registered method
@@ -60,7 +102,11 @@ impl IndexKeys {
                 None => btrees.push(i),
             }
             let mut per = Vec::with_capacity(ix.columns.len());
-            for (&c, o) in ix.columns.iter().zip(&ix.orderings) {
+            for ((&c, o), e) in ix.columns.iter().zip(&ix.orderings).zip(&ix.exprs) {
+                if let Some(e) = e {
+                    per.push(Some(bind_index_expr(&mut binder, table, &e.sql)?.0));
+                    continue;
+                }
                 per.push(match o {
                     None => None,
                     Some(name) => match binder.ordering(Some(table.columns[c].ty), name)? {
@@ -1768,7 +1814,7 @@ pub fn backfill_index(txn: &mut dyn KvTxn, reg: &Registry, table: &Table, i: usi
     let keys = IndexKeys::new(&*txn, reg, table)?;
     let storage = crate::storage::of(table)?;
     let mut wanted = vec![false; table.columns.len()];
-    for &c in &table.indexes[i].columns {
+    for c in table.indexes[i].reads() {
         wanted[c] = true;
     }
     let rows_prefix = table.index_prefix(0);

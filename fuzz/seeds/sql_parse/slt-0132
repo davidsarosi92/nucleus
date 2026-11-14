@@ -1,2 +1,20 @@
 SELECT sum(qty) FROM (SELECT j.qty FROM jt, JSON_TABLE(jt.doc, '$.items[*]' COLUMNS (qty int PATH '$.qty' DEFAULT 0 ON ERROR)) j) s;
-SELECT j.k, j.v FROM JSON_TABLE(jsonb '{"b": 2, "a": 1}', '$.keyvalue()' COLUMNS (k text PATH '$.key', v int PATH '$.value')) j ORDER BY 1
+SELECT j.k, j.v FROM JSON_TABLE(jsonb '{"b": 2, "a": 1}', '$.keyvalue()' COLUMNS (k text PATH '$.key', v int PATH '$.value')) j ORDER BY 1;
+CREATE TABLE users (id int PRIMARY KEY, email text, n int, doc jsonb);
+INSERT INTO users VALUES (1, 'Ann@X.org', 10, '{"name": "ann", "age": 31, "tags": ["a"]}'), (2, 'bob@x.org', 20, '{"name": "bob", "age": 25}'), (3, 'CAROL@x.org', 30, '{"name": "carol", "age": 40}'), (4, NULL, NULL, NULL);
+CREATE INDEX ON users (lower(email));
+CREATE UNIQUE INDEX users_name ON users ((doc->>'name'));
+CREATE INDEX users_age ON users (((doc->>'age')::int));
+CREATE INDEX users_n ON users ((n * 2), id);
+SELECT id FROM users WHERE lower(email) = 'ann@x.org';
+SELECT id FROM users WHERE 'carol@x.org' = lower(email);
+SELECT id FROM users WHERE doc->>'name' = 'bob';
+SELECT id FROM users WHERE (doc->>'age')::int >= 31;
+SELECT id FROM users WHERE (doc->>'age')::int < 31;
+SELECT id FROM users WHERE n * 2 = 40 AND id = 2;
+SELECT id FROM users WHERE n * 2 > 15;
+EXPLAIN SELECT id FROM users WHERE lower(email) = 'ann@x.org';
+EXPLAIN SELECT id FROM users WHERE (doc->>'age')::int >= 31;
+INSERT INTO users VALUES (5, 'x@y.z', 1, '{"name": "ann"}');
+INSERT INTO users VALUES (5, 'x@y.z', 1, '{"age": 7}'), (6, 'y@y.z', 2, '{"age": 8}');
+UPDATE users SET email = 'Dave@X.org', doc = '{"name": "dave", "age": 50}' WHERE id = 2

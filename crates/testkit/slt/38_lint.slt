@@ -46,7 +46,7 @@ ANALYZE QUERY SELECT * FROM lc WHERE email = 'c5'
 query TTTT rowsort
 ANALYZE QUERY SELECT * FROM lc WHERE lower(email) = 'c5'
 ----
-index_defeated lc: (lower(email) = 'c5') the comparison is on an expression of email, not on email itself, so index lc_email_idx cannot serve it compare email itself, or keep the computed value in a column of its own and index that
+index_defeated lc: (lower(email) = 'c5') the comparison is on an expression of email, not on email itself, so index lc_email_idx cannot serve it compare email itself, or index the expression: CREATE INDEX ON lc ((lower(email)))
 
 # nucleus-only
 query TTTT rowsort

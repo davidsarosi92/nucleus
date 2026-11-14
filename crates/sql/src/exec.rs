@@ -778,7 +778,12 @@ pub(crate) fn key_range(
     };
     let id = index.map_or(0, |i| table.indexes[i].id);
     let mut key = table.index_prefix(id);
-    let ty = |pos: usize| columns.get(pos).map(|c| table.columns[*c].ty);
+    let ty = |pos: usize| {
+        (pos < columns.len()).then(|| match index {
+            None => table.columns[columns[pos]].ty,
+            Some(i) => table.indexes[*i].key_type(table, pos),
+        })
+    };
     let coerce = |v: Value, pos: usize| key_bound(v, ty(pos)?);
     let mut usable = true;
     for (pos, p) in prefix.iter().enumerate() {

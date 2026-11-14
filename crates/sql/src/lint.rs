@@ -10,7 +10,8 @@
 //!   left alone.
 //! - `index_defeated`: a comparison that wraps an indexed column (the
 //!   first of an index) in a function, a cast or arithmetic, so the index
-//!   cannot serve it.
+//!   cannot serve it — unless an expression index serves the scan; the
+//!   fix for a function names the expression index that would.
 //! - `foreign_key_without_index`: a foreign key of a table the statement
 //!   reads — or, for `UPDATE` and `DELETE`, one referencing the table it
 //!   changes — whose columns lead no index: every change of the
@@ -274,8 +275,11 @@ impl Linter<'_> {
             Access::Key { index, .. } => Some(*index),
             Access::Method { index, .. } => Some(Some(*index)),
         };
-        // index_defeated
-        for p in &preds {
+        // index_defeated (not where an expression index serves the scan:
+        // the expression is indexed)
+        let by_expression = matches!(access, Access::Key { index: Some(i), .. }
+            if table.indexes[*i].has_exprs());
+        for p in preds.iter().filter(|_| !by_expression) {
             let Expr::Binary(op, a, b) = p else { continue };
             if !matches!(
                 op,
@@ -316,8 +320,10 @@ impl Linter<'_> {
                         _,
                     ) => format!("move the arithmetic to the other side, leaving {cname} alone"),
                     _ => format!(
-                        "compare {cname} itself, or keep the computed value in a column of \
-                         its own and index that"
+                        "compare {cname} itself, or index the expression: CREATE INDEX ON {} \
+                         (({}))",
+                        table.name,
+                        show_with(side, &name)
                     ),
                 };
                 self.out.push(Finding {

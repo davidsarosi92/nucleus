@@ -87,7 +87,7 @@ pub const INDEX_PREFIX_LEN: usize = 1 + 4 + 4;
 /// operator classes and options; version 17 a row expiry and a memory
 /// store's definition; version 18 the subject columns (a memory store's
 /// `subject` before it); older versions still read.
-const TABLE_VERSION: u8 = 18;
+const TABLE_VERSION: u8 = 19;
 
 /// The version of the keyspace layout above (PLAN.md principle 6).
 pub const KEYSPACE_VERSION: u16 = 1;
@@ -235,6 +235,22 @@ pub struct Index {
     /// The method's options (`WITH (name = value, …)`), as the method
     /// defined them.
     pub options: Vec<(String, String)>,
+    /// Per key part, the expression it indexes (`CREATE INDEX … ((expr))`,
+    /// PLAN.md §M14.15 J4); `None`: the column's value.  An expression's
+    /// part has the first column it reads in `columns`.
+    pub exprs: Vec<Option<IndexExpr>>,
+}
+
+/// An index's key part that is an expression of the row: a B-tree's,
+/// immutable, its value computed on each write.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexExpr {
+    /// Its SQL text, over the table's columns.
+    pub sql: String,
+    /// Its type: the key part's.
+    pub ty: DataType,
+    /// The columns it reads, by position, ascending.
+    pub uses: Vec<usize>,
 }
 
 impl Index {
@@ -242,6 +258,7 @@ impl Index {
     pub fn plain(id: u32, name: String, columns: Vec<usize>, unique: bool) -> Self {
         let orderings = vec![None; columns.len()];
         let opclasses = vec![None; columns.len()];
+        let exprs = vec![None; columns.len()];
         Self {
             id,
             name,
@@ -251,6 +268,59 @@ impl Index {
             method: None,
             opclasses,
             options: Vec::new(),
+            exprs,
+        }
+    }
+
+    /// Whether some key part is an expression.
+    pub fn has_exprs(&self) -> bool {
+        self.exprs.iter().any(Option::is_some)
+    }
+
+    /// Whether the index reads column `c`: a key part of it, or a column
+    /// an expression part reads.
+    pub fn uses(&self, c: usize) -> bool {
+        self.columns
+            .iter()
+            .zip(&self.exprs)
+            .any(|(&k, e)| e.as_ref().map_or(k == c, |e| e.uses.contains(&c)))
+    }
+
+    /// The columns every key part reads, by position.
+    pub fn reads(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (&k, e) in self.columns.iter().zip(&self.exprs) {
+            match e {
+                None => out.push(k),
+                Some(e) => out.extend(&e.uses),
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Its key parts' columns where each is a column's own value — what
+    /// a uniqueness of those columns follows from; `None` where some part
+    /// is an expression.
+    pub fn key_columns(&self) -> Option<&[usize]> {
+        (!self.has_exprs()).then_some(self.columns.as_slice())
+    }
+
+    /// Key part `k`'s type.
+    pub fn key_type(&self, t: &Table, k: usize) -> DataType {
+        match &self.exprs[k] {
+            Some(e) => e.ty,
+            None => t.columns[self.columns[k]].ty,
+        }
+    }
+
+    /// Key part `k` as SQL: the column's name, or the expression in
+    /// parentheses.
+    pub fn part_sql(&self, t: &Table, k: usize) -> String {
+        match &self.exprs[k] {
+            Some(e) => format!("({})", e.sql),
+            None => t.columns[self.columns[k]].name.clone(),
         }
     }
 
@@ -260,9 +330,10 @@ impl Index {
     }
 
     /// Whether it is a B-tree of the columns' own values: an access path
-    /// for predicates on them (not a registered method's, not mapped).
+    /// for predicates on them (not a registered method's, not mapped, no
+    /// expression).
     pub fn ordered(&self) -> bool {
-        self.method.is_none() && !self.mapped()
+        self.method.is_none() && !self.mapped() && !self.has_exprs()
     }
 }
 
@@ -587,6 +658,23 @@ impl Table {
         for &c in &self.subject {
             w.u32(c as u32);
         }
+        for i in &self.indexes {
+            for e in &i.exprs {
+                match e {
+                    None => {
+                        w.u8(0);
+                    }
+                    Some(e) => {
+                        w.u8(1).str(&e.sql);
+                        write_type(&mut w, e.ty);
+                        w.u32(e.uses.len() as u32);
+                        for &c in &e.uses {
+                            w.u32(c as u32);
+                        }
+                    }
+                }
+            }
+        }
         w.0
     }
 
@@ -670,6 +758,7 @@ impl Table {
                 method,
                 opclasses,
                 options,
+                exprs: vec![None; m],
             });
         }
         let n = r.u32()? as usize;
@@ -804,6 +893,20 @@ impl Table {
         } else {
             Vec::new()
         };
+        if version >= 19 {
+            for ix in &mut indexes {
+                for e in &mut ix.exprs {
+                    if r.u8()? == 1 {
+                        let sql = r.str()?;
+                        let ty = read_type(&mut r)?;
+                        let uses = (0..r.u32()?)
+                            .map(|_| r.u32().map(|c| c as usize))
+                            .collect::<Result<_>>()?;
+                        *e = Some(IndexExpr { sql, ty, uses });
+                    }
+                }
+            }
+        }
         Ok(Self {
             id,
             name,
@@ -858,6 +961,27 @@ fn action_of_tag(t: u8) -> Result<FkAction> {
 const EXT_TAG: u8 = 0x7F;
 /// An enum's column tag; its name follows.
 const ENUM_TAG: u8 = 0x7E;
+
+/// A type as a column's is written: its tag, then a registered type's
+/// or an enum's name.
+fn write_type(w: &mut Writer, t: DataType) {
+    w.u8(type_tag(t));
+    if let DataType::Ext(t) = t {
+        w.str(t.name());
+    }
+    if let DataType::Enum(e) = t {
+        w.str(e.name());
+    }
+}
+
+/// A type [`write_type`] wrote.
+fn read_type(r: &mut Reader) -> Result<DataType> {
+    Ok(match r.u8()? {
+        EXT_TAG => DataType::Ext(crate::ext::TypeRef::named_or_missing(&r.str()?)),
+        ENUM_TAG => DataType::Enum(crate::enums::EnumRef::named(&r.str()?)),
+        tag => type_of_tag(tag)?,
+    })
+}
 
 fn type_tag(t: DataType) -> u8 {
     match t {
@@ -1147,7 +1271,9 @@ impl Table {
     /// Whether `indexes[i]` is a `UNIQUE` constraint (the indexes those
     /// create are named `…_key`) rather than an index.
     pub fn is_unique_constraint(&self, i: usize) -> bool {
-        self.indexes[i].unique && self.indexes[i].name.ends_with("_key")
+        self.indexes[i].unique
+            && !self.indexes[i].has_exprs()
+            && self.indexes[i].name.ends_with("_key")
     }
 }
 
@@ -1539,6 +1665,7 @@ mod tests {
                     method: None,
                     opclasses: vec![None],
                     options: Vec::new(),
+                    exprs: vec![None],
                 },
                 Index {
                     id: 2,
@@ -1549,6 +1676,11 @@ mod tests {
                     method: Some("someday".into()),
                     opclasses: vec![Some("numeric_ops".into())],
                     options: vec![("m".into(), "16".into())],
+                    exprs: vec![Some(IndexExpr {
+                        sql: "price * 2".into(),
+                        ty: DataType::Numeric,
+                        uses: vec![2],
+                    })],
                 },
             ],
             checks: vec![("id_positive".into(), "id > 0".into())],

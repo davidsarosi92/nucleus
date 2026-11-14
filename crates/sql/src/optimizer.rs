@@ -1333,19 +1333,57 @@ pub(crate) fn column_bound(p: &Expr) -> Option<(usize, BinaryOp, Expr)> {
     }
 }
 
+/// `key op e` with `e` free of this row's columns (and of subqueries):
+/// `(op, e)` with `op` as if `key` were on the left — `key` a column, or
+/// an index's expression part, matched as bound (PLAN.md §M14.15 J4).
+fn key_bound(p: &Expr, key: &Expr) -> Option<(BinaryOp, Expr)> {
+    if let Expr::Column(c) = key {
+        return column_bound(p)
+            .filter(|(col, _, _)| col == c)
+            .map(|(_, op, e)| (op, e));
+    }
+    let Expr::Binary(op, a, b) = p else {
+        return None;
+    };
+    if !matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
+    ) {
+        return None;
+    }
+    let free = |e: &Expr| e.columns().is_empty() && !e.has_subquery();
+    let flip = |op: BinaryOp| match op {
+        BinaryOp::Lt => BinaryOp::Gt,
+        BinaryOp::LtEq => BinaryOp::GtEq,
+        BinaryOp::Gt => BinaryOp::Lt,
+        BinaryOp::GtEq => BinaryOp::LtEq,
+        op => op,
+    };
+    if **a == *key && free(b) {
+        Some((*op, (**b).clone()))
+    } else if **b == *key && free(a) {
+        Some((flip(*op), (**a).clone()))
+    } else {
+        None
+    }
+}
+
 /// The access path for a scan with filter conjuncts `preds`.  With
 /// statistics: the cheapest of a full scan and each usable index.
-/// Without: the longest equality prefix, then a range on the next column,
-/// the primary key winning ties.
+/// Without: the longest equality prefix, then a range on the next key
+/// part, the primary key winning ties.  An index's key part is a column
+/// or an expression (with statistics only: they bind it,
+/// [`Stats::key_parts`]).
 pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Access {
-    let bounds: Vec<(usize, BinaryOp, Expr)> = preds.iter().filter_map(column_bound).collect();
-    let eq = |c: usize| {
-        bounds
+    let eq = |k: &Expr| {
+        preds
             .iter()
-            .find(|(col, op, _)| *col == c && *op == BinaryOp::Eq)
-            .map(|(_, _, e)| e.clone())
+            .filter_map(|p| key_bound(p, k))
+            .find(|(op, _)| *op == BinaryOp::Eq)
+            .map(|(_, e)| e)
     };
-    let candidates = std::iter::once((None, table.primary_key.clone())).chain(
+    let columns = |cols: &[usize]| cols.iter().map(|&c| Expr::Column(c)).collect::<Vec<_>>();
+    let candidates = std::iter::once((None, columns(&table.primary_key))).chain(
         table
             .indexes
             .iter()
@@ -1353,29 +1391,31 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
             // An index in a taught ordering holds mappings, not the
             // columns' values, and a registered method's is searched its
             // own way: no access path for predicates on them.
-            .filter(|(_, ix)| ix.ordered())
-            .map(|(i, ix)| (Some(i), ix.columns.clone())),
+            .filter(|(_, ix)| ix.method.is_none() && !ix.mapped())
+            .filter_map(|(i, ix)| {
+                if !ix.has_exprs() {
+                    return Some((Some(i), columns(&ix.columns)));
+                }
+                Some((Some(i), st?.key_parts(table, Some(i))?))
+            }),
     );
     let analyzed = st.filter(|s| s.of(table).is_some());
     let rows = analyzed.map_or(0.0, |s| s.rows(table));
     // (score or negative cost, access)
     let mut best: Option<(f64, Access)> = None;
-    for (index, cols) in candidates {
-        if cols.is_empty() {
+    for (index, keys) in candidates {
+        if keys.is_empty() {
             continue; // a hidden row id
         }
-        let prefix: Vec<Expr> = cols.iter().map_while(|&c| eq(c)).collect();
+        let prefix: Vec<Expr> = keys.iter().map_while(&eq).collect();
         let (mut lower, mut upper) = (Bound::Unbounded, Bound::Unbounded);
         let mut used: Vec<Expr> = prefix
             .iter()
-            .zip(&cols)
-            .map(|(e, &c)| bin(BinaryOp::Eq, c, e))
+            .zip(&keys)
+            .map(|(e, k)| bin(BinaryOp::Eq, k, e))
             .collect();
-        if let Some(&next) = cols.get(prefix.len()) {
-            for (col, op, e) in &bounds {
-                if *col != next {
-                    continue;
-                }
+        if let Some(next) = keys.get(prefix.len()) {
+            for (op, e) in preds.iter().filter_map(|p| key_bound(p, next)) {
                 let slot = match op {
                     BinaryOp::Gt | BinaryOp::GtEq => &mut lower,
                     BinaryOp::Lt | BinaryOp::LtEq => &mut upper,
@@ -1387,7 +1427,7 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
                     } else {
                         Bound::Included(e.clone())
                     };
-                    used.push(bin(*op, next, e));
+                    used.push(bin(op, next, &e));
                 }
             }
         }
@@ -1404,7 +1444,7 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
                 -(10.0 + rows * sel * per_row)
             }
             None => {
-                let full = prefix.len() == cols.len();
+                let full = prefix.len() == keys.len();
                 (prefix.len() * 4 + range + usize::from(full) * 2) as f64
             }
         };
@@ -1428,8 +1468,8 @@ pub fn choose_access(table: &Table, preds: &[Expr], st: Option<&Stats>) -> Acces
     }
 }
 
-fn bin(op: BinaryOp, c: usize, e: &Expr) -> Expr {
-    Expr::Binary(op, Box::new(Expr::Column(c)), Box::new(e.clone()))
+fn bin(op: BinaryOp, k: &Expr, e: &Expr) -> Expr {
+    Expr::Binary(op, Box::new(k.clone()), Box::new(e.clone()))
 }
 
 // ------------------------------------------------------------- join order
@@ -1638,7 +1678,11 @@ fn keyed_selectivity<'p>(
                 continue;
             };
             let covers = |key: &[usize]| !key.is_empty() && key.iter().all(|c| cols.contains(c));
-            if covers(&t.primary_key) || t.indexes.iter().any(|i| i.unique && covers(&i.columns)) {
+            if covers(&t.primary_key)
+                || t.indexes
+                    .iter()
+                    .any(|i| i.unique && i.key_columns().is_some_and(covers))
+            {
                 let product: f64 = ks.iter().map(|&k| sel[k]).product();
                 let keyed = 1.0 / st.rows(t).max(1.0);
                 if keyed > product {

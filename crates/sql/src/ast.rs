@@ -64,8 +64,11 @@ pub enum Statement {
         name: Option<String>,
         /// Table.
         table: String,
-        /// Indexed columns.
+        /// Indexed columns (an expression's part: empty).
         columns: Vec<String>,
+        /// Per key part, the expression it indexes (`(expr)` or a
+        /// function's call), as SQL text; `None`: the column.
+        exprs: Vec<Option<String>>,
         /// Per column, `USING ordering`: index it in that ordering.
         orderings: Vec<Option<String>>,
         /// `USING method` (`None`: the B-tree).

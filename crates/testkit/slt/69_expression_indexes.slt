@@ -1,0 +1,217 @@
+# Expression indexes (PLAN.md §M14.15 J4): an index's key part an
+# immutable expression of the row, `(expr)` or a function's call, kept
+# on every write and chosen where a condition compares the very
+# expression.  Results checked against PostgreSQL 18 (scripts/slt-pg.py
+# check), records marked nucleus-only excepted.
+
+statement ok
+CREATE TABLE users (id int PRIMARY KEY, email text, n int, doc jsonb)
+
+statement ok
+INSERT INTO users VALUES (1, 'Ann@X.org', 10, '{"name": "ann", "age": 31, "tags": ["a"]}'), (2, 'bob@x.org', 20, '{"name": "bob", "age": 25}'), (3, 'CAROL@x.org', 30, '{"name": "carol", "age": 40}'), (4, NULL, NULL, NULL)
+
+statement ok
+CREATE INDEX ON users (lower(email))
+
+statement ok
+CREATE UNIQUE INDEX users_name ON users ((doc->>'name'))
+
+statement ok
+CREATE INDEX users_age ON users (((doc->>'age')::int))
+
+statement ok
+CREATE INDEX users_n ON users ((n * 2), id)
+
+query I
+SELECT id FROM users WHERE lower(email) = 'ann@x.org'
+----
+1
+
+query I
+SELECT id FROM users WHERE 'carol@x.org' = lower(email)
+----
+3
+
+query I
+SELECT id FROM users WHERE doc->>'name' = 'bob'
+----
+2
+
+query I rowsort
+SELECT id FROM users WHERE (doc->>'age')::int >= 31
+----
+1
+3
+
+query I rowsort
+SELECT id FROM users WHERE (doc->>'age')::int < 31
+----
+2
+
+query I
+SELECT id FROM users WHERE n * 2 = 40 AND id = 2
+----
+2
+
+query I rowsort
+SELECT id FROM users WHERE n * 2 > 15
+----
+1
+2
+3
+
+# nucleus-only: the plans.
+query T
+EXPLAIN SELECT id FROM users WHERE lower(email) = 'ann@x.org'
+----
+Project: #0
+  Index Scan using users_lower_idx on users ((lower(email)) = 'ann@x.org') filter: (lower(#1) = 'ann@x.org')
+
+# nucleus-only: the plans.
+query T
+EXPLAIN SELECT id FROM users WHERE (doc->>'age')::int >= 31
+----
+Project: #0
+  Index Scan using users_age on users (((doc->>'age')::int) >= 31) filter: (->>(json,text)(#3, 'age')::integer >= 31)
+
+# A unique expression: two rows may not share a name, NULLs aside.
+statement error 23505
+INSERT INTO users VALUES (5, 'x@y.z', 1, '{"name": "ann"}')
+
+statement ok
+INSERT INTO users VALUES (5, 'x@y.z', 1, '{"age": 7}'), (6, 'y@y.z', 2, '{"age": 8}')
+
+# Kept on updates and deletes.
+statement ok
+UPDATE users SET email = 'Dave@X.org', doc = '{"name": "dave", "age": 50}' WHERE id = 2
+
+query I
+SELECT id FROM users WHERE lower(email) = 'bob@x.org'
+----
+
+query I
+SELECT id FROM users WHERE lower(email) = 'dave@x.org'
+----
+2
+
+query I
+SELECT id FROM users WHERE doc->>'name' = 'dave'
+----
+2
+
+statement ok
+INSERT INTO users VALUES (7, 'e@x.org', 3, '{"name": "bob"}')
+
+statement ok
+DELETE FROM users WHERE id = 3
+
+query I
+SELECT count(*) FROM users WHERE (doc->>'age')::int >= 31
+----
+2
+
+query T
+SELECT email FROM users WHERE lower(email) = 'carol@x.org'
+----
+
+# A different expression is not the index's: still right, by a scan.
+query I
+SELECT id FROM users WHERE upper(email) = 'ANN@X.ORG'
+----
+1
+
+# An expression that may vary is refused.
+statement error 42P17
+CREATE INDEX ON users ((random() * n))
+
+statement error 42P17
+CREATE INDEX ON users ((now() > '2020-01-01'))
+
+statement error 42703
+CREATE INDEX ON users ((nope + 1))
+
+# nucleus-only: a subquery is refused as not immutable (PostgreSQL: 0A000).
+statement error 42P17
+CREATE INDEX ON users (((SELECT 1) + n))
+
+# nucleus-only: an index method indexes columns (PostgreSQL's GIN takes
+# expressions).
+statement error 0A000
+CREATE INDEX ON users USING text ((lower(email)))
+
+# An index made on rows already there, and the catalog's view of it.
+statement ok
+CREATE TABLE t (a int, b text)
+
+statement ok
+INSERT INTO t SELECT g, 'k' || (g % 10) FROM generate_series(1, 200) g
+
+statement ok
+CREATE INDEX t_ab ON t ((a % 7), upper(b))
+
+query I
+SELECT count(*) FROM t WHERE a % 7 = 3 AND upper(b) = 'K3'
+----
+3
+
+# nucleus-only: nc_catalog shows the expressions.
+query T
+SELECT columns FROM nc_catalog.indexes WHERE name = 't_ab'
+----
+{"(a % 7)",(upper(b))}
+
+# Analyzed: the sample estimates the expressions' conditions, and the
+# index wins over the scan.
+statement ok
+ANALYZE t
+
+# nucleus-only: the plans.
+query T
+EXPLAIN SELECT a FROM t WHERE a % 7 = 3 AND upper(b) = 'K3'
+----
+Project: #0
+  Index Scan using t_ab on t ((a % 7) = 3 AND (upper(b)) = 'K3') filter: (((#0 % 7)::integer = 3) AND (upper(#1) = 'K3')) (rows=3)
+
+# A column's type changed: the expression bound again, the index rebuilt.
+statement ok
+ALTER TABLE t ALTER COLUMN a TYPE bigint
+
+query I
+SELECT count(*) FROM t WHERE a % 7 = 3 AND upper(b) = 'K3'
+----
+3
+
+statement ok
+DROP TABLE t
+
+# SQL/JSON's JSON_VALUE as a key: its RETURNING type is part of the
+# expression, so a condition on another type's is not the index's.
+statement ok
+CREATE INDEX users_jv ON users ((JSON_VALUE(doc, '$.age' RETURNING int)))
+
+query I
+SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING int) = 50
+----
+2
+
+query I
+SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING text) = '50'
+----
+2
+
+# nucleus-only: the plans.
+query T
+EXPLAIN SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING int) = 50
+----
+Project: #0
+  Index Scan using users_jv on users ((JSON_VALUE(doc, '$.age' RETURNING int)) = 50) filter: (json_value(#3, $."age", NULL, NULL::integer, 0, NULL, 0, NULL) = 50)
+
+# nucleus-only: the plans.
+query T
+EXPLAIN SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING text) = '50'
+----
+Project: #0
+  Seq Scan on users filter: (json_value(#3, $."age", NULL, NULL::text, 0, NULL, 0, NULL) = '50')
+
+statement ok
+DROP TABLE users

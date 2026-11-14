@@ -1,0 +1,9 @@
+ALTER TABLE t ALTER COLUMN a TYPE bigint;
+SELECT count(*) FROM t WHERE a % 7 = 3 AND upper(b) = 'K3';
+DROP TABLE t;
+CREATE INDEX users_jv ON users ((JSON_VALUE(doc, '$.age' RETURNING int)));
+SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING int) = 50;
+SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING text) = '50';
+EXPLAIN SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING int) = 50;
+EXPLAIN SELECT id FROM users WHERE JSON_VALUE(doc, '$.age' RETURNING text) = '50';
+DROP TABLE users

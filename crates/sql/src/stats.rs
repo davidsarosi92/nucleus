@@ -408,7 +408,9 @@ fn column_groups(table: &Table) -> Vec<Vec<usize>> {
     };
     add(&table.primary_key);
     for i in &table.indexes {
-        add(&i.columns);
+        if let Some(k) = i.key_columns() {
+            add(k);
+        }
     }
     for s in &table.statistics {
         add(&s.columns);
@@ -509,6 +511,9 @@ pub struct Stats<'a> {
     samples: RefCell<HashMap<u32, Option<usize>>>,
     /// Predicates estimated on a sample, and their estimates.
     estimated: RefCell<Vec<(u32, Expr, Option<f64>)>>,
+    /// Indexes' key parts bound ([`Stats::key_parts`]), by table and index
+    /// id.
+    keys: RefCell<HashMap<(u32, u32), Option<Vec<Expr>>>>,
 }
 
 impl<'a> Stats<'a> {
@@ -524,7 +529,41 @@ impl<'a> Stats<'a> {
             cache: RefCell::new(HashMap::new()),
             samples: RefCell::new(HashMap::new()),
             estimated: RefCell::new(Vec::new()),
+            keys: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// The key parts of `table`'s index `index` (`None`: the primary
+    /// key) as expressions of its row — a column, or an expression part
+    /// (PLAN.md §M14.15 J4) bound with the built-in functions, once a
+    /// statement.  `None` where an expression does not bind so (it reads
+    /// a module's function): the index is then no access path.
+    pub fn key_parts(&self, table: &Table, index: Option<usize>) -> Option<Vec<Expr>> {
+        let Some(i) = index else {
+            return Some(table.primary_key.iter().map(|&c| Expr::Column(c)).collect());
+        };
+        let ix = &table.indexes[i];
+        if !ix.has_exprs() {
+            return Some(ix.columns.iter().map(|&c| Expr::Column(c)).collect());
+        }
+        self.keys
+            .borrow_mut()
+            .entry((table.id, ix.id))
+            .or_insert_with(|| {
+                let reg = crate::ext::Registry::shared_builtin();
+                let mut binder = crate::binder::Binder::new(self.txn, &reg);
+                ix.columns
+                    .iter()
+                    .zip(&ix.exprs)
+                    .map(|(&c, e)| match e {
+                        None => Some(Expr::Column(c)),
+                        Some(e) => crate::dml::bind_index_expr(&mut binder, table, &e.sql)
+                            .ok()
+                            .map(|(x, _)| x),
+                    })
+                    .collect()
+            })
+            .clone()
     }
 
     /// `table`'s kept sample rows of the columns `cols` only (in that
@@ -648,7 +687,10 @@ impl<'a> Stats<'a> {
     /// The distinct values of column `c` of `table` (estimated).
     pub fn distinct(&self, table: &Table, c: usize) -> f64 {
         let unique = (table.primary_key.len() == 1 && table.primary_key[0] == c)
-            || table.indexes.iter().any(|i| i.unique && i.columns == [c]);
+            || table
+                .indexes
+                .iter()
+                .any(|i| i.unique && i.key_columns() == Some(&[c][..]));
         match self.of(table) {
             Some(s) => (s.columns.get(c).map_or(1, |cs| cs.distinct) as f64).max(1.0),
             None if unique => DEFAULT_ROWS,
@@ -738,7 +780,10 @@ fn selectivity(
     let non_null = |c: usize| col(c).map_or(1.0, |cs| 1.0 - cs.nulls as f64 / rows);
     let distinct = |c: usize| -> f64 {
         let unique = (table.primary_key.len() == 1 && table.primary_key[0] == c)
-            || table.indexes.iter().any(|i| i.unique && i.columns == [c]);
+            || table
+                .indexes
+                .iter()
+                .any(|i| i.unique && i.key_columns() == Some(&[c][..]));
         match col(c) {
             Some(cs) => (cs.distinct as f64).max(1.0),
             None if unique => rows,
@@ -900,7 +945,12 @@ fn together(table: &Table, stats: Option<&TableStats>, eqs: &[(usize, f64)]) -> 
     let cols: Vec<usize> = eqs.iter().map(|e| e.0).collect();
     let rows = stats.map_or(DEFAULT_ROWS, |s| s.rows as f64).max(1.0);
     let covers = |key: &[usize]| !key.is_empty() && key.iter().all(|c| cols.contains(c));
-    if covers(&table.primary_key) || table.indexes.iter().any(|i| i.unique && covers(&i.columns)) {
+    if covers(&table.primary_key)
+        || table
+            .indexes
+            .iter()
+            .any(|i| i.unique && i.key_columns().is_some_and(covers))
+    {
         return 1.0 / rows;
     }
     let Some(s) = stats else { return product };

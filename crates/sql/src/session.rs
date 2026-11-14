@@ -2231,6 +2231,7 @@ pub(crate) fn execute_statement(
             name,
             table,
             columns,
+            exprs,
             orderings,
             method,
             opclasses,
@@ -2245,9 +2246,10 @@ pub(crate) fn execute_statement(
             };
             // `PARTITION BY (c, …)`: the columns after the indexed ones,
             // the method's `partition_by` option their number.
-            let (columns, orderings, opclasses, options) = &{
-                let (mut c, mut o, mut p, mut w) = (
+            let (columns, exprs, orderings, opclasses, options) = &{
+                let (mut c, mut x, mut o, mut p, mut w) = (
                     columns.clone(),
+                    exprs.clone(),
                     orderings.clone(),
                     opclasses.clone(),
                     options.clone(),
@@ -2265,17 +2267,25 @@ pub(crate) fn execute_statement(
                     }
                     for col in partition_by {
                         c.push(col.clone());
+                        x.push(None);
                         o.push(None);
                         p.push(None);
                     }
                     w.push(("partition_by".into(), partition_by.len().to_string()));
                 }
-                (c, o, p, w)
+                (c, x, o, p, w)
             };
+            let has_exprs = exprs.iter().any(Option::is_some);
             if let Some(m) = &access {
                 if *unique {
                     return Err(Error::feature(format!(
                         "access method \"{}\" does not support unique indexes",
+                        m.name()
+                    )));
+                }
+                if has_exprs {
+                    return Err(Error::feature(format!(
+                        "access method \"{}\" indexes columns, not expressions",
                         m.name()
                     )));
                 }
@@ -2300,8 +2310,17 @@ pub(crate) fn execute_statement(
             let name = &match name {
                 Some(n) => n.clone(),
                 None => {
-                    // PostgreSQL's: table_columns_idx, numbered if taken.
-                    let base = format!("{table}_{}_idx", columns.join("_"));
+                    // PostgreSQL's: table_columns_idx, numbered if taken —
+                    // an expression's part named by its function, or `expr`.
+                    let parts: Vec<String> = columns
+                        .iter()
+                        .zip(exprs)
+                        .map(|(c, e)| match e {
+                            None => c.clone(),
+                            Some(e) => expr_part_name(e),
+                        })
+                        .collect();
+                    let base = format!("{table}_{}_idx", parts.join("_"));
                     let mut n = base.clone();
                     let mut k = 1;
                     while catalog::find_index(&*txn, &n)?.is_some()
@@ -2326,14 +2345,26 @@ pub(crate) fn execute_statement(
             let mut t = catalog::table(&*txn, table)?;
             let cols = columns
                 .iter()
-                .map(|c| {
+                .zip(exprs)
+                .map(|(c, e)| {
+                    if e.is_some() {
+                        return Ok(0); // set when the expression is bound
+                    }
                     t.column(c).ok_or_else(|| {
                         Error::undefined_column(format!("column \"{c}\" does not exist"))
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut plain = Vec::new();
-            for (&c, o) in cols.iter().zip(orderings) {
+            for ((&c, o), e) in cols.iter().zip(orderings).zip(exprs) {
+                if e.is_some() {
+                    if o.is_some() {
+                        return Err(Error::feature(
+                            "an index expression in a taught ordering is not supported",
+                        ));
+                    }
+                    continue;
+                }
                 let Some(o) = o else {
                     plain.push(c);
                     continue;
@@ -2358,6 +2389,17 @@ pub(crate) fn execute_statement(
             }
             let mut ix = Index::plain(t.next_index_id, name.clone(), cols, *unique);
             ix.orderings = orderings.clone();
+            ix.exprs = exprs
+                .iter()
+                .map(|e| {
+                    e.as_ref().map(|sql| catalog::IndexExpr {
+                        sql: sql.clone(),
+                        ty: DataType::Text,
+                        uses: Vec::new(),
+                    })
+                })
+                .collect();
+            bind_index_exprs(&*txn, reg, &t, &mut ix)?;
             match &access {
                 None => require_keys(&t.columns, &plain, *unique, "an index")?,
                 Some(m) => {
@@ -2371,7 +2413,12 @@ pub(crate) fn execute_statement(
             t.next_index_id += 1;
             let i = t.indexes.len() - 1;
             if let Some(p) = &t.partition_by {
-                if *unique && !p.columns.iter().all(|c| t.indexes[i].columns.contains(c)) {
+                if *unique
+                    && !p
+                        .columns
+                        .iter()
+                        .all(|c| t.indexes[i].key_columns().is_some_and(|k| k.contains(c)))
+                {
                     return Err(Error::feature(
                         "a unique index of a partitioned table must include the partition key",
                     ));
@@ -3777,11 +3824,19 @@ fn alter_column_type(
     // A registered method's index defined again against the new type.
     let shape = new.clone();
     for ix in &mut new.indexes {
-        if !ix.columns.contains(&c) {
+        if !ix.uses(c) {
             continue;
         }
         if let Some(m) = crate::index_method::of(ix)? {
             m.define(&shape, ix)?;
+        } else if ix.has_exprs() {
+            // Its expressions bound again against the new type.
+            bind_index_exprs(&*txn, reg, &shape, ix)?;
+            let plain: Vec<usize> = (0..ix.columns.len())
+                .filter(|&k| ix.exprs[k].is_none() && ix.columns[k] == c)
+                .map(|k| ix.columns[k])
+                .collect();
+            require_keys(&new.columns, &plain, ix.unique, "an index")?;
         } else if !ix.mapped() {
             require_keys(&new.columns, &[c], ix.unique, "an index")?;
         }
@@ -3860,6 +3915,51 @@ fn check_function(reg: &Registry, name: &str, args: &[DataType]) -> Result<()> {
 
 /// Refuses key columns whose types have no key encoding (and, for a
 /// primary key or `UNIQUE`, no equality).
+/// An index expression's part's name in an index's made-up name, as
+/// PostgreSQL's: the function it calls, or `expr`.
+fn expr_part_name(sql: &str) -> String {
+    let head: String = sql
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    if !head.is_empty() && sql[head.len()..].trim_start().starts_with('(') {
+        head.to_lowercase()
+    } else {
+        "expr".into()
+    }
+}
+
+/// Binds index `ix`'s expression parts over `t` (PLAN.md §M14.15 J4):
+/// each immutable, of a type keys encode (and compare, for a unique
+/// index); its type, the columns it reads and its first column recorded.
+fn bind_index_exprs(txn: &dyn KvTxn, reg: &Registry, t: &Table, ix: &mut Index) -> Result<()> {
+    use crate::binder::{Need, require};
+    let mut binder = Binder::new(txn, reg);
+    for (k, e) in ix.exprs.iter_mut().enumerate() {
+        let Some(e) = e else { continue };
+        let (x, ty) = dml::bind_index_expr(&mut binder, t, &e.sql)?;
+        let needs: &[Need] = if ix.unique {
+            &[Need::KeyEncoding, Need::Equality]
+        } else {
+            &[Need::KeyEncoding]
+        };
+        require(ty, needs, "an index expression")?;
+        let Some(ty) = ty else {
+            return Err(Error::invalid_object_definition(format!(
+                "an index expression must have a type; {} has none",
+                e.sql
+            )));
+        };
+        let mut uses = x.columns();
+        uses.sort_unstable();
+        uses.dedup();
+        e.ty = ty;
+        ix.columns[k] = uses[0];
+        e.uses = uses;
+    }
+    Ok(())
+}
+
 fn require_keys(columns: &[Column], cols: &[usize], unique: bool, what: &str) -> Result<()> {
     use crate::binder::{Need, require};
     let needs: &[Need] = if unique {

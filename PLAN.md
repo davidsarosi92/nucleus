@@ -8172,7 +8172,7 @@ put it but `text`, which it can neither query nor index.
   `json_each`, `json_array_elements` and `JSON_TABLE` plug in there.
 - **Indexes**: B-trees over columns, a stored generated column
   (`GENERATED ALWAYS AS (doc->>'kind') STORED`, §M14.22 E4a) indexable
-  like any other; no expression indexes yet.  The text index (§M14.21)
+  like any other; no expression indexes yet (J4a added them).  The text index (§M14.21)
   is an inverted index — terms to block-compressed postings, kept in the
   writer's transaction, crash-safe — the machinery a containment index
   needs.
@@ -8524,7 +8524,34 @@ put it but `text`, which it can neither query nor index.
 - **J4 — indexes**: expression indexes for every type, the containment
   index, the planner choosing them (with statistics: a path's
   selectivity); measured against PostgreSQL's GIN (`jsonb_path_ops`)
-  on the same documents.
+  on the same documents.  In three steps:
+  - **J4a — expression indexes** ✅ (2026-11-14): `CREATE [UNIQUE]
+    INDEX … ((expr), lower(c), …)`, any type keys encode.  *Prior art:*
+    PostgreSQL keeps an index's expressions in its record (`indexprs`)
+    and matches a condition's side to them as planned trees; MySQL 8
+    makes a functional key part a hidden virtual generated column.
+    Taken: PostgreSQL's — the expression's SQL text, type and columns
+    in the index record (`catalog::IndexExpr`, table record version
+    19), bound once per writer (`dml::IndexKeys`, as a taught
+    ordering's mapping is) and, for the optimizer, once a statement
+    with the built-in functions (`Stats::key_parts`), matched
+    structurally (`optimizer::key_bound`; a function's `RETURNING`
+    witness is an argument, so `JSON_VALUE … RETURNING int` and `…
+    RETURNING text` are different expressions).  Not taken: MySQL's
+    hidden column — every reader of a table's columns (`SELECT *`,
+    `COPY`, the drivers' descriptions, the catalogs) would have to skip
+    it.  Immutability as PostgreSQL's (`42P17`), and a conversion of
+    or to `timestamptz` refused as it depends on the time zone.  An
+    expression part is no uniqueness of its columns: the statistics',
+    the optimizer's and foreign keys' inferences of uniqueness read
+    `Index::key_columns`, `None` for it.  The selectivity of a
+    condition on it comes from the statistics' sample, which evaluates
+    it.  `slt/69_expression_indexes.slt`.  Measured with J4b in J4c.
+  - **J4b — the containment index** `USING json` (as planned in the
+    study, point 7), with a recheck flag on an index method's served
+    condition (the hash of a path and a value may collide).
+  - **J4c — measured** against PostgreSQL's GIN (`jsonb_path_ops`) and
+    B-tree expression indexes on the same documents.
 - **J5 — for models**: `json_matches_schema`, MCP's JSON results, an
   example (a model's tool calls and structured outputs, stored, checked
   and queried), the guide, DOCS and the benchmark page.

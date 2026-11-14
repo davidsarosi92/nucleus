@@ -1682,7 +1682,8 @@ REFERENCES …`, each with an optional `CONSTRAINT name`), `CREATE TABLE
 query's columns, names given replacing theirs from the left, with their
 types — without a length or a numeric's precision — and no constraints;
 filled by the query unless `WITH NO DATA`; tagged `SELECT n`), `DROP TABLE [IF
-EXISTS] … [CASCADE]`, `CREATE [UNIQUE] INDEX [IF NOT EXISTS]`, `DROP INDEX
+EXISTS] … [CASCADE]`, `CREATE [UNIQUE] INDEX [IF NOT EXISTS]` (of
+columns and expressions), `DROP INDEX
 [IF EXISTS]`, `ALTER TABLE … ADD [COLUMN] …`, `ALTER TABLE … ADD
 [CONSTRAINT n] FOREIGN KEY | CHECK | UNIQUE …`, `ALTER TABLE … DROP
 CONSTRAINT [IF EXISTS] n`, `INSERT … VALUES | SELECT | DEFAULT VALUES
@@ -2864,7 +2865,33 @@ naming the index) unless `CASCADE`, which drops those indexes.  A plain
 text ADD ORDERING ci BY lower(value)`); the value itself is unchanged.
 Orderings live in the catalog (key `00 05`), so teaching is transactional
 DDL; indexes record them per column (table record version 5).
-`CREATE INDEX` without a name makes one up (`table_columns_idx`).
+`CREATE INDEX` without a name makes one up (`table_columns_idx`; an
+expression's part named by the function it calls, or `expr`).
+
+**Expression indexes** (§M14.15 J4a): `CREATE [UNIQUE] INDEX [name] ON t
+((expr), col, lower(c), …)` — a key part is a column, an expression in
+parentheses, or a function's call; any type whose values keys encode
+(and compare, for `UNIQUE`), not JSON only (`((doc->>'kind'))`,
+`(((doc->>'age')::int))`, `((JSON_VALUE(doc, '$.id' RETURNING int)))`).
+The expression is kept as SQL text with its type and the columns it
+reads (`catalog::IndexExpr`, table record version 19); it must be
+immutable — no subquery, parameter, function that may vary, or
+conversion to or of a `timestamptz` (`42P17`) — and read a column.
+`dml::IndexKeys` binds it once per writer and computes each row's key
+(as a taught ordering's mapping is), so inserts, updates, deletes and
+builds keep it; a `UNIQUE` one refuses two rows with equal non-NULL
+values (`23505`).  The optimizer binds it with the built-in functions
+(`Stats::key_parts`, once a statement) and matches a condition's side
+to it structurally — `lower(email) = $1`, `(doc->>'age')::int >= 30`;
+the same function on another `RETURNING` type is another expression —
+so it is an access path like a column's, costed by the statistics'
+sample (which evaluates the condition on its rows).  `ALTER COLUMN …
+TYPE` binds it again against the new type and rebuilds the index.  An
+expression part is no uniqueness of its columns (the optimizer's and
+foreign keys' inferences ignore it), and an index method's index takes
+columns only (`0A000`).  `nc_catalog.indexes.columns` and pg-compat's
+`indexdef` show `(expr)`; `pg_index.indkey` holds 0 for it, as
+PostgreSQL's.
 
 **Encoding versions** (registered types): each stored value carries its
 type's encoding version.  A value in an older one is upgraded as it is
@@ -3106,7 +3133,7 @@ and its subqueries:
 | Rule | Fires on | Fix |
 |------|----------|-----|
 | `full_scan` | a table read in full for a filter that keeps a tenth of it or less (by the statistics, else the default selectivities) and that an index could serve; not for an analyzed table under 1000 rows | `CREATE INDEX ON t (…)`: the equality columns, then one range column |
-| `index_defeated` | a comparison with a value where the first column of an index (or the primary key) is under a function, arithmetic or a cast (the binder's too), and the scan does not use that index | compare the column itself; move the arithmetic; cast the other side |
+| `index_defeated` | a comparison with a value where the first column of an index (or the primary key) is under a function, arithmetic or a cast (the binder's too), and the scan uses neither that index nor an expression index | compare the column itself; move the arithmetic; cast the other side; or index the expression (`CREATE INDEX ON t ((expr))`) |
 | `foreign_key_without_index` | a foreign key whose columns lead no index, of a table the statement reads — or, for `UPDATE` / `DELETE`, of a table referencing the one changed | `CREATE INDEX ON t (…)` |
 | `cartesian_product` | a join with no condition (or `ON true`) between inputs estimated at more than one row each | a join condition (ignore when every pair is meant) |
 | `not_in_nullable` | `NOT IN (subquery)` whose column can be NULL (nullability followed through scans, filters that reject NULLs, projections, joins, aggregates) | `NOT EXISTS`, or `IS NOT NULL` in the subquery |
@@ -5228,6 +5255,11 @@ difference, recorded in `slt/68_json_table.slt` (67 records as
 PostgreSQL 18 gives them): a `DEFAULT` may read the row's columns
 (PostgreSQL refuses column references there).
 
+**Indexes on JSON** (§M14.15 J4a): an expression index on a path's
+value — `CREATE INDEX ON t ((doc->>'kind'))`, `(((doc->>'age')::int))`,
+`((JSON_VALUE(doc, '$.id' RETURNING int)))` — serves equalities and
+ranges on that very expression (§8.7's expression indexes).
+
 **On the wire** (`ncp` tag 11 named `json`) a value travels as its text
 (`Type::wire_output` / `wire_input`), in rows and in columnar batches;
 the drivers hand out the language's own values (§11).  pg-compat shows
@@ -5240,6 +5272,8 @@ records as PostgreSQL 18 gives them: `scripts/slt-pg.py check`),
 `slt/66_json_path.slt` (paths, 221 records as PostgreSQL 18 gives them),
 `slt/67_json_sql.slt` (SQL/JSON's functions, 207 records as PostgreSQL
 18 gives them), `slt/68_json_table.slt` (`JSON_TABLE`, 67 records),
+`slt/69_expression_indexes.slt` (expression indexes, on JSON paths
+among others),
 the law kit's generator (equal documents written differently), the
 `json` fuzz target (§2; the operators' laws too, and paths: normalized
 text reads back as itself, items are canonical), pg-compat's
@@ -6218,6 +6252,12 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — §M14.15 J4a, expression indexes:** `CREATE [UNIQUE]
+  INDEX … ((expr), lower(c), …)` for every type — immutable, kept on
+  every write, matched structurally by the optimizer (`Stats::key_parts`,
+  `optimizer::choose_access`), bound again on `ALTER COLUMN … TYPE`;
+  `catalog::IndexExpr`, table record version 19.
+  `slt/69_expression_indexes.slt`.
 - **2026-11-14 — §M14.15 J3c, `JSON_TABLE`:** in `FROM`, desugared into
   a lateral subquery over `__json_table_rows` (a table function of the
   row path's items and positions) whose columns are `JSON_VALUE`,

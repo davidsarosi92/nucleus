@@ -1183,7 +1183,11 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         text(t.name.clone()),
                         Value::Int(i64::from(ix.id)),
                         text(ix.name.clone()),
-                        names(t, &ix.columns),
+                        Value::Array(
+                            (0..ix.columns.len())
+                                .map(|k| text(ix.part_sql(t, k)))
+                                .collect(),
+                        ),
                         Value::Bool(ix.unique),
                         Value::Bool(false),
                         text(hex(&t.index_prefix(ix.id))),

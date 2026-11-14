@@ -1260,10 +1260,29 @@ impl<'a> Parser<'a> {
             };
             self.expect_op("(")?;
             let mut columns = Vec::new();
+            let mut exprs = Vec::new();
             let mut orderings = Vec::new();
             let mut opclasses = Vec::new();
             loop {
-                columns.push(self.ident()?);
+                // A column, `(expression)` or a function's call.
+                if self.eat_op("(") {
+                    let (_, text) = self.text_of(|p| p.expr())?;
+                    self.expect_op(")")?;
+                    columns.push(String::new());
+                    exprs.push(Some(text));
+                } else {
+                    let save = self.pos;
+                    let name = self.ident()?;
+                    if self.peek_op("(") {
+                        self.pos = save;
+                        let (_, text) = self.text_of(|p| p.expr())?;
+                        columns.push(String::new());
+                        exprs.push(Some(text));
+                    } else {
+                        columns.push(name);
+                        exprs.push(None);
+                    }
+                }
                 orderings.push(if self.eat_kw("using") {
                     Some(self.ident()?)
                 } else {
@@ -1295,6 +1314,7 @@ impl<'a> Parser<'a> {
                 name,
                 table,
                 columns,
+                exprs,
                 orderings,
                 method,
                 opclasses,

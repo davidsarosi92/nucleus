@@ -52,7 +52,7 @@ pub fn referenced_key(
     parent
         .indexes
         .iter()
-        .position(|i| i.unique && same_set(&i.columns))
+        .position(|i| i.unique && i.key_columns().is_some_and(same_set))
         .map(|i| (Some(i), order(&parent.indexes[i].columns)))
 }
 

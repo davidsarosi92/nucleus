@@ -1122,13 +1122,11 @@ fn index_def(t: &Table, i: Option<usize>) -> String {
         );
     };
     // A registered method's: its operator classes and options too.
-    let cols = ix
-        .columns
-        .iter()
+    let cols = (0..ix.columns.len())
         .zip(&ix.opclasses)
-        .map(|(&c, o)| match o {
-            Some(o) => format!("{} {o}", t.columns[c].name),
-            None => t.columns[c].name.clone(),
+        .map(|(k, o)| match o {
+            Some(o) => format!("{} {o}", ix.part_sql(t, k)),
+            None => ix.part_sql(t, k),
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -1360,12 +1358,26 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
         }
         "pg_index" => {
             for t in &tables {
-                let mut list: Vec<(Option<usize>, Vec<usize>, bool, bool)> = Vec::new();
+                // (index, key columns' attribute numbers — 0 for an
+                // expression —, unique, primary)
+                let mut list: Vec<(Option<usize>, Vec<i64>, bool, bool)> = Vec::new();
+                let attnum = |c: usize| c as i64 + 1;
                 if !t.primary_key.is_empty() {
-                    list.push((None, t.primary_key.clone(), true, true));
+                    list.push((
+                        None,
+                        t.primary_key.iter().map(|&c| attnum(c)).collect(),
+                        true,
+                        true,
+                    ));
                 }
                 for (i, ix) in t.indexes.iter().enumerate() {
-                    list.push((Some(i), ix.columns.clone(), ix.unique, false));
+                    let keys = ix
+                        .columns
+                        .iter()
+                        .zip(&ix.exprs)
+                        .map(|(&c, e)| if e.is_some() { 0 } else { attnum(c) })
+                        .collect();
+                    list.push((Some(i), keys, ix.unique, false));
                 }
                 for (i, cols, unique, primary) in list {
                     let n = cols.len() as i64;
@@ -1385,7 +1397,7 @@ fn rows(k: usize, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                         ("indisready", Value::Bool(true)),
                         ("indislive", Value::Bool(true)),
                         ("indisreplident", Value::Bool(false)),
-                        ("indkey", attnums(&cols)),
+                        ("indkey", ints(cols.iter().copied())),
                         ("indcollation", ints(cols.iter().map(|_| 0))),
                         ("indclass", ints(cols.iter().map(|_| 0))),
                         ("indoption", ints(cols.iter().map(|_| 0))),

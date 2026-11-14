@@ -488,20 +488,31 @@ fn key_conds(table: &Table, access: &Access) -> (String, String) {
     else {
         return (String::new(), String::new());
     };
-    let (name, cols) = match index {
-        None => ("primary key".to_string(), table.primary_key.clone()),
-        Some(i) => (
-            table.indexes[*i].name.clone(),
-            table.indexes[*i].columns.clone(),
+    let (name, parts) = match index {
+        None => (
+            "primary key".to_string(),
+            table
+                .primary_key
+                .iter()
+                .map(|&c| table.columns[c].name.clone())
+                .collect::<Vec<_>>(),
         ),
+        Some(i) => {
+            let ix = &table.indexes[*i];
+            (
+                ix.name.clone(),
+                (0..ix.columns.len())
+                    .map(|k| ix.part_sql(table, k))
+                    .collect(),
+            )
+        }
     };
     let mut conds: Vec<String> = prefix
         .iter()
-        .zip(&cols)
-        .map(|(e, c)| format!("{} = {}", table.columns[*c].name, show(e)))
+        .zip(&parts)
+        .map(|(e, p)| format!("{p} = {}", show(e)))
         .collect();
-    if let Some(c) = cols.get(prefix.len()) {
-        let col = &table.columns[*c].name;
+    if let Some(col) = parts.get(prefix.len()) {
         match lower {
             Bound::Included(e) => conds.push(format!("{col} >= {}", show(e))),
             Bound::Excluded(e) => conds.push(format!("{col} > {}", show(e))),
