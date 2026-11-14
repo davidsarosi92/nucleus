@@ -13,6 +13,9 @@ timed (the median of five runs, the client's clock):
 - field: `sum(length(<a field>))` over it — a nested field by `->` and
   `->>` (a tweet's user's screen name, a performance's start, a
   feature's name);
+- path: `count(*) … WHERE doc @? <path>` — an SQL/JSON path with a
+  filter (a tweet's hashtags starting with "a", a performance's seat
+  areas above an id, a feature's points west of 70°W);
 - size: each whole file as one value, `pg_column_size` against nucleus's
   binary form (from `bench/json`'s binary: the `form KB` column).
 
@@ -97,11 +100,16 @@ def main():
             except Exception:
                 time.sleep(0.5)
         print(f"{'documents':<14} {'rows':>7} {'MB':>6} | {'parse s':>8} {'pg':>8} | "
-              f"{'output s':>8} {'pg':>8} | {'field s':>8} {'pg':>8}")
+              f"{'output s':>8} {'pg':>8} | {'field s':>8} {'pg':>8} | {'path s':>8} {'pg':>8}")
         fields = {
             "tweets": "doc -> 'user' ->> 'screen_name'",
             "performances": "doc ->> 'start'",
             "features": "doc -> 'properties' ->> 'name'",
+        }
+        paths = {
+            "tweets": '$.entities.hashtags[*] ? (@.text starts with "a")',
+            "performances": "$.seatCategories[*].areas[*] ? (@.areaId > 205705999)",
+            "features": "$.geometry.coordinates[*][*] ? (@[0] < -70)",
         }
         for name, texts in docs.items():
             rows = [texts[i % len(texts)] for i in range(args.rows)] if name != "features" else texts * 4
@@ -116,6 +124,8 @@ def main():
             pg_parse = pg_time("SELECT count(*) FROM src WHERE doc::jsonb IS NOT NULL;")
             pg_out = pg_time("SELECT sum(length(doc::text)) FROM j;")
             pg_field = pg_time(f"SELECT sum(length({fields[name]})) FROM j;")
+            path = f"SELECT count(*) FROM j WHERE doc @? '{paths[name]}'"
+            pg_path = pg_time(path + ";")
             # nucleus: the same rows.
             db.execute("DROP TABLE IF EXISTS src")
             db.execute("DROP TABLE IF EXISTS j")
@@ -129,8 +139,11 @@ def main():
             field = f"SELECT sum(length({fields[name]})) FROM j"
             assert str(db.execute(field).rows[0][0]) == psql(field + ";"), "the same field sums"
             n_field = median(lambda: db.execute(field))
+            assert str(db.execute(path).rows[0][0]) == psql(path + ";"), "the same path counts"
+            n_path = median(lambda: db.execute(path))
             print(f"{name:<14} {len(rows):>7} {mb:>6.1f} | {n_parse:>8.3f} {pg_parse:>8.3f} | "
-                  f"{n_out:>8.3f} {pg_out:>8.3f} | {n_field:>8.3f} {pg_field:>8.3f}")
+                  f"{n_out:>8.3f} {pg_out:>8.3f} | {n_field:>8.3f} {pg_field:>8.3f} | "
+                  f"{n_path:>8.3f} {pg_path:>8.3f}", flush=True)
         print()
         print(f"{'file':<20} {'text KB':>8} {'jsonb KB':>9}")
         for f in ("canada.json", "citm_catalog.json", "twitter.json"):

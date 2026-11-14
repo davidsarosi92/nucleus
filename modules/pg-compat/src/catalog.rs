@@ -56,6 +56,8 @@ pub const UUID: i64 = 2950;
 pub const JSONB: i64 = 3802;
 /// PostgreSQL's `json`: accepted from clients, read as nucleus's `json`.
 pub const JSON: i64 = 114;
+/// PostgreSQL's `jsonpath`.
+pub const JSONPATH: i64 = 4072;
 /// nucleus's `vector`: an oid of its own, as pgvector's is per database
 /// (its clients look it up with `to_regtype('vector')`).
 pub const VECTOR: i64 = 13_201;
@@ -707,6 +709,7 @@ pub fn type_oid(t: DataType) -> i64 {
         DataType::Cidr => 650,
         DataType::Ext(t) if t.name() == "uuid" => UUID,
         DataType::Ext(t) if t.name() == "json" => JSONB,
+        DataType::Ext(t) if t.name() == "jsonpath" => JSONPATH,
         DataType::Ext(t) if t.name() == "vector" => VECTOR,
         DataType::Ext(t) if t.name() == "sparsevec" => SPARSEVEC,
         DataType::Ext(t) if t.name() == "tsvector" => TSVECTOR,
@@ -768,6 +771,8 @@ const TYPES: &[(i64, &str, i64, &str, i64, i64, i64)] = &[
     (3807, "_jsonb", -1, "A", JSONB, 0, 0),
     (JSON, "json", -1, "U", 0, 199, 0),
     (199, "_json", -1, "A", JSON, 0, 0),
+    (JSONPATH, "jsonpath", -1, "U", 0, 4073, 0),
+    (4073, "_jsonpath", -1, "A", JSONPATH, 0, 0),
     (VECTOR, "vector", -1, "U", 0, VECTOR + 1, 0),
     (VECTOR + 1, "_vector", -1, "A", VECTOR, 0, 0),
     (SPARSEVEC, "sparsevec", -1, "U", 0, SPARSEVEC + 1, 0),
@@ -858,6 +863,7 @@ pub fn format_type(oid: i64, typmod: Option<i64>) -> Option<String> {
         TSQUERY => "tsquery".into(),
         JSONB => "jsonb".into(),
         JSON => "json".into(),
+        JSONPATH => "jsonpath".into(),
         _ => {
             let (_, _, _, _, elem, _, _) = TYPES.iter().find(|t| t.0 == oid)?;
             return format_type(*elem, typmod).map(|e| format!("{e}[]"));

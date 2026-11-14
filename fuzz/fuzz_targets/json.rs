@@ -4,18 +4,29 @@
 //! value make canonical values, with their own laws (a value contains
 //! itself; a key deleted is gone, set it is there).
 //!
-//! The first byte picks the mode: even, the rest is JSON text; odd, the
-//! rest is a value's bytes (as a corrupted page or a key would hand them).
+//! And SQL/JSON paths (J3a): a path's normalized text reads back as
+//! itself, and evaluating one over a value makes canonical items or an
+//! error, never a panic.
+//!
+//! The first byte picks the mode: 2 mod 4, the rest is a path, a NUL and
+//! JSON text; otherwise even, the rest is JSON text; odd, the rest is a
+//! value's bytes (as a corrupted page or a key would hand them).
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use nucleus_sql::json::{form, key, ops, parse, to_pretty, to_text};
+use nucleus_sql::json::{form, key, ops, parse, path, to_pretty, to_text};
 
 fuzz_target!(|data: &[u8]| {
     let Some((mode, rest)) = data.split_first() else {
         return;
     };
-    if mode % 2 == 0 {
+    if mode % 4 == 2 {
+        let Ok(text) = std::str::from_utf8(rest) else {
+            return;
+        };
+        let (p, doc) = text.split_once('\0').unwrap_or((text, "null"));
+        paths(p, doc);
+    } else if mode % 2 == 0 {
         let Ok(text) = std::str::from_utf8(rest) else {
             return;
         };
@@ -105,5 +116,27 @@ fn operators(b: &[u8]) {
         let set = ops::set(&gone, &path, b"\x00", true).expect("set");
         canonical(&set, "json_set");
         assert!(ops::exists(&set, &k).expect("?"), "a key set is there");
+    }
+}
+
+/// A path's laws.
+fn paths(p: &str, doc: &str) {
+    let Ok(norm) = path::normalize(p) else {
+        return;
+    };
+    assert_eq!(
+        path::normalize(&norm).expect("the normalized text parses"),
+        norm,
+        "normalized twice"
+    );
+    let Ok(b) = parse::parse(doc) else {
+        return;
+    };
+    for silent in [false, true] {
+        if let Ok(items) = path::query(&b, p, silent) {
+            for i in items {
+                form::check(&i).expect("an item is canonical");
+            }
+        }
     }
 }

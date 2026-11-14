@@ -283,7 +283,7 @@ are marked ✅.
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ✅ (2026-11-14) study written (2026-11-13); R1 ✅ memory stores, `REMEMBER`, `recall()`, row expiry, MCP tools, driver helpers (LongMemEval_S turn R@10 0.819 against the paper's BM25 0.592); R2 ✅ `FORGET SUBJECT`, the scrub and the search (a planted subject's texts: 100 places after `DELETE` and a vacuum, 0 after `FORGET`); R3 ✅ leak tests over every recall path, BM25's statistics a tenant's own on a table partitioned by tenant; R4 ✅ `recall` under 1 ms in the process (100 000 memories), batched through `LATERAL`, a vacuum's crash flaw fixed; §M14.14 ✅ between; R5 ✅ citations (`as_of`), read records by request id (`nc_catalog.reads`), erasure through history and the log; R6 ✅ `BACKUP TO` / `nucleus restore` without index pages, each subject's rows sealed under its own key, which `FORGET` destroys (60 MiB backed up in 0.46 s, restored in 0.80 s); R7 ✅ `docs/memory.md`, the Python and JavaScript `memory` examples (run in CI), MCP `cite` and `forget_subject` |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
-| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster |
+| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
@@ -8130,7 +8130,7 @@ SELECT … FROM t AS OF …`, a dropped table included).
   costs nothing now.  `snapshot_at`'s search bounded by the visible
   commit, not the timestamp space: 20 µs → 5.5 µs.
 
-### §M14.15 — JSON ◐ (study written, J1–J2 ✅, 2026-11-14)
+### §M14.15 — JSON ◐ (study written, J1–J3a ✅, 2026-11-14)
 
 - A `JSON` type (validated, stored in a compact binary form), operators
   `->`, `->>`, `#>`, `@>`, `?`, functions to build, extract, test and
@@ -8389,7 +8389,54 @@ put it but `text`, which it can neither query nor index.
 - **J3 — SQL/JSON**: the path language (`lax` / `strict`, filters,
   methods), `json_path_query` and kin, `@?` / `@@`, `JSON_VALUE`,
   `JSON_QUERY`, `JSON_EXISTS`, `JSON_TABLE`, `IS JSON`, the standard
-  constructors; checked against PostgreSQL 18.
+  constructors; checked against PostgreSQL 18.  In three steps: **J3a**
+  the path language, its type and functions; **J3b** `JSON_VALUE`,
+  `JSON_QUERY`, `JSON_EXISTS`, `IS JSON` and the constructors; **J3c**
+  `JSON_TABLE`.
+
+  **J3a ✅ (2026-11-14).**  `json::path`: `parse` (PostgreSQL's
+  `jsonpath` grammar — `jsonpath_gram.y`, `jsonpath_scan.l` — by
+  recursive descent with one token of look-ahead; what PostgreSQL
+  refuses while reading a path is refused here with its SQLSTATE),
+  `print` (its normalized text, from `printJsonPathItem`'s rules:
+  operator priorities, quoted keys, `numeric`'s numbers), `eval`
+  (`jsonpath_exec.c` step for step: lax unwrapping and wrapping,
+  ignored structural errors and their being ignored under `.**`, the
+  early stop of `exists` and of `@?` in lax mode, three-valued
+  predicates, strict mode's collecting every item to see that none
+  fails; soft errors — PostgreSQL's `RETURN_ERROR`, which `silent` and
+  predicates swallow — apart from hard ones), `datetime` (the ISO forms
+  `.datetime()` tries, `to_timestamp`'s standard-mode template reader
+  for the common patterns, the casts and comparisons across date, time,
+  timetz, timestamp, timestamptz and the ones that need a zone).  Items
+  are ranges of the document (or a variable, or a value the path made,
+  shared by `Rc`) read in place — no item is copied until a function
+  returns it.  A `jsonpath` type (its normalized text; PostgreSQL's oid
+  4072 in pg-compat, binary with its version byte); `json_path_exists`,
+  `_match`, `_query_array`, `_query_first`, `json_path_query` in
+  `FROM`, each with a `jsonb_` name and a `_tz` form; `@?`, `@@`.  A
+  path value is parsed once per thread while among the last 16 used.
+  *Checked against PostgreSQL 18:* `slt/66_json_path.slt`, 221 records
+  filled from PostgreSQL by `scripts/slt-pg.py fill` and passing on
+  nucleus with two differences, recorded: numbers keep no scale (`2 *
+  3.5` is `7`, PostgreSQL's `7.0`, as J1 decided), and `.keyvalue()`'s
+  `id` below the outermost value is a byte offset in nucleus's form, not
+  in PostgreSQL's.  One deliberate departure: PostgreSQL prints
+  `(@.a + 1).abs()` inside a filter without its parentheses (`@."a" + 1.abs()`,
+  which reads back as another path); nucleus keeps them.  *Not there:*
+  PostgreSQL's less common template patterns (ordinal suffixes, `FM`,
+  `FX`, ISO weeks, Roman months) and zone names beyond `Z`, `UTC`,
+  `GMT`, `UT`; numbers past 38 digits in arithmetic and methods
+  (`22003`, `numeric`'s bound in nucleus).  *Fuzzing:* the `json` target
+  reads paths too — the normalized text reads back as itself, items are
+  canonical, nothing panics (2.0 M runs clean).  *Measured* against
+  PostgreSQL 18 (`bench/json/pg.py`, a `path` column; the counts
+  asserted equal): `doc @? '$.entities.hashtags[*] ? (@.text starts
+  with "a")'` over 50 000 tweets 0.062 s against 0.356 (5.7×); a
+  performance's seat areas above an id 0.018 against 0.051 (2.8×); a
+  feature's points west of 70°W 0.005 against 0.012 — the items read
+  in place, the path parsed once, `@?`'s lax evaluation stopping at the
+  first match as PostgreSQL's does.
 - **J4 — indexes**: expression indexes for every type, the containment
   index, the planner choosing them (with statistics: a path's
   selectivity); measured against PostgreSQL's GIN (`jsonb_path_ops`)

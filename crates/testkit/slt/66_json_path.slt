@@ -1,0 +1,1064 @@
+# The SQL/JSON path language (PLAN.md §M14.15 J3a): jsonpath's text,
+# lax and strict modes, accessors, filters, predicates, arithmetic, item
+# methods, datetimes, variables, silence, the json_path_* functions and
+# the @? and @@ operators.  Expected results produced by PostgreSQL 18
+# (scripts/slt-pg.py check), records marked nucleus-only excepted.
+
+statement ok
+CREATE TABLE pdocs (id int PRIMARY KEY, doc jsonb)
+
+statement ok
+INSERT INTO pdocs VALUES
+  (1, '{"name": "Ann", "age": 41, "tags": ["a", "b"], "items": [{"sku": "x1", "qty": 2, "price": 9.5}, {"sku": "y2", "qty": 1, "price": 20}], "born": "1984-03-05"}'),
+  (2, '{"name": "Bob", "age": null, "tags": [], "items": [{"sku": "x1", "qty": 5, "price": 9.5}], "born": "1990-12-31"}'),
+  (3, '{"name": "Cid", "tags": ["b", "c"], "items": [], "born": "not a date"}'),
+  (4, '[1, 2, 3]'),
+  (5, '"text"')
+
+query T
+SELECT '$.a'::jsonpath
+----
+$."a"
+
+query T
+SELECT 'strict $.a[*] ? (@ > 1)'::jsonpath
+----
+strict $."a"[*]?(@ > 1)
+
+query T
+SELECT '$.a ? (@.b == "x" && @.c < 2 || !(@.d >= 3))'::jsonpath
+----
+$."a"?(@."b" == "x" && @."c" < 2 || !(@."d" >= 3))
+
+query T
+SELECT '$.**{1 to last}.x'::jsonpath
+----
+$.**{1 to last}."x"
+
+query T
+SELECT '$.a[1, 2 to last]'::jsonpath
+----
+$."a"[1,2 to last]
+
+query T
+SELECT '($.a + 1) * -$.b'::jsonpath
+----
+(($."a" + 1) * -$."b")
+
+query T
+SELECT '$ ? (@ like_regex "^a.c" flag "si")'::jsonpath
+----
+$?(@ like_regex "^a.c" flag "is")
+
+query T
+SELECT '$ ? (@ starts with $prefix)'::jsonpath
+----
+$?(@ starts with $"prefix")
+
+query T
+SELECT '$.datetime("YYYY-MM-DD HH24:MI").type()'::jsonpath
+----
+$.datetime("YYYY-MM-DD HH24:MI").type()
+
+query T
+SELECT '$.decimal(6, 2).string()'::jsonpath
+----
+$.decimal(6,2).string()
+
+query T
+SELECT '1.5e3'::jsonpath
+----
+1500
+
+query T
+SELECT '$."key with space"'::jsonpath
+----
+$."key with space"
+
+query T
+SELECT '$.a.b.c.size()'::jsonpath
+----
+$."a"."b"."c".size()
+
+query error 42601
+SELECT '$ ? (@ == TRUE)'::jsonpath
+
+query error 42601
+SELECT '@.a'::jsonpath
+
+query error 42601
+SELECT 'last'::jsonpath
+
+query error 2201B
+SELECT '$.a ? (@ like_regex "(")'::jsonpath
+
+query error 0A000
+SELECT '$ ? (@ like_regex "a" flag "x")'::jsonpath
+
+query error 42601
+SELECT '$ ? (@.a)'::jsonpath
+
+query error 42601
+SELECT '$.a +'::jsonpath
+
+query error 42601
+SELECT '1 > 2 > 3'::jsonpath
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*]')
+----
+1
+2
+{"b": 3}
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a.b')
+----
+3
+
+query error 2203A
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a.b')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.z')
+----
+
+query error 2203A
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.z')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[1 to last]')
+----
+2
+{"b": 3}
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[last]')
+----
+{"b": 3}
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[5]')
+----
+
+query error 22033
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a[5]')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c[0]')
+----
+{"d": "x"}
+
+query error 22039
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.c[0]')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c[*]')
+----
+{"d": "x"}
+
+query error 22039
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.c[*]')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a.*')
+----
+3
+
+query error 2203C
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a.*')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c.*')
+----
+"x"
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.*')
+----
+[1, 2, {"b": 3}]
+{"d": "x"}
+null
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.**')
+----
+{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}
+[1, 2, {"b": 3}]
+1
+2
+{"b": 3}
+3
+{"d": "x"}
+"x"
+null
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.**{2}')
+----
+1
+2
+{"b": 3}
+"x"
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.**{1 to 2}')
+----
+[1, 2, {"b": 3}]
+1
+2
+{"b": 3}
+{"d": "x"}
+"x"
+null
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.**{last}')
+----
+1
+2
+3
+"x"
+null
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[1.9]')
+----
+2
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[$.a[0]]')
+----
+2
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[last - 1]')
+----
+2
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[2 to 1]')
+----
+
+query error 22033
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a[2 to 1]')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[-1]')
+----
+
+query error 22033
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a[-1]')
+
+query error 22033
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a["x"]')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.e')
+----
+null
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.e.x')
+----
+
+query error 2203A
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.e.x')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ > 1)')
+----
+2
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a ? (@ > 1)')
+----
+2
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a ? (@ > 1)')
+----
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@.b == 3)')
+----
+{"b": 3}
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ == "1")')
+----
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ != null)')
+----
+1
+2
+{"b": 3}
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ == null)')
+----
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.e ? (@ == null)')
+----
+null
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.e ? (@ != 1)')
+----
+null
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ < 2 || @.b > 2)')
+----
+1
+{"b": 3}
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (!(@ > 1))')
+----
+1
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? ((@ > 1) is unknown)')
+----
+{"b": 3}
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$ ? (exists (@.c.d))')
+----
+{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$ ? (exists (@.c.z))')
+----
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c ? (@.d starts with "x")')
+----
+{"d": "x"}
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c ? (@.d like_regex "X" flag "i")')
+----
+{"d": "x"}
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c ? (@.d like_regex "X")')
+----
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ > $.a[0])')
+----
+2
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a ? (@[*] > 2)')
+----
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a ? (@[*] > 2)')
+----
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@.type() == "number")')
+----
+1
+2
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[0] > 0')
+----
+true
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c > 0')
+----
+null
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a > 0')
+----
+true
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'strict $.a > 0')
+----
+null
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.x.y == 1')
+----
+false
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.e == null')
+----
+true
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c.d == "x"')
+----
+true
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[*] ? (@ == 1 || @ == "x")')
+----
+1
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '"abc" < "abd"')
+----
+true
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '"b" > "abc"')
+----
+true
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', 'true > false')
+----
+true
+
+query error 42601
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '[1] == [1]')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[0] + 1')
+----
+2
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[0] - $.a[1] * 3')
+----
+-5
+
+query error 22038
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a + 1')
+
+query error 22038
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '1 + $.a')
+
+query error 22012
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[0] / 0')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '7 % 3')
+----
+1
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '-7 % 3')
+----
+-1
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '1 / 3')
+----
+0.33333333333333333333
+
+# nucleus-only: numbers do not keep their scale (PostgreSQL: 7.0).
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '2 * 3.5')
+----
+7
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '-$.a[0 to 1]')
+----
+-1
+-2
+
+query error 2203B
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '-$.a[*]')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '+$.a[0]')
+----
+1
+
+query error 2203B
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '- "x"')
+
+query error 22038
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.c.d + 1')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '$.a[0 to 1] ? (@ + 1 > 2)')
+----
+2
+
+query T
+SELECT * FROM jsonb_path_query('{"a": [1, 2, {"b": 3}], "c": {"d": "x"}, "e": null}', '($.a[0] + 1).type()')
+----
+"number"
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.*.type()')
+----
+"string"
+"number"
+"number"
+"object"
+"string"
+"boolean"
+"array"
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.arr.size()')
+----
+3
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.n.size()')
+----
+1
+
+query error 22039
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', 'strict $.n.size()')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.n.abs()')
+----
+2.5
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.n.floor()')
+----
+-3
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.n.ceiling()')
+----
+-2
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.arr.floor()')
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.s.abs()')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.s.double()')
+----
+12.5
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.n.double()')
+----
+-2.5
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"x".double()')
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"NaN".double()')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"1e3".double()')
+----
+1000
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.keyvalue() ? (@.key == "i")')
+----
+{"id": 0, "key": "i", "value": 7}
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.o.keyvalue().key')
+----
+"k"
+"kk"
+
+query error 2203C
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.i.keyvalue()')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.arr.bigint()')
+----
+1
+2
+4
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.n.bigint()')
+----
+-3
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"99999999999999999999".bigint()')
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"1.5".bigint()')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '" 12 ".integer()')
+----
+12
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"3000000000".integer()')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.arr.integer()')
+----
+1
+2
+4
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.b.boolean()')
+----
+true
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"off".boolean()')
+----
+false
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"o".boolean()')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.i.boolean()')
+----
+true
+
+query error 42601
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '0.boolean()')
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.n.boolean()')
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.o.boolean()')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.s.number()')
+----
+12.5
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"abc".number()')
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '"Infinity".number()')
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.t.number()')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.s.decimal(4,1)')
+----
+12.5
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.s.decimal(2,1)')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.i.decimal(3)')
+----
+7
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '1234.5678.decimal(6,-2)')
+----
+1200
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.i.string()')
+----
+"7"
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.t.string()')
+----
+"true"
+
+query error 22036
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.o.string()')
+
+query T
+SELECT * FROM jsonb_path_query('{"n": -2.5, "i": 7, "s": "12.5", "b": "yes", "t": true, "o": {"k": 1, "kk": [2]}, "arr": [1, "2", 3.7]}', '$.s.string().type()')
+----
+"string"
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime()')
+----
+"2020-01-01"
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime().type()')
+----
+"date"
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03"', '$.datetime()')
+----
+"2020-01-01T10:00:00+03:00"
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01T10:00:00Z"', '$.datetime()')
+----
+"2020-01-01T10:00:00+00:00"
+
+query T
+SELECT * FROM jsonb_path_query('"10:00:00.25-1"', '$.datetime()')
+----
+"10:00:00.25-01:00"
+
+query T
+SELECT * FROM jsonb_path_query('"10:00:00"', '$.datetime().type()')
+----
+"time without time zone"
+
+query error 22031
+SELECT * FROM jsonb_path_query('"2020-13-01"', '$.datetime()')
+
+query error 22031
+SELECT * FROM jsonb_path_query('"x"', '$.datetime()')
+
+query error 22031
+SELECT * FROM jsonb_path_query('1', '$.datetime()')
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00"', '$.date()')
+----
+"2020-01-01"
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.timestamp()')
+----
+"2020-01-01T00:00:00"
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00.123456"', '$.timestamp(2)')
+----
+"2020-01-01T10:00:00.12"
+
+query error 22031
+SELECT * FROM jsonb_path_query('"10:00:00"', '$.date()')
+
+query error 0A000
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03"', '$.date()')
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03"', '$.time_tz()')
+----
+"07:00:00+00:00"
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00"', '$.time()')
+----
+"10:00:00"
+
+query error 0A000
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00"', '$.timestamp_tz()')
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03"', '$.timestamp_tz().string()')
+----
+"2020-01-01T10:00:00+03:00"
+
+query T
+SELECT * FROM jsonb_path_query('"12/31/2020 5pm"', '$.datetime("MM/DD/YYYY HH12am")')
+----
+"2020-12-31T17:00:00"
+
+query T
+SELECT * FROM jsonb_path_query('"2020"', '$.datetime("YYYY")')
+----
+"2020-01-01"
+
+query error 22007
+SELECT * FROM jsonb_path_query('"x"', '$.datetime("YYYY")')
+
+query T
+SELECT * FROM jsonb_path_query('"10:30"', '$.datetime("HH24:MI")')
+----
+"10:30:00"
+
+query error 22007
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime("DD/MM")')
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03:30"', '$.datetime("YYYY-MM-DD HH24:MI:SSTZH:TZM")')
+----
+"2020-01-01T10:00:00+03:30"
+
+query T
+SELECT * FROM jsonb_path_query('"05 Mar 2021"', '$.datetime("DD Mon YYYY")')
+----
+"2021-03-05"
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime() < "2020-01-02 00:00:00".datetime()')
+----
+true
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime() < "10:00:00".datetime()')
+----
+null
+
+query error 0A000
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime() < "2020-01-02 00:00:00+00".datetime()')
+
+query T
+SELECT * FROM jsonb_path_query('"10:00:00+03"', '$.datetime() == "07:00:00+00".datetime()')
+----
+false
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01 10:00:00+03"', '$.datetime() == "2020-01-01 07:00:00+00".datetime()')
+----
+true
+
+query T
+SELECT * FROM jsonb_path_query('["2020-01-01", "2021-06-01", "x"]', '$[*] ? (@.datetime() > "2020-06-01".datetime())')
+----
+"2021-06-01"
+
+query T
+SELECT * FROM jsonb_path_query('["2020-01-01", "2021-06-01"]', 'strict $[*] ? (@.datetime() > "2020-06-01".datetime())')
+----
+"2021-06-01"
+
+query T
+SELECT * FROM jsonb_path_query('"2020-01-01"', '$.datetime() == "2020-01-01"')
+----
+null
+
+query T
+SELECT * FROM jsonb_path_query_tz('"2020-01-01"', '$.datetime() < "2020-01-02 00:00:00+00".datetime()')
+----
+true
+
+query T
+SELECT * FROM jsonb_path_query_tz('"2020-01-01 10:00:00"', '$.timestamp_tz()')
+----
+"2020-01-01T10:00:00+00:00"
+
+query T
+SELECT jsonb_path_exists_tz('"2020-01-01"', '$.datetime() < "2020-01-02 00:00:00+00".datetime()')
+----
+t
+
+query T
+SELECT * FROM jsonb_path_query('[1, 5, 10]', '$[*] ? (@ >= $min && @ <= $max)', '{"min": 2, "max": 10}')
+----
+5
+10
+
+query T
+SELECT * FROM jsonb_path_query('["apple", "banana"]', '$[*] ? (@ starts with $p)', '{"p": "ba"}')
+----
+"banana"
+
+query T
+SELECT * FROM jsonb_path_query('{"a": 1}', '$.a + $x', '{"x": 2}')
+----
+3
+
+# nucleus-only: an id below the root is an offset in the value's binary
+# form, which is not PostgreSQL's (PostgreSQL: 10000000016).
+query T
+SELECT * FROM jsonb_path_query('{"a": 1}', '$x.keyvalue()', '{"x": {"k": 2}}')
+----
+{"id": 10000000000, "key": "k", "value": 2}
+
+query error 42704
+SELECT * FROM jsonb_path_query('{"a": 1}', '$.a + $x', '{}')
+
+query error 22023
+SELECT * FROM jsonb_path_query('{"a": 1}', '$.a', '[1]')
+
+query T
+SELECT * FROM jsonb_path_query('{"a": 1}', '$.a', NULL)
+----
+
+query error 22036
+SELECT * FROM jsonb_path_query('[1, "a", 2]', 'strict $[*].abs()')
+
+query T
+SELECT * FROM jsonb_path_query('[1, "a", 2]', 'strict $[*].abs()', '{}', true)
+----
+1
+
+query T
+SELECT * FROM jsonb_path_query('{"a": 1}', 'strict $.b', '{}', true)
+----
+
+query error 42704
+SELECT * FROM jsonb_path_query('{"a": 1}', '$x', '{}', true)
+
+query T
+SELECT jsonb_path_exists('{"a": [1, 2]}', '$.a[*] ? (@ > 1)')
+----
+t
+
+query T
+SELECT jsonb_path_exists('{"a": [1, 2]}', '$.a[*] ? (@ > 2)')
+----
+f
+
+query error 2203A
+SELECT jsonb_path_exists('{"a": 1}', 'strict $.b')
+
+query T
+SELECT jsonb_path_exists('{"a": 1}', 'strict $.b', '{}', true)
+----
+NULL
+
+query T
+SELECT jsonb_path_exists('[1, "a"]', 'lax $[*].abs()')
+----
+t
+
+query error 22036
+SELECT jsonb_path_exists('["a", 1]', 'lax $[*].abs()')
+
+query T
+SELECT jsonb_path_match('{"a": 1}', '$.a == 1')
+----
+t
+
+query T
+SELECT jsonb_path_match('{"a": 1}', '$.a > "x"')
+----
+NULL
+
+query error 22038
+SELECT jsonb_path_match('{"a": 1}', '$.a')
+
+query T
+SELECT jsonb_path_match('{"a": 1}', '$.a', '{}', true)
+----
+NULL
+
+query T
+SELECT jsonb_path_match('{"a": [1, 2]}', 'exists($.a ? (@ > 1))')
+----
+t
+
+query T
+SELECT jsonb_path_query_array('{"a": [1, 2, 3]}', '$.a[*] ? (@ > 1)')
+----
+[2, 3]
+
+query T
+SELECT jsonb_path_query_array('{"a": [1, 2, 3]}', '$.b')
+----
+[]
+
+query T
+SELECT jsonb_path_query_first('{"a": [1, 2, 3]}', '$.a[*] ? (@ > 1)')
+----
+2
+
+query T
+SELECT jsonb_path_query_first('{"a": [1, 2, 3]}', '$.b')
+----
+NULL
+
+query T
+SELECT jsonb_path_query_array('[1, "a", 2]', 'strict $[*].abs()', '{}', true)
+----
+[1]
+
+query I
+SELECT id FROM pdocs WHERE doc @? '$.items[*] ? (@.qty > 1)' ORDER BY id
+----
+1
+2
+
+query I
+SELECT id FROM pdocs WHERE doc @@ '$.age > 40' ORDER BY id
+----
+1
+
+query I
+SELECT id FROM pdocs WHERE doc @@ '$.items.size() == 0' ORDER BY id
+----
+3
+
+query IT
+SELECT id, jsonb_path_query_array(doc, '$.items[*].sku') FROM pdocs ORDER BY id
+----
+1 ["x1", "y2"]
+2 ["x1"]
+3 []
+4 []
+5 []
+
+query IT
+SELECT id, jsonb_path_query_first(doc, '$.items[*] ? (@.price > 10).sku') FROM pdocs ORDER BY id
+----
+1 "y2"
+2 NULL
+3 NULL
+4 NULL
+5 NULL
+
+query IT
+SELECT id, jsonb_path_exists(doc, '$.born ? (@.datetime() < "1985-01-01".datetime())') FROM pdocs ORDER BY id
+----
+1 t
+2 f
+3 f
+4 f
+5 f
+
+query IT
+SELECT id, jsonb_path_match(doc, 'exists($.tags[*] ? (@ == "b"))') FROM pdocs ORDER BY id
+----
+1 t
+2 f
+3 t
+4 f
+5 f
+
+query IT
+SELECT d.id, p.* FROM pdocs d, jsonb_path_query(d.doc, '$.items[*].qty') p ORDER BY d.id
+----
+1 2
+1 1
+2 5
+
+query error 42601
+SELECT id, jsonb_path_query_first(doc, '$.items.price.sum()') FROM pdocs ORDER BY id
+
+query T
+SELECT doc @? '$.a' FROM pdocs WHERE id = 5
+----
+f
+
+query T
+SELECT '[1,2]'::jsonb @? 'strict $[5]'
+----
+NULL
+
+query T
+SELECT '[1,2]'::jsonb @@ 'strict $[5] == 1'
+----
+NULL
+
+query T
+SELECT '[1,2]'::jsonb @@ '$[*]'
+----
+NULL
+
+# nucleus-only: the json_path_ names are the same functions.
+query T
+SELECT json_path_query_array('{"a": [1, 2]}', '$.a[*] ? (@ > 1)')
+----
+[2]
+
+# nucleus-only: the PostgreSQL-printed path reads back as another one.
+query T
+SELECT '$ ? ((@.a + 1).abs() > 0)'::jsonpath
+----
+$?((@."a" + 1).abs() > 0)

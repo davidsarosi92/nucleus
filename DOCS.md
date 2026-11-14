@@ -5088,11 +5088,73 @@ path, new [, after])` (a position out of range adds at that end),
 `json_agg(x)` (`NULL`s as `null`) and `json_object_agg(k, v)`.  Errors
 are PostgreSQL's (`22023 cannot delete from scalar`, `22P02 path
 element at position 1 is not an integer: "x"`, `22004` a `NULL` path
-step or key, `2202E` uneven arrays).  Not there yet: the SQL/JSON path
-language and the standard's functions (J3), arrays of `json` (no
+step or key, `2202E` uneven arrays).  Not there yet: the standard's
+`JSON_VALUE`, `JSON_QUERY`, `JSON_EXISTS`, `JSON_TABLE` and `IS JSON`
+(J3b–c), arrays of `json` (no
 `json[]`), `row_to_json` (no row values: `json_build_object`), set-returning functions in the select list (PostgreSQL's
 `SELECT json_each(j)`: in `FROM`), and `jsonb`'s raw-scalar quirk
 (`'1'::jsonb -> 0` is `1` there, `NULL` here).
+
+**SQL/JSON paths** (`json::path`, §M14.15 J3a): PostgreSQL's
+`jsonpath` — a type of its own (`'$.a[*] ? (@ > 1)'::jsonpath`), kept
+as its normalized text (keys and variables quoted, `lax` left out,
+operators parenthesized by priority: `$."a"[*]?(@ > 1)`; a number or
+an operator followed by accessors is parenthesized wherever it stands,
+where PostgreSQL's text drops the parentheses inside a filter and reads
+back as another path).  The language (`json::path::parse`, one token of
+look-ahead): `$`, `@` (in a filter only), `$name` and `$"name"`
+variables, `last` (in a subscript only), literals (numbers as
+`numeric`, also `0x1F`, `0o17`, `0b101`, `1_000`; strings with `\x41`,
+`\u{1F600}` and `\v`); accessors `.key`, `."key"`, `.*`, `[*]`, `[i, j
+to k]`, `.**`, `.**{n}`, `.**{n to m}` (`last` as a level), filters
+`?( … )`; `+ - * / %` and unary signs (a sign on a number folds into
+it); predicates `== != <> < <= > >=`, `&& || !`, `exists( … )`, `( … )
+is unknown`, `starts with` a string or a variable, `like_regex "…" flag
+"ismq"` (`x` is `0A000`, as PostgreSQL's; compiled once, with the
+`regex` crate); methods `.type() .size() .double() .ceiling() .floor()
+.abs() .keyvalue() .bigint() .boolean() .integer() .number() .string()
+.decimal(p, s) .datetime([template]) .date() .time([p]) .time_tz([p])
+.timestamp([p]) .timestamp_tz([p])`; keywords in any case but `true`,
+`false` and `null`; `/* comments */`.  Refused as PostgreSQL refuses
+(`42601`, `2201B`, `0A000`, `22P05`).
+
+Evaluation (`json::path::eval`) is PostgreSQL's executor step for step:
+*lax* mode (the default) unwraps an array for an accessor, a filter or
+a method, wraps a scalar for `[…]`, and ignores structural errors (a
+missing key, a subscript out of range); *strict* mode raises them
+(`2203A`, `2203C`, `22033`, `22039`).  Items are slices of the document
+read in place (or of a variable, or of a value the path made), or
+datetimes.  Predicates are three-valued: items of different kinds are
+unknown (but `null` is unequal to everything else), containers unknown,
+strings by their bytes, numbers by value; an error inside a predicate
+is unknown; lax mode answers at the first true, strict at the first
+unknown.  Arithmetic wants one number a side (`22038`; `22012` division
+by zero), on `numeric` (38 digits: a number past them is `22003`).
+`.**` goes depth-first, a value before its children.  `.keyvalue()`'s
+`id` is 0 for the outermost object and its byte offset otherwise (an
+offset in nucleus's form, not in PostgreSQL's).  Datetimes
+(`json::path::datetime`): `.datetime()` tries PostgreSQL's ISO 8601
+forms in its order; a template is `to_timestamp`'s (`YYYY YYY YY Y MM
+DD Mon Month Dy Day HH24 HH12 HH MI SS MS US FF1–FF6 AM PM A.M. P.M.
+TZH TZM TZ "text"`; separators must match, a zone is `Z`, `UTC`,
+`GMT`, `UT` or an offset); they compare across kinds where PostgreSQL's
+do, a comparison or cast that needs a zone is `0A000` outside the
+`_tz` functions (whose zone is the session's, UTC); an item prints as
+ISO 8601 (`2020-01-01T10:00:00+03:00`).
+
+Functions, each also under a `jsonb_` name and with a `_tz` form
+(`stable`): `json_path_exists(j, path [, vars [, silent]])`,
+`json_path_match` (the path's single boolean, `NULL` when unknown;
+`22038` otherwise), `json_path_query_array`, `json_path_query_first`,
+and in `FROM` `json_path_query` (a row an item).  `vars` is an object
+(`22023` otherwise); a missing variable is `42704` even when silent;
+`silent` hides the evaluation's errors and returns what was found
+before one, as PostgreSQL's.  Operators `j @? path` (exists) and `j @@
+path` (match), both silent.  A path value is parsed once per thread
+while it is among the last 16 (`json::path::compiled`).  Differences,
+recorded in `slt/66_json_path.slt`: numbers keep no scale (`2 * 3.5`
+is `7`, PostgreSQL's `7.0`), `.keyvalue()`'s ids below the root, the
+parenthesized text above.
 
 **On the wire** (`ncp` tag 11 named `json`) a value travels as its text
 (`Type::wire_output` / `wire_input`), in rows and in columnar batches;
@@ -5101,10 +5163,13 @@ it as `jsonb` (§9).  Tests: `json::tests` (round trips, canonical bytes,
 malformed text and bytes, the order, wide containers), `tests/json.rs`
 (stored and read back, a key and an index, `DISTINCT` and `GROUP BY`,
 casts and errors), `slt/65_json.slt` (the operators and functions, 108
-records as PostgreSQL 18 gives them: `scripts/slt-pg.py check`), the law
-kit's generator (equal documents written differently), the `json` fuzz
-target (§2; the operators' laws too), pg-compat's
-`json_through_a_real_driver`.  Measurements: PLAN.md §M14.15 J1–J2 and
+records as PostgreSQL 18 gives them: `scripts/slt-pg.py check`),
+`json::path::tests` (texts and errors as PostgreSQL's, evaluation),
+`slt/66_json_path.slt` (paths, 221 records as PostgreSQL 18 gives them),
+the law kit's generator (equal documents written differently), the
+`json` fuzz target (§2; the operators' laws too, and paths: normalized
+text reads back as itself, items are canonical), pg-compat's
+`json_through_a_real_driver`.  Measurements: PLAN.md §M14.15 J1–J3a and
 `docs/benchmarks.md`.
 
 ### 8.14 Errors and hints (`error`, `hint`)
@@ -6079,6 +6144,16 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — §M14.15 J3a, SQL/JSON paths:** PostgreSQL's
+  `jsonpath` (a type of its own, kept as its normalized text; oid 4072
+  in pg-compat), the language with lax and strict modes, filters,
+  predicates, arithmetic, item methods and datetimes, evaluated as
+  PostgreSQL's executor evaluates it; `json_path_exists`, `_match`,
+  `_query_array`, `_query_first` and `json_path_query` in `FROM` (with
+  `jsonb_` names and `_tz` forms), `@?` and `@@`; 221 records checked
+  against PostgreSQL 18 (`slt/66_json_path.slt`).  New SQLSTATEs: the
+  SQL/JSON family (`22031`–`2203G`).  The `json` fuzz target reads
+  paths; the law kit generates `jsonpath` values.
 - **2026-11-14 — §M14.15 J2, JSON's operators and functions:**
   PostgreSQL's `jsonb` operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`,
   `?`, `?|`, `?&`, `||`, `-`, `#-`), functions under `json_` and

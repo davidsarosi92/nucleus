@@ -14,6 +14,7 @@ mod funcs;
 pub mod key;
 pub mod ops;
 pub mod parse;
+pub mod path;
 pub mod text;
 
 use std::sync::Arc;
@@ -263,7 +264,8 @@ impl Type for Json {
 /// Registers the type and its functions.
 pub fn register(r: &mut Registry) -> Result<()> {
     r.add_type(Arc::new(Json))?;
-    funcs::register(r)
+    funcs::register(r)?;
+    path::register(r)
 }
 
 #[cfg(test)]

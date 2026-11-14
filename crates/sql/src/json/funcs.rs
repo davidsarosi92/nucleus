@@ -77,11 +77,11 @@ fn maybe_text(b: Option<&[u8]>) -> Result<Value> {
     })
 }
 
-type Body = fn(&[Value]) -> Result<Value>;
+pub(super) type Body = fn(&[Value]) -> Result<Value>;
 
 /// A function: its arguments' types (the last repeated for a variadic
 /// one), its result's, and what it computes.
-struct Func {
+pub(super) struct Func {
     name: &'static str,
     arity: RangeInclusive<usize>,
     args: Vec<Arg>,
@@ -92,7 +92,7 @@ struct Func {
 }
 
 impl Func {
-    fn new(name: &'static str, args: Vec<Arg>, returns: DataType, body: Body) -> Self {
+    pub(super) fn new(name: &'static str, args: Vec<Arg>, returns: DataType, body: Body) -> Self {
         let n = args.len();
         Self {
             name,
@@ -105,7 +105,7 @@ impl Func {
         }
     }
 
-    fn arity(mut self, arity: RangeInclusive<usize>) -> Self {
+    pub(super) fn arity(mut self, arity: RangeInclusive<usize>) -> Self {
         self.arity = arity;
         self
     }
@@ -115,7 +115,7 @@ impl Func {
         self
     }
 
-    fn stable(mut self) -> Self {
+    pub(super) fn stable(mut self) -> Self {
         self.volatility = Volatility::Stable;
         self
     }
@@ -145,7 +145,7 @@ impl ScalarFunction for Func {
     }
 }
 
-fn u(t: DataType) -> Arg {
+pub(super) fn u(t: DataType) -> Arg {
     Arg::Untyped(t)
 }
 

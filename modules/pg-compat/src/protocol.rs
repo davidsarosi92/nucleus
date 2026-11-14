@@ -98,6 +98,7 @@ fn type_of_oid(o: i32) -> Option<DataType> {
         o if i64::from(o) == crate::catalog::JSONB || i64::from(o) == crate::catalog::JSON => {
             DataType::Ext(TypeRef::named("json")?)
         }
+        o if i64::from(o) == crate::catalog::JSONPATH => DataType::Ext(TypeRef::named("jsonpath")?),
         o if i64::from(o) == crate::catalog::VECTOR => DataType::Ext(TypeRef::named("vector")?),
         o if i64::from(o) == crate::catalog::SPARSEVEC => {
             DataType::Ext(TypeRef::named("sparsevec")?)
@@ -761,8 +762,9 @@ fn binary_value(v: &Value, ty: DataType) -> Vec<u8> {
     match (v, ty) {
         // PostgreSQL's binary uuid is its 16 bytes, as nucleus's canonical form.
         (Value::Ext(t, bytes), _) if t.name() == "uuid" => bytes.to_vec(),
-        // `jsonb_send`: a version byte (1), then the text.
-        (Value::Ext(t, _), _) if t.name() == "json" => {
+        // `jsonb_send` and `jsonpath_send`: a version byte (1), then the
+        // text.
+        (Value::Ext(t, _), _) if t.name() == "json" || t.name() == "jsonpath" => {
             let mut out = vec![1u8];
             out.extend_from_slice(v.render().as_bytes());
             out
@@ -936,9 +938,10 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                 Value::TimestampTz(i64::from_be_bytes(bytes.try_into().unwrap()))
             }
             (Some(DataType::Ext(t)), 16) if t.name() == "uuid" => Value::ext(t, bytes.to_vec()),
-            // `jsonb_recv`: a version byte (1), then the text; `json`'s
-            // binary form is the text alone (which never starts with 1).
-            (Some(DataType::Ext(t)), _) if t.name() == "json" => {
+            // `jsonb_recv` and `jsonpath_recv`: a version byte (1), then
+            // the text; `json`'s binary form is the text alone (which
+            // never starts with 1).
+            (Some(DataType::Ext(t)), _) if t.name() == "json" || t.name() == "jsonpath" => {
                 let text = match bytes.split_first() {
                     Some((1, text)) => text,
                     _ => bytes,

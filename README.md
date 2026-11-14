@@ -11,7 +11,7 @@ crash-safe copy-on-write B+tree with a write-ahead log, MVCC transactions
 SQL dialect (joins of every kind, CTEs, foreign keys; integers by width,
 `real` and `double`, `numeric`, text and `char(n)`, `bytea` — large
 values stored out of line —, date, time and timestamps, intervals,
-`inet` / `cidr`, `uuid`, `json` — one binary type, read in place, with `jsonb`'s operators —, enums and arrays) with a cost-based optimizer, its own system catalog
+`inet` / `cidr`, `uuid`, `json` — one binary type, read in place, with `jsonb`'s operators and SQL/JSON paths —, enums and arrays) with a cost-based optimizer, its own system catalog
 (`nc_catalog`), and a server that speaks nucleus's own protocol (`ncp`;
 results stream, read a batch at a time through a cursor, or columnar —
 straight into numpy, Arrow, pandas and polars) —

@@ -1000,7 +1000,7 @@ nucleus restore /abs/backups/mon restored --subject-keys db.subject-keys
 
 ## JSON
 
-PLAN.md §M14.15 J1–J2: the `json` type and its operators, release, an
+PLAN.md §M14.15 J1–J3a: the `json` type, its operators and SQL/JSON paths, release, an
 M2 Pro.  The usual corpora (`canada.json`: numbers; `citm_catalog.json`:
 objects; `twitter.json`: strings and Unicode), fetched by
 `bench/json/run.sh`.
@@ -1020,18 +1020,23 @@ from exact decimals.  A field is read from the stored form in place.
 
 Against PostgreSQL 18's `jsonb` (`bench/json/pg.py`: postgres:18-alpine
 in Docker on the same machine, its defaults; nucleus a server; seconds
-for one statement, the median of five; the field sums asserted equal):
+for one statement, the median of five; the field sums and path counts
+asserted equal):
 
-| documents | rows | text | parse | PostgreSQL | output | PostgreSQL | a field | PostgreSQL |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| tweets | 50,000 | 246 MB | 0.397 | 1.642 | 0.145 | 1.113 | 0.082 | 0.361 |
-| citm performances | 50,000 | 103 MB | 0.095 | 0.983 | 0.054 | 0.438 | 0.010 | 0.038 |
-| canada features ×4 | 4 | 8.8 MB | 0.027 | 0.071 | 0.030 | 0.042 | 0.004 | 0.012 |
+| documents | rows | text | parse | PostgreSQL | output | PostgreSQL | a field | PostgreSQL | a path | PostgreSQL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tweets | 50,000 | 246 MB | 0.384 | 1.621 | 0.142 | 1.100 | 0.098 | 0.352 | 0.062 | 0.356 |
+| citm performances | 50,000 | 103 MB | 0.089 | 0.975 | 0.046 | 0.438 | 0.009 | 0.037 | 0.018 | 0.051 |
+| canada features ×4 | 4 | 8.8 MB | 0.027 | 0.070 | 0.029 | 0.041 | 0.005 | 0.012 | 0.005 | 0.012 |
 
 Parse: `count(*) … WHERE doc::json IS NOT NULL` over a text column;
 output: `sum(length(doc::text))`; a field: `sum(length(doc -> 'user' ->>
 'screen_name'))` (tweets), `doc ->> 'start'` (performances), `doc ->
-'properties' ->> 'name'` (features).
+'properties' ->> 'name'` (features); a path: `count(*) … WHERE doc @?
+'$.entities.hashtags[*] ? (@.text starts with "a")'` (tweets),
+`'$.seatCategories[*].areas[*] ? (@.areaId > 205705999)'`
+(performances), `'$.geometry.coordinates[*][*] ? (@[0] < -70)'`
+(features).
 
 A whole file as one value:
 

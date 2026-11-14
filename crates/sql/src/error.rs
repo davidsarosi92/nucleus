@@ -105,6 +105,18 @@ codes! {
     internal => "XX000",
     io => "58030",
     generated_always => "428C9",
+    json_datetime => "22031",
+    json_subscript => "22033",
+    json_more_than_one_item => "22034",
+    json_no_item => "22035",
+    json_non_numeric => "22036",
+    json_singleton_required => "22038",
+    json_array_not_found => "22039",
+    json_member_not_found => "2203A",
+    json_number_not_found => "2203B",
+    json_object_not_found => "2203C",
+    json_scalar_required => "2203F",
+    json_cannot_cast => "2203G",
 }
 
 impl fmt::Display for Error {

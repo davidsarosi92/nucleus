@@ -318,6 +318,38 @@ pub fn generator(ty: DataType) -> Option<Box<Generator<'static>>> {
             debug_assert_eq!(v.data_type(), Some(DataType::Ext(t)));
             v
         }),
+        DataType::Ext(t) if t.name() == "jsonpath" => Box::new(move |g: &mut Gen| {
+            // Few keys and steps, written several ways (`lax` or not,
+            // quoted keys or not, spacing, a method's case), so equal
+            // normalized paths in different texts meet often.
+            let mut text = String::from(*g.pick(&["", "lax ", "strict ", "  "]));
+            text.push('$');
+            for _ in 0..g.below(4) {
+                text.push_str(g.pick(&[
+                    ".a",
+                    ".\"a\"",
+                    " . b",
+                    ".*",
+                    "[*]",
+                    "[0]",
+                    "[ 0 ]",
+                    "[1 to last]",
+                    ".**{1 to 2}",
+                    ".size()",
+                    ".SIZE()",
+                    " ? (@ > 1)",
+                    "?(@>1)",
+                    " ? (@.a == \"x\" && @.b < 2.50)",
+                    ".type()",
+                ]));
+            }
+            if g.below(3) == 0 {
+                text.push_str(g.pick(&[" + 1", "+1", " > 0", " == $v"]));
+            }
+            let v = t.imp().input(&text).expect("a path");
+            debug_assert_eq!(v.data_type(), Some(DataType::Ext(t)));
+            v
+        }),
         DataType::Ext(t) if t.name() == "vector" => Box::new(move |g: &mut Gen| {
             // Few distinct components and lengths, so equal prefixes,
             // a shorter vector before a longer one and -0 meet often.

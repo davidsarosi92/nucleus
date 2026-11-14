@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `jsonpath` on the wire as PostgreSQL's type (oid 4072; `pg_type` rows
+  with its array, `format_type`), in binary format as `jsonpath_send`
+  gives it (a version byte, then the text) and taken as `jsonpath_recv`
+  takes it (nucleus PLAN.md §M14.15 J3a).
+
 - `handle_stream`: a client served over any byte stream (no TLS, no
   address), for connections made in the process and for fuzzing; found
   by fuzzing (nucleus PLAN.md §M14.29 S2): `websearch_to_tsquery` panicked

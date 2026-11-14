@@ -57,6 +57,14 @@ are in UTC.
 aggregates `json_agg(x)` and `json_object_agg(k, v)`, and in `FROM`
 `json_each(doc)` (`key`, `value`), `json_array_elements(doc)`,
 `json_object_keys(doc)` (`_text` forms too).  Every `jsonb_` name works.
+**SQL/JSON paths** (PostgreSQL's `jsonpath`): `doc @? '$.items[*] ?
+(@.qty > 1)'` (exists), `doc @@ '$.age > 40'` (a predicate's value),
+`json_path_query_array(doc, '$.items[*].sku')`,
+`json_path_query_first(doc, path [, vars [, silent]])`,
+`json_path_exists`, `json_path_match`, in `FROM` `json_path_query(doc,
+path)`; `lax` (default) or `strict`, filters, `like_regex`, `starts
+with $var`, `.size() .type() .double() .datetime() .keyvalue()` and the
+other methods; `_tz` forms for zone-dependent datetime comparisons.
 
 **Vectors** (embeddings, as pgvector): `embedding vector(768)`, literals
 `'[0.1, 0.2, …]'` (or a driver's float array as a parameter); distances
@@ -293,7 +301,7 @@ before a generation's queries records what each returned
 | `CREATE VIEW` | a `WITH` query |
 | `count(*) FILTER (WHERE …)` | `sum(CASE WHEN … THEN 1 ELSE 0 END)` |
 | `unnest(…)` in the select list | `SELECT … FROM unnest(…) AS u(x)` |
-| SQL/JSON paths (`@?`, `@@`, `jsonb_path_query`, `JSON_TABLE`, `JSON_VALUE`; coming, §M14.15) | `->`, `->>`, `#>`, `@>`, `?`, `json_each(…)` in `FROM` |
+| `JSON_TABLE`, `JSON_VALUE`, `JSON_QUERY`, `JSON_EXISTS`, `IS JSON` (coming, §M14.15) | `json_path_query(doc, path)` in `FROM`, `json_path_query_first`, `doc @? path`, `->>` |
 | `json[]`, `json_each(…)` in the select list | `json_agg` / `json_build_array`; `SELECT … FROM t, json_each(t.doc) e` |
 | `TRUNCATE` | `DELETE FROM t` |
 | `ALTER TABLE … DROP COLUMN`, `RENAME`, `ALTER COLUMN … SET DEFAULT` | a new table and `INSERT … SELECT` |
