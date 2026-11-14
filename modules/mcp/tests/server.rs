@@ -260,7 +260,7 @@ fn memory_tools_when_asked() {
         [
             "REMEMBER 'likes tea' FOR 'u''1' IN \"notes\" AS 'preference' CONFIDENCE 0.5 \
              EXPIRES now() + CAST('7 days' AS interval) SOURCE 'chat' REPLACING '0190'",
-            "SELECT id, kind, content, confidence, seen, valid_from, source, score \
+            "SELECT id, kind, content, confidence, seen, valid_from, source, score, as_of \
              FROM recall('notes', 'u1', 'tea?', 20)",
             "DELETE FROM \"notes\" WHERE id = '0190'",
         ]

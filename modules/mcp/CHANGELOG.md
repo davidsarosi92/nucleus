@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `recall` answers carry `as_of`, the commit read (nucleus PLAN.md §M14.24
+  R5): an agent cites a memory by its id and `as_of`.
+
 - Memory tools (nucleus PLAN.md §M14.24 R1): `remember`, `recall` and
   `forget` over memory stores, with `Options::memory` — independent of
   `allow_writes`.  A tool not offered is refused as unknown.

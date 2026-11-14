@@ -1000,7 +1000,8 @@ class Connection:
         """The subject's current memories most relevant to ``query`` —
         full-text and semantic search fused — best first, as dicts: id,
         kind, content, confidence, seen, valid_from, source, created,
-        last_seen, score."""
+        last_seen, score, as_of (the commit read: a citation is an id and
+        its as_of, read again by ``AS OF COMMIT``)."""
         return self.execute(
             f"SELECT * FROM recall({_literal(store)}, $1, $2, $3)",
             (subject, query, int(k)),

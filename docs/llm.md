@@ -259,6 +259,12 @@ that time use the block form).  Undo a mistake: `INSERT INTO t SELECT * FROM t A
 TIMESTAMP … WHERE …`, or `CREATE TABLE t_restored AS SELECT * FROM t AS
 OF TIMESTAMP …`.  `72000` means past the history kept.
 
+**Citing memories:** `recall` rows carry `as_of`; cite a memory as its
+`id` and `as_of` — `SELECT content FROM notes AS OF COMMIT <as_of> WHERE
+id = '<id>'` shows exactly what you read.  `SET request_id = 'gen-42'`
+before a generation's queries records what each returned
+(`nc_catalog.reads`).
+
 ## Not available — use instead
 
 | Not there | Instead |

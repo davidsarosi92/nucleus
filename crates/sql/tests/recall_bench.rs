@@ -12,7 +12,8 @@
 //! time, a statement parsed once and run with parameters, then batches of
 //! 16 questions in one statement (`LATERAL recall` over an array).
 //! Without `RECALL_BENCH` (the CI's ignored tests) it runs small, as a
-//! test: each batch's answers are its questions' own.
+//! test: each batch's answers are its questions' own.  `REQUEST_ID=…`
+//! records each read (`SET request_id`) — what a read record costs.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -148,6 +149,10 @@ fn recall_latency() {
     // Warm.
     for a in asked.iter().take(20) {
         ask(&mut s, a);
+    }
+    // With `REQUEST_ID`, each read recorded (§M14.24 R5): its cost.
+    if let Ok(r) = std::env::var("REQUEST_ID") {
+        s.execute(&format!("SET request_id = '{r}'")).unwrap();
     }
     let mut times = Vec::with_capacity(asks);
     let mut answers = Vec::with_capacity(asks);

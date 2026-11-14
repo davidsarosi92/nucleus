@@ -1335,7 +1335,9 @@ export class Client {
   /**
    * The subject's current memories most relevant to `query` — full-text
    * and semantic search fused — best first: id, kind, content,
-   * confidence, seen, valid_from, source, created, last_seen, score.
+   * confidence, seen, valid_from, source, created, last_seen, score,
+   * as_of (the commit read: a citation is an id and its as_of, read again
+   * by `AS OF COMMIT`).
    */
   async recall(store: string, subject: string, query: string, k = 10): Promise<Record<string, Value>[]> {
     const r = await this.query(`SELECT * FROM recall('${store.replace(/'/g, "''")}', $1, $2, $3)`, [subject, query, k]);

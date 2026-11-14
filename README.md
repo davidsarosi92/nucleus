@@ -175,7 +175,9 @@ keeps the old one as history), `SELECT * FROM recall('notes', 'ann',
 'how to answer')` ranks a subject's current memories by text and vector
 together — under a millisecond among 100 000 memories in the process,
 many questions in one statement through `LATERAL` —, all under the
-caller's privileges and row-level security;
+caller's privileges and row-level security, each answer carrying the
+commit it read so a citation reads back exactly what was cited
+(`SET request_id` records what a generation read);
 rows expire by a column (`ALTER TABLE t SET EXPIRY (expires_at)`),
 `FORGET SUBJECT 'ann'` erases a subject's rows from every table whose
 columns are marked as saying whose a row is — all of them or none —,

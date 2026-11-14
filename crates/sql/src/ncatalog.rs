@@ -166,6 +166,20 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     (
+        "reads",
+        &[
+            ("request_id", T),
+            ("at", DataType::TimestampTz),
+            ("user_name", T),
+            ("as_of", I),
+            ("tables", TA),
+            ("ids", TA),
+            ("parameters", T),
+            ("statement", T),
+            ("erasure", I),
+        ],
+    ),
+    (
         "history",
         &[
             ("retention", DataType::Interval),
@@ -736,6 +750,49 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     text(k.default.to_string()),
                     text(k.description.to_string()),
                 ]);
+            }
+        }
+        "reads" => {
+            // The read records (§M14.24 R5): an administrator's all, a
+            // role's own; an erased one's fields gone, its erasure named.
+            let who = crate::access::current();
+            let list = |s: &str| {
+                Value::Array(
+                    s.split(", ")
+                        .filter(|x| !x.is_empty())
+                        .map(|x| text(x.to_string()))
+                        .collect(),
+                )
+            };
+            for r in crate::audit::all(txn)? {
+                if r.kind != "read" || (!who.superuser && r.user != who.user) {
+                    continue;
+                }
+                let erasure = r.erased.map_or(Value::Null, |e| Value::Int(e as i64));
+                let mut row = match crate::audit::read_fields(&r.detail) {
+                    Some([request, at, tables, ids, params, statement]) => vec![
+                        text(request),
+                        Value::TimestampTz(r.at),
+                        text(r.user.clone()),
+                        at.parse().map_or(Value::Null, Value::Int),
+                        list(&tables),
+                        list(&ids),
+                        text(params),
+                        text(statement),
+                    ],
+                    None => vec![
+                        Value::Null,
+                        Value::TimestampTz(r.at),
+                        text(r.user.clone()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                    ],
+                };
+                row.push(erasure);
+                out.push(row);
             }
         }
         "history" => {

@@ -936,9 +936,12 @@ statement parsed once and run with parameters; an M2 Pro.  The target:
 |---|---:|---:|
 | `recall(…, 10)`, one question a statement | 0.81 ms | 0.91 ms |
 | `recall(…, 10)`, 16 questions a statement (`LATERAL`), a question | 0.63 ms | 0.65 ms |
+| — each read recorded (`SET request_id`, §M14.24 R5), one question a statement | 1.3–1.5 ms | 1.7–1.9 ms |
+| — each read recorded, 16 questions a statement, a question | 0.67–0.69 ms | 0.71–0.73 ms |
 
 ```sh
 RECALL_BENCH=1 cargo test --release -p nucleus-sql --test recall_bench -- --ignored --nocapture
+REQUEST_ID=gen RECALL_BENCH=1 cargo test --release -p nucleus-sql --test recall_bench -- --ignored --nocapture
 ```
 
 ## Erasure

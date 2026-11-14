@@ -48,7 +48,9 @@ db.remember("notes", "ann", "prefers short answers", { kind:
 "preference", expires: "30 days" })` → `{ id, action }` (`"inserted"`,
 `"merged"`, `"replaced"` — `replaces: oldId` keeps the old one as
 history), `await db.recall("notes", "ann", "how to answer", 5)` → the
-subject's current memories, best first, `await db.forget("notes", id)`;
+subject's current memories, best first (each with `as_of`, the commit
+read: cite a memory by its `id` and `as_of`; `SET request_id = 'gen-1'`
+records the reads that serve a request in `nc_catalog.reads`), `await db.forget("notes", id)`;
 `await db.forgetSubject("ann")` → `{ erasure, rows, scrubbed, found }`
 erases her rows from every table with subject columns (`FORGET SUBJECT`),
 scrubs the files and searches them (`found === 0`: none of their values is

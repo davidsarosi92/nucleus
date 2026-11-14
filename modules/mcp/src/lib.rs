@@ -380,7 +380,7 @@ impl<'a> Server<'a> {
             tools.push(json!({
                 "name": "recall",
                 "title": "Recall",
-                "description": "The subject's current memories most relevant to a question or topic (full-text and semantic search fused), best first: id, kind, content, confidence, how often seen, since when valid, source, score.",
+                "description": "The subject's current memories most relevant to a question or topic (full-text and semantic search fused), best first: id, kind, content, confidence, how often seen, since when valid, source, score, and as_of — the commit read: cite a memory by its id and as_of (SELECT … FROM store AS OF COMMIT as_of WHERE id = … reads it again).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -646,7 +646,7 @@ impl Server<'_> {
                 let k = k.clamp(1, self.options.max_rows as u64);
                 Ok(json!({
                     "memories": self.objects(&format!(
-                        "SELECT id, kind, content, confidence, seen, valid_from, source, score \
+                        "SELECT id, kind, content, confidence, seen, valid_from, source, score, as_of \
                          FROM recall({}, {}, {}, {k})",
                         literal(&text("store")?),
                         literal(&text("subject")?),

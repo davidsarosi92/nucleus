@@ -1710,7 +1710,8 @@ current_date localtimestamp clock_timestamp extract date_part date_trunc
 make_date age justify_days justify_hours justify_interval to_timestamp
 array_length array_upper array_lower cardinality array_append
 array_to_string pg_typeof current_user current_database current_schema
-current_setting` (and the catalog functions of §8.11); aggregates `count
+current_setting snapshot_commit` (the last: the commit the statement's
+transaction reads, §8.28; and the catalog functions of §8.11); aggregates `count
 sum avg min max string_agg array_agg bool_and bool_or every` (with
 `DISTINCT`, `count(*)`, `ORDER BY` inside the call); window calls `f(…)
 OVER name | ([name] [PARTITION BY …] [ORDER BY …] [ROWS | RANGE | GROUPS
@@ -2783,6 +2784,7 @@ catalog when scanned (D13), registered by the built-in module (§8.12).
 | `nc_catalog.database_settings` | `name`, `value`, `is_set`, `default`, `description` (`ALTER DATABASE nucleus SET …`) |
 | `nc_catalog.statements` | `user_name`, `query` (constants as `$n`), `calls`, `errors`, `total_ms`, `mean_ms`, `min_ms`, `max_ms`, `rows_read`, `rows_returned`, `model_calls`, `model_texts`, `model_cached`, `model_tokens`, `model_errors`, `model_ms`, `last_call` (statement statistics, §8.13; an administrator sees all, others their own; the model columns §8.27) |
 | `nc_catalog.index_advice` | `table_name`, `columns`, `create_statement`, `statements`, `calls`, `rows_read`, `rows_read_with_index`, `example_query`, `plan` (the index advisor, §8.13) |
+| `nc_catalog.reads` | `request_id`, `at`, `user_name`, `as_of` (the commit read), `tables`, `ids` (returned), `parameters`, `statement`, `erasure` (the `FORGET` that blanked it) — the queries run under `SET request_id` (an administrator's all, a role's own; §8.28) |
 | `nc_catalog.history` | `retention` (the retention by time; NULL without one), `oldest_time`, `oldest_commit` (how far back `AS OF` reaches: the oldest snapshot whose commit time is recorded), `newest_commit` — one row (§8.7, §M14.14) |
 | `nc_catalog.sessions` | `id`, `user_name`, `session_user_name`, `client_addr`, `front_end`, `auth_method`, `tls`, `access_rule`, `read_only`, `as_role`, `roles` (active at login), `started` (the sessions a front end admitted; an administrator sees all, others their own) |
 | `nc_catalog.policies` | `table_name`, `name`, `permissive`, `command`, `roles`, `using`, `with_check` |
@@ -4701,7 +4703,8 @@ bound outside the expansion, so the caller's parameters pass through:
 
 ```sql
 SELECT id, kind, content, confidence, seen, valid_from, source, created, last_seen,
-       rrf(score(content @@ query), embedding <=> embed(query)) AS score
+       rrf(score(content @@ query), embedding <=> embed(query)) AS score,
+       snapshot_commit() AS as_of
 FROM notes WHERE subject = $subject AND <current> ORDER BY score DESC LIMIT k  -- k: 10
 ```
 
@@ -4712,6 +4715,32 @@ index's rows; not analyzed, the subject's rows are read by its index
 (§8.17) and the words checked on them.  It is a query: the
 caller's privileges, row-level security and plan apply.  Deleting a
 memory is `DELETE`; the drivers' `forget` and the MCP tool are that.
+
+**Citations and read records** (§M14.24 R5).  `recall`'s `as_of` is
+the commit its statement read (`snapshot_commit()`): a memory is cited
+by its `id` and `as_of`, and `SELECT … FROM notes AS OF COMMIT as_of
+WHERE id = …` reads what was cited — however it was replaced, merged
+into or deleted since — while the history kept by time reaches it
+(§8.7, the server's `--history`); `BEGIN READ ONLY AS OF COMMIT as_of`
+then `recall` again gives the whole answer as it was.  `SET request_id
+= 'gen-42'` (at most 200 bytes on one line, `22023`) records each query
+the session runs while it is set — not other statements — in the audit
+log (§9) as a record of kind `read`, apart from the query's
+transaction (a rolled-back block keeps it): the request id, the commit
+read, the tables its privilege checks looked at, the ids it returned
+(its `id` column's values, up to 1 000), its parameters as literals and
+its text.  `nc_catalog.reads` shows them (`request_id`, `at`,
+`user_name`, `as_of`, `tables`, `ids`, `parameters`, `statement`,
+`erasure`): an administrator's all, a role's own.  `FORGET SUBJECT`
+reaches both: its purge removes the subject's versions however recent,
+so a time within the retention no longer reads them (the past is
+rewritten for an erasure, as PLAN's "overriding retention" asks), and a
+read record holding the subject's value (a parameter, the statement's
+text) is blanked like any audit record's detail, its erasure named.
+A read record is a commit of its own: +0.5–0.7 ms to a `recall`
+statement, +0.05 ms a question in batches of 16
+(`tests/recall_bench.rs` with `REQUEST_ID`).  Tests:
+`tests/citations.rs`.
 
 **Batched recall and its latency** (§M14.24 R4).  A model's several
 questions are one statement — one parse, one snapshot:
@@ -5818,6 +5847,13 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-14 — §M14.24 R5, citations and read records:** `recall`
+  returns `as_of` (`snapshot_commit()`); `SET request_id` records each
+  query's read — commit, tables, ids returned, parameters — as an audit
+  record of kind `read`, shown in `nc_catalog.reads`; `FORGET SUBJECT`
+  blanks them and its purge reaches the history kept by time; the MCP
+  `recall` tool and the Python and JavaScript helpers carry `as_of`.
 
 - **2026-11-13 — §M14.14 TT5, time travel checked and free:** a logged
   workload read back at random times through every index kind

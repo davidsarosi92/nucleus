@@ -126,11 +126,30 @@ struct Counted<'s> {
     sink: &'s mut dyn Sink,
     started: bool,
     rows: u64,
+    /// The ids returned, for a read record: the `id` column's position
+    /// and its values.
+    cited: Option<(Option<usize>, Vec<String>)>,
+}
+
+impl Counted<'_> {
+    fn cite(&mut self, row: &[Value]) {
+        if let Some((Some(c), ids)) = self.cited.as_mut()
+            && ids.len() < READ_IDS
+            && let Some(v) = row.get(*c)
+        {
+            ids.push(v.render());
+        }
+    }
 }
 
 impl Sink for Counted<'_> {
     fn columns(&mut self, columns: &[OutColumn]) -> Result<()> {
         self.started = true;
+        if let Some((c, ids)) = self.cited.as_mut() {
+            // (A retried statement starts again.)
+            *c = columns.iter().position(|c| c.name == "id");
+            ids.clear();
+        }
         self.sink.columns(columns)
     }
     fn copy_in(&mut self, columns: &[OutColumn]) -> Result<()> {
@@ -142,6 +161,9 @@ impl Sink for Counted<'_> {
         self.sink.copy_data()
     }
     fn row(&mut self, row: Row) -> Result<ControlFlow<()>> {
+        if self.cited.is_some() {
+            self.cite(&row);
+        }
         let flow = self.sink.row(row)?;
         if flow.is_continue() {
             self.rows += 1;
@@ -153,10 +175,16 @@ impl Sink for Counted<'_> {
     }
     fn batch(&mut self, batch: &crate::vector::Batch) -> Result<ControlFlow<usize>> {
         let flow = self.sink.batch(batch)?;
-        self.rows += match flow {
+        let taken = match flow {
             ControlFlow::Continue(()) => batch.sel.len(),
             ControlFlow::Break(k) => k,
-        } as u64;
+        };
+        if self.cited.is_some() {
+            for i in batch.sel.iter().take(taken) {
+                self.cite(&batch.row(i));
+            }
+        }
+        self.rows += taken as u64;
         Ok(flow)
     }
 }
@@ -243,6 +271,14 @@ struct Block {
 /// The session setting whose time (or `commit n`) every statement and
 /// transaction reads at (PLAN.md §M14.14).
 pub const READ_AS_OF: &str = "read_as_of";
+
+/// The session setting naming the request its queries serve: while it is
+/// set, each query's read is recorded in the audit log — the commit it
+/// read, its tables, the ids it returned (PLAN.md §M14.24 R5).
+pub const REQUEST_ID: &str = "request_id";
+
+/// Ids a read record keeps at most.
+const READ_IDS: usize = 1000;
 
 /// A session over a database.
 pub struct Session {
@@ -900,6 +936,12 @@ impl Session {
                 if name == "work_mem" {
                     crate::dbsettings::memory(value)?;
                 }
+                if name == REQUEST_ID && (value.len() > 200 || value.chars().any(char::is_control))
+                {
+                    return Err(Error::invalid_parameter(
+                        "a request id is at most 200 bytes, on one line",
+                    ));
+                }
                 if name == "batch_size" {
                     crate::dbsettings::batch(value)?;
                 }
@@ -1049,13 +1091,47 @@ impl Session {
             crate::budget::model_cost(),
         );
         crate::audit::begin_statement();
+        // A query serving a request: its read recorded.
+        let request = match stmt {
+            Statement::Query(_) => self
+                .settings
+                .get(REQUEST_ID)
+                .filter(|v| !v.is_empty())
+                .cloned(),
+            _ => None,
+        };
+        if request.is_some() {
+            crate::audit::begin_read();
+        }
         let mut counted = Counted {
             sink,
             started: false,
             rows: 0,
+            cited: request.as_ref().map(|_| (None, Vec::new())),
         };
         let r = self.run_in_txn_audited(stmt, params, text.as_deref(), &mut counted);
         crate::audit::end_statement();
+        let noted = crate::audit::end_read();
+        if let (Some(request), Some((tables, Some(at))), Ok(_)) = (&request, noted, &r) {
+            let ids = counted.cited.take().map(|(_, ids)| ids).unwrap_or_default();
+            let statement = text.as_deref().map_or_else(
+                || "(a query)".to_string(),
+                |t| crate::statements::redacted(t).into_owned(),
+            );
+            let params = params
+                .iter()
+                .enumerate()
+                .map(|(i, v)| format!("${} = {}", i + 1, literal(v)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let detail =
+                crate::audit::read_detail(request, &at, &tables, &ids, &params, &statement);
+            let now = crate::datetime::from_system(self.kv.wall_clock());
+            let record = crate::datetime::with_now(now, &self.kv, || {
+                crate::audit::record_of(&crate::access::current(), "read", true, "", &detail)
+            });
+            self.audit_apart(record)?;
+        }
         // In the statistics when its text is known (every front end
         // notes it, and `execute`).
         let Some(text) = text.as_deref() else {
@@ -1571,6 +1647,7 @@ pub fn execute(
     params: &[Value],
     sink: &mut dyn Sink,
 ) -> Result<Output> {
+    crate::audit::read_at(txn.read_ts());
     let out = execute_statement(txn, reg, stmt, params, sink);
     // The tables it wrote: their storages finish (a merge of recent
     // writes) — unless it failed, and its writes go with it.
@@ -3116,6 +3193,16 @@ fn create_partition(
         crate::fk::attach(txn, &mut child, fk)?;
     }
     Ok(())
+}
+
+/// A value as a literal of SQL (a text quoted, as `FORGET` looks for it
+/// in the audit log).
+fn literal(v: &Value) -> String {
+    match v {
+        Value::Null => "NULL".into(),
+        Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        other => format!("'{}'", other.render().replace('\'', "''")),
+    }
 }
 
 /// A new table's storage, from its `WITH (storage = …)`.

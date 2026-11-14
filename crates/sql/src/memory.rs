@@ -156,7 +156,7 @@ pub(crate) fn recall_query(txn: &dyn KvTxn, name: &str) -> Result<ast::Query> {
     store(txn, name)?;
     let sql = format!(
         "SELECT id, kind, content, confidence, seen, valid_from, source, created, last_seen, \
-         rrf(score(content @@ $2), embedding <=> embed($2)) AS score \
+         rrf(score(content @@ $2), embedding <=> embed($2)) AS score, snapshot_commit() AS as_of \
          FROM {} WHERE subject = $1 AND {CURRENT} \
          ORDER BY rrf(score(content @@ $2), embedding <=> embed($2)) DESC LIMIT $3",
         quote(name)

@@ -375,6 +375,71 @@ pub fn check(txn: &dyn KvTxn) -> Result<Chain> {
 
 thread_local! {
     static TOUCHED: RefCell<Option<BTreeSet<String>>> = const { RefCell::new(None) };
+    /// A read being recorded (PLAN.md §M14.24 R5): the tables its checks
+    /// looked at, and the commit its transaction read.
+    static READ: RefCell<Option<(BTreeSet<String>, Option<String>)>> = const { RefCell::new(None) };
+}
+
+/// Starts noting what the next statement reads, for a read record.
+pub(crate) fn begin_read() {
+    READ.with(|r| *r.borrow_mut() = Some((BTreeSet::new(), None)));
+}
+
+/// The commit the statement's transaction reads (noted when reading).
+pub(crate) fn read_at(ts: impl std::fmt::Display) {
+    READ.with(|r| {
+        if let Some((_, at)) = r.borrow_mut().as_mut() {
+            *at = Some(ts.to_string());
+        }
+    });
+}
+
+/// What was noted since [`begin_read`]: the tables and the commit.
+pub(crate) fn end_read() -> Option<(BTreeSet<String>, Option<String>)> {
+    READ.with(|r| r.borrow_mut().take())
+}
+
+/// A read record's detail (`kind = 'read'`): its request id, the commit
+/// read, the tables, the ids returned, the parameters and the statement,
+/// a line each.
+pub(crate) fn read_detail(
+    request: &str,
+    at: &str,
+    tables: &BTreeSet<String>,
+    ids: &[String],
+    params: &str,
+    statement: &str,
+) -> String {
+    let one_line = |s: &str| s.replace(['\n', '\r'], " ");
+    format!(
+        "request: {}\nas of commit: {at}\ntables: {}\nids: {}\nparameters: {}\nstatement: {}",
+        one_line(request),
+        tables.iter().cloned().collect::<Vec<_>>().join(", "),
+        ids.join(", "),
+        one_line(params),
+        one_line(statement),
+    )
+}
+
+/// A read record's detail taken apart: request, commit, tables, ids,
+/// parameters, statement (`None`: not one, or erased).
+pub(crate) fn read_fields(detail: &str) -> Option<[String; 6]> {
+    let mut lines = detail.splitn(6, '\n');
+    let mut field = |name: &str| -> Option<String> {
+        lines
+            .next()?
+            .strip_prefix(name)?
+            .strip_prefix(": ")
+            .map(str::to_string)
+    };
+    Some([
+        field("request")?,
+        field("as of commit")?,
+        field("tables")?,
+        field("ids")?,
+        field("parameters")?,
+        field("statement")?,
+    ])
 }
 
 /// Starts noting the tables the next statement's checks look at.
@@ -386,6 +451,11 @@ pub fn begin_statement() {
 pub fn touched(table: &str) {
     TOUCHED.with(|t| {
         if let Some(set) = t.borrow_mut().as_mut() {
+            set.insert(table.to_string());
+        }
+    });
+    READ.with(|r| {
+        if let Some((set, _)) = r.borrow_mut().as_mut() {
             set.insert(table.to_string());
         }
     });

@@ -73,3 +73,42 @@ pub fn snapshot(kv: &Arc<dyn Kv>, registry: &Registry, as_of: &AsOf) -> Result<T
         )),
     }
 }
+
+/// `snapshot_commit()`: the commit the statement reads — its
+/// transaction's snapshot (a table read `AS OF`, that one's) — so what it
+/// read is read again by `AS OF COMMIT n` while the history keeps it
+/// (PLAN.md §M14.24 R5: a citation's version).
+struct SnapshotCommit;
+
+impl crate::ext::ScalarFunction for SnapshotCommit {
+    fn name(&self) -> &str {
+        "snapshot_commit"
+    }
+
+    fn arity(&self) -> std::ops::RangeInclusive<usize> {
+        0..=0
+    }
+
+    fn resolve(&self, _: &[crate::ext::ArgInfo]) -> Result<crate::ext::Signature> {
+        Ok(crate::ext::Signature::new(
+            vec![],
+            crate::ext::Returns::Type(Some(DataType::BigInt)),
+        ))
+    }
+
+    fn volatility(&self) -> crate::ext::Volatility {
+        crate::ext::Volatility::Stable
+    }
+
+    fn call(&self, cx: &crate::ext::CallContext<'_>, _: &[Value]) -> Result<Value> {
+        let ts = cx.txn().read_ts().to_string();
+        ts.parse()
+            .map(Value::Int)
+            .map_err(|_| Error::internal("a snapshot's commit"))
+    }
+}
+
+/// Registers `snapshot_commit()`.
+pub fn register(r: &mut Registry) -> Result<()> {
+    r.add_function(&["snapshot_commit"], Arc::new(SnapshotCommit))
+}

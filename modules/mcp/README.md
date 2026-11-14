@@ -23,7 +23,7 @@ edition gives it a local directory or a server: `nucleus mcp`.
 | `lint` | what in a statement is likely slow or wrong, with the fix (`ANALYZE QUERY`) |
 | `execute` | SQL that writes — only with `Options::allow_writes` |
 | `remember` | keeps a memory in a memory store (`REMEMBER`): merged into a near-identical one of the subject or added; `replaces` closes an old one — only with `Options::memory` |
-| `recall` | a subject's current memories most relevant to a query, text and vector search fused (read-only) — only with `Options::memory` |
+| `recall` | a subject's current memories most relevant to a query, text and vector search fused, each with `as_of` (the commit read: a citation is an id and its `as_of`) (read-only) — only with `Options::memory` |
 | `forget` | deletes a memory by id — only with `Options::memory` |
 
 Reads are safe: their SQL goes to the database marked read-only — the

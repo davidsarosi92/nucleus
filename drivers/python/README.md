@@ -58,7 +58,9 @@ store (`CREATE MEMORY STORE notes USING m`): `conn.remember("notes",
 expires=timedelta(days=30))` → `(id, "inserted" | "merged" |
 "replaced")` (`replaces=old_id` keeps the old one as history),
 `conn.recall("notes", "ann", "how to answer", k=5)` → the subject's
-current memories as dicts, best first, `conn.forget("notes", id)`;
+current memories as dicts, best first (each with `as_of`, the commit
+read: cite a memory by its `id` and `as_of`; `SET request_id = 'gen-1'`
+records the reads that serve a request in `nc_catalog.reads`), `conn.forget("notes", id)`;
 `conn.forget_subject("ann")` → `(erasure, rows, scrubbed, found)` erases
 her rows from every table with subject columns (`FORGET SUBJECT`), scrubs
 the files and searches them (`found == 0`: none of their values is left).  Tests:

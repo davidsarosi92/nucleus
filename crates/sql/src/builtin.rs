@@ -145,6 +145,7 @@ impl Module for Builtin {
         crate::bytea::register(r)?;
         crate::inet::register(r)?;
         crate::statements::register(r)?;
+        crate::time_travel::register(r)?;
         r.add_table_function(Arc::new(Unnest))?;
         r.add_table_function(Arc::new(crate::chunks::Chunks))?;
         r.add_schema("public", "user tables", false)?;
