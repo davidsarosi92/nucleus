@@ -44,8 +44,8 @@ for abi in ${ABIS:-arm64-v8a x86_64}; do
   echo "$so: $size bytes"
   # The size budget (PLAN.md §M14.23 step 3): what the engine adds to an
   # app on a device's architecture.
-  if [ "$abi" = arm64-v8a ] && [ "$size" -gt $((8 << 20)) ]; then
-    echo "over the size budget: $size bytes, 8 MiB at most for arm64-v8a"
+  if [ "$abi" = arm64-v8a ] && [ "$size" -gt $((9 << 20)) ]; then
+    echo "over the size budget: $size bytes, 9 MiB at most for arm64-v8a"
     exit 1
   fi
 done

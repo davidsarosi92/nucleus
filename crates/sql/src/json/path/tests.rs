@@ -229,6 +229,10 @@ fn evaluates_as_postgresql() {
 
 #[test]
 fn deep_paths_are_refused_not_overflowed() {
+    // WebAssembly has no threads: the host's stack, its smallest.
+    if cfg!(target_family = "wasm") {
+        return deep_paths();
+    }
     // On a session's stack (2 MiB, a thread's default), in a debug build.
     std::thread::Builder::new()
         .stack_size(2 << 20)

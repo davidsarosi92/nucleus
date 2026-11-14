@@ -52,7 +52,7 @@ drivers/swift/build-xcframework.sh        # ARCHS="arm64" for Apple silicon only
 The script builds the embedded edition (LTO, one codegen unit, without
 the model modules) for iOS, the simulator and macOS, makes the
 XCFramework and checks the size budget: what the engine adds to an iOS
-app on arm64, linked and stripped, at most 8 MiB (now 7.0 MiB).
+app on arm64, linked and stripped, at most 9 MiB (now 7.71 MiB).
 
 ## Tests
 

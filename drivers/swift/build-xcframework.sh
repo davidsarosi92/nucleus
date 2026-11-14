@@ -87,7 +87,7 @@ xcrun --sdk iphoneos clang -target arm64-apple-ios15.0 -Os -dead_strip -Iedition
 strip -x "$probe/app"
 size=$(wc -c < "$probe/app")
 echo "an iOS app's engine: $size bytes"
-if [ "$size" -gt $((8 << 20)) ]; then
-  echo "over the size budget: $size bytes, 8 MiB at most for arm64"
+if [ "$size" -gt $((9 << 20)) ]; then
+  echo "over the size budget: $size bytes, 9 MiB at most for arm64"
   exit 1
 fi

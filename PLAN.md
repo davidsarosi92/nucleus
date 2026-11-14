@@ -7289,7 +7289,15 @@ would use against a server.
   speed over size, §M14.23 step 2).  SQLite is under 1 MB; nucleus
   carries its vectors, text search, columnar execution and the protocol
   server, and the budget is checked by both build scripts, in CI, so it
-  only grows on purpose.
+  only grows on purpose.  *Grown on purpose to 9 MiB* (2026-11-14):
+  JSON (§M14.15 J1–J3 — the type, SQL/JSON paths, the SQL/JSON
+  functions, `JSON_TABLE`) took Android arm64 to 8.17 MiB (8,570,648
+  bytes, +757 KB) and iOS to 7.71 MiB (8,081,696 bytes).  Of the growth, about 270 KB is
+  JSON's own code with what it inlined; the rest is the parser's forms,
+  sort and drop instantiations and their unwind tables.  Not taken:
+  `panic = "abort"` (unwind tables are ~950 KB, but the C API turns a
+  panic into an error rather than ending the app) and `opt-level = "s"`
+  (20 % slower, as measured in step 2).
 - **Tested** on the iOS simulator (iOS 18) and an Android emulator
   (API 35, arm64 with 16 KB pages; x86_64 in CI): the Swift suite (19
   tests: the conformance cases on a database in memory and in a
