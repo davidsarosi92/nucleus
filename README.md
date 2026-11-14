@@ -250,6 +250,9 @@ ncsql -c '\d t'                         # the shell, connected (user and passwor
 nucleus server ./mydb --pg-compat       # also PostgreSQL's protocol on 5432
 nucleus server ./mydb --console         # a web console on http://127.0.0.1:20036/
 PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
+nucleus migrate new add_notes           # migrations/<time>_add_notes.sql: up and down
+nucleus migrate up ./mydb               # the pending ones, each in one transaction
+nucleus dump --schema ./mydb            # the schema as the SQL that makes it
 ```
 
 Or nothing to install: the playground ([`playground/`](playground)) is

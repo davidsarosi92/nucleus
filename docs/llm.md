@@ -201,6 +201,14 @@ for conditions on that very expression —; `CREATE INDEX ON t USING json
 (doc)` serves `doc @> '{…}'`, `doc ? 'key'`, `?|`, `?&`, `DROP
 INDEX`, `DROP TABLE [IF EXISTS] t [CASCADE]`.  `ALTER TABLE t ADD [COLUMN]
 …`, `ADD CONSTRAINT …`, `DROP CONSTRAINT …`, `ALTER COLUMN c TYPE …`.
+The whole schema as SQL: `SELECT definition FROM nc_catalog.definitions
+ORDER BY position` (or `nucleus dump --schema <dir>`) — each object's
+creating statement, as it is now.  Schema changes as versioned files:
+`nucleus migrate new add_notes` makes `migrations/<time>_add_notes.sql`
+(`-- migrate:up` … `-- migrate:down` …); `nucleus migrate up <db>`
+applies the pending ones, each in one transaction with its record
+(`nc_catalog.migrations`), `down` reverts the newest, `status` lists
+them; never edit an applied file — add a new one.
 `COMMENT ON TABLE t IS '…'`, `COMMENT ON COLUMN t.c IS '…'` — read them
 (`describe_table`, `nc_catalog.tables.comment`, `nc_catalog.columns.comment`)
 to learn what the data means.

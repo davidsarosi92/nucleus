@@ -24,6 +24,8 @@
 //! | `nc_catalog.casts` | cast taught (`ALTER TYPE … ADD CAST`) |
 //! | `nc_catalog.orderings` | ordering taught to a type (`ALTER TYPE … ADD ORDERING`) |
 //! | `nc_catalog.types` | type (of the session's registry), with its abilities |
+//! | `nc_catalog.migrations` | migration applied (`RECORD MIGRATION`, `nucleus migrate`) |
+//! | `nc_catalog.definitions` | schema object, as the statement that makes it ([`crate::definitions`]) |
 
 use std::sync::Arc;
 
@@ -189,6 +191,26 @@ const DEFS: &[(&str, &[(&str, DataType)])] = &[
         ],
     ),
     ("branches", &[("name", T), ("parent", T), ("current", B)]),
+    (
+        "migrations",
+        &[
+            ("version", I),
+            ("name", T),
+            ("checksum", T),
+            ("applied_at", DataType::TimestampTz),
+            ("applied_by", T),
+        ],
+    ),
+    (
+        "definitions",
+        &[
+            ("position", I),
+            ("kind", T),
+            ("name", T),
+            ("table_name", T),
+            ("definition", T),
+        ],
+    ),
     (
         "sessions",
         &[
@@ -822,6 +844,28 @@ fn rows(name: &str, txn: &dyn KvTxn, registry: &Registry) -> Result<Vec<Row>> {
                     }),
                     reach.map_or(Value::Null, |(ts, _)| commit(ts)),
                     kv.newest().map_or(Value::Null, commit),
+                ]);
+            }
+        }
+        "migrations" => {
+            for m in crate::migrations::all(txn)? {
+                out.push(vec![
+                    Value::Int(m.version as i64),
+                    text(m.name),
+                    text(m.checksum),
+                    Value::TimestampTz(m.applied_at),
+                    text(m.applied_by),
+                ]);
+            }
+        }
+        "definitions" => {
+            for (i, d) in crate::definitions::all(txn)?.into_iter().enumerate() {
+                out.push(vec![
+                    Value::Int(i as i64 + 1),
+                    text(d.kind),
+                    text(d.name),
+                    d.table.map_or(Value::Null, text),
+                    text(d.sql),
                 ]);
             }
         }

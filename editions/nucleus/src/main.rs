@@ -1,9 +1,11 @@
 //! The `nucleus` command-line tool.
 
 mod branch;
+mod dump;
 mod init;
 mod kv;
 mod mcp;
+mod migrate;
 mod restore;
 mod server;
 mod sql;
@@ -26,6 +28,12 @@ usage:
                                     SQL shell (also `ncsql`): a local database (or
                                     one in memory, gone at the end) or a server;
                                     a script on stdin, or one command
+  nucleus migrate new <name> | status | up [--to <v>] | down [--to <v> | --all]
+                  [<dir>] [connection options of nucleus sql] [--dir <migrations>]
+                                    versioned migration files, each applied in
+                                    one transaction with its record
+  nucleus dump --schema [<dir>] [connection options of nucleus sql]
+                                    the schema as the SQL that makes it
   nucleus mcp [<dir>] [connection options of nucleus sql] [--allow-writes]
               [--memory] [--max-rows <n>] [--timeout <ms>]
                                     a Model Context Protocol server on stdin and
@@ -116,6 +124,8 @@ fn main() -> ExitCode {
         Some("server") => server::run(&args[1..]),
         Some("restore") => restore::run(&args[1..]),
         Some("branch") => branch::run(&args[1..]),
+        Some("dump") => dump::run(&args[1..]),
+        Some("migrate") => migrate::run(&args[1..]),
         Some("help" | "--help" | "-h") => {
             print!("{USAGE}");
             Ok(())

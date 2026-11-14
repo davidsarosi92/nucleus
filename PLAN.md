@@ -284,7 +284,7 @@ are marked ✅.
 | | M14.13 | Database branches (copy-on-write) | ✅ (2026-11-14) B1–B5: pages' births and dead lists (ZFS's) on the copy-on-write pages, a tree and a WAL per branch in one file, an engine per branch, `CREATE BRANCH [AS OF …]`, a client naming the branch as its database; a branch made in ms whatever the size, dropped in time following the internal nodes it copied |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
 | | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
-| | M14.16 | Migrations and code generation | ⬜ |
+| | M14.16 | Migrations and code generation | ◐ M1–M2 ✅ (2026-11-14): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; next M3 dry runs and diffs |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
@@ -8782,7 +8782,7 @@ put it but `text`, which it can neither query nor index.
   not only JSON; close the remaining gap to `jsonschema`; the benchmark
   page.
 
-### §M14.16 — Migrations and code generation ⬜
+### §M14.16 — Migrations and code generation ◐
 
 - `nucleus migrate`: versioned migration files (`up` / `down`), applied
   transactionally (DDL is transactional), recorded in `nc_catalog`;
@@ -8808,6 +8808,19 @@ Steps (planned 2026-11-14):
   prints them.  Prior art: `pg_dump --schema-only` (its dependency
   sort), SQLite's `sqlite_schema.sql` (the creating text kept), MySQL's
   `SHOW CREATE TABLE`.
+  ✅ 2026-11-14.  *Built:* `definitions::all` from the catalog's records
+  (`nc_catalog.definitions`), `nucleus dump --schema`.  The order is by
+  kind, not a dependency sort as `pg_dump`'s: foreign keys come after
+  every table, so no cycle needs breaking, and what else depends on
+  something (a partition on its parent, a chunk table on its source, a
+  column on its model) has a kind that comes later.  A memory store and a
+  chunk table are their own statements plus what was added since (their
+  columns past the statement's, other indexes and constraints).  *Found
+  by the law:* nothing — every schema of the test kit's 71 scripts
+  replayed on the first run; the rich schema needed no change either,
+  only an index part `DESC` the grammar does not have.  *Not taken:*
+  keeping each object's creating text (SQLite's way): after `ALTER`s it
+  is not the object, and a diff (M3) needs the object as it is.
 - **M2 — `nucleus migrate`**: files `migrations/<version>_<name>.sql`,
   up and down in one file (`-- migrate:up`, `-- migrate:down`);
   `new`, `up [--to v]`, `down [--to v | --all]`, `status`; each
@@ -8822,6 +8835,22 @@ Steps (planned 2026-11-14):
   sql` connects.  Prior art: Flyway (checksums, `validate`), sqlx's and
   golang-migrate's file names, dbmate's one file with both directions,
   Rails' `schema_migrations`.
+  ✅ 2026-11-14.  *Built:* `migrations.rs` (catalog `00 1B <version>`,
+  a big-endian `u64`, so versions sort as numbers), `RECORD MIGRATION` /
+  `FORGET MIGRATION` (the right to create in the database, as `CREATE
+  MODEL`), `nc_catalog.migrations`; `nucleus migrate new | status | up
+  [--to] | down [--to | --all]` over a directory, `:memory:` or a server.
+  Each migration is one script — `BEGIN; up; RECORD …; COMMIT` — so it
+  is one round trip to a server; `transaction:false` (dbmate's word)
+  for what cannot be in a block.  Checksums are SHA-256 of the file with
+  line ends as `\n` (Flyway's CRC32 misses edits it collides on; a file
+  is small).  *Not taken:* a lock table or advisory lock (Flyway, Rails):
+  the record's key is the lock — snapshot isolation makes the second
+  committer conflict, and a migrator that started later finds the
+  record; a separate `.up.sql` / `.down.sql` pair (sqlx, golang-migrate):
+  one file keeps the two directions of a change together; repeatable
+  migrations (Flyway's `R__`) — views and functions nucleus does not
+  have yet.
 - **M3 — dry runs and diffs**: `nucleus migrate up --dry-run` applies on a
   branch of the database (§M14.13), reports each statement's time and the
   linter's findings, and drops the branch — the database untouched;

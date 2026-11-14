@@ -941,7 +941,10 @@ pub fn authorize_ddl(
         Statement::CreateEnum { .. } | Statement::CreateMemoryStore { .. } => {
             c.require(txn, Kind::Schema, "public", CREATE, None)?
         }
-        Statement::CreateSecret { .. } | Statement::CreateModel { .. } => {
+        Statement::CreateSecret { .. }
+        | Statement::CreateModel { .. }
+        | Statement::RecordMigration { .. }
+        | Statement::ForgetMigration { .. } => {
             c.require(txn, Kind::Database, DATABASE, CREATE, None)?
         }
         Statement::DropModel { name, .. } => {

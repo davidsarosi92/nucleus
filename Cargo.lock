@@ -402,6 +402,7 @@ version = "0.1.0"
 dependencies = [
  "nucleus-client",
  "nucleus-console",
+ "nucleus-crypto",
  "nucleus-embeddings",
  "nucleus-kv",
  "nucleus-ldap",

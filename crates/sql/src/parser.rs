@@ -84,6 +84,11 @@ const EXPLAIN_OPTIONS: &[&str] = &[
     "memory",
 ];
 
+/// Whether `word` (lower case) is reserved: a name only in double quotes.
+pub fn is_reserved(word: &str) -> bool {
+    RESERVED.contains(&word)
+}
+
 const RESERVED: &[&str] = &[
     "select",
     "lateral",
@@ -964,8 +969,27 @@ impl<'a> Parser<'a> {
                 Ok(Statement::Summarize(source))
             }
             "remember" => self.remember(),
+            "record" => {
+                self.pos += 1;
+                self.expect_kw("migration")?;
+                let version = self.migration_version()?;
+                self.expect_kw("name")?;
+                let name = self.string()?;
+                self.expect_kw("checksum")?;
+                let checksum = self.string()?;
+                Ok(Statement::RecordMigration {
+                    version,
+                    name,
+                    checksum,
+                })
+            }
             "forget" => {
                 self.pos += 1;
+                if self.eat_kw("migration") {
+                    return Ok(Statement::ForgetMigration {
+                        version: self.migration_version()?,
+                    });
+                }
                 self.expect_kw("subject")?;
                 Ok(Statement::Forget {
                     subject: self.expr()?,
@@ -1657,6 +1681,16 @@ impl<'a> Parser<'a> {
             *slot = Some(self.expr()?);
         }
         Ok(Statement::Remember(Box::new(r)))
+    }
+
+    /// A migration's version: a whole number (its file's prefix).
+    fn migration_version(&mut self) -> Result<u64> {
+        match self.next() {
+            Some(Token::Number(n)) => n
+                .parse()
+                .map_err(|_| self.error("expected a migration's version, a whole number")),
+            _ => Err(self.error("expected a migration's version, a whole number")),
+        }
     }
 
     fn table_options(&mut self) -> Result<Vec<(String, String)>> {

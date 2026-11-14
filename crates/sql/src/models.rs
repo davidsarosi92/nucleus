@@ -467,7 +467,7 @@ pub struct Limits {
 }
 
 /// The core's limit options, by name.
-const LIMITS: [&str; 4] = [
+pub const LIMITS: [&str; 4] = [
     "batch_tokens",
     "requests_per_minute",
     "tokens_per_minute",

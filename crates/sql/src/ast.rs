@@ -119,6 +119,23 @@ pub enum Statement {
         /// The columns; none drops them.
         columns: Vec<String>,
     },
+    /// `RECORD MIGRATION version NAME 'name' CHECKSUM 'hex'`: a migration
+    /// recorded as applied, in the transaction that applies it (PLAN.md
+    /// §M14.16 M2).
+    RecordMigration {
+        /// Its version.
+        version: u64,
+        /// Its name.
+        name: String,
+        /// Its file's checksum.
+        checksum: String,
+    },
+    /// `FORGET MIGRATION version`: a migration's record removed, in the
+    /// transaction that reverts it.
+    ForgetMigration {
+        /// Its version.
+        version: u64,
+    },
     /// `FORGET SUBJECT value`: every row of the subject erased from every
     /// table with subject columns (PLAN.md §M14.24 R2).
     Forget {

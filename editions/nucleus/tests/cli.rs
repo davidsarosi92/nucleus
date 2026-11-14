@@ -154,6 +154,161 @@ fn init_makes_a_password() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `nucleus migrate` (PLAN.md §M14.16 M2): files applied in order, each
+/// with its record in one transaction; reverted; checked.
+#[test]
+fn migrations_up_and_down() {
+    let root = temp_dir("migrate");
+    let (db, m) = (root.join("db"), root.join("migrations"));
+    std::fs::create_dir_all(&m).unwrap();
+    let (d, md) = (db.to_str().unwrap(), m.to_str().unwrap());
+    let migrate = |args: &[&str]| {
+        let mut all = vec!["migrate"];
+        all.extend_from_slice(args);
+        all.extend_from_slice(&[d, "--dir", md]);
+        nucleus(&all, "")
+    };
+    let write = |name: &str, text: &str| std::fs::write(m.join(name), text).unwrap();
+    write(
+        "1_dept.sql",
+        "-- migrate:up\nCREATE TABLE dept (id int PRIMARY KEY, name text);\n-- migrate:down\nDROP TABLE dept;\n",
+    );
+    write(
+        "2_emp.sql",
+        "-- migrate:up\nCREATE TABLE emp (id int PRIMARY KEY, dept_id int REFERENCES dept (id));\nCREATE INDEX emp_dept ON emp (dept_id)\n-- migrate:down\nDROP TABLE emp;\n",
+    );
+    let (ok, out) = migrate(&["status"]);
+    assert!(
+        ok && out.contains("1  dept") && out.matches("pending").count() == 2,
+        "{out}"
+    );
+    let (ok, out) = migrate(&["up", "--to", "1"]);
+    assert!(
+        ok && out.contains("applied 1_dept") && !out.contains("2_emp"),
+        "{out}"
+    );
+    let (ok, out) = migrate(&["up"]);
+    assert!(ok && out.contains("applied 2_emp"), "{out}");
+    let (ok, out) = migrate(&["up"]);
+    assert!(ok && out.contains("up to date"), "{out}");
+    let (ok, out) = nucleus(
+        &[
+            "sql",
+            d,
+            "-c",
+            "SELECT version, name FROM nc_catalog.migrations",
+        ],
+        "",
+    );
+    assert!(
+        ok && out.contains(" 1       | dept") && out.contains(" 2       | emp"),
+        "{out}"
+    );
+
+    // A failing migration leaves nothing: not its first table, not its record.
+    write(
+        "3_bad.sql",
+        "-- migrate:up\nCREATE TABLE half (id int PRIMARY KEY);\nCREATE TABLE emp (id int);\n-- migrate:down\nDROP TABLE half;\n",
+    );
+    let (ok, out) = migrate(&["up"]);
+    assert!(
+        !ok && out.contains("3_bad") && out.contains("42P07"),
+        "{out}"
+    );
+    let (ok, out) = nucleus(
+        &[
+            "sql",
+            d,
+            "-c",
+            "SELECT count(*) FROM nc_catalog.tables WHERE name = 'half'",
+        ],
+        "",
+    );
+    assert!(ok && out.contains(" 0"), "{out}");
+    std::fs::remove_file(m.join("3_bad.sql")).unwrap();
+
+    // An applied file changed is refused; so is a new one older than the newest.
+    let two = std::fs::read_to_string(m.join("2_emp.sql")).unwrap();
+    write("2_emp.sql", &two.replace("CREATE INDEX", "CREATE  INDEX"));
+    let (ok, out) = migrate(&["up"]);
+    assert!(!ok && out.contains("changed since it was applied"), "{out}");
+    let (_, out) = migrate(&["status"]);
+    assert!(out.contains("CHANGED"), "{out}");
+    write("2_emp.sql", &two);
+    write("0_early.sql", "-- migrate:up\nSELECT 1;\n");
+    let (ok, out) = migrate(&["up"]);
+    assert!(
+        !ok && out.contains("older than the newest applied"),
+        "{out}"
+    );
+    std::fs::remove_file(m.join("0_early.sql")).unwrap();
+
+    // Down: the newest, then all.
+    let (ok, out) = migrate(&["down"]);
+    assert!(ok && out.contains("reverted 2_emp"), "{out}");
+    let (ok, out) = nucleus(&["sql", d, "-c", "SELECT * FROM emp"], "");
+    assert!(!ok && out.contains("42P01"), "{out}");
+    let (ok, out) = migrate(&["up"]);
+    assert!(ok && out.contains("applied 2_emp"), "{out}");
+    let (ok, out) = migrate(&["down", "--all"]);
+    assert!(
+        ok && out.contains("reverted 2_emp") && out.contains("reverted 1_dept"),
+        "{out}"
+    );
+    let (ok, out) = migrate(&["status"]);
+    assert!(ok && out.matches("pending").count() == 2, "{out}");
+
+    // Outside a block when it says so: a branch made by a migration.
+    write(
+        "3_branch.sql",
+        "-- migrate:up transaction:false\nCREATE BRANCH trial;\n-- migrate:down transaction:false\nDROP BRANCH trial;\n",
+    );
+    let (ok, out) = migrate(&["up"]);
+    assert!(ok && out.contains("applied 3_branch"), "{out}");
+    let (ok, out) = migrate(&["down"]);
+    assert!(ok && out.contains("reverted 3_branch"), "{out}");
+
+    // `new`: a file named by the time, both directions in it.
+    let (ok, out) = nucleus(&["migrate", "new", "Add Notes!", "--dir", md], "");
+    assert!(ok && out.trim_end().ends_with("_add_notes.sql"), "{out}");
+    let made = std::fs::read_to_string(out.trim_end()).unwrap();
+    assert_eq!(made, "-- migrate:up\n\n\n-- migrate:down\n\n");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// `nucleus dump --schema` (PLAN.md §M14.16 M1): the schema as SQL,
+/// which makes the same schema in another database.
+#[test]
+fn the_schema_dumped_replays() {
+    let (a, b) = (temp_dir("dump-a"), temp_dir("dump-b"));
+    let (da, db) = (a.to_str().unwrap(), b.to_str().unwrap());
+    let (ok, out) = nucleus(
+        &["sql", da],
+        "CREATE TABLE dept (id int PRIMARY KEY, name text NOT NULL UNIQUE);\n\
+         CREATE TABLE emp (id int PRIMARY KEY, dept_id int REFERENCES dept (id), pay numeric(10,2) CHECK (pay > 0));\n\
+         CREATE INDEX emp_dept ON emp (dept_id);\n\
+         COMMENT ON TABLE emp IS 'people';\n\
+         INSERT INTO dept VALUES (1, 'eng');\n",
+    );
+    assert!(ok, "{out}");
+    let (ok, schema) = nucleus(&["dump", "--schema", da], "");
+    assert!(ok, "{schema}");
+    assert!(
+        schema.contains("CREATE INDEX emp_dept ON emp (dept_id);\n")
+            && schema.contains("COMMENT ON TABLE emp IS 'people';\n")
+            && !schema.contains("eng"),
+        "{schema}"
+    );
+    let (ok, out) = nucleus(&["sql", db], &schema);
+    assert!(ok, "{out}");
+    let (ok, again) = nucleus(&["dump", "--schema", db], "");
+    assert!(ok && again == schema, "{again}");
+    let (ok, out) = nucleus(&["dump", da], "");
+    assert!(!ok && out.contains("--schema"), "{out}");
+    std::fs::remove_dir_all(&a).unwrap();
+    std::fs::remove_dir_all(&b).unwrap();
+}
+
 fn ncsql(args: &[&str], stdin: &str) -> (bool, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ncsql"))
         .args(args)

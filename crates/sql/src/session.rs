@@ -2149,6 +2149,18 @@ pub(crate) fn execute_statement(
             crate::forget::set(txn, table, columns)?;
             Output::Command("ALTER TABLE".into())
         }
+        Statement::RecordMigration {
+            version,
+            name,
+            checksum,
+        } => {
+            crate::migrations::record(txn, *version, name, checksum)?;
+            Output::Command("RECORD MIGRATION".into())
+        }
+        Statement::ForgetMigration { version } => {
+            crate::migrations::forget(txn, *version)?;
+            Output::Command("FORGET MIGRATION".into())
+        }
         Statement::Forget { subject } => {
             let e = crate::forget::forget(txn, reg, subject, params)?;
             Output::Rows {
