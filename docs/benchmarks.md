@@ -1167,6 +1167,47 @@ NUCLEUS_HISTORY=3600 cargo run --release -p nucleus-kv --example bench
 cargo run --release -p nucleus-kv --example bench
 ```
 
+## Branches
+
+PLAN.md §M14.13 B5 (`crates/kv/examples/branches.rs`): release, real
+files, an Apple M2 Pro, 2026-11-14, three runs (their middle).  Rows of
+a 16-byte key and a 100-byte value, a 256 MiB cache, an hour of history;
+"in use" the data file's pages in use, the branches' together.
+
+| rows | in use | create | its space | drop untouched | `AS OF` 10,000 rows' changes ago | reset |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100,000 | 13.7 MiB | 2.3 ms | 0 | 2.1 ms | 41 ms | 9.1 ms |
+| 1,000,000 | 137 MiB | 6.5 ms | 0 | 2.4 ms | 263 ms | 40 ms |
+| 4,000,000 | 548 MiB | 7.8 ms | 0 | 2.3 ms | 867 ms | 121 ms |
+
+Making a branch is a checkpoint, whatever the size, and takes no page.
+`AS OF` is a pass over the branch's entries (DOCS.md §5.2): about
+200 ns an entry.  The reset is of that branch, so it drops what its
+roll-back changed.
+
+A branch of the 4,000,000 rows, changed, then dropped:
+
+| rows changed on the branch | its space | drop | given back |
+|---|---:|---:|---:|
+| 1,000 together | 0.3 MiB | 2.8 ms | 0.3 MiB |
+| 100,000 together | 27.4 MiB | 16 ms | 27.4 MiB |
+| 1,000 spread (one a leaf) | 11.1 MiB | 150 ms | 11.1 MiB |
+| 10,000 spread | 81.5 MiB | 172 ms | 81.5 MiB |
+| 100,000 spread (every leaf) | 549 MiB | 321 ms | 548 MiB |
+| 1,000,000 spread | 1,094 MiB | 505 ms | 1,094 MiB |
+
+The space is the pages the branch copied — a row's leaf and the internal
+nodes above it, the old versions kept with the history — and the drop
+gives all of it back.  The drop's time follows the internal nodes copied
+rather than the rows: it reads each copied node's children for their
+births, the ones not copied too, so changes spread over the table read
+up to its leaf level once (all in the cache at 1,000,000 rows: 1,000
+spread then drop in 8 ms).
+
+```sh
+cargo run --release -p nucleus-kv --example branches
+```
+
 ## Embedded editions
 
 PLAN.md §M14.23; an M-series Mac.

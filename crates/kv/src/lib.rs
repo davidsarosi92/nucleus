@@ -950,6 +950,14 @@ impl Database {
         Ok(self.engine.vacuum()?)
     }
 
+    /// The data file's pages and how many of them are free — its
+    /// branches' together (they share the file).  A checkpoint settles
+    /// the count: pages freed since become free at the next.
+    pub fn pages(&self) -> (u64, u64) {
+        let pager = self.engine.store().pool().pager();
+        (pager.page_count(), pager.free_count())
+    }
+
     /// The newest committed snapshot.
     pub fn latest(&self) -> Timestamp {
         self.engine.visible()
