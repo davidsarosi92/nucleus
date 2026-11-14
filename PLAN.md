@@ -8589,13 +8589,18 @@ put it but `text`, which it can neither query nor index.
   `$ref`, `enum`, `pattern`, `anyOf`, `uniqueItems`): first version
   1,320 ns a document against `jsonschema` 0.61's 145 ns; after the
   changes above 378 ns (errors 477 ns against 249 ns; compiling 17 µs
-  against 22 µs).  In SQL (`bench/json/schema.py`) a single-row
-  `INSERT` with the `CHECK` costs +6 µs — found to be the schema
-  literal's cast re-evaluated per row (any `'…'::json` in a `CHECK`
-  costs the same), not the check.  *Next:* fold constant
-  subexpressions of `CHECK`s, defaults and filters once per statement
-  (minding time-zone-dependent casts); close the remaining gap to
-  `jsonschema`; the benchmark page.
+  against 22 µs).  In SQL (`bench/json/schema.py`, 90,000 rows): `INSERT … SELECT`
+  into a table with the `CHECK` costs +0.56 µs a row; single-row
+  `INSERT`s (`execute_many`) +6 µs a row — per statement, not per row:
+  the table's writer binds its `CHECK`s for each statement (the
+  constraint's text parsed, its JSON literal read, the compiled schema
+  found by its bytes); a 700-character `CHECK` of no JSON costs +2.5 µs
+  the same way.  Folding literal casts was tried and changed nothing
+  (the literal is a JSON value already when bound).  *Next:* keep a
+  table's bound writer (checks, defaults, generated columns) across
+  statements, keyed by the table's catalog version — for every table,
+  not only JSON; close the remaining gap to `jsonschema`; the benchmark
+  page.
 
 ### §M14.16 — Migrations and code generation ⬜
 

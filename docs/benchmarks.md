@@ -1074,6 +1074,30 @@ Builds: the expression indexes 0.11 s and 0.09 s, the containment index
 python3 bench/json/index.py --nucleus target/release/nucleus [--no-pg]
 ```
 
+JSON Schema checks (PLAN.md §M14.15 J5): 100,000 made-up tool calls,
+one in ten not fitting, against a schema with `$ref`, `enum`,
+`pattern`, `anyOf`, `uniqueItems` and bounds; each document parsed
+already, the schema compiled once, nanoseconds a document (the median
+of fifteen; `bench/json/src/bin/schema.rs`), against the `jsonschema`
+crate 0.61:
+
+| | nucleus | `jsonschema` |
+|---|---:|---:|
+| whether it fits | 378 | 147 |
+| every problem, with its place | 477 | 249 |
+| compiling the schema | 17 µs | 22 µs |
+
+In SQL (`bench/json/schema.py`, 90,000 rows): `INSERT … SELECT` into a
+table with `CHECK (json_matches_schema(args, '…'))` +0.56 µs a row;
+single-row `INSERT`s +6 µs a row (the `CHECK` bound per statement);
+`count(*) … WHERE json_matches_schema(…)` 17.7 ms against `count(*)`'s
+1.5 ms.  2026-11-14.
+
+```sh
+(cd bench/json && CARGO_TARGET_DIR=../../target/json cargo run --release --bin schema)
+python3 bench/json/schema.py --nucleus target/release/nucleus
+```
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;
