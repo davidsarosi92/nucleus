@@ -1,0 +1,87 @@
+# JSON Schema (PLAN.md §M14.15 J5): json_matches_schema(doc, schema)
+# and json_schema_errors(doc, schema) — a model's structured output
+# checked as it is stored, and told where it does not fit.
+# nucleus-only throughout (PostgreSQL has no JSON Schema).
+
+query T
+SELECT json_matches_schema('{"name": "Ann", "age": 31}', '{"type": "object", "required": ["name"]}')
+----
+t
+
+query T
+SELECT json_matches_schema('{"age": 31}', '{"type": "object", "required": ["name"]}')
+----
+f
+
+query T
+SELECT json_matches_schema(NULL, '{}')
+----
+NULL
+
+query T
+SELECT * FROM unnest(json_schema_errors('{"name": "", "age": "x", "extra": 1}', '{"type": "object", "properties": {"name": {"type": "string", "minLength": 1}, "age": {"type": "integer"}}, "required": ["name", "age"], "additionalProperties": false}'))
+----
+$.age: expected integer, got string
+$.name: "" is 0 characters long, fewer than 1
+$: the property "extra" is not allowed
+
+query I
+SELECT cardinality(json_schema_errors('{"a": 1}', '{"type": "object"}'))
+----
+0
+
+# A table that takes only what fits: a model's tool calls.
+statement ok
+CREATE TABLE calls (id int PRIMARY KEY, args jsonb CHECK (json_matches_schema(args, '{"type": "object", "properties": {"city": {"type": "string", "minLength": 1}, "unit": {"enum": ["c", "f"]}, "days": {"type": "integer", "minimum": 1, "maximum": 14}}, "required": ["city", "unit"], "additionalProperties": false}')))
+
+statement ok
+INSERT INTO calls VALUES (1, '{"city": "Budapest", "unit": "c"}'), (2, '{"city": "Oslo", "unit": "f", "days": 3}')
+
+statement error 23514
+INSERT INTO calls VALUES (3, '{"city": "Rome", "unit": "kelvin"}')
+
+statement error 23514
+INSERT INTO calls VALUES (3, '{"city": "Rome", "unit": "c", "days": 30}')
+
+statement error 23514
+UPDATE calls SET args = args - 'city' WHERE id = 1
+
+query IT rowsort
+SELECT id, args->>'city' FROM calls
+----
+1 Budapest
+2 Oslo
+
+# References, recursion, the applicators.
+query T
+SELECT json_matches_schema('{"v": 1, "kids": [{"v": 2, "kids": []}]}', '{"$defs": {"n": {"type": "object", "properties": {"v": {"type": "integer"}, "kids": {"type": "array", "items": {"$ref": "#/$defs/n"}}}, "required": ["v"]}}, "$ref": "#/$defs/n"}')
+----
+t
+
+query T
+SELECT * FROM unnest(json_schema_errors('{"v": 1, "kids": [{"kids": []}]}', '{"$defs": {"n": {"type": "object", "properties": {"v": {"type": "integer"}, "kids": {"type": "array", "items": {"$ref": "#/$defs/n"}}}, "required": ["v"]}}, "$ref": "#/$defs/n"}'))
+----
+$.kids[0]: the required property "v" is missing
+
+query T
+SELECT json_matches_schema('0.3', '{"type": "number", "multipleOf": 0.1, "exclusiveMinimum": 0}')
+----
+t
+
+query T
+SELECT json_matches_schema('"2024-x"', '{"anyOf": [{"type": "integer"}, {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"}]}')
+----
+f
+
+# A schema mistyped is refused, not passed over.
+statement error 0A000
+SELECT json_matches_schema('{}', '{"requried": ["a"]}')
+
+statement error 22023
+SELECT json_matches_schema('{}', '{"type": "text"}')
+
+statement error 22023
+SELECT json_matches_schema('{}', '{"pattern": "("}')
+
+statement ok
+DROP TABLE calls

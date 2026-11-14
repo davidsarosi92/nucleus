@@ -1222,8 +1222,11 @@ and the module runs it in `BEGIN READ ONLY` … `ROLLBACK`, after `SET
 statement_timeout` (default 5000 ms).  At most `--max-rows` rows (default
 100) are returned, `row_count` and `truncated` saying how many there were.
 Results are JSON (`structuredContent` and the same as text): booleans and
-integers as JSON's, `real` and `double precision` as numbers, the rest —
-`numeric` too — as strings, NULL as null.  A failure is the tool's
+integers as JSON's, `real` and `double precision` as numbers, a `json`
+column's value as the JSON itself (its text instead where a number in it
+has more than 15 significant digits and is not a 64-bit integer — what
+a JSON reader's `f64` would change), the rest — `numeric` too — as
+strings, NULL as null.  A failure is the tool's
 (`isError`), its text `ERROR: … (SQLSTATE)` and `HINT: …`; an unknown tool
 or method is a JSON-RPC error.  The module is the protocol over a
 `Database` trait (SQL text in, answers with column types out); the
@@ -5287,6 +5290,49 @@ the condition stays in the scan's filter, checked on each row found.  A
 serves `?`, and `@>` of an empty container under a key.  `EXPLAIN`:
 `Index Scan using ix on t (doc @> {…}) filter: …`.
 
+**JSON Schema** (§M14.15 J5, `json::schema`): `json_matches_schema(doc,
+schema)` (`jsonb_matches_schema` too, pg_jsonschema's name) says whether
+a document fits a schema, so `CHECK (json_matches_schema(args, '…'))`
+refuses a model's tool call or structured output that does not (`23514`);
+`json_schema_errors(doc, schema)` is `text[]`, each problem with its
+place — `$.days: 30 is greater than the maximum 14`, `$: the required
+property "city" is missing`, `$.hours[1]: expected integer, got string`
+—, in the document's key order, every one of them (where
+`json_matches_schema` stops at the first).  The vocabulary is JSON
+Schema 2020-12's validation and applicators: `type` (a name or names;
+`integer` is any number without a fraction, `1.0` too), `enum`, `const`,
+`minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum` (exact:
+the numbers' order keys, §8.31's order), `multipleOf` (exact in decimals
+where both numbers' digits fit 128 bits, else in `f64`),
+`minLength` / `maxLength` (characters), `pattern` (the `regex` crate:
+ECMA-262's without look-around or back-references), `items`,
+`prefixItems`, `contains` / `minContains` / `maxContains`, `minItems` /
+`maxItems`, `uniqueItems`, `properties`, `patternProperties`,
+`additionalProperties`, `propertyNames`, `required`,
+`dependentRequired`, `dependentSchemas`, `minProperties` /
+`maxProperties`, `allOf`, `anyOf`, `oneOf`, `not`, `if` / `then` /
+`else`, and `$ref` — a JSON Pointer into the schema (`#`,
+`#/$defs/node`, recursion too; a check deeper than 256 is `54001`, a
+loop's end).  Equality (`enum`, `const`, `uniqueItems`) compares
+canonical bytes: equal values have equal bytes.  Annotations are passed
+over (`title`, `description`, `default`, `examples`, `format`,
+`$schema`, `$id`, `$comment`, `deprecated`, `readOnly`, `writeOnly`,
+`content*`, `x-…`, Gemini's `propertyOrdering`), and OpenAPI's
+`nullable: true` admits `null`; any other keyword is refused (`0A000`)
+rather than ignored, so a misspelt `requried` is an error, not a schema
+every document fits — `unevaluatedProperties`, `unevaluatedItems`,
+`$dynamicRef`, `items` as an array (draft 4–2019's; `prefixItems`
+instead) and a `$ref` to another document among them.  A schema that is
+not one (`{"type": "text"}`, a pattern that does not compile, a `$ref`
+pointing nowhere) is `22023`.  A schema is compiled once — subschemas
+in an arena, a `$ref`'s target shared by its pointer — and kept per
+thread by its bytes (64 at most), so a `CHECK`'s constant schema is
+compiled once per thread.  Prior art: pg_jsonschema (Supabase's
+extension, the function names) and the `jsonschema` crate (a schema
+compiled to a tree of validators); PLAN.md §M14.15 J5.
+
+**MCP** (§6.5) sends a `json` column's value as the JSON itself.
+
 **On the wire** (`ncp` tag 11 named `json`) a value travels as its text
 (`Type::wire_output` / `wire_input`), in rows and in columnar batches;
 the drivers hand out the language's own values (§11).  pg-compat shows
@@ -5302,7 +5348,9 @@ records as PostgreSQL 18 gives them: `scripts/slt-pg.py check`),
 `slt/69_expression_indexes.slt` (expression indexes, on JSON paths
 among others), `slt/70_json_index.slt` (the containment index: its
 conditions' results as PostgreSQL 18 gives them, a recheck's false
-match, writes, sealed segments), `text::index::json::tests` (no
+match, writes, sealed segments), `json::schema::tests` and
+`slt/71_json_schema.slt` (JSON Schema: each keyword, the errors' places,
+a `CHECK`, what is refused), `text::index::json::tests` (no
 contained document missed, paths and values told apart),
 the law kit's generator (equal documents written differently), the
 `json` fuzz target (§2; the operators' laws too, and paths: normalized

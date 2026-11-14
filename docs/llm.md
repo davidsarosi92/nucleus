@@ -10,7 +10,9 @@ what to use instead.  For people the full reference is DOCS.md §8.
   (each column's min, max, distinct count, mean, quartiles, NULLs), `query` (read-only,
   `$1`… in `params`), `explain`, `lint`; `execute` with `--allow-writes`;
   `remember`, `recall`, `forget`, `cite` (memory stores) with `--memory`;
-  `forget_subject` with `--allow-erasure`.  A walk-through: `docs/memory.md`.
+  `forget_subject` with `--allow-erasure`.  Results are JSON: numbers and
+  booleans as JSON's, a `json` column's value as the JSON itself (as text
+  only where a number would lose digits).  A walk-through: `docs/memory.md`.
 - **Shell:** `ncsql <dir>` or `ncsql -h 127.0.0.1:20035` (user and password
   `nucleus` by default); `-c "<sql>"` runs one command.
 - **Drivers:** Rust, Python, JavaScript, Java, C, C++, Swift over nucleus's protocol
@@ -77,6 +79,13 @@ Rows from documents: `SELECT o.id, i.* FROM orders o, JSON_TABLE(o.doc,
 '$.items[*]' COLUMNS (n FOR ORDINALITY, sku text, qty int PATH '$.qty'
 DEFAULT 0 ON ERROR, tags jsonb PATH '$.tags', NESTED PATH '$.parts[*]'
 COLUMNS (part text PATH '$.name'))) i`.
+**JSON Schema** (2020-12, the schemas a model's tools and structured
+outputs take): `json_matches_schema(doc, schema)` (true or false; in a
+`CHECK`, a call that does not fit is refused, `23514`) and
+`json_schema_errors(doc, schema)` — `text[]`, each problem with its place
+(`$.days: 30 is greater than the maximum 14`), to hand back to the model.
+`$ref` is `#…` pointers into the schema; an unknown keyword is refused
+(`0A000`), not ignored; `pattern` is Rust's `regex`.
 
 **Vectors** (embeddings, as pgvector): `embedding vector(768)`, literals
 `'[0.1, 0.2, …]'` (or a driver's float array as a parameter); distances

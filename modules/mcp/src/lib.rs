@@ -24,7 +24,8 @@ pub enum Answer {
         columns: Vec<String>,
         /// Their types, by name: `boolean`, `smallint`, `integer`,
         /// `bigint`, `real` and `double precision` become JSON booleans
-        /// and numbers; any other is a string (`numeric` too, exact).
+        /// and numbers, `json` (and `jsonb`) the JSON itself; any other
+        /// is a string (`numeric` too, exact).
         types: Vec<String>,
         /// The rows.
         rows: Vec<Vec<Option<String>>>,
@@ -115,8 +116,50 @@ fn cell(ty: Option<&String>, text: Option<String>) -> Json {
             .ok()
             .and_then(serde_json::Number::from_f64)
             .map_or(Json::String(text), Json::Number),
+        Some("json" | "jsonb") => match serde_json::from_str::<Json>(&text) {
+            Ok(j) if numbers_exact(&text) => j,
+            _ => Json::String(text),
+        },
         _ => Json::String(text),
     }
+}
+
+/// Whether every number in the JSON text `s` survives being read as a
+/// JSON value here — an integer within 64 bits, or at most 15 significant
+/// digits (what an `f64` keeps) —, so a document is sent as JSON only
+/// where that changes nothing; else as its text.
+fn numbers_exact(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < b.len() && matches!(b[i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                {
+                    i += 1;
+                }
+                let token = &s[start..i];
+                if token.parse::<i64>().is_err() && token.parse::<u64>().is_err() {
+                    let mantissa = token.split(['e', 'E']).next().unwrap_or("");
+                    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+                    let significant = digits.trim_start_matches('0').trim_end_matches('0');
+                    if significant.len() > 15 {
+                        return false;
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    true
 }
 
 /// A row as JSON.
@@ -819,5 +862,21 @@ mod tests {
         );
         assert!(bind("SELECT $3", &[json!(1)]).is_err());
         assert!(bind("SELECT $1", &[json!([1])]).is_err());
+    }
+
+    #[test]
+    fn json_cells_are_json() {
+        let ty = Some("json".to_string());
+        let c = |t: &str| cell(ty.as_ref(), Some(t.into()));
+        assert_eq!(
+            c(r#"{"a": [1, 2.5, "x\"1e99999"], "b": null}"#),
+            json!({"a": [1, 2.5, "x\"1e99999"], "b": null})
+        );
+        assert_eq!(c("18446744073709551615"), json!(18446744073709551615u64));
+        // A number a JSON value here would change: the text instead.
+        assert_eq!(c("[0.12345678901234567]"), json!("[0.12345678901234567]"));
+        assert_eq!(c("1e400"), json!("1e400"));
+        assert_eq!(c("100000000000000000000000000000"), json!(1e29));
+        assert_eq!(cell(Some(&"text".into()), Some("{}".into())), json!("{}"));
     }
 }

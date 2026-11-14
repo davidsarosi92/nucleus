@@ -35,7 +35,9 @@ out — and runs in a `BEGIN READ ONLY` transaction rolled back after it,
 each statement within `statement_timeout`.  Errors come back as the tool's
 (`isError`), with nucleus's hint: `HINT: Perhaps you meant column
 "email".`  Results are JSON (`structuredContent`, and the same as text):
-booleans and integers as JSON's, `numeric` as a string.
+booleans and integers as JSON's, `numeric` as a string, a `json` column's
+value as the JSON itself (as its text only where a number in it has more
+digits than a JSON reader's 64-bit float keeps).
 
 ```rust
 let mut db = MyDatabase::new();   // impl nucleus_mcp::Database

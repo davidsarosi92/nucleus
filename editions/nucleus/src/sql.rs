@@ -178,6 +178,7 @@ impl Backend {
                                     T::Int => "bigint",
                                     T::Real => "real",
                                     T::Float => "double precision",
+                                    T::Json => "json",
                                     _ => "text",
                                 }
                                 .to_string()

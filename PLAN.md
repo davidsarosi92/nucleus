@@ -283,7 +283,7 @@ are marked ✅.
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ✅ (2026-11-14) study written (2026-11-13); R1 ✅ memory stores, `REMEMBER`, `recall()`, row expiry, MCP tools, driver helpers (LongMemEval_S turn R@10 0.819 against the paper's BM25 0.592); R2 ✅ `FORGET SUBJECT`, the scrub and the search (a planted subject's texts: 100 places after `DELETE` and a vacuum, 0 after `FORGET`); R3 ✅ leak tests over every recall path, BM25's statistics a tenant's own on a table partitioned by tenant; R4 ✅ `recall` under 1 ms in the process (100 000 memories), batched through `LATERAL`, a vacuum's crash flaw fixed; §M14.14 ✅ between; R5 ✅ citations (`as_of`), read records by request id (`nc_catalog.reads`), erasure through history and the log; R6 ✅ `BACKUP TO` / `nucleus restore` without index pages, each subject's rows sealed under its own key, which `FORGET` destroys (60 MiB backed up in 0.46 s, restored in 0.80 s); R7 ✅ `docs/memory.md`, the Python and JavaScript `memory` examples (run in CI), MCP `cite` and `forget_subject` |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
-| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c (against PostgreSQL's GIN) waits for Docker |
+| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J5 ◐ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example; J4c (against PostgreSQL's GIN) waits for Docker |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
@@ -8573,9 +8573,29 @@ put it but `text`, which it can neither query nor index.
     `slt/70_json_index.slt`.
   - **J4c — measured** against PostgreSQL's GIN (`jsonb_path_ops`) and
     B-tree expression indexes on the same documents.
-- **J5 — for models**: `json_matches_schema`, MCP's JSON results, an
-  example (a model's tool calls and structured outputs, stored, checked
-  and queried), the guide, DOCS and the benchmark page.
+- **J5 — for models** ◐ (2026-11-14): `json_matches_schema(doc, schema)`
+  and `json_schema_errors(doc, schema)` (`json::schema`, JSON Schema
+  2020-12's validation and applicators, unknown keywords refused),
+  MCP's `json` cells as JSON, the example `examples/python/structured.py`
+  (tool calls checked by a `CHECK`, refused ones told where, queried by
+  containment, an expression index and `JSON_TABLE`), DOCS §8.31 and
+  docs/llm.md.  *Prior art:* pg_jsonschema (the names) and the
+  `jsonschema` crate (a schema compiled to the keywords it has).
+  Taken: only the keywords present are kept, grouped by the kind of
+  value they check; an object's keys walked along `properties` in the
+  keys' order (both sorted) rather than looked up; integer bounds
+  compared as integers; byte regexes.  *Measured*
+  (`bench/json/src/bin/schema.rs`, 100,000 tool calls, a schema with
+  `$ref`, `enum`, `pattern`, `anyOf`, `uniqueItems`): first version
+  1,320 ns a document against `jsonschema` 0.61's 145 ns; after the
+  changes above 378 ns (errors 477 ns against 249 ns; compiling 17 µs
+  against 22 µs).  In SQL (`bench/json/schema.py`) a single-row
+  `INSERT` with the `CHECK` costs +6 µs — found to be the schema
+  literal's cast re-evaluated per row (any `'…'::json` in a `CHECK`
+  costs the same), not the check.  *Next:* fold constant
+  subexpressions of `CHECK`s, defaults and filters once per statement
+  (minding time-zone-dependent casts); close the remaining gap to
+  `jsonschema`; the benchmark page.
 
 ### §M14.16 — Migrations and code generation ⬜
 

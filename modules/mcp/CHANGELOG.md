@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `json` cells are JSON (nucleus PLAN.md §M14.15 J5): a document comes
+  back as the object or array it is, not its text — as its text only
+  where a number in it would lose digits.
+
 - `cite` with `Options::memory` (nucleus PLAN.md §M14.24 R7): memories by
   id as they were at a citation's commit (`AS OF COMMIT`); and
   `forget_subject` with `Options::erasure` — `FORGET SUBJECT`, asked for
