@@ -1234,7 +1234,7 @@ nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]   
 nucleus restore <backup> <dir> [--subject-keys <file>]   # §8.30
 nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <duration>] | list | drop <name> | reset <name>   # §8.32
 nucleus dump --schema [<dir> | :memory:] [connection options of nucleus sql]   # §8.33
-nucleus migrate new <name> | status | up [--to <v>] | down [--to <v> | --all] [<dir>] [connection options] [--dir <migrations>]   # §8.34
+nucleus migrate new <name> | status | up [--to <v>] [--dry-run] | down [--to <v> | --all] [--dry-run] | diff [--new <name>] [<dir>] [connection options] [--dir <migrations>]   # §8.34, §8.36
 ```
 
 `nucleus sql <dir> -d <branch>` opens a local database's branch.
@@ -5685,6 +5685,45 @@ every row (`23502` on a `NULL`); `DROP NOT NULL` of a primary key column
 is `42P16`; `SET DEFAULT` binds the expression and computes it once,
 for its type (`22P02`); a generated column has no default (`42P17`).
 
+### 8.36 Dry runs and schema diffs (`schema_diff`, §M14.16 M4)
+
+**`nucleus migrate up --dry-run`** (and `down --dry-run`) makes a branch
+of the database (`migrate_dry_run_<pid>`, §M14.13), applies the
+migrations there — each with its time, a failing one with its error —
+prints how the schema would change (the definitions gone, `-`, and new,
+`+`) and drops the branch however it went: the database is untouched,
+and the run met its real data (a `SET NOT NULL` over rows with `NULL`s,
+a unique index over duplicates fail as they would).  Over the network the
+branch is reached as a database of its name.
+
+**`nucleus migrate diff`** replays every migration's `up` into a database
+in memory, replays the database's definitions into another, and prints
+the statements from the first schema to the second
+(`nucleus_sql::schema_diff`); every file must be applied first (else
+the diff would undo the pending ones).  `--new <name>` writes them as the
+next migration, its `down` the diff the other way, and records it as
+applied — the database has the change already.  The diff compares the
+definitions (§8.33) by kind, name and table, and a table both have by
+its catalog structure: what only the old schema has is dropped, what only
+the new has is created, what changed is dropped and created again —
+except what changes in place: a table's columns (`ADD`, `DROP`, `ALTER
+COLUMN … TYPE`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`) and
+constraints, an enum's new labels (`ADD VALUE … BEFORE`), an ordering's
+mapping, a table's settings (storage, expiry, subject, row security).
+The order: what depends on tables dropped (foreign keys always
+explicitly, so tables that reference each other drop in any order), the
+tables' columns and constraints that go, the types and models nothing
+uses any more; then models and types made, tables, new columns and
+changes, and last indexes, foreign keys, comments, settings and
+policies.  What a diff cannot see or must not do is a `--` note, not a
+statement: a column or table that may have been renamed (a drop and an
+add with the same type or columns: the note gives the `RENAME`), a
+changed primary key or partitioning, a partition, memory store or chunk
+table whose statement changed (dropping it would lose its rows), a
+column order `ADD COLUMN` cannot give.  The law, over every script of the
+test kit: the diff from an empty database makes the script's schema, and
+the diff back leaves an empty one (`crates/sql/tests/schema_diff.rs`).
+
 ## 9. Server (`nucleus-server`)
 
 ```
@@ -6705,6 +6744,9 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — §M14.16 M4, dry runs and diffs:** `nucleus migrate up
+  | down --dry-run` on a branch dropped after; `nucleus migrate diff
+  [--new name]`, `nucleus_sql::schema_diff` (§8.36).
 - **2026-11-14 — §M14.16 M1–M3, the schema as SQL, migrations, the
   `ALTER` they need:** `nc_catalog.definitions` and `nucleus dump
   --schema` (§8.33); `nucleus migrate`, `RECORD` / `FORGET MIGRATION`,

@@ -252,6 +252,8 @@ nucleus server ./mydb --console         # a web console on http://127.0.0.1:2003
 PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
 nucleus migrate new add_notes           # migrations/<time>_add_notes.sql: up and down
 nucleus migrate up ./mydb               # the pending ones, each in one transaction
+nucleus migrate up ./mydb --dry-run     # … on a branch dropped after: what would change
+nucleus migrate diff ./mydb --new x     # the database's schema change as a migration
 nucleus dump --schema ./mydb            # the schema as the SQL that makes it
 ```
 

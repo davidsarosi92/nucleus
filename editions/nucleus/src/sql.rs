@@ -307,6 +307,41 @@ impl Backend {
         }
     }
 
+    /// Branch `name` of the same database, reached as this one is (a dry
+    /// run's, PLAN.md §M14.16 M4).  Let go with [`release`](Self::release):
+    /// the database is this one's.
+    #[allow(dead_code)] // nucleus migrate's; ncsql has no use for it
+    pub(crate) fn on_branch(&self, name: &str) -> Result<Backend> {
+        match self {
+            Backend::Local { db, dir, .. } => {
+                let kv: Arc<dyn nucleus_kv::Kv> = Arc::new(db.clone());
+                let data = nucleus_server::branch_of(&kv, name).map_err(|e| e.message)?;
+                Ok(Backend::Local {
+                    session: Session::with_registry(data, registry()),
+                    db: db.clone(),
+                    dir: format!("{dir}, branch {name}"),
+                })
+            }
+            Backend::Remote(c) => {
+                let mut cfg = c.config().clone();
+                cfg.database = name.to_string();
+                Client::connect(cfg)
+                    .map(Backend::Remote)
+                    .map_err(|e| format!("branch {name}: {e}"))
+            }
+        }
+    }
+
+    /// Lets a backend [`on_branch`](Self::on_branch) made go, its
+    /// database left open.
+    #[allow(dead_code)] // as on_branch
+    pub(crate) fn release(self) -> Result<()> {
+        match self {
+            Backend::Local { .. } => Ok(()),
+            Backend::Remote(c) => c.close().map_err(|e| e.to_string()),
+        }
+    }
+
     pub(crate) fn close(self) -> Result<()> {
         match self {
             Backend::Local { session, db, .. } => {

@@ -276,6 +276,112 @@ fn migrations_up_and_down() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// `nucleus migrate up --dry-run` and `diff` (PLAN.md §M14.16 M4): on a
+/// branch dropped after; the statements from the files' schema to the
+/// database's, as a new migration — locally and against a server.
+#[test]
+fn migrations_dry_run_and_diff() {
+    let root = temp_dir("migrate-diff");
+    let (db, m) = (root.join("db"), root.join("migrations"));
+    std::fs::create_dir_all(&m).unwrap();
+    let (d, md) = (db.to_str().unwrap(), m.to_str().unwrap());
+    std::fs::write(
+        m.join("1_notes.sql"),
+        "-- migrate:up\nCREATE TABLE notes (id int PRIMARY KEY, body text);\n-- migrate:down\nDROP TABLE notes;\n",
+    )
+    .unwrap();
+    let migrate = |at: &[&str], args: &[&str]| {
+        let mut all = vec!["migrate"];
+        all.extend_from_slice(args);
+        all.extend_from_slice(at);
+        all.extend_from_slice(&["--dir", md]);
+        nucleus(&all, "")
+    };
+    let local = [d];
+    let (ok, out) = migrate(&local, &["up", "--dry-run"]);
+    assert!(
+        ok && out.contains("applied 1_notes")
+            && out.contains("+ CREATE TABLE notes")
+            && out.contains("nothing was changed"),
+        "{out}"
+    );
+    let (ok, out) = migrate(&local, &["status"]);
+    assert!(ok && out.contains("pending"), "{out}");
+    let (ok, out) = nucleus(
+        &["sql", d, "-c", "SELECT name FROM nc_catalog.branches"],
+        "",
+    );
+    assert!(ok && !out.contains("dry_run"), "{out}");
+    // A diff needs every file applied.
+    let (ok, out) = migrate(&local, &["diff"]);
+    assert!(!ok && out.contains("pending"), "{out}");
+    let (ok, out) = migrate(&local, &["up"]);
+    assert!(ok, "{out}");
+    let (ok, out) = migrate(&local, &["diff"]);
+    assert!(ok && out.contains("no difference"), "{out}");
+    let (ok, out) = nucleus(
+        &[
+            "sql",
+            d,
+            "-c",
+            "ALTER TABLE notes ADD COLUMN tag text DEFAULT 'misc'; CREATE INDEX notes_tag ON notes (tag)",
+        ],
+        "",
+    );
+    assert!(ok, "{out}");
+
+    // Against a server: the same, over the network.
+    let mut server = Command::new(env!("CARGO_BIN_EXE_nucleus"))
+        .args(["server", d, "--listen", "127.0.0.1:0"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::BufRead as _;
+    let mut first = String::new();
+    std::io::BufReader::new(server.stderr.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    let addr = first
+        .split_whitespace()
+        .find(|w| w.starts_with("127.0.0.1:"))
+        .unwrap_or_else(|| panic!("no address in {first:?}"))
+        .to_string();
+    let remote = ["-h", addr.as_str()];
+    let (ok, out) = migrate(&remote, &["diff"]);
+    assert!(
+        ok && out.contains("ALTER TABLE notes ADD COLUMN tag text DEFAULT 'misc';")
+            && out.contains("CREATE INDEX notes_tag ON notes (tag);"),
+        "{out}"
+    );
+    let (ok, out) = migrate(&remote, &["diff", "--new", "tags"]);
+    assert!(ok && out.contains("recorded as applied"), "{out}");
+    let made = std::fs::read_dir(&m)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with("_tags.sql"))
+        .unwrap();
+    let text = std::fs::read_to_string(&made).unwrap();
+    assert!(
+        text.contains("-- migrate:down\nDROP INDEX notes_tag;\nALTER TABLE notes DROP COLUMN tag;"),
+        "{text}"
+    );
+    let (ok, out) = migrate(&remote, &["diff"]);
+    assert!(ok && out.contains("no difference"), "{out}");
+    // A dry run of the way down, on a branch over the network.
+    let (ok, out) = migrate(&remote, &["down", "--dry-run"]);
+    assert!(
+        ok && out.contains("reverted ")
+            && out.contains("- CREATE INDEX notes_tag")
+            && out.contains("nothing was changed"),
+        "{out}"
+    );
+    let (ok, out) = migrate(&remote, &["status"]);
+    assert!(ok && out.matches("applied").count() == 2, "{out}");
+    server.kill().unwrap();
+    server.wait().unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// `nucleus dump --schema` (PLAN.md §M14.16 M1): the schema as SQL,
 /// which makes the same schema in another database.
 #[test]

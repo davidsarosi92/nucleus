@@ -88,6 +88,7 @@ pub mod regression;
 pub mod roles;
 pub mod rules;
 pub mod sample;
+pub mod schema_diff;
 pub mod secrets;
 pub mod segment;
 pub mod session;

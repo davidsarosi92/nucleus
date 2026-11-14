@@ -19,11 +19,19 @@
 //! Applied files are checked against their checksums (SHA-256 of the
 //! file), so one changed after it was applied is refused, as is one older
 //! than the newest applied (out of order) and a record without its file.
+//!
+//! `--dry-run` (M4) applies on a branch of the database made for it and
+//! dropped after, and shows how the schema would change; `diff` compares
+//! what the files make (replayed into a database in memory) with the
+//! database's schema and writes the statements between them
+//! ([`nucleus_sql::schema_diff`]) — `--new` as the next migration.
 
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
+
 use crate::dump::rows;
-use crate::sql::{Backend, Res, Target};
+use crate::sql::{Backend, MEMORY, Res, Target, open_local, registry};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -36,6 +44,11 @@ usage: nucleus migrate <command> [<dir> | :memory:] [connection options of nucle
   down [--to <version> | --all]
                            the newest applied one reverted (or each above
                            <version>, or all)
+      --dry-run            up or down on a branch made for it, dropped after:
+                           each one's time and how the schema would change
+  diff [--new <name>]      the statements from the schema the files make to
+                           the database's; --new <name>: as a new migration,
+                           recorded as applied (the database has it already)
 Each migration runs in one transaction with its record (nc_catalog.migrations):
 one that fails leaves nothing behind.
 ";
@@ -314,7 +327,8 @@ fn now_version() -> u64 {
         .expect("digits")
 }
 
-fn new_file(dir: &Path, name: &str) -> Result<()> {
+/// A new migration file named `name`, holding `text`: its path.
+fn new_file(dir: &Path, name: &str, text: &str) -> Result<PathBuf> {
     let clean: String = name
         .chars()
         .map(|c| {
@@ -338,9 +352,239 @@ fn new_file(dir: &Path, name: &str) -> Result<()> {
         version = version.max(last.version + 1);
     }
     let path = dir.join(format!("{version}_{clean}.sql"));
-    std::fs::write(&path, "-- migrate:up\n\n\n-- migrate:down\n\n")
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Runs `sql`, every statement of which must succeed.
+fn run_ok(b: &mut Backend, sql: &str) -> Result<()> {
+    if let Some(Err(f)) = b.execute(sql)?.into_iter().find(|r| r.is_err()) {
+        let _ = b.execute("ROLLBACK");
+        return Err(format!("{}: {f}", sql.trim()));
+    }
+    Ok(())
+}
+
+/// The schema as `nc_catalog.definitions` has it.
+fn definitions(b: &mut Backend) -> Result<Vec<String>> {
+    Ok(rows(
+        b,
+        "SELECT definition FROM nc_catalog.definitions ORDER BY position",
+    )?
+    .into_iter()
+    .map(|r| r[0].clone().unwrap_or_default())
+    .collect())
+}
+
+/// The pending migrations applied (up to and with `to`).
+fn up(b: &mut Backend, files: &[File], records: &[Record], to: Option<u64>) -> Result<()> {
+    let pending: Vec<&File> = files
+        .iter()
+        .filter(|f| !records.iter().any(|r| r.version == f.version))
+        .filter(|f| to.is_none_or(|t| f.version <= t))
+        .collect();
+    if pending.is_empty() {
+        println!("up to date");
+    }
+    for f in pending {
+        let label = format!("{}_{}", f.version, f.name);
+        let started = std::time::Instant::now();
+        let record = format!(
+            "RECORD MIGRATION {} NAME {} CHECKSUM {}",
+            f.version,
+            literal(&f.name),
+            literal(&f.checksum)
+        );
+        match apply(b, &label, &f.up, &record)? {
+            Outcome::Done => println!("applied {label} ({} ms)", started.elapsed().as_millis()),
+            Outcome::Raced => {
+                // Applied meanwhile by another: the same file?
+                let now = self::records(b)?;
+                match now.iter().find(|r| r.version == f.version) {
+                    Some(r) if r.checksum == f.checksum => {
+                        println!("{label}: applied by another migrator");
+                    }
+                    _ => {
+                        return Err(format!(
+                            "{label}: a conflict with another transaction; run it again"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The newest applied migration reverted — or each above `to`, or all.
+fn down(
+    b: &mut Backend,
+    files: &[File],
+    records: &[Record],
+    to: Option<u64>,
+    all: bool,
+) -> Result<()> {
+    if to.is_some() && all {
+        return Err("give --to or --all, not both".into());
+    }
+    let undo: Vec<&Record> = if all {
+        records.iter().rev().collect()
+    } else if let Some(t) = to {
+        records.iter().rev().filter(|r| r.version > t).collect()
+    } else {
+        records.iter().rev().take(1).collect()
+    };
+    if undo.is_empty() {
+        println!("nothing to revert");
+    }
+    for r in undo {
+        let f = files
+            .iter()
+            .find(|f| f.version == r.version)
+            .expect("validated");
+        let label = format!("{}_{}", f.version, f.name);
+        if !has_sql(&f.down.sql) {
+            return Err(format!("{label}: its `-- migrate:down` is empty"));
+        }
+        let started = std::time::Instant::now();
+        match apply(
+            b,
+            &label,
+            &f.down,
+            &format!("FORGET MIGRATION {}", f.version),
+        )? {
+            Outcome::Done => println!("reverted {label} ({} ms)", started.elapsed().as_millis()),
+            Outcome::Raced => {
+                return Err(format!(
+                    "{label}: a conflict with another transaction; run it again"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `work` run on a branch of `b`'s database made for it (PLAN.md
+/// §M14.16 M4), the branch dropped after however it went: what `work`
+/// printed, then how the schema would change.
+fn dry_run(b: &mut Backend, work: impl FnOnce(&mut Backend) -> Result<()>) -> Result<()> {
+    let branch = format!("migrate_dry_run_{}", std::process::id());
+    run_ok(b, &format!("CREATE BRANCH {branch}"))?;
+    let result = match b.on_branch(&branch) {
+        Ok(mut on) => {
+            let ran = definitions(&mut on).and_then(|before| {
+                work(&mut on)?;
+                Ok((before, definitions(&mut on)?))
+            });
+            let released = on.release();
+            ran.and_then(|r| released.map(|()| r))
+        }
+        Err(e) => Err(e),
+    };
+    let dropped = run_ok(b, &format!("DROP BRANCH {branch}"));
+    let (before, after) = result?;
+    dropped?;
+    let gone: Vec<&String> = before.iter().filter(|d| !after.contains(d)).collect();
+    let made: Vec<&String> = after.iter().filter(|d| !before.contains(d)).collect();
+    if gone.is_empty() && made.is_empty() {
+        println!("the schema would not change");
+    } else {
+        println!("the schema would change:");
+        for d in gone {
+            println!("- {d}");
+        }
+        for d in made {
+            println!("+ {d}");
+        }
+    }
+    println!("dry run: nothing was changed (branch {branch} dropped)");
+    Ok(())
+}
+
+/// A database in memory, and its store.
+fn memory() -> Result<(Backend, Arc<dyn nucleus_kv::Kv>)> {
+    let db = open_local(MEMORY)?;
+    let kv: Arc<dyn nucleus_kv::Kv> = Arc::new(db.clone());
+    let session = nucleus_sql::Session::with_registry(Arc::clone(&kv), registry());
+    Ok((
+        Backend::Local {
+            session,
+            db,
+            dir: MEMORY.into(),
+        },
+        kv,
+    ))
+}
+
+/// `diff [--new name]`: from what the files make to the database's
+/// schema.
+fn diff(
+    b: &mut Backend,
+    dir: &Path,
+    files: &[File],
+    records: &[Record],
+    new: Option<&str>,
+) -> Result<()> {
+    if let Some(f) = files
+        .iter()
+        .find(|f| !records.iter().any(|r| r.version == f.version))
+    {
+        return Err(format!(
+            "{} is pending: apply it first (nucleus migrate up) — a diff is from what the applied files make to the database",
+            f.path.display()
+        ));
+    }
+    let (mut made, made_kv) = memory()?;
+    for f in files {
+        run_ok(&mut made, &script(&f.up.sql)).map_err(|e| format!("{}: {e}", f.path.display()))?;
+    }
+    let (mut target, target_kv) = memory()?;
+    for d in definitions(b)? {
+        run_ok(&mut target, &d)?;
+    }
+    let schema_diff = |from: &Arc<dyn nucleus_kv::Kv>, to: &Arc<dyn nucleus_kv::Kv>| {
+        nucleus_sql::schema_diff::between(&**from, &**to).map_err(|e| e.message)
+    };
+    let up = schema_diff(&made_kv, &target_kv)?;
+    let down = schema_diff(&target_kv, &made_kv)?;
+    made.close()?;
+    target.close()?;
+    if up.statements.is_empty() {
+        for n in &up.notes {
+            println!("note: {n}");
+        }
+        println!("no difference: the files make the database's schema");
+        return Ok(());
+    }
+    let Some(name) = new else {
+        print!("{}", up.script());
+        return Ok(());
+    };
+    let text = format!(
+        "-- migrate:up\n{}\n-- migrate:down\n{}",
+        up.script(),
+        down.script()
+    );
+    let path = new_file(dir, name, &text)?;
+    let file = self::files(dir)?
+        .into_iter()
+        .find(|f| f.path == path)
+        .ok_or("the new migration")?;
+    // The database has the change already: the migration is applied there.
+    run_ok(
+        b,
+        &format!(
+            "RECORD MIGRATION {} NAME {} CHECKSUM {}",
+            file.version,
+            literal(&file.name),
+            literal(&file.checksum)
+        ),
+    )?;
     println!("{}", path.display());
+    println!("recorded as applied: the database has its change");
+    for n in &up.notes {
+        println!("note: {n}");
+    }
     Ok(())
 }
 
@@ -373,6 +617,8 @@ pub fn run(args: &[String]) -> Result<()> {
     let mut dir = PathBuf::from("migrations");
     let mut to: Option<u64> = None;
     let mut all = false;
+    let mut dry = false;
+    let mut new: Option<String> = None;
     let mut words: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -391,6 +637,8 @@ pub fn run(args: &[String]) -> Result<()> {
                 );
             }
             "--all" => all = true,
+            "--dry-run" => dry = true,
+            "--new" => new = Some(value("a name")?),
             // The command and its argument come first; then the database.
             s if words.is_empty() || (words[0] == "new" && words.len() == 1) => {
                 if s.starts_with('-') {
@@ -408,104 +656,36 @@ pub fn run(args: &[String]) -> Result<()> {
     let command = words.first().map(String::as_str).ok_or(USAGE)?;
     if command == "new" {
         let name = words.get(1).ok_or("nucleus migrate new <name>")?;
-        return new_file(&dir, name);
+        let path = new_file(&dir, name, "-- migrate:up\n\n\n-- migrate:down\n\n")?;
+        println!("{}", path.display());
+        return Ok(());
     }
-    if !matches!(command, "status" | "up" | "down") {
+    if !matches!(command, "status" | "up" | "down" | "diff") {
         return Err(format!("unknown command {command}\n{USAGE}"));
+    }
+    if dry && !matches!(command, "up" | "down") {
+        return Err("--dry-run is for up and down".into());
+    }
+    if new.is_some() && command != "diff" {
+        return Err("--new is for diff".into());
     }
     let files = files(&dir)?;
     let mut b = target.open()?;
     let result = (|| -> Result<()> {
         let records = records(&mut b)?;
+        if command == "status" {
+            status(&files, &records);
+            return Ok(());
+        }
+        validate(&files, &records)?;
+        let work = |b: &mut Backend| match command {
+            "up" => up(b, &files, &records, to),
+            _ => down(b, &files, &records, to, all),
+        };
         match command {
-            "status" => {
-                status(&files, &records);
-                Ok(())
-            }
-            "up" => {
-                validate(&files, &records)?;
-                let pending: Vec<&File> = files
-                    .iter()
-                    .filter(|f| !records.iter().any(|r| r.version == f.version))
-                    .filter(|f| to.is_none_or(|t| f.version <= t))
-                    .collect();
-                if pending.is_empty() {
-                    println!("up to date");
-                }
-                for f in pending {
-                    let label = format!("{}_{}", f.version, f.name);
-                    let started = std::time::Instant::now();
-                    let record = format!(
-                        "RECORD MIGRATION {} NAME {} CHECKSUM {}",
-                        f.version,
-                        literal(&f.name),
-                        literal(&f.checksum)
-                    );
-                    match apply(&mut b, &label, &f.up, &record)? {
-                        Outcome::Done => {
-                            println!("applied {label} ({} ms)", started.elapsed().as_millis())
-                        }
-                        Outcome::Raced => {
-                            // Applied meanwhile by another: the same file?
-                            let now = self::records(&mut b)?;
-                            match now.iter().find(|r| r.version == f.version) {
-                                Some(r) if r.checksum == f.checksum => {
-                                    println!("{label}: applied by another migrator");
-                                }
-                                _ => {
-                                    return Err(format!(
-                                        "{label}: a conflict with another transaction; run it again"
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }
-            _ => {
-                validate(&files, &records)?;
-                if to.is_some() && all {
-                    return Err("give --to or --all, not both".into());
-                }
-                let undo: Vec<&Record> = if all {
-                    records.iter().rev().collect()
-                } else if let Some(t) = to {
-                    records.iter().rev().filter(|r| r.version > t).collect()
-                } else {
-                    records.iter().rev().take(1).collect()
-                };
-                if undo.is_empty() {
-                    println!("nothing to revert");
-                }
-                for r in undo {
-                    let f = files
-                        .iter()
-                        .find(|f| f.version == r.version)
-                        .expect("validated");
-                    let label = format!("{}_{}", f.version, f.name);
-                    if !has_sql(&f.down.sql) {
-                        return Err(format!("{label}: its `-- migrate:down` is empty"));
-                    }
-                    let started = std::time::Instant::now();
-                    match apply(
-                        &mut b,
-                        &label,
-                        &f.down,
-                        &format!("FORGET MIGRATION {}", f.version),
-                    )? {
-                        Outcome::Done => {
-                            println!("reverted {label} ({} ms)", started.elapsed().as_millis())
-                        }
-                        Outcome::Raced => {
-                            return Err(format!(
-                                "{label}: a conflict with another transaction; run it again"
-                            ));
-                        }
-                    }
-                }
-                Ok(())
-            }
+            "diff" => diff(&mut b, &dir, &files, &records, new.as_deref()),
+            _ if dry => dry_run(&mut b, work),
+            _ => work(&mut b),
         }
     })();
     let closed = b.close();
