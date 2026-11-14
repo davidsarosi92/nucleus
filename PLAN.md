@@ -283,7 +283,7 @@ are marked ✅.
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ✅ (2026-11-14) study written (2026-11-13); R1 ✅ memory stores, `REMEMBER`, `recall()`, row expiry, MCP tools, driver helpers (LongMemEval_S turn R@10 0.819 against the paper's BM25 0.592); R2 ✅ `FORGET SUBJECT`, the scrub and the search (a planted subject's texts: 100 places after `DELETE` and a vacuum, 0 after `FORGET`); R3 ✅ leak tests over every recall path, BM25's statistics a tenant's own on a table partitioned by tenant; R4 ✅ `recall` under 1 ms in the process (100 000 memories), batched through `LATERAL`, a vacuum's crash flaw fixed; §M14.14 ✅ between; R5 ✅ citations (`as_of`), read records by request id (`nc_catalog.reads`), erasure through history and the log; R6 ✅ `BACKUP TO` / `nucleus restore` without index pages, each subject's rows sealed under its own key, which `FORGET` destroys (60 MiB backed up in 0.46 s, restored in 0.80 s); R7 ✅ `docs/memory.md`, the Python and JavaScript `memory` examples (run in CI), MCP `cite` and `forget_subject` |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
-| | M14.15 | JSON type and functions | ⬜ |
+| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; steps J1–J5 to be agreed |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
@@ -8130,7 +8130,7 @@ SELECT … FROM t AS OF …`, a dropped table included).
   costs nothing now.  `snapshot_at`'s search bounded by the visible
   commit, not the timestamp space: 20 µs → 5.5 µs.
 
-### §M14.15 — JSON ⬜
+### §M14.15 — JSON ◐ (study written, 2026-11-14)
 
 - A `JSON` type (validated, stored in a compact binary form), operators
   `->`, `->>`, `#>`, `@>`, `?`, functions to build, extract, test and
@@ -8140,6 +8140,170 @@ SELECT … FROM t AS OF …`, a dropped table included).
 
 **Done when:** an slt script checked against PostgreSQL's `jsonb` covers
 the operators and functions.
+
+**The study (2026-11-14).**  Why it comes first among what is left: what
+an AI application stores is JSON more than anything else — a model's
+structured output, tool calls and their results, an API's answers,
+metadata beside a chunk or a memory — and today nucleus has nowhere to
+put it but `text`, which it can neither query nor index.
+
+*What exists to build on* (surveyed in the code):
+
+- **Registered types** (`ext::Type`): a value is its type and its
+  canonical bytes (`Value::Ext`, equal values with equal bytes), with
+  equality, hashing, a total order and an order-preserving key encoding
+  each optional — how `uuid` and `vector` are built.  A JSON value fits:
+  bytes in, nothing new in rows, pages, the log, backups (§M14.24 R6) or
+  time travel.
+- **Operators outside the grammar**: the lexer already reads any run of
+  operator characters (`<->`, `@>`, `?|`) as a user operator, resolved
+  by the operands' types — so `@@` can mean a text match on `text` and a
+  path predicate on `json`, as in PostgreSQL.  The drivers number
+  parameters `$1`, so `?` is free (JDBC's clash does not arise).
+- **Table functions** (`generate_series`, `unnest`, `WITH ORDINALITY`):
+  `json_each`, `json_array_elements` and `JSON_TABLE` plug in there.
+- **Indexes**: B-trees over columns, a stored generated column
+  (`GENERATED ALWAYS AS (doc->>'kind') STORED`, §M14.22 E4a) indexable
+  like any other; no expression indexes yet.  The text index (§M14.21)
+  is an inverted index — terms to block-compressed postings, kept in the
+  writer's transaction, crash-safe — the machinery a containment index
+  needs.
+- **No JSON in the core**: the modules that talk to services (MCP,
+  embeddings, OIDC) use `serde_json`; the core is dependency-free
+  (principle), so the parser is nucleus's own.  The nesting limit
+  (`MAX_NESTING`, §M14.29 S2) bounds the parser's depth too.
+
+*What others do:*
+
+- **PostgreSQL** has two types: `json` keeps the text as written
+  (whitespace, key order, duplicate keys) and re-parses it on every
+  access; `jsonb` (9.4, 2014) is binary — a container header, a 4-byte
+  `JEntry` per element (type and length, every 32nd an offset, so
+  TOAST's compression still finds repeats), an object's keys sorted by
+  length then bytes and found by binary search, duplicates resolved
+  last-wins, numbers as `numeric` (exact; `1.50` prints `1.50`).  Its
+  GIN index has two operator classes: `jsonb_ops` (keys and values as
+  separate terms: `@>`, `?`, `?|`, `?&`) and `jsonb_path_ops` (one hash
+  of path and value per leaf — smaller and faster, `@>` and path
+  predicates only).  SQL/JSON paths in 12; `IS JSON` and the standard
+  constructors in 16; `JSON_TABLE`, `JSON_VALUE`, `JSON_QUERY`,
+  `JSON_EXISTS` in 17.
+- **SQLite** 3.45 (2024) added JSONB: a BLOB of nodes, each a header
+  byte (type and a size width) and a payload — no offset table, so a key
+  is found by a linear walk, but nothing is parsed; the text functions
+  accept either form.
+- **MySQL** (5.7): binary JSON with sorted keys and offset tables for
+  binary search, small and large variants (16- or 32-bit offsets); 8.0
+  updates a value in place where it can (partial updates in the log).
+- **MongoDB's BSON**: length-prefixed fields in insertion order, typed
+  (int32, int64, double, decimal128, dates), found by a linear walk;
+  its indexes reach into arrays (multikey).
+- **The Variant encoding** (Spark 4 / Delta / Iceberg / Parquet, 2024):
+  a metadata dictionary of a column's keys, values that refer to keys
+  by id, objects with sorted field ids and offsets whose width is chosen
+  per value (1–4 bytes); and *shredding* — frequent paths stored as
+  typed columns beside the rest.  Snowflake's `VARIANT` shreds
+  automatically; ClickHouse's `JSON` type (24.8) keeps each path as its
+  own subcolumn up to a limit.  DuckDB stores JSON as text, parsed by
+  yyjson, and turns it into typed `STRUCT`s when it reads.
+- **Parsing**: simdjson (Langdale and Lemire, 2019) parses gigabytes a
+  second by finding structural characters with SIMD first; yyjson
+  without SIMD is close.  The cost that matters in a database is less
+  the parse than not parsing again: reading a field from a binary form
+  costs nothing near a parse.
+- **The standards**: RFC 8259 (JSON); RFC 7493, I-JSON (no duplicate
+  names, numbers within IEEE doubles); RFC 8785, JCS (one canonical
+  text: sorted keys, numbers as ECMAScript prints them); the SQL/JSON
+  path language (ISO/IEC 9075-2:2016, `lax` and `strict`) and RFC 9535
+  JSONPath (2024), which differ; JSON Schema 2020-12, which the model
+  providers' structured outputs take (a subset).
+
+*What nucleus takes, and why:*
+
+1. **One type, `json`** (`jsonb` accepted as its name): the binary form
+   only.  A text kept as written is a `text` column; PostgreSQL's
+   two types are a history, not a need.  Keys sorted, duplicates
+   last-wins (PostgreSQL's choice — the one that never refuses what
+   another system wrote).
+2. **Canonical bytes** — equal documents, equal bytes — so equality,
+   hashing, `DISTINCT`, `GROUP BY` and unique indexes cost a byte
+   comparison and `Value::Ext`'s law holds.  The one visible
+   difference from PostgreSQL, recorded: a number is stored as its
+   value, so `1.50` reads back `1.5` and `1e2` `100` (as JCS and every
+   language's JSON library, but unlike `jsonb`, which keeps the scale).
+   Numbers stay exact (a decimal of any size, like `numeric`): an id of
+   20 digits is not rounded.
+3. **The form** (Variant's and MySQL's ideas, measured before fixed): a
+   header byte per node (type, width); an object's keys sorted, with a
+   table of offsets whose width (1, 2 or 4 bytes) is chosen per object —
+   a key found by binary search, a value reached without reading its
+   siblings; an array's offsets give `a[i]` in constant time; strings
+   raw UTF-8 with a length, so `->>` hands out a slice with nothing to
+   unescape.  No column-wide key dictionary (Variant's): a row's value
+   must stand alone (a row is read, logged, backed up and erased by
+   itself).
+4. **A parser of its own**: strict RFC 8259 (no comments, no trailing
+   commas, no `NaN`), UTF-8 checked, surrogate pairs joined and lone
+   ones refused, `\u0000` refused (`text` holds none), depth within
+   `MAX_NESTING`; scanning a string's bytes a word at a time for `"`,
+   `\` and controls (simdjson's idea, without its two passes), measured
+   against `serde_json` and PostgreSQL.
+5. **PostgreSQL's operators and functions** (`->`, `->>`, `#>`, `#>>`,
+   `@>`, `<@`, `?`, `?|`, `?&`, `||`, `-`, `#-`, `@?`, `@@`; the
+   `jsonb_*` functions and aggregates under `json_*` names, the `jsonb_`
+   names accepted) — what users and models know — **and the
+   standard's** (`JSON_VALUE`, `JSON_QUERY`, `JSON_EXISTS`,
+   `JSON_TABLE`, `IS JSON`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_ARRAYAGG`,
+   `JSON_OBJECTAGG`), both checked against PostgreSQL 18.
+6. **Paths are the SQL/JSON path language** (what PostgreSQL, Oracle and
+   the standard share), not RFC 9535; compiled once per statement.
+7. **Indexes**: expression indexes (`CREATE INDEX ON t ((doc->>'kind'))`
+   — for every type, not JSON only; a stored generated column is the
+   path until then), and a **containment index** `USING json` on the
+   text index's postings, transactional and crash-safe like it: a term
+   per leaf (a hash of path and value, `jsonb_path_ops`' choice) and
+   one per key path (so `?` is served too, which `jsonb_path_ops`
+   cannot), for `@>`, `?`, `?|`, `?&`, `@?` and `JSON_EXISTS` with
+   equalities.
+8. **For models**: `json_matches_schema(doc, schema)` — the JSON Schema
+   subset the providers' structured outputs use (`type`, `properties`,
+   `required`, `additionalProperties`, `enum`, `const`, `items`,
+   `anyOf`, `$defs` / `$ref`, bounds, `pattern` by the core's regex) —
+   so a `CHECK` refuses an output that does not fit; JSON values as
+   JSON in MCP results (not strings inside strings); driver values as
+   the language's own (Python `dict` / `list`, JavaScript objects, Rust
+   and C the text).
+9. **Not taken now**: shredding in columnar tables (Variant / ClickHouse
+   — later, measured on a columnar workload); the text-preserving
+   `json` type; in-place partial updates (MySQL's: rows are rewritten
+   whole here anyway).
+
+*Steps — to be agreed before they are built:*
+
+- **J1 — the type**: the parser, the binary form, output (compact, and
+  `json_pretty`), casts to and from `text` and the scalar types, equality,
+  hashing, PostgreSQL's order (object > array > boolean > number >
+  string > null) and a key encoding, so it can be a key; the `json`
+  wire type and the drivers' native values; a fuzz target (text → form
+  → text, a round trip as the law).  Measured: parse and output
+  throughput against `serde_json` and PostgreSQL, size against `jsonb`.
+- **J2 — operators and functions**: the access and containment
+  operators, building (`json_build_object`, `to_json`, `row_to_json`,
+  `json_agg`, `json_object_agg`), changing (`json_set`, `json_insert`,
+  `||`, `-`, `#-`, `json_strip_nulls`), reading (`json_typeof`,
+  `json_array_length`, `json_each`, `json_array_elements`,
+  `json_object_keys`); an slt checked against PostgreSQL 18.
+- **J3 — SQL/JSON**: the path language (`lax` / `strict`, filters,
+  methods), `json_path_query` and kin, `@?` / `@@`, `JSON_VALUE`,
+  `JSON_QUERY`, `JSON_EXISTS`, `JSON_TABLE`, `IS JSON`, the standard
+  constructors; checked against PostgreSQL 18.
+- **J4 — indexes**: expression indexes for every type, the containment
+  index, the planner choosing them (with statistics: a path's
+  selectivity); measured against PostgreSQL's GIN (`jsonb_path_ops`)
+  on the same documents.
+- **J5 — for models**: `json_matches_schema`, MCP's JSON results, an
+  example (a model's tool calls and structured outputs, stored, checked
+  and queried), the guide, DOCS and the benchmark page.
 
 ### §M14.16 — Migrations and code generation ⬜
 
@@ -9273,3 +9437,8 @@ is fixed or documented as the guarantee it is.
   economic order quantity) searches 3–5× the others and pgvector's at
   the same recall, inserts 3× pgvector's; deletes and updates checked
   against the table and cut out by FreshDiskANN's consolidation.
+- **2026-11-14** — The order after §M14.24, agreed: §M14.15 JSON, then
+  §M14.13 branches, §M14.17 easy start, §M14.16 migrations, §M14.18
+  operations with §M14.29 S5 (Elle) beside it and S3's files (OSS-Fuzz)
+  made ready; §M14.28's LSM when a write-heavy load asks for it.  S3's
+  submission and S4's audit are the owner's to request.
