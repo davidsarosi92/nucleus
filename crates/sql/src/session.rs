@@ -2512,6 +2512,18 @@ pub(crate) fn execute_statement(
             alter_column_type(txn, reg, table, column, ty, typmod, using.as_ref())?;
             Output::Command("ALTER TABLE".into())
         }
+        Statement::AlterTable { table, change } => {
+            crate::alter::alter_table(txn, reg, table, change)?;
+            Output::Command("ALTER TABLE".into())
+        }
+        Statement::RenameIndex {
+            name,
+            to,
+            if_exists,
+        } => {
+            crate::alter::rename_index(txn, name, to, *if_exists)?;
+            Output::Command("ALTER INDEX".into())
+        }
         Statement::AlterType { type_name, action } => {
             alter_type(txn, reg, type_name, action)?;
             Output::Command("ALTER TYPE".into())
@@ -3985,7 +3997,12 @@ fn expr_part_name(sql: &str) -> String {
 /// Binds index `ix`'s expression parts over `t` (PLAN.md §M14.15 J4):
 /// each immutable, of a type keys encode (and compare, for a unique
 /// index); its type, the columns it reads and its first column recorded.
-fn bind_index_exprs(txn: &dyn KvTxn, reg: &Registry, t: &Table, ix: &mut Index) -> Result<()> {
+pub(crate) fn bind_index_exprs(
+    txn: &dyn KvTxn,
+    reg: &Registry,
+    t: &Table,
+    ix: &mut Index,
+) -> Result<()> {
     use crate::binder::{Need, require};
     let mut binder = Binder::new(txn, reg);
     for (k, e) in ix.exprs.iter_mut().enumerate() {

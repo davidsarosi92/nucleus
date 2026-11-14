@@ -1,0 +1,199 @@
+# ALTER TABLE … RENAME, DROP COLUMN, ALTER COLUMN … SET / DROP DEFAULT,
+# SET / DROP NOT NULL; ALTER INDEX … RENAME (PLAN.md §M14.16 M3).
+# Expected results as PostgreSQL 18's (records marked nucleus-only
+# excepted).
+
+statement ok
+CREATE TABLE dept (id INT PRIMARY KEY, name TEXT)
+
+statement ok
+CREATE TABLE emp (id INT PRIMARY KEY, dept_id INT REFERENCES dept (id), nick TEXT, pay INT CHECK (pay > 0), note TEXT)
+
+statement ok
+CREATE INDEX emp_nick ON emp (nick)
+
+statement ok
+CREATE INDEX emp_pay ON emp (pay)
+
+statement ok
+INSERT INTO dept VALUES (1, 'R&D'), (2, 'Ops')
+
+statement ok
+INSERT INTO emp VALUES (1, 1, 'ann', 10, 'x'), (2, 2, 'bob', 20, NULL), (3, 1, NULL, 30, 'y')
+
+statement ok
+ALTER TABLE emp RENAME TO staff
+
+statement error 42P01
+SELECT * FROM emp
+
+statement ok
+ALTER TABLE staff RENAME COLUMN nick TO handle
+
+statement ok
+ALTER TABLE staff RENAME pay TO salary
+
+query ITI
+SELECT id, handle, salary FROM staff ORDER BY id
+----
+1 ann 10
+2 bob 20
+3 NULL 30
+
+statement error 23514
+INSERT INTO staff VALUES (4, 1, 'dan', 0, NULL)
+
+statement error 23503
+INSERT INTO staff VALUES (4, 9, 'dan', 1, NULL)
+
+statement error 23503
+DELETE FROM dept WHERE id = 2
+
+statement error 42701
+ALTER TABLE staff RENAME COLUMN handle TO salary
+
+statement error 42703
+ALTER TABLE staff RENAME COLUMN nope TO x
+
+statement error 42P07
+ALTER TABLE staff RENAME TO dept
+
+statement ok
+ALTER INDEX emp_pay RENAME TO staff_salary
+
+query I
+SELECT id FROM staff WHERE salary = 20
+----
+2
+
+statement ok
+ALTER TABLE staff DROP COLUMN handle
+
+query IIIT
+SELECT * FROM staff ORDER BY id
+----
+1 1 10 x
+2 2 20 NULL
+3 1 30 y
+
+statement ok
+INSERT INTO staff VALUES (4, 2, 40, 'z')
+
+query I
+SELECT id FROM staff WHERE salary = 40
+----
+4
+
+statement ok
+ALTER TABLE staff DROP COLUMN IF EXISTS handle
+
+statement error 42703
+ALTER TABLE staff DROP COLUMN handle
+
+# A column another table's foreign key references: CASCADE drops the key.
+statement ok
+CREATE TABLE codes (id INT PRIMARY KEY, code TEXT UNIQUE)
+
+statement ok
+CREATE TABLE uses (id INT PRIMARY KEY, code TEXT REFERENCES codes (code))
+
+statement ok
+INSERT INTO codes VALUES (1, 'a')
+
+statement ok
+INSERT INTO uses VALUES (1, 'a')
+
+statement error 2BP01
+ALTER TABLE codes DROP COLUMN code
+
+statement ok
+ALTER TABLE codes DROP COLUMN code CASCADE
+
+statement ok
+INSERT INTO uses VALUES (2, 'zz')
+
+# Defaults and NOT NULL.
+statement ok
+ALTER TABLE staff ALTER COLUMN note SET DEFAULT 'none'
+
+statement ok
+INSERT INTO staff (id, dept_id, salary) VALUES (5, 1, 50)
+
+query T
+SELECT note FROM staff WHERE id = 5
+----
+none
+
+statement ok
+ALTER TABLE staff ALTER note DROP DEFAULT
+
+statement ok
+INSERT INTO staff (id, dept_id, salary) VALUES (6, 1, 60)
+
+query T
+SELECT note FROM staff WHERE id = 6
+----
+NULL
+
+statement error 22P02
+ALTER TABLE staff ALTER COLUMN salary SET DEFAULT 'many'
+
+statement error 23502
+ALTER TABLE staff ALTER COLUMN note SET NOT NULL
+
+statement ok
+UPDATE staff SET note = '' WHERE note IS NULL
+
+statement ok
+ALTER TABLE staff ALTER COLUMN note SET NOT NULL
+
+statement error 23502
+INSERT INTO staff (id, dept_id, salary) VALUES (7, 1, 70)
+
+statement ok
+ALTER TABLE staff ALTER COLUMN note DROP NOT NULL
+
+statement ok
+INSERT INTO staff (id, dept_id, salary) VALUES (7, 1, 70)
+
+statement error 42P16
+ALTER TABLE staff ALTER COLUMN id DROP NOT NULL
+
+# Constraints renamed.
+statement ok
+ALTER TABLE staff ADD CONSTRAINT salary_cap CHECK (salary < 1000)
+
+statement ok
+ALTER TABLE staff RENAME CONSTRAINT salary_cap TO salary_limit
+
+statement error 23514
+UPDATE staff SET salary = 5000 WHERE id = 1
+
+statement ok
+ALTER TABLE staff DROP CONSTRAINT salary_limit
+
+statement error 42704
+ALTER TABLE staff RENAME CONSTRAINT nope TO x
+
+# In a transaction, undone with it (nucleus-only: the PostgreSQL runner
+# runs each record in a session of its own).
+# nucleus-only: a transaction across records
+statement ok
+BEGIN
+
+# nucleus-only: a transaction across records
+statement ok
+ALTER TABLE staff DROP COLUMN note
+
+# nucleus-only: a transaction across records
+statement ok
+ALTER TABLE staff RENAME TO people
+
+# nucleus-only: a transaction across records
+statement ok
+ROLLBACK
+
+query IT
+SELECT id, note FROM staff WHERE id = 1
+----
+1 x

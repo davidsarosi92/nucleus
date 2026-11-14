@@ -1175,6 +1175,13 @@ pub fn update_table(txn: &mut dyn KvTxn, table: &Table) -> Result<()> {
     Ok(())
 }
 
+/// Stores `table` under its (new) name, its definition under `from`
+/// removed (`ALTER TABLE from RENAME TO …`).
+pub fn rename_table(txn: &mut dyn KvTxn, from: &str, table: &Table) -> Result<()> {
+    txn.delete(&table_key(from))?;
+    update_table(txn, table)
+}
+
 /// Deletes every entry in `[start, end)`; returns how many.
 pub fn delete_range(txn: &mut dyn KvTxn, start: &[u8], end: Option<&[u8]>) -> Result<u64> {
     let end_bound = end.map_or(Bound::Unbounded, Bound::Excluded);

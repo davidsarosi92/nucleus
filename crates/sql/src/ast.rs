@@ -206,6 +206,23 @@ pub enum Statement {
         /// The model.
         model: String,
     },
+    /// `ALTER TABLE t RENAME …`, `DROP COLUMN`, `ALTER COLUMN … SET /
+    /// DROP DEFAULT`, `SET / DROP NOT NULL` (PLAN.md §M14.16 M3).
+    AlterTable {
+        /// Table.
+        table: String,
+        /// What changes.
+        change: TableChange,
+    },
+    /// `ALTER INDEX [IF EXISTS] i RENAME TO j`.
+    RenameIndex {
+        /// The index.
+        name: String,
+        /// Its new name.
+        to: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+    },
     /// `ALTER TABLE t ALTER [COLUMN] c [SET DATA] TYPE type [USING expr]`.
     AlterColumnType {
         /// Table.
@@ -1558,4 +1575,50 @@ pub struct Remember {
     pub source: Option<Expr>,
     /// `REPLACING id`: the memory it replaces (closed, kept as history).
     pub replacing: Option<Expr>,
+}
+
+/// A change [`Statement::AlterTable`] makes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TableChange {
+    /// `RENAME TO name`.
+    Rename(String),
+    /// `RENAME [COLUMN] a TO b`.
+    RenameColumn {
+        /// The column.
+        from: String,
+        /// Its new name.
+        to: String,
+    },
+    /// `RENAME CONSTRAINT a TO b`: a check, a foreign key, or the index
+    /// behind a primary key or `UNIQUE`.
+    RenameConstraint {
+        /// The constraint.
+        from: String,
+        /// Its new name.
+        to: String,
+    },
+    /// `DROP [COLUMN] [IF EXISTS] c [RESTRICT | CASCADE]`.
+    DropColumn {
+        /// The column.
+        column: String,
+        /// `IF EXISTS`.
+        if_exists: bool,
+        /// `CASCADE`: foreign keys of other tables and policies that name
+        /// it go too.
+        cascade: bool,
+    },
+    /// `ALTER [COLUMN] c SET DEFAULT expr` (SQL text) / `DROP DEFAULT`.
+    SetDefault {
+        /// The column.
+        column: String,
+        /// The expression; `None`: dropped.
+        default: Option<String>,
+    },
+    /// `ALTER [COLUMN] c SET NOT NULL` / `DROP NOT NULL`.
+    SetNotNull {
+        /// The column.
+        column: String,
+        /// `SET NOT NULL`.
+        not_null: bool,
+    },
 }

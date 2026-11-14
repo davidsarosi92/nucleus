@@ -259,6 +259,39 @@ pub(crate) fn forget_table(txn: &mut dyn KvTxn, table_id: u32) -> Result<()> {
     delete_prefix(txn, &p)
 }
 
+/// Column `c` of table `table_id` dropped (`ALTER TABLE … DROP
+/// COLUMN`): its jobs and next model's vectors go; those of the columns
+/// after it follow them one place down.
+pub(crate) fn column_dropped(txn: &mut dyn KvTxn, table_id: u32, c: usize) -> Result<()> {
+    let mut shadow = SHADOW.to_vec();
+    shadow.extend_from_slice(&table_id.to_be_bytes());
+    for prefix in [table_prefix(table_id), shadow] {
+        let end = nucleus_kv::prefix_end(&prefix).expect("a prefix");
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = txn
+            .scan(Bound::Included(&prefix[..]), Bound::Excluded(&end[..]))?
+            .collect::<nucleus_kv::Result<_>>()?;
+        let n = prefix.len();
+        for (k, v) in entries {
+            let Some(slot) = k.get(n..n + 2) else {
+                continue;
+            };
+            let slot = u16::from_be_bytes([slot[0], slot[1]]) as usize;
+            let (next, at) = (slot & NEXT, slot & !NEXT);
+            if at < c {
+                continue;
+            }
+            txn.delete(&k)?;
+            if at > c {
+                let mut moved = prefix.clone();
+                moved.extend_from_slice(&(((at - 1) | next) as u16).to_be_bytes());
+                moved.extend_from_slice(&k[n + 2..]);
+                txn.put(&moved, &v)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Every row of `t` gets a job for `column` (a column just added).
 pub(crate) fn enqueue_all(
     txn: &mut dyn KvTxn,

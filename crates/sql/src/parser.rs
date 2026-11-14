@@ -2446,8 +2446,40 @@ impl<'a> Parser<'a> {
                 options: self.role_options()?,
             });
         }
+        if self.eat_kw("index") {
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let name = self.relation()?;
+            self.expect_kw("rename")?;
+            self.expect_kw("to")?;
+            return Ok(Statement::RenameIndex {
+                name,
+                to: self.ident()?,
+                if_exists,
+            });
+        }
         self.expect_kw("table")?;
         let table = self.relation()?;
+        if self.eat_kw("rename") {
+            let change = if self.eat_kw("to") {
+                TableChange::Rename(self.ident()?)
+            } else if self.eat_kw("constraint") {
+                let from = self.ident()?;
+                self.expect_kw("to")?;
+                TableChange::RenameConstraint {
+                    from,
+                    to: self.ident()?,
+                }
+            } else {
+                self.eat_kw("column");
+                let from = self.ident()?;
+                self.expect_kw("to")?;
+                TableChange::RenameColumn {
+                    from,
+                    to: self.ident()?,
+                }
+            };
+            return Ok(Statement::AlterTable { table, change });
+        }
         for (words, enable, force) in [
             (
                 &["enable", "row", "level", "security"][..],
@@ -2574,10 +2606,57 @@ impl<'a> Parser<'a> {
                 if_exists,
             });
         }
+        if self.eat_kw("drop") {
+            self.eat_kw("column");
+            let if_exists = self.eat_kws(&["if", "exists"]);
+            let column = self.ident()?;
+            let cascade = self.eat_kw("cascade");
+            if !cascade {
+                self.eat_kw("restrict");
+            }
+            return Ok(Statement::AlterTable {
+                table,
+                change: TableChange::DropColumn {
+                    column,
+                    if_exists,
+                    cascade,
+                },
+            });
+        }
         if self.eat_kw("alter") {
             // ALTER [COLUMN] c [SET DATA] TYPE t [USING expr]
             self.eat_kw("column");
             let column = self.ident()?;
+            if self.eat_kws(&["set", "default"]) {
+                let (_, text) = self.text_of(|p| p.expr())?;
+                return Ok(Statement::AlterTable {
+                    table,
+                    change: TableChange::SetDefault {
+                        column,
+                        default: Some(text),
+                    },
+                });
+            }
+            if self.eat_kws(&["drop", "default"]) {
+                return Ok(Statement::AlterTable {
+                    table,
+                    change: TableChange::SetDefault {
+                        column,
+                        default: None,
+                    },
+                });
+            }
+            for (words, not_null) in [
+                (&["set", "not", "null"][..], true),
+                (&["drop", "not", "null"][..], false),
+            ] {
+                if self.eat_kws(words) {
+                    return Ok(Statement::AlterTable {
+                        table,
+                        change: TableChange::SetNotNull { column, not_null },
+                    });
+                }
+            }
             // ALTER [COLUMN] v SET MODEL m: an embedding column's model.
             if self.eat_kws(&["set", "model"]) {
                 let model = self.ident()?;
@@ -2605,7 +2684,7 @@ impl<'a> Parser<'a> {
         }
         if !self.eat_kw("add") {
             return Err(Error::feature(
-                "ALTER TABLE supports ADD COLUMN, ADD CONSTRAINT, DROP CONSTRAINT and ALTER COLUMN … TYPE",
+                "ALTER TABLE supports ADD, DROP, RENAME and ALTER COLUMN",
             ));
         }
         if ["constraint", "primary", "unique", "check", "foreign"]

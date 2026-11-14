@@ -5,6 +5,7 @@
 
 pub mod access;
 pub mod advisor;
+mod alter;
 pub mod ast;
 pub mod audit;
 pub mod backup;

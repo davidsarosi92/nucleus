@@ -1840,7 +1840,9 @@ EXISTS] … [CASCADE]`, `CREATE [UNIQUE] INDEX [IF NOT EXISTS]` (of
 columns and expressions), `DROP INDEX
 [IF EXISTS]`, `ALTER TABLE … ADD [COLUMN] …`, `ALTER TABLE … ADD
 [CONSTRAINT n] FOREIGN KEY | CHECK | UNIQUE …`, `ALTER TABLE … DROP
-CONSTRAINT [IF EXISTS] n`, `INSERT … VALUES | SELECT | DEFAULT VALUES
+CONSTRAINT [IF EXISTS] n`, `ALTER TABLE … RENAME …`, `… DROP COLUMN …`,
+`… ALTER COLUMN … SET / DROP DEFAULT | SET / DROP NOT NULL`, `ALTER INDEX
+… RENAME TO` (§8.35), `INSERT … VALUES | SELECT | DEFAULT VALUES
 [RETURNING]`, `UPDATE … SET … [WHERE] [RETURNING]`, `DELETE … [WHERE]
 [RETURNING]`, queries, `BEGIN`/`START TRANSACTION` (`ISOLATION LEVEL …`,
 `READ ONLY|WRITE`, `AS OF TIMESTAMP|COMMIT …`), `COMMIT`/`END`, `ROLLBACK`, `SET TRANSACTION …`, `SET
@@ -5640,6 +5642,49 @@ write the record's key, so one commits and the other's transaction
 conflicts (`40001`) or finds the record (`42710`); `nucleus migrate`
 then reads the records again and goes on if the same file was applied.
 
+### 8.35 Changing tables (`alter`, §M14.16 M3)
+
+`ALTER TABLE t RENAME TO u`, `RENAME [COLUMN] a TO b`, `RENAME
+CONSTRAINT a TO b` (a check, a foreign key, a unique index), `DROP
+[COLUMN] [IF EXISTS] c [RESTRICT | CASCADE]`, `ALTER [COLUMN] c SET
+DEFAULT expr | DROP DEFAULT | SET NOT NULL | DROP NOT NULL`, and `ALTER
+INDEX [IF EXISTS] i RENAME TO j` — DDL as the rest, in the transaction
+(a migration's), PostgreSQL's results (`72_alter_table.slt`, checked
+against PostgreSQL 18).  On a partitioned table each applies to its
+partitions too; a partition's columns are its parent's (`42809`).
+
+**What names a table or a column keeps up.**  The catalog holds columns
+by position (indexes, keys, foreign keys, statistics, the column copy,
+subject and expiry columns, a chunk table's text column) and tables by
+name (the definition's key, foreign keys both ways, partitions, policies,
+ACLs, tokens scoped to tables); its expressions — checks, generated and
+embedding columns, index expressions, policies — are SQL text.  A rename
+rewrites the records keyed by the name and the identifiers in those
+texts: a column's name where it is that column (not a function's name,
+a type after `::`, an alias, another table's column `u.a`, `extract`'s
+field, an interval's unit), a table's where it
+qualifies a column or is what `FROM` / `JOIN` reads.  Each text rewritten
+is bound again and must read the columns it read (else `0A000`, naming
+it); another table's policy that reads the table and may name the
+column refuses a column's rename (`2BP01`): its aliases are its own.  A
+memory store renamed renames its own indexes (`<store>_subject`, …).
+
+**A dropped column** is taken out of every row — rows are positional,
+the rest move one place down, the table's data written again as by `ALTER
+COLUMN … TYPE` — and what is about it goes too: indexes that use it,
+checks that read it, the table's foreign keys over it, its place in
+statistics (dropped below two columns), its privileges, its embedding
+jobs (later columns' jobs renumbered).  What else names it needs
+`CASCADE` (`2BP01` without: other tables' foreign keys to it, policies
+that may name it) or is refused (`2BP01`): the primary key, the
+partition key, a generated column made from it, a chunk table of its
+text, the subject or expiry column, the column copy's only column, the
+table's only column; a memory store's and a chunk table's own columns
+cannot be renamed, dropped or changed (`42809`).  `SET NOT NULL` reads
+every row (`23502` on a `NULL`); `DROP NOT NULL` of a primary key column
+is `42P16`; `SET DEFAULT` binds the expression and computes it once,
+for its type (`22P02`); a generated column has no default (`42P17`).
+
 ## 9. Server (`nucleus-server`)
 
 ```
@@ -6660,6 +6705,13 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — §M14.16 M1–M3, the schema as SQL, migrations, the
+  `ALTER` they need:** `nc_catalog.definitions` and `nucleus dump
+  --schema` (§8.33); `nucleus migrate`, `RECORD` / `FORGET MIGRATION`,
+  `nc_catalog.migrations` (§8.34); `ALTER TABLE … RENAME TO`, `RENAME
+  COLUMN`, `RENAME CONSTRAINT`, `DROP COLUMN [CASCADE]`, `ALTER COLUMN …
+  SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME TO`
+  (§8.35), each keeping what names the table or column.
 - **2026-11-14 — Fix: a server whose stderr went away stopped.**  Its
   log lines were `eprintln!`, which panics on a closed pipe: a server
   started by a program that read its first line and closed the rest

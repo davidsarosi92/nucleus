@@ -73,6 +73,7 @@ codes! {
     foreign_key_violation => "23503",
     invalid_foreign_key => "42830",
     invalid_object_definition => "42P17",
+    invalid_table_definition => "42P16",
     dependent_objects => "2BP01",
     cardinality => "21000",
     serialization => "40001",

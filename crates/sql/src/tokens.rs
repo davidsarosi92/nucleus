@@ -244,6 +244,21 @@ pub fn rename_role(txn: &mut dyn KvTxn, from: &str, to: &str) -> Result<()> {
     Ok(())
 }
 
+/// Points the tokens scoped to table `from` at `to` (it was renamed).
+pub fn rename_table(txn: &mut dyn KvTxn, from: &str, to: &str) -> Result<()> {
+    for mut t in all(&*txn)? {
+        if let Some(tables) = &mut t.tables
+            && tables.iter().any(|n| n == from)
+        {
+            for n in tables.iter_mut().filter(|n| *n == from) {
+                *n = to.to_string();
+            }
+            put(txn, &t)?;
+        }
+    }
+    Ok(())
+}
+
 /// Forgets `table` in the tokens scoped to it (it was dropped): a token
 /// keeps its other tables, and one left with none touches no table.
 pub fn forget_table(txn: &mut dyn KvTxn, table: &str) -> Result<()> {

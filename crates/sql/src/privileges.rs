@@ -303,6 +303,37 @@ pub fn forget(txn: &mut dyn KvTxn, kind: Kind, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// An object renamed: its ACL record (if it has one) follows it.
+pub fn rename(txn: &mut dyn KvTxn, kind: Kind, from: &str, to: &str) -> Result<()> {
+    if let Some(b) = txn.get(&acl_key(kind, from))? {
+        txn.delete(&acl_key(kind, from))?;
+        txn.put(&acl_key(kind, to), &b)?;
+    }
+    Ok(())
+}
+
+/// A table's column renamed (`to`) or dropped (`None`): its privileges
+/// follow it or go.
+pub fn rename_column(txn: &mut dyn KvTxn, table: &str, from: &str, to: Option<&str>) -> Result<()> {
+    let Some(b) = txn.get(&acl_key(Kind::Table, table))? else {
+        return Ok(());
+    };
+    let mut acl = decode(&b)?;
+    let mut changed = false;
+    for e in acl.values_mut() {
+        if let Some(p) = e.columns.remove(from) {
+            changed = true;
+            if let Some(to) = to {
+                e.columns.insert(to.to_string(), p);
+            }
+        }
+    }
+    if changed {
+        put_acl(txn, Kind::Table, table, &acl)?;
+    }
+    Ok(())
+}
+
 /// Every ACL record: kind, object, ACL.
 pub fn all(txn: &dyn KvTxn) -> Result<Vec<(Kind, String, Acl)>> {
     let end = nucleus_kv::prefix_end(&ACLS).expect("ACL prefix");
@@ -968,6 +999,7 @@ pub fn authorize_ddl(
         | Statement::AttachPartition { table, .. }
         | Statement::DetachPartition { table, .. }
         | Statement::DropConstraint { table, .. }
+        | Statement::AlterTable { table, .. }
         | Statement::SetRowSecurity { table, .. }
         | Statement::DropPolicy { table, .. }
         | Statement::CreatePolicy(crate::policies::Policy { table, .. }) => {
@@ -992,7 +1024,7 @@ pub fn authorize_ddl(
                 references(r)?;
             }
         }
-        Statement::DropIndex { name, .. } => {
+        Statement::DropIndex { name, .. } | Statement::RenameIndex { name, .. } => {
             if let Some((t, _)) = crate::catalog::find_index(txn, name)? {
                 c.require_owner(txn, Kind::Table, &t.name)?;
             }

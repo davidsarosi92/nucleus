@@ -200,7 +200,13 @@ key part may be an expression, `((doc->>'kind'))` or `lower(email)`, used
 for conditions on that very expression —; `CREATE INDEX ON t USING json
 (doc)` serves `doc @> '{…}'`, `doc ? 'key'`, `?|`, `?&`, `DROP
 INDEX`, `DROP TABLE [IF EXISTS] t [CASCADE]`.  `ALTER TABLE t ADD [COLUMN]
-…`, `ADD CONSTRAINT …`, `DROP CONSTRAINT …`, `ALTER COLUMN c TYPE …`.
+…`, `ADD CONSTRAINT …`, `DROP CONSTRAINT …`, `ALTER COLUMN c TYPE …`,
+`RENAME TO u`, `RENAME [COLUMN] a TO b`, `RENAME CONSTRAINT a TO b`,
+`DROP [COLUMN] [IF EXISTS] c [CASCADE]` (its indexes and checks go with
+it), `ALTER [COLUMN] c SET DEFAULT … | DROP DEFAULT | SET NOT NULL | DROP
+NOT NULL`; `ALTER INDEX i RENAME TO j`.  A rename keeps what names the
+table or column (foreign keys, checks, generated columns, index
+expressions, policies, grants).
 The whole schema as SQL: `SELECT definition FROM nc_catalog.definitions
 ORDER BY position` (or `nucleus dump --schema <dir>`) — each object's
 creating statement, as it is now.  Schema changes as versioned files:
@@ -352,7 +358,6 @@ before a generation's queries records what each returned
 | `unnest(…)` in the select list | `SELECT … FROM unnest(…) AS u(x)` |
 | `json[]`, `json_each(…)` in the select list | `json_agg` / `json_build_array`; `SELECT … FROM t, json_each(t.doc) e` |
 | `TRUNCATE` | `DELETE FROM t` |
-| `ALTER TABLE … DROP COLUMN`, `RENAME`, `ALTER COLUMN … SET DEFAULT` | a new table and `INSERT … SELECT` |
 | `SELECT … FOR UPDATE` | a `SERIALIZABLE` transaction |
 | `COPY … TO`, `COPY … FROM 'file'` | a query (`batches` in the drivers); `COPY t FROM STDIN` with the data from the client (a driver's copy, `ncsql \copy`) |
 | `$$` strings, user-defined functions, `TABLESAMPLE`, time zones other than UTC | — |

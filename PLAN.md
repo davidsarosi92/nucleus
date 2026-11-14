@@ -284,7 +284,7 @@ are marked ✅.
 | | M14.13 | Database branches (copy-on-write) | ✅ (2026-11-14) B1–B5: pages' births and dead lists (ZFS's) on the copy-on-write pages, a tree and a WAL per branch in one file, an engine per branch, `CREATE BRANCH [AS OF …]`, a client naming the branch as its database; a branch made in ms whatever the size, dropped in time following the internal nodes it copied |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
 | | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
-| | M14.16 | Migrations and code generation | ◐ M1–M2 ✅ (2026-11-14): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; next M3 dry runs and diffs |
+| | M14.16 | Migrations and code generation | ◐ M1–M3 ✅ (2026-11-14): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; next M4 dry runs and diffs |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
@@ -8820,7 +8820,7 @@ Steps (planned 2026-11-14):
   replayed on the first run; the rich schema needed no change either,
   only an index part `DESC` the grammar does not have.  *Not taken:*
   keeping each object's creating text (SQLite's way): after `ALTER`s it
-  is not the object, and a diff (M3) needs the object as it is.
+  is not the object, and a diff (M4) needs the object as it is.
 - **M2 — `nucleus migrate`**: files `migrations/<version>_<name>.sql`,
   up and down in one file (`-- migrate:up`, `-- migrate:down`);
   `new`, `up [--to v]`, `down [--to v | --all]`, `status`; each
@@ -8851,7 +8851,50 @@ Steps (planned 2026-11-14):
   one file keeps the two directions of a change together; repeatable
   migrations (Flyway's `R__`) — views and functions nucleus does not
   have yet.
-- **M3 — dry runs and diffs**: `nucleus migrate up --dry-run` applies on a
+- **M3 — the `ALTER` a migration needs** (found missing 2026-11-14,
+  while planning M4's diff): `ALTER TABLE … RENAME TO`, `RENAME COLUMN`,
+  `DROP COLUMN`, `ALTER COLUMN … SET / DROP DEFAULT`, `SET / DROP NOT
+  NULL`, `ALTER INDEX … RENAME TO`, `RENAME CONSTRAINT` — each
+  transactional as the rest of DDL, each kept by everything that names
+  the table or column (foreign keys both ways, indexes and their
+  expressions, checks, defaults and generated columns, policies, grants,
+  statistics, partitions, chunk tables, embedding columns) or refused
+  with what stands in its way.  Prior art: PostgreSQL (a dropped column
+  marked, not rewritten — `attisdropped`; names in parse trees, not
+  text), SQLite's `ALTER TABLE … RENAME COLUMN` (which rewrites the
+  stored SQL of what names it, the way nucleus keeps expressions too),
+  MySQL's `ALGORITHM=INSTANT`.
+  ✅ 2026-11-14.  *Built:* `alter.rs` — the catalog keeps columns by
+  position and tables by name, so a column's rename touches only texts
+  and ACLs, a table's the records keyed by its name (its definition,
+  ACL, policies, tokens) and the names others hold (foreign keys both
+  ways, partitions, a memory store's own indexes).  Texts are rewritten
+  token by token from the lexer's spans (SQLite's approach, on tokens:
+  nucleus keeps no parse trees): a name is the column's unless it is
+  called, a type after `::`, an alias, another table's (`u.a`),
+  `extract`'s field or an interval's unit — a test renames a column
+  `day` under `CHECK (extract(day from at) > 1)` and the field stays.
+  Each text is then bound again and must read the same columns as
+  before, else the rename is refused, not stored.  (That check alone
+  would not have caught the field: `extract(d from at)` is valid — `d`
+  abbreviates `day` — and reads the same column; the rule had to be in
+  the rewrite.)  A
+  dropped column follows PostgreSQL's rules (what is wholly about it
+  goes; what else names it needs `CASCADE`), and rewrites the rows as
+  `ALTER COLUMN … TYPE` does; embedding jobs queued for later columns are
+  renumbered (a test drops a column under a job still queued).
+  `72_alter_table.slt`: 52 of 52 records as PostgreSQL 18 has them.
+  *Not taken:* PostgreSQL's dropped-column mark (`attisdropped`): O(1)
+  instead of a rewrite, but every row reader skipping holes and every
+  position in the catalog becoming "physical" vs "logical" — revisit
+  when a table's rewrite is measured too slow (an online rewrite, as
+  `SET STORAGE` converts, is the other road); MySQL's instant `ADD
+  COLUMN` nucleus already has (a column added with a `NULL` default
+  rewrites nothing).  Other tables' policies that may name a renamed
+  column are refused rather than rewritten: their aliases (`FROM t x
+  WHERE x.a …`) are theirs, and a guess there would change a security
+  rule silently.
+- **M4 — dry runs and diffs**: `nucleus migrate up --dry-run` applies on a
   branch of the database (§M14.13), reports each statement's time and the
   linter's findings, and drops the branch — the database untouched;
   `nucleus migrate diff` compares the database's definitions with those
@@ -8861,11 +8904,11 @@ Steps (planned 2026-11-14):
   next migration, its `down` the reverse.  Prior art: migra, Atlas's
   schema diff, Alembic's autogenerate (what it cannot see: renames,
   which a diff writes as a drop and an add and says so).
-- **M4 — code from the schema**: `nucleus codegen ts|rust|python|java`:
+- **M5 — code from the schema**: `nucleus codegen ts|rust|python|java`:
   a type per table (its columns in their languages' types, as each
   driver returns them; nullable columns optional), for each language's
   nucleus driver.
-- **M5 — code from SQL files**: queries in `.sql` files, each named
+- **M6 — code from SQL files**: queries in `.sql` files, each named
   (`-- name: user_by_email :one`, `:many`, `:exec`, as sqlc); the
   engine describes each one's parameters and result columns (the
   protocol's describe) and the generator writes a typed function for

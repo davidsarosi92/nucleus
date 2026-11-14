@@ -179,7 +179,7 @@ fn shape(t: &Table) -> Shape {
 
 /// The memory store's own columns and indexes (`crate::memory::create`):
 /// the first 14 columns and three indexes.
-const MEMORY_COLUMNS: usize = 14;
+pub(crate) const MEMORY_COLUMNS: usize = 14;
 fn memory_index(t: &Table, ix: &Index) -> bool {
     ["subject", "embedding", "content"]
         .iter()
