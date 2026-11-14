@@ -283,7 +283,7 @@ are marked ✅.
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ✅ (2026-11-14) study written (2026-11-13); R1 ✅ memory stores, `REMEMBER`, `recall()`, row expiry, MCP tools, driver helpers (LongMemEval_S turn R@10 0.819 against the paper's BM25 0.592); R2 ✅ `FORGET SUBJECT`, the scrub and the search (a planted subject's texts: 100 places after `DELETE` and a vacuum, 0 after `FORGET`); R3 ✅ leak tests over every recall path, BM25's statistics a tenant's own on a table partitioned by tenant; R4 ✅ `recall` under 1 ms in the process (100 000 memories), batched through `LATERAL`, a vacuum's crash flaw fixed; §M14.14 ✅ between; R5 ✅ citations (`as_of`), read records by request id (`nc_catalog.reads`), erasure through history and the log; R6 ✅ `BACKUP TO` / `nucleus restore` without index pages, each subject's rows sealed under its own key, which `FORGET` destroys (60 MiB backed up in 0.46 s, restored in 0.80 s); R7 ✅ `docs/memory.md`, the Python and JavaScript `memory` examples (run in CI), MCP `cite` and `forget_subject` |
 | | M14.13 | Database branches (copy-on-write) | ◐ study written (2026-11-14): pages' births and dead lists (ZFS's) on the copy-on-write pages, a tree per branch in one file |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
-| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example; J4c (against PostgreSQL's GIN) waits for Docker |
+| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.4–26× faster with the indexes; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
@@ -8201,7 +8201,7 @@ SELECT … FROM t AS OF …`, a dropped table included).
   costs nothing now.  `snapshot_at`'s search bounded by the visible
   commit, not the timestamp space: 20 µs → 5.5 µs.
 
-### §M14.15 — JSON ◐ (study written, J1–J3, J4a–b ✅, 2026-11-14)
+### §M14.15 — JSON ◐ (study written, J1–J5 ✅, 2026-11-14)
 
 - A `JSON` type (validated, stored in a compact binary form), operators
   `->`, `->>`, `#>`, `@>`, `?`, functions to build, extract, test and
@@ -8581,9 +8581,14 @@ put it but `text`, which it can neither query nor index.
   BY`), and one difference recorded: a `DEFAULT` may read the row's
   columns (PostgreSQL refuses column references there).  *Not there:*
   the standard's `PLAN` clause (PostgreSQL 17 and 18 have none either).
-  *Measurement pending:* `bench/json/pg.py` has the `table` column
-  (count and sum asserted equal to PostgreSQL 18's); the run waits for
-  the Docker VM, which stalled when the disk filled.
+  *Measured* (`bench/json/pg.py`, the `table` column, count and sum
+  asserted equal to PostgreSQL 18's; seconds, nucleus / PostgreSQL):
+  tweets' hashtags 0.107 / 0.379, but performances' seat areas 1.093 /
+  0.325 and features' points 0.343 / 0.133 — where a document gives
+  many rows, the desugared form (a lateral subquery, a function call per
+  column per item, each re-reading the item) is 2.6–3.4× slower.
+  *Next:* a `JSON_TABLE` operator of its own, columns read from the
+  item in one pass.
 - **J4 — indexes**: expression indexes for every type, the containment
   index, the planner choosing them (with statistics: a path's
   selectivity); measured against PostgreSQL's GIN (`jsonb_path_ops`)
@@ -8634,8 +8639,17 @@ put it but `text`, which it can neither query nor index.
     a kind and a tag (2,000 rows) 32 → 2.3 ms; `? 'rare'` (200 rows) 6
     → 0.28 ms.  Builds: 0.11 s, 0.09 s, the containment index 0.84 s.
     `slt/70_json_index.slt`.
-  - **J4c — measured** against PostgreSQL's GIN (`jsonb_path_ops`) and
-    B-tree expression indexes on the same documents.
+  - **J4c — measured** ✅ (2026-11-14) against PostgreSQL 18's GIN
+    (`jsonb_path_ops`) and B-tree expression indexes on the same
+    documents (`bench/json/index.py`, 200,000 events, milliseconds,
+    nucleus / PostgreSQL): with the indexes `doc->>'id' =` 0.07 / 1.00,
+    a `score` range 1.28 / 1.88, `@>` a user 0.14 / 1.09, `@>` a kind
+    and a tag 3.14 / 4.26, `? 'rare'` 0.34 / 8.99 (GIN `jsonb_path_ops`
+    cannot serve it: a scan); builds 0.16 / 0.17, 0.09 / 0.10 and 0.88 /
+    1.05 s.  Without: the scans level but `@>`'s, 2.5–2.7× PostgreSQL's
+    (33 / 13 and 27 / 10 ms) — *next:* profile it (`ops::contains`
+    walks the binary form already; the scan's per-row cost around it is
+    the suspect).
 - **J5 — for models** ✅ (2026-11-14): `json_matches_schema(doc, schema)`
   and `json_schema_errors(doc, schema)` (`json::schema`, JSON Schema
   2020-12's validation and applicators, unknown keywords refused),

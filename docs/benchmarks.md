@@ -1023,11 +1023,11 @@ in Docker on the same machine, its defaults; nucleus a server; seconds
 for one statement, the median of five; the field sums, path counts and
 value sums asserted equal):
 
-| documents | rows | text | parse | PostgreSQL | output | PostgreSQL | a field | PostgreSQL | a path | PostgreSQL | a value | PostgreSQL |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| tweets | 50,000 | 246 MB | 0.377 | 1.607 | 0.153 | 1.090 | 0.079 | 0.361 | 0.078 | 0.372 | 0.077 | 0.362 |
-| citm performances | 50,000 | 103 MB | 0.088 | 1.009 | 0.049 | 0.440 | 0.009 | 0.041 | 0.018 | 0.054 | 0.012 | 0.040 |
-| canada features ×4 | 4 | 8.8 MB | 0.025 | 0.084 | 0.028 | 0.051 | 0.005 | 0.014 | 0.005 | 0.014 | 0.004 | 0.014 |
+| documents | rows | text | parse | PostgreSQL | output | PostgreSQL | a field | PostgreSQL | a path | PostgreSQL | a value | PostgreSQL | a table | PostgreSQL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tweets | 50,000 | 246 MB | 0.401 | 1.618 | 0.143 | 1.106 | 0.071 | 0.360 | 0.070 | 0.357 | 0.079 | 0.351 | 0.107 | 0.379 |
+| citm performances | 50,000 | 103 MB | 0.088 | 0.977 | 0.048 | 0.432 | 0.009 | 0.038 | 0.017 | 0.052 | 0.012 | 0.038 | 1.093 | 0.325 |
+| canada features ×4 | 4 | 8.8 MB | 0.026 | 0.073 | 0.030 | 0.042 | 0.004 | 0.012 | 0.005 | 0.012 | 0.004 | 0.012 | 0.343 | 0.133 |
 
 Parse: `count(*) … WHERE doc::json IS NOT NULL` over a text column;
 output: `sum(length(doc::text))`; a field: `sum(length(doc -> 'user' ->>
@@ -1038,7 +1038,11 @@ output: `sum(length(doc::text))`; a field: `sum(length(doc -> 'user' ->>
 (performances), `'$.geometry.coordinates[*][*] ? (@[0] < -70)'`
 (features); a value: `sum(JSON_VALUE(doc, path RETURNING bigint))` of
 `'$.user.followers_count'` (tweets), `'$.start'` (performances),
-`'$.geometry.coordinates.size()'` (features).  2026-11-14.
+`'$.geometry.coordinates.size()'` (features); a table: `count(*),
+sum(<a column>)` over `j, JSON_TABLE(j.doc, <rows> COLUMNS (…))` (a
+tweet's hashtags' lengths, a performance's seat areas' ids, a feature's
+points west of 70°W) — slower than PostgreSQL's where a document gives
+many rows (PLAN.md §M14.15 J3c).  2026-11-14.
 
 A whole file as one value:
 
@@ -1056,19 +1060,21 @@ Indexes on JSON (PLAN.md §M14.15 J4, `bench/json/index.py`): 200,000
 made-up events (`{"id", "user": {"name", "tier"}, "kind", "tags": […],
 "score"[, "rare"]}`), `count(*)` of each condition, a full scan against
 the index (milliseconds, the median of five; each count asserted equal
-with and without it).  PostgreSQL's columns wait for the Docker VM
-(`--no-pg` today):
+with and without the index, and to PostgreSQL's).  PostgreSQL 18 in
+Docker (postgres:18-alpine, its defaults), timed by `psql`'s `\timing`
+inside the container; nucleus a server, timed by the client over TCP:
 
 | condition | rows | scan | index | PostgreSQL scan | PostgreSQL index |
 |---|---:|---:|---:|---:|---:|
-| `doc->>'id' = '123457'` (B-tree on the expression) | 1 | 8 | 0.07 | – | – |
-| `(doc->>'score')::int BETWEEN 10 AND 12` (B-tree) | 600 | 16 | 0.90 | – | – |
-| `doc @> '{"user": {"name": "u42"}}'` (`USING json`; GIN `jsonb_path_ops`) | 40 | 33 | 0.12 | – | – |
-| `doc @> '{"kind": "k3", "tags": ["t3"]}'` | 2,000 | 32 | 2.3 | – | – |
-| `doc ? 'rare'` (`jsonb_path_ops` cannot serve it) | 200 | 6 | 0.28 | – | – |
+| `doc->>'id' = '123457'` (B-tree on the expression) | 1 | 9 | 0.07 | 12 | 1.00 |
+| `(doc->>'score')::int BETWEEN 10 AND 12` (B-tree) | 600 | 16 | 1.28 | 16 | 1.88 |
+| `doc @> '{"user": {"name": "u42"}}'` (`USING json`; GIN `jsonb_path_ops`) | 40 | 33 | 0.14 | 13 | 1.09 |
+| `doc @> '{"kind": "k3", "tags": ["t3"]}'` | 2,000 | 27 | 3.14 | 10 | 4.26 |
+| `doc ? 'rare'` (`jsonb_path_ops` cannot serve it) | 200 | 7 | 0.34 | 8 | 8.99 |
 
-Builds: the expression indexes 0.11 s and 0.09 s, the containment index
-0.84 s.  2026-11-14.
+Builds (seconds): the expression indexes 0.16 and 0.09 (PostgreSQL 0.17
+and 0.10), the containment index 0.88 (GIN 1.05).  A full scan's `@>`
+is 2.5–2.7× PostgreSQL's (the cause not yet found).  2026-11-14.
 
 ```sh
 python3 bench/json/index.py --nucleus target/release/nucleus [--no-pg]
