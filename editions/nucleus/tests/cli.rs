@@ -221,6 +221,8 @@ fn ncsql_local_and_over_the_network() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    // Its first line only: the pipe is closed after it, and the server
+    // goes on (its log lines never fail on a stderr gone).
     let mut first = String::new();
     std::io::BufReader::new(server.stderr.take().unwrap())
         .read_line(&mut first)

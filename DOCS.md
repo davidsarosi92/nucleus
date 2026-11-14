@@ -6575,6 +6575,31 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — Fix: a server whose stderr went away stopped.**  Its
+  log lines were `eprintln!`, which panics on a closed pipe: a server
+  started by a program that read its first line and closed the rest
+  died at the next line (`connect: …`, since E2 — CI's
+  `ncsql_local_and_over_the_network` on Linux and Windows).  The server
+  process's lines now go through `nucleus_platform::log!` (re-exported
+  as `nucleus_server::log!` for front-end modules), which drops a line it
+  cannot write.  The storage's branch test on the real file system used
+  `std::env::temp_dir` and `std::process::id`, which panic on WASI: now
+  the platform's.
+- **2026-11-14 — §M14.17, easy start:** `.deb`, `.rpm`, a container
+  image (distroless static), `scripts/install.sh` / `install.ps1`
+  (checking `SHA256SUMS`), `manifests.sh` (Homebrew, winget), each
+  installed in CI; `nucleus sql :memory:` / `kv :memory:`
+  (`Database::open_in_memory`, `Options::in_memory`); `nucleus init`
+  making a password; `NUCLEUS_PASSWORD`; the web console
+  (`modules/console`, `--console`); the playground (`playground/`) and
+  the tutorial (`docs/tutorial.sql`); the JavaScript driver's
+  `queryText`; the embedded editions' `history` option.
+- **2026-11-14 — §M14.13, branches:** `Store::create_branch`,
+  `drop_branch`, `reset_branch`, branches of a past snapshot
+  (`Kv::create_branch_at`); `CREATE / DROP BRANCH`, `ALTER BRANCH …
+  RESET`, `… AS OF`, `nc_catalog.branches`; a client names a branch as
+  its database (every protocol, `nucleus branch`); `Database::pages`;
+  measured in `crates/kv/examples/branches.rs`.
 - **2026-11-14 — §M14.15 J4b, the containment index:** `CREATE INDEX …
   USING json (doc)` for `@>`, `?`, `?|`, `?&` — the text index's
   storage, terms a leaf's path and value hashed and a key path's;

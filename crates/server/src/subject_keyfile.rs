@@ -78,7 +78,7 @@ impl SubjectKeyFile {
             let _ = d.sync_all();
         }
         if first {
-            eprintln!(
+            nucleus_platform::log!(
                 "nucleus: made the file of subject keys, {} — keep it, and back it up apart \
                  from the data and its backups",
                 self.path.display()

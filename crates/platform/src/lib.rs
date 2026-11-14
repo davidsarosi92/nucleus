@@ -35,6 +35,18 @@ pub mod slots;
 
 pub use rng::SplitMix64;
 
+/// A line to standard error that never fails: `eprintln!` panics when
+/// stderr is gone (a pipe its reader closed, a terminal that went away),
+/// and a server's log line must not take the server down with it.  Same
+/// arguments as `eprintln!`.
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr().lock(), $($arg)*);
+    }};
+}
+
 /// The stack of a thread that runs statements — a session's, a parallel
 /// query's workers': enough for the deepest statement the SQL parser lets
 /// through (`nucleus_sql::parser::MAX_NESTING`; measured at about 6 MB in a

@@ -78,7 +78,7 @@ impl KeyFile {
         f.write_all(format!("{hex}\n").as_bytes())
             .and_then(|()| f.sync_all())
             .map_err(|e| e.to_string())?;
-        eprintln!(
+        nucleus_platform::log!(
             "nucleus: made the key for secrets, {} — keep it, and back it up apart from the data",
             self.path.display()
         );

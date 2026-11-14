@@ -8794,6 +8794,57 @@ put it but `text`, which it can neither query nor index.
 **Done when:** a sample project migrates up and down, and the generated
 code compiles and passes its tests in each language.
 
+Steps (planned 2026-11-14):
+
+- **M1 — the schema as SQL**: `nc_catalog.definitions` — every schema
+  object's creating statement, written by the engine from its own
+  catalog records (enum types, tables with their columns, defaults,
+  generated and embedding columns, keys, checks, storage and
+  partitioning, comments; indexes with their method, opclasses and
+  options; foreign keys after every table; statistics objects; row
+  security and policies), in an order that replays.  The law: a schema's
+  definitions run on an empty database give the same definitions — over
+  the slt suite's schemas and generated ones.  `nucleus dump --schema`
+  prints them.  Prior art: `pg_dump --schema-only` (its dependency
+  sort), SQLite's `sqlite_schema.sql` (the creating text kept), MySQL's
+  `SHOW CREATE TABLE`.
+- **M2 — `nucleus migrate`**: files `migrations/<version>_<name>.sql`,
+  up and down in one file (`-- migrate:up`, `-- migrate:down`);
+  `new`, `up [--to v]`, `down [--to v | --all]`, `status`; each
+  migration in one transaction with its record, so a failed one leaves
+  nothing; the record in the catalog (`nc_catalog.migrations`: version,
+  name, checksum, applied at, by whom), written by SQL a client can send
+  too (`RECORD MIGRATION` / `FORGET MIGRATION`, administrators), so it
+  is per branch and replicated with the database; an applied file
+  changed since is refused (its checksum), as is a gap; two migrators at
+  once — one waits on the other's record (a write conflict, retried).
+  Locally (a directory, `:memory:`) or against a server, as `nucleus
+  sql` connects.  Prior art: Flyway (checksums, `validate`), sqlx's and
+  golang-migrate's file names, dbmate's one file with both directions,
+  Rails' `schema_migrations`.
+- **M3 — dry runs and diffs**: `nucleus migrate up --dry-run` applies on a
+  branch of the database (§M14.13), reports each statement's time and the
+  linter's findings, and drops the branch — the database untouched;
+  `nucleus migrate diff` compares the database's definitions with those
+  the files make (applied to a database in memory) and writes the
+  statements from one to the other (tables and columns added, dropped,
+  changed; indexes and constraints; enum labels) — `--new <name>` as the
+  next migration, its `down` the reverse.  Prior art: migra, Atlas's
+  schema diff, Alembic's autogenerate (what it cannot see: renames,
+  which a diff writes as a drop and an add and says so).
+- **M4 — code from the schema**: `nucleus codegen ts|rust|python|java`:
+  a type per table (its columns in their languages' types, as each
+  driver returns them; nullable columns optional), for each language's
+  nucleus driver.
+- **M5 — code from SQL files**: queries in `.sql` files, each named
+  (`-- name: user_by_email :one`, `:many`, `:exec`, as sqlc); the
+  engine describes each one's parameters and result columns (the
+  protocol's describe) and the generator writes a typed function for
+  it; a query that does not check is an error with its position.  The
+  sample project (`examples/migrations`): migrations, queries, the code
+  generated in four languages and tests that run it, in CI.  Prior art:
+  sqlc, PgTyped, sqlx's `query!`, jOOQ.
+
 ### §M14.17 — Easy start ✅
 
 - Packages: Homebrew, winget, apt/rpm, a Docker image, an install script;

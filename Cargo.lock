@@ -409,6 +409,7 @@ dependencies = [
  "nucleus-mcp",
  "nucleus-oidc",
  "nucleus-pg-compat",
+ "nucleus-platform",
  "nucleus-server",
  "nucleus-sql",
  "nucleus-tls",

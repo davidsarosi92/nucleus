@@ -252,7 +252,7 @@ fn split_tag(tag: &str) -> (String, u64) {
 fn logger(config: &Config, id: u32) -> impl Fn(&str, &str) + '_ {
     move |what: &str, text: &str| {
         if config.log_queries {
-            eprintln!(
+            nucleus_platform::log!(
                 "nucleus-server: [{id}] {what}: {}",
                 nucleus_sql::statements::redacted(text.trim())
             );

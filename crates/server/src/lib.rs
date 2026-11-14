@@ -33,6 +33,8 @@ pub use native::handle as handle_native;
 pub use native::handle_stream as handle_native_stream;
 /// SCRAM-SHA-256 (RFC 5802 / 7677), for front ends and their clients.
 pub use nucleus_crypto::{ScramClient, ScramError, ScramServer};
+/// A log line to stderr that never fails (for front-end modules).
+pub use nucleus_platform::log;
 
 /// The nucleus protocol's default port (`NC` in ASCII).
 pub const DEFAULT_PORT: u16 = 20_035;
@@ -512,12 +514,12 @@ pub fn serve_front_end(
                 if let Err(e) = front.handle(stream, kv, &config, id)
                     && e.kind() != io::ErrorKind::UnexpectedEof
                 {
-                    eprintln!("nucleus-server: {} connection {id}: {e}", front.name());
+                    nucleus_platform::log!("nucleus-server: {} connection {id}: {e}", front.name());
                 }
             });
         if let Err(e) = session {
             // The connection is dropped with the closure: the client sees it close.
-            eprintln!("nucleus-server: connection {id}: no thread for it: {e}");
+            nucleus_platform::log!("nucleus-server: connection {id}: no thread for it: {e}");
         }
     }
     Ok(())
@@ -595,7 +597,7 @@ pub fn maintain_with(
                         true
                     };
                     if let Err(e) = kv.vacuum_background(&mut go_on) {
-                        eprintln!("nucleus-server: vacuum: {e}");
+                        nucleus_platform::log!("nucleus-server: vacuum: {e}");
                     }
                 }
                 if !kv.vacuum_wanted() {
@@ -607,10 +609,10 @@ pub fn maintain_with(
             if tick.is_multiple_of(policies_every) {
                 let now = nucleus_sql::datetime::from_system(kv.wall_clock());
                 if let Err(e) = nucleus_sql::partition::apply_policies(&kv, None, now) {
-                    eprintln!("nucleus-server: storage policies: {}", e.message);
+                    nucleus_platform::log!("nucleus-server: storage policies: {}", e.message);
                 }
                 if let Err(e) = nucleus_sql::expiry::expire(&kv, &registry, None, now) {
-                    eprintln!("nucleus-server: expiry: {}", e.message);
+                    nucleus_platform::log!("nucleus-server: expiry: {}", e.message);
                 }
             }
             seen = kv.activity();

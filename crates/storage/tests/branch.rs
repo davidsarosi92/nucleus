@@ -286,7 +286,8 @@ fn a_reset_branch_is_its_parent_now() {
 
 #[test]
 fn branches_on_the_real_file_system() {
-    let dir = std::env::temp_dir().join(format!("nucleus-branch-{}", std::process::id()));
+    let dir = nucleus_platform::temp_dir()
+        .join(format!("nucleus-branch-{}", nucleus_platform::process_id()));
     let _ = std::fs::remove_dir_all(&dir);
     let platform: Arc<dyn Platform> =
         Arc::new(nucleus_platform::real::RealPlatform::new().unwrap());

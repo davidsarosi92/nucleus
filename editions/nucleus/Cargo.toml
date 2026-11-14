@@ -16,6 +16,7 @@ name = "ncsql"
 path = "src/ncsql.rs"
 
 [dependencies]
+nucleus-platform.workspace = true
 nucleus-kv.workspace = true
 nucleus-sql.workspace = true
 nucleus-server.workspace = true

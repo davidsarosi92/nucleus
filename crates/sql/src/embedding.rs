@@ -1191,7 +1191,7 @@ pub fn serve(kv: Arc<dyn Kv>, reg: Arc<Registry>) -> std::thread::JoinHandle<()>
             match work(&kv, &reg) {
                 Ok(r) if r.due > 0 || r.worked() => continue,
                 Ok(_) => {}
-                Err(e) => eprintln!("nucleus: embedding columns: {}", e.message),
+                Err(e) => nucleus_platform::log!("nucleus: embedding columns: {}", e.message),
             }
             let (lock, cv) = drivers();
             let mut d = lock.lock().unwrap_or_else(|e| e.into_inner());

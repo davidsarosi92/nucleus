@@ -339,7 +339,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())
         })
         .collect::<Result<_, _>>()?;
-    eprintln!(
+    nucleus_platform::log!(
         "nucleus {} listening on {} (database {dir}; index cache {} MB; {}{})",
         env!("CARGO_PKG_VERSION"),
         shown.join(" and "),
@@ -386,7 +386,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         })
         .collect();
     if !hints.is_empty() {
-        eprintln!("connect: {}", hints.join("  or  "));
+        nucleus_platform::log!("connect: {}", hints.join("  or  "));
     }
     nucleus_server::maintain_with(
         Arc::clone(&kv),
@@ -402,7 +402,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         std::thread::spawn(move || {
             let name = front.name().to_string();
             if let Err(e) = serve_front_end(front, l, kv, config) {
-                eprintln!("nucleus: {name} listener stopped: {e}");
+                nucleus_platform::log!("nucleus: {name} listener stopped: {e}");
             }
         });
     }
