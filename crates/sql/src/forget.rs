@@ -274,6 +274,7 @@ pub(crate) fn forget(
         said.insert(format!("'{}'", s.replace('\'', "''")));
     }
     let subject_tables = ordered(&*txn)?;
+    let mut texts = std::collections::BTreeSet::new();
     for t in &subject_tables {
         // The subject in each column's type; a column it cannot be a value
         // of holds none of its rows.
@@ -281,12 +282,17 @@ pub(crate) fn forget(
         for &c in &t.subject {
             let column = &t.columns[c];
             let cast = format!("CAST($1 AS {})", crate::ncatalog::type_text(column));
-            let check = sql(&format!("SELECT {cast}"))?;
+            let check = sql(&format!("SELECT CAST({cast} AS text)"))?;
             let fits = crate::access::with_who(&system, || {
                 run(txn, reg, &check, std::slice::from_ref(&value))
             });
-            if fits.is_ok() {
+            if let Ok((rows, _)) = fits {
                 terms.push(format!("{} = {cast}", quoted(&column.name)));
+                // The subject as a backup names it: its value in the
+                // column's type, as text (§M14.24 R6).
+                if let Some(Value::Text(s)) = rows.first().and_then(|r| r.first()) {
+                    texts.insert(s.to_string());
+                }
             }
         }
         if terms.is_empty() {
@@ -404,9 +410,37 @@ pub(crate) fn forget(
             needles,
             audit: e.audit > 0,
             said,
+            texts: texts.into_iter().collect(),
         })
     });
     Ok(e)
+}
+
+/// Destroys the keys of the subjects `texts` in the store of subject
+/// keys, if one is set (the pepper made if there is none yet: a backup
+/// running meanwhile must not make the key anew), marked with the
+/// erasure's commit.
+fn destroy_keys(texts: &[String], committed: nucleus_kv::Timestamp) -> Result<()> {
+    let Some(store) = crate::subject_keys::subject_keys() else {
+        return Ok(());
+    };
+    if texts.is_empty() {
+        return Ok(());
+    }
+    let commit: u64 = committed
+        .to_string()
+        .parse()
+        .map_err(|_| Error::internal("a commit's number"))?;
+    let pepper = store
+        .pepper(true)
+        .map_err(Error::io)?
+        .ok_or_else(|| Error::internal("no pepper made"))?;
+    let ids: Vec<crate::subject_keys::Id> = texts
+        .iter()
+        .map(|t| crate::subject_keys::id(&pepper, t))
+        .collect();
+    store.destroy(&ids, commit).map_err(Error::io)?;
+    Ok(())
 }
 
 /// The columns `FORGET SUBJECT` returns: the erasure record's number, the
@@ -428,6 +462,9 @@ struct Pending {
     audit: bool,
     /// What a statement's text holds of the subject.
     said: Vec<String>,
+    /// The subject as text in each subject column's type: the subjects
+    /// whose keys go (§M14.24 R6).
+    texts: Vec<String>,
 }
 
 thread_local! {
@@ -546,12 +583,21 @@ pub(crate) fn finish(
     kv: &std::sync::Arc<dyn Kv>,
     reg: &Registry,
     out: crate::session::Output,
+    committed: nucleus_kv::Timestamp,
 ) -> Result<crate::session::Output> {
     let Some(p) = PENDING.with(|p| p.borrow_mut().take()) else {
         return Ok(out);
     };
+    // First the subject's keys (§M14.24 R6): the backups holding its rows
+    // no longer open, whatever the scrub does.
+    destroy_keys(&p.texts, committed)?;
     let system = std::sync::Arc::new(crate::access::Who::system());
-    crate::access::with_who(&system, || scrub_tables(kv, reg, &p.tables))?;
+    // (Under a clock: an analyzed table is analyzed again, its samples
+    // holding the subject's values.)
+    let now = crate::datetime::from_system(kv.wall_clock());
+    crate::access::with_who(&system, || {
+        crate::datetime::with_now(now, kv, || scrub_tables(kv, reg, &p.tables))
+    })?;
     // What memory keeps by a hash of contents — decoded index objects, a
     // model's vectors of texts — cannot be told by row: all of it goes.
     crate::object_cache::clear();

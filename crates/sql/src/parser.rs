@@ -1067,6 +1067,12 @@ impl<'a> Parser<'a> {
                 let options = self.explain_options()?;
                 Ok(Statement::Explain(Box::new(self.statement()?), options))
             }
+            "backup" => {
+                self.pos += 1;
+                self.expect_kw("to")?;
+                let to = self.string()?;
+                Ok(Statement::Backup { to })
+            }
             "vacuum" => {
                 self.pos += 1;
                 // PostgreSQL's forms accepted: options, then tables (the

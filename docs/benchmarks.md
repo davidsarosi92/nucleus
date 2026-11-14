@@ -974,6 +974,30 @@ ERASURE_DIR=target/erasure-bench cargo test --release -p nucleus-sql \
     --test erasure_bench -- --ignored --nocapture
 ```
 
+## Backups
+
+PLAN.md §M14.24 R6: `BACKUP TO` and `nucleus restore`, release, real
+files, an M2 Pro.  A database of 60 MiB: 100,000 notes of 1,000
+subjects (a subject column, a B-tree index on it, a text index on the
+note) and 100,000 rows of a table of no one (a B-tree index), analyzed.
+
+| | time | backup |
+|---|---:|---:|
+| `BACKUP TO`, the notes' rows sealed under their subjects' keys | 0.46 s | 19 MiB |
+| `BACKUP TO`, the same with no subject columns (nothing sealed) | 0.16 s | 15 MiB |
+| `nucleus restore`: 200,000 entries, 100,000 opened, 3 indexes rebuilt, analyzed | 0.80 s | |
+| the same backup unsealed | 0.71 s | |
+
+Sealing costs about 3 µs and 50 bytes a row (finding each row's
+subjects, the HMAC of its subject, ChaCha20-Poly1305; key ids, nonce,
+tag).  After `FORGET SUBJECT 'user7'` the restore of the same backup
+left that subject's 100 rows out (99,900 notes).
+
+```sh
+nucleus sql db -c "BACKUP TO '/abs/backups/mon'"
+nucleus restore /abs/backups/mon restored --subject-keys db.subject-keys
+```
+
 ## Write amplification
 
 Bytes written to disk per byte of rows inserted (PLAN.md §M14.28;

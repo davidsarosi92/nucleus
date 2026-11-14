@@ -873,6 +873,27 @@ impl Session {
             Statement::Forget { .. } if self.block.is_some() => Err(Error::active_txn(
                 "FORGET SUBJECT cannot run inside a transaction block",
             )),
+            Statement::Backup { to } => {
+                if self.block.is_some() {
+                    return Err(Error::active_txn(
+                        "BACKUP cannot run inside a transaction block",
+                    ));
+                }
+                if !self.who.superuser {
+                    return Err(crate::access::denied("BACKUP needs a superuser"));
+                }
+                let b = crate::backup::backup(&self.kv, to)?;
+                Ok(Output::Rows {
+                    columns: crate::backup::RESULT
+                        .iter()
+                        .map(|&(name, ty)| OutColumn {
+                            name: name.to_string(),
+                            ty,
+                        })
+                        .collect(),
+                    rows: vec![b.row()],
+                })
+            }
             Statement::Vacuum => {
                 if self.block.is_some() {
                     return Err(Error::active_txn(
@@ -1182,17 +1203,24 @@ impl Session {
         let out = crate::datetime::with_now(now, &self.kv, || {
             execute(txn.as_mut(), &self.registry, stmt, params, sink)
         })?;
-        txn.commit()?;
-        let out = self.after_commit(stmt, out)?;
+        let committed = txn.commit()?;
+        let out = self.after_commit(stmt, out, committed)?;
         self.after_statement(!opts.read_only);
         Ok(Output::Command(deliver(stmt, out, sink)?))
     }
 
     /// What a statement does once its transaction committed, before its
     /// rows go out: a `FORGET`'s scrub (§M14.24 R2b).
-    fn after_commit(&self, stmt: &Statement, out: Output) -> Result<Output> {
+    fn after_commit(
+        &self,
+        stmt: &Statement,
+        out: Output,
+        committed: nucleus_kv::Timestamp,
+    ) -> Result<Output> {
         match stmt {
-            Statement::Forget { .. } => crate::forget::finish(&self.kv, &self.registry, out),
+            Statement::Forget { .. } => {
+                crate::forget::finish(&self.kv, &self.registry, out, committed)
+            }
             _ => Ok(out),
         }
     }
@@ -1380,8 +1408,8 @@ impl Session {
             // A finished statement's rows (`RETURNING`) are handed over
             // once it has committed, so a retried one sends them once.
             let r = decided.and(r).and_then(|out| {
-                txn.commit()?;
-                let out = self.after_commit(stmt, out)?;
+                let committed = txn.commit()?;
+                let out = self.after_commit(stmt, out, committed)?;
                 deliver(stmt, out, sink).map(Output::Command)
             });
             match r {
@@ -1504,6 +1532,9 @@ impl Session {
                 name: name.clone(),
                 ty: DataType::Text,
             }]),
+            Statement::Backup { .. } => Some(columns_of(
+                crate::backup::RESULT.map(|(name, ty)| (name.to_string(), Some(ty))),
+            )),
             Statement::Insert {
                 table,
                 columns,
@@ -1674,6 +1705,11 @@ pub(crate) fn execute_statement(
         Statement::Vacuum => {
             return Err(Error::active_txn(
                 "VACUUM cannot run inside a transaction block",
+            ));
+        }
+        Statement::Backup { .. } => {
+            return Err(Error::active_txn(
+                "BACKUP cannot run inside a transaction block",
             ));
         }
         Statement::AttachPartition {

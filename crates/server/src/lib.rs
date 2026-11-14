@@ -14,6 +14,7 @@
 mod columnar;
 pub mod keyfile;
 mod native;
+pub mod subject_keyfile;
 pub mod throttle;
 pub mod transport;
 

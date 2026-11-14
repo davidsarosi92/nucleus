@@ -860,6 +860,13 @@ impl Target {
                         kv.clone(),
                     ),
                 )));
+                // Subjects' keys too (BACKUP TO, FORGET SUBJECT).
+                nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(
+                    nucleus_server::subject_keyfile::SubjectKeyFile::new(
+                        nucleus_server::subject_keyfile::SubjectKeyFile::beside(&dir),
+                        kv.clone(),
+                    ),
+                )));
                 Backend::Local {
                     session: Session::with_registry(kv, registry()),
                     db,

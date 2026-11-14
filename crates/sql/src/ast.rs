@@ -515,6 +515,12 @@ pub enum Statement {
     /// no snapshot sees removed, committed intents made versions) — of all
     /// of it, whatever tables are named.
     Vacuum,
+    /// `BACKUP TO 'dir'` (PLAN.md §M14.24 R6): the database as one
+    /// snapshot saw it, into a new directory on the server.
+    Backup {
+        /// The directory: an absolute path.
+        to: String,
+    },
     /// `ANALYZE QUERY <statement>`: the linter's findings.
     Lint(Box<Statement>),
     /// `SUMMARIZE t` or `SUMMARIZE <query>` (DuckDB's): one row a column

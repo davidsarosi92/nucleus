@@ -368,6 +368,13 @@ pub trait Kv: Send + Sync {
         Ok(None)
     }
 
+    /// The file system its files are on, for files written beside them
+    /// — a backup's (PLAN.md §M14.24 R6).  `None` (the default) from an
+    /// implementation with no files of its own.
+    fn files(&self) -> Option<&dyn nucleus_platform::FileSystem> {
+        None
+    }
+
     /// Where in its files any of `needles` (four bytes or more) is: one
     /// place per file offset, or per page of the data file, its leaves
     /// decoded ([`nucleus_storage::scan`]).  `None` from an
@@ -891,6 +898,10 @@ impl Kv for Database {
 
     fn random_bytes(&self, buf: &mut [u8]) {
         self.platform.rng().fill_unpredictable(buf);
+    }
+
+    fn files(&self) -> Option<&dyn nucleus_platform::FileSystem> {
+        Some(self.platform.fs())
     }
 
     fn parallelism(&self) -> usize {

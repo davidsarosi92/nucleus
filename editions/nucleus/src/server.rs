@@ -34,6 +34,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut cache_bytes = None;
     let mut history_time = std::time::Duration::ZERO;
     let mut secrets_key = None::<String>;
+    let mut subject_keys = None::<String>;
     let mut rest = args[1..].iter().peekable();
     // An optional address after a flag.
     let addr = |rest: &mut std::iter::Peekable<std::slice::Iter<'_, String>>| match rest.peek() {
@@ -83,6 +84,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--log-queries" => log_queries = true,
             "--secrets-key" => {
                 secrets_key = Some(rest.next().ok_or("--secrets-key needs a file")?.clone())
+            }
+            "--subject-keys" => {
+                subject_keys = Some(rest.next().ok_or("--subject-keys needs a file")?.clone())
             }
             "--insecure" => insecure = true,
             "--tls-cert" => tls_cert = Some(rest.next().ok_or("--tls-cert needs a file")?.clone()),
@@ -245,6 +249,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
         key_path,
         Arc::clone(&kv),
     ))));
+    let subject_path = subject_keys.map_or_else(
+        || nucleus_server::subject_keyfile::SubjectKeyFile::beside(dir),
+        Into::into,
+    );
+    nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(
+        nucleus_server::subject_keyfile::SubjectKeyFile::new(subject_path, Arc::clone(&kv)),
+    )));
     let mut plan = vec![("ncp".to_string(), listen)];
     plan.extend(extra);
     let mut listeners = Vec::new();

@@ -295,6 +295,35 @@ pub fn erase(txn: &mut dyn KvTxn, erasure: u64, values: &[String]) -> Result<u64
     Ok(n)
 }
 
+/// What a record's erasure is when a restore blanked its detail, the key
+/// it was sealed with in the backup destroyed (PLAN.md §M14.24 R6).
+pub const KEY_DESTROYED: u64 = u64::MAX;
+
+/// A version 2 record's detail apart (a backup seals it, §M14.24 R6): the
+/// record with its detail blank, and the detail.  `None` for a record of
+/// version 1 (whose hash covers the detail), one erased, or none at all.
+pub(crate) fn split_detail(b: &[u8]) -> Result<Option<(Vec<u8>, String)>> {
+    let mut r = Record::decode(b)?;
+    if r.digest.is_empty() || r.erased.is_some() || r.detail.is_empty() {
+        return Ok(None);
+    }
+    let detail = std::mem::take(&mut r.detail);
+    Ok(Some((r.encode(), detail)))
+}
+
+/// [`split_detail`] undone: the detail put back, or — `None`, its key
+/// destroyed — the record left blank, erased by [`KEY_DESTROYED`] (the
+/// chain still holds: a version 2 record's hash covers the detail's
+/// digest).
+pub(crate) fn join_detail(blank: &[u8], detail: Option<String>) -> Result<Vec<u8>> {
+    let mut r = Record::decode(blank)?;
+    match detail {
+        Some(d) => r.detail = d,
+        None => r.erased = Some(KEY_DESTROYED),
+    }
+    Ok(r.encode())
+}
+
 /// The key range of the records (an erasure's scrub).
 pub fn records_range() -> (Vec<u8>, Vec<u8>) {
     (

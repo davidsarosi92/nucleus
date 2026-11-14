@@ -3,6 +3,7 @@
 mod init;
 mod kv;
 mod mcp;
+mod restore;
 mod server;
 mod sql;
 
@@ -42,7 +43,8 @@ usage:
                       [--ldap-starttls] [--ldap-ca <pem file>]]
                      [--trusted-proxy <cidr> …] [--max-connections <n>] [--insecure]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
-                     [--index-cache <size>] [--secrets-key <file>] [--history <duration>]
+                     [--index-cache <size>] [--secrets-key <file>] [--subject-keys <file>]
+                     [--history <duration>]
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
@@ -68,10 +70,20 @@ usage:
                                     machine's memory); --secrets-key the file
                                     whose key seals secrets (CREATE SECRET;
                                     default <dir>.secrets-key, made when the
-                                    first secret is); --history keeps every
+                                    first secret is); --subject-keys the file
+                                    of the keys each subject's rows are sealed
+                                    with in backups, destroyed by FORGET
+                                    SUBJECT (default <dir>.subject-keys); --history keeps every
                                     snapshot of that long ago readable (7d,
                                     12h, '30 minutes'; AS OF TIMESTAMP;
                                     default none)
+  nucleus restore <backup> <dir> [--subject-keys <file>]
+                                    a new database in <dir> from a backup
+                                    (BACKUP TO '<backup>'): its indexes and
+                                    statistics made again from the rows; the
+                                    rows of subjects whose keys FORGET SUBJECT
+                                    destroyed left out (keys from <file>,
+                                    default <dir>.subject-keys)
 
 Keys and values are text; write any byte as \\xNN (and a backslash as \\\\).
 ";
@@ -89,6 +101,7 @@ fn main() -> ExitCode {
         Some("sql") => sql::run(&args[1..]),
         Some("mcp") => mcp::run(&args[1..]),
         Some("server") => server::run(&args[1..]),
+        Some("restore") => restore::run(&args[1..]),
         Some("help" | "--help" | "-h") => {
             print!("{USAGE}");
             Ok(())

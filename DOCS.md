@@ -1028,7 +1028,9 @@ distributed implementation will provide (§F3).
   snapshot, `Engine::oldest_snapshot`), then the store's scrub (§4.6).
   `Kv::find_bytes(needles)` → the places in the files holding one
   (`nucleus_storage::scan::find`, re-exported as `nucleus_kv::scan`).
-  Both `None` by default (an implementation with no files of its own).  `Kv::vacuum_background(go_on)`: the same in small batches (2 048
+  Both `None` by default (an implementation with no files of its own).
+  `Kv::files()` → the file system its files are on (`BACKUP TO` writes
+  beside them, §8.30); `None` by default.  `Kv::vacuum_background(go_on)`: the same in small batches (2 048
   entries), `go_on` asked between them — `false` stops the sweep there,
   and the next call goes on from it (with the transactions it began
   with: their statuses go when a sweep has passed every key).
@@ -1108,6 +1110,7 @@ nucleus kv <dir>              # shell: the same commands, plus begin/commit/roll
 nucleus sql [<dir>] [-h <host[:port]>] [-p <port>] [-U <user>] [-d <db>] [--password <pw>] [-c <sql>]
 ncsql …                       # the same shell under its own name
 nucleus server <dir> [--listen <addr:port>] [--password <pw>] [--log-queries]   # §9
+nucleus restore <backup> <dir> [--subject-keys <file>]   # §8.30
 ```
 
 Keys and values are text; any byte can be written as `\xNN` (`\\` for a
@@ -4859,8 +4862,9 @@ partitions — the scrub, as the system:
    through.
 
 What is not scrubbed: the server's own logs (their texts are masked,
-below), files outside the database's directory (backups, exports,
-replicas — each is erased where it is kept), a value encoded past
+below), files outside the database's directory (exports, replicas —
+each is erased where it is kept; `BACKUP`'s backups are made unreadable
+for the subject by destroying its key, §8.30), a value encoded past
 recognition (bit-packed numbers: a layer's own encoding must drop a
 deleted row by construction, which the steps above do), and short
 values (under 8 bytes) the search does not look for — they are scrubbed
@@ -4890,6 +4894,95 @@ end use; statement statistics keep normalized texts, constants as
 `$n`).  The drivers' `forget_subject` / `forgetSubject` run it.  Tests:
 `tests/forget.rs`.
 
+### 8.30 Backups and subjects' keys (`backup`, `subject_keys`, §M14.24 R6)
+
+**`BACKUP TO 'dir'`** (an administrator's; not in a transaction block,
+`25001`; an absolute path on the server, else `22023`; a new or empty
+directory, else `22023`) writes the database as one read-only
+transaction's snapshot sees it, while others go on writing, and returns
+`commit` (the snapshot: `AS OF COMMIT` it reads the same), `entries`,
+`sealed`, `omitted` and `bytes`.  It is the store's entries less what is
+derived from them: every secondary index's (a B-tree's, HNSW's, a text
+or sparse index's — `table.indexes`' ids under the table's prefix) and
+`ANALYZE`'s samples (`00 04`); the catalog, roles, grants, policies,
+models and their files, secrets (sealed already, §8.24), the audit log,
+the erasure records, the embedding queue and the column store's
+segments travel as they are.  Files (through the database's file system,
+`Kv::files`): parts `part-000000`, … of about 16 MiB, each a sequence of
+entries — `0` key, value; `1` a sealed one: the row's table id (or none),
+its keys' ids, a nonce, the sealed key and value; `2` an audit record:
+key, the record with its detail blank, keys' ids, nonce, the sealed
+detail — and a `manifest` written last (`manifest.tmp`, synced, renamed,
+the directory synced): `nucleus backup 1`, the commit, the time, the
+counts, the tables that had statistics, and each part's length and
+SHA-256.  No manifest, no backup.
+
+**What is sealed.**  An entry about a subject (§8.29): a row of a table
+with subject columns (a partition's are its parent's) whose subject
+columns are not all NULL, and — with the subjects of the row it
+references — a row of a table referencing one by a key that does not
+set itself to NULL or a default when it goes (`CASCADE`, `RESTRICT`,
+`NO ACTION`: what `FORGET` deletes with it, or what would stop it),
+transitively, referenced tables first (a self-reference is not
+followed); for each such row also its values stored out of line
+(`LARGE_INDEX`), its embedding jobs (`00 17`) and next model's vectors
+(`00 18`).  A row's subjects are its subject columns' values cast to
+text, as `FORGET` names them; the entry is sealed by ChaCha20-Poly1305
+under SHA-256 of the subjects' keys in id order (forgetting any one of
+them makes it unreadable, as it deletes the row), its kind, table and
+keys' ids as associated data; nonces are a random base a backup,
+counted up.  An audit record of version 2 whose detail holds, as a
+literal, a subject's text or the head of a text of a subject's rows (8
+bytes or more, `FORGET`'s rule) has its detail sealed and its fields in
+the clear.  A table with rows of subjects stored as columns (`column`,
+`row, column`: a segment mixes subjects) is refused (`0A000`); a
+database with subject columns and no store of keys is refused
+(`55000`): its backups could not be forgotten.
+
+**Subjects' keys** (`subject_keys::SubjectKeys`, set for the process by
+`set_subject_keys`).  A subject's id is HMAC-SHA256 of its text under a
+pepper kept with the keys — a backup shows neither whose rows it holds
+nor, by guessing names, whether someone's are there.  Each subject has
+a 32-byte random key under a 16-byte random key id, which a backup names
+it by; `BACKUP` makes the missing ones before it writes.
+`FORGET SUBJECT` destroys, after its commit, the keys of the subject as
+text in each subject column's type, and marks each with its commit: a
+backup whose snapshot is older (begun before, still running) gets no new
+key for it and leaves those entries out (`omitted`), one taken after
+gets a new key, under a new id, for the subject's new rows — the old
+backups still name the old one.  The server's store is
+`nucleus_server::subject_keyfile::SubjectKeyFile`: `nucleus server
+--subject-keys FILE`, by default `<dir>.subject-keys` beside the data
+directory (`nucleus sql <dir>` and `nucleus mcp <dir>` use it too), made
+with mode 0600 when first needed, a text file (`nucleus subject keys 1`,
+`pepper …`, `k id key-id key`, `d id commit`) rewritten — new file,
+synced, renamed, the directory synced — before each change returns.
+It must be kept, and backed up, apart from the data and its backups.
+`subject_keys::MemoryKeys` keeps them in memory (tests, an application
+holding its own).  The old file's blocks may remain on the disk until
+overwritten; a key management service is a module's to add.
+
+**Restore** (`backup::restore(kv, registry, dir)`; `nucleus restore
+<backup> <dir> [--subject-keys FILE]`, by default `<dir>.subject-keys`)
+makes a new database (one holding data: `55000`): the manifest read,
+each part checked against its length and SHA-256 (`22000`), the entries
+written in transactions of about 4 MiB — a sealed one opened with its
+keys (one that does not open: `22000`, the backup changed or another
+database's keys), left out when one of them is destroyed (`omitted`),
+an audit detail then blanked with erasure `u64::MAX` (`KEY_DESTROYED`;
+the chain still holds, §9) —; then every index rebuilt from the rows
+(`dml::backfill_index`), the keys of tables referencing rows left out
+by `SET NULL` / `SET DEFAULT` set so (`nulled`), and the tables that had
+statistics analyzed again.  It returns `Restored` (`commit`, `entries`,
+`opened`, `omitted`, `blanked`, `indexes`, `nulled`).
+
+Not yet (§M14.18): incremental backups, object storage, a backup's
+history (point-in-time restore), scheduled restore tests.  Tests:
+`tests/backup.rs` (a restore is the database as the backup saw it, its
+indexes used; a backup holds no subject's value in the clear; a restore
+after `FORGET` leaves the subject out, the audit chain intact, a later
+backup's new rows of the subject restored).
+
 ### 8.14 Errors and hints (`error`, `hint`)
 
 An `Error` is a SQLSTATE, a message and perhaps a **hint**: what to do
@@ -4913,8 +5006,12 @@ nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
-                     [--index-cache <size>] [--history <duration>]
+                     [--index-cache <size>] [--secrets-key <file>]
+                     [--subject-keys <file>] [--history <duration>]
 ```
+
+`--subject-keys` names the file of subjects' keys (§8.30; default
+`<dir>.subject-keys`).
 
 `--history` keeps every snapshot of that long ago readable — `7d`,
 `12h`, `90min`, `'30 minutes'` (the units of `statement_timeout`) — for
@@ -5166,7 +5263,8 @@ record's hash is SHA-256 over its fields and the previous record's hash;
 a record of version 2 (eight `ff` bytes, then its fields' length) hashes
 its detail's SHA-256 in the detail's place and keeps the detail apart,
 so an erasure can blank it (§8.29: the detail NULL, `erasure` its
-number) and the chain still holds; version 1 records (the fields, then
+number — or −1, blanked by a restore whose subject's key was
+destroyed, §8.30) and the chain still holds; version 1 records (the fields, then
 the hash) read as written.
 `nc_catalog.audit_chain` walks the chain: a changed record, a gap, or
 records cut off the end (the head names more) show, with where — and a
@@ -5847,6 +5945,16 @@ phones' targets too, with a runner: `xcrun simctl spawn <device>` for
 checks `psql` with and without TLS.
 
 ## 12. Change log
+
+- **2026-11-14 — §M14.24 R6, backups and subjects' keys:** `BACKUP TO
+  'dir'` (online, one snapshot, without index pages or samples) and
+  `nucleus restore` (`backup::restore`: indexes and statistics rebuilt);
+  each entry about a subject sealed under its subjects' keys
+  (`subject_keys`, the server's `--subject-keys` file), which `FORGET
+  SUBJECT` destroys — a restore of an older backup leaves the subject
+  out and blanks the audit details naming it; `Kv::files`.  Fixed on the
+  way: `FORGET` of an analyzed table failed after its commit ("now()
+  outside a statement": its scrub analyzes again, now under a clock).
 
 - **2026-11-14 — §M14.24 R5, citations and read records:** `recall`
   returns `as_of` (`snapshot_commit()`); `SET request_id` records each
