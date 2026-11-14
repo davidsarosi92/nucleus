@@ -944,7 +944,7 @@ fn decode_param(bytes: &[u8], format: i16, ty: Option<DataType>) -> Result<Value
                     _ => bytes,
                 };
                 let text = std::str::from_utf8(text).map_err(|_| bad("jsonb"))?;
-                nucleus_sql::json::from_text(text)?
+                t.imp().input(text)?
             }
             (Some(DataType::Ext(t)), _) if t.name() == "vector" => {
                 let (head, body) = bytes.split_at_checked(4).ok_or_else(|| bad("vector"))?;

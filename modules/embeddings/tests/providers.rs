@@ -228,13 +228,12 @@ fn a_refusal_names_no_key() {
         Some(std::time::Duration::ZERO),
         "{e:?}"
     );
-    // A server down: worth trying again later.
-    let dead = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = dead.local_addr().unwrap().port();
-    drop(dead);
-    s.execute(&format!(
-        "CREATE MODEL gone USING openai WITH (url = 'http://127.0.0.1:{port}/v1', model = 'x', dimensions = 2)"
-    ))
+    // A server down: worth trying again later.  Port 1, which no test
+    // can listen on (a port bound and let go may be another test's
+    // server's by the time it is called: seen in CI as 22000).
+    s.execute(
+        "CREATE MODEL gone USING openai WITH (url = 'http://127.0.0.1:1/v1', model = 'x', dimensions = 2)",
+    )
     .unwrap();
     assert_eq!(
         s.execute("SELECT embed('x', 'gone')").unwrap_err().code,
