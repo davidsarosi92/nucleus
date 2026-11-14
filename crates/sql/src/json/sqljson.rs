@@ -198,6 +198,15 @@ struct Query {
 impl Query {
     /// The items the path finds, or its failure.
     fn items(a: &[Value]) -> std::result::Result<Vec<Vec<u8>>, Fail> {
+        Self::with_items(a, |found| found.iter().map(eval::Item::to_json).collect())
+    }
+
+    /// `f` of the items the path finds (borrowed from the document where
+    /// they are its parts), or the path's failure.
+    fn with_items<R>(
+        a: &[Value],
+        f: impl FnOnce(&[eval::Item<'_>]) -> R,
+    ) -> std::result::Result<R, Fail> {
         let path = super::path::compiled(&a[1])?;
         let doc = super::bytes(&a[0])?;
         let vars = match &a[2] {
@@ -206,7 +215,7 @@ impl Query {
         };
         let mut found = Vec::new();
         eval::run(&path, doc, vars, false, Some(&mut found))?;
-        Ok(found.iter().map(eval::Item::to_json).collect())
+        Ok(f(&found))
     }
 
     /// What an `ON EMPTY` / `ON ERROR` clause gives for `e`.
@@ -248,23 +257,50 @@ impl Query {
     fn value(t: &Target, cx: &CallContext<'_>, a: &[Value]) -> Result<Value> {
         let (on_empty, on_error) = ((&a[4], &a[5]), (&a[6], &a[7]));
         let fail = |e: Error| Self::behave(t, cx, on_error.0, on_error.1, e);
-        let found = match Self::items(a) {
-            Ok(f) => f,
-            Err(Fail::Hard(e)) => return Err(e),
-            Err(Fail::Soft(e)) => return fail(e),
-        };
-        let one = match found.as_slice() {
-            [] => {
+        // The one item — an integer read where it lies in the document
+        // (an integer type's commonest case, no copy), else copied out.
+        let fast = matches!(t.fit, Fit::None)
+            && matches!(t.ty, DataType::BigInt | DataType::Integer | DataType::SmallInt);
+        let one = Self::with_items(a, |found| match found {
+            [] => Ok(None),
+            [eval::Item::J(b)] => {
+                if fast && let Ok(Node::Int(i)) = form::root(b.get()) {
+                    return Ok(Some(Err(i)));
+                }
+                Ok(Some(Ok(b.get().to_vec())))
+            }
+            [d] => Ok(Some(Ok(d.to_json()))),
+            _ => Err(()),
+        });
+        let one = match one {
+            Ok(Ok(Some(Err(i)))) => {
+                let fits = match t.ty {
+                    DataType::Integer => i32::try_from(i).is_ok(),
+                    DataType::SmallInt => i16::try_from(i).is_ok(),
+                    _ => true,
+                };
+                if fits {
+                    return Ok(Value::Int(i));
+                }
+                // Out of the type's range: its text's conversion and error.
+                let mut b = Vec::new();
+                form::put_int(&mut b, i);
+                b
+            }
+            Ok(Ok(Some(Ok(one)))) => one,
+            Ok(Ok(None)) => {
                 let e = Error::json_no_item("no SQL/JSON item found for specified path");
                 return Self::behave(t, cx, on_empty.0, on_empty.1, e);
             }
-            [one] => one,
-            _ => {
+            Ok(Err(())) => {
                 return fail(Error::json_more_than_one_item(
                     "JSON path expression in JSON_VALUE must return single item",
                 ));
             }
+            Err(Fail::Hard(e)) => return Err(e),
+            Err(Fail::Soft(e)) => return fail(e),
         };
+        let one: &[u8] = &one;
         let out = match form::root(one)? {
             Node::Array(_) | Node::Object(_) => {
                 return fail(Error::json_scalar_required(
@@ -708,12 +744,23 @@ impl TableFunction for TableRows {
         if matches!(a[0], Value::Null) || matches!(a[1], Value::Null) {
             return Ok(Vec::new());
         }
-        match Query::items(a) {
-            Ok(items) => Ok(items
-                .into_iter()
+        let ty = super::json_type();
+        let rows = Query::with_items(a, |found| {
+            found
+                .iter()
                 .zip(1..)
-                .map(|(b, i)| vec![super::value(b), Value::Int(i)])
-                .collect()),
+                .map(|(item, i)| {
+                    // Straight into the value's shared bytes: one copy.
+                    let b: std::sync::Arc<[u8]> = match item {
+                        eval::Item::J(b) => b.get().into(),
+                        d => d.to_json().into(),
+                    };
+                    vec![Value::Ext(ty, b), Value::Int(i)]
+                })
+                .collect()
+        });
+        match rows {
+            Ok(rows) => Ok(rows),
             Err(Fail::Hard(e)) => Err(e),
             Err(Fail::Soft(e)) if flag(&a[3]) => Err(e),
             Err(Fail::Soft(_)) => Ok(Vec::new()),

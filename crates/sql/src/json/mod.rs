@@ -48,7 +48,9 @@ pub struct Json;
 
 /// The interned `json` type (the built-in module registers it).
 pub fn json_type() -> TypeRef {
-    TypeRef::named("json").expect("the built-in module registers json")
+    // Interned once: a lookup by name per value made shows in a profile.
+    static JSON: std::sync::OnceLock<TypeRef> = std::sync::OnceLock::new();
+    *JSON.get_or_init(|| TypeRef::named("json").expect("the built-in module registers json"))
 }
 
 /// The `json` column type.

@@ -8585,10 +8585,17 @@ put it but `text`, which it can neither query nor index.
   asserted equal to PostgreSQL 18's; seconds, nucleus / PostgreSQL):
   tweets' hashtags 0.107 / 0.379, but performances' seat areas 1.093 /
   0.325 and features' points 0.343 / 0.133 — where a document gives
-  many rows, the desugared form (a lateral subquery, a function call per
-  column per item, each re-reading the item) is 2.6–3.4× slower.
-  *Next:* a `JSON_TABLE` operator of its own, columns read from the
-  item in one pass.
+  many rows it is 2.6–3.4× slower.  *Profiled* (performances, 1.79
+  million rows, in the process): `JSON_VALUE … RETURNING bigint` went
+  through the integer's text and back, each item was copied twice (into
+  a `Vec`, then into the value's `Arc`), and the `json` type was looked
+  up by name per value — fixed (an integer read where it lies, one copy,
+  the type interned once): 1.08 s → 0.84 s.  What is left is the lateral
+  nested loop's per-row cost spread over allocations, row building and
+  expression calls: `json_path_query` laterally, with no column at all,
+  takes 0.42 s.  *Next:* a cheaper lateral loop (the right side's plan
+  built once and re-bound per row) or a `JSON_TABLE` operator of its
+  own.
 - **J4 — indexes**: expression indexes for every type, the containment
   index, the planner choosing them (with statistics: a path's
   selectivity); measured against PostgreSQL's GIN (`jsonb_path_ops`)
