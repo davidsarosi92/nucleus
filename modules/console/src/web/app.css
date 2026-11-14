@@ -1,0 +1,168 @@
+/* The nucleus console (PLAN.md §M14.17 E3, E4). */
+:root {
+  --bg: #f7f7f5;
+  --panel: #ffffff;
+  --ink: #1c1d1f;
+  --muted: #6b6f76;
+  --line: #e2e2de;
+  --accent: #3a5bd9;
+  --accent-ink: #ffffff;
+  --soft: #eef1fb;
+  --bad: #b3261e;
+  --bad-soft: #fbeceb;
+  --warn: #8a5a00;
+  --warn-soft: #fdf3dc;
+  --good: #1f7a4d;
+  --bar: #c9d3f5;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141517;
+    --panel: #1c1d20;
+    --ink: #e6e6e3;
+    --muted: #9a9ea6;
+    --line: #2d2f33;
+    --accent: #8ea4ff;
+    --accent-ink: #10131c;
+    --soft: #23283a;
+    --bad: #ff8a80;
+    --bad-soft: #3a1f1d;
+    --warn: #f0c060;
+    --warn-soft: #3a3020;
+    --good: #6fd19d;
+    --bar: #36406a;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 var(--sans); }
+button, input, textarea, select { font: inherit; color: inherit; }
+code, pre, .mono { font-family: var(--mono); font-size: 13px; }
+
+#app { height: 100%; display: flex; flex-direction: column; }
+#app.loading::after { content: "…"; margin: auto; color: var(--muted); }
+
+/* The login. */
+.login { margin: auto; width: min(360px, calc(100% - 32px)); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; padding: 24px; }
+.login h1 { margin: 0 0 4px; font-size: 20px; }
+.login p { margin: 0 0 16px; color: var(--muted); }
+.login label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 13px; }
+.login input { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); }
+.login button { margin-top: 16px; width: 100%; }
+
+/* Buttons. */
+.btn { padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+  cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.small { padding: 2px 8px; font-size: 12px; }
+
+/* The bar on top. */
+header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--panel);
+  border-bottom: 1px solid var(--line); }
+header .brand { font-weight: 600; letter-spacing: .2px; }
+header .who { color: var(--muted); }
+header .status { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--soft); }
+header .status.in { background: var(--warn-soft); color: var(--warn); }
+header .status.failed { background: var(--bad-soft); color: var(--bad); }
+header .spacer { flex: 1; }
+
+main { flex: 1; display: grid; grid-template-columns: 260px 1fr; min-height: 0; }
+@media (max-width: 760px) {
+  main { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  aside { max-height: 30vh; border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
+/* The tables. */
+aside { border-right: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 8px; }
+aside input { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); margin-bottom: 6px; }
+aside .empty { color: var(--muted); padding: 8px; }
+.table { border-radius: 6px; }
+.table > .name { display: flex; align-items: center; gap: 6px; padding: 4px 6px; cursor: pointer;
+  border-radius: 6px; }
+.table > .name:hover { background: var(--soft); }
+.table > .name .count { margin-left: auto; color: var(--muted); font-size: 12px; }
+.table .cols { margin: 0 0 6px 18px; font-size: 13px; }
+.table .col { display: flex; gap: 8px; padding: 1px 0; }
+.table .col .type { color: var(--muted); margin-left: auto; font-family: var(--mono); font-size: 12px; }
+.table .col.key .cname { font-weight: 600; }
+.table .actions { margin: 4px 0 0; display: flex; gap: 6px; }
+
+/* The editor and the results. */
+section.work { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.editor { padding: 12px 16px 8px; display: flex; flex-direction: column; gap: 8px; }
+.editor textarea { width: 100%; min-height: 120px; height: 22vh; resize: vertical; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-family: var(--mono);
+  font-size: 13px; line-height: 1.5; tab-size: 2; }
+.editor textarea:focus { outline: 2px solid var(--soft); border-color: var(--accent); }
+.toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.toolbar .hint { color: var(--muted); font-size: 12px; margin-left: auto; }
+.toolbar select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); max-width: 240px; }
+
+.results { flex: 1; overflow: auto; padding: 0 16px 16px; min-height: 0; }
+.result { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-top: 12px;
+  overflow: hidden; }
+.result > .meta { display: flex; gap: 12px; padding: 6px 12px; color: var(--muted); font-size: 12px;
+  border-bottom: 1px solid var(--line); }
+.result > .meta .tag { color: var(--ink); font-weight: 600; }
+.result > .meta .note { color: var(--warn); }
+.grid { overflow: auto; max-height: 60vh; }
+.grid table { border-collapse: collapse; width: max-content; min-width: 100%; }
+.grid th, .grid td { padding: 4px 10px; border-bottom: 1px solid var(--line); text-align: left;
+  font-family: var(--mono); font-size: 13px; white-space: pre; max-width: 480px; overflow: hidden;
+  text-overflow: ellipsis; }
+.grid th { position: sticky; top: 0; background: var(--panel); font-family: var(--sans); font-weight: 600;
+  border-bottom: 1px solid var(--line); }
+.grid th .ty { display: block; font-weight: 400; color: var(--muted); font-size: 11px;
+  font-family: var(--mono); }
+.grid td.num, .grid th.num { text-align: right; }
+.grid td.null { color: var(--muted); font-style: italic; }
+.grid tr:hover td { background: var(--soft); }
+
+.error { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: var(--bad-soft);
+  color: var(--bad); border: 1px solid var(--bad); }
+.error .code { font-family: var(--mono); font-size: 12px; opacity: .8; margin-left: 6px; }
+.error .hint { color: var(--ink); margin-top: 4px; }
+
+/* A plan, drawn. */
+.plan { padding: 8px 12px 12px; }
+.node { position: relative; margin: 3px 0; padding: 5px 8px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel); overflow: hidden; }
+.node .fill { position: absolute; inset: 0 auto 0 0; background: var(--bar); opacity: .55; }
+.node .body { position: relative; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.node .op { font-weight: 600; }
+.node .detail { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.node .nums { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.node .nums b { color: var(--ink); font-weight: 600; }
+.node .off { color: var(--warn); background: var(--warn-soft); border-radius: 4px; padding: 0 5px; }
+.node.never { opacity: .55; }
+.children { margin-left: 22px; border-left: 1px dashed var(--line); padding-left: 8px; }
+.plan .total { margin-top: 8px; color: var(--muted); font-size: 12px; }
+.plan .lines { margin-top: 6px; color: var(--muted); font-size: 12px; }
+
+/* The linter's findings. */
+.findings { padding: 8px 12px 12px; display: grid; gap: 8px; }
+.finding { border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 6px;
+  padding: 8px 10px; }
+.finding .rule { font-family: var(--mono); font-size: 12px; color: var(--warn); }
+.finding .place { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.finding .fix { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.finding .fix code { background: var(--soft); padding: 2px 6px; border-radius: 4px; }
+.none { padding: 10px 12px; color: var(--good); }
+
+/* The tutorial (§M14.17 E5). */
+.tour { margin: 12px 16px 0; padding: 10px 12px; background: var(--soft); border-radius: 8px; }
+.tour h2 { margin: 0 0 4px; font-size: 15px; }
+.tour p { margin: 4px 0; }
+.tour .steps { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.tour .steps .of { color: var(--muted); font-size: 12px; }

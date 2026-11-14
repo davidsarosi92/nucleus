@@ -30,6 +30,7 @@ nucleus-embeddings = { version = "0.1.0", path = "modules/embeddings" }
 nucleus-local-models = { version = "0.1.0", path = "modules/local-models" }
 nucleus-ldap = { version = "0.1.0", path = "modules/ldap" }
 nucleus-mcp = { version = "0.1.0", path = "modules/mcp" }
+nucleus-console = { version = "0.1.0", path = "modules/console" }
 # Regular expressions for `~`: linear-time matching, so no pattern can
 # stall the server.
 regex = "1.11.1"

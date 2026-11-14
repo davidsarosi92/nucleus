@@ -285,7 +285,7 @@ are marked ✅.
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
 | | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
 | | M14.16 | Migrations and code generation | ⬜ |
-| | M14.17 | Easy start: packages, Docker, web console, browser playground | ◐ E1–E2 ✅ (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; next E3 the web console |
+| | M14.17 | Easy start: packages, Docker, web console, browser playground | ◐ E1–E3 ✅ (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; E3 ✅ the web console (`--console`); next E4 the playground |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
@@ -8856,10 +8856,30 @@ Steps (planned 2026-11-14):
   ghcr.io/davidsarosi92/nucleus sql :memory:`, one command.
 - **E3 — the web console** (`--console [addr:port]`, a module): a page
   served by the server — the tables and their columns, SQL run, plans
-  drawn from `EXPLAIN (FORMAT JSON)`, `EXPLAIN ANALYZE`, the analyzer's
+  drawn from `EXPLAIN`, `EXPLAIN ANALYZE`, the analyzer's
   findings — over a small HTTP/1.1 server of the standard library, the
   login the server's, loopback only unless TLS.  Prior art: DuckDB's UI,
   pgAdmin's and Supabase's SQL editors, explain.dalibo.com's plan view.
+  ✅ 2026-11-14.  *Built:* the module `nucleus-console`, a `FrontEnd`
+  (so `--front-end console` and the server's TLS, connection threads
+  and limits come with it): HTTP/1.1 over the standard library (a
+  request at a time, keep-alive, bounded heads and bodies, no chunked
+  bodies); the login through the same pieces as pg-compat's (throttle,
+  authenticator, directory, audit, `Session::admit`), the session kept
+  under a cookie; statements through `Session::run_into` with a sink that
+  stops at the row limit, so a large result is never gathered.  The
+  page: one script without dependencies or a build step, every value
+  set as text (no markup from data), a CSP of `'self'`.  *Changed from
+  the plan:* plans are drawn from `EXPLAIN`'s text, not a new `FORMAT
+  JSON` — two spaces a level and `(rows=…) (actual rows=… loops=…
+  time=…)` on every node are already a format the tests pin; a JSON
+  form for other tools can come when one needs it.  *Not taken:* a
+  client connection back to the server's own `ncp` port per page (a
+  second login path and a port the console would depend on); WebSocket
+  streaming (a reply is bounded, a request at a time is enough); cancel
+  (with §M14.18's statement cancellation).  Tested in headless Chrome
+  over the DevTools protocol (`test/browser.mjs`), screenshots light and
+  dark checked by eye.
 - **E4 — the playground**: the console's page on the browser edition
   (§M14.23) instead of a server — the database in the page, nothing to
   install.  Prior art: shell.duckdb.org, PGlite's REPL, SQLite's fiddle.
@@ -8897,9 +8917,44 @@ Steps (planned 2026-11-14):
   the store opens, the catalog and indexes agree with the tables, row
   counts match the backup's manifest.  An untested backup is reported as
   one; each result is a metric and an audit entry.
-- Metrics (Prometheus endpoint) and tracing (OpenTelemetry): commits,
-  conflicts, cache, WAL, statement latencies, backups and restore tests,
-  logins (§M14.25).
+- **Metrics, and an interface that hands them to exporters** (asked for
+  2026-11-14; none exist yet).  One source, many ways out:
+  - *In the core, without dependencies* (principle 12): a registry of
+    named instruments — counters, gauges and histograms (fixed
+    logarithmic buckets), each with labels — kept in atomics so that
+    recording costs a few nanoseconds and no lock; the layers record
+    into it: commits, aborts and serialization conflicts, the page
+    cache's hits, misses and evictions, WAL bytes, fsyncs and
+    checkpoints, pages in use and free (`Database::pages`), branches,
+    sessions and logins (refused, locked) by front end, statements and
+    their latencies, rows read and returned, embedding model calls,
+    vacuum, backups and restore tests.  A *snapshot* reads them all at
+    once, consistent per instrument.
+  - *The interface*: `MetricsExporter` — a module registers one (as a
+    front end is registered, §M14.19) and is given the registry: a
+    *pull* exporter serves the snapshot when asked, a *push* exporter
+    sends it on its own schedule.  The registry also takes *collectors*
+    a module adds (its own instruments, read at snapshot time), so a
+    module's metrics leave by every exporter too.
+  - *Exporters, as modules*: **Prometheus** — `GET /metrics` in the text
+    exposition format (and OpenMetrics when asked), on its own listener
+    or beside the console's, `nucleus server --metrics [addr]`, loopback
+    unless TLS as the console; **OpenTelemetry** — OTLP over HTTP to a
+    collector, pushed every interval, metrics and then traces (a span
+    per statement, its plan's nodes as child spans when sampled);
+    StatsD and others the same way, outside the repository if wanted.
+  - *In SQL*: `nc_catalog.metrics` reads the same snapshot, so a client,
+    the console and an AI model see what Prometheus sees.
+  - Prior art: Prometheus's client libraries (the exposition format, the
+    histogram's cumulative buckets), ClickHouse's `system.metrics` /
+    `system.events` beside its built-in Prometheus endpoint,
+    CockroachDB's `_status/vars`, PostgreSQL's `pg_stat_*` views and the
+    separate `postgres_exporter` it needs (nucleus serves its own), the
+    OpenTelemetry metrics data model (cumulative temporality).
+  - Done when a Prometheus scrapes a running server in a test (the
+    numbers moving with a workload), an OTLP collector receives the same
+    numbers, `nc_catalog.metrics` agrees with both, and recording is
+    within noise in the kv and SQL benchmarks.
 - **Health checks**: liveness and readiness endpoints for orchestrators
   (`/health/live`, `/health/ready` — ready only once recovery is done and
   the store is open), and `nucleus status` for people.

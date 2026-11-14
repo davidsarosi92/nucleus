@@ -25,6 +25,7 @@ nucleus-tls.workspace = true
 nucleus-oidc.workspace = true
 nucleus-ldap.workspace = true
 nucleus-mcp.workspace = true
+nucleus-console.workspace = true
 nucleus-embeddings.workspace = true
 nucleus-local-models.workspace = true
 

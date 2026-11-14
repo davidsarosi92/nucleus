@@ -248,6 +248,7 @@ ncsql ./mydb                            # SQL shell (same as `nucleus sql`)
 nucleus server ./mydb                   # nucleus protocol on 127.0.0.1:20035
 ncsql -c '\d t'                         # the shell, connected (user and password: nucleus)
 nucleus server ./mydb --pg-compat       # also PostgreSQL's protocol on 5432
+nucleus server ./mydb --console         # a web console on http://127.0.0.1:20036/
 PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
 ```
 

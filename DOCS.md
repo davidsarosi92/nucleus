@@ -45,6 +45,7 @@
 | `modules/embeddings` | `nucleus-embeddings` | embedding model providers: OpenAI-compatible endpoints, Cohere, Voyage (§8.23) | §M14.22 |
 | `modules/local-models` | `nucleus-local-models` | the `local` model provider: models run inside nucleus — WordPiece and Unigram tokenizers, BERT and XLM-RoBERTa encoders on `ext::kernels`, files from Hugging Face or a directory kept in the database (§8.23) | §M14.22 |
 | `modules/mcp` | `nucleus-mcp` | a Model Context Protocol server: AI models list, describe and query a database (§6.5) | §M14.10 |
+| `modules/console` | `nucleus-console` | the web console: a front end serving a page to browse tables, run SQL, see plans drawn and the linter's findings (§9) | §M14.17 |
 | `editions/nucleus` | `nucleus-cli` (binaries `nucleus`, `ncsql`) | the full edition: `nucleus kv`, `nucleus sql` / `ncsql`, `nucleus server` with every front end, `nucleus mcp` | §M6, §M12, §M14.6 ✅ |
 | `editions/embedded` | `nucleus-embedded` (a `cdylib`, `staticlib` and `rlib`) | the embedded edition: a database in memory or in a directory inside the application, its sessions over the nucleus protocol through a pipe in the process, behind a C API (`include/nucleus_embedded.h`) that Python and Node load (§11, *In the process*); for `wasm32-wasip1` the browser's, its sessions stepped (§11, *In the browser*) | §M14.23 |
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
@@ -5557,7 +5558,7 @@ connects to a branch by name.
 
 ```
 nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
-                     [--front-end <name> [<addr:port>]]
+                     [--console [<addr:port>]] [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw>] [--no-auth] [--log-queries]
                      [--sync ordered|full] [--wal minimal|full] [--cache <size>]
                      [--index-cache <size>] [--secrets-key <file>]
@@ -5910,6 +5911,34 @@ and `fake_salt` / `scram_nonce` for the exchange; `ncp` version 4 uses it
 later steps.  `Config::registry` is what sessions have (the
 built-ins by default; a custom build adds its modules —
 `Config::with_registry`); pg-compat's front end adds its module on top.
+
+**The web console** (`modules/console`, §M14.17 E3): `--console`
+(`--front-end console`, default `127.0.0.1:20036`) serves a page to
+browse the tables, run SQL, see `EXPLAIN` / `EXPLAIN ANALYZE` drawn as a
+tree — each node's own time as a bar, an estimate ten times off what
+happened marked — and `ANALYZE QUERY`'s findings with their fixes.  The
+page is the module's (`src/web/`: HTML, CSS and a script with no
+dependencies, compiled in); HTTP/1.1 over the standard library, TLS with
+the server's certificate when it has one.  It logs in with a user and
+password checked as the other front ends check them (the
+authenticator, a directory's users only over TLS or from loopback, the
+throttle, refusals audited, `CONNECT`, `--max-connections`); the session
+is a database session kept under a random 256-bit token in an
+`HttpOnly`, `SameSite=Strict` cookie (`Secure` over TLS), dropped after
+30 minutes unused, at most 64.  `POST /api/query` runs a script's
+statements in order through `Session::run_into`, each reply's rows
+(as text) up to `limit` (≤ 10,000; the statement stops there,
+`truncated`); the first error ends it, with its code and hint.  A
+`POST` needs `X-Nucleus-Console: 1` (no form can send it, no other
+origin may without CORS, which it never allows) and, when the browser
+names one, the page's own `Origin`; replies carry a CSP of `'self'`,
+`nosniff`, no referrer.  Beyond loopback without TLS the server refuses
+to start (the page sends the password) unless `--insecure`.  When
+listening the server names its URL (`connect: … or http://…/ (the
+console)`).  `modules/console/test/browser.mjs` goes through the page in
+headless Chrome against a server — login refused and accepted, tables,
+rows, NULLs, two statements, a plan, the linter, an error and its hint,
+a transaction's state, a new table listed, the logout — in CI on Linux.
 
 **PostgreSQL compatibility** (optional, D14): `--pg-compat` also listens
 for the PostgreSQL protocol (`nucleus_pg_compat::Pg`, default

@@ -33,7 +33,7 @@ usage:
                                     sample and query (read-only unless
                                     --allow-writes); --memory: remember, recall,
                                     forget
-  nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]]
+  nucleus server <dir> [--listen <addr:port>] [--pg-compat [<addr:port>]] [--console [<addr:port>]]
                      [--front-end <name> [<addr:port>]]
                      [--user <name>] [--password <pw> (or NUCLEUS_PASSWORD)] [--no-auth] [--log-queries]
                      [--tls-cert <pem file> --tls-key <pem file> [--tls-client-ca <pem file>]]
@@ -50,7 +50,9 @@ usage:
                                     the server: the nucleus protocol (default
                                     127.0.0.1:20035), and with --pg-compat (the
                                     front end `pg`) also PostgreSQL's (default
-                                    127.0.0.1:5432); clients log in as
+                                    127.0.0.1:5432), with --console a web console
+                                    (default 127.0.0.1:20036; beyond loopback
+                                    over TLS only); clients log in as
                                     nucleus / nucleus unless changed; with a
                                     certificate, TLS for clients that ask; with
                                     a client CA, a client certificate naming

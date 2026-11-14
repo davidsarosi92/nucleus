@@ -17,6 +17,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
     let mut fronts = FrontEnds::builtin();
     fronts.add(Arc::new(nucleus_pg_compat::Pg))?;
+    fronts.add(Arc::new(nucleus_console::Console::new()))?;
     // (front end, address): ncp always, on `--listen`'s address.
     let mut listen: Option<String> = None;
     let mut extra: Vec<(String, Option<String>)> = Vec::new();
@@ -53,6 +54,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         match a.as_str() {
             "--listen" => listen = Some(rest.next().ok_or("--listen needs an address")?.clone()),
             "--pg-compat" => extra.push(("pg".into(), addr(&mut rest))),
+            "--console" => extra.push(("console".into(), addr(&mut rest))),
             "--front-end" => {
                 let name = rest.next().ok_or("--front-end needs a name")?.clone();
                 extra.push((name, addr(&mut rest)));
@@ -294,17 +296,31 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             nucleus_sql::roles::unclaimed(&*txn).map_err(|e| e.message)
         };
+        // The console's page sends its password in the request: beyond
+        // loopback, over TLS only.
+        let console_plain = config.tls.is_none()
+            && listeners.iter().any(|(f, l)| {
+                f.name() == "console" && l.local_addr().is_ok_and(|a| !a.ip().is_loopback())
+            });
+        const CLAIM: &str = "claim the database (nucleus init), give --password, or say --insecure";
         let why = if no_auth {
-            Some("without authentication (--no-auth)")
+            Some(("without authentication (--no-auth)", CLAIM))
+        } else if console_plain {
+            Some((
+                "with the console over plain HTTP (its page sends the password)",
+                "give --tls-cert and --tls-key, listen on loopback, or say --insecure",
+            ))
         } else if weak_password && unclaimed()? {
-            Some("with the default password while the database is unclaimed")
+            Some((
+                "with the default password while the database is unclaimed",
+                CLAIM,
+            ))
         } else {
             None
         };
-        if let Some(why) = why {
+        if let Some((why, what)) = why {
             return Err(format!(
-                "server: refusing to listen on {} {why}: claim the database (nucleus init), \
-                 give --password, or say --insecure",
+                "server: refusing to listen on {} {why}: {what}",
                 exposed.join(", ")
             ));
         }
@@ -315,6 +331,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let what = match f.name() {
                 "ncp" => "nucleus protocol",
                 "pg" => "PostgreSQL compatibility",
+                "console" => "web console",
                 other => other,
             };
             l.local_addr()
@@ -352,6 +369,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .filter_map(|(name, a)| match name {
             "ncp" if a.to_string() == "127.0.0.1:20035" => Some("nucleus sql".to_string()),
             "ncp" => Some(format!("nucleus sql -h {a}")),
+            "console" => Some(format!(
+                "{}://{a}/ (the console)",
+                if config.tls.is_some() {
+                    "https"
+                } else {
+                    "http"
+                }
+            )),
             "pg" => Some(format!(
                 "psql -h {} -p {} -U {shown_user}",
                 a.ip(),

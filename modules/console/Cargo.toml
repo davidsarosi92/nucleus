@@ -1,0 +1,28 @@
+[package]
+name = "nucleus-console"
+description = "The nucleus web console: a page served by the server to browse tables, run SQL, see plans drawn and the linter's findings"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/davidsarosi92/nucleus"
+readme = "README.md"
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE"]
+
+# A module depends on nucleus's public API crates only, by version (the
+# path is for building inside the repository; a published copy drops it).
+[dependencies]
+nucleus-kv = { version = "0.1.0", path = "../../crates/kv" }
+nucleus-sql = { version = "0.1.0", path = "../../crates/sql" }
+nucleus-server = { version = "0.1.0", path = "../../crates/server" }
+# The page's requests and replies.
+serde_json = "1"
+
+[dev-dependencies]
+nucleus-platform = { version = "0.1.0", path = "../../crates/platform" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

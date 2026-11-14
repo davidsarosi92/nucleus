@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `nucleus server --console [addr]`: the web console (the `console` module).
 - `:memory:` for `nucleus sql` and `nucleus kv`: a database in the process.
 - `nucleus init`: given no password, makes one and shows it once; says how
   to start the server and connect.

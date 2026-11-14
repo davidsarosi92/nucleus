@@ -401,6 +401,7 @@ name = "nucleus-cli"
 version = "0.1.0"
 dependencies = [
  "nucleus-client",
+ "nucleus-console",
  "nucleus-embeddings",
  "nucleus-kv",
  "nucleus-ldap",
@@ -425,6 +426,17 @@ dependencies = [
  "nucleus-sql",
  "nucleus-testkit",
  "nucleus-wire",
+]
+
+[[package]]
+name = "nucleus-console"
+version = "0.1.0"
+dependencies = [
+ "nucleus-kv",
+ "nucleus-platform",
+ "nucleus-server",
+ "nucleus-sql",
+ "serde_json",
 ]
 
 [[package]]
