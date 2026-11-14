@@ -454,3 +454,23 @@ test("pipelines and executeMany", async () => {
   assert.deepEqual((await db.query(`SELECT count(*) FROM ${t}`)).rows, [[3000]]);
   await db.close();
 });
+
+test("a script as text", async () => {
+  const db = await connect(options);
+  const t = table();
+  // Every statement's result, values as the server writes them; the first
+  // error ends the script and comes back beside the results before it.
+  const { results, error } = await db.queryText(
+    `CREATE TABLE ${t} (k INT PRIMARY KEY, n NUMERIC(6, 2), d DATE); INSERT INTO ${t} VALUES (1, 2.5, '2026-01-02'), (2, NULL, NULL); SELECT * FROM ${t} ORDER BY k`);
+  assert.equal(error, null);
+  assert.deepEqual(results.map((r) => r.command), ["CREATE TABLE", "INSERT", "SELECT"]);
+  assert.equal(results[1].count, 2);
+  assert.deepEqual(results[2].rows, [["1", "2.50", "2026-01-02"], ["2", null, null]]);
+  assert.deepEqual(results[2].columns.map((c) => c.name), ["k", "n", "d"]);
+  const failed = await db.queryText(`SELECT 1; SELECT nosuch FROM ${t}; SELECT 2`);
+  assert.equal(failed.results.length, 1);
+  assert.equal(failed.error?.code, "42703");
+  // The connection goes on.
+  assert.deepEqual((await db.query("SELECT 3")).rows, [[3]]);
+  await db.close();
+});

@@ -312,3 +312,56 @@ fn a_stepped_session_takes_copy_data_only_with_the_copy() {
     assert_eq!(cur.map(Result::unwrap).count(), 2500);
     assert_eq!(one(&mut c, "SELECT 7"), Value::Integer(7));
 }
+
+/// The tutorial's steps (docs/tutorial.sql, PLAN.md §M14.17 E5) as the
+/// playground reads them (playground/tutorial.js): a step begins at a line
+/// `-- ## Title`, its comment lines are its text, the rest its SQL.
+fn tutorial_steps(text: &str) -> Vec<(String, String)> {
+    let mut steps: Vec<(String, String)> = Vec::new();
+    let mut in_text = false;
+    for line in text.lines() {
+        if let Some(title) = line.strip_prefix("-- ## ") {
+            steps.push((title.trim().to_string(), String::new()));
+            in_text = true;
+            continue;
+        }
+        let Some(step) = steps.last_mut() else {
+            continue;
+        };
+        if in_text && (line == "--" || line.starts_with("-- ")) {
+            continue;
+        }
+        in_text = false;
+        step.1.push_str(line);
+        step.1.push('\n');
+    }
+    steps
+}
+
+/// Every step of the tutorial runs, in order, without an error — on a
+/// database in memory with an hour of history, as the playground opens it.
+#[test]
+fn the_tutorial_runs() {
+    let text = include_str!("../../../docs/tutorial.sql");
+    let steps = tutorial_steps(text);
+    assert!(steps.len() >= 10, "{} steps", steps.len());
+    let db = Database::open(MEMORY, "history=1h").unwrap();
+    let mut c = client(&db);
+    for (title, sql) in &steps {
+        assert!(!sql.trim().is_empty(), "step {title:?} has no SQL");
+        let replies = c.query(sql, &[], Format::Text).expect("connection");
+        assert!(!replies.is_empty(), "step {title:?}: no result");
+        for r in replies {
+            match r {
+                Ok(r) => {
+                    if std::env::var_os("NUCLEUS_SHOW_TUTORIAL").is_some() {
+                        println!("-- {title}: {} {:?}", r.command, r.rows);
+                    }
+                }
+                Err(e) => panic!("step {title:?}: {} {}", e.code, e.message),
+            }
+        }
+    }
+    drop(c);
+    db.close().unwrap();
+}

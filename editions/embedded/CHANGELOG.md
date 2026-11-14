@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The option `history` (`history=1h`): how long every snapshot stays
+  readable for `AS OF` and branches of the past, as the server's
+  `--history` (PLAN.md §M14.17 E4: the playground keeps an hour).
 - Builds for `wasm32-wasip1` (PLAN.md §M14.23 step 2), the browser's
   edition: sessions without threads (`Database::exchange`, C `nce_exchange`,
   `nce_feed`, `nce_exchange_ended`, `nce_exchange_free`), `nce_alloc` /

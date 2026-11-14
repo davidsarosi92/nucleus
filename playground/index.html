@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nucleus playground</title>
+<meta name="description" content="nucleus in this page: the database compiled to WebAssembly, a guided tour, nothing to install.">
+<link rel="stylesheet" href="../modules/console/src/web/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%226%22 fill=%22%233a5bd9%22/%3E%3Ccircle cx=%228%22 cy=%228%22 r=%222.5%22 fill=%22white%22/%3E%3C/svg%3E">
+</head>
+<body>
+<!--
+  The playground (PLAN.md §M14.17 E4): the web console's page on the
+  browser edition — the engine in WebAssembly in a worker, a database in
+  memory (?keep: in the origin's storage, kept across reloads) — and the
+  tutorial (E5) as its tour.  Served from the repository's root (node
+  playground/test.mjs --serve), or as a site (playground/build.sh).
+-->
+<div id="app" class="loading"></div>
+<script src="playground.js"></script>
+<script src="../modules/console/src/web/app.js"></script>
+<script type="module" src="start.js"></script>
+</body>
+</html>

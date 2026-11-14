@@ -1057,6 +1057,23 @@ export class Client {
     return next;
   }
 
+  /** Runs `sql`'s statements with every value as its text — the
+   * server's rendering, as `ncsql` shows it — and resolves with the
+   * results of those that ran and the error that stopped them (`null`
+   * if none): for tools that show what a script did, such as the
+   * console's playground.  Never rejects for a statement's error. */
+  queryText(sql: string): Promise<{ results: Result[]; error: NucleusError | null }> {
+    void this.active?.close();
+    const run = async () => {
+      this.sendQuery(sql, [], 1, 0);
+      const [results, error] = await this.replies();
+      return { results, error };
+    };
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
   /**
    * Runs each of `statements` — `[sql, params]` pairs, or SQL alone —
    * sent without waiting for the replies before (pipelined): a round trip

@@ -252,6 +252,13 @@ nucleus server ./mydb --console         # a web console on http://127.0.0.1:2003
 PGPASSWORD=nucleus psql -h 127.0.0.1 -U nucleus -c '\d t'
 ```
 
+Or nothing to install: the playground ([`playground/`](playground)) is
+the console's page on nucleus compiled to WebAssembly — the database in
+the page, with a guided tour ([`docs/tutorial.sql`](docs/tutorial.sql)):
+tables, plans, the linter, JSON, vectors, text search, time travel and
+branches.  `node playground/test.mjs --serve` serves it from a checkout
+(after `drivers/js/wasm/build.sh` and `npx tsc` in `drivers/js`).
+
 For an AI assistant (any MCP client), point it at `nucleus mcp`:
 
 ```json

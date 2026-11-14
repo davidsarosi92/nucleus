@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `queryText(sql)`: a script of statements with values as the server
+  writes them — every statement's result and the first error beside them,
+  not thrown (nucleus PLAN.md §M14.17 E4; the playground's backend).
 - json (nucleus PLAN.md §M14.15): a `json` value arrives as what
   `JSON.parse` makes; a plain object parameter goes as json, `new
   Json(x)` sends an array or a string as json; in batches too.

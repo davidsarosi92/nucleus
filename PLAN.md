@@ -285,7 +285,7 @@ are marked ✅.
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
 | | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
 | | M14.16 | Migrations and code generation | ⬜ |
-| | M14.17 | Easy start: packages, Docker, web console, browser playground | ◐ E1–E3 ✅ (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; E3 ✅ the web console (`--console`); next E4 the playground |
+| | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
 | **F2 — NoSQL** | M15 | Document model | ⬜ |
@@ -8794,7 +8794,7 @@ put it but `text`, which it can neither query nor index.
 **Done when:** a sample project migrates up and down, and the generated
 code compiles and passes its tests in each language.
 
-### §M14.17 — Easy start ⬜
+### §M14.17 — Easy start ✅
 
 - Packages: Homebrew, winget, apt/rpm, a Docker image, an install script;
   `nucleus init` for a ready local setup.
@@ -8883,10 +8883,44 @@ Steps (planned 2026-11-14):
 - **E4 — the playground**: the console's page on the browser edition
   (§M14.23) instead of a server — the database in the page, nothing to
   install.  Prior art: shell.duckdb.org, PGlite's REPL, SQLite's fiddle.
+  ✅ 2026-11-14.  *Built:* `playground/` — the console's own page, style
+  and script (no copy: loaded from `modules/console/src/web/`), started
+  on a backend of the JavaScript driver's browser entry instead of the
+  server's API: `connect(":memory:", {options: "history=1h"})` (the
+  engine in a worker), and a script run with the driver's new
+  `queryText` — each statement's result with values as the server
+  writes them, as the console shows them, and the first error beside
+  the results before it.  `?keep` keeps the database in the origin's
+  storage across reloads.  An hour of history (the embedded editions'
+  new `history` option), so time travel and branches of the past work
+  in the page.  The engine starts in about 90 ms; the whole site is
+  8 MB, nearly all of it the engine (`playground/build.sh <out>` copies
+  it in the repository's layout for any static host).  *Not taken:* a
+  page of its own (two front ends to keep in step — the console's page
+  takes a backend instead); the server's HTTP API over a fake `fetch`
+  (the console's JSON shapes kept, without HTTP in between).  Tested in
+  headless Chrome (`playground/test.mjs`, in the js-wasm driver tests,
+  also against a built site with `--root`); publishing the site (GitHub
+  Pages) is the maintainer's.
 - **E5 — the tutorial**: DOCS's guided tour (a table, rows, queries,
   indexes and plans, JSON, vectors and text search, time travel and
   branches) as SQL files a test runs, so it stays true; the console and
-  the playground step through it.
+  the playground step through it.  ✅ 2026-11-14.  *Built:*
+  `docs/tutorial.sql`, one file of 14 steps, each a title, its text in
+  comments and its SQL — a table with constraints, 50,000 rows from
+  `generate_series`, a join with aggregates, `EXPLAIN ANALYZE` drawn,
+  `ANALYZE QUERY`'s findings (a full scan, a foreign key without an
+  index), the index made and the plan again, JSON, vectors with hnsw,
+  text search with BM25, a transaction rolled back, `AS OF COMMIT`
+  beside the present, a branch, the catalog.  One file so that it also
+  runs whole (`nucleus sql`, any client); the playground reads its
+  steps (`playground/tutorial.js`), and the console shows any page's
+  linter findings as findings, not as a grid.  Tested twice: every step
+  in Rust on the embedded edition in memory with history
+  (`the_tutorial_runs`), and every step through its button in the
+  playground in Chrome.  *Changed from the plan:* one file, not
+  several — a step is a comment heading, so a reader of the raw file
+  and the tour see the same thing.
 
 ### §M14.18 — Operations ⬜
 

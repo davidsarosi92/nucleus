@@ -264,7 +264,7 @@
     for (const res of r.results || []) {
       const names = (res.columns || []).map((c) => c.name);
       if (names.length === 1 && names[0] === "QUERY PLAN") out.push(planView(res));
-      else if (mode === "lint" && names.includes("rule") && names.includes("fix")) out.push(findingsView(res));
+      else if (names.includes("rule") && names.includes("finding") && names.includes("fix")) out.push(findingsView(res));
       else out.push(gridView(res));
     }
     if (r.error) {
@@ -280,7 +280,7 @@
     return h("div", { class: "meta" },
       h("span", { class: "tag" }, res.command),
       res.columns && !noCount && h("span", {}, res.rows.length.toLocaleString() + (res.rows.length === 1 ? " row" : " rows")),
-      h("span", {}, res.ms.toFixed(res.ms < 10 ? 2 : 0) + " ms"),
+      typeof res.ms === "number" && h("span", {}, res.ms.toFixed(res.ms < 10 ? 2 : 0) + " ms"),
       res.truncated && h("span", { class: "note" }, "the first " + res.rows.length.toLocaleString() + " rows only"),
       extra);
   }

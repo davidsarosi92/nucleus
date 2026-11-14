@@ -51,6 +51,7 @@
 | `integrations/d-os` | `nucleus-dos-settings` (binary `nucleus-settings`) | the d-os settings service and app manifest | §M6, §M6.5 ◐ |
 | `drivers` | — | drivers for C, C++, Python, JS/TS, Java, Swift (§11); Python's platform wheel (`build_wheel.py`) and JavaScript's Node-API addon (`native/`) for the embedded edition; JavaScript's browser entry (`src/browser.ts`, the engine in WebAssembly, `wasm/build.sh`); iOS — the Swift package's `NucleusEmbedded` over `NucleusEmbedded.xcframework` (`swift/build-xcframework.sh`) — and Android, a Kotlin library (`android/`, an AAR) | §M14.8 ✅, §M14.23 |
 | `examples` | `nucleus-example` (Rust) | the quickstart in every driver's language | §M14.8 ✅ |
+| `playground` | — | the console's page on the browser edition, the tutorial as its tour; `build.sh` (a static site), `test.mjs` (headless Chrome) | §M14.17 |
 | `examples/extension` | `nucleus-example-extension` (binary `geo-demo`) | the sample module `geo`: a type, a function, a catalog view; the guide for writing a module (its README) | §M14.19 ✅ |
 | `scripts` | — | `package.sh` (archives, `.deb`, `.rpm`), `install.sh` / `install.ps1` (a release installed, its sums checked), `manifests.sh` (the Homebrew formula, the winget manifests), `image-context.sh` (the image's build context), `psql-smoke.sh`, `driver-tests.sh`; `gen-word-breaks.py`, `gen-stop-words.py` (the text analyzers' tables, §8.19) | §M6, §M12, §M14.8, §M14.17, §M14.21 |
 | `packaging` | — | the container image's `Dockerfile` (§6.3) | §M14.17 |
@@ -6402,7 +6403,9 @@ this build of the C driver.  Product `NucleusEmbedded` (when
 options)` opens a database in directory `path` (made if missing) or, for
 `":memory:"`, a new one on `MemoryPlatform` (§3.6); `options` is
 `"cache=64MB; sync=full; wal=minimal"` (`cache`, `sync` `ordered` /
-`full`, `wal` `minimal` / `full`; in memory the page cache keeps the
+`full`, `wal` `minimal` / `full`, `history` — how long every snapshot
+stays readable for `AS OF` and branches of the past, `1h`, none by
+default, as the server's `--history`; in memory the page cache keeps the
 file's default, 128 MiB, and checkpoints come after 16 MiB of WAL).  It
 runs what `nucleus server` runs beside the sessions — the maintenance
 thread (`nucleus_server::maintain_until`) and the embedding columns'
@@ -6482,6 +6485,35 @@ batch.  The driver's protocol code has no Node imports (`core.ts`;
 `bytes.ts` is Node's `Buffer` or, without one, a `Uint8Array` with the
 part of its interface the driver uses; SCRAM is WebCrypto's), so
 `index.ts` (Node's sockets, the addon) and `browser.ts` share it.
+`queryText(sql)` (every edition) runs a script of statements with the
+values as the server writes them (`query`'s text format) — every
+statement's `Result` and the first error beside them, not thrown — for
+tools that show what a database says, as the console does.
+
+**The playground** (`playground/`, §M14.17 E4): the web console's page
+(its HTML, style and script from `modules/console/src/web/`, not a copy)
+on the browser edition — `start.js` opens `connect(":memory:", {options:
+"history=1h"})` (`?keep`: `file:playground`, kept in OPFS) and gives the
+page a backend answering as the server's console API would, through
+`queryText`.  Its tour is the tutorial (§M14.17 E5, below).  Served from
+the repository's root it works as is (`node playground/test.mjs
+--serve`); `playground/build.sh <out>` copies what it loads, in the same
+layout, for any static host (8 MB, nearly all the engine).
+`playground/test.mjs` runs it in headless Chrome — the engine started, a
+query, every step of the tour through its button — in
+`driver-tests.sh js-wasm`.
+
+**The tutorial** (`docs/tutorial.sql`, §M14.17 E5): a guided tour of 14
+steps — a table and its constraints, rows from `generate_series`, joins
+and aggregates, `EXPLAIN ANALYZE`, `ANALYZE QUERY`'s findings, the index
+they ask for and the plan again, JSON, vectors and hnsw, text search,
+a transaction, time travel, a branch, the catalog.  A step is a line
+`-- ## Title`, its text in the comment lines after it (`--` alone between
+paragraphs) and then its SQL; the file also runs whole (`nucleus sql
+:memory: < docs/tutorial.sql`, the time-travel step aside: it needs a
+history).  `the_tutorial_runs` (`editions/embedded/tests`) runs every
+step on a database in memory with an hour of history; the playground
+test runs them in the page.
 
 **On phones (iOS and Android, §M14.23).**  The embedded edition without
 the model modules, linked into the app (whole-program optimization, one

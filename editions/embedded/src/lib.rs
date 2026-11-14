@@ -69,7 +69,9 @@ pub fn registry() -> Arc<Registry> {
 
 /// How a database opens: `key=value` pairs separated by `;` or `,`
 /// (`cache=64MB; sync=full`).  Keys: `cache` (the page cache), `sync`
-/// (`ordered` or `full`, PLAN.md D17), `wal` (`minimal` or `full`).
+/// (`ordered` or `full`, PLAN.md D17), `wal` (`minimal` or `full`),
+/// `history` (how long every snapshot stays readable, `1h` — `AS OF`,
+/// branches of the past; none by default, as the server's `--history`).
 pub fn options(text: &str, memory: bool) -> Result<Options, String> {
     let mut o = if memory {
         Options::in_memory()
@@ -104,8 +106,15 @@ pub fn options(text: &str, memory: bool) -> Result<Options, String> {
                     _ => return Err("wal takes minimal or full".into()),
                 }
             }
+            "history" => {
+                let us = nucleus_sql::dbsettings::duration(v)
+                    .map_err(|e| format!("history: {}", e.message))?;
+                o.history_time = std::time::Duration::from_micros(us.max(0) as u64);
+            }
             other => {
-                return Err(format!("no option {other:?} (there are: cache, sync, wal)"));
+                return Err(format!(
+                    "no option {other:?} (there are: cache, sync, wal, history)"
+                ));
             }
         }
     }

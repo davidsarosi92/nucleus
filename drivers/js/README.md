@@ -42,7 +42,10 @@ as they are — and `await db.copy("COPY t FROM STDIN WITH (FORMAT csv)",
 createReadStream("t.csv"))` for text or CSV.  Many statements in one
 round trip: `await db.pipeline([[sql, params], …])` (each one's `Result`,
 or its `NucleusError` in its place); one statement for many rows, all or
-none, one commit for all: `await db.executeMany(sql, rows)`.  Memory for
+none, one commit for all: `await db.executeMany(sql, rows)`.  A script
+as a tool shows it: `await db.queryText("…; …")` → `{ results, error }`,
+every statement's `Result` with the values as the server writes them
+(text) and the first error, not thrown.  Memory for
 a model, in a memory store (`CREATE MEMORY STORE notes USING m`): `await
 db.remember("notes", "ann", "prefers short answers", { kind:
 "preference", expires: "30 days" })` → `{ id, action }` (`"inserted"`,

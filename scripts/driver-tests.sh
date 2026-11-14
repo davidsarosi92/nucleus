@@ -11,7 +11,8 @@
 # examples both there and against the server, changing only the
 # connection string.  js-wasm runs the JavaScript suite on the edition in
 # WebAssembly (the browser's), in Node, on files and in memory, then the
-# browser example in headless Chrome (when there is one) across reloads.
+# browser example in headless Chrome (when there is one) across reloads,
+# and the playground with its tour.
 set -euo pipefail
 bin=$(cd "$(dirname "${1:?usage: scripts/driver-tests.sh <nucleus binary> [langs]}")" && pwd)/$(basename "$1")
 shift
@@ -151,6 +152,8 @@ for lang in "${langs[@]}"; do
       NUCLEUS_URL="wasm::memory:" node --test "$root/drivers/js/test/nucleus.test.ts"
       if [ -n "${CHROME:-}" ] || [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ] || command -v google-chrome >/dev/null; then
         node "$root/drivers/js/test/browser.mjs"
+        # The playground (PLAN.md §M14.17 E4, E5): the tour, every step.
+        node "$root/playground/test.mjs"
       else
         echo "no Chrome: the browser test is skipped"
       fi ;;
