@@ -105,6 +105,7 @@ codes! {
     internal => "XX000",
     io => "58030",
     generated_always => "428C9",
+    json_duplicate_key => "22030",
     json_datetime => "22031",
     json_subscript => "22033",
     json_more_than_one_item => "22034",

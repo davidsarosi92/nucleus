@@ -1,0 +1,1073 @@
+# SQL/JSON's functions (PLAN.md §M14.15 J3b): JSON_EXISTS, JSON_VALUE,
+# JSON_QUERY with PASSING, RETURNING, wrappers, quotes and ON EMPTY / ON
+# ERROR; IS JSON; the constructors JSON_OBJECT, JSON_ARRAY,
+# JSON_OBJECTAGG, JSON_ARRAYAGG, JSON, JSON_SCALAR, JSON_SERIALIZE.
+# Expected results produced by PostgreSQL 18 (scripts/slt-pg.py check),
+# records marked nucleus-only excepted.
+
+statement ok
+CREATE TABLE sj (id int PRIMARY KEY, doc jsonb, t text)
+
+statement ok
+INSERT INTO sj VALUES
+  (1, '{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}', '{"a": 1}'),
+  (2, '{"a": 2, "b": [], "c": {}}', '[1, 2]'),
+  (3, NULL, 'not json'),
+  (4, '[1, "two", null]', '{"a": 1, "a": 2}'),
+  (5, '"scalar"', '42')
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a')
+----
+t
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z')
+----
+f
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z')
+----
+f
+
+query error 2203A
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' ERROR ON ERROR)
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' TRUE ON ERROR)
+----
+t
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' UNKNOWN ON ERROR)
+----
+NULL
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' FALSE ON ERROR)
+----
+f
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*] ? (@ > $x)' PASSING 2 AS x)
+----
+t
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*] ? (@ > $x)' PASSING 5 AS x)
+----
+f
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s ? (@ == $v)' PASSING 'text' AS v)
+----
+t
+
+query error 42704
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$ ? ($y == 1)')
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a.abs()')
+----
+t
+
+query T
+SELECT JSON_EXISTS('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.s.abs()')
+----
+f
+
+query IT
+SELECT id, JSON_EXISTS(doc, '$.c.d') FROM sj ORDER BY id
+----
+1 t
+2 f
+3 NULL
+4 f
+5 f
+
+query T
+SELECT JSON_EXISTS('{"a": 1}', '$.a')
+----
+t
+
+query error 22P02
+SELECT JSON_EXISTS('not json', '$.a')
+
+query T
+SELECT JSON_EXISTS(NULL::jsonb, '$.a')
+----
+NULL
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a')
+----
+1
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s')
+----
+text
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.f')
+----
+1.5
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.n')
+----
+NULL
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z')
+----
+NULL
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b')
+----
+NULL
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*]')
+----
+NULL
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.c')
+----
+NULL
+
+query error 2203F
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b' ERROR ON ERROR)
+
+query error 22034
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*]' ERROR ON ERROR)
+
+query error 22035
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' ERROR ON EMPTY)
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' DEFAULT 'none' ON EMPTY)
+----
+none
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b' DEFAULT 'bad' ON ERROR)
+----
+bad
+
+query error 22035
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' ERROR ON EMPTY NULL ON ERROR)
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' DEFAULT 'e' ON EMPTY DEFAULT 'r' ON ERROR)
+----
+r
+
+query error 2203A
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' ERROR ON ERROR)
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a' RETURNING int) + 1
+----
+2
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.f' RETURNING numeric)
+----
+1.5
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.f' RETURNING int)
+----
+NULL
+
+query error 22P02
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.f' RETURNING int ERROR ON ERROR)
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' RETURNING int DEFAULT -1 ON ERROR)
+----
+-1
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.dt' RETURNING date)
+----
+2020-01-01
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.dt.datetime()' RETURNING date)
+----
+2020-01-01
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a' RETURNING boolean)
+----
+t
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' RETURNING varchar(2))
+----
+NULL
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[$i]' PASSING 1 AS i)
+----
+2
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[$i]' PASSING 1 AS i RETURNING int)
+----
+2
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a' RETURNING jsonb)
+----
+1
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' RETURNING jsonb)
+----
+"text"
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a == 1')
+----
+t
+
+query T
+SELECT JSON_VALUE('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' RETURNING int DEFAULT 7 ON EMPTY)
+----
+7
+
+query II
+SELECT id, JSON_VALUE(doc, '$.a' RETURNING int) FROM sj ORDER BY id
+----
+1 1
+2 2
+3 NULL
+4 NULL
+5 NULL
+
+query T
+SELECT JSON_VALUE('{"a": "x"}', '$.a')
+----
+x
+
+query error 22P02
+SELECT JSON_VALUE('nope', '$.a')
+
+query error 22P02
+SELECT JSON_VALUE('nope', '$.a' ERROR ON ERROR)
+
+query T
+SELECT JSON_VALUE(jsonb '{"a": 1}', '$.a' PASSING 1 AS x, 2 AS y)
+----
+1
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b')
+----
+[1, 2, 3]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.c')
+----
+{"d": "x"}
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a')
+----
+1
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s')
+----
+"text"
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*]')
+----
+NULL
+
+query error 22034
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*]' ERROR ON ERROR)
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*]' WITH WRAPPER)
+----
+[1, 2, 3]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*]' WITH ARRAY WRAPPER)
+----
+[1, 2, 3]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*]' WITH UNCONDITIONAL WRAPPER)
+----
+[1, 2, 3]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b' WITH CONDITIONAL WRAPPER)
+----
+[1, 2, 3]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a' WITH CONDITIONAL WRAPPER)
+----
+1
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b' WITH UNCONDITIONAL WRAPPER)
+----
+[[1, 2, 3]]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' WITH WRAPPER)
+----
+NULL
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b' WITHOUT WRAPPER)
+----
+[1, 2, 3]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' OMIT QUOTES)
+----
+NULL
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' KEEP QUOTES)
+----
+"text"
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' RETURNING text OMIT QUOTES)
+----
+text
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' RETURNING text KEEP QUOTES ON SCALAR STRING)
+----
+"text"
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' RETURNING text)
+----
+"text"
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.c' RETURNING text)
+----
+{"d": "x"}
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z')
+----
+NULL
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' EMPTY ARRAY ON EMPTY)
+----
+[]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' EMPTY OBJECT ON EMPTY)
+----
+{}
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' EMPTY ON EMPTY)
+----
+[]
+
+query error 22035
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' ERROR ON EMPTY)
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.z' DEFAULT '[0]' ON EMPTY)
+----
+[0]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*]' EMPTY OBJECT ON ERROR)
+----
+{}
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, 'strict $.z' NULL ON ERROR)
+----
+NULL
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[*] ? (@ > $m)' PASSING 1 AS m WITH WRAPPER)
+----
+[2, 3]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b' RETURNING json)
+----
+[1, 2, 3]
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.a' RETURNING int)
+----
+1
+
+query error 42601
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.s' WITH WRAPPER OMIT QUOTES)
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.dt.datetime()')
+----
+"2020-01-01"
+
+query T
+SELECT JSON_QUERY('{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "s": "text", "n": null, "f": 1.5, "dt": "2020-01-01"}'::jsonb, '$.b[0 to 1]' WITH WRAPPER)
+----
+[1, 2]
+
+query IT
+SELECT id, JSON_QUERY(doc, '$.b') FROM sj ORDER BY id
+----
+1 [1, 2, 3]
+2 []
+3 NULL
+4 NULL
+5 NULL
+
+query TTTTTTTT
+SELECT '{"a": 1}' IS JSON, '{"a": 1}' IS JSON VALUE, '{"a": 1}' IS JSON OBJECT, '{"a": 1}' IS JSON ARRAY, '{"a": 1}' IS JSON SCALAR, '{"a": 1}' IS JSON WITH UNIQUE KEYS, '{"a": 1}' IS NOT JSON, '{"a": 1}' IS JSON OBJECT WITHOUT UNIQUE KEYS
+----
+t t t f f t f t
+
+query TTTTTTTT
+SELECT '[1]' IS JSON, '[1]' IS JSON VALUE, '[1]' IS JSON OBJECT, '[1]' IS JSON ARRAY, '[1]' IS JSON SCALAR, '[1]' IS JSON WITH UNIQUE KEYS, '[1]' IS NOT JSON, '[1]' IS JSON OBJECT WITHOUT UNIQUE KEYS
+----
+t t f t f t f f
+
+query TTTTTTTT
+SELECT '1' IS JSON, '1' IS JSON VALUE, '1' IS JSON OBJECT, '1' IS JSON ARRAY, '1' IS JSON SCALAR, '1' IS JSON WITH UNIQUE KEYS, '1' IS NOT JSON, '1' IS JSON OBJECT WITHOUT UNIQUE KEYS
+----
+t t f f t t f f
+
+query TTTTTTTT
+SELECT '"s"' IS JSON, '"s"' IS JSON VALUE, '"s"' IS JSON OBJECT, '"s"' IS JSON ARRAY, '"s"' IS JSON SCALAR, '"s"' IS JSON WITH UNIQUE KEYS, '"s"' IS NOT JSON, '"s"' IS JSON OBJECT WITHOUT UNIQUE KEYS
+----
+t t f f t t f f
+
+query TTTTTTTT
+SELECT 'null' IS JSON, 'null' IS JSON VALUE, 'null' IS JSON OBJECT, 'null' IS JSON ARRAY, 'null' IS JSON SCALAR, 'null' IS JSON WITH UNIQUE KEYS, 'null' IS NOT JSON, 'null' IS JSON OBJECT WITHOUT UNIQUE KEYS
+----
+t t f f t t f f
+
+query TTTTTTTT
+SELECT 'nope' IS JSON, 'nope' IS JSON VALUE, 'nope' IS JSON OBJECT, 'nope' IS JSON ARRAY, 'nope' IS JSON SCALAR, 'nope' IS JSON WITH UNIQUE KEYS, 'nope' IS NOT JSON, 'nope' IS JSON OBJECT WITHOUT UNIQUE KEYS
+----
+f f f f f f t f
+
+query TTTTTTTT
+SELECT '' IS JSON, '' IS JSON VALUE, '' IS JSON OBJECT, '' IS JSON ARRAY, '' IS JSON SCALAR, '' IS JSON WITH UNIQUE KEYS, '' IS NOT JSON, '' IS JSON OBJECT WITHOUT UNIQUE KEYS
+----
+f f f f f f t f
+
+query TTTTTTTT
+SELECT '{"a": 1, "a": 2}' IS JSON, '{"a": 1, "a": 2}' IS JSON VALUE, '{"a": 1, "a": 2}' IS JSON OBJECT, '{"a": 1, "a": 2}' IS JSON ARRAY, '{"a": 1, "a": 2}' IS JSON SCALAR, '{"a": 1, "a": 2}' IS JSON WITH UNIQUE KEYS, '{"a": 1, "a": 2}' IS NOT JSON, '{"a": 1, "a": 2}' IS JSON OBJECT WITHOUT UNIQUE KEYS
+----
+t t t f f f f t
+
+query TTTTTTTT
+SELECT NULL::text IS JSON, NULL::text IS JSON VALUE, NULL::text IS JSON OBJECT, NULL::text IS JSON ARRAY, NULL::text IS JSON SCALAR, NULL::text IS JSON WITH UNIQUE KEYS, NULL::text IS NOT JSON, NULL::text IS JSON OBJECT WITHOUT UNIQUE KEYS
+----
+NULL NULL NULL NULL NULL NULL NULL NULL
+
+query TTTTTTTT
+SELECT '{"a": {"b": 1, "b": 2}}' IS JSON, '{"a": {"b": 1, "b": 2}}' IS JSON VALUE, '{"a": {"b": 1, "b": 2}}' IS JSON OBJECT, '{"a": {"b": 1, "b": 2}}' IS JSON ARRAY, '{"a": {"b": 1, "b": 2}}' IS JSON SCALAR, '{"a": {"b": 1, "b": 2}}' IS JSON WITH UNIQUE KEYS, '{"a": {"b": 1, "b": 2}}' IS NOT JSON, '{"a": {"b": 1, "b": 2}}' IS JSON OBJECT WITHOUT UNIQUE KEYS
+----
+t t t f f f f t
+
+query ITTT
+SELECT id, t IS JSON, t IS JSON WITH UNIQUE, doc IS JSON OBJECT FROM sj ORDER BY id
+----
+1 t t t
+2 t t t
+3 f f NULL
+4 t f f
+5 t t f
+
+query T
+SELECT jsonb '{"a": 1}' IS JSON SCALAR
+----
+f
+
+query error 42804
+SELECT 1 IS JSON
+
+query I
+SELECT id FROM sj WHERE t IS JSON ARRAY ORDER BY id
+----
+2
+
+query T
+SELECT JSON_OBJECT()::jsonb
+----
+{}
+
+query T
+SELECT JSON_OBJECT('a' VALUE 1)::jsonb
+----
+{"a": 1}
+
+query T
+SELECT JSON_OBJECT('a': 1, 'b': 'x')::jsonb
+----
+{"a": 1, "b": "x"}
+
+query T
+SELECT JSON_OBJECT('a' VALUE NULL)::jsonb
+----
+{"a": null}
+
+query T
+SELECT JSON_OBJECT('a' VALUE NULL ABSENT ON NULL)::jsonb
+----
+{}
+
+query T
+SELECT JSON_OBJECT('a' VALUE NULL NULL ON NULL)::jsonb
+----
+{"a": null}
+
+query T
+SELECT JSON_OBJECT('a': 1, 'a': 2)::jsonb
+----
+{"a": 2}
+
+query error 22030
+SELECT JSON_OBJECT('a': 1, 'a': 2 WITH UNIQUE KEYS)
+
+query T
+SELECT JSON_OBJECT('a': 1, 'a': 2 WITHOUT UNIQUE)::jsonb
+----
+{"a": 2}
+
+query error 22004
+SELECT JSON_OBJECT(NULL: 1)
+
+query T
+SELECT JSON_OBJECT('a': '{"b": 1}')::jsonb
+----
+{"a": "{\"b\": 1}"}
+
+query T
+SELECT JSON_OBJECT('a': '{"b": 1}' FORMAT JSON)::jsonb
+----
+{"a": {"b": 1}}
+
+query T
+SELECT JSON_OBJECT('a': jsonb '[1]')::jsonb
+----
+{"a": [1]}
+
+# nucleus-only: json's text is canonical (PostgreSQL's json keeps its own layout: {"a" : 1}).
+query T
+SELECT JSON_OBJECT('a': 1 RETURNING text)
+----
+{"a": 1}
+
+query T
+SELECT JSON_OBJECT('a': 1 RETURNING jsonb)::jsonb
+----
+{"a": 1}
+
+query T
+SELECT JSON_OBJECT(1: true)::jsonb
+----
+{"1": true}
+
+# nucleus-only: 1.50 is 1.5 (jsonb keeps the scale).
+query T
+SELECT JSON_OBJECT('d': date '2020-01-02', 'n': 1.50)::jsonb
+----
+{"d": "2020-01-02", "n": 1.5}
+
+# nucleus-only: json's text is canonical (PostgreSQL: {"a" : "1", "b" : "2"}).
+query T
+SELECT json_object('{a,1,b,2}')
+----
+{"a": "1", "b": "2"}
+
+query T
+SELECT JSON_ARRAY()::jsonb
+----
+[]
+
+query T
+SELECT JSON_ARRAY(1, 'x', NULL, true)::jsonb
+----
+[1, "x", true]
+
+query T
+SELECT JSON_ARRAY(1, NULL NULL ON NULL)::jsonb
+----
+[1, null]
+
+query T
+SELECT JSON_ARRAY(1, NULL ABSENT ON NULL)::jsonb
+----
+[1]
+
+query T
+SELECT JSON_ARRAY('[1]' FORMAT JSON, '[1]')::jsonb
+----
+[[1], "[1]"]
+
+query T
+SELECT JSON_ARRAY(1 RETURNING text)
+----
+[1]
+
+query T
+SELECT JSON_ARRAY(jsonb '{"a": 1}', 2.5)::jsonb
+----
+[{"a": 1}, 2.5]
+
+query T
+SELECT JSON('{"a": 1, "b": [1, 2]}')::jsonb
+----
+{"a": 1, "b": [1, 2]}
+
+query T
+SELECT JSON('{"a": 1, "a": 2}')::jsonb
+----
+{"a": 2}
+
+query error 22030
+SELECT JSON('{"a": 1, "a": 2}' WITH UNIQUE KEYS)
+
+query error 22P02
+SELECT JSON('nope')
+
+query T
+SELECT JSON('[1]' FORMAT JSON)::jsonb
+----
+[1]
+
+query T
+SELECT JSON(NULL)::jsonb
+----
+NULL
+
+query T
+SELECT JSON_SCALAR(1)::jsonb
+----
+1
+
+# nucleus-only: 1.50 is 1.5 (jsonb keeps the scale).
+query T
+SELECT JSON_SCALAR(1.50)::jsonb
+----
+1.5
+
+query T
+SELECT JSON_SCALAR('x')::jsonb
+----
+"x"
+
+query T
+SELECT JSON_SCALAR(true)::jsonb
+----
+true
+
+query T
+SELECT JSON_SCALAR(NULL)::jsonb
+----
+NULL
+
+query T
+SELECT JSON_SCALAR(date '2020-01-02')::jsonb
+----
+"2020-01-02"
+
+query T
+SELECT JSON_SCALAR(timestamp '2020-01-02 03:04:05')::jsonb
+----
+"2020-01-02T03:04:05"
+
+query T
+SELECT JSON_SCALAR('{"a": 1}')::jsonb
+----
+"{\"a\": 1}"
+
+# nucleus-only: the text.  PostgreSQL 18 gives jsonb's binary form read as text
+# (an empty line here).
+query T
+SELECT JSON_SERIALIZE(jsonb '{"a": [1, 2]}')
+----
+{"a": [1, 2]}
+
+# nucleus-only: json's text is canonical (PostgreSQL's json keeps {"a":1}).
+query T
+SELECT JSON_SERIALIZE('{"a":1}' FORMAT JSON)
+----
+{"a": 1}
+
+# nucleus-only: the text (PostgreSQL 18: jsonb's binary form).
+query T
+SELECT JSON_SERIALIZE(jsonb '[1]' RETURNING text)
+----
+[1]
+
+# nucleus-only: the text's bytes (PostgreSQL 18: jsonb's binary form, \x01…).
+query T
+SELECT JSON_SERIALIZE(jsonb '"x"' RETURNING bytea)
+----
+\x227822
+
+query T
+SELECT JSON_OBJECTAGG(id VALUE t)::jsonb FROM sj WHERE id < 3
+----
+{"1": "{\"a\": 1}", "2": "[1, 2]"}
+
+query T
+SELECT JSON_OBJECTAGG(id: doc)::jsonb FROM sj
+----
+{"1": {"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "f": 1.5, "n": null, "s": "text", "dt": "2020-01-01"}, "2": {"a": 2, "b": [], "c": {}}, "3": null, "4": [1, "two", null], "5": "scalar"}
+
+query T
+SELECT JSON_OBJECTAGG(id: doc ABSENT ON NULL)::jsonb FROM sj
+----
+{"1": {"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "f": 1.5, "n": null, "s": "text", "dt": "2020-01-01"}, "2": {"a": 2, "b": [], "c": {}}, "4": [1, "two", null], "5": "scalar"}
+
+query error 22030
+SELECT JSON_OBJECTAGG(k: v WITH UNIQUE KEYS) FROM (VALUES ('a', 1), ('a', 2)) x(k, v)
+
+query T
+SELECT JSON_OBJECTAGG(k: v)::jsonb FROM (VALUES ('a', 1), ('a', 2)) x(k, v)
+----
+{"a": 2}
+
+# nucleus-only: json's text is canonical (PostgreSQL: { "a" : 1, "b" : 2 }).
+query T
+SELECT JSON_OBJECTAGG(k: v RETURNING text) FROM (VALUES ('a', 1), ('b', 2)) x(k, v)
+----
+{"a": 1, "b": 2}
+
+query T
+SELECT JSON_OBJECTAGG(k: v)::jsonb FROM (VALUES ('a', 1)) x(k, v) WHERE false
+----
+NULL
+
+query T
+SELECT JSON_ARRAYAGG(id)::jsonb FROM sj
+----
+[1, 2, 3, 4, 5]
+
+query T
+SELECT JSON_ARRAYAGG(id ORDER BY id DESC)::jsonb FROM sj
+----
+[5, 4, 3, 2, 1]
+
+query T
+SELECT JSON_ARRAYAGG(doc)::jsonb FROM sj
+----
+[{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "f": 1.5, "n": null, "s": "text", "dt": "2020-01-01"}, {"a": 2, "b": [], "c": {}}, [1, "two", null], "scalar"]
+
+query T
+SELECT JSON_ARRAYAGG(doc NULL ON NULL)::jsonb FROM sj
+----
+[{"a": 1, "b": [1, 2, 3], "c": {"d": "x"}, "f": 1.5, "n": null, "s": "text", "dt": "2020-01-01"}, {"a": 2, "b": [], "c": {}}, null, [1, "two", null], "scalar"]
+
+query T
+SELECT JSON_ARRAYAGG(t FORMAT JSON ORDER BY id)::jsonb FROM sj WHERE id < 3
+----
+[{"a": 1}, [1, 2]]
+
+query T
+SELECT JSON_ARRAYAGG(id RETURNING text) FROM sj
+----
+[1, 2, 3, 4, 5]
+
+query T
+SELECT JSON_ARRAYAGG(id)::jsonb FROM sj WHERE false
+----
+NULL
+
+query IT
+SELECT id % 2, JSON_ARRAYAGG(id ORDER BY id)::jsonb FROM sj GROUP BY id % 2 ORDER BY 1
+----
+0 [2, 4]
+1 [1, 3, 5]
+
+query T
+SELECT JSON_VALUE(jsonb '{"a": true}', '$.a')
+----
+t
+
+query T
+SELECT JSON_VALUE(jsonb '{"a": true}', '$.a' RETURNING jsonb)
+----
+true
+
+query T
+SELECT JSON_VALUE(jsonb '{"a": 1e2}', '$.a')
+----
+100
+
+query T
+SELECT JSON_VALUE(jsonb '"abc"', '$' RETURNING char(2))
+----
+NULL
+
+query T
+SELECT JSON_VALUE(jsonb '"ab "', '$' RETURNING varchar(2))
+----
+ab
+
+query T
+SELECT JSON_VALUE(jsonb '"ab"', '$' RETURNING char(4)) || '|'
+----
+ab|
+
+query T
+SELECT JSON_VALUE(jsonb '1.555', '$' RETURNING numeric(3,1))
+----
+1.6
+
+query T
+SELECT JSON_VALUE(jsonb '1234.5', '$' RETURNING numeric(3,1))
+----
+NULL
+
+query error 22003
+SELECT JSON_VALUE(jsonb '1234.5', '$' RETURNING numeric(3,1) ERROR ON ERROR)
+
+query T
+SELECT JSON_QUERY(jsonb '"abc"', '$' RETURNING varchar(2))
+----
+NULL
+
+query T
+SELECT JSON_QUERY(jsonb '["abc"]', '$[*]' RETURNING text OMIT QUOTES)
+----
+abc
+
+query T
+SELECT JSON_VALUE(jsonb 'null', '$' RETURNING int ERROR ON ERROR)
+----
+NULL
+
+query T
+SELECT JSON_QUERY(jsonb '"x"', '$' RETURNING bytea)
+----
+\x227822
+
+query T
+SELECT JSON_QUERY(jsonb '[]', '$[*]' WITH WRAPPER)
+----
+NULL
+
+query error 22035
+SELECT JSON_QUERY(jsonb '[]', '$[*]' WITH WRAPPER ERROR ON EMPTY)
+
+query T
+SELECT JSON_QUERY(jsonb 'true', '$' RETURNING boolean)
+----
+t
+
+query T
+SELECT JSON_QUERY(jsonb '[1, 2]', '$[*]' WITH CONDITIONAL WRAPPER)
+----
+[1, 2]
+
+query T
+SELECT JSON_QUERY(jsonb '1', '$d' PASSING jsonb '{"x": 1}' AS d)
+----
+{"x": 1}
+
+query T
+SELECT JSON_QUERY(jsonb '1', '$d' PASSING '{"x":1}' AS d)
+----
+"{\"x\":1}"
+
+query error 22035
+SELECT JSON_VALUE(jsonb '"x"', 'lax $.a' ERROR ON EMPTY DEFAULT 'q' ON ERROR)
+
+query error 22P02
+SELECT JSON_VALUE(jsonb '1', '$' RETURNING int DEFAULT 'x' ON ERROR)
+
+query error 42601
+SELECT JSON_VALUE(jsonb '{"a": 1}', '$.a' DEFAULT 1 ON EMPTY ON ERROR)
+
+query error 42601
+SELECT JSON_EXISTS(jsonb '{"a": 1}', '$.a' NULL ON ERROR)
+
+query error 42601
+SELECT JSON_VALUE(jsonb '{"a": 1}', '$.a' EMPTY ARRAY ON ERROR)
+
+query T
+SELECT JSON_QUERY(jsonb '{"a": 1}', '$.a' WITH WRAPPER KEEP QUOTES)
+----
+[1]
+
+query T
+SELECT JSON_QUERY(jsonb '{"a": 1}', '$.a' WITHOUT WRAPPER OMIT QUOTES)
+----
+1
+
+query IT
+SELECT id, JSON_VALUE(t, '$.a') FROM sj WHERE id IN (1, 4) ORDER BY id
+----
+1 1
+4 2
+
+query T
+SELECT JSON_ARRAY(SELECT id FROM sj ORDER BY id)::jsonb
+----
+[1, 2, 3, 4, 5]
+
+query T
+SELECT JSON_ARRAY(SELECT doc FROM sj WHERE id IN (2, 3))::jsonb
+----
+[{"a": 2, "b": [], "c": {}}]
+
+query T
+SELECT JSON_ARRAY(SELECT id FROM sj WHERE false)::jsonb
+----
+NULL
+
+query T
+SELECT JSON_ARRAYAGG(doc)::jsonb FROM sj WHERE id = 3
+----
+[]
+
+query T
+SELECT JSON_ARRAYAGG(doc NULL ON NULL)::jsonb FROM sj WHERE id = 3
+----
+[null]
+
+query error 22004
+SELECT JSON_OBJECTAGG(NULL: 1) FROM sj
+
+query T
+SELECT JSON_OBJECT('a': 1, 'b': NULL ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb)
+----
+{"a": 1}
+
+query error 22030
+SELECT JSON_OBJECT('a': 1, 'a': NULL ABSENT ON NULL WITH UNIQUE KEYS)::jsonb
+
+query T
+SELECT JSON_OBJECT(RETURNING jsonb)
+----
+{}
+
+query T
+SELECT JSON_ARRAY(RETURNING jsonb)
+----
+[]
+
+query T
+SELECT JSON_ARRAY(NULL, NULL)::jsonb
+----
+[]
+
+query T
+SELECT JSON_OBJECT('a': JSON_ARRAY(1, JSON_OBJECT('b': 2)))::jsonb
+----
+{"a": [1, {"b": 2}]}
+
+query T
+SELECT JSON_EXISTS(JSON_OBJECT('a': 1), '$.a')
+----
+t
+
+query T
+SELECT JSON_VALUE(JSON_ARRAY(1, 2), '$[1]' RETURNING int) * 10
+----
+20
+
+query T
+SELECT '{"a": 1}'::jsonb IS JSON OBJECT WITH UNIQUE KEYS
+----
+t
+
+query T
+SELECT '[1, {"a": 1, "a": 2}]' IS JSON ARRAY WITH UNIQUE KEYS
+----
+f
+
+query T
+SELECT '"\u0061"' IS JSON SCALAR
+----
+t
+
+query T
+SELECT '{"a": 1, "\u0061": 2}' IS JSON WITH UNIQUE KEYS
+----
+f
+
+query T
+SELECT '  {"a": 1}  ' IS JSON OBJECT
+----
+t
+
+query T
+SELECT 'nope' IS NOT JSON OBJECT
+----
+t
+
+# nucleus-only: the text (PostgreSQL 18: jsonb's binary form).
+query T
+SELECT JSON_SERIALIZE(JSON_OBJECT('a': 1)::jsonb)
+----
+{"a": 1}
+
+query I
+SELECT count(*) FROM sj WHERE JSON_EXISTS(doc, '$.b[*] ? (@ > 1)')
+----
+1
+
+query I
+SELECT sum(JSON_VALUE(doc, '$.a' RETURNING int)) FROM sj
+----
+3
+
+# nucleus-only: a PASSING value is passed as json (to_json's), so a date is
+# its ISO string, which .datetime() reads; PostgreSQL passes it as a
+# datetime item (type() date; .datetime() of it fails, NULL ON ERROR).
+query T
+SELECT JSON_VALUE(jsonb '1', '$d.type()' PASSING date '2020-01-01' AS d)
+----
+string
+
+# nucleus-only: as above.
+query T
+SELECT JSON_VALUE(jsonb '1', '$d.datetime().type()' PASSING date '2020-01-01' AS d)
+----
+date
+
+query I
+SELECT id FROM sj WHERE JSON_VALUE(doc, '$.a' RETURNING int) = 2
+----
+2
+
+query I
+SELECT id FROM sj WHERE t IS JSON OBJECT WITH UNIQUE KEYS ORDER BY id
+----
+1
+
+statement ok
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')
+
+query TT
+SELECT JSON_VALUE(jsonb '{"m": "happy"}', '$.m' RETURNING mood), JSON_VALUE(jsonb '{"m": "angry"}', '$.m' RETURNING mood)
+----
+happy NULL
+
+query error 22P02
+SELECT JSON_VALUE(jsonb '{"m": "angry"}', '$.m' RETURNING mood ERROR ON ERROR)

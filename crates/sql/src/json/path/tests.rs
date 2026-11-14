@@ -226,3 +226,54 @@ fn evaluates_as_postgresql() {
         assert_eq!(query(doc, path), want, "{path}");
     }
 }
+
+#[test]
+fn deep_paths_are_refused_not_overflowed() {
+    // On a session's stack (2 MiB, a thread's default), in a debug build.
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(deep_paths)
+        .expect("a thread")
+        .join()
+        .expect("no overflow");
+}
+
+fn deep_paths() {
+    let n = super::parse::MAX_DEPTH;
+    let doc = crate::json::parse::parse(r#"{"a": [1, 2]}"#).expect("json");
+    type F = fn(usize) -> String;
+    // Each makes a tree k + 1 levels deep (parentheses alone make none).
+    let shapes: [(&str, F); 4] = [
+        ("signs", |k| format!("{}$", "-".repeat(k))),
+        ("subscripts", |k| {
+            format!("{}0{}", "$[".repeat(k), "]".repeat(k))
+        }),
+        ("sums", |k| format!("${}", " + 1".repeat(k))),
+        ("ands", |k| vec!["$ == 1"; k].join(" && ")),
+    ];
+    for (what, f) in shapes {
+        let ok = f(n - 2);
+        let text = super::normalize(&ok).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        assert_eq!(super::normalize(&text).expect("reads back"), text, "{what}");
+        let _ = super::query(&doc, &ok, true);
+        for k in [n + 1, 10 * n] {
+            let e = super::normalize(&f(k)).expect_err(what);
+            assert_eq!(e.code, "54001", "{what} {k}: {e:?}");
+        }
+    }
+    // Parentheses: deep in the text, not in the tree.
+    let parens = |k: usize| format!("{}$.a{}", "(".repeat(k), ")".repeat(k));
+    assert_eq!(
+        super::normalize(&parens(n)).expect("parentheses"),
+        "$.\"a\""
+    );
+    assert_eq!(super::normalize(&parens(10 * n)).unwrap_err().code, "54001");
+    // The fuzzer's: 900 signs; and 0 minus 64 signs of $, whose text
+    // nests twice as deep.
+    assert_eq!(
+        super::normalize(&"-".repeat(900)).unwrap_err().code,
+        "54001"
+    );
+    let text = super::normalize(&format!("0 - {}$", "-".repeat(64))).expect("parses");
+    super::normalize(&text).expect("its text reads back");
+}

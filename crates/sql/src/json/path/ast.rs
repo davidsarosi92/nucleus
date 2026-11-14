@@ -67,6 +67,35 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// How deeply the tree nests (a leaf is 1).
+    pub(crate) fn depth(&self) -> usize {
+        1 + match self {
+            Expr::Chain(head, steps) => steps
+                .iter()
+                .map(|s| match s {
+                    Step::Index(subs) => subs
+                        .iter()
+                        .map(|(a, b)| a.depth().max(b.as_ref().map_or(0, Expr::depth)))
+                        .max()
+                        .unwrap_or(0),
+                    Step::Filter(e) => e.depth(),
+                    _ => 0,
+                })
+                .fold(head.depth(), usize::max),
+            Expr::Neg(_, e)
+            | Expr::Not(e)
+            | Expr::IsUnknown(e)
+            | Expr::Exists(e)
+            | Expr::LikeRegex(e, _) => e.depth(),
+            Expr::Arith(_, a, b)
+            | Expr::Cmp(_, a, b)
+            | Expr::And(a, b)
+            | Expr::Or(a, b)
+            | Expr::StartsWith(a, b) => a.depth().max(b.depth()),
+            _ => 0,
+        }
+    }
+
     /// Whether this is a predicate (its value true, false or unknown).
     pub fn is_predicate(&self) -> bool {
         matches!(

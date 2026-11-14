@@ -1020,14 +1020,14 @@ from exact decimals.  A field is read from the stored form in place.
 
 Against PostgreSQL 18's `jsonb` (`bench/json/pg.py`: postgres:18-alpine
 in Docker on the same machine, its defaults; nucleus a server; seconds
-for one statement, the median of five; the field sums and path counts
-asserted equal):
+for one statement, the median of five; the field sums, path counts and
+value sums asserted equal):
 
-| documents | rows | text | parse | PostgreSQL | output | PostgreSQL | a field | PostgreSQL | a path | PostgreSQL |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| tweets | 50,000 | 246 MB | 0.384 | 1.621 | 0.142 | 1.100 | 0.098 | 0.352 | 0.062 | 0.356 |
-| citm performances | 50,000 | 103 MB | 0.089 | 0.975 | 0.046 | 0.438 | 0.009 | 0.037 | 0.018 | 0.051 |
-| canada features ×4 | 4 | 8.8 MB | 0.027 | 0.070 | 0.029 | 0.041 | 0.005 | 0.012 | 0.005 | 0.012 |
+| documents | rows | text | parse | PostgreSQL | output | PostgreSQL | a field | PostgreSQL | a path | PostgreSQL | a value | PostgreSQL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tweets | 50,000 | 246 MB | 0.377 | 1.607 | 0.153 | 1.090 | 0.079 | 0.361 | 0.078 | 0.372 | 0.077 | 0.362 |
+| citm performances | 50,000 | 103 MB | 0.088 | 1.009 | 0.049 | 0.440 | 0.009 | 0.041 | 0.018 | 0.054 | 0.012 | 0.040 |
+| canada features ×4 | 4 | 8.8 MB | 0.025 | 0.084 | 0.028 | 0.051 | 0.005 | 0.014 | 0.005 | 0.014 | 0.004 | 0.014 |
 
 Parse: `count(*) … WHERE doc::json IS NOT NULL` over a text column;
 output: `sum(length(doc::text))`; a field: `sum(length(doc -> 'user' ->>
@@ -1036,7 +1036,9 @@ output: `sum(length(doc::text))`; a field: `sum(length(doc -> 'user' ->>
 '$.entities.hashtags[*] ? (@.text starts with "a")'` (tweets),
 `'$.seatCategories[*].areas[*] ? (@.areaId > 205705999)'`
 (performances), `'$.geometry.coordinates[*][*] ? (@[0] < -70)'`
-(features).
+(features); a value: `sum(JSON_VALUE(doc, path RETURNING bigint))` of
+`'$.user.followers_count'` (tweets), `'$.start'` (performances),
+`'$.geometry.coordinates.size()'` (features).  2026-11-14.
 
 A whole file as one value:
 

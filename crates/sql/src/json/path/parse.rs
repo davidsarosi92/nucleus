@@ -22,6 +22,7 @@ pub fn parse(text: &str) -> Result<Path> {
         i: 0,
         filters: 0,
         subscripts: 0,
+        depth: 0,
     };
     let strict = if p.keyword("strict") {
         p.i += 1;
@@ -34,6 +35,9 @@ pub fn parse(text: &str) -> Result<Path> {
     };
     let expr = p.or()?;
     p.expect(Tok::End)?;
+    if expr.depth() > MAX_DEPTH {
+        return Err(too_deep());
+    }
     Ok(Path { strict, expr })
 }
 
@@ -455,6 +459,25 @@ struct Parser<'a> {
     filters: usize,
     /// Array subscripts around it (`last` is allowed in one).
     subscripts: usize,
+    /// Operands around it ([`MAX_DEPTH`]).
+    depth: usize,
+}
+
+/// How deeply a path's tree may nest — parentheses, filters, subscripts,
+/// signs, chains of operators (which nest to the left): the printer, the
+/// evaluator and the tree's drop recurse once a level (PostgreSQL's limit
+/// is its stack's).
+pub(crate) const MAX_DEPTH: usize = 128;
+
+/// How deeply the parser may recurse: past [`MAX_DEPTH`], as a tree's
+/// normalized text nests up to twice as deep (`-(-$)` for `- -$`), and
+/// must read back.
+const PARSE_DEPTH: usize = 2 * MAX_DEPTH + 8;
+
+fn too_deep() -> Error {
+    Error::statement_too_complex(format!(
+        "a jsonpath nests too deeply (more than {MAX_DEPTH} levels)"
+    ))
 }
 
 const METHODS: &[&str] = &[
@@ -560,8 +583,10 @@ impl Parser<'_> {
     }
 
     fn or(&mut self) -> Result<Expr> {
+        let base = self.depth;
         let mut l = self.and()?;
         while *self.tok() == Tok::Or {
+            self.enter()?;
             let at = self.i;
             l = self.predicate(l, at)?;
             self.i += 1;
@@ -569,12 +594,15 @@ impl Parser<'_> {
             let r = self.predicate(r, self.i)?;
             l = Expr::Or(Box::new(l), Box::new(r));
         }
+        self.depth = base;
         Ok(l)
     }
 
     fn and(&mut self) -> Result<Expr> {
+        let base = self.depth;
         let mut l = self.not()?;
         while *self.tok() == Tok::And {
+            self.enter()?;
             let at = self.i;
             l = self.predicate(l, at)?;
             self.i += 1;
@@ -582,6 +610,7 @@ impl Parser<'_> {
             let r = self.predicate(r, self.i)?;
             l = Expr::And(Box::new(l), Box::new(r));
         }
+        self.depth = base;
         Ok(l)
     }
 
@@ -669,12 +698,17 @@ impl Parser<'_> {
 
     fn additive(&mut self) -> Result<Expr> {
         let mut l = self.multiplicative()?;
+        let base = self.depth;
         loop {
             let op = match self.tok() {
                 Tok::Plus => Arith::Add,
                 Tok::Minus => Arith::Sub,
-                _ => return Ok(l),
+                _ => {
+                    self.depth = base;
+                    return Ok(l);
+                }
             };
+            self.enter()?;
             l = self.expression(l, self.i)?;
             self.i += 1;
             let at = self.i;
@@ -686,13 +720,18 @@ impl Parser<'_> {
 
     fn multiplicative(&mut self) -> Result<Expr> {
         let mut l = self.unary()?;
+        let base = self.depth;
         loop {
             let op = match self.tok() {
                 Tok::Star => Arith::Mul,
                 Tok::Slash => Arith::Div,
                 Tok::Percent => Arith::Mod,
-                _ => return Ok(l),
+                _ => {
+                    self.depth = base;
+                    return Ok(l);
+                }
             };
+            self.enter()?;
             l = self.expression(l, self.i)?;
             self.i += 1;
             let at = self.i;
@@ -702,7 +741,25 @@ impl Parser<'_> {
         }
     }
 
+    /// One level deeper: an operand (every nesting passes there) or a link
+    /// of a chain of operators (which nests the tree to the left).
+    fn enter(&mut self) -> Result<()> {
+        if self.depth >= PARSE_DEPTH {
+            return Err(too_deep());
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// An operand.
     fn unary(&mut self) -> Result<Expr> {
+        self.enter()?;
+        let e = self.signed();
+        self.depth -= 1;
+        e
+    }
+
+    fn signed(&mut self) -> Result<Expr> {
         let minus = match self.tok() {
             Tok::Plus => false,
             Tok::Minus => true,

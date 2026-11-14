@@ -16,6 +16,9 @@ timed (the median of five runs, the client's clock):
 - path: `count(*) … WHERE doc @? <path>` — an SQL/JSON path with a
   filter (a tweet's hashtags starting with "a", a performance's seat
   areas above an id, a feature's points west of 70°W);
+- value: `sum(JSON_VALUE(doc, <path> RETURNING bigint))` — SQL/JSON's
+  scalar, converted (a tweet's user's followers, a performance's start, a
+  feature's number of rings);
 - size: each whole file as one value, `pg_column_size` against nucleus's
   binary form (from `bench/json`'s binary: the `form KB` column).
 
@@ -100,7 +103,8 @@ def main():
             except Exception:
                 time.sleep(0.5)
         print(f"{'documents':<14} {'rows':>7} {'MB':>6} | {'parse s':>8} {'pg':>8} | "
-              f"{'output s':>8} {'pg':>8} | {'field s':>8} {'pg':>8} | {'path s':>8} {'pg':>8}")
+              f"{'output s':>8} {'pg':>8} | {'field s':>8} {'pg':>8} | {'path s':>8} {'pg':>8} | "
+              f"{'value s':>8} {'pg':>8}")
         fields = {
             "tweets": "doc -> 'user' ->> 'screen_name'",
             "performances": "doc ->> 'start'",
@@ -110,6 +114,11 @@ def main():
             "tweets": '$.entities.hashtags[*] ? (@.text starts with "a")',
             "performances": "$.seatCategories[*].areas[*] ? (@.areaId > 205705999)",
             "features": "$.geometry.coordinates[*][*] ? (@[0] < -70)",
+        }
+        values = {
+            "tweets": "$.user.followers_count",
+            "performances": "$.start",
+            "features": "$.geometry.coordinates.size()",
         }
         for name, texts in docs.items():
             rows = [texts[i % len(texts)] for i in range(args.rows)] if name != "features" else texts * 4
@@ -126,6 +135,8 @@ def main():
             pg_field = pg_time(f"SELECT sum(length({fields[name]})) FROM j;")
             path = f"SELECT count(*) FROM j WHERE doc @? '{paths[name]}'"
             pg_path = pg_time(path + ";")
+            value = f"SELECT sum(JSON_VALUE(doc, '{values[name]}' RETURNING bigint)) FROM j"
+            pg_value = pg_time(value + ";")
             # nucleus: the same rows.
             db.execute("DROP TABLE IF EXISTS src")
             db.execute("DROP TABLE IF EXISTS j")
@@ -141,9 +152,11 @@ def main():
             n_field = median(lambda: db.execute(field))
             assert str(db.execute(path).rows[0][0]) == psql(path + ";"), "the same path counts"
             n_path = median(lambda: db.execute(path))
+            assert str(db.execute(value).rows[0][0]) == psql(value + ";"), "the same value sums"
+            n_value = median(lambda: db.execute(value))
             print(f"{name:<14} {len(rows):>7} {mb:>6.1f} | {n_parse:>8.3f} {pg_parse:>8.3f} | "
                   f"{n_out:>8.3f} {pg_out:>8.3f} | {n_field:>8.3f} {pg_field:>8.3f} | "
-                  f"{n_path:>8.3f} {pg_path:>8.3f}", flush=True)
+                  f"{n_path:>8.3f} {pg_path:>8.3f} | {n_value:>8.3f} {pg_value:>8.3f}", flush=True)
         print()
         print(f"{'file':<20} {'text KB':>8} {'jsonb KB':>9}")
         for f in ("canada.json", "citm_catalog.json", "twitter.json"):

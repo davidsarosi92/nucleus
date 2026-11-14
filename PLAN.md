@@ -283,7 +283,7 @@ are marked ✅.
 | | M14.24 | Memory for AI models: knowledge that is updatable, erasable, permissioned and auditable, read at generation time | ✅ (2026-11-14) study written (2026-11-13); R1 ✅ memory stores, `REMEMBER`, `recall()`, row expiry, MCP tools, driver helpers (LongMemEval_S turn R@10 0.819 against the paper's BM25 0.592); R2 ✅ `FORGET SUBJECT`, the scrub and the search (a planted subject's texts: 100 places after `DELETE` and a vacuum, 0 after `FORGET`); R3 ✅ leak tests over every recall path, BM25's statistics a tenant's own on a table partitioned by tenant; R4 ✅ `recall` under 1 ms in the process (100 000 memories), batched through `LATERAL`, a vacuum's crash flaw fixed; §M14.14 ✅ between; R5 ✅ citations (`as_of`), read records by request id (`nc_catalog.reads`), erasure through history and the log; R6 ✅ `BACKUP TO` / `nucleus restore` without index pages, each subject's rows sealed under its own key, which `FORGET` destroys (60 MiB backed up in 0.46 s, restored in 0.80 s); R7 ✅ `docs/memory.md`, the Python and JavaScript `memory` examples (run in CI), MCP `cite` and `forget_subject` |
 | | M14.13 | Database branches (copy-on-write) | ⬜ |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
-| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster |
+| | M14.15 | JSON type and functions | ◐ study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster |
 | | M14.16 | Migrations and code generation | ⬜ |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ⬜ |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
@@ -8130,7 +8130,7 @@ SELECT … FROM t AS OF …`, a dropped table included).
   costs nothing now.  `snapshot_at`'s search bounded by the visible
   commit, not the timestamp space: 20 µs → 5.5 µs.
 
-### §M14.15 — JSON ◐ (study written, J1–J3a ✅, 2026-11-14)
+### §M14.15 — JSON ◐ (study written, J1–J3b ✅, 2026-11-14)
 
 - A `JSON` type (validated, stored in a compact binary form), operators
   `->`, `->>`, `#>`, `@>`, `?`, functions to build, extract, test and
@@ -8437,6 +8437,59 @@ put it but `text`, which it can neither query nor index.
   feature's points west of 70°W 0.005 against 0.012 — the items read
   in place, the path parsed once, `@?`'s lax evaluation stopping at the
   first match as PostgreSQL's does.
+
+  **J3b ✅ (2026-11-14).**  `json::sqljson` and the parser's
+  `sql_json`: `JSON_EXISTS`, `JSON_VALUE`, `JSON_QUERY` (`PASSING`,
+  `RETURNING`, wrappers, quotes, `ON EMPTY` / `ON ERROR`), `IS JSON`,
+  `JSON_OBJECT`, `JSON_ARRAY` (of values or of a query),
+  `JSON_OBJECTAGG`, `JSON_ARRAYAGG`, `JSON`, `JSON_SCALAR`,
+  `JSON_SERIALIZE`.  *How* (PostgreSQL's way, `gram.y`'s
+  `func_expr_common_subexpr` and `parse_expr.c`'s `transformJson*`, read
+  for the semantics): the keywords are the parser's alone — each form is
+  desugared into a call of an ordinary function whose options are
+  constant arguments, so the binder, the planner and the executor need
+  nothing new.  `RETURNING t` needs the type at bind time, and a
+  function's result type is its resolver's: the form carries a typed
+  `NULL` (the *witness*, `CAST(NULL AS t)`) the resolver reads `t` off,
+  and `ScalarFunction::rewrite`, which sees the bound arguments, reads
+  the modifier off the bound witness (`varchar(n)` → `substr`,
+  `char(n)` → `bpchar`, `numeric(p, s)` → `numeric`, a registered
+  type's `FitFn`) and gives the call specialized to it — PostgreSQL's
+  `JsonExpr` keeps a coercion expression the executor evaluates in an
+  error-safe way; here the specialized function converts by `t`'s input
+  itself (lengths checked, not cut), so a conversion's error is the `ON
+  ERROR` clause's.  `JSON_ARRAY(query)` is `(SELECT JSON_ARRAYAGG(x)
+  FROM (query) q(x))`, as PostgreSQL reads it.  `IS JSON … WITH UNIQUE
+  KEYS` checks keys while parsing (`json::parse::parse_checked`), after
+  escapes are read.  *Checked against PostgreSQL 18:*
+  `slt/67_json_sql.slt`, 207 records filled by `scripts/slt-pg.py`,
+  plus 12 nucleus-only ones for the differences: `json` is one canonical
+  type, so a constructor's text is `jsonb`'s (sorted keys, the last of
+  equal keys, numbers without their scale) where PostgreSQL's `json`
+  keeps its own layout; `JSON_SERIALIZE` of `jsonb` in PostgreSQL 18
+  gives the binary form read as text (a bug nucleus does not copy); a
+  `PASSING` value travels as `to_json` makes it, so a date is a string
+  (PostgreSQL passes a datetime item).  *Found on the way:* J3a's
+  registration leaked its function names (`String::leak`), which every
+  fuzz target that builds a registry reported (LeakSanitizer, CI of
+  ed92a23); now static.  And the `json` fuzz target found a path of 900
+  signs overflowing the parser's stack, and a chain of `&&` or `+` —
+  read in a loop but nesting the tree to the left — could overflow the
+  printer, the evaluator and the drop: a path's tree nests at most 128
+  levels now (`54001`; PostgreSQL's limit is its stack's), the parser
+  allowed twice as deep so that every normalized text reads back
+  (`-(-$)` for `- -$`); checked on a 2 MiB thread in a debug build.  *Not there:* `FORMAT JSON ENCODING` other than
+  UTF-8 (read and ignored), `RETURNING` a type whose cast is a taught
+  function (`0A000`),
+  a `DEFAULT` that is a subquery (PostgreSQL refuses it too),
+  `JSON_OBJECTAGG` / `JSON_ARRAYAGG` with `FILTER` or `OVER`.
+  *Measured* against PostgreSQL 18 (`bench/json/pg.py`, a `value`
+  column, the sums asserted equal): `sum(JSON_VALUE(doc,
+  '$.user.followers_count' RETURNING bigint))` over 50 000 tweets 0.077 s
+  against 0.362 (4.7×); a performance's start 0.012 against 0.040
+  (3.3×); a feature's number of rings 0.004 against 0.014 (3.5×) — the
+  scalar read in place and converted from its text once, the path
+  parsed once per thread.
 - **J4 — indexes**: expression indexes for every type, the containment
   index, the planner choosing them (with statistics: a path's
   selectivity); measured against PostgreSQL's GIN (`jsonb_path_ops`)

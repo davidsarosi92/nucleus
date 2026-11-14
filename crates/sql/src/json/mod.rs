@@ -15,6 +15,7 @@ pub mod key;
 pub mod ops;
 pub mod parse;
 pub mod path;
+pub(crate) mod sqljson;
 pub mod text;
 
 use std::sync::Arc;
@@ -265,7 +266,8 @@ impl Type for Json {
 pub fn register(r: &mut Registry) -> Result<()> {
     r.add_type(Arc::new(Json))?;
     funcs::register(r)?;
-    path::register(r)
+    path::register(r)?;
+    sqljson::register(r)
 }
 
 #[cfg(test)]

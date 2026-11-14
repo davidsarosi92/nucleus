@@ -17,11 +17,18 @@ use crate::error::{Error, Result};
 
 /// Parses JSON text into its binary form.
 pub fn parse(text: &str) -> Result<Vec<u8>> {
+    parse_checked(text, false)
+}
+
+/// Parses JSON text, refusing an object with a key twice (SQL/JSON's
+/// `WITH UNIQUE KEYS`, PLAN.md §M14.15 J3b) when `unique`.
+pub fn parse_checked(text: &str, unique: bool) -> Result<Vec<u8>> {
     let mut p = Parser {
         b: text.as_bytes(),
         text,
         at: 0,
         levels: Vec::new(),
+        unique,
     };
     let mut out = Vec::with_capacity(text.len());
     p.ws();
@@ -46,6 +53,7 @@ struct Parser<'a> {
     text: &'a str,
     at: usize,
     levels: Vec<Level<'a>>,
+    unique: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -182,6 +190,9 @@ impl<'a> Parser<'a> {
                     _ => return Err(self.bad("expected \",\" or \"}\"")),
                 }
             }
+        }
+        if self.unique {
+            unique_keys(l.pairs.iter().map(|(k, _)| k.as_ref()))?;
         }
         form::put_object(out, &mut l.pairs, &l.data)?;
         self.levels[depth] = l;
@@ -391,4 +402,17 @@ pub(crate) fn has_special(w: u64) -> bool {
     // the byte's own high bit was clear).
     let control = w.wrapping_sub(ONES * 0x20) & !w & HIGH;
     quote | slash | control != 0
+}
+
+/// An error when a key is among `keys` twice (22030, as PostgreSQL's).
+pub(crate) fn unique_keys<'k>(keys: impl Iterator<Item = &'k str>) -> Result<()> {
+    let mut seen: Vec<&str> = keys.collect();
+    seen.sort_unstable();
+    match seen.windows(2).find(|w| w[0] == w[1]) {
+        Some(w) => Err(Error::json_duplicate_key(format!(
+            "duplicate JSON object key value: \"{}\"",
+            w[0]
+        ))),
+        None => Ok(()),
+    }
 }

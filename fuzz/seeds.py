@@ -7,7 +7,8 @@ A seed is a well-formed input the fuzzer starts from and mutates, so it
 reaches deep without guessing a protocol's framing first:
 
 - sql_parse: the statements of the sqllogictest files (crates/testkit/slt).
-- json: JSON texts, and a few values' binary forms.
+- json: JSON texts, a few values' binary forms, and SQL/JSON paths with
+  a document.
 - values, text_search, copy: each statement or type the target picks by
   its first byte, with inputs that the statement or type accepts.
 - scram: a whole exchange, its proof computed here (RFC 5802).
@@ -168,12 +169,27 @@ JSON_FORMS = [b"\x00", b"\x31\x05", b"\x53abc", b"\x60\x01\x01\x20",
               b"\x70\x01\x01\x02a\x31\x01"]
 
 
+# SQL/JSON paths (mode 2): a path, a NUL, a document.  The last two nest
+# deeply: 900 signs, and 0 minus 64 signs of $ (whose normalized text nests
+# twice as deep) — both found by the fuzzer.
+JSON_PATHS = [
+    ('$.a[*] ? (@ > 1 && @ < 5)', '{"a": [1, 2, 7]}'),
+    ('strict $.**{1 to last}.b ? (@ starts with "x")', '{"a": {"b": "xy"}}'),
+    ('$.d.datetime("YYYY-MM-DD HH24:MI").type()', '{"d": "2020-01-02 03:04"}'),
+    ('$ ? (@.s like_regex "^a.c$" flag "i").keyvalue()', '{"s": "AbC"}'),
+    ('-' * 900 + '1', 'null'),
+    ('0 - ' + '-' * 64 + '$', '1'),
+]
+
+
 def json_seeds():
     d = out_dir("json")
     for k, t in enumerate(JSON_TEXTS):
         write(d, f"text-{k}", b"\x00" + t.encode())
     for k, b in enumerate(JSON_FORMS):
         write(d, f"form-{k}", b"\x01" + b)
+    for k, (p, doc) in enumerate(JSON_PATHS):
+        write(d, f"path-{k}", b"\x02" + p.encode() + b"\x00" + doc.encode())
 
 
 # --- text_search -------------------------------------------------------------

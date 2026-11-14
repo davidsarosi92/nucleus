@@ -280,30 +280,54 @@ pub(crate) fn register(r: &mut Registry) -> Result<()> {
     let (j, p, b) = (super::data_type(), data_type(), DataType::Bool);
     let args = || vec![u(j), u(p), u(j), u(b)];
     type F = fn(&[Value]) -> Result<Value>;
-    let fns: [(&str, DataType, F, F); 4] = [
-        ("exists", b, |a| exists(a, false), |a| exists(a, true)),
-        ("match", b, |a| matches(a, false), |a| matches(a, true)),
+    // The names: json_path_x, its jsonb_ alias, and the _tz pair.
+    let fns: [([&str; 4], DataType, F, F); 4] = [
         (
-            "query_array",
+            [
+                "json_path_exists",
+                "jsonb_path_exists",
+                "json_path_exists_tz",
+                "jsonb_path_exists_tz",
+            ],
+            b,
+            |a| exists(a, false),
+            |a| exists(a, true),
+        ),
+        (
+            [
+                "json_path_match",
+                "jsonb_path_match",
+                "json_path_match_tz",
+                "jsonb_path_match_tz",
+            ],
+            b,
+            |a| matches(a, false),
+            |a| matches(a, true),
+        ),
+        (
+            [
+                "json_path_query_array",
+                "jsonb_path_query_array",
+                "json_path_query_array_tz",
+                "jsonb_path_query_array_tz",
+            ],
             j,
             |a| query_array(a, false),
             |a| query_array(a, true),
         ),
         (
-            "query_first",
+            [
+                "json_path_query_first",
+                "jsonb_path_query_first",
+                "json_path_query_first_tz",
+                "jsonb_path_query_first_tz",
+            ],
             j,
             |a| query_first(a, false),
             |a| query_first(a, true),
         ),
     ];
-    for (suffix, returns, plain, tz) in fns {
-        let names = [
-            format!("json_path_{suffix}"),
-            format!("jsonb_path_{suffix}"),
-            format!("json_path_{suffix}_tz"),
-            format!("jsonb_path_{suffix}_tz"),
-        ];
-        let names: Vec<&'static str> = names.into_iter().map(|n| &*n.leak()).collect();
+    for (names, returns, plain, tz) in fns {
         r.add_function(
             &names[..2],
             Arc::new(Func::new(names[0], args(), returns, plain).arity(2..=4)),

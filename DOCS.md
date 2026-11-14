@@ -5089,8 +5089,7 @@ path, new [, after])` (a position out of range adds at that end),
 are PostgreSQL's (`22023 cannot delete from scalar`, `22P02 path
 element at position 1 is not an integer: "x"`, `22004` a `NULL` path
 step or key, `2202E` uneven arrays).  Not there yet: the standard's
-`JSON_VALUE`, `JSON_QUERY`, `JSON_EXISTS`, `JSON_TABLE` and `IS JSON`
-(J3b–c), arrays of `json` (no
+`JSON_TABLE` (J3c), arrays of `json` (no
 `json[]`), `row_to_json` (no row values: `json_build_object`), set-returning functions in the select list (PostgreSQL's
 `SELECT json_each(j)`: in `FROM`), and `jsonb`'s raw-scalar quirk
 (`'1'::jsonb -> 0` is `1` there, `NULL` here).
@@ -5116,7 +5115,12 @@ is unknown`, `starts with` a string or a variable, `like_regex "…" flag
 .decimal(p, s) .datetime([template]) .date() .time([p]) .time_tz([p])
 .timestamp([p]) .timestamp_tz([p])`; keywords in any case but `true`,
 `false` and `null`; `/* comments */`.  Refused as PostgreSQL refuses
-(`42601`, `2201B`, `0A000`, `22P05`).
+(`42601`, `2201B`, `0A000`, `22P05`); a path whose tree nests more
+than 128 levels — filters, subscripts, signs, a chain of `&&` or `+`
+(which nests to the left) — is `54001`: the printer, the evaluator and
+the tree's drop recurse once a level, and the parser, allowed twice as
+deep, reads back every normalized text it gives (PostgreSQL's limit is
+its stack's).
 
 Evaluation (`json::path::eval`) is PostgreSQL's executor step for step:
 *lax* mode (the default) unwraps an array for an accessor, a filter or
@@ -5156,6 +5160,54 @@ recorded in `slt/66_json_path.slt`: numbers keep no scale (`2 * 3.5`
 is `7`, PostgreSQL's `7.0`), `.keyvalue()`'s ids below the root, the
 parenthesized text above.
 
+**SQL/JSON's functions** (`json::sqljson`, §M14.15 J3b), written with
+the standard's keywords, which the parser desugars into calls of
+functions (`__json_value`, …) whose options are constant arguments:
+`JSON_EXISTS(ctx, path [PASSING v AS name, …] [{TRUE | FALSE | UNKNOWN
+| ERROR} ON ERROR])`, `JSON_VALUE(ctx, path [PASSING …] [RETURNING t]
+[{NULL | ERROR | DEFAULT x} ON EMPTY] [… ON ERROR])` (one scalar:
+`2203F` for a container, `22034` for more than one item, a boolean as
+`t`/`f`, JSON `null` as `NULL`), `JSON_QUERY(ctx, path [PASSING …]
+[RETURNING t] [WITH [CONDITIONAL | UNCONDITIONAL] [ARRAY] WRAPPER |
+WITHOUT WRAPPER] [{KEEP | OMIT} QUOTES [ON SCALAR STRING]] [{NULL |
+ERROR | EMPTY [ARRAY] | EMPTY OBJECT | DEFAULT x} ON EMPTY] [… ON
+ERROR])` (`json` by default; a conditional wrapper wraps more than one
+item); the context is `json` or text read as it (a text that is not
+JSON is an error whatever `ON ERROR` says, as PostgreSQL's); `PASSING`
+values become the path's variables as `to_json` makes them.  `ON EMPTY`
+defaults to `NULL`; `ON ERROR` to `NULL` (`FALSE` for `JSON_EXISTS`);
+`ERROR ON EMPTY` is not caught by `ON ERROR`; a missing variable is
+`42704` always.  `RETURNING t` is given as a typed `NULL` (the
+witness) whose type the call takes; when the call is bound,
+`ScalarFunction::rewrite` reads the type and its modifier off the bound
+witness and gives the call specialized to it, which converts the result
+itself — by `t`'s input from the scalar's text (`1.5` is no `int`:
+`22P02`), checking `varchar(n)` and `char(n)` lengths (`22001`, not cut
+as a cast cuts) and `numeric(p, s)` (`22003`) — so that a conversion's
+error is `ON ERROR`'s.  Specialized, a call is immutable (stable when
+it returns `timestamptz`).  `x IS [NOT] JSON [VALUE | ARRAY | OBJECT |
+SCALAR] [WITH | WITHOUT UNIQUE [KEYS]]` on text, `bytea` or `json`
+(`42804` for another type; a key twice anywhere refused with `UNIQUE`,
+compared after escapes are read: `json::parse::parse_checked`).
+Constructors: `JSON_OBJECT(k VALUE v | k : v, … [NULL | ABSENT ON NULL]
+[WITH | WITHOUT UNIQUE [KEYS]] [RETURNING t])` (`NULL ON NULL` by
+default; a `NULL` key `22004`; a key twice `22030` with `UNIQUE`, even
+when its value is left out; with neither `VALUE` nor `:` it is
+PostgreSQL's older `json_object(text[])`), `JSON_ARRAY(v, … [ABSENT |
+NULL ON NULL] [RETURNING t])` (`ABSENT` by default) and
+`JSON_ARRAY(query)` (`(SELECT JSON_ARRAYAGG(x) FROM (query) q(x))`, as
+PostgreSQL reads it: `NULL` over no rows), `JSON_OBJECTAGG(k VALUE v
+…)`, `JSON_ARRAYAGG(v [ORDER BY …] …)` (`NULL` over no rows, `[]` over
+rows all left out), `JSON(text [WITH UNIQUE KEYS])`, `JSON_SCALAR(x)`
+(`to_json`), `JSON_SERIALIZE(x [RETURNING t])`; `v FORMAT JSON` reads
+text as JSON.  Differences, recorded in `slt/67_json_sql.slt` (207
+records as PostgreSQL 18 gives them): `json` is one canonical type, so
+a constructor's text is `jsonb`'s (`{"a": 1}`, sorted keys, the last
+of equal keys, no scale on numbers) where PostgreSQL's `json` keeps its
+own layout (`{"a" : 1}`); `JSON_SERIALIZE` of a `json` value gives its
+text (PostgreSQL 18 gives `jsonb`'s binary form read as text); a
+`PASSING` date is its ISO string (PostgreSQL passes a datetime item).
+
 **On the wire** (`ncp` tag 11 named `json`) a value travels as its text
 (`Type::wire_output` / `wire_input`), in rows and in columnar batches;
 the drivers hand out the language's own values (§11).  pg-compat shows
@@ -5166,10 +5218,12 @@ casts and errors), `slt/65_json.slt` (the operators and functions, 108
 records as PostgreSQL 18 gives them: `scripts/slt-pg.py check`),
 `json::path::tests` (texts and errors as PostgreSQL's, evaluation),
 `slt/66_json_path.slt` (paths, 221 records as PostgreSQL 18 gives them),
+`slt/67_json_sql.slt` (SQL/JSON's functions, 207 records as PostgreSQL
+18 gives them),
 the law kit's generator (equal documents written differently), the
 `json` fuzz target (§2; the operators' laws too, and paths: normalized
 text reads back as itself, items are canonical), pg-compat's
-`json_through_a_real_driver`.  Measurements: PLAN.md §M14.15 J1–J3a and
+`json_through_a_real_driver`.  Measurements: PLAN.md §M14.15 J1–J3b and
 `docs/benchmarks.md`.
 
 ### 8.14 Errors and hints (`error`, `hint`)
@@ -6144,6 +6198,20 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-14 — §M14.15 J3b, SQL/JSON's functions:** `JSON_EXISTS`,
+  `JSON_VALUE`, `JSON_QUERY` (PASSING, RETURNING, wrappers, quotes, ON
+  EMPTY / ON ERROR), `IS JSON`, `JSON_OBJECT`, `JSON_ARRAY` (of values
+  or a query), `JSON_OBJECTAGG`, `JSON_ARRAYAGG`, `JSON`,
+  `JSON_SCALAR`, `JSON_SERIALIZE`: the parser desugars them into calls
+  of `json::sqljson`'s functions; a `RETURNING` type travels as a typed
+  `NULL` and the call is specialized to it when bound
+  (`ScalarFunction::rewrite`), converting with errors `ON ERROR`
+  handles.  `slt/67_json_sql.slt`, 207 records as PostgreSQL 18 gives
+  them.  Error code `22030`.  Fixes: J3a's registration leaked its
+  function names (`String::leak`), which the fuzzers' leak check
+  caught; a path of 900 signs overflowed the parser's stack (the `json`
+  fuzz target) — a path's tree nests at most 128 levels now (`54001`),
+  chains of operators counted.
 - **2026-11-14 — §M14.15 J3a, SQL/JSON paths:** PostgreSQL's
   `jsonpath` (a type of its own, kept as its normalized text; oid 4072
   in pg-compat), the language with lax and strict modes, filters,

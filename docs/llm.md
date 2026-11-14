@@ -65,6 +65,14 @@ aggregates `json_agg(x)` and `json_object_agg(k, v)`, and in `FROM`
 path)`; `lax` (default) or `strict`, filters, `like_regex`, `starts
 with $var`, `.size() .type() .double() .datetime() .keyvalue()` and the
 other methods; `_tz` forms for zone-dependent datetime comparisons.
+**SQL/JSON's functions** (the standard's, as PostgreSQL 17+):
+`JSON_VALUE(doc, '$.user.age' RETURNING int DEFAULT 0 ON EMPTY NULL ON
+ERROR)`, `JSON_QUERY(doc, '$.items[*].sku' WITH WRAPPER)`,
+`JSON_EXISTS(doc, '$.tags[*] ? (@ == $t)' PASSING 'ai' AS t)`, `body IS
+JSON OBJECT WITH UNIQUE KEYS`; constructors `JSON_OBJECT('id': id,
+'name': name ABSENT ON NULL)`, `JSON_ARRAY(1, 'x')`, `JSON_ARRAY(SELECT
+id FROM t)`, `JSON_OBJECTAGG(k: v)`, `JSON_ARRAYAGG(x ORDER BY x)`,
+`JSON(text WITH UNIQUE KEYS)`, `JSON_SCALAR(x)`, `JSON_SERIALIZE(doc)`.
 
 **Vectors** (embeddings, as pgvector): `embedding vector(768)`, literals
 `'[0.1, 0.2, …]'` (or a driver's float array as a parameter); distances
@@ -301,7 +309,7 @@ before a generation's queries records what each returned
 | `CREATE VIEW` | a `WITH` query |
 | `count(*) FILTER (WHERE …)` | `sum(CASE WHEN … THEN 1 ELSE 0 END)` |
 | `unnest(…)` in the select list | `SELECT … FROM unnest(…) AS u(x)` |
-| `JSON_TABLE`, `JSON_VALUE`, `JSON_QUERY`, `JSON_EXISTS`, `IS JSON` (coming, §M14.15) | `json_path_query(doc, path)` in `FROM`, `json_path_query_first`, `doc @? path`, `->>` |
+| `JSON_TABLE` (coming, §M14.15) | `json_path_query(doc, path)` in `FROM`, `JSON_VALUE` per column |
 | `json[]`, `json_each(…)` in the select list | `json_agg` / `json_build_array`; `SELECT … FROM t, json_each(t.doc) e` |
 | `TRUNCATE` | `DELETE FROM t` |
 | `ALTER TABLE … DROP COLUMN`, `RENAME`, `ALTER COLUMN … SET DEFAULT` | a new table and `INSERT … SELECT` |

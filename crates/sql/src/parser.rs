@@ -3471,6 +3471,11 @@ impl<'a> Parser<'a> {
     }
 
     fn name_or_call(&mut self, first: String) -> Result<Expr> {
+        if self.peek_op("(")
+            && let Some(e) = self.sql_json(&first)?
+        {
+            return Ok(e);
+        }
         // extract(field FROM expr)
         if first == "extract" && self.peek_op("(") {
             let save = self.pos;
@@ -3621,6 +3626,406 @@ impl<'a> Parser<'a> {
             table: None,
             name: first,
         })
+    }
+
+    /// SQL/JSON's functions written with keywords (PLAN.md §M14.15 J3b),
+    /// at `name(`: desugared into calls of the functions
+    /// [`crate::json::sqljson`] registers, the options as constant
+    /// arguments; a `RETURNING` type as a typed `NULL` the function takes
+    /// its result type from.  `None`: not one of them — `json_object` with
+    /// neither `VALUE` nor `:` is PostgreSQL's older `json_object(text[])`.
+    fn sql_json(&mut self, first: &str) -> Result<Option<Expr>> {
+        const NAMES: [&str; 9] = [
+            "json_exists",
+            "json_value",
+            "json_query",
+            "json_object",
+            "json_array",
+            "json_objectagg",
+            "json_arrayagg",
+            "json_scalar",
+            "json_serialize",
+        ];
+        if !NAMES.contains(&first) && first != "json" {
+            return Ok(None);
+        }
+        let save = self.pos;
+        self.pos += 1;
+        let e = match first {
+            "json_exists" | "json_value" | "json_query" => self.json_query_call(first)?,
+            "json_object" => match self.json_object()? {
+                Some(e) => e,
+                None => {
+                    self.pos = save;
+                    return Ok(None);
+                }
+            },
+            "json_array" => self.json_array()?,
+            "json_objectagg" => {
+                let k = self.expr()?;
+                if !(self.eat_kw("value") || self.eat_op(":")) {
+                    return Err(self.error("expected VALUE or : after the key"));
+                }
+                let v = self.json_input()?;
+                let absent = self.json_on_null(false);
+                let unique = self.json_unique();
+                let returning = self.json_returning()?;
+                self.expect_op(")")?;
+                let f = json_call(
+                    "__json_objectagg",
+                    vec![k, v, boolean(absent), boolean(unique)],
+                );
+                returning_cast(f, returning)
+            }
+            "json_arrayagg" => {
+                let v = self.json_input()?;
+                let order_by = if self.eat_kws(&["order", "by"]) {
+                    self.order_items()?
+                } else {
+                    vec![]
+                };
+                let absent = self.json_on_null(true);
+                let returning = self.json_returning()?;
+                self.expect_op(")")?;
+                let f = Expr::Function {
+                    name: "__json_arrayagg".into(),
+                    args: vec![v, boolean(absent)],
+                    distinct: false,
+                    star: false,
+                    order_by,
+                    within_group: false,
+                };
+                returning_cast(f, returning)
+            }
+            "json" => {
+                let x = self.expr()?;
+                self.json_format();
+                let unique = self.json_unique();
+                self.expect_op(")")?;
+                json_call("__json_parse", vec![x, boolean(unique)])
+            }
+            "json_scalar" => {
+                let x = self.expr()?;
+                self.expect_op(")")?;
+                json_call("to_json", vec![x])
+            }
+            _ => {
+                // json_serialize
+                let x = self.json_input()?;
+                let returning = self.json_returning()?;
+                self.expect_op(")")?;
+                let text = sql_cast(sql_cast(x, json_type()), SqlType::builtin(DataType::Text));
+                returning_cast(text, returning)
+            }
+        };
+        Ok(Some(e))
+    }
+
+    /// `JSON_EXISTS`, `JSON_VALUE`, `JSON_QUERY` after the `(`.
+    fn json_query_call(&mut self, name: &str) -> Result<Expr> {
+        let context = self.json_input()?;
+        self.expect_op(",")?;
+        let path = self.expr()?;
+        let vars = if self.eat_kw("passing") {
+            let mut pairs = Vec::new();
+            loop {
+                let v = self.json_input()?;
+                self.expect_kw("as")?;
+                pairs.push(Expr::Literal(Value::Text(self.ident()?)));
+                pairs.push(v);
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+            json_call("json_build_object", pairs)
+        } else {
+            Expr::Literal(Value::Null)
+        };
+        let returning = if name == "json_exists" {
+            None
+        } else {
+            self.json_returning()?
+        };
+        let (mut wrapper, mut omit_quotes) = (0, false);
+        if name == "json_query" {
+            if self.eat_kw("without") {
+                self.eat_kw("array");
+                self.expect_kw("wrapper")?;
+            } else if self.peek_kw("with") {
+                self.pos += 1;
+                wrapper = if self.eat_kw("conditional") {
+                    2
+                } else {
+                    self.eat_kw("unconditional");
+                    1
+                };
+                self.eat_kw("array");
+                self.expect_kw("wrapper")?;
+            }
+            let quotes = self.peek_kw("keep") || self.peek_kw("omit");
+            if quotes {
+                omit_quotes = self.eat_kw("omit");
+                self.eat_kw("keep");
+                self.expect_kw("quotes")?;
+                if self.eat_kw("on") {
+                    self.expect_kw("scalar")?;
+                    self.expect_kw("string")?;
+                }
+                if wrapper != 0 && omit_quotes {
+                    return Err(Error::syntax(
+                        "SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used",
+                    ));
+                }
+            }
+        }
+        let (on_empty, on_error) = self.json_behaviors(name)?;
+        self.expect_op(")")?;
+        let null = || Expr::Literal(Value::Null);
+        if name == "json_exists" {
+            let on_error = on_error.map_or(JSON_FALSE, |b| b.0);
+            return Ok(json_call(
+                "__json_exists",
+                vec![context, path, vars, int(on_error)],
+            ));
+        }
+        let witness = match returning {
+            Some((ty, typmod)) => Expr::Cast {
+                expr: Box::new(null()),
+                ty,
+                typmod,
+            },
+            None if name == "json_value" => sql_cast(null(), SqlType::builtin(DataType::Text)),
+            None => sql_cast(null(), json_type()),
+        };
+        let (ek, ed) = on_empty.unwrap_or((JSON_NULL, null()));
+        let (rk, rd) = on_error.unwrap_or((JSON_NULL, null()));
+        let mut args = vec![context, path, vars, witness];
+        if name == "json_query" {
+            args.push(int(wrapper));
+            args.push(boolean(omit_quotes));
+        }
+        args.extend([int(ek), ed, int(rk), rd]);
+        Ok(json_call(&format!("__{name}"), args))
+    }
+
+    /// `… ON EMPTY` and `… ON ERROR`, in that order, as the function
+    /// allows them.
+    #[allow(clippy::type_complexity)]
+    fn json_behaviors(&mut self, name: &str) -> Result<(Option<(i64, Expr)>, Option<(i64, Expr)>)> {
+        let (mut empty, mut error) = (None, None);
+        loop {
+            let b = if self.eat_kw("error") {
+                (JSON_ERROR, Expr::Literal(Value::Null))
+            } else if self.peek_kw("null") && self.peek_at(1).is_some_and(|t| t.is("on")) {
+                self.pos += 1;
+                (JSON_NULL, Expr::Literal(Value::Null))
+            } else if self.eat_kw("default") {
+                (JSON_DEFAULT, self.expr()?)
+            } else if self.eat_kw("empty") {
+                if self.eat_kw("object") {
+                    (JSON_EMPTY_OBJECT, Expr::Literal(Value::Null))
+                } else {
+                    self.eat_kw("array");
+                    (JSON_EMPTY_ARRAY, Expr::Literal(Value::Null))
+                }
+            } else if self.eat_kw("true") {
+                (JSON_TRUE, Expr::Literal(Value::Null))
+            } else if self.eat_kw("false") {
+                (JSON_FALSE, Expr::Literal(Value::Null))
+            } else if self.eat_kw("unknown") {
+                (JSON_UNKNOWN, Expr::Literal(Value::Null))
+            } else {
+                break;
+            };
+            self.expect_kw("on")?;
+            let on_empty = if self.eat_kw("empty") {
+                true
+            } else if self.eat_kw("error") {
+                false
+            } else {
+                return Err(self.error("expected EMPTY or ERROR after ON"));
+            };
+            let allowed: &[i64] = match name {
+                "json_exists" => &[JSON_ERROR, JSON_TRUE, JSON_FALSE, JSON_UNKNOWN],
+                "json_value" => &[JSON_ERROR, JSON_NULL, JSON_DEFAULT],
+                _ => &[
+                    JSON_ERROR,
+                    JSON_NULL,
+                    JSON_DEFAULT,
+                    JSON_EMPTY_ARRAY,
+                    JSON_EMPTY_OBJECT,
+                ],
+            };
+            let clause = if on_empty { "ON EMPTY" } else { "ON ERROR" };
+            if !allowed.contains(&b.0) || (on_empty && name == "json_exists") {
+                return Err(Error::syntax(format!(
+                    "invalid {clause} behavior for {}()",
+                    name.to_uppercase()
+                )));
+            }
+            let out_of_order = on_empty && error.is_some();
+            let slot = if on_empty { &mut empty } else { &mut error };
+            if slot.is_some() || out_of_order {
+                return Err(Error::syntax(format!(
+                    "{clause} given twice or out of order"
+                )));
+            }
+            *slot = Some(b);
+        }
+        Ok((empty, error))
+    }
+
+    /// `JSON_OBJECT(…)` after the `(`; `None` when it is not the SQL/JSON
+    /// constructor.
+    fn json_object(&mut self) -> Result<Option<Expr>> {
+        let mut args = Vec::new();
+        if !self.peek_op(")") && !self.json_options_next() {
+            loop {
+                let k = self.expr()?;
+                if !(self.eat_kw("value") || self.eat_op(":")) {
+                    return Ok(None);
+                }
+                args.push(k);
+                args.push(self.json_input()?);
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+        }
+        let absent = self.json_on_null(false);
+        let unique = self.json_unique();
+        let returning = self.json_returning()?;
+        self.expect_op(")")?;
+        let mut all = vec![boolean(absent), boolean(unique)];
+        all.extend(args);
+        Ok(Some(returning_cast(
+            json_call("__json_object", all),
+            returning,
+        )))
+    }
+
+    /// `JSON_ARRAY(…)` after the `(`: of values, or of a query's rows.
+    fn json_array(&mut self) -> Result<Expr> {
+        if self.at_query() {
+            let q = self.query()?;
+            let returning = self.json_returning()?;
+            self.expect_op(")")?;
+            // (SELECT JSON_ARRAYAGG(x) FROM (query) AS q(x)), as
+            // PostgreSQL reads it.
+            let agg = json_call(
+                "__json_arrayagg",
+                vec![
+                    Expr::Column {
+                        table: Some("__json_array".into()),
+                        name: "x".into(),
+                    },
+                    boolean(true),
+                ],
+            );
+            let select = Select {
+                distinct: false,
+                items: vec![SelectItem::Expr {
+                    expr: agg,
+                    alias: None,
+                }],
+                from: vec![TableRef::Subquery {
+                    query: Box::new(q),
+                    alias: "__json_array".into(),
+                    columns: vec!["x".into()],
+                }],
+                filter: None,
+                group_by: vec![],
+                having: None,
+                windows: vec![],
+            };
+            let f = Expr::Subquery(Box::new(Query {
+                with: None,
+                body: SetExpr::Select(Box::new(select)),
+                order_by: vec![],
+                limit: None,
+                offset: None,
+            }));
+            return Ok(returning_cast(f, returning));
+        }
+        let mut values = Vec::new();
+        if !self.peek_op(")") && !self.json_options_next() {
+            loop {
+                values.push(self.json_input()?);
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+        }
+        let absent = self.json_on_null(true);
+        let returning = self.json_returning()?;
+        self.expect_op(")")?;
+        let mut all = vec![boolean(absent)];
+        all.extend(values);
+        Ok(returning_cast(json_call("__json_array", all), returning))
+    }
+
+    /// Whether a constructor's options come next (`NULL ON NULL`, `WITH
+    /// UNIQUE`, `RETURNING`), not a value.
+    fn json_options_next(&self) -> bool {
+        let then = |w: &str| self.peek_at(1).is_some_and(|t| t.is(w));
+        self.peek_kw("returning")
+            || ((self.peek_kw("null") || self.peek_kw("absent")) && then("on"))
+            || ((self.peek_kw("with") || self.peek_kw("without")) && then("unique"))
+    }
+
+    /// A value with `FORMAT JSON` after it read as `json`.
+    fn json_input(&mut self) -> Result<Expr> {
+        let x = self.expr()?;
+        Ok(if self.json_format() {
+            sql_cast(x, json_type())
+        } else {
+            x
+        })
+    }
+
+    /// `FORMAT JSON [ENCODING UTF8]`.
+    fn json_format(&mut self) -> bool {
+        if !self.eat_kws(&["format", "json"]) {
+            return false;
+        }
+        if self.eat_kw("encoding") {
+            self.pos += 1;
+        }
+        true
+    }
+
+    /// `NULL ON NULL` (`false`) or `ABSENT ON NULL` (`true`).
+    fn json_on_null(&mut self, absent: bool) -> bool {
+        if self.eat_kws(&["null", "on", "null"]) {
+            false
+        } else if self.eat_kws(&["absent", "on", "null"]) {
+            true
+        } else {
+            absent
+        }
+    }
+
+    /// `WITH UNIQUE [KEYS]` (`true`) or `WITHOUT UNIQUE [KEYS]`.
+    fn json_unique(&mut self) -> bool {
+        if self.eat_kws(&["with", "unique"]) {
+            self.eat_kw("keys");
+            true
+        } else {
+            if self.eat_kws(&["without", "unique"]) {
+                self.eat_kw("keys");
+            }
+            false
+        }
+    }
+
+    /// `RETURNING type [FORMAT JSON]`.
+    fn json_returning(&mut self) -> Result<Option<(SqlType, TypeMod)>> {
+        if !self.eat_kw("returning") {
+            return Ok(None);
+        }
+        let t = self.data_type()?;
+        self.json_format();
+        Ok(Some(t))
     }
 
     fn case(&mut self) -> Result<Expr> {
@@ -3791,8 +4196,27 @@ impl<'a> Parser<'a> {
                     } else {
                         f
                     }
+                } else if self.eat_kw("json") {
+                    // x IS [NOT] JSON [VALUE | ARRAY | OBJECT | SCALAR]
+                    // [WITH | WITHOUT UNIQUE [KEYS]] (PLAN.md §M14.15 J3b).
+                    let kind = ["value", "array", "object", "scalar"]
+                        .iter()
+                        .position(|k| self.eat_kw(k))
+                        .unwrap_or(0);
+                    let unique = self.json_unique();
+                    let f = json_call("__is_json", vec![*boxed, int(kind as i64), boolean(unique)]);
+                    if negated {
+                        Expr::Unary {
+                            op: UnaryOp::Not,
+                            expr: Box::new(f),
+                        }
+                    } else {
+                        f
+                    }
                 } else {
-                    return Err(self.error("expected NULL, TRUE, FALSE or DISTINCT FROM after IS"));
+                    return Err(
+                        self.error("expected NULL, TRUE, FALSE, DISTINCT FROM or JSON after IS")
+                    );
                 }
             }
             Infix::In(negated) => {
@@ -3900,6 +4324,62 @@ fn show(t: &Token) -> String {
         Token::Param(n) => format!("${n}"),
         Token::Op(o) => format!("\"{o}\""),
         Token::UserOp(o) => format!("\"{o}\""),
+    }
+}
+
+// SQL/JSON's ON EMPTY / ON ERROR behaviors, as the functions of
+// `json::sqljson` take them.
+const JSON_NULL: i64 = 0;
+const JSON_ERROR: i64 = 1;
+const JSON_DEFAULT: i64 = 2;
+const JSON_EMPTY_ARRAY: i64 = 3;
+const JSON_EMPTY_OBJECT: i64 = 4;
+const JSON_TRUE: i64 = 5;
+const JSON_FALSE: i64 = 6;
+const JSON_UNKNOWN: i64 = 7;
+
+fn json_call(name: &str, args: Vec<Expr>) -> Expr {
+    Expr::Function {
+        name: name.into(),
+        args,
+        distinct: false,
+        star: false,
+        order_by: vec![],
+        within_group: false,
+    }
+}
+
+fn int(i: i64) -> Expr {
+    Expr::Literal(Value::Int(i))
+}
+
+fn boolean(b: bool) -> Expr {
+    Expr::Literal(Value::Bool(b))
+}
+
+fn json_type() -> SqlType {
+    SqlType::Named {
+        schema: None,
+        name: "json".into(),
+    }
+}
+
+fn sql_cast(x: Expr, ty: SqlType) -> Expr {
+    Expr::Cast {
+        expr: Box::new(x),
+        ty,
+        typmod: TypeMod::default(),
+    }
+}
+
+fn returning_cast(x: Expr, returning: Option<(SqlType, TypeMod)>) -> Expr {
+    match returning {
+        Some((ty, typmod)) => Expr::Cast {
+            expr: Box::new(x),
+            ty,
+            typmod,
+        },
+        None => x,
     }
 }
 

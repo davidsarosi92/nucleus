@@ -6,7 +6,8 @@
 //!
 //! And SQL/JSON paths (J3a): a path's normalized text reads back as
 //! itself, and evaluating one over a value makes canonical items or an
-//! error, never a panic.
+//! error, never a panic; the unique-keys parse (J3b) makes the same value
+//! as the parse or refuses a key twice.
 //!
 //! The first byte picks the mode: 2 mod 4, the rest is a path, a NUL and
 //! JSON text; otherwise even, the rest is JSON text; odd, the rest is a
@@ -31,8 +32,17 @@ fuzz_target!(|data: &[u8]| {
             return;
         };
         let Ok(b) = parse::parse(text) else {
+            assert!(
+                parse::parse_checked(text, true).is_err(),
+                "the unique-keys parse refuses what the parse refuses"
+            );
             return;
         };
+        // SQL/JSON's WITH UNIQUE KEYS (J3b): the same value, or 22030.
+        match parse::parse_checked(text, true) {
+            Ok(u) => assert_eq!(u, b, "the unique-keys parse makes the same value"),
+            Err(e) => assert_eq!(e.code, "22030", "only a key twice is refused: {e:?}"),
+        }
         laws(&b);
     } else if form::check(rest).is_ok() {
         laws(rest);
