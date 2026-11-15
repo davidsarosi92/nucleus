@@ -170,32 +170,39 @@ for lang in "${langs[@]}"; do
         echo "no Chrome: the browser test is skipped"
       fi ;;
     codegen)
-      # nucleus codegen (PLAN.md §M14.16 M5): the types of a schema of
-      # every type, in each language, compiled strictly and reading its rows.
+      # nucleus codegen (PLAN.md §M14.16 M5, M6): the types of a schema of
+      # every type and the functions of named queries over it, in each
+      # language, compiled strictly and reading its rows.
       fx="$root/scripts/fixtures/codegen" cg="$work/codegen"
       mkdir -p "$cg/rust/src"
       "$bin" sql -h "127.0.0.1:$port" <"$fx/schema.sql" >/dev/null
       js="$root/drivers/js/src/index.ts"
       "$bin" codegen ts -h "127.0.0.1:$port" --import "$js" --out "$cg/schema.ts"
+      "$bin" codegen ts -h "127.0.0.1:$port" --import "$js" --queries "$fx/queries.sql" --out "$cg/queries.ts"
       sed "s|\"nucleus-db\"|\"$js\"|" "$fx/check.ts" >"$cg/check.ts"
       echo '{"type": "module"}' >"$cg/package.json"
       [ -x "$root/drivers/js/node_modules/.bin/tsc" ] ||
         (cd "$root/drivers/js" && npm install --no-package-lock --no-audit --no-fund --silent)
-      printf '{"compilerOptions": {"target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext", "strict": true, "noEmit": true, "allowImportingTsExtensions": true, "skipLibCheck": true, "types": ["node"], "typeRoots": ["%s"]}, "files": ["check.ts", "schema.ts"]}\n' \
+      printf '{"compilerOptions": {"target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext", "strict": true, "noEmit": true, "allowImportingTsExtensions": true, "skipLibCheck": true, "types": ["node"], "typeRoots": ["%s"]}, "files": ["check.ts", "schema.ts", "queries.ts"]}\n' \
         "$root/drivers/js/node_modules/@types" >"$cg/tsconfig.json"
       "$root/drivers/js/node_modules/.bin/tsc" -p "$cg/tsconfig.json"
       node "$cg/check.ts"
       "$bin" codegen python -h "127.0.0.1:$port" --out "$cg/schema.py"
+      "$bin" codegen python -h "127.0.0.1:$port" --queries "$fx/queries.sql" --out "$cg/queries.py"
       python3 "$fx/check.py" "$cg"
       "$bin" codegen java -h "127.0.0.1:$port" --out "$cg/Schema.java"
-      javac -Xlint:all -Werror -d "$cg/java" $(find "$root/drivers/java/src/main" -name '*.java') "$cg/Schema.java" "$fx/Check.java"
+      "$bin" codegen java -h "127.0.0.1:$port" --queries "$fx/queries.sql" --out "$cg/Queries.java"
+      javac -Xlint:all -Werror -d "$cg/java" $(find "$root/drivers/java/src/main" -name '*.java') "$cg/Schema.java" "$cg/Queries.java" "$fx/Check.java"
       java -cp "$cg/java" Check
       "$bin" codegen rust -h "127.0.0.1:$port" --out "$cg/rust/src/schema.rs"
+      "$bin" codegen rust -h "127.0.0.1:$port" --queries "$fx/queries.sql" --out "$cg/rust/src/queries.rs"
       cp "$fx/check.rs" "$cg/rust/src/main.rs"
       printf '[package]\nname = "codegen-check"\nversion = "0.0.0"\nedition = "2024"\n\n[dependencies]\nnucleus-client = { path = "%s" }\n\n[workspace]\n' \
         "$root/crates/client" >"$cg/rust/Cargo.toml"
       CARGO_TARGET_DIR="$root/target/codegen-check" cargo clippy -q --manifest-path "$cg/rust/Cargo.toml" -- -D warnings
-      CARGO_TARGET_DIR="$root/target/codegen-check" cargo run -q --manifest-path "$cg/rust/Cargo.toml" ;;
+      CARGO_TARGET_DIR="$root/target/codegen-check" cargo run -q --manifest-path "$cg/rust/Cargo.toml"
+      # The sample project: migrations, queries, the code made of them.
+      "$root/examples/migrations/run.sh" "$bin" ;;
     *) echo "unknown language $lang"; exit 1 ;;
   esac
 done

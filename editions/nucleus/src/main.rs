@@ -36,9 +36,11 @@ usage:
   nucleus dump --schema [<dir>] [connection options of nucleus sql]
                                     the schema as the SQL that makes it
   nucleus codegen <ts|rust|python|java> [<dir>] [connection options of nucleus sql]
-                  [--out <file>] [--tables <a,b>] [--import <m>] [--package <p>]
+                  [--out <file>] [--tables <a,b> | --queries <file|dir>]
+                  [--import <m>] [--package <p>] [--class <c>]
                                     a type per table for the language's driver,
-                                    with its SELECT and a function reading a row
+                                    with its SELECT and a function reading a row;
+                                    or a typed function per named query
   nucleus mcp [<dir>] [connection options of nucleus sql] [--allow-writes]
               [--memory] [--max-rows <n>] [--timeout <ms>]
                                     a Model Context Protocol server on stdin and

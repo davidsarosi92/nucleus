@@ -360,6 +360,7 @@ pub fn copy_from(
             .map(|&c| OutColumn {
                 name: t.columns[c].name.clone(),
                 ty: t.columns[c].ty,
+                not_null: false,
             })
             .collect::<Vec<_>>(),
     )?;

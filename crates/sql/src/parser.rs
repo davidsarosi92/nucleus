@@ -968,6 +968,10 @@ impl<'a> Parser<'a> {
                 };
                 Ok(Statement::Summarize(source))
             }
+            "describe" => {
+                self.pos += 1;
+                Ok(Statement::Describe(Box::new(self.statement()?)))
+            }
             "remember" => self.remember(),
             "record" => {
                 self.pos += 1;

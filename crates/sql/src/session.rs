@@ -38,6 +38,8 @@ pub struct OutColumn {
     pub name: String,
     /// Type (`text` when unknown).
     pub ty: DataType,
+    /// Known never to be `NULL` ([`crate::binder::ScopeCol::not_null`]).
+    pub not_null: bool,
 }
 
 /// What a statement returns.
@@ -360,6 +362,7 @@ fn columns_of(cols: impl IntoIterator<Item = (String, Option<DataType>)>) -> Vec
         .map(|(name, ty)| OutColumn {
             name,
             ty: ty.unwrap_or(DataType::Text),
+            not_null: false,
         })
         .collect()
 }
@@ -387,6 +390,7 @@ pub fn read_only(stmt: &Statement) -> bool {
             | Statement::Show(_)
             | Statement::Lint(_)
             | Statement::Summarize(_)
+            | Statement::Describe(_)
     )
 }
 
@@ -889,6 +893,7 @@ impl Session {
                         .map(|&(name, ty)| OutColumn {
                             name: name.to_string(),
                             ty,
+                            not_null: false,
                         })
                         .collect(),
                     rows: vec![b.row()],
@@ -1067,6 +1072,7 @@ impl Session {
                     columns: vec![OutColumn {
                         name: name.clone(),
                         ty: DataType::Text,
+                        not_null: false,
                     }],
                     rows: vec![vec![Value::Text(value)]],
                 })
@@ -1285,6 +1291,7 @@ impl Session {
                 | Statement::Explain(..)
                 | Statement::Lint(_)
                 | Statement::Summarize(_)
+                | Statement::Describe(_)
                 | Statement::Show(_)
                 | Statement::Begin(_)
                 | Statement::Commit
@@ -1510,20 +1517,32 @@ impl Session {
     }
 
     /// [`Session::describe`] in `txn`.
-    fn describe_in(txn: &dyn KvTxn, reg: &Arc<Registry>, stmt: &Statement) -> Result<Described> {
+    fn describe_in(txn: &dyn KvTxn, reg: &Registry, stmt: &Statement) -> Result<Described> {
         let mut binder = Binder::new(txn, reg).checked();
         let columns = match stmt {
             Statement::Query(q) => {
                 let b = binder.query(q)?;
-                Some(columns_of(b.scope.cols.into_iter().map(|c| (c.name, c.ty))))
+                Some(
+                    b.scope
+                        .cols
+                        .into_iter()
+                        .map(|c| OutColumn {
+                            name: c.name,
+                            ty: c.ty.unwrap_or(DataType::Text),
+                            not_null: c.not_null,
+                        })
+                        .collect(),
+                )
             }
             Statement::Lint(_) => Some(columns_of(
                 ["rule", "place", "finding", "fix"].map(|c| (c.to_string(), Some(DataType::Text))),
             )),
             Statement::Summarize(_) => Some(crate::summarize::columns()),
+            Statement::Describe(_) => Some(describe_columns()),
             Statement::Explain(..) => Some(vec![OutColumn {
                 name: "QUERY PLAN".into(),
                 ty: DataType::Text,
+                not_null: false,
             }]),
             Statement::CreateToken { .. } => Some(columns_of(
                 ["name", "login", "secret"].map(|c| (c.to_string(), Some(DataType::Text))),
@@ -1535,10 +1554,12 @@ impl Session {
                     OutColumn {
                         name: crate::memory::RESULT[0].into(),
                         ty: t.columns[0].ty,
+                        not_null: false,
                     },
                     OutColumn {
                         name: crate::memory::RESULT[1].into(),
                         ty: DataType::Text,
+                        not_null: false,
                     },
                 ])
             }
@@ -1569,6 +1590,7 @@ impl Session {
             Statement::Show(name) => Some(vec![OutColumn {
                 name: name.clone(),
                 ty: DataType::Text,
+                not_null: false,
             }]),
             Statement::Backup { .. } => Some(columns_of(
                 crate::backup::RESULT.map(|(name, ty)| (name.to_string(), Some(ty))),
@@ -1650,17 +1672,30 @@ fn returning_columns(
     for item in items {
         match item {
             crate::ast::SelectItem::Expr { expr, alias } => {
-                let (_, ty) = binder.expr(expr, &scope)?;
+                let (x, ty) = binder.expr(expr, &scope)?;
                 let name = alias.clone().unwrap_or_else(|| match expr {
                     crate::ast::Expr::Column { name, .. } => name.clone(),
                     _ => "?column?".into(),
                 });
-                cols.push((name, ty));
+                let not_null = match x {
+                    crate::expr::Expr::Column(i) => scope.cols.get(i).is_some_and(|c| c.not_null),
+                    crate::expr::Expr::Literal(v) => !v.is_null(),
+                    _ => false,
+                };
+                cols.push(OutColumn {
+                    name,
+                    ty: ty.unwrap_or(DataType::Text),
+                    not_null,
+                });
             }
-            _ => cols.extend(t.columns.iter().map(|c| (c.name.clone(), Some(c.ty)))),
+            _ => cols.extend(t.columns.iter().map(|c| OutColumn {
+                name: c.name.clone(),
+                ty: c.ty,
+                not_null: !c.nullable,
+            })),
         }
     }
-    Ok(Some(columns_of(cols)))
+    Ok(Some(cols))
 }
 
 fn written(tag: &str, w: dml::Written) -> Output {
@@ -1894,6 +1929,32 @@ pub(crate) fn execute_statement(
             Output::Command("COMMENT".into())
         }
         Statement::Summarize(source) => crate::summarize::run(txn, reg, source, params)?,
+        Statement::Describe(inner) => {
+            let (params, columns) = Session::describe_in(&*txn, reg, inner)?;
+            let mut rows = Vec::new();
+            for (i, t) in params.iter().enumerate() {
+                rows.push(vec![
+                    Value::Text("parameter".into()),
+                    Value::Int(i as i64 + 1),
+                    Value::Null,
+                    t.map_or(Value::Null, |t| Value::Text(describe_type(t))),
+                    Value::Bool(true),
+                ]);
+            }
+            for (i, c) in columns.unwrap_or_default().into_iter().enumerate() {
+                rows.push(vec![
+                    Value::Text("column".into()),
+                    Value::Int(i as i64 + 1),
+                    Value::Text(c.name),
+                    Value::Text(describe_type(c.ty)),
+                    Value::Bool(!c.not_null),
+                ]);
+            }
+            Output::Rows {
+                columns: describe_columns(),
+                rows,
+            }
+        }
         Statement::Lint(inner) => {
             let ro: &dyn KvTxn = &*txn;
             let (plan, changed) = match &**inner {
@@ -1959,6 +2020,7 @@ pub(crate) fn execute_statement(
                 columns: vec![OutColumn {
                     name: "QUERY PLAN".into(),
                     ty: DataType::Text,
+                    not_null: false,
                 }],
                 rows: crate::profile::explain(ro, &plan, &profile, rows, total, &models)
                     .into_iter()
@@ -1985,6 +2047,7 @@ pub(crate) fn execute_statement(
                 columns: vec![OutColumn {
                     name: "QUERY PLAN".into(),
                     ty: DataType::Text,
+                    not_null: false,
                 }],
                 rows: plan
                     .explain()
@@ -2132,10 +2195,12 @@ pub(crate) fn execute_statement(
                     OutColumn {
                         name: crate::memory::RESULT[0].into(),
                         ty,
+                        not_null: false,
                     },
                     OutColumn {
                         name: crate::memory::RESULT[1].into(),
                         ty: DataType::Text,
+                        not_null: false,
                     },
                 ],
                 rows: vec![vec![id, Value::Text(action.into())]],
@@ -2169,6 +2234,7 @@ pub(crate) fn execute_statement(
                     .map(|&(name, ty)| OutColumn {
                         name: name.to_string(),
                         ty,
+                        not_null: false,
                     })
                     .collect(),
                 // Whether it was scrubbed is known after the commit
@@ -3950,6 +4016,36 @@ fn alter_column_type(
     catalog::delete_stats_sample(txn, &new)?;
     catalog::note_stored_types(txn, &new.columns)?;
     catalog::update_table(txn, &new)
+}
+
+/// `DESCRIBE`'s columns.
+fn describe_columns() -> Vec<OutColumn> {
+    let mut c = columns_of(
+        [
+            ("kind", DataType::Text),
+            ("position", DataType::BigInt),
+            ("name", DataType::Text),
+            ("type", DataType::Text),
+            ("nullable", DataType::Bool),
+        ]
+        .map(|(n, t)| (n.to_string(), Some(t))),
+    );
+    for (i, c) in c.iter_mut().enumerate() {
+        c.not_null = i != 2 && i != 3;
+    }
+    c
+}
+
+/// A type as `nc_catalog.columns` writes it, without a length or a
+/// precision (a parameter or a result has none).
+fn describe_type(t: DataType) -> String {
+    match t {
+        DataType::Array(e) => format!("{}[]", describe_type(*e)),
+        DataType::Char => "char".into(),
+        DataType::Timestamp => "timestamp".into(),
+        DataType::TimestampTz => "timestamptz".into(),
+        t => t.name().into(),
+    }
 }
 
 fn type_name_of(t: DataType) -> String {

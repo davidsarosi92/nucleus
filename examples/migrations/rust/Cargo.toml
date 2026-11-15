@@ -1,0 +1,17 @@
+[package]
+name = "nucleus-example-migrations"
+description = "nucleus's sample project: migrations, named queries and the Rust code nucleus codegen makes of them"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "migrations-app"
+path = "src/main.rs"
+
+[dependencies]
+nucleus-client.workspace = true
+
+[lints]
+workspace = true

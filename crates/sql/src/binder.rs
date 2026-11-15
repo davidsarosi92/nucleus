@@ -28,6 +28,11 @@ pub struct ScopeCol {
     pub hidden: bool,
     /// The table column it is (table, column), for privilege checks.
     pub origin: Option<(String, String)>,
+    /// Known never to be `NULL`: a `NOT NULL` column read where no outer
+    /// join pads it, a plain reference to one, a non-`NULL` literal,
+    /// `count`, an ordinality (`DESCRIBE`; PLAN.md §M14.16 M6).  `false`
+    /// when unknown.
+    pub not_null: bool,
 }
 
 /// The columns of a plan's output, by position.
@@ -550,6 +555,11 @@ impl<'a> Binder<'a> {
                 )));
             }
         }
+        // A column is never NULL only if neither term makes one.
+        let mut scope = base.scope;
+        for (c, st) in scope.cols.iter_mut().zip(&step.scope.cols) {
+            c.not_null &= st.not_null;
+        }
         let plan = if used {
             Plan::Recursive {
                 id: work,
@@ -565,7 +575,7 @@ impl<'a> Binder<'a> {
                 all: *all,
             }
         };
-        self.cte_def(cte, base.scope, plan)
+        self.cte_def(cte, scope, plan)
     }
 
     /// A function in `FROM`.
@@ -628,6 +638,7 @@ impl<'a> Binder<'a> {
                 ty,
                 hidden: false,
                 origin: None,
+                not_null: false,
             })
             .collect();
         if ordinality {
@@ -637,6 +648,7 @@ impl<'a> Binder<'a> {
                 ty: Some(DataType::BigInt),
                 hidden: false,
                 origin: None,
+                not_null: true,
             });
         }
         let mut scope = Scope { cols };
@@ -787,6 +799,7 @@ impl<'a> Binder<'a> {
                 for (c, rc) in scope.cols.iter_mut().zip(&r.scope.cols) {
                     c.ty = unify(c.ty, rc.ty)?;
                     c.table = None;
+                    c.not_null &= rc.not_null;
                     if !*all || *op != ast::SetOp::Union {
                         require(c.ty, &[Need::Equality, Need::Hashing], op.keyword())?;
                     }
@@ -851,6 +864,7 @@ impl<'a> Binder<'a> {
                     ty: *t,
                     hidden: false,
                     origin: None,
+                    not_null: false,
                 })
                 .collect(),
         };
@@ -1144,6 +1158,7 @@ impl<'a> Binder<'a> {
                                         ty: Some(ty),
                                         hidden: false,
                                         origin: None,
+                                        not_null: false,
                                     })
                                     .collect(),
                             };
@@ -1190,6 +1205,7 @@ impl<'a> Binder<'a> {
                             ty: Some(c.ty),
                             hidden: false,
                             origin: Some((table.name.clone(), c.name.clone())),
+                            not_null: !c.nullable,
                         })
                         .collect(),
                 };
@@ -1306,6 +1322,15 @@ impl<'a> Binder<'a> {
                 };
                 let mut combined = l.scope.clone();
                 combined.cols.extend(r.scope.cols.clone());
+                // The sides an outer join pads with NULLs.
+                let padded = match jt {
+                    JoinType::Left => lw..lw + rw,
+                    JoinType::Full => 0..lw + rw,
+                    _ => 0..0,
+                };
+                for c in &mut combined.cols[padded] {
+                    c.not_null = false;
+                }
                 let mut merged = Vec::new();
                 let cond = if !using.is_empty() {
                     let mut parts = Vec::new();
@@ -1369,6 +1394,7 @@ impl<'a> Binder<'a> {
                             ty: *ty,
                             hidden: false,
                             origin: None,
+                            not_null: false,
                         });
                     }
                     exprs.extend((0..lw + rw).map(Expr::Column));
@@ -1503,6 +1529,7 @@ impl<'a> Binder<'a> {
                             ty: c.ty,
                             hidden: false,
                             origin: None,
+                            not_null: grouping.is_none() && c.not_null,
                         });
                     }
                 }
@@ -1521,6 +1548,20 @@ impl<'a> Binder<'a> {
                         },
                         _ => None,
                     };
+                    // A grouped column is its key's (no grouping sets make
+                    // NULL keys); `count` is never NULL.
+                    let not_null = matches!(expr, ast::Expr::Function { name, .. } if name.eq_ignore_ascii_case("count"))
+                        || match (&x, &grouping) {
+                            (Expr::Column(i), None) => {
+                                scope.cols.get(*i).is_some_and(|c| c.not_null)
+                            }
+                            (Expr::Column(i), Some(g)) => matches!(
+                                g.group.get(*i),
+                                Some(Expr::Column(j)) if g.from.cols.get(*j).is_some_and(|c| c.not_null)
+                            ),
+                            (Expr::Literal(v), _) => !v.is_null(),
+                            _ => false,
+                        };
                     exprs.push(x);
                     cols.push(ScopeCol {
                         table,
@@ -1528,6 +1569,7 @@ impl<'a> Binder<'a> {
                         ty: t,
                         hidden: false,
                         origin: None,
+                        not_null,
                     });
                 }
             }
@@ -3298,6 +3340,7 @@ impl<'a> Binder<'a> {
                 ty: Some(ty),
                 hidden: false,
                 origin: None,
+                not_null: false,
             }],
         };
         let ast = crate::parser::parse_expr(text)?;

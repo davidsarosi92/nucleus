@@ -31,6 +31,7 @@ pub fn table_scope(table: &Table) -> Scope {
                 ty: Some(c.ty),
                 hidden: false,
                 origin: Some((table.name.clone(), c.name.clone())),
+                not_null: !c.nullable,
             })
             .collect(),
     }

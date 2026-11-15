@@ -497,6 +497,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleus-example-migrations"
+version = "0.1.0"
+dependencies = [
+ "nucleus-client",
+]
+
+[[package]]
 name = "nucleus-http"
 version = "0.1.0"
 dependencies = [

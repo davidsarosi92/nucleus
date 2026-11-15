@@ -284,7 +284,7 @@ are marked ✅.
 | | M14.13 | Database branches (copy-on-write) | ✅ (2026-11-14) B1–B5: pages' births and dead lists (ZFS's) on the copy-on-write pages, a tree and a WAL per branch in one file, an engine per branch, `CREATE BRANCH [AS OF …]`, a client naming the branch as its database; a branch made in ms whatever the size, dropped in time following the internal nodes it copied |
 | | M14.14 | Time travel: `AS OF` queries | ✅ 2026-11-13: commit times recorded (deferred puts: no cost measurable), `BEGIN … AS OF TIMESTAMP` or `COMMIT`, `SET read_as_of`, `FROM t AS OF …` / `FOR SYSTEM_TIME AS OF`, `CREATE TABLE … AS`, `nucleus server --history`, `nc_catalog.history`; checked against a logged workload through every index kind |
 | | M14.15 | JSON type and functions | ✅ (2026-11-14) study written (2026-11-14): one binary `json` type with canonical bytes, PostgreSQL's operators and the SQL/JSON standard's, a containment index on the text index's postings, JSON Schema checks for models' outputs; J1 ✅ the type (parse faster than `serde_json` on two of three files and level on numbers, 2.8–11× PostgreSQL's `jsonb` and output 1.5–9×, stored 13–45% smaller); J2 ✅ PostgreSQL's operators and functions, 108 records checked against PostgreSQL 18 (`scripts/slt-pg.py`), a field read 3–4.4× faster; J3a ✅ SQL/JSON paths (`jsonpath`, `json_path_*`, `@?`, `@@`), 221 records checked against PostgreSQL 18, a filtered path 2.4–5.7× faster; J3b ✅ `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS`, `IS JSON`, the constructors, 207 records checked against PostgreSQL 18, `JSON_VALUE` 3.3–4.7× faster; J3c ✅ `JSON_TABLE` with `NESTED PATH`, 67 records checked against PostgreSQL 18; J4a ✅ expression indexes for every type; J4b ✅ the containment index `USING json` (`@>`, `?`, `?|`, `?&`), 14–275× faster than a full scan on 200,000 events; J4c ✅ against PostgreSQL's GIN: 1.3–27× faster with the indexes, scans level or faster; J5 ✅ JSON Schema checks (`json_matches_schema`, `json_schema_errors`), MCP JSON results, an example |
-| | M14.16 | Migrations and code generation | ◐ M1–M5 ✅ (2026-11-14): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; M4 ✅ `migrate up / down --dry-run` on a branch, `migrate diff [--new]`; M5 ✅ `nucleus codegen ts|rust|python|java`; next M6 code from SQL files |
+| | M14.16 | Migrations and code generation | ✅ M1–M6 (2026-11-15): `nc_catalog.definitions`, `nucleus dump --schema` — the schema as the SQL that makes it, replaying to itself; `nucleus migrate` — versioned files, each applied in one transaction with its record (`nc_catalog.migrations`), checked by checksum; M3 ✅ `ALTER TABLE … RENAME`, `DROP COLUMN`, `SET / DROP DEFAULT`, `SET / DROP NOT NULL`, `ALTER INDEX … RENAME`, keeping what names them; M4 ✅ `migrate up / down --dry-run` on a branch, `migrate diff [--new]`; M5 ✅ `nucleus codegen ts|rust|python|java`; M6 ✅ `DESCRIBE`, `codegen --queries`, `examples/migrations` in CI |
 | | M14.17 | Easy start: packages, Docker, web console, browser playground | ✅ E1–E5 (2026-11-14): `.deb`, `.rpm`, a container image, install scripts checking the release's sums, a Homebrew formula and winget manifests per release, each installed in CI; `:memory:` in the CLI; the web console (`--console`); the playground (the engine in WebAssembly, the console's page, nothing to install); the tutorial (`docs/tutorial.sql`, run in a test and step by step in the playground) |
 | | M14.18 | Operations: full and incremental backups to local or object storage, point-in-time restore, automatic restore tests, metrics and tracing, health checks, alert rules | ⬜ |
 | | M14.29 | Security and assurance from outside, each step at its time: `SECURITY.md` (now), fuzzing in CI (before §M14.23), OSS-Fuzz, an independent security audit through OSTIF (before the first production release), Elle's checks on one node | ◐ S1 ✅ `SECURITY.md` (2026-11-12), S2 ✅ fuzzing in CI (2026-11-13: ten targets, nine bugs fixed) |
@@ -8782,7 +8782,7 @@ put it but `text`, which it can neither query nor index.
   not only JSON; close the remaining gap to `jsonschema`; the benchmark
   page.
 
-### §M14.16 — Migrations and code generation ◐
+### §M14.16 — Migrations and code generation ✅
 
 - `nucleus migrate`: versioned migration files (`up` / `down`), applied
   transactionally (DDL is transactional), recorded in `nc_catalog`;
@@ -8964,7 +8964,7 @@ Steps (planned 2026-11-14):
   drivers return the label as text; a generated enum would need its own
   decoding — later, if asked); chrono / `time` types in Rust (the driver
   has none: dates are its day and microsecond counts).
-- **M6 — code from SQL files**: queries in `.sql` files, each named
+- **M6 — code from SQL files** ✅: queries in `.sql` files, each named
   (`-- name: user_by_email :one`, `:many`, `:exec`, as sqlc); the
   engine describes each one's parameters and result columns (the
   protocol's describe) and the generator writes a typed function for
@@ -8972,6 +8972,45 @@ Steps (planned 2026-11-14):
   sample project (`examples/migrations`): migrations, queries, the code
   generated in four languages and tests that run it, in CI.  Prior art:
   sqlc, PgTyped, sqlx's `query!`, jOOQ.
+  *Built:* `DESCRIBE <statement>` — the binder run without the plan
+  (`Session::describe`, which pg-compat's describe already used): each
+  parameter's type, each result column's name, type and `nullable`.
+  The binder's `ScopeCol` gained `not_null` — a `NOT NULL` table column,
+  carried through plain references, subqueries, CTEs, inner joins and
+  `GROUP BY` keys, cleared on the side an outer join pads, ANDed across
+  set operations and a recursive CTE's terms; `count`, non-`NULL`
+  literals, `ORDINALITY` and `RETURNING`'s `NOT NULL` columns are never
+  `NULL`; anything else may be (`crates/testkit/slt/73_describe.slt`).
+  `nucleus codegen <lang> --queries <file | dir>`
+  (`editions/nucleus/src/codegen/queries.rs`) parses each query (one
+  statement, so nothing after a `;` runs in a describe), describes it,
+  names its parameters from their places (the column compared with,
+  assigned to, inserted into or combined with; `limit` / `offset`; `-- params:
+  a, b?` to say), and writes the SQL as a constant, a row type and a
+  function per query — over TypeScript's structural `Queryable` (a
+  client, a transaction's, a database in the process), Python's
+  connection, Java's `NucleusClient`, Rust's `&mut Client`.  An error is
+  `file:line[:column]: query: message`.  `examples/migrations`: two
+  migrations (the second renames a column), six queries, the code in the
+  four languages committed, a program in each; `run.sh` starts a server,
+  migrates, fails when the committed code is not what the schema and
+  queries make (`--generate` writes it) and runs the programs — in CI's
+  drivers job with the codegen step, which also compiles the fixture's
+  query code strictly (`tsc --strict`, `javac -Werror`, `clippy -D
+  warnings`) and checks each value against its declared type.
+  *Taken:* sqlc's file format and kinds; nullability from the tables'
+  `NOT NULL` and the joins' sides, as sqlc works it out from the query
+  and sqlx from PostgreSQL's describe plus `EXPLAIN` (sqlx also guesses
+  outer joins).  *Not taken:* a describe message in `ncp` — one SQL
+  statement serves every protocol, driver and shell, local and remote;
+  sqlc's `sqlc.arg(name)` / `@name` (the SQL stays plain and runs as
+  written anywhere: `-- params:` and names from places instead);
+  compile-time checking against a live database (sqlx's `query!`): the
+  generated files are committed and CI checks they are current;
+  parameters' nullability inferred (a parameter is required unless `?`
+  says it takes `NULL`); sqlc's `:copyfrom` / `:batchexec` and
+  embedding a table's type in a row (`sqlc.embed`) — later, if asked;
+  jOOQ's DSL and PgTyped's TypeScript-only scope.
 
 ### §M14.17 — Easy start ✅
 

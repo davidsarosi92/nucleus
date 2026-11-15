@@ -32,7 +32,18 @@ public final class Check {
             check(a.select().equals("sel") && a.Two_Words().equals("tw"), "names");
             check(b.i() == 7 && b.n() == null && b.ia() == null, "nulls");
             check(db.query(Schema.CgEvents.SELECT).rows().stream().map(Schema.CgEvents::fromRow)
-                    .toList().get(0).kind().equals("start"), "partitioned");
+                    .anyMatch(e -> "start".equals(e.kind())), "partitioned");
+            // The queries' functions (PLAN.md §M14.16 M6).
+            Queries.EveryByIdRow e = Queries.everyById(db, 1L).orElseThrow();
+            check(e.n().compareTo(new BigDecimal("12.34")) == 0 && e.m().equals("happy") && e.Two_Words().equals("tw"), "everyById");
+            check(Queries.everyById(db, 99L).isEmpty(), "no row");
+            check(Queries.everyIds(db, 0, 10L).stream().map(Queries.EveryIdsRow::i).toList().equals(List.of(3, 7)), "everyIds");
+            check(Queries.everyByMood(db, "happy").size() == 1, "everyByMood");
+            check(Queries.addEvent(db, java.time.LocalDate.of(2025, 6, 1), 12, "java") == 1, "addEvent");
+            Queries.RenameEventRow renamed = Queries.renameEvent(db, 12, null).orElseThrow();
+            check(renamed.id() == 12 && renamed.kind() == null, "renameEvent");
+            check(Queries.kindsAfter(db, java.time.LocalDate.of(2025, 1, 1)).stream()
+                    .anyMatch(k -> "start".equals(k.kind()) && k.n() == 1L && "x".equals(k.t())), "kindsAfter");
         }
         System.out.println("codegen java: ok");
     }

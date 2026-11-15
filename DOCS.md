@@ -1235,7 +1235,7 @@ nucleus restore <backup> <dir> [--subject-keys <file>]   # §8.30
 nucleus branch <dir> create <name> [--from <branch>] [--at <time> --history <duration>] | list | drop <name> | reset <name>   # §8.32
 nucleus dump --schema [<dir> | :memory:] [connection options of nucleus sql]   # §8.33
 nucleus migrate new <name> | status | up [--to <v>] [--dry-run] | down [--to <v> | --all] [--dry-run] | diff [--new <name>] [<dir>] [connection options] [--dir <migrations>]   # §8.34, §8.36
-nucleus codegen <ts|rust|python|java> [<dir> | :memory:] [connection options] [--out <file>] [--tables <a,b>] [--import <module>] [--package <name>]   # §8.37
+nucleus codegen <ts|rust|python|java> [<dir> | :memory:] [connection options] [--out <file>] [--tables <a,b> | --queries <file|dir> …] [--import <module>] [--package <name>] [--class <name>]   # §8.37
 ```
 
 `nucleus sql <dir> -d <branch>` opens a local database's branch.
@@ -2149,6 +2149,23 @@ the source (`SELECT count(*), count(c0), approx_count_distinct(c0),
 min(c0)::text, … FROM (<source>) AS summarized(c0, …)`), so one scan
 of every column, in parallel, its result turned into rows; a read (the
 MCP tool `summarize_table` runs it).  Not yet a `FROM` item.
+
+**`DESCRIBE`** (§M14.16 M6).  `DESCRIBE <statement>` binds the statement
+without running it and returns a row for each parameter (`kind`
+`parameter`, its `position`, its `type` — the one its place gives it, as
+the extended protocol's describe does; `NULL` when nothing tells) and for
+each result column (`column`, `position`, `name`, `type`, `nullable`):
+what `nucleus codegen --queries` reads (§8.37).  A column is `nullable =
+false` only when it is known never to be `NULL` (the binder's
+`ScopeCol::not_null`): a `NOT NULL` column read as it is — through
+subqueries, CTEs, inner joins and `GROUP BY` keys, not on the side an
+outer join pads (`LEFT`: the right; `RIGHT`: the left; `FULL`: both) —,
+`RETURNING`'s, a non-`NULL` literal, `count`, an `ORDINALITY`; a set
+operation's column when every branch's is; else `true` (an expression, an
+aggregate over no rows, a scalar subquery: may be `NULL`).  A statement
+that does not check fails as it would (`42703`, `42P01`, …); a
+`DESCRIBE` of a write writes nothing.  `nucleus`'s own (PostgreSQL has
+none; MySQL's `DESCRIBE t` describes a table).
 
 **Columns** (`prune`, §M14.11).  Before a query runs, its plan is walked
 from the top with the output columns wanted, each node adding what its
@@ -5725,7 +5742,7 @@ column order `ADD COLUMN` cannot give.  The law, over every script of the
 test kit: the diff from an empty database makes the script's schema, and
 the diff back leaves an empty one (`crates/sql/tests/schema_diff.rs`).
 
-### 8.37 Code from the schema (`nucleus codegen`, §M14.16 M5)
+### 8.37 Code from the schema and from queries (`nucleus codegen`, §M14.16 M5, M6)
 
 `nucleus codegen ts|rust|python|java <db>` writes a type per table (not
 partitions; `--tables a,b` for some) for that language's nucleus driver:
@@ -5752,8 +5769,9 @@ gets `_`); a type named as one the generated code uses (`Value`, `Date`,
 `List`, `String`) gets `Row`.  `--out` writes a file; `--import` names
 the driver (TypeScript's module, default `nucleus-db`; Python's,
 `nucleus`; Rust's crate, `nucleus_client`); `--package` is the Java
-class's package.  The Rust file is a module of its own (`mod schema;`,
-`#![allow(dead_code)]`).
+class's package.  The Rust file is a module of its own (`#[rustfmt::skip] mod schema;` —
+rustfmt would change what a later run checks against; the file allows
+dead code).
 
 ```ts
 import { connect } from "nucleus-db";
@@ -5762,9 +5780,55 @@ const db = await connect();
 const emps: Emp[] = (await db.query(Emp.select + " WHERE pay > $1", [100])).rows.map(Emp.fromRow);
 ```
 
+**Code from SQL files** (§M14.16 M6, sqlc's way).  `--queries <file |
+dir>` (repeatable) reads named queries instead of the tables:
+
+```sql
+-- name: user_by_email :one
+-- A user, by the address they log in with.
+SELECT id, email, display_name FROM users WHERE email = $1;
+
+-- name: add_post :exec
+-- params: id, author, title, body?
+INSERT INTO posts (id, author, title, body) VALUES ($1, $2, $3, $4);
+```
+
+`:one` returns the first row or none, `:many` the rows, `:exec` the
+count of rows changed; `--` lines after the name are the function's
+documentation.  Each query is parsed (one statement: nothing after a `;`
+ever runs) and described by the database (`DESCRIBE`, §8.5): its
+parameters' types, its columns' names, types and whether they may be
+`NULL` — so a column of a `LEFT JOIN`'s right side is optional where the
+same column of an inner join is not.  A query that does not check is an
+error at its place (`queries.sql:12:9: syntax error …`, or `queries.sql:12:
+user_by_email: column "nope" does not exist`); a parameter whose type
+nothing tells asks for a cast (`$1::text`).  A parameter is named after
+the column it is compared with, assigned to, inserted into or combined
+with (`email = $1`, `SET pay = pay + $1`, `INSERT … (a, b) VALUES ($1,
+$2)`), `limit` / `offset`, else `p1`, …; `-- params: a, b?` names them
+itself, `?` taking `NULL` too (otherwise a parameter is not optional).
+Per query: the SQL as a constant (`userByEmailSql`, `USER_BY_EMAIL_SQL`),
+a row type (`UserByEmailRow`) and a function taking what runs a statement
+— TypeScript's `Queryable` (a client, a transaction's, a database in the
+process), Python's connection, Java's `NucleusClient`, Rust's `&mut
+Client` — and the parameters:
+
+```ts
+const ann = await userByEmail(db, "ann@example.com");   // UserByEmailRow | null
+await db.transaction(async (tx) => { await addPost(tx, 1, ann!.id, "Hello", null); });
+```
+
+The sample project, `examples/migrations`: two migrations, `queries.sql`,
+the code generated from them in the four languages (committed) and a
+program in each that runs it; `examples/migrations/run.sh <nucleus>`
+starts a server, applies the migrations, checks that the committed code
+is what the schema and queries make now (`--generate` writes it) and runs
+the programs.
+
 `scripts/driver-tests.sh … codegen` compiles each language's code from a
-schema of every type strictly (`tsc --strict`, `javac -Werror`, `clippy
--D warnings`) and reads its rows with it.
+schema of every type and from queries over it strictly (`tsc --strict`,
+`javac -Werror`, `clippy -D warnings`), reads its rows with it, and runs
+the sample project.
 
 ## 9. Server (`nucleus-server`)
 
@@ -6786,6 +6850,10 @@ checks `psql` with and without TLS.
 
 ## 12. Change log
 
+- **2026-11-15 — §M14.16 M6, code from SQL files:** `DESCRIBE
+  <statement>` (§8.5), the binder's knowledge of what is never `NULL`;
+  `nucleus codegen … --queries` (§8.37); the sample project
+  `examples/migrations`, run in CI.
 - **2026-11-15 — licence:** the database under AGPL-3.0-only, the
   drivers, the Rust client (`crates/client`, `wire`, `crypto`) and the
   examples under MIT; COPYRIGHT (what is under which, third-party

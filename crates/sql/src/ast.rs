@@ -585,6 +585,10 @@ pub enum Statement {
     /// `SUMMARIZE t` or `SUMMARIZE <query>` (DuckDB's): one row a column
     /// of the source, the query's text (`SELECT * FROM t` for a table).
     Summarize(String),
+    /// `DESCRIBE <statement>`: its parameters' types and its result
+    /// columns' names, types and whether they may be `NULL`, without
+    /// running it (PLAN.md §M14.16 M6).
+    Describe(Box<Statement>),
     /// `COPY t [(columns)] FROM STDIN [WITH (options)]`.
     Copy {
         /// The table.

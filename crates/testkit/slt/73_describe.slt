@@ -1,0 +1,119 @@
+# DESCRIBE <statement> (PLAN.md §M14.16 M6): a statement's parameters'
+# types and its result columns' names, types and whether they may be
+# NULL, without running it — what `nucleus codegen --queries` reads.
+# nucleus's own statement: every record is nucleus-only.
+
+statement ok
+CREATE TYPE mood AS ENUM ('sad', 'ok')
+
+statement ok
+CREATE TABLE users (id BIGINT PRIMARY KEY, email TEXT NOT NULL, name TEXT, mood mood, tags TEXT[] NOT NULL DEFAULT '{}')
+
+statement ok
+CREATE TABLE posts (id INT PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users (id), title TEXT NOT NULL, body TEXT)
+
+# nucleus-only: a NOT NULL column read as it is is never NULL.
+query TITTT
+DESCRIBE SELECT id, email, name, mood, tags FROM users WHERE email = $1
+----
+parameter 1 NULL text t
+column 1 id bigint f
+column 2 email text f
+column 3 name text t
+column 4 mood mood t
+column 5 tags text[] f
+
+# nucleus-only: the side a LEFT JOIN pads may be NULL; count and a
+# literal never are; a GROUP BY key is its column's.
+query TITTT
+DESCRIBE SELECT u.email, p.title, count(*) AS n, 1 AS one FROM users u LEFT JOIN posts p ON p.user_id = u.id WHERE u.id > $1 AND p.title LIKE $2 GROUP BY u.email, p.title
+----
+parameter 1 NULL bigint t
+parameter 2 NULL text t
+column 1 email text f
+column 2 title text t
+column 3 n bigint f
+column 4 one integer f
+
+# nucleus-only: an inner join keeps both sides' NOT NULL.
+query TITTT
+DESCRIBE SELECT u.email, p.title, p.body FROM users u JOIN posts p ON p.user_id = u.id
+----
+column 1 email text f
+column 2 title text f
+column 3 body text t
+
+# nucleus-only: a FULL JOIN pads both sides; a RIGHT JOIN the left.
+query TITTT
+DESCRIBE SELECT u.email, p.title FROM users u RIGHT JOIN posts p ON p.user_id = u.id
+----
+column 1 email text t
+column 2 title text f
+
+# nucleus-only: a UNION's column is NOT NULL only if every branch's is.
+query TITTT
+DESCRIBE SELECT email FROM users UNION SELECT title FROM posts
+----
+column 1 email text f
+
+# nucleus-only
+query TITTT
+DESCRIBE SELECT email FROM users UNION SELECT name FROM users
+----
+column 1 email text t
+
+# nucleus-only: a parameter takes the type of the column it is written to;
+# RETURNING's NOT NULL columns are never NULL.
+query TITTT
+DESCRIBE INSERT INTO users (id, email, name) VALUES ($1, $2, $3) RETURNING id, name
+----
+parameter 1 NULL bigint t
+parameter 2 NULL text t
+parameter 3 NULL text t
+column 1 id bigint f
+column 2 name text t
+
+# nucleus-only: a statement without rows has only its parameters.
+query TITTT
+DESCRIBE UPDATE posts SET title = $1 WHERE id = $2
+----
+parameter 1 NULL text t
+parameter 2 NULL integer t
+
+# nucleus-only: a parameter whose type nothing tells has none.
+query TITTT
+DESCRIBE SELECT $1
+----
+parameter 1 NULL NULL t
+column 1 ?column? text t
+
+# nucleus-only: nothing runs — the row is not there after.
+statement ok
+DESCRIBE DELETE FROM users
+
+statement ok
+INSERT INTO users (id, email) VALUES (1, 'a@x')
+
+# nucleus-only
+statement ok
+DESCRIBE DELETE FROM users
+
+query I
+SELECT count(*) FROM users
+----
+1
+
+# nucleus-only: a statement that does not check is the error it would be.
+statement error 42703
+DESCRIBE SELECT nope FROM users
+
+# nucleus-only: an aggregate other than count may be NULL (no rows).
+query TITTT
+DESCRIBE SELECT max(id) AS top, count(id) AS n FROM users
+----
+column 1 top bigint t
+column 2 n bigint f
+
+# nucleus-only
+statement error 42P01
+DESCRIBE SELECT * FROM nowhere

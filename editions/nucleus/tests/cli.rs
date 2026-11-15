@@ -467,6 +467,45 @@ fn code_from_the_schema() {
     assert!(!ok && out.contains("no table nope"), "{out}");
     let (ok, out) = nucleus(&["codegen", "cobol", da], "");
     assert!(!ok && out.contains("unknown language cobol"), "{out}");
+    // Named queries (§M14.16 M6): a function each; one that does not
+    // check is an error at its place.
+    let q = a.join("queries.sql");
+    let qs = q.to_str().unwrap();
+    std::fs::write(
+        &q,
+        "-- name: emp_by_name :one\nSELECT id, pay FROM emp WHERE name = $1;\n\n\
+         -- name: raise :exec\nUPDATE emp SET pay = pay + $1 WHERE mood = $2;\n",
+    )
+    .unwrap();
+    let (ok, py) = nucleus(&["codegen", "python", da, "--queries", qs], "");
+    assert!(
+        ok && py.contains("def emp_by_name(conn: Any, name: str) -> Optional[EmpByNameRow]:")
+            && py.contains("    id: int\n    pay: Optional[decimal.Decimal]\n")
+            && py.contains("def raise_(conn: Any, pay: decimal.Decimal, mood: Literal[\"sad\", \"ok\"]) -> int:"),
+        "{py}"
+    );
+    std::fs::write(
+        &q,
+        "-- name: broken :many\nSELECT id\n  FROM emp WHERE nope = $1;\n",
+    )
+    .unwrap();
+    let (ok, out) = nucleus(&["codegen", "ts", da, "--queries", qs], "");
+    assert!(
+        !ok && out.contains("queries.sql:2: broken: column \"nope\" does not exist"),
+        "{out}"
+    );
+    std::fs::write(&q, "-- name: broken :many\nSELECT id,\n  FROM emp;\n").unwrap();
+    let (ok, out) = nucleus(&["codegen", "ts", da, "--queries", qs], "");
+    assert!(
+        !ok && out.contains("queries.sql:3:3: syntax error"),
+        "{out}"
+    );
+    std::fs::write(&q, "-- name: gone :one\nDELETE FROM emp;\n").unwrap();
+    let (ok, out) = nucleus(&["codegen", "ts", da, "--queries", qs], "");
+    assert!(
+        !ok && out.contains("gone returns no rows: make it :exec"),
+        "{out}"
+    );
     std::fs::remove_dir_all(&a).unwrap();
 }
 

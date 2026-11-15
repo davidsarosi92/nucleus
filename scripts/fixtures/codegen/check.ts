@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { connect, Decimal, Interval, Time, Inet, Cidr, SparseVector } from "nucleus-db";
 import { CgEvery, CgEvents } from "./schema.ts";
+import { addEvent, everyById, everyByMood, everyIds, kindsAfter, renameEvent } from "./queries.ts";
 
 const db = await connect({ port: Number(process.env.NUCLEUS_PORT) });
 const rows = (await db.query(CgEvery.select + " ORDER BY id")).rows.map(CgEvery.fromRow);
@@ -35,6 +36,18 @@ assert.equal(b.i, 7);
 assert.equal(b.n, null);
 assert.equal(b.ia, null);
 const ev = (await db.query(CgEvents.select)).rows.map(CgEvents.fromRow);
-assert.equal(ev[0].kind, "start");
+assert.ok(ev.some((e) => e.kind === "start"));
+// The queries' functions (PLAN.md §M14.16 M6).
+const e = await everyById(db, 1);
+assert.ok(e !== null && e.n instanceof Decimal && e.m === "happy" && e["Two Words"] === "tw");
+assert.ok(e.bin instanceof Uint8Array && e.tz instanceof Date && e.vec instanceof Float32Array);
+assert.equal(await everyById(db, 99), null);
+assert.deepEqual((await everyIds(db, 0, 10)).map((r) => r.i), [3, 7]);
+assert.deepEqual((await everyByMood(db, "happy")).map((r) => Number(r.id)), [1]);
+assert.equal(await addEvent(db, new Date("2025-06-01"), 10, "ts"), 1);
+const renamed = await renameEvent(db, 10, null);
+assert.ok(renamed !== null && renamed.id === 10 && renamed.kind === null);
+const kinds = await kindsAfter(db, new Date("2025-01-01"));
+assert.ok(kinds.some((k) => k.kind === "start" && Number(k.n) === 1 && k.t === "x"), JSON.stringify(kinds));
 await db.close();
 console.log("codegen ts: ok");

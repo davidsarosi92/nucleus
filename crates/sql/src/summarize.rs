@@ -42,6 +42,7 @@ pub fn columns() -> Vec<OutColumn> {
     .map(|(name, ty)| OutColumn {
         name: name.into(),
         ty,
+        not_null: false,
     })
     .collect()
 }

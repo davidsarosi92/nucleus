@@ -77,3 +77,9 @@ drivers/android/build-native.sh && examples/android/run.sh   # an emulator runni
 type, a function and a catalog view added through the extension API — and
 the guide for writing one (`cargo run -p nucleus-example-extension --bin
 geo-demo -- ./geodb`).
+
+**A project with migrations and typed queries:** [`migrations/`](migrations)
+has versioned schema changes, named queries in `queries.sql`, the code
+`nucleus codegen --queries` makes of them in TypeScript, Python, Java and
+Rust, and a program in each that runs it (`examples/migrations/run.sh
+target/release/nucleus`; [its README](migrations/README.md)).

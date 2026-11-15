@@ -222,6 +222,13 @@ its `down`) — check its notes: a rename shows as a drop and an add.
 Typed code from the schema: `nucleus codegen ts|python|java|rust <db>
 [--out file]` — a type per table in the driver's types, with `select` and
 `fromRow` / `from_row` (generate it again after each migration).
+Typed functions from SQL: named queries in a file (`-- name: user_by_email
+:one` / `:many` / `:exec`, then the statement with `$1`…; `-- params: a,
+b?` names the parameters) and `nucleus codegen ts <db> --queries
+queries.sql --out queries.ts`: a function per query, its parameters and
+row typed as the database describes them (`DESCRIBE <statement>`: each
+parameter's type, each column's type and whether it may be NULL — use it
+to check a query without running it).  Sample: `examples/migrations`.
 `COMMENT ON TABLE t IS '…'`, `COMMENT ON COLUMN t.c IS '…'` — read them
 (`describe_table`, `nc_catalog.tables.comment`, `nc_catalog.columns.comment`)
 to learn what the data means.

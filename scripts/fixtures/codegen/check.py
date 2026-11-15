@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(here, "..", "..", "..", "drivers", "python"))
 sys.path.insert(0, sys.argv[1])
 import nucleus  # noqa: E402
 import schema  # noqa: E402
+import queries  # noqa: E402
 
 conn = nucleus.connect(port=int(os.environ["NUCLEUS_PORT"]))
 a, b = [schema.CgEvery.from_row(r) for r in conn.execute(schema.CgEvery.SELECT + " ORDER BY id").rows]
@@ -52,7 +53,22 @@ assert a.n == decimal.Decimal("12.34") and a.m == "happy" and a.select == "sel" 
 assert isinstance(a.vec, array.array) and isinstance(a.ip, ipaddress.IPv4Interface)
 assert a.u == uuid.UUID("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11") and a.j == {"a": [1, 2]}
 assert a.ia == [1, None, 3] and b.n is None and b.i == 7
-assert [e.kind for e in map(schema.CgEvents.from_row, conn.execute(schema.CgEvents.SELECT).rows)] == ["start"]
+assert "start" in [e.kind for e in map(schema.CgEvents.from_row, conn.execute(schema.CgEvents.SELECT).rows)]
 assert not hasattr(schema, "CgEvents2025")
+# The queries' functions (PLAN.md §M14.16 M6), their rows as annotated.
+e = queries.every_by_id(conn, 1)
+assert e is not None and e.n == decimal.Decimal("12.34") and e.m == "happy" and e.Two_Words == "tw"
+assert queries.every_by_id(conn, 99) is None
+assert [r.i for r in queries.every_ids(conn, 0, 10)] == [3, 7]
+assert [r.id for r in queries.every_by_mood(conn, "happy")] == [1]
+assert queries.add_event(conn, datetime.date(2025, 6, 1), 11, "py") == 1
+renamed = queries.rename_event(conn, 11, None)
+assert renamed is not None and renamed.id == 11 and renamed.kind is None
+kinds = queries.kinds_after(conn, datetime.date(2025, 1, 1))
+assert any(k.kind == "start" and k.n == 1 and k.t == "x" for k in kinds), kinds
+for row in [e, renamed, *kinds]:
+    row_hints = typing.get_type_hints(type(row), vars(queries))
+    for f in dataclasses.fields(row):
+        assert conforms(getattr(row, f.name), row_hints[f.name]), (f.name, getattr(row, f.name))
 conn.close()
 print("codegen python: ok")
