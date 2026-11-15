@@ -405,14 +405,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         &kv,
         key_options.settings(dir),
         secrets_key.map(Into::into),
+        subject_keys.map(Into::into),
     )?;
-    let subject_path = subject_keys.map_or_else(
-        || nucleus_server::subject_keyfile::SubjectKeyFile::beside(dir),
-        Into::into,
-    );
-    nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(
-        nucleus_server::subject_keyfile::SubjectKeyFile::new(subject_path, Arc::clone(&kv)),
-    )));
     let mut plan = vec![("ncp".to_string(), listen)];
     plan.extend(extra);
     let mut listeners = Vec::new();

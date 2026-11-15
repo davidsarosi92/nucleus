@@ -5328,12 +5328,14 @@ it.  A `--backup-key` given is taken into the keyring as that data key
 (the user's file, never removed), so the backups made without it later
 go on with the same key and chain.  The manifest then carries the data
 keys wrapped by the root — `key backup <root id> <wrapped>` and the
-secrets' `key secrets …` (never the subject keys: `FORGET` must reach
-every backup) — under its MAC, so the root alone restores it:
+secrets' `key secrets …`, and `key subjects …`, the key the subject
+keys' table is sealed with (never the subject keys themselves: `FORGET`
+must reach every backup) — under its MAC, so the root alone restores it:
 `nucleus restore <repo> <dir> --root-key FILE` (or the other root
 options) unwraps the backup's key, refuses another root naming both
-ids, and takes the wrapped keys into `<dir>.keyring`, so the restored
-database opens its secrets with that root (`backup::Restored::keys`;
+ids, and takes the wrapped keys into `<dir>.keyring` before it
+restores — so the sealed table `--subject-keys` names opens, and the
+restored database its secrets, with that root (`backup::carried_keys`;
 the backup's `--backup-key` still opens it as before).  While backups
 are encrypted, an unencrypted backup is refused as with a key set
 (`--encrypt-backups no` restores it).
@@ -5426,10 +5428,20 @@ backups still name the old one.  The server's store is
 `nucleus_server::subject_keyfile::SubjectKeyFile`: `nucleus server
 --subject-keys FILE`, by default `<dir>.subject-keys` beside the data
 directory (`nucleus sql <dir>` and `nucleus mcp <dir>` use it too), made
-with mode 0600 when first needed, a text file (`nucleus subject keys 1`,
+with mode 0600 when first needed, a table (`nucleus subject keys 1`,
 `pepper …`, `k id key-id key`, `d id commit`) rewritten — new file,
 synced, renamed, the directory synced — before each change returns.
-It must be kept, and backed up, apart from the data and its backups.
+*Sealed* (§M14.30 K1d): on disk the table is `nucleus subject keys
+sealed 1` and, in hex, a random nonce and the table sealed by
+ChaCha20-Poly1305 under the key hierarchy's data key `subjects` — a
+copy of the file alone opens nothing.  A table in the clear (before
+the hierarchy) is sealed at the next start, rewritten in place so no
+copy in the clear stays (a kept copy would keep the keys `FORGET`
+destroys); with `--old-key-files keep` or `manual` it stays in the
+clear, warned of at every start, until `nucleus keys <dir> import`.
+It must be kept, and backed up, apart from the data and its backups;
+restoring it needs the root that wraps `subjects` too (a backup
+carries that key wrapped, so the root and the file suffice).
 `subject_keys::MemoryKeys` keeps them in memory (tests, an application
 holding its own).  The old file's blocks may remain on the disk until
 overwritten; a key management service is a module's to add.
@@ -6444,9 +6456,9 @@ string.
 
 **The key hierarchy** (§M14.30 K1; `nucleus_crypto::keys`,
 `nucleus_sql::keys`, `nucleus_server::keyring`).  One root key wraps
-the data keys — `secrets` now; the backups' and the subject keys' table
-`backup` (§8.30, *Under the key hierarchy*), the subject keys' table
-following (K1d) — which are kept only wrapped, in the keyring
+the data keys — `secrets`, the backups' `backup` (§8.30, *Under the key
+hierarchy*), and `subjects`, which seals the subject keys' table
+(§8.30) — which are kept only wrapped, in the keyring
 `<dir>.keyring` beside the data directory (text: `nucleus keyring 1`,
 `root <id> <custody>`, a passphrase root's `salt <hex> <iterations>`,
 `dek <purpose> <id> <wrapped> <made>`; mode 0600, each change a new

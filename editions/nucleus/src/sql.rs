@@ -915,14 +915,8 @@ impl Target {
                     // (NUCLEUS_BACKUP_KEY_FILE).
                     nucleus_server::backups::load_key(None)?;
                     // The key hierarchy as the server's (§M14.30 K1).
-                    crate::keys::install(&dir, &kv, self.keys.settings(&dir), None)?;
                     // Subjects' keys too (BACKUP TO, FORGET SUBJECT).
-                    nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(
-                        nucleus_server::subject_keyfile::SubjectKeyFile::new(
-                            nucleus_server::subject_keyfile::SubjectKeyFile::beside(&dir),
-                            kv.clone(),
-                        ),
-                    )));
+                    crate::keys::install(&dir, &kv, self.keys.settings(&dir), None, None)?;
                 }
                 // -d: a branch of it (PLAN.md §M14.13).
                 let data = nucleus_server::branch_of(&kv, &cfg.database)

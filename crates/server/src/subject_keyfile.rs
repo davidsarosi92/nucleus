@@ -11,13 +11,26 @@
 //! to a crash; one destroyed is gone from the file).  The old file's
 //! blocks may stay on the disk until overwritten: a store in a key
 //! management service is a module's to add.
+//!
+//! Under the key hierarchy (PLAN.md §M14.30 K1d) the table is sealed:
+//! `nucleus subject keys sealed 1`, then on a second line the nonce and
+//! the table's text sealed by ChaCha20-Poly1305 under the keyring's data
+//! key `subjects`, in hex.  A table in the clear (before) is read, and
+//! sealed at its next write — or at once, when the old key files are
+//! removed (`--old-key-files remove`, the default).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use nucleus_crypto::aead;
 use nucleus_kv::Kv;
 use nucleus_sql::subject_keys::{Id, Key, KeyId, KeyTable, SubjectKeys};
+
+use crate::keyring::Keyring;
+
+const SEALED: &str = "nucleus subject keys sealed 1";
+const AAD: &[u8] = b"nucleus subject keys";
 
 /// Subjects' keys in a file.
 pub struct SubjectKeyFile {
@@ -26,6 +39,9 @@ pub struct SubjectKeyFile {
     kv: Arc<dyn Kv>,
     /// The file's contents, once read.
     table: Mutex<Option<KeyTable>>,
+    /// The keyring whose data key `subjects` seals the table (none: the
+    /// table in the clear, as before §M14.30).
+    ring: Option<Arc<Keyring>>,
 }
 
 impl SubjectKeyFile {
@@ -35,7 +51,38 @@ impl SubjectKeyFile {
             path: path.into(),
             kv,
             table: Mutex::new(None),
+            ring: None,
         }
+    }
+
+    /// The keys in `path`, sealed under `ring`'s data key `subjects`.
+    pub fn sealed(path: impl Into<PathBuf>, kv: Arc<dyn Kv>, ring: Arc<Keyring>) -> Self {
+        Self {
+            ring: Some(ring),
+            ..Self::new(path, kv)
+        }
+    }
+
+    /// Whether the file holds the table in the clear (`None`: no file).
+    pub fn in_the_clear(&self) -> Result<Option<bool>, String> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(t) => Ok(Some(!t.starts_with(SEALED))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", self.path.display())),
+        }
+    }
+
+    /// Seals a table kept in the clear now (rewritten in place: no copy in
+    /// the clear stays, so a key `FORGET` destroys is gone from it).
+    pub fn seal_now(&self) -> Result<(), String> {
+        let mut cached = self.table.lock().unwrap_or_else(|e| e.into_inner());
+        let t = match cached.take() {
+            Some(t) => t,
+            None => self.load()?,
+        };
+        self.save(&t)?;
+        *cached = Some(t);
+        Ok(())
     }
 
     /// The default file for data directory `dir`: `<dir>.subject-keys`.
@@ -48,11 +95,53 @@ impl SubjectKeyFile {
     }
 
     fn load(&self) -> Result<KeyTable, String> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(t) => KeyTable::from_text(&t).map_err(|e| format!("{}: {e}", self.path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(KeyTable::default()),
-            Err(e) => Err(format!("{}: {e}", self.path.display())),
-        }
+        let at = |e: String| format!("{}: {e}", self.path.display());
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(KeyTable::default()),
+            Err(e) => return Err(at(e.to_string())),
+        };
+        let Some(rest) = text.strip_prefix(SEALED) else {
+            return KeyTable::from_text(&text).map_err(at);
+        };
+        let ring = self
+            .ring
+            .as_ref()
+            .ok_or_else(|| at("sealed, and no keyring to open it".into()))?;
+        let key = ring.dek("subjects", false)?.ok_or_else(|| {
+            at(format!(
+                "sealed, and {} has no key for it",
+                ring.path().display()
+            ))
+        })?;
+        let b = nucleus_crypto::keys::from_hex(rest.trim())
+            .filter(|b| b.len() > aead::NONCE_LEN)
+            .ok_or_else(|| at("damaged".into()))?;
+        let (nonce, sealed) = b.split_at(aead::NONCE_LEN);
+        let nonce: [u8; aead::NONCE_LEN] = nonce.try_into().expect("nonce");
+        let mut plain = aead::open(key.bytes(), &nonce, AAD, sealed).ok_or_else(|| {
+            at("does not open with the keyring's key: damaged, or another's".into())
+        })?;
+        let t = String::from_utf8(plain.clone()).map_err(|_| at("damaged".into()));
+        plain.fill(0);
+        KeyTable::from_text(&t?).map_err(at)
+    }
+
+    /// The file's text for `t`: sealed under the keyring's key, or in the
+    /// clear without a keyring.
+    fn text(&self, t: &KeyTable) -> Result<String, String> {
+        let Some(ring) = &self.ring else {
+            return Ok(t.to_text());
+        };
+        let key = ring.dek("subjects", true)?.expect("made");
+        let mut nonce = [0u8; aead::NONCE_LEN];
+        self.kv.random_bytes(&mut nonce);
+        let mut plain = t.to_text().into_bytes();
+        let sealed = aead::seal(key.bytes(), &nonce, AAD, &plain);
+        plain.fill(0);
+        let mut b = nonce.to_vec();
+        b.extend_from_slice(&sealed);
+        Ok(format!("{SEALED}\n{}\n", nucleus_crypto::keys::to_hex(&b)))
     }
 
     /// Writes `t` durably: a new file, synced, renamed over the old one,
@@ -65,8 +154,9 @@ impl SubjectKeyFile {
         o.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let text = self.text(t)?;
         let mut f = o.open(&new).map_err(fail)?;
-        f.write_all(t.to_text().as_bytes())
+        f.write_all(text.as_bytes())
             .and_then(|()| f.sync_all())
             .map_err(fail)?;
         drop(f);
@@ -171,6 +261,41 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_table_in_the_clear_is_sealed_and_reads_back() {
+        let dir = nucleus_platform::temp_dir().join(format!(
+            "nucleus-subject-keys-sealed-{}",
+            nucleus_platform::process_id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let kv: Arc<dyn Kv> =
+            Arc::new(nucleus_kv::Database::open(dir.join("db"), Default::default()).unwrap());
+        let db = dir.join("db");
+        let db = db.to_str().unwrap();
+        let path = dir.join("db.subject-keys");
+        // Before: in the clear.
+        let old = SubjectKeyFile::new(&path, Arc::clone(&kv));
+        let (kid, key) = old.keys(&[[3; 32]], 1).unwrap()[0].unwrap();
+        let ring = Arc::new(Keyring::new(
+            db,
+            crate::keyring::Settings::default_for(db),
+            Arc::clone(&kv),
+        ));
+        let f = SubjectKeyFile::sealed(&path, Arc::clone(&kv), Arc::clone(&ring));
+        assert_eq!(f.in_the_clear().unwrap(), Some(true));
+        f.seal_now().unwrap();
+        assert_eq!(f.in_the_clear().unwrap(), Some(false));
+        let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains(&hex));
+        // Another process with the keyring: the key; without: refused.
+        let g = SubjectKeyFile::sealed(&path, Arc::clone(&kv), ring);
+        assert_eq!(g.open(&[kid]).unwrap(), vec![Some(key)]);
+        let e = SubjectKeyFile::new(&path, kv).open(&[kid]).unwrap_err();
+        assert!(e.contains("no keyring"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

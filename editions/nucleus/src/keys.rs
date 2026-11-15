@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use nucleus_kv::Kv;
 use nucleus_server::keyring::{self, Keyring, OldFiles, Root, SecretsKey, Settings};
+use nucleus_server::subject_keyfile::SubjectKeyFile;
 
 /// The options' usage, for the commands' help.
 pub const OPTIONS: &str = "[--root-key <file> | --root-key-env <var> | --root-passphrase-env <var>]
@@ -94,13 +95,15 @@ impl KeyOptions {
 /// Installs the key hierarchy of data directory `dir` for this process:
 /// the keyring as the custody, the secrets' key from it — the old key
 /// file (`secrets_file`, else `<dir>.secrets-key`) taken in as the owner
-/// set — and the backup key set (load it first) taken in.  An explicit
-/// root is checked at once.
+/// set —, the backup key set (load it first) taken in, and the subjects'
+/// keys (`subject_file`, else `<dir>.subject-keys`) sealed under the
+/// keyring.  An explicit root is checked at once.
 pub fn install(
     dir: &str,
     kv: &Arc<dyn Kv>,
     settings: Settings,
     secrets_file: Option<PathBuf>,
+    subject_file: Option<PathBuf>,
 ) -> Result<Arc<Keyring>, String> {
     let explicit = !matches!(settings.root, Root::Managed(_));
     let ring = Arc::new(Keyring::new(dir, settings, Arc::clone(kv)));
@@ -125,8 +128,43 @@ pub fn install(
     {
         ring.import("backup", &nucleus_crypto::keys::Key::new(*k.bytes()))?;
     }
+    let subjects = subject_keys(
+        &ring,
+        kv,
+        subject_file.unwrap_or_else(|| keyring::beside(dir, "subject-keys")),
+    )?;
+    nucleus_sql::subject_keys::set_subject_keys(Some(subjects));
     nucleus_sql::keys::set_custody(Some(ring.clone() as Arc<dyn nucleus_sql::keys::Custody>));
     Ok(ring)
+}
+
+/// The subjects' keys in `file`, sealed under `ring` (§M14.30 K1d): a
+/// table in the clear sealed at once — rewritten in place, so no copy in
+/// the clear stays — unless the owner keeps the old key files, when it
+/// stays in the clear (a copy would keep the keys `FORGET` destroys).
+pub fn subject_keys(
+    ring: &Arc<Keyring>,
+    kv: &Arc<dyn Kv>,
+    file: PathBuf,
+) -> Result<Arc<SubjectKeyFile>, String> {
+    let sealed = SubjectKeyFile::sealed(file.clone(), Arc::clone(kv), Arc::clone(ring));
+    if sealed.in_the_clear()? != Some(true) {
+        return Ok(Arc::new(sealed));
+    }
+    if ring.settings().old_files != OldFiles::Remove {
+        nucleus_platform::log!(
+            "nucleus: warning: {} holds the subjects' keys in the clear; `nucleus keys \
+             import` seals them under the keyring",
+            file.display()
+        );
+        return Ok(Arc::new(SubjectKeyFile::new(file, Arc::clone(kv))));
+    }
+    sealed.seal_now()?;
+    nucleus_platform::log!(
+        "nucleus: the subjects' keys in {} are sealed under the keyring's key",
+        file.display()
+    );
+    Ok(Arc::new(sealed))
 }
 
 /// `nucleus keys <dir> list | import [options]`.
@@ -168,13 +206,21 @@ pub fn run(args: &[String]) -> Result<(), String> {
             if settings.old_files == OldFiles::Manual {
                 settings.old_files = OldFiles::Remove;
             }
-            let ring = Keyring::new(dir, settings, kv);
+            let ring = Arc::new(Keyring::new(dir, settings, Arc::clone(&kv)));
             let file = keyring::beside(dir, "secrets-key");
             if file.exists() {
                 ring.adopt("secrets", &file, true)?;
                 println!("secrets: {} taken in", file.display());
             } else {
                 println!("secrets: no old file");
+            }
+            let file = keyring::beside(dir, "subject-keys");
+            let f = SubjectKeyFile::sealed(file.clone(), kv, Arc::clone(&ring));
+            if f.in_the_clear()? == Some(true) {
+                f.seal_now()?;
+                println!("subject keys: {} sealed", file.display());
+            } else {
+                println!("subject keys: nothing in the clear");
             }
             Ok(())
         }

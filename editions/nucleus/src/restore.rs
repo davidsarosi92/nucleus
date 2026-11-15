@@ -102,21 +102,30 @@ fn test_restore(
     let r = (|| {
         let db = Database::open(&scratch, Options::default()).map_err(|e| e.to_string())?;
         let kv: Arc<dyn Kv> = Arc::new(db);
+        // The root, for a backup whose keys it wrapped (§M14.30 K1).
+        let d = scratch.to_string_lossy();
+        let ring = set_custody(&d, &kv, key_options)?;
         if let Some(path) = keys {
-            nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(SubjectKeyFile::new(
+            let carried =
+                nucleus_sql::backup::carried_keys(&kv, backup, &nucleus_sql::backup::Until::Latest)
+                    .map_err(|e| e.message)?;
+            take_keys(&ring, &carried)?;
+            nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(SubjectKeyFile::sealed(
                 std::path::PathBuf::from(path),
                 Arc::clone(&kv),
+                ring,
             ))));
         }
-        // The root, for a backup whose key it wrapped (§M14.30 K1).
-        let d = scratch.to_string_lossy();
-        set_custody(&d, &kv, key_options)?;
         let r = nucleus_sql::backup::restore_test(&kv, &kv, &crate::sql::registry(), backup);
         nucleus_sql::keys::set_custody(None);
         nucleus_sql::subject_keys::set_subject_keys(None);
         r.map_err(|e| e.message)
     })();
     let _ = std::fs::remove_dir_all(&scratch);
+    let d = scratch.to_string_lossy();
+    for what in ["keyring", "root-key"] {
+        let _ = std::fs::remove_file(nucleus_server::keyring::beside(&d, what));
+    }
     match r? {
         None => Err(format!("restore: {backup} holds no finished backup")),
         Some(t) if t.problems.is_empty() => {
@@ -152,6 +161,25 @@ fn set_custody(
     Ok(ring)
 }
 
+/// The data keys `carried` (a backup's, wrapped) taken into `ring` when
+/// its root wrapped them: their purposes.
+fn take_keys(ring: &Keyring, carried: &[(String, String, Vec<u8>)]) -> Result<Vec<String>, String> {
+    let mut taken = Vec::new();
+    for (purpose, root_id, blob) in carried {
+        match ring.root(false)? {
+            Some(root) if root.id() == *root_id => {
+                ring.import(purpose, &root.unwrap(purpose, blob)?)?;
+                taken.push(purpose.clone());
+            }
+            _ => eprintln!(
+                "nucleus: the backup holds the key for {purpose} wrapped by the root key \
+                 {root_id}: restore with that root (--root-key …) to take it in"
+            ),
+        }
+    }
+    Ok(taken)
+}
+
 fn restore_into(
     dir: &str,
     backup: &str,
@@ -169,32 +197,23 @@ fn restore_into(
             path.display()
         );
     }
-    nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(SubjectKeyFile::new(
+    let ring = set_custody(dir, &kv, key_options)?;
+    // The data keys the backup carried, wrapped by the root: into the
+    // restored database's keyring first — the subject keys' table sealed
+    // with one of them opens then (§M14.30 K1d).
+    let carried = nucleus_sql::backup::carried_keys(&kv, backup, until).map_err(|e| e.message)?;
+    let taken = take_keys(&ring, &carried)?;
+    nucleus_sql::subject_keys::set_subject_keys(Some(Arc::new(SubjectKeyFile::sealed(
         path,
         Arc::clone(&kv),
+        Arc::clone(&ring),
     ))));
-    let ring = set_custody(dir, &kv, key_options)?;
     let r = nucleus_sql::backup::restore_to(&kv, &crate::sql::registry(), backup, until);
     // The keys' stores hold on to the database: let them go.
     nucleus_sql::subject_keys::set_subject_keys(None);
     nucleus_sql::keys::set_custody(None);
     drop(kv);
     let r = r.map_err(|e| e.message)?;
-    // The data keys the backup carried, wrapped by the root: into the
-    // restored database's keyring, when that root is given.
-    let mut taken = Vec::new();
-    for (purpose, root_id, blob) in &r.keys {
-        match ring.root(false)? {
-            Some(root) if root.id() == *root_id => {
-                ring.import(purpose, &root.unwrap(purpose, blob)?)?;
-                taken.push(purpose.as_str());
-            }
-            _ => eprintln!(
-                "nucleus: the backup holds the key for {purpose} wrapped by the root key \
-                 {root_id}: restore with that root (--root-key …) to take it in"
-            ),
-        }
-    }
     if !taken.is_empty() {
         println!(
             "keys: {} in {}, wrapped by the root ({}) — start the database with it",

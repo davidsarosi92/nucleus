@@ -1434,3 +1434,73 @@ fn the_root_key_restores_an_encrypted_backup() {
     assert!(ok && out.contains("50") && out.contains(" 3"), "{out}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// PLAN.md §M14.30 K1d: the subjects' keys sealed under the keyring —
+/// never in the clear on disk — and a backup's rows of subjects opened
+/// again by the root alone and that sealed table.
+#[test]
+fn the_subject_keys_are_sealed_under_the_keyring() {
+    let dir = temp_dir("sealed-subjects");
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = dir.join("root.key");
+    std::fs::write(&root, format!("{}\n", "c3".repeat(32))).unwrap();
+    let (db, repo, new) = (dir.join("db"), dir.join("repo"), dir.join("new"));
+    let table = dir.join("db.subject-keys");
+    let (db, repo, new, root, table_s) = (
+        db.to_str().unwrap(),
+        repo.to_str().unwrap(),
+        new.to_str().unwrap(),
+        root.to_str().unwrap(),
+        table.to_str().unwrap(),
+    );
+    let (ok, out) = nucleus(
+        &["sql", db, "--root-key", root],
+        &format!(
+            "CREATE TABLE m (id INT PRIMARY KEY, who TEXT, body TEXT);\n\
+             ALTER TABLE m SET SUBJECT (who);\n\
+             INSERT INTO m VALUES (1, 'ann', 'Balaton'), (2, 'bob', 'Tisza');\n\
+             BACKUP TO '{repo}';\n"
+        ),
+    );
+    assert!(ok, "{out}");
+    let sealed = std::fs::read_to_string(&table).unwrap();
+    assert!(
+        sealed.starts_with("nucleus subject keys sealed 1\n") && !sealed.contains("ann"),
+        "{sealed}"
+    );
+    let m = std::fs::read_to_string(dir.join("repo/000001-full/manifest")).unwrap();
+    assert!(m.contains("\nkey subjects "), "{m}");
+    // The root and the sealed table: the rows of subjects opened.
+    let (ok, out) = nucleus(
+        &[
+            "restore",
+            repo,
+            new,
+            "--root-key",
+            root,
+            "--subject-keys",
+            table_s,
+        ],
+        "",
+    );
+    assert!(
+        ok && out.contains("subjects") && out.contains("(2 opened)"),
+        "{out}"
+    );
+    let (ok, out) = nucleus(
+        &[
+            "sql",
+            new,
+            "--root-key",
+            root,
+            "-c",
+            "SELECT body FROM m ORDER BY id",
+        ],
+        "",
+    );
+    assert!(
+        ok && out.contains("Balaton") && out.contains("Tisza"),
+        "{out}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

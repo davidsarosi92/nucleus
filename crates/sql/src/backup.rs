@@ -604,9 +604,10 @@ fn writing_key() -> Result<Option<BackupKey>> {
 
 /// The data keys a manifest carries, wrapped by the root, so the root
 /// alone restores it: `key <purpose> <root id> <wrapped, hex>` lines — the
-/// backup's own key (when it is the hierarchy's) and the secrets' (a
-/// restored database reads its secrets).  Subject keys never: `FORGET`
-/// must reach every backup.
+/// backup's own key (when it is the hierarchy's), the secrets' (a
+/// restored database reads its secrets) and the one sealing the subject
+/// keys' table (the table itself stays apart).  Subject keys never:
+/// `FORGET` must reach every backup.
 fn wrapped_keys(key: Option<&BackupKey>) -> Result<String> {
     let Some(c) = crate::keys::custody() else {
         return Ok(String::new());
@@ -615,7 +616,7 @@ fn wrapped_keys(key: Option<&BackupKey>) -> Result<String> {
         return Ok(String::new());
     };
     let mut out = String::new();
-    for purpose in ["backup", "secrets"] {
+    for purpose in ["backup", "secrets", "subjects"] {
         let Some(dek) = c.dek(purpose, false).map_err(custody_error)? else {
             continue;
         };
@@ -1643,6 +1644,44 @@ fn backup_once(kv: &Arc<dyn Kv>, to: &str, full: bool) -> Result<Backup> {
     Ok(out)
 }
 
+/// The repository `from` names and the chain of backups a restore up to
+/// `until` reads (`from` may name a backup's own directory: that backup
+/// of the repository around it).
+fn resolve<'a>(
+    kv: &'a Arc<dyn Kv>,
+    from: &str,
+    until: &Until,
+) -> Result<(Box<dyn Target + 'a>, Vec<(String, Manifest)>)> {
+    let mut target = open_target(kv, from)?;
+    let mut start = None;
+    if read_manifest(&*target, "")?.is_some() {
+        let (parent, name) = split_last(from).ok_or_else(|| {
+            Error::invalid_parameter(format!("{from}: a backup's directory needs one around it"))
+        })?;
+        target = open_target(kv, &parent)?;
+        start = Some(name);
+    }
+    let chain = chain(&*target, start, until)?;
+    Ok((target, chain))
+}
+
+/// The data keys the backup a restore up to `until` ends with carries,
+/// wrapped by the root: (purpose, the root's id, the wrapped key) — taken
+/// into the restored database's keyring before the restore, so a sealed
+/// table of subject keys opens (§M14.30 K1d).  Only the root unwraps
+/// them; the manifest's MAC is checked by the restore itself.
+pub fn carried_keys(
+    kv: &Arc<dyn Kv>,
+    from: &str,
+    until: &Until,
+) -> Result<Vec<(String, String, Vec<u8>)>> {
+    let (_, chain) = resolve(kv, from, until)?;
+    Ok(chain
+        .last()
+        .map(|(_, m)| m.wrapped.clone())
+        .unwrap_or_default())
+}
+
 /// What a restore did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Restored {
@@ -2077,18 +2116,8 @@ pub fn restore(kv: &Arc<dyn Kv>, reg: &Registry, from: &str) -> Result<Restored>
 /// out, an audit record's detail blanked, a key referencing a row left
 /// out set to `NULL` or its default as declared.
 pub fn restore_to(kv: &Arc<dyn Kv>, reg: &Registry, from: &str, until: &Until) -> Result<Restored> {
-    let mut target = open_target(kv, from)?;
-    let mut start = None;
-    // A backup's own directory: that backup of the repository around it.
-    if read_manifest(&*target, "")?.is_some() {
-        let (parent, name) = split_last(from).ok_or_else(|| {
-            Error::invalid_parameter(format!("{from}: a backup's directory needs one around it"))
-        })?;
-        target = open_target(kv, &parent)?;
-        start = Some(name);
-    }
+    let (target, chain) = resolve(kv, from, until)?;
     let target = &*target;
-    let chain = chain(target, start, until)?;
     {
         let txn = kv.begin(TxnOptions::read_only())?;
         if let Some(e) = txn
